@@ -295,14 +295,26 @@ describe("one-at-a-time steering: a person's message before agent steering", () 
 			const { agent } = await runWithQueued([reused, person("U1"), person("U2"), person("U3"), person("U4")], {
 				arrivals: (call, target) => {
 					if (call !== 4) return;
-					// Four user steers went ahead of `reused`; it leaves the queue, then comes back.
+					// Four user steers went ahead of `reused`; it leaves the queue, then comes back. The
+					// fourth is taken but not yet recorded, and it belongs to the wait that ended.
 					empty(target);
 					target.steer(reused);
-					target.steer(person("new"));
+					for (let n = 1; n <= 4; n++) target.steer(person(`new ${n}`));
 				},
 			});
 
-			expect(transcriptTexts(agent)).toEqual(["start", "U1", "U2", "U3", "U4", "new", "card 1"]);
+			expect(transcriptTexts(agent)).toEqual([
+				"start",
+				"U1",
+				"U2",
+				"U3",
+				"U4",
+				"new 1",
+				"new 2",
+				"new 3",
+				"new 4",
+				"card 1",
+			]);
 		});
 	}
 
@@ -315,6 +327,117 @@ describe("one-at-a-time steering: a person's message before agent steering", () 
 		});
 
 		expect(transcriptTexts(agent)).toEqual(["start", "U1", "U2", "U3", "U4", "card 1", "new"]);
+	});
+
+	it("starts a fresh allowance for an agent steer queued after the waiting one was withdrawn ahead of an abort", async () => {
+		const people = ["U1", "U2", "U3", "U4", "U5"].map(person);
+		const { agent } = await runWithQueued([card(1), ...people], {
+			arrivals: (call, target) => {
+				// Call 5 took card 1, the allowance being spent; Esc takes it back before the transcript records it.
+				if (call !== 5) return;
+				target.withdrawUndeliveredQueuedMessages();
+				target.abort();
+			},
+		});
+		expect(transcriptTexts(agent)).toEqual(["start", "U1", "U2", "U3", "U4"]);
+		expect(agent.peekSteeringQueue()).toEqual([people[4]]);
+
+		agent.steer(card(2));
+		agent.steer(person("new"));
+		await agent.continue();
+		// Card 2 waits from nothing: no agent steering was pending once card 1 was withdrawn.
+		expect(transcriptTexts(agent).slice(5)).toEqual(["U5", "new", "card 2"]);
+	});
+
+	it("keeps the allowance of an agent steer when a second queued occurrence of it is popped", async () => {
+		const waiting = card(1);
+		let popped: AgentMessage | undefined;
+		let stillQueued = false;
+		const { agent } = await runWithQueued([waiting, person("U1"), person("U2"), person("U3"), person("U4")], {
+			arrivals: (call, target) => {
+				if (call !== 4) return;
+				// The same object queued twice is two entries: popping the second leaves the first waiting.
+				target.steer(waiting);
+				popped = target.popLastSteer();
+				stillQueued = target.peekSteeringQueue().includes(waiting);
+				target.steer(person("new"));
+			},
+		});
+
+		expect(popped).toBe(waiting);
+		expect(stillQueued).toBe(true);
+		expect(transcriptTexts(agent)).toEqual(["start", "U1", "U2", "U3", "U4", "card 1", "new"]);
+	});
+
+	for (const [name, failure] of [
+		["throws", "throw"],
+		["aborts the run", "abort"],
+		["cancels its commit", "cancel"],
+	] as const) {
+		it(`does not count a person's steer toward the allowance when its preparation ${name}`, async () => {
+			const mock = createMockModel({ handler: () => ({ content: ["ack"] }) });
+			const agent = new Agent({
+				initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: mock.stream,
+				convertToLlm,
+				steeringMode: "one-at-a-time",
+			});
+			const typed = person("typed");
+			const waiting = card(1);
+			agent.steer(typed);
+			agent.steer(waiting);
+			agent.prepareQueuedMessages = () => {
+				if (failure === "throw") throw new Error("preparation failed");
+				if (failure === "abort") {
+					agent.abort();
+					return undefined;
+				}
+				return { commit: () => undefined };
+			};
+			// As many failed attempts as the allowance holds; each puts the queue back untouched.
+			for (let attempt = 0; attempt < MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING; attempt++) {
+				await agent.continue().catch(() => undefined);
+				expect(agent.peekSteeringQueue()).toEqual([typed, waiting]);
+			}
+			expect(mock.calls).toHaveLength(0);
+			expect(transcriptTexts(agent)).toEqual([]);
+
+			agent.prepareQueuedMessages = undefined;
+			await agent.continue();
+			// Nothing reached the transcript, so the person's steer still goes first.
+			expect(transcriptTexts(agent)).toEqual(["typed", "card 1"]);
+		});
+	}
+
+	it("does not count a person's steer a queue replacement withdraws while it is being prepared", async () => {
+		const mock = createMockModel({ handler: () => ({ content: ["ack"] }) });
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+			convertToLlm,
+			steeringMode: "one-at-a-time",
+		});
+		const withdrawn = person("withdrawn");
+		for (const text of ["U1", "U2", "U3"]) agent.steer(person(text));
+		agent.steer(withdrawn);
+		agent.steer(card(1));
+		let replaced = 0;
+		agent.prepareQueuedMessages = messages => {
+			if (!messages.includes(withdrawn)) return undefined;
+			replaced++;
+			agent.replaceQueue(
+				"steering",
+				agent.peekSteeringQueue().filter(message => message !== withdrawn),
+			);
+			agent.steer(person("U4"));
+			return undefined;
+		};
+		await agent.continue();
+		if (agent.hasQueuedMessages()) await agent.continue();
+
+		expect(replaced).toBe(1);
+		// Three steers reached the transcript before the withdrawn one, so U4 is the fourth.
+		expect(transcriptTexts(agent)).toEqual(["U1", "U2", "U3", "U4", "card 1"]);
 	});
 
 	it("delivers the whole queue in order at the next boundary in all mode", async () => {

@@ -73,12 +73,14 @@ import { isSoftToolRequirement } from "./types";
 
 /**
  * In "one-at-a-time" steering, how many priority (by default user-authored)
- * units may be delivered while an agent-authored unit waits, counted since an
- * agent unit was last delivered, before the oldest waiting agent unit goes next.
- * Every unit a boundary delivers counts, wherever it sat in the queue, including
- * user units queued before the agent unit. So an agent unit with `k` agent units
- * ahead of it when it is queued is delivered within `5 × (k + 1)` deliveries,
- * and agent units take at most one delivery in five while priority units wait.
+ * units the transcript may record while agent-authored steering waits, counted
+ * since an agent unit was last recorded, before the oldest waiting agent unit
+ * goes next. A unit counts when the transcript records it, wherever it sat in the
+ * queue, including user units queued before the agent unit; a unit whose
+ * preparation fails or is cancelled, which is withdrawn, or whose run ends before
+ * recording it, counts for nothing. So an agent unit with `k` agent units ahead
+ * of it when it is queued is recorded within `5 × (k + 1)` deliveries, and agent
+ * units take at most one delivery in five while priority units wait.
  */
 export const MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING = 4;
 
@@ -412,6 +414,37 @@ interface LiveSteeredEntry {
 interface QueuedMessageClaim {
 	messages: AgentMessage[];
 	controller: AbortController;
+	allowance?: SteeringAllowanceEffect;
+}
+
+/**
+ * A wait of agent-authored steering in "one-at-a-time" mode: how many priority
+ * units the transcript recorded while it lasted
+ * ({@link MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING}).
+ */
+interface SteeringWait {
+	spent: number;
+}
+
+/**
+ * What one "one-at-a-time" steering unit does to the agent-steering allowance.
+ * Decided when the unit is taken, applied only when the transcript records the
+ * whole unit: a unit whose preparation fails or is cancelled, which is withdrawn,
+ * or whose run ends first, changes nothing.
+ */
+interface SteeringAllowanceEffect {
+	/** The unit is agent steering: recording it ends the wait. */
+	agentUnit: boolean;
+	/** The wait agent steering was in when this priority unit was taken; recording the unit spends one of it. */
+	wait: SteeringWait | undefined;
+}
+
+/** A steering unit the run took, until the transcript records it or the run ends. */
+interface TakenSteeringUnit {
+	messages: readonly AgentMessage[];
+	next: number;
+	allowance: SteeringAllowanceEffect;
+	controller: AbortController | undefined;
 }
 
 export class Agent {
@@ -460,12 +493,22 @@ export class Agent {
 	#steeringWaiters = new Set<() => void>();
 	#queuedMessageGrouping?: (previous: AgentMessage, next: AgentMessage) => boolean;
 	/**
-	 * Fairness state for "one-at-a-time" steering: the oldest waiting agent-authored
-	 * steering message, and how many priority units were delivered while an agent
-	 * unit waited since an agent unit was last delivered. It ends when that message
-	 * leaves the queue by any path, so a cleared and re-queued message starts fresh.
+	 * The current wait of agent steering. It starts when a priority unit is taken
+	 * while agent steering is queued, and ends when an agent unit is recorded or
+	 * when no agent steering is pending anywhere (queued, being prepared, or taken
+	 * and not yet recorded). A unit counts toward the wait it was taken in, so a
+	 * wait that ended leaves nothing behind however the queue was emptied, and the
+	 * same object queued twice is two entries.
 	 */
-	#steeringWait?: { oldest: AgentMessage; passed: number };
+	#steeringWait?: SteeringWait;
+	/** The allowance effect of the unit {@link #dequeueSteeringMessages} just took, until a claim or {@link #takenSteeringUnits} holds it. */
+	#steeringTaken?: SteeringAllowanceEffect;
+	/**
+	 * Steering units handed to the run, until the transcript records them or the run ends.
+	 * Kept apart from {@link #queuedMessageDeliveries}: a queue replacement drops those, but the
+	 * run still records what it holds, and that is where a unit counts.
+	 */
+	#takenSteeringUnits: TakenSteeringUnit[] = [];
 	#steeringPriority?: (message: AgentMessage) => boolean;
 
 	#steeringMode: "all" | "one-at-a-time";
@@ -1046,15 +1089,18 @@ export class Agent {
 	async #prepareQueuedMessageBatch(queue: QueuedMessageQueue, signal: AbortSignal): Promise<AgentMessage[]> {
 		if (this.#queuedMessageClaims[queue]) return [];
 		const messages = queue === "steering" ? this.#dequeueSteeringMessages() : this.#dequeueFollowUpMessages();
+		const allowance = queue === "steering" ? this.#steeringTaken : undefined;
+		if (queue === "steering") this.#steeringTaken = undefined;
 		const prepare = this.prepareQueuedMessages;
 		if (messages.length === 0) return messages;
 		const runController = this.#abortController;
 		if (!prepare) {
 			this.#queuedMessageDeliveries.add({ queue, controller: runController, messages, next: 0, additional: [] });
+			if (allowance) this.#takenSteeringUnits.push({ messages, next: 0, allowance, controller: runController });
 			return messages;
 		}
 
-		const claim: QueuedMessageClaim = { messages, controller: new AbortController() };
+		const claim: QueuedMessageClaim = { messages, controller: new AbortController(), allowance };
 		this.#queuedMessageClaims[queue] = claim;
 		const preparationSignal = AbortSignal.any([signal, claim.controller.signal]);
 		try {
@@ -1076,6 +1122,7 @@ export class Agent {
 				next: 0,
 				additional: additional ?? [],
 			});
+			if (allowance) this.#takenSteeringUnits.push({ messages, next: 0, allowance, controller: runController });
 			return additional?.length ? [...messages, ...additional] : messages;
 		} catch (error) {
 			if (signal.aborted) throw error;
@@ -1111,7 +1158,14 @@ export class Agent {
 	}
 
 	#restoreUndeliveredQueuedMessages(controller: AbortController): void {
-		if (this.#queuedMessageDeliveries.size === 0 && this.#liveSteered.length === 0) return;
+		// A unit the run did not record counts for nothing; a restored one is taken again later.
+		if (this.#takenSteeringUnits.length > 0) {
+			this.#takenSteeringUnits = this.#takenSteeringUnits.filter(unit => unit.controller !== controller);
+		}
+		if (this.#queuedMessageDeliveries.size === 0 && this.#liveSteered.length === 0) {
+			this.#settleSteeringWait();
+			return;
+		}
 		const restored: Record<QueuedMessageQueue, AgentMessage[]> = { steering: [], followUp: [] };
 		// Live steering was taken before anything the run still holds undelivered.
 		this.#liveSteered = this.#liveSteered.filter(entry => {
@@ -1134,6 +1188,7 @@ export class Agent {
 		}
 		if (restored.followUp.length > 0) this.#followUpQueue = [...restored.followUp, ...this.#followUpQueue];
 		if (restored.steering.length > 0 || restored.followUp.length > 0) this.#emitQueueChanged();
+		else this.#settleSteeringWait();
 	}
 
 	/** Move steering live steering took out of the queue-delivery records into {@link #liveSteered}. */
@@ -1191,7 +1246,14 @@ export class Agent {
 			for (const message of [...pending, ...delivery.additional]) suppress(message, delivery.controller);
 		}
 		this.#queuedMessageDeliveries.clear();
+		// What is withdrawn never reaches the transcript, so its units count for nothing.
+		if (this.#takenSteeringUnits.length > 0) {
+			this.#takenSteeringUnits = this.#takenSteeringUnits.filter(
+				unit => !withdrawn.steering.includes(unit.messages[unit.next]),
+			);
+		}
 		if (hadLiveSteered) this.#emitQueueChanged();
+		else this.#settleSteeringWait();
 		return withdrawn;
 	}
 
@@ -1356,6 +1418,7 @@ export class Agent {
 	 *  enqueue, dequeue-on-delivery, clear, and restore without emits scattered
 	 *  across every call site that queues or dequeues a message. */
 	#emitQueueChanged(): void {
+		this.#settleSteeringWait();
 		for (const listener of this.#queueListeners) {
 			try {
 				listener();
@@ -1369,7 +1432,6 @@ export class Agent {
 
 	replaceQueues(steering: AgentMessage[], followUp: AgentMessage[]) {
 		this.#steeringQueue = steering.slice();
-		this.#forgetSteeringWaitIfGone();
 		this.#followUpQueue = followUp.slice();
 		this.#cancelQueuedMessagePreparation("steering");
 		this.#cancelQueuedMessagePreparation("followUp");
@@ -1389,7 +1451,6 @@ export class Agent {
 	replaceQueue(queue: "steering" | "followUp", messages: readonly AgentMessage[]): void {
 		if (queue === "steering") {
 			this.#steeringQueue = messages.slice();
-			this.#forgetSteeringWaitIfGone();
 			this.#cancelQueuedMessagePreparation("steering");
 			this.#notifySteeringWaiters();
 		} else {
@@ -1415,6 +1476,7 @@ export class Agent {
 
 	appendMessage(m: AgentMessage) {
 		this.#state.messages.push(m);
+		this.#recordTakenSteering(m);
 		const live = this.#liveSteered.findIndex(entry => entry.message === m);
 		if (live >= 0) {
 			this.#liveSteered.splice(live, 1);
@@ -1473,7 +1535,6 @@ export class Agent {
 
 	clearSteeringQueue() {
 		this.#steeringQueue = [];
-		this.#steeringWait = undefined;
 		this.#cancelQueuedMessagePreparation("steering");
 		this.#notifySteeringWaiters();
 		this.#emitQueueChanged();
@@ -1496,7 +1557,6 @@ export class Agent {
 
 	clearAllQueues() {
 		this.#steeringQueue = [];
-		this.#steeringWait = undefined;
 		this.#followUpQueue = [];
 		this.#liveSteered = [];
 		this.#cancelQueuedMessagePreparation("steering");
@@ -1609,7 +1669,7 @@ export class Agent {
 	 * person's steer is read at the next boundary rather than behind every agent
 	 * steer queued before it; each class keeps its own order. Once
 	 * {@link MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING} priority units have been
-	 * delivered while an agent unit waits, the oldest waiting agent unit goes
+	 * recorded while agent steering waits, the oldest waiting agent unit goes
 	 * next, so sustained priority input delays agent steering but cannot starve
 	 * it. Where a unit sits in the queue does not matter, so moving messages
 	 * ({@link prioritizeSteering}) cannot bypass this. Allocation-free: the
@@ -1618,7 +1678,7 @@ export class Agent {
 	#nextSteeringUnitStart(): number {
 		const queue = this.#steeringQueue;
 		if (this.#steeringMode === "all" || queue.length === 0) return 0;
-		if ((this.#steeringWait?.passed ?? 0) >= MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING) {
+		if ((this.#steeringWait?.spent ?? 0) >= MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING) {
 			const agentStart = this.#oldestAgentUnitStart();
 			if (agentStart >= 0) return agentStart;
 		}
@@ -1640,31 +1700,47 @@ export class Agent {
 		return this.#unitEnd(queue, start);
 	}
 
-	/** End the fairness wait when its message left the queue other than by delivery. */
-	#forgetSteeringWaitIfGone(): void {
-		const wait = this.#steeringWait;
-		if (wait && !this.#steeringQueue.includes(wait.oldest)) this.#steeringWait = undefined;
+	/** Whether agent steering is pending: queued, being prepared, or taken and not yet recorded. */
+	#agentSteeringPending(): boolean {
+		if (this.#steeringTaken?.agentUnit || this.#queuedMessageClaims.steering?.allowance?.agentUnit) return true;
+		for (const unit of this.#takenSteeringUnits) if (unit.allowance.agentUnit) return true;
+		return this.#oldestAgentUnitStart() >= 0;
+	}
+
+	/** End a wait whose agent steering is no longer pending, by whatever path it left. */
+	#settleSteeringWait(): void {
+		if (this.#steeringWait && !this.#agentSteeringPending()) this.#steeringWait = undefined;
+	}
+
+	/** The transcript recorded `m`: a taken steering unit it completes counts now. */
+	#recordTakenSteering(m: AgentMessage): void {
+		const units = this.#takenSteeringUnits;
+		for (let i = 0; i < units.length; i++) {
+			const unit = units[i];
+			if (unit.messages[unit.next] !== m) continue;
+			if (++unit.next < unit.messages.length) return;
+			units.splice(i, 1);
+			const { agentUnit, wait } = unit.allowance;
+			if (agentUnit) this.#steeringWait = undefined;
+			// A wait that already ended keeps the count to itself.
+			else if (wait) wait.spent++;
+			return;
+		}
 	}
 
 	#dequeueSteeringMessages(): AgentMessage[] {
 		const queue = this.#steeringQueue;
-		// Track the oldest waiting agent unit from the first boundary it waits at.
-		const agentStart = this.#steeringMode === "all" ? -1 : this.#oldestAgentUnitStart();
-		if (agentStart < 0) {
-			this.#steeringWait = undefined;
-		} else if (this.#steeringWait) {
-			// An older agent unit can reappear ahead (an aborted run requeues what it
-			// took); the window since the last agent delivery continues.
-			this.#steeringWait.oldest = queue[agentStart];
-		} else {
-			this.#steeringWait = { oldest: queue[agentStart], passed: 0 };
-		}
 		const start = this.#nextSteeringUnitStart();
 		const end = this.#steeringUnitEnd(start);
 		if (start === end) return [];
-		// Delivering the agent unit ends the window; a priority unit delivered while it waits counts.
-		if (start === agentStart) this.#steeringWait = undefined;
-		else if (this.#steeringWait) this.#steeringWait.passed++;
+		if (this.#steeringMode === "one-at-a-time") {
+			const agentStart = this.#oldestAgentUnitStart();
+			const agentUnit = start === agentStart;
+			// A priority unit taken while agent steering is queued counts toward that wait once recorded.
+			const wait = agentStart >= 0 && !agentUnit ? (this.#steeringWait ??= { spent: 0 }) : undefined;
+			// Held until a claim or taken-unit record takes it, so a pending agent unit stays visible meanwhile.
+			this.#steeringTaken = { agentUnit, wait };
+		}
 		this.#steeringQueue = start === 0 ? queue.slice(end) : [...queue.slice(0, start), ...queue.slice(end)];
 		this.#emitQueueChanged();
 		return queue.slice(start, end);
@@ -1684,7 +1760,6 @@ export class Agent {
 	popLastSteer(): AgentMessage | undefined {
 		if (this.#steeringQueue.length === 0) this.#cancelQueuedMessagePreparation("steering", true);
 		const popped = this.#steeringQueue.pop();
-		if (popped !== undefined && popped === this.#steeringWait?.oldest) this.#steeringWait = undefined;
 		if (popped !== undefined) this.#emitQueueChanged();
 		return popped;
 	}

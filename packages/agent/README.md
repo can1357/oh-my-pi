@@ -256,12 +256,15 @@ message (`attribution: "user"`, or a `role: "user"` message not attributed to an
 `isUserSteeringMessage`, or the host's own rule from `setSteeringPriority(predicate)`) goes ahead of
 agent-authored steering queued before it. A person's steer is read at the next boundary however many
 agent steers wait; user units keep their order, as do agent units. Once
-`MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING` (4) user units have been delivered while an agent unit
-waits (counted since an agent unit was last delivered, including user units queued before it), the
-oldest waiting agent unit goes next, so sustained user input delays agent steering but never starves
-it: an agent unit with `k` agent units ahead of it when it is queued is read within `5 × (k + 1)`
-boundaries. The count ends when its message leaves the queue, so a cleared and re-queued message
-starts again, and it does not depend on where a unit sits, so `prioritizeSteering` cannot bypass it.
+`MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING` (4) user units have been recorded in the transcript while
+agent steering waits (counted since an agent unit was last recorded, including user units queued
+before it), the oldest waiting agent unit goes next, so sustained user input delays agent steering
+but never starves it: an agent unit with `k` agent units ahead of it when it is queued is read within
+`5 × (k + 1)` boundaries. A unit counts only once the transcript records it: one whose preparation
+fails or is cancelled, one withdrawn ahead of an abort, or one its run never recorded, counts for
+nothing. The wait ends when no agent steering is pending, so a cleared and re-queued message starts
+again; it does not depend on where a unit sits or which message object it holds, so
+`prioritizeSteering` cannot bypass it and the same message queued twice is two units.
 `all` mode delivers the whole queue in order. A host that lists queued messages should pass
 `setSteeringPriority` the rule its list uses, so the list shows the order the agent reads them.
 
