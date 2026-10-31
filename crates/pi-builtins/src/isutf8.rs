@@ -62,7 +62,7 @@ impl Utility for Isutf8 {
 		let files: Vec<OsString> = self
 			.matches
 			.get_many::<OsString>(ARG_FILES)
-			.map_or_else(Vec::new, |values| values.cloned().collect());
+			.map_or_default(|values| values.cloned().collect());
 		let cancel = host.cancel_flag();
 
 		let mut any_failed = false;

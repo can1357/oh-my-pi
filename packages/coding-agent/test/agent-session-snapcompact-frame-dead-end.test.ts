@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { Agent, RESCUE_SHAKE_CONFIG } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
+import type { Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -12,6 +13,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { CompactionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { computeNonMessageTokens } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 
@@ -41,6 +43,7 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 	beforeAll(async () => {
 		authStorage = await AuthStorage.create(":memory:");
 		authStorage.keys.setRuntime("anthropic", "test-key");
+		authStorage.keys.setRuntime("venice", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 	});
 
@@ -80,6 +83,8 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 		/** Seed a kept-recent entry between firstKeptEntryId and the archive —
 		 *  re-emitted by buildSessionContext, so the rescue budget must charge it. */
 		preArchiveKeptText?: string;
+		/** Bundled model to run on instead of Claude Sonnet 4.5. */
+		model?: Model;
 	}): Promise<void> {
 		tempDir = TempDir.createSync("@pi-snapcompact-frame-dead-end-");
 		sessionManager = SessionManager.inMemory(tempDir.path());
@@ -121,7 +126,7 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 			);
 		}
 
-		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const bundled = options.model ?? getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!bundled) {
 			throw new Error("Expected built-in anthropic model to exist");
 		}
@@ -320,6 +325,98 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 		expect(recovery[0].level).toBe("info");
 	});
 
+	it("rebuilds the archive for a Claude reader without its reasoning", async () => {
+		// The rescue re-renders for the active model, so it must apply that
+		// model's reasoning policy: an Anthropic reader gets no `¶think:` scope.
+		await createSession({ frameCount: SEEDED_FRAME_COUNT });
+		const isCompaction = (entry: { type: string }): entry is CompactionEntry => entry.type === "compaction";
+		const stale = sessionManager.getBranch().findLast(isCompaction)!;
+		const text = Array.from(
+			{ length: 40 },
+			(_, i) => `¶user: turn ${i}\n¶think: private plan ${i}\n\nstill planning ${i}\n¶ai: reply ${i}`,
+		).join("\n");
+		stale.summary = "- `¶user:`, `¶think:`, `¶ai:`, `¶call:`: user, assistant reasoning, assistant reply, tool call.";
+		stale.preserveData = {
+			snapcompact: { frames: makeFrames(SEEDED_FRAME_COUNT), text, totalChars: text.length, truncatedChars: 0 },
+		};
+		vi.spyOn(session.agent, "prompt").mockResolvedValue();
+		vi.spyOn(session.agent, "continue").mockResolvedValue();
+		vi.spyOn(session, "getContextUsage").mockImplementation(() =>
+			sessionManager.getBranch().filter(isCompaction).length > 1
+				? { tokens: 30000, contextWindow: 200000, percent: 15 }
+				: { tokens: 190000, contextWindow: 200000, percent: 95 },
+		);
+		vi.spyOn(session, "shake").mockResolvedValue({
+			mode: "elide",
+			toolResultsDropped: 0,
+			blocksDropped: 0,
+			tokensFreed: 0,
+		});
+
+		await triggerMaintenance();
+
+		const rebuilt = sessionManager.getBranch().findLast(isCompaction)!;
+		expect(rebuilt.id).not.toBe(stale.id);
+		expect(rebuilt.summary).not.toContain("¶think:");
+		const rebuiltText = snapcompact.archiveSourceText(snapcompact.getPreservedArchive(rebuilt.preserveData)!);
+		expect(rebuiltText).toContain("reply 39");
+		expect(rebuiltText).not.toContain("planning");
+	});
+
+	it("rebuilds at a billing-verified reader's own frame price", async () => {
+		// gpt-5.5's rule is billing-verified, gpt-5.4's is not; both bill a 1568px frame alike.
+		const verified = getBundledModel("openai", "gpt-5.5");
+		const unverified = getBundledModel("openai", "gpt-5.4");
+		if (!verified || !unverified) throw new Error("Expected bundled openai/gpt-5.5 and gpt-5.4");
+		const price = snapcompact.resolveShape(verified).frameTokenEstimate;
+		expect(snapcompact.resolveShape(unverified).frameTokenEstimate).toBe(price);
+		expect(price).toBe(2882);
+
+		const rebuildFrames = async (model: Model): Promise<{ frames: number; budget: number }> => {
+			await createSession({ frameCount: SEEDED_FRAME_COUNT, model });
+			const [firstEntry] = sessionManager.getBranch();
+			if (firstEntry?.type !== "message") throw new Error("Expected the seeded user turn first");
+			// The 80% recovery band of the 60k trigger, less the fixed context, the kept
+			// user turn, the archive's text edges and the summary template.
+			const budget =
+				Math.floor(60_000 * 0.8) -
+				computeNonMessageTokens(session, session.agent.tokenizer, session.settings.revision) -
+				session.agent.tokenizer.countMessage(firstEntry.message) -
+				Math.ceil((2 * snapcompact.geometry(snapcompact.resolveShape(model)).capacity * 1.15) / 4) -
+				2000;
+			vi.spyOn(session.agent, "prompt").mockImplementation(async () => {});
+			vi.spyOn(session.agent, "continue").mockResolvedValue();
+			let rebuilt = false;
+			vi.spyOn(session, "getContextUsage").mockImplementation(() =>
+				rebuilt
+					? { tokens: 30000, contextWindow: 200000, percent: 15 }
+					: { tokens: 190000, contextWindow: 200000, percent: 95 },
+			);
+			const compactSpy = vi.spyOn(snapcompact, "compact").mockImplementation(async () => {
+				rebuilt = true;
+				return {
+					summary: "Rebuilt archive at a smaller frame budget.",
+					shortSummary: "rebuilt snapcompact archive",
+					firstKeptEntryId: firstEntry.id,
+					tokensBefore: 150_000,
+					details: { readFiles: [], modifiedFiles: [] },
+					preserveData: makeArchivePreserveData(4),
+				};
+			});
+			await triggerMaintenance();
+			return { frames: compactSpy.mock.calls[0]?.[1]?.maxFrames ?? 0, budget };
+		};
+		const atCeiling = await rebuildFrames(unverified);
+		await session.dispose();
+		await tempDir.remove();
+		vi.restoreAllMocks();
+		const atPrice = await rebuildFrames(verified);
+
+		expect(atPrice.frames).toBe(Math.floor(atPrice.budget / price));
+		expect(atCeiling.frames).toBe(Math.floor(atCeiling.budget / snapcompact.FRAME_TOKEN_ESTIMATE));
+		expect(atPrice.frames).toBeGreaterThan(atCeiling.frames);
+		expect(atPrice.frames).toBeLessThan(SEEDED_FRAME_COUNT);
+	});
 	it("rebuilds the just-written archive when a completed pass dead-ends on its own frames", async () => {
 		// POST-PASS shape (observed live on 17.0.8): compaction ran and wrote a
 		// frame archive, but the archive itself is the over-budget cost — each
@@ -414,6 +511,24 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 		expect(snapcompact.getPreservedArchive(active?.preserveData)?.frames.length).toBe(4);
 		expect(active?.warning).toContain(NO_PROGRESS_FRAGMENT);
 		expect(active?.warning).toContain(IMAGE_REMEDY_FRAGMENT);
+	});
+
+	it("identifies irreducible fixed context instead of blaming tool output", async () => {
+		await createSession({ frameCount: SEEDED_FRAME_COUNT });
+		session.agent.setSystemPrompt(["fixed instructions ".repeat(40_000)]);
+		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		vi.spyOn(session.agent, "continue").mockResolvedValue();
+		vi.spyOn(session, "shake").mockResolvedValue({
+			mode: "elide",
+			toolResultsDropped: 0,
+			blocksDropped: 0,
+			tokensFreed: 0,
+		});
+		const notices = collectNotices();
+		await triggerMaintenance();
+		const warning = notices.find(n => n.source === NOTICE_SOURCE && n.message.includes("fixed context"));
+		expect(warning?.message).toContain("compaction.modelThresholds");
+		expect(warning?.message).not.toContain("clear large tool output");
 	});
 
 	it("bails when the kept tail plus fixed context leaves no frame budget", async () => {
@@ -551,6 +666,26 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 
 		// Text-only model: no frame re-render; existing tiers still run and the
 		// existing dead-end warning is preserved.
+		expect(compactSpy).not.toHaveBeenCalled();
+		expect(shakeSpy).toHaveBeenCalledWith("elide", expect.objectContaining({ config: RESCUE_SHAKE_CONFIG }));
+		const noProgress = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes(NO_PROGRESS_FRAGMENT));
+		expect(noProgress.length).toBe(1);
+	});
+
+	it("skips the frame rescue when the active model's wire strips image input", async () => {
+		// Declares image input, so only the wire predicate tells it apart from a vision model.
+		await createSession({ frameCount: SEEDED_FRAME_COUNT, model: getBundledModel("venice", "deepseek-v4-1-flash") });
+		vi.spyOn(session.agent, "prompt").mockResolvedValue();
+		vi.spyOn(session.agent, "continue").mockResolvedValue();
+		vi.spyOn(session, "getContextUsage").mockReturnValue({ tokens: 190000, contextWindow: 200000, percent: 95 });
+		const shakeSpy = vi
+			.spyOn(session, "shake")
+			.mockResolvedValue({ mode: "elide", toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 });
+		const compactSpy = vi.spyOn(snapcompact, "compact");
+
+		const notices = collectNotices();
+		await triggerMaintenance();
+
 		expect(compactSpy).not.toHaveBeenCalled();
 		expect(shakeSpy).toHaveBeenCalledWith("elide", expect.objectContaining({ config: RESCUE_SHAKE_CONFIG }));
 		const noProgress = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes(NO_PROGRESS_FRAGMENT));

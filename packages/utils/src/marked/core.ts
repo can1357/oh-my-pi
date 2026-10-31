@@ -248,14 +248,15 @@ export type TokensList = Token[] & { links: Links };
 export interface TokenizerThis {
 	lexer: Lexer;
 	/**
-	 * For an inline tokenizer, the whole inline source, such as a paragraph's text. The `src` it receives is the part
-	 * of it before `end` that starts at `end - src.length`: inside a link label or the text of emphasis, `end` is where
-	 * that text ends, right before its closer, and a token there must not reach past it. Inline tokenizers get one
-	 * context object per inline source, the same for every call while the lexer works through it and the labels and
-	 * emphasis inside it, so a tokenizer can keep state for it in a `WeakMap`.
+	 * The whole source the lexer works through. The `src` a tokenizer receives is the part of it before `end` that
+	 * starts at `end - src.length`. For a block tokenizer, `source` is the text passed to one `blockTokens` call and
+	 * `end` its length. For an inline tokenizer, it is the inline source, such as a paragraph's text: inside a link
+	 * label or the text of emphasis, `end` is where that text ends, right before its closer, and a token there must
+	 * not reach past it. Tokenizers get one context object per source, the same for every call while the lexer works
+	 * through it (and, inline, the labels and emphasis inside it), so a tokenizer can keep state for it in a `WeakMap`.
 	 */
 	source?: string;
-	/** For an inline tokenizer, where the text the lexer works through ends in `source` (see `source`). */
+	/** Where the text the lexer works through ends in `source` (see `source`). */
 	end?: number;
 }
 /** A tokenizer extension callback. */
@@ -654,39 +655,48 @@ function lexToNested(lex: InlineLex): NestedMatch | undefined {
 	// The context is shared with the sources nested in this one, which move its end while they are lexed.
 	context.end = closers.end;
 	let rest = lex.rest;
+	// A token the lexer consumed ends the walk, so the backticks left where the next token starts are a string of their
+	// own even when the run they belong to began earlier: an extension, an override or an escape token may leave the
+	// scan inside a run, and a code span opens there. Only the text step's own advance leaves the scan inside a run
+	// without consuming a token, and no span opens at such a position.
+	let resumed = false;
+	/** Pushes `token` and moves past its raw, which is where the next token starts. */
+	const consumeToken = (token: Token): void => {
+		output.push(token);
+		rest = rest.slice(token.raw.length);
+		resumed = true;
+	};
 	while (rest !== "") {
+		const resumedHere = resumed;
+		resumed = false;
 		let custom: Tokens.Generic | undefined;
 		for (const extension of lexer.extensions.inline) {
 			custom = extension.tokenizer.call(context, rest, output);
 			if (custom?.raw) break;
 		}
 		if (custom?.raw) {
-			output.push(custom);
-			rest = rest.slice(custom.raw.length);
+			consumeToken(custom);
 			continue;
 		}
 
 		const escaped = /^\\([!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~])/.exec(rest);
 		if (escaped) {
-			output.push({ type: "escape", raw: escaped[0], text: escaped[1]! });
-			rest = rest.slice(2);
+			consumeToken({ type: "escape", raw: escaped[0], text: escaped[1]! });
 			continue;
 		}
 		const br = lexer.options.breaks ? /^(?: {2,}|\\)?\n/.exec(rest) : /^(?: {2,}|\\)\n/.exec(rest);
 		if (br) {
-			output.push({ type: "br", raw: br[0] });
-			rest = rest.slice(br[0].length);
+			consumeToken({ type: "br", raw: br[0] });
 			continue;
 		}
 		if (rest[0] === "`") {
-			const width = closers.codeOpenerWidth(rest);
+			const width = closers.codeOpenerWidth(rest, resumedHere);
 			const end = closers.closeCode(rest, width);
 			if (end !== -1) {
 				const raw = rest.slice(0, end + width);
 				let text = rest.slice(width, end).replace(/\n/g, " ");
 				if (/^ .* $/.test(text) && text.trim() !== "") text = text.slice(1, -1);
-				output.push({ type: "codespan", raw, text });
-				rest = rest.slice(raw.length);
+				consumeToken({ type: "codespan", raw, text });
 				continue;
 			}
 		}
@@ -694,14 +704,12 @@ function lexToNested(lex: InlineLex): NestedMatch | undefined {
 		if (auto) {
 			const text = auto.slice(1, -1);
 			const href = text.includes("@") && !/^[a-z][a-z+.-]*:\/\//i.test(text) ? `mailto:${text}` : text;
-			output.push({ type: "link", raw: auto, text, href, tokens: [{ type: "text", raw: text, text }] });
-			rest = rest.slice(auto.length);
+			consumeToken({ type: "link", raw: auto, text, href, tokens: [{ type: "text", raw: text, text }] });
 			continue;
 		}
 		const html = inlineHtmlPrefix(rest, closers);
 		if (html) {
-			output.push({ type: "html", raw: html, inLink: false, inRawBlock: false, block: false, text: html });
-			rest = rest.slice(html.length);
+			consumeToken({ type: "html", raw: html, inLink: false, inRawBlock: false, block: false, text: html });
 			continue;
 		}
 		const nested = matchLink(rest, lexer, closers) ?? matchEmphasis(rest, output, closers);
@@ -715,8 +723,7 @@ function lexToNested(lex: InlineLex): NestedMatch | undefined {
 			if (override) del = override.call(lexer.tokenizer, rest, rest);
 			if (del === false || !override) del = lexer.tokenizer.del(rest);
 			if (del) {
-				output.push(del);
-				rest = rest.slice(del.raw.length);
+				consumeToken(del);
 				continue;
 			}
 		}
@@ -743,8 +750,7 @@ function lexToNested(lex: InlineLex): NestedMatch | undefined {
 			}
 		}
 		if (url) {
-			output.push(url);
-			rest = rest.slice(url.raw.length);
+			consumeToken(url);
 			continue;
 		}
 
@@ -774,7 +780,10 @@ function splitTableRow(line: string): string[] {
 }
 
 function isFence(line: string): RegExpExecArray | null {
-	return /^ {0,3}(`{3,}|~{3,})(.*?)(?:\n|$)$/.exec(line);
+	// Unicode line separators may occur in the info string.
+	const match = /^ {0,3}(`{3,}|~{3,})([^\n]*?)(?:\n|$)$/.exec(line);
+	// Backtick fences cannot contain backticks in their info string.
+	return match && match[1]!.startsWith("`") && match[2]!.includes("`") ? null : match;
 }
 function isHeading(line: string): boolean {
 	return /^ {0,3}#{1,6}(?:\s|$)/.test(line);
@@ -971,13 +980,30 @@ function parseList(lines: string[], index: number, lexer: Lexer): { token: Token
 
 function blockTokens(src: string, lexer: Lexer, output: Token[]): Token[] {
 	const lines = lineArray(src);
+	// `lines` tiles `src` exactly, so the unconsumed source at line `i` is
+	// `src.slice(lineStarts[i])`. Only block extensions and an lheading override
+	// read it; computing offsets once keeps the loop linear.
+	const blockExtensions = lexer.extensions.block;
+	const context: TokenizerThis = { lexer, source: src, end: src.length };
+	const lheadingOverride = lexer.tokenizerOverrides.lheading;
+	let lineStarts: number[] | undefined;
+	if (blockExtensions.length > 0 || lheadingOverride) {
+		lineStarts = [];
+		let offset = 0;
+		for (let index = 0; index < lines.length; index++) {
+			lineStarts.push(offset);
+			offset += lines[index]!.length;
+		}
+	}
 	let i = 0;
 	while (i < lines.length) {
-		const remaining = lines.slice(i).join("");
 		let custom: Tokens.Generic | undefined;
-		for (const extension of lexer.extensions.block) {
-			custom = extension.tokenizer.call({ lexer }, remaining, output);
-			if (custom?.raw) break;
+		if (blockExtensions.length > 0) {
+			const remaining = src.slice(lineStarts![i]);
+			for (const extension of blockExtensions) {
+				custom = extension.tokenizer.call(context, remaining, output);
+				if (custom?.raw) break;
+			}
 		}
 		if (custom?.raw) {
 			output.push(custom);
@@ -1006,9 +1032,10 @@ function blockTokens(src: string, lexer: Lexer, output: Token[]): Token[] {
 			let raw = line;
 			let text = "";
 			i++;
+			const closer = new RegExp(`^ {0,3}${marker[0]}{${marker.length},}[ \\t]*(?:\\n|$)$`);
 			while (i < lines.length) {
 				const next = lines[i++]!;
-				if (new RegExp(`^ {0,3}${marker[0]}{${marker.length},}[ \\t]*(?:\\n|$)$`).test(next)) {
+				if (closer.test(next)) {
 					raw += next;
 					break;
 				}
@@ -1090,10 +1117,16 @@ function blockTokens(src: string, lexer: Lexer, output: Token[]): Token[] {
 			i++;
 			if (line.trimStart().startsWith("<!--")) {
 				while (!raw.includes("-->") && i < lines.length) raw += lines[i++]!;
-			} else if (tag && !new RegExp(`</${tag}>`, "i").test(raw)) {
-				while (i < lines.length) {
-					raw += lines[i++]!;
-					if (new RegExp(`</${tag}>`, "i").test(raw)) break;
+			} else if (tag) {
+				// A closing tag never spans lines, so testing each appended line is
+				// equivalent to re-testing the accumulated block.
+				const closeTag = new RegExp(`</${tag}>`, "i");
+				if (!closeTag.test(raw)) {
+					while (i < lines.length) {
+						const next = lines[i++]!;
+						raw += next;
+						if (closeTag.test(next)) break;
+					}
 				}
 			}
 			const value = i < lines.length && /^\s*\n$/.test(lines[i]!) ? stripFinalNewline(raw) : raw;
@@ -1129,9 +1162,8 @@ function blockTokens(src: string, lexer: Lexer, output: Token[]): Token[] {
 		}
 		if (i + 1 < lines.length && /^ {0,3}(=+|-+)[ \t]*(?:\n|$)$/.test(lines[i + 1]!)) {
 			let fallback: Tokens.Heading | undefined | false;
-			const override = lexer.tokenizerOverrides.lheading;
-			if (override) fallback = override.call(lexer.tokenizer, remaining);
-			if (!override || fallback === false) {
+			if (lheadingOverride) fallback = lheadingOverride.call(lexer.tokenizer, src.slice(lineStarts![i]));
+			if (!lheadingOverride || fallback === false) {
 				const raw = line + lines[i + 1]!;
 				const text = stripFinalNewline(line);
 				const tokens: Token[] = [];

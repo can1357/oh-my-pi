@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { fuzzyMatch, fuzzyRank, resetFuzzyIndexCache } from "@oh-my-pi/pi-tui/fuzzy";
+import { FuzzyQuery, FuzzyText, fuzzyMatch, fuzzyRank, resetFuzzyIndexCache } from "@oh-my-pi/pi-tui/fuzzy";
 
 describe("fuzzy index cache", () => {
 	it("produces identical ordering whether the cache is cold or warm", () => {
@@ -26,6 +26,35 @@ describe("fuzzy index cache", () => {
 		const second = fuzzyMatch("gpt4", longText);
 		expect(first).toEqual(second);
 		expect(first.matches).toBe(true);
+	});
+
+	it("keeps ranking identical after the cache overflows and evicts", () => {
+		const items = Array.from({ length: 6000 }, (_, i) => `provider-${i % 37}/model-${i} family ${i * 7919}`);
+		resetFuzzyIndexCache();
+		const cold = fuzzyRank(items, "model 42", item => item);
+		// Churn the cache with unrelated texts, then rank again (partly cached, partly evicted).
+		fuzzyRank(
+			Array.from({ length: 5000 }, (_, i) => `junk ${i}`),
+			"j",
+			item => item,
+		);
+		const warm = fuzzyRank(items, "model 42", item => item);
+		expect(warm).toEqual(cold);
+	});
+});
+
+describe("FuzzyQuery", () => {
+	it("matches exactly like fuzzyMatch for strings and prepared texts", () => {
+		const texts = ["openai/gpt-4o-mini", "anthropic/claude-4-opus", "compactionThreshold", "", "!!!"];
+		for (const query of ["gpt4o", "claude opus", "cthr", "", "!!", "x"]) {
+			const prepared = new FuzzyQuery(query);
+			for (const text of texts) {
+				const expected = fuzzyMatch(query, text);
+				expect(prepared.match(text)).toEqual(expected);
+				expect(prepared.match(new FuzzyText(text))).toEqual(expected);
+				expect(new FuzzyText(text).match(prepared)).toEqual(expected);
+			}
+		}
 	});
 });
 

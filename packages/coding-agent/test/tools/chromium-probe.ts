@@ -31,7 +31,12 @@ async function chromiumCanLaunch(): Promise<boolean> {
 	}
 }
 
-/** A disposable headless launch must actually answer CDP, not just --version. */
+/**
+ * A disposable headless launch must actually answer CDP, not just --version.
+ * Chrome exiting first (e.g. code 127 for missing libnspr4) fails the probe at
+ * once: polling on would let a concurrent test server that grabs the freed
+ * port answer `/json/version` with 200 and pass the probe falsely.
+ */
 export async function chromiumCdpAvailable(executable: string, timeoutMs = 5000): Promise<boolean> {
 	const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-chromium-probe-"));
 	let child: ChildProcess | undefined;
@@ -50,7 +55,12 @@ export async function chromiumCdpAvailable(executable: string, timeoutMs = 5000)
 			],
 			{ stdin: "ignore", detached: true, subreaper: true },
 		);
-		await waitForCdp(`http://127.0.0.1:${port}`, timeoutMs);
+		const exitedEarly = new AbortController();
+		child.exited.then(
+			() => exitedEarly.abort(),
+			() => exitedEarly.abort(),
+		);
+		await waitForCdp(`http://127.0.0.1:${port}`, timeoutMs, exitedEarly.signal);
 		return true;
 	} catch {
 		return false;

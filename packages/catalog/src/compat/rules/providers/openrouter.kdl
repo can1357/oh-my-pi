@@ -13,12 +13,20 @@ provider "openrouter" {
 		stt "openai-transcriptions"
 	}
 	web-search "openrouter"
+	image-count-budget 90
 
 	// TypeSafe's Jev answers only through the Decisions API (`/api/alpha/decisions`,
 	// System One wire shape); the default `/models` roster omits `text->decisions`
-	// rows, so the alias is authored here and discovery refreshes the family.
+	// rows, so the alias and the pinned default judge are authored here and
+	// discovery refreshes the family.
 	seed api="openrouter-decisions" base-url="https://openrouter.ai/api/alpha" bundle="always" {
 		model "~typesafe/jev-latest" name="TypeSafe: Jev Latest" {
+			reasoning #false
+			input "text"
+			cost input=0.042 output=0 cache-read=0 cache-write=0
+			limits context=32000 max-tokens=28800
+		}
+		model "typesafe/jev-1.14" name="TypeSafe: Jev 1.14" {
 			reasoning #false
 			input "text"
 			cost input=0.042 output=0 cache-read=0 cache-write=0
@@ -118,6 +126,17 @@ provider "openrouter" {
 	models "~typesafe/*" "typesafe/*" {
 		kind "judge"
 	}
+	models "~typesafe/jev-latest" "typesafe/jev-1.13" "typesafe/jev-1.14" {
+		input-modalities "text" "image"
+		judgment-image-input {
+			mime-types "image/png,image/jpeg"
+			max-bytes 16777216
+			min-pixels 78400
+			max-pixels 2458624
+			min-side 280
+			max-side 1568
+		}
+	}
 	models "cohere/rerank-v3.5" {
 		kind "rerank"
 	}
@@ -150,6 +169,13 @@ provider "openrouter" {
 			allows-synthetic-reasoning-content-for-tool-calls #false
 		}
 	}
+	// OpenRouter forwards these hosted Muse SKUs to Meta's backend, which
+	// accepts only tool_choice "auto" and 400s on "none" (see providers/meta.kdl).
+	// Other Muse models, including muse-spark-open, retain discovered tool_choice.
+	models "meta/muse-spark-1.1" "meta/muse-spark-1.2" "meta/muse-spark-1.2-contributor" \
+		"meta/muse-spark-1.3" "meta/muse-spark-1.3-contributor" "meta/muse-wonder" {
+		supports-tool-choice #false
+	}
 	class "minimax" {
 		family "m3" {
 			thinking-efforts "minimal" "low" "medium" "high"
@@ -158,6 +184,12 @@ provider "openrouter" {
 	class "openai" {
 		family "o-series" {
 			thinking-efforts "minimal" "low" "medium" "high"
+		}
+		// OpenRouter's Responses API does not document `configuration_update`
+		// input items (and serves `-pro` rows that would need pro mode, where the
+		// item is unsupported): GPT-6 effort changes stay on the request level.
+		revision ">=6 <7" {
+			supports-configuration-update #false
 		}
 	}
 	class "stepfun" {

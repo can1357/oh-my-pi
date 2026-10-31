@@ -10,6 +10,29 @@ export function codexUsagePlan(report: UsageReport): string | undefined {
 	return sanitizeText(plan.trim().replace(/[\r\n\t]+/g, " "));
 }
 
+/** OAuth identity a usage report is attributed to, from its metadata or its limits' scopes. */
+export function usageReportIdentity(report: UsageReport): OAuthAccountIdentity {
+	const metadata = report.metadata ?? {};
+	const read = (key: keyof OAuthAccountIdentity): string | undefined => {
+		const value = metadata[key];
+		return typeof value === "string" && value.length > 0 ? value : undefined;
+	};
+	const firstScoped = (key: "accountId" | "projectId" | "orgId"): string | undefined => {
+		for (const limit of report.limits) {
+			const value = limit.scope[key];
+			if (value) return value;
+		}
+		return undefined;
+	};
+	return {
+		email: read("email"),
+		accountId: read("accountId") ?? firstScoped("accountId"),
+		projectId: read("projectId") ?? firstScoped("projectId"),
+		orgId: read("orgId") ?? firstScoped("orgId"),
+		orgName: read("orgName"),
+	};
+}
+
 /** Qualify Codex identities only when two reports have the same email. */
 export function formatCodexUsageReportLabel(
 	report: UsageReport,
@@ -72,8 +95,10 @@ export function formatActiveAccountLabel(identity: OAuthAccountIdentity | undefi
  *   recovered at all) matches on the org alone. When neither side carries
  *   an org, the base fallback applies unchanged (providers without orgs
  *   keep their former behavior).
+ * - `email`     ↔ report metadata `email` — decisive when both sides carry
+ *   one: Codex Team seats share an account id and Antigravity accounts share
+ *   one Google project, so only the email tells their reports apart
  * - `accountId` ↔ report metadata `accountId`/`account_id` or `limit.scope.accountId`
- * - `email`     ↔ report metadata `email`
  * - `projectId` ↔ report metadata `projectId` or `limit.scope.projectId`
  *   (Google-style providers key usage on the GCP project, not an account id)
  */
@@ -96,12 +121,13 @@ export function limitMatchesActiveAccount(
 		if (activeOrgId !== reportOrgId) return false;
 		if (!activeAccountId && !activeEmail && !activeProjectId) return true;
 	}
+	const reportEmail = normalizeIdentityValue(metadata.email);
+	if (activeEmail && reportEmail) return activeEmail === reportEmail;
 	if (activeAccountId) {
 		const reportAccountId = normalizeIdentityValue(metadata.accountId) ?? normalizeIdentityValue(metadata.account_id);
 		if (reportAccountId === activeAccountId) return true;
 		if (normalizeIdentityValue(limit.scope.accountId) === activeAccountId) return true;
 	}
-	if (activeEmail && normalizeIdentityValue(metadata.email) === activeEmail) return true;
 	if (activeProjectId) {
 		if (normalizeIdentityValue(metadata.projectId) === activeProjectId) return true;
 		if (normalizeIdentityValue(limit.scope.projectId) === activeProjectId) return true;

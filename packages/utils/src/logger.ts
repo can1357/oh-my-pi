@@ -7,11 +7,13 @@
  * transport so a process supervisor (pm2, journald, k8s) captures the logs.
  *
  * Each entry includes `process.pid` so concurrent omp instances stay
- * traceable. The file is created on the first record written. Records are
- * batched — one write per second or per 64 KiB — while `warn`/`error` records
- * are written at once together with everything buffered before them; exit,
- * fatal, and signal paths flush the rest. `OMP_LOG_LEVEL` optionally limits
- * the levels written to the file (default: all).
+ * traceable, and the fields of the enclosing {@link withContext} (a session's
+ * `sessionId`) so sessions sharing one process stay apart. The file is created
+ * on the first record written. Records are batched — one write per second or
+ * per 64 KiB — while `warn`/`error` records are written at once together with
+ * everything buffered before them; exit, fatal, and signal paths flush the
+ * rest. `OMP_LOG_LEVEL` optionally limits the levels written to the file
+ * (default: all).
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 import * as fs from "node:fs";
@@ -48,7 +50,18 @@ export function registerLogSink(sink: LogSink): () => void {
 
 function emitToSinks(level: LogLevel, message: string, context: Record<string, unknown> | undefined): void {
 	if (logSinks.size === 0) return;
-	const event: LogEvent = { level, message, context, timestamp: new Date() };
+	// The enclosing {@link withContext} fields reach sinks as they reach the file;
+	// call-site fields win, and a record outside any context keeps its own object.
+	const scoped = logContextStorage.getStore();
+	let merged = context;
+	if (scoped) {
+		try {
+			merged = { ...scoped, ...context };
+		} catch {
+			// A throwing getter must not turn a log call into a failure; sinks get the call's own fields.
+		}
+	}
+	const event: LogEvent = { level, message, context: merged, timestamp: new Date() };
 	for (const sink of logSinks) {
 		try {
 			sink(event);
@@ -209,9 +222,28 @@ function jsonReplacer(_key: string, value: unknown): unknown {
 	return value;
 }
 
-interface NormalizedLogInfo extends Record<string, unknown> {
-	level: LogLevel;
-	message: unknown;
+// Values visited by the Error pre-scan before falling back to the replacer.
+const ERROR_SCAN_BUDGET = 128;
+
+/**
+ * Whether `value` may contain an {@link Error} that {@link jsonReplacer} must
+ * unwrap. Walks what `JSON.stringify` serializes (arrays and own enumerable
+ * keys); objects with a `toJSON` other than `Date` may return an Error, and an
+ * exhausted budget answers true.
+ */
+function mayContainError(root: unknown): boolean {
+	const stack: unknown[] = [root];
+	let budget = ERROR_SCAN_BUDGET;
+	while (stack.length > 0) {
+		const value = stack.pop();
+		if (value === null || typeof value !== "object") continue;
+		if (value instanceof Error) return true;
+		if (--budget < 0) return true;
+		if (value instanceof Date) continue;
+		if ("toJSON" in value && typeof value.toJSON === "function") return true;
+		for (const child of Object.values(value)) stack.push(child);
+	}
+	return false;
 }
 
 function padTimestampPart(value: number, width = 2): string {
@@ -232,33 +264,58 @@ function formatLocalTimestamp(date: Date): string {
 
 const FORMAT_TOKEN_PATTERN = /%[scdjifoO%]/;
 
-function normalizeLogInfo(
+const logContextStorage = new AsyncLocalStorage<Readonly<Record<string, unknown>>>();
+
+/**
+ * Run `fn` with `context`'s fields on every record logged while it runs,
+ * including from the promises, timers and callbacks it starts. A nested call
+ * replaces the enclosing context, as a subagent's session replaces its
+ * parent's; a field passed to the log call itself wins. Fields are read as each
+ * record is written, so a getter stays current.
+ */
+export function withContext<T>(context: Readonly<Record<string, unknown>>, fn: () => T): T {
+	return logContextStorage.run(context, fn);
+}
+
+/**
+ * Run `fn` outside any {@link withContext}: for process-wide work started on
+ * behalf of one caller, such as a shared server's read loop, whose later
+ * records belong to no single caller.
+ */
+export function withoutContext<T>(fn: () => T): T {
+	return logContextStorage.exit(fn);
+}
+
+/** Serialize one log record: timestamp, level, pid, message, then context fields. */
+function formatLogRecord(
 	level: LogLevel,
 	message: string,
 	context: Record<string, unknown> | undefined,
-): NormalizedLogInfo {
+	timestamp: string,
+): string {
 	const metadata =
 		!FORMAT_TOKEN_PATTERN.test(message) && context !== null && typeof context === "object" ? context : undefined;
-	const info = Object.assign({}, metadata, { level, message }) as NormalizedLogInfo;
-	if (metadata?.message) info.message = `${message} ${metadata.message}`;
-	if (metadata?.stack) info.stack = metadata.stack;
-	if (metadata?.cause) info.cause = metadata.cause;
-	return info;
-}
-
-function formatLogInfo(info: NormalizedLogInfo): string {
-	const timestamp = formatLocalTimestamp(new Date());
-	info.timestamp = timestamp;
 	const entry: Record<string, unknown> = {
 		timestamp,
-		level: info.level,
+		level,
 		pid: process.pid,
-		message: info.message,
+		message: metadata?.message ? `${message} ${metadata.message}` : message,
 	};
-	for (const [key, value] of Object.entries(info)) {
-		if (key !== "level" && key !== "timestamp" && key !== "message") entry[key] = value;
+	const scoped = logContextStorage.getStore();
+	if (scoped) {
+		for (const key of Object.keys(scoped)) {
+			if (key !== "level" && key !== "timestamp" && key !== "message") entry[key] = scoped[key];
+		}
 	}
-	return JSON.stringify(entry, jsonReplacer) as string;
+	if (metadata) {
+		for (const key of Object.keys(metadata)) {
+			if (key !== "level" && key !== "timestamp" && key !== "message") entry[key] = metadata[key];
+		}
+		// An Error passed as the context carries these as non-enumerable fields.
+		if (metadata.stack) entry.stack = metadata.stack;
+		if (metadata.cause) entry.cause = metadata.cause;
+	}
+	return mayContainError(entry) ? JSON.stringify(entry, jsonReplacer) : JSON.stringify(entry);
 }
 
 /** Longest a buffered file record waits before it is written. */
@@ -361,9 +418,9 @@ function emitLocally(level: LogLevel, message: string, context: Record<string, u
 	const rank = LOG_LEVEL_RANK[level];
 	const file = rank <= transports.fileLevelRank ? transports.file : undefined;
 	if (!file && !transports.console) return;
-	const info = normalizeLogInfo(level, message, context);
-	const line = formatLogInfo(info);
-	file?.write(line, rank <= IMMEDIATE_FLUSH_RANK || exiting);
+	const now = new Date();
+	const line = formatLogRecord(level, message, context, formatLocalTimestamp(now));
+	file?.write(line, rank <= IMMEDIATE_FLUSH_RANK || exiting, localDay(now));
 	if (transports.console) fs.writeSync(1, `${line}${os.EOL}`);
 }
 

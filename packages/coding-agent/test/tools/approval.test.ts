@@ -5,12 +5,16 @@ import {
 	type ApprovalMode,
 	denyError,
 	formatApprovalPrompt,
+	requestApproval,
 	requiresApproval,
 	resolveApproval,
 	resolveApprovalFromContext,
 	truncateForPrompt,
 } from "@oh-my-pi/pi-coding-agent/tools/approval";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
+import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
+import { DeferredMCPTool, MCPTool } from "../../src/mcp/tool-bridge";
+import type { MCPServerConnection, MCPToolDefinition } from "../../src/mcp/types";
 import { Settings } from "../../src/config/settings";
 import { EditTool } from "../../src/edit";
 import type { ToolSession } from "../../src/tools";
@@ -237,9 +241,153 @@ describe("MCP fallback and prompt formatting", () => {
 		]);
 	});
 
+	it("the dialog's compact prompt summarizes the details to one row, keeping origin, reason, and appendix", async () => {
+		const prompts: { full: string; compact: string }[] = [];
+		const ui = {
+			select: async () => undefined,
+			approve: async (prompt: { full: string; compact: string }) => {
+				prompts.push(prompt);
+				return "once" as const;
+			},
+		};
+		const write = tool("mcp__server__write", undefined, () => ["Path: /tmp/out", "Content:\nsecret\nbody"]);
+		expect(
+			await requestApproval(
+				ui,
+				write,
+				{},
+				{
+					reason: "Critical pattern",
+					appendix: ["Provider safety checks:", "- check"],
+				},
+			),
+		).toBe("once");
+		expect(prompts[0]!.compact.split("\n")).toEqual([
+			"Allow tool: mcp__server__write",
+			"Origin: MCP server tool",
+			"Reason: Critical pattern",
+			// A label alone takes its body's first line; `…` marks the lines left out.
+			"Path: /tmp/out · Content: secret …",
+			"Provider safety checks:",
+			"- check",
+		]);
+		// The full prompt, which the dialog's expand key shows, keeps every detail whole.
+		expect(prompts[0]!.full).toContain("Content:\nsecret\nbody");
+		// A detail that fits on its row is shown as is, without an ellipsis.
+		await requestApproval(
+			ui,
+			tool("bash", "exec", () => ["Command: git push"]),
+			{},
+		);
+		expect(prompts[1]!.compact).toBe("Allow tool: bash\nCommand: git push");
+	});
+
 	it("does not add MCP origin for annotated MCP tools", () => {
 		const subject = tool("mcp__server__safe", "read");
 		expect(formatApprovalPrompt(subject, {}, undefined)).toBe("Allow tool: mcp__server__safe");
+	});
+
+	it("shows decoded manifests through MCP registrations, MCP fallback, and device writes", () => {
+		const args = {
+			context: "some-context",
+			resource: "apiVersion: v1\nkind: Pod\nmetadata:\n  name: probe\n  namespace: probe-ns",
+		};
+		const definition: MCPToolDefinition = { name: "apply", inputSchema: { type: "object" } };
+		const connection = { name: "kubernetes" } as MCPServerConnection;
+		const eager = new MCPTool(connection, definition);
+		const deferred = new DeferredMCPTool("kubernetes", definition, async () => connection);
+		const writeTool = new WriteTool({ cwd: "." } as ToolSession);
+		const expected = [
+			"Arguments:",
+			"{",
+			'  "context": "some-context",',
+			'  "resource": "',
+			"    apiVersion: v1",
+			"    kind: Pod",
+			"    metadata:",
+			"      name: probe",
+			"      namespace: probe-ns",
+			'  "',
+			"}",
+		].join("\n");
+		const cases: { subject: ApprovalTool; args: unknown }[] = [
+			{ subject: eager, args },
+			{ subject: deferred, args },
+			{ subject: tool(eager.name), args },
+			{ subject: writeTool, args: { path: `xd://${eager.name}`, content: JSON.stringify(args) } },
+		];
+		for (const entry of cases) {
+			expect(formatApprovalPrompt(entry.subject, entry.args)).toContain(expected);
+		}
+	});
+
+	it("keeps multiline array strings distinct from numbers and their commas outside the body", () => {
+		const subject = tool("mcp__server__run");
+		const prompt = formatApprovalPrompt(subject, { scripts: ["1\n", "2\n"], enabled: true });
+		expect(prompt).toContain('  "scripts": [\n    "\n      1\n      \n    ",\n    "\n      2\n      \n    "\n  ],');
+		expect(prompt).not.toBe(formatApprovalPrompt(subject, { scripts: [1, 2], enabled: true }));
+		expect(prompt).toContain('  "enabled": true');
+	});
+
+	it("normalizes CRLF and CR, expands tabs, and keeps terminal controls escaped in string blocks", () => {
+		const prompt = formatApprovalPrompt(tool("mcp__server__run"), {
+			script: "first\r\n\tsecond\rthird\u001b[2J\b\nlast",
+		});
+		expect(prompt).toContain("first\n       second\n    third\\u001b[2J\\b\n    last");
+		expect(prompt).not.toMatch(/[\r\t\u001b\b]/);
+	});
+
+	it("retains explicit MCP approval detail formatters, including suppressed details", () => {
+		const args = { hidden: "custom formatter owns disclosure" };
+		expect(
+			formatApprovalPrompt(
+				tool("mcp__server__run", undefined, () => []),
+				args,
+			),
+		).not.toContain("Arguments:");
+		expect(
+			formatApprovalPrompt(
+				tool("mcp__server__run", undefined, () => "Custom details"),
+				args,
+			),
+		).toContain("Custom details");
+	});
+
+	it("shows empty and null JSON device payloads while omitting absent direct MCP arguments", () => {
+		const writeTool = new WriteTool({ cwd: "." } as ToolSession);
+		for (const content of ["{}", "[]", "null"]) {
+			expect(formatApprovalPrompt(writeTool, { path: "XD://run", content })).toContain(`Arguments:\n${content}`);
+		}
+		expect(formatApprovalPrompt(tool("mcp__server__run"), undefined)).not.toContain("Arguments:");
+	});
+
+	it("regular file write keeps Path and Content lines unchanged", () => {
+		const session = { cwd: "." } as ToolSession;
+		const writeTool = new WriteTool(session);
+		const details = writeTool.formatApprovalDetails({
+			path: "src/main.ts",
+			content: '{"script":"first\\nsecond"}',
+		});
+		expect(details).toEqual(["Path: src/main.ts", 'Content:\n{"script":"first\\nsecond"}']);
+	});
+
+	it("falls back to raw Content for xd:// write with non-JSON content", () => {
+		const session = { cwd: "." } as ToolSession;
+		const writeTool = new WriteTool(session);
+		const details = writeTool.formatApprovalDetails({
+			path: "xd://some_device",
+			content: "not-json-content",
+		});
+		expect(details).toEqual(["Path: xd://some_device", "Content:\nnot-json-content"]);
+	});
+
+	it("caps large device argument payloads at prompt truncation limit", () => {
+		const longScript = "echo test\n".repeat(300);
+		const subject = tool("mcp__server__eval");
+		const prompt = formatApprovalPrompt(subject, { script: longScript });
+		const displayed = prompt.split("Arguments:\n")[1]!;
+		expect(displayed).toMatch(/^.{2000}\[…\d+ch elided…\]$/s);
+		expect(displayed).toContain('  "script": "\n    echo test');
 	});
 
 	it("truncates prompt details without touching short strings", () => {
@@ -367,6 +515,12 @@ describe("tool-owned dynamic approval declarations", () => {
 			"rm -rf -v /",
 			"rm -rf -i /",
 			"rm -v -rf /",
+			"dd if=/dev/zero of=/dev/sda bs=1M",
+			"dd if=image.iso of=/dev/disk2 bs=4m",
+			"dd if=/dev/urandom of=/dev/nvme0n1",
+			"dd if=image.img of=/dev/ttyS0",
+			"dd if=image.img of=/dev/nullb0",
+			"dd if=big.mov of=/dev/null; dd if=image.iso of=/dev/sdb",
 		]) {
 			expect(bashApproval(command)).toEqual({ tier: "exec", override: true, reason: "Critical pattern detected" });
 		}
@@ -383,6 +537,11 @@ describe("tool-owned dynamic approval declarations", () => {
 			"rm -rf -- ./build",
 			"rm --recursive --force ./dist",
 			"rm -v /tmp/scratch",
+			"dd if=big.mov of=/dev/null bs=4m count=100",
+			"dd if=/dev/sda of=/dev/null bs=1M count=10",
+			"dd if=big.mov of=/dev/stdout",
+			"dd if=big.mov of=/dev/fd/1 status=none",
+			"dd if=big.mov of=/dev/null 2>&1",
 		]) {
 			expect(bashApproval(command)).toBe("exec");
 		}

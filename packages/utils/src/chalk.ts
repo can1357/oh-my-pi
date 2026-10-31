@@ -257,13 +257,73 @@ function applyStyles(input: string, styles: readonly Style[]): string {
 	for (let index = styles.length - 1; index >= 0; index--) {
 		const style = styles[index];
 		if (!style) continue;
-		output = output.split(style.close).join(style.close + style.open);
+		if (output.includes(style.close)) output = output.split(style.close).join(style.close + style.open);
 		opening = style.open + opening;
 		closing += style.close;
 	}
-	output = output.replace(/\r?\n/g, match => `${closing}${match}${opening}`);
+	if (output.includes("\n")) output = output.replace(/\r?\n/g, match => `${closing}${match}${opening}`);
 	return opening + output + closing;
 }
+
+const BUILDER_CONTEXT = Symbol("chalk.context");
+const BUILDER_STYLES = Symbol("chalk.styles");
+const BUILDER_HEX_CACHE = Symbol("chalk.hexCache");
+// Bounds per-builder hex children when callers derive colors dynamically.
+const MAX_CACHED_HEX_BUILDERS = 256;
+
+interface BuilderState {
+	[BUILDER_CONTEXT]: ChalkContext;
+	[BUILDER_STYLES]: readonly Style[];
+	[BUILDER_HEX_CACHE]?: Map<string, ChalkInstance>;
+}
+
+type Builder = ChalkInstance & BuilderState;
+
+/** Child builders are created on first access and cached on the parent builder. */
+function defineStyleGetter(proto: object, name: string, style: Style): void {
+	Object.defineProperty(proto, name, {
+		get(this: Builder) {
+			const child = createBuilder(this[BUILDER_CONTEXT], [...this[BUILDER_STYLES], style]);
+			Object.defineProperty(this, name, { value: child });
+			return child;
+		},
+	});
+}
+
+const builderPrototype: object = Object.create(Function.prototype);
+Object.defineProperty(builderPrototype, "level", {
+	get(this: Builder) {
+		return this[BUILDER_CONTEXT].level;
+	},
+	set(this: Builder, level: number) {
+		this[BUILDER_CONTEXT].level = level;
+	},
+});
+for (const name in STYLES) {
+	const style = STYLES[name];
+	if (style) defineStyleGetter(builderPrototype, name, style);
+}
+defineStyleGetter(builderPrototype, "grey", STYLES.gray!);
+defineStyleGetter(builderPrototype, "bgGray", STYLES.bgBlackBright!);
+defineStyleGetter(builderPrototype, "bgGrey", STYLES.bgBlackBright!);
+Object.defineProperty(builderPrototype, "hex", {
+	value(this: Builder, color: string): ChalkInstance {
+		const context = this[BUILDER_CONTEXT];
+		const key = `${context.level}:${color}`;
+		let cache = this[BUILDER_HEX_CACHE];
+		const cached = cache?.get(key);
+		if (cached) return cached;
+		const child = createBuilder(context, [...this[BUILDER_STYLES], hexStyle(color, context.level)]);
+		if (!cache) {
+			cache = new Map();
+			this[BUILDER_HEX_CACHE] = cache;
+		} else if (cache.size >= MAX_CACHED_HEX_BUILDERS) {
+			cache.clear();
+		}
+		cache.set(key, child);
+		return child;
+	},
+});
 
 function createBuilder(context: ChalkContext, styles: readonly Style[]): ChalkInstance {
 	const builder = ((...values: unknown[]) => {
@@ -274,27 +334,10 @@ function createBuilder(context: ChalkContext, styles: readonly Style[]): ChalkIn
 		}
 		if (text.length === 0 || context.level === 0) return text;
 		return applyStyles(text, styles);
-	}) as ChalkInstance;
-	Object.defineProperty(builder, "level", {
-		get: () => context.level,
-		set: (level: number) => {
-			context.level = level;
-		},
-	});
-	for (const name in STYLES) {
-		const style = STYLES[name];
-		if (style) Object.defineProperty(builder, name, { get: () => createBuilder(context, [...styles, style]) });
-	}
-	Object.defineProperty(builder, "grey", { get: () => createBuilder(context, [...styles, STYLES.gray!]) });
-	Object.defineProperty(builder, "bgGray", {
-		get: () => createBuilder(context, [...styles, STYLES.bgBlackBright!]),
-	});
-	Object.defineProperty(builder, "bgGrey", {
-		get: () => createBuilder(context, [...styles, STYLES.bgBlackBright!]),
-	});
-	Object.defineProperty(builder, "hex", {
-		value: (color: string) => createBuilder(context, [...styles, hexStyle(color, context.level)]),
-	});
+	}) as Builder;
+	Object.setPrototypeOf(builder, builderPrototype);
+	builder[BUILDER_CONTEXT] = context;
+	builder[BUILDER_STYLES] = styles;
 	return builder;
 }
 

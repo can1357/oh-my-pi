@@ -9,6 +9,14 @@
  */
 
 /**
+ * Cheap check whether the generated text carries a gzip archive: sniffs the
+ * base64 of the gzip magic (`1f 8b 08`) without decoding megabytes.
+ */
+export function hasEmbeddedClientArchive(txt: string): boolean {
+	return /^\s*H4s/.test(txt);
+}
+
+/**
  * Decode the generated archive text.
  *
  * Returns `null` when the content is blank or not a raw gzip archive encoded as
@@ -17,6 +25,7 @@
  * rather than decoded into garbage bytes.
  */
 export function decodeEmbeddedClientArchive(txt: string): Buffer | null {
+	if (!hasEmbeddedClientArchive(txt)) return null;
 	const normalized = txt.replaceAll(/\s+/g, "");
 	if (!normalized) return null;
 	if (!/^[A-Za-z0-9+/]+={0,2}$/.test(normalized)) return null;

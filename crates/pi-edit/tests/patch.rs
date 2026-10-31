@@ -9,7 +9,8 @@ async fn patch_core_fixtures() {
 
 #[test]
 fn matcher_digest_uses_added_lines_and_whole_create_content() {
-	let engine = PatchEngine { allow_fuzzy: true, fuzzy_threshold: 0.95 };
+	let engine =
+		PatchEngine { allow_fuzzy: true, fuzzy_threshold: 0.95, first_match: false };
 	let args = ArgSnapshot {
 		path: Some("a.txt".into()),
 		edits: vec![

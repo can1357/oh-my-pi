@@ -33,6 +33,10 @@
  * 4. **Gemini summary-header runaway** — handled separately by
  *    {@link GeminiHeaderRunDetector}.
  *
+ * The semantic heuristics (2, 3) judge prose only: code-shaped lines are dropped
+ * before analysis because legitimate code repeats one keyword skeleton with
+ * different literals, and numeric tokens are stripped during normalization.
+ *
  * Scope: exact cycles are guarded for every model; semantic heuristics remain
  * limited to Gemini, DeepSeek, and Grok family streams. Thinking stays armed
  * after a tool call starts — xAI/Grok can keep emitting `thinking_delta` after
@@ -66,6 +70,11 @@ const EXACT_SHORT_MAX_UNIT = 60;
 const EXACT_SHORT_MIN_REPEATED_CHARS = 180;
 /** Long cycles need at least three repeats covering at least this many chars. */
 const EXACT_LONG_MIN_REPEATED_CHARS = 1024;
+/** Repeated characters before a punctuation-only run counts as a loop. Matches
+ *  {@link EXACT_LONG_MIN_REPEATED_CHARS}: a model that has emitted a kilobyte of
+ *  one punctuation cycle back-to-back is degenerate, while the short separators
+ *  real output produces (table rules, dividers) never reach it. */
+const EXACT_PUNCTUATION_MIN_REPEATED_CHARS = EXACT_LONG_MIN_REPEATED_CHARS;
 
 /** Char cap for an unterminated segment; forces a flush so a wall-of-text loop
  *  (no blank lines / headings) still segments. */
@@ -107,6 +116,13 @@ const LEX_STALL_MIN_RUN = 8;
  *  matchAll, so never used with the stateful test(). */
 const CONCRETE_ANCHOR =
 	/`[^`]+`|\b\w{2,}\.[a-zA-Z]\w{0,4}\b|[\w-]+(?:\/[\w-]+){2,}|\b\w+_\w+\b|\b[a-z]+[A-Z]\w*\b|\b[A-Z][a-z]+[A-Z]\w*\b/g;
+
+/** A whole line shaped like code rather than prose: a fence marker, an indented
+ *  line that is not a nested list item, or a line ending in a block, statement,
+ *  or markup delimiter. Classified per line rather than by fence state because Gemini
+ *  thought summaries routinely end inside an unclosed fence; tracking fences
+ *  would hide every later prose paragraph from the heuristics. */
+const CODE_LINE = /^(?:[ \t]*```.*|(?: {2,}|\t)(?![ \t]*(?:[-*+]|\d+[.)])[ \t]).*|.*[{}[\](;,>][ \t]*)$/gm;
 
 /**
  * True when resolved compatibility policy enables semantic loop heuristics for
@@ -222,9 +238,13 @@ export class ThinkingLoopDetector {
 	#consumeSegment(raw: string): string | null {
 		// Reasoning-summarizer titles ("**Maintaining Momentum**", "## Heading")
 		// are per-thought formatting, not chain-of-thought; their ever-changing
-		// wording would otherwise mask a loop by inflating novelty. Strip them
-		// before analysis (a title-only segment then falls below the length gate).
-		const segment = raw.replace(/^[ \t]*#{1,6}[ \t].*$/gm, "").replace(/^[ \t]*\*{2,3}.+?\*{2,3}[ \t]*$/gm, "");
+		// wording would otherwise mask a loop by inflating novelty. Strip them and
+		// code lines before analysis (a title- or code-only segment then falls below
+		// the length gate).
+		const segment = raw
+			.replace(CODE_LINE, "")
+			.replace(/^[ \t]*#{1,6}[ \t].*$/gm, "")
+			.replace(/^[ \t]*\*{2,3}.+?\*{2,3}[ \t]*$/gm, "");
 		const normalized = normalizeSegment(segment);
 		if (normalized.length < SEGMENT_MIN_NORM_CHARS) return null;
 
@@ -386,8 +406,30 @@ export function guardThinkingLoopStream(
 		let thinkingArmed = true;
 		let textArmed = checkAssistantContent;
 		let textStarted = false;
+		// The provider's latest snapshot of this attempt, and when (wall clock,
+		// like its `timestamp`) its first delta arrived: the guard reports the
+		// attempt that tripped, not the wrapper's lifetime around retries. The
+		// attempt's start is kept as a value: providers that retry may reset
+		// the same output object's `timestamp` in place.
+		let snapshot: AssistantMessage | undefined;
+		let attemptStart: number | undefined;
+		let firstDeltaAt: number | undefined;
 		try {
 			for await (const event of inner) {
+				const next = "partial" in event ? event.partial : event.type === "done" ? event.message : undefined;
+				if (next) {
+					if (next.timestamp !== attemptStart) {
+						attemptStart = next.timestamp;
+						firstDeltaAt = undefined;
+					}
+					snapshot = next;
+				}
+				if (
+					firstDeltaAt === undefined &&
+					(event.type === "text_delta" || event.type === "thinking_delta" || event.type === "toolcall_delta")
+				) {
+					firstDeltaAt = Date.now();
+				}
 				let detail: string | null = null;
 				if (event.type === "thinking_delta") {
 					// Re-arm after thinking_end / toolcall_start unless visible answer
@@ -435,7 +477,7 @@ export function guardThinkingLoopStream(
 					outer.push({
 						type: "error",
 						reason: "error",
-						error: buildThinkingLoopError(model, detail),
+						error: buildThinkingLoopError(model, detail, snapshot, firstDeltaAt),
 					});
 					return;
 				}
@@ -482,7 +524,24 @@ export function withThinkingLoopGuard<
 	return guardThinkingLoopStream(dispatch(merged), model, controller, options);
 }
 
-function buildThinkingLoopError(model: Model<Api>, detail: string): AssistantMessage {
+/**
+ * The loop-abort error for one attempt. It keeps what the provider had
+ * reported for that attempt when the guard tripped (usage so far, start time,
+ * response id, and timing a finished snapshot already carries); otherwise
+ * duration and time to first delta run from the attempt's own start, since
+ * the provider's timers stop with the abort.
+ */
+function buildThinkingLoopError(
+	model: Model<Api>,
+	detail: string,
+	snapshot: AssistantMessage | undefined,
+	firstDeltaAt: number | undefined,
+): AssistantMessage {
+	const now = Date.now();
+	const duration = snapshot ? (snapshot.duration ?? now - snapshot.timestamp) : undefined;
+	const ttft =
+		snapshot?.ttft ??
+		(snapshot && firstDeltaAt !== undefined ? Math.max(0, firstDeltaAt - snapshot.timestamp) : undefined);
 	return {
 		role: "assistant",
 		// Empty content is load-bearing: loop-guard output is replay garbage, even
@@ -492,20 +551,26 @@ function buildThinkingLoopError(model: Model<Api>, detail: string): AssistantMes
 		api: model.api,
 		provider: model.provider,
 		model: model.id,
-		usage: {
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 0,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		},
+		// Cloned: the provider keeps mutating its output while it tears down.
+		usage: snapshot?.usage
+			? structuredClone(snapshot.usage)
+			: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
 		stopReason: "error",
 		// "stream stall" makes the transport/session retry classifiers treat this
 		// as a transient (retryable) failure with no bespoke rule.
 		errorMessage: `${THINKING_LOOP_ERROR_MARKER}: the model repeated near-identical content (${detail}). Treating as a stream stall and retrying.`,
 		errorId: AIError.create(AIError.Flag.ThinkingLoop),
-		timestamp: Date.now(),
+		...(snapshot?.responseId && { responseId: snapshot.responseId }),
+		...(duration !== undefined && { duration }),
+		...(ttft !== undefined && { ttft }),
+		timestamp: snapshot?.timestamp ?? now,
 	};
 }
 
@@ -520,6 +585,12 @@ const exactZ = new Uint16Array(EXACT_MAX_UNIT + 1);
  * only `z[i - left]` with `i - left < i`, which is already filled. Short
  * cycles retain the original 180-character/four-repeat sensitivity; long
  * cycles require at least three repeats and 1024 repeated characters.
+ *
+ * A unit carrying a letter or an emoji matches at those thresholds. A unit with
+ * neither, such as the `?!?!` run a stuck model emits, matches only once it has
+ * repeated for {@link EXACT_PUNCTUATION_MIN_REPEATED_CHARS} characters, and never
+ * when it holds only digits and whitespace: padding, indentation and zero-filled
+ * hexdumps or literals are ordinary output at any length.
  */
 function detectExactSuffixCycle(text: string): [unit: string, count: number] | null {
 	const n = text.length;
@@ -542,10 +613,15 @@ function detectExactSuffixCycle(text: string): [unit: string, count: number] | n
 	for (let len = 2; len <= maxUnit; len++) {
 		const count = 1 + Math.floor(z[len] / len);
 		const minCount = len <= EXACT_SHORT_MAX_UNIT ? 4 : 3;
-		const minChars = len <= EXACT_SHORT_MAX_UNIT ? EXACT_SHORT_MIN_REPEATED_CHARS : EXACT_LONG_MIN_REPEATED_CHARS;
-		if (count < minCount || len * count < minChars) continue;
+		if (count < minCount) continue;
 		const unit = text.slice(-len);
-		if (/\p{L}|\p{Extended_Pictographic}/u.test(unit)) return [unit, count];
+		if (/\p{L}|\p{Extended_Pictographic}/u.test(unit)) {
+			const minChars = len <= EXACT_SHORT_MAX_UNIT ? EXACT_SHORT_MIN_REPEATED_CHARS : EXACT_LONG_MIN_REPEATED_CHARS;
+			if (len * count >= minChars) return [unit, count];
+			continue;
+		}
+		if (/^[\p{N}\s]*$/u.test(unit)) continue;
+		if (len * count >= EXACT_PUNCTUATION_MIN_REPEATED_CHARS) return [unit, count];
 	}
 	return null;
 }

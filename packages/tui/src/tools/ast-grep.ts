@@ -1,10 +1,12 @@
+import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { Component } from "../tui";
 import { Text } from "../components/text";
 import type { Theme } from "../theme/theme";
-import { Ellipsis, fileHyperlink, renderStatusLine, renderTreeList, truncateToWidth } from "../render";
+import { fileHyperlink, renderStatusLine, renderTreeList } from "../render";
 import {
 	appendParseErrorsBulletList,
 	createCachedComponent,
+	fitHeaderedRows,
 	formatCount,
 	formatEmptyMessage,
 	formatErrorMessage,
@@ -13,12 +15,11 @@ import {
 	toPathList,
 } from "../render/render-utils";
 import { classifyGroupedLines, describeGroupedOutput, groupLineIndicesByBlank } from "./grouped-file-output";
-import { getLanguageFromPath } from "../lang-from-path";
 import { code, compact, node, span } from "../native/describe";
 import type { NativeChild } from "../native/node";
 import { errorText, noteText, resultText, toolHead } from "./native-view";
 import type { OutputMeta } from "./output-meta";
-import type { NativeToolView, RenderResultOptions, ToolRenderer } from "./renderer";
+import type { NativeToolView, RenderResultContextOptions, RenderResultOptions, ToolRenderer } from "./renderer";
 
 /** Display metadata returned by ast-grep. */
 export interface AstGrepToolDetails {
@@ -70,7 +71,7 @@ export const astGrepToolRenderer = {
 
 	renderResult(
 		result: { content: Array<{ type: string; text?: string }>; details?: AstGrepToolDetails; isError?: boolean },
-		options: RenderResultOptions,
+		options: RenderResultContextOptions,
 		uiTheme: Theme,
 		args?: AstGrepRenderArgs,
 	): Component {
@@ -123,29 +124,64 @@ export const astGrepToolRenderer = {
 		// Resolve hyperlinks over the whole output so nested directory headers
 		// reconstruct across the blank-line groups the tree list collapses by.
 		const contexts = classifyGroupedLines(allLines, details?.cwd ?? details?.searchPath, details?.searchPath);
-		const styledLines = allLines.map((line, index) => {
+		// The displayed lines are sanitized, but OSC 8 destinations must retain the
+		// original path bytes. Only substitute targets for headers already linked
+		// by the sanitized output; never let raw text create additional links.
+		const rawDetails = options.renderContext?.rawDetails;
+		const rawContent =
+			isRecord(rawDetails) && typeof rawDetails.displayContent === "string" ? rawDetails.displayContent : undefined;
+		const rawLines = rawContent?.split("\n");
+		const rawCwd = isRecord(rawDetails) && typeof rawDetails.cwd === "string" ? rawDetails.cwd : undefined;
+		const rawSearchPath =
+			isRecord(rawDetails) && typeof rawDetails.searchPath === "string" ? rawDetails.searchPath : undefined;
+		const rawContexts =
+			rawContent !== undefined && rawLines?.length === allLines.length && sanitizeText(rawContent) === textContent
+				? classifyGroupedLines(rawLines, rawCwd ?? rawSearchPath, rawSearchPath)
+				: undefined;
+		// Style lazily: the collapsed tree list only renders the first few groups,
+		// so a large result never styles/hyperlinks rows nobody sees.
+		const styledLines: (string | undefined)[] = Array.from({ length: allLines.length }, () => undefined);
+		const styleLine = (index: number): string => {
+			const cached = styledLines[index];
+			if (cached !== undefined) return cached;
+			const line = allLines[index]!;
 			const ctx = contexts[index]!;
+			const rawContext = rawContexts?.[index];
+			const target =
+				ctx.headerPath && rawContext?.kind === ctx.kind && rawContext.depth === ctx.depth
+					? (rawContext.headerPath ?? ctx.headerPath)
+					: ctx.headerPath;
+			let styled: string;
 			if (ctx.kind === "dir") {
-				const styled = uiTheme.fg("accent", line);
-				return ctx.headerPath ? fileHyperlink(ctx.headerPath, styled) : styled;
+				const accent = uiTheme.fg("accent", line);
+				styled = target ? fileHyperlink(target, accent) : accent;
+			} else if (ctx.kind === "file") {
+				const tinted = uiTheme.fg(ctx.depth === 1 ? "accent" : "dim", line);
+				styled = target ? fileHyperlink(target, tinted) : tinted;
+			} else {
+				styled = uiTheme.fg(line.startsWith("  meta:") ? "dim" : "toolOutput", line);
 			}
-			if (ctx.kind === "file") {
-				const styled = uiTheme.fg(ctx.depth === 1 ? "accent" : "dim", line);
-				return ctx.headerPath ? fileHyperlink(ctx.headerPath, styled) : styled;
-			}
-			if (line.startsWith("  meta:")) return uiTheme.fg("dim", line);
-			return uiTheme.fg("toolOutput", line);
+			styledLines[index] = styled;
+			return styled;
+		};
+		const matchGroups = groupLineIndicesByBlank(allLines).filter(indices => {
+			const first = allLines[indices[0]!]!;
+			return !first.startsWith("Result limit reached") && !first.startsWith("Parse issues:");
 		});
-		const matchGroups = groupLineIndicesByBlank(allLines)
-			.filter(indices => {
-				const first = allLines[indices[0]!]!;
-				return !first.startsWith("Result limit reached") && !first.startsWith("Parse issues:");
-			})
-			.map(indices => indices.map(index => styledLines[index]!));
+		// Line offset at which each group starts. A collapsed tree list stops at the
+		// first group that overflows its line budget, so groups starting at or past
+		// the budget are never shown — hand it same-length placeholders instead of
+		// styling them (renderTreeList only needs their line counts).
+		const groupStarts: number[] = [];
+		let groupStart = 0;
+		for (const group of matchGroups) {
+			groupStarts.push(groupStart);
+			groupStart += group.length;
+		}
 
 		const extraLines: string[] = [];
 		if (limitReached) {
-			extraLines.push(uiTheme.fg("warning", "limit reached; narrow path or increase limit"));
+			extraLines.push(uiTheme.fg("warning", "limit reached; narrow path or use skip"));
 		}
 		if (details?.parseErrors?.length) {
 			extraLines.push(
@@ -163,11 +199,14 @@ export const astGrepToolRenderer = {
 						maxCollapsed: matchGroups.length,
 						maxCollapsedLines: COLLAPSED_MATCH_LIMIT,
 						itemType: "match",
-						renderItem: group => group,
+						renderItem: (group, context) =>
+							!options.expanded && groupStarts[context.index]! >= COLLAPSED_MATCH_LIMIT
+								? Array.from({ length: group.length }, () => "")
+								: group.map(styleLine),
 					},
 					uiTheme,
 				);
-				return [header, ...matchLines, ...extraLines].map(l => truncateToWidth(l, width, Ellipsis.Omit));
+				return fitHeaderedRows(header, [...matchLines, ...extraLines], width);
 			},
 		);
 	},
@@ -240,8 +279,8 @@ export const astGrepToolRenderer = {
 		return {
 			head,
 			body: compact<NativeChild>([
-				...describeGroupedOutput(kept, { lang: getLanguageFromPath }),
-				limitReached && noteText("limit reached; narrow path or increase limit", "warning"),
+				...describeGroupedOutput(kept),
+				limitReached && noteText("limit reached; narrow path or use skip", "warning"),
 				parseNote,
 			]),
 			preview: { lines: COLLAPSED_MATCH_LIMIT },

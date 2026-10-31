@@ -1,10 +1,13 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { gunzipSync } from "node:zlib";
+import { promisify } from "node:util";
+import { gunzip, gunzipSync } from "node:zlib";
 import { getDocsRsCacheDir, isEnoent, logger, ptree, tryParseJson, USER_AGENT } from "@oh-my-pi/pi-utils";
 import { ToolAbortError } from "../../tools/tool-errors";
 import type { RenderResult, SpecialHandler } from "./types";
 import { buildResult, MAX_BYTES } from "./types";
+
+const gunzipAsync = promisify(gunzip);
 
 // --- Rustdoc JSON types (subset we care about) ---
 
@@ -289,6 +292,14 @@ export function gunzipRustdocJson(compressed: Buffer, maxOutputLength: number = 
 	return gunzipSync(compressed, { maxOutputLength }).toString("utf-8");
 }
 
+/** Off-thread {@link gunzipRustdocJson}: same cap, same RangeError when it is exceeded. */
+export async function gunzipRustdocJsonAsync(
+	compressed: Buffer,
+	maxOutputLength: number = MAX_RUSTDOC_GUNZIP_BYTES,
+): Promise<string> {
+	return (await gunzipAsync(compressed, { maxOutputLength })).toString("utf-8");
+}
+
 function sanitizeCacheSegment(value: string): string {
 	return value.replace(/[^A-Za-z0-9._-]+/g, "_");
 }
@@ -304,10 +315,12 @@ function getDocsRsCachePath(target: DocsRsTarget, now = new Date()): string {
 	return path.join(getDocsRsCacheDir(), `docsrs_${crate}_${version}`, DOCS_RS_CACHE_FILENAME);
 }
 
-async function readCachedRustdocCrate(
-	target: DocsRsTarget,
-): Promise<{ crate: RustdocCrate; fetchedAt: string } | null> {
-	const cachePath = getDocsRsCachePath(target);
+interface CachedRustdocCrate {
+	crate: RustdocCrate;
+	fetchedAt: string;
+}
+
+async function readCachedRustdocCrate(cachePath: string): Promise<CachedRustdocCrate | null> {
 	try {
 		const [jsonStr, stat] = await Promise.all([Bun.file(cachePath).text(), fs.stat(cachePath)]);
 		const crate = tryParseJson<RustdocCrate>(jsonStr);
@@ -320,8 +333,7 @@ async function readCachedRustdocCrate(
 	}
 }
 
-async function writeCachedRustdocCrate(target: DocsRsTarget, json: string): Promise<void> {
-	const cachePath = getDocsRsCachePath(target);
+async function writeCachedRustdocCrate(cachePath: string, json: string): Promise<void> {
 	try {
 		await Bun.write(cachePath, json);
 	} catch (err) {
@@ -339,85 +351,57 @@ export const handleDocsRs: SpecialHandler = async (
 	const target = parseDocsRsUrl(url);
 	if (!target) return null;
 
-	const cached = await readCachedRustdocCrate(target);
-	if (cached) {
-		const notes = ["Loaded from docs.rs rustdoc JSON cache"];
-		let currentItem = cached.crate.index[String(cached.crate.root)];
-		if (!currentItem) return null;
-
-		const subPath = target.modulePath.slice(1);
-		for (const seg of subPath) {
-			const modData = currentItem.inner?.module as { items: number[] } | undefined;
-			if (!modData?.items) return null;
-
-			const child = modData.items
-				.map(id => cached.crate.index[String(id)])
-				.find(it => it?.name === seg && "module" in (it?.inner ?? {}));
-			if (!child) return null;
-			currentItem = child;
-		}
-
-		if (target.itemName) {
-			const found = findItemInModule(currentItem, target.itemName, cached.crate.index);
-			if (!found) return null;
-
-			return buildResult(renderSingleItem(found, cached.crate.index, cached.crate), {
-				url,
-				method: "docs.rs",
-				fetchedAt: cached.fetchedAt,
-				notes,
-			});
-		}
-
-		return buildResult(renderModule(currentItem, cached.crate.index, cached.crate, target), {
-			url,
-			method: "docs.rs",
-			fetchedAt: cached.fetchedAt,
-			notes,
-		});
-	}
-
-	const fetchedAt = new Date().toISOString();
-	const notes = ["Fetched via docs.rs rustdoc JSON"];
-
-	// Fetch the rustdoc JSON (gzip variant for native Node decompression)
-	const jsonUrl = `https://docs.rs/crate/${target.crateName}/${target.version}/json.gz`;
-
+	const cachePath = getDocsRsCachePath(target);
+	const cached = await readCachedRustdocCrate(cachePath);
 	let crate_: RustdocCrate | null;
-	try {
-		const requestSignal = ptree.combineSignals(signal, timeout * 1000);
-		const response = await fetch(jsonUrl, {
-			signal: requestSignal,
-			headers: { "User-Agent": USER_AGENT, Accept: "application/gzip" },
-			redirect: "follow",
-		});
-		if (!response.ok) return null;
+	let fetchedAt: string;
+	let notes: string[];
+	if (cached) {
+		crate_ = cached.crate;
+		fetchedAt = cached.fetchedAt;
+		notes = ["Loaded from docs.rs rustdoc JSON cache"];
+	} else {
+		fetchedAt = new Date().toISOString();
+		notes = ["Fetched via docs.rs rustdoc JSON"];
 
-		const reader = response.body?.getReader();
-		if (!reader) return null;
+		// Fetch the rustdoc JSON (gzip variant for native Node decompression)
+		const jsonUrl = `https://docs.rs/crate/${target.crateName}/${target.version}/json.gz`;
 
-		const chunks: Uint8Array[] = [];
-		let totalSize = 0;
-		while (true) {
-			const { done, value } = await reader.read();
-			if (done) break;
-			chunks.push(value);
-			totalSize += value.length;
-			if (totalSize > MAX_BYTES) {
-				reader.cancel();
-				break;
+		try {
+			const requestSignal = ptree.combineSignals(signal, timeout * 1000);
+			const response = await fetch(jsonUrl, {
+				signal: requestSignal,
+				headers: { "User-Agent": USER_AGENT, Accept: "application/gzip" },
+				redirect: "follow",
+			});
+			if (!response.ok) return null;
+
+			const reader = response.body?.getReader();
+			if (!reader) return null;
+
+			const chunks: Uint8Array[] = [];
+			let totalSize = 0;
+			while (true) {
+				const { done, value } = await reader.read();
+				if (done) break;
+				chunks.push(value);
+				totalSize += value.length;
+				if (totalSize > MAX_BYTES) {
+					reader.cancel();
+					break;
+				}
 			}
-		}
 
-		const compressed = Buffer.concat(chunks);
-		const jsonStr = gunzipRustdocJson(compressed);
-		crate_ = tryParseJson<RustdocCrate>(jsonStr);
-		if (crate_?.index) {
-			await writeCachedRustdocCrate(target, jsonStr);
+			const compressed = Buffer.concat(chunks, totalSize);
+			const jsonStr = await gunzipRustdocJsonAsync(compressed);
+			crate_ = tryParseJson<RustdocCrate>(jsonStr);
+			if (crate_?.index) {
+				await writeCachedRustdocCrate(cachePath, jsonStr);
+			}
+		} catch {
+			if (signal?.aborted) throw new ToolAbortError();
+			return null;
 		}
-	} catch {
-		if (signal?.aborted) throw new ToolAbortError();
-		return null;
 	}
 	if (!crate_?.index) return null;
 

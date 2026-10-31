@@ -28,7 +28,7 @@ export * from "./thinking";
 export * from "./tool-context";
 // Tokenizer choice
 export * from "./tokenizer";
+// Lenient-aware tool argument validation
+export * from "./tool-arguments";
 // Types
 export * from "./types";
-// Yield utilities for Bun event-loop busy-wait prevention
-export * from "./utils/yield";

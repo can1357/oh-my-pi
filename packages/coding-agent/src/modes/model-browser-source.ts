@@ -5,6 +5,7 @@ import { resolveModelRoleValue, rolePriorityDefaults } from "../config/model-res
 import { getKnownRoleIds, getRoleInfo } from "../config/model-roles";
 import { buildServiceTierByFamily } from "../config/service-tier";
 import type { Settings } from "../config/settings";
+import { describeModelCompactionPoint } from "../session/model-compaction-threshold";
 
 import {
 	cfgCycleOrder,
@@ -85,5 +86,6 @@ export function createModelBrowserSource(
 		defaultRoleChain: role => rolePriorityDefaults(role),
 		resolveRoleValue: (value, models, roleLookup) => resolveModelRoleValue(value, models, { settings, roleLookup }),
 		getModelPresets: () => ({ names: getModelPresetNames(settings), active: findActiveModelPreset(settings) }),
+		compactionPointFor: model => describeModelCompactionPoint(settings, model),
 	};
 }

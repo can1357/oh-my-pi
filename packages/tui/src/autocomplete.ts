@@ -14,6 +14,11 @@ const PATH_DELIMITERS = new Set([" ", "\t", '"', "'", "="]);
  */
 const AT_PARTIAL_DELAY_MS = 150;
 
+/**
+ * Without a deadline the native walk follows symlinks at unbounded depth and never returns.
+ */
+const AT_FUZZY_TIMEOUT_MS = 1_500;
+
 function buildAutocompleteFuzzyDiscoveryProfile(
 	query: string,
 	basePath: string,
@@ -25,6 +30,7 @@ function buildAutocompleteFuzzyDiscoveryProfile(
 	hidden: boolean;
 	gitignore: boolean;
 	cache: boolean;
+	timeoutMs: number;
 	signal?: AbortSignal;
 } {
 	return {
@@ -34,6 +40,7 @@ function buildAutocompleteFuzzyDiscoveryProfile(
 		hidden: true,
 		gitignore: true,
 		cache: true,
+		timeoutMs: AT_FUZZY_TIMEOUT_MS,
 		...(signal ? { signal } : {}),
 	};
 }
@@ -104,6 +111,18 @@ function extractQuotedPrefix(text: string): string | null {
 	}
 
 	return text.slice(quoteStart);
+}
+
+/** Extract the live whitespace-delimited or double-quoted `@` file token ending at the cursor. */
+export function extractAtFilePrefix(text: string): string | null {
+	const quotedPrefix = extractQuotedPrefix(text);
+	if (quotedPrefix?.startsWith('@"')) {
+		return quotedPrefix;
+	}
+
+	const lastDelimiterIndex = findLastDelimiter(text);
+	const tokenStart = lastDelimiterIndex === -1 ? 0 : lastDelimiterIndex + 1;
+	return text[tokenStart] === "@" ? text.slice(tokenStart) : null;
 }
 
 function parsePathPrefix(prefix: string): { rawPrefix: string; isAtPrefix: boolean; isQuotedPrefix: boolean } {
@@ -207,6 +226,12 @@ export interface AutocompleteItem {
 	state?: string;
 	/** Dim hint text shown inline after cursor when this item is selected */
 	hint?: string;
+	/**
+	 * Slash command matched only through its description, not its name or an alias:
+	 * a browse hit, so Enter submits the typed text instead of running it unless the
+	 * user moved the selection onto it.
+	 */
+	descriptionMatch?: boolean;
 }
 
 type Awaitable<T> = T | Promise<T>;
@@ -418,6 +443,7 @@ function buildSlashCommandCompletions(
 						...(cmd.iconName && { iconName: cmd.iconName }),
 						...(fullDesc && { description: fullDesc }),
 						...nativeTextMemo,
+						...(nameScore === 0 && { descriptionMatch: true }),
 					};
 				}
 
@@ -425,7 +451,11 @@ function buildSlashCommandCompletions(
 					for (const alias of getCommandAliases(cmd)) {
 						if (alias === name) continue;
 						const aliasScore = scoreCommandTextMatch(lowerPrefix, alias.toLowerCase());
-						if (aliasScore === 0 || (best && aliasScore <= best.score)) continue;
+						if (aliasScore === 0) continue;
+						// An alias can match even when the description outranks it; Enter
+						// must still accept the command rather than submit the raw query.
+						if (best?.descriptionMatch) delete best.descriptionMatch;
+						if (best && aliasScore <= best.score) continue;
 						const fullDesc = resolveFullDesc();
 						best = {
 							value: alias,
@@ -592,6 +622,22 @@ function buildMidPromptSkillCompletions(commands: CommandEntry[], lowerPrefix: s
 	);
 }
 
+const DIR_CACHE_MAX = 100;
+const DIR_CACHE_EVICT = 50;
+
+/**
+ * Drops the `count` oldest entries once `map` exceeds `max`. Callers delete a
+ * key before re-setting it, so Map insertion order is refresh order.
+ */
+function evictOldest(map: Map<string, unknown>, max: number, count: number): void {
+	if (map.size <= max) return;
+	let remaining = count;
+	for (const key of map.keys()) {
+		if (remaining-- === 0) break;
+		map.delete(key);
+	}
+}
+
 // Combined provider that handles both slash commands and file paths.
 export class CombinedAutocompleteProvider implements AutocompleteProvider {
 	#commands: CommandEntry[];
@@ -601,6 +647,9 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 	// per-directory readdir fast-path for prefix completions. Global fuzzy
 	// discovery continues to use native fuzzyFind + shared scan cache.
 	#dirCache: Map<string, { entries: fs.Dirent[]; timestamp: number }> = new Map();
+	// Whether a scoped fuzzy query's base (`src/` in `@src/foo`) is a directory;
+	// stat'ing it on every keystroke is redundant while the base is unchanged.
+	#scopedBaseCache: Map<string, { isDirectory: boolean; timestamp: number }> = new Map();
 	readonly #DIR_CACHE_TTL = 2000; // 2 seconds
 
 	constructor(
@@ -700,7 +749,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		}
 
 		// Check for @ file reference (fuzzy search) - must be after a delimiter or at start
-		const atPrefix = this.#extractAtPrefix(textBeforeCursor);
+		const atPrefix = extractAtFilePrefix(textBeforeCursor);
 		if (atPrefix) {
 			const { rawPrefix, isQuotedPrefix } = parsePathPrefix(atPrefix);
 			// Recursive fuzzy walks rooted outside the project (e.g. `@../`,
@@ -843,7 +892,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 
 		// Check if we're completing a file attachment (prefix starts with "@")
 		if (prefix.startsWith("@")) {
-			const liveAtPrefix = this.#extractAtPrefix(textBeforeCursor);
+			const liveAtPrefix = extractAtFilePrefix(textBeforeCursor);
 			if (liveAtPrefix) {
 				beforePrefix = currentLine.slice(0, cursorCol - liveAtPrefix.length);
 			}
@@ -875,23 +924,6 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 			cursorLine,
 			cursorCol: beforePrefix.length + item.value.length,
 		};
-	}
-
-	// Extract @ prefix for fuzzy file suggestions
-	#extractAtPrefix(text: string): string | null {
-		const quotedPrefix = extractQuotedPrefix(text);
-		if (quotedPrefix?.startsWith('@"')) {
-			return quotedPrefix;
-		}
-
-		const lastDelimiterIndex = findLastDelimiter(text);
-		const tokenStart = lastDelimiterIndex === -1 ? 0 : lastDelimiterIndex + 1;
-
-		if (text[tokenStart] === "@") {
-			return text.slice(tokenStart);
-		}
-
-		return null;
 	}
 
 	// Extract a path-like prefix from the text before cursor
@@ -979,11 +1011,21 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 			baseDir = path.join(this.#basePath, displayBase);
 		}
 
-		try {
-			if (!(await fs.promises.stat(baseDir)).isDirectory()) {
-				return null;
+		const now = Date.now();
+		let cachedBase = this.#scopedBaseCache.get(baseDir);
+		if (!cachedBase || now - cachedBase.timestamp >= this.#DIR_CACHE_TTL) {
+			let isDirectory = false;
+			try {
+				isDirectory = (await fs.promises.stat(baseDir)).isDirectory();
+			} catch {
+				// Missing or inaccessible base: not a scope.
 			}
-		} catch {
+			cachedBase = { isDirectory, timestamp: now };
+			this.#scopedBaseCache.delete(baseDir);
+			this.#scopedBaseCache.set(baseDir, cachedBase);
+			evictOldest(this.#scopedBaseCache, DIR_CACHE_MAX, DIR_CACHE_EVICT);
+		}
+		if (!cachedBase.isDirectory) {
 			return null;
 		}
 
@@ -1006,17 +1048,9 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		}
 
 		const entries = await fs.promises.readdir(searchDir, { withFileTypes: true });
+		this.#dirCache.delete(searchDir);
 		this.#dirCache.set(searchDir, { entries, timestamp: now });
-
-		if (this.#dirCache.size > 100) {
-			const sortedKeys = [...this.#dirCache.entries()]
-				.sort((a, b) => a[1].timestamp - b[1].timestamp)
-				.slice(0, 50)
-				.map(([key]) => key);
-			for (const key of sortedKeys) {
-				this.#dirCache.delete(key);
-			}
-		}
+		evictOldest(this.#dirCache, DIR_CACHE_MAX, DIR_CACHE_EVICT);
 
 		return entries;
 	}
@@ -1024,8 +1058,10 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 	invalidateDirCache(dir?: string): void {
 		if (dir) {
 			this.#dirCache.delete(dir);
+			this.#scopedBaseCache.delete(dir);
 		} else {
 			this.#dirCache.clear();
+			this.#scopedBaseCache.clear();
 		}
 	}
 
@@ -1090,26 +1126,29 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 			const entries = await this.#getCachedDirEntries(searchDir);
 			const suggestions: AutocompleteItem[] = [];
 
-			for (const entry of entries) {
-				if (!entry.name.toLowerCase().startsWith(searchPrefix.toLowerCase())) {
-					continue;
-				}
-				// Skip .git directory
-				if (entry.name === ".git") {
-					continue;
-				}
+			const lowerSearchPrefix = searchPrefix.toLowerCase();
+			// Skip .git directory
+			const matched = entries.filter(
+				entry => entry.name !== ".git" && entry.name.toLowerCase().startsWith(lowerSearchPrefix),
+			);
+			// Directory flag per match; symlinks are stat'ed concurrently to learn whether
+			// they point at a directory. `null` drops a broken symlink, a file deleted
+			// between readdir and stat, or a permission error.
+			const directoryFlags = await Promise.all(
+				matched.map(entry =>
+					!entry.isDirectory() && entry.isSymbolicLink()
+						? fs.promises.stat(path.join(searchDir, entry.name)).then(
+								stats => stats.isDirectory(),
+								() => null,
+							)
+						: entry.isDirectory(),
+				),
+			);
 
-				// Check if entry is a directory (or a symlink pointing to a directory)
-				let isDirectory = entry.isDirectory();
-				if (!isDirectory && entry.isSymbolicLink()) {
-					try {
-						const fullPath = path.join(searchDir, entry.name);
-						isDirectory = (await fs.promises.stat(fullPath)).isDirectory();
-					} catch {
-						// Broken symlink, file deleted between readdir and stat, or permission error
-						continue;
-					}
-				}
+			for (let index = 0; index < matched.length; index++) {
+				const isDirectory = directoryFlags[index];
+				if (typeof isDirectory !== "boolean") continue;
+				const entry = matched[index]!;
 
 				let relativePath: string;
 				const name = entry.name;

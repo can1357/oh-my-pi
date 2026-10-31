@@ -91,4 +91,18 @@ describe("SessionManager branch ordering", () => {
 		manager.appendModelChange("anthropic/claude-haiku-4-5", "smol");
 		expect(manager.getLastModelChangeRole()).toBe("smol");
 	});
+
+	it("an append that keeps the current leaf leaves an issued branch view unchanged", () => {
+		const manager = SessionManager.inMemory();
+		manager.appendModelChange("m/a", "default");
+		const leaf = manager.appendModelChange("m/b", "slow");
+		const view = manager.getBranchView();
+		const ids = view.map(entry => entry.id);
+
+		const offBranch = manager.appendMessageToBranch({ role: "user", content: "background", timestamp: 0 }, leaf);
+
+		expect(manager.getBranch().map(entry => entry.id)).toEqual(ids);
+		expect(view.map(entry => entry.id)).toEqual(ids);
+		expect(view.some(entry => entry.id === offBranch)).toBe(false);
+	});
 });

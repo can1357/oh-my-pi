@@ -54,6 +54,19 @@ provider "meta" {
 			supports-reasoning-effort #true
 			include-encrypted-reasoning #true
 		}
+		// Muse Wonder: dev.meta.ai/docs/models + pricing-rate-limits (2026-10-12).
+		// `max` documented; no contributor tier on Model API. Meta publishes no
+		// output cap, so it takes the Muse Spark ceiling.
+		model "muse-wonder-1.0" name="Muse Wonder" {
+			reasoning #true
+			input "text" "image"
+			cost input=4 output=20 cache-read=0.2 cache-write=0
+			limits context=1048576 max-tokens=131072
+			thinking-mode "effort"
+			thinking-efforts "minimal" "low" "medium" "high" "xhigh" "max"
+			supports-reasoning-effort #true
+			include-encrypted-reasoning #true
+		}
 		model "muse-spark-1.3-contributor" name="Muse Spark 1.3 (C)" {
 			reasoning #true
 			input "text" "image"
@@ -72,7 +85,10 @@ provider "meta" {
 	// api.meta.ai/v1 accepts only tool_choice "auto"; "none", "required" and named
 	// choices are rejected with 400 (verified 2026-09-10), so omit the field.
 	supports-tool-choice #false
+	// `/v1/models` carries no capability metadata: an id no seed or taxonomy
+	// knows is offered this ladder for the user to opt into.
 	class "unknown" {
+		thinking-unverified #true
 		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
 		thinking-mode "effort"
 	}

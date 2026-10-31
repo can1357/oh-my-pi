@@ -1,0 +1,1 @@
+This session was moved here from another machine. It ran in `{{fromCwd}}` there; its working directory is now `{{cwd}}`. Paths from earlier turns under `{{fromCwd}}` now live under `{{cwd}}`. Running processes, shell state, and files outside the working directory did not move with it.

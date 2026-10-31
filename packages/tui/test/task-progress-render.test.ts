@@ -151,6 +151,29 @@ describe("task progress rendering", () => {
 		expect(recent).not.toContain("Searching the workspace");
 	});
 
+	it("shows the agent's probe stage on running rows only, sanitized to one line", async () => {
+		const theme = (await getThemeByName("dark"))!;
+		const render = (progress: AgentProgress) =>
+			Bun.stripANSI(
+				taskToolRenderer
+					.renderResult(
+						{ content: [], details: detailsFor(progress) },
+						{ expanded: false, isPartial: true },
+						theme,
+					)
+					.render(120)
+					.join("\n"),
+			);
+		const running = render(runningProgress({ stage: "benchmarking\tthe \x1b[31mdecoder" }));
+		expect(running).toContain("benchmarking");
+		expect(running).toContain("decoder");
+		expect(running).not.toContain("\t");
+		expect(running).not.toContain("[31m");
+		expect(render(runningProgress({ status: "completed", stage: "benchmarking the decoder" }))).not.toContain(
+			"benchmarking the decoder",
+		);
+	});
+
 	it("shortens home paths in keyless arguments and in each call's intent on the card", async () => {
 		const theme = (await getThemeByName("dark"))!;
 		const file = `${os.homedir()}/private/file`;

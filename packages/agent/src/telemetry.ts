@@ -51,7 +51,6 @@ import {
 } from "@opentelemetry/api";
 import { AgentRunCollector, type AgentRunCoverage, type AgentRunSummary, type ToolStatus } from "./run-collector";
 import type { AgentTool } from "./types";
-import { EventLoopKeepalive } from "./utils/yield";
 
 /** Default tracer name. Override via {@link AgentTelemetryConfig.tracerName}. */
 export const DEFAULT_TRACER_NAME = "@oh-my-pi/pi-agent-core";
@@ -836,15 +835,27 @@ function serializeRequestMessagesForTelemetry(
 ): string | undefined {
 	const serializer = telemetry.config.contentSerializer?.requestMessages;
 	if (serializer) return callContentSerializer(telemetry, "requestMessages", () => serializer(request));
+	const systemParts = normalizeSystemPromptParts(request.systemPrompt);
+	const requestMessages = request.messages ?? [];
+	const total = systemParts.length + requestMessages.length;
+	if (total === 0) return undefined;
+	// Summarize only what survives the message cap; the rest is counted.
 	const messages: TelemetryMessageSummary[] = [];
-	for (const text of normalizeSystemPromptParts(request.systemPrompt))
+	for (const text of systemParts) {
+		if (messages.length === MAX_TELEMETRY_MESSAGE_COUNT) break;
 		messages.push({ role: "system", content: summarizeTelemetryValue(text) });
-	if (request.messages) {
-		for (const message of request.messages) {
-			messages.push({ role: message.role, content: summarizeTelemetryValue(message.content) });
-		}
 	}
-	return messages.length === 0 ? undefined : stringifyJsonAttribute(limitTelemetryMessages(messages));
+	for (const message of requestMessages) {
+		if (messages.length === MAX_TELEMETRY_MESSAGE_COUNT) break;
+		messages.push({ role: message.role, content: summarizeTelemetryValue(message.content) });
+	}
+	if (total > MAX_TELEMETRY_MESSAGE_COUNT) {
+		messages.push({
+			role: "system",
+			content: { kind: "truncated", omittedMessages: total - MAX_TELEMETRY_MESSAGE_COUNT },
+		});
+	}
+	return stringifyJsonAttribute(messages);
 }
 
 function serializeResponseTextForTelemetry(telemetry: AgentTelemetry, message: AssistantMessage): string | undefined {
@@ -1020,17 +1031,6 @@ function callContentSerializer(
 		});
 		return undefined;
 	}
-}
-
-function limitTelemetryMessages(messages: readonly TelemetryMessageSummary[]): TelemetryMessageSummary[] {
-	const limited = messages.slice(0, MAX_TELEMETRY_MESSAGE_COUNT);
-	if (messages.length > MAX_TELEMETRY_MESSAGE_COUNT) {
-		limited.push({
-			role: "system",
-			content: { kind: "truncated", omittedMessages: messages.length - MAX_TELEMETRY_MESSAGE_COUNT },
-		});
-	}
-	return limited;
 }
 
 function limitTelemetryToolCalls(toolCalls: readonly TelemetryToolCallSummary[]): TelemetryToolCallSummary[] {
@@ -1839,13 +1839,6 @@ export async function instrumentedCompleteSimple<TApi extends Api>(
 	options: SimpleStreamOptions,
 	span: InstrumentedChatSpanOptions,
 ): Promise<AssistantMessage> {
-	// Oneshot LLM calls (handoff, compaction/branch summaries) run outside the
-	// agent `#runLoop`, which is where the EventLoopKeepalive normally lives.
-	// Without it, Bun's JSC loop stops servicing timers while parked on the
-	// long-lived completion promise, freezing any host spinner (e.g. the
-	// `/handoff` Loader) until an unrelated I/O event (a terminal resize)
-	// pokes the loop. Keep the loop healthy for the duration of the call.
-	using _keepalive = new EventLoopKeepalive();
 	const { telemetry, parent, oneshotKind } = span;
 	const stepNumber = span.stepNumber ?? -1;
 	const reasoning = options.reasoning;

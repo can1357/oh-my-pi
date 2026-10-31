@@ -335,7 +335,6 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 		const disposeGate = Promise.withResolvers<void>();
 		const lateJobGate = Promise.withResolvers<void>();
 		const manager = new AsyncJobManager({});
-		AsyncJobManager.setInstance(manager);
 		const cleanupGraceMs = 0;
 		let lateJobId: string | undefined;
 		let deferredCleanup: Promise<void> | undefined;
@@ -369,6 +368,7 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 
 		const run = runSubprocess({
 			cwd: "/tmp",
+			asyncJobManager: manager,
 			agent: baseAgent,
 			task: "do the work",
 			index: 0,

@@ -17,7 +17,7 @@ import { OverlayPanel } from "../chrome/overlay-box";
 import { Input } from "../components/input";
 import { MenuSelection } from "../components/menu-selection";
 import { centeredViewportRange } from "../components/scroll-viewport";
-import type { TspPickerItem, TspSpan, TspTone } from "@oh-my-pi/pi-wire";
+import type { TspPickerAction, TspPickerItem, TspSpan, TspText, TspTone } from "@oh-my-pi/pi-wire";
 import { node, span, text } from "../native/describe";
 import type { DescribeContext, NativeNode, NativeUiEvent } from "../native/node";
 import { CLOSE_ACTION, dockedPicker, PICKER_KEY, pickerAction, pickerEvent, pickerQuery } from "../native/picker";
@@ -30,6 +30,21 @@ const OAUTH_SELECTOR_MAX_VISIBLE = 10;
 export interface OAuthSelectorAuthSource {
 	readonly credentials: Pick<CredentialsApi, "has">;
 	readonly keys: Pick<KeysApi, "source">;
+}
+
+/**
+ * How a host other than `/login` presents the native provider sheet (the
+ * setup wizard): its heading, `role` and size, a status line docked above the
+ * action bar, and the Esc action that leaves in place of Close (the action's
+ * `id` cancels like Esc).
+ */
+export interface OAuthSelectorSheet {
+	readonly title: string;
+	readonly subtitle: TspText;
+	readonly role: string;
+	readonly size: "md" | "lg";
+	readonly status?: TspText;
+	readonly leave: { readonly id: string; readonly label: string };
 }
 
 /**
@@ -51,6 +66,8 @@ const ORIGIN_LABELS = {
  */
 export class OAuthSelectorComponent extends OverlayPanel {
 	#listContainer: Container;
+	/** Provider rows viewport of the last {@link #updateList}; spinner ticks repaint only its rows. */
+	#listView: ScrollView | undefined;
 	#menu: MenuSelection<OAuthProviderInfo>;
 	/** The provider search field; its value drives `#menu`'s query. */
 	#search = Object.assign(new Input(), { prompt: "" });
@@ -78,6 +95,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 	/** Picker rows for the whole catalogue; dropped when an auth state changes. */
 	#pickerItems: readonly TspPickerItem[] | undefined;
 	#pickerRoot: NativeNode | undefined;
+	#sheet: OAuthSelectorSheet | undefined;
 	constructor(
 		mode: "login" | "logout",
 		authStorage: OAuthSelectorAuthSource,
@@ -87,6 +105,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 			disabledProviders?: readonly string[];
 			validateAuth?: (providerId: string) => Promise<boolean>;
 			requestRender?: () => void;
+			sheet?: OAuthSelectorSheet;
 		},
 	) {
 		super(mode === "login" ? "Select provider to login" : "Select provider to logout", "omp.overlay.oauth");
@@ -96,6 +115,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 		this.#onCancelCallback = onCancel;
 		this.#validateAuthCallback = options?.validateAuth;
 		this.#requestRenderCallback = options?.requestRender;
+		this.#sheet = options?.sheet;
 		this.#menu = new MenuSelection<OAuthProviderInfo>([], {
 			getKey: provider => provider.id,
 			getSearchText: provider => this.#getProviderSearchText(provider),
@@ -113,6 +133,20 @@ export class OAuthSelectorComponent extends OverlayPanel {
 	stopValidation(): void {
 		this.#validationGeneration += 1;
 		this.#stopSpinner();
+	}
+
+	/** Replace the native sheet's presentation (a new outcome line, a relabelled leave action). */
+	setSheet(sheet: OAuthSelectorSheet): void {
+		this.#sheet = sheet;
+		this.#pickerRoot = undefined;
+	}
+
+	/** Re-read credential state after a sign-in stored one, keeping the query and selection. */
+	refreshAuth(): void {
+		this.#nativeItems = undefined;
+		this.#pickerItems = undefined;
+		this.#menu.setItems(this.#menu.items);
+		this.#updateList();
 	}
 
 	/**
@@ -213,7 +247,13 @@ export class OAuthSelectorComponent extends OverlayPanel {
 			if (frameCount > 0) {
 				this.#spinnerFrame = (this.#spinnerFrame + 1) % frameCount;
 			}
-			this.#updateList();
+			// Only the provider rows carry the spinner glyph; the window is unchanged.
+			if (this.#listView) {
+				const start = this.#scrollStart;
+				this.#listView.setLines(this.#providerRows(start, start + this.#visibleCount));
+			} else {
+				this.#updateList();
+			}
 			this.#requestRenderCallback?.();
 		}, 80);
 	}
@@ -310,14 +350,50 @@ export class OAuthSelectorComponent extends OverlayPanel {
 		this.#nativeRoot = undefined;
 		this.#pickerRoot = undefined;
 		this.#listContainer.clear();
+		this.#listView = undefined;
 
-		const items = this.#menu.visibleItems;
-		const total = items.length;
+		const total = this.#menu.visibleItems.length;
 		const maxVisible = this.#maxVisible;
 		const { start: startIndex, end: endIndex } = centeredViewportRange(this.#menu.selectedIndex, total, maxVisible);
 		this.#scrollStart = startIndex;
 		this.#visibleCount = endIndex - startIndex;
 
+		const rows = this.#providerRows(startIndex, endIndex);
+		if (rows.length > 0) {
+			const sv = new ScrollView(rows, {
+				height: rows.length,
+				scrollbar: "auto",
+				totalRows: total,
+				theme: { track: t => theme.fg("muted", t), thumb: t => theme.fg("accent", t) },
+			});
+			sv.setScrollOffset(startIndex);
+			this.#listView = sv;
+			this.#listContainer.addChild(sv);
+		}
+
+		// Search status line (scrollbar covers overflow indication)
+		if (this.#shouldRenderSearchStatus()) {
+			this.#listContainer.addChild(new TruncatedText(this.#renderStatusLine(total), 0, 0));
+		}
+
+		if (total === 0) {
+			const message =
+				this.#menu.items.length === 0
+					? this.#mode === "login"
+						? "No OAuth providers available"
+						: "No stored provider credentials to log out"
+					: "No matching providers";
+			this.#listContainer.addChild(new TruncatedText(theme.fg("muted", message), 0, 0));
+		}
+		if (this.#statusMessage) {
+			this.#listContainer.addChild(new Spacer(1));
+			this.#listContainer.addChild(new TruncatedText(theme.fg("warning", this.#statusMessage), 0, 0));
+		}
+	}
+
+	/** Styled rows for visible providers `[startIndex, endIndex)`: cursor, name, auth status and provenance. */
+	#providerRows(startIndex: number, endIndex: number): string[] {
+		const items = this.#menu.visibleItems;
 		const rows: string[] = [];
 		for (let i = startIndex; i < endIndex; i++) {
 			const provider = items[i];
@@ -340,36 +416,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 			}
 			rows.push(line);
 		}
-
-		if (rows.length > 0) {
-			const sv = new ScrollView(rows, {
-				height: rows.length,
-				scrollbar: "auto",
-				totalRows: total,
-				theme: { track: t => theme.fg("muted", t), thumb: t => theme.fg("accent", t) },
-			});
-			sv.setScrollOffset(startIndex);
-			this.#listContainer.addChild(sv);
-		}
-
-		// Search status line (scrollbar covers overflow indication)
-		if (this.#shouldRenderSearchStatus()) {
-			this.#listContainer.addChild(new TruncatedText(this.#renderStatusLine(total), 0, 0));
-		}
-
-		if (total === 0) {
-			const message =
-				this.#menu.items.length === 0
-					? this.#mode === "login"
-						? "No OAuth providers available"
-						: "No stored provider credentials to log out"
-					: "No matching providers";
-			this.#listContainer.addChild(new TruncatedText(theme.fg("muted", message), 0, 0));
-		}
-		if (this.#statusMessage) {
-			this.#listContainer.addChild(new Spacer(1));
-			this.#listContainer.addChild(new TruncatedText(theme.fg("warning", this.#statusMessage), 0, 0));
-		}
+		return rows;
 	}
 	handleInput(keyData: string): void {
 		// Escape or Ctrl+C
@@ -489,12 +536,17 @@ export class OAuthSelectorComponent extends OverlayPanel {
 		const query = this.#menu.query;
 		const login = this.#mode === "login";
 		const search = this.#shouldRenderSearchStatus() ? pickerQuery(this.#search) : pickerQuery(null);
+		const sheet = this.#sheet;
+		const leave: TspPickerAction = sheet
+			? pickerAction(sheet.leave.id, sheet.leave.label, "escape", { end: true })
+			: CLOSE_ACTION;
 		this.#pickerRoot = dockedPicker({
-			title: login ? "Sign in" : "Sign out",
-			subtitle: login ? "Pick a provider" : "Remove stored credentials",
+			...(sheet ? { role: sheet.role } : {}),
+			title: sheet?.title ?? (login ? "Sign in" : "Sign out"),
+			subtitle: sheet?.subtitle ?? (login ? "Pick a provider" : "Remove stored credentials"),
 			icon: "key-round",
 			noun: "providers",
-			size: "md",
+			size: sheet?.size ?? "md",
 			layout: "cards",
 			preview: "none",
 			...search,
@@ -505,6 +557,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 			total: all.length,
 			empty: login ? "No OAuth providers available" : "No stored provider credentials to log out",
 			...(this.#statusMessage ? { message: this.#statusMessage } : {}),
+			...(sheet?.status ? { strip: { label: sheet.status, items: [] } } : {}),
 			actions: [
 				pickerAction(
 					"confirm",
@@ -512,7 +565,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 					"enter",
 					login ? { primary: true } : { primary: true, danger: true },
 				),
-				CLOSE_ACTION,
+				leave,
 			],
 		});
 		return this.#pickerRoot;
@@ -581,7 +634,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 			else if (ev.act === "clear") {
 				this.#search.setValue("");
 				this.#syncSearchQuery();
-			} else if (ev.act === "close" || ev.act === "cancel") {
+			} else if (ev.act === "close" || ev.act === "cancel" || ev.act === this.#sheet?.leave.id) {
 				this.stopValidation();
 				this.#onCancelCallback();
 			}

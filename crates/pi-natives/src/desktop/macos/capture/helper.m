@@ -112,6 +112,42 @@ static void CaptureNext(SCShareableContent *content, NSArray *requests, NSUInteg
 	}];
 }
 
+static BOOL HasTargets(SCShareableContent *content, NSArray *requests) API_AVAILABLE(macos(14.0));
+
+static BOOL HasTargets(SCShareableContent *content, NSArray *requests) {
+	for (NSDictionary *request in requests) {
+		uint32_t identifier = [request[@"id"] unsignedIntValue];
+		BOOL found = NO;
+		if ([request[@"kind"] isEqualToString:@"window"]) {
+			for (SCWindow *window in content.windows) if ((found = window.windowID == identifier)) break;
+		} else {
+			for (SCDisplay *display in content.displays) if ((found = display.displayID == identifier)) break;
+		}
+		if (!found) return NO;
+	}
+	return YES;
+}
+
+static void FetchAndCapture(BOOL onScreenOnly, NSArray *requests, uint64_t maxPixels,
+	dispatch_block_t done) API_AVAILABLE(macos(14.0));
+
+// The on-screen list is a fraction of the full one, which also holds every
+// minimized, other-Space and hidden-app window; the full list is fetched only
+// when the on-screen fetch fails or omits a target.
+static void FetchAndCapture(BOOL onScreenOnly, NSArray *requests, uint64_t maxPixels, dispatch_block_t done) {
+	[SCShareableContent getShareableContentExcludingDesktopWindows:NO onScreenWindowsOnly:onScreenOnly completionHandler:^(SCShareableContent *content, NSError *error) {
+		if (onScreenOnly && (error || !content || !HasTargets(content, requests))) {
+			FetchAndCapture(NO, requests, maxPixels, done); return;
+		}
+		if (error || !content) {
+			Failure(error.code == -3801 || error.code == -3803 ? @"PermissionDenied" : @"CaptureFailed",
+				error.localizedDescription ?: @"ScreenCaptureKit returned no shareable content");
+			done(); return;
+		}
+		CaptureNext(content, requests, 0, maxPixels, done);
+	}];
+}
+
 static void Request(NSDictionary *request, dispatch_block_t done) {
 	NSArray *targets = request[@"requests"];
 	NSNumber *limit = request[@"maxPixels"];
@@ -130,14 +166,7 @@ static void Request(NSDictionary *request, dispatch_block_t done) {
 		Failure(@"PermissionDenied", @"Screen Recording permission is not granted"); done(); return;
 	}
 	if (@available(macOS 14.0, *)) {
-		[SCShareableContent getShareableContentExcludingDesktopWindows:NO onScreenWindowsOnly:NO completionHandler:^(SCShareableContent *content, NSError *error) {
-			if (error || !content) {
-				Failure(error.code == -3801 || error.code == -3803 ? @"PermissionDenied" : @"CaptureFailed",
-					error.localizedDescription ?: @"ScreenCaptureKit returned no shareable content");
-				done(); return;
-			}
-			CaptureNext(content, targets, 0, limit.unsignedLongLongValue, done);
-		}];
+		FetchAndCapture(YES, targets, limit.unsignedLongLongValue, done);
 	} else {
 		Failure(@"Unsupported", @"ScreenCaptureKit capture worker requires macOS 14 or later"); done();
 	}

@@ -9,7 +9,8 @@
  * ({@link MUX_CONNECT_METHOD}); everything below is shared by the worker
  * entry (`server.ts`), the client connector (`daemon.ts`), and tests.
  */
-import * as path from "node:path";
+import { stableStringifyJson } from "@oh-my-pi/pi-utils";
+
 export { LSP_MUX_WORKER_ARG } from "../../cli/worker-selectors";
 
 /** Environment key carrying the socket endpoint the mux must listen on. */
@@ -27,15 +28,6 @@ export const LSP_MUX_READY_PATTERN = String.raw`omp lsp mux listening on \S+`;
 /** Banner printed on stdout once the mux socket accepts connections. */
 export function lspMuxReadyBanner(endpoint: string): string {
 	return `omp lsp mux listening on ${endpoint}`;
-}
-
-/** Resolve the Unix socket or Windows named pipe for one project scope. */
-export function lspMuxEndpoint(projectDir: string, runtimeDir: string): string {
-	if (process.platform === "win32") {
-		const key = Bun.hash.wyhash(path.resolve(projectDir)).toString(16).padStart(16, "0");
-		return `\\\\.\\pipe\\omp-lsp-mux-${key}`;
-	}
-	return path.join(runtimeDir, "lsp-mux.sock");
 }
 
 // =============================================================================
@@ -75,11 +67,17 @@ export interface MuxConnectParams {
 	cwd: string;
 	/** Extra environment overlaid on the mux daemon's own env for the spawn. */
 	env?: Record<string, string>;
+	/**
+	 * `initializationOptions` the client sends in its `initialize` request. A
+	 * reused server answers `initialize` from its cached result, so the options
+	 * it was started with are part of its identity.
+	 */
+	initializationOptions?: unknown;
 }
 
 /** Handshake result. */
 export interface MuxConnectResult {
-	/** Server identity key inside the mux; covers command, args, cwd, and env. */
+	/** Server identity key inside the mux; covers command, args, cwd, env, and initialization options. */
 	key: string;
 	/** True when this handshake spawned the server process. */
 	spawned: boolean;
@@ -98,15 +96,27 @@ export interface MuxConnectResult {
  * that asked for another, silently serving the wrong configuration from a
  * process the client believed it had configured.
  *
- * Env keys are sorted so object insertion order never splits one identity in
- * two, and the parts are JSON-encoded so no separator can be forged from a
- * value (`["--log-level", "4"]` stays distinct from `["--log-level 4"]`).
- * The canonical identity is SHA-256 hashed because the key is returned over
- * the handshake and included in mux logs; raw environment values can contain
- * credentials and must not leak through either surface.
+ * Initialization options belong in the key for the same reason. A reused
+ * server answers `initialize` from the cached result of the link that started
+ * it, so the options a later link sends never reach the process. Absent
+ * options key like `{}`, which is what the client sends when its config has
+ * none.
+ *
+ * Object keys are sorted at every depth so insertion order never splits one
+ * identity in two, and the parts are JSON-encoded so no separator can be
+ * forged from a value (`["--log-level", "4"]` stays distinct from
+ * `["--log-level 4"]`). The canonical identity is SHA-256 hashed because the
+ * key is returned over the handshake and included in mux logs; raw
+ * environment values and initialization options can contain credentials and
+ * must not leak through either surface.
  */
 export function muxServerKey(params: MuxConnectParams): string {
-	const envEntries = Object.entries(params.env ?? {}).sort((a, b) => (a[0] < b[0] ? -1 : 1));
-	const identity = JSON.stringify([params.command, params.args, params.cwd, envEntries]);
+	const identity = stableStringifyJson([
+		params.command,
+		params.args,
+		params.cwd,
+		params.env ?? {},
+		params.initializationOptions ?? {},
+	]);
 	return `sha256:${Bun.SHA256.hash(identity, "hex")}`;
 }

@@ -29,8 +29,14 @@
  * queued/planning until `tool_execution_start`, and only then delegate to the
  * wrapped tool's own renderer with the decoded inner args.
  */
-import type { AgentToolContext, AgentToolResult, AgentToolUpdateCallback, ToolLoadMode } from "@oh-my-pi/pi-agent-core";
-import { type Tool as AiTool, jsonSchemaToTypeScript, toolWireSchema, validateToolArguments } from "@oh-my-pi/pi-ai";
+import {
+	type AgentToolContext,
+	type AgentToolResult,
+	type AgentToolUpdateCallback,
+	type ToolLoadMode,
+	validateAgentToolArguments,
+} from "@oh-my-pi/pi-agent-core";
+import { type Tool as AiTool, jsonSchemaToTypeScript, toolWireSchema } from "@oh-my-pi/pi-ai";
 import { schemaDeclaresIntentField } from "../utils/tool-schema";
 import { stripXdUrlPrefix, XD_URL_PREFIX } from "@oh-my-pi/pi-tui/tools/xd-url";
 import { truncateHeadBytes } from "@oh-my-pi/pi-tui/tools/streaming-output";
@@ -85,7 +91,7 @@ export function isMountableUnderXdev(tool: { name: string; loadMode?: ToolLoadMo
 export interface XdevDispatch {
 	tool: string;
 	mode: "help" | "execute";
-	/** Validated inner args, kept for renderer delegation on result rebuilds. */
+	/** Validated renderer args, projected where execution-only payloads are unnecessary. */
 	args?: Record<string, unknown>;
 	/**
 	 * Approval tier of the wrapped tool for {@link args} (`read` = no workspace
@@ -94,6 +100,12 @@ export interface XdevDispatch {
 	 * calls when deciding the model hand-off (issue #7312).
 	 */
 	tier?: ToolTier;
+	/**
+	 * The wrapped MCP tool declared itself read-only (`annotations.readOnlyHint`).
+	 * Captured at dispatch so the prewalk coordinator classifies the tool that ran,
+	 * not whatever a later MCP tool refresh put under its name.
+	 */
+	readOnlyHint?: true;
 	/** Details object returned by the wrapped tool, when executed. */
 	inner?: unknown;
 }
@@ -126,9 +138,9 @@ function renderDocs(inst: Tool, heading = "#", descriptionCap?: number): string 
  * tool bridge honor (`AgentTool.lenientArgValidation`) — so a tool that owns
  * its own refusal/repair (e.g. `todo` inferring an omitted `op`) is never
  * pre-empted by the host's generic wording plus the full docs. Lenience covers
- * schema mismatch only: malformed JSON and non-object content still throw. The
- * `__parseError`/`__rawJson` strip keeps a payload from forging the agent
- * loop's parse-failure sentinels.
+ * schema mismatch only: malformed JSON and non-object content still throw.
+ * Content is a model-written payload, so lenience strips forged
+ * `__parseError`/`__rawJson` sentinels (see `validateAgentToolArguments`).
  */
 function parseDeviceArgs(
 	device: Tool,
@@ -154,19 +166,12 @@ function parseDeviceArgs(
 	const args: Record<string, unknown> = { ...(parsed as Record<string, unknown>) };
 	if ("i" in args && !schemaDeclaresIntentField(toolWireSchema(device))) delete args.i;
 	try {
-		return validateToolArguments(device, {
-			type: "toolCall",
-			id: toolCallId,
-			name: device.name,
-			arguments: args,
-		});
+		return validateAgentToolArguments(
+			device,
+			{ type: "toolCall", id: toolCallId, name: device.name, arguments: args },
+			"payload",
+		);
 	} catch (error) {
-		if (device.lenientArgValidation) {
-			const fallback = { ...args };
-			delete fallback.__parseError;
-			delete fallback.__rawJson;
-			return fallback;
-		}
 		const message = error instanceof Error ? error.message : String(error);
 		throw new ToolError(`Invalid args for ${XD_URL_PREFIX}${device.name}: ${message}\n\n${docs()}`);
 	}
@@ -457,7 +462,12 @@ export async function dispatchXdevTool(
 		} catch {
 			tier = undefined;
 		}
-		xdev = { ...xdev, args: validated, tier };
+		// PR creation renders only its operation and repository. Keep the body
+		// in the validated execution input, not a second copy in result details.
+		const renderArgs =
+			name === "github" && validated.op === "pr_create" ? { op: validated.op, repo: validated.repo } : validated;
+		xdev = { ...xdev, args: renderArgs, tier };
+		if ("mcpReadOnlyHint" in canonical && canonical.mcpReadOnlyHint === true) xdev.readOnlyHint = true;
 		const innerOnUpdate: AgentToolUpdateCallback | undefined = onUpdate
 			? partial =>
 					onUpdate({

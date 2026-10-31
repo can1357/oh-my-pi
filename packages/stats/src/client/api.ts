@@ -45,12 +45,34 @@ async function readErrorMessage(res: Response, endpoint: string): Promise<string
 	return `HTTP error ${res.status} on ${endpoint}`;
 }
 
-async function fetchJson<T>(endpoint: string, options?: RequestInit): Promise<T> {
-	const res = await fetch(endpoint, options);
+/**
+ * Response validators keyed by the parsed body they describe. Revalidating a
+ * body sends its ETag; the entry dies with the body when callers drop it.
+ */
+const validators = new WeakMap<object, string>();
+
+/**
+ * Fetch `endpoint` as JSON, revalidating `previous` when it came from an
+ * ETag-bearing response: a 304 resolves to `previous` itself (same reference,
+ * no re-parse).
+ */
+async function fetchJson<T>(endpoint: string, options?: RequestInit, previous?: T): Promise<T> {
+	const etag = typeof previous === "object" && previous !== null ? validators.get(previous) : undefined;
+	let init = options;
+	if (etag) {
+		const headers = new Headers(options?.headers);
+		headers.set("If-None-Match", etag);
+		init = { ...options, headers };
+	}
+	const res = await fetch(endpoint, init);
+	if (res.status === 304 && etag) return previous as T;
 	if (!res.ok) {
 		throw new ApiError(res.status, endpoint, await readErrorMessage(res, endpoint));
 	}
-	return res.json() as Promise<T>;
+	const data = (await res.json()) as T;
+	const nextEtag = res.headers.get("ETag");
+	if (nextEtag && typeof data === "object" && data !== null) validators.set(data, nextEtag);
+	return data;
 }
 
 /**
@@ -182,8 +204,21 @@ export async function getSessions(limit = 100, q?: string, signal?: AbortSignal)
 	return fetchJson<SessionSummary[]>(`${API_BASE}/sessions?${params}`, { signal });
 }
 
-export async function getSessionTrace(file: string, signal?: AbortSignal): Promise<SessionTrace> {
-	return fetchJson<SessionTrace>(`${API_BASE}/session/trace?file=${encodeURIComponent(file)}`, { signal });
+/**
+ * Pass the last trace for `file` as `previous` to revalidate it: an unchanged
+ * trace resolves to that same object without downloading or parsing the body.
+ */
+export async function getSessionTrace(
+	file: string,
+	signal?: AbortSignal,
+	previous?: SessionTrace,
+): Promise<SessionTrace> {
+	// `no-store`: validation is ours (above); the browser cache would only keep a second multi-MB copy.
+	return fetchJson<SessionTrace>(
+		`${API_BASE}/session/trace?file=${encodeURIComponent(file)}`,
+		{ signal, cache: "no-store" },
+		previous,
+	);
 }
 
 /** Fetch one full journal entry for the span drawer. Entries are opaque JSON. */

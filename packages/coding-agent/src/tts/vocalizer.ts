@@ -48,7 +48,7 @@ import { BlockAccumulator, type SpeechEnhancer } from "./speech-enhancer";
 import { createStreamingPlayer, DUCK_GAIN } from "./streaming-player";
 import { type TtsStreamHandle, ttsClient } from "./tts-client";
 
-import { cfgSpeechEnabled, cfgSpeechEnhanced, cfgSpeechVoice } from "./settings";
+import { cfgSpeechEnabled, cfgSpeechEnhanced, cfgSpeechSpeed, cfgSpeechVoice } from "./settings";
 
 /** Quiet time on the delta stream before the buffered partial is spoken. */
 const IDLE_FLUSH_MS = 1000;
@@ -380,8 +380,10 @@ export class Vocalizer {
 	#openSession(abort: AbortController): TtsStreamHandle {
 		const source = this.#modelSource;
 		const modelKey = source ? resolveLocalSpeechModelId(source) : TTS_LOCAL_MODELS[0].key;
-		const voice = cfgSpeechVoice.get(source?.settings ?? settings) || DEFAULT_TTS_VOICE;
-		const handle = ttsClient.synthesizeStream(modelKey, { voice, signal: abort.signal });
+		const sessionSettings = source?.settings ?? settings;
+		const voice = cfgSpeechVoice.get(sessionSettings) || DEFAULT_TTS_VOICE;
+		const speed = cfgSpeechSpeed.get(sessionSettings);
+		const handle = ttsClient.synthesizeStream(modelKey, { voice, speed, signal: abort.signal });
 		const player = this.#createPlayer();
 		player.setGain(this.#ducked ? DUCK_GAIN : 1);
 		this.#liveAborts.add(abort);

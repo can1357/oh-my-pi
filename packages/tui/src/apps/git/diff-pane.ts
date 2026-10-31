@@ -21,7 +21,7 @@ import { centerLine, sliceWithWidth, truncateToWidth, visibleWidth } from "../..
 import { formatBytes } from "@oh-my-pi/pi-utils";
 import { sanitizeDisplayText } from "../../overlays/extensions/display-text";
 import { getLanguageFromPath } from "../../lang-from-path";
-import { createHighlightStream, theme } from "../../theme/theme";
+import { createHighlightStream, getThemeEpoch, theme } from "../../theme/theme";
 import { bgAnsiHex, canvasHex, fgAnsiHex, mixHex, pill, selectionBgAnsi, textHex, withBg } from "./colors";
 import { DIFF_CONTEXT_LINES, type FileAssetSide, type FileStreamUpdate } from "./state";
 
@@ -502,9 +502,12 @@ interface DiffPalette {
 	gutterDel: string;
 }
 
-let paletteCache: { key: string; palette: DiffPalette } | undefined;
+let paletteCache: { epoch: number; theme: object; palette: DiffPalette } | undefined;
 
+/** Diff colors for the active theme, rebuilt only when the theme instance or epoch changes. */
 function palette(): DiffPalette {
+	const epoch = getThemeEpoch();
+	if (paletteCache?.epoch === epoch && paletteCache.theme === theme) return paletteCache.palette;
 	const added = theme.getColorHex("toolDiffAdded");
 	const removed = theme.getColorHex("toolDiffRemoved");
 	const accent = theme.getColorHex("accent");
@@ -512,8 +515,6 @@ function palette(): DiffPalette {
 	const dark = luminance === undefined || luminance <= 0.5;
 	const canvas = canvasHex();
 	const text = textHex();
-	const key = `${added}\u0000${removed}\u0000${accent}\u0000${dark}\u0000${canvas}\u0000${text}`;
-	if (paletteCache?.key === key) return paletteCache.palette;
 	const built: DiffPalette = {
 		addSoft: bgAnsiHex(mixHex(canvas, added, dark ? 0.18 : 0.24)),
 		addStrong: bgAnsiHex(mixHex(canvas, added, dark ? 0.42 : 0.48)),
@@ -529,7 +530,7 @@ function palette(): DiffPalette {
 		gutterAdd: added,
 		gutterDel: removed,
 	};
-	paletteCache = { key, palette: built };
+	paletteCache = { epoch, theme, palette: built };
 	return built;
 }
 
@@ -570,6 +571,43 @@ interface AssetDocument {
 export type PaneClick = { type: "hunk-action"; hunk: HunkBlock; action: HunkAction } | { type: "handled" } | null;
 
 /**
+ * The heading of one side of a media/binary change (`Before · PNG · Git LFS`):
+ * `label` plus the side's kind, shared by the ANSI pane and the native compare.
+ */
+export function assetTitle(label: string, side: FileAssetSide): string {
+	let kind: string;
+	let lfs = false;
+	switch (side.kind) {
+		case "empty":
+			return label;
+		case "image":
+			kind =
+				side.image.sourceMimeType === "image/svg+xml"
+					? "SVG"
+					: side.image.sourceMimeType.replace(/^image\//, "").toUpperCase();
+			lfs = side.image.lfsOid !== undefined;
+			break;
+		case "text":
+			kind = "Text";
+			lfs = side.lfsOid !== undefined;
+			break;
+		case "binary":
+			kind = "Binary";
+			lfs = side.lfsOid !== undefined;
+			break;
+		case "tooLarge":
+			kind = "Too large";
+			lfs = side.lfsOid !== undefined;
+			break;
+		case "lfsMissing":
+			kind = "LFS missing";
+			lfs = true;
+			break;
+	}
+	return `${label} · ${kind}${lfs ? " · Git LFS" : ""}`;
+}
+
+/**
  * Scrollable diff viewport. The root component feeds it key/mouse input and
  * composes its rendered lines into the frame.
  */
@@ -599,6 +637,10 @@ export class DiffPane {
 	#lastHeight = 1;
 	#lastWidth = 0;
 	#layoutCache: { key: string; visuals: Visual[] } | undefined;
+	/** Minimap column for (layout, height, scroll offset, palette). */
+	#minimapCache:
+		| { visuals: Visual[]; height: number; scrollTop: number; colors: DiffPalette; lines: string[] }
+		| undefined;
 	/** Per visible row: clickable hunk-button ranges recorded during render. */
 	#hits: ({ hunk: number; primary?: [number, number]; discard?: [number, number] } | undefined)[] = [];
 	/**
@@ -1124,11 +1166,11 @@ export class DiffPane {
 		for (let index = 0; index < height; index++) {
 			const leftSource =
 				index === 0
-					? centerLine(theme.bold(this.#assetTitle("Before", asset.old)), leftWidth).trimEnd()
+					? centerLine(theme.bold(assetTitle("Before", asset.old)), leftWidth).trimEnd()
 					: (oldLines[index - 1] ?? "");
 			const rightSource =
 				index === 0
-					? centerLine(theme.bold(this.#assetTitle("After", asset.new)), rightWidth).trimEnd()
+					? centerLine(theme.bold(assetTitle("After", asset.new)), rightWidth).trimEnd()
 					: (newLines[index - 1] ?? "");
 			const left = truncateToWidth(leftSource, leftWidth);
 			const right = truncateToWidth(rightSource, rightWidth);
@@ -1201,39 +1243,6 @@ export class DiffPane {
 		}
 		const top = Math.max(0, Math.floor((height - content.length) / 2));
 		return Array.from({ length: height }, (_, index) => content[index - top] ?? "");
-	}
-
-	#assetTitle(label: string, side: FileAssetSide): string {
-		let kind: string;
-		let lfs = false;
-		switch (side.kind) {
-			case "empty":
-				return label;
-			case "image":
-				kind =
-					side.image.sourceMimeType === "image/svg+xml"
-						? "SVG"
-						: side.image.sourceMimeType.replace(/^image\//, "").toUpperCase();
-				lfs = side.image.lfsOid !== undefined;
-				break;
-			case "text":
-				kind = "Text";
-				lfs = side.lfsOid !== undefined;
-				break;
-			case "binary":
-				kind = "Binary";
-				lfs = side.lfsOid !== undefined;
-				break;
-			case "tooLarge":
-				kind = "Too large";
-				lfs = side.lfsOid !== undefined;
-				break;
-			case "lfsMissing":
-				kind = "LFS missing";
-				lfs = true;
-				break;
-		}
-		return `${label} · ${kind}${lfs ? " · Git LFS" : ""}`;
 	}
 
 	#renderStreaming(width: number, height: number): string[] {
@@ -1488,6 +1497,22 @@ export class DiffPane {
 	}
 
 	#renderMinimap(visuals: Visual[], height: number, colors: DiffPalette): string[] {
+		const cached = this.#minimapCache;
+		if (
+			cached &&
+			cached.visuals === visuals &&
+			cached.height === height &&
+			cached.scrollTop === this.scrollTop &&
+			cached.colors === colors
+		) {
+			return cached.lines;
+		}
+		const lines = this.#buildMinimap(visuals, height, colors);
+		this.#minimapCache = { visuals, height, scrollTop: this.scrollTop, colors, lines };
+		return lines;
+	}
+
+	#buildMinimap(visuals: Visual[], height: number, colors: DiffPalette): string[] {
 		const total = visuals.length;
 		const lines: string[] = [];
 		const bandKind = (band: number): RowKind | "hunk" | null => {

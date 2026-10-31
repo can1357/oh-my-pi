@@ -475,6 +475,33 @@ describe("ModelBrowser native model metadata", () => {
 		expect(browser.visibleCount).toBe(0);
 	});
 
+	test("shows the rate card in force, not the one current when the row was built", () => {
+		// A row loaded before a dated list-price change took effect: a bundle, a cache, a long session.
+		const repriced = makeModel("google", "dated-list-price", {
+			cost: {
+				input: 2,
+				output: 10,
+				cacheRead: 0.1,
+				cacheWrite: 0,
+				timeBased: {
+					offPeakMultiplier: 1,
+					peakWindows: [],
+					effectiveRates: [
+						{ effectiveFrom: -8_640_000_000_000_000, input: 2, output: 10, cacheRead: 0.1, cacheWrite: 0 },
+						{
+							effectiveFrom: Date.parse("2026-01-01T00:00:00Z"),
+							input: 4,
+							output: 20,
+							cacheRead: 0.2,
+							cacheWrite: 0,
+						},
+					],
+				},
+			},
+		});
+		expect(renderDetail(repriced)).toContain("$4/20 per M");
+	});
+
 	test("price rows preserve free labels and identify invalid rates", () => {
 		const zero = makeModel("fixture", "zero");
 		const missing = makeModel("fixture", "missing");

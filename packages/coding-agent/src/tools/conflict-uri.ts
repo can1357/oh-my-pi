@@ -5,32 +5,28 @@
  */
 import * as fs from "node:fs/promises";
 import { type ConflictEntry, renderConflictRegion } from "@oh-my-pi/pi-tui/tools/conflict-detect";
+import { PREVIEW_LIMITS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { getEditStore } from "../edit/store";
 import type { InternalWriteResult } from "../internal-urls/types";
 import { writethroughNoop } from "../lsp/writethrough";
-import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import {
-	conflictRegionPresent,
-	conflictRegionsEqual,
 	expandContentTokens,
 	getConflictHistory,
 	parseConflictUri,
 	type ParsedConflictUri,
+	reconcileRegisteredConflicts,
+	scanConflictLines,
 	spliceConflict,
 } from "./conflict-detect";
-import { invalidateFsScanAfterWrite } from "./fs-cache-invalidation";
 import type { ToolSession } from "./index";
 import { formatPathRelativeToCwd } from "./path-utils";
-import { formatTextWithMode, hashlineHeaderContext, prependHashlineHeader } from "./read-format";
 import { maybeWriteSnapshotHeader, stripWriteContent } from "./write-content";
 
-/** A rendered `conflict://<N>[/<scope>]` region. */
+/** Raw `conflict://<N>[/<scope>]` content for the shared read selector pipeline. */
 export interface ConflictRegionRead {
-	/** Model-facing text: hashline header + anchored lines, or numbered/plain lines per display mode. */
+	/** Prefix-free region text, sliced before any read formatting. */
 	text: string;
-	/** Prefix-free region lines for transcript display. */
-	rawText: string;
 	/** 1-based file line number of the first rendered line. */
 	startLine: number;
 	/** File the conflict block lives in. */
@@ -49,44 +45,55 @@ function parseTarget(raw: string): ParsedConflictUri {
 	return parsed;
 }
 
-function requireEntry(session: ToolSession, id: number): ConflictEntry {
-	const entry = getConflictHistory(session).get(id);
+async function requireEntry(session: ToolSession, id: number): Promise<ConflictEntry> {
+	const history = getConflictHistory(session);
+	// Only the addressed block's file needs re-checking; other files keep their ids until touched.
+	const registered = history.get(id);
+	if (registered) await reconcileRegisteredConflicts(history, registered.absolutePath);
+	const entry = history.get(id);
 	if (!entry) {
+		const byPath = new Map<string, number[]>();
+		for (const registered of history.entries()) {
+			const ids = byPath.get(registered.absolutePath) ?? [];
+			ids.push(registered.id);
+			byPath.set(registered.absolutePath, ids);
+		}
+		// Capped: a session can hold hundreds of ids after `:conflicts` scans.
+		const limit = PREVIEW_LIMITS.COLLAPSED_ITEMS;
+		const more = (hidden: number, noun: string) => (hidden > 0 ? ` (+${hidden} more${noun})` : "");
+		const files = [...byPath].slice(0, limit).map(
+			([absolutePath, ids]) =>
+				`${ids
+					.slice(0, limit)
+					.map(n => `#${n}`)
+					.join(", ")}${more(ids.length - limit, "")} in ${formatPathRelativeToCwd(absolutePath, session.cwd)}`,
+		);
+		const known =
+			byPath.size > 0
+				? `Registered: ${files.join("; ")}${more(byPath.size - limit, " files")}.`
+				: "No conflicts are registered.";
 		throw new ToolError(
-			`Conflict #${id} not found. Conflict ids are registered when \`read\` surfaces a marker block; re-read the file to get a current id.`,
+			`Conflict #${id} not found: it was resolved, became stale, or no \`read\` has shown its block yet (a ranged read registers only the blocks it shows, so unseen blocks' ids can't be guessed). Read \`<path>:conflicts\` on the file to list and register its blocks. ${known}`,
 		);
 	}
 	return entry;
 }
 
 /**
- * Render a `conflict://<N>` (or `conflict://<N>/<scope>`) region as regular
- * file content. Lines keep their original file line numbers and, in hashline
- * mode, a snapshot tag is recorded against the underlying file so anchors
- * line up with the source for `edit`.
+ * Select a `conflict://<N>` (or `conflict://<N>/<scope>`) body. The shared
+ * read pipeline slices its raw text and renders once using source coordinates.
  */
-export function readConflictUri(session: ToolSession, raw: string): ConflictRegionRead {
+export async function readConflictUri(session: ToolSession, raw: string): Promise<ConflictRegionRead> {
 	const target = parseTarget(raw);
 	if (target.id === "*") {
 		throw new ToolError(
 			"Reading `conflict://*` is not supported — wildcards are write-only. Use the `<path>:conflicts` read selector for the full list of conflicts in a file, or read `conflict://<N>` to inspect a single block.",
 		);
 	}
-	const entry = requireEntry(session, target.id);
+	const entry = await requireEntry(session, target.id);
 	const region = renderConflictRegion(entry, target.scope);
-	const displayMode = resolveFileDisplayMode(session);
-	const shouldAddHashLines = displayMode.hashLines;
-	const shouldAddLineNumbers = shouldAddHashLines ? false : displayMode.lineNumbers;
-
-	const rawText = region.lines.join("\n");
-	const tag = shouldAddHashLines ? getEditStore(session).recordSnapshotFile(entry.absolutePath) : undefined;
-	const hashContext = tag
-		? hashlineHeaderContext(formatPathRelativeToCwd(entry.absolutePath, session.cwd), tag)
-		: undefined;
-	const formattedBody = formatTextWithMode(rawText, region.startLine, shouldAddHashLines, shouldAddLineNumbers);
 	return {
-		text: prependHashlineHeader(formattedBody, hashContext),
-		rawText,
+		text: region.lines.join("\n"),
 		startLine: region.startLine,
 		absolutePath: entry.absolutePath,
 	};
@@ -112,7 +119,7 @@ export async function writeConflictUri(
 	}
 	const { text: cleanContent, stripped } = stripWriteContent(session, content);
 	if (target.id === "*") return resolveAllConflicts(session, cleanContent, stripped, signal, content);
-	return resolveConflict(session, requireEntry(session, target.id), cleanContent, stripped, signal);
+	return resolveConflict(session, await requireEntry(session, target.id), cleanContent, stripped, signal);
 }
 
 /**
@@ -145,27 +152,11 @@ async function resolveConflict(
 	const newContent = splice.text;
 
 	await writethroughNoop(absolutePath, newContent, signal);
-	invalidateFsScanAfterWrite(absolutePath);
 	session.bumpFileMutationVersion?.(absolutePath);
 	getEditStore(session).invalidate(absolutePath);
 	const history = session.conflictHistory;
 	history?.invalidate(entry.id);
-	if (history) {
-		// Drop stale duplicate registrations of the same region: a re-read
-		// after an out-of-band shift registers a fresh id at the new
-		// startLine while the stale twin persists at the old one. A DISTINCT
-		// conflict block that is merely byte-identical still occurs in the
-		// post-splice content and must stay addressable.
-		for (const other of history.entries()) {
-			if (
-				other.absolutePath === absolutePath &&
-				conflictRegionsEqual(other, entry) &&
-				!conflictRegionPresent(newContent, other)
-			) {
-				history.invalidate(other.id);
-			}
-		}
-	}
+	history?.reconcilePath(absolutePath, { blocks: scanConflictLines(newContent.split("\n"), 1) });
 
 	const header = maybeWriteSnapshotHeader(session, absolutePath, newContent);
 	const range =
@@ -186,13 +177,16 @@ async function resolveConflict(
 	};
 }
 
-const BULK_DIRECTIVE_RE = /^#?(\d+)\s*[:=]\s*(@ours|@theirs|@base|@both)$/;
+/** `<id>: @side`, optionally behind a copied `LINE:` display prefix (`40:#4 = @ours`). */
+const BULK_DIRECTIVE_RE = /^(?:\d+:)?#?(\d+)\s*[:=]\s*(@ours|@theirs|@base|@both)$/;
 /**
- * The head of a per-id directive line — `<id>:` / `<id>=` (optionally `#`-prefixed),
- * regardless of whether its value is a valid `@side` token. Used only to sharpen the
- * error message when a directive block is malformed (e.g. `15: some literal text`).
+ * The head of a per-id directive line — `<id>:` / `<id>=` (optionally `#`-prefixed,
+ * and optionally behind a copied `LINE:` prefix like `BULK_DIRECTIVE_RE`),
+ * regardless of whether its value is a valid `@side` token. Used to recognise a
+ * per-id block with literal values (e.g. `15: some literal text`) and to sharpen
+ * its error message.
  */
-const BULK_DIRECTIVE_HEAD_RE = /^#?\d+\s*[:=]/;
+const BULK_DIRECTIVE_HEAD_RE = /^(?:\d+:)?#?(\d+)\s*[:=]/;
 
 function truncateDirectiveLine(line: string): string {
 	return line.length > 60 ? `${line.slice(0, 57)}…` : line;
@@ -203,16 +197,18 @@ function truncateDirectiveLine(line: string): string {
  * `<id>: @side` (also accepted: `#<id> = @side`), where `@side` is one of
  * `@ours` / `@theirs` / `@base` / `@both`.
  *
- * Returns `null` only when NO line is directive-shaped (→ uniform bulk mode).
- * Throws on duplicate ids, and — critically — on a *partial* directive block:
- * content that mixes valid `<id>: @side` lines with lines that aren't. Without
- * that guard a per-id write carrying any non-token value (a literal or
- * multi-line replacement, e.g. `15: <multi-line content>`) fell through to
- * uniform bulk mode, which pasted the raw directive text verbatim into every
- * block and still reported success. Per-id bulk is token-only; literal or
- * multi-line replacements must go through individual `conflict://<N>` writes.
+ * Returns `null` only when the content is not a per-id block (→ uniform bulk mode).
+ * Throws on duplicate ids, and — critically — on a *malformed* directive block:
+ * content that mixes valid `<id>: @side` lines with lines that aren't, or a
+ * block of `<id>: <literal>` values naming registered conflicts. Without that
+ * guard a per-id write carrying non-token values (a literal or multi-line
+ * replacement, e.g. `15: <multi-line content>`) fell through to uniform bulk
+ * mode, which pasted the directive text (or, in hashline mode, the text with
+ * its `<id>:` heads stripped as line numbers) into every block and still
+ * reported success. Per-id bulk is token-only; literal or multi-line
+ * replacements must go through individual `conflict://<N>` writes.
  */
-function parseBulkDirectives(content: string): Map<number, string> | null {
+function parseBulkDirectives(content: string, registeredIds: ReadonlySet<number>): Map<number, string> | null {
 	const map = new Map<number, string>();
 	const stray: string[] = [];
 	let sawDirective = false;
@@ -231,8 +227,23 @@ function parseBulkDirectives(content: string): Map<number, string> | null {
 		}
 		map.set(id, match[2]);
 	}
-	// No directive lines at all → not a per-id block; caller uses uniform mode.
-	if (!sawDirective) return null;
+	// No `<id>: @side` line → uniform mode, unless the content opens with `<id>:`
+	// naming a registered conflict, no line carries a head naming anything else
+	// (copied `LINE:` rows do), and either every line is such a head or at least two
+	// registered ids head lines: a per-id block with (possibly multi-line) literal values.
+	if (!sawDirective) {
+		const heads = stray.map(line => {
+			const head = line.match(BULK_DIRECTIVE_HEAD_RE);
+			return head ? Number.parseInt(head[1], 10) : undefined;
+		});
+		const registeredHeads = heads.filter(id => id !== undefined && registeredIds.has(id));
+		const literalPerIdBlock =
+			heads[0] !== undefined &&
+			registeredIds.has(heads[0]) &&
+			heads.every(id => id === undefined || registeredIds.has(id)) &&
+			(registeredHeads.length === heads.length || new Set(registeredHeads).size >= 2);
+		if (!literalPerIdBlock) return null;
+	}
 	if (stray.length > 0) {
 		const sample = stray[0]!;
 		const tokenHint = BULK_DIRECTIVE_HEAD_RE.test(sample)
@@ -261,22 +272,26 @@ function parseBulkDirectives(content: string): Map<number, string> | null {
  * block. When they differ, a malformed raw block still defers to a *clean*
  * stripped block, but otherwise surfaces its error rather than degrading.
  */
-function resolveBulkDirectives(raw: string, stripped: string): Map<number, string> | null {
-	if (raw === stripped) return parseBulkDirectives(raw);
+function resolveBulkDirectives(
+	raw: string,
+	stripped: string,
+	registeredIds: ReadonlySet<number>,
+): Map<number, string> | null {
+	if (raw === stripped) return parseBulkDirectives(raw, registeredIds);
 	let rawResult: Map<number, string> | null;
 	try {
-		rawResult = parseBulkDirectives(raw);
+		rawResult = parseBulkDirectives(raw, registeredIds);
 	} catch (rawError) {
 		let fallback: Map<number, string> | null = null;
 		try {
-			fallback = parseBulkDirectives(stripped);
+			fallback = parseBulkDirectives(stripped, registeredIds);
 		} catch {
 			fallback = null;
 		}
 		if (fallback) return fallback;
 		throw rawError;
 	}
-	return rawResult ?? parseBulkDirectives(stripped);
+	return rawResult ?? parseBulkDirectives(stripped, registeredIds);
 }
 
 /**
@@ -302,6 +317,7 @@ async function resolveAllConflicts(
 	rawContent: string,
 ): Promise<InternalWriteResult> {
 	const history = getConflictHistory(session);
+	await reconcileRegisteredConflicts(history);
 	const allEntries = history.entries();
 	if (allEntries.length === 0) {
 		throw new ToolError(
@@ -315,9 +331,9 @@ async function resolveAllConflicts(
 	// winner — one call instead of one write per conflict. Parsed from the
 	// PRE-strip content: hashline prefix stripping would otherwise eat the
 	// `<id>: ` heads as echoed line numbers.
-	const directives = resolveBulkDirectives(rawContent, replacementContent);
+	const known = new Set(allEntries.map(entry => entry.id));
+	const directives = resolveBulkDirectives(rawContent, replacementContent, known);
 	if (directives) {
-		const known = new Set(allEntries.map(entry => entry.id));
 		const unknown = [...directives.keys()].filter(id => !known.has(id));
 		if (unknown.length > 0) {
 			throw new ToolError(
@@ -355,7 +371,6 @@ async function resolveAllConflicts(
 
 		let text: string;
 		const resolvedEntries: ConflictEntry[] = [];
-		const staleEntries: ConflictEntry[] = [];
 		let failure: string | undefined;
 		try {
 			text = await Bun.file(absolutePath).text();
@@ -375,13 +390,6 @@ async function resolveAllConflicts(
 				totalEchoTrimmed += splice.trimmedLeading + splice.trimmedTrailing;
 				resolvedEntries.push(entry);
 			} catch (error) {
-				// A locate-miss for a region an earlier entry already spliced
-				// in this pass is a stale duplicate registration (re-read after
-				// an out-of-band shift) — treat it as already resolved.
-				if (resolvedEntries.some(done => conflictRegionsEqual(done, entry))) {
-					staleEntries.push(entry);
-					continue;
-				}
 				failure = error instanceof Error ? error.message : String(error);
 				break;
 			}
@@ -396,11 +404,10 @@ async function resolveAllConflicts(
 		}
 
 		await writethroughNoop(absolutePath, text, signal);
-		invalidateFsScanAfterWrite(absolutePath);
 		session.bumpFileMutationVersion?.(absolutePath);
 		getEditStore(session).invalidate(absolutePath);
 		for (const entry of resolvedEntries) history.invalidate(entry.id);
-		for (const entry of staleEntries) history.invalidate(entry.id);
+		history.reconcilePath(absolutePath, { blocks: scanConflictLines(text.split("\n"), 1) });
 		const header = maybeWriteSnapshotHeader(session, absolutePath, text);
 		succeededFiles.push({ displayPath: sample.displayPath, count: resolvedEntries.length, header });
 		totalResolvedIds += resolvedEntries.length;
@@ -417,11 +424,16 @@ async function resolveAllConflicts(
 			summaryLines.push(`  ${file.displayPath}: ${file.count} ${conflictWord(file.count)}`);
 		}
 	}
-	if (directives && selectedEntries.length < allEntries.length) {
-		const remaining = allEntries.filter(entry => !directives.has(entry.id)).map(entry => `#${entry.id}`);
-		summaryLines.push(
-			`Directive mode: ${remaining.length} unlisted ${conflictWord(remaining.length)} still registered (${remaining.join(", ")}).`,
-		);
+	if (directives) {
+		const remaining = history
+			.entries()
+			.filter(entry => !directives.has(entry.id))
+			.map(entry => `#${entry.id}`);
+		if (remaining.length > 0) {
+			summaryLines.push(
+				`Directive mode: ${remaining.length} unlisted ${conflictWord(remaining.length)} still registered (${remaining.join(", ")}).`,
+			);
+		}
 	}
 	if (totalEchoTrimmed > 0) {
 		summaryLines.push(

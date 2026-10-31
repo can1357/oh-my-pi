@@ -9,23 +9,33 @@ import {
 	type TokensList,
 } from "@oh-my-pi/pi-utils/marked";
 import {
-	MathBlockScan,
 	type MathBlockOpener,
-	mathBlockAt,
+	type MathOpener,
 	mathBlockCloserIndex,
+	mathBlockInContext,
 	mathBlockMayCloseAt,
 	mathBlockOpenerAt,
+	mathOpenerAt,
+	mathSpanAt,
 	mathSpanInContext,
 	mathStartIndex,
 } from "@oh-my-pi/pi-utils/math-delimiters";
+import { listMayContinueAt } from "@oh-my-pi/pi-utils/marked-list";
 import { latexToBlock } from "../latex-block";
 import { isBareMathEnvironment, latexToUnicode } from "../latex-to-unicode";
 import { plainText } from "../native/spans";
 import { md } from "../native/describe";
 import type { DescribeContext, NativeNode } from "../native/node";
+import {
+	extensionLinkScheme,
+	extensionLinksVersion,
+	formatExtensionLink,
+	stripExtensionLinkMarkers,
+} from "../render/extension-links";
 import type { SymbolTheme } from "../symbols";
 import { TERMINAL } from "../terminal-capabilities";
-import { getSymbolTheme } from "../theme/theme";
+import { getSymbolTheme, getThemeEpoch } from "../theme/theme";
+import { canCacheMarkdownListItems } from "../theme/tui-adapters";
 import type { Component } from "../tui";
 import {
 	applyBackgroundToLine,
@@ -49,6 +59,395 @@ const OSC8_ST_PREFIX_REGEX = /(\x1b\]8;[^\x07\x1b]*)\x1b\\/g;
 
 function normalizeOsc8Terminators(text: string): string {
 	return text.replace(OSC8_ST_PREFIX_REGEX, "$1\x07");
+}
+
+/**
+ * `text` as the streaming renderer lexes it: OSC 8 terminators unified and
+ * tabs expanded. {@link Markdown.getLastRenderStableText} is a prefix of this
+ * form, not of the raw source, so append-only publishers that mix settled
+ * prefixes with whole blocks must compare both in this form. Rendering it is
+ * byte-identical to rendering `text`.
+ */
+export function streamingMarkdownSource(text: string): string {
+	if (!text.includes("\t") && !text.includes("\x1b")) return text;
+	return replaceTabs(normalizeOsc8Terminators(text));
+}
+
+// A leading-pipe table line: optional indent / blockquote markers, then `|`.
+const TABLE_LINE_AT = /[ \t>]*\|/y;
+// A line holding an unescaped `|`: a GFM table line needs no outer pipes.
+const PIPE_IN_LINE_AT = /[^\n]*?(?<!\\)\|/y;
+// A whole GFM delimiter row (`| --- | :-: |`, `--- | ---`). Without a leading pipe it needs an inner one; a lone
+// `---` is a rule or setext underline.
+const DELIMITER_ROW_AT =
+	/[ \t>]*(?:\|[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?|[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)+\|?)[ \t]*\r?(?=\n|$)/y;
+const UNESCAPED_PIPE = /(?<!\\)\|/g;
+const UNESCAPED_PIPE_END = /(?<!\\)\|$/;
+// A fence line (opener or closer) after any blockquote markers: indentation, marker, info string.
+const FENCE_LINE = /^(?:[ \t]*>)*([ \t]*)(`{3,}|~{3,})([^\n]*)$/gm;
+// A list item's marker line after any blockquote markers: indentation, marker, spacing.
+const LIST_ITEM_LINE = /^(?:[ \t]*>)*([ \t]*)([-*+]|\d{1,9}[.)])([ \t]+)\S/;
+
+function matchesAt(pattern: RegExp, text: string, lineStart: number): boolean {
+	pattern.lastIndex = lineStart;
+	return pattern.test(text);
+}
+
+/** Column width of leading whitespace, tabs to the next multiple of four. */
+function indentWidth(whitespace: string): number {
+	let width = 0;
+	for (const ch of whitespace) width = ch === "\t" ? width + 4 - (width % 4) : width + 1;
+	return width;
+}
+
+/**
+ * Whether the fence line at `lineStart`, indented `indent` columns, is a real
+ * fence: at most three columns in, or inside a list item whose content column
+ * it sits within three columns of. Deeper lines elsewhere are indented code.
+ */
+function fenceIndentValid(text: string, lineStart: number, indent: number): boolean {
+	if (indent <= 3) return true;
+	for (let end = lineStart - 1; end > 0;) {
+		const start = text.lastIndexOf("\n", end - 1) + 1;
+		const line = text.slice(start, end);
+		end = start - 1;
+		if (!line.trim()) continue;
+		const lineIndent = indentWidth(/^(?:[ \t]*>)*([ \t]*)/.exec(line)![1]);
+		if (lineIndent >= indent) continue;
+		const item = LIST_ITEM_LINE.exec(line);
+		if (item) {
+			const content = indentWidth(item[1]) + item[2].length + indentWidth(item[3]);
+			return indent >= content && indent <= content + 3;
+		}
+		// A less indented line that is no list item: only a list item's continuation text keeps looking.
+		if (lineIndent === 0) return false;
+	}
+	return false;
+}
+
+/** Whether a code fence is still open at `end` of `text`. */
+function fenceOpenAt(text: string, end: number): boolean {
+	let open: string | undefined;
+	FENCE_LINE.lastIndex = 0;
+	for (let match = FENCE_LINE.exec(text); match !== null && match.index < end; match = FENCE_LINE.exec(text)) {
+		const [, indent, marker, rest] = match;
+		if (!fenceIndentValid(text, match.index, indentWidth(indent))) continue;
+		if (open === undefined) {
+			// A backtick fence's info string cannot hold a backtick (that line is inline code).
+			if (marker[0] !== "`" || !rest.includes("`")) open = marker;
+		} else if (marker[0] === open[0] && marker.length >= open.length && !rest.trim()) {
+			open = undefined;
+		}
+	}
+	return open !== undefined;
+}
+
+/**
+ * Whether `text` ends inside a code fence the source never closed. The
+ * renderer still draws such a fence's closing border, so a caller publishing a
+ * settled source prefix must drop that fabricated row: it is not a prefix of
+ * the live block, which reaches the border only once the closer arrives.
+ */
+export function endsInsideOpenFence(text: string): boolean {
+	return fenceOpenAt(text, text.length);
+}
+
+/**
+ * Offset of the settled prefix of the still-open fence that `text` ends in, or
+ * 0 when it holds none.
+ *
+ * An open fence's body only ever appends: nothing a later chunk adds can
+ * change a line that already ended. Those lines are therefore settled, and a
+ * stream may publish them into native scrollback instead of leaving the whole
+ * block in the mutable viewport until the closing fence finally arrives — a
+ * long streamed code block would otherwise lose every row that left the screen
+ * (#9780).
+ *
+ * The cut lands before the last complete line, not after it: a streamed chunk
+ * usually ends on a "\n", and the publisher requires non-blank source past the
+ * prefix it publishes, so cutting at the final "\n" would publish nothing on
+ * exactly those frames. Once the closing fence has arrived, the retained line
+ * is the one in front of it.
+ */
+function settledFenceBodyEnd(text: string): number {
+	const lastBreak = text.lastIndexOf("\n");
+	if (lastBreak <= 0) return 0;
+	const cut = text.lastIndexOf("\n", lastBreak - 1) + 1;
+	return cut > 0 && fenceOpenAt(text, cut) ? cut : 0;
+}
+
+/**
+ * Streaming `md` source for a native terminal, minus a still-growing table row:
+ * the unterminated last line when a GFM table (a run of pipe lines holding a
+ * header and its delimiter row, outer pipes optional) sits right above it,
+ * outside any open code fence. GFM continues a table on any non-blank line, so
+ * that line is a row whatever it holds so far. The terminal sizes columns by
+ * every row it gets, so a half-streamed row (an unclosed link shows its whole
+ * URL) would rewrap the table each frame, and TSP cannot ask it to skip one.
+ * The result keeps the newline before the held line, so it is a prefix of
+ * `text` and of the result for every append to it: streaming stays
+ * append-only. Pass untrimmed source: trimming first drops the newline that
+ * marks the last row finished, so that row would be held too.
+ */
+export function holdPartialTableRow(text: string): string {
+	const lastBreak = text.lastIndexOf("\n");
+	if (lastBreak <= 0 || lastBreak === text.length - 1) return text;
+	// Walk up the run of pipe lines above the growing row to a delimiter row with a header above it.
+	let lineStart = text.lastIndexOf("\n", lastBreak - 1) + 1;
+	let table = false;
+	while (matchesAt(PIPE_IN_LINE_AT, text, lineStart)) {
+		const above = lineStart > 0 ? text.lastIndexOf("\n", lineStart - 2) + 1 : -1;
+		if (matchesAt(DELIMITER_ROW_AT, text, lineStart)) {
+			table = above >= 0 && matchesAt(PIPE_IN_LINE_AT, text, above);
+			lineStart = above;
+			break;
+		}
+		if (above < 0) break;
+		lineStart = above;
+	}
+	if (!table || fenceOpenAt(text, lineStart)) return text;
+	return text.slice(0, lastBreak + 1);
+}
+
+/**
+ * Index of the cell a streaming table's last row is still writing: the cell
+ * after its last `|`, or -1 when a newline or trailing `|` closed the row.
+ * `raw` is the table token's source; GFM splits cells on every unescaped pipe.
+ */
+function growingTableCell(raw: string): number {
+	if (raw.endsWith("\n")) return -1;
+	const line = raw.slice(raw.lastIndexOf("\n") + 1).trimEnd();
+	if (UNESCAPED_PIPE_END.test(line)) return -1;
+	const pipes = line.match(UNESCAPED_PIPE)?.length ?? 0;
+	return matchesAt(TABLE_LINE_AT, line, 0) ? pipes - 1 : pipes;
+}
+
+const MATH_CLOSERS: Record<MathOpener, string> = { $: "$", $$: "$$", "\\(": "\\)", "\\[": "\\]" };
+// The end of a math body that is not yet valid LaTeX: a half-typed command, a lone `\`, or a dangling `^`/`_`.
+const PARTIAL_LATEX_TAIL = /(?:\\[A-Za-z]*|[\^_])$/;
+// A body opened by anything but `$$` needs one of these: `$5` is a price and `\[docs]` an escaped bracket until
+// LaTeX shows up, so they stay literal until they close.
+const LATEX_HINT = /[\\^_{}]/;
+// Math openers tried from the end of the run; the one being written is almost always the last.
+const MATH_OPENER_TRIES = 3;
+
+/** Whether the character at `at` follows an odd run of backslashes. */
+function escapedAt(text: string, at: number): boolean {
+	let slashes = 0;
+	while (at - slashes - 1 >= 0 && text[at - slashes - 1] === "\\") slashes++;
+	return slashes % 2 === 1;
+}
+
+/**
+ * Where `text` is inline prose rather than code: the closed code spans, and
+ * the start of a backtick run no later run closes. While streaming, that run
+ * is a code span still being written, so nothing after it is prose.
+ */
+class InlineCode {
+	readonly #spans: number[] = [];
+	readonly #openFrom: number;
+
+	constructor(text: string) {
+		let at = text.indexOf("`");
+		let openFrom = text.length;
+		while (at >= 0) {
+			let runEnd = at;
+			while (text[runEnd] === "`") runEnd++;
+			if (escapedAt(text, at) && runEnd - at === 1) {
+				at = text.indexOf("`", runEnd);
+				continue;
+			}
+			const length = runEnd - at;
+			let close = text.indexOf("`", runEnd);
+			let closeEnd = close;
+			while (close >= 0) {
+				closeEnd = close;
+				while (text[closeEnd] === "`") closeEnd++;
+				if (closeEnd - close === length) break;
+				close = text.indexOf("`", closeEnd);
+			}
+			if (close < 0) {
+				openFrom = at;
+				break;
+			}
+			this.#spans.push(at, closeEnd);
+			at = text.indexOf("`", closeEnd);
+		}
+		this.#openFrom = openFrom;
+	}
+
+	/** Whether `at` is prose: outside every code span, and before any span still open. */
+	prose(at: number): boolean {
+		if (at >= this.#openFrom) return false;
+		for (let i = 0; i < this.#spans.length; i += 2) {
+			if (at >= this.#spans[i]! && at < this.#spans[i + 1]!) return false;
+		}
+		return true;
+	}
+}
+
+/** `text` with its trailing open link closed, or `undefined` when its end is not inside a link destination. */
+function closeOpenLink(text: string, code: () => InlineCode): string | undefined {
+	const destination = text.lastIndexOf("](");
+	if (destination < 0 || escapedAt(text, destination)) return undefined;
+	// A destination may hold balanced parentheses; `<…>` destinations and titles are not guessed.
+	if (text[destination + 2] === "<") return undefined;
+	let depth = 1;
+	for (let i = destination + 2; i < text.length; i++) {
+		const ch = text[i];
+		if (ch === "\\") i++;
+		else if (ch === "(") depth++;
+		else if (ch === ")" && --depth === 0) return undefined;
+		else if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r") return undefined;
+	}
+	let nested = 0;
+	let label = -1;
+	for (let i = destination - 1; i >= 0; i--) {
+		const ch = text[i];
+		if ((ch !== "[" && ch !== "]") || escapedAt(text, i)) continue;
+		if (ch === "]") nested++;
+		else if (nested > 0) nested--;
+		else {
+			label = i;
+			break;
+		}
+	}
+	// An image keeps its literal form: its alt text and source are not a link.
+	if (label < 0 || (text[label - 1] === "!" && !escapedAt(text, label - 1))) return undefined;
+	const spans = code();
+	if (!spans.prose(label) || !spans.prose(destination)) return undefined;
+	return text + ")".repeat(depth);
+}
+
+/** `text` with its trailing open math span closed in its last valid form, or `undefined`. */
+function closeOpenMath(text: string, code: () => InlineCode): string | undefined {
+	let from = text.length;
+	for (let tries = 0; tries < MATH_OPENER_TRIES && from > 0;) {
+		const at = Math.max(
+			text.lastIndexOf("$", from - 1),
+			text.lastIndexOf("\\(", from - 1),
+			text.lastIndexOf("\\[", from - 1),
+		);
+		if (at < 0) return undefined;
+		from = at;
+		const opener = mathOpenerAt(text, at);
+		// The second `$` of a `$$` opener is not an opener of its own.
+		if (opener === undefined || (opener === "$" && text[at - 1] === "$")) continue;
+		tries++;
+		if (!code().prose(at)) continue;
+		const bodyStart = at + opener.length;
+		let written = text.slice(bodyStart);
+		// A `$$` span whose closer is half written ends in that closer's first `$`.
+		if (opener === "$$" && written.endsWith("$") && !escapedAt(text, text.length - 1)) written = written.slice(0, -1);
+		const body = written.replace(PARTIAL_LATEX_TAIL, "");
+		if (!body.trim() || (opener !== "$$" && !LATEX_HINT.test(written))) continue;
+		let depth = 0;
+		for (let i = 0; i < body.length; i++) {
+			if (body[i] === "\\") i++;
+			else if (body[i] === "{") depth++;
+			else if (body[i] === "}" && depth > 0) depth--;
+		}
+		const closed = `${text.slice(0, bodyStart)}${body}${"}".repeat(depth)}${MATH_CLOSERS[opener]}`;
+		// The grammar decides: escaped, currency-like, or space-padded openers stay literal.
+		if (mathSpanAt(closed, at)?.end === closed.length) return closed;
+	}
+	return undefined;
+}
+
+/**
+ * `text`, one inline run whose end is still streaming, with a trailing open
+ * link or math span closed the way the finished text most likely closes it,
+ * or `undefined` when nothing at its end is open. A link gains its missing
+ * `)` (one per open parenthesis in its destination), so it renders as the
+ * link it becomes instead of literal brackets and URL. A math body is cut back
+ * to its last valid form (a half-typed command, dangling `^`/`_`, or the first
+ * `$` of a `$$` closer dropped, open braces closed) and closed, so the
+ * rendered math grows in place instead of raw LaTeX turning into symbols at
+ * the closer. A `$` body needs a LaTeX character, so a price (`$5 per`) is
+ * never speculated. Only prose is: escaped openers and anything inside a code
+ * span, closed or still being written, stay literal.
+ */
+export function speculativeInlineClose(text: string): string | undefined {
+	let spans: InlineCode | undefined;
+	const code = () => (spans ??= new InlineCode(text));
+	return closeOpenLink(text, code) ?? closeOpenMath(text, code);
+}
+
+/**
+ * Streaming `md` source for a native terminal with the open link or math span
+ * at its end speculatively closed ({@link speculativeInlineClose}), as the TUI
+ * renders it. Only the last block is read (a span cannot cross a blank line),
+ * and source inside an open code fence is left as it is. Each frame rewrites
+ * only the guessed closers at the end, which the reconciler sends as a small
+ * `splice`.
+ */
+export function speculativeStreamingSource(text: string): string {
+	const blockBreak = text.lastIndexOf("\n\n");
+	const blockStart = blockBreak < 0 ? 0 : blockBreak + 2;
+	const closed = speculativeInlineClose(text.slice(blockStart));
+	if (closed === undefined || fenceOpenAt(text, text.length)) return text;
+	return text.slice(0, blockStart) + closed;
+}
+
+/** `raw` with its last `from` replaced by `to`, or `undefined` when `from` is not in it. */
+function replaceLast(raw: string, from: string, to: string): string | undefined {
+	const at = raw.lastIndexOf(from);
+	return at < 0 ? undefined : raw.slice(0, at) + to + raw.slice(at + from.length);
+}
+
+/**
+ * A copy of `token`, the last block of a streaming render, whose still-written
+ * inline run is speculatively closed ({@link speculativeInlineClose}), or
+ * `undefined` when nothing in it is open. Follows the run into the last list
+ * item, blockquote child, or the open cell of a table's last row. `raw` is
+ * rewritten to match, so row caches keyed on it never mistake the copy for
+ * the source as it stands.
+ */
+function speculateStreamingToken(token: Token): Token | undefined {
+	switch (token.type) {
+		case "paragraph":
+		case "heading":
+		case "text": {
+			const closed = speculativeInlineClose(token.text);
+			const raw = closed === undefined ? undefined : replaceLast(token.raw, token.text, closed);
+			if (closed === undefined || raw === undefined) return undefined;
+			return { ...token, raw, text: closed, tokens: lexInlineTokens(closed) };
+		}
+		case "blockquote": {
+			const children: Token[] = token.tokens ?? [];
+			const inner = children.at(-1);
+			const patched = inner && speculateStreamingToken(inner);
+			const raw = inner && patched && replaceLast(token.raw, inner.raw, patched.raw);
+			if (!patched || raw === undefined) return undefined;
+			return { ...token, raw, tokens: [...children.slice(0, -1), patched] };
+		}
+		case "list": {
+			const items: Tokens.ListItem[] = token.items;
+			const item = items.at(-1);
+			const inner = item?.tokens.at(-1);
+			if (!item || !inner) return undefined;
+			const patched = speculateStreamingToken(inner);
+			const itemRaw = patched && replaceLast(item.raw, inner.raw, patched.raw);
+			const raw = itemRaw === undefined ? undefined : replaceLast(token.raw, item.raw, itemRaw);
+			if (!patched || itemRaw === undefined || raw === undefined) return undefined;
+			const grown = { ...item, raw: itemRaw, tokens: [...item.tokens.slice(0, -1), patched] };
+			return { ...token, raw, items: [...items.slice(0, -1), grown] };
+		}
+		case "table": {
+			const rows: Tokens.TableCell[][] = token.rows;
+			const open = growingTableCell(token.raw);
+			const row = rows.at(-1);
+			const cell = open >= 0 ? row?.[open] : undefined;
+			if (!row || !cell) return undefined;
+			const closed = speculativeInlineClose(cell.text);
+			const raw = closed === undefined ? undefined : replaceLast(token.raw, cell.text, closed);
+			if (closed === undefined || raw === undefined) return undefined;
+			const cells = row.map((c, i) => (i === open ? { ...c, text: closed, tokens: lexInlineTokens(closed) } : c));
+			return { ...token, raw, rows: [...rows.slice(0, -1), cells] };
+		}
+		default:
+			return undefined;
+	}
 }
 
 /** The longest suffix of `text` a future append could still complete into a
@@ -603,7 +1002,6 @@ const markdownParser = new Marked();
 // never math. Inline extensions run before marked's escape tokenizer, so
 // `\(…\)` becomes math while a genuinely escaped `\$` is left to `escape` and
 // renders as a literal dollar.
-const CUSTOM_HR_START_REGEX = /(?:^|\n) {0,3}([-*_─━═=–—])[ \t]*(?:\1[ \t]*){2,}(?:\n+|$)/;
 const CUSTOM_HR_TOKENIZER_REGEX = /^ {0,3}([-*_─━═=–—])[ \t]*(?:\1[ \t]*){2,}(?:\n+|$)/;
 
 function getHrChar(char: string, hrChar: string): string {
@@ -629,15 +1027,6 @@ function getHrChar(char: string, hrChar: string): string {
 const customHrExtension: TokenizerAndRendererExtension = {
 	name: "customHr",
 	level: "block",
-	start(src) {
-		const match = CUSTOM_HR_START_REGEX.exec(src);
-		if (!match) return undefined;
-		let idx = match.index;
-		if (src[idx] === "\n") {
-			idx += 1;
-		}
-		return idx;
-	},
 	tokenizer(src) {
 		const match = CUSTOM_HR_TOKENIZER_REGEX.exec(src);
 		if (match) {
@@ -674,7 +1063,7 @@ const mathBlockExtension: TokenizerAndRendererExtension = {
 	// No `start` hint: marked only probes block extensions at a block boundary
 	// here and never consults their hints.
 	tokenizer(src) {
-		const block = mathBlockAt(src);
+		const block = mathBlockInContext(this, src);
 		if (!block) return undefined;
 		return { type: "math", raw: block.raw, text: block.body, display: true };
 	},
@@ -691,40 +1080,67 @@ const mathBlockExtension: TokenizerAndRendererExtension = {
 // starts at offset 0" guards keep fenced/indented `\begin{cases}` code blocks
 // for marked's own code rules.
 const BARE_ENV_BEGIN = /(?:^|\n)[ \t]{0,3}\\begin\{([A-Za-z]+\*?)\}/;
-function bareMathEnvBlock(src: string): readonly [number, number] | null {
-	const bm = BARE_ENV_BEGIN.exec(src);
-	if (!bm || !isBareMathEnvironment(bm[1])) return null;
+const BLANK_LINE_RE = /\n[ \t]*\n/;
+
+/** Where a search for an `\end{…}` closer in a lexer source started, and what it found. */
+interface EnvCloserSearch {
+	from: number;
+	at: number;
+}
+const envCloserSearches = new WeakMap<TokenizerThis, Map<string, EnvCloserSearch>>();
+
+/**
+ * The first `endToken` at or after `from` in the source of `context`, or -1. Block
+ * starts ask at increasing offsets, so a search is remembered per source: an
+ * unclosed environment otherwise rescans the rest of the document at each one.
+ */
+function envCloserIndex(context: TokenizerThis, source: string, endToken: string, from: number): number {
+	let searches = envCloserSearches.get(context);
+	if (!searches) envCloserSearches.set(context, (searches = new Map()));
+	const last = searches.get(endToken);
+	if (last !== undefined && last.from <= from && (last.at === -1 || from <= last.at)) return last.at;
+	const at = source.indexOf(endToken, from);
+	searches.set(endToken, { from, at });
+	return at;
+}
+
+/** Length of the bare math-environment block that starts at offset 0 of `src`, or 0. */
+function bareMathEnvBlockLength(context: TokenizerThis, src: string): number {
+	// A block at offset 0 has its `\begin` on the first line, or on the second
+	// after an `lhs =` line, so the opener scan stops there.
+	const firstBreak = src.indexOf("\n");
+	const secondBreak = firstBreak === -1 ? -1 : src.indexOf("\n", firstBreak + 1);
+	const bm = BARE_ENV_BEGIN.exec(secondBreak === -1 ? src : src.slice(0, secondBreak));
+	if (!bm || !isBareMathEnvironment(bm[1])) return 0;
 	// Skip a matched leading `\n`, at offset 0 too: a blank line before the block
 	// is a space token of its own, not part of the block.
 	const beginLineStart = src[bm.index] === "\n" ? bm.index + 1 : bm.index;
+	// Pull in one immediately-preceding `lhs =`/open-delimiter line (e.g. `f(x) =`).
+	if (beginLineStart > 0 && !/[=([{]\s*$/.test(src.slice(0, beginLineStart - 1))) return 0;
 	const endToken = `\\end{${bm[1]}}`;
-	const endAt = src.indexOf(endToken, bm.index);
-	if (endAt === -1) return null;
+	const source = context.source ?? src;
+	const base = (context.end ?? source.length) - src.length;
+	const closer = envCloserIndex(context, source, endToken, base + bm.index);
+	if (closer === -1) return 0;
+	const endAt = closer - base;
 	// The `\end` must close before any blank line (i.e. within the same block).
-	if (/\n[ \t]*\n/.test(src.slice(beginLineStart, endAt))) return null;
+	// Scan only up to the closer: the rest of the document is irrelevant here, and
+	// scanning it per block is quadratic across consecutive environments.
+	if (BLANK_LINE_RE.test(src.slice(beginLineStart, endAt))) return 0;
 	let blockEnd = endAt + endToken.length;
 	while (src[blockEnd] === " " || src[blockEnd] === "\t") blockEnd++;
 	if (src[blockEnd] === "\n") blockEnd++;
-	// Pull in one immediately-preceding `lhs =`/open-delimiter line (e.g. `f(x) =`).
-	let start = beginLineStart;
-	if (start > 0 && src[start - 1] === "\n") {
-		const prevStart = src.lastIndexOf("\n", start - 2) + 1;
-		const prevLine = src.slice(prevStart, start - 1);
-		if (/[=([{]\s*$/.test(prevLine)) start = prevStart;
-	}
-	return [start, blockEnd];
+	return blockEnd;
 }
+
 const mathEnvBlockExtension: TokenizerAndRendererExtension = {
 	name: "mathEnvBlock",
 	level: "block",
-	start(src) {
-		const r = bareMathEnvBlock(src);
-		return r ? r[0] : undefined;
-	},
+	// No `start` hint: marked only probes block extensions at a block boundary.
 	tokenizer(src) {
-		const r = bareMathEnvBlock(src);
-		if (r?.[0] !== 0) return undefined; // only consume when the block starts at offset 0
-		const raw = src.slice(0, r[1]);
+		const length = bareMathEnvBlockLength(this, src);
+		if (length === 0) return undefined;
+		const raw = src.slice(0, length);
 		const text = raw.replace(/\n[ \t]*$/, "");
 		if (text.trim().length === 0) return undefined;
 		return { type: "math", raw, text, display: true };
@@ -774,76 +1190,12 @@ markdownParser.use({
 	],
 });
 
-// Setext-underline pre-gate for marked's `lheading` rule. The rule's lazy body
-// `((?:.|\n(?!<block-start>))+?)` re-runs its block-start lookahead while
-// expanding character by character, so even a FAILING attempt at offset 0
-// costs O(len × lookahead) — ~26µs per 200-char list-item body, and marked's
-// list tokenizer block-tokenizes every item's content (47.8% of a streaming
-// bench profile). A match REQUIRES the setext underline `\n {0,3}(=+|-+)`
-// somewhere in src, so this O(n) charCode scan never rejects a src the
-// built-in rule would match; single-line srcs (every tight list item) reject
-// on the first indexOf.
-function lheadingPossible(src: string): boolean {
-	let i = src.indexOf("\n");
-	while (i !== -1) {
-		let j = i + 1;
-		const limit = j + 3; // underline allows up to 3 leading spaces
-		while (j < limit && src.charCodeAt(j) === 0x20 /* space */) j++;
-		const c = src.charCodeAt(j); // NaN past the end fails both comparisons
-		if (c === 0x3d /* = */ || c === 0x2d /* - */) return true;
-		i = src.indexOf("\n", j);
-	}
-	return false;
-}
-
 markdownParser.use({
 	tokenizer: {
-		// `false` → marked falls back to the built-in tokenizer;
-		// `undefined` → no token here, built-in never runs.
-		lheading(src: string): Tokens.Heading | undefined | false {
-			return lheadingPossible(src) ? false : undefined;
-		},
 		// Strikethrough is `strikethroughExtension`'s: marked's own looser rule never runs.
 		del: () => undefined,
 	},
 });
-
-// ---------------------------------------------------------------------------
-// Sticky clones of marked's pathological block rules
-// ---------------------------------------------------------------------------
-// Bun's (JSC) regex engine skips the start-anchor fast-fail for several of
-// marked's `^`-anchored block rules — `hr`, `lheading`, `table` and `html` are
-// anchored alternations of quantified branches, and a failing `exec`/`test`
-// rescans the entire remaining source instead of stopping after offset 0.
-// marked's list tokenizer runs `hr.test` and `lheading` per list line against
-// the remaining source, so lexing a long list is quadratic (66% of a streaming
-// bench profile sat in these two regexes). A sticky (`y`) clone with
-// `lastIndex` pinned to 0 attempts the match at offset 0 only.
-//
-// Equivalence: for a flagless rule whose source is `^`-anchored, a sticky
-// clone at `lastIndex = 0` matches exactly when the original matches (same
-// match object, same captures) — `^` already restricted matches to offset 0
-// (no `m` flag), and stickiness only removes the futile later attempts. The
-// flags/anchor guard below skips any rule a future marked version changes.
-class AnchoredAtZero extends RegExp {
-	override exec(str: string): RegExpExecArray | null {
-		this.lastIndex = 0; // sticky matches set lastIndex; rules are shared
-		return super.exec(str);
-	}
-	override test(str: string): boolean {
-		this.lastIndex = 0;
-		return super.test(str);
-	}
-}
-
-for (const table of [Lexer.rules.block.normal, Lexer.rules.block.gfm]) {
-	for (const name of ["hr", "lheading", "table", "html"] as const) {
-		const rule = table[name];
-		if (rule.flags === "" && rule.source.startsWith("^")) {
-			table[name] = new AnchoredAtZero(rule.source, "y");
-		}
-	}
-}
 
 // ---------------------------------------------------------------------------
 // Module-level LRU render cache
@@ -1042,6 +1394,15 @@ function inlineHasOpen(tokens: readonly Token[]): boolean {
 	return false;
 }
 
+/** True when the inline token stream holds a link whose scheme an extension claimed. */
+function hasExtensionLink(tokens: readonly Token[]): boolean {
+	for (const token of tokens) {
+		if (token.type === "link" && typeof token.href === "string" && extensionLinkScheme(token.href)) return true;
+		if ("tokens" in token && Array.isArray(token.tokens) && hasExtensionLink(token.tokens as Token[])) return true;
+	}
+	return false;
+}
+
 /** Isolated inline lex of a same-line delta. A single-line delta has no block
  * structure, so the isolated inline pass equals the full lex's inline pass
  * (marked's paragraph tokens run the same `inlineTokens` entry point). */
@@ -1057,85 +1418,12 @@ function lexInlineTokens(text: string): Token[] {
 const REF_DEF_LINE_RE = /^ {0,3}\[(?:\\.|[^\]\\])+\]:/;
 const HAS_REF_DEF = new RegExp(REF_DEF_LINE_RE.source, "m");
 
-// marked's list tokenizer (Tokenizer.list, marked v18) continues a list across
-// blank lines only when the remaining source matches
-// `listItemRegex(marker)` = `^( {0,3}${marker})((?:[\t ][^\n]*)?(?:\n|$))`,
-// where `marker` is the exact bullet char for unordered lists (`\${char}`) or
-// 1-9 digits plus the exact delimiter for ordered lists (`\d{1,9}\${delim}`).
-// The marker is derived from the list's FIRST item (`n = t[1].trim()`), which
-// sits at the start of a top-level list token's raw:
-const LIST_MARKER_RE = /^ {0,3}(?:([*+-])|\d{1,9}([.)]))/;
-
-// Streaming-freeze equivalence invariant: lex(prefix) ++ lex(tail) must equal
-// lex(full text) — for the CURRENT text and for every append-only extension of
-// it, because a frozen prefix is sticky (it keeps being reused while the text
-// grows). At a blank-line (`\n\n`) cut directly after a top-level `list`
-// token, the only construct that can straddle the cut is a continuation item
-// of that list: marked consumed the blank line into the last item's raw and
-// re-ran `listItemRegex` at exactly `tailStart`, merging a same-marker item
-// into one renumbered loose list. The cut is safe only when that regex can
-// NEVER match at `tailStart`, no matter what is appended later.
-//
-// Append-only growth means existing characters are immutable while new ones
-// may appear after them, so "closed" may only be concluded from a present
-// character that contradicts every possible continuation (e.g. tail "1x" can
-// never grow into an ordered item, but tail "1" can become "1. c"). Running
-// out of text mid-marker therefore answers "may continue".
-//
-// Returns true when the tail could still continue the list (or the list's
-// marker is unrecognizable) — the conservative "don't freeze" answer. marked
-// may break the list anyway when the matching line is also an hr (`- - -`);
-// treating that as "may continue" merely skips a freeze, never corrupts one.
-function listMayContinueAt(text: string, tailStart: number, listRaw: string): boolean {
-	const marker = LIST_MARKER_RE.exec(listRaw);
-	if (marker === null) return true; // unrecognized list shape — stay conservative
-	const n = text.length;
-	let i = tailStart;
-	// `listItemRegex` allows up to 3 leading spaces (the caller's next-char
-	// guard rejects whitespace at the final cut, but mirror the rule exactly).
-	while (i < n && i - tailStart < 3 && text.charCodeAt(i) === 0x20 /* space */) i++;
-	if (i >= n) return true;
-	const bullet = marker[1];
-	if (bullet !== undefined) {
-		if (text[i] !== bullet) return false; // wrong marker char — closed forever
-		i++;
-	} else {
-		// Ordered: 1-9 digits, then the same `.`/`)` delimiter.
-		let digits = 0;
-		while (i < n && digits < 10) {
-			const c = text.charCodeAt(i);
-			if (c < 0x30 /* 0 */ || c > 0x39 /* 9 */) break;
-			digits++;
-			i++;
-		}
-		if (digits === 0 || digits > 9) return false; // no digit run / too long — closed forever
-		if (i >= n) return true; // delimiter (or more digits) may still arrive
-		if (text[i] !== marker[2]) return false; // wrong delimiter — closed forever
-		i++;
-	}
-	// After the marker: `(?:[\t ][^\n]*)?(?:\n|$)` — tab/space + anything, a
-	// bare newline, or end-of-input (which appends can still extend).
-	if (i >= n) return true;
-	const after = text.charCodeAt(i);
-	return after === 0x20 /* space */ || after === 0x09 /* tab */ || after === 0x0a; /* \n */
-}
-
-/** A probe window: see {@link stableBlockBoundary}. */
-interface ProbeWindow {
-	/** Offset in `text` where the window, and so the lex of `tokens`, ends. */
-	end: number;
-	/** The display-math blocks of the whole of `text`. */
-	mathBlocks: MathBlockScan;
-}
-
 /** The last stable block boundary of a token run: see {@link stableBlockBoundary}. */
 interface BlockBoundary {
 	/** Offset just past the boundary token, or 0 when the run holds none. */
 	end: number;
 	/** Number of tokens up to and including the boundary token, or 0. */
 	count: number;
-	/** End of the display-math block a probe's scan stopped at, which a later window must reach past; 0 when it stopped at none. */
-	blockEnd: number;
 }
 
 // A whitespace-only line, capturing its terminator: "\n", or "" at the end of the text.
@@ -1161,15 +1449,10 @@ const NO_OPENERS: readonly PrefixOpener[] = [];
  * `"\n\n"` break, together with the number of tokens up to and including it.
  * `count === 0` means the run holds no usable boundary.
  *
- * `base` is where `tokens[0]` starts inside `text`. Without `window`, `tokens`
- * lex the rest of `text`, which appends may still extend: the streaming
- * freeze. With it, they lex `text.slice(base, window.end)` of a whole
- * document: a probe. A boundary qualifies only when splitting there is
- * invisible to the lexer, i.e. `lex(head) ++ lex(tail) === lex(text)`:
- *  - In a probe, the token must end before `window.end`. An unclosed fence,
- *    HTML block or comment runs to the end of its input, so a window that
- *    ends just after a blank line inside one hands back a truncated token
- *    whose raw ends in `"\n\n"`.
+ * `base` is where `tokens[0]` starts inside `text`; `tokens` lex the rest of
+ * `text`, which appends may still extend (the streaming freeze). A boundary
+ * qualifies only when splitting there is invisible to the lexer, i.e.
+ * `lex(head) ++ lex(tail) === lex(text)`:
  *  - The break must sit inside `text`. At end-of-text the next character is
  *    unknown (and, while streaming, may still arrive), so the cut is deferred.
  *  - The next line must start real block content. A leading space or newline
@@ -1181,15 +1464,8 @@ const NO_OPENERS: readonly PrefixOpener[] = [];
  *  - A preceding `list` must be provably closed: CommonMark lets a same-marker
  *    item continue the list across the blank line, and marked merges both into
  *    one renumbered loose list (`listMayContinueAt`).
- *  - In a probe, no earlier token may open a display-math block that the
- *    window cut short: a token other than `math` (which is the block itself)
- *    where `window.mathBlocks` finds a block in the whole document. The
- *    one-pass lex makes that block one `math` token across its blank lines,
- *    so the scan stops there and reports the block's end as `blockEnd`. An
- *    opener with no closer, or with a whitespace-only body, is no block in
- *    either lex, so it leaves later boundaries alone.
- *  - While streaming, `tokens` are the one-pass lex of `text` as it stands,
- *    so a block the lex already made is a `math` token, and one that an
+ *  - Display math: `tokens` are the one-pass lex of `text` as it stands, so
+ *    a block the lex already made is a `math` token, and one that an
  *    append could still close becomes one only once a closer line arrives,
  *    which Markdown#lexTokens watches for. With `settle`, the scan instead
  *    stops at a token whose display-math block an append could still close
@@ -1212,30 +1488,18 @@ function stableBlockBoundary(
 	{
 		startIndex = 0,
 		endIndex = tokens.length,
-		window,
 		settle = false,
-	}: { startIndex?: number; endIndex?: number; window?: ProbeWindow; settle?: boolean } = {},
+	}: { startIndex?: number; endIndex?: number; settle?: boolean } = {},
 ): BlockBoundary {
 	let pos = base;
 	let end = 0;
 	let count = 0;
-	let blockEnd = 0;
 	for (let i = startIndex; i < endIndex; i++) {
 		const token = tokens[i];
 		const raw = token.raw;
 		const tokenEnd = pos + raw.length;
-		if (token.type !== "math") {
-			if (window !== undefined) {
-				const block = window.mathBlocks.at(pos);
-				if (block !== undefined) {
-					blockEnd = pos + block.raw.length;
-					break;
-				}
-			} else if (settle && mathBlockMayCloseAt(text, pos)) {
-				break;
-			}
-		}
-		if (raw.endsWith("\n\n") && (window === undefined || tokenEnd < window.end)) {
+		if (settle && token.type !== "math" && mathBlockMayCloseAt(text, pos)) break;
+		if (raw.endsWith("\n\n")) {
 			const prev = i > 0 ? tokens[i - 1] : undefined;
 			if (prev === undefined || prev.type !== "list" || !listMayContinueAt(text, tokenEnd, prev.raw)) {
 				end = tokenEnd;
@@ -1244,116 +1508,33 @@ function stableBlockBoundary(
 		}
 		pos = tokenEnd;
 	}
-	if (count === 0 || end >= text.length) return { end: 0, count: 0, blockEnd };
+	if (count === 0 || end >= text.length) return { end: 0, count: 0 };
 	const next = text.charCodeAt(end);
-	if (next === 0x20 /* space */ || next === 0x0a /* \n */) return { end: 0, count: 0, blockEnd };
+	if (next === 0x20 /* space */ || next === 0x0a /* \n */) return { end: 0, count: 0 };
 	WHITESPACE_LINE_RE.lastIndex = end;
-	const blank = WHITESPACE_LINE_RE.exec(text);
-	if (blank !== null && (blank[1] === "\n" || window === undefined)) return { end: 0, count: 0, blockEnd };
-	return { end, count, blockEnd };
-}
-
-// Bun's regex engine skips the start-anchor optimization for several of marked's
-// block rules — `hr`, `lheading`, `table` and `html` are `^`-anchored
-// alternations of quantified branches — so each failing `exec` rescans the whole
-// remaining source instead of stopping at offset 0. Lexing is then quadratic in
-// document length: an 800 KB message costs ~41 s under Bun where Node/V8 needs
-// ~60 ms, and it runs on the render path, freezing the UI. Bounded windows keep
-// every scan short and restore linear behavior (~0.7 s for that same message).
-/** @internal exported for tests — the windowed lexer's first-probe window size. */
-export const LEX_WINDOW_BYTES = 2 * 1024;
-// Under this size a single pass beats probing for window boundaries; the
-// crossover measured on pathological Markdown sits around 16 KB.
-const WINDOWED_LEX_MIN_BYTES = 16 * 1024;
-
-/**
- * Lex `text` in bounded windows, producing the exact token stream
- * `markdownParser.lexer(text)` would.
- *
- * Window cuts come from marked itself: a throwaway BLOCK-ONLY probe lex of the
- * window reports its last stable block boundary ({@link stableBlockBoundary})
- * and only that confirmed segment is handed to the real lexer; a window
- * holding no boundary grows ({@link nextProbeSize}) until it finds one or
- * reaches the end. Probes never run inline tokenization (their inlineQueue is
- * discarded) — a boundary is a property of block structure alone, and probe
- * inline passes were the dominant cost of an earlier revision. Block
- * tokenization runs per window while inline tokenization is deferred to the
- * end — mirroring `Lexer.lex` — so a `[label]: dest` definition anywhere in
- * the document still resolves for every inline span.
- *
- * Each round's first window reaches just past the next blank line
- * ({@link firstProbeSize}); a tail with no blank line left (e.g. one long
- * tight list) goes to the lexer whole.
- */
-function lexWindowed(text: string): TokensList {
-	const lexer = new Lexer(markdownParser.defaults);
-	const mathBlocks = new MathBlockScan(text);
-	let offset = 0;
-	while (offset < text.length) {
-		let end = text.length;
-		for (let size = firstProbeSize(text, offset); offset + size < text.length;) {
-			const boundary = probeBoundary(text, offset, size, mathBlocks);
-			if (boundary.end > 0) {
-				end = boundary.end;
-				break;
-			}
-			size = nextProbeSize(text, offset, size, boundary.blockEnd);
-		}
-		lexer.blockTokens(text.slice(offset, end), lexer.tokens);
-		offset = end;
-	}
-	for (const queued of lexer.inlineQueue) lexer.inlineTokens(queued.src, queued.tokens);
-	lexer.inlineQueue = [];
-	return lexer.tokens;
-}
-
-/**
- * Size of the first probe window at `offset`: `LEX_WINDOW_BYTES`, or up to one
- * character past the next blank line when that lies further. A boundary is a
- * token whose raw ends in `"\n\n"` and that ends inside its window, so no
- * smaller window can cut. With no blank line left, it is the rest of the text.
- */
-function firstProbeSize(text: string, offset: number): number {
-	const nextBlank = text.indexOf("\n\n", offset);
-	return nextBlank === -1 ? text.length - offset : Math.max(LEX_WINDOW_BYTES, nextBlank + 3 - offset);
-}
-
-/**
- * Size of the next probe window after the one of `size` at `offset` gave no
- * usable cut: at least double, and one character past the first blank line
- * that reaches the window's edge, or `blockEnd` when the probe stopped at a
- * display-math block ending there, since only such a blank line can end a
- * later boundary. Doubling toward a far closer would re-lex the block once
- * per window. With no blank line left, it is the rest of the text.
- */
-function nextProbeSize(text: string, offset: number, size: number, blockEnd: number): number {
-	const nextBlank = text.indexOf("\n\n", Math.max(offset + size, blockEnd) - 2);
-	return nextBlank === -1 ? text.length - offset : Math.max(2 * size, nextBlank + 3 - offset);
-}
-
-/**
- * The last stable block boundary ({@link stableBlockBoundary}) in the window
- * `text.slice(offset, offset + size)`, from a throwaway block-only lex of the
- * window. `mathBlocks` holds the display-math blocks of all of `text`.
- */
-function probeBoundary(text: string, offset: number, size: number, mathBlocks: MathBlockScan): BlockBoundary {
-	const probe = new Lexer(markdownParser.defaults);
-	probe.blockTokens(text.slice(offset, offset + size), probe.tokens);
-	return stableBlockBoundary(text, offset, probe.tokens, { window: { end: offset + size, mathBlocks } });
+	if (WHITESPACE_LINE_RE.test(text)) return { end: 0, count: 0 };
+	return { end, count };
 }
 
 /**
  * Lex a whole document with the renderer's rules (math, custom rules,
- * strikethrough), windowing anything large enough for the quadratic scan to
- * bite. `links` holds every reference definition, at any nesting depth. Callers
- * that split a document along its blocks (table charts) lex through this so
- * they see the blocks Markdown renders.
+ * strikethrough). Callers that split a document along its blocks (table
+ * charts) lex through this so they see the blocks Markdown renders.
  */
 export function lexDocument(text: string): TokensList {
-	// A CR shifts every `raw` span (marked normalizes CRLF before tokenizing), so
-	// window offsets would address the wrong characters — lex those in one pass.
-	if (text.length < WINDOWED_LEX_MIN_BYTES || text.includes("\r")) return markdownParser.lexer(text);
-	return lexWindowed(text);
+	return markdownParser.lexer(text);
+}
+
+/**
+ * `source` as a fenced code block in `lang`: the fence is one backtick longer
+ * than any backtick run in the source (at least three), so the block always
+ * closes where intended. `open` leaves it unclosed, the source verbatim, for
+ * a body that is still arriving.
+ */
+export function fencedCode(lang: string, source: string, options?: { open?: boolean }): string {
+	const longest = source.match(/`+/g)?.reduce((max, run) => Math.max(max, run.length), 2) ?? 2;
+	const fence = "`".repeat(longest + 1);
+	return options?.open ? `${fence}${lang}\n${source}` : `${fence}${lang}\n${source.trimEnd()}\n${fence}`;
 }
 
 /** A hyperlink as the renderer sees it: inline `[text](href)`, `<autolink>`, bare GFM URL, or reference link. */
@@ -1396,8 +1577,122 @@ export function extractMarkdownLinks(text: string): MarkdownLink[] {
 			if (any.rows) for (const row of any.rows) for (const cell of row) walk(cell.tokens);
 		}
 	};
-	walk(lexDocument(text));
+	walk(markdownParser.lexer(text));
 	return links;
+}
+
+/**
+ * Offset just past the destination that starts at or after `start` in `raw`
+ * (CommonMark link destination grammar), plus where it begins. `null` when no
+ * destination is there.
+ */
+function scanLinkDestination(raw: string, start: number): { start: number; end: number } | null {
+	let i = start;
+	while (i < raw.length && (raw[i] === " " || raw[i] === "\t" || raw[i] === "\n" || raw[i] === "\r")) i++;
+	if (i >= raw.length) return null;
+	if (raw[i] === "<") {
+		for (let j = i + 1; j < raw.length; j++) {
+			if (raw[j] === "\\") j++;
+			else if (raw[j] === ">") return { start: i, end: j + 1 };
+			else if (raw[j] === "<" || raw[j] === "\n") return null;
+		}
+		return null;
+	}
+	let depth = 0;
+	let j = i;
+	for (; j < raw.length; j++) {
+		const ch = raw[j]!;
+		if (ch === "\\") {
+			j++;
+			continue;
+		}
+		if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r" || ch.charCodeAt(0) < 0x20) break;
+		if (ch === "(") depth++;
+		else if (ch === ")") {
+			if (depth === 0) break;
+			depth--;
+		}
+	}
+	return j > i ? { start: i, end: j } : null;
+}
+
+/** A destination that stays one destination whatever bytes the target holds. */
+function formatLinkDestination(target: string): string {
+	return /[\s()<>\\]/.test(target) ? `<${target.replaceAll(/[<>\\]/g, ch => encodeURIComponent(ch))}>` : target;
+}
+
+function isListToken(token: Token): token is Tokens.List {
+	return token.type === "list";
+}
+
+function isTableToken(token: Token): token is Tokens.Table {
+	return token.type === "table";
+}
+
+/**
+ * Rewrite the destinations of inline links and link reference definitions in
+ * `text` to `resolve(href)`, leaving everything else byte-for-byte intact.
+ * Hosts that render the Markdown source themselves (a native terminal's `md`
+ * node) resolve relative destinations against their own idea of the working
+ * directory; handing them the session-resolved target keeps links pointing at
+ * what the author meant. Links inside code, images, autolinks and reference
+ * uses (`[x][ref]`, rewritten through their definition) are untouched; a link
+ * whose source cannot be located exactly is left as written.
+ */
+export function rewriteMarkdownLinkDestinations(text: string, resolve: (href: string) => string | undefined): string {
+	const edits: Array<{ start: number; end: number; target: string }> = [];
+	let cursor = 0;
+	const rewrite = (token: Token, labelEnd: number | undefined): void => {
+		const at = text.indexOf(token.raw, cursor);
+		if (at < 0) return;
+		cursor = at + token.raw.length;
+		const href = "href" in token && typeof token.href === "string" ? token.href : "";
+		if (!href || labelEnd === undefined) return;
+		const target = resolve(href);
+		if (!target || target === href) return;
+		const dest = scanLinkDestination(token.raw, labelEnd);
+		if (dest) edits.push({ start: at + dest.start, end: at + dest.end, target });
+	};
+	const walk = (tokens: readonly Token[] | undefined): void => {
+		if (!tokens) return;
+		for (const token of tokens) {
+			if (token.type === "link") {
+				const label = "text" in token && typeof token.text === "string" ? `[${token.text}](` : undefined;
+				rewrite(token, label && token.raw.startsWith(label) ? label.length : undefined);
+				continue;
+			}
+			if (token.type === "def") {
+				const close = token.raw.indexOf("]:");
+				rewrite(token, close < 0 ? undefined : close + 2);
+				continue;
+			}
+			const children = "tokens" in token && Array.isArray(token.tokens) ? token.tokens : undefined;
+			const items = isListToken(token) ? token.items : undefined;
+			const table = isTableToken(token) ? token : undefined;
+			if (token.type === "image" || (!children && !items && !table)) {
+				// A leaf (text, code span, fenced code, html, image…): step past it so a
+				// later link's source is never matched inside it.
+				const at = token.raw ? text.indexOf(token.raw, cursor) : -1;
+				if (at >= 0) cursor = at + token.raw.length;
+				continue;
+			}
+			walk(children);
+			walk(items);
+			if (table) {
+				for (const cell of table.header) walk(cell.tokens);
+				for (const row of table.rows) for (const cell of row) walk(cell.tokens);
+			}
+		}
+	};
+	walk(markdownParser.lexer(text));
+	if (edits.length === 0) return text;
+	let out = "";
+	let last = 0;
+	for (const edit of edits) {
+		out += text.slice(last, edit.start) + formatLinkDestination(edit.target);
+		last = edit.end;
+	}
+	return out + text.slice(last);
 }
 
 /** Drop all L2 cache entries. Call on theme change to prevent stale styled output. */
@@ -1425,6 +1720,13 @@ function objectId(o: object): number {
 export interface DefaultTextStyle {
 	/** Foreground color function */
 	color?: (text: string) => string;
+	/**
+	 * The `color` foreground is prose-level: semantically-themed markdown spans
+	 * (headings, links) keep their own `md*` theme colors instead of being
+	 * painted over by it, while plain text runs still use `color`. Unset keeps
+	 * the historical behavior where `color` paints every run.
+	 */
+	proseFg?: boolean;
 	/** Background color function */
 	bgColor?: (text: string) => string;
 	/** Bold text */
@@ -1501,11 +1803,62 @@ export interface MarkdownTheme {
 interface InlineStyleContext {
 	applyText: (text: string) => string;
 	stylePrefix: string;
+	/** True when the context came from the component's own default style (vs. a caller-supplied one). */
+	isDefault?: boolean;
 }
 
-type ListToken = Token & { items: Array<{ tokens?: Token[] }>; ordered: boolean; start?: number };
-type TableCellToken = { tokens?: Token[] };
-type TableToken = Token & { header: TableCellToken[]; rows: TableCellToken[][]; raw?: string };
+type ListToken = Token & {
+	items: Array<{ raw: string; tokens?: Token[] }>;
+	ordered: boolean;
+	start?: number;
+	loose: boolean;
+};
+type TableCellToken = { tokens?: Token[]; align?: Tokens.TableCell["align"] };
+type TableToken = Token & {
+	header: TableCellToken[];
+	rows: TableCellToken[][];
+	raw?: string;
+	align?: Array<Tokens.TableCell["align"]>;
+};
+
+/** `item` as marked lexes it inside a loose list: tight `text` blocks become paragraphs. */
+function loosenListItem(item: Tokens.ListItem): Tokens.ListItem {
+	if (item.loose) return item;
+	return {
+		...item,
+		loose: true,
+		tokens: item.tokens.map(token =>
+			token.type === "text" ? ({ ...token, type: "paragraph" } as Tokens.Paragraph) : token,
+		),
+	};
+}
+
+const REFERENCE_LABEL_RE = /\[[^[\]]*[^\s[\]][^[\]]*\]/;
+const LABEL_FREE_TOKENS = new Set(["checkbox", "code", "codespan", "escape", "html", "image", "math"]);
+
+function labelSource(tokens: readonly Token[]): string {
+	let source = "";
+	for (const token of tokens) {
+		if (token.type === "list") {
+			for (const item of (token as Tokens.List).items) source += `${labelSource(item.tokens)}\n\n`;
+		} else if (token.type === "table") {
+			const table = token as TableToken;
+			for (const cell of [...table.header, ...table.rows.flat()]) source += `${labelSource(cell.tokens ?? [])}\n\n`;
+		} else if ("tokens" in token && token.tokens) {
+			source += labelSource(token.tokens);
+		} else {
+			source += LABEL_FREE_TOKENS.has(token.type) ? " " : token.raw;
+		}
+	}
+	return source;
+}
+
+/** Whether a reference definition arriving later could still turn part of `item` into a link. */
+function hasUnresolvedReferenceLabel(item: Tokens.ListItem): boolean {
+	return labelSource(item.tokens)
+		.split(BLANK_LINE_RE)
+		.some(block => REFERENCE_LABEL_RE.test(block));
+}
 
 function formatHyperlink(text: string, target: string): string {
 	if (!TERMINAL.hyperlinks || !target) {
@@ -1518,6 +1871,63 @@ function formatHyperlink(text: string, target: string): string {
 	}
 
 	return `\x1b]8;;${safeTarget}\x07${text}\x1b]8;;\x07`;
+}
+
+const CODE_ESCAPE_RE = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))/y;
+const CODE_URL_RE = /(?<![A-Za-z0-9+.-])https?:\/\/[^\s\x00-\x1f\x7f<>"'`]+/g;
+const CODE_URL_TRAILING_RE = /[.,;:!?]+$/;
+const CODE_URL_OPENERS: Partial<Record<string, string>> = { ")": "(", "]": "[", "}": "{" };
+
+/** Whether `url` ends in a closing bracket that has no matching opener inside it. */
+function endsWithUnbalancedCloser(url: string): boolean {
+	const closer = url.at(-1) ?? "";
+	const opener = CODE_URL_OPENERS[closer];
+	return opener !== undefined && url.split(closer).length > url.split(opener).length;
+}
+
+/**
+ * Wrap each http(s) URL in a highlighted code row with an OSC 8 hyperlink.
+ * The row is hard-wrapped later; wrapTextWithAnsi reopens the link on every
+ * fragment, so terminals open the whole URL instead of only the first visual
+ * line. URLs are located in the visible text so syntax-highlight escapes
+ * inside them stay in place and the visible width is unchanged.
+ */
+function linkifyCodeUrls(line: string): string {
+	if (!TERMINAL.hyperlinks || !line.includes("://") || line.includes("\x1b]8;")) {
+		return line;
+	}
+
+	let visible = "";
+	const offsets: number[] = [];
+	for (let i = 0; i < line.length;) {
+		if (line.charCodeAt(i) === 0x1b) {
+			CODE_ESCAPE_RE.lastIndex = i;
+			const match = CODE_ESCAPE_RE.exec(line);
+			if (match) {
+				i += match[0].length;
+				continue;
+			}
+		}
+		offsets.push(i);
+		visible += line[i];
+		i++;
+	}
+
+	let result = "";
+	let copied = 0;
+	for (const match of visible.matchAll(CODE_URL_RE)) {
+		let url = match[0].replace(CODE_URL_TRAILING_RE, "");
+		// A closer only belongs to the URL when it balances an opener inside it.
+		while (endsWithUnbalancedCloser(url)) {
+			url = url.slice(0, -1).replace(CODE_URL_TRAILING_RE, "");
+		}
+		if (!/:\/\/./.test(url)) continue;
+		const start = offsets[match.index] ?? 0;
+		const end = (offsets[match.index + url.length - 1] ?? start) + 1;
+		result += line.slice(copied, start) + formatHyperlink(line.slice(start, end), url);
+		copied = end;
+	}
+	return copied === 0 ? line : result + line.slice(copied);
 }
 
 function isAsciiTextSizingPayload(text: string): boolean {
@@ -1768,6 +2178,7 @@ interface RenderSignature {
 	defaultTextStyleId: number;
 	imageProtocol: string;
 	hyperlinks: boolean;
+	extensionLinks: number;
 	textSizing: boolean;
 	bgColorProbe: string;
 	headingProbe: string;
@@ -1856,6 +2267,26 @@ interface TailRowCache extends RenderSignature {
 	// type of token[i+1] when the rows were produced (blank/spacing gate).
 	nextTypes: (string | undefined)[];
 }
+interface ListItemRowsCache {
+	signature: RenderSignature;
+	width: number;
+	themeEpoch: number;
+	ordered: boolean;
+	start: number | undefined;
+	loose: boolean;
+	raws: string[];
+	rows: RenderedLine[][];
+}
+
+interface StreamingListCache {
+	text: string;
+	before: Token[];
+	start: number;
+	tailStart: number;
+	stableCount: number;
+	referenceStop?: number;
+	list: Tokens.List;
+}
 /**
  * Mutable per-token record collector passed to #renderContentLines while
  * rendering the streaming tail. The render loop fills `raws`/`nextTypes`
@@ -1919,6 +2350,8 @@ export class Markdown implements Component {
 	#cachedText?: string;
 	#cachedWidth?: number;
 	#cachedLines?: readonly string[];
+	// Extension-link routing changes how links draw without changing text or width.
+	#cachedExtensionLinks?: number;
 	#transientRenderCache = false;
 
 	// Streaming-lex cache: the largest blank-line-bounded prefix of #text whose
@@ -1941,6 +2374,19 @@ export class Markdown implements Component {
 	// The frozen prefix's leading run in front of the first of those openers:
 	// no append can change its tokens, so getLastRenderStableText publishes it.
 	#streamSettledText?: string;
+	// The complete lines inside a still-open fence, with the fence's opening
+	// line in front of them: an open fence never reaches a "\n\n" boundary, so
+	// #streamSettledText holds nothing for it and a long streamed code block
+	// would stay unretirable until the closing fence arrived. Kept while the
+	// source extends it, so the published prefix never shrinks.
+	#streamFenceSettledText?: string;
+	// The text in front of the newest top-level item of a list that is still
+	// streaming as the last block. Once an item's marker line has ended, no
+	// append can add to the items in front of it, and #renderList draws each
+	// item from its own tokens alone, so their rows are final. Kept while later
+	// texts extend it, so the published prefix never shrinks when the list
+	// stops being the last block.
+	#streamListSettledText?: string;
 	// The prefix before a rewind that only a closer on the still-growing last
 	// line caused. Once a later text holds no closer line after it, that
 	// prefix is right again, so #lexTokens puts it back.
@@ -1969,6 +2415,8 @@ export class Markdown implements Component {
 	// the blank-replacement branch of setText and the fallback branch of
 	// #lexTokens.
 	#tailRowCache?: TailRowCache;
+	#listItemRowsCache?: ListItemRowsCache;
+	#streamingListCache?: StreamingListCache;
 	// True while #renderStreamingContentLines renders the frozen token range:
 	// frozen code blocks highlight even in transient mode so their bytes match
 	// the finalized render (they render once into the prefix line cache, so
@@ -1983,6 +2431,9 @@ export class Markdown implements Component {
 	#fastTail?: FastTailRecipe; // undefined = disarmed
 	// B+ capture plumbing: #renderContentLines records the last rendered paragraph row.
 	#lastTailCapture?: { kind: "paragraph"; open: boolean; rowInput: string; rowRaw: string };
+	/** Top-level token index and running count of the extension links drawn in it; see `#renderContentLines`. */
+	#extensionLinkBlock = 0;
+	#extensionLinkOrdinal = 0;
 	#ignoreTight = false;
 	#native?: { text: string; stream: boolean; node: NativeNode };
 	setIgnoreTight(ignore: boolean): this {
@@ -2075,6 +2526,7 @@ export class Markdown implements Component {
 			// the non-append edit, so drop the frozen stream state here or it
 			// outlives the content it indexed.
 			this.#dropStreamPrefix();
+			this.#listItemRowsCache = undefined;
 			// B+: the captured fast-path rows index the replaced content — drop
 			// the recipe so a fresh stream cannot splice onto stale rows.
 			this.#fastTail = undefined;
@@ -2089,6 +2541,14 @@ export class Markdown implements Component {
 		this.#cachedLines = undefined;
 	}
 
+	releaseRenderCaches(): void {
+		this.invalidate();
+		this.#dropStreamPrefix();
+		this.#streamingHighlightCache = undefined;
+		this.#fastTail = undefined;
+		this.#lastTailCapture = undefined;
+	}
+
 	/**
 	 * The unrendered source as an `md` node, `stream` while the streaming
 	 * (transient) cache is on. Append-only growth yields a fresh node of the
@@ -2100,21 +2560,49 @@ export class Markdown implements Component {
 		const cached = this.#native;
 		if (cached?.text === this.#text && cached.stream === stream) return cached.node;
 		// Sources are model text; OSC 8 / SGR bytes a caller spliced in are the terminal's to style, not ours.
-		const source = this.#text.includes("\x1b") ? plainText(this.#text) : this.#text;
-		const described = md(source, stream ? { stream: true } : undefined);
+		const plain = this.#text.includes("\x1b") ? plainText(this.#text) : this.#text;
+		const described = stream
+			? md(speculativeStreamingSource(holdPartialTableRow(plain)), { stream: true })
+			: md(plain);
 		this.#native = { text: this.#text, stream, node: described };
 		return described;
 	}
 
 	/**
-	 * Width-independent source prefix of the last render ending at a frozen
-	 * Markdown block boundary that no append can move: it stops in front of a
-	 * display-math opener whose block an append could still close. Only
+	 * Width-independent source prefix of the last render that no append can
+	 * change: up to a frozen Markdown block boundary, stopping in front of a
+	 * display-math opener whose block an append could still close, or, while a
+	 * list streams as the last block, up to its newest top-level item. Only
 	 * meaningful while streaming (transient render cache on); grows
 	 * monotonically under append-only `setText`.
 	 */
 	getLastRenderStableText(): string {
-		return this.#transientRenderCache ? (this.#streamSettledText ?? "") : "";
+		if (!this.#transientRenderCache) return "";
+		// An open fence has no "\n\n" boundary, so the block walk above settles
+		// nothing inside it. Its finished lines are settled all the same: no
+		// append can change a line that already ended. Publish them, or a long
+		// streamed code block (SQL, logs) stays unretirable in the mutable
+		// viewport and its top rows are dropped as it outgrows the screen.
+		const source = streamingMarkdownSource(this.#text);
+		let fence = this.#streamFenceSettledText;
+		if (fence !== undefined && !source.startsWith(fence)) {
+			// A non-append edit rewound the text below what was published. Drop
+			// the stored prefix as well: keeping it would fail this check on
+			// every later frame and leave the block unretirable for the rest of
+			// the stream.
+			fence = undefined;
+			this.#streamFenceSettledText = undefined;
+		}
+		const body = settledFenceBodyEnd(source);
+		if (body > (fence?.length ?? 0)) {
+			fence = source.slice(0, body);
+			this.#streamFenceSettledText = fence;
+		}
+		let text = this.#streamSettledText ?? "";
+		const list = this.#streamListSettledText;
+		if (list !== undefined && list.length > text.length) text = list;
+		if (fence !== undefined && fence.length > text.length) text = fence;
+		return text;
 	}
 
 	get transientRenderCache(): boolean {
@@ -2144,8 +2632,11 @@ export class Markdown implements Component {
 			// render consumes it (see #lexTokens / the L2 hit path).
 			this.#streamPrefixLineCache = undefined;
 			this.#tailRowCache = undefined;
+			this.#listItemRowsCache = undefined;
 			this.#streamingHighlightCache = undefined;
+			this.#streamingListCache = undefined;
 			this.#streamRewound = undefined;
+			this.#streamFenceSettledText = undefined;
 		}
 		this.invalidate();
 	}
@@ -2221,30 +2712,125 @@ export class Markdown implements Component {
 		}
 		this.#lastScanLength = text.length;
 		this.#lastScanCanStream = canStream;
+		if (!canStream) this.#listItemRowsCache = undefined;
 		this.#lastScanValid = true;
 		this.#appendOnlySinceLastScan = true;
+		if (canStream && retainPrefix) {
+			const tokens = this.#resumeStreamingList(text);
+			if (tokens !== undefined) {
+				this.#freezeStablePrefix(text, tokens, { preserveExisting: true });
+				this.#checkpointStreamingList(text, tokens);
+				return tokens;
+			}
+		}
 		if (canStream && hasPrefix) {
 			const tailTokens = lexDocument(refDefText);
-			// HAS_REF_DEF sees top-level definition lines only. A definition nested
-			// in a quote or list item still registers for the whole document and
-			// can resolve a reference in the frozen prefix, which was lexed
+			// A definition at any nesting depth registers for the whole document
+			// and can resolve a reference in the frozen prefix, which was lexed
 			// without it, so any definition in the tail sends the text to a full lex.
 			if (Object.keys(tailTokens.links).length === 0) {
 				const tokens = [...prefixTokens, ...tailTokens];
 				if (retainPrefix) this.#freezeStablePrefix(text, tokens, { preserveExisting: true });
 				else this.#dropStreamPrefix();
+				if (retainPrefix) this.#checkpointStreamingList(text, tokens);
 				return tokens;
 			}
 		}
 		const tokens = lexDocument(text);
+		const hasReferenceDefinitions = Object.keys(tokens.links).length > 0;
+		if (hasReferenceDefinitions) this.#lastScanCanStream = false;
 		// A definition frozen into the prefix would be missing from every later
 		// tail lex, so a full lex that registered any definition freezes nothing.
-		if (canStream && retainPrefix && Object.keys(tokens.links).length === 0) {
+		if (canStream && retainPrefix && !hasReferenceDefinitions) {
 			this.#freezeStablePrefix(text, tokens, { preserveExisting: false });
+			this.#checkpointStreamingList(text, tokens);
 		} else {
 			this.#dropStreamPrefix();
 		}
 		return tokens;
+	}
+
+	#resumeStreamingList(text: string): Token[] | undefined {
+		const cached = this.#streamingListCache;
+		if (cached === undefined || text.length <= cached.text.length || !text.startsWith(cached.text)) return undefined;
+		const tail = lexDocument(text.slice(cached.tailStart));
+		if (Object.keys(tail.links).length > 0) return undefined;
+		const first = tail[0];
+		if (first?.type !== "list") return undefined;
+		const list = first as Tokens.List;
+		if (!listMayContinueAt(list.raw, 0, cached.list.raw)) return undefined;
+		const loose = cached.list.loose || list.loose;
+		const completed = cached.list.items.slice(0, cached.stableCount);
+		const items = [...completed, ...list.items];
+		const merged: Tokens.List = {
+			...cached.list,
+			raw: text.slice(cached.start, cached.tailStart + list.raw.length),
+			loose,
+			items: loose ? items.map(loosenListItem) : items,
+		};
+		return [...cached.before, merged, ...tail.slice(1)];
+	}
+
+	#checkpointStreamingList(text: string, tokens: Token[]): void {
+		const previous = this.#streamingListCache;
+		this.#streamingListCache = undefined;
+		if (this.#streamListSettledText !== undefined && !text.startsWith(this.#streamListSettledText)) {
+			this.#streamListSettledText = undefined;
+		}
+		let index = tokens.length - 1;
+		while (tokens[index]?.type === "space") index--;
+		const token = tokens[index];
+		if (token?.type !== "list") return;
+		const list = token as Tokens.List;
+		let start = 0;
+		for (let i = 0; i < index; i++) start += tokens[i]!.raw.length;
+		// Late block delimiters can absorb an unfrozen preceding region. Bare
+		// environments can also absorb list items through an equation prefix.
+		if (start !== (this.#streamPrefixText?.length ?? 0) || BARE_ENV_BEGIN.test(list.raw)) return;
+		const canResume = previous !== undefined && previous.start === start && text.startsWith(previous.text);
+		let cursor = canResume ? previous.tailStart : start;
+		let tailStart = start;
+		let stableCount = 0;
+		let referenceStop = canResume ? previous.referenceStop : undefined;
+		const indent = /^ */.exec(list.raw)![0].length;
+		for (let i = canResume ? previous.stableCount : 0; i < list.items.length; i++) {
+			const item = list.items[i]!;
+			const position = text.indexOf(item.raw, cursor);
+			if (position < cursor || position >= start + list.raw.length) return;
+			// List continuation uses the first item's indentation. Resume only at
+			// an item with that same indentation so the lexer sees the same context.
+			if (/^ */.exec(item.raw)![0].length === indent) {
+				tailStart = position;
+				stableCount = i;
+			}
+			if (referenceStop === undefined && hasUnresolvedReferenceLabel(item)) referenceStop = tailStart;
+			cursor = position + item.raw.length;
+		}
+		// Items from stableCount on are scanned again next time and may still
+		// resolve their own labels, so only a finished item's label is kept.
+		if (referenceStop !== undefined && referenceStop >= tailStart) referenceStop = undefined;
+		this.#streamingListCache = {
+			text,
+			before: tokens.slice(0, index),
+			start,
+			tailStart,
+			stableCount,
+			referenceStop,
+			list,
+		};
+		// No append can add to an item once a later one has begun, but a later
+		// reference definition can still restyle a bracketed label in it. The
+		// list must also start right at the settled boundary: in front of it may
+		// sit a display-math opener whose closer, arriving after the list, would
+		// turn the whole run, list included, into one math block.
+		const settledEnd = referenceStop ?? tailStart;
+		if (
+			settledEnd > start &&
+			(this.#streamSettledText?.length ?? 0) === start &&
+			settledEnd > (this.#streamListSettledText?.length ?? 0)
+		) {
+			this.#streamListSettledText = text.slice(0, settledEnd);
+		}
 	}
 
 	/**
@@ -2257,8 +2843,11 @@ export class Markdown implements Component {
 		this.#streamPrefixTokens = undefined;
 		this.#streamPrefixOpeners = NO_OPENERS;
 		this.#streamSettledText = undefined;
+		this.#streamListSettledText = undefined;
 		this.#streamPrefixLineCache = undefined;
 		this.#tailRowCache = undefined;
+		this.#listItemRowsCache = undefined;
+		this.#streamingListCache = undefined;
 	}
 
 	/**
@@ -2299,6 +2888,8 @@ export class Markdown implements Component {
 	#rewindStreamPrefix(end: number, count: number): void {
 		this.#streamPrefixLineCache = rewoundLineCache(this.#streamPrefixLineCache, count);
 		this.#tailRowCache = undefined;
+		this.#listItemRowsCache = undefined;
+		this.#streamingListCache = undefined;
 		if (count === 0) {
 			this.#streamPrefixText = undefined;
 			this.#streamPrefixTokens = undefined;
@@ -2336,6 +2927,8 @@ export class Markdown implements Component {
 		this.#streamPrefixOpeners = rewound.openers;
 		this.#streamPrefixLineCache = rewound.lineCache;
 		this.#tailRowCache = rewound.tailRowCache;
+		this.#listItemRowsCache = undefined;
+		this.#streamingListCache = undefined;
 	}
 
 	// Freeze the largest run of leading blocks that end on a hard "\n\n" boundary
@@ -2405,7 +2998,12 @@ export class Markdown implements Component {
 		// instance at the same width (e.g. resize debounce, repeated redraws).
 		// Returning the cached reference is load-bearing: parents memoize their
 		// concatenation on reference equality.
-		if (this.#cachedLines && this.#cachedText === this.#text && this.#cachedWidth === width) {
+		if (
+			this.#cachedLines &&
+			this.#cachedText === this.#text &&
+			this.#cachedWidth === width &&
+			this.#cachedExtensionLinks === extensionLinksVersion()
+		) {
 			return this.#cachedLines;
 		}
 
@@ -2418,6 +3016,7 @@ export class Markdown implements Component {
 			this.#cachedText = this.#text;
 			this.#cachedWidth = width;
 			this.#cachedLines = EMPTY_RENDER_LINES;
+			this.#cachedExtensionLinks = extensionLinksVersion();
 			return EMPTY_RENDER_LINES;
 		}
 
@@ -2502,7 +3101,11 @@ export class Markdown implements Component {
 					// into a table on a marker-free delta (`| --` + `--- | -`).
 					!FAST_TABLE_DELIM_ROW_RE.test(grownLastLine) &&
 					(!markerDelta || (!this.#lastTailCapture?.open && !pairSeamHazard && !inlineHasOpen(deltaTokens!))) &&
-					!FAST_URL_ANYWHERE_RE.test(seamWindow)
+					// Extension link markers are numbered per block; a delta rendered alone can't continue that.
+					!(deltaTokens && hasExtensionLink(deltaTokens)) &&
+					!FAST_URL_ANYWHERE_RE.test(seamWindow) &&
+					// A link or math span the grown row leaves open renders speculatively closed: re-lex.
+					speculativeInlineClose(grownLastLine) === undefined
 				) {
 					// Same text paths a full re-lex applies: real pipeline for marker
 					// deltas, plain swatch/entity render for inert deltas.
@@ -2540,6 +3143,7 @@ export class Markdown implements Component {
 					this.#cachedText = this.#text;
 					this.#cachedWidth = width;
 					this.#cachedLines = fastResult;
+					this.#cachedExtensionLinks = signature.extensionLinks;
 					this.#fastTail = {
 						lines: fastResult,
 						source: this.#text,
@@ -2602,12 +3206,17 @@ export class Markdown implements Component {
 				this.#cachedText = this.#text;
 				this.#cachedWidth = width;
 				this.#cachedLines = cached;
+				this.#cachedExtensionLinks = signature.extensionLinks;
 				return cached;
 			}
 		}
 
-		// Parse markdown to HTML-like tokens
-		const tokens = this.#lexTokens(normalizedText);
+		// Parse markdown to HTML-like tokens. While streaming, the block still
+		// being written renders its open link or math span as already closed.
+		const lexed = this.#lexTokens(normalizedText);
+		const tail = lexed.at(-1);
+		const speculated = this.transientRenderCache && tail ? speculateStreamingToken(tail) : undefined;
+		const tokens = speculated ? [...lexed.slice(0, -1), speculated] : lexed;
 		let contentLines: string[];
 		this.#activeRenderSignature = signature;
 		try {
@@ -2631,9 +3240,12 @@ export class Markdown implements Component {
 		this.#cachedText = this.#text;
 		this.#cachedWidth = width;
 		this.#cachedLines = result;
+		this.#cachedExtensionLinks = signature.extensionLinks;
 
 		const fastEligible =
 			this.transientRenderCache &&
+			// A speculated frame's rows come from source the stream does not hold yet.
+			speculated === undefined &&
 			contentLines.length > 0 &&
 			// B+ invariant: only the FINAL #renderContentLines call captures;
 			// the all-cache-hit prefix path clears #lastTailCapture at its top.
@@ -2683,6 +3295,7 @@ export class Markdown implements Component {
 			defaultTextStyleId: this.#defaultTextStyle ? objectId(this.#defaultTextStyle) : -1,
 			imageProtocol: TERMINAL.imageProtocol ?? "",
 			hyperlinks: TERMINAL.hyperlinks,
+			extensionLinks: extensionLinksVersion(),
 			textSizing: TERMINAL.textSizing,
 			bgColorProbe,
 			headingProbe,
@@ -2695,7 +3308,7 @@ export class Markdown implements Component {
 	}
 
 	#renderCacheKey(normalizedText: string, signature: RenderSignature): string {
-		return `${normalizedText}\x00${signature.width}\x00${signature.paddingX}\x00${signature.paddingY}\x00${signature.codeBlockIndent}\x00${signature.themeId}\x00${signature.defaultTextStyleId}\x00${signature.imageProtocol}\x00${signature.hyperlinks ? 1 : 0}\x00${signature.textSizing ? 1 : 0}\x00${signature.bgColorProbe}\x00${signature.headingProbe}\x00${signature.symbolsProbe}`;
+		return `${normalizedText}\x00${signature.width}\x00${signature.paddingX}\x00${signature.paddingY}\x00${signature.codeBlockIndent}\x00${signature.themeId}\x00${signature.defaultTextStyleId}\x00${signature.imageProtocol}\x00${signature.hyperlinks ? 1 : 0}\x00${signature.extensionLinks}\x00${signature.textSizing ? 1 : 0}\x00${signature.bgColorProbe}\x00${signature.headingProbe}\x00${signature.symbolsProbe}`;
 	}
 
 	#renderStreamingContentLines(
@@ -2704,6 +3317,7 @@ export class Markdown implements Component {
 		signature: RenderSignature,
 		contentWidth: number,
 	): string[] {
+		if (tokens[tokens.length - 1]?.type !== "list") this.#listItemRowsCache = undefined;
 		const stableText = this.#streamPrefixText;
 		const stableTokenCount = this.#streamPrefixTokens?.length ?? 0;
 		if (stableText === undefined || stableTokenCount === 0 || !normalizedText.startsWith(stableText)) {
@@ -2770,6 +3384,7 @@ export class Markdown implements Component {
 		if (cache.defaultTextStyleId !== signature.defaultTextStyleId) return undefined;
 		if (cache.imageProtocol !== signature.imageProtocol) return undefined;
 		if (cache.hyperlinks !== signature.hyperlinks) return undefined;
+		if (cache.extensionLinks !== signature.extensionLinks) return undefined;
 		if (cache.textSizing !== signature.textSizing) return undefined;
 		if (cache.bgColorProbe !== signature.bgColorProbe) return undefined;
 		if (cache.headingProbe !== signature.headingProbe) return undefined;
@@ -2860,6 +3475,7 @@ export class Markdown implements Component {
 		if (cache.defaultTextStyleId !== signature.defaultTextStyleId) return start;
 		if (cache.imageProtocol !== signature.imageProtocol) return start;
 		if (cache.hyperlinks !== signature.hyperlinks) return start;
+		if (cache.extensionLinks !== signature.extensionLinks) return start;
 		if (cache.textSizing !== signature.textSizing) return start;
 		if (cache.bgColorProbe !== signature.bgColorProbe) return start;
 		if (cache.headingProbe !== signature.headingProbe) return start;
@@ -2894,6 +3510,10 @@ export class Markdown implements Component {
 			const token = tokens[i];
 			const nextToken = tokens[i + 1];
 			const tokenWrappedRowStart = wrappedLines.length;
+			// Extension links are numbered per top-level block, across its nested inline runs, so
+			// identical links on neighbouring rows draw distinct markers that every render repeats.
+			this.#extensionLinkBlock = i;
+			this.#extensionLinkOrdinal = 0;
 			const renderedTokenLines = this.#renderToken(token, contentWidth, nextToken?.type);
 			for (const renderedRow of renderedTokenLines) {
 				// Lists wrap while their structural prefixes are still available, so
@@ -3027,7 +3647,8 @@ export class Markdown implements Component {
 		const tokenText = "text" in token && typeof token.text === "string" ? token.text : "";
 		const lang = "lang" in token && typeof token.lang === "string" ? token.lang : undefined;
 		const addBodyLine = (line: string): void => {
-			bodyLines.push(renderedLine(literalCode ? line : codeIndent + line, literalCode));
+			const linked = linkifyCodeUrls(line);
+			bodyLines.push(renderedLine(literalCode ? linked : codeIndent + linked, literalCode));
 		};
 
 		const streaming = this.transientRenderCache && !this.#renderingStablePrefix;
@@ -3280,6 +3901,37 @@ export class Markdown implements Component {
 		return {
 			applyText: (text: string) => this.#applyDefaultStyle(text),
 			stylePrefix: this.#getDefaultStylePrefix(),
+			isDefault: true,
+		};
+	}
+
+	/**
+	 * Style context for semantically-themed spans (headings, links) under a
+	 * `proseFg` default style: plain runs keep the prose foreground, but the
+	 * span's own `md*` theme color must stay the innermost (winning) SGR, so
+	 * `applyText` keeps decorations (bold/italic/…) while dropping the
+	 * prose color. Non-`proseFg` styles and caller-supplied contexts pass
+	 * through unchanged.
+	 */
+	#proseFgExemptContext(styleContext: InlineStyleContext | undefined): InlineStyleContext | undefined {
+		// A caller-supplied context (blockquote identity styling) already governs
+		// this subtree and wins; exemption applies only to the component's own
+		// default style (undefined resolves to it downstream), and stays applied
+		// through nested recursion.
+		if (styleContext && !styleContext.isDefault) return styleContext;
+		if (!this.#defaultTextStyle?.color || !this.#defaultTextStyle?.proseFg) return styleContext;
+		const applyExceptColor = (text: string): string => {
+			let styled = text;
+			if (this.#defaultTextStyle?.bold) styled = this.#theme.bold(styled);
+			if (this.#defaultTextStyle?.italic) styled = this.#theme.italic(styled);
+			if (this.#defaultTextStyle?.strikethrough) styled = this.#theme.strikethrough(styled);
+			if (this.#defaultTextStyle?.underline) styled = this.#theme.underline(styled);
+			return styled;
+		};
+		return {
+			applyText: applyExceptColor,
+			stylePrefix: this.#getStylePrefix(applyExceptColor),
+			isDefault: true,
 		};
 	}
 
@@ -3311,10 +3963,11 @@ export class Markdown implements Component {
 			case "heading": {
 				const headingLevel = token.depth;
 				const headingPrefix = `${"#".repeat(headingLevel)} `;
-				const headingText = this.#renderInlineTokens(token.tokens || [], styleContext);
+				const headingText = this.#renderInlineTokens(token.tokens || [], this.#proseFgExemptContext(styleContext));
 				const headingPlainText = plainInlineTokens(token.tokens || []);
 				let styledHeading: string;
-				if (headingLevel === 1 && TERMINAL.textSizing) {
+				// A sized heading draws plain text, which would drop a clickable extension link's marker.
+				if (headingLevel === 1 && TERMINAL.textSizing && stripExtensionLinkMarkers(headingText) === headingText) {
 					const plainWidth = visibleWidth(headingPlainText);
 					if (plainWidth > 0 && 2 * plainWidth <= width) {
 						const sizedHeading = encodeTextSizedHeading(headingPlainText, 2);
@@ -3629,9 +4282,19 @@ export class Markdown implements Component {
 
 				case "link": {
 					markHtmlItemWhenContent(token.text);
-					const linkText = this.#renderInlineTokens(token.tokens || [], resolvedStyleContext);
-					const styledLinkText = this.#theme.link(this.#theme.underline(linkText));
+					const linkText = this.#renderInlineTokens(
+						token.tokens || [],
+						this.#proseFgExemptContext(resolvedStyleContext),
+					);
 					const href = typeof token.href === "string" ? token.href : "";
+					// An extension owns this link: no suffix, and no hyperlink the terminal could open.
+					// Its label gets its own (dotted) underline instead of the web-link one.
+					if (href && extensionLinkScheme(href)) {
+						const key = `${this.#extensionLinkBlock}\0${this.#extensionLinkOrdinal++}`;
+						result += formatExtensionLink(this.#theme.link(linkText), href, key) + stylePrefix;
+						break;
+					}
+					const styledLinkText = this.#theme.link(this.#theme.underline(linkText));
 					const target = (href && this.#theme.resolveLink?.(href)) || href;
 					const clickableLinkText = formatHyperlink(styledLinkText, target);
 					// If link text matches href, only show the link once. A missing
@@ -3707,6 +4370,41 @@ export class Markdown implements Component {
 		const indent = "  ".repeat(depth);
 		// Use the list's start property (defaults to 1 for ordered lists)
 		const startNumber = token.start ?? 1;
+		const signature =
+			depth === 0 &&
+			styleContext === undefined &&
+			this.#defaultTextStyle === undefined &&
+			this.#transientRenderCache &&
+			!this.#renderingStablePrefix &&
+			this.#lastScanCanStream &&
+			canCacheMarkdownListItems(this.#theme)
+				? this.#activeRenderSignature
+				: undefined;
+		const themeEpoch = signature === undefined ? undefined : getThemeEpoch();
+		const previous = this.#listItemRowsCache;
+		const reusable =
+			signature !== undefined &&
+			themeEpoch !== undefined &&
+			previous !== undefined &&
+			previous.width === width &&
+			previous.themeEpoch === themeEpoch &&
+			previous.ordered === token.ordered &&
+			previous.start === token.start &&
+			previous.loose === token.loose &&
+			this.#signatureEquals(previous.signature, signature)
+				? previous
+				: undefined;
+		let reusableCount = 0;
+		if (reusable !== undefined) {
+			while (
+				reusableCount < token.items.length &&
+				token.items[reusableCount]?.raw === reusable.raws[reusableCount]
+			) {
+				reusableCount++;
+			}
+		}
+		const raws: string[] | undefined = signature === undefined ? undefined : [];
+		const rows: RenderedLine[][] | undefined = signature === undefined ? undefined : [];
 		const pushWrapped = (line: RenderedLine, firstPrefix: string, continuationPrefix: string): void => {
 			if (line.literalCode) {
 				const wrappedLiteralRows = wrapTextWithAnsi(line.text, Math.max(1, width));
@@ -3742,6 +4440,14 @@ export class Markdown implements Component {
 
 		for (let i = 0; i < token.items.length; i++) {
 			const item = token.items[i];
+			if (i < reusableCount && reusable !== undefined && raws !== undefined && rows !== undefined) {
+				const cached = reusable.rows[i]!;
+				for (const row of cached) lines.push(row);
+				raws.push(item.raw);
+				rows.push(cached);
+				continue;
+			}
+			const rowStart = lines.length;
 			const bullet = token.ordered ? `${startNumber + i}. ` : "- ";
 			const firstPrefix = indent + this.#theme.listBullet(bullet);
 			// Continuation rows align under the item text, so the hang matches the
@@ -3750,7 +4456,13 @@ export class Markdown implements Component {
 
 			// Process item tokens; nested-list lines arrive structurally tagged and
 			// already carry their own full indent.
-			const itemLines = this.#renderListItem(item.tokens || [], depth, width, styleContext);
+			const itemLines = this.#renderListItem(
+				item.tokens || [],
+				depth,
+				width,
+				Math.max(1, width - visibleWidth(continuationIndent)),
+				styleContext,
+			);
 
 			if (itemLines.length > 0) {
 				const firstLine = itemLines[0]!;
@@ -3771,6 +4483,22 @@ export class Markdown implements Component {
 			} else {
 				lines.push(renderedLine(firstPrefix));
 			}
+			if (raws !== undefined && rows !== undefined) {
+				raws.push(item.raw);
+				rows.push(lines.slice(rowStart));
+			}
+		}
+		if (signature !== undefined && themeEpoch !== undefined && raws !== undefined && rows !== undefined) {
+			this.#listItemRowsCache = {
+				signature,
+				width,
+				themeEpoch,
+				ordered: token.ordered,
+				start: token.start,
+				loose: token.loose,
+				raws,
+				rows,
+			};
 		}
 
 		return lines;
@@ -3786,11 +4514,13 @@ export class Markdown implements Component {
 		tokens: Token[],
 		parentDepth: number,
 		width: number,
+		contentWidth: number,
 		styleContext?: InlineStyleContext,
 	): RenderedListItemLine[] {
 		const lines: RenderedListItemLine[] = [];
 
-		for (const token of tokens) {
+		for (let i = 0; i < tokens.length; i++) {
+			const token = tokens[i]!;
 			if (token.type === "list") {
 				// Nested list - render with one additional indent level
 				// These lines carry their own indent, so tag them for pass-through
@@ -3830,6 +4560,10 @@ export class Markdown implements Component {
 					lines.push({ ...bodyLine, nested: false });
 				}
 				lines.push({ text: this.#theme.codeBlockBorder("```"), nested: false });
+			} else if (token.type === "table") {
+				for (const row of this.#renderTable(token as TableToken, contentWidth, tokens[i + 1]?.type, styleContext)) {
+					lines.push({ text: row, nested: false });
+				}
 			} else if (isMathToken(token)) {
 				// Display math block inside a list item: stack fractions / matrix rows.
 				const apply = styleContext?.applyText ?? ((t: string) => this.#applyDefaultStyle(t));
@@ -3871,7 +4605,7 @@ export class Markdown implements Component {
 	 * Delegates to wrapTextWithAnsi() so ANSI codes + long tokens are handled
 	 * consistently with the rest of the renderer.
 	 */
-	#wrapCellText(text: string, maxWidth: number): string[] {
+	#wrapCellText(text: string, maxWidth: number, clampOversized = true): string[] {
 		const cellWidth = Math.max(1, maxWidth);
 		// Wrap the whole cell in one call so wrapTextWithAnsi() balances OSC 8
 		// hyperlink state across explicit newlines (e.g. `<br>` rendered as \n);
@@ -3886,7 +4620,34 @@ export class Markdown implements Component {
 		// (e.g. mdCode) would bleed into the "│" and the following cells.
 		// Terminate each line at default fg, clearing bold/italic but keeping
 		// any ambient background (message-bg rendering) intact.
-		return wrapped.map(line => `${line}\x1b[22m\x1b[23m\x1b[39m`);
+		// A wide glyph can exceed a one-cell column without wrapping (a 2-cell
+		// emoji in a column squeezed to 1), so clamp here before the row is
+		// spliced between borders; otherwise the overwide row is re-wrapped and
+		// the trailing border lands on its own line.
+		return wrapped.map(line => {
+			const fitted = clampOversized && visibleWidth(line) > cellWidth ? truncateToWidth(line, cellWidth) : line;
+			return `${fitted}\x1b[22m\x1b[23m\x1b[39m`;
+		});
+	}
+
+	/**
+	 * Pad a table cell to the width of its column, following the column's GFM
+	 * alignment: a right-aligned cell ends at the column's right edge, a
+	 * centered one is surrounded by padding, and anything else stays flush left.
+	 */
+	#alignCellText(text: string, width: number, align: Tokens.TableCell["align"]): string {
+		const gap = Math.max(0, width - visibleWidth(text));
+		if (gap === 0) return text;
+		switch (align) {
+			case "right":
+				return padding(gap) + text;
+			case "center": {
+				const left = Math.floor(gap / 2);
+				return padding(left) + text + padding(gap - left);
+			}
+			default:
+				return text + padding(gap);
+		}
 	}
 
 	/**
@@ -3930,8 +4691,21 @@ export class Markdown implements Component {
 			naturalWidths[i] = Math.max(...headerLineWidths, 0);
 			minWordWidths[i] = Math.max(1, this.#getLongestWordWidth(headerText, maxUnbrokenWordWidth));
 		}
-		for (const row of token.rows) {
+		// While streaming, the last row's open cell is still growing (an unclosed
+		// link even shows its whole URL): sizing columns by it would rewrap every
+		// row above it on each frame. Lay that cell out in the measured widths
+		// instead; it counts once a `|` or newline closes it. The row's closed
+		// cells are final and count already. The first data row has no finished
+		// rows to borrow from, so it counts whole.
+		const openCell =
+			this.#transientRenderCache && !this.#renderingStablePrefix && token.rows.length > 1
+				? growingTableCell(token.raw)
+				: -1;
+		const lastRow = token.rows.length - 1;
+		for (let rowIndex = 0; rowIndex <= lastRow; rowIndex++) {
+			const row = token.rows[rowIndex];
 			for (let i = 0; i < row.length; i++) {
+				if (rowIndex === lastRow && i === openCell) continue;
 				const cellText = this.#renderInlineTokens(row[i].tokens || [], styleContext);
 				const cellLineWidths = this.#terminalLineWidths(cellText);
 				naturalWidths[i] = Math.max(naturalWidths[i] || 0, ...cellLineWidths);
@@ -4017,6 +4791,12 @@ export class Markdown implements Component {
 		const h = t.horizontal;
 		const v = t.vertical;
 
+		// GFM alignment belongs to the column: the marker in the delimiter row
+		// applies to the header and to every body cell below it.
+		const columnAligns: Array<Tokens.TableCell["align"]> = token.header.map(
+			(cell, i) => cell.align ?? token.align?.[i] ?? null,
+		);
+
 		// Render top border
 		const topBorderCells = columnWidths.map(w => h.repeat(w));
 		lines.push(`${t.topLeft}${h}${topBorderCells.join(`${h}${t.teeDown}${h}`)}${h}${t.topRight}`);
@@ -4031,7 +4811,7 @@ export class Markdown implements Component {
 		for (let lineIdx = 0; lineIdx < headerLineCount; lineIdx++) {
 			const rowParts = headerCellLines.map((cellLines, colIdx) => {
 				const text = cellLines[lineIdx] || "";
-				const padded = text + padding(Math.max(0, columnWidths[colIdx] - visibleWidth(text)));
+				const padded = this.#alignCellText(text, columnWidths[colIdx], columnAligns[colIdx] ?? null);
 				return this.#theme.bold(padded);
 			});
 			lines.push(`${v} ${rowParts.join(` ${v} `)} ${v}`);
@@ -4049,12 +4829,34 @@ export class Markdown implements Component {
 				const text = this.#renderInlineTokens(cell.tokens || [], styleContext);
 				return this.#wrapCellText(text, columnWidths[i]);
 			});
-			const rowLineCount = Math.max(...rowCellLines.map(c => c.length));
+			let rowLineCount = Math.max(...rowCellLines.map(c => c.length));
+			// The open cell is laid out in widths measured without it, so it can
+			// wrap past the lines its row's finished cells need. Those extra lines
+			// come and go as the cell grows and the column widens, moving every row
+			// below the table each frame; hold the row at its finished cells' height
+			// until the cell closes and counts toward the widths. While lines are
+			// held back, only the last kept line makes room for a `…`: it is
+			// re-wrapped one column narrower, since the wrapper closes the line's
+			// links and styles where truncation would cut them off, and dropped when
+			// even that overflows (a wide glyph in a two-cell column).
+			if (rowIndex === lastRow && rowCellLines[openCell]) {
+				const settledLineCount = Math.max(1, ...rowCellLines.filter((_, i) => i !== openCell).map(c => c.length));
+				if (rowCellLines[openCell].length > settledLineCount) {
+					const width = columnWidths[openCell];
+					const kept = rowCellLines[openCell].slice(0, settledLineCount);
+					const last =
+						width > 1 ? (this.#wrapCellText(kept[settledLineCount - 1], width - 1, false)[0] ?? "") : "";
+					kept[settledLineCount - 1] = `${visibleWidth(last) < width ? last : ""}…`;
+					rowCellLines[openCell] = kept;
+				}
+				rowLineCount = settledLineCount;
+			}
 
 			for (let lineIdx = 0; lineIdx < rowLineCount; lineIdx++) {
 				const rowParts = rowCellLines.map((cellLines, colIdx) => {
 					const text = cellLines[lineIdx] || "";
-					return text + padding(Math.max(0, columnWidths[colIdx] - visibleWidth(text)));
+					const align = row[colIdx]?.align ?? columnAligns[colIdx] ?? null;
+					return this.#alignCellText(text, columnWidths[colIdx], align);
 				});
 				lines.push(`${v} ${rowParts.join(` ${v} `)} ${v}`);
 			}

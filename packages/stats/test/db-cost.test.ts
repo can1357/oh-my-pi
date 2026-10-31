@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import { closeDb, getRecentRequests, initDb, insertMessageStats } from "@oh-my-pi/omp-stats/db";
 import {
 	getCostTimeSeries,
@@ -9,8 +9,9 @@ import {
 	getStatsByProvider,
 } from "@oh-my-pi/omp-stats/rollup";
 import type { MessageStats } from "@oh-my-pi/omp-stats/types";
+import * as catalogModels from "@oh-my-pi/pi-catalog/models";
 import { getBundledModel, getBundledModels } from "@oh-my-pi/pi-catalog/models";
-import { getStatsDbPath } from "@oh-my-pi/pi-utils";
+import { getStatsDbPath, VERSION } from "@oh-my-pi/pi-utils";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
 
 installStatsTestIsolation("@pi-stats-db-");
@@ -256,6 +257,8 @@ describe("stats subscription cost correction", () => {
 			0,
 			0,
 		);
+		// A database whose catalog backfill has not run for this release.
+		database.run("DELETE FROM meta WHERE key = 'catalog_cost_backfill'");
 		database.close();
 
 		await initDb();
@@ -269,6 +272,62 @@ describe("stats subscription cost correction", () => {
 			expectedXaiGrokCost().total,
 			8,
 		);
+	});
+
+	describe("per-release catalog backfill gate", () => {
+		async function seedZeroCostRow(backfillMark: string): Promise<void> {
+			await initDb();
+			closeDb();
+			const database = new Database(getStatsDbPath());
+			database
+				.prepare(`
+					INSERT INTO messages (
+						session_file, entry_id, folder, model, provider, api, timestamp,
+						duration, ttft, stop_reason, error_message,
+						input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens, premium_requests,
+						cost_input, cost_output, cost_cache_read, cost_cache_write, cost_total
+					) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				`)
+				.run(
+					"/tmp/session.jsonl",
+					"codex-gated",
+					"/tmp/project",
+					codexReferenceModel.id,
+					"openai-codex",
+					"openai-codex-responses",
+					Date.now(),
+					1000,
+					100,
+					"stop",
+					null,
+					1000,
+					500,
+					200,
+					0,
+					1700,
+					0,
+					0,
+					0,
+					0,
+					0,
+					0,
+				);
+			database.run("INSERT OR REPLACE INTO meta (key, value) VALUES ('catalog_cost_backfill', ?)", [backfillMark]);
+			database.close();
+			await initDb();
+		}
+
+		it("reprices zero-cost rows when the backfill last ran for an older release", async () => {
+			await seedZeroCostRow("0.0.0-older");
+
+			expect(getRecentRequests(1)[0]?.usage.cost.total).toBeCloseTo(expectedCodexGptCost().total, 8);
+		});
+
+		it("leaves zero-cost rows alone when the backfill already ran for this release", async () => {
+			await seedZeroCostRow(VERSION);
+
+			expect(getRecentRequests(1)[0]?.usage.cost.total).toBe(0);
+		});
 	});
 
 	it("refreshes a historically zero-cost multi-agent row with orchestration usage on re-ingest", async () => {
@@ -380,10 +439,77 @@ describe("stats scheduled response costs", () => {
 
 		// Simulate a database predating the no-cache estimate column's backfill.
 		database.run("UPDATE messages SET cost_no_cache_input = NULL");
+		database.run("DELETE FROM meta WHERE key = 'cost_no_cache_input_v1'");
 		closeDb();
 		await initDb();
 		expect(getOverallStats().totalCost).toBeCloseTo(0.069, 8);
 		expect(getOverallStats().cacheSavings).toBeCloseTo(1 - 0.069 / 2.13, 8);
+	});
+
+	it("reprices recorded zeros on a dated rate card at the card in force for each request", async () => {
+		// A dated list-price change (Gemini 4 Argon's), not a recurring tariff:
+		// the zero Argon usage recorded before its price existed is legacy
+		// absence, so it gets priced like any other unscheduled model's.
+		const switchAt = Date.parse("2026-12-01T08:00:00Z");
+		const dated = {
+			...codexReferenceModel,
+			id: "dated-card-model",
+			provider: "google-antigravity",
+			cost: {
+				input: 2,
+				output: 10,
+				cacheRead: 0.1,
+				cacheWrite: 0,
+				timeBased: {
+					offPeakMultiplier: 1,
+					peakWindows: [],
+					effectiveRates: [
+						{ effectiveFrom: -8_640_000_000_000_000, input: 2, output: 10, cacheRead: 0.1, cacheWrite: 0 },
+						{ effectiveFrom: switchAt, input: 4, output: 20, cacheRead: 0.2, cacheWrite: 0 },
+					],
+				},
+			},
+		};
+		// The isolated database holds only these requests, so every lookup is theirs.
+		const lookup = spyOn(catalogModels, "getBundledModel").mockReturnValue(dated);
+		try {
+			const database = await initDb();
+			const requests = [
+				["intro", switchAt - 1],
+				["list", switchAt],
+			] as const;
+			insertMessageStats(
+				requests.map(([entryId, timestamp]) => {
+					const stats = createCodexGptStats(entryId);
+					stats.provider = dated.provider;
+					stats.model = dated.id;
+					stats.api = "google-gemini-cli";
+					stats.timestamp = timestamp;
+					stats.usage = {
+						input: 1_000_000,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 1_000_000,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					};
+					return stats;
+				}),
+			);
+			const totals = () =>
+				Object.fromEntries(getRecentRequests(2).map(request => [request.entryId, request.usage.cost.total]));
+			expect(totals()).toEqual({ intro: 2, list: 4 });
+
+			// Rows ingested at $0 before the card existed are repaired by the
+			// release's catalog backfill.
+			database.run("UPDATE messages SET cost_input = 0, cost_total = 0");
+			database.run("DELETE FROM meta WHERE key = 'catalog_cost_backfill'");
+			closeDb();
+			await initDb();
+			expect(totals()).toEqual({ intro: 2, list: 4 });
+		} finally {
+			lookup.mockRestore();
+		}
 	});
 
 	it("reports a scheduled request with no recoverable timestamp as unpriced, not free", async () => {
