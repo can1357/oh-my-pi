@@ -1338,6 +1338,7 @@ export class InputController {
 		const messages = splitMessages.length > 0 ? splitMessages : [""];
 		const originalDraft = this.ctx.editor.getText();
 		const images = options.images?.length ? [...options.images] : undefined;
+		const originalExpandedDraft = images ? this.ctx.editor.getExpandedText() : originalDraft;
 		const imageLinks = options.imageLinks
 			? [...options.imageLinks]
 			: images
@@ -1429,7 +1430,19 @@ export class InputController {
 				};
 				submission.onRejected = async () => {
 					this.ctx.session.dropQueuedMessages(batchQueued);
-					if (!this.ctx.editor.getText().trim()) {
+					const currentDraft = this.ctx.editor.getText();
+					if (currentDraft.trim()) {
+						// Keep the newer draft's image slots; the rejected batch's references follow them.
+						const mergedDraft = images
+							? `${this.ctx.editor.getExpandedText()}\n\n${shiftImageMarkers(originalExpandedDraft, this.ctx.editor.pendingImages.length)}`
+							: `${currentDraft}\n\n${originalDraft}`;
+						if (images) {
+							this.ctx.editor.pendingImages.push(...images);
+							this.ctx.editor.pendingImageLinks.push(...(imageLinks ?? images.map(() => undefined)));
+							this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
+						}
+						this.ctx.editor.setCollapsedText(mergedDraft);
+					} else {
 						restoreOriginalDraft();
 					}
 					this.ctx.updatePendingMessagesDisplay();

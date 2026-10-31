@@ -110,13 +110,17 @@ describe("queue shorthand on an idle mid-session (#10802)", () => {
 		// request while completion still waits for the held response.
 		const runLoop = { session };
 		const submissionTurns: Promise<void>[] = [];
+		let draftOnAdmission: string | undefined;
 		const onInputCallback = vi.fn((submission: SubmittedUserInput) => {
 			queueMicrotask(() => {
 				submissionTurns.push(
 					(async () => {
 						try {
 							const admission = {
-								onPromptAdmitted: submission.onAdmitted,
+								onPromptAdmitted: async () => {
+									await submission.onAdmitted?.();
+									if (draftOnAdmission !== undefined) editor.setText(draftOnAdmission);
+								},
 								onPromptRejected: submission.onRejected,
 							};
 							if (submission.skillPrompt) {
@@ -193,6 +197,17 @@ describe("queue shorthand on an idle mid-session (#10802)", () => {
 		expect(session.getQueuedMessages().followUp).toEqual([]);
 		expect(editor.getText()).toBe(rejected);
 		expect(contexts.slice(1).map(lastUserText)).toEqual(["ITEM ONE", "ITEM TWO", "ITEM THREE", "LATER"]);
+		const newDraft = "NEW DRAFT";
+		const rejectedWithDraft = "=>\n1. FAILED FIRST\n2. PRESERVE TAIL";
+		draftOnAdmission = newDraft;
+		editor.setText(rejectedWithDraft);
+		await editor.onSubmit?.(rejectedWithDraft);
+		await Promise.all(submissionTurns);
+		await session.waitForIdle();
+		expect(session.getQueuedMessages().followUp).toEqual([]);
+		expect(editor.getText()).toBe(`${newDraft}\n\n${rejectedWithDraft}`);
+		expect(contexts.slice(1).map(lastUserText)).toEqual(["ITEM ONE", "ITEM TWO", "ITEM THREE", "LATER"]);
+		draftOnAdmission = undefined;
 		onInputCallback.mockImplementationOnce(submission => {
 			submission.cancelled = true;
 			editor.setText(submission.text);
