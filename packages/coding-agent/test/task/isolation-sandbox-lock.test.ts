@@ -389,6 +389,57 @@ it("checks its hold before each removal, not once before the listing", async () 
 	expect(await Bun.file(path.join(baseDir, "payload.txt")).exists()).toBe(true);
 });
 
+it("settles when its own writer record clears, instead of leaving on it", async () => {
+	// The owner unreferenced its watcher while its own record was still there
+	// and then exited once that record cleared, so a foreign write queued
+	// behind it was never captured. Clearing the record is the event the
+	// teardown was waiting for, so it runs there.
+	const { baseDir, mergedDir } = await makeSandbox();
+	registerIsolationWorkspace(mergedDir, { baseDir, generation: "gen-1" });
+	registered.push(mergedDir);
+	const clear = await markUnfinishedWriter(mergedDir);
+	let captured = 0;
+	expect(await deferTeardownWhileLeased(mergedDir, async () => void (captured += 1), { generation: "gen-1" })).toBe(
+		true,
+	);
+
+	await clear();
+
+	expect(captured).toBe(1);
+});
+
+it("stays when a writer announced itself while the listing was in flight", async () => {
+	// The decision is taken twice with the lock really released in between: a
+	// writer that announced during the first listing is blocked on this very
+	// lock, and dropping it lets that writer publish before the second pass.
+	const { baseDir, mergedDir } = await makeSandbox();
+	registerIsolationWorkspace(mergedDir, { baseDir, generation: "gen-1" });
+	registered.push(mergedDir);
+	const clear = await markUnfinishedWriter(mergedDir);
+	let captured = 0;
+	expect(await deferTeardownWhileLeased(mergedDir, async () => void (captured += 1), { generation: "gen-1" })).toBe(
+		true,
+	);
+	// A foreign party, live and on its way in, that lands between the passes.
+	const foreign = path.join(baseDir, ISOLATION_INTENT_DIR, "foreign.json");
+	const real = fs.readdir;
+	const spy = vi.spyOn(fs, "readdir");
+	spy.mockImplementation((async (...args: unknown[]) => {
+		const listed = await (real as (...a: unknown[]) => Promise<string[]>)(...args);
+		if (String(args[0]).endsWith(ISOLATION_INTENT_DIR)) {
+			spy.mockRestore();
+			await Bun.write(foreign, JSON.stringify({ pid: process.pid, startedAt: 0 }));
+		}
+		return listed;
+	}) as unknown as typeof fs.readdir);
+
+	await clear();
+
+	// The teardown is still owed: somebody is in here.
+	expect(captured).toBe(0);
+	await fs.rm(foreign, { force: true });
+});
+
 describe("retaining a workspace another party has already moved", () => {
 	it("reports the sibling this sandbox retained last, not the one touched last", async () => {
 		const { baseDir, mergedDir } = await makeSandbox();
@@ -427,6 +478,32 @@ describe("retaining a workspace another party has already moved", () => {
 		// Not "gone": nothing was found out, and the message must not send the
 		// user to a path that may not exist.
 		expect(retained.location).toBe("unknown");
+	});
+
+	it("will not move a successor's workspace for an older run", async () => {
+		// The path is not the claim. Asked to retain with the old generation,
+		// it returned the successor's work and moved its base, while this
+		// run's own retained copy sat intact beside it.
+		const { baseDir, mergedDir } = await makeSandbox();
+		const mine = `${baseDir}.retained-${Date.now().toString(36)}-mine`;
+		await fs.mkdir(path.join(mine, "m"), { recursive: true });
+		await writeIsolationOwner(mine, "owner");
+		temporary.push(mine);
+		const old = await readIsolationClaim(baseDir);
+		const mineClaim = await readIsolationClaim(mine);
+		// The original path now belongs to a successor.
+		await writeIsolationOwner(baseDir, "successor");
+
+		const retained = await retainIsolationWorkspace(
+			mergedDir,
+			natives.IsoBackendKind.Rcopy,
+			mineClaim.kind === "claimed" ? mineClaim.generation : undefined,
+		);
+
+		expect(old.kind).toBe("claimed");
+		// The successor's base is untouched, and the answer is this run's copy.
+		expect(await Bun.file(path.join(baseDir, ".omp-isolation-owner.json")).exists()).toBe(true);
+		expect(retained.dir).toBe(path.join(mine, "m"));
 	});
 
 	it("says a workspace is gone rather than naming a path that is not there", async () => {

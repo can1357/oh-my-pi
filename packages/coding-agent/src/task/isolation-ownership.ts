@@ -265,6 +265,12 @@ export async function clearClaimedWorkspace(baseDir: string): Promise<void> {
 	if (listing.kind === "unknown") {
 		throw new Error(`Isolation workspace ${baseDir} could not be listed (${listing.reason}); refusing to clear it.`);
 	}
+	// The boundary of this guarantee, stated rather than left to be
+	// rediscovered: the hold is checked before the rename and the rename is one
+	// syscall, so nothing a peer writes afterwards is inside what goes. A
+	// caller that detaches this call and releases its hold while the removal
+	// below is already running is not covered — nothing can cancel a syscall
+	// in flight. Every current caller awaits this function under its own hold.
 	const entries = listing.value.filter(entry => entry !== ISOLATION_OWNER_FILE);
 	if (entries.length === 0) return;
 	// Moved aside in one step, then deleted.

@@ -352,6 +352,27 @@ export async function retainIsolationWorkspace(
 		// Only `ENOENT` says the workspace has moved. A stat that fails for any
 		// other reason is a workspace this caller could not look at, and
 		// retention goes ahead on the real path rather than hunting siblings.
+		// The path is not the claim. A successor materialised here is a
+		// different workspace with a different owner, and moving it took a
+		// stranger's work while this run's own retained copy sat intact beside
+		// it. Checked wherever the path is claimed, not only where siblings
+		// are searched.
+		if (generation !== undefined) {
+			const claim = await readIsolationClaim(baseDir);
+			if (claim.kind === "unknown") {
+				return { dir: isolationDir, sidecarOk: false, location: "unknown" };
+			}
+			if (claim.kind === "claimed" && claim.generation !== generation) {
+				const sibling = await findRetainedSibling(baseDir, generation);
+				if (sibling.kind === "unknown") return { dir: isolationDir, sidecarOk: false, location: "unknown" };
+				if (sibling.kind === "absent") return { dir: isolationDir, sidecarOk: false, location: "gone" };
+				return {
+					dir: sibling.value,
+					sidecarOk: await hasRetainedSidecar(path.dirname(sibling.value), backend),
+					location: "here",
+				};
+			}
+		}
 		const existing = await fs.statLookup(isolationDir);
 		if (existing.kind === "absent") {
 			// Someone else moved it. Report a path that exists and a sidecar
@@ -549,7 +570,21 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 	const cleanupHandle = (): Promise<void> => {
 		cleanupPromise ??= (async () => {
 			await releaseBase();
-			if (handle && !retainWorkspace) await cleanupIsolation(handle, { capture });
+			if (handle && !retainWorkspace) {
+				await cleanupIsolation(handle, {
+					capture: async () => {
+						try {
+							await capture();
+						} catch (error) {
+							// Kept for the caller's result: the teardown keeps
+							// the workspace on this failure, and a kept
+							// workspace nobody is told about is a lost patch.
+							finalCaptureError = error;
+							throw error;
+						}
+					},
+				});
+			}
 		})();
 		return cleanupPromise;
 	};
@@ -673,6 +708,8 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 	};
 	/** Why the capture at release failed, when it did; the caller's result must carry it. */
 	let releaseCaptureError: unknown;
+	/** Why the teardown's own capture — the last one — failed, when it did. */
+	let finalCaptureError: unknown;
 	let lifecycleOwnsRelease = false;
 	try {
 		handle = await ensureIsolation(opts.context.repoRoot, opts.agentId, opts.preferredBackend);
@@ -852,7 +889,30 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			try {
 				const capture = await writeIsolationPatch(isolationDir, baseline, opts.artifactsDir, opts.agentId);
 				handedOff = capture.fingerprint;
-				return rememberAgentArtifacts({ ...result, ...capture.artifacts });
+				const artifacts = rememberAgentArtifacts({ ...result, ...capture.artifacts });
+				// The teardown runs here rather than in the `finally`, for the
+				// one shape where this function can still speak: its capture is
+				// the last one, and when it fails the workspace is kept. Left
+				// to the `finally`, that failure reached a log and the caller
+				// got exit 0 with an earlier patch, no error and no path to the
+				// only copy of what was not captured.
+				if (!releasePromise && !lifecycleOwnsRelease && !deferredCleanup && !retainWorkspace) {
+					await cleanupHandle();
+				}
+				if (finalCaptureError === undefined) return artifacts;
+				retainWorkspace = true;
+				const kept = await retainIsolationWorkspace(isolationDir, isolationBackend, handle?.generation);
+				return {
+					...artifacts,
+					error: renderIsolationError({
+						kind: "patch-capture-failed",
+						message: finalCaptureError instanceof Error ? finalCaptureError.message : String(finalCaptureError),
+						retainedDir: kept.dir,
+						sidecarMissing: !kept.sidecarOk,
+						retainedGone: kept.location === "gone",
+						retainedUnknown: kept.location === "unknown",
+					}),
+				};
 			} catch (patchErr) {
 				retainWorkspace = true;
 				const retained = await retainIsolationWorkspace(isolationDir, isolationBackend, handle?.generation);
