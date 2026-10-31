@@ -2218,7 +2218,7 @@ describe("anthropic stream envelope handling", () => {
 			],
 		};
 	};
-	const reasoningExtractionRefusal: MockAnthropicEvent[] = [
+	const refusalEvents = (stopDetails: Record<string, unknown>): MockAnthropicEvent[] => [
 		{
 			type: "message_start",
 			message: { id: "msg_reasoning_refusal", usage: { input_tokens: 10, output_tokens: 0 } },
@@ -2228,21 +2228,20 @@ describe("anthropic stream envelope handling", () => {
 		{ type: "content_block_stop", index: 0 },
 		{
 			type: "message_delta",
-			delta: {
-				stop_reason: "refusal",
-				stop_sequence: null,
-				stop_details: { type: "refusal", category: "reasoning_extraction", explanation: null },
-			},
+			delta: { stop_reason: "refusal", stop_sequence: null, stop_details: { type: "refusal", ...stopDetails } },
 			usage: { input_tokens: 10, output_tokens: 4 },
 		},
 		{ type: "message_stop" },
 	];
-	/** A client that refuses every request, recording each request body it was sent. */
-	const refusingClient = (sent: string[]): AnthropicMessagesClientLike => ({
+	/** A client that refuses every request (as `reasoning_extraction` by default), recording each request body. */
+	const refusingClient = (
+		sent: string[],
+		stopDetails: Record<string, unknown> = { category: "reasoning_extraction", explanation: null },
+	): AnthropicMessagesClientLike => ({
 		messages: {
 			create(params) {
 				sent.push(JSON.stringify(params));
-				return createMockRequest(reasoningExtractionRefusal);
+				return createMockRequest(refusalEvents(stopDetails));
 			},
 		},
 	});
@@ -2277,6 +2276,25 @@ describe("anthropic stream envelope handling", () => {
 		expect(sent[0]).toContain("opus unsigned note");
 		expect(result.stopReason).toBe("error");
 		expect(result.demotedReasoningBlocks).toBeUndefined();
+	});
+
+	it("keeps the refused request's demoted reasoning count through a fallback-credit redemption", async () => {
+		const sent: string[] = [];
+		const refused = await streamAnthropic(model, crossModelReasoningContext(), {
+			client: refusingClient(sent, { category: "cyber", explanation: null, fallback_credit_token: "fct_carried" }),
+		}).result();
+		expect(refused.fallbackCreditHandle?.demotedReasoningBlocks).toBe(2);
+
+		// The fallback model replays the frozen body, which carries the same reasoning.
+		const redeemed = await streamAnthropic({ ...model, id: "claude-opus-4-8" }, crossModelReasoningContext(), {
+			client: refusingClient(sent),
+			fallbackCreditRedemption: refused.fallbackCreditHandle,
+		}).result();
+
+		expect(sent).toHaveLength(2);
+		expect(sent[1]).toContain("fct_carried");
+		expect(redeemed.errorMessage).toBe("Refusal (reasoning_extraction)");
+		expect(redeemed.demotedReasoningBlocks).toBe(2);
 	});
 
 	it("redeems fallback credit token with frozen request body and continuation prefill", async () => {
