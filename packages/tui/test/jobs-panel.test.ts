@@ -118,6 +118,29 @@ describe("JobsSheet", () => {
 		expect(source.cancel).toHaveBeenCalledTimes(1);
 	});
 
+	it("keeps the selected settled job and its output after the session evicts it, until another is selected", () => {
+		let jobs: JobsPanelSnapshot = JOBS;
+		const details: Record<string, JobsPanelDetail | undefined> = { ...DETAILS };
+		const sheet = new JobsSheet({ load: () => jobs, inspect: id => details[id], close: vi.fn() });
+		sheet.handleInput(DOWN);
+		sheet.handleInput(DOWN);
+		expect(prop(list(sheet.describe(CX)), "selected")).toBe("bash-2");
+
+		jobs = { running: JOBS.running, recent: [] };
+		details["bash-2"] = undefined;
+		const root = sheet.describe(CX);
+		expect(prop(list(root), "selected")).toBe("bash-2");
+		expect(prop(byRole(root, "omp.jobs.output")[0], "text")).toBe("1 error\n");
+		expect(sheet.render(100).join("\n")).toContain("1 error");
+
+		sheet.handleInput(UP);
+		sheet.handleInput(DOWN);
+		expect(list(sheet.describe(CX))?.c?.map(row => ("key" in row ? row.key : undefined))).toEqual([
+			"task-1",
+			"bash-1",
+		]);
+	});
+
 	it("routes clicks: a row selects, Cancel job cancels, Close and Esc close", () => {
 		const { sheet, source } = setup();
 		const events: NativeUiEvent[] = [
@@ -297,6 +320,30 @@ describe("JobsSheet", () => {
 				expect.stringMatching(/^ {2}└─ running {2}bash \S+ {2}lone-bash$/),
 				expect.stringMatching(/^ {2}running {2}bash \S+ {2}main-bash$/),
 				expect.stringMatching(/^ {2}completed {2}bash \S+ {2}main-done$/),
+			]);
+		});
+
+		it("keeps an evicted subagent job under its subagent after the session drops both", () => {
+			const mainBash = job("main-bash", "Main");
+			let snapshot: JobsPanelSnapshot = {
+				rootId: "Main",
+				agents: [{ id: "Gone", parentId: "Main" }],
+				running: [mainBash],
+				recent: [job("gone-done", "Gone", { status: "completed", endTime: NOW })],
+			};
+			const sheet = new JobsSheet({ load: () => snapshot, inspect: () => undefined, close: vi.fn() });
+			sheet.handleNativeEvent({ type: "select", key: "jobs", item: "gone-done" });
+			sheet.render(120);
+
+			snapshot = { rootId: "Main", agents: [], running: [mainBash], recent: [] };
+			const rows = sheet
+				.render(120)
+				.slice(1, 4)
+				.map(line => line.trimEnd());
+			expect(rows).toEqual([
+				"  Gone",
+				expect.stringMatching(/^> └─ completed {2}bash \S+ {2}gone-done$/),
+				expect.stringMatching(/^ {2}running {2}bash \S+ {2}main-bash$/),
 			]);
 		});
 

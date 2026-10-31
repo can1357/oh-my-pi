@@ -92,6 +92,13 @@ interface PageShadowRoot {
 	elementFromPoint(x: number, y: number): PageElement | null;
 }
 
+/** An element on the way up to a contenteditable's editing host. */
+interface EditableAncestor {
+	isContentEditable: boolean;
+	parentElement: EditableAncestor | null;
+	focus(): void;
+}
+
 interface PageElement {
 	readonly tagName: string;
 	id: string;
@@ -158,13 +165,12 @@ export class ClickRefusedError extends ToolAbortError {
 }
 
 /**
- * Typing aborted after some keys reached the page; the field keeps those `typed` of `total` code points.
+ * Text entry aborted after input reached the page; `progress` says what the field may already hold.
  * The per-op timeout reports this instead of an actionability hint, since the element did take input.
  */
 export class TypingInterruptedError extends ToolAbortError {
 	constructor(
-		readonly typed: number,
-		readonly total: number,
+		readonly progress: string,
 		options?: ErrorOptions,
 	) {
 		super(undefined, options);
@@ -473,7 +479,10 @@ async function typeKeys(
 		}
 	} catch (error) {
 		if (signal?.aborted && typed > 0) {
-			throw new TypingInterruptedError(typed, characters.length, { cause: signal.reason });
+			throw new TypingInterruptedError(
+				`typing stopped after ${typed} of ${characters.length} characters (the field keeps what was typed)`,
+				{ cause: signal.reason },
+			);
 		}
 		throw error;
 	}
@@ -508,7 +517,9 @@ const PICKER_INPUT_TYPES = Object.keys(PICKER_VALUE_EXAMPLES);
 
 /**
  * Focus a field that can take text, clear any existing value, then retype. A colour, date, time or
- * range input gets its value set the way its picker would, and refuses one it rejects.
+ * range input gets its value set the way its picker would, and refuses one it rejects. A
+ * contenteditable element has its contents selected and replaced by one text insertion (or deleted
+ * by Backspace for an empty value), as a paste would.
  *
  * Every step is a DOM evaluation or an input dispatch, so this works on tabs
  * that produce no animation frames — unlike Puppeteer's `Locator.fill`, whose
@@ -518,7 +529,7 @@ const PICKER_INPUT_TYPES = Object.keys(PICKER_VALUE_EXAMPLES);
  */
 export async function fillViaHandle(handle: ElementHandle, value: string, signal?: AbortSignal): Promise<void> {
 	await focusTextEntryTarget(handle, "fill", signal);
-	const picker = await untilAborted(signal, () =>
+	const prepared = await untilAborted(signal, () =>
 		handle.evaluate(
 			(el, wanted, pickerTypes) => {
 				const node = el as unknown as {
@@ -527,7 +538,8 @@ export async function fillViaHandle(handle: ElementHandle, value: string, signal
 					value?: string;
 					focus?: () => void;
 					isContentEditable?: boolean;
-					innerText?: string;
+					parentElement: EditableAncestor | null;
+					getRootNode(): { activeElement: { contains(other: unknown): boolean } | null };
 					getAttribute(name: string): string | null;
 					namespaceURI: string | null;
 					ownerDocument: {
@@ -535,6 +547,12 @@ export async function fillViaHandle(handle: ElementHandle, value: string, signal
 							namespace: string | null,
 							tag: "input",
 						): { value: string; setAttribute(name: string, value: string): void };
+						createRange(): {
+							readonly collapsed: boolean;
+							selectNodeContents(node: unknown): void;
+							getClientRects(): ArrayLike<{ width: number; height: number }>;
+						};
+						getSelection(): { removeAllRanges(): void; addRange(range: unknown): void } | null;
 					};
 					dispatchEvent(event: unknown): boolean;
 				};
@@ -620,27 +638,77 @@ export async function fillViaHandle(handle: ElementHandle, value: string, signal
 						write(wanted);
 						report();
 					}
-					return { kind, refused };
+					return { target: "picker" as const, kind, refused };
 				}
-				const before = node.isContentEditable ? node.innerText : node.value;
-				if (node.isContentEditable) node.innerText = "";
-				else if ("value" in node) write("");
+				if (node.isContentEditable) {
+					// An element inside an editing host cannot take focus itself, so its host is focused. Input goes
+					// to whatever holds focus, so a host whose focus handler moved it elsewhere (or an inert one)
+					// would have the replacement land in another control. The element's own root (its document, or a
+					// shadow root, closed ones included) says which of its elements holds focus.
+					let host: EditableAncestor | null = node.parentElement?.isContentEditable ? node.parentElement : null;
+					while (host?.parentElement?.isContentEditable) host = host.parentElement;
+					host?.focus();
+					if (!node.getRootNode().activeElement?.contains(node)) return { target: "unfocused" as const };
+					// Rich-text editors (Slate, Lexical) keep their own document and either undo a direct DOM write
+					// or stop tracking the element, so the old text is selected for the input that replaces it.
+					const range = node.ownerDocument.createRange();
+					range.selectNodeContents(node);
+					const selection = node.ownerDocument.getSelection();
+					selection?.removeAllRanges();
+					selection?.addRange(range);
+					// The browser keeps a deletion inside the editing host, so a host with any contents is cleared.
+					// Inside a host, Backspace over contents that draw nothing deletes the character before them, so
+					// an element there is cleared only when its contents draw something (text, an image).
+					const deletable = node.parentElement?.isContentEditable
+						? Array.from(range.getClientRects()).some(rect => rect.width > 0 && rect.height > 0)
+						: !range.collapsed;
+					return { target: "editable" as const, deletable };
+				}
+				const before = node.value;
+				if ("value" in node) write("");
 				// Typing a value fires its own input events; an empty value types nothing,
 				// so report the clear itself when there was something to clear.
 				if (wanted === "" && before) report();
-				return null;
+				return { target: "field" as const };
 			},
 			value,
 			PICKER_INPUT_TYPES,
 		),
 	);
-	if (picker?.refused) {
-		throw new ToolError(
-			`<input type=${picker.kind}> does not accept ${JSON.stringify(value)}; give its value format, e.g. ${PICKER_VALUE_EXAMPLES[picker.kind]}`,
-		);
+	const page = handle.frame.page();
+	switch (prepared.target) {
+		case "picker":
+			if (prepared.refused) {
+				throw new ToolError(
+					`<input type=${prepared.kind}> does not accept ${JSON.stringify(value)}; give its value format, e.g. ${PICKER_VALUE_EXAMPLES[prepared.kind]}`,
+				);
+			}
+			return;
+		case "unfocused":
+			throw new ToolError("Cannot fill an element that does not keep focus");
+		case "editable":
+			if (!value && !prepared.deletable) return;
+			throwIfAborted(signal);
+			try {
+				// One `Input.insertText` replaces the selection the way a paste does; the editor's own
+				// beforeinput handling applies it to its model. Backspace is a real deletion of the selection.
+				await untilAborted(signal, () =>
+					value ? page.keyboard.sendCharacter(value) : page.keyboard.press("Backspace"),
+				);
+			} catch (error) {
+				// The input was already sent and cannot be recalled, so the editor may hold its result.
+				if (signal?.aborted) {
+					throw new TypingInterruptedError(
+						`the ${value ? "replacement text" : "deletion"} was already sent and may have reached the editor`,
+						{ cause: signal.reason },
+					);
+				}
+				throw error;
+			}
+			return;
+		case "field":
+			await typeKeys(page, value, signal);
 	}
-	if (picker) return;
-	await typeKeys(handle.frame.page(), value, signal);
 }
 
 interface QueryCandidate {
