@@ -93,10 +93,36 @@ interface ArtifactLookup {
  */
 type Presence<T> = { readonly [K in keyof T]-?: {} extends Pick<T, K> ? "optional" : "required" };
 
-/** A shape every field of which is a string, which is all this wire carries. */
-type StringShape<T> = { [K in keyof T]: string | undefined };
+/**
+ * What the parser can deliver for each field of `T`, so what `T` may say a
+ * field is. The parser checks only that a field is a string, so a required
+ * field must be one — never a type that admits `undefined`, which the parser
+ * would refuse — and an optional one, when it is there. A field named
+ * `__proto__` cannot be one at all: written into a table it sets the table's
+ * prototype rather than naming a key, and the parser would never read it.
+ */
+type WireFields<T> = {
+	[K in keyof T]: K extends "__proto__" ? never : {} extends Pick<T, K> ? string | undefined : string;
+};
 
-/** One variant of the request, by its op. */
+/**
+ * `T` when it is one shape; when it is several, a type nothing a parser
+ * returns can be, whose text says why. A parser table describes one shape,
+ * so a union parsed for one op — two request variants with the same `op` —
+ * would have every shape but one parsed into the wrong one, its own fields
+ * dropped. (The answer needs no such check: an interface is always one shape.)
+ *
+ * Compared with the intersection of the members rather than with each
+ * member: a second variant that only adds fields to the first is a subtype
+ * of it, so the union is assignable to the first member alone, yet it is not
+ * assignable to the shape that has every field.
+ */
+type OneShape<T> = [T] extends [AllOf<T>] ? T : "an op names exactly one request shape";
+
+/** The intersection of the members of `T`. */
+type AllOf<T> = (T extends unknown ? (shape: T) => void : never) extends (shape: infer All) => void ? All : never;
+
+/** The request shape for one op. */
 type RequestOf<Op extends ArtifactRequest["op"]> = Extract<ArtifactRequest, { op: Op }>;
 
 const SETTLED_ARTIFACT_FIELDS: Presence<SettledArtifact> = {
@@ -109,19 +135,21 @@ const SETTLED_ARTIFACT_FIELDS: Presence<SettledArtifact> = {
 };
 
 /**
- * The parser for each request variant, each against that variant's own type.
+ * The parser for each op, each against the request shape that op names.
  *
- * Per variant, never against the union. `StringShape` of a union is the union
- * of each variant's string shape, and a type with more fields still fits a
- * shape with fewer, so checked against `ArtifactRequest` as a whole a `take`
- * given a field that is not a string still fits the `release` shape and
- * compiles — and the parser then refuses every such request at run time.
- * Each entry names its variant, so its table is checked for the variant's
- * fields and `shapeOf` for their being strings; the mapped type makes a new
- * variant without an entry a compile error too. `artifact-wire-edits.test.ts`
- * makes each of those edits to a copy of this module and holds it to that.
+ * Per op, never against the union: checked against `ArtifactRequest` as a
+ * whole, a `take` given a field that is not a string still fits the
+ * `release` shape and compiles — and the parser then refuses every such
+ * request at run time. Each entry names its op, so its table is checked for
+ * that shape's fields and `shapeOf` for their being strings; the mapped type
+ * makes an op without an entry a compile error, and an entry may return only
+ * `OneShape` of its op's requests, so an op that names two shapes is one too.
+ * `artifact-wire-edits.test.ts` makes each of those edits to a copy of this
+ * module and holds it to that.
  */
-const REQUEST_PARSERS: { readonly [Op in ArtifactRequest["op"]]: (value: object) => RequestOf<Op> | null } = {
+const REQUEST_PARSERS: {
+	readonly [Op in ArtifactRequest["op"]]: (value: object) => OneShape<RequestOf<Op>> | null;
+} = {
 	answer: value =>
 		shapeOf<RequestOf<"answer">>({ op: "required", id: "required", root: "required", token: "optional" }, value),
 	locate: value =>
@@ -135,10 +163,11 @@ const REQUEST_PARSERS: { readonly [Op in ArtifactRequest["op"]]: (value: object)
  * required one is missing or is not a string.
  *
  * There is no per-field code to forget a field in: the table is the list,
- * and the table is checked against the type. `T` must be one concrete shape,
- * never a union (see {@link REQUEST_PARSERS}).
+ * and the table is checked against the type. The constraint is what makes
+ * that check mean "parsed whole": each field of `T` is something this
+ * parser hands back as it came.
  */
-function shapeOf<T extends StringShape<T>>(fields: Presence<T>, value: unknown): T | null {
+function shapeOf<T extends WireFields<T>>(fields: Presence<T>, value: unknown): T | null {
 	if (typeof value !== "object" || value === null) return null;
 	const shaped: Record<string, string> = {};
 	// `Object.keys` types its result as `string[]`; these are the table's own keys.
@@ -155,7 +184,9 @@ function shapeOf<T extends StringShape<T>>(fields: Presence<T>, value: unknown):
 /** The host's answer about an artifact, as it crosses the bridge (`{ text, details }`). */
 export function settledArtifactOf(value: unknown): SettledArtifact | null {
 	if (typeof value !== "object" || value === null || !("details" in value)) return null;
-	return shapeOf(SETTLED_ARTIFACT_FIELDS, value.details);
+	// Named, not inferred: inferred from the table, `T` is whatever the table
+	// spells, and the check that each field is a string never sees the interface.
+	return shapeOf<SettledArtifact>(SETTLED_ARTIFACT_FIELDS, value.details);
 }
 
 function isRequestOp(op: unknown): op is ArtifactRequest["op"] {

@@ -6,15 +6,18 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 /**
  * The wire's guarantee is about edits to it, so it is tested on edits.
  *
- * A request variant that gains a field which is not a string, with its parser
- * row listing it, must not compile: if it does, every request a reader sends in
- * that shape reaches the host and is refused there as "not a request this host
- * answers" (`artifactRequestOf` returns `null`, which is exactly what the bridge
- * turns into that refusal). That failure exists only in an edited module, never
- * in the module as it stands, so each case below edits a copy of
- * `artifact-wire.ts`, type-checks it alone, and — where it compiles — asks the
- * copy's own parser about the request the edit lets a reader send. Either the
- * compiler refuses the edit, or the host parses that request whole.
+ * An edit that lets a reader send something the host's parser does not hand
+ * back whole must not compile: a field that is not a string, a required field
+ * whose type admits `undefined`, a field named `__proto__`, or a second request
+ * shape for an op that already has one. If such an edit compiles, every
+ * request a reader sends in that shape either reaches the host and is refused
+ * as "not a request this host answers" (`artifactRequestOf` returns `null`,
+ * which is exactly what the bridge turns into that refusal) or arrives with a
+ * field missing. That failure exists only in an edited module, never in the
+ * module as it stands, so each case below edits a copy of `artifact-wire.ts`,
+ * type-checks it alone, and — where it compiles — asks the copy's own parser
+ * about the request the edit lets a reader send. Either the compiler refuses
+ * the edit, or the host parses that request whole.
  */
 
 const repoRoot = path.resolve(import.meta.dir, "../../../..");
@@ -27,8 +30,8 @@ interface WireModule {
 }
 
 interface Edit {
-	/** The name the edit adds, which a refusal by the compiler must be about. */
-	readonly adds: string;
+	/** What the compiler's refusal must mention, so it refuses this edit and not a copy the edit broke. */
+	readonly refusal: string;
 	/** Each pattern must match the module, so an edit that no longer applies fails instead of passing vacuously. */
 	readonly changes: ReadonlyArray<readonly [RegExp, string]>;
 	/** What a reader is allowed to send once the edit is made, and how the host reads it. */
@@ -44,7 +47,7 @@ const answer = (wire: WireModule, sent: unknown) =>
 
 const edits = {
 	"a non-string field on the take request, listed in its row": {
-		adds: "attempt",
+		refusal: "attempt",
 		changes: [
 			[/\| \{ op: "take"; file: string \}/, '| { op: "take"; file: string; attempt: number }'],
 			[/(take:[^\n]*\{ op: "required", file: "required") \}/, '$1, attempt: "required" }'],
@@ -54,7 +57,7 @@ const edits = {
 		expected: { op: "take", file: "file-1", attempt: 3 },
 	},
 	"a non-string field on the answer and locate lookup, listed in both rows": {
-		adds: "attempt",
+		refusal: "attempt",
 		changes: [
 			[/interface ArtifactLookup \{\n/, "interface ArtifactLookup {\n\tattempt: number;\n"],
 			[
@@ -67,7 +70,7 @@ const edits = {
 		expected: { op: "answer", id: "0", root: "/artifacts", attempt: 3 },
 	},
 	"a new request variant with no parser entry": {
-		adds: "renew",
+		refusal: "renew",
 		changes: [
 			[
 				/\| \{ op: "release"; file: string \};/,
@@ -78,8 +81,41 @@ const edits = {
 		parse: request,
 		expected: { op: "renew", file: "file-1" },
 	},
+	"a second request shape for take, its row unchanged": {
+		refusal: "an op names exactly one request shape",
+		changes: [
+			[
+				/\| \{ op: "take"; file: string \}/,
+				'| { op: "take"; file: string }\n\t| { op: "take"; file: string; receipt: string }',
+			],
+		],
+		sends: { op: "take", file: "file-1", receipt: "receipt-1" },
+		parse: request,
+		expected: { op: "take", file: "file-1", receipt: "receipt-1" },
+	},
+	"a required field on the take request that admits undefined, listed in its row": {
+		refusal: "attempt",
+		changes: [
+			[/\| \{ op: "take"; file: string \}/, '| { op: "take"; file: string; attempt: string | undefined }'],
+			[/(take:[^\n]*\{ op: "required", file: "required") \}/, '$1, attempt: "required" }'],
+		],
+		sends: { op: "take", file: "file-1", attempt: undefined },
+		parse: request,
+		expected: { op: "take", file: "file-1", attempt: undefined },
+	},
+	"a field named __proto__ on the take request, listed in its row": {
+		refusal: "__proto__",
+		changes: [
+			[/\| \{ op: "take"; file: string \}/, '| { op: "take"; file: string; __proto__: string }'],
+			[/(take:[^\n]*\{ op: "required", file: "required") \}/, '$1, __proto__: "required" }'],
+		],
+		// An own `__proto__` key, as a reader's JSON carries one.
+		sends: JSON.parse('{"op":"take","file":"file-1","__proto__":"proto-1"}'),
+		parse: request,
+		expected: JSON.parse('{"op":"take","file":"file-1","__proto__":"proto-1"}'),
+	},
 	"a non-string field on the answer, listed in its table": {
-		adds: "attempt",
+		refusal: "attempt",
 		changes: [
 			[/export interface SettledArtifact \{\n/, "export interface SettledArtifact {\n\tattempt?: number;\n"],
 			[/(const SETTLED_ARTIFACT_FIELDS: Presence<SettledArtifact> = \{\n)/, '$1\tattempt: "optional",\n'],
@@ -87,6 +123,19 @@ const edits = {
 		sends: { path: "/artifacts/0.read.log", device: "64768", inode: "12", attempt: 3 },
 		parse: answer,
 		expected: { path: "/artifacts/0.read.log", device: "64768", inode: "12", attempt: 3 },
+	},
+	"a required field on the answer that admits undefined, listed in its table": {
+		refusal: "mount",
+		changes: [
+			[
+				/export interface SettledArtifact \{\n/,
+				"export interface SettledArtifact {\n\tmount: string | undefined;\n",
+			],
+			[/(const SETTLED_ARTIFACT_FIELDS: Presence<SettledArtifact> = \{\n)/, '$1\tmount: "required",\n'],
+		],
+		sends: { path: "/artifacts/0.read.log", device: "64768", inode: "12", mount: undefined },
+		parse: answer,
+		expected: { path: "/artifacts/0.read.log", device: "64768", inode: "12", mount: undefined },
 	},
 } satisfies Record<string, Edit>;
 
@@ -187,7 +236,7 @@ describe("artifact wire under edits", () => {
 			const found = diagnostics.get(name);
 			if (found !== undefined) {
 				// Refused by the compiler, and for the edit, not for something else in the copy.
-				expect(found).toContain(edit.adds);
+				expect(found).toContain(edit.refusal);
 				return;
 			}
 			// It compiled, so a reader may send this; the host must not refuse it or drop the field.
