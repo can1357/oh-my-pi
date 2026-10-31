@@ -344,6 +344,19 @@ describe("arm ownership", () => {
 		expect(() => budget.checkpoint()).not.toThrow();
 	});
 
+	it("spends the arm a refused handoff took, so requests after the refused replay are not refused for it", () => {
+		const clock = fakeClock();
+		const budget = budgetOf(100);
+		budget.arm(new Error("503"));
+		clock.advance(200);
+		expect(() => budget.handoff()).toThrow(RetryRefusedError);
+
+		// The refused frame went nowhere: a cleanup request after it is not a replay,
+		// and the refusal still latches for every later replay.
+		expect(() => budget.checkpoint()).not.toThrow();
+		expect(budget.admits(0)).toBe(false);
+	});
+
 	it("renames the replay being prepared when it is armed again, so disarming the earlier arm keeps the later", () => {
 		const clock = fakeClock();
 		const budget = budgetOf(100);
