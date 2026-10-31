@@ -33,10 +33,6 @@ export default class Gc extends Command {
 			description:
 				"Give up the live copy of an archived session by id prefix or archive path (runs alone; the only step that deletes one)",
 		}),
-		quarantine: Flags.string({
-			description:
-				"Move a staging record a killed gc run left, and the directory it names, out of the session trees into gc-quarantine (runs alone; deletes nothing)",
-		}),
 		"cold-archive-after-days": Flags.integer({ description: "Minimum session age before archiving" }),
 		"retain-newest-global": Flags.integer({ description: "Always keep this many newest sessions active" }),
 		"retain-newest-per-cwd": Flags.integer({ description: "Always keep this many newest sessions per cwd active" }),
@@ -62,7 +58,6 @@ export default class Gc extends Command {
 				restore: flags.restore,
 				forwardOnly: flags["forward-only"],
 				reclaim: flags.reclaim,
-				quarantine: flags.quarantine,
 				coldArchiveAfterDays: flags["cold-archive-after-days"],
 				retainNewestGlobal: flags["retain-newest-global"],
 				retainNewestPerCwd: flags["retain-newest-per-cwd"],
