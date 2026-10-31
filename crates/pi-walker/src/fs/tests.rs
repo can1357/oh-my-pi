@@ -122,7 +122,11 @@ async fn native_full_listing_has_sizes_and_mtimes() {
 	assert_eq!(a.mtime, Some(mtime_nanos(&file)));
 	let sub = record("sub");
 	assert_eq!(sub.size, None);
-	assert_eq!(sub.mtime, Some(mtime_nanos(&tmp.0.join("sub"))));
+	// NTFS refreshes a directory's entry in its parent's index lazily, so a
+	// listing can trail the directory's own mtime there.
+	if !cfg!(windows) {
+		assert_eq!(sub.mtime, Some(mtime_nanos(&tmp.0.join("sub"))));
+	}
 	if cfg!(target_os = "macos") {
 		assert_eq!(sub.children, 2);
 	}
@@ -307,6 +311,14 @@ async fn stat_and_identify() {
 	assert_eq!(
 		s.stat_dir(&dir).await.unwrap().ino,
 		s.stat(&tmp.0.join("d"), true).await.unwrap().stamp.ino
+	);
+	// A `.` component (fd's default `CWD/.` root) names the directory itself.
+	assert_eq!(
+		s.stat(&tmp.0.join("d").join("."), true)
+			.await
+			.unwrap()
+			.file_type,
+		Some(FileType::Dir)
 	);
 	#[cfg(unix)]
 	{
