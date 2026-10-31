@@ -89,13 +89,29 @@ describe("compaction short summary isolation", () => {
 
 	test("a short summary with no answer text omits shortSummary instead of storing an empty string", async () => {
 		const result = await compact(makePreparation(), getModel(), "key", undefined, undefined, {
-			completeImpl: completeWith(() => reply("length", [{ type: "thinking", thinking: "..." }])),
+			completeImpl: completeWith(() => reply("stop", [{ type: "thinking", thinking: "..." }])),
 			oneshotRetry: false,
 		});
 
 		expect(result.summary.startsWith(FULL_SUMMARY)).toBe(true);
 		expect("shortSummary" in result).toBe(false);
 	});
+
+	const incompleteContents: Array<[string, AssistantMessage["content"]]> = [
+		["partial text", [{ type: "text", text: "I fixed the thing and" }]],
+		["reasoning only", [{ type: "thinking", thinking: "Preparing the short summary" }]],
+	];
+	for (const [name, content] of incompleteContents) {
+		test(`a short summary ending on length with ${name} omits only shortSummary`, async () => {
+			const result = await compact(makePreparation(), getModel(), "key", undefined, undefined, {
+				completeImpl: completeWith(() => reply("length", content)),
+				oneshotRetry: false,
+			});
+
+			expect(result.summary.startsWith(FULL_SUMMARY)).toBe(true);
+			expect("shortSummary" in result).toBe(false);
+		});
+	}
 
 	test("an aborted short-summary response cancels the compaction", async () => {
 		const error = await compact(makePreparation(), getModel(), "key", undefined, undefined, {

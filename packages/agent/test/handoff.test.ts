@@ -293,4 +293,61 @@ describe("handoff helpers", () => {
 			reasoning: Effort.Medium,
 		});
 	});
+
+	const incompleteContents: Array<[string, AssistantMessage["content"]]> = [
+		["partial text", [{ type: "text", text: "## Next Steps\nContinue by" }]],
+		["reasoning only", [{ type: "thinking", thinking: "Preparing the handoff" }]],
+	];
+	for (const [name, content] of incompleteContents) {
+		test(`generateHandoffFromContext rejects length output with ${name} without retrying`, async () => {
+			const response: AssistantMessage = { ...createAssistantMessage(content), stopReason: "length" };
+			const completeImpl = vi.fn(async () => response);
+			const error = await generateHandoffFromContext(
+				{
+					systemPrompt: ["Live system prompt"],
+					messages: [{ role: "user", content: "prepare handoff", timestamp: 1 }],
+				},
+				getTestModel(),
+				{ streamOptions: { apiKey: "test-key" }, completeImpl },
+			).catch((caught: unknown) => caught);
+
+			expect(error).toBeInstanceOf(Error);
+			expect((error as Error).message).toBe(
+				"Handoff generation failed: model output ended incomplete (stopReason: length)",
+			);
+			expect(completeImpl).toHaveBeenCalledTimes(1);
+		});
+	}
+
+	test("generateHandoffFromContext rejects length output from the auto-only tool-choice retry", async () => {
+		const initialResponse = createAssistantError(
+			400,
+			"400 Bad Request: Only a tool_choice of 'auto' is supported for this model; param=tool_choice",
+		);
+		const incompleteResponse: AssistantMessage = {
+			...createAssistantMessage([{ type: "text", text: "## Next Steps\nContinue by" }]),
+			stopReason: "length",
+		};
+		const completeImpl = vi
+			.fn(ai.completeSimple)
+			.mockResolvedValue(incompleteResponse)
+			.mockResolvedValueOnce(initialResponse);
+		const error = await generateHandoffFromContext(
+			{
+				systemPrompt: ["Live system prompt"],
+				tools: [createHandoffTool()],
+				messages: [{ role: "user", content: "prepare handoff", timestamp: 1 }],
+			},
+			getTestModel(),
+			{ streamOptions: { apiKey: "test-key" }, completeImpl },
+		).catch((caught: unknown) => caught);
+
+		expect(error).toBeInstanceOf(Error);
+		expect((error as Error).message).toBe(
+			"Handoff generation failed: model output ended incomplete (stopReason: length)",
+		);
+		expect(completeImpl).toHaveBeenCalledTimes(2);
+		expect(completeImpl.mock.calls[0]?.[2]?.toolChoice).toBe("none");
+		expect(completeImpl.mock.calls[1]?.[2]?.toolChoice).toBe("auto");
+	});
 });

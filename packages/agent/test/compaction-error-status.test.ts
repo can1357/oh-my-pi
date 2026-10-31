@@ -9,6 +9,7 @@ import {
 } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 // Pins the fix for the "raw 401 surfaced as Compaction failed:" bug.
@@ -23,9 +24,9 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 // into the UI.
 //
 // `generateHandoff` is the cheapest vehicle (one LLM call). The same
-// `createSummarizationError` helper backs every summarizer throw site
+// `createSummarizationError` helper backs every provider-error throw site
 // in `packages/agent/src/compaction/compaction.ts`, so verifying one
-// site is sufficient to lock the contract.
+// site is sufficient to lock that contract.
 
 function makeAssistantStop(content: AssistantMessage["content"]): AssistantMessage {
 	return {
@@ -69,6 +70,16 @@ function makeAssistantError(errorStatus: number | undefined, errorMessage: strin
 	};
 }
 
+function makeAssistantLength(content: AssistantMessage["content"]): AssistantMessage {
+	return {
+		...makeAssistantStop(content),
+		stopReason: "length",
+		errorStatus: 401,
+		errorId: AIError.create(AIError.Flag.AuthFailed),
+		errorMessage: "auth_unavailable",
+	};
+}
+
 function getAnthropicModel(): Model {
 	const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 	if (!model) throw new Error("Expected built-in anthropic/claude-sonnet-4-5 to exist");
@@ -99,6 +110,18 @@ function makePreparation(overrides: Partial<CompactionPreparation> = {}): Compac
 		settings: { ...DEFAULT_COMPACTION_SETTINGS, remoteEnabled: false },
 		...overrides,
 	};
+}
+
+function expectIncompleteSummaryError(error: unknown, prefix: string): void {
+	if (!(error instanceof Error)) throw new Error("Expected incomplete summary to reject");
+	expect(error.constructor).toBe(Error);
+	expect(error.message).toBe(`${prefix}: model output ended incomplete (stopReason: length)`);
+	expect("status" in error).toBe(false);
+	expect("errorId" in error).toBe(false);
+	const classification = AIError.classify(error.message);
+	expect(AIError.is(classification, AIError.Flag.Transient)).toBe(false);
+	expect(AIError.is(classification, AIError.Flag.ContextOverflow)).toBe(false);
+	expect(AIError.is(classification, AIError.Flag.AuthFailed)).toBe(false);
 }
 
 afterEach(() => {
@@ -158,4 +181,58 @@ describe("compaction error-status propagation", () => {
 		expect(e.status).toBeUndefined();
 		expect(e.message).toContain("auth_unavailable");
 	});
+});
+
+describe("incomplete local summaries", () => {
+	test("generateHandoff rejects incomplete output without carrying stale provider error metadata", async () => {
+		const response = makeAssistantLength([{ type: "text", text: "## Next Steps\nContinue by" }]);
+		const completeSimpleSpy = vi.spyOn(ai, "completeSimple").mockResolvedValue(response);
+		const error = await generateHandoff(handoffMessages, getAnthropicModel(), "key", {
+			systemPrompt: ["sp"],
+		}).catch((caught: unknown) => caught);
+
+		expectIncompleteSummaryError(error, "Handoff generation failed");
+		expect(completeSimpleSpy).toHaveBeenCalledTimes(1);
+	});
+
+	const incompleteContents: Array<[string, AssistantMessage["content"]]> = [
+		["partial text", [{ type: "text", text: "The remaining work is to" }]],
+		["reasoning only", [{ type: "thinking", thinking: "Preparing the summary" }]],
+	];
+	for (const [name, content] of incompleteContents) {
+		test(`compact rejects a full summary ending on length with ${name} without another call`, async () => {
+			const response = makeAssistantLength(content);
+			const completeImpl = vi.fn(async () => response);
+			const preparation = makePreparation({ isSplitTurn: false, turnPrefixMessages: [] });
+			const originalHistory = structuredClone(preparation.messagesToSummarize);
+			const error = await compact(preparation, getAnthropicModel(), "key", undefined, undefined, {
+				completeImpl,
+			}).catch((caught: unknown) => caught);
+
+			expectIncompleteSummaryError(error, "Summarization failed");
+			expect(completeImpl).toHaveBeenCalledTimes(1);
+			expect(preparation.messagesToSummarize).toEqual(originalHistory);
+		});
+
+		test(`compact rejects a split-turn prefix ending on length with ${name}`, async () => {
+			const response = makeAssistantLength(content);
+			const historyResponse = makeAssistantStop([{ type: "text", text: "Complete history summary." }]);
+			const prompts: string[] = [];
+			const preparation = makePreparation();
+			const originalPrefix = structuredClone(preparation.turnPrefixMessages);
+			const prefixPrompt = "MUST summarize prefix for retained suffix:";
+			const error = await compact(preparation, getAnthropicModel(), "key", undefined, undefined, {
+				completeImpl: async (_model, ctx) => {
+					const prompt = JSON.stringify(ctx.messages);
+					prompts.push(prompt);
+					return prompt.includes(prefixPrompt) ? response : historyResponse;
+				},
+			}).catch((caught: unknown) => caught);
+
+			expectIncompleteSummaryError(error, "Turn prefix summarization failed");
+			expect(prompts).toHaveLength(2);
+			expect(prompts.filter(prompt => prompt.includes(prefixPrompt))).toHaveLength(1);
+			expect(preparation.turnPrefixMessages).toEqual(originalPrefix);
+		});
+	}
 });

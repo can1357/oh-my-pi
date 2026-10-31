@@ -7,6 +7,7 @@ import {
 	type SessionEntry,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, Model, Usage } from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
@@ -424,4 +425,55 @@ describe("branch summarization", () => {
 		expect(calls).toBe(1);
 		expect(result).toEqual({ aborted: true });
 	});
+
+	const incompleteContents: Array<[string, AssistantMessage["content"]]> = [
+		["partial text", [{ type: "text", text: "The branch still needs" }]],
+		["reasoning only", [{ type: "thinking", thinking: "Preparing the branch summary" }]],
+	];
+	for (const [name, content] of incompleteContents) {
+		test(`returns an error for a length-stopped summary with ${name} without another call`, async () => {
+			const entries: SessionEntry[] = [
+				{
+					type: "message",
+					id: "user-1",
+					parentId: null,
+					timestamp: new Date(0).toISOString(),
+					message: { role: "user", content: "Summarize this branch.", timestamp: 0 },
+				},
+			];
+			const originalEntries = structuredClone(entries);
+			const response: AssistantMessage = {
+				role: "assistant",
+				content,
+				api: MODEL.api,
+				provider: MODEL.provider,
+				model: MODEL.id,
+				usage: ZERO_USAGE,
+				stopReason: "length",
+				errorStatus: 401,
+				errorId: AIError.create(AIError.Flag.AuthFailed),
+				errorMessage: "auth_unavailable",
+				timestamp: 1,
+			};
+			let calls = 0;
+			const result = await generateBranchSummary(entries, {
+				model: MODEL,
+				apiKey: "test-api-key",
+				signal: new AbortController().signal,
+				completeImpl: async () => {
+					calls += 1;
+					return response;
+				},
+			});
+
+			expect(result).toEqual({ error: "Summarization failed: model output ended incomplete (stopReason: length)" });
+			expect("summary" in result).toBe(false);
+			expect(calls).toBe(1);
+			expect(entries).toEqual(originalEntries);
+			const classification = AIError.classify(result.error);
+			expect(AIError.is(classification, AIError.Flag.Transient)).toBe(false);
+			expect(AIError.is(classification, AIError.Flag.ContextOverflow)).toBe(false);
+			expect(AIError.is(classification, AIError.Flag.AuthFailed)).toBe(false);
+		});
+	}
 });

@@ -386,6 +386,9 @@ export async function generateBranchSummary(
 	if (response.stopReason === "error") {
 		return { error: response.errorMessage || "Summarization failed" };
 	}
+	if (response.stopReason === "length") {
+		return { error: "Summarization failed: model output ended incomplete (stopReason: length)" };
+	}
 
 	let summary = response.content
 		.filter((c): c is { type: "text"; text: string } => c.type === "text")
