@@ -1523,10 +1523,6 @@ export function buildChart(table: TableAnalysis, plan: ChartPlan): ChartSpec | u
 	// its rows are in different units.
 	if (arrows.length === 1 && plan.kind !== "paired" && plan.kind !== "range" && !plan.transpose)
 		return buildChart(table, { ...plan, kind: arrows[0]!.mixed ? "change" : "paired", series: [arrows[0]!.index] });
-	// A dumbbell of two measures beside their ratio (`pi-walker | Go | Speedup`): the ratio restates the gap the
-	// dumbbell draws (on a log axis its length), so the pair draws alone.
-	const pair = plan.kind === "paired" && !plan.transpose ? ratioPair(table, columns) : undefined;
-	if (pair) return buildChart(table, { ...plan, series: pair.map(column => column.index) });
 	// Unitless before/after values spanning decades are rows of different quantities, and rows of very different
 	// sizes beside a baseline column share no readable axis; their factors do (`3.95M → 190k` is 21× less).
 	// Intervals keep their values: a range chart prints the factor between a pair's midpoints beside both.
@@ -2808,31 +2804,6 @@ function againstBaseline(
 	);
 	if (pairSpread(grid) < ROW_SPREAD) return undefined;
 	return [baseline, ...columns.filter(column => column !== baseline)];
-}
-
-/** Relative slack within which a ratio column restates the ratio of two others (`4.1×` for 75.3 / 18.2). */
-const RATIO_SLACK = 0.05;
-
-/**
- * Of three plotted columns, the two same-unit measures when the third is their ratio (`Speedup`
- * `4.1×`, a `ratio` column) matching `a ÷ b` or `b ÷ a` within {@link RATIO_SLACK}
- * in every row holding all three, two rows at least; else `undefined`.
- */
-function ratioPair(table: TableAnalysis, columns: readonly TableColumn[]): [TableColumn, TableColumn] | undefined {
-	if (columns.length !== 3) return undefined;
-	const ratio = columns.find(column => column.dim === "ratio");
-	const rest = columns.filter(column => column !== ratio);
-	const [a, b] = rest;
-	if (!ratio || !a || !b || a.dim !== b.dim || a.unit !== b.unit || a.dim === "ratio") return undefined;
-	const near = (value: number, target: number) => Math.abs(value - target) <= RATIO_SLACK * target;
-	let matched = 0;
-	for (const row of table.rows) {
-		const [x, y, r] = [a.cells[row], b.cells[row], ratio.cells[row]];
-		if (!isNumber(x) || !isNumber(y) || !isNumber(r) || x.value <= 0 || y.value <= 0) continue;
-		if (!near(r.value, x.value / y.value) && !near(r.value, y.value / x.value)) return undefined;
-		matched++;
-	}
-	return matched >= 2 ? [a, b] : undefined;
 }
 
 /**
