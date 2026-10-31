@@ -158,8 +158,11 @@ function parseDeviceArgs(
 	try {
 		parsed = JSON.parse(content);
 	} catch (error) {
+		// Embed the expected shape and the rejected head, so a malformed envelope
+		// repairs itself in one round instead of a docs re-read.
+		const head = content.length > 400 ? `${content.slice(0, 400)}…` : content;
 		throw new ToolError(
-			`${XD_URL_PREFIX}${device.name} expects a JSON args object as content (${error instanceof Error ? error.message : String(error)}). Write \`?\` for docs.`,
+			`${XD_URL_PREFIX}${device.name} expects a JSON args object as content (${error instanceof Error ? error.message : String(error)}). Rejected head: ${head}\n\n${docs()}`,
 		);
 	}
 	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
