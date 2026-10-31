@@ -51,6 +51,13 @@ export function invalidateAllCommandConfigs(): void {
 	commandInFlight.clear();
 }
 
+/** Milliseconds until a failed command-backed value runs again; undefined when it is not backing off. */
+export function commandFailureRetryAfterMs(valueConfig: string | undefined): number | undefined {
+	if (!isCommandConfigValue(valueConfig)) return undefined;
+	const retryAt = commandFailureRetryAt.get(commandKey(valueConfig));
+	return retryAt === undefined ? undefined : Math.min(COMMAND_FAILURE_RETRY_MS, Math.max(0, retryAt - Date.now()));
+}
+
 async function executeCommand(valueConfig: string): Promise<string | undefined> {
 	const command = commandKey(valueConfig);
 

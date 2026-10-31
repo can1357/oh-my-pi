@@ -8827,9 +8827,10 @@ export class AgentSession implements SettingsScope {
 				);
 			}
 
-			// Validate API key
+			// Validate API key. A `!command` key that produced nothing is left to the
+			// turn, whose resolver fails retryably so auto-retry covers the helper.
 			const apiKey = await logger.time("prompt:apiKey", () => this.#modelRegistry.getApiKey(model, this.sessionId));
-			if (!apiKey) {
+			if (!apiKey && !this.#modelRegistry.retriesFailedCommandKey(model.provider)) {
 				throw new Error(
 					`No API key found for ${model.provider}.\n\n` +
 						`Use /login, set an API key environment variable, or create ${getAgentDbPath()}`,

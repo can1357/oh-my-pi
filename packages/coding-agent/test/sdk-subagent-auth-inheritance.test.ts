@@ -549,6 +549,11 @@ describe("task subagent OAuth pin inheritance", () => {
 			expect(await resolveApiKeyOnce(pooled.modelRegistry.resolver(model, "side-provider-session"))).toBe(
 				"access-c",
 			);
+			// Turn requests resolve through turnResolver, which a security scan session
+			// calls on its host's registry under its own provider session id.
+			expect(await resolveApiKeyOnce(pooled.modelRegistry.turnResolver(model, "turn-provider-session"))).toBe(
+				"access-c",
+			);
 			// The shared registry the session was handed stays unrestricted.
 			expect(await modelRegistry.getApiKey(model, "unpooled-provider-session")).toBe("runtime-key");
 
