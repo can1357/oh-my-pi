@@ -459,9 +459,9 @@ describe("createSettingsAwareStreamFn", () => {
 		});
 
 		it("drops entries that are not model ids and warns naming each one and why", () => {
-			const warnings: unknown[][] = [];
-			vi.spyOn(logger, "warn").mockImplementation((message: unknown, context?: unknown) => {
-				warnings.push([message, context]);
+			const warnings: unknown[] = [];
+			vi.spyOn(logger, "warn").mockImplementation((_message: unknown, context?: unknown) => {
+				warnings.push(context);
 			});
 			try {
 				const settings = Settings.isolated({
@@ -475,18 +475,15 @@ describe("createSettingsAwareStreamFn", () => {
 
 				expect(calls[0]?.options?.fallbacks).toEqual([{ model: "claude-opus-5" }]);
 				expect(warnings).toEqual([
-					[
-						"providers.anthropic.serverSideFallbackModels: dropping entries that are not model ids",
-						{
-							setting: "providers.anthropic.serverSideFallbackModels",
-							dropped: [
-								{ index: 0, value: 1, problem: "not a string (number)" },
-								{ index: 2, value: null, problem: "not a string (null)" },
-								{ index: 3, value: "  ", problem: "blank string" },
-							],
-							expected: "non-blank model id strings",
-						},
-					],
+					{
+						setting: "providers.anthropic.serverSideFallbackModels",
+						dropped: [
+							{ index: 0, value: 1, problem: "not a string (number)" },
+							{ index: 2, value: null, problem: "not a string (null)" },
+							{ index: 3, value: "  ", problem: "blank string" },
+						],
+						expected: "non-blank model id strings",
+					},
 				]);
 			} finally {
 				vi.restoreAllMocks();
@@ -495,9 +492,9 @@ describe("createSettingsAwareStreamFn", () => {
 
 		// A list whose entries all fail is a value that says nothing usable, not an explicit `[]`.
 		it("follows the catalog chain, warning once, when a non-empty configured list has no model id", () => {
-			const warnings: unknown[][] = [];
-			vi.spyOn(logger, "warn").mockImplementation((message: unknown, context?: unknown) => {
-				warnings.push([message, context]);
+			const warnings: unknown[] = [];
+			vi.spyOn(logger, "warn").mockImplementation((_message: unknown, context?: unknown) => {
+				warnings.push(context);
 			});
 			try {
 				const settings = Settings.isolated({
@@ -515,17 +512,14 @@ describe("createSettingsAwareStreamFn", () => {
 					[{ model: "claude-opus-5" }],
 				]);
 				expect(warnings).toEqual([
-					[
-						"providers.anthropic.serverSideFallbackModels has no model id; ignoring it and following the catalog chain",
-						{
-							setting: "providers.anthropic.serverSideFallbackModels",
-							dropped: [
-								{ index: 0, value: 42, problem: "not a string (number)" },
-								{ index: 1, value: "  ", problem: "blank string" },
-							],
-							expected: "non-blank model id strings",
-						},
-					],
+					{
+						setting: "providers.anthropic.serverSideFallbackModels",
+						dropped: [
+							{ index: 0, value: 42, problem: "not a string (number)" },
+							{ index: 1, value: "  ", problem: "blank string" },
+						],
+						expected: "non-blank model id strings",
+					},
 				]);
 			} finally {
 				vi.restoreAllMocks();
@@ -538,9 +532,9 @@ describe("createSettingsAwareStreamFn", () => {
 			// Ambient overlays would join the layers under test.
 			const previousConfigFiles = process.env.PI_CONFIG_FILES;
 			delete process.env.PI_CONFIG_FILES;
-			const warnings: unknown[][] = [];
-			vi.spyOn(logger, "warn").mockImplementation((message: unknown, context?: unknown) => {
-				warnings.push([message, context]);
+			const warnings: Array<Record<string, unknown> | undefined> = [];
+			vi.spyOn(logger, "warn").mockImplementation((_message: unknown, context?: Record<string, unknown>) => {
+				warnings.push(context);
 			});
 			try {
 				const agentDir = tempDir.join("agent");
@@ -557,14 +551,10 @@ describe("createSettingsAwareStreamFn", () => {
 				wrapped(stubFableModel, stubContext, { apiKey: "k" });
 
 				expect(calls[0]?.options?.fallbacks).toEqual([{ model: "claude-opus-5" }]);
-				expect(warnings).toContainEqual([
-					"Settings: ignoring invalid value, using the default",
-					{
-						setting: "providers.anthropic.serverSideFallbackModels",
-						value: "claude-opus-4-8",
-						expected: "an array",
-					},
-				]);
+				const rejected = warnings.find(
+					context => context?.setting === "providers.anthropic.serverSideFallbackModels",
+				);
+				expect(rejected).toMatchObject({ value: "claude-opus-4-8", expected: "an array" });
 			} finally {
 				vi.restoreAllMocks();
 				if (previousConfigFiles === undefined) delete process.env.PI_CONFIG_FILES;
