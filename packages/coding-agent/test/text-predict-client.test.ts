@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -10,6 +10,12 @@ import { type TextPredictRequest, type TextPredictResponse, textPredictDaemon } 
 import { rejectionOf } from "./helpers/rejection";
 
 const cleanups: (() => Promise<void>)[] = [];
+
+beforeEach(() => {
+	// Earlier suites may have opened the process-wide client against the real
+	// daemon. Drop it before installing the fixture broker, not only afterward.
+	closeTextPrediction();
+});
 
 afterEach(async () => {
 	closeTextPrediction();
@@ -50,6 +56,7 @@ async function serveDaemon(version: string): Promise<string[]> {
 	vi.spyOn(launchClient, "daemonClientForGlobal").mockResolvedValue({
 		projectDir: runtimeDir,
 		onCompletion: () => () => {},
+		observeOwners: () => () => {},
 		request: async operation => {
 			if (operation.op === "ping") return { op: "ping", projectDir: runtimeDir };
 			throw new launchClient.DaemonBrokerRejectedError(`no daemon ${operation.op} in this test`);

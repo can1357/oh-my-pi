@@ -102,6 +102,10 @@ class ReplayTestSession {
 
 	setMcpServerInstructionsSource(_source: unknown): void {}
 
+	holdStallReminderDelivery(): Disposable {
+		return { [Symbol.dispose]() {} };
+	}
+
 	subscribe(_listener: (event: AgentSessionEvent) => void): () => void {
 		return () => {};
 	}
