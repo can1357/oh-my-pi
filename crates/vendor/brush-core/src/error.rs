@@ -133,7 +133,7 @@ pub enum ErrorKind {
 
 	/// An error occurred evaluating an arithmetic expression.
 	#[error("arithmetic evaluation error: {0}")]
-	EvalError(#[from] crate::arithmetic::EvalError),
+	EvalError(#[source] crate::arithmetic::EvalError),
 
 	/// The given string could not be parsed as an integer.
 	#[error("failed to parse '{s}' as a {int_type_name}, base-{radix} integer: {inner}")]
@@ -450,6 +450,18 @@ where
 {
 	fn from(convertible_to_kind: T) -> Self {
 		Self { kind: convertible_to_kind.into(), fatal: false }
+	}
+}
+
+impl From<crate::arithmetic::EvalError> for ErrorKind {
+	/// An evaluation cancelled at one of its checkpoints is
+	/// [`ErrorKind::Interrupted`], as a run cancelled anywhere else is, and not
+	/// an arithmetic error.
+	fn from(error: crate::arithmetic::EvalError) -> Self {
+		match error {
+			crate::arithmetic::EvalError::Interrupted => Self::Interrupted,
+			error => Self::EvalError(error),
+		}
 	}
 }
 

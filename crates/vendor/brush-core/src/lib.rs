@@ -69,6 +69,8 @@ pub use interp::{
 	loop_checkpoints,
 	push_str_in_strides,
 };
+// A builtin copying a list of arguments the caller sized, one step each.
+pub use variables::clone_charged;
 pub use parser::{SourcePosition, SourcePositionOffset, SourceSpan};
 pub use pipetap::{PipeMirror, PipeTap};
 pub use results::{ExecutionControlFlow, ExecutionExitCode, ExecutionResult, ExecutionSpawnResult};

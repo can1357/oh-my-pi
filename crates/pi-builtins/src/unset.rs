@@ -75,7 +75,8 @@ impl builtins::Command for UnsetCommand {
 							}
 						},
 						brush_parser::word::Parameter::NamedWithIndex { name, index } => {
-							unset_array_index(context.shell, name.as_str(), index.as_str())?
+							unset_array_index(context.shell, &context.params, name.as_str(), index.as_str())
+								.await?
 						},
 						brush_parser::word::Parameter::NamedWithAllIndices {
 							name: _,
@@ -122,8 +123,9 @@ fn unset_name_reference(
 }
 
 
-fn unset_array_index(
+async fn unset_array_index(
 	shell: &mut Shell<impl brush_core::ShellExtensions>,
+	params: &brush_core::ExecutionParameters,
 	name: &str,
 	index: &str,
 ) -> Result<bool, brush_core::Error> {
@@ -144,7 +146,7 @@ fn unset_array_index(
 	} else {
 		// First evaluate the index expression.
 		let index_as_expr = brush_parser::arithmetic::parse(index)?;
-		let evaluated_index = shell.eval_arithmetic(&index_as_expr)?;
+		let evaluated_index = shell.eval_arithmetic(params, &index_as_expr).await?;
 		evaluated_index.to_string().into()
 	};
 

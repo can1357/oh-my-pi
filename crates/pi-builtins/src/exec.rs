@@ -53,26 +53,31 @@ impl builtins::Command for ExecCommand {
 				return self.execute_external_in_subshell(context).await;
 			}
 
-			let cmd_cmd = crate::command::CommandCommand {
-				command_and_args: self.args.clone(),
-				..Default::default()
-			};
+			// The arguments are handed over as copies, one step each, since
+			// one can be any length.
+			let mut command_and_args = Vec::with_capacity(self.args.len());
+			let mut budget = brush_core::ElementBudget::new();
+			for arg in &self.args {
+				command_and_args.push(brush_core::clone_charged(&context.params, &mut budget, arg).await?);
+			}
+			let cmd_cmd = crate::command::CommandCommand { command_and_args, ..Default::default() };
 
 			return cmd_cmd.execute(context).await;
 		}
 
 		let argv0 = self.argv0();
 
-		let mut cmd = commands::compose_std_command(
+		let composed = commands::compose_std_command(
 			&context,
 			&self.args[0],
 			argv0.as_ref(),
+			&[],
 			&self.args[1..],
 			self.empty_environment,
 		)
 		.await?;
 
-		let exec_error = cmd.exec();
+		let exec_error = composed.start(|mut cmd| cmd.exec()).await?;
 
 		if exec_error.kind() == std::io::ErrorKind::NotFound {
 			Ok(ExecutionExitCode::NotFound.into())
@@ -101,19 +106,24 @@ impl ExecCommand {
 		context: brush_core::ExecutionContext<'_, SE>,
 	) -> Result<ExecutionResult, brush_core::Error> {
 		let argv0 = self.argv0();
-		let cmd = commands::compose_std_command(
+		let composed = commands::compose_std_command(
 			&context,
 			&self.args[0],
 			argv0.as_ref(),
+			&[],
 			&self.args[1..],
 			self.empty_environment,
 		)
 		.await?;
 
-		let mut cmd = tokio::process::Command::from(cmd);
-		cmd.kill_on_drop(true);
-
-		let mut child = match cmd.spawn() {
+		let spawned = composed
+			.start(|cmd| {
+				let mut cmd = tokio::process::Command::from(cmd);
+				cmd.kill_on_drop(true);
+				cmd.spawn()
+			})
+			.await?;
+		let mut child = match spawned {
 			Ok(child) => child,
 			Err(spawn_err) => {
 				if spawn_err.kind() == std::io::ErrorKind::NotFound {

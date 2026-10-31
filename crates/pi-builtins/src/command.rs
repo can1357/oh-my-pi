@@ -146,7 +146,16 @@ impl CommandCommand {
 		use_default_path: bool,
 	) -> Result<ExecutionResult, brush_core::Error> {
 		command_name.clone_into(&mut context.command_name);
-		let command_and_args = self.command_and_args.iter().map(|arg| arg.into()).collect();
+		// Each argument is a copy, and one can be any length: `( exec
+		// /usr/bin/true "$big" )` comes here, and with a 64 MiB argument it
+		// held the worker 51.7 ms across this copy and the one `exec` makes
+		// to hand its arguments over.
+		let mut command_and_args = Vec::with_capacity(self.command_and_args.len());
+		let mut budget = brush_core::ElementBudget::new();
+		for arg in &self.command_and_args {
+			let arg = brush_core::clone_charged(&context.params, &mut budget, arg).await?;
+			command_and_args.push(brush_core::CommandArg::String(arg));
+		}
 
 		let path_dirs = if use_default_path {
 			Some(sys::fs::get_default_standard_utils_paths())

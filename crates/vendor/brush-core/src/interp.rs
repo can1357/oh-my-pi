@@ -1859,7 +1859,7 @@ impl Execute for ast::ForClauseCommand {
 			// with the integer attribute takes the arithmetic value, as in
 			// Bash: `declare -i n; for n in 1+1` gives `2`.
 			let value =
-				crate::variables::value_for_variable(shell, &self.variable_name, value).await?;
+				crate::variables::value_for_variable(shell, params, &self.variable_name, value).await?;
 			shell
 				.env_mut()
 				.update_or_add(
@@ -2604,7 +2604,7 @@ async fn apply_assignment(
 		// The value after the subscript, the order Bash's side effects show:
 		// `a[i++]=i++` assigns `1` at `0`.
 		ShellValueLiteral::Scalar(value) if integer => {
-			ShellValueLiteral::Scalar(crate::variables::integer_value(shell, value).await?)
+			ShellValueLiteral::Scalar(crate::variables::integer_value(shell, params, value).await?)
 		},
 		ShellValueLiteral::Array(literal) if keyed || integer => ShellValueLiteral::Array(
 			literal.evaluate_elements(shell, params, index_start, integer).await?,

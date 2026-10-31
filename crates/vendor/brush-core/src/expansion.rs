@@ -530,15 +530,33 @@ async fn parse_word_in_strides(
 	// more than a stride, and the word is then parsed whole, off the worker.
 	parse.limit_grammar_reach(interp::BYTE_CHECKPOINT_STRIDE);
 	loop {
-		interp::stride_checkpoint(params).await?;
+		if let Err(interrupted) = interp::stride_checkpoint(params).await {
+			let_go_of(parse.into_made());
+			return Err(interrupted);
+		}
 		if !parse.step(interp::BYTE_CHECKPOINT_STRIDE, interp::ELEMENT_CHECKPOINT_STRIDE) {
 			break;
 		}
 	}
 	if parse.failed() {
+		let_go_of(parse.into_made());
 		return parse_whole_off_worker(params, word, options, brush_parser::word::parse_uncached).await;
 	}
 	Ok(parse.finish()?)
+}
+
+/// Frees what a stepped parse made before it was given up, where that cannot
+/// hold the worker ([`crate::variables::free_off_worker`]).
+///
+/// **Moving a parse off the worker moves its work, not its state.** The
+/// fallback parse runs on a blocking worker, but the stepped parse it replaced
+/// was kept beside it and freed on the worker afterwards: a prompt of a
+/// million `"h"` pieces and a quote that never closes held the worker 33.8 ms,
+/// 364.5 ms under load, and freeing that parse alone measured 32.7 ms and
+/// 263.4 ms. A parse given up for cancellation is let go of the same way.
+fn let_go_of(made: brush_parser::word::MadePieces) {
+	let pieces = made.pieces();
+	crate::variables::free_off_worker(made, pieces);
 }
 
 /// The whole parse of a long word that the stepped parse could not finish, on
@@ -591,12 +609,16 @@ async fn parse_brace_expansions_in_strides(
 	let mut parse = brush_parser::word::SteppedBraceParse::new(word, options);
 	parse.limit_grammar_reach(interp::BYTE_CHECKPOINT_STRIDE);
 	loop {
-		interp::stride_checkpoint(params).await?;
+		if let Err(interrupted) = interp::stride_checkpoint(params).await {
+			let_go_of(parse.into_made());
+			return Err(interrupted);
+		}
 		if !parse.step(interp::BYTE_CHECKPOINT_STRIDE, interp::ELEMENT_CHECKPOINT_STRIDE) {
 			break;
 		}
 	}
 	if parse.needs_whole_parse() {
+		let_go_of(parse.into_made());
 		// The whole brace parse's error is the inner result, not the run's.
 		let whole = |word: &str, options: &brush_parser::ParserOptions| {
 			Ok(brush_parser::word::parse_brace_expansions(word, options))
@@ -2036,7 +2058,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		let integer =
 			self.shell.env().get(variable_name).is_some_and(|(_, var)| var.is_treated_as_integer());
 		let (value, evaluated) = if integer {
-			let value = crate::variables::integer_value(self.shell, value).await?;
+			let value = crate::variables::integer_value(self.shell, self.params, value).await?;
 			(value.clone(), Some(value))
 		} else {
 			(value, None)

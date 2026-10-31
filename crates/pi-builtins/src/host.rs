@@ -185,7 +185,7 @@ pub(crate) struct Host {
 
 	name:                  String,
 	paths:                 ShellPaths,
-	env:                   HashMap<String, String>,
+	env:                   ExportedEnv,
 	cancel:                Arc<AtomicBool>,
 	exit_code:             i32,
 	stdin_is_search_input: bool,
@@ -1208,7 +1208,7 @@ fn cancelled_command() -> io::Error {
 /// child process. Finished workers are reused; another is forked only when
 /// every existing one is busy, so sequential commands share one.
 struct CommandRunner<SE: ShellExtensions> {
-	template: Shell<SE>,
+	template: Arc<Shell<SE>>,
 	idle:     Vec<Shell<SE>>,
 	params:   Arc<ExecutionParameters>,
 	cwd:      Arc<Path>,
@@ -1216,12 +1216,17 @@ struct CommandRunner<SE: ShellExtensions> {
 }
 
 impl<SE: ShellExtensions> CommandRunner<SE> {
-	fn new(context: &ExecutionContext<'_, SE>, requests: flume::Receiver<CommandRequest>) -> Self {
-		let mut template = context.shell.clone();
+	/// A runner forking its workers from `template`, the invoking shell
+	/// copied a step at a time ([`copy_for_utility`]).
+	fn new(
+		context: &ExecutionContext<'_, SE>,
+		mut template: Shell<SE>,
+		requests: flume::Receiver<CommandRequest>,
+	) -> Self {
 		template.options_mut().interactive = false;
 		let cwd = Arc::from(template.working_dir());
 		Self {
-			template,
+			template: Arc::new(template),
 			idle: Vec::new(),
 			params: Arc::new(context.params.clone()),
 			cwd,
@@ -1231,12 +1236,27 @@ impl<SE: ShellExtensions> CommandRunner<SE> {
 
 	/// Starts serving `request` on a worker. The future answers the request —
 	/// a utility that stopped waiting (it was cancelled) simply never reads
-	/// the answer — and yields the worker back for [`CommandRunner::release`].
-	fn start(&mut self, request: CommandRequest) -> impl Future<Output = Shell<SE>> + Send + use<SE> {
-		let mut shell = self.idle.pop().unwrap_or_else(|| self.template.clone());
+	/// the answer — and yields the worker back for [`CommandRunner::release`],
+	/// or nothing if a new worker's copy was cancelled.
+	///
+	/// A new worker is a copy of every variable of the template, so it is
+	/// made a step at a time inside the future, not in one `clone` here.
+	fn start(&mut self, request: CommandRequest) -> impl Future<Output = Option<Shell<SE>>> + Send + use<SE> {
+		let idle = self.idle.pop();
+		let template = Arc::clone(&self.template);
 		let params = Arc::clone(&self.params);
 		let cwd = Arc::clone(&self.cwd);
 		async move {
+			let mut shell = match idle {
+				Some(shell) => shell,
+				None => match template.clone_divided(&params).await {
+					Ok(shell) => shell,
+					Err(_cancelled) => {
+						let _ = request.reply.send(Err(cancelled_command()));
+						return None;
+					},
+				},
+			};
 			let status = run_in(&mut shell, &params, &cwd, request.command).await.map_err(|error| {
 				let kind = match ExecutionExitCode::from(&error) {
 					ExecutionExitCode::NotFound => io::ErrorKind::NotFound,
@@ -1246,7 +1266,7 @@ impl<SE: ShellExtensions> CommandRunner<SE> {
 				io::Error::new(kind, error.to_string())
 			});
 			let _ = request.reply.send(status);
-			shell
+			Some(shell)
 		}
 	}
 
@@ -1272,9 +1292,12 @@ async fn run_in<SE: ShellExtensions>(
 		return dispatch(shell, base, command, None).await;
 	}
 	// The worker is reused for later commands: run on a scratch environment
-	// and put the worker's own back whatever the outcome.
-	let saved = shell.env().clone();
-	*shell.env_mut() = changed_env(&saved, &command.env)?;
+	// and put the worker's own back whatever the outcome. The scratch one is
+	// built a step at a time from the worker's, which is swapped out rather
+	// than copied: `env A=1 cmd` copied the whole environment twice in one
+	// step each, 59 ms with 100,000 variables and 79 ms with one of 64 MiB.
+	let scratch = changed_env(shell.env(), &command.env, base).await?;
+	let saved = std::mem::replace(shell.env_mut(), scratch);
 	let path_dirs = search_path(shell);
 	let status = dispatch(shell, base, command, Some(path_dirs)).await;
 	*shell.env_mut() = saved;
@@ -1284,15 +1307,43 @@ async fn run_in<SE: ShellExtensions>(
 /// `env` with `changes` applied, flattened into one global scope: a change
 /// must win over every scope, and the command runs no shell functions whose
 /// locals could need the stack.
-fn changed_env(
+///
+/// Built a step at a time: the visible variables are found and copied one
+/// step each, and the map is sized before it is filled, since growing it
+/// rehashes all of it in one step. A variable a clearing change (`env -i`)
+/// removes is never copied: changes up to the last clear can only remove
+/// what it would remove anyway, or a variable it keeps.
+async fn changed_env(
 	env: &brush_core::env::ShellEnvironment,
 	changes: &[EnvChange],
+	params: &ExecutionParameters,
 ) -> Result<brush_core::env::ShellEnvironment, Error> {
-	let mut vars: HashMap<String, brush_core::ShellVariable> =
-		env.iter().map(|(name, var)| (name.clone(), var.clone())).collect();
-	for change in changes {
+	let last_clear = changes.iter().rposition(|change| matches!(change, EnvChange::Clear));
+	let (before, after) = match last_clear {
+		Some(clear) => (&changes[..clear], &changes[clear + 1..]),
+		None => (&changes[..0], changes),
+	};
+	let visible = env.visible_divided(params).await?;
+	let mut vars: HashMap<String, brush_core::ShellVariable> = HashMap::with_capacity(visible.len());
+	let mut budget = brush_core::ElementBudget::new();
+	for (name, var) in visible {
+		if last_clear.is_some() && var.is_exported() {
+			continue;
+		}
+		let name = brush_core::clone_charged(params, &mut budget, name).await?;
+		vars.insert(name, var.clone_divided(params, &mut budget).await?);
+	}
+	// Before the last clear, a removal removes the name, and so does a set:
+	// it makes the name an exported variable, which the clear then removes.
+	for change in before {
+		if let EnvChange::Remove(name) | EnvChange::Set(name, _) = change {
+			vars.remove(name);
+		}
+	}
+	for change in after {
 		match change {
-			EnvChange::Clear => vars.retain(|_, var| !var.is_exported()),
+			// None follows the last clear.
+			EnvChange::Clear => {},
 			EnvChange::Remove(name) => {
 				vars.remove(name);
 			},
@@ -1303,11 +1354,7 @@ fn changed_env(
 			},
 		}
 	}
-	let mut changed = brush_core::env::ShellEnvironment::new();
-	for (name, var) in vars {
-		changed.set_global(name, var)?;
-	}
-	Ok(changed)
+	Ok(brush_core::env::ShellEnvironment::with_globals(vars))
 }
 
 /// The directories `execvp` would search for a command run with `shell`'s
@@ -2098,8 +2145,13 @@ async fn run_utility<U: Utility, SE: ShellExtensions>(
 	argv: Vec<String>,
 ) -> Result<ExecutionResult, Error> {
 	let spec = Spec::of_sync::<U>();
+	let parsed = match parse_utility_argv::<U, SE>(&context, argv, spec) {
+		Ok(parsed) => parsed,
+		Err(done) => return done,
+	};
+	let (env, template) = copy_for_utility(&context, spec).await?;
 	let Prepared { parsed, mut host, runner, cancel, cancel_flag, _cancel_on_drop } =
-		match prepare::<U, SE>(context, argv, spec) {
+		match prepare::<U, SE>(context, parsed, spec, env, template) {
 			Ok(prepared) => prepared,
 			Err(done) => return done,
 		};
@@ -2127,8 +2179,13 @@ async fn run_async_utility<U: AsyncUtility, SE: ShellExtensions>(
 	argv: Vec<String>,
 ) -> Result<ExecutionResult, Error> {
 	let spec = Spec::of_async::<U>();
+	let parsed = match parse_utility_argv::<U, SE>(&context, argv, spec) {
+		Ok(parsed) => parsed,
+		Err(done) => return done,
+	};
+	let (env, template) = copy_for_utility(&context, spec).await?;
 	let Prepared { parsed, mut host, runner, cancel, cancel_flag, _cancel_on_drop } =
-		match prepare::<U, SE>(context, argv, spec) {
+		match prepare::<U, SE>(context, parsed, spec, env, template) {
 			Ok(prepared) => prepared,
 			Err(done) => return done,
 		};
@@ -2150,17 +2207,13 @@ struct Prepared<P, SE: ShellExtensions> {
 	_cancel_on_drop:  CancelOnDrop,
 }
 
-/// Rewrites and parses `argv` and builds the host. `Err` carries the finished
-/// result when the invocation ends early (usage error, `--help`, host failure).
-///
-/// Everything owned is captured here, before the caller's first await, so its
-/// future stays `Send`: the borrowed `ExecutionContext` (and its `&mut Shell`)
-/// is dropped on return.
-fn prepare<P: clap::Parser, SE: ShellExtensions>(
-	context: ExecutionContext<'_, SE>,
+/// Rewrites and parses `argv`. `Err` carries the finished result when the
+/// invocation ends there (usage error, `--help`).
+fn parse_utility_argv<P: clap::Parser, SE: ShellExtensions>(
+	context: &ExecutionContext<'_, SE>,
 	argv: Vec<String>,
 	spec: Spec,
-) -> Result<Prepared<P, SE>, Result<ExecutionResult, Error>> {
+) -> Result<P, Result<ExecutionResult, Error>> {
 	let argv: Vec<OsString> = argv.into_iter().map(OsString::from).collect();
 
 	let argv = match (spec.rewrite_argv)(argv) {
@@ -2171,8 +2224,8 @@ fn prepare<P: clap::Parser, SE: ShellExtensions>(
 		},
 	};
 
-	let parsed = match P::try_parse_from(&argv) {
-		Ok(parsed) => parsed,
+	match P::try_parse_from(&argv) {
+		Ok(parsed) => Ok(parsed),
 		Err(err) => {
 			// clap reports `--help` and `--version` as errors; those belong on
 			// stdout with a success status, everything else on stderr.
@@ -2182,20 +2235,104 @@ fn prepare<P: clap::Parser, SE: ShellExtensions>(
 				return Err(Ok(ExecutionResult::new(spec.usage_error)));
 			}
 			let _ = write!(context.stdout(), "{rendered}");
-			return Err(Ok(ExecutionResult::success()));
+			Err(Ok(ExecutionResult::success()))
 		},
-	};
+	}
+}
 
-	let mut host = build_host(&context, spec).map_err(Err)?;
+/// A host's copy of the exported environment, freed where freeing it cannot
+/// hold the worker ([`brush_core::variables::free_off_worker`]): an async
+/// utility's host is dropped on the shell's task, and a hundred thousand
+/// entries are two hundred thousand frees.
+struct ExportedEnv(HashMap<String, String>);
+
+impl std::ops::Deref for ExportedEnv {
+	type Target = HashMap<String, String>;
+
+	fn deref(&self) -> &Self::Target {
+		&self.0
+	}
+}
+
+impl std::ops::DerefMut for ExportedEnv {
+	fn deref_mut(&mut self) -> &mut Self::Target {
+		&mut self.0
+	}
+}
+
+impl Drop for ExportedEnv {
+	fn drop(&mut self) {
+		let env = std::mem::take(&mut self.0);
+		let allocations = env.len().saturating_mul(2);
+		brush_core::variables::free_off_worker(env, allocations);
+	}
+}
+
+/// The exported environment a utility's host is given, found and copied a
+/// step at a time.
+///
+/// Every utility builtin takes this snapshot, so a copy made in one step was
+/// a hold on every call: `cat </dev/null` with 100,000 exported variables held
+/// the worker 21.6–22.6 ms, and with one 64 MiB exported value 26.7–27.4 ms.
+/// Each variable is a step charged its bytes, and a long value is copied in
+/// strides.
+async fn exported_environment<SE: ShellExtensions>(
+	context: &ExecutionContext<'_, SE>,
+) -> Result<ExportedEnv, Error> {
+	let exported = context.shell.env().exported_divided(&context.params).await?;
+	let mut env = ExportedEnv(HashMap::with_capacity(exported.len()));
+	let mut budget = brush_core::ElementBudget::new();
+	for (name, variable) in exported {
+		if variable.value().is_set() {
+			let value = variable.value().to_cow_str(context.shell);
+			let value = brush_core::clone_charged(&context.params, &mut budget, &value).await?;
+			env.insert(name.clone(), value);
+		}
+	}
+	Ok(env)
+}
+
+/// Builds the host for parsed arguments. `Err` carries the finished result
+/// when the host cannot be built.
+///
+/// Everything owned is captured here, so the caller's future stays `Send`
+/// after it: the borrowed `ExecutionContext` (and its `&mut Shell`) is dropped
+/// on return.
+fn prepare<P: clap::Parser, SE: ShellExtensions>(
+	context: ExecutionContext<'_, SE>,
+	parsed: P,
+	spec: Spec,
+	env: ExportedEnv,
+	template: Option<Shell<SE>>,
+) -> Result<Prepared<P, SE>, Result<ExecutionResult, Error>> {
+	let mut host = build_host(&context, spec, env).map_err(Err)?;
 	let cancel = context.cancel_token();
 	let cancel_flag = host.cancel_flag();
 	let cancel_on_drop = CancelOnDrop(Arc::clone(&cancel_flag));
-	let runner = spec.runs_commands.then(|| {
+	let runner = template.map(|template| {
 		let (sender, requests) = flume::unbounded();
 		host.commands = Some(sender);
-		CommandRunner::new(&context, requests)
+		CommandRunner::new(&context, template, requests)
 	});
 	Ok(Prepared { parsed, host, runner, cancel, cancel_flag, _cancel_on_drop: cancel_on_drop })
+}
+
+/// What a utility needs before [`prepare`], copied a step at a time: its
+/// exported environment, and, for one that runs commands, the shell its
+/// command workers are copied from. `env /usr/bin/true` held the worker
+/// 27.7 ms forking that shell with one 64 MiB variable in it, and 11.2 ms
+/// with 100,000 small ones, in one `clone`.
+async fn copy_for_utility<SE: ShellExtensions>(
+	context: &ExecutionContext<'_, SE>,
+	spec: Spec,
+) -> Result<(ExportedEnv, Option<Shell<SE>>), Error> {
+	let env = exported_environment(context).await?;
+	let template = if spec.runs_commands {
+		Some(context.shell.clone_divided(&context.params).await?)
+	} else {
+		None
+	};
+	Ok((env, template))
 }
 
 /// Awaits `body` (`None` when its task failed) while serving the utility's
@@ -2236,8 +2373,8 @@ async fn drive<SE: ShellExtensions>(
 				let (result, ()) = tokio::join!(&mut body, drain(&mut running));
 				break final_status(spec.owns_cancellation, true, result);
 			},
-			Some(shell) = running.next(), if !running.is_empty() => {
-				if let Some(runner) = runner.as_mut() {
+			Some(worker) = running.next(), if !running.is_empty() => {
+				if let (Some(runner), Some(shell)) = (runner.as_mut(), worker) {
 					runner.release(shell);
 				}
 			},
@@ -2374,9 +2511,14 @@ fn settle(name: &str, outcome: std::thread::Result<i32>, host: &mut Host) -> i32
 	}
 }
 
-/// Snapshots the command's streams, working directory, and exported
-/// environment into an owned [`Host`] that can move to a blocking thread.
-fn build_host<SE: ShellExtensions>(context: &ExecutionContext<'_, SE>, spec: Spec) -> Result<Host, Error> {
+/// Snapshots the command's streams and working directory into an owned
+/// [`Host`] that can move to a blocking thread, with `env`, the exported
+/// environment [`exported_environment`] copied.
+fn build_host<SE: ShellExtensions>(
+	context: &ExecutionContext<'_, SE>,
+	spec: Spec,
+	env: ExportedEnv,
+) -> Result<Host, Error> {
 	let Spec { name, checks_stdout_path, owns_cancellation, async_io, .. } = spec;
 	let stdin = context.try_fd(OpenFiles::STDIN_FD);
 	// The `OpenFile` is kept alive by the `Stdin` below, so the fd stays valid.
@@ -2384,13 +2526,6 @@ fn build_host<SE: ShellExtensions>(context: &ExecutionContext<'_, SE>, spec: Spe
 	let stdin_is_search_input = stdin
 		.as_ref()
 		.is_some_and(|file| matches!(file, OpenFile::PipeReader(_) | OpenFile::Stream(_) | OpenFile::Vfs(_)));
-
-	let mut env = HashMap::new();
-	for (key, var) in context.shell.env().iter_exported() {
-		if var.value().is_set() {
-			env.insert(key.clone(), var.value().to_cow_str(context.shell).into_owned());
-		}
-	}
 
 	let invoked = if context.command_name.is_empty() {
 		name.to_string()
@@ -2702,7 +2837,7 @@ mod testing {
 				umask:                 Default::default(),
 				name:                  name.to_string(),
 				paths:                 ShellPaths::with_cwd(cwd),
-				env:                   HashMap::new(),
+				env:                   crate::host::ExportedEnv(HashMap::new()),
 				cancel,
 				exit_code:             0,
 				stdin_is_search_input: false,

@@ -213,7 +213,7 @@ async fn assign_input_to_variables(
 			input_line.unwrap_or_default(),
 		)
 		.await?;
-		let reply = variables::value_for_variable(shell, "REPLY", reply).await?;
+		let reply = variables::value_for_variable(shell, params, "REPLY", reply).await?;
 		shell
 			.env_mut()
 			.update_or_add(
@@ -261,7 +261,7 @@ async fn assign_to_named_variables(
 			fields.pop_front().unwrap_or_default()
 		};
 
-		let value = variables::value_for_variable(shell, name, value).await?;
+		let value = variables::value_for_variable(shell, params, name, value).await?;
 		shell
 			.env_mut()
 			.update_or_add(

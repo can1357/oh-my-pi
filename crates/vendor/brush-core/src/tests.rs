@@ -1604,20 +1604,187 @@ mod regression {
 		/// A long word that does not parse falls back to one whole parse, so
 		/// that its error is the whole parse's: a 16 MiB `PS1` that opens a
 		/// quote and never closes it held the worker 375 ms in that parse.
+		///
+		/// **And the stepped parse it replaces is freed off the worker too.**
+		/// A million `"h"` pieces before the quote that never closes held the
+		/// worker 33.8 ms, 364.5 ms under load, after the fallback had moved:
+		/// the pieces the stepped parse had made were freed where it was.
 		#[test]
 		fn a_prompt_that_does_not_parse_yields_throughout() {
 			let _serial = lock(&MEASURED_RUN);
 			settle_the_allocator();
 			let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
 			runtime.block_on(async {
-				let mut shell = Shell::builder().build().await.expect("shell");
-				let spec = format!("\"{}", "h".repeat(16 << 20));
-				shell.env_mut().set_global("PS1", ShellVariable::new(ShellValue::String(spec))).expect("PS1");
-				let (prompt, longest) = longest_poll(shell.compose_prompt()).await;
-				eprintln!("PROMPT unclosed quote: longest_poll={longest:?}");
-				assert!(prompt.is_err(), "the prompt does not parse");
-				assert!(longest <= LONGEST_ALLOWED_HOLD, "held the worker {longest:?}");
+				let specs = [
+					("unclosed quote", format!("\"{}", "h".repeat(16 << 20))),
+					("a million pieces, then an unclosed quote", format!("{}\"", "\"h\"".repeat(1_000_000))),
+				];
+				for (shape, spec) in specs {
+					let mut shell = Shell::builder().build().await.expect("shell");
+					shell.env_mut().set_global("PS1", ShellVariable::new(ShellValue::String(spec))).expect("PS1");
+					let (prompt, longest) = longest_poll(shell.compose_prompt()).await;
+					eprintln!("PROMPT {shape}: longest_poll={longest:?}");
+					assert!(prompt.is_err(), "{shape}: the prompt does not parse");
+					assert!(longest <= LONGEST_ALLOWED_HOLD, "{shape}: held the worker {longest:?}");
+				}
 			});
+		}
+
+		/// **What an expression reads is not the expression.** A reference is
+		/// a name of a few bytes, and the value it names was copied and parsed
+		/// in one step: `x=([zeros]=v)` held the worker 199.3 ms, 536.0 ms
+		/// under load, `n=zeros` on an integer 105.1 ms, and `for n in zeros`
+		/// 104.9 ms, where the same digits spelled into the expression were
+		/// already parsed off the worker.
+		#[test]
+		fn arithmetic_references_to_long_values_yield_throughout() {
+			let cases = [
+				"o=$open; x=([zeros]=v); closed=$close; [[ ${x[0]} == v ]]",
+				"o=$open; n=zeros; closed=$close; [[ $n == 0 ]]",
+				"o=$open; for n in zeros; do :; done; closed=$close; [[ $n == 0 ]]",
+				"o=$open; (( m = zeros + 1 )); closed=$close; [[ $m == 1 ]]",
+				"o=$open; y=$(( zeros )); closed=$close; [[ $y == 0 ]]",
+			];
+
+			for command in cases {
+				assert_yields_throughout(command, zeros_and_an_integer);
+			}
+		}
+
+		/// A provider that takes every path for a directory.
+		#[derive(Debug)]
+		struct EveryPathIsADirectory;
+
+		#[async_trait::async_trait]
+		impl pi_vfs::FileSystem for EveryPathIsADirectory {
+			fn is_native_local(&self, path: &std::path::Path) -> bool {
+				!pi_vfs::is_virtual_path(path)
+			}
+
+			async fn open(
+				&self,
+				_path: &std::path::Path,
+				_options: &pi_vfs::OpenOptions,
+			) -> std::io::Result<pi_vfs::File> {
+				Err(std::io::ErrorKind::Unsupported.into())
+			}
+
+			async fn metadata(&self, _path: &std::path::Path) -> std::io::Result<pi_vfs::Metadata> {
+				Ok(std::fs::metadata("/")?.into())
+			}
+
+			async fn read_dir(&self, _path: &std::path::Path) -> std::io::Result<pi_vfs::ReadDir> {
+				Ok(pi_vfs::ReadDir::from_entries(vec![]))
+			}
+		}
+
+		/// **What `cd` resolves is the target joined to the working
+		/// directory.** Inside an accepted 64 MiB virtual directory, `.`,
+		/// `child` and `../sibling` held the worker 63–64 ms, 179–277 ms under
+		/// load, because the gate that decides where to resolve measured the
+		/// target alone.
+		#[test]
+		fn a_short_target_in_a_long_directory_yields_throughout() {
+			let _serial = lock(&MEASURED_RUN);
+			settle_the_allocator();
+			let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+			runtime.block_on(async {
+				let start = format!("virtual://root/{}/leaf", "x".repeat(ONE_HUGE_ELEMENT_BYTES));
+				for target in [".", "child", "../sibling"] {
+					let mut shell = Shell::builder().build().await.expect("shell");
+					shell.set_filesystem(pi_vfs::Fs::new(Arc::new(EveryPathIsADirectory)));
+					shell.set_working_dir(&start).await.expect("the long directory");
+					let expected = pi_vfs::normalize_lexically(&pi_vfs::join_path(
+						std::path::Path::new(&start),
+						std::path::Path::new(target),
+					));
+					let (changed, longest) = longest_poll(shell.set_working_dir(target)).await;
+					eprintln!("CD {target:?} in a long directory: longest_poll={longest:?}");
+					changed.expect("cd");
+					assert!(shell.working_dir() == expected, "{target:?}: the working directory");
+					assert!(
+						shell.env().get_str("OLDPWD", &shell).is_some_and(|oldpwd| oldpwd == start),
+						"{target:?}: OLDPWD"
+					);
+					assert!(longest <= LONGEST_ALLOWED_HOLD, "{target:?}: held the worker {longest:?}");
+				}
+			});
+		}
+
+		/// `seed`: 128 elements of `Σ`, `BYTES` long, and `x`, lowercasing
+		/// what is assigned to it.
+		fn lowercasing_sigma_elements<const BYTES: usize>(shell: &mut Shell<DefaultShellExtensions>) {
+			let text = "Σ".repeat(BYTES / 2);
+			let values: BTreeMap<u64, String> = (0..128).map(|index| (index, text.clone())).collect();
+			shell
+				.env_mut()
+				.set_global("seed", ShellVariable::new(ShellValue::IndexedArray(values)))
+				.expect("seed");
+			converting(shell, "x", ShellVariableUpdateTransform::Lowercase);
+		}
+
+		/// **A step is cheap only if its work is.** Each step of this loop is
+		/// an element-sized one, which reads the thread's clock one time in
+		/// sixteen, and each converted up to 64 KiB of `Σ` in one piece: over
+		/// 4 ms in five loaded trials of five at 65,534 and 65,536 bytes, where
+		/// 65,538, which was divided, held 1.040 ms. A conversion is now divided
+		/// above its own stride.
+		#[test]
+		fn a_loop_of_short_conversions_yields_throughout() {
+			let cases: [fn(&mut Shell<DefaultShellExtensions>); 3] = [
+				lowercasing_sigma_elements::<32_768>,
+				lowercasing_sigma_elements::<65_534>,
+				lowercasing_sigma_elements::<65_536>,
+			];
+
+			for prepare in cases {
+				assert_yields_throughout(
+					"o=$open; for x in \"${seed[@]}\"; do :; done; closed=$close; [[ -n $x ]]",
+					prepare,
+				);
+			}
+		}
+
+		/// `v0` onwards: a hundred thousand small exported variables.
+		fn many_exported(shell: &mut Shell<DefaultShellExtensions>) {
+			for index in 0..100_000 {
+				let mut variable = ShellVariable::new(ShellValue::String(String::from("x")));
+				variable.export();
+				shell.env_mut().set_global(format!("v{index}"), variable).expect("exported");
+			}
+		}
+
+		/// `big`: [`ONE_HUGE_ELEMENT_BYTES`] of `h`, exported.
+		fn one_huge_exported(shell: &mut Shell<DefaultShellExtensions>) {
+			let mut variable = ShellVariable::new(ShellValue::String("h".repeat(ONE_HUGE_ELEMENT_BYTES)));
+			variable.export();
+			shell.env_mut().set_global("big", variable).expect("big");
+		}
+
+		/// `big`: [`ONE_HUGE_ELEMENT_BYTES`] of `h`.
+		fn one_huge_scalar(shell: &mut Shell<DefaultShellExtensions>) {
+			let variable = ShellVariable::new(ShellValue::String("h".repeat(ONE_HUGE_ELEMENT_BYTES)));
+			shell.env_mut().set_global("big", variable).expect("big");
+		}
+
+		/// **What starting a command touches is everything composed into it.**
+		/// A hundred thousand small exported variables held the worker
+		/// 90.8 ms before `/usr/bin/true`, 418.6 ms under load, though none
+		/// was long; an argument or a variable too long for the operating
+		/// system is still copied to where the command starts, and refused
+		/// there by the spawn rather than by a length check of the shell's.
+		#[test]
+		fn starting_an_external_command_yields_throughout() {
+			let cases: [(&str, fn(&mut Shell<DefaultShellExtensions>)); 4] = [
+				("o=$open; /usr/bin/true; closed=$close", many_exported),
+				("o=$open; /usr/bin/true; closed=$close", one_huge_exported),
+				("o=$open; /usr/bin/true \"$big\"; closed=$close", one_huge_scalar),
+				("o=$open; /usr/bin/true \"$big\" \"$big\"; closed=$close", one_huge_scalar),
+			];
+
+			for (command, prepare) in cases {
+				assert_yields_throughout(command, prepare);
+			}
 		}
 
 		/// The longest single poll `future` takes, outside the allocator

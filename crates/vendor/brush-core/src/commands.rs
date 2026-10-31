@@ -217,7 +217,7 @@ async fn host_path(filesystem: &pi_vfs::Fs, path: &Path) -> Result<Option<PathBu
 	})
 }
 
-/// `arg` rewritten to the host path it names, if it names one.
+/// What [`host_arg`] does with an argument, decided from its text alone.
 ///
 /// Both the bare spelling (`skill://example-skill/tool.py`) and the
 /// attached-value spelling (`--index=skill://example-skill/data`) translate.
@@ -225,37 +225,62 @@ async fn host_path(filesystem: &pi_vfs::Fs, path: &Path) -> Result<Option<PathBu
 /// it was written, so `https://…`, `s3://…`, and ordinary words reach the
 /// child untouched. A bare scheme root (`local://`) is far likelier a search
 /// pattern or message text than a directory, so it stays literal too.
-async fn host_arg(filesystem: &pi_vfs::Fs, arg: &OsStr) -> Result<Option<OsString>, error::Error> {
-	let Some(text) = arg.to_str() else {
-		return Ok(None);
-	};
+#[derive(Clone, Copy)]
+enum HostArgPlan {
+	/// The argument names no file-backed URL.
+	Literal,
+	/// The whole argument is a URL, which its backing path replaces.
+	Whole,
+	/// `name=URL`, with the `=` at this offset: the URL's backing path
+	/// replaces the part after it.
+	Attached(usize),
+}
+
+/// The [`HostArgPlan`] for `text`. Every test is on the text alone and reads
+/// as far as the whole of it, so an argument longer than a stride is planned
+/// on a blocking worker ([`ComposedCommand::arg`]).
+fn host_arg_plan(text: &str) -> HostArgPlan {
 	if !text.contains("://") {
-		return Ok(None);
+		return HostArgPlan::Literal;
 	}
 	if pi_vfs::is_virtual_path(Path::new(text)) {
-		if is_url_root(text) {
-			return Ok(None);
-		}
-		return Ok(host_path(filesystem, Path::new(text))
-			.await?
-			.map(PathBuf::into_os_string));
+		return if is_url_root(text) { HostArgPlan::Literal } else { HostArgPlan::Whole };
 	}
 	let Some((name, value)) = text.split_once('=') else {
-		return Ok(None);
+		return HostArgPlan::Literal;
 	};
 	// Only an option name may carry an attached URL. A URL of its own that
 	// happens to embed one in a query string (`https://host/cb?next=local://x`)
 	// is one opaque string to the program receiving it.
 	if name.contains("://") || is_url_root(value) {
-		return Ok(None);
+		return HostArgPlan::Literal;
 	}
-	let Some(host) = host_path(filesystem, Path::new(value)).await? else {
-		return Ok(None);
-	};
-	let mut rewritten = OsString::from(name);
-	rewritten.push("=");
-	rewritten.push(host);
-	Ok(Some(rewritten))
+	HostArgPlan::Attached(name.len())
+}
+
+/// `text` rewritten to the host path its [`HostArgPlan`] names, if the
+/// filesystem routes that URL to a backing file.
+async fn host_arg(
+	filesystem: &pi_vfs::Fs,
+	text: &str,
+	plan: HostArgPlan,
+) -> Result<Option<OsString>, error::Error> {
+	match plan {
+		HostArgPlan::Literal => Ok(None),
+		HostArgPlan::Whole => Ok(host_path(filesystem, Path::new(text))
+			.await?
+			.map(PathBuf::into_os_string)),
+		HostArgPlan::Attached(equals) => {
+			let (name, value) = (&text[..equals], &text[equals + 1..]);
+			let Some(host) = host_path(filesystem, Path::new(value)).await? else {
+				return Ok(None);
+			};
+			let mut rewritten = OsString::from(name);
+			rewritten.push("=");
+			rewritten.push(host);
+			Ok(Some(rewritten))
+		},
+	}
 }
 
 /// Whether `text` is a URL naming nothing below its scheme (`local://`).
@@ -264,9 +289,258 @@ fn is_url_root(text: &str) -> bool {
 		.is_some_and(|scheme| text[scheme.len() + 3..].trim_matches('/').is_empty())
 }
 
+/// Runs `work` on a blocking worker and waits for it, or in place on a
+/// builtin that is on a blocking worker already.
+async fn off_worker<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Result<T, error::Error> {
+	if builtin_on_blocking_worker() {
+		return Ok(work());
+	}
+	match tokio::task::spawn_blocking(work).await {
+		Ok(done) => Ok(done),
+		Err(join_error) if join_error.is_panic() => std::panic::resume_unwind(join_error.into_panic()),
+		Err(join_error) => Err(error::ErrorKind::ThreadingError(join_error).into()),
+	}
+}
+
+/// A command [`compose_std_command`] composed, with what it left to be done
+/// where the command starts.
+///
+/// **The size that decides where a command starts is the size of everything
+/// composed into it, because the start touches all of it again.** `std`
+/// copies every variable of the environment once more and builds the block
+/// the process receives from those copies when it starts, and frees every
+/// argument when the command is dropped: a hundred thousand small exported
+/// variables held the worker 90.8 ms before `/usr/bin/true`, though no one of
+/// them was long. So composing counts the steps and bytes it puts into the
+/// command, and a command of more than one step's worth —
+/// [`interp::DIVIDE_COPY_ABOVE_BYTES`] of text or
+/// [`interp::ELEMENT_CHECKPOINT_STRIDE`] arguments and variables — starts on
+/// a blocking worker ([`Self::start`]). An ordinary command starts in place.
+///
+/// A piece longer than a stride is not copied into the command while it is
+/// composed, because `Command::arg` and `Command::env` copy in one call: it is
+/// copied out in strides and left for the start (`deferred`), and so is every
+/// argument after it, to keep the arguments in order, and every variable after
+/// it, so that a later setting of the same name still wins. So is an
+/// exported function, whose definition is rendered as text only there.
+///
+/// **Nothing here decides whether the operating system will start the
+/// command.** An argument or environment too long for it is copied to where
+/// the command starts and refused there by the spawn, with the spawn's own
+/// error and in the spawn's own order of checks.
+pub struct ComposedCommand {
+	command:       std::process::Command,
+	deferred:      Vec<Deferred>,
+	args_deferred: bool,
+	env_deferred:  bool,
+	budget:        interp::ElementBudget,
+	steps:         usize,
+	bytes:         usize,
+}
+
+/// A piece of a [`ComposedCommand`] left for where it starts.
+enum Deferred {
+	Arg0(String),
+	Arg(OsString),
+	Env(OsString, OsString),
+	Function(String, std::sync::Arc<ast::FunctionDefinition>),
+}
+
+impl ComposedCommand {
+	fn new(command: std::process::Command) -> Self {
+		Self {
+			command,
+			deferred: Vec::new(),
+			args_deferred: false,
+			env_deferred: false,
+			budget: interp::ElementBudget::new(),
+			steps: 0,
+			bytes: 0,
+		}
+	}
+
+	/// The command, for the settings a caller adds before it starts.
+	pub const fn command_mut(&mut self) -> &mut std::process::Command {
+		&mut self.command
+	}
+
+	/// Counts one step of `bytes` put into the command, and spends the
+	/// checkpoints it owes.
+	async fn charge(&mut self, params: &ExecutionParameters, bytes: usize) -> Result<(), error::Error> {
+		self.steps += 1;
+		self.bytes = self.bytes.saturating_add(bytes);
+		let due = self.budget.charge(bytes);
+		if due > 0 {
+			interp::loop_checkpoints(params, due).await?;
+		}
+		Ok(())
+	}
+
+	/// Spends the checkpoints one step owes that looks at something without
+	/// putting it into the command.
+	async fn walk(&mut self, params: &ExecutionParameters) -> Result<(), error::Error> {
+		let due = self.budget.charge(0);
+		if due > 0 {
+			interp::loop_checkpoints(params, due).await?;
+		}
+		Ok(())
+	}
+
+	async fn arg0(&mut self, params: &ExecutionParameters, argv0: &str) -> Result<(), error::Error> {
+		if argv0.len() <= interp::DIVIDE_COPY_ABOVE_BYTES {
+			self.charge(params, argv0.len()).await?;
+			self.command.arg0(argv0);
+			return Ok(());
+		}
+		self.charge(params, 0).await?;
+		let argv0 = interp::clone_in_strides(params, argv0).await?;
+		self.deferred.push(Deferred::Arg0(argv0));
+		Ok(())
+	}
+
+	/// Adds `arg`, rewritten to the host path it names where `rewrites`.
+	///
+	/// A long argument is planned on a blocking worker from a copy made in
+	/// strides: deciding whether it holds a URL reads all of it.
+	async fn arg(
+		&mut self,
+		params: &ExecutionParameters,
+		filesystem: &pi_vfs::Fs,
+		rewrites: bool,
+		arg: &str,
+	) -> Result<(), error::Error> {
+		if arg.len() <= interp::DIVIDE_COPY_ABOVE_BYTES {
+			self.charge(params, arg.len()).await?;
+			let rewritten = if rewrites { host_arg(filesystem, arg, host_arg_plan(arg)).await? } else { None };
+			match (rewritten, self.args_deferred) {
+				(Some(rewritten), true) => self.deferred.push(Deferred::Arg(rewritten)),
+				(None, true) => self.deferred.push(Deferred::Arg(OsString::from(arg))),
+				(Some(rewritten), false) => {
+					self.command.arg(rewritten);
+				},
+				(None, false) => {
+					self.command.arg(arg);
+				},
+			}
+			return Ok(());
+		}
+		self.charge(params, 0).await?;
+		let arg = interp::clone_in_strides(params, arg).await?;
+		let (arg, plan) = if rewrites {
+			off_worker(move || {
+				let plan = host_arg_plan(&arg);
+				(arg, plan)
+			})
+			.await?
+		} else {
+			(arg, HostArgPlan::Literal)
+		};
+		let arg = match host_arg(filesystem, &arg, plan).await? {
+			Some(rewritten) => rewritten,
+			None => OsString::from(arg),
+		};
+		self.args_deferred = true;
+		self.deferred.push(Deferred::Arg(arg));
+		Ok(())
+	}
+
+	/// Adds the variable `name` with `value` to the child's environment.
+	async fn env(
+		&mut self,
+		params: &ExecutionParameters,
+		name: &str,
+		value: Cow<'_, str>,
+	) -> Result<(), error::Error> {
+		let bytes = name.len() + value.len();
+		if bytes <= interp::DIVIDE_COPY_ABOVE_BYTES {
+			self.charge(params, bytes).await?;
+			self.set_env(OsStr::new(name), OsStr::new(value.as_ref()));
+			return Ok(());
+		}
+		self.charge(params, 0).await?;
+		let name = interp::clone_in_strides(params, name).await?;
+		let value = match value {
+			Cow::Owned(value) => value,
+			Cow::Borrowed(value) => interp::clone_in_strides(params, value).await?,
+		};
+		self.env_deferred = true;
+		self.deferred.push(Deferred::Env(name.into(), value.into()));
+		Ok(())
+	}
+
+	/// Sets a variable whose value the shell does not size (a path the
+	/// operating system gave it), after any deferred one of the same name.
+	fn set_env(&mut self, name: &OsStr, value: &OsStr) {
+		if self.env_deferred {
+			self.deferred.push(Deferred::Env(name.to_owned(), value.to_owned()));
+		} else {
+			self.command.env(name, value);
+		}
+	}
+
+	/// Finishes the command and runs `start` on it — a spawn, or an `exec` —
+	/// on a blocking worker if more than one step's worth was composed into
+	/// it, and in place otherwise. The command is dropped where `start` ran.
+	///
+	/// # Errors
+	///
+	/// Returns [`error::ErrorKind::ThreadingError`] if the blocking worker
+	/// did not run `start`.
+	pub async fn start<T: Send + 'static>(
+		self,
+		start: impl FnOnce(std::process::Command) -> T + Send + 'static,
+	) -> Result<T, error::Error> {
+		let large = !self.deferred.is_empty()
+			|| self.bytes > interp::DIVIDE_COPY_ABOVE_BYTES
+			|| self.steps > interp::ELEMENT_CHECKPOINT_STRIDE;
+		if large {
+			off_worker(move || start(self.finish())).await
+		} else {
+			Ok(start(self.finish()))
+		}
+	}
+
+	/// The command with every deferred piece copied into it.
+	fn finish(self) -> std::process::Command {
+		let Self { mut command, deferred, .. } = self;
+		for piece in deferred {
+			match piece {
+				Deferred::Arg0(argv0) => {
+					command.arg0(argv0);
+				},
+				Deferred::Arg(arg) => {
+					command.arg(arg);
+				},
+				Deferred::Env(name, value) => {
+					command.env(name, value);
+				},
+				Deferred::Function(name, definition) => {
+					command.env(std::format!("BASH_FUNC_{name}%%"), std::format!("() {}", definition.body));
+				},
+			}
+		}
+
+		// When tracing is enabled, report.
+		tracing::debug!(
+			 target: trace_categories::COMMANDS,
+			 "Spawning: cmd='{} {}'",
+			 command.get_program().to_string_lossy().to_string(),
+			 command.get_args()
+				  .map(|a| a.to_string_lossy().to_string())
+				  .join(" ")
+		);
+
+		command
+	}
+}
+
 /// Composes a `std::process::Command` to execute the given command.
 /// Appropriately configures the command name and arguments, redirections,
 /// injected file descriptors, environment variables, etc.
+///
+/// Composing is divided: every argument and every variable is a step, the
+/// variables are found a step at a time, and a piece longer than a stride is
+/// left for where the command starts. See [`ComposedCommand`].
 ///
 /// # Arguments
 ///
@@ -274,18 +548,25 @@ fn is_url_root(text: &str) -> bool {
 /// * `command_name` - The name of the command to execute.
 /// * `argv0` - The value to use for `argv[0]` (may be different from the
 ///   command).
+/// * `leading` - Arguments to pass before `args`.
 /// * `args` - The arguments to pass to the command.
 /// * `empty_env` - If true, the command will be executed with an empty
 ///   environment; if false, the command will inherit environment variables
 ///   marked as exported in the provided `Shell`.
-#[allow(unused_variables, reason = "argv0 is only used on unix platforms")]
-pub async fn compose_std_command<S: AsRef<OsStr>, SE: extensions::ShellExtensions>(
+///
+/// # Errors
+///
+/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part
+/// way, and the error of a virtual working directory, program or argument the
+/// child cannot be handed.
+pub async fn compose_std_command<SE: extensions::ShellExtensions, S: AsRef<str> + Sync>(
 	context: &ExecutionContext<'_, SE>,
 	command_name: &str,
 	argv0: &str,
+	leading: &[&str],
 	args: &[S],
 	empty_env: bool,
-) -> Result<std::process::Command, error::Error> {
+) -> Result<ComposedCommand, error::Error> {
 	// The operating system has no view of this process's virtual filesystem: a
 	// child can only start in a native directory and only run a native program.
 	// A file-backed scheme aliases a real file, so the program, the arguments
@@ -336,30 +617,21 @@ pub async fn compose_std_command<S: AsRef<OsStr>, SE: extensions::ShellExtension
 		}
 	}
 
-	let mut cmd = std::process::Command::new(&program);
+	let params = &context.params;
+	let mut composed = ComposedCommand::new(std::process::Command::new(&program));
 
 	// Override argv[0].
 	// NOTE: Not supported on all platforms.
-	cmd.arg0(argv0);
+	composed.arg0(params, argv0).await?;
 
-	// Each argument is scanned for a virtual path and then copied by
-	// `Command::arg` into the string the operating system takes, both in one
-	// step per argument, so the loop between them is charged. The step itself
-	// is bounded: an argument longer than the operating system takes has been
-	// refused before this with the spawn's own error (see
-	// `exceeds_exec_limit`), and the longest Linux takes, 131,071 bytes,
-	// copies in 5 µs.
-	let mut budget = interp::ElementBudget::new();
+	// A native filesystem routes no URL to a backing file, so nothing is
+	// rewritten and no argument needs reading for one.
+	let rewrites = !filesystem.is_native();
+	for arg in leading {
+		composed.arg(params, filesystem, rewrites, arg).await?;
+	}
 	for arg in args {
-		let arg = arg.as_ref();
-		let due = budget.charge(arg.len());
-		if due > 0 {
-			interp::loop_checkpoints(&context.params, due).await?;
-		}
-		match host_arg(filesystem, arg).await? {
-			Some(rewritten) => cmd.arg(rewritten),
-			None => cmd.arg(arg),
-		};
+		composed.arg(params, filesystem, rewrites, arg.as_ref()).await?;
 	}
 
 	// Apply `ulimit` overrides to the child only; the host keeps its own limits.
@@ -370,7 +642,7 @@ pub async fn compose_std_command<S: AsRef<OsStr>, SE: extensions::ShellExtension
 		// issues `setrlimit` calls, which are async-signal-safe, and does not
 		// allocate.
 		unsafe {
-			cmd.pre_exec(move || limits.apply_in_child());
+			composed.command.pre_exec(move || limits.apply_in_child());
 		}
 	}
 
@@ -380,7 +652,7 @@ pub async fn compose_std_command<S: AsRef<OsStr>, SE: extensions::ShellExtension
 		// SAFETY: runs in the forked child before exec; `umask` is
 		// async-signal-safe and cannot fail.
 		unsafe {
-			cmd.pre_exec(move || {
+			composed.command.pre_exec(move || {
 				nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(
 					mask as nix::libc::mode_t,
 				));
@@ -390,19 +662,22 @@ pub async fn compose_std_command<S: AsRef<OsStr>, SE: extensions::ShellExtension
 	}
 
 	// Use the shell's current working dir, as the host spells it.
-	cmd.current_dir(&spawn_dir);
+	composed.command.current_dir(&spawn_dir);
 
 	// Start with a clear environment.
-	cmd.env_clear();
+	composed.command.env_clear();
 
-	// Add in exported variables.
 	if !empty_env {
-		for (k, v) in context.shell.env().iter_exported() {
+		// Add in exported variables, found a step at a time: every variable
+		// is looked at, exported or not.
+		for (name, variable) in context.shell.env().exported_divided(params).await? {
 			// NOTE: To match bash behavior, we only include exported variables
 			// that are set (i.e., have a value). This means a variable that
 			// shows up in `declare -p` but has no *set* value will be omitted.
-			if v.value().is_set() {
-				cmd.env(k.as_str(), v.value().to_cow_str(context.shell).as_ref());
+			if variable.value().is_set() {
+				composed
+					.env(params, name, variable.value().to_cow_str(context.shell))
+					.await?;
 			}
 		}
 		// A child started in the directory a URL aliases must not be told its
@@ -410,20 +685,20 @@ pub async fn compose_std_command<S: AsRef<OsStr>, SE: extensions::ShellExtension
 		// disagree with its own `getcwd()`. The shell's own `$PWD` keeps the
 		// URL spelling; only the child's environment is corrected.
 		if spawn_dir != working_dir {
-			cmd.env("PWD", &spawn_dir);
+			composed.set_env(OsStr::new("PWD"), spawn_dir.as_os_str());
 		}
 		// Set _ to the resolved command path for external commands, as the host
 		// spells it when the program was a URL.
-		cmd.env("_", &program);
-	}
+		composed.set_env(OsStr::new("_"), program.as_os_str());
 
-	// Add in exported functions.
-	if !empty_env {
+		// Add in exported functions. A definition is rendered as text where
+		// the command starts, since it can be any length.
 		for (func_name, registration) in context.shell.funcs().iter() {
+			composed.walk(params).await?;
 			if registration.is_exported() {
-				let var_name = std::format!("BASH_FUNC_{func_name}%%");
-				let value = std::format!("() {}", registration.definition().body);
-				cmd.env(var_name, value);
+				composed
+					.deferred
+					.push(Deferred::Function(func_name.clone(), registration.shared_definition()));
 			}
 		}
 	}
@@ -433,7 +708,7 @@ pub async fn compose_std_command<S: AsRef<OsStr>, SE: extensions::ShellExtension
 		None => (),
 		Some(stdin_file) => {
 			let as_stdio = stdin_file.into_stdio()?;
-			cmd.stdin(as_stdio);
+			composed.command.stdin(as_stdio);
 		},
 	}
 
@@ -442,7 +717,7 @@ pub async fn compose_std_command<S: AsRef<OsStr>, SE: extensions::ShellExtension
 		None => (),
 		Some(stdout_file) => {
 			let as_stdio = stdout_file.into_stdio()?;
-			cmd.stdout(as_stdio);
+			composed.command.stdout(as_stdio);
 		},
 	}
 
@@ -451,7 +726,7 @@ pub async fn compose_std_command<S: AsRef<OsStr>, SE: extensions::ShellExtension
 		None => {},
 		Some(stderr_file) => {
 			let as_stdio = stderr_file.into_stdio()?;
-			cmd.stderr(as_stdio);
+			composed.command.stderr(as_stdio);
 		},
 	}
 
@@ -459,9 +734,9 @@ pub async fn compose_std_command<S: AsRef<OsStr>, SE: extensions::ShellExtension
 	let other_files = context.iter_fds().filter(|(fd, _)| {
 		*fd != OpenFiles::STDIN_FD && *fd != OpenFiles::STDOUT_FD && *fd != OpenFiles::STDERR_FD
 	});
-	cmd.inject_fds(other_files)?;
+	composed.command.inject_fds(other_files)?;
 
-	Ok(cmd)
+	Ok(composed)
 }
 
 /// Renders `args` the way `BASH_COMMAND` holds them: joined by spaces, each as
@@ -1036,28 +1311,22 @@ pub(crate) async fn execute_external_command(
 	let new_pg = matches!(context.params.process_group_policy, ProcessGroupPolicy::NewProcessGroup);
 	let session_action = child_session_action(new_pg, child_stdin_is_terminal, in_pipeline);
 
-	// An argument or exported value longer than the operating system starts a
-	// process with is refused by the spawn with `E2BIG` — but only after
-	// `Command::arg` or `Command::env` has copied it, in one step: a 64 MiB
-	// argument held the worker 33.4 ms there, 197.5 ms under load, before the
-	// refusal. So the refusal is reached first, from the lengths alone, and
-	// it is the spawn's own: the same error, marker and status.
-	#[cfg(unix)]
-	if exceeds_exec_limit(&context, cmd_args.as_slice()).await? {
-		let marker_output = prepare_output_markers(&context, executable_path, cmd_args.as_slice());
-		return spawn_failed(context, marker_output, io::Error::from_raw_os_error(libc::E2BIG));
-	}
-
 	// Compose the std::process::Command that encapsulates what we want to launch.
 	// argv[0] defaults to context.command_name (the user-facing name of the
 	// command) unless the caller specified an explicit override.
+	//
+	// Nothing here checks whether the operating system will take the
+	// arguments and environment: an argument or variable too long for it is
+	// refused by the spawn, with the spawn's own error, in the spawn's own
+	// order of checks. What keeps a long one from holding the worker is where
+	// it is copied and where the command starts (`ComposedCommand`).
 	let argv0 = argv0_override.unwrap_or(context.command_name.as_str());
-	#[allow(unused_mut, reason = "only mutated on unix platforms")]
-	let mut cmd = if context.params.deferred_redirects().is_empty() {
+	let mut composed = if context.params.deferred_redirects().is_empty() {
 		compose_std_command(
 			&context,
 			executable_path,
 			argv0,
+			&[],
 			cmd_args.as_slice(),
 			false, /* empty environment? */
 		)
@@ -1066,15 +1335,13 @@ pub(crate) async fn execute_external_command(
 		// Redirections to a FIFO left for the child (see
 		// `interp::DeferredRedirect`): `/bin/sh` makes them and then execs the
 		// command in place, so the pid the shell tracks is the command's. Its
-		// argv[0] is then the resolved path.
+		// argv[0] is then the resolved path. The arguments are passed through
+		// as they are, not copied: one can be any length.
 		let script = interp::deferred_redirect_script(context.params.deferred_redirects());
-		let mut trampoline_args = vec!["-c".to_owned(), script, "sh".to_owned()];
-		trampoline_args.push(executable_path.to_owned());
-		trampoline_args.extend(cmd_args.iter().map(|arg| (*arg).clone()));
-		compose_std_command(&context, "/bin/sh", "sh", trampoline_args.as_slice(), false).await?
+		let leading = ["-c", script.as_str(), "sh", executable_path];
+		compose_std_command(&context, "/bin/sh", "sh", &leading, cmd_args.as_slice(), false).await?
 	};
 	let mut marker_output = prepare_output_markers(&context, executable_path, cmd_args.as_slice());
-
 
 	// Set up process group/session state.
 	//
@@ -1089,6 +1356,7 @@ pub(crate) async fn execute_external_command(
 		&& matches!(session_action, ChildSessionAction::TakeForeground)
 		&& context.shell.options().external_cmd_leads_session;
 
+	let cmd = composed.command_mut();
 	match session_action {
 		ChildSessionAction::DetachSession => {
 			// setsid() creates the fresh session + process group; no process_group().
@@ -1125,17 +1393,7 @@ pub(crate) async fn execute_external_command(
 		}
 	}
 
-	// When tracing is enabled, report.
-	tracing::debug!(
-		 target: trace_categories::COMMANDS,
-		 "Spawning: cmd='{} {}'",
-		 cmd.get_program().to_string_lossy().to_string(),
-		 cmd.get_args()
-			  .map(|a| a.to_string_lossy().to_string())
-			  .join(" ")
-	);
-
-	match sys::process::spawn(cmd) {
+	match composed.start(sys::process::spawn).await? {
 		Ok(child) => {
 			// Retrieve the pid.
 			#[expect(clippy::cast_possible_wrap)]
@@ -1198,62 +1456,6 @@ fn spawn_failed(
 	} else {
 		Err(error::ErrorKind::FailedToExecuteCommand(context.command_name, spawn_err).into())
 	}
-}
-
-/// The longest string the operating system starts a process with, as an
-/// argument or as a `NAME=value` of its environment.
-///
-/// Linux caps each one at `MAX_ARG_STRLEN`, thirty-two pages with its
-/// terminating NUL: 131,071 bytes on 4 KiB pages, which the gate machine
-/// accepts, where it refuses 131,072 with `E2BIG`. Elsewhere one string
-/// longer than `ARG_MAX`, the cap on all of them together, cannot fit
-/// either.
-#[cfg(unix)]
-fn longest_exec_string() -> Option<usize> {
-	#[cfg(target_os = "linux")]
-	{
-		// SAFETY: `sysconf` reads a configuration value and has no
-		// preconditions.
-		let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-		usize::try_from(page).ok().map(|page| page * 32 - 1)
-	}
-	#[cfg(not(target_os = "linux"))]
-	{
-		// SAFETY: as above.
-		let max = unsafe { libc::sysconf(libc::_SC_ARG_MAX) };
-		usize::try_from(max).ok()
-	}
-}
-
-/// Whether an argument, or an exported variable as the child's environment
-/// would hold it, is longer than [`longest_exec_string`]. Reads lengths only,
-/// a checkpoint's worth of them a step.
-#[cfg(unix)]
-async fn exceeds_exec_limit(
-	context: &ExecutionContext<'_, impl extensions::ShellExtensions>,
-	args: &[&String],
-) -> Result<bool, error::Error> {
-	let Some(longest) = longest_exec_string() else {
-		return Ok(false);
-	};
-	let mut budget = interp::ElementBudget::new();
-	for arg in args {
-		let due = budget.charge(0);
-		if due > 0 {
-			interp::loop_checkpoints(&context.params, due).await?;
-		}
-		if arg.len() > longest {
-			return Ok(true);
-		}
-	}
-	for (name, variable) in context.shell.env().iter_exported() {
-		if variable.value().is_set()
-			&& name.len() + 1 + variable.value().to_cow_str(context.shell).len() > longest
-		{
-			return Ok(true);
-		}
-	}
-	Ok(false)
 }
 
 fn prepare_output_markers<SE: extensions::ShellExtensions>(

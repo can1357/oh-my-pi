@@ -410,7 +410,7 @@ impl DeclareCommand {
 	) -> Result<(Option<ShellValueLiteral>, bool), brush_core::Error> {
 		let literal = match value {
 			Some(ShellValueLiteral::Scalar(value)) if integer => {
-				let value = variables::integer_value(context.shell, value).await?;
+				let value = variables::integer_value(context.shell, &context.params, value).await?;
 				return Ok((Some(ShellValueLiteral::Scalar(value)), false));
 			},
 			Some(ShellValueLiteral::Array(literal)) if keyed || integer => literal,
@@ -453,7 +453,8 @@ impl DeclareCommand {
 			}
 			// The value after its subscript, as in a literal.
 			if integer {
-				*value = variables::integer_value(context.shell, std::mem::take(value)).await?;
+				*value =
+					variables::integer_value(context.shell, &context.params, std::mem::take(value)).await?;
 			}
 		}
 		Ok((Some(ShellValueLiteral::Array(ArrayLiteral(elements))), false))

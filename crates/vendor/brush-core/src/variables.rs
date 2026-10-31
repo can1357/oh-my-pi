@@ -14,7 +14,12 @@ use crate::{
 
 /// Copies `text` as one step of `budget`: charged its bytes and copied in one
 /// go within a stride, and copied in strides of its own above one.
-pub(crate) async fn clone_charged(
+///
+/// # Errors
+///
+/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part
+/// way.
+pub async fn clone_charged(
 	params: &ExecutionParameters,
 	budget: &mut interp::ElementBudget,
 	text: &str,
@@ -114,7 +119,7 @@ impl ShellVariable {
 	///
 	/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part
 	/// way, discarding the copy.
-	pub(crate) async fn clone_divided(
+	pub async fn clone_divided(
 		&self,
 		params: &ExecutionParameters,
 		budget: &mut interp::ElementBudget,
@@ -1026,9 +1031,19 @@ pub(crate) struct ValueConverter {
 /// enforce. 8 KiB converts in about 0.15 ms optimised. The extra clock
 /// reading each stride costs 100–300 ns against 150 µs of conversion.
 ///
-/// This is the size of a *piece*, not the threshold for dividing at all;
-/// a value shorter than [`interp::DIVIDE_COPY_ABOVE_BYTES`] is converted in
-/// one step, because below that there is nothing worth dividing.
+/// **It is also the threshold for dividing at all, and the copy's 64 KiB is
+/// not.** A value up to [`interp::DIVIDE_COPY_ABOVE_BYTES`] used to be
+/// converted in one step, on the reasoning that below a copy stride there is
+/// nothing worth dividing; but a step is cheap only if its work is, and one
+/// conversion of 64 KiB of `Σ` is already over the millisecond. A loop whose
+/// every step was such a conversion — `declare -l x; for x in "${seed[@]}"`
+/// over 128 elements of 65,534 bytes — read the thread's clock one time in
+/// sixteen checkpoints, as an element-sized step does, with a conversion
+/// between each: the worker was held over 4 ms in five loaded trials of five,
+/// median 4.745 ms, while 65,538-byte elements, divided, held it 1.040 ms.
+/// Converting more than one stride in pieces makes every stride of conversion
+/// a [`interp::stride_checkpoint`], which reads the clock each time, so the
+/// cadence that suits element-sized steps never has to stretch over one.
 const CONVERSION_STRIDE_BYTES: usize = 8 * 1024;
 
 /// An append made in place, which puts the buffer back if it does not finish.
@@ -1151,7 +1166,7 @@ impl ValueConverter {
 		}
 		let divisible = !self.treat_as_int
 			&& !matches!(self.update_transform, ShellVariableUpdateTransform::None);
-		if !divisible || value.len() <= interp::DIVIDE_COPY_ABOVE_BYTES {
+		if !divisible || value.len() <= CONVERSION_STRIDE_BYTES {
 			return Ok(self.apply(value));
 		}
 
@@ -1826,7 +1841,7 @@ impl ArrayLiteral {
 			let value = if integer {
 				// A parse, like a subscript's.
 				interp::loop_checkpoint(params).await?;
-				integer_value(shell, value).await?
+				integer_value(shell, params, value).await?
 			} else {
 				value
 			};
@@ -1849,15 +1864,25 @@ impl ArrayLiteral {
 /// # Arguments
 ///
 /// * `shell` - The shell the value is evaluated in.
+/// * `params` - The execution parameters of the run doing the assignment.
 /// * `value` - The expanded value.
 pub async fn integer_value(
 	shell: &mut Shell<impl extensions::ShellExtensions>,
+	params: &ExecutionParameters,
 	value: String,
 ) -> Result<String, error::Error> {
-	match crate::arithmetic::eval_expanded(shell, value).await {
+	match crate::arithmetic::eval_expanded(shell, params, value).await {
 		Ok(value) => Ok(value.to_string()),
-		Err(failed) => Err(error::Error::from(failed).into_fatal()),
+		Err(failed) => Err(fatal_unless_interrupted(failed)),
 	}
+}
+
+/// The error a failed evaluation ends a non-interactive shell with, as Bash's
+/// does — unless the evaluation was cancelled, which is the run's
+/// interruption and ends only the run.
+fn fatal_unless_interrupted(failed: crate::arithmetic::EvalError) -> error::Error {
+	let error = error::Error::from(failed);
+	if matches!(error.kind(), error::ErrorKind::Interrupted) { error } else { error.into_fatal() }
 }
 
 /// `value` as the variable called `name` takes it, for a write that names a
@@ -1870,15 +1895,17 @@ pub async fn integer_value(
 /// # Arguments
 ///
 /// * `shell` - The shell the value is evaluated in.
+/// * `params` - The execution parameters of the run doing the write.
 /// * `name` - The name of the variable written.
 /// * `value` - The value written.
 pub async fn value_for_variable(
 	shell: &mut Shell<impl extensions::ShellExtensions>,
+	params: &ExecutionParameters,
 	name: &str,
 	value: String,
 ) -> Result<String, error::Error> {
 	if shell.env().get(name).is_some_and(|(_, var)| var.is_treated_as_integer()) {
-		integer_value(shell, value).await
+		integer_value(shell, params, value).await
 	} else {
 		Ok(value)
 	}
@@ -1913,7 +1940,7 @@ pub async fn evaluate_index_subscript(
 	}
 	match crate::arithmetic::expand_and_eval(shell, params, subscript, false).await {
 		Ok(index) => Ok(count_back(index, end)),
-		Err(failed) => Err(error::Error::from(failed).into_fatal()),
+		Err(failed) => Err(fatal_unless_interrupted(failed)),
 	}
 }
 
@@ -1976,7 +2003,7 @@ const FREE_IN_PLACE_ELEMENTS: usize = 16 * 1024;
 /// scope dropped at the end of a subshell or a function. Freeing on another
 /// thread contends with this one for the allocator, so a value let go of where
 /// the run can await is freed by [`free_in_strides`] instead.
-pub(crate) fn free_off_worker<T: Send + 'static>(value: T, elements: usize) {
+pub fn free_off_worker<T: Send + 'static>(value: T, elements: usize) {
 	if elements <= FREE_IN_PLACE_ELEMENTS || crate::commands::builtin_on_blocking_worker() {
 		return;
 	}

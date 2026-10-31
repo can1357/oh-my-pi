@@ -190,7 +190,7 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
 	///
 	/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part
 	/// way, discarding the copy.
-	pub(crate) async fn clone_divided(
+	pub async fn clone_divided(
 		&self,
 		params: &crate::ExecutionParameters,
 	) -> Result<Self, error::Error> {

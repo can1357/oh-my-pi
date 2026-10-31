@@ -38,11 +38,17 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 		//
 		// A path has no enforced bound: a virtual provider may accept one of
 		// any length, and making a 64 MiB one absolute and normalizing it held
-		// the worker 79.6 ms, 286.8 ms under load, in one step. A path longer
-		// than a stride is resolved on a blocking worker, from copies made in
-		// strides, unless this is one already.
+		// the worker 79.6 ms, 286.8 ms under load, in one step. **What is
+		// resolved is the target joined to the working directory, not the
+		// target**: `cd .` in an accepted 64 MiB virtual directory held it
+		// 63–64 ms, 179–277 ms under load, while the gate measured one byte.
+		// So the gate is the length of the text resolution reads
+		// ([`resolution_len`]), and a resolution longer than a stride runs on
+		// a blocking worker, from copies made in strides, unless this is one
+		// already.
 		let target = target_dir.as_ref();
-		let (native, checked_path) = if target.as_os_str().len() > crate::interp::DIVIDE_COPY_ABOVE_BYTES
+		let (native, checked_path) = if resolution_len(self.working_dir(), target)
+			> crate::interp::DIVIDE_COPY_ABOVE_BYTES
 			&& !crate::commands::builtin_on_blocking_worker()
 		{
 			let target = copy_path_in_strides(&params, target).await?;
@@ -311,6 +317,15 @@ fn resolve_directory(filesystem: &pi_vfs::Fs, working_dir: &Path, target: &Path)
 	let native = filesystem.is_native_local(&absolute);
 	let checked = if native { absolute } else { pi_vfs::normalize_lexically(&absolute) };
 	(native, checked)
+}
+
+/// How much text [`resolve_directory`] may read for `target`: the target, and
+/// the working directory a relative target is joined to and normalized with.
+/// Counted from the lengths alone, which is an upper bound for a target that
+/// turns out to be absolute: telling that a long target is absolute or a URL
+/// would itself read it.
+fn resolution_len(working_dir: &Path, target: &Path) -> usize {
+	working_dir.as_os_str().len().saturating_add(target.as_os_str().len())
 }
 
 /// A copy of `path` made a stride at a time.
