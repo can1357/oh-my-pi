@@ -9,12 +9,17 @@
 - Added `markRequestRefusal()` and `isRequestRefusal()` (`@oh-my-pi/pi-utils/request-hold-scope`): a refusal of the provider-request hold is terminal, so `fetchWithRetry` stops at one and `isRetryableError` no longer reports one as retryable ([#17457](https://github.com/can1357/oh-my-pi/pull/17457) by [@sjawhar](https://github.com/sjawhar))
 - Added `admitNetworkSend()` and `cutIfHeldBefore()` (`@oh-my-pi/pi-utils/request-hold-scope`) for code outside pi-ai that opens a connection the provider-request hold's fetch backstop does not see (an HTTP/2 session, a raw socket): ask the hold right before connecting, then cut the connection if the hold begins before its response does. A held caller is refused with `NetworkSendHeldError`, a terminal refusal. `SharedFlight` now exposes `failure`, the work's own failure once it settles, so a caller that left can still act on what the work found ([#17457](https://github.com/can1357/oh-my-pi/pull/17457) by [@sjawhar](https://github.com/sjawhar))
 
+## [18.14.2] - 2026-10-31
+
+### Added
+
+- Added `oklabDistance`, the perceptual distance between two hex colors ([#17520](https://github.com/can1357/oh-my-pi/pull/17520))
+
 ## [18.14.1] - 2026-10-31
 
 ### Added
 
 - Added `isFileLockHeld`, which reports whether a file lock is held without acquiring it ([#17428](https://github.com/can1357/oh-my-pi/pull/17428) by [@andrebrait](https://github.com/andrebrait))
-- Added `oklabDistance`, the perceptual distance between two hex colors ([#17520](https://github.com/can1357/oh-my-pi/pull/17520))
 
 ## [18.14.0] - 2026-10-29
 

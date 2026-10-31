@@ -6,6 +6,8 @@
 
 - Added `signal` to recall options: it cancels the recall's query-embedding request (`embed`, `embedQuery` and embedding providers receive it too), and a cancelled recall ranks without an embedding ([#17457](https://github.com/can1357/oh-my-pi/pull/17457) by [@sjawhar](https://github.com/sjawhar))
 
+## [18.14.2] - 2026-10-31
+
 ### Fixed
 
 - Fixed heuristic episodic facts storing word fragments (`Drafting is active.` → `ctive`), truncated multiword objects, or nothing for `has an …` sentences ([#17511](https://github.com/can1357/oh-my-pi/issues/17511))

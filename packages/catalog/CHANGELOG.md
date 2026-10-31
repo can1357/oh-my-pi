@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the Antigravity version lookup serving every caller through the first caller's `fetch`, and one failed lookup suppressing it for every caller for ten minutes; lookups are now shared and suppressed only among callers of the same `fetch`. A caller whose session has started closing no longer starts the version, models.dev or Ollama metadata lookup ([#17457](https://github.com/can1357/oh-my-pi/pull/17457) by [@sjawhar](https://github.com/sjawhar))
+- Fixed Cursor model discovery sending the account's token over HTTP/2 from a held job after its scope ended: the request hold's refusal of the first, fetch-based attempt was read as a transport failure, and the HTTP/2 fallback asked nothing. A refusal now ends discovery, and the HTTP/2 leg asks the hold itself before it connects and is cut if the hold begins before its response does ([#17457](https://github.com/can1357/oh-my-pi/pull/17457) by [@sjawhar](https://github.com/sjawhar))
+
+## [18.14.2] - 2026-10-31
+
 ### Breaking Changes
 
 - Removed `thinkingLoopGuard` from compat records; `thinking-loop-guard` is now a catalog axis that applies on every host, with `"semantic"` for Gemini, DeepSeek, and Grok and `"off"` for Claude
@@ -9,8 +16,6 @@
 ### Fixed
 
 - Fixed GitHub Copilot Claude 5.x base models (`claude-opus-5`, `claude-opus-5.5`, `claude-sonnet-5`, `claude-sonnet-5.5`) reporting the 1M window of their `-1m` variants once the model list was read from cache; discovered limits now survive cached reads instead of reverting to bundled values ([#17481](https://github.com/can1357/oh-my-pi/issues/17481))
-- Fixed the Antigravity version lookup serving every caller through the first caller's `fetch`, and one failed lookup suppressing it for every caller for ten minutes; lookups are now shared and suppressed only among callers of the same `fetch`. A caller whose session has started closing no longer starts the version, models.dev or Ollama metadata lookup ([#17457](https://github.com/can1357/oh-my-pi/pull/17457) by [@sjawhar](https://github.com/sjawhar))
-- Fixed Cursor model discovery sending the account's token over HTTP/2 from a held job after its scope ended: the request hold's refusal of the first, fetch-based attempt was read as a transport failure, and the HTTP/2 fallback asked nothing. A refusal now ends discovery, and the HTTP/2 leg asks the hold itself before it connects and is cut if the hold begins before its response does ([#17457](https://github.com/can1357/oh-my-pi/pull/17457) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.1] - 2026-10-31
 
