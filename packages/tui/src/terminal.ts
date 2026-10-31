@@ -612,6 +612,16 @@ export interface Terminal {
 	 * built against older pi-tui versions keep working.
 	 */
 	readonly pendingOutputBytes?: number;
+	/**
+	 * Every output byte this terminal has accepted since it started, when the
+	 * implementation can report it. With {@link Terminal.pendingOutputBytes}
+	 * it says how far the writer has got: a caller that must know its own
+	 * frame reached the terminal reads this after writing it and waits for
+	 * `accepted - pending` to reach that mark, instead of waiting for
+	 * everything queued behind it as well. Optional so custom Terminals built
+	 * against older pi-tui versions keep working.
+	 */
+	readonly outputBytesAccepted?: number;
 
 	/**
 	 * Whether a pseudoconsole host owns the grid this terminal writes to, so
@@ -913,6 +923,8 @@ export class ProcessTerminal implements Terminal {
 	// reported. Only #safeWrite enqueues and the pump thread only drains, so
 	// the live backlog cannot exceed this until the next enqueue refreshes it.
 	#pumpBacklogBound = 0;
+	/** Output bytes accepted since start, whichever write path took them (see {@link Terminal.outputBytesAccepted}). */
+	#outputBytesAccepted = 0;
 
 	#windowsVTInputRestore?: () => void;
 	#xtermScrollToBottomRestoreModes = new Set<number>();
@@ -2587,6 +2599,9 @@ export class ProcessTerminal implements Terminal {
 		if (!process.stdout.isTTY) return;
 		this.#ensureStdoutErrorHandler();
 		this.#trackCursorVisibility(data);
+		// Counted before either write path takes it, so a caller can mark the
+		// frame it just wrote and wait for that mark alone.
+		this.#outputBytesAccepted += Buffer.byteLength(data, "utf8");
 		const pump = this.#outputPump;
 		if (pump) {
 			let pending: number;
@@ -2658,20 +2673,26 @@ export class ProcessTerminal implements Terminal {
 		return process.stdout.columns || Number(Bun.env.COLUMNS) || 80;
 	}
 	/**
-	 * With the output pump, a backlog bound at or below
-	 * {@link STDOUT_BACKLOG_CLEAR_BYTES} is reported as-is instead of re-read:
-	 * both consumers (the render gate and the stall watchdog) act only on a
-	 * backlog above that level, so the bound already decides them and spares a
-	 * native read on every frame.
+	 * With the output pump the bound left by the last enqueue can only be stale
+	 * high — the pump thread does nothing but drain — and nothing refreshes it
+	 * until the next write. A caller waiting for the terminal to have the
+	 * frame (`TUI.renderNowAccepted`, so `/pause` opens the gate only once the
+	 * screen is current) must see the backlog reach zero, and after the last
+	 * frame there is no next write, so any positive bound is re-read from the
+	 * pump. A zero bound needs no read: only a write can lift it.
 	 */
 	get pendingOutputBytes(): number {
 		const pump = this.#outputPump;
 		if (pump) {
-			if (this.#pumpBacklogBound > STDOUT_BACKLOG_CLEAR_BYTES) this.#pumpBacklogBound = pump.pending();
+			if (this.#pumpBacklogBound > 0) this.#pumpBacklogBound = pump.pending();
 			return this.#pumpBacklogBound;
 		}
 		// Stream fallback: bytes queued past the high-water mark by refused writes.
 		return process.stdout.writableLength ?? 0;
+	}
+
+	get outputBytesAccepted(): number {
+		return this.#outputBytesAccepted;
 	}
 
 	get hostOwnsGridOnResize(): boolean {

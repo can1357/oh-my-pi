@@ -3,14 +3,15 @@
  * telemetry-export.test.ts. Isolated out-of-process for the same reason as the
  * other probes: initTelemetryExport() registers a process-global provider.
  *
- * Stands up a loopback OTLP/proto receiver, sets OTEL_SERVICE_NAME plus
- * OTEL_RESOURCE_ATTRIBUTES (including a service.name that must lose to
- * OTEL_SERVICE_NAME), exports a span, and inspects the captured protobuf
- * payload. Exits 0 only when the resource carries the OTEL_RESOURCE_ATTRIBUTES
- * entries and service.name resolves to OTEL_SERVICE_NAME.
+ * Stands up a loopback OTLP/proto receiver, declares it as the test's own, sets
+ * OTEL_SERVICE_NAME plus OTEL_RESOURCE_ATTRIBUTES (including a service.name
+ * that must lose to OTEL_SERVICE_NAME), exports a span, and inspects the
+ * captured protobuf payload. Exits 0 only when the resource carries the
+ * OTEL_RESOURCE_ATTRIBUTES entries and service.name resolves to OTEL_SERVICE_NAME.
  */
 
 import {
+	allowTelemetryReceiverForTests,
 	flushTelemetryExport,
 	initTelemetryExport,
 	isTelemetryExportEnabled,
@@ -33,6 +34,7 @@ const server = Bun.serve({
 	},
 });
 
+allowTelemetryReceiverForTests(`http://localhost:${server.port}`);
 process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = `http://localhost:${server.port}/v1/traces`;
 process.env.OTEL_SERVICE_NAME = "svc-probe";
 process.env.OTEL_RESOURCE_ATTRIBUTES = "deployment.environment=staging,tenant.id=acme,service.name=should-lose";

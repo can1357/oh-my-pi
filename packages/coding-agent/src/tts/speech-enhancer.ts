@@ -15,6 +15,7 @@
  *   mechanical {@link SpeakableStream} cleanup — speech never blocks on the
  *   model.
  */
+import { agentPauseGate } from "@oh-my-pi/pi-agent-core";
 import { type AssistantMessage, completeSimple, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
@@ -83,9 +84,14 @@ export class SpeechEnhancer {
 			if (!apiKey) return null;
 			// Resolve metadata after getApiKey so the session-sticky credential is recorded first.
 			const metadata = this.#deps.metadataResolver?.(model.provider);
+			// The deadline bounds the model, not a human's `/pause`: a pause engaged
+			// before this block's rewrite parks it here, before any attempt arms
+			// its deadline, so the resume still rewrites it.
+			await agentPauseGate.dispatchHold(signal)();
 			const response = await retryTransientCompletion(
 				() => {
 					const timeout = AbortSignal.timeout(REWRITE_TIMEOUT_MS);
+					const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
 					return completeSimple(
 						model,
 						{
@@ -98,7 +104,12 @@ export class SpeechEnhancer {
 							maxTokens: ANSWER_MAX_TOKENS,
 							disableReasoning: true,
 							metadata,
-							signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+							signal: requestSignal,
+							// Each attempt holds at the provider boundary too. A pause
+							// engaged once its deadline runs can still expire it, and
+							// that block falls back to the mechanical cleanup, as any
+							// slow rewrite does.
+							beforeDispatch: agentPauseGate.dispatchHold(requestSignal),
 						},
 					);
 				},

@@ -41,6 +41,7 @@ import { hasVisibleAssistantContent, withReplaySafeStreamRetry } from "../utils/
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import {
+	armPreResponseTimeout,
 	getOpenAIStreamFirstEventTimeoutMs,
 	getOpenAIStreamIdleTimeoutMs,
 	iterateWithIdleTimeout,
@@ -907,6 +908,10 @@ const streamOpenAICompletionsOnce = (
 			const completionsUrl = query
 				? `${trimmedBaseUrl}/chat/completions?${new URLSearchParams(query)}`
 				: `${trimmedBaseUrl}/chat/completions`;
+			// One first-event budget runs from the wire to the first chunk: the
+			// request guard spends the part before headers, and the chunk iterator
+			// below waits on what it left, not on a fresh budget.
+			let firstEventBudgetLeftMs = firstEventTimeoutMs;
 			const createCompletionsStream = async (toolStrictModeOverride?: ToolStrictModeOverride) => {
 				const effectiveToolStrictModeOverride = disableStrictTools ? "none" : toolStrictModeOverride;
 				const builtParams = buildParams(model, context, options, effectiveToolStrictModeOverride);
@@ -939,13 +944,19 @@ const streamOpenAICompletionsOnce = (
 					headers: requestHeaders,
 					body: params,
 				};
-				let requestTimeout: NodeJS.Timeout | undefined;
-				if (requestTimeoutMs !== undefined) {
-					requestTimeout = setTimeout(
-						() => abortTracker.abortLocally(firstEventTimeoutAbortError),
-						requestTimeoutMs,
-					);
-				}
+				// A guard rather than a plain timer: it rides on the request signal,
+				// so the transport stops its clock while the request is prepared and
+				// parked on a dispatch hold, and `stream` (which a stream watchdog
+				// may observe) reports that time as ours rather than the provider's.
+				const requestGuard = armPreResponseTimeout(requestSignal, requestTimeoutMs, stream);
+				const guardedRequestSignal = requestGuard.signal ?? requestSignal;
+				guardedRequestSignal.addEventListener(
+					"abort",
+					() => {
+						if (!requestSignal.aborted) abortTracker.abortLocally(firstEventTimeoutAbortError);
+					},
+					{ once: true },
+				);
 				try {
 					const headersWithTimeout = { ...headers };
 					if (requestTimeoutMs !== undefined) {
@@ -955,7 +966,7 @@ const streamOpenAICompletionsOnce = (
 						url: completionsUrl,
 						headers: headersWithTimeout,
 						body: params,
-						signal: requestSignal,
+						signal: guardedRequestSignal,
 						maxAttempts: options?.maxHttpAttempts,
 						fetch: wrapFetchForCopilotFallback(
 							wrapFetchForRequestCompression(options?.fetch ?? fetch, model),
@@ -965,24 +976,23 @@ const streamOpenAICompletionsOnce = (
 							copilotCacheSnapshot,
 						),
 						// Transient 408/429/5xx get Retry-After-aware transport retries.
-						// The first-event watchdog above aborts `requestSignal`, which
-						// bounds every attempt and backoff sleep — retries cannot
-						// extend the deadline.
+						// The guard above covers every attempt and backoff sleep with one
+						// budget — retries cannot extend the deadline.
 						onSseEvent: rawSseObserver,
 						onDoneSentinel: () => {
 							sawDoneSentinel = true;
 						},
 					});
 					responseHeaders = response.headers;
-					// Disarm the first-event watchdog as soon as headers arrive — a slow
-					// onResponse callback must not abort an already-connected stream.
-					clearTimeout(requestTimeout);
+					// Disarm the guard as soon as headers arrive, so it can never
+					// abort the connected body, and a slow onResponse callback is not
+					// charged to the provider.
+					requestGuard.clear();
+					firstEventBudgetLeftMs = requestGuard.remaining() ?? firstEventTimeoutMs;
 					await notifyProviderResponse(options, response, model, requestId);
 					return events;
 				} finally {
-					// Headers arrived (or the request failed); from here the
-					// first-event deadline is enforced by `iterateWithIdleTimeout`.
-					clearTimeout(requestTimeout);
+					requestGuard.clear();
 				}
 			};
 			// droid CLI parity: cache-read details can arrive on the
@@ -1362,7 +1372,7 @@ const streamOpenAICompletionsOnce = (
 			};
 			const timedOpenaiStream = iterateWithIdleTimeout(openaiStream, {
 				idleTimeoutMs,
-				firstItemTimeoutMs: firstEventTimeoutMs,
+				firstItemTimeoutMs: firstEventBudgetLeftMs,
 				firstItemErrorMessage: OPENAI_COMPLETIONS_FIRST_EVENT_TIMEOUT_MESSAGE,
 				errorMessage: "OpenAI completions stream stalled while waiting for the next event",
 				onIdle: () => requestAbortController.abort(),

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
+import { agentPauseGate } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -47,8 +48,22 @@ function createRegistry(model: Model<Api>, availableModels: Model<Api>[] = [mode
 	} as never;
 }
 
+/** Sentinel that wins a race against a title request the pause gate parks. */
+const PARKED = "parked" as const;
+
+/**
+ * Flush the microtask queue. Under these mocks the whole path from
+ * `generateSessionTitle` to the provider request is microtasks — no timer, no
+ * real I/O — so once it is drained, anything that was not waiting on something
+ * has already run.
+ */
+async function drainMicrotasks(): Promise<void> {
+	for (let tick = 0; tick < 50; tick++) await Promise.resolve();
+}
+
 afterEach(() => {
 	vi.restoreAllMocks();
+	agentPauseGate.resume();
 });
 
 describe("title generator", () => {
@@ -75,6 +90,141 @@ describe("title generator", () => {
 		expect(options?.disableReasoning).toBe(true);
 		const messages = completeSimpleMock.mock.calls[0]?.[1].messages;
 		expect(messages?.map(message => message.role)).toEqual(["user"]);
+	});
+
+	// `/pause` freezes every agent loop, but titles are generated outside
+	// `agentLoop`: before the hold, a paused session still called the provider.
+	it("calls no provider while the pause gate is engaged, then titles after the resume", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		const pausedAtRequest: boolean[] = [];
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockImplementation((async () => {
+			pausedAtRequest.push(agentPauseGate.paused);
+			return { stopReason: "stop", content: [{ type: "text", text: "<title>Held Title</title>" }] };
+		}) as never);
+
+		agentPauseGate.pause();
+		const pending = generateSessionTitle("Investigate the resolver", createRegistry(model), createSettings(model));
+		// The request is parked, not merely late: the promise does not settle
+		// while the gate holds, and nothing reached the provider.
+		await drainMicrotasks();
+		expect(await Promise.race([pending, Promise.resolve(PARKED)])).toBe(PARKED);
+		expect(completeSimpleMock).not.toHaveBeenCalled();
+
+		agentPauseGate.resume();
+
+		expect(await pending).toBe("Held Title");
+		expect(pausedAtRequest).toEqual([false]);
+	});
+
+	it("holds the local tiny worker too while the pause gate is engaged", async () => {
+		const localModel = getBundledModel("local", "lfm2.5-230m");
+		if (!localModel) throw new Error("Expected bundled local tiny model");
+		const generateMock = vi.spyOn(tinyTitleClient, "generate").mockResolvedValue("Local Title");
+
+		agentPauseGate.pause();
+		const pending = generateSessionTitle(
+			"Investigate the resolver",
+			createRegistry(localModel),
+			createSettings(localModel),
+		);
+		await drainMicrotasks();
+		expect(await Promise.race([pending, Promise.resolve(PARKED)])).toBe(PARKED);
+		expect(generateMock).not.toHaveBeenCalled();
+
+		agentPauseGate.resume();
+
+		expect(await pending).toBe("Local Title");
+		expect(generateMock).toHaveBeenCalledTimes(1);
+	});
+
+	it("drops a title request cancelled while the pause gate holds it", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "<title>Never Asked</title>" }],
+		} as never);
+		const controller = new AbortController();
+
+		agentPauseGate.pause();
+		const pending = generateSessionTitle(
+			"Investigate the resolver",
+			createRegistry(model),
+			createSettings(model),
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			controller.signal,
+		);
+		await drainMicrotasks();
+		expect(await Promise.race([pending, Promise.resolve(PARKED)])).toBe(PARKED);
+		// Session disposal, not a resume: the wait releases, the gate does not.
+		controller.abort();
+
+		expect(await pending).toBeNull();
+		expect(completeSimpleMock).not.toHaveBeenCalled();
+		expect(agentPauseGate.paused).toBe(true);
+	});
+
+	// The check at the top of the attempt is passed before the credential is
+	// resolved, so a `/pause` entered during an OAuth refresh — or during the
+	// retry wrapper's backoff — has to be caught at the request itself.
+	it("calls no provider for a pause entered while the credential resolves", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "<title>Late Hold</title>" }],
+		} as never);
+		const registry = {
+			getAvailable: () => [model],
+			getApiKey: async () => {
+				agentPauseGate.pause();
+				return "test-key";
+			},
+			getApiKeyForProvider: async () => "test-key",
+			authStorage: { rotateSessionCredential: async () => false },
+			resolver: () => async () => "test-key",
+		} as never;
+
+		const pending = generateSessionTitle("Investigate the resolver", registry, createSettings(model));
+		await drainMicrotasks();
+		expect(await Promise.race([pending, Promise.resolve(PARKED)])).toBe(PARKED);
+		expect(completeSimpleMock).not.toHaveBeenCalled();
+
+		agentPauseGate.resume();
+
+		expect(await pending).toBe("Late Hold");
+		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
+	});
+
+	// `completeSimple` re-dispatches on its own (thinking-loop re-sample,
+	// rotated credential) without re-entering the retry callback, so the
+	// request carries a hook those attempts go through.
+	it("holds a provider-made redispatch of the title request at the gate", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "<title>Hooked Title</title>" }],
+		} as never);
+
+		expect(await generateSessionTitle("Investigate the resolver", createRegistry(model), createSettings(model))).toBe(
+			"Hooked Title",
+		);
+		const options = completeSimpleMock.mock.calls[0]?.[2] as { beforeDispatch?: () => Promise<void> } | undefined;
+		const beforeDispatch = options?.beforeDispatch;
+		if (!beforeDispatch) throw new Error("the title request carries no dispatch hold");
+
+		agentPauseGate.pause();
+		let released = false;
+		const held = beforeDispatch().then(() => {
+			released = true;
+		});
+		await drainMicrotasks();
+		expect(released).toBe(false);
+
+		agentPauseGate.resume();
+		await held;
+		expect(released).toBe(true);
 	});
 
 	it("selects an available local-inference model from the tiny role", async () => {

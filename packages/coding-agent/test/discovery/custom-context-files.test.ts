@@ -37,6 +37,7 @@ describe("contextFiles.extra", () => {
 	let originalHome: string | undefined;
 	let originalUserProfile: string | undefined;
 	let originalAgentDir: string | undefined;
+	let originalClaudeConfigDir: string | undefined;
 	const dirs: string[] = [];
 
 	beforeEach(async () => {
@@ -45,6 +46,10 @@ describe("contextFiles.extra", () => {
 		originalHome = process.env.HOME;
 		originalUserProfile = process.env.USERPROFILE;
 		originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+		// `CLAUDE_CONFIG_DIR` outranks the temporary home, so a shell that exports it would add
+		// that directory's CLAUDE.md to every list these cases compare exactly.
+		originalClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
+		restoreEnv("CLAUDE_CONFIG_DIR", undefined);
 		tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extra-ctx-home-"));
 		dirs.push(tempHome);
 		process.env.HOME = tempHome;
@@ -63,6 +68,7 @@ describe("contextFiles.extra", () => {
 		restoreEnv("HOME", originalHome);
 		restoreEnv("USERPROFILE", originalUserProfile);
 		restoreEnv("PI_CODING_AGENT_DIR", originalAgentDir);
+		restoreEnv("CLAUDE_CONFIG_DIR", originalClaudeConfigDir);
 		__resetDirsFromEnvForTests();
 		await Promise.all(dirs.splice(0).map(dir => removeWithRetries(dir)));
 	});

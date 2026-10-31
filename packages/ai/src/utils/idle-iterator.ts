@@ -1,6 +1,6 @@
 import { $env } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
-import type { LocalWorkSource } from "./event-stream";
+import type { EventStream, LocalWorkSource } from "./event-stream";
 
 const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000;
 const DEFAULT_STREAM_FIRST_EVENT_TIMEOUT_MS = 300_000;
@@ -101,28 +101,211 @@ export function getOpenAIStreamFirstEventTimeoutMs(
  * pre-response request (issue #2422 regression: large `write` tool-call streams
  * died at the budget with `TimeoutError: The operation timed out.` despite
  * deltas actively flowing). This arms a `clearTimeout`-able timer instead;
- * callers MUST `clear()` as soon as the guarded transport attempt settles so
- * the body stream is left to the iterator-level idle watchdog.
+ * callers MUST `clear()` as soon as the guarded transport attempt settles, so
+ * the guard never aborts a body that is already streaming.
  *
- * Retrying callers MUST arm a fresh guard for each transport attempt and keep
+ * Clearing the guard at headers does not end the first-event budget. One
+ * budget covers the wait from the wire to the first stream event, and headers
+ * do not renew it: the guard bounds the part before them, and whatever waits
+ * for the first event after them gets only what is left, which
+ * {@link PreResponseTimeout.remaining} reports. A host that holds its headers
+ * while the model thinks therefore spends the same budget as one that sends
+ * headers at once and then thinks. The shared stream watchdog that
+ * `register-builtins` installs keeps this rule by itself, because its
+ * first-item deadline runs from the wire on the same budget, so a provider
+ * behind it only clears the guard. Factory's Gemini route keeps its guard
+ * armed until the first chunk instead. Every other provider that owns its
+ * first-event watchdog (Anthropic, OpenAI completions and responses, Azure,
+ * Codex's SSE transport, Gemini CLI and pi-native) hands that watchdog the
+ * remainder.
+ *
+ * `stream()` and `streamSimple()` are what arm that shared body watchdog,
+ * through `register-builtins`; the provider modules do not arm one of their
+ * own. Bedrock (`amazon-bedrock`), Google (`google`), Vertex (`google-vertex`),
+ * Ollama, Cursor, Devin and Apple's on-device model rely on it for both the
+ * first event and the gaps after it, and Gemini CLI relies on it for the gaps.
+ * A caller that imports one of those modules through
+ * `@oh-my-pi/pi-ai/providers/*` and calls its stream function directly gets
+ * none of it: the module's own pre-response guard, where it has one, bounds
+ * the wait for headers, and nothing bounds the stream after them. Such a
+ * caller must wrap the returned stream in {@link iterateWithIdleTimeout}
+ * itself, as `register-builtins` does: the first-event and idle budgets, the
+ * `start` event excluded from progress, and the returned stream as
+ * `localWork` so the first-event deadline runs from the wire. This is
+ * deliberate. A body watchdog inside each module would stack a second one
+ * under `register-builtins` on every request made the supported way.
+ *
+ * Retrying callers SHOULD arm a fresh guard for each transport attempt and keep
  * the retry loop's base signal reserved for caller cancellation. Reusing the
- * guard as the loop signal makes its timeout indistinguishable from cancellation.
+ * guard as the loop signal makes its timeout indistinguishable from
+ * cancellation — and the budget it carries is the *total* one for that call:
+ * see the stop-the-clock contract below.
  *
- * Returns the caller signal unchanged (and a no-op `clear`) when no positive
- * timeout is configured.
+ * The budget is a stopwatch, not a deadline. {@link PreResponseGuard.suspend}
+ * stops it and {@link PreResponseGuard.resume} starts it again with whatever is
+ * left, so the time the transport spends preparing a request or parked on a
+ * caller's dispatch hold is excluded, while the time it spends waiting for a
+ * provider's first byte accumulates across every attempt the same guard covers.
+ * A caller that reuses one guard across its own retries therefore keeps one
+ * aggregate first-byte budget for the whole call; only a fresh guard buys a
+ * fresh budget.
+ *
+ * `heldWork` is the stream whose own watchdog must not count the time this
+ * guard excludes. While the transport has the clock stopped, the stream reports
+ * local work in flight, so a stream-level first-event or idle deadline (see
+ * {@link IdleTimeoutIteratorOptions.localWork}) cannot expire during a hold and
+ * restarts from the moment the request reaches the wire. What it excludes is
+ * the transport's own preparation and the caller's dispatch hold, never the
+ * provider's latency: the window closes when the request goes out, and also
+ * when the guard is cleared or its signal aborts, so a failed or cancelled
+ * request cannot leave the stream reporting work forever.
+ *
+ * A guard armed over a signal that already carries one — a client's own
+ * timeout inside a provider's, or a transport's inside a client's — passes its
+ * stops and starts on to that enclosing guard. The transport only sees the
+ * innermost signal, and `AbortSignal.any` hides every guard behind it, so
+ * without this an outer budget would keep running through a hold the inner
+ * one excludes.
+ *
+ * Returns the caller signal unchanged, a no-op `clear` and no remainder when
+ * no positive timeout is configured.
  */
 export function armPreResponseTimeout(
 	callerSignal: AbortSignal | undefined,
 	timeoutMs: number | undefined,
-): { signal: AbortSignal | undefined; clear: () => void } {
-	if (timeoutMs === undefined || timeoutMs <= 0) return { signal: callerSignal, clear: () => {} };
+	heldWork?: Pick<EventStream<unknown>, "trackLocalWork">,
+): PreResponseTimeout {
+	if (timeoutMs === undefined || timeoutMs <= 0) {
+		return { signal: callerSignal, clear: () => {}, remaining: () => undefined };
+	}
 	const controller = new AbortController();
-	const timer = setTimeout(() => {
-		controller.abort(new DOMException("The operation timed out.", "TimeoutError"));
-	}, timeoutMs);
-	timer.unref?.();
-	const signal = callerSignal ? AbortSignal.any([callerSignal, controller.signal]) : controller.signal;
-	return { signal, clear: () => clearTimeout(timer) };
+	let timer: NodeJS.Timeout | undefined;
+	let remainingMs = timeoutMs;
+	let startedAt = 0;
+	let cleared = false;
+	const expire = () => controller.abort(new DOMException("The operation timed out.", "TimeoutError"));
+	const arm = () => {
+		startedAt = Date.now();
+		timer = setTimeout(expire, remainingMs);
+		timer.unref?.();
+	};
+	const stop = () => {
+		if (timer === undefined) return;
+		clearTimeout(timer);
+		timer = undefined;
+		remainingMs -= Date.now() - startedAt;
+	};
+	arm();
+	const signal: PreResponseGuardedSignal = callerSignal
+		? AbortSignal.any([callerSignal, controller.signal])
+		: controller.signal;
+	// Settles the window `suspend` opened on `heldWork`; at most one is open.
+	let settleHeld: (() => void) | undefined;
+	const openHeld = () => {
+		if (!heldWork || settleHeld || cleared || signal.aborted) return;
+		const { promise, resolve } = Promise.withResolvers<void>();
+		settleHeld = resolve;
+		void heldWork.trackLocalWork(promise);
+	};
+	const closeHeld = () => {
+		const settle = settleHeld;
+		settleHeld = undefined;
+		settle?.();
+	};
+	const enclosing = preResponseGuard(callerSignal);
+	let enclosingStopped = false;
+	const stopEnclosing = () => {
+		if (!enclosing || enclosingStopped || cleared || signal.aborted) return;
+		enclosingStopped = true;
+		enclosing.suspend();
+	};
+	const startEnclosing = () => {
+		if (!enclosingStopped) return;
+		enclosingStopped = false;
+		enclosing?.resume();
+	};
+	if (heldWork || enclosing) {
+		signal.addEventListener(
+			"abort",
+			() => {
+				closeHeld();
+				startEnclosing();
+			},
+			{ once: true },
+		);
+	}
+	// The guard is armed where the request is built, but what it bounds is the
+	// provider's latency. Everything between the two — a caller's dispatch hold
+	// above all, which a human releases — is our own preparation: the transport
+	// stops the clock while it prepares and holds, and starts it again at the
+	// wire with the budget that is left.
+	signal[PRE_RESPONSE_GUARD] = {
+		suspend: () => {
+			stop();
+			openHeld();
+			stopEnclosing();
+		},
+		resume: () => {
+			closeHeld();
+			startEnclosing();
+			if (cleared || timer !== undefined || controller.signal.aborted) return;
+			if (remainingMs <= 0) {
+				expire();
+				return;
+			}
+			arm();
+		},
+	};
+	return {
+		signal,
+		clear: () => {
+			cleared = true;
+			stop();
+			closeHeld();
+			startEnclosing();
+		},
+		remaining: () => Math.max(1, timer === undefined ? remainingMs : remainingMs - (Date.now() - startedAt)),
+	};
+}
+
+/** A pre-response budget armed by {@link armPreResponseTimeout}. */
+export interface PreResponseTimeout {
+	/** The caller's signal combined with the budget; the caller's own signal when no budget is armed. */
+	signal: AbortSignal | undefined;
+	/** Disarms the guard for good, once the attempt it covers has its headers or has failed. */
+	clear: () => void;
+	/**
+	 * What is left of the budget for the watchdog that waits for the first
+	 * event after headers; `undefined` when no budget is armed. Read it once
+	 * headers arrive. That watchdog starts its own clock when the body is first
+	 * read, so a caller's `onResponse` hook in between counts as our time, as a
+	 * hold does. Never below 1 ms: a budget that ran out in the turn the headers
+	 * arrived must still bound the first event, and 0 would read as no
+	 * watchdog at all.
+	 */
+	remaining: () => number | undefined;
+}
+
+/** Attached by {@link armPreResponseTimeout} to the signal it hands the transport. */
+const PRE_RESPONSE_GUARD = Symbol("omp.preResponseTimeout");
+
+interface PreResponseGuard {
+	/** Stop the clock: the request is still being prepared or held. */
+	suspend: () => void;
+	/** Start the clock again with the budget that is left: the request is going out. */
+	resume: () => void;
+}
+
+type PreResponseGuardedSignal = AbortSignal & { [PRE_RESPONSE_GUARD]?: PreResponseGuard };
+
+/**
+ * The pre-response budget riding on a request's signal, if any: the transport
+ * stops it while it prepares and holds the request, and starts it again — with
+ * whatever is left of it — when the request reaches the wire. A signal without
+ * one yields `undefined` and nothing changes.
+ */
+export function preResponseGuard(signal: AbortSignal | undefined | null): PreResponseGuard | undefined {
+	return (signal as PreResponseGuardedSignal | undefined | null)?.[PRE_RESPONSE_GUARD];
 }
 
 export interface IdleTimeoutIteratorOptions {

@@ -22,8 +22,11 @@ import type {
 	ToolResultMessage,
 } from "../types";
 import { normalizeSystemPrompts } from "../utils";
+import { dispatchWhenOpen } from "../utils/dispatch-hold";
 import { AssistantMessageEventStream } from "../utils/event-stream";
+import { armPreResponseTimeout } from "../utils/idle-iterator";
 import { toolWireSchema } from "../utils/schema/wire";
+import { withoutDispatchHold } from "../utils/transport-fetch";
 import chatmlHistoryNote from "./gitlab-duo-workflow-chatml-note.md" with { type: "text" };
 import { redactSensitiveCredentials } from "./transform-messages";
 
@@ -45,15 +48,17 @@ const GITLAB_DUO_WORKFLOW_CLIENT_TYPE = "node-websocket";
  * keepalive contract OMP can rely on, so a connection silently going half-open
  * (proxy/LB drops the TCP link without delivering FIN/RST) would otherwise leave
  * `runGitLabDuoWorkflowSocket` waiting forever. If no frame arrives within this
- * window — before open or between checkpoints — the socket is aborted and the
- * run reconnects once on the same `workflowID` (server-side resume).
+ * window — before open or between checkpoints — the socket is aborted, and a
+ * fresh-workflow run restarts once on a new workflow. Time one of our frames
+ * spends parked on the caller's dispatch hold does not count toward it.
  */
 const GITLAB_DUO_WORKFLOW_IDLE_TIMEOUT_MS = 90_000;
 /**
- * Absolute deadline (ms) for each REST setup fetch (`ensureGitLabDuoWorkflowSettings`,
+ * Deadline (ms) for each REST setup fetch (`ensureGitLabDuoWorkflowSettings`,
  * `discoverGitLabDuoWorkflowProject`, `resolveGitLabDuoWorkflowNumericProjectId`,
  * `requestGitLabDuoWorkflowDirectAccess`, `createGitLabDuoWorkflow`,
- * `fetchGitLabDuoWorkflowAvailableModels`, `stopGitLabDuoWorkflow`).
+ * `fetchGitLabDuoWorkflowAvailableModels`, `stopGitLabDuoWorkflow`), counted
+ * from the moment the request reaches the wire.
  *
  * `streamGitLabDuoWorkflow` pushes its `start` event before these calls run and the
  * `gitlab-duo-agent` bypass in `streamSimple` skips the `register-builtins`
@@ -63,6 +68,21 @@ const GITLAB_DUO_WORKFLOW_IDLE_TIMEOUT_MS = 90_000;
  * matches the OAuth `TOKEN_REQUEST_TIMEOUT_MS` used by sibling GitLab flows.
  */
 const GITLAB_DUO_WORKFLOW_REST_TIMEOUT_MS = 30_000;
+/**
+ * How long before the expiry GitLab states for a workflow token the token is
+ * replaced before it opens another socket. The socket authenticates at its
+ * handshake, which has to land while the token is still good, with room for
+ * clock skew between this host and GitLab.
+ */
+const GITLAB_DUO_WORKFLOW_TOKEN_REFRESH_MARGIN_MS = 5 * 60 * 1000;
+/**
+ * How long a workflow token is trusted when the `direct_access` response states
+ * no expiry. GitLab mints a two-hour token today and says so
+ * (`gitlab_rails.token_expires_at`); a server that does not say is given the
+ * same conservative lifetime the GitLab Duo provider assumes for its own
+ * `direct_access` token.
+ */
+const GITLAB_DUO_WORKFLOW_TOKEN_UNSTATED_TTL_MS = 25 * 60 * 1000;
 /**
  * How many times a single stream may restart on a FRESH workflow after the server
  * reports its per-workflow step (graph-recursion) limit. Long OMP tool-call loops
@@ -229,8 +249,13 @@ export interface GitLabDirectAccessResponse {
 	jwt?: string;
 	workflow_token?: string;
 	duo_workflow_access_token?: string;
-	duo_workflow_service?: { token?: string; base_url?: string; headers?: Record<string, string> };
-	gitlab_rails?: { token?: string };
+	duo_workflow_service?: {
+		token?: string;
+		token_expires_at?: string | number;
+		base_url?: string;
+		headers?: Record<string, string>;
+	};
+	gitlab_rails?: { token?: string; token_expires_at?: string | number };
 	[key: string]: unknown;
 }
 
@@ -239,6 +264,12 @@ interface GitLabDuoWorkflowDirectAccessConnection {
 	baseUrl?: string;
 	headers: Record<string, string>;
 	serviceEndpoint: boolean;
+	/**
+	 * When the token has aged out and must be minted afresh before it opens
+	 * another socket, in epoch milliseconds. Undefined for a caller's own
+	 * `workflowToken`, which this provider cannot mint.
+	 */
+	refreshAt?: number;
 }
 
 interface GitLabCreateWorkflowResponse {
@@ -985,17 +1016,24 @@ export function gitLabDuoWorkflowErrorText(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
-// Absolute-deadline signal for one REST setup fetch (`fetch`, `direct_access`, etc.).
-// The caller's abort signal — when present — is folded in with `AbortSignal.any`, so
-// either the request being cancelled OR the local timeout aborts the fetch. Called
-// per-fetch so each REST call gets its OWN fresh budget; a shared timeout would race
-// several fetches on the same clock and starve the later ones after the first spent
-// the whole budget. The workflow's `start` event already streamed before any of
-// these calls run, so an unbounded fetch would leave the assistant stream with no
-// terminal event — see {@link GITLAB_DUO_WORKFLOW_REST_TIMEOUT_MS}.
+// Deadline signal for one REST setup fetch (`fetch`, `direct_access`, etc.).
+// The caller's abort signal — when present — is folded in, so either the request
+// being cancelled OR the local timeout aborts the fetch. Called per-fetch so each
+// REST call gets its OWN fresh budget; a shared timeout would race several fetches
+// on the same clock and starve the later ones after the first spent the whole
+// budget. The workflow's `start` event already streamed before any of these calls
+// run, so an unbounded fetch would leave the assistant stream with no terminal
+// event — see {@link GITLAB_DUO_WORKFLOW_REST_TIMEOUT_MS}.
+//
+// The budget is a pre-response stopwatch rather than `AbortSignal.timeout`: these
+// calls go through the caller's transport fetch, which waits on its dispatch hold
+// and stops this clock while it does. A `/pause` that a human releases therefore
+// never times out a call that has not been sent, while a server that stalls once
+// it has still does. It is never cleared, so like the deadline it replaces it also
+// bounds reading the small JSON body.
 function gitLabDuoWorkflowRestSignal(callerSignal?: AbortSignal): AbortSignal {
-	const timeoutSignal = AbortSignal.timeout(GITLAB_DUO_WORKFLOW_REST_TIMEOUT_MS);
-	return callerSignal ? AbortSignal.any([callerSignal, timeoutSignal]) : timeoutSignal;
+	// A positive budget always arms a signal.
+	return armPreResponseTimeout(callerSignal, GITLAB_DUO_WORKFLOW_REST_TIMEOUT_MS).signal as AbortSignal;
 }
 
 async function readGitLabDuoWorkflowResponseErrorMessage(response: Response): Promise<string | undefined> {
@@ -1303,11 +1341,12 @@ async function runGitLabDuoWorkflow(
 			setGitLabDuoWorkflowCachedNamespace(apiKey, baseUrl, options.cwd, namespaceSelection);
 		}
 	}
+	const rootNamespaceId = setup.rootNamespaceId;
 	const restNamespaceId = setup.restNamespaceId;
 	const createNamespaceId = setup.createNamespaceId;
 	const restProjectId = setup.restProjectId;
 	const webSocketProjectId = setup.webSocketProjectId;
-	const workflowConnection = setup.workflowConnection;
+	let workflowConnection = setup.workflowConnection;
 	const selectedModelIdentifier = setup.selectedModelIdentifier;
 	let workflowId = setup.workflowId;
 	let startPayload = setup.startPayload;
@@ -1355,37 +1394,68 @@ async function runGitLabDuoWorkflow(
 	let settledNormally = false;
 	try {
 		for (let attempt = 0; attempt < 12; attempt++) {
-			const ws = openGitLabDuoWorkflowSocket(workflowConnection.baseUrl ?? baseUrl, {
-				token: workflowConnection.token,
-				projectId: webSocketProjectId,
-				// Pass the resolved namespace/root even when no numeric project id is
-				// available (project path unresolved, or auto-discovery found none): the
-				// REST direct_access/create calls may be namespace- or path-scoped, but the
-				// socket must still route inside the selected namespace. Dropping them with
-				// the project left the socket scope-less and could route/fail outside it.
-				namespaceId: restNamespaceId,
-				rootNamespaceId: restNamespaceId,
-				selectedModelIdentifier,
-				workflowDefinition,
-				serviceEndpoint: workflowConnection.serviceEndpoint,
-				extraHeaders: workflowConnection.headers,
-				originBaseUrl: baseUrl,
-				webSocketFactory: options.webSocketFactory,
-			});
-			if (providerSessionState) {
-				// Capture the CURRENT workflow id (it is reassigned across timeout/step-limit/
-				// retry restarts) so a later session-dispose stops the right workflow.
-				const stopWorkflowId = workflowId;
-				providerSessionState.active = {
-					workflowId,
-					startPayload,
-					ws,
-					stop: () => {
-						void stopGitLabDuoWorkflow(fetchImpl, baseUrl, apiKey, stopWorkflowId);
-					},
-				};
-			}
-			lastSocketResult = await runGitLabDuoWorkflowSocket(ws, startPayload, state, options);
+			// This loop opens a socket of its own on every restart — a reconnect,
+			// an approval round, a step-limit restart. Each is traffic the caller's
+			// gate has to see; the REST calls above reach the wire through the
+			// transport fetch, which holds for the same reason. The socket opens in
+			// the same synchronous step as the hold's last check, so a pause that
+			// lands after the hold answered opens nothing, and the run takes its
+			// handlers in that step too, before the socket can report anything.
+			lastSocketResult = await dispatchWhenOpen(
+				options.beforeDispatch,
+				options.signal,
+				() => {
+					const ws = openGitLabDuoWorkflowSocket(workflowConnection.baseUrl ?? baseUrl, {
+						token: workflowConnection.token,
+						projectId: webSocketProjectId,
+						// Pass the resolved namespace/root even when no numeric project id is
+						// available (project path unresolved, or auto-discovery found none): the
+						// REST direct_access/create calls may be namespace- or path-scoped, but the
+						// socket must still route inside the selected namespace. Dropping them with
+						// the project left the socket scope-less and could route/fail outside it.
+						namespaceId: restNamespaceId,
+						rootNamespaceId: restNamespaceId,
+						selectedModelIdentifier,
+						workflowDefinition,
+						serviceEndpoint: workflowConnection.serviceEndpoint,
+						extraHeaders: workflowConnection.headers,
+						originBaseUrl: baseUrl,
+						webSocketFactory: options.webSocketFactory,
+					});
+					if (providerSessionState) {
+						// Capture the CURRENT workflow id (it is reassigned across timeout/step-limit/
+						// retry restarts) so a later session-dispose stops the right workflow.
+						const stopWorkflowId = workflowId;
+						providerSessionState.active = {
+							workflowId,
+							startPayload,
+							ws,
+							stop: () => {
+								void stopGitLabDuoWorkflow(fetchImpl, baseUrl, apiKey, stopWorkflowId);
+							},
+						};
+					}
+					return runGitLabDuoWorkflowSocket(ws, startPayload, state, options);
+				},
+				// The socket authenticates at its handshake with a token GitLab
+				// minted during setup, and a pause can outlast it. One that has
+				// aged out is minted afresh here, after the hold answered and before
+				// its last check, so a pause landing while it is minted sends the
+				// barrier round again. Minting is the request's own credential
+				// prerequisite and goes out unheld (see `withoutDispatchHold`).
+				async () => {
+					if (workflowConnection.refreshAt === undefined || Date.now() < workflowConnection.refreshAt) return;
+					workflowConnection = await requestGitLabDuoWorkflowDirectAccess(
+						withoutDispatchHold(fetchImpl),
+						baseUrl,
+						apiKey,
+						rootNamespaceId,
+						restProjectId,
+						workflowDefinition,
+						options.signal,
+					);
+				},
+			);
 			if (lastSocketResult === "approval") {
 				startPayload = buildGitLabDuoWorkflowApprovalStartRequest(startPayload);
 				state.lastApprovalStatus = undefined;
@@ -1578,9 +1648,9 @@ async function fetchGitLabDuoWorkflowAvailableModels(
 		const models = getRecord(getRecord(payload, "data"), "aiChatAvailableModels");
 		return parseGitLabAvailableModelsPayload(models);
 	} catch {
-		// Timeout (AbortSignal.timeout) surfaces as an AbortError here; matches the pre-fix
-		// transient-network behavior (undefined -> caller falls back to defaults), so a
-		// stalled models fetch degrades rather than hanging the whole stream.
+		// The REST deadline surfaces as an AbortError/TimeoutError here; matches the
+		// pre-fix transient-network behavior (undefined -> caller falls back to defaults),
+		// so a stalled models fetch degrades rather than hanging the whole stream.
 		return undefined;
 	}
 }
@@ -1691,10 +1761,12 @@ async function requestGitLabDuoWorkflowDirectAccess(
 	workflowDefinition: GitLabDuoWorkflowDefinition = GITLAB_DUO_WORKFLOW_DEFINITION,
 	signal?: AbortSignal,
 ): Promise<GitLabDuoWorkflowDirectAccessConnection> {
-	// A timeout here throws `AbortError`/`TimeoutError` (per `AbortSignal.timeout`),
+	// A timeout here throws `AbortError`/`TimeoutError` (the REST deadline's abort),
 	// which surfaces through the outer `streamGitLabDuoWorkflow` catch as a real
 	// stream `error` event — matching the existing HTTP-error path rather than the
 	// swallowed best-effort helpers (settings ensure / project discovery / models).
+	// An unstated lifetime counts from before the request, never from after it.
+	const requestedAt = Date.now();
 	const response = await fetchImpl(gitLabApiUrl(baseUrl, "/api/v4/ai/duo_workflows/direct_access"), {
 		method: "POST",
 		headers: {
@@ -1735,6 +1807,7 @@ async function requestGitLabDuoWorkflowDirectAccess(
 	}
 	traceGitLabDuoWorkflow("direct_access.token", { hasToken: true });
 	const serviceEndpoint = !payload.gitlab_rails?.token && Boolean(payload.duo_workflow_service?.base_url);
+	const expiresAt = gitLabDuoWorkflowTokenExpiry(payload);
 	return {
 		token,
 		...(serviceEndpoint && payload.duo_workflow_service?.base_url
@@ -1742,7 +1815,29 @@ async function requestGitLabDuoWorkflowDirectAccess(
 			: {}),
 		headers: serviceEndpoint ? (payload.duo_workflow_service?.headers ?? {}) : {},
 		serviceEndpoint,
+		refreshAt:
+			expiresAt === undefined
+				? requestedAt + GITLAB_DUO_WORKFLOW_TOKEN_UNSTATED_TTL_MS
+				: expiresAt - GITLAB_DUO_WORKFLOW_TOKEN_REFRESH_MARGIN_MS,
 	};
+}
+
+/**
+ * The earliest expiry a `direct_access` response states for its tokens, in
+ * epoch milliseconds. GitLab's own language server refreshes on the earlier of
+ * the Rails token's and the Duo Workflow Service token's, so this does too.
+ * GitLab serializes a time as ISO 8601; a bare number is read as epoch
+ * seconds, as a JWT `exp` is, unless it is too large to be one.
+ */
+function gitLabDuoWorkflowTokenExpiry(payload: GitLabDirectAccessResponse): number | undefined {
+	let earliest: number | undefined;
+	for (const stated of [payload.gitlab_rails?.token_expires_at, payload.duo_workflow_service?.token_expires_at]) {
+		if (stated === undefined || stated === "") continue;
+		const numeric = Number(stated);
+		const at = Number.isNaN(numeric) ? Date.parse(String(stated)) : numeric < 1e12 ? numeric * 1000 : numeric;
+		if (Number.isFinite(at)) earliest = Math.min(earliest ?? at, at);
+	}
+	return earliest;
 }
 
 async function createGitLabDuoWorkflow(
@@ -1804,8 +1899,15 @@ async function stopGitLabDuoWorkflow(
 	// caller must still fire the server-side stop, but a stalled PATCH here would
 	// otherwise leave the `runGitLabDuoWorkflow` promise unresolved forever — the
 	// bounded budget keeps cleanup best-effort in both directions.
+	//
+	// For the same reason it skips the caller's dispatch hold: this PATCH ends
+	// paid work rather than starting it, and parking it behind a `/pause` would
+	// leave the remote workflow running — and billing — until a human resumes.
+	// The rest of the transport (proxy, CA bundle, User-Agent, PI_REQ_DEBUG)
+	// still applies.
+	const stopFetch = withoutDispatchHold(fetchImpl);
 	try {
-		await fetchImpl(gitLabApiUrl(baseUrl, `/api/v4/ai/duo_workflows/workflows/${encodeURIComponent(workflowId)}`), {
+		await stopFetch(gitLabApiUrl(baseUrl, `/api/v4/ai/duo_workflows/workflows/${encodeURIComponent(workflowId)}`), {
 			method: "PATCH",
 			headers: {
 				Authorization: `Bearer ${apiKey}`,
@@ -1918,33 +2020,38 @@ export function runGitLabDuoWorkflowSocket(
 	replayMessages?: readonly unknown[],
 ): Promise<GitLabDuoWorkflowSocketResult> {
 	const { promise, resolve, reject } = Promise.withResolvers<GitLabDuoWorkflowSocketResult>();
+	// The run owns the socket until it settles. An `action` or `pause` settle
+	// hands the socket on to the next turn's resume, so from then on nothing
+	// this run scheduled may send on it or close it.
 	let settled = false;
-	let idleTimer: NodeJS.Timeout | undefined;
-	const clearIdleTimer = (): void => {
-		if (idleTimer !== undefined) {
-			clearTimeout(idleTimer);
-			idleTimer = undefined;
-		}
-	};
-	const settle = (result: GitLabDuoWorkflowSocketResult = "closed", error?: unknown): void => {
-		if (settled) return;
-		settled = true;
-		clearIdleTimer();
-		if (error) reject(error);
-		else resolve(result);
-	};
 	const idleTimeoutMs =
 		options.idleTimeoutMs !== undefined && options.idleTimeoutMs > 0
 			? options.idleTimeoutMs
 			: GITLAB_DUO_WORKFLOW_IDLE_TIMEOUT_MS;
-	const resetIdleTimer = (): void => {
-		clearIdleTimer();
+	// The idle watchdog is a stopwatch over the time the socket waits on the
+	// server: a frame starts it again with the full window, and a frame of
+	// ours parked on the caller's dispatch hold stops it. Held time is our own
+	// wait, not the server's silence — counted, a hold a human releases would
+	// close the socket before the frame it holds went out — while the window
+	// left when the hold began runs on from the send, so a server that never
+	// answers still times out.
+	let idleTimer: NodeJS.Timeout | undefined;
+	let idleRemainingMs = idleTimeoutMs;
+	let idleStartedAt = 0;
+	let dispatchHeld = false;
+	const stopIdleTimer = (): void => {
+		if (idleTimer === undefined) return;
+		clearTimeout(idleTimer);
+		idleTimer = undefined;
+		idleRemainingMs -= Date.now() - idleStartedAt;
+	};
+	const settle = (result: GitLabDuoWorkflowSocketResult = "closed", error?: unknown): void => {
 		if (settled) return;
-		idleTimer = setTimeout(() => {
-			traceGitLabDuoWorkflow("websocket.idle_timeout", { timeoutMs: idleTimeoutMs });
-			close();
-			settle("timeout");
-		}, idleTimeoutMs);
+		settled = true;
+		stopIdleTimer();
+		options.signal?.removeEventListener("abort", abort);
+		if (error) reject(error);
+		else resolve(result);
 	};
 	const close = (): void => {
 		try {
@@ -1952,6 +2059,28 @@ export function runGitLabDuoWorkflowSocket(
 		} catch {
 			// Ignore close failures from test doubles or already closed sockets.
 		}
+	};
+	const timeOut = (): void => {
+		traceGitLabDuoWorkflow("websocket.idle_timeout", { timeoutMs: idleTimeoutMs });
+		close();
+		settle("timeout");
+	};
+	const startIdleTimer = (): void => {
+		if (settled || dispatchHeld || idleTimer !== undefined) return;
+		if (idleRemainingMs <= 0) {
+			timeOut();
+			return;
+		}
+		idleStartedAt = Date.now();
+		idleTimer = setTimeout(() => {
+			idleTimer = undefined;
+			timeOut();
+		}, idleRemainingMs);
+	};
+	const resetIdleTimer = (): void => {
+		stopIdleTimer();
+		idleRemainingMs = idleTimeoutMs;
+		startIdleTimer();
 	};
 	const abort = (): void => {
 		close();
@@ -2041,6 +2170,46 @@ export function runGitLabDuoWorkflowSocket(
 			error => settle("closed", error),
 		);
 	};
+	// Each frame this run puts on the socket for the request — the
+	// `startRequest` that starts (and bills) a workflow, or the
+	// `actionResponse` that lets a preserved one run its next model turn —
+	// waits on the caller's dispatch hold first, and goes out in the same
+	// synchronous step as the hold's last check, so a pause that lands after
+	// the hold answered still stops it. Closing the socket is the one write
+	// left unheld: it stops paid work instead of starting it. A send that
+	// throws fails this request rather than escaping as a rejection no one
+	// observes, and a hold that ends after the run settled leaves the socket
+	// to whoever owns it by then.
+	const dispatch = (frames: readonly unknown[]): void => {
+		const send = (): void => {
+			try {
+				for (const frame of frames) ws.send(JSON.stringify(frame));
+			} catch (error) {
+				close();
+				settle("closed", error);
+			}
+		};
+		const hold = options.beforeDispatch;
+		// Without a gate the frame goes out on the caller's tick, exactly as an
+		// ungated workflow always ran.
+		if (!hold) {
+			send();
+			return;
+		}
+		dispatchHeld = true;
+		stopIdleTimer();
+		void dispatchWhenOpen(hold, options.signal, () => {
+			dispatchHeld = false;
+			if (settled) return;
+			startIdleTimer();
+			if (!settled) send();
+		}).catch((error: unknown) => {
+			dispatchHeld = false;
+			if (settled) return;
+			close();
+			settle("closed", error);
+		});
+	};
 	if (replayMessages && replayMessages.length > 0) {
 		ws.onopen = null;
 		void (async () => {
@@ -2085,10 +2254,7 @@ export function runGitLabDuoWorkflowSocket(
 		// action of this turn. (Accepts an array for forward-compat, but the serial
 		// inline flow only ever has one.) DWS matches it by requestID to the awaiting
 		// outbox future and the workflow continues on the same connection.
-		const responses = Array.isArray(resumeResponse) ? resumeResponse : [resumeResponse];
-		for (const response of responses) {
-			ws.send(JSON.stringify(response));
-		}
+		dispatch(Array.isArray(resumeResponse) ? resumeResponse : [resumeResponse]);
 	} else {
 		ws.onopen = () => {
 			traceGitLabDuoWorkflow("websocket.open", {
@@ -2100,14 +2266,15 @@ export function runGitLabDuoWorkflowSocket(
 				mcpTools: startPayload.mcpTools.length,
 				preapprovedTools: startPayload.preapproved_tools.length,
 			});
-			ws.send(JSON.stringify({ startRequest: startPayload }));
+			// `startRequest` is what starts (and bills) the workflow; the socket
+			// before it is only a connection. The caller's gate is held once more
+			// here because the handshake between the two outlasts a `/pause`
+			// engaged while it runs.
+			dispatch([{ startRequest: startPayload }]);
 		};
 	}
 	resetIdleTimer();
-	return promise.finally(() => {
-		clearIdleTimer();
-		options.signal?.removeEventListener("abort", abort);
-	});
+	return promise;
 }
 
 type GitLabDuoWorkflowMessageResult =

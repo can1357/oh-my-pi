@@ -480,6 +480,72 @@ export type OpenAIResponseInclude =
 	| "reasoning.encrypted_content"
 	| "message.output_text.logprobs";
 
+/**
+ * A caller's hold on one request, awaited at each site that puts that request
+ * on the wire. See {@link StreamOptions.beforeDispatch}.
+ *
+ * Awaiting a hold proves only that it was open when it answered. In
+ * single-threaded JavaScript a gate can still close in any microtask between
+ * that answer and the send, and a plain function cannot be asked again
+ * without being awaited again. A hold that can tell synchronously whether it
+ * is closed therefore carries {@link isClosed}: the transport reads it in the
+ * same synchronous step that sends, so such a hold is enforced exactly at
+ * dispatch, and a request never reaches the wire while it reads closed. For a
+ * hold without one the transport promises the wait and nothing more: it may
+ * close again after it answered and the request still goes out.
+ *
+ * Several holds on one transport (a `beforeDispatch` given with a `fetch`
+ * that already carries another) are awaited in order and then probed
+ * together, and a hold may be asked more than once per attempt: every hold is
+ * asked again whenever a probe reads closed at the send, and a hold without a
+ * probe that answered before a later hold waited is asked again too, on a
+ * best-effort basis that fails the attempt if a later hold parks every time it
+ * is asked behind it (a pacing delay).
+ *
+ * What the transport enforces and what it trusts. It enforces the order at
+ * every site that puts a request on the wire: every probe is read after
+ * every hold has answered and after any work that must not be older than the
+ * wait (a signature, a short-lived token), and the wire operation runs in
+ * that same synchronous step. Nothing of this layer's runs between that read
+ * and the wire: no `await`, no caller callback (`onPayload`, `onResponse`),
+ * no raw-stream observer (`onSseEvent` hears of a frame only once it is on
+ * the wire), no logger or request-debug hook. It trusts the rest, because no
+ * transport can check it: that each hold and probe tell the truth and the
+ * probe has no effects ({@link isClosed}), and that the wire operation a
+ * caller supplies (`StreamOptions.fetch`, a replacement `WebSocket`, a socket
+ * factory) puts the request out before it awaits anything or calls back into
+ * caller code.
+ */
+export interface DispatchHold {
+	(): Promise<void> | void;
+	/**
+	 * Whether the hold is closed right now. Read after the hold has been
+	 * awaited, in the same synchronous step as the send; while it reads
+	 * closed the request does not go out, and the hold is awaited again.
+	 * Asked while this reads closed, the hold must wait until it opens, or
+	 * reject: one that answered at once would be asked again without end.
+	 *
+	 * The probe must be honest and pure: it reports its gate as it is, and
+	 * changes nothing, neither its own gate nor any other hold's. The
+	 * transport relies on both and can check neither. A probe that reads open
+	 * while its gate is closed lets the request out, and one that closes a
+	 * gate as it is read can close one already read, which the same check
+	 * does not see again: a hold or a probe that lies gets what it asked for.
+	 * A probe that throws fails the attempt with nothing sent.
+	 */
+	isClosed?: () => boolean;
+}
+
+/**
+ * A caller's wrapper around the transport this layer builds, for a caller that
+ * must see each HTTP attempt and its response. The transport calls it once
+ * per build, and the build is live for its request, so the fetch it returns
+ * keeps its state for that request. The unheld transport that carries the
+ * request's cleanup and credential traffic does not carry it. See
+ * {@link StreamOptions.wrapTransport}.
+ */
+export type TransportWrapper = (fetch: FetchImpl) => FetchImpl;
+
 export interface StreamOptions {
 	temperature?: number;
 	topP?: number;
@@ -501,6 +567,62 @@ export interface StreamOptions {
 	frequencyPenalty?: number;
 	maxTokens?: number;
 	signal?: AbortSignal;
+	/**
+	 * Awaited immediately before every request this layer puts on the wire —
+	 * the caller's own, a thinking-loop re-sample, and each attempt with a
+	 * rotated credential alike. It runs at the provider-dispatch chokepoint,
+	 * after the credential, any command-backed headers and the in-flight slot
+	 * are settled, and again at each transport's own last step before bytes go
+	 * out: the one transport fetch; each Codex websocket connect, and each
+	 * `response.create` and `response.steer` frame on it; the Cursor HTTP/2
+	 * request; each GitLab Duo workflow socket it opens, and each
+	 * `startRequest` and `actionResponse` frame it sends. A caller whose
+	 * requests are gated (omp's `/pause`) holds them there, where no await of
+	 * this layer's own can still follow. It cannot change the request, and a
+	 * throw from it fails that attempt like any other dispatch error.
+	 *
+	 * A hold that carries a probe ({@link DispatchHold.isClosed}) is also read
+	 * at each of those sites in the same synchronous step as its wire
+	 * operation, so no request goes out while the probe reads closed, as long
+	 * as the probe keeps the rules given there. A plain function is only
+	 * awaited. {@link DispatchHold} says which guarantees the transport
+	 * enforces and which it trusts the caller for.
+	 *
+	 * The wait ends when {@link signal} aborts, with that signal's reason, so a
+	 * cancelled request never stays parked on a hold nobody will release.
+	 *
+	 * Ordering is not preserved: the hold gates each request independently, so
+	 * a request whose hold resolves first reaches the wire first even when an
+	 * earlier request is still held. A caller that needs its requests to reach
+	 * the provider in order must serialize them itself.
+	 */
+	beforeDispatch?: DispatchHold;
+	/**
+	 * Wraps the transport this layer builds for the request, outside everything
+	 * it does: the User-Agent default, the CA bundle, the proxy, the
+	 * `PI_REQ_DEBUG` dump and {@link beforeDispatch}, which stays the last step
+	 * before the wire. A caller that must *see* each HTTP attempt and its
+	 * response uses it — answering a provider SDK's own retry loop, whose
+	 * budget is a constructor literal, is not expressible as a hold. An
+	 * attempt the wrapper declines costs no hold, no debug dump and no traffic.
+	 *
+	 * It is per-request state (an attempt count, the caller's report-back):
+	 * build one per request and never share it between requests. Rejecting
+	 * from it fails that attempt as a transport error, which the provider's
+	 * own retry loop may still retry; only an abort on {@link signal} ends
+	 * those retries at once.
+	 *
+	 * The transport built around it is live for that request. A hold given
+	 * later, with a `fetch` that already carries this wrapper, gates that
+	 * same build — every reference to the fetch waits on it from then on —
+	 * and a further wrapper goes outside it. Neither rebuilds the transport,
+	 * so this wrapper is constructed once and keeps every attempt it counted.
+	 * The request's cleanup and credential traffic (a workflow stop, a token
+	 * refresh) goes through a separate build that skips the hold and does not
+	 * carry this wrapper either: the wrapper's state is the inference
+	 * request's, and that traffic is not one of its attempts.
+	 */
+	wrapTransport?: TransportWrapper;
 	/**
 	 * OpenAI chat-completions HTTP attempt budget. When set, transient provider
 	 * errors are not replayed above the transport, so retries share this limit.
@@ -672,29 +794,34 @@ export interface StreamOptions {
 	 * plus synthesized SSE-shaped frames for the Codex WebSocket transport (one synthetic frame
 	 * per JSON request/response message). WebSocket frames are tagged with a leading
 	 * `: ws → <type>` (outbound) or `: ws ← <type>` (inbound) comment line in `RawSseEvent.raw`.
+	 * An outbound frame is reported once the socket has taken it: never before, so an
+	 * observer that pauses on it cannot stop it, and never for a frame the socket refused
+	 * or a closed hold withheld. A reply is reported after the frame it answers.
 	 *
 	 * Diagnostic only: provider implementations must ignore callback failures and must not
 	 * let observers alter stream contents.
 	 */
 	onSseEvent?: (event: RawSseEvent, model?: Model<Api>) => void;
 	/**
-	 * Optional override for the first-event watchdog in milliseconds. Built-in
-	 * providers apply this budget twice when they can: once to the underlying
-	 * SDK/request while waiting for the HTTP stream object to exist, then again
-	 * in the iterator while waiting for the first semantic stream event. Set to
-	 * `0` to disable both layers for this request. After the first semantic
-	 * event arrives, `streamIdleTimeoutMs` governs inter-event stalls. Falls
-	 * back to `PI_STREAM_FIRST_EVENT_TIMEOUT_MS` and then to a 100s default.
+	 * Optional override for the first-event watchdog in milliseconds: one budget
+	 * for the wait from the moment the request reaches the wire to the first
+	 * semantic stream event. Response headers do not renew it: the pre-response
+	 * guard bounds the wait for headers, and the wait for the first event after
+	 * them gets only what is left. Time spent preparing the request or parked on
+	 * `beforeDispatch` is not counted (see `armPreResponseTimeout`). Set to `0`
+	 * to disable the watchdog for this request. After the first semantic event
+	 * arrives, `streamIdleTimeoutMs` governs inter-event stalls. Falls back to
+	 * `PI_STREAM_FIRST_EVENT_TIMEOUT_MS` and then to a 300 s default, which a
+	 * model's catalog compat can replace.
 	 * OpenAI-family transports additionally honor
 	 * `PI_OPENAI_STREAM_FIRST_EVENT_TIMEOUT_MS` as the most-specific override and
 	 * floor the first-event budget at the resolved idle (per-call
 	 * `streamIdleTimeoutMs` or `PI_OPENAI_STREAM_IDLE_TIMEOUT_MS`) so slow local
 	 * OpenAI-compatible servers are not undercut during prompt processing.
 	 *
-	 * Iterator-level honored by: every built-in provider (via the lazy-stream
-	 * forwarder in `register-builtins`). SDK-request honored by:
-	 * `openai-completions`, `openai-responses`, `azure-openai-responses`,
-	 * `anthropic-messages`.
+	 * `openai-completions`, `openai-responses` and `azure-openai-responses` also
+	 * send the budget as the `X-Stainless-Timeout` header hint, and
+	 * `anthropic-messages` passes it to the SDK client as its request timeout.
 	 */
 	streamFirstEventTimeoutMs?: number;
 	/**
@@ -703,7 +830,7 @@ export interface StreamOptions {
 	 * mid-stream stalls (broker dies, half-open socket, model produces no real
 	 * progress for too long). Set to `0` to disable. Falls back to
 	 * `PI_STREAM_IDLE_TIMEOUT_MS` (alias: `PI_OPENAI_STREAM_IDLE_TIMEOUT_MS`)
-	 * and then to a 120s default.
+	 * and then to a 300 s default.
 	 */
 	streamIdleTimeoutMs?: number;
 	/**

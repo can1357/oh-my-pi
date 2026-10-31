@@ -55,6 +55,7 @@ const NON_WIRE_KEYS = new Set<keyof SimpleStreamOptions>([
 	"cursorExecHandlers",
 	"cursorOnToolResult",
 	"providerSessionState",
+	"beforeDispatch",
 ]);
 const PI_NATIVE_STREAM_IDLE_TIMEOUT_ERROR = "pi-native stream stalled while waiting for the next event";
 const PI_NATIVE_STREAM_FIRST_EVENT_TIMEOUT_ERROR = "pi-native stream timed out while waiting for the first event";
@@ -199,7 +200,8 @@ export function streamPiNative<TApi extends Api>(
 			// configurable first-event watchdog governs slow-prefill turns: a gateway
 			// may legitimately hold headers while the upstream model thinks
 			// (issue #17363). The pre-response guard bounds time-to-headers and stays
-			// armed across the error-body read.
+			// armed across the error-body read. Headers do not renew the budget: the
+			// event iterator below waits on what the guard left of it.
 			const watchdog = armPreResponseTimeout(abortTracker.requestSignal, firstEventTimeoutMs);
 			// `timeout` is a Bun fetch extension absent from the DOM `RequestInit`.
 			const init: RequestInit & { timeout: false } = {
@@ -218,6 +220,7 @@ export function streamPiNative<TApi extends Api>(
 			} finally {
 				watchdog.clear();
 			}
+			const firstEventBudgetLeftMs = watchdog.remaining() ?? firstEventTimeoutMs;
 			// Callers can truthfully inspect the gateway HTTP response, but its
 			// request body is opaque here; callbacks themselves never cross the wire.
 			await notifyProviderResponse(
@@ -239,7 +242,7 @@ export function streamPiNative<TApi extends Api>(
 			);
 			const watchedSource = iterateWithIdleTimeout(source, {
 				idleTimeoutMs,
-				firstItemTimeoutMs: firstEventTimeoutMs,
+				firstItemTimeoutMs: firstEventBudgetLeftMs,
 				errorMessage: PI_NATIVE_STREAM_IDLE_TIMEOUT_ERROR,
 				firstItemErrorMessage: PI_NATIVE_STREAM_FIRST_EVENT_TIMEOUT_ERROR,
 				onIdle: () =>

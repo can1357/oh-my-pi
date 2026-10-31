@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { Api, ApiKey, Model } from "@oh-my-pi/pi-ai";
+import type { Api, ApiKey, DispatchHold, Model } from "@oh-my-pi/pi-ai";
 
 export type MnemopiLlmCompletionTask = {
 	kind: "memory-extraction";
@@ -13,6 +13,13 @@ export interface MnemopiLlmCompleteOptions {
 	provider?: string | null;
 	model?: string | null;
 	task?: MnemopiLlmCompletionTask;
+	/**
+	 * The instance's {@link MnemopiRuntimeOptions.beforeDispatch}, for a
+	 * completion that puts its own request on the wire: await it before the
+	 * request's deadline starts, and give it to the request as its
+	 * `beforeDispatch` so every attempt waits on it too.
+	 */
+	beforeDispatch?: DispatchHold;
 }
 
 export type MnemopiLlmCompletion = (
@@ -61,6 +68,14 @@ export interface MnemopiRuntimeOptions {
 	llm?: false | MnemopiLlmRuntimeOptions | Model<Api> | MnemopiLlmCompletion;
 	/** Verbose diagnostics: escalates best-effort failure logs from debug to warn. */
 	debug?: boolean;
+	/**
+	 * Awaited before every remote request the instance makes: each attempt at
+	 * a completion or embedding endpoint, and each pi-ai model request. A
+	 * custom completion receives it as {@link MnemopiLlmCompleteOptions.beforeDispatch}.
+	 * A host that gates its requests holds them here; a rejection fails the
+	 * request, which then degrades like any other failed remote call.
+	 */
+	beforeDispatch?: DispatchHold;
 }
 
 export interface ResolvedMnemopiEmbeddingRuntimeOptions {
@@ -87,6 +102,7 @@ export interface ResolvedMnemopiRuntimeOptions {
 	embeddings?: ResolvedMnemopiEmbeddingRuntimeOptions;
 	llm?: ResolvedMnemopiLlmRuntimeOptions;
 	debug?: boolean;
+	beforeDispatch?: DispatchHold;
 }
 
 const runtimeOptionsStorage = new AsyncLocalStorage<ResolvedMnemopiRuntimeOptions>();
@@ -105,6 +121,11 @@ export function getMnemopiRuntimeOptions(): ResolvedMnemopiRuntimeOptions | unde
 /** Whether the active runtime scope requested verbose diagnostics (`mnemopi.debug`). */
 export function mnemopiDebugEnabled(): boolean {
 	return runtimeOptionsStorage.getStore()?.debug === true;
+}
+
+/** The active runtime scope's dispatch hold, if its instance was given one. */
+export function activeDispatchHold(): DispatchHold | undefined {
+	return runtimeOptionsStorage.getStore()?.beforeDispatch;
 }
 
 export function resolveEmbeddingProvider(

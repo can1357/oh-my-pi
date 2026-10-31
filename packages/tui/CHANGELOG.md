@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Space and Enter now dismiss the `/pause` screen on terminals that send keys as xterm `modifyOtherKeys` sequences, such as tmux with extended keys on ([#17399](https://github.com/can1357/oh-my-pi/pull/17399) by [@sjawhar](https://github.com/sjawhar))
+- The `/pause` screen now leaves the terminal as soon as you resume, and a failed teardown no longer leaves the session paused with no screen to release it ([#17399](https://github.com/can1357/oh-my-pi/pull/17399) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.14.1] - 2026-10-31
 
 ### Added

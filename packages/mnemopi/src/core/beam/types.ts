@@ -197,6 +197,11 @@ export interface RecallOptions {
 	 * {@link RECALL_CONTENT_PREVIEW_CHARS} (500).
 	 */
 	contentPreviewChars?: number;
+	/**
+	 * Ends the recall's query-embedding request, including a wait at the
+	 * instance's dispatch hold. The recall then ranks without an embedding.
+	 */
+	signal?: AbortSignal;
 }
 
 export interface RecallEnhancedOptions extends RecallOptions {

@@ -672,8 +672,12 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 				sawFinishReason = false;
 			};
 
+			// `firstEventBudgetLeftMs` is what the request's pre-response guard left
+			// of the first-event budget when headers arrived: headers do not renew
+			// it, so the wait for the first SSE event spends only the rest.
 			const streamResponse = async (
 				activeResponse: Response,
+				firstEventBudgetLeftMs: number | undefined,
 			): Promise<{ meaningful: boolean; strippedPlanningLeak: boolean }> => {
 				if (!activeResponse.body) {
 					throw new AIError.ProviderResponseError("No response body", {
@@ -793,7 +797,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 							: undefined,
 					),
 					{
-						firstItemTimeoutMs: firstEventTimeoutMs,
+						firstItemTimeoutMs: firstEventBudgetLeftMs,
 						errorMessage: FIRST_EVENT_TIMEOUT_ERROR,
 						firstItemErrorMessage: FIRST_EVENT_TIMEOUT_ERROR,
 						onFirstItemTimeout: () =>
@@ -978,6 +982,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					} finally {
 						watchdog.clear();
 					}
+					let firstEventBudgetLeftMs = watchdog.remaining() ?? firstEventTimeoutMs;
 
 					if (!response.ok) {
 						if (AIError.isTransientStatus(response.status)) {
@@ -1021,12 +1026,22 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 								throw new AIError.ConfigurationError("Missing request URL");
 							}
 
-							currentResponse = await (options?.fetch ?? fetch)(requestUrl, {
+							// The replay is a new request with its own budget, bounded
+							// before headers the same way the attempt above is.
+							const replayWatchdog = armPreResponseTimeout(callerSignal, firstEventTimeoutMs);
+							const replayInit: RequestInit & { timeout: false } = {
 								method: "POST",
 								headers: requestHeaders,
 								body: requestBodyJson,
-								signal: options?.signal,
-							});
+								signal: replayWatchdog.signal,
+								timeout: false,
+							};
+							try {
+								currentResponse = await (options?.fetch ?? fetch)(requestUrl, replayInit);
+							} finally {
+								replayWatchdog.clear();
+							}
+							firstEventBudgetLeftMs = replayWatchdog.remaining() ?? firstEventTimeoutMs;
 
 							if (!currentResponse.ok) {
 								const retryErrorText = await currentResponse.text();
@@ -1038,7 +1053,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 							}
 						}
 
-						const streamed = await streamResponse(currentResponse);
+						const streamed = await streamResponse(currentResponse, firstEventBudgetLeftMs);
 						// Eventless silence may fail over to the alternate Antigravity
 						// endpoint. Once thinking has streamed, the endpoint is already
 						// committed downstream; Advisor mode may accept that silence,

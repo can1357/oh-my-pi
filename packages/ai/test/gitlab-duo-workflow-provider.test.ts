@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -39,9 +39,11 @@ import type {
 	ToolResultMessage,
 } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { transportFetch } from "@oh-my-pi/pi-ai/utils/transport-fetch";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { extractHttpStatusFromError } from "@oh-my-pi/pi-utils";
+import { PROBE_MAX_DEPTH, ProbedGate, resumeUntilSettled } from "./helpers/probed-gate";
 
 beforeAll(() => configureCredentialRedaction(true));
 afterAll(() => configureCredentialRedaction(false));
@@ -1148,6 +1150,704 @@ describe("GitLab Duo Workflow WebSocket state machine", () => {
 		expect(createdWorkflowIds).toEqual(["workflow-1", "workflow-2"]);
 		expect(result.stopReason).not.toBe("error");
 		expect(result.errorMessage).toBeUndefined();
+	});
+
+	// Every restart opens a socket of its own and starts a workflow on it, and
+	// both are traffic a caller's `/pause` gate has to see: the hold runs before
+	// each `webSocketFactory` and again before each `startRequest`.
+	it("waits on the caller's dispatch hold before each workflow socket", async () => {
+		const order: string[] = [];
+		let createCount = 0;
+		const fetchImpl: FetchImpl = async (input: string | URL | Request, init?: RequestInit) => {
+			const url = String(input);
+			if (url.includes("/api/graphql")) {
+				return new Response(
+					JSON.stringify({
+						data: {
+							aiChatAvailableModels: {
+								defaultModel: { name: "Claude", ref: "claude_sonnet_4_6_vertex" },
+								selectableModels: [],
+								pinnedModel: null,
+							},
+						},
+					}),
+					{ status: 200 },
+				);
+			}
+			if (url.includes("/api/v4/ai/duo_workflows/direct_access")) {
+				return new Response(JSON.stringify({ gitlab_rails: { token: "rails-token" } }), { status: 200 });
+			}
+			if (url.includes("/api/v4/ai/duo_workflows/workflows/")) {
+				return new Response("{}", { status: 200 });
+			}
+			if (url.includes("/api/v4/ai/duo_workflows/workflows") && init?.method === "POST") {
+				createCount++;
+				return new Response(JSON.stringify({ id: `workflow-${createCount}` }), { status: 200 });
+			}
+			return new Response("{}", { status: 404 });
+		};
+		const sockets: GitLabDuoWorkflowWebSocketLike[] = [];
+		const webSocketFactory: GitLabDuoWorkflowWebSocketFactory = () => {
+			const index = sockets.length;
+			order.push("socket");
+			const socket: GitLabDuoWorkflowWebSocketLike = {
+				onopen: null,
+				onmessage: null,
+				onerror: null,
+				onclose: null,
+				send() {},
+				close() {},
+			};
+			sockets.push(socket);
+			// The first workflow overruns the step limit, so the provider restarts
+			// on a fresh one: two sockets, and a hold before each.
+			queueMicrotask(() => {
+				socket.onopen?.(new Event("open"));
+				if (index === 0) {
+					socket.onmessage?.(
+						new MessageEvent("message", {
+							data: JSON.stringify({
+								status: "FAILED",
+								error: "The workflow reached its maximum step limit and could not complete. Please try again with a more focused goal, or break the task into smaller steps.",
+							}),
+						}),
+					);
+				} else {
+					socket.onmessage?.(new MessageEvent("message", { data: JSON.stringify({ status: "INPUT_REQUIRED" }) }));
+				}
+			});
+			return socket;
+		};
+
+		const result = await streamGitLabDuoWorkflow(model, context, {
+			apiKey: "[REDACTED]",
+			rootNamespaceId: "gid://gitlab/Group/1",
+			fetch: fetchImpl,
+			webSocketFactory,
+			beforeDispatch: () => {
+				order.push("hold");
+			},
+		}).result();
+
+		expect(sockets).toHaveLength(2);
+		expect(order).toEqual(["hold", "socket", "hold", "hold", "socket", "hold"]);
+		expect(result.stopReason).not.toBe("error");
+	});
+
+	// The hold was awaited and the socket opened a few microtasks later, so a
+	// pause landing in between opened a workflow socket under it.
+	it("opens no workflow socket when the gate closes after the hold answered", async () => {
+		const fetchImpl: FetchImpl = async (input: string | URL | Request, init?: RequestInit) => {
+			const url = String(input);
+			if (url.includes("/api/v4/ai/duo_workflows/direct_access")) {
+				return new Response(JSON.stringify({ gitlab_rails: { token: "rails-token" } }), { status: 200 });
+			}
+			if (url.includes("/api/v4/ai/duo_workflows/workflows") && init?.method === "POST") {
+				return new Response(JSON.stringify({ id: "workflow-1" }), { status: 200 });
+			}
+			return new Response("{}", { status: 404 });
+		};
+		const openedWhileClosed: number[] = [];
+		const heldAt: number[] = [];
+		for (let depth = 1; depth <= PROBE_MAX_DEPTH; depth++) {
+			const probe = new ProbedGate();
+			let sockets = 0;
+			const webSocketFactory: GitLabDuoWorkflowWebSocketFactory = () => {
+				sockets++;
+				if (probe.closed) openedWhileClosed.push(depth);
+				const socket: GitLabDuoWorkflowWebSocketLike = {
+					onopen: null,
+					onmessage: null,
+					onerror: null,
+					onclose: null,
+					send() {
+						queueMicrotask(() =>
+							socket.onmessage?.(
+								new MessageEvent("message", { data: JSON.stringify({ status: "INPUT_REQUIRED" }) }),
+							),
+						);
+					},
+					close() {},
+				};
+				queueMicrotask(() => socket.onopen?.(new Event("open")));
+				return socket;
+			};
+			const result = streamGitLabDuoWorkflow(model, context, {
+				apiKey: "[REDACTED]",
+				rootNamespaceId: "gid://gitlab/Group/1",
+				fetch: fetchImpl,
+				webSocketFactory,
+				// The REST setup goes through `fetchImpl` unheld, so the first hold
+				// the provider asks is the one right before its socket.
+				beforeDispatch: probe.holdClosingAfter(depth, () => true),
+			}).result();
+			const message = await resumeUntilSettled(
+				result,
+				probe,
+				() => sockets === 0,
+				() => heldAt.push(depth),
+			);
+			expect(sockets).toBe(1);
+			expect(message.stopReason).not.toBe("error");
+		}
+
+		expect(openedWhileClosed).toEqual([]);
+		// Not vacuous: some depth closed the gate before the socket and was held.
+		expect(heldAt.length).toBeGreaterThan(0);
+	});
+
+	// The hold before the factory covers the connection only. The handshake
+	// after it outlasts a pause engaged while it runs, and `startRequest` —
+	// not the socket — is what starts and bills the workflow.
+	it("holds the workflow start request until after the socket handshake", async () => {
+		const sentWhileHeld: boolean[] = [];
+		const gate = { closed: false };
+		const resumed = Promise.withResolvers<void>();
+		const socket: GitLabDuoWorkflowWebSocketLike = {
+			onopen: null,
+			onmessage: null,
+			onerror: null,
+			onclose: null,
+			send() {
+				sentWhileHeld.push(gate.closed);
+				queueMicrotask(() =>
+					socket.onmessage?.(new MessageEvent("message", { data: JSON.stringify({ status: "INPUT_REQUIRED" }) })),
+				);
+			},
+			close() {},
+		};
+		const output: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: "gitlab-duo-agent",
+			provider: "gitlab-duo-agent",
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		};
+
+		const run = runGitLabDuoWorkflowSocket(
+			socket,
+			buildGitLabDuoWorkflowStartRequest("workflow-1", model, context),
+			{ stream: new AssistantMessageEventStream(), output, started: true },
+			{
+				apiKey: "redacted",
+				beforeDispatch: () => {
+					if (!gate.closed) return;
+					queueMicrotask(() => {
+						gate.closed = false;
+						resumed.resolve();
+					});
+					return resumed.promise;
+				},
+			},
+		);
+		// The caller pauses while the socket is still connecting.
+		gate.closed = true;
+		socket.onopen?.(new Event("open"));
+		await run;
+
+		expect(sentWhileHeld).toEqual([false]);
+	});
+	// Cleanup runs the other way round: the stop PATCH is what ends the remote
+	// workflow's spending, so holding it behind a gate a human releases leaves
+	// that workflow running for the whole pause.
+	it("sends the workflow stop even while the caller's gate holds everything else", async () => {
+		const gate = { closed: false };
+		// Never resolved: the gate stays closed for the rest of the test, exactly
+		// as a `/pause` nobody has lifted yet.
+		const parked = Promise.withResolvers<void>();
+		const hold = () => (gate.closed ? parked.promise : undefined);
+		const stoppedWhileHeld: boolean[] = [];
+		const base: FetchImpl = async (input: string | URL | Request, init?: RequestInit) => {
+			const url = String(input);
+			if (url.includes("/api/graphql")) {
+				return new Response(
+					JSON.stringify({
+						data: {
+							aiChatAvailableModels: {
+								defaultModel: { name: "Claude", ref: "claude_sonnet_4_6_vertex" },
+								selectableModels: [],
+								pinnedModel: null,
+							},
+						},
+					}),
+					{ status: 200 },
+				);
+			}
+			if (url.includes("/api/v4/ai/duo_workflows/direct_access")) {
+				return new Response(JSON.stringify({ gitlab_rails: { token: "rails-token" } }), { status: 200 });
+			}
+			if (url.includes("/api/v4/ai/duo_workflows/workflows/") && init?.method === "PATCH") {
+				stoppedWhileHeld.push(gate.closed);
+				return new Response("{}", { status: 200 });
+			}
+			if (url.includes("/api/v4/ai/duo_workflows/workflows") && init?.method === "POST") {
+				return new Response(JSON.stringify({ id: "workflow-1" }), { status: 200 });
+			}
+			return new Response("{}", { status: 404 });
+		};
+		const webSocketFactory: GitLabDuoWorkflowWebSocketFactory = () => {
+			const socket: GitLabDuoWorkflowWebSocketLike = {
+				onopen: null,
+				onmessage: null,
+				onerror: null,
+				onclose: null,
+				send() {},
+				close() {},
+			};
+			// The socket dies and the caller pauses in the same moment: the
+			// workflow is left running on the server, and only the stop ends it.
+			queueMicrotask(() => {
+				gate.closed = true;
+				socket.onerror?.(new Event("error"));
+			});
+			return socket;
+		};
+
+		const outcome = await Promise.race([
+			streamGitLabDuoWorkflow(model, context, {
+				apiKey: "[REDACTED]",
+				rootNamespaceId: "gid://gitlab/Group/1",
+				fetch: transportFetch(model, base, hold),
+				webSocketFactory,
+				beforeDispatch: hold,
+			})
+				.result()
+				.then(
+					() => "settled",
+					() => "settled",
+				),
+			Bun.sleep(1_000).then(() => "parked on the hold"),
+		]);
+
+		expect(outcome).toBe("settled");
+		expect(stoppedWhileHeld).toEqual([true]);
+	});
+
+	// The REST setup calls reach the wire through the caller's transport fetch,
+	// which waits on the dispatch hold. Their per-call deadline was an
+	// `AbortSignal.timeout` that kept running through that hold, so a `/pause`
+	// longer than the deadline failed a call that had never been sent. Once the
+	// call is out, a server that never answers it must still time it out.
+	it("keeps held time off the REST setup deadline but still times out a stalled call", async () => {
+		vi.useFakeTimers();
+		try {
+			for (const server of ["answers", "stalls"] as const) {
+				const parked = Promise.withResolvers<void>();
+				const reached = Promise.withResolvers<void>();
+				const directAccessSent = Promise.withResolvers<AbortSignal | undefined>();
+				const attempted: string[] = [];
+				const arrived: string[] = [];
+				// `direct_access` carries the REST deadline and fails the turn when it
+				// throws, so the hold parks that call, once, as a `/pause` engaged at
+				// that moment would. The wrapper runs on the same tick as the hold.
+				let parkNext = false;
+				let parkedOnce = false;
+				const hold = () => {
+					if (!parkNext) return;
+					parkNext = false;
+					reached.resolve();
+					return parked.promise;
+				};
+				const base: FetchImpl = async (input: string | URL | Request, init?: RequestInit) => {
+					const url = String(input);
+					arrived.push(url);
+					if (url.includes("/api/graphql")) {
+						return new Response(
+							JSON.stringify({
+								data: {
+									aiChatAvailableModels: {
+										defaultModel: { name: "Claude", ref: "claude_sonnet_4_6_vertex" },
+										selectableModels: [],
+										pinnedModel: null,
+									},
+								},
+							}),
+							{ status: 200 },
+						);
+					}
+					if (url.includes("/api/v4/ai/duo_workflows/direct_access")) {
+						const signal = init?.signal ?? undefined;
+						directAccessSent.resolve(signal);
+						if (server === "stalls") {
+							const stalled = Promise.withResolvers<Response>();
+							signal?.addEventListener("abort", () => stalled.reject(signal.reason), { once: true });
+							return stalled.promise;
+						}
+						return new Response(JSON.stringify({ gitlab_rails: { token: "rails-token" } }), { status: 200 });
+					}
+					if (url.includes("/api/v4/ai/duo_workflows/workflows") && init?.method === "POST") {
+						return new Response(JSON.stringify({ id: "workflow-1" }), { status: 200 });
+					}
+					return new Response("{}", { status: 404 });
+				};
+				const webSocketFactory: GitLabDuoWorkflowWebSocketFactory = () => {
+					const socket: GitLabDuoWorkflowWebSocketLike = {
+						onopen: null,
+						onmessage: null,
+						onerror: null,
+						onclose: null,
+						send() {
+							queueMicrotask(() =>
+								socket.onmessage?.(
+									new MessageEvent("message", { data: JSON.stringify({ status: "INPUT_REQUIRED" }) }),
+								),
+							);
+						},
+						close() {},
+					};
+					queueMicrotask(() => socket.onopen?.(new Event("open")));
+					return socket;
+				};
+				const stream = streamGitLabDuoWorkflow(model, context, {
+					apiKey: "[REDACTED]",
+					rootNamespaceId: "gid://gitlab/Group/1",
+					fetch: transportFetch(model, base, hold, next => (input, init) => {
+						const url = String(input);
+						attempted.push(url);
+						if (!parkedOnce && url.includes("/api/v4/ai/duo_workflows/direct_access")) {
+							parkedOnce = true;
+							parkNext = true;
+						}
+						return next(input, init);
+					}),
+					webSocketFactory,
+				});
+				await reached.promise;
+				// Twice the 30 s REST deadline, all of it spent parked on the hold.
+				vi.advanceTimersByTime(60_000);
+				parked.resolve();
+
+				if (server === "answers") {
+					const result = await stream.result();
+					expect(arrived).toEqual(attempted);
+					expect(result.stopReason).not.toBe("error");
+					continue;
+				}
+				const sentSignal = await directAccessSent.promise;
+				vi.advanceTimersByTime(29_999);
+				expect(sentSignal?.aborted).toBe(false);
+				vi.advanceTimersByTime(1);
+				expect(sentSignal?.aborted).toBe(true);
+				expect((await stream.result()).stopReason).toBe("error");
+			}
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	describe("dispatch hold on the workflow socket", () => {
+		const actionResponse = {
+			actionResponse: { requestID: "req-1", plainTextResponse: { response: "ok" } },
+		};
+
+		function socketDouble(onSend?: (data: string) => void): {
+			socket: GitLabDuoWorkflowWebSocketLike;
+			sent: string[];
+			closes: () => number;
+		} {
+			const sent: string[] = [];
+			let closes = 0;
+			const socket: GitLabDuoWorkflowWebSocketLike = {
+				onopen: null,
+				onmessage: null,
+				onerror: null,
+				onclose: null,
+				send(data) {
+					onSend?.(data);
+					sent.push(data);
+				},
+				close() {
+					closes++;
+				},
+			};
+			return { socket, sent, closes: () => closes };
+		}
+
+		function socketState(): GitLabDuoWorkflowStreamState {
+			return {
+				stream: new AssistantMessageEventStream(),
+				output: {
+					role: "assistant",
+					content: [],
+					api: "gitlab-duo-agent",
+					provider: "gitlab-duo-agent",
+					model: model.id,
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "stop",
+					timestamp: Date.now(),
+				},
+				started: true,
+			};
+		}
+
+		function deliver(socket: GitLabDuoWorkflowWebSocketLike, payload: unknown): void {
+			socket.onmessage?.(new MessageEvent("message", { data: JSON.stringify(payload) }));
+		}
+
+		// Every pending microtask runs before the next macrotask, so this is
+		// where a hold's continuation has had its chance to act.
+		function drainMicrotasks(): Promise<void> {
+			const { promise, resolve } = Promise.withResolvers<void>();
+			setImmediate(resolve);
+			return promise;
+		}
+
+		const startRequest = () => buildGitLabDuoWorkflowStartRequest("workflow-1", model, context);
+
+		// The `actionResponse` that continues a preserved workflow is paid work
+		// as much as `startRequest` is: it lets the server run the next model
+		// turn. Sent straight from the continuation, it reached the wire while
+		// the caller's gate was closed and the hold was never consulted.
+		it("holds the live-socket action response until the caller's gate opens", async () => {
+			const sentOnce = Promise.withResolvers<void>();
+			const { socket, sent } = socketDouble(() => sentOnce.resolve());
+			const gate = Promise.withResolvers<void>();
+			let holds = 0;
+			const run = runGitLabDuoWorkflowSocket(
+				socket,
+				startRequest(),
+				socketState(),
+				{
+					apiKey: "redacted",
+					beforeDispatch: () => {
+						holds++;
+						return gate.promise;
+					},
+				},
+				actionResponse,
+			);
+			expect({ holds, sent: sent.length }).toEqual({ holds: 1, sent: 0 });
+
+			gate.resolve();
+			await sentOnce.promise;
+			expect(sent.map(data => JSON.parse(data))).toEqual([actionResponse]);
+			deliver(socket, { status: "INPUT_REQUIRED" });
+			expect(await run).toBe("terminal");
+		});
+
+		// A send that throws belongs to the request it was sending. After a hold
+		// it ran in a detached callback outside any `catch`, so the failure
+		// escaped as an unhandled rejection and the request never settled; the
+		// ungated sends threw out of `onopen` or out of the call itself instead.
+		it("settles the request when a socket send throws, held or not", async () => {
+			const outcomes: Record<string, unknown> = {};
+			for (const resume of [false, true]) {
+				for (const held of [false, true]) {
+					const name = `${resume ? "actionResponse" : "startRequest"} ${held ? "held" : "ungated"}`;
+					const { socket, closes } = socketDouble(() => {
+						throw new Error(`${name}: socket closed before send`);
+					});
+					let thrown: string | undefined;
+					let settled = "no request";
+					try {
+						const run = runGitLabDuoWorkflowSocket(
+							socket,
+							startRequest(),
+							socketState(),
+							{ apiKey: "redacted", idleTimeoutMs: 1_000, beforeDispatch: held ? () => undefined : undefined },
+							resume ? actionResponse : undefined,
+						);
+						if (!resume) socket.onopen?.(new Event("open"));
+						settled = await run.then(
+							result => `resolved ${result}`,
+							(error: unknown) => `rejected ${error instanceof Error ? error.message : String(error)}`,
+						);
+					} catch (error) {
+						thrown = error instanceof Error ? error.message : String(error);
+					}
+					outcomes[name] = { thrown, settled, closes: closes() };
+				}
+			}
+			// Bun's runner fails the running test on an unhandled rejection;
+			// draining first keeps a late one inside this test.
+			await drainMicrotasks();
+
+			expect(outcomes).toEqual({
+				"startRequest ungated": {
+					thrown: undefined,
+					settled: "rejected startRequest ungated: socket closed before send",
+					closes: 1,
+				},
+				"startRequest held": {
+					thrown: undefined,
+					settled: "rejected startRequest held: socket closed before send",
+					closes: 1,
+				},
+				"actionResponse ungated": {
+					thrown: undefined,
+					settled: "rejected actionResponse ungated: socket closed before send",
+					closes: 1,
+				},
+				"actionResponse held": {
+					thrown: undefined,
+					settled: "rejected actionResponse held: socket closed before send",
+					closes: 1,
+				},
+			});
+		});
+
+		// A run owns its socket only until it settles: an `action` settle hands
+		// the socket to the next turn's resume. A start hold that ends after
+		// that belongs to a request that is already over, yet its rejection
+		// closed whatever socket the closure held — by then the successor's.
+		it("leaves the socket to its successor when a stale start hold ends late", async () => {
+			for (const ending of ["resolves", "rejects"] as const) {
+				const { socket, sent, closes } = socketDouble();
+				const held = Promise.withResolvers<void>();
+				const stale = runGitLabDuoWorkflowSocket(socket, startRequest(), socketState(), {
+					apiKey: "redacted",
+					beforeDispatch: () => held.promise,
+				});
+				socket.onopen?.(new Event("open"));
+				deliver(socket, {
+					requestID: "req-1",
+					runMCPTool: { name: "mcp__omp__read", args: JSON.stringify({ path: "file.ts" }) },
+				});
+				expect(await stale).toBe("action");
+
+				const successor = runGitLabDuoWorkflowSocket(
+					socket,
+					startRequest(),
+					socketState(),
+					{ apiKey: "redacted" },
+					actionResponse,
+				);
+				if (ending === "resolves") held.resolve();
+				else held.reject(new Error("late hold failure"));
+				await drainMicrotasks();
+
+				expect({ ending, sent: sent.map(data => Object.keys(JSON.parse(data))), closes: closes() }).toEqual({
+					ending,
+					sent: [["actionResponse"]],
+					closes: 0,
+				});
+				deliver(socket, { status: "INPUT_REQUIRED" });
+				expect(await successor).toBe("terminal");
+			}
+		});
+
+		// The hold was awaited and the frame sent a few microtasks later, so a
+		// pause landing in between put a frame that starts or continues paid
+		// work on the socket under it.
+		it("sends no frame when the gate closes after the hold answered", async () => {
+			const sentWhileClosed: string[] = [];
+			const heldAt: string[] = [];
+			for (const frame of ["startRequest", "actionResponse"] as const) {
+				for (let depth = 1; depth <= PROBE_MAX_DEPTH; depth++) {
+					const probe = new ProbedGate();
+					let sends = 0;
+					const double = socketDouble(() => {
+						sends++;
+						if (probe.closed) sentWhileClosed.push(`${frame}@${depth}`);
+						queueMicrotask(() => deliver(double.socket, { status: "INPUT_REQUIRED" }));
+					});
+					const run = runGitLabDuoWorkflowSocket(
+						double.socket,
+						startRequest(),
+						socketState(),
+						{
+							apiKey: "redacted",
+							idleTimeoutMs: 1_000,
+							beforeDispatch: probe.holdClosingAfter(depth, () => true),
+						},
+						frame === "actionResponse" ? actionResponse : undefined,
+					);
+					if (frame === "startRequest") double.socket.onopen?.(new Event("open"));
+					const result = await resumeUntilSettled(
+						run,
+						probe,
+						() => sends === 0,
+						() => heldAt.push(`${frame}@${depth}`),
+					);
+					expect(result).toBe("terminal");
+					expect(sends).toBe(1);
+				}
+			}
+
+			expect(sentWhileClosed).toEqual([]);
+			expect(heldAt.some(at => at.startsWith("startRequest@"))).toBe(true);
+			expect(heldAt.some(at => at.startsWith("actionResponse@"))).toBe(true);
+		});
+
+		// The idle watchdog times the server's silence, and a frame parked on
+		// the caller's gate is our own wait — `/pause` holds until a human
+		// resumes. Counted, it closed the socket with nothing sent. The clock
+		// stops for the hold and runs on from the send with what was left, so
+		// a server that never answers the frame still times out.
+		it("keeps held time off the socket idle watchdog but still times out a silent server", async () => {
+			vi.useFakeTimers();
+			try {
+				// The start request: 10 ms of handshake count, the hold does not.
+				{
+					const sentOnce = Promise.withResolvers<void>();
+					const { socket, sent, closes } = socketDouble(() => sentOnce.resolve());
+					const gate = Promise.withResolvers<void>();
+					const run = runGitLabDuoWorkflowSocket(socket, startRequest(), socketState(), {
+						apiKey: "redacted",
+						idleTimeoutMs: 30,
+						beforeDispatch: () => gate.promise,
+					});
+					vi.advanceTimersByTime(10);
+					socket.onopen?.(new Event("open"));
+					vi.advanceTimersByTime(1_000);
+					expect({ sent: sent.length, closes: closes() }).toEqual({ sent: 0, closes: 0 });
+
+					gate.resolve();
+					await sentOnce.promise;
+					vi.advanceTimersByTime(19);
+					expect({ sent: sent.length, closes: closes() }).toEqual({ sent: 1, closes: 0 });
+					vi.advanceTimersByTime(1);
+					expect(closes()).toBe(1);
+					expect(await run).toBe("timeout");
+				}
+				// The action response: a frame that arrives while it is parked
+				// restarts the window without arming it behind the hold.
+				{
+					const sentOnce = Promise.withResolvers<void>();
+					const { socket, sent, closes } = socketDouble(() => sentOnce.resolve());
+					const gate = Promise.withResolvers<void>();
+					const run = runGitLabDuoWorkflowSocket(
+						socket,
+						startRequest(),
+						socketState(),
+						{ apiKey: "redacted", idleTimeoutMs: 30, beforeDispatch: () => gate.promise },
+						actionResponse,
+					);
+					vi.advanceTimersByTime(500);
+					deliver(socket, { status: "RUNNING" });
+					await Promise.resolve();
+					vi.advanceTimersByTime(500);
+					expect({ sent: sent.length, closes: closes() }).toEqual({ sent: 0, closes: 0 });
+
+					gate.resolve();
+					await sentOnce.promise;
+					vi.advanceTimersByTime(29);
+					expect({ sent: sent.length, closes: closes() }).toEqual({ sent: 1, closes: 0 });
+					vi.advanceTimersByTime(1);
+					expect(closes()).toBe(1);
+					expect(await run).toBe("timeout");
+				}
+			} finally {
+				vi.useRealTimers();
+			}
+		});
 	});
 
 	it("retries once on a fresh workflow when the server returns the generic processing error", async () => {

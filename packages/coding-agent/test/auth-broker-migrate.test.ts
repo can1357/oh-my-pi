@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
-import { type AuthBrokerServerHandle, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
+import { type AuthBrokerServerHandle, allowAuthBrokerForTests, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
 import { runAuthBrokerCommand } from "@oh-my-pi/pi-coding-agent/cli/auth-broker-cli";
 import { getAgentDbPath, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
@@ -33,6 +33,7 @@ describe("auth-broker migrate", () => {
 	let brokerStore: SqliteAuthCredentialStore | undefined;
 	let brokerStorage: AuthStorage | undefined;
 	let handle: AuthBrokerServerHandle | undefined;
+	let brokerDeclaration: Disposable | undefined;
 	const token = "broker-migrate-bearer";
 	const savedEnv: Record<string, string | undefined> = {};
 
@@ -52,12 +53,14 @@ describe("auth-broker migrate", () => {
 			bearerTokens: [token],
 			disableRefresher: true,
 		});
+		brokerDeclaration = allowAuthBrokerForTests(handle.url);
 		process.env.OMP_AUTH_BROKER_URL = handle.url;
 		process.env.OMP_AUTH_BROKER_TOKEN = token;
 	});
 
 	afterEach(async () => {
 		await handle?.close();
+		brokerDeclaration?.[Symbol.dispose]();
 		brokerStorage?.close();
 		brokerStore?.close();
 		await removeWithRetries(agentDir);

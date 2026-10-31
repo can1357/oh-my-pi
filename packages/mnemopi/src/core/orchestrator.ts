@@ -54,7 +54,7 @@ export async function orchestrateRecall(
 		// Auto-derive when the caller did not pass one. `embedQuery()` returns null when
 		// embeddings are disabled or no provider is configured, so this is a no-op for
 		// FTS-only deployments. `null` (explicit "no embedding") is preserved untouched.
-		queryEmbedding = await embedQuery(query);
+		queryEmbedding = await embedQuery(query, options.signal);
 	}
 	if (polyphonic) {
 		return polyphonicRecall(beam, query, topK, { ...options, queryEmbedding });

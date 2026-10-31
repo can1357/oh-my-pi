@@ -1,0 +1,4 @@
+# Bun reads only the bunfig.toml of the directory `bun test` starts in.
+[test]
+# Marks every child a test spawns as a test child; see scripts/test-preload.ts.
+preload = ["../../scripts/test-preload.ts"]

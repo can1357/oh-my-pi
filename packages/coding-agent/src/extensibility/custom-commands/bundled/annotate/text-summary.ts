@@ -1,3 +1,4 @@
+import { agentPauseGate } from "@oh-my-pi/pi-agent-core";
 import { completeSimple } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import type { CustomCommandContext } from "../../../../extensibility/custom-commands/types";
@@ -15,6 +16,9 @@ export async function generateTextReviewContextSummary(
 	const model = ctx.model;
 	if (!model) return undefined;
 
+	// The 60 s budget bounds the model, not a human's `/pause`: wait a pause out
+	// before arming it.
+	await agentPauseGate.dispatchHold(signal)();
 	const timeout = AbortSignal.timeout(60_000);
 	const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
 	const message = await completeSimple(
@@ -28,6 +32,9 @@ export async function generateTextReviewContextSummary(
 			disableReasoning: true,
 			maxTokens: 512,
 			signal: requestSignal,
+			// Held at the provider boundary too. A pause engaged once the budget
+			// runs can still expire it, and the review then has no summary.
+			beforeDispatch: agentPauseGate.dispatchHold(requestSignal),
 		},
 	);
 	if (message.stopReason === "error" || message.stopReason === "aborted") return undefined;

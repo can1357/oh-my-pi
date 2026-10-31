@@ -27,12 +27,15 @@ interface FakeHost {
 	host: PauseScreenHost;
 	shown: Component[];
 	statuses: string[];
+	/** Teardown steps in the order the screen ran them. */
+	order: string[];
 	requestCount(): number;
 	hiddenCount(): number;
 }
 function makeHost(rows = 24): FakeHost {
 	const shown: Component[] = [];
 	const statuses: string[] = [];
+	const order: string[] = [];
 	let hidden = 0;
 	let requests = 0;
 	const host: PauseScreenHost = {
@@ -42,6 +45,7 @@ function makeHost(rows = 24): FakeHost {
 				return {
 					hide: () => {
 						hidden++;
+						order.push("hide");
 					},
 					setHidden() {},
 					isHidden: () => false,
@@ -51,13 +55,17 @@ function makeHost(rows = 24): FakeHost {
 			requestRender() {
 				requests++;
 			},
+			renderNowAccepted() {
+				order.push("paint");
+				return Promise.resolve();
+			},
 			terminal: { rows },
 		},
 		showStatus(message) {
 			statuses.push(message);
 		},
 	};
-	return { host, shown, statuses, requestCount: () => requests, hiddenCount: () => hidden };
+	return { host, shown, statuses, order, requestCount: () => requests, hiddenCount: () => hidden };
 }
 
 describe("pause screen", () => {
@@ -555,6 +563,68 @@ describe("pause screen", () => {
 			expect(statuses.some(message => message.includes("Resumed after"))).toBe(true);
 		});
 
+		it("paints the frame that drops the screen before the gate opens", async () => {
+			// The pane must never show PAUSED for a gate that is already open.
+			// `hide()` alone only schedules a frame, and the loops this resume
+			// wakes run first, so the alternate screen keeps the overlay for as
+			// long as they keep the event loop busy (pane %11, 2026-10-28: 4.4 s
+			// after the key, hold timer frozen, while the session already ran).
+			const { host, shown, order } = makeHost();
+			const unsubscribe = agentPauseGate.onChange(paused => {
+				if (!paused) order.push("gate open");
+			});
+			try {
+				const run = runPauseScreen(host);
+				const component = shown[0]; // showOverlay runs before the first await
+				if (!(component instanceof PauseScreenComponent)) throw new Error("expected the pause screen");
+				component.handleInput("\x1b");
+				await run;
+			} finally {
+				unsubscribe();
+			}
+			expect(order).toEqual(["hide", "paint", "gate open"]);
+		});
+
+		it("releases the gate even when the teardown throws", async () => {
+			// A leaked pause freezes every agent in the process with no UI left
+			// to release it, so no teardown step may skip the release.
+			const { host, shown } = makeHost();
+			const show = host.ui.showOverlay.bind(host.ui);
+			host.ui.showOverlay = (component, options) => ({
+				...show(component, options),
+				hide: () => {
+					throw new Error("hide failed");
+				},
+			});
+			const run = runPauseScreen(host);
+			const component = shown[0];
+			if (!(component instanceof PauseScreenComponent)) throw new Error("expected the pause screen");
+			component.handleInput("\x1b");
+			await expect(run).rejects.toThrow("hide failed");
+			expect(agentPauseGate.paused).toBe(false);
+		});
+
+		it("dismisses and repaints the screen when a teardown step before the hide throws", async () => {
+			// The outer release runs whatever the teardown does, so a throw in a
+			// step that precedes `hide()` would otherwise open the gate while the
+			// terminal still holds the full-screen PAUSED frame — defect 1 again,
+			// by another route.
+			const { host, shown, order, hiddenCount } = makeHost();
+			let focusCalls = 0;
+			host.ui.setFocus = () => {
+				focusCalls++;
+				if (focusCalls > 1) throw new Error("setFocus failed");
+			};
+			const run = runPauseScreen(host);
+			const component = shown[0];
+			if (!(component instanceof PauseScreenComponent)) throw new Error("expected the pause screen");
+			component.handleInput("\x1b");
+			await expect(run).rejects.toThrow("setFocus failed");
+			expect(hiddenCount()).toBe(1);
+			expect(order).toEqual(["hide", "paint"]);
+			expect(agentPauseGate.paused).toBe(false);
+		});
+
 		it("treats ctrl+c as resume, never as abort-and-stay-paused", async () => {
 			const { host, shown } = makeHost();
 			const run = runPauseScreen(host);
@@ -574,6 +644,63 @@ describe("pause screen", () => {
 			await runPauseScreen(host); // must resolve immediately, not park
 			expect(shown.length).toBe(0);
 			expect(agentPauseGate.paused).toBe(true); // foreign pause not stolen
+		});
+
+		it("resumes on space and enter encoded by modifyOtherKeys or the Kitty protocol", async () => {
+			// This test feeds xterm modifyOtherKeys and Kitty CSI-u encodings for Space and Enter.
+			for (const key of [
+				"\x1b[27;1;32~", // modifyOtherKeys space
+				"\x1b[27;1;13~", // modifyOtherKeys enter
+				"\x1b[32u", // Kitty space
+				"\x1b[13u", // Kitty enter
+			]) {
+				const { host, shown } = makeHost();
+				const run = runPauseScreen(host);
+				const component = shown[0];
+				if (!(component instanceof PauseScreenComponent)) throw new Error("expected the pause screen");
+				component.handleInput(key);
+				await run;
+				expect(agentPauseGate.paused).toBe(false);
+			}
+		});
+
+		it("keeps holding when one pty read coalesces typed text and the enter after it", async () => {
+			// A pty read batches bytes that arrive faster than the TUI drains
+			// them, so a word typed at the pane and its terminator reach
+			// handleInput as one chunk. Matching an encoded key must not start
+			// matching a chunk that merely ends with one.
+			const { host, shown } = makeHost();
+			const run = runPauseScreen(host);
+			const component = shown[0];
+			if (!(component instanceof PauseScreenComponent)) throw new Error("expected the pause screen");
+			for (const chunk of [
+				"/pause\r",
+				"/pause\x1b[27;1;13~",
+				"\x1b[27;1;47~\x1b[27;1;112~\x1b[27;1;13~",
+				"\x1b[47u\x1b[112u\x1b[13u",
+			]) {
+				component.handleInput(chunk);
+				expect(agentPauseGate.paused).toBe(true);
+			}
+			component.handleInput("\x1b");
+			await run;
+			expect(agentPauseGate.paused).toBe(false);
+		});
+
+		it("keeps holding for input that is not a resume key", async () => {
+			// An arrow, a mouse report, a paste and a modified space are not
+			// resume keys in any encoding.
+			const { host, shown } = makeHost();
+			const run = runPauseScreen(host);
+			const component = shown[0];
+			if (!(component instanceof PauseScreenComponent)) throw new Error("expected the pause screen");
+			for (const chunk of ["\x1b[A", "\x1b[<0;10;5M", "\x1b[200~ \x1b[201~", "\x1b[27;2;32~"]) {
+				component.handleInput(chunk);
+				expect(agentPauseGate.paused).toBe(true);
+			}
+			component.handleInput("\x1b");
+			await run;
+			expect(agentPauseGate.paused).toBe(false);
 		});
 	});
 });

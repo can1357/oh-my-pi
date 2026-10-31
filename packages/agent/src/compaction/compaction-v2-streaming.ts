@@ -7,7 +7,14 @@
  * compaction item as replacement history.
  */
 
-import type { Api, CodexCompactionContext, FetchImpl, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
+import type {
+	Api,
+	CodexCompactionContext,
+	DispatchHold,
+	FetchImpl,
+	Model,
+	ProviderSessionState,
+} from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createOpenAICodexCompactionRequestContext } from "@oh-my-pi/pi-ai/providers/openai-codex-compaction";
 import { applyCodexResponsesLiteShape } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
@@ -21,7 +28,10 @@ import {
 	parseAzureDeploymentNameMap,
 	resolveOpenAIRequestSetup,
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
+import { dispatchWhenOpen } from "@oh-my-pi/pi-ai/utils/dispatch-hold";
+import { armPreResponseTimeout } from "@oh-my-pi/pi-ai/utils/idle-iterator";
 import { captureOpenAIHttpError } from "@oh-my-pi/pi-ai/utils/openai-http";
+import { transportFetch } from "@oh-my-pi/pi-ai/utils/transport-fetch";
 import type { CatalogPolicyInputs } from "@oh-my-pi/pi-catalog/types";
 import { isBedrockOpenAIUrl } from "@oh-my-pi/pi-catalog/hosts";
 import {
@@ -32,7 +42,7 @@ import {
 	OPENAI_HEADER_VALUES,
 	OPENAI_HEADERS,
 } from "@oh-my-pi/pi-catalog/wire/codex";
-import { $env, isUnexpectedSocketCloseMessage, logger, ptree, stringifyJson } from "@oh-my-pi/pi-utils";
+import { $env, isUnexpectedSocketCloseMessage, logger, stringifyJson } from "@oh-my-pi/pi-utils";
 import { appendAzureApiVersion, resolveAzureOpenAiBaseUrl } from "./azure-openai-endpoint";
 import { prepareBedrockCompactionRequest } from "./bedrock";
 
@@ -274,16 +284,18 @@ export async function requestCompactionV2Streaming(
 		providerSessionState?: Map<string, ProviderSessionState>;
 		codexCompaction?: CodexCompactionContext;
 		preferWebsockets?: boolean;
+		/** Awaited before each attempt goes out; see `SummaryOptions.beforeDispatch`. */
+		beforeDispatch?: DispatchHold;
 		codexAccessPrograms?: boolean;
 	},
 ): Promise<CompactionV2Response> {
 	let fetchImpl: FetchImpl = options?.fetch ?? globalThis.fetch;
 	if (isBedrockOpenAIUrl(model.baseUrl)) {
-		({
-			model,
-			apiKey,
-			fetch: fetchImpl,
-		} = await prepareBedrockCompactionRequest(model, apiKey, options?.fetch, signal));
+		// Bedrock's fetch signs the request on its way to the wire, so an
+		// attempt's send is not one synchronous call: the hold rides into the
+		// transport too, which reads it again where the signed request leaves.
+		const heldFetch = transportFetch(model, options?.fetch, options?.beforeDispatch);
+		({ model, apiKey, fetch: fetchImpl } = await prepareBedrockCompactionRequest(model, apiKey, heldFetch, signal));
 	}
 	const endpoint = getCompactionV2Endpoint(model);
 	if (!endpoint) {
@@ -310,16 +322,32 @@ export async function requestCompactionV2Streaming(
 	let lastError: Error | undefined;
 
 	for (let attempt = 0; attempt <= V2_COMPACTION_MAX_RETRIES; attempt++) {
-		const timeoutSignal = ptree.combineSignals(signal, options?.timeoutMs ?? V2_COMPACTION_TIMEOUT_MS);
+		let sent = false;
 		try {
-			return await attemptCompactionV2Streaming(endpoint, apiKey, model, request, fetchImpl, timeoutSignal, {
-				codexMetadata,
-				providerSessionState: options?.providerSessionState,
-				codexCompaction: options?.codexCompaction,
-				preferWebsockets: options?.preferWebsockets,
-				codexAccessPrograms: options?.codexAccessPrograms,
+			// Held before the attempt's timeout is armed: the timeout bounds the
+			// provider, and a `/pause` that outlasted it would otherwise fail a held
+			// compaction instead of sending it on resume. Each retry holds again.
+			// The attempt starts in the same synchronous step as the last read of
+			// the hold's probe, so a gate that closed after the hold answered still
+			// holds it. The timeout is a pre-response guard, so a transport that
+			// holds the request again — Bedrock's, which signs it on the way out —
+			// stops its clock while it holds and starts it again when it leaves.
+			return await dispatchWhenOpen(options?.beforeDispatch, signal, () => {
+				sent = true;
+				const timeoutSignal = armPreResponseTimeout(signal, options?.timeoutMs ?? V2_COMPACTION_TIMEOUT_MS).signal;
+				return attemptCompactionV2Streaming(endpoint, apiKey, model, request, fetchImpl, timeoutSignal, {
+					codexMetadata,
+					providerSessionState: options?.providerSessionState,
+					codexCompaction: options?.codexCompaction,
+					preferWebsockets: options?.preferWebsockets,
+					codexAccessPrograms: options?.codexAccessPrograms,
+					beforeDispatch: options?.beforeDispatch,
+				});
 			});
 		} catch (err) {
+			// A hold that failed or was cancelled fails the compaction as itself:
+			// nothing was sent, so there is nothing to retry.
+			if (!sent) throw err;
 			const error = err instanceof Error ? err : new Error(String(err));
 			if (signal?.aborted) throw error;
 
@@ -354,6 +382,7 @@ async function attemptCompactionV2Streaming(
 		providerSessionState?: Map<string, ProviderSessionState>;
 		codexCompaction?: CodexCompactionContext;
 		preferWebsockets?: boolean;
+		beforeDispatch?: DispatchHold;
 		codexAccessPrograms?: boolean;
 	},
 ): Promise<CompactionV2Response> {
@@ -381,6 +410,10 @@ async function attemptCompactionV2Streaming(
 			providerSessionState: options.providerSessionState,
 			preferWebsockets: options.preferWebsockets,
 			codexAccessPrograms: options.codexAccessPrograms,
+			// The Codex transport resolves its attestation and opens or reuses
+			// its websocket after the hold above, so it holds again at each of
+			// those connect attempts and at the send.
+			beforeDispatch: options.beforeDispatch,
 			responsesLite: model.useResponsesLite,
 			codexCompaction: createOpenAICodexCompactionRequestContext({
 				context: options.codexCompaction,

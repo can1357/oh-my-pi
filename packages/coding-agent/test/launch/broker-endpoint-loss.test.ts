@@ -52,7 +52,14 @@ describe.skipIf(process.platform === "win32")("daemon broker runtime dir loss", 
 			await broker;
 
 			// The same client reconnects: it recreates the token, spawns a fresh broker, and is served.
-			const ping = await client.request({ op: "ping" });
+			// The client learns its broker is gone only when the socket's close reaches it, which can
+			// trail the broker's own shutdown; a request sent in that window goes out on the dead
+			// socket and fails as closed, and the next request reconnects. Any other failure —
+			// a replacement broker that cannot start, above all — still fails the test.
+			const ping = await client.request({ op: "ping" }).catch((error: unknown) => {
+				if (!(error instanceof Error) || error.message !== "Daemon broker connection closed") throw error;
+				return client.request({ op: "ping" });
+			});
 			if (ping.op !== "ping") throw new Error(`unexpected daemon result ${ping.op}`);
 			expect(ping.projectDir).toBe(client.projectDir);
 		} finally {

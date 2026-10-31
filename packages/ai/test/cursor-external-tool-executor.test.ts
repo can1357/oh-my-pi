@@ -1,11 +1,13 @@
-import { describe, expect, it, vi } from "bun:test";
-import * as http2 from "node:http2";
+import { describe, expect, it, spyOn, vi } from "bun:test";
+import http2 from "node:http2";
 import { AuthGatewaySessionStateStore } from "@oh-my-pi/pi-ai/auth-gateway";
 import { encodeStream as encodeAnthropicMessagesStream } from "@oh-my-pi/pi-ai/providers/anthropic-messages-server";
 import { buildGrpcRequest, type CursorOptions, streamCursor } from "@oh-my-pi/pi-ai/providers/cursor";
 import { encodeStream as encodeChatCompletionsStream } from "@oh-my-pi/pi-ai/providers/openai-chat-server";
+import { stream as streamThroughDispatch } from "@oh-my-pi/pi-ai/stream";
 import type {
 	AssistantMessage,
+	DispatchHold,
 	Message,
 	Model,
 	ProviderSessionState,
@@ -41,6 +43,7 @@ import {
 	TurnEndedUpdateSchema,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
 import { create, encodeJsonValue, fromBinary, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
+import { afterMicrotasks, nextTurn, PROBE_MAX_DEPTH, ProbedGate, resumeUntilSettled } from "./helpers/probed-gate";
 
 // An auth-gateway runs Cursor for a client that owns every tool and is reached
 // only through the pi-native wire, which carries no `kCursorExecResolved`
@@ -1088,6 +1091,367 @@ describe("Cursor runs relayed across an external executor's requests", () => {
 			expect(cursor.runs.map(served => served.action)).toEqual(["userMessageAction", "resumeAction"]);
 			expect(text(second)).toBe("Fixed.");
 			expect(first.usage.output + second.usage.output).toBe(12);
+		});
+	});
+});
+
+// The results a parked run writes when a request resumes it start Cursor's
+// next model turn on the open stream, so they are that request's dispatch:
+// they wait on its hold and go out in the same synchronous step as the hold's
+// last check. No caller sets both a hold and a session to park in today (the
+// auth-gateway, the relay's one caller, sets no hold), so these hand both to
+// `streamCursor` — the entry point the gateway reaches through `streamSimple`
+// — and run the real parked run against the fixture Cursor over real HTTP/2.
+
+/**
+ * Reports the messages of each write the client makes onto a Run stream as it
+ * makes it, before the frame reaches the socket: the real HTTP/2 client, each
+ * request stream's `write` observed. Restore the returned spy.
+ */
+function observeRunWrites(onWrite: (messages: AgentClientMessage[]) => void) {
+	const connect = http2.connect;
+	return spyOn(http2, "connect").mockImplementation(((
+		authority: string | URL,
+		options?: http2.ClientSessionOptions,
+	) => {
+		const session = connect(authority, options);
+		const request = session.request.bind(session);
+		session.request = ((headers?: http2.OutgoingHttpHeaders, requestOptions?: http2.ClientSessionRequestOptions) => {
+			const opened = request(headers, requestOptions);
+			const write = opened.write.bind(opened) as (chunk: Uint8Array) => boolean;
+			opened.write = ((chunk: Uint8Array) => {
+				onWrite(decodeClientMessages(Buffer.from(chunk)));
+				return write(chunk);
+			}) as typeof opened.write;
+			return opened;
+		}) as typeof session.request;
+		return session;
+	}) as typeof http2.connect);
+}
+
+/** What each message written is, an exec reply by its result; keepalives, which start nothing, left out. */
+function writtenCases(messages: AgentClientMessage[]): string[] {
+	return messages.flatMap(message => {
+		if (message.message.case === "clientHeartbeat") return [];
+		if (message.message.case === "execClientMessage") return [message.message.value.message.case ?? "exec"];
+		return [message.message.case ?? "unknown"];
+	});
+}
+
+describe("a relayed run resumed under the resuming request's dispatch hold", () => {
+	it("writes the held results only once the resuming request's gate opens, whatever the parking request's gate does", async () => {
+		const runs: ServedRun[] = [];
+		const states = new Map<string, ProviderSessionState>();
+		const parkingGate = new ProbedGate();
+		const resumingGate = new ProbedGate();
+		let parked = false;
+		const writtenWhileClosed: string[] = [];
+		const connect = observeRunWrites(messages => {
+			if (parked && resumingGate.closed) writtenWhileClosed.push(...writtenCases(messages));
+		});
+		try {
+			await withCursorServer(relayingCursor(runs), async baseUrl => {
+				const handedOff = await respond(
+					baseUrl,
+					[user],
+					relayOptions(states, { beforeDispatch: parkingGate.hold }),
+				);
+				parked = true;
+				// The parking request is over: a pause on its gate holds nothing now.
+				parkingGate.close();
+				resumingGate.close();
+				const response = streamCursor(
+					model(baseUrl),
+					{ messages: [user, handedOff, readResult], tools },
+					relayOptions(states, { beforeDispatch: resumingGate.hold }),
+				);
+				const settled = (async () => {
+					for await (const _event of response) {
+						// drain
+					}
+					return await response.result();
+				})();
+				for (let turn = 0; turn < 8; turn++) await nextTurn();
+
+				expect(writtenWhileClosed).toEqual([]);
+				expect(runs[0].answers).toEqual([]);
+				// The held time is ours, not Cursor's: the stream watchdog skips it.
+				expect(response.hasPendingLocalWork).toBe(true);
+
+				resumingGate.open();
+				const resumed = await settled;
+				expect(text(resumed)).toBe("Fixed.");
+				expect(runs).toHaveLength(1);
+				expect(runs[0].answers.map(mcpText)).toEqual(["1|def add(a, b):\n2|    return a - b"]);
+				expect(response.hasPendingLocalWork).toBe(false);
+			});
+		} finally {
+			connect.mockRestore();
+		}
+	});
+
+	it("holds the results when the gate closes after the resuming request's hold answered", async () => {
+		const runs: ServedRun[] = [];
+		const sentWhileClosed: number[] = [];
+		const heldAt: number[] = [];
+		let probe: ProbedGate | undefined;
+		let depthNow = 0;
+		let sent = false;
+		const connect = observeRunWrites(messages => {
+			if (!probe || !writtenCases(messages).includes("mcpResult")) return;
+			sent = true;
+			if (probe.closed) sentWhileClosed.push(depthNow);
+		});
+		try {
+			await withCursorServer(relayingCursor(runs), async baseUrl => {
+				for (let depth = 1; depth <= PROBE_MAX_DEPTH; depth++) {
+					const states = new Map<string, ProviderSessionState>();
+					const sessionId = `relay-hold-${depth}`;
+					const handedOff = await respond(baseUrl, [user], relayOptions(states, { sessionId }));
+					const gate = new ProbedGate();
+					probe = gate;
+					depthNow = depth;
+					sent = false;
+					// Through the provider-dispatch chokepoint, which asks the hold first
+					// and dispatches to Cursor in the step of its last check: the pause
+					// lands between that and the parked run's write.
+					const result = streamThroughDispatch(
+						model(baseUrl),
+						{ messages: [user, handedOff, readResult], tools },
+						relayOptions(states, { sessionId, beforeDispatch: gate.holdClosingAfter(depth, () => true) }),
+					).result();
+					const message = await resumeUntilSettled(
+						result,
+						gate,
+						() => !sent,
+						() => heldAt.push(depth),
+					);
+					probe = undefined;
+
+					expect(text(message)).toBe("Fixed.");
+					// The run went on: the results reached it, not a rebuilt turn.
+					expect(runs).toHaveLength(depth);
+					expect(runs[depth - 1].answers.map(mcpText)).toEqual(["1|def add(a, b):\n2|    return a - b"]);
+					expect(states.size).toBe(0);
+				}
+			});
+		} finally {
+			connect.mockRestore();
+		}
+
+		expect(sentWhileClosed).toEqual([]);
+		// Not vacuous: some depth closed the gate before the results went out.
+		expect(heldAt.length).toBeGreaterThan(0);
+	}, 30_000);
+
+	it("writes nothing onto the parked stream once the resuming request is cancelled, and closes it", async () => {
+		const runs: ServedRun[] = [];
+		const wiredCancelled: string[] = [];
+		const stopReasons = new Set<string>();
+		let cancelledParked = 0;
+		let cancelledBeforeResults = 0;
+		let abort: AbortController | undefined;
+		let depthNow = 0;
+		let wrote = false;
+		const connect = observeRunWrites(messages => {
+			if (!abort) return;
+			const cases = writtenCases(messages);
+			if (cases.length === 0) return;
+			wrote = true;
+			if (abort.signal.aborted) wiredCancelled.push(`${cases.join(",")} at ${depthNow}`);
+		});
+		try {
+			await withCursorServer(relayingCursor(runs), async baseUrl => {
+				for (let depth = 1; depth <= PROBE_MAX_DEPTH; depth++) {
+					const states = new Map<string, ProviderSessionState>();
+					const sessionId = `relay-cancel-${depth}`;
+					const handedOff = await respond(baseUrl, [user], relayOptions(states, { sessionId }));
+					const run = runs[runs.length - 1];
+					const controller = new AbortController();
+					abort = controller;
+					depthNow = depth;
+					wrote = false;
+					let armed = true;
+					// Cancel `depth` microtasks after the chokepoint first asks the hold.
+					const hold: DispatchHold = () => {
+						if (!armed) return;
+						armed = false;
+						afterMicrotasks(depth, () =>
+							controller.abort(new Error(`cancelled ${depth} microtasks after the hold`)),
+						);
+					};
+					hold.isClosed = () => false;
+
+					const result = streamThroughDispatch(
+						model(baseUrl),
+						{ messages: [user, handedOff, readResult], tools },
+						relayOptions(states, { sessionId, beforeDispatch: hold, signal: controller.signal }),
+					).result();
+					// The chokepoint fails a request cancelled before it dispatched with
+					// the caller's reason; one it dispatched settles as aborted.
+					const message = await result.catch((error: unknown) => {
+						expect(error).toBe(controller.signal.reason);
+						return undefined;
+					});
+					// Nothing of the run may reach the stream after the cancellation.
+					for (let turn = 0; turn < 4; turn++) await nextTurn();
+					abort = undefined;
+
+					if (states.size > 0) {
+						// Cancelled before the chokepoint dispatched: the run never resumed.
+						cancelledParked += 1;
+						expect(message).toBeUndefined();
+						for (const state of states.values()) state.close();
+					} else {
+						stopReasons.add(message?.stopReason ?? "rejected");
+						if (!wrote) {
+							cancelledBeforeResults += 1;
+							// Cursor never got the results and never ended the run: the client closed it.
+							await run.closed;
+							expect(run.cancelled).toBe(true);
+						}
+					}
+					await run.closed;
+					expect(states.size).toBe(0);
+				}
+			});
+		} finally {
+			connect.mockRestore();
+		}
+
+		expect(wiredCancelled).toEqual([]);
+		expect([...stopReasons]).toEqual(["aborted"]);
+		// Not vacuous: the sweep cancels both before the run resumes and after it
+		// resumed but before its results went out.
+		expect(cancelledParked).toBeGreaterThan(0);
+		expect(cancelledBeforeResults).toBeGreaterThan(0);
+	}, 30_000);
+
+	it("writes nothing onto the parked stream, even once the gate opens, when the resuming request is cancelled while held", async () => {
+		const runs: ServedRun[] = [];
+		const sentWhileClosed: number[] = [];
+		const wiredCancelled: string[] = [];
+		let heldByChokepoint = 0;
+		let heldByRun = 0;
+		let probe: ProbedGate | undefined;
+		let abort: AbortController | undefined;
+		let depthNow = 0;
+		let sent = false;
+		const connect = observeRunWrites(messages => {
+			if (!probe || !abort) return;
+			const cases = writtenCases(messages);
+			if (abort.signal.aborted && cases.length > 0) wiredCancelled.push(`${cases.join(",")} at ${depthNow}`);
+			if (!cases.includes("mcpResult")) return;
+			sent = true;
+			if (probe.closed) sentWhileClosed.push(depthNow);
+		});
+		try {
+			await withCursorServer(relayingCursor(runs), async baseUrl => {
+				for (let depth = 1; depth <= PROBE_MAX_DEPTH; depth++) {
+					const states = new Map<string, ProviderSessionState>();
+					const sessionId = `relay-held-cancel-${depth}`;
+					const handedOff = await respond(baseUrl, [user], relayOptions(states, { sessionId }));
+					const run = runs[runs.length - 1];
+					const gate = new ProbedGate();
+					const controller = new AbortController();
+					probe = gate;
+					abort = controller;
+					depthNow = depth;
+					sent = false;
+					let settled = false;
+					const result = streamThroughDispatch(
+						model(baseUrl),
+						{ messages: [user, handedOff, readResult], tools },
+						relayOptions(states, {
+							sessionId,
+							beforeDispatch: gate.holdClosingAfter(depth, () => true),
+							signal: controller.signal,
+						}),
+					)
+						.result()
+						.catch((error: unknown) => {
+							// The chokepoint fails a request cancelled while it held it with the caller's reason.
+							expect(error).toBe(controller.signal.reason);
+							return undefined;
+						})
+						.finally(() => {
+							settled = true;
+						});
+					// A request found held is cancelled, and only then is its gate reopened.
+					let cancelledHeld = false;
+					while (!settled) {
+						await nextTurn();
+						if (!gate.closed) continue;
+						if (!sent && !controller.signal.aborted) {
+							controller.abort(new Error(`cancelled while held at ${depth}`));
+							cancelledHeld = true;
+						}
+						gate.open();
+					}
+					const message = await result;
+					for (let turn = 0; turn < 4; turn++) await nextTurn();
+					probe = undefined;
+					abort = undefined;
+
+					if (!cancelledHeld) {
+						// The gate closed after the results went out: the run went on.
+						expect(text(message!)).toBe("Fixed.");
+					} else if (states.size > 0) {
+						heldByChokepoint += 1;
+						expect(message).toBeUndefined();
+						for (const state of states.values()) state.close();
+					} else {
+						heldByRun += 1;
+						expect(message?.stopReason).toBe("aborted");
+						// Cursor never got the results; the client closed the run.
+						await run.closed;
+						expect(run.answers).toEqual([]);
+						expect(run.cancelled).toBe(true);
+					}
+					await run.closed;
+					expect(states.size).toBe(0);
+				}
+			});
+		} finally {
+			connect.mockRestore();
+		}
+
+		expect(sentWhileClosed).toEqual([]);
+		expect(wiredCancelled).toEqual([]);
+		// Not vacuous: the sweep cancels requests the chokepoint held and ones the
+		// resumed run held.
+		expect(heldByChokepoint).toBeGreaterThan(0);
+		expect(heldByRun).toBeGreaterThan(0);
+	}, 30_000);
+
+	it("fails the resuming request when its hold fails, and the next request rebuilds the turn", async () => {
+		const runs: ServedRun[] = [];
+		const states = new Map<string, ProviderSessionState>();
+		await withCursorServer(relayingCursor(runs), async baseUrl => {
+			const handedOff = await respond(baseUrl, [user], relayOptions(states));
+			const refusing: DispatchHold = () => Promise.reject(new Error("dispatch refused"));
+
+			const failed = await respond(
+				baseUrl,
+				[user, handedOff, readResult],
+				relayOptions(states, { beforeDispatch: refusing }),
+			);
+			await runs[0].closed;
+
+			expect(failed.stopReason).toBe("error");
+			expect(failed.errorMessage).toContain("dispatch refused");
+			// Cursor never got the results, and the run is gone: nothing is left parked.
+			expect(runs.map(run => [run.action, run.answers.length, run.cancelled])).toEqual([
+				["userMessageAction", 0, true],
+			]);
+			expect(states.size).toBe(0);
+
+			const rebuilt = await respond(baseUrl, [user, handedOff, readResult], relayOptions(states));
+			expect(runs.map(run => [run.action, run.answers.length, run.cancelled])).toEqual([
+				["userMessageAction", 0, true],
+				["resumeAction", 0, false],
+			]);
+			expect(text(rebuilt)).toBe("Rebuilt.");
 		});
 	});
 });

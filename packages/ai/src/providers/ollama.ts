@@ -595,8 +595,13 @@ const streamOllamaOnce = (
 				options.streamFirstEventTimeoutMs ?? getOpenAIStreamFirstEventTimeoutMs(idleTimeoutMs);
 			// Cleared the instant headers arrive (below) so the pre-response timer
 			// never aborts the actively streaming body — an absolute
-			// `AbortSignal.timeout` would (issue #2422).
-			const watchdog = armPreResponseTimeout(options.signal, firstEventTimeoutMs);
+			// `AbortSignal.timeout` would (issue #2422). Headers do not renew the
+			// first-event budget: the wait for the first chunk stays on the stream
+			// watchdog `register-builtins` installs, whose first-item deadline runs
+			// from the wire on the same budget. `stream` rides along so that
+			// watchdog skips the same held time the guard does instead of failing
+			// a parked request.
+			const watchdog = armPreResponseTimeout(options.signal, firstEventTimeoutMs, stream);
 			let response: Response;
 			try {
 				response = await fetchWithRetry(`${baseUrl}/api/chat`, {

@@ -14,6 +14,7 @@
 import {
 	type AgentTelemetry,
 	type AgentTelemetryConfig,
+	agentPauseGate,
 	recordJudgmentTelemetry,
 	resolveTelemetry,
 } from "@oh-my-pi/pi-agent-core";
@@ -545,7 +546,7 @@ export class ChainJudge implements Judge {
 		if (isJudgmentApi(model.api)) {
 			const headers = await this.#deps.registry.resolveModelHeaders(model, signal);
 			const judge = createNativeJudge(model, { apiKey, headers });
-			return nativeJudge(judge, model, this.#deps.cache, attempt => this.#report(attempt));
+			return pauseHeld(nativeJudge(judge, model, this.#deps.cache, attempt => this.#report(attempt)));
 		}
 		// Resolve metadata after getApiKey so the session-sticky credential is recorded first.
 		const metadata = this.#deps.metadataResolver?.(model.provider);
@@ -567,8 +568,35 @@ export class ChainJudge implements Judge {
 					startedAt: attempt.timestamp,
 				}),
 		});
-		return new TextJudge(backend);
+		return pauseHeld(new TextJudge(backend));
 	}
+}
+
+/**
+ * The candidate with every provider request it sends held at `/pause`.
+ * Judgments run beside the agent loop — turn recovery, prewalk, TTSR, auto
+ * thinking — and callers hand their options straight to the candidate
+ * (`withCandidate`), so the hold is bound to the candidate itself, on each
+ * call's own signal, after any hold the caller brought.
+ *
+ * Most callers bound a judgment with a deadline of their own (prewalk, auto
+ * thinking, the unexpected-stop check, chart picks) and arm it before calling.
+ * That deadline keeps running while a request is held, so a pause that
+ * outlasts it fails the judgment and the caller takes its no-judgment default:
+ * no prewalk, the default effort, no retry nudge, the guessed chart. These are
+ * best-effort classifiers, and each already treats a missed deadline that way.
+ */
+function pauseHeld(judge: Judge): Judge {
+	return {
+		label: judge.label,
+		...(judge.supportsImages === undefined ? {} : { supportsImages: judge.supportsImages }),
+		judge<Q extends Questions>(request: JudgmentRequest<Q>, options?: JudgeOptions): Promise<JudgmentResult<Q>> {
+			return judge.judge(request, {
+				...options,
+				beforeDispatch: agentPauseGate.dispatchHold(options?.signal, options?.beforeDispatch),
+			});
+		},
+	};
 }
 
 /** Keyword completions through the shared on-device tiny-model worker. */
@@ -666,6 +694,7 @@ function nativeJudge(
 						},
 						{
 							signal: options?.signal,
+							beforeDispatch: options?.beforeDispatch,
 							onPartialUsage: usage => {
 								partial = usage;
 							},

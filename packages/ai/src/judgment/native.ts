@@ -30,6 +30,7 @@ import { validateImageInput } from "../images/shared";
 import { withInferenceUserAgent } from "../providers/inference-headers";
 import { redactSensitiveInObject } from "../providers/transform-messages";
 import type { ImageContent, Model, Usage } from "../types";
+import { dispatchWhenOpen } from "../utils/dispatch-hold";
 import { getRetryAfterMsFromHeaders } from "../utils/retry-after";
 import { openaiDecisionsWire } from "./openai-decisions";
 import { openrouterDecisionsWire, referencedImageAssets, typesafeWire, workersAiWire } from "./systemone";
@@ -418,7 +419,11 @@ export class NativeJudge implements Judge {
 				// TypeSafe refuses unreferenced assets: a chunk carries only those its own questions or the state use.
 				const chunkAssets = imageAssets === undefined ? undefined : referencedImageAssets(chunk, imageAssets);
 				try {
-					results[index] = await this.#judgeOnce(chunk, { signal, imageAssets: chunkAssets });
+					results[index] = await this.#judgeOnce(chunk, {
+						signal,
+						imageAssets: chunkAssets,
+						beforeDispatch: options?.beforeDispatch,
+					});
 				} catch (error) {
 					failed.abort(error);
 					throw error;
@@ -462,7 +467,11 @@ export class NativeJudge implements Judge {
 		const hasImages = (request.images?.length ?? 0) > 0 || Object.keys(options?.imageAssets ?? {}).length > 0;
 		const requestHeaders = hasImages ? this.#wire.imageHeaders : undefined;
 		const signal = options?.signal;
-		const payload = await withAuth(this.#apiKey, key => this.#attempt(body, key, signal, requestHeaders), { signal });
+		const payload = await withAuth(
+			this.#apiKey,
+			key => this.#attempt(body, key, signal, requestHeaders, options?.beforeDispatch),
+			{ signal },
+		);
 		const decoded = this.#wire.decode(payload);
 		if (!decoded) {
 			throw new AIError.ProviderResponseError(`${this.label} returned a malformed judgment response`, {
@@ -503,6 +512,7 @@ export class NativeJudge implements Judge {
 		key: string,
 		signal: AbortSignal | undefined,
 		requestHeaders: Readonly<Record<string, string>> | undefined,
+		hold: JudgeOptions["beforeDispatch"],
 	): Promise<unknown> {
 		const target = this.#wire.target(this.baseUrl, this.model, key);
 		const headers: Record<string, string> = {
@@ -514,20 +524,31 @@ export class NativeJudge implements Judge {
 		};
 		for (let attempt = 0; ; attempt++) {
 			signal?.throwIfAborted();
-			const timeout = AbortSignal.timeout(this.#timeoutMs);
 			let response: Response;
+			let sent = false;
 			try {
-				response = await this.#fetch(
-					target.url,
-					withInferenceUserAgent(target.url, {
-						method: "POST",
-						headers,
-						body,
-						signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
-					}),
-				);
+				// Each attempt, retries included, holds before its timeout is armed:
+				// the timeout bounds the endpoint, not a caller's hold (`/pause`).
+				// The fetch starts in the same synchronous step as the last read of
+				// the hold's probe, so a gate that closed after the hold answered
+				// still holds the attempt.
+				response = await dispatchWhenOpen(hold, signal, () => {
+					sent = true;
+					const timeout = AbortSignal.timeout(this.#timeoutMs);
+					return this.#fetch(
+						target.url,
+						withInferenceUserAgent(target.url, {
+							method: "POST",
+							headers,
+							body,
+							signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+						}),
+					);
+				});
 			} catch (error) {
-				if (signal?.aborted || attempt + 1 >= MAX_ATTEMPTS) throw error;
+				// A hold that failed or was cancelled fails the judgment as itself:
+				// nothing was sent, so there is nothing to retry.
+				if (!sent || signal?.aborted || attempt + 1 >= MAX_ATTEMPTS) throw error;
 				await Bun.sleep(backoffMs(attempt, undefined));
 				continue;
 			}

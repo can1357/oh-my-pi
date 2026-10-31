@@ -1,8 +1,9 @@
 import { resolveVertexEndpointHost } from "@oh-my-pi/pi-catalog/hosts";
 import { $env } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
-import type { Context, Model, StreamFunction } from "../types";
+import type { Context, FetchImpl, Model, StreamFunction } from "../types";
 import type { AssistantMessageEventStream } from "../utils/event-stream";
+import { fetchAuthorizedAtWire, type WireAuthorization, withoutDispatchHold } from "../utils/transport-fetch";
 import { getVertexAccessToken } from "./google-auth";
 import {
 	buildGoogleGenerateContentParams,
@@ -86,14 +87,27 @@ export const streamGoogleVertex: StreamFunction<"google-vertex"> = (
 
 			const project = resolveProject(options);
 			const location = resolveLocation(options);
-			const accessToken = await getVertexAccessToken({ signal: options?.signal, fetch: options?.fetch });
 			const host = resolveVertexEndpointHost(location);
 			const url = `https://${host}/${API_VERSION}/projects/${project}/locations/${location}/publishers/google/models/${model.id}:streamGenerateContent?alt=sse`;
+			const wireFetch = options?.fetch ?? (globalThis.fetch.bind(globalThis) as FetchImpl);
+			// Token minting is this request's prerequisite, not inference traffic:
+			// it goes out unheld under its own timeouts.
+			const tokenFetch = options?.fetch ? withoutDispatchHold(options.fetch) : undefined;
+			// The token expires, and a dispatch hold a human releases can outlast
+			// it, so it is taken where the request leaves: after the transport's
+			// holds open, and again whenever a gate that closed sends the request
+			// back to wait. A cached token that is still valid costs nothing there.
+			const authorize: WireAuthorization = async wireInit => {
+				const accessToken = await getVertexAccessToken({ signal: options?.signal, fetch: tokenFetch });
+				const headers = new Headers(wireInit.headers);
+				headers.set("Authorization", `Bearer ${accessToken}`);
+				return { ...wireInit, headers };
+			};
 			return {
 				params,
 				url,
-				headers: { ...baseHeaders, Authorization: `Bearer ${accessToken}` },
-				fetch: options?.fetch,
+				headers: baseHeaders,
+				fetch: (input, init) => fetchAuthorizedAtWire(wireFetch, input, init ?? {}, authorize),
 			};
 		},
 	});

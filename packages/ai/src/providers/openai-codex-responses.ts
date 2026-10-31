@@ -32,6 +32,7 @@ import type {
 	AssistantMessage,
 	CodexCompactionRequestContext,
 	Context,
+	DispatchHold,
 	FetchImpl,
 	Model,
 	ProviderSessionState,
@@ -59,7 +60,9 @@ import {
 	sanitizeOpenAIResponsesAssistantHistoryItemsForReplay,
 	stripOpenAIResponsesComputerLinkedReasoningIdsForReplay,
 } from "../utils";
+import { raceWithSignal } from "../utils/abort";
 import { clearStreamingPartialJson, kStreamingLastParseLen, kStreamingPartialJson } from "../utils/block-symbols";
+import { dispatchWhenOpen } from "../utils/dispatch-hold";
 import { hasVisibleAssistantContent } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { escapeHarmonyControlTokens, isHarmonyDialectModel } from "../utils/harmony-leak";
@@ -69,6 +72,7 @@ import {
 	getOpenAIStreamFirstEventTimeoutMs,
 	getOpenAIStreamIdleTimeoutMs,
 	iterateWithIdleTimeout,
+	type PreResponseTimeout,
 } from "../utils/idle-iterator";
 import { getProxyForUrl } from "../utils/proxy";
 import { wrapFetchForRequestCompression } from "../utils/request-compression";
@@ -76,6 +80,7 @@ import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResp
 import { getHeadersFromError, getRetryAfterMsFromHeaders, type HeadersLike } from "../utils/retry-after";
 import { adaptSchemaForStrict, NO_STRICT, sanitizeSchemaForOpenAIResponses, toolWireSchema } from "../utils/schema";
 import { notifyRawSseEvent } from "../utils/sse-debug";
+import { fetchAuthorizedAtWire, type WireAuthorization } from "../utils/transport-fetch";
 import { compactGrammarDefinition } from "./grammar";
 import {
 	type CodexLiteShapedBody,
@@ -762,7 +767,15 @@ interface CodexRequestContext {
 
 interface CodexRequestSetup {
 	requestSignal: AbortSignal;
-	wrapCodexSseStream: (source: AsyncGenerator<Record<string, unknown>>) => AsyncGenerator<Record<string, unknown>>;
+	/**
+	 * Wraps an opened SSE body in the stream watchdogs. `firstEventBudgetLeftMs`
+	 * is what the attempt's pre-response guard left at headers: headers do not
+	 * renew the first-event budget (see `armPreResponseTimeout`).
+	 */
+	wrapCodexSseStream: (
+		source: AsyncGenerator<Record<string, unknown>>,
+		firstEventBudgetLeftMs: number | undefined,
+	) => AsyncGenerator<Record<string, unknown>>;
 	requestAbortController: AbortController;
 	firstEventTimeoutMs: number | undefined;
 	websocketIdleTimeoutMs: number | undefined;
@@ -1139,6 +1152,11 @@ function notifyCodexWebSocketInbound(
 	notifyRawSseEvent(observer, { event: type, data: text, raw });
 }
 
+/**
+ * Reports a frame the socket has already taken. Only
+ * `CodexWebSocketConnection.#sendReporting` calls it, after `socket.send`
+ * returned, for the reasons given there.
+ */
 function notifyCodexWebSocketOutbound(
 	observer: ((event: RawSseEvent) => void) | undefined,
 	request: Record<string, unknown>,
@@ -1345,10 +1363,11 @@ function createRequestSetup(options: OpenAICodexResponsesOptions | undefined): C
 	const websocketFirstEventTimeoutMs = options?.streamFirstEventTimeoutMs ?? CODEX_WEBSOCKET_FIRST_EVENT_TIMEOUT_MS;
 	const wrapCodexSseStream = (
 		source: AsyncGenerator<Record<string, unknown>>,
+		firstEventBudgetLeftMs: number | undefined,
 	): AsyncGenerator<Record<string, unknown>> =>
 		iterateWithIdleTimeout(source, {
 			idleTimeoutMs,
-			firstItemTimeoutMs: firstEventTimeoutMs,
+			firstItemTimeoutMs: firstEventBudgetLeftMs,
 			firstItemErrorMessage: "OpenAI Codex SSE stream timed out while waiting for the first event",
 			errorMessage: "OpenAI Codex SSE stream stalled while waiting for the next event",
 			onIdle: () => requestAbortController.abort(),
@@ -1811,9 +1830,9 @@ async function openCodexWebSocketTransport(
 		requestContext.turnState,
 		requestContext.responsesLite,
 		requestContext.requestMetadata,
-		await getCodexAttestationHeader(requestContext.accountId),
 		requestContext.transformedBody,
 	);
+	const attest = () => getCodexAttestationHeader(requestContext.accountId);
 	// One socket carries one request at a time. While another request on this
 	// session streams over it, reusing, replacing, or closing it would cut that
 	// request off, so this one goes over SSE instead.
@@ -1826,6 +1845,10 @@ async function openCodexWebSocketTransport(
 	const onOwned = () => {
 		if (websocketState.acceptedSteering === steered) websocketState.acceptedSteering = undefined;
 	};
+	// Opening a socket is this transport's first traffic: each socket
+	// `getOrCreateCodexWebSocketConnection` opens passes the hold immediately
+	// before it, here and after a discarded steer. Reusing an open socket sends
+	// nothing yet, and `response.create` holds again before its own send.
 	let websocketConnection = await getOrCreateCodexWebSocketConnection(
 		websocketState,
 		requestContext.turnState,
@@ -1833,6 +1856,8 @@ async function openCodexWebSocketTransport(
 		websocketHeaders,
 		model.provider,
 		requestSetup.requestSignal,
+		options?.beforeDispatch,
+		attest,
 	);
 	const timeouts: CodexWebSocketRequestTimeouts = {
 		idleTimeoutMs: requestSetup.websocketIdleTimeoutMs,
@@ -1847,6 +1872,8 @@ async function openCodexWebSocketTransport(
 			chainedBody.previous_response_id ? chainedBody.input : undefined,
 			liveSteers.flatMap(steer => steer.items),
 		);
+		// The server already started the successor from steering it accepted;
+		// reading it puts nothing on the wire, so it passes no hold.
 		if (plan.kind === "attach") {
 			recordCodexTurnRequestDiagnostics(websocketState, chainedBody, "websocket", canAppendBeforeRequest);
 			requestContext.rawRequestDump.body = chainedBody;
@@ -1878,6 +1905,8 @@ async function openCodexWebSocketTransport(
 				websocketHeaders,
 				model.provider,
 				requestSetup.requestSignal,
+				options?.beforeDispatch,
+				attest,
 			);
 		}
 	}
@@ -1931,7 +1960,7 @@ async function openCodexWebSocketTransport(
 			retryBudget: CODEX_WEBSOCKET_RETRY_BUDGET,
 		});
 	const eventStream = websocketConnection.streamRequest(
-		{ send: websocketRequest },
+		{ send: websocketRequest, hold: options?.beforeDispatch },
 		timeouts,
 		requestSetup.requestSignal,
 		onSseEvent,
@@ -1984,26 +2013,28 @@ async function openCodexSseTransport(
 	const open = async (wireBody: RequestBody) => {
 		// Keep the 400 dump honest: record the body actually sent on the wire.
 		requestContext.rawRequestDump.body = wireBody;
-		return requestSetup.wrapCodexSseStream(
-			await openCodexSseEventStream(
-				requestContext.url,
-				requestContext.requestHeaders,
-				requestContext.accountId,
-				requestContext.apiKey,
-				requestContext.transportSessionId,
-				wireBody,
-				state,
-				requestContext.turnState,
-				requestContext.responsesLite,
-				requestContext.codexClientVersion,
-				requestContext.requestMetadata,
-				requestSetup.requestSignal,
-				requestSetup.firstEventTimeoutMs,
-				options?.codexSseMaxAttempts,
-				event => options?.onSseEvent?.(event, model),
-				wrapFetchForRequestCompression(options?.fetch ?? fetch, model),
+		const { events, firstEventBudgetLeftMs } = await openCodexSseEventStream(
+			requestContext.url,
+			requestContext.requestHeaders,
+			requestContext.accountId,
+			requestContext.apiKey,
+			requestContext.transportSessionId,
+			wireBody,
+			state,
+			requestContext.turnState,
+			requestContext.responsesLite,
+			requestContext.codexClientVersion,
+			requestContext.requestMetadata,
+			requestSetup.requestSignal,
+			requestSetup.firstEventTimeoutMs,
+			options?.codexSseMaxAttempts,
+			event => options?.onSseEvent?.(event, model),
+			wrapFetchForRequestCompression(
+				withCodexAttestationAtWire(options?.fetch ?? fetch, requestContext.accountId),
+				model,
 			),
 		);
+		return requestSetup.wrapCodexSseStream(events, firstEventBudgetLeftMs);
 	};
 	const canAppendBeforeRequest = state?.canAppend === true;
 	let wireBody = body;
@@ -2491,8 +2522,13 @@ class CodexStreamProcessor {
 			return;
 		}
 		this.#steerConnection = connection;
-		this.#steerPump = new CodexSteerPump(source, connection, messages =>
-			toSteerInputItems(convertMessages(this.model, { messages: [...messages] })),
+		// Each steer is new input that can start a successor response, so it
+		// passes this request's hold; an attach to that successor sends nothing.
+		this.#steerPump = new CodexSteerPump(
+			source,
+			connection,
+			messages => toSteerInputItems(convertMessages(this.model, { messages: [...messages] })),
+			{ hold: this.options?.beforeDispatch, signal: this.requestSetup.requestSignal },
 		);
 		this.#steerPump.start(responseId);
 	}
@@ -3398,6 +3434,7 @@ export async function prewarmOpenAICodexResponses(
 		| "headers"
 		| "sessionId"
 		| "signal"
+		| "beforeDispatch"
 		| "preferWebsockets"
 		| "providerSessionState"
 		| "responsesLite"
@@ -3425,7 +3462,6 @@ export async function prewarmOpenAICodexResponses(
 	const turnState = getOrCreateCodexTurnState(metadataSession, sessionKey);
 	const codexClientVersion = CODEX_CLIENT_VERSION;
 	const requestIdentity = createCodexCompatibilityIdentity(metadataSession);
-	const attestation = await getCodexAttestationHeader(accountId);
 	const routedRequest: Pick<RequestBody, "model" | "service_tier"> = {
 		model: model.requestModelId ?? model.id,
 	};
@@ -3443,7 +3479,6 @@ export async function prewarmOpenAICodexResponses(
 		turnState,
 		responsesLite,
 		requestIdentity,
-		attestation,
 		routedRequest,
 	);
 	await logger.time(
@@ -3455,6 +3490,8 @@ export async function prewarmOpenAICodexResponses(
 		headers,
 		model.provider,
 		options?.signal,
+		options?.beforeDispatch,
+		() => getCodexAttestationHeader(accountId),
 	);
 	state.prewarmed = true;
 }
@@ -3830,8 +3867,16 @@ interface CodexWebSocketRequestTimeouts {
 
 /** What {@link CodexWebSocketConnection.streamRequest} puts on the wire before reading a response. */
 type CodexWebSocketExchange =
-	| { send: Record<string, unknown> }
-	/** Read the successor the server creates from accepted steering; nothing is sent. */
+	/**
+	 * Send this request. `hold` is the caller's dispatch hold, awaited after the
+	 * handshake and the request-debug dump — the two awaits a `/pause` used to
+	 * slip through — and immediately before the payload goes out.
+	 */
+	| { send: Record<string, unknown>; hold?: DispatchHold }
+	/**
+	 * Read the successor the server creates from accepted steering; nothing is
+	 * sent, so nothing is held: that response is already running and paid for.
+	 */
 	| { attachSteerIds: readonly string[] };
 
 interface CodexSteerWaiter {
@@ -3883,6 +3928,12 @@ class CodexWebSocketConnection {
 	#failedSteers = new Set<string>();
 	/** Steering whose automatic successor the active attach request is reading. */
 	#attachSteerIds?: ReadonlySet<string>;
+	/**
+	 * Observer reports for inbound frames that arrived while
+	 * {@link #sendReporting} was handing a frame to the socket; set only during
+	 * that call.
+	 */
+	#reportsAfterSend?: (() => void)[];
 
 	constructor(url: string, headers: Record<string, string>, options: CodexWebSocketConnectionOptions) {
 		this.#url = url;
@@ -3954,12 +4005,20 @@ class CodexWebSocketConnection {
 		}
 	}
 
+	/**
+	 * Open the socket, or join the handshake another caller already started.
+	 * `signal` ends only this caller's part: a cancelled caller opens nothing,
+	 * and one that joined leaves the shared handshake running for its owner.
+	 */
 	async connect(signal?: AbortSignal): Promise<void> {
 		if (this.isOpen()) return;
 		if (this.#connectPromise) {
 			logger.time("codexWs:awaitSharedHandshake");
-			await this.#connectPromise;
+			await raceWithSignal(this.#connectPromise, signal);
 			return;
+		}
+		if (signal?.aborted) {
+			throw new CodexWebSocketTransportError(`request was aborted`, { cause: signal.reason });
 		}
 		const { promise, resolve, reject } = Promise.withResolvers<void>();
 		this.#connectPromise = promise;
@@ -3986,23 +4045,15 @@ class CodexWebSocketConnection {
 			}
 			this.close("aborted");
 		};
-		if (signal) {
-			if (signal.aborted) {
-				onAbort();
-			} else {
-				signal.addEventListener("abort", onAbort, { once: true });
+		signal?.addEventListener("abort", onAbort, { once: true });
+		timeout = setTimeout(() => {
+			this.close("connect-timeout");
+			if (!settled) {
+				settled = true;
+				clearPending();
+				reject(new CodexWebSocketTransportError(`connection timeout`));
 			}
-		}
-		if (!settled) {
-			timeout = setTimeout(() => {
-				this.close("connect-timeout");
-				if (!settled) {
-					settled = true;
-					clearPending();
-					reject(new CodexWebSocketTransportError(`connection timeout`));
-				}
-			}, CODEX_WEBSOCKET_CONNECT_TIMEOUT_MS);
-		}
+		}, CODEX_WEBSOCKET_CONNECT_TIMEOUT_MS);
 
 		socket.onopen = event => {
 			if (!settled) {
@@ -4061,7 +4112,7 @@ class CodexWebSocketConnection {
 						parsed.message = inner.message;
 					}
 				}
-				notifyCodexWebSocketInbound(this.#streamObserver, parsed, text);
+				this.#reportInbound(observer => notifyCodexWebSocketInbound(observer, parsed, text));
 				// Steering acknowledgements belong to the submitter, not to the
 				// response stream they interleave with.
 				if (typeof parsed.type === "string" && parsed.type.startsWith("response.steer.")) {
@@ -4075,7 +4126,7 @@ class CodexWebSocketConnection {
 				}
 				this.#push(parsed);
 			} catch (error) {
-				notifyCodexWebSocketMalformed(this.#streamObserver, event.data, error);
+				this.#reportInbound(observer => notifyCodexWebSocketMalformed(observer, event.data, error));
 				this.#push(new CodexWebSocketTransportError(`${String(error)}`));
 			}
 		};
@@ -4148,26 +4199,32 @@ class CodexWebSocketConnection {
 					: undefined;
 
 				const requestPayload = JSON.stringify(request);
-				notifyCodexWebSocketOutbound(onSseEvent, request, requestPayload);
-				// Re-check liveness: the debug-session await above can outlive the socket.
-				// Preserve the abort cause: onAbort already queued a caused error, but this
-				// throw would otherwise mask it before #nextMessage() drains the queue.
-				const socket = this.#socket;
-				if (!socket || socket.readyState !== WebSocket.OPEN) {
-					if (signal?.aborted) {
-						throw new CodexWebSocketTransportError(`websocket connection is unavailable`, {
-							cause: signal.reason,
-						});
+				// The handshake above and the debug dump just before it both outlast
+				// a `/pause` engaged while they run, and this socket send is what the
+				// provider bills. The send runs in the same synchronous step as the
+				// hold's last check, so a pause landing after the hold answered still
+				// stops it; nothing in that step may call caller code before the send.
+				await dispatchWhenOpen(exchange.hold, signal, () => {
+					// Re-check liveness: the debug-session await above can outlive the socket.
+					// Preserve the abort cause: onAbort already queued a caused error, but this
+					// throw would otherwise mask it before #nextMessage() drains the queue.
+					const socket = this.#socket;
+					if (!socket || socket.readyState !== WebSocket.OPEN) {
+						if (signal?.aborted) {
+							throw new CodexWebSocketTransportError(`websocket connection is unavailable`, {
+								cause: signal.reason,
+							});
+						}
+						throw new CodexWebSocketTransportError(`websocket connection is unavailable`);
 					}
-					throw new CodexWebSocketTransportError(`websocket connection is unavailable`);
-				}
-				try {
-					socket.send(requestPayload);
-				} catch (error) {
-					throw new CodexWebSocketTransportError(
-						`websocket send failed: ${error instanceof Error ? error.message : String(error)}`,
-					);
-				}
+					try {
+						this.#sendReporting(socket, request, requestPayload, onSseEvent);
+					} catch (error) {
+						throw new CodexWebSocketTransportError(
+							`websocket send failed: ${error instanceof Error ? error.message : String(error)}`,
+						);
+					}
+				});
 			} else if (this.hasFailedSteer(exchange.attachSteerIds)) {
 				throw new CodexSteerCommitError("accepted steering was not committed to a successor response");
 			}
@@ -4300,7 +4357,12 @@ class CodexWebSocketConnection {
 
 	/**
 	 * Submit `response.steer` for `previousResponseId`, which must be streaming
-	 * on this socket. Resolves on the server's acknowledgement.
+	 * on this socket. Resolves on the server's acknowledgement. The frame goes
+	 * out at once: a steer is new input, unlike an attach, so its
+	 * {@link CodexSteerPump} has already passed the request's dispatch hold and
+	 * calls this in the same synchronous step as the hold's last check, so the
+	 * raw-stream observer hears of the frame only after the send
+	 * ({@link #sendReporting}).
 	 */
 	steer(previousResponseId: string, input: InputItem[]): Promise<CodexSteerAck> {
 		const socket = this.#socket;
@@ -4312,9 +4374,8 @@ class CodexWebSocketConnection {
 		const { promise, resolve, reject } = Promise.withResolvers<CodexSteerAck>();
 		const waiter: CodexSteerWaiter = { previousResponseId, resolve, reject };
 		this.#steerWaiters.push(waiter);
-		notifyCodexWebSocketOutbound(this.#streamObserver, event, payload);
 		try {
-			socket.send(payload);
+			this.#sendReporting(socket, event, payload, this.#streamObserver);
 		} catch (error) {
 			this.#steerWaiters.splice(this.#steerWaiters.indexOf(waiter), 1);
 			reject(
@@ -4324,6 +4385,44 @@ class CodexWebSocketConnection {
 			);
 		}
 		return promise;
+	}
+
+	/**
+	 * Hand `payload`, the serialized `frame`, to `socket`, then tell `observer`
+	 * of it. Every frame sent runs this in the same synchronous step as the
+	 * dispatch hold's last check, and the observer is caller code: told before
+	 * the send, it could close the gate on a frame that goes out anyway, and it
+	 * would hear of a frame the socket then refused. Throws what `socket.send`
+	 * throws, having told the observer nothing of that frame.
+	 */
+	#sendReporting(
+		socket: Bun.WebSocket,
+		frame: Record<string, unknown>,
+		payload: string,
+		observer: ((event: RawSseEvent) => void) | undefined,
+	): void {
+		const arrived: (() => void)[] = [];
+		this.#reportsAfterSend = arrived;
+		try {
+			socket.send(payload);
+			notifyCodexWebSocketOutbound(observer, frame, payload);
+		} finally {
+			this.#reportsAfterSend = undefined;
+			for (const report of arrived) report();
+		}
+	}
+
+	/**
+	 * Tell the raw-stream observer of an inbound frame. One that arrives while
+	 * {@link #sendReporting} is handing a frame to the socket is told right
+	 * after that frame instead: a socket that delivers its reply within `send`
+	 * must not have the reply reported before the frame it answers.
+	 */
+	#reportInbound(notify: (observer: (event: RawSseEvent) => void) => void): void {
+		const observer = this.#streamObserver;
+		if (!observer) return;
+		if (this.#reportsAfterSend) this.#reportsAfterSend.push(() => notify(observer));
+		else notify(observer);
 	}
 
 	/** True when the server failed to commit any of the accepted steering `ids`. */
@@ -4569,61 +4668,124 @@ class CodexWebSocketConnection {
 	}
 }
 
+/**
+ * The session's open socket, or a fresh one. Opening a socket is traffic of
+ * its own, so each one opened here passes `hold`, the caller's dispatch hold,
+ * and is constructed in the same synchronous step as the hold's last check.
+ * Joining a handshake another caller started, or reusing an open socket, opens
+ * nothing and is not held.
+ *
+ * `attest` mints the DeviceCheck attestation the handshake carries. It is
+ * minted after the hold has answered, on every round a closed gate sends the
+ * connect back to wait, because the token is ephemeral and a pause outlasts
+ * any one minted before it. `headers` therefore carry none.
+ */
 async function getOrCreateCodexWebSocketConnection(
 	state: CodexWebSocketSessionState,
 	turnState: CodexTurnStateCell,
 	url: string,
 	headers: Headers,
 	provider: string,
-	signal?: AbortSignal,
+	signal: AbortSignal | undefined,
+	hold: DispatchHold | undefined,
+	attest: () => Promise<string | undefined>,
 ): Promise<CodexWebSocketConnection> {
 	const proxy = getProxyForUrl(provider, new URL(url));
 	const headerRecord = headersToRecord(headers);
-	// Join an in-flight handshake instead of tearing it down: closing a
-	// CONNECTING socket rejects the concurrent caller (prewarm racing the first
-	// request) with a fatal "websocket closed before open", which would disable
-	// websockets for the entire session.
-	// Bounded re-join: a fresh handshake may have been started by yet another
-	// caller while we awaited the previous one.
-	for (let joinAttempt = 0; joinAttempt < 3; joinAttempt += 1) {
-		const pending = state.connection;
-		if (!pending || pending.isOpen() || !pending.isConnecting()) break;
-		try {
-			await pending.connect(signal);
-		} catch {
-			// The handshake owner surfaces its own failure; re-evaluate below
-			// (state.connection may have been replaced or cleared).
+	for (let round = 0; ; round += 1) {
+		// Join an in-flight handshake instead of tearing it down: closing a
+		// CONNECTING socket rejects the concurrent caller (prewarm racing the first
+		// request) with a fatal "websocket closed before open", which would disable
+		// websockets for the entire session.
+		// Bounded re-join: a fresh handshake may have been started by yet another
+		// caller while we awaited the previous one.
+		for (let joinAttempt = 0; joinAttempt < 3 && !signal?.aborted; joinAttempt += 1) {
+			const pending = state.connection;
+			if (!pending || pending.isOpen() || !pending.isConnecting()) break;
+			try {
+				await pending.connect(signal);
+			} catch {
+				// The handshake owner surfaces its own failure; re-evaluate below
+				// (state.connection may have been replaced or cleared).
+			}
 		}
-	}
-	if (state.connection?.isOpen()) {
-		if (!state.connection.matchesAuth(headerRecord)) {
-			state.connection.close("token-refresh");
-			resetCodexWebSocketAppendState(state);
-		} else if (state.connection.isHealthyForReuse()) {
-			logger.time("codexWs:reuseOpenSocket");
-			return state.connection;
-		} else {
-			// Open in readyState but no inbound traffic recently — likely server-
-			// evicted (issue #1450). Force a fresh handshake instead of writing
-			// `response.create` into a half-open buffer and waiting out the
-			// first-event timeout. Drop append state because the new socket
-			// won't carry the prior `previous_response_id` context.
-			CODEX_DEBUG && logger.debug("[codex] codex websocket reuse rejected by health check", {});
-			state.connection.close("stale-reuse");
-			resetCodexWebSocketAppendState(state);
+		// Cancelled while it waited on another caller's handshake: this caller
+		// fails here rather than open a socket of its own once that one is over.
+		if (signal?.aborted) throw signal.reason ?? new AIError.AbortError("Request aborted before connect");
+		if (state.connection?.isOpen()) {
+			if (!state.connection.matchesAuth(headerRecord)) {
+				state.connection.close("token-refresh");
+				resetCodexWebSocketAppendState(state);
+			} else if (state.connection.isHealthyForReuse()) {
+				logger.time("codexWs:reuseOpenSocket");
+				return state.connection;
+			} else {
+				// Open in readyState but no inbound traffic recently — likely server-
+				// evicted (issue #1450). Force a fresh handshake instead of writing
+				// `response.create` into a half-open buffer and waiting out the
+				// first-event timeout. Drop append state because the new socket
+				// won't carry the prior `previous_response_id` context.
+				CODEX_DEBUG && logger.debug("[codex] codex websocket reuse rejected by health check", {});
+				state.connection.close("stale-reuse");
+				resetCodexWebSocketAppendState(state);
+			}
 		}
+		// After every wait above, so a pause or a cancellation that landed while
+		// this caller waited on someone else's handshake still stops this one.
+		let connectHeaders = headerRecord;
+		const opened = await dispatchWhenOpen<CodexWebSocketConnection | undefined>(
+			hold,
+			signal,
+			() => {
+				// Another caller may have opened or started a socket during the hold;
+				// join or reuse it rather than tear it down.
+				const current = state.connection;
+				if (round < 2 && (current?.isOpen() || current?.isConnecting())) return undefined;
+				const connection = new CodexWebSocketConnection(url, connectHeaders, {
+					onHandshakeHeaders: handshakeHeaders => {
+						updateCodexSessionMetadataFromHeaders(turnState, state, handshakeHeaders);
+					},
+					proxy,
+				});
+				// `connect` constructs the socket before its first await, so the
+				// handshake starts right after the hold's last check. Retiring the
+				// old socket comes after it, because closing one can log, and a log
+				// sink is code this step must not run before the wire.
+				const connected = connection.connect(signal).then(() => connection);
+				current?.close("reconnect");
+				state.connection = connection;
+				resetCodexWebSocketAppendState(state);
+				logger.time("codexWs:newSocket");
+				return connected;
+			},
+			async () => {
+				const attestation = await attest();
+				connectHeaders = attestation
+					? { ...headerRecord, [OPENAI_HEADERS.ATTESTATION]: attestation }
+					: headerRecord;
+			},
+		);
+		if (opened) return opened;
 	}
-	state.connection?.close("reconnect");
-	resetCodexWebSocketAppendState(state);
-	logger.time("codexWs:newSocket");
-	state.connection = new CodexWebSocketConnection(url, headerRecord, {
-		onHandshakeHeaders: handshakeHeaders => {
-			updateCodexSessionMetadataFromHeaders(turnState, state, handshakeHeaders);
-		},
-		proxy,
-	});
-	await state.connection.connect(signal);
-	return state.connection;
+}
+
+/**
+ * `fetchImpl` with the DeviceCheck attestation added where the request leaves:
+ * through a transport fetch, inside its dispatch barrier after the holds
+ * answer, and again on every round a closed gate sends the request back to
+ * wait (see `fetchAuthorizedAtWire`). The token is ephemeral, and a pause
+ * outlasts one minted while the request was built.
+ */
+function withCodexAttestationAtWire(fetchImpl: FetchImpl, accountId: string | undefined): FetchImpl {
+	const authorize: WireAuthorization = async init => {
+		const attestation = await getCodexAttestationHeader(accountId);
+		if (!attestation) return init;
+		const headers = new Headers(init.headers);
+		headers.set(OPENAI_HEADERS.ATTESTATION, attestation);
+		return { ...init, headers };
+	};
+	const attested: FetchImpl = (input, init) => fetchAuthorizedAtWire(fetchImpl, input, init ?? {}, authorize);
+	return Object.assign(attested, fetchImpl.preconnect ? { preconnect: fetchImpl.preconnect } : {});
 }
 
 async function openCodexSseEventStream(
@@ -4643,7 +4805,7 @@ async function openCodexSseEventStream(
 	codexSseMaxAttempts: number | undefined,
 	onSseEvent?: OpenAICodexResponsesOptions["onSseEvent"],
 	fetchOverride?: FetchImpl,
-): Promise<AsyncGenerator<Record<string, unknown>>> {
+): Promise<{ events: AsyncGenerator<Record<string, unknown>>; firstEventBudgetLeftMs: number | undefined }> {
 	const headers = createCodexHeaders(
 		requestHeaders,
 		accountId,
@@ -4655,7 +4817,6 @@ async function openCodexSseEventStream(
 		turnState,
 		responsesLite,
 		requestMetadata,
-		await getCodexAttestationHeader(accountId),
 		body,
 	);
 	// `wrapCodexSseStream` arms the iterator-level idle watchdog only after this
@@ -4663,6 +4824,9 @@ async function openCodexSseEventStream(
 	// the retry loop's base signal remains reserved for caller cancellation, so
 	// an internal timeout stays retryable while an explicit abort fails fast.
 	let clearPreResponseTimeout: (() => void) | undefined;
+	// The guard of the attempt that got headers: what it left of the budget is
+	// all the wait for the first event gets.
+	let attemptGuard: PreResponseTimeout | undefined;
 	const fetchAttempt: FetchImpl = async (input, init) => {
 		let response: Response | undefined;
 		try {
@@ -4703,6 +4867,7 @@ async function openCodexSseEventStream(
 				// body read; disarm it before arming the next attempt's guard.
 				clearPreResponseTimeout?.();
 				const watchdog = armPreResponseTimeout(signal, firstEventTimeoutMs);
+				attemptGuard = watchdog;
 				clearPreResponseTimeout = watchdog.clear;
 				return { signal: watchdog.signal };
 			},
@@ -4742,13 +4907,16 @@ async function openCodexSseEventStream(
 	}
 	// Attach the observer only when a diagnostic listener exists: any observer
 	// turns on per-line raw capture in `readSseJson`.
-	return readSseJson<Record<string, unknown>>(
-		response.body,
-		signal,
-		onSseEvent
-			? event => onSseEvent({ event: event.event, data: event.data, raw: [...event.raw] }, undefined)
-			: undefined,
-	);
+	return {
+		events: readSseJson<Record<string, unknown>>(
+			response.body,
+			signal,
+			onSseEvent
+				? event => onSseEvent({ event: event.event, data: event.data, raw: [...event.raw] }, undefined)
+				: undefined,
+		),
+		firstEventBudgetLeftMs: attemptGuard?.remaining() ?? firstEventTimeoutMs,
+	};
 }
 
 function createCodexHeaders(
@@ -4762,7 +4930,6 @@ function createCodexHeaders(
 	turnState?: CodexTurnStateCell,
 	responsesLite = false,
 	requestMetadata?: CodexCompatibilityIdentity,
-	attestation?: string,
 	routedRequest?: Pick<RequestBody, "model" | "service_tier">,
 ): Headers {
 	const headers = new Headers(initHeaders ?? {});
@@ -4782,11 +4949,11 @@ function createCodexHeaders(
 	// already carries it, so this needs no configuration. A caller-supplied
 	// header still wins: a proxy fronting Codex may want a different value.
 	applyCodexResidencyHeader(headers, accessToken);
-	if (attestation) {
-		headers.set(OPENAI_HEADERS.ATTESTATION, attestation);
-	} else {
-		headers.delete(OPENAI_HEADERS.ATTESTATION);
-	}
+	// The DeviceCheck attestation is ephemeral, so it is minted where the request
+	// leaves, after the dispatch hold (see `withCodexAttestationAtWire` and
+	// `getOrCreateCodexWebSocketConnection`), never with the headers it is built
+	// from here.
+	headers.delete(OPENAI_HEADERS.ATTESTATION);
 	const betaHeader =
 		transport === "websocket"
 			? OPENAI_HEADER_VALUES.BETA_RESPONSES_WEBSOCKETS_V2

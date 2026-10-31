@@ -73,6 +73,9 @@ function startProcess(
 		getHindsightSessionState: () => undefined,
 		subscribe: () => () => {},
 		refreshBaseSystemPrompt: async () => {},
+		// `/memory clear` rehydrates through the backend, which binds `/pause` holds to the session's disposal.
+		isDisposed: false,
+		addDisposer: () => {},
 	};
 	const state = new MnemopiSessionState({
 		sessionId: session.sessionId,

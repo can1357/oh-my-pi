@@ -90,6 +90,7 @@ import { withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
 import {
+	armPreResponseTimeout,
 	getStreamFirstEventTimeoutMs,
 	getStreamIdleTimeoutMs,
 	iterateWithIdleTimeout,
@@ -2587,25 +2588,40 @@ const streamAnthropicOnce = (
 						),
 					};
 				}
+				// The provider's own first-byte budget, for every client including a
+				// caller's that ignores `timeout`. A guard rather than a plain timer:
+				// it rides on the request signal, so the transport stops its clock
+				// while the request is prepared and parked on a dispatch hold, and
+				// `stream` (which a stream watchdog may observe) reports that time
+				// as ours rather than the provider's.
+				const requestGuard = armPreResponseTimeout(requestSignal, requestTimeoutMs, stream);
+				const guardedRequestSignal = requestGuard.signal ?? requestSignal;
+				const requestTracker = activeAbortTracker;
+				guardedRequestSignal.addEventListener(
+					"abort",
+					() => {
+						if (!requestSignal.aborted) requestTracker.abortLocally(firstEventTimeoutAbortError);
+					},
+					{ once: true },
+				);
 				const requestOptions = {
-					...createSdkStreamRequestOptions(requestSignal, requestTimeoutMs),
+					...createSdkStreamRequestOptions(guardedRequestSignal, requestTimeoutMs),
 					maxRetries: 0,
 					...(perRequestHeaders ? { headers: perRequestHeaders } : {}),
 				};
-				const anthropicRequest: unknown =
-					isOAuthToken && client.beta
-						? client.beta.messages.create({ ...params, stream: true }, requestOptions)
-						: client.messages.create({ ...params, stream: true }, requestOptions);
+				let anthropicRequest: unknown;
+				try {
+					anthropicRequest =
+						isOAuthToken && client.beta
+							? client.beta.messages.create({ ...params, stream: true }, requestOptions)
+							: client.messages.create({ ...params, stream: true }, requestOptions);
+				} catch (error) {
+					requestGuard.clear();
+					throw error;
+				}
 				let streamedReplayUnsafeContent = false;
 
 				try {
-					let requestTimeout: NodeJS.Timeout | undefined;
-					if (requestTimeoutMs !== undefined) {
-						requestTimeout = setTimeout(
-							() => activeAbortTracker.abortLocally(firstEventTimeoutAbortError),
-							requestTimeoutMs,
-						);
-					}
 					let anthropicStream: AsyncIterable<AnthropicStreamEvent>;
 					let response: Response;
 					let requestId: string | null;
@@ -2623,8 +2639,12 @@ const streamAnthropicOnce = (
 						}
 						throw error;
 					} finally {
-						if (requestTimeout !== undefined) clearTimeout(requestTimeout);
+						requestGuard.clear();
 					}
+					// One first-event budget runs from the wire to the first event: the
+					// guard spent the part before headers, and the event iterator below
+					// waits on what it left, not on a fresh budget.
+					const firstEventBudgetLeftMs = requestGuard.remaining() ?? firstEventTimeoutMs;
 					await notifyProviderResponse(options, response, sourceModel, requestId);
 					if (slowMode) {
 						const slowSignal = parseAnthropicSlowModeHeaders(response.headers);
@@ -2675,7 +2695,7 @@ const streamAnthropicOnce = (
 							: undefined;
 					const timedAnthropicStream = iterateWithIdleTimeout(anthropicStream, {
 						idleTimeoutMs,
-						firstItemTimeoutMs: firstEventTimeoutMs,
+						firstItemTimeoutMs: firstEventBudgetLeftMs,
 						errorMessage: idleTimeoutAbortError.message,
 						firstItemErrorMessage: firstEventTimeoutAbortError.message,
 						onIdle: () => activeAbortTracker.abortLocally(idleTimeoutAbortError),

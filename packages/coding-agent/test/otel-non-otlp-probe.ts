@@ -1,10 +1,13 @@
 /**
  * Negative-path probe for explicit non-OTLP exporter selections. Runs in a
  * subprocess so a broken bootstrap can register process-global providers and
- * attempt real exports without contaminating the test runner.
+ * attempt real exports without contaminating the test runner. The receiver is
+ * declared as the test's own, so the exporter selection alone must keep the
+ * export off.
  */
 
 import {
+	allowTelemetryReceiverForTests,
 	flushTelemetryExport,
 	initTelemetryExport,
 	isTelemetryExportEnabled,
@@ -30,6 +33,7 @@ const server = Bun.serve({
 });
 
 const base = `http://localhost:${server.port}`;
+allowTelemetryReceiverForTests(base);
 process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = `${base}/v1/traces`;
 process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = `${base}/v1/logs`;
 process.env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT = `${base}/v1/metrics`;

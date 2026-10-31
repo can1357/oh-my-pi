@@ -44,6 +44,13 @@ export interface PauseScreenHost {
 		showOverlay(component: Component, options?: OverlayOptions): OverlayHandle;
 		setFocus(component: Component): void;
 		requestRender(): void;
+		/**
+		 * Paint one frame without the scheduler's hop and cadence, and resolve
+		 * once the terminal holds it: a native surface has acknowledged it, or
+		 * the row writer has delivered its bytes. Bounded — a terminal that
+		 * reads nothing delays the resolution by one stall span at most.
+		 */
+		renderNowAccepted(): Promise<void>;
 		readonly terminal: { readonly rows: number };
 	};
 	showStatus(message: string, options?: { dim?: boolean }): void;
@@ -417,21 +424,45 @@ export class PauseScreenComponent implements Component, OverlayFocusOwner {
  */
 export async function runPauseScreen(host: PauseScreenHost, options?: PauseScreenOptions): Promise<void> {
 	if (!agentPauseGate.pause()) return;
-	const component = new PauseScreenComponent(host, options);
-	const overlay = host.ui.showOverlay(component, {
-		width: "100%",
-		maxHeight: "100%",
-		anchor: "top-left",
-		margin: 0,
-		fullscreen: true,
-	});
 	try {
-		host.ui.setFocus(component);
-		await component.run();
+		const component = new PauseScreenComponent(host, options);
+		const overlay = host.ui.showOverlay(component, {
+			width: "100%",
+			maxHeight: "100%",
+			anchor: "top-left",
+			margin: 0,
+			fullscreen: true,
+		});
+		try {
+			host.ui.setFocus(component);
+			await component.run();
+		} finally {
+			try {
+				component.dispose();
+				host.ui.setFocus(component);
+			} finally {
+				// Dismissal cannot depend on the steps before it. The outer
+				// `finally` opens the gate whatever happens here, so a throw in
+				// `dispose()` or `setFocus()` would otherwise leave the terminal
+				// holding a focused, full-screen PAUSED frame over a running
+				// session — the very defect the paint below exists to prevent.
+				overlay.hide();
+				// `overlay.hide()` only schedules a frame and `resume()` wakes
+				// every parked agent loop in the same tick, while painting the
+				// dismissal does not put it on the screen: a native (TSP)
+				// surface keeps the frame back until the terminal has credits,
+				// and a row paint only hands its bytes to the off-thread
+				// writer. Either way the terminal goes on showing PAUSED, so
+				// wait for it to take the dismissal before the gate opens: no
+				// agent may touch the repo behind that screen. The wait is
+				// bounded, so it cannot strand the pause either.
+				await host.ui.renderNowAccepted();
+			}
+		}
 	} finally {
-		component.dispose();
-		host.ui.setFocus(component);
-		overlay.hide();
+		// Every path from the engage above, so no throw in setFocus, hide or the
+		// paint can strand the gate: a leaked pause freezes every agent in the
+		// process with no UI left to release it.
 		const heldMs = agentPauseGate.resume();
 		if (heldMs !== undefined) {
 			host.showStatus(`Resumed after ${formatCoarseDuration(heldMs)} — agents are running again.`);

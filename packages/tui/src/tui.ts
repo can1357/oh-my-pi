@@ -24,7 +24,7 @@ import { TuiDebugServer } from "./debug-server";
 import { extractPrintableText, isKeyRelease, matchesKey } from "./keys";
 import { KITTY_PLACEHOLDER } from "./kitty-graphics";
 import { LoopWatchdog } from "./loop-watchdog";
-import { assumedTspHello, NativeBackend, type NativeHost } from "./native/backend";
+import { assumedTspHello, NativeBackend, type NativeHost, STALLED_ACK_MS } from "./native/backend";
 import { col } from "./native/describe";
 import { TSP_PREFIX, type TspHello } from "./native/encode";
 import type { DescribeContext, NativeNode, NativeScreen, NativeSurfaceProvider, NativeUiEvent } from "./native/node";
@@ -970,6 +970,13 @@ export class TUI extends Container {
 	static readonly #MAX_PENDING_OUTPUT_BYTES = STDOUT_BACKLOG_CLEAR_BYTES;
 	/** Retry cadence while the output backlog gate is holding renders back. */
 	static readonly #OUTPUT_BACKLOG_RETRY_MS = 10;
+	/**
+	 * Longest {@link TUI.renderNowAccepted} waits for the terminal to take the
+	 * frame it painted. The native backend's stalled-ack span, so a caller has
+	 * one ceiling whichever renderer is live: past it the terminal is one the
+	 * backend already renders to without credits.
+	 */
+	static readonly #FRAME_ACCEPT_TIMEOUT_MS = STALLED_ACK_MS;
 	/** Quiet window before restoring the normal buffer after resize. */
 	static readonly #RESIZE_VIEWPORT_SETTLE_MS = 120;
 	/** Longest wait for a CPR reply before the settled repaint falls back. */
@@ -2804,6 +2811,61 @@ export class TUI extends Container {
 		this.#lastRenderAt = start;
 		this.#doRender();
 		this.#lastFrameCostMs = this.#renderScheduler.now() - start;
+	}
+
+	/**
+	 * Paint one frame now and resolve once the terminal holds *that* frame.
+	 *
+	 * Neither renderer puts the frame on the screen before it returns. A
+	 * native (TSP) surface keeps a frame back while the terminal owes
+	 * acknowledgements, so there the wait ends when the terminal acknowledges
+	 * the frame this paint described. The row renderer hands its bytes to the
+	 * terminal, which on a unix TTY only queues them on the off-thread writer,
+	 * so there the wait ends when the writer has delivered as many bytes as it
+	 * had accepted when the paint returned. Whatever the session queues behind
+	 * that frame is somebody else's wait. Either way it also ends after
+	 * {@link TUI.#FRAME_ACCEPT_TIMEOUT_MS}, so a terminal that reads nothing
+	 * can delay a caller but never park it.
+	 *
+	 * For a caller whose next step must not run behind a stale frame, such as
+	 * the `/pause` screen opening the agent gate.
+	 */
+	async renderNowAccepted(): Promise<void> {
+		this.renderNow();
+		if (this.#nativeLive) {
+			// TSP frames cross the same writer, and only a terminal that read
+			// them can acknowledge them: the ack covers delivery as well.
+			await this.#native!.acknowledged();
+			return;
+		}
+		await this.#outputDelivered();
+	}
+
+	/**
+	 * Resolve once the terminal's writer has delivered everything it had
+	 * accepted when this was called, or after
+	 * {@link TUI.#FRAME_ACCEPT_TIMEOUT_MS}. A terminal that reports neither
+	 * counter (a custom one, or stdout that is not a TTY) writes
+	 * synchronously as far as this process can tell, so the wait is over at
+	 * once.
+	 */
+	async #outputDelivered(): Promise<void> {
+		const mark = this.terminal.outputBytesAccepted;
+		if (mark === undefined || this.terminal.pendingOutputBytes === undefined) return;
+		const delivered = (): number =>
+			(this.terminal.outputBytesAccepted ?? mark) - (this.terminal.pendingOutputBytes ?? 0);
+		const deadline = this.#renderScheduler.now() + TUI.#FRAME_ACCEPT_TIMEOUT_MS;
+		while (!this.#stopped && delivered() < mark) {
+			if (this.#renderScheduler.now() >= deadline) {
+				logger.warn("Terminal did not take a frame within the accept span; continuing", {
+					undelivered: mark - delivered(),
+				});
+				return;
+			}
+			const { promise, resolve } = Promise.withResolvers<void>();
+			this.#renderScheduler.scheduleRender(resolve, TUI.#OUTPUT_BACKLOG_RETRY_MS);
+			await promise;
+		}
 	}
 
 	/**

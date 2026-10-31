@@ -9,6 +9,7 @@ import {
 	type ComputerAction,
 	type ComputerSafetyCheck,
 	type Context,
+	type DispatchHold,
 	EventStream,
 	isApiKeyResolver,
 	type Model,
@@ -1204,6 +1205,15 @@ function discardAsides(messages: readonly AgentMessage[], error: Error): void {
 	}
 }
 
+/** Removes `drop`'s members from `messages` in place, so every holder of the array sees it. */
+function dropMessages(messages: AgentMessage[], drop: WeakSet<AgentMessage>): void {
+	let kept = 0;
+	for (const message of messages) {
+		if (!drop.has(message)) messages[kept++] = message;
+	}
+	messages.length = kept;
+}
+
 async function runLoopBody(
 	currentContext: AgentContext,
 	newMessages: AgentMessage[],
@@ -1240,6 +1250,28 @@ async function runLoopBody(
 	// `liveAccepted` reached the model inside it, `liveDeferred` did not.
 	let liveAccepted: AgentMessage[] = [];
 	let liveDeferred: AgentMessage[] = [];
+	// Input the loop dequeued from its host (steering, follow-ups, live steering)
+	// stays the host's until a turn records it, and the host requeues whatever a
+	// run did not record (see `onLiveSteeringTaken`). Nothing answers input once
+	// the run has aborted, so an aborted run records none of it: the requeue is
+	// then its only copy, and it delivers on the next run (after any pause).
+	const unrecordedQueueInput = new WeakSet<AgentMessage>();
+	const dequeued = (messages: AgentMessage[]): AgentMessage[] => {
+		for (const message of messages) unrecordedQueueInput.add(message);
+		return messages;
+	};
+	// The input the turn about to open records. Dequeued input an aborted run
+	// leaves to its host also leaves the context and the run's messages, which it
+	// joined while the call was prepared.
+	const recordedInput = (messages: AgentMessage[]): AgentMessage[] => {
+		if (signal?.aborted && messages.some(message => unrecordedQueueInput.has(message))) {
+			dropMessages(currentContext.messages, unrecordedQueueInput);
+			dropMessages(newMessages, unrecordedQueueInput);
+			messages = messages.filter(message => !unrecordedQueueInput.has(message));
+		}
+		for (const message of messages) unrecordedQueueInput.delete(message);
+		return messages;
+	};
 	try {
 		let messagesToEmit = [...initialMessages];
 		if (isDeadlineExceeded(config.deadline)) {
@@ -1251,7 +1283,7 @@ async function runLoopBody(
 		// Skip when the run is already externally aborted — dequeuing would strand
 		// the messages in a run that is about to die.
 		try {
-			pendingMessages = signal?.aborted ? [] : (await config.getSteeringMessages?.(signal)) || [];
+			pendingMessages = signal?.aborted ? [] : dequeued((await config.getSteeringMessages?.(signal)) || []);
 		} catch (error) {
 			stream.push({ type: "turn_start" });
 			emitInputMessages(stream, messagesToEmit);
@@ -1318,6 +1350,13 @@ async function runLoopBody(
 			}
 		}
 
+		// Whether a model call is owed apart from dequeued input: the run opened on
+		// input to answer, or the last turn left work for another call. When an
+		// abort sends dequeued input back to its host, this decides whether the run
+		// still makes the call that ends aborted.
+		const lastMessage = currentContext.messages.at(-1);
+		let modelCallOwed = lastMessage !== undefined && lastMessage.role !== "assistant";
+
 		// Outer loop: continues when queued follow-up messages arrive after agent would stop
 		while (true) {
 			let hasMoreToolCalls = true;
@@ -1333,6 +1372,14 @@ async function runLoopBody(
 				// engaged (host /pause). An external abort releases the park so a
 				// cancelled run still unwinds while everything else stays frozen.
 				if (agentPauseGate.paused) await waitForProcessPause(config, signal);
+				// An abort that ends the park, or lands while the boundary dequeued
+				// input, leaves the run as an abort before that dequeue would have:
+				// the input goes back to its host, and only owed work still gets the
+				// model call that ends aborted.
+				if (signal?.aborted && pendingMessages.some(message => unrecordedQueueInput.has(message))) {
+					pendingMessages = pendingMessages.filter(message => !unrecordedQueueInput.has(message));
+					if (!modelCallOwed && pendingMessages.length === 0) break;
+				}
 
 				// Build the provider-bound context before opening the turn. Queue
 				// messages are added now but their events remain deferred until
@@ -1388,11 +1435,15 @@ async function runLoopBody(
 				} catch (error) {
 					if (!turnOpen) {
 						stream.push({ type: "turn_start" });
-						emitInputMessages(stream, turnMessages);
+						emitInputMessages(stream, recordedInput(turnMessages));
 						turnOpen = true;
 					}
 					throw error;
 				}
+				// Preparation awaits, so a pause can engage after the boundary park.
+				// Hold the call here, before the turn opens and records its input; a
+				// gate that already stopped the call has nothing to hold.
+				if (!gateResult?.stop && agentPauseGate.paused) await waitForProcessPause(config, signal);
 				if (config.beforeModelCall && signal?.aborted) {
 					gateResult = { stop: true };
 				}
@@ -1410,7 +1461,7 @@ async function runLoopBody(
 							throw error;
 						}
 					}
-					emitInputMessages(stream, turnMessages);
+					emitInputMessages(stream, recordedInput(turnMessages));
 					if (turnOpen) {
 						const stopMessage = createGateStopMessage(preparedProviderCall.model, gateResult.reason);
 						currentContext.messages.push(stopMessage);
@@ -1436,7 +1487,7 @@ async function runLoopBody(
 
 				if (!turnOpen) {
 					stream.push({ type: "turn_start" });
-					emitInputMessages(stream, turnMessages);
+					emitInputMessages(stream, recordedInput(turnMessages));
 					turnOpen = true;
 				}
 
@@ -1444,7 +1495,6 @@ async function runLoopBody(
 				let recovered: HarmonyRecoveredToolCall | undefined;
 				let message: AssistantMessage;
 				try {
-					if (agentPauseGate.paused) await waitForProcessPause(config, signal);
 					message = await streamAssistantResponse(
 						currentContext,
 						config,
@@ -1757,6 +1807,7 @@ async function runLoopBody(
 					hasMoreToolCalls = true;
 				}
 
+				modelCallOwed = hasMoreToolCalls;
 				await emitTurnEnd(stream, currentContext, message, toolResults, config, signal, {
 					additionalMessages,
 					willContinue: hasMoreToolCalls && !isDeadlineExceeded(config.deadline),
@@ -1775,7 +1826,7 @@ async function runLoopBody(
 				// still owns every message until this dequeue.
 				// Aborted: live-taken steering stays unrecorded, so the agent returns
 				// it to the queue for the continuation run.
-				const live = signal?.aborted ? [] : [...liveAccepted, ...liveDeferred];
+				const live = signal?.aborted ? [] : dequeued([...liveAccepted, ...liveDeferred]);
 				const liveReachedModel = !signal?.aborted && liveAccepted.length > 0;
 				if (liveReachedModel) {
 					for (const message of liveAccepted) {
@@ -1792,7 +1843,7 @@ async function runLoopBody(
 				} else {
 					const steering = signal?.aborted
 						? []
-						: [...live, ...((await config.getSteeringMessages?.(signal)) || [])];
+						: [...live, ...dequeued((await config.getSteeringMessages?.(signal)) || [])];
 					if (hasMoreToolCalls) {
 						// Mid-work: fold any non-interrupting asides into the next turn alongside steering.
 						const asides = signal?.aborted ? [] : resolveAsides(await config.getAsideMessages?.("work"));
@@ -1822,9 +1873,9 @@ async function runLoopBody(
 			// Re-poll steering too: a steer can land between the stop-boundary dequeue
 			// above and this yield point (e.g. queued while onBeforeYield ran). Without
 			// this poll it would strand in the queue until the next manual prompt.
-			const lateSteering = signal?.aborted ? [] : (await config.getSteeringMessages?.(signal)) || [];
+			const lateSteering = signal?.aborted ? [] : dequeued((await config.getSteeringMessages?.(signal)) || []);
 			const asideMessages = signal?.aborted ? [] : resolveAsides(await config.getAsideMessages?.("stop"));
-			const followUpMessages = signal?.aborted ? [] : (await config.getFollowUpMessages?.(signal)) || [];
+			const followUpMessages = signal?.aborted ? [] : dequeued((await config.getFollowUpMessages?.(signal)) || []);
 			if (lateSteering.length > 0 || asideMessages.length > 0 || followUpMessages.length > 0) {
 				// Set as pending so the inner loop processes them before stopping.
 				pendingMessages = [...lateSteering, ...asideMessages, ...followUpMessages];
@@ -2154,6 +2205,34 @@ async function streamAssistantResponse(
 		});
 	};
 
+	// The loop polls the gate before this call, but the credential, the
+	// metadata resolve and the provider-bound context all await after that
+	// poll, so a `/pause` engaged during them would otherwise reach the
+	// provider. Holding here covers those awaits and the retries the stream
+	// layer dispatches itself (re-sample, rotated credential). The caller's
+	// own hold is asked again after each wait on the gate, so what it checks
+	// is checked after the pause rather than before it.
+	const callerHold = config.beforeDispatch;
+	const beforeDispatch: DispatchHold = async () => {
+		for (;;) {
+			// An abort ends the wait on the gate without opening it. The probe
+			// below reads the abort as closed, so a hold that answered here would
+			// be asked again without end, or send a cancelled request where
+			// nothing else reads the signal; it fails the attempt instead.
+			finalRequestSignal?.throwIfAborted();
+			await callerHold?.();
+			if (!agentPauseGate.paused) break;
+			await waitForProcessPause(config, finalRequestSignal);
+		}
+		finalRequestSignal?.throwIfAborted();
+	};
+	// Awaiting the hold proves only that the gate was open when it answered.
+	// The transport reads this in the same synchronous step that sends, so a
+	// `/pause` that engages in the microtasks after the answer still stops
+	// the request.
+	beforeDispatch.isClosed = () =>
+		agentPauseGate.paused || finalRequestSignal?.aborted === true || callerHold?.isClosed?.() === true;
+
 	try {
 		return await runInActiveSpan(chatSpan, async () => {
 			let response = await streamFunction(model, llmContext, {
@@ -2167,6 +2246,7 @@ async function streamAssistantResponse(
 				serviceTier: effectiveServiceTier,
 				cwd: effectiveCwd,
 				signal: finalRequestSignal,
+				beforeDispatch,
 				onResponse: captureOnResponse,
 				cursorOnToolResult: collectCursorToolResult,
 				liveSteering: providerCall.liveSteering,

@@ -94,6 +94,9 @@ function makeFakeSession(deps: FakeSessionDeps) {
 			for (const l of [...listeners]) l(event);
 		},
 		listenerCount: () => listeners.size,
+		// The backend binds its client's `/pause` holds to the session's disposal.
+		isDisposed: false,
+		addDisposer: () => {},
 	};
 	return session;
 }

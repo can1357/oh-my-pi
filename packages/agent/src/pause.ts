@@ -16,7 +16,15 @@
  *
  * Hosts drive the singleton {@link agentPauseGate} (e.g. the TUI `/pause`
  * command); library code only ever reads it.
+ *
+ * A request issued outside an agent loop — a compaction summary, a memory
+ * extraction, an edit repair, a judge question — never reaches those two
+ * boundaries, so it carries {@link AgentPauseGate.dispatchHold} as its
+ * `beforeDispatch` instead, and the provider layer parks it there.
  */
+
+import type { DispatchHold } from "@oh-my-pi/pi-ai";
+import { raceWithSignal } from "@oh-my-pi/pi-ai/utils/abort";
 
 /** Listener invoked with the new state on every pause/resume transition. */
 export type AgentPauseListener = (paused: boolean) => void;
@@ -89,6 +97,63 @@ export class AgentPauseGate {
 			} finally {
 				signal.removeEventListener("abort", onAbort);
 			}
+		}
+	}
+
+	/**
+	 * The `beforeDispatch` hold for a request issued outside an agent loop. It
+	 * parks the request until the gate is released, then runs `next` — the
+	 * caller's own hold — so a caller's check of what changed under the pause
+	 * runs after the wait, not before it. A pause engaged while `next` waits
+	 * parks the request again once `next` answers, and `next` runs again after
+	 * that resume too, so the hold settles only when the gate is open as `next`
+	 * answers.
+	 *
+	 * Its probe ({@link DispatchHold.isClosed}) reads the gate, `signal`, and
+	 * `next`'s own probe when it has one. The transport reads it in the same
+	 * synchronous step that sends, so a request carrying this hold never
+	 * reaches the wire while the gate is engaged. A `next` without a probe is
+	 * only awaited.
+	 *
+	 * `signal` ends the whole wait, on the gate and on `next` alike, and the
+	 * hold then rejects with its reason; once it has aborted the hold rejects
+	 * as soon as it is asked, gate open or not. Pass the request's own signal,
+	 * so a cancelled request unparks, or a wider lifetime that includes it (a
+	 * session's), so a request whose owner went away fails instead of
+	 * dispatching. `next` itself keeps running when the wait ends this way: it
+	 * is the caller's, and other requests may share it. With the gate open and
+	 * `next` answering at once the hold costs a request no microtask, and a
+	 * caller that can also run outside a paused process (a one-shot CLI) needs
+	 * no branch of its own.
+	 */
+	dispatchHold(signal?: AbortSignal, next?: DispatchHold): DispatchHold {
+		const hold: DispatchHold = () => {
+			if (signal?.aborted) return Promise.reject(signal.reason);
+			if (this.#gate) return this.#holdUntilOpen(signal, next, undefined);
+			const pending = next?.();
+			return pending ? this.#holdUntilOpen(signal, next, pending) : undefined;
+		};
+		hold.isClosed = () => this.#gate !== undefined || signal?.aborted === true || next?.isClosed?.() === true;
+		return hold;
+	}
+
+	/**
+	 * Wait out `pending` (what `next` returned), then the gate, running `next`
+	 * again after every wait on the gate, until the gate is open when `next`
+	 * has answered.
+	 */
+	async #holdUntilOpen(
+		signal: AbortSignal | undefined,
+		next: DispatchHold | undefined,
+		pending: Promise<void> | void,
+	): Promise<void> {
+		for (;;) {
+			if (pending) await raceWithSignal(pending, signal);
+			signal?.throwIfAborted();
+			if (!this.#gate) return;
+			await this.waitUntilResumed(signal);
+			signal?.throwIfAborted();
+			pending = next?.();
 		}
 	}
 

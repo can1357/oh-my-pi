@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
+import { agentPauseGate } from "@oh-my-pi/pi-agent-core";
 import { completeSimple, Effort, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { prompt, withFileLock } from "@oh-my-pi/pi-utils";
@@ -170,6 +171,9 @@ async function consolidateLocked(
 						maxTokens: 8192,
 						reasoning: clampThinkingLevelForModel(model, Effort.Medium),
 						toolChoice: "required",
+						// The scheduler fires on a timer, outside any agent loop, so
+						// `/pause` holds the request here until the resume.
+						beforeDispatch: agentPauseGate.dispatchHold(),
 					},
 				),
 			{ provider: model.provider },

@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
-import { type AuthBrokerServerHandle, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
+import { type AuthBrokerServerHandle, allowAuthBrokerForTests, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
 import { runAuthGatewayCommand } from "@oh-my-pi/pi-coding-agent/cli/auth-gateway-cli";
 import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { getAgentDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
@@ -23,6 +23,7 @@ describe("auth-gateway account pool", () => {
 	let brokerStore: SqliteAuthCredentialStore | undefined;
 	let brokerStorage: AuthStorage | undefined;
 	let handle: AuthBrokerServerHandle | undefined;
+	let brokerDeclaration: Disposable | undefined;
 	let savedEnv: Record<(typeof ENV_KEYS)[number], string | undefined>;
 
 	beforeEach(async () => {
@@ -54,6 +55,7 @@ describe("auth-gateway account pool", () => {
 		});
 		const poolPath = path.join(tempDir, "account-pool.json");
 		await Bun.write(poolPath, JSON.stringify({ anthropic: ["email:allowed@example.com"] }));
+		brokerDeclaration = allowAuthBrokerForTests(handle.url);
 		process.env.OMP_AUTH_BROKER_URL = handle.url;
 		process.env.OMP_AUTH_BROKER_TOKEN = BROKER_TOKEN;
 		process.env.OMP_AUTH_BROKER_ACCOUNT_POOL_FILE = poolPath;
@@ -63,6 +65,7 @@ describe("auth-gateway account pool", () => {
 		vi.restoreAllMocks();
 		resetSettingsForTest();
 		await handle?.close();
+		brokerDeclaration?.[Symbol.dispose]();
 		brokerStorage?.close();
 		brokerStore?.close();
 		if (tempDir) await removeWithRetries(tempDir);

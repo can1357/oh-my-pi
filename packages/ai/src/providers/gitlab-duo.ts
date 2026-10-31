@@ -5,6 +5,7 @@ import * as AIError from "../error";
 import { ANTHROPIC_THINKING, mapAnthropicToolChoice } from "../stream";
 import type { Api, Context, FetchImpl, Model, ModelSpec, SimpleStreamOptions } from "../types";
 import { AssistantMessageEventStream } from "../utils/event-stream";
+import { fetchAuthorizedAtWire, type WireAuthorization, withoutDispatchHold } from "../utils/transport-fetch";
 import { createProviderErrorMessage } from "./error-message";
 import type { OpenAICompletionsOptions } from "./openai-completions";
 import type { OpenAIResponsesOptions } from "./openai-responses";
@@ -87,6 +88,47 @@ export function clearGitLabDuoDirectAccessCache(): void {
 	directAccessCache.clear();
 }
 
+/**
+ * The fetch the routed provider sends through, re-authorized with a current
+ * direct-access token where the request leaves: through a transport fetch,
+ * inside its dispatch barrier after the holds answer, and again on every round
+ * a closed gate sends the request back to wait (see `fetchAuthorizedAtWire`).
+ *
+ * The routed provider was built with `initial`, the token in hand when the
+ * request started, as its key and with that token's gateway headers. The
+ * token expires and a `/pause` lasts as long as a human wants, so at the wire
+ * the token is taken from the cache again, minted afresh once it has aged
+ * out, and put wherever the provider put `initial`, along with the gateway
+ * headers that came with it. A header the caller set itself is left alone.
+ * Minting is the request's own credential prerequisite and goes out unheld
+ * (see `withoutDispatchHold`).
+ */
+function directAccessAtWire(
+	gitlabAccessToken: string,
+	initial: DirectAccessToken,
+	options: SimpleStreamOptions,
+): FetchImpl {
+	const base = options.fetch ?? fetch;
+	const tokenFetch = withoutDispatchHold(base);
+	const callerHeaders = new Set(Object.keys(options.headers ?? {}).map(name => name.toLowerCase()));
+	const authorize: WireAuthorization = async init => {
+		const current = await getDirectAccessToken(gitlabAccessToken, tokenFetch);
+		if (current === initial) return init;
+		const sent = new Headers(init.headers);
+		const headers = new Headers(sent);
+		for (const [name, value] of sent) {
+			if (value === initial.token) headers.set(name, current.token);
+			else if (value === `Bearer ${initial.token}`) headers.set(name, `Bearer ${current.token}`);
+		}
+		for (const [name, value] of Object.entries(current.headers)) {
+			if (!callerHeaders.has(name.toLowerCase())) headers.set(name, value);
+		}
+		return { ...init, headers };
+	};
+	const authorized: FetchImpl = (input, init) => fetchAuthorizedAtWire(base, input, init ?? {}, authorize);
+	return Object.assign(authorized, base.preconnect ? { preconnect: base.preconnect } : {});
+}
+
 export function streamGitLabDuo(
 	model: Model<Api>,
 	context: Context,
@@ -122,6 +164,7 @@ export function streamGitLabDuo(
 				...directAccess.headers,
 				...options.headers,
 			};
+			const wireFetch = directAccessAtWire(apiKey, directAccess, options);
 
 			// This wrapper dispatches directly to the routed provider and bypasses
 			// mapOptionsForApi(), so preserve the shared reasoning contracts here as
@@ -167,7 +210,7 @@ export function streamGitLabDuo(
 								onPayload: options.onPayload,
 								onResponse: options.onResponse,
 								onSseEvent: options.onSseEvent,
-								fetch: options.fetch,
+								fetch: wireFetch,
 								thinkingEnabled: Boolean(anthropicReasoningEffort) && model.reasoning,
 								thinkingBudgetTokens: anthropicReasoningEffort
 									? (options.thinkingBudgets?.[anthropicReasoningEffort] ??
@@ -209,7 +252,7 @@ export function streamGitLabDuo(
 									onPayload: options.onPayload,
 									onResponse: options.onResponse,
 									onSseEvent: options.onSseEvent,
-									fetch: options.fetch,
+									fetch: wireFetch,
 									reasoning: reasoningEffort,
 									disableReasoning: options.disableReasoning,
 									forceReasoningOff: options.forceReasoningOff,
@@ -245,7 +288,7 @@ export function streamGitLabDuo(
 									onPayload: options.onPayload,
 									onResponse: options.onResponse,
 									onSseEvent: options.onSseEvent,
-									fetch: options.fetch,
+									fetch: wireFetch,
 									reasoning: reasoningEffort,
 									// OpenAICompletionsOptions carries no forceReasoningOff; fold it
 									// like the azure-openai-responses mapping does.
