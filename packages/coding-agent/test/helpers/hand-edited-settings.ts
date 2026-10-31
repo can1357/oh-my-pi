@@ -45,11 +45,20 @@ export async function loadHandEditedSettings(
 	{ reloadable = false }: { reloadable?: boolean } = {},
 ): Promise<Settings> {
 	const options = await writeHandEditedConfig(dir, layers);
+	// The `Settings` constructor reads `PI_CONFIG_FILES` synchronously when a load starts, so the
+	// variable is back before any await: a test file sharing this process never sees it unset.
 	const ambient = process.env.PI_CONFIG_FILES;
 	delete process.env.PI_CONFIG_FILES;
+	let loading: Promise<Settings>;
 	try {
-		return await (reloadable ? Settings.loadIsolated(options) : Settings.loadReadOnly(options));
+		loading = reloadable ? Settings.loadIsolated(options) : Settings.loadReadOnly(options);
 	} finally {
 		if (ambient !== undefined) process.env.PI_CONFIG_FILES = ambient;
 	}
+	const settings = await loading;
+	// Should the read ever move past an await, an ambient overlay would join the layers under test.
+	if (settings.getConfigFiles().length !== options.configFiles.length) {
+		throw new Error(`loadHandEditedSettings: ambient overlays joined the load: ${settings.getConfigFiles()}`);
+	}
+	return settings;
 }
