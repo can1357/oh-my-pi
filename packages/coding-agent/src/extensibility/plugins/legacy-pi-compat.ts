@@ -2172,6 +2172,7 @@ function evaluateGraphCommonJs(modulePath: string): unknown {
 		},
 	);
 	module.require = graphRequire;
+	// model-request: extension — runs a legacy plugin's CommonJS source; its requests are the plugin's, which the extension boundary governs.
 	const execute = new Function("exports", "require", "module", "__filename", "__dirname", definition.source);
 	try {
 		execute.call(module.exports, module.exports, graphRequire, module, definition.filename, definition.dirname);

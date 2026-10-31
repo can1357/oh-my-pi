@@ -4,7 +4,15 @@
  * so once the session begins disposing neither may reach the provider, not even a request
  * already waiting for its credential. Both requests used to go out with no cancellation.
  *
- * The cases count requests at a local endpoint.
+ * The cases count requests at a local endpoint that speaks HTTPS on `localhost`. The fixture takes
+ * the branch production's Anthropic traffic takes: provider `anthropic` over `anthropic-messages`
+ * on an `https` URL, no `fetch` of the caller's own, no proxy, so the request leaves `fetch` for
+ * `node:https` (`coworkFetch`). Each live control checks that its requests reached the endpoint
+ * without passing `globalThis.fetch`, which only the fallback branch calls. One property differs
+ * from production and cannot match it: the base URL is the local endpoint, not
+ * `https://api.anthropic.com`. The transport is chosen by provider, API and scheme, not by host;
+ * the host only drops what the catalog scopes to the official API (request-body compression, the
+ * official endpoint's headers and its warm-up).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
@@ -21,6 +29,7 @@ import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { LOOPBACK_TLS, loopbackOrigin, trustLoopbackTls } from "./helpers/loopback-tls";
 
 /** One Anthropic streaming response whose text is `text`. */
 function anthropicText(text: string): Response {
@@ -67,12 +76,17 @@ describe("local memory startup at disposal", () => {
 	let session: AgentSession;
 	/** For each request the endpoint received, whether the session was disposing. */
 	let requests: boolean[];
+	/** Requests to the endpoint that passed `globalThis.fetch`: the fallback branch, which production does not take. */
+	let globalFetchSends: number;
+
+	trustLoopbackTls();
 
 	beforeEach(async () => {
 		tempDir = TempDir.createSync("@omp-dispose-memory-startup-");
 		requests = [];
+		globalFetchSends = 0;
 		server = Bun.serve({
-			hostname: "127.0.0.1",
+			...LOOPBACK_TLS,
 			port: 0,
 			fetch: async request => {
 				await request.json();
@@ -81,9 +95,15 @@ describe("local memory startup at disposal", () => {
 				return anthropicText(JSON.stringify(reply));
 			},
 		});
+		const origin = loopbackOrigin(server);
+		const realFetch = globalThis.fetch;
+		vi.spyOn(globalThis, "fetch").mockImplementation(((input: string | URL | Request, init?: RequestInit) => {
+			if (new URL(input instanceof Request ? input.url : String(input)).origin === origin) globalFetchSends++;
+			return realFetch(input, init);
+		}) as typeof fetch);
 		authStorage = createInMemoryAuthStorage();
 		authStorage.keys.setRuntime("anthropic", "test-key");
-		const model: Model<Api> = { ...getBundledModel("anthropic", "claude-sonnet-4-5")!, baseUrl: server.url.origin };
+		const model: Model<Api> = { ...getBundledModel("anthropic", "claude-sonnet-4-5")!, baseUrl: origin };
 		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 		// The current transcript is excluded from extraction; it only has to exist on disk.
@@ -172,6 +192,8 @@ describe("local memory startup at disposal", () => {
 		await startup.finished;
 
 		expect(requests).toEqual([false, false]);
+		// Both went out over `node:https`, as production's do; the fallback would have called the global fetch.
+		expect(globalFetchSends).toBe(0);
 	});
 
 	it("sends no phase-one extraction once disposal begins while its credential resolves", async () => {
@@ -191,7 +213,8 @@ describe("local memory startup at disposal", () => {
 		startup.release();
 		await startup.finished;
 
-		// Phase one ran while the session was live; phase two never left.
+		// Phase one ran while the session was live, over `node:https`; phase two never left.
 		expect(requests).toEqual([false]);
+		expect(globalFetchSends).toBe(0);
 	});
 });

@@ -2,6 +2,7 @@ import * as net from "node:net";
 import * as tls from "node:tls";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { AbortError } from "../error/abort";
+import { admitSend } from "../request-hold";
 import { StreamTimeoutError, ValidationError } from "../error/validation";
 import type { FetchImpl } from "../types";
 
@@ -287,6 +288,8 @@ export interface ConnectProxiedSocketOptions {
 /**
  * Tunnel a socket connection through an HTTP CONNECT proxy.
  * This is used specifically to wrap Node's `http2.connect(baseUrl, { createConnection })` for Cursor.
+ * The provider-request hold is asked in the turn the connection to the proxy opens; the caller asks
+ * it again before it sends its request over the tunnel.
  */
 export async function connectProxiedSocket(
 	proxyUrlStr: string,
@@ -383,8 +386,9 @@ export async function connectProxiedSocket(
 			rejectOnce(new ValidationError(`Proxy tunnel failed: ${firstLine}`));
 			return;
 		}
-
 		const tlsOptions = options?.tls;
+		// No new connection and no request: TLS to the target over the tunnel this call opened.
+		// model-request: transport stream — TLS over the Cursor agent stream's proxy tunnel.
 		const newTunnelSocket: tls.TLSSocket = tls.connect({
 			...tlsOptions,
 			socket: rawSocket,
@@ -416,15 +420,11 @@ export async function connectProxiedSocket(
 		});
 	};
 
-	options?.signal?.addEventListener("abort", onAbort, { once: true });
-	if (options?.timeoutMs !== undefined && Number.isFinite(options.timeoutMs) && options.timeoutMs > 0) {
-		const timeoutMs = Math.trunc(options.timeoutMs);
-		timeout = setTimeout(() => {
-			rejectOnce(new StreamTimeoutError(`Proxy tunnel timed out after ${timeoutMs}ms`));
-		}, timeoutMs);
-		timeout.unref?.();
-	}
-
+	// The hold is asked in the same turn the connection opens: nothing from here to `connect` awaits.
+	// It is asked before the abort listener and the timer exist, which a refusal would leave behind.
+	const refusal = admitSend(options?.signal);
+	if (refusal) await refusal;
+	// model-request: transport stream — the Cursor agent stream's connection to its proxy.
 	const rawSocket = useProxySsl
 		? tls.connect({
 				host: proxyHost,
@@ -436,6 +436,14 @@ export async function connectProxiedSocket(
 			});
 	rawSocket.once("error", onRawError);
 	rawSocket.once(readyEvent, onProxyReady);
+	options?.signal?.addEventListener("abort", onAbort, { once: true });
+	if (options?.timeoutMs !== undefined && Number.isFinite(options.timeoutMs) && options.timeoutMs > 0) {
+		const timeoutMs = Math.trunc(options.timeoutMs);
+		timeout = setTimeout(() => {
+			rejectOnce(new StreamTimeoutError(`Proxy tunnel timed out after ${timeoutMs}ms`));
+		}, timeoutMs);
+		timeout.unref?.();
+	}
 
 	return promise;
 }

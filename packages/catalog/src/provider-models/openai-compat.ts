@@ -1,4 +1,5 @@
 import { USER_AGENT, getInstallId, runOutsideRequestHold } from "@oh-my-pi/pi-utils";
+import { admitSharedStart } from "@oh-my-pi/pi-utils/request-hold-scope";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { toClinePassPublicModelId } from "../cline-pass-model-id";
 import {
@@ -226,6 +227,9 @@ export function fetchWellKnownModels(fetchImpl?: FetchImpl, signal?: AbortSignal
 function fetchRevalidatedWellKnownModels(fetchImpl?: FetchImpl, signal?: AbortSignal): Promise<unknown> {
 	const session = getCatalogSession(fetchImpl);
 	if (!session.inflight) {
+		// A held caller must not start the lookup for the others; it may only join one in flight.
+		const refusal = admitSharedStart(signal);
+		if (refusal) return refusal;
 		// Shared by every caller of this fetch context, so started outside the caller's provider-request hold.
 		session.inflight = runOutsideRequestHold(() =>
 			withCatalogDiscoveryTimeout(DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS, transportSignal =>
@@ -768,6 +772,9 @@ function createOllamaMetadataResolver(
 	return modelId => {
 		const cached = cache.get(modelId);
 		if (cached) return cached;
+		// A held caller must not start the lookup for every later caller; it may only join one in flight.
+		const refusal = admitSharedStart();
+		if (refusal) return refusal;
 		// Shared by every later lookup of this model, so started outside the caller's provider-request hold.
 		const pending = runOutsideRequestHold(async () => {
 			const metadata = await fetchOllamaShowMetadata(nativeBaseUrl, modelId, fetchImpl);

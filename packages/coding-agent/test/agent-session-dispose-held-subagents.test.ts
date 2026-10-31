@@ -11,8 +11,17 @@
  * The cases count what each endpoint receives once the owner has begun disposing. Retries are on, as
  * in a real session: in one case every endpoint answers with a rate limit, so the owner begins
  * disposing while each provider client waits out its `retry-after` before sending again.
+ *
+ * Every endpoint speaks HTTPS on `localhost`. The fixture takes the branch production's Anthropic
+ * traffic takes: provider `anthropic` over `anthropic-messages` on an `https` URL, no `fetch` of the
+ * caller's own, no proxy, so each request, its retries included, leaves `fetch` for `node:https`
+ * (`coworkFetch`). Each case checks that no request reached an endpoint through `globalThis.fetch`,
+ * which only the fallback branch calls. One property differs from production and cannot match it:
+ * the base URL is the local endpoint, not `https://api.anthropic.com`. The transport is chosen by
+ * provider, API and scheme, not by host; the host only drops what the catalog scopes to the official
+ * API (request-body compression, the official endpoint's headers and its warm-up).
  */
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Type } from "@oh-my-pi/omptype/typebox";
 import { Agent } from "@oh-my-pi/pi-agent-core";
@@ -33,6 +42,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { LOOPBACK_TLS, loopbackOrigin, trustLoopbackTls } from "./helpers/loopback-tls";
 
 /** One Anthropic streaming response that calls the `again` tool. */
 function callAgain(id: number): Response {
@@ -94,6 +104,11 @@ describe("subagent jobs that survive their owner's beginDispose()", () => {
 	let manager: AsyncJobManager;
 	let owner: AgentSession;
 	let children: Child[];
+	/** The children's endpoints, and requests to them that passed `globalThis.fetch`: the fallback branch. */
+	let origins: Set<string>;
+	let globalFetchSends: number;
+
+	trustLoopbackTls();
 
 	beforeEach(() => {
 		tempDir = TempDir.createSync("@omp-dispose-held-subagents-");
@@ -101,6 +116,13 @@ describe("subagent jobs that survive their owner's beginDispose()", () => {
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		manager = new AsyncJobManager({ onJobComplete: () => {}, maxRunningJobs: 16 });
 		children = [];
+		origins = new Set();
+		globalFetchSends = 0;
+		const realFetch = globalThis.fetch;
+		vi.spyOn(globalThis, "fetch").mockImplementation(((input: string | URL | Request, init?: RequestInit) => {
+			if (origins.has(new URL(input instanceof Request ? input.url : String(input)).origin)) globalFetchSends++;
+			return realFetch(input, init);
+		}) as typeof fetch);
 	});
 
 	afterEach(async () => {
@@ -151,7 +173,7 @@ describe("subagent jobs that survive their owner's beginDispose()", () => {
 		const firstRequest = Promise.withResolvers<void>();
 		const child = { name, survives, requests: 0, afterDisposal: 0 } as Child;
 		child.server = Bun.serve({
-			hostname: "127.0.0.1",
+			...LOOPBACK_TLS,
 			port: 0,
 			fetch: async request => {
 				await request.json();
@@ -159,14 +181,15 @@ describe("subagent jobs that survive their owner's beginDispose()", () => {
 				if (owner.isDisposed) child.afterDisposal++;
 				firstRequest.resolve();
 				if (rateLimit) return rateLimited();
-				// A real 5 ms provider latency: the loops make real HTTP turns, which fake time cannot count.
+				// A real 5 ms provider latency: the loops make real HTTPS turns, which fake time cannot count.
 				await Bun.sleep(5);
 				return callAgain(child.requests);
 			},
 		});
+		origins.add(loopbackOrigin(child.server));
 		const model: Model<Api> = {
 			...getBundledModel("anthropic", "claude-sonnet-4-5")!,
-			baseUrl: child.server.url.origin,
+			baseUrl: loopbackOrigin(child.server),
 		};
 		child.session = new AgentSession({
 			agent: new Agent({ getApiKey: () => "test-key", initialState: { model, systemPrompt: ["Test"], tools: [] } }),
@@ -208,7 +231,8 @@ describe("subagent jobs that survive their owner's beginDispose()", () => {
 
 	/**
 	 * Requests after disposal began: a surviving job's request already sent then may land; nothing else
-	 * reaches an endpoint. The control job is cancelled at once.
+	 * reaches an endpoint. The control job is cancelled at once. Every request, before disposal or
+	 * after, went through `node:https`, past the global fetch: production's branch.
 	 */
 	function expectHeld(): void {
 		const counts = children.map(child => ({ child: child.name, requests: child.afterDisposal }));
@@ -217,6 +241,7 @@ describe("subagent jobs that survive their owner's beginDispose()", () => {
 			requests: Math.min(child.afterDisposal, child.survives ? 1 : 0),
 		}));
 		expect(counts).toEqual(allowed);
+		expect(globalFetchSends).toBe(0);
 	}
 
 	it("holds them, alive, through a wrapper's wait before dispose()", async () => {
@@ -268,6 +293,7 @@ describe("subagent jobs that survive their owner's beginDispose()", () => {
 		await manager.waitForAll();
 
 		expect(counts).toEqual(children.map(child => ({ child: child.name, requests: 0 })));
+		expect(globalFetchSends).toBe(0);
 	}, 20_000);
 
 	it("lets a child whose owner is not disposing send its retry once the rate limit passes (control)", async () => {
@@ -277,5 +303,7 @@ describe("subagent jobs that survive their owner's beginDispose()", () => {
 		await Bun.sleep(1_500);
 
 		expect(children[0].requests).toBeGreaterThanOrEqual(2);
+		// Its first request and its retry went through `node:https`, past the global fetch: production's branch.
+		expect(globalFetchSends).toBe(0);
 	}, 20_000);
 });

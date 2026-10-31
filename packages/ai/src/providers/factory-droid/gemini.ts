@@ -3,6 +3,7 @@ import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { readSseJson } from "@oh-my-pi/pi-utils";
 import * as AIError from "../../error";
+import { gatedFetch } from "../../request-hold";
 import type { AssistantMessage, Context, Message, Model, StreamOptions, Tool, ToolCall } from "../../types";
 import { createAbortSourceTracker } from "../../utils/abort";
 import { AssistantMessageEventStream } from "../../utils/event-stream";
@@ -352,7 +353,7 @@ export function streamFactoryDroidGemini(
 			}
 
 			// model-request: transport stream — the Factory Droid Gemini stream's request.
-			const response = await (options.fetch ?? fetch)(`${options.baseUrl}/generate`, {
+			const response = await gatedFetch(options.fetch)(`${options.baseUrl}/generate`, {
 				method: "POST",
 				headers: {
 					"Content-Type": "application/json",

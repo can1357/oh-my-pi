@@ -4,7 +4,15 @@
  * when the session begins disposing. `/annotate`'s summary request used to run on with only its
  * 60-second deadline.
  *
- * Counted at a local endpoint, with the summary's credential held while the session stops.
+ * Counted at a local endpoint that speaks HTTPS on `localhost`, with the summary's credential held
+ * while the session stops. The fixture takes the branch production's Anthropic traffic takes:
+ * provider `anthropic` over `anthropic-messages` on an `https` URL, no `fetch` of the caller's own,
+ * no proxy, so the request leaves `fetch` for `node:https` (`coworkFetch`). The live control checks
+ * that its request reached the endpoint without passing `globalThis.fetch`, which only the fallback
+ * branch calls. One property differs from production and cannot match it: the base URL is the local
+ * endpoint, not `https://api.anthropic.com`. The transport is chosen by provider, API and scheme,
+ * not by host; the host only drops what the catalog scopes to the official API (request-body
+ * compression, the official endpoint's headers and its warm-up).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
@@ -22,6 +30,7 @@ import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { LOOPBACK_TLS, loopbackOrigin, trustLoopbackTls } from "./helpers/loopback-tls";
 
 /** One Anthropic streaming response whose text is `text`. */
 function anthropicText(text: string): Response {
@@ -60,6 +69,10 @@ describe("a custom command's model request at disposal", () => {
 	let credentialReached: PromiseWithResolvers<void>;
 	let releaseCredential: PromiseWithResolvers<void>;
 	let commandSettled: PromiseWithResolvers<void>;
+	/** Requests to the endpoint that passed `globalThis.fetch`: the fallback branch, which production does not take. */
+	let globalFetchSends: number;
+
+	trustLoopbackTls();
 
 	beforeEach(() => {
 		tempDir = TempDir.createSync("@omp-dispose-command-request-");
@@ -67,8 +80,9 @@ describe("a custom command's model request at disposal", () => {
 		credentialReached = Promise.withResolvers<void>();
 		releaseCredential = Promise.withResolvers<void>();
 		commandSettled = Promise.withResolvers<void>();
+		globalFetchSends = 0;
 		server = Bun.serve({
-			hostname: "127.0.0.1",
+			...LOOPBACK_TLS,
 			port: 0,
 			fetch: async request => {
 				await request.json();
@@ -76,9 +90,15 @@ describe("a custom command's model request at disposal", () => {
 				return anthropicText("A summary.");
 			},
 		});
+		const origin = loopbackOrigin(server);
+		const realFetch = globalThis.fetch;
+		vi.spyOn(globalThis, "fetch").mockImplementation(((input: string | URL | Request, init?: RequestInit) => {
+			if (new URL(input instanceof Request ? input.url : String(input)).origin === origin) globalFetchSends++;
+			return realFetch(input, init);
+		}) as typeof fetch);
 		authStorage = createInMemoryAuthStorage();
 		authStorage.keys.setRuntime("anthropic", "test-key");
-		const model: Model<Api> = { ...getBundledModel("anthropic", "claude-sonnet-4-5")!, baseUrl: server.url.origin };
+		const model: Model<Api> = { ...getBundledModel("anthropic", "claude-sonnet-4-5")!, baseUrl: origin };
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 		const resolve = modelRegistry.resolver.bind(modelRegistry) as (
 			target: ApiKeyResolverModel,
@@ -138,7 +158,7 @@ describe("a custom command's model request at disposal", () => {
 		await commandSettled.promise;
 		await running;
 
-		expect(requests).toEqual([false]);
+		expect({ requests, globalFetchSends }).toEqual({ requests: [false], globalFetchSends: 0 });
 	});
 
 	it("sends no request once the session running the command begins disposing", async () => {

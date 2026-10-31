@@ -9,6 +9,14 @@
  * controller runs with a caller-owned SDP offer, so no microphone or native peer is involved. The
  * credential lookup resolves the real stored OAuth row, then holds its result while the call stops,
  * the way a slow token refresh that ignores cancellation would.
+ *
+ * The endpoint speaks HTTPS on `localhost`, and the sideband socket `wss`, as production's
+ * `https://chatgpt.com` and `wss://api.openai.com` do. The fixture takes production's branches: the
+ * transport sends signaling through `globalThis.fetch` with the `Headers` it builds itself, and opens
+ * the sideband through `globalThis.WebSocket` with its own options, with no proxy. One property
+ * differs from production and cannot match it: both URLs are fixed, so the global fetch and the
+ * global `WebSocket` the transport calls are stand-ins that send to the local endpoint instead, with
+ * the same init and options.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
@@ -22,6 +30,7 @@ import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
+import { LOOPBACK_TLS, loopbackOrigin, trustLoopbackTls } from "../helpers/loopback-tls";
 
 const SIGNALING_ORIGIN = "https://chatgpt.com";
 const SIGNALING_PATH = "/backend-api/codex/realtime/calls";
@@ -51,6 +60,8 @@ describe("a live call's requests after it stops", () => {
 	let releaseCredential: PromiseWithResolvers<void>;
 	const RealWebSocket = globalThis.WebSocket;
 
+	trustLoopbackTls();
+
 	beforeEach(async () => {
 		tempDir = TempDir.createSync("@omp-live-dispose-");
 		stopCalled = false;
@@ -62,7 +73,7 @@ describe("a live call's requests after it stops", () => {
 		credentialReached = Promise.withResolvers<void>();
 		releaseCredential = Promise.withResolvers<void>();
 		server = Bun.serve({
-			hostname: "127.0.0.1",
+			...LOOPBACK_TLS,
 			port: 0,
 			fetch: async request => {
 				const url = new URL(request.url);
@@ -82,20 +93,21 @@ describe("a live call's requests after it stops", () => {
 			},
 		});
 		// Signaling goes to the fixed ChatGPT URL and the sideband to the fixed OpenAI host; deliver both locally.
+		const origin = loopbackOrigin(server);
 		const realFetch = globalThis.fetch;
 		vi.spyOn(globalThis, "fetch").mockImplementation(((input: string | URL | Request, init?: RequestInit) => {
 			const url = new URL(input instanceof Request ? input.url : String(input));
 			if (url.origin !== SIGNALING_ORIGIN || url.pathname !== SIGNALING_PATH) {
 				throw new Error(`Unexpected request to ${url}`);
 			}
-			return realFetch(new URL(`${url.pathname}${url.search}`, server.url), init);
+			return realFetch(new URL(`${url.pathname}${url.search}`, origin), init);
 		}) as typeof fetch);
-		const local = server.url;
+		const local = new URL(origin);
 		globalThis.WebSocket = class extends RealWebSocket {
 			constructor(url: string | URL, options?: Bun.WebSocketOptions) {
 				const target = new URL(String(url));
 				if (target.host !== SIDEBAND_HOST) throw new Error(`Unexpected socket to ${target}`);
-				super(`ws://${local.host}${target.pathname}`, options);
+				super(`wss://${local.host}${target.pathname}`, options);
 			}
 		} as typeof WebSocket;
 

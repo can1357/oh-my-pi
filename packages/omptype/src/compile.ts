@@ -939,6 +939,7 @@ class Builder {
 		}
 		this.push(`if(${errors}!==undefined)return ${errors};`);
 		const src = `return function(v){${this.#lines.join("")}return ${ret}}`;
+		// model-request: none — compiles a schema validator from the schema's own IR; the generated code only checks values.
 		const make = new Function("R", "AE", "M", "PF", "UF", "MC", "own", "MD", src) as (
 			refs: unknown[],
 			ae: typeof OmpErrors,
@@ -1060,6 +1061,7 @@ class Builder {
 	buildAllows(ir: IR): (value: unknown) => value is unknown {
 		this.emitAllows(ir, "v");
 		const src = `return function(v){${this.#lines.join("")}return true}`;
+		// model-request: none — compiles a schema validator from the schema's own IR; the generated code only checks values.
 		const make = new Function("R", "AE", "own", src) as (
 			refs: unknown[],
 			ae: typeof OmpErrors,

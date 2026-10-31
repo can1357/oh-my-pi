@@ -8,6 +8,7 @@ import {
 	structuredCloneJSON,
 } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
+import { gatedFetch } from "../request-hold";
 import { getEnvApiKey } from "../env-api-key";
 import type {
 	AssistantMessage,
@@ -823,7 +824,7 @@ const streamOpenAIResponsesOnce = (
 						signal: requestSignal,
 						fetch: wrapFetchForCopilotFallback(
 							// model-request: transport stream — the Responses stream's requests.
-							wrapFetchForRequestCompression(options?.fetch ?? fetch, model),
+							wrapFetchForRequestCompression(gatedFetch(options?.fetch), model),
 							model.provider === "github-copilot",
 							resolveCopilotRequestIdentity(options?.headers),
 							copilotCacheKey,

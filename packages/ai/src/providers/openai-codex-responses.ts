@@ -27,7 +27,7 @@ import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import * as AIError from "../error";
 import { parseToolCallArguments, replayableToolCallArguments } from "../utils/tool-call-arguments";
 import { getEnvApiKey } from "../env-api-key";
-import { admitProviderRequest, isRequestHeld } from "../request-hold";
+import { admitSend, gatedFetch } from "../request-hold";
 import type {
 	Api,
 	AssistantMessage,
@@ -2003,7 +2003,7 @@ async function openCodexSseTransport(
 				options?.codexSseMaxAttempts,
 				event => options?.onSseEvent?.(event, model),
 				// model-request: transport stream — the Codex stream's HTTP requests.
-				wrapFetchForRequestCompression(options?.fetch ?? fetch, model),
+				wrapFetchForRequestCompression(gatedFetch(options?.fetch), model),
 			),
 		);
 	};
@@ -3966,7 +3966,8 @@ class CodexWebSocketConnection {
 		// A held scope opens no socket: the upgrade request is a request too (see `request-hold.ts`).
 		// Checked with no await before the socket is created, so a hold that began in the setup above
 		// still stops it.
-		if (isRequestHeld()) await admitProviderRequest(signal);
+		const refusal = admitSend(signal);
+		if (refusal) await refusal;
 		const { promise, resolve, reject } = Promise.withResolvers<void>();
 		this.#connectPromise = promise;
 		// model-request: transport stream, prewarmOpenAICodexResponses — the Codex WebSocket stream and its prewarm.
@@ -4157,7 +4158,8 @@ class CodexWebSocketConnection {
 				const requestPayload = JSON.stringify(request);
 				// A held scope sends no frame (see `request-hold.ts`): checked with no await before the send
 				// below, so a hold that began during this request's setup still stops it.
-				if (isRequestHeld()) await admitProviderRequest(signal);
+				const refusal = admitSend(signal);
+				if (refusal) await refusal;
 				notifyCodexWebSocketOutbound(onSseEvent, request, requestPayload);
 				// Re-check liveness: the debug-session await above can outlive the socket.
 				// Preserve the abort cause: onAbort already queued a caused error, but this
@@ -4313,9 +4315,10 @@ class CodexWebSocketConnection {
 	 * on this socket. Resolves on the server's acknowledgement.
 	 */
 	steer(previousResponseId: string, input: InputItem[]): Promise<CodexSteerAck> {
-		// Steering adds input to a response, so a held scope sends none (see `request-hold.ts`). Admission
-		// in a held scope never resolves; it is refused when the scope ends.
-		if (isRequestHeld()) return admitProviderRequest().then(() => this.steer(previousResponseId, input));
+		// Steering adds input to a response, so a held scope sends none (see `request-hold.ts`). The
+		// refusal of a held scope never resolves; it rejects when the scope ends.
+		const refusal = admitSend();
+		if (refusal) return refusal;
 		const socket = this.#socket;
 		if (!socket || socket.readyState !== WebSocket.OPEN) {
 			return Promise.reject(new CodexWebSocketTransportError(`websocket connection is unavailable`));
@@ -4680,7 +4683,7 @@ async function openCodexSseEventStream(
 		let response: Response | undefined;
 		try {
 			// model-request: transport stream — the Codex stream's HTTP requests.
-			response = await (fetchOverride ?? fetch)(input, init);
+			response = await gatedFetch(fetchOverride)(input, init);
 			return response;
 		} finally {
 			// A successful streaming body is governed by the iterator-level idle

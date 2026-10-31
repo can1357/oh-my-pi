@@ -229,6 +229,7 @@ async function fetchViaHttp2(
 	timeoutMs: number,
 ): Promise<Uint8Array | null> {
 	const { promise, resolve } = Promise.withResolvers<Uint8Array | null>();
+	// model-request: none — lists Cursor's available models (a catalog read, not a model request), bounded by `timeoutMs`.
 	const client = http2.connect(baseUrl);
 	let settled = false;
 	const finish = (value: Uint8Array | null): void => {

@@ -8,7 +8,22 @@
  * Every case runs a real primary turn through the eval tool and its JavaScript worker, lets that
  * turn finish, then holds the detached request at its credential while the session is live, has
  * begun disposing, or waits in `dispose()` for its shutdown hooks. The cases count requests at
- * local endpoints.
+ * local endpoints that speak HTTPS on `localhost`.
+ *
+ * The branch each request takes, and production's:
+ *
+ * - The primary turn and a `completion()`: provider `anthropic` over `anthropic-messages` on an
+ *   `https` URL, no `fetch` of the caller's own, no proxy, so the request leaves `fetch` for
+ *   `node:https` (`coworkFetch`), as production's Anthropic traffic does. Each finished primary turn,
+ *   and each `completion()` sent on a live session, is checked to have reached the endpoint without
+ *   passing `globalThis.fetch`, which only the fallback branch calls.
+ * - `judge()`, `find`'s judgments, `judgeBatch()` and a `judge_batch` run: the native judge
+ *   (`typesafe`), whose transport is the global fetch, there and in production.
+ *
+ * One property differs from production and cannot match it: each base URL is a local endpoint, not
+ * the provider's own host. The transport is chosen by provider, API and scheme, not by host; the
+ * host only drops what the catalog scopes to the official API (request-body compression, the
+ * official endpoint's headers and its warm-up).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
@@ -36,6 +51,7 @@ import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
 import { FindTool } from "@oh-my-pi/pi-coding-agent/tools/jfind";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { LOOPBACK_TLS, loopbackOrigin, trustLoopbackTls } from "./helpers/loopback-tls";
 
 /** One Anthropic streaming response: a text reply, or a call to `eval` running `code`. */
 function anthropicResponse(reply: { text: string } | { evalCode: string }): Response {
@@ -104,6 +120,8 @@ describe("model work detached from a finished turn at disposal", () => {
 	let evalCode: string;
 	/** For each primary-endpoint request, whether the session was disposing. */
 	let primaryRequests: boolean[];
+	/** Requests to the primary endpoint through `globalThis.fetch`: the fallback branch, which production skips. */
+	let primaryGlobalFetchSends: number;
 	/** For each judge-endpoint request, whether the session was disposing. */
 	let judgeRequests: boolean[];
 	/** Which provider's credential the case holds, from when `holding` is set. */
@@ -115,6 +133,8 @@ describe("model work detached from a finished turn at disposal", () => {
 	let shutdownEntered: PromiseWithResolvers<void>;
 	let releaseShutdown: PromiseWithResolvers<void>;
 	let disposal: Promise<void> | undefined;
+
+	trustLoopbackTls();
 
 	function createSession(settings: Record<string, unknown>): AgentSession {
 		const extensionRunner = {
@@ -176,6 +196,7 @@ describe("model work detached from a finished turn at disposal", () => {
 		holding = true;
 		await session.prompt("Run the eval, then answer.");
 		expect(primaryRequests).toEqual([false, false]);
+		expect(primaryGlobalFetchSends).toBe(0);
 		expect(session.isStreaming).toBe(false);
 	}
 
@@ -198,6 +219,7 @@ describe("model work detached from a finished turn at disposal", () => {
 		);
 		evalCode = "";
 		primaryRequests = [];
+		primaryGlobalFetchSends = 0;
 		judgeRequests = [];
 		heldProvider = "typesafe";
 		holding = false;
@@ -207,7 +229,7 @@ describe("model work detached from a finished turn at disposal", () => {
 		releaseShutdown = Promise.withResolvers<void>();
 		disposal = undefined;
 		primaryServer = Bun.serve({
-			hostname: "127.0.0.1",
+			...LOOPBACK_TLS,
 			port: 0,
 			fetch: async request => {
 				await request.json();
@@ -216,7 +238,7 @@ describe("model work detached from a finished turn at disposal", () => {
 			},
 		});
 		judgeServer = Bun.serve({
-			hostname: "127.0.0.1",
+			...LOOPBACK_TLS,
 			port: 0,
 			fetch: async request => {
 				const body = (await request.json()) as { questions: Record<string, { type: string }> };
@@ -234,13 +256,21 @@ describe("model work detached from a finished turn at disposal", () => {
 		authStorage = createInMemoryAuthStorage();
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		authStorage.keys.setRuntime("typesafe", "ts-test-key");
-		model = { ...getBundledModel("anthropic", "claude-sonnet-4-5")!, baseUrl: primaryServer.url.origin };
+		const primaryOrigin = loopbackOrigin(primaryServer);
+		const realFetch = globalThis.fetch;
+		vi.spyOn(globalThis, "fetch").mockImplementation(((input: string | URL | Request, init?: RequestInit) => {
+			if (new URL(input instanceof Request ? input.url : String(input)).origin === primaryOrigin) {
+				primaryGlobalFetchSends++;
+			}
+			return realFetch(input, init);
+		}) as typeof fetch);
+		model = { ...getBundledModel("anthropic", "claude-sonnet-4-5")!, baseUrl: primaryOrigin };
 		const judge = {
 			id: "jev-preview",
 			name: "JEV Preview",
 			api: "typesafe",
 			provider: "typesafe",
-			baseUrl: judgeServer.url.origin,
+			baseUrl: loopbackOrigin(judgeServer),
 			kind: "judge",
 			reasoning: false,
 			input: ["text"],
@@ -339,8 +369,10 @@ describe("model work detached from a finished turn at disposal", () => {
 			await stopAt(stop);
 			await handleSettled.promise;
 
-			// The turn's two requests, then the completion's while the session was live.
+			// The turn's two requests, then the completion's while the session was live, each through
+			// `node:https`, past the global fetch.
 			expect(primaryRequests).toEqual([false, false, ...expected([false])]);
+			expect(primaryGlobalFetchSends).toBe(0);
 		});
 	});
 

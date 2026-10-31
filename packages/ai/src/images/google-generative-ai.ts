@@ -1,6 +1,7 @@
 import type { Model } from "@oh-my-pi/pi-catalog/types";
 import { withAuth } from "../auth-retry";
 import * as AIError from "../error";
+import { gatedFetch } from "../request-hold";
 import { errorMessage, ImageApiError, imageBaseUrl, modelHeaders, usageFromWire, validateImageInput } from "./shared";
 import type { GeneratedImage, ImageGenerationOptions, ImageGenerationRequest, ImageGenerationResult } from "./types";
 
@@ -63,7 +64,7 @@ export async function generateGoogleImage(
 			? { aspectRatio: request.aspectRatio, imageSize: request.imageSize }
 			: undefined;
 	// model-request: transport generateImage — the image request.
-	const fetchImpl = options.fetch ?? fetch;
+	const fetchImpl = gatedFetch(options.fetch);
 	const body = {
 		contents: geminiImageContents(request),
 		generationConfig: {

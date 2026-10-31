@@ -163,6 +163,7 @@ export function spawnComputerWorker(): ComputerWorkerHandle {
 		postmortem.register("computer-event-taps", () => closeDesktopEventTaps(), { exitOnly: true });
 	}
 	const hostEntry = workerHostEntry();
+	// model-request: none — the worker drives the local desktop through native calls and sends nothing.
 	const worker = hostEntry
 		? new Worker(hostEntry, { type: "module", argv: [COMPUTER_WORKER_ARG] })
 		: new Worker(new URL("./worker-entry.ts", import.meta.url).href, { type: "module" });

@@ -43,6 +43,15 @@ const BASE: Readonly<Record<string, string>> = {
 
 const IMPORT = 'import { completeSimple } from "@oh-my-pi/pi-ai";\n';
 
+/** pi-ai's gate, as the fixture's transport package defines it. */
+const GATE_MODULE = [
+	"export function gatedFetch(fetchImpl?: typeof fetch): typeof fetch {",
+	"\t// model-request: none — the fixture gate's own delegate; each send through it is declared where the gate is called.",
+	"\tconst send = fetchImpl ?? fetch;",
+	"\treturn ((input: string, init?: RequestInit) => send(input, init)) as typeof fetch;",
+	"}",
+].join("\n");
+
 /** Each case: the files it adds, and whether the checker must pass (a control) or fail (an attack). */
 const CASES: ReadonlyArray<{ name: string; files: Readonly<Record<string, string>>; passes: boolean }> = [
 	// Controls.
@@ -246,6 +255,261 @@ const CASES: ReadonlyArray<{ name: string; files: Readonly<Record<string, string
 		},
 		passes: false,
 	},
+	// Round twelve's shapes: a cancellation lost to a later write, a getter, a spread or a helper's body,
+	// and network requests reached through an alias, a computed key or a node module.
+	...(
+		[
+			["a computed key that overwrites the signal", '{ signal: owner.signal, ["signal"]: undefined }'],
+			["a getter that returns undefined", "{ get signal() { return undefined; } }"],
+			["a signal that is a method", "{ signal() { return owner.signal; } }"],
+			["a later key the walk cannot resolve", "{ signal: owner.signal, [dynamicKey]: undefined }"],
+			["a helper whose body discards the signal", "discard({ signal: owner.signal })"],
+			["an argument spread with no options", "...[]"],
+		] as const
+	).map(([name, options]) => ({
+		name,
+		files: {
+			"coding-agent/src/zz.ts": `${IMPORT}function discard(o: object) {\n\treturn { ...o, signal: undefined };\n}\nexport function go(owner: AbortController, dynamicKey: string) {\n\t// model-request: session — claims a signal.\n\treturn completeSimple(m, c, ${options});\n}\n`,
+		},
+		passes: false,
+	})),
+	{
+		name: "a property read of an object whose property is undefined",
+		files: {
+			"coding-agent/src/zz.ts": `${IMPORT}const options = { signal: undefined };\n// model-request: session — claims a signal.\ncompleteSimple(m, c, { signal: options.signal });\n`,
+		},
+		passes: false,
+	},
+	{
+		name: "a signal reassigned to undefined",
+		files: {
+			"coding-agent/src/zz.ts": `${IMPORT}export function go(owner: AbortController) {\n\tlet signal: AbortSignal | undefined = owner.signal;\n\tsignal = undefined;\n\t// model-request: session — claims a signal.\n\treturn completeSimple(m, c, { signal });\n}\n`,
+		},
+		passes: false,
+	},
+	{
+		name: "options whose signal is overwritten after they are built",
+		files: {
+			"coding-agent/src/zz.ts": `${IMPORT}export function go(owner: AbortController) {\n\tconst options: { signal?: AbortSignal } = { signal: owner.signal };\n\toptions.signal = undefined;\n\t// model-request: session — claims a signal.\n\treturn completeSimple(m, c, options);\n}\n`,
+		},
+		passes: false,
+	},
+	{
+		name: "options whose signal is deleted after they are built",
+		files: {
+			"coding-agent/src/zz.ts": `${IMPORT}export function go(owner: AbortController) {\n\tconst options: { signal?: AbortSignal } = { signal: owner.signal };\n\tdelete options.signal;\n\t// model-request: session — claims a signal.\n\treturn completeSimple(m, c, options);\n}\n`,
+		},
+		passes: false,
+	},
+	{
+		name: "an argument spread whose options carry an undefined signal",
+		files: {
+			"coding-agent/src/zz.ts": `${IMPORT}// model-request: session — claims a signal.\ncompleteSimple(m, c, ...[{ signal: undefined }]);\n`,
+		},
+		passes: false,
+	},
+	{
+		name: "arguments spread from a local tuple with no signal",
+		files: {
+			"coding-agent/src/zz.ts": `export function go(url: string) {\n\tconst args: [string, RequestInit] = [url, {}];\n\t// model-request: session — claims a signal.\n\treturn fetch(...args);\n}\n`,
+		},
+		passes: false,
+	},
+	{
+		name: "arguments spread from a value the walk cannot see",
+		files: {
+			"coding-agent/src/zz.ts": `export function go(args: [string, RequestInit]) {\n\t// model-request: session — claims a signal.\n\treturn fetch(...args);\n}\n`,
+		},
+		passes: false,
+	},
+	{
+		name: "fetch through a local alias of the global object",
+		files: { "coding-agent/src/zz.ts": 'const g = globalThis;\ng.fetch("https://api.test");\n' },
+		passes: false,
+	},
+	{
+		name: "fetch through a computed key held in a local",
+		files: { "coding-agent/src/zz.ts": 'const key = "fetch";\nglobalThis[key]("https://api.test");\n' },
+		passes: false,
+	},
+	{
+		name: "a global read under a key the walk cannot resolve",
+		files: {
+			"coding-agent/src/zz.ts":
+				"export function go(key: string) {\n\treturn (globalThis as Record<string, unknown>)[key];\n}\n",
+		},
+		passes: false,
+	},
+	{
+		name: "fetch destructured under a computed key",
+		files: { "coding-agent/src/zz.ts": 'const { ["fetch"]: send } = globalThis;\nsend("https://api.test");\n' },
+		passes: false,
+	},
+	{
+		name: "fetch read with Reflect.get",
+		files: {
+			"coding-agent/src/zz.ts": 'const send = Reflect.get(globalThis, "fetch");\nsend("https://api.test");\n',
+		},
+		passes: false,
+	},
+	{
+		name: "a Hindsight method destructured off the client",
+		files: {
+			"coding-agent/src/zz.ts":
+				'import { HindsightApi } from "./hindsight/client";\nconst client = new HindsightApi();\nconst { reflect } = client;\nreflect("bank", "query");\n',
+		},
+		passes: false,
+	},
+	{
+		name: "a node:http request",
+		files: {
+			"coding-agent/src/zz.ts":
+				'import http from "node:http";\nhttp.request("https://api.test", { method: "POST" }).end("{}");\n',
+		},
+		passes: false,
+	},
+	{
+		name: "an HTTP/2 session",
+		files: { "coding-agent/src/zz.ts": 'import { connect } from "node:http2";\nconnect("https://api.test");\n' },
+		passes: false,
+	},
+	{
+		name: "a raw TCP connection",
+		files: { "coding-agent/src/zz.ts": 'import * as net from "node:net";\nnet.connect(443, "api.test");\n' },
+		passes: false,
+	},
+	{
+		name: "a session-owned request whose signal is traced through a local controller",
+		files: {
+			"coding-agent/src/ok.ts": `${IMPORT}export function go() {\n\tconst controller = new AbortController();\n\t// model-request: session — the fixture session's controller.\n\treturn completeSimple(m, c, { signal: controller.signal });\n}\n`,
+		},
+		passes: true,
+	},
+	{
+		name: "a helper whose body keeps the signal",
+		files: {
+			"coding-agent/src/ok.ts": `${IMPORT}function keep(o: { signal: AbortSignal }) {\n\treturn { ...o, retries: 2 };\n}\nexport function go(owner: AbortController) {\n\t// model-request: session — the fixture session's signal.\n\treturn completeSimple(m, c, keep({ signal: owner.signal }));\n}\n`,
+		},
+		passes: true,
+	},
+	{
+		name: "options from a helper whose argument holds a signal a call returns",
+		files: {
+			"coding-agent/src/ok.ts": `${IMPORT}declare function prepare<T>(o: T): T;\nexport function go(m: unknown, c: unknown, owner: AbortController, stop: AbortController) {\n\t// model-request: session — the fixture session's signal, joined to a local stop.\n\treturn completeSimple(m, c, prepare({ signal: AbortSignal.any([owner.signal, stop.signal]) }));\n}\n`,
+		},
+		passes: true,
+	},
+	{
+		name: "a declared worker that sends nothing, and data imports",
+		files: {
+			"coding-agent/src/ok.ts":
+				'import data from "./data.json";\nimport text from "./notes.txt" with { type: "text" };\nexport function go() {\n\t// model-request: none — the fixture worker renders text and sends nothing.\n\treturn new Worker(new URL("./render.ts", import.meta.url).href, { type: "module" }) && data && text;\n}\n',
+			"coding-agent/src/data.json": "{}",
+			"coding-agent/src/notes.txt": "notes",
+		},
+		passes: true,
+	},
+	{
+		name: "fetch under a concatenated global key",
+		files: { "coding-agent/src/zz.ts": 'globalThis["fet" + "ch"]("https://api.test");\n' },
+		passes: false,
+	},
+	{
+		name: "fetch under a templated global key",
+		files: { "coding-agent/src/zz.ts": 'const head = "fe";\nglobalThis[`${head}tch`]("https://api.test");\n' },
+		passes: false,
+	},
+	{
+		name: "fetch under a concatenated key held in a local, behind a cast",
+		files: {
+			"coding-agent/src/zz.ts":
+				'const name = "fet" + "ch";\nexport function go() {\n\treturn (globalThis as any)[name]("https://api.test");\n}\n',
+		},
+		passes: false,
+	},
+	{
+		name: "a request inside new Function",
+		files: { "coding-agent/src/zz.ts": 'new Function("return fetch")()("https://api.test");\n' },
+		passes: false,
+	},
+	{
+		name: "a request inside eval",
+		files: { "coding-agent/src/zz.ts": 'eval("fetch")("https://api.test");\n' },
+		passes: false,
+	},
+	{
+		name: "a request inside a function's constructor",
+		files: { "coding-agent/src/zz.ts": '(() => undefined).constructor("return fetch")()("https://api.test");\n' },
+		passes: false,
+	},
+	{
+		name: "generated code declared as session-owned",
+		files: {
+			"coding-agent/src/zz.ts":
+				'// model-request: session — the fixture claims a signal generated code cannot take.\nnew Function("return 1")();\n',
+		},
+		passes: false,
+	},
+	{
+		name: "an undeclared worker thread",
+		files: { "coding-agent/src/zz.ts": 'new Worker("./payload.ts", { type: "module" });\n' },
+		passes: false,
+	},
+	{
+		name: "an undeclared node:worker_threads worker",
+		files: {
+			"coding-agent/src/zz.ts":
+				'import { Worker as Thread } from "node:worker_threads";\nnew Thread("./payload.ts");\n',
+		},
+		passes: false,
+	},
+	{
+		name: "a request in a .es6 file",
+		files: { "coding-agent/src/zz.es6": 'fetch("https://api.test");\n' },
+		passes: false,
+	},
+	{
+		name: "a relative import of a file the walk does not parse",
+		files: {
+			"coding-agent/src/zz.ts": 'require("./payload.coffee");\n',
+			"coding-agent/src/payload.coffee": 'fetch "https://api.test"\n',
+		},
+		passes: false,
+	},
+	{
+		name: "an undeclared node:https request in a transport package",
+		files: {
+			"ai/src/zz.ts":
+				'import * as https from "node:https";\nhttps.request("https://api.test", { method: "POST" }).end("{}");\n',
+		},
+		passes: false,
+	},
+	{
+		name: "a transport send through the declared gate",
+		files: {
+			"ai/src/request-hold.ts": GATE_MODULE,
+			"ai/src/providers/gated.ts": `import { gatedFetch } from "../request-hold";\nexport function streamGated(model: { baseUrl: string }, context: unknown, options?: { signal?: AbortSignal; fetch?: typeof fetch }) {\n\t// model-request: transport streamGated — the fixture provider's gated request.\n\tconst send = gatedFetch(options?.fetch);\n\treturn send(model.baseUrl, { signal: options?.signal });\n}\n`,
+		},
+		passes: true,
+	},
+	{
+		name: "an undeclared send through the gate in a transport package",
+		files: {
+			"ai/src/request-hold.ts": GATE_MODULE,
+			"ai/src/zz.ts":
+				'import { gatedFetch } from "./request-hold";\ngatedFetch()("https://api.test", { method: "POST" });\n',
+		},
+		passes: false,
+	},
+	{
+		name: "a session-owned send through the gate with no signal",
+		files: {
+			"ai/src/request-hold.ts": GATE_MODULE,
+			"coding-agent/src/zz.ts":
+				'import { gatedFetch } from "@oh-my-pi/pi-ai";\nexport function go() {\n\t// model-request: session — the fixture claims a session owner but passes no signal.\n\tconst send = gatedFetch();\n\treturn send("https://api.test", { method: "POST" });\n}\n',
+		},
+		passes: false,
+	},
 ];
 
 describe("model request ownership checker self-test", () => {
@@ -269,7 +533,7 @@ describe("model request ownership checker self-test", () => {
 			expect(report.packageCount).toBe(3);
 			if (passes) expect(report.problems).toEqual([]);
 			// The problem names the attack's own file, so it fails for the attack, not for something incidental.
-			else expect(report.problems.filter(problem => /\/zz\.m?ts:/.test(problem))).not.toEqual([]);
+			else expect(report.problems.filter(problem => /\/zz\.[a-z0-9]+:/.test(problem))).not.toEqual([]);
 		});
 	}
 });

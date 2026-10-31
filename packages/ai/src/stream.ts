@@ -61,7 +61,7 @@ import {
 	streamOpenAIResponses,
 } from "./providers/register-builtins";
 import { getProviderDefinition } from "./registry";
-import { admitProviderRequest, holdAfterKeyResolution, inRequestHoldScope, isRequestHeld } from "./request-hold";
+import { admitSend, gatedFetch, holdAroundKeyResolution, inRequestHoldScope } from "./request-hold";
 import type {
 	Api,
 	AssistantMessage,
@@ -725,10 +725,12 @@ function withProviderInFlightLimit<TOptions extends Pick<StreamOptions, "signal"
 }
 
 function createVertexAuthenticatedFetch(options: StreamOptions | undefined): FetchImpl {
+	// The token lookup is shared work, which a gated fetch would refuse: it gets the caller's fetch as is.
+	const tokenFetch = options?.fetch;
 	// model-request: transport stream, streamSimple — Vertex AI's authenticated transport.
-	const baseFetch = options?.fetch ?? fetch;
+	const sendFetch = gatedFetch(options?.fetch);
 	const vertexFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-		const token = await getVertexAccessToken({ signal: options?.signal, fetch: baseFetch });
+		const token = await getVertexAccessToken({ signal: options?.signal, fetch: tokenFetch });
 		const headers = new Headers(init?.headers);
 		headers.set("Authorization", `Bearer ${token}`);
 		const rewritten = resolveVertexRequest(input);
@@ -736,16 +738,16 @@ function createVertexAuthenticatedFetch(options: StreamOptions | undefined): Fet
 		if (isVertexRawPredictUrl(url)) {
 			const bodyText = await readVertexRequestBody(rewritten, init);
 			const transformed = transformVertexAnthropicBody(bodyText);
-			return baseFetch(url, {
+			return sendFetch(url, {
 				...init,
 				method: init?.method ?? (rewritten instanceof Request ? rewritten.method : "POST"),
 				headers,
 				body: transformed,
 			});
 		}
-		return baseFetch(rewritten, { ...init, headers });
+		return sendFetch(rewritten, { ...init, headers });
 	};
-	return Object.assign(vertexFetch, baseFetch.preconnect ? { preconnect: baseFetch.preconnect } : {});
+	return Object.assign(vertexFetch, sendFetch.preconnect ? { preconnect: sendFetch.preconnect } : {});
 }
 
 async function readVertexRequestBody(input: string | URL | Request, init: RequestInit | undefined): Promise<string> {
@@ -835,35 +837,24 @@ function withResolvedModelHeaders<TApi extends Api>(
 
 /**
  * `run`, once the provider-request hold admits it. Outside a hold scope `run` is called at once; in a
- * scope, a resolver key is wrapped so a hold that begins while it resolves still stops the request,
- * and while the scope is held the request waits (see {@link admitProviderRequest}). This only checks
- * on entry: each attempt the provider then sends, its own retries included, is held where it is sent
- * (the hold's wrapper around the global fetch, and the Codex WebSocket's own checks).
+ * scope, a resolver key is wrapped so the hold is checked before and after each resolution (a held
+ * request starts no credential refresh), and while the scope is held the request waits, then is
+ * refused (see {@link admitSend}). In shared work, which has no owner, the request is refused at
+ * once. This only checks on entry: each attempt the provider then sends, its own retries included,
+ * is checked again where it is sent.
  */
 function withRequestHold<O extends { apiKey?: ApiKey; signal?: AbortSignal }>(
 	options: O | undefined,
 	run: (options: O | undefined) => AssistantMessageEventStream,
 ): AssistantMessageEventStream {
-	if (!inRequestHoldScope()) return run(options);
-	const held = options?.apiKey
-		? { ...options, apiKey: holdAfterKeyResolution(options.apiKey, options.signal) }
-		: options;
-	if (!isRequestHeld()) return run(held);
-	const outer = new AssistantMessageEventStream();
-	void (async () => {
-		try {
-			await admitProviderRequest(options?.signal);
-			const inner = run(held);
-			for await (const event of inner) {
-				outer.push(event);
-				if (outer.done) return;
-			}
-			if (!outer.done) outer.end(await inner.result());
-		} catch (error) {
-			outer.fail(error);
-		}
-	})();
-	return outer;
+	const refusal = admitSend(options?.signal);
+	if (refusal) {
+		const outer = new AssistantMessageEventStream();
+		refusal.catch(error => outer.fail(error));
+		return outer;
+	}
+	if (!inRequestHoldScope() || !options?.apiKey) return run(options);
+	return run({ ...options, apiKey: holdAroundKeyResolution(options.apiKey, options.signal) });
 }
 
 export function stream<TApi extends Api>(

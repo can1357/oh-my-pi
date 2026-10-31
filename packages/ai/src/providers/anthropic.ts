@@ -23,6 +23,7 @@ import {
 import { NO_AUTH_SENTINEL } from "../auth-retry";
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
+import { gatedFetch } from "../request-hold";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import { waitForRetry } from "../utils/retry-wait";
 import { getEnvApiKey } from "../env-api-key";
@@ -3913,7 +3914,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 	// body. Catalog rules scope it to verified hosts (official API, Copilot), so
 	// proxies pass through.
 	// model-request: transport stream — the Anthropic stream's requests.
-	const baseFetch = wrapFetchForRequestCompression(args.fetch ?? fetch, model);
+	const baseFetch = wrapFetchForRequestCompression(gatedFetch(args.fetch), model);
 	// Only OAuth requests inject the CC billing header; no API-key request can ever
 	// contain it, so there is no need to install the rewriter for those.
 	const cchFetch = oauthToken ? wrapFetchForCch(baseFetch) : baseFetch;

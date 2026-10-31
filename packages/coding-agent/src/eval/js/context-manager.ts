@@ -980,6 +980,8 @@ function spawnJsWorker(): JsEvalWorkerHandle {
 function spawnBunWorker(): JsEvalWorkerHandle {
 	try {
 		const hostEntry = workerHostEntry();
+		// model-request: outlives-disposal — the fallback JavaScript eval worker runs cell code with globals of its own, which
+		// the request hold does not reach: a request a cell sends from here stops only with the cell's abort or the worker.
 		const worker = hostEntry
 			? new Worker(hostEntry, { type: "module", argv: ["__omp_worker_js_eval"] })
 			: new Worker(new URL("./worker-entry.ts", import.meta.url).href, { type: "module" });

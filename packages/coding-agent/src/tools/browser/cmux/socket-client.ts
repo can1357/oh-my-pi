@@ -141,6 +141,7 @@ export class CmuxSocketClient {
 	async #openSocket(): Promise<void> {
 		const relayEndpoint = this.#parseRelayEndpoint();
 		const relayCredentials = relayEndpoint ? await this.#loadRelayCredentials(relayEndpoint) : null;
+		// model-request: none — connects to the cmux browser host (its relay or its local socket), not a model request.
 		const socket = relayEndpoint
 			? net.createConnection({ host: relayEndpoint.host, port: relayEndpoint.port })
 			: net.createConnection({ path: this.#socketPath });

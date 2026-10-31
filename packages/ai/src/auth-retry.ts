@@ -192,7 +192,11 @@ function isDirectCredentialRotationError(error: unknown): boolean {
 	return isUsageLimitOutcome(status, message);
 }
 
-/** Resolve a single retry step, swallowing resolver failures into `undefined`. */
+/**
+ * Resolve a single retry step, swallowing resolver failures into `undefined`. The provider-request
+ * hold is asked first, so a held caller starts no credential refresh; its refusal, once the scope
+ * ends, ends the retries like any resolver failure.
+ */
 export async function resolveRetryKey(
 	resolver: ApiKeyResolver,
 	lastChance: boolean,
@@ -202,6 +206,7 @@ export async function resolveRetryKey(
 	onResolved?: (resolved: ApiKeyResolution) => void,
 ): Promise<string | undefined> {
 	try {
+		if (isRequestHeld()) await admitProviderRequest(signal);
 		const rotateSibling = lastChance || (!lastChance && isDirectCredentialRotationError(error));
 		const resolved = await resolver({ lastChance: rotateSibling, error, signal, previousKey });
 		onResolved?.(resolved);
@@ -331,9 +336,11 @@ async function runOAuthAttempt<T>(
  *   resolver that resolves without a credential is a "No API key" case.
  * Used by non-streaming consumers (image generation, web search, completion
  * helpers). The streaming driver in `stream.ts` implements the same policy with
- * its replay-safe buffering machinery. Each attempt first passes the provider
- * request hold ({@link admitProviderRequest}), checked in the same turn as the
- * attempt: inside a held scope it waits, then is refused, instead of being sent.
+ * its replay-safe buffering machinery. The provider request hold
+ * ({@link admitProviderRequest}) is asked before each credential resolution, so
+ * a held caller starts no credential refresh, and before each attempt, in the
+ * same turn as the attempt: inside a held scope it waits, then is refused,
+ * instead of being sent.
  */
 export async function withAuth<T>(
 	key: ApiKey | undefined,
@@ -351,6 +358,8 @@ export async function withAuth<T>(
 
 	const resolver = key;
 	const signal = opts?.signal;
+	// Asked before the resolver runs: a credential refresh it would start is a request too.
+	if (isRequestHeld()) await admitProviderRequest(signal);
 	let initialKey: string | undefined;
 	try {
 		initialKey = await resolveApiKeyOnce(resolver, signal);
@@ -377,6 +386,8 @@ export async function withAuth<T>(
 	}
 
 	while (true) {
+		// Asked before the next resolution, so its refusal is thrown as is rather than ending the retries.
+		if (isRequestHeld()) await admitProviderRequest(signal);
 		const nextKey = await resolveNextAuthRetryKey(state, resolver, lastError, signal);
 		if (nextKey === undefined) break;
 		if (isRequestHeld()) await admitProviderRequest(signal);
@@ -433,8 +444,8 @@ export interface WithOAuthAccessOptions {
  * sibling rotation stops when it yields a credential identity
  * (`credentialId ?? accessToken`) or bearer already attempted in this turn.
  * All OAuth attempts share the {@link AUTH_RETRY_MAX_ATTEMPTS} ceiling.
- * Non-auth errors propagate immediately. Like {@link withAuth}, each attempt
- * first passes the provider-request hold. Use this instead of hand-rolled
+ * Non-auth errors propagate immediately. Like {@link withAuth}, each credential
+ * resolution and each attempt first passes the provider-request hold. Use this instead of hand-rolled
  * `getOAuthAccess` + fetch flows so 401s and usage-limits rotate credentials
  * instead of failing the call.
  */
@@ -447,6 +458,8 @@ export async function withOAuthAccess<T>(
 	const isAuthError = opts?.isAuthError ?? isAuthRetryableError;
 	const { sessionId, signal } = opts ?? {};
 
+	// Asked before the access resolves: a credential refresh it would start is a request too.
+	if (!opts?.seed && isRequestHeld()) await admitProviderRequest(signal);
 	let lastAccess = opts?.seed ?? (await storage.oauth.access(provider, sessionId, { signal }));
 	if (!lastAccess) {
 		throw new AIError.MissingApiKeyError(
@@ -472,6 +485,8 @@ export async function withOAuthAccess<T>(
 			if (tokenRefreshReplayUsed) break;
 			tokenRefreshReplayUsed = true;
 			refreshedCurrent = true;
+			// Outside the `try`: the hold's refusal is thrown as is, never taken for a failed refresh.
+			if (isRequestHeld()) await admitProviderRequest(signal);
 			try {
 				next = await storage.oauth.access(provider, sessionId, {
 					forceRefresh: true,
@@ -498,6 +513,7 @@ export async function withOAuthAccess<T>(
 		if (!directRotation) {
 			if (!refreshedCurrent) {
 				refreshedCurrent = true;
+				if (isRequestHeld()) await admitProviderRequest(signal);
 				try {
 					next = await storage.oauth.access(provider, sessionId, {
 						forceRefresh: true,
@@ -527,6 +543,7 @@ export async function withOAuthAccess<T>(
 
 		if (signal?.aborted || attemptCount >= AUTH_RETRY_MAX_ATTEMPTS) break;
 		let afterSiblingWait = false;
+		if (isRequestHeld()) await admitProviderRequest(signal);
 		try {
 			const rotation = await storage.limits.rotate(provider, sessionId, {
 				error: lastError,
@@ -536,6 +553,7 @@ export async function withOAuthAccess<T>(
 			});
 			if (!rotation.switched) break;
 			afterSiblingWait = rotation.afterSiblingWait === true;
+			if (isRequestHeld()) await admitProviderRequest(signal);
 			next = await storage.oauth.access(provider, sessionId, { signal });
 		} catch {
 			next = undefined;

@@ -3,8 +3,11 @@
  * `response.create` frame and no `response.steer` frame. WebSocket traffic never passes through the
  * global fetch the hold wraps, so the transport checks the hold itself, right before each send.
  *
- * The cases wait real time where they assert that nothing arrives: the server is a real loopback
- * WebSocket, which fake time can neither deliver nor rule out.
+ * Every server is a real loopback WebSocket over `wss` on `localhost` (`helpers/loopback-tls.ts`),
+ * which is what production dials (`wss://chatgpt.com/backend-api/...`), and each case counts what the
+ * server receives. The transport opens it as in production: Bun's `WebSocket` with the request's
+ * headers, no proxy (none is configured), WebSockets preferred. Only the host differs. The cases wait
+ * real time where they assert that nothing arrives, which fake time can neither deliver nor rule out.
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { ServerWebSocket } from "bun";
@@ -16,6 +19,9 @@ import type { LiveSteering, Model } from "@oh-my-pi/pi-ai/types";
 import { runInRequestHoldScope } from "../src/request-hold";
 import { stream } from "../src/stream";
 import { createCodexModel } from "./helpers";
+import { LOOPBACK_TLS, loopbackOrigin, trustLoopbackTls } from "./helpers/loopback-tls";
+
+trustLoopbackTls();
 
 type Frame = Record<string, unknown>;
 
@@ -66,7 +72,7 @@ describe("the Codex WebSocket transport in a hold scope", () => {
 			upgrades = 0;
 			frames = [];
 			server = Bun.serve({
-				hostname: "127.0.0.1",
+				...LOOPBACK_TLS,
 				port: 0,
 				fetch(incoming, server) {
 					upgrades++;
@@ -81,7 +87,7 @@ describe("the Codex WebSocket transport in a hold scope", () => {
 					},
 				},
 			});
-			model = { ...createCodexModel("gpt-5.5"), baseUrl: `http://127.0.0.1:${server.port}` };
+			model = { ...createCodexModel("gpt-5.5"), baseUrl: loopbackOrigin(server) };
 		});
 
 		afterEach(() => {
@@ -149,9 +155,20 @@ describe("the Codex WebSocket transport in a hold scope", () => {
 			const pending = runInRequestHoldScope(held.signal, ended.signal, () =>
 				stream(lateHeaders, context, options()).result(),
 			);
+			let settled = false;
+			void pending.then(
+				() => {
+					settled = true;
+				},
+				() => {
+					settled = true;
+				},
+			);
 			await Bun.sleep(100);
 
-			expect({ upgrades, frames: frames.length }).toEqual({ upgrades: 0, frames: 0 });
+			// Still waiting, not ended: a turn whose socket failed in the client (on TLS, say) would show
+			// no upgrade either, but it would have ended.
+			expect({ upgrades, frames: frames.length, settled }).toEqual({ upgrades: 0, frames: 0, settled: false });
 
 			ended.abort();
 			request.abort();
@@ -161,59 +178,48 @@ describe("the Codex WebSocket transport in a hold scope", () => {
 	});
 
 	describe("steering a response in flight", () => {
-		const originalWebSocket = globalThis.WebSocket;
-		let sent: Frame[];
-		let socket: ScriptedWebSocket | undefined;
-
-		/** A socket that opens at once and starts each response it is asked for, leaving it open. */
-		class ScriptedWebSocket {
-			static readonly CONNECTING = 0;
-			static readonly OPEN = 1;
-			static readonly CLOSING = 2;
-			static readonly CLOSED = 3;
-			readyState = ScriptedWebSocket.CONNECTING;
-			binaryType = "nodebuffer";
-			onopen: ((event: Event) => void) | null = null;
-			onmessage: ((event: MessageEvent) => void) | null = null;
-			onerror: ((event: Event) => void) | null = null;
-			onclose: ((event: Event) => void) | null = null;
-
-			constructor() {
-				socket = this;
-				queueMicrotask(() => {
-					this.readyState = ScriptedWebSocket.OPEN;
-					this.onopen?.(new Event("open"));
-				});
-			}
-
-			send(data: string): void {
-				const frame = JSON.parse(data) as Frame;
-				sent.push(frame);
-				if (frame.type === "response.create") this.emit(...answerFrames("resp_1").slice(0, 4));
-				if (frame.type === "response.steer") {
-					this.emit({ type: "response.steer.accepted", steer: { id: "steer_1", previous_response_id: "resp_1" } });
-				}
-			}
-
-			close(): void {
-				this.readyState = ScriptedWebSocket.CLOSED;
-			}
-
-			emit(...frames: Frame[]): void {
-				queueMicrotask(() => {
-					for (const frame of frames) this.onmessage?.({ data: JSON.stringify(frame) } as MessageEvent);
-				});
-			}
-		}
+		let server: Bun.Server<undefined>;
+		/** The frames the server received. */
+		let received: Frame[];
+		/** The server's end of the turn's socket, once it opened. */
+		let peer: ServerWebSocket<unknown> | undefined;
 
 		beforeEach(() => {
-			sent = [];
-			socket = undefined;
-			globalThis.WebSocket = ScriptedWebSocket as unknown as typeof WebSocket;
+			received = [];
+			peer = undefined;
+			// A server that starts each response it is asked for and leaves it open, so a steer can join it.
+			server = Bun.serve({
+				...LOOPBACK_TLS,
+				port: 0,
+				fetch(incoming, server) {
+					if (server.upgrade(incoming, { data: undefined })) return undefined;
+					return new Response("WebSocket required", { status: 400 });
+				},
+				websocket: {
+					open(socket: ServerWebSocket<unknown>) {
+						peer = socket;
+					},
+					message(socket: ServerWebSocket<unknown>, message) {
+						const frame = JSON.parse(String(message)) as Frame;
+						received.push(frame);
+						if (frame.type === "response.create") {
+							for (const event of answerFrames("resp_1").slice(0, 4)) socket.send(JSON.stringify(event));
+						}
+						if (frame.type === "response.steer") {
+							socket.send(
+								JSON.stringify({
+									type: "response.steer.accepted",
+									steer: { id: "steer_1", previous_response_id: "resp_1" },
+								}),
+							);
+						}
+					},
+				},
+			});
 		});
 
 		afterEach(() => {
-			globalThis.WebSocket = originalWebSocket;
+			server.stop(true);
 		});
 
 		/** A steering source whose one message becomes claimable when `ready` resolves. */
@@ -240,14 +246,16 @@ describe("the Codex WebSocket transport in a hold scope", () => {
 
 		/**
 		 * Stream one turn whose response stays open; once its text arrives, `whenStreaming` runs and the
-		 * steering message becomes claimable. Returns once the steer had time to go out.
+		 * steering message becomes claimable. Returns, once the steer had time to reach the server from
+		 * then, whether the response streamed and how many steers the server received.
 		 */
-		async function steerWhileStreaming(whenStreaming: () => void): Promise<number> {
+		async function steerWhileStreaming(whenStreaming: () => void): Promise<{ streamed: boolean; steers: number }> {
 			const ready = Promise.withResolvers<void>();
 			const model: Model<"openai-codex-responses"> = {
 				...createCodexModel("gpt-6-sol"),
-				baseUrl: "https://chatgpt.com/backend-api",
+				baseUrl: loopbackOrigin(server),
 			};
+			let streamed = false;
 			const turn = runInRequestHoldScope(held.signal, ended.signal, async () => {
 				const events = streamOpenAICodexResponses(
 					model,
@@ -264,24 +272,31 @@ describe("the Codex WebSocket transport in a hold scope", () => {
 				for await (const event of events) {
 					if (event.type !== "text_delta") continue;
 					whenStreaming();
+					streamed = true;
 					ready.resolve();
 				}
 			});
+			// The steer becomes claimable when the text arrives; a turn that ends first never streamed.
+			await Promise.race([ready.promise, turn.catch(() => undefined)]);
 			await Bun.sleep(100);
-			const steers = sent.filter(frame => frame.type === "response.steer").length;
+			const steers = received.filter(frame => frame.type === "response.steer").length;
 			ended.abort();
 			request.abort();
-			socket?.emit({ type: "response.completed", response: { id: "resp_1", status: "completed", usage: USAGE } });
+			const completed = {
+				type: "response.completed",
+				response: { id: "resp_1", status: "completed", usage: USAGE },
+			};
+			peer?.send(JSON.stringify(completed));
 			await turn.catch(() => undefined);
-			return steers;
+			return { streamed, steers };
 		}
 
 		it("sends the steer when the scope is not held", async () => {
-			expect(await steerWhileStreaming(() => {})).toBe(1);
+			expect(await steerWhileStreaming(() => {})).toEqual({ streamed: true, steers: 1 });
 		});
 
 		it("sends no steer once the hold began while the response streamed", async () => {
-			expect(await steerWhileStreaming(() => held.abort())).toBe(0);
+			expect(await steerWhileStreaming(() => held.abort())).toEqual({ streamed: true, steers: 0 });
 		});
 	});
 });

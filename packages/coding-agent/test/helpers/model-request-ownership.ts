@@ -6,7 +6,17 @@
  * A request is created through:
  *
  * - a network global (`fetch`, `WebSocket`, `EventSource`), anywhere in those packages, also as
- *   `globalThis["fetch"]` or destructured from the global object;
+ *   `globalThis["fetch"]`, `globalThis["fet" + "ch"]`, `Reflect.get(globalThis, …)` or destructured
+ *   from the global object;
+ * - a connection of a Node network module (`node:https` `request`/`get`, `http2.connect`,
+ *   `net`/`tls` `connect`/`createConnection`) or `Bun.connect`, anywhere in those packages;
+ * - a worker thread (`new Worker`, also from `node:worker_threads`): it has globals of its own, so
+ *   the request hold of `@oh-my-pi/pi-ai` does not reach what it sends;
+ * - a call of pi-ai's `gatedFetch` (the fetch a transport sends through, which refuses a held send
+ *   until the response settles), anywhere in those packages; its result is checked like a `fetch`
+ *   value;
+ * - code generated at run time (`eval`, `new Function`, `fn.constructor(…)`), whose requests the
+ *   walk cannot see;
  * - the request API of the transport packages, `@oh-my-pi/pi-ai` and `@oh-my-pi/pi-agent-core`
  *   ({@link TRANSPORT_PRIMITIVES}), plus every provider entry point a transport package exports
  *   (`stream<Provider>`), found rather than listed. Inside a transport package's `src/` only its
@@ -15,13 +25,15 @@
  *   Hindsight client, also as `client["method"]`;
  * - any function, class or member a `caller` declaration names (below), transitively.
  *
- * The walk parses every source file (`.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs`),
- * resolves each name through the module graph (named, aliased, namespace and dynamic imports, named
- * and star re-exports through barrels, in any quote style), sees through type assertions and
- * parentheses, and finds every use: a call, a construction, or the thing handed on as a value. A
- * use it cannot resolve (a computed member of a request module's namespace or of a Hindsight
- * client, an unbound dynamic import of one, a dynamic import whose specifier is computed) is a
- * site too, so it needs a declaration of its own. Each site must sit under a declaration:
+ * The walk parses every source file (`.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs`,
+ * `.es6`, `.es`), resolves each name through the module graph (named, aliased, namespace and dynamic
+ * imports, named and star re-exports through barrels, in any quote style), sees through type
+ * assertions and parentheses, and finds every use: a call, a construction, or the thing handed on as
+ * a value. A use it cannot resolve (a computed member of a request module's namespace or of a
+ * Hindsight client, an unbound dynamic import of one, a dynamic import whose specifier is computed,
+ * a global read under a key it cannot resolve, a relative import of a file it does not parse that
+ * is not data) is a site too, so it needs a declaration of its own. Each site must sit under a
+ * declaration:
  *
  *     // model-request: <owner> — <why>
  *
@@ -68,7 +80,10 @@ import { parse } from "@babel/parser";
 let PACKAGES_DIR = "";
 const ROOT_PACKAGE = "@oh-my-pi/pi-coding-agent";
 /** Every source file in a package; {@link isProductFile} drops tests, dependencies and build output. */
-const SOURCE_GLOB = "**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}";
+const SOURCE_GLOB = "**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs,es6,es}";
+const SOURCE_EXTENSION = /^\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|es6|es)$/;
+/** Files Bun loads as data rather than code: importing one runs nothing. */
+const DATA_FILE = /\.(json|jsonc|json5|toml|ya?ml|txt|md|html?|css|svg|png|jpe?g|gif|webp|ico|wasm|node|wav|mp3)$/i;
 
 /** Where a request takes its cancellation: argument `arg`, or its property `prop`. */
 interface SignalPath {
@@ -146,9 +161,25 @@ const HINDSIGHT = {
 	factory: "createHindsightClient",
 };
 
-/** Network globals: every use is a request. */
-const NETWORK_GLOBALS: Readonly<Record<string, SignalSpec>> = { fetch: opt(1), WebSocket: NONE, EventSource: NONE };
+/**
+ * Network globals: every use is a request. A `Worker` is a thread with globals of its own, which
+ * the request hold does not reach; `eval` and `Function` run code the walk cannot see. A socket or
+ * worker takes no signal; generated code has no signal position at all.
+ */
+const NETWORK_GLOBALS: Readonly<Record<string, SignalSpec>> = {
+	fetch: opt(1),
+	WebSocket: NONE,
+	EventSource: NONE,
+	Worker: NONE,
+	eval: { kind: "unknown" },
+	Function: { kind: "unknown" },
+};
 const GLOBAL_OBJECTS = new Set(["globalThis", "window", "self", "global"]);
+/**
+ * pi-ai's gated fetch: `gatedFetch(fetchImpl)` returns the fetch a transport sends through, so each
+ * call of it is a network site like a `fetch` value, its result's calls checked for a signal.
+ */
+const GATE = { pkg: "@oh-my-pi/pi-ai", file: "ai/src/request-hold.ts", name: "gatedFetch" };
 
 const OWNERS = new Set([
 	"session",
@@ -435,7 +466,18 @@ function addConstructor(id: string, name: string, signal: SignalSpec, origin?: s
 }
 
 /** What a binding in a file refers to. */
-type Binding = { kind: "constructor"; id: string } | { kind: "namespace"; module: ModuleRef };
+type Binding =
+	| { kind: "constructor"; id: string }
+	| { kind: "namespace"; module: ModuleRef }
+	/** A Node network module (`node:http2`, `https`, …): its `request`/`connect`/… are network sites. */
+	| { kind: "builtin"; module: string };
+
+/**
+ * Node modules that open network connections or threads, and the functions of each that do: a
+ * `worker_threads` `Worker` has globals of its own, which the request hold does not reach.
+ */
+const NODE_NETWORK_MODULE = /^(?:node:)?(http|https|http2|net|tls|worker_threads)$/;
+const NODE_NETWORK_FUNCTIONS = ["request", "get", "connect", "createConnection", "Worker"] as const;
 
 class Graph {
 	readonly #files: ReadonlyMap<string, SourceFile>;
@@ -448,6 +490,29 @@ class Graph {
 
 	module(from: SourceFile, specifier: string): ModuleRef {
 		return resolveModule(from, specifier, this.#packages, this.#files);
+	}
+
+	/** Local names in `file` for pi-ai's {@link GATE}: imported from it or from the package, or its own declaration. */
+	gateLocals(file: SourceFile): Set<string> {
+		const locals = new Set<string>();
+		if (file.key === GATE.file) locals.add(GATE.name);
+		for (const statement of children(child(file.ast, "program"), "body")) {
+			if (statement.type !== "ImportDeclaration" || statement.importKind === "type") continue;
+			const source = child(statement, "source")?.value;
+			if (typeof source !== "string") continue;
+			const module = this.module(file, source);
+			const fromGate =
+				(module?.kind === "transport" && module.pkg === GATE.pkg) ||
+				(module?.kind === "file" && module.key === GATE.file);
+			if (!fromGate) continue;
+			for (const specifier of children(statement, "specifiers")) {
+				if (specifier.type === "ImportSpecifier" && nameOf(child(specifier, "imported")) === GATE.name) {
+					const local = nameOf(child(specifier, "local"));
+					if (local) locals.add(local);
+				}
+			}
+		}
+		return locals;
 	}
 
 	/** The constructor `name` exported by `module` refers to, following re-exports and barrels. */
@@ -524,7 +589,24 @@ class Graph {
 		this.#bindingCache.set(file.key, { version: this.version, map });
 		for (const statement of children(child(file.ast, "program"), "body")) {
 			if (statement.type !== "ImportDeclaration" || statement.importKind === "type") continue;
-			const module = this.module(file, child(statement, "source")?.value as string);
+			const specifierText = child(statement, "source")?.value as string;
+			const builtin = NODE_NETWORK_MODULE.exec(specifierText)?.[1];
+			if (builtin) {
+				for (const specifier of children(statement, "specifiers")) {
+					const local = nameOf(child(specifier, "local"));
+					if (!local || specifier.importKind === "type") continue;
+					if (specifier.type !== "ImportSpecifier") {
+						map.set(local, { kind: "builtin", module: builtin });
+						continue;
+					}
+					const imported = nameOf(child(specifier, "imported")) ?? local;
+					if ((NODE_NETWORK_FUNCTIONS as readonly string[]).includes(imported)) {
+						map.set(local, { kind: "constructor", id: `net:${builtin}.${imported}` });
+					}
+				}
+				continue;
+			}
+			const module = this.module(file, specifierText);
 			for (const specifier of children(statement, "specifiers")) {
 				const local = nameOf(child(specifier, "local"));
 				if (!local || specifier.importKind === "type") continue;
@@ -552,8 +634,20 @@ class Graph {
 			if (node.type !== "VariableDeclarator") return;
 			const required = requiredModule(unwrap(child(node, "init")));
 			if (required === undefined) return;
-			const module = this.module(file, required);
 			const id = child(node, "id");
+			const builtin = NODE_NETWORK_MODULE.exec(required)?.[1];
+			if (builtin) {
+				if (id?.type === "Identifier") map.set(id.name as string, { kind: "builtin", module: builtin });
+				for (const property of id?.type === "ObjectPattern" ? children(id, "properties") : []) {
+					const key = nameOf(child(property, "key"));
+					const local = nameOf(child(property, "value"));
+					if (key && local && (NODE_NETWORK_FUNCTIONS as readonly string[]).includes(key)) {
+						map.set(local, { kind: "constructor", id: `net:${builtin}.${key}` });
+					}
+				}
+				return;
+			}
+			const module = this.module(file, required);
 			if (id?.type === "Identifier") map.set(id.name as string, { kind: "namespace", module });
 			if (id?.type === "ObjectPattern") {
 				for (const property of children(id, "properties")) {
@@ -799,8 +893,9 @@ function sitesIn(file: SourceFile, graph: Graph, hindsightMethods: ReadonlySet<s
 		if (constructor.id.startsWith(`member:${file.key}:`)) privateMembers.set(constructor.name, constructor);
 		if (constructor.id.startsWith("member:*:")) publicMembers.set(constructor.name, constructor);
 	}
-	// `const { fetch: send } = globalThis`: the local name stands for the global.
-	const globalAliases = globalAliasesIn(file);
+	// `const { fetch: send } = globalThis` (or of an alias of it): the local name stands for the global.
+	const globalAliases = globalAliasesIn(file, sites);
+	const gates = graph.gateLocals(file);
 	walk(file.ast, (node, ancestors) => {
 		const parent = ancestors.at(-1);
 		// Network globals: in every package, transport ones included.
@@ -819,15 +914,110 @@ function sitesIn(file: SourceFile, graph: Graph, hindsightMethods: ReadonlySet<s
 			return;
 		}
 		if (node.type === "Identifier" && Object.hasOwn(NETWORK_GLOBALS, node.name as string)) return;
+		// A member of the global object (or a local alias of it): `globalThis.fetch`, `g["fetch"]`, `g[key]`.
 		if (
 			/MemberExpression$/.test(node.type) &&
-			GLOBAL_OBJECTS.has(nameOf(child(node, "object")) ?? "") &&
-			Object.hasOwn(NETWORK_GLOBALS, memberName(node) ?? "") &&
 			!ancestors.some(ancestor => TYPE_LEVEL.test(ancestor.type)) &&
-			// `globalThis.fetch = wrapped`: replacing the global sends nothing.
-			!(parent?.type === "AssignmentExpression" && parent.left === node)
+			// `globalThis.fetch = wrapped`, `delete globalThis[key]`: replacing or removing the global sends nothing.
+			!(parent?.type === "AssignmentExpression" && parent.left === node) &&
+			!(parent?.type === "UnaryExpression" && parent.operator === "delete") &&
+			isGlobalObject(child(node, "object"), ancestors, file)
 		) {
-			sites.push(makeSite(file, byId.get(`global:${memberName(node)}`)!, node, ancestors));
+			const key = node.computed
+				? resolveString(child(node, "property"), ancestors)
+				: nameOf(child(node, "property"));
+			if (typeof key === "string" && Object.hasOwn(NETWORK_GLOBALS, key)) {
+				sites.push(makeSite(file, byId.get(`global:${key}`)!, node, ancestors));
+				return;
+			}
+			if (key === undefined) {
+				const unresolved = addConstructor(`global:${file.key}:[…]`, "globalThis[…]", { kind: "unknown" });
+				sites.push({ ...makeSite(file, unresolved, node, ancestors), use: "unresolved" });
+				return;
+			}
+		}
+		// `Reflect.get(globalThis, "fetch")`.
+		if (node.type === "CallExpression") {
+			const callee = unwrap(child(node, "callee"));
+			const [target, keyNode] = children(node, "arguments");
+			if (
+				callee?.type === "MemberExpression" &&
+				nameOf(child(callee, "object")) === "Reflect" &&
+				memberName(callee) === "get" &&
+				isGlobalObject(target, ancestors, file)
+			) {
+				const key = resolveString(keyNode, ancestors);
+				if (typeof key === "string" && Object.hasOwn(NETWORK_GLOBALS, key)) {
+					sites.push(makeSite(file, byId.get(`global:${key}`)!, node, ancestors));
+					return;
+				}
+				if (key === undefined) {
+					const unresolved = addConstructor(`global:${file.key}:[…]`, "globalThis[…]", { kind: "unknown" });
+					sites.push({ ...makeSite(file, unresolved, node, ancestors), use: "unresolved" });
+					return;
+				}
+			}
+		}
+		// Node network modules (`https.request`, `http2.connect`, `net.connect`, …) and `Bun.connect`:
+		// network sites in every package, like the globals.
+		if (node.type === "Identifier" && isValueUse(node, ancestors)) {
+			const binding = bindings.get(node.name as string);
+			if (binding?.kind === "constructor" && binding.id.startsWith("net:")) {
+				sites.push(makeSite(file, byId.get(binding.id)!, node, ancestors));
+				return;
+			}
+		}
+		if (/MemberExpression$/.test(node.type)) {
+			const object = unwrap(child(node, "object"));
+			const property = memberName(node);
+			const binding = object?.type === "Identifier" ? bindings.get(object.name as string) : undefined;
+			if (binding?.kind === "builtin") {
+				if (property && (NODE_NETWORK_FUNCTIONS as readonly string[]).includes(property)) {
+					sites.push(makeSite(file, byId.get(`net:${binding.module}.${property}`)!, node, ancestors));
+					return;
+				}
+				if (property === undefined) {
+					const unresolved = addConstructor(`net:${file.key}:[…]`, `${binding.module}[…]`, { kind: "unknown" });
+					sites.push({ ...makeSite(file, unresolved, node, ancestors), use: "unresolved" });
+					return;
+				}
+			}
+			if (
+				nameOf(object) === "Bun" &&
+				property === "connect" &&
+				!locallyBound("Bun", ancestors, file) &&
+				!ancestors.some(ancestor => TYPE_LEVEL.test(ancestor.type))
+			) {
+				sites.push(makeSite(file, byId.get("net:bun.connect")!, node, ancestors));
+				return;
+			}
+		}
+		// `gatedFetch(options.fetch)`: the transport's send, a network site in every package.
+		if (node.type === "CallExpression") {
+			const callee = unwrap(child(node, "callee"));
+			if (callee?.type === "Identifier" && gates.has(callee.name as string)) {
+				sites.push(makeSite(file, byId.get(`net:${GATE.name}`)!, node, ancestors));
+				return;
+			}
+		}
+		// `fn.constructor(…)`: the constructor of a function is `Function`, which runs code it is given.
+		if (
+			/MemberExpression$/.test(node.type) &&
+			!node.computed &&
+			nameOf(child(node, "property")) === "constructor" &&
+			/^(Call|OptionalCall|New)Expression$/.test(parent?.type ?? "") &&
+			parent?.callee === node
+		) {
+			sites.push(makeSite(file, byId.get("global:Function")!, node, ancestors));
+			return;
+		}
+		// A relative import of a file the walk does not parse (`./x.coffee`): code it cannot see.
+		const unparsed = unparsedImport(node, file, graph);
+		if (unparsed) {
+			const unresolved = addConstructor(`import:${file.key}:${unparsed}`, `import(${unparsed})`, {
+				kind: "unknown",
+			});
+			sites.push({ ...makeSite(file, unresolved, node, ancestors), use: "unresolved" });
 			return;
 		}
 		// Inside a transport package only network sites are checked.
@@ -917,6 +1107,40 @@ function sitesIn(file: SourceFile, graph: Graph, hindsightMethods: ReadonlySet<s
 	return sites;
 }
 
+/**
+ * The specifier of a relative import, export-from, `import()` or `require()` of a file the walk
+ * cannot parse: one whose extension is neither a source extension it parses nor data (`./x.coffee`;
+ * `require` runs an unknown extension as JavaScript). Type-only imports and imports with a `type`
+ * attribute load nothing that runs. A source file outside the walk (a test helper a script
+ * imports) is excluded by the same rule that excludes tests, not reported here.
+ */
+function unparsedImport(node: Node, file: SourceFile, graph: Graph): string | undefined {
+	let specifier: string | undefined;
+	if (/^(ImportDeclaration|ExportNamedDeclaration|ExportAllDeclaration)$/.test(node.type)) {
+		if (node.importKind === "type" || node.exportKind === "type") return undefined;
+		const attributes = [...children(node, "attributes"), ...children(node, "assertions")];
+		if (attributes.some(attribute => nameOf(child(attribute, "key")) === "type")) return undefined;
+		const source = child(node, "source");
+		specifier = source?.type === "StringLiteral" ? (source.value as string) : undefined;
+	} else if (node.type === "CallExpression" || node.type === "ImportExpression") {
+		const options = unwrap(
+			node.type === "ImportExpression" ? child(node, "options") : children(node, "arguments")[1],
+		);
+		const attributes = children(options, "properties").find(property =>
+			/^(with|assert)$/.test(nameOf(child(property, "key")) ?? ""),
+		);
+		const typed = children(unwrap(child(attributes, "value")), "properties").some(
+			property => nameOf(child(property, "key")) === "type",
+		);
+		if (typed) return undefined;
+		specifier = requiredModule(node);
+	}
+	if (!specifier?.startsWith(".") || DATA_FILE.test(specifier)) return undefined;
+	const extension = path.posix.extname(specifier);
+	if (extension === "" || SOURCE_EXTENSION.test(extension)) return undefined;
+	return graph.module(file, specifier) === undefined ? specifier : undefined;
+}
+
 /** A member's name: `x.name`, `x.#name` or `x["name"]`; undefined for a key computed at run time. */
 function memberName(node: Node): string | undefined {
 	const property = child(node, "property");
@@ -928,20 +1152,73 @@ function memberName(node: Node): string | undefined {
 	return undefined;
 }
 
-/** Local names a file destructures from a global object for a network global: `const { fetch: send } = globalThis`. */
-function globalAliasesIn(file: SourceFile): Map<string, string> {
-	const aliases = new Map<string, string>();
-	if (!/\{[^}]*\b(fetch|WebSocket|EventSource)\b[^}]*\}\s*=\s*(globalThis|window|self|global)\b/.test(file.text)) {
-		return aliases;
+/** Per file, the local names that hold the global object (`const g = globalThis`, transitively). */
+const globalObjectLocalsCache = new WeakMap<SourceFile, Set<string>>();
+
+function globalObjectLocals(file: SourceFile): Set<string> {
+	const cached = globalObjectLocalsCache.get(file);
+	if (cached) return cached;
+	const locals = new Set<string>();
+	if (/=\s*\(?\s*(globalThis|window|self|global)\b/.test(file.text)) {
+		const declarators: Array<{ name: string; init: string }> = [];
+		walk(file.ast, node => {
+			if (node.type !== "VariableDeclarator") return;
+			const name = nameOf(child(node, "id"));
+			const init = nameOf(unwrap(child(node, "init")));
+			if (name && init) declarators.push({ name, init });
+		});
+		for (let changed = true; changed;) {
+			changed = false;
+			for (const { name, init } of declarators) {
+				if (!locals.has(name) && (GLOBAL_OBJECTS.has(init) || locals.has(init))) {
+					locals.add(name);
+					changed = true;
+				}
+			}
+		}
 	}
-	walk(file.ast, node => {
+	globalObjectLocalsCache.set(file, locals);
+	return locals;
+}
+
+/**
+ * Whether `node` is the global object: `globalThis` (or `window`, `self`, `global`) not shadowed by a
+ * local, or a local holding it (`const g = globalThis`; matched by name in the file).
+ */
+function isGlobalObject(node: Node | undefined, ancestors: readonly Node[], file: SourceFile): boolean {
+	const value = unwrap(node);
+	if (value?.type !== "Identifier") return false;
+	const name = value.name as string;
+	if (GLOBAL_OBJECTS.has(name)) return !locallyBound(name, ancestors, file);
+	return globalObjectLocals(file).has(name);
+}
+
+/**
+ * Local names a file destructures from the global object for a network global: `const { fetch: send }
+ * = globalThis`, `const { ["fetch"]: send } = g`. A destructured key the walk cannot resolve is an
+ * unresolved site, pushed onto `sites`.
+ */
+function globalAliasesIn(file: SourceFile, sites: Site[]): Map<string, string> {
+	const aliases = new Map<string, string>();
+	walk(file.ast, (node, ancestors) => {
 		if (node.type !== "VariableDeclarator" || child(node, "id")?.type !== "ObjectPattern") return;
-		if (!GLOBAL_OBJECTS.has(nameOf(unwrap(child(node, "init"))) ?? "")) return;
+		if (!isGlobalObject(child(node, "init"), ancestors, file)) return;
 		for (const property of children(child(node, "id"), "properties")) {
-			const key = property.computed ? undefined : nameOf(child(property, "key"));
+			if (property.type === "RestElement") continue;
+			const key = property.computed
+				? resolveString(child(property, "key"), ancestors)
+				: nameOf(child(property, "key"));
 			const value = child(property, "value");
 			const local = nameOf(value?.type === "AssignmentPattern" ? child(value, "left") : value);
-			if (key && local && Object.hasOwn(NETWORK_GLOBALS, key)) aliases.set(local, key);
+			if (key === undefined) {
+				const unresolved = addConstructor(`global:${file.key}:[…]`, "globalThis[…]", { kind: "unknown" });
+				sites.push({
+					...makeSite(file, unresolved, property, [...ancestors, node, child(node, "id")!]),
+					use: "unresolved",
+				});
+				continue;
+			}
+			if (typeof key === "string" && local && Object.hasOwn(NETWORK_GLOBALS, key)) aliases.set(local, key);
 		}
 	});
 	return aliases;
@@ -976,63 +1253,184 @@ interface Source {
 	prop?: string;
 }
 
+/** A local binding found above a node: where it is declared, and what initially gives it a value. */
+interface LocalBinding {
+	/** The function or program whose body (or parameter list) declares it. */
+	scope: Node;
+	/** A variable's initializer, if it has one. */
+	init?: Node;
+	/** The property of `init` it was destructured from: `const { signal } = options`. */
+	initProp?: string;
+	/** A parameter: the function, its index, and the property destructured from it. */
+	param?: { fn: Node; index: number; prop?: string };
+}
+
 /**
- * The innermost declaration of local `name` above `ancestors`: a variable's initializer (with the
- * property it was destructured from, if any) or a parameter.
+ * The innermost declaration of local `name` above `ancestors`: a variable (with its initializer and
+ * the property it was destructured from, if any) or a parameter.
  */
-function localDeclaration(
-	name: string,
-	ancestors: readonly Node[],
-): { init?: Node; initProp?: string; param?: { fn: Node; index: number; prop?: string } } | undefined {
+function localDeclaration(name: string, ancestors: readonly Node[]): LocalBinding | undefined {
 	for (let index = ancestors.length - 1; index >= 0; index--) {
 		const scope = ancestors[index];
 		if (isFunctionLike(scope)) {
 			const params = children(scope, "params");
 			for (let i = 0; i < params.length; i++) {
 				const param = params[i].type === "AssignmentPattern" ? child(params[i], "left") : params[i];
-				if (param?.type === "Identifier" && param.name === name) return { param: { fn: scope, index: i } };
+				if (param?.type === "Identifier" && param.name === name) return { scope, param: { fn: scope, index: i } };
 				const pattern = param?.type === "TSParameterProperty" ? child(param, "parameter") : param;
 				if (pattern?.type === "ObjectPattern") {
 					for (const property of children(pattern, "properties")) {
 						if (property.type === "RestElement" && nameOf(child(property, "argument")) === name) {
-							return { param: { fn: scope, index: i } };
+							return { scope, param: { fn: scope, index: i } };
 						}
 						const value = child(property, "value");
 						const local = value?.type === "AssignmentPattern" ? child(value, "left") : value;
-						if (nameOf(local) === name)
-							return { param: { fn: scope, index: i, prop: nameOf(child(property, "key")) } };
+						if (nameOf(local) === name) {
+							return { scope, param: { fn: scope, index: i, prop: propertyKey(property, ancestors) } };
+						}
 					}
 				}
 			}
 		}
 		const body = isFunctionLike(scope) ? child(scope, "body") : scope.type === "Program" ? scope : undefined;
 		if (!body) continue;
-		let found: { init?: Node; initProp?: string } | undefined;
+		let found: LocalBinding | undefined;
 		walk(body, (node, nodeAncestors) => {
 			if (found || node.type !== "VariableDeclarator") return;
 			if (nodeAncestors.slice(1).some(isFunctionLike)) return;
 			const id = child(node, "id");
 			if (nameOf(id) === name) {
-				found = { init: child(node, "init") };
+				found = { scope, init: child(node, "init") };
 				return;
 			}
 			if (id?.type !== "ObjectPattern") return;
 			for (const property of children(id, "properties")) {
 				if (property.type === "RestElement" && nameOf(child(property, "argument")) === name) {
-					found = { init: child(node, "init") };
+					found = { scope, init: child(node, "init") };
 					return;
 				}
 				const value = child(property, "value");
 				const local = value?.type === "AssignmentPattern" ? child(value, "left") : value;
 				if (nameOf(local) === name) {
-					found = { init: child(node, "init"), initProp: nameOf(child(property, "key")) };
+					found = { scope, init: child(node, "init"), initProp: propertyKey(property, ancestors) };
 					return;
 				}
 			}
 		});
-		if (found?.init) return found;
+		if (found) return found;
 	}
 	return undefined;
+}
+
+/** A property's key: `name`, `"name"`, or a computed key the walk can resolve to a string. */
+function propertyKey(property: Node, ancestors: readonly Node[]): string | undefined {
+	const key = child(property, "key");
+	if (!property.computed) return nameOf(key);
+	const resolved = resolveString(key, ancestors);
+	return typeof resolved === "string" ? resolved : undefined;
+}
+
+/** A value known not to be a string (a symbol), as opposed to one the walk cannot resolve. */
+const NOT_A_STRING = Symbol("not a string");
+
+/**
+ * The string `node` evaluates to: a literal, a template or `+` concatenation of resolvable parts, or
+ * a local constant holding one. {@link NOT_A_STRING} for a symbol or number; undefined when the walk
+ * cannot tell.
+ */
+function resolveString(
+	node: Node | undefined,
+	ancestors: readonly Node[],
+	depth = 0,
+): string | typeof NOT_A_STRING | undefined {
+	const value = unwrap(node);
+	if (!value || depth > 8) return undefined;
+	if (value.type === "StringLiteral") return value.value as string;
+	if (value.type === "NumericLiteral") return NOT_A_STRING;
+	if (value.type === "TemplateLiteral") {
+		// `${a}${b}`: every expression must resolve to a string.
+		const quasis = children(value, "quasis");
+		let text = "";
+		for (const [index, quasi] of quasis.entries()) {
+			const cooked = (quasi.value as { cooked?: string } | undefined)?.cooked;
+			if (cooked === undefined) return undefined;
+			text += cooked;
+			const expression = children(value, "expressions")[index];
+			if (!expression) continue;
+			const part = resolveString(expression, ancestors, depth + 1);
+			if (typeof part !== "string") return undefined;
+			text += part;
+		}
+		return text;
+	}
+	if (value.type === "BinaryExpression" && value.operator === "+") {
+		const left = resolveString(child(value, "left"), ancestors, depth + 1);
+		const right = resolveString(child(value, "right"), ancestors, depth + 1);
+		return typeof left === "string" && typeof right === "string" ? left + right : undefined;
+	}
+	if (value.type === "CallExpression") {
+		const callee = unwrap(child(value, "callee"));
+		const symbol =
+			nameOf(callee) === "Symbol" ||
+			(callee?.type === "MemberExpression" && nameOf(child(callee, "object")) === "Symbol");
+		return symbol ? NOT_A_STRING : undefined;
+	}
+	if (value.type === "MemberExpression" && nameOf(child(value, "object")) === "Symbol") return NOT_A_STRING;
+	if (value.type === "Identifier") {
+		const declared = localDeclaration(value.name as string, ancestors);
+		if (!declared?.init || declared.initProp || assignmentsTo(value.name as string, declared.scope).length > 0) {
+			return undefined;
+		}
+		return resolveString(declared.init, ancestors, depth + 1);
+	}
+	return undefined;
+}
+
+/** Every value assigned to local `name` in `scope` after its declaration: `name = v`, `name ??= v`. */
+function assignmentsTo(name: string, scope: Node): Node[] {
+	const values: Node[] = [];
+	walk(scope, node => {
+		if (node.type !== "AssignmentExpression") return;
+		const left = unwrap(child(node, "left"));
+		if (left?.type !== "Identifier" || left.name !== name) return;
+		const right = child(node, "right");
+		if (right) values.push(right);
+	});
+	return values;
+}
+
+/**
+ * What `scope` does to property `prop` of local `name`: each value assigned to it (`name.prop = v`,
+ * `name["prop"] = v`), and whether it is deleted or written under a key the walk cannot resolve.
+ */
+function mutationsOf(name: string, prop: string, scope: Node): { values: Node[]; erased?: string } {
+	const values: Node[] = [];
+	let erased: string | undefined;
+	walk(scope, (node, ancestors) => {
+		const target =
+			node.type === "AssignmentExpression"
+				? unwrap(child(node, "left"))
+				: node.type === "UnaryExpression" && node.operator === "delete"
+					? unwrap(child(node, "argument"))
+					: undefined;
+		if (!target || !/MemberExpression$/.test(target.type)) return;
+		if (nameOf(unwrap(child(target, "object"))) !== name) return;
+		const key = target.computed
+			? resolveString(child(target, "property"), ancestors)
+			: nameOf(child(target, "property"));
+		if (key === NOT_A_STRING || (key !== undefined && key !== prop)) return;
+		if (key === undefined) {
+			erased ??= `\`${name}\` is written under a key the walk cannot resolve, which may replace its \`${prop}\``;
+			return;
+		}
+		if (node.type === "UnaryExpression") {
+			erased ??= `\`${name}.${prop}\` is deleted`;
+			return;
+		}
+		const right = child(node, "right");
+		if (right) values.push(right);
+	});
+	return { values, erased };
 }
 
 /**
@@ -1043,46 +1441,239 @@ function localDeclaration(
  */
 type Supply = { sources: Source[]; opaque?: true } | { missing: string; explicit?: true; absent?: true };
 
+/** A helper being traced: its parameters stand for the arguments of the call that reached it. */
+interface Substitution {
+	fn: Node;
+	args: readonly Node[];
+	ancestors: readonly Node[];
+	outer?: Substitution;
+}
+
+/** `a.b` joined with `c` into `a.b.c`, skipping empty parts. */
+const joinProp = (...parts: Array<string | undefined>): string | undefined =>
+	parts.filter(part => part !== undefined && part !== "").join(".") || undefined;
+
+/**
+ * The combined supply of several values a binding or a helper may yield: any visibly missing one is
+ * missing; all absent is absent; otherwise every source, opaque if any is.
+ */
+function combine(supplies: readonly Supply[], what: string): Supply {
+	const explicit = supplies.find(entry => "missing" in entry && entry.explicit);
+	if (explicit) return explicit;
+	const supplied = supplies.filter((entry): entry is Extract<Supply, { sources: Source[] }> => "sources" in entry);
+	if (supplied.length === 0) return { missing: `${what} carries none`, absent: true };
+	return {
+		sources: supplied.flatMap(entry => entry.sources),
+		...(supplied.some(entry => entry.opaque) ? { opaque: true as const } : {}),
+	};
+}
+
+/** The function a local name refers to in scope: a function declaration or a constant holding one. */
+function resolveLocalFunction(name: string, ancestors: readonly Node[]): Node | undefined {
+	const declared = localDeclaration(name, ancestors);
+	if (declared && !declared.param) {
+		const init = unwrap(declared.init);
+		if (init && isFunctionLike(init) && !declared.initProp && assignmentsTo(name, declared.scope).length === 0) {
+			return init;
+		}
+		if (declared.init) return undefined;
+	}
+	for (let index = ancestors.length - 1; index >= 0; index--) {
+		const scope = ancestors[index];
+		const body = isFunctionLike(scope) ? child(scope, "body") : scope.type === "Program" ? scope : undefined;
+		if (!body) continue;
+		let found: Node | undefined;
+		walk(body, (node, nodeAncestors) => {
+			if (found || node.type !== "FunctionDeclaration" || nameOf(child(node, "id")) !== name) return;
+			if (nodeAncestors.slice(1).some(isFunctionLike)) return;
+			found = node;
+		});
+		if (found) return found;
+	}
+	return undefined;
+}
+
+/** The ancestors of `target` from the root of the tree `ancestors` belongs to. */
+function ancestorsOf(target: Node, ancestors: readonly Node[]): readonly Node[] | undefined {
+	const root = ancestors[0];
+	if (!root) return undefined;
+	let found: readonly Node[] | undefined;
+	walk(root, (node, nodeAncestors) => {
+		if (!found && node === target) found = [...nodeAncestors];
+	});
+	return found;
+}
+
+/** What a function returns: each `return` expression (not those of nested functions), or an arrow's body. */
+function returnsOf(fn: Node, fnAncestors: readonly Node[]): Array<{ node: Node | undefined; ancestors: Node[] }> {
+	const body = child(fn, "body");
+	if (!body) return [];
+	if (body.type !== "BlockStatement") return [{ node: body, ancestors: [...fnAncestors, fn] }];
+	const returns: Array<{ node: Node | undefined; ancestors: Node[] }> = [];
+	walk(
+		body,
+		(node, nodeAncestors) => {
+			if (node.type !== "ReturnStatement") return;
+			if (nodeAncestors.slice(fnAncestors.length + 2).some(isFunctionLike)) return;
+			returns.push({ node: child(node, "argument"), ancestors: [...nodeAncestors, node] });
+		},
+		[...fnAncestors, fn],
+	);
+	return returns;
+}
+
+/** Trace the value(s) a local function returns, its parameters standing for `args`. */
+function supplyFromFunction(
+	fn: Node,
+	args: readonly Node[],
+	callAncestors: readonly Node[],
+	prop: string | undefined,
+	depth: number,
+	subst: Substitution | undefined,
+	inOptions: boolean,
+): Supply {
+	const fnAncestors = ancestorsOf(fn, callAncestors);
+	if (!fnAncestors) return { sources: [{ node: fn, prop }], opaque: true };
+	const inner: Substitution = { fn, args, ancestors: callAncestors, outer: subst };
+	const returns = returnsOf(fn, fnAncestors);
+	if (returns.length === 0) return { missing: "the helper returns nothing", explicit: true };
+	return combine(
+		returns.map(entry =>
+			entry.node
+				? supply({ node: entry.node, prop }, entry.ancestors, depth + 1, inner, inOptions)
+				: { missing: "the helper returns nothing", explicit: true as const },
+		),
+		"the helper's result",
+	);
+}
+
 /**
  * Where `source` (an argument, or a property of one) comes from: the expressions that supply the
- * signal, `missing` when it is visibly absent or `undefined`. Options built by a helper call
- * (`prepare({ signal })`) are traced into the call's arguments; a helper whose arguments show no
- * signal fails, so a cancellation deleted behind a helper is seen.
+ * signal, `missing` when it is visibly absent or `undefined` on any path the walk can see.
+ *
+ * - A local binding is traced through its initializer and every later assignment, and a property of
+ *   it through every later write of that property; a deletion or a write under an unresolvable key
+ *   fails.
+ * - A property read (`options.signal`) is traced into the object it reads from.
+ * - An object literal's later property wins, a computed key included; a getter is traced into what
+ *   it returns; a key the walk cannot resolve after the signal fails.
+ * - A call to a local function is traced into what it returns, its parameters standing for the
+ *   call's arguments. Options built by any other helper (`inOptions`) are accepted only when the
+ *   helper's arguments visibly carry the signal.
+ * - A parameter, `this`, or an import is trusted (`opaque`): a caller declaration carries the
+ *   requirement out to whoever supplies it.
  */
-function supply(source: Source, ancestors: readonly Node[], depth = 0): Supply {
-	if (depth > 8) return { sources: [source], opaque: true };
+function supply(source: Source, ancestors: readonly Node[], depth = 0, subst?: Substitution, inOptions = true): Supply {
+	if (depth > 12) return { sources: [source], opaque: true };
 	const node = unwrap(source.node);
 	if (!node) return { missing: "no argument", explicit: true };
 	if (node.type === "ConditionalExpression") {
 		const branches = [child(node, "consequent")!, child(node, "alternate")!].map(branch =>
-			supply({ node: branch, prop: source.prop }, ancestors, depth + 1),
+			supply({ node: branch, prop: source.prop }, ancestors, depth + 1, subst, inOptions),
 		);
 		const missing = branches.find(branch => "missing" in branch);
 		if (missing)
 			return { missing: `a branch passes none: ${(missing as { missing: string }).missing}`, explicit: true };
-		return {
-			sources: branches.flatMap(branch => ("sources" in branch ? branch.sources : [])),
-			...(branches.some(branch => "opaque" in branch) ? { opaque: true as const } : {}),
-		};
+		return combine(branches, "a conditional");
 	}
 	if (node.type === "LogicalExpression") {
-		const left = supply({ node: child(node, "left")!, prop: source.prop }, ancestors, depth + 1);
+		const left = supply({ node: child(node, "left")!, prop: source.prop }, ancestors, depth + 1, subst, inOptions);
 		// `a ?? b`, `a || b`: when the left side is visibly missing, the right side is what is passed.
 		// `a && b`: a truthy left yields the right side.
 		if (node.operator === "&&" || "missing" in left) {
-			return supply({ node: child(node, "right")!, prop: source.prop }, ancestors, depth + 1);
+			return supply({ node: child(node, "right")!, prop: source.prop }, ancestors, depth + 1, subst, inOptions);
 		}
 		return left;
 	}
+	if (node.type === "SequenceExpression") {
+		const last = children(node, "expressions").at(-1);
+		return supply({ node: last!, prop: source.prop }, ancestors, depth + 1, subst, inOptions);
+	}
 	if (node.type === "Identifier" && node.name !== "undefined") {
-		const declared = localDeclaration(node.name as string, ancestors);
-		if (declared?.init && !declared.initProp) {
-			return supply({ node: declared.init, prop: source.prop }, ancestors, depth + 1);
+		const name = node.name as string;
+		const declared = localDeclaration(name, ancestors);
+		if (declared?.param && subst && declared.param.fn === subst.fn) {
+			// A helper's parameter: the caller's argument at that position.
+			const arg = subst.args[declared.param.index];
+			const prop = joinProp(declared.param.prop, source.prop);
+			if (!arg)
+				return { missing: `the helper's parameter ${declared.param.index + 1} is not passed`, explicit: true };
+			if (arg.type === "SpreadElement") return { missing: "the helper's arguments are spread", explicit: true };
+			return supply({ node: arg, prop }, subst.ancestors, depth + 1, subst.outer, inOptions);
 		}
-		if (declared?.init && declared.initProp && !source.prop) {
-			return supply({ node: declared.init, prop: declared.initProp }, ancestors, depth + 1);
+		if (!declared) {
+			return source.prop ? { sources: [{ node, prop: source.prop }], opaque: true } : { sources: [{ node }] };
+		}
+		const candidates: Supply[] = [];
+		if (declared.param) {
+			candidates.push(
+				source.prop ? { sources: [{ node, prop: source.prop }], opaque: true } : { sources: [{ node }] },
+			);
+		} else if (declared.init) {
+			const prop = declared.initProp ? joinProp(declared.initProp, source.prop) : source.prop;
+			candidates.push(supply({ node: declared.init, prop }, ancestors, depth + 1, subst, inOptions));
+		} else {
+			candidates.push({ missing: `\`${name}\` is declared with no value`, absent: true });
+		}
+		for (const assigned of assignmentsTo(name, declared.scope)) {
+			candidates.push(supply({ node: assigned, prop: source.prop }, ancestors, depth + 1, subst, inOptions));
+		}
+		if (source.prop) {
+			const [head, ...rest] = source.prop.split(".");
+			const mutated = mutationsOf(name, head, declared.scope);
+			if (mutated.erased) return { missing: mutated.erased, explicit: true };
+			for (const value of mutated.values) {
+				candidates.push(
+					supply({ node: value, prop: joinProp(...rest) }, ancestors, depth + 1, subst, rest.length > 0),
+				);
+			}
+		}
+		return combine(candidates, `\`${name}\``);
+	}
+	if (/MemberExpression$/.test(node.type)) {
+		const object = unwrap(child(node, "object"));
+		const key = node.computed ? resolveString(child(node, "property"), ancestors) : nameOf(child(node, "property"));
+		if (typeof key === "string" && object?.type === "Identifier") {
+			// At a signal position (`controller.signal`), the object read from is no options object: a
+			// constructed or helper-built one is traced, not refused.
+			const traced = supply(
+				{ node: object, prop: joinProp(key, source.prop) },
+				ancestors,
+				depth + 1,
+				subst,
+				source.prop ? inOptions : false,
+			);
+			// A signal read off an object the walk cannot see into (`owner.signal`, a parameter) is the signal
+			// passed; only a visible object that lacks it, or holds `undefined`, makes it missing.
+			if (!source.prop && "sources" in traced && traced.opaque) return { sources: [{ node }] };
+			return traced;
 		}
 		return source.prop ? { sources: [{ node, prop: source.prop }], opaque: true } : { sources: [{ node }] };
+	}
+	if (/^(Call|OptionalCall)Expression$/.test(node.type)) {
+		const callee = unwrap(child(node, "callee"));
+		const local = callee?.type === "Identifier" ? resolveLocalFunction(callee.name as string, ancestors) : undefined;
+		const args = children(node, "arguments");
+		if (local) return supplyFromFunction(local, args, ancestors, source.prop, depth, subst, inOptions);
+		if (inOptions && source.prop) {
+			// Options built by a helper the walk cannot read: accept only a signal visible in its arguments.
+			const helper = callee?.type === "MemberExpression" ? memberName(callee) : nameOf(callee);
+			for (const arg of args) {
+				if (/signal$/i.test((arg.type === "MemberExpression" ? memberName(arg) : nameOf(arg)) ?? "")) {
+					return { sources: [{ node: arg }] };
+				}
+				const traced = supply({ node: arg, prop: source.prop }, ancestors, depth + 1, subst, inOptions);
+				if ("missing" in traced && traced.explicit) return traced;
+				// Accepted when the argument visibly holds the property, whatever value it holds there; an
+				// argument the walk cannot see into (a parameter) is no evidence.
+				if ("sources" in traced && (!traced.opaque || traced.sources.every(found => !found.prop))) return traced;
+			}
+			return {
+				missing: `the options come from \`${helper ?? "a call"}(…)\`, whose arguments show no \`${source.prop}\`; pass it in the options themselves`,
+				explicit: true,
+			};
+		}
+		return { sources: [{ node, prop: source.prop }], opaque: true };
 	}
 	if (!source.prop) {
 		if (isUndefinedLiteral(node)) return { missing: "the signal is undefined", explicit: true };
@@ -1095,31 +1686,44 @@ function supply(source: Source, ancestors: readonly Node[], depth = 0): Supply {
 			const property = properties[index];
 			if (property.type === "SpreadElement") {
 				// A later spread wins: one that carries the property (even as `undefined`) decides it.
-				const spread = supply({ node: child(property, "argument")!, prop: source.prop }, ancestors, depth + 1);
+				const spread = supply(
+					{ node: child(property, "argument")!, prop: source.prop },
+					ancestors,
+					depth + 1,
+					subst,
+					inOptions,
+				);
 				if ("missing" in spread && spread.absent) continue;
 				return spread;
 			}
-			if (property.computed || nameOf(child(property, "key")) !== head) continue;
-			if (property.type === "ObjectMethod") return { sources: [{ node: property }] };
+			const key = property.computed
+				? resolveString(child(property, "key"), ancestors)
+				: nameOf(child(property, "key"));
+			if (key === undefined) {
+				return {
+					missing: `a later key the walk cannot resolve may replace \`${head}\``,
+					explicit: true,
+				};
+			}
+			if (key !== head) continue;
+			if (property.type === "ObjectMethod") {
+				if (property.kind !== "get") {
+					return {
+						missing: `\`${head}\` is ${property.kind === "set" ? "a setter with no getter" : "a method"}`,
+						explicit: true,
+					};
+				}
+				const getterAncestors = ancestorsOf(property, ancestors) ?? ancestors;
+				return supplyFromFunction(property, [], getterAncestors, joinProp(...rest), depth, subst, rest.length > 0);
+			}
 			const value = child(property, property.shorthand ? "key" : "value");
-			return supply({ node: value!, prop: rest.join(".") || undefined }, ancestors, depth + 1);
+			return supply({ node: value!, prop: joinProp(...rest) }, ancestors, depth + 1, subst, rest.length > 0);
 		}
 		return { missing: `the options carry no \`${source.prop}\``, absent: true };
 	}
-	if (/^(Call|OptionalCall|New)Expression$/.test(node.type)) {
-		// Options built by a helper: accept only a signal visible in its arguments.
-		const callee = unwrap(child(node, "callee"));
-		const helper = callee?.type === "MemberExpression" ? memberName(callee) : nameOf(callee);
-		for (const arg of children(node, "arguments")) {
-			if (/signal$/i.test((arg.type === "MemberExpression" ? memberName(arg) : nameOf(arg)) ?? "")) {
-				return { sources: [{ node: arg }] };
-			}
-			const traced = supply({ node: arg, prop: source.prop }, ancestors, depth + 1);
-			if ("missing" in traced && traced.explicit) return traced;
-			if ("sources" in traced && !traced.opaque) return traced;
-		}
+	if (node.type === "NewExpression" && inOptions) {
 		return {
-			missing: `the options come from \`${helper ?? "a call"}(…)\`, whose arguments show no \`${source.prop}\`; pass it in the options themselves`,
+			missing: `the options are constructed by \`new ${nameOf(unwrap(child(node, "callee"))) ?? "…"}(…)\`; pass them as an object`,
 			explicit: true,
 		};
 	}
@@ -1165,12 +1769,44 @@ function requestCalls(site: Site): RequestCall[] | undefined {
 	return calls;
 }
 
+/**
+ * A call's arguments with each spread of a visible array (`f(...[a, b])`, `f(...args)` where
+ * `const args = [a, b]`) expanded in place; undefined when a spread hides what is passed.
+ */
+function expandArguments(args: readonly Node[], ancestors: readonly Node[]): Node[] | undefined {
+	const expanded: Node[] = [];
+	for (const arg of args) {
+		if (arg.type !== "SpreadElement") {
+			expanded.push(arg);
+			continue;
+		}
+		let target = unwrap(child(arg, "argument"));
+		if (target?.type === "Identifier") {
+			const declared = localDeclaration(target.name as string, ancestors);
+			if (!declared?.init || declared.initProp || declared.param) return undefined;
+			if (assignmentsTo(target.name as string, declared.scope).length > 0) return undefined;
+			target = unwrap(declared.init);
+		}
+		if (target?.type !== "ArrayExpression") return undefined;
+		for (const element of children(target, "elements")) {
+			if (element.type === "SpreadElement") return undefined;
+			expanded.push(element);
+		}
+	}
+	return expanded;
+}
+
 /** The value a `signal` path of a call or construction supplies. */
-function supplyAt(site: RequestCall, path: SignalPath): { missing: string } | { sources: Source[] } {
-	const args = children(site.node, "arguments");
-	if (args.slice(0, path.arg + 1).some(arg => arg.type === "SpreadElement")) return { sources: [{ node: site.node }] };
+function supplyAt(site: RequestCall, path: SignalPath): Supply {
+	const args = expandArguments(children(site.node, "arguments"), site.ancestors);
+	if (!args) {
+		return {
+			missing: "its arguments are spread from a value the walk cannot see; pass them directly",
+			explicit: true,
+		};
+	}
 	const arg = args[path.arg];
-	if (!arg) return { missing: `argument ${path.arg + 1} is not passed` };
+	if (!arg) return { missing: `argument ${path.arg + 1} is not passed`, explicit: true };
 	return supply({ node: arg, prop: path.prop }, site.ancestors);
 }
 
@@ -1466,7 +2102,7 @@ function closedOnAbort(site: Site): boolean {
 			const close = unwrap(child(inner, "callee"));
 			if (
 				close?.type === "MemberExpression" &&
-				memberName(close) === "close" &&
+				/^(close|destroy|abort|terminate)$/.test(memberName(close) ?? "") &&
 				nameOf(child(close, "object")) === socket.name
 			) {
 				closed = true;
@@ -1539,11 +2175,31 @@ async function hindsightMethods(files: ReadonlyMap<string, SourceFile>): Promise
 	return methods;
 }
 
-/** Problems with how the Hindsight client is bound: the walk finds its requests by the name `client`. */
-function hindsightBindings(files: ReadonlyMap<string, SourceFile>): string[] {
+/**
+ * Problems with how the Hindsight client is bound: the walk finds its requests by the name `client`,
+ * so a client stored under another name, or a method destructured off it, would hide a request.
+ */
+function hindsightBindings(files: ReadonlyMap<string, SourceFile>, methods: ReadonlySet<string>): string[] {
 	const problems: string[] = [];
 	for (const file of files.values()) {
 		if (file.key === HINDSIGHT.file) continue;
+		if (/\}\s*=\s*[\w$.?]*\bclient\b/.test(file.text)) {
+			walk(file.ast, node => {
+				if (node.type !== "VariableDeclarator" || child(node, "id")?.type !== "ObjectPattern") return;
+				const init = unwrap(child(node, "init"));
+				const receiver = /MemberExpression$/.test(init?.type ?? "") ? memberName(init!) : nameOf(init);
+				if (receiver !== "client") return;
+				const taken = children(child(node, "id"), "properties").some(property => {
+					if (property.type === "RestElement" || property.computed) return true;
+					return methods.has(nameOf(child(property, "key")) ?? "");
+				});
+				if (taken) {
+					problems.push(
+						`${file.key}:${node.loc?.start.line}: a Hindsight client's methods destructured off "client"; call them on it`,
+					);
+				}
+			});
+		}
 		if (!file.text.includes(HINDSIGHT.className) && !file.text.includes(HINDSIGHT.factory)) continue;
 		walk(file.ast, (node, ancestors) => {
 			const parent = ancestors.at(-1);
@@ -1610,11 +2266,16 @@ export async function checkModelRequestOwnership(packagesDir: string): Promise<O
 		for (const [name, signal] of Object.entries(primitives)) addConstructor(`fn:${file}:${name}`, name, signal);
 	}
 	for (const [name, signal] of Object.entries(NETWORK_GLOBALS)) addConstructor(`global:${name}`, name, signal);
+	for (const module of ["http", "https", "http2", "net", "tls", "worker_threads"]) {
+		for (const name of NODE_NETWORK_FUNCTIONS) addConstructor(`net:${module}.${name}`, `${module}.${name}`, NONE);
+	}
+	addConstructor("net:bun.connect", "Bun.connect", NONE);
+	addConstructor(`net:${GATE.name}`, GATE.name, opt(1));
 	const methods = await hindsightMethods(files);
 	if (files.has(HINDSIGHT.file) && !["recall", "retain", "retainBatch", "reflect"].every(name => methods.has(name))) {
 		problems.push(`${HINDSIGHT.file}: the Hindsight client's request methods were not found`);
 	}
-	problems.push(...hindsightBindings(files));
+	problems.push(...hindsightBindings(files, methods));
 
 	// Discover sites to a fixed point: each `caller` declaration adds a constructor whose uses are sites.
 	const sites = new Map<string, Site>();
@@ -1698,7 +2359,7 @@ export async function checkModelRequestOwnership(packagesDir: string): Promise<O
 			continue;
 		}
 		if (!site.reason) problems.push(`${where}: the declaration gives no reason`);
-		const network = site.constructor.id.startsWith("global:");
+		const network = site.constructor.id.startsWith("global:") || site.constructor.id.startsWith("net:");
 		// A model API (a listed primitive, the judge chain, the Hindsight client) is always a model request.
 		const modelApi =
 			/^(pkg:|hindsight:)/.test(site.constructor.id) ||
@@ -1748,6 +2409,12 @@ export async function checkModelRequestOwnership(packagesDir: string): Promise<O
 		}
 		if (site.use === "unresolved") continue;
 		const needsSignal = site.owner === "session" || site.owner === "turn" || site.owner === "caller";
+		if (needsSignal && (site.constructor.id === "global:eval" || site.constructor.id === "global:Function")) {
+			problems.push(
+				`${where}: generated code takes no cancellation, so it cannot be "${site.owner}"-owned; declare what the code is for`,
+			);
+			continue;
+		}
 		if (!needsSignal) continue;
 		const needed = pathsFor(site.constructor, site);
 		if (needed === "exempt") continue;

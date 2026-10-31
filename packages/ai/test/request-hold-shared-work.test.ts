@@ -9,6 +9,20 @@
  * endpoint holds its answer, so the live call can only join, never find a cached result. The cases
  * wait real time: the shared work registers after the held call's own awaits (database reads,
  * credential lookups), and only a loopback request shows whether it was sent.
+ *
+ * Every endpoint speaks HTTPS on `localhost` (`helpers/loopback-tls.ts`), and each case counts what it
+ * receives. No request here is an Anthropic Messages request, so each goes through the global fetch
+ * over HTTPS as over `http`; the scheme matches production's all the same. The path each fixture's
+ * request takes, against production's:
+ * - The Vertex and AWS lookups get a caller `fetch` that sends to the endpoint through the global
+ *   fetch; production hands them the provider's `transportFetch`, which for these providers also ends
+ *   in the global fetch. The caller fetch is needed to send the lookup to the endpoint at all: the
+ *   real token URLs are fixed hosts.
+ * - The OAuth refresh, the usage poll, the store's usage report and the saved-reset requests call the
+ *   global fetch, as production's do. The saved-reset requests use a loopback base URL, not the
+ *   official API.
+ * - The auth broker serves only `http`, so its client reaches it through an HTTPS front that counts
+ *   and holds each request. The client uses the global fetch, its production default.
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
@@ -23,8 +37,11 @@ import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import type { UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import { claudeUsageProvider } from "@oh-my-pi/pi-ai/usage/claude";
 import { runInRequestHoldScope } from "../src/request-hold";
+import { LOOPBACK_TLS, loopbackOrigin, trustLoopbackTls } from "./helpers/loopback-tls";
 
-/** A local endpoint that records each request and answers none until released. */
+trustLoopbackTls();
+
+/** A local HTTPS endpoint that records each request and answers none until released. */
 interface SharedEndpoint {
 	readonly url: string;
 	/** The path of each request received. */
@@ -38,7 +55,7 @@ function sharedEndpoint(answer: (request: Request, body: string) => Response | P
 	const paths: string[] = [];
 	const gate = Promise.withResolvers<void>();
 	const server = Bun.serve({
-		hostname: "127.0.0.1",
+		...LOOPBACK_TLS,
 		port: 0,
 		fetch: async request => {
 			const body = await request.text();
@@ -47,7 +64,7 @@ function sharedEndpoint(answer: (request: Request, body: string) => Response | P
 			return answer(request, body);
 		},
 	});
-	return { url: server.url.origin, paths, release: () => gate.resolve(), stop: () => server.stop(true) };
+	return { url: loopbackOrigin(server), paths, release: () => gate.resolve(), stop: () => server.stop(true) };
 }
 
 /** A fetch that sends every request to `site`, keeping its path, through the global fetch. */
@@ -402,9 +419,11 @@ describe("shared work a held job starts", () => {
 		const token = "hold-shared-bearer";
 		let remote: RemoteAuthCredentialStore;
 		let brokerStorage: AuthStorage;
-		/** Broker requests that passed the global fetch, by path. */
-		let sent: string[];
-		let answer: PromiseWithResolvers<void>;
+		/**
+		 * The HTTPS front the client reaches the broker through: it records each request's path and holds
+		 * the broker's answer until released, so a live caller can join the request in flight.
+		 */
+		let front: SharedEndpoint;
 
 		beforeEach(async () => {
 			brokerStorage = await AuthStorage.create(":memory:", { usageProviderResolver: () => undefined });
@@ -416,37 +435,40 @@ describe("shared work a held job starts", () => {
 				disableRefresher: true,
 			});
 			cleanups.push(() => handle.close());
-			sent = [];
-			answer = Promise.withResolvers<void>();
-			const client = new AuthBrokerClient({
-				url: handle.url,
-				token,
-				// The answer is held back until released, so a live caller can join the request in flight.
-				fetchImpl: (async (input: string | URL | Request, init?: RequestInit) => {
-					const response = await fetch(input, init);
-					sent.push(new URL(input instanceof Request ? input.url : String(input)).pathname);
-					await answer.promise;
-					return response;
-				}) as typeof fetch,
+			front = endpoint(async (request, body) => {
+				const url = new URL(request.url);
+				const headers = new Headers(request.headers);
+				headers.delete("host");
+				const upstream = await fetch(`${handle.url}${url.pathname}${url.search}`, {
+					method: request.method,
+					headers,
+					body: request.method === "GET" || request.method === "HEAD" ? undefined : body,
+				});
+				return new Response(await upstream.arrayBuffer(), {
+					status: upstream.status,
+					headers: { "content-type": upstream.headers.get("content-type") ?? "application/json" },
+				});
 			});
+			const client = new AuthBrokerClient({ url: front.url, token });
 			remote = new RemoteAuthCredentialStore({ client, streamSnapshots: false, observedUsageFlushMs: 25 });
 			cleanups.push(() => remote.close());
 		});
 
 		it("usage report", async () => {
-			const site = { url: "", paths: [], release: () => answer.resolve(), stop() {} } satisfies SharedEndpoint;
-
 			const live = await liveCallerOf(
-				site,
+				front,
 				() => remote.fetchUsageReports(),
 				() => remote.fetchUsageReports(),
 			);
 
-			expect({ live, sent: sent.filter(entry => entry === "/v1/usage").length }).toEqual({ live: [], sent: 1 });
+			expect({ live, sent: front.paths.filter(entry => entry === "/v1/usage").length }).toEqual({
+				live: [],
+				sent: 1,
+			});
 		});
 
 		it("observed-usage batch", async () => {
-			answer.resolve();
+			front.release();
 			const entry = (model: string) => ({
 				at: Date.now(),
 				provider: "anthropic",
@@ -469,7 +491,7 @@ describe("shared work a held job starts", () => {
 				.clientSummary(0)
 				.clients.flatMap(client => client.providers)
 				.reduce((total, provider) => total + provider.requests, 0);
-			expect({ reported, sent: sent.filter(path => path === "/v1/usage/observed").length }).toEqual({
+			expect({ reported, sent: front.paths.filter(path => path === "/v1/usage/observed").length }).toEqual({
 				reported: 2,
 				sent: 1,
 			});

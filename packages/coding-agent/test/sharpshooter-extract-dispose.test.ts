@@ -6,7 +6,15 @@
  * keeps; and none starts once disposal has begun. It used to send its request after the bound and
  * then throw the reply away because the session was disposed.
  *
- * Counted at a local endpoint, with the extraction's credential held while the session stops.
+ * Counted at a local endpoint, with the extraction's credential held while the session stops. The
+ * endpoint speaks HTTPS on `localhost`. The fixture takes the branch production's Anthropic traffic
+ * takes: provider `anthropic` over `anthropic-messages` on an `https` URL, no `fetch` of the caller's
+ * own, no proxy, so the request leaves `fetch` for `node:https` (`coworkFetch`). Each case whose
+ * request arrives checks that it reached the endpoint without passing `globalThis.fetch`, which only
+ * the fallback branch calls. One property differs from production and cannot match it: the base URL
+ * is the local endpoint, not `https://api.anthropic.com`. The transport is chosen by provider, API
+ * and scheme, not by host; the host only drops what the catalog scopes to the official API
+ * (request-body compression, the official endpoint's headers and its warm-up).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
@@ -27,6 +35,7 @@ import {
 import { listSharpshooterDeltas } from "@oh-my-pi/pi-coding-agent/sharpshooter/queue";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { LOOPBACK_TLS, loopbackOrigin, trustLoopbackTls } from "./helpers/loopback-tls";
 
 const PROMPT = "Keep boundaries explicit. This durable architecture decision governs the whole project.";
 
@@ -80,16 +89,21 @@ describe("Sharpshooter extraction at disposal", () => {
 	let session: AgentSession;
 	/** For each request the endpoint received, whether the session was disposing. */
 	let requests: boolean[];
+	/** Requests to the endpoint that passed `globalThis.fetch`: the fallback branch, which production does not take. */
+	let globalFetchSends: number;
 	let credentialReached: PromiseWithResolvers<void>;
 	let releaseCredential: PromiseWithResolvers<void>;
+
+	trustLoopbackTls();
 
 	beforeEach(() => {
 		tempDir = TempDir.createSync("@omp-sharpshooter-dispose-");
 		requests = [];
+		globalFetchSends = 0;
 		credentialReached = Promise.withResolvers<void>();
 		releaseCredential = Promise.withResolvers<void>();
 		server = Bun.serve({
-			hostname: "127.0.0.1",
+			...LOOPBACK_TLS,
 			port: 0,
 			fetch: async request => {
 				await request.json();
@@ -97,9 +111,15 @@ describe("Sharpshooter extraction at disposal", () => {
 				return deltaReply();
 			},
 		});
+		const origin = loopbackOrigin(server);
+		const realFetch = globalThis.fetch;
+		vi.spyOn(globalThis, "fetch").mockImplementation(((input: string | URL | Request, init?: RequestInit) => {
+			if (new URL(input instanceof Request ? input.url : String(input)).origin === origin) globalFetchSends++;
+			return realFetch(input, init);
+		}) as typeof fetch);
 		authStorage = createInMemoryAuthStorage();
 		authStorage.keys.setRuntime("anthropic", "test-key");
-		const model: Model<Api> = { ...getBundledModel("anthropic", "claude-sonnet-4-5")!, baseUrl: server.url.origin };
+		const model: Model<Api> = { ...getBundledModel("anthropic", "claude-sonnet-4-5")!, baseUrl: origin };
 		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 		vi.spyOn(modelRegistry, "getAll").mockReturnValue([model]);
 		const resolve = modelRegistry.resolver.bind(modelRegistry) as (
@@ -160,6 +180,8 @@ describe("Sharpshooter extraction at disposal", () => {
 		await flushSharpshooterExtraction(session);
 
 		expect(requests).toEqual([false]);
+		// It went out over `node:https`, as production's does; the fallback would have called the global fetch.
+		expect(globalFetchSends).toBe(0);
 		expect(await deltas()).toBe(1);
 	});
 
@@ -171,6 +193,7 @@ describe("Sharpshooter extraction at disposal", () => {
 		await flushSharpshooterExtraction(session);
 
 		expect(requests).toEqual([true]);
+		expect(globalFetchSends).toBe(0);
 		expect(await deltas()).toBe(1);
 	});
 

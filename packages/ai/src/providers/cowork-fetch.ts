@@ -4,6 +4,7 @@ import * as stream from "node:stream";
 import * as tls from "node:tls";
 import * as zlib from "node:zlib";
 import { logger } from "@oh-my-pi/pi-utils";
+import { admitSend, gatedFetch } from "../request-hold";
 import type { FetchImpl } from "../types";
 
 /** `host/path` for logging; query strings can carry keys. */
@@ -44,9 +45,12 @@ type RequestBody = string | Uint8Array;
 
 const directAgent = new https.Agent({ keepAlive: true });
 
-/** Resolved at call time, so a proxy wrapper installed after this module loads is honored. */
+/**
+ * Resolved at call time, so a proxy wrapper installed after this module loads is honored. It asks the
+ * provider-request hold itself, since the global fetch may be one the hold's backstop never wrapped.
+ */
 // model-request: transport stream — the fallback the Anthropic stream's fetch uses.
-const fallbackFetch: FetchImpl = (input, init) => globalThis.fetch(input, init as RequestInit);
+const fallbackFetch: FetchImpl = gatedFetch();
 
 function isHeaderRecord(headers: RequestInit["headers"]): headers is Record<string, string> {
 	return headers !== undefined && !(headers instanceof Headers) && !Array.isArray(headers);
@@ -206,7 +210,12 @@ async function sendCoworkRequest(
 		release();
 		signal.throwIfAborted();
 	}
+	// The hold is asked in the same turn the request goes out: nothing from here to `https.request`
+	// awaits. It is asked before the abort listener exists, which a refusal would otherwise leave behind.
+	const refusal = admitSend(signal);
+	if (refusal) await refusal;
 	signal?.addEventListener("abort", abort, { once: true });
+	// model-request: transport stream — the Anthropic stream's Cowork-profiled HTTPS request.
 	const request = https.request(
 		{
 			protocol: url.protocol,

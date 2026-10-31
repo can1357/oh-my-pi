@@ -4,7 +4,13 @@
 
 ### Added
 
-- Added provider-request holds (`runInRequestHoldScope`): work that must stay alive but stop calling out runs in a hold scope, and once the scope is held every `fetch` made in it, each `withAuth`/`withOAuthAccess` attempt and each Codex and GitLab Duo WebSocket frame waits at the moment it would be sent, then is refused when the request's signal or the scope ends ([#17457](https://github.com/can1357/oh-my-pi/pull/17457) by [@sjawhar](https://github.com/sjawhar))
+- Added provider-request holds (`runInRequestHoldScope`): work that must stay alive but stop calling out runs in a hold scope, and once the scope is held nothing it sends reaches a server. Every transport send in pi-ai and pi-agent-core asks the hold in the same turn it sends (`admitSend`, `gatedFetch`): each provider's fetch and its retries, Anthropic's `node:https` transport, Cursor's HTTP/2 session, the proxy tunnel and the Codex and GitLab Duo WebSockets. `withAuth`, `withOAuthAccess` and the streaming entry points also check before they resolve a credential, so a held caller starts no token refresh. A held request waits, then is refused (`RequestHeldError`) when its signal or the scope ends; one still waiting for its response when the hold begins is aborted. A refusal is terminal: the provider retry loops and the Anthropic client do not replay it. The global `fetch` is wrapped as a backstop for code that never asks ([#17457](https://github.com/can1357/oh-my-pi/pull/17457) by [@sjawhar](https://github.com/sjawhar))
+
+### Fixed
+
+- Fixed shared credential and usage work depending on whichever caller started it: an OAuth refresh, a saved-reset lookup or redemption, a usage probe, and an AWS or Vertex credential lookup took the first caller's cancellation, timeout or `fetch` for every caller that joined it, so one caller leaving failed the others, and a caller that brought its own `fetch` could get another caller's result. Such work now runs as long as any caller still waits for it, each caller's signal ends only its own wait, a held caller starts none, and lookups are shared only among callers of the same `fetch`. A saved-reset lookup now shows each caller its own session's accounts, and a redemption ends within 45 seconds however long its callers wait ([#17457](https://github.com/can1357/oh-my-pi/pull/17457) by [@sjawhar](https://github.com/sjawhar))
+- Fixed a credential being blocked for every session for five minutes when the caller that needed its refresh was cancelled or refused ([#17457](https://github.com/can1357/oh-my-pi/pull/17457) by [@sjawhar](https://github.com/sjawhar))
+- `AuthBrokerClient` and `AuthStorage`'s usage and saved-reset requests now read the global `fetch` per request instead of capturing it at construction ([#17457](https://github.com/can1357/oh-my-pi/pull/17457) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.1] - 2026-10-31
 

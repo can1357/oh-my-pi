@@ -14,6 +14,7 @@ import { PARENT_WATCHDOG_WORKER_ARG } from "../cli/worker-selectors";
  */
 export function startParentWatchdog(parentPid: number): void {
 	const hostEntry = workerHostEntry();
+	// model-request: none — the worker polls the parent process's liveness and sends nothing.
 	const worker = hostEntry
 		? new Worker(hostEntry, { type: "module", argv: [PARENT_WATCHDOG_WORKER_ARG] })
 		: new Worker(new URL("./parent-watchdog-worker.ts", import.meta.url).href, { type: "module" });

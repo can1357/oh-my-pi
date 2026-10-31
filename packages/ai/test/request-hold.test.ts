@@ -1,9 +1,31 @@
+/**
+ * The provider-request hold, case by case: `withAuth`, a streaming completion, a plain fetch, a
+ * provider's own retry, `withOAuthAccess`, and nested scopes.
+ *
+ * Every endpoint speaks HTTPS on `localhost` (`helpers/loopback-tls.ts`), because the scheme picks the
+ * code path. The path each fixture's requests take, against production's:
+ * - The Anthropic completions ("streaming requests", "a provider's own retry") are made as production
+ *   makes them: no caller `fetch`, a string URL, record headers and no proxy, so `transportFetch`
+ *   sends them through `coworkFetch` on `node:https`, not the global fetch. Each live control checks
+ *   that: its requests arrive while none passed the global fetch. Two properties differ, neither of
+ *   which changes the transport: the base URL is a loopback one, not the official API (so no
+ *   official-only beta is sent and a large body would not be compressed; a compressed body is bytes,
+ *   which `coworkFetch` sends the same way), and the credential is an API key, not an OAuth token
+ *   (whose body rewrite also yields bytes).
+ * - The plain fetches ("fetch", the attempt `withOAuthAccess` runs, "nested scopes") call the global
+ *   fetch, as a tool's own request does in production; the scheme does not change that path. The
+ *   `withAuth` and `withOAuthAccess` cases are about the attempt the wrapper starts, which they count
+ *   themselves.
+ */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { type OAuthAccessSource, withAuth, withOAuthAccess } from "../src/auth-retry";
 import { runInRequestHoldScope } from "../src/request-hold";
 import { completeSimple } from "../src/stream";
 import type { Api, Model } from "../src/types";
+import { LOOPBACK_TLS, loopbackOrigin, trustLoopbackTls } from "./helpers/loopback-tls";
+
+trustLoopbackTls();
 
 /** One Anthropic streaming response whose text is `done`. */
 function anthropicDone(): Response {
@@ -38,10 +60,10 @@ async function settle(): Promise<void> {
 }
 
 /**
- * A local endpoint that counts what it receives; `answer` gets each request's 1-based number.
+ * A local HTTPS endpoint that counts what it receives; `answer` gets each request's 1-based number.
  *
  * The cases below wait real time where they assert that nothing arrives: a request is a loopback
- * HTTP exchange, and a provider's retry waits on the real clock, so fake time can neither deliver one
+ * HTTPS exchange, and a provider's retry waits on the real clock, so fake time can neither deliver one
  * nor show that none came.
  */
 interface Endpoint {
@@ -57,7 +79,7 @@ function endpoint(answer: (count: number) => Response = () => new Response("ok")
 	let requests = 0;
 	const first = Promise.withResolvers<void>();
 	const server = Bun.serve({
-		hostname: "127.0.0.1",
+		...LOOPBACK_TLS,
 		port: 0,
 		fetch: async request => {
 			await request.arrayBuffer();
@@ -67,7 +89,7 @@ function endpoint(answer: (count: number) => Response = () => new Response("ok")
 		},
 	});
 	return {
-		url: server.url.origin,
+		url: loopbackOrigin(server),
 		get requests() {
 			return requests;
 		},
@@ -82,6 +104,38 @@ function rateLimited(): Response {
 		status: 429,
 		headers: { "content-type": "application/json", "retry-after": "1" },
 	});
+}
+
+/** The requests to one origin that passed the global fetch, counted until `restore()`. */
+interface GlobalFetchCount {
+	readonly count: number;
+	restore(): void;
+}
+
+/**
+ * Count the requests to `origin` that pass the global fetch. An Anthropic request sent through
+ * `coworkFetch` never does; one that fell back to the global fetch (an `http` URL, a `Request` input,
+ * headers that are not a record, a proxy) does. A live control that sees zero here shows its fixture
+ * takes the production path.
+ */
+function globalFetchesTo(origin: string): GlobalFetchCount {
+	const below = globalThis.fetch;
+	let count = 0;
+	globalThis.fetch = Object.assign(
+		(input: string | URL | Request, init?: RequestInit) => {
+			if (new URL(input instanceof Request ? input.url : String(input)).origin === origin) count++;
+			return below(input, init);
+		},
+		{ preconnect: below.preconnect },
+	) as typeof fetch;
+	return {
+		get count() {
+			return count;
+		},
+		restore: () => {
+			globalThis.fetch = below;
+		},
+	};
 }
 
 describe("provider-request hold", () => {
@@ -194,11 +248,12 @@ describe("provider-request hold", () => {
 		let server: Bun.Server<undefined>;
 		let requests: number;
 		let model: Model<Api>;
+		let viaGlobalFetch: GlobalFetchCount;
 
 		beforeEach(() => {
 			requests = 0;
 			server = Bun.serve({
-				hostname: "127.0.0.1",
+				...LOOPBACK_TLS,
 				port: 0,
 				fetch: async request => {
 					await request.json();
@@ -206,10 +261,12 @@ describe("provider-request hold", () => {
 					return anthropicDone();
 				},
 			});
-			model = { ...getBundledModel("anthropic", "claude-sonnet-4-5")!, baseUrl: server.url.origin };
+			model = { ...getBundledModel("anthropic", "claude-sonnet-4-5")!, baseUrl: loopbackOrigin(server) };
+			viaGlobalFetch = globalFetchesTo(loopbackOrigin(server));
 		});
 
 		afterEach(() => {
+			viaGlobalFetch.restore();
 			server.stop(true);
 		});
 
@@ -220,13 +277,15 @@ describe("provider-request hold", () => {
 			const message = await runInRequestHoldScope(held.signal, ended.signal, () => ask("key"));
 
 			expect(message.stopReason).toBe("stop");
-			expect(requests).toBe(1);
+			expect({ requests, viaGlobalFetch: viaGlobalFetch.count }).toEqual({ requests: 1, viaGlobalFetch: 0 });
 		});
 
 		it("holds a completion made in a held scope until the scope ends, and sends nothing", async () => {
 			held.abort();
 			const pending = runInRequestHoldScope(held.signal, ended.signal, () => ask("key"));
-			await settle();
+			// Real time, long enough for a loopback HTTPS request to arrive: microtasks alone would show
+			// nothing whether or not a request had been sent.
+			await Bun.sleep(100);
 			expect(requests).toBe(0);
 
 			ended.abort();
@@ -242,7 +301,7 @@ describe("provider-request hold", () => {
 					return "key";
 				}),
 			);
-			await settle();
+			await Bun.sleep(100);
 			expect(requests).toBe(0);
 
 			ended.abort();
@@ -351,18 +410,26 @@ describe("provider-request hold", () => {
 
 		it("sends the retry of a rate-limited request whose scope is not held", async () => {
 			const site = endpoint(count => (count === 1 ? rateLimited() : anthropicDone()));
+			const viaGlobalFetch = globalFetchesTo(site.url);
 			try {
 				const model = { ...getBundledModel("anthropic", "claude-sonnet-4-5")!, baseUrl: site.url };
 				const message = await runInRequestHoldScope(held.signal, ended.signal, () => ask(model));
 
 				expect(message.stopReason).toBe("stop");
-				expect(site.requests).toBe(2);
+				expect({ requests: site.requests, viaGlobalFetch: viaGlobalFetch.count }).toEqual({
+					requests: 2,
+					viaGlobalFetch: 0,
+				});
 			} finally {
+				viaGlobalFetch.restore();
 				site.stop();
 			}
 		}, 10_000);
 
 		it("holds the retry of a request that was backing off when the hold began", async () => {
+			// A request that arrives with `held` aborted was sent after the hold began: the retry is sent
+			// only after the client's one-second retry-after wait, which starts once the first answer
+			// arrives, and the hold begins as soon as the endpoint received the first request.
 			let afterHold = 0;
 			const site = endpoint(count => {
 				if (held.signal.aborted) afterHold++;

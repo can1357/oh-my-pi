@@ -16,6 +16,7 @@ import {
 } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import { extractHttpStatusFromError, fetchWithRetry, readSseJson } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
+import { gatedFetch } from "../request-hold";
 import { oauthAccountKey } from "../auth/types";
 import type {
 	AntigravityModelWireProfile,
@@ -973,7 +974,8 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 							maxAttempts: isLastEndpoint ? MAX_RETRIES + 1 : 1,
 							defaultDelayMs: attempt => BASE_DELAY_MS * 2 ** attempt,
 							maxDelayMs: options?.maxRetryDelayMs ?? RATE_LIMIT_BUDGET_MS,
-							fetch: options?.fetch,
+							// model-request: transport stream — the Gemini CLI stream's request.
+							fetch: gatedFetch(options?.fetch),
 							timeout: false,
 						});
 					} finally {
@@ -1023,7 +1025,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 							}
 
 							// model-request: transport stream — the Gemini CLI stream's request.
-							currentResponse = await (options?.fetch ?? fetch)(requestUrl, {
+							currentResponse = await gatedFetch(options?.fetch)(requestUrl, {
 								method: "POST",
 								headers: requestHeaders,
 								body: requestBodyJson,

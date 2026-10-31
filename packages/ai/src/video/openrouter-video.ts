@@ -2,6 +2,7 @@ import type { Api, FetchImpl, Model, Usage } from "@oh-my-pi/pi-catalog/types";
 import { type } from "@oh-my-pi/omptype";
 import { type ApiKey, withAuth } from "../auth-retry";
 import * as AIError from "../error";
+import { gatedFetch } from "../request-hold";
 import type {
 	VideoAudioReference,
 	VideoContent,
@@ -148,7 +149,7 @@ async function authenticatedFetch(
 	init?: Omit<RequestInit, "signal">,
 ): Promise<Response> {
 	// model-request: transport submitVideo, pollVideo, downloadVideo — the video job requests.
-	const fetchImpl = options.fetch ?? fetch;
+	const fetchImpl = gatedFetch(options.fetch);
 	return withAuth(
 		options.apiKey,
 		async key => {

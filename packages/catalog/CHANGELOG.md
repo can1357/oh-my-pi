@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the Antigravity version lookup serving every caller through the first caller's `fetch`, and one failed lookup suppressing it for every caller for ten minutes; lookups are now shared and suppressed only among callers of the same `fetch`. A caller whose session has started closing no longer starts the version, models.dev or Ollama metadata lookup ([#17457](https://github.com/can1357/oh-my-pi/pull/17457) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.14.1] - 2026-10-31
 
 ### Changed

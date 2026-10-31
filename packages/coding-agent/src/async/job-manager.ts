@@ -1,4 +1,4 @@
-import { type ImageContent, runInRequestHoldScope } from "@oh-my-pi/pi-ai";
+import { ensureRequestHoldFetch, type ImageContent, runInRequestHoldScope } from "@oh-my-pi/pi-ai";
 import type { PipeStreams } from "@oh-my-pi/pi-natives";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
@@ -811,6 +811,9 @@ export class AsyncJobManager {
 		) {
 			return;
 		}
+		// The global fetch may have been replaced since the job's scope wrapped it: wrap it again, so a
+		// fetch the job makes through the global from here on is held too.
+		ensureRequestHoldFetch();
 		this.#requestHolds.get(job.id)?.abort();
 		if (job.survivesBeginDispose !== undefined) return;
 		job.status = "cancelled";

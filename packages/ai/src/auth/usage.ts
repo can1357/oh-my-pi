@@ -1,5 +1,6 @@
 import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
 import { $pickenv, logger, runOutsideRequestHold } from "@oh-my-pi/pi-utils";
+import { admitSharedStart } from "@oh-my-pi/pi-utils/request-hold-scope";
 import { getEnvApiKey } from "../env-api-key";
 import * as AIError from "../error";
 import type { OAuthCredentials } from "../registry/oauth/types";
@@ -200,15 +201,16 @@ export class UsageService implements UsageApi {
 		});
 	}
 
-	/** Probe a provider endpoint, refreshing near-expiry OAuth tokens when possible. */
-	async #fetchUsageUncached(request: UsageRequestDescriptor, timeoutMs?: number): Promise<UsageReport | null> {
+	/**
+	 * Probe a provider endpoint, refreshing near-expiry OAuth tokens when possible. The probe is shared by
+	 * every caller for the credential, so it is bounded by this service's own timeout, not a caller's.
+	 */
+	async #fetchUsageUncached(request: UsageRequestDescriptor): Promise<UsageReport | null> {
 		const providerImpl = this.providerFor(request.provider);
 		if (!providerImpl) return null;
 
-		const timeoutSignal =
-			typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0
-				? AbortSignal.timeout(timeoutMs)
-				: undefined;
+		const timeoutMs = this.requestTimeoutMs;
+		const timeoutSignal = Number.isFinite(timeoutMs) && timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : undefined;
 		let params: UsageFetchParams = {
 			...request,
 			accountKey: usageCacheIdentity(request.credential),
@@ -318,12 +320,11 @@ export class UsageService implements UsageApi {
 		}
 	}
 
-	/** Cache a credential report with jitter and failure cooldown. */
-	async #fetchUsageCached(
-		request: UsageRequestDescriptor,
-		options: { timeoutMs?: number } = {},
-	): Promise<UsageReport | null> {
-		const timeoutMs = options.timeoutMs;
+	/**
+	 * Cache a credential report with jitter and failure cooldown. `signal` is the caller's: it decides
+	 * only whether a held caller may start a probe, never how long the shared probe runs.
+	 */
+	async #fetchUsageCached(request: UsageRequestDescriptor, signal?: AbortSignal): Promise<UsageReport | null> {
 		const cacheKey = this.#deps.cache.reportKey(request);
 		const failureKey = this.#deps.cache.failureKey(cacheKey);
 		const now = Date.now();
@@ -346,15 +347,18 @@ export class UsageService implements UsageApi {
 			const report = await inFlight.promise;
 			return inFlight.refreshEpoch === this.#deps.cache.refreshEpoch(request.provider)
 				? report
-				: this.#fetchUsageCached(request, options);
+				: this.#fetchUsageCached(request, signal);
 		}
 		const usageCacheEpoch = this.#deps.cache.epoch;
 		const refreshEpoch = this.#deps.cache.refreshEpoch(request.provider);
 		const recoveryEpoch = this.#deps.cache.recoveryEpoch(request.provider);
+		// A held caller must not start the probe for the others; it may only join one in flight.
+		const refusal = admitSharedStart(signal);
+		if (refusal) await refusal;
 		// Every caller for this credential joins this probe, so it starts outside the caller's
 		// provider-request hold: a held caller must not hold it, or refuse it, for the others.
 		const promise = runOutsideRequestHold(async () => {
-			const report = await this.#fetchUsageUncached(request, timeoutMs);
+			const report = await this.#fetchUsageUncached(request);
 			// Block marks bump the generation too: a report racing a fresh 429 may
 			// predate it, so it answers this probe but is neither cached nor used
 			// to heal blocks.
@@ -402,7 +406,7 @@ export class UsageService implements UsageApi {
 		const report = await promise;
 		return refreshEpoch === this.#deps.cache.refreshEpoch(request.provider)
 			? report
-			: this.#fetchUsageCached(request, options);
+			: this.#fetchUsageCached(request, signal);
 	}
 
 	/**
@@ -669,7 +673,7 @@ export class UsageService implements UsageApi {
 	async report(
 		provider: Provider,
 		credential: AuthCredential,
-		options?: { baseUrl?: string; timeoutMs?: number; signal?: AbortSignal },
+		options?: { baseUrl?: string; signal?: AbortSignal },
 	): Promise<UsageReport | null> {
 		// Store-level hook (e.g. `RemoteAuthCredentialStore`) is authoritative
 		// when present for OAuth: the broker already aggregates usage from a
@@ -693,9 +697,7 @@ export class UsageService implements UsageApi {
 			if (!resolvedApiKey) return null;
 			usageCredential.apiKey = resolvedApiKey;
 		}
-		return this.#fetchUsageCached(usageRequest(provider, usageCredential, options?.baseUrl), {
-			timeoutMs: options?.timeoutMs ?? this.requestTimeoutMs,
-		});
+		return this.#fetchUsageCached(usageRequest(provider, usageCredential, options?.baseUrl), options?.signal);
 	}
 
 	/**
@@ -736,17 +738,9 @@ export class UsageService implements UsageApi {
 		const tails = new Map<Provider, Promise<void>>();
 		return Promise.all(
 			requests.map(request => {
-				if (!serializedProviders.has(request.provider)) {
-					return this.#fetchUsageCached(request, {
-						timeoutMs: this.requestTimeoutMs,
-					});
-				}
+				if (!serializedProviders.has(request.provider)) return this.#fetchUsageCached(request);
 				const tail = tails.get(request.provider) ?? Promise.resolve();
-				const current = tail.then(() =>
-					this.#fetchUsageCached(request, {
-						timeoutMs: this.requestTimeoutMs,
-					}),
-				);
+				const current = tail.then(() => this.#fetchUsageCached(request));
 				tails.set(
 					request.provider,
 					current.then(
@@ -773,6 +767,9 @@ export class UsageService implements UsageApi {
 			const overrideKey = `__override__\0${this.#deps.cache.epoch}\0${scope}`;
 			let shared = this.#usageReportsInFlight.get(overrideKey);
 			if (!shared) {
+				// A held caller must not start the shared fetch for the others; it may only join one in flight.
+				const refusal = admitSharedStart(options?.signal);
+				if (refusal) await refusal;
 				// Don't forward the caller signal into the shared fetch — first caller's
 				// abort would otherwise cancel the upstream for every peer. Nor the caller's
 				// provider-request hold, for the same reason.
@@ -831,9 +828,13 @@ export class UsageService implements UsageApi {
 		const inFlight = this.#usageReportsInFlight.get(cacheKey);
 		if (inFlight) return raceSignal(inFlight, options?.signal, "usage fetch aborted");
 
-		// Its per-credential probes are shared work and start outside the caller's provider-request hold
-		// themselves (see #fetchUsageCached); this aggregate only awaits them.
-		const promise = (async () => {
+		// A held caller must not start the aggregate for the others; it may only join one in flight.
+		const refusal = admitSharedStart(options?.signal);
+		if (refusal) await refusal;
+		// Every caller polling the same credentials joins this aggregate, so it runs outside the caller's
+		// provider-request hold, and so do the per-credential probes it starts: a caller held while the
+		// aggregate runs must not hold or refuse them for the others.
+		const promise = runOutsideRequestHold(async () => {
 			for (const request of requests) {
 				this.logger?.debug("Usage fetch queued", {
 					provider: request.provider,
@@ -867,7 +868,7 @@ export class UsageService implements UsageApi {
 			});
 			if (usageCacheEpoch === this.#deps.cache.epoch) this.#deps.cache.clearForceRefresh(forcedRefresh);
 			return resolved;
-		})().finally(() => {
+		}).finally(() => {
 			this.#usageReportsInFlight.delete(cacheKey);
 		});
 

@@ -4,9 +4,18 @@
  * result on a socket a previous turn preserved. WebSocket traffic never passes through the global
  * fetch the hold wraps, so the transport checks the hold itself, right before each send.
  *
- * The REST setup is answered by the `fetch` option, so the global fetch's own hold stays out of these
- * cases. They wait real time where they assert that nothing arrives: the server is a real loopback
- * WebSocket, which fake time can neither deliver nor rule out.
+ * The server is a real loopback WebSocket over `wss` on `localhost` (`helpers/loopback-tls.ts`), as a
+ * production GitLab host serves `https`, and each case counts what it receives. The socket is opened
+ * as in production: Bun's `WebSocket` with the workflow's headers (the default factory, or one case's
+ * factory that builds the same socket). Only the host differs.
+ *
+ * One property differs from production on purpose: the REST setup is answered by the `fetch` option,
+ * in process. Production sends it over the network through the same gate (`gatedFetch` around the
+ * transport fetch). But a hold that begins while a REST request waits for its answer aborts that
+ * request (the gate links each request to the hold until its response arrives), which would end the
+ * turn before it reaches the socket, and the case would pass without exercising the socket's own
+ * check. The cases wait real time where they assert that nothing arrives, which fake time can neither
+ * deliver nor rule out.
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { ServerWebSocket } from "bun";
@@ -18,6 +27,9 @@ import {
 import type { AssistantMessage, Context, FetchImpl, Model, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { runInRequestHoldScope } from "../src/request-hold";
+import { LOOPBACK_TLS, loopbackOrigin, trustLoopbackTls } from "./helpers/loopback-tls";
+
+trustLoopbackTls();
 
 type Frame = Record<string, unknown>;
 
@@ -91,7 +103,7 @@ describe("the GitLab Duo WebSocket transport in a hold scope", () => {
 		onStart = [ANSWER];
 		providerSessionState = new Map();
 		server = Bun.serve({
-			hostname: "127.0.0.1",
+			...LOOPBACK_TLS,
 			port: 0,
 			fetch(incoming, server) {
 				upgrades++;
@@ -113,7 +125,7 @@ describe("the GitLab Duo WebSocket transport in a hold scope", () => {
 			name: "Claude Sonnet 4.6 - Vertex",
 			api: "gitlab-duo-agent",
 			provider: "gitlab-duo-agent",
-			baseUrl: `http://127.0.0.1:${server.port}`,
+			baseUrl: loopbackOrigin(server),
 			reasoning: false,
 			input: ["text"],
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -163,9 +175,20 @@ describe("the GitLab Duo WebSocket transport in a hold scope", () => {
 
 	it("opens no socket once the hold began during the workflow's setup", async () => {
 		const pending = turn(context, { fetch: rest(() => held.abort()) });
+		let settled = false;
+		void pending.then(
+			() => {
+				settled = true;
+			},
+			() => {
+				settled = true;
+			},
+		);
 		await Bun.sleep(150);
 
-		expect({ upgrades, frames }).toEqual({ upgrades: 0, frames: [] });
+		// Still waiting, not ended: a turn whose socket failed in the client (on TLS, say) would show no
+		// upgrade either, but it would have ended.
+		expect({ upgrades, frames, settled }).toEqual({ upgrades: 0, frames: [], settled: false });
 
 		await cancel(pending);
 		expect({ upgrades, frames }).toEqual({ upgrades: 0, frames: [] });

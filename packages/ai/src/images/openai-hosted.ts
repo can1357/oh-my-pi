@@ -10,6 +10,7 @@ import {
 import { prompt, readSseJson, USER_AGENT } from "@oh-my-pi/pi-utils";
 import { withAuth } from "../auth-retry";
 import * as AIError from "../error";
+import { gatedFetch } from "../request-hold";
 import { applySessionHeader } from "../providers/inference-headers";
 import {
 	errorMessage,
@@ -201,7 +202,7 @@ export async function generateHostedImage(
 		...(stream ? { instructions: IMAGE_SYSTEM_INSTRUCTION, stream: true } : {}),
 	};
 	// model-request: transport generateImage — the image request.
-	const fetchImpl = options.fetch ?? fetch;
+	const fetchImpl = gatedFetch(options.fetch);
 	return withAuth(
 		options.apiKey,
 		async key => {

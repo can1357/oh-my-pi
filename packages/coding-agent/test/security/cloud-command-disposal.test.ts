@@ -7,6 +7,12 @@
  *
  * Counted at a local endpoint. The credential lookup resolves the real stored OAuth row, then holds
  * its result while the session stops, the way a slow token refresh that ignores cancellation would.
+ *
+ * The endpoint speaks HTTPS on `localhost`, as `https://chatgpt.com` does. The fixture takes
+ * production's branch: the command builds its client with no `fetch` of its own, so the client sends
+ * through `globalThis.fetch` over HTTPS, with no proxy. One property differs from production and
+ * cannot match it: the client's base URL is fixed to ChatGPT, so the global fetch the client captures
+ * is a stand-in that sends each ChatGPT request, with the same init, to the local endpoint instead.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
@@ -20,6 +26,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { handleSecurityCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/security";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
+import { LOOPBACK_TLS, loopbackOrigin, trustLoopbackTls } from "../helpers/loopback-tls";
 
 const CLOUD_ORIGIN = "https://chatgpt.com";
 const CLOUD_PATH = "/backend-api/aardvark/";
@@ -46,13 +53,15 @@ describe("/security cloud at session disposal", () => {
 	let credentialReached: PromiseWithResolvers<void>;
 	let releaseCredential: PromiseWithResolvers<void>;
 
+	trustLoopbackTls();
+
 	beforeEach(async () => {
 		tempDir = TempDir.createSync("@omp-security-cloud-dispose-");
 		requests = [];
 		credentialReached = Promise.withResolvers<void>();
 		releaseCredential = Promise.withResolvers<void>();
 		server = Bun.serve({
-			hostname: "127.0.0.1",
+			...LOOPBACK_TLS,
 			port: 0,
 			fetch: async request => {
 				if (request.method === "POST") await request.json();
@@ -80,7 +89,7 @@ describe("/security cloud at session disposal", () => {
 			if (url.origin !== CLOUD_ORIGIN || !url.pathname.startsWith(CLOUD_PATH)) {
 				throw new Error(`Unexpected request to ${url}`);
 			}
-			return realFetch(new URL(`${url.pathname}${url.search}`, server.url), init);
+			return realFetch(new URL(`${url.pathname}${url.search}`, loopbackOrigin(server)), init);
 		}) as typeof fetch);
 
 		authStorage = createInMemoryAuthStorage();

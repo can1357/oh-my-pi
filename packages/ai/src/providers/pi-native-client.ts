@@ -18,6 +18,7 @@
 import * as os from "node:os";
 import { getAppName, getInstallId, readSseJson } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
+import { gatedFetch } from "../request-hold";
 import type {
 	Api,
 	AssistantMessage,
@@ -182,7 +183,7 @@ export function streamPiNative<TApi extends Api>(
 		try {
 			const url = resolveStreamUrl(model as Model<Api>);
 			// model-request: transport stream — the pi-native gateway stream's requests.
-			const fetchImpl = options?.fetch ?? globalThis.fetch;
+			const fetchImpl = gatedFetch(options?.fetch);
 			const headers = buildHeaders(
 				model as Model<Api>,
 				typeof options?.apiKey === "string" ? options.apiKey : undefined,

@@ -9,6 +9,7 @@
  */
 import * as os from "node:os";
 import { getAppName, getInstallId, logger, postmortem, runOutsideRequestHold } from "@oh-my-pi/pi-utils";
+import { admitSharedStart } from "@oh-my-pi/pi-utils/request-hold-scope";
 import type { AuthCredentialStore } from "../auth/store";
 import {
 	type AuthCredential,
@@ -1360,7 +1361,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	 */
 	async fetchUsageReports(signal?: AbortSignal, provider?: Provider): Promise<UsageReport[] | null> {
 		this.#noteActivity();
-		const reports = await raceSignal(this.#loadUsageReports(provider), signal, "auth-broker request aborted");
+		const reports = await raceSignal(this.#loadUsageReports(provider, signal), signal, "auth-broker request aborted");
 		if (!reports) return null;
 		const visible = this.#filterUsageReports(this.#applyUsageOverlays(reports));
 		return provider === undefined ? visible : visible.filter(report => report.provider === provider);
@@ -1381,7 +1382,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		signal?: AbortSignal,
 	): Promise<UsageReport | null> {
 		this.#noteActivity();
-		const reports = await raceSignal(this.#loadUsageReports(provider), signal, "auth-broker request aborted");
+		const reports = await raceSignal(this.#loadUsageReports(provider, signal), signal, "auth-broker request aborted");
 		const visibleReports = reports ? this.#filterUsageReports(reports) : null;
 		const matched = visibleReports ? matchUsageReport(visibleReports, provider, credential) : null;
 		const overlay = this.#getActiveUsageOverlay(provider, credential);
@@ -1500,7 +1501,8 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		return maximum;
 	}
 
-	#loadUsageReports(provider?: Provider): Promise<UsageReport[] | null> {
+	/** `signal` is the caller's: it decides only whether a held caller may start a lookup. */
+	#loadUsageReports(provider?: Provider, signal?: AbortSignal): Promise<UsageReport[] | null> {
 		// An existing aggregate result covers a provider lookup too. The reverse
 		// is not true: a partial cache must never hide other providers from /usage.
 		const now = Date.now();
@@ -1520,6 +1522,9 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		const existing = this.#usageInflight.get(provider) ?? this.#usageInflight.get(undefined);
 		if (existing) return existing;
 		const epoch = this.#usageCacheEpoch;
+		// A held caller must not start the lookup for the others; it may only join one in flight.
+		const refusal = admitSharedStart(signal);
+		if (refusal) return refusal;
 		// Shared by every caller, so started outside the caller's provider-request hold, the reload an
 		// invalidation calls for included.
 		const inflight: Promise<UsageReport[] | null> = runOutsideRequestHold(() =>

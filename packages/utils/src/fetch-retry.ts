@@ -1,4 +1,5 @@
 import { scheduler } from "node:timers/promises";
+import { isRequestRefusal } from "./request-hold-scope";
 
 // "reset after 1h2m3s" / "10m15s" / "39s"
 const QUOTA_RESET_PATTERN = /reset after (?:(\d+)h)?(?:(\d+)m)?(\d+(?:\.\d+)?)s/i;
@@ -368,6 +369,8 @@ export async function fetchWithRetry(
 			response = await fetchImpl(requestUrl, { ...init, signal: init.signal ?? signal });
 		} catch (error) {
 			if (signal?.aborted) throw new Error("Request was aborted");
+			// Refused by the provider-request hold: every retry is refused the same way.
+			if (isRequestRefusal(error)) throw error;
 			const wrapped = wrapNetworkError(error);
 			if (attempt + 1 >= maxAttempts) throw wrapped;
 			await waitForRetry(resolveDefaultDelay(defaultDelayMs, attempt, maxDelayMs), signal);
@@ -534,6 +537,8 @@ export function isRetryableError(error: unknown): boolean {
 	const info = error as { message?: string; name?: string } | null;
 	const message = info?.message ?? "";
 	const name = info?.name ?? "";
+	// A refusal of the provider-request hold is named like an abort, but a retry is refused the same way.
+	if (isRequestRefusal(error)) return false;
 	if (name === "AbortError" || /timeout|timed out|aborted/i.test(message)) return true;
 
 	const status = extractHttpStatusFromError(error);

@@ -503,6 +503,7 @@ export class JsRuntime {
 	/** Read a prelude-owned global from this runtime's active global set. */
 	getGlobal(name: string): unknown {
 		this.#activateGlobals("read runtime global");
+		// model-request: none — reads a prelude-owned helper global by name for an eval cell; the read sends nothing.
 		return Reflect.get(globalThis, name);
 	}
 
@@ -787,6 +788,7 @@ interface GlobalStack {
 const GLOBAL_STACKS = new Map<string, GlobalStack>();
 
 function snapshotGlobal(key: string): GlobalSnapshot {
+	// model-request: none — snapshots a reserved helper global so a later release can restore it; the read sends nothing.
 	return {
 		exists: key in globalThis,
 		value: (globalThis as Record<string, unknown>)[key],
@@ -807,12 +809,14 @@ function claimGlobalKey(key: string, owner: symbol): void {
 		stack = { base: snapshotGlobal(key), entries: [] };
 		GLOBAL_STACKS.set(key, stack);
 	}
+	// model-request: none — records a reserved helper global's value for its owner; the read sends nothing.
 	stack.entries.push({ owner, value: (globalThis as Record<string, unknown>)[key] });
 }
 
 function recordGlobalValue(key: string, owner: symbol): void {
 	const stack = GLOBAL_STACKS.get(key);
 	const entry = stack?.entries.findLast(item => item.owner === owner);
+	// model-request: none — records a reserved helper global's value for its owner; the read sends nothing.
 	if (entry) entry.value = (globalThis as Record<string, unknown>)[key];
 }
 

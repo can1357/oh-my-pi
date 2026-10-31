@@ -18,6 +18,7 @@ import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { $flag, fetchWithRetry, logger, parseStreamingJsonThrottled, USER_AGENT } from "@oh-my-pi/pi-utils";
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
+import { gatedFetch } from "../request-hold";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import { resolveAwsBearerToken } from "../registry/aws";
 import type {
@@ -307,7 +308,8 @@ async function sendBedrockRequest(
 			headers: requestHeaders,
 			body,
 			signal: watchdog.signal,
-			fetch: options.fetch,
+			// model-request: transport stream — the Bedrock stream's request.
+			fetch: gatedFetch(options.fetch),
 			timeout: false,
 		});
 		if (!response.ok && endpoint === "invoke-with-response-stream")

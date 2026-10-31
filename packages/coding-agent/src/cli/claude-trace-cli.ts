@@ -615,6 +615,7 @@ export class ClaudeMessagesProxy {
 			socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
 			return;
 		}
+		// model-request: no-session — the claude-trace proxy forwards a traced CLI's own traffic upstream; no session exists in this command.
 		const upstream = this.#track(
 			net.connect({ host: target.host, port: target.port }, () => {
 				upstream.write(head);
@@ -639,6 +640,7 @@ export class ClaudeMessagesProxy {
 		if (rest.length > 0) {
 			clientTls.unshift(rest);
 		}
+		// model-request: no-session — the claude-trace proxy's upstream TLS leg for a traced CLI's traffic; no session exists in this command.
 		const upstreamTlsSocket: tls.TLSSocket = tls.connect({
 			host: target.host,
 			port: target.port,

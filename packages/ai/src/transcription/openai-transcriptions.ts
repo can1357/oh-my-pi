@@ -3,6 +3,7 @@ import type { Api, FetchImpl, Model, Usage } from "@oh-my-pi/pi-catalog/types";
 import { type } from "@oh-my-pi/omptype";
 import { type ApiKey, withAuth } from "../auth-retry";
 import * as AIError from "../error";
+import { gatedFetch } from "../request-hold";
 import type { TranscriptionRequest, TranscriptionResult, TranscriptionSegment, TranscriptionWord } from "./types";
 
 export interface TranscriptionOptions {
@@ -97,7 +98,7 @@ export async function transcribeOpenAI(
 	}
 
 	// model-request: transport transcribeAudio — the transcription request.
-	const fetchImpl = options.fetch ?? fetch;
+	const fetchImpl = gatedFetch(options.fetch);
 	const response = await withAuth(
 		options.apiKey,
 		async key => {

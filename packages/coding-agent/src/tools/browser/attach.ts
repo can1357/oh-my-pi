@@ -94,6 +94,7 @@ async function rawHttpGet(url: string, opts: RawGetOptions): Promise<CdpProbeRes
 	let contentLength: number | null = null;
 	const bodySoFar = () => buffered.slice(headerEnd + 4);
 	try {
+		// model-request: none — probes a browser's DevTools endpoint, a web service rather than a model request.
 		socket = await Bun.connect({
 			hostname: target.hostname,
 			port,

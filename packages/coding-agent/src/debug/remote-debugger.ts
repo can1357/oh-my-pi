@@ -68,6 +68,7 @@ async function reserveFreePort(host: string): Promise<number> {
 /** Resolve once `host:port` accepts a TCP connection (within one attempt). */
 function tryConnect(host: string, port: number, timeoutMs: number): Promise<boolean> {
 	const { promise, resolve } = Promise.withResolvers<boolean>();
+	// model-request: none — probes whether a debugger's TCP port accepts a connection, a local service.
 	const socket = net.createConnection({ host, port });
 	let settled = false;
 	const finish = (ok: boolean) => {

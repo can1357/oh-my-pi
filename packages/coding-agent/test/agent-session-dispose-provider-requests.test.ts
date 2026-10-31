@@ -6,8 +6,23 @@
  * auto-prewalk classifier of a queued task stops. Each of these used to send a request from the
  * closing session.
  *
- * The cases count requests at local endpoints, because what must not happen is a request
- * reaching the provider.
+ * The cases count requests at local endpoints that speak HTTPS on `localhost`, because what must
+ * not happen is a request reaching the provider.
+ *
+ * The branch each request takes, and production's:
+ *
+ * - Turns, steers and follow-ups, asides, side requests, compaction, handoff, branch summaries and
+ *   image descriptions: provider `anthropic` over `anthropic-messages` on an `https` URL, no `fetch`
+ *   of the caller's own, no proxy, so the request leaves `fetch` for `node:https` (`coworkFetch`), as
+ *   production's Anthropic traffic does. After each case the fixture checks that no request reached
+ *   the provider endpoint through `globalThis.fetch`, which only the fallback branch calls.
+ * - The judges (the prewalk classifier, `createJudge`, the TTSR rule judge, the table chart judge):
+ *   the native judge (`typesafe`), whose transport is the global fetch, there and in production.
+ *
+ * One property differs from production and cannot match it: each base URL is a local endpoint, not
+ * the provider's own host. The transport is chosen by provider, API and scheme, not by host; the
+ * host only drops what the catalog scopes to the official API (request-body compression, the
+ * official endpoint's headers and its warm-up).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
@@ -28,6 +43,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { planChart } from "@oh-my-pi/pi-tui/charts/chart-plan";
 import { analyzeTable } from "@oh-my-pi/pi-tui/charts/table-data";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { LOOPBACK_TLS, loopbackOrigin, trustLoopbackTls } from "./helpers/loopback-tls";
 
 /** A 1×1 PNG. */
 const IMAGE: ImageContent = {
@@ -103,6 +119,10 @@ describe("AgentSession provider requests at disposal", () => {
 	let releaseFirst: PromiseWithResolvers<void>;
 	let firstReply: "text" | "tool";
 	let toolRuns: number;
+	/** Requests to the provider endpoint through `globalThis.fetch`: the fallback branch, which production skips. */
+	let globalFetchSends: number;
+
+	trustLoopbackTls();
 
 	/** A session on the local endpoint; replaces the current one, which is disposed first. */
 	async function replaceSession(options: SessionOptions): Promise<void> {
@@ -142,8 +162,9 @@ describe("AgentSession provider requests at disposal", () => {
 		releaseFirst = Promise.withResolvers<void>();
 		firstReply = "text";
 		toolRuns = 0;
+		globalFetchSends = 0;
 		server = Bun.serve({
-			hostname: "127.0.0.1",
+			...LOOPBACK_TLS,
 			port: 0,
 			fetch: async request => {
 				const body = (await request.json()) as { messages: unknown[] };
@@ -157,9 +178,15 @@ describe("AgentSession provider requests at disposal", () => {
 				return anthropicResponse(firstReply);
 			},
 		});
+		const origin = loopbackOrigin(server);
+		const realFetch = globalThis.fetch;
+		vi.spyOn(globalThis, "fetch").mockImplementation(((input: string | URL | Request, init?: RequestInit) => {
+			if (new URL(input instanceof Request ? input.url : String(input)).origin === origin) globalFetchSends++;
+			return realFetch(input, init);
+		}) as typeof fetch);
 		authStorage = createInMemoryAuthStorage();
 		authStorage.keys.setRuntime("anthropic", "test-key");
-		model = { ...getBundledModel("anthropic", "claude-sonnet-4-5")!, baseUrl: server.url.origin };
+		model = { ...getBundledModel("anthropic", "claude-sonnet-4-5")!, baseUrl: origin };
 		modelRegistry = new ModelRegistry(authStorage);
 		session = createSession();
 	});
@@ -170,6 +197,8 @@ describe("AgentSession provider requests at disposal", () => {
 		authStorage.close();
 		server.stop(true);
 		vi.restoreAllMocks();
+		// Every request the provider endpoint received went through `node:https`: production's branch.
+		expect(globalFetchSends).toBe(0);
 	});
 
 	/** Start a turn and hold its provider response, so messages can be queued behind it. */
@@ -201,7 +230,7 @@ describe("AgentSession provider requests at disposal", () => {
 		const reached = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
 		const judgeServer = Bun.serve({
-			hostname: "127.0.0.1",
+			...LOOPBACK_TLS,
 			port: 0,
 			fetch: async request => {
 				const body = (await request.json()) as {
@@ -226,7 +255,7 @@ describe("AgentSession provider requests at disposal", () => {
 			name: "JEV Preview",
 			api: "typesafe",
 			provider: "typesafe",
-			baseUrl: judgeServer.url.origin,
+			baseUrl: loopbackOrigin(judgeServer),
 			kind: "judge",
 			reasoning: false,
 			input: ["text"],

@@ -4,7 +4,9 @@
 
 ### Added
 
-- Added `runOutsideRequestHold(fn)`: work shared across callers (a token refresh, a discovery cache) runs outside the caller's provider-request hold, so one held job's hold does not stall or refuse it for every other caller ([#17457](https://github.com/can1357/oh-my-pi/pull/17457) by [@sjawhar](https://github.com/sjawhar))
+- Added `runOutsideRequestHold(fn)`: work shared across callers (a token refresh, a discovery cache) runs outside the caller's provider-request hold, so one held job's hold does not stall or refuse it for every other caller. Shared work belongs to no caller, so a model request made in it is refused ([#17457](https://github.com/can1357/oh-my-pi/pull/17457) by [@sjawhar](https://github.com/sjawhar))
+- Added `SharedFlight` (`@oh-my-pi/pi-utils/shared-flight`): single-flight work with a lifetime of its own, which ends only once no caller still waits for it, so the caller that started it leaving fails no other caller; a held caller may join such work but starts none (`admitSharedStart`) ([#17457](https://github.com/can1357/oh-my-pi/pull/17457) by [@sjawhar](https://github.com/sjawhar))
+- Added `markRequestRefusal()` and `isRequestRefusal()` (`@oh-my-pi/pi-utils/request-hold-scope`): a refusal of the provider-request hold is terminal, so `fetchWithRetry` stops at one and `isRetryableError` no longer reports one as retryable ([#17457](https://github.com/can1357/oh-my-pi/pull/17457) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.1] - 2026-10-31
 

@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, setSystemTime } from "bun:
 import { runInRequestHoldScope } from "@oh-my-pi/pi-ai/request-hold";
 import { fetchWellKnownModels, ollamaModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
-import { ensureAntigravityVersion } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
+import { __resetAntigravityVersionForTests, ensureAntigravityVersion } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 
 /** A local endpoint that records each request and answers none it gates until released. */
 interface SharedEndpoint {
@@ -97,6 +97,8 @@ describe("a shared catalog lookup a held job starts", () => {
 		const saved = process.env.PI_AI_ANTIGRAVITY_VERSION;
 
 		beforeEach(() => {
+			// Another file's successful lookup must not skip this one.
+			__resetAntigravityVersionForTests();
 			delete process.env.PI_AI_ANTIGRAVITY_VERSION;
 			// The lookup's state is process-wide: move past any retry window a failed lookup left.
 			setSystemTime(new Date(Date.now() + 24 * 60 * 60_000));

@@ -14734,7 +14734,9 @@ export class AgentSession implements SettingsScope {
 				const redeemOptions = {
 					target: action.target,
 					baseUrlResolver: (candidate: string) => this.#modelRegistry.getProviderBaseUrl?.(candidate),
-					// Caller cancellation must not leave an ambiguous consume in flight.
+					// Bounds this attempt's wait. The redemption itself ends once every caller waiting on it has
+					// left, and within 45 s whatever they do: inside the fence's cooldown below, so no other
+					// process spends while it may still land.
 					signal: AbortSignal.timeout(15_000),
 				};
 				const lockKey = resetAccountLockKey(action.target);

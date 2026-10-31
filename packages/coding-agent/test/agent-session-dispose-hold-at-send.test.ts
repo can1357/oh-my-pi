@@ -14,8 +14,28 @@
  * cancelled when the owner lets go of its jobs.
  *
  * Each case counts what a local endpoint receives, beside a live control that sends. The cases wait
- * real time where they assert that nothing arrives: a request is a loopback HTTP exchange, which fake
+ * real time where they assert that nothing arrives: a request is a loopback HTTPS exchange, which fake
  * time can neither deliver nor rule out.
+ *
+ * Every endpoint speaks HTTPS on `localhost`, because the scheme picks the transport. The branch each
+ * request takes here, and production's:
+ *
+ * - pi-ai's model APIs (`complete`, `completeSimple`, `stream`, `streamSimple`), the job bodies' model
+ *   requests and the held subagent's turns: provider `anthropic` over `anthropic-messages` on an
+ *   `https` URL, no `fetch` of the caller's own, no proxy, so the request leaves `fetch` for
+ *   `node:https` (`coworkFetch`), as production's Anthropic traffic does. Each live control checks
+ *   that such a request reached the endpoint without passing `globalThis.fetch`, which only the
+ *   fallback branch calls. One property differs from production and cannot match it: the base URL is
+ *   the local endpoint, not `https://api.anthropic.com`. The transport is chosen by provider, API and
+ *   scheme, not by host; the host only drops what the catalog scopes to the official API
+ *   (request-body compression, the official endpoint's headers and its warm-up).
+ * - `withAuth`'s and `withOAuthAccess`'s attempts, the Hindsight read, the MCP call and the tool's own
+ *   fetch: the global fetch, which production's credentialed tool requests (web search), Hindsight
+ *   client and MCP calls use too.
+ * - The Perplexity search: production sends it through pi-ai's OpenAI chat-completions provider to
+ *   `api.perplexity.ai`, on that provider's transport, the global fetch. Its URL is fixed, so the
+ *   fixture passes a `fetch` of its own that rewrites the URL to the endpoint and calls the global
+ *   fetch: the same transport, one wrapper deeper.
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
@@ -45,6 +65,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { searchPerplexity } from "@oh-my-pi/pi-coding-agent/web/search/providers/perplexity";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { LOOPBACK_TLS, loopbackOrigin, trustLoopbackTls } from "./helpers/loopback-tls";
 
 /** One Anthropic streaming response: the `raw` tool call when `tool` is set, else the text `done`. */
 function anthropicTurn(tool: boolean): Response {
@@ -105,7 +126,8 @@ interface Site {
 	readonly arrivals: boolean[];
 	/**
 	 * Each call to the site that reached the global fetch the hold wraps, which sends it: whether the
-	 * owner had begun disposing when it was made.
+	 * owner had begun disposing when it was made. A model request never makes one: over HTTPS it is
+	 * sent through `node:https`, so only the endpoint sees it.
 	 */
 	readonly fetches: boolean[];
 	/** Resolves when the first request arrives. */
@@ -130,6 +152,8 @@ describe("a held job sends nothing from its owner's beginDispose() on", () => {
 	let server: Bun.Server<undefined>;
 	let previousFetch: typeof globalThis.fetch;
 	const cleanups: Array<() => Promise<void> | void> = [];
+
+	trustLoopbackTls();
 
 	beforeEach(() => {
 		tempDir = TempDir.createSync("@omp-hold-at-send-");
@@ -156,7 +180,7 @@ describe("a held job sends nothing from its owner's beginDispose() on", () => {
 		const arrivals: boolean[] = [];
 		const fetches: boolean[] = [];
 		server = Bun.serve({
-			hostname: "127.0.0.1",
+			...LOOPBACK_TLS,
 			port: 0,
 			fetch: async request => {
 				const body = await request.text();
@@ -169,7 +193,7 @@ describe("a held job sends nothing from its owner's beginDispose() on", () => {
 				return Response.json({ results: [] });
 			},
 		});
-		site = { url: server.url.origin, arrivals, fetches, first: first.promise };
+		site = { url: loopbackOrigin(server), arrivals, fetches, first: first.promise };
 		// Recorded beneath the hold: the next hold scope wraps whatever the global fetch is then.
 		previousFetch = globalThis.fetch;
 		const sendingFetch = previousFetch;
@@ -234,11 +258,17 @@ describe("a held job sends nothing from its owner's beginDispose() on", () => {
 		};
 	}
 
+	/** The job's state and every request that reached the site, whenever it was sent. */
+	function sent(jobId: string) {
+		const job = manager.getJob(jobId)!;
+		return { held: job.requestHold?.aborted, status: job.status, arrivals: site.arrivals.length };
+	}
+
 	/** Wait for the first request, or long enough that one would have arrived. */
 	const firstRequestOrQuiet = (quietMs = 500) => Promise.race([site.first, Bun.sleep(quietMs)]);
 
 	describe("a request started in the continuation that begins disposal", () => {
-		it.each([...APIS])("%s makes no fetch once disposal began", async api => {
+		it.each([...APIS])("%s sends nothing once disposal began", async api => {
 			const go = Promise.withResolvers<void>();
 			const jobId = manager.register(
 				"task",
@@ -255,10 +285,21 @@ describe("a held job sends nothing from its owner's beginDispose() on", () => {
 			go.resolve();
 			await firstRequestOrQuiet();
 
-			expect(afterDisposal(jobId)).toMatchObject({ held: true, status: "running", fetches: 0 });
-			// `withAuth` makes its attempt in the call itself, before `beginDispose()`: that request was sent
-			// before the hold, so it may land after; every request that lands was such a fetch.
-			expect(site.arrivals.length).toBe(site.fetches.length);
+			if (api === "withAuth") {
+				// `withAuth` makes its one attempt, through the global fetch, in the call itself, before
+				// `beginDispose()`: that request was sent before the hold, so it may land after; every request
+				// that lands was that fetch. The hold then aborts it, since its response had not begun, so that
+				// job ends instead of waiting held. Over HTTPS the abort can come during the TLS handshake,
+				// before the request is written, so whether it lands is not fixed.
+				expect(afterDisposal(jobId)).toMatchObject({ held: true, status: "completed" });
+				expect(site.fetches).toEqual([false]);
+				expect(site.arrivals.length).toBeLessThanOrEqual(site.fetches.length);
+				return;
+			}
+			// A model API awaits its credential and headers before it reaches the transport, so it sends, if
+			// at all, after the `beginDispose()` of this continuation: every request that lands came from the
+			// held scope. It goes through `node:https`, past the global fetch, so it is counted where it lands.
+			expect(sent(jobId)).toEqual({ held: true, status: "running", arrivals: 0 });
 		});
 
 		it.each([...APIS])("%s is sent when the owner is not disposing (control)", async api => {
@@ -273,9 +314,10 @@ describe("a held job sends nothing from its owner's beginDispose() on", () => {
 			);
 			await manager.getJob(jobId)!.promise;
 
+			// A model API's request reaches the endpoint without passing the global fetch: production's branch.
 			expect({ status: manager.getJob(jobId)!.status, fetches: site.fetches, arrivals: site.arrivals }).toEqual({
 				status: "completed",
-				fetches: [false],
+				fetches: api === "withAuth" ? [false] : [],
 				arrivals: [false],
 			});
 		});
@@ -308,7 +350,9 @@ describe("a held job sends nothing from its owner's beginDispose() on", () => {
 			release.resolve();
 			await firstRequestOrQuiet();
 
-			expect(afterDisposal(jobId)).toEqual({ held: true, status: "running", fetches: 0, arrivals: 0 });
+			// The headers resolve only after `beginDispose()`, so the request is sent, if at all, from the held
+			// scope, through `node:https`: it is counted where it lands.
+			expect(sent(jobId)).toEqual({ held: true, status: "running", arrivals: 0 });
 		});
 
 		it.each(["complete", "stream"] as const)("%s is sent when the owner is not disposing (control)", async api => {
@@ -324,17 +368,16 @@ describe("a held job sends nothing from its owner's beginDispose() on", () => {
 			);
 			await manager.getJob(jobId)!.promise;
 
-			expect({ fetches: site.fetches, arrivals: site.arrivals }).toEqual({ fetches: [false], arrivals: [false] });
+			// It reaches the endpoint without passing the global fetch: production's branch.
+			expect({ fetches: site.fetches, arrivals: site.arrivals }).toEqual({ fetches: [], arrivals: [false] });
 		});
 	});
 
 	describe("a job body that begins its owner's disposal before its first await", () => {
-		/** Eight credentialed requests, one after another. */
+		/** Eight credentialed model requests, one after another, as a subagent's turns make them. */
 		async function sendEight(signal: AbortSignal): Promise<string> {
 			for (let index = 0; index < 8; index++) {
-				await withAuth("test-key", key => fetch(site.url, { method: "POST", body: `${index}:${key}`, signal }), {
-					signal,
-				});
+				await complete(siteModel(), context(), { apiKey: "test-key", signal });
 			}
 			return "sent";
 		}
@@ -354,12 +397,9 @@ describe("a held job sends nothing from its owner's beginDispose() on", () => {
 			);
 			await firstRequestOrQuiet();
 
-			expect(afterDisposal(jobId)).toEqual({
-				held: true,
-				status: survives ? "running" : "cancelled",
-				fetches: 0,
-				arrivals: 0,
-			});
+			// The body begins its owner's disposal before it makes any request: every request that lands came
+			// from the held scope, through `node:https`.
+			expect(sent(jobId)).toEqual({ held: true, status: survives ? "running" : "cancelled", arrivals: 0 });
 		});
 
 		it("sends all eight when it does not begin its owner's disposal (control)", async () => {
@@ -367,11 +407,14 @@ describe("a held job sends nothing from its owner's beginDispose() on", () => {
 				ownerId: "Main",
 				survivesBeginDispose: SUBAGENT_TEARDOWN_DECIDES,
 			});
-			await manager.getJob(jobId)!.promise;
+			const job = manager.getJob(jobId)!;
+			await job.promise;
 
-			expect({ status: manager.getJob(jobId)!.status, arrivals: site.arrivals.length }).toEqual({
+			// Each request reached the endpoint without passing the global fetch: production's branch.
+			expect({ status: job.status, arrivals: site.arrivals.length, fetches: site.fetches.length }).toEqual({
 				status: "completed",
 				arrivals: 8,
+				fetches: 0,
 			});
 		});
 	});
@@ -437,7 +480,7 @@ describe("a held job sends nothing from its owner's beginDispose() on", () => {
 			cleanups.push(() => release.resolve());
 			let turns = 0;
 			const modelServer = Bun.serve({
-				hostname: "127.0.0.1",
+				...LOOPBACK_TLS,
 				port: 0,
 				fetch: async request => {
 					await request.arrayBuffer();
@@ -448,7 +491,10 @@ describe("a held job sends nothing from its owner's beginDispose() on", () => {
 				agent: new Agent({
 					getApiKey: () => "test-key",
 					initialState: {
-						model: { ...getBundledModel("anthropic", "claude-sonnet-4-5")!, baseUrl: modelServer.url.origin },
+						model: {
+							...getBundledModel("anthropic", "claude-sonnet-4-5")!,
+							baseUrl: loopbackOrigin(modelServer),
+						},
 						systemPrompt: ["Test"],
 						tools: [],
 					},
@@ -523,14 +569,14 @@ describe("a held job sends nothing from its owner's beginDispose() on", () => {
 			cleanups.push(() => late.dispose({ timeoutMs: 3_000 }).then(() => undefined));
 		});
 
-		/** A surviving job for `Late` that sends one credentialed request once `go` resolves. */
+		/** A surviving job for `Late` that sends one credentialed model request once `go` resolves. */
 		function registerLate(go: Promise<void> = Promise.resolve()): string {
 			return late.register(
 				"task",
 				"late survivor",
 				async ({ signal }) => {
 					await go;
-					await withAuth("test-key", key => fetch(site.url, { method: "POST", body: key, signal }), { signal });
+					await complete(siteModel(), context(), { apiKey: "test-key", signal });
 					return "sent";
 				},
 				{ ownerId: "Late", survivesBeginDispose: SUBAGENT_TEARDOWN_DECIDES },
@@ -541,7 +587,12 @@ describe("a held job sends nothing from its owner's beginDispose() on", () => {
 		async function settledState(jobId: string) {
 			const job = late.getJob(jobId)!;
 			await Promise.race([job.promise, Bun.sleep(1_000)]);
-			return { status: job.status, cancelled: job.abortController.signal.aborted, arrivals: site.arrivals.length };
+			return {
+				status: job.status,
+				cancelled: job.abortController.signal.aborted,
+				arrivals: site.arrivals.length,
+				fetches: site.fetches.length,
+			};
 		}
 
 		it.each(["removed", "replaced by a new one"] as const)(
@@ -562,7 +613,12 @@ describe("a held job sends nothing from its owner's beginDispose() on", () => {
 				if (change === "removed") unbind();
 				else late.bindOwnerDisposal("Late", new AbortController().signal);
 
-				expect(await settledState(jobId)).toEqual({ status: "cancelled", cancelled: true, arrivals: 0 });
+				expect(await settledState(jobId)).toEqual({
+					status: "cancelled",
+					cancelled: true,
+					arrivals: 0,
+					fetches: 0,
+				});
 			},
 		);
 
@@ -573,7 +629,8 @@ describe("a held job sends nothing from its owner's beginDispose() on", () => {
 			unbind();
 			go.resolve();
 
-			expect(await settledState(jobId)).toEqual({ status: "completed", cancelled: false, arrivals: 1 });
+			// It reaches the endpoint without passing the global fetch: production's branch.
+			expect(await settledState(jobId)).toEqual({ status: "completed", cancelled: false, arrivals: 1, fetches: 0 });
 		});
 	});
 });

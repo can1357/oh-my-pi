@@ -6,6 +6,12 @@
  * Each used to send its embedding request after its owner was gone.
  *
  * Counted at a local embedding endpoint, with the embedding credential held while the owner stops.
+ * The endpoint speaks HTTPS on `localhost`, as production's embedding endpoint (OpenRouter by
+ * default) does. The fixture takes production's branch: the embedding request goes through
+ * `fetchWithRetry` with no `fetch` of its own, so it is sent by `globalThis.fetch` over HTTPS, with
+ * record headers and no proxy. One property differs from production and cannot match it: the
+ * endpoint is not OpenRouter, so `embedApi` skips its "is a key configured" check; the fixture's key
+ * is a configured resolver, so production passes that check too and the send path is the same.
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
@@ -29,6 +35,7 @@ import { MemoryRecallTool } from "@oh-my-pi/pi-coding-agent/tools/memory-recall"
 import { MemoryReflectTool } from "@oh-my-pi/pi-coding-agent/tools/memory-reflect";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { LOOPBACK_TLS, loopbackOrigin, trustLoopbackTls } from "./helpers/loopback-tls";
 
 await Promise.all([loadMnemopi(), loadMnemopiCore()]);
 
@@ -46,6 +53,8 @@ describe("Mnemopi recall embeddings at cancellation", () => {
 	/** Every scoped recall started, so a case can wait for the read underneath a returned tool call. */
 	let reads: Promise<unknown>[];
 
+	trustLoopbackTls();
+
 	beforeEach(() => {
 		tempDir = TempDir.createSync("@omp-mnemopi-recall-cancel-");
 		requests = [];
@@ -54,7 +63,7 @@ describe("Mnemopi recall embeddings at cancellation", () => {
 		credentialReached = Promise.withResolvers<void>();
 		releaseCredential = Promise.withResolvers<void>();
 		server = Bun.serve({
-			hostname: "127.0.0.1",
+			...LOOPBACK_TLS,
 			port: 0,
 			fetch: async request => {
 				await request.json();
@@ -82,7 +91,7 @@ describe("Mnemopi recall embeddings at cancellation", () => {
 		const config = loadMnemopiConfig(settings, tempDir.path());
 		config.providerOptions = {
 			...config.providerOptions,
-			embeddingApiUrl: server.url.origin,
+			embeddingApiUrl: loopbackOrigin(server),
 			embeddingApiKey: async () => {
 				credentialReached.resolve();
 				await releaseCredential.promise;

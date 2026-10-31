@@ -1,4 +1,5 @@
 import { logger } from "@oh-my-pi/pi-utils";
+import { SharedStartHeldError } from "@oh-my-pi/pi-utils/request-hold-scope";
 import * as AIError from "../error";
 import { getOAuthApiKey, getOAuthProvider } from "../registry/oauth";
 import type { OAuthCredentials, OAuthProvider } from "../registry/oauth/types";
@@ -220,10 +221,7 @@ export class CredentialSelector {
 				if (blockedUntil !== undefined) {
 					return { selection, usage: null, usageChecked: false, blockedUntil };
 				}
-				const usage = await this.#deps.usage.report(args.provider, selection.credential, {
-					...args.options,
-					timeoutMs: this.#deps.usage.requestTimeoutMs,
-				});
+				const usage = await this.#deps.usage.report(args.provider, selection.credential, args.options);
 				return {
 					selection,
 					usage,
@@ -379,18 +377,12 @@ export class CredentialSelector {
 			blockedUntil !== undefined &&
 			this.#deps.blocks.canHeal(provider, providerKey, selection.index, blockScopes)
 		) {
-			usage = await this.#deps.usage.report(provider, selection.credential, {
-				...options,
-				timeoutMs: this.#deps.usage.requestTimeoutMs,
-			});
+			usage = await this.#deps.usage.report(provider, selection.credential, options);
 			usageChecked = true;
 			blockedUntil = this.#deps.blocks.blockedUntil(provider, providerKey, selection.index, blockScopes);
 		}
 		if (blockedUntil === undefined && !usageChecked) {
-			usage = await this.#deps.usage.report(provider, selection.credential, {
-				...options,
-				timeoutMs: this.#deps.usage.requestTimeoutMs,
-			});
+			usage = await this.#deps.usage.report(provider, selection.credential, options);
 			usageChecked = true;
 		}
 		return { selection, usage, usageChecked, blockedUntil };
@@ -662,10 +654,7 @@ export class CredentialSelector {
 		// reads this same report for the pin, so it is handed on below.
 		const sessionPreferredUsage =
 			checkUsage && !rankDespitePin && !sessionPinIsExplicit && sessionPreferredCredential
-				? await this.#deps.usage.report(provider, sessionPreferredCredential, {
-						...options,
-						timeoutMs: this.#deps.usage.requestTimeoutMs,
-					})
+				? await this.#deps.usage.report(provider, sessionPreferredCredential, options)
 				: undefined;
 		const shouldRank =
 			checkUsage &&
@@ -863,6 +852,12 @@ export class CredentialSelector {
 						if (rowId !== undefined) this.#deps.pool.replaceById(provider, rowId, updated);
 					}
 				} catch (error) {
+					// The caller leaving, or a held caller refused the shared refresh, says nothing about the
+					// credential, so it is neither blocked nor disabled for every other session.
+					if (options?.signal?.aborted || error instanceof SharedStartHeldError) {
+						preflightFailures.add(candidate);
+						return;
+					}
 					// A failed preflight already exercised the provider refresh path.
 					// Do not replay the same refresh token in the final candidate pass.
 					const errorMsg = String(error);
@@ -1106,10 +1101,7 @@ export class CredentialSelector {
 				usage = prefetchedUsage;
 				usageChecked = true;
 			} else {
-				usage = await this.#deps.usage.report(provider, selection.credential, {
-					...options,
-					timeoutMs: this.#deps.usage.requestTimeoutMs,
-				});
+				usage = await this.#deps.usage.report(provider, selection.credential, options);
 				usageChecked = true;
 			}
 			if (applyPlanFilter && planGate?.(usage) !== true) {
@@ -1175,10 +1167,7 @@ export class CredentialSelector {
 			if ((checkUsage && !allowBlocked) || hasPlanRequirement) {
 				const sameAccount = selection.credential.accountId === updated.accountId;
 				if (!usageChecked || !sameAccount) {
-					usage = await this.#deps.usage.report(provider, updated, {
-						...options,
-						timeoutMs: this.#deps.usage.requestTimeoutMs,
-					});
+					usage = await this.#deps.usage.report(provider, updated, options);
 					usageChecked = true;
 				}
 				if (applyPlanFilter && planGate?.(usage) !== true) {
@@ -1206,6 +1195,9 @@ export class CredentialSelector {
 			}
 			return { apiKey: result.apiKey, credential: updated, credentialId };
 		} catch (error) {
+			// The caller leaving, or a held caller refused the shared refresh, says nothing about the
+			// credential, so it is neither blocked nor disabled for every other session.
+			if (options?.signal?.aborted || error instanceof SharedStartHeldError) return undefined;
 			const errorMsg = String(error);
 			// Only remove credentials for definitive auth failures
 			// Keep credentials for transient errors (network, 5xx) and block temporarily

@@ -5,7 +5,7 @@ import {
 	type GitLabDuoWorkflowNamespaceSelection,
 } from "@oh-my-pi/pi-catalog/discovery/gitlab-duo-workflow";
 import * as AIError from "../error";
-import { admitProviderRequest, isRequestHeld } from "../request-hold";
+import { admitSend, gatedFetch } from "../request-hold";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import type {
 	Api,
@@ -1043,7 +1043,7 @@ async function runGitLabDuoWorkflow(
 	if (!apiKey) throw new AIError.MissingApiKeyError("gitlab-duo-agent");
 	const baseUrl = normalizeGitLabBaseUrl(model.baseUrl || DEFAULT_GITLAB_BASE_URL);
 	// model-request: transport stream — the GitLab Duo workflow stream's requests.
-	const fetchImpl = options.fetch ?? fetch;
+	const fetchImpl = gatedFetch(options.fetch);
 	const providerSessionState = getGitLabDuoWorkflowProviderSessionState(
 		options.providerSessionState,
 		baseUrl,
@@ -1359,7 +1359,8 @@ async function runGitLabDuoWorkflow(
 		for (let attempt = 0; attempt < 12; attempt++) {
 			// A held scope opens no socket (see `request-hold.ts`): checked with no await before the
 			// socket is created, so a hold that began during the setup above still stops it.
-			if (isRequestHeld()) await admitProviderRequest(options.signal);
+			const refusal = admitSend(options.signal);
+			if (refusal) await refusal;
 			const ws = openGitLabDuoWorkflowSocket(workflowConnection.baseUrl ?? baseUrl, {
 				token: workflowConnection.token,
 				projectId: webSocketProjectId,
@@ -2048,16 +2049,15 @@ export function runGitLabDuoWorkflowSocket(
 		);
 	};
 	// A held scope sends no frame (see `request-hold.ts`): each send checks the hold with no await
-	// before it. Held, the frame waits for the hold's refusal instead, which ends this turn.
+	// before it. Refused, the frame is never sent: the refusal ends this turn when it rejects (at once in
+	// shared work, when the scope ends while held).
 	const send = (frame: unknown): void => {
-		if (isRequestHeld()) {
-			void admitProviderRequest(options.signal).then(
-				() => send(frame),
-				error => {
-					close();
-					settle("closed", error);
-				},
-			);
+		const refusal = admitSend(options.signal);
+		if (refusal) {
+			void refusal.catch(error => {
+				close();
+				settle("closed", error);
+			});
 			return;
 		}
 		ws.send(JSON.stringify(frame));
