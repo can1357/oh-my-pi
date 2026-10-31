@@ -83,7 +83,7 @@ Service observations use an independent diagnostic registration. Enabling or cle
 
 History excerpts exclude thinking, tool arguments, and tool-result bodies. Reports retain at most 512 transition events, limit sections to 100 rows, admit at most 100 complete agent-history sections, and stay within 64 KiB of UTF-8 text; omissions are counted explicitly. Unchanged historical parked/aborted agents are excluded. If the bounded transition ledger overflows, additional historical agent/status counts are reported as unknown. Unreadable sources and service-observation gaps are reported as unavailable coverage.
 
-The report asks the main agent to assess whether intervention is needed; the harness does not automatically cancel work or revive agents. Reports wait for a safe message boundary when the main agent is busy and cannot interrupt a blocked tool or provider call. Protocol restrictions, plan mode, and a deliberate user stop can defer autonomous idle turns. Turning reminders off or changing sessions clears the reporting window.
+The report asks the main agent to assess whether intervention is needed; the harness does not automatically cancel work or revive agents. Reports wait for a safe message boundary when the main agent is busy and cannot interrupt a blocked tool or provider call. Protocol restrictions and plan mode can defer autonomous idle turns. A deliberate Esc, including while idle or before reminders are enabled, parks autonomous reminder turns until a real user prompt resumes work. Turning reminders off or changing sessions clears the reporting window.
 
 ### Subcommands
 
