@@ -4088,8 +4088,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}
 			const memoryBackend = restrictToolNames ? undefined : await resolveMemoryBackend(settings);
 			const memoryInstructions = memoryBackend
-				? await memoryBackend.buildDeveloperInstructions(agentDir, sessionManager.getCwd(), settings, session)
+				? await memoryBackend.buildDeveloperInstructions(
+						agentDir,
+						sessionManager.getCwd(),
+						settings,
+						session,
+						sessionManager,
+					)
 				: undefined;
+			// The memory block is staged here and recorded in the transcript only
+			// once the prompt carrying it commits, so the transcript never claims
+			// a memory block this session did not send.
+			const stagedMemory = memoryBackend?.pendingInstructionsCommit?.(sessionManager);
 			// Advisors get the same memory block (sharpshooter decisions, mnemopi/
 			// hindsight instructions) wrapped as shared background knowledge; the
 			// tool-availability caveat lives in the wrapper template.
@@ -4102,8 +4112,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// Preserve the bookkeeping above, but skip discovering or rendering a
 			// template whose output would be discarded.
 			if (options.systemPrompt !== undefined && typeof options.systemPrompt !== "function") {
+				const literalPrompt =
+					typeof options.systemPrompt === "string" ? [options.systemPrompt] : options.systemPrompt;
 				return {
-					systemPrompt: typeof options.systemPrompt === "string" ? [options.systemPrompt] : options.systemPrompt,
+					systemPrompt: literalPrompt,
+					// The replaced prompt carries no memory block, so the staged
+					// one is cancelled instead of recorded.
+					commit: stagedMemory?.commit(literalPrompt),
 				};
 			}
 
@@ -4251,11 +4266,32 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			});
 
 			if (typeof options.systemPrompt !== "function") {
-				return defaultPrompt;
+				// The base prompt can drop the memory block as well — an empty
+				// prompt (`NULL_PROMPT`) carries none. Recording the snapshot
+				// then would pin memory this session never sent, and a later
+				// resume without the override would restore it as if it had.
+				return {
+					...defaultPrompt,
+					commit: stagedMemory?.commit(defaultPrompt.systemPrompt),
+				};
 			}
-			const customPrompt = options.systemPrompt(defaultPrompt.systemPrompt);
+			let customPrompt: string | string[];
+			try {
+				customPrompt = options.systemPrompt(defaultPrompt.systemPrompt);
+			} catch (error) {
+				// The build failed before any prompt carried the staged block, so
+				// the staging must be cancelled: the next build reads the current
+				// memory state instead of a block no prompt ever sent.
+				stagedMemory?.commit([]);
+				throw error;
+			}
+			const customSystemPrompt = typeof customPrompt === "string" ? [customPrompt] : customPrompt;
 			return {
-				systemPrompt: typeof customPrompt === "string" ? [customPrompt] : customPrompt,
+				systemPrompt: customSystemPrompt,
+				// A replacement prompt may drop the memory block: recording the
+				// snapshot then would pin memory this session never sent, and a
+				// later resume without the override would restore it as if it had.
+				commit: stagedMemory?.commit(customSystemPrompt),
 			};
 		};
 
@@ -4408,7 +4444,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 
 		setSessionActiveToolNames(initialToolNames);
-		const { systemPrompt } = await logger.time(
+		const { systemPrompt, commit: commitMemorySnapshot } = await logger.time(
 			"buildSystemPrompt",
 			rebuildSystemPrompt,
 			initialToolNames,
@@ -4754,6 +4790,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// session adopts every model with the window its own settings select (a
 		// subagent with a compaction override must not inherit the parent's).
 		agent.setModelResolver(next => modelRegistry.fitContextWindow(next, settings));
+
+		// The initial prompt is live now: record the memory block it carries, so a
+		// resumed process rebuilds the same block instead of rereading disk.
+		commitMemorySnapshot?.();
 
 		cursorEventEmitter = event => agent.emitExternalEvent(event);
 
