@@ -665,6 +665,38 @@ export function createOpenAIResponsesHistoryPayload(
 	};
 }
 
+/**
+ * Server-annotated metadata the Codex backend attaches to output items but
+ * rejects as an unknown parameter when replayed as input (e.g.
+ * `content_token_count`). codex-rs drops it on deserialize; strip it on read so
+ * already-persisted sessions replay too.
+ */
+const OPENAI_RESPONSES_OUTPUT_ONLY_ITEM_FIELD = "internal_chat_message_metadata_passthrough";
+const strippedOutputOnlyItems = new WeakMap<Record<string, unknown>, Record<string, unknown>>();
+
+function stripOpenAIResponsesOutputOnlyItemFields(
+	items: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+	let stripped: Array<Record<string, unknown>> | undefined;
+	for (let index = 0; index < items.length; index++) {
+		const item = items[index]!;
+		if (!(OPENAI_RESPONSES_OUTPUT_ONLY_ITEM_FIELD in item)) continue;
+		let replacement = strippedOutputOnlyItems.get(item);
+		if (!replacement) {
+			const { [OPENAI_RESPONSES_OUTPUT_ONLY_ITEM_FIELD]: _metadata, ...rest } = item;
+			replacement = rest;
+			strippedOutputOnlyItems.set(item, replacement);
+		}
+		stripped ??= items.slice(0, index);
+		stripped[index] = replacement;
+	}
+	if (!stripped) return items;
+	for (let index = stripped.length; index < items.length; index++) {
+		stripped[index] = strippedOutputOnlyItems.get(items[index]!) ?? items[index]!;
+	}
+	return stripped;
+}
+
 export function getOpenAIResponsesHistoryPayload(
 	providerPayload: ProviderPayload | undefined,
 	currentProvider: string,
@@ -675,7 +707,11 @@ export function getOpenAIResponsesHistoryPayload(
 	}
 	const payloadProvider = providerPayload.provider ?? fallbackProvider ?? currentProvider;
 	if (payloadProvider !== currentProvider) return undefined;
-	return { ...providerPayload, provider: payloadProvider };
+	return {
+		...providerPayload,
+		provider: payloadProvider,
+		items: stripOpenAIResponsesOutputOnlyItemFields(providerPayload.items),
+	};
 }
 
 export function getOpenAIResponsesHistoryItems(

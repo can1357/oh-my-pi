@@ -1265,4 +1265,67 @@ describe("openai-codex native history redaction", () => {
 			},
 		]);
 	});
+
+	it("drops server-only passthrough metadata from replayed native items", () => {
+		// The Codex backend annotates output items with this field but 400s
+		// `Unknown parameter: 'input[N].internal_chat_message_metadata_passthrough.content_token_count'`
+		// when it comes back as input.
+		const model = createCodexModel("gpt-5.1-codex");
+		const passthrough = { content_token_count: 74, create_time: 1793470226.99, turn_id: "turn-1" };
+		const retainedUser = {
+			type: "message",
+			role: "user",
+			content: [{ type: "input_text", text: "retained" }],
+			internal_chat_message_metadata_passthrough: { turn_id: "turn-0" },
+		};
+		const assistantItem = {
+			type: "message",
+			id: "msg_1",
+			role: "assistant",
+			status: "completed",
+			content: [{ type: "output_text", text: "progress report", annotations: [] }],
+			internal_chat_message_metadata_passthrough: passthrough,
+		};
+		const context: Context = {
+			messages: [
+				{
+					role: "user",
+					content: "fallback",
+					timestamp: 1,
+					providerPayload: { type: "openaiResponsesHistory", provider: model.provider, items: [retainedUser] },
+				} as Context["messages"][number],
+				{
+					role: "assistant",
+					content: [{ type: "text", text: "progress report" }],
+					api: model.api,
+					provider: model.provider,
+					model: model.id,
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "stop",
+					timestamp: 2,
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: model.provider,
+						dt: true,
+						items: [assistantItem],
+					},
+				},
+				{ role: "user", content: "next", timestamp: 3 },
+			],
+		};
+
+		const messages = convertCodexResponsesMessages(model, context);
+
+		expect(JSON.stringify(messages)).not.toContain("internal_chat_message_metadata_passthrough");
+		expect(messages.map(item => ("role" in item ? item.role : item.type))).toEqual(["user", "assistant", "user"]);
+		// Persisted history stays untouched; only the wire copy is stripped.
+		expect(assistantItem.internal_chat_message_metadata_passthrough).toBe(passthrough);
+	});
 });
