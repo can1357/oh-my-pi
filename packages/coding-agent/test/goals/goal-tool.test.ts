@@ -329,6 +329,7 @@ describe("GoalTool", () => {
 
 	it("auto-approves every op in write mode; always-ask prompts only for goal changes (#14368)", () => {
 		const tool = new GoalTool(createToolSession({}));
+
 		for (const op of ["get", "create", "update", "complete", "resume", "drop"]) {
 			expect(resolveApproval(tool, { op }, "write").policy).toBe("allow");
 			expect(resolveApproval(tool, { op }, "always-ask").policy).toBe(op === "get" ? "allow" : "prompt");

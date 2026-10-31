@@ -245,6 +245,7 @@ describe("InteractiveMode goal mode integration", () => {
 		harness.session.goalRuntime.onTurnStart("turn-edit", { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 		await harness.session.goalRuntime.flushUsage("suppressed", { input: 37, output: 2, cacheRead: 0, cacheWrite: 0 });
 		const original = harness.session.getGoalModeState()?.goal;
+
 		if (!original) throw new Error("expected active goal");
 		cfgGoalModelObjectiveUpdates.set(harness.settings, "on-request");
 
@@ -267,7 +268,9 @@ describe("InteractiveMode goal mode integration", () => {
 		await harness.session.sessionManager.ensureOnDisk();
 		await harness.session.sessionManager.flush();
 		const source = harness.session.sessionManager.getSessionFile();
+
 		if (!source) throw new Error("expected persisted session");
+
 		const fork = await SessionManager.forkFrom(
 			source,
 			harness.tempDir.path(),
@@ -278,6 +281,7 @@ describe("InteractiveMode goal mode integration", () => {
 				suppressBreadcrumb: true,
 			},
 		);
+
 		try {
 			expect(fork.getSessionId()).not.toBe(harness.session.sessionManager.getSessionId());
 			expect(goalFromModeData(fork.buildSessionContext().modeData)).toEqual(persisted);

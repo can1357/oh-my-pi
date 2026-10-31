@@ -3263,6 +3263,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				if (!latestState?.enabled || latestState.goal.status !== "active") return;
 				if (this.#goalOpenWorkAllBlocked()) return;
 				const prompt = this.session.goalRuntime.buildContinuationPrompt();
+
 				if (!prompt) return;
 				this.#pendingGoalContinuationTurns++;
 				this.onInputCallback(

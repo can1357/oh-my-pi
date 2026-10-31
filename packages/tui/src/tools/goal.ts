@@ -114,6 +114,7 @@ export const goalToolRenderer = {
 		const description = describeOp(args.op);
 		const meta: string[] = [];
 		const trimmedObjective = args.objective ? objectiveDisplayText(args.objective) : undefined;
+
 		if ((args.op === "create" || args.op === "update") && trimmedObjective) {
 			const objective = truncateToWidth(trimmedObjective, TRUNCATE_LENGTHS.TITLE);
 			meta.push(uiTheme.italic(uiTheme.fg("muted", `"${objective}"`)));
@@ -196,6 +197,7 @@ export const goalToolRenderer = {
 	describeCall(args: GoalRenderArgs): NativeToolView {
 		const head: TspSpan[] = toolHead("Goal", describeOp(args.op));
 		const objective = args.objective ? objectiveDisplayText(args.objective) : undefined;
+
 		if ((args.op === "create" || args.op === "update") && objective) {
 			head.push(span(" "), span(`"${truncateToWidth(objective, TRUNCATE_LENGTHS.TITLE)}"`, "muted"));
 		}

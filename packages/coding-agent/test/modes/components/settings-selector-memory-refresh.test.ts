@@ -236,6 +236,7 @@ describe("SettingsSelectorComponent memory tab", () => {
 describe("SettingsSelectorComponent goal objective updates", () => {
 	it("selects confirmation, trusted user requests, and disabled permissions from the goal setting submenu", () => {
 		const comp = createSelector();
+
 		for (const ch of "goal objective updates") comp.handleInput(ch);
 		comp.handleInput("\n");
 		const options = comp.render(120).join("\n");

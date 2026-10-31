@@ -387,6 +387,7 @@ describe("agent-loop wait wake delivery", () => {
 		cfgGoalModelObjectiveUpdates.set(settings, "on-request");
 		const steering: AgentMessage[] = [];
 		let state: GoalModeState | undefined;
+
 		const runtime = new GoalRuntime({
 			getState: () => state,
 			setState: next => {
@@ -399,7 +400,9 @@ describe("agent-loop wait wake delivery", () => {
 				steering.push(userMessage(message.content));
 			},
 		});
+
 		await runtime.createGoal({ objective: "Build the release" });
+
 		const toolSession: ToolSession = {
 			cwd: "/tmp",
 			hasUI: false,
@@ -413,9 +416,11 @@ describe("agent-loop wait wake delivery", () => {
 			getAgentId: () => "Main",
 			enableIrc: false,
 		};
+
 		const goal = new GoalTool(toolSession);
 		const wait = new WaitTool(toolSession);
 		const jobId = manager.register("bash", "build artifact", async () => releaseJob.promise, { ownerId: "Main" });
+
 		const mock = createMockModel({
 			responses: [
 				{
@@ -431,6 +436,7 @@ describe("agent-loop wait wake delivery", () => {
 				{ content: ["Build result received"] },
 			],
 		});
+
 		const stream = agentLoop(
 			[userMessage("Update the goal to include auditing, then wait for the build")],
 			{ systemPrompt: ["Test"], messages: [], tools: [goal, wait] },
@@ -443,11 +449,13 @@ describe("agent-loop wait wake delivery", () => {
 			undefined,
 			mock.stream,
 		);
+
 		for await (const event of stream) {
 			if (event.type === "tool_execution_update" && event.toolName === "wait") {
 				releaseJob.resolve("artifact ready");
 			}
 		}
+
 		const messages = await stream.result();
 		const result = messages.find(message => message.role === "toolResult" && message.toolName === "wait");
 		expect(result).toBeDefined();

@@ -875,6 +875,7 @@ export async function requestApproval(
 	}
 	const choices = { ...(session ? { session } : {}), ...(grants.length > 0 ? { grants } : {}) };
 	const choice = "select" in ui ? await ui.select(full, approvalChoiceLabels(choices)) : undefined;
+
 	return approvalAnswerForChoice(choices, choice);
 }
 

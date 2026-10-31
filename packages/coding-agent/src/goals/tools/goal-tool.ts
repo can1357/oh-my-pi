@@ -88,34 +88,45 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 	): Promise<Goal> {
 		throwIfAborted(signal);
 		const mode = cfgGoalModelObjectiveUpdates.get(this.#session.settings);
+
 		if (mode === "disabled") {
 			throw new ToolError(
 				"Model objective edits are disabled (goal.modelObjectiveUpdates). Ask the user to edit the goal.",
 			);
 		}
+
 		if (params.token_budget !== undefined) {
 			throw new ToolError("op=update cannot change the token budget. Ask the user to use /goal budget.");
 		}
+
 		const objective = params.objective?.trim();
+
 		if (!objective) throw new ToolError("objective is required when op=update");
 		const state = this.#session.getGoalModeState?.();
+
 		if (!state?.enabled || (state.goal.status !== "active" && state.goal.status !== "budget-limited")) {
 			throw new ToolError("cannot update objective because no goal is active");
 		}
+
 		const expectedGoalId = state.goal.id;
 		const expectedObjective = state.goal.objective;
 		const sessionId = this.#session.getSessionId?.();
+
 		if (mode === "confirm") {
 			const toolContext = context ?? this.#session.getToolContext?.();
+
 			if (!toolContext?.ui?.approve || toolContext.hasUI === false) {
 				throw new ToolError("Objective edits require user approval, but no interactive approval UI is available.");
 			}
+
 			const ui = toolContext.ui;
 			const approve = toolContext.ui.approve.bind(ui);
+
 			const details = prompt.render(goalObjectiveUpdateApproval, {
 				currentObjective: replaceTabs(sanitizeText(expectedObjective)),
 				proposedObjective: replaceTabs(sanitizeText(objective)),
 			});
+
 			const approved = await untilAborted(signal, () =>
 				requestApproval(
 					{
@@ -126,12 +137,15 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 					{ reason: "Update goal objective" },
 				),
 			);
+
 			if (approved !== "once") {
 				throw new ToolError("Goal objective update was not approved. The objective is unchanged.");
 			}
 		}
+
 		const updated = await runtime.updateGoalObjective({ objective, expectedGoalId, expectedObjective }, () => {
 			throwIfAborted(signal);
+
 			if (
 				!cfgGoalEnabled.get(this.#session.settings) ||
 				cfgGoalModelObjectiveUpdates.get(this.#session.settings) !== mode ||
@@ -140,6 +154,7 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 				throw new ToolError("Goal editing permissions or session changed. Request the edit again.");
 			}
 		});
+
 		return updated.goal;
 	}
 
@@ -189,6 +204,7 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 		} else {
 			text = "No active goal.";
 		}
+
 		if (params.op === "get") {
 			text += `\nObjective editing: ${cfgGoalModelObjectiveUpdates.get(this.#session.settings)}`;
 		}
