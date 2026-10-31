@@ -156,7 +156,8 @@ export async function writeRemoteFile(
 	const dest = quotePosixArgument(remotePath);
 	const tmp = quotePosixArgument(`${remotePath}.omp-tmp.${crypto.randomUUID()}`);
 	const updateGuard = opts.requireRegularFile
-		? `if [ ! -f ${dest} ] || [ -L ${dest} ]; then echo 'ssh://: targeted edits require an existing regular file; symlinks are not supported' >&2; exit 1; fi; `
+		? `if [ -L ${dest} ]; then echo 'ssh://: targeted edits require an existing regular file; symlinks are not supported' >&2; exit 1; ` +
+			`elif [ ! -e ${dest} ]; then echo 'ssh://: destination does not exist; targeted edits require an existing regular file' >&2; exit 1; fi; `
 		: "";
 	// Stage stdin into the temp first (so the remote never blocks on an unread
 	// pipe and a dropped connection lands in the temp, never the destination).
