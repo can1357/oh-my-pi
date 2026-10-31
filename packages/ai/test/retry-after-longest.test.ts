@@ -13,7 +13,7 @@
 import { describe, expect, it } from "bun:test";
 import {
 	extractProviderRetryHint,
-	formatErrorMessageWithRetryAfter,
+	appendRetryAfterHint,
 	getRetryAfterMsFromHeaders,
 	longestProviderRetryHint,
 	providerRetryWaitMs,
@@ -104,7 +104,7 @@ describe("longestProviderRetryHint", () => {
 	});
 });
 
-describe("formatErrorMessageWithRetryAfter", () => {
+describe("appendRetryAfterHint", () => {
 	it.each([
 		["a shorter body hint", "read ECONNRESET retry-after-ms=200", { "retry-after": "9" }, true],
 		["a zero body hint", "read ECONNRESET retry-after-ms=0", { "retry-after": "9" }, true],
@@ -116,7 +116,7 @@ describe("formatErrorMessageWithRetryAfter", () => {
 		(_label, message, headers, shown) => {
 			// The text is for the person reading it; the wait itself reaches readers
 			// structured, so whatever the text says, the header's 9 s is kept.
-			const formatted = formatErrorMessageWithRetryAfter(new Error(message), headers);
+			const formatted = appendRetryAfterHint(message, headers);
 			expect(formatted).toBe(shown ? `${message} retry-after-ms=9000` : message);
 			expect(providerRetryWaitMs("anthropic", formatted, getRetryAfterMsFromHeaders(headers))).toBe(9000);
 		},

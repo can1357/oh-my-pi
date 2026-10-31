@@ -66,20 +66,30 @@ export function longestProviderRetryHint(
 	return longestRetryHint(undefined, message, hintOptions(provider));
 }
 
+/** `error`'s message text: an Error's `message`, anything else as JSON. */
+export function errorMessageText(error: unknown): string {
+	return error instanceof Error ? error.message : JSON.stringify(error);
+}
+
 /**
- * `error`'s message with the response headers' retry wait appended as
- * `retry-after-ms=<n>`, for the person reading it, when the message's own
- * reading is shorter. No consumer reads the header's wait back out of this
- * text — it takes it structured ({@link providerRetryWaitMs}) — so the text is
- * free to say it and a body is unable to forge it.
+ * `message` with the response headers' retry wait appended as
+ * `retry-after-ms=<n>`, for the person reading it, when the first wait the
+ * message itself names is shorter or absent. No consumer reads the header's
+ * wait back out of this text — it takes it structured
+ * ({@link providerRetryWaitMs}) — so the text is free to say it and a body is
+ * unable to forge it, and the text never shows a shorter wait than the field.
  */
-export function formatErrorMessageWithRetryAfter(error: unknown, headers?: HeadersLike): string {
-	const message = error instanceof Error ? error.message : JSON.stringify(error);
-	const retryAfterMs = getRetryAfterMsFromHeaders(headers ?? getHeadersFromError(error));
+export function appendRetryAfterHint(message: string, headers: HeadersLike): string {
+	const retryAfterMs = getRetryAfterMsFromHeaders(headers);
 	if (retryAfterMs === undefined) return message;
 	const named = extractProviderRetryHint(undefined, message);
 	if (named !== undefined && named >= retryAfterMs) return message;
 	return `${message} ${RETRY_AFTER_HINT}${retryAfterMs}`;
+}
+
+/** `error`'s message with its own response headers' retry wait appended ({@link appendRetryAfterHint}). */
+export function formatErrorMessageWithRetryAfter(error: unknown): string {
+	return appendRetryAfterHint(errorMessageText(error), getHeadersFromError(error));
 }
 
 /**

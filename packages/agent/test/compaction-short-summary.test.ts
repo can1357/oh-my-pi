@@ -89,7 +89,17 @@ describe("compaction short summary isolation", () => {
 
 	test("a short summary with no answer text omits shortSummary instead of storing an empty string", async () => {
 		const result = await compact(makePreparation(), getModel(), "key", undefined, undefined, {
-			completeImpl: completeWith(() => reply("length", [{ type: "thinking", thinking: "..." }])),
+			completeImpl: completeWith(() => reply("stop", [{ type: "thinking", thinking: "..." }])),
+			oneshotRetry: false,
+		});
+
+		expect(result.summary.startsWith(FULL_SUMMARY)).toBe(true);
+		expect("shortSummary" in result).toBe(false);
+	});
+
+	test("a short summary cut off at the output limit is omitted, not stored truncated", async () => {
+		const result = await compact(makePreparation(), getModel(), "key", undefined, undefined, {
+			completeImpl: completeWith(() => reply("length", [{ type: "text", text: "I fixed the thing and" }])),
 			oneshotRetry: false,
 		});
 

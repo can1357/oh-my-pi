@@ -12,7 +12,7 @@
  */
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import {
-	formatErrorMessageWithRetryAfter,
+	appendRetryAfterHint,
 	getRetryAfterMsFromHeaders,
 	providerRetryWaitMs,
 } from "@oh-my-pi/pi-ai/utils/retry-after";
@@ -73,12 +73,9 @@ describe("credential block from a rate-limit failure", () => {
 		"lasts the response's own wait for %s, from a thrown error's headers",
 		async (_label, body, retryAfter, expected) => {
 			await withStore(async (auth, now) => {
-				const error = Object.assign(
-					new Error(formatErrorMessageWithRetryAfter(new Error(body), { "retry-after": retryAfter })),
-					{
-						headers: new Headers({ "retry-after": retryAfter }),
-					},
-				);
+				const error = Object.assign(new Error(appendRetryAfterHint(body, { "retry-after": retryAfter })), {
+					headers: new Headers({ "retry-after": retryAfter }),
+				});
 				const result = await auth.limits.rotate(PROVIDER, "retry-hint-session", {
 					error,
 					apiKey: "fixture-key",
@@ -96,7 +93,7 @@ describe("credential block from a rate-limit failure", () => {
 			await withStore(async (auth, now) => {
 				const headers = { "retry-after": retryAfter };
 				const result = await auth.limits.rotate(PROVIDER, "retry-hint-session", {
-					error: formatErrorMessageWithRetryAfter(new Error(body), headers),
+					error: appendRetryAfterHint(body, headers),
 					retryAfterMs: getRetryAfterMsFromHeaders(headers),
 					apiKey: "fixture-key",
 					waitForSibling: false,
@@ -138,7 +135,7 @@ describe("credential block ceiling", () => {
 					headers?.["x-ratelimit-reset"] === "YEAR"
 						? { "x-ratelimit-reset": String(Math.floor(now / 1000) + 365 * 24 * 3600) }
 						: headers;
-				const text = formatErrorMessageWithRetryAfter(new Error(body), resolved);
+				const text = appendRetryAfterHint(body, resolved);
 				const retryAfterMs = providerRetryWaitMs(PROVIDER, text, getRetryAfterMsFromHeaders(resolved));
 				const result = await auth.limits.markReached(PROVIDER, "retry-hint-session", {
 					retryAfterMs,

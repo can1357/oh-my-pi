@@ -102,6 +102,10 @@ class ReplayTestSession {
 
 	setMcpServerInstructionsSource(_source: unknown): void {}
 
+	registerSessionChangeCallback(_callback: () => void): () => void {
+		return () => {};
+	}
+
 	subscribe(_listener: (event: AgentSessionEvent) => void): () => void {
 		return () => {};
 	}
