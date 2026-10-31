@@ -34,8 +34,6 @@ import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } f
 let root: string;
 let writes: string[] = [];
 let stderrWrites: string[] = [];
-let stdoutSpy: { mockRestore(): void } | undefined;
-let stderrSpy: { mockRestore(): void } | undefined;
 let settingsState: SettingsTestState | undefined;
 const originalExitCode = process.exitCode;
 // A session's lease is an abstract socket named by its id, and on Linux that
@@ -54,11 +52,11 @@ beforeEach(async () => {
 	writes = [];
 	stderrWrites = [];
 	process.exitCode = 0;
-	stdoutSpy = spyOn(process.stdout, "write").mockImplementation(chunk => {
+	spyOn(process.stdout, "write").mockImplementation(chunk => {
 		writes.push(String(chunk));
 		return true;
 	});
-	stderrSpy = spyOn(process.stderr, "write").mockImplementation(chunk => {
+	spyOn(process.stderr, "write").mockImplementation(chunk => {
 		stderrWrites.push(String(chunk));
 		return true;
 	});
@@ -70,8 +68,6 @@ afterEach(async () => {
 	// the same function would take that spy over and recurse. Every spy goes
 	// here, before the next test starts.
 	mock.restore();
-	stdoutSpy = undefined;
-	stderrSpy = undefined;
 	process.exitCode = originalExitCode;
 	restoreSettingsTestState(settingsState);
 	settingsState = undefined;
