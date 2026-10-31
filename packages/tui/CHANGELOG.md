@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Highlight the full keyboard-selected row in `/agents`, keeping selection and hover backgrounds filled through truncated text.
+
 ## [18.14.1] - 2026-10-31
 
 ### Added
