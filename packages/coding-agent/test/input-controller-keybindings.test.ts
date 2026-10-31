@@ -10,6 +10,7 @@ import { SpaceHoldGesture } from "@oh-my-pi/pi-tui/space-hold";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import type { RestoredQueuedMessage } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { type KeyId, matchesKey } from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
@@ -29,13 +30,21 @@ type FakeEditor = {
 	onPasteImage?: () => Promise<boolean>;
 	onCopyPrompt?: () => void;
 	onRetry?: () => void;
+	onDequeue?: () => void;
 	onChange?: (text: string) => void;
 	onSubmit?: (text: string) => Promise<void>;
 	setText(text: string): void;
 	getText(): string;
+	textRevision: number;
 	getExpandedText(): string;
 	setCollapsedText(text: string): void;
 	composerChips(): unknown[];
+	captureComposerDraft(): { editor: { text: string }; images: ImageContent[]; links: (string | undefined)[] };
+	restoreComposerDraft(snapshot: {
+		editor: { text: string };
+		images: ImageContent[];
+		links: (string | undefined)[];
+	}): void;
 	addToHistory(text: string): void;
 	setActionKeys(action: string, keys: string[]): void;
 	setCustomKeyHandler(key: string, handler: () => void): void;
@@ -73,6 +82,8 @@ async function createContext() {
 		"app.history.search": ["ctrl+r"],
 		"app.editor.external": ["ctrl+g"],
 		"app.local.open": ["alt+g"],
+		"app.editor.stash": ["ctrl+s"],
+		"app.agents.hub": ["alt+a"],
 		"app.model.selectTemporary": ["ctrl+y"],
 		"app.model.select": ["alt+m"],
 		"app.retry": ["alt+r"],
@@ -93,7 +104,10 @@ async function createContext() {
 	const showModelSelector = vi.fn();
 	const requestRender = vi.fn();
 	const showError = vi.fn();
+	const notifyComposerStash = vi.fn();
+	const cancelComposerStashNotice = vi.fn();
 	let focused: unknown;
+	let focusedAgentId: string | undefined;
 	let overlayVisible = false;
 	const addInputListener = vi.fn((listener: InputListener) => {
 		void listener;
@@ -105,18 +119,26 @@ async function createContext() {
 		refreshAppearance();
 		resetDisplay();
 	});
-	const prompt = vi.fn(async () => {});
+	const prompt = vi.fn(async (_text: string, options?: { onAccepted?: () => void }) => {
+		options?.onAccepted?.();
+		return true;
+	});
 	const retry = vi.fn(async () => true);
 	const abort = vi.fn(async () => {});
 	const session = {
+		messages: [],
 		isStreaming: false,
 		isCompacting: false,
 		isGeneratingHandoff: false,
 		isBashRunning: false,
 		isEvalRunning: false,
 		extensionRunner: undefined,
+		customCommands: [],
+		promptTemplates: [],
 		prompt,
 		queuedMessageCount: 0,
+		maybeStartTitleGeneration: vi.fn(),
+		subscribe: vi.fn(() => () => {}),
 		abort,
 		retry,
 		prewarmModelConnection: vi.fn(),
@@ -134,6 +156,7 @@ async function createContext() {
 	const editor: FakeEditor = {
 		setText(text: string) {
 			editorText = text;
+			this.textRevision++;
 		},
 		getText() {
 			return editorText;
@@ -143,18 +166,30 @@ async function createContext() {
 		},
 		setCollapsedText(text: string) {
 			editorText = text;
+			this.textRevision++;
 		},
 		composerChips() {
 			return [];
 		},
+		captureComposerDraft() {
+			return { editor: { text: editorText }, images: [...this.pendingImages], links: [...this.pendingImageLinks] };
+		},
+		restoreComposerDraft(snapshot) {
+			this.pendingImages = [...snapshot.images];
+			this.pendingImageLinks = [...snapshot.links];
+			this.imageLinks = this.pendingImageLinks;
+			this.setText(snapshot.editor.text);
+		},
 		addToHistory: vi.fn(),
 		pasteText(text: string) {
 			editorText += text;
+			this.textRevision++;
 		},
 		setActionKeys,
 		setCustomKeyHandler,
 		clearCustomKeyHandlers,
 		spaceHold: new SpaceHoldGesture(() => {}),
+		textRevision: 0,
 		pendingImages: [],
 		pendingImageLinks: [],
 		clearDraft(historyText?: string) {
@@ -169,6 +204,13 @@ async function createContext() {
 	const ctx = {
 		editor: editor as unknown as InteractiveModeContext["editor"],
 		syncIdleMaintenanceView: vi.fn(),
+		eventController: {
+			isAwaitingAsyncWork: vi.fn(() => false),
+			stopAwaitingAsyncWork: vi.fn(async () => {}),
+		} as unknown as InteractiveModeContext["eventController"],
+		get focusedAgentId() {
+			return focusedAgentId;
+		},
 		resetDisplayAfterAppearanceRefresh,
 		ui: {
 			requestRender,
@@ -186,6 +228,8 @@ async function createContext() {
 		autoCompactionEscapeHandler: undefined,
 		retryEscapeHandler: undefined,
 		session: session as unknown as InteractiveModeContext["session"],
+		skillCommands: new Map(),
+		fileSlashCommands: new Map(),
 		viewSession: session as unknown as InteractiveModeContext["viewSession"],
 		keybindings: {
 			getKeys(action: string) {
@@ -232,6 +276,7 @@ async function createContext() {
 		handleHotkeysCommand: vi.fn(),
 		handlePlanModeCommand: vi.fn(),
 		handleNewCommand: vi.fn(),
+		flushPendingBashComponents: vi.fn(),
 		showTreeSelector: vi.fn(),
 		showUserMessageSelector: vi.fn(),
 		showSessionSelector: vi.fn(),
@@ -254,6 +299,8 @@ async function createContext() {
 		showStatus: vi.fn(),
 		isGuidedGoalInterviewActive,
 		sessionManager: { getSessionId: () => "session", getLeafId: () => null },
+		notifyComposerStash,
+		cancelComposerStashNotice,
 	} as unknown as InteractiveModeContext;
 
 	return {
@@ -263,6 +310,9 @@ async function createContext() {
 		customHandlers,
 		setFocused(target: unknown) {
 			focused = target;
+		},
+		setFocusedAgent(id: string | undefined) {
+			focusedAgentId = id;
 		},
 		setOverlayVisible(visible: boolean) {
 			overlayVisible = visible;
@@ -294,6 +344,8 @@ async function createContext() {
 			handleBtwFollowUpKey,
 			showError,
 			isGuidedGoalInterviewActive,
+			notifyComposerStash,
+			cancelComposerStashNotice,
 		},
 	};
 }
@@ -415,10 +467,9 @@ describe("InputController keybinding setup", () => {
 	});
 
 	it("retries the focused view session instead of the main session", async () => {
-		const { InputController, ctx, editor, spies } = await createContext();
+		const { InputController, ctx, editor, spies, setFocusedAgent } = await createContext();
 		const focusedRetry = vi.fn(async () => true);
-		(ctx as unknown as { focusedAgentId: string; viewSession: { retry: typeof focusedRetry } }).focusedAgentId =
-			"worker";
+		setFocusedAgent("worker");
 		(ctx as unknown as { viewSession: { retry: typeof focusedRetry } }).viewSession = { retry: focusedRetry };
 		const controller = new InputController(ctx);
 
@@ -1609,5 +1660,779 @@ describe("InputController global tool-output expand (ctrl+o)", () => {
 
 		expect(dispatchInput(listeners, "\x0f")).toEqual({ consume: true });
 		expect(ctx.toolOutputExpanded).toBe(true);
+	});
+});
+
+describe("Ctrl+S prompt stash", () => {
+	for (const [mode, handler] of [
+		["plan", "handlePlanModeCommand"],
+		["vibe", "handleVibeModeCommand"],
+		["goal", "handleGoalModeCommand"],
+		["guided-goal", "handleGuidedGoalCommand"],
+	] as const) {
+		for (const accept of [false, true]) {
+			it(`keeps a rich stash separate when /${mode} dispatch rejects ${accept ? "after" : "before"} acceptance`, async () => {
+				const { ctx, editor, customHandlers, spies } = await createContext();
+				const controller = new InputController(ctx);
+				controller.setupKeyHandlers();
+				controller.setupEditorSubmitHandler();
+				const saved: ImageContent = { type: "image", data: "c2F2ZWQ=", mimeType: "image/png" };
+				const submitted: ImageContent = { type: "image", data: "c2VudA==", mimeType: "image/png" };
+				editor.setText("saved [Image #1]");
+				editor.pendingImages = [saved];
+				editor.pendingImageLinks = ["file:///saved.png"];
+				customHandlers.get("ctrl+s")?.();
+				let dispatched = false;
+				Object.assign(ctx, {
+					[handler]: async (_text: string | undefined, input?: { onAccepted?: () => void }) => {
+						dispatched = true;
+						if (accept) input?.onAccepted?.();
+						throw new Error("mode dispatch failed");
+					},
+				});
+				editor.pendingImages = [submitted];
+				editor.pendingImageLinks = ["file:///submitted.png"];
+				const command = `/${mode} objective [Image #1]`;
+				await editor.onSubmit?.(command);
+				expect(dispatched).toBe(true);
+				expect(spies.showError).toHaveBeenCalledWith("mode dispatch failed");
+				expect(editor.getText()).toBe(accept ? "saved [Image #1]" : command);
+				expect(editor.pendingImages).toEqual(accept ? [saved] : [submitted]);
+				expect(editor.pendingImageLinks).toEqual(accept ? ["file:///saved.png"] : ["file:///submitted.png"]);
+				if (!accept) {
+					editor.clearDraft();
+					customHandlers.get("ctrl+s")?.();
+					expect(editor.getText()).toBe("saved [Image #1]");
+					expect(editor.pendingImages).toEqual([saved]);
+					expect(editor.pendingImageLinks).toEqual(["file:///saved.png"]);
+				}
+			});
+		}
+	}
+
+	for (const path of [
+		"idle Enter",
+		"streaming Enter",
+		"idle follow-up",
+		"streaming follow-up",
+		"focused prompt",
+		"focused .",
+		"focused c",
+	] as const) {
+		for (const accept of [false, true]) {
+			it(`preserves rich drafts when ${path} rejects ${accept ? "after" : "before"} acceptance`, async () => {
+				const { ctx, editor, customHandlers, spies, setFocusedAgent } = await createContext();
+				const controller = new InputController(ctx);
+				controller.setupKeyHandlers();
+				controller.setupEditorSubmitHandler();
+				const saved: ImageContent = { type: "image", data: "c2F2ZWQ=", mimeType: "image/png" };
+				const submitted: ImageContent = { type: "image", data: "c2VudA==", mimeType: "image/png" };
+				editor.setText("saved [Image #1]");
+				editor.pendingImages = [saved];
+				editor.pendingImageLinks = ["file:///saved.png"];
+				customHandlers.get("ctrl+s")?.();
+				if (path.startsWith("focused")) setFocusedAgent("agent");
+				Object.assign(ctx.session, { isStreaming: path.startsWith("streaming") });
+				const reject = async (options?: { onAccepted?: () => void }) => {
+					if (accept) options?.onAccepted?.();
+					throw new Error("dispatch failed");
+				};
+				spies.prompt.mockImplementation(async (_text, options) => reject(options));
+				Object.assign(ctx.session, { resume: async (options?: { onAccepted?: () => void }) => reject(options) });
+				const shortcut = path === "focused ." ? "." : path === "focused c" ? "c" : undefined;
+				const text = shortcut ?? "submitted [Image #1]";
+				editor.setText(text);
+				if (!shortcut) {
+					editor.pendingImages = [submitted];
+					editor.pendingImageLinks = ["file:///submitted.png"];
+				}
+				if (path.endsWith("follow-up")) await controller.handleFollowUp();
+				else {
+					editor.setText(""); // Enter resets text, but leaves attachments for the controller.
+					await editor.onSubmit?.(text);
+				}
+				expect(spies.showError).toHaveBeenCalledWith("dispatch failed");
+				expect(editor.getText()).toBe(accept ? "saved [Image #1]" : text);
+				expect(editor.pendingImages).toEqual(accept ? [saved] : shortcut ? [] : [submitted]);
+				expect(editor.pendingImageLinks).toEqual(
+					accept ? ["file:///saved.png"] : shortcut ? [] : ["file:///submitted.png"],
+				);
+				if (!accept) {
+					editor.clearDraft();
+					customHandlers.get("ctrl+s")?.();
+					expect(editor.getText()).toBe("saved [Image #1]");
+					expect(editor.pendingImages).toEqual([saved]);
+					expect(editor.pendingImageLinks).toEqual(["file:///saved.png"]);
+				}
+			});
+		}
+	}
+
+	for (const mode of ["plan", "vibe", "goal", "guided-goal"]) {
+		it(`returns /${mode} images when an input hook rejects before admission`, async () => {
+			const { ctx, editor, customHandlers, spies } = await createContext();
+			const controller = new InputController(ctx);
+			controller.setupKeyHandlers();
+			controller.setupEditorSubmitHandler();
+			const saved: ImageContent = { type: "image", data: "c2F2ZWQ=", mimeType: "image/png" };
+			const submitted: ImageContent = { type: "image", data: "c2VudA==", mimeType: "image/png" };
+			editor.setText("saved [Image #1]");
+			editor.pendingImages = [saved];
+			editor.pendingImageLinks = ["file:///saved.png"];
+			customHandlers.get("ctrl+s")?.();
+			editor.pendingImages = [submitted];
+			editor.pendingImageLinks = ["file:///submitted.png"];
+			Object.assign(ctx.session, {
+				extensionRunner: {
+					hasHandlers: (event: string) => event === "input",
+					emitInput: async () => {
+						throw new Error("hook failed");
+					},
+				},
+			});
+			await editor.onSubmit?.(`/${mode} [Image #1]`);
+			expect(spies.prompt).not.toHaveBeenCalled();
+			expect(spies.showError).toHaveBeenCalledWith("hook failed");
+			expect(editor.getText()).toBe(`/${mode} [Image #1]`);
+			expect(editor.pendingImages).toEqual([submitted]);
+			expect(editor.pendingImageLinks).toEqual(["file:///submitted.png"]);
+			editor.clearDraft();
+			customHandlers.get("ctrl+s")?.();
+			expect(editor.getText()).toBe("saved [Image #1]");
+			expect(editor.pendingImages).toEqual([saved]);
+		});
+	}
+
+	for (const queued of [false, true]) {
+		it(`restores a rich stash when a follow-up is held by ${queued ? "yield compaction" : "active compaction"}`, async () => {
+			const { ctx, editor, customHandlers, spies } = await createContext();
+			const controller = new InputController(ctx);
+			controller.setupKeyHandlers();
+			const saved: ImageContent = { type: "image", data: "c2F2ZWQ=", mimeType: "image/png" };
+			editor.setText("saved [Image #1]");
+			editor.pendingImages = [saved];
+			editor.pendingImageLinks = ["file:///saved.png"];
+			customHandlers.get("ctrl+s")?.();
+			const held: string[] = [];
+			Object.assign(ctx, {
+				queueCompactionMessage: (text: string) => {
+					held.push(text);
+				},
+				yieldCompaction: queued ? { text: "/compact", sessionId: "session", leafId: null } : undefined,
+			});
+			Object.assign(ctx.session, { isCompacting: !queued });
+			editor.setText("after compaction");
+			await controller.handleFollowUp();
+			expect(held).toEqual(["after compaction"]);
+			expect(spies.prompt).not.toHaveBeenCalled();
+			expect(editor.getText()).toBe("saved [Image #1]");
+			expect(editor.pendingImages).toEqual([saved]);
+			expect(editor.pendingImageLinks).toEqual(["file:///saved.png"]);
+		});
+	}
+	for (const followUp of [false, true]) {
+		for (const accepted of [false, true]) {
+			it(`restores a stash only for an accepted side file command (${followUp ? "follow-up" : "Enter"}, accepted=${accepted})`, async () => {
+				const { ctx, editor, customHandlers } = await createContext();
+				const controller = new InputController(ctx);
+				controller.setupKeyHandlers();
+				controller.setupEditorSubmitHandler();
+				ctx.fileSlashCommands = new Set(["sitrep"]);
+				Object.assign(ctx.session, {
+					slashCommands: [
+						{
+							name: "sitrep",
+							description: "Situation report",
+							content: "Report: $ARGUMENTS",
+							side: true,
+							source: "via OMP User",
+						},
+					],
+				});
+				ctx.handleBtwCommand = vi.fn(async () => accepted);
+				editor.setText("saved draft");
+				customHandlers.get("ctrl+s")?.();
+				editor.setText("/sitrep migration");
+				if (followUp) await controller.handleFollowUp();
+				else {
+					editor.setText("");
+					await editor.onSubmit?.("/sitrep migration");
+				}
+				expect(ctx.handleBtwCommand).toHaveBeenCalledWith("Report: migration", undefined, "/sitrep migration");
+				expect(editor.getText()).toBe(accepted ? "saved draft" : "");
+				if (!accepted) {
+					customHandlers.get("ctrl+s")?.();
+					expect(editor.getText()).toBe("saved draft");
+				}
+			});
+		}
+	}
+
+	it("keeps an empty submit from consuming the stash, then restores after a separate prompt", async () => {
+		const { ctx, editor, customHandlers, spies } = await createContext();
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+		controller.setupEditorSubmitHandler();
+		const stash = customHandlers.get("ctrl+s");
+		expect(stash).toBeDefined();
+		expect(customHandlers.get("alt+a")).toBeDefined();
+		const image: ImageContent = { type: "image", data: "aGVsbG8=", mimeType: "image/png" };
+		editor.pendingImages = [image];
+		editor.pendingImageLinks = ["/tmp/attached.png"];
+		editor.setText("original [Image #1]");
+		stash?.();
+		expect(editor.getText()).toBe("");
+		expect(editor.pendingImages).toEqual([]);
+		await editor.onSubmit?.("");
+		expect(editor.getText()).toBe("");
+		editor.setText("intervening prompt");
+		editor.setText(""); // Editor clears before invoking onSubmit.
+		await editor.onSubmit?.("intervening prompt");
+		expect(spies.prompt).toHaveBeenCalledWith("intervening prompt", {
+			streamingBehavior: "steer",
+			images: undefined,
+			onAccepted: expect.any(Function),
+		});
+		expect(editor.getText()).toBe("original [Image #1]");
+		expect(editor.pendingImages).toEqual([image]);
+		expect(editor.pendingImageLinks).toEqual(["/tmp/attached.png"]);
+	});
+
+	it("keeps the stash available when another prompt fails, then restores on an empty Ctrl+S", async () => {
+		const { ctx, editor, customHandlers, spies } = await createContext();
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+		controller.setupEditorSubmitHandler();
+		editor.setText("original");
+		customHandlers.get("ctrl+s")?.();
+		spies.prompt.mockRejectedValueOnce(new Error("dispatch failed"));
+		await editor.onSubmit?.("other");
+		expect(editor.getText()).toBe("other");
+		expect(spies.showError).toHaveBeenCalled();
+		editor.setText("");
+		customHandlers.get("ctrl+s")?.();
+		expect(editor.getText()).toBe("original");
+	});
+
+	it("restores after a focused submission, and explicit Ctrl+S swaps drafts", async () => {
+		const { ctx, editor, customHandlers, spies, setFocusedAgent } = await createContext();
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+		controller.setupEditorSubmitHandler();
+		editor.setText("first");
+		customHandlers.get("ctrl+s")?.();
+		editor.setText("replacement");
+		customHandlers.get("ctrl+s")?.();
+		customHandlers.get("ctrl+s")?.();
+		expect(editor.getText()).toBe("replacement");
+		customHandlers.get("ctrl+s")?.();
+		setFocusedAgent("agent");
+		await editor.onSubmit?.("ask focused agent");
+		expect(spies.prompt).toHaveBeenCalledWith("ask focused agent", {
+			streamingBehavior: "steer",
+			images: undefined,
+			onAccepted: expect.any(Function),
+		});
+		expect(editor.getText()).toBe("replacement");
+	});
+
+	it("swaps both rich drafts instead of overwriting an existing stash", async () => {
+		const { ctx, editor, customHandlers } = await createContext();
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+		const first: ImageContent = { type: "image", data: "Zmlyc3Q=", mimeType: "image/png" };
+		const second: ImageContent = { type: "image", data: "c2Vjb25k", mimeType: "image/png" };
+		editor.setText("first [Image #1]");
+		editor.pendingImages = [first];
+		editor.pendingImageLinks = ["file:///first.png"];
+		customHandlers.get("ctrl+s")?.();
+		editor.setText("second [Image #1]");
+		editor.pendingImages = [second];
+		editor.pendingImageLinks = ["file:///second.png"];
+		customHandlers.get("ctrl+s")?.();
+		expect(editor.getText()).toBe("first [Image #1]");
+		expect(editor.pendingImages).toEqual([first]);
+		expect(editor.pendingImageLinks).toEqual(["file:///first.png"]);
+		customHandlers.get("ctrl+s")?.();
+		expect(editor.getText()).toBe("second [Image #1]");
+		expect(editor.pendingImages).toEqual([second]);
+		expect(editor.pendingImageLinks).toEqual(["file:///second.png"]);
+		editor.clearDraft();
+		customHandlers.get("ctrl+s")?.();
+		expect(editor.getText()).toBe("first [Image #1]");
+		expect(editor.pendingImages).toEqual([first]);
+	});
+
+	it("restores a rich draft on acceptance of a canonicalized prompt before its model turn finishes", async () => {
+		const { ctx, editor, customHandlers, spies, setFocusedAgent } = await createContext();
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+		controller.setupEditorSubmitHandler();
+		const image: ImageContent = { type: "image", data: "aGVsbG8=", mimeType: "image/png" };
+		editor.pendingImages = [image];
+		editor.pendingImageLinks = ["/tmp/attached.png"];
+		editor.setText("long draft [Image #1]");
+		customHandlers.get("ctrl+s")?.();
+		setFocusedAgent("agent");
+		let finishTurn!: () => void;
+		const turn = new Promise<void>(resolve => {
+			finishTurn = resolve;
+		});
+		spies.prompt.mockImplementationOnce(async (_text, options) => {
+			expect(editor.getText()).toBe("");
+			// The session expands the submitted text before delivering the user message.
+			// Restoration follows acceptance, not exact message text.
+			options?.onAccepted?.();
+			await turn;
+			return true;
+		});
+		const submission = editor.onSubmit?.("typed @mention");
+		await Promise.resolve();
+		expect(editor.getText()).toBe("long draft [Image #1]");
+		expect(editor.pendingImages).toEqual([image]);
+		finishTurn();
+		await submission;
+	});
+	it("keeps a single-Ctrl+S stash separate from a queued steering edit", async () => {
+		const { ctx, editor, customHandlers, spies } = await createContext();
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+		controller.setupEditorSubmitHandler();
+		const image: ImageContent = { type: "image", data: "aGVsbG8=", mimeType: "image/png" };
+		editor.pendingImages = [image];
+		editor.pendingImageLinks = ["file:///stash.png"];
+		editor.setText("saved draft [Image #1]");
+		customHandlers.get("ctrl+s")?.();
+		expect(spies.notifyComposerStash).toHaveBeenCalledTimes(1);
+
+		const queued: RestoredQueuedMessage[] = [];
+		const session = ctx.session as InteractiveModeContext["session"] & {
+			popLastQueuedMessage: () => RestoredQueuedMessage | undefined;
+		};
+		Object.assign(session, { popLastQueuedMessage: () => queued.pop() });
+		let acceptFirstPrompt: (() => void) | undefined;
+		const { promise: firstPromptStarted, resolve: signalFirstPromptStarted } = Promise.withResolvers<void>();
+		let finishFirstTurn!: () => void;
+		const firstTurn = new Promise<void>(resolve => {
+			finishFirstTurn = resolve;
+		});
+		spies.prompt.mockImplementation(async (text, options) => {
+			if (text === "first prompt") {
+				acceptFirstPrompt = () => options?.onAccepted?.();
+				signalFirstPromptStarted();
+				await firstTurn;
+				return true;
+			}
+			queued.push({ text });
+			options?.onAccepted?.();
+			return true;
+		});
+
+		editor.setText("first prompt");
+		editor.clearDraft(); // The editor clears before calling onSubmit.
+		const firstSubmission = editor.onSubmit?.("first prompt");
+		if (!firstSubmission) throw new Error("Expected the first prompt to start");
+		await firstPromptStarted;
+		expect(acceptFirstPrompt).toBeDefined();
+		expect(editor.getText()).toBe("");
+
+		// The first turn is running while its acceptance callback is still pending.
+		// Submit steering before that callback can consume the only stashed draft.
+		Object.assign(session, { isStreaming: true });
+		editor.setText("steering prompt");
+		editor.clearDraft();
+		await editor.onSubmit?.("steering prompt");
+		expect(queued).toEqual([{ text: "steering prompt" }]);
+		expect(editor.getText()).toBe("saved draft [Image #1]");
+		expect(editor.pendingImages).toEqual([image]);
+
+		expect(spies.notifyComposerStash).toHaveBeenCalledTimes(1);
+
+		// Alt+Up recalls the steering prompt alone. Accepting its edit restores
+		// the parked stash instead of folding it into the submitted prompt.
+		expect(editor.onDequeue).toBeDefined();
+		editor.onDequeue?.();
+		expect(editor.getText()).toBe("steering prompt");
+		expect(editor.pendingImages).toEqual([]);
+		editor.setText("steering prompt revised");
+		editor.clearDraft();
+		// The delayed first-prompt acceptance cannot consume the fresh stash parked by Alt+Up.
+		acceptFirstPrompt?.();
+		expect(editor.getText()).toBe("");
+		expect(editor.pendingImages).toEqual([]);
+		await editor.onSubmit?.("steering prompt revised");
+		expect(queued).toEqual([{ text: "steering prompt revised" }]);
+		expect(editor.getText()).toBe("saved draft [Image #1]");
+		expect(editor.pendingImages).toEqual([image]);
+		expect(editor.pendingImageLinks).toEqual(["file:///stash.png"]);
+
+		finishFirstTurn();
+		await firstSubmission;
+	});
+
+	it("keeps a rich stash separate when Esc restores all queued messages", async () => {
+		const { ctx, editor, customHandlers, spies } = await createContext();
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+		controller.setupEditorSubmitHandler();
+		const image: ImageContent = { type: "image", data: "aGVsbG8=", mimeType: "image/png" };
+		editor.pendingImages = [image];
+		editor.pendingImageLinks = ["file:///stash.png"];
+		editor.setText("saved draft [Image #1]");
+		customHandlers.get("ctrl+s")?.();
+
+		editor.setText("first prompt");
+		editor.clearDraft();
+		await editor.onSubmit?.("first prompt");
+		expect(editor.getText()).toBe("saved draft [Image #1]");
+		expect(editor.pendingImages).toEqual([image]);
+
+		const session = ctx.session as InteractiveModeContext["session"] & {
+			clearQueue: () => { steering: RestoredQueuedMessage[]; followUp: RestoredQueuedMessage[] };
+		};
+		const clearQueue = vi.fn(() => ({ steering: [{ text: "queued prompt" }], followUp: [] }));
+		Object.assign(session, { clearQueue });
+		Object.assign(ctx, {
+			compactionQueuedMessages: [],
+			mcpTestEscapeHandlers: new Set(),
+			hasActiveOmfg: () => false,
+			hasActiveCleanse: () => false,
+			dismissCommandReport: () => false,
+			loadingAnimation: {},
+			cancelPendingSubmission: vi.fn(() => false),
+		});
+		editor.onEscape?.();
+		expect(clearQueue).toHaveBeenCalledWith({ forInterrupt: true });
+		expect(editor.getText()).toBe("queued prompt");
+		expect(editor.pendingImages).toEqual([]);
+		expect(editor.pendingImageLinks).toEqual([]);
+
+		Object.assign(session, { isStreaming: true });
+		editor.setText("queued prompt revised");
+		editor.clearDraft();
+		await editor.onSubmit?.("queued prompt revised");
+		expect(spies.prompt).toHaveBeenCalledWith("queued prompt revised", {
+			streamingBehavior: "steer",
+			images: undefined,
+			onAccepted: expect.any(Function),
+		});
+		expect(editor.getText()).toBe("saved draft [Image #1]");
+		expect(editor.pendingImages).toEqual([image]);
+		expect(editor.pendingImageLinks).toEqual(["file:///stash.png"]);
+	});
+
+	it("does not consume a newer stash when an older submission is accepted", async () => {
+		const { ctx, editor, customHandlers, spies } = await createContext();
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+		controller.setupEditorSubmitHandler();
+		editor.setText("old draft");
+		customHandlers.get("ctrl+s")?.();
+		let accept!: () => void;
+		spies.prompt.mockImplementationOnce(async (_text, options) => {
+			accept = () => options?.onAccepted?.();
+			return true;
+		});
+		await editor.onSubmit?.("separate prompt");
+		editor.setText("new draft");
+		customHandlers.get("ctrl+s")?.();
+		accept();
+		expect(editor.getText()).toBe("old draft");
+		customHandlers.get("ctrl+s")?.();
+		expect(editor.getText()).toBe("new draft");
+	});
+
+	it("restores a stash as soon as a long-running local command starts", async () => {
+		const { ctx, editor, customHandlers } = await createContext();
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+		controller.setupEditorSubmitHandler();
+		editor.setText("unfinished draft");
+		customHandlers.get("ctrl+s")?.();
+		const { promise: started, resolve: startCommand } = Promise.withResolvers<void>();
+		const { promise: running, resolve: finishCommand } = Promise.withResolvers<void>();
+		ctx.handleBashCommand = vi.fn(async () => {
+			startCommand();
+			return running;
+		});
+		const submission = editor.onSubmit?.("! sleep 30");
+		await started;
+		expect(editor.getText()).toBe("unfinished draft");
+		finishCommand();
+		await submission;
+	});
+
+	for (const [command, handler] of [
+		["/plan prepare", "handlePlanModeCommand"],
+		["/vibe delegate", "handleVibeModeCommand"],
+		["/goal ship", "handleGoalModeCommand"],
+		["/guided-goal discuss", "handleGuidedGoalCommand"],
+	] as const) {
+		it(`restores a stashed draft only when ${command} is accepted`, async () => {
+			const { ctx, editor, customHandlers } = await createContext();
+			const controller = new InputController(ctx);
+			controller.setupKeyHandlers();
+			controller.setupEditorSubmitHandler();
+			const image: ImageContent = { type: "image", data: "aGVsbG8=", mimeType: "image/png" };
+			editor.pendingImages = [image];
+			editor.pendingImageLinks = ["file:///stash.png"];
+			editor.setText("stashed [Image #1]");
+			customHandlers.get("ctrl+s")?.();
+			editor.setText(command);
+			let accept: (() => void) | undefined;
+			(ctx as unknown as Record<string, unknown>)[handler] = vi.fn(
+				async (_args: string | undefined, input?: { onAccepted?: () => void }) => {
+					accept = input?.onAccepted;
+					return true;
+				},
+			);
+
+			editor.setText(""); // Enter removes submitted text before calling onSubmit.
+			await editor.onSubmit?.(command);
+			expect(editor.getText()).toBe("");
+			expect(editor.pendingImages).toEqual([]);
+			expect(accept).toBeDefined();
+			// The handler merely scheduled a prompt; it may still fail preflight.
+			accept?.();
+			expect(editor.getText()).toBe("stashed [Image #1]");
+			expect(editor.pendingImages).toEqual([image]);
+			expect(editor.pendingImageLinks).toEqual(["file:///stash.png"]);
+		});
+	}
+
+	it("keeps the stash when a scheduled slash prompt is dropped before acceptance", async () => {
+		const { ctx, editor, customHandlers } = await createContext();
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+		controller.setupEditorSubmitHandler();
+		editor.setText("safe draft");
+		customHandlers.get("ctrl+s")?.();
+		editor.setText("/plan try this");
+		ctx.handlePlanModeCommand = vi.fn(async () => true);
+		editor.setText(""); // Enter removes submitted text before calling onSubmit.
+		await editor.onSubmit?.("/plan try this");
+		expect(editor.getText()).toBe("");
+		// Simulate the pending submission's preflight failure: it never called
+		// onAccepted, so the stashed draft remains available to restore manually.
+		customHandlers.get("ctrl+s")?.();
+		expect(editor.getText()).toBe("safe draft");
+	});
+
+	it("restores a stash for /queue only when the scheduled message is accepted", async () => {
+		const { ctx, editor, customHandlers } = await createContext();
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+		controller.setupEditorSubmitHandler();
+		editor.setText("stash");
+		customHandlers.get("ctrl+s")?.();
+		let accept: (() => void) | undefined;
+		ctx.startPendingSubmission = vi.fn((input: Parameters<InteractiveModeContext["startPendingSubmission"]>[0]) => {
+			accept = input.onAccepted;
+			return { ...input, cancelled: false, started: false };
+		});
+		ctx.onInputCallback = vi.fn();
+		ctx.handleQueueCommand = (text, input) => controller.handleQueueCommand(text, input);
+		editor.setText("/queue later");
+		await editor.onSubmit?.("/queue later");
+		expect(editor.getText()).toBe("");
+		expect(accept).toBeDefined();
+		accept?.();
+		expect(editor.getText()).toBe("stash");
+	});
+
+	it("preserves the restored rich stash when a later queued message fails", async () => {
+		const { ctx, editor, customHandlers } = await createContext();
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+		const image: ImageContent = { type: "image", data: "aGVsbG8=", mimeType: "image/png" };
+		editor.pendingImages = [image];
+		editor.pendingImageLinks = ["file:///stash.png"];
+		editor.setText("draft [Image #1]");
+		customHandlers.get("ctrl+s")?.();
+		Object.assign(ctx.session, {
+			isStreaming: true,
+			followUp: vi.fn(async (text: string) => {
+				if (text === "second") throw new Error("queue failed");
+			}),
+		});
+		await controller.handleQueueCommand("1. first\n2. second");
+		expect(editor.getText()).toBe("draft [Image #1]\n\n=> second");
+		expect(editor.pendingImages).toEqual([image]);
+		expect(editor.pendingImageLinks).toEqual(["file:///stash.png"]);
+	});
+
+	it("retains legacy no-stash queue failure replacement rather than merging a new draft", async () => {
+		const { ctx, editor } = await createContext();
+		const controller = new InputController(ctx);
+		Object.assign(ctx.session, {
+			isStreaming: true,
+			followUp: vi.fn(async (text: string) => {
+				if (text === "second") {
+					editor.setText("newly typed");
+					throw new Error("queue failed");
+				}
+			}),
+		});
+		await controller.handleQueueCommand("1. first\n2. second");
+		expect(editor.getText()).toBe("=> second");
+	});
+
+	it("restores the stash alongside an unsent queue entry when first acceptance arrives after the error", async () => {
+		const { ctx, editor, customHandlers } = await createContext();
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+		const image: ImageContent = { type: "image", data: "aGVsbG8=", mimeType: "image/png" };
+		editor.pendingImages = [image];
+		editor.pendingImageLinks = ["file:///stash.png"];
+		editor.setText("draft [Image #1]");
+		customHandlers.get("ctrl+s")?.();
+		let accept: (() => void) | undefined;
+		ctx.startPendingSubmission = vi.fn((input: Parameters<InteractiveModeContext["startPendingSubmission"]>[0]) => {
+			accept = input.onAccepted;
+			return { ...input, cancelled: false, started: false };
+		});
+		ctx.onInputCallback = vi.fn();
+		Object.assign(ctx.session, {
+			followUp: vi.fn(async () => {
+				throw new Error("queue failed");
+			}),
+		});
+
+		await controller.handleQueueCommand("1. first\n2. second");
+		expect(editor.getText()).toBe("=>\n1. first\n2. second");
+		accept?.();
+		expect(editor.getText()).toBe("draft [Image #1]\n\n=> second");
+		expect(editor.pendingImages).toEqual([image]);
+		expect(editor.pendingImageLinks).toEqual(["file:///stash.png"]);
+	});
+
+	it("drops an accepted first queued entry and its images from a no-stash recovery preview", async () => {
+		const { ctx, editor } = await createContext();
+		const controller = new InputController(ctx);
+		const image: ImageContent = { type: "image", data: "Zmlyc3Q=", mimeType: "image/png" };
+		editor.pendingImages = [image];
+		editor.pendingImageLinks = ["file:///first.png"];
+		let accept: (() => void) | undefined;
+		ctx.startPendingSubmission = vi.fn((input: Parameters<InteractiveModeContext["startPendingSubmission"]>[0]) => {
+			accept = input.onAccepted;
+			return { ...input, cancelled: false, started: false };
+		});
+		ctx.onInputCallback = vi.fn();
+		Object.assign(ctx.session, {
+			followUp: vi.fn(async () => {
+				throw new Error("queue failed");
+			}),
+		});
+
+		await controller.handleQueueCommand("1. first [Image #1]\n2. second");
+		expect(editor.getText()).toBe("=>\n1. first [Image #1]\n2. second");
+		expect(editor.pendingImages).toEqual([image]);
+		expect(editor.pendingImageLinks).toEqual(["file:///first.png"]);
+		accept?.();
+		expect(editor.getText()).toBe("=> second");
+		expect(editor.pendingImages).toEqual([]);
+		expect(editor.pendingImageLinks).toEqual([]);
+	});
+
+	for (const [label, submittedText] of [
+		["Enter", "=>\n1. first [Image #1]\n2. second"],
+		["detached Ctrl+Enter", "/queue 1. first [Image #1]\n2. second"],
+	] as const) {
+		it(`${label} preserves a newer image draft while a pending first queue entry awaits acceptance`, async () => {
+			const { ctx, editor } = await createContext();
+			const controller = new InputController(ctx);
+			controller.setupEditorSubmitHandler();
+			ctx.handleQueueCommand = (text, input) => controller.handleQueueCommand(text, input);
+			const firstImage: ImageContent = { type: "image", data: "Zmlyc3Q=", mimeType: "image/png" };
+			const newerImage: ImageContent = { type: "image", data: "bmV3ZXI=", mimeType: "image/jpeg" };
+			let accept: (() => void) | undefined;
+			ctx.startPendingSubmission = vi.fn(
+				(input: Parameters<InteractiveModeContext["startPendingSubmission"]>[0]) => {
+					accept = input.onAccepted;
+					return { ...input, cancelled: false, started: false };
+				},
+			);
+			ctx.onInputCallback = vi.fn();
+			const secondStarted = Promise.withResolvers<void>();
+			const failSecond = Promise.withResolvers<void>();
+			const followUp = vi.fn(async (text: string) => {
+				if (text === "second") {
+					secondStarted.resolve();
+					await failSecond.promise;
+					throw new Error("queue failed");
+				}
+			});
+			Object.assign(ctx.session, { followUp });
+			editor.pendingImages = [firstImage];
+			editor.pendingImageLinks = ["file:///first.png"];
+			editor.imageLinks = editor.pendingImageLinks;
+			editor.setText(submittedText);
+			// The real editor clears submitted Enter text before calling onSubmit;
+			// Ctrl+Enter detaches text and images inside handleFollowUp.
+			let submitting: Promise<void> | undefined;
+			if (label === "Enter") {
+				editor.setText("");
+				submitting = editor.onSubmit?.(submittedText);
+			} else {
+				submitting = controller.handleFollowUp();
+			}
+			if (!submitting) throw new Error("submission handler missing");
+			await secondStarted.promise;
+			editor.pendingImages = [newerImage];
+			editor.pendingImageLinks = ["file:///newer.jpg"];
+			editor.imageLinks = editor.pendingImageLinks;
+			editor.setText("newer [Image #1]");
+			failSecond.resolve();
+			await submitting;
+
+			// If pending first fails preflight, it and its own image must still
+			// be retriable; neither image marker may refer to the other image.
+			expect(accept).toBeDefined();
+			expect(followUp).toHaveBeenCalledWith("second", undefined);
+			expect(editor.getText()).toBe("=>\n1. first [Image #2]\n2. second\n\nnewer [Image #1]");
+			expect(editor.pendingImages).toEqual([newerImage, firstImage]);
+			expect(editor.pendingImageLinks).toEqual(["file:///newer.jpg", "file:///first.png"]);
+
+			accept?.();
+			expect(editor.getText()).toBe("newer [Image #1]\n\n=> second");
+			expect(editor.pendingImages).toEqual([newerImage]);
+			expect(editor.pendingImageLinks).toEqual(["file:///newer.jpg"]);
+			expect(editor.imageLinks).toEqual(["file:///newer.jpg"]);
+		});
+	}
+
+	it("does not replace a re-edited queue recovery draft when delayed acceptance arrives", async () => {
+		const { ctx, editor, customHandlers } = await createContext();
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+		const image: ImageContent = { type: "image", data: "aGVsbG8=", mimeType: "image/png" };
+		editor.pendingImages = [image];
+		editor.pendingImageLinks = ["file:///stash.png"];
+		editor.setText("draft [Image #1]");
+		customHandlers.get("ctrl+s")?.();
+		let accept: (() => void) | undefined;
+		ctx.startPendingSubmission = vi.fn((input: Parameters<InteractiveModeContext["startPendingSubmission"]>[0]) => {
+			accept = input.onAccepted;
+			return { ...input, cancelled: false, started: false };
+		});
+		ctx.onInputCallback = vi.fn();
+		Object.assign(ctx.session, {
+			followUp: vi.fn(async () => {
+				throw new Error("queue failed");
+			}),
+		});
+
+		await controller.handleQueueCommand("1. first\n2. second");
+		const recoveryDraft = editor.getText();
+		expect(recoveryDraft).toBe("=>\n1. first\n2. second");
+		// Re-editing to identical text must still be treated as a new user draft.
+		editor.setText(recoveryDraft);
+		accept?.();
+		expect(editor.getText()).toBe(recoveryDraft);
+
+		customHandlers.get("ctrl+s")?.();
+		expect(editor.getText()).toBe("draft [Image #1]");
+		expect(editor.pendingImages).toEqual([image]);
+		expect(editor.pendingImageLinks).toEqual(["file:///stash.png"]);
 	});
 });

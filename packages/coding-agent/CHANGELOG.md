@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Stash a prompt draft with Ctrl+S and restore or swap it without losing attachments; the composer briefly confirms when a draft is stashed. Mode prompts queued during compaction dispatch once without replaying the slash command or parking their loop continuation ([#13468](https://github.com/can1357/oh-my-pi/pull/13468) by [@pedropaulovc](https://github.com/pedropaulovc)).
+
+### Fixed
+
+- Preserve restored rich drafts when a submitted prompt fails after acceptance, and return mode-command attachments when an input hook fails before admission.
+
 ## [18.14.1] - 2026-10-31
 
 ### Added

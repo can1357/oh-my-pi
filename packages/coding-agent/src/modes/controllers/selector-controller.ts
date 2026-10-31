@@ -2527,10 +2527,7 @@ export class SelectorController {
 			return true;
 		};
 		if (reuseOpenHub()) return;
-		const hubKeys = [
-			...this.ctx.keybindings.getKeys("app.agents.hub"),
-			...this.ctx.keybindings.getKeys("app.session.observe"),
-		];
+		const hubKeys = this.ctx.keybindings.getKeys("app.agents.hub");
 		let menu: OpenMenu | undefined;
 		let closed = false;
 

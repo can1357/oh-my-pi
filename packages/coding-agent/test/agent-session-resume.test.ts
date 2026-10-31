@@ -145,4 +145,34 @@ describe("AgentSession.resume", () => {
 			["assistant", "more"],
 		]);
 	});
+
+	for (const answered of [false, true]) {
+		it(`accepts a ${answered ? "continue directive" : "re-run"} before its response finishes`, async () => {
+			const initial = stalledResponse();
+			const resumed = stalledResponse();
+			const { session } = createSession([answered ? { content: ["done"] } : initial.handler, resumed.handler]);
+			if (answered) {
+				await session.prompt("do the thing");
+			} else {
+				await abortDuring(session, session.prompt("do the thing"), initial.started);
+			}
+			let accepted = 0;
+			const pending = session.resume({ onAccepted: () => accepted++ });
+			await resumed.started;
+			expect(accepted).toBe(1);
+			await abortDuring(session, pending, resumed.started);
+			expect(accepted).toBe(1);
+		});
+	}
+
+	it("does not accept a continue rejected while the session is busy", async () => {
+		const stall = stalledResponse();
+		const { session } = createSession([stall.handler]);
+		const pending = session.prompt("still running");
+		await stall.started;
+		let accepted = 0;
+		await expect(session.resume({ onAccepted: () => accepted++ })).rejects.toThrow();
+		expect(accepted).toBe(0);
+		await abortDuring(session, pending, stall.started);
+	});
 });
