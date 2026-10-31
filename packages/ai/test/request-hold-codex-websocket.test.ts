@@ -96,7 +96,10 @@ describe("the Codex WebSocket transport in a hold scope", () => {
 			signal: request.signal,
 			...extra,
 		});
-		const context = { systemPrompt: ["system prompt"], messages: [{ role: "user" as const, content: "Hi", timestamp: 1 }] };
+		const context = {
+			systemPrompt: ["system prompt"],
+			messages: [{ role: "user" as const, content: "Hi", timestamp: 1 }],
+		};
 
 		it("opens a socket and sends its request when the scope is not held", async () => {
 			const reply = await runInRequestHoldScope(held.signal, ended.signal, () =>

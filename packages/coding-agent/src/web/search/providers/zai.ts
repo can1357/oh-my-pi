@@ -283,7 +283,8 @@ async function callZaiTool(
 
 async function callZaiSearch(apiKey: string, params: ZaiSearchParams): Promise<unknown> {
 	const count = params.num_results ?? DEFAULT_NUM_RESULTS;
-	// model-request: caller callZaiSearch(params.signal) — Z.ai's web search: each attempt passes `params.signal` to `callZaiTool`.
+	// model-request: none — Z.ai's search API (its MCP tool `web_search_prime`), not a model request; each attempt still
+	// passes `params.signal`.
 	const fetchImpl = params.fetch ?? fetch;
 	const attempts: Record<string, unknown>[] = [
 		{ query: params.query, count },
@@ -416,7 +417,6 @@ export async function searchZai(params: ZaiSearchParams): Promise<SearchResponse
 		sessionId: params.sessionId,
 	});
 
-	// model-request: turn — Z.ai's web search for the web_search tool call, with its signal (`params.signal`).
 	const rawResult = await withAuth(keyOrResolver, key => callZaiSearch(key, params), {
 		signal: params.signal,
 		missingKeyMessage: "Z.AI credentials not found. Set ZAI_API_KEY or login with 'omp /login zai'.",

@@ -122,9 +122,18 @@ describe("shared work a held job starts", () => {
 		const adc = path.join(dir, "adc.json");
 		await Bun.write(
 			adc,
-			JSON.stringify({ type: "authorized_user", client_id: "id", client_secret: "secret", refresh_token: "refresh" }),
+			JSON.stringify({
+				type: "authorized_user",
+				client_id: "id",
+				client_secret: "secret",
+				refresh_token: "refresh",
+			}),
 		);
-		withEnv({ GOOGLE_APPLICATION_CREDENTIALS: adc, GOOGLE_CLOUD_ACCESS_TOKEN: undefined, CLOUDSDK_AUTH_ACCESS_TOKEN: undefined });
+		withEnv({
+			GOOGLE_APPLICATION_CREDENTIALS: adc,
+			GOOGLE_CLOUD_ACCESS_TOKEN: undefined,
+			CLOUDSDK_AUTH_ACCESS_TOKEN: undefined,
+		});
 		__resetVertexTokenCache();
 		cleanups.push(() => __resetVertexTokenCache());
 		const site = endpoint(() => Response.json({ access_token: "shared-token", expires_in: 3600 }));

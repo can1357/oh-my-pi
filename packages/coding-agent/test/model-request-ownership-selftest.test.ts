@@ -83,7 +83,11 @@ const CASES: ReadonlyArray<{ name: string; files: Readonly<Record<string, string
 		passes: false,
 	},
 	// Attacks: an undeclared request, in every form the walk must see.
-	{ name: "an undeclared call", files: { "coding-agent/src/zz.ts": `${IMPORT}completeSimple(m, c, {});\n` }, passes: false },
+	{
+		name: "an undeclared call",
+		files: { "coding-agent/src/zz.ts": `${IMPORT}completeSimple(m, c, {});\n` },
+		passes: false,
+	},
 	{
 		name: "an undeclared call in an .mts file",
 		files: { "coding-agent/src/zz.mts": `${IMPORT}completeSimple(m, c, {});\n` },
@@ -96,7 +100,9 @@ const CASES: ReadonlyArray<{ name: string; files: Readonly<Record<string, string
 	},
 	{
 		name: "through a TypeScript cast",
-		files: { "coding-agent/src/zz.ts": `${IMPORT}(completeSimple as unknown as (...args: unknown[]) => unknown)(m, c, {});\n` },
+		files: {
+			"coding-agent/src/zz.ts": `${IMPORT}(completeSimple as unknown as (...args: unknown[]) => unknown)(m, c, {});\n`,
+		},
 		passes: false,
 	},
 	{
@@ -111,13 +117,16 @@ const CASES: ReadonlyArray<{ name: string; files: Readonly<Record<string, string
 	},
 	{
 		name: "a namespace of a dynamic import",
-		files: { "coding-agent/src/zz.ts": 'const ai = await import("@oh-my-pi/pi-ai");\nai.completeSimple(m, c, {});\n' },
+		files: {
+			"coding-agent/src/zz.ts": 'const ai = await import("@oh-my-pi/pi-ai");\nai.completeSimple(m, c, {});\n',
+		},
 		passes: false,
 	},
 	{
 		name: "a computed member of that namespace",
 		files: {
-			"coding-agent/src/zz.ts": 'const ai = await import("@oh-my-pi/pi-ai");\nconst key = "completeSimple";\nai[key](m, c, {});\n',
+			"coding-agent/src/zz.ts":
+				'const ai = await import("@oh-my-pi/pi-ai");\nconst key = "completeSimple";\nai[key](m, c, {});\n',
 		},
 		passes: false,
 	},

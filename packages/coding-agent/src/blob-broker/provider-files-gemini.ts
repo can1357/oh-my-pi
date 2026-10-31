@@ -81,7 +81,8 @@ function isOfficialGeminiModel(model: Model): boolean {
 export function createGeminiProviderFileClient(
 	model: Model,
 	credential: string,
-	// model-request: none — uploads a blob to Gemini's file store for the blob broker, not a model request.
+	// model-request: none — a credentialed upload to Gemini's file store for the blob broker: provider HTTP, but not
+	// inference.
 	fetchImpl: FetchImpl = globalThis.fetch,
 ): ProviderFileClient | null {
 	if (!isOfficialGeminiModel(model)) return null;

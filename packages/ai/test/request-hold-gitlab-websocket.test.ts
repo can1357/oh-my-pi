@@ -174,7 +174,9 @@ describe("the GitLab Duo WebSocket transport in a hold scope", () => {
 	it("sends no startRequest once the hold began after its socket was created", async () => {
 		const pending = turn(context, {
 			webSocketFactory: (url, options) => {
-				const socket = new WebSocket(url, { headers: options.headers }) as unknown as GitLabDuoWorkflowWebSocketLike;
+				const socket = new WebSocket(url, {
+					headers: options.headers,
+				}) as unknown as GitLabDuoWorkflowWebSocketLike;
 				// The socket is not open yet; the startRequest is sent when it opens.
 				held.abort();
 				return socket;

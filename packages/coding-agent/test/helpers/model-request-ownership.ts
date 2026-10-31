@@ -1058,7 +1058,8 @@ function supply(source: Source, ancestors: readonly Node[], depth = 0): Supply {
 			supply({ node: branch, prop: source.prop }, ancestors, depth + 1),
 		);
 		const missing = branches.find(branch => "missing" in branch);
-		if (missing) return { missing: `a branch passes none: ${(missing as { missing: string }).missing}`, explicit: true };
+		if (missing)
+			return { missing: `a branch passes none: ${(missing as { missing: string }).missing}`, explicit: true };
 		return {
 			sources: branches.flatMap(branch => ("sources" in branch ? branch.sources : [])),
 			...(branches.some(branch => "opaque" in branch) ? { opaque: true as const } : {}),
@@ -1463,7 +1464,11 @@ function closedOnAbort(site: Site): boolean {
 		walk(listener, inner => {
 			if (inner.type !== "CallExpression") return;
 			const close = unwrap(child(inner, "callee"));
-			if (close?.type === "MemberExpression" && memberName(close) === "close" && nameOf(child(close, "object")) === socket.name) {
+			if (
+				close?.type === "MemberExpression" &&
+				memberName(close) === "close" &&
+				nameOf(child(close, "object")) === socket.name
+			) {
 				closed = true;
 			}
 		});
@@ -1571,7 +1576,6 @@ function hindsightBindings(files: ReadonlyMap<string, SourceFile>): string[] {
 	return problems;
 }
 
-
 /** What {@link checkModelRequestOwnership} found. */
 export interface OwnershipReport {
 	/** Every site found, declared or not. */
@@ -1594,7 +1598,7 @@ export async function checkModelRequestOwnership(packagesDir: string): Promise<O
 	const files = await loadFiles(packages);
 	const graph = new Graph(files, packages);
 	const problems: string[] = [];
-	
+
 	for (const [pkg, primitives] of Object.entries(TRANSPORT_PRIMITIVES)) {
 		for (const [name, signal] of Object.entries(primitives)) addConstructor(`pkg:${pkg}:${name}`, name, signal);
 	}
@@ -1611,7 +1615,7 @@ export async function checkModelRequestOwnership(packagesDir: string): Promise<O
 		problems.push(`${HINDSIGHT.file}: the Hindsight client's request methods were not found`);
 	}
 	problems.push(...hindsightBindings(files));
-	
+
 	// Discover sites to a fixed point: each `caller` declaration adds a constructor whose uses are sites.
 	const sites = new Map<string, Site>();
 	const walkedIds = new Set<string>();
@@ -1624,8 +1628,7 @@ export async function checkModelRequestOwnership(packagesDir: string): Promise<O
 		const names = [...new Set(fresh.map(constructor => constructor.name.replace(/^#/, "")))];
 		for (const constructor of fresh) walkedIds.add(constructor.id);
 		for (const file of files.values()) {
-			if (round > 0 && !names.some(name => file.text.includes(name)) && !INDIRECT_IMPORT.test(file.text))
-				continue;
+			if (round > 0 && !names.some(name => file.text.includes(name)) && !INDIRECT_IMPORT.test(file.text)) continue;
 			for (const site of sitesIn(file, graph, methods)) {
 				const key = `${site.file.key}:${site.node.start}:${site.constructor.id}`;
 				if (sites.has(key)) continue;
@@ -1681,7 +1684,7 @@ export async function checkModelRequestOwnership(packagesDir: string): Promise<O
 		if (settled === known && round > 0) break;
 		if (round > 40) throw new Error("caller propagation did not settle");
 	}
-	
+
 	// Check every site against its declaration and its constructor's final requirement.
 	const siteNodes = new Set([...sites.values()].map(site => site.node));
 	for (const site of sites.values()) {
@@ -1795,7 +1798,7 @@ export async function checkModelRequestOwnership(packagesDir: string): Promise<O
 			}
 		}
 	}
-	
+
 	// A declaration no site uses is stale: the request it described moved or went away.
 	const used = new Set([...sites.values()].map(site => `${site.file.key}:${site.declarationStart}`));
 	for (const file of files.values()) {
@@ -1806,17 +1809,17 @@ export async function checkModelRequestOwnership(packagesDir: string): Promise<O
 			}
 		}
 	}
-	
+
 	const inventory = [...sites.values()];
 	return {
-	sites: inventory.map(s => ({
-		owner: s.owner,
-		file: s.file.key,
-		line: s.line,
-		use: s.use,
-		name: s.constructor.name,
-	})),
-	problems,
-	packageCount: packages.size,
+		sites: inventory.map(s => ({
+			owner: s.owner,
+			file: s.file.key,
+			line: s.line,
+			use: s.use,
+			name: s.constructor.name,
+		})),
+		problems,
+		packageCount: packages.size,
 	};
 }

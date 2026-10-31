@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `runOutsideRequestHold(fn)`: work shared across callers (a token refresh, a discovery cache) runs outside the caller's provider-request hold, so one held job's hold does not stall or refuse it for every other caller ([#17457](https://github.com/can1357/oh-my-pi/pull/17457) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.14.1] - 2026-10-31
 
 ### Added

@@ -50,7 +50,11 @@ import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 function anthropicTurn(tool: boolean): Response {
 	const block = tool
 		? [
-				{ type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "toolu_raw", name: "raw", input: {} } },
+				{
+					type: "content_block_start",
+					index: 0,
+					content_block: { type: "tool_use", id: "toolu_raw", name: "raw", input: {} },
+				},
 				{ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: "{}" } },
 			]
 		: [
@@ -109,7 +113,13 @@ interface Site {
 }
 
 const APIS = ["withAuth", "complete", "completeSimple", "stream", "streamSimple"] as const;
-const RAW_REQUESTS = ["Hindsight recall", "Perplexity search", "withOAuthAccess", "MCP over HTTP", "the tool's own fetch"] as const;
+const RAW_REQUESTS = [
+	"Hindsight recall",
+	"Perplexity search",
+	"withOAuthAccess",
+	"MCP over HTTP",
+	"the tool's own fetch",
+] as const;
 
 describe("a held job sends nothing from its owner's beginDispose() on", () => {
 	let tempDir: TempDir;
@@ -130,7 +140,11 @@ describe("a held job sends nothing from its owner's beginDispose() on", () => {
 		owner = new AgentSession({
 			agent: new Agent({
 				getApiKey: () => "test-key",
-				initialState: { model: getBundledModel("anthropic", "claude-sonnet-4-5")!, systemPrompt: ["Test"], tools: [] },
+				initialState: {
+					model: getBundledModel("anthropic", "claude-sonnet-4-5")!,
+					systemPrompt: ["Test"],
+					tools: [],
+				},
 			}),
 			sessionManager: SessionManager.inMemory(tempDir.path()),
 			modelRegistry: new ModelRegistry(authStorage, path.join(tempDir.path(), "owner.yml")),
@@ -457,7 +471,8 @@ describe("a held job sends nothing from its owner's beginDispose() on", () => {
 						toolStarted.resolve();
 						await release.promise;
 						try {
-							for (let index = 0; index < 3; index++) await rawRequest(kind, signal ?? new AbortController().signal);
+							for (let index = 0; index < 3; index++)
+								await rawRequest(kind, signal ?? new AbortController().signal);
 						} catch {
 							// A refused or failed request ends the tool; the endpoint has counted what was sent.
 						} finally {
