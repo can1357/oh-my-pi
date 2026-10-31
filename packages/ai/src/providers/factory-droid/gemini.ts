@@ -104,7 +104,7 @@ const GOOGLE_APIS: Record<string, true> = {
  * Responses-origin call), and with its reasoning already gone there is
  * nothing left for a cross-model pass to demote.
  */
-function adoptFactoryReplay(message: Message, model: Model<"factory-droid-agent">): Message {
+export function adoptFactoryReplay(message: Message, model: Model<"factory-droid-agent">): Message {
 	if (message.role !== "assistant") return message;
 	const googleOrigin = GOOGLE_APIS[message.api] === true;
 	const sameModel = googleOrigin && message.provider === model.provider && message.model === model.id;
@@ -250,7 +250,7 @@ function toGeminiContents(
 	};
 }
 
-function toGeminiTools(tools: Tool[] | undefined): Array<{ functionDeclarations: unknown[] }> | undefined {
+export function toGeminiTools(tools: Tool[] | undefined): Array<{ functionDeclarations: unknown[] }> | undefined {
 	if (!tools || tools.length === 0) return undefined;
 	return [
 		{

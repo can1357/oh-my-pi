@@ -6,7 +6,8 @@ export const SIZE_HARD_CAP = 1_000_000;
 export const SIZE_BASE64_CHECK = 100_000;
 export const ENTROPY_THRESHOLD = 5.0;
 
-const DATA_URI_RE = /^data:(?<mime>[^;,]+)?(?:;base64)?,(?<payload>.*)/i;
+const DATA_URI_RE =
+	/^data:(?<mime>[-\w.+]+\/[-\w.+]+)?(?<params>(?:;[-\w.+]+=[^;,]*)*)(?<base64>;base64)?,(?<data>[\s\S]*)$/i;
 const VALID_MIME_RE = /^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/;
 const BASE64_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 export interface BlobMetadata {
@@ -49,11 +50,12 @@ export function isDataUri(content: string): boolean {
 export function parseDataUri(content: string): [mimeType: string, raw: Buffer] | null {
 	const match = DATA_URI_RE.exec(content);
 	if (match?.groups === undefined) return null;
+	if (match.groups.base64 === undefined) return null;
 
 	const rawMime = match.groups.mime;
 	if (rawMime !== undefined && !VALID_MIME_RE.test(rawMime)) return null;
 	const mimeType = rawMime ?? "application/octet-stream";
-	const payload = match.groups.payload ?? "";
+	const payload = match.groups.data ?? "";
 	if (!isValidBase64(payload)) return null;
 
 	return [mimeType, Buffer.from(payload, "base64")];
@@ -495,8 +497,9 @@ const CREDENTIAL_RULES: ReadonlyArray<{
 	},
 	{
 		type: "auth_bearer_basic",
-		pattern: /\b(Authorization\s*:\s*(?:Bearer|Basic)\s+)[^\s"',;]{8,}/gi,
-		replacement: "$1[REDACTED]",
+		pattern:
+			/((?<q1>["']?)\b(?:Proxy-)?Authorization\k<q1>\s*:\s*(?<q2>["']?)(?:Bearer|Basic)\s+)[^\s"',;}{[\]]{8,}(\k<q2>)/gi,
+		replacement: "$1[REDACTED]$4",
 	},
 	{
 		type: "basic_auth_url",
@@ -541,6 +544,9 @@ export function scrubLiveCredentials(content: string): { content: string; matche
 			}
 			if (rule.replacement === "$1[REDACTED]$3") {
 				return `${args[1] as string}[REDACTED]${args[3] as string}`;
+			}
+			if (rule.replacement === "$1[REDACTED]$4") {
+				return `${args[1] as string}[REDACTED]${args[4] as string}`;
 			}
 			return rule.replacement ?? "[REDACTED]";
 		});
@@ -755,7 +761,7 @@ export function sanitizeContent(content: string): [sanitizedContent: string, met
 				mime: mimeType,
 				extraction_reason: "data_uri",
 			};
-			const omittedMime = /^data:(?:;base64)?,/i.test(content);
+			const omittedMime = DATA_URI_RE.exec(content)?.groups?.mime === undefined;
 			if (omittedMime || isTextualMime(mimeType, rawBytes)) {
 				let decoded = new TextDecoder("utf-8", { fatal: false }).decode(rawBytes);
 				const tagRes = stripInjectedMemoryTags(decoded);

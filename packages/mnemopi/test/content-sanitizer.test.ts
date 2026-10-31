@@ -48,6 +48,16 @@ describe("content sanitizer data URI parsing", () => {
 		]);
 		expect(parseDataUri("data:;base64,SGVsbG8=")).toEqual(["application/octet-stream", Buffer.from("Hello")]);
 	});
+	it("parses data URIs with RFC 2397 parameters and charset settings", () => {
+		expect(parseDataUri("data:text/plain;charset=utf-8;base64,SGVsbG8=")).toEqual([
+			"text/plain",
+			Buffer.from("Hello"),
+		]);
+		expect(parseDataUri("data:;charset=utf-8;base64,SGVsbG8=")).toEqual([
+			"application/octet-stream",
+			Buffer.from("Hello"),
+		]);
+	});
 
 	it("rejects invalid base64, invalid media types, and missing schemes", () => {
 		expect(parseDataUri("data:image/png;base64,!!!not-valid!!!")).toBeNull();
@@ -583,5 +593,33 @@ Tail content
 			const stored = readFileSync(join(blobRoot, sha.slice(0, 2), sha.slice(0, 4), sha), "utf8");
 			expect(stored).toBe("Authorization: Bearer [REDACTED]");
 		}
+	});
+
+	it("scrubs live credentials from parameterized data URIs with text/plain or omitted MIME before writing blob bytes", () => {
+		const blobRoot = useTempBlobDir();
+		const rawPayload = "Authorization: Bearer secretToken12345678";
+		for (const uri of [
+			`data:text/plain;charset=utf-8;base64,${Buffer.from(rawPayload, "utf8").toString("base64")}`,
+			`data:;charset=utf-8;base64,${Buffer.from(rawPayload, "utf8").toString("base64")}`,
+		]) {
+			const [text, meta] = sanitizeContent(uri);
+			expect(text).not.toContain("secretToken12345678");
+			expect(meta.extraction_reason).toBe("data_uri");
+			expect(meta.redacted_secrets).toContain("auth_bearer_basic");
+			const sha = (meta.blob_ref ?? "").replace("blob://sha256/", "");
+			const stored = readFileSync(join(blobRoot, sha.slice(0, 2), sha.slice(0, 4), sha), "utf8");
+			expect(stored).toBe("Authorization: Bearer [REDACTED]");
+		}
+	});
+
+	it("redacts quoted Authorization header values in JSON and YAML strings", () => {
+		const jsonPayload = '{"Authorization":"Bearer sampleLongCredential123456789"}';
+		const { content: scrubbed, matchedTypes } = scrubLiveCredentials(jsonPayload);
+		expect(matchedTypes).toContain("auth_bearer_basic");
+		expect(scrubbed).toBe('{"Authorization":"Bearer [REDACTED]"}');
+
+		const [sanitized, meta] = sanitizeContent(jsonPayload);
+		expect(sanitized).toBe('{"Authorization":"Bearer [REDACTED]"}');
+		expect(meta.redacted_secrets).toContain("auth_bearer_basic");
 	});
 });
