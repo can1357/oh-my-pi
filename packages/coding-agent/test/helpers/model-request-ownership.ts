@@ -2496,31 +2496,42 @@ function credentialNear(site: Site): string | undefined {
 /** Calls that ask the request hold right before a send: pi-ai's `admitSend`, pi-utils' `admitNetworkSend`, a bound admission. */
 const HOLD_ADMISSION = /^(#?admitSend|admitNetworkSend|admitProviderRequest|admit)$/;
 
+/** The shapes an admission's answer counts in, as the checker's message tells the author. */
+const ADMISSION_SHAPES =
+	"`await admitNetworkSend(signal);`, or `const refusal = admitNetworkSend(signal);` followed by `if (refusal) await refusal;` (the branch may `return` or `throw` instead) or `refusal && await refusal;` (`admitSend` in pi-ai the same way), in the same function, before the send";
+
 /**
  * Whether a function asks the request hold before a site and acts on the answer, which is what an
- * admission's doc comment requires. The call counts only when it is awaited
- * (`await admitProviderRequest(signal)`), or when it initialises a local that an `if` before the site
- * tests and whose branch awaits it, returns or throws
- * (`const refusal = admitSend(signal); if (refusal) await refusal;`). A call whose answer is dropped
- * (`admitNetworkSend();`) asks the hold and ignores what it says.
+ * admission's doc comment requires: `gated`, or the first admission before the site whose answer the
+ * checker cannot see used (`dropped`), or neither. The call counts only when it is awaited
+ * (`await admitProviderRequest(signal)`), or when it initialises a local that, before the site, an
+ * `if` tests and whose branch awaits it, returns or throws
+ * (`const refusal = admitSend(signal); if (refusal) await refusal;`), or that `refusal && await refusal;`
+ * awaits. A call whose answer is dropped (`admitNetworkSend();`), kept on an object or handed to
+ * another function asks the hold, but the checker does not follow the answer there.
  *
- * This reads shapes, not control flow: a `catch` that swallows the refusal, or a branch that returns
- * into the send some other way, is not seen. The request-count tests carry the claim at run time.
+ * The checker enforces these shapes; it does not prove that an admission executes or that it prevents
+ * the send. It reads no control flow: an `await` in a branch that never runs or a helper nobody calls,
+ * a local reassigned before its test, a `catch` that swallows the refusal, or one admission before two
+ * sends with a hold between them all pass. The request-count tests carry the claim at run time.
  */
-function gatedBefore(site: Site): boolean {
+function admissionBefore(site: Site): { gated: boolean; dropped?: string } {
 	const start = (site.node.start as number | undefined) ?? 0;
 	const scope = enclosingScope(site);
 	let gated = false;
+	let dropped: string | undefined;
 	walk(scope, (node, ancestors) => {
 		if (gated || !/^(Call|OptionalCall)Expression$/.test(node.type) || ((node.start as number) ?? 0) >= start) return;
 		const callee = unwrap(child(node, "callee"));
 		const name = callee?.type === "MemberExpression" ? memberName(callee) : nameOf(callee);
-		if (name && HOLD_ADMISSION.test(name) && answerActedOn(node, ancestors, scope, start)) gated = true;
+		if (!name || !HOLD_ADMISSION.test(name)) return;
+		if (answerActedOn(node, ancestors, scope, start)) gated = true;
+		else dropped ??= `\`${name}\`, line ${node.loc?.start.line ?? 0}`;
 	});
-	return gated;
+	return gated ? { gated } : { gated, dropped };
 }
 
-/** Whether an admission call's answer decides the path before `before` (see {@link gatedBefore}). */
+/** Whether an admission call's answer decides the path before `before` (see {@link admissionBefore}). */
 function answerActedOn(call: Node, ancestors: readonly Node[], scope: Node, before: number): boolean {
 	let index = ancestors.length - 1;
 	while (index >= 0 && TRANSPARENT.has(ancestors[index].type)) index--;
@@ -2531,18 +2542,32 @@ function answerActedOn(call: Node, ancestors: readonly Node[], scope: Node, befo
 	if (!name) return false;
 	let acted = false;
 	walk(scope, node => {
-		if (acted || node.type !== "IfStatement" || ((node.start as number) ?? 0) >= before) return;
-		if (nameOf(unwrap(child(node, "test"))) === name) acted = leavesOnRefusal(child(node, "consequent"), name);
+		if (acted || ((node.start as number) ?? 0) >= before) return;
+		if (node.type === "IfStatement" && nameOf(unwrap(child(node, "test"))) === name) {
+			acted = leavesOnRefusal(child(node, "consequent"), name);
+		} else if (node.type === "ExpressionStatement") {
+			// `refusal && await refusal;`: the `if` shape written as one expression.
+			const expression = unwrap(child(node, "expression"));
+			if (
+				expression?.type === "LogicalExpression" &&
+				expression.operator === "&&" &&
+				nameOf(unwrap(child(expression, "left"))) === name
+			) {
+				acted = leavesOnRefusal(child(expression, "right"), name);
+			}
+		}
 	});
 	return acted;
 }
 
-/** Whether an `if (refusal)` branch keeps the send from going ahead: it awaits the refusal, or ends in `return` or `throw`. */
+/**
+ * Whether what runs when the refusal is there keeps the send from going ahead: an `if` branch, or the
+ * right side of `refusal && …`, that awaits the refusal, or ends in `return` or `throw`.
+ */
 function leavesOnRefusal(branch: Node | undefined, name: string): boolean {
 	const last = branch?.type === "BlockStatement" ? children(branch, "body").at(-1) : branch;
 	if (last?.type === "ReturnStatement" || last?.type === "ThrowStatement") return true;
-	if (last?.type !== "ExpressionStatement") return false;
-	const expression = unwrap(child(last, "expression"));
+	const expression = unwrap(last?.type === "ExpressionStatement" ? child(last, "expression") : last);
 	return expression?.type === "AwaitExpression" && nameOf(unwrap(child(expression, "argument"))) === name;
 }
 
@@ -2888,9 +2913,13 @@ export async function checkModelRequestOwnership(packagesDir: string): Promise<O
 		// governed by the extension boundary.
 		if (unbackstopped(site) && !["no-session", "outlives-disposal", "extension"].includes(site.owner)) {
 			const credential = credentialNear(site);
-			if (credential && !gatedBefore(site)) {
+			const admission = credential ? admissionBefore(site) : undefined;
+			if (admission && !admission.gated) {
+				const asked = admission.dropped
+					? `asks the hold (${admission.dropped}) but its answer is not used in a shape the checker reads, so nothing it can see stops the send`
+					: "nothing asks the hold first";
 				problems.push(
-					`${where}: this send carries a credential (${credential}) on a transport the request hold's fetch backstop does not see, and nothing asks the hold first; call \`admitSend\` (pi-ai) or \`admitNetworkSend\` (pi-utils) before it, or declare its lifetime ("no-session", "outlives-disposal") — "${site.owner}" does not cover it`,
+					`${where}: this send carries a credential (${credential}) on a transport the request hold's fetch backstop does not see, and ${asked}. Write ${ADMISSION_SHAPES}; an answer kept on an object or handed to another function is not followed, so keep it in a local. Or declare its lifetime ("no-session", "outlives-disposal") — "${site.owner}" does not cover it`,
 				);
 			}
 		}

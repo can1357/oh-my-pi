@@ -673,6 +673,27 @@ const CASES: ReadonlyArray<{ name: string; files: Readonly<Record<string, string
 		},
 		passes: false,
 	},
+	// Round eighteen's confirmation review: a safe form the round-sixteen rule refused. Accepted: the `if`
+	// shape written as one expression.
+	{
+		name: "a credentialed HTTP/2 send that asks the hold with `refusal && await refusal`",
+		files: {
+			"coding-agent/src/ok.ts":
+				'import * as http2 from "node:http2";\nimport { admitNetworkSend } from "@oh-my-pi/pi-utils/request-hold-scope";\nexport async function go(url: string, apiKey: string, signal: AbortSignal) {\n\tconst refusal = admitNetworkSend(signal); refusal && await refusal;\n\t// model-request: none — the fixture lists models, a catalog read; asks the hold above.\n\tconst client = http2.connect(url);\n\treturn client.request({ authorization: `Bearer ${apiKey}` });\n}\n',
+		},
+		passes: true,
+	},
+	// The other safe form that review found refused, refused on purpose: the checker would have to tie the
+	// property it tests and awaits to the call through the object and every write to it. A local carries
+	// the same answer with nothing to tie, and the checker's message says so.
+	{
+		name: "declined: an admission kept on an object, though tested and awaited",
+		files: {
+			"coding-agent/src/zz.ts":
+				'import * as http2 from "node:http2";\nimport { admitNetworkSend } from "@oh-my-pi/pi-utils/request-hold-scope";\nexport async function go(url: string, apiKey: string, signal: AbortSignal) {\n\tconst box = { refusal: admitNetworkSend(signal) };\n\tif (box.refusal) await box.refusal;\n\t// model-request: none — the fixture lists models, a catalog read; asks the hold above.\n\tconst client = http2.connect(url);\n\treturn client.request({ authorization: `Bearer ${apiKey}` });\n}\n',
+		},
+		passes: false,
+	},
 ];
 
 describe("model request ownership checker self-test", () => {
@@ -699,4 +720,21 @@ describe("model request ownership checker self-test", () => {
 			else expect(report.problems.filter(problem => /\/zz\.[a-z0-9]+:/.test(problem))).not.toEqual([]);
 		});
 	}
+
+	it("tells the author which shapes count when an admission's answer is not used", async () => {
+		const dir = path.join(root.path(), "admission-message");
+		const files = {
+			"coding-agent/src/zz.ts":
+				'import * as http2 from "node:http2";\nimport { admitNetworkSend } from "@oh-my-pi/pi-utils/request-hold-scope";\nexport function go(url: string, apiKey: string) {\n\tadmitNetworkSend();\n\t// model-request: none — the fixture lists models, a catalog read.\n\tconst client = http2.connect(url);\n\treturn client.request({ authorization: `Bearer ${apiKey}` });\n}\n',
+		};
+		for (const [file, text] of Object.entries({ ...BASE, ...files })) await Bun.write(path.join(dir, file), text);
+
+		const [problem] = (await checkModelRequestOwnership(dir)).problems;
+
+		expect(problem).toContain("asks the hold (`admitNetworkSend`, line 4) but its answer is not used");
+		expect(problem).toContain("`await admitNetworkSend(signal);`");
+		expect(problem).toContain("`if (refusal) await refusal;`");
+		expect(problem).toContain("`refusal && await refusal;`");
+		expect(problem).toContain("keep it in a local");
+	});
 });
