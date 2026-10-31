@@ -16,7 +16,9 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
+import { EPHEMERAL_MODEL_CHANGE_ROLE } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
+import { cfgTaskPerCallModelFallbacks } from "@oh-my-pi/pi-coding-agent/task/settings";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
@@ -171,75 +173,95 @@ it("revives a parked subagent on its prewalk handoff target, keeping its todo li
 	}
 }, 30_000);
 
-it("revives a parked per-call worker on its exact model, not on a session-local switch", async () => {
-	const cwd = path.join(root, "home", "work");
-	const artifactsDir = path.join(root, "artifacts");
-	await fs.mkdir(cwd, { recursive: true });
-	await fs.mkdir(artifactsDir, { recursive: true });
+it.each(["manual", "runtime", "runtime-then-manual", "runtime-off", "runtime-revoked", "runtime-level"] as const)(
+	"revives a parked per-call worker using the same exact runtime rules as cold revival (%s)",
+	async scenario => {
+		const ephemeral = scenario !== "manual";
+		const targetId = scenario === "runtime-level" ? `${TARGET}:low` : TARGET;
+		const revivedOn = ephemeral && scenario !== "runtime-then-manual" ? targetId : PLANNER;
+		const cwd = path.join(root, "home", "work");
+		const artifactsDir = path.join(root, "artifacts");
+		await fs.mkdir(cwd, { recursive: true });
+		await fs.mkdir(artifactsDir, { recursive: true });
 
-	const authStorage = createInMemoryAuthStorage();
-	authStorage.keys.setRuntime("mock", "test-key");
-	const modelRegistry = new ModelRegistry(authStorage);
-	const [exact, switched] = [PLANNER, TARGET].map(id =>
-		Object.assign(
-			createMockModel({
-				id,
-				reasoning: true,
-				handler: context =>
-					(context.tools ?? []).some(tool => tool.name === "yield")
-						? { content: [{ type: "toolCall", name: "yield", arguments: { type: "result", data: "done" } }] }
-						: { content: ["label"] },
-			}),
-			{ thinking },
-		),
-	);
-	const catalogAvailable = modelRegistry.getAvailable.bind(modelRegistry);
-	vi.spyOn(modelRegistry, "getAvailable").mockImplementation(kind => [exact, switched, ...catalogAvailable(kind)]);
-	vi.spyOn(modelRegistry, "awaitBackgroundRefresh").mockResolvedValue(undefined);
-	// Both models are operator-approved, so only the revive's model choice can move the worker.
-	const settings = Settings.isolated({
-		"task.agentIdleTtlMs": 0,
-		"task.perCallModel": "on",
-		"async.enabled": false,
-		"compaction.enabled": false,
-		"retry.enabled": false,
-		"todo.reminders": false,
-		"advisor.enabled": false,
-		modelRoles: { default: `mock/${PLANNER}`, review: `mock/${PLANNER}`, smol: `mock/${TARGET}` },
-	});
-
-	try {
-		const result = await runSubprocess({
-			cwd,
-			artifactsDir,
-			agent: { name: "task", description: "test", systemPrompt: "test", tools: ["read"], source: "bundled" },
-			task: "answer",
-			index: 0,
-			id: AGENT_ID,
-			modelOverride: `mock/${PLANNER}:medium`,
-			perCallModelGrants: { settings, agentName: "task", agentSource: "bundled" },
-			authStorage,
-			modelRegistry,
-			settings,
-			enableLsp: false,
-			enableMCP: false,
-			enableIrc: false,
+		const authStorage = createInMemoryAuthStorage();
+		authStorage.keys.setRuntime("mock", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage);
+		const [exact, switched] = [PLANNER, targetId].map(id =>
+			Object.assign(
+				createMockModel({
+					id,
+					reasoning: true,
+					handler: context =>
+						(context.tools ?? []).some(tool => tool.name === "yield")
+							? { content: [{ type: "toolCall", name: "yield", arguments: { type: "result", data: "done" } }] }
+							: { content: ["label"] },
+				}),
+				{ thinking },
+			),
+		);
+		const catalogAvailable = modelRegistry.getAvailable.bind(modelRegistry);
+		vi.spyOn(modelRegistry, "getAvailable").mockImplementation(kind => [exact, switched, ...catalogAvailable(kind)]);
+		vi.spyOn(modelRegistry, "getAll").mockReturnValue([exact!, switched!]);
+		vi.spyOn(modelRegistry, "awaitBackgroundRefresh").mockResolvedValue(undefined);
+		// Both models are operator-approved, so only the revive's model choice can move the worker.
+		const settings = Settings.isolated({
+			"task.agentIdleTtlMs": 0,
+			"task.perCallModel": "on",
+			"task.perCallModelFallbacks": ephemeral ? "runtime" : "off",
+			"async.enabled": false,
+			"compaction.enabled": false,
+			"retry.enabled": false,
+			"todo.reminders": false,
+			"advisor.enabled": false,
+			modelRoles: { default: `mock/${PLANNER}`, review: `mock/${PLANNER}`, smol: `mock/${targetId}` },
 		});
-		expect(result.exitCode).toBe(0);
 
-		const live = AgentRegistry.global().get(AGENT_ID)?.session;
-		if (!live) throw new Error("Expected a kept-alive subagent session");
-		expect(live.model?.id).toBe(PLANNER);
-		// A focused worker can still be switched by hand; that persists a session-local model change.
-		await live.setModelTemporary(switched);
-		expect(live.sessionManager.getSessionLocalModelChange()?.model).toBe(`mock/${TARGET}`);
+		try {
+			const result = await runSubprocess({
+				cwd,
+				artifactsDir,
+				agent: { name: "task", description: "test", systemPrompt: "test", tools: ["read"], source: "bundled" },
+				task: "answer",
+				index: 0,
+				id: AGENT_ID,
+				modelOverride: `mock/${PLANNER}:medium`,
+				perCallModelGrants: { settings, agentName: "task", agentSource: "bundled" },
+				authStorage,
+				modelRegistry,
+				settings,
+				enableLsp: false,
+				enableMCP: false,
+				enableIrc: false,
+			});
+			expect(result.exitCode).toBe(0);
 
-		await AgentLifecycleManager.global().park(AGENT_ID);
-		const revived = await AgentLifecycleManager.global().ensureLive(AGENT_ID);
+			const live = AgentRegistry.global().get(AGENT_ID)?.session;
+			if (!live) throw new Error("Expected a kept-alive subagent session");
+			expect(live.model?.id).toBe(PLANNER);
+			// A manual switch is session-local and never moves a per-call worker; a runtime fallback
+			// records an ephemeral change, the model the worker then actually runs.
+			await live.setModelTemporary(switched, undefined, { ephemeral });
+			expect(live.sessionManager.getBranch().findLast(entry => entry.type === "model_change")).toMatchObject({
+				model: `mock/${targetId}`,
+				role: ephemeral ? EPHEMERAL_MODEL_CHANGE_ROLE : "temporary",
+			});
+			if (scenario === "runtime-then-manual") await live.setModelTemporary(exact);
+			if (scenario === "runtime-off") cfgTaskPerCallModelFallbacks.override(settings, "off");
+			if (scenario === "runtime-revoked") settings.setModelRole("smol", "mock/revoked");
 
-		expect(revived.model?.id).toBe(PLANNER);
-		expect(revived.configuredThinkingLevel()).toBe(Effort.Medium);
-	} finally {
-		authStorage.close();
-	}
-}, 30_000);
+			await AgentLifecycleManager.global().park(AGENT_ID);
+			if (scenario === "runtime-revoked") {
+				await expect(AgentLifecycleManager.global().ensureLive(AGENT_ID)).rejects.toThrow(/not approved/);
+				return;
+			}
+			const revived = await AgentLifecycleManager.global().ensureLive(AGENT_ID);
+
+			expect(revived.model?.id).toBe(revivedOn);
+			expect(revived.configuredThinkingLevel()).toBe(Effort.Medium);
+		} finally {
+			authStorage.close();
+		}
+	},
+	30_000,
+);

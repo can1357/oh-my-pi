@@ -13,6 +13,8 @@
  * project agent frontmatter, other agents' frontmatter and saved transcripts
  * grant nothing. `task.perCallModelAllow`, when set, narrows the result to the
  * models its exact, configured `@role` or glob entries match.
+ * Under `task.perCallModelFallbacks: runtime` a running worker may also send to
+ * concrete operator-owned `retry.fallbackChains` entries; those are never requestable.
  */
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
@@ -30,7 +32,8 @@ import {
 } from "../config/model-resolver";
 import { isKindRole } from "../config/model-roles";
 import type { Settings } from "../config/settings";
-import { cfgTaskDisabledAgents, cfgTaskPerCallModelAllow } from "./settings";
+import { cfgRetryFallbackChains } from "../session/settings";
+import { cfgTaskDisabledAgents, cfgTaskPerCallModelAllow, perCallModelFallbacksEnabled } from "./settings";
 
 /** A per-call model request could not be dispatched or restored. */
 export class PerCallModelError extends Error {
@@ -411,18 +414,31 @@ function perCallModelGrantPatterns(grants: PerCallModelGrants): string[] {
 	];
 }
 
+/** Wildcard chain entries are relative provider swaps, not concrete operator grants. */
+function concreteChainEntries(settings: Settings): string[] {
+	return Object.entries(cfgRetryFallbackChains.get(settings))
+		.filter(([key]) => !isKindRole(key))
+		.flatMap(([, chain]) => (Array.isArray(chain) ? chain.filter(entry => !/[*?]/.test(entry)) : []));
+}
+
 /** Whether the configuration grants this model; the caller has already checked chat availability. */
 function computeGranted(
 	target: string,
 	grants: PerCallModelGrants,
 	chat: Model<Api>[],
 	catalog: Model<Api>[],
+	runtime: boolean,
 ): boolean {
 	const authority = grants.settings.grantAuthority();
 	const resolution = { chat, catalog, matchPreferences: grants.matchPreferences };
 	return (
 		allowlistsAdmitIdentity(perCallAllowlists(grants.settings), target, authority, resolution) &&
-		perCallModelGrantPatterns(grants).some(pattern => grantPatternIdentity(pattern, resolution) === target)
+		(perCallModelGrantPatterns(grants).some(pattern => grantPatternIdentity(pattern, resolution) === target) ||
+			(runtime &&
+				perCallModelFallbacksEnabled(grants.settings) &&
+				modelGrantPatterns(concreteChainEntries(authority), authority).some(
+					pattern => grantPatternIdentity(pattern, resolution) === target,
+				)))
 	);
 }
 
@@ -433,14 +449,19 @@ function computeGranted(
  */
 const decisionCache = new WeakMap<
 	PerCallModelGrants,
-	ApprovalCacheKey & { catalog: Model<Api>[]; decisions: Map<string, boolean> }
+	ApprovalCacheKey & {
+		catalog: Model<Api>[];
+		decisions: Map<string, boolean>;
+		dispatchDecisions: Map<string, boolean>;
+	}
 >();
 
-/** Throw {@link PerCallModelError} unless `model` is an available chat model the configuration approves. */
-export function assertPerCallModelApproved(
+/** Shared cached approval; runtime grants are dispatch-only and cannot change selector eligibility. */
+function assertApproved(
 	model: Model<Api>,
 	grants: PerCallModelGrants,
 	registry: ApprovalRegistry,
+	runtime: boolean,
 ): void {
 	const target = formatModelStringWithRouting(model);
 	let cache = decisionCache.get(grants);
@@ -451,24 +472,44 @@ export function assertPerCallModelApproved(
 			registry,
 			catalog: registry.getAll(),
 			decisions: new Map(),
+			dispatchDecisions: new Map(),
 		};
 		decisionCache.set(grants, cache);
 	}
-	let granted = cache.decisions.get(target);
+	const decisions = runtime ? cache.dispatchDecisions : cache.decisions;
+	let granted = decisions.get(target);
 	if (granted === undefined) {
 		const chat = registry.getAvailable("chat");
 		// Unavailability is never cached: a login can make the model available without a settings change.
 		if (!chat.some(candidate => candidate.provider === model.provider && candidate.id === model.id)) {
 			throw new PerCallModelUnavailableError(`Per-call model ${target} is not an available chat model.`);
 		}
-		granted = computeGranted(target, grants, chat, cache.catalog);
-		cache.decisions.set(target, granted);
+		granted = computeGranted(target, grants, chat, cache.catalog, runtime);
+		decisions.set(target, granted);
 	}
 	if (granted) return;
 	const allowGuidance = perCallAllowlists(grants.settings).some(allow => allow.length > 0)
 		? " It must also match an entry in task.perCallModelAllow."
 		: "";
 	throw new PerCallModelError(
-		`Per-call model ${target} is not approved for agent "${grants.agentName}": use a model named by a chat role configured outside project settings, the selected agent's own frontmatter (bundled or user-level agents only), or the parent's model.${allowGuidance} Catalog or credentials alone do not approve a model.`,
+		`Per-call model ${target} is not approved for agent "${grants.agentName}": use a model named by a chat role configured outside project settings, the selected agent's own frontmatter (bundled or user-level agents only), or the parent's model.${runtime ? " Running workers may also use concrete operator retry.fallbackChains entries with task.perCallModelFallbacks: runtime." : ""}${allowGuidance} Catalog or credentials alone do not approve a model.`,
 	);
+}
+
+/** Throw unless `model` is an available chat model the operator approves for selection. */
+export function assertPerCallModelApproved(
+	model: Model<Api>,
+	grants: PerCallModelGrants,
+	registry: ApprovalRegistry,
+): void {
+	assertApproved(model, grants, registry, false);
+}
+
+/** Runtime dispatch also admits concrete retry-chain grants, never hidden server-side switches. */
+export function assertPerCallDispatchModel(
+	model: Model<Api>,
+	grants: PerCallModelGrants,
+	registry: ApprovalRegistry,
+): void {
+	assertApproved(model, grants, registry, true);
 }

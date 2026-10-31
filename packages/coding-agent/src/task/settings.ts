@@ -372,6 +372,34 @@ export const cfgTaskPerCallModelAllow = register({
 	},
 });
 
+export const cfgTaskPerCallModelFallbacks = register({
+	id: "task.perCallModelFallbacks",
+	type: "enum",
+	values: ["off", "runtime"] as const,
+	default: "off",
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Per-Call Model Fallbacks",
+		description:
+			"Whether a per-call subagent may switch models when a request fails. Retry-chain entries grant dispatch only, never selection in `model`. Project and subagent settings can turn this off but not on.",
+		options: [
+			{ value: "off", label: "Off", description: "The subagent fails instead of switching models" },
+			{
+				value: "runtime",
+				label: "Runtime",
+				description:
+					"The subagent may retry on its later candidates and on concrete retry.fallbackChains models; nothing else",
+			},
+		],
+	},
+});
+
+/** Operator opt-in; project and subagent-derived settings can only disable runtime fallback. */
+export function perCallModelFallbacksEnabled(settings: Settings): boolean {
+	return [settings.grantAuthority(), settings].every(layers => cfgTaskPerCallModelFallbacks.get(layers) === "runtime");
+}
+
 export const cfgTaskMaxConcurrency = register({
 	id: "task.maxConcurrency",
 	protocolDefault: ["rpc", "acp"],

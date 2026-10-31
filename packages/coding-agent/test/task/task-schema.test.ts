@@ -348,6 +348,16 @@ describe("task spawn validation", () => {
 		}
 	});
 
+	it("states the runtime fallback rule that task.perCallModelFallbacks selects", async () => {
+		const description = async (fallbacks: string) => {
+			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
+			const settings = { "task.perCallModel": "on", "task.perCallModelFallbacks": fallbacks };
+			return (await TaskTool.create(createSession({ settings }))).description;
+		};
+		expect(await description("off")).toContain("No runtime model fallback.");
+		expect(await description("runtime")).toContain("operator-configured fallback models");
+	});
+
 	it("advertises provider-qualified role values as written and omits globs, without consulting the model registry", async () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
 		const session = createSession({

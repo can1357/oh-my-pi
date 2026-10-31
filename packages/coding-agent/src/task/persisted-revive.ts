@@ -35,19 +35,20 @@ import {
 	createMCPProxyTools,
 	createSubagentSettings,
 	followMCPTools,
+	lastRunPerCallModel,
 	replayRevivedAgentStart,
 	subagentRetryFallbackRole,
 } from "./executor";
 import { isCompletionProbeEnabled } from "./completion-probe";
 import { discoverAgents, getAgent } from "./discovery";
 import {
-	assertPerCallModelApproved,
+	assertPerCallDispatchModel,
 	parentModelGrantPattern,
 	PerCallModelError,
 	PerCallModelUnavailableError,
 	type PerCallModelGrants,
 } from "./model-approval";
-import { cfgTaskAgentAccountPools, cfgTaskMaxEffort } from "./settings";
+import { cfgTaskAgentAccountPools, cfgTaskMaxEffort, perCallModelFallbacksEnabled } from "./settings";
 import { type RestoredSeanceSession, restoreSeanceSession } from "./seance";
 import { seanceIsolationOptions } from "./seance-policy";
 import type { AgentDefinition } from "./types";
@@ -194,10 +195,11 @@ export function createPersistedSubagentReviverFactory(
 						);
 					}
 					await ctx.modelRegistry.awaitBackgroundRefresh();
-					perCallModel = resolveExactModelIdentity(init.perCallModelIdentity, ctx.modelRegistry);
+					const identity = lastRunPerCallModel(reopened, init.perCallModelIdentity);
+					perCallModel = resolveExactModelIdentity(identity, ctx.modelRegistry);
 					if (!perCallModel) {
 						throw new PerCallModelError(
-							`Cannot revive subagent "${ref.id}": its per-call model ${init.perCallModelIdentity} is no longer available. A per-call worker revives only on its exact saved model.`,
+							`Cannot revive subagent "${ref.id}": its per-call model ${identity} is no longer available. A per-call worker revives only on its exact saved model.`,
 						);
 					}
 					// File definitions follow the live parent's discovery scope; a missing parent
@@ -243,7 +245,7 @@ export function createPersistedSubagentReviverFactory(
 						const liveParentSession = resolveParentSession();
 						const parentModel = liveParentSession?.model;
 						try {
-							assertPerCallModelApproved(
+							assertPerCallDispatchModel(
 								model,
 								grantsFor(parentModel ? parentModelGrantPattern(parentModel) : undefined),
 								ctx.modelRegistry,
@@ -378,12 +380,15 @@ export function createPersistedSubagentReviverFactory(
 					parentAgentId: ref.parentId,
 					oauthAccountPools,
 					// A per-call model is held to the operator's current grants, not the transcript's,
-					// never switches models, and keeps the live task.maxEffort ceiling the spawn ran under.
+					// switches models only through approved runtime fallbacks, never promotes context,
+					// and keeps the live task.maxEffort ceiling the spawn ran under.
 					...(assertApprovedModel
 						? {
 								thinkingLevelCeiling: cfgTaskMaxEffort.get(ctx.settings),
-								disableModelFallback: true,
+								disableModelFallback: !perCallModelFallbacksEnabled(ctx.settings),
+								disableContextPromotion: true,
 								disableServerSideFallback: true,
+								pinnedRetryFallbackRole: subagentRetryFallbackRole(ref.id),
 								assertDispatchModel: (model: Model) => {
 									assertApprovedModel(model);
 									assertModelSupportsEffortCeiling(model, cfgTaskMaxEffort.get(ctx.settings));
@@ -427,7 +432,7 @@ export function createPersistedSubagentReviverFactory(
 			// A per-call worker runs only on its exact saved model, never a similarly named survivor.
 			if (init.perCallModel) {
 				try {
-					const saved = init.perCallModelIdentity!;
+					const saved = formatModelStringWithRouting(perCallModel!);
 					const identity = session.model ? formatModelStringWithRouting(session.model) : undefined;
 					if (identity !== saved) {
 						throw new PerCallModelError(

@@ -267,4 +267,239 @@ describe("per-call exact selection after background discovery", () => {
 			expect(result.output).toBe("Open answer.");
 		}
 	});
+
+	it.each(["off", "runtime"] as const)(
+		"falls back to the role's chain model only under task.perCallModelFallbacks: %s",
+		async fallbacks => {
+			const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-executor-runtime-fallback-"));
+			const authStorage = await AuthStorage.create(":memory:");
+			const sourceId = `executor-runtime-fallback-${fallbacks}`;
+			const agentId = `RuntimeFallback${fallbacks}`;
+			try {
+				authStorage.keys.setRuntime("mock", "test-key");
+				registerMockApi(sourceId);
+				const failing = createMockModel({
+					id: "failing",
+					handler: () => ({ throw: "overloaded_error: provider returned error 503" }),
+				});
+				const backup = createMockModel({ id: "backup", handler: () => ({ content: ["Backup answer."] }) });
+				const models = [failing, backup];
+				const modelRegistry = new ModelRegistry(authStorage, path.join(cwd, "models.yml"));
+				const find = modelRegistry.find.bind(modelRegistry);
+				vi.spyOn(modelRegistry, "find").mockImplementation(
+					(provider, id) =>
+						models.find(model => model.provider === provider && model.id === id) ?? find(provider, id),
+				);
+				vi.spyOn(modelRegistry, "getAvailable").mockImplementation(() => models);
+				vi.spyOn(modelRegistry, "getAll").mockImplementation(() => models);
+				const created = vi.spyOn(sdk, "createAgentSession");
+				vi.spyOn(discovery, "discoverAgents").mockResolvedValue({
+					agents: [
+						{ name: "worker", description: "test", systemPrompt: "test", source: "bundled", tools: ["read"] },
+					],
+					projectAgentsDir: null,
+				});
+				const settings = Settings.isolated({
+					"task.maxRecursionDepth": 2,
+					"task.perCallModel": "on",
+					"task.perCallModelFallbacks": fallbacks,
+					"task.isolation.enabled": false,
+					"compaction.enabled": false,
+					"retry.baseDelayMs": 5,
+					"retry.maxRetries": 1,
+					modelRoles: { review: "mock/failing" },
+					"retry.fallbackChains": { review: ["mock/backup"] },
+				});
+				const session = {
+					cwd,
+					hasUI: false,
+					settings,
+					authStorage,
+					modelRegistry,
+					restrictToolNames: true,
+					enableMCP: false,
+					enableLsp: false,
+					enableIrc: false,
+					getSessionFile: () => null,
+					getSessionSpawns: () => "*",
+					getSessionAgents: () => [],
+				} as unknown as ToolSession;
+				const execution = await runStructuredSubagent({
+					session,
+					invocationKind: "task",
+					assignment: "Answer the question.",
+					agent: "worker",
+					perCallModel: "@review",
+					structured: false,
+					identity: { id: agentId },
+					keepAlive: false,
+				});
+				const options = created.mock.calls[0]?.[0];
+				// Context promotion never moves a per-call worker, whatever the fallback mode.
+				expect(options?.disableContextPromotion).toBe(true);
+				expect(options?.disableModelFallback).toBe(fallbacks === "off");
+				expect(options?.disableServerSideFallback).toBe(true);
+				expect(options?.prewalk).toBeUndefined();
+				// Even with runtime fallbacks, a model nobody configured stays out of reach.
+				expect(() => options?.assertDispatchModel?.(createMockModel({ id: "other" }))).toThrow(
+					/not.*(approved|available)/,
+				);
+				if (fallbacks === "runtime") {
+					expect(execution.result.exitCode).toBe(0);
+					expect(execution.result.output).toBe("Backup answer.");
+				} else {
+					expect(backup.calls).toHaveLength(0);
+					expect(execution.result.exitCode).not.toBe(0);
+				}
+			} finally {
+				await AgentRegistry.global().get(agentId)?.session?.dispose();
+				AgentRegistry.global().unregister(agentId);
+				unregisterCustomApis(sourceId);
+				authStorage.close();
+				await fs.rm(cwd, { recursive: true, force: true });
+			}
+		},
+	);
+
+	it.each(["mock/failing", "mock/*"])(
+		"walks the worker's own chain before a refused %s chain covering its model",
+		async shadowKey => {
+			const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-executor-chain-shadow-"));
+			const authStorage = await AuthStorage.create(":memory:");
+			const sourceId = `executor-chain-shadow-${shadowKey}`;
+			const agentId = `ChainShadow${shadowKey === "mock/*" ? "Wildcard" : "Model"}`;
+			try {
+				authStorage.keys.setRuntime("mock", "test-key");
+				registerMockApi(sourceId);
+				const failing = createMockModel({
+					id: "failing",
+					handler: () => ({ throw: "overloaded_error: provider returned error 503" }),
+				});
+				const blocked = createMockModel({ id: "blocked", handler: () => ({ content: ["Blocked answer."] }) });
+				const backup = createMockModel({ id: "backup", handler: () => ({ content: ["Backup answer."] }) });
+				const models = [failing, blocked, backup];
+				const modelRegistry = new ModelRegistry(authStorage, path.join(cwd, "models.yml"));
+				const find = modelRegistry.find.bind(modelRegistry);
+				vi.spyOn(modelRegistry, "find").mockImplementation(
+					(provider, id) =>
+						models.find(model => model.provider === provider && model.id === id) ?? find(provider, id),
+				);
+				vi.spyOn(modelRegistry, "getAvailable").mockImplementation(() => models);
+				vi.spyOn(modelRegistry, "getAll").mockImplementation(() => models);
+				vi.spyOn(discovery, "discoverAgents").mockResolvedValue({
+					agents: [
+						{ name: "worker", description: "test", systemPrompt: "test", source: "bundled", tools: ["read"] },
+					],
+					projectAgentsDir: null,
+				});
+				const settings = Settings.isolated({
+					"task.maxRecursionDepth": 2,
+					"task.perCallModel": "on",
+					"task.perCallModelFallbacks": "runtime",
+					"task.perCallModelAllow": ["@review", "mock/backup"],
+					"task.isolation.enabled": false,
+					"compaction.enabled": false,
+					"retry.baseDelayMs": 5,
+					"retry.maxRetries": 1,
+					modelRoles: { review: "mock/failing" },
+					// A model-keyed or wildcard chain outranks the role chain for the worker's model.
+					"retry.fallbackChains": { review: ["mock/backup"], [shadowKey]: ["mock/blocked"] },
+				});
+				const session = {
+					cwd,
+					hasUI: false,
+					settings,
+					authStorage,
+					modelRegistry,
+					restrictToolNames: true,
+					enableMCP: false,
+					enableLsp: false,
+					enableIrc: false,
+					getSessionFile: () => null,
+					getSessionSpawns: () => "*",
+					getSessionAgents: () => [],
+				} as unknown as ToolSession;
+				const execution = await runStructuredSubagent({
+					session,
+					invocationKind: "task",
+					assignment: "Answer the question.",
+					agent: "worker",
+					perCallModel: "@review",
+					structured: false,
+					identity: { id: agentId },
+					keepAlive: false,
+				});
+				expect(execution.result.exitCode).toBe(0);
+				expect(execution.result.output).toBe("Backup answer.");
+				expect(blocked.calls).toHaveLength(0);
+			} finally {
+				await AgentRegistry.global().get(agentId)?.session?.dispose();
+				AgentRegistry.global().unregister(agentId);
+				unregisterCustomApis(sourceId);
+				authStorage.close();
+				await fs.rm(cwd, { recursive: true, force: true });
+			}
+		},
+	);
+
+	it.each([false, true])("checks runtime fallback effort before dispatch (high-only: %s)", async highOnly => {
+		const primary = Object.assign(
+			createMockModel({
+				id: "effort-primary",
+				reasoning: true,
+				handler: () => ({ throw: "overloaded_error: provider returned error 503" }),
+			}),
+			{ thinking: { mode: "effort", efforts: [Effort.Low, Effort.High] } satisfies ThinkingConfig },
+		);
+		const backup = Object.assign(
+			createMockModel({ id: "effort-backup", reasoning: true, handler: () => ({ content: ["Capped backup."] }) }),
+			{
+				thinking: {
+					mode: "effort",
+					efforts: highOnly ? [Effort.High] : [Effort.Low, Effort.High],
+				} satisfies ThinkingConfig,
+			},
+		);
+		const result = await runWorker({
+			model: primary,
+			models: [primary, backup],
+			perCallModel: "@review:high",
+			settings: perCallSettings(primary, {
+				"task.perCallModelFallbacks": "runtime",
+				"task.maxEffort": "low",
+				"retry.baseDelayMs": 1,
+				"retry.maxRetries": 1,
+				"retry.fallbackChains": { review: ["mock/effort-backup:high"] },
+			}),
+		});
+		if (highOnly) {
+			expect(result.exitCode).not.toBe(0);
+			expect(backup.calls).toHaveLength(0);
+		} else {
+			expect(result.exitCode).toBe(0);
+			expect(result.output).toBe("Capped backup.");
+			expect(backup.calls.map(call => call.options?.reasoning)).toEqual([Effort.Low]);
+		}
+	});
+
+	it("retries its ordered candidates without granting selection through the installed worker chain", async () => {
+		const primary = createMockModel({
+			id: "candidate-primary",
+			handler: () => ({ throw: "overloaded_error: provider returned error 503" }),
+		});
+		const backup = createMockModel({ id: "candidate-backup", handler: () => ({ content: ["Candidate backup."] }) });
+		const result = await runWorker({
+			model: primary,
+			models: [primary, backup],
+			perCallModel: ["mock/candidate-primary", "mock/candidate-backup"],
+			settings: perCallSettings(primary, {
+				"task.perCallModelFallbacks": "runtime",
+				"retry.baseDelayMs": 1,
+				"retry.maxRetries": 1,
+				modelRoles: { review: "mock/candidate-primary,mock/candidate-backup" },
+			}),
+		});
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toBe("Candidate backup.");
+	});
 });

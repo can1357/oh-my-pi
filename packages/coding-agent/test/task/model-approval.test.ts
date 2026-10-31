@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Model } from "@oh-my-pi/pi-ai";
@@ -9,16 +9,24 @@ import { buildFactoryDroidModel } from "@oh-my-pi/pi-catalog/discovery";
 import { getModelMatchPreferences, parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
+import { cfgRetryFallbackChains } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import {
+	assertPerCallDispatchModel,
 	assertPerCallModelApproved,
 	getPerCallModelAdvertisement,
 	parentModelGrantPattern,
 	PerCallModelError,
+	PerCallModelUnavailableError,
 	type PerCallModelGrants,
 } from "@oh-my-pi/pi-coding-agent/task/model-approval";
-import { cfgTaskPerCallModelAllow, perCallModelEnabled } from "@oh-my-pi/pi-coding-agent/task/settings";
+import {
+	cfgTaskPerCallModelAllow,
+	cfgTaskPerCallModelFallbacks,
+	perCallModelEnabled,
+	perCallModelFallbacksEnabled,
+} from "@oh-my-pi/pi-coding-agent/task/settings";
 import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
 import { YAML } from "bun";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "../helpers/settings-test-state";
@@ -735,9 +743,226 @@ describe("project settings and per-call grants", () => {
 		},
 	);
 
+	it.each([
+		{ operator: "off", repository: "runtime", enabled: false },
+		{ operator: "runtime", repository: "off", enabled: false },
+		{ operator: "runtime", repository: "runtime", enabled: true },
+	])(
+		"lets project runtime fallback only narrow ($operator/$repository)",
+		async ({ operator, repository, enabled }) => {
+			const settings = await load(
+				{ task: { perCallModelFallbacks: operator }, retry: { fallbackChains: { default: ["mock/target"] } } },
+				{ task: { perCallModelFallbacks: repository }, retry: { fallbackChains: { default: ["mock/other"] } } },
+			);
+			const grants = { settings, agentName: "worker" };
+			expect(perCallModelFallbacksEnabled(settings)).toBe(enabled);
+			const dispatch = () => assertPerCallDispatchModel(target, grants, registry);
+			if (enabled) expect(dispatch).not.toThrow();
+			else expect(dispatch).toThrow(/not approved/);
+			// Repository retry-chain entries are not grants.
+			expect(() => assertPerCallDispatchModel(other, grants, registry)).toThrow(/not approved/);
+		},
+	);
+
+	it("keeps both allowlist layers on runtime chain grants", async () => {
+		const settings = await load(
+			{
+				task: { perCallModelFallbacks: "runtime", perCallModelAllow: ["mock/target"] },
+				retry: { fallbackChains: { default: ["mock/target", "mock/other"] } },
+			},
+			{ task: { perCallModelAllow: ["mock/other"] } },
+		);
+		for (const model of [target, other]) {
+			expect(() => assertPerCallDispatchModel(model, { settings, agentName: "worker" }, registry)).toThrow(
+				/task\.perCallModelAllow/,
+			);
+		}
+	});
+
 	it("drops the frontmatter grant of an agent the project disables", async () => {
 		const settings = await load({}, { task: { disabledAgents: ["worker"] } });
 		const grants = { settings, agentName: "worker", agentSource: "user" as const, agentModel: ["mock/target"] };
 		expect(approved(target, grants)).toBe(false);
+	});
+});
+
+describe("per-call dispatch with runtime fallbacks", () => {
+	const chained = { modelRoles: { review: "mock/other" }, "retry.fallbackChains": { review: ["mock/target:high"] } };
+	const dispatch =
+		(settings: Record<string, unknown>, model: Model = target) =>
+		() =>
+			assertPerCallDispatchModel(model, { settings: Settings.isolated(settings), agentName: "worker" }, registry);
+
+	it.each([
+		["off: a chain entry is refused", chained, /not approved/],
+		[
+			"runtime: a wildcard chain entry never grants",
+			{ ...chained, "retry.fallbackChains": { "mock/*": ["mock/*"] }, "task.perCallModelFallbacks": "runtime" },
+			/not approved/,
+		],
+		[
+			"runtime: a question-mark wildcard chain entry never grants",
+			{ ...chained, "retry.fallbackChains": { review: ["mock/tar?et"] }, "task.perCallModelFallbacks": "runtime" },
+			/not approved/,
+		],
+		[
+			"runtime: exact allowlist entries remain literal even when level-shaped",
+			{ ...chained, "task.perCallModelFallbacks": "runtime", "task.perCallModelAllow": ["mock/target:high"] },
+			/task\.perCallModelAllow/,
+		],
+		[
+			"runtime: a chain entry outside the allowlist is refused",
+			{ ...chained, "task.perCallModelFallbacks": "runtime", "task.perCallModelAllow": ["mock/other"] },
+			/task\.perCallModelAllow/,
+		],
+	] as const)("%s", (_name, settings, error) => {
+		expect(dispatch(settings)).toThrow(error);
+	});
+
+	it("runtime: a concrete chain entry may be sent to but never requested", () => {
+		const settings = { ...chained, "task.perCallModelFallbacks": "runtime" };
+		expect(dispatch(settings)).not.toThrow();
+		expect(approved(target, { settings: Settings.isolated(settings), agentName: "worker" }, registry)).toBe(false);
+		// A non-chat model named in a chain stays out of reach.
+		const imageChain = { ...settings, "retry.fallbackChains": { review: ["mock/painter"] } };
+		expect(dispatch(imageChain, image)).toThrow(PerCallModelUnavailableError);
+	});
+
+	it.each(["off", "runtime"] as const)("keeps unavailable chat denials distinct (%s)", mode => {
+		const grants = {
+			settings: Settings.isolated({
+				...chained,
+				modelRoles: { review: "mock/target" },
+				"task.perCallModelFallbacks": mode,
+			}),
+			agentName: "worker",
+		};
+		const unavailable = { ...registry, getAvailable: () => chat.filter(model => model !== target) };
+		expect(() => assertPerCallDispatchModel(target, grants, unavailable)).toThrow(PerCallModelUnavailableError);
+	});
+
+	it("does not let derived overlays enable runtime fallback or add chain grants", () => {
+		const root = Settings.isolated({ ...chained, "retry.fallbackChains": {} });
+		const overlaid = root.overlay(
+			{ "task.perCallModelFallbacks": "runtime", "retry.fallbackChains": { "subagent:x": ["mock/target"] } },
+			{ derived: true },
+		);
+		expect(() => assertPerCallDispatchModel(target, { settings: overlaid, agentName: "worker" }, registry)).toThrow(
+			/not approved/,
+		);
+		cfgTaskPerCallModelFallbacks.override(root, "runtime");
+		expect(perCallModelFallbacksEnabled(overlaid)).toBe(true);
+		expect(() => assertPerCallDispatchModel(target, { settings: overlaid, agentName: "worker" }, registry)).toThrow(
+			/not approved/,
+		);
+		const narrowed = Settings.isolated({ ...chained, "task.perCallModelFallbacks": "runtime" }).overlay(
+			{ "task.perCallModelFallbacks": "off" },
+			{ derived: true },
+		);
+		expect(perCallModelFallbacksEnabled(narrowed)).toBe(false);
+		expect(() => assertPerCallDispatchModel(target, { settings: narrowed, agentName: "worker" }, registry)).toThrow(
+			/not approved/,
+		);
+	});
+
+	it("honors SDK host overlays as grant authority", () => {
+		for (const mode of ["off", "runtime"] as const) {
+			const host = Settings.isolated({ ...chained }).overlay({ "task.perCallModelFallbacks": mode });
+			const check = () => assertPerCallDispatchModel(target, { settings: host, agentName: "worker" }, registry);
+			if (mode === "runtime") expect(check).not.toThrow();
+			else expect(check).toThrow(/not approved/);
+		}
+	});
+
+	it("never broadens an unavailable level-shaped chain literal to its base model", () => {
+		const unavailable = { ...registry, getAvailable: () => chat.filter(model => model !== codingRouterLow) };
+		const grants = {
+			settings: Settings.isolated({
+				"retry.fallbackChains": { review: ["nanogpt/nanogpt/coding-router:low"] },
+				"task.perCallModelFallbacks": "runtime",
+			}),
+			agentName: "worker",
+		};
+		expect(() => assertPerCallDispatchModel(codingRouter, grants, unavailable)).toThrow(/not approved/);
+	});
+
+	it("uses the initial approval's scoped role and glob allowlist rules", () => {
+		const settings = {
+			modelRoles: { review: "mock/other", scope: "anthropic/*", exact: "openrouter/anthropic/claude-sonnet-4.5" },
+			"retry.fallbackChains": { review: ["openrouter/anthropic/claude-sonnet-4.5"] },
+			"task.perCallModelFallbacks": "runtime",
+		};
+		for (const selector of ["anthropic/*", "@scope"]) {
+			expect(dispatch({ ...settings, "task.perCallModelAllow": [selector] }, sonnet)).toThrow(/not approved/);
+		}
+		for (const selector of ["openrouter/*", "@exact"]) {
+			expect(dispatch({ ...settings, "task.perCallModelAllow": [selector] }, sonnet)).not.toThrow();
+		}
+	});
+
+	it("freezes non-exact chain resolution while allowlist edits stay live", () => {
+		const first = createMockModel({ id: "worker-a" });
+		const second = createMockModel({ id: "worker-b" });
+		const usageOrder = ["mock/worker-a", "mock/worker-b"];
+		const settings = Settings.isolated(
+			{
+				"retry.fallbackChains": { review: ["worker"] },
+				"task.perCallModelFallbacks": "runtime",
+				"task.perCallModelAllow": ["mock/*"],
+			},
+			{ storage: { getModelUsageOrder: () => usageOrder } as AgentStorage },
+		);
+		const grants = {
+			settings,
+			agentName: "worker",
+			matchPreferences: structuredClone(getModelMatchPreferences(settings)),
+		};
+		const modelRegistry = { getAll: () => [first, second], getAvailable: () => [first, second] };
+		usageOrder.reverse();
+		expect(() => assertPerCallDispatchModel(first, grants, modelRegistry)).not.toThrow();
+		expect(() => assertPerCallDispatchModel(second, grants, modelRegistry)).toThrow(/not approved/);
+		cfgTaskPerCallModelAllow.override(settings, ["mock/worker-b"]);
+		expect(() => assertPerCallDispatchModel(first, grants, modelRegistry)).toThrow(/not approved/);
+	});
+
+	it("keeps @upstream pins in runtime chain grant identities", () => {
+		const settings = {
+			"retry.fallbackChains": { review: ["openrouter/anthropic/claude-sonnet-4.5@anthropic"] },
+			"task.perCallModelFallbacks": "runtime",
+		};
+		expect(dispatch(settings, pinnedSonnet)).not.toThrow();
+		expect(dispatch(settings, sonnet)).toThrow(/not approved/);
+	});
+
+	it("admits a Factory chain entry without authorizing server-side fallback", () => {
+		expect(
+			dispatch(
+				{
+					"retry.fallbackChains": { review: ["factory-droid/claude-fable-5"] },
+					"task.perCallModelFallbacks": "runtime",
+				},
+				droidFable,
+			),
+		).not.toThrow();
+	});
+
+	it("caches dispatch separately from selection and invalidates on settings or catalog changes", () => {
+		const settings = Settings.isolated({ ...chained, "task.perCallModelFallbacks": "runtime" });
+		const grants = { settings, agentName: "worker" };
+		let catalog = [target, other];
+		const lookup = { getAll: () => catalog, getAvailable: vi.fn(() => catalog) };
+		const check = () => assertPerCallDispatchModel(target, grants, lookup);
+		expect(check).not.toThrow();
+		expect(check).not.toThrow();
+		expect(lookup.getAvailable).toHaveBeenCalledTimes(1);
+		expect(approved(target, grants, lookup)).toBe(false);
+		cfgRetryFallbackChains.override(settings, {});
+		expect(check).toThrow(/not approved/);
+		cfgRetryFallbackChains.override(settings, chained["retry.fallbackChains"]);
+		expect(check).not.toThrow();
+		catalog = [other];
+		expect(check).toThrow(PerCallModelUnavailableError);
+		catalog = [target, other];
+		expect(check).not.toThrow();
 	});
 });
