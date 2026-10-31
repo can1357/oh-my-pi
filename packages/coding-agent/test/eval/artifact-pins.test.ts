@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
@@ -11,8 +11,11 @@ import { Settings } from "../../src/config/settings";
 import {
 	ArtifactPinOwner,
 	answerArtifactRequest,
+	artifactPinCeiling,
+	artifactPinCeilingFor,
 	releaseArtifactRoots,
 	resolveSettledArtifact,
+	setArtifactPinCeilingForTests,
 	takePinnedArtifact,
 } from "../../src/eval/artifact-readiness";
 import { type ArtifactRequest, EVAL_ARTIFACT_ROOT_TOKEN, settledArtifactOf } from "../../src/eval/artifact-wire";
@@ -74,7 +77,35 @@ afterEach(async () => {
 	await releaseArtifactRoots();
 });
 
+describe("the pin ceiling", () => {
+	it("is a sixty-fourth of the open-descriptor limit, and never fewer than thirty-two", () => {
+		expect(artifactPinCeilingFor(524_288)).toBe(8_192);
+		expect(artifactPinCeilingFor(1_048_576)).toBe(16_384);
+		expect(artifactPinCeilingFor(4_096)).toBe(64);
+		expect(artifactPinCeilingFor(1_024)).toBe(32);
+		expect(artifactPinCeilingFor(256)).toBe(32);
+		expect(artifactPinCeilingFor(undefined)).toBe(32);
+	});
+
+	it.skipIf(process.platform !== "linux")("is derived from this process's own soft limit", () => {
+		const line = fs
+			.readFileSync("/proc/self/limits", "utf8")
+			.split("\n")
+			.find(entry => entry.startsWith("Max open files"));
+		const soft = Number(line?.slice("Max open files".length).trim().split(/\s+/)[0]);
+		expect(artifactPinCeiling()).toBe(artifactPinCeilingFor(soft));
+	});
+});
+
 describe.skipIf(process.platform !== "linux")("eval artifact pins", () => {
+	// These tests are about admission at the ceiling, so they fix it at the floor
+	// rather than at whatever this machine's descriptor limit derives.
+	let restoreCeiling: () => void = () => {};
+	beforeEach(() => {
+		restoreCeiling = setArtifactPinCeilingForTests(32);
+	});
+	afterEach(() => restoreCeiling());
+
 	it("gives a lapsed pin back once, so the quota stays thirty-two", async () => {
 		using tempDir = TempDir.createSync("@omp-eval-pins-");
 		const dir = artifacts(tempDir, "a", 140);

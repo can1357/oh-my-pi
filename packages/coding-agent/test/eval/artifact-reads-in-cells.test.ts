@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { $which, TempDir } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../src/config/settings";
-import { releaseArtifactRoots } from "../../src/eval/artifact-readiness";
+import { artifactPinCeiling, releaseArtifactRoots } from "../../src/eval/artifact-readiness";
 import { artifactRequestOf } from "../../src/eval/artifact-wire";
 import js from "../../src/eval/js";
 import {
@@ -182,6 +182,43 @@ describe.skipIf(process.platform !== "linux")("artifact reads in real cells", ()
 				await cell;
 			}
 		}, 30_000);
+
+		// Past the old fixed ceiling of 32: an ordinary cell that reads many
+		// artifacts at once, which the derived ceiling must not refuse.
+		it.skipIf(artifactPinCeiling() < 128)(
+			`${language}: a hundred artifact reads started together in one cell all succeed`,
+			async () => {
+				using tempDir = TempDir.createSync("@omp-eval-cells-");
+				const f = fixture(tempDir);
+				fs.mkdirSync(f.root);
+				for (let n = 0; n < 100; n++) fs.writeFileSync(path.join(f.root, `${n}.read.log`), `ORIGINAL ${n}`);
+				const code =
+					language === "js"
+						? "const texts = await Promise.all(Array.from({ length: 100 }, (_, n) => read('artifact://' + n)));\nprint(texts.filter((text, n) => text === 'ORIGINAL ' + n).length);\n"
+						: [
+								// Every thread holds its answer until all hundred have one: a hundred
+								// reads in flight at once, as slow consumers would leave them.
+								"import os, threading",
+								"from concurrent.futures import ThreadPoolExecutor",
+								"real_open = os.open",
+								"gate = threading.Barrier(100, timeout=5)",
+								"def held(name, flags, *rest, **kw):",
+								"    if str(name).endswith('.read.log'):",
+								"        try: gate.wait()",
+								"        except threading.BrokenBarrierError: pass",
+								"    return real_open(name, flags, *rest, **kw)",
+								"os.open = held",
+								"with ThreadPoolExecutor(max_workers=100) as pool:",
+								"    texts = list(pool.map(lambda n: read(f'artifact://{n}'), range(100)))",
+								"print(sum(text == f'ORIGINAL {n}' for n, text in enumerate(texts)))",
+							].join("\n");
+				const result = await run(language, code, f);
+				expect(result.output.trim()).toBe("100");
+				expect(result.exitCode).toBe(0);
+				expect(openUnder(f.root)).toBe(0);
+			},
+			60_000,
+		);
 
 		it(`${language}: forty one-read cells each give their pin back`, async () => {
 			using tempDir = TempDir.createSync("@omp-eval-cells-");

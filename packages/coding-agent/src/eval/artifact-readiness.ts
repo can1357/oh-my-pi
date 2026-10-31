@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
@@ -433,16 +434,81 @@ async function artifactElsewhere(
  */
 const leaseClock = (): number => performance.now();
 /**
+ * The fewest answers a session may hold pinned at once, whatever the machine.
+ */
+const PINNED_FILES_FLOOR = 32;
+/**
+ * The share of the process's open-descriptor limit one session's pins may
+ * take: one sixty-fourth. Every pin is an open descriptor, and the rest of the
+ * limit is for everything else the process opens — its other sessions, their
+ * subagents, sockets, logs, held directories.
+ */
+const DESCRIPTOR_SHARE = 64;
+/**
+ * The C runtime's fixed table of low-level descriptors on Windows, which has
+ * no adjustable per-process limit to read.
+ */
+const WINDOWS_LOW_LEVEL_DESCRIPTORS = 8_192;
+
+/**
+ * The soft limit on open descriptors this process runs with, or `undefined`
+ * where it cannot be read. Bun raises the soft limit to the hard one at
+ * startup, so this is the limit after that.
+ *
+ * Linux reports it in `/proc/self/limits`. Elsewhere on POSIX a child shell
+ * inherits it and `ulimit -n` reports it — one short child, once.
+ */
+function openDescriptorLimit(): number | undefined {
+	try {
+		if (process.platform === "win32") return WINDOWS_LOW_LEVEL_DESCRIPTORS;
+		if (process.platform === "linux") {
+			const line = fs
+				.readFileSync("/proc/self/limits", "utf8")
+				.split("\n")
+				.find(entry => entry.startsWith("Max open files"));
+			const soft = Number(line?.slice("Max open files".length).trim().split(/\s+/)[0]);
+			return Number.isSafeInteger(soft) && soft > 0 ? soft : undefined;
+		}
+		const soft = Number(execFileSync("/bin/sh", ["-c", "ulimit -n"], { encoding: "utf8", timeout: 2_000 }).trim());
+		return Number.isSafeInteger(soft) && soft > 0 ? soft : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/** The ceiling a process with `limit` open descriptors gives each session's pins. */
+export function artifactPinCeilingFor(limit: number | undefined): number {
+	return Math.max(PINNED_FILES_FLOOR, Math.floor((limit ?? 0) / DESCRIPTOR_SHARE));
+}
+
+let pinCeiling: number | undefined;
+
+/**
  * Answers one session may hold pinned at once, so one cannot deny another.
  *
  * A pin lasts from an answer to the end of its read, so the limit is on reads
- * in flight at once, not on reads: a cell that starts more than this many
- * together (`await Promise.all(ids.map(id => read(`artifact://${id}`)))`) has
- * the ones past it refused with an explicit error — how many depends on how
- * many earlier reads have finished by then — and never answered with another
- * file. A refused read can simply be asked again.
+ * in flight at once, not on reads. It is a sixty-fourth of what this process
+ * may hold open, never fewer than {@link PINNED_FILES_FLOOR} — so it is a
+ * statement about the machine rather than a chosen number, and no ordinary
+ * cell reaches it: 8,192 on a process with 524,288 descriptors, the soft limit
+ * Bun runs with under systemd's default. A session that does reach it has the
+ * reads past it refused with an explicit error, never answered with another
+ * file; a refused read can be asked again, and the limit raised with
+ * `ulimit -n`. Read once, at the first pin.
  */
-const PINNED_FILES_MAX = 32;
+export function artifactPinCeiling(): number {
+	pinCeiling ??= artifactPinCeilingFor(openDescriptorLimit());
+	return pinCeiling;
+}
+
+/** Fix the ceiling for a test; the returned function puts the derived one back. */
+export function setArtifactPinCeilingForTests(ceiling: number): () => void {
+	const previous = pinCeiling;
+	pinCeiling = ceiling;
+	return () => {
+		pinCeiling = previous;
+	};
+}
 /**
  * How long an answer is its reader's before the pin lapses.
  *
@@ -715,7 +781,8 @@ export async function takePinnedArtifact(file: string): Promise<SettledArtifact>
 async function pinFile(handle: fs.promises.FileHandle, answer: SettledArtifact, reader: PinReader): Promise<string> {
 	const account = reader.account;
 	let displaced: Promise<void> | undefined;
-	if (account.pins.size >= PINNED_FILES_MAX) {
+	const ceiling = artifactPinCeiling();
+	if (account.pins.size >= ceiling) {
 		let lapsed: ArtifactPin | undefined;
 		for (const pin of account.pins) {
 			if (pin.lapsed) {
@@ -726,7 +793,7 @@ async function pinFile(handle: fs.promises.FileHandle, answer: SettledArtifact, 
 		if (!lapsed) {
 			await handle.close().catch(() => {});
 			throw new ToolError(
-				`${PINNED_FILES_MAX} artifact answers are outstanding for this session and none has lapsed; ${answer.path} cannot be answered for`,
+				`${ceiling} artifact answers are outstanding for this session and none has lapsed; ${answer.path} cannot be answered for until one is read, or the open-file limit (ulimit -n) this ceiling is derived from is raised`,
 			);
 		}
 		// Out of the account now, synchronously; its descriptor closes below.
