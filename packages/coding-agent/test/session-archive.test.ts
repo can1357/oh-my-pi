@@ -4785,6 +4785,48 @@ test("a finished quarantine whose directory was replaced afterwards is not repor
 	expect(applied.quarantine?.errors.join("\n")).toContain("not what the statement names");
 });
 
+for (const later of ["another directory", "the moved directory itself, by a bind mount"] as const) {
+	test(`a finished quarantine of a record without inodes, with ${later} at the old name, is ${later === "another directory" ? "reported finished" : "not reported finished"}`, async () => {
+		const { ground, record } = await archivedWithKilledStage();
+		const destination = quarantineDestination(record);
+		const stageAt = path.join(destination, path.basename(ground.dir));
+		// The review's intent-record fixture: a record written before its run
+		// took the inodes, quarantined to the end.
+		const { dirIdentity: _dir, identity: _file, ...intent } = JSON.parse(await Bun.file(ground.record).text());
+		await fs.writeFile(ground.record, JSON.stringify(intent), { mode: 0o600 });
+		const finished = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
+		expect(finished.quarantine?.moved).toBe(true);
+		await Bun.write(path.join(ground.dir, "foreign"), "NEW USER DATA");
+		// A bind mount answers a look at the old name with the moved
+		// directory; mounting needs privileges a test does not take.
+		const realLstat = fs.lstat;
+		const alias =
+			later === "another directory"
+				? undefined
+				: spyOn(fs, "lstat").mockImplementation(
+						(async (target: string, ...rest: unknown[]) =>
+							await (realLstat as (...args: unknown[]) => Promise<Stats>)(
+								String(target) === ground.dir ? stageAt : target,
+								...rest,
+							)) as typeof fs.lstat,
+					);
+		let applied: GcResult;
+		try {
+			applied = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
+		} finally {
+			alias?.mockRestore();
+		}
+
+		if (later === "another directory") {
+			expect(applied.quarantine?.errors).toEqual([]);
+			expect(applied.quarantine?.moved).toBe(true);
+		} else {
+			expect(applied.quarantine?.moved).toBe(false);
+			expect(applied.quarantine?.errors.join("\n")).toContain("is still where the gc run left it");
+		}
+	});
+}
+
 test("a record-only quarantine stopped before its statement, then an archive run, is refused naming that window, and finishes once its record is put back", async () => {
 	const { ground, record } = await archivedWithKilledStage();
 	const destination = quarantineDestination(record);
@@ -4848,6 +4890,36 @@ test("a quarantine retry that finds another record's statement at its statement'
 	expect(finished.quarantine?.errors).toEqual([]);
 	expect(finished.quarantine?.moved).toBe(true);
 	expect(await Bun.file(path.join(root, "other-statement")).text()).toContain("9999.json");
+});
+
+test("a quarantine retry that finds another record's statement while the directory never moved says to move it aside, and finishes once that and the record copy back are done", async () => {
+	const { ground, record } = await archivedWithKilledStage();
+	const destination = quarantineDestination(record);
+	const copy = path.join(destination, record);
+	const statement = path.join(destination, `${path.basename(record, ".json")}.quarantined`);
+	// The review's wrong-ID fixture: a quarantine killed before it moved the
+	// directory, the ledger record removed, and another record's statement
+	// put at this record's statement name.
+	await quarantineStopped(ground, record, "before the directory moves");
+	await fs.unlink(ground.record);
+	await Bun.write(statement, `${JSON.stringify({ finished: "another-id.json", directory: null })}\n`);
+
+	const retried = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
+
+	expect(retried.quarantine?.moved).toBe(false);
+	const told = retried.quarantine?.errors.join("\n") ?? "";
+	expect(told).toContain(`move it out of ${destination} first`);
+	expect(told).toContain(`copy ${copy} back to ${ground.record}`);
+	expect(told).toContain(ground.dir);
+
+	// The steps the refusal gives, in its order.
+	await fs.rename(statement, path.join(root, "other-statement"));
+	await fs.copyFile(copy, ground.record);
+	await fs.chmod(ground.record, 0o600);
+	const finished = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
+	expect(finished.quarantine?.errors).toEqual([]);
+	expect(finished.quarantine?.moved).toBe(true);
+	expect(await Bun.file(path.join(destination, path.basename(ground.dir), "b.log")).text()).toBe("PARTIAL STAGE");
 });
 
 test("a quarantine retry whose destination resolves into the session tree it came from is refused", async () => {

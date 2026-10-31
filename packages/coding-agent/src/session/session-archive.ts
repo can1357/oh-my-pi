@@ -1587,11 +1587,13 @@ function statementName(recordName: string): string {
  * happened, which nothing on disk afterwards can show. It names what it
  * finished: the record, and what then stood at the stage's name in the
  * destination — the directory, by device and inode, or null when nothing
- * did. A retry believes it only of the same thing at that name, and only
- * while nothing of the run's is at the directory's old name. So a statement
- * written while the directory was still in its tree is not believed, and
- * one written by anything else has to name, exactly, what is at the stage's
- * name.
+ * did. A retry believes it only of the same thing at that name, and not
+ * while the run's directory is still at its old name: the one the record
+ * recorded, or, for a record written before its run took the inodes, any
+ * directory there unless it is another than the one the statement names. So
+ * a statement written while the directory was still in its tree is not
+ * believed, and one written by anything else has to name, exactly, what is
+ * at the stage's name.
  */
 function finishedStatement(recordName: string, directory: Identity | null): { name: string; bytes: Buffer } {
 	return {
@@ -1720,8 +1722,8 @@ const UNRECORDED_STAGE_WARNING =
  * Done only when a place holds a whole copy of the record and the statement
  * that its quarantine finished — see {@link finishedStatement} — and what the
  * statement names is so: the destination lies outside both session trees,
- * the directory the record names is not at its old name, and the directory
- * the statement names, when it names one, is the one at the stage's name.
+ * the run's directory is not still at its old name, and what stands at the
+ * stage's name is what the statement names — that directory, or nothing.
  * What stands beside the copy is never taken for a move by itself; it can
  * only show that a statement is not true of it. Anything short of that is
  * refused, saying what is there and how to finish, naming every place that
@@ -1783,7 +1785,15 @@ async function settleWithoutLedgerRecord(
 			);
 		}
 		const left = await checkRecordedGround(copied, roots);
-		if (left.kind === "minted" || left.kind === "intent") {
+		// A record written before its run took the inodes cannot tell the
+		// run's directory from a later one at the same name; a statement that
+		// names the directory it moved can, since one directory is not at two
+		// names unless something aliases it there.
+		const named = said.kind === "whole" ? said.directory : null;
+		const atOldName = left.kind === "intent" && named !== null ? await directoryIdentity(copied.dir) : null;
+		const another =
+			atOldName !== null && named !== null && (atOldName.dev !== named.dev || atOldName.ino !== named.ino);
+		if ((left.kind === "minted" || left.kind === "intent") && !another) {
 			result.directory = copied.dir;
 			if (said.kind === "whole") {
 				// No run writes a statement before the directory has left its
@@ -1800,19 +1810,26 @@ async function settleWithoutLedgerRecord(
 			// Stopped between the record and the directory, or the directory
 			// shown in the destination under an alias; and an archive run
 			// keeps the ledger entry of a directory still in its tree, so
-			// something else removed it.
+			// something else removed it. Anything at the statement's name has
+			// to go first: a run refuses to move a directory while it is there.
+			const occupied =
+				said.kind === "none"
+					? ""
+					: ` Something already stands at ${statementAt}, where this command writes the statement that it ` +
+						`finished${said.kind === "part" ? ": the start of a statement;" : ", and it is not this record's statement;"} ` +
+						`no run wrote it while the directory was still in its tree, and this command writes over nothing, so look ` +
+						`at it and move it out of ${first.destination} first.`;
 			return refuse(
 				`${record} is not in ${ledger}, but ${copy} holds a copy of it, and the directory it names, ${copied.dir}, ` +
 					`is still where the gc run left it: this command copied the record and stopped before it moved the directory, ` +
 					`and something other than gc has since removed the record from the ledger, since a gc run keeps the ledger ` +
 					`entry of a directory still in its tree. Until a record names it again, a restore takes that directory for ` +
-					`an artifact and carries it home. To finish the quarantine, copy ${copy} back to ${record} and run the same ` +
-					`command again.${elsewhere}`,
+					`an artifact and carries it home.${occupied} To finish the quarantine, copy ${copy} back to ${record} and run ` +
+					`the same command again.${elsewhere}`,
 			);
 		}
 		const there = await fs.lstat(stageAt).catch(() => undefined);
 		if (said.kind === "whole") {
-			const named = said.directory;
 			// The statement names what stood at the stage's name when it was
 			// written: a directory, by identity, or nothing, for a quarantine
 			// that moved only the record. It is believed only of the same.
@@ -1848,9 +1865,11 @@ async function settleWithoutLedgerRecord(
 		const atSource =
 			left.kind === "refused"
 				? `its old name could not be checked: ${left.note}`
-				: left.note !== undefined
-					? `something else is at its old name: ${left.note}`
-					: "nothing is at its old name";
+				: left.kind !== "gone"
+					? "another directory is at its old name"
+					: left.note !== undefined
+						? `something else is at its old name: ${left.note}`
+						: "nothing is at its old name";
 		if (said.kind === "other") {
 			return refuse(
 				`${record} is not in ${ledger}, and its quarantine did not finish: ${copy} holds a copy of the record, but what ` +
