@@ -2,31 +2,42 @@
 
 ## [Unreleased]
 
-### Breaking Changes
-
-- Removed `invalidateFsScanCache`: the listing cache no longer needs invalidation. `FS_SCAN_CACHE_TTL_MS`, `FS_SCAN_EMPTY_RECHECK_MS`, `FS_SCAN_CACHE_MAX_ENTRIES`, and `FS_SCAN_CACHE_MAX_BYTES` are no longer read
+## [18.14.1] - 2026-10-31
 
 ### Added
 
-- The bash tool's built-in `rsync` behaves like rsync 3.5.1 on Linux, macOS, and Windows without an installed binary: local copies, `-e`/ssh remote shells, and `rsync://` daemons, interoperating with real rsync peers speaking protocol 29–33. Serving as a daemon (`--daemon`) is not supported; `PI_DISABLE_UUTILS_DESTRUCTIVE` falls back to the system `rsync`
-- The bash tool has a built-in `ast-grep` (also `sg`) for structural search and rewrite: `run` with patterns, rewrites, `-U`, context, headings, and `--json` output like ast-grep 0.50
-
-### Changed
-
-- Native `glob` is about 3× faster on large trees; `grep`, `fuzzyFind`, `listWorkspace`, and `astGrep`/`astEdit` run on the same rewritten walker and return identical results from run to run
-- Native `grep` with `maxCount` (the agent's grep tool) searches files while the walk finds them and stops both once the limit is met: 1.3–2.3× faster, and a first page of results about 10× faster
-- The bash tool's built-in `rg` and recursive `grep` search files in parallel (about 2× faster) and print them in path order
-- `cache: true` reuses unchanged directory listings validated against their timestamps, so it never serves stale results
-- Reduced overhead for full-tree native `grep` searches while preserving result ordering and streaming backpressure
-- Aborting or timing out native `grep`, `glob`, `fuzzyFind`, `listWorkspace`, and `astGrep`/`astEdit` stops their filesystem work at once, including searches over JavaScript-provided filesystems; `grep`'s `onMatches` streaming paces the search to the callback
-- Cancelling the bash tool's built-in `rg`, `grep`, `fd`, `find`, and `ast-grep` (abort, `timeout`) stops them immediately, even mid-way through a large file; `find -prune` and `fd` ignore rules no longer list pruned directories
+- Added `FileLock.isHeld(path)`, which reports whether a lock is held without acquiring it ([#17428](https://github.com/can1357/oh-my-pi/pull/17428) by [@andrebrait](https://github.com/andrebrait))
 
 ### Fixed
 
-- Fixed cancelled directory searches leaving filesystem-provider requests running during walk startup
-- Fixed the bash tool's built-in commands (`cat`, `grep`, `head`, `wc`, `read`, `mapfile`, …) hanging on macOS at the end of a FIFO's input until the command was aborted; `read -t` now returns at EOF instead of waiting out its timeout
-- Fixed `wrapTextWithAnsi` continuing a wrapped styled underline (`4:3`, `4:4`) as a background colour, `4:0` setting background `40`, and colon-form colours (`38:2::r:g:b`) being dropped ([#16239](https://github.com/can1357/oh-my-pi/pull/16239) by [@materemias](https://github.com/materemias))
-- Fixed native audio playback clicking when its queue runs dry mid-waveform; output fades to silence and back in over 5 ms ([#17295](https://github.com/can1357/oh-my-pi/issues/17295))
+- Fixed native search on Windows (the bash tool's `fd`, grep, glob) failing with "The filename, directory name, or volume label syntax is incorrect" or "path not found" for paths with `.`/`..` components or `/` separators, including `fd` run without a search path
+- Fixed glob and find on Windows reporting a symlinked file's own size and mtime instead of its target's, which dropped linked files from listings that skip empty files
+- Fixed the bash tool's built-in `rsync` on Windows ignoring per-directory merge files whose name includes a directory part, such as `--filter=':- ../rules'`
+
+## [18.14.0] - 2026-10-29
+
+### Breaking Changes
+
+- Removed the `invalidateFsScanCache` API and the associated filesystem scan cache environment variables (`FS_SCAN_CACHE_TTL_MS`, `FS_SCAN_EMPTY_RECHECK_MS`, `FS_SCAN_CACHE_MAX_ENTRIES`, and `FS_SCAN_CACHE_MAX_BYTES`); filesystem listing caches are now managed automatically.
+
+### Added
+
+- Added a built-in `rsync` implementation to the bash tool, compatible with rsync 3.5.1 and protocol versions 29–33 across Linux, macOS, and Windows. It supports local copies, SSH remote shells via `-e`, and `rsync://` daemons without requiring an installed binary; daemon serving is not supported, and `PI_DISABLE_UUTILS_DESTRUCTIVE` continues to use the system `rsync`.
+- Added built-in `ast-grep` (also available as `sg`) support to the bash tool for structural code search and rewriting, including pattern matching, rewrites, context, headings, and JSON output.
+
+### Changed
+
+- Improved native filesystem search performance, including faster globbing and more efficient grep, fuzzy finding, workspace listing, and structural search/edit operations, while preserving deterministic result ordering and streaming behavior.
+- Native search and the bash tool's built-in `rg`, `grep`, `fd`, `find`, and `ast-grep` now stop filesystem work promptly when cancelled or timed out, including searches over JavaScript-provided filesystems and searches interrupted while reading large files.
+- The bash tool's built-in `rg` and recursive `grep` now search files in parallel while retaining path-ordered output; `grep` can also stop promptly after reaching `maxCount`.
+- Enabled safe reuse of unchanged directory listings when `cache: true`, with timestamp validation to prevent stale results.
+
+### Fixed
+
+- Fixed cancelled native directory searches leaving filesystem-provider requests running during startup.
+- Fixed built-in bash commands such as `cat`, `grep`, `head`, `wc`, `read`, and `mapfile` hanging at the end of FIFO input on macOS; `read -t` now returns at EOF.
+- Fixed ANSI text wrapping for styled underlines, background colours, and colon-form RGB colours.
+- Fixed clicking in native audio playback when the queue runs dry mid-waveform by smoothly fading output to silence and back.
 
 ## [18.13.3] - 2026-10-28
 

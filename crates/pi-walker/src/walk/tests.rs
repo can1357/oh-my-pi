@@ -393,7 +393,11 @@ async fn full_detail_reports_sizes_and_mtimes() {
 			.duration_since(std::time::UNIX_EPOCH)
 			.expect("after epoch")
 			.as_nanos();
-		assert_eq!(entry.mtime, Some(i64::try_from(nanos).expect("fits")), "{}", lossy(&entry));
+		// NTFS refreshes a directory's entry in its parent's index lazily, so a
+		// listing can trail the directory's own mtime there.
+		if !(cfg!(windows) && meta.is_dir()) {
+			assert_eq!(entry.mtime, Some(i64::try_from(nanos).expect("fits")), "{}", lossy(&entry));
+		}
 	}
 }
 
@@ -935,12 +939,9 @@ async fn tree_walks_trees_deeper_than_the_thread_stack() {
 	std::fs::write(deepest.join("leaf.txt"), "ok").expect("leaf");
 	let leaf = format!("{}leaf.txt", "d/".repeat(DEPTH));
 	for contents_first in [false, true] {
-		// Deep Windows paths exceed MAX_PATH without the verbatim prefix.
-		let root = if cfg!(windows) {
-			PathBuf::from(format!(r"\\?\{}", tmp.path().display()))
-		} else {
-			tmp.path().to_path_buf()
-		};
+		// Deep Windows paths exceed MAX_PATH without the verbatim prefix, which
+		// the canonical temp dir already carries there.
+		let root = tmp.path().to_path_buf();
 		let seen = on_small_stack(async move {
 			let opts = TreeOptions { contents_first, ..Default::default() };
 			tree_paths(&root, &opts).await

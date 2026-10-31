@@ -2,13 +2,21 @@
 
 ## [Unreleased]
 
+## [18.14.1] - 2026-10-31
+
 ### Added
 
-- Added `logger.withContext(fields, fn)`, which adds `fields` to every record logged while `fn` runs, including from the promises and timers it starts and in events passed to log sinks, and `logger.withoutContext(fn)` for process-wide work whose records belong to no caller ([#16587](https://github.com/can1357/oh-my-pi/pull/16587) by [@will-bogusz](https://github.com/will-bogusz))
+- Added `isFileLockHeld`, which reports whether a file lock is held without acquiring it ([#17428](https://github.com/can1357/oh-my-pi/pull/17428) by [@andrebrait](https://github.com/andrebrait))
+
+## [18.14.0] - 2026-10-29
+
+### Added
+
+- Added `logger.withContext(fields, fn)` to attach contextual fields to all records produced during a function and its asynchronous work, plus `logger.withoutContext(fn)` for work that should not inherit caller context.
 
 ### Fixed
 
-- Fixed `untilAborted` leaving a promise passed to it unobserved when the signal was already aborted, so its later rejection crashed the process as unhandled ([#17290](https://github.com/can1357/oh-my-pi/pull/17290) by [@H4vC](https://github.com/H4vC))
+- Fixed `untilAborted` so promises passed to an already-aborted signal are still observed, preventing later rejections from being reported as unhandled.
 
 ## [18.13.3] - 2026-10-28
 

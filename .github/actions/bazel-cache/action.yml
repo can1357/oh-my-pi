@@ -1,27 +1,11 @@
 name: "Compose bazel cache config"
 description: >
-   Emits a bazelrc fragment wiring a remote cache. Every Bazel job runs on a
-   vmon `omp-ci` sandbox (VMON_CI=1), whose template bakes the
-   repository/xwin caches at /opt/bazel-repo-cache. Given the bazel-remote
-   secrets it adds the shared read-write bazel-remote cache; without them it
-   uses the vmon node's own Bazel HTTP cache ($VMON_CACHE_URL/bazel, set by
-   the vmon runner when the node serves it): written by non-PR jobs, read by
-   all. Elsewhere the fragment carries only --config=ci and the build runs
-   uncached.
-
-inputs:
-   remote-url:
-      description: bazel-remote gRPC endpoint (grpcs://host:port), from the BAZEL_REMOTE_URL secret
-      required: false
-      default: ""
-   remote-user:
-      description: bazel-remote write user, from the BAZEL_REMOTE_USER secret
-      required: false
-      default: ""
-   remote-password:
-      description: bazel-remote write password, from the BAZEL_REMOTE_PASSWORD secret
-      required: false
-      default: ""
+   Emits a bazelrc fragment wiring the vmon node's Bazel HTTP cache. Every
+   Bazel job runs on a vmon `omp-ci` sandbox (VMON_CI=1), whose template bakes
+   the repository/xwin caches at /opt/bazel-repo-cache, and whose node serves
+   a per-repository Bazel cache at $VMON_CACHE_URL/bazel: written by branch
+   and tag jobs, read-only for pull requests. Elsewhere the fragment carries
+   only --config=ci and the build runs uncached.
 
 outputs:
    rc:
@@ -34,10 +18,6 @@ runs:
       - name: Compose cache config
         id: compose
         shell: bash
-        env:
-           REMOTE_URL: ${{ inputs.remote-url }}
-           REMOTE_USER: ${{ inputs.remote-user }}
-           REMOTE_PASSWORD: ${{ inputs.remote-password }}
         run: |
            set -euo pipefail
            rc="$RUNNER_TEMP/bazel-cache.rc"
@@ -56,46 +36,19 @@ runs:
              echo "common --repo_env=OMP_XWIN_CACHE_DIR=/opt/bazel-repo-cache/xwin"
            } > "$rc"
 
-           if [ -z "$REMOTE_URL$REMOTE_USER$REMOTE_PASSWORD" ]; then
-             if [ -n "${VMON_CACHE_URL:-}" ]; then
-               # The vmon node's local Bazel cache. It refuses writes from
-               # pull request jobs; PRs (pull_request_target included) skip
-               # uploads instead of collecting 403 warnings.
-               case "${GITHUB_EVENT_NAME:-}" in
-                 pull_request*) mode=cache-ro ;;
-                 *) mode=cache-rw ;;
-               esac
-               {
-                 echo "common --config=${mode}"
-                 echo "common --remote_cache=${VMON_CACHE_URL}/bazel"
-               } >> "$rc"
-               echo "::notice title=Bazel cache::Using the vmon node's Bazel cache (${mode})."
-               exit 0
-             fi
-             echo "::warning title=Bazel cache::No bazel-remote secrets reached this job and the vmon node serves no Bazel cache; building without the remote cache."
+           if [ -z "${VMON_CACHE_URL:-}" ]; then
+             echo "::warning title=Bazel cache::The vmon node serves no Bazel cache; building without a remote cache."
              exit 0
            fi
-           if [ -z "$REMOTE_URL" ] || [ -z "$REMOTE_USER" ] || [ -z "$REMOTE_PASSWORD" ]; then
-             echo "::error::BAZEL_REMOTE_URL, BAZEL_REMOTE_USER and BAZEL_REMOTE_PASSWORD must all be set"
-             exit 1
-           fi
-           case "$REMOTE_URL" in
-             grpcs://*) ;;
-             *) echo "::error::BAZEL_REMOTE_URL must be a grpcs:// endpoint"; exit 1 ;;
+           # The node refuses writes from pull request jobs; PRs
+           # (pull_request_target included) skip uploads instead of
+           # collecting 403 warnings.
+           case "${GITHUB_EVENT_NAME:-}" in
+             pull_request*) mode=cache-ro ;;
+             *) mode=cache-rw ;;
            esac
-
-           # Mask the derived credential BEFORE writing the rc: config=ci
-           # enables --announce_rc, which prints --remote_header verbatim.
-           # Mask lines inside the redirected block below would land in the
-           # rc file itself and mask nothing.
-           raw_auth="${REMOTE_USER}:${REMOTE_PASSWORD}"
-           auth="$(printf %s "$raw_auth" | base64 | tr -d '\n')"
-           echo "::add-mask::$raw_auth"
-           echo "::add-mask::$auth"
            {
-             echo "common --config=cache-rw"
-             echo "common --remote_cache=${REMOTE_URL}"
-             echo "common --tls_certificate=infra/bazel-remote/ca.crt"
-             echo "common --remote_header='authorization=Basic ${auth}'"
-             echo "common --remote_download_toplevel"
+             echo "common --config=${mode}"
+             echo "common --remote_cache=${VMON_CACHE_URL}/bazel"
            } >> "$rc"
+           echo "::notice title=Bazel cache::Using the vmon node's Bazel cache (${mode})."

@@ -11,11 +11,9 @@ import type { Api, CodexCompactionContext, FetchImpl, Model, ProviderSessionStat
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createOpenAICodexCompactionRequestContext } from "@oh-my-pi/pi-ai/providers/openai-codex-compaction";
 import { applyCodexResponsesLiteShape } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
-import {
-	createOpenAICodexCompatibilityMetadata,
-	openCodexCompactionEventStream,
-	type OpenAICodexCompactionBody,
-	type OpenAICodexCompatibilityMetadata,
+import type {
+	OpenAICodexCompactionBody,
+	OpenAICodexCompatibilityMetadata,
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import {
 	getOpenAIPromptCacheKey,
@@ -276,6 +274,7 @@ export async function requestCompactionV2Streaming(
 		providerSessionState?: Map<string, ProviderSessionState>;
 		codexCompaction?: CodexCompactionContext;
 		preferWebsockets?: boolean;
+		codexAccessPrograms?: boolean;
 	},
 ): Promise<CompactionV2Response> {
 	let fetchImpl: FetchImpl = options?.fetch ?? globalThis.fetch;
@@ -293,18 +292,21 @@ export async function requestCompactionV2Streaming(
 
 	const retryWait = options?.retryWait ?? ((delayMs: number) => Bun.sleep(delayMs));
 	const isCodexResponses = compactionV2Api(model) === "openai-codex-responses" || model.provider === "openai-codex";
-	const codexMetadata =
-		isCodexResponses && !shouldUseCodexProviderTransport(model)
-			? createOpenAICodexCompatibilityMetadata({
-					sessionId: request.sessionId,
-					providerSessionState: options?.providerSessionState,
-					requestKind: "compaction",
-					compaction: createOpenAICodexCompactionRequestContext({
-						context: options?.codexCompaction,
-						implementation: "responses_compaction_v2",
-					}),
-				})
-			: undefined;
+	let codexMetadata: OpenAICodexCompatibilityMetadata | undefined;
+	if (isCodexResponses && !shouldUseCodexProviderTransport(model)) {
+		// Metadata generation is request work; importing compaction policy must not load the Codex transport.
+		const { createOpenAICodexCompatibilityMetadata } =
+			await import("@oh-my-pi/pi-ai/providers/openai-codex-responses");
+		codexMetadata = createOpenAICodexCompatibilityMetadata({
+			sessionId: request.sessionId,
+			providerSessionState: options?.providerSessionState,
+			requestKind: "compaction",
+			compaction: createOpenAICodexCompactionRequestContext({
+				context: options?.codexCompaction,
+				implementation: "responses_compaction_v2",
+			}),
+		});
+	}
 	let lastError: Error | undefined;
 
 	for (let attempt = 0; attempt <= V2_COMPACTION_MAX_RETRIES; attempt++) {
@@ -315,6 +317,7 @@ export async function requestCompactionV2Streaming(
 				providerSessionState: options?.providerSessionState,
 				codexCompaction: options?.codexCompaction,
 				preferWebsockets: options?.preferWebsockets,
+				codexAccessPrograms: options?.codexAccessPrograms,
 			});
 		} catch (err) {
 			const error = err instanceof Error ? err : new Error(String(err));
@@ -351,6 +354,7 @@ async function attemptCompactionV2Streaming(
 		providerSessionState?: Map<string, ProviderSessionState>;
 		codexCompaction?: CodexCompactionContext;
 		preferWebsockets?: boolean;
+		codexAccessPrograms?: boolean;
 	},
 ): Promise<CompactionV2Response> {
 	// Faithful to Codex: append the compaction trigger as the final input item
@@ -367,6 +371,8 @@ async function attemptCompactionV2Streaming(
 	}
 
 	if (shouldUseCodexProviderTransport(model)) {
+		// The native transport is only needed when sending a Codex compaction request.
+		const { openCodexCompactionEventStream } = await import("@oh-my-pi/pi-ai/providers/openai-codex-responses");
 		const eventStream = await openCodexCompactionEventStream(model, body, {
 			apiKey,
 			signal,
@@ -374,6 +380,7 @@ async function attemptCompactionV2Streaming(
 			sessionId: request.sessionId,
 			providerSessionState: options.providerSessionState,
 			preferWebsockets: options.preferWebsockets,
+			codexAccessPrograms: options.codexAccessPrograms,
 			responsesLite: model.useResponsesLite,
 			codexCompaction: createOpenAICodexCompactionRequestContext({
 				context: options.codexCompaction,
