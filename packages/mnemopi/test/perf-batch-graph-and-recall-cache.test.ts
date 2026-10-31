@@ -278,4 +278,75 @@ describe("performance optimizations: batched graph and recall cache", () => {
 			parseSpy.mockRestore();
 		}
 	});
+
+	it("findEdgesTouching and findRelatedMemories handle frontiers larger than 900 IDs without SQL variable errors", () => {
+		const db = new Database(":memory:");
+		const graph = new EpisodicGraph({ db });
+		const now = new Date().toISOString();
+
+		// Insert 1000 nodes connected to root, plus target leaf nodes
+		const nodeCount = 1000;
+		for (let i = 0; i < nodeCount; i++) {
+			graph.addEdge({
+				source: "root",
+				target: `frontier_${i}`,
+				edgeType: "ctx",
+				weight: 0.8,
+				timestamp: now,
+			});
+		}
+
+		// Add an edge from the last frontier node to a target
+		graph.addEdge({
+			source: "frontier_999",
+			target: "target_leaf",
+			edgeType: "ctx",
+			weight: 0.9,
+			timestamp: now,
+		});
+
+		const frontierIds = Array.from({ length: nodeCount }, (_, i) => `frontier_${i}`);
+		// Directly verify findEdgesTouching with >900 IDs
+		const edges = graph.findEdgesTouching(frontierIds, "ctx", 0.5);
+		expect(edges.length).toBeGreaterThan(nodeCount);
+		const leafEdge = edges.find(e => e.target === "target_leaf" || e.source === "target_leaf");
+		expect(leafEdge).toBeDefined();
+		expect(leafEdge?.weight).toBe(0.9);
+
+		// Verify findRelatedMemories traversing depth 2 across the 1000-node frontier
+		const related = graph.findRelatedMemories("root", 2, "ctx", 0.5);
+		const leafRelated = related.find(r => r.memoryId === "target_leaf");
+		expect(leafRelated).toBeDefined();
+		expect(leafRelated?.depth).toBe(2);
+		expect(leafRelated?.weight).toBe(0.9);
+
+		graph.close();
+	});
+
+	it("ingestMemory links across >256 prior memories via chunked batching", () => {
+		const db = new Database(":memory:");
+		const graph = new EpisodicGraph({ db });
+		const count = 300;
+
+		// Seed > 256 prior memories with distinct IDs and content
+		for (let i = 0; i < count; i++) {
+			const content = i === 280 ? "Alice works at Initech on compiler systems" : `Arbitrary memory note number ${i}`;
+			graph.ingestMemory(content, `mem_${i}`, { linkExisting: false });
+		}
+
+		// Ingest a new memory that references Alice and Initech, which should link to mem_280 (in chunk 2: index 256..299)
+		const result = graph.ingestMemory("Alice is consulting at Initech today", "mem_target", {
+			linkExisting: true,
+			minLinkScore: 0.1,
+		});
+
+		const linkedEdges = result.edges.filter(
+			e =>
+				(e.source === "mem_target" && e.target === "mem_280") ||
+				(e.source === "mem_280" && e.target === "mem_target"),
+		);
+		expect(linkedEdges.length).toBeGreaterThan(0);
+
+		graph.close();
+	});
 });

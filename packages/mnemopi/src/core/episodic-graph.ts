@@ -106,6 +106,8 @@ interface MemoryLivenessRow {
 const EXTRACT_FACTS_MAX_CONTENT_LEN = 4096;
 const MAX_FACTS_PER_MEMORY = 5;
 const DEFAULT_LINK_THRESHOLD = 0.35;
+const MAX_SQL_IDS_PER_CHUNK = 900;
+const LINK_CANDIDATE_BATCH_SIZE = 256;
 const LIVE_MEMORY_SQL = "superseded_by IS NULL AND (valid_until IS NULL OR valid_until > ?)";
 
 /** Clause connector that ends a fact object, so the next clause is never swallowed into it. */
@@ -509,27 +511,41 @@ export class EpisodicGraph {
 	): GraphEdge[] {
 		const max = Math.max(0, Math.trunc(limit));
 		if (nodeIds.length === 0 || max === 0) return [];
-		const placeholders = nodeIds.map(() => "?").join(", ");
 		const threshold = clampWeight(minWeight);
-		const rows =
-			edgeType.length > 0
-				? (this.db
-						.query(
-							`SELECT source, target, edge_type, weight, timestamp FROM graph_edges
-				 WHERE (source IN (${placeholders}) OR target IN (${placeholders})) AND edge_type = ? AND weight >= ?
-				 ORDER BY weight DESC, id
-				 LIMIT ?`,
-						)
-						.all(...nodeIds, ...nodeIds, edgeType, threshold, max) as EdgeRow[])
-				: (this.db
-						.query(
-							`SELECT source, target, edge_type, weight, timestamp FROM graph_edges
-				 WHERE (source IN (${placeholders}) OR target IN (${placeholders})) AND weight >= ?
-				 ORDER BY weight DESC, id
-				 LIMIT ?`,
-						)
-						.all(...nodeIds, ...nodeIds, threshold, max) as EdgeRow[]);
-		return rows.map(edgeFromRow);
+		const seenKeys = new Set<string>();
+		const collected: GraphEdge[] = [];
+
+		for (let i = 0; i < nodeIds.length; i += MAX_SQL_IDS_PER_CHUNK) {
+			const chunk = nodeIds.slice(i, i + MAX_SQL_IDS_PER_CHUNK);
+			const placeholders = chunk.map(() => "?").join(", ");
+			const rows =
+				edgeType.length > 0
+					? (this.db
+							.query(
+								`SELECT source, target, edge_type, weight, timestamp FROM graph_edges
+					 WHERE (source IN (${placeholders}) OR target IN (${placeholders})) AND edge_type = ? AND weight >= ?
+					 ORDER BY weight DESC, id`,
+							)
+							.all(...chunk, ...chunk, edgeType, threshold) as EdgeRow[])
+					: (this.db
+							.query(
+								`SELECT source, target, edge_type, weight, timestamp FROM graph_edges
+					 WHERE (source IN (${placeholders}) OR target IN (${placeholders})) AND weight >= ?
+					 ORDER BY weight DESC, id`,
+							)
+							.all(...chunk, ...chunk, threshold) as EdgeRow[]);
+
+			for (const row of rows) {
+				const key = `${row.source}\0${row.target}\0${row.edge_type}`;
+				if (seenKeys.has(key)) continue;
+				seenKeys.add(key);
+				collected.push(edgeFromRow(row));
+			}
+		}
+
+		collected.sort((a, b) => b.weight - a.weight || b.timestamp.localeCompare(a.timestamp));
+		if (collected.length > max) return collected.slice(0, max);
+		return collected;
 	}
 	findFactsBySubject(subject: string): Fact[] {
 		const rows = this.db
@@ -587,57 +603,65 @@ export class EpisodicGraph {
 					.query("SELECT subject, object FROM facts WHERE source_msg_id = ?")
 					.all(memoryId) as FactRow[];
 				const leftEntities = lowerSet(leftRows.flatMap(row => [row.subject, row.object]));
-				const otherEntitiesMap = this.#entitySetsForMemories(previousMemoryIds);
-				const otherContentMap = this.#batchMemoryContent(previousMemoryIds, timestamp);
 
-				for (const otherId of previousMemoryIds) {
-					const otherContent = otherContentMap.get(otherId) ?? "";
-					const lexicalScore = Math.round(jaccard(sourceTokens, contentTokenSet(otherContent)) * 1000) / 1000;
-					let wroteCtxEdge = false;
-					if (lexicalScore >= minLinkScore) {
-						const edge = {
-							source: memoryId,
-							target: otherId,
-							edgeType: "related_to",
-							weight: lexicalScore,
-							timestamp,
-						};
-						this.addEdge(edge);
-						edges.push(edge);
-						const ctxEdge = {
-							source: memoryId,
-							target: otherId,
-							edgeType: "ctx",
-							weight: lexicalScore,
-							timestamp,
-						};
-						this.addEdge(ctxEdge);
-						edges.push(ctxEdge);
-						wroteCtxEdge = true;
-					}
-					const rightEntities = otherEntitiesMap.get(otherId) ?? new Set();
-					const entityScore = Math.round(overlapScore(leftEntities, rightEntities) * 1000) / 1000;
-					if (entityScore > 0) {
-						const edge = {
-							source: memoryId,
-							target: otherId,
-							edgeType: "references",
-							weight: entityScore,
-							timestamp,
-						};
-						this.addEdge(edge);
-						edges.push(edge);
-					}
-					if (!wroteCtxEdge && entityScore >= minLinkScore) {
-						const ctxEdge = {
-							source: memoryId,
-							target: otherId,
-							edgeType: "ctx",
-							weight: entityScore,
-							timestamp,
-						};
-						this.addEdge(ctxEdge);
-						edges.push(ctxEdge);
+				for (let i = 0; i < previousMemoryIds.length; i += LINK_CANDIDATE_BATCH_SIZE) {
+					const chunk = previousMemoryIds.slice(i, i + LINK_CANDIDATE_BATCH_SIZE);
+					const otherEntitiesMap = this.#entitySetsForMemories(chunk);
+					const otherContentMap =
+						sourceTokens.size > 0 ? this.#batchMemoryContent(chunk, timestamp) : new Map<string, string>();
+
+					for (const otherId of chunk) {
+						const otherContent = otherContentMap.get(otherId) ?? "";
+						const lexicalScore =
+							sourceTokens.size > 0
+								? Math.round(jaccard(sourceTokens, contentTokenSet(otherContent)) * 1000) / 1000
+								: 0;
+						let wroteCtxEdge = false;
+						if (lexicalScore >= minLinkScore) {
+							const edge = {
+								source: memoryId,
+								target: otherId,
+								edgeType: "related_to",
+								weight: lexicalScore,
+								timestamp,
+							};
+							this.addEdge(edge);
+							edges.push(edge);
+							const ctxEdge = {
+								source: memoryId,
+								target: otherId,
+								edgeType: "ctx",
+								weight: lexicalScore,
+								timestamp,
+							};
+							this.addEdge(ctxEdge);
+							edges.push(ctxEdge);
+							wroteCtxEdge = true;
+						}
+						const rightEntities = otherEntitiesMap.get(otherId) ?? new Set();
+						const entityScore = Math.round(overlapScore(leftEntities, rightEntities) * 1000) / 1000;
+						if (entityScore > 0) {
+							const edge = {
+								source: memoryId,
+								target: otherId,
+								edgeType: "references",
+								weight: entityScore,
+								timestamp,
+							};
+							this.addEdge(edge);
+							edges.push(edge);
+						}
+						if (!wroteCtxEdge && entityScore >= minLinkScore) {
+							const ctxEdge = {
+								source: memoryId,
+								target: otherId,
+								edgeType: "ctx",
+								weight: entityScore,
+								timestamp,
+							};
+							this.addEdge(ctxEdge);
+							edges.push(ctxEdge);
+						}
 					}
 				}
 			}
