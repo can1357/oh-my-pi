@@ -72,6 +72,15 @@ import type {
 import { isSoftToolRequirement } from "./types";
 
 /**
+ * In "one-at-a-time" steering, how many user-authored units may go ahead of the
+ * agent-authored unit at the head of the queue before it goes next. A person who
+ * sends a burst of up to this many messages has each one read at the next free
+ * boundary; sustained input still lets agent steering through, one unit after
+ * every this many user units, so no queued message waits forever.
+ */
+export const MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING = 4;
+
+/**
  * Default convertToLlm: Keep only LLM-compatible replay messages.
  */
 function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
@@ -133,7 +142,8 @@ export interface AgentOptions {
 
 	/**
 	 * Steering mode: "all" = send all steering messages at once, "one-at-a-time" = one per turn,
-	 * user-authored messages ahead of agent-authored ones (see {@link isUserSteeringMessage})
+	 * user-authored messages ahead of agent-authored ones (see {@link isUserSteeringMessage}), with
+	 * the head agent message going next after {@link MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING} user units
 	 */
 	steeringMode?: "all" | "one-at-a-time";
 
@@ -446,6 +456,8 @@ export class Agent {
 	#withdrawnMessages = new WeakMap<AgentMessage, AbortController>();
 	#steeringWaiters = new Set<() => void>();
 	#queuedMessageGrouping?: (previous: AgentMessage, next: AgentMessage) => boolean;
+	/** The head agent steering message user units passed, and how many passed it. */
+	#steeringHeadPassed?: { head: AgentMessage; count: number };
 
 	#steeringMode: "all" | "one-at-a-time";
 	#followUpMode: "all" | "one-at-a-time";
@@ -1551,11 +1563,17 @@ export class Agent {
 	 * in "one-at-a-time" mode the first unit holding a user-authored message, else
 	 * the head unit. A person's steer is read at the next boundary rather than
 	 * behind every agent steer queued before it; each class keeps its own order.
+	 * An agent unit at the head that {@link MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING}
+	 * user units have passed goes next, so sustained user input cannot starve it.
 	 */
 	#nextSteeringUnit(): { start: number; end: number } {
 		const queue = this.#steeringQueue;
 		if (this.#steeringMode === "all" || queue.length === 0) return { start: 0, end: queue.length };
 		const headEnd = this.#unitEnd(queue, 0);
+		const passed = this.#steeringHeadPassed;
+		if (passed?.head === queue[0] && passed.count >= MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING) {
+			return { start: 0, end: headEnd };
+		}
 		for (let start = 0, end = headEnd; start < queue.length; start = end, end = this.#unitEnd(queue, start)) {
 			for (let i = start; i < end; i++) {
 				if (isUserSteeringMessage(queue[i])) return { start, end };
@@ -1568,6 +1586,13 @@ export class Agent {
 		const queue = this.#steeringQueue;
 		const { start, end } = this.#nextSteeringUnit();
 		if (start === end) return [];
+		if (start === 0) {
+			this.#steeringHeadPassed = undefined;
+		} else if (this.#steeringHeadPassed?.head === queue[0]) {
+			this.#steeringHeadPassed.count++;
+		} else {
+			this.#steeringHeadPassed = { head: queue[0], count: 1 };
+		}
 		this.#steeringQueue = start === 0 ? queue.slice(end) : [...queue.slice(0, start), ...queue.slice(end)];
 		this.#emitQueueChanged();
 		return queue.slice(start, end);

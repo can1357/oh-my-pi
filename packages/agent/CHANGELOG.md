@@ -8,7 +8,7 @@
 
 ### Changed
 
-- `one-at-a-time` steering delivers the first queued unit holding a user-authored message (`isUserSteeringMessage`) ahead of agent-authored steering queued before it; `steeringQueueState` classifies the messages it is given and no longer takes a count ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
+- `one-at-a-time` steering delivers the first queued unit holding a user-authored message (`isUserSteeringMessage`) ahead of agent-authored steering queued before it, and the agent unit at the head goes next once `MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING` (4) user units have passed it; `steeringQueueState` classifies the messages it is given and no longer takes a count ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
 
 ### Fixed
 

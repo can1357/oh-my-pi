@@ -1,6 +1,12 @@
 import { describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
-import { Agent, type AgentEvent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import {
+	Agent,
+	type AgentEvent,
+	type AgentMessage,
+	type AgentTool,
+	MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING,
+} from "@oh-my-pi/pi-agent-core";
 import type { Context, Message } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 
@@ -135,6 +141,35 @@ describe("one-at-a-time steering: a person's message before agent steering", () 
 		expect(transcriptTexts(agent)).toEqual(["start", "card 1", "parent", "card 2"]);
 	});
 
+	it("reads the head agent steer after every bound's worth of user steers, so sustained input starves nothing", async () => {
+		const bound = MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING;
+		const cards = 32;
+		const people = cards * bound + 3;
+		const queued: AgentMessage[] = [];
+		for (let n = 1; n <= cards; n++) queued.push(card(n));
+		for (let n = 1; n <= people; n++) queued.push(person(`person ${n}`));
+		const { agent } = await runWithQueued(queued);
+
+		const expected = ["start"];
+		let nextPerson = 1;
+		for (let n = 1; n <= cards; n++) {
+			for (let i = 0; i < bound; i++) expected.push(`person ${nextPerson++}`);
+			expected.push(`card ${n}`);
+		}
+		while (nextPerson <= people) expected.push(`person ${nextPerson++}`);
+		expect(transcriptTexts(agent)).toEqual(expected);
+		expect(agent.hasQueuedMessages()).toBe(false);
+	});
+
+	it("lets a burst of up to the bound in user steers go first, then the passed agent steer", async () => {
+		const bound = MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING;
+		const burst = Array.from({ length: bound + 1 }, (_, i) => person(`typed ${i + 1}`));
+		const { agent } = await runWithQueued([card(1), card(2), ...burst]);
+
+		const typed = burst.map((_, i) => `typed ${i + 1}`);
+		expect(transcriptTexts(agent)).toEqual(["start", ...typed.slice(0, bound), "card 1", typed[bound], "card 2"]);
+	});
+
 	it("delivers the whole queue in order at the next boundary in all mode", async () => {
 		const { agent, calls } = await runWithQueued([card(1), person("mine"), card(2)], { steeringMode: "all" });
 
@@ -143,7 +178,7 @@ describe("one-at-a-time steering: a person's message before agent steering", () 
 		expect(transcriptTexts(agent)).toEqual(["start", "card 1", "mine", "card 2"]);
 	});
 
-	it("interrupts a tool batch for a person's steer queued behind agent steering", async () => {
+	it("classifies the batch interrupt by a person's steer queued behind agent steering, and reads it next", async () => {
 		const agentRef = {} as { current: Agent };
 		const schema = type({ value: type("string") });
 		const executed: string[] = [];
