@@ -3,7 +3,6 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils/temp";
 import {
-	awaitEvalArtifactsSettled,
 	holdArtifactRoot,
 	releaseArtifactRoots,
 	releasePinnedArtifact,
@@ -28,7 +27,7 @@ function sessionWithArtifacts(dir: string): ToolSession {
 }
 
 describe("eval artifact readiness", () => {
-	it("holds a cell for a copy that has announced itself but not staged anything", async () => {
+	it("holds a reader of a directory for a copy that has announced itself but not staged anything", async () => {
 		using tempDir = TempDir.createSync("@omp-eval-readiness-");
 		const source = path.join(tempDir.path(), "2026-01-01T00-00-00-000Z_source");
 		const destination = path.join(tempDir.path(), "2026-01-01T00-00-01-000Z_destination");
@@ -47,7 +46,7 @@ describe("eval artifact readiness", () => {
 		});
 
 		let started = false;
-		const cell = awaitEvalArtifactsSettled(sessionWithArtifacts(destination)).then(() => {
+		const reader = whenArtifactCopiesSettle(destination).then(() => {
 			started = true;
 			return fs.readdirSync(destination).sort();
 		});
@@ -57,7 +56,7 @@ describe("eval artifact readiness", () => {
 		release();
 		await copying;
 		// The whole inheritance, not the part of it that had arrived.
-		expect(await cell).toEqual(["0.bash.log", "1.bash.log", "8.read.log"]);
+		expect(await reader).toEqual(["0.bash.log", "1.bash.log", "8.read.log"]);
 		await whenArtifactCopiesSettle(destination);
 	});
 
@@ -378,7 +377,7 @@ describe("eval artifact readiness", () => {
 		}
 	});
 
-	it("does not hold a cell for a staging tree that no copy is using", async () => {
+	it("does not hold a reader for a staging tree that no copy is using", async () => {
 		using tempDir = TempDir.createSync("@omp-eval-readiness-");
 		const destination = path.join(tempDir.path(), "2026-01-01T00-00-01-000Z_destination");
 		fs.mkdirSync(destination, { recursive: true });
@@ -390,7 +389,7 @@ describe("eval artifact readiness", () => {
 		fs.writeFileSync(path.join(retained, "left-behind"), "not this process's to remove");
 
 		const outcome = await Promise.race([
-			awaitEvalArtifactsSettled(sessionWithArtifacts(destination)).then(() => "settled"),
+			whenArtifactCopiesSettle(destination).then(() => "settled"),
 			new Promise(resolve => setTimeout(() => resolve("waited"), 100)),
 		]);
 		expect(outcome).toBe("settled");

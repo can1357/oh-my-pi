@@ -905,14 +905,3 @@ async function artifactInDirectory(at: string, where: string, id: string): Promi
 		);
 	}
 }
-
-/**
- * Settle once every artifact copy into this session's artifacts directory has
- * finished. Used where the caller has no id to resolve, only a directory to
- * wait for.
- */
-export async function awaitEvalArtifactsSettled(session: ToolSession, signal?: AbortSignal): Promise<void> {
-	const dir = contextLocalProtocolOptions(session)?.getArtifactsDir?.();
-	if (!dir) return;
-	await whenArtifactCopiesSettle(dir, signal);
-}
