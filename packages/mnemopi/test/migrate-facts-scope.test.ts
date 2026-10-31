@@ -9,6 +9,7 @@ import { factRecall } from "@oh-my-pi/pi-mnemopi/core/beam/recall";
 import { initBeam } from "@oh-my-pi/pi-mnemopi/core/beam/schema";
 import { sourceMemoryScope } from "@oh-my-pi/pi-mnemopi/core/beam/fact-scope";
 import { get, importFromDict, updateWorking } from "@oh-my-pi/pi-mnemopi/core/beam/store";
+import { ensureFactsFtsUpdateTrigger } from "@oh-my-pi/pi-mnemopi/core/facts-fts";
 import { Mnemopi } from "@oh-my-pi/pi-mnemopi/core/memory";
 import { EpisodicGraph } from "@oh-my-pi/pi-mnemopi/core/episodic-graph";
 import {
@@ -446,6 +447,87 @@ describe("E7 facts scope migration", () => {
 			expect(annotation != null && annotation.value === "2026-01-02T00:00:00.000Z").toBe(true);
 		} finally {
 			beamA.close();
+		}
+	});
+
+	it("discards extraction when the source row is forgotten and recreated identically", async () => {
+		const memory = new Mnemopi({
+			sessionId: "session-a",
+			dbPath: tempDb(),
+			llm: { enabled: true, complete: async () => "The user uses the quorum relay for tokens" },
+		});
+		try {
+			const id = memory.remember("same text both times", { source: "test", extract: true });
+			expect(id).toBeTruthy();
+			// Forget the row while extraction is in flight and re-create it with
+			// identical content and scope: the rowid generation token must still
+			// distinguish the new incarnation from the one the task bound to.
+			memory.beam.db.run("DELETE FROM working_memory WHERE id = ?", [id]);
+			memory.beam.db.run(
+				"INSERT INTO working_memory (id, content, session_id, scope) VALUES (?, 'same text both times', 'session-a', 'session')",
+				[id],
+			);
+			await memory.flushExtractions();
+			const rows = memory.conn.query("SELECT fact_id FROM facts WHERE source_msg_id = ?").all(id) as { fact_id: string }[];
+			expect(rows.length).toBe(0);
+		} finally {
+			await memory.flushExtractions();
+			memory.close();
+		}
+	});
+
+	it("episode force-import skips the purge when a working row collides on the id", () => {
+		const dbPath = tempDb();
+		const beamA = new BeamMemory({ sessionId: "session-a", dbPath });
+		try {
+			beamA.db.run(
+				"INSERT INTO working_memory (id, content, session_id, scope) VALUES ('wm-c2', 'working text', 'session-a', 'global')",
+			);
+			beamA.db.run(
+				"INSERT INTO episodic_memory (id, content, session_id, scope) VALUES ('wm-c2', 'episode text', 'session-b', 'session')",
+			);
+			storeFactStrings(beamA, ["I use the quorum relay for tokens"], 0, "wm-c2");
+			const before = beamA.db.query("SELECT fact_id FROM facts WHERE source_msg_id = 'wm-c2'").all() as unknown[];
+			expect(before.length).toBeGreaterThan(0);
+
+			const stats = importFromDict(
+				beamA,
+				{
+					episodic_memory: [{ id: "wm-c2", content: "replacement episode text", session_id: "session-b", scope: "session" }],
+				},
+				true,
+			);
+			expect(stats.episodic_memory.overwritten).toBe(1);
+
+			// Collision: the untyped-id purge is skipped, so the working row's
+			// derivatives survive the episode overwrite.
+			const after = beamA.db.query("SELECT fact_id FROM facts WHERE source_msg_id = 'wm-c2'").all() as unknown[];
+			expect(after.length).toBe(before.length);
+		} finally {
+			beamA.close();
+		}
+	});
+
+	it("backfills fts_facts when the index adopts a pre-existing facts table", () => {
+		const db = openDatabase(":memory:");
+		try {
+			db.run(
+				"CREATE TABLE facts (fact_id TEXT PRIMARY KEY, session_id TEXT, subject TEXT, predicate TEXT, object TEXT, timestamp TEXT, source_msg_id TEXT, confidence REAL, scope TEXT DEFAULT 'session')",
+			);
+			db.run(
+				"INSERT INTO facts (fact_id, subject, predicate, object, timestamp, scope) VALUES ('f_old', 'Ada', 'works at', 'Example Corp', '2026-01-01T00:00:00.000Z', 'global')",
+			);
+			db.run("CREATE VIRTUAL TABLE fts_facts USING fts5(subject, predicate, object, content='facts')");
+			ensureFactsFtsUpdateTrigger(db);
+			const found = db.query("SELECT count(*) AS n FROM fts_facts WHERE fts_facts MATCH 'Example'").get() as { n: number };
+			expect(found.n).toBe(1);
+			db.run("UPDATE facts SET object = 'Other Corp' WHERE fact_id = 'f_old'");
+			const stale = db.query("SELECT count(*) AS n FROM fts_facts WHERE fts_facts MATCH 'Example'").get() as { n: number };
+			const fresh = db.query("SELECT count(*) AS n FROM fts_facts WHERE fts_facts MATCH 'Other'").get() as { n: number };
+			expect(stale.n).toBe(0);
+			expect(fresh.n).toBe(1);
+		} finally {
+			closeQuietly(db);
 		}
 	});
 

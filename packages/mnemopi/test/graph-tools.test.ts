@@ -289,11 +289,16 @@ describe("EpisodicGraph fact scope (e7)", () => {
 			const first = graph.db.query("SELECT scope FROM facts WHERE fact_id = 'fact_scope_new'").get() as { scope: string };
 			expect(first.scope).toBe("global");
 
+			// Observable downstream effect of the explicit 'session' scope: a
+			// later store of the same fact id from a different session must not
+			// clobber its content — the upsert guard keys off the stored scope
+			// and session, not the supplied option.
 			graph.storeFact(fact("fact_scope_arg"), "mem_scope_3", "test", "session");
-			const argScope = graph.db
-				.query("SELECT scope FROM facts WHERE fact_id = 'fact_scope_arg'")
-				.get() as { scope: string };
-			expect(argScope.scope).toBe("session");
+			graph.storeFact({ ...fact("fact_scope_arg"), object: "overwriter" }, "mem_scope_3", "other");
+			const kept = graph.db
+				.query("SELECT object FROM facts WHERE fact_id = 'fact_scope_arg'")
+				.get() as { object: string };
+			expect(kept.object).toBe("engineer");
 
 			graph.db.run("UPDATE facts SET scope = 'session' WHERE fact_id = 'fact_scope_new'");
 			graph.storeFact(fact("fact_scope_new"), "mem_scope_1", "test");

@@ -23,7 +23,22 @@ export const factsFtsUpdateTriggerSql = [
 	"END",
 ].join("\n");
 
-/** Install the FTS update trigger when the bank has an fts_facts index. */
+/**
+ * Install the FTS update trigger when the bank has an fts_facts index. An
+ * external-content index only reflects rows written while the trigger was
+ * active, so whenever the trigger is being enabled for the first time on this
+ * index (fresh create, or adopting a facts table that predates the index, as
+ * when a standalone-graph bank is opened through the beam) the index must be
+ * backfilled with a rebuild first — otherwise the first UPDATE on a
+ * pre-existing fact issues an FTS `delete` for a row the index never saw
+ * (SQLITE_CORRUPT_VTAB).
+ */
 export function ensureFactsFtsUpdateTrigger(db: Database): void {
-	if (bankHasFactsFts(db)) db.run(factsFtsUpdateTriggerSql);
+	if (!bankHasFactsFts(db)) return;
+	const hasTrigger =
+		db.query("SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = 'facts_au'").get() !== null;
+	if (!hasTrigger) {
+		db.run("INSERT INTO fts_facts(fts_facts) VALUES ('rebuild')");
+	}
+	db.run(factsFtsUpdateTriggerSql);
 }

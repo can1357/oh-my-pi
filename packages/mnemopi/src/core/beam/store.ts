@@ -319,29 +319,33 @@ async function runFactExtraction(
 	beam: BeamMemoryState,
 	memoryId: string,
 	content: string,
-	scheduledContent: string | null,
+	scheduled: { rowid: number; content: string; created_at: string | null; timestamp: string | null } | null,
 	scheduledScope: string,
 ): Promise<void> {
 	try {
 		const extracted = await extractFactCategoriesSafe(content);
 		withLoopPhase("mnemopi.extract", () => {
 			if (countExtractedFactCategories(extracted) === 0) return;
-			// Discard stale results: if the source row disappeared (forget/
-			// trim), or its stored content or scope changed (edit, re-scope,
-			// id reuse) while extraction was in flight, storing would publish
-			// facts mined from the old text or wider than the source's current
-			// scope. A null snapshot (source already trimmed before the task
-			// captured its version) is rejected outright: without a bound
-			// version the result cannot be trusted against an id reuse. Facts
-			// otherwise inherit the scheduled scope, never wider than their
-			// source.
+			// Discard stale results: the task is bound to the source row's
+			// incarnation at schedule time — the rowid generation, the stored
+			// content, and the creation stamps (created_at, timestamp) — plus
+			// the inherited scope. A delete + re-create with the same content
+			// and scope (even reusing the same rowid) produces different
+			// stamps, so the old incarnation's extraction cannot land on its
+			// replacement; an edit or re-scope changes content/scope directly.
+			// A null snapshot (source already trimmed before the task captured
+			// its version) is rejected outright. Facts otherwise inherit the
+			// scheduled scope, never wider than their source.
 			const source = beam.db
-				.prepare("SELECT content, scope FROM working_memory WHERE id = ?")
-				.get(memoryId) as { content: string; scope: string | null } | null;
+				.prepare("SELECT rowid, content, created_at, timestamp, scope FROM working_memory WHERE id = ?")
+				.get(memoryId) as { rowid: number; content: string; created_at: string | null; timestamp: string | null; scope: string | null } | null;
 			if (
 				source == null ||
-				scheduledContent === null ||
-				source.content !== scheduledContent ||
+				scheduled == null ||
+				source.rowid !== scheduled.rowid ||
+				source.content !== scheduled.content ||
+				source.created_at !== scheduled.created_at ||
+				source.timestamp !== scheduled.timestamp ||
 				(source.scope ?? "session") !== scheduledScope
 			) {
 				return;
@@ -366,15 +370,19 @@ async function runFactExtraction(
 function scheduleFactExtraction(beam: BeamMemoryState, memoryId: string, content: string): void {
 	if (content.trim() === "") return;
 	const runtimeOptions = getMnemopiRuntimeOptions();
-	// Bind the task to the source version at schedule time: the stored content
-	// and the inherited scope are captured now, and runFactExtraction discards
-	// the result if the source row changed or disappeared in the meantime.
+	// Bind the task to the source row's incarnation at schedule time: the
+	// rowid generation, the stored content, the creation stamps, and the
+	// inherited scope are captured now, and runFactExtraction discards the
+	// result if the source row no longer matches the whole token in the
+	// meantime (covers edits, re-scopes, and delete + re-create with
+	// identical content and scope, which reuses the rowid but gets fresh
+	// stamps).
 	const scheduled = beam.db
-		.prepare("SELECT content FROM working_memory WHERE id = ?")
-		.get(memoryId) as { content: string } | null;
+		.prepare("SELECT rowid, content, created_at, timestamp FROM working_memory WHERE id = ?")
+		.get(memoryId) as { rowid: number; content: string; created_at: string | null; timestamp: string | null } | null;
 	const scheduledScope = sourceMemoryScope(beam, memoryId);
 	const task = withMnemopiRuntimeOptions(runtimeOptions, () =>
-		runFactExtraction(beam, memoryId, content, scheduled?.content ?? null, scheduledScope),
+		runFactExtraction(beam, memoryId, content, scheduled, scheduledScope),
 	);
 	const pending = beam.pendingExtractions;
 	if (pending !== undefined) {
@@ -1089,8 +1097,14 @@ export function importFromDict(beam: BeamMemoryState, data: Record<string, unkno
 				// A force overwrite replaces the episode's content entirely:
 				// cascade the old row's fact / graph / annotation artifacts so
 				// the replacement cannot keep derivatives of the overwritten
-				// text (mirrors the working-memory branch above).
-				purgeWorkingMemoryArtifacts(db, [id]);
+				// text (mirrors the working-memory branch above). Derivative
+				// rows are keyed only by the untyped id, so when a working row
+				// with the same id exists the purge cannot tell the tiers apart
+				// — skip it, as the edit path does.
+				const workingCollision = workingExists.get(id) !== null;
+				if (!workingCollision) {
+					purgeWorkingMemoryArtifacts(db, [id]);
+				}
 				stats.episodic_memory.overwritten++;
 			} else {
 				stats.episodic_memory.inserted++;
