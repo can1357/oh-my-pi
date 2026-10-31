@@ -26,6 +26,19 @@ describe("extractProviderRetryHint", () => {
 
 describe("formatErrorMessageWithRetryAfter", () => {
 	it.each([
+		["a zero body hint and a Retry-After", "read ECONNRESET retry-after-ms=0", { "retry-after": "9" }, 9000],
+		["a malformed body hint and a Retry-After", "read ECONNRESET retry-after-ms=oops", { "retry-after": "9" }, 9000],
+	] as [string, string, Record<string, string>, number][])(
+		"keeps the header wait over %s",
+		(_label, message, headers, expected) => {
+			// A zero or unreadable body hint names no wait the header could stand
+			// behind; the header's wait is the one the server gave.
+			const formatted = formatErrorMessageWithRetryAfter(new Error(message), headers);
+			expect(extractProviderRetryHint("anthropic", formatted)).toBe(expected);
+		},
+	);
+
+	it.each([
 		[
 			"a shorter body hint and a longer Retry-After",
 			"read ECONNRESET retry-after-ms=200",
