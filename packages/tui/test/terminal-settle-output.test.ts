@@ -250,7 +250,10 @@ describe("settling the output pump before the terminal is handed back", () => {
 		await session.feed("\x1b[?0u");
 		expect(session.terminal.kittyProtocolActive).toBe(true);
 
-		await session.terminal.drainInput(20, 5);
+		// The drain's idle window runs on the harness's fake clock.
+		const drained = session.terminal.drainInput(20, 5);
+		await session.settle();
+		await drained;
 		session.tui.stop();
 		pump.catchUp();
 
@@ -270,7 +273,9 @@ describe("settling the output pump before the terminal is handed back", () => {
 		// InteractiveMode's teardown order: settle, pop the title, drain input, stop.
 		session.terminal.settleOutput();
 		session.terminal.write(TITLE_POP);
-		await session.terminal.drainInput(20, 5);
+		const drained = session.terminal.drainInput(20, 5);
+		await session.settle();
+		await drained;
 		session.tui.stop();
 		pump.catchUp();
 
