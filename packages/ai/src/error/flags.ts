@@ -15,6 +15,7 @@ import {
 	isUsageLimitStatus,
 	matchesUsageLimitText,
 	parseRateLimitReason,
+	type RateLimitReason,
 } from "./rate-limit";
 
 export const Flag = {
@@ -51,6 +52,25 @@ export const Flag = {
 	 * status value, so no raw status id can set it.
 	 */
 	CacheControlUnsupported: 0x0000_0800,
+	/**
+	 * The request died on the wire with no HTTP status: a socket or stream
+	 * closed, a chunked transfer was cut mid-body, an SSE stream ended before
+	 * its terminal event. Nothing the model produced caused it, and no lower
+	 * retry budget covers it — `fetchWithRetry` and the provider's pre-output
+	 * retry both end once a status line has arrived.
+	 *
+	 * Deliberately exclusive of capacity signals (429, 529, overloaded, quota):
+	 * those say the host declined to serve, which another model can serve now.
+	 * Also exclusive of any failure carrying a status, including a gateway's
+	 * own 5xx — that one the transport already replayed on its own budget.
+	 * Turn recovery uses the distinction to decide whether an identical replay
+	 * is worth trying before the fallback chain advances.
+	 *
+	 * Claims a low bit for the reason {@link Flag.CacheControlUnsupported}
+	 * documents: 0x400 is 1024, above every HTTP status, so no raw status id
+	 * can set it.
+	 */
+	Connection: 0x0000_0400,
 	/** HTTP 413 byte/media rejection — token compaction cannot shrink bytes or media budgets (#9235). */
 	PayloadRejected: 0x8000_0000,
 } as const;
@@ -77,6 +97,7 @@ const KIND_MASK =
 	Flag.Grammar |
 	Flag.FastModeUnsupported |
 	Flag.CacheControlUnsupported |
+	Flag.Connection |
 	Flag.OAuthExpiry;
 
 const RETRIABLE_KINDS =
@@ -465,6 +486,7 @@ export function isOAuthExpiry(errorMessage: string): boolean {
 const ERROR_KIND_LABELS: readonly [Flag, string][] = [
 	[Flag.ThinkingLoop, "thinking-loop"],
 	[Flag.Transient, "transient"],
+	[Flag.Connection, "connection"],
 	[Flag.Timeout, "timeout"],
 	[Flag.UsageLimit, "usage-limit"],
 	[Flag.StaleResponsesItem, "stale-responses-item"],
@@ -488,6 +510,161 @@ const STATUS_MESSAGE_PATTERNS = [
 	/\b(?:error|failed)\s*[:=]?\s*(\d{3})\b/i,
 	/(?:^|\s)(\d{3})\s+(?:[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/,
 ] as const;
+
+/** A URL: its digits are a host, port, path or query, never the status of the response. */
+const URL_PATTERN = /\b[a-z][a-z\d+.-]*:\/\/[^\s"'<>]+/gi;
+/**
+ * A `key=value` or `key: value` field with a number for its value, the value
+ * quoted or not. Which of them name a status is decided by
+ * {@link STATUS_FIELD_KEY}; every other value is metadata — a duration
+ * (`retry-after-ms=401`, `elapsed_ms="503"`), an id (`request_id=529`, Python
+ * h2's `stream_id:503`, Go's `LastStreamID=503`), a frame code (`error_code:2`),
+ * a size.
+ */
+const FIELD_NUMBER_PATTERN = /(["']?)([A-Za-z][\w.-]*)\1\s*([:=])\s*(["']?)(\d+(?:\.\d+)?)\4/g;
+/**
+ * The field keys whose number is an HTTP status: `status`, `status_code`,
+ * `statusCode`, `http_status`, `upstream_status`, `x-http-status`, `code`,
+ * `http_code`, and the `error: 503` / `failed: 503` spellings the status reader
+ * already takes.
+ */
+const STATUS_FIELD_KEY = /status(?:[_-]?code)?$|^(?:code|http[_-]?code|error|failed|http)$/i;
+/**
+ * A key that names an amount of time: a time word anywhere in it (`elapsed`,
+ * `duration`, `latency`, `delay`, `timeout`, `wait`, `ttl`, `backoff`,
+ * `interval`, `retry-after`), or a time-unit suffix (`_ms`, `-ns`, `Us`,
+ * `_secs`). Its number is a duration whatever separates it from the key, so
+ * `elapsed: 503` is time, not a 503.
+ */
+const DURATION_FIELD_KEY =
+	/elapsed|duration|latency|delay|timeout|wait|ttl|backoff|interval|retry[_-]?after|(?:^|[_.-]|[a-z](?=[A-Z]))(?:ns|nanos?|us|µs|μs|micros?|ms|msecs?|millis?|s|secs?|seconds|mins?|minutes|h|hrs?|hours)$/i;
+/**
+ * A key whose colon makes a field rather than a sentence: quoted, spelled as
+ * an identifier (`retry-after-ms`, `elapsed_ms`, `latencyMs`, `request.id`), an
+ * id, or a key that names time. A plain word before a colon is otherwise prose
+ * — `closed the connection: 503 Service Unavailable` keeps its status — while
+ * `=` always makes a field.
+ */
+function isFieldKey(quote: string, key: string, separator: string): boolean {
+	return (
+		separator === "=" ||
+		quote !== "" ||
+		/[_.-]/.test(key) ||
+		/[a-z][A-Z]/.test(key) ||
+		/^id$/i.test(key) ||
+		DURATION_FIELD_KEY.test(key)
+	);
+}
+/**
+ * A stream number in prose: Go's frame field (`stream error: stream ID 503`) and
+ * HTTP/3's (`HTTP/3 stream 503`). A stream is numbered, never a status.
+ */
+const STREAM_NUMBER_PATTERN = /\bstream\s+(?:ID\s+)?\d+/gi;
+/**
+ * A port, by the host in front of it: anything in brackets — every IPv6
+ * spelling, a zone (`[fe80::1%eth0]:401`, `[fe80::1%25eth0]:403`), an IPv4
+ * mapping (`[::ffff:192.0.2.1]:503`) — a dotted numeric host of two to four
+ * parts (`127.0.0.1:503`, the shorthand `127.1:401`), or `localhost`; or a port
+ * named in prose (`port 503`). A dotted host name before a colon is already a
+ * field key, so `h.invalid:503` is covered there.
+ */
+const PORT_NUMBER_PATTERN = /(?:\[[^\]\s]+\]|\b\d{1,3}(?:\.\d{1,3}){1,3}|\blocalhost):\d+|\bport\s+\d+/gi;
+/**
+ * Every character Unicode marks as default-ignorable: nothing renders, so
+ * nothing can separate a number from its unit. Covers the zero-width space,
+ * joiners, the soft hyphen (`503\u00ADms`), the invisible separator
+ * (`529\u2063ms`), the word joiner and the byte-order mark, and any such
+ * character Unicode adds later.
+ */
+const DEFAULT_IGNORABLE_PATTERN = /\p{Default_Ignorable_Code_Point}/gu;
+/**
+ * A number in the role of a duration: followed by a unit of time, glued or
+ * spaced, or by a size or token unit. The unit decides, whatever surrounds
+ * it. Latin units come in every spelling of every SI prefix of the second
+ * (`ns`, `nsec`, `nanos`, `nanosecond`, `nano-second`, the micro sign as
+ * U+00B5 or U+03BC), and minutes through years; a Latin unit must end the word,
+ * so `503 Service` is not `503 s`. CJK and Korean units need no word end,
+ * because those scripts have none (`503秒后重试`): seconds and their
+ * subdivisions, minutes, hours, days, weeks, months and years in Chinese,
+ * Japanese and Korean.
+ */
+const UNIT_NUMBER_PATTERN =
+	/(?<![\w.])\d+(?:\.\d+)?\s*(?:(?:n(?:ano)?s(?:ecs?)?|nanos?(?:-?secs?|-?seconds?)?|[uµμ]s(?:ecs?)?|micros?(?:-?secs?|-?seconds?)?|ms(?:ecs?)?|millis?(?:-?secs?|-?seconds?)?|s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?|d|days?|w|wks?|weeks?|mos?|months?|y|yrs?|years?|bytes?|[kmgt]i?b|tokens?)(?![\p{L}\p{N}_])|纳秒|微秒|毫秒|秒钟|秒鐘|秒|分钟|分鐘|分|小时|小時|時間|个月|個月|ヶ月|か月|カ月|月|星期|週間|周|週|天|日|年|나노초|마이크로초|밀리초|초|분|시간|개월|일|주|달|년)/giu;
+/**
+ * Digits glued into an ASCII identifier or a path: `x-request-503-trace`,
+ * `/jobs/503/`, `gpt-503-preview`. ASCII only on purpose: CJK prose glues a
+ * status to the words around it (`服务器返回503错误`), and that number is the
+ * status; a CJK or Korean unit after the number is read as a duration above.
+ */
+const GLUED_NUMBER_PATTERN = /(?<=[A-Za-z_\-/])\d+|\d+(?=[A-Za-z_\-/])/g;
+
+/**
+ * `text` with the digits that are diagnostic metadata removed, by the role
+ * each number plays: inside a URL; a port; a stream number; a duration, size
+ * or token count (a unit after it, or the value of a field whose key names
+ * time); the value of any other field that does not name a status; or glued
+ * into an identifier or a path. Every reader that takes a bare number as an
+ * HTTP status, an auth rejection, a capacity refusal or a transient status
+ * reads this instead, so `read ECONNRESET after 401 ns` stays a wire cut. A
+ * status the sentence states — `HTTP 503`, `status=529`, `503 Service
+ * Unavailable`, `error: 429`, `(429)` — keeps its digits.
+ */
+function withoutMetadataNumbers(text: string): string {
+	return text
+		.replace(DEFAULT_IGNORABLE_PATTERN, "")
+		.replace(URL_PATTERN, url => url.replace(/\d+/g, ""))
+		.replace(PORT_NUMBER_PATTERN, port => port.replace(/\d+$/, ""))
+		.replace(FIELD_NUMBER_PATTERN, (field, quote: string, key: string, separator: string, _q, value: string) => {
+			if (!isFieldKey(quote, key, separator) || STATUS_FIELD_KEY.test(key)) return field;
+			const at = field.lastIndexOf(value);
+			return field.slice(0, at) + field.slice(at + value.length);
+		})
+		.replace(STREAM_NUMBER_PATTERN, field => field.replace(/\d+/g, ""))
+		.replace(UNIT_NUMBER_PATTERN, quantity => quantity.replace(/^[\d.]+/, ""))
+		.replace(GLUED_NUMBER_PATTERN, "");
+}
+
+/** Words that introduce a decoration rather than state a reason (`after 401 ns`, `took 2 s`). */
+const DECORATION_FILLER_PATTERN = /\b(?:after|took|in|at|via|from|on|over|elapsed)\b/gi;
+/** A protocol name: `HTTP/1.1`, `HTTP/3`. */
+const PROTOCOL_PATTERN = /\bHTTP\/\d(?:\.\d)?\b/gi;
+/**
+ * A field whose value carries a digit, quoted or not — a number
+ * (`retry-after-ms=9000`, `elapsed_ms="401"`) or an identifier
+ * (`model=gpt-503-preview`, `request_id=req_7`) — or whose key names an
+ * identifier (`trace: abc`).
+ */
+const METADATA_FIELD_PATTERN =
+	/\b(?:[A-Za-z][\w.-]*\s*[:=]\s*(["']?)(?=[\w.-]*\d)[\w.-]+\1|(?:[A-Za-z][\w.-]*?(?:_id|-id|\.id|Id|ID)|id|trace)\s*[:=]\s*(["']?)[\w.-]+\2)/g;
+/**
+ * A token that joins letters and digits with `-`, `_` or `.`: an identifier
+ * (`x-request-503`, `gpt-503-preview`, `req_7`). A reason is words; a word with
+ * no digit (`SIGKILL`, `content_policy`) is not taken for an identifier.
+ */
+const DIGIT_IDENTIFIER_PATTERN = /\b(?=[\w.-]*\d)(?=[\w.-]*[A-Za-z])[A-Za-z0-9]+(?:[-_.][A-Za-z0-9]+)+\b/g;
+
+/**
+ * Whether `tail` carries metadata and nothing else: URLs, ports, stream
+ * numbers, protocol names, durations and sizes, fields whose value carries a
+ * digit, identifier fields, identifiers that carry a digit, the words that
+ * introduce them, and punctuation. One word of any other kind — a reason such
+ * as `content policy violation`, `process killed by SIGKILL`, `permission
+ * denied`, `due to …`, `reason=content_policy` — and it is not.
+ */
+function isMetadataOnly(tail: string): boolean {
+	const residue = tail
+		.replace(DEFAULT_IGNORABLE_PATTERN, "")
+		.replace(URL_PATTERN, " ")
+		.replace(PORT_NUMBER_PATTERN, " ")
+		.replace(STREAM_NUMBER_PATTERN, " ")
+		.replace(PROTOCOL_PATTERN, " ")
+		.replace(METADATA_FIELD_PATTERN, " ")
+		.replace(UNIT_NUMBER_PATTERN, " ")
+		.replace(DIGIT_IDENTIFIER_PATTERN, " ")
+		.replace(DECORATION_FILLER_PATTERN, " ")
+		.replace(/[\s;,.()[\]{}]+/g, "");
+	return residue === "";
+}
 
 export function create(...flags: number[]): number {
 	let bits = 0;
@@ -549,8 +726,9 @@ function statusInternal(error: unknown, depth: number): number | undefined {
 	if (error instanceof Error || (typeof error === "object" && error !== null && "message" in error)) {
 		const message = (error as { message: string }).message;
 		if (typeof message === "string") {
+			const text = withoutMetadataNumbers(message);
 			for (const pattern of STATUS_MESSAGE_PATTERNS) {
-				const match = pattern.exec(message);
+				const match = pattern.exec(text);
 				if (match) {
 					const code = parseInt(match[1], 10);
 					if (code >= 100 && code <= 599) return code;
@@ -583,6 +761,16 @@ export function isStreamEnvelopeTruncationText(text: string): boolean {
 	return TRANSIENT_ENVELOPE_PATTERN.test(text) && TRANSIENT_ENVELOPE_TRUNCATION_PATTERN.test(text);
 }
 
+/** The bare status arm of {@link TRANSIENT_TRANSPORT_PATTERN}. */
+const TRANSIENT_STATUS_NUMBER_PATTERN = /\b(?:429|500|502|503|504)\b/;
+const TRANSIENT_STATUS_NUMBERS = /\b(?:429|500|502|503|504)\b/g;
+
+/**
+ * The shared transport pattern, with its bare status numbers read off the
+ * metadata-free text ({@link withoutMetadataNumbers}) so `elapsed_ms=503` is
+ * not a 503. The wording arms read the text as given: they name tokens such as
+ * `HTTP2StreamReset` whose digits are not metadata.
+ */
 function isTransientErrorText(text: string): boolean {
 	return (
 		isUnexpectedSocketCloseMessage(text) ||
@@ -590,16 +778,170 @@ function isTransientErrorText(text: string): boolean {
 		PYTHON_HTTP2_STREAM_RESET_PATTERN.test(text) ||
 		PYTHON_HTTP_INCOMPLETE_CHUNK_PATTERN.test(text) ||
 		isStreamEnvelopeTruncationText(text) ||
-		TRANSIENT_TRANSPORT_PATTERN.test(text)
+		TRANSIENT_TRANSPORT_PATTERN.test(text.replace(TRANSIENT_STATUS_NUMBERS, "")) ||
+		TRANSIENT_STATUS_NUMBER_PATTERN.test(withoutMetadataNumbers(text))
 	);
+}
+
+/**
+ * Capacity wording the rate-limit parsers do not already name: a far side that
+ * answered and declined to serve for load. The parsers own every throttle with
+ * a recognised reason or usage-limit phrasing, so this covers only the plain
+ * English and bare status codes they leave (`TooManyRequests`, `slow down`,
+ * `model is busy`). Capacity signals can ride alongside a wire failure; a
+ * request carrying one must walk the fallback chain rather than be held on the
+ * model.
+ */
+const CAPACITY_PRESSURE_PATTERN =
+	/\b(?:no[_ -]?capacity|(?:high|peak)[ _-]?demand|(?:at|over|insufficient)[ _-]?capacity|capacity[ _-]?(?:exceeded|exhausted)|peak[ _-]?load)\b|overloaded|\bbusy\b|rate.?limit|too[ _-]?many[ _-]?requests|service.?unavailable|temporar(?:y|ily)[ _-]?unavailable|slow down|\b(?:429|503|529)\b/i;
+
+/**
+ * Whether the far side declined to serve for load or quota, so an identical
+ * replay re-hits the same cap. Defers to the rate-limit parsers first; the
+ * regex only covers what they leave.
+ */
+function isCapacityPressure(text: string, reason: RateLimitReason): boolean {
+	if (reason !== "UNKNOWN") return true;
+	if (matchesUsageLimitText(text)) return true;
+	return CAPACITY_PRESSURE_PATTERN.test(text);
+}
+
+/**
+ * Whether a diagnostic carries capacity or quota evidence — see
+ * {@link isCapacityPressure}. Pass `reason` when the caller already parsed it;
+ * it is re-parsed only when metadata digits had to be blanked first
+ * ({@link withoutMetadataNumbers}): both capacity readers match bare
+ * `429`/`503`/`529` tokens (`parseRateLimitReason`, rate-limit.ts, and the
+ * pattern above), which a stream number, a URL or a request id satisfies by
+ * accident and vetoes the connection lane for a cut that reached no status line.
+ */
+function hasCapacityEvidence(text: string, reason?: RateLimitReason): boolean {
+	const capacityText = withoutMetadataNumbers(text);
+	if (capacityText === text) return isCapacityPressure(text, reason ?? parseRateLimitReason(text));
+	return isCapacityPressure(capacityText, parseRateLimitReason(capacityText));
+}
+
+/**
+ * Transport diagnostics for a wire that died after the request was accepted:
+ * the socket, the SSE stream or the chunked transfer failed partway. Two kinds
+ * of wording are deliberately absent. Connect-phase (`unable to connect`,
+ * `fetch failed`, `ECONNREFUSED`, `EAI_AGAIN`, `ETIMEDOUT`) is already
+ * replayed by `fetchWithRetry` on its own budget. A bare mention of the
+ * transfer-encoding header is a request fault, not a cut body, so only the
+ * error spelling matches.
+ *
+ * The HTTP/2 arm covers the three reset spellings this repo already treats as
+ * transport resets elsewhere — the `NGHTTP2_INTERNAL_ERROR` /
+ * `NGHTTP2_REFUSED_STREAM` wording a gateway forwards, the bare
+ * `HTTP2StreamReset` token, and Go's `stream error: stream ID 7;
+ * INTERNAL_ERROR` — each a stream the peer reset with no status line of its
+ * own. `INTERNAL_ERROR` is matched only inside that `stream error:` frame, so
+ * a model's own "internal error" prose is not a cut stream. Go's GOAWAY
+ * sentence (`http2: server sent GOAWAY and closed the connection;
+ * LastStreamID=1, …`) reaches the lane through `closed the connection`; it
+ * carries no status line either.
+ */
+const CONNECTION_FAILURE_PATTERN =
+	/connection (?:closed|reset|aborted)|closed the connection|socket hang up|socket is closed|other side closed|use of closed network connection|reset before headers|premature close|incomplete chunked|transfer[ _-]?encoding\s*error|\bECONNRESET\b|\bEPIPE\b|HTTP2(?:StreamReset|RefusedStream)|\bNGHTTP2_(?:INTERNAL_ERROR|REFUSED_STREAM)\b|stream error:[^;]*;\s*(?:INTERNAL_ERROR|REFUSED_STREAM)\b/i;
+
+/**
+ * undici's whole diagnostic for a response body that ended early is the bare
+ * word `terminated`. Anchored, because the word on its own inside a sentence
+ * means something else entirely — a killed process ("Process terminated by
+ * signal SIGKILL"), a policy stop ("terminated: content policy") — neither of
+ * which an identical replay recovers.
+ */
+const UNDICI_TERMINATED_HEAD_PATTERN = /^(?:TypeError:\s*)?terminated\.?/i;
+
+/**
+ * undici's `terminated`, alone or followed by metadata only
+ * ({@link isMetadataOnly}): `terminated; after 401 ns`, `terminated
+ * (https://h/v1)`, `terminated retry-after-ms=9000`. A reason never passes,
+ * whatever separates it — `terminated; process killed by SIGKILL`, `terminated
+ * (content policy violation)`, `terminated retry-after-ms=200 due to content
+ * policy` — and a colon always introduces one.
+ */
+function isUndiciTerminatedText(text: string): boolean {
+	const head = UNDICI_TERMINATED_HEAD_PATTERN.exec(text);
+	if (!head) return false;
+	const tail = text.slice(head[0].length);
+	return !/^\s*:/.test(tail) && isMetadataOnly(tail);
+}
+
+/**
+ * Wire failures a runtime reports only as an errno on `err.code`, leaving the
+ * message generic. `UND_ERR_SOCKET` is undici's own code for a socket that
+ * died mid-response.
+ *
+ * Not handled, deliberately: an HTTP/2 GOAWAY. No diagnostic wording for it
+ * has been observed, and its frame surfaces differently in each runtime, so
+ * widening the flag would be a guess. Add a concrete diagnostic when observed.
+ *
+ * Errnos only, never a provider's own error code: the branch that reads this
+ * does not look at the message, so a code copied verbatim from an upstream
+ * payload must never be matched here, or a terminal failure becomes retriable.
+ */
+const WIRE_FAILURE_CODE_PATTERN = /^(?:ECONNRESET|EPIPE|ECONNABORTED|UND_ERR_SOCKET)$/;
+
+/**
+ * Whether a failure happened on the wire rather than at the model — see
+ * {@link Flag.Connection}.
+ *
+ * Restricted to failures carrying no HTTP status. A status means the request
+ * reached a status line, which `fetchWithRetry` and the provider's pre-output
+ * retry already replay on their own budgets; by the time such an error reaches
+ * turn recovery the same model has been asked many times. A statusless wire
+ * failure — the stream cut mid-body, the socket closed, the chunked transfer
+ * truncated — is past the point either of those budgets covers, so it arrives
+ * with almost no replay spent on it.
+ */
+function isConnectionFailure(text: string, status: number | undefined, reason: RateLimitReason): boolean {
+	if (status !== undefined) return false;
+	if (hasCapacityEvidence(text, reason)) return false;
+	return (
+		isUnexpectedSocketCloseMessage(text) ||
+		isStreamReadErrorText(text) ||
+		PYTHON_HTTP2_STREAM_RESET_PATTERN.test(text) ||
+		PYTHON_HTTP_INCOMPLETE_CHUNK_PATTERN.test(text) ||
+		isStreamEnvelopeTruncationText(text) ||
+		isTransientStreamDropError(text) ||
+		isTransientStreamParseError(text) ||
+		CODEX_HTTP_BODY_READ_ERROR_PATTERN.test(text) ||
+		isUndiciTerminatedText(text.trim()) ||
+		CONNECTION_FAILURE_PATTERN.test(text)
+	);
+}
+
+/**
+ * `Flag.Connection` means "no status, no capacity signal, no rejected
+ * credential", but both assembly points OR per-link kinds together: a
+ * statusless connection-worded cause under a 429 or 5xx wrapper, beside a
+ * proven usage limit, beside capacity wording on another link, or beside an
+ * authentication rejection would otherwise carry the bit past its own guard
+ * and hold the fallback chain for a route that answered.
+ *
+ * `capacityEvidence` is the per-link capacity reading the caller collected:
+ * `isConnectionFailure` sees only the link it classifies, so
+ * `Error("model is busy", { cause: Error("socket hang up") })` reaches here
+ * with the bit set from the cause and the refusal recorded on the wrapper.
+ * An auth rejection is read off the assembled kinds, which is where
+ * `isAuthFailureText` on any link puts it.
+ */
+function withoutContradictedConnection(kinds: number, status: number | undefined, capacityEvidence: boolean): number {
+	if ((kinds & Flag.Connection) === 0) return kinds;
+	if (status !== undefined || capacityEvidence || (kinds & (Flag.UsageLimit | Flag.AuthFailed)) !== 0) {
+		return kinds & ~Flag.Connection;
+	}
+	return kinds;
 }
 
 function isTimeoutText(text: string): boolean {
 	return TIMEOUT_PATTERN.test(text);
 }
 
+/** A `401`/`403` in a URL or an identifier is metadata, not a rejection ({@link withoutMetadataNumbers}). */
 function isAuthFailureText(text: string): boolean {
-	return AUTH_FAILURE_PATTERN.test(text);
+	return AUTH_FAILURE_PATTERN.test(withoutMetadataNumbers(text));
 }
 
 function isStaleResponsesText(text: string): boolean {
@@ -713,6 +1055,19 @@ function classifyText(
 			) {
 				kinds |= Flag.Transient;
 			}
+			// Connection-level within the same non-terminal-4xx window: the wire or
+			// a gateway in front of the model failed, so an identical replay is
+			// worth one cheap try before the fallback chain advances. A usage limit
+			// already proven above is a cap the replay re-hits, never that, and a
+			// statusless credential rejection ("authentication failed: socket is
+			// closed") is a request the far side answered and refused — replaying
+			// it holds the session on a route that will refuse it again.
+			if (
+				(kinds & (Flag.UsageLimit | Flag.AuthFailed)) === 0 &&
+				isConnectionFailure(errorMessage, statusClean, reason)
+			) {
+				kinds |= Flag.Connection | Flag.Transient;
+			}
 		}
 		// A concurrency cap (e.g. Vertex "Online prediction concurrent requests
 		// quota exceeded") is transient — shed-and-backoff. The bare wording need
@@ -754,6 +1109,42 @@ function classifyText(
 	return fallbackStatus ?? 0;
 }
 
+/** The message a cause-chain link carries: an `Error`'s, a string cause, a plain object's `message` or `errorMessage`. */
+function linkMessageOf(link: unknown): string | undefined {
+	if (link instanceof Error) return link.message;
+	if (typeof link === "string") return link;
+	if (typeof link !== "object" || link === null) return undefined;
+	if ("message" in link && typeof link.message === "string") return link.message;
+	if ("errorMessage" in link && typeof link.errorMessage === "string") return link.errorMessage;
+	return undefined;
+}
+
+/** A link's status: its structured fields ({@link status}), else the one its own message states. */
+function linkStatusOf(link: unknown, message: string | undefined): number | undefined {
+	return status(link) ?? (message !== undefined ? status({ message }) : undefined);
+}
+
+/**
+ * The first terminal 4xx anywhere in an error's cause chain, read from every
+ * representation a link can carry it in. It governs every link, above it as
+ * much as below, so neither the depth a status sits at nor the shape that
+ * carries it decides whether a rejected request retries.
+ */
+function chainTerminalStatus(error: unknown): number | undefined {
+	const seen = new Set<object>();
+	let link: unknown = error;
+	while (link !== undefined && link !== null) {
+		if (typeof link === "object") {
+			if (seen.has(link)) break;
+			seen.add(link);
+		}
+		const linkStatus = linkStatusOf(link, linkMessageOf(link));
+		if (isTerminalClientErrorStatus(linkStatus)) return linkStatus;
+		link = typeof link === "object" && "cause" in link ? (link as { cause: unknown }).cause : undefined;
+	}
+	return undefined;
+}
+
 export function classify(error: unknown, api?: Api): number {
 	let kinds = 0;
 	const seen = new Set<object>();
@@ -765,7 +1156,24 @@ export function classify(error: unknown, api?: Api): number {
 	// down so the terminal-4xx guard in classifyText sees it on the status-less
 	// cause.
 	let governingTerminalStatus: number | undefined;
+	// And one on any link below governs the links above it: the walk reaches a
+	// deep status only after it has classified the outer links, and the text
+	// and errno arms set `Transient` on those links. Read it first.
+	const terminalStatus = chainTerminalStatus(error);
+	// What the connection finalizer needs that no single link carries:
+	// `status(error)` alone stops at the third link (`statusInternal`, depth 2),
+	// and a capacity refusal on one link is invisible to the link that supplies
+	// the wire wording. The messages are kept rather than read here, so the
+	// capacity parse runs only for an error that still claims the lane.
+	let statusSeen: number | undefined;
+	const linkMessages: string[] = [];
+	// The errno arm below is decided after the walk, under the same chain-wide
+	// terminal-4xx gate as the text arm.
+	let wireErrnoSeen = false;
 	while (link !== undefined && link !== null) {
+		const linkMessage = linkMessageOf(link);
+		const linkStatus = linkStatusOf(link, linkMessage);
+		statusSeen ??= linkStatus;
 		if (typeof link === "object") {
 			if (seen.has(link)) break;
 			seen.add(link);
@@ -779,6 +1187,14 @@ export function classify(error: unknown, api?: Api): number {
 				} else if (ANTHROPIC_ACCOUNT_POLICY_PATTERN.test(link.code)) {
 					kinds |= Flag.AccountPolicy;
 				}
+				// A runtime that reports the wire failure as an errno puts it in
+				// `code` and leaves the message generic ("fetch failed"), so the
+				// text predicates never see it. Gated, after the walk, by the same
+				// terminal-4xx window as the text arm in `classifyText`: a request
+				// the provider rejected as malformed or unentitled replays
+				// identically, whatever errno the socket carried on the way out,
+				// so neither bit is retriable there.
+				if (WIRE_FAILURE_CODE_PATTERN.test(link.code)) wireErrnoSeen = true;
 			}
 		}
 
@@ -838,28 +1254,26 @@ export function classify(error: unknown, api?: Api): number {
 			kinds |= linkKinds;
 		}
 
-		let linkMessage: string | undefined;
-		if (link instanceof Error) {
-			linkMessage = link.message;
-		} else if (typeof link === "string") {
-			linkMessage = link;
-		} else if (typeof link === "object") {
-			if ("message" in link && typeof link.message === "string") {
-				linkMessage = link.message;
-			} else if ("errorMessage" in link && typeof link.errorMessage === "string") {
-				linkMessage = link.errorMessage;
-			}
-		}
-
-		const linkStatus = status(link);
-		const textId = classifyText(linkMessage, linkStatus ?? governingTerminalStatus, causeTokenEvidence, api);
+		if (linkMessage !== undefined) linkMessages.push(linkMessage);
+		const textId = classifyText(
+			linkMessage,
+			linkStatus ?? governingTerminalStatus ?? terminalStatus,
+			causeTokenEvidence,
+			api,
+		);
 		kinds |= textId & KIND_MASK;
 		if (isTerminalClientErrorStatus(linkStatus)) governingTerminalStatus = linkStatus;
 
 		link = typeof link === "object" && "cause" in link ? (link as { cause: unknown }).cause : undefined;
 	}
 
-	return kinds !== 0 ? create(kinds) : (status(error) ?? 0);
+	if (wireErrnoSeen && terminalStatus === undefined) kinds |= Flag.Connection | Flag.Transient;
+
+	if (kinds === 0) return status(error) ?? 0;
+	// Only an error still holding the lane pays for the capacity parse.
+	const capacityEvidence =
+		(kinds & Flag.Connection) !== 0 && linkMessages.some(message => hasCapacityEvidence(message));
+	return create(withoutContradictedConnection(kinds, statusSeen, capacityEvidence));
 }
 
 /**
@@ -1027,6 +1441,17 @@ export function classifyMessage(message: {
 		// because the same prompt reproduces the same malformed output, so the agent-level
 		// auto-retry would loop. Strip Transient so the recovery message surfaces immediately.
 		kinds &= ~Flag.Transient;
+	}
+	// The status the text states counts as much as the structured one, as it
+	// does for `classifyText` (`statusClean`): a persisted `Connection` that the
+	// message contradicts with `HTTP 400` must not survive because
+	// `errorStatus` is unset.
+	if ((kinds & Flag.Connection) !== 0) {
+		kinds = withoutContradictedConnection(
+			kinds,
+			currentStatus ?? (classificationMessage ? status({ message: classificationMessage }) : undefined),
+			classificationMessage !== undefined && hasCapacityEvidence(classificationMessage),
+		);
 	}
 	const id = kinds !== 0 ? create(kinds) : (statusFromId(textId) ?? statusFromId(existingId) ?? currentStatus ?? 0);
 

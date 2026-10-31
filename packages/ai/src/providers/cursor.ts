@@ -230,6 +230,7 @@ import { connectProxiedSocket, getProxyForUrl, wrapFetchForProxy } from "../util
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
 import { waitForRetry } from "../utils/retry-wait";
 import { sanitizeSchemaForCursor, toolWireSchema } from "../utils/schema";
+import { createWireAttempts, providerReplaysFrom, type WireAttempts, wireAttemptsOf } from "../utils/wire-attempts";
 import { formatConnectEndStreamError, hasRetryableCursorErrorDetail } from "./connect-error-detail";
 import { CONNECT_END_STREAM_FLAG, ConnectFrameDecoder, frameConnectMessage } from "./connect-frame";
 import mcpExternalHandoffMessage from "./cursor-external-tool-handoff.md" with { type: "text" };
@@ -554,6 +555,13 @@ interface CursorStreamTiming {
 	timestamp: number;
 	retry?: CursorRetryContext;
 	transport?: "http2" | "http1";
+	/**
+	 * Wire requests this call has issued. Shared with every stream it hands the
+	 * turn to — the checkpoint resume, the HTTP/2→HTTP/1 drop and the
+	 * normalized→discovered wire-model replay all re-send the request, and the
+	 * stream that finally fails is the one that has to report them.
+	 */
+	wireAttempts?: WireAttempts;
 }
 
 interface CursorRequestState {
@@ -1190,6 +1198,10 @@ function streamCursorWithWireMode(
 	(async () => {
 		const retryContext = timing?.retry;
 		const transportMode = timing?.transport ?? (options?.transport === "http1" ? "http1" : "http2");
+		// The request's counter when the options carry one (`withRequestTransport`
+		// on the `stream()` path), so a call the authentication retry makes again
+		// adds to the same count; Cursor counts at its own socket into it either way.
+		const wireAttempts = timing?.wireAttempts ?? wireAttemptsOf(options?.fetch) ?? createWireAttempts();
 		let startTime = timing?.startTime ?? performance.now();
 		let firstTokenTime = retryContext?.firstTokenTime;
 
@@ -1482,6 +1494,9 @@ function streamCursorWithWireMode(
 					})
 				: undefined;
 
+			// The request boundary for both transports: counted before it opens, so
+			// a connection that is refused counts exactly like one that answers.
+			wireAttempts.count += 1;
 			if (transportMode === "http2") {
 				const proxyUrl = getProxyForUrl(model.provider, new URL(baseUrl));
 				let client: http2.ClientHttp2Session;
@@ -2010,6 +2025,7 @@ function streamCursorWithWireMode(
 					startTime,
 					timestamp: output.timestamp,
 					transport: "http1",
+					wireAttempts,
 					retry: {
 						attempt: retryContext?.attempt ?? 0,
 						originalRequestId,
@@ -2060,6 +2076,7 @@ function streamCursorWithWireMode(
 					startTime,
 					timestamp: output.timestamp,
 					transport: transportMode,
+					wireAttempts,
 				});
 				// The lazy watchdog observes THIS outer stream; the fallback's exec
 				// bridge marks the inner stream busy via `trackLocalWork`. Forward
@@ -2147,6 +2164,7 @@ function streamCursorWithWireMode(
 						startTime,
 						timestamp: output.timestamp,
 						transport: transportMode,
+						wireAttempts,
 						retry: {
 							attempt: retryAttempt + 1,
 							originalRequestId: retryOriginalRequestId,
@@ -2242,6 +2260,12 @@ function streamCursorWithWireMode(
 			} else {
 				output.errorMessage = result.message;
 			}
+			output.errorRetryAfterMs = result.retryAfterMs;
+			// Every request this turn sent beyond the first — a checkpoint resume, a
+			// drop to HTTP/1, a replay on the discovered wire model. Cursor resumes
+			// from a fresh checkpoint even after visible progress, so the content
+			// left on the message says nothing about whether it was replayed.
+			output.providerReplays = providerReplaysFrom(wireAttempts);
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: output.stopReason, error: output });

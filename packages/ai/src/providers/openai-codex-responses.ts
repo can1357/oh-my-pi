@@ -76,6 +76,7 @@ import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResp
 import { getHeadersFromError, getRetryAfterMsFromHeaders, type HeadersLike } from "../utils/retry-after";
 import { adaptSchemaForStrict, NO_STRICT, sanitizeSchemaForOpenAIResponses, toolWireSchema } from "../utils/schema";
 import { notifyRawSseEvent } from "../utils/sse-debug";
+import { providerReplaysFrom, type WireAttempts, wireCountedFetch } from "../utils/wire-attempts";
 import { compactGrammarDefinition } from "./grammar";
 import {
 	type CodexLiteShapedBody,
@@ -758,6 +759,15 @@ interface CodexRequestContext {
 	requestMetadata?: CodexRequestMetadata;
 	transformedBody: RequestBody;
 	rawRequestDump: RawHttpRequestDump;
+	/**
+	 * The `fetch` this request's SSE attempts are issued through and the
+	 * request's counter riding on it (`wireCountedFetch`): `withRequestTransport`'s
+	 * on the `stream()` path, shared with every re-entry that sends the request
+	 * again (an authentication retry). Every wrapper this module adds sits above
+	 * it — `fetchWithRetry` and its replays, compression and its uncompressed
+	 * resend — so their requests are counted where they are sent.
+	 */
+	wire: { fetch: FetchImpl; attempts: WireAttempts };
 }
 
 interface CodexRequestSetup {
@@ -1447,6 +1457,7 @@ function createCodexRequestContext(
 		affinitySessionId: normalizeOpenAIPromptCacheKey(options?.parentSessionId),
 	});
 	transformedBody.client_metadata = requestMetadata.clientMetadata;
+	const wire = wireCountedFetch(options?.fetch);
 	return {
 		apiKey,
 		accountId,
@@ -1463,6 +1474,7 @@ function createCodexRequestContext(
 		codexClientVersion,
 		transformedBody,
 		rawRequestDump,
+		wire,
 	};
 }
 
@@ -1826,6 +1838,11 @@ async function openCodexWebSocketTransport(
 	const onOwned = () => {
 		if (websocketState.acceptedSteering === steered) websocketState.acceptedSteering = undefined;
 	};
+	// Past local routing: the busy-socket rejection above sends this call to SSE
+	// without ever attempting a websocket request, and counting it would report
+	// a replay to a concurrent call that made one request. From here the attempt
+	// is genuine, so a connection that fails to open still counts.
+	requestContext.wire.attempts.count += 1;
 	let websocketConnection = await getOrCreateCodexWebSocketConnection(
 		websocketState,
 		requestContext.turnState,
@@ -2001,7 +2018,7 @@ async function openCodexSseTransport(
 				requestSetup.firstEventTimeoutMs,
 				options?.codexSseMaxAttempts,
 				event => options?.onSseEvent?.(event, model),
-				wrapFetchForRequestCompression(options?.fetch ?? fetch, model),
+				wrapFetchForRequestCompression(requestContext.wire.fetch, model),
 			),
 		);
 	};
@@ -2145,6 +2162,12 @@ async function handleCodexStreamFailure(context: CodexStreamFailureContext, erro
 	output.errorStatus = result.status;
 	output.errorId = result.id;
 	output.errorMessage = result.message;
+	output.errorRetryAfterMs = result.retryAfterMs;
+	// A number, 0 included, whenever every attempt went through a transport
+	// this module owns: recovery above reads the absence of this field as "no
+	// layer here reports", so a failure that never reached the processor must
+	// still say what the wire saw. `undefined` after a caller-supplied `fetch`.
+	output.providerReplays = providerReplaysFrom(context.requestContext.wire.attempts);
 	output.duration = performance.now() - context.startTime;
 	if (context.firstTokenTime) {
 		output.ttft = context.firstTokenTime - context.startTime;
@@ -3365,6 +3388,9 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 							url: "",
 							body: { model: model.id },
 						},
+						// No context: this call failed before its first request, but the
+						// request's counter may carry an earlier call's attempts.
+						wire: wireCountedFetch(options?.fetch),
 					},
 					startTime,
 				} satisfies CodexStreamFailureContext);

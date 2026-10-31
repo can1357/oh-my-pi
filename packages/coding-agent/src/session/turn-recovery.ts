@@ -20,7 +20,7 @@ import type {
 import { calculateRateLimitBackoffMs, parseRateLimitReason } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { shouldDropTruncatedThinkingOnlyAssistant } from "@oh-my-pi/pi-ai/providers/transform-messages";
-import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
+import { longestProviderRetryHint, providerRetryWaitMs } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { fallbackCreditTargets } from "@oh-my-pi/pi-catalog/compat/fallback-credit";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
@@ -61,7 +61,9 @@ import {
 } from "./messages";
 import {
 	type ActiveRetryFallbackState,
+	calculateFullJitterRetryDelayMs,
 	calculateRetryBackoffDelayMs,
+	cappedRetryBackoffMs,
 	findRetryFallbackCandidates,
 	formatRetryFallbackBaseSelector,
 	formatRetryFallbackSelector,
@@ -107,6 +109,12 @@ const UNEXPECTED_STOP_TIMEOUT_MS = 15_000;
 const EMPTY_STOP_MAX_RETRIES = 3;
 const MALFORMED_FUNCTION_CALL_MAX_RETRIES = 3;
 const STREAM_STALL_CONTINUE_MAX_RETRIES = 3;
+/**
+ * Same-model retries a statusless wire failure may hold the fallback chain for,
+ * counted across the whole retry saga — every model and credential it tries —
+ * not per failure or per model.
+ */
+const CONNECTION_FAILURE_CHAIN_HOLD_ATTEMPTS = 2;
 const SIBLING_UNBLOCK_BUFFER_MS = 1_000;
 const NON_WHITESPACE_RE = /\S/;
 const USAGE_PREFLIGHT_BLOCKED_PREFIX = "Usage preflight blocked:";
@@ -297,6 +305,8 @@ export interface TurnRecoveryHost {
 		delayMs?: number;
 		generation?: number;
 		shouldContinue?: () => boolean;
+		/** Called when the continuation is skipped instead of run (e.g. `shouldContinue` returned `false`). */
+		onSkip?: () => void;
 		onError?: (error: unknown) => void;
 	}): void;
 	waitForSessionMessagePersistence(message: AssistantMessage): Promise<void>;
@@ -389,11 +399,39 @@ export class TurnRecovery {
 	#retryAbortController: AbortController | undefined;
 	#retryAttempt = 0;
 	/**
+	 * The prompt generation in which `abortRetry()` cancelled the saga ({@link #isRetryCancelled}).
+	 * A property of the recovery, not of the moment it arrived: every point where the saga is
+	 * about to act on a retry — after each wait it awaits, after it announces the retry, when
+	 * the scheduled continuation fires, and when a later failure in the saga asks for another
+	 * retry — reads it and ends the saga as cancelled. A request already on the wire is not
+	 * aborted (that is `session.abort()`); if it fails, the saga ends instead of retrying it.
+	 *
+	 * A saga can be cut without closing — `session.abort()` aborts the request, and a turn an
+	 * extension starts skips the per-prompt reset — so the next turn's saga must not start out
+	 * cancelled: a session abort does not mark it (`abortRetry()` skips the mark while the abort
+	 * is in progress), and the mark is keyed to the prompt generation it was made in. Also reset
+	 * with the saga (`resolveRetry()`) and by a new prompt.
+	 */
+	#retryCancelledGeneration: number | undefined;
+	/**
 	 * Selectors a classifier refusal has already moved off in the current retry saga; see the walk
 	 * bound below. Cleared in `resolveRetry()`, which every end of a saga goes through (an answer,
 	 * the exhausted budget, a cancelled wait, an abort), so no turn inherits another turn's walk.
 	 */
 	readonly #refusalWalkTried = new Set<string>();
+	/**
+	 * Held retries the current saga has spent; see {@link CONNECTION_FAILURE_CHAIN_HOLD_ATTEMPTS}.
+	 * Reset when the saga ends (`resolveRetry()`) and when a new prompt starts, never by a
+	 * model switch, a credential switch or a fresh retry budget, so nothing a still-running
+	 * recovery does re-opens it.
+	 */
+	#connectionHoldsSpent = 0;
+	/**
+	 * Set once a failure after a held retry did not report going out exactly once: the held
+	 * call reached past the hold's bound (the provider replayed it below, or says nothing), so
+	 * the recovery holds no more. Reset with the count above, and only then.
+	 */
+	#connectionHoldClosed = false;
 	/** Per-model account walk allowance, snapshotted once and cleared when the retry saga ends. */
 	readonly #accountPolicyRotationsRemaining = new Map<string, number>();
 	#requestBodyReadTimeoutRecoveryPromptSequence: number | undefined;
@@ -551,6 +589,11 @@ export class TurnRecovery {
 		this.#streamStallContinueCount = 0;
 		this.#acceptTerminalEmptyStopForPrompt = false;
 		this.#activeFallbackCreditRedemption = undefined;
+		// A new prompt is a new recovery, even when the last one was left without
+		// a close (its retried request superseded before it settled).
+		this.#connectionHoldsSpent = 0;
+		this.#connectionHoldClosed = false;
+		this.#retryCancelledGeneration = undefined;
 	}
 
 	/** Sets whether one terminal empty stop is accepted for the current prompt. */
@@ -830,7 +873,7 @@ export class TurnRecovery {
 		let recorded = this.#usageLimitOutcomes.get(message);
 		if (!recorded) {
 			const errorMessage = message.errorMessage || "Unknown error";
-			const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage);
+			const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage, message.errorRetryAfterMs);
 			const retryAfterMs = parsedRetryAfterMs ?? calculateRateLimitBackoffMs(parseRateLimitReason(errorMessage));
 			recorded = (async (): Promise<UsageLimitOutcome> => {
 				const outcome = await this.#host.modelRegistry.authStorage.limits.markReached(
@@ -885,8 +928,16 @@ export class TurnRecovery {
 		return parsed ? formatRetryFallbackBaseSelector(parsed) : selector;
 	}
 
-	/** Resolve the pending retry promise; the saga is over, and so is its refusal walk. */
+	/** Resolve the pending retry promise; the saga is over, and so is its refusal walk and its hold. */
 	resolveRetry(): void {
+		this.#connectionHoldsSpent = 0;
+		this.#connectionHoldClosed = false;
+		this.#retryCancelledGeneration = undefined;
+		this.#releaseRetry();
+	}
+
+	/** Ends the saga's walk state and resolves `retryPromise`; the hold state is the caller's to clear. */
+	#releaseRetry(): void {
 		this.#refusalWalkTried.clear();
 		this.#accountPolicyRotationsRemaining.clear();
 		if (this.#retryResolve) {
@@ -1765,27 +1816,79 @@ export class TurnRecovery {
 		);
 	}
 	/**
-	 * First-attempt mid-stream socket drop with streamed progress: the transport
-	 * died after the model had already emitted reasoning or tool calls, so the
-	 * failure says nothing about model health — retry the same model once before
-	 * consulting the fallback chain. A drop with no streamed content keeps the
-	 * immediate fallback (a different route may genuinely help), as do later
-	 * attempts. Never applies once the retry budget is spent (e.g.
-	 * `retry.maxRetries: 0`): there is no same-model retry left, so the
-	 * fallback-chain consult is the only recovery. Mirrors the stall handler's
-	 * socket check, extended to turns with tool calls.
+	 * Statusless wire failure the fallback chain waits behind: the socket, the
+	 * SSE stream or the chunked transfer died ({@link AIError.Flag.Connection})
+	 * on a request the provider reports it put on the wire exactly once
+	 * ({@link AssistantMessage.providerReplays} `=== 0`). Nothing the model
+	 * produced caused it, so an identical replay is worth making before the
+	 * chain moves the session to a weaker model.
+	 *
+	 * The count is the only admissible evidence, and only a reported zero earns
+	 * the hold. Above zero, a layer below already replayed the request, so a held
+	 * attempt would replay it again. Absent, the provider has said nothing about
+	 * how often the request went out — not that it went out once. Streamed
+	 * content and wording cannot stand in for the count: a 503 that
+	 * `fetchWithRetry` replayed before the attempt that streamed and died leaves
+	 * content, a wording no provider loop retries, and no count, and reading
+	 * that as "sent once" sent the identical body six times where two were due.
+	 * The providers that report today are `anthropic`, `openai-codex-responses`
+	 * and `cursor` (and `empty-completion-retry`, which passes their count on),
+	 * each counting where its requests are issued, below every resend this
+	 * repository owns; through a caller-supplied client or `fetch` they report
+	 * nothing. Every other provider walks the chain at once, as it does for any
+	 * failure the chain admits.
+	 *
+	 * Bounded per recovery, not per model or per failure: at most
+	 * {@link CONNECTION_FAILURE_CHAIN_HOLD_ATTEMPTS} held retries in the whole
+	 * saga — a fallback that a spent budget hands a fresh one does not re-open
+	 * the hold — each on one of the first two attempts of the current budget, and
+	 * each counted where it replaces a chain consult, never elsewhere. The k-th
+	 * held retry waits a full-jitter backoff in `[0, min(base × 2^(k-1), 8s))`,
+	 * so clients sharing a failed upstream do not re-request together, and the
+	 * caller declines the hold unless the wait it would take — a provider hint
+	 * included, which is never shortened — is strictly inside that window (or
+	 * zero). Added sleep is therefore strictly under 1.5s at the 500ms default
+	 * base and strictly under 16s at any base.
+	 *
+	 * What the bound cannot shorten is a held call itself: if the route goes
+	 * down under it, the provider's own loop retries it on that provider's
+	 * budget. That call then reports a non-zero count, and any failure after a
+	 * hold that does not report going out once closes the hold for the rest of
+	 * the recovery ({@link #connectionHoldClosed}), so at most one held call can
+	 * spend a provider retry budget. The recovery's hold state ends only with the
+	 * recovery, and `abortRetry()` ends the recovery from whatever moment it is
+	 * called (see {@link #isRetryCancelled}), so no cancelled recovery holds again.
+	 *
+	 * Excluded on purpose:
+	 * - capacity (429, 529, overloaded, a usage limit) — the replay re-hits the
+	 *   same cap while a chain entry may sit under a different one. Capacity
+	 *   named on any link of the cause chain counts, not only the one that
+	 *   carried the wire wording;
+	 * - a rejected credential ({@link AIError.Flag.AuthFailed}) — the far side
+	 *   answered and refused, and refuses the replay too;
+	 * - a classifier refusal and an account-policy denial, which reproduce;
+	 * - a timeout ({@link AIError.Flag.Timeout}) — each held replay costs a
+	 *   whole first-event window, minutes against a wedged route, for evidence
+	 *   that already points at the route rather than at the wire.
+	 *
+	 * The caller drops the hold when `retry.maxDelayMs` would refuse the wait it
+	 * asks for; see the fail-fast cap in `#applyRetryPolicy`.
+	 *
+	 * Never applies once the retry budget is spent (e.g. `retry.maxRetries: 0`):
+	 * there is no same-model retry left, so the fallback-chain consult is the
+	 * only recovery.
 	 */
-	#isFirstAttemptMidStreamSocketDrop(message: AssistantMessage, id: number, retryBudgetExhausted: boolean): boolean {
-		if (this.#retryAttempt !== 1 || retryBudgetExhausted) return false;
+	#holdsChainForConnectionRetry(message: AssistantMessage, id: number, retryBudgetExhausted: boolean): boolean {
+		if (retryBudgetExhausted || this.#retryAttempt > CONNECTION_FAILURE_CHAIN_HOLD_ATTEMPTS) return false;
+		if (this.#connectionHoldClosed || this.#connectionHoldsSpent >= CONNECTION_FAILURE_CHAIN_HOLD_ATTEMPTS) {
+			return false;
+		}
 		if (message.stopReason !== "error" || !AIError.retriable(id)) return false;
 		if (this.#host.streamingEditAbortTriggered()) return false;
-		if (!isUnexpectedSocketCloseMessage(message.errorMessage ?? "")) return false;
-		return message.content.some(
-			block =>
-				(block.type === "thinking" && block.thinking.trim().length > 0) ||
-				block.type === "toolCall" ||
-				(block.type === "text" && block.text.trim().length > 0),
-		);
+		if (AIError.is(id, AIError.Flag.Timeout)) return false;
+		if (AIError.is(id, AIError.Flag.AccountPolicy) || this.isClassifierRefusal(message)) return false;
+		if (!AIError.is(id, AIError.Flag.Connection)) return false;
+		return message.providerReplays === 0;
 	}
 
 	/** Checks whether a provider error represents a classifier refusal. */
@@ -2596,12 +2699,13 @@ export class TurnRecovery {
 		return true;
 	}
 
-	#parseRetryAfterMsFromError(errorMessage: string): number | undefined {
-		// Single call into the provider-aware parser: it merges every supported
-		// form (account resets, retry-after-ms, legacy retry-after /
-		// x-ratelimit-reset text) by longest-wins, so a shorter reset phrase
-		// can never shadow a longer retry signal carried in the same message.
-		return extractProviderRetryHint(this.#host.model()?.provider, errorMessage);
+	#parseRetryAfterMsFromError(errorMessage: string, headerRetryAfterMs?: number): number | undefined {
+		// The wait this failure names, as every caller that keeps a route or a
+		// credential closed reads it: the usage-limit mark and the retry delay. The
+		// header's wait arrives structured (`errorRetryAfterMs`), never from the
+		// text. The held-retry check reads every occurrence on its own; see
+		// `longestProviderRetryHint` where the hold is decided.
+		return providerRetryWaitMs(this.#host.model()?.provider, errorMessage, headerRetryAfterMs);
 	}
 
 	/**
@@ -2642,6 +2746,9 @@ export class TurnRecovery {
 		// not a retry loop, so it runs even when the user disabled retries: it switches
 		// the model once and lets the base turn proceed.
 		if (!retrySettings.enabled && !options?.fireworksFastFallback) return false;
+		// `abortRetry()` landed while the retried request was on the wire; that
+		// request failed, and the cancelled saga ends here instead of retrying it.
+		if (this.#isRetryCancelled()) return this.#endCancelledRetry();
 		const classifierRefusal = this.isClassifierRefusal(message);
 
 		const generation = this.#host.promptGeneration();
@@ -2684,10 +2791,23 @@ export class TurnRecovery {
 		const staleOpenAIResponsesReplayError = AIError.is(id, AIError.Flag.StaleResponsesItem);
 		const accountPolicyDenial = AIError.is(id, AIError.Flag.AccountPolicy);
 		const recordedUsageLimitOutcome = await this.#usageLimitOutcomes.get(message);
-		const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage);
+		const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage, message.errorRetryAfterMs);
+		// A failure after a held retry that does not report going out once means
+		// the held call reached past the hold's bound, so the recovery stops
+		// holding — before the next model, reached on a fresh retry budget, can
+		// hold again and let a second held call spend a second provider budget.
+		if (this.#connectionHoldsSpent > 0 && message.providerReplays !== 0) this.#connectionHoldClosed = true;
+		const connectionHoldCandidate = this.#holdsChainForConnectionRetry(message, id, retryBudgetExhausted);
+		// A held wire failure takes full jitter, not the narrow band: a shared upstream
+		// failure can make many clients retry at once, so they must not replay in the
+		// same quarter-window. Indexed by the hold, not the attempt, so the window —
+		// and the sleep the hold may add — is fixed whatever attempt it lands on.
+		const heldRetryIndex = this.#connectionHoldsSpent + 1;
 		let delayMs = staleOpenAIResponsesReplayError
 			? 0
-			: calculateRetryBackoffDelayMs(retrySettings.baseDelayMs, this.#retryAttempt);
+			: connectionHoldCandidate
+				? calculateFullJitterRetryDelayMs(retrySettings.baseDelayMs, heldRetryIndex)
+				: calculateRetryBackoffDelayMs(retrySettings.baseDelayMs, this.#retryAttempt);
 		// Transient rate/concurrency caps stay on the same credential, but must
 		// honor their reason-specific windows. The default exponential base
 		// (≈500ms, capped at 8s) otherwise re-hits the cap and burns the retry
@@ -2763,6 +2883,9 @@ export class TurnRecovery {
 					if (this.#retryAbortController === resetAbortController) this.#retryAbortController = undefined;
 				}
 			}
+			// A reset read that settled as `abortRetry()` landed: the wait was not
+			// aborted, but the saga was.
+			if (this.#isRetryCancelled()) return this.#endCancelledRetry();
 			if (rotated || restored) {
 				switchedCredential = true;
 				delayMs = 0;
@@ -2852,6 +2975,7 @@ export class TurnRecovery {
 				switchedCredential = (
 					await this.#host.modelRegistry.authStorage.limits.rotate(currentModel.provider, this.#host.sessionId(), {
 						error: errorMessage,
+						retryAfterMs: message.errorRetryAfterMs,
 						modelId: currentModel.id,
 						signal: rotateAbortController.signal,
 						waitForSibling: rotationsRemaining > 0,
@@ -2867,6 +2991,9 @@ export class TurnRecovery {
 			} finally {
 				if (this.#retryAbortController === rotateAbortController) this.#retryAbortController = undefined;
 			}
+			// A rotation that resolved as `abortRetry()` landed has already switched
+			// the credential; the retry it would carry is still cancelled.
+			if (this.#isRetryCancelled()) return this.#endCancelledRetry();
 			if (switchedCredential) delayMs = 0;
 		}
 		// A thinking-loop abort is not a provider failure — it is the loop guard
@@ -2932,6 +3059,42 @@ export class TurnRecovery {
 				waitMs <= effectiveUsageLimitWaitMs;
 			return maxDelayMs > 0 && waitMs > maxDelayMs && !waitForUsageReset;
 		};
+		// What the next same-model attempt would actually wait. The jittered
+		// backoff is only the floor: with no usage-limit wait in play, a longer
+		// provider hint replaces it further down (`delayMs = parsedRetryAfterMs`,
+		// below the chain consult) and that is the figure the fail-fast cap then
+		// measures. Computing it here keeps both readers on one number.
+		const sameModelDelayMs =
+			usageLimitWaitMs === undefined && parsedRetryAfterMs && parsedRetryAfterMs > delayMs
+				? parsedRetryAfterMs
+				: delayMs;
+		// The hold trades the chain consult for one more request on this model, so
+		// it is only a trade while that request can still happen. When the wait it
+		// would take is past `retry.maxDelayMs` (a cap below the backoff base, e.g.
+		// 100ms against the 500ms default, or a 20s `retry-after` against any cap),
+		// the fail-fast branch below ends the turn because neither model nor
+		// credential switched — so holding would spend the chain's only consult on
+		// a retry the cap then refuses. Consult the chain instead; a switch zeroes
+		// the wait.
+		//
+		// Nor unless every wait the message names is strictly inside the held
+		// retry's own window (or zero). Full jitter stays inside it; a provider
+		// hint can be longer and is never shortened, so a hint at or past the
+		// window consults the chain rather than break the bound on the sleep a
+		// hold adds. "Every" is the longest across all occurrences: a hint repeated
+		// with a longer value (`retry-after-ms=200 retry-after-ms=9000`) declines
+		// the hold. That reading is used here alone, where a quoted or echoed
+		// number can only cost a chain consult; the delay and the usage-limit
+		// mark keep the bounded reading.
+		const heldWindowMs = cappedRetryBackoffMs(retrySettings.baseDelayMs, heldRetryIndex);
+		const longestNamedWaitMs = connectionHoldCandidate
+			? longestProviderRetryHint(this.#host.model()?.provider, errorMessage)
+			: undefined;
+		const connectionHold =
+			connectionHoldCandidate &&
+			(sameModelDelayMs === 0 || sameModelDelayMs < heldWindowMs) &&
+			(longestNamedWaitMs === undefined || longestNamedWaitMs === 0 || longestNamedWaitMs < heldWindowMs) &&
+			!exceedsDelayCap(sameModelDelayMs);
 
 		if (!staleOpenAIResponsesReplayError && !switchedCredential && currentSelector) {
 			// The retry budget bounds same-model retries against a failing provider. A
@@ -2947,16 +3110,21 @@ export class TurnRecovery {
 			// chains say.
 			const refusalWalkKey = this.#refusalWalkKey(currentSelector);
 			const refusalWalkRepeats = classifierRefusal && this.#refusalWalkTried.has(refusalWalkKey);
-			if (
+			const chainConsultable =
 				allowModelFallback &&
 				retrySettings.modelFallback &&
 				retryFallbackAdmits(retrySettings.fallbackOn, AIError.is(id, AIError.Flag.UsageLimit)) &&
 				!thinkingLoop &&
 				!sameModelSteerReplay &&
 				!waitForSiblingCredential &&
-				!refusalWalkRepeats &&
-				!this.#isFirstAttemptMidStreamSocketDrop(message, id, retryBudgetExhausted)
-			) {
+				!refusalWalkRepeats;
+			// A hold is spent here and nowhere else: it is the chain consult it
+			// replaces. Where no consult would have run (no chain to walk, a stale
+			// Responses item, a switched credential, no selector), the retry stays
+			// on the model anyway and holds nothing.
+			if (chainConsultable && connectionHold) {
+				this.#connectionHoldsSpent++;
+			} else if (chainConsultable) {
 				if (classifierRefusal) {
 					this.#refusalWalkTried.add(refusalWalkKey);
 				} else {
@@ -2990,11 +3158,7 @@ export class TurnRecovery {
 							(options?.fireworksFastFallback || options?.hardErrorFallback) &&
 							!this.isRetryableError(message)
 						) &&
-						!exceedsDelayCap(
-							usageLimitWaitMs === undefined && parsedRetryAfterMs && parsedRetryAfterMs > delayMs
-								? parsedRetryAfterMs
-								: delayMs,
-						),
+						!exceedsDelayCap(sameModelDelayMs),
 				});
 			}
 			// Auto fallback from a Fireworks Fast variant to its base model. Independent
@@ -3006,8 +3170,8 @@ export class TurnRecovery {
 			}
 			if (switchedModel) {
 				delayMs = 0;
-			} else if (usageLimitWaitMs === undefined && parsedRetryAfterMs && parsedRetryAfterMs > delayMs) {
-				delayMs = parsedRetryAfterMs;
+			} else {
+				delayMs = sameModelDelayMs;
 			}
 		}
 
@@ -3082,6 +3246,9 @@ export class TurnRecovery {
 		}
 
 		await this.#recordPendingRetryError(message, id, { switchedCredential, switchedModel, delayMs });
+		// Cancelled while the chain was consulted or the attempt recorded: do not
+		// announce a retry that will not run.
+		if (this.#isRetryCancelled()) return this.#endCancelledRetry();
 
 		await this.#host.emitSessionEvent({
 			type: "auto_retry_start",
@@ -3091,7 +3258,9 @@ export class TurnRecovery {
 			errorMessage,
 			errorId: message.errorId,
 		});
-		if (this.#host.abortInProgress() || this.#host.promptGeneration() !== generation) {
+		// `abortRetry()` from an `auto_retry_start` listener runs before any wait is
+		// installed for it to abort; the saga still reads it here.
+		if (this.#host.abortInProgress() || this.#host.promptGeneration() !== generation || this.#isRetryCancelled()) {
 			return this.#endCancelledRetry();
 		}
 
@@ -3127,6 +3296,9 @@ export class TurnRecovery {
 		if (this.#retryAbortController === retryAbortController) {
 			this.#retryAbortController = undefined;
 		}
+		// A zero-length sleep never sees its signal, and a call can land between
+		// the sleep's end and this line.
+		if (this.#isRetryCancelled()) return this.#endCancelledRetry();
 
 		// The identity-keyed removal above can miss when a context rebuild
 		// recreated the failed turn's message object between settle and retry
@@ -3149,7 +3321,18 @@ export class TurnRecovery {
 			source: "automatic-retry",
 			delayMs: 1,
 			generation,
-			shouldContinue: () => this.#retryAttempt > 0,
+			// The continuation fires a tick later; a cancellation in between skips it
+			// and closes the saga instead of sending the request.
+			shouldContinue: () => this.#retryAttempt > 0 && !this.#isRetryCancelled(),
+			onSkip: () => {
+				if (this.#isRetryCancelled() && this.#retryAttempt > 0) {
+					void this.#endCancelledRetry().catch(failure =>
+						logger.error("Closing a cancelled retry saga threw", {
+							error: failure instanceof Error ? failure.message : String(failure),
+						}),
+					);
+				}
+			},
 			onError: error =>
 				void this.#failRetryAfterLocalContinueError(message, error).catch(failure =>
 					logger.error("Closing a retry saga after a failed local continuation threw", {
@@ -3161,7 +3344,7 @@ export class TurnRecovery {
 		return true;
 	}
 
-	/** Closes a retry saga whose credential wait or backoff sleep was aborted. */
+	/** Closes a retry saga that `abortRetry()` cancelled, or whose credential wait or backoff sleep was aborted. */
 	async #endCancelledRetry(): Promise<false> {
 		const attempt = this.#retryAttempt;
 		this.#retryAttempt = 0;
@@ -3267,12 +3450,36 @@ export class TurnRecovery {
 	}
 
 	/**
-	 * Cancel in-progress retry.
+	 * Cancel the retry saga in progress, from whatever moment it is called.
+	 *
+	 * Marks the saga cancelled ({@link #isRetryCancelled}) and aborts the wait it
+	 * may be in. Whichever point the saga reaches next ends it as cancelled: the
+	 * aborted wait, the check after a wait that settled anyway (a credential
+	 * rotation that resolved as the call landed), the check after `auto_retry_start`
+	 * is announced, the scheduled continuation, or — with the retried request
+	 * already on the wire — that request's failure. The request itself is not
+	 * aborted; if it succeeds, the turn simply completes.
+	 *
+	 * Outside a saga there is nothing to cancel, and nothing is remembered for the
+	 * next one. The hold state is left to the saga's end, which clears it.
 	 */
 	abortRetry(): void {
+		// `session.abort()` calls this as part of aborting everything; the abort
+		// itself ends the saga (every decision point reads `abortInProgress()`), and
+		// a mark made here would outlive it into the next turn's saga.
+		if (!this.#host.abortInProgress() && (this.#retryAttempt > 0 || this.#retryPromise !== undefined)) {
+			this.#retryCancelledGeneration = this.#host.promptGeneration();
+		}
 		this.#retryAbortController?.abort();
-		// Note: _retryAttempt is reset in the catch block of _autoRetry
-		this.resolveRetry();
+		this.#releaseRetry();
+	}
+
+	/** Whether `abortRetry()` cancelled the saga running in the current prompt generation. */
+	#isRetryCancelled(): boolean {
+		return (
+			this.#retryCancelledGeneration !== undefined &&
+			this.#retryCancelledGeneration === this.#host.promptGeneration()
+		);
 	}
 
 	async #promptAgentWithIdleRetry(

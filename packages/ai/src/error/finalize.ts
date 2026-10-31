@@ -4,6 +4,7 @@ import type { AbortSourceTracker } from "../utils/abort";
 import type { CapturedHttpErrorResponse, RawHttpRequestDump } from "../utils/http-inspector";
 import { classify, classifyMessage, status } from "./flags";
 import { formatMessage } from "./format";
+import { getHeadersFromError, getRetryAfterMsFromHeaders } from "../utils/retry-after";
 
 /** Context a provider catch block hands to {@link finalize}. */
 export interface FinalizeOptions {
@@ -33,6 +34,12 @@ export interface FinalizeResult {
 	stopReason: "aborted" | "error";
 	/** User-facing message: a local abort reason, else the caller's abort reason, else from {@link formatMessage}. */
 	message: string;
+	/**
+	 * The response headers' retry wait, from the error's own headers or the
+	 * captured response's: assign it to `AssistantMessage.errorRetryAfterMs`.
+	 * Read from headers only, so a body cannot forge it.
+	 */
+	retryAfterMs: number | undefined;
 }
 
 /**
@@ -81,5 +88,6 @@ export async function finalize(error: unknown, opts: FinalizeOptions = {}): Prom
 		status: currentStatus,
 		stopReason: aborted ? "aborted" : "error",
 		message,
+		retryAfterMs: getRetryAfterMsFromHeaders(opts.capturedErrorResponse?.headers ?? getHeadersFromError(error)),
 	};
 }

@@ -757,6 +757,12 @@ export type ObservedUsageInput = {
 
 /** Mark a session credential blocked with caller and provider timing. */
 export type MarkUsageLimitOptions = {
+	/**
+	 * How long to block the credential, from the failure's stated retry wait.
+	 * Clamped to `MAX_HINTED_BLOCK_MS` (7 days): no message or header may take a
+	 * credential out of rotation for longer. A usage report can still extend the
+	 * block to a later reset it states.
+	 */
 	retryAfterMs?: number;
 	/**
 	 * Whether `retryAfterMs` came from provider-stated timing (a parsed
@@ -774,6 +780,12 @@ export type MarkUsageLimitOptions = {
 /** Resolve a failed request to its credential and rotate if possible. */
 export type RotateCredentialOptions = {
 	error?: unknown;
+	/**
+	 * The failure's response-header retry wait, structured
+	 * (`AssistantMessage.errorRetryAfterMs`), for a caller that passes `error` as
+	 * text. A thrown `error` that carries its response headers supplies it itself.
+	 */
+	retryAfterMs?: number;
 	modelId?: string;
 	apiKey?: string;
 	credentialId?: number;

@@ -92,6 +92,8 @@ export interface MockResponse {
 	fallbackCreditHandle?: AnthropicFallbackCreditHandle;
 	/** Error text paired with an explicit `"error"` stop reason. */
 	errorMessage?: string;
+	/** Replays a provider loop reports having spent before this failure surfaced. */
+	providerReplays?: number;
 	/** Usage stats. Missing fields default to 0; missing `cost.total` is recomputed from components. */
 	usage?: Partial<Omit<Usage, "cost">> & { cost?: Partial<Usage["cost"]> };
 	/** Service tier the mock reports serving the turn, as a real provider's response echo would. */
@@ -411,6 +413,7 @@ async function runMock(
 	partial.stopDetails = response.stopDetails;
 	partial.fallbackCreditHandle = response.fallbackCreditHandle;
 	partial.errorMessage = response.errorMessage;
+	partial.providerReplays = response.providerReplays;
 	partial.usage = mergeUsage(response.usage);
 	partial.serviceTier = response.serviceTier;
 	partial.duration = performance.now() - perfStart;

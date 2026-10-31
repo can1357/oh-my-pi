@@ -1,7 +1,7 @@
 import { scheduler } from "node:timers/promises";
 import * as AIError from "../error";
 import { isUsageLimitOutcome } from "../error/rate-limit";
-import { extractProviderRetryHint } from "../utils/retry-after";
+import { getHeadersFromError, getRetryAfterMsFromHeaders, providerRetryWaitMs } from "../utils/retry-after";
 import type { CredentialRankingContext, CredentialRankingStrategy } from "../usage";
 import type { RankingStrategyResolver } from "../usage/registry";
 import { raceSignal } from "./abort";
@@ -9,6 +9,7 @@ import {
 	ACCOUNT_POLICY_BLOCK_SCOPE,
 	AUTH_BLOCK_SCOPE,
 	DEFAULT_BLOCK_MS,
+	MAX_HINTED_BLOCK_MS,
 	credentialBlockScopesForRequest,
 	modelAccountPolicyBlockScope,
 	providerTypeKey,
@@ -248,7 +249,10 @@ export class RateLimits implements LimitsApi {
 
 		const routing = this.#credentialBlockRouting(provider, credentialType, options?.modelId);
 		const now = Date.now();
-		const requestedBlockedUntilMs = now + (options?.retryAfterMs ?? DEFAULT_BLOCK_MS);
+		// The stated wait is clamped; only a usage report below may block longer.
+		const requestedBlockMs =
+			options?.retryAfterMs === undefined ? DEFAULT_BLOCK_MS : Math.min(options.retryAfterMs, MAX_HINTED_BLOCK_MS);
+		const requestedBlockedUntilMs = now + requestedBlockMs;
 		let blockedUntil = requestedBlockedUntilMs;
 		// Heuristic/default fallbacks are guesses; provider-stated hints and
 		// report-derived extensions are timed.
@@ -412,8 +416,13 @@ export class RateLimits implements LimitsApi {
 		if (!accountPolicy && (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message))) {
 			// Thread the provider-specified reset window (e.g. Devin "Your limit
 			// will reset in 13 minutes") into the block duration so the credential
-			// is not reselected and hammered while the cap remains active.
-			const retryAfterMs = extractProviderRetryHint(provider, message);
+			// is not reselected and hammered while the cap remains active. The
+			// header's wait comes from the response object, never from the text.
+			const retryAfterMs = providerRetryWaitMs(
+				provider,
+				message,
+				options?.retryAfterMs ?? getRetryAfterMsFromHeaders(getHeadersFromError(error)),
+			);
 			const mark = await this.markReached(provider, sessionId, {
 				retryAfterMs,
 				providerTimed: retryAfterMs !== undefined,

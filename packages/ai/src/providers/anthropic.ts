@@ -107,6 +107,7 @@ import { spillToDescription } from "../utils/schema/spill";
 import { createSdkStreamRequestOptions } from "../utils/sdk-stream-timeout";
 import { notifyRawSseEvent } from "../utils/sse-debug";
 import { isForcedToolChoice } from "../utils/tool-choice";
+import { providerReplaysFrom, wireCountedFetch } from "../utils/wire-attempts";
 import {
 	AnthropicConnectionTimeoutError,
 	type AnthropicFetchOptions,
@@ -1828,6 +1829,24 @@ const streamAnthropicOnce = (
 		let rawRequestDump: RawHttpRequestDump | undefined;
 		let transportPayload: unknown;
 		let activeAbortTracker = createAbortSourceTracker(options?.signal);
+		// Request attempts, counted on the `fetch` the client issues them through
+		// (`wireCountedFetch`): the request's own counter — `withRequestTransport`
+		// on the `stream()` path, `withWireCount` at `streamAnthropic` otherwise —
+		// shared by every call that sends this request again with the same
+		// options (an authentication retry, an empty-completion retry). Every
+		// wrapper `buildAnthropicClientOptions` adds sits above it — compression
+		// and its uncompressed resend, the cch rewriter, the Copilot identity
+		// resend — so their requests are counted too.
+		const wire = wireCountedFetch(options?.fetch);
+		/**
+		 * Every attempt after the first the request has made, or `undefined`
+		 * when the requests went through a transport this module does not own —
+		 * a caller-supplied client, or a transport that builds its own — or
+		 * through a caller-supplied `fetch`. Each knows how often it replayed and
+		 * this module does not.
+		 */
+		const reportedProviderReplays = (): number | undefined =>
+			transport || options?.client ? undefined : providerReplaysFrom(wire.attempts);
 
 		const onSseEvent = options?.onSseEvent;
 		const rawSseObserver = onSseEvent ? (event: RawSseEvent) => onSseEvent(event, sourceModel) : undefined;
@@ -2175,7 +2194,7 @@ const streamAnthropicOnce = (
 						context.tools?.some(tool => ANTHROPIC_BUFFERED_INPUT_TOOLS.has(tool.name)) ?? false,
 					thinkingEnabled: options?.thinkingEnabled,
 					thinkingDisplay: options?.thinkingDisplay,
-					fetch: options?.fetch,
+					fetch: wire.fetch,
 					maxRetryDelayMs: options?.maxRetryDelayMs,
 					copilotCacheKey,
 					copilotCacheSnapshot: copilotCached ?? null,
@@ -3615,6 +3634,10 @@ const streamAnthropicOnce = (
 				output.content.unshift(...prefix);
 				if (retained !== output.content) retained.unshift(...prefix);
 			}
+			// A success carries the count too: the layer above may discard this
+			// response (an empty completion it retries) and the requests already
+			// spent on it are still requests the model saw.
+			output.providerReplays = reportedProviderReplays();
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			if (dropFastMode && model.compat.firstPartyProvider && options?.serviceTier === "priority") {
@@ -3672,6 +3695,8 @@ const streamAnthropicOnce = (
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = transport ? result.message : maybeAddReplayUnsignedThinkingHint(model, result.message);
+			output.errorRetryAfterMs = result.retryAfterMs;
+			output.providerReplays = reportedProviderReplays();
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({

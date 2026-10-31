@@ -1337,6 +1337,63 @@ export interface AssistantMessage {
 	/** Structured machine-readable error classifier; see `utils/error-id.ts` for bit layout and helpers. */
 	errorId?: number;
 	/**
+	 * The retry wait the failed response's headers stated (`retry-after-ms`,
+	 * `Retry-After`, `x-ratelimit-reset[-ms]`), in milliseconds. Set from the
+	 * response object, never parsed from text, so its provenance is the header:
+	 * a body cannot forge it, however it is worded. Consumers that keep a route
+	 * or credential closed take the longer of this and the first wait the
+	 * message text names (`providerRetryWaitMs`). The text may also show it, for
+	 * the reader; no consumer trusts the text for it.
+	 */
+	errorRetryAfterMs?: number;
+	/**
+	 * Request attempts a layer below the caller made beyond the first, before
+	 * this message was produced; `0` when the request went out exactly once.
+	 * `undefined` means "unknown", never "none": the provider does not report,
+	 * or its requests went through a transport it cannot see into — a
+	 * caller-supplied client, or a caller-supplied `fetch`, which may resend
+	 * inside itself — and a count taken above that cannot say the request went
+	 * out once.
+	 *
+	 * Counted where each request is issued, before it goes out, so an attempt
+	 * that never opens counts too: on the `fetch` at the bottom of the
+	 * provider's stack (the request's counted transport on the `stream()` path), or at the
+	 * provider's own socket. Every resend this repository owns sits above that
+	 * counter and is counted by where it is — the provider's own replays (a
+	 * transport reopen, a transport fallback, a checkpoint resume, rebuilt
+	 * parameters, a client's own retry budget), the replays `fetchWithRetry`
+	 * makes, the uncompressed resend of a refused compressed body, the GitHub
+	 * Copilot identity resend.
+	 *
+	 * **One count per logical request.** The counter rides on the `fetch` in
+	 * the request's options, so a layer that sends the request again by calling
+	 * the provider again with those options — `streamSimple`'s authentication
+	 * retry under another key, the replay-safe empty-completion retry — counts
+	 * into the same counter, and the provider reports the request's whole count,
+	 * not its own call's share. A request the route makes for itself (the
+	 * Vertex OAuth token) is not an attempt at the model request and is not
+	 * counted.
+	 *
+	 * **Attempts, not HTTP requests.** Below the counter one attempt may still
+	 * be several HTTP requests — a redirect hop `fetch` follows, a transport
+	 * whose logical turn is several RPCs (Cursor's `RunSSE` plus `BidiAppend`)
+	 * — and those stay one attempt: neither is a second generation of the
+	 * request. The question the count answers is whether the request was sent
+	 * again.
+	 *
+	 * Recovery above the provider has to know that — replaying again multiplies
+	 * the work below. Streamed content cannot stand in for it: each loop stops
+	 * at its own commitment boundary and those boundaries differ (the Codex
+	 * loop replays an *empty* reasoning block, while the Anthropic loop counts
+	 * the same opened block as committed), and a loop that replayed a 503
+	 * before the attempt that finally streamed leaves content the first attempt
+	 * never produced.
+	 *
+	 * Set on a successful message too: the layer above may discard it (an empty
+	 * completion it retries), and the attempts already spent still happened.
+	 */
+	providerReplays?: number;
+	/**
 	 * Stable identifiers for request features the provider silently dropped
 	 * during this turn (e.g. `"priority"`). Set when a server-side rejection
 	 * triggered an in-provider fallback retry that succeeded without the
