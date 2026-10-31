@@ -43,6 +43,8 @@ describe("Agent — inactive tool definitions", () => {
 		delete Bun.env.PI_DIALECT;
 		try {
 			const contexts: Context[] = [];
+			// What the provider transform (where the request-size clamp runs) sees.
+			const transformed: Context[] = [];
 			const responses = [
 				reply({
 					messageIndex: 1,
@@ -55,6 +57,10 @@ describe("Agent — inactive tool definitions", () => {
 					model: createMockModel({ responses: [] }),
 					systemPrompt: ["system"],
 					tools: [agentTool("read"), agentTool("grep")],
+				},
+				transformProviderContext: context => {
+					transformed.push(context);
+					return context;
 				},
 				streamFn: (_model, context) => {
 					contexts.push(context);
@@ -74,6 +80,7 @@ describe("Agent — inactive tool definitions", () => {
 			expect(contexts[0]?.inactiveTools).toBeUndefined();
 			expect(contexts[1]?.tools?.map(tool => tool.name)).toEqual(["read"]);
 			expect(contexts[1]?.inactiveTools).toEqual([sentGrep]);
+			expect(transformed[1]?.inactiveTools).toEqual([sentGrep]);
 
 			const messages = agent.state.messages.filter(
 				(message): message is Message =>
@@ -81,6 +88,7 @@ describe("Agent — inactive tool definitions", () => {
 			);
 			const side = await agent.buildSideRequestContext(messages);
 			expect(side.inactiveTools).toEqual([sentGrep]);
+			expect(transformed[2]?.inactiveTools).toEqual([sentGrep]);
 		} finally {
 			if (previousDialect === undefined) delete Bun.env.PI_DIALECT;
 			else Bun.env.PI_DIALECT = previousDialect;
