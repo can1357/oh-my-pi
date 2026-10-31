@@ -228,16 +228,9 @@ function getEmbeddingCache(db: Database): LRUCache<string, CachedEmbedding> {
 	return cache;
 }
 
-interface DeferredAdmission {
-	readonly memoryId: string;
-	readonly entry: CachedEmbedding;
-}
-
 interface VectorScanState {
-	hitEntries: number;
-	hitBytes: number;
-	readonly deferred: DeferredAdmission[];
-	deferredBytes: number;
+	admittedEntries: number;
+	admittedBytes: number;
 }
 
 function cosineAgainstRow(
@@ -251,8 +244,6 @@ function cosineAgainstRow(
 		if (cached.rawJson === row.embedding_json) {
 			const { values, norm } = cached;
 			if (values.length !== unit.length || norm === 0) return null;
-			scanState.hitEntries++;
-			scanState.hitBytes += cached.byteSize;
 			let dot = 0;
 			for (let i = 0; i < values.length; i++) {
 				dot += (unit[i] as number) * (values[i] as number);
@@ -271,11 +262,11 @@ function cosineAgainstRow(
 	if (!Array.isArray(raw) || raw.length !== unit.length) return null;
 
 	const byteSize = row.memory_id.length * 2 + row.embedding_json.length * 2 + raw.length * 8 + 64;
-	const shouldDefer =
-		scanState.hitEntries + scanState.deferred.length < MAX_EMBEDDING_CACHE_ENTRIES &&
-		scanState.hitBytes + scanState.deferredBytes + byteSize <= MAX_EMBEDDING_CACHE_BYTES;
+	const shouldAdmit =
+		scanState.admittedEntries + 1 <= MAX_EMBEDDING_CACHE_ENTRIES &&
+		scanState.admittedBytes + byteSize <= MAX_EMBEDDING_CACHE_BYTES;
 
-	const values = shouldDefer ? new Float64Array(raw.length) : null;
+	const values = shouldAdmit ? new Float64Array(raw.length) : null;
 	let normSq = 0;
 	let dot = 0;
 	for (let i = 0; i < raw.length; i++) {
@@ -289,11 +280,9 @@ function cosineAgainstRow(
 	const norm = Math.sqrt(normSq);
 
 	if (values !== null) {
-		scanState.deferred.push({
-			memoryId: row.memory_id,
-			entry: { rawJson: row.embedding_json, values, norm, byteSize },
-		});
-		scanState.deferredBytes += byteSize;
+		scanState.admittedEntries++;
+		scanState.admittedBytes += byteSize;
+		cache.set(row.memory_id, { rawJson: row.embedding_json, values, norm, byteSize });
 	}
 
 	return dot / norm;
@@ -454,11 +443,29 @@ export class PolyphonicRecallEngine {
 		}
 
 		const cache = getEmbeddingCache(this.db);
+		let admittedEntries = 0;
+		let admittedBytes = 0;
+		const countedHitIds = new Set<string>();
+		for (const row of rows) {
+			const cached = cache.get(row.memory_id);
+			if (cached === undefined) continue;
+			if (cached.rawJson === row.embedding_json) {
+				if (
+					cached.values.length === queryUnit.length &&
+					cached.norm > 0 &&
+					!countedHitIds.has(row.memory_id)
+				) {
+					countedHitIds.add(row.memory_id);
+					admittedEntries++;
+					admittedBytes += cached.byteSize;
+				}
+			} else {
+				cache.delete(row.memory_id);
+			}
+		}
 		const scanState: VectorScanState = {
-			hitEntries: 0,
-			hitBytes: 0,
-			deferred: [],
-			deferredBytes: 0,
+			admittedEntries,
+			admittedBytes,
 		};
 		const byId = new Map<string, VoiceRecallResult>();
 		for (const row of rows) {
@@ -480,21 +487,6 @@ export class PolyphonicRecallEngine {
 				});
 			}
 		}
-
-		let admittedEntries = scanState.hitEntries;
-		let admittedBytes = scanState.hitBytes;
-		for (const { memoryId, entry } of scanState.deferred) {
-			if (
-				admittedEntries + 1 > MAX_EMBEDDING_CACHE_ENTRIES ||
-				admittedBytes + entry.byteSize > MAX_EMBEDDING_CACHE_BYTES
-			) {
-				continue;
-			}
-			admittedEntries++;
-			admittedBytes += entry.byteSize;
-			cache.set(memoryId, entry);
-		}
-
 		return [...byId.values()].sort((a, b) => b.score - a.score || a.memoryId.localeCompare(b.memoryId)).slice(0, 20);
 	}
 	/**
@@ -717,12 +709,14 @@ export class PolyphonicRecallEngine {
 		};
 	}
 	close(): void {
-		const cache = embeddingCachesByDb.get(this.db);
-		if (cache !== undefined) {
-			cache.clear();
-			embeddingCachesByDb.delete(this.db);
+		if (this.ownsConnection) {
+			const cache = embeddingCachesByDb.get(this.db);
+			if (cache !== undefined) {
+				cache.clear();
+				embeddingCachesByDb.delete(this.db);
+			}
+			closeQuietly(this.db);
 		}
-		if (this.ownsConnection) closeQuietly(this.db);
 	}
 
 	/** Visibility predicate mirroring linear recall: own session, `global`, or the requested channel. */
