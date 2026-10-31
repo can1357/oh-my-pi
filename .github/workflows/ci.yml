@@ -21,7 +21,6 @@ on:
          - "deny.toml"
          - "about.toml"
          - "LICENSE"
-         - "THIRD-PARTY-NOTICES.txt"
          - "rust-toolchain.toml"
          - "rustfmt.toml"
          # A root dependency change (lockfile/catalog/patches) affects every
@@ -52,7 +51,6 @@ on:
          - "deny.toml"
          - "about.toml"
          - "LICENSE"
-         - "THIRD-PARTY-NOTICES.txt"
          - "rust-toolchain.toml"
          - "rustfmt.toml"
          - "bun.lock"
@@ -86,11 +84,11 @@ env:
    # so a filegroup addition cannot silently skip both.
    NATIVES_X64_TARGETS: natives-linux-x64-baseline natives-linux-x64-modern
    NATIVES_CROSS_TARGETS: natives-darwin-arm64 natives-darwin-x64-baseline natives-linux-arm64 natives-linux-musl-arm64 natives-linux-musl-x64-baseline natives-win32-arm64 natives-win32-x64-baseline
-   # Per-test wall-clock ceiling (seconds) for scripts/ci-test-ts.ts. omp-kata
-   # runners with reclaim_guest_freed_memory (infra/tune-kata-runtime.sh) run
-   # the SQLite/subprocess-heavy coding-agent suites 1.5-2x slower, which put
-   # several cases (model-registry refresh, session fork, credential bridge)
-   # over the 30 s default; 120 s still catches a real hang.
+   # Per-test wall-clock ceiling (seconds) for scripts/ci-test-ts.ts. The
+   # SQLite/subprocess-heavy coding-agent suites ran 1.5-2x slower on the
+   # previous self-hosted microVM runners, which put several cases
+   # (model-registry refresh, session fork, credential bridge) over the 30 s
+   # default on shared hosts; 120 s still catches a real hang.
    OMP_TEST_TIMEOUT: "120"
 
 permissions:
@@ -109,9 +107,9 @@ jobs:
    # ref (or from a tagged main HEAD) is also treated as a release.
    release_metadata:
       name: Resolve release metadata
-      # Hosted, not omp-kata: this ~20 s git-tag probe gates the whole release
-      # chain, and queueing it behind the 4-runner kata pool adds dead minutes
-      # to the release critical path.
+      # Hosted, not vmon: this ~20 s git-tag probe gates the whole release
+      # chain and needs no toolchain, so it should not wait on a vmon sandbox
+      # (team capacity, snapshot fork) on the release critical path.
       runs-on: ubuntu-22.04
       outputs:
          is-release: ${{ steps.detect.outputs.is-release }}
@@ -160,7 +158,7 @@ jobs:
 
    check:
       name: Lint, type check & web build
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'vmon-large/from=omp-ci' }}
       steps:
          - uses: actions/checkout@v4
          - uses: ./.github/actions/bun-install
@@ -187,7 +185,8 @@ jobs:
               # cache. PR runs use a fresh GitHub-hosted runner (see runs-on
               # above) with no prior cargo work, so nothing populates the index
               # for our own graph and resolution fails. Non-PR events land on
-              # omp-kata, whose Cargo cache is warm. Fetch first.
+              # vmon, whose omp-ci template bakes a warm Cargo registry (only
+              # crates added since the template build download). Fetch first.
               cargo fetch --locked
               cargo deny --locked --offline check licenses sources
          - name: Type check workspace
@@ -227,12 +226,12 @@ jobs:
    # Rust validation (tests, clippy, rustfmt) runs on non-PR events only.
    # Native-changing PRs are rare enough that they do not warrant PR-side
    # Rust validation or a PR-side addon build (see native_addons): Rust is
-   # validated post-merge on main (kata remote cache, warm) and again at
+   # validated post-merge on main (vmon, node Bazel cache) and again at
    # release. A skipped required check still satisfies branch protection.
    rust_validate:
       name: Validate Rust workspace (bazel)
       if: github.event_name != 'pull_request'
-      runs-on: omp-kata
+      runs-on: vmon-large/from=omp-ci
       steps:
          - uses: actions/checkout@v4
          - uses: ./.github/actions/bun-install
@@ -280,21 +279,17 @@ jobs:
    # (a merged grep fix plus its TS test failed 75 PR runs against the
    # 18.3.1 addon). Only main saves; see the save step for why.
    #
-   # Main (kata, cluster remote cache) builds only the pair here so the TS
+   # Main (vmon, node Bazel cache) builds only the pair here so the TS
    # fan-out starts as soon as it links; native_addons_cross builds every
    # other target in parallel. Job name says "bazel" for continuity
    # with required checks.
    native_addons:
       name: Build native addons (bazel)
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'vmon-large/from=omp-ci' }}
       # actions: write lets main prune superseded addon cache entries.
       permissions:
          contents: read
          actions: write
-      outputs:
-         # "<artifact-relative path>=<sha256>" pairs; kata consumers restore
-         # these from the in-cluster stash (see native-artifacts).
-         stash: ${{ steps.stage.outputs.stash }}
       steps:
          - uses: actions/checkout@v4
          - name: Compute native addon cache key
@@ -310,7 +305,7 @@ jobs:
 
          # ---- PR path: main-built addons from actions/cache, else npm ----
          # `ci-natives` is a plain workspace-relative path on purpose: the
-         # cache version hashes the literal path list, so kata (save) and
+         # cache version hashes the literal path list, so vmon (save) and
          # hosted (restore) must spell it identically, and upload-artifact
          # skips dot-directories by default.
          - name: Restore main-built native addons
@@ -361,7 +356,7 @@ jobs:
               if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
               # The addon cdylib links each peak at several GiB of rustc RSS;
               # building several addons in one invocation runs them
-              # concurrently, which OOMs the kata pod and takes the bazel
+              # concurrently, which OOMed the 14 GiB runner VM and took the bazel
               # server with it (exit 37 "Server terminated abruptly", runs
               # 30556752623 / 30557524371). Build one addon per invocation —
               # analysis and cached actions are shared through the persistent
@@ -411,52 +406,6 @@ jobs:
               "$loader" "$RUNNER_TEMP/smoke-addons.js" \
                 "$PWD/ci-natives/natives-linux-x64-baseline/pi_natives.linux-x64-baseline.node" \
                 "$PWD/ci-natives/natives-linux-x64-modern/pi_natives.linux-x64-modern.node"
-         # Kata test jobs download ~120 MB of artifact over the node's NAT
-         # egress (44-68 s per job, on the critical path). Every kata pod
-         # mounts the shared runner-cache PVC at /opt/bazel-repo-cache (the
-         # xwin cache already lives there), so stash the pair content-addressed
-         # beside it; the native-artifacts action restores and re-verifies it
-         # and falls back to the artifact on any miss. Best-effort: a stash
-         # failure only costs consumers the download.
-         - name: Stage native addons for consumers
-           id: stage
-           shell: bash
-           run: |
-              set -euo pipefail
-              stash=""
-              for f in ci-natives/natives-linux-x64-*/*.node; do
-                sha="$(sha256sum "$f" | cut -d' ' -f1)"
-                stash="$stash ${f#ci-natives/}=$sha"
-              done
-              echo "stash=${stash# }" >> "$GITHUB_OUTPUT"
-              stash_dir=/opt/bazel-repo-cache/ci-natives
-              if [ -z "${BAZEL_REMOTE_USER:-}" ] || [ ! -w /opt/bazel-repo-cache ]; then
-                echo "No in-cluster stash on this runner; consumers download the artifact."
-                exit 0
-              fi
-              if ! mkdir -p "$stash_dir"; then
-                echo "::warning title=Native addon stash::cannot create $stash_dir; consumers will download the artifact"
-                exit 0
-              fi
-              # Consumers of a run need its entries for minutes; two days
-              # covers re-runs while bounding the PVC footprint.
-              find "$stash_dir" -type f -mmin +2880 -delete 2>/dev/null || true
-              for entry in ${stash# }; do
-                rel="${entry%%=*}"
-                sha="${entry##*=}"
-                dest="$stash_dir/$sha.node"
-                if [ -f "$dest" ]; then
-                  touch "$dest"
-                  continue
-                fi
-                tmp="$stash_dir/.$sha.$$.tmp"
-                if cp "ci-natives/$rel" "$tmp" && mv -f "$tmp" "$dest"; then
-                  echo "stashed $rel -> $dest"
-                else
-                  rm -f "$tmp"
-                  echo "::warning title=Native addon stash::could not stash $rel; consumers will download the artifact"
-                fi
-              done
          # Only main saves: an entry saved on any other ref is readable by
          # that ref alone yet counts against the shared 10 GB repo quota,
          # whose LRU eviction has already cost the darwin release archives.
@@ -465,11 +414,24 @@ jobs:
          # The three steps below run only on main (never exercised by PR or
          # branch runs) and are pure optimization for later PRs: a failure
          # must never fail native_addons and with it every test job.
+         # PR runs restore this entry on GitHub-hosted runners, which read
+         # GitHub's cache; on vmon runners actions/cache goes to the node's
+         # local cache. The vmon runner hands GitHub's results URL to node
+         # actions (not run steps) as ACTIONS_RESULTS_ORL, so a script action
+         # looks it up and the probe and save below talk to GitHub.
+         - name: Locate GitHub's cache service
+           id: gh-results
+           if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+           uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+           with:
+              script: core.setOutput("url", process.env.ACTIONS_RESULTS_ORL || process.env.ACTIONS_RESULTS_URL)
          - name: Probe native addon cache entry
            id: natives-cache-probe
            if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
            continue-on-error: true
            uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+           env:
+              ACTIONS_RESULTS_URL: ${{ steps.gh-results.outputs.url }}
            with:
               path: ci-natives
               key: ${{ steps.natives-key.outputs.key }}
@@ -478,6 +440,8 @@ jobs:
            if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && steps.natives-cache-probe.outputs.cache-hit != 'true'
            continue-on-error: true
            uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+           env:
+              ACTIONS_RESULTS_URL: ${{ steps.gh-results.outputs.url }}
            with:
               path: ci-natives
               key: ${{ steps.natives-key.outputs.key }}
@@ -512,7 +476,7 @@ jobs:
    native_addons_cross:
       name: Build native addons (bazel, cross targets)
       if: github.event_name != 'pull_request'
-      runs-on: omp-kata
+      runs-on: vmon-large/from=omp-ci
       steps:
          - uses: actions/checkout@v4
          - id: cache
@@ -577,16 +541,17 @@ jobs:
 
    test_coding_agent_native:
       name: "Test coding-agent native/unit (TS) ${{ matrix.shard }}"
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'vmon-large/from=omp-ci' }}
       needs: [native_addons]
       if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
       timeout-minutes: 25
       # The longest PR job, so it runs as three shards on hosted PR runners
       # (two left the slower shard ~25 s behind every other job). Main keeps
-      # one: omp-kata caps at 8 runners and the fan-out already fills it.
-      # Declared first among the test jobs: when the 8-runner pool is full
-      # the longest bucket should not be the one left queued (probe run
-      # 36238796966 queued it 1.9 min behind the shorter buckets).
+      # one: each vmon job holds an 8 vCPU / 16 GiB sandbox against the CI
+      # team's limits, and the main fan-out already runs up to a dozen.
+      # Declared first among the test jobs: when the team is at its sandbox
+      # limit the longest bucket should not be the one left waiting (probe
+      # run 36238796966 queued it 1.9 min behind the shorter buckets).
       # No required check keys on this job name (branch protection and
       # rulesets are off for main/omp2), so the per-shard names are safe.
       strategy:
@@ -599,7 +564,6 @@ jobs:
          - uses: ./.github/actions/native-artifacts
            with:
               targets: linux-x64-baseline linux-x64-modern
-              stash: ${{ needs.native_addons.outputs.stash }}
          - name: Test coding-agent native/unit bucket
            env:
               OMP_TEST_CONCURRENCY: "4"
@@ -608,7 +572,7 @@ jobs:
 
    test_workspace:
       name: Test TS workspace fast
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'vmon-large/from=omp-ci' }}
       needs: [native_addons]
       if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
       timeout-minutes: 20
@@ -618,7 +582,6 @@ jobs:
          - uses: ./.github/actions/native-artifacts
            with:
               targets: linux-x64-baseline linux-x64-modern
-              stash: ${{ needs.native_addons.outputs.stash }}
          - name: Test workspace packages and repo scripts (TS)
            env:
               OMP_TEST_CONCURRENCY: "4"
@@ -627,11 +590,11 @@ jobs:
               # Not `test:scripts`: scripts/install.test.ts fails on main
               # (its install.sh smoke-check executes a fake binary), so running
               # the whole group here would red this job on an unrelated break.
-              bun test scripts/release.test.ts
+              bun test scripts/release.test.ts scripts/ci-build-upload.test.ts
 
    test_coding_agent_singleton:
       name: Test coding-agent singleton/global-state (TS)
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'vmon-large/from=omp-ci' }}
       needs: [native_addons]
       if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
       timeout-minutes: 20
@@ -641,7 +604,6 @@ jobs:
          - uses: ./.github/actions/native-artifacts
            with:
               targets: linux-x64-baseline linux-x64-modern
-              stash: ${{ needs.native_addons.outputs.stash }}
          - name: Test coding-agent singleton/global-state bucket
            # Keep global Settings/env/fake-timer tests serial; native addon
            # artifacts are still available like every other coding-agent bucket.
@@ -649,7 +611,7 @@ jobs:
 
    test_ts_native:
       name: Test TS native/integration packages
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'vmon-large/from=omp-ci' }}
       needs: [native_addons]
       if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
       timeout-minutes: 25
@@ -659,7 +621,6 @@ jobs:
          - uses: ./.github/actions/native-artifacts
            with:
               targets: linux-x64-baseline linux-x64-modern
-              stash: ${{ needs.native_addons.outputs.stash }}
          - name: Install project-local TUI debug tool dependencies
            run: bun install --cwd .omp/tools --frozen-lockfile
          - name: Test native/TUI/browser-ish packages (TS)
@@ -669,7 +630,7 @@ jobs:
 
    test_coding_agent_ui:
       name: Test coding-agent UI/TUI (TS)
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'vmon-large/from=omp-ci' }}
       needs: [native_addons]
       if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
       timeout-minutes: 25
@@ -679,7 +640,6 @@ jobs:
          - uses: ./.github/actions/native-artifacts
            with:
               targets: linux-x64-baseline linux-x64-modern
-              stash: ${{ needs.native_addons.outputs.stash }}
          - name: Test coding-agent UI/TUI bucket
            env:
               OMP_TEST_CONCURRENCY: "2"
@@ -687,7 +647,7 @@ jobs:
 
    test_coding_agent_runtime:
       name: Test coding-agent runtime/session (TS)
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'vmon-large/from=omp-ci' }}
       needs: [native_addons]
       if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
       timeout-minutes: 25
@@ -697,7 +657,6 @@ jobs:
          - uses: ./.github/actions/native-artifacts
            with:
               targets: linux-x64-baseline linux-x64-modern
-              stash: ${{ needs.native_addons.outputs.stash }}
          - name: Test coding-agent runtime bucket
            # Runtime/session tests import native-backed barrels too; keep this
            # separate for concurrency, not as a native-free guardrail.
@@ -707,7 +666,7 @@ jobs:
 
    test_smoke:
       name: Test CLI smoke (TS)
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'vmon-large/from=omp-ci' }}
       needs: [native_addons]
       if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
       timeout-minutes: 15
@@ -717,13 +676,12 @@ jobs:
          - uses: ./.github/actions/native-artifacts
            with:
               targets: linux-x64-baseline linux-x64-modern
-              stash: ${{ needs.native_addons.outputs.stash }}
          - name: CLI smoke test
            run: bun run ci:test:smoke
 
    install_methods:
       name: Install method smoke tests
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'vmon-large/from=omp-ci' }}
       needs: [native_addons]
       if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
       steps:
@@ -732,7 +690,6 @@ jobs:
          - uses: ./.github/actions/native-artifacts
            with:
               targets: linux-x64-baseline linux-x64-modern
-              stash: ${{ needs.native_addons.outputs.stash }}
          - name: Install method smoke tests
            env:
               OMP_INSTALL_TEST_SKIP_NATIVE_BUILD: "1"
@@ -879,6 +836,15 @@ jobs:
            with:
               name: omp-binary-${{ matrix.target_id }}
               path: ${{ matrix.binary_path }}
+         # All targets pin the committed viewer manifest. Publish the exact
+         # generated bytes from one binary build rather than rebuilding them.
+         - name: Upload shared export viewer artifact
+           if: matrix.target_id == 'linux-x64'
+           uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+           with:
+              name: omp-export-viewer
+              path: packages/coding-agent/export-assets/*.js
+              if-no-files-found: error
          # Main-only save, after the build so it is off the leg's critical
          # path: caches saved on a tag or branch are readable only by that ref
          # yet count against the shared 10 GB repo cache quota.
@@ -1122,8 +1088,7 @@ jobs:
               bun run ci:release:checksums SHA256SUMS.txt \
                 packages/coding-agent/binaries/omp-* \
                 packages/browser-relay/dist/omp-browser-relay-extension.zip \
-                LICENSE \
-                THIRD-PARTY-NOTICES.txt
+                LICENSE
          - name: Create GitHub Release
            uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
            with:
@@ -1133,7 +1098,6 @@ jobs:
                  packages/coding-agent/binaries/omp-*
                  packages/browser-relay/dist/omp-browser-relay-extension.zip
                  LICENSE
-                 THIRD-PARTY-NOTICES.txt
                  SHA256SUMS.txt
               body_path: release-notes.md
               generate_release_notes: true
@@ -1141,8 +1105,9 @@ jobs:
    # Publishes the release binaries to build.stencil.so, which serves them
    # (with binary patches between releases) to `omp update`, the install
    # scripts' binary mode, and the Homebrew formula. Canary tags upload to the
-   # canary channel (derived script-side). Not gated on skip_npm: binary
-   # clients never read npm.
+   # canary channel (derived script-side). Also publishes the integrity-pinned
+   # shared HTML export viewer before npm consumers can reference its URL.
+   # Not gated on skip_npm: binary clients never read npm.
    release_build:
       name: Publish to build.stencil.so
       if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
@@ -1168,6 +1133,11 @@ jobs:
               pattern: omp-binary-*
               path: packages/coding-agent/binaries
               merge-multiple: true
+         - name: Download shared export viewer
+           uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+           with:
+              name: omp-export-viewer
+              path: packages/coding-agent/export-assets
          # Dependency-free script (bun APIs + curl), so no `bun install`.
          - name: Publish to build.stencil.so
            run: bun scripts/ci-build-upload.ts "${{ needs.release_metadata.outputs.release-tag }}" packages/coding-agent/binaries/omp-*
@@ -1184,7 +1154,7 @@ jobs:
       # leaf packages as lockstep-versioned optionalDependencies, so installs
       # resolve them the moment the core version is live. release_build too:
       # binary updates install what build.stencil.so published (update-cli.ts),
-      # so the build service must lead npm.
+      # and HTML exports load its pinned viewer, so the build service must lead npm.
       needs: [release_metadata, release_binary, release_smoke, release_build, release_native_leaves]
       runs-on: ubuntu-22.04
       # `id-token: write` lets npm mint the GitHub OIDC token it exchanges for a

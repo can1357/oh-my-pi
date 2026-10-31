@@ -174,7 +174,7 @@ fn is_anchor(text: &str) -> bool {
 	let hash = word
 		.bytes()
 		.fold(0x811c_9dc5u32, |h, b| (h ^ u32::from(b)).wrapping_mul(0x0100_0193));
-	hash % ANCHOR_EVERY == 0
+	hash.is_multiple_of(ANCHOR_EVERY)
 }
 
 /// The context `before` a word: the last [`CONTEXT_UNITS`] UTF-16 units,

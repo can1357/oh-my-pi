@@ -44,11 +44,7 @@ pub(super) fn capture_permission() -> bool {
 }
 
 fn require_capture_permission() -> CoreResult<()> {
-	if capture_permission() {
-		Ok(())
-	} else {
-		Err(permission::denied(permission::screen_recording_pane()))
-	}
+	capture_permission().ok_or_else(|| permission::denied(permission::screen_recording_pane()))
 }
 
 pub(super) fn capture_available() -> bool {

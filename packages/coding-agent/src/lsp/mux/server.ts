@@ -64,6 +64,8 @@ class Session {
 	readonly connection: IpcConnection;
 	readonly framer = new MessageFramer(Buffer.alloc(0));
 	readonly openUris = new Set<string>();
+	/** Workspace folders this session added; removed from the server when the session leaves. */
+	readonly workspaceFolders = new Map<string, unknown>();
 	readonly forwardedIds = new Map<LspJsonRpcId, LspJsonRpcId>();
 	readonly pendingClientRequests = new Map<string, ClientRequestPending>();
 	server?: ServerInstance;
@@ -333,6 +335,11 @@ export class LspMuxServer {
 			await this.#didClose(session, server, message);
 			return;
 		}
+		if (message.method === "workspace/didChangeWorkspaceFolders" && !request) {
+			this.#trackWorkspaceFolders(session, message);
+			await this.#writeServer(server, message);
+			return;
+		}
 		if (message.method === "$/cancelRequest" && !request) {
 			if (!isRecord(message.params)) return;
 			const originalId = message.params.id;
@@ -390,6 +397,17 @@ export class LspMuxServer {
 		// so no other session holds an overlay of this document on this server.
 		server.documents.delete(uri);
 		await this.#writeServer(server, message);
+	}
+
+	#trackWorkspaceFolders(session: Session, message: LspJsonRpcNotification): void {
+		const event = isRecord(message.params) ? message.params.event : undefined;
+		if (!isRecord(event)) return;
+		const folders = (value: unknown): Array<{ uri: string } & Record<string, unknown>> =>
+			Array.isArray(value)
+				? value.filter((folder): folder is { uri: string } => isRecord(folder) && typeof folder.uri === "string")
+				: [];
+		for (const folder of folders(event.removed)) session.workspaceFolders.delete(folder.uri);
+		for (const folder of folders(event.added)) session.workspaceFolders.set(folder.uri, folder);
 	}
 
 	#spawnServer(key: string, params: MuxConnectParams): ServerInstance {
@@ -627,6 +645,13 @@ export class LspMuxServer {
 				if (pending.session !== session) continue;
 				pending.drop = true;
 				cleanup = writeBestEffort({ jsonrpc: "2.0", method: "$/cancelRequest", params: { id: muxId } });
+			}
+			if (session.workspaceFolders.size > 0) {
+				cleanup = writeBestEffort({
+					jsonrpc: "2.0",
+					method: "workspace/didChangeWorkspaceFolders",
+					params: { event: { added: [], removed: [...session.workspaceFolders.values()] } },
+				});
 			}
 			// The write queue is serial, so the last teardown write settling means all have.
 			await cleanup;

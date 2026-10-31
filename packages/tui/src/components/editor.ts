@@ -779,6 +779,12 @@ export class Editor implements Component, Focusable {
 	/** Label the TSP field to disable host-side editing while another input owner handles raw keys. */
 	nativeKeyPassthrough = false;
 	/**
+	 * Ask the TSP terminal to keep what is typed into this field and draw it at
+	 * the caret until this clears, then send it: set while startup cannot read
+	 * input yet (the prompt composer's deferred-input start).
+	 */
+	nativeTypeahead = false;
+	/**
 	 * TSP chrome around the `editor` node (the prompt composer's chips, mode
 	 * chip, send/stop): the root role, the children with `input` placed where
 	 * the layout wants it, and the input's keypath for the caret-anchored
@@ -1899,6 +1905,7 @@ export class Editor implements Component, Focusable {
 			mode: this.nativeKeyPassthrough ? "PTY" : vim ? VIM_MODE_LABELS[vim.mode] : undefined,
 			lang: this.describeLanguage?.(),
 			maxLines: this.#maxHeight,
+			typeahead: this.nativeTypeahead || undefined,
 		};
 		let editor = this.#nativeEditor;
 		if (!editor || !sameProps(editor.props, props)) {

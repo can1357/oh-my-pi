@@ -1,24 +1,43 @@
-import { afterAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
-import { acquireBrowser, holdBrowser, releaseBrowser } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
+import {
+	acquireBrowser,
+	holdBrowser,
+	type PuppeteerBrowserHandle,
+	releaseBrowser,
+} from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
 import { releaseAllTabs } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import {
-	installWebMcp,
-	installWebMcpPageHook,
-	WEBMCP_BRIDGE_KEY,
+	WebMcpController,
 	type WebMcpEventsResult,
 	type WebMcpInvokeResult,
 	type WebMcpListResult,
-	webMcpSnapshotInPage,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/webmcp";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
+import { rejectionOf } from "../helpers/rejection";
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
-// Every case includes a real Chromium lifecycle, including process launch and shutdown.
 const BROWSER_TEST_TIMEOUT_MS = 30_000;
+
+// One headless Chromium for the file, held across it; the browser host's tabs open in it too. Each test closes the
+// pages and tabs it opened.
+let sharedHeadless: PuppeteerBrowserHandle | undefined;
+
+beforeAll(async () => {
+	if (!CHROMIUM_AVAILABLE) return;
+	const launched = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
+	if (!("browser" in launched)) throw new Error("Expected a Puppeteer browser");
+	holdBrowser(launched);
+	sharedHeadless = launched;
+});
+
+function headless(): PuppeteerBrowserHandle {
+	if (!sharedHeadless?.browser.connected) throw new Error("Expected the shared headless browser");
+	return sharedHeadless;
+}
 
 function createBrowserHost() {
 	const session: ToolSession = {
@@ -55,18 +74,29 @@ function valueFrom<T>(result: { details?: unknown }): T {
 afterAll(async () => {
 	await releaseAllTabs({ kill: true });
 	await disposeAllVmContexts();
+	if (sharedHeadless) await releaseBrowser(sharedHeadless, { kill: true });
 });
+
+function servePage(body: string): Bun.Server<undefined> {
+	return Bun.serve({
+		port: 0,
+		hostname: "localhost",
+		fetch: () => new Response(`<!doctype html>${body}`, { headers: { "content-type": "text/html" } }),
+	});
+}
 
 describe.skipIf(!CHROMIUM_AVAILABLE)("browser WebMCP helpers", () => {
 	it(
-		"discovers, invokes, bounds trust, and reports page-side registrations",
+		"discovers, invokes, bounds trust, and reports native registrations",
 		async () => {
 			const invoke = createBrowserHost();
-			const html = `<!doctype html>
-<html><head><title>loading</title></head><body><script>
+			// localhost is a secure context, so Chromium exposes its own modelContext.
+			using server = servePage(`<title>loading</title>
+<form toolname="search_form" tooldescription="Searches the page."><input name="q"></form>
+<script>
 (async () => {
-  window.webmcpSurface = navigator.modelContext?.constructor?.name === "ModelContext" ? "native" : "hook-polyfill";
-  await navigator.modelContext.registerTool({
+  const context = document.modelContext ?? navigator.modelContext;
+  await context.registerTool({
     name: "sum_values",
     description: "Adds two values from the page.",
     inputSchema: {
@@ -74,16 +104,15 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser WebMCP helpers", () => {
       properties: { left: { type: "number" }, right: { type: "number" } },
       required: ["left", "right"]
     },
-    annotations: { readOnlyHint: true },
     execute({ left, right }) { return { total: left + right }; }
   });
-  await navigator.modelContext.registerTool({
+  await context.registerTool({
     name: "large_result",
     description: "Returns an oversized page result.",
     inputSchema: { type: "object" },
     execute() { return "x".repeat(70 * 1024); }
   });
-  await navigator.modelContext.registerTool({
+  await context.registerTool({
     name: "throw_page_error",
     description: "Throws page-provided text.",
     inputSchema: { type: "object" },
@@ -91,22 +120,20 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser WebMCP helpers", () => {
   });
   document.title = "registered";
 })();
-</script></body></html>`;
-			const url = `data:text/html,${encodeURIComponent(html)}`;
-			await invoke({ action: "open", name: "webmcp", url });
-
-			const surface = valueFrom<string>(await invoke(call("webmcp", "evaluate", ["window.webmcpSurface"])));
-			// Chrome 150 with WebMCP flags does not expose its secure-context API to data: pages; the preload polyfill runs.
-			expect(surface).toBe("hook-polyfill");
+</script>`);
+			await invoke({ action: "open", name: "webmcp", url: `http://localhost:${server.port}/` });
+			expect(valueFrom<string>(await invoke(call("webmcp", "evaluate", ["document.title"])))).toBe("registered");
 
 			const summary = valueFrom<WebMcpListResult>(await invoke(call("webmcp", "webmcpList")));
-			expect(summary).toMatchObject({
-				status: "ready",
-				truncated: false,
-				untrusted: true,
-			});
-			expect(summary.tools.map(tool => tool.name)).toEqual(["large_result", "sum_values", "throw_page_error"]);
+			expect(summary).toMatchObject({ status: "ready", truncated: false, untrusted: true });
+			expect(summary.tools.map(tool => tool.name)).toEqual([
+				"large_result",
+				"search_form",
+				"sum_values",
+				"throw_page_error",
+			]);
 			expect(summary.tools.every(tool => tool.inputSchema === undefined)).toBe(true);
+			expect(new Set(summary.tools.map(tool => tool.origin))).toEqual(new Set([`http://localhost:${server.port}`]));
 
 			const detail = valueFrom<WebMcpListResult>(
 				await invoke(call("webmcp", "webmcpList", [{ name: "sum_values" }])),
@@ -115,7 +142,6 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser WebMCP helpers", () => {
 				expect.objectContaining({
 					name: "sum_values",
 					inputSchema: expect.objectContaining({ type: "object", required: ["left", "right"] }),
-					annotations: { readOnlyHint: true },
 					untrusted: true,
 				}),
 			]);
@@ -144,10 +170,104 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser WebMCP helpers", () => {
 			expect(events).toMatchObject({ untrusted: true, truncated: false });
 			expect(events.events.map(event => [event.type, event.name])).toEqual([
 				["registered", "large_result"],
+				["registered", "search_form"],
 				["registered", "sum_values"],
 				["registered", "throw_page_error"],
 			]);
 			await invoke({ action: "close", name: "webmcp", kill: true });
+		},
+		BROWSER_TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"leaves the page's globals and modelContext alone, before and after a webmcp helper runs",
+		async () => {
+			const invoke = createBrowserHost();
+			using server = servePage(`<title>untouched</title>`);
+			// What the page itself can see of omp: an omp global, a wrapped platform method, a polyfilled context.
+			const pageView = `JSON.stringify({
+  ompGlobals: Object.getOwnPropertyNames(globalThis).filter(name => name.startsWith("__ompWebMcp")),
+  nativeRegisterTool: typeof ModelContext === "undefined"
+    ? null
+    : /\\[native code\\]/.test(Function.prototype.toString.call(ModelContext.prototype.registerTool)),
+  ownModelContext: Object.getOwnPropertyNames(navigator).concat(Object.getOwnPropertyNames(document)).includes("modelContext"),
+  modelContext: "modelContext" in navigator || "modelContext" in document,
+})`;
+			await invoke({ action: "open", name: "webmcp-untouched", url: `http://localhost:${server.port}/` });
+			const secure = { ompGlobals: [], nativeRegisterTool: true, ownModelContext: false, modelContext: true };
+			expect(JSON.parse(valueFrom<string>(await invoke(call("webmcp-untouched", "evaluate", [pageView]))))).toEqual(
+				secure,
+			);
+			await invoke(call("webmcp-untouched", "webmcpList"));
+			expect(JSON.parse(valueFrom<string>(await invoke(call("webmcp-untouched", "evaluate", [pageView]))))).toEqual(
+				secure,
+			);
+
+			// No secure context, so no platform API, and omp adds none.
+			await invoke(call("webmcp-untouched", "goto", ["data:text/html,<title>insecure</title>"]));
+			expect(JSON.parse(valueFrom<string>(await invoke(call("webmcp-untouched", "evaluate", [pageView]))))).toEqual({
+				ompGlobals: [],
+				nativeRegisterTool: null,
+				ownModelContext: false,
+				modelContext: false,
+			});
+			await invoke({ action: "close", name: "webmcp-untouched", kill: true });
+		},
+		BROWSER_TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"says why a page gets no WebMCP instead of listing no tools",
+		async () => {
+			const invoke = createBrowserHost();
+			await invoke({ action: "open", name: "webmcp-none", url: "data:text/html,<title>insecure</title>" });
+			const listed = valueFrom<WebMcpListResult>(await invoke(call("webmcp-none", "webmcpList")));
+			expect(listed).toMatchObject({ status: "unavailable", tools: [], untrusted: true });
+			expect(listed.reason).toContain("secure context");
+			expect(listed.reason).toContain("origin trial");
+			expect(listed.reason).toContain("--enable-features=WebMCP");
+			const error = await rejectionOf(invoke(call("webmcp-none", "webmcpInvoke", ["anything", {}])));
+			expect(String(error)).toContain("Chrome does not expose WebMCP to this page");
+			await invoke({ action: "close", name: "webmcp-none", kill: true });
+		},
+		BROWSER_TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"lists and invokes a tool a cross-origin iframe registers in its own process",
+		async () => {
+			const invoke = createBrowserHost();
+			// 127.0.0.1 and localhost are different sites, so the iframe gets its own renderer and CDP session.
+			using child = Bun.serve({
+				port: 0,
+				hostname: "127.0.0.1",
+				fetch: () =>
+					new Response(
+						`<!doctype html><title>child</title><script>
+document.modelContext.registerTool({
+  name: "child_tool",
+  description: "Answers from the iframe.",
+  inputSchema: { type: "object" },
+  execute() { return { from: location.origin }; }
+});
+</script>`,
+						{ headers: { "content-type": "text/html" } },
+					),
+			});
+			using parent = servePage(
+				`<title>parent</title><iframe allow="tools" src="http://127.0.0.1:${child.port}/" onload="document.title = 'loaded'"></iframe>`,
+			);
+			await invoke({ action: "open", name: "webmcp-oopif", url: `http://localhost:${parent.port}/` });
+			expect(valueFrom<string>(await invoke(call("webmcp-oopif", "evaluate", ["document.title"])))).toBe("loaded");
+			const listed = valueFrom<WebMcpListResult>(await invoke(call("webmcp-oopif", "webmcpList")));
+			expect(listed.tools).toEqual([
+				expect.objectContaining({ name: "child_tool", origin: `http://127.0.0.1:${child.port}` }),
+			]);
+			const result = valueFrom<WebMcpInvokeResult>(
+				await invoke(call("webmcp-oopif", "webmcpInvoke", ["child_tool", {}])),
+			);
+			expect(result).toEqual({ ok: true, result: { from: `http://127.0.0.1:${child.port}` }, untrusted: true });
+			await invoke({ action: "close", name: "webmcp-oopif", kill: true });
 		},
 		BROWSER_TEST_TIMEOUT_MS,
 	);
@@ -208,281 +328,225 @@ context.registerTool({
 		BROWSER_TEST_TIMEOUT_MS,
 	);
 
-	// The hook reaches a loaded page when omp attaches to it: a context the page set up itself is
-	// patched directly, not through Chromium's ModelContext prototype.
-	it.each([
-		{
-			setup: "a non-configurable accessor",
-			define: `Object.defineProperty(navigator, "modelContext", { get: () => window.pageContext });`,
-			registerOn: "navigator.modelContext",
-		},
-		{
-			setup: "an accessor the page read before attach",
-			define: `Object.defineProperty(navigator, "modelContext", { configurable: true, get: () => window.pageContext });
-window.cachedContext = navigator.modelContext;`,
-			registerOn: "window.cachedContext",
-		},
-		{
-			setup: "an accessor that yields no context",
-			define: `Object.defineProperty(navigator, "modelContext", { configurable: true, get: () => undefined });`,
-			registerOn: "navigator.modelContext",
-		},
-		{
-			setup: "a prototype accessor the page read before attach",
-			define: `Object.defineProperty(Navigator.prototype, "modelContext", { configurable: true, get: () => window.pageContext });
-window.cachedContext = navigator.modelContext;`,
-			registerOn: "window.cachedContext",
-		},
-		{
-			setup: "a prototype accessor that yields no context",
-			define: `Object.defineProperty(Navigator.prototype, "modelContext", { configurable: true, get: () => undefined });`,
-			registerOn: "navigator.modelContext",
-		},
-		{
-			setup: "a data property holding null",
-			define: `Object.defineProperty(navigator, "modelContext", { configurable: true, value: null });`,
-			registerOn: "navigator.modelContext",
-		},
-		{
-			setup: "a prototype accessor that yields null",
-			define: `Object.defineProperty(Navigator.prototype, "modelContext", { configurable: true, get: () => null });`,
-			registerOn: "navigator.modelContext",
-		},
-		{
-			setup: "a bound prototype accessor the page read before attach",
-			define: `Object.defineProperty(Navigator.prototype, "modelContext", { configurable: true, get: function () { return window.pageContext; }.bind(null) });
-window.cachedContext = navigator.modelContext;`,
-			registerOn: "window.cachedContext",
-		},
-	])(
-		"mirrors a tool registered after attach on a page whose modelContext is $setup",
-		async ({ define, registerOn }) => {
-			const handle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
-			if (!("browser" in handle)) throw new Error("Expected a Puppeteer browser");
-			holdBrowser(handle);
-			const page = await handle.browser.newPage();
-			try {
-				await page.goto("data:text/html,<title>page-owned context</title>");
-				// The realm installWebMcp hooks in existing frames.
-				const realm = page.mainFrame().mainRealm();
-				await realm.evaluate(`window.pageContext = { registerTool() {}, unregisterTool() {} };\n${define}\nnull;`);
-				const controller = await installWebMcp(page);
-				await realm.evaluate(
-					`${registerOn}.registerTool({ name: "page_owned", description: "Page tool.", inputSchema: { type: "object" }, execute: () => ({ value: 42 }) })`,
-				);
-				expect((await controller.list()).tools.map(tool => tool.name)).toEqual(["page_owned"]);
-				expect(await controller.invoke("page_owned", {})).toEqual({
-					ok: true,
-					result: { value: 42 },
-					untrusted: true,
-				});
-				await controller.dispose();
-			} finally {
-				await page.close();
-				await releaseBrowser(handle, { kill: false });
-			}
-		},
-		BROWSER_TEST_TIMEOUT_MS,
-	);
-
-	// `window.nativeRegister` is Chromium's method from before attach.
-	it.each([
-		{
-			change: "left registerTool alone",
-			afterAttach: "",
-			check: `ModelContext.prototype.registerTool === window.nativeRegister`,
-		},
-		{
-			change: "replaced registerTool",
-			afterAttach: `window.pageRegister = function registerTool() {};
-ModelContext.prototype.registerTool = window.pageRegister;`,
-			check: `ModelContext.prototype.registerTool === window.pageRegister`,
-		},
-		{
-			change: "made registerTool non-enumerable",
-			afterAttach: `Object.defineProperty(ModelContext.prototype, "registerTool", { enumerable: false });`,
-			check: `(d => d.value === window.nativeRegister && !d.enumerable)(Object.getOwnPropertyDescriptor(ModelContext.prototype, "registerTool"))`,
-		},
-	])(
-		"restores only its own methods on dispose after the page $change",
-		async ({ afterAttach, check }) => {
-			// A secure context, so Chromium exposes its own ModelContext.
+	it(
+		"forgets a page's tools once it navigates and finds the next page's",
+		async () => {
 			using server = Bun.serve({
 				port: 0,
 				hostname: "localhost",
-				fetch: () =>
-					new Response("<!doctype html><title>dispose</title>", { headers: { "content-type": "text/html" } }),
+				fetch: request => {
+					const name = new URL(request.url).pathname.slice(1);
+					return new Response(
+						`<!doctype html><title>${name}</title><script>document.modelContext.registerTool({ name: "${name}_tool", description: "Page tool.", inputSchema: { type: "object" }, execute: () => "${name}" });</script>`,
+						{ headers: { "content-type": "text/html" } },
+					);
+				},
 			});
-			const handle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
-			if (!("browser" in handle)) throw new Error("Expected a Puppeteer browser");
-			holdBrowser(handle);
+			const handle = headless();
 			const page = await handle.browser.newPage();
 			try {
-				await page.goto(`http://localhost:${server.port}/`);
-				const realm = page.mainFrame().mainRealm();
-				await realm.evaluate(`window.nativeRegister = ModelContext.prototype.registerTool; null;`);
-				const controller = await installWebMcp(page);
-				await realm.evaluate(`${afterAttach}\nnull;`);
-				await controller.dispose();
-				expect(await realm.evaluate(check)).toBe(true);
+				const controller = new WebMcpController(page);
+				await page.goto(`http://localhost:${server.port}/first`);
+				expect((await controller.list()).tools.map(tool => tool.name)).toEqual(["first_tool"]);
+				await page.goto(`http://localhost:${server.port}/second`);
+				expect((await controller.list()).tools.map(tool => tool.name)).toEqual(["second_tool"]);
+				// Back from the back/forward cache: Chrome announces the restored page's tools again.
+				await page.goBack();
+				expect((await controller.list()).tools.map(tool => tool.name)).toEqual(["first_tool"]);
+				expect((await controller.events()).events.map(event => [event.type, event.name])).toEqual([
+					["registered", "first_tool"],
+					["registered", "second_tool"],
+					["unregistered", "first_tool"],
+					["registered", "first_tool"],
+					["unregistered", "second_tool"],
+				]);
 			} finally {
 				await page.close();
-				await releaseBrowser(handle, { kill: false });
 			}
 		},
 		BROWSER_TEST_TIMEOUT_MS,
 	);
 
 	it(
-		"keeps an attached page alive whose document is replaced through a javascript: URL",
+		"cancels the page's tool invocation when the call is aborted",
 		async () => {
-			using server = Bun.serve({
-				port: 0,
-				hostname: "localhost",
-				fetch: () =>
-					new Response("<!doctype html><title>before</title>", { headers: { "content-type": "text/html" } }),
-			});
-			const handle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
-			if (!("browser" in handle)) throw new Error("Expected a Puppeteer browser");
-			holdBrowser(handle);
+			using server = servePage(`<title>hang</title><script>
+document.modelContext.registerTool({ name: "never_answers", description: "Hangs.", inputSchema: { type: "object" }, execute: () => Promise.withResolvers().promise });
+</script>`);
+			const handle = headless();
 			const page = await handle.browser.newPage();
 			try {
 				await page.goto(`http://localhost:${server.port}/`);
-				const realm = page.mainFrame().mainRealm();
-				const controller = await installWebMcp(page);
-				// Puppeteer loses track of a javascript:-replaced document's realm, so the new document reports
-				// through a CDP binding.
-				const session = await page.createCDPSession();
-				await session.send("Runtime.enable");
-				await session.send("Runtime.addBinding", { name: "reportSurface" });
-				const reported = Promise.withResolvers<string>();
-				session.on("Runtime.bindingCalled", event => reported.resolve(event.payload));
-				let crashed = false;
-				page.on("error", () => {
-					crashed = true;
-				});
-				// The replacement document is the frame's second; reading its context binds a second time if omp
-				// created one in the first.
-				const html = `<script>reportSurface((document.modelContext ?? navigator.modelContext).constructor.name);</script>`;
-				await realm.evaluate(`location.href = "javascript:" + ${JSON.stringify(JSON.stringify(html))}; null;`);
-				expect(await reported.promise).toBe("ModelContext");
-				// The kill can land after the report; a killed renderer answers nothing more and the test times out.
-				const alive = await session.send("Runtime.evaluate", { expression: "1 + 1", returnByValue: true });
-				expect(alive.result.value).toBe(2);
-				expect(crashed).toBe(false);
-				await controller.dispose();
+				const observer = await page.createCDPSession();
+				const invoked = Promise.withResolvers<void>();
+				const responded = Promise.withResolvers<string>();
+				observer.on("WebMCP.toolInvoked", () => invoked.resolve());
+				observer.on("WebMCP.toolResponded", event => responded.resolve(event.status));
+				await observer.send("WebMCP.enable");
+				const aborter = new AbortController();
+				const call = new WebMcpController(page).invoke("never_answers", {}, {}, aborter.signal);
+				await invoked.promise;
+				aborter.abort();
+				expect(await rejectionOf(call)).toBeInstanceOf(Error);
+				expect(await responded.promise).toBe("Canceled");
+				await observer.detach();
 			} finally {
 				await page.close();
-				await releaseBrowser(handle, { kill: false });
-			}
-		},
-		BROWSER_TEST_TIMEOUT_MS,
-	);
-
-	it.each([
-		{
-			setup: "held before attach",
-			define: `window.pageContext = document.modelContext ?? navigator.modelContext;`,
-		},
-		{
-			setup: "exposed on document with its own registerTool",
-			define: `window.pageContext = document.modelContext ?? navigator.modelContext;
-const nativeRegister = pageContext.registerTool;
-pageContext.registerTool = function (tool, options) { return nativeRegister.call(this, tool, options); };
-Object.defineProperty(document, "modelContext", { configurable: true, value: pageContext });`,
-		},
-	])(
-		"mirrors a tool registered after attach through a native modelContext $setup",
-		async ({ define }) => {
-			using server = Bun.serve({
-				port: 0,
-				hostname: "localhost",
-				fetch: () =>
-					new Response("<!doctype html><title>cached</title>", { headers: { "content-type": "text/html" } }),
-			});
-			const handle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
-			if (!("browser" in handle)) throw new Error("Expected a Puppeteer browser");
-			holdBrowser(handle);
-			const page = await handle.browser.newPage();
-			try {
-				await page.goto(`http://localhost:${server.port}/`);
-				const realm = page.mainFrame().mainRealm();
-				await realm.evaluate(`${define}\nnull;`);
-				const controller = await installWebMcp(page);
-				await realm.evaluate(
-					`pageContext.registerTool({ name: "native_tool", description: "Page tool.", inputSchema: { type: "object" }, execute: () => ({ value: 42 }) })`,
-				);
-				// The page-side mirror, which is all omp has when the browser lacks WebMCP over CDP.
-				const snapshot = await realm.evaluate(webMcpSnapshotInPage, WEBMCP_BRIDGE_KEY);
-				expect(snapshot.tools.map(tool => tool.name)).toEqual(["native_tool"]);
-				await controller.dispose();
-			} finally {
-				await page.close();
-				await releaseBrowser(handle, { kill: false });
 			}
 		},
 		BROWSER_TEST_TIMEOUT_MS,
 	);
 
 	it(
-		"calls a page-owned context's methods on that context when the page detaches them",
+		"never starts the page's tool once the call is aborted",
 		async () => {
-			const handle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
-			if (!("browser" in handle)) throw new Error("Expected a Puppeteer browser");
-			holdBrowser(handle);
+			using server = servePage(`<title>idle</title><script>
+document.modelContext.registerTool({ name: "rename_page", description: "Renames.", inputSchema: { type: "object" }, execute: () => { document.title = "executed"; return 1; } });
+</script>`);
+			const handle = headless();
 			const page = await handle.browser.newPage();
 			try {
-				await page.goto("data:text/html,<title>detached</title>");
-				const realm = page.mainFrame().mainRealm();
-				await realm.evaluate(`window.pageContext = {
-  names: new Set(),
-  registerTool(tool) { this.names.add(tool.name); },
-  unregisterTool(name) { this.names.delete(name); },
-};
-Object.defineProperty(navigator, "modelContext", { configurable: true, value: window.pageContext });
-null;`);
-				const controller = await installWebMcp(page);
-				await realm.evaluate(
-					`(({ registerTool }) => registerTool({ name: "detached", description: "Page tool.", inputSchema: { type: "object" }, execute: () => 1 }))(navigator.modelContext)`,
-				);
-				expect(await realm.evaluate(`[...pageContext.names]`)).toEqual(["detached"]);
-				expect((await controller.list()).tools.map(tool => tool.name)).toEqual(["detached"]);
-				await realm.evaluate(`(({ unregisterTool }) => unregisterTool("detached"))(navigator.modelContext)`);
-				expect(await realm.evaluate(`pageContext.names.size`)).toBe(0);
-				expect((await controller.list()).tools).toEqual([]);
-				await controller.dispose();
+				await page.goto(`http://localhost:${server.port}/`);
+				const controller = new WebMcpController(page);
+				expect((await controller.list()).tools.map(tool => tool.name)).toEqual(["rename_page"]);
+				const aborted = AbortSignal.abort();
+				expect(await rejectionOf(controller.invoke("rename_page", {}, {}, aborted))).toBeInstanceOf(Error);
+				expect(await page.title()).toBe("idle");
 			} finally {
 				await page.close();
-				await releaseBrowser(handle, { kill: false });
 			}
 		},
 		BROWSER_TEST_TIMEOUT_MS,
 	);
 
-	// The hook reads `document.modelContext ?? navigator.modelContext` without the platform API.
-	it.each([
-		{ owner: "document", nativeAvailable: false },
-		{ owner: "navigator", nativeAvailable: true },
-	])(
-		"reports nativeAvailable $nativeAvailable when $owner has a null modelContext",
-		async ({ owner, nativeAvailable }) => {
-			const handle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
-			if (!("browser" in handle)) throw new Error("Expected a Puppeteer browser");
-			holdBrowser(handle);
+	it(
+		"lists a same-process iframe's tools, registered before the first call, until the iframe navigates",
+		async () => {
+			const invoke = createBrowserHost();
+			// Same site, other port: the iframe shares the page's renderer and CDP session.
+			using child = Bun.serve({
+				port: 0,
+				hostname: "localhost",
+				fetch: request =>
+					new Response(
+						new URL(request.url).pathname === "/plain"
+							? "<!doctype html><title>plain</title>"
+							: `<!doctype html><title>child</title><script>
+document.modelContext.registerTool({ name: "child_tool", description: "Answers from the iframe.", inputSchema: { type: "object" }, execute: () => ({ from: "child" }) });
+</script>`,
+						{ headers: { "content-type": "text/html" } },
+					),
+			});
+			using parent = servePage(
+				`<title>parent</title><iframe allow="tools" src="http://localhost:${child.port}/" onload="document.title = 'loaded'"></iframe>`,
+			);
+			await invoke({ action: "open", name: "webmcp-child", url: `http://localhost:${parent.port}/` });
+			expect(valueFrom<string>(await invoke(call("webmcp-child", "evaluate", ["document.title"])))).toBe("loaded");
+			const listed = valueFrom<WebMcpListResult>(await invoke(call("webmcp-child", "webmcpList")));
+			expect(listed.tools).toEqual([
+				expect.objectContaining({ name: "child_tool", origin: `http://localhost:${child.port}` }),
+			]);
+			const result = valueFrom<WebMcpInvokeResult>(
+				await invoke(call("webmcp-child", "webmcpInvoke", ["child_tool", {}])),
+			);
+			expect(result).toEqual({ ok: true, result: { from: "child" }, untrusted: true });
+			await invoke(
+				call("webmcp-child", "evaluate", [
+					`(() => { const { promise, resolve } = Promise.withResolvers(); const frame = document.querySelector("iframe"); frame.onload = resolve; frame.src = "http://localhost:${child.port}/plain"; return promise.then(() => null); })()`,
+				]),
+			);
+			expect(valueFrom<WebMcpListResult>(await invoke(call("webmcp-child", "webmcpList"))).tools).toEqual([]);
+			await invoke({ action: "close", name: "webmcp-child", kill: true });
+		},
+		BROWSER_TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"stops following a cross-origin iframe's session once the iframe is gone",
+		async () => {
+			using child = Bun.serve({
+				port: 0,
+				hostname: "127.0.0.1",
+				fetch: () =>
+					new Response("<!doctype html><title>child</title>", { headers: { "content-type": "text/html" } }),
+			});
+			using parent = servePage(`<title>parent</title><iframe src="http://127.0.0.1:${child.port}/"></iframe>`);
+			const handle = headless();
 			const page = await handle.browser.newPage();
 			try {
-				await page.goto("data:text/html,<title>null context</title>");
-				const realm = page.mainFrame().mainRealm();
-				await realm.evaluate(
-					`Object.defineProperty(${owner}, "modelContext", { configurable: true, value: null }); null;`,
-				);
-				await realm.evaluate(installWebMcpPageHook, WEBMCP_BRIDGE_KEY);
-				expect((await realm.evaluate(webMcpSnapshotInPage, WEBMCP_BRIDGE_KEY)).nativeAvailable).toBe(
-					nativeAvailable,
+				await page.goto(`http://localhost:${parent.port}/`, { waitUntil: "load" });
+				const oopif = page.frames().find(frame => frame.client !== page.mainFrame().client);
+				if (!oopif) throw new Error("Expected the cross-origin iframe in its own process");
+				const session = oopif.client;
+				const controller = new WebMcpController(page);
+				await controller.list();
+				expect(session.listenerCount("WebMCP.toolsAdded")).toBe(1);
+				await page.evaluate(`document.querySelector("iframe").remove()`);
+				await controller.list();
+				expect(session.listenerCount("WebMCP.toolsAdded")).toBe(0);
+			} finally {
+				await page.close();
+			}
+		},
+		BROWSER_TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"blames the Chrome version only when invokeTool itself is missing, not for another error saying something wasn't found",
+		async () => {
+			using server = servePage(`<title>tool</title><script>
+document.modelContext.registerTool({ name: "rename_page", description: "Renames.", inputSchema: { type: "object" }, execute: () => 1 });
+</script>`);
+			const handle = headless();
+			const page = await handle.browser.newPage();
+			try {
+				await page.goto(`http://localhost:${server.port}/`);
+				const session = page.mainFrame().client;
+				const send = session.send.bind(session);
+				let failure = "";
+				// Puppeteer's ProtocolError message: the method, then Chrome's own message.
+				session.send = ((method: string, ...rest: unknown[]) => {
+					if (method === "WebMCP.invokeTool")
+						return Promise.reject(new Error(`Protocol error (${method}): ${failure}`));
+					return (send as (method: string, ...rest: unknown[]) => Promise<unknown>)(method, ...rest);
+				}) as typeof session.send;
+				const controller = new WebMcpController(page);
+
+				failure = "No frame with the given id wasn't found";
+				const result = await controller.invoke("rename_page", {});
+				expect(result).toMatchObject({ ok: false, untrusted: true });
+				if (result.ok) throw new Error("Expected the invocation to fail");
+				expect(result.error).toContain("No frame with the given id wasn't found");
+
+				failure = "'WebMCP.invokeTool' wasn't found";
+				expect(String(await rejectionOf(controller.invoke("rename_page", {})))).toContain(
+					"invoking needs Chrome 149 or newer",
 				);
 			} finally {
 				await page.close();
-				await releaseBrowser(handle, { kill: false });
+			}
+		},
+		BROWSER_TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"says the browser has no WebMCP when its DevTools protocol lacks the domain",
+		async () => {
+			const page = await headless().browser.newPage();
+			try {
+				// Chrome before 147 answers with the method-not-found error for the whole domain.
+				const session = page.mainFrame().client;
+				const send = session.send.bind(session);
+				session.send = ((method: string, ...rest: unknown[]) => {
+					if (method === "WebMCP.enable")
+						return Promise.reject(new Error(`Protocol error (${method}): '${method}' wasn't found`));
+					return (send as (method: string, ...rest: unknown[]) => Promise<unknown>)(method, ...rest);
+				}) as typeof session.send;
+				const listed = await new WebMcpController(page).list();
+				expect(listed).toMatchObject({ status: "unavailable", tools: [] });
+				expect(listed.reason).toContain("lacks the WebMCP domain");
+			} finally {
+				await page.close();
 			}
 		},
 		BROWSER_TEST_TIMEOUT_MS,

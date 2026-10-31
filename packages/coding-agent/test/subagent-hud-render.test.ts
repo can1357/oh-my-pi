@@ -12,7 +12,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { resetHangulCompatibilityJamoWidthForTests, setHangulCompatibilityJamoWidth } from "@oh-my-pi/pi-tui";
 import type { DescribeContext } from "@oh-my-pi/pi-tui/native/node";
-import { PINNED_HUD_TOGGLE_ID } from "@oh-my-pi/pi-tui/prompt/composer";
+import { PINNED_HUD_TOGGLE_ID } from "@oh-my-pi/pi-coding-agent/task/output-manager";
 import {
 	InteractiveMode,
 	layoutPinnedHud,
@@ -521,6 +521,10 @@ describe("subagent HUD lines", () => {
 	});
 
 	describe("live preview", () => {
+		afterEach(() => {
+			vi.restoreAllMocks();
+		});
+
 		it("shows the current tool call only when enabled", () => {
 			const sessions = [
 				makeSession({
@@ -623,6 +627,8 @@ describe("subagent HUD lines", () => {
 		});
 
 		it("shortens a path argument by its key but keeps a literal search pattern as written", () => {
+			// A fixed home: the detail is capped at 40 columns, which would cut the literal pattern under a long HOME.
+			vi.spyOn(os, "homedir").mockReturnValue(path.join(path.sep, "home", "tester"));
 			const homeFile = `${os.homedir()}/.ssh/config`;
 			const preview = (key: string) =>
 				render(

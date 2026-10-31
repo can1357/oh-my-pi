@@ -470,7 +470,7 @@ def tonumber: tonumber_;
 		let read = |import: load::Import<&str, PathBuf>| -> Result<File<String, PathBuf>, String> {
 			let path = find_import(fs, &import, paths, "jq")?;
 			let code = fs.read_to_string(&path).map_err(|e| e.to_string())?;
-			counts_lines.set(counts_lines.get() || code.contains("input_line_number"));
+			counts_lines.update(|v| v || code.contains("input_line_number"));
 			Ok(File { code, path })
 		};
 		let loader = Loader::new(defs).with_read(read);
@@ -589,10 +589,7 @@ def tonumber: tonumber_;
 	/// A plain string literal without interpolation or format.
 	fn term_str<'t, 's>(term: &'t load::parse::Term<&'s str>) -> Option<&'t &'s str> {
 		match term {
-			load::parse::Term::Str(None, parts) => match &parts[..] {
-				[load::lex::StrPart::Str(text)] => Some(text),
-				_ => None,
-			},
+			load::parse::Term::Str(None, parts) if let [load::lex::StrPart::Str(text)] = &parts[..] => Some(text),
 			_ => None,
 		}
 	}
@@ -756,7 +753,7 @@ def tonumber: tonumber_;
 
 	fn report_lex(code: &str, (expected, found): load::lex::Error<&str>) -> Report {
 		// truncate found string to its first character
-		let found = &found[..found.char_indices().nth(1).map_or(found.len(), |(i, _)| i)];
+		let found = &found[..found.ceil_char_boundary(1)];
 
 		let found_range = load::span(code, found);
 		let found = match found {
@@ -1035,12 +1032,9 @@ mod read {
 			match self.read.read_until(b'\n', &mut line) {
 				Ok(0) => None,
 				Ok(_) => {
-					if line.last() == Some(&b'\n') {
-						line.pop();
-						if line.last() == Some(&b'\r') {
-							line.pop();
-						}
-						self.lines.set(self.lines.get() + 1);
+					if line.pop_if(|byte| *byte == b'\n').is_some() {
+						line.pop_if(|byte| *byte == b'\r');
+						self.lines.update(|v| v + 1);
 					}
 					Some(Ok(Val::utf8_str(line)))
 				},
@@ -1076,7 +1070,7 @@ mod read {
 				self.pos = 0;
 				self.read.read_until(b'\n', &mut self.line)?;
 				if self.line.last() == Some(&b'\n') {
-					self.lines.set(self.lines.get() + 1);
+					self.lines.update(|v| v + 1);
 				}
 			}
 			Ok(&self.line[self.pos..])

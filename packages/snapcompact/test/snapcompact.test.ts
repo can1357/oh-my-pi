@@ -1402,7 +1402,7 @@ describe("frame data budget", () => {
 		const opus = getBundledModel("anthropic", "claude-opus-5-5");
 		const sol = getBundledModel("openai-codex", "gpt-6.1-sol");
 		const throughProxy = (model: Model) => buildModel({ ...toModelSpec(model), baseUrl: "https://proxy.example/v1" });
-		expect(snapcompact.frameDataBytesBudget(opus)).toBe(12_000_000);
+		expect(snapcompact.frameDataBytesBudget(opus)).toBe(60_000_000);
 		expect(snapcompact.frameDataBytesBudget(sol)).toBe(12_000_000);
 		// A rerouted baseUrl has its own body limit; so does a host without a budget rule.
 		expect(snapcompact.frameDataBytesBudget(throughProxy(opus))).toBe(budget);
@@ -1427,10 +1427,10 @@ describe("frame data budget", () => {
 		};
 		expect(snapcompact.frameDataBytesBudget(factory("https://api.factory.ai/api/llm/a"))).toBeLessThan(budget);
 		expect(snapcompact.frameDataBytesBudget(factory("https://factory-gateway.example/api/llm/a"))).toBe(budget);
-		// Opus's 1932px frames: 17 under the default, 70 under Anthropic's share.
+		// Opus's 1932px frames: 17 under the default, 352 under Anthropic's share.
 		const opusShape = snapcompact.resolveShape(opus);
 		expect(snapcompact.maxFramesForDataBudget(opusShape, budget)).toBe(17);
-		expect(snapcompact.maxFramesForDataBudget(opusShape, snapcompact.frameDataBytesBudget(opus))).toBe(70);
+		expect(snapcompact.maxFramesForDataBudget(opusShape, snapcompact.frameDataBytesBudget(opus))).toBe(352);
 	});
 
 	it.each([
@@ -1450,7 +1450,7 @@ describe("frame data budget", () => {
 				FOUNDRY_BASE_URL: undefined,
 			};
 			withEnv(official, () => {
-				expect(snapcompact.frameDataBytesBudget(opus)).toBe(12_000_000);
+				expect(snapcompact.frameDataBytesBudget(opus)).toBe(60_000_000);
 				expect(snapcompact.providerImageBudget(opus)).toBe(600);
 			});
 			withEnv({ ...official, ...reroute }, () => {
