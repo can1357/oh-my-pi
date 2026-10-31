@@ -17,6 +17,7 @@ test("lightweight cache resolver matches scoped descriptor inputs", () => {
 		{ providerId: "opencode-go", baseUrl: "https://opencode.example/go" },
 		{ providerId: "opencode-zen", baseUrl: "https://opencode.example/zen/v1/" },
 		{ providerId: "vllm", baseUrl: "http://vllm.example:8000/v1" },
+		{ providerId: "tokenrhythm", baseUrl: "https://tokenrhythm.studio/v1/" },
 	] as const;
 	for (const { providerId, baseUrl } of cases) {
 		const descriptor = PROVIDER_DESCRIPTORS.find(candidate => candidate.providerId === providerId);
@@ -25,6 +26,32 @@ test("lightweight cache resolver matches scoped descriptor inputs", () => {
 		const options = descriptor.createModelManagerOptions(config);
 		expect(resolveModelCacheProviderId(providerId, config)).toBe(options.cacheProviderId ?? providerId);
 	}
+});
+
+test("TokenRhythm cache scope changes with API keys and endpoints", () => {
+	const accountA = resolveModelCacheProviderId("tokenrhythm", {
+		apiKey: "account-a-key",
+		baseUrl: "https://tokenrhythm.studio/v1",
+	});
+	expect(accountA).not.toBe(
+		resolveModelCacheProviderId("tokenrhythm", {
+			apiKey: "account-b-key",
+			baseUrl: "https://tokenrhythm.studio/v1",
+		}),
+	);
+	// A trailing slash is the same endpoint and must keep one namespace.
+	expect(accountA).toBe(
+		resolveModelCacheProviderId("tokenrhythm", {
+			apiKey: "account-a-key",
+			baseUrl: "https://tokenrhythm.studio/v1/",
+		}),
+	);
+	expect(accountA).not.toBe(
+		resolveModelCacheProviderId("tokenrhythm", {
+			apiKey: "account-a-key",
+			baseUrl: "https://proxy.example/tokenrhythm/v1",
+		}),
+	);
 });
 
 test("Muse Code cache scope changes with subscription credentials and endpoints", () => {

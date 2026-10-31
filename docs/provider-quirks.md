@@ -2004,6 +2004,24 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/toge
 - **Catalog Source**: Models generated via `models.dev` descriptor using key `togetherai` mapping to provider `together` at `https://api.together.xyz/v1` (`packages/catalog/src/provider-models/openai-compat.ts`).
 - **Host Matching**: Listed in `packages/catalog/src/hosts.ts` matching host URL markers `api.together.xyz` and registered in `priority.ts` identity mapping.
 
+## TokenRhythm (`tokenrhythm`)
+TokenRhythm is an OpenAI-compatible aggregator for DeepSeek, GLM, Qwen, Kimi, Doubao Seed, MiniMax, MiMo and LongCat models, served through the OpenAI Chat Completions transport at `https://tokenrhythm.studio/v1`. It has no Responses API.
+
+### Special casings
+- **Thinking wire format**: `packages/catalog/src/compat/rules/providers/tokenrhythm.kdl` uses the `zai` format: `thinking: {type: "enabled"|"disabled"}` is the toggle the host forwards. The rules were verified against production `/v1/chat/completions`:
+  - DeepSeek V4 offers off plus `reasoning_effort` low/high/max. The host validates the effort (unknown values return 400), and the dated V4 SKUs only think when `thinking.type` is enabled.
+  - Qwen 3.7/3.8 and Doubao Seed 2.1 offer off plus one on-rung. `reasoning_effort` is accepted but ignored, so it is never sent.
+  - GLM, Kimi, LongCat, MiniMax and MiMo always think. GLM-5.3, Kimi K2.7 Code, LongCat 2.0 and MiniMax M2.7 return 400 "当前模型必须开启深度思考" on any disable field, so these families are `thinking-requires-effort` with `reasoning-disable-mode "omit"` and send no reasoning field.
+- **Budget fields**: `thinking_budget`, `reasoning.max_tokens` and `thinking.budget_tokens` are rejected as unknown request fields, so no budget mode is declared.
+- **Reasoning stream**: reasoning arrives in `delta.reasoning_content`.
+
+### Auth & usage
+- **API Key Login**: `packages/catalog/src/compat/rules/auth/tokenrhythm.kdl` declares a `login "api-key"` rule pointing at `https://tokenrhythm.studio/account/keys` and validates the key against `https://tokenrhythm.studio/v1/models`, which returns 401 without a key. Environment key: `TOKENRHYTHM_API_KEY`.
+
+### Catalog model handling
+- **Discovery**: `tokenrhythmModelManagerOptions` (`packages/catalog/src/provider-models/openai-compat.ts`) fetches `/v1/models` when a key is configured and maps `context_length` / `max_completion_tokens`. The live roster is authoritative (`dynamicModelsAuthoritative`). Prices are published in CNY only, so rows stay unpriced rather than being read as USD.
+- **Authored seed**: `deepseek-v4-pro-0813` with an unpriced card; bundle policy `fallback`. It keeps the provider visible in `/model` before login and is replaced by the first live roster. TokenRhythm is credential-scoped in `generate-models.ts`, so the bundle never carries a generator account's roster.
+
 ## Umans AI Coding Plan (`umans`)
 
 Umans AI Coding Plan is a proxy service for AI coding models, operating via the Anthropic Messages wire format ("Anthropic Messages") with its default base URL set to `https://api.code.umans.ai`.
