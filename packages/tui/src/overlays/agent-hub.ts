@@ -26,7 +26,7 @@ import type {
 import { Container, type OverlayHandle, type TUI } from "../tui";
 import { matchesKey } from "../keys";
 import { routeSelectListMouse, routeSgrMouseInput, type SelectListMouseTarget } from "../mouse";
-import { padding, visibleWidth, wrapTextWithAnsi } from "../utils";
+import { Ellipsis, padding, visibleWidth, wrapTextWithAnsi } from "../utils";
 import { formatAge, formatDuration, formatNumber, getProjectDir, logger } from "@oh-my-pi/pi-utils";
 import {
 	type AgentActivitySource,
@@ -62,9 +62,9 @@ import {
 	formatMetricColumns,
 	formatMetricDuration,
 	formatMetrics,
+	boundedModelMetadata,
 	formatRoleBadge,
 	metricsText,
-	modelBadge,
 	modelBadgeSpans,
 	modelChip,
 	roleBadgeSpan,
@@ -952,16 +952,15 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		if (this.#viewMode === "roster" && ref.parentId && ref.parentId !== MAIN_AGENT_ID) {
 			badges.push({ text: `↳ ${sanitizeDisplaySingleLine(ref.parentId)}`, tone: "muted", title: "Spawned by" });
 		}
-		const model = modelChip(ref, observed);
+		const model = modelBadgeSpans(ref, observed);
 		const item: TspPickerItem = {
 			id: ref.id,
-			label: sanitizeDisplaySingleLine(ref.id),
+			label: model
+				? [span(sanitizeDisplaySingleLine(ref.id), "mono"), span(theme.sep.dot, "dim"), ...model]
+				: sanitizeDisplaySingleLine(ref.id),
 			mono: true,
 			dot: statusDot(ref.status),
 			detail: task ? taskSummary(task) : undefined,
-			chips: model
-				? [{ text: model.fallback ? `fallback → ${model.text}` : model.text, dot: model.dot }]
-				: undefined,
 			badges: badges.length > 0 ? badges.slice(0, 3) : undefined,
 		};
 		if (this.#viewMode === "tree") {
@@ -1021,6 +1020,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			const model: TspSpan[] = [];
 			if (chip.fallback) model.push(span("fallback → ", "warning"));
 			model.push(span(chip.text, "mono"));
+			if (chip.fastMode && theme.icon.fast) model.push(span(` ${theme.icon.fast}`, "warning"));
 			if (chip.level && chip.dot) model.push(span(theme.sep.dot, "dim"), span(chip.level, chip.dot));
 			const modelRole = observed?.progress?.modelRole ?? ref.history?.modelRole;
 			if (modelRole && this.#getRoleInfo) {
@@ -2074,12 +2074,11 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		add(
 			`${statusText(ref.status, ref.status)}${theme.fg("dim", `${theme.sep.dot}${lifecycleDetails.join(theme.sep.dot)}`)}`,
 		);
-		const modelDetails: string[] = [];
 		const modelRole = progress?.modelRole ?? ref.history?.modelRole;
-		if (modelRole && this.#getRoleInfo) modelDetails.push(formatRoleBadge(modelRole, this.#getRoleInfo(modelRole)));
-		const badge = modelBadge(ref, observed);
-		if (badge) modelDetails.push(badge);
-		if (modelDetails.length > 0) add(modelDetails.join(theme.sep.dot));
+		const role =
+			modelRole && this.#getRoleInfo ? formatRoleBadge(modelRole, this.#getRoleInfo(modelRole)) : undefined;
+		const modelDetails = boundedModelMetadata(ref, observed, role, width);
+		if (modelDetails) add(modelDetails);
 
 		const task = observed?.description ?? progress?.task ?? ref.activity;
 		if (task) {
@@ -2188,14 +2187,11 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		// get their own always-present metadata line below so wrapping task text
 		// can never mix with them.
 		const metrics = this.#metricsFor(ref, observed);
-		const meta: string[] = [];
 		const modelRole = observed?.progress?.modelRole ?? ref.history?.modelRole;
-		if (modelRole && this.#getRoleInfo) {
-			meta.push(formatRoleBadge(modelRole, this.#getRoleInfo(modelRole)));
-		}
-		const badge = modelBadge(ref, observed);
-		if (badge) meta.push(badge);
-		const right = meta.join(theme.sep.dot);
+		const role =
+			modelRole && this.#getRoleInfo ? formatRoleBadge(modelRole, this.#getRoleInfo(modelRole)) : undefined;
+		const identityWidth = Math.min(visibleWidth(fields[0]), Math.floor(max / 2));
+		const right = boundedModelMetadata(ref, observed, role, Math.max(0, max - identityWidth - 2));
 
 		const entry: string[] = [];
 		const detailIndent = Math.min(max - 1, 4 + visibleWidth(branch));
@@ -2204,7 +2200,13 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		if (rightWidth > 0 && leftWidth + 2 + rightWidth <= max) {
 			entry.push(left + padding(max - leftWidth - rightWidth) + right);
 		} else {
-			entry.push(truncateToWidth(left.replace(/[\r\n]+/g, " "), max));
+			const leftSpace = rightWidth > 0 ? Math.max(0, max - rightWidth - 2) : max;
+			const boundedLeft = truncateToWidth(left.replace(/[\r\n]+/g, " "), leftSpace, Ellipsis.Omit);
+			entry.push(
+				rightWidth > 0
+					? `${boundedLeft}${padding(Math.max(0, max - visibleWidth(boundedLeft) - rightWidth))}${right}`
+					: boundedLeft,
+			);
 		}
 
 		const ownChildRail = this.#childrenByParent.has(ref.id) ? theme.fg("dim", "│ ") : "  ";

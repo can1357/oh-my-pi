@@ -521,6 +521,7 @@ describe("task spawn routing", () => {
 				resolvedModelIdentity: "custom/coding-router:max",
 				resolvedThinkingLevel: ThinkingLevel.High,
 				resolvedModelIsFallback: true,
+				fastMode: true,
 			};
 			options.onProgress?.(progress);
 			publishProgress = metadata => options.onProgress?.({ ...progress, ...metadata });
@@ -539,6 +540,7 @@ describe("task spawn routing", () => {
 					snapshotJobs(session, [job])[0]?.resolvedThinkingLevel === ThinkingLevel.High,
 			);
 			expect(getJobProgress(job)?.resolvedModelIsFallback).toBe(true);
+			expect(getJobProgress(job)?.fastMode).toBe(true);
 			publishProgress!({
 				resolvedModel: undefined,
 				resolvedModelIdentity: undefined,
@@ -547,6 +549,7 @@ describe("task spawn routing", () => {
 			});
 			await pollUntil(() => snapshotJobs(session, [job])[0]?.resolvedModel === undefined);
 			expect(getJobProgress(job)?.resolvedModelIsFallback).toBeUndefined();
+			expect(getJobProgress(job)?.fastMode).toBeUndefined();
 
 			publishProgress!({});
 			await pollUntil(() => getJobProgress(job)?.resolvedModelIsFallback === true);
@@ -555,12 +558,14 @@ describe("task spawn routing", () => {
 				resolvedModelIdentity: undefined,
 				resolvedThinkingLevel: undefined,
 				resolvedModelIsFallback: undefined,
+				fastMode: undefined,
 			});
 			await pollUntil(() => snapshotJobs(session, [job])[0]?.resolvedModel === "custom/legacy:low");
 			const legacy = snapshotJobs(session, [job])[0];
 			expect(legacy?.resolvedModelIdentity).toBeUndefined();
 			expect(legacy?.resolvedThinkingLevel).toBeUndefined();
 			expect(getJobProgress(job)?.resolvedModelIsFallback).toBeUndefined();
+			expect(getJobProgress(job)?.fastMode).toBeUndefined();
 
 			publishProgress!({ resolvedModelIsFallback: false });
 			await pollUntil(() => getJobProgress(job)?.resolvedModelIsFallback === false);
@@ -576,10 +581,11 @@ describe("task spawn routing", () => {
 		expect(settled?.resolvedModelIdentity).toBeUndefined();
 		expect(settled?.resolvedThinkingLevel).toBeUndefined();
 		expect(getJobProgress(job)?.resolvedModelIsFallback).toBeUndefined();
+		expect(getJobProgress(job)?.fastMode).toBeUndefined();
 	});
 
 	it.each([undefined, false, true])(
-		"uses the settled model's authoritative fallback state (%s), not the previous model's",
+		"uses the settled model's authoritative fallback and fast state (%s), not the previous model's",
 		async settledFallback => {
 			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [taskAgent], projectAgentsDir: null });
 			const gate = deferred();
@@ -594,12 +600,14 @@ describe("task spawn routing", () => {
 					resolvedModel: "custom/previous",
 					resolvedModelIdentity: "custom/previous",
 					resolvedModelIsFallback: settledFallback !== true,
+					fastMode: settledFallback !== true,
 				});
 				await gate.promise;
 				return makeResult(options.id ?? "?", {
 					resolvedModel: "custom/settled",
 					resolvedModelIdentity: "custom/settled",
 					resolvedModelIsFallback: settledFallback,
+					fastMode: settledFallback,
 				});
 			});
 			const manager = createManager();
@@ -613,6 +621,7 @@ describe("task spawn routing", () => {
 			try {
 				await pollUntil(() => getJobProgress(job)?.resolvedModel === "custom/previous");
 				expect(getJobProgress(job)?.resolvedModelIsFallback).toBe(settledFallback !== true);
+				expect(getJobProgress(job)?.fastMode).toBe(settledFallback !== true);
 			} finally {
 				gate.resolve();
 				await job.promise;
@@ -620,6 +629,7 @@ describe("task spawn routing", () => {
 			expect(job.status).toBe("completed");
 			expect(getJobProgress(job)?.resolvedModel).toBe("custom/settled");
 			expect(getJobProgress(job)?.resolvedModelIsFallback).toBe(settledFallback);
+			expect(getJobProgress(job)?.fastMode).toBe(settledFallback);
 		},
 	);
 

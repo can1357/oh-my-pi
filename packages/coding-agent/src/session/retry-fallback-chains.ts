@@ -77,6 +77,8 @@ export interface ServingModel {
 	thinkingLevel?: ThinkingLevel;
 	/** Whether fallback routing, rather than the configured primary, owns it. */
 	isFallback: boolean;
+	/** False for bootstrap selection; true once this runtime has produced output. */
+	served?: boolean;
 	/**
 	 * Context window of the attributed model, carried verbatim from
 	 * {@link Model.contextWindow} (`null` when the model declares none), so

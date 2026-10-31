@@ -110,6 +110,112 @@ describe("subagent runtime model resolution", () => {
 		vi.restoreAllMocks();
 	});
 
+	for (const { name, fallback, primaryFast, fallbackFast, expectedFast } of [
+		{
+			name: "retains fast primary provenance while a standard fallback is unproven",
+			fallback: "unproven",
+			primaryFast: true,
+			fallbackFast: false,
+			expectedFast: true,
+		},
+		{
+			name: "does not badge a standard primary with an unproven fast fallback's tier",
+			fallback: "unproven",
+			primaryFast: false,
+			fallbackFast: true,
+			expectedFast: false,
+		},
+		{
+			name: "publishes the fast fallback's own tier once it serves",
+			fallback: "served",
+			primaryFast: false,
+			fallbackFast: true,
+			expectedFast: true,
+		},
+		{
+			name: "publishes an authoritative standard tier when the fallback serves",
+			fallback: "served",
+			primaryFast: true,
+			fallbackFast: false,
+			expectedFast: false,
+		},
+		{
+			name: "leaves sessions without runtime tier evidence unknown",
+			fallback: "none",
+			primaryFast: undefined,
+			fallbackFast: false,
+			expectedFast: undefined,
+		},
+	] as const) {
+		it(name, async () => {
+			const primary = model("primary", "bad-runtime-model");
+			const candidate = model("fallback", "working-model");
+			const snapshots: AgentProgress[] = [];
+			vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
+				const session = createYieldingSession(fallback);
+				if (primaryFast !== undefined) {
+					session.isFastModeActive = () => (session.model?.provider === "primary" ? primaryFast : fallbackFast);
+				}
+				return { session, extensionsResult: {}, setToolUIContext: () => {} } as never;
+			});
+			const result = await runSubprocess({
+				cwd: "/tmp",
+				agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled" },
+				task: "work",
+				index: 0,
+				id: "fast-provenance",
+				modelOverride: ["primary/bad-runtime-model"],
+				settings: Settings.isolated({ "tier.openai": "priority" }),
+				modelRegistry: {
+					refresh: async () => {},
+					getAvailable: () => [primary, candidate],
+					getApiKey: async () => "test-key",
+				} as never,
+				onProgress: progress => snapshots.push({ ...progress }),
+				enableLsp: false,
+			});
+			const expectedModel = fallback === "served" ? "fallback/working-model" : "primary/bad-runtime-model";
+			expect(result.resolvedModel).toBe(expectedModel);
+			expect(result.fastMode).toBe(expectedFast);
+			expect(snapshots.findLast(progress => progress.resolvedModel === expectedModel)?.fastMode).toBe(expectedFast);
+		});
+	}
+
+	it.each([false, true])(
+		"publishes a live own-session fast-mode change from %s without a model change",
+		async initial => {
+			const primary = model("primary", "bad-runtime-model");
+			let fastMode = initial;
+			const snapshots: AgentProgress[] = [];
+			vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
+				const session = createYieldingSession("none", async () => {
+					fastMode = !initial;
+				});
+				session.isFastModeActive = () => fastMode;
+				return { session, extensionsResult: {}, setToolUIContext: () => {} } as never;
+			});
+			const result = await runSubprocess({
+				cwd: "/tmp",
+				agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled" },
+				task: "work",
+				index: 0,
+				id: "live-fast-policy",
+				modelOverride: ["primary/bad-runtime-model"],
+				settings: Settings.isolated({}),
+				modelRegistry: {
+					refresh: async () => {},
+					getAvailable: () => [primary],
+					getApiKey: async () => "test-key",
+				} as never,
+				onProgress: progress => snapshots.push({ ...progress }),
+				enableLsp: false,
+			});
+			expect(snapshots.some(progress => progress.fastMode === initial)).toBe(true);
+			expect(snapshots.at(-1)?.fastMode).toBe(!initial);
+			expect(result.fastMode).toBe(!initial);
+		},
+	);
+
 	for (const { level, collide } of [
 		{ level: undefined, collide: false },
 		{ level: ThinkingLevel.High, collide: false },

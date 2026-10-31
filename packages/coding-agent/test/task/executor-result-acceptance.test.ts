@@ -8,6 +8,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import type { AssistantMessage, ToolCall } from "@oh-my-pi/pi-ai";
 import { type CursorExecResolvedCarrier, kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
@@ -19,9 +22,11 @@ import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import * as artifactsModule from "@oh-my-pi/pi-coding-agent/session/artifacts";
 import { IrcBridge, type IrcBridgeHost } from "@oh-my-pi/pi-coding-agent/session/irc-bridge";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import {
 	attachIrcWakeTurnMonitor,
 	runSubagentFollowUpTurn,
@@ -33,6 +38,9 @@ import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
+import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
+import { withOfficialAnthropicEndpoint } from "../helpers/anthropic-endpoint";
 
 const AGENT_ID = "accepted-result";
 
@@ -311,6 +319,372 @@ describe("runSubprocess result acceptance", () => {
 		expect(settled?.lifecycle?.responseAt).toBeNumber();
 		expect(settled?.lifecycle?.acceptedAt).toBeNumber();
 		expect(settled?.lifecycle?.terminalAt).toBeNumber();
+	});
+
+	for (const turn of ["follow-up", "IRC wake"] as const) {
+		it.each([false, true])(`retains aligned runtime tier %s in a fresh ${turn} monitor`, async fastMode => {
+			const harness = createHarness();
+			Object.assign(harness.session, {
+				model: { provider: "candidate", id: "unproven" },
+				servingModel: {
+					selector: "primary/served@route:high",
+					modelIdentity: "primary/served@route",
+					isFallback: false,
+				},
+				isFastModeActive: () => !fastMode,
+			});
+			const ref = registerRunning(harness.session);
+			AgentRegistry.global().setHistory(AGENT_ID, {
+				resolvedModel: "primary/served@route",
+				fastMode,
+				responseFastMode: !fastMode,
+			});
+			if (turn === "follow-up") {
+				const snapshots: AgentProgress[] = [];
+				const result = await runSubagentFollowUpTurn({
+					id: AGENT_ID,
+					agent: baseAgent,
+					message: "continue",
+					onProgress: progress => snapshots.push(progress),
+				});
+				expect(snapshots[0]?.fastMode).toBe(fastMode);
+				expect(result.fastMode).toBe(fastMode);
+			} else {
+				attachIrcWakeTurnMonitor(harness.session, { id: AGENT_ID, agent: baseAgent });
+				const finish = harness.wakeObserver()?.([]);
+				if (!finish) throw new Error("wake-turn monitor was not attached");
+				harness.emitTerminalYield({ report: "still on the serving model" });
+				await finish();
+			}
+			expect(ref.history?.resolvedModel).toBe("primary/served@route");
+			expect(ref.history?.fastMode).toBe(fastMode);
+		});
+	}
+
+	it("does not borrow a different route's runtime tier for a fresh monitor", async () => {
+		const harness = createHarness();
+		Object.assign(harness.session, {
+			model: { provider: "candidate", id: "unproven" },
+			servingModel: { selector: "primary/served@new", modelIdentity: "primary/served@new", isFallback: false },
+			isFastModeActive: () => true,
+		});
+		const ref = registerRunning(harness.session);
+		AgentRegistry.global().setHistory(AGENT_ID, { resolvedModel: "primary/served@old", fastMode: true });
+		const result = await runSubagentFollowUpTurn({ id: AGENT_ID, agent: baseAgent, message: "continue" });
+		expect(result.fastMode).toBeUndefined();
+		expect(ref.history?.resolvedModel).toBe("primary/served@new");
+		expect(ref.history?.fastMode).toBeUndefined();
+	});
+
+	it("retains transcript attribution when a cold-revived follow-up serves nothing", async () => {
+		const harness = createHarness();
+		Object.assign(harness.session, {
+			model: { provider: "primary", id: "bootstrap" },
+			servingModel: {
+				selector: "primary/bootstrap",
+				modelIdentity: "primary/bootstrap",
+				isFallback: false,
+				served: false,
+			},
+			isFastModeActive: () => true,
+		});
+		const ref = registerRunning(harness.session);
+		AgentRegistry.global().setHistory(AGENT_ID, {
+			resolvedModel: "fallback/served",
+			resolvedModelIsFallback: true,
+			fastMode: false,
+			responseFastMode: true,
+		});
+		vi.spyOn(harness.session, "prompt").mockRejectedValue(new Error("primary unavailable"));
+		const result = await runSubagentFollowUpTurn({ id: AGENT_ID, agent: baseAgent, message: "continue" });
+		expect(result.resolvedModelIdentity).toBe("fallback/served");
+		expect(result.fastMode).toBe(false);
+		expect(ref.history).toMatchObject({
+			resolvedModel: "fallback/served",
+			resolvedModelIsFallback: true,
+			fastMode: false,
+			responseFastMode: true,
+		});
+	});
+
+	it.each(["older", "newer"] as const)(
+		"keeps newer same-ref attribution when the %s wake turn finalizes first",
+		async firstToFinish => {
+			using tempDir = TempDir.createSync("@omp-final-attribution-turn-");
+			const harness = createHarness();
+			Object.assign(harness.session, {
+				model: { provider: "primary", id: "old" },
+				servingModel: { selector: "primary/old", modelIdentity: "primary/old", isFallback: false },
+				isFastModeActive: () => true,
+			});
+			const registry = AgentRegistry.global();
+			const ref = registerRunning(harness.session);
+			ref.sessionFile = path.join(tempDir.path(), `${AGENT_ID}.jsonl`);
+			const previousHistory = {
+				resolvedModel: "primary/prior",
+				resolvedModelIsFallback: false,
+				fastMode: false,
+				outputPath: path.join(tempDir.path(), `${AGENT_ID}.md`),
+				directCost: 7,
+			};
+			const newerHistory = {
+				...previousHistory,
+				resolvedModel: "fallback/new",
+				resolvedModelIsFallback: true,
+			};
+			registry.setHistory(AGENT_ID, previousHistory);
+			const barriers = [0, 1].map(() => ({
+				entered: Promise.withResolvers<void>(),
+				release: Promise.withResolvers<void>(),
+			}));
+			let outputWrites = 0;
+			const writeArtifact = artifactsModule.writeArtifact;
+			vi.spyOn(artifactsModule, "writeArtifact").mockImplementation(async (file, text) => {
+				if (file.endsWith(".md")) {
+					const barrier = barriers[outputWrites++];
+					if (!barrier) throw new Error("unexpected output artifact write");
+					barrier.entered.resolve();
+					await barrier.release.promise;
+				}
+				return await writeArtifact(file, text);
+			});
+			attachIrcWakeTurnMonitor(harness.session, {
+				id: AGENT_ID,
+				agent: baseAgent,
+				artifactsDir: tempDir.path(),
+			});
+			const observer = harness.wakeObserver();
+			if (!observer) throw new Error("wake-turn observer was not registered");
+			const finishOlder = observer([]);
+			if (!finishOlder) throw new Error("older wake-turn monitor was not attached");
+			harness.emitTerminalYield({ report: "older" });
+			const older = Promise.resolve(finishOlder());
+			let newer: Promise<void> | undefined;
+			try {
+				await barriers[0]!.entered.promise;
+				Object.assign(harness.session, {
+					model: { provider: "fallback", id: "new" },
+					servingModel: { selector: "fallback/new", modelIdentity: "fallback/new", isFallback: true },
+					isFastModeActive: () => false,
+				});
+				const finishNewer = observer([]);
+				if (!finishNewer) throw new Error("newer wake-turn monitor was not attached");
+				harness.emitTerminalYield({ report: "newer" });
+				newer = Promise.resolve(finishNewer());
+				await barriers[1]!.entered.promise;
+				const firstIndex = firstToFinish === "older" ? 0 : 1;
+				barriers[firstIndex]!.release.resolve();
+				await (firstToFinish === "older" ? older : newer);
+				expect(ref.history).toMatchObject(firstToFinish === "older" ? previousHistory : newerHistory);
+				barriers[1 - firstIndex]!.release.resolve();
+				await Promise.all([older, newer]);
+				expect(registry.get(AGENT_ID)).toBe(ref);
+				expect(ref.session).toBe(harness.session);
+				expect(ref.history).toMatchObject(newerHistory);
+			} finally {
+				for (const barrier of barriers) barrier.release.resolve();
+				await Promise.all([older, newer]);
+			}
+		},
+	);
+
+	for (const [history, selection, policyChange] of [
+		["missing", "unproven", "before"],
+		["opposite", "unproven", "before"],
+		["opposite", "serving", "before"],
+		["opposite", "serving", "after"],
+	] as const) {
+		it.each([false, true])(
+			`finalizes initial tier %s with ${history} history and ${selection} selection when policy changes ${policyChange} detach`,
+			async fastMode => {
+				using tempDir = TempDir.createSync("@omp-final-attribution-detach-");
+				const harness = createHarness();
+				Object.assign(harness.session, {
+					model: { provider: "primary", id: "served" },
+					servingModel: { selector: "primary/served", modelIdentity: "primary/served", isFallback: false },
+					isFastModeActive: () => fastMode,
+				});
+				const registry = AgentRegistry.global();
+				const ref = registerRunning(harness.session);
+				ref.sessionFile = path.join(tempDir.path(), `${AGENT_ID}.jsonl`);
+				if (history === "opposite") {
+					registry.setHistory(AGENT_ID, { resolvedModel: "primary/served", fastMode: !fastMode });
+				}
+				const entered = Promise.withResolvers<void>();
+				const release = Promise.withResolvers<void>();
+				const writeArtifact = artifactsModule.writeArtifact;
+				vi.spyOn(artifactsModule, "writeArtifact").mockImplementation(async (file, text) => {
+					entered.resolve();
+					await release.promise;
+					return await writeArtifact(file, text);
+				});
+				const run = runSubagentFollowUpTurn({
+					id: AGENT_ID,
+					agent: baseAgent,
+					message: "continue",
+					artifactsDir: tempDir.path(),
+				});
+				try {
+					await entered.promise;
+					Object.assign(harness.session, {
+						model:
+							selection === "serving"
+								? { provider: "primary", id: "served" }
+								: { provider: "candidate", id: "unproven" },
+						isFastModeActive: () => (policyChange === "before" ? !fastMode : fastMode),
+					});
+					expect(registry.detachSession(AGENT_ID, ref)).toBe(true);
+					if (policyChange === "after") {
+						Object.assign(harness.session, { isFastModeActive: () => !fastMode });
+					}
+					release.resolve();
+					const result = await run;
+					const expectedFastMode = selection === "serving" && policyChange === "before" ? !fastMode : fastMode;
+					expect(result.resolvedModelIdentity).toBe("primary/served");
+					expect(result.fastMode).toBe(expectedFastMode);
+					expect(result.outputPath).toBe(path.join(tempDir.path(), `${AGENT_ID}.md`));
+					expect(ref.session).toBeNull();
+					expect(ref.history).toMatchObject({
+						resolvedModel: "primary/served",
+						resolvedModelIsFallback: false,
+						fastMode: expectedFastMode,
+					});
+				} finally {
+					release.resolve();
+					await run;
+				}
+			},
+		);
+	}
+
+	describe("detached real-session tier policy", () => {
+		withOfficialAnthropicEndpoint();
+
+		it("retains Anthropic fallback-off attribution after disposal clears provider state", async () => {
+			using tempDir = TempDir.createSync("@omp-final-attribution-dispose-");
+			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected bundled Anthropic test model");
+			const authStorage = createInMemoryAuthStorage();
+			authStorage.keys.setRuntime("anthropic", "test-key");
+			const mock = createMockModel({
+				provider: model.provider,
+				id: model.id,
+				handler: () => ({ content: ["completed report"] }),
+			});
+			const session = new AgentSession({
+				agent: new Agent({
+					getApiKey: () => "test-key",
+					initialState: { model, systemPrompt: ["test"], tools: [] },
+					streamFn: mock.stream,
+				}),
+				sessionManager: SessionManager.inMemory(tempDir.path()),
+				settings: Settings.isolated({ "compaction.enabled": false, "todo.enabled": false }),
+				modelRegistry: new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml")),
+				agentId: AGENT_ID,
+			});
+			session.setFastMode(true);
+			const providerState = {
+				strictToolsDisabled: false,
+				fastModeDisabled: true,
+				replayUnsignedThinkingDisabled: false,
+				close: () => {},
+			};
+			session.providerSessionState.set(`anthropic-messages:${model.baseUrl}\u0000${model.id}`, providerState);
+			const registry = AgentRegistry.global();
+			const ref = registerRunning(session);
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const writeArtifact = artifactsModule.writeArtifact;
+			vi.spyOn(artifactsModule, "writeArtifact").mockImplementation(async (file, text) => {
+				entered.resolve();
+				await release.promise;
+				return await writeArtifact(file, text);
+			});
+			const run = runSubagentFollowUpTurn({
+				id: AGENT_ID,
+				agent: baseAgent,
+				message: "complete the report",
+				structured: false,
+				artifactsDir: tempDir.path(),
+			});
+			try {
+				await Promise.race([
+					entered.promise,
+					run.then(() => {
+						throw new Error("Run finalized without writing an output artifact");
+					}),
+				]);
+				expect(session.isFastModeEnabled()).toBe(true);
+				expect(session.isFastModeActive()).toBe(false);
+				expect(registry.detachSession(AGENT_ID, ref)).toBe(true);
+				expect(ref.history?.fastMode).toBe(false);
+				await session.dispose();
+				expect(session.providerSessionState.size).toBe(0);
+				// A disposed predicate no longer contains the rejection evidence.
+				expect(session.isFastModeActive()).toBe(true);
+				release.resolve();
+				expect((await run).fastMode).toBe(false);
+				expect(ref.history?.fastMode).toBe(false);
+			} finally {
+				release.resolve();
+				await run;
+				await session.dispose();
+				authStorage.close();
+			}
+		});
+	});
+
+	it("fences final attribution against same-transcript generation replacement during artifact writes", async () => {
+		using tempDir = TempDir.createSync("@omp-final-attribution-generation-");
+		const harness = createHarness();
+		Object.assign(harness.session, {
+			model: { provider: "primary", id: "old" },
+			servingModel: { selector: "primary/old", modelIdentity: "primary/old", isFallback: false },
+			isFastModeActive: () => true,
+		});
+		const registry = AgentRegistry.global();
+		const ref = registerRunning(harness.session);
+		ref.sessionFile = path.join(tempDir.path(), `${AGENT_ID}.jsonl`);
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const writeArtifact = artifactsModule.writeArtifact;
+		vi.spyOn(artifactsModule, "writeArtifact").mockImplementation(async (file, text) => {
+			entered.resolve();
+			await release.promise;
+			return await writeArtifact(file, text);
+		});
+		const run = runSubagentFollowUpTurn({
+			id: AGENT_ID,
+			agent: baseAgent,
+			message: "continue",
+			artifactsDir: tempDir.path(),
+		});
+		try {
+			await entered.promise;
+			registry.setStatus(AGENT_ID, "aborted", ref);
+			registry.detachSession(AGENT_ID, ref);
+			const replacement = registry.reopen(AGENT_ID, ref);
+			if (!replacement) throw new Error("agent generation was not reopened");
+			registry.attachSession(AGENT_ID, createHarness().session, ref.sessionFile, replacement);
+			registry.setHistory(AGENT_ID, {
+				resolvedModel: "fallback/new",
+				resolvedModelIsFallback: true,
+				fastMode: false,
+				responseFastMode: false,
+			});
+			release.resolve();
+			await run;
+			expect(registry.get(AGENT_ID)).toBe(replacement);
+			expect(replacement.history).toMatchObject({
+				resolvedModel: "fallback/new",
+				resolvedModelIsFallback: true,
+				fastMode: false,
+				responseFastMode: false,
+			});
+		} finally {
+			release.resolve();
+			await run;
+		}
 	});
 
 	it("terminalizes the ref when an autonomous wake turn's yield is accepted", async () => {
