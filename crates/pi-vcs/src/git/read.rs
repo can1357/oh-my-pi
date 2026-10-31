@@ -758,13 +758,15 @@ impl GitRepo {
 	///
 	/// Empty when git walked everything, or when the in-process walk answered
 	/// (it reaches what it can open and fails otherwise, rather than warning).
+	/// An error when git's stderr outgrew the capture: the cut may have taken
+	/// one of those reports, so the listing's completeness is unknown.
 	pub fn ls_files_with_warnings(
 		&self,
 		others: bool,
 		exclude_standard: bool,
 	) -> Result<(Vec<String>, Vec<String>)> {
 		let (paths, warnings) = self.ls_files_at_paths(others, exclude_standard, &BTreeSet::new())?;
-		Ok((paths, unreadable_directories(&warnings)))
+		Ok((paths, unreadable_directories(&warnings)?))
 	}
 
 	/// Untracked listing (`others`) is a whole-worktree walk, the same shape
@@ -802,7 +804,8 @@ impl GitRepo {
 			} else {
 				super::cli::SYNC_TIMEOUT
 			};
-			match cli_text_and_warnings_capped(self.root(), &args, timeout, path_list_capture_limit()) {
+			match cli_text_and_warnings_capped(self.root(), &args, timeout, path_list_capture_limit())
+			{
 				// The subprocess capture is capped, and this output is the
 				// return value rather than a diagnostic: a short list would
 				// silently hide paths, so re-run the walk in-process. Reftable
@@ -816,7 +819,8 @@ impl GitRepo {
 				},
 				Ok((text, warnings)) => {
 					return Ok((
-						text.split('\0')
+						text
+							.split('\0')
 							.filter(|path| !path.is_empty())
 							.map(str::to_owned)
 							.collect(),
@@ -1181,14 +1185,26 @@ fn cli_text_and_warnings_capped(
 /// Only that warning: git's stderr also carries traces, access warnings for
 /// individual files it did read, and anything a hook printed, and treating
 /// every line as an unread directory refused healthy captures. The form is
-/// fixed because this module forces `LC_MESSAGES=C`.
-fn unreadable_directories(stderr: &str) -> Vec<String> {
+/// fixed because this module forces `LC_MESSAGES=C`. A stderr cut at the
+/// capture limit answers nothing: the report of an unopened directory may be
+/// in the part that was dropped, and an empty list would then read as a
+/// complete walk.
+fn unreadable_directories(stderr: &str) -> Result<Vec<String>> {
+	if super::cli::is_truncated(stderr) {
+		return Err(Error::backend(
+			"git ls-files",
+			"its warnings exceeded the subprocess capture limit, so the directories it could not \
+			 open are unknown",
+		));
+	}
 	let mut out = Vec::new();
 	for line in stderr.lines() {
 		let Some(rest) = line.strip_prefix("warning: could not open directory '") else {
 			continue;
 		};
-		let Some(end) = rest.rfind("':") else { continue };
+		let Some(end) = rest.rfind("':") else {
+			continue;
+		};
 		let name = rest[..end].trim_end_matches('/');
 		if !name.is_empty() {
 			out.push(name.to_owned());
@@ -1196,7 +1212,7 @@ fn unreadable_directories(stderr: &str) -> Vec<String> {
 	}
 	out.sort();
 	out.dedup();
-	out
+	Ok(out)
 }
 
 /// Retention cap for path-list captures.
@@ -1574,6 +1590,113 @@ mod tests {
 
 		let listed = with_capture_limit(256, || repo.ls_files(true, true))?;
 		assert_eq!(listed, expected);
+		Ok(())
+	}
+
+	/// Take every permission on `dir` away from this process, or report that
+	/// the process reads it anyway (root, or a filesystem that ignores modes),
+	/// in which case the mode is restored and the caller skips.
+	#[cfg(unix)]
+	fn lock_dir(dir: &Path) -> std::result::Result<bool, Box<dyn std::error::Error>> {
+		use std::os::unix::fs::PermissionsExt;
+		fs::set_permissions(dir, fs::Permissions::from_mode(0o000))?;
+		if fs::read_dir(dir).is_ok() {
+			fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+			eprintln!("skipping: this process can read a mode-000 directory");
+			return Ok(false);
+		}
+		Ok(true)
+	}
+
+	#[cfg(unix)]
+	fn unlock_dir(dir: &Path) -> TestResult {
+		use std::os::unix::fs::PermissionsExt;
+		fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+		Ok(())
+	}
+
+	#[test]
+	fn unreadable_directories_reads_only_the_could_not_open_warning() -> TestResult {
+		// A trace line and a per-file access warning are not directories git
+		// skipped; a name may itself contain `':`, so the last one ends it.
+		let stderr = [
+			"trace: built-in: git ls-files",
+			"warning: unable to access 'd/.gitignore': Permission denied",
+			"warning: could not open directory 'b/c/': Permission denied",
+			"warning: could not open directory 'it's': odd/': Permission denied",
+			"warning: could not open directory 'b/c/': Permission denied",
+		]
+		.join("\n");
+		assert_eq!(unreadable_directories(&stderr)?, ["b/c", "it's': odd"]);
+		assert!(unreadable_directories("")?.is_empty());
+		Ok(())
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn ls_files_with_warnings_names_a_directory_git_could_not_open() -> TestResult {
+		let (dir, repo) = repo()?;
+		let root = dir.path();
+		commit(root, ".gitignore", "build/\n", "ignore build")?;
+		fs::write(root.join("seen.txt"), "x")?;
+		let locked = root.join("locked");
+		fs::create_dir(&locked)?;
+		fs::write(locked.join("only-copy.txt"), "x")?;
+		// Ignored, so git never opens it and has nothing to report.
+		let ignored = root.join("build").join("cache");
+		fs::create_dir_all(&ignored)?;
+		if !lock_dir(&locked)? {
+			return Ok(());
+		}
+		let ignored_locked = lock_dir(&ignored)?;
+
+		let listed = repo.ls_files_with_warnings(true, true);
+		// The plain listing is the same short list, with nothing to say that it
+		// is short: the reason the variant above exists.
+		let plain = repo.ls_files(true, true);
+		unlock_dir(&locked)?;
+		if ignored_locked {
+			unlock_dir(&ignored)?;
+		}
+
+		let (paths, unreadable) = listed?;
+		assert_eq!(paths, ["seen.txt"]);
+		assert_eq!(unreadable, ["locked"]);
+		assert_eq!(plain?, ["seen.txt"]);
+		Ok(())
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn ls_files_with_warnings_refuses_a_warning_stream_cut_at_the_capture_limit() -> TestResult {
+		let (dir, repo) = repo()?;
+		let root = dir.path();
+		commit(root, "tracked", "tracked\n", "tracked")?;
+		// Nothing readable is untracked, so stdout stays empty and under the
+		// cap: only stderr is cut, and the listing is not retried in-process.
+		let mut locked = Vec::new();
+		for index in 0..8 {
+			let path = root.join(format!("{}-{index}", "d".repeat(40)));
+			fs::create_dir(&path)?;
+			if !lock_dir(&path)? {
+				return Ok(());
+			}
+			locked.push(path);
+		}
+		let args = ["ls-files".to_owned(), "-z".to_owned(), "--others".to_owned()];
+		let capped = cli_text_and_warnings_capped(root, &args, super::super::cli::SYNC_TIMEOUT, 128);
+		let listed = with_capture_limit(128, || repo.ls_files_with_warnings(true, true));
+		for path in &locked {
+			unlock_dir(path)?;
+		}
+
+		// Pin the precondition: at this cap stderr really is cut and stdout is
+		// not, so the error below comes from the cut warnings alone.
+		let (stdout, stderr) = capped?;
+		assert!(!super::super::cli::is_truncated(&stdout), "stdout must fit the cap: {stdout:?}");
+		assert!(super::super::cli::is_truncated(&stderr), "stderr must overflow the cap: {stderr:?}");
+		let err = listed.expect_err("a cut warning stream must not answer");
+		assert!(err.to_string().contains("capture limit"), "unexpected error: {err}");
 		Ok(())
 	}
 

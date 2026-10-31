@@ -715,15 +715,10 @@ impl VcsRepo {
 		exclude_standard: bool,
 		signal: Option<Unknown>,
 	) -> Promise<LsFilesWithWarnings> {
-		repo_blocking(
-			"vcs.lsFilesWithWarnings",
-			self.inner.clone(),
-			signal,
-			move |repo| {
-				let (paths, unreadable) = repo.ls_files_with_warnings(others, exclude_standard)?;
-				Ok(LsFilesWithWarnings { paths, unreadable })
-			},
-		)
+		repo_blocking("vcs.lsFilesWithWarnings", self.inner.clone(), signal, move |repo| {
+			let (paths, unreadable) = repo.ls_files_with_warnings(others, exclude_standard)?;
+			Ok(LsFilesWithWarnings { paths, unreadable })
+		})
 	}
 }
 
@@ -1037,15 +1032,10 @@ impl VcsGitRepo {
 		exclude_standard: bool,
 		signal: Option<Unknown>,
 	) -> Promise<LsFilesWithWarnings> {
-		blocking(
-			"vcs.lsFilesWithWarnings",
-			self.inner.clone(),
-			signal,
-			move |r| {
-				let (paths, unreadable) = r.ls_files_with_warnings(others, exclude_standard)?;
-				Ok(LsFilesWithWarnings { paths, unreadable })
-			},
-		)
+		blocking("vcs.lsFilesWithWarnings", self.inner.clone(), signal, move |r| {
+			let (paths, unreadable) = r.ls_files_with_warnings(others, exclude_standard)?;
+			Ok(LsFilesWithWarnings { paths, unreadable })
+		})
 	}
 
 	/// List tree paths.
