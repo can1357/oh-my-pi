@@ -4,7 +4,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
+import { type CustomStreamSimpleFn, clearCustomApis, registerCustomApi } from "@oh-my-pi/pi-ai/api-registry";
+import type { ProviderCallGate } from "@oh-my-pi/pi-ai/auth/provider-gate";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import {
 	__providerInFlightForTesting,
@@ -12,12 +13,55 @@ import {
 	stream,
 	streamSimple,
 } from "@oh-my-pi/pi-ai/stream";
-import type { Context, Model, RawSseEvent } from "@oh-my-pi/pi-ai/types";
+import type { Api, Context, Model, RawSseEvent } from "@oh-my-pi/pi-ai/types";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 
 function context(): Context {
 	return {
 		systemPrompt: [],
 		messages: [{ role: "user", content: "hi", timestamp: 0 }],
+	};
+}
+
+/** A session lifetime the test retires by hand. */
+function testGate(): ProviderCallGate & { retired: boolean } {
+	const gate = {
+		retired: false,
+		run<R>(call: () => R): R {
+			if (gate.retired) throw new Error("gate retired");
+			return call();
+		},
+	};
+	return gate;
+}
+
+/** A custom-API stream function that records that it answered and replies with its label. */
+function labelledReply(label: string, answered: string[]): CustomStreamSimpleFn {
+	return model => {
+		answered.push(label);
+		const reply = new AssistantMessageEventStream();
+		reply.push({
+			type: "done",
+			reason: "stop",
+			message: {
+				role: "assistant",
+				content: [{ type: "text", text: label }],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: Date.now(),
+			},
+		});
+		return reply;
 	};
 }
 
@@ -730,5 +774,80 @@ describe("provider in-flight request limits", () => {
 		expect(relative).not.toBe("");
 		expect(relative.startsWith("..")).toBe(false);
 		expect(path.isAbsolute(relative)).toBe(false);
+	});
+
+	test.each([
+		["streamSimple", streamSimple],
+		["stream", stream],
+	] as const)(
+		"%s: a custom API registration that retires while its request waits for a slot hands the request to the live one",
+		async (_entry, entry) => {
+			registerMockApi();
+			const firstStarted = Promise.withResolvers<void>();
+			const releaseFirst = Promise.withResolvers<void>();
+			const occupant = createMockModel({
+				provider: "tests",
+				handler: async () => {
+					firstStarted.resolve();
+					await releaseFirst.promise;
+					return { content: ["occupant"] };
+				},
+			});
+			const api = "tests-gated-custom-api";
+			const model: Model<Api> = { ...occupant.model, api };
+			const answered: string[] = [];
+			const parent = testGate();
+			const child = testGate();
+			registerCustomApi(api, labelledReply("parent", answered), "gated-test", undefined, parent);
+			registerCustomApi(api, labelledReply("child", answered), "gated-test", undefined, child);
+
+			const first = streamSimple(occupant.model, context(), { maxInFlightRequests: { tests: 1 } });
+			const firstResult = first.result();
+			await firstStarted.promise;
+			const secondWaiting = nextLimiterWait();
+			const second = entry(model, context(), { maxInFlightRequests: { tests: 1 } });
+			await secondWaiting;
+
+			child.retired = true;
+			releaseFirst.resolve();
+			await firstResult;
+			const secondMessage = await second.result();
+
+			expect(answered).toEqual(["parent"]);
+			expect(secondMessage.content).toEqual([{ type: "text", text: "parent" }]);
+		},
+	);
+
+	test("a custom API with no live registration left at dispatch fails as an unhandled API", async () => {
+		registerMockApi();
+		const firstStarted = Promise.withResolvers<void>();
+		const releaseFirst = Promise.withResolvers<void>();
+		const occupant = createMockModel({
+			provider: "tests",
+			handler: async () => {
+				firstStarted.resolve();
+				await releaseFirst.promise;
+				return { content: ["occupant"] };
+			},
+		});
+		const api = "tests-gated-custom-api";
+		const model: Model<Api> = { ...occupant.model, api };
+		const answered: string[] = [];
+		const owner = testGate();
+		registerCustomApi(api, labelledReply("owner", answered), "gated-test", undefined, owner);
+
+		const first = streamSimple(occupant.model, context(), { maxInFlightRequests: { tests: 1 } });
+		const firstResult = first.result();
+		await firstStarted.promise;
+		const secondWaiting = nextLimiterWait();
+		const second = streamSimple(model, context(), { maxInFlightRequests: { tests: 1 } });
+		await secondWaiting;
+
+		owner.retired = true;
+		releaseFirst.resolve();
+		await firstResult;
+
+		await expect(second.result()).rejects.toThrow(`Unhandled API: ${api}`);
+		expect(answered).toEqual([]);
 	});
 });

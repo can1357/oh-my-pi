@@ -66,6 +66,39 @@ Important constraint from `loader.ts`:
 - `pi.exec()` is directly available during load; provider registration is queued until session setup
 - child sessions reuse imported factories but bind fresh APIs and extension registrations; module-level variables remain shared across those sessions
 
+What you register, and when, decides how long it lasts:
+
+- What your factory registers at load — tools, commands, handlers, shortcuts, flags, renderers,
+  file fallbacks, link schemes, composer shapes, providers — serves every session the runtime
+  serves, even when the extension is loaded while a session is running.
+- What you register while a session is running — from a handler, a command, a tool, a timer —
+  belongs to that session: it runs as that session's work, and it is **withdrawn when that
+  session ends**. A tool registered from session A's handler is absent in session B, not listed
+  and doing nothing; a registration that replaced a load-time one of the same name gives it back.
+  To have it in B, register it again from B. Whatever the host still holds of it — a tool's
+  `execute` and renderers, a composer shape it is drawing — answers for that session alone: once the
+  session has ended `execute` fails, saying so, and a shape draws as the built-in `box`. A tool
+  stays its registering session's when another session's runner executes it: its cancellation
+  and the components its renderers return run as that session's work and stop when it ends. A
+  flag's value goes with its declaration, whatever it was set to. A session that has ended can
+  register nothing, nor unregister a provider: the call throws.
+- A dispatch already under way when its session ends runs to its end: the handlers after the one
+  that was running still run, and their result still reaches the host. A callback that session
+  registered refuses on its own. A dispatch that begins after its session has ended — one a
+  finishing handler starts included — runs nothing, and each handler it skips is reported through
+  `onError`. The work a session has under way holds that session's disposal, not the next
+  session's.
+- A `ctx` you keep is its session's, and refuses once that session has ended, even while the
+  runtime serves the next one and whichever host the runner is bound to by then. Every member that
+  calls the host refuses — `abort`, `shutdown`, `compact`, `cwd`, `model`, `isIdle`, the members
+  of its `ui`, `sessionManager`, `modelRegistry`, `models`, `memory`, `sessionModes` and
+  `localProtocolOptions` — however it is called: `ctx.ui.setFooter(undefined)` refuses as
+  `ctx.ui.setFooter(factory)` does, and `ctx.ui.getEditorText()` answers nothing about the next
+  session. What answers from the context itself (`mode`, `hasUI`, `agent`, `clearTimer`) still
+  answers. `ctx.setTimeout`/`ctx.setInterval` refuse too, and a callback scheduled while the
+  session was live belongs to that session, whichever session the runtime serves when it fires.
+  A host call that fails reaches you as a copy of its failure, never the host's own exception.
+
 ## Quick start
 
 ```ts
@@ -212,6 +245,166 @@ Cached usage reports live in the shared `agent.db`, keyed by provider name, the
 usage provider's `cacheVersion`, normalized base URL, and credential identity. When overriding a built-in provider, set a `cacheVersion`
 distinct from the built-in one so processes without the extension (older sessions,
 `--no-extensions` runs, SDK scripts) never serve their reports to yours, or yours to them.
+
+### What the host keeps, and when
+
+Everything crossing the boundary between your extension and the host is live until the host has
+copied it, **in both directions**: the properties you expose, the callbacks you register, the
+values you return, the events and results your streams carry — and the objects the host hands
+**in** to your callbacks, because installing a getter on one of those changes what the host
+reads from its own record afterwards. So the host hands you a copy and takes a copy of what
+comes back, each read **once**, inside the session that owns the call. It never validates one
+read and then reads the same name again, and it never reads a value you touched after the call
+that produced it. Where the host _acts_ on something you gave it — navigating to a URL, opening
+a file, choosing a host — the value it acts on is the value it checked, because a check of one
+read and an action on another is a check of nothing.
+
+This holds at every surface you reach the host through: a provider's configuration, callbacks
+and streams; a hook's result; a tool's result; a browser sign-in request. Two consequences
+worth knowing before you write a provider.
+
+**What the host keeps at admission is the data and the callbacks; change either by registering
+again.** `headers`, `compat`, `remoteCompaction`, `transport` and the `models` rows are copied,
+and `streamSimple`, `fetchDynamicModels` and `oauth.modifyModels` are captured as the functions
+they were at that moment. Replacing any of them afterwards does not change what later requests
+do — re-register the provider instead, which is also how you replace it. A captured callback is
+still **yours**: it is applied to your own object, so a class instance keeps its receiver and
+its private fields, and `fetchUsage`, `login`, `refreshToken`, `getApiKey` and a
+`resolveHeaders` your `modifyModels` returns behave the same way. The copy and the capture
+happen when the registry admits the registration, which for a queued provider is when the host
+drains the queue rather than when `pi.registerProvider` returns; a change in that gap still
+reaches requests, and is not something to rely on.
+
+**Put values in data fields, not functions — in what you register and in what you return.** A
+function where the host expects data — a `toJSON` inside `compat`, a callable `extraBody`, an
+`access` your `login` hands back as a function — is refused with the field named. Those would
+run during request construction or credential storage, long after the call, and a session that
+has gone cannot answer for them. Compute the value before you hand it over.
+
+What you return is copied the same way your registration is, inside the call that returned it:
+a `UsageReport`, the credentials from `login` and `refreshToken`, and the events, deltas and
+result a custom stream carries. Each field the host knows is read once, and the record it keeps
+is the one you answered with rather than one assembled from several later reads of the same
+getter. An event or a content block of a type no known variant covers is copied as data — its
+own enumerable fields — which is what the host forwarded before.
+
+The objects handed **to** your callbacks are copies as well: the credential that `refreshToken`,
+`getApiKey` and `modifyModels` receive, the `credential` in a `supports` or `fetchUsage` params
+object, the `headers` that `parseRateLimitHeaders` receives, and the fetch context's `logger`,
+which forwards to the host's. Read them and change them freely — changing them changes nothing
+the host keeps. Return what you want it to keep.
+
+`pi.setModel` and `ctx.compact` copy what you hand them, once, and act on that copy — the key
+check and the selection read the same model, and the guidance a compaction validates is the
+guidance it summarises with. Both refuse a function where data belongs, and `ctx.compact` drops
+fields `CompactOptions` does not declare.
+
+A model you are handed — `ctx.model`, `ctx.models.list()`/`current()`/`resolve()`, the rows
+`ctx.modelRegistry` answers with — is a copy of every field a model declares, and of every field
+of the shapes those declare (its cost, identity, thinking), read as the host reads them, whatever
+objects the host holds them in. The fields the type leaves open (`compat`, `kindConfig`, `headers`,
+`requestMetadata`) are read the same way, own accessors included, enumerable or not. Changing its
+`baseUrl` or `provider` changes nothing the host sends. Its `resolveHeaders` calls the host's own
+on the host's model. Pass it to `pi.setModel` to select it.
+
+What `ctx` and `pi` read back — `getSystemPrompt()`, `getContextUsage()`, `getAsyncJobSnapshot()`,
+`getPendingPlanReview()`, `getActiveTools()`, `getAllTools()`, `getCommands()`,
+`getServiceTiers()` — and the events your hooks receive are copies of the host's data. A date, a
+map, a set, binary data, a regular expression and a URL arrive as themselves, copied; an object of
+any other class arrives as a plain object of its own enumerable fields, without its methods; an
+error arrives as a new error of the language's own class it extends (`TypeError`, `Error`,
+`AggregateError`, and `DOMException` for an `AbortError`), with its own properties and its
+`name`, `message` and `code`, never as an instance of the host's error class — so copying it again
+gives the same error. A function is behavior, not data, wherever it sits — a field of a record
+or of an instance, an array element, a map's key or value, a set's member, an error's property —
+and is dropped, as the session file drops it (an array keeps the slot, `undefined`). The copy is
+made without recursion, so how deeply the data nests does not matter — a long session's tree is
+copied whole. What is bounded is how many objects one copy makes: past one million, the copy
+throws a `RangeError` saying so, rather than handing you a value that looks complete and is not;
+a hook whose event cannot be copied is reported as failed. An `AbortSignal` you receive is a
+signal of your own, and when it aborts its `reason` is a copy of the caller's.
+
+The callables a surface declares are handed on purpose by that surface, not found in data. A
+tool's callable schema in `getAllTools()` (`ToolInfo.parameters`) is a frozen schema of your own:
+calling it, its `assert` and its `toJsonSchema` reach the host's, which you never hold, and
+everything crossing is a copy — the value it validates, what it answers, a failure (which reads
+exactly as the host's does, alternatives included), an exception it throws, and what a callback
+you pass to `toJsonSchema` (a `fallback`) is handed and answers. A thinking renderer's
+`requestRender` does nothing once your session has gone.
+
+What a `ctx.ui` factory is handed besides its theme is the session's own, not the host's:
+
+- **The TUI** has every member `TUI` declares. Drawing (`requestRender`, `requestComponentRender`,
+  `invalidate`), the frame's timing, `terminal.rows`/`columns` and the image budget an image draws
+  through reach the host's. An input listener, `setFocus`, `showOverlay` and `stop` take effect
+  only while your session is live: a listener is removed at the first key after the session has
+  gone. A component you focus or show takes its keys inside your session, so an asynchronous
+  `handleInput` is your session's work. Once the session has gone, every overlay it showed comes
+  down before the next frame or key, whichever component it holds and however that component was
+  focused before; so does any overlay holding a component your session focused, whichever session
+  showed it. The TUI never focuses a component of a session that has gone, and focus goes back to
+  what the session last took it from — or to what took that one's place, when it was an
+  extension's too. `setFocus(null)` gives focus back the same way. What a session leaves behind
+  belongs to it, not to the runtime — a factory it handed `ctx.ui`, a widget, editor or dialog
+  the host mounted from one, a component it focused or showed, a listener it added — so a host that
+  starts the next session on the same runtime does not bring any of it back, even before the
+  next frame. `start` ends only a suspension your session started. Members that steer the
+  host's renderer, its input or its other components — `children`, `addChild`,
+  `injectDebugInput`, `getFocused`, `hideOverlay`, paint and frame listeners, and the terminal's
+  `write` — throw, naming the member.
+- **The keybindings** a `custom` dialog or a `setEditorComponent` factory receives are a manager
+  of your own built from a copy of the user's bindings; changing them changes only yours.
+- **The provider** an `addAutocompleteProvider` factory wraps is an object whose methods call the
+  host's provider. Replace its methods freely: the host's provider, which the editor falls back to
+  once your session has gone, is not changed.
+
+### A registered tool
+
+`pi.registerTool` copies your definition when it runs. A later edit to a plain JSON Schema
+`parameters` object changes nothing; a callable schema — `pi.zod`, `pi.typebox`, an omptype or
+ArkType `type` — is kept rather than copied, because its checks are code, so its wire schema is
+asked for once at registration (where a `toJsonSchema` failure now surfaces) and its own checks
+run inside your session on copies of the arguments. A function anywhere in a JSON Schema
+`parameters` is refused with its path.
+
+`openArgStream`, `speculation`'s callbacks and the approval callbacks all run inside your
+session, on copies, and do nothing once the session has gone. **Editing the arguments a
+receiver is handed changes nothing that executes** — to change an input, return it from a
+`tool_call` hook.
+
+The `signal` a tool's `execute` receives, and the one a `session_stop`,
+`session_before_compact` or `session_before_tree` hook receives, is your session's own: already
+aborted if the caller's was, aborting with a copy of the caller's reason in the same turn, and no
+longer following the caller once the call ends. The caller's reason is the host's own object,
+which it reads again after the abort, so you are handed a copy of it.
+
+Your `streamSimple` and `stream` receive copies of the model, the context and the options.
+Tool parameters arrive as the JSON Schema that goes on the wire, not as the host's live schema
+object. The callbacks among the options — `onPayload`, `onResponse`, `onSseEvent`, `fetch`,
+`providerRetryWait`, `liveSteering`, an API-key resolver, and `model.resolveHeaders` — are
+functions of the host's own that call its originals on copies of whatever you pass them; a
+function where data belongs is refused with its path, and a signal must be a real
+`AbortSignal`. `providerSessionState`, the Cursor exec handlers and tool-result hook, and the
+Anthropic slow-mode hooks are host-only and are not handed to an extension's API.
+
+Several sessions can register the same provider name; a subagent that rebinds its parent's
+extensions does. The registration in force is the most recent one whose session is still alive,
+so when that session ends the earlier one answers again rather than the provider breaking.
+`pi.unregisterProvider(name)` withdraws **your** registration and leaves anyone else's.
+
+**A custom `streamSimple` is read to its end, and gets its own abort signal.** The host starts
+reading the stream you return as soon as you return it, so a custom async iterator runs ahead of
+whoever is consuming the events rather than at their pace, and its `return()` runs when the
+stream ends rather than when a consumer stops early. The `signal` your function receives is the
+host's own: it aborts with the caller's reason, at the same moment, and stops following once
+your stream has finished. Both exist so that what your stream does while it runs is still your
+session's work. That is what keeps your session's credentials in place while it runs — and
+"while it runs" means until your iterator's `return()` has finished, an asynchronous `finally`
+included, **and** the stream's own `result()` has settled. A stream whose `result` is not a
+function is refused at the call, because a producer that cannot say when it is finished is one
+the session cannot be held open for. A `finally` that never settles therefore holds your
+session's account restriction for the life of the process; the alternative would be releasing
+its credentials while your code is still running.
 
 Extension-registered providers (`registerProvider`) can supply `fetchDynamicModels` for runtime model discovery; these fetches are hard-bounded to a 15-second timeout (`RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS` in `model-provider-discovery.ts`) so a hung endpoint cannot stall discovery.
 
@@ -430,7 +623,7 @@ await peer.setRemoteDescription({ type: "answer", sdp: live.sdpAnswer });
 
 The promise resolves once the call is signaled and its control socket is open; apply `sdpAnswer` right away. It rejects without a non-empty `sdpOffer` and while another live session is active. `voice` and `instructions` work as for RPC `live_start`. The peer does its own echo cancellation and mute: the TUI mute key only moves the phase to `muted`, so silence the peer's microphone track while that phase lasts. omp reports no audio levels and no `speaking` phase for these calls. `onEnd` is called exactly once, including when the call fails to start (before the promise rejects). Observer callbacks that throw are logged and do not end the call.
 
-omp has no media peer for these calls, so it cannot tell when yours goes away. Call `live.stop()` when the peer disconnects (`connectionstatechange` to `failed` or `closed`, or your relay socket closing); otherwise the call stays open and the TUI keeps the live visualizer up.
+omp has no media peer for these calls, so it cannot tell when yours goes away. Call `live.stop()` when the peer disconnects (`connectionstatechange` to `failed` or `closed`, or your relay socket closing); otherwise the call stays open and the TUI keeps the live visualizer up. `stop()` keeps working after your session has ended, so a call your session started can always be ended. The options are copied when you call `startLive`, and `onPhase`, `onTranscript` and `onEnd` run as your session's work, handed copies of what omp reports, and do nothing once it has ended.
 
 Whoever holds the peer steers this session by voice, including delegated work that runs tools, so authenticate the page or relay that hands you the offer.
 

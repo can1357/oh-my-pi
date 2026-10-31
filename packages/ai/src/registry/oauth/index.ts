@@ -3,6 +3,12 @@
 // ============================================================================
 
 import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
+import {
+	callThroughGate,
+	type GatedRegistration,
+	type ProviderCallGate,
+	selectLiveRegistration,
+} from "../../auth/provider-gate";
 import * as AIError from "../../error";
 import { jwtExpiryMs, NEVER_EXPIRES } from "../engine/common";
 import { getProviderDefinition, PROVIDER_REGISTRY } from "../registry";
@@ -27,37 +33,118 @@ const builtInOAuthProviders: OAuthProviderInfo[] = PROVIDER_REGISTRY.filter(
 	storeCredentialsAs: provider.storeCredentialsAs,
 }));
 
-const customOAuthProviders = new Map<string, OAuthProviderInterface>();
+/**
+ * A custom OAuth provider as its author wrote it. The registry can record `id` and `sourceId`
+ * beside the object (see {@link OAuthProviderRegistrationOptions}), so the object need not carry
+ * them.
+ */
+export type CustomOAuthProvider = Omit<OAuthProviderInterface, "id" | "sourceId"> &
+	Partial<Pick<OAuthProviderInterface, "id" | "sourceId">>;
+
+/** What the registry records beside a provider, never on it. */
+export interface OAuthProviderRegistrationOptions {
+	/** Registry key. Defaults to the provider's own `id`. */
+	readonly id?: OAuthProviderId;
+	/** Source that {@link unregisterOAuthProviders} matches. Defaults to the provider's own `sourceId`. */
+	readonly sourceId?: string;
+	/** Lifetime of the session that registered the provider. Omitted for the host's own. */
+	readonly gate?: ProviderCallGate;
+}
+
+/** One registration of a custom OAuth provider: the author's object, stored as given, and what
+ *  the registry knows about it. Call the provider's methods on `provider` itself, through `gate`. */
+export interface OAuthProviderRegistration extends GatedRegistration {
+	readonly provider: CustomOAuthProvider;
+	readonly id: OAuthProviderId;
+	readonly sourceId?: string;
+}
+
+/** Registrations by provider id, oldest first. Several sessions can register one id; the newest
+ *  live one answers. A retired registration stays until it is unregistered: retirement only stops
+ *  it being selected. */
+const customOAuthProviders = new Map<string, OAuthProviderRegistration[]>();
 
 /**
- * Register a custom OAuth provider.
+ * Register a custom OAuth provider. The object is stored as given. Its own `id` and `sourceId` are
+ * read only when `options` does not supply them, and then through the registration's gate, since a
+ * property of the author's object may be a getter. Registering an id again with the same gate (or,
+ * for the host, again without one) replaces that registration in place.
  */
-export function registerOAuthProvider(provider: OAuthProviderInterface): void {
-	customOAuthProviders.set(provider.id, provider);
+export function registerOAuthProvider(
+	provider: OAuthProviderInterface,
+	options?: OAuthProviderRegistrationOptions,
+): void;
+export function registerOAuthProvider(
+	provider: CustomOAuthProvider,
+	options: OAuthProviderRegistrationOptions & { readonly id: OAuthProviderId },
+): void;
+export function registerOAuthProvider(provider: CustomOAuthProvider, options?: OAuthProviderRegistrationOptions): void {
+	const gate = options?.gate;
+	const id = options?.id ?? callThroughGate(gate, () => provider.id);
+	if (id === undefined) {
+		throw new AIError.ConfigurationError("Cannot register an OAuth provider without an id.");
+	}
+	const sourceId = options?.sourceId ?? callThroughGate(gate, () => provider.sourceId);
+	const registration: OAuthProviderRegistration = { provider, id, sourceId, gate };
+	const registrations = customOAuthProviders.get(id);
+	if (!registrations) {
+		customOAuthProviders.set(id, [registration]);
+		return;
+	}
+	const index = registrations.findIndex(entry => entry.gate === gate);
+	if (index === -1) {
+		registrations.push(registration);
+	} else {
+		registrations[index] = registration;
+	}
+}
+
+/** Drops the registrations of `id` that `remove` matches, and the id once none are left. */
+function removeOAuthRegistrations(id: string, remove: (entry: OAuthProviderRegistration) => boolean): void {
+	const registrations = customOAuthProviders.get(id);
+	if (!registrations) return;
+	const kept = registrations.filter(entry => !remove(entry));
+	if (kept.length === 0) {
+		customOAuthProviders.delete(id);
+	} else if (kept.length !== registrations.length) {
+		customOAuthProviders.set(id, kept);
+	}
 }
 
 /**
- * Remove a custom OAuth provider by ID.
+ * Remove a custom OAuth provider by ID: only `gate`'s registration when a gate is given, so other
+ * sessions' registrations of the same ID go on being selected; every registration otherwise.
  */
-export function unregisterOAuthProvider(id: string): void {
-	customOAuthProviders.delete(id);
+export function unregisterOAuthProvider(id: string, gate?: ProviderCallGate): void {
+	if (gate) {
+		removeOAuthRegistrations(id, entry => entry.gate === gate);
+	} else {
+		customOAuthProviders.delete(id);
+	}
 }
 
 /**
- * Get a custom OAuth provider by ID.
+ * The registration in force for a custom OAuth provider ID: the newest one whose session is still
+ * live. Calls into its provider go through {@link callThroughGate} with its `gate`.
+ *
+ * This is the only way to reach a registered provider, deliberately. A registration's `id` and
+ * `sourceId` belong to THIS registry — a provider may expose an `id` of its own, through a
+ * getter it alone controls, that disagrees with the name it was registered under — and the
+ * author's object is handed back untouched, so the two cannot be read from one value. Returning
+ * the entry keeps the registry's name and the author's object each saying only what it knows.
  */
-export function getOAuthProvider(id: OAuthProviderId): OAuthProviderInterface | undefined {
-	return customOAuthProviders.get(id);
+export function getOAuthProviderEntry(id: OAuthProviderId): OAuthProviderRegistration | undefined {
+	const registrations = customOAuthProviders.get(id);
+	return registrations ? selectLiveRegistration(registrations) : undefined;
 }
 
 /**
- * Remove all custom OAuth providers registered by a source.
+ * Remove the custom OAuth provider registrations made for a source: only `gate`'s when a gate is
+ * given, every session's otherwise.
  */
-export function unregisterOAuthProviders(sourceId: string): void {
-	for (const [id, provider] of customOAuthProviders.entries()) {
-		if (provider.sourceId === sourceId) {
-			customOAuthProviders.delete(id);
-		}
+export function unregisterOAuthProviders(sourceId: string, gate?: ProviderCallGate): void {
+	for (const id of customOAuthProviders.keys()) {
+		removeOAuthRegistrations(id, entry => entry.sourceId === sourceId && (!gate || entry.gate === gate));
 	}
 }
 
@@ -158,16 +245,33 @@ export async function getOAuthApiKey(
  * Get list of OAuth providers.
  */
 export function getOAuthProviders(): OAuthProviderInfo[] {
-	const customProviders = Array.from(customOAuthProviders.values(), provider => ({
-		id: provider.id,
-		name: provider.name,
-		available: true,
-		storeCredentialsAs: provider.storeCredentialsAs,
-	}));
+	const customProviders: OAuthProviderInfo[] = [];
+	for (const registrations of customOAuthProviders.values()) {
+		const entry = selectLiveRegistration(registrations);
+		if (!entry) continue;
+		const { provider } = entry;
+		// `name` and `storeCredentialsAs` are the author's properties (either may be a getter), so
+		// they are read as the owning session's work.
+		customProviders.push(
+			callThroughGate(entry.gate, () => ({
+				id: entry.id,
+				name: provider.name,
+				available: true,
+				storeCredentialsAs: provider.storeCredentialsAs,
+			})),
+		);
+	}
 	return [...builtInOAuthProviders, ...customProviders];
 }
 
 /** Provider id that stores `providerId`'s credentials: login aliases (`openai-codex-device`) map to their target (`openai-codex`). */
 export function getOAuthCredentialProvider(providerId: string): string {
-	return getOAuthProviders().find(provider => provider.id === providerId)?.storeCredentialsAs ?? providerId;
+	const builtIn = builtInOAuthProviders.find(provider => provider.id === providerId);
+	if (builtIn) return builtIn.storeCredentialsAs ?? providerId;
+	const entry = getOAuthProviderEntry(providerId);
+	if (!entry) return providerId;
+	// Only this provider's property is read, as its owning session's work: listing every
+	// provider would run each one's `name` getter for nothing.
+	const { provider } = entry;
+	return callThroughGate(entry.gate, () => provider.storeCredentialsAs) ?? providerId;
 }

@@ -19,6 +19,7 @@ import type {
 	ProviderResponseMetadata,
 	TextContent,
 } from "@oh-my-pi/pi-ai";
+import type { ProviderCallGate } from "@oh-my-pi/pi-ai/auth/provider-gate";
 import {
 	clearContextHistoryIndex,
 	getContextHistoryIndex,
@@ -40,11 +41,36 @@ import type { SessionManager } from "../../session/session-manager";
 import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-write-fallback";
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
 import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shared-events";
+import {
+	assistantContentAsCopied,
+	copyHandlerResult,
+	copyHostData,
+	HandedSignals,
+	handHostModel,
+	handHostSchema,
+	handSessionFacade,
+	sessionHostCall,
+} from "./boundary-data";
+import { providerCallGate } from "./callback-ownership";
 import { ManagedTimers } from "./managed-timers";
+import {
+	type ExtensionModelRegistry,
+	type ExtensionSessionManager,
+	CONTEXT_ANSWERS,
+	handLiveStart,
+	handLocalProtocolOptions,
+	handMemory,
+	handModelRegistry,
+	handSessionManager,
+	handSessionModes,
+	handTheme,
+	handUIContext,
+} from "./context-surfaces";
 import { createExtensionModelQuery } from "./model-api";
 import { trackUserWaits, type UserWaitTracker } from "./user-wait";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import { extensionLinkClicksAvailable } from "@oh-my-pi/pi-tui/render/extension-links";
+import { pinInputScope, type ToolRendererScope } from "@oh-my-pi/pi-tui/tools/renderer-scope";
 import type {
 	AfterProviderResponseEvent,
 	AssistantMessageRewriteEvent,
@@ -63,6 +89,7 @@ import type {
 	ContextUsage,
 	Extension,
 	ExtensionActions,
+	ExtensionCallbackOwner,
 	ExtensionAgentIdentity,
 	ExtensionAnnotationsAPI,
 	ExtensionAnnotationsFactory,
@@ -75,6 +102,8 @@ import type {
 	ExtensionFlag,
 	ExtensionMode,
 	ExtensionRuntime,
+	ExtensionSessionGeneration,
+	ExtensionSessionModes,
 	ExtensionShortcut,
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
@@ -99,6 +128,7 @@ import type {
 	SessionStopEventResult,
 	ToolCallEvent,
 	ToolCallEventResult,
+	ToolInfo,
 	ToolRegistrationListener,
 	ToolResultEvent,
 	ToolResultEventResult,
@@ -109,6 +139,7 @@ import type {
 } from "./types";
 
 import { cfgExtensionAssistantTextRenderers, cfgExtensionHandlersToolCallTimeoutMs } from "../settings";
+import { ownAcceptedCallbacks } from "./loader";
 
 /** Combined result from all before_agent_start handlers */
 interface BeforeAgentStartCombinedResult {
@@ -173,6 +204,16 @@ function handlerTimeoutForEvent(eventType: string): number {
 const EXTENSION_HANDLER_TIMEOUT = Symbol("extensionHandlerTimeout");
 const EXTENSION_HANDLER_ABORTED = Symbol("extensionHandlerAborted");
 
+/** One dispatch, as `ExtensionRunner.#runDispatched` keeps it: the session it was made for, whether
+ *  that session was live when it began, the handlers of it running now, and the hold that keeps
+ *  the session's disposal waiting until the dispatch is over. */
+interface DispatchRecord {
+	readonly session: ExtensionCallbackOwner;
+	readonly live: boolean;
+	running: number;
+	hold: PromiseWithResolvers<void> | undefined;
+}
+
 /** Events after which the session file and id may differ from what child shells last saw. */
 const SESSION_IDENTITY_EVENTS: Record<string, true> = {
 	session_start: true,
@@ -200,8 +241,6 @@ function createHandlerUIContext(
 	handlerSignal: AbortSignal,
 	timeoutBudget?: HandlerTimeoutBudget,
 ): ExtensionUIContext {
-	const askDialog = ui.askDialog;
-	const approve = ui.approve;
 	const runDialog = async <T>(dialog: () => Promise<T>): Promise<T> => {
 		timeoutBudget?.pause();
 		try {
@@ -217,14 +256,24 @@ function createHandlerUIContext(
 			runDialog(() => ui.confirm(title, message, attachHandlerSignal(dialogOptions, handlerSignal))),
 		input: (title, placeholder, dialogOptions) =>
 			runDialog(() => ui.input(title, placeholder, attachHandlerSignal(dialogOptions, handlerSignal))),
-		askDialog: askDialog
-			? (questions, dialogOptions) =>
-					runDialog(() => askDialog.call(ui, questions, attachHandlerSignal(dialogOptions, handlerSignal)))
-			: undefined,
-		approve: approve
-			? (prompt, dialogOptions) =>
-					runDialog(() => approve.call(ui, prompt, attachHandlerSignal(dialogOptions, handlerSignal)))
-			: undefined,
+		// Read when asked for, as the UI they wrap reads them: a host can offer one later (RPC's
+		// `set_ask_dialog`), and a handler that started before it did sees it then.
+		get askDialog(): ExtensionUIContext["askDialog"] {
+			const askDialog = ui.askDialog;
+			return (
+				askDialog &&
+				((questions, dialogOptions) =>
+					runDialog(() => askDialog.call(ui, questions, attachHandlerSignal(dialogOptions, handlerSignal))))
+			);
+		},
+		get approve(): ExtensionUIContext["approve"] {
+			const approve = ui.approve;
+			return (
+				approve &&
+				((prompt, dialogOptions) =>
+					runDialog(() => approve.call(ui, prompt, attachHandlerSignal(dialogOptions, handlerSignal))))
+			);
+		},
 		custom: async (factory, options) => {
 			let customSettled = false;
 			let componentReady = false;
@@ -251,19 +300,22 @@ function createHandlerUIContext(
 		editor: (title, prefill, dialogOptions, editorOptions) =>
 			runDialog(() => ui.editor(title, prefill, attachHandlerSignal(dialogOptions, handlerSignal), editorOptions)),
 	} satisfies Pick<ExtensionUIContext, "select" | "confirm" | "input" | "askDialog" | "approve" | "custom" | "editor">;
-	const delegatedMethods = new Map<PropertyKey, unknown>();
+	// Bound once per function the UI answers with, not once per name: a member answered afresh
+	// later — a host's replacement, a getter's new function — is bound afresh, never served stale.
+	const delegatedMethods = new WeakMap<Function, unknown>();
 
 	return new Proxy(ui, {
 		get(target, property) {
 			if (Object.hasOwn(dialogMethods, property)) {
 				return Reflect.get(dialogMethods, property, dialogMethods);
 			}
-			const cached = delegatedMethods.get(property);
-			if (cached) return cached;
 			const value: unknown = Reflect.get(target, property, target);
 			if (typeof value !== "function") return value;
-			const delegated: unknown = value.bind(target);
-			delegatedMethods.set(property, delegated);
+			let delegated = delegatedMethods.get(value);
+			if (!delegated) {
+				delegated = value.bind(target);
+				delegatedMethods.set(value, delegated);
+			}
 			return delegated;
 		},
 	});
@@ -273,7 +325,9 @@ function createHandlerUIContext(
  * Scope `ctx` to a single handler run without spreading it: `{ ...ctx }` would
  * snapshot live accessors (notably the `model` getter), so a handler calling
  * `pi.setModel()` and then reading `ctx.model` would see a stale model.
- * Prototype delegation keeps every getter live while overriding `ui`.
+ * Prototype delegation keeps every getter live while overriding `ui` — itself read from `ctx` when
+ * asked for, so a handler running across a host rebind dialogs through the UI the host has now,
+ * wrapped once per UI object so it compares equal to itself.
  */
 function createHandlerContext(
 	ctx: ExtensionContext,
@@ -281,8 +335,17 @@ function createHandlerContext(
 	timeoutBudget?: HandlerTimeoutBudget,
 ): ExtensionContext {
 	const scoped: ExtensionContext = Object.create(ctx);
+	const handlerUIs = new WeakMap<ExtensionUIContext, ExtensionUIContext>();
 	Object.defineProperty(scoped, "ui", {
-		value: createHandlerUIContext(ctx.ui, handlerSignal, timeoutBudget),
+		get: () => {
+			const ui = ctx.ui;
+			let handlerUI = handlerUIs.get(ui);
+			if (!handlerUI) {
+				handlerUI = createHandlerUIContext(ui, handlerSignal, timeoutBudget);
+				handlerUIs.set(ui, handlerUI);
+			}
+			return handlerUI;
+		},
 		enumerable: true,
 		configurable: true,
 	});
@@ -305,6 +368,8 @@ async function raceHandlerWithTimeout<T>(
 	work: (handlerSignal: AbortSignal, timeoutBudget: HandlerTimeoutBudget) => Promise<T> | T,
 	timeoutMs: number,
 	signal?: AbortSignal,
+	/** Receives the callback itself, which outlives the race below when the timeout wins. */
+	track?: (handlerWork: Promise<unknown>) => void,
 ): Promise<T | typeof EXTENSION_HANDLER_TIMEOUT | typeof EXTENSION_HANDLER_ABORTED> {
 	if (signal?.aborted) return EXTENSION_HANDLER_ABORTED;
 
@@ -361,6 +426,7 @@ async function raceHandlerWithTimeout<T>(
 	try {
 		if (signal?.aborted) return EXTENSION_HANDLER_ABORTED;
 		const workPromise = Promise.resolve(work(handlerSignal, timeoutBudget));
+		track?.(workPromise);
 		const result = await Promise.race([workPromise, interruptPromise]);
 		if (result === EXTENSION_HANDLER_TIMEOUT) {
 			await Promise.race([
@@ -558,12 +624,32 @@ export class ExtensionRunner {
 	#suspendedExtensions = new Set<Extension>();
 	/** Per-extension listener factories from {@link onToolRegistered}, applied to late-added extensions too. */
 	#toolRegistrationSubscribers = new Set<(extension: Extension) => ToolRegistrationListener>();
+	/** {@link onComposerShapesChanged} subscriptions, applied to late-added extensions too. */
+	#composerShapeSubscribers = new Set<(extension: Extension) => void>();
+	/** The session each dispatch context was made for ({@link createContext}), and whether it was
+	 *  live then: what decides whether a dispatch runs to its end ({@link #runDispatched}). */
+	readonly #dispatchSessions = new WeakMap<object, DispatchRecord>();
 	/** Latest `session_start` broadcast, replayed to extensions added afterwards. */
 	#sessionStartEvent: RunnerEmitEvent | undefined;
 	/** Notified after {@link setSuspendedExtensions} suspends or resumes any extension. */
 	#suspensionListeners = new Set<() => void>();
 	/** Main runner whose suspensions this runner's drawing follows; see {@link followSuspension}. */
 	#suspensionParent: ExtensionRunner | undefined;
+	/** {@link rendererScope}, made once it is first asked for. */
+	#rendererScope: ToolRendererScope | undefined;
+	/** {@link rendererScope}'s `pin`: one scope per session generation, made when first asked for. */
+	#pinnedScopes = new WeakMap<ExtensionSessionGeneration, ToolRendererScope>();
+	/** The host services a context hands this session's extensions (`context-surfaces.ts`), each
+	 *  made once per host object, so every context hands the same one. */
+	#handedSessionManager = new WeakMap<ExtensionCallbackOwner, ExtensionSessionManager>();
+	#handedModelRegistry = new WeakMap<ExtensionCallbackOwner, ExtensionModelRegistry>();
+	#handedLocalProtocolOptions = new WeakMap<ExtensionCallbackOwner, LocalProtocolOptions>();
+	readonly #handedUI = new WeakMap<ExtensionCallbackOwner, WeakMap<ExtensionUIContext, ExtensionUIContext>>();
+	readonly #handedMemory = new WeakMap<ExtensionCallbackOwner, WeakMap<MemoryRuntimeContext, MemoryRuntimeContext>>();
+	readonly #handedSessionModes = new WeakMap<
+		ExtensionCallbackOwner,
+		WeakMap<ExtensionSessionModes, ExtensionSessionModes>
+	>();
 	/**
 	 * Buffer for `credential_disabled` events received via {@link emitCredentialDisabled}
 	 * before {@link initialize} has run. Drained through {@link emit} once initialize sets
@@ -592,7 +678,9 @@ export class ExtensionRunner {
 	 * dispatch — a throw is logged and routed through {@link onError} instead of
 	 * escaping to the process `uncaughtException` handler and tearing down the
 	 * whole session (issue #5664). Handles are `unref`'d and every outstanding
-	 * timer is cleared on session teardown via {@link clearManagedTimers}.
+	 * timer is cleared on session teardown via {@link clearManagedTimers}. Each callback is owned
+	 * by the session whose context scheduled it (`createContext`), not by whichever session the
+	 * runtime serves when it is scheduled.
 	 */
 	#managedTimers = new ManagedTimers((event, error, stack) =>
 		this.emitError({ extensionPath: "<timer>", event, error, stack }),
@@ -773,6 +861,40 @@ export class ExtensionRunner {
 		this.#getMemoryFn = getMemory;
 		this.#createAnnotations = createAnnotations;
 		this.#getAsyncJobSnapshotFn = getAsyncJobSnapshot ?? (() => null);
+		this.#ownEveryDispatch();
+	}
+
+	/** Ownership of the GAP inside a broadcast, not of callback lifetimes — those belong to
+	 *  {@link runScoped}, which every path that invokes extension code goes through. Several
+	 *  emitters (`emitInput`, `emitBeforeAgentStart`, `emitUserBash`, `emitResourcesDiscover`,
+	 *  `emitToolResult`, …) run their own sequential handler loops, and between two handlers of
+	 *  such a loop no callback is executing while work that was registered all along has not
+	 *  started; a caller asking "is extension work outstanding?" in that gap would get the wrong
+	 *  answer. Hooking the surface those loops share, rather than hand-listing them, keeps a new
+	 *  emitter from reopening that hole — but it is a convention over method names, so it is the
+	 *  weaker of the two layers and never the one that owns a callback. */
+	#ownEveryDispatch(): void {
+		const prototype = ExtensionRunner.prototype as unknown as Record<string, unknown>;
+		for (const name of Object.getOwnPropertyNames(prototype)) {
+			if (!name.startsWith("emit")) continue;
+			if (typeof Object.getOwnPropertyDescriptor(prototype, name)?.value !== "function") continue;
+			Object.defineProperty(this, name, {
+				configurable: true,
+				writable: true,
+				value: (...args: unknown[]): unknown => {
+					// Resolved at call time, not captured here: a spy or patch installed on the
+					// prototype after construction must still be the thing that runs.
+					const emitter = prototype[name] as (...rest: unknown[]) => unknown;
+					// The session the dispatch is made for is the one before its first handler runs:
+					// a handler can end it, and the dispatch stays its work.
+					const work = this.#workOf();
+					const result = emitter.apply(this, args);
+					// Synchronous emitters finish inside this call and own no gap.
+					if (result instanceof Promise) this.#track(work.dispatches, result);
+					return result;
+				},
+			});
+		}
 	}
 
 	/**
@@ -821,30 +943,64 @@ export class ExtensionRunner {
 		uiContext?: ExtensionUIContext,
 		mode: ExtensionMode = "print",
 	): void {
-		// Copy actions into the shared runtime (all extension APIs reference this)
+		// Copy actions into the shared runtime (all extension APIs reference this). What a read
+		// answers with is a copy: the host keeps its own lists and records, and an extension editing
+		// what it was handed must not edit what the host acts on.
 		this.runtime.sendMessage = actions.sendMessage;
 		this.runtime.sendUserMessage = actions.sendUserMessage;
 		this.runtime.appendEntry = actions.appendEntry;
-		this.runtime.getActiveTools = actions.getActiveTools;
-		this.runtime.getAllTools = actions.getAllTools;
+		this.runtime.getActiveTools = () => copyHostData(actions.getActiveTools());
+		// Each tool's `parameters` is the host's own (a registered tool's is the copy taken at
+		// registration), and the host validates and builds requests against it. A JSON Schema is
+		// copied as data. A callable schema is code, so a copy of the record drops it; it is handed
+		// deliberately, as `ToolInfo.parameters` declares it, through a frozen schema of its own
+		// (`handHostSchema`) whose calls reach the host's: the host's object, a built-in tool's
+		// included, is never handed, so nothing the extension sets on what it holds reaches it.
+		this.runtime.getAllTools = () =>
+			actions.getAllTools().map(info => {
+				const parameters: unknown = info.parameters;
+				return {
+					...copyHostData(info),
+					parameters:
+						typeof parameters === "function"
+							? (handHostSchema(parameters) as ToolInfo["parameters"])
+							: copyHostData(info.parameters),
+				};
+			});
 		this.runtime.setActiveTools = async toolNames => {
 			const registrationBarrier = this.#toolRegistrationBarrier;
 			if (registrationBarrier) await registrationBarrier;
 			await actions.setActiveTools(toolNames);
 		};
-		this.runtime.getCommands = actions.getCommands;
-		this.runtime.setModel = actions.setModel;
+		this.runtime.getCommands = () => copyHostData(actions.getCommands());
+		// The session that hands a model over owns it: the copy is taken inside its admission, and a
+		// `resolveHeaders` the model brings runs as its work (`runExtensionSetModel`).
+		this.runtime.setModel = model => actions.setModel(model, this.runtime);
 		this.runtime.getThinkingLevel = actions.getThinkingLevel;
 		this.runtime.setThinkingLevel = actions.setThinkingLevel;
-		this.runtime.getServiceTiers = actions.getServiceTiers ?? throwUnsupportedServiceTierAction;
+		const getServiceTiers = actions.getServiceTiers;
+		this.runtime.getServiceTiers = getServiceTiers
+			? () => copyHostData(getServiceTiers())
+			: throwUnsupportedServiceTierAction;
 		this.runtime.setServiceTier = actions.setServiceTier ?? throwUnsupportedServiceTierAction;
 		this.runtime.getSessionName = actions.getSessionName;
 		this.runtime.setSessionName = actions.setSessionName;
+		// The session goes with the configuration here too. `initialize()` replaces the queue
+		// with a direct registration, and that is the path a real SDK extension takes: without
+		// this the registry would have no owner to ask before calling the provider, and a
+		// withdrawal would take away a sibling session's registration along with this one's.
+		// A provider registered while a session runs is that session's (`forAcceptance`), and comes
+		// out of the registry when the session ends; one registered at load serves every session.
 		this.runtime.registerProvider = (name, config, sourceId) => {
-			this.modelRegistry.registerProvider(name, config, sourceId);
+			const accepting = this.runtime.forAcceptance?.();
+			const session = accepting !== undefined && accepting !== this.runtime ? accepting : undefined;
+			this.modelRegistry.registerProvider(name, config, sourceId, session ?? this.runtime);
+			session?.whenSessionEnds?.(() => this.modelRegistry.unregisterProvider(name, session, "session"));
 		};
+		// A withdrawal is the extension's: every registration of the name it made, at load or in any
+		// of its sessions.
 		this.runtime.unregisterProvider = name => {
-			this.modelRegistry.unregisterProvider(name);
+			this.modelRegistry.unregisterProvider(name, this.runtime);
 		};
 
 		// Context actions (required)
@@ -1039,6 +1195,42 @@ export class ExtensionRunner {
 		return this.#uiContext;
 	}
 
+	/** `ui` as this session's extensions are handed it (`handUIContext`): this runner's own UI in
+	 *  every context it creates, and a UI another host lends a handler (a focused subagent's
+	 *  transcript, a tool's `onSession`). One per UI object and session: the session is the one
+	 *  served now — or the admitted call's on this stack — and the facade is that session's alone
+	 *  (`ExtensionCallbackOwner.forSession`), so a `ctx.ui` a session held is refused once it has
+	 *  gone, even while the runtime serves the next session. */
+	handedUIContext(ui: ExtensionUIContext, session: ExtensionCallbackOwner = this.#sessionOwner()): ExtensionUIContext {
+		let bySession = this.#handedUI.get(session);
+		if (!bySession) {
+			bySession = new WeakMap();
+			this.#handedUI.set(session, bySession);
+		}
+		let handed = bySession.get(ui);
+		if (!handed) {
+			handed = handUIContext(ui, session, pinInputScope(this.rendererScope));
+			bySession.set(ui, handed);
+		}
+		return handed;
+	}
+
+	/** This runtime as the session served now (`forSession`), or the runtime itself for one with no
+	 *  sessions of its own. A facade made for it stays that session's. */
+	#sessionOwner(): ExtensionCallbackOwner {
+		return this.runtime.forSession?.() ?? this.runtime;
+	}
+
+	/** The value `cache` holds for `session`, made by `make` the first time it is asked for. */
+	#onceFor<V>(cache: WeakMap<ExtensionCallbackOwner, V>, session: ExtensionCallbackOwner, make: () => V): V {
+		let value = cache.get(session);
+		if (value === undefined) {
+			value = make();
+			cache.set(session, value);
+		}
+		return value;
+	}
+
 	hasUI(): boolean {
 		return this.#uiContext !== noOpUIContext;
 	}
@@ -1079,9 +1271,13 @@ export class ExtensionRunner {
 				addFileWriteFallback(async req => {
 					if (this.#suspendedExtensions.has(ext)) return false;
 					const ctx = this.createContext();
+					const named = { extensionPath: ext.path, event: "file_write_fallback" };
 					for (const handler of ext.fileWriteFallbackHandlers) {
 						try {
-							if (await handler(req, ctx)) return true;
+							// Through runScoped like every other extension callback: invoked straight
+							// from the filesystem helper, it would otherwise run unowned. Handed a copy: the
+							// helper rethrows `req.cause` as the original error once no handler took it.
+							if (await this.#runDispatched(ctx, named, () => handler(copyHostData(req), ctx))) return true;
 						} catch (error) {
 							logger.warn("Extension file write fallback handler threw; trying next handler", {
 								extension: ext.path,
@@ -1098,9 +1294,10 @@ export class ExtensionRunner {
 				addFileDeleteFallback(async req => {
 					if (this.#suspendedExtensions.has(ext)) return false;
 					const ctx = this.createContext();
+					const named = { extensionPath: ext.path, event: "file_delete_fallback" };
 					for (const handler of ext.fileDeleteFallbackHandlers) {
 						try {
-							if (await handler(req, ctx)) return true;
+							if (await this.#runDispatched(ctx, named, () => handler(copyHostData(req), ctx))) return true;
 						} catch (error) {
 							logger.warn("Extension file delete fallback handler threw; trying next handler", {
 								extension: ext.path,
@@ -1131,6 +1328,7 @@ export class ExtensionRunner {
 			for (const extension of added) this.#installFileFallbacks(extension);
 		}
 		for (const extension of added) {
+			for (const attach of this.#composerShapeSubscribers) attach(extension);
 			const scope: ToolRegistrationScope = {
 				pending: new Set(),
 				closed: false,
@@ -1310,13 +1508,32 @@ export class ExtensionRunner {
 		if (firstFailure) throw firstFailure.reason;
 	}
 
-	/** Composer shapes registered during extension load, with later extensions winning id collisions. */
+	/** Composer shapes the extensions have registered — at load, or by a session still running —
+	 *  with later extensions winning id collisions. */
 	getComposerShapes(): ComposerShapeDefinition[] {
 		const shapes = new Map<string, ComposerShapeDefinition>();
 		for (const extension of this.extensions) {
 			for (const [id, shape] of extension.composerShapes) shapes.set(id, shape);
 		}
 		return [...shapes.values()];
+	}
+
+	/** Calls `listener` whenever an extension's composer shapes change after load — a session
+	 *  registers one, or its end withdraws one — including extensions added later. A host that
+	 *  installed {@link getComposerShapes} reinstalls them. Answers what unsubscribes. */
+	onComposerShapesChanged(listener: () => void): () => void {
+		const attached = new Set<Extension>();
+		const attach = (extension: Extension): void => {
+			extension.composerShapeListeners ??= new Set();
+			extension.composerShapeListeners.add(listener);
+			attached.add(extension);
+		};
+		for (const extension of this.extensions) attach(extension);
+		this.#composerShapeSubscribers.add(attach);
+		return () => {
+			this.#composerShapeSubscribers.delete(attach);
+			for (const extension of attached) extension.composerShapeListeners?.delete(listener);
+		};
 	}
 
 	/**
@@ -1416,18 +1633,44 @@ export class ExtensionRunner {
 		return false;
 	}
 
+	/**
+	 * The renderer an extension registered for `customType`, as a host may call it: inside
+	 * {@link runScoped} on copies of the message and options, `undefined` once the session has
+	 * gone, and carrying {@link rendererScope}, which the host mounts the returned component in
+	 * (`FramedMessageComponent`). The component is the extension's live code; it is not copied.
+	 */
 	getMessageRenderer(customType: string): MessageRenderer | undefined {
 		for (const ext of this.extensions) {
 			const renderer = ext.messageRenderers.get(customType);
 			if (renderer) {
-				return renderer;
+				const admitted: MessageRenderer = (message, options, theme) =>
+					this.runScoped(() => renderer(copyHostData(message), copyHostData(options), handTheme(theme)));
+				return Object.assign(admitted, { rendererScope: this.rendererScope });
 			}
 		}
 		return undefined;
 	}
 
+	/** The thinking renderers extensions registered, each as {@link getMessageRenderer} hands one:
+	 *  admitted, on a copy of its context, carrying the scope its component is mounted in. The
+	 *  context's `requestRender` is the one callable it declares, so it is handed deliberately: it
+	 *  asks the host for a frame, and does nothing once the session has gone. */
 	getAssistantThinkingRenderers(): AssistantThinkingRenderer[] {
-		return this.extensions.flatMap(ext => ext.assistantThinkingRenderers);
+		return this.extensions.flatMap(ext =>
+			ext.assistantThinkingRenderers.map(renderer => {
+				const admitted: AssistantThinkingRenderer = (context, theme) => {
+					const scope = this.rendererScope;
+					const handed = {
+						...copyHostData(context),
+						requestRender: () => {
+							if (scope.live) context.requestRender();
+						},
+					};
+					return this.runScoped(() => renderer(handed, handTheme(theme)));
+				};
+				return Object.assign(admitted, { rendererScope: this.rendererScope });
+			}),
+		);
 	}
 
 	/**
@@ -1452,10 +1695,19 @@ export class ExtensionRunner {
 		return parent ? this.extensions.filter(ext => !parent.isExtensionSuspended(ext.resolvedPath)) : this.extensions;
 	}
 
-	/** Registered assistant text renderers; none while `extensionRenderers.assistantText` is off. */
+	/**
+	 * Registered assistant text renderers; none while `extensionRenderers.assistantText` is off.
+	 * Each runs inside {@link runScoped} on a copy of its context and answers `undefined` once the
+	 * session has gone, so the host draws the block's own text; what it answers is a string.
+	 */
 	getAssistantTextRenderers(): AssistantTextRenderer[] {
 		if (!this.settings || !cfgExtensionAssistantTextRenderers.get(this.settings)) return [];
-		return this.#drawingExtensions().flatMap(ext => ext.assistantTextRenderers);
+		return this.#drawingExtensions().flatMap(ext =>
+			ext.assistantTextRenderers.map(renderer => {
+				const admitted: AssistantTextRenderer = context => this.runScoped(() => renderer(copyHostData(context)));
+				return Object.assign(admitted, { rendererScope: this.rendererScope });
+			}),
+		);
 	}
 
 	/** Link schemes claimed with `registerLinkScheme`; none while `extensionRenderers.assistantText` is off. */
@@ -1502,10 +1754,14 @@ export class ExtensionRunner {
 		const event: LinkActivateEvent = { type: "link_activate", url, scheme };
 		const base = this.createContext();
 		const ctx: ExtensionContext =
-			ui && ui !== this.#uiContext ? Object.create(base, { ui: { value: ui }, hasUI: { value: true } }) : base;
+			ui && ui !== this.#uiContext
+				? Object.create(base, { ui: { value: this.handedUIContext(ui) }, hasUI: { value: true } })
+				: base;
 		for (const handler of handlers) {
 			try {
-				await this.runScoped(() => handler(event, ctx));
+				await this.#runDispatched(base, { extensionPath: owner.path, event: event.type }, () =>
+					handler(event, ctx),
+				);
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				logger.warn("link_activate handler failed", { extensionPath: owner.path, url, error: message });
@@ -1558,12 +1814,158 @@ export class ExtensionRunner {
 	/**
 	 * Run an extension-owned callback within this session's settings scope, so a
 	 * synchronous `SettingsManager.create(ctx.cwd)` inside it resolves THIS
-	 * session's manager rather than a same-cwd sibling's. Event handlers get this
-	 * scope via {@link #runHandlerWithTimeout}; slash commands and shortcuts are
-	 * invoked directly by their controllers and route through here instead.
+	 * session's manager rather than a same-cwd sibling's.
+	 *
+	 * This is the invoker for everything this runner calls — event handlers, slash commands,
+	 * keyboard shortcuts, link activations, tool execution, the file write/delete fallbacks — so
+	 * it owns those invocations: refused once the session is retired (a `pi.on` handler stored
+	 * before disposal must not run after it, however the dispatch reaches it), counted while it
+	 * runs, and executed inside the acceptance scope so a subscription the callback makes is
+	 * attributed to this session rather than to whoever is on the stack. It is entered as the
+	 * session's admitted work (`runOwned`), so what the callback registers, and what its
+	 * continuations do after the session has gone, belong to that session.
 	 */
-	runScoped<T>(fn: () => T): T {
-		return withActiveSettings(this.settings, fn);
+	runScoped<T>(fn: () => T): T | undefined {
+		const owner = this.#scopeOwner;
+		if (!owner) return withActiveSettings(this.settings, fn);
+		if (owner.isRetired) return undefined;
+		return owner.runOwned(() => withActiveSettings(this.settings, fn));
+	}
+
+	/**
+	 * Runs one handler of a dispatch made with `ctx` ({@link createContext}). A dispatch that began
+	 * while its session was live runs to its end, as that session's work: its session ending while
+	 * an earlier handler awaited does not skip the handlers after it — a load-time handler serves
+	 * every session, this one's last dispatch included, and its result reaches the host — while a
+	 * callback that session registered refuses on its own (`ownCallback`). A dispatch that began
+	 * after its session had gone runs nothing — one a finishing handler starts included, since
+	 * finishing never starts anything — and says so through {@link onError} for each handler it
+	 * skips (`handler` names it), so a result the host expected is never lost in silence.
+	 *
+	 * The dispatch is one piece of its session's work: held from its first handler until a turn of
+	 * the event loop after its last, so the session's disposal, which waits for work under way, does
+	 * not finish in the gap between two handlers and leave the next to run after it. A dispatch loop
+	 * moves from one handler to the next within that turn. The hold is that session's alone: the
+	 * disposal of a session after it does not wait for it.
+	 */
+	#runDispatched<T>(
+		ctx: ExtensionContext,
+		handler: { readonly extensionPath: string; readonly event: string },
+		fn: () => T,
+	): T | undefined {
+		// A handler's context may derive from the dispatch's (`Object.create`, a lent `ui`).
+		let dispatch: DispatchRecord | undefined;
+		for (let at: object | null = ctx; at !== null && dispatch === undefined; at = Object.getPrototypeOf(at)) {
+			dispatch = this.#dispatchSessions.get(at);
+		}
+		const finish = dispatch?.session.finishOwned;
+		if (!this.#scopeOwner || !dispatch || !finish) return this.runScoped(fn);
+		if (!dispatch.live) {
+			this.emitError({
+				...handler,
+				error: "Not run: the session this dispatch was made for had ended before it began",
+			});
+			return undefined;
+		}
+		const record = dispatch;
+		if (record.running === 0 && record.hold === undefined) {
+			const hold = Promise.withResolvers<void>();
+			record.hold = hold;
+			record.session.trackCallback(hold.promise);
+		}
+		record.running++;
+		const settled = (): void => {
+			record.running--;
+			if (record.running > 0) return;
+			setImmediate(() => {
+				if (record.running > 0 || record.hold === undefined) return;
+				const hold = record.hold;
+				record.hold = undefined;
+				hold.resolve();
+			});
+		};
+		let result: T;
+		try {
+			result = Reflect.apply(finish, record.session, [() => withActiveSettings(this.settings, fn)]) as T;
+		} catch (error) {
+			settled();
+			throw error;
+		}
+		Promise.resolve(result).then(settled, settled);
+		return result;
+	}
+
+	/**
+	 * The scope a host runs this session's extension renderers in, and the components they return
+	 * (`ToolRendererScope`, `@oh-my-pi/pi-tui/tools/renderer-scope`, which cannot import this
+	 * admission): {@link runScoped}, refused once the session has retired. One per runner. A
+	 * runner whose callbacks run as the host's own never retires.
+	 *
+	 * It answers for whichever session the runtime serves, so a runner reused for the next session
+	 * renders for that one. What a session leaves behind — a component bound to the TUI's input, an
+	 * overlay it showed — is pinned to that session instead (`pin`): one scope per session
+	 * generation (`ExtensionRuntime.sessionGeneration`), which never becomes live again once the
+	 * session has gone, so the next session's lease does not revive it before the TUI's sweep.
+	 */
+	get rendererScope(): ToolRendererScope {
+		if (this.#rendererScope) return this.#rendererScope;
+		const retired = (): boolean => this.#scopeOwner?.isRetired === true;
+		const runScoped = <T>(call: () => T): T | undefined => this.runScoped(call);
+		const pin = (): ToolRendererScope => {
+			const generation = this.#scopeOwner?.sessionGeneration;
+			// `ExtensionRuntime` always answers one, before its first session too. A runner whose
+			// callbacks run as the host's own, or an embedder's runtime with no session generations,
+			// has no session lifetime to pin to: its scope is the only one it has.
+			if (generation === undefined) return scope;
+			let pinned = this.#pinnedScopes.get(generation);
+			if (!pinned) {
+				pinned = {
+					get live() {
+						return !generation.isRetired;
+					},
+					run<T>(call: () => T): T {
+						if (generation.isRetired) {
+							throw new Error("Extension session retired; its renderers are no longer callable");
+						}
+						// Not retired, so this generation is the runtime's current one and `runScoped` runs it.
+						return runScoped(call) as T;
+					},
+				};
+				this.#pinnedScopes.set(generation, pinned);
+			}
+			return pinned;
+		};
+		const scope: ToolRendererScope = {
+			get live() {
+				return !retired();
+			},
+			run<T>(call: () => T): T {
+				if (retired()) throw new Error("Extension session retired; its renderers are no longer callable");
+				// Live, so `runScoped` runs `call` and answers what it returned.
+				return runScoped(call) as T;
+			},
+			pin,
+		};
+		this.#rendererScope = scope;
+		return scope;
+	}
+
+	/** The owner {@link runScoped} runs callbacks as. Feature-tested, like every other reach into a
+	 *  host-supplied object here: embedders and this repo's tests pass runtimes that implement only
+	 *  what they use, and one without `ownCallback` runs its callbacks as the host's own. */
+	get #scopeOwner(): ExtensionRuntime | undefined {
+		return typeof this.runtime?.ownCallback === "function" ? this.runtime : undefined;
+	}
+
+	/**
+	 * The lifetime a signal handed to a callback this runner admits follows (`AdmittedSignal`,
+	 * `HandedSignals`): this session's, or none for a runner whose callbacks run as the host's
+	 * own, which hand the caller's signal itself. Used by the hooks here and by the tool adapter,
+	 * whose `execute` runs inside the tool wrapper's {@link runScoped}.
+	 */
+	get callbackGate(): ProviderCallGate | undefined {
+		const owner = this.#scopeOwner;
+		return owner ? providerCallGate(owner) : undefined;
 	}
 
 	/**
@@ -1591,48 +1993,110 @@ export class ExtensionRunner {
 		},
 		agent: ExtensionAgentIdentity = this.agent,
 	): ExtensionContext {
-		const getModel = model ? () => model : this.#getModel;
-		const runEphemeralTurn = this.#runEphemeralTurnFn;
-		const createAnnotations = this.#createAnnotations;
+		// Every member the host can change after this context is made — its UI and mode on a rebind
+		// (`initialize`), its model, its cwd after a relocation, its memory backend, the actions it
+		// wires — is read when the extension asks for it: a context saved across the change answers
+		// as the host does now. What is captured here is captured on purpose: `model`, `delegation`
+		// and `agent` are what this one call was made with.
+		const runner = this;
+		// The session this context is made for: its facades are that session's, so a context a
+		// session saved is refused once it has gone, even while the runtime serves the next one.
+		const session = this.#sessionOwner();
+		const getModel = model ? () => model : () => this.#getModel();
 		const sendUserMessage = (text: string, options?: SendUserMessageOptions): void =>
 			this.runtime.sendUserMessage(text, options);
 		const getSessionModes = () => this.#sessionModes;
-		return {
-			ui: this.#uiContext,
-			mode: this.#mode,
-			getContextUsage: () => this.#getContextUsageFn(),
-			compact: instructionsOrOptions => this.#compactFn(instructionsOrOptions),
-			getAsyncJobSnapshot: () => this.#getAsyncJobSnapshotFn(),
-			hasUI: this.hasUI(),
-			cwd: this.cwd,
-			sessionManager: this.sessionManager,
-			modelRegistry: this.modelRegistry,
+		const handSessionModesOnce = (modes: ExtensionSessionModes | undefined): ExtensionSessionModes | undefined => {
+			if (!modes) return undefined;
+			let bySession = this.#handedSessionModes.get(session);
+			if (!bySession) {
+				bySession = new WeakMap();
+				this.#handedSessionModes.set(session, bySession);
+			}
+			let handed = bySession.get(modes);
+			if (!handed) {
+				handed = handSessionModes(modes, session);
+				bySession.set(modes, handed);
+			}
+			return handed;
+		};
+		// The tool call's own channel, never the host's function itself: handed a string, called on
+		// the call's context as the host defined it.
+		const toolCallContext = delegation?.context;
+		const addToolCallContext = toolCallContext?.addAdditionalContext;
+		const addAdditionalContext =
+			addToolCallContext &&
+			((text: string): void => {
+				Reflect.apply(addToolCallContext, toolCallContext, [String(text)]);
+			});
+		const context: ExtensionContext = {
+			// The host's services, each as `context-surfaces.ts` hands it: named members calling the
+			// host's object, copies in and out. The host keeps acting on its own objects — the
+			// approval prompt, the registry's rows and credentials, the history — so an extension
+			// is never handed them.
+			get ui() {
+				return runner.handedUIContext(runner.#uiContext, session);
+			},
+			get mode() {
+				return runner.#mode;
+			},
+			// What a read answers with is a copy, here as on `pi`: the host's prompt, its pending plan
+			// review and its job records are what it keeps acting on.
+			getContextUsage: () => copyHostData(this.#getContextUsageFn()),
+			// `ctx` accepts callbacks too (`compact({ onError })`), and a continuation an extension
+			// hands over here outlives the command that made the call. Owned at acceptance, like
+			// everything the `pi` surface takes.
+			compact: instructionsOrOptions =>
+				this.#compactFn(ownAcceptedCallbacks(instructionsOrOptions, session) as typeof instructionsOrOptions),
+			getAsyncJobSnapshot: () => copyHostData(this.#getAsyncJobSnapshotFn()),
+			get hasUI() {
+				return runner.hasUI();
+			},
+			get cwd() {
+				return runner.cwd;
+			},
+			sessionManager: this.#onceFor(this.#handedSessionManager, session, () =>
+				handSessionManager(this.sessionManager, session),
+			),
+			modelRegistry: this.#onceFor(this.#handedModelRegistry, session, () =>
+				handModelRegistry(this.modelRegistry, session),
+			),
 			isProjectTrusted: () => true,
 			agent,
+			// A copy on every read, as `ctx.models` hands them (`handHostModel`): the host keeps building
+			// requests from its model after the handler returns — the credential it chooses by
+			// `provider`, the endpoint `baseUrl` names — so an edit to the one handed over must stay on
+			// it, whether the host holds a registry row or a class an SDK caller selected.
+			// The host's getter may throw: as every member's host call (`handSessionFacade`), its
+			// failure crosses as a copy, as the model does.
 			get model() {
-				return getModel();
+				const model = getModel();
+				return model && handHostModel(model);
 			},
-			models: createExtensionModelQuery(this.modelRegistry, this.settings, getModel),
+			models: createExtensionModelQuery(this.modelRegistry, this.settings, getModel, session),
 			isIdle: () => this.#isIdleFn(),
 			abort: () => this.#abortFn(),
 			hasPendingMessages: () => this.#hasPendingMessagesFn(),
 			shutdown: () => this.#shutdownHandler(),
 			resolvePlanReview: (reviewId, choice, input) => this.#resolvePlanReviewFn(reviewId, choice, input),
-			getPendingPlanReview: () => this.#getPendingPlanReviewFn(),
+			getPendingPlanReview: () => copyHostData(this.#getPendingPlanReviewFn()),
 			openPlanReview: () => this.#openPlanReviewFn(),
 			// Live: a context saved before or across a host rebind sees the current controls.
 			get sessionModes() {
-				return getSessionModes();
+				return handSessionModesOnce(getSessionModes());
 			},
-			getSystemPrompt: () => this.#getSystemPromptFn(),
-			runEphemeralTurn: runEphemeralTurn
-				? async options => {
-						if (this.#ephemeralTurnBlocker.getStore()) {
+			getSystemPrompt: () => copyHostData(this.#getSystemPromptFn()),
+			get runEphemeralTurn(): ExtensionContext["runEphemeralTurn"] {
+				const runEphemeralTurn = runner.#runEphemeralTurnFn;
+				return (
+					runEphemeralTurn &&
+					(async options => {
+						if (runner.#ephemeralTurnBlocker.getStore()) {
 							throw new Error("runEphemeralTurn cannot be called recursively from an ephemeral turn hook");
 						}
 						// Resolve at call time so a running handler's cancellation is inherited.
 						// A saved context must not retain a completed handler's stale signal.
-						const registrationScope = this.#toolRegistrationScope.getStore();
+						const registrationScope = runner.#toolRegistrationScope.getStore();
 						const signals = [
 							options.signal,
 							delegation?.signal,
@@ -1645,25 +2109,61 @@ export class ExtensionRunner {
 						const request = {
 							...options,
 							onTextDelta: onTextDelta
-								? (delta: string) => this.#ephemeralTurnBlocker.exit(() => onTextDelta(delta))
+								? (delta: string) => runner.#ephemeralTurnBlocker.exit(() => onTextDelta(delta))
 								: undefined,
 							signal: signals.length ? AbortSignal.any(signals) : undefined,
 						};
-						return await this.#ephemeralTurnBlocker.run("ephemeral turn", () => runEphemeralTurn(request));
-					}
-				: undefined,
-			startLive: this.#startLiveFn,
-			localProtocolOptions: this.localProtocolOptions,
-			memory: this.#getMemoryFn?.(),
+						return copyHostData(
+							await runner.#ephemeralTurnBlocker.run("ephemeral turn", () => runEphemeralTurn(request)),
+						);
+					})
+				);
+			},
+			get startLive(): ExtensionContext["startLive"] {
+				const startLive = runner.#startLiveFn;
+				return startLive && handLiveStart(startLive, session);
+			},
+			// The runner's options are fixed at construction; the facade reads their answers per call.
+			localProtocolOptions:
+				this.localProtocolOptions &&
+				this.#onceFor(this.#handedLocalProtocolOptions, session, () =>
+					handLocalProtocolOptions(this.localProtocolOptions as LocalProtocolOptions, session),
+				),
+			get memory() {
+				const memory = runner.#getMemoryFn?.();
+				if (!memory) return undefined;
+				let bySession = runner.#handedMemory.get(session);
+				if (!bySession) {
+					bySession = new WeakMap();
+					runner.#handedMemory.set(session, bySession);
+				}
+				let handed = bySession.get(memory);
+				if (!handed) {
+					handed = handMemory(memory, session);
+					bySession.set(memory, handed);
+				}
+				return handed;
+			},
 			// A getter, not a value: `createHandlerContext` scopes a handler via `Object.create(ctx)`, and
 			// `this` here is that receiver, so the overlay mounts through the handler's timeout-aware `ui`.
 			get annotations(): ExtensionAnnotationsAPI {
-				return createAnnotations ? createAnnotations(() => this, sendUserMessage) : UNAVAILABLE_ANNOTATIONS;
+				const createAnnotations = runner.#createAnnotations;
+				// What the annotations deliver is the session's message: refused once it has gone.
+				return createAnnotations
+					? createAnnotations(
+							() => this,
+							(text, options) => sessionHostCall(session, () => sendUserMessage(text, options)),
+						)
+					: UNAVAILABLE_ANNOTATIONS;
 			},
-			setInterval: (callback, ms, ...args) => this.#managedTimers.setInterval(callback, ms, ...args),
-			setTimeout: (callback, ms, ...args) => this.#managedTimers.setTimeout(callback, ms, ...args),
+			// Owned by this context's session: scheduled after it has gone, refused; scheduled while it
+			// is live, inert once it has gone, whichever session the runtime serves when it fires.
+			setInterval: (callback, ms, ...args) =>
+				this.#managedTimers.setInterval(session.ownCallback(callback), ms, ...args),
+			setTimeout: (callback, ms, ...args) =>
+				this.#managedTimers.setTimeout(session.ownCallback(callback), ms, ...args),
 			clearTimer: timer => this.#managedTimers.clear(timer),
-			addAdditionalContext: delegation?.context?.addAdditionalContext,
+			addAdditionalContext,
 			invokeTool:
 				delegation !== undefined && this.hasNativeTool(delegation.toolName)
 					? (params, options) =>
@@ -1677,6 +2177,12 @@ export class ExtensionRunner {
 							})
 					: undefined,
 		};
+		// Every member that calls the host is this session's host call: refused once the session has
+		// gone, even while the runtime serves the next — and whichever host `initialize` has bound
+		// the runner to since, so a context kept across a rebind drives neither host.
+		handSessionFacade(context, session, CONTEXT_ANSWERS);
+		this.#dispatchSessions.set(context, { session, live: !session.isRetired, running: 0, hold: undefined });
+		return context;
 	}
 
 	/**
@@ -1707,17 +2213,30 @@ export class ExtensionRunner {
 	}
 
 	createCommandContext(): ExtensionCommandContext {
-		return {
-			...this.createContext(),
-			getContextUsage: () => this.#getContextUsageFn(),
-			waitForIdle: () => this.#waitForIdleFn(),
-			newSession: options => this.#newSessionHandler(options),
-			branch: entryId => this.#branchHandler(entryId),
-			navigateTree: (targetId, options) => this.#navigateTreeHandler(targetId, options),
-			switchSession: sessionPath => this.#switchSessionHandler(sessionPath),
-			reload: () => this.#reloadHandler(),
-			compact: instructionsOrOptions => this.#compactFn(instructionsOrOptions),
-		};
+		// Delegates to the context rather than spreading it: a spread reads each getter once, here —
+		// `model`, `annotations` — and a command that switched models would go on seeing the old one.
+		const base = this.createContext();
+		const session = this.#dispatchSessions.get(base)?.session ?? this.#sessionOwner();
+		const context: ExtensionContext = Object.create(base);
+		// Each is a host call of the context's session, refused once it has gone, as the base's are.
+		return Object.assign(
+			context,
+			handSessionFacade(
+				{
+					waitForIdle: () => this.#waitForIdleFn(),
+					newSession: (options?: Parameters<ExtensionCommandContext["newSession"]>[0]) =>
+						this.#newSessionHandler(options),
+					branch: (entryId: string) => this.#branchHandler(entryId),
+					navigateTree: (targetId: string, options?: Parameters<ExtensionCommandContext["navigateTree"]>[1]) =>
+						this.#navigateTreeHandler(targetId, options),
+					switchSession: (sessionPath: string) => this.#switchSessionHandler(sessionPath),
+					reload: () => this.#reloadHandler(),
+					compact: (instructionsOrOptions?: string | CompactOptions) =>
+						this.#compactFn(ownAcceptedCallbacks(instructionsOrOptions, session) as typeof instructionsOrOptions),
+				},
+				session,
+			),
+		);
 	}
 
 	#isSessionBeforeEvent(event: RunnerEmitEvent): event is SessionBeforeEvent {
@@ -1731,6 +2250,132 @@ export class ExtensionRunner {
 	#isSessionShutdownEvent(event: RunnerEmitEvent): event is Extract<RunnerEmitEvent, { type: "session_shutdown" }> {
 		return event.type === "session_shutdown";
 	}
+
+	/** Each session's work this runner started, by its generation (`ExtensionRuntime.sessionGeneration`):
+	 *  what that session's disposal waits for, and nothing a session before it left running.
+	 *
+	 *  `handlerWork` is the handler callbacks still executing. {@link #runHandlerWithTimeout} RACES
+	 *  each one against its timeout, so a dispatch that times out returns while its callback keeps
+	 *  running — and that callback can still touch host resources (resolve a credential, write a
+	 *  file). A caller that needs the extension work itself to be over waits on
+	 *  {@link waitForPendingHandlerWork}, never on the dispatch.
+	 *
+	 *  `dispatches` is the broadcasts still fanning out. A broadcast runs its handlers one after
+	 *  another, so between two of them nothing is executing while work that is already registered
+	 *  has not started. {@link hasPendingHandlerWork} reports that gap; the wait deliberately does
+	 *  not block on it, or a caller waiting from inside one handler would wait for its own
+	 *  siblings. */
+	readonly #sessionWork = new WeakMap<
+		object,
+		{ readonly handlerWork: Set<Promise<unknown>>; readonly dispatches: Set<Promise<unknown>> }
+	>();
+
+	/** Settles whenever a tracked promise is added or removed, so a caller can wait for the next
+	 *  change instead of sampling for it. */
+	#workChanged: PromiseWithResolvers<void> | undefined;
+
+	/** The session work is counted for: the one named, else the admitted call's on this stack, else
+	 *  the one the runtime serves now — the session `createContext` makes a context for. A runtime
+	 *  with no session generations has one lifetime, this runner's. */
+	#workOf(session?: ExtensionSessionGeneration) {
+		const generation: object = session ?? this.runtime?.sessionGeneration ?? this;
+		let work = this.#sessionWork.get(generation);
+		if (!work) {
+			work = { handlerWork: new Set(), dispatches: new Set() };
+			this.#sessionWork.set(generation, work);
+		}
+		return work;
+	}
+
+	#track(set: Set<Promise<unknown>>, work: Promise<unknown>): void {
+		const tracked: Promise<void> = work.then(
+			() => undefined,
+			() => undefined,
+		);
+		set.add(tracked);
+		this.#notifyWorkChanged();
+		void tracked.finally(() => {
+			set.delete(tracked);
+			this.#notifyWorkChanged();
+		});
+	}
+
+	#notifyWorkChanged(): void {
+		const changed = this.#workChanged;
+		this.#workChanged = undefined;
+		changed?.resolve();
+	}
+
+	#trackHandlerWork(handlerWork: Promise<unknown>): void {
+		this.#track(this.#workOf().handlerWork, handlerWork);
+	}
+
+	/** Whether extension work of `session` (by default the session a context is made for here) is
+	 *  outstanding: a callback of it executing (see {@link ExtensionRuntime}'s pending-callback set —
+	 *  timers and `pi.events` subscriptions report there too, not only this runner's own
+	 *  invocations), a raced-out handler, or a broadcast between two of its handlers. Cheap check for
+	 *  a caller that must not declare itself settled while extension work runs, but cannot afford to
+	 *  wait for it. */
+	hasPendingHandlerWork(session?: ExtensionSessionGeneration): boolean {
+		const work = this.#workOf(session);
+		return work.handlerWork.size > 0 || work.dispatches.size > 0 || this.runtime.hasPendingCallbacks(session);
+	}
+
+	/** Resolves once every extension callback of `session` (as {@link hasPendingHandlerWork} names
+	 *  it) that is executing has returned, including ones whose dispatch already gave up on them and
+	 *  ones a timer or the event bus invoked. Unbounded by design: a callback that never returns
+	 *  keeps whatever its caller is holding, which is safer than releasing under it.
+	 *
+	 *  A broadcast between two of its handlers is not awaited — a caller waiting from inside one
+	 *  handler would wait for its own siblings — but neither is it polled: this waits for the next
+	 *  change in the tracked sets, which is either that broadcast's next callback starting or the
+	 *  broadcast ending. A caller looping on {@link hasPendingHandlerWork} therefore makes one wait
+	 *  per real event rather than one per turn of the event loop. */
+	async waitForPendingHandlerWork(session?: ExtensionSessionGeneration): Promise<void> {
+		const work = this.#workOf(session);
+		while (work.handlerWork.size > 0 || this.runtime.hasPendingCallbacks(session)) {
+			await Promise.all([...work.handlerWork, this.runtime.waitForPendingCallbacks(session)]);
+		}
+		if (work.dispatches.size > 0) {
+			this.#workChanged ??= Promise.withResolvers<void>();
+			await Promise.race([this.#workChanged.promise, this.runtime.whenCallbacksChange()]);
+		}
+	}
+
+	/** Claims this runner's extension callbacks for a session that is starting, and returns the
+	 *  only way to give that claim back. A host may build one runner and hand it to several
+	 *  sessions in turn, so the claim — not the runner's own lifetime — is what keeps its
+	 *  callbacks live.
+	 *
+	 *  There is deliberately no separate "retire" method: a release that is not a handle from a
+	 *  claim can be called by a caller that never claimed, and that retires a live sibling
+	 *  session's surface. Waiting for work this runner can see is not enough on its own — a
+	 *  facility it never told can still enter a disposed session — which is why the claim exists
+	 *  at all. See `ExtensionCallbackOwner`. */
+	claimExtensionCallbacks(): (() => void) | undefined {
+		if (typeof this.runtime?.beginSession !== "function") return undefined;
+		return this.runtime.beginSession();
+	}
+
+	/** The owner a facility uses to own an invocation of a callback this session accepted. Exposed
+	 *  because the invoker — not this runner — is the party that knows when its call starts. */
+	get callbackOwner(): ExtensionRuntime {
+		return this.runtime;
+	}
+
+	/**
+	 * Runs one handler inside this session's admission, bounded by `timeoutMs`.
+	 *
+	 * Both directions of the boundary are crossed here, for every emitter: the handler is handed a
+	 * copy of the event, so an edit in place or an installed getter changes nothing the host reads
+	 * from its own records afterwards (`eventIsCopy` when the emitter built a fresh copy for this
+	 * handler itself), and what the handler returns is copied by the event's schema
+	 * (`copyHandlerResult`) before the admitted call settles — every later read by the emitter is of
+	 * the host's copy, and a result the host never reads is never touched. A signal the event
+	 * carries is handed as the one this admission aborts (`HandedSignals`), let go of when the
+	 * handler's own work is over, so a listener the handler installs runs as the session's work and
+	 * never after it.
+	 */
 	async #runHandlerWithTimeout<TEvent extends { type: string }, R>(
 		handler: (event: TEvent, ctx: ExtensionContext) => Promise<R | undefined> | R | undefined,
 		event: TEvent,
@@ -1739,6 +2384,7 @@ export class ExtensionRunner {
 		timeoutMs: number,
 		onFailure?: (kind: "timeout" | "error", message: string) => R,
 		outerSignal?: AbortSignal,
+		eventIsCopy = false,
 	): Promise<R | undefined> {
 		// `session_stop` carries its own signal on the event; `tool_call` receives
 		// the outer dispatch signal (loop request or wrapper execute) so an abort
@@ -1755,23 +2401,26 @@ export class ExtensionRunner {
 		let handlerResult: R | typeof EXTENSION_HANDLER_TIMEOUT | typeof EXTENSION_HANDLER_ABORTED | undefined;
 		let handlerFailure: { error: unknown } | undefined;
 		try {
-			handlerResult = await withActiveSettings(this.settings, () =>
+			handlerResult = await this.#runDispatched(ctx, { extensionPath: ext.path, event: event.type }, () =>
 				raceHandlerWithTimeout(
 					async (handlerSignal, budget) => {
 						registrationScope.signal = handlerSignal;
 						let result: R | undefined;
+						const handedSignals = new HandedSignals(this.callbackGate);
 						try {
 							const handlerContext = createHandlerContext(
 								ctx,
 								handlerSignal,
 								event.type === "tool_call" ? budget : undefined,
 							);
-							result = await this.#toolRegistrationScope.run(registrationScope, () =>
-								handler(event, handlerContext),
+							const produced = await this.#toolRegistrationScope.run(registrationScope, () =>
+								handler(eventIsCopy ? event : copyHostData(event, handedSignals), handlerContext),
 							);
+							result = copyHandlerResult(event.type, produced, ext.path) as R | undefined;
 						} catch (error) {
 							handlerFailure = { error };
 						} finally {
+							handedSignals.release();
 							registrationScope.closed = true;
 						}
 						try {
@@ -1783,6 +2432,7 @@ export class ExtensionRunner {
 					},
 					timeoutMs,
 					signal,
+					handlerWork => this.#trackHandlerWork(handlerWork),
 				),
 			);
 		} catch (error) {
@@ -1828,7 +2478,20 @@ export class ExtensionRunner {
 		return result;
 	}
 
-	async #emitTo<TEvent extends RunnerEmitEvent>(
+	/** Tracked as one unit: a broadcast runs its handlers one after another, so a caller that waits
+	 *  only on the callbacks currently executing can return in the gap between two of them and miss
+	 *  a handler that was registered before it ever asked. */
+	#emitTo<TEvent extends RunnerEmitEvent>(
+		extensions: readonly Extension[],
+		event: TEvent,
+	): Promise<RunnerEmitResult<TEvent>> {
+		const work = this.#workOf();
+		const broadcast = this.#emitToHandlers(extensions, event);
+		this.#track(work.dispatches, broadcast);
+		return broadcast;
+	}
+
+	async #emitToHandlers<TEvent extends RunnerEmitEvent>(
 		extensions: readonly Extension[],
 		event: TEvent,
 	): Promise<RunnerEmitResult<TEvent>> {
@@ -1920,10 +2583,10 @@ export class ExtensionRunner {
 	 * change only in its original block position; all other metadata and blocks
 	 * remain unchanged. Text replay signatures are tied to their original text.
 	 *
-	 * Handlers see a structured clone, but the result is rebuilt from the
-	 * original blocks: unchanged blocks keep their identity and symbol-keyed
-	 * provider markers (e.g. `kCursorExecResolved`, which `structuredClone`
-	 * drops and without which agent-loop re-runs Cursor-settled tool calls).
+	 * Handlers are handed a copy (the dispatch copies every event), but the result
+	 * is rebuilt from the original blocks: unchanged blocks keep their identity
+	 * and symbol-keyed provider markers (e.g. `kCursorExecResolved`, which no copy
+	 * carries and without which agent-loop re-runs Cursor-settled tool calls).
 	 */
 	async emitAssistantMessage(
 		message: AssistantMessage,
@@ -1954,10 +2617,12 @@ export class ExtensionRunner {
 			if (!handlers?.length) continue;
 			for (const handler of handlers) {
 				if (signal?.aborted) break extensions;
-				// Detach the whole message, not just `content`: in-place edits to `usage`
-				// or other fields must not leak into the finalized message.
-				const presented = structuredClone({ ...message, content: currentContent() });
-				const event: AssistantMessageRewriteEvent = { type: "assistant_message", message: presented };
+				// The dispatch hands the handler a copy of the whole message, not just `content`:
+				// in-place edits to `usage` or other fields must not leak into the finalized message.
+				const event: AssistantMessageRewriteEvent = {
+					type: "assistant_message",
+					message: { ...message, content: currentContent() },
+				};
 				const result = (await this.#runHandlerWithTimeout(
 					handler,
 					event,
@@ -1970,8 +2635,9 @@ export class ExtensionRunner {
 				if (signal?.aborted) break extensions;
 				if (result?.content === undefined) continue;
 				const replacement = result.content;
-				// Compare against a fresh clone: the handler may have mutated `presented`.
-				const expected = structuredClone(currentContent());
+				// Compare against the current content as the copy of a replacement reads it: the
+				// fields a block declares, without the host's markers.
+				const expected = assistantContentAsCopied(currentContent());
 				if (
 					!Array.isArray(replacement) ||
 					replacement.length !== expected.length ||
@@ -2237,15 +2903,9 @@ export class ExtensionRunner {
 		if (!this.hasHandlers("context")) return messages;
 		const ctx = this.createContext();
 
-		let currentMessages: AgentMessage[];
-		try {
-			currentMessages = structuredClone(messages);
-		} catch {
-			// Messages may contain non-cloneable objects (e.g. in ToolResultMessage.details
-			// or ProviderPayload). Fall back to a shallow array clone — extensions should
-			// return new message arrays rather than mutating in place.
-			currentMessages = [...messages];
-		}
+		// The host's working copy: `copyHostData` copies what `structuredClone` cannot (a function in a
+		// tool result's details), so no handler is ever handed a live history message.
+		let currentMessages: AgentMessage[] = copyHostData(messages);
 		for (let index = 0; index < currentMessages.length; index++) {
 			const message = currentMessages[index];
 			if (message) setContextHistoryIndex(message, index);
@@ -2256,7 +2916,15 @@ export class ExtensionRunner {
 			if (!handlers || handlers.length === 0) continue;
 
 			for (const handler of handlers) {
-				const event: ContextEvent = { type: "context", messages: currentMessages };
+				// Each handler gets its own copy, carrying the history position the dispatch's generic
+				// copy would drop: an edit in place reaches neither the working copy nor history.
+				const presented = currentMessages.map(message => {
+					const copy = copyHostData(message);
+					const historyIndex = getContextHistoryIndex(message);
+					if (historyIndex !== undefined) setContextHistoryIndex(copy, historyIndex);
+					return copy;
+				});
+				const event: ContextEvent = { type: "context", messages: presented };
 				const handlerResult = await this.#runHandlerWithTimeout(
 					handler,
 					event,
@@ -2265,6 +2933,7 @@ export class ExtensionRunner {
 					extensionHandlerTimeoutMs,
 					undefined,
 					signal,
+					true,
 				);
 
 				if (handlerResult && (handlerResult as ContextEventResult).messages) {

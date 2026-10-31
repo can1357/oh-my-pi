@@ -6,6 +6,11 @@
  * markdown body when the renderer returns nothing or throws. Hook messages
  * collapse to the first N lines when not expanded; extension messages render
  * in full.
+ *
+ * An extension's renderer carries the scope its session's code runs in
+ * (`ToolRendererScope`); the component it returns is mounted through it
+ * (`SafeToolRendererComponent`), and once that scope has gone the frame draws
+ * its own card and calls nothing the renderer returned.
  */
 
 import type { TextContent } from "@oh-my-pi/pi-ai";
@@ -19,6 +24,7 @@ import { card, col, md, span } from "../native/describe";
 import { type NativeNode, type NativeUiEvent, rootToggleExpanded } from "../native/node";
 import { Memo } from "../native/memo";
 import { colorTone } from "../native/tone";
+import { SafeToolRendererComponent, type ToolRendererScope, toolRendererScope } from "../tools/renderer-scope";
 /** Message shape consumed by the shared frame. */
 export interface FramedMessage {
 	customType: string;
@@ -60,7 +66,17 @@ export interface FramedMessageOptions<M extends FramedMessage> {
 export class FramedMessageComponent<M extends FramedMessage> extends Container {
 	readonly #options: FramedMessageOptions<M>;
 	readonly #box: Box;
+	/** The mounted custom component: what the renderer returned, through its scope when it has one. */
 	#customComponent: Component | undefined;
+	/** What the renderer returned for {@link #customComponent}, kept to tell a renderer that hands
+	 *  back the component it is already showing. */
+	#customRendered: Component | undefined;
+	/** The scope an extension's renderer runs in; `undefined` for the host's own renderer. */
+	readonly #scope: ToolRendererScope | undefined;
+	/** Whether {@link #scope} was live when the frame was last built. */
+	#builtLive = true;
+	/** The {@link #version} {@link #box} holds the default card for. */
+	#boxVersion = -1;
 	#expanded = false;
 	#disposed = false;
 	#version = 0;
@@ -69,6 +85,7 @@ export class FramedMessageComponent<M extends FramedMessage> extends Container {
 	constructor(options: FramedMessageOptions<M>) {
 		super();
 		this.#options = options;
+		this.#scope = toolRendererScope(options.customRenderer);
 		this.#box = new Box(1, 1, text => theme.bg("customMessageBg", text));
 		this.#box.setIgnoreTight(true);
 		this.#rebuild();
@@ -92,6 +109,12 @@ export class FramedMessageComponent<M extends FramedMessage> extends Container {
 		this.#box.clear();
 		this.clear();
 		this.#customComponent = undefined;
+		this.#customRendered = undefined;
+	}
+
+	override render(width: number): readonly string[] {
+		this.#redrawIfRetired();
+		return super.render(width);
 	}
 
 	/**
@@ -100,6 +123,7 @@ export class FramedMessageComponent<M extends FramedMessage> extends Container {
 	 * terminal while collapsed.
 	 */
 	override describe(): NativeNode {
+		this.#redrawIfRetired();
 		const key = [this.#version, this.#expanded, getThemeEpoch()];
 		return this.#native.get(key, () => {
 			if (this.#customComponent) return col([this.#customComponent], { role: this.#options.role });
@@ -136,22 +160,31 @@ export class FramedMessageComponent<M extends FramedMessage> extends Container {
 			.join("\n");
 	}
 
+	/** A renderer whose scope has gone since the frame was built is no renderer: rebuild as the
+	 *  frame's own card before anything the renderer returned is drawn or called. */
+	#redrawIfRetired(): void {
+		if (this.#builtLive && this.#scope?.live === false) this.#rebuild();
+	}
+
 	#rebuild(): void {
 		if (this.#disposed) return;
 		this.#version++;
-		let nextCustomComponent: Component | undefined;
+		const scope = this.#scope;
+		const live = scope?.live !== false;
+		this.#builtLive = live;
+		let rendered: Component | undefined;
 		const customRenderer = this.#options.customRenderer;
-		if (customRenderer) {
+		if (customRenderer && live) {
 			try {
-				nextCustomComponent = customRenderer(this.#options.message, { expanded: this.#expanded }, theme);
+				rendered = customRenderer(this.#options.message, { expanded: this.#expanded }, theme);
 			} catch {
 				// A broken extension renderer must not hide its persisted message.
 			}
 		}
 
 		const previousCustomComponent = this.#customComponent;
-		if (nextCustomComponent) {
-			if (nextCustomComponent === previousCustomComponent) {
+		if (rendered) {
+			if (rendered === this.#customRendered) {
 				super.invalidate();
 				return;
 			}
@@ -162,8 +195,20 @@ export class FramedMessageComponent<M extends FramedMessage> extends Container {
 			this.removeChild(this.#box);
 			for (const child of this.#box.children) child.dispose?.();
 			this.#box.clear();
-			this.#customComponent = nextCustomComponent;
-			this.addChild(nextCustomComponent);
+			this.#boxVersion = -1;
+			const mounted =
+				scope === undefined
+					? rendered
+					: new SafeToolRendererComponent(
+							this.#options.message.customType,
+							"message",
+							rendered,
+							() => this.#defaultCard(),
+							scope,
+						);
+			this.#customRendered = rendered;
+			this.#customComponent = mounted;
+			this.addChild(mounted);
 			return;
 		}
 
@@ -171,8 +216,18 @@ export class FramedMessageComponent<M extends FramedMessage> extends Container {
 			this.removeChild(previousCustomComponent);
 			previousCustomComponent.dispose?.();
 			this.#customComponent = undefined;
+			this.#customRendered = undefined;
 		}
 		this.removeChild(this.#box);
+		this.addChild(this.#defaultCard());
+	}
+
+	/** The frame's own card in {@link #box}: the type tag and the markdown body, built once per
+	 *  {@link #version}. Mounted when no renderer draws the message, and drawn in place of an
+	 *  extension's component that fails to render. */
+	#defaultCard(): Box {
+		if (this.#boxVersion === this.#version) return this.#box;
+		this.#boxVersion = this.#version;
 		for (const child of this.#box.children) child.dispose?.();
 		this.#box.clear();
 		this.#box.setBorder({
@@ -202,6 +257,6 @@ export class FramedMessageComponent<M extends FramedMessage> extends Container {
 				color: value => theme.fg("customMessageText", value),
 			}),
 		);
-		this.addChild(this.#box);
+		return this.#box;
 	}
 }

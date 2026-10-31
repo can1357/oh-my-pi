@@ -4,12 +4,13 @@ import { getEnvApiKey } from "../env-api-key";
 import * as AIError from "../error";
 import type { OAuthCredentials } from "../registry/oauth/types";
 import type { Provider } from "../types";
-import { resolveUsedFraction } from "../usage";
+import { copyUsageReport, handUsageCredential, handUsageLogger, resolveUsedFraction } from "../usage";
 import type {
 	ClientUsageReport,
 	ClientUsageSummary,
 	CredentialRankingContext,
 	UsageCredential,
+	UsageFetchContext,
 	UsageFetchParams,
 	UsageHistoryEntry,
 	UsageHistoryQuery,
@@ -38,7 +39,9 @@ import { mergeRefreshedOrganizationScope, OAUTH_REFRESH_SKEW_MS } from "./refres
 import type { OAuthRefresher } from "./refresh";
 import { USAGE_REPORT_TTL_MS } from "./sqlite-credential-store";
 import type { AuthCredentialStore } from "./store";
-import type { AuthCredential, OAuthCredential, ObservedUsageInput, UsageApi } from "./types";
+import type { AuthCredential, OAuthCredential, ObservedUsageInput, UsageApi, UsageProviderRegistration } from "./types";
+import { AdmittedSignal, callThroughGate, selectLiveRegistration } from "./provider-gate";
+import type { ProviderCallGate } from "./provider-gate";
 import {
 	dedupeUsageReports,
 	isUsageLimitExhausted,
@@ -111,11 +114,23 @@ type UsageReportsOptions = {
 	signal?: AbortSignal;
 };
 
+/**
+ * One usage probe's report and the runtime registration that produced it — undefined when the
+ * configured resolver answered, or nothing did. A result belongs to its producer: once that is no
+ * longer the registration in force, the result is not recorded for the provider.
+ */
+type UsageProbeOutcome = { report: UsageReport | null; runtime?: UsageProviderRegistration };
+
 /** Usage reports: per-credential cached fetches, aggregate reports, header ingestion, history. */
 export class UsageService implements UsageApi {
 	#deps: UsageServiceDeps;
-	/** Runtime extension providers take precedence over the configured/default resolver. */
-	#runtimeUsageProviderOverrides: Map<Provider, { provider: UsageProvider; apiKey?: string }> = new Map();
+	/**
+	 * Runtime registrations per provider, newest last. Several sessions may register the same
+	 * provider (a subagent rebinding its parent's extensions does), so the one in force is a
+	 * selection: the newest whose owner is live, else the configured/default resolver. Each provider
+	 * is stored exactly as its author supplied it.
+	 */
+	#runtimeUsageProviderOverrides: Map<Provider, UsageProviderRegistration[]> = new Map();
 	/** One probe per credential report key, tagged with the refresh epoch it can answer. */
 	#usageRequestInFlight: Map<string, { refreshEpoch: number; promise: Promise<UsageReport | null> }> = new Map();
 	#usageHeaderIngestAt: Map<string, number> = new Map();
@@ -144,20 +159,54 @@ export class UsageService implements UsageApi {
 	 * providers without a usage API) — the latter never warrants a usage row.
 	 */
 	providerFor(provider: Provider): UsageProvider | undefined {
-		return this.#runtimeUsageProviderOverrides.get(provider)?.provider ?? this.#deps.usageProviders(provider);
+		return this.#liveRuntimeEntry(provider)?.provider ?? this.#deps.usageProviders(provider);
+	}
+
+	/**
+	 * The registration answering for `provider`: the newest live runtime registration, else the
+	 * configured/default resolver's provider with no gate. Every call into a usage provider goes
+	 * through the entry this returns, so it runs through its owner's gate.
+	 */
+	providerEntryFor(provider: Provider): UsageProviderRegistration | undefined {
+		const runtime = this.#liveRuntimeEntry(provider);
+		if (runtime) return runtime;
+		const configured = this.#deps.usageProviders(provider);
+		return configured ? { provider: configured } : undefined;
+	}
+
+	/**
+	 * The answering provider's `cacheVersion`, for the usage cache's keys. The read is the
+	 * author's code (it may be a getter) on the path of every cache lookup, so it runs through the
+	 * owner's gate and a throw or a refusal means no version rather than a failed lookup.
+	 */
+	cacheVersionFor(provider: Provider): number | undefined {
+		const entry = this.providerEntryFor(provider);
+		if (!entry) return undefined;
+		try {
+			return callThroughGate(entry.gate, () => entry.provider.cacheVersion);
+		} catch (error) {
+			logger.debug("Usage provider cache version unavailable; keying without it", {
+				provider,
+				error: String(error),
+			});
+			return undefined;
+		}
 	}
 
 	/**
 	 * Install a runtime usage provider override (not persisted to disk).
 	 *
-	 * Runtime overrides are checked before the configured resolver, including its
-	 * built-in fallback. Removing the override restores that resolver unchanged.
+	 * Runtime overrides are checked before the configured resolver, including its built-in
+	 * fallback. The newest registration whose owner is live answers; registering again with the
+	 * same `gate` replaces that owner's registration in place instead of stacking another.
 	 */
-	setProvider(provider: Provider, usageProvider: UsageProvider, apiKey?: string): void {
-		this.#runtimeUsageProviderOverrides.set(provider, {
-			provider: usageProvider,
-			apiKey,
-		});
+	setProvider(provider: Provider, usageProvider: UsageProvider, apiKey?: string, gate?: ProviderCallGate): void {
+		const registration: UsageProviderRegistration = { provider: usageProvider, apiKey, gate };
+		const entries = this.#runtimeUsageProviderOverrides.get(provider);
+		const index = entries ? entries.findIndex(entry => entry.gate === gate) : -1;
+		if (!entries) this.#runtimeUsageProviderOverrides.set(provider, [registration]);
+		else if (index >= 0) entries[index] = registration;
+		else entries.push(registration);
 		this.#deps.cache.invalidateForProvider(provider);
 	}
 	/** Carry runtime usage provider overrides over from the service this one replaces (store swap). */
@@ -165,11 +214,130 @@ export class UsageService implements UsageApi {
 		this.#runtimeUsageProviderOverrides = previous.#runtimeUsageProviderOverrides;
 	}
 
-	/** Remove a runtime usage provider override and restore configured/default resolution. */
-	removeProvider(provider: Provider): void {
+	/**
+	 * Remove runtime usage registrations for `provider`: the one `gate` owns when a gate is
+	 * given, every one of them otherwise — what a host teardown means.
+	 *
+	 * The gate argument keeps the meaning it has always had. Making it the whole-teardown call
+	 * regardless would silently widen every existing gated caller, which is the shape of defect
+	 * this round exists to remove. {@link removeRegistration} is the separate case: the HOST's
+	 * own ungated registration, which `undefined` cannot express here.
+	 */
+	removeProvider(provider: Provider, gate?: ProviderCallGate): void {
+		if (gate) {
+			this.removeRegistration(provider, gate);
+			return;
+		}
 		if (!this.#runtimeUsageProviderOverrides.has(provider)) return;
 		this.#deps.cache.invalidateForProvider(provider);
 		this.#runtimeUsageProviderOverrides.delete(provider);
+	}
+
+	/**
+	 * Remove exactly one runtime registration for `provider`: the one `gate` owns, or the host's
+	 * own — the ungated one — when `gate` is undefined. Every other registration for the name stays
+	 * to be selected, so one party handing off or withdrawing takes away only its own.
+	 */
+	removeRegistration(provider: Provider, gate: ProviderCallGate | undefined): void {
+		// Selecting first drops retired owners' registrations, so what is left is live.
+		const selected = this.#liveRuntimeEntry(provider);
+		const entries = this.#runtimeUsageProviderOverrides.get(provider);
+		const index = entries ? entries.findIndex(entry => entry.gate === gate) : -1;
+		if (!entries || index < 0) return;
+		// Invalidate while the departing registration still answers, as the teardown does, so its
+		// rows go and the next answerer's survive. Removing one that does not answer changes nothing
+		// a reader sees.
+		if (entries[index] === selected) this.#deps.cache.invalidateForProvider(provider);
+		entries.splice(index, 1);
+		if (entries.length === 0) this.#runtimeUsageProviderOverrides.delete(provider);
+	}
+
+	/**
+	 * The newest runtime registration for `provider` whose owner is live. Registrations of retired
+	 * owners are dropped here; when the newest one was among them a different provider answers
+	 * from now on, so the cache is invalidated as {@link setProvider} and {@link removeProvider} do.
+	 */
+	#liveRuntimeEntry(provider: Provider): UsageProviderRegistration | undefined {
+		const entries = this.#runtimeUsageProviderOverrides.get(provider);
+		if (!entries) return undefined;
+		const selected = selectLiveRegistration(entries);
+		if (entries.every(entry => entry.gate?.retired !== true)) return selected;
+		const live = entries.filter(entry => entry.gate?.retired !== true);
+		if (live.length === 0) this.#runtimeUsageProviderOverrides.delete(provider);
+		else this.#runtimeUsageProviderOverrides.set(provider, live);
+		// After the prune, so the invalidation's own key lookup selects without re-entering here.
+		if (selected !== entries[entries.length - 1]) this.#deps.cache.invalidateForProvider(provider);
+		return selected;
+	}
+
+	/** Providers with a live runtime registration. Selection may delete the key being visited,
+	 *  which Map iteration tolerates. */
+	#liveRuntimeProviders(): Provider[] {
+		const providers: Provider[] = [];
+		for (const provider of this.#runtimeUsageProviderOverrides.keys()) {
+			if (this.#liveRuntimeEntry(provider)) providers.push(provider);
+		}
+		return providers;
+	}
+
+	/**
+	 * Asks the selected provider whether it handles `request`. Reading `supports` is the author's
+	 * code as much as calling it (it may be a getter), so it is read once, and the read and the call
+	 * run through the owner's gate inside one guard, with the provider as the receiver. `undefined`
+	 * means the provider gave no answer — it threw, or its owner retired after selection — which
+	 * costs that provider alone.
+	 *
+	 * `signal` is the request's bridge when the request carries one. The author sees the admitted
+	 * signal here as it does at every other call. The bridge must exist before this check, which
+	 * is the first call to the USAGE provider on that path — the author's `cacheVersion` getter
+	 * and a near-expiry credential refresh can both run before it, each inside its own gate.
+	 */
+	#supports(
+		entry: UsageProviderRegistration,
+		provider: Provider,
+		request: UsageFetchParams,
+		signal?: AdmittedSignal,
+	): boolean | undefined {
+		try {
+			return callThroughGate(entry.gate, () => {
+				const usageProvider = entry.provider;
+				const supports = usageProvider.supports;
+				if (!supports) return true;
+				// A session's provider is handed its own copy of the credential: the host keeps the
+				// request, fetches it next and keys the cache by it, so a getter or assignment on the
+				// host's credential would decide those after this call.
+				const handed = entry.gate
+					? { ...request, credential: handUsageCredential(request.credential, provider) }
+					: request;
+				const admitted = signal?.admit();
+				return Reflect.apply(supports, usageProvider, [admitted ? { ...handed, signal: admitted } : handed]);
+			});
+		} catch (error) {
+			logger.debug("Usage provider support check failed; skipping provider", { provider, error: String(error) });
+			return undefined;
+		}
+	}
+
+	/**
+	 * The answering provider's failure policy, read through its owner's gate. The shared defaults
+	 * stand in when it sets none, when a getter throws, or when its owner retired after selection.
+	 */
+	#failurePolicy(provider: Provider): { retainLastGoodOnFailure: boolean; failureBackoffMs: number } {
+		const entry = this.providerEntryFor(provider);
+		if (entry) {
+			try {
+				return callThroughGate(entry.gate, () => ({
+					retainLastGoodOnFailure: entry.provider.retainLastGoodOnFailure !== false,
+					failureBackoffMs: entry.provider.failureBackoffMs ?? USAGE_FAILURE_BACKOFF_MS,
+				}));
+			} catch (error) {
+				logger.debug("Usage provider failure policy unavailable; using defaults", {
+					provider,
+					error: String(error),
+				});
+			}
+		}
+		return { retainLastGoodOnFailure: true, failureBackoffMs: USAGE_FAILURE_BACKOFF_MS };
 	}
 
 	/** Preserve the persisted OAuth row's login anchor and subtype metadata on usage-path refresh. */
@@ -201,9 +369,8 @@ export class UsageService implements UsageApi {
 	}
 
 	/** Probe a provider endpoint, refreshing near-expiry OAuth tokens when possible. */
-	async #fetchUsageUncached(request: UsageRequestDescriptor, timeoutMs?: number): Promise<UsageReport | null> {
-		const providerImpl = this.providerFor(request.provider);
-		if (!providerImpl) return null;
+	async #fetchUsageUncached(request: UsageRequestDescriptor, timeoutMs?: number): Promise<UsageProbeOutcome> {
+		if (!this.providerFor(request.provider)) return { report: null };
 
 		const timeoutSignal =
 			typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0
@@ -269,16 +436,49 @@ export class UsageService implements UsageApi {
 			}
 		}
 
-		if (providerImpl.supports && !providerImpl.supports(params)) return null;
+		// Selected after the refresh: an owner that retired while it ran no longer answers, and the
+		// registration in force now does. A refusal from a gate that retires after this point is
+		// one failed fetch, caught below like any other.
+		const runtime = this.#liveRuntimeEntry(request.provider);
+		const entry = runtime ?? this.providerEntryFor(request.provider);
+		if (!entry) return { report: null, runtime };
+
+		// Built before the support check, which is the first call this path makes to the USAGE
+		// provider. It is not the first author code the path reaches, and this comment has been
+		// too strong twice: `report()` evaluates the author's `cacheVersion` getter while
+		// building the cache key, and the block above refreshes a near-expiry credential, which
+		// hands a non-leased `refreshToken` — an OAuth provider's, possibly the same
+		// extension's — this request's timeout signal. Both run inside their own gates, and both
+		// precede this. One bridge per request, admitted inside each gated call: the timeout
+		// fires on the host's timer, long after a quick fetch is over, so the signal the usage
+		// provider is handed follows the caller's only while this request runs.
+		const signal = new AdmittedSignal(entry.gate, params.signal);
+		if (!this.#supports(entry, request.provider, params, signal)) {
+			signal.release();
+			return { report: null, runtime };
+		}
 
 		try {
 			const previousReport = this.#deps.cache.getStale<UsageReport | null>(
 				this.#deps.cache.reportKey(request),
 			)?.value;
-			const report = await providerImpl.fetchUsage(params, {
+			// A session's provider gets its own logger: the storage's is one the host keeps calling
+			// after this call, so a method reassigned on it would run the author's code in every
+			// later host log line, outside the session's admission.
+			const context: UsageFetchContext = {
 				fetch: this.fetch,
-				logger: this.logger,
+				logger: entry.gate ? handUsageLogger(this.logger) : this.logger,
 				...(previousReport ? { previousReport } : {}),
+			};
+			const report = await callThroughGate(entry.gate, async () => {
+				// And its own copy of the credential, which the host reads below to attribute the
+				// report and keeps in the request it caches under.
+				const handed: UsageFetchParams = { ...params, signal: signal.admit() };
+				if (entry.gate) handed.credential = handUsageCredential(params.credential, request.provider);
+				const answered = await entry.provider.fetchUsage(handed, context);
+				// Copied where it comes back, as the session's work: what follows reads and extends
+				// only the copy, never the author's report.
+				return entry.gate ? copyUsageReport(answered, request.provider, "fetchUsage") : answered;
 			});
 			// Attribute the report to the credential's organization. The orgId and
 			// orgName fallbacks apply independently: Claude's usage endpoint stamps
@@ -298,13 +498,19 @@ export class UsageService implements UsageApi {
 					};
 				}
 			}
-			return report;
+			return { report, runtime };
 		} catch (error) {
-			if (error instanceof AIError.ProviderHttpError && (error.status === 401 || error.status === 403)) {
-				// Definitive auth failure (revoked key, lapsed subscription): purge
-				// the last-good report so #fetchUsageCached's failure branch can't
-				// keep rendering and ranking from stale quota the way it does for
-				// transient failures. Mirrors the definitive-OAuth-refresh path.
+			// Definitive auth failure (revoked key, lapsed subscription): purge
+			// the last-good report so #fetchUsageCached's failure branch can't
+			// keep rendering and ranking from stale quota the way it does for
+			// transient failures. Mirrors the definitive-OAuth-refresh path. Only
+			// while this registration still answers: once it has been superseded,
+			// the report under that key is its successor's.
+			if (
+				error instanceof AIError.ProviderHttpError &&
+				(error.status === 401 || error.status === 403) &&
+				runtime === this.#liveRuntimeEntry(request.provider)
+			) {
 				this.#deps.cache.set(this.#deps.cache.reportKey(request), {
 					value: null,
 					expiresAt: 0,
@@ -314,7 +520,9 @@ export class UsageService implements UsageApi {
 				provider: request.provider,
 				error: String(error),
 			});
-			return null;
+			return { report: null, runtime };
+		} finally {
+			signal.release();
 		}
 	}
 
@@ -352,7 +560,16 @@ export class UsageService implements UsageApi {
 		const refreshEpoch = this.#deps.cache.refreshEpoch(request.provider);
 		const recoveryEpoch = this.#deps.cache.recoveryEpoch(request.provider);
 		const promise = (async () => {
-			const report = await this.#fetchUsageUncached(request, timeoutMs);
+			const { report, runtime } = await this.#fetchUsageUncached(request, timeoutMs);
+			// A registration that stopped answering while it ran — its owner retired, or it was
+			// withdrawn or replaced — no longer speaks for this provider. Its result answers this
+			// probe and is recorded nowhere: neither cached as the successor's report nor allowed to
+			// cool the successor down. Selecting here also applies a retirement nobody has looked up
+			// yet, which invalidates the cache and so earns the successor its own probe below.
+			if (runtime !== this.#liveRuntimeEntry(request.provider)) return report;
+			// Keyed again, now, by the producer's cache version: the registration that keyed this
+			// probe when it started may have retired while it ran.
+			const reportKey = this.#deps.cache.reportKey(request);
 			// Block marks bump the generation too: a report racing a fresh 429 may
 			// predate it, so it answers this probe but is neither cached nor used
 			// to heal blocks.
@@ -366,7 +583,7 @@ export class UsageService implements UsageApi {
 				// per source IP regardless of account, and synchronized 5-credential
 				// fan-out trips 429s every cycle. With ±25% jitter on TTL the refresh
 				// times decorrelate within a few cycles.
-				this.#deps.cache.set(cacheKey, {
+				this.#deps.cache.set(reportKey, {
 					value: report,
 					expiresAt: Date.now() + USAGE_REPORT_TTL_MS + ttlJitter,
 				});
@@ -376,11 +593,12 @@ export class UsageService implements UsageApi {
 			// Failure: apply a short jittered cool-down so the credential doesn't
 			// re-hit the endpoint on every poll. Most providers serve the last good
 			// value through transient failures. Session-cookie providers can opt out
-			// so an expired login does not display stale quota indefinitely.
-			const providerImpl = this.providerFor(request.provider);
-			const retainLastGood = !invalidated && providerImpl?.retainLastGoodOnFailure !== false;
-			const lastGood = retainLastGood ? this.#deps.cache.lastGood(cacheKey) : null;
-			const failureBackoffMs = providerImpl?.failureBackoffMs ?? USAGE_FAILURE_BACKOFF_MS;
+			// so an expired login does not display stale quota indefinitely. The
+			// policy is the producer's: it is still the registration in force.
+			const failurePolicy = this.#failurePolicy(request.provider);
+			const retainLastGood = !invalidated && failurePolicy.retainLastGoodOnFailure;
+			const lastGood = retainLastGood ? this.#deps.cache.lastGood(reportKey) : null;
+			const failureBackoffMs = failurePolicy.failureBackoffMs;
 			const backoffJitter = failureBackoffMs * (Math.random() * 0.5 - 0.25);
 			const coolDown = Date.now() + failureBackoffMs + backoffJitter;
 			// Dropping snapshots is not recovery from a failed endpoint. Persist its
@@ -388,9 +606,9 @@ export class UsageService implements UsageApi {
 			// A confirmed reset is the exception: the old failure cannot suppress
 			// the first post-reset probe.
 			if (recoveryEpoch === this.#deps.cache.recoveryEpoch(request.provider)) {
-				this.#deps.cache.set(failureKey, { value: null, expiresAt: coolDown });
+				this.#deps.cache.set(this.#deps.cache.failureKey(reportKey), { value: null, expiresAt: coolDown });
 			}
-			if (!invalidated) this.#deps.cache.set(cacheKey, { value: lastGood, expiresAt: coolDown });
+			if (!invalidated) this.#deps.cache.set(reportKey, { value: lastGood, expiresAt: coolDown });
 			return lastGood;
 		})().finally(() => {
 			this.#usageRequestInFlight.delete(cacheKey);
@@ -501,15 +719,40 @@ export class UsageService implements UsageApi {
 		headers: Record<string, string>,
 		options?: { sessionId?: string; baseUrl?: string; responseStatus?: number },
 	): boolean {
-		const parseHeaders = this.providerFor(provider)?.parseRateLimitHeaders;
-		if (!parseHeaders) return false;
-
+		const entry = this.providerEntryFor(provider);
+		if (!entry) return false;
 		const credential = this.#deps.affinity.activeOAuth(provider, options?.sessionId);
 		if (!credential) return false;
 
 		const cacheKey = this.#deps.cache.reportKey(oauthUsageRequest(provider, credential, options?.baseUrl));
 		const now = Date.now();
-		const parsedReport = parseHeaders(headers, now, { responseStatus: options?.responseStatus });
+		// Reading the property is already the author's code: a provider may expose its parser
+		// through a getter. It is read once, and that read and the call run through the owner's
+		// gate inside one guard, so a retired owner's getter never runs. This runs on the response
+		// path of every request and must not be able to fail one: a gate refuses by throwing, and a
+		// third-party parser can throw for its own reasons. Either way there are simply no headers
+		// to ingest.
+		let parsedReport: UsageReport | null | undefined;
+		try {
+			parsedReport = callThroughGate(entry.gate, () => {
+				const usageProvider = entry.provider;
+				const parse = usageProvider.parseRateLimitHeaders;
+				if (!parse) return undefined;
+				// A session's parser is handed its own copy of the headers: the caller's record is the
+				// live response's, which the agent session hands on to its response hooks after this.
+				// It is a plain record (`normalizeProviderResponse` builds it), so a spread copies it.
+				const parsed = Reflect.apply(parse, usageProvider, [
+					entry.gate ? { ...headers } : headers,
+					now,
+					{ responseStatus: options?.responseStatus },
+				]);
+				// Copied inside the call, as the session's work: the merge below reads only the copy.
+				return entry.gate ? copyUsageReport(parsed, provider, "parseRateLimitHeaders") : parsed;
+			});
+		} catch (error) {
+			logger.debug("Rate-limit header parser failed; skipping ingest", { provider, error: String(error) });
+			return false;
+		}
 		if (!parsedReport) return false;
 		// Throttled to one ingest per interval — except when a window reads
 		// exhausted: persist that snapshot immediately. A full-backed cache can
@@ -586,80 +829,115 @@ export class UsageService implements UsageApi {
 			providerFilter ??
 			new Set<string>([
 				...this.#deps.pool.providers(),
-				...this.#runtimeUsageProviderOverrides.keys(),
+				...this.#liveRuntimeProviders(),
 				...DEFAULT_USAGE_PROVIDERS.map(provider => provider.id),
 			]);
 
 		for (const providerId of providers) {
 			const provider = providerId as Provider;
-			const providerImpl = this.providerFor(provider);
-			if (!providerImpl) continue;
-			const baseUrl = options?.baseUrlResolver?.(provider);
-			let entries = this.#deps.pool.entries(providerId);
-			if (entries.length > 0) {
-				const dedupedEntries = await this.#deps.pool.pruneDuplicates(providerId, entries);
-				if (dedupedEntries.length !== entries.length) {
-					this.#deps.pool.replace(providerId, dedupedEntries);
-				}
-				entries = dedupedEntries;
-			}
-
-			// A declared OAuth bearer env list means usage probes must ignore stored
-			// API keys and borrowed API-key env aliases. Even when an API-key row
-			// exists, fall back to the provider's own OAuth env bearer.
-			const oauthTokenEnv = authPolicyFor(providerId)?.oauthTokenEnv;
-			if (oauthTokenEnv) {
-				let hasUsableStoredOAuthCredential = false;
-				for (const entry of entries) {
-					if (entry.credential.type !== "oauth") continue;
-					const request = oauthUsageRequest(provider, entry.credential, baseUrl);
-					if (providerImpl.supports && !providerImpl.supports(request)) continue;
-					requests.push(request);
-					hasUsableStoredOAuthCredential = true;
-				}
-				const oauthToken = $pickenv(...oauthTokenEnv);
-				if (!hasUsableStoredOAuthCredential && oauthToken) {
-					const request = usageRequest(provider, { type: "oauth", accessToken: oauthToken }, baseUrl);
-					if (!providerImpl.supports || providerImpl.supports(request)) requests.push(request);
-				}
-				continue;
-			}
-
-			if (entries.length === 0) {
-				const runtimeKey = this.#deps.overrides.runtimeKey(providerId);
-				const extensionUsageKeyConfig = this.#runtimeUsageProviderOverrides.get(provider)?.apiKey,
-					extensionUsageKey = extensionUsageKeyConfig
-						? await this.#deps.overrides.resolve(extensionUsageKeyConfig)
-						: undefined,
-					envKey = getEnvApiKey(providerId);
-				const apiKey = runtimeKey ?? extensionUsageKey ?? envKey;
-				if (!apiKey) continue;
-				const request = usageRequest(provider, { type: "api_key", apiKey }, baseUrl);
-				if (providerImpl.supports && !providerImpl.supports(request)) continue;
-				requests.push(request);
-				continue;
-			}
-
-			for (const entry of entries) {
-				const credential = entry.credential;
-				let request: UsageRequestDescriptor;
-				if (credential.type === "api_key") {
-					// Stored keys may be references (env var name, "!command") —
-					// resolve to the actual secret before it reaches a provider
-					// fetcher's Authorization header. Unresolvable references are
-					// skipped: probing with the literal reference string would
-					// 401 and flag a working credential as bad.
-					const apiKey = await this.#deps.overrides.resolve(credential.key);
-					if (!apiKey) continue;
-					request = usageRequest(provider, { type: "api_key", apiKey }, baseUrl);
-				} else {
-					request = oauthUsageRequest(provider, credential, baseUrl);
-				}
-				if (providerImpl.supports && !providerImpl.supports(request)) continue;
-				requests.push(request);
-			}
+			// A provider nobody answers for has no requests; its credentials need no work.
+			if (!this.providerEntryFor(provider)) continue;
+			const providerRequests = await this.#collectProviderRequests(provider, options);
+			if (providerRequests) requests.push(...providerRequests);
 		}
 
+		return requests;
+	}
+
+	/**
+	 * One provider's usage requests, or undefined when no registration answers for it any more,
+	 * or the one in force gave no answer to whether it supports one — it threw, or its owner
+	 * retired mid-check. Such a provider contributes nothing to this poll and every other provider
+	 * is unaffected.
+	 *
+	 * Preparing the requests awaits (duplicate pruning, key resolution), and an owner can retire
+	 * during any of it. So the registration that judges them — and whose key configuration feeds
+	 * them — is selected after the last await, never carried across one.
+	 */
+	async #collectProviderRequests(
+		provider: Provider,
+		options?: UsageReportsOptions,
+	): Promise<UsageRequestDescriptor[] | undefined> {
+		const baseUrl = options?.baseUrlResolver?.(provider);
+		let entries = this.#deps.pool.entries(provider);
+		if (entries.length > 0) {
+			const dedupedEntries = await this.#deps.pool.pruneDuplicates(provider, entries);
+			if (dedupedEntries.length !== entries.length) {
+				this.#deps.pool.replace(provider, dedupedEntries);
+			}
+			entries = dedupedEntries;
+		}
+
+		// A declared OAuth bearer env list means usage probes must ignore stored
+		// API keys and borrowed API-key env aliases. Even when an API-key row
+		// exists, fall back to the provider's own OAuth env bearer.
+		const oauthTokenEnv = authPolicyFor(provider)?.oauthTokenEnv;
+		if (oauthTokenEnv) {
+			const registration = this.providerEntryFor(provider);
+			if (!registration) return undefined;
+			const stored: UsageRequestDescriptor[] = [];
+			for (const entry of entries) {
+				if (entry.credential.type === "oauth") stored.push(oauthUsageRequest(provider, entry.credential, baseUrl));
+			}
+			const requests = this.#supportedRequests(registration, provider, stored);
+			if (requests === undefined || requests.length > 0) return requests;
+			const oauthToken = $pickenv(...oauthTokenEnv);
+			if (!oauthToken) return requests;
+			const envRequest = usageRequest(provider, { type: "oauth", accessToken: oauthToken }, baseUrl);
+			return this.#supportedRequests(registration, provider, [envRequest]);
+		}
+
+		if (entries.length === 0) {
+			// The key configuration is the registration's own, so it is resolved again when a
+			// different registration took over while the previous one's resolved.
+			let registration = this.providerEntryFor(provider);
+			let resolved: { config: string; key: string | undefined } | undefined;
+			while (registration?.apiKey && registration.apiKey !== resolved?.config) {
+				const config = registration.apiKey;
+				resolved = { config, key: await this.#deps.overrides.resolve(config) };
+				registration = this.providerEntryFor(provider);
+			}
+			if (!registration) return undefined;
+			const extensionUsageKey =
+				registration.apiKey && registration.apiKey === resolved?.config ? resolved.key : undefined;
+			const apiKey = this.#deps.overrides.runtimeKey(provider) ?? extensionUsageKey ?? getEnvApiKey(provider);
+			if (!apiKey) return [];
+			return this.#supportedRequests(registration, provider, [
+				usageRequest(provider, { type: "api_key", apiKey }, baseUrl),
+			]);
+		}
+
+		const candidates: UsageRequestDescriptor[] = [];
+		for (const entry of entries) {
+			const credential = entry.credential;
+			if (credential.type === "api_key") {
+				// Stored keys may be references (env var name, "!command") —
+				// resolve to the actual secret before it reaches a provider
+				// fetcher's Authorization header. Unresolvable references are
+				// skipped: probing with the literal reference string would
+				// 401 and flag a working credential as bad.
+				const apiKey = await this.#deps.overrides.resolve(credential.key);
+				if (apiKey) candidates.push(usageRequest(provider, { type: "api_key", apiKey }, baseUrl));
+			} else {
+				candidates.push(oauthUsageRequest(provider, credential, baseUrl));
+			}
+		}
+		const registration = this.providerEntryFor(provider);
+		return registration ? this.#supportedRequests(registration, provider, candidates) : undefined;
+	}
+
+	/** The candidates `registration` supports, or undefined when it gave no answer for one of them. */
+	#supportedRequests(
+		registration: UsageProviderRegistration,
+		provider: Provider,
+		candidates: readonly UsageRequestDescriptor[],
+	): UsageRequestDescriptor[] | undefined {
+		const requests: UsageRequestDescriptor[] = [];
+		for (const request of candidates) {
+			const supported = this.#supports(registration, provider, request);
+			if (supported === undefined) return undefined;
+			if (supported) requests.push(request);
+		}
 		return requests;
 	}
 
@@ -784,13 +1062,15 @@ export class UsageService implements UsageApi {
 					? fetched.filter(report => report.provider === options.provider)
 					: fetched;
 			if (reports) this.#deps.blocks.reconcileReports(reports);
-			if (!reports || this.#runtimeUsageProviderOverrides.size === 0) return reports;
+			if (!reports) return reports;
+			const runtimeProviders = this.#liveRuntimeProviders();
+			if (runtimeProviders.length === 0) return reports;
 
 			// The broker owns its reported providers; only extension providers
 			// absent from its response need local credentials and a local probe.
 			const brokerProviders = new Set(reports.map(report => report.provider));
 			const localProviders = new Set<Provider>();
-			for (const provider of this.#runtimeUsageProviderOverrides.keys()) {
+			for (const provider of runtimeProviders) {
 				if (options?.provider !== undefined && provider !== options.provider) continue;
 				if (!brokerProviders.has(provider)) localProviders.add(provider);
 			}

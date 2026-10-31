@@ -8,9 +8,9 @@ import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
-import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import type { ExtensionFactory, ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { buildSkillPromptMessage } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
@@ -32,6 +32,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { getConfigRootDir, setAgentDir } from "@oh-my-pi/pi-utils";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import type {
 	AgentSideConnection,
 	ClientCapabilities,
@@ -536,6 +537,8 @@ async function createHarness(
 		sessionUpdateHook?: (notification: SessionNotification) => Promise<void> | void;
 		/** Gives each session the factory creates a real extension runner with no extensions. */
 		extensionRunners?: boolean;
+		/** Loads this extension into each created session's real extension runner. */
+		extension?: ExtensionFactory;
 		/** Exposed to each created session's `modelRegistry` for MCP credential round-trips. */
 		authStorage?: AuthStorage;
 	} = {},
@@ -575,10 +578,14 @@ async function createHarness(
 	const factory = async (cwd: string, factoryOptions?: { interactivePrompts?: boolean }) => {
 		const session = new FakeAgentSession(cwd);
 		if (options.authStorage) session.authStorage = options.authStorage;
-		if (options.extensionRunners) {
+		if (options.extensionRunners || options.extension) {
+			const runtime = new ExtensionRuntime();
+			const extensions = options.extension
+				? [await loadExtensionFromFactory(options.extension, cwd, new EventBus(), runtime, "acp-test-extension")]
+				: [];
 			session.extensionRunner = new ExtensionRunner(
-				[],
-				new ExtensionRuntime(),
+				extensions,
+				runtime,
 				cwd,
 				session.sessionManager,
 				{} as ModelRegistry,
@@ -3506,6 +3513,42 @@ describe("ACP agent", () => {
 		expect(messages).toEqual(["Spend a saved reset?"]);
 
 		await harness.agent.dispose();
+	});
+
+	it("an extension's pi.setModel selects the model whose credential it checked", async () => {
+		let api: Parameters<ExtensionFactory>[0] | undefined;
+		const harness = await createHarness({
+			extension: pi => {
+				api = pi;
+			},
+		});
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId);
+		if (!session || !api) throw new Error("the extension session was not created");
+		const auth = await AuthStorage.create(":memory:");
+		try {
+			auth.keys.setRuntime("acp-safe", "safe-secret");
+			auth.keys.setRuntime("acp-blocked", "blocked-secret");
+			const registry = new ModelRegistry(auth, path.join(harness.cwdA, "models.json"), {
+				settings: Settings.isolated({ disabledProviders: ["acp-blocked"] }),
+			});
+			Object.defineProperty(session, "modelRegistry", { value: registry });
+			const before = session.model;
+			const model = { ...TEST_MODELS[1]!, provider: "acp-blocked" };
+			expect(await api.setModel(model)).toBe(false);
+			expect(session.model).toBe(before);
+
+			let reads = 0;
+			Object.defineProperty(model, "provider", {
+				enumerable: true,
+				get: () => (reads++ === 0 ? "acp-safe" : "acp-blocked"),
+			});
+			expect(await api.setModel(model)).toBe(true);
+			expect([session.model?.provider, session.model?.provider]).toEqual(["acp-safe", "acp-safe"]);
+		} finally {
+			auth.close();
+			await harness.agent.dispose();
+		}
 	});
 
 	describe("ACP elicitation bridge", () => {

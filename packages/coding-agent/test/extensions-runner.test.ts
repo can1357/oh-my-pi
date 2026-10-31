@@ -877,13 +877,6 @@ describe("ExtensionRunner", () => {
 					{ type: "thinking", thinking: "second" },
 				],
 			],
-			[
-				"changed text metadata",
-				[
-					{ type: "text", text: "first", providerMetadata: "forged" },
-					{ type: "text", text: "second" },
-				],
-			],
 		] as const)("rejects %s topology or metadata changes", async (_case, content) => {
 			fs.writeFileSync(
 				path.join(extensionsDir, "assistant-message-invalid.ts"),
@@ -909,6 +902,35 @@ describe("ExtensionRunner", () => {
 			expect(await runner.emitAssistantMessage(message)).toBeUndefined();
 			expect(errors).toHaveLength(1);
 			expect(errors[0]?.error).toContain("block positions");
+		});
+
+		it("keeps none of the undeclared metadata a replacement block carries", async () => {
+			// A replacement is copied by its schema: a text block's `text` and `textSignature`, nothing
+			// else. A forged field never reaches the message, so there is nothing left to reject.
+			fs.writeFileSync(
+				path.join(extensionsDir, "assistant-message-forged-metadata.ts"),
+				`export default pi => pi.on("assistant_message", () => ({ content: [{ type: "text", text: "first", providerMetadata: "forged" }, { type: "text", text: "second" }] }));`,
+			);
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const errors: ExtensionError[] = [];
+			runner.onError(error => errors.push(error));
+			const message = {
+				...createAssistantMessage("first"),
+				content: [
+					{ type: "text" as const, text: "first", textSignature: "original-first" },
+					{ type: "text" as const, text: "second", textSignature: "original-second" },
+				],
+			};
+			expect(await runner.emitAssistantMessage(message)).toBeUndefined();
+			expect(errors).toEqual([]);
+			expect(JSON.stringify(message)).not.toContain("forged");
 		});
 
 		it("returns completed rewrites without awaiting or accepting a handler after abort", async () => {
@@ -4014,17 +4036,46 @@ describe("ExtensionRunner", () => {
 			expect(fs.existsSync(recordPath)).toBe(false); // tool never executed
 		});
 
-		it.each([
-			["without returning a replacement", false],
-			["while returning the same object", true],
-		] as const)("forfeits ACP approval after in-place input mutation %s", async (_case, returnsInput) => {
-			const recordPath = path.join(tempDir.path(), `acp-mutated-${returnsInput}.jsonl`);
+		it("runs the ACP-approved input when a handler edits its copy in place without returning it", async () => {
+			// The handler is handed a copy of the input: an edit in place changes nothing the host runs,
+			// so the approved original executes and no second approval is needed.
+			const recordPath = path.join(tempDir.path(), "acp-mutated-copy.jsonl");
 			const extCode = `
 				export default function(pi) {
 					pi.on("tool_call", async (event) => {
 						if (event.toolName !== "bash") return;
 						event.input.command = "echo revised";
-						${returnsInput ? "return { input: event.input };" : ""}
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "tool-call-acp-mutate-copy.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const wrapped = new ExtensionToolWrapper(createRecordingTool(recordPath), runner);
+			const acpContext = {
+				settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
+				acpApprovedArgs: { command: "echo original" },
+			} as never;
+
+			await wrapped.execute("acp-call-id", { command: "echo original" }, undefined, undefined, acpContext);
+			expect(fs.readFileSync(recordPath, "utf8")).toBe(`${JSON.stringify({ command: "echo original" })}\n`);
+		});
+
+		it("forfeits ACP approval when a handler returns its in-place edit as the revision", async () => {
+			const recordPath = path.join(tempDir.path(), "acp-mutated-returned.jsonl");
+			const extCode = `
+				export default function(pi) {
+					pi.on("tool_call", async (event) => {
+						if (event.toolName !== "bash") return;
+						event.input.command = "echo revised";
+						return { input: event.input };
 					});
 				}
 			`;

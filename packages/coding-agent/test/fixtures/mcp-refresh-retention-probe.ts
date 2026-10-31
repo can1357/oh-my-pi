@@ -64,6 +64,7 @@ const host: SessionToolsHost = {
 	emitNotice: () => {},
 	notifyCommandMetadataChanged: () => {},
 	localProtocolOptions: () => ({}),
+	customToolSurfaces: () => ({}) as never,
 	evalPreludes: () => [],
 	sessionAgents: () => [],
 	waitForUser: dialog => dialog(),

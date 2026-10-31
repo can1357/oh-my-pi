@@ -585,9 +585,9 @@ export async function searchCodex(params: SearchParams): Promise<SearchResponse>
 		// The registry resolver and provenance guard must consult the same storage;
 		// params.authStorage may be a divergent caller handle. Command-backed keys
 		// still outrank lower-priority OAuth credentials in the registry storage.
-		const credentialOrigin = params.modelRegistry.authStorage.keys.source(params.model.provider);
+		const credentialOrigin = params.modelRegistry.credentialProvenance(params.model.provider);
 		const hasCommandBackedKey = params.modelRegistry.hasCommandBackedApiKey(params.model.provider);
-		if (!hasCommandBackedKey && (credentialOrigin?.kind === "oauth" || credentialOrigin?.kind === "env")) {
+		if (!hasCommandBackedKey && (credentialOrigin === "oauth" || credentialOrigin === "env")) {
 			throw new SearchProviderError(
 				"codex",
 				`Refusing to send official Codex OAuth credentials to custom endpoint ${transport.baseUrl}. Configure an API key for provider "${params.model.provider}".`,
@@ -610,8 +610,8 @@ export async function searchCodex(params: SearchParams): Promise<SearchResponse>
 			signal: params.signal,
 		});
 		if (!seed) {
-			const credentialOrigin = params.modelRegistry.authStorage.keys.source(params.model.provider);
-			if (credentialOrigin?.kind !== "env") {
+			const credentialOrigin = params.modelRegistry.credentialProvenance(params.model.provider);
+			if (credentialOrigin !== "env") {
 				throw new Error(`No Codex OAuth credentials found for selected provider "${params.model.provider}".`);
 			}
 			result = await withAuth(

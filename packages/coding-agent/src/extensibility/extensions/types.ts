@@ -78,7 +78,6 @@ import type { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import type { CodeReviewAnnotation, TextReviewAnnotation } from "@oh-my-pi/pi-tui/overlays/annotation-types";
 export type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
-import type { ModelRegistry } from "../../config/model-registry";
 import type { EditToolDetails } from "@oh-my-pi/pi-tui/tools/edit";
 import type { PythonResult } from "../../eval/py/executor";
 import type { BashResult } from "../../exec/bash-executor";
@@ -95,7 +94,8 @@ import type { AsyncJobSnapshot, SendUserMessageOptions } from "../../session/age
 import type { EphemeralTurnOptions, EphemeralTurnResult } from "../../session/agent-session-types";
 import type { CompactMode } from "../../session/compact-modes";
 import type { CustomMessagePayload } from "../../session/messages";
-import type { ReadonlySessionManager, SessionManager } from "../../session/session-manager";
+import type { SessionManager } from "../../session/session-manager";
+import type { ExtensionModelRegistry, ExtensionSessionManager } from "./context-surfaces";
 import type { BashToolInput, GlobToolInput, GrepToolInput, ReadToolInput, WriteToolInput } from "../../tools";
 import type { GlobToolDetails } from "@oh-my-pi/pi-tui/tools/glob";
 import type { GrepToolDetails } from "@oh-my-pi/pi-tui/tools/grep";
@@ -104,6 +104,8 @@ import type { ApprovalMode } from "../../tools/approval";
 import type { BashToolDetails } from "@oh-my-pi/pi-tui/tools/bash";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
 import type { EventBus } from "../../utils/event-bus";
+import type { AdmittedWorkKind } from "@oh-my-pi/pi-ai/auth/provider-gate";
+import type { QueuedProviderRegistration } from "./callback-ownership";
 import type {
 	AgentEndEvent,
 	AgentStartEvent,
@@ -758,10 +760,10 @@ export interface ExtensionContext {
 	hasUI: boolean;
 	/** Current working directory */
 	cwd: string;
-	/** Session manager (read-only) */
-	sessionManager: ReadonlySessionManager;
-	/** Model registry for API key resolution */
-	modelRegistry: ModelRegistry;
+	/** Session manager (read-only): the members `ReadonlySessionManager` declares, answering copies. */
+	sessionManager: ExtensionSessionManager;
+	/** Model registry for catalog queries and API key resolution; see `ExtensionModelRegistry`. */
+	modelRegistry: ExtensionModelRegistry;
 	/** Calling session's `local://` root mapping for external tool bridges. */
 	localProtocolOptions?: LocalProtocolOptions;
 	/** Current model (may be undefined) */
@@ -2311,7 +2313,9 @@ export type GetCommandsHandler = () => SlashCommandInfo[];
 
 export type SetActiveToolsHandler = (toolNames: string[]) => Promise<void>;
 
-export type SetModelHandler = (model: Model) => Promise<boolean>;
+/** The `pi.setModel` action. `owner` is the session that handed the model over: the copy is taken
+ *  inside its admission, and a `resolveHeaders` the model brings runs as its work. */
+export type SetModelHandler = (model: Model, owner: ExtensionCallbackOwner) => Promise<boolean>;
 
 export type GetThinkingLevelHandler = () => ThinkingLevel | undefined;
 
@@ -2324,8 +2328,15 @@ export type SetServiceTierHandler = (family: ServiceTierFamily, tier: ServiceTie
 /** Shared state created by loader, used during registration and runtime. */
 export interface ExtensionRuntimeState {
 	flagValues: Map<string, boolean | string>;
-	/** Provider registrations queued during extension loading, processed during session initialization */
-	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; sourceId: string }>;
+	/** Provider registrations queued during extension loading, processed during session
+	 *  initialization. Each record carries the session that queued it: the same configuration
+	 *  object may be registered by two sessions, so ownership belongs to the occurrence rather
+	 *  than to the author's object. A host that drains this queue and passes only the first
+	 *  three fields still registers under the right owner when it takes the records out of the
+	 *  queue or registers each one from a `for…of` over it — the registry recovers the owner from
+	 *  that drain, and refuses rather than guesses when it cannot — but passing `owner` on is
+	 *  cheaper and exact. */
+	pendingProviderRegistrations: QueuedProviderRegistration<ProviderConfig>[];
 	/** Queue a provider registration until initialization, then apply it immediately. */
 	registerProvider(name: string, config: ProviderConfig, sourceId: string): void;
 	/** Remove a queued or initialized provider registration. */
@@ -2388,8 +2399,86 @@ export interface ExtensionCommandContextActions {
 	reload: () => Promise<void>;
 }
 
+/** Owns the lifetime of extension-authored callbacks for one session, from the moment the session
+ *  ACCEPTS them.
+ *
+ *  Ownership keyed on the facility that invokes a callback cannot be completed by enumeration:
+ *  any facility handed a callback through `pi` can invoke it, and the set of such facilities is
+ *  open (the runner, `ManagedTimers`, the `EventBus`, the tool UI controller, `ModelRegistry` by
+ *  way of a provider config, a compaction `onError`). The set of places a callback is ACCEPTED is
+ *  closed: it is an argument to a `pi` or `ctx` method. {@link ownCallback} wraps it there, so the
+ *  wrapper owns its own execution and no invoker has to opt in. */
+export interface ExtensionCallbackOwner {
+	/** Wraps a callback this session accepts: inert once the last session hold on this surface has
+	 *  been released, owned while it runs. */
+	ownCallback<A extends unknown[], R>(fn: (...args: A) => R): (...args: A) => R | undefined;
+	/** Runs one call into extension code this session accepted — a provider's `fetchUsage`, an
+	 *  `oauth.login`, a registered stream function — as this session's work: attributed to it,
+	 *  held open until the work of the declared kind finishes, and refused once the session is
+	 *  gone. The caller holds the extension's own object and calls its method on it; nothing of
+	 *  the author's is wrapped, and the KIND is declared here rather than guessed from what
+	 *  comes back. */
+	runOwned<R>(call: () => R, kind?: AdmittedWorkKind): R;
+	/** Runs one call as `runOwned` does, as the finish of work its session already began — a
+	 *  dispatch under way when the session ended — so the rest of it is not skipped. Optional for
+	 *  an embedder's runtime, which then has one lifetime for every session. */
+	finishOwned?<R>(call: () => R): R;
+	/** Counts `result` as a live callback when it is awaitable, returning something awaitable once
+	 *  more — a cold thenable must not be run twice. */
+	trackCallback<T>(result: T): T;
+	/** Claims this surface for a session that is starting, and returns the only way to give that
+	 *  claim back. Ownership is per SESSION even when the runtime is not: a host may reuse one
+	 *  runtime for several sessions in turn, and the next session's claim revives callbacks the
+	 *  previous one's release made inert.
+	 *
+	 *  The release is a handle, not a second method, so that it cannot be called without a
+	 *  matching claim — an unpaired release would steal a live sibling's hold — and so that
+	 *  calling it twice releases once. Once the last holder releases, every accepted callback is
+	 *  inert: a facility still holding one — a bus subscription, a provider config, a timer — can
+	 *  no longer enter a session whose resources are released. */
+	beginSession(): () => void;
+	/** Whether no session holds this surface, so accepted callbacks are inert. */
+	readonly isRetired: boolean;
+	/** The session this surface serves now, retired once it has gone and never live again: what a
+	 *  session leaves behind is pinned to it, so the next session's claim does not revive it.
+	 *  Optional for an embedder's runtime; one without it has nothing pinned to a session. */
+	readonly sessionGeneration?: ExtensionSessionGeneration | undefined;
+	/** Whether extension work of `session` — by default the session a gate checks here — is under
+	 *  way. Work a session before it left running is that session's, not this one's. */
+	hasPendingCallbacks(session?: ExtensionSessionGeneration): boolean;
+	/** Resolves once every callback `session` (as {@link hasPendingCallbacks} names it) has under
+	 *  way now has returned. */
+	waitForPendingCallbacks(session?: ExtensionSessionGeneration): Promise<void>;
+	/** Settles on the next add or remove, for a caller that must not sample. */
+	whenCallbacksChange(): Promise<void>;
+	/** This surface as one session's owner — the admitted call's session on this stack, else the one
+	 *  served now — whose gates read that session alone, so a facade or gate made for it stays its
+	 *  own when the surface goes on to serve the next. Optional for an embedder's runtime, which
+	 *  then has one lifetime for every session. */
+	forSession?(): ExtensionCallbackOwner;
+	/** This surface as the owner of what is accepted now: the accepting call's session, or the
+	 *  surface itself for what an extension factory accepts at load (live for each session). */
+	forAcceptance?(): ExtensionCallbackOwner;
+	/** For a session's owner ({@link forSession}), the surface it is a session of: who registered
+	 *  what it registers, whichever of its sessions did. */
+	readonly registrant?: ExtensionCallbackOwner;
+	/** For a session's owner ({@link forSession}), registers what to withdraw when that session
+	 *  retires: a registration it made comes out of the host's lists then, rather than staying
+	 *  listed and doing nothing. */
+	whenSessionEnds?(withdraw: () => void): void;
+}
+
+/** One session's hold on an extension runtime ({@link ExtensionCallbackOwner.sessionGeneration}):
+ *  retired once the session has gone, and never live again. */
+export interface ExtensionSessionGeneration {
+	readonly isRetired: boolean;
+}
+
 /** Full runtime = state + actions, including host-compatible service-tier fallbacks. */
-export interface ExtensionRuntime extends ExtensionRuntimeState, ExtensionActions {
+export interface ExtensionRuntime extends ExtensionRuntimeState, ExtensionActions, ExtensionCallbackOwner {
+	/** `pi.setModel`, bound by the runner to {@link ExtensionActions.setModel} with this runtime as
+	 *  the session that hands the model over. */
+	setModel(model: Model): Promise<boolean>;
 	getServiceTiers: GetServiceTiersHandler;
 	setServiceTier: SetServiceTierHandler;
 }
@@ -2410,6 +2499,9 @@ export interface Extension {
 	fileDeleteFallbackHandlers: FileDeleteFallbackHandler[];
 	messageRenderers: Map<string, MessageRenderer>;
 	composerShapes: Map<string, ComposerShapeDefinition>;
+	/** Called when `composerShapes` changes after load: a session registers a shape, or its end
+	 *  withdraws one. A host that installed the shapes resyncs its installation. */
+	composerShapeListeners?: Set<() => void>;
 	commands: Map<string, RegisteredCommand>;
 	flags: Map<string, ExtensionFlag>;
 	shortcuts: Map<KeyId, ExtensionShortcut>;

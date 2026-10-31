@@ -360,7 +360,7 @@ export async function runModelsListing(options: RunModelsListingOptions): Promis
 		modelRegistry.syncExtensionSources(activeSources);
 		modelRegistry.clearSourceRegistrations(new Set(activeSources));
 		for (const { name, config, sourceId } of extensionsResult.runtime.pendingProviderRegistrations) {
-			modelRegistry.registerProvider(name, config, sourceId);
+			modelRegistry.registerProvider(name, config, sourceId, extensionsResult.runtime);
 		}
 		extensionsResult.runtime.pendingProviderRegistrations = [];
 		// Discover runtime (extension) provider catalogs now that they are registered.

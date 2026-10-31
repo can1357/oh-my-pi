@@ -1,7 +1,7 @@
 import * as path from "node:path";
-import type { ApiKeyResolver, FetchImpl, ResolvedApiKey, UsageProvider } from "@oh-my-pi/pi-ai";
+import type { ApiKeyResolver, CredentialOriginKind, FetchImpl, ResolvedApiKey, UsageProvider } from "@oh-my-pi/pi-ai";
 import { type AuthApiKeyOptions, type AuthPeekOptions, oauthAccountKey } from "@oh-my-pi/pi-ai/auth-storage";
-import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
+import { registerCustomApi, unregisterCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { registerOAuthProvider, unregisterOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
 import { setCodexAttestationProvider } from "@oh-my-pi/pi-ai/providers/openai-codex-attestation";
@@ -9,13 +9,23 @@ import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/env-api-key";
 import { OAuthRefreshUnavailableError } from "@oh-my-pi/pi-ai/error";
 import type {
+	AntigravityModelWireProfile,
 	Api,
 	Context,
+	CursorModelParameter,
+	CursorModelRoute,
+	EffectiveTokenCost,
+	LongContextTokenCost,
 	Model,
+	ModelAccountAccess,
+	ModelCost,
+	ModelPromptCache,
 	ModelSpec,
+	PeakPricingWindow,
 	RemoteCompactionConfig,
 	SimpleStreamOptions,
 	ThinkingConfig,
+	TimeBasedCost,
 } from "@oh-my-pi/pi-ai/types";
 import type { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildDiscoveredModel, buildModel, nextBuildPriceChange } from "@oh-my-pi/pi-catalog/build";
@@ -52,6 +62,29 @@ import { getAgentDir, isBunTestRuntime, logger, wrapFetchForExtraCa } from "@oh-
 import { resolveProviderModelReference } from "../config/model-resolver";
 import { generateCodexAttestation } from "../live/attestation";
 import { redactUrlForLog } from "../mcp/json-rpc";
+import {
+	AdmittedSignal,
+	callThroughGate,
+	handOAuthCredentials,
+	type GatedRegistration,
+	type ProviderCallGate,
+	selectLiveRegistration,
+} from "@oh-my-pi/pi-ai/auth/provider-gate";
+import {
+	claimProviderRegistrationOwner,
+	providerCallGate,
+	registrationEnded,
+	sameRegistrant,
+} from "../extensibility/extensions/callback-ownership";
+import {
+	type AuthorDataSchema,
+	type AuthorDataSite,
+	CALLBACK,
+	DATA,
+	fieldsOf,
+	snapshotAuthorData,
+} from "../extensibility/extensions/author-data";
+import type { ExtensionCallbackOwner } from "../extensibility/extensions/types";
 import type { AuthStorage } from "../session/auth-storage";
 import { type ApiKeyResolverModel, type ApiKeyResolverOptions, createApiKeyResolver } from "./api-key-resolver";
 import type { ConfigError, ConfigFile } from "./config-file";
@@ -207,11 +240,331 @@ interface ConfiguredModelDiscoveryResult {
 	replaceRuntimeModels: boolean;
 }
 
+/** What `registerProvider` consumes of an extension's configuration, read ONCE.
+ *
+ *  Every field of the author's object may be a getter, and a getter is the registering session's
+ *  code: evaluating one is a call into the extension. So the fields are read a single time,
+ *  inside that session's admission, into this plain record, and everything the registry does
+ *  afterwards — validation, overlays, transport overrides, keys, the discovery rows' defaults —
+ *  works from the record. The data those fields hold — headers, compat, remote compaction,
+ *  transport, the model rows — is {@link registrationData}, taken in the same admission.
+ *  Its METHODS are read once here too, and the captured function is what every later use
+ *  applies — on the author's own object, so its receiver and private state are the ones it was
+ *  written with. Validating a capability and then reading its name again to call it is two
+ *  reads of one property: a getter answering once made the registry serve a substitute's
+ *  stream, persist a substitute's models, and throw on a capability it had just proved.
+ *  Re-registering is how a provider changes a callback, exactly as it is how it changes data. */
+interface AdmittedProviderConfig {
+	readonly baseUrl: string | undefined;
+	readonly apiKey: string | undefined;
+	readonly api: Api | undefined;
+	readonly headers: Record<string, string> | undefined;
+	readonly compat: ProviderConfigInput["compat"];
+	readonly remoteCompaction: ProviderConfigInput["remoteCompaction"];
+	readonly authHeader: boolean | undefined;
+	readonly transport: ProviderConfigInput["transport"];
+	readonly usage: UsageProvider | undefined;
+	readonly oauth: ProviderOAuthBlock | undefined;
+	/** Captured once; applied on `config`. */
+	readonly streamSimple: ProviderConfigInput["streamSimple"];
+	/** Captured once; applied on `config`. */
+	readonly fetchDynamicModels: ProviderConfigInput["fetchDynamicModels"];
+	/** Captured once; applied on `oauth`, the object it was written on. */
+	readonly modifyModels: ProviderOAuthBlock["modifyModels"];
+	/** Overlays built from `models`; empty when it declared none. */
+	readonly overlays: readonly CustomModelOverlay[];
+	/** `!command` values in its key and headers, so a 401 can re-run them. */
+	readonly commandConfigs: ReadonlySet<string>;
+}
+
+type ProviderOAuthBlock = NonNullable<ProviderConfigInput["oauth"]>;
+type HeaderResolver = NonNullable<Model<Api>["resolveHeaders"]>;
+
+const TOKEN_COST_FIELDS = { input: DATA, output: DATA, cacheRead: DATA, cacheWrite: DATA };
+const LONG_CONTEXT_COST = fieldsOf<LongContextTokenCost>({
+	...TOKEN_COST_FIELDS,
+	inputThreshold: DATA,
+	inputThresholdInclusive: DATA,
+});
+const MODEL_COST = fieldsOf<ModelCost>({
+	...TOKEN_COST_FIELDS,
+	longContext: LONG_CONTEXT_COST,
+	timeBased: fieldsOf<TimeBasedCost>({
+		offPeakMultiplier: DATA,
+		peakWindows: {
+			kind: "items",
+			items: fieldsOf<PeakPricingWindow>({ weekdays: DATA, startMinute: DATA, endMinute: DATA }),
+		},
+		effectiveRates: {
+			kind: "items",
+			items: fieldsOf<EffectiveTokenCost>({
+				...TOKEN_COST_FIELDS,
+				effectiveFrom: DATA,
+				longContext: LONG_CONTEXT_COST,
+			}),
+		},
+	}),
+});
+const MODEL_THINKING = fieldsOf<ThinkingConfig>({
+	mode: DATA,
+	efforts: DATA,
+	defaultLevel: DATA,
+	effortMap: DATA,
+	supportsDisplay: DATA,
+	prefixBinding: DATA,
+	effortRouting: DATA,
+	effortBudgets: DATA,
+	suppressWhenOff: DATA,
+	requiresEffort: DATA,
+	unverified: DATA,
+});
+const MODEL_PROMPT_CACHE = fieldsOf<ModelPromptCache>({ short: DATA, long: DATA });
+const REMOTE_COMPACTION = fieldsOf<RemoteCompactionConfig>({
+	enabled: DATA,
+	api: DATA,
+	endpoint: DATA,
+	v2StreamingEnabled: DATA,
+	v2Endpoint: DATA,
+	streamingEndpoint: DATA,
+	model: DATA,
+});
+const ANTIGRAVITY_WIRE_PROFILES: AuthorDataSchema = {
+	kind: "entries",
+	entries: fieldsOf<AntigravityModelWireProfile>({
+		modelEnum: DATA,
+		maxOutputTokens: DATA,
+		thinkingLevel: DATA,
+		thinkingBudget: DATA,
+	}),
+};
+const CURSOR_MODEL_PARAMETERS: AuthorDataSchema = {
+	kind: "items",
+	items: fieldsOf<CursorModelParameter>({ id: DATA, value: DATA }),
+};
+
+/** A model row, as `oauth.modifyModels` returns it and `pi.setModel` hands one over: every field a
+ *  model has. */
+export const MODEL_ROW = fieldsOf<Model<Api>>({
+	id: DATA,
+	kind: DATA,
+	kindConfig: DATA,
+	webSearch: DATA,
+	webSearchModel: DATA,
+	hostedImage: DATA,
+	imageModel: DATA,
+	identity: fieldsOf<Model<Api>["identity"]>({
+		class: DATA,
+		family: DATA,
+		revision: DATA,
+		effort: DATA,
+		thinkingVariant: DATA,
+		logicalId: DATA,
+	}),
+	requiresGlyphTokenization: DATA,
+	requiresCursorToolSchemaProjection: DATA,
+	toolSchemasInContext: DATA,
+	requiresToolResultImageHoisting: DATA,
+	supportsAssistantPrefill: DATA,
+	requestModelId: DATA,
+	reasoningMode: DATA,
+	name: DATA,
+	api: DATA,
+	provider: DATA,
+	providerType: DATA,
+	baseUrl: DATA,
+	reasoning: DATA,
+	tokenizer: DATA,
+	input: DATA,
+	imageInputDecoder: DATA,
+	imageCountBudget: DATA,
+	supportsTools: DATA,
+	supportsComputerUse: DATA,
+	supportsComputerUseConfig: DATA,
+	gitlabDuoWorkflowRootNamespaceId: DATA,
+	cursorMaxMode: DATA,
+	cursorMaxModeRoutes: DATA,
+	antigravityWireProfiles: ANTIGRAVITY_WIRE_PROFILES,
+	accountAccess: {
+		kind: "entries",
+		entries: fieldsOf<ModelAccountAccess>({
+			cyberPrograms: DATA,
+			antigravityWireProfiles: ANTIGRAVITY_WIRE_PROFILES,
+		}),
+	},
+	cursorModelParameters: CURSOR_MODEL_PARAMETERS,
+	cursorModelRoutes: {
+		kind: "entries",
+		entries: fieldsOf<CursorModelRoute>({ modelId: DATA, parameters: CURSOR_MODEL_PARAMETERS, maxMode: DATA }),
+	},
+	cursorPrice: DATA,
+	cursorRequiresDataRetention: DATA,
+	cursorSupportsAgent: DATA,
+	cursorSupportsSandboxing: DATA,
+	factoryDroidApiProviders: DATA,
+	factoryDroidRoutingSource: DATA,
+	factoryDroidCredits: DATA,
+	factoryDroidOrgId: DATA,
+	cost: MODEL_COST,
+	promptCache: MODEL_PROMPT_CACHE,
+	promptCacheConfig: MODEL_PROMPT_CACHE,
+	pricingStatus: DATA,
+	premiumMultiplier: DATA,
+	contextWindow: DATA,
+	contextWindowAuthoritative: DATA,
+	longContextWindowUncapped: DATA,
+	maxContextWindow: DATA,
+	maxTokens: DATA,
+	omitMaxOutputTokens: DATA,
+	headers: DATA,
+	resolveHeaders: CALLBACK,
+	transport: DATA,
+	preferWebsockets: DATA,
+	useResponsesLite: DATA,
+	serviceTiers: DATA,
+	contextPromotionTarget: DATA,
+	compactionModel: DATA,
+	remoteCompaction: REMOTE_COMPACTION,
+	priority: DATA,
+	serviceTierCost: fieldsOf<NonNullable<Model<Api>["serviceTierCost"]>>({
+		flex: DATA,
+		priority: DATA,
+		ultrafast: DATA,
+	}),
+	description: DATA,
+	isNew: DATA,
+	isBeta: DATA,
+	isProviderDefault: DATA,
+	isRecommended: DATA,
+	thinking: MODEL_THINKING,
+	int: DATA,
+	tps: DATA,
+	compat: DATA,
+	compatConfig: DATA,
+	applyPatchToolType: DATA,
+	editPromptVariant: DATA,
+	isOAuth: DATA,
+	guardrailIdentifier: DATA,
+	guardrailVersion: DATA,
+	guardrailTrace: DATA,
+	requestMetadata: DATA,
+});
+
+/** What a provider's `models` and `fetchDynamicModels` rows are read for — validation, the overlay
+ *  builder and the `!command` scan. A row's `resolveHeaders` is none of these, so it is not read. */
+type ModelDefinitionFields = Omit<CustomModelDefinitionLike, "resolveHeaders"> &
+	NonNullable<ProviderConfigInput["models"]>[number];
+
+/** The rows a provider's `models` and `fetchDynamicModels` hand over. */
+const MODEL_DEFINITIONS: AuthorDataSchema = {
+	kind: "items",
+	items: fieldsOf<ModelDefinitionFields>({
+		id: DATA,
+		name: DATA,
+		api: DATA,
+		kind: DATA,
+		baseUrl: DATA,
+		reasoning: DATA,
+		thinking: MODEL_THINKING,
+		input: DATA,
+		imageInputDecoder: DATA,
+		imageCountBudget: DATA,
+		tokenizer: DATA,
+		supportsTools: DATA,
+		cost: MODEL_COST,
+		promptCache: MODEL_PROMPT_CACHE,
+		contextWindow: DATA,
+		maxContextWindow: DATA,
+		maxTokens: DATA,
+		omitMaxOutputTokens: DATA,
+		preferWebsockets: DATA,
+		headers: DATA,
+		compat: DATA,
+		contextPromotionTarget: DATA,
+		compactionModel: DATA,
+		remoteCompaction: REMOTE_COMPACTION,
+		premiumMultiplier: DATA,
+	}),
+};
+
+const REGISTERING_ADVICE = "Compute the value before registering the provider.";
+const RETURNING_ADVICE = "Compute the value before returning it.";
+
+function authorDataSite(providerName: string, root: string, advice: string): AuthorDataSite {
+	return { subject: `Provider ${providerName}`, path: [root], advice };
+}
+
 /**
- * Credential-aware model projection supplied by an extension provider. Receives
- * the fully composed catalog and returns the list the host should serve.
+ * What a registration keeps of the data its author handed over. A session's registration keeps a
+ * {@link snapshotAuthorData} copy: a later read of the author's objects would be author code with
+ * no admission to run under, its session possibly gone. The host's own registration keeps its
+ * objects as they are, and they stay live — they are the host's data, with no session to admit a
+ * read against, and mutating them later changes what the next request reads (the host contract
+ * `model-registry-runtime-provider.test.ts` pins in "registerProvider keeps runtime header objects
+ * live for request-time reads" and "oauth.modifyModels projection survives refresh and
+ * refreshProvider"). An extension that needs different data registers again.
  */
-type ModifyModelsHook = (models: Model<Api>[], credentials: OAuthCredentials) => Model<Api>[];
+function registrationData<T>(
+	gate: ProviderCallGate | undefined,
+	value: T,
+	schema: AuthorDataSchema,
+	site: AuthorDataSite,
+	copies?: Map<AuthorDataSchema, Map<object, unknown>>,
+): T {
+	return gate ? (snapshotAuthorData(value, schema, site, copies ?? new Map()) as T) : value;
+}
+
+/** What one registration contributes to the provider state THIS registry folds — keys, catalog
+ *  overlays, transport overrides — accumulated over that session's registration calls the way
+ *  registration folds them, so the state can be folded again from the registrations left once
+ *  one goes. */
+interface RegistrationFold {
+	key: { readonly keyConfig: string; readonly fallback: boolean } | undefined;
+	overlays: readonly CustomModelOverlay[];
+	override: ProviderOverride | undefined;
+}
+
+/**
+ * One session's — or the host's — registration of a provider name.
+ *
+ * Several sessions register one name: a subagent rebinding its parent's extensions does. The
+ * registries this one installs into keep an entry per registration and select the newest live
+ * one; this record is the same for what THIS registry owns, so a withdrawal takes away exactly the
+ * caller's entries and the callbacks it stores are chosen among live registrations when they run.
+ */
+interface RuntimeProviderRegistration extends GatedRegistration {
+	sourceId: string | undefined;
+	/** Custom API ids this registration installed a stream for. */
+	readonly apis: Set<string>;
+	/** Set once this registration declared models: the OAuth block whose `modifyModels` projects
+	 *  the catalog while it is in force, or none. Unset, it leaves the projection to an earlier
+	 *  registration, as a registration without models always has. */
+	projection:
+		| { readonly oauth: ProviderOAuthBlock | undefined; readonly modifyModels: ProviderOAuthBlock["modifyModels"] }
+		| undefined;
+	/** The configuration whose `fetchDynamicModels` discovers while this registration is in force,
+	 *  and the fields its rows default to. */
+	discovery: { readonly config: ProviderConfigInput; readonly fields: AdmittedProviderConfig } | undefined;
+	readonly fold: RegistrationFold;
+}
+
+/** A registration's discovery as it stood when its `fetchDynamicModels` was called: the same
+ *  session re-registering replaces the discovery, and its earlier fetch is no longer its answer. */
+interface RuntimeDiscoveryProducer {
+	readonly registration: RuntimeProviderRegistration;
+	readonly discovery: NonNullable<RuntimeProviderRegistration["discovery"]>;
+}
+
+/** One discovery pass of a runtime provider's manager. `producer` is the registration chosen to
+ *  fetch, recorded before the fetch so a pass whose producer departs while it runs is still known
+ *  as that producer's — whatever the manager then serves, its fetched rows or the model cache.
+ *  `fetched` is set once the producer's own rows were accepted. */
+interface RuntimeDiscoveryRun {
+	producer: RuntimeDiscoveryProducer | undefined;
+	fetched: boolean;
+}
+
+/** Thrown inside a projected resolver whose registration stopped answering while it ran. */
+const PROJECTION_SUPERSEDED = Symbol("projection superseded");
 
 function getDisabledProviderIdsFromSettings(settingsInstance?: Settings): Set<string> {
 	try {
@@ -294,6 +647,9 @@ export type ResolvedRequestAuth =
 			env?: Record<string, string>;
 	  }
 	| { ok: false; error: string };
+
+/** The fields of a model that resolving its request credential reads. */
+export type ModelCredentialFields = Pick<Model<Api>, "provider" | "baseUrl" | "id" | "accountAccess">;
 
 /**
  * Model registry - loads and manages models, resolves API keys via AuthStorage.
@@ -398,18 +754,36 @@ export class ModelRegistry {
 	// headers). Separate from #commandConfigsByProvider because static reload
 	// rebuilds that map from models.yml only; runtime entries must survive.
 	#runtimeCommandConfigsByProvider: Map<string, Set<string>> = new Map();
-	// Credential-aware model projections registered via
-	// `registerProvider({ oauth: { modifyModels } })`. Persisted for the same
-	// reason as #runtimeModelOverlays: the overlays hold the *pre-projection*
-	// definitions, so without re-applying the projection every static reload
-	// would silently revert the provider to its unprojected catalog.
-	#runtimeModelModifiers: Map<string, ModifyModelsHook> = new Map();
+	// Providers with a credential-aware model projection registered via
+	// `registerProvider({ oauth: { modifyModels } })`, in the order the hooks
+	// run. Persisted for the same reason as #runtimeModelOverlays: the overlays
+	// hold the *pre-projection* definitions, so without re-applying the
+	// projection every static reload would silently revert the provider to its
+	// unprojected catalog. Which registration's hook runs is chosen when it runs
+	// (see #applyRuntimeModelModifiers).
+	#runtimeModelModifiers: Set<string> = new Set();
 	#lastModelModifierWarnings: Map<string, string> = new Map();
-	#runtimeProvidersBySource: Map<string, Set<string>> = new Map();
+	// Every registration of each runtime provider name, oldest first.
+	#runtimeRegistrations: Map<string, RuntimeProviderRegistration[]> = new Map();
+	// The source of the registration applied last for each provider name: a
+	// registration from another source takes the name over.
 	#runtimeProviderSourceByName: Map<string, string> = new Map();
 	// Runtime model managers registered by extensions via fetchDynamicModels.
 	// Keyed by provider name; use the same SQLite cache path as builtins.
 	#runtimeModelManagers: Map<string, { options: ModelManagerOptions<Api>; sourceId: string }> = new Map();
+	/** Every manager options object installed for a runtime provider, so a pass that started with
+	 *  one still knows it for an extension's after the provider was withdrawn or reinstalled. */
+	readonly #runtimeManagerOptions = new WeakSet<ModelManagerOptions<Api>>();
+	/**
+	 * The producer whose rows the model cache holds for a runtime provider, as far as this process
+	 * knows. The cache is keyed by provider name and outlives every registration, so it serves the
+	 * registration in force only while its writer is still registered, live and current, from the
+	 * same source — a subagent's registration may use the rows its live parent fetched, while rows
+	 * of a registration that was withdrawn, retired or replaced, or of another extension, are not
+	 * served again: the registration in force fetches its own. Absent, the cache predates this
+	 * process and is trusted as before.
+	 */
+	readonly #runtimeDiscoveryWriters = new Map<string, RuntimeDiscoveryProducer>();
 	#ignoreLocalModelConfig: boolean;
 	#fetch: FetchImpl;
 	#settings: Settings | undefined;
@@ -487,12 +861,9 @@ export class ModelRegistry {
 		for (const config of runtimeConfigs) invalidateCommandConfig(config);
 	}
 
-	#recordRuntimeCommandConfigs(providerName: string, config: ProviderConfigInput): void {
+	#recordRuntimeCommandConfigs(providerName: string, values: ReadonlySet<string>): void {
 		const target = this.#runtimeCommandConfigsByProvider.get(providerName) ?? new Set<string>();
-		this.#collectCommandConfigValues(target, config.apiKey, config.headers);
-		for (const modelDef of config.models ?? []) {
-			this.#collectCommandConfigValues(target, undefined, modelDef.headers);
-		}
+		for (const value of values) target.add(value);
 		if (target.size > 0) this.#runtimeCommandConfigsByProvider.set(providerName, target);
 		else this.#runtimeCommandConfigsByProvider.delete(providerName);
 	}
@@ -807,14 +1178,16 @@ export class ModelRegistry {
 	 * and patch its context window to what the backend actually serves.
 	 */
 	async refreshSelectedModelMetadata(model: Model<Api>): Promise<Model<Api>> {
-		const discoveryConfig = this.#findLazyRuntimeDiscovery(model.provider);
+		// The provider and id are read once: the row patched is the row of the provider probed.
+		const { provider, id } = model;
+		const discoveryConfig = this.#findLazyRuntimeDiscovery(provider);
 		if (!discoveryConfig) {
 			return model;
 		}
 		this.#ensureFullSnapshot();
 		const headers = await this.resolveModelHeaders(model);
-		const { resolveHeaders: _resolveHeaders, ...plainModel } = model;
-		const requestModel = { ...plainModel, headers };
+		const { resolveHeaders, ...fields } = model;
+		const requestModel = { ...fields, provider, id, headers };
 		const runtimeMetadata =
 			discoveryConfig.discovery.type === "lm-studio"
 				? await discoverLmStudioModelRuntimeMetadata(
@@ -828,10 +1201,13 @@ export class ModelRegistry {
 						discoveryConfig.discovery.timeoutMs,
 					);
 		if (runtimeMetadata === undefined) {
-			return this.find(model.provider, model.id) ?? model;
+			return this.find(provider, id) ?? model;
 		}
 		const { contextWindow, maxTokens, input } = runtimeMetadata;
-		const current = this.find(model.provider, model.id) ?? model;
+		// A model the registry does not hold is patched as the one read above, never read again.
+		const current: Model<Api> =
+			this.find(provider, id) ??
+			(resolveHeaders ? { ...fields, provider, id, resolveHeaders } : { ...fields, provider, id });
 		const override = this.#resolveLiveModelOverride(current);
 		const customModel = this.#resolveLiveCustomModelOverlay(current);
 		const patch: ModelPatch = {};
@@ -1116,22 +1492,44 @@ export class ModelRegistry {
 	 * mutation of both the array and its model records before returning, and the
 	 * rows it returns for its own provider are re-materialized through
 	 * `buildModel` so the registry keeps its "every model is built" invariant.
+	 *
+	 * The hook in force for a provider is the one declared by its newest live
+	 * registration that declared models. A retired session's projection is not
+	 * applied and no code of its runs; an earlier live registration's applies
+	 * again. The hook is the function captured when that registration was
+	 * admitted, applied on the author's OAuth block inside the registration's
+	 * admission. What it returns is {@link registrationData}, read inside the
+	 * same admission, and a header resolver it put on a row is owned by that
+	 * registration from then on (see `#ownProjectedResolver`).
 	 */
 	#applyRuntimeModelModifiers(models: Model<Api>[]): Model<Api>[] {
 		if (this.#runtimeModelModifiers.size === 0) return models;
 		let projected = models;
-		for (const [providerName, modifyModels] of this.#runtimeModelModifiers) {
+		for (const providerName of this.#runtimeModelModifiers) {
+			const registration = this.#projectionInForce(providerName);
+			const oauth = registration?.projection?.oauth;
+			const modifyModels = registration?.projection?.modifyModels;
+			if (!registration || !oauth || !modifyModels) continue;
 			const credential = this.authStorage.credentials.getOAuth(providerName);
 			if (!credential) continue;
+			const { gate } = registration;
+			const before = projected;
 			try {
 				// Clone mutable catalog data, retaining resolver functions as opaque
 				// capabilities. Hooks can then rename models without losing their
 				// request-time credentials or resolving them during catalog reads.
 				const snapshot: Model<Api>[] = structuredClone(
-					projected.map(({ resolveHeaders: _resolveHeaders, ...model }) => model),
+					before.map(({ resolveHeaders: _resolveHeaders, ...model }) => model),
 				);
+				// Resolvers already on the catalog are the host's, or held for an earlier
+				// hook's owner; a resolver the hook hands back that is not one of these is
+				// its own output.
+				const handed = new Set<HeaderResolver>();
 				for (let index = 0; index < snapshot.length; index++) {
-					if (projected[index].resolveHeaders) snapshot[index].resolveHeaders = projected[index].resolveHeaders;
+					const resolver = before[index].resolveHeaders;
+					if (!resolver) continue;
+					snapshot[index].resolveHeaders = resolver;
+					handed.add(resolver);
 				}
 				// A hook owns its provider's rows and may synthesize them outright
 				// (a credential-scoped catalog replacing the registered bootstrap)
@@ -1143,32 +1541,168 @@ export class ModelRegistry {
 				// reader crashes, or an identity left over from a different id.
 				// Rows of other providers pass through untouched; rebuilding a
 				// full catalog on every projection costs more than it can fix.
-				projected = modifyModels(snapshot, credential).map(model => {
-					const withHeaders =
-						model.resolveHeaders && model.headers
-							? {
-									...model,
-									headers: undefined,
-									resolveHeaders: createConfigHeaderResolver([model.resolveHeaders, model.headers]),
-								}
-							: model;
-					if (withHeaders.provider !== providerName) return withHeaders as Model<Api>;
-					// `identity` exists only on built rows. Without it the hook
-					// authored a spec, where `compat` already is the sparse
-					// override `toModelSpec` would drop while reading the absent
-					// `compatConfig`; built rows keep resolving from that field
-					// instead of feeding the resolved view back in as an override.
-					return buildModel(
-						withHeaders.identity === undefined
-							? (withHeaders as ModelSpec<Api>)
-							: toModelSpec(withHeaders as Model<Api>),
-					);
+				projected = callThroughGate(gate, () => {
+					// The function captured when this registration was admitted, applied on the
+					// block it was written on. A session's hook is handed a copy of the credential:
+					// `getOAuth` returns the credential pool's own entry, which every other reader of
+					// the credential reads afterwards. A host registration is handed the entry itself.
+					const authored = Reflect.apply(modifyModels, oauth, [
+						snapshot,
+						gate ? handOAuthCredentials(credential) : credential,
+					]);
+					if (authored === undefined) return before;
+					const copies = new Map<AuthorDataSchema, Map<object, unknown>>();
+					const site = authorDataSite(providerName, "oauth.modifyModels() result", RETURNING_ADVICE);
+					const rows: Model<Api>[] = [];
+					const length = authored.length;
+					for (let index = 0; index < length; index++) {
+						// Each row is read once; the one the hook authored stays the receiver of a
+						// resolver it put there.
+						const authoredRow = authored[index];
+						site.path.push(index);
+						const model = registrationData(gate, authoredRow, MODEL_ROW, site, copies);
+						site.path.pop();
+						const resolver = model.resolveHeaders;
+						const headers = model.headers;
+						const withHeaders =
+							resolver && !handed.has(resolver)
+								? {
+										...model,
+										headers: undefined,
+										resolveHeaders: this.#ownProjectedResolver(
+											providerName,
+											registration,
+											authoredRow,
+											model,
+										),
+									}
+								: resolver && headers
+									? {
+											...model,
+											headers: undefined,
+											resolveHeaders: createConfigHeaderResolver([resolver, headers]),
+										}
+									: model;
+						if (withHeaders.provider !== providerName) {
+							rows.push(withHeaders as Model<Api>);
+							continue;
+						}
+						// `identity` exists only on built rows. Without it the hook
+						// authored a spec, where `compat` already is the sparse
+						// override `toModelSpec` would drop while reading the absent
+						// `compatConfig`; built rows keep resolving from that field
+						// instead of feeding the resolved view back in as an override.
+						rows.push(
+							buildModel(
+								withHeaders.identity === undefined
+									? (withHeaders as ModelSpec<Api>)
+									: toModelSpec(withHeaders as Model<Api>),
+							),
+						);
+					}
+					return rows;
 				});
 			} catch (error) {
 				this.#warnModelModifierFailure(providerName, error instanceof Error ? error.message : String(error));
 			}
 		}
 		return projected;
+	}
+
+	/** The registration whose projection is in force for a provider: the newest live one that
+	 *  declared models. */
+	#projectionInForce(providerName: string): RuntimeProviderRegistration | undefined {
+		return selectLiveRegistration(
+			this.#runtimeRegistrations.get(providerName)?.filter(entry => entry.projection !== undefined) ?? [],
+		);
+	}
+
+	/** The registration whose discovery is in force for a provider: the newest live one that
+	 *  declared `fetchDynamicModels`. */
+	#discoveryInForce(providerName: string): RuntimeProviderRegistration | undefined {
+		return selectLiveRegistration(
+			this.#runtimeRegistrations.get(providerName)?.filter(entry => entry.discovery !== undefined) ?? [],
+		);
+	}
+
+	/**
+	 * A header resolver an extension's model projection put on a row. From then on the HOST holds
+	 * it and calls it itself — the streaming path does, knowing nothing of who wrote it — so it is
+	 * owned the way an accepted handler is: it runs through the producing registration's gate, on
+	 * the row it came with, and what it returns is read inside that admission too. The abort signal
+	 * it is handed runs its listeners in that admission, and only until the call is over.
+	 *
+	 * It answers only while that registration is the projection in force, checked again once the
+	 * author's resolver settles, whether it fulfils or rejects. After the registration has gone —
+	 * retired, withdrawn or superseded — the call is answered as the projection in force now serves
+	 * the row, so a row cached before the change neither reaches departed code nor fails while a
+	 * live registration still serves the provider. A failure is the caller's only while the
+	 * registration that produced it still answers.
+	 */
+	#ownProjectedResolver(
+		providerName: string,
+		registration: RuntimeProviderRegistration,
+		receiver: unknown,
+		row: Model<Api>,
+	): HeaderResolver | undefined {
+		const { provider, id, resolveHeaders: resolver, headers } = row;
+		if (!resolver) return undefined;
+		const { gate, projection } = registration;
+		if (!gate) return headers ? (createConfigHeaderResolver([resolver, headers]) ?? resolver) : resolver;
+		const answers = () =>
+			registration.projection === projection && this.#projectionInForce(providerName) === registration;
+		const authored: HeaderResolver = async signal => {
+			const admitted = new AdmittedSignal(gate, signal);
+			try {
+				const produced = await callThroughGate(gate, () => Reflect.apply(resolver, receiver, [admitted.admit()]));
+				if (!answers()) throw PROJECTION_SUPERSEDED;
+				return callThroughGate(gate, () =>
+					snapshotAuthorData(
+						produced,
+						DATA,
+						authorDataSite(providerName, "resolveHeaders() result", RETURNING_ADVICE),
+						new Map(),
+					),
+				) as Record<string, string> | undefined;
+			} finally {
+				admitted.release();
+			}
+		};
+		const own = headers ? (createConfigHeaderResolver([authored, headers]) ?? authored) : authored;
+		const owned: HeaderResolver = async signal => {
+			if (answers()) {
+				try {
+					return await own(signal);
+				} catch (error) {
+					// A rejection from a projection that has since gone is no more its answer than a
+					// fulfilment would be.
+					if (error !== PROJECTION_SUPERSEDED && answers()) throw error;
+				}
+			}
+			return this.#resolveLiveRowHeaders(provider, id, owned, signal);
+		};
+		return owned;
+	}
+
+	/** A row's headers as the projection in force now serves it, for a projected resolver whose
+	 *  registration no longer answers. The catalog is projected afresh: the cached projection may
+	 *  predate the change. */
+	async #resolveLiveRowHeaders(
+		provider: string,
+		id: string,
+		departed: HeaderResolver,
+		signal: AbortSignal | undefined,
+	): Promise<Record<string, string> | undefined> {
+		const unprojected = this.#hasFullSnapshot
+			? this.#unprojectedModels
+			: this.#projectBaseModels(this.#composeBaseModels());
+		const live = this.#applyRuntimeModelModifiers(unprojected).find(
+			model => model.provider === provider && model.id === id,
+		);
+		if (!live || live.resolveHeaders === departed) {
+			throw new Error(`Model ${provider}/${id} is no longer served by a live registration`);
+		}
+		return this.resolveModelHeaders(live, signal);
 	}
 
 	/**
@@ -1913,10 +2447,14 @@ export class ModelRegistry {
 							...(await this.#discoverProviderModelsCoalesced(provider, strategy)),
 						})),
 					);
-		const [configuredDiscoveryResults, builtInDiscovery] = await Promise.all([
+		const runtimeRuns = new Map<string, RuntimeDiscoveryRun>();
+		const [configuredDiscoveryResults, builtInDiscoveryResult] = await Promise.all([
 			configuredDiscoveriesPromise,
-			this.#discoverBuiltInProviderModels(strategy, providerFilter),
+			this.#discoverBuiltInProviderModels(strategy, providerFilter, runtimeRuns),
 		]);
+		// Published now, after every await of the pass: a runtime provider's rows go out only while
+		// the registration that produced them is still the one in force.
+		const builtInDiscovery = this.#withoutDepartedRuntimeDiscoveries(builtInDiscoveryResult, runtimeRuns);
 		this.#captureCatalogMetrics(builtInDiscovery.models, providerFilter === undefined);
 		const currentDiscoverableProviders = new Set(this.#discoverableProviders);
 		const currentConfiguredDiscoveryResults = configuredDiscoveryResults.filter(result =>
@@ -2257,7 +2795,8 @@ export class ModelRegistry {
 
 	async #discoverBuiltInProviderModels(
 		strategy: ModelRefreshStrategy,
-		providerFilter?: ReadonlySet<string>,
+		providerFilter: ReadonlySet<string> | undefined,
+		runtimeRuns: Map<string, RuntimeDiscoveryRun>,
 	): Promise<BuiltInDiscoveryResult> {
 		// Skip providers already handled by configured discovery (e.g. user-configured ollama with discovery.type)
 		const configuredDiscoveryProviders = new Set(this.#discoverableProviders.map(p => p.provider));
@@ -2271,7 +2810,7 @@ export class ModelRegistry {
 		}
 		const writesBefore = getModelCacheWriteStats();
 		const discoveries = await Promise.all(
-			managerOptions.map(options => this.#discoverWithModelManager(options, strategy)),
+			managerOptions.map(options => this.#discoverWithModelManager(options, strategy, runtimeRuns)),
 		);
 		const writesAfter = getModelCacheWriteStats();
 		const rewrittenRows = writesAfter.payloadWrites - writesBefore.payloadWrites;
@@ -2572,12 +3111,39 @@ export class ModelRegistry {
 	async #discoverWithModelManager(
 		options: ModelManagerOptions<Api>,
 		strategy: ModelRefreshStrategy,
+		runtimeRuns: Map<string, RuntimeDiscoveryRun>,
 	): Promise<BuiltInDiscoveryResult> {
+		const providerId = options.providerId;
+		let runOptions = options;
+		let runStrategy = strategy;
+		// An extension's manager: this pass records the registration it asked to fetch (see
+		// #discoverRuntimeModels), so what it found is published only while that one is in force.
+		const run: RuntimeDiscoveryRun | undefined = this.#runtimeManagerOptions.has(options)
+			? { producer: undefined, fetched: false }
+			: undefined;
+		if (run) {
+			runtimeRuns.set(providerId, run);
+			runOptions = { ...options, fetchDynamicModels: () => this.#discoverRuntimeModels(providerId, run) };
+			const inForce = this.#discoveryInForce(providerId);
+			if (inForce && !this.#runtimeDiscoveryCacheServes(providerId, inForce)) {
+				// The model cache holds rows the registration in force may not be served: it
+				// fetches its own, and an offline pass has nothing of its to serve.
+				if (strategy === "offline") {
+					return { models: [], authoritativeProviders: new Set(), replaceRuntimeProviders: new Set() };
+				}
+				runStrategy = "online";
+			}
+		}
 		try {
-			const manager = createModelManager({ ...options, cacheDbPath: this.#cacheDbPath });
+			const manager = createModelManager({ ...runOptions, cacheDbPath: this.#cacheDbPath });
 			const result = await withModelDiscoveryTimeout(RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS, () =>
-				manager.refresh(strategy),
+				manager.refresh(runStrategy),
 			);
+			// Selected again after the refresh: a registration that stopped answering while it ran
+			// leaves no rows and no discovery state behind.
+			if (run && !this.#runtimeDiscoveryRunAnswers(providerId, run)) {
+				return { models: [], authoritativeProviders: new Set(), replaceRuntimeProviders: new Set() };
+			}
 			const models = result.models.map(model =>
 				model.provider === options.providerId ? model : { ...model, provider: options.providerId },
 			);
@@ -2610,6 +3176,11 @@ export class ModelRegistry {
 			}
 			return { models, authoritativeProviders, replaceRuntimeProviders };
 		} catch (error) {
+			// A pass whose producer departed while it ran — its fetch timing out after a newer
+			// pass of the registration in force succeeded — has no failure to report for it.
+			if (run?.producer && !this.#runtimeDiscoveryProducerAnswers(providerId, run.producer)) {
+				return { models: [], authoritativeProviders: new Set(), replaceRuntimeProviders: new Set() };
+			}
 			const message = error instanceof Error ? error.message : String(error);
 			const previous = this.#providerDiscoveryStates.get(options.providerId);
 			// Same auth-rejection surfacing as the configured-discovery path: a
@@ -3211,6 +3782,16 @@ export class ModelRegistry {
 		return isCommandConfigValue(keyConfig);
 	}
 
+	/**
+	 * Where the credential {@link resolver} would send for `provider` comes from, as this registry's
+	 * own store answers it (`oauth`, `env`, `api_key`, …), or `undefined` when it holds none.
+	 * A provenance guard and the resolver it guards must see the same storage; this lets a caller
+	 * ask that question without being handed {@link authStorage}.
+	 */
+	credentialProvenance(provider: string): CredentialOriginKind | undefined {
+		return this.authStorage.keys.source(provider)?.kind;
+	}
+
 	getDiscoverableProviders(): string[] {
 		const disabledProviders = getDisabledProviderIdsFromSettings(this.#settings);
 		return this.#discoverableProviders
@@ -3333,8 +3914,11 @@ export class ModelRegistry {
 
 	/** Materialize a model's complete configured header chain for one request. */
 	async resolveModelHeaders(model: Model<Api>, signal?: AbortSignal): Promise<Record<string, string> | undefined> {
-		if (model.resolveHeaders) return await model.resolveHeaders(signal);
-		return model.headers ? { ...model.headers } : undefined;
+		// One read each: the resolver called is the resolver checked, the headers copied the headers checked.
+		const resolveHeaders = model.resolveHeaders;
+		if (resolveHeaders) return await Reflect.apply(resolveHeaders, model, [signal]);
+		const headers = model.headers;
+		return headers ? { ...headers } : undefined;
 	}
 
 	#isKeylessProvider(provider: string): boolean {
@@ -3346,20 +3930,22 @@ export class ModelRegistry {
 
 	/** Resolve a model's request credential or the no-auth sentinel. */
 	async getApiKey(
-		model: Model<Api>,
+		model: ModelCredentialFields,
 		sessionId?: string,
 		options?: { signal?: AbortSignal },
 	): Promise<string | undefined> {
-		// A disabled provider gets no credential, so no request reaches it however
-		// its model was obtained.
-		if (this.#isProviderDisabled(model.provider)) return undefined;
-		if (this.#isKeylessProvider(model.provider)) {
+		// Each field is read once, so the provider checked is the provider whose credential is looked
+		// up. A disabled provider gets no credential, so no request reaches it however its model was
+		// obtained.
+		const { provider, baseUrl, id, accountAccess } = model;
+		if (this.#isProviderDisabled(provider)) return undefined;
+		if (this.#isKeylessProvider(provider)) {
 			return kNoAuth;
 		}
-		return this.authStorage.keys.get(model.provider, sessionId, {
-			baseUrl: model.baseUrl,
-			modelId: model.id,
-			accountIds: model.accountAccess && Object.keys(model.accountAccess),
+		return this.authStorage.keys.get(provider, sessionId, {
+			baseUrl,
+			modelId: id,
+			accountIds: accountAccess && Object.keys(accountAccess),
 			signal: options?.signal,
 		});
 	}
@@ -3367,11 +3953,13 @@ export class ModelRegistry {
 	/** Resolve request authentication through the historical Pi extension facade. */
 	async getApiKeyAndHeaders(model: Model<Api>): Promise<ResolvedRequestAuth> {
 		try {
-			const apiKey = await this.getApiKey(model);
+			// One read of the model: the key and the headers are for the same provider.
+			const { provider, baseUrl, id, accountAccess } = model;
+			const apiKey = await this.getApiKey({ provider, baseUrl, id, accountAccess });
 			if (apiKey === undefined) {
-				return { ok: false, error: `No API key found for "${model.provider}"` };
+				return { ok: false, error: `No API key found for "${provider}"` };
 			}
-			const headers = await this.getProviderHeaders(model.provider);
+			const headers = await this.getProviderHeaders(provider);
 			return { ok: true, apiKey, headers };
 		} catch (error) {
 			return { ok: false, error: error instanceof Error ? error.message : String(error) };
@@ -3414,19 +4002,21 @@ export class ModelRegistry {
 		options?: AuthApiKeyOptions,
 	): Promise<ResolvedApiKey | undefined> {
 		if (this.#isProviderDisabled(provider)) return undefined;
-		if (options?.forceRefresh) this.#invalidateProviderCommandConfigs(provider);
+		// Each option is read once: the model whose account access is looked up is the model passed on.
+		const { baseUrl, modelId, forceRefresh, refreshReason, rejectedAccessToken, signal } = options ?? {};
+		if (forceRefresh) this.#invalidateProviderCommandConfigs(provider);
 		if (this.#isKeylessProvider(provider)) {
 			return { apiKey: kNoAuth };
 		}
-		const accountAccess = options?.modelId ? this.find(provider, options.modelId)?.accountAccess : undefined;
+		const accountAccess = modelId ? this.find(provider, modelId)?.accountAccess : undefined;
 		return this.authStorage.keys.getWithCredential(provider, sessionId, {
-			baseUrl: options?.baseUrl,
-			modelId: options?.modelId,
+			baseUrl,
+			modelId,
 			accountIds: accountAccess && Object.keys(accountAccess),
-			forceRefresh: options?.forceRefresh,
-			refreshReason: options?.refreshReason,
-			rejectedAccessToken: options?.rejectedAccessToken,
-			signal: options?.signal,
+			forceRefresh,
+			refreshReason,
+			rejectedAccessToken,
+			signal,
 		});
 	}
 
@@ -3465,14 +4055,18 @@ export class ModelRegistry {
 		return this.authStorage.credentials.hasOAuth(model.provider);
 	}
 
-	#clearRuntimeProviderState(providerName: string): void {
+	/** Drops what THIS registry folds from a provider's registrations: keys, transport overrides
+	 *  and catalog overlays. */
+	#clearFoldedProviderState(providerName: string): void {
 		this.#runtimeProviderApiKeys.delete(providerName);
 		this.#runtimeProviderOverrides.delete(providerName);
-		this.#runtimeCommandConfigsByProvider.delete(providerName);
 		this.#runtimeModelOverlays = this.#runtimeModelOverlays.filter(overlay => overlay.provider !== providerName);
-		this.#runtimeModelManagers.delete(providerName);
-		this.#runtimeModelModifiers.delete(providerName);
-		this.#lastModelModifierWarnings.delete(providerName);
+		this.#invalidateProviderModelCache(providerName);
+		this.authStorage.keys.removeConfig(providerName);
+	}
+
+	/** Drops the rows discovered for a runtime provider. */
+	#dropRuntimeDiscoveredModels(providerName: string): void {
 		// A credential-scoped built-in provider (e.g. opencode-go) populates its
 		// slice of #runtimeDiscoveredModels from startup cache hydration, not from
 		// this extension. #reloadStaticModels excludes credential-scoped providers
@@ -3482,14 +4076,160 @@ export class ModelRegistry {
 		// credential-scoped providers; discard for everyone else, where the slice is
 		// the extension's own discovery (or a non-credential-scoped built-in slice
 		// that baked this provider's now-removed override and must be recomposed).
-		if (!isCredentialScopedModelCacheProvider(providerName)) {
-			this.#runtimeDiscoveredModels = this.#runtimeDiscoveredModels.filter(model => model.provider !== providerName);
-			this.#runtimeAuthoritativeProviders.delete(providerName);
-			this.#providerDiscoveryStates.delete(providerName);
-		}
+		if (isCredentialScopedModelCacheProvider(providerName)) return;
+		this.#runtimeDiscoveredModels = this.#runtimeDiscoveredModels.filter(model => model.provider !== providerName);
+		this.#runtimeAuthoritativeProviders.delete(providerName);
+		this.#providerDiscoveryStates.delete(providerName);
 		this.#invalidateProviderModelCache(providerName);
-		this.authStorage.keys.removeConfig(providerName);
-		this.authStorage.usage.removeProvider(providerName);
+	}
+
+	/** Drops what THIS registry holds for a provider: catalog, keys, overrides, projection and
+	 *  discovery. The registries other code selects from — usage, OAuth, custom APIs — keep one
+	 *  entry per registration and are withdrawn from per registration, by the callers. */
+	#clearRuntimeProviderState(providerName: string): void {
+		this.#clearFoldedProviderState(providerName);
+		this.#runtimeCommandConfigsByProvider.delete(providerName);
+		this.#runtimeModelManagers.delete(providerName);
+		this.#runtimeModelModifiers.delete(providerName);
+		this.#lastModelModifierWarnings.delete(providerName);
+		this.#dropRuntimeDiscoveredModels(providerName);
+	}
+
+	/** Withdraws the custom APIs one registration installed. An id another provider's registration
+	 *  of the same session installed too stays: that registration replaced this one's stream in the
+	 *  custom-API registry and still serves through it. */
+	#withdrawCustomApis(providerName: string, registration: RuntimeProviderRegistration): void {
+		for (const api of registration.apis) {
+			let claimedElsewhere = false;
+			for (const [otherProvider, entries] of this.#runtimeRegistrations) {
+				if (otherProvider === providerName) continue;
+				if (entries.some(entry => entry.gate === registration.gate && entry.apis.has(api))) {
+					claimedElsewhere = true;
+					break;
+				}
+			}
+			if (!claimedElsewhere) unregisterCustomApi(api, registration.gate);
+		}
+	}
+
+	/**
+	 * Takes one registration out of the registries other code selects from, under its own gate, so
+	 * another session's entry for the same name stays to be selected. A host registration's usage
+	 * entry is the host's own — the ungated one — and its OAuth entry is left for the next host
+	 * registration to replace, as before registrations were tracked.
+	 */
+	#withdrawRegistrationEntries(providerName: string, registration: RuntimeProviderRegistration): void {
+		this.#withdrawCustomApis(providerName, registration);
+		if (registration.gate) unregisterOAuthProvider(providerName, registration.gate);
+		this.authStorage.usage.removeRegistration(providerName, registration.gate);
+	}
+
+	/**
+	 * Records which registrations of a provider are left after some went, and settles what this
+	 * registry holds for it from them. With none live, everything goes. Otherwise the keys,
+	 * overrides and catalog are folded again from the live registrations left: a departing
+	 * registration must not leave its catalog, URL or key in force — its model advertised with no
+	 * stream left to serve it, the live registration's model missing. The projection and discovery
+	 * follow the registrations that remain. When the discovery in force changes, the rows
+	 * discovered so far stay only if they may serve the new one (see
+	 * `#runtimeDiscoveryCacheServes`); otherwise they go, as a source handoff drops them.
+	 * `discoveryBefore` is the registration whose discovery was in force before the change.
+	 */
+	#settleRegistrations(
+		providerName: string,
+		remaining: RuntimeProviderRegistration[],
+		discoveryBefore: RuntimeProviderRegistration | undefined,
+	): void {
+		if (remaining.length === 0) this.#runtimeRegistrations.delete(providerName);
+		else this.#runtimeRegistrations.set(providerName, remaining);
+		const newestSource = remaining.at(-1)?.sourceId;
+		if (newestSource) this.#runtimeProviderSourceByName.set(providerName, newestSource);
+		else this.#runtimeProviderSourceByName.delete(providerName);
+		// A registration whose session has ended goes; one an extension made at load stays while no
+		// session holds its runtime, so the next session finds the catalog it registered.
+		const live = remaining.filter(entry => !registrationEnded(entry.gate));
+		if (live.length === 0) {
+			this.#clearRuntimeProviderState(providerName);
+			return;
+		}
+		this.#refoldRegistrations(providerName, live);
+		this.#syncRegistrationCallbacks(providerName);
+		const discoveryAfter = this.#discoveryInForce(providerName);
+		if (
+			discoveryBefore &&
+			discoveryBefore !== discoveryAfter &&
+			!(discoveryAfter && this.#runtimeDiscoveryCacheServes(providerName, discoveryAfter, discoveryBefore))
+		) {
+			this.#dropRuntimeDiscoveredModels(providerName);
+		}
+	}
+
+	/**
+	 * Folds a provider's keys, transport overrides and catalog overlays again from its live
+	 * registrations, oldest first, starting where the newest source took the name over — the fold
+	 * registration itself performs, without the registrations that went. The `!command` values
+	 * recorded for the provider stay: the rows discovered so far may still carry one, and
+	 * re-running a command nobody uses any more after a 401 costs nothing.
+	 */
+	#refoldRegistrations(providerName: string, live: readonly RuntimeProviderRegistration[]): void {
+		this.#clearFoldedProviderState(providerName);
+		let start = 0;
+		let source: string | undefined;
+		for (let index = 0; index < live.length; index++) {
+			const sourceId = live[index].sourceId;
+			if (sourceId && source && sourceId !== source) start = index;
+			source = sourceId ?? source;
+		}
+		let key: RegistrationFold["key"];
+		let overlays: readonly CustomModelOverlay[] = [];
+		let override: ProviderOverride | undefined;
+		for (let index = start; index < live.length; index++) {
+			const { fold } = live[index];
+			key = fold.key ?? key;
+			if (fold.overlays.length > 0) overlays = fold.overlays;
+			if (fold.override) override = this.#mergeProviderOverride(override, fold.override);
+		}
+		if (key) {
+			this.#installProviderApiKey(providerName, key.keyConfig, { fallback: key.fallback });
+			this.#runtimeProviderApiKeys.set(providerName, key);
+		}
+		this.#runtimeModelOverlays.push(...overlays);
+		if (override) this.#runtimeProviderOverrides.set(providerName, override);
+	}
+
+	/**
+	 * Keeps the projection order and the discovery manager in step with the registrations that
+	 * declare them. Which registration's hook or fetcher runs is chosen when it runs; this only
+	 * decides whether there is anything to choose from.
+	 */
+	#syncRegistrationCallbacks(providerName: string): void {
+		const entries = this.#runtimeRegistrations.get(providerName) ?? [];
+		if (entries.some(entry => entry.projection?.oauth !== undefined)) {
+			this.#runtimeModelModifiers.add(providerName);
+		} else {
+			this.#runtimeModelModifiers.delete(providerName);
+			this.#lastModelModifierWarnings.delete(providerName);
+		}
+		const discovering = entries.findLast(entry => entry.discovery !== undefined);
+		if (!discovering) this.#runtimeModelManagers.delete(providerName);
+		else if (!this.#runtimeModelManagers.has(providerName)) {
+			this.#installRuntimeModelManager(providerName, discovering.sourceId);
+		}
+	}
+
+	/** The discovery manager for a runtime provider. It holds no registration and no fetcher: each
+	 *  pass supplies one that selects the registration that discovers (see
+	 *  {@link #discoverWithModelManager}). */
+	#installRuntimeModelManager(providerName: string, sourceId: string | undefined): void {
+		const options: ModelManagerOptions<Api> = {
+			providerId: providerName as Parameters<typeof createModelManager>[0]["providerId"],
+			staticModels: [],
+			cacheDbPath: this.#cacheDbPath,
+			cacheTtlMs: 24 * 60 * 60 * 1000,
+			dynamicModelsAuthoritative: true,
+		};
+		this.#runtimeManagerOptions.add(options);
+		this.#runtimeModelManagers.set(providerName, { options, sourceId: sourceId ?? "" });
 	}
 
 	/**
@@ -3501,20 +4241,23 @@ export class ModelRegistry {
 		for (const sourceId of typeof sourceIds === "string" ? [sourceIds] : sourceIds) {
 			unregisterCustomApis(sourceId);
 			unregisterOAuthProviders(sourceId);
-			const sourceProviders = this.#runtimeProvidersBySource.get(sourceId);
-			if (!sourceProviders || sourceProviders.size === 0) {
-				continue;
-			}
-			this.#ensureFullSnapshot();
-			this.#runtimeProvidersBySource.delete(sourceId);
-			for (const providerName of sourceProviders) {
-				if (this.#runtimeProviderSourceByName.get(providerName) !== sourceId) {
-					continue;
+			// Settling replaces or deletes only the entry being visited, which a Map iteration
+			// tolerates.
+			for (const [providerName, entries] of this.#runtimeRegistrations) {
+				const departing = entries.filter(entry => entry.sourceId === sourceId);
+				if (departing.length === 0) continue;
+				this.#ensureFullSnapshot();
+				const discoveryBefore = this.#discoveryInForce(providerName);
+				for (const registration of departing) {
+					this.authStorage.usage.removeRegistration(providerName, registration.gate);
 				}
-				this.#runtimeProviderSourceByName.delete(providerName);
-				this.#clearRuntimeProviderState(providerName);
+				this.#settleRegistrations(
+					providerName,
+					entries.filter(entry => entry.sourceId !== sourceId),
+					discoveryBefore,
+				);
+				cleared = true;
 			}
-			cleared = true;
 		}
 		if (cleared) {
 			this.#reloadStaticModels({ force: true, preserveRuntimeDiscovery: true });
@@ -3523,20 +4266,49 @@ export class ModelRegistry {
 
 	/**
 	 * Remove one extension-registered provider and restore its static models.
+	 *
+	 * `callbackOwner` is who is withdrawing it. Several sessions can hold a registration for
+	 * one provider name — a subagent that rebound its parent's extensions does — so a withdrawal
+	 * takes away only the caller's own registrations, from every registry they were installed into
+	 * (custom API, OAuth, usage), and folds what this registry holds for the provider again from
+	 * the live registrations left. By default those are every registration the caller's extension
+	 * made (`"registrant"`): at load and in any of its sessions, which is what `pi.unregisterProvider`
+	 * means. With `"session"`, only the registration that one session made, which is what its end
+	 * means: the extension's load-time registration stays. Without an owner, every registration for
+	 * the name goes, which is what a host teardown means.
 	 */
-	unregisterProvider(providerName: string): void {
-		const sourceId = this.#runtimeProviderSourceByName.get(providerName);
-		if (sourceId) {
-			const sourceProviders = this.#runtimeProvidersBySource.get(sourceId);
-			sourceProviders?.delete(providerName);
-			if (sourceProviders?.size === 0) {
-				this.#runtimeProvidersBySource.delete(sourceId);
+	unregisterProvider(
+		providerName: string,
+		callbackOwner?: ExtensionCallbackOwner,
+		scope: "registrant" | "session" = "registrant",
+	): void {
+		const entries = this.#runtimeRegistrations.get(providerName) ?? [];
+		const discoveryBefore = this.#discoveryInForce(providerName);
+		let remaining: RuntimeProviderRegistration[];
+		if (callbackOwner) {
+			const gate = providerCallGate(callbackOwner);
+			const withdrawn = (registration: RuntimeProviderRegistration): boolean =>
+				scope === "session" ? registration.gate === gate : sameRegistrant(registration.gate, gate);
+			// Each gate whose registrations go: OAuth and usage are keyed by it.
+			const gates = new Set<ProviderCallGate>([gate]);
+			for (const registration of entries) {
+				if (!withdrawn(registration)) continue;
+				this.#withdrawCustomApis(providerName, registration);
+				if (registration.gate) gates.add(registration.gate);
 			}
-			this.#runtimeProviderSourceByName.delete(providerName);
+			for (const withdrawnGate of gates) {
+				unregisterOAuthProvider(providerName, withdrawnGate);
+				this.authStorage.usage.removeRegistration(providerName, withdrawnGate);
+			}
+			remaining = entries.filter(registration => !withdrawn(registration));
+		} else {
+			for (const registration of entries) this.#withdrawCustomApis(providerName, registration);
+			unregisterOAuthProvider(providerName);
+			this.authStorage.usage.removeProvider(providerName);
+			remaining = [];
 		}
-		unregisterOAuthProvider(providerName);
 		this.#ensureFullSnapshot();
-		this.#clearRuntimeProviderState(providerName);
+		this.#settleRegistrations(providerName, remaining, discoveryBefore);
 		this.#reloadStaticModels({ force: true, preserveRuntimeDiscovery: true });
 	}
 
@@ -3560,101 +4332,258 @@ export class ModelRegistry {
 	 * If provider has streamSimple: registers a custom API streaming function.
 	 * If provider has oauth: registers OAuth provider for /login support.
 	 */
-	registerProvider(providerName: string, config: ProviderConfigInput, sourceId?: string): void {
-		if (config.streamSimple && !config.api) {
+	registerProvider(
+		providerName: string,
+		config: ProviderConfigInput,
+		sourceId?: string,
+		/** The session that registered this configuration, when an extension did. Optional here
+		 *  because a host that drains the runtime's queue itself passes only the queued name,
+		 *  configuration and source: the queued record it came from is found from that drain, and
+		 *  a registration whose record cannot be told apart is refused (see
+		 *  `QueuedProviderRegistration`). */
+		callbackOwner?: ExtensionCallbackOwner,
+	): void {
+		// Whose registration this is comes first, and costs no author code: the queued record is
+		// found by the object's identity and our own strings. A session that has already gone
+		// registers nothing, and nothing of its configuration is evaluated — a getter on it is
+		// that session's code.
+		const owner = claimProviderRegistrationOwner(providerName, config, sourceId, callbackOwner);
+		const gate = owner ? providerCallGate(owner) : undefined;
+		if (gate?.retired === true) {
+			logger.debug("Discarding a provider registration whose session has ended", {
+				provider: providerName,
+				sourceId,
+			});
+			return;
+		}
+		// One admitted read of everything registration consumes; below, only the record is used.
+		const fields = callThroughGate(gate, () => this.#admitProviderConfig(providerName, config, gate));
+		this.#applyProviderRegistration(providerName, config, fields, sourceId, gate);
+	}
+
+	/**
+	 * Reads what registration consumes of an extension's configuration — each field once, and the
+	 * data those fields hold as {@link registrationData} — and derives from those reads everything
+	 * that needs them: validation, model overlays and the `!command` values. Runs inside the
+	 * registering session's admission. Changes no registry state, so an invalid configuration
+	 * throws before anything is installed.
+	 */
+	#admitProviderConfig(
+		providerName: string,
+		config: ProviderConfigInput,
+		gate: ProviderCallGate | undefined,
+	): AdmittedProviderConfig {
+		const {
+			baseUrl: authoredBaseUrl,
+			apiKey: authoredApiKey,
+			api: authoredApi,
+			headers: authoredHeaders,
+			compat: authoredCompat,
+			remoteCompaction: authoredRemoteCompaction,
+			authHeader: authoredAuthHeader,
+			transport: authoredTransport,
+			usage,
+			oauth,
+			models: authoredModels,
+			streamSimple,
+			fetchDynamicModels,
+		} = config;
+		const data = <T>(value: T, field: string, schema: AuthorDataSchema = DATA): T =>
+			registrationData(gate, value, schema, authorDataSite(providerName, field, REGISTERING_ADVICE));
+		const baseUrl = data(authoredBaseUrl, "baseUrl");
+		const apiKey = data(authoredApiKey, "apiKey");
+		const api = data(authoredApi, "api");
+		const authHeader = data(authoredAuthHeader, "authHeader");
+		const headers = data(authoredHeaders, "headers");
+		const compat = data(authoredCompat, "compat");
+		const remoteCompaction = data(authoredRemoteCompaction, "remoteCompaction", REMOTE_COMPACTION);
+		const transport = data(authoredTransport, "transport");
+		const models = data(authoredModels, "models", MODEL_DEFINITIONS);
+		// One read, kept: `Boolean(oauth?.modifyModels)` followed by a second read at projection
+		// time let a getter answer differently and project a substitute's models.
+		const modifyModels = oauth?.modifyModels;
+		if (streamSimple && !api) {
 			throw new Error(`Provider ${providerName}: "api" is required when registering streamSimple.`);
 		}
-
 		validateProviderConfiguration(
 			providerName,
 			{
-				baseUrl: config.baseUrl,
-				headers: config.headers,
-				apiKey: config.apiKey,
-				api: config.api,
-				oauthConfigured: Boolean(config.oauth),
-				models: (config.models ?? []) as ProviderValidationModel[],
+				baseUrl,
+				headers,
+				apiKey,
+				api,
+				oauthConfigured: Boolean(oauth),
+				models: (models ?? []) as ProviderValidationModel[],
 			},
 			"runtime-register",
 		);
-
-		if (config.streamSimple && config.api) {
-			const streamSimple = config.streamSimple;
-			registerCustomApi(config.api, streamSimple, sourceId, (model, context, options) =>
-				streamSimple(model, context, options as SimpleStreamOptions),
+		const overlays: CustomModelOverlay[] = [];
+		const commandConfigs = new Set<string>();
+		this.#collectCommandConfigValues(commandConfigs, apiKey, headers);
+		for (const modelDef of models ?? []) {
+			const overlay = buildCustomModelOverlay(
+				providerName,
+				baseUrl!,
+				api,
+				headers,
+				apiKey,
+				authHeader,
+				compat,
+				undefined,
+				remoteCompaction,
+				modelDef as CustomModelDefinitionLike,
 			);
+			if (!overlay) {
+				throw new Error(`Provider ${providerName}, model ${modelDef.id}: no "api" specified.`);
+			}
+			overlays.push(overlay);
+			this.#collectCommandConfigValues(commandConfigs, undefined, modelDef.headers);
 		}
+		return {
+			baseUrl,
+			apiKey,
+			api,
+			headers,
+			compat,
+			remoteCompaction,
+			authHeader,
+			transport,
+			usage,
+			oauth,
+			streamSimple,
+			fetchDynamicModels,
+			modifyModels,
+			overlays,
+			commandConfigs,
+		};
+	}
 
-		if (config.oauth) {
-			registerOAuthProvider({
-				...config.oauth,
-				id: providerName,
-				sourceId,
-			});
+	/** This registration's entry for a provider name: the session's earlier one updated in place,
+	 *  or a new one. The same session registering the name from another source replaces its
+	 *  earlier registration outright — every entry it installed goes first. */
+	#registrationEntry(
+		providerName: string,
+		sourceId: string | undefined,
+		gate: ProviderCallGate | undefined,
+	): RuntimeProviderRegistration {
+		const entries = this.#runtimeRegistrations.get(providerName) ?? [];
+		const existing = entries.find(entry => entry.gate === gate);
+		if (existing && (existing.sourceId === undefined || sourceId === undefined || existing.sourceId === sourceId)) {
+			existing.sourceId = sourceId ?? existing.sourceId;
+			return existing;
 		}
+		if (existing) this.#withdrawRegistrationEntries(providerName, existing);
+		const registration: RuntimeProviderRegistration = {
+			gate,
+			sourceId,
+			apis: new Set(),
+			projection: undefined,
+			discovery: undefined,
+			fold: { key: undefined, overlays: [], override: undefined },
+		};
+		this.#runtimeRegistrations.set(providerName, [...entries.filter(entry => entry !== existing), registration]);
+		return registration;
+	}
 
+	#applyProviderRegistration(
+		providerName: string,
+		config: ProviderConfigInput,
+		fields: AdmittedProviderConfig,
+		sourceId: string | undefined,
+		gate: ProviderCallGate | undefined,
+	): void {
 		let sourceHandoff = false;
 		if (sourceId) {
 			this.#registeredProviderSources.add(sourceId);
 			const previousSourceId = this.#runtimeProviderSourceByName.get(providerName);
 			if (previousSourceId && previousSourceId !== sourceId) {
-				const previousProviders = this.#runtimeProvidersBySource.get(previousSourceId);
-				previousProviders?.delete(providerName);
-				if (previousProviders && previousProviders.size === 0) {
-					this.#runtimeProvidersBySource.delete(previousSourceId);
-				}
+				// Another extension takes this name over: what THIS registry folds from a
+				// provider's registrations starts again from it. Another session's registration
+				// is not this one's to remove — it stays in every registry, to be selected again
+				// once this one has gone.
 				this.#clearRuntimeProviderState(providerName);
 				sourceHandoff = true;
 			}
-			const sourceProviders = this.#runtimeProvidersBySource.get(sourceId) ?? new Set<string>();
-			sourceProviders.add(providerName);
-			this.#runtimeProvidersBySource.set(sourceId, sourceProviders);
 			this.#runtimeProviderSourceByName.set(providerName, sourceId);
 		}
+		const registration = this.#registrationEntry(providerName, sourceId, gate);
+		// Another session's projection or discovery is still there to be chosen once this one goes.
+		if (sourceHandoff) this.#syncRegistrationCallbacks(providerName);
+		// A registration that declares a catalog without discovering leaves the provider's
+		// transport to its model rows.
+		const transportOverride: ProviderOverride | undefined =
+			(fields.overlays.length === 0 || fields.fetchDynamicModels !== undefined) &&
+			(fields.baseUrl ||
+				fields.headers ||
+				fields.apiKey ||
+				fields.authHeader !== undefined ||
+				fields.remoteCompaction !== undefined ||
+				fields.transport !== undefined)
+				? {
+						baseUrl: fields.baseUrl,
+						headers: fields.headers,
+						apiKey: fields.apiKey,
+						authHeader: fields.authHeader,
+						remoteCompaction: fields.remoteCompaction,
+						transport: fields.transport,
+					}
+				: undefined;
+		// What this call folds into the provider's state, kept on its registration too, so the
+		// state can be folded again from the registrations left once one goes.
+		const { fold } = registration;
+		if (fields.apiKey) fold.key = { keyConfig: fields.apiKey, fallback: fields.oauth !== undefined };
+		if (fields.overlays.length > 0) fold.overlays = fields.overlays;
+		if (transportOverride) fold.override = this.#mergeProviderOverride(fold.override, transportOverride);
+
+		const streamSimple = fields.streamSimple;
+		if (streamSimple && fields.api) {
+			// The function captured at admission, applied on the author's configuration so its
+			// receiver is the object it was written on.
+			registerCustomApi(
+				fields.api,
+				(model, context, options) => Reflect.apply(streamSimple, config, [model, context, options]),
+				sourceId,
+				(model, context, options) =>
+					Reflect.apply(streamSimple, config, [model, context, options as SimpleStreamOptions]),
+				gate,
+			);
+			registration.apis.add(fields.api);
+		}
+
+		if (fields.oauth) {
+			// The author's object, registered as it stands. `id` and `sourceId` are this
+			// registry's own and live on the registration entry, not on the extension's block:
+			// a spread lost inherited methods and a delegating copy could not override a
+			// getter-only `id`.
+			registerOAuthProvider(fields.oauth, { id: providerName, sourceId, gate });
+		}
+
 		if (sourceHandoff) {
 			this.#reloadStaticModels({ force: true, preserveRuntimeDiscovery: true });
 		}
 
-		// Extension usage providers override built-ins/configured resolvers for the
-		// provider lifetime. #clearRuntimeProviderState removes this override when
-		// the owning extension is unregistered or replaced.
-		if (config.usage) {
-			this.authStorage.usage.setProvider(providerName, config.usage, config.apiKey);
+		// Extension usage providers override built-ins/configured resolvers for as
+		// long as the registration lasts; withdrawing it removes this entry.
+		if (fields.usage) {
+			// The author's object and its lifetime, side by side: the usage service selects the
+			// newest live registration for a provider name and asks this gate before it calls.
+			this.authStorage.usage.setProvider(providerName, fields.usage, fields.apiKey, gate);
 		}
-		if (config.apiKey) {
+		if (fields.apiKey) {
 			// A provider that owns a /login flow must not let its default key
 			// reference shadow the credential that login stores. Its apiKey is
 			// typically an env-var name; unset, it resolves to its literal text
 			// and would otherwise be sent (and passed to fetchDynamicModels)
 			// instead of the saved key.
-			const fallback = config.oauth !== undefined;
-			this.#installProviderApiKey(providerName, config.apiKey, { fallback });
+			const fallback = fields.oauth !== undefined;
+			this.#installProviderApiKey(providerName, fields.apiKey, { fallback });
 			// Persist runtime API keys so they survive #reloadStaticModels() cycles
-			this.#runtimeProviderApiKeys.set(providerName, { keyConfig: config.apiKey, fallback });
+			this.#runtimeProviderApiKeys.set(providerName, { keyConfig: fields.apiKey, fallback });
 		}
-		this.#recordRuntimeCommandConfigs(providerName, config);
+		this.#recordRuntimeCommandConfigs(providerName, fields.commandConfigs);
 
-		if (config.models && config.models.length > 0) {
-			// Build model overlays that persist across refresh() cycles
-			const newOverlays: CustomModelOverlay[] = [];
-			for (const modelDef of config.models) {
-				const overlay = buildCustomModelOverlay(
-					providerName,
-					config.baseUrl!,
-					config.api,
-					config.headers,
-					config.apiKey,
-					config.authHeader,
-					config.compat,
-					undefined,
-					config.remoteCompaction,
-					modelDef as CustomModelDefinitionLike,
-				);
-				if (!overlay) {
-					throw new Error(`Provider ${providerName}, model ${modelDef.id}: no "api" specified.`);
-				}
-				newOverlays.push(overlay);
-			}
+		if (fields.overlays.length > 0) {
+			const newOverlays = fields.overlays;
 			// Store as runtime overlays so they survive #reloadStaticModels()
 			this.#runtimeModelOverlays = this.#runtimeModelOverlays.filter(m => m.provider !== providerName);
 			this.#runtimeModelOverlays.push(...newOverlays);
@@ -3662,25 +4591,24 @@ export class ModelRegistry {
 			// A modifier is explicitly a whole-catalog transform and may throw
 			// based on another provider's models. Preserve registration-time
 			// execution/error reporting by materializing only for this case.
-			if (config.oauth?.modifyModels && !this.#hasFullSnapshot) {
+			if (fields.modifyModels && !this.#hasFullSnapshot) {
 				logger.time(`modelRegistry:materializeModifier:${providerName}`, () => this.#ensureFullSnapshot());
 			}
-			if (config.oauth?.modifyModels) {
-				this.#runtimeModelModifiers.set(providerName, config.oauth.modifyModels);
-			} else {
-				this.#runtimeModelModifiers.delete(providerName);
-			}
+			registration.projection = fields.modifyModels
+				? { oauth: fields.oauth, modifyModels: fields.modifyModels }
+				: { oauth: undefined, modifyModels: undefined };
+			this.#syncRegistrationCallbacks(providerName);
 			if (!this.#hasFullSnapshot) {
 				// Lazy compositions read runtime overlays directly. A whole-catalog
 				// modifier can affect providers beyond its owner, so discard every
 				// provider slice; an ordinary overlay only invalidates its provider.
-				if (config.oauth?.modifyModels) {
+				if (fields.modifyModels) {
 					this.#providerLookupSnapshots.clear();
 					this.#internedStaticModels.clear();
 				} else {
 					this.#invalidateProviderModelCache(providerName);
 				}
-				if (!config.fetchDynamicModels) return;
+				if (!fields.fetchDynamicModels) return;
 			}
 
 			// Update the unprojected snapshot, then rerun every whole-catalog
@@ -3703,83 +4631,17 @@ export class ModelRegistry {
 
 			this.#models = this.#finalizeModels(this.#applyRuntimeModelModifiers(this.#unprojectedModels));
 			this.#invalidateProviderModelCache(providerName);
-			if (!config.fetchDynamicModels) return;
+			if (!fields.fetchDynamicModels) return;
 		}
 
-		if (config.fetchDynamicModels) {
-			const fetcher = config.fetchDynamicModels;
-			const providerBaseUrl = config.baseUrl ?? "";
-			const providerApi = config.api;
-			const providerHeaders = config.headers;
-			const providerApiKey = config.apiKey;
-			const providerAuthHeader = config.authHeader;
-			const providerCompat = config.compat;
-			const managerOptions: ModelManagerOptions<Api> = {
-				providerId: providerName as Parameters<typeof createModelManager>[0]["providerId"],
-				staticModels: [],
-				cacheDbPath: this.#cacheDbPath,
-				cacheTtlMs: 24 * 60 * 60 * 1000,
-				dynamicModelsAuthoritative: true,
-				fetchDynamicModels: async () => {
-					const apiKey = await this.#peekApiKeyForProvider(providerName);
-					const resolvedKey = isAuthenticated(apiKey) ? apiKey : undefined;
-					const modelDefs = await withModelDiscoveryTimeout(RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS, () =>
-						fetcher(resolvedKey),
-					);
-					// Dynamic rows can carry `!command` headers that are not on the
-					// registerProvider() config; track them so F5 / 401 can evict the cache.
-					this.#recordRuntimeModelHeaderCommands(providerName, modelDefs);
-					const results: Model<Api>[] = [];
-					for (const modelDef of modelDefs) {
-						const overlay = buildCustomModelOverlay(
-							providerName,
-							modelDef.baseUrl ?? providerBaseUrl,
-							modelDef.api ?? providerApi,
-							providerHeaders,
-							providerApiKey,
-							providerAuthHeader,
-							providerCompat,
-							undefined,
-							config.remoteCompaction,
-							modelDef as CustomModelDefinitionLike,
-						);
-						if (!overlay) continue;
-						// Static registrations fail validation on this mismatch; a live row is dropped instead.
-						if (overlay.kind !== undefined && !apiServesKind(overlay.api, overlay.kind)) {
-							logger.warn("fetchDynamicModels row dropped: its api does not serve its kind", {
-								provider: providerName,
-								model: overlay.id,
-								kind: overlay.kind,
-								api: overlay.api,
-							});
-							continue;
-						}
-						results.push(finalizeCustomModel(overlay, { useDefaults: true }));
-					}
-					return results.map(toModelSpec);
-				},
-			};
-			this.#runtimeModelManagers.set(providerName, { options: managerOptions, sourceId: sourceId ?? "" });
+		if (fields.fetchDynamicModels) {
+			registration.discovery = { config, fields };
+			this.#installRuntimeModelManager(providerName, sourceId);
 			// Discovery is driven by refreshRuntimeProviders() after the drain — not
 			// here, so registration has no network side effect and callers can await.
 		}
 
-		if (
-			config.baseUrl ||
-			config.headers ||
-			config.apiKey ||
-			config.authHeader !== undefined ||
-			config.remoteCompaction !== undefined ||
-			config.transport !== undefined
-		) {
-			const transportOverride = {
-				baseUrl: config.baseUrl,
-				headers: config.headers,
-				apiKey: config.apiKey,
-				authHeader: config.authHeader,
-				remoteCompaction: config.remoteCompaction,
-				transport: config.transport,
-			};
+		if (transportOverride) {
 			const nextRuntimeOverride = this.#mergeProviderOverride(
 				this.#runtimeProviderOverrides.get(providerName),
 				transportOverride,
@@ -3796,6 +4658,143 @@ export class ModelRegistry {
 			}
 			this.#invalidateProviderModelCache(providerName);
 		}
+	}
+
+	/**
+	 * One discovery fetch for a runtime provider, for the pass `run` belongs to. The registration
+	 * that discovers is chosen after the key is read — the one in force before that await may have
+	 * gone — as the newest live one that declared discovery, and the run records it as its producer
+	 * before the fetch: whatever the pass serves from here — these rows, or the model cache when the
+	 * fetch fails or stops answering — it serves for that producer, and only while it is in force.
+	 * Its `fetchDynamicModels` is read off its configuration and called on it inside its admission.
+	 * When the fetch settles it is selected again, and its rows are read only if it is still the
+	 * discovery in force: a registration withdrawn or replaced while it ran does not answer, though
+	 * its owner may still be alive. The rows are that session's data, read inside its admission (see
+	 * {@link registrationData}). Without an answering registration the answer is `null` — "could
+	 * not fetch" — which leaves the cache as it is. An empty list would instead prune the catalog
+	 * and overwrite the cache a live registration may still serve.
+	 */
+	async #discoverRuntimeModels(providerName: string, run: RuntimeDiscoveryRun): Promise<ModelSpec<Api>[] | null> {
+		const apiKey = await this.#peekApiKeyForProvider(providerName);
+		const resolvedKey = isAuthenticated(apiKey) ? apiKey : undefined;
+		const registration = this.#discoveryInForce(providerName);
+		const discovery = registration?.discovery;
+		if (!registration || !discovery) return null;
+		const producer: RuntimeDiscoveryProducer = { registration, discovery };
+		run.producer = producer;
+		const { gate } = registration;
+		const { config, fields } = discovery;
+		const fetchDynamicModels = fields.fetchDynamicModels;
+		if (!fetchDynamicModels) return null;
+		// The function captured when this registration was admitted, applied on the author's
+		// configuration.
+		const authored = await withModelDiscoveryTimeout(RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS, () =>
+			callThroughGate(gate, () => Reflect.apply(fetchDynamicModels, config, [resolvedKey])),
+		);
+		if (!this.#runtimeDiscoveryProducerAnswers(providerName, producer)) return null;
+		const rows = callThroughGate(gate, () => {
+			const modelDefs = registrationData(
+				gate,
+				authored,
+				MODEL_DEFINITIONS,
+				authorDataSite(providerName, "fetchDynamicModels() result", RETURNING_ADVICE),
+			);
+			// Dynamic rows can carry `!command` headers that are not on the
+			// registerProvider() config; track them so F5 / 401 can evict the cache.
+			this.#recordRuntimeModelHeaderCommands(providerName, modelDefs);
+			const results: Model<Api>[] = [];
+			for (const modelDef of modelDefs) {
+				const overlay = buildCustomModelOverlay(
+					providerName,
+					modelDef.baseUrl ?? fields.baseUrl ?? "",
+					modelDef.api ?? fields.api,
+					fields.headers,
+					fields.apiKey,
+					fields.authHeader,
+					fields.compat,
+					undefined,
+					fields.remoteCompaction,
+					modelDef as CustomModelDefinitionLike,
+				);
+				if (!overlay) continue;
+				// Static registrations fail validation on this mismatch; a live row is dropped instead.
+				if (overlay.kind !== undefined && !apiServesKind(overlay.api, overlay.kind)) {
+					logger.warn("fetchDynamicModels row dropped: its api does not serve its kind", {
+						provider: providerName,
+						model: overlay.id,
+						kind: overlay.kind,
+						api: overlay.api,
+					});
+					continue;
+				}
+				results.push(finalizeCustomModel(overlay, { useDefaults: true }));
+			}
+			return results.map(toModelSpec);
+		});
+		run.fetched = true;
+		// The manager writes these rows to the model cache.
+		this.#runtimeDiscoveryWriters.set(providerName, producer);
+		return rows;
+	}
+
+	/** Whether `producer` is still the discovery in force for a provider. */
+	#runtimeDiscoveryProducerAnswers(providerName: string, producer: RuntimeDiscoveryProducer): boolean {
+		const inForce = this.#discoveryInForce(providerName);
+		return inForce === producer.registration && inForce.discovery === producer.discovery;
+	}
+
+	/**
+	 * Whether the rows the model cache holds for a runtime provider may serve `inForce`: their
+	 * writer is still registered, live and current, from the same source (see
+	 * {@link #runtimeDiscoveryWriters}). Rows written before this process are trusted, unless the
+	 * caller presumes a writer — `presumedWriter`, the discovery in force when they were served —
+	 * of another source.
+	 */
+	#runtimeDiscoveryCacheServes(
+		providerName: string,
+		inForce: RuntimeProviderRegistration,
+		presumedWriter?: RuntimeProviderRegistration,
+	): boolean {
+		const writer = this.#runtimeDiscoveryWriters.get(providerName);
+		if (!writer) return presumedWriter === undefined || presumedWriter.sourceId === inForce.sourceId;
+		const { registration } = writer;
+		return (
+			registration.sourceId === inForce.sourceId &&
+			registration.discovery === writer.discovery &&
+			registration.gate?.retired !== true &&
+			(this.#runtimeRegistrations.get(providerName)?.includes(registration) ?? false)
+		);
+	}
+
+	/** Whether what a discovery pass found for a runtime provider may still be published. A pass
+	 *  that chose a producer answers only while that producer is in force: its own fetched rows,
+	 *  or — its fetch having failed — cached rows that may serve it. A pass that chose none serves
+	 *  cached rows that may serve the registration in force now. */
+	#runtimeDiscoveryRunAnswers(providerName: string, run: RuntimeDiscoveryRun): boolean {
+		if (run.producer) {
+			if (!this.#runtimeDiscoveryProducerAnswers(providerName, run.producer)) return false;
+			if (run.fetched) return true;
+		}
+		const inForce = this.#discoveryInForce(providerName);
+		return inForce !== undefined && this.#runtimeDiscoveryCacheServes(providerName, inForce);
+	}
+
+	/** A discovery pass's built-in result without the runtime providers whose pass no longer
+	 *  answers (see {@link #runtimeDiscoveryRunAnswers}). */
+	#withoutDepartedRuntimeDiscoveries(
+		result: BuiltInDiscoveryResult,
+		runs: ReadonlyMap<string, RuntimeDiscoveryRun>,
+	): BuiltInDiscoveryResult {
+		const departed = new Set<string>();
+		for (const [providerName, run] of runs) {
+			if (!this.#runtimeDiscoveryRunAnswers(providerName, run)) departed.add(providerName);
+		}
+		if (departed.size === 0) return result;
+		return {
+			models: result.models.filter(model => !departed.has(model.provider)),
+			authoritativeProviders: new Set([...result.authoritativeProviders].filter(id => !departed.has(id))),
+			replaceRuntimeProviders: new Set([...result.replaceRuntimeProviders].filter(id => !departed.has(id))),
+		};
 	}
 
 	/**

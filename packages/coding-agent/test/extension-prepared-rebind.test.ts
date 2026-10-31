@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { setImmediate } from "node:timers/promises";
 import { bindPreparedExtensions, loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
@@ -46,8 +47,21 @@ describe("prepared extension rebinding", () => {
 		const bindings = Reflect.get(globalThis, bindingsKey) as ExtensionAPI[];
 		expect(bindings).toHaveLength(2);
 		expect(bindings[0]).not.toBe(bindings[1]);
-		expect(bindings[0]?.events).toBe(parentEventBus);
-		expect(bindings[1]?.events).toBe(childEventBus);
+		// Each binding's `pi.events` is a view of ITS OWN session's bus, bound to that session's
+		// callback owner, so a subscription made from a captured `pi` is attributed to the session
+		// that handed it out rather than to whoever happens to be on the stack. What the contract
+		// owes an extension is the routing, not the raw bus object: a handler registered through
+		// one binding hears its own session's bus and not the other's.
+		expect(bindings[0]?.events).not.toBe(bindings[1]?.events);
+		const parentSeen: string[] = [];
+		const childSeen: string[] = [];
+		bindings[0]?.events.on("rebind-probe", data => parentSeen.push(String(data)));
+		bindings[1]?.events.on("rebind-probe", data => childSeen.push(String(data)));
+		parentEventBus.emit("rebind-probe", "parent");
+		childEventBus.emit("rebind-probe", "child");
+		await setImmediate();
+		expect(parentSeen).toEqual(["parent"]);
+		expect(childSeen).toEqual(["child"]);
 		// Print cwd via Bun, not `pwd`: on Windows Git-for-Windows' pwd.exe reports MSYS paths (`/tmp/...`).
 		const printCwd = ["-e", "process.stdout.write(process.cwd())"];
 		const [parentPwd, childPwd] = await Promise.all([

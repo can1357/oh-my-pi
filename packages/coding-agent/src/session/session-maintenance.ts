@@ -77,6 +77,7 @@ import type { ModelRegistry } from "../config/model-registry";
 import { CHAT_MODEL_ROLE_IDS } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import type { ExtensionRunner, SessionBeforeCompactResult } from "../extensibility/extensions";
+import { copyHostData } from "../extensibility/extensions/boundary-data";
 import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
 import type { GoalModeState } from "../goals/state";
 import { resolveMemoryBackend } from "../memory-backend/resolve";
@@ -1128,6 +1129,20 @@ export class SessionMaintenance {
 	 * `session_compact` hook or `onComplete` throwing after the append) still
 	 * resumes the interrupted turn exactly as the direct path does.
 	 */
+	/** Owns an invocation of a callback an extension handed to `ctx.compact`. This class is the
+	 *  party that CALLS `onComplete`/`onError`, so it is the only one that knows when the call
+	 *  starts and ends; the options object the extension passed is never rewritten. What the
+	 *  callback is handed — the result the host goes on to deliver in `manual_compaction_end`, the
+	 *  host's own error — is a copy: owning the call is not copying its arguments. */
+	#ownCompactionCallback<A extends unknown[]>(
+		callback: ((...args: A) => unknown) | undefined,
+	): ((...args: A) => unknown) | undefined {
+		if (!callback) return undefined;
+		const owner = this.#host.extensionRunner?.callbackOwner;
+		if (!owner) return callback;
+		return owner.ownCallback((...args: A): unknown => callback(...(args.map(arg => copyHostData(arg)) as A)));
+	}
+
 	async compact(
 		customInstructions?: string,
 		options?: CompactOptions,
@@ -1241,7 +1256,7 @@ export class SessionMaintenance {
 					compactionAbortController,
 					markCommitted,
 				);
-				options?.onComplete?.(result);
+				this.#ownCompactionCallback(options?.onComplete)?.(result);
 				return finish(result);
 			}
 
@@ -1588,7 +1603,7 @@ export class SessionMaintenance {
 				preserveData: snapcompact.stripPreservedArchive(preserveData),
 				...(providerReplayThroughEntryId ? { providerReplayThroughEntryId } : {}),
 			};
-			options?.onComplete?.(compactionResult);
+			this.#ownCompactionCallback(options?.onComplete)?.(compactionResult);
 			return finish(compactionResult);
 		} catch (error) {
 			manualCompactionError = error;
@@ -1623,7 +1638,10 @@ export class SessionMaintenance {
 					throw fallbackError;
 				}
 			}
-			options?.onError?.(err);
+			// Owned at the invoker: this is the party that CALLS `onError`, and the continuation it
+			// returns outlives the command that handed it over. The options object is left exactly
+			// as the extension passed it — only this call is wrapped.
+			this.#ownCompactionCallback(options?.onError)?.(err);
 			throw error;
 		} finally {
 			if (ownsCompactionController) {

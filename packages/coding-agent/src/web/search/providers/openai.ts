@@ -216,7 +216,7 @@ function readResponse(payload: unknown, modelId: string, resultLimit: number): S
 
 /** Execute API-billed web search through the selected OpenAI Responses model. */
 export async function searchOpenAIResponses(params: SearchParams): Promise<SearchResponse> {
-	if (params.modelRegistry.authStorage.keys.source(params.model.provider)?.kind === "oauth") {
+	if (params.modelRegistry.credentialProvenance(params.model.provider) === "oauth") {
 		throw new SearchProviderError(
 			"openai",
 			`OpenAI API web search requires API-key credentials; OAuth credentials for "${params.model.provider}" are not supported.`,

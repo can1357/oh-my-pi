@@ -1407,12 +1407,18 @@ function streamSimpleRequest<TApi extends Api>(
 	}
 
 	// Check custom API registry (extension-provided APIs)
-	const customApiProvider = getCustomApi(model.api);
-	if (customApiProvider) {
+	if (getCustomApi(model.api)) {
 		return withThinkingLoopGuard(model, requestOptions, opts =>
-			withProviderInFlightLimit(model, opts, limited =>
-				customApiProvider.streamSimple(model, context, { ...opts, waitForTerminalDrain: limited }),
-			),
+			withProviderInFlightLimit(model, opts, limited => {
+				// Selected again at dispatch, which can follow a wait for an in-flight slot: the
+				// registration found above may have retired since, and then an earlier live one
+				// answers. With none live the API has no handler, as `streamDispatch` reports.
+				const customApiProvider = getCustomApi(model.api);
+				if (!customApiProvider) {
+					throw new AIError.ConfigurationError(`Unhandled API: ${model.api}`);
+				}
+				return customApiProvider.streamSimple(model, context, { ...opts, waitForTerminalDrain: limited });
+			}),
 		);
 	}
 

@@ -6,7 +6,7 @@
  * validators see the same JSON Schema dialect.
  */
 
-import type { Type } from "@oh-my-pi/omptype";
+import type { ToJsonSchemaOptions, Type } from "@oh-my-pi/omptype";
 import { isRecord, structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import type { Tool, TSchema } from "../../types";
 import { upgradeJsonSchemaTo202012 } from "./draft";
@@ -577,11 +577,22 @@ function pruneArkUndefinedUnionBranches(node: unknown): void {
 }
 
 /**
+ * The options a callable schema's `toJsonSchema` is asked for its wire schema with: draft 2020-12,
+ * a node JSON Schema cannot express kept as its structural base. A new object on every call, never
+ * a shared one: `toJsonSchema` may be an extension's own code, and an object it is handed is its
+ * to keep — a getter or a replaced `fallback` it leaves on a shared object would answer for the
+ * next schema asked, which may be another session's.
+ */
+export function wireJsonSchemaOptions(): ToJsonSchemaOptions {
+	return { target: "draft-2020-12", fallback: context => context.base };
+}
+
+/**
  * Convert an ArkType schema into the JSON Schema shape providers consume.
  */
 export function arkToWireSchema(schema: Type): Record<string, unknown> {
 	return stamp(schema, kArkWireSchema, s => {
-		const raw = s.toJsonSchema({ target: "draft-2020-12", fallback: ctx => ctx.base }) as Record<string, unknown>;
+		const raw = s.toJsonSchema(wireJsonSchemaOptions()) as Record<string, unknown>;
 		delete raw.$schema;
 		pruneArkUndefinedUnionBranches(raw);
 		const upgraded = postProcessJsonSchema(upgradeJsonSchemaTo202012(raw) as Record<string, unknown>);

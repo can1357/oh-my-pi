@@ -1,7 +1,7 @@
 import { type Api, type AuthStorage, type Model, withAuth } from "@oh-my-pi/pi-ai";
 import { resolveXaiBaseUrl, XAI_DEFAULT_BASE_URL } from "@oh-my-pi/pi-ai/providers/xai-base-url";
 import { buildModelProviderPriorityRank } from "@oh-my-pi/pi-catalog/identity";
-import type { ModelRegistry } from "../../../config/model-registry";
+import type { SearchModelRegistry } from "./base";
 import { pickDefaultAvailableModel, resolveRoleChain } from "../../../config/model-resolver";
 import { roleCandidatePool } from "../../../config/model-roles";
 import { cfgModelProviderOrder } from "../../../config/model-settings";
@@ -172,7 +172,7 @@ const XAI_PROVIDERS: ReadonlySet<string> = new Set(["xai", "xai-oauth"]);
  * Whether X search can run: an xAI-grounded model with credentials exists.
  * Gates the X operators in the `web_search` tool description.
  */
-export function xSearchAvailable(modelRegistry: ModelRegistry): boolean {
+export function xSearchAvailable(modelRegistry: SearchModelRegistry): boolean {
 	return modelRegistry.getAvailableForProviders(XAI_PROVIDERS).some(model => model.webSearch === "xai");
 }
 
@@ -540,12 +540,14 @@ export async function requestXAIResponses(
 		throw new SearchProviderError("xai", `Selected model ${model.provider}/${model.id} is not an xAI model`, 400);
 	}
 	const customEndpoint = model.baseUrl.replace(/\/+$/, "") !== XAI_DEFAULT_BASE_URL;
-	const credentialOrigin = request.authStorage.keys.source(model.provider);
+	// The provenance guard and `modelRegistry.resolver` below must consult the same storage, as the
+	// Codex provider's does: `request.authStorage` may be a divergent caller handle.
+	const credentialOrigin = modelRegistry.credentialProvenance(model.provider);
 	const hasCommandBackedKey = modelRegistry.hasCommandBackedApiKey(model.provider);
 	const officialOAuthCredential =
 		model.provider === "xai-oauth" &&
 		!hasCommandBackedKey &&
-		(credentialOrigin?.kind === "oauth" || credentialOrigin?.kind === "env");
+		(credentialOrigin === "oauth" || credentialOrigin === "env");
 	if (customEndpoint && officialOAuthCredential) {
 		throw new SearchProviderError(
 			"xai",
@@ -571,7 +573,7 @@ export async function requestXAIResponses(
 		},
 	);
 	const authMode =
-		model.provider === "xai-oauth" && (credentialOrigin?.kind === "oauth" || credentialOrigin?.kind === "env")
+		model.provider === "xai-oauth" && (credentialOrigin === "oauth" || credentialOrigin === "env")
 			? "oauth"
 			: "api_key";
 	return { response, authMode };
@@ -597,7 +599,7 @@ export function rankXAIProviders<T>(items: readonly T[], modelOf: (item: T) => M
  * cheaper `webSearchModel`, ranked by {@link rankXAIProviders}. Empty without
  * xAI credentials.
  */
-export function xaiModelChain(modelRegistry: ModelRegistry, settings: Settings): Model<Api>[] {
+export function xaiModelChain(modelRegistry: SearchModelRegistry, settings: Settings): Model<Api>[] {
 	const pool = roleCandidatePool("web", settings, modelRegistry);
 	const chain = resolveRoleChain("web", settings, pool)
 		.map(candidate => candidate.model)

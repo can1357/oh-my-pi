@@ -1176,7 +1176,9 @@ export async function loadCliExtensionProviders(
 	modelRegistry.syncExtensionSources(activeSources);
 	modelRegistry.clearSourceRegistrations(new Set(activeSources));
 	for (const { name, config, sourceId } of extensionsResult.runtime.pendingProviderRegistrations) {
-		modelRegistry.registerProvider(name, config, sourceId);
+		// The runtime is this session's callback owner; ModelRegistry calls `oauth.login` and
+		// `fetchDynamicModels` and owns those invocations.
+		modelRegistry.registerProvider(name, config, sourceId, extensionsResult.runtime);
 	}
 	extensionsResult.runtime.pendingProviderRegistrations = [];
 	if (options.discoverModels !== false) await modelRegistry.refreshRuntimeProviders();
@@ -1394,15 +1396,26 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 
 // Internal Helpers
 
-function createCustomToolContext(ctx: ExtensionContext): CustomToolContext {
+/**
+ * What a custom tool is handed: the session's services as an extension's context hands them. A tool
+ * the host hands in as an MCP tool (`mcpTools`, `refreshMCPTools`) also gets the session's
+ * `Settings` — the MCP bridge resolves internal URLs in its arguments by them, and a host tool's
+ * cache follows them — on every pass, the first included (`SessionTools`'s manager-tool context
+ * hands the same after a refresh). A tool handed in as a custom tool does not.
+ */
+function createCustomToolContext(ctx: ExtensionContext, settings?: Settings): CustomToolContext {
 	return {
 		sessionManager: ctx.sessionManager,
 		modelRegistry: ctx.modelRegistry,
-		model: ctx.model,
+		// Read when asked for, as `ctx.model` is: a tool that switched models sees the one it chose.
+		get model() {
+			return ctx.model;
+		},
 		isIdle: ctx.isIdle,
 		hasQueuedMessages: ctx.hasPendingMessages,
 		abort: ctx.abort,
 		localProtocolOptions: ctx.localProtocolOptions,
+		...(settings !== undefined && { settings }),
 	};
 }
 
@@ -1446,7 +1459,7 @@ function registerEvalCleanup(): void {
 	postmortem.register("python-cleanup", disposeAllKernelSessions);
 }
 
-export function customToolToDefinition(tool: CustomTool, sourcePath?: string): ToolDefinition {
+export function customToolToDefinition(tool: CustomTool, sourcePath?: string, mcpSettings?: Settings): ToolDefinition {
 	const definition: ToolDefinition & { [TOOL_DEFINITION_MARKER]: true } = {
 		name: tool.name,
 		label: tool.label,
@@ -1474,8 +1487,10 @@ export function customToolToDefinition(tool: CustomTool, sourcePath?: string): T
 		legacyName: tool.legacyName,
 		sourcePath,
 		execute: (toolCallId, params, signal, onUpdate, ctx) =>
-			tool.execute(toolCallId, params, onUpdate, createCustomToolContext(ctx), signal),
-		onSession: tool.onSession ? (event, ctx) => tool.onSession?.(event, createCustomToolContext(ctx)) : undefined,
+			tool.execute(toolCallId, params, onUpdate, createCustomToolContext(ctx, mcpSettings), signal),
+		onSession: tool.onSession
+			? (event, ctx) => tool.onSession?.(event, createCustomToolContext(ctx, mcpSettings))
+			: undefined,
 		renderCall: tool.renderCall,
 		renderResult: tool.renderResult
 			? (result, options, theme): Component => {
@@ -2911,7 +2926,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 		if (extensionsResult.runtime.pendingProviderRegistrations.length > 0) {
 			for (const { name, config, sourceId } of extensionsResult.runtime.pendingProviderRegistrations) {
-				modelRegistry.registerProvider(name, config, sourceId);
+				modelRegistry.registerProvider(name, config, sourceId, extensionsResult.runtime);
 			}
 			extensionsResult.runtime.pendingProviderRegistrations = [];
 		}
@@ -3632,10 +3647,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		initialMcpManagerTools.push(...sdkMcpTools);
 		const sdkCustomTools = [...sdkMcpTools, ...explicitCustomTools];
 		const sdkCustomToolNames = new Set(sdkCustomTools.map(tool => tool.name));
+		const sdkMcpToolSet = new Set<CustomTool | ToolDefinition>(sdkMcpTools);
 		const allCustomTools = [
 			...registeredTools,
 			...sdkCustomTools.map(tool => {
-				const definition = isCustomTool(tool) ? customToolToDefinition(tool) : tool;
+				// A tool handed in as an MCP tool gets the context a refresh would hand it.
+				const definition = isCustomTool(tool)
+					? customToolToDefinition(tool, undefined, sdkMcpToolSet.has(tool) ? settings : undefined)
+					: tool;
 				return { definition, extensionPath: "<sdk>", sourceInfo: extensionToolSourceInfo(definition, "<sdk>") };
 			}),
 		];
@@ -5720,7 +5739,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				if (session.isDisposed) return;
 				// Providers queue until the runner is initialized; drain them as session creation does.
 				for (const { name, config, sourceId } of runtime.pendingProviderRegistrations.splice(0)) {
-					modelRegistry.registerProvider(name, config, sourceId);
+					modelRegistry.registerProvider(name, config, sourceId, runtime);
 				}
 				forwardedPreparedExtensions.push(...(loaded.preparedExtensions ?? []));
 				extensionPaths.push(...loaded.extensions.map(extension => extension.resolvedPath));

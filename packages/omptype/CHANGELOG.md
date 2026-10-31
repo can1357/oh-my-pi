@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the internal `OmpErrors.rendersAsAlternatives`, so a copy of a set of failures can read as the original does when its branches are alternatives ("A or B") ([#17402](https://github.com/can1357/oh-my-pi/pull/17402) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.13.3] - 2026-10-28
 
 ### Changed

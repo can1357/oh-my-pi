@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- Exported the `InputListener` and `InputListenerResult` types `TUI.addInputListener` takes ([#17402](https://github.com/can1357/oh-my-pi/pull/17402) by [@sjawhar](https://github.com/sjawhar))
+- Added `whenInputScopeGone`, `hasInputScope` and `pinInputScope` to `tools/renderer-scope`, and an optional `pin()` to `ToolRendererScope`: a host registers what it owes once a renderer scope has gone (an extension's overlays), settled by the TUI's retirement sweep before any component is retired, drawn or handed a key; bindings, obligations, a component `SafeToolRendererComponent` mounts and a provider `scopedAutocompleteProvider` wraps belong to the session the scope serves when they are made, so a scope whose owner already serves the next session does not revive them ([#17402](https://github.com/can1357/oh-my-pi/pull/17402) by [@sjawhar](https://github.com/sjawhar))
+
+### Fixed
+
+- Fixed a key reserved by a component's `capturesInput` reaching its `handleInput` after that component closed its dialog, ended its extension's session or moved focus while reserving it; the key is consumed and handled by nothing ([#17402](https://github.com/can1357/oh-my-pi/pull/17402) by [@sjawhar](https://github.com/sjawhar))
+- Fixed a focus target an extension's overlay owns (`ownsOverlayFocusTarget`) taking input outside that extension's session; it now takes input inside it and none once it has gone, and the overlay is asked about ownership inside it too. An asynchronous `handleInput` is now work its session owns until it ends ([#17402](https://github.com/can1357/oh-my-pi/pull/17402) by [@sjawhar](https://github.com/sjawhar))
+- Fixed a native edit typed into an extension's editor being lost when the frame that swapped the host's editor in arrived first: the edit now reaches the host's editor ([#17402](https://github.com/can1357/oh-my-pi/pull/17402) by [@sjawhar](https://github.com/sjawhar))
+- Fixed focus landing on, or being left on, an extension's component whose session has gone — an outer overlay a closing inner one handed focus back to, a component focused through a gone session's replacement: `TUI.setFocus` and the retirement sweep send it to what the host put in that component's place, through a chain of them, or nowhere, and an overlay holding such a component comes down whichever session showed it. A focus target an extension's overlay owns now retires with the overlay and goes where the overlay went, and a component a gone session left behind takes input in the next session that binds it rather than staying retired ([#17402](https://github.com/can1357/oh-my-pi/pull/17402) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.14.1] - 2026-10-31
 
 ### Added

@@ -1,5 +1,11 @@
 import type { Provider } from "../types";
-import { isWithinUsageReserve, resolveUsedFraction } from "../usage";
+import {
+	copyUsageReport,
+	handUsageCredential,
+	handUsageLogger,
+	isWithinUsageReserve,
+	resolveUsedFraction,
+} from "../usage";
 import type {
 	CredentialRankingContext,
 	UsageCredential,
@@ -25,13 +31,61 @@ import type {
 	ModelUsageAccountHealth,
 	ModelUsageHealth,
 	ModelUsageHealthOptions,
+	UsageProviderRegistration,
 } from "./types";
+import { AdmittedSignal, callThroughGate } from "./provider-gate";
 import { buildRefreshableOauthCredential, mergeRefreshedUsageCredential } from "./usage";
 import type { UsageService } from "./usage";
 import { REMOTE_REFRESH_SENTINEL } from "./types";
 import { oauthUsageRequest, usageCacheIdentity, usageRequest } from "./usage-cache";
 import type { UsageRequestDescriptor } from "./usage-cache";
 import { isUsageLimitExhausted, reserveUsageLimits, usageReportMetadataValue } from "./usage-report";
+
+/** Why a usage probe declined to contact upstream for a credential. */
+type DeclinedUsageProbe = "unsupported" | "unvalidated";
+
+/**
+ * Runs one credential's usage probe through the registration's gate: the `supports` and
+ * `validatesCredentials` reads, then `fetchUsage`. Every read of the provider is its author's
+ * code — any of them may be a getter — so all of it runs as the owner's work, each property is
+ * read once and the value read is the one used, and each method is called with the provider as
+ * its receiver, so a host provider reading its own private state works. `fetchUsage` is handed
+ * `signal`'s admitted signal in place of the probe's, which the caller releases once the probe is
+ * over, and a session's report is copied by its schema where it comes back, still as that work:
+ * the caller reads only the copy. A throw, including the gate's refusal once the owner has retired
+ * and a report holding a function, fails this probe only: the caller records it as one
+ * credential's `ok: false`.
+ *
+ * A session's provider is handed its own copies of what the caller keeps: the credential, whose
+ * bearer the completion probe uses next, and the context, which is one object `check()` hands to
+ * every row — an assignment to it would otherwise reach the next row's provider, another
+ * session's or the host's own. A host provider is handed the caller's objects, as it always was.
+ */
+function probeUsage(
+	registration: UsageProviderRegistration,
+	request: UsageRequestDescriptor,
+	params: UsageFetchParams,
+	ctx: UsageFetchContext,
+	signal: AdmittedSignal,
+): Promise<DeclinedUsageProbe | UsageReport | null> {
+	return callThroughGate(registration.gate, async () => {
+		const gated = registration.gate !== undefined;
+		const provider = registration.provider;
+		const supports = provider.supports;
+		if (supports) {
+			const handedRequest = gated
+				? { ...request, credential: handUsageCredential(request.credential, request.provider) }
+				: request;
+			if (!Reflect.apply(supports, provider, [handedRequest])) return "unsupported";
+		}
+		if (provider.validatesCredentials === false) return "unvalidated";
+		const handed: UsageFetchParams = { ...params, signal: signal.admit() };
+		if (gated) handed.credential = handUsageCredential(params.credential, request.provider);
+		const context = gated ? { ...ctx, logger: ctx.logger && handUsageLogger(ctx.logger) } : ctx;
+		const report = await provider.fetchUsage(handed, context);
+		return gated ? copyUsageReport(report, request.provider, "fetchUsage") : report;
+	});
+}
 
 /** Dependencies for model pool health and stored credential probes. */
 export interface CredentialHealthDeps {
@@ -373,30 +427,35 @@ export class CredentialHealth implements HealthApi {
 				continue;
 			}
 
-			const providerImpl = this.#deps.usage.providerFor(row.provider as Provider);
-			if (!providerImpl) {
+			// Selected after the refresh, so an owner that retired while it ran no longer answers.
+			const registration = this.#deps.usage.providerEntryFor(row.provider as Provider);
+			if (!registration) {
 				base.reason = `no usage probe configured for provider ${row.provider}`;
-			} else if (providerImpl.supports && !providerImpl.supports(initialRequest)) {
-				base.reason = `usage probe does not support ${cred.type} credentials for ${row.provider}`;
-			} else if (providerImpl.validatesCredentials === false) {
-				base.reason = `usage probe for ${row.provider} does not validate credentials`;
 			} else {
+				// The probe's signal follows the provider's work only until the probe is over.
+				const signal = new AdmittedSignal(registration.gate, params.signal);
 				try {
-					const report = await providerImpl.fetchUsage(params, ctx);
-					if (report === null) {
+					const outcome = await probeUsage(registration, initialRequest, params, ctx, signal);
+					if (outcome === "unsupported") {
+						base.reason = `usage probe does not support ${cred.type} credentials for ${row.provider}`;
+					} else if (outcome === "unvalidated") {
+						base.reason = `usage probe for ${row.provider} does not validate credentials`;
+					} else if (outcome === null) {
 						base.reason = "usage probe returned no data for this credential";
 					} else {
 						base.ok = true;
-						const accountId = usageReportMetadataValue(report, "accountId");
-						const email = usageReportMetadataValue(report, "email");
+						const accountId = usageReportMetadataValue(outcome, "accountId");
+						const email = usageReportMetadataValue(outcome, "email");
 						if (accountId) base.accountId = accountId;
 						if (email) base.email = email;
-						const { raw: _raw, ...trimmed } = report;
+						const { raw: _raw, ...trimmed } = outcome;
 						base.report = trimmed;
 					}
 				} catch (error) {
 					base.ok = false;
 					base.reason = error instanceof Error ? error.message : String(error);
+				} finally {
+					signal.release();
 				}
 			}
 

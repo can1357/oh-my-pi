@@ -20,6 +20,7 @@ import type {
 	UsageResetCredit,
 	UsageResetCredits,
 } from "../usage";
+import type { GatedRegistration, ProviderCallGate } from "./provider-gate";
 
 /** Default remaining quota protected for accounts without an explicit policy override. */
 export const DEFAULT_USAGE_RESERVE_PCT = 10;
@@ -1285,6 +1286,13 @@ export interface UsageApi {
 	 */
 	providerFor(provider: Provider): UsageProvider | undefined;
 	/**
+	 * The registration answering for `provider`: the newest runtime registration whose owner is
+	 * still live, else the configured/default resolver's provider with no gate. Callers that invoke
+	 * the provider go through this so each call runs through the registration's
+	 * {@link UsageProviderRegistration.gate | gate}.
+	 */
+	providerEntryFor(provider: Provider): UsageProviderRegistration | undefined;
+	/**
 	 * Return model ids whose live reports map to a quantitative usage scope.
 	 * Provider strategies supply model/tier mapping when available; otherwise
 	 * only explicitly matching model ids and account-wide shared limits count.
@@ -1295,11 +1303,34 @@ export interface UsageApi {
 	 * Install a runtime usage provider override (not persisted to disk).
 	 *
 	 * Runtime overrides are checked before the configured resolver, including its
-	 * built-in fallback. Removing the override restores that resolver unchanged.
+	 * built-in fallback. Several owners may register the same provider: the newest
+	 * whose `gate` is not retired answers, so a retired owner's registration stops
+	 * being chosen and an earlier one answers again. Registering again with the same
+	 * `gate` replaces that owner's registration in place.
 	 */
-	setProvider(provider: Provider, usageProvider: UsageProvider, apiKey?: string): void;
-	/** Remove a runtime usage provider override and restore configured/default resolution. */
-	removeProvider(provider: Provider): void;
+	setProvider(provider: Provider, usageProvider: UsageProvider, apiKey?: string, gate?: ProviderCallGate): void;
+	/**
+	 * Remove runtime usage registrations for `provider`: the one `gate` owns when a gate is
+	 * given, every one of them otherwise — what a host teardown means.
+	 */
+	removeProvider(provider: Provider, gate?: ProviderCallGate): void;
+	/**
+	 * Remove exactly one runtime registration for `provider`: the one `gate` owns,
+	 * or the host's own (ungated) one when `gate` is undefined. Every other
+	 * registration stays to be selected.
+	 */
+	removeRegistration(provider: Provider, gate: ProviderCallGate | undefined): void;
+}
+
+/**
+ * One runtime usage-provider registration. The provider is kept exactly as its author supplied
+ * it and is always called as the receiver of its own methods; `gate` admits each call (and each
+ * read of an authored property) as its owning session's work. No gate means the host's own.
+ */
+export interface UsageProviderRegistration extends GatedRegistration {
+	readonly provider: UsageProvider;
+	/** Usage-probe key configuration supplied with the registration, used when no credential is stored. */
+	readonly apiKey?: string;
 }
 
 /** Credential and model-level health probes. */

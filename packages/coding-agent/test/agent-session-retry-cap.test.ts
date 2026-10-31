@@ -4040,6 +4040,8 @@ describe("AgentSession retry delay cap", () => {
 				{ content: ["should not be reached after dispose"] },
 			],
 		});
+		const streamEntered = Promise.withResolvers<void>();
+		const releaseStream = Promise.withResolvers<void>();
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
 			initialState: {
@@ -4048,7 +4050,11 @@ describe("AgentSession retry delay cap", () => {
 				tools: [],
 				messages: [],
 			},
-			streamFn: mock.stream,
+			streamFn: async (...args) => {
+				streamEntered.resolve();
+				await releaseStream.promise;
+				return mock.stream(...args);
+			},
 		});
 
 		const settings = Settings.isolated({
@@ -4072,10 +4078,15 @@ describe("AgentSession retry delay cap", () => {
 			if (event.type === "auto_retry_start") retryStartEvents.push(event);
 		});
 
-		// Enter the disposing window before the empty abort lands. Without the
-		// #isDisposed guard this prompt would hang on an orphaned retry promise.
+		// Disposal lands on a run that is already live: the abort it causes reaches an
+		// in-flight turn, and that disposal-driven empty abort must not schedule a retry.
+		// Whether a prompt submitted after beginDispose() may start a turn at all is a
+		// separate contract, decided in pull request #17457.
+		const prompt = session.prompt("Trigger empty aborted turn while disposing");
+		await streamEntered.promise;
 		session.beginDispose();
-		await session.prompt("Trigger empty aborted turn while disposing");
+		releaseStream.resolve();
+		await prompt;
 		await session.waitForIdle();
 
 		expect(retryStartEvents).toHaveLength(0);
