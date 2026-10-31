@@ -192,7 +192,8 @@ mod tests {
 		assert!(decode_base64("Zm=8").is_none());
 		assert!(decode_base64("Zm8=Zm8=").is_none());
 		assert!(decode_base64("Zm 8").is_none());
-		// Non-zero pad bits: lenient decoders accept these, canonical ones must not.
+		// Non-zero pad bits: lenient decoders accept these, canonical ones must
+		// not.
 		assert!(decode_base64("Zm9=").is_none());
 		assert!(decode_base64("Zh==").is_none());
 	}
