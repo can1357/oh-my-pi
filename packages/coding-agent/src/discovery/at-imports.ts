@@ -23,7 +23,7 @@
  *   current import chain counts as a cycle. Output therefore grows with
  *   fan-out raised to the depth: a file that imports the next one N times
  *   per level yields up to N^{@link MAX_AT_IMPORT_DEPTH} copies of the
- *   deepest file, and only the depth cap bounds it.
+ *   deepest file. A shared expansion budget also caps total file reads.
  * - When the referenced file cannot be read, the original `@token` is
  *   left untouched and a debug log is emitted.
  *
@@ -36,6 +36,9 @@ import { readFile } from "../capability/fs";
 
 /** Maximum number of recursive `@`-import hops. Matches Claude Code's documented cap. */
 export const MAX_AT_IMPORT_DEPTH = 5;
+
+/** Maximum number of successfully expanded imports in one top-level document. */
+export const MAX_AT_IMPORT_EXPANSIONS = 256;
 
 /**
  * Matches a candidate `@import` token: a leading boundary (start-of-string
@@ -78,7 +81,8 @@ export async function expandAtImports(
 	const home = options.home ?? os.homedir();
 	const absoluteSource = path.resolve(filePath);
 	const chain: string[] = [absoluteSource];
-	return await expand(content, path.dirname(absoluteSource), 0, maxDepth, home, chain);
+	const budget = { remaining: MAX_AT_IMPORT_EXPANSIONS };
+	return await expand(content, path.dirname(absoluteSource), 0, maxDepth, home, chain, budget);
 }
 
 async function expand(
@@ -88,6 +92,7 @@ async function expand(
 	maxDepth: number,
 	home: string,
 	chain: readonly string[],
+	budget: { remaining: number },
 ): Promise<string> {
 	if (depth >= maxDepth) return content;
 
@@ -98,7 +103,7 @@ async function expand(
 			out.push(segment.text);
 			continue;
 		}
-		out.push(await expandTextSegment(segment.text, baseDir, depth, maxDepth, home, chain));
+		out.push(await expandTextSegment(segment.text, baseDir, depth, maxDepth, home, chain, budget));
 	}
 	return out.join("");
 }
@@ -110,10 +115,11 @@ async function expandTextSegment(
 	maxDepth: number,
 	home: string,
 	chain: readonly string[],
+	budget: { remaining: number },
 ): Promise<string> {
 	const lines = text.split("\n");
 	for (let i = 0; i < lines.length; i++) {
-		lines[i] = await expandLine(lines[i], baseDir, depth, maxDepth, home, chain);
+		lines[i] = await expandLine(lines[i], baseDir, depth, maxDepth, home, chain, budget);
 	}
 	return lines.join("\n");
 }
@@ -125,6 +131,7 @@ async function expandLine(
 	maxDepth: number,
 	home: string,
 	chain: readonly string[],
+	budget: { remaining: number },
 ): Promise<string> {
 	if (!line.includes("@")) return line;
 
@@ -152,7 +159,7 @@ async function expandLine(
 	let cursor = 0;
 	for (const m of matches) {
 		parts.push(line.slice(cursor, m.start));
-		const expanded = await resolveAndExpand(m.importPath, baseDir, depth, maxDepth, home, chain);
+		const expanded = await resolveAndExpand(m.importPath, baseDir, depth, maxDepth, home, chain, budget);
 		parts.push(expanded ?? line.slice(m.start, m.end));
 		cursor = m.end;
 	}
@@ -167,7 +174,12 @@ async function resolveAndExpand(
 	maxDepth: number,
 	home: string,
 	chain: readonly string[],
+	budget: { remaining: number },
 ): Promise<string | null> {
+	if (budget.remaining <= 0) {
+		logger.debug("@-import: expansion budget exhausted", { remaining: budget.remaining });
+		return null;
+	}
 	const resolved = resolveImportPath(importPath, baseDir, home);
 	// Only an ancestor in the current import chain counts as a cycle. The
 	// same file imported twice from unrelated places is expanded twice.
@@ -182,7 +194,8 @@ async function resolveAndExpand(
 		return null;
 	}
 
-	return await expand(content, path.dirname(resolved), depth + 1, maxDepth, home, [...chain, resolved]);
+	budget.remaining--;
+	return await expand(content, path.dirname(resolved), depth + 1, maxDepth, home, [...chain, resolved], budget);
 }
 
 function resolveImportPath(importPath: string, baseDir: string, home: string): string {
