@@ -1,27 +1,18 @@
 import { retryResetTimezoneOffsetFor } from "@oh-my-pi/pi-catalog/compat/behavior";
-import { extractRetryHint, longestRetryHint } from "@oh-my-pi/pi-utils";
+import { longestRetryHint } from "@oh-my-pi/pi-utils";
 
 export type HeadersLike = Headers | Record<string, string | undefined> | undefined | null;
 
-/** Extracts retry timing using the provider's catalog-declared timestamp timezone. */
-export function extractProviderRetryHint(
-	provider: string | undefined,
-	message: string | undefined,
-): number | undefined {
-	const naiveResetTimezoneOffset = provider === undefined ? undefined : retryResetTimezoneOffsetFor(provider);
-	return extractRetryHint(undefined, message, { naiveResetTimezoneOffset });
-}
-
 /**
- * The longest wait `message` names, across every occurrence of every hint
- * phrase — {@link longestRetryHint} with the provider's catalog-declared
- * timestamp timezone. `retry-after-ms=200 retry-after-ms=9000` is 9 s here,
- * where {@link extractProviderRetryHint} stops at the first occurrence and
- * reads 200 ms. A caller that decides whether a retry can wait at all — turn
- * recovery's held retry, which declines a hint longer than its window — needs
- * this reading: a retry inside a window the server said is closed fails again.
+ * The retry wait `message` names, read in the provider's catalog-declared
+ * timestamp timezone: the longest across every form and every occurrence of
+ * each ({@link longestRetryHint}). `retry-after-ms=200 retry-after-ms=9000` is
+ * 9 s, whatever the order. Every caller decides how long a route or credential
+ * stays closed — a credential block, a usage-limit mark, turn recovery's held
+ * retry, which declines a hint longer than its window — and a retry inside a
+ * window the server said is closed fails again.
  */
-export function longestProviderRetryHint(
+export function extractProviderRetryHint(
 	provider: string | undefined,
 	message: string | undefined,
 ): number | undefined {

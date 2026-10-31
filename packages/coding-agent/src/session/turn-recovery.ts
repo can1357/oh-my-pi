@@ -20,7 +20,7 @@ import type {
 import { calculateRateLimitBackoffMs, parseRateLimitReason } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { shouldDropTruncatedThinkingOnlyAssistant } from "@oh-my-pi/pi-ai/providers/transform-messages";
-import { longestProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
+import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { fallbackCreditTargets } from "@oh-my-pi/pi-catalog/compat/fallback-credit";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
@@ -2705,7 +2705,7 @@ export class TurnRecovery {
 		// occurrence of each: `retry-after-ms=200 retry-after-ms=9000` is 9 s, so
 		// a held retry declines it rather than resending inside a window the
 		// server said is closed.
-		return longestProviderRetryHint(this.#host.model()?.provider, errorMessage);
+		return extractProviderRetryHint(this.#host.model()?.provider, errorMessage);
 	}
 
 	/**
