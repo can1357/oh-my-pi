@@ -846,7 +846,10 @@ export function buildOpenAiNativeHistory(
 		msgIndex++;
 	}
 
-	return stripOpenAIResponsesOutputOnlyStatusesForReplay(hoistInterleavedResponsesToolBatchMessages(input));
+	const replay = stripOpenAIResponsesOutputOnlyStatusesForReplay(hoistInterleavedResponsesToolBatchMessages(input));
+	// Backend-only metadata on captured output items; Codex rejects it as an unknown input parameter.
+	if (!replay.some(item => Object.hasOwn(item, "internal_chat_message_metadata_passthrough"))) return replay;
+	return replay.map(({ internal_chat_message_metadata_passthrough: _internalMetadata, ...item }) => item);
 }
 
 // ============================================================================
