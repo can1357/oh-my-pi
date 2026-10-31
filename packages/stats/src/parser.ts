@@ -416,6 +416,13 @@ function sanitizeToolName(name: string): string | null {
 	return candidate.length > 0 ? candidate : null;
 }
 
+/** A call the agent loop skipped carries a synthetic `executed: false` result: it never ran, so it is no tool error. */
+function isToolExecutionError(message: { isError?: unknown; details?: unknown }): boolean {
+	if (message.isError !== true) return false;
+	const details = message.details as { __synthetic?: unknown; executed?: unknown } | null | undefined;
+	return !(details?.__synthetic === true && details.executed === false);
+}
+
 /**
  * Build the result linkage for a `toolResult` entry: text characters fed back
  * into context plus the error flag, keyed to the originating call.
@@ -435,7 +442,7 @@ function extractToolResultLink(sessionFile: string, entry: SessionMessageEntry):
 		sessionFile,
 		toolCallId: msg.toolCallId,
 		resultChars,
-		isError: msg.isError === true,
+		isError: isToolExecutionError(msg),
 	};
 }
 

@@ -3,6 +3,7 @@ import type { BunFile } from "bun";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { connectToServer, MCPConnectionTimeoutError } from "@oh-my-pi/pi-coding-agent/mcp/client";
 import { MCPTransportError } from "@oh-my-pi/pi-coding-agent/mcp/errors";
 import * as mcpTimeout from "@oh-my-pi/pi-coding-agent/mcp/timeout";
 import { StdioTransport } from "@oh-my-pi/pi-coding-agent/mcp/transports/stdio";
@@ -114,6 +115,68 @@ describe("StdioTransport cancellation", () => {
 			content: [{ type: "text", text }],
 		});
 	}
+
+	it("does not spawn a child after cancellation during transport creation", async () => {
+		const caller = new AbortController();
+		const spawn = spyOn(Bun, "spawn");
+		try {
+			const pending = connectToServer(
+				"cancelled",
+				{ type: "stdio", command: process.execPath, args: ["-e", "process.exit(0)"], timeout: 0 },
+				{ signal: caller.signal },
+			);
+			caller.abort(new Error("cancelled"));
+			await expect(pending).rejects.toThrow("cancelled");
+			// Allow asynchronous command resolution to finish even after the caller returns.
+			await Bun.sleep(100);
+			expect(spawn).not.toHaveBeenCalled();
+		} finally {
+			spawn.mockRestore();
+		}
+	});
+
+	(process.platform === "win32" ? it : it.skip)(
+		"does not spawn a child after the deadline while Windows PATH resolution is pending",
+		async () => {
+			const started = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const finished = Promise.withResolvers<void>();
+			const access = fs.access;
+			const probe = spyOn(fs, "access").mockImplementation(async (target, mode) => {
+				if (String(target).toLowerCase() === process.execPath.toLowerCase()) {
+					started.resolve();
+					await release.promise;
+					try {
+						return await access(target, mode);
+					} finally {
+						finished.resolve();
+					}
+				}
+				return access(target, mode);
+			});
+			const spawn = spyOn(Bun, "spawn");
+			try {
+				const pending = connectToServer("deadline", {
+					type: "stdio",
+					command: process.execPath,
+					args: ["-e", "process.exit(0)"],
+					timeout: 50,
+				});
+				// Observe rejection immediately, even if the deadline expires before the probe starts.
+				const outcome = pending.catch((error: unknown) => error);
+				await within(started.promise);
+				expect(await within(outcome)).toBeInstanceOf(MCPConnectionTimeoutError);
+				release.resolve();
+				await within(finished.promise);
+				await Bun.sleep(100);
+				expect(spawn).not.toHaveBeenCalled();
+			} finally {
+				release.resolve();
+				probe.mockRestore();
+				spawn.mockRestore();
+			}
+		},
+	);
 
 	it("rejects promptly with the abort reason and sends one cancellation with the numeric request id", async () => {
 		const client = await start();

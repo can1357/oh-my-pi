@@ -5,6 +5,17 @@
 ### Added
 
 - Added a `ref` option to `sleepLong()`: `{ ref: false }` arms every chunk unreferenced, so a day-scale deadline does not by itself keep the process alive ([#17400](https://github.com/can1357/oh-my-pi/pull/17400) by [@sjawhar](https://github.com/sjawhar))
+
+## [18.14.2] - 2026-10-31
+
+### Added
+
+- Added `oklabDistance`, the perceptual distance between two hex colors ([#17520](https://github.com/can1357/oh-my-pi/pull/17520))
+
+## [18.14.1] - 2026-10-31
+
+### Added
+
 - Added `isFileLockHeld`, which reports whether a file lock is held without acquiring it ([#17428](https://github.com/can1357/oh-my-pi/pull/17428) by [@andrebrait](https://github.com/andrebrait))
 
 ## [18.14.0] - 2026-10-29
