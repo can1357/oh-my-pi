@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `@path` imports in `APPEND_SYSTEM.md` and `SYSTEM.md` being inserted into the system prompt as literal text instead of the imported file contents; an `--append-system-prompt` file path expands them too, while literal prompt text is left as is ([#17294](https://github.com/can1357/oh-my-pi/pull/17294) by [@Abelo9996](https://github.com/Abelo9996))
+
 ## [18.14.1] - 2026-10-31
 
 ### Added
@@ -101,6 +105,9 @@
 - Fixed unavailable configured default or dictation models being silently replaced; omp now warns and identifies the fallback model.
 - Fixed LSP references for files in sibling Git worktrees by adding those checkouts to the active workspace.
 - Improved macOS computer-use behavior for applications without windows by opening the app and inspecting its returned window in one operation.
+- Fixed `read` rejecting artifact URLs from truncation hints when cached approvals or restricted folders are configured ([#17282](https://github.com/can1357/oh-my-pi/pull/17282) by [@iliaal](https://github.com/iliaal)).
+- A failed Hindsight memory recall (for example `recall request timed out after 30s`) now shows a warning instead of silently sending the prompt without memories; `omp -p` writes it, and Hindsight retain failures, to stderr ([#17278](https://github.com/can1357/oh-my-pi/pull/17278) by [@enieuwy](https://github.com/enieuwy))
+- Fixed cancelling an MCP OAuth login or `/mcp` auth lookup at the wrong moment crashing the session with an unhandled rejection ([#17290](https://github.com/can1357/oh-my-pi/pull/17290) by [@H4vC](https://github.com/H4vC))
 
 ## [18.13.3] - 2026-10-28
 

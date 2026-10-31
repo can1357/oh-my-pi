@@ -1460,7 +1460,7 @@ export async function buildSessionOptions(
 			discoveredOverride?.kind === "text"
 				? Promise.resolve(discoveredOverride.content)
 				: resolvePromptInput(systemPromptSource, "system prompt"),
-			resolvePromptInput(appendPromptSource, "append system prompt"),
+			resolvePromptInput(appendPromptSource, "append system prompt", { expandAtImports: true }),
 			resolvePromptInput(titleSystemPromptSource, "title system prompt"),
 			// Discovered templates arrive pre-loaded from the capability; only
 			// explicit CLI paths hit the strict file loader here.
