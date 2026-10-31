@@ -7,6 +7,16 @@ import type { BeamMemoryState, JsonValue, Metadata, RecallResult, RecallTierLabe
 import { EpisodicGraph, extractProperNouns } from "./episodic-graph";
 import { STOP_WORDS } from "./synonyms";
 import { VeracityConsolidator } from "./veracity-consolidation";
+import {
+	CJK_PARTICLE_SPLIT_RE,
+	CJK_STOP_SEGMENTS,
+	cjkCodePointShingles,
+	codePointLength,
+	expandCjkCandidateSegments,
+	hasCjk,
+	splitMixedScriptToken,
+	stripCjkQuestionAffixes,
+} from "../util/regex";
 
 export type PolyphonicVoice = "hybrid" | "vector" | "graph" | "fact" | "temporal";
 
@@ -216,34 +226,105 @@ function cosineAgainstUnit(unit: Float32Array, raw: unknown): number | null {
 
 function queryTokens(query: string): string[] {
 	const tokens: string[] = [];
-	for (const match of query.toLowerCase().matchAll(/[\p{L}\p{N}_-]+/gu)) tokens.push(match[0]);
+	for (const match of query.toLowerCase().matchAll(/[\p{L}\p{N}\u30FC\u3005\uFF66-\uFF9F_-]+/gu)) {
+		tokens.push(match[0]);
+	}
+	return tokens;
+}
+
+function rawQueryTokens(query: string): string[] {
+	const tokens: string[] = [];
+	for (const match of query.matchAll(/[\p{L}\p{N}\u30FC\u3005\uFF66-\uFF9F_-]+/gu)) {
+		tokens.push(match[0]);
+	}
 	return tokens;
 }
 
 /**
- * Subject candidates for the fact voice: every 3+ char query word plus adjacent word pairs.
+ * Subject candidates for the fact voice: every 3+ char query word plus adjacent word pairs,
+ * plus 2-6 code-point CJK sub-clauses and 2/3/4-code-point shingles for unspaced CJK queries.
  * Stopwords never anchor a subject on their own — the regex extractor stores sentence-initial
  * words like `That` as subjects, so a bare `that` in the query would pull in unrelated memories.
  */
 function factSubjectCandidates(query: string): string[] {
-	const tokens = queryTokens(query);
+	const rawTokens = rawQueryTokens(query);
+	const tokens = rawTokens.map(t => t.toLowerCase());
 	const seen = new Set<string>();
 	for (let i = 0; i < tokens.length; i++) {
 		const word = tokens[i] as string;
+		const rawWord = rawTokens[i] ?? word;
 		const isContent = !STOP_WORDS.has(word);
-		if (isContent && word.length >= 3) seen.add(word);
+		const isCjk = hasCjk(word);
+		const wordLen = isCjk ? codePointLength(word) : word.length;
+		const minLen = isCjk ? 2 : 3;
+		if (isContent && wordLen >= minLen && !CJK_STOP_SEGMENTS.has(word)) {
+			seen.add(word);
+			if (rawWord !== word) seen.add(rawWord);
+		}
+		if (isCjk) {
+			const { nonCjk, cjkRuns } = splitMixedScriptToken(rawWord);
+			for (const latin of nonCjk) {
+				if (latin.length >= 3 && !STOP_WORDS.has(latin.toLowerCase())) seen.add(latin);
+			}
+			if (nonCjk.length > 0 && cjkRuns.length > 0) {
+				const strippedWord = stripCjkQuestionAffixes(word);
+				for (const seg of [word, strippedWord]) {
+					if (codePointLength(seg) >= 2 && !CJK_STOP_SEGMENTS.has(seg)) seen.add(seg);
+				}
+				for (const sub of strippedWord.split(CJK_PARTICLE_SPLIT_RE)) {
+					const strippedSub = stripCjkQuestionAffixes(sub);
+					if (codePointLength(strippedSub) >= 2 && !CJK_STOP_SEGMENTS.has(strippedSub)) seen.add(strippedSub);
+				}
+			}
+			if (wordLen >= 2) expandCjkCandidateSegments(rawWord, seen);
+		}
 		const next = tokens[i + 1];
-		if (next !== undefined && (isContent || !STOP_WORDS.has(next))) seen.add(`${word} ${next}`);
+		if (next !== undefined) {
+			if (isContent || !STOP_WORDS.has(next)) seen.add(`${word} ${next}`);
+			const nextIsCjk = hasCjk(next);
+			if (isContent && !isCjk && nextIsCjk) {
+				const firstClause = stripCjkQuestionAffixes(next.split(CJK_PARTICLE_SPLIT_RE)[0] ?? "");
+				if (codePointLength(firstClause) >= 2 && firstClause !== next) {
+					seen.add(`${word} ${firstClause}`);
+				}
+			} else if (isContent && isCjk && !nextIsCjk && !STOP_WORDS.has(next)) {
+				const clauses = word.split(CJK_PARTICLE_SPLIT_RE);
+				const lastClause = stripCjkQuestionAffixes(clauses[clauses.length - 1] ?? "");
+				if (codePointLength(lastClause) >= 2 && lastClause !== word) {
+					seen.add(`${lastClause} ${next}`);
+				}
+			}
+		}
 	}
 	return [...seen];
 }
 
 function contentTokens(text: string): Set<string> {
 	const out = new Set<string>();
-	for (const token of queryTokens(text)) if (token.length >= 2) out.add(token);
+	for (const token of queryTokens(text)) {
+		if (codePointLength(token) < 2) continue;
+		if (hasCjk(token)) {
+			const { nonCjk, cjkRuns } = splitMixedScriptToken(token);
+			for (const latin of nonCjk) {
+				if (latin.length >= 1) out.add(latin.toLowerCase());
+			}
+			if (cjkRuns.length === 0) {
+				out.add(token);
+			}
+			for (const run of cjkRuns) {
+				const normalizedRun = run.normalize("NFKC");
+				if (codePointLength(normalizedRun) === 2) {
+					out.add(normalizedRun);
+				} else {
+					for (const bigram of cjkCodePointShingles(normalizedRun, [2])) out.add(bigram);
+				}
+			}
+		} else {
+			out.add(token);
+		}
+	}
 	return out;
 }
-
 function tokenJaccard(left: ReadonlySet<string>, right: ReadonlySet<string>): number {
 	if (left.size === 0 || right.size === 0) return 0;
 	let intersection = 0;
@@ -258,11 +339,19 @@ function anchorTime(queryTime: string | Date | null | undefined): number | null 
 	return Number.isFinite(parsed) ? parsed : null;
 }
 
+const CJK_TEMPORAL_RE =
+	/(?:昨天|昨日|今天|今日|最近|近期|最新|這週|本週|上週|上周|本周|这周|這個月|上個月|上个月|这个月|之前|先前|以前|何時|什麼時候|何时|什么时候|剛剛|剛才|刚刚|刚才|過去|过去|現在|现在|目前)/u;
+
 function looksTemporal(query: string): boolean {
 	const lower = query.toLowerCase();
-	return ["yesterday", "today", "recent", "last", "latest", "this week", "this month", "ago", "before"].some(keyword =>
-		lower.includes(keyword),
-	);
+	if (
+		["yesterday", "today", "recent", "last", "latest", "this week", "this month", "ago", "before"].some(keyword =>
+			lower.includes(keyword),
+		)
+	) {
+		return true;
+	}
+	return CJK_TEMPORAL_RE.test(query);
 }
 
 export class PolyphonicRecallEngine {
