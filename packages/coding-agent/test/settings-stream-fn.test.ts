@@ -7,7 +7,8 @@
  * OpenRouter sticky-routing / response caching behaves the same on advisor turns
  * (can1357/oh-my-pi#3639).
  */
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
+import * as path from "node:path";
 import type { StreamFn } from "@oh-my-pi/pi-agent-core";
 import { type Context, type Model, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
 import { configureProviderStoreResponses } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
@@ -16,8 +17,13 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { bindEffects } from "@oh-my-pi/pi-coding-agent/config/registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { cfgProvidersMuseCodeStoreResponses } from "@oh-my-pi/pi-coding-agent/session/settings";
+import {
+	cfgProvidersAnthropicServerSideFallbackModels,
+	cfgProvidersMuseCodeStoreResponses,
+} from "@oh-my-pi/pi-coding-agent/session/settings";
 import { createSettingsAwareStreamFn } from "@oh-my-pi/pi-coding-agent/session/settings-stream-fn";
+import { logger, TempDir } from "@oh-my-pi/pi-utils";
+import { YAML } from "bun";
 
 function captureBase(): { fn: StreamFn; calls: Array<{ options?: SimpleStreamOptions }> } {
 	const calls: Array<{ options?: SimpleStreamOptions }> = [];
@@ -422,6 +428,28 @@ describe("createSettingsAwareStreamFn", () => {
 			expect(calls[0]?.options?.fallbacks).toBeUndefined();
 		});
 
+		it("does not warn about a configured chain a per-call worker never sends", () => {
+			const warnings: unknown[] = [];
+			vi.spyOn(logger, "warn").mockImplementation((_message: unknown, context?: unknown) => {
+				warnings.push(context);
+			});
+			try {
+				const settings = Settings.isolated({
+					"providers.anthropic.serverSideFallback": true,
+					"providers.anthropic.serverSideFallbackModels": [42, "m1", "m2", "m3", "m4"],
+				});
+				const { fn: base, calls } = captureBase();
+				const wrapped = createSettingsAwareStreamFn(settings, base, { disableServerSideFallback: true });
+
+				wrapped(stubFableModel, stubContext, { apiKey: "k" });
+
+				expect(calls[0]?.options?.fallbacks).toBeUndefined();
+				expect(warnings).toEqual([]);
+			} finally {
+				vi.restoreAllMocks();
+			}
+		});
+
 		it("caller-supplied fallbacks always win over the settings default", () => {
 			const settings = Settings.isolated({ "providers.anthropic.serverSideFallback": true });
 			const { fn: base, calls } = captureBase();
@@ -433,6 +461,253 @@ describe("createSettingsAwareStreamFn", () => {
 			});
 
 			expect(calls[0]?.options?.fallbacks).toEqual([{ model: "claude-sonnet-5" }]);
+		});
+
+		it("forwards a configured multi-model chain in order", () => {
+			const settings = Settings.isolated({
+				"providers.anthropic.serverSideFallback": true,
+				"providers.anthropic.serverSideFallbackModels": ["claude-opus-5", "claude-opus-4-8"],
+			});
+			const { fn: base, calls } = captureBase();
+			const wrapped = createSettingsAwareStreamFn(settings, base);
+
+			wrapped(stubFableModel, stubContext, { apiKey: "k" });
+
+			expect(calls[0]?.options?.fallbacks).toEqual([{ model: "claude-opus-5" }, { model: "claude-opus-4-8" }]);
+		});
+
+		it("does not send a configured chain to models without a catalog chain", () => {
+			const settings = Settings.isolated({
+				"providers.anthropic.serverSideFallback": true,
+				"providers.anthropic.serverSideFallbackModels": ["claude-opus-5"],
+			});
+			const { fn: base, calls } = captureBase();
+			const wrapped = createSettingsAwareStreamFn(settings, base);
+
+			wrapped(stubBedrockFableModel, stubContext, { apiKey: "k" });
+			wrapped(stubOpusModel, stubContext, { apiKey: "k" });
+
+			expect(calls.map(call => call.options?.fallbacks)).toEqual([undefined, undefined]);
+		});
+
+		it("drops entries that are not model ids and warns naming each one and why", () => {
+			const warnings: unknown[] = [];
+			vi.spyOn(logger, "warn").mockImplementation((_message: unknown, context?: unknown) => {
+				warnings.push(context);
+			});
+			try {
+				const settings = Settings.isolated({
+					"providers.anthropic.serverSideFallback": true,
+					"providers.anthropic.serverSideFallbackModels": [1, "claude-opus-5", null, "  "],
+				});
+				const { fn: base, calls } = captureBase();
+				const wrapped = createSettingsAwareStreamFn(settings, base);
+
+				wrapped(stubFableModel, stubContext, { apiKey: "k" });
+
+				expect(calls[0]?.options?.fallbacks).toEqual([{ model: "claude-opus-5" }]);
+				expect(warnings).toEqual([
+					{
+						setting: "providers.anthropic.serverSideFallbackModels",
+						dropped: [
+							{ index: 0, value: 1, problem: "not a string (number)" },
+							{ index: 2, value: null, problem: "not a string (null)" },
+							{ index: 3, value: "  ", problem: "blank string" },
+						],
+						droppedCount: 3,
+						expected: "non-blank model id strings",
+					},
+				]);
+			} finally {
+				vi.restoreAllMocks();
+			}
+		});
+
+		// A list whose entries all fail is a value that says nothing usable, not an explicit `[]`.
+		it("follows the catalog chain, warning once, when a non-empty configured list has no model id", () => {
+			const warnings: unknown[] = [];
+			vi.spyOn(logger, "warn").mockImplementation((_message: unknown, context?: unknown) => {
+				warnings.push(context);
+			});
+			try {
+				const settings = Settings.isolated({
+					"providers.anthropic.serverSideFallback": true,
+					"providers.anthropic.serverSideFallbackModels": [42, "  "],
+				});
+				const { fn: base, calls } = captureBase();
+				const wrapped = createSettingsAwareStreamFn(settings, base);
+
+				wrapped(stubFableModel, stubContext, { apiKey: "k" });
+				wrapped(stubFableModel, stubContext, { apiKey: "k" });
+
+				expect(calls.map(call => call.options?.fallbacks)).toEqual([
+					[{ model: "claude-opus-5" }],
+					[{ model: "claude-opus-5" }],
+				]);
+				expect(warnings).toEqual([
+					{
+						setting: "providers.anthropic.serverSideFallbackModels",
+						dropped: [
+							{ index: 0, value: 42, problem: "not a string (number)" },
+							{ index: 1, value: "  ", problem: "blank string" },
+						],
+						droppedCount: 2,
+						expected: "non-blank model id strings",
+					},
+				]);
+			} finally {
+				vi.restoreAllMocks();
+			}
+		});
+
+		// Hand-edited YAML is the only way to store a non-list: writes reject one.
+		it("ignores a configured value that is not a list, with a warning, and follows the catalog chain", async () => {
+			const tempDir = TempDir.createSync("@pi-fallback-chain-");
+			// Ambient overlays would join the layers under test.
+			const previousConfigFiles = process.env.PI_CONFIG_FILES;
+			delete process.env.PI_CONFIG_FILES;
+			const warnings: Array<Record<string, unknown> | undefined> = [];
+			vi.spyOn(logger, "warn").mockImplementation((_message: unknown, context?: Record<string, unknown>) => {
+				warnings.push(context);
+			});
+			try {
+				const agentDir = tempDir.join("agent");
+				await Bun.write(
+					path.join(agentDir, "config.yml"),
+					YAML.stringify({
+						providers: { anthropic: { serverSideFallback: true, serverSideFallbackModels: "claude-opus-4-8" } },
+					}),
+				);
+				const settings = await Settings.loadReadOnly({ agentDir, cwd: tempDir.path() });
+				const { fn: base, calls } = captureBase();
+				const wrapped = createSettingsAwareStreamFn(settings, base);
+
+				wrapped(stubFableModel, stubContext, { apiKey: "k" });
+
+				expect(calls[0]?.options?.fallbacks).toEqual([{ model: "claude-opus-5" }]);
+				const rejected = warnings.find(
+					context => context?.setting === "providers.anthropic.serverSideFallbackModels",
+				);
+				expect(rejected).toMatchObject({ value: "claude-opus-4-8", expected: "an array" });
+			} finally {
+				vi.restoreAllMocks();
+				if (previousConfigFiles === undefined) delete process.env.PI_CONFIG_FILES;
+				else process.env.PI_CONFIG_FILES = previousConfigFiles;
+				tempDir.removeSync();
+			}
+		});
+
+		it("trims whitespace from configured chain entries before forwarding", () => {
+			const settings = Settings.isolated({
+				"providers.anthropic.serverSideFallback": true,
+				"providers.anthropic.serverSideFallbackModels": [" claude-opus-5 ", "\tclaude-opus-4-8\n"],
+			});
+			const { fn: base, calls } = captureBase();
+			const wrapped = createSettingsAwareStreamFn(settings, base);
+
+			wrapped(stubFableModel, stubContext, { apiKey: "k" });
+
+			expect(calls[0]?.options?.fallbacks).toEqual([{ model: "claude-opus-5" }, { model: "claude-opus-4-8" }]);
+		});
+
+		it("caps the forwarded chain at the wire limit of three entries", () => {
+			const settings = Settings.isolated({
+				"providers.anthropic.serverSideFallback": true,
+				"providers.anthropic.serverSideFallbackModels": ["m1", "m2", "m3", "m4", "m5"],
+			});
+			const { fn: base, calls } = captureBase();
+			const wrapped = createSettingsAwareStreamFn(settings, base);
+
+			wrapped(stubFableModel, stubContext, { apiKey: "k" });
+
+			expect(calls[0]?.options?.fallbacks).toEqual([{ model: "m1" }, { model: "m2" }, { model: "m3" }]);
+		});
+
+		it("warns about an overlong chain once per chain, naming the entries left out, and not when caller fallbacks win", () => {
+			const overlongWarnings: unknown[] = [];
+			vi.spyOn(logger, "warn").mockImplementation((_message: unknown, context?: Record<string, unknown>) => {
+				if (context?.setting === "providers.anthropic.serverSideFallbackModels") overlongWarnings.push(context);
+			});
+			try {
+				const settings = Settings.isolated({
+					"providers.anthropic.serverSideFallback": true,
+					"providers.anthropic.serverSideFallbackModels": ["m1", "m2", "m3", "m4"],
+				});
+				const { fn: base, calls } = captureBase();
+				const wrapped = createSettingsAwareStreamFn(settings, base);
+
+				wrapped(stubFableModel, stubContext, { apiKey: "k", fallbacks: [{ model: "caller" }] });
+				expect(overlongWarnings).toHaveLength(0);
+
+				wrapped(stubFableModel, stubContext, { apiKey: "k" });
+				wrapped(stubFableModel, stubContext, { apiKey: "k" });
+				expect(overlongWarnings).toEqual([
+					{
+						setting: "providers.anthropic.serverSideFallbackModels",
+						dropped: [{ index: 3, value: "m4", problem: "beyond the wire limit" }],
+						droppedCount: 1,
+						expected: "at most 3 model ids",
+					},
+				]);
+				expect(calls[2]?.options?.fallbacks).toEqual([{ model: "m1" }, { model: "m2" }, { model: "m3" }]);
+
+				cfgProvidersAnthropicServerSideFallbackModels.override(settings, ["n1", "n2", "n3", "n4"]);
+				wrapped(stubFableModel, stubContext, { apiKey: "k" });
+				expect(overlongWarnings).toHaveLength(2);
+			} finally {
+				vi.restoreAllMocks();
+			}
+		});
+
+		// A thousand-entry chain must not put a thousand ids in one log line.
+		it("names dropped entries by their configured index and lists at most ten, with the total", () => {
+			const warnings: unknown[] = [];
+			vi.spyOn(logger, "warn").mockImplementation((_message: unknown, context?: unknown) => {
+				warnings.push(context);
+			});
+			try {
+				const ids = Array.from({ length: 14 }, (_, i) => `m${i}`);
+				const settings = Settings.isolated({
+					"providers.anthropic.serverSideFallback": true,
+					"providers.anthropic.serverSideFallbackModels": [42, ...ids],
+				});
+				const { fn: base, calls } = captureBase();
+
+				createSettingsAwareStreamFn(settings, base)(stubFableModel, stubContext, { apiKey: "k" });
+
+				expect(calls[0]?.options?.fallbacks).toEqual([{ model: "m0" }, { model: "m1" }, { model: "m2" }]);
+				expect(warnings).toEqual([
+					{
+						setting: "providers.anthropic.serverSideFallbackModels",
+						dropped: [{ index: 0, value: 42, problem: "not a string (number)" }],
+						droppedCount: 1,
+						expected: "non-blank model id strings",
+					},
+					{
+						setting: "providers.anthropic.serverSideFallbackModels",
+						dropped: ids
+							.slice(3, 13)
+							.map((value, i) => ({ index: i + 4, value, problem: "beyond the wire limit" })),
+						droppedCount: 11,
+						expected: "at most 3 model ids",
+					},
+				]);
+			} finally {
+				vi.restoreAllMocks();
+			}
+		});
+
+		it("sends no fallbacks when the configured chain is empty, even with the toggle on", () => {
+			const settings = Settings.isolated({
+				"providers.anthropic.serverSideFallback": true,
+				"providers.anthropic.serverSideFallbackModels": [],
+			});
+			const { fn: base, calls } = captureBase();
+			const wrapped = createSettingsAwareStreamFn(settings, base);
+
+			wrapped(stubFableModel, stubContext, { apiKey: "k" });
+
+			expect(calls[0]?.options?.fallbacks).toBeUndefined();
 		});
 	});
 
