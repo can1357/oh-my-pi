@@ -84,14 +84,14 @@ class "openai" {
 	on-api "openai-responses" {
 		revision ">=5" {
 			web-search "openai"
-			web-search-model "gpt-5.6-luna"
+			web-search-model "gpt-6-luna"
 			hosted-image #true
 			image-model "gpt-image-2"
 		}
 	}
 	on-api "openai-codex-responses" {
 		revision ">=5" {
-			web-search-model "gpt-5.6-luna"
+			web-search-model "gpt-6-luna"
 			hosted-image #true
 			image-model "gpt-image-2"
 		}

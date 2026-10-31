@@ -58,8 +58,7 @@ This document describes how `crates/pi-natives` schedules native work and how ca
 
 Use when work is CPU-heavy or fundamentally synchronous/blocking:
 
-- regex/file scanning (`grep`, `glob`, `fuzzyFind`)
-- ast-grep search/edit worker work
+- in-memory ast-grep matching (`astMatch`, using `CancelToken::cancellation()`)
 - HTML conversion
 - clipboard image read
 
@@ -87,16 +86,17 @@ Behavior:
 
 | JS-facing API                                                 | Rust export                 | Scheduler                                                      | Cancellation hookup                                                                                                                  |
 | ------------------------------------------------------------- | --------------------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `grep(options, onMatch?)`                                     | `grep`                      | `task::blocking("grep", ct, ...)`                              | `CancelToken::new(options.timeoutMs, options.signal)` + heartbeat checks                                                             |
-| `glob(options, onMatch?)`                                     | `glob`                      | `task::blocking("glob", ct, ...)`                              | `CancelToken::new(...)` + heartbeat checks                                                                                           |
-| `fuzzyFind(options)`                                          | `fuzzy_find`                | `task::blocking("fuzzy_find", ct, ...)`                        | `CancelToken::new(...)` + heartbeat checks                                                                                           |
-| `astGrep(options)` / `astMatch(options)` / `astEdit(options)` | ast exports                 | blocking worker path                                           | timeout/signal fields are accepted by options and checked cooperatively in worker loops                                              |
-| `listWorkspace(options)`                                      | `list_workspace`            | `task::blocking("listWorkspace", ct, ...)`                     | `CancelToken::new(options.timeoutMs, options.signal)` + heartbeat checks                                                             |
+| `grep(options, onMatch?)`                                     | `grep`                      | `task::filesystem_future(env, "grep", ct, ...)`                | `CancelToken::new(options.timeoutMs, options.signal)`; work future dropped on abort                                                  |
+| `glob(options, onMatch?)`                                     | `glob`                      | `task::filesystem_future(env, "glob", ct, ...)`                | `CancelToken::new(...)`; work future dropped on abort                                                                                |
+| `fuzzyFind(options)`                                          | `fuzzy_find`                | `task::filesystem_future(env, "fuzzy_find", ct, ...)`          | `CancelToken::new(...)`; work future dropped on abort                                                                                |
+| `astGrep(options)` / `astEdit(options)`                       | ast exports                 | `task::filesystem_future(env, tag, ct, ...)`                   | `CancelToken::new(...)`; work future dropped on abort                                                                                |
+| `astMatch(options)`                                           | `ast_match`                 | `task::blocking(...)` (in-memory `find_source`)                | `CancelToken::cancellation()` passed to `find_source`                                                                                |
+| `listWorkspace(options)`                                      | `list_workspace`            | `task::filesystem_future(env, "listWorkspace", ct, ...)`       | `CancelToken::new(options.timeoutMs, options.signal)`; work future dropped on abort                                                  |
 | `Shell#run(options, onChunk?)`                                | `Shell::run`                | `task::future(env, "shell.run", ...)`                          | JS `CancelToken` is converted into `pi_shell::cancel::CancelToken`; shell races it against command completion and descendant cleanup |
 | `executeShell(options, onChunk?)`                             | `execute_shell`             | `task::future(env, "shell.execute", ...)`                      | same cancellation race and 2s graceful window (5s on Windows)                                                                        |
 | `Process#terminate(options?)`                                 | `Process::terminate`        | `task::future(env, "process.terminate", ...)`                  | optional signal cancels termination waits; grace and hard-kill timeouts are process policy rather than `CancelToken` deadlines       |
 | `Process#waitForExit(options?)`                               | `Process::wait_for_exit`    | `task::future(env, "process.wait_for_exit", ...)`              | optional signal is bridged through `CancelToken`; `timeoutMs` is the wait operation's typed `false` timeout                          |
-| `PtySession#start(...)` / `startArgv(...)`                    | PTY methods                 | `task::future(env, "pty.start", ...)` + inner `spawn_blocking` | heartbeat checks before PTY allocation/spawn reject; checks in the running loop produce cancellation flags |
+| `PtySession#start(...)` / `startArgv(...)`                    | PTY methods                 | `task::future(env, "pty.start", ...)` + inner `spawn_blocking` | heartbeat checks before PTY allocation/spawn reject; checks in the running loop produce cancellation flags                           |
 | `htmlToMarkdown(html, options?)`                              | `html_to_markdown`          | `task::blocking("html_to_markdown", (), ...)`                  | none (`()` token)                                                                                                                    |
 | `encodeSixel(...)`                                            | `encode_sixel`              | synchronous native function                                    | none                                                                                                                                 |
 | `readImageFromClipboard()`                                    | `read_image_from_clipboard` | `task::blocking("clipboard.read_image", (), ...)`              | none (`()` token)                                                                                                                    |
@@ -125,28 +125,28 @@ Aborted
 ### Before-start vs mid-execution cancellation
 
 - **Before start / before first cancellation check**:
-  - `task::future` users that race on `ct.wait()` can resolve cancellation once they enter `select!`.
-  - `task::blocking` users observe cancellation at closure heartbeat checks, with an explicit-flag check again during JS result settlement. The helper itself does not insert a pre-compute heartbeat.
-  - PTY checks before `openpty` and before spawn reject setup rather than returning a command cancellation result.
+   - `task::future` users that race on `ct.wait()` can resolve cancellation once they enter `select!`.
+   - `task::blocking` users observe cancellation at closure heartbeat checks, with an explicit-flag check again during JS result settlement. The helper itself does not insert a pre-compute heartbeat.
+   - PTY checks before `openpty` and before spawn reject setup rather than returning a command cancellation result.
 
 - **Mid-execution**:
-  - `blocking`: next `heartbeat()` returns `Err("Aborted: ...")`.
-  - `future`: `ct.wait()` branch wins `select!`, then code cancels subordinate async machinery.
-  - shell: cancellation triggers a Tokio cancellation token and TERM/KILL waves over a per-run spawn registry, waits up to 2 seconds (5 on Windows) for the command task, then aborts the task if needed. Cleanup is scoped to that run, not a process-global descendant snapshot.
-  - PTY: heartbeat failure or `kill()` terminates PTY child/process targets and drains output briefly.
+   - `blocking`: next `heartbeat()` returns `Err("Aborted: ...")`.
+   - `future`: `ct.wait()` branch wins `select!`, then code cancels subordinate async machinery.
+   - shell: cancellation triggers a Tokio cancellation token and TERM/KILL waves over a per-run spawn registry, waits up to 2 seconds (5 on Windows) for the command task, then aborts the task if needed. Cleanup is scoped to that run, not a process-global descendant snapshot.
+   - PTY: heartbeat failure or `kill()` terminates PTY child/process targets and drains output briefly.
 
-## Heartbeat expectations for long-running loops
+## Cancellation expectations for long-running loops
 
-`heartbeat()` must run at predictable cadence in loops with unbounded or large work sets.
+Synchronous loops (`task::blocking`, PTY) must call `heartbeat()` at predictable cadence when the work set is unbounded or large. Async filesystem work needs no heartbeat: it is cancelled by dropping the future.
 
 Observed patterns:
 
-- `glob` and `fuzzyFind` pass heartbeat callbacks into `pi-walker` traversal and also check result-processing loops.
-- `grep` checks before and during expensive search and passes the token through its scan/search workers.
+- `grep`, `glob`, `fuzzyFind`, `listWorkspace`, `astGrep`, and `astEdit` run through `task::filesystem_future(env, tag, ct, fs, work)`. On abort/timeout the work future is dropped with the same rejection strings as `task::filesystem`. `pi-walker` has no runtime of its own: its futures spawn tasks with `tokio::spawn` on the current runtime, and dropping the future sets a halt flag (drop guard) that stops them. `walk::Tree` spends tokio's coop budget per entry (`tokio::task::coop::consume_budget`), so raced serial traversals also cancel.
+- `grep` streams batches through a bounded `tokio::sync::mpsc::Sender<Vec<Match>>`. The `onMatches` forwarder awaits each JS call (`call_async_catch`) and coalesces queued batches up to 1024 matches; a channel of 4 batches gives end-to-end backpressure.
+- `astMatch` (in-memory `find_source`) stays on `task::blocking` with `CancelToken::cancellation()`.
 - `run_pty_sync` checks every loop tick with a maximum 16ms wait cadence.
-- `listWorkspace` checks during traversal.
 
-Practical rule: no loop over external-size input should exceed a short bounded interval without a heartbeat.
+Practical rule: no synchronous loop over external-size input should exceed a short bounded interval without a heartbeat; async loops must keep awaiting (or spending coop budget) so dropping the future takes effect.
 
 ## Failure behavior and error propagation to JS
 
@@ -208,6 +208,7 @@ Choose one model per API and document it explicitly.
 1. Classify work correctly:
    - CPU-bound or sync blocking -> `task::blocking`.
    - async I/O / `await` orchestration -> `task::future`.
+   - async filesystem work over a `pi_vfs::Fs` -> `task::filesystem_future` (abort/timeout drops the future).
 
 2. Expose cancel inputs when needed:
    - include `timeoutMs` and `signal` in `#[napi(object)]` options,

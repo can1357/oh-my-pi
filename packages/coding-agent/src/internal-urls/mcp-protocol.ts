@@ -189,6 +189,14 @@ export async function readMcpResource(
 	};
 }
 
+/** No connected MCP server advertises the requested resource URI. */
+export class McpResourceNotFoundError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "McpResourceNotFoundError";
+	}
+}
+
 /**
  * Protocol handler for MCP resources.
  *
@@ -216,7 +224,7 @@ export class McpProtocolHandler implements ProtocolHandler {
 		}
 		const resource = await readMcpResource(mcpManager, url, { signal: context?.signal });
 		if (resource) return resource;
-		throw new Error(
+		throw new McpResourceNotFoundError(
 			`No MCP server has resource "${extractResourceUri(url)}".\n\nAvailable resources:\n${formatAvailableResources(mcpManager)}`,
 		);
 	}

@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/pi-ai",
-	"version": "18.12.6",
+	"version": "18.14.1",
 	"description": "Unified LLM API with automatic model discovery and provider configuration",
 	"keywords": [
 		"ai",
@@ -16,7 +16,10 @@
 		"url": "https://github.com/can1357/oh-my-pi/issues"
 	},
 	"license": "MIT",
-	"author": { "name": "Stencil Labs, Inc.", "url": "https://stencil.so" },
+	"author": {
+		"name": "Stencil Labs, Inc.",
+		"url": "https://stencil.so"
+	},
 	"contributors": [
 		"Mario Zechner"
 	],
@@ -94,6 +97,7 @@
 			"types": "./src/providers/*.ts",
 			"import": "./src/providers/*.ts"
 		},
+		"./providers/*.js": "./src/providers/*.ts",
 		"./providers/openai-codex/*": {
 			"types": "./src/providers/openai-codex/*.ts",
 			"import": "./src/providers/openai-codex/*.ts"
@@ -159,6 +163,6 @@
 		"@types/bun": "catalog:"
 	},
 	"engines": {
-		"bun": ">=1.3.14"
+		"bun": ">=1.4.4"
 	}
 }

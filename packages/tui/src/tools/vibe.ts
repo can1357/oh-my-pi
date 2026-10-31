@@ -206,6 +206,7 @@ function tvScreen(
 	screen: VibeScreenSnapshot,
 	options: RenderResultOptions,
 	settledStatus?: "completed" | "failed" | "cancelled",
+	nowMs = Date.now(),
 ): string[] {
 	const live = screen.state === "running" || screen.state === "starting";
 	const spinnerFrame = live ? options.spinnerFrame : undefined;
@@ -223,7 +224,7 @@ function tvScreen(
 	const turnsLabel = `${screen.turns}t${screen.queued > 0 ? `+${screen.queued}q` : ""}`;
 	headParts.push(uiTheme.fg("muted", turnsLabel));
 	if (screen.turnStartedAt !== undefined) {
-		headParts.push(uiTheme.fg("dim", formatDuration(Date.now() - screen.turnStartedAt)));
+		headParts.push(uiTheme.fg("dim", formatDuration(nowMs - screen.turnStartedAt)));
 	}
 	if (screen.model) headParts.push(uiTheme.fg("muted", frameText(screen.model, 40)));
 
@@ -603,6 +604,8 @@ export function createVibeToolRenderer(op: VibeOp) {
 			}
 			const waiting = details.wait?.waiting === true;
 			const settledById = new Map(details.wait?.settled.map(entry => [entry.id, entry.status] as const) ?? []);
+			const snapshotTime = Date.now();
+			const wallOptions = options.isPartial ? options : { ...options, spinnerFrame: undefined };
 			return linesComponent(() => {
 				const running = screens.filter(screen => screen.state === "running" || screen.state === "starting").length;
 				const meta: string[] = [];
@@ -619,7 +622,7 @@ export function createVibeToolRenderer(op: VibeOp) {
 				const header = renderStatusLine(
 					{
 						icon: details.wait?.timedOut ? "warning" : running > 0 ? "info" : "done",
-						spinnerFrame: running > 0 ? options.spinnerFrame : undefined,
+						spinnerFrame: running > 0 ? wallOptions.spinnerFrame : undefined,
 						title,
 						meta,
 					},
@@ -627,7 +630,15 @@ export function createVibeToolRenderer(op: VibeOp) {
 				);
 				const lines = [header];
 				for (const screen of screens) {
-					lines.push(...tvScreen(uiTheme, screen, options, settledById.get(screen.id)));
+					lines.push(
+						...tvScreen(
+							uiTheme,
+							screen,
+							wallOptions,
+							settledById.get(screen.id),
+							options.isPartial ? Date.now() : snapshotTime,
+						),
+					);
 				}
 				return lines;
 			});

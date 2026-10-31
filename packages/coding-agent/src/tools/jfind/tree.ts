@@ -247,9 +247,9 @@ export interface ListFilesOptions {
 
 /**
  * Every eligible, non-gitignored regular file under `root`, in path order.
- * Symlinks are never followed. A file root is its only entry unless it is
- * credential material, a binary, or empty; being named explicitly admits it
- * even when hidden.
+ * Skill mounts follow contained links; host walks do not descend links. A file
+ * root is its only entry unless it is credential material, a binary, or empty;
+ * being named explicitly admits it even when hidden.
  */
 export async function listFiles(root: SearchRoot, options: ListFilesOptions): Promise<FileEntry[]> {
 	if (root.type === "file") {
@@ -263,6 +263,7 @@ export async function listFiles(root: SearchRoot, options: ListFilesOptions): Pr
 		pattern: "*",
 		path: root.path,
 		recursive: true,
+		followLinks: root.path.startsWith("skill://"),
 		fileType: natives.FileType.File,
 		hidden: options.includeHidden,
 		gitignore: true,

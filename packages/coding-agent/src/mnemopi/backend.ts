@@ -346,9 +346,9 @@ export const mnemopiBackend: MemoryBackend = {
 		return { backend: "mnemopi", stored: 1, ids: [id] };
 	},
 
-	async preCompactionContext(messages, _settings, session): Promise<string | undefined> {
+	async preCompactionContext(messages, _settings, session, signal): Promise<string | undefined> {
 		const state = getMnemopiSessionState(session);
-		return await state?.recallForCompaction(messages);
+		return await state?.recallForCompaction(messages, signal);
 	},
 };
 

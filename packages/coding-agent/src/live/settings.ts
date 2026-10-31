@@ -2,7 +2,7 @@
  * Settings declared by this domain (see `config/registry.ts`). Declaration order is the
  * settings-panel order; `config/all-settings.ts` registers every domain.
  */
-import { register } from "../config/registry";
+import { register, type ScopeLike } from "../config/registry";
 import { DEFAULT_LIVE_VOICE, LIVE_VOICE_OPTIONS, LIVE_VOICE_VALUES } from "./voices";
 
 export const cfgLiveVoice = register({
@@ -18,3 +18,8 @@ export const cfgLiveVoice = register({
 		options: LIVE_VOICE_OPTIONS,
 	},
 });
+
+/** The voice a live session uses: an explicit choice, else the `live.voice` setting, else the default. */
+export function resolveLiveVoice(scope: ScopeLike, voice?: string): string {
+	return voice?.trim() || cfgLiveVoice.get(scope) || DEFAULT_LIVE_VOICE;
+}

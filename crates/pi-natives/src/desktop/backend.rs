@@ -146,12 +146,96 @@ pub struct KeyboardFocus {
 /// Outcome of keyboard input addressed to an element.
 pub enum ElementDelivery {
 	Delivered,
-	/// The element never reported keyboard focus; nothing was sent.
+	/// The element never reported keyboard focus; no keys were sent.
 	#[cfg_attr(
 		not(target_os = "macos"),
 		allow(dead_code, reason = "only macOS reads which element holds keyboard focus")
 	)]
 	Unfocused(KeyboardFocus),
+}
+
+/// How a click is sent, as `win.click` and `el.click` ask for it.
+#[derive(Debug, Clone, Copy)]
+pub struct ClickOptions<'a> {
+	pub button:      MouseButton,
+	pub count:       u32,
+	pub modifiers:   Modifiers,
+	/// The item path to choose in the menu the click opens.
+	pub menu:        Option<&'a [String]>,
+	/// Refuse a background click that would open a control's menu.
+	pub refuse_menu: bool,
+	pub mode:        DeliveryMode,
+}
+
+impl ClickOptions<'_> {
+	/// The click at `(x, y)`.
+	pub const fn at(&self, x: f64, y: f64) -> PointerEvent {
+		PointerEvent::Click {
+			x,
+			y,
+			button: self.button,
+			count: self.count,
+			modifiers: self.modifiers,
+		}
+	}
+
+	/// Sends the click `event` to `target`, choosing [`Self::menu`] in the menu
+	/// it opens when that is set. With [`Self::refuse_menu`], a background
+	/// click that would open a control's menu is refused first
+	/// ([`Backend::refuse_menu_press`]).
+	pub fn send<B: Backend + ?Sized>(
+		&self,
+		backend: &mut B,
+		target: &Target,
+		event: PointerEvent,
+		frame: &FrameGeometry,
+		token: &OperationToken,
+	) -> CoreResult<()> {
+		if let Some(path) = self.menu {
+			return backend.pointer_menu(target, event, path, frame, self.mode, token);
+		}
+		if self.checks_menu_press() {
+			backend.refuse_menu_press(target, &event)?;
+		}
+		backend.pointer(target, event, frame, self.mode, token)
+	}
+
+	/// Whether [`Self::send`] asks [`Backend::refuse_menu_press`] first: a
+	/// background click without a menu path, with [`Self::refuse_menu`] set.
+	pub fn checks_menu_press(&self) -> bool {
+		self.menu.is_none() && refuses_menu_press(self.refuse_menu, self.mode)
+	}
+}
+
+/// Whether input asked to `refuse` a control's menu is refused before a press
+/// that would open one: only in the background, where an open menu would take
+/// the user's keyboard ([`Backend::refuse_menu_press`]).
+pub fn refuses_menu_press(refuse: bool, mode: DeliveryMode) -> bool {
+	refuse && mode == DeliveryMode::Background
+}
+
+/// The [`locate_element_click`] error for an element without bounds; the
+/// worker names the element's ref in it.
+pub const NO_CLICKABLE_BOUNDS: &str = "the element has no clickable bounds";
+
+/// Where `click` goes on `element`: the window holding it, and the click at
+/// its center. Both are read from the element's application.
+pub fn locate_element_click<B: Backend + ?Sized>(
+	backend: &mut B,
+	element: &AxHandle,
+	click: &ClickOptions,
+) -> CoreResult<(Target, PointerEvent)> {
+	let ax = backend.ax().ok_or_else(DesktopError::ax_unsupported)?;
+	let bounds = ax
+		.props(element)?
+		.bounds
+		.ok_or_else(|| DesktopError::ax_failed(NO_CLICKABLE_BOUNDS))?;
+	let windows = backend.windows()?;
+	// Desktop refs and parent traversal can leave the snapshot's original
+	// window; only the live element can establish ownership.
+	let ax = backend.ax().ok_or_else(DesktopError::ax_unsupported)?;
+	let target = Target::Window(ax.window_id(element, &windows)?);
+	Ok((target, click.at(bounds.x + bounds.width / 2.0, bounds.y + bounds.height / 2.0)))
 }
 
 pub trait Backend: Send {
@@ -253,26 +337,39 @@ pub trait Backend: Send {
 		mode: DeliveryMode,
 		token: &OperationToken,
 	) -> CoreResult<()>;
-	/// Types or presses `input` into `element`, a live element of window
-	/// `target`. Backends that cannot read which element holds keyboard focus
-	/// focus it and send through the window's keyboard path.
+	/// Types or presses `input` into `element`, a live element, in the window
+	/// that holds it. The backend looks that window up itself, so it can read
+	/// what it needs about the user's state before the lookup reaches the
+	/// element's application. Backends that cannot read which element holds
+	/// keyboard focus focus it and send through the window's keyboard path.
 	fn element_input(
 		&mut self,
-		target: &Target,
 		element: &AxHandle,
 		input: &ElementInput,
 		mode: DeliveryMode,
 		token: &OperationToken,
 	) -> CoreResult<ElementDelivery> {
-		self
-			.ax()
-			.ok_or_else(DesktopError::ax_unsupported)?
-			.focus(element)?;
+		let windows = self.windows()?;
+		let ax = self.ax().ok_or_else(DesktopError::ax_unsupported)?;
+		let target = Target::Window(ax.window_id(element, &windows)?);
+		ax.focus(element)?;
 		match input {
-			ElementInput::Text(text) => self.type_text(target, text, mode, token)?,
-			ElementInput::Chord(keys) => self.key_chord(target, keys, mode, token)?,
+			ElementInput::Text(text) => self.type_text(&target, text, mode, token)?,
+			ElementInput::Chord(keys) => self.key_chord(&target, keys, mode, token)?,
 		}
 		Ok(ElementDelivery::Delivered)
+	}
+	/// Clicks `element`, a live element, at its center in the window that
+	/// holds it ([`locate_element_click`]). The backend reads both from the
+	/// element's application itself, as for [`Self::element_input`].
+	fn element_click(
+		&mut self,
+		element: &AxHandle,
+		click: &ClickOptions,
+		token: &OperationToken,
+	) -> CoreResult<()> {
+		let (target, event) = locate_element_click(self, element, click)?;
+		click.send(self, &target, event, &FrameGeometry::identity_global(), token)
 	}
 	fn hold_keys(
 		&mut self,

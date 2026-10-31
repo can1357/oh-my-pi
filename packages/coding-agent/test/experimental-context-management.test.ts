@@ -278,6 +278,67 @@ describe("experimental context management", () => {
 		expect(manager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(0);
 		expect(session.isCompacting).toBe(false);
 	});
+	it("does not repeatedly roll over a tool loop when fixed context exceeds the recovery band", async () => {
+		const mock = createMockModel({
+			contextWindow: 200_000,
+			responses: [
+				{ content: [{ type: "toolCall", name: "context_notes", arguments: {} }], usage: { input: 190_000 } },
+				{ content: [{ type: "toolCall", name: "context_notes", arguments: {} }], usage: { input: 190_000 } },
+				{ content: [{ type: "toolCall", name: "context_notes", arguments: {} }], usage: { input: 190_000 } },
+				{ content: ["done"] },
+				{ content: [{ type: "toolCall", name: "context_notes", arguments: {} }], usage: { input: 190_000 } },
+				{ content: ["done again"] },
+			],
+		});
+		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([mock.model]);
+		const fixedPrompt = "fixed context ".repeat(100_000);
+		const manager = SessionManager.inMemory();
+		const settings = Settings.isolated({
+			"compaction.experimentalContextManagement": true,
+			"compaction.thresholdTokens": 100_000,
+			"compaction.keepRecentTokens": 1,
+			"compaction.midTurnEnabled": true,
+			"compaction.autoContinue": false,
+		});
+		const { tools } = createRolloverTools(manager, settings);
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: {
+				model: mock.model,
+				systemPrompt: [fixedPrompt],
+				tools,
+				messages: [],
+			},
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: manager,
+			settings,
+			modelRegistry,
+			toolRegistry: new Map(tools.map(tool => [tool.name, tool])),
+			builtInToolNames: BUILTIN_TOOL_NAMES,
+		});
+		const notices: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "notice") notices.push(event.message);
+		});
+		await session.prompt("Continue the assignment across three tool calls.");
+		expect(mock.calls).toHaveLength(4);
+		expect(manager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(0);
+		expect(notices.filter(message => message.includes("cannot create headroom"))).toHaveLength(1);
+
+		const previousSessionId = manager.getSessionId();
+		expect(await session.newSession()).toBe(true);
+		expect(manager.getSessionId()).not.toBe(previousSessionId);
+		agent.setSystemPrompt([fixedPrompt]);
+		await session.prompt("Continue the next assignment.");
+		expect(mock.calls).toHaveLength(6);
+		expect(manager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(0);
+		expect(notices.filter(message => message.includes("cannot create headroom"))).toHaveLength(2);
+	});
+
 	it("keeps exact earlier requirements and the latest notebook through three real rollover boundaries", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected bundled model");

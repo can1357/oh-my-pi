@@ -131,6 +131,8 @@ version = "1.23.1"
 features = ["js"]
 
 [lints.clippy]
+# This vendored crate's cargo lint otherwise checks metadata for the whole workspace.
+cargo_common_metadata = "allow"
 bool_to_int_with_if = "allow"
 cognitive_complexity = "allow"
 collapsible_else_if = "allow"

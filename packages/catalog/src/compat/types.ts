@@ -351,6 +351,8 @@ export interface CompiledBehavior {
 	pricingPeers: CompiledPricingPeer[];
 	retryResetTimezones: CompiledRetryResetTimezone[];
 	retiredProviders: string[];
+	/** Hosts whose prefix caches benefit from a stable append-only conversation. */
+	appendOnlyContextProviders: string[];
 	referenceIsolatedProviders: string[];
 	/** Built-in model selector chains per agent role, keyed by role in declaration order. */
 	roleDefaults: Record<string, string[]>;
@@ -396,8 +398,10 @@ export type CompiledAuthValidation =
 			kind: "models-endpoint";
 			label?: string;
 			url: string;
-			/** Env var holding an alternate base URL; `/models` is appended to it. */
+			/** Env var holding an alternate base URL; `baseUrlPath` is appended to it. */
 			baseUrlEnv?: string;
+			/** Path appended to the `baseUrlEnv` value (default `/models`), for bases that exclude the API version. */
+			baseUrlPath?: string;
 			/** Hook returning extra request headers (may throw a configuration error). */
 			headersHook?: string;
 			optional?: boolean;

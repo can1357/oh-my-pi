@@ -86,6 +86,17 @@ function parseArtifactId(url: InternalUrl): string {
 /** An artifact id no session artifacts dir backs; `locate` maps it to null, `resolve` surfaces it. */
 class MissingArtifactError extends Error {}
 
+/**
+ * The caller's own in-memory spill for `id`, when the caller has no artifacts
+ * dir (`--no-session`, SDK). It wins over registry-backed files: ids are
+ * per-session counters, so another session's `<id>.*` file is not this one.
+ */
+function callerInMemoryArtifact(id: string, context?: ResolveContext): string | null {
+	if (context?.localProtocolOptions?.getArtifactsDir?.()) return null;
+	if (context?.session?.seanceSourceArtifactsDir) return null;
+	return context?.session?.sessionManager?.getArtifactContent?.(id) ?? null;
+}
+
 /** Resolve an `artifact://` URL to its backing file without reading artifact bytes. */
 async function resolveArtifactFile(url: InternalUrl, context?: ResolveContext): Promise<ResolvedArtifactFile> {
 	const id = parseArtifactId(url);
@@ -166,6 +177,8 @@ export class ArtifactProtocolHandler implements ProtocolHandler {
 
 	/** Backing artifact file; null for unknown ids, throws the resolve errors for malformed ones. */
 	async locate(url: InternalUrl, context?: ResolveContext): Promise<string | null> {
+		// No backing file: the read tool falls through to `resolve` and applies selectors in memory.
+		if (callerInMemoryArtifact(parseArtifactId(url), context) !== null) return null;
 		try {
 			return (await resolveArtifactFile(url, context)).path;
 		} catch (error) {
@@ -175,6 +188,20 @@ export class ArtifactProtocolHandler implements ProtocolHandler {
 	}
 
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
+		// A non-persistent session (`--no-session`, SDK) spills into memory
+		// instead of an artifacts dir; the `artifact://` link the truncation
+		// footer advertises must read that copy. The bytes are already resident,
+		// so the size gate below (which avoids loading a large file) does not
+		// apply; the read tool pages and limits the content it returns.
+		const inMemory = callerInMemoryArtifact(parseArtifactId(url), context);
+		if (inMemory !== null) {
+			return {
+				url: url.href,
+				content: inMemory,
+				contentType: "text/plain",
+				size: Buffer.byteLength(inMemory, "utf8"),
+			};
+		}
 		const artifact = await resolveArtifactFile(url, context);
 
 		// Path consumers (search, the shell filesystem) use `locate`, which never

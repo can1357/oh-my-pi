@@ -2,7 +2,7 @@ import * as path from "node:path";
 
 import { buildPathTree, isUrlLikePath, type PathTreeInput, walkPathTree } from "@oh-my-pi/pi-utils";
 import type { TspTone } from "@oh-my-pi/pi-wire";
-import { code, col, keyed, span, text } from "../native/describe";
+import { code, col, keyed } from "../native/describe";
 import type { NativeNode } from "../native/node";
 import { formatHashlineHeader } from "./hashline-format";
 import { fileRow } from "./native-view";
@@ -306,10 +306,10 @@ export function* walkGroupedOutput(lines: readonly string[]): Generator<GroupedO
 
 /** `*12│text`, ` 12|text`, `*12:text`: optional match marker, line number, gutter, content. */
 const GROUPED_NUMBERED_LINE_RE = /^\s*(\*?)(\d+)(?:│|[:|])(.*)$/;
-/** `    │...`: grep's gap between non-adjacent context runs (drawn as {@link numberedCode}'s `…` row). */
+/** `    │...`: grep's gap between non-adjacent context runs (Tern draws it from the jump in {@link numberedCode}'s numbers). */
 const GROUPED_GAP_LINE_RE = /^\s*│\.\.\.$/;
 
-/** One source line for {@link numberedCode}: its number (`null` for an elision marker), text and match mark. */
+/** One source line for {@link numberedCode}: its number (`null` for an elision marker, which adds no line), text and match mark. */
 export interface NumberedLine {
 	n: number | null;
 	text: string;
@@ -317,58 +317,52 @@ export interface NumberedLine {
 }
 
 /**
- * Numbered `code` for possibly non-contiguous source lines: one block per run
- * of consecutive line numbers (`start` = the run's first line, match lines
- * `mark`ed), with a `…` row wherever the numbers jump or an elision marker
- * (`n: null`) sits. `path` is the file the lines come from: Tern picks their
- * grammar from it and draws no header (the row or head above names the file).
- * `wrap` soft-wraps long lines instead of scrolling the block sideways.
+ * One numbered `code` block for possibly non-contiguous source lines (match
+ * lines `mark`ed by their line number): `start` when the numbers run on
+ * consecutively, else `nums` (each line's number), from whose jumps Tern draws
+ * the `…` gap rows in the gutter. Elision markers (`n: null`) add no line; the
+ * numbers jump around them. `path` is the file the lines come from: Tern picks
+ * their grammar from it and draws no header (the row or head above names the
+ * file). `wrap` soft-wraps long lines instead of scrolling the block sideways.
+ * `undefined` when no line is numbered.
  */
 export function numberedCode(
 	lines: readonly NumberedLine[],
 	opts: { path?: string; wrap?: boolean } = {},
-): NativeNode[] {
-	const out: NativeNode[] = [];
-	let run: { start: number; text: string[]; marks: { line: number; tone: TspTone }[] } | undefined;
-	const flush = () => {
-		if (!run) return;
-		// The quiet `…` row between two non-adjacent runs.
-		if (out.length > 0) out.push(keyed(text([span("…", "dim")], { wrap: "none" }), `g${run.start}`));
-		out.push(
-			keyed(
-				code(run.text.join("\n"), {
-					start: run.start,
-					numbers: true,
-					path: opts.path,
-					wrap: opts.wrap,
-					marks: run.marks.length > 0 ? run.marks : undefined,
-				}),
-				`c${run.start}`,
-			),
-		);
-		run = undefined;
-	};
+): NativeNode | undefined {
+	const nums: number[] = [];
+	const body: string[] = [];
+	const marks: { line: number; tone: TspTone }[] = [];
+	let contiguous = true;
 	for (const line of lines) {
-		if (line.n === null) {
-			flush();
-			continue;
-		}
-		if (run && run.start + run.text.length !== line.n) flush();
-		run ??= { start: line.n, text: [], marks: [] };
-		run.text.push(line.text);
-		if (line.mark) run.marks.push({ line: line.n, tone: "accent" });
+		if (line.n === null) continue;
+		if (nums.length > 0 && line.n !== nums[nums.length - 1]! + 1) contiguous = false;
+		nums.push(line.n);
+		body.push(line.text);
+		if (line.mark) marks.push({ line: line.n, tone: "accent" });
 	}
-	flush();
-	return out;
+	if (nums.length === 0) return undefined;
+	return keyed(
+		code(body.join("\n"), {
+			start: contiguous ? nums[0] : undefined,
+			nums: contiguous ? undefined : nums,
+			numbers: true,
+			path: opts.path,
+			wrap: opts.wrap,
+			marks: marks.length > 0 ? marks : undefined,
+		}),
+		`c${nums[0]}`,
+	);
 }
 
 /**
  * Describe grouped search output (grep / ast-grep / ast-edit display content)
  * by file (§7.3 grep): per file a 22px path row (dim dir, strong name, the
  * header's suffix or the match count as a chip), then its lines as
- * {@link numberedCode} with match lines marked and `…` between non-adjacent
- * runs. Unnumbered body lines stay plain `code`. `maxFiles` keeps only the
- * first files (the caller says how many were left out). `file` owns the lines
+ * one {@link numberedCode} block with match lines marked (gaps between
+ * non-adjacent runs drawn in its gutter). Unnumbered body lines stay plain
+ * `code`. `maxFiles` keeps only the first files (the caller says how many
+ * were left out). `file` owns the lines
  * before any header: a single-file search prints none, yet its lines get the
  * same file row as a directory search's.
  */
@@ -386,10 +380,9 @@ export function describeGroupedOutput(
 
 	const flushLines = () => {
 		const target = current?.children ?? loose;
-		if (numbered.length > 0) {
-			target.push(...numberedCode(numbered, { path: current?.path }));
-			numbered = [];
-		}
+		const block = numberedCode(numbered, { path: current?.path });
+		if (block) target.push(block);
+		numbered = [];
 		if (plain.length > 0) {
 			target.push(keyed(code(plain.join("\n")), `p${target.length}`));
 			plain = [];

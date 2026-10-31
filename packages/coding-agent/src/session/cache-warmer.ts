@@ -88,6 +88,11 @@ function supportsLongCacheRetention(model: Model<Api>): boolean {
 			compat !== undefined && "supportsLongCacheRetention" in compat && compat.supportsLongCacheRetention === true
 		);
 	}
+	// Factory Droid resolves long retention per upstream at request time, so
+	// warming starts on the 5m tier and adopts 1h once a response reports it.
+	// A model declaring only a 1h lifetime (a long-only `promptCache` override)
+	// starts on 1h instead, and stops if a response reports a 5m write.
+	if (model.api === "factory-droid-agent") return model.promptCache?.short === undefined;
 	if (model.api === "bedrock-converse-stream") {
 		return (
 			compat !== undefined &&
@@ -141,6 +146,18 @@ export function observedPromptCacheTier(usage: Usage): PromptCacheTier | undefin
 	if ((usage.cttl?.ephemeral1h ?? 0) > 0) return "long";
 	if ((usage.cttl?.ephemeral5m ?? 0) > 0) return "short";
 	return undefined;
+}
+
+/**
+ * Whether `message` is the response to a request sent to `model`. A
+ * server-side fallback retags the response with the served model, so its
+ * fallback marker's `from` names the model the request went to.
+ */
+function answers(message: AssistantMessage, model: Model<Api>): boolean {
+	if (message.provider !== model.provider) return false;
+	if (message.model === model.id) return true;
+	const fallback = message.content.find(block => block.type === "fallback");
+	return fallback?.type === "fallback" && fallback.from.model === model.id;
 }
 
 /**
@@ -410,7 +427,7 @@ export class CacheWarmer {
 	onResponse(message: AssistantMessage): void {
 		const observed = observedPromptCacheTier(message.usage);
 		const pending = this.#pendingEntry;
-		if (pending && message.provider === pending.model.provider && message.model === pending.model.id) {
+		if (pending && answers(message, pending.model)) {
 			this.#pendingEntry = undefined;
 			if (message.stopReason !== "error" && (message.usage.cacheRead > 0 || message.usage.cacheWrite > 0)) {
 				if (observed !== undefined) pending.tier = observed;
@@ -419,10 +436,13 @@ export class CacheWarmer {
 		}
 		const run = this.#run;
 		if (!run || run.timer === undefined) return;
-		if (message.provider !== run.model.provider || message.model !== run.model.id) return;
+		if (!answers(message, run.model)) return;
 		if (observed === undefined || observed === run.tier) return;
 		const delayMs = this.#delayFor(run.model, observed);
-		if (delayMs === undefined) return;
+		if (delayMs === undefined) {
+			this.#stop("cache lifetime unavailable");
+			return;
+		}
 		clearTimeout(run.timer);
 		run.timer = undefined;
 		run.tier = observed;

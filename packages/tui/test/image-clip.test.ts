@@ -221,3 +221,63 @@ describe("direct placement lifecycle", () => {
 		}
 	});
 });
+
+describe("uncroppable image blocks", () => {
+	for (const protocol of [ImageProtocol.Iterm2, ImageProtocol.Kitty]) {
+		it(`does not draw a top-clipped ${protocol === ImageProtocol.Kitty ? "Kitty transmit-and-display" : "iTerm2"} image over following text`, async () => {
+			terminal.imageProtocol = protocol;
+			const term = new VirtualTerminal(40, 8);
+			const scheduler = new VirtualRenderScheduler();
+			const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+			const graphic = new Image(
+				BASE64_ONE_PIXEL_PNG,
+				"image/png",
+				{ fallbackColor: text => text },
+				{ maxWidthCells: 4, maxHeightCells: 4 },
+				{ widthPx: 40, heightPx: 40 },
+			);
+			const settled = ["table row", "table border"];
+			let retired = false;
+			let accepted = false;
+			tui.setFrameProvider({
+				renderFrame: size => {
+					const block = graphic.render(size.columns);
+					if (!retired) return { viewport: [...settled, ...block, "following text"] };
+					return {
+						history: accepted ? undefined : { id: 1, rows: settled },
+						viewport: [...block.slice(2), "following text"],
+					};
+				},
+				acknowledgeHistory() {
+					accepted = true;
+				},
+			});
+			const writes: string[] = [];
+			const write = term.write.bind(term);
+			term.write = data => {
+				writes.push(data);
+				write(data);
+			};
+			try {
+				tui.start();
+				await scheduler.settle(term);
+				expect(writes.join("")).toContain(protocol);
+				writes.length = 0;
+				retired = true;
+				tui.requestRender();
+				await scheduler.settle(term);
+				const output = writes.join("");
+				expect(output).not.toContain(protocol);
+				expect(
+					term
+						.getViewport()
+						.map(row => row.trimEnd())
+						.slice(0, 2),
+				).toEqual(settled);
+				expect(term.getViewport()[4]?.trimEnd()).toBe("following text");
+			} finally {
+				tui.stop();
+			}
+		});
+	}
+});

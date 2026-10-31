@@ -18,7 +18,7 @@ describe("RPC queued-message editing", () => {
 	let directory: string;
 
 	/** `script` selects a scripted first model call; see the fixture's QUEUED_RPC_SCRIPT. */
-	function createClient(script?: "internal-steer" | "live-steer"): RpcClient {
+	function createClient(script?: "hold" | "until-steer" | "internal-steer" | "live-steer"): RpcClient {
 		return new RpcClient({
 			command: [process.execPath, path.join(import.meta.dir, "fixtures", "queued-message-rpc-agent.ts")],
 			cwd: directory,
@@ -197,6 +197,8 @@ describe("RPC queued-message editing", () => {
 			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
 		};
 
+		// The first turn streams until the promoted steer is queued.
+		client = createClient("until-steer");
 		await client.start();
 
 		const agentStarted = Promise.withResolvers<void>();
@@ -231,9 +233,9 @@ describe("RPC queued-message editing", () => {
 	}, 30_000);
 
 	describe("abort_and_restore_queue", () => {
-		/** Starts the fixture under `script` with a first turn that is still streaming. */
-		async function startStreamingTurn(script?: "internal-steer" | "live-steer"): Promise<void> {
-			if (script) client = createClient(script);
+		/** Starts the fixture under `script` with a first turn that streams until aborted. */
+		async function startStreamingTurn(script: "hold" | "internal-steer" | "live-steer" = "hold"): Promise<void> {
+			client = createClient(script);
 			await client.start();
 			const agentStarted = Promise.withResolvers<void>();
 			const unsubscribe = client.onEvent(event => {
@@ -306,7 +308,7 @@ describe("RPC queued-message editing", () => {
 			).toMatchObject({ errorMessage: USER_INTERRUPT_LABEL });
 		}, 30_000);
 
-		test("drops a queued non-user steer without returning or running it", async () => {
+		test("records a queued non-user steer without returning or running it", async () => {
 			await startStreamingTurn("internal-steer");
 			await untilState(state => state.queuedMessageCount === 1, "Internal steer was never queued");
 			await client.steer("queued steer");
@@ -314,7 +316,20 @@ describe("RPC queued-message editing", () => {
 			expect(await client.abortAndRestoreQueue()).toEqual({ steering: [{ text: "queued steer" }], followUp: [] });
 			expect((await client.getState()).queuedMessageCount).toBe(0);
 			const messages = await transcriptAfterNextPrompt();
-			expect(messages.filter(message => message.role === "custom")).toEqual([]);
+			// Not handed back for the editor and not lost: recorded once after the aborted reply,
+			// ahead of the next prompt, and no resume turn ran on it (two replies in all).
+			const custom = messages.filter(message => message.role === "custom");
+			expect(custom).toMatchObject([{ customType: "test-internal-steer", content: "internal steer" }]);
+			const steerIndex = messages.indexOf(custom[0]!);
+			expect(steerIndex).toBeGreaterThan(
+				messages.findIndex(message => message.role === "assistant" && message.stopReason === "aborted"),
+			);
+			expect(steerIndex).toBeLessThan(
+				messages.findIndex(
+					message => message.role === "user" && JSON.stringify(message.content).includes("after abort"),
+				),
+			);
+			expect(messages.filter(message => message.role === "assistant")).toHaveLength(2);
 			expect(userTexts(messages)).toEqual(expectedUserTurns);
 		}, 30_000);
 

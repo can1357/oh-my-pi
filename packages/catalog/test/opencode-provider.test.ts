@@ -793,38 +793,39 @@ describe("OpenCode provider discovery", () => {
 		});
 	});
 
-	test("routes live Go Argon to native Gemini with supported thinking levels (#15722)", async () => {
-		const id = "gemini-4-argon-contributor";
+	test("routes both Go Argon IDs to native Gemini with supported thinking levels (#17031)", async () => {
+		const ids = ["gemini-4-argon", "gemini-4-argon-contributor"] as const;
 		const baseUrl = "https://opencode.ai/inference/go/v1";
 		const descriptor = MODELS_DEV_PROVIDER_DESCRIPTORS.find(item => item.providerId === "opencode-go");
-		expect(descriptor?.resolveApi?.(id, { tool_call: true })).toEqual({ api: "google-generative-ai", baseUrl });
-
 		let requestedUrl = "";
 		const options = opencodeGoModelManagerOptions({
 			apiKey: "test-key",
 			fetch: async input => {
 				requestedUrl = String(input);
-				return modelListResponse([id]);
+				return modelListResponse(ids);
 			},
 		});
-		const spec = (await options.fetchDynamicModels?.())?.find(model => model.id === id);
-		if (!spec) throw new Error("Go did not discover Argon");
-		const model = buildModel(spec);
+		const specs = await options.fetchDynamicModels?.();
 		expect(requestedUrl).toBe(`${baseUrl}/models`);
-		expect(model).toMatchObject({
-			api: "google-generative-ai",
-			baseUrl,
-			reasoning: true,
-			input: ["text", "image"],
-			contextWindow: 1_048_576,
-			maxTokens: 65_536,
-			thinking: {
-				mode: "google-level",
-				efforts: [Effort.Low, Effort.Medium, Effort.High],
-				requiresEffort: true,
-			},
-		});
-		expect(options.dropCachedModelIdsOnStaticMismatch).toContain(id);
+		for (const id of ids) {
+			expect(descriptor?.resolveApi?.(id, { tool_call: true })).toEqual({ api: "google-generative-ai", baseUrl });
+			const spec = specs?.find(model => model.id === id);
+			if (!spec) throw new Error(`Go did not discover ${id}`);
+			expect(buildModel(spec)).toMatchObject({
+				api: "google-generative-ai",
+				baseUrl,
+				reasoning: true,
+				input: ["text", "image"],
+				contextWindow: 1_048_576,
+				maxTokens: 65_536,
+				thinking: {
+					mode: "google-level",
+					efforts: [Effort.Low, Effort.Medium, Effort.High],
+					requiresEffort: true,
+				},
+			});
+			expect(options.dropCachedModelIdsOnStaticMismatch).toContain(id);
+		}
 	});
 
 	test("routes live Zen Argon to the native Google endpoint (#15977)", async () => {

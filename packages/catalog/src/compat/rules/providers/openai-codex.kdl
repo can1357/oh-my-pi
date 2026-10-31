@@ -16,7 +16,7 @@ provider "openai-codex" {
 
 	// Policy budgets: the Codex backend documents no request-size or image
 	// limit, and requests with several thousand images fail mid-stream at
-	// random. Inline images keep Anthropic's 24 MB; the official endpoint's
+	// random. Inline images keep a 24 MB budget; the official endpoint's
 	// image count stays well below those failures. A custom baseUrl keeps 200.
 	inline-image-byte-budget 24000000
 	image-count-budget 200
@@ -139,6 +139,19 @@ provider "openai-codex" {
 			priority 2.5
 			ultrafast 8
 		}
+	}
+	// GPT-6.1 Terra lists at half GPT-6.1 Sol: $1/$5 with $0.05 cached input
+	// (OpenAI API docs, 2026-10-26). OpenAI documents 922K max input (1.05M
+	// total); the curated maximum applies only with extended context on, and a
+	// higher live maximum still wins. Codex ships no Ultrafast tier for it.
+	models "gpt-6.1-terra" "gpt-6.1-terra-wm" {
+		cost-patch {
+			input 1.0
+			output 5.0
+			cache-read 0.05
+			cache-write 0
+		}
+		max-context-window 922000
 	}
 	models "gpt-6-luna" "gpt-6-luna-wm" {
 		cost-patch {
