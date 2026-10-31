@@ -94,6 +94,7 @@ export default function (pi: HookAPI) {
 						timestamp: Date.now(),
 					};
 
+					// model-request: extension — an example hook; the extension boundary governs its requests.
 					const response = await complete(
 						ctx.model!,
 						{ systemPrompt: [SYSTEM_PROMPT], messages: [userMessage] },

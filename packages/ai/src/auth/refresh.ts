@@ -1,5 +1,5 @@
 import { scheduler } from "node:timers/promises";
-import { isSqliteBusyError, logger, postmortem } from "@oh-my-pi/pi-utils";
+import { isSqliteBusyError, logger, postmortem, runOutsideRequestHold } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { getOAuthProvider, normalizeOAuthCredentialExpiry, refreshOAuthToken } from "../registry/oauth";
 import type { OAuthCredentials, OAuthProvider } from "../registry/oauth/types";
@@ -928,25 +928,22 @@ export class OAuthRefresher {
 		if (credentialId === undefined) {
 			return this.#refreshOAuthCredentialUnshared(provider, credential, undefined, signal, reason, rejectedAccess);
 		}
-		const promise = this.#refreshOAuthCredentialUnshared(
-			provider,
-			credential,
-			credentialId,
-			signal,
-			reason,
-			rejectedAccess,
-		)
-			.then(refreshed => {
-				// A delegated refresh may have returned a broker-cached token rather
-				// than minting one. Only direct local requests can establish mint time.
-				if (!hasRefreshLeases(this.#deps.store) && this.#mintsLocally()) {
-					this.#rememberMint(provider, credentialId, refreshed);
-				}
-				return refreshed;
-			})
-			.finally(() => {
-				this.#oauthCredentialRefreshInFlight.delete(credentialId);
-			});
+		// Every caller for this credential joins this refresh, so it starts outside the caller's
+		// provider-request hold: a held caller must not hold it, or refuse it, for the others.
+		const promise = runOutsideRequestHold(() =>
+			this.#refreshOAuthCredentialUnshared(provider, credential, credentialId, signal, reason, rejectedAccess)
+				.then(refreshed => {
+					// A delegated refresh may have returned a broker-cached token rather
+					// than minting one. Only direct local requests can establish mint time.
+					if (!hasRefreshLeases(this.#deps.store) && this.#mintsLocally()) {
+						this.#rememberMint(provider, credentialId, refreshed);
+					}
+					return refreshed;
+				})
+				.finally(() => {
+					this.#oauthCredentialRefreshInFlight.delete(credentialId);
+				}),
+		);
 		this.#oauthCredentialRefreshInFlight.set(credentialId, promise);
 		return raceSignal(promise, signal, "credential refresh aborted");
 	}
@@ -1111,7 +1108,9 @@ export class OAuthRefresher {
 		// A caller that already left must not own a refresh that later callers join.
 		if (signal?.aborted) throw new AIError.AbortError("credential refresh aborted");
 
-		const promise = (async () => {
+		// Shared by every caller for this row, so started outside the caller's provider-request hold: the
+		// refresh itself already is, and so must the store reload a lost compare-and-set triggers.
+		const promise = runOutsideRequestHold(async () => {
 			this.#deps.pool.bump("credential-refresh-start");
 			try {
 				return await this.#forceRefreshCredentialByIdUnshared(id, signal, options?.reason, options?.rejectedAccess);
@@ -1121,7 +1120,7 @@ export class OAuthRefresher {
 			} finally {
 				this.#oauthRefreshInFlight.delete(id);
 			}
-		})();
+		});
 		this.#oauthRefreshInFlight.set(id, promise);
 		return raceSignal(promise, signal, "credential refresh aborted");
 	}

@@ -85,6 +85,7 @@ ${conversationText}
 
 		try {
 			// Pass signal to honor abort requests (e.g., user cancels compaction)
+			// model-request: extension — an example hook; the extension boundary governs its requests.
 			const response = await complete(model, { messages: summaryMessages }, { apiKey, maxTokens: 8192, signal });
 
 			const summary = response.content

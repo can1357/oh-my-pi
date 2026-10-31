@@ -16,7 +16,7 @@
 import { Buffer } from "node:buffer";
 import * as os from "node:os";
 import * as path from "node:path";
-import { $envpos, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { $envpos, isEnoent, logger, runOutsideRequestHold } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import type { FetchImpl } from "../types";
 import { raceWithSignal } from "../utils/abort";
@@ -312,8 +312,9 @@ export async function getVertexAccessToken(options?: { signal?: AbortSignal; fet
 
 	// Deliberately resolve without any caller's signal: the in-flight promise is shared
 	// by every concurrent caller, so aborting one request must not fail the whole batch.
-	// Each caller races its own signal against the shared promise instead.
-	const promise = (async () => {
+	// Each caller races its own signal against the shared promise instead. For the same
+	// reason it starts outside the caller's provider-request hold.
+	const promise = runOutsideRequestHold(async () => {
 		try {
 			const { source, token } = await resolveAccessTokenUncached(
 				AbortSignal.timeout(SHARED_TOKEN_RESOLVE_TIMEOUT_MS),
@@ -326,7 +327,7 @@ export async function getVertexAccessToken(options?: { signal?: AbortSignal; fet
 		} finally {
 			inflight.delete(cacheKey);
 		}
-	})();
+	});
 	inflight.set(cacheKey, promise);
 	return raceWithSignal(promise, options?.signal);
 }

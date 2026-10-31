@@ -1,4 +1,4 @@
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, runOutsideRequestHold } from "@oh-my-pi/pi-utils";
 import { USAGE_REPORT_TTL_MS } from "./sqlite-credential-store";
 import type { UsageReport } from "../usage";
 import { claudeResetClearedBlockScopes, consumeClaudeResetCredit, listClaudeResetCredits } from "../usage/claude-reset";
@@ -63,9 +63,10 @@ export class ResetCredits implements ResetsApi {
 		const key = JSON.stringify([provider, baseUrl, activeId]);
 		let pending = this.#listInFlight.get(key);
 		if (!pending) {
-			pending = this.#listAccounts(provider, baseUrl, { ...options, signal: undefined }).finally(() =>
-				this.#listInFlight.delete(key),
-			);
+			// Shared by every caller on this account, so started outside the caller's provider-request hold.
+			pending = runOutsideRequestHold(() =>
+				this.#listAccounts(provider, baseUrl, { ...options, signal: undefined }),
+			).finally(() => this.#listInFlight.delete(key));
 			this.#listInFlight.set(key, pending);
 		}
 		return raceSignal(pending, options?.signal, "Reset discovery aborted");
@@ -147,11 +148,14 @@ export class ResetCredits implements ResetsApi {
 			if (inFlight.creditId !== creditId) return { ...resolvedIdentity, ok: false, code: "reset_in_progress" };
 			return inFlight.promise;
 		}
-		const promise = this.#redeemAccountReset(provider, match, accountKey, {
-			creditId,
-			baseUrl,
-			signal: options.signal,
-		}).finally(() => this.#resetInFlight.delete(accountKey));
+		// Shared with every attempt on this account, so started outside the caller's provider-request hold.
+		const promise = runOutsideRequestHold(() =>
+			this.#redeemAccountReset(provider, match, accountKey, {
+				creditId,
+				baseUrl,
+				signal: options.signal,
+			}),
+		).finally(() => this.#resetInFlight.delete(accountKey));
 		this.#resetInFlight.set(accountKey, { creditId, promise });
 		return promise;
 	}

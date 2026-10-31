@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `signal` to recall options: it cancels the recall's query-embedding request (`embed`, `embedQuery` and embedding providers receive it too), and a cancelled recall ranks without an embedding ([#17457](https://github.com/can1357/oh-my-pi/pull/17457) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.13.3] - 2026-10-28
 
 ### Changed

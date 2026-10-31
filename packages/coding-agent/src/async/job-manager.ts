@@ -54,8 +54,8 @@ export const ASYNC_JOB_MANAGER_SHUTDOWN_REASON = Symbol("AsyncJobManager shutdow
  * a vibe suspension, which marks its workers suspended before it cancels them. Cancelled when the
  * owner merely began disposing, the job would end before that choice, and a suspended vibe worker
  * would be tombstoned. So the job stays alive until that teardown cancels it, but idle: from the
- * moment its owner begins disposing, every provider request it makes is held (see
- * {@link AsyncJob.requestHold}), so it reaches no provider while the owner decides.
+ * moment its owner begins disposing, every request it makes is held (see
+ * {@link AsyncJob.requestHold}), so it reaches no provider, or any other server, while the owner decides.
  */
 export const SUBAGENT_TEARDOWN_DECIDES =
 	"runs a lifecycle-tracked subagent, which its owner's dispose() and the agent lifecycle end";
@@ -167,9 +167,10 @@ export interface AsyncJob {
 	survivesBeginDispose?: string;
 	/**
 	 * Aborted when the job's owner begins disposing while the job runs in the background (a job that
-	 * survives that is held, the others are cancelled). From then on every provider request the job
-	 * makes waits instead of being sent (`runInRequestHoldScope`), until the job is cancelled; work
-	 * about the job done elsewhere (its widget) stops on it too. Set by {@link AsyncJobManager.register}.
+	 * survives that is held, the others are cancelled). From then on every request the job makes, its
+	 * provider requests and every other fetch, its tools' included, waits instead of being sent
+	 * (`runInRequestHoldScope`), until the job is cancelled; work about the job done elsewhere (its
+	 * widget) stops on it too. Set by {@link AsyncJobManager.register}.
 	 */
 	requestHold?: AbortSignal;
 }
@@ -293,7 +294,7 @@ export interface AsyncJobRegisterOptions {
 	 * awaits it any more, so whatever model work it does would otherwise reach the provider from a
 	 * closing session. Set it only for work whose end the owner's own teardown decides, and say why
 	 * (e.g. {@link SUBAGENT_TEARDOWN_DECIDES}). Such a job is kept alive but held: none of its
-	 * provider requests is sent until the teardown cancels it.
+	 * requests is sent until the teardown cancels it.
 	 */
 	survivesBeginDispose?: string;
 }
@@ -466,6 +467,10 @@ export class AsyncJobManager {
 			requestHold: requestHold.signal,
 		};
 		this.#requestHolds.set(id, requestHold);
+		// Listed before its body starts: a body that begins its owner's disposal before its first await
+		// is then found by the owner-disposal listener (`bindOwnerDisposal`), and held or cancelled like
+		// any other job of that owner.
+		this.#jobs.set(id, job);
 		// An owner that has begun disposing starts no background work: the job runs already
 		// cancelled, so its body sees an aborted signal from its first line, or, if it survives the
 		// owner's disposal, already held.
@@ -486,8 +491,9 @@ export class AsyncJobManager {
 		};
 		job.promise = (async () => {
 			try {
-				// Everything the body does runs in the job's hold scope: once the hold engages, its provider
-				// requests (a subagent's turns, nested subagents' included) wait until the job is cancelled.
+				// Everything the body does runs in the job's hold scope: once the hold engages, its requests
+				// (a subagent's turns and its tools' fetches, nested subagents' included) wait until the job
+				// is cancelled.
 				const outcome = await runInRequestHoldScope(requestHold.signal, abortController.signal, () =>
 					run({
 						jobId: id,
@@ -538,8 +544,6 @@ export class AsyncJobManager {
 				}
 			}
 		})();
-
-		this.#jobs.set(id, job);
 		return id;
 	}
 
@@ -751,13 +755,19 @@ export class AsyncJobManager {
 	 * it aborts, every background job of the owner is cancelled, and so is one the owner backgrounds
 	 * or registers afterwards, except those registered with
 	 * {@link AsyncJobRegisterOptions.survivesBeginDispose}: those stay alive but held, so none of their
-	 * provider requests is sent ({@link AsyncJob.requestHold}). A foreground-backed job belongs to the
+	 * requests is sent ({@link AsyncJob.requestHold}). A foreground-backed job belongs to the
 	 * call (and so the turn) awaiting it, and is stopped only if it is backgrounded.
 	 *
 	 * Last binding wins for an owner id; the returned unbind clears it only while it is still
 	 * `signal`'s, so a revived session's binding survives its predecessor's late cleanup.
+	 *
+	 * When a binding whose disposal fired goes, by its unbind (its session's teardown has finished) or
+	 * by a new binding for the owner (a new session took the owner's id), the owner's held jobs are
+	 * cancelled, since nothing else would end them. That covers a survivor registered after the
+	 * teardown cancelled the owner's jobs, which is held from its first line.
 	 */
 	bindOwnerDisposal(ownerId: string, signal: AbortSignal): () => void {
+		if (this.#ownerDisposals.get(ownerId)?.aborted) this.#cancelHeldJobs(ownerId);
 		this.#ownerDisposals.set(ownerId, signal);
 		const onAbort = (): void => {
 			if (this.#ownerDisposals.get(ownerId) !== signal) return;
@@ -769,8 +779,23 @@ export class AsyncJobManager {
 		else signal.addEventListener("abort", onAbort, { once: true });
 		return () => {
 			signal.removeEventListener("abort", onAbort);
-			if (this.#ownerDisposals.get(ownerId) === signal) this.#ownerDisposals.delete(ownerId);
+			if (this.#ownerDisposals.get(ownerId) !== signal) return;
+			this.#ownerDisposals.delete(ownerId);
+			this.#cancelHeldJobs(ownerId);
 		};
+	}
+
+	/**
+	 * Cancel `ownerId`'s running jobs that are held. Without a reason: the session teardowns that
+	 * share a manager, the only ones that leave a held job behind, cancel their jobs without one too
+	 * (a manager's owning session cancels everything when it disposes the manager).
+	 */
+	#cancelHeldJobs(ownerId: string): void {
+		for (const job of this.#jobs.values()) {
+			if (job.ownerId !== ownerId || job.status !== "running" || job.requestHold?.aborted !== true) continue;
+			job.status = "cancelled";
+			job.abortController.abort();
+		}
 	}
 
 	/**

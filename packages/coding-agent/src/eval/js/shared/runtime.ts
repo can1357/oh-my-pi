@@ -667,12 +667,16 @@ export class JsRuntime {
 				const resolved = await this.#moduleLoader.resolveForRun(baseDir, source);
 				if (resolved.mode === "local") return resolved.value;
 				const target = resolved.target;
+				// model-request: turn — an eval cell's own import of a module it names; it runs inside the cell's tool call
+				// (or its job, which a disposing owner holds or cancels).
 				return options !== undefined ? await import(target, options) : await import(target);
 			},
 			__omp_import_from__: async (moduleUrl: string, source: string, options?: ImportCallOptions) => {
 				const resolved = await this.#moduleLoader.resolveForModule(moduleUrl, source, this.#activeCwd());
 				if (resolved.mode === "local") return resolved.value;
 				const target = resolved.target;
+				// model-request: turn — an eval cell's own import of a module it names; it runs inside the cell's tool call
+				// (or its job, which a disposing owner holds or cancels).
 				return options !== undefined ? await import(target, options) : await import(target);
 			},
 			__omp_get_require__: (moduleUrl?: string) => this.#activeRequire(moduleUrl),

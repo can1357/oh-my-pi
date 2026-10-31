@@ -8,7 +8,9 @@
  *
  * Seven surviving jobs (one per kind that registers that way) and an ordinary control each run a
  * real session whose model calls a tool over and over against a local endpoint answering in 5 ms.
- * The cases count what each endpoint receives once the owner has begun disposing.
+ * The cases count what each endpoint receives once the owner has begun disposing. Retries are on, as
+ * in a real session: in one case every endpoint answers with a rate limit, so the owner begins
+ * disposing while each provider client waits out its `retry-after` before sending again.
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
@@ -63,6 +65,14 @@ function callAgain(id: number): Response {
 	});
 }
 
+/** An Anthropic rate limit that asks the client to retry in one second. */
+function rateLimited(): Response {
+	return new Response(JSON.stringify({ type: "error", error: { type: "rate_limit_error", message: "Slow down" } }), {
+		status: 429,
+		headers: { "content-type": "application/json", "retry-after": "1" },
+	});
+}
+
 /** The seven registrations that survive `beginDispose()`, and an ordinary job as control. */
 const SURVIVORS = ["eval agent()", "task", "task executor", "restore", "workpool", "workpool worker", "vibe"];
 
@@ -71,6 +81,8 @@ interface Child {
 	survives: boolean;
 	session: AgentSession;
 	server: Bun.Server<undefined>;
+	/** Requests the child's endpoint received. */
+	requests: number;
 	/** Requests the child's endpoint received once the owner had begun disposing. */
 	afterDisposal: number;
 	jobId: string;
@@ -131,21 +143,25 @@ describe("subagent jobs that survive their owner's beginDispose()", () => {
 		return owner;
 	}
 
-	/** Start a job for the owner whose child session loops on a tool until the job is cancelled. */
-	async function startChild(name: string, survives: boolean): Promise<void> {
+	/**
+	 * Start a job for the owner whose child session loops on a tool until the job is cancelled. With
+	 * `rateLimit`, the child's endpoint answers every request with a one-second rate limit instead.
+	 */
+	async function startChild(name: string, survives: boolean, rateLimit = false): Promise<void> {
 		const firstRequest = Promise.withResolvers<void>();
-		let requests = 0;
-		const child = { name, survives, afterDisposal: 0 } as Child;
+		const child = { name, survives, requests: 0, afterDisposal: 0 } as Child;
 		child.server = Bun.serve({
 			hostname: "127.0.0.1",
 			port: 0,
 			fetch: async request => {
 				await request.json();
+				child.requests++;
 				if (owner.isDisposed) child.afterDisposal++;
 				firstRequest.resolve();
+				if (rateLimit) return rateLimited();
 				// A real 5 ms provider latency: the loops make real HTTP turns, which fake time cannot count.
 				await Bun.sleep(5);
-				return callAgain(++requests);
+				return callAgain(child.requests);
 			},
 		});
 		const model: Model<Api> = {
@@ -156,7 +172,7 @@ describe("subagent jobs that survive their owner's beginDispose()", () => {
 			agent: new Agent({ getApiKey: () => "test-key", initialState: { model, systemPrompt: ["Test"], tools: [] } }),
 			sessionManager: SessionManager.inMemory(tempDir.path()),
 			modelRegistry: new ModelRegistry(authStorage, path.join(tempDir.path(), `${name}.yml`)),
-			settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false }),
+			settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": true }),
 		});
 		child.session.agent.setTools([
 			{
@@ -236,4 +252,30 @@ describe("subagent jobs that survive their owner's beginDispose()", () => {
 		},
 		20_000,
 	);
+
+	it("holds them while their provider clients wait out a rate limit", async () => {
+		await createOwner(0);
+		for (const name of SURVIVORS) await startChild(name, true, true);
+		await startChild("ordinary job", false, true);
+
+		// Every child's first request was answered with a one-second `retry-after`; its client is waiting
+		// to send it again when the owner begins disposing. The wait outlasts the retry, in real time:
+		// the client's backoff runs on the real clock.
+		owner.beginDispose();
+		await Bun.sleep(1_500);
+		const counts = children.map(child => ({ child: child.name, requests: child.afterDisposal }));
+		await owner.dispose();
+		await manager.waitForAll();
+
+		expect(counts).toEqual(children.map(child => ({ child: child.name, requests: 0 })));
+	}, 20_000);
+
+	it("lets a child whose owner is not disposing send its retry once the rate limit passes (control)", async () => {
+		await createOwner(0);
+		await startChild("task", true, true);
+
+		await Bun.sleep(1_500);
+
+		expect(children[0].requests).toBeGreaterThanOrEqual(2);
+	}, 20_000);
 });

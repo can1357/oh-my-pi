@@ -8,7 +8,7 @@
  * every gateway client's 30-day sticky row resident.
  */
 import * as os from "node:os";
-import { getAppName, getInstallId, logger, postmortem } from "@oh-my-pi/pi-utils";
+import { getAppName, getInstallId, logger, postmortem, runOutsideRequestHold } from "@oh-my-pi/pi-utils";
 import type { AuthCredentialStore } from "../auth/store";
 import {
 	type AuthCredential,
@@ -1520,30 +1520,34 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		const existing = this.#usageInflight.get(provider) ?? this.#usageInflight.get(undefined);
 		if (existing) return existing;
 		const epoch = this.#usageCacheEpoch;
-		const inflight = this.#client
-			.fetchUsage({ provider, maxAccountsPerProvider: this.#maxBrokerUsageAccounts(provider) })
-			.then(body => {
-				if (epoch !== this.#usageCacheEpoch) {
+		// Shared by every caller, so started outside the caller's provider-request hold, the reload an
+		// invalidation calls for included.
+		const inflight: Promise<UsageReport[] | null> = runOutsideRequestHold(() =>
+			this.#client
+				.fetchUsage({ provider, maxAccountsPerProvider: this.#maxBrokerUsageAccounts(provider) })
+				.then(body => {
+					if (epoch !== this.#usageCacheEpoch) {
+						if (this.#usageInflight.get(provider) === inflight) this.#usageInflight.delete(provider);
+						return this.#loadUsageReports(provider);
+					}
+					// Older brokers ignore the query and still return an aggregate.
+					// Keep it scoped locally; a scoped response is never an aggregate cache.
+					const reports =
+						provider === undefined ? body.reports : body.reports.filter(report => report.provider === provider);
+					this.#usageCache.set(provider, { reports, fetchedAt: Date.now() });
+					return reports;
+				})
+				.catch(error => {
+					logger.warn("auth-broker usage fetch failed", { error: String(error) });
+					// Documented 15s TTL fallback, isolated to the requested scope.
+					// Invalidation preserves this cooldown, as it does for aggregate polls.
+					this.#usageCache.set(provider, { reports: null, fetchedAt: Date.now() });
+					return null;
+				})
+				.finally(() => {
 					if (this.#usageInflight.get(provider) === inflight) this.#usageInflight.delete(provider);
-					return this.#loadUsageReports(provider);
-				}
-				// Older brokers ignore the query and still return an aggregate.
-				// Keep it scoped locally; a scoped response is never an aggregate cache.
-				const reports =
-					provider === undefined ? body.reports : body.reports.filter(report => report.provider === provider);
-				this.#usageCache.set(provider, { reports, fetchedAt: Date.now() });
-				return reports;
-			})
-			.catch(error => {
-				logger.warn("auth-broker usage fetch failed", { error: String(error) });
-				// Documented 15s TTL fallback, isolated to the requested scope.
-				// Invalidation preserves this cooldown, as it does for aggregate polls.
-				this.#usageCache.set(provider, { reports: null, fetchedAt: Date.now() });
-				return null;
-			})
-			.finally(() => {
-				if (this.#usageInflight.get(provider) === inflight) this.#usageInflight.delete(provider);
-			});
+				}),
+		);
 		this.#usageInflight.set(provider, inflight);
 		return inflight;
 	}
@@ -1598,12 +1602,16 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	#flushObservedUsage(): Promise<void> {
+		// The batch holds every session's usage, so its sends belong to none of them: chained outside
+		// whichever caller's provider-request hold scheduled the flush.
 		// The tail never rejects, so one failed send cannot stall every later flush.
-		this.#observedUsageFlush = this.#observedUsageFlush
-			.then(() => this.#sendObservedUsage())
-			.catch(error => {
-				logger.debug("auth-broker observed usage flush failed", { error: String(error) });
-			});
+		this.#observedUsageFlush = runOutsideRequestHold(() =>
+			this.#observedUsageFlush
+				.then(() => this.#sendObservedUsage())
+				.catch(error => {
+					logger.debug("auth-broker observed usage flush failed", { error: String(error) });
+				}),
+		);
 		return this.#observedUsageFlush;
 	}
 

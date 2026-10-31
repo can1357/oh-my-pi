@@ -63,9 +63,9 @@ export async function orchestrateRecall(
 	const linearOptions = toLinearRecallOptions({ ...options, queryEmbedding });
 	if (options.enhanced === true && typeof beam.recallEnhanced === "function") {
 		// model-request: caller orchestrateRecall(options.signal) — the linear recall carries the reader's `signal`.
-		return beam.recallEnhanced(query, topK, linearOptions);
+		return beam.recallEnhanced(query, topK, { ...linearOptions, signal: options.signal });
 	}
 	// model-request: caller orchestrateRecall(options.signal) — the linear recall carries the reader's `signal`.
-	if (typeof beam.recall === "function") return beam.recall(query, topK, linearOptions);
+	if (typeof beam.recall === "function") return beam.recall(query, topK, { ...linearOptions, signal: options.signal });
 	return [];
 }

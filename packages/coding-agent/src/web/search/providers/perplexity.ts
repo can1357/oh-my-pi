@@ -508,6 +508,8 @@ async function callPerplexityApi(
 		collectPerplexityMetadata(metadata, event.data);
 	};
 
+	// model-request: turn — Perplexity's answer through the OpenAI Responses or Completions provider, for the web_search
+	// tool call, with its signal (`requestSignal`).
 	const message = config.useResponses
 		? await drainAssistantStream(
 				streamOpenAIResponses(buildPerplexityResponsesModel(request), context, {

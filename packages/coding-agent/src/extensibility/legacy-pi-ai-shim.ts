@@ -151,6 +151,7 @@ export const getModels = getBundledModels;
 
 const ANTHROPIC_MESSAGES_API = {
 	// Loads the Anthropic transport on first invocation, not extension setup.
+	// model-request: extension — the legacy `/compat` Anthropic transport handed to extensions; the extension boundary governs its requests.
 	stream: streamAnthropic,
 	// model-request: extension — the legacy `/compat` Anthropic transport handed to extensions; the extension boundary governs its requests.
 	streamSimple: (model: Model<"anthropic-messages">, context: Context, options?: SimpleStreamOptions) =>

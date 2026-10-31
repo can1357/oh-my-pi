@@ -1,4 +1,5 @@
 import type { FetchImpl } from "@oh-my-pi/pi-utils";
+import { runOutsideRequestHold } from "@oh-my-pi/pi-utils/request-hold-scope";
 import type { AntigravityModelWireProfile } from "../types";
 
 /**
@@ -74,7 +75,8 @@ export function parseAntigravityManifestVersion(yamlText: string): string | null
  * `ANTIGRAVITY_VERSION_RETRY_MS`. Skipped entirely when PI_AI_ANTIGRAVITY_VERSION is set.
  *
  * The lookup is shared by concurrent callers, so it is bounded only by its own
- * timeout; `signal` ends this caller's wait without cancelling the lookup.
+ * timeout, and it starts outside the caller's provider-request hold; `signal`
+ * ends this caller's wait without cancelling the lookup.
  */
 // model-request: none — fetches the client version Antigravity requires, not a model request.
 export function ensureAntigravityVersion(fetcher: FetchImpl = fetch, signal?: AbortSignal): Promise<void> {
@@ -86,7 +88,7 @@ export function ensureAntigravityVersion(fetcher: FetchImpl = fetch, signal?: Ab
 		) {
 			return Promise.resolve();
 		}
-		antigravityVersionFetch = (async () => {
+		antigravityVersionFetch = runOutsideRequestHold(async () => {
 			try {
 				const response = await fetcher(ANTIGRAVITY_VERSION_MANIFEST_URL, {
 					headers: { "Cache-Control": "no-cache", "User-Agent": "electron-builder" },
@@ -101,7 +103,7 @@ export function ensureAntigravityVersion(fetcher: FetchImpl = fetch, signal?: Ab
 				antigravityVersionFetch = null;
 				if (!discoveredAntigravityVersion) antigravityVersionFailedAt = Date.now();
 			}
-		})();
+		});
 	}
 	const lookup = antigravityVersionFetch;
 	if (!signal) return lookup;

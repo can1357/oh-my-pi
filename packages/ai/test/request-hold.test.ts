@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { withAuth } from "../src/auth-retry";
+import { type OAuthAccessSource, withAuth, withOAuthAccess } from "../src/auth-retry";
 import { runInRequestHoldScope } from "../src/request-hold";
 import { completeSimple } from "../src/stream";
 import type { Api, Model } from "../src/types";
@@ -37,6 +37,53 @@ async function settle(): Promise<void> {
 	for (let round = 0; round < 20; round++) await Promise.resolve();
 }
 
+/**
+ * A local endpoint that counts what it receives; `answer` gets each request's 1-based number.
+ *
+ * The cases below wait real time where they assert that nothing arrives: a request is a loopback
+ * HTTP exchange, and a provider's retry waits on the real clock, so fake time can neither deliver one
+ * nor show that none came.
+ */
+interface Endpoint {
+	readonly url: string;
+	/** Requests received so far. */
+	readonly requests: number;
+	/** Resolves when the first request arrives. */
+	readonly first: Promise<void>;
+	stop(): void;
+}
+
+function endpoint(answer: (count: number) => Response = () => new Response("ok")): Endpoint {
+	let requests = 0;
+	const first = Promise.withResolvers<void>();
+	const server = Bun.serve({
+		hostname: "127.0.0.1",
+		port: 0,
+		fetch: async request => {
+			await request.arrayBuffer();
+			requests++;
+			first.resolve();
+			return answer(requests);
+		},
+	});
+	return {
+		url: server.url.origin,
+		get requests() {
+			return requests;
+		},
+		first: first.promise,
+		stop: () => server.stop(true),
+	};
+}
+
+/** An Anthropic rate limit that asks the client to retry in one second. */
+function rateLimited(): Response {
+	return new Response(JSON.stringify({ type: "error", error: { type: "rate_limit_error", message: "Slow down" } }), {
+		status: 429,
+		headers: { "content-type": "application/json", "retry-after": "1" },
+	});
+}
+
 describe("provider-request hold", () => {
 	let held: AbortController;
 	let ended: AbortController;
@@ -53,6 +100,22 @@ describe("provider-request hold", () => {
 			);
 
 			expect(sent).toBe("sent with key");
+		});
+
+		it("makes its attempt in the same turn it checks the hold, so no hold begins between them", async () => {
+			const heldAtAttempt: boolean[] = [];
+			const pending = runInRequestHoldScope(held.signal, ended.signal, () =>
+				withAuth("key", async () => {
+					heldAtAttempt.push(held.signal.aborted);
+					return "sent";
+				}),
+			);
+			// The hold begins in the caller's own continuation, right after the request was made.
+			held.abort();
+			ended.abort();
+			await pending.catch(() => undefined);
+
+			expect(heldAtAttempt).toEqual([false]);
 		});
 
 		it("holds a request made in a held scope, and refuses it when the scope ends", async () => {
@@ -187,5 +250,323 @@ describe("provider-request hold", () => {
 
 			expect(requests).toBe(0);
 		});
+	});
+
+	describe("fetch", () => {
+		let site: Endpoint;
+
+		beforeEach(() => {
+			site = endpoint();
+		});
+
+		afterEach(() => {
+			site.stop();
+		});
+
+		const post = (init?: RequestInit) => fetch(site.url, { method: "POST", body: "{}", ...init });
+
+		it("sends a fetch made in a scope that is not held", async () => {
+			const response = await runInRequestHoldScope(held.signal, ended.signal, () => post());
+
+			expect(await response.text()).toBe("ok");
+			expect(site.requests).toBe(1);
+		});
+
+		it("never sends a fetch made in a held scope, and refuses it when the scope ends", async () => {
+			held.abort();
+			const pending = runInRequestHoldScope(held.signal, ended.signal, () => post());
+			await Bun.sleep(50);
+			expect(site.requests).toBe(0);
+
+			ended.abort();
+
+			await expect(pending).rejects.toThrow("its owner began disposing");
+			expect(site.requests).toBe(0);
+		});
+
+		it("refuses a held fetch when its request signal aborts", async () => {
+			const request = new AbortController();
+			held.abort();
+			const pending = runInRequestHoldScope(held.signal, ended.signal, () => post({ signal: request.signal }));
+
+			request.abort();
+
+			await expect(pending).rejects.toThrow("its owner began disposing");
+			expect(site.requests).toBe(0);
+		});
+
+		it("refuses a held fetch of a Request when that Request's signal aborts", async () => {
+			const request = new AbortController();
+			held.abort();
+			const pending = runInRequestHoldScope(held.signal, ended.signal, () =>
+				fetch(new Request(site.url, { method: "POST", body: "{}", signal: request.signal })),
+			);
+
+			request.abort();
+
+			await expect(pending).rejects.toThrow("its owner began disposing");
+			expect(site.requests).toBe(0);
+		});
+
+		it("holds a fetch made through a global fetch installed after the hold's own", async () => {
+			const previous = globalThis.fetch;
+			let calls = 0;
+			globalThis.fetch = Object.assign(
+				(input: string | URL | Request, init?: RequestInit) => {
+					calls++;
+					return previous(input, init);
+				},
+				{ preconnect: previous.preconnect },
+			) as typeof fetch;
+			try {
+				// Not held, the replacement is reached in the same call, and keeps its own properties.
+				await runInRequestHoldScope(new AbortController().signal, new AbortController().signal, () => {
+					const sent = post();
+					expect(calls).toBe(1);
+					return sent;
+				});
+				expect(typeof globalThis.fetch.preconnect).toBe("function");
+
+				held.abort();
+				const pending = runInRequestHoldScope(held.signal, ended.signal, () => post());
+				await Bun.sleep(50);
+				expect(calls).toBe(1);
+				expect(site.requests).toBe(1);
+
+				ended.abort();
+				await expect(pending).rejects.toThrow("its owner began disposing");
+			} finally {
+				globalThis.fetch = previous;
+			}
+		});
+	});
+
+	describe("a provider's own retry", () => {
+		const ask = (model: Model<Api>, signal?: AbortSignal) =>
+			completeSimple(
+				model,
+				{ messages: [{ role: "user", content: "hi", timestamp: Date.now() }] },
+				{ apiKey: "key", signal },
+			);
+
+		it("sends the retry of a rate-limited request whose scope is not held", async () => {
+			const site = endpoint(count => (count === 1 ? rateLimited() : anthropicDone()));
+			try {
+				const model = { ...getBundledModel("anthropic", "claude-sonnet-4-5")!, baseUrl: site.url };
+				const message = await runInRequestHoldScope(held.signal, ended.signal, () => ask(model));
+
+				expect(message.stopReason).toBe("stop");
+				expect(site.requests).toBe(2);
+			} finally {
+				site.stop();
+			}
+		}, 10_000);
+
+		it("holds the retry of a request that was backing off when the hold began", async () => {
+			let afterHold = 0;
+			const site = endpoint(count => {
+				if (held.signal.aborted) afterHold++;
+				return count === 1 ? rateLimited() : anthropicDone();
+			});
+			const request = new AbortController();
+			try {
+				const model = { ...getBundledModel("anthropic", "claude-sonnet-4-5")!, baseUrl: site.url };
+				const pending = runInRequestHoldScope(held.signal, ended.signal, () => ask(model, request.signal));
+				await site.first;
+				// The client now waits out the one-second retry-after; the hold begins during that wait.
+				held.abort();
+				await Bun.sleep(1_500);
+
+				expect({ requests: site.requests, afterHold }).toEqual({ requests: 1, afterHold: 0 });
+
+				request.abort();
+				ended.abort();
+				await pending.catch(() => undefined);
+				expect(site.requests).toBe(1);
+			} finally {
+				site.stop();
+			}
+		}, 10_000);
+	});
+
+	describe("withOAuthAccess", () => {
+		let site: Endpoint;
+		let attempts: number;
+
+		beforeEach(() => {
+			site = endpoint();
+			attempts = 0;
+		});
+
+		afterEach(() => {
+			site.stop();
+		});
+
+		/** OAuth storage whose access is `access()`, and which never rotates. */
+		const storage = (access: () => Promise<{ accessToken: string; credentialId: number }>) =>
+			({
+				oauth: { access: async () => access() },
+				limits: { rotate: async () => ({ switched: false }) },
+			}) as unknown as OAuthAccessSource;
+
+		const send = async (access: { accessToken: string }): Promise<string> => {
+			attempts++;
+			const response = await fetch(site.url, {
+				method: "POST",
+				body: "{}",
+				headers: { authorization: `Bearer ${access.accessToken}` },
+			});
+			return response.text();
+		};
+
+		it("sends an attempt made in a scope that is not held", async () => {
+			const sent = await runInRequestHoldScope(held.signal, ended.signal, () =>
+				withOAuthAccess(
+					storage(async () => ({ accessToken: "token", credentialId: 1 })),
+					"openai-codex",
+					send,
+				),
+			);
+
+			expect(sent).toBe("ok");
+			expect({ attempts, requests: site.requests }).toEqual({ attempts: 1, requests: 1 });
+		});
+
+		it("holds an attempt made in a held scope, and refuses it when the scope ends", async () => {
+			held.abort();
+			const pending = runInRequestHoldScope(held.signal, ended.signal, () =>
+				withOAuthAccess(
+					storage(async () => ({ accessToken: "token", credentialId: 1 })),
+					"openai-codex",
+					send,
+				),
+			);
+			await Bun.sleep(50);
+			expect({ attempts, requests: site.requests }).toEqual({ attempts: 0, requests: 0 });
+
+			ended.abort();
+
+			await expect(pending).rejects.toThrow("its owner began disposing");
+			expect({ attempts, requests: site.requests }).toEqual({ attempts: 0, requests: 0 });
+		});
+
+		it("holds an attempt whose access was still resolving when the hold began", async () => {
+			const pending = runInRequestHoldScope(held.signal, ended.signal, () =>
+				withOAuthAccess(
+					storage(async () => {
+						held.abort();
+						return { accessToken: "token", credentialId: 1 };
+					}),
+					"openai-codex",
+					send,
+				),
+			);
+			await Bun.sleep(50);
+			expect({ attempts, requests: site.requests }).toEqual({ attempts: 0, requests: 0 });
+
+			ended.abort();
+			await expect(pending).rejects.toThrow("its owner began disposing");
+		});
+
+		it("holds the retry of an attempt during which the hold began", async () => {
+			let token = 0;
+			const pending = runInRequestHoldScope(held.signal, ended.signal, () =>
+				withOAuthAccess(
+					storage(async () => ({ accessToken: `token-${++token}`, credentialId: token })),
+					"openai-codex",
+					async access => {
+						if (attempts === 0) {
+							attempts++;
+							held.abort();
+							throw new Error("401 Unauthorized");
+						}
+						return send(access);
+					},
+					{ isAuthError: () => true },
+				),
+			);
+			await Bun.sleep(50);
+			expect({ attempts, requests: site.requests }).toEqual({ attempts: 1, requests: 0 });
+
+			ended.abort();
+			await expect(pending).rejects.toThrow("its owner began disposing");
+			expect({ attempts, requests: site.requests }).toEqual({ attempts: 1, requests: 0 });
+		});
+	});
+
+	describe("nested scopes", () => {
+		let site: Endpoint;
+		let inner: { held: AbortController; ended: AbortController };
+
+		beforeEach(() => {
+			site = endpoint();
+			inner = { held: new AbortController(), ended: new AbortController() };
+		});
+
+		afterEach(() => {
+			ended.abort();
+			inner.ended.abort();
+			site.stop();
+		});
+
+		const requests = {
+			withAuth: () => withAuth("key", key => fetch(site.url, { method: "POST", body: key })),
+			fetch: () => fetch(site.url, { method: "POST", body: "{}" }),
+		};
+		const kinds = Object.keys(requests) as Array<keyof typeof requests>;
+
+		/** Run `request` in `inner`'s scope, nested in the outer one; report when it settles. */
+		function nested(request: () => Promise<unknown>): { settled: () => boolean; outcome: Promise<string> } {
+			let settled = false;
+			const outcome = runInRequestHoldScope(held.signal, ended.signal, () =>
+				runInRequestHoldScope(inner.held.signal, inner.ended.signal, request),
+			).then(
+				() => "sent",
+				(error: Error) => error.message,
+			);
+			void outcome.finally(() => {
+				settled = true;
+			});
+			return { settled: () => settled, outcome };
+		}
+
+		it.each(kinds)("sends a %s request from nested scopes that are not held", async kind => {
+			const { outcome } = nested(requests[kind]);
+
+			expect(await outcome).toBe("sent");
+			expect(site.requests).toBe(1);
+		});
+
+		it.each(kinds)("refuses a %s request waiting in a held inner scope when the outer scope ends", async kind => {
+			held.abort();
+			inner.held.abort();
+			const { settled, outcome } = nested(requests[kind]);
+			await Bun.sleep(20);
+			expect(settled()).toBe(false);
+
+			ended.abort();
+			await Bun.sleep(20);
+
+			expect(settled()).toBe(true);
+			expect(await outcome).toContain("its owner began disposing");
+			expect(site.requests).toBe(0);
+		});
+
+		it.each(kinds)(
+			"refuses a %s request waiting in an unheld inner scope of a held one when the inner scope ends",
+			async kind => {
+				held.abort();
+				const { settled, outcome } = nested(requests[kind]);
+				await Bun.sleep(20);
+				expect(settled()).toBe(false);
+
+				inner.ended.abort();
+				await Bun.sleep(20);
+
+				expect(settled()).toBe(true);
+				expect(await outcome).toContain("its owner began disposing");
+				expect(site.requests).toBe(0);
+			},
+		);
 	});
 });

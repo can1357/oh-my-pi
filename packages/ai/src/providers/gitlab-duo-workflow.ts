@@ -5,6 +5,7 @@ import {
 	type GitLabDuoWorkflowNamespaceSelection,
 } from "@oh-my-pi/pi-catalog/discovery/gitlab-duo-workflow";
 import * as AIError from "../error";
+import { admitProviderRequest, isRequestHeld } from "../request-hold";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import type {
 	Api,
@@ -1356,6 +1357,9 @@ async function runGitLabDuoWorkflow(
 	let settledNormally = false;
 	try {
 		for (let attempt = 0; attempt < 12; attempt++) {
+			// A held scope opens no socket (see `request-hold.ts`): checked with no await before the
+			// socket is created, so a hold that began during the setup above still stops it.
+			if (isRequestHeld()) await admitProviderRequest(options.signal);
 			const ws = openGitLabDuoWorkflowSocket(workflowConnection.baseUrl ?? baseUrl, {
 				token: workflowConnection.token,
 				projectId: webSocketProjectId,
@@ -2043,6 +2047,21 @@ export function runGitLabDuoWorkflowSocket(
 			error => settle("closed", error),
 		);
 	};
+	// A held scope sends no frame (see `request-hold.ts`): each send checks the hold with no await
+	// before it. Held, the frame waits for the hold's refusal instead, which ends this turn.
+	const send = (frame: unknown): void => {
+		if (isRequestHeld()) {
+			void admitProviderRequest(options.signal).then(
+				() => send(frame),
+				error => {
+					close();
+					settle("closed", error);
+				},
+			);
+			return;
+		}
+		ws.send(JSON.stringify(frame));
+	};
 	if (replayMessages && replayMessages.length > 0) {
 		ws.onopen = null;
 		void (async () => {
@@ -2088,9 +2107,7 @@ export function runGitLabDuoWorkflowSocket(
 		// inline flow only ever has one.) DWS matches it by requestID to the awaiting
 		// outbox future and the workflow continues on the same connection.
 		const responses = Array.isArray(resumeResponse) ? resumeResponse : [resumeResponse];
-		for (const response of responses) {
-			ws.send(JSON.stringify(response));
-		}
+		for (const response of responses) send(response);
 	} else {
 		ws.onopen = () => {
 			traceGitLabDuoWorkflow("websocket.open", {
@@ -2102,7 +2119,7 @@ export function runGitLabDuoWorkflowSocket(
 				mcpTools: startPayload.mcpTools.length,
 				preapprovedTools: startPayload.preapproved_tools.length,
 			});
-			ws.send(JSON.stringify({ startRequest: startPayload }));
+			send({ startRequest: startPayload });
 		};
 	}
 	resetIdleTimer();

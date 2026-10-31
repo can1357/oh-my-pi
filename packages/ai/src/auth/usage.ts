@@ -1,5 +1,5 @@
 import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
-import { $pickenv, logger } from "@oh-my-pi/pi-utils";
+import { $pickenv, logger, runOutsideRequestHold } from "@oh-my-pi/pi-utils";
 import { getEnvApiKey } from "../env-api-key";
 import * as AIError from "../error";
 import type { OAuthCredentials } from "../registry/oauth/types";
@@ -351,7 +351,9 @@ export class UsageService implements UsageApi {
 		const usageCacheEpoch = this.#deps.cache.epoch;
 		const refreshEpoch = this.#deps.cache.refreshEpoch(request.provider);
 		const recoveryEpoch = this.#deps.cache.recoveryEpoch(request.provider);
-		const promise = (async () => {
+		// Every caller for this credential joins this probe, so it starts outside the caller's
+		// provider-request hold: a held caller must not hold it, or refuse it, for the others.
+		const promise = runOutsideRequestHold(async () => {
 			const report = await this.#fetchUsageUncached(request, timeoutMs);
 			// Block marks bump the generation too: a report racing a fresh 429 may
 			// predate it, so it answers this probe but is neither cached nor used
@@ -392,7 +394,7 @@ export class UsageService implements UsageApi {
 			}
 			if (!invalidated) this.#deps.cache.set(cacheKey, { value: lastGood, expiresAt: coolDown });
 			return lastGood;
-		})().finally(() => {
+		}).finally(() => {
 			this.#usageRequestInFlight.delete(cacheKey);
 		});
 
@@ -772,8 +774,9 @@ export class UsageService implements UsageApi {
 			let shared = this.#usageReportsInFlight.get(overrideKey);
 			if (!shared) {
 				// Don't forward the caller signal into the shared fetch — first caller's
-				// abort would otherwise cancel the upstream for every peer.
-				shared = storeOverride(undefined, options?.provider).finally(() => {
+				// abort would otherwise cancel the upstream for every peer. Nor the caller's
+				// provider-request hold, for the same reason.
+				shared = runOutsideRequestHold(() => storeOverride(undefined, options?.provider)).finally(() => {
 					this.#usageReportsInFlight.delete(overrideKey);
 				});
 				this.#usageReportsInFlight.set(overrideKey, shared);
@@ -828,6 +831,8 @@ export class UsageService implements UsageApi {
 		const inFlight = this.#usageReportsInFlight.get(cacheKey);
 		if (inFlight) return raceSignal(inFlight, options?.signal, "usage fetch aborted");
 
+		// Its per-credential probes are shared work and start outside the caller's provider-request hold
+		// themselves (see #fetchUsageCached); this aggregate only awaits them.
 		const promise = (async () => {
 			for (const request of requests) {
 				this.logger?.debug("Usage fetch queued", {

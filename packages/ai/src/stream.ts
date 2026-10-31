@@ -836,7 +836,9 @@ function withResolvedModelHeaders<TApi extends Api>(
 /**
  * `run`, once the provider-request hold admits it. Outside a hold scope `run` is called at once; in a
  * scope, a resolver key is wrapped so a hold that begins while it resolves still stops the request,
- * and while the scope is held the request waits (see {@link admitProviderRequest}).
+ * and while the scope is held the request waits (see {@link admitProviderRequest}). This only checks
+ * on entry: each attempt the provider then sends, its own retries included, is held where it is sent
+ * (the hold's wrapper around the global fetch, and the Codex WebSocket's own checks).
  */
 function withRequestHold<O extends { apiKey?: ApiKey; signal?: AbortSignal }>(
 	options: O | undefined,

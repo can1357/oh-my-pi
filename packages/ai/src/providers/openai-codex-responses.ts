@@ -27,6 +27,7 @@ import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import * as AIError from "../error";
 import { parseToolCallArguments, replayableToolCallArguments } from "../utils/tool-call-arguments";
 import { getEnvApiKey } from "../env-api-key";
+import { admitProviderRequest, isRequestHeld } from "../request-hold";
 import type {
 	Api,
 	AssistantMessage,
@@ -3962,6 +3963,10 @@ class CodexWebSocketConnection {
 			await this.#connectPromise;
 			return;
 		}
+		// A held scope opens no socket: the upgrade request is a request too (see `request-hold.ts`).
+		// Checked with no await before the socket is created, so a hold that began in the setup above
+		// still stops it.
+		if (isRequestHeld()) await admitProviderRequest(signal);
 		const { promise, resolve, reject } = Promise.withResolvers<void>();
 		this.#connectPromise = promise;
 		// model-request: transport stream, prewarmOpenAICodexResponses — the Codex WebSocket stream and its prewarm.
@@ -4150,6 +4155,9 @@ class CodexWebSocketConnection {
 					: undefined;
 
 				const requestPayload = JSON.stringify(request);
+				// A held scope sends no frame (see `request-hold.ts`): checked with no await before the send
+				// below, so a hold that began during this request's setup still stops it.
+				if (isRequestHeld()) await admitProviderRequest(signal);
 				notifyCodexWebSocketOutbound(onSseEvent, request, requestPayload);
 				// Re-check liveness: the debug-session await above can outlive the socket.
 				// Preserve the abort cause: onAbort already queued a caused error, but this
@@ -4305,6 +4313,9 @@ class CodexWebSocketConnection {
 	 * on this socket. Resolves on the server's acknowledgement.
 	 */
 	steer(previousResponseId: string, input: InputItem[]): Promise<CodexSteerAck> {
+		// Steering adds input to a response, so a held scope sends none (see `request-hold.ts`). Admission
+		// in a held scope never resolves; it is refused when the scope ends.
+		if (isRequestHeld()) return admitProviderRequest().then(() => this.steer(previousResponseId, input));
 		const socket = this.#socket;
 		if (!socket || socket.readyState !== WebSocket.OPEN) {
 			return Promise.reject(new CodexWebSocketTransportError(`websocket connection is unavailable`));

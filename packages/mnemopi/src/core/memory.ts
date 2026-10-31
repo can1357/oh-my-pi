@@ -338,7 +338,6 @@ function toRecallOptions(options: RecallFacadeOptions): BeamRecallFacadeOptions 
 	// FTS-only, `number[]` = caller-supplied) so callers can opt out of `recall()`'s
 	// auto-embed without being forced into it.
 	if ("queryEmbedding" in options) beamOptions.queryEmbedding = options.queryEmbedding;
-	if (options.signal) beamOptions.signal = options.signal;
 	return beamOptions;
 }
 
@@ -479,7 +478,9 @@ export class Mnemopi {
 
 	recall(query: string, topK = 5, options: RecallFacadeOptions = {}): Promise<RecallResult[]> {
 		// model-request: caller recall(options.signal) — the reader's `signal` reaches the query embedding.
-		return this.#withRuntimeOptions("mnemopi.recall", () => this.beam.recall(query, topK, toRecallOptions(options)));
+		return this.#withRuntimeOptions("mnemopi.recall", () =>
+			this.beam.recall(query, topK, { ...toRecallOptions(options), signal: options.signal }),
+		);
 	}
 
 	recallEnhanced(
@@ -493,6 +494,7 @@ export class Mnemopi {
 				...toRecallOptions(options),
 				useCache: options.useCache,
 				includeFacts: options.includeFacts,
+				signal: options.signal,
 			}),
 		);
 	}

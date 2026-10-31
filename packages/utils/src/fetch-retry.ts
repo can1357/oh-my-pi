@@ -364,7 +364,8 @@ export async function fetchWithRetry(
 
 		let response: Response;
 		try {
-			response = await fetchImpl(requestUrl, init);
+			// The caller's signal on every attempt, also when `prepareInit` built this attempt's init.
+			response = await fetchImpl(requestUrl, { ...init, signal: init.signal ?? signal });
 		} catch (error) {
 			if (signal?.aborted) throw new Error("Request was aborted");
 			const wrapped = wrapNetworkError(error);

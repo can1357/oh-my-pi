@@ -18,7 +18,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { $env, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { $env, isEnoent, logger, runOutsideRequestHold } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import type { FetchImpl } from "../types";
 import { raceWithSignal } from "../utils/abort";
@@ -100,13 +100,14 @@ export async function resolveAwsCredentials(opts: CredentialResolveOptions = {})
 	// Single-flight: N concurrent cold calls must not each spawn credential_process/SSO/IMDS fetches.
 	// The shared resolution is deliberately detached from any caller's signal — aborting one
 	// request must not fail every waiter — and bounded by its own timeout instead; each caller
-	// races its own signal against the shared promise.
+	// races its own signal against the shared promise. For the same reason it starts outside the
+	// caller's provider-request hold.
 	const existing = inflight.get(cacheKey);
 	if (existing) return raceWithSignal(existing, opts.signal);
 
 	// model-request: none — resolves AWS credentials (instance metadata, STS), not a model request.
 	const fetchImpl = opts.fetch ?? (globalThis.fetch as FetchImpl);
-	const promise = (async () => {
+	const promise = runOutsideRequestHold(async () => {
 		try {
 			const creds = await resolveFresh(
 				profile,
@@ -120,7 +121,7 @@ export async function resolveAwsCredentials(opts: CredentialResolveOptions = {})
 		} finally {
 			inflight.delete(cacheKey);
 		}
-	})();
+	});
 	inflight.set(cacheKey, promise);
 	return raceWithSignal(promise, opts.signal);
 }

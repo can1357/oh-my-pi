@@ -1,4 +1,4 @@
-import { USER_AGENT, getInstallId } from "@oh-my-pi/pi-utils";
+import { USER_AGENT, getInstallId, runOutsideRequestHold } from "@oh-my-pi/pi-utils";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { toClinePassPublicModelId } from "../cline-pass-model-id";
 import {
@@ -226,8 +226,11 @@ export function fetchWellKnownModels(fetchImpl?: FetchImpl, signal?: AbortSignal
 function fetchRevalidatedWellKnownModels(fetchImpl?: FetchImpl, signal?: AbortSignal): Promise<unknown> {
 	const session = getCatalogSession(fetchImpl);
 	if (!session.inflight) {
-		session.inflight = withCatalogDiscoveryTimeout(DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS, transportSignal =>
-			fetchCatalogPayload(fetchImpl ?? discoveryFetch(), session, transportSignal),
+		// Shared by every caller of this fetch context, so started outside the caller's provider-request hold.
+		session.inflight = runOutsideRequestHold(() =>
+			withCatalogDiscoveryTimeout(DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS, transportSignal =>
+				fetchCatalogPayload(fetchImpl ?? discoveryFetch(), session, transportSignal),
+			),
 		).finally(() => {
 			session.inflight = null;
 		});
@@ -765,7 +768,8 @@ function createOllamaMetadataResolver(
 	return modelId => {
 		const cached = cache.get(modelId);
 		if (cached) return cached;
-		const pending = (async () => {
+		// Shared by every later lookup of this model, so started outside the caller's provider-request hold.
+		const pending = runOutsideRequestHold(async () => {
 			const metadata = await fetchOllamaShowMetadata(nativeBaseUrl, modelId, fetchImpl);
 			if (!metadata) {
 				cache.delete(modelId);
@@ -776,7 +780,7 @@ function createOllamaMetadataResolver(
 				contextWindow: metadata.contextWindow ?? OLLAMA_FALLBACK_CONTEXT_WINDOW,
 				maxTokens: metadata.maxTokens ?? OLLAMA_DEFAULT_MAX_TOKENS,
 			};
-		})();
+		});
 		cache.set(modelId, pending);
 		void pending.catch(() => cache.delete(modelId));
 		return pending;

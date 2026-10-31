@@ -98,6 +98,7 @@ async function episode(directory: string, speculative: boolean, index: number): 
 		return response;
 	};
 	const startedAt = performance.now();
+	// model-request: no-session — a benchmark driving the loop against its own stub; no session exists.
 	await agentLoop(
 		[{ role: "user", content: "Read", timestamp: Date.now() }],
 		{ systemPrompt: [""], messages: [], tools: [evalTool] },
