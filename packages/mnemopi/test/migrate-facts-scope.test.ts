@@ -8,7 +8,7 @@ import { consolidateToEpisodic, extractAndStoreFacts, storeExtractedFactCategori
 import { factRecall } from "@oh-my-pi/pi-mnemopi/core/beam/recall";
 import { initBeam } from "@oh-my-pi/pi-mnemopi/core/beam/schema";
 import { sourceMemoryScope } from "@oh-my-pi/pi-mnemopi/core/beam/fact-scope";
-import { get, updateWorking } from "@oh-my-pi/pi-mnemopi/core/beam/store";
+import { get, importFromDict, updateWorking } from "@oh-my-pi/pi-mnemopi/core/beam/store";
 import { Mnemopi } from "@oh-my-pi/pi-mnemopi/core/memory";
 import { EpisodicGraph } from "@oh-my-pi/pi-mnemopi/core/episodic-graph";
 import {
@@ -364,6 +364,66 @@ describe("E7 facts scope migration", () => {
 		}
 	});
 
+	it("discards extraction when the source is trimmed before the task snapshots it", async () => {
+		const memory = new Mnemopi({
+			sessionId: "session-a",
+			dbPath: tempDb(),
+			llm: { enabled: true, complete: async () => "The user uses the quorum relay for tokens" },
+		});
+		try {
+			// An ancient timestamp is TTL-trimmed inside this remember(), before
+			// the extraction task captures its source snapshot.
+			const id = memory.remember("original text", {
+				source: "test",
+				extract: true,
+				timestamp: "2000-01-01T00:00:00.000Z",
+			});
+			expect(id).toBeTruthy();
+			// Reuse the id with different content under the same scope while the
+			// extraction is still in flight (this insert only succeeds because
+			// the trim already removed the original row).
+			memory.beam.db.run(
+				"INSERT INTO working_memory (id, content, session_id, scope) VALUES (?, 'replacement text', 'session-a', 'session')",
+				[id],
+			);
+			await memory.flushExtractions();
+			const rows = memory.conn.query("SELECT fact_id FROM facts WHERE source_msg_id = ?").all(id) as { fact_id: string }[];
+			expect(rows.length).toBe(0);
+		} finally {
+			await memory.flushExtractions();
+			memory.close();
+		}
+	});
+
+	it("force import overwriting an episode purges the old episode's facts", () => {
+		const dbPath = tempDb();
+		const beamA = new BeamMemory({ sessionId: "session-a", dbPath });
+		try {
+			beamA.db.run(
+				"INSERT INTO episodic_memory (id, content, session_id, scope) VALUES ('ep-repl', 'old episode text', 'session-a', 'global')",
+			);
+			storeFactStrings(beamA, ["I use the quorum relay for tokens"], 0, "ep-repl");
+			const before = beamA.db.query("SELECT fact_id FROM facts WHERE source_msg_id = 'ep-repl'").all() as unknown[];
+			expect(before.length).toBeGreaterThan(0);
+
+			const stats = importFromDict(
+				beamA,
+				{
+					episodic_memory: [{ id: "ep-repl", content: "replacement episode text", session_id: "session-a", scope: "global" }],
+				},
+				true,
+			);
+			expect(stats.episodic_memory.overwritten).toBe(1);
+
+			const after = beamA.db.query("SELECT fact_id FROM facts WHERE source_msg_id = 'ep-repl'").all() as unknown[];
+			expect(after.length).toBe(0);
+			const content = beamA.db.query("SELECT content FROM episodic_memory WHERE id = 'ep-repl'").get() as { content: string };
+			expect(content.content).toBe("replacement episode text");
+		} finally {
+			beamA.close();
+		}
+	});
+
 	it("content edits preserve the source's annotations", () => {
 		const dbPath = tempDb();
 		const beamA = new BeamMemory({ sessionId: "session-a", dbPath });
@@ -399,7 +459,7 @@ describe("E7 facts scope migration", () => {
 				complete: async prompt => {
 					// Edit the source after remember() has returned (and the task
 					// captured the scheduled version) but before extraction settles.
-					await new Promise(resolve => setTimeout(resolve, 0));
+					await Bun.sleep(0);
 					updateWorking(memory.beam, idRef.id, "completely different text");
 					return "The user uses the quorum relay for tokens";
 				},

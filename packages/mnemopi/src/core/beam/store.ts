@@ -330,14 +330,18 @@ async function runFactExtraction(
 			// trim), or its stored content or scope changed (edit, re-scope,
 			// id reuse) while extraction was in flight, storing would publish
 			// facts mined from the old text or wider than the source's current
-			// scope. Facts otherwise inherit the scheduled scope, never wider
-			// than their source.
+			// scope. A null snapshot (source already trimmed before the task
+			// captured its version) is rejected outright: without a bound
+			// version the result cannot be trusted against an id reuse. Facts
+			// otherwise inherit the scheduled scope, never wider than their
+			// source.
 			const source = beam.db
 				.prepare("SELECT content, scope FROM working_memory WHERE id = ?")
 				.get(memoryId) as { content: string; scope: string | null } | null;
 			if (
 				source == null ||
-				(scheduledContent !== null && source.content !== scheduledContent) ||
+				scheduledContent === null ||
+				source.content !== scheduledContent ||
 				(source.scope ?? "session") !== scheduledScope
 			) {
 				return;
@@ -1082,6 +1086,11 @@ export function importFromDict(beam: BeamMemoryState, data: Record<string, unkno
 					}
 				}
 				db.run("DELETE FROM episodic_memory WHERE id = ?", [id]);
+				// A force overwrite replaces the episode's content entirely:
+				// cascade the old row's fact / graph / annotation artifacts so
+				// the replacement cannot keep derivatives of the overwritten
+				// text (mirrors the working-memory branch above).
+				purgeWorkingMemoryArtifacts(db, [id]);
 				stats.episodic_memory.overwritten++;
 			} else {
 				stats.episodic_memory.inserted++;
