@@ -111,6 +111,7 @@ Capability dedup key is skill name; the first item with a given name wins in the
 - `disabledExtensions` entries with `skill:<name>`
 - `ignoredSkills` (exclude; glob patterns)
 - `includeSkills` (include allowlist; glob patterns; empty means include all)
+- `hideSkills` (keep loaded but omit from the model-visible catalog; skill-name glob patterns; empty means hide none)
 
 Filter order is:
 
@@ -118,6 +119,7 @@ Filter order is:
 2. source enabled
 3. not ignored
 4. included (if include list present)
+5. hidden from the model-visible catalog if a `hideSkills` pattern matches the final skill name
 
 The `agents` provider (`.agent[s]/skills`) has its own `enableAgentsUser`/`enableAgentsProject` toggles — disabling Claude/Codex/Pi does **not** turn it off. Foreign user-level providers are opt-in through `enabledProviders`; their project roots still load by default. Native OMP sources and marketplace plugins registered under `~/.omp/plugins` also load by default. For `claude-plugins`, the opt-in controls only plugins from Claude Code's own user registry.
 
@@ -148,7 +150,7 @@ System prompt construction (`src/system-prompt.ts`) uses discovered skills as fo
 
 When no tool metadata is supplied, the prompt builder uses the presence of `read` as a compatibility fallback.
 
-`hide: true` does not disable the skill. Hidden skills are still loaded and remain reachable through `skill://<name>` and `/skill:<name>` when skill commands are enabled.
+`hide: true` and configured `skills.hideSkills` do not disable a skill. Hidden skills are still loaded and remain reachable through `skill://<name>` and `/skill:<name>` when skill commands are enabled.
 
 Task tool subagents receive the session's discovered/provided skills list via normal session creation; there is no per-task skill pinning override.
 

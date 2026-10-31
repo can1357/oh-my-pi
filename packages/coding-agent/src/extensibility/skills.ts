@@ -314,6 +314,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		enableAgentsProject = true,
 		customDirectories = [],
 		ignoredSkills = [],
+		hideSkills = [],
 		includeSkills = [],
 		disabledExtensions = [],
 		extensionRoots,
@@ -370,6 +371,11 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 	function matchesIgnorePatterns(name: string): boolean {
 		if (ignoredSkills.length === 0) return false;
 		return ignoredSkills.some(pattern => new Bun.Glob(pattern).match(name));
+	}
+
+	function matchesHidePatterns(name: string): boolean {
+		if (hideSkills.length === 0) return false;
+		return hideSkills.some(pattern => new Bun.Glob(pattern).match(name));
 	}
 
 	const disabledSkillNames = new Set(
@@ -608,6 +614,10 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 	}
 
 	const skills = Array.from(skillMap.values()).filter(skill => matchesIncludePatterns(skill.name));
+	// Apply visibility after collision resolution so patterns address final names.
+	for (const skill of skills) {
+		if (matchesHidePatterns(skill.name)) skill.hide = true;
+	}
 	// Deterministic ordering for prompt stability (case-insensitive, then exact name, then path).
 	skills.sort((a, b) => compareSkillOrder(a.name, a.filePath, b.name, b.filePath));
 	return {

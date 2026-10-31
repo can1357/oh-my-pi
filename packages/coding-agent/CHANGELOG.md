@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `skills.hideSkills` to omit selected skills from the model catalog while keeping them available through `skill://` and explicit skill invocation.
+
 ## [18.14.1] - 2026-10-31
 
 ### Added

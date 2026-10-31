@@ -14,6 +14,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
 import { SkillProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/skill-protocol";
+import { buildSystemPrompt } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { CombinedAutocompleteProvider } from "@oh-my-pi/pi-tui/autocomplete";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { restoreEnvValue } from "./helpers/settings-test-state";
@@ -391,6 +392,53 @@ describe("skills", () => {
 			expect(skills.every(s => !s.name.startsWith("valid-"))).toBe(true);
 		});
 
+		it("should omit hideSkills name and glob matches from the catalog while keeping them resolvable", async () => {
+			const { skills } = await loadSkills({
+				...DISABLE_ALL_BUILTIN_SKILLS,
+				customDirectories: [fixturesDir],
+				hideSkills: ["valid-*", "unknown-field"],
+			});
+			const { systemPrompt } = await buildSystemPrompt({
+				cwd: isolatedHome,
+				contextFiles: [],
+				rules: [],
+				skills,
+				toolNames: ["read"],
+			});
+			const catalog = systemPrompt.join("\n");
+			expect(catalog).not.toContain("valid-skill");
+			expect(catalog).not.toContain("unknown-field");
+			expect(catalog).toContain("different-name");
+
+			const handler = new SkillProtocolHandler();
+			for (const name of ["valid-skill", "unknown-field"]) {
+				const skill = skills.find(skill => skill.name === name);
+				expect(skill?.hide).toBe(true);
+				const resolved = await handler.resolve(parseInternalUrl(`skill://${name}`)!, { skills });
+				expect(resolved.content).toBe(await Bun.file(skill!.filePath).text());
+			}
+			expect(skills.find(skill => skill.name === "different-name")?.hide).not.toBe(true);
+		});
+
+		it("should preserve the catalog when hideSkills is empty or omitted", async () => {
+			for (const options of [{}, { hideSkills: [] }]) {
+				const { skills } = await loadSkills({
+					...DISABLE_ALL_BUILTIN_SKILLS,
+					customDirectories: [fixturesDir],
+					...options,
+				});
+				const { systemPrompt } = await buildSystemPrompt({
+					cwd: isolatedHome,
+					contextFiles: [],
+					rules: [],
+					skills,
+					toolNames: ["read"],
+				});
+				expect(systemPrompt.join("\n")).toContain("valid-skill");
+				expect(systemPrompt.join("\n")).toContain("unknown-field");
+			}
+		});
+
 		it("should skip skills disabled via frontmatter", async () => {
 			const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-disabled-skill-"));
 			const skillDir = path.join(tempDir, "disabled-skill");
@@ -593,6 +641,20 @@ describe("collision handling", () => {
 		expect(namespaced.content).toContain("Calendar (Second)");
 		const nested = await handler.resolve(parseInternalUrl("skill://second/calendar/SKILL.md")!, { skills });
 		expect(nested.content).toContain("Calendar (Second)");
+	});
+
+	it("applies hideSkills to the final namespaced name without hiding the bare skill", async () => {
+		const { skills } = await loadSkills({
+			...DISABLE_ALL_BUILTIN_SKILLS,
+			customDirectories: [first, second],
+			hideSkills: ["second/*"],
+		});
+		expect(skills.find(skill => skill.name === "calendar")?.hide).not.toBe(true);
+		expect(skills.find(skill => skill.name === "second/calendar")?.hide).toBe(true);
+		const resolved = await new SkillProtocolHandler().resolve(parseInternalUrl("skill://second/calendar")!, {
+			skills,
+		});
+		expect(resolved.content).toContain("Calendar (Second)");
 	});
 
 	/** Project with `.claude/skills/calendar` (priority 80) and `.agents/skills/calendar` (priority 70) copied from fixtures. */
