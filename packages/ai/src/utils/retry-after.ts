@@ -1,5 +1,5 @@
 import { retryResetTimezoneOffsetFor } from "@oh-my-pi/pi-catalog/compat/behavior";
-import { extractRetryHint, parseRetryAfterDate } from "@oh-my-pi/pi-utils";
+import { extractRetryHint, parseRetryAfter } from "@oh-my-pi/pi-utils";
 
 export type HeadersLike = Headers | Record<string, string | undefined> | undefined | null;
 
@@ -105,24 +105,11 @@ function parseRetryAfterMsHeader(value: string | undefined): number | undefined 
 	return Math.ceil(ms);
 }
 
+/** The header's wait, read by the shared `parseRetryAfter`; a wait of zero names none here. */
 function parseRetryAfterHeader(value: string | undefined): number | undefined {
 	if (!value) return undefined;
-	const trimmed = value.trim();
-	if (!trimmed) return undefined;
-
-	const numeric = Number(trimmed);
-	if (Number.isFinite(numeric)) {
-		if (numeric <= 0) return undefined;
-		return Math.ceil(numeric * 1000);
-	}
-
-	const dateMs = parseRetryAfterDate(trimmed);
-	if (dateMs !== undefined) {
-		const delay = dateMs - Date.now();
-		return delay > 0 ? Math.ceil(delay) : undefined;
-	}
-
-	return undefined;
+	const ms = parseRetryAfter(value);
+	return ms === undefined || ms <= 0 ? undefined : Math.ceil(ms);
 }
 
 function parseResetHeader(value: string | undefined, unit: "ms" | "s"): number | undefined {

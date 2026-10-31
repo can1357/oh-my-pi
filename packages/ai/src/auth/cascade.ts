@@ -500,7 +500,7 @@ export class KeyCascade implements KeysApi {
 			provenance.record(resolved);
 			return resolved;
 		};
-		return async ({ lastChance, error, signal, previousKey }) => {
+		return async ({ lastChance, error, signal, previousKey, admitsWait }) => {
 			const rejectedAccessToken = provenance.accessFor(previousKey);
 			if (error === undefined) {
 				return resolve({ signal });
@@ -511,6 +511,7 @@ export class KeyCascade implements KeysApi {
 					modelId,
 					signal,
 					apiKey: previousKey,
+					admitsWait,
 				});
 				if (!rotation.switched) {
 					const status = AIError.status(error);

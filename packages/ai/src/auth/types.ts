@@ -780,6 +780,12 @@ export type RotateCredentialOptions = {
 	signal?: AbortSignal;
 	/** Whether to wait for a briefly blocked sibling; defaults to true. The failed credential is blocked either way. */
 	waitForSibling?: boolean;
+	/**
+	 * Asked with the sibling wait before it starts; `false` skips it like
+	 * `waitForSibling: false`. A caller's replay budget refuses a wait that would
+	 * end past its deadline this way.
+	 */
+	admitsWait?: (delayMs: number) => boolean;
 };
 
 /**

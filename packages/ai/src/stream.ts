@@ -1385,7 +1385,11 @@ function streamSimpleRequest<TApi extends Api>(
 				if (signal?.aborted) break;
 				let nextCredentialId: number | undefined;
 				let nextOAuthIdentity: OAuthRequestIdentity | undefined;
-				const nextKey = await resolveNextAuthRetryKey(
+				// Under a budget the resolution is part of the replay's wait: a sibling
+				// credential's block is waited out only when the wait fits, and a
+				// resolver still running at the deadline refuses the replay. The
+				// failed credential is still blocked: the resolver runs either way.
+				const resolving = resolveNextAuthRetryKey(
 					retryState,
 					apiKeyResolver,
 					failure.error,
@@ -1394,7 +1398,16 @@ function streamSimpleRequest<TApi extends Api>(
 						nextCredentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
 						nextOAuthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
 					},
+					replayBudget?.allowsWait,
 				);
+				let nextKey: string | undefined;
+				if (replayBudget) {
+					const resolved = await replayBudget.race(resolving);
+					if (resolved === undefined) break;
+					nextKey = resolved.value;
+				} else {
+					nextKey = await resolving;
+				}
 				if (nextKey === undefined) break;
 				// Another credential re-sends the request: a replay. Under a budget it
 				// must still begin inside it after the longest wait the failure names,

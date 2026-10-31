@@ -30,27 +30,83 @@ const RETRY_AFTER_MS_BODY_PATTERN = /\bretry-after-ms\s*[:=]\s*([0-9]+)\b/i;
 // Legacy text form "retry-after: 30" (a delta in seconds, or a timestamp written
 // as one token) and the `x-ratelimit-reset[-ms]` counters folded into a message.
 const RETRY_AFTER_BODY_PATTERN = /retry-after\s*[:=]\s*([^\s,;]+)/i;
-// `retry-after: <HTTP date>` in text: the three forms RFC 9110 names (IMF-fixdate,
-// the obsolete RFC 850 form, ANSI C asctime). The delta pattern above stops at the
-// first space or comma, so it cannot capture a date. A candidate ends at a token
-// boundary, so a prefix of a longer number is never taken for a year or a time;
-// `parseRetryAfterDate` then checks it field by field.
+// `retry-after: <date>` in text. The delta pattern above stops at the first space
+// or comma, so it cannot capture a date. This finds a candidate in any shape
+// `parseRetryAfterDate` reads, ending at a token boundary so a prefix of a
+// longer number is never taken for a year or a time; the reader then checks it
+// field by field.
 const RETRY_AFTER_DATE_BODY_PATTERN =
-	/retry-after\s*[:=]\s*((?:[A-Za-z]{3,9},\s+\d{1,2}[ -][A-Za-z]{3}[ -]\d{2,4}\s+\d{2}:\d{2}:\d{2}|[A-Za-z]{3}\s+[A-Za-z]{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})(?:\s+(?:GMT|UTC|UT|[ECMP][SD]T|[+-]\d{4}))?)(?![\w:])/i;
-// RFC 9110 section 5.6.7. The day name is optional before the comma forms: a
-// duplicate header joined by commas splits a date at its comma, and RFC 5322
-// (which a forwarded message may use) makes it optional too. RFC 5322 also
-// allows the zones UT, the US zone names and a numeric offset beside GMT.
-const IMF_FIXDATE_PATTERN =
-	/^(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s*)?(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})\s+(\d{2}):(\d{2}):(\d{2})(?:\s+(GMT|UTC|UT|[ECMP][SD]T|[+-]\d{4}))?$/i;
-const RFC850_DATE_PATTERN =
-	/^(?:(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s*)?(\d{1,2})-([A-Za-z]{3})-(\d{2}|\d{4})\s+(\d{2}):(\d{2}):(\d{2})(?:\s+(GMT|UTC|UT|[ECMP][SD]T|[+-]\d{4}))?$/i;
-const ASCTIME_DATE_PATTERN =
-	/^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+([A-Za-z]{3})\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})\s+(\d{4})(?:\s+(GMT|UTC|UT|[ECMP][SD]T|[+-]\d{4}))?$/i;
-// An RFC 3339 timestamp, which some servers send instead of an HTTP date. Only
-// with an explicit zone: without one it names a different instant in every zone.
-const RFC3339_PATTERN = /^(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?([Zz]|[+-]\d{2}:?\d{2})$/;
-const HTTP_DATE_MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+	/retry-after\s*[:=]\s*((?:[A-Za-z]{3,9},?\s+)?(?:\d{1,2}(?:\s+|-)[A-Za-z]{3,9}(?:\s+|-)\d{2,4}\s+\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?|[A-Za-z]{3,9}\s+\d{1,2}(?:,?\s+\d{4})?\s+\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:\s+\d{4})?|\d{4}-\d{2}-\d{2}[Tt ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)(?:\s*(?:(?:GMT|UTC|UT)(?:[+-]\d{2}:?\d{2})?|Z|[ECMP][SD]T|[+-]\d{2}:?\d{2}))?(?:\s*\([^()]*\))*)(?![\w:])/i;
+// The shapes a Retry-After date takes. RFC 9110 section 5.6.7 names three
+// (IMF-fixdate, RFC 850, asctime) and asks recipients to be robust: a date
+// forwarded from an RFC 5322 message may omit the weekday or the seconds, name
+// UT, a US zone or a numeric offset, and end in a comment. Servers also send
+// JavaScript's `Date#toString` shape and RFC 3339 timestamps. Every shape that
+// names its instant without guessing the machine's zone is read; a time with
+// no zone is GMT only in the HTTP shapes, where GMT is the rule.
+const DATE_ZONE = String.raw`(?:GMT|UTC|UT)(?:[+-]\d{2}:?\d{2})?|Z|[ECMP][SD]T|[+-]\d{2}:?\d{2}`;
+const DATE_TIME = String.raw`(?<hour>\d{1,2}):(?<minute>\d{2})(?::(?<second>\d{2})(?:\.(?<fraction>\d+))?)?`;
+const DATE_WEEKDAY = String.raw`(?:(?<weekday>[A-Za-z]{3,9})(?:,\s*|\s+))?`;
+const DATE_END = String.raw`(?:\s*(?<zone>${DATE_ZONE}))?(?:\s*\([^()]*\))*$`;
+/**
+ * IMF-fixdate and RFC 850: day, month and year, joined by hyphens or by
+ * whitespace (RFC 5322 folding whitespace may be more than one space).
+ */
+const DAY_MONTH_YEAR_PATTERN = new RegExp(
+	String.raw`^${DATE_WEEKDAY}(?<day>\d{1,2})(?:\s+|-)(?<month>[A-Za-z]{3,9})(?:\s+|-)(?<year>\d{4}|\d{2})\s+${DATE_TIME}${DATE_END}`,
+	"i",
+);
+/** asctime (year after the time) and `Date#toString` (year before it). */
+const MONTH_DAY_PATTERN = new RegExp(
+	String.raw`^${DATE_WEEKDAY}(?<month>[A-Za-z]{3,9})\s+(?<day>\d{1,2})(?:,?\s+(?<yearBefore>\d{4}))?\s+${DATE_TIME}(?:\s+(?<yearAfter>\d{4}))?${DATE_END}`,
+	"i",
+);
+// An RFC 3339 timestamp. Only with an explicit zone: without one it names a
+// different instant in every machine zone.
+const RFC3339_PATTERN =
+	/^(?<year>\d{4})-(?<month>\d{2})-(?<day>\d{2})[Tt ](?<hour>\d{2}):(?<minute>\d{2})(?::(?<second>\d{2})(?:\.(?<fraction>\d+))?)?\s*(?<zone>[Zz]|[+-]\d{2}:?\d{2}|GMT|UTC)$/;
+const MONTH_NAMES = [
+	"jan",
+	"feb",
+	"mar",
+	"apr",
+	"may",
+	"jun",
+	"jul",
+	"aug",
+	"sep",
+	"oct",
+	"nov",
+	"dec",
+	"january",
+	"february",
+	"march",
+	"april",
+	"may",
+	"june",
+	"july",
+	"august",
+	"september",
+	"october",
+	"november",
+	"december",
+];
+const WEEKDAY_NAMES = new Set([
+	"mon",
+	"tue",
+	"wed",
+	"thu",
+	"fri",
+	"sat",
+	"sun",
+	"monday",
+	"tuesday",
+	"wednesday",
+	"thursday",
+	"friday",
+	"saturday",
+	"sunday",
+]);
 /** RFC 5322 section 4.3 named zones, in minutes east of UTC. */
 const NAMED_ZONE_MINUTES: Readonly<Record<string, number>> = {
 	gmt: 0,
@@ -125,10 +181,8 @@ export function extractRetryHint(
 		}
 		const retryAfter = headers.get("retry-after");
 		if (retryAfter) {
-			const seconds = Number(retryAfter);
-			if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
-			const parsedDate = parseRetryAfterDate(retryAfter);
-			if (parsedDate !== undefined) return Math.max(0, parsedDate - Date.now());
+			const ms = parseRetryAfter(retryAfter);
+			if (ms !== undefined) return ms;
 		}
 		const rateLimitResetMs = headers.get("x-ratelimit-reset-ms");
 		if (rateLimitResetMs) {
@@ -197,12 +251,9 @@ function headerRetryHints(headers: Headers): number[] {
 		}
 	};
 	read("retry-after-ms", value => nonNegative(Number(value)));
-	read("retry-after", value => {
-		const seconds = Number(value);
-		if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
-		const dateMs = parseRetryAfterDate(value);
-		return dateMs === undefined ? undefined : Math.max(0, dateMs - Date.now());
-	});
+	const retryAfter = headers.get("retry-after");
+	const retryAfterMs = retryAfter ? parseRetryAfter(retryAfter) : undefined;
+	if (retryAfterMs !== undefined) hints.push(retryAfterMs);
 	read("x-ratelimit-reset-ms", value => resetCounterMs(Number(value), 1));
 	read("x-ratelimit-reset", value => resetCounterMs(Number(value), 1000));
 	read("x-ratelimit-reset-after", value => {
@@ -213,45 +264,109 @@ function headerRetryHints(headers: Headers): number[] {
 }
 
 /**
- * The instant a `Retry-After` date names, in ms since the epoch, or `undefined`
- * when `value` is not one. Reads the three forms RFC 9110 section 5.6.7 defines,
- * with the zones RFC 5322 also allows, and an RFC 3339 timestamp that names its
- * zone. Every field is range-checked: the day must exist in its month, and
- * second 60 is accepted only as a leap second at 23:59, read as the instant
- * after 23:59:59. An HTTP date without a zone is GMT. The two-digit year of the
- * RFC 850 form is the latest year with those digits that is not more than fifty
- * years after `nowMs`.
+ * The wait, in ms, a `Retry-After` header value names: delta seconds or a date
+ * ({@link parseRetryAfterDate}), the longest across the values a duplicated
+ * header joins with commas (the comma after a date's weekday stays with its
+ * date). A date already past and a negative delta name `0`; `undefined` when
+ * no value is a wait.
  *
- * The one reader of a `Retry-After` date: every retry-hint parser uses it,
- * whether or not a replay budget governs the call, so two readers of the same
- * header never disagree.
+ * The one reading of the header: every retry parser uses it, with or without a
+ * replay budget, and only bounds the result its own way (a cap, a floor), so
+ * two readers of the same header never disagree about what it says.
+ */
+export function parseRetryAfter(value: string, nowMs = Date.now()): number | undefined {
+	let longest: number | undefined;
+	for (const entry of retryAfterEntries(value, nowMs)) {
+		const seconds = Number(entry);
+		let ms: number | undefined;
+		if (Number.isFinite(seconds)) {
+			ms = Math.max(0, seconds * 1000);
+		} else {
+			const dateMs = parseRetryAfterDate(entry, nowMs);
+			ms = dateMs === undefined ? undefined : Math.max(0, dateMs - nowMs);
+		}
+		if (ms !== undefined && (longest === undefined || ms > longest)) longest = ms;
+	}
+	return longest;
+}
+
+/** The values a Retry-After header carries: the whole value when it is one, else its comma-separated parts. */
+function retryAfterEntries(value: string, nowMs: number): string[] {
+	const whole = value.trim();
+	if (whole === "") return [];
+	if (Number.isFinite(Number(whole)) || parseRetryAfterDate(whole, nowMs) !== undefined) return [whole];
+	const parts = whole.split(",").map(part => part.trim());
+	const entries: string[] = [];
+	for (let index = 0; index < parts.length; index++) {
+		const part = parts[index]!;
+		if (part === "") continue;
+		// A bare word is a weekday whose date follows its comma.
+		if (/^[A-Za-z]+$/.test(part) && index + 1 < parts.length) {
+			entries.push(`${part}, ${parts[++index]}`);
+			continue;
+		}
+		entries.push(part);
+	}
+	return entries;
+}
+
+/**
+ * The instant a `Retry-After` date names, in ms since the epoch, or `undefined`
+ * when `value` is not one. Reads RFC 9110 section 5.6.7's three forms with the
+ * robustness it asks for: the RFC 5322 date-time they derive from (optional
+ * weekday and seconds, UT, the US zone names, a numeric offset, a trailing
+ * comment), month and weekday names short or long, JavaScript's `Date#toString`
+ * shape, and an RFC 3339 timestamp that names its zone. Every field is
+ * range-checked: the day must exist in its month, and second 60 is accepted
+ * only as a leap second at 23:59, read as the instant after 23:59:59. A time
+ * with no zone is GMT in the HTTP shapes and is not read in any other, where it
+ * would name a different instant in every machine zone. A two-digit year is the
+ * latest year with those digits that is not more than fifty years after `nowMs`.
+ *
+ * The one reader of a `Retry-After` date, used by {@link parseRetryAfter} and by
+ * the readers of a date written in error text.
  */
 export function parseRetryAfterDate(value: string, nowMs = Date.now()): number | undefined {
 	const text = value.trim();
-	let match = IMF_FIXDATE_PATTERN.exec(text);
-	if (match) {
-		const [, day, month, year, hour, minute, second, zone] = match;
-		return utcInstant(Number(year), monthIndex(month!), day!, hour!, minute!, second!, undefined, zone);
+	let groups = DAY_MONTH_YEAR_PATTERN.exec(text)?.groups;
+	if (groups) {
+		if (!isWeekday(groups.weekday)) return undefined;
+		const month = monthIndex(groups.month!);
+		const year = groups.year!.length === 4 ? Number(groups.year) : twoDigitYear(groups, month, nowMs);
+		return year === undefined ? undefined : utcInstant(year, month, groups, groups.zone);
 	}
-	match = ASCTIME_DATE_PATTERN.exec(text);
-	if (match) {
-		const [, month, day, hour, minute, second, year, zone] = match;
-		return utcInstant(Number(year), monthIndex(month!), day!, hour!, minute!, second!, undefined, zone);
+	groups = MONTH_DAY_PATTERN.exec(text)?.groups;
+	if (groups) {
+		if (!isWeekday(groups.weekday)) return undefined;
+		const { yearBefore, yearAfter, zone } = groups;
+		// Exactly one year. The `Date#toString` shape (year before the time) is not
+		// an HTTP date, so it is read only with a zone.
+		if ((yearBefore === undefined) === (yearAfter === undefined)) return undefined;
+		if (yearBefore !== undefined && zone === undefined) return undefined;
+		return utcInstant(Number(yearBefore ?? yearAfter), monthIndex(groups.month!), groups, zone);
 	}
-	match = RFC3339_PATTERN.exec(text);
-	if (match) {
-		const [, year, month, day, hour, minute, second, fraction, zone] = match;
-		return utcInstant(Number(year), Number(month) - 1, day!, hour!, minute!, second!, fraction, zone);
-	}
-	match = RFC850_DATE_PATTERN.exec(text);
-	if (!match) return undefined;
-	const [, day, month, year, hour, minute, second, zone] = match;
-	const month0 = monthIndex(month!);
-	if (year!.length === 4) return utcInstant(Number(year), month0, day!, hour!, minute!, second!, undefined, zone);
-	// Not more than fifty years ahead: the latest of the three centuries that
-	// fits, chosen first and then checked, so a 29 February that only exists in
-	// another century is not moved there.
-	if (month0 < 0) return undefined;
+	groups = RFC3339_PATTERN.exec(text)?.groups;
+	if (groups) return utcInstant(Number(groups.year), Number(groups.month) - 1, groups, groups.zone);
+	return undefined;
+}
+
+function isWeekday(name: string | undefined): boolean {
+	return name === undefined || WEEKDAY_NAMES.has(name.toLowerCase());
+}
+
+function monthIndex(name: string): number {
+	const index = MONTH_NAMES.indexOf(name.toLowerCase());
+	return index < 0 ? -1 : index % 12;
+}
+
+/**
+ * The year a two-digit year names: the latest of the three centuries that is
+ * not more than fifty years after `nowMs` (RFC 9110 section 5.6.7), chosen
+ * first and then checked, so a 29 February that only exists in another century
+ * is not moved there.
+ */
+function twoDigitYear(fields: Record<string, string | undefined>, month: number, nowMs: number): number | undefined {
+	if (month < 0) return undefined;
 	const now = new Date(nowMs);
 	const limitMs = Date.UTC(
 		now.getUTCFullYear() + 50,
@@ -262,16 +377,14 @@ export function parseRetryAfterDate(value: string, nowMs = Date.now()): number |
 		now.getUTCSeconds(),
 		now.getUTCMilliseconds(),
 	);
-	const nearest = Math.floor(now.getUTCFullYear() / 100) * 100 + Number(year);
-	for (const candidate of [nearest + 100, nearest, nearest - 100]) {
-		if (Date.UTC(candidate, month0, Number(day), Number(hour), Number(minute), Number(second)) > limitMs) continue;
-		return utcInstant(candidate, month0, day!, hour!, minute!, second!, undefined, zone);
-	}
-	return undefined;
-}
-
-function monthIndex(name: string): number {
-	return HTTP_DATE_MONTHS.indexOf(name.toLowerCase());
+	const nearest = Math.floor(now.getUTCFullYear() / 100) * 100 + Number(fields.year);
+	const day = Number(fields.day);
+	const hour = Number(fields.hour);
+	const minute = Number(fields.minute);
+	const second = Number(fields.second ?? 0);
+	return [nearest + 100, nearest, nearest - 100].find(
+		candidate => Date.UTC(candidate, month, day, hour, minute, second) <= limitMs,
+	);
 }
 
 /** Minutes east of UTC a zone names; `0` when none is named, `undefined` when it is out of range. */
@@ -279,33 +392,32 @@ function zoneOffsetMinutes(zone: string | undefined): number | undefined {
 	if (zone === undefined) return 0;
 	const named = NAMED_ZONE_MINUTES[zone.toLowerCase()];
 	if (named !== undefined) return named;
-	const digits = zone.slice(1).replace(":", "");
+	// A numeric offset, alone or after GMT/UTC/UT (`GMT+0000`, `UTC+05:30`).
+	const offset = /[+-]\d{2}:?\d{2}$/.exec(zone)?.[0];
+	if (offset === undefined) return undefined;
+	const digits = offset.slice(1).replace(":", "");
 	const hours = Number(digits.slice(0, 2));
 	const minutes = Number(digits.slice(2, 4));
 	if (hours > 23 || minutes > 59) return undefined;
-	return (zone[0] === "-" ? -1 : 1) * (hours * 60 + minutes);
+	return (offset[0] === "-" ? -1 : 1) * (hours * 60 + minutes);
 }
 
 /** The UTC instant of a checked calendar date and time of day; `undefined` when a field is out of range. */
 function utcInstant(
 	year: number,
 	month: number,
-	dayText: string,
-	hourText: string,
-	minuteText: string,
-	secondText: string,
-	fraction: string | undefined,
+	fields: Record<string, string | undefined>,
 	zone: string | undefined,
 ): number | undefined {
-	const day = Number(dayText);
-	const hour = Number(hourText);
-	const minute = Number(minuteText);
-	const second = Number(secondText);
+	const day = Number(fields.day);
+	const hour = Number(fields.hour);
+	const minute = Number(fields.minute);
+	const second = Number(fields.second ?? 0);
 	const offsetMinutes = zoneOffsetMinutes(zone);
 	if (offsetMinutes === undefined || month < 0 || month > 11 || year < 0) return undefined;
 	if (day < 1 || day > daysInMonth(year, month)) return undefined;
 	if (hour > 23 || minute > 59 || second > (hour === 23 && minute === 59 ? 60 : 59)) return undefined;
-	const ms = fraction === undefined ? 0 : Number(fraction.slice(0, 3).padEnd(3, "0"));
+	const ms = fields.fraction === undefined ? 0 : Number(fields.fraction.slice(0, 3).padEnd(3, "0"));
 	// `Date.UTC` reads years 0-99 as 1900-1999; a 400-year shift is exact.
 	const shift = year < 100 ? MS_PER_400_YEARS : 0;
 	return Date.UTC(year + (shift ? 400 : 0), month, day, hour, minute, second, ms) - shift - offsetMinutes * 60_000;

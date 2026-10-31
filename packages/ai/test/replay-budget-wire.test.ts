@@ -1106,6 +1106,51 @@ describe("a retryable failure naming an RFC 850 date whose two-digit year is dec
 	);
 });
 
+/** Spellings of a date 30 s ahead that servers send in a `Retry-After` header. */
+const DATE_SPELLINGS_30S: ReadonlyArray<[string, (at: Date) => string]> = [
+	["with a trailing comment", at => `${at.toUTCString()} (UTC)`],
+	[
+		"with long weekday and month names",
+		at => {
+			const day = new Intl.DateTimeFormat("en-US", { weekday: "long", timeZone: "UTC" }).format(at);
+			const month = new Intl.DateTimeFormat("en-US", { month: "long", timeZone: "UTC" }).format(at);
+			const time = at.toISOString().slice(11, 19);
+			return `${day}, ${at.getUTCDate()} ${month} ${at.getUTCFullYear()} ${time} GMT`;
+		},
+	],
+	["as an RFC 3339 timestamp", at => at.toISOString()],
+	[
+		"in JavaScript's Date#toString shape with a GMT offset",
+		at =>
+			`${at.toUTCString().replace(/^(\w{3}), (\d{2}) (\w{3}) (\d{4}) (\S+) GMT$/, "$1 $3 $2 $4 $5")} GMT+0000 (Coordinated Universal Time)`,
+	],
+	["without a zone", at => at.toUTCString().replace(/ GMT$/, "")],
+	["with doubled spaces", at => at.toUTCString().replaceAll(" ", "  ")],
+];
+
+// Each spelling names the same 30 s wait, so each ends the call at once under
+// a 2 s budget: one request, marked.
+describe.each(DATE_SPELLINGS_30S)("a retryable failure whose Retry-After date is written %s", (_name, spell) => {
+	it.each(HTTP_LANES.map(lane => [lane.name, lane] as const))(
+		"%s ends the call on the 30 s wait against a 2 s budget",
+		async (_lane, lane) => {
+			const route = scripted(n =>
+				n === 1
+					? failure(503, { "retry-after": spell(new Date(Math.ceil((Date.now() + 30_000) / 1000) * 1000)) })
+					: failure(400),
+			);
+			try {
+				const result = await lane.call(route.url, { replayBudgetMs: 2_000 });
+
+				expect(route.requests()).toBe(1);
+				expect(result.replayBudgetExhausted).toBe(true);
+			} finally {
+				route.stop();
+			}
+		},
+	);
+});
+
 describe("the no-budget reading of conflicting hints", () => {
 	// Without a budget nothing changes: the retry loop still sleeps on the first
 	// header it recognizes, so the conflicting pair is retried after 1 ms.

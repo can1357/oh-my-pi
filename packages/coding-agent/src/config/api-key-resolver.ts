@@ -80,7 +80,7 @@ export function createApiKeyResolver(
 		provenance.record(resolved);
 		return resolved;
 	};
-	return async ({ lastChance, error, signal, previousKey }) => {
+	return async ({ lastChance, error, signal, previousKey, admitsWait }) => {
 		const rejectedAccessToken = provenance.accessFor(previousKey);
 		if (error === undefined) {
 			return resolveKey(undefined);
@@ -89,7 +89,8 @@ export function createApiKeyResolver(
 			// Account constraint (401 / usage / account-rate-limit): rotate to a
 			// sibling credential. We do NOT honor the failed account's retry-after
 			// here — if a sibling exists we switch immediately, and `rotate` itself
-			// sleeps out a sibling block that clears within seconds. Longer
+			// sleeps out a sibling block that clears within seconds, when the
+			// caller's replay budget allows the wait. Longer
 			// no-sibling backoff is owned by `markUsageLimitReached` (default +
 			// server usage-report reset) and the outer whole-turn retry layer.
 			const rotation = await registry.authStorage.limits.rotate(provider, sessionId, {
@@ -97,6 +98,7 @@ export function createApiKeyResolver(
 				modelId,
 				signal,
 				apiKey: previousKey,
+				admitsWait,
 			});
 			if (!rotation.switched) {
 				const status = AIError.status(error);

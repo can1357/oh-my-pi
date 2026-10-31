@@ -585,13 +585,62 @@ describe("longestRetryHint", () => {
 			["an RFC 5322 date without its weekday", "31 Oct 2026 12:00:30 GMT", at + 30_000],
 			["an RFC 3339 timestamp in UTC", "2026-10-31T12:00:30Z", at + 30_000],
 			["an RFC 3339 timestamp with an offset and a fraction", "2026-10-31T14:00:30.250+02:00", at + 30_250],
+			["an RFC 3339 one-digit fraction, as tenths", "2026-10-31T12:00:30.5Z", at + 30_500],
+			["an RFC 3339 two-digit fraction, as hundredths", "2026-10-31T12:00:30.05Z", at + 30_050],
+			["an RFC 3339 fraction finer than milliseconds", "2026-10-31T12:00:30.123456Z", at + 30_123],
 			["the RFC 3339 leap second", "2016-12-31T23:59:60Z", Date.UTC(2017, 0, 1)],
+			["a date with a trailing comment", "Sat, 31 Oct 2026 12:00:30 GMT (UTC)", at + 30_000],
+			["long weekday and month names", "Saturday, 31 October 2026 12:00:30 GMT", at + 30_000],
+			["a time without seconds", "Sat, 31 Oct 2026 12:01 GMT", at + 60_000],
+			["a GMT offset", "Sat, 31 Oct 2026 13:00:30 GMT+0100", at + 30_000],
+			[
+				"JavaScript's Date#toString shape",
+				"Sat Oct 31 2026 12:00:30 GMT+0000 (Coordinated Universal Time)",
+				at + 30_000,
+			],
+			["an RFC 3339 timestamp with a space for the T", "2026-10-31 12:00:30Z", at + 30_000],
 		])("reads %s", (_name, value, expected) => {
 			expect(parseRetryAfterDate(value, at)).toBe(expected);
 		});
 
+		// RFC 5322 section 4.3: every named zone, so no single offset can drift.
+		it.each([
+			["GMT", 0],
+			["UT", 0],
+			["UTC", 0],
+			["Z", 0],
+			["EST", -5 * 60],
+			["EDT", -4 * 60],
+			["CST", -6 * 60],
+			["CDT", -5 * 60],
+			["MST", -7 * 60],
+			["MDT", -6 * 60],
+			["PST", -8 * 60],
+			["PDT", -7 * 60],
+		])("reads the zone %s as %i minutes from UTC", (zone, offsetMinutes) => {
+			// The wall clock in that zone at `at`.
+			const wall = new Date(at + offsetMinutes * 60_000);
+			const hh = String(wall.getUTCHours()).padStart(2, "0");
+			const mm = String(wall.getUTCMinutes()).padStart(2, "0");
+			expect(parseRetryAfterDate(`${wall.getUTCDate()} Oct 2026 ${hh}:${mm}:00 ${zone}`, at)).toBe(at);
+		});
+
+		// `Date.UTC` reads years 0-99 as 1900-1999; a four-digit year below 100 is
+		// that year, in every shape.
+		it.each([
+			["IMF", "Fri, 01 Jan 0050 00:00:00 GMT"],
+			["RFC 3339", "0050-01-01T00:00:00Z"],
+			["asctime", "Fri Jan  1 00:00:00 0050"],
+		])("reads a four-digit year below 100 as itself in the %s shape", (_name, value) => {
+			const year50 = new Date(0);
+			year50.setUTCFullYear(50, 0, 1);
+			expect(parseRetryAfterDate(value, at)).toBe(year50.getTime());
+		});
+
 		it.each([
 			["an RFC 3339 timestamp without a zone", "2026-10-31T12:00:30"],
+			["JavaScript's Date#toString shape without a zone", "Sat Oct 31 2026 12:00:30"],
+			["a word that is not a weekday", "Foo, 31 Oct 2026 12:00:30 GMT"],
 			["an unknown zone", "Sat, 31 Oct 2026 12:00:30 CET"],
 			["an offset past 23 hours", "2026-10-31T12:00:30+24:00"],
 			["a seconds value", "30"],

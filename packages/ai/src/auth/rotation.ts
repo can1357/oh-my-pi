@@ -422,7 +422,7 @@ export class RateLimits implements LimitsApi {
 				credentialId: options?.credentialId,
 				signal: options?.signal,
 			});
-			return awaitSiblingUnblock(mark, options?.signal, options?.waitForSibling);
+			return awaitSiblingUnblock(mark, options?.signal, options?.waitForSibling, options?.admitsWait);
 		}
 
 		const deniedModel = AIError.codexChatGPTAccountPolicyModel(error);
@@ -468,7 +468,7 @@ export class RateLimits implements LimitsApi {
 				routing,
 				false,
 			);
-			return awaitSiblingUnblock(mark, options?.signal, options?.waitForSibling);
+			return awaitSiblingUnblock(mark, options?.signal, options?.waitForSibling, options?.admitsWait);
 		}
 
 		const providerKey = providerTypeKey(provider, sessionCredential.type);
@@ -532,17 +532,20 @@ export class RateLimits implements LimitsApi {
 
 /**
  * Turn a no-sibling mark into a rotation by sleeping out the soonest sibling
- * block when it expires within {@link SIBLING_UNBLOCK_WAIT_MAX_MS}.
+ * block when it expires within {@link SIBLING_UNBLOCK_WAIT_MAX_MS} and
+ * `admitsWait` (a caller's replay budget) allows the wait.
  */
 async function awaitSiblingUnblock(
 	mark: UsageLimitMarkResult,
 	signal?: AbortSignal,
 	waitForSibling = true,
+	admitsWait?: (delayMs: number) => boolean,
 ): Promise<CredentialRotation> {
 	if (mark.switched) return { switched: true };
 	if (!waitForSibling || mark.retryAtMs === undefined) return { switched: false };
 	const waitMs = mark.retryAtMs - Date.now() + SIBLING_UNBLOCK_SLACK_MS;
 	if (waitMs > SIBLING_UNBLOCK_WAIT_MAX_MS) return { switched: false };
+	if (waitMs > 0 && admitsWait && !admitsWait(waitMs)) return { switched: false };
 	if (waitMs > 0) await scheduler.wait(waitMs, { signal });
 	return { switched: true, afterSiblingWait: true };
 }

@@ -366,6 +366,18 @@ describe("arm ownership", () => {
 		expect(() => budget.checkpoint()).not.toThrow();
 		expect(() => budget.handoff()).not.toThrow();
 	});
+
+	it("releases the arm a handoff sent, so the attempt's later requests pass after the deadline", () => {
+		const clock = fakeClock();
+		const budget = budgetOf(100);
+		budget.arm(new Error("503"));
+		budget.handoff();
+		clock.advance(200);
+
+		// A streaming append on the replay's own connection is not a replay.
+		expect(() => budget.checkpoint()).not.toThrow();
+		expect(() => budget.handoff()).not.toThrow();
+	});
 });
 
 describe("the failure a refused call answers with", () => {
@@ -455,6 +467,83 @@ describe("the wait before a replay", () => {
 		expect(await budget.replayAfterDelay(30_000, undefined, undefined, async ms => void waits.push(ms))).toBe(false);
 		expect(waits).toEqual([]);
 		expect(budget.admits(0)).toBe(false);
+	});
+
+	it("refuses a wait exactly as long as what remains, without starting it", async () => {
+		fakeClock();
+		const budget = budgetOf(100);
+		const waits: number[] = [];
+		expect(await budget.wait(100, undefined, async ms => void waits.push(ms))).toBe(false);
+		expect(waits).toEqual([]);
+		expect(budget.allowsWait(0)).toBe(false);
+	});
+
+	it("allowsWait refuses a wait exactly as long as what remains, and latches", () => {
+		fakeClock();
+		const budget = budgetOf(100);
+		expect(budget.allowsWait(99)).toBe(true);
+		expect(budget.allowsWait(100)).toBe(false);
+		expect(budget.allowsWait(0)).toBe(false);
+	});
+
+	it("rejects at once, without starting the wait, when the caller already aborted", async () => {
+		const budget = budgetOf(60_000);
+		const controller = new AbortController();
+		controller.abort();
+		const waits: number[] = [];
+
+		expect(await thrownBy(() => budget.wait(10, controller.signal, async ms => void waits.push(ms)))).toBeDefined();
+		expect(waits).toEqual([]);
+	});
+
+	it("bounds the wait's race by what remains of the budget, not longer", async () => {
+		fakeClock();
+		const budget = budgetOf(150);
+		const timer = vi.spyOn(globalThis, "setTimeout");
+
+		expect(await budget.wait(50, undefined, () => new Promise<void>(() => {}))).toBe(false);
+		const delays = timer.mock.calls.map(call => call[1]);
+		expect(delays).toContain(150);
+		expect(Math.max(...delays.map(Number))).toBeLessThanOrEqual(150);
+	});
+});
+
+describe("racing work the replay waits on", () => {
+	it("answers with the work's value when it settles inside the budget", async () => {
+		const budget = budgetOf(60_000);
+		expect(await budget.race(Promise.resolve("key"))).toEqual({ value: "key" });
+		expect(budget.admits(0)).toBe(true);
+	});
+
+	it("answers undefined at the deadline while the work still runs, bounded by what remains, and latches", async () => {
+		fakeClock();
+		const budget = budgetOf(120);
+		const timer = vi.spyOn(globalThis, "setTimeout");
+
+		expect(await budget.race(new Promise<string>(() => {}))).toBeUndefined();
+		const delays = timer.mock.calls.map(call => Number(call[1]));
+		expect(delays).toContain(120);
+		expect(Math.max(...delays)).toBeLessThanOrEqual(120);
+		expect(budget.admits(0)).toBe(false);
+	});
+
+	it("answers undefined at once when the budget is already spent", async () => {
+		const clock = fakeClock();
+		const budget = budgetOf(100);
+		clock.advance(100);
+		const timer = vi.spyOn(globalThis, "setTimeout");
+
+		expect(await budget.race(new Promise<string>(() => {}))).toBeUndefined();
+		expect(timer).not.toHaveBeenCalled();
+	});
+
+	it("does not leave a rejection the race stopped watching unhandled", async () => {
+		fakeClock();
+		const budget = budgetOf(10);
+		const late = Promise.withResolvers<string>();
+		expect(await budget.race(late.promise)).toBeUndefined();
+		late.reject(new Error("resolver failed after the deadline"));
+		await Bun.sleep(0);
 	});
 });
 
