@@ -1048,6 +1048,14 @@ export class AgentsHubComponent implements Component {
 		return truncateToWidth(theme.fg("muted", ` ${scopeLabel} · ${count}`), width);
 	}
 
+	/** Clamp a list row to `width`; a banded row is painted with `selectedBg` across the full width. */
+	#finishRow(line: string, width: number, banded: boolean): string {
+		const out = truncateToWidth(line, width);
+		if (!banded) return out;
+		const w = visibleWidth(out);
+		return theme.bgFill("selectedBg", w < width ? out + " ".repeat(width - w) : out);
+	}
+
 	#renderList(width: number, rows: number): string[] {
 		const lines: string[] = [];
 		const query = this.#search.getValue();
@@ -1074,16 +1082,12 @@ export class AgentsHubComponent implements Component {
 			const rowDef = this.#rows[i];
 			if (!rowDef) continue;
 			const selected = i === this.#rowIndex;
-			const hovered = i === this.#rowHover;
+			const banded = (selected && listFocused) || i === this.#rowHover;
 			const cursor = selected && listFocused ? theme.fg("accent", theme.nav.cursor) : " ";
 			if (rowDef.kind === "new") {
-				let line = truncateToWidth(` ${cursor} ${theme.fg(selected ? "accent" : "dim", "+ New agent…")}`, width);
-				if (selected || hovered) {
-					const w = visibleWidth(line);
-					if (w < width) line += " ".repeat(width - w);
-					line = theme.bgFill("selectedBg", line);
-				}
-				lines.push(line);
+				lines.push(
+					this.#finishRow(` ${cursor} ${theme.fg(selected ? "accent" : "dim", "+ New agent…")}`, width, banded),
+				);
 				continue;
 			}
 			const agent = rowDef.agent;
@@ -1110,13 +1114,7 @@ export class AgentsHubComponent implements Component {
 			if (rightWidth > 0 && lineWidth + rightWidth + 2 <= width) {
 				line = `${line}${" ".repeat(width - lineWidth - rightWidth - 1)}${right}`;
 			}
-			line = truncateToWidth(line, width);
-			if (selected || hovered) {
-				const w = visibleWidth(line);
-				if (w < width) line += " ".repeat(width - w);
-				line = theme.bgFill("selectedBg", line);
-			}
-			lines.push(line);
+			lines.push(this.#finishRow(line, width, banded));
 		}
 
 		// Selected-agent detail block pinned to the bottom of the body pane.

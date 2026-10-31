@@ -201,6 +201,22 @@ describe("AgentsHub layout", () => {
 		});
 	}
 
+	test("drops the keyboard band from the list while the scope sidebar has focus", async () => {
+		const { hub } = await createHub(new TestSettings());
+		const devBody = (): string =>
+			hub
+				.render(200)
+				.find(line => Bun.stripANSI(line).split("│")[2]?.includes(" dev"))!
+				.split("│")[2]!;
+		expect(devBody()).toContain(theme.getBgAnsi("selectedBg"));
+
+		hub.handleInput("\x1b[D"); // left → scope focus
+		expect(devBody()).not.toContain(theme.getBgAnsi("selectedBg"));
+
+		hub.handleInput("\x1b[C"); // right → list focus
+		expect(devBody()).toContain(theme.getBgAnsi("selectedBg"));
+	});
+
 	test("sidebar scope filters the rows to one source", async () => {
 		const { hub, strip } = await createHub(new TestSettings());
 		hub.handleInput("\x1b[D"); // left → scope focus
