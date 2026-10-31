@@ -742,6 +742,37 @@ export const cfgRetryMaxRetries = register({
 	},
 });
 
+export const cfgRetryContinueClassifierRefusals = register({
+	id: "retry.continueClassifierRefusals",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "model",
+		group: "Retry & Fallback",
+		label: "Continue Classifier Refusals",
+		description:
+			"Opt in to bounded same-model continuation after a provider safety-classifier refusal when no fallback is active",
+	},
+});
+
+export const cfgRetryMaxClassifierRefusalContinuations = register({
+	id: "retry.maxClassifierRefusalContinuations",
+	type: "number",
+	default: 2,
+	ui: {
+		tab: "model",
+		group: "Retry & Fallback",
+		label: "Classifier Refusal Continuations",
+		description: "Maximum same-model continuations per prompt after classifier refusals",
+		options: [
+			{ value: "1", label: "1 continuation" },
+			{ value: "2", label: "2 continuations" },
+			{ value: "3", label: "3 continuations" },
+			{ value: "5", label: "5 continuations" },
+		],
+	},
+});
+
 export const cfgRetryBaseDelayMs = register({ id: "retry.baseDelayMs", type: "number", default: 500 });
 
 export const cfgRetryMaxDelayMs = register({
@@ -926,6 +957,8 @@ export const cfgRetryFallbackRevertPolicy = register({
 export const cfgRetry = combine({
 	enabled: cfgRetryEnabled,
 	maxRetries: cfgRetryMaxRetries,
+	continueClassifierRefusals: cfgRetryContinueClassifierRefusals,
+	maxClassifierRefusalContinuations: cfgRetryMaxClassifierRefusalContinuations,
 	baseDelayMs: cfgRetryBaseDelayMs,
 	maxDelayMs: cfgRetryMaxDelayMs,
 	waitForUsageReset: cfgRetryWaitForUsageReset,

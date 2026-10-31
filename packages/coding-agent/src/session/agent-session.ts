@@ -1166,6 +1166,7 @@ export class AgentSession implements SettingsScope {
 	#modeExitDrainSuppressionDepth = 0;
 	#usagePreflightReadyForNextModelCall = false;
 	#usagePreflightReadyModel: Model | undefined;
+	#usagePreflightSuppressedForClassifierContinuation = false;
 	#detachUsageBeforeQueueDequeue: (() => void) | undefined;
 	#detachUsageBeforeModelCall: (() => void) | undefined;
 	/** Claude account lane (`cred:<id>`/`key:<hash>`) that served the latest Anthropic request. */
@@ -2181,6 +2182,7 @@ export class AgentSession implements SettingsScope {
 		this.#detachUsageBeforeQueueDequeue = this.agent.addBeforeQueuedMessageDequeueHook(async signal => {
 			if (
 				!cfgRetryUsageAwareFallback.get(this.settings) ||
+				this.#usagePreflightSuppressedForClassifierContinuation ||
 				(this.#usagePreflightReadyForNextModelCall && this.#usagePreflightReadyModel === this.model)
 			) {
 				return;
@@ -2193,6 +2195,10 @@ export class AgentSession implements SettingsScope {
 		this.agent.prepareQueuedMessages = this.#prepareQueuedUserMessages;
 		this.#detachUsageBeforeModelCall = this.agent.addBeforeModelCallHook(async signal => {
 			if (!cfgRetryUsageAwareFallback.get(this.settings)) return;
+			if (this.#usagePreflightSuppressedForClassifierContinuation) {
+				this.#usagePreflightSuppressedForClassifierContinuation = false;
+				return;
+			}
 			if (this.#usagePreflightReadyForNextModelCall) {
 				const checkedModel = this.#usagePreflightReadyModel;
 				this.#usagePreflightReadyForNextModelCall = false;
@@ -5085,7 +5091,9 @@ export class AgentSession implements SettingsScope {
 				}
 			}
 			const resumeResolvedStreamStall = resolvedInterruptedToolTurn === "stream-stall";
-			if (!requestBodyTimeoutTerminal && (resumeResolvedStreamStall || this.#recovery.isRetryableError(msg))) {
+			const retryableTurn =
+				!requestBodyTimeoutTerminal && (resumeResolvedStreamStall || this.#recovery.isRetryableError(msg));
+			if (retryableTurn) {
 				const didRetry = await this.#recovery.handleRetryableError(
 					msg,
 					resumeResolvedStreamStall ? { preserveFailedTurn: true } : undefined,
@@ -5094,21 +5102,36 @@ export class AgentSession implements SettingsScope {
 					await emitAgentEndNotification({ willContinue: true });
 					return;
 				}
-			} else if (!requestBodyTimeoutTerminal && this.#recovery.handleMalformedFunctionCallStop(msg)) {
+			}
+			if (!requestBodyTimeoutTerminal && (await this.#recovery.handleClassifierRefusalContinuation(msg))) {
+				// Carry useful text or a neutral retry reminder so the next request
+				// sees neither the failed assistant nor its refusal metadata.
+				maintenanceRoute("classifier-refusal-continued");
+				await emitAgentEndNotification({ willContinue: true });
+				return;
+			} else if (
+				!requestBodyTimeoutTerminal &&
+				!retryableTurn &&
+				this.#recovery.handleMalformedFunctionCallStop(msg)
+			) {
 				// A malformed call with committed text cannot be replayed, but it
 				// never executed anything either: keep the turn and continue with a
 				// corrective reminder rather than stopping on a pinned error.
 				maintenanceRoute("malformed-function-call-handled");
 				await emitAgentEndNotification({ willContinue: true });
 				return;
-			} else if (!requestBodyTimeoutTerminal && this.#recovery.handleCommittedTextStreamStall(msg)) {
+			} else if (
+				!requestBodyTimeoutTerminal &&
+				!retryableTurn &&
+				this.#recovery.handleCommittedTextStreamStall(msg)
+			) {
 				// The stream died after text rendered: replay would duplicate it and
 				// a trailing assistant prefill is rejected, so keep the partial turn
 				// and continue from where it stopped.
 				maintenanceRoute("committed-text-stream-stall-continued");
 				await emitAgentEndNotification({ willContinue: true });
 				return;
-			} else if (!requestBodyTimeoutTerminal && this.#recovery.isHardErrorFallbackEligible(msg)) {
+			} else if (!requestBodyTimeoutTerminal && !retryableTurn && this.#recovery.isHardErrorFallbackEligible(msg)) {
 				// A non-retryable hard error on a model covered by a configured
 				// fallback chain: retrying the SAME model is pointless, but a
 				// DIFFERENT model is a fresh chance — consult the chain before
@@ -5283,14 +5306,13 @@ export class AgentSession implements SettingsScope {
 		onStart?: () => void,
 	): Promise<AgentContinueOutcome> {
 		try {
-			// During an automatic-retry saga the primary model's selector cooldown
-			// can expire while a chain-tail fallback is still mid-backoff. Restoring
-			// the primary then would reset the retry budget and re-enter a model
-			// that just failed — an unbounded loop. Skip the cooldown-expiry revert
-			// for retries; the primary can still be restored on the next user
-			// prompt or after the saga terminates.
-			const isAutomaticRetry = request.options.source === "automatic-retry";
-			const reverted = isAutomaticRetry ? false : await this.#recovery.maybeRestoreRetryFallbackPrimary();
+			// Retry and classifier-refusal continuations must stay on the model
+			// whose turn they are recovering. A cooldown-expiry restore here can
+			// either re-enter the model that just failed or move a partial response
+			// to a different model before it finishes.
+			const classifierRefusalContinue = request.options.source === "classifier-refusal-continue";
+			const keepCurrentModel = request.options.source === "automatic-retry" || classifierRefusalContinue;
+			const reverted = keepCurrentModel ? false : await this.#recovery.maybeRestoreRetryFallbackPrimary();
 			if (signal.aborted || this.#isDisposed || this.#abortInProgress) {
 				return { status: "skipped", reason: "post-restore-unavailable" };
 			}
@@ -5305,7 +5327,8 @@ export class AgentSession implements SettingsScope {
 					return { status: "skipped", reason: "post-restore-unavailable" };
 				}
 			}
-			if (cfgRetryUsageAwareFallback.get(this.settings)) {
+			// Usage-aware model substitution would split one partial response across models.
+			if (!classifierRefusalContinue && cfgRetryUsageAwareFallback.get(this.settings)) {
 				if (!(await this.#runQueuedUsageAwarePreflight(signal))) {
 					return { status: "skipped", reason: "session-unavailable" };
 				}
@@ -5316,7 +5339,12 @@ export class AgentSession implements SettingsScope {
 			for (;;) {
 				try {
 					if (!this.agent.state.isStreaming) onStart?.();
-					await this.agent.continue(signal);
+					if (classifierRefusalContinue) this.#usagePreflightSuppressedForClassifierContinuation = true;
+					try {
+						await this.agent.continue(signal);
+					} finally {
+						if (classifierRefusalContinue) this.#usagePreflightSuppressedForClassifierContinuation = false;
+					}
 					return { status: "completed" };
 				} catch (error) {
 					if (!(error instanceof AgentBusyError)) throw error;
@@ -8616,10 +8644,20 @@ export class AgentSession implements SettingsScope {
 		const promptText = text.join("\n\n");
 		const preparationImages = images.length > 0 ? images : undefined;
 		// Steering amends the running task; only a follow-up starts a new one worth routing.
-		if (queue === "followUp" && userMessages.some(message => this.#isAutoPrewalkTask(message))) {
-			return this.#prepareQueuedAutoPrewalkTask(first, promptText, preparationImages, signal);
-		}
-		return this.#prepareAgentStart(first, promptText, preparationImages, this.#promptGeneration, signal, "queued");
+		const prepared =
+			queue === "followUp" && userMessages.some(message => this.#isAutoPrewalkTask(message))
+				? this.#prepareQueuedAutoPrewalkTask(first, promptText, preparationImages, signal)
+				: this.#prepareAgentStart(first, promptText, preparationImages, this.#promptGeneration, signal, "queued");
+		if (queue !== "followUp") return prepared;
+		// A delivered follow-up is a new user-authored task: it gets its own refusal-continuation budget.
+		return prepared.then(preparation => ({
+			...preparation,
+			commit: () => {
+				const additional = preparation.commit();
+				if (additional !== undefined) this.#recovery.resetClassifierRefusalContinuations();
+				return additional;
+			},
+		}));
 	};
 
 	/**

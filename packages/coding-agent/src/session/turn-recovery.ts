@@ -33,6 +33,8 @@ import type { Settings } from "../config/settings";
 import type { RetryErrorUpdate } from "../extensibility/shared-events";
 import { isEvalStateContext } from "../eval/state";
 import emptyStopRetryTemplate from "../prompts/system/empty-stop-retry.md" with { type: "text" };
+import classifierRefusalContinueTemplate from "../prompts/system/classifier-refusal-continue.md" with { type: "text" };
+import classifierRefusalRetryTemplate from "../prompts/system/classifier-refusal-retry.md" with { type: "text" };
 import malformedFunctionCallRetryTemplate from "../prompts/system/malformed-function-call-retry.md" with { type: "text" };
 import streamStallContinueTemplate from "../prompts/system/stream-stall-continue.md" with { type: "text" };
 import thinkingLoopRedirectTemplate from "../prompts/system/thinking-loop-redirect.md" with { type: "text" };
@@ -410,6 +412,9 @@ export class TurnRecovery {
 	#emptyStopRetryCount = 0;
 	#unexpectedStopRetryCount = 0;
 	#malformedFunctionCallRetryCount = 0;
+	#classifierRefusalContinueCount = 0;
+	/** The user cancelled a retry wait this prompt; a refusal follow-on must not undo that. */
+	#retryCancelledForPrompt = false;
 	#streamStallContinueCount = 0;
 	#acceptTerminalEmptyStopForPrompt = false;
 	// Three fields sit near the word "serve" and are deliberately distinct:
@@ -543,11 +548,19 @@ export class TurnRecovery {
 		}
 	}
 
+	/** Restores the classifier-refusal continuation budget for a new user-authored task. */
+	resetClassifierRefusalContinuations(): void {
+		this.#classifierRefusalContinueCount = 0;
+		this.#retryCancelledForPrompt = false;
+	}
+
 	/** Resets per-prompt recovery counters and terminal-stop acceptance. */
 	resetForNewPrompt(): void {
 		this.#emptyStopRetryCount = 0;
 		this.#unexpectedStopRetryCount = 0;
 		this.#malformedFunctionCallRetryCount = 0;
+		this.#classifierRefusalContinueCount = 0;
+		this.#retryCancelledForPrompt = false;
 		this.#streamStallContinueCount = 0;
 		this.#acceptTerminalEmptyStopForPrompt = false;
 		this.#activeFallbackCreditRedemption = undefined;
@@ -704,6 +717,101 @@ export class TurnRecovery {
 		});
 		this.#host.scheduleAgentContinue({
 			source: "malformed-function-call-retry",
+			generation: this.#host.promptGeneration(),
+		});
+		return true;
+	}
+
+	/**
+	 * Continue a classifier-refused turn on the same model without exposing the
+	 * provider refusal to the next request. Useful committed text is carried in
+	 * a hidden developer reminder; empty and thinking-only refusals receive a
+	 * neutral retry reminder. Tool and media output remain terminal.
+	 */
+	async handleClassifierRefusalContinuation(message: AssistantMessage): Promise<boolean> {
+		if (!this.isClassifierRefusal(message)) return false;
+		if (!this.autoRetryEnabled || this.#host.abortInProgress() || this.#host.isDisposed()) return false;
+		const retrySettings = cfgRetry.get(this.#host.settings);
+		if (!retrySettings.continueClassifierRefusals) return false;
+		if (this.#activeRetryFallback) return false;
+		if (this.#retryCancelledForPrompt) return false;
+
+		const text: string[] = [];
+		for (const block of message.content) {
+			if (block.type === "text") {
+				if (hasNonWhitespace(block.text)) text.push(block.text);
+				continue;
+			}
+			// Narration is prose the user already saw; ordinary and redacted thinking stays private.
+			if (block.type === "thinking" && block.narration) {
+				if (hasNonWhitespace(block.thinking)) text.push(block.thinking);
+				continue;
+			}
+			if (block.type === "thinking" || block.type === "redactedThinking") continue;
+			return false;
+		}
+		let partialText = text.join("\n\n").trim();
+		if (partialText && !this.#host.textOutputCommitted()) partialText = "";
+		const explanation = message.stopDetails?.explanation?.trim();
+		if (
+			partialText === explanation ||
+			message.errorMessage?.trim() === partialText ||
+			message.errorMessage?.trim().endsWith(partialText)
+		) {
+			partialText = "";
+		}
+
+		const maxContinuations = retrySettings.maxClassifierRefusalContinuations;
+		this.#classifierRefusalContinueCount++;
+		if (this.#classifierRefusalContinueCount > maxContinuations) {
+			logger.warn("Classifier refusals continued past retry cap", {
+				attempts: this.#classifierRefusalContinueCount - 1,
+				model: message.model,
+				provider: message.provider,
+			});
+			// Stay saturated until the next prompt so another owner cannot re-arm the budget.
+			return false;
+		}
+
+		logger.info("Classifier refusal ended the turn; continuing with neutral reminder", {
+			attempt: this.#classifierRefusalContinueCount,
+			model: message.model,
+			provider: message.provider,
+			preservedText: partialText.length > 0,
+		});
+		const reminder: AgentMessage = {
+			role: "developer",
+			content: [
+				{
+					type: "text",
+					text: partialText
+						? prompt.render(classifierRefusalContinueTemplate, {
+								partialText,
+								retryCount: this.#classifierRefusalContinueCount,
+								maxRetries: maxContinuations,
+							})
+						: prompt.render(classifierRefusalRetryTemplate, {
+								retryCount: this.#classifierRefusalContinueCount,
+								maxRetries: maxContinuations,
+							}),
+				},
+			],
+			attribution: "agent",
+			timestamp: Date.now(),
+		};
+		// A retry saga can have persisted the refused turn; drop it from the branch too,
+		// so the reminder is appended to the refusal's parent and reloads never see it.
+		const generation = this.#host.promptGeneration();
+		await this.#dropAssistantTurnDurably(message);
+		// An abort, disposal or new prompt may land during the durable rewrite; the
+		// refused turn is already gone, so stop without leaving a reminder behind.
+		if (this.#host.abortInProgress() || this.#host.isDisposed() || this.#host.promptGeneration() !== generation) {
+			return false;
+		}
+		this.#host.agent.appendMessage(reminder);
+		this.#host.sessionManager.appendMessage(reminder);
+		this.#host.scheduleAgentContinue({
+			source: "classifier-refusal-continue",
 			generation: this.#host.promptGeneration(),
 		});
 		return true;
@@ -3166,6 +3274,7 @@ export class TurnRecovery {
 		const attempt = this.#retryAttempt;
 		this.#retryAttempt = 0;
 		this.#retryAbortController = undefined;
+		this.#retryCancelledForPrompt = true;
 		await this.#host.emitSessionEvent({
 			type: "auto_retry_end",
 			success: false,
