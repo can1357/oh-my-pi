@@ -7,7 +7,7 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { type Component } from "../tui";
-import { formatBytes, formatCount, formatDuration } from "@oh-my-pi/pi-utils";
+import { formatBytes, formatCount, formatDuration, sanitizeText } from "@oh-my-pi/pi-utils";
 import { span } from "../native/describe";
 import type { JobSnapshot } from "../tools/wait";
 import type { DaemonSnapshot } from "../tools/daemon";
@@ -15,7 +15,7 @@ import { type CustomMessage, type FileMentionMessage, resolveAbortLabel, shouldR
 import { createIrcMessageCard } from "../tools/wait";
 import { formatArtifactErrorNotice, type OutputMeta } from "../tools/output-meta";
 import type { OutputArtifactError } from "../tools/streaming-output";
-import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../render/render-utils";
+import { replaceTabs, shortenEmbeddedPaths, TRUNCATE_LENGTHS, truncateToWidth } from "../render/render-utils";
 import { canonicalizeMessage } from "./thinking-display";
 import { ToolActivityContainer } from "../chrome/tool-activity";
 import { type TranscriptBlock } from "../chrome/transcript-container";
@@ -23,6 +23,23 @@ import { TranscriptStatusBlock, type TranscriptStatusRow } from "../chrome/trans
 import { theme } from "../theme";
 
 type CustomOrHookMessage = Extract<AgentMessage, { role: "custom" | "hookMessage" }>;
+
+/**
+ * Build the display-only copy of an async progress message. The persisted/model
+ * payload remains byte-identical; both transcript surfaces pass this copy to the
+ * existing custom-message renderer.
+ */
+export function buildAsyncProgressDisplayMessage(message: CustomOrHookMessage): CustomOrHookMessage {
+	// Mirrors `ASYNC_PROGRESS_MESSAGE_TYPE` in @oh-my-pi/pi-coding-agent; pi-tui
+	// matches custom types by literal (see chat-transcript-builder's "async-result").
+	if (message.customType !== "async-progress" || typeof message.content !== "string") return message;
+	const content = shortenEmbeddedPaths(replaceTabs(message.content))
+		.split("\n")
+		.map(line => truncateToWidth(line, TRUNCATE_LENGTHS.LINE))
+		.join("\n");
+	return content === message.content ? message : { ...message, content };
+}
+
 type AssistantAgentMessage = Extract<AgentMessage, { role: "assistant" }>;
 
 /**
@@ -111,6 +128,10 @@ export function buildLaunchCompletionBlock(message: CustomOrHookMessage): ToolAc
 		});
 	}
 	for (const daemon of daemons) {
+		const normalizedName = shortenEmbeddedPaths(
+			replaceTabs(sanitizeText(daemon.name.replace(/[\r\n]+/g, " "))),
+		).trim();
+		const displayName = truncateToWidth(normalizedName || "unnamed", TRUNCATE_LENGTHS.TITLE);
 		const failed = daemon.state === "failed" || (daemon.exitCode !== undefined && daemon.exitCode !== 0);
 		const label = failed ? "Supervised process failed" : "Supervised process completed";
 		const exit = daemon.exitCode !== undefined ? `exit ${daemon.exitCode}` : undefined;
@@ -123,13 +144,13 @@ export function buildLaunchCompletionBlock(message: CustomOrHookMessage): ToolAc
 				failed
 					? { text: `${theme.status.error} ${label}`, color: "error" }
 					: { text: `${theme.status.done} ${label}`, color: "success" },
-				{ text: daemon.name, color: "accent" },
+				{ text: displayName, color: "accent" },
 				exit ? { text: `(${exit})`, color: "dim" } : undefined,
 				duration ? { text: `(${duration})`, color: "dim" } : undefined,
 			],
 			native: {
 				tone: failed ? "error" : "success",
-				message: [span(label), span(" "), span(daemon.name, "mono"), ...facts([exit, duration])],
+				message: [span(label), span(" "), span(displayName, "mono"), ...facts([exit, duration])],
 			},
 		});
 	}
