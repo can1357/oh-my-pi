@@ -6,6 +6,7 @@ import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/eve
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { SKILL_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -55,6 +56,7 @@ describe("issue #2372 pre-streaming chat rebuild preserves optimistic submission
 
 	beforeEach(() => {
 		mode.clearOptimisticUserMessage();
+		mode.clearOptimisticSkillMessage();
 		mode.chatContainer.clear();
 		mode.locallySubmittedUserSignatures.clear();
 		mode.optimisticUserMessageSignature = undefined;
@@ -149,6 +151,35 @@ describe("issue #2372 pre-streaming chat rebuild preserves optimistic submission
 		expect(mode.chatContainer.children).toHaveLength(1);
 		expect(mode.optimisticUserMessageSignature).toBeUndefined();
 		expect(mode.locallySubmittedUserSignatures.has("/jira-task\u00000")).toBe(false);
+	});
+
+	it("reconciles an idle queue's skill-first submission without a literal command row", async () => {
+		mode.isInitialized = true;
+		const controller = new EventController(mode);
+		const addMessageSpy = vi.spyOn(mode, "addMessageToChat");
+		const skillPrompt = {
+			message: {
+				customType: SKILL_PROMPT_MESSAGE_TYPE,
+				content: "Expanded skill instructions",
+				display: true,
+				details: { name: "sample", path: "/sample.md", lineCount: 1 },
+				attribution: "user",
+			},
+			options: { streamingBehavior: "followUp", queueChipText: "/skill:sample" },
+		} as const;
+
+		mode.startPendingSubmission({ text: "/skill:sample", skillPrompt });
+		expect(mode.optimisticUserMessageSignature).toBeUndefined();
+		expect(mode.optimisticSkillMessagePending).toBe(true);
+		expect(mode.chatContainer.children).toHaveLength(1);
+
+		await controller.handleEvent({
+			type: "message_start",
+			message: { role: "custom", ...skillPrompt.message, timestamp: Date.now() },
+		});
+		expect(mode.optimisticSkillMessagePending).toBe(false);
+		expect(mode.chatContainer.children).toHaveLength(1);
+		expect(addMessageSpy.mock.calls.map(([message]) => message.role)).toEqual(["custom", "custom"]);
 	});
 
 	it("does not replace a pending optimistic prompt with another local user event", async () => {

@@ -1995,7 +1995,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		};
 		this.#pendingSubmittedInput = submission;
 		this.#pendingSubmissionPreservesDraft = options?.preserveDraft === true;
-		if (!submission.customType) {
+		if (submission.skillPrompt) {
+			this.#resetGoalContinuationSuppression();
+			this.clearOptimisticUserMessage();
+			this.renderOptimisticSkillMessage(
+				{ role: "custom", ...submission.skillPrompt.message, timestamp: Date.now() },
+				{ imageLinks: input.imageLinks },
+			);
+		} else if (!submission.customType) {
 			this.#resetGoalContinuationSuppression();
 			const imageCount = submission.images?.length ?? 0;
 			this.optimisticUserMessageSignature = `${submission.text}\u0000${imageCount}`;
@@ -2035,6 +2042,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#pendingSubmittedInput = undefined;
 		this.#pendingSubmissionPreservesDraft = false;
 		this.clearOptimisticUserMessage();
+		if (submission.skillPrompt) this.clearOptimisticSkillMessage();
 		this.#pendingWorkingMessage = undefined;
 		if (submission.customType === "goal-continuation") {
 			this.#goalContinuationTurnInFlight = false;
@@ -2105,6 +2113,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#goalContinuationTurnInFlight = false;
 		}
 
+		if (wasPendingSubmission && input.skillPrompt && this.optimisticSkillMessagePending) {
+			this.clearOptimisticSkillMessage();
+		}
 		if (wasPendingSubmission && !this.session.isStreaming && !this.streamingComponent) {
 			this.optimisticUserMessageSignature = undefined;
 			pendingSubmissionDispose?.();
@@ -5108,6 +5119,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		submission?.onSettled?.();
 		this.#pendingSubmissionPreservesDraft = false;
 		this.clearOptimisticUserMessage();
+		if (submission?.skillPrompt) this.clearOptimisticSkillMessage();
 		this.#pendingWorkingMessage = undefined;
 		if (this.loadingAnimation) {
 			this.#stopLoadingAnimation(true);

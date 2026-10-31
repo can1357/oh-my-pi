@@ -5,6 +5,7 @@
 ### Fixed
 
 - Queue shorthand (`->`/`=>`) on idle or post-compaction sessions now queues later items before the first turn finishes, preserves their order with subsequent input, and restores cancelled batches or rejected batches alongside newer drafts ([#10802](https://github.com/can1357/oh-my-pi/issues/10802)).
+- Skill-first idle queue lists now display the expanded skill once, without a duplicate `/skill:` row ([#10802](https://github.com/can1357/oh-my-pi/issues/10802)).
 
 ## [18.1.10] - 2026-09-04
 

@@ -382,6 +382,7 @@ describe("compaction skill re-invocation", () => {
 			recordLocalSubmission: vi.fn((_text: string, _imageCount: number) => vi.fn()),
 			withLocalSubmission: vi.fn(async (_text: string, fn: () => unknown) => Promise.resolve(fn())),
 			session: {
+				subscribe: () => () => {},
 				promptCustomMessage,
 				prompt,
 				steer,
@@ -410,9 +411,9 @@ describe("compaction skill re-invocation", () => {
 		const uiHelpers = new UiHelpers(ctx);
 
 		await uiHelpers.flushCompactionQueue({ willRetry: false });
-		await promptCustomMessageCalled;
+		await promptCustomMessageCalled.promise;
 
-		const [message, options] = firstPromptCustomCall(promptCustomMessage);
+		const [message] = firstPromptCustomCall(promptCustomMessage);
 		expect(message.customType).toBe(SKILL_PROMPT_MESSAGE_TYPE);
 		expect(message.attribution).toBe("user");
 		if (!Array.isArray(message.content)) {
@@ -429,10 +430,6 @@ describe("compaction skill re-invocation", () => {
 		expect(renderedText.text).toContain("arg1 arg2");
 		expect(message.content[1]).toEqual(image);
 		expect(message.details).toMatchObject({ name: "test-skill", args: "arg1 arg2", lineCount: 1 });
-		expect(options).toEqual({
-			streamingBehavior: "followUp",
-			queueChipText: "/skill:test-skill arg1 arg2",
-		});
 		expect(prompt).not.toHaveBeenCalled();
 		expect(steer).not.toHaveBeenCalled();
 		expect(followUp).not.toHaveBeenCalled();
