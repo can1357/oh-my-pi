@@ -37,6 +37,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 import { type FileLockHandle, getAgentDir, getSessionsDir, setAgentDir } from "@oh-my-pi/pi-utils";
+import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 
 // A session's lease is an abstract socket named by its id, and on Linux that
 // name is shared by the whole machine. Every id here starts with a part made
@@ -4059,6 +4060,22 @@ for (const form of ["a FIFO", "a link to a FIFO"] as const) {
 					}
 					if (apply) expect(await Bun.file(path.join(liveArtifacts, "a.log")).text()).toBe("HELLO");
 					expect(await fs.lstat(path.join(liveArtifacts, "pipe")).catch(() => undefined)).toBeUndefined();
+					// The advice, followed as written, finishes the restore: the
+					// review found that moving the entry out alone did not.
+					const told = outcome === "hung" ? "" : (outcome.restore?.errors.join("\n") ?? "");
+					await fs.rename(entry, path.join(root, "moved-out-of-the-archive"));
+					if (apply) {
+						const record = `${archiveFile}.restoring`;
+						expect(told).toContain(`move this restore's record ${record} aside, then restore again`);
+						await fs.rename(record, path.join(root, "restore-record-aside"));
+					} else {
+						expect(told).toContain("move it out of the archive, then restore");
+					}
+					const again = await runGcCommand({
+						flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true },
+					});
+					expect(again.restore?.errors).toEqual([]);
+					expect(again.restore?.artifactsRestored).toBe(true);
 				} finally {
 					await pipe.close();
 				}
@@ -5959,12 +5976,14 @@ test("a quarantine retry that finds no record anywhere says where the directory 
 	const destination = quarantineDestination(record);
 	const stranded = path.join(destination, path.basename(ground.dir));
 	// The directory in the destination with no copy of the record beside it,
-	// which this command never leaves itself, then an archive run, which
-	// drops a record whose directory has left its tree.
+	// which this command never leaves itself; an archive run, which keeps a
+	// record whose directory has left its tree; then the record lost by
+	// hand, the way left to reach this.
 	await fs.mkdir(destination, { recursive: true, mode: 0o700 });
 	await fs.rename(ground.dir, stranded);
 	await archiveOnly();
-	expect(await Bun.file(ground.record).exists()).toBe(false);
+	expect(await Bun.file(ground.record).exists()).toBe(true);
+	await fs.unlink(ground.record);
 
 	const retried = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
 
@@ -6482,39 +6501,24 @@ test("a quarantine retry does not take an alias of a directory moved elsewhere i
 	expect(await Bun.file(path.join(relocated, path.basename(ground.file))).text()).toBe("PARTIAL STAGE");
 });
 
-test("a quarantine stopped right after it moved an emptied stage, then an archive run, is refused without blaming anyone else, and finishes once its record is put back", async () => {
+test("a quarantine stopped right after it moved an emptied stage, then an archive run, finishes on the same command", async () => {
 	const { ground, record } = await archivedWithKilledStage();
 	const destination = quarantineDestination(record);
-	const copy = path.join(destination, record);
 	const stageAt = path.join(destination, path.basename(ground.dir));
 	// The review's sequence, nothing removed by hand: an archive run killed
 	// once its cleanup had removed the staged file and before it removed the
 	// directory, an ordinary archive run, a quarantine stopped right after
-	// it moved the directory, and another ordinary archive run, which drops
-	// the ledger entry of a directory that has left its tree.
+	// it moved the directory, and another ordinary archive run. That run used
+	// to drop the ledger entry of a directory that had left its tree, which
+	// left the quarantine nothing to finish from; it removes no ledger entry
+	// it did not write now, so the same command finishes.
 	await fs.unlink(ground.file);
 	await archiveOnly();
 	expect(await Bun.file(ground.record).exists()).toBe(true);
 	await quarantineStopped(ground, record, "after the directory moves");
 	await archiveOnly();
-	expect(await Bun.file(ground.record).exists()).toBe(false);
+	expect(await Bun.file(ground.record).exists()).toBe(true);
 
-	const preview = await runGcCommand({ flags: { agentDir: root, quarantine: record, json: true } });
-	const applied = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
-
-	for (const run of [preview, applied]) {
-		expect(run.quarantine?.moved).toBe(false);
-		const told = run.quarantine?.errors.join("\n") ?? "";
-		expect(told).toContain("does not report a quarantine of it finished");
-		expect(told).toContain("stopped once its directory had left");
-		expect(told).toContain(`copy ${copy} back to ${ground.record}`);
-		expect(told).toContain(stageAt);
-		expect(told).not.toContain("something other than gc");
-	}
-
-	// The step the refusal gives.
-	await fs.copyFile(copy, ground.record);
-	await fs.chmod(ground.record, 0o600);
 	const finished = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
 
 	expect(finished.quarantine?.errors).toEqual([]);
@@ -6525,13 +6529,15 @@ test("a quarantine stopped right after it moved an emptied stage, then an archiv
 	expect(repeated.quarantine?.moved).toBe(false);
 });
 
-test("a quarantine stopped before its ledger entry went, then an archive run, is refused, and finishes once its record is put back", async () => {
+test("a quarantine stopped before its ledger entry went, whose record is then lost, is refused, and finishes once its record is put back", async () => {
 	const { ground, record, liveArtifacts } = await archivedWithKilledStage();
 	const destination = quarantineDestination(record);
 	const copy = path.join(destination, record);
 	await quarantineStopped(ground, record, "before the ledger entry goes");
+	// An archive run keeps the record; it is lost by hand.
 	await archiveOnly();
-	expect(await Bun.file(ground.record).exists()).toBe(false);
+	expect(await Bun.file(ground.record).exists()).toBe(true);
+	await fs.unlink(ground.record);
 
 	const retried = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
 
@@ -6587,23 +6593,24 @@ test("a finished quarantine whose directory was replaced afterwards is not repor
 	expect(applied.quarantine?.errors.join("\n")).toContain("does not report a quarantine of it finished");
 });
 
-test("a record-only quarantine stopped before its ledger entry went, then an archive run, is refused, and finishes once its record is put back", async () => {
+test("a record-only quarantine stopped before its ledger entry went, whose record is then lost, is refused, and finishes once its record is put back", async () => {
 	const { ground, record } = await archivedWithKilledStage();
 	const destination = quarantineDestination(record);
 	const copy = path.join(destination, record);
 	// The directory already gone, so the quarantine moves only the record,
-	// and it is stopped as it removes the ledger entry; an archive run then
-	// drops that entry, since its directory is not in its tree.
+	// and it is stopped as it removes the ledger entry; an archive run keeps
+	// that entry, and it is then lost by hand.
 	await fs.rename(ground.dir, path.join(root, "gone-before"));
 	await quarantineStopped(ground, record, "before the ledger entry goes");
 	await archiveOnly();
-	expect(await Bun.file(ground.record).exists()).toBe(false);
+	expect(await Bun.file(ground.record).exists()).toBe(true);
+	await fs.unlink(ground.record);
 
 	const retried = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
 
 	expect(retried.quarantine?.moved).toBe(false);
 	const told = retried.quarantine?.errors.join("\n") ?? "";
-	expect(told).toContain("stopped once its directory had left");
+	expect(told).toContain("lost any other way, partway through a quarantine or not");
 	expect(told).toContain(`copy ${copy} back to ${ground.record}`);
 
 	await fs.copyFile(copy, ground.record);
@@ -6892,9 +6899,9 @@ test("a quarantine that cannot resolve the directory its record names refuses, a
 	expect(await fs.lstat(quarantineDestination(record)).catch(() => undefined)).toBeUndefined();
 });
 
-// The review's sequence, nothing removed by hand: a quarantine stopped once
-// its record and directory were in place and before the ledger entry went,
-// an archive run that then drops that entry, and a quarantine place this
+// The review's sequence: a quarantine stopped once its record and directory
+// were in place and before the ledger entry went, an archive run, which
+// keeps that entry, the entry then lost by hand, and a quarantine place this
 // user cannot list. Not listed is not empty.
 const unlistable = [
 	["searchable but not listable", 0o100],
@@ -6910,7 +6917,8 @@ for (const [shape, mode] of unlistable) {
 			const copy = path.join(destination, record);
 			await quarantineStopped(ground, record, "before the ledger entry goes");
 			await archiveOnly();
-			expect(await Bun.file(ground.record).exists()).toBe(false);
+			expect(await Bun.file(ground.record).exists()).toBe(true);
+			await fs.unlink(ground.record);
 			const beside = shape.endsWith("holding the copy");
 			// The other place a quarantine of this id uses, beside the agent directory.
 			const other = path.join(root, "gc-quarantine", path.basename(record, ".json"));
@@ -6958,3 +6966,170 @@ for (const [shape, mode] of unlistable) {
 		},
 	);
 }
+
+// Round nine. A later run removes nothing it did not create in that run,
+// identified by what it captured when it created it: a name in the staging
+// ledger, a suffix or a record's shape is not provenance.
+
+test("an archive run keeps a file in the staging ledger whose name ends in .part, in its preview as in applying", async () => {
+	const ledger = stagingLedgerDir(root);
+	await fs.mkdir(ledger, { recursive: true, mode: 0o700 });
+	const foreign = path.join(ledger, "user-notes.json.part");
+	await Bun.write(foreign, "FOREIGN USER DATA NOT WRITTEN BY GC");
+	const preview = await runGcCommand({
+		flags: {
+			agentDir: root,
+			archive: true,
+			json: true,
+			coldArchiveAfterDays: 0,
+			retainNewestGlobal: 0,
+			retainNewestPerCwd: 0,
+		},
+	});
+	expect(await Bun.file(foreign).text()).toBe("FOREIGN USER DATA NOT WRITTEN BY GC");
+
+	const applied = await archiveOnly();
+
+	expect(preview.archive).toBeDefined();
+	expect(applied.archive?.archived).toBe(1);
+	expect(await Bun.file(foreign).text()).toBe("FOREIGN USER DATA NOT WRITTEN BY GC");
+});
+
+test("an archive run keeps a staging record whose directory is gone", async () => {
+	const ledger = stagingLedgerDir(root);
+	await fs.mkdir(ledger, { recursive: true, mode: 0o700 });
+	const dir = sessionStagingPath(path.join(getSessionsDir(root), "--work--", "x.log"));
+	const record = path.join(ledger, "1234567890123456.json");
+	const text = JSON.stringify({ dir, file: path.join(dir, "x.log") });
+	await Bun.write(record, text);
+
+	await archiveOnly();
+
+	expect(await Bun.file(record).text()).toBe(text);
+});
+
+test("a staging ground that cannot write its record's replacement keeps what already holds that name", async () => {
+	const ledger = stagingLedgerDir(root);
+	await fs.mkdir(ledger, { recursive: true, mode: 0o700 });
+	// Fixed names, so the collision is the kernel's EEXIST and not a made-up error.
+	let sequence = 0;
+	const names = spyOn(Snowflake, "next").mockImplementation(() => {
+		sequence += 1;
+		return (sequence === 1 ? "1111111111111111" : "2222222222222222") as ReturnType<typeof Snowflake.next>;
+	});
+	const part = path.join(ledger, "2222222222222222.json.part");
+	await Bun.write(part, "SOMEBODY'S FILE, WRITTEN BEFORE THIS RUN");
+	const target = path.join(root, "staged-here", "example.log");
+	await fs.mkdir(path.dirname(target), { recursive: true });
+	let failure = "";
+	try {
+		const ground = await mintStagingGround(target, ledger);
+		await ground.handle.close();
+	} catch (error) {
+		failure = String(error);
+	} finally {
+		names.mockRestore();
+	}
+
+	expect(failure).toContain("EEXIST");
+	expect(failure).toContain(`${part} is not a record this run wrote, so it was left as it is`);
+	expect(await Bun.file(part).text()).toBe("SOMEBODY'S FILE, WRITTEN BEFORE THIS RUN");
+	// What this attempt did write is gone again: its record and its directory.
+	expect((await fs.readdir(ledger)).sort()).toEqual(["2222222222222222.json.part"]);
+	expect(await fs.readdir(path.dirname(target))).toEqual([]);
+});
+
+test("a run keeps a staging record that something else replaced, and says so", async () => {
+	const target = path.join(root, "staged-here", "example.log");
+	await fs.mkdir(path.dirname(target), { recursive: true });
+	const ground = await mintStagingGround(target, stagingLedgerDir(root));
+	await ground.handle.close();
+	// Another file at the record's name: written aside, then moved over it.
+	await Bun.write(`${ground.record}.aside`, "SOMEBODY ELSE'S RECORD");
+	await fs.rename(`${ground.record}.aside`, ground.record);
+
+	const note = await removeStagingGround(ground);
+
+	expect(note).toContain(`${ground.record} is not the record this run wrote, so it was left as it is`);
+	expect(await Bun.file(ground.record).text()).toBe("SOMEBODY ELSE'S RECORD");
+	expect(await fs.lstat(ground.dir).catch(() => undefined)).toBeUndefined();
+});
+
+test("a quarantine keeps a ledger record replaced after it was copied, and does not report it moved", async () => {
+	const { ground, record } = await archivedWithKilledStage();
+	// Once the directory has moved, another file takes the record's name.
+	const realRename = fs.rename;
+	const rename = spyOn(fs, "rename").mockImplementation((async (from: string, to: string) => {
+		await realRename(from, to);
+		if (String(from) === ground.dir) {
+			await Bun.write(`${ground.record}.aside`, "SOMEBODY ELSE'S RECORD");
+			await realRename(`${ground.record}.aside`, ground.record);
+		}
+	}) as typeof fs.rename);
+	let applied: GcResult;
+	try {
+		applied = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
+	} finally {
+		rename.mockRestore();
+	}
+
+	expect(applied.quarantine?.moved).toBe(false);
+	expect(applied.quarantine?.errors.join("\n")).toContain(`${ground.record} is not the record this command copied`);
+	expect(await Bun.file(ground.record).text()).toBe("SOMEBODY ELSE'S RECORD");
+});
+
+test("a gc run keeps a gc.lock that holds something gc does not write, however old, and names it", async () => {
+	const lock = path.join(root, "gc.lock");
+	await Bun.write(lock, "MY NOTES ABOUT GC, NOT A LOCK\n");
+	const old = new Date(Date.now() - 60 * 60_000);
+	await fs.utimes(lock, old, old);
+
+	const failure = await archiveOnly().then(
+		() => "",
+		(error: unknown) => String(error),
+	);
+
+	expect(failure).toContain(`${lock} holds something gc does not write`);
+	expect(await Bun.file(lock).text()).toBe("MY NOTES ABOUT GC, NOT A LOCK\n");
+	expect(await fs.lstat(`${lock}.break`).catch(() => undefined)).toBeUndefined();
+});
+
+test("a gc run still takes over a gc.lock its dead holder left", async () => {
+	const lock = path.join(root, "gc.lock");
+	// A pid no process holds: the highest a pid can be on Linux, plus one.
+	await Bun.write(lock, `4194305\n${new Date(Date.now() - 60 * 60_000).toISOString()}\n`);
+
+	const result = await archiveOnly();
+
+	expect(result.archive?.archived).toBe(1);
+	expect(await fs.lstat(lock).catch(() => undefined)).toBeUndefined();
+});
+
+test("a reclaim does not remove a link whose last look found nothing, whatever stands there by the removal", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "HELLO");
+	const link = path.join(liveArtifacts, "b.link");
+	await fs.symlink("a.log", link);
+	await archiveOnly();
+	// Once the removal has begun, the last look at the link finds nothing —
+	// as if it went and something else came back before the unlink.
+	let removing = false;
+	const realUnlink = fs.unlink;
+	const unlink = spyOn(fs, "unlink").mockImplementation((async (target: string) => {
+		if (String(target) === sessionFile) removing = true;
+		return await realUnlink(target);
+	}) as typeof fs.unlink);
+	const gone = failWithEio("lstat", target => removing && target === link, "ENOENT");
+	let applied: GcResult;
+	try {
+		applied = await runGcCommand({
+			flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+		});
+	} finally {
+		unlink.mockRestore();
+		gone.mockRestore();
+	}
+
+	expect(applied.reclaim?.errors.join("\n")).toContain(`${link} is no longer the entry this run proved; it was kept`);
+	expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
+});

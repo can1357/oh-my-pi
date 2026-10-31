@@ -1,7 +1,11 @@
+// SQLite opens a database by path, which no descriptor check can stand in
+// for; the one database this module opens is looked at through
+// openRegularFile first — see checkpointWal. The rule against `bun:sqlite`
+// stays, so a second opener has to be argued for here too.
+// oxlint-disable-next-line eslint/no-restricted-imports
 import { Database } from "bun:sqlite";
-import { CryptoHasher, Glob } from "bun";
 import * as fs from "../session/gc-fs";
-import type { Stats } from "../session/gc-fs";
+import { CryptoHasher, Glob, type Stats } from "../session/gc-fs";
 import * as path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -1830,7 +1834,10 @@ interface ProvenEntry extends EntryIdentity {
  * The walk's reading is a fact about a moment that has passed by the time
  * the removal reaches this entry. A file is read again through a descriptor
  * opened now; a link or a device has nothing to read, so the name has to
- * still hold the very entry the walk saw — see {@link standsAsProved}.
+ * still hold the very entry the walk saw — see {@link standsAsProved}. An
+ * entry gone at any of these looks is not the entry proved either, the same
+ * as for the transcript: whatever stands at the name by the `unlink` was
+ * never looked at.
  *
  * The caller holds the lease of every transcript in the tree, so no process
  * that writes a session through its lease changes the answer after this.
@@ -1838,25 +1845,21 @@ interface ProvenEntry extends EntryIdentity {
  * `unlink`, which takes a name because no system call takes an inode.
  */
 async function proveEntryStillGoes(entry: ProvenEntry): Promise<void> {
+	const kept = (what: string): Error =>
+		new Error(`${entry.path} is no longer the ${what} this run proved; it was kept`);
 	if (!entry.compared) {
-		if ((await standsAsProved(entry.path, entry)) === false) {
-			throw new Error(`${entry.path} is no longer the entry this run proved; it was kept`);
-		}
+		if ((await standsAsProved(entry.path, entry)) !== true) throw kept("entry");
 		return;
 	}
 	const live = await openRegularFile(entry.path).catch(error => {
 		// Anything but a regular file at the name is not the file proved.
-		if (error instanceof NotARegularFile) {
-			throw new Error(`${entry.path} is no longer the file this run proved; it was kept`);
-		}
+		if (error instanceof NotARegularFile) throw kept("file");
 		throw error;
 	});
-	if (!live) return;
+	if (!live) throw kept("file");
 	try {
 		const now = await live.stat();
-		if (!now.isFile() || !sameIdentity(identityFrom(now), entry)) {
-			throw new Error(`${entry.path} is no longer the file this run proved; it was kept`);
-		}
+		if (!now.isFile() || !sameIdentity(identityFrom(now), entry)) throw kept("file");
 		if (!(await compared(archivedHandleIsHeldBy(live, now, entry.destination), entry.path, entry.destination))) {
 			throw new Error(`${entry.path} holds what ${entry.destination} does not; it was kept`);
 		}
@@ -1864,9 +1867,7 @@ async function proveEntryStillGoes(entry: ProvenEntry): Promise<void> {
 		await live.close().catch(() => undefined);
 	}
 	// The descriptor follows a link; the name has to be the file itself.
-	if ((await standsAsProved(entry.path, entry)) === false) {
-		throw new Error(`${entry.path} is no longer the file this run proved; it was kept`);
-	}
+	if ((await standsAsProved(entry.path, entry)) !== true) throw kept("file");
 }
 
 /**
@@ -2408,10 +2409,11 @@ async function runArchiveGc(options: ResolvedGcOptions, archiveRoot: string): Pr
 	}
 
 	// Before this run stages anything of its own, so every staging record
-	// standing now is a dead run's. Reported, never removed: only the run
-	// that made a staging directory removes it, and nothing in this phase
-	// deletes by name — see {@link surveyRecordedStagingGrounds}.
-	const grounds = await surveyRecordedStagingGrounds(options.agentDir, options.apply);
+	// standing now is a dead run's, or somebody's. Reported, never removed:
+	// only the run that made a staging directory or a ledger file removes it,
+	// by the identity it captured making it — see
+	// {@link surveyRecordedStagingGrounds}. Preview and applying see the same.
+	const grounds = await surveyRecordedStagingGrounds(options.agentDir);
 	if (grounds.residue.length > 0) result.stagingResidue = grounds.residue;
 	result.errors.push(...grounds.notes);
 
@@ -2686,6 +2688,13 @@ async function checkpointWal(dbPath: string, apply: boolean): Promise<WalCheckpo
 	};
 	if (!apply || !(await pathExists(dbPath))) return result;
 
+	// SQLite opens the database by path, past any descriptor check, so it is
+	// looked at through one first: a FIFO, a socket or a device at the name
+	// stops the checkpoint, named, instead of being opened. A name switched
+	// between that look and SQLite's own open is outside what this guards;
+	// on a FIFO SQLite then fails with SQLITE_IOERR_READ and leaves the pipe
+	// as it was.
+	await (await openRegularFile(dbPath))?.close();
 	const db = new Database(dbPath);
 	let checkpointAttempted = false;
 	try {

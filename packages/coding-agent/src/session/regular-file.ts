@@ -102,17 +102,69 @@ export async function createExclusive(file: string, mode: number, readable = fal
 	return await fs.open(file, readable ? "wx+" : "wx", mode);
 }
 
+/** A file's identity: what a run captures from the descriptor that created it. */
+export interface FileIdentity {
+	dev: number;
+	ino: number;
+}
+
 /**
  * Write `text` to `file`, which must not exist yet: created with `O_EXCL`,
  * so nothing already at the name — a FIFO, a link to somebody's file — is
- * written through. EEXIST when something is there.
+ * written through, and EEXIST leaves whatever is there as it is. Returns the
+ * identity of the file it created, from its own descriptor: the only proof,
+ * later, that a file at that name is the one this call wrote. A write that
+ * fails after the create takes away what it created, and only that.
  */
-export async function writeExclusive(file: string, text: string, mode: number): Promise<void> {
+export async function writeExclusive(file: string, text: string, mode: number): Promise<FileIdentity> {
 	const handle = await createExclusive(file, mode);
+	let created: FileIdentity | undefined;
 	try {
+		const { dev, ino } = await handle.stat();
+		created = { dev, ino };
 		await handle.writeFile(text);
+		return created;
+	} catch (error) {
+		const note = created ? await removeOwnFile(file, [created], "the file this run created") : undefined;
+		throw note
+			? new Error(`${error instanceof Error ? error.message : String(error)}; ${note}`, { cause: error })
+			: error;
 	} finally {
-		await handle.close();
+		await handle.close().catch(() => undefined);
+	}
+}
+
+/**
+ * Remove `file` only while the name holds a regular file with one of the
+ * identities in `own` — what the caller captured when it created it. A name
+ * is not provenance: anything else standing there, whatever it is called,
+ * is left as it is, and so is anything that cannot be looked at. Returns
+ * undefined once nothing of the caller's is left at the name, or a sentence
+ * saying what was left and why, `what` naming the caller's file ("the
+ * record this run wrote").
+ *
+ * The look and the `unlink` both name a path, and no system call removes a
+ * file by its inode: a writer who puts a file at the name between the two
+ * has it removed. Such a concurrent writer is outside what this guards.
+ */
+export async function removeOwnFile(
+	file: string,
+	own: readonly FileIdentity[],
+	what: string,
+): Promise<string | undefined> {
+	try {
+		const standing = await fs.lstat(file).catch((error: unknown) => {
+			if (isEnoent(error)) return undefined;
+			throw error;
+		});
+		if (!standing) return undefined;
+		if (!standing.isFile() || !own.some(id => id.dev === standing.dev && id.ino === standing.ino)) {
+			return `${file} is not ${what}, so it was left as it is`;
+		}
+		await fs.unlink(file);
+		return undefined;
+	} catch (error) {
+		return `${file} could not be checked or removed, so it was left as it is: ${error instanceof Error ? error.message : String(error)}`;
 	}
 }
 

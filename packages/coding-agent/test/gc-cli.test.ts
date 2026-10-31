@@ -781,11 +781,27 @@ describe("runGcCommand history checkpoint", () => {
 	});
 
 	test("--apply propagates WAL checkpoint failures and releases the gc lock", async () => {
+		// A regular file SQLite opens and then fails on: the failure is its own,
+		// past gc's look at the name.
+		const dbPath = getHistoryDbPath(root);
+		await fs.mkdir(path.dirname(dbPath), { recursive: true });
+		await Bun.write(dbPath, "NOT A DATABASE, ".repeat(64));
+
+		await expect(runGcCommand({ flags: { agentDir: root, wal: true, apply: true } })).rejects.toThrow(
+			"file is not a database",
+		);
+
+		expect(await Bun.file(path.join(root, "gc.lock")).exists()).toBe(false);
+	});
+
+	test("--apply refuses a history database that is not a regular file, and releases the gc lock", async () => {
+		// What SQLite used to be handed and fail on with "unable to open
+		// database file" is now refused before it opens anything, by name.
 		const dbPath = getHistoryDbPath(root);
 		await fs.mkdir(dbPath, { recursive: true });
 
 		await expect(runGcCommand({ flags: { agentDir: root, wal: true, apply: true } })).rejects.toThrow(
-			"unable to open database file",
+			`${dbPath} is a directory, not a regular file, so it was not read`,
 		);
 
 		expect(await Bun.file(path.join(root, "gc.lock")).exists()).toBe(false);
