@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added goal-objective update previews with terminal-safe objective text.
+
 ## [18.14.1] - 2026-10-31
 
 ### Added

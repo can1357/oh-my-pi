@@ -114,6 +114,105 @@ Top-level entry modules: `cli.ts`, `main.ts`, `sdk.ts`, `index.ts` (SDK barrel),
 - [non-compaction-retry-policy.md](../../docs/non-compaction-retry-policy.md)
 - [handoff-generation-pipeline.md](../../docs/handoff-generation-pipeline.md)
 
+#### Goals and model objective edits
+
+[`GoalRuntime`](src/goals/runtime.ts) owns serialized goal mutations and accounting.
+[`AgentSession`](src/session/agent-session.ts) supplies live state, usage totals, hidden
+messages, `goal_updated` events, and persisted `mode_change` snapshots.
+[`InteractiveMode`](src/modes/interactive-mode.ts) and the
+[`RPC goal controller`](src/modes/rpc/rpc-goal.ts) own continuation admission and tool-set restoration.
+
+```mermaid
+stateDiagram-v2
+    [*] --> NoGoal
+    NoGoal --> Active: create
+    Active --> Paused: user pause, interrupt, or process resume
+    Paused --> Active: resume
+    Active --> BudgetLimited: token budget reached or lowered
+    BudgetLimited --> Active: budget raised or cleared
+    BudgetLimited --> Paused: explicit pause
+    Active --> Complete: verified completion
+    Paused --> Complete: runtime completion
+    BudgetLimited --> Complete: verified completion
+    Complete --> NoGoal: controller cleanup at agent end
+    Complete --> Active: runtime create, fresh goal
+    Active --> Dropped: drop
+    Paused --> Dropped: drop
+    BudgetLimited --> Dropped: drop
+    Dropped --> NoGoal: clear persisted mode
+    Active --> Active: authorized objective update, same goal
+    BudgetLimited --> BudgetLimited: authorized objective update, same goal
+    Active --> Active: user replacement, fresh goal
+    BudgetLimited --> Active: user replacement, fresh goal
+    BudgetLimited --> Active: runtime resume
+```
+
+The diagram combines runtime transitions with controller cleanup; an edge does not imply
+that every caller exposes the corresponding operation. `GoalModeState` also carries
+`enabled` and `mode`. Active and budget-limited goals are enabled; paused goals are
+disabled. Completion temporarily sets `mode: "exiting"` with `enabled: false` in memory.
+Dropped is an event snapshot, followed by clearing the goal record. See
+[`GoalModeState` and `goalFromModeData`](src/goals/state.ts) and
+[`Goal`/`GoalStatus`](../tui/src/tools/goal.ts).
+
+Controller resume actions require a paused goal. The lower-level `resumeGoal` method
+rejects missing or complete goals but otherwise sets status to active; it does not change
+the budget or accumulated usage. These existing lifecycle permissions are unchanged by
+objective editing.
+
+- **Creation and exposure:** `createGoal` rejects unfinished goals and initializes identity,
+  timestamps, and zero usage. The SDK registers the hidden tool eagerly or lazily, but normal
+  chats do not expose it. Goal entry adds it; pause/drop/completion restore the prior tool set.
+  `/guided-goal` exposes it before a record exists so the interview can end with `create`.
+  Restricted tool sessions cannot expose it. See [`tools/index.ts`](src/tools/index.ts),
+  [`sdk.ts`](src/sdk.ts), and `InteractiveMode.handleGuidedGoalCommand`.
+- **Accounting and limits:** turn start captures a usage baseline and goal ID. Charged tokens
+  are positive deltas of input + cache writes + output; cache reads are excluded. Elapsed time
+  is counted in whole seconds. Both active and budget-limited goals accrue usage. Crossing a
+  budget changes status and may steer the model, but does not abort work or mark completion.
+  User budget changes can reactivate a budget-limited goal. Ordinary wall-clock-only ticks
+  stay in memory; token deltas, limit transitions, and internal-abort accounting persist.
+  There is no separate elapsed-time limit. See `GoalRuntime.onTurnStart`, `flushUsage`,
+  `onBudgetMutated`, and `onTaskAborted`.
+- **Continuation:** interactive admission uses an 800 ms idle delay; RPC continuation requires
+  opting into `"rpc"` in `goal.continuationModes`. Both require an enabled active goal and
+  reject busy/input/session-transition conflicts. Interactive admission also checks editor
+  text/images and plan/loop modes. Blocked-only todos suppress continuation without a
+  separate blocked goal status. Empty or repeated tool activity suppresses further automatic
+  turns until new user activity resets suppression. Continuation prompts read the live
+  objective at admission. See `InteractiveMode.#scheduleGoalContinuation`,
+  [`RpcGoalController`](src/modes/rpc/rpc-goal.ts), and
+  [`goalContinuationActivity`](src/goals/state.ts).
+- **Restore, fork, and compaction:** mode snapshots contain the entire goal. Reconstruction
+  follows the selected journal branch independently of compacted model messages.
+  Process resume pauses an active goal; internal reconciliation can preserve it and reset
+  its wall-clock anchor. Forks retain the source branch's goal identity and accounting.
+  Subsequent model prompts rebuild goal context from live state. See
+  [`session-context.ts`](src/session/session-context.ts), `GoalRuntime.onThreadResumed`,
+  and [`SessionManager`](src/session/session-manager.ts).
+- **Replacement versus editing:** user `/goal set` calls `replaceGoal`, which creates a fresh
+  goal and resets accounting. Model `goal({op:"update", objective:"..."})` instead calls
+  `updateGoalObjective`, changing only objective and `updatedAt`. It preserves identity,
+  status, budget, and accumulated usage, persists the snapshot, and emits the standard event.
+  Its tool result carries the new objective without interrupting other work in the tool batch.
+
+`goal.modelObjectiveUpdates` is persisted through the settings registry and appears under
+**Tasks → Modes → Goal Objective Updates**. Changes apply to the existing tool immediately.
+
+| Value | Model behavior |
+| --- | --- |
+| `disabled` (default) | Reject objective edits; ask the user to use `/goal set`. |
+| `confirm` | Require approval of each old/new objective through the host's scrollable approval UI. Denial, cancellation, or a missing approval surface leaves the goal unchanged. Global auto-approval does not bypass this check. |
+| `on-request` | Permit an edit without another prompt when the model interprets an explicit natural-language user request. This trusts the model; it does not independently verify intent. |
+
+All modes leave budget editing user-controlled through `/goal budget`. The tool rejects a
+`token_budget` argument on `update`, and cannot edit an inactive goal. Consent is checked
+against the same session, goal identity, old objective, and live permissions at mutation time;
+stale consent is rejected. Automatic continuation is not user authorization. These editing
+permissions do not override ordinary tool-approval requirements or deny policies.
+See [`settings.ts`](src/goals/settings.ts), [`GoalTool`](src/goals/tools/goal-tool.ts),
+and the static [`goal tool instructions`](src/prompts/tools/goal.md).
+
 ### Configuration, models, providers, auth
 
 - [settings.md](../../docs/settings.md), [config-usage.md](../../docs/config-usage.md)

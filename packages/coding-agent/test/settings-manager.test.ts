@@ -80,6 +80,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { cfgModelRoles, cfgDisabledProviders, cfgEnabledModels } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { cfgShellPath } from "@oh-my-pi/pi-coding-agent/exec/settings";
+import { cfgGoalModelObjectiveUpdates } from "@oh-my-pi/pi-coding-agent/goals/settings";
 
 /** Lets microtask-coalesced setting listeners run. */
 const tick = () => Promise.resolve();
@@ -1120,6 +1121,24 @@ describe("Settings", () => {
 	});
 
 	describe("live persisted reload", () => {
+		it("preserves model objective edit permissions across persisted settings reloads", async () => {
+			const settings = await Settings.loadIsolated({ cwd: projectDir, agentDir });
+			cfgGoalModelObjectiveUpdates.set(settings, "confirm");
+			await settings.flush();
+
+			const reloaded = await Settings.loadIsolated({ cwd: projectDir, agentDir });
+			expect(cfgGoalModelObjectiveUpdates.get(reloaded)).toBe("confirm");
+			cfgGoalModelObjectiveUpdates.set(reloaded, "on-request");
+			await reloaded.flush();
+			await settings.reloadFromDisk();
+			expect(cfgGoalModelObjectiveUpdates.get(settings)).toBe("on-request");
+
+			cfgGoalModelObjectiveUpdates.set(settings, "disabled");
+			await settings.flush();
+			await reloaded.reloadFromDisk();
+			expect(cfgGoalModelObjectiveUpdates.get(reloaded)).toBe("disabled");
+		});
+
 		it("rejects malformed live configs without moving them aside or replacing effective settings", async () => {
 			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
 			await writeSettings({
