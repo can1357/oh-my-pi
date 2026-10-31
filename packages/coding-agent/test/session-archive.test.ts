@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 import { constants as fsConstants, type Stats } from "node:fs";
 import * as fs from "node:fs/promises";
@@ -225,6 +225,13 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+	// A test that times out is abandoned, not stopped: its body runs on, and
+	// its own `finally` restores its spies only when that body ends, inside
+	// the next test. Until then the next test's `spyOn` on the same function
+	// takes over that spy, captures it as the function it wraps, and calls
+	// itself until the stack is gone. Every spy goes here, before the next
+	// test starts; a late `mockRestore()` on one leaves the next test's alone.
+	mock.restore();
 	setAgentDir(originalAgentDir);
 	await fs.rm(root, { recursive: true, force: true });
 });
