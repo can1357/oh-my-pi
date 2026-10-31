@@ -18,11 +18,12 @@ import {
 	DAEMON_META_FILE,
 	DAEMON_SPEC_FILE,
 	daemonBrokerEndpoint,
+	probeBrokerEndpoint,
 	readStoredDaemonRecord,
 	writeDaemonScopeMeta,
 } from "./paths";
 import type { DaemonReadySpec, DaemonSnapshot, DaemonSpec } from "@oh-my-pi/pi-tui/tools/daemon";
-import { hasLiveDaemonProjectPresence, pruneDeadDaemonRuntimeDirs } from "./presence";
+import { daemonProcessDomain, hasLiveDaemonProjectPresence, pruneDeadDaemonRuntimeDirs } from "./presence";
 import {
 	DAEMON_IDLE_GRACE_ENV,
 	DAEMON_PROJECT_DIR_ENV,
@@ -69,8 +70,6 @@ const PID_FILE = "broker.pid";
  * bind its endpoint before the lease is treated as stale (issue #11080).
  */
 const LEASE_HANDOFF_GRACE_MS = 500;
-/** Connect budget for the endpoint probe that answers "is a broker serving this scope?". */
-const LEASE_PROBE_TIMEOUT_MS = 250;
 const LOG_FILE = "output.log";
 const PREVIOUS_LOG_FILE = "output.previous.log";
 const DAEMON_SPAWN_OPTIONS = resolveDaemonSpawnOptions({
@@ -331,17 +330,6 @@ class DaemonLog {
 	}
 }
 
-/** Whether a broker is accepting connections on the scope endpoint right now. */
-async function probeBrokerEndpoint(endpoint: string): Promise<boolean> {
-	try {
-		const connection = await IpcConnection.connect(endpoint, { framing: "lines", timeoutMs: LEASE_PROBE_TIMEOUT_MS });
-		connection.destroy();
-		return true;
-	} catch {
-		return false;
-	}
-}
-
 /**
  * Whether a live lease left by a broker that predates the native lock still
  * owns this scope. The recorded PID alone cannot answer it: PID reuse by an
@@ -367,9 +355,9 @@ async function holdsLiveForeignLease(pidPath: string, endpoint: string): Promise
 	} catch {
 		return false; // Dead PID: the lease outlived its broker.
 	}
-	if (await probeBrokerEndpoint(endpoint)) return true;
+	if ((await probeBrokerEndpoint(endpoint)) === "live") return true;
 	await Bun.sleep(LEASE_HANDOFF_GRACE_MS);
-	return probeBrokerEndpoint(endpoint);
+	return (await probeBrokerEndpoint(endpoint)) === "live";
 }
 
 /**
@@ -389,7 +377,9 @@ async function acquireBrokerLease(runtimeDir: string, endpoint: string): Promise
 			lock.release();
 			return null;
 		}
-		await fs.writeFile(pidPath, JSON.stringify({ pid: process.pid }), { mode: 0o600 });
+		await fs.writeFile(pidPath, JSON.stringify({ pid: process.pid, domain: await daemonProcessDomain() }), {
+			mode: 0o600,
+		});
 		return { path: pidPath, lock };
 	} catch (error) {
 		lock.release();
