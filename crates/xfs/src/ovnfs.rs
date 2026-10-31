@@ -48,8 +48,12 @@ pub(crate) async fn glob(
 ) -> Option<Vec<GlobMatch>> {
 	// The daemon never follows links, cannot see a caller's stop flag,
 	// descends into `node_modules` whenever the pattern names it, and always
-	// prunes `.git`; a zero depth is unlimited to it.
-	if opts.walk.follow_links
+	// prunes `.git`; a zero depth is unlimited to it. It also cannot enforce
+	// scan caps or the caller's exclusions.
+	if opts.max_scan_entries.is_some()
+		|| opts.max_scan_bytes.is_some()
+		|| !opts.exclude.is_empty()
+		|| opts.walk.follow_links
 		|| opts.walk.stop.is_some()
 		|| selector.mentions_git()
 		|| opts.walk.max_depth == Some(0)
@@ -101,8 +105,11 @@ async fn glob_at(
 /// [`GrepOptions::compile`].
 pub(crate) async fn grep(fs: &Fs, root: &Path, opts: &GrepOptions) -> Option<GrepResult> {
 	// Streaming and type filters stay native, as do a stop flag the daemon
-	// cannot see and zero limits, which mean "unlimited" to it.
+	// cannot see and zero limits, which mean "unlimited" to it; nor can it
+	// enforce scan caps.
 	if opts.source.is_none()
+		|| opts.max_scan_files.is_some()
+		|| opts.max_scan_bytes.is_some()
 		|| opts.sink.is_some()
 		|| opts.file_type.is_some()
 		|| opts.walk.stop.is_some()
@@ -639,6 +646,9 @@ mod tests {
 			file_type:            Some(FileType::File),
 			max_results:          Some(5),
 			sort_by_mtime:        true,
+			max_scan_entries:     None,
+			max_scan_bytes:       None,
+			exclude:              Vec::new(),
 			include_node_modules: Some(true),
 			walk:                 walk::Options {
 				hidden: true,
