@@ -1,8 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import type { StreamFn } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Context, Model } from "@oh-my-pi/pi-ai";
+import { reachesBudgetedHost } from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { resolveInlineImageByteBudget } from "@oh-my-pi/pi-catalog/compat/request-size";
 import { ImageUrlService } from "@oh-my-pi/pi-coding-agent/blob-broker/service";
 import { wrapStreamFnWithBlobUrlFallback } from "@oh-my-pi/pi-coding-agent/blob-broker/stream-fallback";
 
@@ -152,11 +154,17 @@ describe("provider-file stream fallback", () => {
 			contextWindow: 1_000_000,
 			maxTokens: 4096,
 		});
-		const screenshot = "A".repeat(534_000);
+		// Sized from the budget the clamp reads for this model, so a change to the catalog value moves the case with
+		// it: the budget holds `withinBudget` screenshots, and the context carries 16 more.
+		const byteBudget = resolveInlineImageByteBudget(anthropicModel, reachesBudgetedHost(anthropicModel));
+		if (byteBudget === undefined) throw new Error(`${anthropicModel.id} has no inline image byte budget`);
+		const screenshot = "A".repeat(Math.floor(byteBudget / 224));
+		const withinBudget = Math.floor(byteBudget / screenshot.length);
+		const ids = Array.from({ length: withinBudget + 16 }, (_, index) => `call-${index}`);
 		const context: Context = {
-			messages: Array.from({ length: 240 }, (_, index) => ({
+			messages: ids.map((toolCallId, index) => ({
 				role: "toolResult",
-				toolCallId: `call-${index}`,
+				toolCallId,
 				toolName: "screenshot",
 				content: [{ type: "image", data: screenshot, mimeType: "image/png", url: "https://images.test/blob" }],
 				isError: false,
@@ -174,11 +182,12 @@ describe("provider-file stream fallback", () => {
 		expect(await eventTypes(await wrapped(anthropicModel, context))).toEqual(["start", "done"]);
 		expect(attempts).toHaveLength(2);
 		const retried = attempts[1];
+		// The retry drops the oldest screenshots, and only as many as the budget requires.
 		expect(
 			retried?.messages.flatMap(message =>
 				message.role === "toolResult" && message.content[0]?.type === "image" ? [message.toolCallId] : [],
 			),
-		).toEqual(Array.from({ length: 224 }, (_, index) => `call-${index + 16}`));
+		).toEqual(ids.slice(ids.length - withinBudget));
 	});
 
 	it("never retries after content has been emitted", async () => {
