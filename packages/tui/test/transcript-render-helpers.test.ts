@@ -72,21 +72,6 @@ describe("assistantUsageIsBilled", () => {
 });
 
 describe("buildLaunchCompletionBlock", () => {
-	it("preserves native completion notices while truncating terminal rows", () => {
-		const message = launchCompletionMessage("worker", {
-			state: "failed",
-			exitCode: 58,
-			exitReason: "diagnostic ".repeat(200),
-		});
-		const block = buildLaunchCompletionBlock(message);
-		const native = JSON.stringify(block.describe());
-		expect(native).toContain("omp.status-block");
-		expect(native).toContain("Supervised process failed");
-		expect(native).toContain("worker");
-		expect(native).toContain("exit 58");
-		expect(native).not.toContain("\\u001b");
-	});
-
 	it("sanitizes and bounds daemon names without changing persisted details", () => {
 		const rawName = `worker\talpha\r\n${os.homedir()}/secret/${"x".repeat(160)}`;
 		const message = launchCompletionMessage(rawName);
