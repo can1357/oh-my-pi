@@ -112,34 +112,50 @@ describe("settings registry", () => {
 		}
 	});
 
-	it("reads a value the setting rejects as unset in its own layer: value, presence and provenance agree", async () => {
+	it("reads a value the setting rejects as unset in its own config file: value, presence and provenance agree", async () => {
 		const dir = TempDir.createSync("@pi-settings-rejected-layer-");
 		const aloneDir = TempDir.createSync("@pi-settings-rejected-alone-");
+		const validatedDir = TempDir.createSync("@pi-settings-rejected-validated-");
 		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
 		try {
 			const underGlobal = await loadHandEditedSettings(dir, {
 				global: { temperature: 0.2, task: { agentPrewalk: { scout: "anthropic/claude-haiku-4-5" } } },
 				project: { temperature: "hot", task: { agentPrewalk: "fast" } },
+				overlays: [{ task: { agentPrewalk: { plan: "anthropic/claude-opus-4-8" } } }],
 			});
 			expect(cfgTemperature.get(underGlobal)).toBe(0.2);
 			expect(cfgTemperature.isConfigured(underGlobal)).toBe(true);
 			expect(cfgTemperature.provenance(underGlobal)).toBe("global");
-			expect(cfgTaskAgentPrewalk.get(underGlobal)).toEqual({ scout: "anthropic/claude-haiku-4-5" });
-			expect(cfgTaskAgentPrewalk.provenance(underGlobal)).toBe("global");
+			// The malformed project record does not replace the global entries the --config record merges over.
+			expect(cfgTaskAgentPrewalk.get(underGlobal)).toEqual({
+				plan: "anthropic/claude-opus-4-8",
+				scout: "anthropic/claude-haiku-4-5",
+			});
 			expect(warn).toHaveBeenCalledWith("Settings: ignoring invalid value", {
 				setting: "temperature",
 				value: "hot",
 				expected: "a number",
+				source: expect.stringMatching(/\.omp[\\/]config\.yml$/),
 			});
 
-			const alone = await loadHandEditedSettings(aloneDir, { overlay: { temperature: "hot" } });
+			const alone = await loadHandEditedSettings(aloneDir, { overlays: [{ temperature: "hot" }] });
 			expect(cfgTemperature.get(alone)).toBe(cfgTemperature.default);
 			expect(cfgTemperature.isConfigured(alone)).toBe(false);
 			expect(cfgTemperature.provenance(alone)).toBe("default");
+
+			// A setting with `validate` keeps the value for its check and reads it as unset, never the
+			// lower value that check did not see.
+			const validated = await loadHandEditedSettings(validatedDir, {
+				global: { providers: { maxInFlightRequests: { openai: -1 } } },
+				overlays: [{ providers: { maxInFlightRequests: "lots" } }],
+			});
+			expect(cfgProvidersMaxInFlightRequests.get(validated)).toEqual({});
+			expect(cfgProvidersMaxInFlightRequests.isConfigured(validated)).toBe(false);
 		} finally {
 			warn.mockRestore();
 			dir.removeSync();
 			aloneDir.removeSync();
+			validatedDir.removeSync();
 		}
 	});
 

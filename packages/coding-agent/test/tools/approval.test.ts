@@ -1132,4 +1132,19 @@ describe("resolveApprovalFromContext fail-closed default", () => {
 			dir.removeSync();
 		}
 	});
+
+	it("keeps a global deny policy when a project config holds a malformed tools.approval under a --config record", async () => {
+		const dir = TempDir.createSync("@pi-approval-policy-layers-");
+		try {
+			const settings = await loadHandEditedSettings(dir, {
+				global: { tools: { approval: { bash: "deny" } } },
+				project: { tools: { approval: "deny-bash" } },
+				overlays: [{ tools: { approval: { read: "allow" } } }],
+			});
+			const { approvalMode, userPolicies } = resolveApprovalFromContext({ settings });
+			expect(resolveApproval(tool("bash", "exec"), {}, approvalMode, userPolicies).policy).toBe("deny");
+		} finally {
+			dir.removeSync();
+		}
+	});
 });

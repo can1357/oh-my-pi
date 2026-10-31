@@ -382,12 +382,14 @@ describe("a hand-edited tools.approvalMode", () => {
 		expect(await permissionRequests({ global: { tools: { approvalMode: value } } })).toEqual(asks);
 	});
 
-	it("keeps ACP permission prompts on when project and --config files hold malformed values", async () => {
+	it("keeps the mode a lower config file chose when a higher one holds a malformed value", async () => {
+		// The first --config file's always-ask outranks the global yolo; the typos in the project
+		// config and in the second --config file read as unset there.
 		expect(
 			await permissionRequests({
-				global: { tools: { approvalMode: "always-ask" } },
+				global: { tools: { approvalMode: "yolo" } },
 				project: { tools: { approvalMode: "alwasy-ask" } },
-				overlay: { tools: { approvalMode: 1 } },
+				overlays: [{ tools: { approvalMode: "always-ask" } }, { tools: { approvalMode: 1 } }],
 			}),
 		).toEqual(asks);
 	});

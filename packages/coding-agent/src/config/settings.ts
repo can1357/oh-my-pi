@@ -190,21 +190,6 @@ function getByPath(obj: RawSettings, segments: readonly string[]): unknown {
 }
 
 /**
- * What one settings `layer` puts at `segments` when deep-merged over the layers beneath it (see
- * `Settings.#deepMerge`): its value there, `undefined` when it sets nothing there so the layers beneath
- * show through, or `null` (like a configured `null`) when a non-record on the way replaces them.
- */
-function layerValue(layer: RawSettings, segments: readonly string[]): unknown {
-	let current: unknown = layer;
-	for (const segment of segments) {
-		if (!isRecord(current)) return null;
-		current = current[segment];
-		if (current === undefined) return undefined;
-	}
-	return current;
-}
-
-/**
  * Set a nested value in an object by path segments.
  * Creates intermediate objects as needed, replacing whatever non-record (a malformed `[]` included) is in the way.
  */
@@ -870,78 +855,50 @@ export class Settings {
 	/**
 	 * Registry plumbing behind `Setting.get`: the configured value of `id` across all layers
 	 * (path-scoped entries resolved for this cwd), or `undefined` when unset — the handle
-	 * supplies the default. It may be a value the setting rejects; {@link acceptedValue} reads
-	 * past one. Read settings through their handles, not this.
+	 * supplies the default. Read settings through their handles, not this.
 	 *
 	 * A configured `null` is treated as unset: YAML writes `null` for a key left
 	 * without a value (`fallbackChains:`), and no schema entry has a null
 	 * default, so returning it verbatim would hand callers a value the schema
 	 * says is impossible (#13183).
+	 *
+	 * A value the setting rejects is unset too, with a warning (`Setting.reportRejected`). Project
+	 * and `--config` files drop such values as they load ({@link #dropRejected}), so the files and
+	 * layers beneath still apply; what can remain here is a rejected global value, the lowest
+	 * layer, or one a definition's `validate` keeps for its own check.
 	 */
 	rawValue(setting: AnySetting): unknown {
-		return configuredValue(this.#mergedView(), setting, this.#cwd);
-	}
-
-	/**
-	 * Registry plumbing behind `Setting.get`, `isConfigured` and `provenance`: {@link rawValue} with a
-	 * value the setting rejects read as unset in its own layer, so the layers beneath it apply, or the
-	 * default when none configures an accepted value (`undefined`). Reading past a rejected value
-	 * reports it (`Setting.reportRejected`).
-	 */
-	acceptedValue(setting: AnySetting): unknown {
-		const raw = this.rawValue(setting);
-		if (raw === undefined || setting.accepts(raw)) return raw;
-		setting.reportRejected(this, raw);
-		const value = this.#acceptedIn(setting, this.#ownLayers());
-		return value === undefined ? undefined : (resolvePathScopedStringArray(setting, value, this.#cwd) ?? value);
-	}
-
-	/**
-	 * What `layers`, over the overlay parent's, configure for `setting`, merged as the merged view is
-	 * but skipping each value the setting rejects; path-scoped entries stay unresolved.
-	 */
-	#acceptedIn(setting: AnySetting, layers: OwnLayers): unknown {
-		const parent = this.#parent;
-		let value = parent ? parent.#acceptedIn(setting, parent.#ownLayers()) : undefined;
-		for (const layer of [
-			layers.global,
-			projectLayerForMerge(layers.project),
-			layers.configOverlay,
-			layers.overrides,
-		]) {
-			const next = layerValue(layer, setting.segments);
-			if (next === undefined || (next !== null && !setting.accepts(next))) continue;
-			value = isRecord(value) && isRecord(next) ? this.#deepMerge(value, next) : next;
+		const value = configuredValue(this.#mergedView(), setting, this.#cwd);
+		if (value === undefined || setting.accepts(value)) {
+			setting.rearmRejected(this);
+			return value;
 		}
-		return value ?? undefined;
+		setting.reportRejected(this, value);
+		return undefined;
 	}
 
 	/**
 	 * Whether `setting` has an explicitly configured value (global config, project
 	 * config, or runtime override) rather than falling back to the schema default.
 	 * A configured `null` counts as unset, like in {@link rawValue}, and so does a
-	 * value the setting rejects ({@link acceptedValue}).
+	 * value the setting rejects.
 	 */
 	isConfigured(setting: AnySetting): boolean {
-		return this.acceptedValue(setting) !== undefined;
+		return this.rawValue(setting) !== undefined;
 	}
 
 	/**
 	 * Layer supplying the effective value of `setting`, in merge precedence order:
 	 * runtime override → config overlay → project → global → (overlay parent) → schema default.
-	 * A value that merges to `null` is unset and reports `"default"`; a layer holding only a value
-	 * the setting rejects supplies nothing ({@link acceptedValue}).
+	 * A value that merges to `null`, or that the setting rejects, is unset and reports `"default"`.
 	 */
 	getProvenance(setting: AnySetting): SettingProvenance {
 		if (!this.isConfigured(setting)) return "default";
-		const configures = (layer: RawSettings) => {
-			const value = layerValue(layer, setting.segments);
-			return value !== undefined && value !== null && setting.accepts(value);
-		};
-		if (configures(this.#overrides)) return "runtime";
-		if (configures(this.#configOverlay)) return "overlay";
-		if (configures(projectLayerForMerge(this.#project))) return "project";
-		if (configures(this.#global)) return "global";
+		const segments = setting.segments;
+		if (getByPath(this.#overrides, segments) !== undefined) return "runtime";
+		if (getByPath(this.#configOverlay, segments) !== undefined) return "overlay";
+		if (getByPath(projectLayerForMerge(this.#project), segments) !== undefined) return "project";
+		if (getByPath(this.#global, segments) !== undefined) return "global";
 		return this.#parent?.getProvenance(setting) ?? "default";
 	}
 
@@ -1077,8 +1034,11 @@ export class Settings {
 	 */
 	#settlePins(layers: OwnLayers): AnySetting[] {
 		if (this.#softPins.size === 0) return [];
-		const persisted = { ...layers, overrides: {} };
-		const settled = [...this.#softPins].filter(setting => this.#acceptedIn(setting, persisted) !== undefined);
+		const persisted = this.#mergeOverParent(this.#mergeOwnLayers({ ...layers, overrides: {} }));
+		const settled = [...this.#softPins].filter(setting => {
+			const value = getByPath(persisted, setting.segments);
+			return value !== undefined && value !== null && setting.accepts(value);
+		});
 		if (settled.length === 0) return settled;
 		layers.overrides = structuredClone(layers.overrides);
 		for (const setting of settled) deleteByPath(layers.overrides, setting.segments);
@@ -2497,9 +2457,13 @@ export class Settings {
 				warningsSeen = new Set(projectWarnings);
 				for (const item of result.items as SettingsCapabilityItem[]) {
 					if (item.level === "project") {
-						merged = this.#deepMerge(merged, dropSettingsGroupShadows(item.data as RawSettings, item.path));
+						const data = this.#dropRejected(
+							dropSettingsGroupShadows(item.data as RawSettings, item.path),
+							item.path,
+						);
+						merged = this.#deepMerge(merged, data);
 						sourcePaths.push(item.path);
-						if (Object.hasOwn(item.data, "shellPath")) shellPathSource = item.path;
+						if (Object.hasOwn(data, "shellPath")) shellPathSource = item.path;
 					}
 				}
 			}
@@ -2519,7 +2483,7 @@ export class Settings {
 				(this.#quarantinedYamlTargets.has(projectConfigPath) ? structuredClone(this.#projectFileSettings) : {}));
 		const nativeModelRoles = getByPath(nativeProject, ["modelRoles"]);
 		if (nativeModelRoles !== undefined) {
-			merged = this.#deepMerge(merged, { modelRoles: nativeModelRoles });
+			merged = this.#deepMerge(merged, this.#dropRejected({ modelRoles: nativeModelRoles }, projectConfigPath));
 		}
 		return {
 			settings: this.#migrateRawSettings(merged, quarantineInvalid),
@@ -2548,7 +2512,10 @@ export class Settings {
 		let shellPathSource: string | undefined;
 		let settings: RawSettings = {};
 		for (const filePath of this.#configFiles) {
-			const overlay = await this.#loadOverlayYaml(filePath, captureLegacyChangelogVersion);
+			const overlay = this.#dropRejected(
+				await this.#loadOverlayYaml(filePath, captureLegacyChangelogVersion),
+				filePath,
+			);
 			settings = this.#deepMerge(settings, overlay);
 			if (Object.hasOwn(overlay, "shellPath")) shellPathSource = filePath;
 		}
@@ -4014,6 +3981,30 @@ export class Settings {
 			}
 		}
 		for (const key of Object.keys(base)) if (!Object.hasOwn(result, key)) setOwn(result, key, base[key]);
+		return result;
+	}
+
+	/**
+	 * `data`, one project or `--config` file, without the values its settings reject (the wrong type,
+	 * or not one of an enum's values), each reported naming `source`. Such a value reads as unset in
+	 * its own file, so the files and layers beneath still apply rather than being replaced by it while
+	 * the layers merge. A definition with `validate` keeps its value for that check, which then fails
+	 * the load on its own terms.
+	 */
+	#dropRejected(data: RawSettings, source: string, prefix = ""): RawSettings {
+		const result: RawSettings = {};
+		for (const key of Object.keys(data)) {
+			const value = data[key];
+			const id = prefix === "" ? key : `${prefix}.${key}`;
+			const setting = lookupSetting(id);
+			if (!setting) {
+				setOwn(result, key, isRecord(value) ? this.#dropRejected(value, source, id) : value);
+			} else if (value === null || value === undefined || setting.definition.validate || setting.accepts(value)) {
+				setOwn(result, key, value);
+			} else {
+				setting.reportRejected(this, value, source);
+			}
+		}
 		return result;
 	}
 }

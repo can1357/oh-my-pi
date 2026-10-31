@@ -453,7 +453,7 @@ export function combine<R extends Record<string, Derived<unknown>>, T>(
 /**
  * Handle for one registered setting. Reads resolve, in precedence order: the definition's
  * environment variable, runtime override, `--config` overlay, project, global, then the default.
- * A layer holding a value the setting rejects ({@link accepts}) reads as unset there, with a warning.
+ * A value the setting rejects ({@link accepts}) reads as unset in the config file holding it, with a warning.
  */
 export class Setting<T, Id extends string = string> extends Derived<T> {
 	readonly id: Id;
@@ -531,7 +531,7 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 		if (value === undefined || !this.envFallback) return value;
 		const settings = settingsOf(scope);
 		if (this.envFallback === true) return settings.isConfigured(this) ? undefined : value;
-		const configured = settings.acceptedValue(this);
+		const configured = settings.rawValue(this);
 		return configured === undefined || (typeof configured === "string" && configured.trim() === "")
 			? value
 			: undefined;
@@ -641,36 +641,33 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 		}
 	}
 
-	/**
-	 * The configured value, and when the setting rejects it, what lies beneath: a rejected value reads
-	 * as unset in its own layer (see `Settings.acceptedValue`), so the layers below it are inputs too.
-	 */
 	inputs(settings: Settings): readonly unknown[] {
-		const raw = settings.rawValue(this);
-		return raw === undefined || this.accepts(raw) ? [raw] : [raw, settings.acceptedValue(this)];
+		return [settings.rawValue(this)];
 	}
 
-	compute(inputs: readonly unknown[], settings: Settings): T {
+	/** `Settings.rawValue` reads a value this setting rejects as unset, so only the default fills a gap. */
+	compute(inputs: readonly unknown[]): T {
 		const raw = inputs[0];
-		if (raw === undefined || this.accepts(raw)) {
-			// A fixed value re-arms this instance's warning, so breaking it again is reported again.
-			settings.warnState.invalid.delete(this.id);
-			return raw === undefined ? this.default : (raw as T);
-		}
-		this.reportRejected(settings, raw);
-		return (inputs[1] as T | undefined) ?? this.default;
+		return raw === undefined ? this.default : (raw as T);
 	}
 
 	/**
-	 * Registry plumbing: warns that `raw`, the value `settings` configures, is one this setting rejects
-	 * and reads as unset in its layer, naming the setting, the value and what was expected. Once per
-	 * instance and value: {@link compute} re-arms it when the configured value is fixed.
+	 * Registry plumbing: warns that `raw`, a value configured in `settings` (in the file `source`, when
+	 * known), is one this setting rejects and so reads as unset, naming the setting, the value and what
+	 * was expected. Once per instance and value, until {@link rearmRejected}.
 	 */
-	reportRejected(settings: Settings, raw: unknown): void {
+	reportRejected(settings: Settings, raw: unknown, source?: string): void {
 		const warned = settings.warnState.invalid;
 		if (warned.has(this.id) && Bun.deepEquals(warned.get(this.id), raw)) return;
 		warned.set(this.id, raw);
-		logger.warn("Settings: ignoring invalid value", { setting: this.id, value: raw, expected: this.#expected() });
+		const context = { setting: this.id, value: raw, expected: this.#expected() };
+		logger.warn("Settings: ignoring invalid value", source === undefined ? context : { ...context, source });
+	}
+
+	/** Registry plumbing: `settings` reads an accepted value or none, so breaking it again is reported again. */
+	rearmRejected(settings: Settings): void {
+		const warned = settings.warnState.invalid;
+		if (warned.size !== 0) warned.delete(this.id);
 	}
 
 	/**
@@ -805,13 +802,13 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 
 	/**
 	 * Whether the environment or any settings layer (runtime, overlay, project, global) sets this value.
-	 * A value the setting rejects reads as unset in its layer, so it never counts (see {@link get}).
+	 * A value the setting rejects never counts: it reads as unset (see `Settings.rawValue`).
 	 */
 	isConfigured(scope: ScopeLike): boolean {
 		return this.envValue() !== undefined || settingsOf(scope).isConfigured(this);
 	}
 
-	/** Layer supplying the effective value; a layer holding only a value the setting rejects supplies none. */
+	/** Layer supplying the effective value; a value the setting rejects supplies none. */
 	provenance(scope: ScopeLike): SettingProvenance {
 		return this.#effectiveEnv(scope) !== undefined ? "env" : settingsOf(scope).getProvenance(this);
 	}

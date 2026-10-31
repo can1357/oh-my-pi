@@ -8,8 +8,8 @@ import { YAML } from "bun";
 export interface HandEditedLayers {
 	global?: Record<string, unknown>;
 	project?: Record<string, unknown>;
-	/** A `--config` overlay file. */
-	overlay?: Record<string, unknown>;
+	/** `--config` overlay files, later ones winning, as repeated `--config` flags load them. */
+	overlays?: Record<string, unknown>[];
 }
 
 /**
@@ -27,10 +27,10 @@ export async function writeHandEditedConfig(
 	const configFiles: string[] = [];
 	if (layers.global) await Bun.write(path.join(agentDir, "config.yml"), YAML.stringify(layers.global));
 	if (layers.project) await Bun.write(path.join(cwd, ".omp", "config.yml"), YAML.stringify(layers.project));
-	if (layers.overlay) {
-		const overlay = dir.join("overlay.yml");
-		await Bun.write(overlay, YAML.stringify(layers.overlay));
-		configFiles.push(overlay);
+	for (const [index, overlay] of (layers.overlays ?? []).entries()) {
+		const file = dir.join(`overlay-${index}.yml`);
+		await Bun.write(file, YAML.stringify(overlay));
+		configFiles.push(file);
 	}
 	return { agentDir, cwd, configFiles };
 }
