@@ -3,6 +3,7 @@ import { $env } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import type { Context, Model, StreamFunction } from "../types";
 import type { AssistantMessageEventStream } from "../utils/event-stream";
+import { uncountedFetchOf } from "../utils/wire-attempts";
 import { getVertexAccessToken } from "./google-auth";
 import {
 	buildGoogleGenerateContentParams,
@@ -86,7 +87,11 @@ export const streamGoogleVertex: StreamFunction<"google-vertex"> = (
 
 			const project = resolveProject(options);
 			const location = resolveLocation(options);
-			const accessToken = await getVertexAccessToken({ signal: options?.signal, fetch: options?.fetch });
+			// The token is not a model request; keep it off the request's counter.
+			const accessToken = await getVertexAccessToken({
+				signal: options?.signal,
+				fetch: options?.fetch ? uncountedFetchOf(options.fetch) : undefined,
+			});
 			const host = resolveVertexEndpointHost(location);
 			const url = `https://${host}/${API_VERSION}/projects/${project}/locations/${location}/publishers/google/models/${model.id}:streamGenerateContent?alt=sse`;
 			return {

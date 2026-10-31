@@ -4,7 +4,7 @@ import { withInferenceUserAgent } from "../providers/inference-headers";
 import type { Api, FetchImpl, Model } from "../types";
 import { getProxyForProvider, withProxyInit } from "./proxy";
 import { createFetchRequestDebugSession, isRequestDebugEnabled } from "./request-debug";
-import { countWireAttempts, createWireAttempts, inheritWireAttempts } from "./wire-attempts";
+import { countWireAttempts, createWireAttempts, inheritWireAttempts, withUncountedSibling } from "./wire-attempts";
 
 /** Stamped on a fetch already built by {@link transportFetch}. */
 const TRANSPORT_FETCH = Symbol("omp.transportFetch");
@@ -22,38 +22,42 @@ type TransportFetch = FetchImpl & { [TRANSPORT_FETCH]?: true };
  * request is counted (`countWireAttempts`): every resend a provider or a
  * wrapper above makes passes through here, and the counter rides on the
  * returned fetch for the provider to read. A caller-supplied `fetchImpl` is
- * opaque to the count — it may resend inside itself.
+ * opaque to the count — it may resend inside itself. A request that is not an
+ * attempt at the model request (the Vertex OAuth token) takes the uncounted
+ * sibling (`uncountedFetchOf`), which applies the same transport concerns.
  *
  * Idempotent: the built fetch is stamped and returned as-is on later passes.
  * `streamSimple` re-enters `stream`, and `streamSimpleRequest` re-enters itself
  * on auth retries, so without the stamp each entry point would add another
- * layer (three PI_REQ_DEBUG dumps for one request).
+ * layer (three PI_REQ_DEBUG dumps for one request) — and the request's counter
+ * would restart on every re-entry.
  */
 export function transportFetch(model: Model<Api>, fetchImpl: FetchImpl | undefined): FetchImpl {
 	const given = fetchImpl as TransportFetch | undefined;
 	if (given?.[TRANSPORT_FETCH]) return given;
-	const issue = countWireAttempts(
-		createWireAttempts(),
-		given ?? (model.provider === "anthropic" && model.api === "anthropic-messages" ? coworkFetch : globalThis.fetch),
-		given !== undefined,
-	);
+	const base =
+		given ?? (model.provider === "anthropic" && model.api === "anthropic-messages" ? coworkFetch : globalThis.fetch);
+	const issue = countWireAttempts(createWireAttempts(), base, given !== undefined);
 	const proxyUrl = getProxyForProvider(model.provider);
 
-	const fetch: TransportFetch = async (input, init) => {
-		if ((init?.method ?? (input instanceof Request ? input.method : "GET")) === "POST") {
-			recordDispatchOrigin(model, input);
-		}
-		init = withInferenceUserAgent(input, init);
-		const extraCa = resolveExtraCa();
-		if (extraCa) init = withExtraCaInit(init, extraCa);
-		if (proxyUrl) init = withProxyInit(input, init, proxyUrl);
-		if (!isRequestDebugEnabled()) return issue(input, init);
-		const session = await createFetchRequestDebugSession(input, init);
-		return session.wrapResponse(await issue(input, init));
-	};
+	const through =
+		(target: FetchImpl): FetchImpl =>
+		async (input, init) => {
+			if ((init?.method ?? (input instanceof Request ? input.method : "GET")) === "POST") {
+				recordDispatchOrigin(model, input);
+			}
+			init = withInferenceUserAgent(input, init);
+			const extraCa = resolveExtraCa();
+			if (extraCa) init = withExtraCaInit(init, extraCa);
+			if (proxyUrl) init = withProxyInit(input, init, proxyUrl);
+			if (!isRequestDebugEnabled()) return target(input, init);
+			const session = await createFetchRequestDebugSession(input, init);
+			return session.wrapResponse(await target(input, init));
+		};
+	const fetch: TransportFetch = through(issue);
 	if (issue.preconnect) fetch.preconnect = issue.preconnect;
 	fetch[TRANSPORT_FETCH] = true;
-	return inheritWireAttempts(fetch, issue);
+	return withUncountedSibling(inheritWireAttempts(fetch, issue), through(base));
 }
 
 const dispatchOrigins = new Map<string, string>();

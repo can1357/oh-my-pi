@@ -230,7 +230,7 @@ import { connectProxiedSocket, getProxyForUrl, wrapFetchForProxy } from "../util
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
 import { waitForRetry } from "../utils/retry-wait";
 import { sanitizeSchemaForCursor, toolWireSchema } from "../utils/schema";
-import { createWireAttempts, providerReplaysFrom, type WireAttempts } from "../utils/wire-attempts";
+import { createWireAttempts, providerReplaysFrom, type WireAttempts, wireAttemptsOf } from "../utils/wire-attempts";
 import { formatConnectEndStreamError, hasRetryableCursorErrorDetail } from "./connect-error-detail";
 import { CONNECT_END_STREAM_FLAG, ConnectFrameDecoder, frameConnectMessage } from "./connect-frame";
 import mcpExternalHandoffMessage from "./cursor-external-tool-handoff.md" with { type: "text" };
@@ -1198,7 +1198,10 @@ function streamCursorWithWireMode(
 	(async () => {
 		const retryContext = timing?.retry;
 		const transportMode = timing?.transport ?? (options?.transport === "http1" ? "http1" : "http2");
-		const wireAttempts = timing?.wireAttempts ?? createWireAttempts();
+		// The request's counter when the options carry one (`transportFetch` on the
+		// `stream()` path), so a call the authentication retry makes again adds to
+		// the same count; Cursor counts at its own socket into it either way.
+		const wireAttempts = timing?.wireAttempts ?? wireAttemptsOf(options?.fetch) ?? createWireAttempts();
 		let startTime = timing?.startTime ?? performance.now();
 		let firstTokenTime = retryContext?.firstTokenTime;
 

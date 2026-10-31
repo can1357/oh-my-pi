@@ -4,9 +4,10 @@
  * so output is never duplicated.
  */
 import { describe, expect, it } from "bun:test";
-import type { AssistantMessage, AssistantMessageEvent, Context, Usage } from "@oh-my-pi/pi-ai/types";
+import type { AssistantMessage, AssistantMessageEvent, Context, FetchImpl, Usage } from "@oh-my-pi/pi-ai/types";
 import { MAX_EMPTY_COMPLETION_RETRIES, withReplaySafeStreamRetry } from "@oh-my-pi/pi-ai/utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { providerReplaysFrom, wireAttemptsOf } from "@oh-my-pi/pi-ai/utils/wire-attempts";
 
 const CTX = {} as Context;
 
@@ -372,12 +373,67 @@ describe("withReplaySafeStreamRetry", () => {
 		expect(result.content).toEqual([{ type: "text", text: "hello" }]);
 	});
 
-	it("keeps the replays a discarded attempt spent, and claims none when nothing below reports", async () => {
-		// Every request this wrapper is responsible for has to survive into the
-		// count, including the ones the attempt it threw away had already spent.
-		// Recovery above reads a reported `0` as "this request went out exactly
-		// once" and holds its fallback chain on it, so the field stays absent
-		// when neither the wrapper nor the loop below knows a number.
+	interface CountedAttemptOptions {
+		fetch?: FetchImpl;
+		signal?: AbortSignal;
+		providerRetryWait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
+	}
+
+	/**
+	 * An attempt that spends `requests` on the wire through the request's
+	 * counter, as every reporting provider does, and fails before output with
+	 * the count that counter now holds.
+	 */
+	const countedFailure =
+		(requestsPerAttempt: ReadonlyArray<number>, onAttempt: () => void = () => {}) =>
+		(_model: unknown, _context: Context, options?: CountedAttemptOptions) => {
+			onAttempt();
+			const counter = wireAttemptsOf(options?.fetch);
+			if (!counter) throw new Error("the attempt was not handed the request's counter");
+			counter.count += requestsPerAttempt[Math.min(attemptIndex++, requestsPerAttempt.length - 1)];
+			const message = assistant();
+			message.stopReason = "error";
+			message.errorMessage = "The socket connection was closed unexpectedly";
+			message.providerReplays = providerReplaysFrom(counter);
+			return streamFromEvents([
+				{ type: "start", partial: message },
+				{ type: "error", reason: "error", error: message },
+			]);
+		};
+	let attemptIndex = 0;
+
+	it("hands every attempt one counter, so the surfaced count holds the discarded attempts' requests", async () => {
+		// The attempt it surfaces reports the request's whole count — including
+		// the six requests the attempt it threw away had already spent — because
+		// both counted into one counter. Nothing is added here, so nothing can be
+		// counted twice.
+		const run = async (requests: ReadonlyArray<number>): Promise<AssistantMessage> => {
+			attemptIndex = 0;
+			const stream = withReplaySafeStreamRetry(
+				{},
+				CTX,
+				{ providerRetryWait: async () => {} },
+				countedFailure(requests),
+				{
+					retryProviderErrors: true,
+					maxProviderErrorRetries: 1,
+				},
+			);
+			await drain(stream);
+			return await stream.result();
+		};
+
+		// Six requests, then one: seven in all.
+		expect((await run([6, 1])).providerReplays).toBe(6);
+		// Six and six: twelve.
+		expect((await run([6, 6])).providerReplays).toBe(11);
+	});
+
+	it("reports unknown, not a lower number, when the layer below counted only its own call", async () => {
+		// A count over one counter never falls. An attempt that reports five and a
+		// retry that reports zero cannot both be the request's count: the zero
+		// is the retry's own call, and forwarding it would claim the request went
+		// out once after it went out six times.
 		const failing = (counts: ReadonlyArray<number | undefined>) => {
 			let index = 0;
 			return () => {
@@ -400,78 +456,58 @@ describe("withReplaySafeStreamRetry", () => {
 			return await stream.result();
 		};
 
-		// Five spent by the attempt that was discarded, none by the one that
-		// surfaced, one by the wrapper itself.
-		expect((await run([5, 0])).providerReplays).toBe(6);
-		// Both attempts replayed below, plus the wrapper's own.
-		expect((await run([5, 5])).providerReplays).toBe(11);
-		// A loop that reports nothing: only the wrapper's own replay is known.
-		expect((await run([undefined])).providerReplays).toBe(1);
+		expect((await run([5, 0])).providerReplays).toBeUndefined();
+		// A number after an attempt that reported none is not the request's count either.
+		expect((await run([undefined, 0])).providerReplays).toBeUndefined();
+		// Nothing below reports: unknown, whatever this wrapper itself retried.
+		expect((await run([undefined])).providerReplays).toBeUndefined();
 	});
 
-	it("does not compound its count when the layer below reuses one terminal message", async () => {
-		// The message belongs to the layer below. Writing the total into it would
-		// make the next call that surfaces the same object report that total plus
-		// its own.
+	it("does not write a count into a terminal message the layer below may reuse", async () => {
 		const shared = assistant();
 		shared.stopReason = "error";
 		shared.errorMessage = "The socket connection was closed unexpectedly";
-		shared.providerReplays = 0;
-		const counts: Array<number | undefined> = [];
+		shared.providerReplays = 3;
+		const surfaced: Array<number | undefined> = [];
+		let call = 0;
 		for (let run = 0; run < 2; run++) {
 			const stream = withReplaySafeStreamRetry(
 				{},
 				CTX,
 				{ providerRetryWait: async () => {} },
-				() => streamFromEvents([{ type: "error", reason: "error", error: shared }]),
+				() => {
+					// The first attempt of each run reports more than the shared message
+					// does, so the wrapper must drop the count from what it forwards.
+					const message = call++ % 2 === 0 ? { ...shared, providerReplays: 7 } : shared;
+					return streamFromEvents([{ type: "error", reason: "error", error: message }]);
+				},
 				{ retryProviderErrors: true, maxProviderErrorRetries: 1 },
 			);
 			await drain(stream);
-			counts.push((await stream.result()).providerReplays);
+			surfaced.push((await stream.result()).providerReplays);
 		}
-		expect(counts).toEqual([1, 1]);
-		expect(shared.providerReplays).toBe(0);
+		expect(surfaced).toEqual([undefined, undefined]);
+		expect(shared.providerReplays).toBe(3);
 	});
 
-	it("charges a retry only once it is going to run, and keeps what earlier attempts spent", async () => {
-		// The budget and the discarded attempt are both charged on the way into a
-		// retry. Charging them when the delay is merely computed invents a replay
-		// the turn never made if an abort ends it there, and charging them only
-		// at the end loses the ones it did make.
-		const failing = (replays: number, onAttempt: () => void) => () => {
-			onAttempt();
-			const message = assistant();
-			message.stopReason = "error";
-			message.errorMessage = "The socket connection was closed unexpectedly";
-			message.providerReplays = replays;
-			return streamFromEvents([
-				{ type: "start", partial: message },
-				{ type: "error", reason: "error", error: message },
-			]);
-		};
-
-		// Aborted during the attempt, before any retry wait: one attempt, and only
-		// the five replays that attempt reported.
+	it("reports what the counter holds when an abort ends the retry, before or during its wait", async () => {
+		// Aborted during the first attempt: one attempt of six requests.
 		const beforeWait = new AbortController();
-		let attemptsBeforeWait = 0;
+		attemptIndex = 0;
 		const abortedEarly = withReplaySafeStreamRetry(
 			{},
 			CTX,
 			{ signal: beforeWait.signal, providerRetryWait: async () => {} },
-			failing(5, () => {
-				attemptsBeforeWait++;
-				beforeWait.abort();
-			}),
+			countedFailure([6], () => beforeWait.abort()),
 			{ retryProviderErrors: true, maxProviderErrorRetries: 1 },
 		);
 		await drain(abortedEarly);
-		expect(attemptsBeforeWait).toBe(1);
 		expect((await abortedEarly.result()).providerReplays).toBe(5);
 
-		// Aborted during the second retry wait: two attempts of five, plus the one
-		// retry that actually ran.
+		// Aborted during the second retry wait: two attempts of six requests.
 		const duringWait = new AbortController();
-		let attemptsDuringWait = 0;
+		attemptIndex = 0;
+		let attempts = 0;
 		let waits = 0;
 		const abortedLate = withReplaySafeStreamRetry(
 			{},
@@ -485,13 +521,13 @@ describe("withReplaySafeStreamRetry", () => {
 					}
 				},
 			},
-			failing(5, () => {
-				attemptsDuringWait++;
+			countedFailure([6], () => {
+				attempts++;
 			}),
 			{ retryProviderErrors: true, maxProviderErrorRetries: 2 },
 		);
 		await drain(abortedLate);
-		expect(attemptsDuringWait).toBe(2);
+		expect(attempts).toBe(2);
 		expect((await abortedLate.result()).providerReplays).toBe(11);
 	});
 

@@ -404,14 +404,15 @@ export class TurnRecovery {
 	readonly #refusalWalkTried = new Set<string>();
 	/**
 	 * Held retries the current saga has spent; see {@link CONNECTION_FAILURE_CHAIN_HOLD_ATTEMPTS}.
-	 * Reset in `resolveRetry()` with the refusal walk, never by a model switch, a credential
-	 * switch or a fresh retry budget, so a chain walked on a spent budget does not re-open it.
+	 * Reset when the saga ends (`resolveRetry()`) and when a new prompt starts, never by a
+	 * model switch, a credential switch, a fresh retry budget or `abortRetry()` with a retried
+	 * request in flight, so nothing a still-running recovery does re-opens it.
 	 */
 	#connectionHoldsSpent = 0;
 	/**
 	 * Set once a failure after a held retry did not report going out exactly once: the held
 	 * call reached past the hold's bound (the provider replayed it below, or says nothing), so
-	 * the recovery holds no more. Reset only in `resolveRetry()`, like the count above.
+	 * the recovery holds no more. Reset with the count above, and only then.
 	 */
 	#connectionHoldClosed = false;
 	/** Per-model account walk allowance, snapshotted once and cleared when the retry saga ends. */
@@ -571,6 +572,10 @@ export class TurnRecovery {
 		this.#streamStallContinueCount = 0;
 		this.#acceptTerminalEmptyStopForPrompt = false;
 		this.#activeFallbackCreditRedemption = undefined;
+		// A new prompt is a new recovery, even when the last one was left without
+		// a close (its retried request superseded before it settled).
+		this.#connectionHoldsSpent = 0;
+		this.#connectionHoldClosed = false;
 	}
 
 	/** Sets whether one terminal empty stop is accepted for the current prompt. */
@@ -905,11 +910,16 @@ export class TurnRecovery {
 		return parsed ? formatRetryFallbackBaseSelector(parsed) : selector;
 	}
 
-	/** Resolve the pending retry promise; the saga is over, and so is its refusal walk. */
+	/** Resolve the pending retry promise; the saga is over, and so is its refusal walk and its hold. */
 	resolveRetry(): void {
-		this.#refusalWalkTried.clear();
 		this.#connectionHoldsSpent = 0;
 		this.#connectionHoldClosed = false;
+		this.#releaseRetry();
+	}
+
+	/** Ends the saga's walk state and resolves `retryPromise`; the hold state is the caller's to clear. */
+	#releaseRetry(): void {
+		this.#refusalWalkTried.clear();
 		this.#accountPolicyRotationsRemaining.clear();
 		if (this.#retryResolve) {
 			this.#retryResolve();
@@ -1812,20 +1822,23 @@ export class TurnRecovery {
 	 * Bounded per recovery, not per model or per failure: at most
 	 * {@link CONNECTION_FAILURE_CHAIN_HOLD_ATTEMPTS} held retries in the whole
 	 * saga — a fallback that a spent budget hands a fresh one does not re-open
-	 * the hold — each on one of the first two attempts of the current budget.
-	 * The k-th held retry waits a full-jitter backoff inside `[0, min(base ×
-	 * 2^(k-1), 8s))`, so clients sharing a failed upstream do not re-request
-	 * together, and the caller declines the hold when the wait it would take —
-	 * a provider hint included, which is never shortened — falls outside that
-	 * window. Added sleep is therefore under 1.5s at the 500ms default base and
-	 * under 16s at any base.
+	 * the hold — each on one of the first two attempts of the current budget, and
+	 * each counted where it replaces a chain consult, never elsewhere. The k-th
+	 * held retry waits a full-jitter backoff in `[0, min(base × 2^(k-1), 8s))`,
+	 * so clients sharing a failed upstream do not re-request together, and the
+	 * caller declines the hold unless the wait it would take — a provider hint
+	 * included, which is never shortened — is strictly inside that window (or
+	 * zero). Added sleep is therefore strictly under 1.5s at the 500ms default
+	 * base and strictly under 16s at any base.
 	 *
 	 * What the bound cannot shorten is a held call itself: if the route goes
 	 * down under it, the provider's own loop retries it on that provider's
 	 * budget. That call then reports a non-zero count, and any failure after a
 	 * hold that does not report going out once closes the hold for the rest of
 	 * the recovery ({@link #connectionHoldClosed}), so at most one held call can
-	 * spend a provider retry budget.
+	 * spend a provider retry budget. The recovery's hold state ends only with the
+	 * recovery: `abortRetry()` with a retried request already in flight does not
+	 * end it, because that request's failure still continues the recovery.
 	 *
 	 * Excluded on purpose:
 	 * - capacity (429, 529, overloaded, a usage limit) — the replay re-hits the
@@ -3034,15 +3047,15 @@ export class TurnRecovery {
 		// a retry the cap then refuses. Consult the chain instead; a switch zeroes
 		// the wait.
 		//
-		// Nor when the wait falls outside the held retry's own window. Full jitter
-		// stays inside it; a provider hint can be longer and is never shortened,
-		// so a hint past the window consults the chain rather than break the
-		// bound on the sleep a hold adds.
+		// Nor unless the wait is strictly inside the held retry's own window (or
+		// zero). Full jitter stays inside it; a provider hint can be longer and is
+		// never shortened, so a hint at or past the window consults the chain
+		// rather than break the bound on the sleep a hold adds.
+		const heldWindowMs = cappedRetryBackoffMs(retrySettings.baseDelayMs, heldRetryIndex);
 		const connectionHold =
 			connectionHoldCandidate &&
-			sameModelDelayMs <= cappedRetryBackoffMs(retrySettings.baseDelayMs, heldRetryIndex) &&
+			(sameModelDelayMs === 0 || sameModelDelayMs < heldWindowMs) &&
 			!exceedsDelayCap(sameModelDelayMs);
-		if (connectionHold) this.#connectionHoldsSpent++;
 
 		if (!staleOpenAIResponsesReplayError && !switchedCredential && currentSelector) {
 			// The retry budget bounds same-model retries against a failing provider. A
@@ -3058,16 +3071,21 @@ export class TurnRecovery {
 			// chains say.
 			const refusalWalkKey = this.#refusalWalkKey(currentSelector);
 			const refusalWalkRepeats = classifierRefusal && this.#refusalWalkTried.has(refusalWalkKey);
-			if (
+			const chainConsultable =
 				allowModelFallback &&
 				retrySettings.modelFallback &&
 				retryFallbackAdmits(retrySettings.fallbackOn, AIError.is(id, AIError.Flag.UsageLimit)) &&
 				!thinkingLoop &&
 				!sameModelSteerReplay &&
 				!waitForSiblingCredential &&
-				!refusalWalkRepeats &&
-				!connectionHold
-			) {
+				!refusalWalkRepeats;
+			// A hold is spent here and nowhere else: it is the chain consult it
+			// replaces. Where no consult would have run (no chain to walk, a stale
+			// Responses item, a switched credential, no selector), the retry stays
+			// on the model anyway and holds nothing.
+			if (chainConsultable && connectionHold) {
+				this.#connectionHoldsSpent++;
+			} else if (chainConsultable) {
 				if (classifierRefusal) {
 					this.#refusalWalkTried.add(refusalWalkKey);
 				} else {
@@ -3375,11 +3393,19 @@ export class TurnRecovery {
 
 	/**
 	 * Cancel in-progress retry.
+	 *
+	 * A pending wait (the backoff sleep, a credential wait) is aborted, and its
+	 * catch ends the saga through `#endCancelledRetry`, which clears the hold
+	 * too. With a retried request already in flight there is no wait to cancel:
+	 * that request's outcome still settles the saga — its failure continues the
+	 * recovery — so the hold state (the held retries spent, the closed hold)
+	 * outlives this call. Clearing it here forgot a replay that request was about
+	 * to report, and the next model reached on a fresh budget held again. The
+	 * saga's end and the next prompt clear it.
 	 */
 	abortRetry(): void {
 		this.#retryAbortController?.abort();
-		// Note: _retryAttempt is reset in the catch block of _autoRetry
-		this.resolveRetry();
+		this.#releaseRetry();
 	}
 
 	async #promptAgentWithIdleRetry(

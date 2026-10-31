@@ -514,29 +514,54 @@ const STATUS_MESSAGE_PATTERNS = [
 /** A URL: its digits are a host, port, path or query, never the status of the response. */
 const URL_PATTERN = /\b[a-z][a-z\d+.-]*:\/\/[^\s"'<>]+/gi;
 /**
- * The value of a field that names an identifier — `request_id=529`, Python
- * h2's `stream_id:503` / `last_stream_id` / `error_code:2`, Go's
- * `LastStreamID=503` — and Go's `stream ID 503`. Case-sensitive on purpose: the
- * field must end in a separate `id` segment, so `invalid: 400` keeps its status.
+ * A `key=value` or `key: value` field with a number for its value. Which of
+ * them name a status is decided by {@link STATUS_FIELD_KEY}; every other value
+ * is metadata — a duration (`retry-after-ms=401`, `elapsed_ms=503`), an id
+ * (`request_id=529`, Python h2's `stream_id:503`, Go's `LastStreamID=503`), a
+ * frame code (`error_code:2`), a size.
  */
-const ID_FIELD_VALUE_PATTERN =
-	/\b(?:[A-Za-z][\w.-]*?(?:_id|-id|_ID|-ID|Id|ID)|id|ID|error_code)\s*[:=]\s*\d+|\bstream\s+ID\s+\d+/g;
-/** Digits glued into an identifier or a path: `x-request-503-trace`, `/jobs/503/`, `gpt-503-preview`. */
+const FIELD_NUMBER_PATTERN = /(["']?)([A-Za-z][\w.-]*)\1(\s*)([:=])(\s*)(\d+(?:\.\d+)?)/g;
+/**
+ * The field keys whose number is an HTTP status: `status`, `status_code`,
+ * `statusCode`, `http_status`, `upstream_status`, `x-http-status`, `code`,
+ * `http_code`, and the `error: 503` / `failed: 503` spellings the status reader
+ * already takes.
+ */
+const STATUS_FIELD_KEY = /status(?:[_-]?code)?$|^(?:code|http[_-]?code|error|failed|http)$/i;
+/**
+ * A key whose colon makes a field rather than a sentence: quoted, or spelled as
+ * an identifier (`retry-after-ms`, `elapsed_ms`, `latencyMs`, `request.id`), or
+ * an id. A plain word before a colon is prose — `closed the connection: 503
+ * Service Unavailable` keeps its status — while `=` always makes a field.
+ */
+function isFieldKey(quote: string, key: string, separator: string): boolean {
+	return separator === "=" || quote !== "" || /[_.-]/.test(key) || /[a-z][A-Z]/.test(key) || /^id$/i.test(key);
+}
+/** Go's frame field, which has no separator: `stream error: stream ID 503`. */
+const GO_STREAM_ID_PATTERN = /\bstream\s+ID\s+\d+/g;
+/** A number with a unit after a space: `503 ms`, `401 seconds`, `429 bytes`. */
+const UNIT_NUMBER_PATTERN =
+	/\b\d+(?:\.\d+)?\s+(?:ms|msecs?|millis(?:econds?)?|s|secs?|seconds?|mins?|minutes?|hours?|bytes?|[kmg]i?b|tokens?)\b/gi;
+/** Digits glued into an identifier, a path or a unit: `x-request-503-trace`, `/jobs/503/`, `503ms`. */
 const GLUED_NUMBER_PATTERN = /(?<=[A-Za-z_\-/])\d+|\d+(?=[A-Za-z_\-/])/g;
 
 /**
  * `text` with the digits that are diagnostic metadata removed: inside a URL,
- * glued into an identifier or a path, or the value of an id field. Every reader
- * that takes a bare number as an HTTP status, an auth rejection or a capacity
- * refusal reads this instead, so `upstream closed the connection:
- * https://gateway.invalid/jobs/503/result` stays a wire cut. A status the
- * sentence states — `HTTP 503`, `status=529`, `503 Service Unavailable`,
- * `(429)` — keeps its digits.
+ * the value of any field that does not name a status, a quantity with a unit,
+ * or glued into an identifier or a path. Every reader that takes a bare number
+ * as an HTTP status, an auth rejection, a capacity refusal or a transient
+ * status reads this instead, so `read ECONNRESET retry-after-ms=401` stays a
+ * wire cut. A status the sentence states — `HTTP 503`, `status=529`, `503
+ * Service Unavailable`, `error: 429`, `(429)` — keeps its digits.
  */
 function withoutMetadataNumbers(text: string): string {
 	return text
 		.replace(URL_PATTERN, url => url.replace(/\d+/g, ""))
-		.replace(ID_FIELD_VALUE_PATTERN, field => field.replace(/\d+/g, ""))
+		.replace(FIELD_NUMBER_PATTERN, (field, quote: string, key: string, _s1, separator: string, _s2, value: string) =>
+			isFieldKey(quote, key, separator) && !STATUS_FIELD_KEY.test(key) ? field.slice(0, -value.length) : field,
+		)
+		.replace(GO_STREAM_ID_PATTERN, field => field.replace(/\d+/g, ""))
+		.replace(UNIT_NUMBER_PATTERN, quantity => quantity.replace(/[\d.]+/, ""))
 		.replace(GLUED_NUMBER_PATTERN, "");
 }
 
@@ -635,6 +660,16 @@ export function isStreamEnvelopeTruncationText(text: string): boolean {
 	return TRANSIENT_ENVELOPE_PATTERN.test(text) && TRANSIENT_ENVELOPE_TRUNCATION_PATTERN.test(text);
 }
 
+/** The bare status arm of {@link TRANSIENT_TRANSPORT_PATTERN}. */
+const TRANSIENT_STATUS_NUMBER_PATTERN = /\b(?:429|500|502|503|504)\b/;
+const TRANSIENT_STATUS_NUMBERS = /\b(?:429|500|502|503|504)\b/g;
+
+/**
+ * The shared transport pattern, with its bare status numbers read off the
+ * metadata-free text ({@link withoutMetadataNumbers}) so `elapsed_ms=503` is
+ * not a 503. The wording arms read the text as given: they name tokens such as
+ * `HTTP2StreamReset` whose digits are not metadata.
+ */
 function isTransientErrorText(text: string): boolean {
 	return (
 		isUnexpectedSocketCloseMessage(text) ||
@@ -642,7 +677,8 @@ function isTransientErrorText(text: string): boolean {
 		PYTHON_HTTP2_STREAM_RESET_PATTERN.test(text) ||
 		PYTHON_HTTP_INCOMPLETE_CHUNK_PATTERN.test(text) ||
 		isStreamEnvelopeTruncationText(text) ||
-		TRANSIENT_TRANSPORT_PATTERN.test(text)
+		TRANSIENT_TRANSPORT_PATTERN.test(text.replace(TRANSIENT_STATUS_NUMBERS, "")) ||
+		TRANSIENT_STATUS_NUMBER_PATTERN.test(withoutMetadataNumbers(text))
 	);
 }
 

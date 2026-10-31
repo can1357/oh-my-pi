@@ -325,6 +325,45 @@ describe("connection-failure classification", () => {
 		expect(AIError.status(new Error(`${WIRE}: status=400 at https://gateway.invalid/poll`))).toBe(400);
 	});
 
+	const DURATION_VALUES = [399, 400, 401, 403, 429, 500, 503, 529, 8000];
+	it.each(
+		DURATION_VALUES.flatMap(n => [
+			`retry-after-ms=${n}`,
+			`elapsed_ms=${n}`,
+			`retry-after: ${n}`,
+			`latencyMs=${n}`,
+			`{"elapsed":${n}}`,
+			`after ${n} ms`,
+			`after ${n}ms`,
+			`timed ${n} seconds`,
+		]),
+	)("keeps the connection lane and the retry for a wire cut carrying %s", suffix => {
+		// A duration, a delay hint or a size is metadata, whatever number it
+		// holds. Read as a bare status, `retry-after-ms=401` made a socket reset
+		// an auth rejection that never retries, and `=529` made it a capacity
+		// refusal that walks the chain after one request.
+		const id = AIError.classify(new Error(`read ECONNRESET ${suffix}`));
+		expect(AIError.is(id, AIError.Flag.Connection)).toBe(true);
+		expect(AIError.retriable(id)).toBe(true);
+		expect(AIError.status(new Error(`read ECONNRESET ${suffix}`))).toBeUndefined();
+	});
+
+	it.each([
+		["a status field", "read ECONNRESET status=529", 529],
+		["a quoted status key", 'read ECONNRESET {"status":503}', undefined],
+		["a camel-case status key", "read ECONNRESET statusCode: 503", undefined],
+		["an upstream status key", "read ECONNRESET upstream_status=429", undefined],
+		["an error field", "read ECONNRESET error=503", 503],
+		["a status line beside a duration", "read ECONNRESET HTTP 503 elapsed_ms=12", 503],
+	] as [string, string, number | undefined][])("still reads capacity in %s", (_label, errorMessage, expected) => {
+		// A status-named field keeps its number, so the capacity it names still
+		// takes the cut off the connection lane. `status()` reads only the
+		// spellings it read before; the field keys it never parsed stay capacity
+		// evidence without becoming a parsed status.
+		expect(AIError.status(new Error(errorMessage))).toBe(expected);
+		expect(AIError.is(AIError.classify(new Error(errorMessage)), AIError.Flag.Connection)).toBe(false);
+	});
+
 	it("keeps a rejected credential off the connection lane", () => {
 		// The far side answered and refused the credential; replaying it holds the
 		// session on a route that refuses it again, and the hold reads only the

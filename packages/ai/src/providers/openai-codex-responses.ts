@@ -76,7 +76,7 @@ import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResp
 import { getHeadersFromError, getRetryAfterMsFromHeaders, type HeadersLike } from "../utils/retry-after";
 import { adaptSchemaForStrict, NO_STRICT, sanitizeSchemaForOpenAIResponses, toolWireSchema } from "../utils/schema";
 import { notifyRawSseEvent } from "../utils/sse-debug";
-import { createWireAttempts, providerReplaysFrom, type WireAttempts, wireCountedFetch } from "../utils/wire-attempts";
+import { providerReplaysFrom, type WireAttempts, wireCountedFetch } from "../utils/wire-attempts";
 import { compactGrammarDefinition } from "./grammar";
 import {
 	type CodexLiteShapedBody,
@@ -760,14 +760,14 @@ interface CodexRequestContext {
 	transformedBody: RequestBody;
 	rawRequestDump: RawHttpRequestDump;
 	/**
-	 * The `fetch` this call's SSE requests are issued through and the counter
-	 * riding on it (`wireCountedFetch`). Every wrapper this module adds sits
-	 * above it — `fetchWithRetry` and its replays, compression and its
-	 * uncompressed resend — so their requests are counted where they are sent.
+	 * The `fetch` this request's SSE attempts are issued through and the
+	 * request's counter riding on it (`wireCountedFetch`): `transportFetch`'s on
+	 * the `stream()` path, shared with every re-entry that sends the request
+	 * again (an authentication retry). Every wrapper this module adds sits above
+	 * it — `fetchWithRetry` and its replays, compression and its uncompressed
+	 * resend — so their requests are counted where they are sent.
 	 */
 	wire: { fetch: FetchImpl; attempts: WireAttempts };
-	/** `wire.attempts.count` when this call started; this call's share is what came after. */
-	wireStart: number;
 }
 
 interface CodexRequestSetup {
@@ -1475,7 +1475,6 @@ function createCodexRequestContext(
 		transformedBody,
 		rawRequestDump,
 		wire,
-		wireStart: wire.attempts.count,
 	};
 }
 
@@ -2167,7 +2166,7 @@ async function handleCodexStreamFailure(context: CodexStreamFailureContext, erro
 	// this module owns: recovery above reads the absence of this field as "no
 	// layer here reports", so a failure that never reached the processor must
 	// still say what the wire saw. `undefined` after a caller-supplied `fetch`.
-	output.providerReplays = providerReplaysFrom(context.requestContext.wire.attempts, context.requestContext.wireStart);
+	output.providerReplays = providerReplaysFrom(context.requestContext.wire.attempts);
 	output.duration = performance.now() - context.startTime;
 	if (context.firstTokenTime) {
 		output.ttft = context.firstTokenTime - context.startTime;
@@ -3388,9 +3387,9 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 							url: "",
 							body: { model: model.id },
 						},
-						// No context means the failure predates the first request.
-						wire: { fetch, attempts: createWireAttempts() },
-						wireStart: 0,
+						// No context: this call failed before its first request, but the
+						// request's counter may carry an earlier call's attempts.
+						wire: wireCountedFetch(options?.fetch),
 					},
 					startTime,
 				} satisfies CodexStreamFailureContext);

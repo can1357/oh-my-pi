@@ -587,6 +587,8 @@ describe("AgentSession retry recovery", () => {
 			fallback: getBundledModel("openai", "gpt-5.5"),
 		},
 		retryDelays: { baseDelayMs?: number; maxDelayMs?: number } = {},
+		/** Called once the session exists, before the prompt: lets a test act on its events. */
+		onSession?: (session: AgentSession, agent: Agent) => void,
 	): Promise<{
 		primary: string;
 		fallback: string;
@@ -638,6 +640,7 @@ describe("AgentSession retry recovery", () => {
 			if (event.type === "retry_fallback_applied") fallbackEvents.push(event);
 			if (event.type === "auto_retry_start") retryStartDelaysMs.push(event.delayMs);
 		});
+		onSession?.(session, agent);
 
 		await session.prompt("Trigger a socket drop");
 		await session.waitForIdle();
@@ -775,6 +778,81 @@ describe("AgentSession retry recovery", () => {
 
 		expect(requestedModels).toEqual([primary, primary]);
 		expect(retryStartDelaysMs).toEqual([400]);
+	});
+
+	it.each([
+		["the first held window", 600, [600]],
+		["the second held window", 500, [400, 1000]],
+		["the 8 s cap", 8000, [8000]],
+	] as [string, number, number[]][])("does not hold a hint exactly at %s", async (_label, baseDelayMs, hintsMs) => {
+		// The window is half-open, `[0, min(base × 2^(k-1), 8 s))`: full jitter
+		// never reaches its upper end, and neither may a hint. Holding at it
+		// scheduled exactly 1.5 s at the default base and exactly 16 s at the
+		// cap, against a promise of strictly under.
+		vi.spyOn(Math, "random").mockReturnValue(0.5);
+		const { primary, fallback, requestedModels, retryStartDelaysMs } = await runFallbackChainRecovery(
+			[
+				...hintsMs.map(hint => ({
+					...droppedAfterThinking,
+					errorMessage: `${SOCKET_CLOSE_MID_STREAM} retry-after-ms=${hint}`,
+				})),
+				{ content: ["recovered on fallback"], stopReason: "stop" },
+			],
+			2,
+			undefined,
+			{ baseDelayMs, maxDelayMs: 20_000 },
+		);
+
+		// Every hint inside its window is held and slept as given; the one at its
+		// window's end consults the chain, which zeroes the wait.
+		expect(requestedModels).toEqual([...hintsMs.slice(0, -1).map(() => primary), primary, fallback]);
+		expect(retryStartDelaysMs).toEqual([...hintsMs.slice(0, -1), 0]);
+		expect(retryStartDelaysMs.reduce((sum, delay) => sum + delay, 0)).toBeLessThan(
+			Math.min(baseDelayMs, 8000) + Math.min(2 * baseDelayMs, 8000),
+		);
+	});
+
+	it("keeps the closed hold when abortRetry() lands while the held request reports its replays", async () => {
+		// `abortRetry()` (public, and RPC `abort_retry`) with the held request
+		// already in flight has no wait to cancel; that request's failure still
+		// continues the recovery. Clearing the hold state there forgot the ten
+		// replays it reported, and the model the chain reached on a fresh budget
+		// held again: a second held call spending a second provider budget.
+		const models = {
+			primary: getBundledModel("anthropic", "claude-sonnet-4-5"),
+			fallback: getBundledModel("openai", "gpt-5.5"),
+			rest: [getBundledModel("google", "gemini-2.5-flash"), getBundledModel("openai", "gpt-4o")],
+		};
+		const [third, fourth] = models.rest.map(entry => `${entry.provider}/${entry.id}`);
+		let aborted = false;
+		const { primary, fallback, requestedModels } = await runFallbackChainRecovery(
+			[
+				droppedAfterThinking,
+				{ ...droppedAfterThinking, providerReplays: 10 },
+				droppedAfterThinking,
+				droppedAfterThinking,
+				{ content: ["recovered on the last fallback"], stopReason: "stop" },
+			],
+			2,
+			models,
+			{},
+			(session, agent) => {
+				agent.subscribe(event => {
+					if (
+						!aborted &&
+						event.type === "message_end" &&
+						event.message.role === "assistant" &&
+						(event.message.providerReplays ?? 0) > 0
+					) {
+						aborted = true;
+						session.abortRetry();
+					}
+				});
+			},
+		);
+
+		expect(aborted).toBe(true);
+		expect(requestedModels).toEqual([primary, primary, fallback, third, fourth]);
 	});
 
 	it("stops holding for the rest of the recovery once a held retry reports a replay", async () => {

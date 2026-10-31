@@ -1355,6 +1355,15 @@ export interface AssistantMessage {
 	 * makes, the uncompressed resend of a refused compressed body, the GitHub
 	 * Copilot identity resend.
 	 *
+	 * **One count per logical request.** The counter rides on the `fetch` in
+	 * the request's options, so a layer that sends the request again by calling
+	 * the provider again with those options — `streamSimple`'s authentication
+	 * retry under another key, the replay-safe empty-completion retry — counts
+	 * into the same counter, and the provider reports the request's whole count,
+	 * not its own call's share. A request the route makes for itself (the
+	 * Vertex OAuth token) is not an attempt at the model request and is not
+	 * counted.
+	 *
 	 * **Attempts, not HTTP requests.** Below the counter one attempt may still
 	 * be several HTTP requests — a redirect hop `fetch` follows, a transport
 	 * whose logical turn is several RPCs (Cursor's `RunSSE` plus `BidiAppend`)

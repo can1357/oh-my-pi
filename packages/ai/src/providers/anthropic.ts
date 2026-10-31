@@ -1829,22 +1829,24 @@ const streamAnthropicOnce = (
 		let rawRequestDump: RawHttpRequestDump | undefined;
 		let transportPayload: unknown;
 		let activeAbortTracker = createAbortSourceTracker(options?.signal);
-		// Request attempts this call spends, counted on the `fetch` the client
-		// issues them through (`wireCountedFetch`): `transportFetch` on the
-		// `stream()` path, else a counter over the runtime's `fetch`. Every
-		// wrapper `buildAnthropicClientOptions` adds sits above it —
-		// compression and its uncompressed resend, the cch rewriter, the
-		// Copilot identity resend — so their requests are counted too.
+		// Request attempts, counted on the `fetch` the client issues them through
+		// (`wireCountedFetch`): the request's own counter — `transportFetch` on
+		// the `stream()` path, `withWireCount` at `streamAnthropic` otherwise —
+		// shared by every call that sends this request again with the same
+		// options (an authentication retry, an empty-completion retry). Every
+		// wrapper `buildAnthropicClientOptions` adds sits above it — compression
+		// and its uncompressed resend, the cch rewriter, the Copilot identity
+		// resend — so their requests are counted too.
 		const wire = wireCountedFetch(options?.fetch);
-		const wireStart = wire.attempts.count;
 		/**
-		 * The count, or `undefined` when the requests went through a transport
-		 * this module does not own — a caller-supplied client, or a transport
-		 * that builds its own — or through a caller-supplied `fetch`. Each knows
-		 * how often it replayed and this module does not.
+		 * Every attempt after the first the request has made, or `undefined`
+		 * when the requests went through a transport this module does not own —
+		 * a caller-supplied client, or a transport that builds its own — or
+		 * through a caller-supplied `fetch`. Each knows how often it replayed and
+		 * this module does not.
 		 */
 		const reportedProviderReplays = (): number | undefined =>
-			transport || options?.client ? undefined : providerReplaysFrom(wire.attempts, wireStart);
+			transport || options?.client ? undefined : providerReplaysFrom(wire.attempts);
 
 		const onSseEvent = options?.onSseEvent;
 		const rawSseObserver = onSseEvent ? (event: RawSseEvent) => onSseEvent(event, sourceModel) : undefined;

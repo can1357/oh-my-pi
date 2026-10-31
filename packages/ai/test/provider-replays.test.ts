@@ -15,9 +15,10 @@ import { afterEach, expect, it, vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { AnthropicMessagesClient, type AnthropicMessagesClientLike } from "@oh-my-pi/pi-ai/providers/anthropic-client";
+import { __resetVertexTokenCache } from "@oh-my-pi/pi-ai/providers/google-auth";
 import { streamOpenAICodexResponses } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { getCodexProviderSessionState } from "@oh-my-pi/pi-ai/providers/openai-codex-state";
-import { stream } from "@oh-my-pi/pi-ai/stream";
+import { stream, streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Context, FetchImpl, Model, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
 import { resetRequestCompressionForTesting } from "@oh-my-pi/pi-ai/utils/request-compression";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -497,6 +498,153 @@ it("carries the count on a successful Anthropic response the caller may discard"
 	expect(result.providerReplays).toBe(1);
 	tempDir.removeSync();
 });
+
+/** The request body's SHA-256; the bodies here sit under the compression floor, so they are sent as is. */
+function bodyHash(init: RequestInit | undefined): string {
+	return new Bun.CryptoHasher("sha256").update(String(init?.body ?? "")).digest("hex");
+}
+
+it("counts the request the authentication retry sent again under another key", async () => {
+	// `streamSimple` resolves a second key after a 401 and calls the provider
+	// again with the same request. Each call used to take its own snapshot of
+	// the counter, so the second reported `0` for the second request of one
+	// body — and earned a hold that sent the pair again.
+	const tempDir = TempDir.createSync("@pi-provider-replays-");
+	setAgentDir(tempDir.path());
+	vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+	const requests: { key: string | null; hash: string }[] = [];
+	serveRuntimeFetch(async (_url, init) => {
+		const key = new Headers(init?.headers).get("x-api-key");
+		requests.push({ key, hash: bodyHash(init) });
+		return key === "old-key"
+			? new Response('{"type":"error","error":{"type":"authentication_error","message":"invalid api key"}}', {
+					status: 401,
+					headers: { "content-type": "application/json" },
+				})
+			: sseResponse(ANTHROPIC_THINKING_THEN_CUT);
+	});
+
+	const result = await streamSimple(localAnthropicModel(), context, {
+		apiKey: ({ error }) => (error === undefined ? "old-key" : "new-key"),
+		providerRetryWait: async () => {},
+	}).result();
+
+	expect(requests.map(request => request.key)).toEqual(["old-key", "new-key"]);
+	expect(new Set(requests.map(request => request.hash)).size).toBe(1);
+	expect(result.stopReason).toBe("error");
+	expect(result.providerReplays).toBe(1);
+	tempDir.removeSync();
+});
+
+it("counts the attempts an empty-completion retry discarded on the stream() path", async () => {
+	// The replay-safe wrapper calls the provider again with the same options, so
+	// the retried call counts into the request's counter and reports both.
+	const tempDir = TempDir.createSync("@pi-provider-replays-");
+	setAgentDir(tempDir.path());
+	vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+	let requests = 0;
+	serveRuntimeFetch(async () => {
+		requests += 1;
+		return sseResponse(requests === 1 ? ANTHROPIC_EMPTY_STOP : ANTHROPIC_THINKING_THEN_CUT);
+	});
+
+	const result = await stream(localAnthropicModel(), context, {
+		apiKey: "test-key",
+		providerRetryWait: async () => {},
+	}).result();
+
+	expect(requests).toBe(2);
+	expect(result.stopReason).toBe("error");
+	expect(result.providerReplays).toBe(1);
+	tempDir.removeSync();
+});
+
+/**
+ * The same model at a plain-HTTP origin. On the `stream()` path `transportFetch`
+ * sends `anthropic` requests to an `https:` origin through the Cowork transport
+ * (`node:https`), past the replaced runtime `fetch`; at `http:` it hands them to
+ * the runtime `fetch`, so the test answers them and nothing leaves the machine.
+ */
+function localAnthropicModel(): Model<"anthropic-messages"> {
+	return { ...anthropicModel(), baseUrl: "http://anthropic.invalid" };
+}
+
+it("does not count the Vertex OAuth token request as an attempt at the model request", async () => {
+	// The token is minted over the same transport as the model request. Counted
+	// with it, one model request reported one replay, and the hold never applied
+	// on this route — on a process's first call and at every token refresh.
+	const tempDir = TempDir.createSync("@pi-provider-replays-");
+	setAgentDir(tempDir.path());
+	vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+	const adcPath = `${tempDir.path()}/adc.json`;
+	await Bun.write(
+		adcPath,
+		JSON.stringify({
+			type: "authorized_user",
+			client_id: "client-id",
+			client_secret: "client-secret",
+			refresh_token: "refresh-token",
+		}),
+	);
+	const saved = Object.fromEntries(VERTEX_ENV.map(name => [name, Bun.env[name]]));
+	for (const name of VERTEX_ENV) delete Bun.env[name];
+	Bun.env.GOOGLE_CLOUD_PROJECT = "vertex-project";
+	Bun.env.GOOGLE_VERTEX_LOCATION = "global";
+	Bun.env.GOOGLE_APPLICATION_CREDENTIALS = adcPath;
+	const calls: string[] = [];
+	serveRuntimeFetch(async url => {
+		if (url === "https://oauth2.googleapis.com/token") {
+			calls.push("token");
+			return new Response(JSON.stringify({ access_token: "vertex-token", expires_in: 3600 }));
+		}
+		calls.push("model");
+		return sseResponse(ANTHROPIC_THINKING_THEN_CUT);
+	});
+	try {
+		__resetVertexTokenCache();
+		const result = await stream(
+			buildModel({
+				id: "claude-sonnet-4@20250514",
+				name: "Claude Sonnet 4",
+				api: "anthropic-messages",
+				provider: "google-vertex",
+				baseUrl:
+					"https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/anthropic/models/claude-sonnet-4@20250514:streamRawPredict",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 200_000,
+				maxTokens: 8_192,
+			}),
+			context,
+			{ apiKey: "<authenticated>", providerRetryWait: async () => {} },
+		).result();
+
+		expect(calls).toEqual(["token", "model"]);
+		expect(result.stopReason).toBe("error");
+		expect(result.providerReplays).toBe(0);
+	} finally {
+		__resetVertexTokenCache();
+		for (const name of VERTEX_ENV) {
+			if (saved[name] === undefined) delete Bun.env[name];
+			else Bun.env[name] = saved[name];
+		}
+		tempDir.removeSync();
+	}
+});
+
+const VERTEX_ENV = [
+	"GOOGLE_CLOUD_PROJECT",
+	"GCP_PROJECT",
+	"GCLOUD_PROJECT",
+	"GOOGLE_VERTEX_LOCATION",
+	"GOOGLE_CLOUD_LOCATION",
+	"VERTEX_LOCATION",
+	"GOOGLE_CLOUD_API_KEY",
+	"GOOGLE_APPLICATION_CREDENTIALS",
+	"GOOGLE_CLOUD_ACCESS_TOKEN",
+	"CLOUDSDK_AUTH_ACCESS_TOKEN",
+] as const;
 
 it("does not count a websocket request a busy socket sent the call away from", async () => {
 	// One socket carries one request at a time, so a call that finds it busy is
