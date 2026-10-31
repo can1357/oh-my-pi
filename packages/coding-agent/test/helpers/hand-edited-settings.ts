@@ -35,13 +35,20 @@ export async function writeHandEditedConfig(
 	return { agentDir, cwd, configFiles };
 }
 
-/** Loads {@link writeHandEditedConfig}'s files read-only, without the ambient `PI_CONFIG_FILES` overlays. */
-export async function loadHandEditedSettings(dir: TempDir, layers: HandEditedLayers): Promise<Settings> {
+/**
+ * Loads {@link writeHandEditedConfig}'s files without the ambient `PI_CONFIG_FILES` overlays: read-only,
+ * or `reloadable` as an instance that `reloadFromDisk` re-reads.
+ */
+export async function loadHandEditedSettings(
+	dir: TempDir,
+	layers: HandEditedLayers,
+	{ reloadable = false }: { reloadable?: boolean } = {},
+): Promise<Settings> {
 	const options = await writeHandEditedConfig(dir, layers);
 	const ambient = process.env.PI_CONFIG_FILES;
 	delete process.env.PI_CONFIG_FILES;
 	try {
-		return await Settings.loadReadOnly(options);
+		return await (reloadable ? Settings.loadIsolated(options) : Settings.loadReadOnly(options));
 	} finally {
 		if (ambient !== undefined) process.env.PI_CONFIG_FILES = ambient;
 	}

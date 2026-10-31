@@ -152,6 +152,20 @@ describe("flushGrievances", () => {
 		}
 	});
 
+	it("honors a consent denied in a project file's legacy dev.autoqa shape over a global grant", async () => {
+		const dir = piUtils.TempDir.createSync("@pi-autoqa-legacy-");
+		try {
+			// The legacy shape fails `dev.autoqa`'s type until migration moves it to `dev.autoqaConsent`.
+			const settings = await loadHandEditedSettings(dir, {
+				global: { dev: { autoqaConsent: "granted" } },
+				project: { dev: { autoqa: { consent: "denied" } } },
+			});
+			expect(isAutoQaEnabled(settings)).toBe(false);
+		} finally {
+			dir.removeSync();
+		}
+	});
+
 	it("skips network when consent is missing and leaves rows intact", async () => {
 		insertGrievance(db, "glob", "weird ordering");
 		const fetchSpy = vi.fn(async () => new Response("unexpected", { status: 200 }));

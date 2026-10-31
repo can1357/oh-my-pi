@@ -652,14 +652,22 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 	}
 
 	/**
-	 * Registry plumbing: warns that `raw`, a value configured in `settings` (in the file `source`, when
-	 * known), is one this setting rejects and so reads as unset, naming the setting, the value and what
-	 * was expected. Once per instance and value, until {@link rearmRejected}.
+	 * Registry plumbing behind `Settings.rawValue`: warns that `raw`, the value `settings` configures,
+	 * is one this setting rejects and so reads as unset. Once per instance and value, until
+	 * {@link rearmRejected}.
 	 */
-	reportRejected(settings: Settings, raw: unknown, source?: string): void {
+	reportRejected(settings: Settings, raw: unknown): void {
 		const warned = settings.warnState.invalid;
 		if (warned.has(this.id) && Bun.deepEquals(warned.get(this.id), raw)) return;
 		warned.set(this.id, raw);
+		this.warnRejected(raw);
+	}
+
+	/**
+	 * Registry plumbing: logs that `raw` (found in the config file `source`, when known) is a value this
+	 * setting rejects, naming the setting, the value and what was expected. Callers decide how often.
+	 */
+	warnRejected(raw: unknown, source?: string): void {
 		const context = { setting: this.id, value: raw, expected: this.#expected() };
 		logger.warn("Settings: ignoring invalid value", source === undefined ? context : { ...context, source });
 	}
@@ -864,6 +872,8 @@ export interface WarnState {
 	readonly invalid: Map<string, unknown>;
 	/** Unknown `items` entries each setting (by id) warned about that are still configured. */
 	readonly items: Map<string, Set<string>>;
+	/** Per config file: the values a load dropped from it, by setting id (see {@link reportDropped}). */
+	readonly dropped: Map<string, ReadonlyMap<string, unknown>>;
 }
 
 /**
@@ -871,11 +881,32 @@ export interface WarnState {
  * `target` takes over `source`'s warn-once diagnostics, so the values it inherits are not reported again.
  */
 export function inheritWarnings(target: Settings, source: Settings): void {
-	const { invalid, items } = target.warnState;
+	const { invalid, items, dropped } = target.warnState;
 	invalid.clear();
 	items.clear();
+	dropped.clear();
 	for (const [id, value] of source.warnState.invalid) invalid.set(id, value);
 	for (const [id, entries] of source.warnState.items) items.set(id, new Set(entries));
+	for (const [file, values] of source.warnState.dropped) dropped.set(file, values);
+}
+
+/**
+ * Registry plumbing run by `Settings` each time it loads the config file `source`: warns about each
+ * value in `dropped` (a value its setting rejects, so the load left it out) that the previous load of
+ * that file did not already report, and remembers the set, so an unchanged file stays quiet on reload
+ * and a value fixed and broken again is reported again.
+ */
+export function reportDropped(settings: Settings, source: string, dropped: ReadonlyMap<AnySetting, unknown>): void {
+	const warned = settings.warnState.dropped;
+	const previous = warned.get(source);
+	const reported = new Map<string, unknown>();
+	for (const [setting, value] of dropped) {
+		reported.set(setting.id, value);
+		if (previous?.has(setting.id) && Bun.deepEquals(previous.get(setting.id), value)) continue;
+		setting.warnRejected(value, source);
+	}
+	if (reported.size === 0) warned.delete(source);
+	else warned.set(source, reported);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

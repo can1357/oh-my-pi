@@ -1147,4 +1147,19 @@ describe("resolveApprovalFromContext fail-closed default", () => {
 			dir.removeSync();
 		}
 	});
+
+	it("keeps the global approval mode and policies when a --config file sets the whole tools group to a scalar", async () => {
+		const dir = TempDir.createSync("@pi-approval-group-shadow-");
+		try {
+			const settings = await loadHandEditedSettings(dir, {
+				global: { tools: { approvalMode: "always-ask", approval: { bash: "deny" } } },
+				overlays: [{ tools: false }],
+			});
+			const { approvalMode, userPolicies } = resolveApprovalFromContext({ settings });
+			expect(approvalMode).toBe("always-ask");
+			expect(resolveApproval(tool("bash", "exec"), {}, approvalMode, userPolicies).policy).toBe("deny");
+		} finally {
+			dir.removeSync();
+		}
+	});
 });

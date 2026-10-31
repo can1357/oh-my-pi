@@ -137,6 +137,8 @@ describe("settings registry", () => {
 				expected: "a number",
 				source: expect.stringMatching(/\.omp[\\/]config\.yml$/),
 			});
+			// The project layer as written still shows it, so a host editing that file does not lose it.
+			expect(underGlobal.getProjectSettings()).toMatchObject({ temperature: "hot" });
 
 			const alone = await loadHandEditedSettings(aloneDir, { overlays: [{ temperature: "hot" }] });
 			expect(cfgTemperature.get(alone)).toBe(cfgTemperature.default);
@@ -156,6 +158,40 @@ describe("settings registry", () => {
 			dir.removeSync();
 			aloneDir.removeSync();
 			validatedDir.removeSync();
+		}
+	});
+
+	it("warns once per file about a value it holds, and again only after the file fixes and breaks it", async () => {
+		const dir = TempDir.createSync("@pi-settings-rejected-warn-once-");
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const sources = () =>
+			warn.mock.calls
+				.filter(([message]) => message === "Settings: ignoring invalid value")
+				.map(([, context]) =>
+					context && typeof context === "object" && "source" in context ? context.source : undefined,
+				);
+		try {
+			const settings = await loadHandEditedSettings(
+				dir,
+				{ global: { temperature: 0.2 }, overlays: [{ temperature: "hot" }, { temperature: "hot" }] },
+				{ reloadable: true },
+			);
+			const [first, second] = [dir.join("overlay-0.yml"), dir.join("overlay-1.yml")];
+			expect(sources()).toEqual([first, second]);
+
+			expect(cfgTemperature.get(settings)).toBe(0.2);
+			await settings.reloadFromDisk();
+			await settings.reloadFromDisk();
+			expect(sources()).toEqual([first, second]);
+
+			await Bun.write(second, YAML.stringify({ temperature: 0.4 }));
+			await settings.reloadFromDisk();
+			await Bun.write(second, YAML.stringify({ temperature: "hot" }));
+			await settings.reloadFromDisk();
+			expect(sources()).toEqual([first, second, second]);
+		} finally {
+			warn.mockRestore();
+			dir.removeSync();
 		}
 	});
 

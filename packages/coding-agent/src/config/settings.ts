@@ -47,6 +47,7 @@ import {
 	all as allSettings,
 	bindEffects,
 	inheritWarnings,
+	reportDropped,
 	lookup as lookupSetting,
 	resetRegistryForTest,
 	settingValuesEqual,
@@ -133,7 +134,10 @@ type MainYamlReadResult = {
 };
 
 type ProjectSettingsReadResult = {
+	/** The merged project layer, without the values its settings reject. */
 	settings: RawSettings;
+	/** The merged project layer as written, those values included (see `Settings.getProjectSettings`). */
+	asWritten: RawSettings;
 	fileSettings: RawSettings;
 	shellPathSource: string | undefined;
 	/** Files that supplied merged project-level settings items. */
@@ -338,12 +342,14 @@ function settingsGroupOnlyPrefixes(): Readonly<Record<string, true>> {
 }
 
 /**
- * Drop entries from capability-provided project settings whose non-object
+ * Drop entries from a project settings file or a `--config` file whose non-object
  * value would shadow an entire settings group. `.claude/settings.json` is
  * shared with other tools, and a foreign leaf like `"tui": "fullscreen"`
  * deep-merges over omp's `tui` group, silently replacing every `tui.*`
- * setting for sessions rooted in that project. Values at schema leaves,
- * unknown keys, and well-formed nested objects pass through unchanged.
+ * setting for sessions rooted in that project; a `tools: false` in a `--config`
+ * file would likewise drop every lower `tools.*` setting, approval policies
+ * included. Values at schema leaves, unknown keys, and well-formed nested
+ * objects pass through unchanged.
  */
 export function dropSettingsGroupShadows(data: RawSettings, sourcePath: string, basePrefix = ""): RawSettings {
 	const result: RawSettings = {};
@@ -355,7 +361,7 @@ export function dropSettingsGroupShadows(data: RawSettings, sourcePath: string, 
 			continue;
 		}
 		if (typeof value !== "object" || value === null || Array.isArray(value)) {
-			logger.warn("Settings: ignoring project setting that would shadow a settings group", {
+			logger.warn("Settings: ignoring a value that would shadow a settings group", {
 				setting: path,
 				source: sourcePath,
 			});
@@ -586,8 +592,10 @@ export class Settings {
 	#configFiles: string[] = [];
 	/** Global settings from config.yml/config.yaml */
 	#global: RawSettings = {};
-	/** Project settings from .claude/settings.yml etc */
+	/** Project settings from .claude/settings.yml etc, without the values their settings reject */
 	#project: RawSettings = {};
+	/** {@link #project} as written, those values included; see {@link getProjectSettings}. */
+	#projectAsWritten: RawSettings = {};
 	/** Last successfully loaded native .omp/config.yml contents. */
 	#projectFileSettings: RawSettings = {};
 	/** Logical config paths whose malformed targets were moved aside. */
@@ -616,7 +624,7 @@ export class Settings {
 	 */
 	readonly valueCache: (ValueCacheEntry | undefined)[] = [];
 	/** Registry-owned warn-once diagnostics of this instance; see `config/registry.ts`. */
-	readonly warnState: WarnState = { invalid: new Map(), items: new Map() };
+	readonly warnState: WarnState = { invalid: new Map(), items: new Map(), dropped: new Map() };
 	/** Change listeners bucketed by the `slot` of the setting they observe ({@link onEffectiveChange}). */
 	#changeListeners: (Set<SettingChangeListener> | undefined)[] = [];
 	/** Forwarders of every change into live {@link overlay} children. */
@@ -1308,17 +1316,26 @@ export class Settings {
 		let cloned: Settings;
 		if (this.#parent) {
 			cloned = (await this.#parent.cloneForCwd(cwd)).overlay();
+			inheritWarnings(cloned, this);
 			cloned.#project = structuredClone(this.#project);
+			cloned.#projectAsWritten = structuredClone(this.#projectAsWritten);
 		} else {
 			cloned = new Settings({
 				cwd,
 				agentDir: this.#agentDir,
 				inMemory: !this.#persist,
 			});
+			// Before the project re-read, so a file this instance already reported stays quiet.
+			inheritWarnings(cloned, this);
 			cloned.#storage = this.#storage;
 			cloned.#configPath = this.#configPath;
-			cloned.#project = this.#persist ? await cloned.#loadProjectSettings() : structuredClone(this.#project);
-			if (!this.#persist) cloned.#projectShellPathSource = this.#projectShellPathSource;
+			if (this.#persist) {
+				cloned.#project = await cloned.#loadProjectSettings();
+			} else {
+				cloned.#project = structuredClone(this.#project);
+				cloned.#projectAsWritten = structuredClone(this.#projectAsWritten);
+				cloned.#projectShellPathSource = this.#projectShellPathSource;
+			}
 			cloned.#configFiles = [...this.#configFiles];
 			cloned.#overlayShellPathSource = this.#overlayShellPathSource;
 		}
@@ -1330,7 +1347,6 @@ export class Settings {
 		for (const setting of cloned.#settlePins(layers)) cloned.#softPins.delete(setting);
 		cloned.#overrides = layers.overrides;
 		cloned.#rebuildMerged();
-		inheritWarnings(cloned, this);
 		cloned.#validateAll();
 		return cloned;
 	}
@@ -1592,13 +1608,14 @@ export class Settings {
 	}
 
 	/**
-	 * Raw project settings layer (`.claude/settings.yml`, `.omp/config.yml`,
-	 * etc.), deep-cloned. Companion to {@link getGlobalSettings} for the legacy
-	 * pi `SettingsManager` shim's `getProjectSettings()`; an {@link overlay}
-	 * likewise reports its parent's layer under its own.
+	 * Project settings layer as written (`.claude/settings.yml`, `.omp/config.yml`,
+	 * etc.), deep-cloned: a value its setting rejects stays here, though reads leave
+	 * it out. Companion to {@link getGlobalSettings} for the legacy pi
+	 * `SettingsManager` shim's `getProjectSettings()` and `omp config list
+	 * --project`; an {@link overlay} likewise reports its parent's layer under its own.
 	 */
 	getProjectSettings(): RawSettings {
-		const own = structuredClone(this.#project);
+		const own = structuredClone(this.#projectAsWritten);
 		return this.#parent ? this.#deepMerge(this.#parent.getProjectSettings(), own) : own;
 	}
 
@@ -1738,6 +1755,11 @@ export class Settings {
 		const current: Record<string, unknown> = isRecord(projectRoles) ? { ...projectRoles } : {};
 		current[role] = modelId;
 		setByPath(this.#project, ["modelRoles"], current);
+		const writtenRoles = getByPath(this.#projectAsWritten, ["modelRoles"]);
+		setByPath(this.#projectAsWritten, ["modelRoles"], {
+			...(isRecord(writtenRoles) ? writtenRoles : {}),
+			[role]: modelId,
+		});
 		this.#modifiedProjectModelRoles.add(role);
 		this.#persistedMutationGeneration++;
 		this.#rebuildMerged();
@@ -2432,6 +2454,9 @@ export class Settings {
 		for (const sourcePath of this.#projectSourcePaths) invalidateCapabilityFsCache(sourcePath);
 		let shellPathSource: string | undefined;
 		let merged: RawSettings = {};
+		let asWritten: RawSettings = {};
+		// What each file's load left out, reported once all files are read (see `reportDropped`).
+		const dropped = new Map<string, Map<AnySetting, unknown>>();
 		const sourcePaths: string[] = [];
 		let rejectedWarnings: string[] | undefined;
 		let warningsSeen = this.#projectSettingsWarningsSeen;
@@ -2457,10 +2482,15 @@ export class Settings {
 				warningsSeen = new Set(projectWarnings);
 				for (const item of result.items as SettingsCapabilityItem[]) {
 					if (item.level === "project") {
-						const data = this.#dropRejected(
+						// Migrated before filtering: a legacy key or shape is valid until migration renames it.
+						const written = this.#migrateRawSettings(
 							dropSettingsGroupShadows(item.data as RawSettings, item.path),
-							item.path,
+							quarantineInvalid,
 						);
+						const fileDropped = dropped.get(item.path) ?? new Map<AnySetting, unknown>();
+						dropped.set(item.path, fileDropped);
+						const data = this.#dropRejected(written, fileDropped);
+						asWritten = this.#deepMerge(asWritten, written);
 						merged = this.#deepMerge(merged, data);
 						sourcePaths.push(item.path);
 						if (Object.hasOwn(data, "shellPath")) shellPathSource = item.path;
@@ -2483,10 +2513,16 @@ export class Settings {
 				(this.#quarantinedYamlTargets.has(projectConfigPath) ? structuredClone(this.#projectFileSettings) : {}));
 		const nativeModelRoles = getByPath(nativeProject, ["modelRoles"]);
 		if (nativeModelRoles !== undefined) {
-			merged = this.#deepMerge(merged, this.#dropRejected({ modelRoles: nativeModelRoles }, projectConfigPath));
+			const written = this.#migrateRawSettings({ modelRoles: nativeModelRoles }, quarantineInvalid);
+			const fileDropped = dropped.get(projectConfigPath) ?? new Map<AnySetting, unknown>();
+			dropped.set(projectConfigPath, fileDropped);
+			asWritten = this.#deepMerge(asWritten, written);
+			merged = this.#deepMerge(merged, this.#dropRejected(written, fileDropped));
 		}
+		for (const [source, values] of dropped) reportDropped(this, source, values);
 		return {
-			settings: this.#migrateRawSettings(merged, quarantineInvalid),
+			settings: merged,
+			asWritten,
 			fileSettings: structuredClone(nativeProject),
 			shellPathSource,
 			sourcePaths,
@@ -2506,16 +2542,20 @@ export class Settings {
 		this.#projectShellPathSource = result.shellPathSource;
 		this.#projectSourcePaths = result.sourcePaths;
 		this.#projectSettingsWarningsSeen = result.warningsSeen;
+		this.#projectAsWritten = result.asWritten;
 	}
 
 	async #readConfigOverlays(captureLegacyChangelogVersion = true): Promise<ConfigOverlayReadResult> {
 		let shellPathSource: string | undefined;
 		let settings: RawSettings = {};
 		for (const filePath of this.#configFiles) {
-			const overlay = this.#dropRejected(
+			const written = dropSettingsGroupShadows(
 				await this.#loadOverlayYaml(filePath, captureLegacyChangelogVersion),
 				filePath,
 			);
+			const dropped = new Map<AnySetting, unknown>();
+			const overlay = this.#dropRejected(written, dropped);
+			reportDropped(this, filePath, dropped);
 			settings = this.#deepMerge(settings, overlay);
 			if (Object.hasOwn(overlay, "shellPath")) shellPathSource = filePath;
 		}
@@ -3986,23 +4026,23 @@ export class Settings {
 
 	/**
 	 * `data`, one project or `--config` file, without the values its settings reject (the wrong type,
-	 * or not one of an enum's values), each reported naming `source`. Such a value reads as unset in
-	 * its own file, so the files and layers beneath still apply rather than being replaced by it while
-	 * the layers merge. A definition with `validate` keeps its value for that check, which then fails
-	 * the load on its own terms.
+	 * or not one of an enum's values), each added to `dropped` for the caller to report. Such a value
+	 * reads as unset in its own file, so the files and layers beneath still apply rather than being
+	 * replaced by it while the layers merge. A definition with `validate` keeps its value for that
+	 * check, which then fails the load on its own terms.
 	 */
-	#dropRejected(data: RawSettings, source: string, prefix = ""): RawSettings {
+	#dropRejected(data: RawSettings, dropped: Map<AnySetting, unknown>, prefix = ""): RawSettings {
 		const result: RawSettings = {};
 		for (const key of Object.keys(data)) {
 			const value = data[key];
 			const id = prefix === "" ? key : `${prefix}.${key}`;
 			const setting = lookupSetting(id);
 			if (!setting) {
-				setOwn(result, key, isRecord(value) ? this.#dropRejected(value, source, id) : value);
+				setOwn(result, key, isRecord(value) ? this.#dropRejected(value, dropped, id) : value);
 			} else if (value === null || value === undefined || setting.definition.validate || setting.accepts(value)) {
 				setOwn(result, key, value);
 			} else {
-				setting.reportRejected(this, value, source);
+				dropped.set(setting, value);
 			}
 		}
 		return result;
