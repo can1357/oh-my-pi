@@ -350,7 +350,10 @@ export class Theme {
 	fg(color: ThemeColor, text: string): string {
 		const ansi = this.#fgColors[color];
 		if (!ansi) throw new Error(`Unknown theme color: ${color}`);
-		return `${ansi}${text}\x1b[39m`; // Reset only foreground color
+		// Nested styling ends with a reset; restore this color after it so the
+		// rest of `text` keeps it (`fg("dim", `${fg("success", "+2")} more`)`).
+		const body = text.includes("\x1b[") ? text.replace(FOREGROUND_RESET_PATTERN, `$&${ansi}`) : text;
+		return `${ansi}${body}\x1b[39m`; // Reset only foreground color
 	}
 
 	/** Apply a foreground, replacing terminal-default tokens with the theme's contrast-safe fallback. */
