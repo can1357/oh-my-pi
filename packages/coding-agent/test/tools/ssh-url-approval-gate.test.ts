@@ -56,7 +56,9 @@ describe("ssh:// tools are exec-gated through the production approval wrapper", 
 			undefined,
 			settings,
 		);
-		// Exercise the production tool factory and approval wrapper without full SDK startup.
+		// Adding edit made the full SDK setup exceed Bun's default five-second
+		// deadline, including with unchanged main implementation. Keep the real
+		// tool factory and approval wrapper while avoiding unrelated SDK startup.
 		tools = (await createTools(session, ["read", "grep", "glob", "write", "edit"])).map(
 			tool => new ExtensionToolWrapper(tool, runner),
 		);

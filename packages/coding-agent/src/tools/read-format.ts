@@ -3,7 +3,7 @@ import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { countNewlines } from "@oh-my-pi/pi-utils";
 import { getEditStore } from "../edit/store";
-import { extractUriScheme } from "../internal-urls/parse";
+import { InternalUrlRouter } from "../internal-urls/router";
 import {
 	formatHashlineHeader,
 	formatNumberedLines,
@@ -90,7 +90,12 @@ function recordFullHashlineContext(
 	fullText: string,
 	sourceStartLine?: number,
 ): HashlineHeaderContext | undefined {
-	if (!absolutePath || (!path.isAbsolute(absolutePath) && extractUriScheme(absolutePath) !== "ssh")) return undefined;
+	if (
+		!absolutePath ||
+		(!path.isAbsolute(absolutePath) &&
+			InternalUrlRouter.instance().writeTarget(absolutePath)?.spec.editVia !== "content")
+	)
+		return undefined;
 	// An excerpt must never replace the backing file's full edit snapshot.
 	const normalized = sourceStartLine === undefined ? normalizeToLF(fullText) : undefined;
 	const tag =
@@ -227,7 +232,11 @@ function recordInMemorySeenLines(
 	sourceStartLine?: number,
 ): void {
 	if (!absolutePath || !seenLines || seenLines.length === 0) return;
-	if (!path.isAbsolute(absolutePath) && extractUriScheme(absolutePath) !== "ssh") return;
+	if (
+		!path.isAbsolute(absolutePath) &&
+		InternalUrlRouter.instance().writeTarget(absolutePath)?.spec.editVia !== "content"
+	)
+		return;
 	if (sourceStartLine !== undefined) {
 		getEditStore(session).recordSnapshotFile(
 			absolutePath,

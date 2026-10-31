@@ -32,7 +32,6 @@ import {
 	type ShellFsResponse,
 } from "@oh-my-pi/pi-natives";
 import { isFsError } from "@oh-my-pi/pi-utils";
-import { stripBom } from "../edit/normalize";
 import { TIER_RANK } from "../tools/approval";
 import { UrlContainmentError } from "./filesystem-resource";
 import { parseInternalUrl } from "./parse";
@@ -754,10 +753,7 @@ export class InternalUrlFilesystem {
 				sourcePath: resource.sourcePath,
 			};
 		}
-		// SSH edit resolution retains the BOM for write-back; virtual consumers
-		// see the same BOM-free text as read, including first-line search anchors.
-		const content = target.scheme === "ssh" ? stripBom(resource.content).text : resource.content;
-		return { kind: "virtual", url, spec, directory: false, bytes: Buffer.from(content, "utf-8") };
+		return { kind: "virtual", url, spec, directory: false, bytes: Buffer.from(resource.content, "utf-8") };
 	}
 
 	#enumerated(scheme: string): Promise<Map<string, string>> {

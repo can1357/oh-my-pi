@@ -255,6 +255,9 @@ impl FileCache {
 		});
 		let is_remote = remote_content.is_some();
 		let current = if let Some(content) = &remote_content {
+			// Length alone is not a content identity: provide() must evict the
+			// target's cached reads, and forget_answers() must clear all reads
+			// before apply, including when new host text has the same length.
 			Stamp { mtime: None, len: content.len() as u64, special_kind: None }
 		} else if let Some(current) = stamp(&resolved.absolute) {
 			current

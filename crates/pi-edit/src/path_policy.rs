@@ -33,6 +33,9 @@ pub struct UrlResolution {
 	/// Full text supplied by the host for a remote file. `absolute` is then
 	/// an opaque resource key, never a local filesystem path.
 	pub content:       Option<String>,
+	/// The host defers resolution until execution approval. Preview passes
+	/// omit this target without presenting it as a failed edit.
+	pub deferred:      bool,
 	/// Model-facing refusal (read-only scheme, immutable, disabled…); wins
 	/// over `absolute`.
 	pub error:         Option<String>,
@@ -94,6 +97,9 @@ impl PathPolicy {
 				let resolution = urls
 					.get(url.as_ref())
 					.ok_or_else(|| EditError::UnresolvedUrl(url.as_ref().to_owned()))?;
+				if resolution.deferred {
+					return Err(EditError::DeferredUrl(url.into_owned()));
+				}
 				if let Some(error) = &resolution.error {
 					return Err(EditError::apply(error.clone()));
 				}
@@ -686,7 +692,13 @@ mod tests {
 	}
 
 	fn answer(absolute: Option<PathBuf>, error: Option<&str>, plan_writable: bool) -> UrlResolution {
-		UrlResolution { absolute, content: None, error: error.map(str::to_owned), plan_writable }
+		UrlResolution {
+			absolute,
+			content: None,
+			deferred: false,
+			error: error.map(str::to_owned),
+			plan_writable,
+		}
 	}
 
 	#[test]

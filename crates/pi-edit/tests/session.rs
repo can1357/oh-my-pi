@@ -27,6 +27,7 @@ fn remote_answer(url: &str, content: &str) -> UrlResolution {
 	UrlResolution {
 		absolute:      Some(url.into()),
 		content:       Some(content.into()),
+		deferred:      false,
 		error:         None,
 		plan_writable: false,
 	}
@@ -668,6 +669,7 @@ async fn internal_url_targets_wait_for_host_answers() {
 	session.provide("local://plan.md".into(), UrlResolution {
 		absolute:      Some(backing.clone()),
 		content:       None,
+		deferred:      false,
 		error:         None,
 		plan_writable: true,
 	});
@@ -687,6 +689,7 @@ async fn internal_url_targets_wait_for_host_answers() {
 	session.provide("local://plan.md".into(), UrlResolution {
 		absolute:      Some(backing.clone()),
 		content:       None,
+		deferred:      false,
 		error:         None,
 		plan_writable: true,
 	});
@@ -711,6 +714,7 @@ async fn apply_never_reuses_url_answers_given_to_previews() {
 	let answer = |absolute: &std::path::Path| UrlResolution {
 		absolute:      Some(absolute.to_owned()),
 		content:       None,
+		deferred:      false,
 		error:         None,
 		plan_writable: false,
 	};
@@ -800,6 +804,7 @@ async fn begin_apply_url_targets_cover_every_url_before_the_first_stage() {
 			session.provide(url.clone(), UrlResolution {
 				absolute:      Some(sandbox.path().join(name)),
 				content:       None,
+				deferred:      false,
 				error:         None,
 				plan_writable: false,
 			});

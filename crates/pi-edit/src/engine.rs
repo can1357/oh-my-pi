@@ -171,6 +171,8 @@ pub struct PreviewFile {
 	pub first_changed_line: Option<u32>,
 	/// Model-facing error text; mutually exclusive with `diff`.
 	pub error:              Option<String>,
+	/// Host resolution awaits execution approval; never publish as an error.
+	pub deferred:           bool,
 	pub op:                 Option<FileOp>,
 	pub rename:             Option<String>,
 }

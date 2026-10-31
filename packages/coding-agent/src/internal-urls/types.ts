@@ -74,7 +74,7 @@ export interface SchemeWritePolicy {
 	 * - `file`: tools (`write`, `edit`, `ast_edit`) write the file {@link ProtocolHandler.locate}
 	 *   returns with `{ create: true }`; the handler has no `write` hook.
 	 * - `handler`: {@link ProtocolHandler.write} performs it (messages, stdin, settings, remote
-	 *   hosts, devices); file-editing tools refuse the URL even when it locates a backing file.
+	 *   hosts, devices); `edit` requires `editVia: "content"`, and other file-editing tools refuse the URL.
 	 */
 	via: "file" | "handler";
 	/**
@@ -106,6 +106,8 @@ export interface SchemeWritePolicy {
 export interface SchemeSpec {
 	backing: SchemeBacking;
 	selectors: SchemeSelectors;
+	/** Edit full resolved text in memory and persist existing-file updates through the text handler, without a local backing file. */
+	editVia?: "content";
 	/** A trailing `:N` with no path after the authority is a port, not a selector (ssh://host:2222). */
 	portAuthority?: boolean;
 	/** The authority is the first path segment under one root (local://a/b), so a glob may start there; other schemes' authority is an id. */
@@ -168,6 +170,8 @@ export interface InternalResource {
 	url: string;
 	/** Resolved text content */
 	content: string;
+	/** The source text had a leading UTF-8 BOM, omitted from `content`; content edits restore it when persisting. */
+	bom?: boolean;
 	/** MIME type: text/markdown, application/json, or text/plain */
 	contentType: "text/markdown" | "application/json" | "text/plain";
 	/** Content size in bytes */
@@ -340,7 +344,7 @@ export interface WriteContext {
 	cwd?: string;
 	/** Caller's abort signal. */
 	signal?: AbortSignal;
-	/** SSH edits require an existing regular file rather than creating a file or replacing a symlink. */
+	/** Content edits require an existing regular file rather than creating a file or replacing a symlink. */
 	requireRegularFile?: boolean;
 	/** Calling session's `local://` root mapping — see {@link ResolveContext.localProtocolOptions}. */
 	localProtocolOptions?: LocalProtocolOptions;

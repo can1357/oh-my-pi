@@ -212,6 +212,7 @@ fn preview_section(
 	})();
 	if let Err(error) = outcome {
 		result.diff = None;
+		result.deferred = error.is_deferred();
 		result.error = Some(error.to_string());
 	}
 	result

@@ -8,6 +8,7 @@ import * as capability from "../../src/capability";
 import { Settings } from "../../src/config/settings";
 import { EditTool, getEditStore } from "../../src/edit";
 import * as autoRepair from "../../src/edit/auto-repair";
+import { InternalUrlRouter } from "../../src/internal-urls/router";
 import { InternalUrlFilesystem } from "../../src/internal-urls/url-filesystem";
 import { createLspWritethrough, flushLspWritethroughBatch } from "../../src/lsp";
 import * as lspConfig from "../../src/lsp/config";
@@ -28,7 +29,7 @@ function textOf(result: { content: Array<{ type: string; text?: string }> }): st
 }
 
 function headerOf(result: { content: Array<{ type: string; text?: string }> }): string {
-	const header = textOf(result).match(/^\[ssh:\/\/[^\n]+#[0-9A-Fa-f]{4}\]/m)?.[0];
+	const header = textOf(result).match(/^\[[a-z][a-z0-9+.-]*:\/\/[^\n]+#[0-9A-Fa-f]{4}\]/m)?.[0];
 	expect(header).toBeDefined();
 	return header!;
 }
@@ -57,6 +58,48 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe("SSH read/edit snapshots (#12125)", () => {
+	it("edits a declared content-backed scheme without an SSH-specific route", async () => {
+		remoteText = Array.from({ length: 80 }, (_, i) => `line ${i + 1}`).join("\n") + "\n";
+		const original = remoteText;
+		const router = InternalUrlRouter.instance();
+		const url = "testremote://account/notes.txt";
+		const resolve = vi.fn(async () => ({ url, content: remoteText, contentType: "text/plain" as const }));
+		const write = vi.fn(async (_url: unknown, content: string) => {
+			remoteText = content;
+		});
+		router.register({
+			scheme: "testremote",
+			spec: {
+				backing: "remote",
+				selectors: "lines",
+				immutable: false,
+				editVia: "content",
+				write: { via: "handler", payload: "text", scope: "workspace", tier: () => "exec" },
+			},
+			resolve,
+			write,
+		});
+		try {
+			const read = new ReadTool(session);
+			const before = await read.execute("read-other-scheme", { path: `${url}:10-10,60-60` });
+			const header = headerOf(before);
+			const edit = new EditTool(session, "hashline");
+			const params = { input: `${header}\nPUT 40.=40:\n+BETA` };
+			const unseen = await edit.execute("unseen-other-scheme", params);
+			expect(unseen.isError).toBe(true);
+			expect(remoteText).toBe(original);
+			const raw = await read.execute("raw-other-scheme", { path: `${url}:raw:40-40` });
+			expect(textOf(raw)).toBe("line 40");
+			const edited = await edit.execute("edit-other-scheme", params);
+			expect(edited.isError, textOf(edited)).not.toBe(true);
+			expect(remoteText).toBe(original.replace("line 40\n", "BETA\n"));
+			expect(fileTransfer.readRemoteFile).not.toHaveBeenCalled();
+			expect(fileTransfer.writeRemoteFile).not.toHaveBeenCalled();
+		} finally {
+			router.unregister("testremote");
+		}
+	});
+
 	it("edits the selected SSH line, preserving external changes and refreshing its snapshot", async () => {
 		const url = "ssh://user@[::1]:2222/tmp/edit%20repro%23draft%3A2.txt";
 		const read = new ReadTool(session);
@@ -149,6 +192,9 @@ describe("SSH read/edit snapshots (#12125)", () => {
 
 	it("keeps BOM out of read/search/virtual views and preserves BOM/CRLF on a first-line edit", async () => {
 		remoteText = "\uFEFFalpha\r\nbeta\r\n";
+		const resource = await InternalUrlRouter.instance().resolve(URL, { cwd: session.cwd });
+		expect(resource.content).toBe("alpha\r\nbeta\r\n");
+		expect(resource.bom).toBe(true);
 		const filesystem = new InternalUrlFilesystem({ context: { cwd: session.cwd }, tier: "exec" });
 		const opened = await filesystem.handle({
 			op: ShellFsOp.Open,
@@ -184,18 +230,36 @@ describe("SSH read/edit snapshots (#12125)", () => {
 
 	it.each([
 		["replace", "apply"],
+		["patch", "apply"],
+		["apply_patch", "apply"],
+		["sloppy", "apply"],
 		["hashline", "apply"],
 		["hashline", "cancel"],
 	] as const)("keeps %s previews offline before %s", async (mode, action) => {
+		const localDir = mode === "apply_patch" ? TempDir.createSync("@pi-ssh-preview-batch-") : undefined;
+		const localPath = localDir ? path.join(localDir.path(), "local.txt") : undefined;
+		if (localPath) await Bun.write(localPath, "before\n");
 		const tool = new EditTool(session, mode);
 		const header =
 			mode === "hashline" ? `[${URL}#${getEditStore(session).recordSnapshot(URL, remoteText, [1, 2, 3])}]` : "";
 		const params =
 			mode === "replace"
 				? { path: URL, old_string: "beta", new_string: "BETA" }
-				: {
-						input: `${header}\nPUT 2.=2:\n+BETA`,
-					};
+				: mode === "hashline"
+					? {
+							input: `${header}\nPUT 2.=2:\n+BETA`,
+						}
+					: mode === "patch"
+						? {
+								path: URL,
+								edits: [{ op: "update" as const, diff: "@@ -2,1 +2,1 @@\n-beta\n+BETA" }],
+							}
+						: {
+								input:
+									mode === "apply_patch"
+										? `*** Begin Patch\n*** Update File: ${URL}\n@@\n-beta\n+BETA\n*** Update File: ${localPath}\n@@\n-before\n+after\n*** End Patch`
+										: `*** Edit File: ${URL}\n*** Find\nbeta\n*** Replace\nBETA\n`,
+							};
 		const preview = Promise.withResolvers<void>();
 		const previewErrors: string[] = [];
 		const stream = tool.openArgStream({
@@ -224,6 +288,7 @@ describe("SSH read/edit snapshots (#12125)", () => {
 			const edited = await tool.execute("stream", params, signal);
 			expect(edited.isError, textOf(edited)).not.toBe(true);
 			expect(remoteText).toBe("delta\nBETA\ngamma\n");
+			if (localPath) expect(await Bun.file(localPath).text()).toBe("after\n");
 			expect(readRemote.mock.calls.at(-1)?.[2].signal).toBe(signal);
 			expect(writeRemote.mock.calls[0]?.[3].signal).toBe(signal);
 			if (mode === "hashline") {
@@ -233,6 +298,7 @@ describe("SSH read/edit snapshots (#12125)", () => {
 			}
 		} finally {
 			stream.cancel();
+			localDir?.removeSync();
 		}
 	});
 
@@ -319,6 +385,39 @@ describe("SSH read/edit snapshots (#12125)", () => {
 		expect(edited.isError).not.toBe(true);
 		expect(remoteText).toBe('{"cells": [], "nbformat": 4, "nbformat_minor": 5}\n');
 	});
+
+	it.each(["remote", "local"] as const)(
+		"preserves the %s notebook view across nonadjacent updates",
+		async location => {
+			await using dir = await TempDir.create("@omp-notebook-batch-");
+			session.cwd = dir.path();
+			const notebook = {
+				cells: [{ cell_type: "markdown", metadata: { keep: true }, source: ["alpha\n"] }],
+				metadata: {},
+				nbformat: 4,
+				nbformat_minor: 5,
+			};
+			const original = JSON.stringify(notebook);
+			const notebookPath = location === "remote" ? URL.replace(".txt", ".ipynb") : dir.join("notebook.ipynb");
+			if (location === "remote") remoteText = `${original}\n`;
+			else await Bun.write(notebookPath, `${original}\n`);
+			const otherPath = dir.join("other.txt");
+			await Bun.write(otherPath, "before\n");
+			const before = location === "remote" ? original : "alpha";
+			const middle = before.replace("alpha", "beta");
+			const after = before.replace("alpha", "gamma");
+			const result = await new EditTool(session, "apply_patch").execute("notebook-batch", {
+				input: `*** Begin Patch\n*** Update File: ${notebookPath}\n@@\n-${before}\n+${middle}\n*** Update File: ${otherPath}\n@@\n-before\n+after\n*** Update File: ${notebookPath}\n@@\n-${middle}\n+${after}\n*** End Patch`,
+			});
+			expect(result.isError, textOf(result)).not.toBe(true);
+			const updated: typeof notebook = JSON.parse(
+				location === "remote" ? remoteText : await Bun.file(notebookPath).text(),
+			);
+			expect(updated.cells[0]?.source).toEqual(["gamma\n"]);
+			expect(updated.cells[0]?.metadata).toEqual({ keep: true });
+			expect(await Bun.file(otherPath).text()).toBe("after\n");
+		},
+	);
 
 	it("keeps directory listings uneditable and without a snapshot header", async () => {
 		vi.spyOn(fileTransfer, "statRemotePath").mockResolvedValue("directory");

@@ -35,6 +35,11 @@ afterEach(() => {
 describe("InternalUrlRouter.register invariants", () => {
 	const locate = async (): Promise<string | null> => "/tmp/fixture";
 
+	it("refuses content editing without a handler that can persist text", () => {
+		const handler = fixture({ backing: "remote", selectors: "lines", immutable: false, editVia: "content" });
+		expect(() => InternalUrlRouter.instance().register(handler)).toThrow("requires a mutable text handler write");
+	});
+
 	it("refuses a write() hook without spec.write", () => {
 		const handler = fixture({ backing: "virtual", selectors: "lines", immutable: false }, { write: async () => {} });
 		expect(() => InternalUrlRouter.instance().register(handler)).toThrow(

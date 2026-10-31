@@ -97,6 +97,7 @@ impl ModeEngine for SloppyEngine {
 						return Some(PreviewFile {
 							display: section.path,
 							error: Some(error.to_string()),
+							deferred: error.is_deferred(),
 							..PreviewFile::default()
 						});
 					},

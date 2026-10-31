@@ -23,6 +23,7 @@ import { type ShellFsDirEntry, ShellFsFileType } from "@oh-my-pi/pi-natives";
 import { $which } from "@oh-my-pi/pi-utils";
 import * as capability from "../capability";
 import { type SSHHost, sshCapability } from "../capability/ssh";
+import { stripBom } from "../edit/normalize";
 import type { SSHConnectionTarget } from "../ssh/connection-manager";
 import {
 	listRemoteDir,
@@ -51,7 +52,7 @@ const SSH_TEXT_MAX_BYTES = 1024 * 1024;
 function decodeUtf8Text(bytes: Uint8Array): string | null {
 	if (bytes.indexOf(0) !== -1) return null;
 	try {
-		// Keep the BOM in the backing text so targeted edits preserve the file's bytes.
+		// Detect the original BOM before exposing normalized text plus encoding metadata.
 		return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
 	} catch {
 		return null;
@@ -259,6 +260,7 @@ export class SshProtocolHandler implements ProtocolHandler {
 	readonly spec: SchemeSpec = {
 		backing: "remote",
 		selectors: "lines",
+		editVia: "content",
 		portAuthority: true,
 		immutable: false,
 		readTier: "exec",
@@ -321,9 +323,11 @@ export class SshProtocolHandler implements ProtocolHandler {
 		}
 		// No `sourcePath`: keeps search on the virtual-resource path so the
 		// displayed/searched resource stays `ssh://…` instead of a temp path.
+		const normalized = stripBom(content);
 		return {
 			url: url.href,
-			content,
+			content: normalized.text,
+			bom: normalized.bom !== "",
 			contentType: contentTypeForPath(remotePath),
 			size: fileResult.bytes.length,
 		};
