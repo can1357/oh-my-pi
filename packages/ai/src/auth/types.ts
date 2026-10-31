@@ -474,6 +474,13 @@ export interface ModelUsageHealthOptions {
 	baseUrl?: string;
 	reserveFraction: number;
 	signal?: AbortSignal;
+	/**
+	 * Evidence cutoff (epoch ms) for usage reports. When set, a report counts
+	 * only if `fetchedAt` is finite and strictly greater than this value;
+	 * older, equal, or non-finite evidence reads as unknown and cannot heal
+	 * blocks — existing credential blocks stay authoritative.
+	 */
+	usageAfter?: number;
 }
 
 /** Options controlling model, base URL, cancellation, and forced OAuth refresh in KeysApi.get. */
@@ -1231,6 +1238,14 @@ export interface SessionsApi {
 	 * {@link restrict} list names.
 	 */
 	permits(provider: string, sessionId: string, credentialId: number): boolean;
+	/**
+	 * Whether the session's sticky credential for `provider` is an explicit user
+	 * pin (set by {@link pin} without `restoredAtMs`). Automatic warm affinities
+	 * return `false`; a session with no sticky credential also returns `false`.
+	 * Usage-aware routing must only release automatic affinities: an explicit
+	 * pin is the user's durable account choice and is never evicted for reserve.
+	 */
+	isExplicit(provider: string, sessionId: string): boolean;
 	/**
 	 * Release a session's sticky credential so its next {@link getApiKey} call
 	 * re-runs native pool ranking. This never blocks or penalizes the released

@@ -151,6 +151,8 @@ import { matchModelCompactionThreshold } from "./compaction-threshold";
 // requests; the pi-ai provider resolves it just-in-time per request.
 setCodexAttestationProvider(generateCodexAttestation);
 
+/** Reject older evidence even if a jittered cache entry is still valid. */
+const RECOVERY_EVIDENCE_MAX_AGE_MS = 5 * 60_000;
 /** One built-in discovery pass rewriting more payload rows than this is debug-logged. */
 const MODEL_CACHE_REWRITE_LOG_THRESHOLD = 5;
 /** `scheme://user:pass@` in free text (e.g. a fetch error echoing the request URL). */
@@ -295,9 +297,17 @@ export type ResolvedRequestAuth =
 	  }
 	| { ok: false; error: string };
 
-/**
- * Model registry - loads and manages models, resolves API keys via AuthStorage.
- */
+interface SuppressedSelectorRecord {
+	untilMs: number;
+	nonQuotaUntilMs: number;
+	usageLimitFailureTime?: number;
+	/** Per-session quota-failure times: a sibling session's failure must not ratchet this session's recovery cutoff. */
+	usageLimitFailureTimeBySession?: Map<string, number>;
+	/** Per-session cooldown deadlines: a sibling session's longer quota cooldown must not extend this session's own. */
+	untilMsBySession?: Map<string, number>;
+}
+
+/** Loads models and resolves their credentials through AuthStorage. */
 export class ModelRegistry {
 	#models: Model<Api>[] = [];
 	#unprojectedModels: Model<Api>[] = [];
@@ -368,7 +378,7 @@ export class ModelRegistry {
 	#registeredProviderSources: Set<string> = new Set();
 	#providerDiscoveryStates: Map<string, ProviderDiscoveryState> = new Map();
 	#cacheDbPath?: string;
-	#suppressedSelectors: Map<string, number> = new Map();
+	#suppressedSelectors: Map<string, SuppressedSelectorRecord> = new Map();
 	#backgroundRefresh?: Promise<void>;
 	/** Whether the first background discovery has settled; latches once so a late-armed waiter still resolves. */
 	#initialRefreshSettled = false;
@@ -3798,31 +3808,131 @@ export class ModelRegistry {
 		}
 	}
 
-	/**
-	 * Suppress a specific model selector (e.g., "provider/id") until a specific timestamp.
-	 */
-	suppressSelector(selector: string, untilMs: number): void {
-		this.#suppressedSelectors.set(
-			normalizeSuppressedSelector(selector, (provider, id) => this.find(provider, id) !== undefined),
-			untilMs,
+	/** Quota failures may recover early from usage evidence newer than `usageLimitFailureTime`. */
+	suppressSelector(selector: string, untilMs: number, usageLimitFailureTime?: number, sessionId?: string): void {
+		const normalizedSelector = normalizeSuppressedSelector(
+			selector,
+			(provider, id) => this.find(provider, id) !== undefined,
 		);
+		const previous = this.#activeSuppressedRecord(normalizedSelector)?.record;
+		const usageLimitFailureTimeBySession =
+			usageLimitFailureTime === undefined || sessionId === undefined
+				? previous?.usageLimitFailureTimeBySession
+				: new Map(previous?.usageLimitFailureTimeBySession).set(
+						sessionId,
+						Math.max(
+							previous?.usageLimitFailureTimeBySession?.get(sessionId) ?? usageLimitFailureTime,
+							usageLimitFailureTime,
+						),
+					);
+		const untilMsBySession =
+			sessionId === undefined
+				? previous?.untilMsBySession
+				: new Map(previous?.untilMsBySession).set(
+						sessionId,
+						Math.max(previous?.untilMsBySession?.get(sessionId) ?? untilMs, untilMs),
+					);
+		this.#suppressedSelectors.set(normalizedSelector, {
+			untilMs: Math.max(previous?.untilMs ?? 0, untilMs),
+			nonQuotaUntilMs: Math.max(previous?.nonQuotaUntilMs ?? 0, usageLimitFailureTime === undefined ? untilMs : 0),
+			usageLimitFailureTime:
+				usageLimitFailureTime === undefined
+					? previous?.usageLimitFailureTime
+					: Math.max(previous?.usageLimitFailureTime ?? usageLimitFailureTime, usageLimitFailureTime),
+			usageLimitFailureTimeBySession,
+			untilMsBySession,
+		});
+	}
+
+	/** Active, unexpired suppression record for `selector`, deleting an expired entry. */
+	#activeSuppressedRecord(selector: string): { selector: string; record: SuppressedSelectorRecord } | undefined {
+		const normalizedSelector = normalizeSuppressedSelector(
+			selector,
+			(provider, id) => this.find(provider, id) !== undefined,
+		);
+		const record = this.#suppressedSelectors.get(normalizedSelector);
+		if (!record) return undefined;
+		if (record.untilMs <= Date.now()) {
+			this.#suppressedSelectors.delete(normalizedSelector);
+			return undefined;
+		}
+		return { selector: normalizedSelector, record };
 	}
 
 	/**
 	 * Check if a model selector is currently suppressed due to rate limits.
 	 */
 	isSelectorSuppressed(selector: string): boolean {
-		const normalizedSelector = normalizeSuppressedSelector(
-			selector,
-			(provider, id) => this.find(provider, id) !== undefined,
-		);
-		const suppressedUntil = this.#suppressedSelectors.get(normalizedSelector);
-		if (!suppressedUntil) return false;
-		if (suppressedUntil <= Date.now()) {
-			this.#suppressedSelectors.delete(normalizedSelector);
+		return this.#activeSuppressedRecord(selector) !== undefined;
+	}
+
+	/** Bypasses quota cooldowns for this session only when fresh usage proves recovery. */
+	async isSelectorSuppressedWithRecovery(
+		selector: string,
+		options: { sessionId?: string; reserveFraction: number; signal?: AbortSignal },
+	): Promise<boolean> {
+		const active = this.#activeSuppressedRecord(selector);
+		if (!active) return false;
+		const { selector: normalizedSelector, record } = active;
+		// A session whose own cooldown deadline has passed is no longer suppressed
+		// for that session, even while a sibling session's longer cooldown keeps
+		// the selector-wide record active.
+		const sessionUntilMs =
+			options.sessionId !== undefined ? record.untilMsBySession?.get(options.sessionId) : undefined;
+		if (sessionUntilMs !== undefined && sessionUntilMs <= Date.now()) return false;
+		const failureTime =
+			(options.sessionId !== undefined
+				? record.usageLimitFailureTimeBySession?.get(options.sessionId)
+				: undefined) ?? record.usageLimitFailureTime;
+		if (failureTime === undefined || record.nonQuotaUntilMs > Date.now()) return true;
+		const separatorIndex = normalizedSelector.indexOf("/");
+		if (separatorIndex <= 0) return true;
+		const provider = normalizedSelector.slice(0, separatorIndex);
+		const modelId = normalizedSelector.slice(separatorIndex + 1);
+		const model = this.find(provider, modelId);
+		if (!model) return true;
+		try {
+			const health = await this.authStorage.health.model(provider, {
+				modelId,
+				baseUrl: model.baseUrl,
+				sessionId: options.sessionId,
+				reserveFraction: options.reserveFraction,
+				usageAfter: Math.max(failureTime, Date.now() - RECOVERY_EVIDENCE_MAX_AGE_MS),
+				signal: options.signal,
+			});
+			if (options.signal?.aborted) return true;
+			if (health.state !== "healthy") {
+				// A short cooldown can expire while the probe is in flight; revalidate
+				// (also covering a concurrent replacement) before keeping the suppression.
+				return this.#activeSuppressedRecord(normalizedSelector) !== undefined;
+			}
+			const replacement = this.#activeSuppressedRecord(normalizedSelector);
+			if (replacement !== undefined && replacement.record !== record) return true;
+			// Fresh healthy evidence recovered this selector. If the session's pinned
+			// account only recovered into reserve while a sibling is healthy, release
+			// the warm pin (as the usage preflight does) so the restored request uses
+			// the healthy sibling instead of consuming the protected reserve.
+			const selectedAccount = health.accounts.find(account => account.selected);
+			if (
+				options.sessionId &&
+				// An explicit pin is the user's durable account choice: release only
+				// automatic warm affinities here, never a user-set pin.
+				!this.authStorage.sessions.isExplicit(provider, options.sessionId) &&
+				selectedAccount?.state === "reserve" &&
+				health.accounts.some(account => account.state === "healthy")
+			) {
+				this.authStorage.sessions.release(provider, options.sessionId);
+			}
 			return false;
+		} catch (error) {
+			if (options.signal?.aborted) return true;
+			logger.debug("Quota-cooldown usage recovery check failed; keeping suppression", {
+				provider,
+				model: modelId,
+				error: String(error),
+			});
+			return true;
 		}
-		return true;
 	}
 
 	/**

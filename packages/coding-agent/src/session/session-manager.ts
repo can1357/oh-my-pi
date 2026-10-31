@@ -3831,6 +3831,15 @@ export class SessionManager {
 		return this.#index.leafId();
 	}
 
+	/**
+	 * Rewinds the leaf to a previously captured entry id, detaching entries
+	 * appended after it. Used by retry-fallback rollback so an aborted apply
+	 * does not leave its ephemeral model change as the session leaf.
+	 */
+	rewindLeafTo(id: string | null): void {
+		this.#setLeaf(id !== null && this.#index.has(id) ? id : null);
+	}
+
 	getLeafEntry(): SessionEntry | undefined {
 		return this.#index.leafEntry();
 	}

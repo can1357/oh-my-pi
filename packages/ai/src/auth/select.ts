@@ -903,8 +903,13 @@ export class CredentialSelector {
 							return;
 						}
 					} else {
-						recordTransientRefreshFailure(error);
-						if (credentialId !== undefined) {
+						// A caller cancellation (or an abort-raced refresh) is not evidence
+						// about the credential: it must not write a transient-failure auth
+						// block, or a cancelled preflight would park a healthy account for
+						// the full backoff window.
+						const callerAborted = options?.signal?.aborted || error instanceof AIError.AbortError;
+						if (!callerAborted) recordTransientRefreshFailure(error);
+						if (!callerAborted && credentialId !== undefined) {
 							const latestIndex = this.#deps.pool
 								.entries(provider)
 								.findIndex(entry => entry.id === credentialId);
@@ -1234,6 +1239,9 @@ export class CredentialSelector {
 				if (this.#deps.pool.credentials(provider).some(credential => credential.type === "oauth")) {
 					if (allowFallback) return this.resolveOAuth(provider, sessionId, options);
 				}
+			} else if (options?.signal?.aborted || error instanceof AIError.AbortError) {
+				// A caller cancellation is not a transient refresh failure: aborting a
+				// refresh must not block the account or notify transient-failure hooks.
 			} else {
 				usageOptions.onTransientRefreshFailure?.(error);
 				// Block temporarily for transient failures (5 minutes)

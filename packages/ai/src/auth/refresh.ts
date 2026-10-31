@@ -666,6 +666,15 @@ export class OAuthRefresher {
 						})
 					: undefined;
 			const refreshAbort = new AbortController();
+			// Propagate a caller abort into the exchange: ESC or request cancellation
+			// must abort the in-flight token request itself (surfacing AbortError),
+			// not merely stop this caller from waiting while the request runs on.
+			const forwardCallerAbort = () =>
+				refreshAbort.abort(new AIError.AbortError("OAuth token refresh aborted by caller"));
+			if (options.signal) {
+				if (options.signal.aborted) forwardCallerAbort();
+				else options.signal.addEventListener("abort", forwardCallerAbort, { once: true });
+			}
 			const backstopReached = Promise.withResolvers<never>();
 			const backstop = setTimeout(
 				() => {
@@ -755,6 +764,7 @@ export class OAuthRefresher {
 					},
 				};
 			} finally {
+				options.signal?.removeEventListener("abort", forwardCallerAbort);
 				leaseRenewalStop.abort();
 				await leaseRenewal;
 				clearTimeout(backstop);
@@ -914,7 +924,18 @@ export class OAuthRefresher {
 		if (credentialId !== undefined) {
 			const existing = this.#oauthCredentialRefreshInFlight.get(credentialId);
 			if (existing) {
-				const joined = await raceSignal(existing, signal, "credential refresh aborted");
+				let joined: OAuthCredentials;
+				try {
+					joined = await raceSignal(existing, signal, "credential refresh aborted");
+				} catch (error) {
+					if (!(error instanceof AIError.AbortError) || signal?.aborted) throw error;
+					// The joined refresh died with its owner's cancellation. This caller
+					// did not leave, so it must not inherit the peer's abort: wait for
+					// the dead attempt to settle out of the single-flight, then refresh
+					// again under this caller's own signal.
+					await existing.catch(() => {});
+					return this.#refreshSingleFlight(provider, credential, credentialId, signal, reason, rejectedAccess);
+				}
 				// A refresh started for another request may adopt the very token this
 				// request was refused with; refresh again instead of returning it.
 				if (rejectedAccess === undefined || joined.access !== rejectedAccess) return joined;

@@ -2644,9 +2644,10 @@ export class AgentSession implements SettingsScope {
 				this.#recovery.retryFallbackChainKeys(selector, model, options),
 			findRetryFallbackCandidates: (role, selector, model) =>
 				this.#recovery.findRetryFallbackCandidates(role, selector, model),
-			isRetryFallbackSelectorSuppressed: selector => this.#recovery.isRetryFallbackSelectorSuppressed(selector),
-			noteRetryFallbackCooldown: (selector, retryAfterMs, errorMessage) =>
-				this.#recovery.noteRetryFallbackCooldown(selector, retryAfterMs, errorMessage),
+			isRetryFallbackSelectorSuppressed: (selector, signal, sessionIdOverride) =>
+				this.#recovery.isRetryFallbackSelectorSuppressed(selector, signal, sessionIdOverride),
+			noteRetryFallbackCooldown: (selector, retryAfterMs, errorMessage, usageLimitFailureTime) =>
+				this.#recovery.noteRetryFallbackCooldown(selector, retryAfterMs, errorMessage, usageLimitFailureTime),
 			createCodexCompactionContext: createMaintenanceCodexCompactionContext,
 			sessionId: () => this.sessionId,
 			restrictOAuthAccounts: providerSessionId => this.#accountPoolScope?.restrict(providerSessionId),
@@ -5290,7 +5291,7 @@ export class AgentSession implements SettingsScope {
 			// for retries; the primary can still be restored on the next user
 			// prompt or after the saga terminates.
 			const isAutomaticRetry = request.options.source === "automatic-retry";
-			const reverted = isAutomaticRetry ? false : await this.#recovery.maybeRestoreRetryFallbackPrimary();
+			const reverted = isAutomaticRetry ? false : await this.#recovery.maybeRestoreRetryFallbackPrimary(signal);
 			if (signal.aborted || this.#isDisposed || this.#abortInProgress) {
 				return { status: "skipped", reason: "post-restore-unavailable" };
 			}
@@ -8798,13 +8799,17 @@ export class AgentSession implements SettingsScope {
 		this.#promptSetupAbortController = setupAbort;
 		try {
 			options?.onPromptAdmitted?.();
-			await this.#recovery.maybeRestoreRetryFallbackPrimary();
+			await this.#recovery.maybeRestoreRetryFallbackPrimary(setupAbort.signal);
 			// Auto-prewalk: return from the previous task's handoff before the usage preflight checks the model,
 			// then judge this task alongside the rest of setup; the decision is applied right before dispatch.
 			const autoPrewalkTask = this.#isAutoPrewalkTask(message);
 			if (autoPrewalkTask) await this.#prewalk.beginAutoTask();
 			const autoPrewalk = autoPrewalkTask ? this.#prewalk.classifyAuto(expandedText, setupAbort.signal) : undefined;
-			if (!(await logger.time("prompt:usagePreflight", () => this.#runUsageAwarePreflightForNextModelCall())))
+			if (
+				!(await logger.time("prompt:usagePreflight", () =>
+					this.#runUsageAwarePreflightForNextModelCall(setupAbort.signal),
+				))
+			)
 				return false;
 			// A capped session hands the prompt back rather than start a run whose first request it refuses.
 			if (this.#refuseOverCostCap()) return false;

@@ -73,6 +73,8 @@ function createHost(
 		} as never,
 		sessionManager: {
 			getLastModelChangeRole: () => options.lastModelChangeRole,
+			getLeafId: () => null,
+			rewindLeafTo: () => {},
 			getBranch: () => [],
 			getBranchView: () => [],
 			getSessionId: () => "test-session",
@@ -147,6 +149,8 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		host.model = () => activeModel;
 		host.sessionManager = {
 			appendModelChange: (selector: string) => modelChanges.push(selector),
+			getLeafId: () => null,
+			rewindLeafTo: () => {},
 			getSessionId: () => "replay-unsafe-session",
 		} as never;
 		host.setModelWithProviderSessionReset = async nextModel => {
@@ -198,6 +202,8 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		host.model = () => activeModel;
 		host.sessionManager = {
 			appendModelChange: (selector: string) => modelChanges.push(selector),
+			getLeafId: () => null,
+			rewindLeafTo: () => {},
 			getSessionId: () => "replay-unsafe-session",
 		} as never;
 		host.setThinkingLevel = level => thinkingChanges.push(level);
@@ -235,6 +241,128 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		expect(thinkingChanges).toEqual([]);
 		expect(emittedEvents).toEqual([]);
 	});
+	it("rolls back a committed fallback when cancellation lands during post-swap synchronization", async () => {
+		const fallback = getBundledModel("openai", "gpt-4o-mini");
+		if (!fallback) throw new Error("Expected bundled fallback model");
+		let activeModel = model;
+		const fallbackApplied = Promise.withResolvers<void>();
+		const releaseSync = Promise.withResolvers<void>();
+		const modelChanges: string[] = [];
+		const retractedLeaf = { value: null as string | null };
+		const emittedEvents: string[] = [];
+		const thinkingChanges: unknown[] = [];
+		const host = createHost(model, modelRegistry);
+		host.model = () => activeModel;
+		host.sessionManager = {
+			appendModelChange: (selector: string) => modelChanges.push(selector),
+			getLeafId: () => (modelChanges.length > 0 ? "leaf-after-append" : "leaf-before-append"),
+			rewindLeafTo: (id: string | null) => {
+				retractedLeaf.value = id;
+			},
+			getSessionId: () => "replay-unsafe-session",
+		} as never;
+		host.setThinkingLevel = level => thinkingChanges.push(level);
+		host.setModelWithProviderSessionReset = async nextModel => {
+			activeModel = nextModel;
+			if (nextModel.provider === fallback.provider && nextModel.id === fallback.id) {
+				fallbackApplied.resolve();
+			}
+		};
+		host.syncAfterModelChange = async () => {
+			await releaseSync.promise;
+		};
+		host.emitSessionEvent = async event => {
+			emittedEvents.push(event.type);
+		};
+		const recovery = new TurnRecovery(host);
+		const controller = new AbortController();
+		const applying = recovery.applyRetryFallbackCandidate(
+			"default",
+			{
+				raw: `${fallback.provider}/${fallback.id}`,
+				provider: fallback.provider,
+				id: fallback.id,
+				thinkingLevel: undefined,
+			},
+			`${model.provider}/${model.id}`,
+			{ pinFallback: true, apiKey: "***", signal: controller.signal },
+		);
+
+		await fallbackApplied.promise;
+		controller.abort();
+		releaseSync.resolve();
+		const committed = await applying;
+
+		expect(committed).toBe(false);
+		expect(activeModel).toBe(model);
+		expect(modelChanges).toEqual([`${fallback.provider}/${fallback.id}`]);
+		expect(retractedLeaf.value).toBe("leaf-before-append");
+		// The apply set the fallback level, the rollback restored the original.
+		expect(thinkingChanges.length).toBe(2);
+		expect(emittedEvents).toEqual([]);
+	});
+
+	it("does not clobber a newer explicit model when cancellation lands during post-swap synchronization", async () => {
+		const fallback = getBundledModel("openai", "gpt-4o-mini");
+		if (!fallback) throw new Error("Expected bundled fallback race model");
+		const selectedModel = { ...fallback, baseUrl: "https://user-selected-route.example" };
+		let activeModel = model;
+		const fallbackApplied = Promise.withResolvers<void>();
+		const releaseSync = Promise.withResolvers<void>();
+		const modelChanges: string[] = [];
+		const retractedLeaf = { value: null as string | null };
+		const emittedEvents: string[] = [];
+		const host = createHost(model, modelRegistry);
+		host.model = () => activeModel;
+		host.sessionManager = {
+			appendModelChange: (selector: string) => modelChanges.push(selector),
+			getLeafId: () => (modelChanges.length > 0 ? "leaf-after-append" : "leaf-before-append"),
+			rewindLeafTo: (id: string | null) => {
+				retractedLeaf.value = id;
+			},
+			getSessionId: () => "replay-unsafe-session",
+		} as never;
+		host.setModelWithProviderSessionReset = async nextModel => {
+			activeModel = nextModel;
+			if (nextModel.provider === fallback.provider && nextModel.id === fallback.id) {
+				fallbackApplied.resolve();
+			}
+		};
+		host.syncAfterModelChange = async () => {
+			await releaseSync.promise;
+		};
+		host.emitSessionEvent = async event => {
+			emittedEvents.push(event.type);
+		};
+		const recovery = new TurnRecovery(host);
+		const controller = new AbortController();
+		const applying = recovery.applyRetryFallbackCandidate(
+			"default",
+			{
+				raw: `${fallback.provider}/${fallback.id}`,
+				provider: fallback.provider,
+				id: fallback.id,
+				thinkingLevel: undefined,
+			},
+			`${model.provider}/${model.id}`,
+			{ pinFallback: true, apiKey: "***", signal: controller.signal },
+		);
+
+		await fallbackApplied.promise;
+		// An explicit model change while the synchronization is pending advances
+		// the fallback generation and takes ownership of the selection.
+		activeModel = selectedModel;
+		(recovery as never as { clearActiveRetryFallback(): void }).clearActiveRetryFallback();
+		controller.abort();
+		releaseSync.resolve();
+		const committed = await applying;
+
+		expect(committed).toBe(false);
+		expect(activeModel).toBe(selectedModel);
+		expect(retractedLeaf.value).toBeNull();
+		expect(emittedEvents).toEqual([]);
+	});
+
 	it("keeps a committed fallback when cancellation arrives during applied-event delivery", async () => {
 		const fallback = getBundledModel("openai", "gpt-4o-mini");
 		if (!fallback) throw new Error("Expected bundled fallback model");
@@ -246,6 +374,8 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		host.model = () => activeModel;
 		host.sessionManager = {
 			appendModelChange: (selector: string) => modelChanges.push(selector),
+			getLeafId: () => null,
+			rewindLeafTo: () => {},
 			getSessionId: () => "replay-unsafe-session",
 		} as never;
 		host.setModelWithProviderSessionReset = async nextModel => {
@@ -1355,6 +1485,32 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		});
 	});
 
+	describe("suppression recovery session scoping", () => {
+		it("threads a session override through to the registry recovery check", async () => {
+			const host = createHost(model, modelRegistry);
+			const recovery = new TurnRecovery(host);
+			const seen: Array<string | undefined> = [];
+			const original = modelRegistry.isSelectorSuppressedWithRecovery.bind(modelRegistry);
+			modelRegistry.isSelectorSuppressedWithRecovery = async (selector, options) => {
+				seen.push(options.sessionId);
+				return await original(selector, options);
+			};
+			try {
+				const selector = {
+					raw: `${model.provider}/${model.id}`,
+					provider: model.provider,
+					id: model.id,
+					thinkingLevel: undefined,
+				};
+				await recovery.isRetryFallbackSelectorSuppressed(selector, undefined, "advisor-session-1");
+				await recovery.isRetryFallbackSelectorSuppressed(selector, undefined);
+			} finally {
+				modelRegistry.isSelectorSuppressedWithRecovery = original;
+			}
+			expect(seen[0]).toBe("advisor-session-1");
+			expect(seen[1]).toBe("test-session");
+		});
+	});
 	describe("reasonless abort carrying only a fallback boundary", () => {
 		// A mid-turn server-side fallback persists a `fallback` boundary block
 		// before the fallback model emits anything. An abort right there leaves

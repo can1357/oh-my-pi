@@ -398,6 +398,11 @@ export class SessionAffinity implements SessionsApi {
 		return inherited;
 	}
 
+	/** Whether the session's current sticky credential is an explicit user pin. */
+	isExplicit(provider: string, sessionId: string): boolean {
+		return this.get(provider, sessionId)?.explicit === true;
+	}
+
 	/**
 	 * Release a session's sticky credential so its next `KeyCascade.get` call
 	 * re-runs native pool ranking. This never blocks or penalizes the released
