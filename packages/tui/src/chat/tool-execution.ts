@@ -377,6 +377,12 @@ export class ToolExecutionComponent extends Container {
 	#args: unknown;
 	#expanded = false;
 	#allocation = Number.POSITIVE_INFINITY;
+	/**
+	 * The next render only sizes the block: the transcript measures a block
+	 * before it decides whether to show it, and a block it then omits never
+	 * reaches the terminal. A measured render is not a paint.
+	 */
+	#measured = false;
 	#presentationFrame: AnimationFrame = { tick: 0, now: 0 };
 	#toolActivityVisible = true;
 	#showImages: boolean;
@@ -1311,9 +1317,24 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	/** Apply the transcript allocator's current viewport reservation. */
-	setTranscriptAllocation(rows: number, frame: AnimationFrame): void {
+	setTranscriptAllocation(rows: number, frame: AnimationFrame, measured = false): void {
 		this.#allocation = Math.max(0, Math.trunc(rows));
 		this.#presentationFrame = frame;
+		this.#measured = measured;
+	}
+
+	/**
+	 * The transcript's measurement of this block became the viewport output, so
+	 * the shape reached the terminal.
+	 *
+	 * A measured render is not a paint, so it deliberately leaves the per-paint
+	 * repaint fact alone. But when the whole live tail fits, the measured rows
+	 * ARE the rows the terminal shows, and the shape the first result has to
+	 * re-anchor is the one the user is looking at. The fact is recomputed here
+	 * exactly as a painted render would compute it.
+	 */
+	notifyMeasuredPaint(): void {
+		this.#firstResultViewportRepaintShapePainted = this.#needsFirstResultViewportRepaintAtRender();
 	}
 
 	setToolActivityVisible(visible: boolean): void {
@@ -1380,6 +1401,11 @@ export class ToolExecutionComponent extends Container {
 
 	override render(width: number): readonly string[] {
 		if (!this.#toolActivityVisible || this.#allocation === 0 || (this.#toolName === "wait" && this.#isBenignSkip())) {
+			// Nothing reaches the terminal on this path, so the per-paint repaint
+			// fact must not survive it: the tail window it recorded is gone, and
+			// the first result must not replay the viewport for a shape the user
+			// never saw.
+			this.#firstResultViewportRepaintShapePainted = false;
 			return [];
 		}
 		let lines = super.render(width);
@@ -1390,10 +1416,25 @@ export class ToolExecutionComponent extends Container {
 			// results, one-line receipts) keep that content instead of an equally
 			// tall but contentless frame.
 			const trimmed = trimBlankEdges(lines);
-			if (trimmed.length > this.#allocation) return this.#renderCompact(width);
+			if (trimmed.length > this.#allocation) {
+				// The compact row is the shape that reaches the terminal, and it
+				// carries no tail window for the first result to re-anchor. The
+				// flag is a per-paint fact, so the compact render has to clear
+				// it: the transcript measures every block with an unlimited
+				// allocation first, and that measurement arms the flag for a
+				// shape that never reaches the screen.
+				this.#firstResultViewportRepaintShapePainted = false;
+				return this.#renderCompact(width);
+			}
 			lines = trimmed;
 		}
-		this.#firstResultViewportRepaintShapePainted = this.#needsFirstResultViewportRepaintAtRender();
+		// The flag is a per-paint fact, and a measured render is not a paint:
+		// the transcript sizes a block before it decides whether to show it, and
+		// a block it then omits never reaches the terminal. Arming the flag here
+		// would ask for a viewport replay for a shape the user never saw.
+		if (!this.#measured) {
+			this.#firstResultViewportRepaintShapePainted = this.#needsFirstResultViewportRepaintAtRender();
+		}
 		this.#partialResultShapePainted = this.#result !== undefined && this.#isPartial;
 		return lines;
 	}
