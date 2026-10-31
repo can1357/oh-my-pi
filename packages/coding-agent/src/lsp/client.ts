@@ -5,7 +5,7 @@ import { encodeMessageFrame, MessageFramer } from "../jsonrpc/message-framing";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { resolveSyscallTarget } from "../tools/path-utils";
 import { findRepoRoot } from "../capability/fs";
-import { getConfig } from "./config";
+import { assertSafeLspRoot, assertSafeLspWorkspaceMessage, getConfig, UnsafeLspRootError } from "./config";
 import { applyWorkspaceEdit, type ExecutedWorkspaceChange } from "./edits";
 import { getLspmuxCommand, isLspmuxSupported } from "./lspmux";
 import { connectSharedLspTransport } from "./mux/daemon";
@@ -433,13 +433,17 @@ function queueWriteMessage(
 ): Promise<void> {
 	const write = client.writeQueue
 		.catch(() => {})
-		.then(() =>
-			writeMessage(
+		.then(() => {
+			if ("method" in message) {
+				if (message.method === "initialize") assertSafeLspRoot(client.cwd);
+				assertSafeLspWorkspaceMessage(message.method, message.params);
+			}
+			return writeMessage(
 				client.proc.stdin,
 				message,
 				deliverQueued && signal?.aborted ? AbortSignal.timeout(DELIVER_QUEUED_TIMEOUT_MS) : signal,
-			),
-		);
+			);
+		});
 	const result = write.catch((err: unknown) => {
 		if (err instanceof LspDrainAbortError) {
 			// Only an abort that raced this write's in-flight drain leaves
@@ -639,6 +643,7 @@ function workspaceFolder(folder: string): { uri: string; name: string } {
  * `workspace/workspaceFolders` server requests.
  */
 function currentWorkspaceFolders(client: LspClient): Array<{ uri: string; name: string }> {
+	assertSafeLspRoot(client.cwd);
 	return [client.cwd, ...(workspaceFolderStates.get(client)?.added.keys() ?? [])].map(workspaceFolder);
 }
 
@@ -666,6 +671,13 @@ async function workspaceFolderToAdd(client: LspClient, filePath: string): Promis
 	// A repository at or above the home directory (a dotfiles checkout) would have the
 	// server index everything under it.
 	if (isPathInsideWorkspace(await realPathOf(os.homedir()), checkout)) return undefined;
+	// Filesystem and shared temporary-directory roots are not workspaces either.
+	try {
+		assertSafeLspRoot(checkout);
+	} catch (error) {
+		if (error instanceof UnsafeLspRootError) return undefined;
+		throw error;
+	}
 	return checkout;
 }
 
@@ -1333,6 +1345,7 @@ export async function getOrCreateClient(
 	}
 
 	// Create new client with lock
+	assertSafeLspRoot(cwd);
 	const lockToken = Symbol();
 	const clientPromise = (async () => {
 		const baseCommand = config.resolvedCommand ?? config.command;
@@ -1357,11 +1370,13 @@ export async function getOrCreateClient(
 		if (isSharedLspEnabled() && command === baseCommand) {
 			proc = await connectSharedLspTransport({ command, args, cwd, env, initializationOptions, signal });
 		}
-		proc ??= ptree.spawn([command, ...args], {
-			cwd,
-			stdin: "pipe",
-			env: env ? { ...Bun.env, ...env } : undefined,
-		});
+		if (!proc) {
+			proc = ptree.spawn([command, ...args], {
+				cwd,
+				stdin: "pipe",
+				env: env ? { ...Bun.env, ...env } : undefined,
+			});
+		}
 
 		const projectLoad = createProjectLoad();
 		const client: LspClient = {

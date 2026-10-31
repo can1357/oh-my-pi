@@ -196,6 +196,58 @@ describe("LspMuxServer", () => {
 		return { client, connected };
 	}
 
+	it.each([path.parse(process.cwd()).root, os.tmpdir()])(
+		"rejects unsafe mux workspace root %s before spawning",
+		async cwd => {
+			await expect(link({ ...connectParams, cwd })).rejects.toThrow("Refusing LSP workspace root");
+			expect(server.serverKeys).toHaveLength(0);
+		},
+	);
+
+	it("rejects a symlink to an unsafe mux workspace root", async () => {
+		const alias = path.join(tmpDir, "root-alias");
+		await fs.symlink(path.parse(tmpDir).root, alias, "junction");
+		await expect(link({ ...connectParams, cwd: alias })).rejects.toThrow("Refusing LSP workspace root");
+		expect(server.serverKeys).toHaveLength(0);
+	});
+
+	it.each(["rootPath", "rootUri", "workspaceFolders", "relativeRootPath"])(
+		"rejects unsafe mux initialize %s before forwarding or cache replay",
+		async field => {
+			const { client } = await link();
+			const key = field === "relativeRootPath" ? "rootPath" : field;
+			const value =
+				field === "relativeRootPath"
+					? ".."
+					: field === "rootPath"
+						? os.tmpdir()
+						: field === "rootUri"
+							? Bun.pathToFileURL(os.tmpdir()).href
+							: [{ uri: Bun.pathToFileURL(os.tmpdir()).href, name: "temp" }];
+			const unsafeParams = { ...initializeParams(), [key]: value };
+			await expect(client.request("initialize", unsafeParams)).rejects.toThrow("Refusing LSP workspace root");
+			expect((await state(client)).initializeCount).toBe(0);
+			await initialize(client);
+			await expect(client.request("initialize", unsafeParams)).rejects.toThrow("Refusing LSP workspace root");
+			expect((await state(client)).initializeCount).toBe(1);
+		},
+	);
+
+	it("does not forward unsafe workspace additions in mux requests or notifications", async () => {
+		const { client } = await link();
+		await initialize(client);
+		const params = { event: { added: [{ uri: Bun.pathToFileURL(os.tmpdir()).href, name: "temp" }], removed: [] } };
+		await expect(client.request("workspace/didChangeWorkspaceFolders", params)).rejects.toThrow(
+			"Refusing LSP workspace root",
+		);
+		client.notify("workspace/didChangeWorkspaceFolders", params);
+		expect((await state(client)).notifications).not.toContain("workspace/didChangeWorkspaceFolders");
+		client.notify("workspace/didChangeWorkspaceFolders", {
+			event: { added: [{ uri: Bun.pathToFileURL(tmpDir).href, name: "project" }], removed: params.event.added },
+		});
+		expect((await state(client)).notifications).toContain("workspace/didChangeWorkspaceFolders");
+	});
+
 	it("disconnects a malformed link without terminating other sessions", async () => {
 		const healthy = await link();
 		await initialize(healthy.client);
