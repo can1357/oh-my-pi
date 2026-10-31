@@ -357,7 +357,7 @@ mod tests {
 		// the choice is reported only once it is gone.
 		let reads = std::cell::Cell::new(0);
 		let fading = || {
-			reads.set(reads.get() + 1);
+			reads.update(|v| v + 1);
 			reads.get() < 4
 		};
 		let chosen = settle_choice(

@@ -10,6 +10,13 @@ const MAX_LABEL_CHARS = 80;
  * `pipe:<n>`. Offsets are stream bytes; a streaming decoder keeps multi-byte
  * characters split across reads intact and restarts whenever a read does not
  * continue where the previous one ended (a gap, or a reread from the start).
+ *
+ * A pipe that carried a NUL byte (`git archive | tar -x`, `curl | gunzip`) is
+ * binary from then on and reads as empty text: decoded, its runs between
+ * newlines would count as lines and surface as mojibake in the widget's stage
+ * and the author's samples. Every read is scanned, not just the stream's head:
+ * a fast producer outruns the retained window, so the first read can open deep
+ * inside an archived text file.
  */
 export class PipeTextSource implements JobTextSource {
 	readonly id: string;
@@ -18,6 +25,8 @@ export class PipeTextSource implements JobTextSource {
 	#decoder = new TextDecoder();
 	/** Stream offset the decoder's state continues from. */
 	#decodedTo = -1;
+	/** The stream carried a NUL byte. */
+	#binary = false;
 
 	constructor(
 		readonly streams: PipeStreams,
@@ -33,6 +42,8 @@ export class PipeTextSource implements JobTextSource {
 	read(from: number): JobTextChunk {
 		const chunk = this.streams.read(this.streamId, from);
 		if (!chunk) return { start: from, end: from, text: "", open: false };
+		this.#binary ||= chunk.data.indexOf(0) !== -1;
+		if (this.#binary) return { start: chunk.start, end: chunk.end, text: "", open: chunk.open };
 		if (chunk.start !== this.#decodedTo) this.#decoder = new TextDecoder();
 		const text = this.#decoder.decode(chunk.data, { stream: chunk.open });
 		this.#decodedTo = chunk.end;

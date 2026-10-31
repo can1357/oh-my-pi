@@ -9,7 +9,7 @@
     JS: `pool = await workpool(agent, { name, context{{#if evalTools}}, tools{{/if}} })`; `await` each pool method.{{/ifAll}}
 ```
 
-The cell `timeout` counts only the cell's own work, not waits on `agent()`/`wait()`/`tool.task(...)`, so a subagent can outlast it.
+The cell `timeout` counts only the cell's own work, not waits on `agent()`/`wait()`/`tool.task(…)`, so a subagent can outlast it.
 
 <dag>
 Acyclic waves of handles:

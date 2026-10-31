@@ -35,7 +35,7 @@ _ADDONS = {
     for target, (platform, out) in _ADDONS.items()
 ]
 
-# Every shipped addon. Linux hosts (the omp-kata pods) build all of them: the
+# Every shipped addon. Linux hosts (the vmon CI runners) build all of them: the
 # zig, msvc and darwin cross toolchains all run there.
 filegroup(
     name = "natives-all",

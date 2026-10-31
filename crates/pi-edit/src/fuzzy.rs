@@ -1261,7 +1261,7 @@ pub fn format_occurrence_error(path: &str, outcome: &MatchOutcome) -> String {
 	let previews = outcome
 		.occurrence_previews
 		.as_ref()
-		.map_or_else(String::new, |items| items.join("\n\n"));
+		.map_or_default(|items| items.join("\n\n"));
 	let more = if occurrences > MAX_RECORDED_MATCHES {
 		format!(" (showing first {MAX_RECORDED_MATCHES} of {occurrences})")
 	} else {

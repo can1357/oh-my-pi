@@ -549,6 +549,18 @@ impl GitRepo {
 		Ok(out)
 	}
 
+	/// Return each stash entry's commit subject, `stash@{0}` first: git's
+	/// `WIP on <branch>: …` or `On <branch>: <message>`.
+	pub fn stash_subjects(&self) -> Result<Vec<String>> {
+		if !self.ref_exists("refs/stash")? {
+			return Ok(Vec::new());
+		}
+		Ok(cli_text(self.root(), &["log", "--walk-reflogs", "--format=%s", "refs/stash"])?
+			.lines()
+			.map(str::to_owned)
+			.collect())
+	}
+
 	/// Return recent commits as `<short-sha> <subject>` lines.
 	pub fn log_onelines(&self, count: usize) -> Result<Vec<String>> {
 		if self.is_reftable() {

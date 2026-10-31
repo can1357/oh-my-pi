@@ -15,7 +15,7 @@ Pool-first phases:
 <helpers>
 State persists across `eval` calls. Every call provides:
 
-- {{#if py}}`workpool(agent=None, *, name=None, context=None{{#if evalTools}}, tools=None{{/if}})`{{else}}`await workpool(agent?, { name?, context?{{#if evalTools}}, tools?{{/if}} })`{{/if}}: {{#if freshAgents}}pool of single-item agents, at most live `task.maxConcurrency` running at once (0 = unlimited). Items dispatch in push order: each gets a new agent while under the limit, else waits in a pool-wide FIFO queue until a running agent finishes. An agent leaves the pool after its one item and never takes another, so items share no conversation; the pool context and tools still reach every agent.{{else}}pool of keep-alive workers, at most live `task.maxConcurrency` of them (0 = unlimited). Items dispatch in push order: to the idle worker using the least of its context window, else to a new worker while under the limit, else onto a busy worker's queue, round-robin. A worker keeps its conversation across items, so a later item sees everything its worker did before; items queued on a busy worker reach it together as one batch when it frees up. Reuse happens only once items outnumber the limit or one arrives while a worker is idle.{{/if}} {{#if py}}`.push(*items)`{{else}}`.push(...items)`{{/if}} returns item ids; `.status()` reports counts/workers; `.peek()` returns a non-consuming batch snapshot; `.close()` drops queued work.{{#if js}}{{#if py}} JS: `await workpool(agent, { name, context{{#if evalTools}}, tools{{/if}} })`; every{{else}} Every{{/if}} pool method is async (`await pool.push(...items)`).{{/if}}
+- {{#if py}}`workpool(agent=None, *, name=None, context=None{{#if evalTools}}, tools=None{{/if}})`{{else}}`await workpool(agent?, { name?, context?{{#if evalTools}}, tools?{{/if}} })`{{/if}}: {{#if freshAgents}}pool of single-item agents, at most live `task.maxConcurrency` running at once (0 = unlimited). Items dispatch in push order: each gets a new agent while under the limit, else waits in a pool-wide FIFO queue until a running agent finishes. An agent leaves the pool after its one item and never takes another, so items share no conversation; the pool context and tools still reach every agent.{{else}}pool of keep-alive workers, at most live `task.maxConcurrency` of them (0 = unlimited). Items dispatch in push order: to the idle worker using the least of its context window, else to a new worker while under the limit, else onto a busy worker's queue, round-robin. A worker keeps its conversation across items, so a later item sees everything its worker did before; items queued on a busy worker reach it together as one batch when it frees up. Reuse happens only once items outnumber the limit or one arrives while a worker is idle.{{/if}} {{#if py}}`.push(*items)`{{else}}`.push(…items)`{{/if}} returns item ids; `.status()` reports counts/workers; `.peek()` returns a non-consuming batch snapshot; `.close()` drops queued work.{{#if js}}{{#if py}} JS: `await workpool(agent, { name, context{{#if evalTools}}, tools{{/if}} })`; every{{else}} Every{{/if}} pool method is async (`await pool.push(…items)`).{{/if}}
   - The pool name is its background job id and label. Push all items while it is active; its first full drain settles and closes that pool job. New phase/wave after drain → create a new named pool.
   - Results auto-deliver. Completely blocked? Leave `eval` and call the `wait` tool (not kernel `wait()`); NEVER poll.
 - {{#if py}}`agent(prompt, *, agent=None, label=None, schema=None, schema_mode=None, isolated=None, apply=None, merge=None{{#if evalTools}}, tools=None{{/if}})`{{else}}`await agent(prompt, { agent?, label?, schema?, schemaMode?, isolated?, apply?, merge?{{#if evalTools}}, tools?{{/if}} })`{{/if}}: immediate `AgentHandle`; use for a small fixed dependency graph or when the parent needs validated `schema` data. `.wait()` returns text/data; `.handle` is `agent://<id>`. Unwaited results auto-deliver.{{#if js}}{{#if py}} JS: `await agent(prompt, { agent, label, schema, schemaMode, isolated, apply, merge{{#if evalTools}}, tools{{/if}} })`; without `await`,{{else}} Without `await agent(…)`,{{/if}} `.id`/`.handle` are undefined; handle methods are async (`await h.wait()`).{{/if}}
@@ -39,7 +39,6 @@ State persists across `eval` calls. Every call provides:
 {{#if py}}
 {{#if js}}
 **Python:**
-
 {{/if}}
 ```python
 phase("Review")
@@ -52,12 +51,10 @@ review.push(*[
 ])
 print(review.name)   # background job id; results auto-deliver
 ```
-
 {{/if}}
 {{#if js}}
 {{#if py}}
 **JavaScript:**
-
 {{/if}}
 ```js
 phase("Review");
@@ -73,7 +70,6 @@ await review.push(
 );
 print(review.name); // background job id; results auto-deliver
 ```
-
 {{/if}}
 Need a snapshot without consuming/delivering results? `{{#unless py}}await {{/unless}}review.peek()`. Need activity counts? `{{#unless py}}await {{/unless}}review.status()`.{{#ifAll py js}} JS: `await` both.{{/ifAll}}
 </pool-workflow>
@@ -87,7 +83,6 @@ spec = agent("Extract the protocol", {{#if scoutAvailable}}agent="scout", {{/if}
 impl = agent(f"Implement this protocol: {spec}")
 result = impl.wait()
 ```
-
 {{/if}}
 {{#if js}}
 ```js
@@ -96,7 +91,6 @@ const spec = await specHandle.wait();
 const impl = await agent(`Implement this protocol: ${JSON.stringify(spec)}`);
 const result = await impl.wait();
 ```
-
 {{/if}}
 Fixed independent handles are acceptable when each result must be returned directly into the kernel as structured data. Otherwise use a pool.
 </dependencies>

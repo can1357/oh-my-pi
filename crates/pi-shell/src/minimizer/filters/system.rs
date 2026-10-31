@@ -1,6 +1,9 @@
 //! Conservative text filters for system-style commands.
 
-use std::{collections::HashMap, fmt::Write as _};
+use std::{
+	collections::HashMap,
+	fmt::{NumBuffer, Write as _},
+};
 
 use super::git;
 use crate::minimizer::{MinimizerCtx, MinimizerOutput, primitives};
@@ -372,7 +375,7 @@ fn push_counted_line(out: &mut String, line: &str, count: usize) {
 	out.push_str(line);
 	if count > 1 {
 		out.push_str(" (×");
-		out.push_str(&count.to_string());
+		out.push_str(count.format_into(&mut NumBuffer::new()));
 		out.push(')');
 	}
 	out.push('\n');

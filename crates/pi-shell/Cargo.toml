@@ -21,7 +21,6 @@ pi-vfs.workspace = true
 brush-core.workspace = true
 brush-parser.workspace = true
 clap.workspace = true
-os_pipe.workspace = true
 parking_lot.workspace = true
 regex.workspace = true
 serde.workspace = true

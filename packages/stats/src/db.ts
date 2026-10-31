@@ -11,6 +11,7 @@ import {
 } from "@oh-my-pi/pi-catalog/models";
 import type { ModelCost } from "@oh-my-pi/pi-catalog/types";
 import { getConfigRootDir, getStatsDbPath, VERSION } from "@oh-my-pi/pi-utils";
+import { ChunkedInsert } from "./chunked-insert";
 import { classifyAgentType, type ParseSessionResult, type SessionParserState } from "./parser";
 import { ensureRollupSchema, getDailyActivityFromRollup } from "./rollup";
 import type {
@@ -135,6 +136,17 @@ export async function initDb(): Promise<Database> {
 	// https://github.com/can1357/oh-my-pi/issues/2421.
 	db.run("PRAGMA busy_timeout = 5000");
 	db.run("PRAGMA journal_mode = WAL");
+	// The database is a derived cache of the transcripts, so WAL's NORMAL sync
+	// (fsync only at checkpoints) is safe: a crash can drop the newest batches,
+	// which the next sync re-ingests from their unchanged cursors. Rarer, larger
+	// checkpoints cut the F_FULLFSYNC stalls macOS pays per checkpoint. The
+	// statement journal and temp b-tree every trigger-carrying insert opens stay
+	// in memory instead of a temp file, and a 64 MiB page cache (default 8 MiB)
+	// keeps more index pages of a multi-GB database resident between batches.
+	db.run("PRAGMA synchronous = NORMAL");
+	db.run("PRAGMA temp_store = MEMORY");
+	db.run("PRAGMA cache_size = -65536");
+	db.run("PRAGMA wal_autocheckpoint = 16384");
 
 	// Whether `messages` predates this init — drives the one-time agent_type
 	// backfill below, so it must be sampled before CREATE TABLE adds the table.
@@ -174,11 +186,17 @@ export async function initDb(): Promise<Database> {
 			UNIQUE(session_file, entry_id)
 		);
 
-		CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
-		CREATE INDEX IF NOT EXISTS idx_messages_entry_timestamp ON messages(entry_id, timestamp);
+		-- Fork-guard identity lookups key on (entry_id, timestamp). Time-first
+		-- keeps one transcript's rows in a few neighbouring leaves; entry-first
+		-- scattered every insert, delete and lookup across the whole index. The
+		-- composite also serves every timestamp range scan.
+		DROP INDEX IF EXISTS idx_messages_timestamp;
+		DROP INDEX IF EXISTS idx_messages_entry_timestamp;
+		CREATE INDEX IF NOT EXISTS idx_messages_timestamp_entry ON messages(timestamp, entry_id);
 		CREATE INDEX IF NOT EXISTS idx_messages_model ON messages(model);
 		CREATE INDEX IF NOT EXISTS idx_messages_folder ON messages(folder);
-		CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_file);
+		-- UNIQUE(session_file, entry_id) already indexes session_file lookups.
+		DROP INDEX IF EXISTS idx_messages_session;
 		CREATE INDEX IF NOT EXISTS idx_messages_timestamp_model_provider ON messages(timestamp, model, provider);
 		CREATE INDEX IF NOT EXISTS idx_messages_timestamp_folder ON messages(timestamp, folder);
 		CREATE INDEX IF NOT EXISTS idx_messages_stop_reason_timestamp ON messages(stop_reason, timestamp);
@@ -211,8 +229,9 @@ export async function initDb(): Promise<Database> {
 			UNIQUE(session_file, entry_id)
 		);
 
-		CREATE INDEX IF NOT EXISTS idx_user_messages_timestamp ON user_messages(timestamp);
-		CREATE INDEX IF NOT EXISTS idx_user_messages_entry_timestamp ON user_messages(entry_id, timestamp);
+		DROP INDEX IF EXISTS idx_user_messages_timestamp;
+		DROP INDEX IF EXISTS idx_user_messages_entry_timestamp;
+		CREATE INDEX IF NOT EXISTS idx_user_messages_timestamp_entry ON user_messages(timestamp, entry_id);
 		CREATE INDEX IF NOT EXISTS idx_user_messages_timestamp_model ON user_messages(timestamp, model, provider);
 
 		-- Judge verdicts keyed by prose hash: identical messages share one verdict,
@@ -244,8 +263,9 @@ export async function initDb(): Promise<Database> {
 			UNIQUE(session_file, tool_call_id)
 		);
 
-		CREATE INDEX IF NOT EXISTS idx_tool_calls_timestamp ON tool_calls(timestamp);
-		CREATE INDEX IF NOT EXISTS idx_tool_calls_entry_timestamp ON tool_calls(entry_id, timestamp);
+		DROP INDEX IF EXISTS idx_tool_calls_timestamp;
+		DROP INDEX IF EXISTS idx_tool_calls_entry_timestamp;
+		CREATE INDEX IF NOT EXISTS idx_tool_calls_timestamp_entry ON tool_calls(timestamp, entry_id);
 		CREATE INDEX IF NOT EXISTS idx_tool_calls_tool_timestamp ON tool_calls(tool_name, timestamp);
 
 		CREATE TABLE IF NOT EXISTS meta (
@@ -348,7 +368,7 @@ export async function initDb(): Promise<Database> {
 				prose_hash TEXT NOT NULL DEFAULT '',
 				UNIQUE(session_file, entry_id)
 			);
-			CREATE INDEX IF NOT EXISTS idx_user_messages_timestamp ON user_messages(timestamp);
+			CREATE INDEX IF NOT EXISTS idx_user_messages_timestamp_entry ON user_messages(timestamp, entry_id);
 			CREATE INDEX IF NOT EXISTS idx_user_messages_timestamp_model ON user_messages(timestamp, model, provider);
 		`);
 	} else if (!userMessageColumns.some(column => column.name === "prose")) {
@@ -674,6 +694,17 @@ export function setFileOffset(
 	stmt.run(sessionFile, offset, lastModified, parserState ? JSON.stringify(parserState) : null);
 }
 
+/**
+ * Run `fn` atomically: inline when the caller already holds a transaction,
+ * otherwise in a fresh one. Nesting `db.transaction` would open a savepoint,
+ * which copies every page the batch touches into the statement journal; each
+ * statement end then rewinds that ever-growing journal, so a long batch
+ * degrades quadratically.
+ */
+function atomically<T>(database: Database, fn: () => T): T {
+	return database.inTransaction ? fn() : database.transaction(fn)();
+}
+
 /** Parsed transcript queued by the sync loop for an atomic database batch. */
 export interface ParsedSession {
 	sessionFile: string;
@@ -873,7 +904,7 @@ export function completeSessionSync(reconcile: boolean): void {
  * `provider`, token counts, and `responseId`. The `UNIQUE(session_file,
  * entry_id)` constraint alone keys each row by file, so without the guard
  * below the same provider request would land twice and inflate every
- * aggregate. The `WHERE NOT EXISTS` clause skips inserts whose
+ * aggregate. The {@link ChunkedInsert} fork guard skips inserts whose
  * `(entry_id, timestamp)` already exists under a different `session_file` —
  * first-write-wins across the lineage. Same-file re-syncs still hit the
  * `ON CONFLICT(session_file, entry_id)` upsert below, which re-derives the
@@ -882,21 +913,39 @@ export function completeSessionSync(reconcile: boolean): void {
  */
 export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 	if (!db) return 0;
-
-	const stmt = db.query(`
-		INSERT INTO messages (
-			session_file, entry_id, folder, model, provider, api, timestamp,
-			duration, ttft, stop_reason, error_message,
-			input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens, premium_requests,
-			cost_input, cost_output, cost_cache_read, cost_cache_write, cost_total, cost_no_cache_input,
-			cost_unpriced, agent_type, service_tier
-		)
-		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-		WHERE NOT EXISTS (
-			SELECT 1 FROM messages
-			WHERE entry_id = ? AND timestamp = ? AND session_file <> ?
-		)
-		ON CONFLICT(session_file, entry_id) DO UPDATE SET
+	const writer = new ChunkedInsert(db, {
+		verb: "INSERT",
+		table: "messages",
+		columns: [
+			"session_file",
+			"entry_id",
+			"folder",
+			"model",
+			"provider",
+			"api",
+			"timestamp",
+			"duration",
+			"ttft",
+			"stop_reason",
+			"error_message",
+			"input_tokens",
+			"output_tokens",
+			"cache_read_tokens",
+			"cache_write_tokens",
+			"total_tokens",
+			"premium_requests",
+			"cost_input",
+			"cost_output",
+			"cost_cache_read",
+			"cost_cache_write",
+			"cost_total",
+			"cost_no_cache_input",
+			"cost_unpriced",
+			"agent_type",
+			"service_tier",
+		],
+		identity: ["entry_id", "timestamp"],
+		upsert: `ON CONFLICT(session_file, entry_id) DO UPDATE SET
 			premium_requests = MAX(messages.premium_requests, excluded.premium_requests),
 			cost_input = excluded.cost_input,
 			cost_output = excluded.cost_output,
@@ -905,53 +954,47 @@ export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 			cost_total = excluded.cost_total,
 			cost_no_cache_input = excluded.cost_no_cache_input,
 			cost_unpriced = excluded.cost_unpriced,
-			service_tier = excluded.service_tier
-	`);
-
-	let inserted = 0;
-	const insert = db.transaction(() => {
+			service_tier = excluded.service_tier`,
+	});
+	return atomically(db, () => {
 		for (const s of stats) {
 			const { cost, unpriced } = resolveStoredCost(s);
 			const noCacheInputCost = calculateNoCacheInputCost(s.provider, s.model, s.usage, s.timestamp) ?? 0;
-			const result = stmt.run(
+			writer.add(
 				s.sessionFile,
-				s.entryId,
-				s.folder,
-				s.model,
-				s.provider,
-				s.api,
-				s.timestamp,
-				s.duration,
-				s.ttft,
-				s.stopReason,
-				s.errorMessage,
-				s.usage.input,
-				s.usage.output,
-				s.usage.cacheRead,
-				s.usage.cacheWrite,
-				s.usage.totalTokens,
-				s.usage.premiumRequests ?? 0,
-				cost.input,
-				cost.output,
-				cost.cacheRead,
-				cost.cacheWrite,
-				cost.total,
-				noCacheInputCost,
-				unpriced ? 1 : 0,
-				s.agentType,
-				s.serviceTier ?? null,
-				// `WHERE NOT EXISTS` binds: skip when a different session_file
-				// already holds this (entry_id, timestamp).
-				s.entryId,
-				s.timestamp,
-				s.sessionFile,
+				[s.entryId, s.timestamp],
+				[
+					s.sessionFile,
+					s.entryId,
+					s.folder,
+					s.model,
+					s.provider,
+					s.api,
+					s.timestamp,
+					s.duration,
+					s.ttft,
+					s.stopReason,
+					s.errorMessage,
+					s.usage.input,
+					s.usage.output,
+					s.usage.cacheRead,
+					s.usage.cacheWrite,
+					s.usage.totalTokens,
+					s.usage.premiumRequests ?? 0,
+					cost.input,
+					cost.output,
+					cost.cacheRead,
+					cost.cacheWrite,
+					cost.total,
+					noCacheInputCost,
+					unpriced ? 1 : 0,
+					s.agentType,
+					s.serviceTier ?? null,
+				],
 			);
-			if (result.changes > 0) inserted++;
 		}
+		return writer.finish();
 	});
-
-	insert();
-	return inserted;
 }
 
 /**
@@ -1333,57 +1376,62 @@ export function markSessionBackfillsComplete(): void {
 
 /**
  * Insert user-message stats. Idempotent via UNIQUE(session_file, entry_id).
- * The `WHERE NOT EXISTS` clause matches {@link insertMessageStats}: forks
- * copy user entries verbatim into the child JSONL, so the same
- * `(entry_id, timestamp)` must not land twice across different session files.
+ * The fork guard matches {@link insertMessageStats}: forks copy user entries
+ * verbatim into the child JSONL, so the same `(entry_id, timestamp)` must not
+ * land twice across different session files.
  */
 export function insertUserMessageStats(stats: Iterable<UserMessageStats>): number {
 	if (!db) return 0;
-
-	const stmt = db.query(`
-		INSERT OR IGNORE INTO user_messages (
-			session_file, entry_id, folder, timestamp, model, provider,
-			chars, words, yelling, profanity, anguish,
-			negation, repetition, blame, prose, prose_hash
-		)
-		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-		WHERE NOT EXISTS (
-			SELECT 1 FROM user_messages
-			WHERE entry_id = ? AND timestamp = ? AND session_file <> ?
-		)
-	`);
-
-	let inserted = 0;
-	const insert = db.transaction(() => {
-		for (const s of stats) {
-			const result = stmt.run(
-				s.sessionFile,
-				s.entryId,
-				s.folder,
-				s.timestamp,
-				s.model,
-				s.provider,
-				s.chars,
-				s.words,
-				s.yelling,
-				s.profanity,
-				s.anguish,
-				s.negation,
-				s.repetition,
-				s.blame,
-				s.prose,
-				s.proseHash,
-				// `WHERE NOT EXISTS` binds: skip when a different session_file
-				// already holds this (entry_id, timestamp).
-				s.entryId,
-				s.timestamp,
-				s.sessionFile,
-			);
-			if (result.changes > 0) inserted++;
-		}
+	const writer = new ChunkedInsert(db, {
+		verb: "INSERT OR IGNORE",
+		table: "user_messages",
+		columns: [
+			"session_file",
+			"entry_id",
+			"folder",
+			"timestamp",
+			"model",
+			"provider",
+			"chars",
+			"words",
+			"yelling",
+			"profanity",
+			"anguish",
+			"negation",
+			"repetition",
+			"blame",
+			"prose",
+			"prose_hash",
+		],
+		identity: ["entry_id", "timestamp"],
 	});
-	insert();
-	return inserted;
+	return atomically(db, () => {
+		for (const s of stats) {
+			writer.add(
+				s.sessionFile,
+				[s.entryId, s.timestamp],
+				[
+					s.sessionFile,
+					s.entryId,
+					s.folder,
+					s.timestamp,
+					s.model,
+					s.provider,
+					s.chars,
+					s.words,
+					s.yelling,
+					s.profanity,
+					s.anguish,
+					s.negation,
+					s.repetition,
+					s.blame,
+					s.prose,
+					s.proseHash,
+				],
+			);
+		}
+		return writer.finish();
+	});
 }
 
 /**
@@ -1404,13 +1452,12 @@ export function updateUserMessageLinks(links: Iterable<UserMessageLink>): number
 	`);
 
 	let updated = 0;
-	const apply = db.transaction(() => {
+	atomically(db, () => {
 		for (const link of links) {
 			const result = stmt.run(link.model, link.provider, link.sessionFile, link.entryId);
 			if (result.changes > 0) updated++;
 		}
 	});
-	apply();
 	return updated;
 }
 
@@ -1574,7 +1621,7 @@ export function upsertFrustrationVerdicts(verdicts: readonly FrustrationVerdict[
 
 /**
  * Insert tool-call rows. Idempotent via UNIQUE(session_file, tool_call_id);
- * the `WHERE NOT EXISTS` guard mirrors {@link insertMessageStats}: forked
+ * the fork guard mirrors {@link insertMessageStats}: forked
  * sessions deep-copy assistant entries (same `entry_id`, `timestamp`, and
  * tool-call ids under a new file), so first-write-wins across the lineage
  * keeps aggregates from double counting. Keyed on the assistant entry
@@ -1583,46 +1630,50 @@ export function upsertFrustrationVerdicts(verdicts: readonly FrustrationVerdict[
  */
 export function insertToolCalls(calls: Iterable<ToolCallStats>): number {
 	if (!db) return 0;
-
-	const stmt = db.query(`
-		INSERT OR IGNORE INTO tool_calls (
-			session_file, entry_id, tool_call_id, folder, tool_name,
-			model, provider, timestamp, agent_type, calls_in_turn, args_chars
-		)
-		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-		WHERE NOT EXISTS (
-			SELECT 1 FROM tool_calls
-			WHERE entry_id = ? AND timestamp = ? AND tool_call_id = ? AND session_file <> ?
-		)
-	`);
-
-	let inserted = 0;
-	const insert = db.transaction(() => {
-		for (const c of calls) {
-			const result = stmt.run(
-				c.sessionFile,
-				c.entryId,
-				c.toolCallId,
-				c.folder,
-				c.toolName,
-				c.model,
-				c.provider,
-				c.timestamp,
-				c.agentType,
-				c.callsInTurn,
-				c.argsChars,
-				// `WHERE NOT EXISTS` binds: skip when a different session_file
-				// already holds this (entry_id, timestamp, tool_call_id).
-				c.entryId,
-				c.timestamp,
-				c.toolCallId,
-				c.sessionFile,
-			);
-			if (result.changes > 0) inserted++;
-		}
+	const writer = new ChunkedInsert(db, {
+		verb: "INSERT OR IGNORE",
+		table: "tool_calls",
+		columns: [
+			"session_file",
+			"entry_id",
+			"tool_call_id",
+			"folder",
+			"tool_name",
+			"model",
+			"provider",
+			"timestamp",
+			"agent_type",
+			"calls_in_turn",
+			"args_chars",
+			"result_chars",
+			"is_error",
+		],
+		identity: ["entry_id", "timestamp", "tool_call_id"],
 	});
-	insert();
-	return inserted;
+	return atomically(db, () => {
+		for (const c of calls) {
+			writer.add(
+				c.sessionFile,
+				[c.entryId, c.timestamp, c.toolCallId],
+				[
+					c.sessionFile,
+					c.entryId,
+					c.toolCallId,
+					c.folder,
+					c.toolName,
+					c.model,
+					c.provider,
+					c.timestamp,
+					c.agentType,
+					c.callsInTurn,
+					c.argsChars,
+					c.resultChars ?? null,
+					c.isError === undefined ? null : c.isError ? 1 : 0,
+				],
+			);
+		}
+		return writer.finish();
+	});
 }
 
 /**
@@ -1642,12 +1693,11 @@ export function updateToolResults(links: Iterable<ToolResultLink>): number {
 	`);
 
 	let updated = 0;
-	const apply = db.transaction(() => {
+	atomically(db, () => {
 		for (const link of links) {
 			const result = stmt.run(link.resultChars, link.isError ? 1 : 0, link.sessionFile, link.toolCallId);
 			updated += result.changes;
 		}
 	});
-	apply();
 	return updated;
 }

@@ -143,6 +143,40 @@ function fenceOpenAt(text: string, end: number): boolean {
 }
 
 /**
+ * Whether `text` ends inside a code fence the source never closed. The
+ * renderer still draws such a fence's closing border, so a caller publishing a
+ * settled source prefix must drop that fabricated row: it is not a prefix of
+ * the live block, which reaches the border only once the closer arrives.
+ */
+export function endsInsideOpenFence(text: string): boolean {
+	return fenceOpenAt(text, text.length);
+}
+
+/**
+ * Offset of the settled prefix of the still-open fence that `text` ends in, or
+ * 0 when it holds none.
+ *
+ * An open fence's body only ever appends: nothing a later chunk adds can
+ * change a line that already ended. Those lines are therefore settled, and a
+ * stream may publish them into native scrollback instead of leaving the whole
+ * block in the mutable viewport until the closing fence finally arrives — a
+ * long streamed code block would otherwise lose every row that left the screen
+ * (#9780).
+ *
+ * The cut lands before the last complete line, not after it: a streamed chunk
+ * usually ends on a "\n", and the publisher requires non-blank source past the
+ * prefix it publishes, so cutting at the final "\n" would publish nothing on
+ * exactly those frames. Once the closing fence has arrived, the retained line
+ * is the one in front of it.
+ */
+function settledFenceBodyEnd(text: string): number {
+	const lastBreak = text.lastIndexOf("\n");
+	if (lastBreak <= 0) return 0;
+	const cut = text.lastIndexOf("\n", lastBreak - 1) + 1;
+	return cut > 0 && fenceOpenAt(text, cut) ? cut : 0;
+}
+
+/**
  * Streaming `md` source for a native terminal, minus a still-growing table row:
  * the unterminated last line when a GFM table (a run of pipe lines holding a
  * header and its delimiter row, outer pipes optional) sits right above it,
@@ -2340,6 +2374,12 @@ export class Markdown implements Component {
 	// The frozen prefix's leading run in front of the first of those openers:
 	// no append can change its tokens, so getLastRenderStableText publishes it.
 	#streamSettledText?: string;
+	// The complete lines inside a still-open fence, with the fence's opening
+	// line in front of them: an open fence never reaches a "\n\n" boundary, so
+	// #streamSettledText holds nothing for it and a long streamed code block
+	// would stay unretirable until the closing fence arrived. Kept while the
+	// source extends it, so the published prefix never shrinks.
+	#streamFenceSettledText?: string;
 	// The text in front of the newest top-level item of a list that is still
 	// streaming as the last block. Once an item's marker line has ended, no
 	// append can add to the items in front of it, and #renderList draws each
@@ -2538,9 +2578,31 @@ export class Markdown implements Component {
 	 */
 	getLastRenderStableText(): string {
 		if (!this.#transientRenderCache) return "";
-		const settled = this.#streamSettledText ?? "";
+		// An open fence has no "\n\n" boundary, so the block walk above settles
+		// nothing inside it. Its finished lines are settled all the same: no
+		// append can change a line that already ended. Publish them, or a long
+		// streamed code block (SQL, logs) stays unretirable in the mutable
+		// viewport and its top rows are dropped as it outgrows the screen.
+		const source = streamingMarkdownSource(this.#text);
+		let fence = this.#streamFenceSettledText;
+		if (fence !== undefined && !source.startsWith(fence)) {
+			// A non-append edit rewound the text below what was published. Drop
+			// the stored prefix as well: keeping it would fail this check on
+			// every later frame and leave the block unretirable for the rest of
+			// the stream.
+			fence = undefined;
+			this.#streamFenceSettledText = undefined;
+		}
+		const body = settledFenceBodyEnd(source);
+		if (body > (fence?.length ?? 0)) {
+			fence = source.slice(0, body);
+			this.#streamFenceSettledText = fence;
+		}
+		let text = this.#streamSettledText ?? "";
 		const list = this.#streamListSettledText;
-		return list !== undefined && list.length > settled.length ? list : settled;
+		if (list !== undefined && list.length > text.length) text = list;
+		if (fence !== undefined && fence.length > text.length) text = fence;
+		return text;
 	}
 
 	get transientRenderCache(): boolean {
@@ -2574,6 +2636,7 @@ export class Markdown implements Component {
 			this.#streamingHighlightCache = undefined;
 			this.#streamingListCache = undefined;
 			this.#streamRewound = undefined;
+			this.#streamFenceSettledText = undefined;
 		}
 		this.invalidate();
 	}

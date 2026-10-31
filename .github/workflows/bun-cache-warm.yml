@@ -3,8 +3,8 @@ name: Warm bun store cache
 # Produces the shared `bun-<os>-<lockhash>` store entry PR jobs restore. PR jobs
 # restore it but never save (per-PR-ref copies of the ~500 MB store once ate
 # ~9.4 GB of the 10 GB repo cache quota), bun-install's save half only runs on
-# non-PR events, and main CI jobs run on omp-kata (PVC store, no GitHub
-# cache), so this is the sole GitHub-hosted producer. Triggers only on pushes
+# non-PR events, and main CI jobs run on vmon (omp-ci template store, no
+# GitHub cache), so this is the sole GitHub-hosted producer. Triggers only on pushes
 # that can change the entry.
 
 on:

@@ -474,19 +474,18 @@ function liveEventStream(headers: Record<string, string>, signal: AbortSignal): 
 	});
 }
 
-/**
- * Start the HTTP server, reusing a live dashboard or reclaiming a stale omp listener.
- */
+/** A dashboard this process started or found; `port` is where it listens, which may differ from the one requested. */
 export interface StatsServerHandle {
 	hostname: string;
 	port: number;
 	stop: () => void;
 }
 
-// Dashboards this process already bound, keyed by requested `hostname:port`.
-// A second in-process start (e.g. `/trace` twice in one session) must return
-// the live handle: probing our own port can time out under load and would
-// then dead-end in the reclaim path's self-PID guard.
+// Dashboards this process already bound, keyed by requested and bound
+// `hostname:port`. A second in-process start (e.g. `/trace` twice in one
+// session, or a caller passing back a fallback port) must return the live
+// handle: probing our own port can time out under load and would then start
+// yet another dashboard on a fallback port.
 const activeServers = new Map<string, StatsServerHandle>();
 /** Dashboards bound by this process (any port); background ingest stops when the last one does. */
 let liveServers = 0;
@@ -496,30 +495,34 @@ export interface StartServerOptions {
 	judge?: StatsJudgeProvider;
 }
 
+/**
+ * Start the dashboard on `port`, or reuse the current dashboard already serving it.
+ * An older dashboard there is stopped and replaced; any other holder (a foreign
+ * program, or a dashboard too busy to answer the identity probe) is left running
+ * and the dashboard binds an ephemeral port instead.
+ */
 export async function startServer(
 	port = 3847,
 	hostname = STATS_DASHBOARD_HOSTNAME,
 	options: StartServerOptions = {},
 ): Promise<StatsServerHandle> {
 	if (options.judge) setStatsJudgeProvider(options.judge);
-	const activeKey = `${hostname}:${port}`;
+	const requestedKey = `${hostname}:${port}`;
 	if (port !== 0) {
-		const active = activeServers.get(activeKey);
+		const active = activeServers.get(requestedKey);
 		if (active) return active;
 	}
 	await ensureClientBuild();
-	const preparation = await prepareStatsPort(port, hostname);
-	if (preparation === "reuse") {
-		return { hostname, port, stop: () => {} };
-	}
 	const register = (server: Server<undefined>): StatsServerHandle => {
 		liveServers++;
 		let stopped = false;
+		const boundPort = server.port ?? port;
+		const keys = port === 0 ? [`${hostname}:${boundPort}`] : [requestedKey, `${hostname}:${boundPort}`];
 		const handle: StatsServerHandle = {
 			hostname,
-			port: server.port ?? port,
+			port: boundPort,
 			stop: () => {
-				activeServers.delete(activeKey);
+				for (const key of keys) activeServers.delete(key);
 				server.stop(true);
 				if (stopped) return;
 				stopped = true;
@@ -527,26 +530,31 @@ export async function startServer(
 				if (--liveServers === 0) statsLive().stop();
 			},
 		};
-		if (port !== 0) activeServers.set(activeKey, handle);
+		for (const key of keys) activeServers.set(key, handle);
 		return handle;
 	};
 
+	let claim = await prepareStatsPort(port, hostname);
+	if (claim === "bind") {
+		const server = bindDashboardServer(port, hostname);
+		if (server) return register(server);
+		claim = await recoverStatsPort(port, hostname);
+	}
+	if (claim === "reuse") return { hostname, port, stop: () => {} };
+	if (claim === "bind") {
+		const server = bindDashboardServer(port, hostname);
+		if (server) return register(server);
+	}
+	logger.warn("Stats dashboard port is held by another process; serving on an ephemeral port", { hostname, port });
+	return register(createDashboardServer(0, hostname));
+}
+
+/** {@link createDashboardServer}, or null when the port is already in use. */
+function bindDashboardServer(port: number, hostname: string): Server<undefined> | null {
 	try {
-		return register(createDashboardServer(port, hostname));
+		return createDashboardServer(port, hostname);
 	} catch (error) {
-		if (!(error instanceof Error && "code" in error && error.code === "EADDRINUSE")) throw error;
-
-		const recovery = await recoverStatsPort(port, hostname);
-		if (recovery === "reuse") {
-			return { hostname, port, stop: () => {} };
-		}
-
-		try {
-			return register(createDashboardServer(port, hostname));
-		} catch (retryError) {
-			throw new Error(`Failed to start stats dashboard on ${hostname}:${port} after reclaiming it.`, {
-				cause: retryError,
-			});
-		}
+		if (error instanceof Error && "code" in error && error.code === "EADDRINUSE") return null;
+		throw error;
 	}
 }

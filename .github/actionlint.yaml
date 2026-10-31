@@ -1,6 +1,6 @@
-# actionlint only knows GitHub-hosted labels; register the self-hosted ARC
-# runner scale set (infra/docs/04-arc-and-caching.md) so `runs-on: omp-kata`
-# lints clean.
+# actionlint only knows GitHub-hosted labels; register the vmon runner labels
+# (infra/docs/01-vmon-runners.md) so `runs-on: vmon-large/from=omp-ci` lints
+# clean.
 self-hosted-runner:
    labels:
-      - omp-kata
+      - vmon-large/from=omp-ci

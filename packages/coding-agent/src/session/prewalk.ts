@@ -9,7 +9,7 @@ import { invalidateMessageCache } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Model, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { AutoPrewalkDecision } from "../auto-prewalk/classifier";
-import { formatModelStringWithRouting } from "../config/model-resolver";
+import { formatModelStringWithRouting, prewalkWouldBeNoopWithRouting } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { resolveApprovedPlan } from "../plan-mode/approved-plan";
@@ -20,7 +20,7 @@ import planYoloHandoffPrompt from "../prompts/system/plan-yolo-handoff.md" with 
 import prewalkChecklistPrompt from "../prompts/system/prewalk-checklist.md" with { type: "text" };
 import prewalkContinuePrompt from "../prompts/system/prewalk-continue.md" with { type: "text" };
 import prewalkPlanPrompt from "../prompts/system/prewalk-plan.md" with { type: "text" };
-import { type ConfiguredThinkingLevel, prewalkWouldBeNoop } from "@oh-my-pi/pi-tui/thinking";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { isMCPToolName } from "../tools/builtin-names";
 import {
 	replaceTabs,
@@ -174,9 +174,12 @@ export class PrewalkCoordinator {
 	}
 
 	#isNoop(prewalk: Prewalk): boolean {
-		const model = this.#host.model();
-		if (model && formatModelStringWithRouting(model) !== formatModelStringWithRouting(prewalk.target)) return false;
-		return prewalkWouldBeNoop(model, this.#host.configuredThinkingLevel(), prewalk.target, prewalk.thinkingLevel);
+		return prewalkWouldBeNoopWithRouting(
+			this.#host.model(),
+			this.#host.configuredThinkingLevel(),
+			prewalk.target,
+			prewalk.thinkingLevel,
+		);
 	}
 
 	#clearPrewalkState(): void {
@@ -188,7 +191,7 @@ export class PrewalkCoordinator {
 	}
 
 	/** A later model/effort selection owns the active model, even if its identity is unchanged. */
-	releaseHandoff(): void {
+	releaseHandoffAndAutoArm(): void {
 		if (this.#autoArm && this.#autoArm === this.#prewalk) {
 			this.#scrubPlanNudge(undefined, true);
 			this.#clearPrewalkState();
@@ -217,7 +220,7 @@ export class PrewalkCoordinator {
 		const restoreSource = handoff !== undefined && (enabled || handoff.auto) && this.#onHandoffTarget(handoff);
 		this.#scrubPlanNudge(undefined, true);
 		this.#clearPrewalkState();
-		this.releaseHandoff();
+		this.releaseHandoffAndAutoArm();
 		// Best-effort: /new has already committed the transcript switch, so an
 		// unusable planning model must not abort the rest of session setup.
 		if (restoreSource) await this.#restoreSource(handoff);
@@ -278,7 +281,7 @@ export class PrewalkCoordinator {
 		}
 		const handoff = this.#handoff;
 		if (!handoff?.auto) return;
-		this.releaseHandoff();
+		this.releaseHandoffAndAutoArm();
 		if (this.#onHandoffTarget(handoff)) await this.#restoreSource(handoff);
 	}
 
@@ -437,19 +440,23 @@ export class PrewalkCoordinator {
 		);
 	}
 
+	#noticeAlreadyArmed(active: Prewalk): void {
+		this.#host.emitNotice(
+			"info",
+			`Prewalk: already armed for ${active.target.provider}/${active.target.id}, waiting for the first edit/write.`,
+			"prewalk",
+		);
+	}
+
 	/** Arms a prewalk immediately for an explicit slash-command request, replacing an automatic arm. */
 	arm(target: Model, thinkingLevel?: ConfiguredThinkingLevel): boolean {
 		if (this.#autoArm && this.#autoArm === this.#prewalk) {
 			this.#host.invalidateAutomaticSelection();
-			this.releaseHandoff();
+			this.releaseHandoffAndAutoArm();
 		}
 		const active = this.#prewalk;
 		if (active) {
-			this.#host.emitNotice(
-				"info",
-				`Prewalk: already armed for ${active.target.provider}/${active.target.id}, waiting for the first edit/write.`,
-				"prewalk",
-			);
+			this.#noticeAlreadyArmed(active);
 			const matches =
 				formatModelStringWithRouting(active.target) === formatModelStringWithRouting(target) &&
 				active.thinkingLevel === thinkingLevel;
@@ -489,7 +496,7 @@ export class PrewalkCoordinator {
 
 	/**
 	 * Restores the planning model and reuses or creates the requested one-shot handoff.
-	 * A different active arm rejects the restart before the current model changes.
+	 * An initial target mismatch rejects before selection; a concurrent arm change can reject after the model changes.
 	 */
 	async restart(
 		source: Model,
@@ -503,17 +510,30 @@ export class PrewalkCoordinator {
 			(formatModelStringWithRouting(active.target) !== formatModelStringWithRouting(target) ||
 				active.thinkingLevel !== targetThinkingLevel)
 		) {
+			this.#noticeAlreadyArmed(active);
+			return "rejected";
+		}
+
+		const switched = await this.#host.setModelTemporary(source, sourceThinkingLevel);
+		const current = this.#host.model();
+		const currentModel = current ? formatModelStringWithRouting(current) : "none";
+		if (!switched) {
 			this.#host.emitNotice(
 				"info",
-				`Prewalk: already armed for ${active.target.provider}/${active.target.id}, waiting for the first edit/write.`,
+				`Prewalk: restart cancelled; the planning model selection was superseded. Current model: ${currentModel}.`,
 				"prewalk",
 			);
 			return "rejected";
 		}
-
-		if (!(await this.#host.setModelTemporary(source, sourceThinkingLevel))) return "rejected";
 		if (!active || active === this.#autoArm) return this.arm(target, targetThinkingLevel) ? "armed" : "reset";
-		if (this.#prewalk !== active) return "rejected";
+		if (this.#prewalk !== active) {
+			this.#host.emitNotice(
+				"info",
+				`Prewalk: restart cancelled; the prewalk arm changed while selecting the planning model${this.#prewalk ? "" : " and no prewalk is armed"}. Current model: ${currentModel}.`,
+				"prewalk",
+			);
+			return "rejected";
+		}
 		if (this.#isNoop(active)) {
 			this.#scrubPlanNudge();
 			this.#disarmNoop(active);

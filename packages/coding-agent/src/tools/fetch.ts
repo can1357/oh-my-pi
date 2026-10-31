@@ -547,6 +547,69 @@ function stripDataUriImages(markdown: string): string {
 	return markdown.replace(DATA_URI_IMAGE_RE, (_match, alt: string) => (alt.trim() ? `![${alt}]` : ""));
 }
 
+/**
+ * Lowercased `<meta>` names whose front-matter line is worth its tokens to a reader; Open Graph,
+ * Twitter Card, viewport and verification tags are not.
+ */
+const READER_META_NAMES: Record<string, true> = {
+	description: true,
+	author: true,
+	"article:published_time": true,
+	"article:modified_time": true,
+};
+
+/** The key of a front-matter line: a plain YAML scalar, which holds no `: `, or a double-quoted one. */
+const FRONT_MATTER_KEY_RE = /^(?:("(?:\\.|[^\\"])*")|([^"][^\n]*?)): /;
+
+/** Omitted `<meta>` names the front matter lists by name; the rest are counted. */
+const MAX_OMITTED_META_NAMES = 25;
+
+/** Reader output at or under this many characters is no rendering of the page. */
+const MIN_RENDERED_CHARS = 100;
+
+/**
+ * Drop the native converter's front-matter lines for `<meta>` tags outside {@link READER_META_NAMES}
+ * (keys `meta-<name>`, YAML-escaped) and name them in one `meta_omitted` line. A page whose only
+ * content is its `<head>` is returned whole.
+ */
+function pruneFrontMatter(markdown: string): string {
+	if (!markdown.startsWith("---\n")) return markdown;
+	const end = markdown.indexOf("\n---\n", 3);
+	if (end < 0) return markdown;
+	const kept: string[] = [];
+	const omitted: string[] = [];
+	for (const line of markdown.slice(4, end).split("\n")) {
+		const key = FRONT_MATTER_KEY_RE.exec(line);
+		// No front matter: the body opens with a `---` rule.
+		if (!key) return markdown;
+		let name: string;
+		try {
+			// The converter's double-quoted escapes are JSON's.
+			name = key[1] === undefined ? key[2] : JSON.parse(key[1]);
+		} catch {
+			return markdown;
+		}
+		if (name.startsWith("meta-") && !Object.hasOwn(READER_META_NAMES, name.slice(5).toLowerCase())) {
+			omitted.push(name.slice(5));
+		} else {
+			kept.push(line);
+		}
+	}
+	if (omitted.length === 0) return markdown;
+	const rest = markdown.slice(end);
+	const head = kept.join("\n");
+	// `renderHtmlToText` already stripped data-URI images, so the length check needs no second pass.
+	if ((head ? `---\n${head}${rest}` : rest.slice(5)).trim().length <= MIN_RENDERED_CHARS) return markdown;
+	const more = omitted.length - MAX_OMITTED_META_NAMES;
+	const note = `${omitted.slice(0, MAX_OMITTED_META_NAMES).join(", ")}${more > 0 ? ` (+${more} more)` : ""}; read the URL with :raw for their values`;
+	// A JSON string is a YAML double-quoted scalar once the characters YAML reads as line breaks are escaped.
+	const value = JSON.stringify(note).replace(
+		/[\u0085\u2028\u2029]/g,
+		c => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`,
+	);
+	return `---\n${head ? `${head}\n` : ""}meta_omitted: ${value}${rest}`;
+}
+
 /** Reader backends for {@link renderHtmlToText}, in default priority order. */
 export type FetchProvider = "native" | "trafilatura" | "lynx" | "parallel" | "firecrawl" | "jina";
 
@@ -671,7 +734,7 @@ export async function renderHtmlToText(
 			const rendered = await runners[method]();
 			if (!rendered) continue;
 			const content = stripDataUriImages(rendered);
-			if (content.trim().length <= 100) continue;
+			if (content.trim().length <= MIN_RENDERED_CHARS) continue;
 			if (!isLowQualityOutput(content, method)) {
 				return { content, ok: true, method };
 			}
@@ -1553,7 +1616,10 @@ async function renderUrl(
 			notes.push("Page appears to require JavaScript or is mostly navigation");
 		}
 
-		const output = finalizeOutput(htmlResult.content);
+		// Every check above judged the rendering whole; only the copy returned is pruned.
+		const output = finalizeOutput(
+			htmlResult.method === "native" ? pruneFrontMatter(htmlResult.content) : htmlResult.content,
+		);
 		return {
 			url,
 			finalUrl,

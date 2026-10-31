@@ -2,9 +2,12 @@
 
 ## [Unreleased]
 
+## [18.14.0] - 2026-10-29
+
 ### Added
 
-- Added the TSP `json` kind (`TspJsonProps`: a raw JSON `value` and `open`, the container levels expanded below the top-level entries), which the terminal draws as an interactive tree
+- Added the TSP `json` kind for displaying raw JSON values as interactive, expandable trees in the terminal.
+- Added `TspEditorProps.typeahead` support so programs that cannot yet read input can preserve typed text, display it at the caret, and submit it when input becomes available.
 
 ## [18.13.3] - 2026-10-28
 

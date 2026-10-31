@@ -98,11 +98,9 @@ struct LimiterCursor<'collection> {
 
 impl LimiterCursor<'_> {
 	fn try_next(self, arg: Argument) -> Result<Argument, ExhaustedCommandSpace> {
-		if self.limiters.is_empty() {
-			Ok(arg)
-		} else {
-			let (current, remaining) = self.limiters.split_at_mut(1);
-			current[0].try_arg(arg, LimiterCursor { limiters: remaining })
+		match self.limiters.split_first_mut() {
+			None => Ok(arg),
+			Some((current, remaining)) => current.try_arg(arg, LimiterCursor { limiters: remaining }),
 		}
 	}
 }
@@ -610,7 +608,7 @@ impl ArgumentReader for WhitespaceDelimitedArgumentReader {
 		}
 
 		Ok(Some(Argument {
-			arg:  String::from_utf8_lossy(&result[..]).into_owned().into(),
+			arg:  String::from_utf8_lossy_owned(result).into(),
 			kind: if terminated_by_newline {
 				ArgumentKind::HardTerminated
 			} else {
@@ -665,7 +663,7 @@ impl ArgumentReader for ByteDelimitedArgumentReader {
 				continue;
 			}
 			return Ok(Some(Argument {
-				arg:  String::from_utf8_lossy(&result).into_owned().into(),
+				arg:  String::from_utf8_lossy_owned(result).into(),
 				kind: ArgumentKind::HardTerminated,
 			}));
 		}

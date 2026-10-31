@@ -19,7 +19,8 @@ const OPAQUE_URI_RE = /^([a-z][a-z0-9+.-]*):(.+)$/is;
 // A read-tool selector chain (`12`, `1-20,30+5`, `raw`, `raw:2-4`, `conflicts`)
 // so `Makefile:12` or `notes:raw` is not mistaken for an opaque URI.
 const SELECTOR_CHUNK_SRC = String.raw`(?:raw|conflicts|-?\d+(?:[-+]\d+)?(?:,\d+(?:[-+]\d+)?)*)`;
-const SELECTOR_CHAIN_RE = new RegExp(`^${SELECTOR_CHUNK_SRC}(?::${SELECTOR_CHUNK_SRC})*$`, "i");
+// A `;` after the chain means a path list (`Dockerfile:198-220;a.yml:1-60`), not an opaque URI.
+const SELECTOR_CHAIN_RE = new RegExp(`^${SELECTOR_CHUNK_SRC}(?::${SELECTOR_CHUNK_SRC})*(?:;|$)`, "i");
 
 /**
  * Extract the lowercased scheme from a URI-shaped input, or `undefined` when

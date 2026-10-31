@@ -469,6 +469,12 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		values: ["gemini", "anthropic", "codex", "xai", "openrouter", "openai"],
 	},
 	"web-search-model": { key: "webSearchModel", set: "catalog", shape: "scalar" },
+	/**
+	 * Revision suffix the host appends to the model's id (Vertex `@default`): a
+	 * `provider/id` selector written without it names this model exactly.
+	 * Unassigned: the id has no implied revision and must be written in full.
+	 */
+	"selector-revision-suffix": { key: "selectorRevisionSuffix", set: "catalog", shape: "scalar" },
 	"hosted-image": { key: "hostedImage", set: "catalog", shape: "scalar", values: [true, false] },
 	/** How the model line bills an input image; shape and formulas in `./image-tokenization`. */
 	"image-tokenization": { key: "imageTokenization", set: "catalog", shape: "object" },
@@ -496,8 +502,9 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"image-max-edge": { key: "imageMaxEdge", set: "catalog", shape: "scalar" },
 	"inline-image-byte-budget": { key: "inlineImageByteBudget", set: "catalog", shape: "scalar" },
 	/**
-	 * Largest request body the host accepts. Where set, the inline-image byte clamp keeps the newest user message's
-	 * and newest tool result's images past `inline-image-byte-budget` while they alone fit this limit.
+	 * Largest request body the host accepts. Where set, the inline-image byte clamp keeps images within what the
+	 * request's other bytes leave of it, and keeps the newest user message's and newest tool result's images past
+	 * `inline-image-byte-budget` while they fit that room.
 	 */
 	"request-body-byte-limit": { key: "requestBodyByteLimit", set: "catalog", shape: "scalar" },
 	/**

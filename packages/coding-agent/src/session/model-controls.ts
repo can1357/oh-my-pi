@@ -67,15 +67,27 @@ export interface ModelControlsHost {
 	model(): Model | undefined;
 	sessionId(): string;
 	promptGeneration(): number;
+	sessionGenerationSettled(): Promise<void> | undefined;
 	resolveActiveEditMode(): EditMode;
 	syncAfterModelChange(previousEditMode: EditMode): Promise<void>;
-	setModelWithProviderSessionReset(model: Model, selection?: "explicit" | "automatic"): Promise<void>;
+	/** Calls onPublished synchronously after successful assignment, before subscribers or reconciliation. */
+	setModelWithProviderSessionReset(
+		model: Model,
+		selection: "explicit" | "automatic",
+		onPublished: () => void,
+	): Promise<void>;
 	clearActiveRetryFallback(): void;
 	clearInheritedProviderPromptCacheKey(): void;
 	magicKeywordEnabled(keyword: MagicKeywordId): boolean;
 	emit(event: AgentSessionEvent): void;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
+}
+
+interface ModelPublicationScope {
+	preparation: object;
+	livePublication: number;
+	resumePublication: number;
 }
 
 /** Owns model selection, thinking effort, role cycling, and service tiers. */
@@ -89,6 +101,8 @@ export class ModelControls {
 	#autoResolvedLevel: Effort | undefined;
 	#selectionGeneration = 0;
 	#modelPublication = 0;
+	// /clear and /new keep published model owners; a rejected transcript switch restores them.
+	#publicationScope: ModelPublicationScope = { preparation: {}, livePublication: 0, resumePublication: 0 };
 	#serviceTierByFamily: ServiceTierByFamily;
 
 	constructor(
@@ -124,6 +138,21 @@ export class ModelControls {
 
 	get #model(): Model | undefined {
 		return this.#host.model();
+	}
+
+	beginPublicationScope(): ModelPublicationScope {
+		const previousScope = this.#publicationScope;
+		this.#publicationScope = { preparation: {}, livePublication: 0, resumePublication: 0 };
+		return previousScope;
+	}
+
+	restorePublicationScope(scope: ModelPublicationScope): void {
+		this.#publicationScope = scope;
+	}
+
+	/** /new inherits published models, but not outgoing preparation that has yet to assign one. */
+	invalidatePendingModelSelections(): void {
+		this.#publicationScope.preparation = {};
 	}
 
 	invalidateAutomaticSelection(): void {
@@ -247,20 +276,31 @@ export class ModelControls {
 			persist?: boolean;
 		},
 	): Promise<{ switched: boolean }> {
+		const scope = this.#publicationScope;
+		const preparation = scope.preparation;
 		const previousEditMode = this.#host.resolveActiveEditMode();
 		if (!this.#host.modelRegistry.hasConfiguredAuth(model)) {
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
 		}
 
 		const targetModel = await this.#host.modelRegistry.refreshSelectedModelMetadata(model);
+		while (this.#publicationScope.preparation !== preparation && this.#host.sessionGenerationSettled()) {
+			await this.#host.sessionGenerationSettled();
+		}
+		if (this.#publicationScope.preparation !== preparation) return { switched: false };
 
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
 		this.#host.clearActiveRetryFallback();
-		this.#selectionGeneration++;
-		this.#modelPublication++;
-		await this.#host.setModelWithProviderSessionReset(targetModel);
-		this.#host.sessionManager.appendModelChange(formatModelStringWithRouting(targetModel), role);
-		if (options?.persist) {
+		let publication = 0;
+		await this.#host.setModelWithProviderSessionReset(targetModel, "explicit", () => {
+			this.#selectionGeneration++;
+			publication = scope.livePublication = ++this.#modelPublication;
+			if (role !== EPHEMERAL_MODEL_CHANGE_ROLE) scope.resumePublication = publication;
+		});
+		await this.#recordModelReceipt(targetModel, role, publication, scope);
+		if (this.#publicationScope !== scope) return { switched: false };
+		const settingsOwner = role === EPHEMERAL_MODEL_CHANGE_ROLE ? scope.livePublication : scope.resumePublication;
+		if (options?.persist && settingsOwner === publication) {
 			this.#host.settings.setModelRole(
 				role,
 				formatRoleModelValue(
@@ -273,13 +313,15 @@ export class ModelControls {
 				),
 			);
 		}
-		this.#host.settings.getStorage()?.recordModelUsage(`${targetModel.provider}/${targetModel.id}`);
 
 		// Re-apply thinking for the newly selected model. Prefer the model's
 		// configured defaultLevel; otherwise preserve the current level (or auto).
 		this.#reapplyThinkingLevel(targetModel.thinking?.defaultLevel);
 		await this.#host.syncAfterModelChange(previousEditMode);
-		return { switched: true };
+		while (this.#publicationScope !== scope && this.#host.sessionGenerationSettled()) {
+			await this.#host.sessionGenerationSettled();
+		}
+		return { switched: this.#publicationScope === scope };
 	}
 
 	/**
@@ -296,6 +338,8 @@ export class ModelControls {
 		options?: { ephemeral?: boolean; prewalk?: boolean },
 		selection: "explicit" | "automatic" = "explicit",
 	): Promise<boolean> {
+		const scope = this.#publicationScope;
+		const preparation = scope.preparation;
 		const previousEditMode = this.#host.resolveActiveEditMode();
 		if (!this.#host.modelRegistry.hasConfiguredAuth(model)) {
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
@@ -303,26 +347,29 @@ export class ModelControls {
 
 		const generation = this.#selectionGeneration;
 		const targetModel = await this.#host.modelRegistry.refreshSelectedModelMetadata(model);
+		while (this.#publicationScope.preparation !== preparation && this.#host.sessionGenerationSettled()) {
+			await this.#host.sessionGenerationSettled();
+		}
+		if (this.#publicationScope.preparation !== preparation) return false;
 		// An automatic switch yields to a model or effort selected while its metadata loaded.
 		if (selection === "automatic" && this.#selectionGeneration !== generation) return false;
 
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
 		this.#host.clearActiveRetryFallback();
-		const published = ++this.#selectionGeneration;
-		const publication = ++this.#modelPublication;
-		await this.#host.setModelWithProviderSessionReset(targetModel, selection);
-		// A newer model publication owns the journal leaf; this stale one must not become the resume target.
-		if (this.#modelPublication === publication) {
-			this.#host.sessionManager.appendModelChange(
-				formatModelStringWithRouting(targetModel),
-				options?.prewalk
-					? PREWALK_MODEL_CHANGE_ROLE
-					: options?.ephemeral
-						? EPHEMERAL_MODEL_CHANGE_ROLE
-						: "temporary",
-			);
-			this.#host.settings.getStorage()?.recordModelUsage(`${targetModel.provider}/${targetModel.id}`);
-		}
+		let published = 0;
+		let publication = 0;
+		const role = options?.prewalk
+			? PREWALK_MODEL_CHANGE_ROLE
+			: options?.ephemeral
+				? EPHEMERAL_MODEL_CHANGE_ROLE
+				: "temporary";
+		await this.#host.setModelWithProviderSessionReset(targetModel, selection, () => {
+			published = ++this.#selectionGeneration;
+			publication = scope.livePublication = ++this.#modelPublication;
+			if (role !== EPHEMERAL_MODEL_CHANGE_ROLE) scope.resumePublication = publication;
+		});
+		await this.#recordModelReceipt(targetModel, role, publication, scope);
+		if (this.#publicationScope !== scope) return false;
 
 		// A selection made while this one reconciled owns the effort.
 		if (this.#selectionGeneration === published) {
@@ -337,7 +384,27 @@ export class ModelControls {
 			this.#setThinkingLevel(this.configuredThinkingLevel());
 		}
 		await this.#host.syncAfterModelChange(previousEditMode);
-		return this.#modelPublication === publication;
+		while (this.#publicationScope !== scope && this.#host.sessionGenerationSettled()) {
+			await this.#host.sessionGenerationSettled();
+		}
+		return this.#publicationScope === scope && scope.livePublication === publication;
+	}
+
+	async #recordModelReceipt(
+		model: Model,
+		role: string | undefined,
+		publication: number,
+		scope: ModelPublicationScope,
+	) {
+		while (this.#publicationScope !== scope && this.#host.sessionGenerationSettled()) {
+			await this.#host.sessionGenerationSettled();
+		}
+		if (this.#publicationScope !== scope) return;
+		// Ephemeral publications own live state, not the latest resume-eligible receipt.
+		const owner = role === EPHEMERAL_MODEL_CHANGE_ROLE ? scope.livePublication : scope.resumePublication;
+		if (owner !== publication) return;
+		this.#host.sessionManager.appendModelChange(formatModelStringWithRouting(model), role);
+		this.#host.settings.getStorage()?.recordModelUsage(`${model.provider}/${model.id}`);
 	}
 
 	/**
@@ -417,11 +484,14 @@ export class ModelControls {
 	 * Apply a resolved role model as the active model without changing global
 	 * settings. Shared with role cycling and the plan-approval model slider.
 	 */
-	async applyRoleModel(entry: ResolvedRoleModel): Promise<void> {
-		await this.setModel(entry.model, entry.role);
+	async applyRoleModel(entry: ResolvedRoleModel): Promise<boolean> {
+		const scope = this.#publicationScope;
+		const result = await this.setModel(entry.model, entry.role);
+		if (!result.switched || this.#publicationScope !== scope) return false;
 		if (entry.explicitThinkingLevel && entry.thinkingLevel !== undefined) {
 			this.setThinkingLevel(entry.thinkingLevel);
 		}
+		return true;
 	}
 
 	/**
@@ -434,13 +504,14 @@ export class ModelControls {
 		roleOrder: readonly string[],
 		direction: "forward" | "backward" = "forward",
 	): Promise<RoleModelCycleResult | undefined> {
+		const scope = this.#publicationScope;
 		const cycle = this.getRoleModelCycle(roleOrder);
 		if (!cycle || cycle.models.length <= 1) return undefined;
 
 		const step = direction === "backward" ? -1 : 1;
 		const next = cycle.models[(cycle.currentIndex + step + cycle.models.length) % cycle.models.length];
 
-		await this.applyRoleModel(next);
+		if (!(await this.applyRoleModel(next)) || this.#publicationScope !== scope) return undefined;
 
 		return { model: next.model, thinkingLevel: this.thinkingLevel, role: next.role };
 	}
@@ -468,8 +539,14 @@ export class ModelControls {
 	}
 
 	async #cycleScopedModel(direction: "forward" | "backward"): Promise<ModelCycleResult | undefined> {
+		const scope = this.#publicationScope;
+		const preparation = scope.preparation;
 		const previousEditMode = this.#host.resolveActiveEditMode();
 		const scopedModels = await this.#getScopedModelsWithApiKey();
+		while (this.#publicationScope.preparation !== preparation && this.#host.sessionGenerationSettled()) {
+			await this.#host.sessionGenerationSettled();
+		}
+		if (this.#publicationScope.preparation !== preparation) return undefined;
 		if (scopedModels.length <= 1) return undefined;
 
 		const currentModel = this.#model;
@@ -483,20 +560,29 @@ export class ModelControls {
 		// Apply model
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(next.model));
 		this.#host.clearActiveRetryFallback();
-		this.#selectionGeneration++;
-		this.#modelPublication++;
-		await this.#host.setModelWithProviderSessionReset(next.model);
-		this.#host.sessionManager.appendModelChange(formatModelStringWithRouting(next.model));
-		this.#host.settings.getStorage()?.recordModelUsage(`${next.model.provider}/${next.model.id}`);
+		let publication = 0;
+		await this.#host.setModelWithProviderSessionReset(next.model, "explicit", () => {
+			this.#selectionGeneration++;
+			publication = scope.livePublication = ++this.#modelPublication;
+			scope.resumePublication = publication;
+		});
+		await this.#recordModelReceipt(next.model, undefined, publication, scope);
+		if (this.#publicationScope !== scope) return undefined;
 
 		// Apply the scoped model's configured thinking level, preserving auto.
 		this.setThinkingLevel(this.#autoThinking ? AUTO_THINKING : next.thinkingLevel);
 		await this.#host.syncAfterModelChange(previousEditMode);
+		while (this.#publicationScope !== scope && this.#host.sessionGenerationSettled()) {
+			await this.#host.sessionGenerationSettled();
+		}
+		if (this.#publicationScope !== scope) return undefined;
 
 		return { model: next.model, thinkingLevel: this.thinkingLevel, isScoped: true };
 	}
 
 	async #cycleAvailableModel(direction: "forward" | "backward"): Promise<ModelCycleResult | undefined> {
+		const scope = this.#publicationScope;
+		const preparation = scope.preparation;
 		const previousEditMode = this.#host.resolveActiveEditMode();
 		const availableModels = this.#host.modelRegistry.getAvailable();
 		if (availableModels.length <= 1) return undefined;
@@ -513,17 +599,28 @@ export class ModelControls {
 		if (!apiKey) {
 			throw new Error(`No API key for ${nextModel.provider}/${nextModel.id}`);
 		}
+		while (this.#publicationScope.preparation !== preparation && this.#host.sessionGenerationSettled()) {
+			await this.#host.sessionGenerationSettled();
+		}
+		if (this.#publicationScope.preparation !== preparation) return undefined;
 
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(nextModel));
 		this.#host.clearActiveRetryFallback();
-		this.#selectionGeneration++;
-		this.#modelPublication++;
-		await this.#host.setModelWithProviderSessionReset(nextModel);
-		this.#host.sessionManager.appendModelChange(formatModelStringWithRouting(nextModel));
-		this.#host.settings.getStorage()?.recordModelUsage(`${nextModel.provider}/${nextModel.id}`);
+		let publication = 0;
+		await this.#host.setModelWithProviderSessionReset(nextModel, "explicit", () => {
+			this.#selectionGeneration++;
+			publication = scope.livePublication = ++this.#modelPublication;
+			scope.resumePublication = publication;
+		});
+		await this.#recordModelReceipt(nextModel, undefined, publication, scope);
+		if (this.#publicationScope !== scope) return undefined;
 		// Re-apply the current thinking level (or auto) for the newly selected model
 		this.#reapplyThinkingLevel();
 		await this.#host.syncAfterModelChange(previousEditMode);
+		while (this.#publicationScope !== scope && this.#host.sessionGenerationSettled()) {
+			await this.#host.sessionGenerationSettled();
+		}
+		if (this.#publicationScope !== scope) return undefined;
 
 		return { model: nextModel, thinkingLevel: this.thinkingLevel, isScoped: false };
 	}

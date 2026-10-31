@@ -1,5 +1,5 @@
 /**
- * Bake↔runtime consistency gate: for every bundled models.json row, the compat
+ * Bake↔runtime consistency gate: for every bundled catalog row, the compat
  * engine (`resolveModelPolicy`) must reproduce the row's baked `compat` and
  * `thinking` values exactly, so a rule change that is not re-baked into the
  * bundle fails here.
@@ -16,7 +16,7 @@
 import { describe, expect, test } from "bun:test";
 import { isCollapsedVariantSpec } from "../src/compat/collapse";
 import { resolveModelPolicy } from "../src/compat/resolve";
-import models from "../src/models.json";
+import { getBundledModels, getBundledProviders } from "../src/models";
 import type { Api, Model, ModelSpec } from "../src/types";
 
 function jsonClone<T>(value: T): unknown {
@@ -82,15 +82,14 @@ function keepsExplicitThinking(row: RowLike): boolean {
 }
 
 describe("compat parity", () => {
-	test("engine reproduces every baked models.json compat/thinking value", () => {
+	test("engine reproduces every baked catalog compat/thinking value", () => {
 		const diffs: string[] = [];
 		let rows = 0;
-		for (const provider in models) {
-			const providerModels = models[provider as keyof typeof models] as Record<string, unknown>;
-			for (const modelId in providerModels) {
-				const row = providerModels[modelId] as unknown as Model<Api> & RowLike;
+		for (const provider of getBundledProviders()) {
+			for (const model of getBundledModels(provider)) {
+				const row = model as unknown as RowLike;
 				rows++;
-				const label = `${provider}/${modelId}`;
+				const label = `${provider}/${row.id}`;
 				const {
 					compat: _compat,
 					compatConfig,

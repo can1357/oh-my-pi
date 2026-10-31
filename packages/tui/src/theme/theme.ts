@@ -8,16 +8,8 @@ import * as logger from "@oh-my-pi/pi-utils/logger";
 import { isTerminalBackgroundQueryTrusted } from "../terminal-multiplexer";
 import { setActiveSymbolTheme } from "./active-symbols";
 import { ansi256ToHex, resolveThemeColors, resolveVarRefs } from "./color";
-import {
-	type CreateThemeOptions,
-	createTheme,
-	getBuiltinThemes,
-	loadTheme,
-	loadThemeJson,
-	loadThemeJsonSync,
-	loadThemeSync,
-} from "./loader";
-import { isValidThemeBg, isValidThemeColor, type ThemeColor, type ThemeJson } from "./schema";
+import { type CreateThemeOptions, getBuiltinThemes, loadTheme, loadThemeJson, loadThemeSync } from "./loader";
+import { type ThemeColor, type ThemeJson } from "./schema";
 import type { SymbolPreset } from "./symbols";
 import type { Theme } from "./theme-class";
 

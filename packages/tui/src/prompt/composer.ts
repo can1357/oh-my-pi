@@ -220,13 +220,6 @@ function viewportLinkTargets(rows: readonly string[]): ViewportLink[] {
 }
 
 /**
- * Reserved click-candidate id for the pinned HUD expander row. Checked before
- * any registry lookup: its `@…:…` charset cannot collide with generated agent
- * ids (word names, numeric and `-N` suffixes, dotted nesting).
- */
-export const PINNED_HUD_TOGGLE_ID = "@omp:toggle-pinned-hud";
-
-/**
  * Nested background opens inside a hovered row. The band wraps the line, so a
  * surviving nested open would paint over it for every cell it covers; the
  * matching closes stay and become band resumes via bgFill.
@@ -1138,6 +1131,9 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	start(options: ComposerStartOptions = {}): void {
 		if (this.#started || this.#stopped) return;
 		this.#started = true;
+		// A TSP terminal keeps (and draws) what is typed until startup releases
+		// the held input, standing in for the kernel echo other terminals give.
+		this.#editor.nativeTypeahead = options.deferInput === true;
 		this.ui.start({ clearScrollback: options.clearScrollback === true, deferInput: options.deferInput === true });
 		if (options.playWelcomeIntro !== false) this.playWelcomeIntro();
 		// Deferred input identifies the CLI prepaint handoff. Flush the queued
@@ -1221,7 +1217,21 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	/** Update the canonical editor reference after InteractiveMode remounts a custom editor. */
 	setEditor(editor: CustomEditor): void {
 		this.ui.replaceHeldFocus(this.#editor, editor);
+		editor.nativeTypeahead = this.#editor.nativeTypeahead;
 		this.#editor = editor;
+	}
+
+	/**
+	 * End the startup input hold once the app's handlers are wired: the TSP
+	 * terminal sends the typing it kept, and the keys the TUI held replay
+	 * ({@link TUI.releaseHeldInput}). Idempotent.
+	 */
+	releaseHeldInput(): void {
+		if (this.#editor.nativeTypeahead) {
+			this.#editor.nativeTypeahead = false;
+			this.ui.requestRender();
+		}
+		this.ui.releaseHeldInput();
 	}
 
 	/**

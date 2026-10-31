@@ -83,10 +83,17 @@ import { DEFAULT_AUTH_GATEWAY_BIND } from "./types";
 // `parseBind` lives in ../utils/parse-bind so the gateway and broker can't
 // drift on accepted inputs (e.g. empty hostname, IPv6 brackets).
 
-const FORMAT_ROUTES: Record<string, { module: FormatModule; label: string }> = {
-	"/v1/chat/completions": { module: openaiChat, label: "openai-chat" },
-	"/v1/messages": { module: anthropicMessages, label: "anthropic-messages" },
-	"/v1/responses": { module: openaiResponses, label: "openai-responses" },
+/** A foreign chat wire the gateway translates: its codec, log label, and the pi-ai api it speaks natively. */
+interface FormatRoute {
+	module: FormatModule;
+	label: string;
+	api: Api;
+}
+
+const FORMAT_ROUTES: Record<string, FormatRoute> = {
+	"/v1/chat/completions": { module: openaiChat, label: "openai-chat", api: "openai-completions" },
+	"/v1/messages": { module: anthropicMessages, label: "anthropic-messages", api: "anthropic-messages" },
+	"/v1/responses": { module: openaiResponses, label: "openai-responses", api: "openai-responses" },
 };
 
 // (passthrough fast-path removed — it bypassed pi-ai provider logic, in
@@ -299,7 +306,7 @@ function chatRouteRejection(model: Model<Api>): string | undefined {
 // (handlePassthrough removed — see note above.)
 
 async function handleFormatEndpoint(
-	route: { module: FormatModule; label: string },
+	route: FormatRoute,
 	bootOpts: AuthGatewayRouteOptions,
 	req: Request,
 	peer: string,
@@ -330,7 +337,7 @@ async function handleFormatEndpoint(
 		return route.module.formatError(400, "invalid_request_error", "Missing top-level `model` field");
 	}
 
-	const model = bootOpts.resolveModel(modelId);
+	const model = bootOpts.resolveModel(modelId, { api: route.api });
 	if (!model) {
 		return route.module.formatError(404, "invalid_request_error", `Unknown model: ${modelId}`);
 	}
@@ -892,18 +899,11 @@ function scopeRouteOptions(opts: AuthGatewayRouteOptions, client: AuthGatewayCli
 	return {
 		...opts,
 		client,
-		resolveModel: id => {
-			const model = resolveModel(id);
-			if (model) {
-				if (client.allows(model)) return model;
-				// A provider-qualified id names one model: a refused one is never reread as another provider's bare id.
-				if (`${model.provider}/${model.id}` === id) return undefined;
-			}
-			// A bare id whose first match is refused resolves to the first served model of that id the client may call.
-			for (const candidate of listModels?.() ?? []) {
-				if (candidate.id === id && client.allows(candidate)) return candidate;
-			}
-			return undefined;
+		resolveModel: (id, options) => {
+			const accepts = (model: Model<Api>): boolean => client.allows(model) && (options?.accepts?.(model) ?? true);
+			const model = resolveModel(id, { ...options, accepts });
+			// Checked again so a resolver that ignores `accepts` still never serves a refused model.
+			return model && accepts(model) ? model : undefined;
 		},
 		listModels: listModels && (() => [...listModels()].filter(model => client.allows(model))),
 	};

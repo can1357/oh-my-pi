@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, setSystemTime, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -14,6 +14,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { RACY_STAMP_WINDOW_MS } from "@oh-my-pi/pi-coding-agent/tools/racy-stamp";
 import * as toolTimeouts from "@oh-my-pi/pi-coding-agent/tools/tool-timeouts";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { $which, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
@@ -39,6 +40,15 @@ function writeFileWithMtime(filePath: string, content: string, mtimeMs: number):
 	fs.writeFileSync(filePath, content);
 	const mtime = new Date(mtimeMs);
 	fs.utimesSync(filePath, mtime, mtime);
+}
+
+/** Makes `Bun.file(filePath).stat()` answer `stat()`, as a filesystem whose timestamps the test picks. */
+function reportStat(filePath: string, stat: () => fs.Stats): void {
+	const prototype: Bun.BunFile = Object.getPrototypeOf(Bun.file(filePath));
+	const realStat = prototype.stat;
+	vi.spyOn(prototype, "stat").mockImplementation(function (this: Bun.BunFile) {
+		return this.name === filePath ? Promise.resolve(stat()) : realStat.call(this);
+	});
 }
 
 function shellEscape(value: string): string {
@@ -1841,16 +1851,53 @@ describe("Coding Agent Tools", () => {
 			const pinnedMtime = new Date("2024-01-01T00:00:00Z");
 			fs.writeFileSync(archivePath, createZipArchive([{ path: "alpha.txt", content: "first\n" }]));
 			fs.utimesSync(archivePath, pinnedMtime, pinnedMtime);
-			expect(getTextOutput(await readTool.execute("test-call-zip-before", { path: archivePath }))).toContain(
-				"alpha.txt",
-			);
+			const settled = await Bun.file(archivePath).stat();
+			let reported = settled;
+			reportStat(archivePath, () => reported);
+			// The archive is older than the racy window when first read, so its index is cached
+			// (the clock ticks in whole milliseconds; ctime carries a fraction).
+			setSystemTime(new Date(Math.ceil(settled.ctimeMs) + RACY_STAMP_WINDOW_MS));
+			try {
+				expect(getTextOutput(await readTool.execute("test-call-zip-before", { path: archivePath }))).toContain(
+					"alpha.txt",
+				);
 
-			// Same-length name and content: the rewrite keeps the size; the mtime is put back.
-			fs.writeFileSync(archivePath, createZipArchive([{ path: "bravo.txt", content: "other\n" }]));
-			fs.utimesSync(archivePath, pinnedMtime, pinnedMtime);
-			const output = getTextOutput(await readTool.execute("test-call-zip-after", { path: archivePath }));
-			expect(output).toContain("bravo.txt");
-			expect(output).not.toContain("alpha.txt");
+				// Same-length name and content: the rewrite keeps the size; the mtime is put back.
+				fs.writeFileSync(archivePath, createZipArchive([{ path: "bravo.txt", content: "other\n" }]));
+				fs.utimesSync(archivePath, pinnedMtime, pinnedMtime);
+				// Only the change time tells it apart, moved on by the next timestamp granule.
+				reported = Object.assign(Object.create(Object.getPrototypeOf(settled)), settled, {
+					ctimeMs: settled.ctimeMs + 1,
+				});
+				const output = getTextOutput(await readTool.execute("test-call-zip-after", { path: archivePath }));
+				expect(output).toContain("bravo.txt");
+				expect(output).not.toContain("alpha.txt");
+			} finally {
+				setSystemTime();
+			}
+		});
+
+		it("re-reads an archive rewritten in place within one timestamp granule", async () => {
+			const archivePath = path.join(testDir, "granule.zip");
+			await Bun.write(archivePath, createZipArchive([{ path: "alpha.txt", content: "first\n" }]));
+			// A coarse-timestamp filesystem: the same-size rewrite below lands in this
+			// write's granule, so it leaves the archive's whole stat unchanged.
+			const granuleStat = await Bun.file(archivePath).stat();
+			reportStat(archivePath, () => granuleStat);
+			// Both reads run inside the granule.
+			setSystemTime(granuleStat.ctime);
+			try {
+				expect(
+					getTextOutput(await readTool.execute("test-call-zip-granule-before", { path: archivePath })),
+				).toContain("alpha.txt");
+
+				await Bun.write(archivePath, createZipArchive([{ path: "bravo.txt", content: "other\n" }]));
+				const output = getTextOutput(await readTool.execute("test-call-zip-granule-after", { path: archivePath }));
+				expect(output).toContain("bravo.txt");
+				expect(output).not.toContain("alpha.txt");
+			} finally {
+				setSystemTime();
+			}
 		});
 
 		it("should list zip archives without inflating member payloads", async () => {

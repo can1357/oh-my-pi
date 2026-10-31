@@ -11,6 +11,7 @@ import { formatModelStringWithRouting, parseModelPattern } from "@oh-my-pi/pi-co
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { Prewalk } from "@oh-my-pi/pi-coding-agent/session/agent-session-types";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
 	cfgCompactionEnabled,
@@ -741,8 +742,159 @@ describe("AgentSession auto-prewalk", () => {
 			expect(compact).toHaveBeenCalledWith("threshold", false, expect.objectContaining({ phase: "mid_turn" }));
 		});
 
+		it.each(["metadata", "reconciliation"] as const)(
+			"a direct manual arm during context promotion %s owns the pending handoff",
+			async phase => {
+				stubJudge([PREWALK, DIRECT]);
+				const promoted = modelOrThrow("claude-opus-4-6");
+				const f = createFixture([toolCall("todo", "todo"), done("planned"), done("next"), done("followup")], {
+					auto: "on",
+					beforeStream: async () => {
+						if (f.requested.length !== 1) return;
+						cfgCompactionEnabled.override(f.settings, true);
+						cfgCompactionThresholdTokens.override(f.settings, 1);
+						cfgContextPromotionEnabled.override(f.settings, true);
+					},
+				});
+				vi.spyOn(SessionMaintenance.prototype, "deferThresholdCompactionToSpeculation").mockReturnValue(false);
+				vi.spyOn(SessionMaintenance.prototype, "resolveContextPromotionTarget").mockImplementation(async current =>
+					current.id === f.primary.id ? promoted : undefined,
+				);
+				vi.spyOn(SessionMaintenance.prototype, "runAutoCompaction").mockResolvedValue({
+					continuationScheduled: false,
+				});
+				const entered = Promise.withResolvers<void>();
+				const release = Promise.withResolvers<void>();
+				let held = false;
+				if (phase === "metadata") {
+					const refresh = f.modelRegistry.refreshSelectedModelMetadata.bind(f.modelRegistry);
+					vi.spyOn(f.modelRegistry, "refreshSelectedModelMetadata").mockImplementation(async model => {
+						if (!held && model.id === promoted.id) {
+							held = true;
+							entered.resolve();
+							await release.promise;
+						}
+						return refresh(model);
+					});
+				} else {
+					const reconcile = SessionTools.prototype.reconcileThinkTool;
+					vi.spyOn(SessionTools.prototype, "reconcileThinkTool").mockImplementation(async function (
+						this: SessionTools,
+						...args
+					) {
+						if (!held && f.session.model?.id === promoted.id) {
+							held = true;
+							entered.resolve();
+							await release.promise;
+						}
+						return reconcile.apply(this, args);
+					});
+				}
+				const task = f.session.prompt(TASK);
+				await entered.promise;
+				const automaticArm = f.session.getPrewalkState();
+				let arm;
+				try {
+					cfgCompactionEnabled.override(f.settings, false);
+					expect(automaticArm).toBeDefined();
+					expect(f.session.armPrewalk(f.target, Effort.Medium)).toBe(true);
+					arm = f.session.getPrewalkState();
+				} finally {
+					release.resolve();
+					await task;
+				}
+				expect(f.session.getLastAssistantMessage()).toMatchObject({ stopReason: "stop" });
+				const selected = phase === "metadata" ? f.primary : promoted;
+				expect(f.session.getPrewalkState()).toBe(arm);
+				expect(arm).not.toBe(automaticArm);
+				expect(arm).toMatchObject({ target: f.target, thinkingLevel: Effort.Medium });
+				expect(f.session.model?.id).toBe(selected.id);
+				expect(f.session.configuredThinkingLevel()).toBe(Effort.High);
+				expect(f.requested.at(-1)).toBe(selected.id);
+				expect(f.efforts.at(-1)).toBe(Effort.High);
+				expect(f.notices.some(notice => notice.startsWith("Prewalk: switched"))).toBe(false);
+				await f.session.prompt("explain the cursor without changing any files");
+				expect(f.session.getLastAssistantMessage()).toMatchObject({ stopReason: "stop" });
+				expect(f.session.getPrewalkState()).toBe(arm);
+				expect(f.requested.at(-1)).toBe(selected.id);
+				expect(f.efforts.at(-1)).toBe(Effort.High);
+				expect(f.nudges.flat()).not.toContain("prewalk-checklist");
+				expect(f.notices.some(notice => notice.startsWith("Prewalk: switched"))).toBe(false);
+			},
+		);
+
+		it.each(["metadata", "reconciliation"] as const)(
+			"a direct manual arm during source restoration %s owns the pending handoff",
+			async phase => {
+				stubJudge([PREWALK, DIRECT]);
+				let arm: Prewalk | undefined;
+				let restoredBoundary = false;
+				const manual = modelOrThrow("claude-opus-4-6");
+				const f = createFixture([...cycle(), done("next"), ...cycle(), done("later")], {
+					auto: "on",
+					beforeStream: async () => {
+						if (!arm || restoredBoundary || f.session.model?.id !== f.primary.id) return;
+						restoredBoundary = true;
+						expect(f.session.getPrewalkState()).toBe(arm);
+						expect(f.session.configuredThinkingLevel()).toBe(Effort.High);
+						expect(f.efforts.at(-1)).toBe(Effort.High);
+					},
+				});
+				await f.session.prompt(TASK);
+				const entered = Promise.withResolvers<void>();
+				const release = Promise.withResolvers<void>();
+				let held = false;
+				if (phase === "metadata") {
+					const refresh = f.modelRegistry.refreshSelectedModelMetadata.bind(f.modelRegistry);
+					vi.spyOn(f.modelRegistry, "refreshSelectedModelMetadata").mockImplementation(async model => {
+						if (!held && model.id === f.primary.id) {
+							held = true;
+							entered.resolve();
+							await release.promise;
+						}
+						return refresh(model);
+					});
+				} else {
+					const reconcile = SessionTools.prototype.reconcileThinkTool;
+					vi.spyOn(SessionTools.prototype, "reconcileThinkTool").mockImplementation(async function (
+						this: SessionTools,
+						...args
+					) {
+						if (!held && f.session.model?.id === f.primary.id) {
+							held = true;
+							entered.resolve();
+							await release.promise;
+						}
+						return reconcile.apply(this, args);
+					});
+				}
+				const task = f.session.prompt("explain the cursor without changing any files");
+				await entered.promise;
+				try {
+					expect(f.session.armPrewalk(manual, Effort.Medium)).toBe(true);
+					arm = f.session.getPrewalkState();
+				} finally {
+					release.resolve();
+					await task;
+				}
+				expect(restoredBoundary).toBe(true);
+				expect(arm?.thinkingLevel).toBe(Effort.Medium);
+				expect(f.session.getPrewalkState()).toBeUndefined();
+				expect(f.session.model?.id).toBe(manual.id);
+				expect(f.session.configuredThinkingLevel()).toBe(Effort.Medium);
+				expect(f.requested.at(-1)).toBe(manual.id);
+				expect(f.efforts.at(-1)).toBe(Effort.Medium);
+				expect(f.nudges.at(-1)).toContain("prewalk-checklist");
+				await f.session.prompt("explain another cursor without changing any files");
+				expect(f.session.model?.id).toBe(manual.id);
+				expect(f.session.configuredThinkingLevel()).toBe(Effort.Medium);
+				expect(f.requested.at(-1)).toBe(manual.id);
+				expect(f.efforts.at(-1)).toBe(Effort.Medium);
+			},
+		);
+
 		it("a restart superseded during metadata rejects without replacing the selected model or arm", async () => {
-			const f = createFixture([]);
+			const f = createFixture([done("next")]);
 			const source = modelOrThrow("claude-opus-4-6");
 			expect(f.session.armPrewalk(f.target, Effort.Low)).toBe(true);
 			const arm = f.session.getPrewalkState();
@@ -756,6 +908,66 @@ describe("AgentSession auto-prewalk", () => {
 			expect(f.session.model?.id).toBe(f.primary.id);
 			expect(f.session.configuredThinkingLevel()).toBe(Effort.Medium);
 			expect(f.session.getPrewalkState()).toBe(arm);
+			expect(
+				f.notices.some(
+					notice =>
+						/restart.*cancel/i.test(notice) &&
+						/superseded/i.test(notice) &&
+						notice.includes(`${f.primary.provider}/${f.primary.id}`),
+				),
+			).toBe(true);
+			await f.session.prompt("explain the cursor without changing any files");
+			expect(f.requested.length).toBeGreaterThan(0);
+			expect(f.requested.every(model => model === f.primary.id)).toBe(true);
+			expect(f.efforts.every(effort => effort === Effort.Medium)).toBe(true);
+			expect(f.session.getPrewalkState()).toBe(arm);
+			expect(f.nudges.flat()).not.toContain("prewalk-checklist");
+		});
+
+		it("a restart whose arm is removed after source publication explains the changed model and missing arm", async () => {
+			const f = createFixture([done("next")]);
+			const source = modelOrThrow("claude-opus-4-6");
+			expect(f.session.armPrewalk(f.target, Effort.Low)).toBe(true);
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const reconcile = SessionTools.prototype.reconcileThinkTool;
+			let held = false;
+			vi.spyOn(SessionTools.prototype, "reconcileThinkTool").mockImplementation(async function (
+				this: SessionTools,
+				...args
+			) {
+				if (!held && f.session.model?.id === source.id) {
+					held = true;
+					entered.resolve();
+					await release.promise;
+				}
+				return reconcile.apply(this, args);
+			});
+			const restarting = f.session.restartPrewalk(source, Effort.High, f.target, Effort.Low);
+			await entered.promise;
+			try {
+				f.session.disarmPrewalk();
+			} finally {
+				release.resolve();
+			}
+			expect(await restarting).toBe("rejected");
+			expect(f.session.model?.id).toBe(source.id);
+			expect(f.session.configuredThinkingLevel()).toBe(Effort.High);
+			expect(f.session.getPrewalkState()).toBeUndefined();
+			expect(
+				f.notices.some(
+					notice =>
+						/restart.*cancel/i.test(notice) &&
+						/arm changed/i.test(notice) &&
+						/no prewalk is armed/i.test(notice) &&
+						notice.includes(`${source.provider}/${source.id}`),
+				),
+			).toBe(true);
+			await f.session.prompt("explain the cursor without changing any files");
+			expect(f.requested).toEqual([source.id]);
+			expect(f.efforts).toEqual([Effort.High]);
+			expect(f.nudges.flat()).not.toContain("prewalk-checklist");
+			expect(f.notices.some(notice => notice.startsWith("Prewalk: switched"))).toBe(false);
 		});
 
 		it.each(["restart finishes first", "older target finishes first"] as const)(
@@ -1892,7 +2104,7 @@ describe("AgentSession auto-prewalk", () => {
 			let replacementSteering;
 			try {
 				f.session.setThinkingLevel(Effort.Medium);
-				coordinator.releaseHandoff();
+				coordinator.releaseHandoffAndAutoArm();
 				expect(coordinator.state).toBeUndefined();
 				expect(coordinator.arm(modelOrThrow("claude-opus-4-6"), Effort.Medium)).toBe(true);
 				replacementArm = coordinator.state;

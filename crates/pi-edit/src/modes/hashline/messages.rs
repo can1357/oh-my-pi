@@ -109,10 +109,7 @@ impl std::fmt::Display for AbsoluteRangeOp {
 }
 
 fn reg_suffix(register: Option<&str>) -> String {
-	match register {
-		Some(reg) => format!(" @{reg}"),
-		None => String::new(),
-	}
+	register.map_or_default(|reg| format!(" @{reg}"))
 }
 
 fn range_op_single(op: AbsoluteRangeOp, line: u32, register: Option<&str>) -> String {
@@ -641,10 +638,7 @@ pub fn boundary_variant_repair_warning(start_line: u32, kept: u32, dropped: u32)
 /// tree-sitter and surfaced in the same response instead of waiting for a
 /// compiler pass.
 pub fn edit_broke_parse_warning(first_changed_line: Option<u32>) -> String {
-	let at = match first_changed_line {
-		Some(line) => format!(" near line {line}"),
-		None => String::new(),
-	};
+	let at = first_changed_line.map_or_default(|line| format!(" near line {line}"));
 	format!(
 		"This edit introduced a syntax error{at}: the file parsed before the patch and no longer \
 		 does. It was applied exactly as written, so a line number or range endpoint is likely \

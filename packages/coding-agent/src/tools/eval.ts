@@ -189,8 +189,8 @@ export interface EvalToolDescriptionOptions {
 	eagerDelegation?: boolean;
 	/** Point blocked callers at the `wait` tool; false when the session lacks it (subagents). Default: true. */
 	waitTool?: boolean;
-	/** Enabled preludes; each becomes an `xd://eval/<name>` doc topic. */
-	preludes?: readonly Pick<EvalPreludeDefinition, "name" | "documentation">[];
+	/** Enabled preludes; each becomes an `xd://eval/<name>` doc topic, inlined when it asks to be. */
+	preludes?: readonly Pick<EvalPreludeDefinition, "name" | "documentation" | "inlineDocumentation">[];
 	/**
 	 * Inline every doc topic instead of linking `xd://eval/<topic>`. Required
 	 * when the session cannot `read` (the only transport for topic docs).
@@ -243,10 +243,16 @@ export function getEvalDocTopics(options: EvalToolDescriptionOptions = {}): Reco
 	return topics;
 }
 
-/** Model-facing eval description: core kernel surface plus one pointer per doc topic. */
+/** Model-facing eval description: core kernel surface plus one pointer per linked doc topic. */
 export function getEvalToolDescription(options: EvalToolDescriptionOptions = {}): string {
 	const preludes: { name: string; summary: string }[] = [];
+	const inlinePreludes: { name: string; documentation: string }[] = [];
 	for (const prelude of options.preludes ?? []) {
+		if (prelude.inlineDocumentation && !options.inlineTopics) {
+			const documentation = prelude.documentation.trim();
+			if (documentation) inlinePreludes.push({ name: prelude.name, documentation });
+			continue;
+		}
 		const summary = evalPreludeSummary(prelude);
 		if (summary) preludes.push({ name: prelude.name, summary });
 	}
@@ -254,6 +260,7 @@ export function getEvalToolDescription(options: EvalToolDescriptionOptions = {})
 		...evalTemplateContext(options),
 		preludes,
 		toolNames: options.toolNames,
+		inlinePreludes,
 		inlineTopics: options.inlineTopics ? Object.values(getEvalDocTopics(options)).join("\n\n") : undefined,
 	});
 }

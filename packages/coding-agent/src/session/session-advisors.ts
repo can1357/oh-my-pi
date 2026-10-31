@@ -131,7 +131,7 @@ import {
 } from "../advisor/settings";
 import { cfgCompaction, cfgContextPromotionEnabled } from "./context-settings";
 import { resolveModelCompactionSettings } from "./model-compaction-threshold";
-import { cfgRetry, cfgTierAdvisor } from "./settings";
+import { cfgProvidersOpenaiCodexDaybreak, cfgRetry, cfgTierAdvisor } from "./settings";
 
 const ADVISOR_CODEX_SSE_MAX_ATTEMPTS = 1;
 
@@ -2399,12 +2399,10 @@ export class SessionAdvisors {
 			compactionContextTokens(
 				providerContextTokens,
 				fixedPromptTokens +
-					estimateContextToolSchemaTokens(
-						agent.state.tools,
-						agent.tokenizer,
-						model,
-						this.#host.settings.revision,
-					) +
+					estimateContextToolSchemaTokens(agent.state.tools, agent.tokenizer, model, {
+						sourceRevision: this.#host.settings.revision,
+						pruneDescriptions: agent.prunesToolDescriptions(model),
+					}) +
 					storedConversationTokens +
 					incomingTokens,
 			);
@@ -2572,6 +2570,7 @@ export class SessionAdvisors {
 						metadata: advisorMetadata,
 						providerSessionState: this.#host.providerSessionState,
 						preferWebsockets: this.#host.preferWebsockets(),
+						codexAccessPrograms: cfgProvidersOpenaiCodexDaybreak.get(this.#host.settings),
 						codexCompaction,
 					},
 				);

@@ -11,6 +11,7 @@ import type { AdvisorMessageDetails } from "../../advisor";
 import { InternalUrlRouter } from "../../internal-urls";
 import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "../../collab/protocol";
 import { settings } from "../../config/settings";
+import { continuesConversation } from "./conversation-position";
 import { createAdvisorMessageCard } from "@oh-my-pi/pi-tui/chat/advisor-message";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { readMediaPath } from "@oh-my-pi/pi-tui/native/blobs";
@@ -37,6 +38,7 @@ import {
 	ReadToolGroupComponent,
 	readArgsCollapseIntoGroup,
 } from "@oh-my-pi/pi-tui/chat/read-tool-group";
+import { ReplyWriteComponent, replyDisplayMessage, toolResultReplies } from "@oh-my-pi/pi-tui/chat/reply-write";
 import { SkillMessageComponent } from "@oh-my-pi/pi-tui/chat/skill-message";
 import { StrippedToolCallsPlaceholder } from "@oh-my-pi/pi-tui/chat/stripped-tool-calls-placeholder";
 import { imageContent, textContent } from "@oh-my-pi/pi-tui/chat/transcript-entry";
@@ -55,6 +57,7 @@ import { span } from "@oh-my-pi/pi-tui/native/describe";
 import { createUsageRowBlock, turnElapsedMs } from "@oh-my-pi/pi-tui/overlays/usage-row";
 import { UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
 import { decodeStreamedToolArgs, streamingStringKeysForTool } from "../../modes/controllers/tool-args-reveal";
+import { createToolCallBlock } from "../../modes/controllers/tool-call-block";
 import {
 	materializeImageReferenceLinks,
 	materializeImageReferenceLinksSync,
@@ -726,18 +729,15 @@ export class UiHelpers {
 								streamingStringKeys: streamingStringKeysForTool(renderToolName, rawInput),
 							})
 						: content.arguments;
-					const component = new ToolExecutionComponent(
-						renderToolName,
-						renderArgs,
-						{
-							useBuiltInRenderer: this.ctx.viewSession.hasBuiltInTool(renderToolName),
-							showImages: cfgTerminalShowImages.get(settings),
-						},
+					const component = createToolCallBlock(this.ctx, {
+						name: renderToolName,
+						args: renderArgs,
 						tool,
-						this.ctx.ui,
-						this.ctx.viewSession.sessionManager.getCwd(),
-						content.id,
-					);
+						id: content.id,
+						cwd: this.ctx.viewSession.sessionManager.getCwd(),
+					});
+					// Persisted args are final: settle a reply's text now. Cards keep their own args-complete timing.
+					if (!partialJson && component instanceof ReplyWriteComponent) component.setArgsComplete();
 					component.setExpanded(this.ctx.toolOutputExpanded);
 					this.ctx.chatContainer.addChild(component);
 
@@ -873,6 +873,9 @@ export class UiHelpers {
 							todoSnapshot = component;
 						}
 					}
+				}
+				for (const reply of toolResultReplies(message.details)) {
+					this.ctx.chatContainer.addChild(createAssistantMessageComponent(this.ctx, replyDisplayMessage(reply)));
 				}
 			} else {
 				readGroup?.seal();
@@ -1283,6 +1286,7 @@ export class UiHelpers {
 		const steeringMessages = [...queuedMessages.steering];
 		const followUpMessages = [...queuedMessages.followUp];
 		if (!this.ctx.focusedAgentId) {
+			if (this.ctx.yieldCompaction) followUpMessages.push(this.ctx.yieldCompaction.text);
 			for (const entry of this.ctx.compactionQueuedMessages as CompactionQueuedMessage[]) {
 				if (entry.mode === "steer") steeringMessages.push(entry.text);
 				else followUpMessages.push(entry.text);
@@ -1398,7 +1402,15 @@ export class UiHelpers {
 	}
 
 	async flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void> {
-		if (this.ctx.compactionQueuedMessages.length === 0) {
+		// Follow-ups queued behind a yield compaction wait for it, not for a pass that lands first.
+		if (this.ctx.yieldCompaction) return;
+		const origin = this.ctx.compactionQueueOrigin;
+		this.ctx.compactionQueueOrigin = undefined;
+		if (this.ctx.compactionQueuedMessages.length === 0) return;
+		// Held behind the queued compaction that just ran: a switch or tree move while it summarized
+		// means they belong to a conversation that is no longer live, so they go back to the editor.
+		if (origin && !continuesConversation(this.ctx.sessionManager, origin)) {
+			this.ctx.restoreCompactionQueueToEditor();
 			return;
 		}
 

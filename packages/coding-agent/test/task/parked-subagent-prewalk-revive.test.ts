@@ -179,13 +179,17 @@ it.each(["model", "upstream route"] as const)(
 
 			const live = AgentRegistry.global().get(AGENT_ID)?.session;
 			if (!live) throw new Error("Expected a kept-alive subagent session");
-			expect(formatModelStringWithRouting(live.model!)).toBe(targetSelector);
+			const liveModel = live.model;
+			if (!liveModel) throw new Error("Expected a model for the kept-alive subagent session");
+			expect(formatModelStringWithRouting(liveModel)).toBe(targetSelector);
 			expect(live.configuredThinkingLevel()).toBe(Effort.High);
 
 			await AgentLifecycleManager.global().park(AGENT_ID);
 			const revived = await AgentLifecycleManager.global().ensureLive(AGENT_ID);
 
-			expect(formatModelStringWithRouting(revived.model!)).toBe(targetSelector);
+			const revivedModel = revived.model;
+			if (!revivedModel) throw new Error("Expected a model for the revived subagent session");
+			expect(formatModelStringWithRouting(revivedModel)).toBe(targetSelector);
 			expect(revived.configuredThinkingLevel()).toBe(Effort.High);
 			expect(revived.getPrewalkState()).toBeUndefined();
 			expect(revived.getActiveToolNames()).toContain("todo");

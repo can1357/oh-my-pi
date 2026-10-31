@@ -61,7 +61,7 @@ impl Utility for Sponge {
 		match result {
 			Ok(()) => 0,
 			Err(err) => {
-			host.error(format_args!("{}: {err}", file.to_string_lossy()), 1);
+			host.error(format_args!("{}: {err}", file.display()), 1);
 				1
 			},
 		}
@@ -162,7 +162,7 @@ fn write_and_swap(
 /// default creation mode so a new target ends up with ordinary permissions.
 fn create_sibling_temp(fs: &BlockingFs, target: &Path) -> io::Result<(PathBuf, File)> {
 	let dir = pi_vfs::parent_path(target)
-		.filter(|p| !p.as_os_str().is_empty())
+		.filter(|p| !p.is_empty())
 		.unwrap_or_else(|| Path::new("."));
 	let base = pi_vfs::file_name(target);
 	let base = base.as_deref().unwrap_or(OsStr::new("sponge")).to_string_lossy();

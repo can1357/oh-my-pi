@@ -26,7 +26,7 @@ type AuthenticationFactoryFn =
 const RTLD_NOW: c_int = 0x2;
 const RTLD_GLOBAL: c_int = 0x8;
 /// `RTLD_DEFAULT` on Darwin.
-const RTLD_DEFAULT: *mut c_void = -2isize as *mut c_void;
+const RTLD_DEFAULT: *mut c_void = ptr::without_provenance_mut(-2isize as usize);
 
 unsafe extern "C" {
 	fn dlopen(path: *const c_char, mode: c_int) -> *mut c_void;

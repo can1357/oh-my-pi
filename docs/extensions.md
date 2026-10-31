@@ -22,7 +22,7 @@ An extension is a TS/JS module exporting a default factory. Factories may initia
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 export default function myExtension(pi: ExtensionAPI) {
-  // register handlers/tools/commands/renderers
+	// register handlers/tools/commands/renderers
 }
 ```
 
@@ -72,40 +72,40 @@ Important constraint from `loader.ts`:
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 export default function (pi: ExtensionAPI) {
-  const z = pi.zod;
+	const z = pi.zod;
 
-  pi.setLabel("Safety + Utilities");
+	pi.setLabel("Safety + Utilities");
 
-  pi.on("session_start", async (_event, ctx) => {
-    ctx.ui.notify(`Extension loaded in ${ctx.cwd}`, "info");
-  });
+	pi.on("session_start", async (_event, ctx) => {
+		ctx.ui.notify(`Extension loaded in ${ctx.cwd}`, "info");
+	});
 
-  pi.on("tool_call", async (event) => {
-    const command = event.input.command;
-    if (event.toolName === "bash" && typeof command === "string" && command.includes("rm -rf")) {
-      return { block: true, reason: "Blocked by extension policy" };
-    }
-  });
+	pi.on("tool_call", async event => {
+		const command = event.input.command;
+		if (event.toolName === "bash" && typeof command === "string" && command.includes("rm -rf")) {
+			return { block: true, reason: "Blocked by extension policy" };
+		}
+	});
 
-  pi.registerTool({
-    name: "hello_extension",
-    label: "Hello Extension",
-    description: "Return a greeting",
-    parameters: z.object({ name: z.string() }),
-    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
-      return {
-        content: [{ type: "text", text: `Hello, ${params.name}` }],
-        details: { greeted: params.name },
-      };
-    },
-  });
+	pi.registerTool({
+		name: "hello_extension",
+		label: "Hello Extension",
+		description: "Return a greeting",
+		parameters: z.object({ name: z.string() }),
+		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+			return {
+				content: [{ type: "text", text: `Hello, ${params.name}` }],
+				details: { greeted: params.name },
+			};
+		},
+	});
 
-  pi.registerCommand("hello-ext", {
-    description: "Show queue state",
-    handler: async (_args, ctx) => {
-      ctx.ui.notify(`pending=${ctx.hasPendingMessages()}`, "info");
-    },
-  });
+	pi.registerCommand("hello-ext", {
+		description: "Show queue state",
+		handler: async (_args, ctx) => {
+			ctx.ui.notify(`pending=${ctx.hasPendingMessages()}`, "info");
+		},
+	});
 }
 ```
 
@@ -144,18 +144,20 @@ Provider `models` entries and rows returned by `fetchDynamicModels` accept the s
 
 ```ts
 pi.registerProvider("my-gateway", {
-  baseUrl: "https://gateway.example.com/v1",
-  apiKey: "GATEWAY_API_KEY",
-  models: [{
-    id: "gpt-image-2",
-    name: "GPT Image 2",
-    api: "openai-images", // kind: "image" implied
-    reasoning: false,
-    input: ["text"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 128000,
-    maxTokens: 16384,
-  }],
+	baseUrl: "https://gateway.example.com/v1",
+	apiKey: "GATEWAY_API_KEY",
+	models: [
+		{
+			id: "gpt-image-2",
+			name: "GPT Image 2",
+			api: "openai-images", // kind: "image" implied
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128000,
+			maxTokens: 16384,
+		},
+	],
 });
 ```
 
@@ -167,37 +169,37 @@ usage.
 
 ```ts
 pi.registerProvider("my-provider", {
-  baseUrl: "https://api.example.com/v1",
-  api: "openai-completions",
-  usage: {
-    id: "my-provider",
-    async fetchUsage(params, { fetch }) {
-      const response = await fetch("https://api.example.com/usage", {
-        headers: { Authorization: `Bearer ${params.credential.apiKey}` },
-      });
-      if (!response.ok) return null;
-      const payload = (await response.json()) as {
-        used: number;
-        limit: number;
-      };
-      return {
-        provider: "my-provider",
-        fetchedAt: Date.now(),
-        limits: [
-          {
-            id: "requests",
-            label: "Requests",
-            scope: { provider: "my-provider" },
-            amount: {
-              used: payload.used,
-              limit: payload.limit,
-              unit: "requests",
-            },
-          },
-        ],
-      };
-    },
-  },
+	baseUrl: "https://api.example.com/v1",
+	api: "openai-completions",
+	usage: {
+		id: "my-provider",
+		async fetchUsage(params, { fetch }) {
+			const response = await fetch("https://api.example.com/usage", {
+				headers: { Authorization: `Bearer ${params.credential.apiKey}` },
+			});
+			if (!response.ok) return null;
+			const payload = (await response.json()) as {
+				used: number;
+				limit: number;
+			};
+			return {
+				provider: "my-provider",
+				fetchedAt: Date.now(),
+				limits: [
+					{
+						id: "requests",
+						label: "Requests",
+						scope: { provider: "my-provider" },
+						amount: {
+							used: payload.used,
+							limit: payload.limit,
+							unit: "requests",
+						},
+					},
+				],
+			};
+		},
+	},
 });
 ```
 
@@ -237,30 +239,32 @@ import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 export default function (pi: ExtensionAPI) {
-  pi.registerProvider("local-command", {
-    // Required model metadata; the custom stream does not use this URL.
-    baseUrl: "https://command-provider.invalid/",
-    apiKey: "unused-by-extension",
-    api: "local-command-api",
-    streamSimple(model, context, options) {
-      const stream = new AssistantMessageEventStream();
-      // Spawn the command, translate its output, and push canonical OMP events.
-      // The implementation owns process cleanup, cancellation, and errors; the
-      // helper needs `context` for the conversation and `options` for `signal`,
-      // `cwd`, and the stable `sessionId`.
-      void runCommandAndPushEvents(stream, model, context, options);
-      return stream;
-    },
-    models: [{
-      id: "local-command-model",
-      name: "Local command",
-      reasoning: false,
-      input: ["text"],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: 128000,
-      maxTokens: 16000,
-    }],
-  });
+	pi.registerProvider("local-command", {
+		// Required model metadata; the custom stream does not use this URL.
+		baseUrl: "https://command-provider.invalid/",
+		apiKey: "unused-by-extension",
+		api: "local-command-api",
+		streamSimple(model, context, options) {
+			const stream = new AssistantMessageEventStream();
+			// Spawn the command, translate its output, and push canonical OMP events.
+			// The implementation owns process cleanup, cancellation, and errors; the
+			// helper needs `context` for the conversation and `options` for `signal`,
+			// `cwd`, and the stable `sessionId`.
+			void runCommandAndPushEvents(stream, model, context, options);
+			return stream;
+		},
+		models: [
+			{
+				id: "local-command-model",
+				name: "Local command",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128000,
+				maxTokens: 16000,
+			},
+		],
+	});
 }
 ```
 
@@ -295,9 +299,9 @@ import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { lookup } from "@oh-my-pi/pi-coding-agent/config/registry";
 
 export default function (pi: ExtensionAPI) {
-  const recap = lookup("recap.enabled");
-  // Defer to the user: pin a default only when no env var or settings layer configures it.
-  if (recap && !recap.isConfigured(pi.pi.settings)) recap.override(pi.pi.settings, false);
+	const recap = lookup("recap.enabled");
+	// Defer to the user: pin a default only when no env var or settings layer configures it.
+	if (recap && !recap.isConfigured(pi.pi.settings)) recap.override(pi.pi.settings, false);
 }
 ```
 
@@ -360,15 +364,16 @@ Handlers and tool `execute` receive `ctx` with:
 - `openPlanReview()`: open the interactive plan review on the newest plan file, like `/plan-review`; resolves `true` once a review awaits an answer, without waiting for a choice. An already-open review is kept rather than replaced. Unlike `/plan-review` it never aborts work: it resolves `false`, silently, while the agent is streaming or compacting, when plan mode is inactive, or when no non-empty plan file exists
 - `sessionModes` (interactive TUI sessions only; `undefined` in print, JSON, RPC, ACP, and subagents): direct control of the built-in plan, vibe, goal, and loop modes without slash commands or dialogs. `getState()` returns a detached snapshot (`plan`/`goal`: `inactive | active | paused`, `vibe`: `inactive | active`, `loop`: `inactive | active | paused`, plus the plan file and goal objective/budget), so an extension that loaded late can read the current state. `set(request)` runs one explicit transition: `{ mode: "plan" | "vibe", action: "enter" | "exit" }`, `{ mode: "goal", action: "enter", objective, tokenBudget? }`, `{ mode: "goal", action: "pause" | "resume" | "drop" }`, `{ mode: "loop", action: "enter", prompt?, limit?, condition? }`, or `{ mode: "loop", action: "exit" }`. Requesting a state that already holds returns `{ ok: true, changed: false }`. Refusals return `{ ok: false, code, message, state }` with `code` `busy` (a turn, compaction, or another mode transition is running; the session is still restoring its saved modes, as during `session_start` or a session switch; or a completed goal is still being torn down), `conflict` (another mode blocks it, as with the slash commands), `disabled` (`extensionHandlers.modeControl` off, or `plan.enabled` / `goal.enabled` off), or `invalid_request`. No transition submits a prompt — send one separately; goal continuation and loop repetition start once the next turn ends. Loop `prompt` is the text repeated after each turn (without it, the user's next typed prompt); on an active loop it replaces that text, and `enter` on a paused loop resumes it. Plan `exit` leaves plan mode fully, restoring tools and model, without approving the plan or deleting its draft. Setting `extensionHandlers.modeControl: false` refuses every `set()` while `getState()` and `mode_changed` keep working.
 
-  ```ts
-  pi.registerCommand("mission", {
-  	handler: async (args, ctx) => {
-  		const entered = await ctx.sessionModes?.set({ mode: "plan", action: "enter" });
-  		if (!entered?.ok) return ctx.ui.notify(entered?.message ?? "Mode control needs the TUI", "warning");
-  		pi.sendUserMessage(args);
-  	},
-  });
-  ```
+   ```ts
+   pi.registerCommand("mission", {
+   	handler: async (args, ctx) => {
+   		const entered = await ctx.sessionModes?.set({ mode: "plan", action: "enter" });
+   		if (!entered?.ok) return ctx.ui.notify(entered?.message ?? "Mode control needs the TUI", "warning");
+   		pi.sendUserMessage(args);
+   	},
+   });
+   ```
+
 - `getSystemPrompt()`
 - `isProjectTrusted()` — always `true`; OMP does not ask for per-directory trust before loading project inputs
 - `agent` — the agent this session runs: `{ kind: "main" | "sub", id, name, depth, parentId? }`. Factories are rebound to every subagent session (task tool, eval `agent()`, `/tan` clones), so a handler can check `ctx.agent.kind === "sub"` or the lowercased agent definition `name` (for example `"explore"`) to act only in subagents. Use `kind`, not `depth`: `depth` counts `task` nesting only, so `/tan` clones are subagents at depth 0 and report `name: "sub"`. An advisor's own tool calls reach the session's `tool_call`/`tool_result` handlers with `{ kind: "sub", id: "advisor", name: "advisor", depth: 0, parentId }`, so `kind === "main"` also excludes advisor activity
@@ -385,23 +390,23 @@ Run the same side-turn pipeline as `/btw` using the current model and conversati
 
 ```ts
 if (!ctx.runEphemeralTurn) {
-  throw new Error("This host does not support ephemeral turns");
+	throw new Error("This host does not support ephemeral turns");
 }
 await requireConsultationConsent(remoteCaller);
 await auditConsultationRequest(remoteCaller, remoteQuestion);
 const { replyText } = await ctx.runEphemeralTurn({
-  promptText: remoteQuestion,
-  tools: false,
-  maxTokens: 4096,
-  maxContextBytes: 1_048_576,
-  onTextDelta: delta => sendRemoteChunk(delta),
-  signal: requestAbortController.signal,
+	promptText: remoteQuestion,
+	tools: false,
+	maxTokens: 4096,
+	maxContextBytes: 1_048_576,
+	onTextDelta: delta => sendRemoteChunk(delta),
+	signal: requestAbortController.signal,
 });
 ```
 
 For example, a Synadia/NATS bridge can answer another agent's question from the local context and stream the response back without injecting a live user message. **A side turn sends the current conversation snapshot to the configured model provider and returns its answer to the calling extension.** Bridge extensions must obtain user consent where appropriate, authenticate and authorize callers, and audit every remote request before using this API. Agent-to-agent consultation extensions can set `maxTokens` and a serialized, post-transform `maxContextBytes` cap (measured after secret obfuscation) before inference. Transports that omit or overwrite caller output-token limits, including Codex Responses, Cursor, GitLab Duo Workflow, Ollama Cloud discovery models, and Antigravity, reject `maxTokens` before inference instead of silently starting an uncapped request. Antigravity rejects requested caps conservatively across its transport because effort routing can select wire profiles with fixed output limits. A requested cap disables optional budget thinking, since those transports may otherwise raise the wire limit to fit a thinking budget; models that require budget thinking reject the cap. `tools: false` also rejects before inference on Cursor, whose transport exposes native tools independently of the supplied tool catalog. Both caps must be positive safe integers. Omit `maxTokens` only when an uncapped turn is acceptable, or choose an API that supports output limits. The extension owns transport, access controls, request limits, and cancellation (including shutdown); this API adds no network dependency. `onTextDelta` may return a promise: delivery is awaited in order, including the final flush, and a delivery error rejects the side turn and aborts the provider request instead of leaving it streaming.
 
-Hooks may start a side turn, including from delayed callbacks. Only `context`, `before_provider_request`, and `after_provider_response` hooks reached *within* a running side turn reject a nested `runEphemeralTurn` call, which bounds recursion; the caller's `onTextDelta` runs outside that guard. Side turns inherit the active event-handler signal (only while that handler is still running) and, for registered tools, the tool invocation’s abort signal. An explicit `options.signal` is combined with those signals; it does not replace them. `maxContextBytes` is checked before `before_provider_request` hooks run; a hook that replaces the payload is not re-measured.
+Hooks may start a side turn, including from delayed callbacks. Only `context`, `before_provider_request`, and `after_provider_response` hooks reached _within_ a running side turn reject a nested `runEphemeralTurn` call, which bounds recursion; the caller's `onTextDelta` runs outside that guard. Side turns inherit the active event-handler signal (only while that handler is still running) and, for registered tools, the tool invocation’s abort signal. An explicit `options.signal` is combined with those signals; it does not replace them. `maxContextBytes` is checked before `before_provider_request` hooks run; a hook that replaces the payload is not re-measured.
 
 Tool calls are always discarded rather than executed. Pass `tools: false` to remove tool definitions after context transforms and set `toolChoice: "none"` at the provider boundary. Omitting it preserves `/btw`'s tool catalog for prompt-cache reuse; disabling it may reduce cache hits. Bedrock Converse rejects tool opt-out if the transformed history still contains tool calls or results. Existing context/provider hooks still run. It is not a sandbox or a guarantee that arbitrary extension hooks have no side effects. Model inference consumes the configured provider's resources. `dedupeReply` defaults to `true`, collapses runs of more than three identical lines, and caps the returned reply at 4 KiB. Set it to `false` to disable those transformations; `replyText` is still trimmed. Callers should use `replyText` for the final result.
 
@@ -414,10 +419,10 @@ Start a `/live` session whose audio runs on a WebRTC peer the extension owns, fo
 ```ts
 if (!ctx.startLive) throw new Error("This host does not run live sessions");
 const live = await ctx.startLive({
-  sdpOffer, // from the peer: one sendrecv Opus audio track plus an "oai-events" data channel
-  onPhase: phase => relay({ phase }), // "muted": silence the peer's microphone track
-  onTranscript: t => relay({ transcript: t }),
-  onEnd: error => relay({ end: error?.message ?? null }),
+	sdpOffer, // from the peer: one sendrecv Opus audio track plus an "oai-events" data channel
+	onPhase: phase => relay({ phase }), // "muted": silence the peer's microphone track
+	onTranscript: t => relay({ transcript: t }),
+	onEnd: error => relay({ end: error?.message ?? null }),
 });
 await peer.setRemoteDescription({ type: "answer", sdp: live.sdpAnswer });
 // later: await live.stop();
@@ -441,12 +446,12 @@ Use `ctx.setInterval` / `ctx.setTimeout` for any periodic or deferred background
 
 ```ts
 pi.on("session_start", async (_event, ctx) => {
-  const timer = ctx.setInterval(() => {
-    // A throw here is contained — it will not crash the session.
-    ctx.ui.notify("tick", "info");
-  }, 60_000);
-  // Optional: clear it yourself; otherwise it is cleared on shutdown.
-  pi.on("session_shutdown", () => ctx.clearTimer(timer));
+	const timer = ctx.setInterval(() => {
+		// A throw here is contained — it will not crash the session.
+		ctx.ui.notify("tick", "info");
+	}, 60_000);
+	// Optional: clear it yourself; otherwise it is cleared on shutdown.
+	pi.on("session_shutdown", () => ctx.clearTimer(timer));
 });
 ```
 
@@ -464,9 +469,7 @@ If you use raw `setInterval`/`setTimeout` or detached promises instead, you own 
 ```ts
 // Pick a model from a different family than the current one (e.g. a cross-family reviewer).
 const current = ctx.models.current();
-const contrasting = ctx.models
-  .list()
-  .find((m) => current && ctx.models.family(m) !== ctx.models.family(current));
+const contrasting = ctx.models.list().find(m => current && ctx.models.family(m) !== ctx.models.family(current));
 ```
 
 ## 3) Command context (`ExtensionCommandContext`)
@@ -555,15 +558,16 @@ Handlers must tolerate re-entry: a source-base retry can call the entire `before
 If a later queue drain fails, earlier originals that have not reached the
 transcript are restored ahead of newer enqueues. Generated preparation context
 is not requeued, and explicitly cleared or replaced queues are not resurrected.
+
 #### External input interception
 
 `input` runs once at submission ingress, before command interpretation, skill or
 prompt-template expansion, and queue insertion:
 
-| Submission | `source` |
-|---|---|
-| Main-session Enter or Ctrl+Enter | `"interactive"` |
-| `prompt`, `steer`, `follow_up`, or `abort_and_prompt` in RPC or RPC UI mode | `"rpc"` |
+| Submission                                                                  | `source`        |
+| --------------------------------------------------------------------------- | --------------- |
+| Main-session Enter or Ctrl+Enter                                            | `"interactive"` |
+| `prompt`, `steer`, `follow_up`, or `abort_and_prompt` in RPC or RPC UI mode | `"rpc"`         |
 
 Handlers run in extension/registration order. Returned `text` and `images`
 replacements feed subsequent handlers; omitted fields preserve the current value,
@@ -633,14 +637,14 @@ and `/new`. Commands retain their explicit prefill and session-transition action
 Bridging a push-capable MCP into a session steer:
 
 ```ts
-pi.on("mcp_notification", (event) => {
-  if (event.server !== "peer-bus") return;
-  if (event.method !== "notifications/peer_message") return;
-  const params = event.params as { from: string; text: string };
-  pi.sendUserMessage(`[from ${params.from}] ${params.text}`, {
-    deliverAs: "steer",
-    attribution: "agent",
-  });
+pi.on("mcp_notification", event => {
+	if (event.server !== "peer-bus") return;
+	if (event.method !== "notifications/peer_message") return;
+	const params = event.params as { from: string; text: string };
+	pi.sendUserMessage(`[from ${params.from}] ${params.text}`, {
+		deliverAs: "steer",
+		attribution: "agent",
+	});
 });
 ```
 
@@ -685,9 +689,9 @@ A `tool_call` handler can return `additionalContext` without changing the tool r
 
 ```ts
 pi.on("tool_call", async event => {
-  if (event.toolName === "search") {
-    return { additionalContext: "Use this result before searching again." };
-  }
+	if (event.toolName === "search") {
+		return { additionalContext: "Use this result before searching again." };
+	}
 });
 ```
 
@@ -739,29 +743,29 @@ Template:
 const z = pi.zod;
 
 pi.registerTool({
-  name: "my_tool",
-  label: "My Tool",
-  description: "...",
-  parameters: z.object({}),
-  hidden: false,
-  defaultInactive: false,
-  deferrable: false,
-  async execute(_id, _params, signal, onUpdate, ctx) {
-    if (signal?.aborted) {
-      return { content: [{ type: "text", text: "Cancelled" }] };
-    }
-    onUpdate?.({ content: [{ type: "text", text: "Working..." }] });
-    return { content: [{ type: "text", text: "Done" }], details: {} };
-  },
-  onSession(event, ctx) {
-    // reason: start|switch|branch|tree|shutdown
-  },
-  renderCall(args, options, theme) {
-    // optional TUI render
-  },
-  renderResult(result, options, theme, args) {
-    // optional TUI render
-  },
+	name: "my_tool",
+	label: "My Tool",
+	description: "...",
+	parameters: z.object({}),
+	hidden: false,
+	defaultInactive: false,
+	deferrable: false,
+	async execute(_id, _params, signal, onUpdate, ctx) {
+		if (signal?.aborted) {
+			return { content: [{ type: "text", text: "Cancelled" }] };
+		}
+		onUpdate?.({ content: [{ type: "text", text: "Working..." }] });
+		return { content: [{ type: "text", text: "Done" }], details: {} };
+	},
+	onSession(event, ctx) {
+		// reason: start|switch|branch|tree|shutdown
+	},
+	renderCall(args, options, theme) {
+		// optional TUI render
+	},
+	renderResult(result, options, theme, args) {
+		// optional TUI render
+	},
 });
 ```
 
@@ -795,9 +799,9 @@ via `pi.registerFileWriteFallback` before giving up:
 import type { FileWriteFallbackHandler } from "@oh-my-pi/pi-coding-agent";
 
 const writeThroughBroker: FileWriteFallbackHandler = async (req, ctx) => {
-  // req: { dst: string; content: string; cause: unknown; sessionId: string | undefined }
-  const ok = await myPrivilegedWriter.write(req.dst, req.content);
-  return ok;
+	// req: { dst: string; content: string; cause: unknown; sessionId: string | undefined }
+	const ok = await myPrivilegedWriter.write(req.dst, req.content);
+	return ok;
 };
 
 pi.registerFileWriteFallback(writeThroughBroker);
@@ -863,8 +867,8 @@ Removing a file is a different primitive from writing one, and it has its own se
 
 ```ts
 pi.registerFileDeleteFallback(async (req, ctx) => {
-  // req: { dst; cause; confirmedFile; sessionId } — no `content`.
-  return await myPrivilegedWriter.unlink(req.dst);
+	// req: { dst; cause; confirmedFile; sessionId } — no `content`.
+	return await myPrivilegedWriter.unlink(req.dst);
 });
 ```
 
@@ -993,13 +997,13 @@ explicit typed requests.
 
 ```ts
 const result = await ctx.ui.openTerminal?.({
-  multiplexer: "tmux",
-  placement: "pane",
-  command: ["bun", "run", "dev"],
-  cwd: ctx.cwd,
-  target: process.env.TMUX_PANE!,
-  focus: false,
-  execution: "direct",
+	multiplexer: "tmux",
+	placement: "pane",
+	command: ["bun", "run", "dev"],
+	cwd: ctx.cwd,
+	target: process.env.TMUX_PANE!,
+	focus: false,
+	execution: "direct",
 });
 ```
 
@@ -1141,16 +1145,13 @@ Example reconstruction pattern:
 
 ```ts
 pi.on("session_start", async (_event, ctx) => {
-  let latest;
-  for (const entry of ctx.sessionManager.getBranch()) {
-    if (
-      entry.type === "custom" &&
-      entry.customType === "com.example.my-extension.state"
-    ) {
-      latest = entry.data;
-    }
-  }
-  // restore from latest
+	let latest;
+	for (const entry of ctx.sessionManager.getBranch()) {
+		if (entry.type === "custom" && entry.customType === "com.example.my-extension.state") {
+			latest = entry.data;
+		}
+	}
+	// restore from latest
 });
 ```
 
@@ -1192,27 +1193,27 @@ off `role` loses every tool result while user/assistant text still flows through
 
 ```ts
 for (const entry of ctx.sessionManager.getBranch()) {
-  switch (entry.type) {
-    case "custom_message":
-      // pi.sendMessage payload: entry.customType, entry.content
-      break;
-    case "branch_summary":
-      // reconstructed as role: "branchSummary"
-      break;
-    case "compaction":
-      // reconstructed as role: "compactionSummary"
-      break;
-    case "message":
-      switch (entry.message.role) {
-        case "assistant":
-          // tool calls: entry.message.content.filter(b => b.type === "toolCall")
-          break;
-        case "toolResult":
-          // entry.message.toolCallId, entry.message.content
-          break;
-      }
-      break;
-  }
+	switch (entry.type) {
+		case "custom_message":
+			// pi.sendMessage payload: entry.customType, entry.content
+			break;
+		case "branch_summary":
+			// reconstructed as role: "branchSummary"
+			break;
+		case "compaction":
+			// reconstructed as role: "compactionSummary"
+			break;
+		case "message":
+			switch (entry.message.role) {
+				case "assistant":
+					// tool calls: entry.message.content.filter(b => b.type === "toolCall")
+					break;
+				case "toolResult":
+					// entry.message.toolCallId, entry.message.content
+					break;
+			}
+			break;
+	}
 }
 ```
 
@@ -1227,28 +1228,27 @@ import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import type { ComposerStyle } from "@oh-my-pi/pi-tui";
 
 const dockStyle: ComposerStyle = {
-  id: "acme-dock",
-  sideBorders: false,
-  verticalChrome: 1,
-  statusAttachment: "none",
-  bottomBar: "full",
-  bottomBarGap: true,
-  defaultPromptGutter: "❯ ",
+	id: "acme-dock",
+	sideBorders: false,
+	verticalChrome: 1,
+	statusAttachment: "none",
+	bottomBar: "full",
+	bottomBarGap: true,
+	defaultPromptGutter: "❯ ",
 
-  defaultPaddingX: () => 0,
-  sideChromeWidth: () => 0,
-  renderTop: ({ box, width, borderColor }) =>
-    borderColor(box.horizontal.repeat(width)),
-  renderRow: ({ gutter, text, pad }) => [gutter + text + pad],
-  renderBottom: () => undefined,
+	defaultPaddingX: () => 0,
+	sideChromeWidth: () => 0,
+	renderTop: ({ box, width, borderColor }) => borderColor(box.horizontal.repeat(width)),
+	renderRow: ({ gutter, text, pad }) => [gutter + text + pad],
+	renderBottom: () => undefined,
 };
 
 export default function (pi: ExtensionAPI) {
-  pi.registerComposerShape({
-    label: "Acme Dock",
-    description: "Prompt below a single rule",
-    style: dockStyle,
-  });
+	pi.registerComposerShape({
+		label: "Acme Dock",
+		description: "Prompt below a single rule",
+		style: dockStyle,
+	});
 }
 ```
 
@@ -1298,7 +1298,7 @@ The built-in implementations in `packages/tui/src/components/composer/` are the 
 
 ```ts
 pi.registerMessageRenderer("my-type", (message, { expanded }, theme) => {
-  // return pi-tui Component
+	// return pi-tui Component
 });
 ```
 
@@ -1310,11 +1310,9 @@ Used by interactive rendering when custom messages are displayed.
 import { Container, Text } from "@oh-my-pi/pi-tui";
 
 pi.registerAssistantThinkingRenderer((context, theme) => {
-  const container = new Container();
-  container.addChild(
-    new Text(theme.fg("dim", `thinking chars: ${context.text.length}`), 1, 0),
-  );
-  return container;
+	const container = new Container();
+	container.addChild(new Text(theme.fg("dim", `thinking chars: ${context.text.length}`), 1, 0));
+	return container;
 });
 ```
 
@@ -1326,8 +1324,8 @@ Opt-in: renderers run only while the `extensionRenderers.assistantText` setting 
 
 ```ts
 pi.registerAssistantTextRenderer(({ message, contentIndex, text, streaming }) => {
-  // Return the markdown to draw for this text block, or undefined to draw `text` unchanged.
-  return streaming ? text.replace(/\{\{[^}]*$/, "") : text;
+	// Return the markdown to draw for this text block, or undefined to draw `text` unchanged.
+	return streaming ? text.replace(/\{\{[^}]*$/, "") : text;
 });
 ```
 
@@ -1346,7 +1344,7 @@ Opt-in with the same setting as [assistant text renderers](#assistant-text-rende
 ```ts
 pi.registerLinkScheme("cc-stretch");
 pi.on("link_activate", ({ url }) => {
-  // url is the link as drawn, e.g. "cc-stretch:open/1792/0/2"; validate it before acting on it
+	// url is the link as drawn, e.g. "cc-stretch:open/1792/0/2"; validate it before acting on it
 });
 ```
 
