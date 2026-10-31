@@ -985,6 +985,25 @@ const REFUSED = expect.stringContaining("Extension session retired");
 const bearer = (resolved: unknown): unknown =>
 	typeof resolved === "string" ? resolved : (resolved as { apiKey?: string } | undefined)?.apiKey;
 
+describe("a model argument a ctx member is handed", () => {
+	test("that is not a model is refused, naming the argument, not failing inside the copy", async () => {
+		const h = await reusedRuntime(() => {});
+		h.session();
+		const registry = h.runner.createContext().modelRegistry;
+		const refusals = await Promise.all(
+			[undefined, null, "anthropic/claude-sonnet-4-5"].map(value =>
+				outcome(() => registry.isUsingOAuth(value as never)),
+			),
+		);
+
+		expect(refusals).toEqual([
+			"threw: Error: ctx.modelRegistry: model is not a model object (got undefined).",
+			"threw: Error: ctx.modelRegistry: model is not a model object (got null).",
+			"threw: Error: ctx.modelRegistry: model is not a model object (got string).",
+		]);
+	});
+});
+
 describe("what a ctx member hands back", () => {
 	test("a credential resolver is the session's call: refused once it has gone, never reading the next session's key", async () => {
 		const h = await reusedRuntime(() => {});

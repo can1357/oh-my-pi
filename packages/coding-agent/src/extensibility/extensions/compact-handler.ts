@@ -86,20 +86,23 @@ export async function runExtensionSetModel(
 /**
  * A model an extension hands the host, as the host keeps it: copied once by {@link MODEL_ROW},
  * inside the admission of `owner` — the session that handed it over, refused once it has gone —
- * each field read once and a function where data belongs refused with its path. A
+ * each field read once and a function where data belongs refused with its path. Anything that is
+ * not an object is refused there too, naming the argument, rather than failing inside the copy. A
  * `resolveHeaders` is a capability, not data: the host calls it for every request it builds with
  * the model from then on ({@link handedResolver}).
  */
 export function copyHandedModel(model: Model, owner: ExtensionCallbackOwner, subject: string): Model {
-	const copied = owner.runOwned(
-		() =>
-			snapshotAuthorData(
-				model,
-				MODEL_ROW,
-				{ subject, path: ["model"], advice: "Compute the value before handing the model over." },
-				new Map(),
-			) as Model,
-	);
+	const copied = owner.runOwned(() => {
+		if (typeof model !== "object" || model === null) {
+			throw new Error(`${subject}: model is not a model object (got ${model === null ? "null" : typeof model}).`);
+		}
+		return snapshotAuthorData(
+			model,
+			MODEL_ROW,
+			{ subject, path: ["model"], advice: "Compute the value before handing the model over." },
+			new Map(),
+		) as Model;
+	});
 	const resolver = copied.resolveHeaders;
 	return resolver ? { ...copied, resolveHeaders: handedResolver(resolver, model, owner, subject) } : copied;
 }
