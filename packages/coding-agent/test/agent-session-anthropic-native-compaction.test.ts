@@ -9,6 +9,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { requestBodyText } from "@oh-my-pi/pi-ai/utils/request-body";
 import { asGlobalFetch } from "./helpers/fetch-mock";
+import { rejectionOf } from "./helpers/rejection";
 
 interface MessagesRequest {
 	system?: unknown;
@@ -247,5 +248,71 @@ describe("AgentSession Anthropic native compaction", () => {
 		expect(withoutCacheControl(next.messages.slice(0, live.messages.length))).toEqual(
 			withoutCacheControl(live.messages),
 		);
+	});
+
+	it("leaves out other models' reasoning the session stopped sending after a refusal", async () => {
+		using tempDir = TempDir.createSync("@pi-anthropic-native-compaction-stripped-");
+		const refusal = sse([
+			{
+				type: "message_start",
+				message: { id: "msg_refused", model: "claude-opus-5-5", usage: { input_tokens: 10 } },
+			},
+			{ type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "", signature: "" } },
+			{ type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "Considering" } },
+			{ type: "content_block_stop", index: 0 },
+			{
+				type: "message_delta",
+				delta: {
+					stop_reason: "refusal",
+					stop_details: { type: "refusal", category: "reasoning_extraction", explanation: null },
+				},
+				usage: { output_tokens: 5 },
+			},
+			{ type: "message_stop" },
+		]);
+		const { session, requests, close } = await openSession(tempDir, request =>
+			request === 1 ? refusal : request === 2 ? answer(request) : captured(),
+		);
+		try {
+			// An earlier Kimi turn: its reasoning reaches Claude as text.
+			const user = { role: "user" as const, content: "Plan the migration", timestamp: 1 };
+			const kimiTurn = {
+				role: "assistant" as const,
+				api: "anthropic-messages" as const,
+				provider: "kimi-code",
+				model: "k3",
+				content: [
+					{ type: "thinking" as const, thinking: "kimi private plan", thinkingSignature: "sig-kimi" },
+					{ type: "text" as const, text: "Kimi answer" },
+				],
+				stopReason: "stop" as const,
+				timestamp: 2,
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+			};
+			for (const message of [user, kimiTurn]) {
+				session.sessionManager.appendMessage(message);
+				session.agent.appendMessage(message);
+			}
+			await session.prompt("Continue");
+			expect(String(await rejectionOf(session.compact()))).toContain("captured");
+		} finally {
+			await close();
+		}
+
+		expect(requests).toHaveLength(3);
+		const [refused, live, compaction] = requests;
+		expect(JSON.stringify(refused.messages)).toContain("kimi private plan");
+		expect(JSON.stringify(live.messages)).not.toContain("kimi private plan");
+		expect(withoutCacheControl(compaction.messages)).toEqual(
+			withoutCacheControl(live.messages.slice(0, compaction.messages.length)),
+		);
+		expect(JSON.stringify(compaction.messages)).not.toContain("kimi private plan");
 	});
 });

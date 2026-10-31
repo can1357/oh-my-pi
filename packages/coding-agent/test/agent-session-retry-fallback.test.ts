@@ -4733,6 +4733,90 @@ describe("AgentSession retry fallback", () => {
 		]);
 	});
 
+	describe("reasoning_extraction refusal of other models' reasoning", () => {
+		const reasoningRefusal = (demotedReasoningBlocks: number | undefined): MockResponse => ({
+			content: [{ type: "thinking", thinking: "Classifier evaluation before refusal." }],
+			stopReason: "error",
+			stopDetails: { type: "refusal", category: "reasoning_extraction", explanation: null },
+			errorMessage: "Refusal (reasoning_extraction)",
+			demotedReasoningBlocks,
+		});
+
+		/**
+		 * Prompts Claude (GPT as its fallback) through scripted refusals. Returns each request's
+		 * model and whether it left other models' reasoning out, plus the final assistant turn.
+		 */
+		async function promptThroughRefusals(
+			primaryResponses: MockResponse[],
+			prompts = 1,
+		): Promise<{ requests: string[]; answer: AssistantMessage }> {
+			const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+			const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+			if (!primaryModel || !fallbackModel) throw new Error("Expected bundled test models to exist");
+			const requests: string[] = [];
+			const mock = createMockModel();
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					requests.push(`${model.provider}/${model.id} omit=${session?.omitsDemotedReasoning(model)}`);
+					const primary = model.provider === primaryModel.provider && model.id === primaryModel.id;
+					mock.push(
+						primary ? (primaryResponses.shift() ?? { content: ["Claude answer"] }) : { content: ["GPT answer"] },
+					);
+					return mock.stream(model, context, options);
+				},
+			});
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 5,
+				"retry.maxRetries": 1,
+				"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+			});
+			settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+			const activeSession = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+			});
+			session = activeSession;
+			for (let index = 0; index < prompts; index++) {
+				await activeSession.prompt(`Prompt ${index}`);
+				await activeSession.waitForIdle();
+			}
+			return { requests, answer: getLastAssistantMessage(activeSession) };
+		}
+
+		it("retries once on the same model without the reasoning, before the fallback chain, and keeps it out", async () => {
+			const { requests, answer } = await promptThroughRefusals([reasoningRefusal(2)], 2);
+
+			expect(requests).toEqual([
+				"anthropic/claude-sonnet-4-5 omit=false",
+				"anthropic/claude-sonnet-4-5 omit=true",
+				"anthropic/claude-sonnet-4-5 omit=true",
+			]);
+			expect(answer.content).toEqual([{ type: "text", text: "Claude answer" }]);
+		});
+
+		it("walks the fallback chain without a same-model retry when the refused request carried no reasoning", async () => {
+			const { requests } = await promptThroughRefusals([reasoningRefusal(undefined)]);
+
+			expect(requests).toEqual(["anthropic/claude-sonnet-4-5 omit=false", "openai/gpt-4o-mini omit=false"]);
+		});
+
+		it("walks the fallback chain when the refusal outlives the strip", async () => {
+			const { requests, answer } = await promptThroughRefusals([reasoningRefusal(2), reasoningRefusal(2)]);
+
+			expect(requests).toEqual([
+				"anthropic/claude-sonnet-4-5 omit=false",
+				"anthropic/claude-sonnet-4-5 omit=true",
+				"openai/gpt-4o-mini omit=false",
+			]);
+			expect(answer.content).toEqual([{ type: "text", text: "GPT answer" }]);
+		});
+	});
+
 	it.each([
 		// Fable → Opus 4.8 and Opus 5.5 → Opus 5 are catalog-permitted fallback-credit target pairs.
 		{ primaryId: "claude-fable-5", fallbackId: "claude-opus-4-8", swapRebuildsPrompt: false, nonTargetFirst: false },

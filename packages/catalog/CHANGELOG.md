@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed GitLab Duo's Claude models (`duo-chat-opus-*`, `duo-chat-sonnet-*`, `duo-chat-haiku-*`) not being treated as Claude when quoting earlier reasoning: compaction summaries and interrupted-turn notes now leave it out for them, and a `reasoning_extraction` refusal is retried without it, as for Claude elsewhere ([#17610](https://github.com/can1357/oh-my-pi/pull/17610) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.14.2] - 2026-10-31
 
 ### Breaking Changes

@@ -2,8 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `omitDemotedReasoning` to `StreamOptions`: an Anthropic request leaves out other models' reasoning that it would otherwise replay as text, and a refused request reports how many such blocks it carried in `demotedReasoningBlocks` ([#10407](https://github.com/can1357/oh-my-pi/issues/10407)) ([#17610](https://github.com/can1357/oh-my-pi/pull/17610) by [@will-bogusz](https://github.com/will-bogusz))
+
 ### Fixed
 
+- Fixed Anthropic requests dropping the reasoning of earlier non-Claude turns signed in under another credential, or kept through a compaction; it is now replayed like other models' reasoning ([#7241](https://github.com/can1357/oh-my-pi/issues/7241)) ([#17610](https://github.com/can1357/oh-my-pi/pull/17610) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed Codex conversation replay failing with an unknown `internal_chat_message_metadata_passthrough.content_token_count` parameter by omitting backend-internal response metadata from replayed input ([#17590](https://github.com/can1357/oh-my-pi/pull/17590) by [@briankeefe](https://github.com/briankeefe)).
 
 ## [18.14.2] - 2026-10-31

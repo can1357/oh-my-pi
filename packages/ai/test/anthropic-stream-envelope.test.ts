@@ -11,7 +11,14 @@ import type {
 	ToolSearchToolResultBlockParam,
 	WebSearchToolResultBlockParam,
 } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
-import type { AssistantMessageEvent, Context, Model, ModelSpec, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
+import type {
+	AssistantMessage,
+	AssistantMessageEvent,
+	Context,
+	Model,
+	ModelSpec,
+	ProviderSessionState,
+} from "@oh-my-pi/pi-ai/types";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { structuredCloneJSON } from "@oh-my-pi/pi-utils";
@@ -2161,6 +2168,133 @@ describe("anthropic stream envelope handling", () => {
 		expect(result.fallbackCreditHandle?.prefillClaim).toBe(true);
 		expect(result.fallbackCreditHandle?.params).toBeDefined();
 		expect(result.fallbackCreditHandle?.expiresAt).toBeGreaterThan(Date.now());
+	});
+
+	// Gemini's reasoning crosses APIs and Kimi's signature cannot verify on official
+	// Anthropic, so both replay as text. Opus signed its own turn on this deployment:
+	// the unsigned block beside that signed thinking is the turn's own.
+	const crossModelReasoningContext = (): Context => {
+		const assistant = (
+			api: AssistantMessage["api"],
+			provider: string,
+			id: string,
+			content: AssistantMessage["content"],
+		): AssistantMessage => ({
+			role: "assistant",
+			content,
+			api,
+			provider,
+			model: id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: 0,
+		});
+		return {
+			messages: [
+				{ role: "user", content: "Plan the migration", timestamp: 0 },
+				assistant("google-generative-ai", "google", "gemini-3-pro-preview", [
+					{ type: "thinking", thinking: "gemini private plan" },
+					{ type: "text", text: "Gemini answer" },
+				]),
+				{ role: "user", content: "Refine it", timestamp: 0 },
+				assistant("anthropic-messages", "kimi-code", "k3", [
+					{ type: "thinking", thinking: "kimi private plan", thinkingSignature: "kimi-signature" },
+					{ type: "text", text: "Kimi answer" },
+				]),
+				{ role: "user", content: "Check it", timestamp: 0 },
+				assistant("anthropic-messages", "anthropic", "claude-opus-4-5", [
+					{ type: "thinking", thinking: "opus signed plan", thinkingSignature: "sig_opus" },
+					{ type: "thinking", thinking: "opus unsigned note" },
+					{ type: "text", text: "Opus answer" },
+				]),
+				{ role: "user", content: "Ship it", timestamp: 0 },
+			],
+		};
+	};
+	const refusalEvents = (stopDetails: Record<string, unknown>): MockAnthropicEvent[] => [
+		{
+			type: "message_start",
+			message: { id: "msg_reasoning_refusal", usage: { input_tokens: 10, output_tokens: 0 } },
+		},
+		{ type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } },
+		{ type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "Considering the plan" } },
+		{ type: "content_block_stop", index: 0 },
+		{
+			type: "message_delta",
+			delta: { stop_reason: "refusal", stop_sequence: null, stop_details: { type: "refusal", ...stopDetails } },
+			usage: { input_tokens: 10, output_tokens: 4 },
+		},
+		{ type: "message_stop" },
+	];
+	/** A client that refuses every request (as `reasoning_extraction` by default), recording each request body. */
+	const refusingClient = (
+		sent: string[],
+		stopDetails: Record<string, unknown> = { category: "reasoning_extraction", explanation: null },
+	): AnthropicMessagesClientLike => ({
+		messages: {
+			create(params) {
+				sent.push(JSON.stringify(params));
+				return createMockRequest(refusalEvents(stopDetails));
+			},
+		},
+	});
+
+	it("reports the other models' reasoning a refused request replayed as text", async () => {
+		const sent: string[] = [];
+		const result = await streamAnthropic(model, crossModelReasoningContext(), {
+			client: refusingClient(sent),
+		}).result();
+
+		expect(sent).toHaveLength(1);
+		expect(sent[0]).toContain("gemini private plan");
+		expect(sent[0]).toContain("kimi private plan");
+		expect(sent[0]).toContain("opus unsigned note");
+		expect(result.errorMessage).toBe("Refusal (reasoning_extraction)");
+		expect(result.demotedReasoningBlocks).toBe(2);
+	});
+
+	it("leaves other models' reasoning out under omitDemotedReasoning and keeps a turn's own", async () => {
+		const sent: string[] = [];
+		const result = await streamAnthropic(model, crossModelReasoningContext(), {
+			client: refusingClient(sent),
+			omitDemotedReasoning: true,
+		}).result();
+
+		expect(sent).toHaveLength(1);
+		expect(sent[0]).not.toContain("gemini private plan");
+		expect(sent[0]).not.toContain("kimi private plan");
+		expect(sent[0]).toContain("Gemini answer");
+		expect(sent[0]).toContain("Kimi answer");
+		expect(sent[0]).toContain("opus signed plan");
+		expect(sent[0]).toContain("opus unsigned note");
+		expect(result.stopReason).toBe("error");
+		expect(result.demotedReasoningBlocks).toBeUndefined();
+	});
+
+	it("keeps the refused request's demoted reasoning count through a fallback-credit redemption", async () => {
+		const sent: string[] = [];
+		const refused = await streamAnthropic(model, crossModelReasoningContext(), {
+			client: refusingClient(sent, { category: "cyber", explanation: null, fallback_credit_token: "fct_carried" }),
+		}).result();
+		expect(refused.fallbackCreditHandle?.demotedReasoningBlocks).toBe(2);
+
+		// The fallback model replays the frozen body, which carries the same reasoning.
+		const redeemed = await streamAnthropic({ ...model, id: "claude-opus-4-8" }, crossModelReasoningContext(), {
+			client: refusingClient(sent),
+			fallbackCreditRedemption: refused.fallbackCreditHandle,
+		}).result();
+
+		expect(sent).toHaveLength(2);
+		expect(sent[1]).toContain("fct_carried");
+		expect(redeemed.errorMessage).toBe("Refusal (reasoning_extraction)");
+		expect(redeemed.demotedReasoningBlocks).toBe(2);
 	});
 
 	it("redeems fallback credit token with frozen request body and continuation prefill", async () => {

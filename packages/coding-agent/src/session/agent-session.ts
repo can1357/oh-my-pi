@@ -2249,7 +2249,16 @@ export class AgentSession implements SettingsScope {
 		this.#titleSystemPrompt = config.titleSystemPrompt;
 		this.#autoTitle = config.autoTitle === true;
 		this.#transformContext = config.transformContext ?? (messages => messages);
-		this.#sideStreamFn = config.sideStreamFn ?? streamSimple;
+		const sideStreamFn = config.sideStreamFn ?? streamSimple;
+		// Side requests over this history (native compaction, handoff) send it as
+		// the live turns do: once this session leaves other models' reasoning out,
+		// so do they.
+		this.#sideStreamFn = (model, context, options) =>
+			sideStreamFn(
+				model,
+				context,
+				this.#recovery.omitsDemotedReasoning(model) ? { ...options, omitDemotedReasoning: true } : options,
+			);
 		this.#onPayload = config.onPayload;
 		this.rawSseDebugBuffer = config.rawSseDebugBuffer ?? new RawSseDebugBuffer();
 		// Avoid wrapping in an `async` closure when no user callback is configured: the
@@ -15410,5 +15419,10 @@ export class AgentSession implements SettingsScope {
 	 */
 	consumeActiveFallbackCreditRedemption(targetModel?: Model): AnthropicFallbackCreditHandle | undefined {
 		return this.#recovery.consumeActiveFallbackCreditRedemption(targetModel);
+	}
+
+	/** Whether requests to `model` leave other models' reasoning out of their input. */
+	omitsDemotedReasoning(model: Model): boolean {
+		return this.#recovery.omitsDemotedReasoning(model);
 	}
 }

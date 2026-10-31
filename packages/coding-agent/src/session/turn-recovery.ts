@@ -21,6 +21,7 @@ import { calculateRateLimitBackoffMs, parseRateLimitReason } from "@oh-my-pi/pi-
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { shouldDropTruncatedThinkingOnlyAssistant } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
+import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { fallbackCreditTargets } from "@oh-my-pi/pi-catalog/compat/fallback-credit";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
@@ -437,6 +438,12 @@ export class TurnRecovery {
 	 * with how the previous one was routed.
 	 */
 	#fallbackRoutedFor: string | undefined;
+	/**
+	 * Session whose requests leave other models' reasoning out instead of
+	 * replaying it as text, after a `reasoning_extraction` refusal of a request
+	 * that carried it. Anchored like {@link #fallbackRoutedFor}.
+	 */
+	#demotedReasoningOmittedFor: string | undefined;
 	/** Memoized bootstrap answer, for the window before anything has served. */
 	#bootstrapCache:
 		| { model: Model; level: ThinkingLevel | undefined; routed: boolean; value: ServingModel }
@@ -543,6 +550,9 @@ export class TurnRecovery {
 		if (this.#fallbackRoutedFor === previousSessionId) {
 			this.#fallbackRoutedFor = sessionId;
 		}
+		if (this.#demotedReasoningOmittedFor === previousSessionId) {
+			this.#demotedReasoningOmittedFor = sessionId;
+		}
 	}
 
 	/** Resets per-prompt recovery counters and terminal-stop acceptance. */
@@ -572,6 +582,18 @@ export class TurnRecovery {
 			return undefined;
 		}
 		return active.handle;
+	}
+
+	/**
+	 * Whether a request to `model` leaves other models' reasoning out of its
+	 * input: this session turned it off after a refusal, and `model`'s
+	 * classifier refuses reasoning replayed as text.
+	 */
+	omitsDemotedReasoning(model: Model): boolean {
+		return (
+			this.#demotedReasoningOmittedFor === this.#host.sessionManager.getSessionId() &&
+			resolveCatalogPolicy(model).classifierCotExtraction === true
+		);
 	}
 
 	/**
@@ -2935,7 +2957,29 @@ export class TurnRecovery {
 			return maxDelayMs > 0 && waitMs > maxDelayMs && !waitForUsageReset;
 		};
 
-		if (!staleOpenAIResponsesReplayError && !switchedCredential && currentSelector) {
+		// A `reasoning_extraction` refusal of a request that replayed other models'
+		// reasoning as text: resend it once on this model without that reasoning,
+		// and leave it out for the rest of the session, before walking the chain.
+		// A refusal of a request that carried none would only be refused again.
+		const sessionId = this.#host.sessionManager.getSessionId();
+		const stripDemotedReasoning =
+			classifierRefusal &&
+			!retryBudgetExhausted &&
+			message.stopDetails?.category === "reasoning_extraction" &&
+			(message.demotedReasoningBlocks ?? 0) > 0 &&
+			currentModel !== undefined &&
+			resolveCatalogPolicy(currentModel).classifierCotExtraction === true &&
+			this.#demotedReasoningOmittedFor !== sessionId;
+		if (stripDemotedReasoning) {
+			this.#demotedReasoningOmittedFor = sessionId;
+			delayMs = 0;
+			logger.info("Classifier refused other models' reasoning replayed as text; retrying without it", {
+				model: `${currentModel.provider}/${currentModel.id}`,
+				demotedReasoningBlocks: message.demotedReasoningBlocks,
+			});
+		}
+
+		if (!staleOpenAIResponsesReplayError && !switchedCredential && !stripDemotedReasoning && currentSelector) {
 			// The retry budget bounds same-model retries against a failing provider. A
 			// classifier refusal is not that: retrying the same model reproduces it, and
 			// the next model in the chain is one request away and often answers. Stopping
@@ -3028,7 +3072,12 @@ export class TurnRecovery {
 			// same-route budget: every distinct account must be tried first.
 			if (switchedModel) this.#retryAttempt = 1;
 		}
-		if ((classifierRefusal || accountPolicyDenial) && !switchedCredential && !switchedModel) {
+		if (
+			(classifierRefusal || accountPolicyDenial) &&
+			!switchedCredential &&
+			!switchedModel &&
+			!stripDemotedReasoning
+		) {
 			// A prior attempt in this saga already announced `auto_retry_start`
 			// (retryAttempt was incremented for each call to this method, so > 1
 			// means at least one earlier attempt started the loop) but this
