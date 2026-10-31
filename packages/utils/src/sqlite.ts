@@ -347,14 +347,167 @@ export function checkpointWal(db: Database): void {
 const SALVAGE_MAX_DAMAGED_REGIONS = 1000;
 
 /**
+ * Largest damaged store a salvage may image in memory to bound its recovery; larger
+ * stores recover with the unbounded scan instead, because a second copy of the whole
+ * store can exceed what the process can spare and abort the best-effort salvage.
+ */
+export const SALVAGE_MAX_IMAGE_BYTES = 128 * 1024 * 1024;
+
+/**
+ * Interior table keys bound individual subtrees even when readable and damaged leaves alternate.
+ * One damaged interior page voids every bound, so the caller recovers unbounded instead.
+ * A readable child page outside the interval its ancestors' separators establish proves a
+ * redirected link, which voids every bound the same way.
+ */
+function readSalvageRowidStarts(db: Database, table: string): number[] {
+	const root = db
+		.query<{ rootpage: number }, [string]>("SELECT rootpage FROM sqlite_schema WHERE name = ?")
+		.get(table);
+	if (!root) return [];
+	// The image is a second copy of the whole store: past a cap the copy can
+	// exceed what the process can spare and abort the salvage, so oversized
+	// stores recover unbounded instead of imaging every page.
+	const pageCount = db.query<{ page_count: number }, []>("PRAGMA page_count").get()?.page_count ?? 0;
+	const pragmaPageSize = db.query<{ page_size: number }, []>("PRAGMA page_size").get()?.page_size ?? 0;
+	if (pageCount * pragmaPageSize > SALVAGE_MAX_IMAGE_BYTES) return [];
+	// Serialize through SQLite so committed WAL pages are included, without modifying the damaged store.
+	const image = db.serialize();
+	const encodedPageSize = image.readUInt16BE(16);
+	const pageSize = encodedPageSize === 1 ? 65536 : encodedPageSize;
+	const pending: Array<{ page: number; low: number; high: number }> = [
+		{ page: root.rootpage, low: Number.MIN_SAFE_INTEGER, high: Number.MAX_SAFE_INTEGER },
+	];
+	const visited = new Set<number>();
+	const starts: number[] = [];
+	let trusted = true;
+	while (pending.length > 0) {
+		const { page, low, high } = pending.pop()!;
+		const start = (page - 1) * pageSize;
+		const end = start + pageSize;
+		// A child link that is out of range, or reaches a page an earlier link
+		// already visited, proves the tree structure itself is damaged: the
+		// separators along the path to it bound the wrong subtrees, so every
+		// bound is voided and the caller recovers unbounded.
+		if (start < 0 || end > image.length || visited.has(page)) {
+			trusted = false;
+			continue;
+		}
+		visited.add(page);
+		const header = start + (page === 1 ? 100 : 0);
+		if (image[header] === 0x0d) {
+			// A leaf that still decodes is validated against its parent range; one
+			// that does not is ordinary damage and voids nothing here.
+			const cells = image.readUInt16BE(header + 3);
+			const contentStart = header + 8 + cells * 2;
+			if (contentStart > end) continue;
+			let min = Number.MAX_SAFE_INTEGER;
+			let max = Number.MIN_SAFE_INTEGER;
+			for (let index = 0; index < cells; index++) {
+				const cell = start + image.readUInt16BE(header + 8 + index * 2);
+				if (cell < contentStart || cell + 2 > end) continue;
+				// Table leaf cell: payload-size varint, then the rowid varint.
+				let offset = cell;
+				for (let consumed = 0; offset < end; consumed++, offset++) {
+					const byte = image[offset]!;
+					if (consumed === 8 || byte < 0x80) {
+						offset++;
+						break;
+					}
+				}
+				let key = 0n;
+				let readable = false;
+				for (let byteIndex = 0; offset < end; byteIndex++, offset++) {
+					const byte = image[offset]!;
+					key = (key << BigInt(byteIndex === 8 ? 8 : 7)) | BigInt(byteIndex === 8 ? byte : byte & 0x7f);
+					if (byteIndex === 8 || byte < 0x80) {
+						readable = true;
+						break;
+					}
+				}
+				if (!readable) continue;
+				const rowid = Number(BigInt.asIntN(64, key));
+				if (Number.isSafeInteger(rowid)) {
+					min = Math.min(min, rowid);
+					max = Math.max(max, rowid);
+				}
+			}
+			if (min <= max && (min <= low || max > high)) trusted = false;
+			continue;
+		}
+		if (image[header] !== 0x05) continue;
+		const cells = image.readUInt16BE(header + 3);
+		const contentStart = header + 12 + cells * 2;
+		if (contentStart > end) continue;
+		const children: Array<{ page: number; low: number; high: number }> = [];
+		let previous = low;
+		const pageStarts: number[] = [];
+		for (let index = 0; index < cells; index++) {
+			const cell = start + image.readUInt16BE(header + 12 + index * 2);
+			if (cell < contentStart || cell + 5 > end) continue;
+			const child: { page: number; low: number; high: number } = {
+				page: image.readUInt32BE(cell),
+				low: previous,
+				high,
+			};
+			children.push(child);
+			let key = 0n;
+			for (let byteIndex = 0, offset = cell + 4; byteIndex < 9 && offset < end; byteIndex++, offset++) {
+				const byte = image[offset]!;
+				key = (key << BigInt(byteIndex === 8 ? 8 : 7)) | BigInt(byteIndex === 8 ? byte : byte & 0x7f);
+				if (byteIndex === 8 || byte < 0x80) {
+					const rowid = Number(BigInt.asIntN(64, key));
+					if (Number.isSafeInteger(rowid)) {
+						// The separator bounds this child from above and the next child
+						// from below; a key outside this page's own parent range proves
+						// a redirection above it.
+						if (rowid <= low || rowid > high) trusted = false;
+						if (rowid < Number.MAX_SAFE_INTEGER) {
+							child.high = rowid;
+							previous = rowid;
+							pageStarts.push(rowid + 1);
+						}
+					}
+					break;
+				}
+			}
+		}
+		// The rightmost child holds every key above the last separator.
+		children.push({ page: image.readUInt32BE(header + 8), low: previous, high });
+		pending.push(...children);
+		// A valid interior page stores its separator keys in ascending order; a
+		// page that violates the format is itself damaged, and its values must
+		// not be trusted as skip points. Its subtree is still walked — child
+		// pages validate independently — but this page contributes no bounds.
+		let ascending = true;
+		for (let index = 1; index < pageStarts.length; index++) {
+			if (pageStarts[index]! <= pageStarts[index - 1]!) {
+				ascending = false;
+				break;
+			}
+		}
+		if (ascending) starts.push(...pageStarts);
+		else trusted = false;
+	}
+	// An invalid page also condemns the bounds of the ancestors that enclose its
+	// subtree: a bound derived from them would make the scan resume at their next
+	// surviving key and skip the readable rows the damaged subtree still holds,
+	// so a single invalid page reverts the whole scan to unbounded recovery.
+	if (!trusted) return [];
+	return starts.sort((a, b) => a - b).filter((value, index) => index === 0 || value > starts[index - 1]!);
+}
+
+/**
  * Reads every row of a rowid table that SQLite can still decode, to salvage a
  * damaged store. A full scan aborts at the first unreadable page, so this walks
  * rowids with indexed seeks instead: when a seek hits damage it doubles its
  * stride past it, then bisects back to the first rowid from which seeking
- * works again, losing only rows on the damaged pages. Cross-linked pages can
- * still decode rows with foreign column types, so callers validate types;
- * rows returned out of rowid order count as damage. Only corruption errors are
- * treated as damage; anything else is thrown.
+ * works again, losing only rows on the damaged pages. When the interior pages
+ * are valid, the recovery is bounded by the next interior subtree key, so a
+ * probe can no longer jump across a readable island into later damage, and a
+ * run of adjacent damaged leaves counts as one damaged region. Cross-linked
+ * pages can still decode rows with foreign column types, so callers validate
+ * types; rows returned out of rowid order count as damage. Only corruption
+ * errors are treated as damage; anything else is thrown.
  */
 export function readSalvageableRows<T extends object>(db: Database, table: string, columns: string): T[] {
 	type Row = T & { salvage_rowid: number };
@@ -382,18 +535,28 @@ export function readSalvageableRows<T extends object>(db: Database, table: strin
 	};
 	let after = Number.MIN_SAFE_INTEGER;
 	let damaged = 0;
+	let inDamagedRun = false;
+	let starts: number[] | undefined;
+	let nextStart = 0;
 	while (after < Number.MAX_SAFE_INTEGER) {
 		const row = probe(after);
 		if (row === null) break;
 		if (row) {
 			keep(row);
 			after = row.salvage_rowid;
+			inDamagedRun = false;
 			continue;
 		}
-		if (++damaged > SALVAGE_MAX_DAMAGED_REGIONS) break;
-		// An end-of-table result counts as clear: the gap below it may still hold readable rows.
+		// Adjacent damaged leaves belong to one region; only a region that
+		// begins after readable rows counts against the cap again.
+		if (!inDamagedRun && ++damaged > SALVAGE_MAX_DAMAGED_REGIONS) break;
+		starts ??= readSalvageRowidStarts(db, table);
+		while (nextStart < starts.length && starts[nextStart]! <= after) nextStart++;
+		// The next interior key bounds the recovery: damage narrower than a
+		// leaf still loses only its own rows, but a probe can no longer jump
+		// across a readable island into the next damaged region.
 		let bad = after;
-		let clear = Number.MAX_SAFE_INTEGER;
+		let clear = starts[nextStart] ?? Number.MAX_SAFE_INTEGER;
 		for (let step = 1; after + step < clear; step *= 2) {
 			if (probe(after + step) !== undefined) clear = after + step;
 			else bad = after + step;
@@ -408,6 +571,7 @@ export function readSalvageableRows<T extends object>(db: Database, table: strin
 		const boundary = probe(bad, clear);
 		if (boundary) keep(boundary);
 		after = clear;
+		inDamagedRun = clear === (starts[nextStart] ?? Number.MAX_SAFE_INTEGER) && boundary === undefined;
 	}
 	return rows;
 }
