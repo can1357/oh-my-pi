@@ -514,6 +514,7 @@ describe("createSettingsAwareStreamFn", () => {
 							{ index: 2, value: null, problem: "not a string (null)" },
 							{ index: 3, value: "  ", problem: "blank string" },
 						],
+						droppedCount: 3,
 						expected: "non-blank model id strings",
 					},
 				]);
@@ -550,6 +551,7 @@ describe("createSettingsAwareStreamFn", () => {
 							{ index: 0, value: 42, problem: "not a string (number)" },
 							{ index: 1, value: "  ", problem: "blank string" },
 						],
+						droppedCount: 2,
 						expected: "non-blank model id strings",
 					},
 				]);
@@ -621,10 +623,10 @@ describe("createSettingsAwareStreamFn", () => {
 			expect(calls[0]?.options?.fallbacks).toEqual([{ model: "m1" }, { model: "m2" }, { model: "m3" }]);
 		});
 
-		it("warns about an overlong chain once per chain, not per request, and not when caller fallbacks win", () => {
+		it("warns about an overlong chain once per chain, naming the entries left out, and not when caller fallbacks win", () => {
 			const overlongWarnings: unknown[] = [];
-			vi.spyOn(logger, "warn").mockImplementation((message: unknown) => {
-				if (String(message).includes("serverSideFallbackModels")) overlongWarnings.push(message);
+			vi.spyOn(logger, "warn").mockImplementation((_message: unknown, context?: Record<string, unknown>) => {
+				if (context?.setting === "providers.anthropic.serverSideFallbackModels") overlongWarnings.push(context);
 			});
 			try {
 				const settings = Settings.isolated({
@@ -639,12 +641,57 @@ describe("createSettingsAwareStreamFn", () => {
 
 				wrapped(stubFableModel, stubContext, { apiKey: "k" });
 				wrapped(stubFableModel, stubContext, { apiKey: "k" });
-				expect(overlongWarnings).toHaveLength(1);
+				expect(overlongWarnings).toEqual([
+					{
+						setting: "providers.anthropic.serverSideFallbackModels",
+						dropped: [{ index: 3, value: "m4", problem: "beyond the wire limit" }],
+						droppedCount: 1,
+						expected: "at most 3 model ids",
+					},
+				]);
 				expect(calls[2]?.options?.fallbacks).toEqual([{ model: "m1" }, { model: "m2" }, { model: "m3" }]);
 
 				cfgProvidersAnthropicServerSideFallbackModels.override(settings, ["n1", "n2", "n3", "n4"]);
 				wrapped(stubFableModel, stubContext, { apiKey: "k" });
 				expect(overlongWarnings).toHaveLength(2);
+			} finally {
+				vi.restoreAllMocks();
+			}
+		});
+
+		// A thousand-entry chain must not put a thousand ids in one log line.
+		it("names dropped entries by their configured index and lists at most ten, with the total", () => {
+			const warnings: unknown[] = [];
+			vi.spyOn(logger, "warn").mockImplementation((_message: unknown, context?: unknown) => {
+				warnings.push(context);
+			});
+			try {
+				const ids = Array.from({ length: 14 }, (_, i) => `m${i}`);
+				const settings = Settings.isolated({
+					"providers.anthropic.serverSideFallback": true,
+					"providers.anthropic.serverSideFallbackModels": [42, ...ids],
+				});
+				const { fn: base, calls } = captureBase();
+
+				createSettingsAwareStreamFn(settings, base)(stubFableModel, stubContext, { apiKey: "k" });
+
+				expect(calls[0]?.options?.fallbacks).toEqual([{ model: "m0" }, { model: "m1" }, { model: "m2" }]);
+				expect(warnings).toEqual([
+					{
+						setting: "providers.anthropic.serverSideFallbackModels",
+						dropped: [{ index: 0, value: 42, problem: "not a string (number)" }],
+						droppedCount: 1,
+						expected: "non-blank model id strings",
+					},
+					{
+						setting: "providers.anthropic.serverSideFallbackModels",
+						dropped: ids
+							.slice(3, 13)
+							.map((value, i) => ({ index: i + 4, value, problem: "beyond the wire limit" })),
+						droppedCount: 11,
+						expected: "at most 3 model ids",
+					},
+				]);
 			} finally {
 				vi.restoreAllMocks();
 			}

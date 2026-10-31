@@ -49,12 +49,32 @@ export function resolveOpenAIWebsocketPreference(settings: Settings): boolean | 
 /** Anthropic `MessageCreateParams.fallbacks` accepts at most three entries. */
 const ANTHROPIC_MAX_FALLBACK_MODELS = 3;
 
+/** Most dropped entries one warning lists; its `droppedCount` gives the total. */
+const MAX_WARNED_ENTRIES = 10;
+
+/** A configured chain entry left out of the wire chain: its index in the configured list, its value and why. */
+interface DroppedEntry {
+	index: number;
+	value: unknown;
+	problem: string;
+}
+
 /** Configured fallback chains already warned about, so each warning fires once per distinct value. */
 interface FallbackChainWarnings {
 	/** Last configured list warned about for entries that are not model ids. */
 	unusable?: readonly unknown[];
 	/** Last overlong chain warned about. */
 	overlong?: string;
+}
+
+/** Warns that `dropped` entries of the configured chain were left out, listing at most {@link MAX_WARNED_ENTRIES}. */
+function warnDroppedEntries(message: string, dropped: readonly DroppedEntry[], expected: string): void {
+	logger.warn(message, {
+		setting: cfgProvidersAnthropicServerSideFallbackModels.id,
+		dropped: dropped.slice(0, MAX_WARNED_ENTRIES),
+		droppedCount: dropped.length,
+		expected,
+	});
 }
 
 /**
@@ -68,47 +88,51 @@ interface FallbackChainWarnings {
  * unset value instead of sending nothing like `[]`.
  * The wire contract allows at most three entries
  * (MessageCreateParams.fallbacks) and an overlong chain would be rejected by
- * the API instead of falling back, so cap deliberately and loudly. Each warning
- * fires once per distinct value, tracked in `warned`, rather than on every request.
+ * the API instead of falling back, so cap deliberately and loudly, naming the
+ * entries left out. Each warning fires once per distinct value, tracked in
+ * `warned`, rather than on every request.
  */
 function configuredServerSideFallbackModels(
 	configured: readonly unknown[] | undefined,
 	warned: FallbackChainWarnings,
 ): string[] | undefined {
 	if (configured === undefined) return undefined;
-	const models: string[] = [];
-	const dropped: Array<{ index: number; value: unknown; problem: string }> = [];
+	const models: Array<{ index: number; id: string }> = [];
+	const unusable: DroppedEntry[] = [];
 	for (const [index, entry] of configured.entries()) {
 		if (typeof entry !== "string") {
-			dropped.push({ index, value: entry, problem: `not a string (${entry === null ? "null" : typeof entry})` });
+			unusable.push({ index, value: entry, problem: `not a string (${entry === null ? "null" : typeof entry})` });
 			continue;
 		}
 		const id = entry.trim();
-		if (id.length > 0) models.push(id);
-		else dropped.push({ index, value: entry, problem: "blank string" });
+		if (id.length > 0) models.push({ index, id });
+		else unusable.push({ index, value: entry, problem: "blank string" });
 	}
 	const noModelId = models.length === 0 && configured.length > 0;
-	if (dropped.length > 0 && !Bun.deepEquals(warned.unusable, configured)) {
+	if (unusable.length > 0 && !Bun.deepEquals(warned.unusable, configured)) {
 		warned.unusable = configured;
-		logger.warn(
+		warnDroppedEntries(
 			noModelId
 				? "providers.anthropic.serverSideFallbackModels has no model id; ignoring it and following the catalog chain"
 				: "providers.anthropic.serverSideFallbackModels: dropping entries that are not model ids",
-			{ setting: cfgProvidersAnthropicServerSideFallbackModels.id, dropped, expected: "non-blank model id strings" },
+			unusable,
+			"non-blank model id strings",
 		);
 	}
 	if (noModelId) return undefined;
-	if (models.length > ANTHROPIC_MAX_FALLBACK_MODELS) {
-		const chain = models.join("\n");
+	const overlong = models.slice(ANTHROPIC_MAX_FALLBACK_MODELS);
+	if (overlong.length > 0) {
+		const chain = models.map(({ id }) => id).join("\n");
 		if (warned.overlong !== chain) {
 			warned.overlong = chain;
-			logger.warn("providers.anthropic.serverSideFallbackModels exceeds the wire limit; using the first three", {
-				configured: models.length,
-				limit: ANTHROPIC_MAX_FALLBACK_MODELS,
-			});
+			warnDroppedEntries(
+				"providers.anthropic.serverSideFallbackModels exceeds the wire limit; using the first three",
+				overlong.map(({ index }) => ({ index, value: configured[index], problem: "beyond the wire limit" })),
+				`at most ${ANTHROPIC_MAX_FALLBACK_MODELS} model ids`,
+			);
 		}
 	}
-	return models.slice(0, ANTHROPIC_MAX_FALLBACK_MODELS);
+	return models.slice(0, ANTHROPIC_MAX_FALLBACK_MODELS).map(({ id }) => id);
 }
 
 function timeoutSecondsToMs(value: number): number | undefined {
