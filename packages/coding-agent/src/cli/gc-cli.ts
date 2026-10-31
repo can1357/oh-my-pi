@@ -1853,6 +1853,29 @@ async function carryLiveModeToArchive(live: string, archived: string): Promise<v
 }
 
 /**
+ * A relative link's target as an absolute path that keeps every name the
+ * target goes through: the leading `..` steps are taken against `realParent`,
+ * the link's own directory as a real path, so none of them passes through
+ * that directory by name; the rest is kept as written, so a name in it that is
+ * itself a link — `outside/current` — stays one, and the moved link follows it
+ * when it moves on. `.` steps are dropped. Undefined when a `..` follows a
+ * name in the rest: that name may be a link, so no lexical form is the same
+ * path, and a resolved one would be a snapshot.
+ */
+function aliasPreservingTarget(realParent: string, target: string): string | undefined {
+	const parts = target.split("/").filter(part => part !== "" && part !== ".");
+	let base = realParent;
+	let at = 0;
+	while (at < parts.length && parts[at] === "..") {
+		base = path.dirname(base);
+		at += 1;
+	}
+	const rest = parts.slice(at);
+	if (rest.includes("..")) return undefined;
+	return rest.length === 0 ? base : path.join(base, ...rest);
+}
+
+/**
  * Why a reclaim keeps a session whose transcript is a symbolic link: the file
  * it leads to is outside the session's tree and its leases, so a turn written
  * there after the last comparison and before the `unlink` would be left at a
@@ -1940,10 +1963,14 @@ async function proveLiveTreeIsArchived(
 		// FIFO is, and the user decides where it goes.
 		if (stat.isSymbolicLink()) {
 			// A relative link leads somewhere else once moved, so the advice for
-			// one makes it absolute first. The absolute target is the one the
-			// kernel resolves now, with no step through this tree left in it: a
-			// path that climbs out of the link's own directory with `..` stops
-			// resolving once the reclaim removes that directory.
+			// one makes it absolute first — keeping every name it goes through.
+			// The target as the kernel resolves it now is a snapshot: a link to
+			// `outside/current` made into one to `outside/v1` no longer follows
+			// `current` when it moves on, which is the very reason a reclaim
+			// keeps links. So only the leading `..` steps, which climb out of
+			// the link's own directory, are taken against that directory's real
+			// path — no step back through this tree is left to stop resolving
+			// once the tree goes — and the rest of the target is kept as written.
 			const target = await fs.readlink(source).catch(() => undefined);
 			const resolved = await fs.realpath(source).catch(() => undefined);
 			let move =
@@ -1951,11 +1978,18 @@ async function proveLiveTreeIsArchived(
 				`when the session was archived — and reclaim again`;
 			if (target !== undefined && !path.isAbsolute(target)) {
 				const parent = await fs.realpath(path.dirname(source)).catch(() => path.dirname(source));
-				const absolute = resolved ?? path.resolve(parent, target);
+				const absolute = aliasPreservingTarget(parent, target);
 				move =
-					`move the link out of the tree and reclaim again. It is a relative link, to ${target}, so moved as it is ` +
-					`it would lead somewhere else: first make it absolute with \`ln -sfn ${shellQuote(absolute)} ` +
-					`${shellQuote(source)}\`, then move it. The archive holds what it led to when the session was archived`;
+					absolute !== undefined
+						? `move the link out of the tree and reclaim again. It is a relative link, to ${target}, so moved as it ` +
+							`is it would lead somewhere else: first make it absolute, keeping every name it goes through, with ` +
+							`\`ln -sfn ${shellQuote(absolute)} ${shellQuote(source)}\`, then move it. The archive holds what it ` +
+							`led to when the session was archived`
+						: `move the link out of the tree and reclaim again. It is a relative link, to ${target}, so moved as it ` +
+							`is it would lead somewhere else, and its target steps back with \`..\` after a name that may itself ` +
+							`be a link, so no absolute form keeps it as it is: either spell the absolute target yourself, or ` +
+							`freeze it at what it leads to now${resolved !== undefined ? `, ${resolved},` : ""} — a snapshot ` +
+							`that no longer follows a name it went through when that name moves on`;
 			}
 			// Moved out, a link into this tree leads to a file the reclaim then
 			// gives up; the archive holds it, but the link will lead nowhere.

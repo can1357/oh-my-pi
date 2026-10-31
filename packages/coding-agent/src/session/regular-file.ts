@@ -102,6 +102,39 @@ export async function createExclusive(file: string, mode: number, readable = fal
 	return await fs.open(file, readable ? "wx+" : "wx", mode);
 }
 
+/**
+ * Make `dir`, new — a plain `mkdir`, which fails on any name already there —
+ * and hold it: open it at once with `O_DIRECTORY` and `O_NOFOLLOW`, so a link
+ * put at the name since the `mkdir` is refused, require the held directory to
+ * be this user's, and give it `mode` through the descriptor, so no umask
+ * leaves it unwritable to its maker. Every later change of its own — its
+ * mode above all — goes through the returned descriptor, which no rename or
+ * link can redirect: a mode set by name after the directory was filled
+ * followed a link put at the name, and gave an unrelated private directory
+ * the archived `0777`.
+ *
+ * Linux has no call that makes a directory and opens it in one step, and Node
+ * has no `mkdirat` or `openat` to tie the open to the parent: between the
+ * `mkdir` and the `open`, a writer of this user's own with access to the
+ * parent can swap in another directory it made, and the caller then holds
+ * that one. Such a concurrent writer is outside what this guards.
+ */
+export async function makeHeldDirectory(dir: string, mode = 0o700): Promise<fs.FileHandle> {
+	await fs.mkdir(dir, { mode });
+	const held = await fs.open(dir, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+	try {
+		const stat = await held.stat();
+		if (!stat.isDirectory() || (process.getuid !== undefined && stat.uid !== process.getuid())) {
+			throw new Error(`${dir} is not the directory this run just made, so nothing was put into it`);
+		}
+		await held.chmod(mode);
+		return held;
+	} catch (error) {
+		await held.close().catch(() => undefined);
+		throw error;
+	}
+}
+
 /** A file's identity: what a run captures from the descriptor that created it. */
 export interface FileIdentity {
 	dev: number;

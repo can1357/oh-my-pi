@@ -31,6 +31,7 @@ import { resolveResumableSession, resolveResumeTarget } from "@oh-my-pi/pi-codin
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import {
 	FileSessionStorage,
+	isSessionLeaseHeld,
 	sessionStagingPath,
 	tryAcquireSessionLease,
 } from "@oh-my-pi/pi-coding-agent/session/session-storage";
@@ -5799,25 +5800,211 @@ test("the printed command, stopped after its directory was renamed, names where 
 	expect(first.said).not.toContain(`anything it copied is in ${aside}/1`);
 });
 
-// One archive bucket this user cannot read: the rest of the archive is still
-// listed, and asking for a session that is not there says so, rather than
-// every lookup by id failing with `EACCES` — the policy the live listing has.
+// One archive bucket this user cannot read: the bucket is exactly where
+// another candidate might be, so a lookup by id chooses nothing and names it.
+// Skipping it instead let a formerly ambiguous prefix resolve to the one
+// session the reclaim could see and give up that session's live copy — the
+// review's wrong-session reclaim, exit 0, `reclaimed: 1`.
 test.skipIf(process.getuid?.() === 0)(
-	"an archive bucket this user cannot read is skipped, not made the answer to every lookup",
+	"an archive bucket this user cannot read stops a lookup by id from choosing, and a reclaim gives up nothing",
 	async () => {
+		const otherId = sessionId("029b1eee0f4c");
+		const hiddenLive = path.join(getSessionsDir(root), "--hidden--");
+		await fs.mkdir(hiddenLive, { recursive: true });
+		const otherFile = path.join(hiddenLive, `2026-01-01T00-00-00-000Z_${otherId}.jsonl`);
+		await Bun.write(otherFile, sessionBody(otherId, PROMPT, root));
+		const old = new Date(Date.now() - 30 * 86_400_000);
+		await fs.utimes(otherFile, old, old);
 		await archiveOnly();
-		const locked = path.join(getArchivedSessionsDir(root), "--locked--");
-		await fs.mkdir(locked, { recursive: true });
-		await Bun.write(path.join(locked, "2026-01-01T00-00-00-000Z_feedface.jsonl.gz"), "x");
-		await fs.chmod(locked, 0o000);
+		const reclaim = { agentDir: root, reclaim: testPrefix, apply: true, forwardOnly: true, json: true };
+		// Both readable: the shared prefix is ambiguous, and nothing is chosen.
+		const ambiguous = await runGcCommand({ flags: reclaim });
+		expect(ambiguous.reclaim?.reclaimed ?? 0).toBe(0);
+		expect(await Bun.file(sessionFile).exists()).toBe(true);
+		const hidden = path.join(getArchivedSessionsDir(root), "--hidden--");
+		expect(await Bun.file(path.join(hidden, `2026-01-01T00-00-00-000Z_${otherId}.jsonl.gz`)).exists()).toBe(true);
+		await fs.chmod(hidden, 0o000);
 		try {
-			const found = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, json: true } });
-			expect(found.restore?.errors).toEqual([]);
-			const missing = await runGcCommand({ flags: { agentDir: root, restore: "zzzz9999", json: true } });
-			expect(missing.restore?.errors.join("\n")).toContain('no archived session matches "zzzz9999"');
-			await expect(resolveResumableSession("zzzz9999", root, getSessionsDir(root))).resolves.toBeUndefined();
+			const reclaimed = await runGcCommand({ flags: reclaim });
+			const restored = await runGcCommand({ flags: { agentDir: root, restore: testPrefix, json: true } });
+			const unknown = await runGcCommand({ flags: { agentDir: root, restore: "zzzz9999", json: true } });
+			// With no session directory given, as \`omp --resume <id>\` asks: one given
+			// stops the lookup before it reaches the archive, and proves nothing.
+			const resumed = resolveResumableSession("zzzz9999", root);
+
+			expect(reclaimed.reclaim?.reclaimed ?? 0).toBe(0);
+			expect(reclaimed.reclaim?.errors.join("\n")).toContain(`${hidden} (EACCES) could not be read`);
+			expect(await Bun.file(sessionFile).exists()).toBe(true);
+			expect(await Bun.file(otherFile).exists()).toBe(true);
+			expect(restored.restore?.errors.join("\n")).toContain(`${hidden} (EACCES) could not be read`);
+			expect(unknown.restore?.errors.join("\n")).toContain("none was chosen");
+			await expect(resumed).rejects.toThrow(`${hidden} (EACCES) could not be read`);
 		} finally {
-			await fs.chmod(locked, 0o700);
+			await fs.chmod(hidden, 0o700);
 		}
 	},
 );
+
+// Round 35. The review's chmod race, real: between the fill and the mode, the
+// directory this restore made is renamed away and its name linked to a
+// private directory of someone else's. The mode goes through the descriptor
+// held since the `mkdir`, so the private directory keeps `0700`, its file is
+// untouched, and the restore says its directory was moved.
+test.skipIf(process.getuid?.() === 0)(
+	"a restore gives a directory it made its archived mode through the descriptor it holds, not through a name someone relinked",
+	async () => {
+		const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+		await Bun.write(path.join(liveArtifacts, "keep.log"), "KEEP");
+		await Bun.write(path.join(liveArtifacts, "shared", "file.log"), "ARCHIVED");
+		await fs.chmod(path.join(liveArtifacts, "shared"), 0o777);
+		await archiveOnly();
+		await fs.rm(path.join(liveArtifacts, "shared"), { recursive: true });
+		const privateDir = path.join(root, "someone-private");
+		await Bun.write(path.join(privateDir, "UNIQUE-ONLY-COPY"), "PRIVATE");
+		await fs.chmod(privateDir, 0o700);
+		const made = path.join(liveArtifacts, "shared");
+		const movedAside = path.join(root, "moved-aside");
+		let switched = false;
+		const realRmdir = fs.rmdir;
+		// The real removal of the stage staged inside the new directory is the
+		// moment after the fill; the switch is a real rename and a real link.
+		const rmdir = spyOn(fs, "rmdir").mockImplementation((async (target: string, ...rest: unknown[]) => {
+			await (realRmdir as (...args: unknown[]) => Promise<void>)(target, ...rest);
+			if (!switched && String(target).startsWith(`${made}${path.sep}`)) {
+				switched = true;
+				await fs.rename(made, movedAside);
+				await fs.symlink(privateDir, made);
+			}
+		}) as typeof fs.rmdir);
+		let result: GcResult;
+		try {
+			result = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
+		} finally {
+			rmdir.mockRestore();
+		}
+
+		expect(switched).toBe(true);
+		expect((await fs.stat(privateDir)).mode & 0o7777).toBe(0o700);
+		expect(await Bun.file(path.join(privateDir, "UNIQUE-ONLY-COPY")).text()).toBe("PRIVATE");
+		// The mode reached the directory this restore made, wherever it is now.
+		expect((await fs.stat(movedAside)).mode & 0o7777).toBe(0o777);
+		expect(result.restore?.errors.join("\n")).toContain(`${made} is no longer the directory this restore made`);
+		await fs.chmod(movedAside, 0o700);
+	},
+);
+
+// A restore preview looks at the session's ownership lease without taking
+// it: one it held made a session opened meanwhile fork its next turn into a
+// new session — the review saw the turn land in a new file, not the original.
+test("a restore preview leaves the session's ownership lease free while it looks", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+	await archiveOnly();
+	const seen: (boolean | null)[] = [];
+	const realReaddir = fs.readdir;
+	const readdir = spyOn(fs, "readdir").mockImplementation((async (target: string, ...rest: unknown[]) => {
+		if (String(target) === archivedArtifacts) seen.push(isSessionLeaseHeld(SESSION_ID));
+		return await (realReaddir as (...args: unknown[]) => Promise<unknown>)(target, ...rest);
+	}) as typeof fs.readdir);
+	try {
+		await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, json: true } });
+		const previewed = [...seen];
+		seen.length = 0;
+		await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
+
+		expect(previewed.length).toBeGreaterThan(0);
+		expect(previewed.every(held => held === false)).toBe(true);
+		// Not vacuous: applying does take it, at the same boundary.
+		expect(seen).toContain(true);
+	} finally {
+		readdir.mockRestore();
+	}
+});
+
+// The relative-link advice keeps the names a link goes through: a link to
+// `outside/current`, made absolute as the message says and moved out, still
+// follows `current` when it moves from `v1` to `v2`. A resolved target would
+// have frozen it at `v1`.
+test("a reclaim's advice for a relative link through an alias keeps following the alias", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const outside = path.join(root, "outside");
+	await Bun.write(path.join(outside, "v1", "f"), "FIRST");
+	await Bun.write(path.join(outside, "v2", "f"), "SECOND UNIQUE");
+	await fs.symlink("v1", path.join(outside, "current"));
+	await Bun.write(path.join(liveArtifacts, "plain.log"), "PLAIN");
+	const link = path.join(liveArtifacts, "cur.link");
+	await fs.symlink(path.relative(liveArtifacts, path.join(outside, "current")), link);
+	await archiveOnly();
+	const reclaim = { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true };
+	const said = (await runGcCommand({ flags: reclaim })).reclaim?.errors.join("\n") ?? "";
+	const command = /`(ln -sfn [^`]+)`/.exec(said)?.[1];
+	expect(command).toBeDefined();
+	expect(command).toContain(path.join(await fs.realpath(outside), "current"));
+
+	expect(await Bun.spawn(["sh", "-c", command!]).exited).toBe(0);
+	const movedTo = path.join(root, "cur.link");
+	await fs.rename(link, movedTo);
+	expect((await runGcCommand({ flags: reclaim })).reclaim).toMatchObject({ reclaimed: 1, errors: [] });
+	await fs.rm(path.join(outside, "current"));
+	await fs.symlink("v2", path.join(outside, "current"));
+
+	expect(await Bun.file(path.join(movedTo, "f")).text()).toBe("SECOND UNIQUE");
+});
+
+// A target that steps back after a name that may be a link has no absolute
+// form that keeps it: the message says so and lets the user choose.
+test("a reclaim's advice says when a relative link's names cannot all be kept", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(root, "outside", "v1", "f"), "FIRST");
+	await Bun.write(path.join(liveArtifacts, "plain.log"), "PLAIN");
+	const link = path.join(liveArtifacts, "back.link");
+	const toOutside = path.relative(liveArtifacts, path.join(root, "outside"));
+	await fs.symlink(`${toOutside}/v1/../v1/f`, link);
+	await archiveOnly();
+
+	const said =
+		(
+			await runGcCommand({ flags: { agentDir: root, reclaim: archiveFile, forwardOnly: true, json: true } })
+		).reclaim?.errors.join("\n") ?? "";
+
+	expect(said).toContain("so no absolute form keeps it as it is");
+	expect(said).not.toContain("ln -sfn");
+});
+
+// The review's two stationary disagreements: preview and apply on unchanged
+// objects. A name too long to stage, and a umask that leaves its maker unable
+// to write the directories a restore makes by name: the preview now refuses
+// where applying fails, and promises nothing it would not bring home.
+for (const shape of ["an archived file whose name is too long to stage", "a umask of 0277"] as const) {
+	test.skipIf(process.getuid?.() === 0)(
+		`a restore preview refuses exactly when applying fails, for ${shape}`,
+		async () => {
+			const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+			const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+			await Bun.write(path.join(liveArtifacts, "keep.log"), "KEEP");
+			await archiveOnly();
+			if (shape === "an archived file whose name is too long to stage") {
+				await Bun.write(path.join(archivedArtifacts, "x".repeat(244)), "UNIQUE ARCHIVED BYTES");
+			} else {
+				await Bun.write(path.join(archivedArtifacts, "only"), "UNIQUE ARCHIVED BYTES");
+			}
+			const previous = shape === "a umask of 0277" ? process.umask(0o277) : undefined;
+			let preview: GcResult;
+			let applied: GcResult;
+			try {
+				preview = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, json: true } });
+				applied = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
+			} finally {
+				if (previous !== undefined) process.umask(previous);
+			}
+
+			expect((preview.restore?.errors.length ?? 0) > 0).toBe(true);
+			expect((applied.restore?.errors.length ?? 0) > 0).toBe(true);
+			expect(preview.restore?.errors.join("\n")).toContain(
+				shape === "a umask of 0277" ? "would be made under umask 0277" : "has a name too long to stage",
+			);
+			expect(preview.restore?.missingArtifacts ?? []).toEqual([]);
+		},
+	);
+}

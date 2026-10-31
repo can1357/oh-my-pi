@@ -30,6 +30,7 @@ import { codeOf, statIfPresent, withGcLock } from "./gc-lock";
 import {
 	absentFile,
 	createExclusive,
+	makeHeldDirectory,
 	type FileIdentity,
 	NotARegularFile,
 	notRegularAsAbsent,
@@ -39,13 +40,15 @@ import {
 } from "./regular-file";
 import { SESSION_TITLE_SLOT_BYTES } from "./session-entries";
 import { readSessionHeaderIdFromHandle, sessionHeaderIdFromBytes } from "./session-loader";
-import { SESSION_STAGING_RE, sessionStagingPath, tryAcquireSessionLease } from "./session-storage";
+import { isSessionLeaseHeld, SESSION_STAGING_RE, sessionStagingPath, tryAcquireSessionLease } from "./session-storage";
 import { parseTitleSlotFromContent, parseTitleSlotLine } from "./session-title-slot";
 
 /** Suffix `gc --archive` gives a transcript it has compressed. */
 export const ARCHIVED_SESSION_SUFFIX = ".jsonl.gz";
 const SESSION_SUFFIX = ".jsonl";
 const ARCHIVED_BUCKET_GLOB = new Bun.Glob(`*${ARCHIVED_SESSION_SUFFIX}`);
+/** The longest name a directory entry may have on the filesystems omp runs on. */
+const NAME_MAX = 255;
 
 /** `<agentDir>/archive/sessions`, the root `gc --archive` moves transcripts into. */
 export function getArchivedSessionsDir(agentDir?: string): string {
@@ -289,28 +292,32 @@ async function dropOwnRestoreRecord(own: OwnRestoreRecord): Promise<string | und
 }
 
 /**
- * Every archived transcript, as absolute paths, newest session first. Buckets
- * and the archive root itself are commonly symlinks onto another filesystem,
- * which `Bun.Glob` walks only when asked. The file name starts with the
- * session's own timestamp, so sorting by name orders sessions by when they
- * ran — unlike mtime, which records when gc happened to archive them.
+ * Every archived transcript, as absolute paths, newest session first, and
+ * every bucket that could not be read. Buckets and the archive root itself
+ * are commonly symlinks onto another filesystem, which `Bun.Glob` walks only
+ * when asked. The file name starts with the session's own timestamp, so
+ * sorting by name orders sessions by when they ran — unlike mtime, which
+ * records when gc happened to archive them.
  *
- * A bucket that cannot be read — gone, `EACCES`, `EPERM`, not a directory —
- * is skipped on its own, the way the live listing skips one: one private
- * project directory must not turn every lookup of a session by id into an
- * error instead of an answer. Any other failure propagates, so a scan that
- * failed is not taken for an empty archive.
+ * A bucket that cannot be read — `EACCES`, `EPERM`, gone, not a directory —
+ * is not part of the listing, and it is named in `unreadable`, never left
+ * out without a word: a listing that failed in part is not a complete
+ * listing. Any other failure propagates, so a scan that failed is not taken
+ * for an empty archive.
  */
-export async function listArchivedSessionFiles(agentDir?: string): Promise<string[]> {
+export async function scanArchivedSessionFiles(
+	agentDir?: string,
+): Promise<{ files: string[]; unreadable: { bucket: string; error: string }[] }> {
 	const archiveRoot = getArchivedSessionsDir(agentDir);
 	let buckets: string[];
 	try {
 		buckets = await fs.readdir(archiveRoot);
 	} catch (error) {
-		if (isEnoent(error) || codeOf(error) === "ENOTDIR") return [];
+		if (isEnoent(error) || codeOf(error) === "ENOTDIR") return { files: [], unreadable: [] };
 		throw error;
 	}
 	const files: string[] = [];
+	const unreadable: { bucket: string; error: string }[] = [];
 	for (const bucket of buckets) {
 		const dir = path.join(archiveRoot, bucket);
 		const found: string[] = [];
@@ -319,25 +326,50 @@ export async function listArchivedSessionFiles(agentDir?: string): Promise<strin
 				found.push(path.join(dir, name));
 			}
 		} catch (error) {
-			if (isEnoent(error) || isPermissionError(error) || codeOf(error) === "ENOTDIR") continue;
+			if (isEnoent(error) || isPermissionError(error) || codeOf(error) === "ENOTDIR") {
+				unreadable.push({ bucket: dir, error: codeOf(error) ?? errorText(error) });
+				continue;
+			}
 			throw error;
 		}
 		files.push(...found);
 	}
 	files.sort((left, right) => path.basename(right).localeCompare(path.basename(left)));
-	return files;
+	return { files, unreadable };
+}
+
+/** The archived transcripts {@link scanArchivedSessionFiles} could read — for a count, never for choosing one. */
+export async function listArchivedSessionFiles(agentDir?: string): Promise<string[]> {
+	return (await scanArchivedSessionFiles(agentDir)).files;
 }
 
 /**
  * Archived transcripts whose file name carries `sessionArg` as an id prefix,
  * newest session first. The name is `<timestamp>_<id>.jsonl.gz`, so this needs
  * no decompression and stays cheap with a large archive.
+ *
+ * Throws, choosing nothing, while any bucket cannot be read: the bucket that
+ * could not be read is exactly where another candidate might be, so a prefix
+ * that matches one readable session may be ambiguous, and one that matches
+ * none may still name a session. Skipping it instead let a reclaim resolve a
+ * formerly ambiguous prefix to the one session it could see and give up that
+ * session's live copy — the wrong one.
  */
 export async function findArchivedSessionFiles(sessionArg: string, agentDir?: string): Promise<string[]> {
 	const needle = sessionArg.toLowerCase();
 	if (!needle) return [];
+	const { files, unreadable } = await scanArchivedSessionFiles(agentDir);
+	if (unreadable.length > 0) {
+		const named = unreadable.map(({ bucket, error }) => `${bucket} (${error})`).join(", ");
+		throw new Error(
+			`archive ${unreadable.length === 1 ? "bucket" : "buckets"} ${named} could not be read, so whether ` +
+				`"${sessionArg}" matches an archived session there is not known, and none was chosen: make ` +
+				`${unreadable.length === 1 ? "it" : "them"} readable, or move ${unreadable.length === 1 ? "it" : "them"} ` +
+				`out of ${getArchivedSessionsDir(agentDir)}, and run the command again`,
+		);
+	}
 	const matches: string[] = [];
-	for (const file of await listArchivedSessionFiles(agentDir)) {
+	for (const file of files) {
 		const name = path.basename(file, ARCHIVED_SESSION_SUFFIX).toLowerCase();
 		const separator = name.lastIndexOf("_");
 		const id = separator < 0 ? name : name.slice(separator + 1);
@@ -1172,29 +1204,49 @@ async function copyEntryDereferenced(
 				plan.notePromise(destination);
 				plan.created.add(destination);
 			}
-		} else if (!existing) {
-			// Private while it is filled, and given the archived mode once it is:
-			// `mkdir` applies the umask, so a tree deliberately tightened below it
-			// would otherwise come back readable to more than it was; and taking
-			// the archived mode first made an archived `0500` directory one this
-			// restore could not put its own files into. A directory the live tree
-			// already holds keeps its own permissions — merging an archive into a
-			// private `0700` directory must not widen it to the archive's mode.
-			await fs.mkdir(destination, { recursive: true, mode: 0o700 });
 		}
-		// Sorted, so a restore that stops part-way is reproducible from its report.
-		for (const entry of (await fs.readdir(source)).sort()) {
-			await copyEntryDereferenced(
-				path.join(source, entry),
-				path.join(destination, entry),
-				archiveRoot,
-				ledger,
-				notes,
-				isResidue,
-				plan,
-			);
+		// A directory this restore makes is held, not named. Private while it
+		// is filled, and given the archived mode last, through the descriptor
+		// it was opened with — `fchmod`, which no rename or link can redirect.
+		// Setting the mode by name after the fill followed a link put at the
+		// name in between: a review renamed the new directory away and linked
+		// the name to a private directory, the restore's `chmod` gave that
+		// directory the archived `0777`, and another user removed its owner's
+		// only file. Taking the archived mode first instead made an archived
+		// `0500` directory one this restore could not fill. A directory the
+		// live tree already holds keeps its own permissions — merging an
+		// archive into a private `0700` directory must not widen it.
+		let held: fs.FileHandle | undefined;
+		if (!plan && !existing) held = await makeHeldDirectory(destination);
+		try {
+			// Sorted, so a restore that stops part-way is reproducible from its report.
+			for (const entry of (await fs.readdir(source)).sort()) {
+				await copyEntryDereferenced(
+					path.join(source, entry),
+					path.join(destination, entry),
+					archiveRoot,
+					ledger,
+					notes,
+					isResidue,
+					plan,
+				);
+			}
+			if (held) {
+				await held.chmod(stat.mode & 0o7777);
+				// The fill names paths, so a writer that moved this directory
+				// away and put something else at its name while it was filled
+				// had files land there instead: said, not taken for a restore.
+				const [mine, standing] = await Promise.all([held.stat(), fs.lstat(destination).catch(() => undefined)]);
+				if (!standing || standing.dev !== mine.dev || standing.ino !== mine.ino) {
+					throw new Error(
+						`${destination} is no longer the directory this restore made for ${source}: something moved it ` +
+							`while it was being filled, so what was restored into it may be elsewhere`,
+					);
+				}
+			}
+		} finally {
+			await held?.close().catch(() => undefined);
 		}
-		if (!plan && !existing) await fs.chmod(destination, stat.mode & 0o7777);
 		return;
 	}
 	if (!stat.isFile()) return;
@@ -1226,6 +1278,19 @@ async function copyEntryDereferenced(
 		// no regular file, refuses here as it would there.
 		await planLedger(ledger, plan);
 		await planWritableDirectory(path.dirname(destination), plan, source);
+		// The stage is named after the file, with a suffix: a name near the
+		// filesystem's limit restores no further than `ENAMETOOLONG`.
+		const stage = path.basename(sessionStagingPath(destination));
+		if (Buffer.byteLength(stage) > NAME_MAX) {
+			throw new Error(
+				`${source} has a name too long to stage beside ${destination}: the staging name would be ` +
+					`${Buffer.byteLength(stage)} bytes, over the ${NAME_MAX} a name may have, so it would be left in the ` +
+					`archive; give it a shorter name there and restore again`,
+			);
+		}
+		// And the stage is a directory made by name, `0700`: under a umask that
+		// takes the owner's write bit, the file cannot go in it.
+		assertUmaskKeepsOwnerWrite(path.join(path.dirname(destination), stage), 0o700, source);
 		const archived = await openRegularFile(source);
 		if (!archived) throw absentFile(source);
 		await archived.close().catch(() => undefined);
@@ -1345,10 +1410,14 @@ export function newRestorePlan(liveArtifacts: string): RestorePlan {
 
 /**
  * Throw unless `dir` is a directory this user can write into, or one a
- * restore could make — its nearest existing ancestor writable — or one the
- * plan already makes. `what` names what would be restored there.
+ * restore could make — its nearest existing ancestor writable, and the
+ * process umask leaving the owner write and search on what `mkdir` with
+ * `mode` makes — or one the plan already makes. `what` names what would be
+ * restored there. The umask matters for a directory made by name: under
+ * `umask 0277` a `mkdir` makes one its own maker cannot write into, and the
+ * apply then fails where the preview had promised it.
  */
-async function planWritableDirectory(dir: string, plan: RestorePlan, what: string): Promise<void> {
+async function planWritableDirectory(dir: string, plan: RestorePlan, what: string, mode = 0o777): Promise<void> {
 	if (plan.created.has(dir)) return;
 	const standing = await statIfPresent(dir);
 	if (standing) {
@@ -1367,14 +1436,31 @@ async function planWritableDirectory(dir: string, plan: RestorePlan, what: strin
 	const parent = path.dirname(dir);
 	if (parent === dir) throw new Error(`${dir} could not be made, so ${what} could not be restored into it`);
 	await planWritableDirectory(parent, plan, what);
+	assertUmaskKeepsOwnerWrite(dir, mode, what);
 	plan.created.add(dir);
+}
+
+/**
+ * Throw unless a directory made by name at `dir` with `mode` under this
+ * process's umask keeps its owner's write and search bits: under `umask
+ * 0277` a `mkdir` makes one its own maker cannot write into, and the apply
+ * then fails where the preview had promised it.
+ */
+function assertUmaskKeepsOwnerWrite(dir: string, mode: number, what: string): void {
+	const umask = process.umask();
+	if ((mode & ~umask & 0o300) === 0o300) return;
+	throw new Error(
+		`${dir} would be made under umask ${umask.toString(8).padStart(4, "0")}, which leaves its owner unable to ` +
+			`write into it, so ${what} could not be restored into it: run the command with a umask that keeps the ` +
+			`owner's write and search bits, such as \`umask 077\``,
+	);
 }
 
 /** Throw unless a restore could record a stage in `ledger`: there and private and writable, or makeable. */
 async function planLedger(ledger: string, plan: RestorePlan): Promise<void> {
 	if (plan.ledgerChecked) return;
 	if (await statIfPresent(ledger)) await assertPrivateLedger(ledger);
-	await planWritableDirectory(ledger, plan, "a staging record");
+	await planWritableDirectory(ledger, plan, "a staging record", 0o700);
 	plan.ledgerChecked = true;
 }
 
@@ -2017,6 +2103,14 @@ async function recordedStagingByPath(agentDir: string, root: string): Promise<Ma
  * subshell, so stopping does not close the shell it was pasted into. When
  * the agent directory already resolves into a session tree, no command is
  * given at all.
+ *
+ * Where a move stopped, the directory it was moving into is named by the
+ * external `pwd -P`, run through `env`, because the shell's own builtin may
+ * report the path it cached at `cd` (dash and busybox do) after someone
+ * renamed a directory above it. That is a report, and only as honest as the
+ * `env` and `pwd` on `PATH`: with no `env` the command names the path it
+ * began with, marked so; a substituted `env` can name a wrong one. Either
+ * misdirects the reader; neither makes the command move or delete anything.
  */
 export async function stagingResidueNote(dir: string, record: string, consequence: string): Promise<string> {
 	const agentDir = path.dirname(path.dirname(record));
@@ -2041,7 +2135,8 @@ export async function stagingResidueNote(dir: string, record: string, consequenc
 			`exit 1; cd -P "$d" || exit 1; r=$(pwd -P); inside "$r"; k=1; while there "./$k"; do k=$((k+1)); done; ` +
 			`mkdir "./$k" || exit 1; cd -P "./$k" || exit 1; [ "$(pwd -P)" = "$r/$k" ] || { echo "$r/$k is not the ` +
 			`directory this command just made, so nothing was moved" >&2; exit 1; }; if there "$s"; then mv -n "$s" ./; ` +
-			`there "$s" && { h=$(env pwd -P); echo "the move of $s did not finish — it stopped part-way, or something ` +
+			`there "$s" && { h=$(env pwd -P 2>/dev/null) && [ -n "$h" ] || h="$r/$k (its path when this command began)"; ` +
+			`echo "the move of $s did not finish — it stopped part-way, or something ` +
 			`already had its name in $h: anything it copied is in $h and the rest is still in $s; nothing was deleted, and once ` +
 			`the cause is fixed this command, run again, moves what is left into a new directory beside it" >&2; exit 1; ` +
 			`}; fi; if there "$c"; then mv -n "$c" ./; there "$c" && { echo "$c was not moved: once the cause is ` +
@@ -2316,6 +2411,7 @@ interface RestoreLeases {
 
 async function tryAcquireRestoreLeases(
 	owners: () => Promise<(string | undefined)[]>,
+	observeOnly = false,
 ): Promise<RestoreLeases | { unprobed: string } | null> {
 	let unprobed: string | undefined;
 	const leases: FileLockHandle[] = [];
@@ -2330,10 +2426,18 @@ async function tryAcquireRestoreLeases(
 				let added = false;
 				for (const id of await owners()) {
 					if (id === undefined || leased.has(id)) continue;
-					const lease = tryAcquireSessionLease(id);
-					if (!lease) return false;
+					if (observeOnly) {
+						// A preview looks without taking: a lease it held would make
+						// a session opened meanwhile fork its turn into a new one.
+						const held = isSessionLeaseHeld(id);
+						if (held === null) throw new Error(`the ownership lease of session ${id} could not be probed`);
+						if (held) return false;
+					} else {
+						const lease = tryAcquireSessionLease(id);
+						if (!lease) return false;
+						leases.push(lease);
+					}
 					leased.add(id);
-					leases.push(lease);
 					added = true;
 				}
 				if (!added) return true;
@@ -2453,7 +2557,7 @@ export async function restoreArchivedSessionLocked(
 	const target = stem.slice(stem.lastIndexOf("_") + 1) || stem;
 	const agentDirSuffix = agentDirFlag(agentDir ?? agentDirOfArchivedPath(archiveFile) ?? getAgentDir());
 	const restoreCommand = `omp gc --restore ${shellQuote(target)} --apply${agentDirSuffix}`;
-	const acquired = await tryAcquireRestoreLeases(owners);
+	const acquired = await tryAcquireRestoreLeases(owners, plan !== undefined);
 	if (acquired && "unprobed" in acquired) {
 		throw new Error(
 			`Cannot restore "${archiveFile}": a file of this session could not be read (${acquired.unprobed}), so whether ` +
