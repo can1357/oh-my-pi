@@ -72,6 +72,8 @@ export interface KernelExecutorBaseOptions {
 	signal?: AbortSignal;
 	onStatus?: (event: JsStatusEvent) => void;
 	emitStatus?: (event: JsStatusEvent) => void;
+	/** Shows the user `out://` replies of the cell's bridged tool calls; absent, those calls are refused. */
+	onReply?: (text: string) => void;
 	toolSession?: ToolSession;
 	bridgeSessionId?: string;
 	artifactId?: string;
@@ -502,6 +504,7 @@ export async function executeWithKernelBase<
 					signal: options.signal,
 					shieldedSignal: abortShield.signal,
 					emitStatus,
+					onReply: options.onReply,
 					shadowCell: getActiveEvalShadowCell(),
 					abortRequested: () => {
 						return abortShield.abortRequested;

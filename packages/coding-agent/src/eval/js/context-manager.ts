@@ -41,6 +41,8 @@ export interface VmRunState {
 	signal?: AbortSignal;
 	onText?: (chunk: string) => void;
 	onDisplay?: (output: EvalDisplayOutput) => void;
+	/** Shows the user `out://` replies of the run's bridged tool calls; absent, those calls are refused. */
+	onReply?: (text: string) => void;
 }
 
 /** Isolated runtime transport used by the context manager and startup regression fixtures. */
@@ -865,6 +867,7 @@ async function handleToolCall(session: JsSession, msg: Extract<WorkerOutbound, {
 			identity: msg.identity,
 			shadowCell: pending.shadowCell,
 			artifactPins: pending.artifactPins,
+			onReply: pending.runState.onReply,
 			emitStatus: (event: JsStatusEvent) => {
 				trackDeferPhase(pending, event);
 				pending.runState.onDisplay?.({ type: "status", event });
