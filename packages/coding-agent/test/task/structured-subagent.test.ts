@@ -4,7 +4,9 @@ import * as os from "node:os";
 import path from "node:path";
 import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	disableProvider,
 	enableProvider,
@@ -17,7 +19,10 @@ import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { AgentCompactionThresholdOverride } from "@oh-my-pi/pi-coding-agent/config/compaction-threshold";
-import type { BeforeSubagentSpawnEvent } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import type {
+	BeforeSubagentSpawnEvent,
+	LoadExtensionsResult,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import {
 	artifactsDirsFromRegistry,
 	resetRegisteredArtifactDirsForTests,
@@ -26,6 +31,9 @@ import * as planHandoff from "@oh-my-pi/pi-coding-agent/plan-mode/plan-handoff";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
+import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
+import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
@@ -44,6 +52,7 @@ import type { SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
+import { createSessionDefaults } from "../helpers/session-defaults";
 
 import { cfgRetryModelFallback } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { cfgTaskAgentModelOverrides, cfgTaskEnableEffort } from "@oh-my-pi/pi-coding-agent/task/settings";
@@ -480,6 +489,63 @@ describe("structured subagent primitive", () => {
 
 		expect(dispatched[0]?.inheritedSessionAgents).toEqual([inheritedAgent]);
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+	it("starts a level-tagged agent at its tagged effort and other agents at the capped hint", async () => {
+		const model = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!model) throw new Error("Expected gpt-5.6-sol model to exist");
+		const selector = `${model.provider}/${model.id}`;
+		mockDiscovery({ ...AGENT, model: [selector], thinkingLevel: Effort.High });
+		const tagged: AgentDefinition = { ...AGENT, name: "m1", model: [`${selector}:high`], thinkingLevel: Effort.High };
+		const untagged: AgentDefinition = { ...AGENT, name: "m2", model: [selector], thinkingLevel: "auto" };
+		const settings = Settings.isolated({ "task.maxEffort": "low", "task.isolation.enabled": false });
+		const parent = Object.assign(session({ settings, sessionAgents: [tagged, untagged] }), {
+			modelRegistry: { authStorage: {}, refresh: async () => {}, getAvailable: () => [model] },
+			getApiKey: async () => "test-key",
+		});
+		const create = vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
+			const listeners: Array<(event: AgentSessionEvent) => void> = [];
+			const child = {
+				...createSessionDefaults(),
+				state: { messages: [] },
+				agent: { state: { systemPrompt: ["test"] } },
+				sessionManager: { appendSessionInit: () => {} },
+				getActiveToolNames: () => ["read", "yield"],
+				getEnabledToolNames: () => ["read", "yield"],
+				subscribe: (listener: (event: AgentSessionEvent) => void) => {
+					listeners.push(listener);
+					return () => {};
+				},
+				prompt: async () => {
+					for (const listener of listeners) {
+						listener({
+							type: "tool_execution_end",
+							toolCallId: "yield",
+							toolName: "yield",
+							result: { content: [], details: { status: "success", data: { agent: true } } },
+							isError: false,
+						});
+					}
+					return true;
+				},
+			} as unknown as AgentSession;
+			return {
+				session: child,
+				extensionsResult: {} as unknown as LoadExtensionsResult,
+				setToolUIContext: () => {},
+				eventBus: new EventBus(),
+			};
+		});
+
+		for (const agent of ["m1", "m2", "worker"]) {
+			await runStructuredSubagent(request({ session: parent, agent, effort: "hi" }));
+		}
+
+		expect(create.mock.calls.map(([options]) => options?.thinkingLevel)).toEqual([
+			Effort.High,
+			Effort.Low,
+			Effort.Low,
+		]);
+		expect(create.mock.calls[0]?.[0]?.thinkingLevelCeiling).toBeUndefined();
 	});
 	it("holds the parent on an inline child until it settles, but not on a detached one", async () => {
 		mockDiscovery();
