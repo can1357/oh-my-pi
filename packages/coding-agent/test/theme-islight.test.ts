@@ -2,13 +2,17 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { bindEffects } from "@oh-my-pi/pi-coding-agent/config/registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { generateThemeVars } from "@oh-my-pi/pi-coding-agent/export/html";
+import "@oh-my-pi/pi-coding-agent/modes/settings";
 import { createTheme, getBuiltinThemes } from "@oh-my-pi/pi-tui/theme/loader";
 import {
 	getEditorTheme,
 	getResolvedThemeColors,
 	getThemeByName,
 	isLightTheme,
+	setComposerTerminalForeground,
 	setThemeInstance,
 } from "@oh-my-pi/pi-tui/theme";
 import { Editor } from "@oh-my-pi/pi-tui";
@@ -111,6 +115,62 @@ describe("empty foreground contrast", () => {
 
 			expect(editor.render(40).join("\n")).toContain("\x1b[38;2;80;100;119mtyped");
 		} finally {
+			setThemeInstance(dark);
+		}
+	});
+
+	it("keeps transparent composer text on the terminal default only when opted in", () => {
+		const { dark } = createBaseThemes();
+		const titaniumJson = getBuiltinThemes().titanium;
+		if (!titaniumJson) throw new Error("Titanium theme is unavailable");
+		try {
+			setThemeInstance(createTheme(titaniumJson, { mode: "truecolor" }));
+			const render = () => {
+				const editor = new Editor(getEditorTheme());
+				editor.setText("typed");
+				return editor.render(40).join("\n");
+			};
+
+			expect(render()).toContain("\x1b[38;2;229;229;231mtyped");
+			setComposerTerminalForeground(true);
+			expect(render()).toContain("\x1b[39mtyped");
+		} finally {
+			setComposerTerminalForeground(false);
+			setThemeInstance(dark);
+		}
+	});
+
+	it("applies composer.terminalForeground from settings", () => {
+		const { dark } = createBaseThemes();
+		const titaniumJson = getBuiltinThemes().titanium;
+		if (!titaniumJson) throw new Error("Titanium theme is unavailable");
+		const release = bindEffects(Settings.isolated({ "composer.terminalForeground": true }));
+		try {
+			setThemeInstance(createTheme(titaniumJson, { mode: "truecolor" }));
+			const editor = new Editor(getEditorTheme());
+			editor.setText("typed");
+
+			expect(editor.render(40).join("\n")).toContain("\x1b[39mtyped");
+		} finally {
+			release();
+			setComposerTerminalForeground(false);
+			setThemeInstance(dark);
+		}
+	});
+
+	it("keeps explicit text colors when the terminal foreground is opted in", () => {
+		const { dark } = createBaseThemes();
+		const poimandresJson = getBuiltinThemes()["light-poimandres"];
+		if (!poimandresJson) throw new Error("Light Poimandres theme is unavailable");
+		try {
+			setThemeInstance(createTheme(poimandresJson, { mode: "truecolor" }));
+			setComposerTerminalForeground(true);
+			const editor = new Editor(getEditorTheme());
+			editor.setText("typed");
+
+			expect(editor.render(40).join("\n")).toContain("\x1b[38;2;80;100;119mtyped");
+		} finally {
+			setComposerTerminalForeground(false);
 			setThemeInstance(dark);
 		}
 	});

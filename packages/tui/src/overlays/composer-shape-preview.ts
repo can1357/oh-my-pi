@@ -18,7 +18,7 @@ import {
 	visibleWidth,
 } from "../index";
 import { type ComposerShape, getComposerShapeOptions } from "./composer-shape-registry";
-import { theme } from "../theme/theme";
+import { composerTextColor, theme } from "../theme/theme";
 import type { NativeNode } from "../native/node";
 import { col, node, span, text } from "../native/describe";
 
@@ -85,9 +85,9 @@ export function renderComposerShapePreview(
 	const promptText = truncateToWidth("Ask anything, edit files, run tools", Math.max(1, contentWidth - 1));
 	// Mirror the live editor: filled shapes let `surfaceColor` paint their own
 	// foreground, while transparent shapes resolve `text` to a contrast-safe
-	// color so an empty token never falls back to the terminal default.
+	// color unless the session opted into the terminal default.
 	const promptRow = `${promptText}${theme.inverse(" ")}`;
-	const text = isFilledComposerStyle(style) ? promptRow : theme.fgResolved("text", promptRow);
+	const text = isFilledComposerStyle(style) ? promptRow : composerTextColor(promptRow);
 	const pad = padding(Math.max(0, contentWidth - visibleWidth(promptText) - 1));
 	const styledGutter = gutter ? theme.fg("accent", gutter) : "";
 
