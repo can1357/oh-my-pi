@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getLogsDir, isBunTestRuntime, isEnoent, isRecord, logger } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error/flags";
-import { formatErrorMessageWithRetryAfter } from "./retry-after.js";
+import { appendRetryAfterHint, errorMessageText, getHeadersFromError } from "./retry-after.js";
 
 export type RawHttpRequestDump = {
 	provider: string;
@@ -166,16 +166,36 @@ export async function finalizeErrorMessage(
 	rawRequestDump: RawHttpRequestDump | undefined,
 	capturedErrorResponse?: CapturedHttpErrorResponse,
 ): Promise<string> {
-	let message = formatErrorMessageWithRetryAfter(error, capturedErrorResponse?.headers);
-	const capturedMessage = formatCapturedHttpError(capturedErrorResponse);
-	if (capturedMessage) {
-		if (/\bstatus code\s*\(no body\)/i.test(message)) {
-			message = `${capturedErrorResponse?.status ?? "HTTP"} status code: ${capturedMessage}`;
-		} else if (!message.includes(capturedMessage)) {
-			message = `${message}\n${capturedMessage}`;
-		}
-	}
+	const captured = formatCapturedHttpErrorParts(capturedErrorResponse);
+	const body = captured
+		? mergeCapturedBody(errorMessageText(error), captured, capturedErrorResponse?.status)
+		: errorMessageText(error);
+	const message = appendRetryAfterHint(body, capturedErrorResponse?.headers ?? getHeadersFromError(error));
 	return appendRawHttpRequestDumpFor400(message, error, rawRequestDump);
+}
+
+const STATUS_PREFIX_PATTERN = /^\s*\d{3}\s+/;
+
+/**
+ * Fold the captured provider body into the thrown message so it prints once.
+ * Works on the message before any retry hint is appended: OpenAI-family errors
+ * cap the body they interpolate, so the thrown message may hold only a prefix
+ * of the captured body, which the captured copy then replaces.
+ */
+function mergeCapturedBody(message: string, captured: CapturedHttpErrorText, status: number | undefined): string {
+	if (/\bstatus code\s*\(no body\)/i.test(message)) {
+		return `${status ?? "HTTP"} status code: ${captured.text}`;
+	}
+	const statusPrefix = STATUS_PREFIX_PATTERN.exec(message)?.[0] ?? "";
+	const body = message.slice(statusPrefix.length).trimEnd();
+	const carriesTruncatedBody = body.length > 0 && body.length < captured.core.length && captured.core.startsWith(body);
+	if (carriesTruncatedBody) return withSuffix(`${statusPrefix}${captured.core}`, captured);
+	if (message.includes(captured.core)) return withSuffix(message, captured);
+	return `${message}\n${captured.text}`;
+}
+
+function withSuffix(message: string, captured: CapturedHttpErrorText): string {
+	return captured.suffix && !message.includes(captured.suffix) ? `${message}${captured.suffix}` : message;
 }
 
 /**
@@ -285,18 +305,29 @@ export function redactHeaders<T>(headers: Record<string, T> | undefined): Record
 	return redacted;
 }
 
-function formatCapturedHttpError(captured: CapturedHttpErrorResponse | undefined): string | undefined {
+interface CapturedHttpErrorText {
+	/** Provider-supplied message with the envelope's structured fields removed. */
+	core: string;
+	/** `core` followed by the `(type=… param=… code=…)` suffix when the payload carries one. */
+	text: string;
+	/** Suffix alone, leading space included; absent when the payload has no type/param/code. */
+	suffix?: string;
+}
+
+function formatCapturedHttpErrorParts(
+	captured: CapturedHttpErrorResponse | undefined,
+): CapturedHttpErrorText | undefined {
 	if (!captured) return undefined;
 	const bodyText = captured.bodyText?.trim();
 	if (!bodyText) return undefined;
 	const payload = parseCapturedErrorPayload(captured);
-	if (!payload) return bodyText;
+	if (!payload) return { core: bodyText, text: bodyText };
 
 	const errorPayload = getObjectProperty(payload, "error") ?? payload;
 	// {"error": "string"} — the error value is a plain string, not a nested object.
 	// Fall back to it when the structured fields ("message", etc.) are absent.
 	const stringError = errorPayload === payload ? getStringProperty(payload, "error") : undefined;
-	const message =
+	const core =
 		getStringProperty(errorPayload, "message") ?? getStringProperty(payload, "message") ?? stringError ?? bodyText;
 	const extras = [
 		getStringProperty(errorPayload, "type") ?? getStringProperty(payload, "type"),
@@ -309,7 +340,9 @@ function formatCapturedHttpError(captured: CapturedHttpErrorResponse | undefined
 			if (index === 1) return `param=${value}`;
 			return `code=${value}`;
 		});
-	return extras.length > 0 ? `${message} (${extras.join(" ")})` : message;
+	if (extras.length === 0) return { core, text: core };
+	const suffix = ` (${extras.join(" ")})`;
+	return { core, text: `${core}${suffix}`, suffix };
 }
 
 function parseCapturedErrorPayload(captured: CapturedHttpErrorResponse): Record<string, unknown> | undefined {

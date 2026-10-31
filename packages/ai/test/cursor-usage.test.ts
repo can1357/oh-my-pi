@@ -274,21 +274,12 @@ describe("cursor usage provider", () => {
 				{ id: "cursor:usd:individual-ondemand", label: "On-Demand Usage" },
 			]);
 			const auto = report?.limits[0]?.amount;
-			const api = report?.limits[1]?.amount;
 			const onDemand = report?.limits[2]?.amount;
 			expect(auto?.unit).toBe("percent");
 			expect(auto?.used).toBeCloseTo(1.85);
 			expect(auto?.usedFraction).toBeCloseTo(0.0185);
 			// Critically: do NOT trust plan.used/limit cents as the dashboard %.
 			expect(auto?.usedFraction).not.toBeCloseTo(1504 / 7000);
-			expect(api).toEqual({
-				used: 0,
-				limit: 70,
-				remaining: 70,
-				usedFraction: 0,
-				remainingFraction: 1,
-				unit: "usd",
-			});
 			expect(onDemand).toEqual({
 				used: 0,
 				limit: 20,
@@ -297,6 +288,31 @@ describe("cursor usage provider", () => {
 				remainingFraction: 1,
 				unit: "usd",
 			});
+		});
+
+		it("reports Other Models as a percent, never as a share of plan.limit", () => {
+			// Live Ultra payload: Cursor's per-request records charged $48.44 of
+			// third-party usage this cycle, so 48.44% means a $100 pool, not $400.
+			const report = parseCursorIndividualUsage({
+				membershipType: "ultra",
+				individualUsage: {
+					plan: {
+						enabled: true,
+						used: 20336,
+						limit: 40000,
+						remaining: 19664,
+						autoPercentUsed: 5.164,
+						apiPercentUsed: 48.44,
+						totalPercentUsed: 6.56,
+					},
+					onDemand: { enabled: false, used: 0, limit: null, remaining: null },
+				},
+			});
+			const api = report?.limits.find(limit => limit.id === "cursor:usd:individual-api")?.amount;
+			expect(api?.unit).toBe("percent");
+			expect(api?.used).toBeCloseTo(48.44);
+			expect(api?.usedFraction).toBeCloseTo(0.4844);
+			expect(api?.limit).toBeUndefined();
 		});
 
 		it("prefers individualUsage.overall when both overall and plan exist", () => {
