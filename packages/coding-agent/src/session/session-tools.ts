@@ -444,17 +444,20 @@ export class SessionTools {
 	 * outside the refresh frame prevents wrappers from retaining rollback maps
 	 * from earlier MCP generations through a shared lexical environment.
 	 *
-	 * What a manager tool is handed when it is called without the agent loop's context. Manager tools
-	 * are host code: the MCP bridge's (`MCPTool`, `DeferredMCPTool`), a subagent's MCP proxies, and
-	 * whatever an SDK host passes to `refreshMCPTools`. No extension code reaches this factory — an
-	 * extension's tools run through `RegisteredToolAdapter`, an SDK custom tool through
-	 * `createCustomToolContext`, and neither carries `Settings`.
-	 *
-	 * So it hands them the session's `Settings`, as the agent loop's context does: the bridge resolves
-	 * the internal URLs in a tool's arguments with them (`memory://` honors the session's memory
-	 * backend and identity), and a host tool's GitHub cache honors the session's policy, kill switch
-	 * included. The session's services are the surfaces an extension's context hands, the model a
-	 * copy (`handHostModel`): a manager tool reads them, and nothing more is needed.
+	 * What a manager tool is handed when it is called without the agent loop's context. A manager
+	 * tool is whatever the host hands in as an MCP tool: the MCP bridge's (`MCPTool`,
+	 * `DeferredMCPTool`), a subagent's MCP proxies, and any tool an SDK host passes to
+	 * `refreshMCPTools` or as `mcpTools`. Each is handed the session's `Settings` here and on its
+	 * first pass alike (`sdk.ts` `createCustomToolContext`), so a refresh never changes what a tool
+	 * receives: the bridge resolves the internal URLs in a tool's arguments with them (`memory://`
+	 * honors the session's memory backend and identity), and a host tool's GitHub cache honors the
+	 * session's policy, kill switch included. A tool an extension registers runs through
+	 * `RegisteredToolAdapter`, and one an SDK host hands in as a custom tool through
+	 * `createCustomToolContext` without them. What a tool's name answers with follows the route that
+	 * installed the tool registered under it: a refresh that installs a tool installs it as a
+	 * manager tool, whatever else the host once handed it in as; a tool the session already held
+	 * and keeps through the refresh (`deduplicateMCPToolsByName`) keeps its route. The session's
+	 * services are the surfaces an extension's context hands, the model a copy (`handHostModel`).
 	 */
 	readonly #getCustomToolContext = (): CustomToolContext => {
 		const host = this.#host;

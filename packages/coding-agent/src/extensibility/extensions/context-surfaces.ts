@@ -43,8 +43,8 @@ import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import {
 	bindInputScope,
 	hasInputScope,
-	inputRecipient,
 	type ToolRendererScope,
+	whenInputScopeGone,
 } from "@oh-my-pi/pi-tui/tools/renderer-scope";
 import type { ApiKeyResolverModel, ApiKeyResolverOptions } from "../../config/api-key-resolver";
 import type { ModelRegistry } from "../../config/model-registry";
@@ -658,18 +658,36 @@ export function handTUI(tui: TUI, owner: ExtensionCallbackOwner, scope: ToolRend
 	const refuse = (member: string): never => withheld(TUI_SUBJECT, member);
 	/** Each listener the session added, with what takes it off the host's TUI. */
 	const listeners = new Map<InputListener, () => void>();
-	/** Each component the session focused, and what had focus before it took it. */
+	/** Each component the session focused or showed, and what had focus outside the session when
+	 *  it last took focus: where focus goes back to once the session gives it up or has gone. */
 	const predecessors = new WeakMap<Component, Component | undefined>();
+	/** The overlays the session showed and has not taken down: the host takes them down once the
+	 *  session has gone, whichever component they hold and whoever bound it. */
+	const overlays = new Set<OverlayHandle>();
+	let overlaysOwed = false;
 	let suspended = false;
+	/** What had focus outside the session: a component the session took focus with stands for what
+	 *  it took focus from. */
+	const outsideSession = (component: Component | null): Component | undefined =>
+		component === null ? undefined : predecessors.has(component) ? predecessors.get(component) : component;
 	/**
-	 * Gives `component` — one the session hands the TUI to focus or to show — the session's scope
-	 * before the TUI calls anything of it, unless it takes input in a scope already (a dialog the
-	 * host bound, a child an overlay owns). Without one the TUI would call its `handleInput` as the
-	 * host's own code: outside the session's admission while it is live, untracked, and on after it
-	 * has gone. `retire` is what the host does once the scope has gone.
+	 * The session takes `component` into view or focus. It takes input in the session's scope from
+	 * now on — bound before the TUI calls anything of it, unless it takes input in a scope already (a
+	 * dialog the host bound, a child an overlay owns) — and remembers what had focus outside the
+	 * session at this taking, not an earlier one: a component given up and taken again goes back to
+	 * what it was taken from the last time. Once the scope has gone, input addressed to it, and focus
+	 * left on it, go there (`inputRecipient`, `TUI.setFocus`).
 	 */
-	const bind = (component: Component, retire: () => Component | undefined): void => {
-		if (!hasInputScope(component)) bindInputScope(component, scope, retire);
+	const take = (component: Component): void => {
+		const focused = tui.getFocused();
+		if (focused !== component) predecessors.set(component, outsideSession(focused));
+		if (!hasInputScope(component)) {
+			bindInputScope(component, scope, () => {
+				const successor = predecessors.get(component);
+				if (tui.getFocused() === component) tui.setFocus(successor ?? null);
+				return successor;
+			});
+		}
 	};
 	const handed: Decided<TUI> = {
 		requestRender: force => tui.requestRender(force === true),
@@ -725,24 +743,13 @@ export function handTUI(tui: TUI, owner: ExtensionCallbackOwner, scope: ToolRend
 		setFocus: component => {
 			if (!scope.live) return;
 			if (component === null) {
-				// Giving focus up hands it back to what the session took it from, and only that.
+				// Giving focus up hands it back to what the session took it from — or to what took that
+				// one's place, once it has gone (`TUI.setFocus`) — and only from what the session took.
 				const focused = tui.getFocused();
 				if (focused !== null && predecessors.has(focused)) tui.setFocus(predecessors.get(focused) ?? null);
 				return;
 			}
-			const focused = tui.getFocused();
-			if (focused !== component && !predecessors.has(component)) {
-				predecessors.set(component, focused ?? undefined);
-			}
-			// Once the session has gone, focus goes back to what the session took it from — or to
-			// what that one's host put in its place, when it was the session's too — and so does
-			// input still addressed to it.
-			bind(component, () => {
-				const before = predecessors.get(component);
-				const successor = before === undefined || before === component ? undefined : inputRecipient(before);
-				if (tui.getFocused() === component) tui.setFocus(successor ?? null);
-				return successor;
-			});
+			take(component);
 			tui.setFocus(component);
 		},
 		showOverlay: (component, options) => {
@@ -761,13 +768,9 @@ export function handTUI(tui: TUI, owner: ExtensionCallbackOwner, scope: ToolRend
 								) as OverlayOptions,
 						);
 			const visible = copied?.visible;
-			// Bound before it is shown: showing it focuses it. The handle exists only once it is shown.
-			const shown: { handle?: OverlayHandle } = {};
-			bind(component, () => {
-				shown.handle?.hide();
-				return undefined;
-			});
-			const handle = tui.showOverlay(
+			// Taken before it is shown: showing it focuses it.
+			take(component);
+			const shown = tui.showOverlay(
 				component,
 				copied && {
 					...copied,
@@ -777,7 +780,30 @@ export function handTUI(tui: TUI, owner: ExtensionCallbackOwner, scope: ToolRend
 							: undefined,
 				},
 			);
-			shown.handle = handle;
+			overlays.add(shown);
+			// Whatever else the session did with this component — focused it first, showed it twice —
+			// the overlay comes down when the session goes, before anything of it is drawn again.
+			if (!overlaysOwed) {
+				overlaysOwed = true;
+				whenInputScopeGone(scope, () => {
+					// Settled once per session: a runner reused by the next one owes its overlays anew.
+					overlaysOwed = false;
+					for (const overlay of overlays) overlay.hide();
+					overlays.clear();
+				});
+			}
+			const handle: Decided<OverlayHandle> = {
+				hide: () => {
+					overlays.delete(shown);
+					shown.hide();
+				},
+				// Hidden and shown again only while the session is live: once it has gone the overlay is
+				// down for good.
+				setHidden: hidden => {
+					if (scope.live) shown.setHidden(hidden === true);
+				},
+				isHidden: () => shown.isHidden(),
+			};
 			return handle;
 		},
 		stop: () => {

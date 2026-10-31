@@ -227,6 +227,8 @@ const inputScopes = new WeakMap<Component, InputScope>();
 /** Bound components not yet retired, for {@link retireGoneInputScopes}: removed when retired or
  *  unbound, so a component the host has let go of is not kept. */
 const awaitingRetirement = new Set<Component>();
+/** What a host owes once a scope has gone, whatever components it touched ({@link whenInputScopeGone}). */
+const scopeObligations = new Set<{ readonly scope: ToolRendererScope; readonly settle: () => void }>();
 
 /**
  * Registers `component` — one an extension supplied that the host focuses — as running in
@@ -261,20 +263,34 @@ export function bindInputScope(
  * the scope `owner` takes input in, when `owner` is an extension's and `target` has none of its
  * own: a child of an extension's dialog is the extension's code too, and is called for input and
  * focus only inside that scope, and not at all once it has gone. Its owner's retirement is what
- * takes it out of input; it has no successor of its own.
+ * takes it out of input, and what takes the owner's place takes the child's too.
  */
 export function adoptInputScope(target: Component, owner: Component): void {
 	const bound = inputScopes.get(owner);
 	if (bound === undefined || inputScopes.has(target)) return;
 	inputScopes.set(target, {
 		scope: bound.scope,
-		retire: () => undefined,
+		retire: () => owner,
 		retired: false,
 		successor: undefined,
 		adopted: undefined,
 	});
 	awaitingRetirement.add(target);
 	(bound.adopted ??= new Set()).add(target);
+}
+
+/**
+ * Registers what a host owes once `scope` has gone — the overlays an extension's code showed
+ * through it, whichever components they hold and whoever bound those — run by the sweep that
+ * retires the scope's components, before them, and once. A component is safe once its session has
+ * gone only if nothing the host does can show, draw or focus it again, and a component's own
+ * binding cannot promise that: the same component may be bound by one call and shown by another.
+ * Answers what withdraws the obligation, for a host that settles it while the scope is live.
+ */
+export function whenInputScopeGone(scope: ToolRendererScope, settle: () => void): () => void {
+	const obligation = { scope, settle };
+	scopeObligations.add(obligation);
+	return () => scopeObligations.delete(obligation);
 }
 
 /** Whether `component` already takes input in a scope ({@link bindInputScope},
@@ -310,10 +326,16 @@ export function withInputScope<T>(component: Component | null | undefined, call:
 	return bound.scope.run(call);
 }
 
-/** Takes every bound component whose scope has gone out of input, through its host's `retire`.
- *  The TUI runs this before it resolves an input target and before it draws a frame. */
+/** Takes every bound component whose scope has gone out of input, through its host's `retire`,
+ *  after settling what its host owes the scope ({@link whenInputScopeGone}). The TUI runs this
+ *  before it resolves an input target and before it draws a frame. */
 export function retireGoneInputScopes(): void {
-	if (awaitingRetirement.size === 0) return;
+	if (awaitingRetirement.size === 0 && scopeObligations.size === 0) return;
+	for (const obligation of scopeObligations) {
+		if (obligation.scope.live) continue;
+		scopeObligations.delete(obligation);
+		obligation.settle();
+	}
 	// A retirement may bind or unbind others; a Set visits what is added and skips what is removed.
 	for (const component of awaitingRetirement) {
 		const bound = inputScopes.get(component);

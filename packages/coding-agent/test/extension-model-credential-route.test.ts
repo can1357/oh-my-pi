@@ -17,6 +17,7 @@ import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensi
 import { MCPTool } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import { getMemoryRoot } from "@oh-my-pi/pi-coding-agent/memories";
 import { cfgMemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/settings";
+import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -257,6 +258,70 @@ describe("a model an extension is handed", () => {
 			settings: true,
 			cacheEnabled: false,
 		});
+	});
+});
+
+describe("a tool the SDK host hands in", () => {
+	test("as an MCP tool gets the session's settings on every pass; as a custom tool, never", async () => {
+		const dir = TempDir.createSync("@sdk-tool-settings-");
+		const auth = await AuthStorage.create(path.join(dir.path(), "auth.db"));
+		cleanups.push(() => {
+			auth.close();
+			dir.removeSync();
+		});
+		const registry = new ModelRegistry(auth, path.join(dir.path(), "models.json"));
+		const row = registry.getAll()[0];
+		if (!row) throw new Error("the bundled catalog is empty");
+		const settings = Settings.isolated();
+		const seen: Array<{ pass: string; settings: boolean }> = [];
+		const probe = (name: string): CustomTool => ({
+			name,
+			label: name,
+			description: "records whether it is handed the session's settings",
+			parameters: { type: "object", properties: {} } as CustomTool["parameters"],
+			execute: async (pass, _params, _onUpdate, ctx) => {
+				seen.push({ pass, settings: ctx.settings === settings });
+				return { content: [{ type: "text", text: "ok" }] };
+			},
+		});
+		const mcp = { ...probe("mcp__sdk_probe"), mcpServerName: "sdk", mcpToolName: "probe" };
+		const custom = probe("sdk_custom_probe");
+		const { session } = await createAgentSession({
+			cwd: dir.path(),
+			agentDir: dir.path(),
+			modelRegistry: registry,
+			model: row,
+			sessionManager: SessionManager.inMemory(dir.path()),
+			settings,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			enableIrc: false,
+			skipPythonPreflight: true,
+			toolNames: [],
+			mcpTools: [mcp],
+			customTools: [custom],
+		});
+		cleanups.push(() => session.dispose());
+		const run = async (name: string, pass: string): Promise<void> => {
+			const tool = session.getToolByName(name);
+			if (!tool) throw new Error(`${name} was not registered`);
+			await tool.execute(pass, {}, undefined);
+		};
+		await run("mcp__sdk_probe", "mcp first");
+		await run("sdk_custom_probe", "custom");
+		await session.refreshMCPTools([mcp]);
+		await run("mcp__sdk_probe", "mcp refreshed");
+
+		expect(seen).toEqual([
+			{ pass: "mcp first", settings: true },
+			{ pass: "custom", settings: false },
+			{ pass: "mcp refreshed", settings: true },
+		]);
 	});
 });
 

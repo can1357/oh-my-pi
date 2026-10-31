@@ -277,10 +277,13 @@ What `ctx` and `pi` read back — `getSystemPrompt()`, `getContextUsage()`, `get
 `getPendingPlanReview()`, `getActiveTools()`, `getAllTools()`, `getCommands()`,
 `getServiceTiers()` — and the events your hooks receive are copies of the host's data. A date, a
 map, a set, binary data, a regular expression and a URL arrive as themselves, copied; an object of
-any other class arrives as a plain object of its own enumerable fields, without its methods —
-prototype methods and function-valued fields, bound or not, alike — because those reach the
-host's private state. A function in a plain record is host code put there to be called (a
-callable schema in `getAllTools()`) and arrives as itself.
+any other class arrives as a plain object of its own enumerable fields, without its methods. A
+function is behavior, not data, wherever it sits — a field of a record or of an instance, an array
+element, a map's key or value, a set's member, an error's property — and is dropped, as the session
+file drops it (an array keeps the slot, `undefined`). The callables a surface declares are handed
+on purpose by that surface, not found in data: a tool's callable schema in `getAllTools()`
+(`ToolInfo.parameters`), and a thinking renderer's `requestRender`, which does nothing once your
+session has gone.
 
 What a `ctx.ui` factory is handed besides its theme is the session's own, not the host's:
 
@@ -288,13 +291,15 @@ What a `ctx.ui` factory is handed besides its theme is the session's own, not th
   `invalidate`), the frame's timing, `terminal.rows`/`columns` and the image budget an image draws
   through reach the host's. An input listener, `setFocus`, `showOverlay` and `stop` take effect
   only while your session is live: a listener is removed at the first key after the session has
-  gone, and an overlay is taken down. A component you focus or show takes its keys inside your
-  session, so an asynchronous `handleInput` is your session's work; once the session has gone it
-  takes none, and focus returns to what your session took it from. `setFocus(null)` gives focus
-  back to that, too. `start` ends only a suspension your session started. Members that steer the
-  host's renderer, its input or its other components — `children`, `addChild`,
-  `injectDebugInput`, `getFocused`, `hideOverlay`, paint and frame listeners, and the terminal's
-  `write` — throw, naming the member.
+  gone. A component you focus or show takes its keys inside your session, so an asynchronous
+  `handleInput` is your session's work. Once the session has gone, every overlay it showed comes
+  down before the next frame or key, whichever component it holds and however that component was
+  focused before; the TUI never focuses a component of a session that has gone, and focus goes
+  back to what the session last took it from — or to what took that one's place, when it was an
+  extension's too. `setFocus(null)` gives focus back the same way. `start` ends only a suspension
+  your session started. Members that steer the host's renderer, its input or its other components
+  — `children`, `addChild`, `injectDebugInput`, `getFocused`, `hideOverlay`, paint and frame
+  listeners, and the terminal's `write` — throw, naming the member.
 - **The keybindings** a `custom` dialog or a `setEditorComponent` factory receives are a manager
   of your own built from a copy of the user's bindings; changing them changes only yours.
 - **The provider** an `addAutocompleteProvider` factory wraps is an object whose methods call the

@@ -15,12 +15,14 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import { copyHostData } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/boundary-data";
 import {
 	handLocalProtocolOptions,
+	handTUI,
 	handUIContext,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/context-surfaces";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type {
 	ExtensionActions,
+	ExtensionAPI,
 	ExtensionContextActions,
 	ExtensionUIContext,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
@@ -32,9 +34,9 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus, extensionCallbackScope } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
-import { type AutocompleteProvider, type Component, Container, TUI } from "@oh-my-pi/pi-tui";
+import { type AutocompleteProvider, type Component, Container, type OverlayFocusOwner, TUI } from "@oh-my-pi/pi-tui";
 import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
-import { getEditorTheme, initTheme } from "@oh-my-pi/pi-tui/theme";
+import { getEditorTheme, initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import { bindInputScope } from "@oh-my-pi/pi-tui/tools/renderer-scope";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
@@ -336,7 +338,7 @@ describe("data the host hands an extension", () => {
 		expect(typeof ctx.models.family(handed)).toBe("string");
 	});
 
-	test("is copied as data: a URL as a URL, a class instance without its behavior, a record's function as itself", () => {
+	test("is copied as data: a URL as a URL, a class instance as its fields, and a function nowhere", () => {
 		class Holder {
 			readonly #secret = "host state";
 			readonly name = "holder";
@@ -345,19 +347,138 @@ describe("data the host hands an extension", () => {
 				return this.#secret;
 			}
 		}
-		const check = (value: unknown): boolean => value !== undefined;
-		const original = { url: new URL("https://example.invalid/path?q=1"), holder: new Holder(), check };
+		const holder = new Holder();
+		const failure = Object.assign(new Error("host failure"), { retry: holder.read });
+		const original = {
+			url: new URL("https://example.invalid/path?q=1"),
+			holder,
+			record: { write: holder.read, kept: 1 },
+			list: [holder.read, 2],
+			map: new Map<string, unknown>([
+				["write", holder.read],
+				["kept", 3],
+			]),
+			set: new Set<unknown>([holder.read, 4]),
+			failure,
+		};
 		const copy = copyHostData(original);
 
 		expect(copy.url).toBeInstanceOf(URL);
 		expect(copy.url).not.toBe(original.url);
 		expect(copy.url.href).toBe("https://example.invalid/path?q=1");
-		// Typed as the class it was copied from; it holds only that class's data.
-		const holder: unknown = copy.holder;
-		expect(holder).toEqual({ name: "holder" });
-		expect(Object.getPrototypeOf(holder)).toBe(Object.prototype);
-		expect("read" in copy.holder || "reveal" in copy.holder).toBe(false);
-		expect(copy.check).toBe(check);
+		// Typed as what it was copied from; it holds only the data.
+		const copied: unknown = { ...copy, url: undefined, failure: { ...copy.failure } };
+		expect(copied).toEqual({
+			url: undefined,
+			holder: { name: "holder" },
+			record: { kept: 1 },
+			list: [undefined, 2],
+			map: new Map([["kept", 3]]),
+			set: new Set([4]),
+			failure: {},
+		});
+		expect(Object.getPrototypeOf(copy.holder)).toBe(Object.prototype);
+		expect(copy.failure).toBeInstanceOf(Error);
+		expect(copy.failure.message).toBe("host failure");
+		expect("retry" in copy.failure).toBe(false);
+	});
+
+	test("a host tool's details reach a hook without the callables they held", async () => {
+		class HostState {
+			#value = "initial";
+			readonly write = (value: string): void => {
+				this.#value = value;
+			};
+			get value(): string {
+				return this.#value;
+			}
+		}
+		const host = new HostState();
+		const owner = new ExtensionRuntime();
+		const release = owner.beginSession();
+		cleanups.push(release);
+		let details: unknown;
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.on("tool_result", event => {
+					details = event.details;
+				});
+			},
+			process.cwd(),
+			new EventBus(),
+			owner,
+			"details-callable",
+		);
+		const runner = new ExtensionRunner(
+			[extension],
+			owner,
+			process.cwd(),
+			SessionManager.inMemory(),
+			{} as ModelRegistry,
+		);
+		await runner.emitToolResult({
+			type: "tool_result",
+			toolName: "host_tool",
+			toolCallId: "details",
+			input: {},
+			content: [{ type: "text", text: "ok" }],
+			details: { write: host.write, status: "done" },
+			isError: false,
+		});
+
+		expect(details).toEqual({ status: "done" });
+		expect(host.value).toBe("initial");
+	});
+
+	test("the callables a surface declares are handed on purpose: a tool's callable schema, a renderer's requestRender", async () => {
+		const owner = new ExtensionRuntime();
+		const release = owner.beginSession();
+		let readTools: (() => ReturnType<ExtensionAPI["getAllTools"]>) | undefined;
+		let requestRender: (() => void) | undefined;
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				readTools = () => pi.getAllTools();
+				pi.registerAssistantThinkingRenderer(context => {
+					requestRender = context.requestRender;
+					context.requestRender();
+					return undefined;
+				});
+			},
+			process.cwd(),
+			new EventBus(),
+			owner,
+			"declared-callables",
+		);
+		const runner = new ExtensionRunner(
+			[extension],
+			owner,
+			process.cwd(),
+			SessionManager.inMemory(),
+			{} as ModelRegistry,
+		);
+		const schema = Object.assign((value: unknown) => value, { toJsonSchema: () => ({ type: "object" }) });
+		// A host may keep a tool's row in a class; the schema is read from the field that declares it.
+		class ToolRow {
+			readonly name = "host_tool";
+			readonly description = "a host tool";
+			readonly parameters = schema;
+			readonly sourceInfo = { path: "<builtin:host_tool>", source: "builtin", scope: "temporary" };
+		}
+		const [host, context] = actions(() => undefined);
+		const withTools = { ...host, getAllTools: () => [new ToolRow()] } as unknown as ExtensionActions;
+		runner.initialize(withTools, context, undefined, { ...runner.getUIContext() }, "rpc");
+		const tools = readTools?.() ?? [];
+		let renders = 0;
+		const renderer = runner.getAssistantThinkingRenderers()[0];
+		if (!renderer) throw new Error("the thinking renderer was not registered");
+		renderer({ contentIndex: 0, thinkingIndex: 0, text: "thinking", requestRender: () => renders++ }, theme);
+		const rendersLive = renders;
+		release();
+		requestRender?.();
+
+		// Compared by identity only; the schema's type is the host's, not the test's.
+		expect(tools[0]?.parameters as unknown).toBe(schema);
+		expect({ rendersLive, rendersAfter: renders }).toEqual({ rendersLive: 1, rendersAfter: 1 });
 	});
 });
 
@@ -397,6 +518,131 @@ async function controllerHost() {
 	});
 	return { owner, release, runner, tui, editor, ui, inside };
 }
+
+/** A TUI with a host component focused, and sessions whose handed TUIs the test drives. */
+function focusHost() {
+	const tui = new TUI(new VirtualTerminal(80, 24));
+	const seen: Array<{ name: string; key: string }> = [];
+	const drawn: string[] = [];
+	const named = (name: string, extra: Partial<Component & OverlayFocusOwner> = {}): Component & { name: string } => ({
+		name,
+		render: () => {
+			drawn.push(name);
+			return [name];
+		},
+		invalidate() {},
+		handleInput(key: string) {
+			seen.push({ name, key });
+		},
+		...extra,
+	});
+	const host = named("host");
+	tui.setFocus(host);
+	const releases: Array<() => void> = [];
+	const session = () => {
+		const owner = new ExtensionRuntime();
+		const release = owner.beginSession();
+		releases.push(release);
+		// Only the TUI surface is exercised; nothing here reaches the registry.
+		const runner = new ExtensionRunner([], owner, process.cwd(), SessionManager.inMemory(), {} as ModelRegistry);
+		return { release, tui: handTUI(tui, owner, runner.rendererScope) };
+	};
+	const focus = (): string | null => {
+		const focused = tui.getFocused();
+		return focused !== null && "name" in focused ? String(focused.name) : null;
+	};
+	cleanups.push(() => {
+		for (const release of releases) release();
+		tui.stop();
+	});
+	return { tui, seen, drawn, named, host, session, focus };
+}
+
+describe("what a session focuses or shows", () => {
+	test("a component it focused and then showed comes down with it, and is never drawn again", () => {
+		const h = focusHost();
+		const a = h.session();
+		const reused = h.named("reused");
+		a.tui.setFocus(reused);
+		a.tui.setFocus(null);
+		a.tui.showOverlay(reused);
+		h.tui.renderNow();
+		const drawnLive = h.drawn.includes("reused");
+		a.release();
+		h.drawn.length = 0;
+		h.tui.renderNow();
+		h.tui.injectDebugInput("next");
+
+		expect({
+			drawnLive,
+			overlays: h.tui.overlayStack.length,
+			drawn: h.drawn.includes("reused"),
+			focus: h.focus(),
+		}).toEqual({ drawnLive: true, overlays: 0, drawn: false, focus: "host" });
+		expect(h.seen).toEqual([{ name: "host", key: "next" }]);
+	});
+
+	test("nested overlays hand focus back to the host's component, not to the outer one gone with them", () => {
+		const h = focusHost();
+		const a = h.session();
+		a.tui.showOverlay(h.named("outer"));
+		a.tui.showOverlay(h.named("inner"));
+		h.tui.injectDebugInput("live");
+		a.release();
+		h.tui.injectDebugInput("next");
+
+		expect({ overlays: h.tui.overlayStack.length, focus: h.focus() }).toEqual({ overlays: 0, focus: "host" });
+		expect(h.seen).toEqual([
+			{ name: "inner", key: "live" },
+			{ name: "host", key: "next" },
+		]);
+	});
+
+	test("a child its overlay owns goes back to the host's component with the overlay", () => {
+		const h = focusHost();
+		const a = h.session();
+		const child = h.named("child");
+		a.tui.showOverlay(h.named("overlay", { ownsOverlayFocusTarget: (target: Component) => target === child }));
+		h.tui.setFocus(child);
+		a.release();
+		h.tui.injectDebugInput("next");
+
+		expect({ overlays: h.tui.overlayStack.length, focus: h.focus() }).toEqual({ overlays: 0, focus: "host" });
+	});
+
+	test("a component taken again goes back to what it was last taken from", () => {
+		const h = focusHost();
+		const a = h.session();
+		const taken = h.named("taken");
+		a.tui.setFocus(taken);
+		a.tui.setFocus(null);
+		h.tui.setFocus(h.named("new-host"));
+		a.tui.setFocus(taken);
+		a.release();
+		h.tui.injectDebugInput("next");
+
+		expect(h.focus()).toBe("new-host");
+		expect(h.seen).toEqual([{ name: "new-host", key: "next" }]);
+	});
+
+	test("giving focus up through a session that has gone reaches what replaced its component", () => {
+		const h = focusHost();
+		const a = h.session();
+		const b = h.session();
+		a.tui.setFocus(h.named("a"));
+		b.tui.setFocus(h.named("b"));
+		a.release();
+		h.tui.injectDebugInput("b-live");
+		b.tui.setFocus(null);
+		h.tui.injectDebugInput("host-next");
+
+		expect(h.focus()).toBe("host");
+		expect(h.seen).toEqual([
+			{ name: "b", key: "b-live" },
+			{ name: "host", key: "host-next" },
+		]);
+	});
+});
 
 describe("a key an extension's dialog takes", () => {
 	test("is not handled by a dialog that closed itself while reserving it", async () => {

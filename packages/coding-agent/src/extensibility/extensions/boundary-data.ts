@@ -487,22 +487,23 @@ export class HandedSignals {
  * installed getter) stays on the copy, and the host's own record reads the same afterwards.
  *
  * What reaches here is data, and it is copied as data whatever it was built with. Whether a value
- * crosses the boundary as itself is decided by what it is for, never by its shape: the host hands
- * a capability only through a surface built for it (`context-surfaces.ts`, {@link handHostModel}),
- * so an object found inside data is never one, and a class instance is copied like a plain object.
+ * crosses the boundary as itself is decided by what it is for, never by its shape or by what holds
+ * it: the host hands a capability only through a surface built for it (`context-surfaces.ts`,
+ * {@link handHostModel}, a callable tool schema in `getAllTools()`, a thinking renderer's
+ * `requestRender`), and nothing found inside data is one.
  *
  * Objects, arrays, maps and sets are copied all the way down; strings and the other primitives are
  * shared, since nothing can change them. Binary data and dates are copied (`copyBuiltInData`), and
  * a regular expression and a URL are rebuilt from what they hold. An object of any other class is
  * copied as the data it holds, as `structuredClone` copies one: its own enumerable string-keyed
- * fields, onto a plain object. Its behavior is not data and does not cross: neither its prototype's
- * methods nor a function held in its own fields — a bound method or an arrow-function field, which
- * reaches the instance's private state as surely as a method does. An error is copied with its own
+ * fields, onto a plain object, without its prototype's methods. An error is copied with its own
  * properties (`message`, `code`, `errno`) and keeps its class. An `AbortSignal` is handed as the
  * counterpart `signals` admits for it, or, when the call hands none, as a signal of its own that
- * follows it. A function in a record, an array or a map is host code the host put there to be
- * called — a callable tool schema in `getAllTools()` — and is handed as itself. Symbol-keyed host
- * markers stay with the host, as `structuredClone` leaves them.
+ * follows it. A function is behavior, not data, wherever it sits — a field of a record or of an
+ * instance, an array element, a map's key or value, a set's member, an error's property: a bound
+ * method or an arrow function reaches the private state of whatever made it. It is dropped, as the
+ * session file drops it when the host persists the same record (an array keeps the slot,
+ * `undefined`). Symbol-keyed host markers stay with the host, as `structuredClone` leaves them.
  */
 export function copyHostData<T>(value: T, signals?: HandedSignals): T {
 	return copyHostValue(value, new Map(), signals) as T;
@@ -606,6 +607,7 @@ function handHostResolver(resolver: Function, model: Model<Api>): NonNullable<Mo
 }
 
 function copyHostValue(value: unknown, copies: Map<object, unknown>, signals: HandedSignals | undefined): unknown {
+	if (typeof value === "function") return undefined;
 	if (typeof value !== "object" || value === null) return value;
 	const known = copies.get(value);
 	if (known !== undefined) return known;
@@ -643,22 +645,26 @@ function copyHostValue(value: unknown, copies: Map<object, unknown>, signals: Ha
 	if (types.isMap(value)) {
 		const copy = new Map<unknown, unknown>();
 		copies.set(value, copy);
-		for (const [key, item] of value)
+		for (const [key, item] of value) {
+			if (typeof key === "function" || typeof item === "function") continue;
 			copy.set(copyHostValue(key, copies, signals), copyHostValue(item, copies, signals));
+		}
 		return copy;
 	}
 	if (types.isSet(value)) {
 		const copy = new Set<unknown>();
 		copies.set(value, copy);
-		for (const item of value) copy.add(copyHostValue(item, copies, signals));
+		for (const item of value) if (typeof item !== "function") copy.add(copyHostValue(item, copies, signals));
 		return copy;
 	}
 	if (types.isNativeError(value)) {
 		const copy: object = Object.create(Object.getPrototypeOf(value));
 		copies.set(value, copy);
 		for (const key of Object.getOwnPropertyNames(value)) {
+			const raw: unknown = Reflect.get(value, key);
+			if (typeof raw === "function") continue;
 			Object.defineProperty(copy, key, {
-				value: copyHostValue(Reflect.get(value, key), copies, signals),
+				value: copyHostValue(raw, copies, signals),
 				enumerable: Object.getOwnPropertyDescriptor(value, key)?.enumerable === true,
 				writable: true,
 				configurable: true,
@@ -666,14 +672,11 @@ function copyHostValue(value: unknown, copies: Map<object, unknown>, signals: Ha
 		}
 		return copy;
 	}
-	// A class instance is copied as its data; a function in its own fields is its behavior.
-	const prototype: unknown = Object.getPrototypeOf(value);
-	const record = prototype === Object.prototype || prototype === null;
 	const copy: Record<string, unknown> = {};
 	copies.set(value, copy);
 	for (const key of Object.keys(value)) {
 		const raw: unknown = Reflect.get(value, key);
-		if (!record && typeof raw === "function") continue;
+		if (typeof raw === "function") continue;
 		const item = copyHostValue(raw, copies, signals);
 		// Assigning an own `__proto__` key would set the copy's prototype; defined, it stays data.
 		if (key === "__proto__") {

@@ -920,9 +920,17 @@ export class ExtensionRunner {
 		this.runtime.appendEntry = actions.appendEntry;
 		this.runtime.getActiveTools = () => copyHostData(actions.getActiveTools());
 		// Each tool's `parameters` is the host's own (a registered tool's is the copy taken at
-		// registration), and the host validates against it. A callable schema is handed as itself;
-		// a registered one is frozen.
-		this.runtime.getAllTools = () => copyHostData(actions.getAllTools());
+		// registration), and the host validates against it. A callable schema is code, so a copy of
+		// the record drops it; it is handed deliberately, as itself — `ToolInfo.parameters` is the
+		// field that declares it — and a registered one is frozen.
+		this.runtime.getAllTools = () =>
+			actions.getAllTools().map(info => {
+				const parameters: unknown = info.parameters;
+				return {
+					...copyHostData(info),
+					parameters: typeof parameters === "function" ? info.parameters : copyHostData(info.parameters),
+				};
+			});
 		this.runtime.setActiveTools = async toolNames => {
 			const registrationBarrier = this.#toolRegistrationBarrier;
 			if (registrationBarrier) await registrationBarrier;
@@ -1555,12 +1563,22 @@ export class ExtensionRunner {
 	}
 
 	/** The thinking renderers extensions registered, each as {@link getMessageRenderer} hands one:
-	 *  admitted, on a copy of its context, carrying the scope its component is mounted in. */
+	 *  admitted, on a copy of its context, carrying the scope its component is mounted in. The
+	 *  context's `requestRender` is the one callable it declares, so it is handed deliberately: it
+	 *  asks the host for a frame, and does nothing once the session has gone. */
 	getAssistantThinkingRenderers(): AssistantThinkingRenderer[] {
 		return this.extensions.flatMap(ext =>
 			ext.assistantThinkingRenderers.map(renderer => {
-				const admitted: AssistantThinkingRenderer = (context, theme) =>
-					this.runScoped(() => renderer(copyHostData(context), handTheme(theme)));
+				const admitted: AssistantThinkingRenderer = (context, theme) => {
+					const scope = this.rendererScope;
+					const handed = {
+						...copyHostData(context),
+						requestRender: () => {
+							if (scope.live) context.requestRender();
+						},
+					};
+					return this.runScoped(() => renderer(handed, handTheme(theme)));
+				};
 				return Object.assign(admitted, { rendererScope: this.rendererScope });
 			}),
 		);

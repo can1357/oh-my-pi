@@ -27,7 +27,13 @@ import { LoopWatchdog } from "./loop-watchdog";
 import { assumedTspHello, NativeBackend, type NativeHost } from "./native/backend";
 import { col } from "./native/describe";
 import { TSP_PREFIX, type TspHello } from "./native/encode";
-import { adoptInputScope, retireGoneInputScopes, withInputScope } from "./tools/renderer-scope";
+import {
+	adoptInputScope,
+	inputRecipient,
+	isRetiredInputScope,
+	retireGoneInputScopes,
+	withInputScope,
+} from "./tools/renderer-scope";
 import type { DescribeContext, NativeNode, NativeScreen, NativeSurfaceProvider, NativeUiEvent } from "./native/node";
 import { cropSixelTop } from "./sixel";
 import { STDOUT_BACKLOG_CLEAR_BYTES, setAltScreenActive, type Terminal } from "./terminal";
@@ -1254,6 +1260,9 @@ export class TUI extends Container {
 	}
 
 	setFocus(component: Component | null): void {
+		// Focus never lands on an extension's component whose session has gone: it goes to what its
+		// host put in its place — through a chain of such, when one replaced another — or nowhere.
+		if (component !== null && isRetiredInputScope(component)) component = inputRecipient(component) ?? null;
 		const holder = this.#getKeyHolderOverlay();
 		if (holder && !isOverlayFocusTarget(holder.component, component)) {
 			if (
@@ -3105,11 +3114,26 @@ export class TUI extends Container {
 		// A component an extension supplied whose session has gone is taken out of input — the host
 		// swaps in its own editor, closes the dialog — before anything of it runs, including
 		// `capturesInput`. A live one is asked for `handleInput` inside its scope.
-		retireGoneInputScopes();
+		this.#retireGoneInputScopes();
 		const focused = this.#focusedComponent;
 		if (focused && withInputScope(focused, () => !!focused.handleInput)) return focused;
 		const holder = this.#getKeyHolderOverlay();
-		return holder?.component === focused ? holder.preFocus : null;
+		if (!holder || holder.component !== focused) return null;
+		const preFocus = holder.preFocus;
+		return preFocus !== null && isRetiredInputScope(preFocus) ? (inputRecipient(preFocus) ?? null) : preFocus;
+	}
+
+	/**
+	 * Takes every extension component whose session has gone out of input and out of view
+	 * (`retireGoneInputScopes`), then makes sure focus is not left on one. A retirement restores
+	 * focus as its host decides, and a cascade can undo it: an inner overlay of a session closing
+	 * after its outer one hands focus back to the outer, already gone. Focus then goes to what took
+	 * that one's place, as {@link setFocus} would send it.
+	 */
+	#retireGoneInputScopes(): void {
+		retireGoneInputScopes();
+		const focused = this.#focusedComponent;
+		if (focused !== null && isRetiredInputScope(focused)) this.setFocus(inputRecipient(focused) ?? null);
 	}
 
 	/**
@@ -3916,7 +3940,7 @@ export class TUI extends Container {
 	#doRender(): void {
 		if (this.#stopped) return;
 		// Before a frame draws anything an extension supplied whose session has gone.
-		retireGoneInputScopes();
+		this.#retireGoneInputScopes();
 		if (this.#nativeLive) {
 			this.#native!.render();
 			return;
