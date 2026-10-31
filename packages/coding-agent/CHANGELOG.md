@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Merging a task's changes back (three-way patch apply, cherry-picking its branch, and restoring stashed edits) now reports a conflict when both sides edit adjacent lines, as git does, instead of merging both edits ([#16410](https://github.com/can1357/oh-my-pi/pull/16410) by [@sjawhar](https://github.com/sjawhar))
+
+### Fixed
+
+- Fixed other colocated jj workspaces losing their working-copy change (moving to a new empty change) after omp read a repository with concurrent `jj` operations ([#16410](https://github.com/can1357/oh-my-pi/pull/16410) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.14.1] - 2026-10-31
 
 ### Added
