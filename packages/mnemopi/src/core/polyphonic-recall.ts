@@ -345,9 +345,9 @@ function anchorTime(queryTime: string | Date | null | undefined): number | null 
 	return Number.isFinite(parsed) ? parsed : null;
 }
 
-const CJK_TEMPORAL_RE =
-	/(?:昨天|昨日|今天|今日|最近|近期|最新|這週|本週|上週|上周|本周|这周|這個月|上個月|上个月|这个月|之前|先前|以前|何時|什麼時候|何时|什么时候|剛剛|剛才|刚刚|刚才|過去|过去|現在|现在|目前)/u;
-
+const TEMPORAL_QUERY_RE =
+	/(?:昨天|昨日|今天|今日|最近(?![鄰邻])|近期|最新|這週|本週|上週|上周|本周|这周|這個月|上個月|上个月|这个月|之前|先前|以前|何時|什麼時候|何时|什么时候|剛剛|剛才|刚刚|刚才|過去|过去|現在|现在|目前|截止(?:日|日期|時間|时间|時限|时限|前|到|至|於|于|$))/u;
+const NON_DEADLINE_CUTOFF_RE = /截止[頻频點点電壓压波長长區区]/u;
 function looksTemporal(query: string): boolean {
 	const lower = query.toLowerCase();
 	if (
@@ -357,7 +357,7 @@ function looksTemporal(query: string): boolean {
 	) {
 		return true;
 	}
-	return CJK_TEMPORAL_RE.test(query);
+	return TEMPORAL_QUERY_RE.test(query) && !NON_DEADLINE_CUTOFF_RE.test(query);
 }
 
 export class PolyphonicRecallEngine {

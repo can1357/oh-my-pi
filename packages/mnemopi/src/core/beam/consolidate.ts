@@ -860,7 +860,13 @@ export function extractAndStoreFacts(
 }
 function classifyAbility(query: string): string {
 	const q = query.toLowerCase();
+	const deadlineContextRe = /截止(?:日|日期|時間|时间|時限|时限|前|到|至|於|于|$)/u;
+	const nonDeadlineCutoffRe = /截止[頻频點点電壓压波長长區区]/u;
+	const isDeadline = deadlineContextRe.test(query) && !nonDeadlineCutoffRe.test(query);
+	const hasRecent = /最近(?![鄰邻])/u.test(query);
 	if (
+		isDeadline ||
+		hasRecent ||
 		[
 			"how many days",
 			"how many weeks",
@@ -888,7 +894,6 @@ function classifyAbility(query: string): string {
 			"幾號",
 			"几号",
 			"哪天",
-			"截止",
 			"時間線",
 			"时间线",
 			"時程",
@@ -1014,27 +1019,43 @@ function timelineRetrieve(beam: BeamMemoryState, query: string, topK: number): M
 		params.push(like, like);
 	}
 	const where = clauses.length === 0 ? "1=1" : clauses.join(" OR ");
-	const orderParts: string[] = [];
+	const trimmed = query.trim().toLowerCase();
+	const scoreExprs: string[] = [];
 	const orderParams: SQLQueryBindings[] = [];
-	if (exactPrimary.length > 0) {
-		const exactChecks: string[] = [];
-		for (const p of exactPrimary) {
-			const like = `%${escapeLike(p)}%`;
-			exactChecks.push("lower(description) LIKE ? ESCAPE '\\' OR date LIKE ? ESCAPE '\\'");
-			orderParams.push(like, like);
-		}
-		orderParts.push(`WHEN ${exactChecks.join(" OR ")} THEN 2`);
+	if (trimmed.length > 0) {
+		const trimmedLike = `%${escapeLike(trimmed)}%`;
+		scoreExprs.push(
+			"(CASE WHEN lower(description) LIKE ? ESCAPE '\\' OR date LIKE ? ESCAPE '\\' THEN 80 ELSE 0 END)",
+		);
+		orderParams.push(trimmedLike, trimmedLike);
 	}
-	if (primary.length > 0) {
-		const primaryChecks: string[] = [];
-		for (const p of primary) {
-			const like = `%${escapeLike(p)}%`;
-			primaryChecks.push("lower(description) LIKE ? ESCAPE '\\' OR date LIKE ? ESCAPE '\\'");
-			orderParams.push(like, like);
-		}
-		orderParts.push(`WHEN ${primaryChecks.join(" OR ")} THEN 1`);
+	const genericTimelineWords = new Set([
+		"timeline",
+		"chronology",
+		"history",
+		"時間線",
+		"时間線",
+		"时间线",
+		"時序",
+		"时序",
+		"歷程",
+		"历程",
+		"順序",
+		"顺序",
+	]);
+	const exactPrimarySet = new Set(exactPrimary);
+	for (const p of primary) {
+		const lowerP = p.toLowerCase();
+		const isGeneric = genericTimelineWords.has(lowerP);
+		const w = isGeneric ? 1 : codePointLength(p);
+		const exactBonus = exactPrimarySet.has(p) && !isGeneric ? w * 2 : 0;
+		const like = `%${escapeLike(p)}%`;
+		scoreExprs.push(
+			`(CASE WHEN lower(description) LIKE ? ESCAPE '\\' OR date LIKE ? ESCAPE '\\' THEN ${w * 4 + exactBonus} ELSE 0 END)`,
+		);
+		orderParams.push(like, like);
 	}
-	const rankClause = orderParts.length > 0 ? `(CASE ${orderParts.join(" ")} ELSE 0 END) DESC, ` : "";
+	const rankClause = scoreExprs.length > 0 ? `(${scoreExprs.join(" + ")}) DESC, ` : "";
 	const allParams = [...params, ...orderParams, topK];
 	const results = asRows(
 		beam.db

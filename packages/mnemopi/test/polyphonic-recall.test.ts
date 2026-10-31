@@ -372,6 +372,57 @@ describe("PolyphonicRecallEngine", () => {
 		}
 	});
 
+	it("ranks specific timeline primary matches ahead of older generic timeline matches", () => {
+		const beam = makeBeam();
+		try {
+			beam.db.run(
+				`INSERT INTO memoria_timelines
+					(session_id, event_id, date, description, source_memory_id)
+					VALUES
+					(?, 1, '2020-01-01', 'General project timeline and historical milestones', 'wm-old-timeline'),
+					(?, 2, '2026-05-01', 'PostgreSQL cluster migration completed', 'wm-pg-migration')`,
+				[beam.sessionId, beam.sessionId],
+			);
+			const result = memoriaRetrieve(beam, "PostgreSQL timeline", "TR", 1);
+			expect(result.ability).toBe("TR");
+			expect((result.results as Array<{ event_id?: number }>)[0]?.event_id).toBe(2);
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
+
+	it("does not trigger temporal routing for nearest-neighbor technical compounds", () => {
+		const beam = makeBeam();
+		try {
+			const engine = seedPolyphonicFixture(beam);
+			expect(engine.temporalVoice("最近鄰演算法")).toEqual([]);
+			expect(engine.temporalVoice("最近邻算法")).toEqual([]);
+
+			const retrieveResult = memoriaRetrieve(beam, "最近鄰演算法");
+			expect(retrieveResult.ability).not.toBe("TR");
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
+
+	it("restricts 截止 routing to deadline phrases and routes 截止頻率 to IE", () => {
+		const beam = makeBeam();
+		try {
+			const engine = seedPolyphonicFixture(beam);
+			expect(engine.temporalVoice("what is the 截止頻率")).toEqual([]);
+			expect(engine.temporalVoice("專案截止日期").length).toBeGreaterThan(0);
+			expect(engine.temporalVoice("報名截止").length).toBeGreaterThan(0);
+
+			const cutoffRetrieve = memoriaRetrieve(beam, "what is the 截止頻率");
+			expect(cutoffRetrieve.ability).toBe("IE");
+
+			const deadlineRetrieve = memoriaRetrieve(beam, "專案截止日期");
+			expect(deadlineRetrieve.ability).toBe("TR");
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
+
 	it("retrieves knowledge graph entities with conjunction-bearing names under MR ability", () => {
 		const beam = makeBeam();
 		try {
