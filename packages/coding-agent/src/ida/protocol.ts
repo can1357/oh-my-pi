@@ -5,8 +5,7 @@
  * broker (so it shows up in `omp ps`). The daemon is an omp worker (`host.ts`) that owns the
  * IDB lock and one Python worker, and serves NDJSON requests on {@link idaHostEndpoint}.
  */
-import type * as net from "node:net";
-import * as path from "node:path";
+import { ipcEndpoint } from "@oh-my-pi/pi-natives";
 import { type } from "@oh-my-pi/omptype";
 export { IDA_HOST_WORKER_ARG } from "../cli/worker-selectors";
 
@@ -32,25 +31,6 @@ export function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
-/** Feed every complete newline-terminated, non-blank line received on `socket` to `onLine`. */
-export function readSocketLines(socket: net.Socket, onLine: (line: string) => void): void {
-	const decoder = new TextDecoder();
-	let buffer = "";
-	socket.on("data", (chunk: Buffer) => {
-		buffer += decoder.decode(chunk, { stream: true });
-		for (let newline = buffer.indexOf("\n"); newline >= 0; newline = buffer.indexOf("\n")) {
-			const line = buffer.slice(0, newline).trim();
-			buffer = buffer.slice(newline + 1);
-			if (line) onLine(line);
-		}
-	});
-}
-
-/** Write one NDJSON frame unless the socket is already gone. */
-export function writeFrame(socket: net.Socket, frame: object): void {
-	if (!socket.destroyed && socket.writable) socket.write(`${JSON.stringify(frame)}\n`);
-}
-
 function hash16(text: string): string {
 	return Bun.hash.wyhash(text).toString(16).padStart(16, "0");
 }
@@ -65,12 +45,9 @@ export function idaDaemonName(id: string): string {
 }
 
 /** Unix socket or Windows named pipe the host for `daemonName` listens on. */
-export function idaHostEndpoint(projectDir: string, runtimeDir: string, daemonName: string): string {
-	if (process.platform === "win32") {
-		return `\\\\.\\pipe\\omp-ida-${hash16(`${path.resolve(projectDir)}\0${daemonName}`)}`;
-	}
+export function idaHostEndpoint(runtimeDir: string, daemonName: string): string {
 	// Hashed to stay under the ~104-byte Unix socket path limit.
-	return path.join(runtimeDir, `ida-${hash16(daemonName)}.sock`);
+	return ipcEndpoint(runtimeDir, `ida-${hash16(daemonName)}`);
 }
 
 /** RPC methods an omp process may forward to the worker through `call`. */

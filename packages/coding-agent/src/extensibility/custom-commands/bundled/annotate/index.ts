@@ -14,7 +14,7 @@ import {
 	selectReviewChoice,
 	type ReviewPrRef,
 } from "../review";
-import { buildReviewPrompt, formatCodeReviewAnnotations } from "../review/prompt";
+import { buildCodeReviewFeedback } from "../review/prompt";
 import {
 	getReviewTargetIssue,
 	type LocalReviewKind,
@@ -23,6 +23,7 @@ import {
 	type ReviewTargetUI,
 } from "../review/target";
 import { acquireFileTextReviewSource, createPromptTextReviewSource } from "./direct-source";
+import { type AnnotationDraft, loadAnnotationDrafts } from "./draft-store";
 import { showCodeReviewOverlay, showTextReviewOverlay } from "./fullscreen";
 import { selectAnnotationSourceKind, selectSessionTextReviewSource, type AnnotationSourceKind } from "./text-source";
 import {
@@ -46,6 +47,8 @@ interface CodeReviewDependencies {
 	showCodeReviewOverlay(
 		ctx: CustomCommandContext,
 		target: ResolvedReviewTarget,
+		focus?: string,
+		resumed?: AnnotationDraft,
 	): Promise<CodeReviewOverlayResult | undefined>;
 }
 
@@ -102,7 +105,7 @@ const ANNOTATE_MODE_COMPLETIONS: readonly AutocompleteItem[] = [
 	{
 		value: "code-review ",
 		label: "code-review",
-		description: "Annotate local changes or a GitHub pull request",
+		description: "Annotate local changes, a GitHub pull request, or a GitLab merge request",
 	},
 ];
 
@@ -182,20 +185,19 @@ async function finishCodeReview(
 	target: ResolvedReviewTarget,
 	focus: string | undefined,
 	showOverlay: CodeReviewDependencies["showCodeReviewOverlay"],
+	resumed?: AnnotationDraft,
 ): Promise<string | undefined> {
 	const issue = getReviewTargetIssue(target);
 	if (issue) {
 		ctx.ui.notify(issue, "warning");
 		return undefined;
 	}
-	const result = await showOverlay(ctx, target);
+	const result = await showOverlay(ctx, target, focus, resumed);
 	if (!result) return undefined;
-	const annotations = formatCodeReviewAnnotations(result.annotations, {
-		forReviewer: result.action === "review",
-		supplementalInstructions: focus,
-	});
-	if (result.action === "review") return buildReviewPrompt(target, annotations);
-	if (annotations) ctx.ui.pasteToEditor(annotations);
+	const review = result.action === "review";
+	const feedback = buildCodeReviewFeedback(target, result.annotations, review, focus);
+	if (review) return feedback;
+	if (feedback) ctx.ui.pasteToEditor(feedback);
 	return undefined;
 }
 
@@ -244,6 +246,7 @@ export async function runAnnotateCommand(
 	const trimmed = args.trim();
 	let kind: AnnotationSourceKind | undefined;
 	let source: TextReviewSource | undefined;
+	let resumed: AnnotationDraft | undefined;
 	if (trimmed.length === 0) {
 		kind = await textDependencies.selectAnnotationSourceKind(ctx.ui);
 	} else {
@@ -276,11 +279,32 @@ export async function runAnnotateCommand(
 				if (text !== undefined) source = textDependencies.createPromptTextReviewSource(ctx, text);
 				break;
 			}
+			case "draft": {
+				const drafts = await loadAnnotationDrafts(ctx.sessionManager);
+				if (drafts.length === 0) {
+					ctx.ui.notify("No saved annotation drafts in this session.", "info");
+					return undefined;
+				}
+				const labels = drafts.map(
+					({ source, state }, index) =>
+						`${index + 1}. ${source.kind === "diff" ? source.target.mode : source.source.label} — ${state.annotations.length} note(s)${state.editor?.text ? " + unfinished note" : ""}`,
+				);
+				resumed = drafts[labels.indexOf((await ctx.ui.select("Resume an annotation draft", labels)) ?? "")];
+				if (!resumed) return undefined;
+				if (resumed.source.kind === "diff") {
+					const { target, focus } = resumed.source;
+					const { showCodeReviewOverlay: show } = { ...defaultCodeReviewDependencies, ...dependencies };
+					return finishCodeReview(ctx, target, focus, show, resumed);
+				}
+				source = resumed.source.source;
+				break;
+			}
 		}
 	}
 	if (!source) return undefined;
-	const result = await textDependencies.showTextReviewOverlay(ctx, source);
+	const result = await textDependencies.showTextReviewOverlay(ctx, source, resumed);
 	if (!result || result.annotations.length === 0) return undefined;
+	if (result.editedText !== undefined) source = { ...source, text: result.editedText };
 	let contextSummary: string | undefined;
 	if (shouldSummarizeTextReviewSource(source)) {
 		ctx.ui.setStatus("annotate-summary", "Rephrasing annotation source with the session model…");

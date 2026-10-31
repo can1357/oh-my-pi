@@ -26,11 +26,13 @@ import {
 	resolveModelRoleValue,
 } from "../config/model-resolver";
 import { getKnownRoleIds } from "../config/model-roles";
+import { buildServiceTierByFamily } from "../config/service-tier";
 import type { Settings } from "../config/settings";
 import { containsMagicKeyword } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
 import type { MagicKeywordId } from "../modes/magic-keywords";
 import {
 	AUTO_THINKING,
+	automaticThinkingLevel,
 	type ConfiguredThinkingLevel,
 	clampAutoThinkingEffort,
 	clampThinkingLevelToCeiling,
@@ -43,10 +45,16 @@ import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ModelCycleResult, ResolvedRoleModel, RoleModelCycle, RoleModelCycleResult } from "./agent-session-types";
 import { formatRoleModelValue, resolveRoleModelFull } from "./role-models";
-import { EPHEMERAL_MODEL_CHANGE_ROLE } from "./session-entries";
+import { EPHEMERAL_MODEL_CHANGE_ROLE, PREWALK_MODEL_CHANGE_ROLE } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 
-import { cfgDefaultThinkingLevel, cfgProvidersFireworksTier } from "./settings";
+import {
+	cfgDefaultThinkingLevel,
+	cfgProvidersFireworksTier,
+	cfgTierAnthropic,
+	cfgTierGoogle,
+	cfgTierOpenai,
+} from "./settings";
 import { cfgDisabledProviders, cfgEnabledModels } from "../config/model-settings";
 
 /** Capabilities borrowed from the owning AgentSession. */
@@ -274,7 +282,7 @@ export class ModelControls {
 	async setModelTemporary(
 		model: Model,
 		thinkingLevel?: ConfiguredThinkingLevel,
-		options?: { ephemeral?: boolean },
+		options?: { ephemeral?: boolean; prewalk?: boolean },
 		selection: "explicit" | "automatic" = "explicit",
 	): Promise<void> {
 		const previousEditMode = this.#host.resolveActiveEditMode();
@@ -289,7 +297,7 @@ export class ModelControls {
 		await this.#host.setModelWithProviderSessionReset(targetModel, selection);
 		this.#host.sessionManager.appendModelChange(
 			`${targetModel.provider}/${targetModel.id}`,
-			options?.ephemeral ? EPHEMERAL_MODEL_CHANGE_ROLE : "temporary",
+			options?.prewalk ? PREWALK_MODEL_CHANGE_ROLE : options?.ephemeral ? EPHEMERAL_MODEL_CHANGE_ROLE : "temporary",
 		);
 		this.#host.settings.getStorage()?.recordModelUsage(`${targetModel.provider}/${targetModel.id}`);
 
@@ -571,7 +579,11 @@ export class ModelControls {
 	 * preferred default or the current effective level.
 	 */
 	#reapplyThinkingLevel(preferredDefault?: ThinkingLevel): void {
-		this.setThinkingLevel(this.#autoThinking ? AUTO_THINKING : (preferredDefault ?? this.#thinkingLevel));
+		this.setThinkingLevel(
+			this.#autoThinking
+				? AUTO_THINKING
+				: automaticThinkingLevel(this.#model, preferredDefault ?? this.#thinkingLevel),
+		);
 	}
 
 	/** All selectable effort selectors for the active model, in cycle order. */
@@ -583,6 +595,8 @@ export class ModelControls {
 			ceiling === undefined
 				? efforts
 				: efforts.filter(level => THINKING_EFFORTS.indexOf(level) <= THINKING_EFFORTS.indexOf(ceiling));
+		// Auto never opts an unverified model into thinking; only a concrete pick does.
+		if (this.#model.thinking?.unverified) return [ThinkingLevel.Off, ...selectable];
 		return [ThinkingLevel.Off, AUTO_THINKING, ...selectable];
 	}
 
@@ -617,7 +631,7 @@ export class ModelControls {
 	 */
 	async applyAutoThinkingLevel(promptText: string, generation: number, solutionSpace?: string): Promise<void> {
 		const model = this.#model;
-		if (!model?.reasoning) return;
+		if (!model?.reasoning || model.thinking?.unverified) return;
 		// Models with reasoning but no controllable effort surface (devin-agent
 		// Cascade routes effort via sibling model ids, not a wire param) have
 		// nothing to pick — skip classification rather than discard its result.
@@ -721,14 +735,30 @@ export class ModelControls {
 	 */
 	isFastModeActive(): boolean {
 		const model = this.#model;
-		if (!model) return false;
-		const tier = this.effectiveServiceTier(model);
-		if (tier === "ultrafast") return shouldSendServiceTier(tier, model);
-		if (!realizesPriorityServiceTier(tier, model)) return false;
-		if (model.provider === "anthropic") {
-			return !isAnthropicFastModeFallbackDisabled(this.#host.providerSessionState, model);
-		}
-		return true;
+		if (!model || !this.#realizesFastTier(model, this.#serviceTierByFamily)) return false;
+		return (
+			model.provider !== "anthropic" || !isAnthropicFastModeFallbackDisabled(this.#host.providerSessionState, model)
+		);
+	}
+
+	/**
+	 * Whether a fresh session started on `model` would realize a fast tier from
+	 * the configured `tier.*` settings, ignoring this session's `/fast` toggles.
+	 * Feeds the next launch's startup status prepaint.
+	 */
+	isFastModeConfiguredFor(model: Model): boolean {
+		const settings = this.#host.settings;
+		const tiers = buildServiceTierByFamily(
+			cfgTierOpenai.get(settings),
+			cfgTierAnthropic.get(settings),
+			cfgTierGoogle.get(settings),
+		);
+		return this.#realizesFastTier(model, tiers);
+	}
+
+	#realizesFastTier(model: Model, tiers: ServiceTierByFamily): boolean {
+		const tier = this.#serviceTierFor(model, tiers);
+		return tier === "ultrafast" ? shouldSendServiceTier(tier, model) : realizesPriorityServiceTier(tier, model);
 	}
 
 	/**
@@ -739,13 +769,16 @@ export class ModelControls {
 	 * per-family tier map down to the entry for its family.
 	 */
 	effectiveServiceTier(model: Model | undefined = this.#model): ServiceTier | undefined {
-		if (model?.provider === "fireworks") {
+		return model ? this.#serviceTierFor(model, this.#serviceTierByFamily) : undefined;
+	}
+
+	#serviceTierFor(model: Model, tiers: ServiceTierByFamily): ServiceTier | undefined {
+		if (model.provider === "fireworks") {
 			return cfgProvidersFireworksTier.get(this.#host.settings) === "priority" && !isFireworksFastModelId(model.id)
 				? "priority"
 				: undefined;
 		}
-		if (!model) return undefined;
-		return resolveModelServiceTier(this.#serviceTierByFamily, model);
+		return resolveModelServiceTier(tiers, model);
 	}
 
 	/** The live per-family tier map, or `null` when empty (for session persistence). */

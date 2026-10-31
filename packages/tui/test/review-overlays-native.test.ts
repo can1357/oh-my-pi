@@ -154,9 +154,9 @@ describe("review overlays under a native surface", () => {
 			expect.objectContaining({ scope: "line", oldLine: 2, rawLine: "-gone", note: "why remove" }),
 		]);
 
-		// Paste is enabled once a note exists; activating it finishes with the notes.
-		const actions = list(overlay.describe(), "actions");
-		overlay.handleNativeEvent({ type: "activate", key: actions.path, item: actions.items[1]!.key! });
+		// Paste is enabled once a note exists; its footer button finishes with the notes.
+		overlay.describe();
+		overlay.handleNativeEvent({ type: "action", key: "actions/paste", act: "paste", mods: [] });
 		expect(result).toEqual({ action: "paste", annotations: overlay.getAnnotations() });
 	});
 
@@ -209,9 +209,8 @@ describe("review overlays under a native surface", () => {
 			"Reviewing",
 			{ onComplete },
 		);
-		const actions = list(overlay.describe(), "actions");
-		expect(actions.items[1]?.p).toMatchObject({ disabled: true });
-		overlay.handleNativeEvent({ type: "activate", key: actions.path, item: actions.items[1]!.key! });
+		overlay.describe();
+		overlay.handleNativeEvent({ type: "action", key: "actions/paste", act: "paste", mods: [] });
 		expect(onComplete).not.toHaveBeenCalled();
 	});
 });

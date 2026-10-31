@@ -10,6 +10,9 @@ provider "cerebras" {
 	// Replaces the Cerebras provider branches in the completions baseline.
 	supports-usage-in-streaming #false
 	tool-strict-mode "all_strict"
+	// Replaces the provider check in agent-loop history normalization: replayed
+	// assistant history drops its thinking blocks.
+	strip-thinking-history #true
 	// Prompt caching carries no discount: cached input tokens bill at the
 	// standard input rate (https://inference-docs.cerebras.ai/capabilities/prompt-caching).
 	cache-read-at-input-rate #true

@@ -1,3 +1,4 @@
+import { getOAuthCredentialProvider } from "@oh-my-pi/pi-ai/oauth";
 import { runProviderSetupWizard as runProviderWizard } from "@oh-my-pi/pi-tui/setup/lazy";
 import type { SetupHost, SetupScene } from "@oh-my-pi/pi-tui/setup/scenes/types";
 import {
@@ -10,7 +11,6 @@ import {
 } from "@oh-my-pi/pi-tui/setup/wizard";
 import type { Settings } from "../config/settings";
 import { captureBrowserSession } from "../utils/browser-session";
-import { copyToClipboard } from "../utils/clipboard";
 import { createModelBrowserSource } from "./model-browser-source";
 import type { InteractiveModeContext } from "./types";
 
@@ -53,8 +53,8 @@ export function createSetupHost(ctx: InteractiveModeContext): SetupHost {
 		},
 		modelSource,
 		getModels: () => ({
-			available: ctx.session.modelRegistry.getAvailable(),
-			all: ctx.session.modelRegistry.getAll(),
+			available: ctx.session.modelRegistry.getAvailable("all"),
+			all: ctx.session.modelRegistry.getAll("all"),
 			current: ctx.session.model,
 		}),
 		refreshModels: () => ctx.session.modelRegistry.refresh("online-if-uncached"),
@@ -64,7 +64,11 @@ export function createSetupHost(ctx: InteractiveModeContext): SetupHost {
 			if (projectScope) ctx.settings.setProjectModelRole("default", selector);
 			await ctx.settings.flush();
 		},
-		refreshProvider: provider => ctx.session.modelRegistry.refreshProvider(provider, "online"),
+		refreshProvider: async provider => {
+			// An OAuth alias (`openai-codex-device`) stores its credential under the base provider.
+			await ctx.session.modelRegistry.refreshProvider(getOAuthCredentialProvider(provider), "online");
+			await ctx.refreshScopedModelsAfterLogin?.();
+		},
 		saveComposerShape: async shape => {
 			cfgComposerShape.set(ctx.settings, shape);
 			await ctx.settings.flush();
@@ -79,7 +83,6 @@ export function createSetupHost(ctx: InteractiveModeContext): SetupHost {
 			(mode === "dark" ? cfgThemeDark : cfgThemeLight).set(ctx.settings, name);
 		},
 		captureBrowserSession,
-		copyToClipboard,
 		openInBrowser: url => ctx.openInBrowser(url),
 		markComplete: version => markSetupWizardComplete(ctx.settings, version),
 		playWelcomeIntro: () => ctx.playWelcomeIntro(),

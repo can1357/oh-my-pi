@@ -1,11 +1,11 @@
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { apiRouteFor } from "@oh-my-pi/pi-catalog/compat/behavior";
+import { parseCloudflareCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare";
 import {
 	CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL,
 	CLOUDFLARE_AI_GATEWAY_BASE_URL,
 	CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL,
 	CLOUDFLARE_AI_GATEWAY_OPENAI_BASE_URL,
-	parseCloudflareAiGatewayCredential,
 } from "@oh-my-pi/pi-catalog/wire/cloudflare-ai-gateway";
 import { $env } from "@oh-my-pi/pi-utils";
 import { NO_AUTH_SENTINEL } from "../auth-retry";
@@ -83,7 +83,7 @@ export const cloudflareAiGatewayTransport: ProviderTransport = {
 		return model;
 	},
 	prepareRequest: (model, options) => {
-		const credential = parseCloudflareAiGatewayCredential(options.apiKey ?? $env.CLOUDFLARE_AI_GATEWAY_API_KEY ?? "");
+		const credential = parseCloudflareCredential(options.apiKey ?? $env.CLOUDFLARE_AI_GATEWAY_API_KEY ?? "");
 		if (!credential) return { model, options };
 		const accountId = credential.accountId ?? $env.CLOUDFLARE_ACCOUNT_ID;
 		const gatewayId = credential.gatewayId ?? $env.CLOUDFLARE_GATEWAY_ID;

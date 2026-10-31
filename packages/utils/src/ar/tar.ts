@@ -16,7 +16,7 @@ import {
 	normalizeArchiveEntryPath,
 	normalizeArchiveLookupPath,
 } from "./paths";
-import { readAllBytes } from "./source";
+import type { ByteSource } from "./source";
 import type { ArchiveIndexEntry, FormatReader, FormatReadOptions, MemberSource } from "./types";
 
 const BLOCK_SIZE = 512;
@@ -53,13 +53,198 @@ interface PendingTarLink {
 	targetPath: string;
 }
 
-class TarMemberSource implements MemberSource {
+interface TarCursor {
+	readonly position: number;
+	read(length: number): Promise<Uint8Array>;
+	skip(length: number): Promise<boolean>;
+}
+
+/** Seek over plain tar payloads without fetching their bytes. */
+class TarSourceCursor implements TarCursor {
+	readonly #source: ByteSource;
+	#position = 0;
+
+	constructor(source: ByteSource) {
+		this.#source = source;
+	}
+
+	get position(): number {
+		return this.#position;
+	}
+
+	async read(length: number): Promise<Uint8Array> {
+		const size = Math.min(length, this.#source.size - this.#position);
+		if (size === 0) return new Uint8Array(0);
+		const end = this.#position + size;
+		const bytes = await this.#source.read(this.#position, end);
+		if (bytes.byteLength !== size) throw new ArchiveError("Invalid archive: truncated data");
+		this.#position = end;
+		return bytes;
+	}
+
+	async skip(length: number): Promise<boolean> {
+		if (length > this.#source.size - this.#position) return false;
+		this.#position += length;
+		return true;
+	}
+}
+
+/** Forward-only reader over tar bytes that arrive in chunks: one buffer, or a decompressing stream. */
+class TarByteStream implements TarCursor {
+	readonly #chunks: AsyncIterator<Uint8Array> | Iterator<Uint8Array>;
+	#chunk: Uint8Array = new Uint8Array(0);
+	#position = 0;
+
+	constructor(chunks: AsyncIterable<Uint8Array> | Iterable<Uint8Array>) {
+		this.#chunks = Symbol.asyncIterator in chunks ? chunks[Symbol.asyncIterator]() : chunks[Symbol.iterator]();
+	}
+
+	/** Bytes consumed so far. */
+	get position(): number {
+		return this.#position;
+	}
+
+	/** The next `length` bytes; shorter only when the stream ends first. */
+	async read(length: number): Promise<Uint8Array> {
+		if (this.#chunk.byteLength >= length) {
+			const bytes = this.#chunk.subarray(0, length);
+			this.#chunk = this.#chunk.subarray(length);
+			this.#position += length;
+			return bytes;
+		}
+		const bytes = new Uint8Array(length);
+		let filled = 0;
+		while (filled < length && (this.#chunk.byteLength > 0 || (await this.#next()))) {
+			const take = Math.min(length - filled, this.#chunk.byteLength);
+			bytes.set(this.#chunk.subarray(0, take), filled);
+			this.#chunk = this.#chunk.subarray(take);
+			filled += take;
+		}
+		this.#position += filled;
+		return filled === length ? bytes : bytes.subarray(0, filled);
+	}
+
+	/** Step over `length` bytes; false when the stream ends first. */
+	async skip(length: number): Promise<boolean> {
+		let remaining = length;
+		while (remaining > 0) {
+			if (this.#chunk.byteLength === 0 && !(await this.#next())) return false;
+			const take = Math.min(remaining, this.#chunk.byteLength);
+			this.#chunk = this.#chunk.subarray(take);
+			this.#position += take;
+			remaining -= take;
+		}
+		return true;
+	}
+
+	/** Stop the underlying stream without draining it. */
+	async close(): Promise<void> {
+		await this.#chunks.return?.();
+	}
+
+	async #next(): Promise<boolean> {
+		const result = await this.#chunks.next();
+		if (result.done) return false;
+		this.#chunk = result.value;
+		return true;
+	}
+}
+
+/** Where an indexed tar's member bytes come from, by offset into the tar stream. */
+interface TarPayload {
+	read(offset: number, size: number, memberPath: string): Promise<Uint8Array>;
+}
+
+class TarSourcePayload implements TarPayload {
+	readonly #source: ByteSource;
+
+	constructor(source: ByteSource) {
+		this.#source = source;
+	}
+
+	async read(offset: number, size: number, memberPath: string): Promise<Uint8Array> {
+		try {
+			const bytes = await this.#source.read(offset, offset + size);
+			if (bytes.byteLength !== size) {
+				throw new ArchiveError(`Archive member '${formatArchivePathForError(memberPath)}' is truncated`);
+			}
+			return bytes;
+		} catch (error) {
+			if (error instanceof ArchiveError) throw error;
+			throw new ArchiveError(error instanceof Error ? error.message : "Failed to read tar member");
+		}
+	}
+}
+
+class TarBufferPayload implements TarPayload {
 	readonly #buffer: Uint8Array;
+
+	constructor(buffer: Uint8Array) {
+		this.#buffer = buffer;
+	}
+
+	async read(offset: number, size: number, memberPath: string): Promise<Uint8Array> {
+		if (size > this.#buffer.byteLength - offset) {
+			throw new ArchiveError(`Archive member '${formatArchivePathForError(memberPath)}' is truncated`);
+		}
+		const bytes = this.#buffer.subarray(offset, offset + size);
+		if (bytes.byteLength !== size) {
+			throw new ArchiveError(`Archive member '${formatArchivePathForError(memberPath)}' has an invalid size`);
+		}
+		return bytes;
+	}
+}
+
+/**
+ * Member bytes of a tar too large to hold decompressed: each read decompresses
+ * the stream again up to the member. Reads are serialized, and a read ahead of
+ * the previous one continues that pass, so reading every member in archive
+ * order decompresses the stream once.
+ */
+class TarStreamPayload implements TarPayload {
+	readonly #open: () => AsyncIterable<Uint8Array>;
+	#stream: TarByteStream | undefined;
+	#pending: Promise<unknown> = Promise.resolve();
+
+	constructor(open: () => AsyncIterable<Uint8Array>) {
+		this.#open = open;
+	}
+
+	read(offset: number, size: number, memberPath: string): Promise<Uint8Array> {
+		const bytes = this.#pending.then(() => this.#readAt(offset, size, memberPath));
+		this.#pending = bytes.catch(() => undefined);
+		return bytes;
+	}
+
+	async #readAt(offset: number, size: number, memberPath: string): Promise<Uint8Array> {
+		let stream = this.#stream;
+		this.#stream = undefined;
+		if (!stream || stream.position > offset) {
+			await stream?.close();
+			stream = new TarByteStream(this.#open());
+		}
+		try {
+			const bytes = (await stream.skip(offset - stream.position)) ? await stream.read(size) : undefined;
+			if (bytes?.byteLength !== size) {
+				throw new ArchiveError(`Archive member '${formatArchivePathForError(memberPath)}' is truncated`);
+			}
+			this.#stream = stream;
+			// A view into a decoder chunk would keep the whole chunk alive with the member.
+			return bytes.byteLength === bytes.buffer.byteLength ? bytes : new Uint8Array(bytes);
+		} catch (error) {
+			await stream.close();
+			throw error;
+		}
+	}
+}
+
+class TarMemberSource implements MemberSource {
+	readonly #payload: TarPayload;
 	readonly #dataOffset: number;
 	readonly #sparse: boolean;
 
-	constructor(buffer: Uint8Array, dataOffset: number, sparse: boolean) {
-		this.#buffer = buffer;
+	constructor(payload: TarPayload, dataOffset: number, sparse: boolean) {
+		this.#payload = payload;
 		this.#dataOffset = dataOffset;
 		this.#sparse = sparse;
 	}
@@ -70,14 +255,7 @@ class TarMemberSource implements MemberSource {
 				`Archive member '${formatArchivePathForError(memberPath)}' is a sparse file and cannot be read`,
 			);
 		}
-		if (size > this.#buffer.byteLength - this.#dataOffset) {
-			throw new ArchiveError(`Archive member '${formatArchivePathForError(memberPath)}' is truncated`);
-		}
-		const bytes = this.#buffer.subarray(this.#dataOffset, this.#dataOffset + size);
-		if (bytes.byteLength !== size) {
-			throw new ArchiveError(`Archive member '${formatArchivePathForError(memberPath)}' has an invalid size`);
-		}
-		return bytes;
+		return this.#payload.read(this.#dataOffset, size, memberPath);
 	}
 }
 
@@ -172,7 +350,6 @@ function checksumMatches(buffer: Uint8Array, offset: number): boolean {
 }
 
 function parsePaxRecords(data: Uint8Array, limits: ArchiveLimits): Map<string, string> {
-	assertIndexSize(data.byteLength, limits, "tar PAX metadata");
 	const attrs = new Map<string, string>();
 	let pos = 0;
 	while (pos < data.byteLength) {
@@ -295,7 +472,6 @@ function applyOldGnuNameRecords(
 	pendingLinks: Map<ArchiveIndexEntry, PendingTarLink>,
 	limits: ArchiveLimits,
 ): void {
-	assertIndexSize(data.byteLength, limits, "old-GNU name metadata");
 	const terminator = data.indexOf(0);
 	const end = terminator === -1 ? data.byteLength : terminator;
 	let start = 0;
@@ -412,10 +588,31 @@ function resolvePendingLinks(
 	if (unresolved.size > 0) throw new ArchiveError("Archive contains cyclic or unsupported links");
 }
 
-/** Index an already-decompressed tar buffer with bounded GNU, ustar, and PAX handling. */
-export function readTarEntriesFromBuffer(buffer: Uint8Array, options: FormatReadOptions): ArchiveIndexEntry[] {
+/** Read one metadata record's payload, bounded by `maxIndexSize`, and step over its padding. */
+async function readTarMetadata(
+	stream: TarCursor,
+	size: number,
+	limits: ArchiveLimits,
+	what: string,
+): Promise<Uint8Array> {
+	assertIndexSize(size, limits, what);
+	const data = await stream.read(size);
+	if (data.byteLength !== size || !(await stream.skip(paddedSize(size) - size))) {
+		throw new ArchiveError("Archive member data is truncated");
+	}
+	return data;
+}
+
+/**
+ * Walk tar headers with bounded GNU, ustar, and PAX handling. Member data is
+ * stepped over, never held: entries point into `payload` by stream offset.
+ */
+async function readTarEntries(
+	stream: TarCursor,
+	payload: TarPayload,
+	options: FormatReadOptions,
+): Promise<ArchiveIndexEntry[]> {
 	const { limits } = options;
-	assertInMemorySize(buffer.byteLength, limits);
 	const entries = new Map<string, ArchiveIndexEntry>();
 	const pendingLinks = new Map<ArchiveIndexEntry, PendingTarLink>();
 	const addEntry = (entry: ArchiveIndexEntry, pendingLink?: PendingTarLink): void => {
@@ -426,61 +623,58 @@ export function readTarEntriesFromBuffer(buffer: Uint8Array, options: FormatRead
 		if (pendingLink) pendingLinks.set(indexed, pendingLink);
 		assertEntryCount(entries.size, limits);
 	};
-	let offset = 0;
 	let longName: string | undefined;
 	let longLink: string | undefined;
 	let localPax: Map<string, string> | undefined;
 	const globalPax = new Map<string, string>();
 	let sawTerminator = false;
 
-	while (offset + BLOCK_SIZE <= buffer.byteLength) {
-		if (isZeroBlock(buffer, offset)) {
+	for (
+		let header = await stream.read(BLOCK_SIZE);
+		header.byteLength === BLOCK_SIZE;
+		header = await stream.read(BLOCK_SIZE)
+	) {
+		if (isZeroBlock(header, 0)) {
 			sawTerminator = true;
 			break;
 		}
-		if (!checksumMatches(buffer, offset)) throw new ArchiveError("Invalid or corrupt tar archive header");
-		const headerOffset = offset;
-		const typeFlag = String.fromCharCode(buffer[headerOffset + TYPEFLAG_OFFSET] || 0x30);
-		let size = readTarSize(buffer, headerOffset + SIZE_OFFSET);
-		let name = readTarString(buffer, headerOffset + NAME_OFFSET, NAME_LENGTH);
-		if (isUstarHeader(buffer, headerOffset)) {
-			const prefix = readTarString(buffer, headerOffset + PREFIX_OFFSET, PREFIX_LENGTH);
+		if (!checksumMatches(header, 0)) throw new ArchiveError("Invalid or corrupt tar archive header");
+		const typeFlag = String.fromCharCode(header[TYPEFLAG_OFFSET] || 0x30);
+		let size = readTarSize(header, SIZE_OFFSET);
+		let name = readTarString(header, NAME_OFFSET, NAME_LENGTH);
+		if (isUstarHeader(header, 0)) {
+			const prefix = readTarString(header, PREFIX_OFFSET, PREFIX_LENGTH);
 			if (prefix) name = `${prefix}/${name}`;
 		}
-		let linkName = readTarString(buffer, headerOffset + LINKNAME_OFFSET, LINKNAME_LENGTH);
-		const mtime = readTarNumeric(buffer, headerOffset + MTIME_OFFSET, MTIME_LENGTH);
-		const rawMode = readTarNumeric(buffer, headerOffset + MODE_OFFSET, MODE_LENGTH);
+		let linkName = readTarString(header, LINKNAME_OFFSET, LINKNAME_LENGTH);
+		const mtime = readTarNumeric(header, MTIME_OFFSET, MTIME_LENGTH);
+		const rawMode = readTarNumeric(header, MODE_OFFSET, MODE_LENGTH);
 		const mode = Number.isSafeInteger(rawMode) && rawMode >= 0 ? rawMode : undefined;
-		offset += BLOCK_SIZE;
-		const dataBlocks = paddedSize(size);
-		if (dataBlocks > buffer.byteLength - offset) throw new ArchiveError("Archive member data is truncated");
-		const data = buffer.subarray(offset, offset + size);
 
 		if (typeFlag === "L") {
-			assertIndexSize(data.byteLength, limits, "GNU long-name metadata");
+			const data = await readTarMetadata(stream, size, limits, "GNU long-name metadata");
 			longName = readMetadataPath(data, "GNU long path", limits);
-			offset += dataBlocks;
 			continue;
 		}
 		if (typeFlag === "K") {
-			assertIndexSize(data.byteLength, limits, "GNU long-link metadata");
+			const data = await readTarMetadata(stream, size, limits, "GNU long-link metadata");
 			longLink = readMetadataPath(data, "GNU long link target", limits);
-			offset += dataBlocks;
 			continue;
 		}
 		if (typeFlag === "N") {
+			const data = await readTarMetadata(stream, size, limits, "old-GNU name metadata");
 			applyOldGnuNameRecords(data, entries, pendingLinks, limits);
-			offset += dataBlocks;
 			continue;
 		}
 		if (typeFlag === "x" || typeFlag === "X") {
-			localPax = parsePaxRecords(data, limits);
-			offset += dataBlocks;
+			localPax = parsePaxRecords(await readTarMetadata(stream, size, limits, "tar PAX metadata"), limits);
 			continue;
 		}
 		if (typeFlag === "g") {
-			applyGlobalPax(globalPax, parsePaxRecords(data, limits));
-			offset += dataBlocks;
+			applyGlobalPax(
+				globalPax,
+				parsePaxRecords(await readTarMetadata(stream, size, limits, "tar PAX metadata"), limits),
+			);
 			continue;
 		}
 		if (typeFlag === "M") throw new ArchiveError("GNU multi-volume tar members are not supported");
@@ -499,22 +693,18 @@ export function readTarEntriesFromBuffer(buffer: Uint8Array, options: FormatRead
 		const paxSparseRealSize = paxAttribute(globalPax, localPax, "GNU.sparse.realsize");
 		if (paxSparseRealSize !== undefined) displaySize = parsePaxSize(paxSparseRealSize, "sparse real size");
 		const sparse = typeFlag === "S" || paxDeclaresSparse(globalPax, localPax);
-		if (typeFlag === "S" && buffer[headerOffset + GNU_SPARSE_ISEXTENDED_OFFSET] === 1) {
+		if (typeFlag === "S" && header[GNU_SPARSE_ISEXTENDED_OFFSET] === 1) {
 			let extended = true;
 			while (extended) {
-				if (offset + BLOCK_SIZE > buffer.byteLength) {
-					throw new ArchiveError("Archive sparse metadata is truncated");
-				}
-				extended = buffer[offset + GNU_SPARSE_CONT_ISEXTENDED_OFFSET] === 1;
-				offset += BLOCK_SIZE;
+				const block = await stream.read(BLOCK_SIZE);
+				if (block.byteLength < BLOCK_SIZE) throw new ArchiveError("Archive sparse metadata is truncated");
+				extended = block[GNU_SPARSE_CONT_ISEXTENDED_OFFSET] === 1;
 			}
 		}
-		const dataOffset = offset;
-		const memberDataBlocks = paddedSize(size);
-		if (memberDataBlocks > buffer.byteLength - dataOffset) {
+		const dataOffset = stream.position;
+		if (!(await stream.skip(paddedSize(size)))) {
 			throw new ArchiveError(`Archive member '${formatArchivePathForError(name)}' is truncated`);
 		}
-		offset += memberDataBlocks;
 		longName = undefined;
 		longLink = undefined;
 		localPax = undefined;
@@ -567,7 +757,7 @@ export function readTarEntriesFromBuffer(buffer: Uint8Array, options: FormatRead
 			size: displaySize,
 			mtimeMs,
 			mode,
-			storage: { type: "member", source: new TarMemberSource(buffer, dataOffset, sparse) },
+			storage: { type: "member", source: new TarMemberSource(payload, dataOffset, sparse) },
 		});
 	}
 	if (!sawTerminator) throw new ArchiveError("Not a valid tar archive: missing terminating zero block");
@@ -575,18 +765,46 @@ export function readTarEntriesFromBuffer(buffer: Uint8Array, options: FormatRead
 	return [...entries.values()];
 }
 
-/** Read and index a tar source after one bounded whole-stream read. */
-export const readTar: FormatReader = async (source, options) => {
-	assertInMemorySize(source.size, options.limits);
-	let bytes: Uint8Array;
+/** Index an already-decompressed tar buffer; members are views into it. */
+export async function readTarEntriesFromBuffer(
+	buffer: Uint8Array,
+	options: FormatReadOptions,
+): Promise<ArchiveIndexEntry[]> {
+	assertInMemorySize(buffer.byteLength, options.limits);
+	return readTarEntries(new TarByteStream([buffer]), new TarBufferPayload(buffer), options);
+}
+
+/**
+ * Index a decompressed tar stream that is too large to hold in memory: one
+ * pass over `open()` walks the headers, and member reads open it again.
+ */
+export async function readTarEntriesFromStream(
+	open: () => AsyncIterable<Uint8Array>,
+	options: FormatReadOptions,
+): Promise<ArchiveIndexEntry[]> {
+	const stream = new TarByteStream(open());
 	try {
-		bytes = await readAllBytes(source);
+		const entries = await readTarEntries(stream, new TarStreamPayload(open), options);
+		// Decompress past the terminator to the end, so the codec still checks the
+		// stream's trailer (gzip CRC and length) as a whole-stream decompression does.
+		await stream.skip(Number.POSITIVE_INFINITY);
+		return entries;
+	} finally {
+		await stream.close();
+	}
+}
+
+/** Index a plain tar by ranging over headers and retaining lazy member offsets. */
+export const readTar: FormatReader = async (source, options) => {
+	if (!Number.isSafeInteger(source.size) || source.size < 0) {
+		throw new ArchiveError("Archive is too large to read safely");
+	}
+	try {
+		return await readTarEntries(new TarSourceCursor(source), new TarSourcePayload(source), options);
 	} catch (error) {
 		if (error instanceof ArchiveError) throw error;
 		throw new ArchiveError(error instanceof Error ? error.message : "Failed to read tar archive");
 	}
-	if (bytes.byteLength !== source.size) throw new ArchiveError("Invalid archive: truncated data");
-	return readTarEntriesFromBuffer(bytes, options);
 };
 
 /** Detect a tar header, including legacy pre-ustar archives, by its checksum. */

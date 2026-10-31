@@ -700,6 +700,78 @@ describe("anthropic-messages encodeResponse", () => {
 			{ type: "tool_use", id: "toolu_handoff", name: "get_weather", input: { city: "Paris" } },
 		]);
 	});
+
+	it("drops the fallback marker and keeps only the first segment's reasoning", () => {
+		const message: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: "primary thoughts", thinkingSignature: "SIG_PRIMARY" },
+				{ type: "fallback", from: { model: "claude-primary" }, to: { model: "claude-fallback" } },
+				{ type: "thinking", thinking: "fallback thoughts", thinkingSignature: "SIG_FALLBACK" },
+				{ type: "text", text: "answer" },
+				{ type: "toolCall", id: "toolu_1", name: "go", arguments: { x: 1 } },
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-primary",
+			usage: emptyUsage(),
+			stopReason: "toolUse",
+			timestamp: 0,
+		};
+		const encoded = encodeResponse(message, "claude-primary");
+		expect(encoded.content).toEqual([
+			{ type: "thinking", thinking: "primary thoughts", signature: "SIG_PRIMARY" },
+			{ type: "text", text: "answer" },
+			{ type: "tool_use", id: "toolu_1", name: "go", input: { x: 1 } },
+		]);
+	});
+
+	it("keeps reasoning that only appears after the fallback boundary", () => {
+		const message: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "fallback", from: { model: "claude-primary" }, to: { model: "claude-fallback" } },
+				{ type: "thinking", thinking: "fallback thoughts", thinkingSignature: "SIG_FALLBACK" },
+				{ type: "fallback", from: { model: "claude-fallback" }, to: { model: "claude-third" } },
+				{ type: "thinking", thinking: "third thoughts", thinkingSignature: "SIG_THIRD" },
+				{ type: "text", text: "answer" },
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-fallback",
+			usage: emptyUsage(),
+			stopReason: "stop",
+			timestamp: 0,
+		};
+		const encoded = encodeResponse(message, "claude-fallback");
+		expect(encoded.content).toEqual([
+			{ type: "thinking", thinking: "fallback thoughts", signature: "SIG_FALLBACK" },
+			{ type: "text", text: "answer" },
+		]);
+	});
+
+	it("keeps a redacted first segment and drops later visible reasoning", () => {
+		const message: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "redactedThinking", data: "REDACTED_PRIMARY" },
+				{ type: "fallback", from: { model: "claude-primary" }, to: { model: "claude-fallback" } },
+				{ type: "thinking", thinking: "fallback thoughts", thinkingSignature: "SIG_FALLBACK" },
+				{ type: "text", text: "answer" },
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-primary",
+			usage: emptyUsage(),
+			stopReason: "stop",
+			timestamp: 0,
+		};
+		const encoded = encodeResponse(message, "claude-primary");
+		expect(encoded.content).toEqual([
+			{ type: "redacted_thinking", data: "REDACTED_PRIMARY" },
+			{ type: "text", text: "answer" },
+		]);
+	});
 });
 
 describe("anthropic-messages encodeStream", () => {
@@ -1078,5 +1150,166 @@ describe("anthropic-messages encodeStream", () => {
 		expect(sse.map(e => e.event)).toEqual(["message_start", "message_delta", "message_stop"]);
 		const delta = sse[1]!.data as { delta: { stop_reason: string } };
 		expect(delta.delta.stop_reason).toBe("end_turn");
+	});
+
+	it("collapses a mid-turn fallback to the first reasoning segment with dense indices", async () => {
+		const finalMessage: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: "primary thoughts", thinkingSignature: "SIG_PRIMARY" },
+				{ type: "fallback", from: { model: "claude-primary" }, to: { model: "claude-fallback" } },
+				{ type: "thinking", thinking: "fallback thoughts", thinkingSignature: "SIG_FALLBACK" },
+				{ type: "text", text: "answer" },
+				{ type: "toolCall", id: "toolu_1", name: "go", arguments: { x: 1 } },
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-primary",
+			usage: emptyUsage(),
+			stopReason: "toolUse",
+			timestamp: 0,
+		};
+		const events: AssistantMessageEvent[] = [
+			{ type: "start", partial: finalMessage },
+			{ type: "thinking_start", contentIndex: 0, partial: finalMessage },
+			{ type: "thinking_delta", contentIndex: 0, delta: "primary thoughts", partial: finalMessage },
+			{ type: "thinking_end", contentIndex: 0, content: "primary thoughts", partial: finalMessage },
+			{ type: "thinking_start", contentIndex: 2, partial: finalMessage },
+			{ type: "thinking_delta", contentIndex: 2, delta: "fallback thoughts", partial: finalMessage },
+			{ type: "thinking_end", contentIndex: 2, content: "fallback thoughts", partial: finalMessage },
+			{ type: "text_start", contentIndex: 3, partial: finalMessage },
+			{ type: "text_delta", contentIndex: 3, delta: "answer", partial: finalMessage },
+			{ type: "text_end", contentIndex: 3, content: "answer", partial: finalMessage },
+			{ type: "toolcall_start", contentIndex: 4, partial: finalMessage },
+			{ type: "toolcall_delta", contentIndex: 4, delta: '{"x":1}', partial: finalMessage },
+			{
+				type: "toolcall_end",
+				contentIndex: 4,
+				toolCall: { type: "toolCall", id: "toolu_1", name: "go", arguments: { x: 1 } },
+				partial: finalMessage,
+			},
+			{ type: "done", reason: "toolUse", message: finalMessage },
+		];
+		const sse = await collectSse(encodeStream(makeStream(events), "claude-primary"));
+
+		// The marker never reaches the wire.
+		expect(JSON.stringify(sse.map(event => event.data))).not.toContain('"fallback"');
+
+		// Indices are contiguous from 0 and every delta/stop addresses an
+		// already-opened block.
+		const openedIndices: unknown[] = [];
+		for (const event of sse) {
+			if (event.event === "content_block_start") openedIndices.push(event.data.index);
+			if (event.event === "content_block_delta" || event.event === "content_block_stop") {
+				expect(openedIndices).toContain(event.data.index);
+			}
+		}
+		expect(sse.filter(event => event.event === "content_block_start").map(event => event.data)).toEqual([
+			{ type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } },
+			{ type: "content_block_start", index: 1, content_block: { type: "text", text: "" } },
+			{
+				type: "content_block_start",
+				index: 2,
+				content_block: { type: "tool_use", id: "toolu_1", name: "go", input: {} },
+			},
+		]);
+		expect(sse.filter(event => event.event === "content_block_stop").map(event => event.data.index)).toEqual([
+			0, 1, 2,
+		]);
+
+		// Only the pre-boundary model's thinking survives, with its signature.
+		type WireDelta = { type: string; thinking?: string; signature?: string; text?: string };
+		const deltas: WireDelta[] = sse
+			.filter(event => event.event === "content_block_delta")
+			.map(event => event.data.delta as WireDelta);
+		expect(deltas.filter(delta => delta.type === "thinking_delta").map(delta => delta.thinking)).toEqual([
+			"primary thoughts",
+		]);
+		expect(deltas.filter(delta => delta.type === "signature_delta").map(delta => delta.signature)).toEqual([
+			"SIG_PRIMARY",
+		]);
+		expect(deltas.filter(delta => delta.type === "text_delta").map(delta => delta.text)).toEqual(["answer"]);
+	});
+
+	it("keeps fallback-model reasoning when the boundary precedes all reasoning", async () => {
+		const finalMessage: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "fallback", from: { model: "claude-primary" }, to: { model: "claude-fallback" } },
+				{ type: "thinking", thinking: "fallback thoughts", thinkingSignature: "SIG_FALLBACK" },
+				{ type: "text", text: "answer" },
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-fallback",
+			usage: emptyUsage(),
+			stopReason: "stop",
+			timestamp: 0,
+		};
+		const events: AssistantMessageEvent[] = [
+			{ type: "start", partial: finalMessage },
+			{ type: "thinking_start", contentIndex: 1, partial: finalMessage },
+			{ type: "thinking_delta", contentIndex: 1, delta: "fallback thoughts", partial: finalMessage },
+			{ type: "thinking_end", contentIndex: 1, content: "fallback thoughts", partial: finalMessage },
+			{ type: "text_start", contentIndex: 2, partial: finalMessage },
+			{ type: "text_delta", contentIndex: 2, delta: "answer", partial: finalMessage },
+			{ type: "text_end", contentIndex: 2, content: "answer", partial: finalMessage },
+			{ type: "done", reason: "stop", message: finalMessage },
+		];
+		const sse = await collectSse(encodeStream(makeStream(events), "claude-fallback"));
+		expect(JSON.stringify(sse.map(event => event.data))).not.toContain('"fallback"');
+		expect(sse.filter(event => event.event === "content_block_start").map(event => event.data)).toEqual([
+			{ type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } },
+			{ type: "content_block_start", index: 1, content_block: { type: "text", text: "" } },
+		]);
+		expect(sse.filter(event => event.event === "content_block_stop").map(event => event.data.index)).toEqual([0, 1]);
+		type WireDelta = { type: string; thinking?: string; signature?: string };
+		const deltas: WireDelta[] = sse
+			.filter(event => event.event === "content_block_delta")
+			.map(event => event.data.delta as WireDelta);
+		expect(deltas.filter(delta => delta.type === "thinking_delta").map(delta => delta.thinking)).toEqual([
+			"fallback thoughts",
+		]);
+		expect(deltas.filter(delta => delta.type === "signature_delta").map(delta => delta.signature)).toEqual([
+			"SIG_FALLBACK",
+		]);
+	});
+
+	it("renumbers around a redacted reasoning block this encoder cannot emit", async () => {
+		// `redactedThinking` occupies a content index but has no stream event, so
+		// a client that addresses deltas by index must not be left with a hole.
+		const finalMessage: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: "visible", thinkingSignature: "SIG" },
+				{ type: "redactedThinking", data: "REDACTED" },
+				{ type: "text", text: "answer" },
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-primary",
+			usage: emptyUsage(),
+			stopReason: "stop",
+			timestamp: 0,
+		};
+		const events: AssistantMessageEvent[] = [
+			{ type: "start", partial: finalMessage },
+			{ type: "thinking_start", contentIndex: 0, partial: finalMessage },
+			{ type: "thinking_delta", contentIndex: 0, delta: "visible", partial: finalMessage },
+			{ type: "thinking_end", contentIndex: 0, content: "visible", partial: finalMessage },
+			{ type: "text_start", contentIndex: 2, partial: finalMessage },
+			{ type: "text_delta", contentIndex: 2, delta: "answer", partial: finalMessage },
+			{ type: "text_end", contentIndex: 2, content: "answer", partial: finalMessage },
+			{ type: "done", reason: "stop", message: finalMessage },
+		];
+		const sse = await collectSse(encodeStream(makeStream(events), "claude-primary"));
+		expect(sse.filter(event => event.event === "content_block_start").map(event => event.data)).toEqual([
+			{ type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } },
+			{ type: "content_block_start", index: 1, content_block: { type: "text", text: "" } },
+		]);
+		expect(sse.filter(event => event.event === "content_block_delta").map(event => event.data.index)).toEqual([
+			0, 0, 1,
+		]);
+		expect(sse.filter(event => event.event === "content_block_stop").map(event => event.data.index)).toEqual([0, 1]);
 	});
 });

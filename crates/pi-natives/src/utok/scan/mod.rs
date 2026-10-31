@@ -122,14 +122,8 @@ pub(crate) fn contraction_end<U: Unit>(units: &[U], pos: usize) -> usize {
 	let one = pos + n0 + n1;
 	match c1 {
 		's' | 'S' | '\u{17f}' | 't' | 'T' | 'm' | 'M' | 'd' | 'D' => one,
-		'r' | 'R' | 'v' | 'V' => match decode_at(units, one) {
-			Some(('e' | 'E', n2)) => one + n2,
-			_ => pos,
-		},
-		'l' | 'L' => match decode_at(units, one) {
-			Some(('l' | 'L', n2)) => one + n2,
-			_ => pos,
-		},
+		'r' | 'R' | 'v' | 'V' if let Some(('e' | 'E', n2)) = decode_at(units, one) => one + n2,
+		'l' | 'L' if let Some(('l' | 'L', n2)) = decode_at(units, one) => one + n2,
 		_ => pos,
 	}
 }

@@ -356,6 +356,30 @@ describe("buildModel", () => {
 	});
 });
 
+describe("TypeSafe Jev image input", () => {
+	const typesafeModel = (id: string, provider = "typesafe") =>
+		buildModel({
+			id,
+			name: id,
+			api: "typesafe",
+			provider,
+			baseUrl: "https://api.typesafe.ai",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: null,
+			maxTokens: null,
+		} satisfies ModelSpec<"typesafe">);
+
+	it("exposes images only for the four confirmed direct TypeSafe ids", () => {
+		expect(typesafeModel("jev-latest").input).toEqual(["text", "image"]);
+		expect(typesafeModel("jev-1.14.0").input).toEqual(["text", "image"]);
+		expect(typesafeModel("jev-fast").input).toEqual(["text"]);
+		expect(typesafeModel("jev-1.13").input).toEqual(["text"]);
+		expect(typesafeModel("jev-latest", "unrelated-provider").input).toEqual(["text"]);
+	});
+});
+
 describe("Responses native-resolution image compatibility", () => {
 	it.each([
 		["custom loopback", "custom", "openai-responses", "http://127.0.0.1:8080/v1", false],
@@ -975,9 +999,29 @@ describe("local OpenAI-compat output clamp", () => {
 		expect(resolveModelPolicy(completionsSpec({ provider, baseUrl })).compat.clampOutputToModelMax).toBe(true);
 	});
 
+	it.each(["box.local.", "localhost."])("preserves local Qwen compat for absolute host %s", hostname => {
+		const compat = resolveModelPolicy(
+			completionsSpec({
+				id: "qwen3.8-27b",
+				reasoning: true,
+				baseUrl: `http://${hostname}:8133/v1`,
+				compat: { thinkingFormat: "qwen-chat-template" },
+			}),
+		).compat;
+		expect(compat).toMatchObject({
+			replayReasoningContent: true,
+			qwenPreserveThinking: true,
+			toolSchemaFlavor: "grammar",
+			clampOutputToModelMax: true,
+			streamFirstEventTimeoutMs: 0,
+			streamIdleTimeoutMs: 300_000,
+		});
+	});
+
 	it.each([
 		["LiteLLM loopback", "litellm", "http://127.0.0.1:4000/v1"],
 		["remote custom", "custom", "https://api.example.com/v1"],
+		["remote absolute host", "custom", "https://api.example.com./v1"],
 		["official OpenAI", "openai", "https://api.openai.com/v1"],
 	] as const)("leaves clampOutputToModelMax off for %s", (_label, provider, baseUrl) => {
 		expect(resolveModelPolicy(completionsSpec({ provider, baseUrl })).compat.clampOutputToModelMax).toBe(false);
@@ -992,6 +1036,15 @@ describe("local OpenAI-compat output clamp", () => {
 			resolveModelPolicy(responsesSpec({ provider: "custom", baseUrl: "http://10.0.0.8:8080/v1" })).compat
 				.clampOutputToModelMax,
 		).toBe(true);
+	});
+
+	it("keeps the local Responses stream budget for an absolute .local host", () => {
+		const compat = resolveModelPolicy(responsesSpec({ baseUrl: "http://box.local.:8133/v1" })).compat;
+		expect(compat).toMatchObject({
+			clampOutputToModelMax: true,
+			streamFirstEventTimeoutMs: 0,
+			streamIdleTimeoutMs: 300_000,
+		});
 	});
 
 	it("uses providerType when clamping aliased Responses backends", () => {
@@ -1123,11 +1176,24 @@ describe("Responses configuration_update compat", () => {
 		});
 	}
 
-	it("turns supportsConfigurationUpdate on for gpt-6-astra on any host and leaves sibling ids off", () => {
-		// The class rule is keyed on the exact id, not on the host: a custom proxy
-		// serving gpt-6-astra gets the item, its gpt-6 neighbour never does.
-		expect(buildModel(astraProxySpec()).compat.supportsConfigurationUpdate).toBe(true);
-		expect(buildModel(astraProxySpec({ id: "gpt-6", name: "GPT-6" })).compat.supportsConfigurationUpdate).toBe(false);
+	it("turns supportsConfigurationUpdate on for the GPT-6 family on any host and leaves GPT-5.6 off", () => {
+		// The class rule is keyed on the GPT-6 revision, not on the host: a custom
+		// proxy serving any GPT-6 id gets the item, earlier generations never do.
+		for (const id of ["gpt-6-astra", "gpt-6-sol", "gpt-6.1-sol", "gpt-6-luna"]) {
+			expect(buildModel(astraProxySpec({ id, name: id })).compat.supportsConfigurationUpdate).toBe(true);
+		}
+		expect(
+			buildModel(astraProxySpec({ id: "gpt-5.6-sol", name: "GPT-5.6 Sol" })).compat.supportsConfigurationUpdate,
+		).toBe(false);
+	});
+
+	it("keeps OpenRouter's GPT-6 rows on request-level effort changes", () => {
+		const model = buildModel({
+			...astraProxySpec({ id: "openai/gpt-6-sol", name: "OpenAI: GPT-6 Sol" }),
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+		});
+		expect(model.compat.supportsConfigurationUpdate).toBe(false);
 	});
 
 	it("lets a spec-level compat override switch configuration_update off for a custom endpoint", () => {
@@ -1226,6 +1292,63 @@ describe("OpenRouter model discovery", () => {
 		});
 	});
 
+	it("bills discovered Haiku 5.5 rows at 5x their own rates above 100K input", async () => {
+		const haiku = {
+			name: "Anthropic: Claude Haiku 5.5",
+			supported_parameters: ["tools", "tool_choice", "reasoning"],
+			architecture: { input_modalities: ["text", "image"] },
+			top_provider: { max_completion_tokens: 128_000 },
+			context_length: 1_000_000,
+		};
+		const options = openrouterModelManagerOptions({
+			fetch: async url =>
+				String(url) !== "https://openrouter.ai/api/v1/models"
+					? Response.json({ data: [] })
+					: Response.json({
+							// Live OpenRouter wire prices (USD per token) for the standard and batch rows.
+							data: [
+								{
+									...haiku,
+									id: "anthropic/claude-haiku-5.5",
+									pricing: {
+										prompt: "0.0000001",
+										completion: "0.0000005",
+										input_cache_read: "0.00000001",
+										input_cache_write: "0.000000125",
+									},
+								},
+								{
+									...haiku,
+									id: "anthropic/claude-haiku-5.5:batch",
+									pricing: {
+										prompt: "0.00000005",
+										completion: "0.00000025",
+										input_cache_read: "0.000000005",
+										input_cache_write: "0.0000000625",
+									},
+								},
+							],
+						}),
+		});
+		const specs = (await options.fetchDynamicModels?.()) ?? [];
+		const tier = (id: string) => {
+			const spec = specs.find(model => model.id === id);
+			if (!spec) throw new Error(`Expected discovered ${id}`);
+			return buildModel(spec).cost.longContext;
+		};
+
+		const standard = tier("anthropic/claude-haiku-5.5");
+		expect(standard?.inputThreshold).toBe(100_000);
+		expect(standard?.input).toBeCloseTo(0.5, 10);
+		expect(standard?.output).toBeCloseTo(2.5, 10);
+		expect(standard?.cacheRead).toBeCloseTo(0.05, 10);
+		expect(standard?.cacheWrite).toBeCloseTo(0.625, 10);
+		// The batch row bills half price, so its tier must scale from its own card.
+		const batch = tier("anthropic/claude-haiku-5.5:batch");
+		expect(batch?.input).toBeCloseTo(0.25, 10);
+		expect(batch?.output).toBeCloseTo(1.25, 10);
+	});
+
 	it("ignores legacy OpenRouter chat-completions cache rows", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-openrouter-legacy-cache-"));
 		const dbPath = path.join(tempDir, "models.db");
@@ -1253,6 +1376,30 @@ describe("OpenRouter model discovery", () => {
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("GitHub Copilot catalog corrections", () => {
+	it("prices Copilot Haiku 5.5 cache legs per tier without a second long-context tier", () => {
+		// `billing.token_prices` carries no cache prices for Haiku 5.5, so both
+		// discovered tiers arrive with $0 cache legs.
+		const base = buildModel(
+			completionsSpec({
+				id: "claude-haiku-5.5",
+				provider: "github-copilot",
+				cost: { input: 0.1, output: 0.5, cacheRead: 0, cacheWrite: 0 },
+			}),
+		);
+		expect(base.cost).toEqual({ input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 });
+		// The `-1m` sibling is the long tier itself; a nested tier would charge it 5x twice.
+		const long = buildModel(
+			completionsSpec({
+				id: "claude-haiku-5.5-1m",
+				provider: "github-copilot",
+				cost: { input: 0.5, output: 2.5, cacheRead: 0, cacheWrite: 0 },
+			}),
+		);
+		expect(long.cost).toEqual({ input: 0.5, output: 2.5, cacheRead: 0.05, cacheWrite: 0.625 });
 	});
 });
 

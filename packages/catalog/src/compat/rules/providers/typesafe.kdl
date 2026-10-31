@@ -1,10 +1,20 @@
 // TypeSafe System One judgment models.
 
 provider "typesafe" {
-	default-model "jev-latest"
+	default-model "jev-1.14.0"
 	env "TYPESAFE_API_KEY"
 
+	// `GET /v1/models` lists only the aliases: `jev-latest` is the newest stable
+	// release (jev-1.13.0) and `jev-preview` the newest of any kind. The pinned
+	// default judge is authored here so it resolves without discovery.
 	seed api="typesafe" base-url="https://api.typesafe.ai" bundle="always" {
+		model "jev-1.14.0" name="TypeSafe Jev 1.14" {
+			reasoning #false
+			input "text"
+			cost input=0.042 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
 		model "jev-latest" name="TypeSafe jev" {
 			reasoning #false
 			input "text"
@@ -12,6 +22,17 @@ provider "typesafe" {
 			cost input=0.042 output=0 cache-read=0 cache-write=0
 			limits
 			supports-tools #false
+		}
+	}
+	models "jev-latest" "jev-preview" "jev-1.13.0" "jev-1.14.0" {
+		input-modalities "text" "image"
+		judgment-image-input {
+			mime-types "image/png,image/jpeg"
+			max-bytes 16777216
+			min-pixels 78400
+			max-pixels 2458624
+			min-side 280
+			max-side 1568
 		}
 	}
 

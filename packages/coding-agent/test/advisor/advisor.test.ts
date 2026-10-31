@@ -37,6 +37,7 @@ import {
 	resolveAdvisorDeliveryChannel,
 } from "../../src/advisor";
 import { createAdvisorMessageCard } from "@oh-my-pi/pi-tui/chat/advisor-message";
+import { setChatTranscriptDisplayPreferences } from "@oh-my-pi/pi-tui/chat/display-preferences";
 import { getThemeByName } from "@oh-my-pi/pi-tui/theme";
 import { obfuscateMessages } from "../../src/secrets/message-transform";
 import { SecretObfuscator } from "../../src/secrets/obfuscator";
@@ -1700,6 +1701,52 @@ describe("advisor", () => {
 			expect(review).toContain("inspect the retry config");
 			expect(review).toContain("now raise the limit");
 		});
+		it("omits primary thinking blocks when includeReasoning is false, including across model switches", async () => {
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const agent = makeAgent(promptInputs);
+			let currentModelIdentity = "anthropic/claude-opus-5-5";
+			const messages: AgentMessage[] = [
+				{ role: "user", content: "verify the patch", timestamp: 1 } as AgentMessage,
+				{
+					role: "assistant",
+					content: [
+						{ type: "thinking", thinking: "Internal hypothesis that might anchor the reviewer." },
+						{ type: "text", text: "Observable answer with file:line evidence." },
+					],
+					timestamp: 2,
+				} as unknown as AgentMessage,
+			];
+			const runtime = new AdvisorRuntime(agent, {
+				snapshotMessages: () => messages,
+				includeReasoning: false,
+				getModelIdentity: () => currentModelIdentity,
+			});
+
+			runtime.onTurnEnd(messages);
+			await runtime.waitForCatchup(1_000, 1);
+			expect(promptInputs).toHaveLength(1);
+			const firstReview = promptText(promptInputs[0]);
+			expect(firstReview).toContain("Observable answer with file:line evidence.");
+			expect(firstReview).not.toContain("Internal hypothesis that might anchor the reviewer.");
+			expect(firstReview).not.toContain("_thinking:_");
+
+			// Switch advisor model identity and verify includeReasoning: false stays enforced
+			currentModelIdentity = "google-antigravity/gemini-4-argon";
+			messages.push({
+				role: "assistant",
+				content: [
+					{ type: "thinking", thinking: "Second turn private reasoning." },
+					{ type: "text", text: "Second turn observable output." },
+				],
+				timestamp: 3,
+			} as unknown as AgentMessage);
+			runtime.onTurnEnd(messages);
+			await runtime.waitForCatchup(1_000, 1);
+			expect(promptInputs).toHaveLength(2);
+			const secondReview = promptText(promptInputs[1]);
+			expect(secondReview).toContain("Second turn observable output.");
+			expect(secondReview).not.toContain("Second turn private reasoning.");
+		});
 
 		it("preserves the next user turn when an accepted empty stop is pruned", async () => {
 			const promptInputs: Array<string | AgentMessage[]> = [];
@@ -2143,6 +2190,66 @@ describe("advisor", () => {
 			expect(promptText(promptInputs[0])).not.toContain(secret);
 		});
 
+		it("drops a tool call's replay signature when it rewrites the call arguments", async () => {
+			const secret = "ADVISOR_SIGNED_ARG_SECRET_123";
+			const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			// The Gemini signature attests to the arguments it was computed over,
+			// so it cannot ride along once those arguments are rewritten.
+			// https://ai.google.dev/gemini-api/docs/thought-signatures
+			const assistant = {
+				role: "assistant",
+				content: [
+					{
+						type: "toolCall",
+						id: "call_1",
+						name: "bash",
+						arguments: { command: `deploy --token ${secret}` },
+						thoughtSignature: "c2lnbmVkLW9yaWdpbmFsLWNhbGw=",
+					},
+				],
+				api: "google-generative-ai",
+				provider: "google",
+				model: "gemini-3.5-flash",
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "toolUse",
+				timestamp: 1,
+			} as AssistantMessage;
+			// The advisor's own conversation replays this history to its model, so
+			// it goes through the same re-obfuscation the primary transcript does.
+			const agent: AdvisorAgent = {
+				prompt: async input => {
+					promptInputs.push(input);
+				},
+				abort: () => {},
+				reset: () => {},
+				state: { messages: [assistant] as AgentMessage[] },
+			};
+			const host: AdvisorRuntimeHost = {
+				snapshotMessages: () => [{ role: "user", content: "deploy it", timestamp: 2 } as AgentMessage],
+				obfuscator,
+			};
+			const runtime = new AdvisorRuntime(agent, host);
+
+			runtime.onTurnEnd();
+			await Promise.resolve();
+
+			expect(promptText(promptInputs[0])).not.toContain(secret);
+			const replayed = agent.state.messages[0];
+			expect(replayed?.role).toBe("assistant");
+			const block = (replayed as AssistantMessage).content[0];
+			expect(block?.type).toBe("toolCall");
+			expect(JSON.stringify(block?.type === "toolCall" ? block.arguments : {})).not.toContain(secret);
+			expect(block?.type === "toolCall" ? block.thoughtSignature : "kept").toBeUndefined();
+		});
+
 		it("falls back to one redacted update when a regex secret spans source messages", async () => {
 			const obfuscator = new SecretObfuscator([{ type: "regex", content: "BEGIN[\\s\\S]*END" }]);
 			const promptInputs: Array<string | AgentMessage[]> = [];
@@ -2422,6 +2529,176 @@ describe("advisor", () => {
 			const rendered = promptText(promptInputs[0]);
 			expect(rendered).toContain("elided");
 			expect(leakedSecretPieces(rendered, secret)).toEqual([]);
+		});
+
+		it("redacts one-line command previews before truncating them", async () => {
+			// Both secrets start inside the ~120-char preview and end past its cut.
+			const toolSecret = distinctSecret(120);
+			const userSecret = distinctSecret(240).slice(120);
+			const obfuscator = new SecretObfuscator([
+				{ type: "plain", content: toolSecret },
+				{ type: "plain", content: userSecret },
+			]);
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const agent = makeAgent(promptInputs);
+			const messages: AgentMessage[] = [
+				{
+					role: "assistant",
+					content: [
+						{
+							type: "toolCall",
+							id: "c1",
+							name: "bash",
+							arguments: {
+								command: `cd /srv/app/releases/current && env DEPLOY_TOKEN=${toolSecret} ./deploy.sh`,
+							},
+						},
+					],
+					timestamp: 1,
+				} as unknown as AgentMessage,
+				{
+					role: "toolResult",
+					toolCallId: "c1",
+					toolName: "bash",
+					content: "deployed",
+					isError: false,
+					timestamp: 2,
+				} as unknown as AgentMessage,
+				{
+					role: "bashExecution",
+					command: `curl -sS https://api.example.com/v1/rotate -H "Authorization: Bearer ${userSecret}"`,
+					output: "rotated",
+					exitCode: 0,
+					cancelled: false,
+					truncated: false,
+					timestamp: 3,
+				} as unknown as AgentMessage,
+			];
+			const runtime = new AdvisorRuntime(agent, { snapshotMessages: () => messages, obfuscator });
+
+			runtime.onTurnEnd();
+			await runtime.waitForCatchup(1_000, 1);
+
+			const rendered = promptText(promptInputs[0]);
+			expect(rendered).toContain("→ bash(cd /srv/app/releases/current && env DEPLOY_TOKEN=");
+			expect(rendered).toContain("→ user-bash! curl -sS https://api.example.com/v1/rotate");
+			expect(leakedSecretPieces(rendered, toolSecret)).toEqual([]);
+			expect(leakedSecretPieces(rendered, userSecret)).toEqual([]);
+		});
+
+		it("redacts preview secrets that cross the cut at a space or run past any fixed window", async () => {
+			// Reviewer repros: a two-word plain secret straddling the cut, a regex
+			// secret longer than 8 KiB starting inside the visible part, a regex
+			// whose lookahead context lies past the cut (the secret itself fits),
+			// and a short replacement that pulls a later secret into view.
+			const spaced = "SECRETONE SECRETTWO";
+			const longToken = `tok_${"z".repeat(9 * 1024)}`;
+			const pulledIn = `SECRET_${"b".repeat(200)}`;
+			const obfuscator = new SecretObfuscator([
+				{ type: "plain", content: spaced },
+				{ type: "plain", content: pulledIn },
+				{ type: "regex", content: "tok_[a-z0-9]+" },
+				{ type: "regex", content: "LOOKSECRET(?= LOOKTAIL)" },
+				{ type: "regex", content: "A{100}(?= x{40}END)", mode: "replace", replacement: "[redacted]" },
+			]);
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const agent = makeAgent(promptInputs);
+			const messages: AgentMessage[] = [
+				{
+					role: "assistant",
+					content: [
+						{
+							type: "toolCall",
+							id: "c1",
+							name: "bash",
+							arguments: { command: `${"p".repeat(110)}${spaced} suffix` },
+						},
+						{
+							type: "toolCall",
+							id: "c2",
+							name: "bash",
+							arguments: { command: `${"r".repeat(109)}LOOKSECRET LOOKTAIL suffix` },
+						},
+					],
+					timestamp: 1,
+				} as unknown as AgentMessage,
+				{
+					role: "toolResult",
+					toolCallId: "c1",
+					toolName: "bash",
+					content: "ok",
+					isError: false,
+					timestamp: 2,
+				} as unknown as AgentMessage,
+				{
+					role: "toolResult",
+					toolCallId: "c2",
+					toolName: "bash",
+					content: "ok",
+					isError: false,
+					timestamp: 2,
+				} as unknown as AgentMessage,
+				{
+					role: "bashExecution",
+					command: `${"q".repeat(100)} ${longToken}`,
+					output: "",
+					exitCode: 0,
+					timestamp: 3,
+				} as unknown as AgentMessage,
+				{
+					role: "bashExecution",
+					command: `${"A".repeat(100)} ${"x".repeat(40)}END ${pulledIn} suffix`,
+					output: "",
+					exitCode: 0,
+					timestamp: 4,
+				} as unknown as AgentMessage,
+			];
+			const runtime = new AdvisorRuntime(agent, { snapshotMessages: () => messages, obfuscator });
+
+			runtime.onTurnEnd();
+			await runtime.waitForCatchup(1_000, 1);
+
+			const rendered = promptText(promptInputs[0]);
+			expect(rendered).toContain(`→ bash(${"p".repeat(110)}`);
+			expect(rendered).toContain(`→ user-bash! ${"q".repeat(100)}`);
+			expect(rendered).not.toContain("SECRETONE");
+			expect(rendered).not.toContain("LOOKSECRET");
+			expect(rendered).not.toContain("tok_zzz");
+			expect(rendered).not.toContain("SECRET_b");
+		});
+
+		it("redacts user execution sources in advisor history before cutting their previews", async () => {
+			const secret = distinctSecret(80);
+			const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const agent = makeAgent(promptInputs);
+			const prefix = "x".repeat(103);
+			agent.state.messages.push(
+				{
+					role: "bashExecution",
+					command: `echo ${prefix}${secret}`,
+					exitCode: 0,
+					timestamp: 1,
+				} as unknown as AgentMessage,
+				{
+					role: "pythonExecution",
+					code: `print("${prefix}${secret}")`,
+					exitCode: 0,
+					timestamp: 2,
+				} as unknown as AgentMessage,
+			);
+			const runtime = new AdvisorRuntime(agent, {
+				snapshotMessages: () => [{ role: "user", content: "review the execution", timestamp: 3 } as AgentMessage],
+				obfuscator,
+			});
+
+			runtime.onTurnEnd();
+			await runtime.waitForCatchup(1_000, 1);
+
+			const bash = agent.state.messages[0] as AgentMessage & { command: string };
+			const python = agent.state.messages[1] as AgentMessage & { code: string };
+			expect(leakedSecretPieces(bash.command, secret)).toEqual([]);
+			expect(leakedSecretPieces(python.code, secret)).toEqual([]);
 		});
 		it("does not scan tool-call arguments hidden by the primary-argument preview", async () => {
 			const obfuscator = new SecretObfuscator([
@@ -6599,6 +6876,24 @@ describe("advisor", () => {
 			const text = strip(card.render(30));
 			expect(text).toContain("truncated.");
 		});
+
+		it("caps collapsed note rows at advisorCollapsedLines and shows every row when expanded", async () => {
+			const uiTheme = await getThemeByName("dark");
+			if (!uiTheme) throw new Error("theme unavailable");
+			const note =
+				"This is a very long advisor note that will definitely exceed the restricted width constraint of thirty characters and should therefore wrap across multiple lines rather than getting truncated.";
+			const details = { notes: [{ note, severity: "concern" as const }] };
+			try {
+				setChatTranscriptDisplayPreferences({ advisorCollapsedLines: 1 });
+				const rows = createAdvisorMessageCard(details, () => false, uiTheme).render(30);
+				expect(rows.length).toBe(2);
+				expect(strip(rows)).not.toContain("truncated.");
+				const expanded = createAdvisorMessageCard(details, () => true, uiTheme);
+				expect(strip(expanded.render(30))).toContain("truncated.");
+			} finally {
+				setChatTranscriptDisplayPreferences({ advisorCollapsedLines: 0 });
+			}
+		});
 	});
 
 	// Regression: the advisor must not withhold interrupting advice from a turn
@@ -6619,6 +6914,7 @@ describe("advisor", () => {
 				expect(
 					resolveAdvisorDeliveryChannel({
 						severity,
+						continueSeverity: "nit",
 						autoResumeSuppressed: false,
 						streaming: false,
 						aborting: false,
@@ -6633,6 +6929,7 @@ describe("advisor", () => {
 			expect(
 				resolveAdvisorDeliveryChannel({
 					severity: "nit",
+					continueSeverity: "concern",
 					autoResumeSuppressed: false,
 					streaming: true,
 					aborting: false,
@@ -6643,6 +6940,7 @@ describe("advisor", () => {
 				expect(
 					resolveAdvisorDeliveryChannel({
 						severity,
+						continueSeverity: "concern",
 						autoResumeSuppressed: false,
 						streaming: true,
 						aborting: false,
@@ -6652,10 +6950,12 @@ describe("advisor", () => {
 			}
 		});
 
-		it("routes a non-interrupting nit to the aside queue regardless of state", () => {
+		it("routes a non-interrupting nit to the aside queue unless the primary is idle on a terminal answer", () => {
+			// A `nit` continue threshold only governs the terminal-answer case.
 			expect(
 				resolveAdvisorDeliveryChannel({
 					severity: "nit",
+					continueSeverity: "nit",
 					autoResumeSuppressed: true,
 					streaming: true,
 					aborting: true,
@@ -6664,6 +6964,7 @@ describe("advisor", () => {
 			expect(
 				resolveAdvisorDeliveryChannel({
 					severity: undefined,
+					continueSeverity: "nit",
 					autoResumeSuppressed: false,
 					streaming: false,
 					aborting: false,
@@ -6677,6 +6978,7 @@ describe("advisor", () => {
 					expect(
 						resolveAdvisorDeliveryChannel({
 							severity,
+							continueSeverity: "blocker",
 							autoResumeSuppressed: false,
 							streaming,
 							aborting: false,
@@ -6686,85 +6988,52 @@ describe("advisor", () => {
 			}
 		});
 
-		it("preserves a late concern when the primary already ended with a terminal answer", () => {
-			expect(
-				resolveAdvisorDeliveryChannel({
-					severity: "concern",
-					autoResumeSuppressed: false,
-					streaming: false,
-					aborting: false,
-					terminalAnswerNoQueuedWork: true,
-				}),
-			).toBe("preserve");
-		});
+		it.each([
+			{ severity: undefined, continueSeverity: "nit", channel: "steer" },
+			{ severity: "nit", continueSeverity: "concern", channel: "preserve" },
+			{ severity: "concern", continueSeverity: "concern", channel: "steer" },
+			{ severity: "concern", continueSeverity: "blocker", channel: "preserve" },
+			// #5628: a blocker always continues the run past a terminal answer.
+			{ severity: "blocker", continueSeverity: "blocker", channel: "steer" },
+		] as const)(
+			"after a terminal answer, $severity at continueSeverity=$continueSeverity → $channel",
+			({ severity, continueSeverity, channel }) => {
+				expect(
+					resolveAdvisorDeliveryChannel({
+						severity,
+						continueSeverity,
+						autoResumeSuppressed: false,
+						streaming: false,
+						aborting: false,
+						terminalAnswerNoQueuedWork: true,
+					}),
+				).toBe(channel);
+			},
+		);
 
-		it("steers a late blocker after a terminal answer so the primary continues and acknowledges it (#5628)", () => {
+		it("preserves a terminal continuation blocked by stop suppression, preserveOnly, or the cooldown", () => {
+			const terminal = {
+				severity: "concern",
+				continueSeverity: "concern",
+				autoResumeSuppressed: false,
+				streaming: false,
+				aborting: false,
+				terminalAnswerNoQueuedWork: true,
+			} as const;
+			expect(resolveAdvisorDeliveryChannel({ ...terminal, autoResumeSuppressed: true })).toBe("preserve");
+			expect(resolveAdvisorDeliveryChannel({ ...terminal, preserveOnly: true })).toBe("preserve");
+			// An aside would sit unseen in the idle yield queue; the card stays visible.
+			expect(resolveAdvisorDeliveryChannel({ ...terminal, interruptImmuneTurnActive: true })).toBe("preserve");
 			expect(
-				resolveAdvisorDeliveryChannel({
-					severity: "blocker",
-					autoResumeSuppressed: false,
-					streaming: false,
-					aborting: false,
-					terminalAnswerNoQueuedWork: true,
-				}),
+				resolveAdvisorDeliveryChannel({ ...terminal, severity: "blocker", interruptImmuneTurnActive: true }),
 			).toBe("steer");
-		});
-
-		it("opts a late concern into steering with allowTerminalConcernSteering, without bypassing other guards", () => {
-			// Final-review continuation policy: a concern against a terminal answer
-			// MAY steer one continuation when the caller opts in — but stop/abort
-			// suppression, preserveOnly, and the immune-turn cooldown still win.
-			expect(
-				resolveAdvisorDeliveryChannel({
-					severity: "concern",
-					autoResumeSuppressed: false,
-					streaming: false,
-					aborting: false,
-					terminalAnswerNoQueuedWork: true,
-					allowTerminalConcernSteering: true,
-				}),
-			).toBe("steer");
-			// Stop/abort suppression is not bypassed.
-			expect(
-				resolveAdvisorDeliveryChannel({
-					severity: "concern",
-					autoResumeSuppressed: true,
-					streaming: false,
-					aborting: false,
-					terminalAnswerNoQueuedWork: true,
-					allowTerminalConcernSteering: true,
-				}),
-			).toBe("preserve");
-			// preserveOnly (headless/terminal-yield drain) is not bypassed.
-			expect(
-				resolveAdvisorDeliveryChannel({
-					severity: "concern",
-					autoResumeSuppressed: false,
-					streaming: false,
-					aborting: false,
-					terminalAnswerNoQueuedWork: true,
-					allowTerminalConcernSteering: true,
-					preserveOnly: true,
-				}),
-			).toBe("preserve");
-			// The immune-turn cooldown is not bypassed.
-			expect(
-				resolveAdvisorDeliveryChannel({
-					severity: "concern",
-					autoResumeSuppressed: false,
-					streaming: false,
-					aborting: false,
-					terminalAnswerNoQueuedWork: true,
-					interruptImmuneTurnActive: true,
-					allowTerminalConcernSteering: true,
-				}),
-			).toBe("aside");
 		});
 
 		it("downgrades concern to aside during immune turns, but still steers a blocker (#5628)", () => {
 			expect(
 				resolveAdvisorDeliveryChannel({
 					severity: "concern",
+					continueSeverity: "concern",
 					autoResumeSuppressed: false,
 					streaming: true,
 					aborting: false,
@@ -6774,6 +7043,7 @@ describe("advisor", () => {
 			expect(
 				resolveAdvisorDeliveryChannel({
 					severity: "blocker",
+					continueSeverity: "concern",
 					autoResumeSuppressed: false,
 					streaming: false,
 					aborting: false,
@@ -6783,6 +7053,7 @@ describe("advisor", () => {
 			expect(
 				resolveAdvisorDeliveryChannel({
 					severity: "blocker",
+					continueSeverity: "concern",
 					autoResumeSuppressed: true,
 					streaming: false,
 					aborting: false,
@@ -6795,6 +7066,7 @@ describe("advisor", () => {
 				expect(
 					resolveAdvisorDeliveryChannel({
 						severity,
+						continueSeverity: "concern",
 						autoResumeSuppressed: true,
 						streaming: false,
 						aborting: false,
@@ -6809,6 +7081,7 @@ describe("advisor", () => {
 			expect(
 				resolveAdvisorDeliveryChannel({
 					severity: "blocker",
+					continueSeverity: "concern",
 					autoResumeSuppressed: true,
 					streaming: true,
 					aborting: true,
@@ -6821,6 +7094,7 @@ describe("advisor", () => {
 				expect(
 					resolveAdvisorDeliveryChannel({
 						severity,
+						continueSeverity: "concern",
 						autoResumeSuppressed: true,
 						streaming: true,
 						aborting: false,

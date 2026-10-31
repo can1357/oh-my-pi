@@ -13,7 +13,7 @@ import {
 	parseParallelSearchPayload,
 } from "../../parallel";
 import { formatQuery, parseSearchQuery, type StructuredQuery } from "../query";
-import { clampNumResults } from "../utils";
+import { clampNumResults, recencyAfterDate } from "../utils";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
 import { classifyProviderHttpError, siteHosts, toSearchSources, withHardTimeout } from "./utils";
@@ -51,13 +51,6 @@ function toMcpToolResult(result: unknown): ParallelMcpToolResult | undefined {
 	return { structuredContent: result.structuredContent, content, isError: result.isError === true };
 }
 
-const RECENCY_DAYS: Record<NonNullable<SearchParams["recency"]>, number> = {
-	day: 1,
-	week: 7,
-	month: 30,
-	year: 365,
-};
-
 /**
  * Map parsed `site:`/`-site:`/`after:` directives and the relative recency
  * option onto Parallel's `source_policy`. An explicit `after:` bound wins.
@@ -72,9 +65,7 @@ function toSourcePolicy(parsed: StructuredQuery, recency?: SearchParams["recency
 	if (include.length) policy.include_domains = include;
 	else if (exclude.length) policy.exclude_domains = exclude;
 	if (parsed.after) policy.after_date = parsed.after;
-	else if (recency) {
-		policy.after_date = new Date(Date.now() - RECENCY_DAYS[recency] * 86_400_000).toISOString().slice(0, 10);
-	}
+	else if (recency) policy.after_date = recencyAfterDate(recency);
 	return policy.include_domains || policy.exclude_domains || policy.after_date ? policy : undefined;
 }
 

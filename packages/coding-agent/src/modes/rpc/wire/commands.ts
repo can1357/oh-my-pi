@@ -191,6 +191,12 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 		result: { voice: "string" },
 		unwrap: "voice",
 	},
+	{
+		name: "live_connect",
+		doc: "Start a live voice session whose audio runs on a caller-owned WebRTC peer: send its SDP offer, apply the returned answer.",
+		params: { sdpOffer: "string", "voice?": "string", "instructions?": "string" },
+		result: { voice: "string", sdpAnswer: "string" },
+	},
 	{ name: "live_stop", doc: "Stop the live voice session, if any." },
 	{
 		name: "live_mute",
@@ -198,6 +204,19 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 		params: { "muted?": "boolean" },
 		result: { muted: "boolean" },
 		unwrap: "muted",
+	},
+	{
+		name: "dictation_start",
+		doc: "Start draft-only speech-to-text; resolves once the microphone is recording.",
+		params: { captureId: "string" },
+		timeoutMs: 600_000,
+	},
+	{
+		name: "dictation_stop",
+		doc: "Stop and flush draft-only dictation, returning the accumulated text.",
+		result: { text: "string" },
+		unwrap: "text",
+		timeoutMs: 600_000,
 	},
 
 	{
@@ -250,6 +269,12 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 
 	{ name: "get_session_stats", doc: "Session statistics.", result: "SessionStats" },
 	{
+		name: "get_session_lease",
+		doc: "Which of these sessions a running process (this one included) owns, probed without taking ownership. Ids in neither list are free; `unknown` could not be probed.",
+		params: { sessionIds: "string[]" },
+		result: { held: "string[]", unknown: "string[]" },
+	},
+	{
 		name: "export_html",
 		doc: "Export the session as HTML; returns the written path.",
 		params: { "outputPath?": "string" },
@@ -273,6 +298,23 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 		doc: "Fork into a new session file: history through `entryId`, or the whole session.",
 		params: { "entryId?": "string" },
 		result: "CancellationResult",
+	},
+	{
+		name: "navigate_tree",
+		doc: "Move the session's leaf to an entry in the same file, optionally summarizing the branch it leaves; refused while busy.",
+		params: {
+			entryId: "string",
+			"summarize?": doc("boolean", "Summarize the abandoned branch at the target."),
+			"customInstructions?": doc("string", "Instructions for the summarizer."),
+		},
+		result: "NavigateTreeResult",
+		timeoutMs: 600_000,
+	},
+	{ name: "abort_branch_summary", doc: "Stop a running `navigate_tree` branch summary; the navigation is cancelled." },
+	{
+		name: "set_label",
+		doc: "Set or clear (omit `label`) an entry's label.",
+		params: { entryId: "string", "label?": "string" },
 	},
 	{
 		name: "get_branch_messages",

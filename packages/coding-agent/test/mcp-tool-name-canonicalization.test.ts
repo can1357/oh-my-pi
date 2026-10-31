@@ -168,10 +168,7 @@ describe("resolveMountedXdevExecutable", () => {
 
 		expect(resolveMountedXdevExecutable(state, "github")?.name).toBe("github");
 		expect(resolveMountedXdevExecutable(state, "xd://github")?.name).toBe("github");
-		// Active but unmounted. Under Code Mode `#applyActiveToolsByName` clears
-		// the mounted set while leaving the active predicate on the whole enabled
-		// slate, so resolving active names here would dispatch a tool deliberately
-		// demoted behind the eval bridge.
+		// Active but unmounted: only mounted devices resolve through xd://.
 		expect(resolveMountedXdevExecutable(state, bank)).toBeUndefined();
 	});
 });
