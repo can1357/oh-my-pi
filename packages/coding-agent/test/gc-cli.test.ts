@@ -29,6 +29,7 @@ import {
 	setProjectDir,
 } from "@oh-my-pi/pi-utils";
 import { runCli } from "../src/cli";
+import { leaveDeadGcLock } from "./helpers/gc-lock-fixture";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
 let root: string;
@@ -1296,7 +1297,8 @@ describe("runGcCommand lock handling", () => {
 
 	test("breaks stale gc locks before running", async () => {
 		const lockPath = path.join(root, "gc.lock");
-		await Bun.write(lockPath, "999999999\n2026-01-01T00:00:00.000Z\n");
+		// What a gc run killed while it held the lock leaves, random value and all.
+		await leaveDeadGcLock(root);
 		const blob = await writeBlob(root, hashFor("orphan"), "orphan");
 		await agePath(blob);
 
@@ -1304,6 +1306,17 @@ describe("runGcCommand lock handling", () => {
 
 		expect(result.blobs?.wouldDelete).toBe(1);
 		expect(await Bun.file(lockPath).exists()).toBe(false);
+	});
+
+	test("keeps a stale gc lock that carries no random value, and says to move it aside", async () => {
+		const lockPath = path.join(root, "gc.lock");
+		// What earlier versions write: a pid no process holds, and a start time.
+		await Bun.write(lockPath, "999999999\n2026-01-01T00:00:00.000Z\n");
+
+		await expect(runGcCommand({ flags: { agentDir: root, blobs: true } })).rejects.toThrow(
+			`${lockPath} looks like a lock an earlier version of gc took`,
+		);
+		expect(await Bun.file(lockPath).text()).toBe("999999999\n2026-01-01T00:00:00.000Z\n");
 	});
 
 	test("does not break gc locks while stale-lock takeover is already in progress", async () => {

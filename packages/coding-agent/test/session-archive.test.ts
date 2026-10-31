@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test";
 import { randomBytes } from "node:crypto";
-import { constants as fsConstants, type Stats } from "node:fs";
+import { existsSync, constants as fsConstants, readFileSync, type Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -38,6 +38,7 @@ import {
 import { serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 import { type FileLockHandle, getAgentDir, getSessionsDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
+import { leaveDeadGcLock } from "./helpers/gc-lock-fixture";
 
 // A session's lease is an abstract socket named by its id, and on Linux that
 // name is shared by the whole machine. Every id here starts with a part made
@@ -150,6 +151,16 @@ function stallLinkOnto(destination: string) {
 		stop: () => link.mockRestore(),
 		kill: () => killed.reject(new Error("killed")),
 	};
+}
+
+/**
+ * Leave a staging ground the way a run killed after it minted leaves it: the
+ * directory, the staged file and the record on disk, and nothing of the run
+ * holding them open.
+ */
+async function abandonGround(ground: StagingGround): Promise<void> {
+	await ground.handle.close();
+	await ground.recordHeld.handle.close();
 }
 
 /** Age every live session and archive it, keeping the live copy. */
@@ -472,6 +483,35 @@ test("restoring an archived session waits for a maintenance run instead of faili
 	expect(await Bun.file(sessionFile).exists()).toBe(true);
 });
 
+test("restoring an archived session does not wait behind a gc.lock gc did not write, and names it at once", async () => {
+	await archiveEverything();
+	// The reviewer's file: what a crash can leave once a size is committed
+	// and its data is not — 48 NUL bytes, an hour old.
+	const lock = path.join(root, "gc.lock");
+	await Bun.write(lock, Buffer.alloc(48));
+	const old = new Date(Date.now() - 60 * 60_000);
+	await fs.utimes(lock, old, old);
+	// Each attempt to take the lock opens it; waiting would make hundreds.
+	const realOpen = fs.open;
+	let opens = 0;
+	const open = spyOn(fs, "open").mockImplementation((async (file: string, ...rest: unknown[]) => {
+		if (String(file) === lock) opens++;
+		return await (realOpen as (...args: unknown[]) => Promise<fs.FileHandle>)(file, ...rest);
+	}) as typeof fs.open);
+	let failure = "";
+	try {
+		await restoreArchivedSession(archiveFile, root);
+	} catch (error) {
+		failure = String(error);
+	} finally {
+		open.mockRestore();
+	}
+
+	expect(failure).toContain(`${lock} holds something gc does not write`);
+	expect(opens).toBeLessThan(10);
+	expect(await Bun.file(lock).bytes()).toEqual(new Uint8Array(48));
+});
+
 test("a symlinked sessions directory is not reported as an orphaned link target", async () => {
 	const real = path.join(root, "sessions-elsewhere");
 	await fs.rename(getSessionsDir(root), real);
@@ -720,7 +760,7 @@ test("a restore does not carry home, and does not remove, a staging directory a 
 	// would otherwise walk as part of the tree.
 	const ground = await mintStagingGround(path.join(archivedArtifacts, "b.log"), stagingLedgerDir(root));
 	await ground.handle.writeFile("HALF A COPY");
-	await ground.handle.close();
+	await abandonGround(ground);
 
 	const restored = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
 
@@ -3470,7 +3510,7 @@ test("a recorded staging directory that could not be cleared is not carried home
 	// leaves both and keeps the record, so the directory is still residue.
 	const ground = await mintStagingGround(path.join(archivedArtifacts, "b.log"), stagingLedgerDir(root));
 	await ground.handle.writeFile("HALF A COPY");
-	await ground.handle.close();
+	await abandonGround(ground);
 	await Bun.write(path.join(ground.dir, "planted"), "PLANTED");
 
 	const restored = await restoreArchivedSession(archiveFile, root);
@@ -3683,7 +3723,7 @@ for (const shape of ["a different link", "a FIFO"] as const) {
 
 test("staging cleanup leaves a FIFO that took the staged file's place", async () => {
 	const ground = await mintStagingGround(path.join(root, "target.log"), stagingLedgerDir(root));
-	await ground.handle.close();
+	await abandonGround(ground);
 	await fs.unlink(ground.file);
 	expect(await Bun.spawn(["mkfifo", ground.file]).exited).toBe(0);
 
@@ -5220,7 +5260,7 @@ test("a restore preview reports a recorded staging directory the restore would l
 	await archiveEverything();
 	const ground = await mintStagingGround(path.join(archivedArtifacts, "b.log"), stagingLedgerDir(root));
 	await ground.handle.writeFile("HALF A COPY");
-	await ground.handle.close();
+	await abandonGround(ground);
 
 	const preview = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, json: true } });
 
@@ -5255,7 +5295,7 @@ test("a killed run's recorded stage is quarantined by gc, and the restore then f
 	await archiveEverything();
 	const ground = await mintStagingGround(path.join(archivedArtifacts, "b.log"), stagingLedgerDir(root));
 	await ground.handle.writeFile("PARTIAL STAGE");
-	await ground.handle.close();
+	await abandonGround(ground);
 	const record = path.basename(ground.record);
 
 	const refused = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
@@ -5295,7 +5335,7 @@ async function archivedWithKilledStage(): Promise<{ ground: StagingGround; recor
 	await archiveEverything();
 	const ground = await mintStagingGround(path.join(archivedArtifacts, "b.log"), stagingLedgerDir(root));
 	await ground.handle.writeFile("PARTIAL STAGE");
-	await ground.handle.close();
+	await abandonGround(ground);
 	return { ground, record: path.basename(ground.record), liveArtifacts };
 }
 
@@ -5373,7 +5413,7 @@ test("the restore's advice names the quarantine, which moves the stage outside b
 		stagingLedgerDir(agentDir),
 	);
 	await ground.handle.writeFile("PARTIAL STAGE");
-	await ground.handle.close();
+	await abandonGround(ground);
 	const record = path.basename(ground.record);
 
 	const advice = stagingResidueNote(ground.dir, ground.record, ARCHIVED_RESIDUE);
@@ -5402,7 +5442,7 @@ async function restoredWithKilledLiveStage(): Promise<{ ground: StagingGround; l
 	expect(first.restore?.errors).toEqual([]);
 	const ground = await mintStagingGround(path.join(liveArtifacts, "b.log"), stagingLedgerDir(root));
 	await ground.handle.writeFile("PARTIAL STAGE");
-	await ground.handle.close();
+	await abandonGround(ground);
 	return { ground, liveArtifacts };
 }
 
@@ -5684,7 +5724,7 @@ test("a quarantine of a stage in a session tree that lies inside the other tree 
 	await fs.symlink(agentDir, path.join(agentDir, "archive", "sessions"));
 	const ground = await mintStagingGround(path.join(agentDir, "sessions", "x", "b.log"), stagingLedgerDir(agentDir));
 	await ground.handle.writeFile("PARTIAL STAGE");
-	await ground.handle.close();
+	await abandonGround(ground);
 	const record = path.basename(ground.record);
 
 	const moved = await runGcCommand({ flags: { agentDir, quarantine: record, apply: true, json: true } });
@@ -5707,7 +5747,7 @@ test("the quarantine the advice names moves nothing when the agent directory is 
 	await fs.symlink(realAgent, link);
 	const ground = await mintStagingGround(path.join(link, "archive", "sessions", "x", "b.log"), stagingLedgerDir(link));
 	await ground.handle.writeFile("PARTIAL STAGE");
-	await ground.handle.close();
+	await abandonGround(ground);
 	const record = path.basename(ground.record);
 	const advice = stagingResidueNote(ground.dir, ground.record, ARCHIVED_RESIDUE);
 	expect(advice).toContain(`--quarantine ${record} --apply --agent-dir ${link}`);
@@ -5865,7 +5905,10 @@ test("a staging record naming a relative path is not one a gc run wrote", async 
 
 	const restored = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
 
-	expect(restored.restore?.errors.join("\n")).toContain(`${ground.record} could not be read`);
+	const told = restored.restore?.errors.join("\n") ?? "";
+	expect(told).toContain(`${ground.record} does not hold a staging record: it is JSON, but not what a gc run writes`);
+	expect(told).toContain(`move it out of ${stagingLedgerDir(root)}, and run the same command again`);
+	expect(told).toContain("a restore takes it for an artifact and carries it home");
 	expect(await fs.stat(path.join(liveArtifacts, path.basename(ground.dir))).catch(() => undefined)).toBeUndefined();
 });
 for (const shape of [
@@ -5884,7 +5927,11 @@ for (const shape of [
 		const applied = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
 
 		expect(applied.quarantine?.moved).toBe(false);
-		expect(applied.quarantine?.errors.join("\n")).toContain("could not be read");
+		const told = applied.quarantine?.errors.join("\n") ?? "";
+		expect(told).toContain(
+			`${ground.record} does not hold a staging record: it is JSON, but not what a gc run writes`,
+		);
+		expect(told).toContain(`move it out of ${stagingLedgerDir(root)}, and run the same command again`);
 		expect(await Bun.file(ground.file).text()).toBe("PARTIAL STAGE");
 	});
 }
@@ -6003,23 +6050,27 @@ test("a quarantine retry that finds no record anywhere says where the directory 
 /**
  * The ledger on one filesystem and the quarantine on another, as the review
  * measured them: the record cannot go across by name, by `rename` or by
- * `link`, and has to be copied.
+ * `link`, and has to be copied. `beforeRename`, while set, sees every rename
+ * first — one spy on `rename`, so a test that stops a rename does not stack
+ * a second.
  */
-function recordAcrossFilesystems(record: string): { restore(): void } {
+function recordAcrossFilesystems(record: string): { restore(): void; beforeRename?: (from: string) => void } {
+	const handle: { restore(): void; beforeRename?: (from: string) => void } = {
+		restore() {
+			for (const spy of spies) spy.mockRestore();
+		},
+	};
 	const spies = (["rename", "link"] as const).map(name => {
 		const real = fs[name];
 		return spyOn(fs, name).mockImplementation(async (from, to) => {
+			if (name === "rename") handle.beforeRename?.(String(from));
 			if (String(from) === record && String(to).includes(`${path.sep}gc-quarantine${path.sep}`)) {
 				throw Object.assign(new Error("EXDEV: cross-device link not permitted"), { code: "EXDEV" });
 			}
 			return await real(from, to);
 		});
 	});
-	return {
-		restore() {
-			for (const spy of spies) spy.mockRestore();
-		},
-	};
+	return handle;
 }
 
 for (const filesystems of ["across filesystems", "on one filesystem"] as const) {
@@ -6030,21 +6081,28 @@ for (const filesystems of ["across filesystems", "on one filesystem"] as const) 
 		const across = filesystems === "across filesystems" ? recordAcrossFilesystems(ground.record) : undefined;
 		try {
 			// The review's kill point: the record is whole in the destination
-			// and its ledger entry not yet removed.
-			const realUnlink = fs.unlink;
+			// and its ledger entry not yet removed — a removal that starts by
+			// moving the record to a private name.
 			let killed = false;
-			const unlink = spyOn(fs, "unlink").mockImplementation(async target => {
-				if (!killed && String(target) === ground.record) {
-					killed = true;
-					throw Object.assign(new Error("killed before the ledger entry went"), { code: "EINTR" });
-				}
-				return await realUnlink(target);
-			});
+			const killAtRemoval = (from: string): void => {
+				if (killed || from !== ground.record) return;
+				killed = true;
+				throw Object.assign(new Error("killed before the ledger entry went"), { code: "EINTR" });
+			};
+			const realRename = fs.rename;
+			const rename = across
+				? undefined
+				: spyOn(fs, "rename").mockImplementation(async (from, to) => {
+						killAtRemoval(String(from));
+						return await realRename(from, to);
+					});
+			if (across) across.beforeRename = killAtRemoval;
 			let first: GcResult;
 			try {
 				first = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
 			} finally {
-				unlink.mockRestore();
+				rename?.mockRestore();
+				if (across) across.beforeRename = undefined;
 			}
 			expect(killed).toBe(true);
 			expect(first.quarantine?.moved).toBe(false);
@@ -6218,7 +6276,8 @@ for (const at of ["before", "created", "half"] as const) {
  * Run a quarantine that stops, as a kill would, at the step this names: once
  * the record is whole in the destination and before the directory moves,
  * once the directory has moved and before the ledger entry goes, or at the
- * removal of the ledger entry itself.
+ * removal of the ledger entry itself, whose first step moves it to a
+ * private name.
  */
 async function quarantineStopped(
 	ground: StagingGround,
@@ -6227,22 +6286,17 @@ async function quarantineStopped(
 ): Promise<void> {
 	const stop = () => Object.assign(new Error("stopped as a kill would"), { code: "EINTR" });
 	const realRename = fs.rename;
-	const realUnlink = fs.unlink;
 	const rename = spyOn(fs, "rename").mockImplementation(async (from, to) => {
+		if (at === "before the ledger entry goes" && String(from) === ground.record) throw stop();
 		if (String(from) !== ground.dir) return await realRename(from, to);
 		if (at === "before the directory moves") throw stop();
 		await realRename(from, to);
 		if (at === "after the directory moves") throw stop();
 	});
-	const unlink = spyOn(fs, "unlink").mockImplementation(async target => {
-		if (at === "before the ledger entry goes" && String(target) === ground.record) throw stop();
-		return await realUnlink(target);
-	});
 	try {
 		await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
 	} finally {
 		rename.mockRestore();
-		unlink.mockRestore();
 	}
 }
 
@@ -7026,7 +7080,7 @@ test("a staging ground that cannot write its record's replacement keeps what alr
 	let failure = "";
 	try {
 		const ground = await mintStagingGround(target, ledger);
-		await ground.handle.close();
+		await abandonGround(ground);
 	} catch (error) {
 		failure = String(error);
 	} finally {
@@ -7096,16 +7150,165 @@ test("a gc run keeps a gc.lock that holds something gc does not write, however o
 	expect(await fs.lstat(`${lock}.break`).catch(() => undefined)).toBeUndefined();
 });
 
-test("a gc run still takes over a gc.lock its dead holder left", async () => {
-	const lock = path.join(root, "gc.lock");
-	// A pid no process holds: the highest a pid can be on Linux, plus one.
-	await Bun.write(lock, `4194305\n${new Date(Date.now() - 60 * 60_000).toISOString()}\n`);
+// A lock is gc's to remove only when it holds exactly what gc writes. What
+// earlier versions wrote carries no random value, so it cannot be told from
+// a file shaped like it.
+
+test("a gc run still takes over a gc.lock a killed gc run left", async () => {
+	await leaveDeadGcLock(root);
 
 	const result = await archiveOnly();
 
 	expect(result.archive?.archived).toBe(1);
-	expect(await fs.lstat(lock).catch(() => undefined)).toBeUndefined();
+	expect(await fs.lstat(path.join(root, "gc.lock")).catch(() => undefined)).toBeUndefined();
 });
+
+test("a gc run keeps a lock-shaped gc.lock with no random value, whose process is gone, names it, and runs once it is moved aside", async () => {
+	const lock = path.join(root, "gc.lock");
+	// What earlier versions write: a pid no process holds, and a start time.
+	const earlier = `4194305\n${new Date(Date.now() - 60 * 60_000).toISOString()}\n`;
+	await Bun.write(lock, earlier);
+
+	const failure = await archiveOnly().then(
+		() => "",
+		(error: unknown) => String(error),
+	);
+
+	expect(failure).toContain(`${lock} looks like a lock an earlier version of gc took`);
+	expect(failure).toContain("move it aside");
+	expect(await Bun.file(lock).text()).toBe(earlier);
+	await fs.rename(lock, path.join(root, "gc.lock.aside"));
+	expect((await archiveOnly()).archive?.archived).toBe(1);
+});
+
+// The review's file: a number on the first line, anything on the second.
+const LOCK_SHAPED = "4194305\nFOREIGN USER DATA, NOT A GC TIMESTAMP\n";
+for (const [command, prepare] of lockedCommands) {
+	test(`${command} keeps a foreign gc.lock with a number on its first line, and names it`, async () => {
+		const lock = path.join(root, "gc.lock");
+		const run = await prepare(lock);
+		await Bun.write(lock, LOCK_SHAPED);
+
+		const failure = await run().then(
+			() => "",
+			(error: unknown) => String(error),
+		);
+
+		expect(failure).toContain(`${lock} holds something gc does not write`);
+		expect(await Bun.file(lock).text()).toBe(LOCK_SHAPED);
+	});
+}
+
+test("a gc run keeps a foreign gc.lock.break with a number on its first line, and names it", async () => {
+	const lock = path.join(root, "gc.lock");
+	// A lock being written this moment, so the breaker is consulted.
+	await Bun.write(lock, "");
+	await Bun.write(`${lock}.break`, LOCK_SHAPED);
+
+	const failure = await archiveOnly().then(
+		() => "",
+		(error: unknown) => String(error),
+	);
+
+	expect(failure).toContain(`${lock}.break holds something gc does not write`);
+	expect(await Bun.file(`${lock}.break`).text()).toBe(LOCK_SHAPED);
+	expect(await Bun.file(lock).text()).toBe("");
+});
+
+/**
+ * Once `armed()` says so, the next look at `at` finds it replaced: unlinked,
+ * and a file holding `foreign` created there over and over until the kernel
+ * gives it the inode number `old` had, or the attempts run out. The first
+ * create after an unlink usually gets the freed number. Returns what happened.
+ */
+function replaceOnNextLook(at: string, foreign: string, armed: () => Stats | undefined) {
+	const happened = { replaced: false, reused: false };
+	const replace = async (old: Stats): Promise<void> => {
+		happened.replaced = true;
+		await fs.unlink(at);
+		for (let attempt = 0; attempt < 2000 && !happened.reused; attempt++) {
+			const handle = await fs.open(at, "wx", 0o600);
+			await handle.writeFile(foreign);
+			const now = await handle.stat();
+			await handle.close();
+			happened.reused = now.dev === old.dev && now.ino === old.ino;
+			if (!happened.reused) await fs.unlink(at);
+		}
+		if (!happened.reused) await Bun.write(at, foreign);
+	};
+	for (const method of ["lstat", "stat"] as const) {
+		const real = fs[method] as (...args: unknown[]) => Promise<Stats>;
+		spyOn(fs, method).mockImplementation((async (target: string, ...rest: unknown[]) => {
+			const old = String(target) === at && !happened.replaced ? armed() : undefined;
+			if (old) await replace(old);
+			return await real(target, ...rest);
+		}) as never);
+	}
+	return happened;
+}
+
+test("a gc run keeps a file put at gc.lock while it ran, even one given its lock's inode number", async () => {
+	const lock = path.join(root, "gc.lock");
+	const foreign = "A FILE SOMEBODY PUT AT gc.lock WHILE GC RAN\n";
+	let old: Stats | undefined;
+	const happened = replaceOnNextLook(lock, foreign, () => old);
+
+	await withGcLock(root, async () => {
+		const handle = await fs.open(lock, "r");
+		old = await handle.stat();
+		await handle.close();
+	});
+
+	expect(happened.replaced).toBe(true);
+	expect(await Bun.file(lock).text()).toBe(foreign);
+});
+
+test.skipIf(!existsSync("/dev/shm"))(
+	"a quarantine across filesystems keeps a ledger record put in its place after the copy, even one given its inode number",
+	async () => {
+		// The review's case: the quarantine on another filesystem, where
+		// `link` fails with EXDEV, so the record is copied and the original's
+		// inode number is free for the next file the moment it is unlinked.
+		const target = path.join(
+			getSessionsDir(root),
+			"--review--",
+			"2026-01-01T00-00-00-000Z_abcd1234abcd1234",
+			"a.txt",
+		);
+		await fs.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
+		const ground = await mintStagingGround(target, stagingLedgerDir(root));
+		// A run killed after it minted, its stage since gone by hand.
+		await abandonGround(ground);
+		await fs.unlink(ground.file);
+		await fs.rmdir(ground.dir);
+		const old = await fs.stat(ground.record);
+		const elsewhere = await fs.mkdtemp("/dev/shm/gc-quarantine-test-");
+		try {
+			expect((await fs.stat(elsewhere)).dev).not.toBe(old.dev);
+			await fs.symlink(elsewhere, path.join(root, "gc-quarantine"), "dir");
+			const copy = path.join(elsewhere, path.basename(ground.record, ".json"), path.basename(ground.record));
+			const foreign = "ONLY COPY: A USER'S NEW LEDGER RECORD, NOT WRITTEN BY GC\n";
+			// Armed once the copy is whole in the quarantine.
+			const happened = replaceOnNextLook(ground.record, foreign, () =>
+				existsSync(copy) && readFileSync(copy).length > 0 ? old : undefined,
+			);
+
+			const applied = await runGcCommand({
+				flags: { agentDir: root, quarantine: path.basename(ground.record), apply: true, json: true },
+			});
+
+			expect(happened.replaced).toBe(true);
+			expect(applied.quarantine?.moved).toBe(false);
+			expect(applied.quarantine?.errors.join("\n")).toContain(
+				`${ground.record} is not the record this command copied into the quarantine`,
+			);
+			expect(await Bun.file(ground.record).text()).toBe(foreign);
+			expect(await Bun.file(copy).exists()).toBe(true);
+		} finally {
+			await fs.rm(elsewhere, { recursive: true, force: true });
+		}
+	},
+);
 
 test("a reclaim does not remove a link whose last look found nothing, whatever stands there by the removal", async () => {
 	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
@@ -7150,12 +7353,50 @@ test("a staging ground never writes its record at the record's own name, so a ki
 	}) as typeof fs.open);
 
 	const ground = await mintStagingGround(target, ledger);
-	await ground.handle.close();
+	await abandonGround(ground);
 
 	expect(written.length).toBeGreaterThan(0);
 	expect(written.filter(name => !name.endsWith(".part"))).toEqual([]);
 	expect(JSON.parse(await Bun.file(ground.record).text())).toMatchObject({ dir: ground.dir, file: ground.file });
 	expect((await fs.readdir(ledger)).filter(name => name.endsWith(".part"))).toEqual([]);
+});
+
+test("a staging ground keeps a file put at its first record's name while it minted, and says so", async () => {
+	const ledger = stagingLedgerDir(root);
+	const target = path.join(root, "staged-here", "example.log");
+	await fs.mkdir(path.dirname(target), { recursive: true });
+	const foreign = "SOMEBODY ELSE'S RECORD";
+	// Once the directory is made and the record's identities are about to be
+	// written, another file takes the first record's name.
+	const parts: string[] = [];
+	const realOpen = fs.open;
+	const open = spyOn(fs, "open").mockImplementation((async (at: string, ...rest: unknown[]) => {
+		if (String(at).endsWith(".json.part")) {
+			parts.push(String(at));
+			if (parts.length === 2) {
+				const first = parts[0].slice(0, -".part".length);
+				await Bun.write(`${first}.aside`, foreign);
+				await fs.rename(`${first}.aside`, first);
+			}
+		}
+		return await (realOpen as (...args: unknown[]) => Promise<fs.FileHandle>)(at, ...rest);
+	}) as typeof fs.open);
+	let failure = "";
+	try {
+		const ground = await mintStagingGround(target, ledger);
+		await abandonGround(ground);
+	} catch (error) {
+		failure = String(error);
+	} finally {
+		open.mockRestore();
+	}
+
+	const first = parts[0].slice(0, -".part".length);
+	expect(await Bun.file(first).text()).toBe(foreign);
+	expect(failure).toContain(`${first} is not a record this run wrote, so it was left as it is`);
+	// What this attempt did write is gone again: its records and its directory.
+	expect(await fs.readdir(ledger)).toEqual([path.basename(first)]);
+	expect(await fs.readdir(path.dirname(target))).toEqual([]);
 });
 
 test("an archive run names a ledger record that does not parse, with the way out, and runs once it is moved", async () => {
@@ -7175,4 +7416,46 @@ test("an archive run names a ledger record that does not parse, with the way out
 	const again = await archiveOnly();
 	expect(again.archive?.errors).toEqual([]);
 	expect(again.archive?.archived).toBe(1);
+});
+
+for (const [command, prepare] of lockedCommands) {
+	test(`${command} names a ledger file that is JSON but not a staging record, with the way out`, async () => {
+		const ledger = stagingLedgerDir(root);
+		// An artifact tree, which every command checks against the ledger
+		// before it acts on it.
+		await Bun.write(path.join(sessionFile.slice(0, -".jsonl".length), "a.log"), "HELLO");
+		const run = await prepare(path.join(root, "gc.lock"));
+		await fs.mkdir(ledger, { recursive: true, mode: 0o700 });
+		// The review's file: well-formed JSON no gc run writes, at the name
+		// the quarantine here is given.
+		const record = path.join(ledger, "0000000000000000.json");
+		const body = JSON.stringify({ note: "SOMEBODY'S JSON, NOT A STAGING RECORD" });
+		await Bun.write(record, body);
+
+		const told = await run().then(
+			result => JSON.stringify(result),
+			(error: unknown) => String(error),
+		);
+
+		expect(told).toContain(`${record} does not hold a staging record: it is JSON, but not what a gc run writes`);
+		expect(told).toContain(`move it out of ${ledger}, and run the same command again`);
+		expect(await Bun.file(record).text()).toBe(body);
+	});
+}
+
+test("an archive run lists a staging record whose directory is gone, and the quarantine it names moves it out", async () => {
+	const { ground, record } = await archivedWithKilledStage();
+	// The stage gone by hand; its record stays, since no run removes it.
+	await fs.unlink(ground.file);
+	await fs.rmdir(ground.dir);
+
+	const listed = await archiveOnly();
+
+	expect(listed.archive?.errors).toEqual([]);
+	expect(listed.archive?.stagingRecordsWithoutDirectory).toEqual([ground.record]);
+	expect(await Bun.file(ground.record).exists()).toBe(true);
+	const moved = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
+	expect(moved.quarantine?.errors).toEqual([]);
+	expect(await Bun.file(ground.record).exists()).toBe(false);
+	expect((await archiveOnly()).archive?.stagingRecordsWithoutDirectory).toBeUndefined();
 });
