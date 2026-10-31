@@ -1,6 +1,6 @@
 const RECALL_TOKEN_RE = /[a-z0-9][a-z0-9_.:/+-]*/g;
 /** Token extractor preserving internal periods, hashes, pluses, and hyphens without sentence-final periods. */
-export const RECALL_RAW_TOKEN_RE = /[\p{L}\p{N}_.#+-\u3099\u309A]+/gu;
+export const RECALL_RAW_TOKEN_RE = /[\p{L}\p{N}_.#+\u3099\u309A-]+/gu;
 export const CJK_CHAR_RE =
 	/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\u30FC\u3005\uFF66-\uFF9F\u3099\u309A]/u;
 const CJK_RE = CJK_CHAR_RE;

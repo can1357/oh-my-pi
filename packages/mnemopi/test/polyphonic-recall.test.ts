@@ -1030,4 +1030,65 @@ describe("PolyphonicRecallEngine", () => {
 			closeQuietly(beam.db);
 		}
 	});
+
+	it("tokenizes sentence punctuation cleanly, routes 近期/最新 to TR, carries subject specificity into factScore, and preserves long particle-stripped MEMORIA subjects", () => {
+		const beam = makeBeam();
+		try {
+			const engine = new PolyphonicRecallEngine({
+				db: beam.db,
+				sessionId: beam.sessionId,
+				channelId: beam.channelId,
+			});
+			const timestamp = new Date().toISOString();
+			beam.db.run(
+				`INSERT INTO consolidated_facts
+					(id, subject, predicate, object, confidence, mention_count, first_seen, last_seen, sources_json, veracity)
+					VALUES
+					('cf-pg', 'PostgreSQL', 'is', 'relational DB', 0.9, 2, ?, ?, ?, 'likely_true'),
+					('cf-rank', '排名', 'is', 'generic rank', 0.9, 2, ?, ?, ?, 'likely_true'),
+					('cf-pku', '北京大學', 'is', 'top university', 0.9, 2, ?, ?, ?, 'likely_true')`,
+				[
+					timestamp,
+					timestamp,
+					JSON.stringify(["wm-pg"]),
+					timestamp,
+					timestamp,
+					JSON.stringify(["a_rank"]),
+					timestamp,
+					timestamp,
+					JSON.stringify(["z_pku"]),
+				],
+			);
+
+			// 1. Punctuation boundary: "what is PostgreSQL?" matches "PostgreSQL"
+			const pgHits = engine.factVoice("what is PostgreSQL?", 1);
+			expect(pgHits[0]?.memoryId).toBe("wm-pg");
+
+			// 2. Specificity tie-breaker: "北京大學" (4 chars) beats "排名" (2 chars) at equal confidence even with later memoryId
+			const pkuHits = engine.factVoice("請問北京大學的排名", 1);
+			expect(pkuHits[0]?.memoryId).toBe("z_pku");
+
+			// 3. 近期 / 最新 route to TR in memoriaRetrieve
+			beam.db.run(
+				`INSERT INTO memoria_timelines (session_id, date, description, importance, source_memory_id)
+					VALUES (?, '2026-10-30', '近期完成了核心服務部署', 50, 'tl-recent')`,
+				[beam.sessionId],
+			);
+			expect(memoriaRetrieve(beam, "近期部署了什麼").ability).toBe("TR");
+			expect(memoriaRetrieve(beam, "最新部署是什麼").ability).toBe("TR");
+
+			// 4. Long particle-stripped MEMORIA subject (>12 chars) preserved as primary
+			beam.db.run(
+				`INSERT INTO memoria_facts (session_id, category, key, value, confidence, importance, context_snippet, source_memory_id)
+					VALUES
+					(?, 'knowledge', 'ソフ', 'unrelated shingle match', 0.99, 95, 'ソフ', 'mf-shingle'),
+					(?, 'knowledge', 'ソフトウェア開発プロジェクト', 'exact long subject match', 0.8, 60, 'ソフトウェア開発プロジェクト', 'mf-long')`,
+				[beam.sessionId, beam.sessionId],
+			);
+			const longRes = memoriaRetrieve(beam, "ソフトウェア開発プロジェクトについて", undefined, 1);
+			expect((longRes.results as Array<{ key?: string }>)[0]?.key).toBe("ソフトウェア開発プロジェクト");
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
 });

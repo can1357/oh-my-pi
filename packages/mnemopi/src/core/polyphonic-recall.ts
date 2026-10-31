@@ -608,7 +608,8 @@ export class PolyphonicRecallEngine {
 		const byId = new Map<string, VoiceRecallResult>();
 		for (const fact of sortedFacts) {
 			const primary = isPrimaryMatch(fact.subject);
-			const factScore = primary ? 1.0 + fact.confidence : fact.confidence;
+			const specificityBonus = primary ? Math.min(codePointLength(fact.subject.trim()), 64) * 0.001 : 0;
+			const factScore = (primary ? 1.0 : 0) + fact.confidence + specificityBonus;
 			for (const source of fact.sources) {
 				const memoryId = source.trim();
 				if (memoryId.length === 0) continue;
