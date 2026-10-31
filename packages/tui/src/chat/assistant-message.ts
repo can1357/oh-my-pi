@@ -173,23 +173,30 @@ const THINKING_DOTS_FRAMES = ["✻", "✼", "❉", "❊", "✺", "✹", "✸", "
 const THINKING_DOTS_FRAME_MS_MIN = 70;
 const THINKING_DOTS_FRAME_MS_MAX = 230;
 
-/** Rolling window (ms) over which streaming-rate observations are averaged. */
+/** Rolling window (ms) over which streamed tokens are aggregated. */
 const SPEED_WINDOW_MS = 3000;
-/** Color/clamp ceiling: a rate at or above this maps to the full accent color. */
+/** Speed that maps to the full accent color. Only the badge's color reads it; the
+ *  number beside it is never capped. */
 const SPEED_MAX = 200;
 
 /**
  * Session-wide streaming-speed gauge. Only one thinking indicator animates at a
- * time, so a single shared instance accumulates instantaneous tok/s observations
- * and reports their windowed average — smoothing the jumpy per-delta numbers.
- * Each thinking block resets the gauge on its first live sample (see
- * {@link AssistantMessageComponent.updateContent}) so the average reflects only
- * the active block, never a previous turn's trailing rate. Components feed it
- * deltas (not cumulative totals), so a fresh turn restarting its token count at
- * zero never produces a spike.
+ * time, so a single shared instance accumulates this block's streamed tokens and
+ * their decode time, and reports `Σtokens / Σspan` over the last
+ * {@link SPEED_WINDOW_MS}. Each thinking block resets the gauge on its first live
+ * sample (see {@link AssistantMessageComponent.updateContent}) so the reading
+ * reflects only the active block, never a previous turn's trailing rate.
+ * Components feed it deltas (not cumulative totals), so a fresh turn restarting
+ * its token count at zero never produces a spike.
+ *
+ * Aggregating the pairs, rather than averaging per-sample `tokens/span` ratios, is
+ * what makes the reading true: providers report usage in bursts, so one sample can
+ * span 5 ms of stream time and the next 300 ms, and the mean of the ratios would
+ * weight them equally. It also removes the need to clamp outliers — a buffered
+ * delta arrives with the long span that produced it.
  */
-class SpeedTracker {
-	#observations: Array<{ time: number; rate: number }> = [];
+export class SpeedTracker {
+	#observations: Array<{ time: number; tokens: number; spanMs: number }> = [];
 
 	#prune(now: number): void {
 		const threshold = now - SPEED_WINDOW_MS;
@@ -198,22 +205,26 @@ class SpeedTracker {
 		}
 	}
 
-	/** Record one instantaneous tok/s reading, clamped to {@link SPEED_MAX} so a
-	 *  single oversized delta (e.g. a buffered reflow tick) can't poison the
-	 *  windowed average. Non-finite/negative rates ignored. */
-	observe(rate: number, now = performance.now()): void {
-		if (!Number.isFinite(rate) || rate < 0) return;
-		this.#observations.push({ time: now, rate: Math.min(rate, SPEED_MAX) });
+	/** Record `tokens` billed over `spanMs` of stream time. Non-finite, non-positive
+	 *  pairs are ignored: a zero span carries no rate and an oversized one only
+	 *  dilutes the window in proportion to the tokens that took it. */
+	observe(tokens: number, spanMs: number, now = performance.now()): void {
+		if (!Number.isFinite(tokens) || tokens <= 0) return;
+		if (!Number.isFinite(spanMs) || spanMs <= 0) return;
+		this.#observations.push({ time: now, tokens, spanMs });
 		this.#prune(now);
 	}
 
-	/** Windowed-average tok/s; 0 once observations age out of the window. */
+	/** Windowed tok/s; 0 once observations age out of the window. */
 	getSpeed(now = performance.now()): number {
 		this.#prune(now);
-		if (this.#observations.length === 0) return 0;
-		let sum = 0;
-		for (const o of this.#observations) sum += o.rate;
-		return sum / this.#observations.length;
+		let tokens = 0;
+		let spanMs = 0;
+		for (const o of this.#observations) {
+			tokens += o.tokens;
+			spanMs += o.spanMs;
+		}
+		return spanMs > 0 ? (tokens * 1000) / spanMs : 0;
 	}
 
 	reset(): void {
@@ -773,7 +784,7 @@ export class AssistantMessageComponent extends Container {
 		const glyph = THINKING_DOTS_FRAMES[this.#thinkingDotsFrame % THINKING_DOTS_FRAMES.length] ?? "…";
 		const coloredGlyph = theme.fg("thinkingText", glyph);
 		const thinkingLabel = theme.fg("muted", " Thinking");
-		const rate = Math.min(SPEED_MAX, sharedSpeedTracker.getSpeed());
+		const rate = sharedSpeedTracker.getSpeed();
 		// The numeric badge ("<total> · <rate> toks/s") only renders while this block
 		// is genuinely streaming provider tokens. A block that has observed no token
 		// delta (e.g. a provider that reports usage only at turn end) or whose rate
@@ -788,7 +799,7 @@ export class AssistantMessageComponent extends Container {
 		// streaming speed climbs (gray → bright accent). Ease (sqrt) so typical
 		// mid-stream rates already read as clearly accent-tinted instead of staying
 		// gray until the rarely-hit SPEED_MAX ceiling.
-		const ratio = Math.sqrt(rate / SPEED_MAX);
+		const ratio = Math.sqrt(Math.min(1, rate / SPEED_MAX));
 		const hex = lerpHex(theme.getColorHex("dim"), theme.getAccentColorHex(), ratio);
 		const rateText = ` · ${rate.toFixed(1)} toks/s`;
 		const rateSpan = theme.getColorMode() === "truecolor" ? chalk.hex(hex)(rateText) : theme.fg("muted", rateText);
@@ -896,7 +907,7 @@ export class AssistantMessageComponent extends Container {
 		const tail = this.#answerMessage ? this.#thinkingTailIndex(this.#answerMessage) : undefined;
 		const rate =
 			tail !== undefined && this.#lastUpdateTransient && this.#thinkingRateLive
-				? Math.round(Math.min(SPEED_MAX, sharedSpeedTracker.getSpeed()) * 10) / 10
+				? Math.round(sharedSpeedTracker.getSpeed() * 10) / 10
 				: 0;
 		const key = [
 			this.#blockVersion,
@@ -1953,7 +1964,7 @@ export class AssistantMessageComponent extends Container {
 					// First live sample of this block: drop the session gauge's prior-turn
 					// observations so the windowed average reflects only this block.
 					if (!this.#thinkingRateLive) sharedSpeedTracker.reset();
-					sharedSpeedTracker.observe((tokenDelta / elapsedMs) * 1000, now);
+					sharedSpeedTracker.observe(tokenDelta, elapsedMs, now);
 					this.#thinkingRateLive = true;
 				}
 			}
