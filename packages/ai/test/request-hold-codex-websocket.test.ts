@@ -9,13 +9,13 @@
  * headers, no proxy (none is configured), WebSockets preferred. Only the host differs. The cases wait
  * real time where they assert that nothing arrives, which fake time can neither deliver nor rule out.
  */
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import type { ServerWebSocket } from "bun";
 import {
 	type OpenAICodexResponsesOptions,
 	streamOpenAICodexResponses,
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
-import type { LiveSteering, Model } from "@oh-my-pi/pi-ai/types";
+import type { LiveSteering, Model, RawSseEvent } from "@oh-my-pi/pi-ai/types";
 import { runInRequestHoldScope } from "../src/request-hold";
 import { stream } from "../src/stream";
 import { createCodexModel } from "./helpers";
@@ -246,10 +246,14 @@ describe("the Codex WebSocket transport in a hold scope", () => {
 
 		/**
 		 * Stream one turn whose response stays open; once its text arrives, `whenStreaming` runs and the
-		 * steering message becomes claimable. Returns, once the steer had time to reach the server from
-		 * then, whether the response streamed and how many steers the server received.
+		 * steering message becomes claimable. `onSseEvent` is the turn's raw observer. Returns, once the
+		 * steer had time to reach the server from then, whether the response streamed and how many steers
+		 * the server received.
 		 */
-		async function steerWhileStreaming(whenStreaming: () => void): Promise<{ streamed: boolean; steers: number }> {
+		async function steerWhileStreaming(
+			whenStreaming: () => void,
+			onSseEvent?: (event: RawSseEvent) => void,
+		): Promise<{ streamed: boolean; steers: number }> {
 			const ready = Promise.withResolvers<void>();
 			const model: Model<"openai-codex-responses"> = {
 				...createCodexModel("gpt-6-sol"),
@@ -267,6 +271,7 @@ describe("the Codex WebSocket transport in a hold scope", () => {
 						preferWebsockets: true,
 						liveSteering: steeringOnce(ready.promise),
 						signal: request.signal,
+						onSseEvent,
 					},
 				);
 				for await (const event of events) {
@@ -297,6 +302,32 @@ describe("the Codex WebSocket transport in a hold scope", () => {
 
 		it("sends no steer once the hold began while the response streamed", async () => {
 			expect(await steerWhileStreaming(() => held.abort())).toEqual({ streamed: true, steers: 0 });
+		});
+
+		it("tells its observer about a steer only once it is written, so the hold the observer begins refuses nothing it was told about", async () => {
+			const writes = spyOn(WebSocket.prototype, "send");
+			let observed = 0;
+			let writtenWhenObserved = -1;
+			try {
+				const result = await steerWhileStreaming(
+					() => {},
+					event => {
+						if (event.event !== "response.steer") return;
+						observed++;
+						writtenWhenObserved = writes.mock.calls.length;
+						held.abort();
+					},
+				);
+				// Two frames written when it is told: the turn's `response.create`, then the steer itself.
+				expect({ ...result, observed, writtenWhenObserved }).toEqual({
+					streamed: true,
+					steers: 1,
+					observed: 1,
+					writtenWhenObserved: 2,
+				});
+			} finally {
+				writes.mockRestore();
+			}
 		});
 	});
 });

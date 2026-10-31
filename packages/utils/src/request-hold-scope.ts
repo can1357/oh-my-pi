@@ -148,9 +148,10 @@ export function admitNetworkSend(signal?: AbortSignal): Promise<never> | undefin
  * Call `cut` if the hold of the caller's scope (or of a scope around it) begins before the returned
  * release is called. A connection admitted now sends its bytes later (after a TCP or TLS handshake, a
  * WebSocket upgrade, a proxy tunnel); the caller registers this right after the admission and releases
- * once the response has begun, so a request still waiting for its response when the hold begins is cut
- * instead of landing. A hold that already began when this is called cuts on the next microtask, once
- * the caller has finished setting the request up. Outside every scope no hold can begin later.
+ * once the response has begun. A hold that begins before the bytes are written cuts the request before
+ * it lands; bytes already written (a connection with no handshake left) are not recalled, and only the
+ * response is cut. A hold that already began when this is called cuts on the next microtask, once the
+ * caller has finished setting the request up. Outside every scope no hold can begin later.
  */
 export function cutIfHeldBefore(cut: () => void): () => void {
 	const scope = currentRequestHoldScope();

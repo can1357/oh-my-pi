@@ -218,7 +218,8 @@ async function sendCoworkRequest(
 	if (refusal) await refusal;
 	signal?.addEventListener("abort", abort, { once: true });
 	// The request's bytes go out only after the TLS handshake: a hold that begins before the response
-	// arrives cuts the request, like any request still waiting for its response (see `request-hold.ts`).
+	// arrives cuts the request (see `request-hold.ts`). During the handshake that stops it landing; on a
+	// warm pooled connection the bytes may already be out, and only the response is cut.
 	releaseHoldCut = cutIfHeldBeforeResponse(reason => request?.destroy(reason));
 	// model-request: transport stream — the Anthropic stream's Cowork-profiled HTTPS request.
 	const request = https.request(

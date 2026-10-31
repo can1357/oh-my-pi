@@ -214,7 +214,7 @@ async function fetchCursorUnary(
 		const remainingMs = deadline - Date.now();
 		if (signal.aborted || remainingMs <= 0) return null;
 		// Older/custom Cursor endpoints may accept only an HTTP/2 Connect request.
-		return fetchViaHttp2(baseUrl, path, body, options, remainingMs);
+		return fetchViaHttp2(baseUrl, path, body, options, remainingMs, signal);
 	}
 	if (!response.ok) return null;
 	try {
@@ -227,7 +227,7 @@ async function fetchCursorUnary(
 /**
  * HTTP/2 transport used by Cursor's unary protobuf RPCs. It is no `fetch`, so the hold's backstop does
  * not see it: it asks the hold itself in the turn it connects, and is cut if the hold begins before
- * its response does.
+ * its response does. Held, it waits no longer than `signal`, the unary call's deadline.
  */
 async function fetchViaHttp2(
 	baseUrl: string,
@@ -235,9 +235,10 @@ async function fetchViaHttp2(
 	body: Uint8Array,
 	options: CursorModelDiscoveryOptions,
 	timeoutMs: number,
+	signal: AbortSignal,
 ): Promise<Uint8Array | null> {
 	const { promise, resolve } = Promise.withResolvers<Uint8Array | null>();
-	const refusal = admitNetworkSend();
+	const refusal = admitNetworkSend(signal);
 	if (refusal) await refusal;
 	// model-request: none — lists Cursor's available models (a catalog read, not a model request), bounded by `timeoutMs`; asks the hold above.
 	const client = http2.connect(baseUrl);

@@ -5,8 +5,9 @@
  *   and the tool's result goes out as a new frame on it. Each frame asks the hold, so a run held while
  *   its tool ran sends no result.
  * - **Caller code between the admission and the send.** Codex tells its outbound observer about each
- *   frame; an observer that begins the owner's disposal must not let the frame it was told about out.
- *   The hold is asked again after the observer, right before the send.
+ *   frame, and an observer can begin the owner's disposal. Nothing runs between the answer and the
+ *   send: the observer is told after the frame is written, so it is told only about frames that went
+ *   out, and the hold it begins cannot reach a frame it was told about.
  * - **A request admitted, whose bytes land later.** A request goes on the wire only after its TCP and
  *   TLS handshake (or WebSocket upgrade). A hold that begins in between cuts it, as a fetch is cut. A
  *   relay that accepts the connection but forwards nothing until released holds each request in its
@@ -16,7 +17,7 @@
  * counts what the endpoint receives, beside a live control that sends. The cases wait real time where
  * they assert that nothing arrives, which fake time can neither deliver nor rule out.
  */
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import http2 from "node:http2";
 import * as net from "node:net";
 import type { ServerWebSocket } from "bun";
@@ -260,10 +261,16 @@ describe("a send asked of the hold at the wrong moment", () => {
 	});
 
 	describe("a Codex frame whose outbound observer begins the owner's disposal", () => {
-		/** Stream one turn; the observer sees the outgoing `response.create` and begins the hold if asked. */
-		async function frameAfterObserver(hold: boolean) {
+		/**
+		 * Stream one turn; the observer sees the outgoing `response.create`, records how many frames the
+		 * client had written by then, and begins the hold if asked.
+		 */
+		async function frameAndObserver(hold: boolean) {
 			const frames: string[] = [];
 			let observed = 0;
+			let writtenWhenObserved = -1;
+			const writes = spyOn(WebSocket.prototype, "send");
+			cleanups.push(() => writes.mockRestore());
 			const arrived = Promise.withResolvers<void>();
 			const server = Bun.serve({
 				...LOOPBACK_TLS,
@@ -309,25 +316,26 @@ describe("a send asked of the hold at the wrong moment", () => {
 						onSseEvent: event => {
 							if (event.event !== "response.create") return;
 							observed++;
+							writtenWhenObserved = writes.mock.calls.length;
 							if (hold) held.abort();
 						},
 					},
 				).result(),
 			).catch(() => undefined);
 			await Promise.race([arrived.promise, Bun.sleep(600)]);
-			const counts = { observed, frames: frames.length };
+			const counts = { observed, writtenWhenObserved, frames: frames.length };
 			request.abort();
 			ended.abort();
 			await turn;
 			return counts;
 		}
 
-		it("is not sent", async () => {
-			expect(await frameAfterObserver(true)).toEqual({ observed: 1, frames: 0 });
+		it("is told only once the frame is written, so the hold it begins refuses nothing it was told about", async () => {
+			expect(await frameAndObserver(true)).toEqual({ observed: 1, writtenWhenObserved: 1, frames: 1 });
 		});
 
-		it("is sent when the observer begins nothing (control)", async () => {
-			expect(await frameAfterObserver(false)).toEqual({ observed: 1, frames: 1 });
+		it("is told once the frame is written when it begins nothing (control)", async () => {
+			expect(await frameAndObserver(false)).toEqual({ observed: 1, writtenWhenObserved: 1, frames: 1 });
 		});
 	});
 

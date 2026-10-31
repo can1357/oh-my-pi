@@ -167,11 +167,13 @@ function requestSignal(input: string | URL | Request, init: RequestInit | undefi
  * begins before the returned release is called (`cutIfHeldBefore` in `@oh-my-pi/pi-utils`). A
  * transport admitted by {@link admitSend} writes its bytes later than the admission (after a TCP or
  * TLS handshake, a WebSocket upgrade, a proxy tunnel): it calls this right after the admission and
- * releases once its response has begun, so a request still waiting for its response when the hold
- * begins is cut instead of landing. A hold that already began when this is called (caller code ran
- * between the admission and here, a socket factory say) cuts on the next microtask. The cut is no
- * refusal: a retry asks the hold again and waits like any other held request, so the job it belongs
- * to stays alive, held, until its owner decides.
+ * releases once its response has begun. A hold that begins before the bytes are written (during the
+ * handshake) cuts the request before it lands. Bytes already written are not recalled: on a warm
+ * pooled connection with no handshake left, the request can reach the server and only its response
+ * is cut, so the caller still gets the refusal. A hold that already began when this is called
+ * (caller code ran between the admission and here, a socket factory say) cuts on the next microtask.
+ * The cut is no refusal: a retry asks the hold again and waits like any other held request, so the
+ * job it belongs to stays alive, held, until its owner decides.
  */
 export function cutIfHeldBeforeResponse(cut: (reason: AbortError) => void): () => void {
 	return cutIfHeldBefore(() =>

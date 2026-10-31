@@ -663,6 +663,16 @@ const CASES: ReadonlyArray<{ name: string; files: Readonly<Record<string, string
 		},
 		passes: false,
 	},
+	// Round sixteen: an admission asked and its answer thrown away, as the reviewer wrote it. The same
+	// send with the answer acted on is the control "a credentialed HTTP/2 send that asks the hold first".
+	{
+		name: "round 16: an admission whose answer is discarded, before a credentialed HTTP/2 send",
+		files: {
+			"coding-agent/src/zz.ts":
+				'import * as http2 from "node:http2";\nimport {admitNetworkSend} from "@oh-my-pi/pi-utils/request-hold-scope";\nexport function go(baseUrl: string, apiKey: string){\n\tadmitNetworkSend();\n\t// model-request: none — model discovery (listing a provider\'s models), not inference.\n\tconst client = http2.connect(baseUrl);\n\tconst req = client.request({":method":"POST",":path":"/models",authorization:`Bearer ${apiKey}`});\n\treq.end();\n\treturn req;\n}',
+		},
+		passes: false,
+	},
 ];
 
 describe("model request ownership checker self-test", () => {

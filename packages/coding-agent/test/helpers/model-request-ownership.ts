@@ -2496,17 +2496,54 @@ function credentialNear(site: Site): string | undefined {
 /** Calls that ask the request hold right before a send: pi-ai's `admitSend`, pi-utils' `admitNetworkSend`, a bound admission. */
 const HOLD_ADMISSION = /^(#?admitSend|admitNetworkSend|admitProviderRequest|admit)$/;
 
-/** Whether the function a site is in asks the request hold before the site. */
+/**
+ * Whether a function asks the request hold before a site and acts on the answer, which is what an
+ * admission's doc comment requires. The call counts only when it is awaited
+ * (`await admitProviderRequest(signal)`), or when it initialises a local that an `if` before the site
+ * tests and whose branch awaits it, returns or throws
+ * (`const refusal = admitSend(signal); if (refusal) await refusal;`). A call whose answer is dropped
+ * (`admitNetworkSend();`) asks the hold and ignores what it says.
+ *
+ * This reads shapes, not control flow: a `catch` that swallows the refusal, or a branch that returns
+ * into the send some other way, is not seen. The request-count tests carry the claim at run time.
+ */
 function gatedBefore(site: Site): boolean {
 	const start = (site.node.start as number | undefined) ?? 0;
+	const scope = enclosingScope(site);
 	let gated = false;
-	walk(enclosingScope(site), node => {
+	walk(scope, (node, ancestors) => {
 		if (gated || !/^(Call|OptionalCall)Expression$/.test(node.type) || ((node.start as number) ?? 0) >= start) return;
 		const callee = unwrap(child(node, "callee"));
 		const name = callee?.type === "MemberExpression" ? memberName(callee) : nameOf(callee);
-		if (name && HOLD_ADMISSION.test(name)) gated = true;
+		if (name && HOLD_ADMISSION.test(name) && answerActedOn(node, ancestors, scope, start)) gated = true;
 	});
 	return gated;
+}
+
+/** Whether an admission call's answer decides the path before `before` (see {@link gatedBefore}). */
+function answerActedOn(call: Node, ancestors: readonly Node[], scope: Node, before: number): boolean {
+	let index = ancestors.length - 1;
+	while (index >= 0 && TRANSPARENT.has(ancestors[index].type)) index--;
+	const parent = ancestors[index];
+	if (parent?.type === "AwaitExpression") return true;
+	if (parent?.type !== "VariableDeclarator" || unwrap(child(parent, "init")) !== call) return false;
+	const name = nameOf(child(parent, "id"));
+	if (!name) return false;
+	let acted = false;
+	walk(scope, node => {
+		if (acted || node.type !== "IfStatement" || ((node.start as number) ?? 0) >= before) return;
+		if (nameOf(unwrap(child(node, "test"))) === name) acted = leavesOnRefusal(child(node, "consequent"), name);
+	});
+	return acted;
+}
+
+/** Whether an `if (refusal)` branch keeps the send from going ahead: it awaits the refusal, or ends in `return` or `throw`. */
+function leavesOnRefusal(branch: Node | undefined, name: string): boolean {
+	const last = branch?.type === "BlockStatement" ? children(branch, "body").at(-1) : branch;
+	if (last?.type === "ReturnStatement" || last?.type === "ThrowStatement") return true;
+	if (last?.type !== "ExpressionStatement") return false;
+	const expression = unwrap(child(last, "expression"));
+	return expression?.type === "AwaitExpression" && nameOf(unwrap(child(expression, "argument"))) === name;
 }
 
 /**

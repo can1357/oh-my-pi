@@ -4170,11 +4170,11 @@ class CodexWebSocketConnection {
 					: undefined;
 
 				const requestPayload = JSON.stringify(request);
-				// A held scope sends no frame (see `request-hold.ts`), and is not reported as sending one.
+				// A held scope sends no frame (see `request-hold.ts`). Nothing runs between the answer and
+				// the send: the outbound observer runs caller code, which can begin the owner's disposal, so
+				// it is told after the frame is written, and only about a frame that went out.
 				const refusal = this.#admitSend(signal);
 				if (refusal) await refusal;
-				// The outbound observer runs caller code, which can begin the owner's disposal.
-				notifyCodexWebSocketOutbound(onSseEvent, request, requestPayload);
 				// Re-check liveness: the debug-session await above can outlive the socket.
 				// Preserve the abort cause: onAbort already queued a caused error, but this
 				// throw would otherwise mask it before #nextMessage() drains the queue.
@@ -4187,9 +4187,6 @@ class CodexWebSocketConnection {
 					}
 					throw new CodexWebSocketTransportError(`websocket connection is unavailable`);
 				}
-				// So the hold is asked again after every observer, with nothing between the answer and the send.
-				const lateRefusal = this.#admitSend(signal);
-				if (lateRefusal) await lateRefusal;
 				try {
 					socket.send(requestPayload);
 				} catch (error) {
@@ -4197,6 +4194,7 @@ class CodexWebSocketConnection {
 						`websocket send failed: ${error instanceof Error ? error.message : String(error)}`,
 					);
 				}
+				notifyCodexWebSocketOutbound(onSseEvent, request, requestPayload);
 			} else if (this.hasFailedSteer(exchange.attachSteerIds)) {
 				throw new CodexSteerCommitError("accepted steering was not committed to a successor response");
 			}
@@ -4337,18 +4335,15 @@ class CodexWebSocketConnection {
 		const payload = JSON.stringify(event);
 		// Steering adds input to the response streaming on this socket, so it asks that request's hold
 		// (see `request-hold.ts`), whoever steers. The refusal of a held scope never resolves; it rejects
-		// when the scope ends. A held scope is not reported as sending a steer.
+		// when the scope ends. Nothing runs between the answer and the send: the observer runs caller
+		// code, which can begin the owner's disposal, so it is told after the steer is written, and only
+		// about a steer that went out.
 		const refusal = this.#admitSend();
 		if (refusal) return refusal;
-		// The observer runs caller code, which can begin the owner's disposal.
-		notifyCodexWebSocketOutbound(this.#streamObserver, event, payload);
 		const socket = this.#socket;
 		if (!socket || socket.readyState !== WebSocket.OPEN) {
 			return Promise.reject(new CodexWebSocketTransportError(`websocket connection is unavailable`));
 		}
-		// So the hold is asked again after the observer, with nothing between the answer and the send.
-		const lateRefusal = this.#admitSend();
-		if (lateRefusal) return lateRefusal;
 		const { promise, resolve, reject } = Promise.withResolvers<CodexSteerAck>();
 		const waiter: CodexSteerWaiter = { previousResponseId, resolve, reject };
 		this.#steerWaiters.push(waiter);
@@ -4361,7 +4356,9 @@ class CodexWebSocketConnection {
 					`websocket send failed: ${error instanceof Error ? error.message : String(error)}`,
 				),
 			);
+			return promise;
 		}
+		notifyCodexWebSocketOutbound(this.#streamObserver, event, payload);
 		return promise;
 	}
 
