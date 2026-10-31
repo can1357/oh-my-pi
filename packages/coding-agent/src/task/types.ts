@@ -181,6 +181,7 @@ function createTaskSchema(options: {
 	evalToolsEnabled: boolean;
 	structured: boolean;
 	file: boolean;
+	perCallModel: boolean;
 	seanceFields: SeanceTaskSchemaFields;
 }): BaseType {
 	const agent = taskAgentSchemaRule(options.defaultAgent);
@@ -190,9 +191,10 @@ function createTaskSchema(options: {
 		? { "outputSchema?": outputSchemaInputSchema, "schemaMode?": '"permissive" | "strict"' }
 		: {};
 	const toolsField = options.evalToolsEnabled ? { "tools?": "string[]" } : {};
-	// `model` is always declared, and preflight decides whether a per-call model
-	// is allowed; seance widens it to a list.
-	const seanceFields = { "model?": "string", ...options.seanceFields };
+	// `model` is always declared so a rejected per-call model fails preflight
+	// instead of being deleted by `"+": "delete"`; an enabled per-call model
+	// and seance widen it to a list.
+	const seanceFields = { "model?": options.perCallModel ? "string | string[]" : "string", ...options.seanceFields };
 	if (options.batchEnabled) {
 		if (options.isolationEnabled) {
 			const item = type.raw({
@@ -275,18 +277,29 @@ export function getTaskSchema(options: {
 	defaultAgent?: string;
 	/** Advertise historical source/model fields for the bundled seance agent. */
 	seanceFields?: SeanceTaskSchemaFields;
+	/** `task.perCallModel` accepts `model` on task calls: declare it as one selector or an ordered list. */
+	perCallModel?: boolean;
 }): TaskToolSchemaInstance {
 	const defaultAgent = options.defaultAgent ?? "task";
 	const effortEnabled = options.effortEnabled ?? false;
 	const evalToolsEnabled = options.evalToolsEnabled ?? true;
 	const structured = options.structured ?? true;
 	const file = options.file ?? false;
+	const perCallModel = options.perCallModel ?? false;
 	const seanceFields = options.seanceFields ?? {};
-	if (defaultAgent === "task" && !effortEnabled && evalToolsEnabled && structured && !file && !options.seanceFields) {
+	if (
+		defaultAgent === "task" &&
+		!effortEnabled &&
+		evalToolsEnabled &&
+		structured &&
+		!file &&
+		!perCallModel &&
+		!options.seanceFields
+	) {
 		if (options.batchEnabled) return options.isolationEnabled ? taskSchemaBatch : taskSchemaBatchNoIsolation;
 		return options.isolationEnabled ? taskSchema : taskSchemaNoIsolation;
 	}
-	const key = `${options.isolationEnabled ? "iso" : "flat"}:${options.batchEnabled ? "batch" : "single"}:${effortEnabled ? "effort" : "default"}:${evalToolsEnabled ? "tools" : "notools"}:${structured ? "structured" : "prose"}:${file ? "file" : "inline"}:${options.seanceFields ? "seance" : "plain"}:${defaultAgent}`;
+	const key = `${options.isolationEnabled ? "iso" : "flat"}:${options.batchEnabled ? "batch" : "single"}:${effortEnabled ? "effort" : "default"}:${evalToolsEnabled ? "tools" : "notools"}:${structured ? "structured" : "prose"}:${file ? "file" : "inline"}:${perCallModel ? "percall" : "fixed"}:${options.seanceFields ? "seance" : "plain"}:${defaultAgent}`;
 	const cached = taskSchemaCache.get(key);
 	if (cached) return cached;
 	const schema = createTaskSchema({
@@ -295,6 +308,7 @@ export function getTaskSchema(options: {
 		evalToolsEnabled,
 		structured,
 		file,
+		perCallModel,
 		defaultAgent,
 		seanceFields,
 	});

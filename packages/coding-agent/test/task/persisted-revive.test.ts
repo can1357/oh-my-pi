@@ -762,9 +762,13 @@ describe("persisted subagent revival", () => {
 	it.each([
 		{ identity: "mock/coding-router", level: Effort.Low },
 		{ identity: "mock/coding-router:low", level: Effort.High },
-	])("restores $identity and its separate $level thinking level exactly", async ({ identity, level }) => {
-		const models = [perCallModelFixture("coding-router"), perCallModelFixture("coding-router:low")];
-		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+	])("revives a role request on exact $identity with its separate $level effort", async ({ identity, level }) => {
+		const models = [
+			perCallModelFixture("coding-router"),
+			perCallModelFixture("coding-router:low"),
+			perCallModelFixture("remapped"),
+		];
+		const create = vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
 			const selector = Array.isArray(options?.modelPattern) ? options.modelPattern[0] : options?.modelPattern;
 			const parsed = selector ? parseModelPattern(selector, models) : undefined;
 			return {
@@ -775,15 +779,17 @@ describe("persisted subagent revival", () => {
 			} as CreateAgentSessionResult;
 		});
 		const cwd = makeTempDir("@pi-revive-per-call-level-");
-		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
+		const sessionFile = await createPersistedSession(cwd, undefined, "review", undefined, {
 			perCallModel: true,
 			resolvedModel: "mock/coding-router:low",
 			perCallModelIdentity: identity,
 			perCallThinkingLevel: level,
 		});
 		const ref = createRef(sessionFile);
+		// The requested role was remapped; a separate current grant still admits the saved identity.
+		const settings = Settings.isolated({ modelRoles: { review: "mock/remapped:high", smol: identity } });
 		const reviver = await createFactory(cwd, undefined, {
-			settings: Settings.isolated({ modelRoles: { review: identity } }),
+			settings,
 			modelRegistry: stubRegistry(models),
 		})(ref);
 		if (!reviver) throw new Error("Expected a persisted reviver");
@@ -791,6 +797,36 @@ describe("persisted subagent revival", () => {
 		const revived = await reviver(ref);
 		expect(`${revived.model?.provider}/${revived.model?.id}`).toBe(identity);
 		expect(revived.thinkingLevel).toBe(level);
+		const check = create.mock.calls[0]?.[0]?.assertDispatchModel;
+		const revivedModel = revived.model;
+		if (!check || !revivedModel) throw new Error("Expected an exact per-call dispatch check");
+		expect(() => check(revivedModel)).not.toThrow();
+		// Withdrawing the last independent grant revokes the saved model instead of substituting the remapped one.
+		settings.setModelRole("smol", undefined);
+		expect(() => check(revivedModel)).toThrow(/not approved/);
+	});
+
+	it("refuses cold revival when remapping a role withdraws the saved model's only grant", async () => {
+		const saved = perCallModelFixture("saved");
+		const remapped = perCallModelFixture("remapped");
+		const create = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({
+			session: Object.assign(createRevivedSession([]).session, { model: remapped }),
+		} as CreateAgentSessionResult);
+		const cwd = makeTempDir("@pi-revive-per-call-role-remap-");
+		const sessionFile = await createPersistedSession(cwd, undefined, "review", undefined, {
+			perCallModel: true,
+			resolvedModel: "mock/saved:low",
+			perCallModelIdentity: "mock/saved",
+			perCallThinkingLevel: Effort.Low,
+		});
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd, undefined, {
+			settings: Settings.isolated({ modelRoles: { review: "mock/remapped:high" } }),
+			modelRegistry: stubRegistry([saved, remapped]),
+		})(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await expect(reviver(ref)).rejects.toThrow(/not approved/);
+		expect(create).not.toHaveBeenCalled();
 	});
 
 	it("revives a per-call worker on its exact model, not on a session-local switch", async () => {
