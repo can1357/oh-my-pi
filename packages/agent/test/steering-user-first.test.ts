@@ -62,7 +62,9 @@ function transcriptTexts(agent: Agent): string[] {
 
 /**
  * A run whose first model call queues `queued` mid-batch from a tool, then answers in text
- * until the steering queue drains; each later model call reads one steering unit.
+ * until the steering queue drains; each later model call reads one steering unit. `arrivals`
+ * runs inside model call `call` (1 for the first boundary), after that call's unit was taken,
+ * so what it queues is first eligible at call `call + 1`.
  */
 async function runWithQueued(
 	queued: AgentMessage[],
@@ -70,6 +72,7 @@ async function runWithQueued(
 		steeringMode?: "all" | "one-at-a-time";
 		grouping?: boolean;
 		priority?: (message: AgentMessage) => boolean;
+		arrivals?: (call: number, agent: Agent) => void;
 	} = {},
 ): Promise<{ agent: Agent; calls: Context[] }> {
 	const agentRef = {} as { current: Agent };
@@ -84,11 +87,15 @@ async function runWithQueued(
 			return { content: [{ type: "text", text: "stepped" }] };
 		},
 	};
+	let call = 0;
 	const mock = createMockModel({
-		handler: context =>
-			context.messages.length === 1
+		handler: context => {
+			const current = call++;
+			if (current >= 1) options.arrivals?.(current, agentRef.current);
+			return context.messages.length === 1
 				? { content: [{ type: "toolCall", id: "step-1", name: "step", arguments: {} }] }
-				: { content: [`read ${context.messages.length}`] },
+				: { content: [`read ${context.messages.length}`] };
+		},
 	});
 	const agent = new Agent({
 		initialState: { model: mock.model, systemPrompt: ["Test"], tools: [tool], messages: [] },
@@ -190,6 +197,109 @@ describe("one-at-a-time steering: a person's message before agent steering", () 
 
 		const typed = burst.map((_, i) => `typed ${i + 1}`);
 		expect(transcriptTexts(agent)).toEqual(["start", ...typed.slice(0, bound), "card 1", typed[bound], "card 2"]);
+	});
+
+	it("counts user steers queued before the agent steer toward its allowance", async () => {
+		// One older user message, then one new user message per model call.
+		const { agent } = await runWithQueued([person("U_old"), card(0)], {
+			arrivals: (call, target) => {
+				if (call <= 5) target.steer(person(`U${call - 1}`));
+			},
+		});
+
+		// card 0 had no agent steer ahead of it, so it is read within 5 deliveries: the 5th.
+		expect(transcriptTexts(agent)).toEqual(["start", "U_old", "U0", "U1", "U2", "card 0", "U3", "U4"]);
+	});
+
+	it("delivers every agent steer within 5 × (k + 1) deliveries of being queued, under random arrivals", async () => {
+		const bound = MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING + 1;
+		let checked = 0;
+		for (let seed = 1; seed <= 32; seed++) {
+			let state = seed * 7919;
+			const random = (): number => {
+				state = (state * 1103515245 + 12345) % 2147483648;
+				return state / 2147483648;
+			};
+			const userRate = 0.3 + (seed % 7) * 0.1;
+			// Call each message was queued in (0 = the tool, before the first delivery).
+			const queuedIn = new Map<string, number>();
+			let next = 0;
+			const message = (call: number, agent: boolean): AgentMessage => {
+				const id = `${agent ? "agent" : "user"} ${next++}`;
+				queuedIn.set(id, call);
+				return agent
+					? { role: "custom", customType: "card", content: id, display: true, timestamp: next }
+					: person(id);
+			};
+			const initial = Array.from({ length: 4 }, () => message(0, random() < 0.5));
+			const { agent } = await runWithQueued(initial, {
+				arrivals: (call, target) => {
+					if (call > 60) return;
+					let queued = 0;
+					while (random() < userRate && queued < 3) {
+						target.steer(message(call, false));
+						queued++;
+					}
+					if (random() < 0.5) target.steer(message(call, true));
+					else if (queued === 0) target.steer(message(call, false));
+				},
+			});
+			// One unit per boundary: the nth transcript entry after "start" was delivered at call n.
+			const transcript = transcriptTexts(agent).slice(1);
+			const deliveredAt = new Map(transcript.map((id, index) => [id, index + 1]));
+			// Nothing lost or delivered twice, and each class keeps its order.
+			expect([...transcript].sort()).toEqual([...queuedIn.keys()].sort());
+			for (const prefix of ["agent", "user"]) {
+				const ids = transcript.filter(id => id.startsWith(prefix)).map(id => Number(id.split(" ")[1]));
+				expect(ids).toEqual([...ids].sort((a, b) => a - b));
+			}
+			for (const [id, queued] of queuedIn) {
+				if (!id.startsWith("agent")) continue;
+				// Agent steers queued earlier and still waiting when this one was queued.
+				const ahead = [...queuedIn].filter(
+					([other]) =>
+						other.startsWith("agent") &&
+						Number(other.split(" ")[1]) < Number(id.split(" ")[1]) &&
+						deliveredAt.get(other)! > queued,
+				).length;
+				expect(deliveredAt.get(id)! - queued).toBeLessThanOrEqual(bound * (ahead + 1));
+				checked++;
+			}
+		}
+		expect(checked).toBeGreaterThan(200);
+	});
+
+	for (const [name, empty] of [
+		["clearSteeringQueue", (target: Agent) => target.clearSteeringQueue()],
+		["clearAllQueues", (target: Agent) => target.clearAllQueues()],
+		["replaceQueue", (target: Agent) => target.replaceQueue("steering", [])],
+		["replaceQueues", (target: Agent) => target.replaceQueues([], [])],
+	] as const) {
+		it(`starts a fresh allowance for an agent steer queued again after ${name} emptied the queue`, async () => {
+			const reused = card(1);
+			const { agent } = await runWithQueued([reused, person("U1"), person("U2"), person("U3"), person("U4")], {
+				arrivals: (call, target) => {
+					if (call !== 4) return;
+					// Four user steers went ahead of `reused`; it leaves the queue, then comes back.
+					empty(target);
+					target.steer(reused);
+					target.steer(person("new"));
+				},
+			});
+
+			expect(transcriptTexts(agent)).toEqual(["start", "U1", "U2", "U3", "U4", "new", "card 1"]);
+		});
+	}
+
+	it("keeps the allowance of an agent steer a queue replacement keeps", async () => {
+		const kept = card(1);
+		const { agent } = await runWithQueued([kept, person("U1"), person("U2"), person("U3"), person("U4")], {
+			arrivals: (call, target) => {
+				if (call === 4) target.replaceQueue("steering", [kept, person("new")]);
+			},
+		});
+
+		expect(transcriptTexts(agent)).toEqual(["start", "U1", "U2", "U3", "U4", "card 1", "new"]);
 	});
 
 	it("delivers the whole queue in order at the next boundary in all mode", async () => {

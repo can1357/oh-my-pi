@@ -1950,9 +1950,9 @@ export class AgentSession implements SettingsScope {
 		// One-at-a-time steering reads a person's message ahead of agent steering. The queue chips
 		// (getQueuedMessages) list exactly the messages this rule accepts, and the grouping above
 		// keeps each one's hidden companions in its unit, so the chips show the order the agent
-		// reads them; the first is read at the next boundary, unless four in a row just passed the
-		// agent steer at the head of the queue (MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING), which goes
-		// first.
+		// reads them; the first is read at the next boundary, unless four user units were already
+		// delivered while an agent steer waited (MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING), in which case
+		// the oldest waiting agent steer goes first.
 		this.agent.setSteeringPriority(isUserAuthoredQueuedMessage);
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;

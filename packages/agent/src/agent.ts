@@ -72,11 +72,13 @@ import type {
 import { isSoftToolRequirement } from "./types";
 
 /**
- * In "one-at-a-time" steering, how many user-authored units may go ahead of the
- * agent-authored unit at the head of the queue before it goes next. A person who
- * sends a burst of up to this many messages has each one read at the next free
- * boundary; sustained input still lets agent steering through, one unit after
- * every this many user units, so no queued message waits forever.
+ * In "one-at-a-time" steering, how many priority (by default user-authored)
+ * units may be delivered while an agent-authored unit waits, counted since an
+ * agent unit was last delivered, before the oldest waiting agent unit goes next.
+ * Every unit a boundary delivers counts, wherever it sat in the queue, including
+ * user units queued before the agent unit. So an agent unit with `k` agent units
+ * ahead of it when it is queued is delivered within `5 × (k + 1)` deliveries,
+ * and agent units take at most one delivery in five while priority units wait.
  */
 export const MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING = 4;
 
@@ -142,8 +144,9 @@ export interface AgentOptions {
 
 	/**
 	 * Steering mode: "all" = send all steering messages at once, "one-at-a-time" = one per turn,
-	 * user-authored messages ahead of agent-authored ones (see {@link isUserSteeringMessage}), with
-	 * the head agent message going next after {@link MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING} user units
+	 * user-authored messages ahead of agent-authored ones (see {@link isUserSteeringMessage}), and the
+	 * oldest waiting agent message next once {@link MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING} user units
+	 * were delivered while it waited
 	 */
 	steeringMode?: "all" | "one-at-a-time";
 
@@ -456,8 +459,13 @@ export class Agent {
 	#withdrawnMessages = new WeakMap<AgentMessage, AbortController>();
 	#steeringWaiters = new Set<() => void>();
 	#queuedMessageGrouping?: (previous: AgentMessage, next: AgentMessage) => boolean;
-	/** The head agent steering message priority units passed, and how many passed it. */
-	#steeringHeadPassed?: { head: AgentMessage; count: number };
+	/**
+	 * Fairness state for "one-at-a-time" steering: the oldest waiting agent-authored
+	 * steering message, and how many priority units were delivered while an agent
+	 * unit waited since an agent unit was last delivered. It ends when that message
+	 * leaves the queue by any path, so a cleared and re-queued message starts fresh.
+	 */
+	#steeringWait?: { oldest: AgentMessage; passed: number };
 	#steeringPriority?: (message: AgentMessage) => boolean;
 
 	#steeringMode: "all" | "one-at-a-time";
@@ -1361,6 +1369,7 @@ export class Agent {
 
 	replaceQueues(steering: AgentMessage[], followUp: AgentMessage[]) {
 		this.#steeringQueue = steering.slice();
+		this.#forgetSteeringWaitIfGone();
 		this.#followUpQueue = followUp.slice();
 		this.#cancelQueuedMessagePreparation("steering");
 		this.#cancelQueuedMessagePreparation("followUp");
@@ -1380,6 +1389,7 @@ export class Agent {
 	replaceQueue(queue: "steering" | "followUp", messages: readonly AgentMessage[]): void {
 		if (queue === "steering") {
 			this.#steeringQueue = messages.slice();
+			this.#forgetSteeringWaitIfGone();
 			this.#cancelQueuedMessagePreparation("steering");
 			this.#notifySteeringWaiters();
 		} else {
@@ -1463,6 +1473,7 @@ export class Agent {
 
 	clearSteeringQueue() {
 		this.#steeringQueue = [];
+		this.#steeringWait = undefined;
 		this.#cancelQueuedMessagePreparation("steering");
 		this.#notifySteeringWaiters();
 		this.#emitQueueChanged();
@@ -1485,6 +1496,7 @@ export class Agent {
 
 	clearAllQueues() {
 		this.#steeringQueue = [];
+		this.#steeringWait = undefined;
 		this.#followUpQueue = [];
 		this.#liveSteered = [];
 		this.#cancelQueuedMessagePreparation("steering");
@@ -1576,21 +1588,40 @@ export class Agent {
 		return queue.slice(0, this.#unitEnd(queue, 0));
 	}
 
+	/** Start of the first unit holding no priority message (the oldest waiting agent unit), or -1. */
+	#oldestAgentUnitStart(): number {
+		const queue = this.#steeringQueue;
+		const isPriority = this.#steeringPriority ?? isUserSteeringMessage;
+		for (let start = 0; start < queue.length;) {
+			const end = this.#unitEnd(queue, start);
+			let priority = false;
+			for (let i = start; i < end && !priority; i++) priority = isPriority(queue[i]);
+			if (!priority) return start;
+			start = end;
+		}
+		return -1;
+	}
+
 	/**
 	 * Start of the steering unit delivered next: the whole queue in "all" mode;
 	 * in "one-at-a-time" mode the first unit holding a priority message
 	 * ({@link setSteeringPriority}, a person's by default), else the head unit. A
 	 * person's steer is read at the next boundary rather than behind every agent
-	 * steer queued before it; each class keeps its own order. An agent unit at the
-	 * head that {@link MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING} priority units have
-	 * passed goes next, so sustained priority input delays agent steering but
-	 * cannot starve it. Allocation-free: the mid-batch steering poll calls it.
+	 * steer queued before it; each class keeps its own order. Once
+	 * {@link MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING} priority units have been
+	 * delivered while an agent unit waits, the oldest waiting agent unit goes
+	 * next, so sustained priority input delays agent steering but cannot starve
+	 * it. Where a unit sits in the queue does not matter, so moving messages
+	 * ({@link prioritizeSteering}) cannot bypass this. Allocation-free: the
+	 * mid-batch steering poll calls it.
 	 */
 	#nextSteeringUnitStart(): number {
 		const queue = this.#steeringQueue;
 		if (this.#steeringMode === "all" || queue.length === 0) return 0;
-		const passed = this.#steeringHeadPassed;
-		if (passed?.head === queue[0] && passed.count >= MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING) return 0;
+		if ((this.#steeringWait?.passed ?? 0) >= MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING) {
+			const agentStart = this.#oldestAgentUnitStart();
+			if (agentStart >= 0) return agentStart;
+		}
 		const isPriority = this.#steeringPriority ?? isUserSteeringMessage;
 		for (let start = 0; start < queue.length;) {
 			const end = this.#unitEnd(queue, start);
@@ -1609,18 +1640,31 @@ export class Agent {
 		return this.#unitEnd(queue, start);
 	}
 
+	/** End the fairness wait when its message left the queue other than by delivery. */
+	#forgetSteeringWaitIfGone(): void {
+		const wait = this.#steeringWait;
+		if (wait && !this.#steeringQueue.includes(wait.oldest)) this.#steeringWait = undefined;
+	}
+
 	#dequeueSteeringMessages(): AgentMessage[] {
 		const queue = this.#steeringQueue;
+		// Track the oldest waiting agent unit from the first boundary it waits at.
+		const agentStart = this.#steeringMode === "all" ? -1 : this.#oldestAgentUnitStart();
+		if (agentStart < 0) {
+			this.#steeringWait = undefined;
+		} else if (this.#steeringWait) {
+			// An older agent unit can reappear ahead (an aborted run requeues what it
+			// took); the window since the last agent delivery continues.
+			this.#steeringWait.oldest = queue[agentStart];
+		} else {
+			this.#steeringWait = { oldest: queue[agentStart], passed: 0 };
+		}
 		const start = this.#nextSteeringUnitStart();
 		const end = this.#steeringUnitEnd(start);
 		if (start === end) return [];
-		if (start === 0) {
-			this.#steeringHeadPassed = undefined;
-		} else if (this.#steeringHeadPassed?.head === queue[0]) {
-			this.#steeringHeadPassed.count++;
-		} else {
-			this.#steeringHeadPassed = { head: queue[0], count: 1 };
-		}
+		// Delivering the agent unit ends the window; a priority unit delivered while it waits counts.
+		if (start === agentStart) this.#steeringWait = undefined;
+		else if (this.#steeringWait) this.#steeringWait.passed++;
 		this.#steeringQueue = start === 0 ? queue.slice(end) : [...queue.slice(0, start), ...queue.slice(end)];
 		this.#emitQueueChanged();
 		return queue.slice(start, end);
@@ -1640,6 +1684,7 @@ export class Agent {
 	popLastSteer(): AgentMessage | undefined {
 		if (this.#steeringQueue.length === 0) this.#cancelQueuedMessagePreparation("steering", true);
 		const popped = this.#steeringQueue.pop();
+		if (popped !== undefined && popped === this.#steeringWait?.oldest) this.#steeringWait = undefined;
 		if (popped !== undefined) this.#emitQueueChanged();
 		return popped;
 	}
