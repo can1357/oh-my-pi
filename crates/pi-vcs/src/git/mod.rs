@@ -253,8 +253,9 @@ fn resolve_info(
 		return Ok(None);
 	}
 	let common_dir = resolve_common_dir(&git_dir);
+	// Bytes, not a `String`: git does not require a config file to be UTF-8.
 	let is_reftable =
-		read_optional(&common_dir.join("config")).is_some_and(|config| config_has_reftable(&config));
+		std::fs::read(common_dir.join("config")).is_ok_and(|config| config_has_reftable(&config));
 	Ok(Some(GitRepoInfo {
 		repo_root: repo_root.to_owned(),
 		git_entry_path: git_entry.to_owned(),
@@ -352,53 +353,25 @@ pub(crate) fn relative_prefix(root: &Path, dir: &Path) -> Option<String> {
 	Some(prefix)
 }
 
-/// Whether a git config file selects the reftable ref storage.
-///
-/// Minimal INI scan of `[extensions] refstorage`, honoring quoted values and
-/// `;`/`#` comments outside quotes — enough to classify a repo without a full
-/// config parser (reftable repos never reach gitoxide, so its parser is not
-/// available for them by construction).
-fn config_has_reftable(content: &str) -> bool {
-	let mut in_extensions = false;
-	for line in content.lines() {
-		let line = strip_config_comment(line);
-		let line = line.trim();
-		if let Some(section) = line.strip_circumfix('[', ']') {
-			in_extensions = section.trim().eq_ignore_ascii_case("extensions");
-			continue;
-		}
-		if !in_extensions {
-			continue;
-		}
-		let Some((key, value)) = line.split_once('=') else {
-			continue;
-		};
-		if !key.trim().eq_ignore_ascii_case("refstorage") {
-			continue;
-		}
-		let mut value = value.trim();
-		if let Some(inner) = value.strip_circumfix('"', '"') {
-			value = inner.trim();
-		}
-		let value = value.to_ascii_lowercase();
-		if value == "reftable" || value.starts_with("reftable:") {
-			return true;
-		}
-	}
-	false
-}
-
-/// Truncate a config line at the first `;`/`#` outside double quotes.
-fn strip_config_comment(line: &str) -> &str {
-	let mut in_quotes = false;
-	for (index, ch) in line.char_indices() {
-		match ch {
-			'"' => in_quotes = !in_quotes,
-			';' | '#' if !in_quotes => return &line[..index],
-			_ => {},
-		}
-	}
-	line
+/// Whether a git config file selects the reftable ref storage:
+/// `extensions.refStorage` is `reftable` or a `reftable:` URI, last value
+/// wins, as git reads it. The file goes through gitoxide's config parser,
+/// which opens no repository: a reftable repository never reaches a gitoxide
+/// repository open.
+fn config_has_reftable(config: &[u8]) -> bool {
+	let Ok(config) = gix::config::File::from_bytes_no_includes(
+		config,
+		gix::config::file::Metadata::from(gix::config::Source::Local),
+		gix::config::file::init::Options { lossy: true, ..Default::default() },
+	) else {
+		return false;
+	};
+	config.string("extensions.refStorage").is_some_and(|value| {
+		value.eq_ignore_ascii_case(b"reftable")
+			|| value
+				.get(..b"reftable:".len())
+				.is_some_and(|scheme| scheme.eq_ignore_ascii_case(b"reftable:"))
+	})
 }
 
 #[cfg(test)]
@@ -418,11 +391,67 @@ mod tests {
 
 	#[test]
 	fn reftable_detection_honors_quotes_and_comments() {
-		assert!(config_has_reftable("[extensions]\n\trefStorage = reftable\n"));
-		assert!(config_has_reftable("[extensions]\nrefstorage = \"reftable\" ; comment\n"));
-		assert!(!config_has_reftable("[extensions]\nrefstorage = files\n"));
-		assert!(!config_has_reftable("[core]\nrefstorage = reftable\n"));
-		assert!(!config_has_reftable("[extensions]\n# refstorage = reftable\n"));
+		assert!(config_has_reftable(b"[extensions]\n\trefStorage = reftable\n"));
+		assert!(config_has_reftable(b"[extensions]\nrefstorage = \"reftable\" ; comment\n"));
+		assert!(config_has_reftable(b"[extensions]\n\trefStorage = reftable:/var/refs\n"));
+		assert!(!config_has_reftable(b"[extensions]\nrefstorage = files\n"));
+		assert!(!config_has_reftable(b"[core]\nrefstorage = reftable\n"));
+		assert!(!config_has_reftable(b"[extensions \"x\"]\nrefstorage = reftable\n"));
+		assert!(!config_has_reftable(b"[extensions]\n# refstorage = reftable\n"));
+	}
+
+	// Each `reftable_detection_matches_git_*` config below is one for which git
+	// 2.43's `git config --file <config> --get extensions.refStorage` prints
+	// the value the assertion expects.
+
+	#[test]
+	fn reftable_detection_matches_git_for_a_key_on_the_header_line() {
+		assert!(config_has_reftable(b"[extensions] refStorage = reftable\n"));
+	}
+
+	#[test]
+	fn reftable_detection_matches_git_after_a_utf8_bom() {
+		assert!(config_has_reftable(b"\xef\xbb\xbf[extensions]\n\trefStorage = reftable\n"));
+	}
+
+	#[test]
+	fn reftable_detection_matches_git_for_a_continued_value() {
+		assert!(config_has_reftable(b"[extensions]\n\trefStorage = reft\\\nable\n"));
+	}
+
+	#[test]
+	fn reftable_detection_matches_git_for_a_value_quoted_in_part() {
+		assert!(config_has_reftable(b"[extensions]\n\trefStorage = reft\"able\"\n"));
+	}
+
+	#[test]
+	fn reftable_detection_matches_git_for_a_config_that_is_not_utf8() {
+		assert!(config_has_reftable(
+			b"[extensions]\n\trefStorage = reftable\n[user]\n\tname = Ren\xe9\n"
+		));
+	}
+
+	#[test]
+	fn reftable_detection_matches_git_for_a_repeated_key() {
+		// Git keeps the last value: `files`.
+		assert!(!config_has_reftable(
+			b"[extensions]\n\trefStorage = reftable\n\trefStorage = files\n"
+		));
+	}
+
+	#[test]
+	fn discovery_reads_reftable_from_a_config_that_is_not_utf8() {
+		let temp = tempfile::tempdir().unwrap();
+		let git_dir = temp.path().join(".git");
+		fs::create_dir_all(&git_dir).unwrap();
+		fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+		fs::write(
+			git_dir.join("config"),
+			b"[extensions]\n\trefStorage = reftable\n[user]\n\tname = Ren\xe9\n",
+		)
+		.unwrap();
+		let info = discover_info(temp.path()).unwrap().expect("repository");
+		assert!(info.is_reftable);
 	}
 
 	#[test]
