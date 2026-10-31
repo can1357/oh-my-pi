@@ -557,6 +557,8 @@ interface CursorStreamTiming {
 	transport?: "http2" | "http1";
 	/** The call's `replayBudgetMs`, carried into the requests that continue it. */
 	replayBudget?: ReplayBudget;
+	/** The failure this request replaces; returned as-is when the budget refuses the request at send time. */
+	replayOf?: unknown;
 }
 
 interface CursorRequestState {
@@ -1502,8 +1504,12 @@ function streamCursorWithWireMode(
 				}
 				h2Client = client;
 				client.on("error", error => settleH2(mapH2TransportError(error, baseUrl)));
+				// A continuing request was admitted before its wait and its rebuilt
+				// request; the clock moved since, so it is asked again here.
+				if (timing?.replayOf !== undefined && !admitsReplay(replayBudget, 0)) throw timing.replayOf;
 				runTransport = wrapHttp2RunTransport(client.request(requestHeaders));
 			} else {
+				if (timing?.replayOf !== undefined && !admitsReplay(replayBudget, 0)) throw timing.replayOf;
 				runTransport = createHttp1RunTransport({
 					baseUrl,
 					headers: requestHeaders,
@@ -2016,6 +2022,7 @@ function streamCursorWithWireMode(
 					timestamp: output.timestamp,
 					transport: "http1",
 					replayBudget,
+					replayOf: error,
 					retry: {
 						attempt: retryContext?.attempt ?? 0,
 						originalRequestId,
@@ -2068,6 +2075,7 @@ function streamCursorWithWireMode(
 					timestamp: output.timestamp,
 					transport: transportMode,
 					replayBudget,
+					replayOf: error,
 				});
 				// The lazy watchdog observes THIS outer stream; the fallback's exec
 				// bridge marks the inner stream busy via `trackLocalWork`. Forward
@@ -2157,6 +2165,7 @@ function streamCursorWithWireMode(
 						timestamp: output.timestamp,
 						transport: transportMode,
 						replayBudget,
+						replayOf: error,
 						retry: {
 							attempt: retryAttempt + 1,
 							originalRequestId: retryOriginalRequestId,

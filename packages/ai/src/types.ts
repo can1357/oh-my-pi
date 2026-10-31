@@ -546,23 +546,29 @@ export interface StreamOptions {
 	/**
 	 * Wall-clock budget, in milliseconds from the start of this call, for every
 	 * request the call sends after its first: a backoff retry, a pre-response
-	 * HTTP retry, a transport re-send, an empty-response retry, and a resend that
+	 * HTTP retry, a transport re-send, an empty-response retry, a switch to an
+	 * alternate endpoint, a read-back of a stored result, and a resend that
 	 * corrects a rejected request (an uncompressed body, another client
-	 * identity, a dropped field, a rebuilt chain). A further request is sent only
-	 * when it, wait included, begins inside the budget; otherwise the provider
-	 * stops and returns the failure in hand with
+	 * identity, a dropped field, a rebuilt chain). A further request is admitted
+	 * only when it, wait included, would begin inside the budget, and is asked
+	 * again immediately before it is sent, after its wait and its preparation, so
+	 * a wait that wakes late cannot carry it past the deadline. A refused request
+	 * is never sent: the provider returns the failure in hand with
 	 * {@link AssistantMessage.replayBudgetExhausted} set. A refusal latches for
 	 * the rest of the call, so a rung with a shorter wait cannot resend what a
-	 * longer wait was refused for.
+	 * longer wait was refused for. A failure the provider would not have
+	 * replayed anyway is never marked.
 	 *
-	 * A server `retry-after` is never shortened to fit, because retrying sooner
-	 * than the server asked is a guaranteed failure: a requested wait that would
-	 * end past the budget ends the call at once rather than sleeping into it,
-	 * and the server's hint stays on the returned error for the caller.
+	 * A server's wait is never shortened to fit, because retrying sooner than
+	 * the server asked is a guaranteed failure: a requested wait that would end
+	 * past the budget ends the call at once rather than sleeping into it, and
+	 * the server's hint stays on the returned error for the caller. The wait is
+	 * the longest one the server named, across its retry headers and its error
+	 * body, at every layer that would replay.
 	 *
 	 * The request in flight is never cut short. `0` (and any negative or `NaN`
 	 * value) refuses every further request. Unset or `Infinity` keeps each
-	 * provider's own retry ceiling.
+	 * provider's own retry ceiling and reads no clock.
 	 */
 	replayBudgetMs?: number;
 	/**

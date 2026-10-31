@@ -638,6 +638,67 @@ describe("withReplaySafeStreamRetry", () => {
 			expect(result.replayBudgetExhausted).toBe(true);
 		});
 
+		// The wait is admitted before it starts; a wait that overruns its slot must
+		// not launch the attempt after the deadline anyway.
+		it("does not start the next attempt when the wait itself overran the budget", async () => {
+			let now = 0;
+			const clock = vi.spyOn(performance, "now").mockImplementation(() => now);
+			let attempts = 0;
+			try {
+				const stream = withReplaySafeStreamRetry(
+					{},
+					CTX,
+					{
+						providerRetryWait: async (ms: number) => {
+							now += ms + 2_000;
+						},
+						replayBudgetMs: 1_000,
+					},
+					() => {
+						attempts++;
+						return emptyAttempt();
+					},
+					{ retryEmptyCompletion: true },
+				);
+
+				const result = await stream.result();
+
+				expect(attempts).toBe(1);
+				expect(result.replayBudgetExhausted).toBe(true);
+			} finally {
+				clock.mockRestore();
+			}
+		});
+
+		it("keeps a hinted failure instead of replaying it sooner than the server asked", async () => {
+			let attempts = 0;
+			const waits: number[] = [];
+			const stream = withReplaySafeStreamRetry(
+				{},
+				CTX,
+				{ providerRetryWait: async ms => void waits.push(ms), replayBudgetMs: 2_000 },
+				() => {
+					attempts++;
+					const overloaded = assistant();
+					overloaded.stopReason = "error";
+					overloaded.errorStatus = 503;
+					overloaded.errorMessage = "503 The server is overloaded retry-after-ms=90000";
+					return streamFromEvents([
+						{ type: "start", partial: overloaded },
+						{ type: "error", reason: "error", error: overloaded },
+					]);
+				},
+				{ retryProviderErrors: true, maxProviderErrorRetries: 1 },
+			);
+
+			const result = await stream.result();
+
+			expect(attempts).toBe(1);
+			expect(waits).toEqual([]);
+			expect(result.errorMessage).toContain("retry-after-ms=90000");
+			expect(result.replayBudgetExhausted).toBe(true);
+		});
+
 		it("replays on its own schedule and marks nothing when no budget is set", async () => {
 			let attempts = 0;
 			const stream = withReplaySafeStreamRetry(

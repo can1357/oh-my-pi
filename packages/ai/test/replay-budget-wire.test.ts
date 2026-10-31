@@ -20,10 +20,15 @@ import { streamGoogleGeminiCli } from "@oh-my-pi/pi-ai/providers/google-gemini-c
 import { streamOllama } from "@oh-my-pi/pi-ai/providers/ollama";
 import { streamOpenAICodexResponses } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
-import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import {
+	pollOpenAIResponsesResultForCompletion,
+	streamOpenAIResponses,
+} from "@oh-my-pi/pi-ai/providers/openai-responses";
 import type { AssistantMessage, Context, FetchImpl } from "@oh-my-pi/pi-ai/types";
+import { ReplayBudget } from "@oh-my-pi/pi-ai/utils/replay-budget";
 import { resetRequestCompressionForTesting } from "@oh-my-pi/pi-ai/utils/request-compression";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getAgentDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
 const context: Context = { messages: [{ role: "user", content: "hello", timestamp: 1 }] };
@@ -395,6 +400,28 @@ describe.each(lanes)("$name against a route that cuts every request before heade
 			route.stop();
 		}
 	});
+
+	// A replay is admitted before its wait; a wait that wakes late — a busy event
+	// loop, a slow wait hook — must not launch the request past the deadline.
+	// Each wait here advances the clock five seconds beyond what it asked for.
+	it("does not send the next request when its wait overran the budget, and says so", async () => {
+		const route = await lane.route();
+		const realNow = performance.now.bind(performance);
+		let lateBy = 0;
+		vi.spyOn(performance, "now").mockImplementation(() => realNow() + lateBy);
+		const overrun = async (delayMs?: number): Promise<void> => {
+			lateBy += (delayMs ?? 0) + 5_000;
+		};
+		vi.spyOn(scheduler, "wait").mockImplementation(overrun);
+		try {
+			const result = await lane.call(route.url, { replayBudgetMs: 3_000, providerRetryWait: overrun });
+
+			expect(route.requests()).toBe(1);
+			expect(result.replayBudgetExhausted).toBe(true);
+		} finally {
+			route.stop();
+		}
+	});
 });
 
 function laneNamed(name: string): Lane {
@@ -513,6 +540,101 @@ describe("a server retry-after against the budget", () => {
 		} finally {
 			server.stop(true);
 		}
+	});
+
+	// A header that says zero must not beat a body that says thirty seconds.
+	it.each([
+		{ lane: "anthropic", status: 529 },
+		{ lane: "openai-completions", status: 503 },
+	])("$lane takes the body's 30 s over a header asking for none", async ({ lane, status }) => {
+		const body =
+			lane === "anthropic"
+				? { type: "error", error: { type: "overloaded_error", message: "Please retry in 30s" } }
+				: { error: { message: "Please retry in 30s", type: "server_error" } };
+		const route = askingToWait(status, body, { "retry-after-ms": "0" });
+		try {
+			const result = await laneNamed(lane).call(route.url, { replayBudgetMs: 2_000 });
+
+			expect(route.requests()).toBe(1);
+			expect(result.replayBudgetExhausted).toBe(true);
+		} finally {
+			route.stop();
+		}
+	});
+
+	// The transport refuses a 90 s wait as over its own cap; the outer replay
+	// must not then retry after half a second and bury the hint under a later error.
+	it("keeps a hint the transport refused as over its cap instead of replaying around it", async () => {
+		const route = askingToWait(503, OPENAI_UNAVAILABLE, { "retry-after-ms": "90000" });
+		try {
+			const result = await laneNamed("openai-completions").call(route.url, { replayBudgetMs: 2_000 });
+
+			expect(route.requests()).toBe(1);
+			expect(result.errorMessage).toContain("retry-after-ms=90000");
+			expect(result.replayBudgetExhausted).toBe(true);
+		} finally {
+			route.stop();
+		}
+	});
+
+	// Antigravity's alternate endpoint is a replay of the same request.
+	describe("at a Gemini endpoint switch", () => {
+		const savedVersion = process.env.PI_AI_ANTIGRAVITY_VERSION;
+		beforeEach(() => {
+			process.env.PI_AI_ANTIGRAVITY_VERSION = "2.19.1";
+		});
+		afterEach(() => {
+			if (savedVersion === undefined) delete process.env.PI_AI_ANTIGRAVITY_VERSION;
+			else process.env.PI_AI_ANTIGRAVITY_VERSION = savedVersion;
+		});
+		function antigravity(budget: number | undefined): { calls: string[]; result: Promise<AssistantMessage> } {
+			const calls: string[] = [];
+			const result = streamGoogleGeminiCli(
+				buildModel({
+					id: "gemini-3-flash",
+					name: "Gemini 3 Flash",
+					api: "google-gemini-cli",
+					provider: "google-antigravity",
+					baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+					reasoning: true,
+					input: ["text"],
+					cost,
+					contextWindow: 1_000_000,
+					maxTokens: 8_192,
+				}),
+				context,
+				{
+					apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),
+					...(budget === undefined ? {} : { replayBudgetMs: budget }),
+					fetch: async input => {
+						calls.push(String(input));
+						return calls.length === 1
+							? Response.json(
+									{ error: { message: "server overloaded" } },
+									{ status: 503, headers: { "retry-after": "30" } },
+								)
+							: Response.json({ error: { message: "bad request" } }, { status: 400 });
+					},
+				},
+			).result();
+			return { calls, result };
+		}
+
+		it("switches at once when no budget is set", async () => {
+			const call = antigravity(undefined);
+			await call.result;
+
+			expect(call.calls).toHaveLength(2);
+		});
+
+		it("does not switch sooner than the first endpoint's server asked when that wait does not fit", async () => {
+			const call = antigravity(2_000);
+			const result = await call.result;
+
+			expect(call.calls).toHaveLength(1);
+			expect(result.errorStatus).toBe(503);
+			expect(result.replayBudgetExhausted).toBe(true);
+		});
 	});
 });
 
@@ -735,5 +857,98 @@ describe.each([
 		} finally {
 			route.stop();
 		}
+	});
+});
+
+// A correction the provider already tried ends the call on its own terms; the
+// marker must not blame a budget that happened to expire meanwhile.
+describe("the marker after a correction the provider already tried", () => {
+	it.each([10_000, 100])("stays unset with a %i ms budget", async budget => {
+		const realNow = performance.now.bind(performance);
+		let lateBy = 0;
+		vi.spyOn(performance, "now").mockImplementation(() => realNow() + lateBy);
+		const efforts: Array<string | undefined> = [];
+		const result = await streamOpenAIResponses(
+			buildModel({
+				id: "fallback-responses-reasoner",
+				name: "Reasoner",
+				api: "openai-responses",
+				provider: "custom-responses",
+				baseUrl: "https://responses.example.test/v1",
+				reasoning: true,
+				compat: { supportsReasoningParams: true, supportsReasoningEffort: true },
+				thinking: { mode: "effort", efforts: [Effort.Low, Effort.High] },
+				input: ["text"],
+				cost,
+				contextWindow: 128_000,
+				maxTokens: 16_384,
+			}),
+			context,
+			{
+				apiKey: "test-key",
+				reasoning: Effort.High,
+				replayBudgetMs: budget,
+				fetch: async (_input, init) => {
+					const effort = (JSON.parse(String(init?.body)) as { reasoning?: { effort?: string } }).reasoning?.effort;
+					efforts.push(effort);
+					// The third rejection arrives after the short budget has run out.
+					if (efforts.length === 3) lateBy += 1_000;
+					const allowed = effort === "high" ? "low" : "high";
+					return Response.json(
+						{
+							error: {
+								message: `invalid reasoning value: '${effort}' (must be "${allowed}")`,
+								type: "invalid_request_error",
+								param: "reasoning.effort",
+							},
+						},
+						{ status: 400 },
+					);
+				},
+			},
+		).result();
+
+		expect(efforts).toEqual(["high", "low", "high"]);
+		expect(result.replayBudgetExhausted).toBeUndefined();
+	});
+});
+
+// Reading back a stored result avoids a duplicate generation, which justifies
+// preferring the poll — not starting it once the caller's budget is gone.
+describe("the stored-result poll", () => {
+	const stored = { id: "resp_stored", status: "completed", output: [] };
+
+	it("sends its first check when no budget governs the call", async () => {
+		let fetches = 0;
+		const result = await pollOpenAIResponsesResultForCompletion({
+			url: "https://muse.example.test/responses/resp_stored",
+			headers: {},
+			responseId: "resp_stored",
+			fetchImpl: async () => {
+				fetches += 1;
+				return Response.json(stored);
+			},
+		});
+
+		expect(fetches).toBe(1);
+		expect(result).toBeDefined();
+	});
+
+	it("sends nothing once the caller's budget is spent", async () => {
+		let fetches = 0;
+		const budget = ReplayBudget.from(0);
+		const result = await pollOpenAIResponsesResultForCompletion({
+			url: "https://muse.example.test/responses/resp_stored",
+			headers: {},
+			responseId: "resp_stored",
+			admits: budget?.admits,
+			fetchImpl: async () => {
+				fetches += 1;
+				return Response.json(stored);
+			},
+		});
+
+		expect(fetches).toBe(0);
+		expect(result).toBeUndefined();
 	});
 });

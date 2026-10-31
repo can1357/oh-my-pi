@@ -1,4 +1,6 @@
+import { extractRetryHint } from "@oh-my-pi/pi-utils";
 import type { AssistantMessage } from "../types";
+import { getHeadersFromError, getRetryAfterMsFromHeaders } from "./retry-after";
 
 /**
  * One streaming call's {@link StreamOptions.replayBudgetMs}: decides whether a
@@ -52,4 +54,19 @@ export class ReplayBudget {
 /** `true` when no budget governs the call, otherwise whether `budget` admits a replay after `delayMs`. */
 export function admitsReplay(budget: ReplayBudget | undefined, delayMs: number): boolean {
 	return budget === undefined || budget.admits(delayMs);
+}
+
+/**
+ * The longest wait a failure's server asked for, across the response headers
+ * it carries and the text of its message or error; `undefined` when it named
+ * none. Under a replay budget this is the server's wait: a header saying zero
+ * does not beat a body saying thirty seconds.
+ */
+export function longestServerWaitMs(failure: unknown): number | undefined {
+	const fromHeaders = getRetryAfterMsFromHeaders(getHeadersFromError(failure));
+	const text = failure instanceof Error ? failure.message : typeof failure === "string" ? failure : undefined;
+	const fromText = text ? extractRetryHint(undefined, text) : undefined;
+	if (fromHeaders === undefined) return fromText;
+	if (fromText === undefined) return fromHeaders;
+	return Math.max(fromHeaders, fromText);
 }

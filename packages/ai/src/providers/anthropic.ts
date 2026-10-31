@@ -101,7 +101,7 @@ import {
 	parseAnthropicSlowModeHeaders,
 } from "./anthropic-slow-mode";
 import { notifyProviderResponse } from "../utils/provider-response";
-import { admitsReplay, ReplayBudget } from "../utils/replay-budget";
+import { admitsReplay, longestServerWaitMs, ReplayBudget } from "../utils/replay-budget";
 import { getHeadersFromError, getRetryAfterMsFromHeaders } from "../utils/retry-after";
 import { COMBINATOR_KEYS, NO_STRICT, toolWireSchema } from "../utils/schema";
 import { spillToDescription } from "../utils/schema/spill";
@@ -2467,6 +2467,10 @@ const streamAnthropicOnce = (
 			let slowWaitSinceMs: number | undefined;
 			let slowWaitAttempts = 0;
 			let sentSlow = false;
+			// The failure the next request would replace. A rung admits its resend
+			// before waiting and rebuilding the request; the clock moves meanwhile, so
+			// the budget is asked again right before the request goes out.
+			let replayOf: unknown;
 			while (true) {
 				activeAbortTracker = createAbortSourceTracker(options?.signal);
 				const { requestSignal } = activeAbortTracker;
@@ -2595,6 +2599,10 @@ const streamAnthropicOnce = (
 							contextManagementBeta,
 						),
 					};
+				}
+				if (replayOf !== undefined) {
+					if (!admitsReplay(replayBudget, 0)) throw replayOf;
+					replayOf = undefined;
 				}
 				const requestOptions = {
 					...createSdkStreamRequestOptions(requestSignal, requestTimeoutMs),
@@ -3188,6 +3196,7 @@ const streamAnthropicOnce = (
 					const preserveTransportStatus = transport && AIError.status(streamError) !== undefined;
 					const streamFailure = preserveTransportStatus ? streamError : (localAbortReason ?? streamError);
 					if (transport) throw streamFailure;
+					replayOf = streamFailure;
 					if (
 						!disableStrictTools &&
 						firstTokenTime === undefined &&
@@ -3331,8 +3340,7 @@ const streamAnthropicOnce = (
 						!latestTurnThinkingRetryAttempted &&
 						firstTokenTime === undefined &&
 						!streamedReplayUnsafeContent &&
-						AIError.isImmutableLatestThinkingText(streamFailureMessage) &&
-						admitsReplay(replayBudget, 0)
+						AIError.isImmutableLatestThinkingText(streamFailureMessage)
 					) {
 						// The API refused the latest assistant turn's reasoning as modified
 						// (e.g. a mid-turn fallback persisted without its boundary marker).
@@ -3341,7 +3349,7 @@ const streamAnthropicOnce = (
 						// The session remembers the dropped blocks so later requests replay
 						// the same prefix; without session state, drop every block instead.
 						const keys = latestAssistantTurnThinkingKeys(params);
-						if (keys.length > 0) {
+						if (keys.length > 0 && admitsReplay(replayBudget, 0)) {
 							logger.warn(
 								"anthropic: latest assistant turn's thinking rejected as modified, dropping it and retrying",
 								{
@@ -3605,8 +3613,12 @@ const streamAnthropicOnce = (
 					const backoffDelayMs = calculateAnthropicRetryDelayMs(providerRetryAttempt - 1);
 					// Honor the server's retry hint (`retry-after-ms`/`retry-after`) on
 					// 429/529-style failures: retrying sooner than the server asked is a
-					// guaranteed failure that just burns the retry budget.
-					const headerDelayMs = getRetryAfterMsFromHeaders(getHeadersFromError(streamFailure));
+					// guaranteed failure that just burns the retry budget. Under a replay
+					// budget the longest wait the headers or the message name counts, so a
+					// header that says zero cannot beat a body that says thirty seconds.
+					const headerDelayMs = replayBudget
+						? longestServerWaitMs(streamFailure)
+						: getRetryAfterMsFromHeaders(getHeadersFromError(streamFailure));
 					// Bound the server-directed wait so a multi-hour `retry-after` cannot
 					// park the provider stream before higher-level recovery runs. A non-positive cap
 					// disables the bound; an over-cap hint surfaces the original error immediately.

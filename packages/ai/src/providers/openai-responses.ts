@@ -259,7 +259,12 @@ export async function pollOpenAIResponsesResultForCompletion(args: {
 	signal?: AbortSignal;
 	/** Sleep between polls; defaults to a real wait honoring `signal`. */
 	wait?: (ms: number, signal?: AbortSignal) => Promise<void>;
-	/** Whether the caller's replay budget admits the next poll wait; omitted, every poll the deadline allows runs. */
+	/**
+	 * The caller's replay budget. When set, every poll — the first included —
+	 * starts only inside it: a stored result is preferred over a fresh
+	 * generation, but not fetched after the caller's budget is gone. Omitted,
+	 * every poll the deadline allows runs.
+	 */
 	admits?: (delayMs: number) => boolean;
 }): Promise<Record<string, unknown> | undefined> {
 	const deadline = Date.now() + OPENAI_RESPONSES_RESUME_DEADLINE_MS;
@@ -275,6 +280,8 @@ export async function pollOpenAIResponsesResultForCompletion(args: {
 			}
 			if (args.signal?.aborted) return undefined;
 		}
+		// Asked right before every poll goes out, after any wait.
+		if (args.admits && !args.admits(0)) return undefined;
 		const remainingMs = deadline - Date.now();
 		if (remainingMs <= 0) return undefined;
 		const attemptTimeout = AbortSignal.timeout(
@@ -857,7 +864,14 @@ const streamOpenAIResponsesOnce = (
 			let forceDisableStrictTools = false;
 			const openResponsesStreamWithFallbacks = async (): Promise<AsyncIterable<ResponseStreamEvent>> => {
 				let openaiStream: AsyncIterable<ResponseStreamEvent>;
+				// The rejection a corrected request replaces; the corrected request is
+				// asked against the budget again right before it goes out.
+				let correctionOf: unknown;
 				while (true) {
+					if (correctionOf !== undefined) {
+						if (!admitsReplay(replayBudget, 0)) throw correctionOf;
+						correctionOf = undefined;
+					}
 					try {
 						openaiStream = await openResponsesStream(chained.params);
 						if (pendingReasoningEffortFallback) {
@@ -880,6 +894,7 @@ const streamOpenAIResponsesOnce = (
 						}
 						break;
 					} catch (error) {
+						correctionOf = error;
 						const capturedErrorResponse = error instanceof OpenAIHttpError ? error.captured : undefined;
 						const reasoningEffortFallback =
 							activeReasoningEffortFallbackKey && activeRequestParams && !requestSignal.aborted
@@ -888,13 +903,12 @@ const streamOpenAIResponsesOnce = (
 											options?.forceReasoningOff === true || options?.disableReasoning === true,
 									})
 								: undefined;
-						if (
-							reasoningEffortFallback !== undefined &&
-							activeReasoningEffortFallbackKey &&
-							admitsReplay(replayBudget, 0)
-						) {
+						if (reasoningEffortFallback !== undefined && activeReasoningEffortFallbackKey) {
 							const retryMarker = `${activeReasoningEffortFallbackKey}:${String(reasoningEffortFallback)}`;
+							// A correction already tried ends the call on the provider's own
+							// terms; only a correction it would make asks the budget.
 							if (attemptedReasoningEffortFallbacks.has(retryMarker)) throw error;
+							if (!admitsReplay(replayBudget, 0)) throw error;
 							attemptedReasoningEffortFallbacks.add(retryMarker);
 							requestReasoningEffortFallbacks.set(activeReasoningEffortFallbackKey, reasoningEffortFallback);
 							applyOpenAIReasoningEffortFallback(chained.params, reasoningEffortFallback);
@@ -1264,6 +1278,8 @@ const streamOpenAIResponsesOnce = (
 						options?.signal,
 					);
 					if (abortTracker.wasCallerAbort()) throw new AIError.AbortError();
+					// The wait took real time: the replay must still start inside the budget.
+					if (!admitsReplay(replayBudget, 0)) throw streamFailure;
 					openaiStream = await openResponsesStreamWithFallbacks();
 				}
 			}

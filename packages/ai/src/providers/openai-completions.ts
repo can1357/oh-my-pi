@@ -909,7 +909,11 @@ const streamOpenAICompletionsOnce = (
 			const completionsUrl = query
 				? `${trimmedBaseUrl}/chat/completions?${new URLSearchParams(query)}`
 				: `${trimmedBaseUrl}/chat/completions`;
-			const createCompletionsStream = async (toolStrictModeOverride?: ToolStrictModeOverride) => {
+			const createCompletionsStream = async (
+				toolStrictModeOverride?: ToolStrictModeOverride,
+				/** The rejection a corrected request replaces; returned as-is when the budget refuses it at send time. */
+				correctionOf?: unknown,
+			) => {
 				const effectiveToolStrictModeOverride = disableStrictTools ? "none" : toolStrictModeOverride;
 				const builtParams = buildParams(model, context, options, effectiveToolStrictModeOverride);
 				appliedStrictTools = builtParams.strictToolsApplied;
@@ -953,6 +957,7 @@ const streamOpenAICompletionsOnce = (
 					if (requestTimeoutMs !== undefined) {
 						headersWithTimeout["X-Stainless-Timeout"] = Math.floor(requestTimeoutMs / 1000).toString();
 					}
+					if (correctionOf !== undefined && !admitsReplay(replayBudget, 0)) throw correctionOf;
 					const { events, response, requestId } = await postOpenAIStream<ChatCompletionChunk>({
 						url: completionsUrl,
 						headers: headersWithTimeout,
@@ -1015,7 +1020,7 @@ const streamOpenAICompletionsOnce = (
 					if (!admitsReplay(replayBudget, 0)) throw error;
 					attemptedReasoningEffortFallbacks.add(retryMarker);
 					requestReasoningEffortFallbacks.set(activeReasoningEffortFallbackKey, reasoningEffortFallback);
-					openaiStream = await createCompletionsStream();
+					openaiStream = await createCompletionsStream(undefined, error);
 					// Explicit-disable fallbacks stay per-request so a reasoning-off
 					// side request cannot downgrade later normal turns sharing
 					// the session state.
@@ -1034,7 +1039,7 @@ const streamOpenAICompletionsOnce = (
 					if (!admitsReplay(replayBudget, 0)) throw error;
 					disableStrictToolsForScope(providerSessionState, strictToolsScope);
 					disableStrictTools = true;
-					openaiStream = await createCompletionsStream("none");
+					openaiStream = await createCompletionsStream("none", error);
 				} else {
 					if (
 						!shouldRetryWithoutStrictTools(error, capturedErrorResponse, {
@@ -1050,7 +1055,7 @@ const streamOpenAICompletionsOnce = (
 					// subsequent request doesn't pay a strict-400 + retry round-trip.
 					disableStrictToolsForScope(providerSessionState, strictToolsScope);
 					disableStrictTools = true;
-					openaiStream = await createCompletionsStream("none");
+					openaiStream = await createCompletionsStream("none", error);
 				}
 			}
 			if (premiumRequestsTotal !== undefined) {

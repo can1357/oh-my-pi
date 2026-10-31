@@ -16,7 +16,7 @@
 import * as AIError from "../error";
 import type { AssistantMessage, AssistantMessageEvent, Context } from "../types";
 import { AssistantMessageEventStream } from "./event-stream";
-import { ReplayBudget } from "./replay-budget";
+import { longestServerWaitMs, ReplayBudget } from "./replay-budget";
 import { waitForRetry } from "./retry-wait";
 
 export const MAX_EMPTY_COMPLETION_RETRIES = 2;
@@ -179,10 +179,16 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 			} else if (retryProviderError) {
 				delayMs = EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** providerErrorRetries;
 				providerErrorRetries++;
+				// Under a budget the server's own wait governs: replaying a hinted
+				// failure sooner than asked is a guaranteed failure, and the later
+				// error would replace the one carrying the hint.
+				const serverWaitMs = budget ? longestServerWaitMs(failedMessage?.errorMessage) : undefined;
+				if (serverWaitMs !== undefined && serverWaitMs > delayMs) delayMs = serverWaitMs;
 			}
+			// `delayMs` is set only for a message the policy would replay.
+			const replaced = completedMessage ?? failedMessage;
 			if (delayMs !== undefined && budget && !budget.admits(delayMs)) {
-				// `delayMs` is set only for a message the policy would replay.
-				budget.stamp((completedMessage ?? failedMessage)!);
+				budget.stamp(replaced!);
 				delayMs = undefined;
 			}
 
@@ -198,7 +204,9 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 					}
 					return;
 				}
-				continue;
+				// The wait took real time: the next attempt must still start inside the budget.
+				if (!budget || budget.admits(0)) continue;
+				budget.stamp(replaced!);
 			}
 
 			flush();

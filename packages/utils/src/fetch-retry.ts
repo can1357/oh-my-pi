@@ -308,12 +308,14 @@ export interface FetchWithRetryOptions extends RequestInit {
 	 */
 	shouldRetryResponse?: (response: Response, bodyText: string, attempt: number) => boolean | Promise<boolean>;
 	/**
-	 * Consulted before every retry with the wait that retry would take (the
-	 * server hint or the default schedule, after `maxDelayMs`). Return `false` to
-	 * stop retrying: a thrown network failure is rethrown and a retryable
-	 * response is returned, exactly as when `maxAttempts` runs out. Lets a caller
-	 * bound one call's retries by its own budget. Omitted, every retry the other
-	 * options allow is taken.
+	 * Consulted before every retry with the wait that retry would take, and again
+	 * with `0` immediately before the retry is sent, after the wait and
+	 * `prepareInit`. Return `false` to stop retrying: a thrown network failure is
+	 * rethrown and a retryable response is returned, exactly as when
+	 * `maxAttempts` runs out. While a gate is set, the wait for a response is the
+	 * longest one its headers or body name. Lets a caller bound one call's
+	 * retries by its own budget. Omitted, every retry the other options allow is
+	 * taken.
 	 */
 	retryGate?: (delayMs: number) => boolean;
 	/**
@@ -354,9 +356,22 @@ export async function fetchWithRetry(
 		...baseInit
 	} = options;
 	const signal = baseInit.signal as AbortSignal | undefined;
+	// Under a gate, the failure a retry would replace is held until the retry is
+	// sent: the wait and `prepareInit` take real time, so the gate is asked again
+	// immediately before the request goes out, and a refusal then returns this.
+	let pending: { response: Response } | { error: Error } | undefined;
+	const releasePending = (): void => {
+		if (pending && "response" in pending && !pending.response.bodyUsed) {
+			pending.response.body?.cancel().catch(() => {});
+		}
+		pending = undefined;
+	};
 
 	for (let attempt = 0; ; attempt++) {
-		if (signal?.aborted) throw new Error("Request was aborted");
+		if (signal?.aborted) {
+			releasePending();
+			throw new Error("Request was aborted");
+		}
 		const requestUrl = typeof url === "function" ? url(attempt) : url;
 		// `timeout` is destructured out of `baseInit`, so forward it to the underlying
 		// fetch on the no-`prepareInit` path too. Without this, callers that pass
@@ -371,6 +386,16 @@ export async function fetchWithRetry(
 				? ({ ...baseInit, timeout } as unknown as RequestInit)
 				: baseInit;
 
+		if (pending) {
+			if (retryGate && !retryGate(0)) {
+				const refused = pending;
+				pending = undefined;
+				if ("error" in refused) throw refused.error;
+				return refused.response;
+			}
+			releasePending();
+		}
+
 		let response: Response;
 		try {
 			response = await fetchImpl(requestUrl, init);
@@ -379,7 +404,10 @@ export async function fetchWithRetry(
 			const wrapped = wrapNetworkError(error);
 			if (attempt + 1 >= maxAttempts) throw wrapped;
 			const networkDelayMs = resolveDefaultDelay(defaultDelayMs, attempt, maxDelayMs);
-			if (retryGate && !retryGate(networkDelayMs)) throw wrapped;
+			if (retryGate) {
+				if (!retryGate(networkDelayMs)) throw wrapped;
+				pending = { error: wrapped };
+			}
 			await waitForRetry(networkDelayMs, signal);
 			continue;
 		}
@@ -390,15 +418,35 @@ export async function fetchWithRetry(
 		const retryBody = await response.clone().text();
 		if (shouldRetryResponse && !(await shouldRetryResponse(response, retryBody, attempt))) return response;
 
-		const hint = extractRetryHint(response, retryBody);
+		// Under a gate the longest wait the server named counts, so a header that
+		// says zero cannot beat a body that says thirty seconds.
+		const hint = retryGate ? longestRetryHint(response, retryBody) : extractRetryHint(response, retryBody);
 		if (hint !== undefined && hint > maxDelayMs) return response;
 
 		const delayMs = Math.min(hint ?? resolveDefaultDelay(defaultDelayMs, attempt, maxDelayMs), maxDelayMs);
-		if (retryGate && !retryGate(delayMs)) return response;
-		// The retried response is discarded; release its unread tee branch.
-		if (!response.bodyUsed) response.body?.cancel().catch(() => {});
-		await waitForRetry(delayMs, signal);
+		if (retryGate) {
+			if (!retryGate(delayMs)) return response;
+			pending = { response };
+		} else if (!response.bodyUsed) {
+			// The retried response is discarded; release its unread tee branch.
+			response.body?.cancel().catch(() => {});
+		}
+		try {
+			await waitForRetry(delayMs, signal);
+		} catch (error) {
+			releasePending();
+			throw error;
+		}
 	}
+}
+
+/** The longest wait named by a response's headers or its body; `undefined` when neither names one. */
+function longestRetryHint(response: Response, body: string): number | undefined {
+	const fromHeaders = extractRetryHint(response.headers);
+	const fromBody = extractRetryHint(undefined, body);
+	if (fromHeaders === undefined) return fromBody;
+	if (fromBody === undefined) return fromHeaders;
+	return Math.max(fromHeaders, fromBody);
 }
 
 function mergeInit(base: RequestInit, overlay: RequestInit, timeout: number | false): RequestInit {

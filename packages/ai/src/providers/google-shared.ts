@@ -1157,17 +1157,20 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 					break;
 				}
 				const emptyRetryDelayMs = EMPTY_STREAM_BASE_DELAY_MS * 2 ** emptyAttempt;
+				const emptyFailure = new AIError.ProviderResponseError(
+					`Google API returned an empty response (finishReason STOP with no content) after ${emptyAttempt + 1} attempts`,
+					{ provider: model.provider, kind: "empty-body" },
+				);
 				if (emptyAttempt >= MAX_EMPTY_STREAM_RETRIES || !admitsReplay(replayBudget, emptyRetryDelayMs)) {
-					throw new AIError.ProviderResponseError(
-						`Google API returned an empty response (finishReason STOP with no content) after ${emptyAttempt + 1} attempts`,
-						{ provider: model.provider, kind: "empty-body" },
-					);
+					throw emptyFailure;
 				}
 				try {
 					await scheduler.wait(emptyRetryDelayMs, { signal: options?.signal });
 				} catch {
 					throw new AIError.AbortError();
 				}
+				// The wait took real time: the replay must still start inside the budget.
+				if (!admitsReplay(replayBudget, 0)) throw emptyFailure;
 				resetGoogleStreamOutputForRetry(output);
 				body = await openStream();
 			}

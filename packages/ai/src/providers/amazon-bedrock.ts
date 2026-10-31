@@ -195,7 +195,8 @@ function resolveBedrockRequestUrl(
  * Sign and send one Bedrock Runtime request. A non-OK InvokeModel response's
  * body is read under the same pre-response deadline, so a stalled error body
  * cannot hang the caller. `retryGate` is the call's replay budget, consulted
- * before each transport retry.
+ * before each transport retry; `replayOf`, the rejection this request corrects,
+ * is thrown as-is when the gate refuses the request right before it is sent.
  */
 async function sendBedrockRequest(
 	model: Model<"bedrock-converse-stream">,
@@ -206,6 +207,7 @@ async function sendBedrockRequest(
 	endpoint: BedrockRequestEndpoint,
 	signal: AbortSignal | undefined,
 	retryGate: ((delayMs: number) => boolean) | undefined,
+	replayOf?: unknown,
 ): Promise<{ response: Response; responseBody?: string }> {
 	const host = base.host;
 	const { urlPath, url } = resolveBedrockRequestUrl(model, base, endpoint);
@@ -301,6 +303,7 @@ async function sendBedrockRequest(
 			: getStreamFirstEventTimeoutMs(
 					options.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs(model.compat.streamIdleTimeoutMs),
 				));
+	if (replayOf !== undefined && retryGate && !retryGate(0)) throw replayOf;
 	const watchdog = armPreResponseTimeout(signal, firstEventTimeoutMs);
 	let response: Response;
 	let responseBody: string | undefined;
@@ -897,6 +900,9 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 
 			let prefixBindingRetryAttempted = false;
 			let response: Response;
+			// The rejection a corrected request replaces; asked against the budget again
+			// right before the corrected request goes out, after it is signed.
+			let correctionOf: unknown;
 			while (true) {
 				rawRequestDump = {
 					provider: model.provider,
@@ -915,6 +921,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 					"converse-stream",
 					options.signal,
 					replayBudget?.admits,
+					correctionOf,
 				));
 				if (response.ok) break;
 				if (!bearerToken && (response.status === 401 || response.status === 403)) {
@@ -924,6 +931,9 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 				}
 				const errBody = await response.text().catch(() => "");
 				const errorMessage = `Bedrock HTTP ${response.status}: ${errBody.slice(0, 1000)}`;
+				const rejection = new AIError.BedrockApiError(errorMessage, response.status, {
+					headers: response.headers,
+				});
 				if (
 					!prefixBindingRetryAttempted &&
 					options.anthropicPrefixMismatchBehavior !== "error" &&
@@ -940,11 +950,10 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 						...commandInput,
 						messages: dropBedrockReasoningContent(commandInput.messages),
 					};
+					correctionOf = rejection;
 					continue;
 				}
-				throw new AIError.BedrockApiError(errorMessage, response.status, {
-					headers: response.headers,
-				});
+				throw rejection;
 			}
 			if (!response.body) throw new AIError.BedrockApiError("Bedrock response has no body", response.status);
 

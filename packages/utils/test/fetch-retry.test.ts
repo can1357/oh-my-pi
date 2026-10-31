@@ -227,6 +227,72 @@ describe("fetchWithRetry", () => {
 			expect(await response.text()).toBe("done");
 			expect(calls).toBe(3);
 		});
+
+		// The wait and `prepareInit` take real time. A gate asked only before the
+		// wait lets a retry go out after the caller's deadline has passed.
+		it("asks the gate again after the wait and preparation, and returns the held response on a refusal", async () => {
+			const events: string[] = [];
+			let calls = 0;
+			const response = await fetchWithRetry("https://example.invalid/gate", {
+				fetch: async () => {
+					calls += 1;
+					events.push(`fetch ${calls}`);
+					return new Response("overloaded", { status: 503 });
+				},
+				prepareInit: async attempt => {
+					events.push(`prepare ${attempt}`);
+					return {};
+				},
+				maxAttempts: 5,
+				defaultDelayMs: 1,
+				retryGate: delayMs => {
+					events.push(`gate ${delayMs}`);
+					return delayMs > 0;
+				},
+			});
+
+			expect(calls).toBe(1);
+			expect(events).toEqual(["prepare 0", "fetch 1", "gate 1", "prepare 1", "gate 0"]);
+			expect(response.status).toBe(503);
+			expect(await response.text()).toBe("overloaded");
+		});
+
+		it("rethrows the held network failure when the gate refuses right before the retry", async () => {
+			let calls = 0;
+			const error = await rejectionOf(
+				fetchWithRetry("https://example.invalid/gate", {
+					fetch: async () => {
+						calls += 1;
+						throw new Error(`socket hang up ${calls}`);
+					},
+					maxAttempts: 5,
+					defaultDelayMs: 1,
+					retryGate: delayMs => delayMs > 0,
+				}),
+			);
+
+			expect(calls).toBe(1);
+			expect(error.message).toBe("socket hang up 1");
+		});
+
+		it("offers the gate the body's wait when the header says zero", async () => {
+			const asked: number[] = [];
+			const response = await fetchWithRetry("https://example.invalid/gate", {
+				fetch: async () =>
+					new Response('{"error":{"message":"Please retry in 30s"}}', {
+						status: 503,
+						headers: { "retry-after": "0" },
+					}),
+				maxAttempts: 5,
+				retryGate: delayMs => {
+					asked.push(delayMs);
+					return false;
+				},
+			});
+
+			expect(response.status).toBe(503);
+			expect(asked).toEqual([30_000]);
+		});
 	});
 });
 
