@@ -4149,7 +4149,7 @@ test("the restore's advice for a killed run's recorded stage, followed as writte
 	const advice = refused.restore?.errors.join("\n") ?? "";
 	expect(advice).toContain("5. run the same command again");
 	// A directory it moves out of that cannot be written is named, with the fix.
-	expect(advice).toContain(`${path.dirname(ground.dir)} for the staging directory`);
+	expect(advice).toContain(`${path.dirname(ground.dir)}, which holds the staging directory`);
 	expect(advice).toContain("chmod u+w");
 	// It moves things aside; it never advises removing anything.
 	expect(advice).not.toMatch(/\brm\b|remov/);
@@ -4549,6 +4549,100 @@ test("the printed command stops, moving nothing, when a session tree has moved t
 	const aside = path.join(await fs.realpath(root), `gc-quarantine-${path.basename(ground.record, ".json")}`);
 	expect(await fs.lstat(aside).catch(() => undefined)).toBeUndefined();
 	expect(await Bun.spawn(["sh", "-c", move!]).exited).toBe(0);
+	expect(await Bun.file(path.join(aside, path.basename(ground.dir), "b.log")).text()).toBe("PARTIAL STAGE");
+});
+
+/** The printed recovery command from a refused restore's message; the refusal keeps the restore record. */
+async function printedCommand(): Promise<string> {
+	const refused = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
+	const move = /`(\(d=[^`]+)`/.exec(refused.restore?.errors.join("\n") ?? "")?.[1];
+	expect(move).toBeDefined();
+	return move!;
+}
+
+async function runPrinted(move: string, env?: Record<string, string>): Promise<{ exit: number; said: string }> {
+	const child = Bun.spawn(["sh", "-c", move], { stderr: "pipe", env: env ? { ...process.env, ...env } : undefined });
+	const exit = await child.exited;
+	return { exit, said: await new Response(child.stderr).text() };
+}
+
+// The review's rerun: a directory the command moves out of at 0500, the
+// command run as printed, the permission fixed as the message says, and the
+// identical string run again. The staging directory itself at 0500 passes
+// the command's own check — its parent is writable — and fails at `mv`,
+// which may not move a directory it cannot write to a new parent; the review
+// saw the command stop there and leave the directory it made.
+for (const where of [
+	"the archived tree",
+	"the live tree",
+	"the staging ledger",
+	"the staging directory itself",
+] as const) {
+	test.skipIf(process.getuid?.() === 0)(
+		`the printed command, stopped by a read-only directory in ${where}, runs again unchanged once it is writable`,
+		async () => {
+			const { ground, liveArtifacts } =
+				where === "the live tree" ? await restoredWithKilledLiveStage() : await archivedWithKilledStage();
+			const move = await printedCommand();
+			const aside = path.join(await fs.realpath(root), `gc-quarantine-${path.basename(ground.record, ".json")}`);
+			const locked =
+				where === "the staging ledger"
+					? path.dirname(ground.record)
+					: where === "the staging directory itself"
+						? ground.dir
+						: path.dirname(ground.dir);
+			const mode = (await fs.stat(locked)).mode & 0o7777;
+			await fs.chmod(locked, 0o500);
+			let first: { exit: number; said: string };
+			try {
+				first = await runPrinted(move);
+			} finally {
+				await fs.chmod(locked, mode);
+			}
+
+			expect(first.exit).not.toBe(0);
+			expect(first.said).toContain(
+				where === "the staging directory itself"
+					? path.basename(ground.dir)
+					: `${await fs.realpath(locked)} is not writable`,
+			);
+			expect(await fs.lstat(aside).catch(() => undefined)).toBeUndefined();
+			expect(await Bun.file(ground.file).text()).toBe("PARTIAL STAGE");
+			expect(await Bun.file(ground.record).exists()).toBe(true);
+			expect(await Bun.file(restoreRecordPath(archiveFile)).exists()).toBe(true);
+
+			expect((await runPrinted(move)).exit).toBe(0);
+			expect(await Bun.file(path.join(aside, path.basename(ground.dir), "b.log")).text()).toBe("PARTIAL STAGE");
+			expect(await Bun.file(path.join(aside, path.basename(ground.record))).exists()).toBe(true);
+			await finishAfterRecovery();
+			expect(await fs.readdir(liveArtifacts)).toEqual(["a.log"]);
+		},
+	);
+}
+
+test("the printed command, stopped after moving the staging directory, moves it back, and runs again unchanged", async () => {
+	const { ground } = await archivedWithKilledStage();
+	const move = await printedCommand();
+	const aside = path.join(await fs.realpath(root), `gc-quarantine-${path.basename(ground.record, ".json")}`);
+	// The record's move fails for a reason the first check cannot see: an
+	// `mv` on the PATH that refuses the record and passes everything else on.
+	const bin = path.join(root, "failing-bin");
+	await fs.mkdir(bin);
+	const realMv = Bun.which("mv")!;
+	await Bun.write(
+		path.join(bin, "mv"),
+		`#!/bin/sh\nfor a in "$@"; do [ "$a" = ${JSON.stringify(await fs.realpath(ground.record))} ] && { echo "mv: injected failure" >&2; exit 1; }; done\nexec ${realMv} "$@"\n`,
+	);
+	await fs.chmod(path.join(bin, "mv"), 0o755);
+
+	const first = await runPrinted(move, { PATH: `${bin}:${process.env.PATH ?? ""}` });
+
+	expect(first.exit).not.toBe(0);
+	expect(first.said).toContain("injected failure");
+	expect(await fs.lstat(aside).catch(() => undefined)).toBeUndefined();
+	expect(await Bun.file(ground.file).text()).toBe("PARTIAL STAGE");
+	expect(await Bun.file(ground.record).exists()).toBe(true);
+	expect((await runPrinted(move)).exit).toBe(0);
 	expect(await Bun.file(path.join(aside, path.basename(ground.dir), "b.log")).text()).toBe("PARTIAL STAGE");
 });
 

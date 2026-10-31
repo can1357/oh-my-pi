@@ -178,10 +178,12 @@ interface OwnRestoreRecord {
  * something already has the name. It is created exclusively — `O_CREAT |
  * O_EXCL`, which neither follows a link nor opens what is there — and its
  * identity is taken from the descriptor it was created through, so what this
- * run later rewrites or removes is the file it made, never one that has the
- * name by then. An error after the create and before the write leaves an
- * empty record, which, not being taken down by this run, needs the same move
- * aside as any record a run left.
+ * run later rewrites is the file it made, never one that has the name by
+ * then, and what it removes is decided by that identity
+ * ({@link dropOwnRestoreRecord} says where a name still decides). An error
+ * after the create and before the write leaves an empty record, which, not
+ * being taken down by this run, needs the same move aside as any record a
+ * run left.
  */
 async function createRestoreRecord(record: string, text: string): Promise<OwnRestoreRecord | undefined> {
 	await fs.mkdir(path.dirname(record), { recursive: true });
@@ -225,6 +227,14 @@ async function rewriteOwnRestoreRecord(own: OwnRestoreRecord, text: string): Pro
  * gone. Anything else is put back under its name with `link`, which replaces
  * nothing, or, where that cannot be done, left where the rename put it and
  * named. A directory that refuses the change is named, with what to do.
+ *
+ * The rename and the `unlink` still name paths — no system call removes a
+ * file by its inode — so a writer with access to this directory is outside
+ * what this guards: a file it puts at the aside name just before the rename
+ * is replaced, and one it puts there between the comparison and the
+ * `unlink` is removed. The aside name carries 64 random bits and the
+ * `unlink` follows the comparison at once, which narrows that window and
+ * does not close it.
  */
 async function dropOwnRestoreRecord(own: OwnRestoreRecord): Promise<string | undefined> {
 	const aside = `${own.path}.${randomBytes(8).toString("hex")}.leaving`;
@@ -1752,20 +1762,28 @@ async function recordedStagingByPath(agentDir: string, root: string): Promise<Ma
  * directory into an artifact gc carries.
  *
  * The example command names every path by its real path as it resolves now,
- * so relinking the agent directory afterwards cannot redirect it, and makes
- * the new directory with one plain `mkdir`, which fails on any name already
- * there, a link included. Then, as it runs, it resolves both session trees
- * again by the names gc uses for them and stops, moving nothing, if the new
- * directory lies inside either: a tree moved or relinked between this
- * message and the command is caught by the command itself, not by a check
- * that ran earlier. `realpath` resolves a tree whose last part has been
- * renamed away to the path it would have, and fails — stopping the command
- * — only when more than that is missing; containment is decided on those
- * canonical paths either way. Stopping takes back with `rmdir`
- * the directory it just made, still empty, so the same command can run again
- * once the trees are back. It runs in a subshell, so stopping does not close the
- * shell it was pasted into. When the agent directory already resolves into
- * a session tree, no command is given at all.
+ * so relinking the agent directory afterwards cannot redirect it. Before it
+ * makes anything it checks that both directories it moves out of are
+ * writable, and stops, saying which to fix, if one is not. It makes the new
+ * directory with one plain `mkdir`, which fails on any name already there, a
+ * link included. Then it resolves both session trees again by the names gc
+ * uses for them and stops if the new directory lies inside either: a tree
+ * moved or relinked between this message and the command is caught by the
+ * command itself, not by a check that ran earlier. `realpath` resolves a tree
+ * whose last part has been renamed away to the path it would have, and fails
+ * — stopping the command — only when more than that is missing; containment
+ * is decided on those canonical paths either way. Whatever stops it after
+ * the `mkdir` takes back what it did — the staging directory moved back if
+ * the record's move failed, then the still empty directory removed with
+ * `rmdir` — so the identical command can be run again once the cause is
+ * fixed; only a take-back that itself fails leaves the directory it made.
+ * A writer that changes the trees, the directory it made or either source
+ * between its checks and its moves is outside what it guards: the checks
+ * and the moves name paths, so such a writer can redirect a move or have
+ * `rmdir` take an empty directory it put there. It runs in a subshell, so
+ * stopping does not close the shell it was pasted into. When the agent
+ * directory already resolves into a session tree, no command is given at
+ * all.
  */
 export async function stagingResidueNote(dir: string, record: string, consequence: string): Promise<string> {
 	const agentDir = path.dirname(path.dirname(record));
@@ -1773,9 +1791,9 @@ export async function stagingResidueNote(dir: string, record: string, consequenc
 	const trees = roots.length > 0 ? roots.join(" and ") : "the sessions tree and the archive";
 	const realAgentDir = await fs.realpath(agentDir).catch(() => undefined);
 	const writable =
-		` If \`mv\` says permission is denied, the directory it moves out of — ${path.dirname(dir)} for the staging ` +
-		`directory, ${path.dirname(record)} for the record — is not writable: make it writable with \`chmod u+w\` and ` +
-		`run the command again.`;
+		` If the command stops because a directory is not writable — it names the directory, usually ` +
+		`${path.dirname(dir)}, which holds the staging directory, or ${path.dirname(record)}, which holds the record — ` +
+		`make it writable with \`chmod u+w\` and run the printed command again: when it stops, it takes back what it did.`;
 	let example: string;
 	let afterSteps = "";
 	if (realAgentDir !== undefined && !roots.some(root => isWithin(root, realAgentDir))) {
@@ -1783,13 +1801,18 @@ export async function stagingResidueNote(dir: string, record: string, consequenc
 		const realDir = await fs.realpath(dir).catch(() => dir);
 		const realRecord = await fs.realpath(record).catch(() => record);
 		const checks = [getSessionsDir(agentDir), getArchivedSessionsDir(agentDir)].map(shellQuote).join(" ");
+		const sources = [path.dirname(realDir), path.dirname(realRecord)].map(shellQuote).join(" ");
+		const back = shellQuote(path.basename(realDir));
 		example =
-			`for example \`(d=${shellQuote(aside)}; mkdir "$d" && r=$(realpath "$d") && for t in ${checks}; do ` +
-			`t=$(realpath "$t") || { rmdir "$d"; exit 1; }; case "$r/" in "$t"/*) echo "$r is inside the session tree $t, ` +
-			`so nothing was moved" >&2; rmdir "$d"; exit 1;; esac; done && mv ${shellQuote(realDir)} "$d"/ && ` +
-			`mv ${shellQuote(realRecord)} "$d"/)\`, where \`mkdir\` makes that directory new and stops if anything already ` +
-			`has its name, and the command checks the session trees again before it moves anything, taking the still empty ` +
-			`directory back if it stops`;
+			`for example \`(d=${shellQuote(aside)}; for p in ${sources}; do [ -w "$p" ] || { echo "$p is not writable: ` +
+			`make it writable with chmod u+w and run this command again" >&2; exit 1; }; done; mkdir "$d" || exit 1; ` +
+			`r=$(realpath "$d") || { rmdir "$d"; exit 1; }; for t in ${checks}; do t=$(realpath "$t") || { rmdir "$d"; ` +
+			`exit 1; }; case "$r/" in "$t"/*) echo "$r is inside the session tree $t, so nothing was moved" >&2; rmdir "$d"; ` +
+			`exit 1;; esac; done; mv ${shellQuote(realDir)} "$d"/ || { rmdir "$d"; exit 1; }; mv ${shellQuote(realRecord)} ` +
+			`"$d"/ || { mv "$d"/${back} ${shellQuote(realDir)}; rmdir "$d"; exit 1; })\`, where \`mkdir\` makes that ` +
+			`directory new and stops if anything already has its name, and the command checks first that both ` +
+			`directories it moves out of are writable, then checks the session trees again before it moves anything, ` +
+			`and takes back what it did if it stops`;
 		afterSteps = writable;
 	} else {
 		example =
