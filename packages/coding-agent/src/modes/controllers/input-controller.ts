@@ -1210,8 +1210,7 @@ export class InputController {
 					// The input loop is parked on the running turn's prompt; resume here.
 					this.ctx.editor.clearDraft();
 					try {
-						await this.ctx.session.resume();
-						restoreOnAccepted?.();
+						await this.ctx.session.resume({ onAccepted: restoreOnAccepted });
 					} catch (error) {
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
 					}
@@ -1803,8 +1802,7 @@ export class InputController {
 		this.ctx.editor.clearDraft(text);
 		try {
 			if (isContinueShortcut) {
-				await target.resume();
-				restoreOnAccepted?.();
+				await target.resume({ onAccepted: restoreOnAccepted });
 			} else {
 				const forwarded = await this.ctx.withLocalSubmission(
 					text,

@@ -1069,6 +1069,7 @@ describe("InputController keybinding setup", () => {
 				cancelled: false,
 				started: true,
 				resume: true,
+				onAccepted: undefined,
 			});
 		}
 	});
