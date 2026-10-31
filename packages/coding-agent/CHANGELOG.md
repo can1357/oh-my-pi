@@ -28,6 +28,8 @@
 - Collab guests no longer run or recall host-only commands: refused commands are neither recorded in `Up` history nor executed on the Ctrl+Enter path (`/new`, `/model …`, `/skill:…`), and queue shorthand (`->` or `=>`) is refused before recording or execution ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Fixed compaction queue retries replaying guest prompts already forwarded to the host, including automatic retries and later prompts in a batch, or leaving queued skills and their hidden context behind after a later delivery failed. Unrelated extension messages remain queued. Side file commands submitted with Enter or Ctrl+Enter now count once in prompt history ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 
+## [18.14.1] - 2026-10-31
+
 ### Added
 
 - Added the `providers.openai-codex.daybreak` setting (default on) to stop omp from automatically requesting the Daybreak Blue cyber access program on eligible ChatGPT accounts; each session follows its own value ([#17508](https://github.com/can1357/oh-my-pi/pull/17508) by [@H4vC](https://github.com/H4vC))

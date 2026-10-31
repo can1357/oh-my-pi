@@ -122,7 +122,11 @@ async fn native_full_listing_has_sizes_and_mtimes() {
 	assert_eq!(a.mtime, Some(mtime_nanos(&file)));
 	let sub = record("sub");
 	assert_eq!(sub.size, None);
-	assert_eq!(sub.mtime, Some(mtime_nanos(&tmp.0.join("sub"))));
+	// NTFS refreshes a directory's entry in its parent's index lazily, so a
+	// listing can trail the directory's own mtime there.
+	if !cfg!(windows) {
+		assert_eq!(sub.mtime, Some(mtime_nanos(&tmp.0.join("sub"))));
+	}
 	if cfg!(target_os = "macos") {
 		assert_eq!(sub.children, 2);
 	}
@@ -308,6 +312,14 @@ async fn stat_and_identify() {
 		s.stat_dir(&dir).await.unwrap().ino,
 		s.stat(&tmp.0.join("d"), true).await.unwrap().stamp.ino
 	);
+	// A `.` component (fd's default `CWD/.` root) names the directory itself.
+	assert_eq!(
+		s.stat(&tmp.0.join("d").join("."), true)
+			.await
+			.unwrap()
+			.file_type,
+		Some(FileType::Dir)
+	);
 	#[cfg(unix)]
 	{
 		std::os::unix::fs::symlink(tmp.0.join("d"), tmp.0.join("l")).unwrap();
@@ -321,6 +333,49 @@ async fn stat_and_identify() {
 			.unwrap_err()
 			.kind(),
 		io::ErrorKind::NotFound
+	);
+}
+
+/// Following a Windows name-surrogate reparse point reports its target.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread")]
+async fn stat_windows_symlink_targets() {
+	let tmp = TempDir::new("stat-windows-symlink");
+	tmp.write("d/f", b"abc");
+	if let Err(error) =
+		std::os::windows::fs::symlink_file(tmp.0.join("d/f"), tmp.0.join("file-link"))
+	{
+		if error.raw_os_error() == Some(1314) {
+			eprintln!("skipping Windows symlink stats: symlink privilege unavailable");
+			return;
+		}
+		panic!("creating Windows file symlink: {error}");
+	}
+	let fs = Fs::native();
+	let mut s = fs.session();
+	assert_eq!(
+		s.stat(&tmp.0.join("file-link"), false)
+			.await
+			.unwrap()
+			.file_type,
+		Some(FileType::Symlink)
+	);
+	let followed = s.stat(&tmp.0.join("file-link"), true).await.unwrap();
+	assert_eq!((followed.file_type, followed.size), (Some(FileType::File), 3));
+	std::os::windows::fs::symlink_dir(tmp.0.join("d"), tmp.0.join("dir-link")).unwrap();
+	assert_eq!(
+		s.stat(&tmp.0.join("dir-link"), false)
+			.await
+			.unwrap()
+			.file_type,
+		Some(FileType::Symlink)
+	);
+	assert_eq!(
+		s.stat(&tmp.0.join("dir-link"), true)
+			.await
+			.unwrap()
+			.file_type,
+		Some(FileType::Dir)
 	);
 }
 

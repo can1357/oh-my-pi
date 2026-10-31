@@ -6,9 +6,22 @@
 
 - Added `initGit` to initialize a checkout through the native VCS API without spawning Git from callers ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 
+### Fixed
+
+- Preserved ordinary file and directory types for non-name-surrogate Windows reparse points, including cloud placeholders, when native path stats follow links ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
+- Fixed cancelled commands running termination cleanup more than once and being killed before cleanup finishes ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
+
+## [18.14.1] - 2026-10-31
+
 ### Added
 
 - Added `FileLock.isHeld(path)`, which reports whether a lock is held without acquiring it ([#17428](https://github.com/can1357/oh-my-pi/pull/17428) by [@andrebrait](https://github.com/andrebrait))
+
+### Fixed
+
+- Fixed native search on Windows (the bash tool's `fd`, grep, glob) failing with "The filename, directory name, or volume label syntax is incorrect" or "path not found" for paths with `.`/`..` components or `/` separators, including `fd` run without a search path
+- Fixed glob and find on Windows reporting a symlinked file's own size and mtime instead of its target's, which dropped linked files from listings that skip empty files
+- Fixed the bash tool's built-in `rsync` on Windows ignoring per-directory merge files whose name includes a directory part, such as `--filter=':- ../rules'`
 
 ## [18.14.0] - 2026-10-29
 

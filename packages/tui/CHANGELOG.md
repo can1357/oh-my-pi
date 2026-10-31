@@ -14,6 +14,8 @@
 - Native history search now exposes forward/backward scope cycling and refreshes its scope title, query highlights and rows even when sources reuse result arrays ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Fixed rapid successive Escape keys on Windows failing to reach interrupt and backtracking handlers when the console host relays them as text records ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 
+## [18.14.1] - 2026-10-31
+
 ### Added
 
 - Added a `maxRows` callback to `FigureMarkdown`, `SvgFigure` and `TableChartFigure` so surfaces shorter than the screen can fit their figures; zero hides a figure without delaying transcript completion ([#15661](https://github.com/can1357/oh-my-pi/issues/15661), [#15853](https://github.com/can1357/oh-my-pi/pull/15853) by [@KunoLu](https://github.com/KunoLu))

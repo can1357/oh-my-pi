@@ -505,6 +505,10 @@ export declare class Process {
    * signal abstraction, so the `signal` argument is ignored and the entire
    * tree is hard-killed via `TerminateProcess`. Defaults to the POSIX
    * hard-kill signal.
+   *
+   * Returns a conservative count of successful signal deliveries: one per
+   * successful group call or pinned-process send, not an exact count of
+   * distinct recipients.
    */
   killTree(signal?: number | undefined | null): number
   /**
