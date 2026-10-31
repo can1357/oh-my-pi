@@ -1077,9 +1077,13 @@ export class AgentsHubComponent implements Component {
 			const hovered = i === this.#rowHover;
 			const cursor = selected && listFocused ? theme.fg("accent", theme.nav.cursor) : " ";
 			if (rowDef.kind === "new") {
-				let line = ` ${cursor} ${theme.fg(selected ? "accent" : "dim", "+ New agent…")}`;
-				if (hovered) line = theme.bg("selectedBg", line);
-				lines.push(truncateToWidth(line, width));
+				let line = truncateToWidth(` ${cursor} ${theme.fg(selected ? "accent" : "dim", "+ New agent…")}`, width);
+				if (selected || hovered) {
+					const w = visibleWidth(line);
+					if (w < width) line += " ".repeat(width - w);
+					line = theme.bgFill("selectedBg", line);
+				}
+				lines.push(line);
 				continue;
 			}
 			const agent = rowDef.agent;
@@ -1107,10 +1111,10 @@ export class AgentsHubComponent implements Component {
 				line = `${line}${" ".repeat(width - lineWidth - rightWidth - 1)}${right}`;
 			}
 			line = truncateToWidth(line, width);
-			if (hovered) {
+			if (selected || hovered) {
 				const w = visibleWidth(line);
 				if (w < width) line += " ".repeat(width - w);
-				line = theme.bg("selectedBg", line);
+				line = theme.bgFill("selectedBg", line);
 			}
 			lines.push(line);
 		}

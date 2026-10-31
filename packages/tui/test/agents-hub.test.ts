@@ -9,7 +9,7 @@ import { Effort } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { TspPickerProps } from "@oh-my-pi/pi-wire";
 import { AgentsHubComponent, type HubAgent, parseGeneratedAgentSpec } from "../src/overlays/agents-hub";
-import { initTheme } from "../src/theme";
+import { initTheme, theme } from "../src/theme";
 import type { TUI } from "../src/index";
 import type { DescribeContext, NativeChild, NativeNode } from "../src/native/node";
 
@@ -137,6 +137,19 @@ beforeAll(async () => {
 	await initTheme(false);
 });
 
+/** Check the actual painted span, including padding and reset-bearing truncation ellipses. */
+function expectFullRowBackground(line: string): void {
+	const background = theme.getBgAnsi("selectedBg");
+	const start = line.indexOf(background);
+	expect(start).toBeGreaterThanOrEqual(0);
+	const painted = line.slice(start + background.length).split("\x1b[49m")[0];
+	const body = Bun.stripANSI(line).split("│")[2];
+	expect(Bun.stringWidth(painted)).toBe(Bun.stringWidth(body) - 2);
+	for (const afterReset of painted.split(/\x1b\[(?:0)?m/).slice(1)) {
+		expect(afterReset.startsWith(background)).toBe(true);
+	}
+}
+
 describe("AgentsHub layout", () => {
 	test("renders the full-height split frame with sidebar scopes and agent rows", async () => {
 		const { hub, strip } = await createHub(new TestSettings());
@@ -152,6 +165,41 @@ describe("AgentsHub layout", () => {
 		expect(rendered).toContain("scout");
 		expect(rendered).toContain("+ New agent");
 	});
+
+	for (const width of [200, 40]) {
+		test(`paints selected and hovered rows across the body at width ${width}`, async () => {
+			const settings = new TestSettings();
+			settings.records.set(OVERRIDE_KEYS.model, { dev: "anthropic/claude-sonnet-4-5:high" });
+			const { hub } = await createHub(settings);
+			let lines = hub.render(width);
+			const agentRow = (name: string): string => lines.find(line => Bun.stripANSI(line).includes(` ${name}`))!;
+			expectFullRowBackground(agentRow("dev"));
+			expect(agentRow("scout")).not.toContain(theme.getBgAnsi("selectedBg"));
+			if (width === 40) expect(Bun.stripANSI(agentRow("dev"))).toContain("…");
+			else expect(agentRow("dev")).toContain("anthropic/claude-sonnet-4-5:high");
+
+			hub.handleInput("\x1b[B");
+			lines = hub.render(width);
+			expect(agentRow("dev")).not.toContain(theme.getBgAnsi("selectedBg"));
+			expectFullRowBackground(agentRow("scout"));
+
+			const devRow = lines.indexOf(agentRow("dev"));
+			const plain = Bun.stripANSI(lines[devRow]);
+			const bodyColumn = plain.indexOf("│", plain.indexOf("│") + 1) + 3;
+			hub.handleInput(`\x1b[<35;${bodyColumn};${devRow + 1}M`);
+			lines = hub.render(width);
+			expectFullRowBackground(agentRow("dev"));
+			expectFullRowBackground(agentRow("scout"));
+
+			hub.handleInput("\x1b[<35;1;1M"); // clear hover
+			hub.handleInput("\x1b[B");
+			hub.handleInput("\x1b[B"); // "+ New agent" row
+			lines = hub.render(width === 40 ? 32 : width);
+			const newRow = lines.find(line => Bun.stripANSI(line).split("│")[2]?.includes("+ New"))!;
+			expectFullRowBackground(newRow);
+			if (width === 40) expect(newRow).toContain("\x1b[0m");
+		});
+	}
 
 	test("sidebar scope filters the rows to one source", async () => {
 		const { hub, strip } = await createHub(new TestSettings());
