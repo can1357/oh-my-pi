@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `/context all` to show per-tool and per-skill context token estimates in terminal, native, and ACP reports; server-deferred tool catalogs are excluded from context costs.
+
 ## [18.14.1] - 2026-10-31
 
 ### Added
