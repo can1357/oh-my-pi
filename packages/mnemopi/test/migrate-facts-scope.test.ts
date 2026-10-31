@@ -363,6 +363,31 @@ describe("E7 facts scope migration", () => {
 		}
 	});
 
+	it("content edits skip the artifact purge when the other tier collides on the id", () => {
+		const dbPath = tempDb();
+		const beamA = new BeamMemory({ sessionId: "session-a", dbPath });
+		try {
+			beamA.db.run(
+				"INSERT INTO working_memory (id, content, session_id, scope) VALUES ('wm-col', 'old text', 'session-a', 'global')",
+			);
+			beamA.db.run(
+				"INSERT INTO episodic_memory (id, content, session_id, scope) VALUES ('wm-col', 'episode text', 'session-b', 'session')",
+			);
+			storeFactStrings(beamA, ["I use the quorum relay for tokens"], 0, "wm-col");
+			const before = beamA.db.query("SELECT fact_id FROM facts WHERE source_msg_id = 'wm-col'").all() as { fact_id: string }[];
+			expect(before.length).toBeGreaterThan(0);
+
+			expect(updateWorking(beamA, "wm-col", "completely different text")).toBe(true);
+
+			// The purge must not have run: the collision makes the untyped source
+			// id ambiguous, so the (possibly episode-derived) rows stay.
+			const after = beamA.db.query("SELECT fact_id FROM facts WHERE source_msg_id = 'wm-col'").all() as { fact_id: string }[];
+			expect(after.length).toBe(before.length);
+		} finally {
+			beamA.close();
+		}
+	});
+
 	it("get-by-id hides a fact when the same id exists privately in the other tier", () => {
 		const dbPath = tempDb();
 		const beamA = new BeamMemory({ sessionId: "session-a", dbPath });

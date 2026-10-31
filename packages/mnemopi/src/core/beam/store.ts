@@ -754,11 +754,17 @@ export function updateWorking(
 			// extraction pass re-derives facts from the new content). Skipped
 			// when the content is unchanged so no-op updates keep derivatives.
 			if (oldContent == null || oldContent.content !== content) {
-				beam.db.run("DELETE FROM facts WHERE source_msg_id = ?", [memoryId]);
-				for (const table of ["memoria_facts", "memoria_kg", "memoria_timelines", "memoria_preferences", "memoria_instructions"]) {
-					beam.db.run(`DELETE FROM ${table} WHERE source_memory_id = ?`, [memoryId]);
+				// Derivative rows carry an untyped source id, so when the other
+				// tier holds a row with the same id (imported/restored banks)
+				// we cannot tell which tier produced them — purging would
+				// destroy the untouched episode's derivatives. Skip in that
+				// collision; otherwise cascade the full artifact set (facts,
+				// memoria projections, gists, graph edges) via the shared helper.
+				const episodeCollision =
+					beam.db.prepare("SELECT 1 FROM episodic_memory WHERE id = ?").get(memoryId) !== null;
+				if (!episodeCollision) {
+					purgeWorkingMemoryArtifacts(beam.db, [memoryId]);
 				}
-				beam.db.run("DELETE FROM triples WHERE source = ?", [memoryId]);
 			}
 			scheduleEmbedding(beam, [{ memoryId, content }]);
 		}
