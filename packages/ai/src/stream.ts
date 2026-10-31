@@ -15,7 +15,13 @@ import {
 } from "@oh-my-pi/pi-catalog/model-thinking";
 import { $env, getProviderInFlightRoot, isEnoent, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { getCustomApi } from "./api-registry";
-import { createAuthRetryKeyState, isApiKeyResolver, resolvedApiKeyBearer, resolveNextAuthRetryKey } from "./auth-retry";
+import {
+	type ApiKey,
+	createAuthRetryKeyState,
+	isApiKeyResolver,
+	resolvedApiKeyBearer,
+	resolveNextAuthRetryKey,
+} from "./auth-retry";
 import type { OAuthRequestIdentity } from "./auth/types";
 import { getEnvApiKey } from "./env-api-key";
 import * as AIError from "./error";
@@ -55,6 +61,7 @@ import {
 	streamOpenAIResponses,
 } from "./providers/register-builtins";
 import { getProviderDefinition } from "./registry";
+import { admitSend, gatedFetch, holdAroundKeyResolution, inRequestHoldScope } from "./request-hold";
 import type {
 	Api,
 	AssistantMessage,
@@ -718,9 +725,12 @@ function withProviderInFlightLimit<TOptions extends Pick<StreamOptions, "signal"
 }
 
 function createVertexAuthenticatedFetch(options: StreamOptions | undefined): FetchImpl {
-	const baseFetch = options?.fetch ?? fetch;
+	// The token lookup is shared work, which a gated fetch would refuse: it gets the caller's fetch as is.
+	const tokenFetch = options?.fetch;
+	// model-request: transport stream, streamSimple — Vertex AI's authenticated transport.
+	const sendFetch = gatedFetch(options?.fetch);
 	const vertexFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-		const token = await getVertexAccessToken({ signal: options?.signal, fetch: baseFetch });
+		const token = await getVertexAccessToken({ signal: options?.signal, fetch: tokenFetch });
 		const headers = new Headers(init?.headers);
 		headers.set("Authorization", `Bearer ${token}`);
 		const rewritten = resolveVertexRequest(input);
@@ -728,16 +738,16 @@ function createVertexAuthenticatedFetch(options: StreamOptions | undefined): Fet
 		if (isVertexRawPredictUrl(url)) {
 			const bodyText = await readVertexRequestBody(rewritten, init);
 			const transformed = transformVertexAnthropicBody(bodyText);
-			return baseFetch(url, {
+			return sendFetch(url, {
 				...init,
 				method: init?.method ?? (rewritten instanceof Request ? rewritten.method : "POST"),
 				headers,
 				body: transformed,
 			});
 		}
-		return baseFetch(rewritten, { ...init, headers });
+		return sendFetch(rewritten, { ...init, headers });
 	};
-	return Object.assign(vertexFetch, baseFetch.preconnect ? { preconnect: baseFetch.preconnect } : {});
+	return Object.assign(vertexFetch, sendFetch.preconnect ? { preconnect: sendFetch.preconnect } : {});
 }
 
 async function readVertexRequestBody(input: string | URL | Request, init: RequestInit | undefined): Promise<string> {
@@ -825,13 +835,45 @@ function withResolvedModelHeaders<TApi extends Api>(
 	return outer;
 }
 
+/**
+ * `run`, once the provider-request hold admits it. Outside a hold scope `run` is called at once; in a
+ * scope, a resolver key is wrapped so the hold is checked before and after each resolution (a held
+ * request starts no credential refresh), and while the scope is held the request waits, then is
+ * refused (see {@link admitSend}). In shared work, which has no owner, the request is refused at
+ * once. This only checks on entry: each attempt the provider then sends, its own retries included,
+ * is checked again where it is sent.
+ */
+function withRequestHold<O extends { apiKey?: ApiKey; signal?: AbortSignal }>(
+	options: O | undefined,
+	run: (options: O | undefined) => AssistantMessageEventStream,
+): AssistantMessageEventStream {
+	const refusal = admitSend(options?.signal);
+	if (refusal) {
+		const outer = new AssistantMessageEventStream();
+		refusal.catch(error => outer.fail(error));
+		return outer;
+	}
+	if (!inRequestHoldScope() || !options?.apiKey) return run(options);
+	return run({ ...options, apiKey: holdAroundKeyResolution(options.apiKey, options.signal) });
+}
+
 export function stream<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
 	options?: OptionsForApi<TApi>,
 ): AssistantMessageEventStream {
+	return withRequestHold(options, held => streamAdmitted(model, context, held));
+}
+
+function streamAdmitted<TApi extends Api>(
+	model: Model<TApi>,
+	context: Context,
+	options?: OptionsForApi<TApi>,
+): AssistantMessageEventStream {
 	if (model.resolveHeaders) {
-		return withResolvedModelHeaders(model, options?.signal, resolvedModel => stream(resolvedModel, context, options));
+		return withResolvedModelHeaders(model, options?.signal, resolvedModel =>
+			streamAdmitted(resolvedModel, context, options),
+		);
 	}
 	if (!model.requiresGlyphTokenization) {
 		return withThinkingLoopGuard(model, options, opts =>
@@ -1167,6 +1209,14 @@ function withSupportedSamplingParams<T extends SamplingOptions>(model: Model<Api
 }
 
 export function streamSimple<TApi extends Api>(
+	model: Model<TApi>,
+	context: Context,
+	options?: SimpleStreamOptions,
+): AssistantMessageEventStream {
+	return withRequestHold(options, held => streamSimpleAdmitted(model, context, held));
+}
+
+function streamSimpleAdmitted<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
 	options?: SimpleStreamOptions,

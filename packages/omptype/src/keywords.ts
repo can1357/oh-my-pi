@@ -153,6 +153,7 @@ const keywordFactories: Record<string, () => IR> = {
 	Key: () => ({ k: "union", members: [{ k: "string" }, { k: "symbol" }] }),
 	"unknown.any": () => ({ k: "unknown" }),
 	Array: () => ({ k: "array", el: { k: "unknown" } }),
+	// model-request: none — `Function` is the class an instance check tests against; it is never called.
 	Function: () => instance(Function as unknown as new (...args: never[]) => object, "Function"),
 	RegExp: () => instance(RegExp, "RegExp"),
 	File: () => instance(File, "File"),

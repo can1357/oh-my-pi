@@ -17,6 +17,7 @@ export async function generateTextReviewContextSummary(
 
 	const timeout = AbortSignal.timeout(60_000);
 	const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
+	// model-request: caller generateTextReviewContextSummary — its caller's `signal`, joined to a 60-second deadline.
 	const message = await completeSimple(
 		model,
 		{

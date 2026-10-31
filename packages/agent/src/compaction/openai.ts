@@ -16,6 +16,7 @@
  */
 
 import { attach, create, Flag, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
+import { gatedFetch } from "@oh-my-pi/pi-ai/request-hold";
 import { getCodexAttestationHeader } from "@oh-my-pi/pi-ai/providers/openai-codex-attestation";
 import { createOpenAICodexCompactionRequestContext } from "@oh-my-pi/pi-ai/providers/openai-codex-compaction";
 import { applyCodexResponsesLiteShape } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
@@ -875,9 +876,14 @@ export async function requestOpenAiRemoteCompaction(
 		rewriteOutputs?: boolean;
 	},
 ): Promise<OpenAiRemoteCompactionResponse> {
-	let fetchImpl: FetchImpl = opts?.fetch ?? fetch;
+	// model-request: transport requestOpenAiRemoteCompaction — the remote compaction request.
+	let fetchImpl: FetchImpl = gatedFetch(opts?.fetch);
 	if (isBedrockOpenAIUrl(model.baseUrl)) {
-		({ model, apiKey, fetch: fetchImpl } = await prepareBedrockCompactionRequest(model, apiKey, opts?.fetch, signal));
+		// The Bedrock preparation resolves credentials in shared work, which a gated fetch would refuse.
+		const prepared = await prepareBedrockCompactionRequest(model, apiKey, opts?.fetch, signal);
+		({ model, apiKey } = prepared);
+		// model-request: transport requestOpenAiRemoteCompaction — the remote compaction request, Bedrock-signed.
+		fetchImpl = gatedFetch(prepared.fetch);
 	}
 	const endpoint = resolveOpenAiCompactEndpoint(model);
 	const requestModel = resolveOpenAiCompactModel(model);
@@ -1091,7 +1097,8 @@ export async function requestRemoteCompaction(
 			}
 		: { systemPrompt: request.systemPrompt, prompt: request.prompt, maxTokens: request.maxTokens };
 
-	const response = await (opts?.fetch ?? fetch)(endpoint, {
+	// model-request: transport requestRemoteCompaction — the remote compaction request.
+	const response = await gatedFetch(opts?.fetch)(endpoint, {
 		method: "POST",
 		headers,
 		body: stringifyJson(body),

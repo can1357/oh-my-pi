@@ -3,6 +3,7 @@ import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import type { Api, FetchImpl, Model, Usage } from "@oh-my-pi/pi-catalog/types";
 import { type ApiKey, withAuth } from "../auth-retry";
 import * as AIError from "../error";
+import { gatedFetch } from "../request-hold";
 import type { RerankRequest, RerankResult } from "./types";
 
 export interface RerankOptions {
@@ -93,7 +94,8 @@ export async function rerankOpenRouter(
 		...(request.topN !== undefined && { top_n: request.topN }),
 		...(request.returnDocuments !== undefined && { return_documents: request.returnDocuments }),
 	});
-	const fetchImpl = options.fetch ?? fetch;
+	// model-request: transport rerank — the rerank request.
+	const fetchImpl = gatedFetch(options.fetch);
 	const response = await withAuth(
 		options.apiKey,
 		async key => {

@@ -91,6 +91,7 @@ async function callTinyFishSearch(apiKey: string, params: TinyFishSearchParams):
 		url.searchParams.set("page", String(params.page));
 	}
 
+	// model-request: none — the TinyFish search API, not a model request.
 	const response = await (params.fetch ?? fetch)(url, {
 		method: "GET",
 		headers: {

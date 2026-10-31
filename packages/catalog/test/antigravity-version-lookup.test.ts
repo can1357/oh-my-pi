@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, setSystemTime } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
-import { ensureAntigravityVersion, getAntigravityPlatform } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
+import {
+	__resetAntigravityVersionForTests,
+	ensureAntigravityVersion,
+	getAntigravityPlatform,
+} from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 
 const RETRY_WINDOW_MS = 10 * 60_000;
 // The lookup state is process-wide; every test starts on a fresh clock past any
@@ -22,6 +26,8 @@ function countingFetch(respond: () => Promise<Response>): { fetcher: FetchImpl; 
 
 describe("ensureAntigravityVersion", () => {
 	beforeEach(() => {
+		// Another file's successful lookup must not skip these.
+		__resetAntigravityVersionForTests();
 		delete process.env.PI_AI_ANTIGRAVITY_VERSION;
 		clock += RETRY_WINDOW_MS * 10;
 		setSystemTime(new Date(clock));

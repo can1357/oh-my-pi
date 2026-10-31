@@ -61,6 +61,7 @@ export class ExtractionClient {
 		this.model = opts.model || DEFAULT_EXTRACTION_MODEL;
 		this.apiKey = opts.apiKey ?? process.env.OPENROUTER_API_KEY ?? "";
 		this.baseUrl = (opts.baseUrl || OPENROUTER_BASE_URL).replace(/\/+$/, "");
+		// model-request: no-session — Mnemopi's standalone extraction client; nothing in the coding agent constructs it.
 		this.fetchImpl = opts.fetch ?? fetch;
 	}
 

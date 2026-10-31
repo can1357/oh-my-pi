@@ -317,6 +317,7 @@ export function buildExaRequestBody(params: ExaSearchParams): Record<string, unk
 async function callExaSearch(apiKey: string, params: ExaSearchParams): Promise<ExaSearchResponse> {
 	const body = buildExaRequestBody(params);
 
+	// model-request: none — the Exa search API, not a model request.
 	const fetchImpl = params.fetch ?? fetch;
 	await waitForExaSearchSlot(params.signal);
 	const response = await fetchImpl(EXA_API_URL, {
@@ -361,6 +362,7 @@ async function callExaMcpSearch(params: ExaSearchParams): Promise<ExaSearchRespo
 	const apiKey = $env.EXA_API_KEY;
 	if (apiKey) query.set("exaApiKey", apiKey);
 	query.set("tools", "web_search_exa");
+	// model-request: none — Exa's MCP search endpoint, not a model request.
 	const fetchImpl = params.fetch ?? fetch;
 	await waitForExaSearchSlot(params.signal);
 	const requestId = Math.random().toString(36).slice(2);

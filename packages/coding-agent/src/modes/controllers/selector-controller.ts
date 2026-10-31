@@ -152,6 +152,7 @@ import { cfgTaskAgentModelOverrides } from "../../task/settings";
 
 /** First-use boundary for provider auth catalog and dialog components. */
 async function loadProviderAuthUi() {
+	// model-request: none — loads the login UI's provider list and OAuth module; logging in is not a model request.
 	const [{ PASTE_CODE_LOGIN_PROVIDERS }, oauth, loginDialog, logoutSelector, oauthSelector] = await Promise.all([
 		import("@oh-my-pi/pi-ai"),
 		import("@oh-my-pi/pi-ai/oauth"),

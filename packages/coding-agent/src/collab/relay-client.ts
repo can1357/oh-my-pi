@@ -540,6 +540,7 @@ export class CollabSocket {
 		const options = {
 			proxy: getProxyForUrl("collab", new URL(url)),
 		} satisfies Bun.WebSocketOptions;
+		// model-request: none — the collaboration relay's socket.
 		const ws: WebSocket = Reflect.construct(WebSocket, [url, options]);
 		ws.binaryType = "arraybuffer";
 		this.#ws = ws;

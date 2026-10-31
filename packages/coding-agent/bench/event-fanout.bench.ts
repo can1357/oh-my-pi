@@ -56,6 +56,7 @@ const update: AgentEvent = {
 };
 
 async function measureSession(hasHandler: boolean): Promise<void> {
+	// model-request: no-session — a benchmark; this agent is never prompted against a provider.
 	const agent = new Agent({ initialState: { systemPrompt: [], tools: [], messages: [] } });
 	let extensionEmitted = 0;
 	const runtime = new ExtensionRuntime();

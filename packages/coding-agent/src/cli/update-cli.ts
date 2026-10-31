@@ -195,6 +195,7 @@ export interface VerifiedBinaryDownloadOptions {
  * `targetPath` when the download fails or does not match.
  */
 export async function downloadVerifiedBinary(options: VerifiedBinaryDownloadOptions): Promise<void> {
+	// model-request: none — downloads a release binary.
 	const fetchImpl = options.fetchImpl ?? fetch;
 	await unlinkIfExists(options.targetPath);
 
@@ -710,6 +711,7 @@ async function fetchLatestManifest(
 	const origin = registry.url === DEFAULT_NPM_REGISTRY ? "" : ` from ${registry.url} (${registry.source})`;
 	const get = async (url: string): Promise<Response> => {
 		try {
+			// model-request: none — release metadata for `omp update`.
 			return await fetch(url, { headers, signal: withTimeoutSignal(timeoutMs) });
 		} catch (err) {
 			if (isTimeoutError(err)) {

@@ -472,6 +472,7 @@ async function runTinyEntry(
 	const started = performance.now();
 	try {
 		const now = Date.now();
+		// model-request: no-session — a developer benchmark script run from the command line; no session exists.
 		const response = await completeSimple(
 			model,
 			{

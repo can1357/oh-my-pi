@@ -25,7 +25,12 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { logger, prompt, Snowflake } from "@oh-my-pi/pi-utils";
-import type { AsyncJob, AsyncJobManager, AsyncJobRunResult } from "../async/job-manager";
+import {
+	type AsyncJob,
+	type AsyncJobManager,
+	type AsyncJobRunResult,
+	SUBAGENT_TEARDOWN_DECIDES,
+} from "../async/job-manager";
 import { validateAgentAccountPools } from "../config/account-pools";
 import { resolveAgentModelSelection } from "../config/model-resolver";
 import { sessionLocalProtocolOptions } from "../internal-urls/context";
@@ -1413,7 +1418,12 @@ export class VibeSessionRegistry {
 					);
 				}
 			},
-			{ id: `${record.id}-t${turnIndex}`, agentId: record.id, ownerId: record.ownerId },
+			{
+				id: `${record.id}-t${turnIndex}`,
+				agentId: record.id,
+				ownerId: record.ownerId,
+				survivesBeginDispose: SUBAGENT_TEARDOWN_DECIDES,
+			},
 		);
 		turn.jobId = jobId;
 		record.turn = turn;

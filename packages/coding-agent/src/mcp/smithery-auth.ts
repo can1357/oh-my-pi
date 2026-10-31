@@ -39,6 +39,7 @@ export function getSmitheryLoginUrl(): string {
 }
 
 export async function createSmitheryCliAuthSession(): Promise<SmitheryCliAuthSession> {
+	// model-request: none — a Smithery CLI login, not a model request.
 	const response = await fetch(`${SMITHERY_URL}/api/auth/cli/session`, {
 		method: "POST",
 		signal: withTimeoutSignal(SMITHERY_AUTH_TIMEOUT_MS),
@@ -53,6 +54,7 @@ export async function pollSmitheryCliAuthSession(
 	sessionId: string,
 	signal?: AbortSignal,
 ): Promise<SmitheryCliPollResponse> {
+	// model-request: none — a Smithery CLI login poll, not a model request.
 	const response = await fetch(`${SMITHERY_URL}/api/auth/cli/poll/${sessionId}`, {
 		signal: withTimeoutSignal(SMITHERY_POLL_TIMEOUT_MS, signal),
 	});

@@ -203,6 +203,7 @@ async function githubOidcToken(): Promise<string | undefined> {
 	if (!requestUrl || !requestToken) return undefined;
 	const url = new URL(requestUrl);
 	url.searchParams.set("audience", SKILLS_OIDC_AUDIENCE);
+	// model-request: none — a GitHub Actions OIDC token for skill publishing.
 	const response = await fetch(url, {
 		headers: { Authorization: `Bearer ${requestToken}`, Accept: "application/json" },
 	});

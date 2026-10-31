@@ -12,6 +12,7 @@ export async function renderTerminalOutputIsolated(
 	options: TerminalOutputOptions,
 ): Promise<string[] | undefined> {
 	const hostEntry = workerHostEntry();
+	// model-request: none — the worker renders terminal output with xterm and sends nothing.
 	const worker = hostEntry
 		? new Worker(hostEntry, { type: "module", argv: [TERMINAL_OUTPUT_WORKER_ARG] })
 		: new Worker(new URL("./terminal-output-worker.ts", import.meta.url).href, { type: "module" });

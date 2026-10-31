@@ -1957,6 +1957,7 @@ async function resolveExtensionCommonJsRequire(
 				// Object-loader callbacks evaluate CommonJS during module linking,
 				// before sibling ESM imports execute. Prime host-owned ESM shims so
 				// the synchronous evaluator can require their namespace.
+				// model-request: extension — primes a legacy plugin's module shims; the extension boundary governs its requests.
 				await import(toImportSpecifier(resolved));
 			}
 			return resolved;
@@ -2171,6 +2172,7 @@ function evaluateGraphCommonJs(modulePath: string): unknown {
 		},
 	);
 	module.require = graphRequire;
+	// model-request: extension — runs a legacy plugin's CommonJS source; its requests are the plugin's, which the extension boundary governs.
 	const execute = new Function("exports", "require", "module", "__filename", "__dirname", definition.source);
 	try {
 		execute.call(module.exports, module.exports, graphRequire, module, definition.filename, definition.dirname);
@@ -2752,7 +2754,9 @@ export async function loadLegacyPiModule(resolvedPath: string, options: { reload
 		const entrySpecifier = isBundledVirtualSpecifier(entryRealPath)
 			? toImportSpecifier(entryRealPath)
 			: stripWindowsExtendedLengthPathPrefix(entryRealPath);
+		// model-request: extension — loads a legacy plugin's entry module; the extension boundary governs its requests.
 		if (options.reload === false) return await import(entrySpecifier);
+		// model-request: extension — reloads a legacy plugin's entry module; the extension boundary governs its requests.
 		return await import(`${entrySpecifier}?mtime=${nextLegacyPiLoadTag()}`);
 	} finally {
 		// Drop whatever the initial import didn't consume: graph modules only

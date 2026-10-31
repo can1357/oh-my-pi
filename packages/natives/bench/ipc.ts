@@ -111,6 +111,7 @@ async function netPair(dir: string, echo: boolean): Promise<Pair> {
 	const listening = Promise.withResolvers<void>();
 	server.listen(endpoint, () => listening.resolve());
 	await listening.promise;
+	// model-request: none — the benchmark connects to the IPC server it started itself.
 	const client = net.createConnection(endpoint);
 	const connected = Promise.withResolvers<void>();
 	client.once("connect", () => connected.resolve());

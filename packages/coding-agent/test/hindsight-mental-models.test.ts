@@ -105,6 +105,7 @@ describe("ensureMentalModels", () => {
 				{ id: "project-conventions", name: "Project Conventions", sourceQuery: "q2", tags: ["project:omp"] },
 			],
 			false,
+			undefined,
 		);
 		expect(calls.created).toHaveLength(1);
 		expect(calls.created[0].id).toBe("project-conventions");
@@ -133,6 +134,7 @@ describe("ensureMentalModels", () => {
 				},
 			],
 			false,
+			undefined,
 		);
 		expect(matching.calls.created).toHaveLength(0);
 
@@ -150,6 +152,7 @@ describe("ensureMentalModels", () => {
 				},
 			],
 			false,
+			undefined,
 		);
 		expect(differentProject.calls.created).toHaveLength(1);
 		expect(differentProject.calls.created[0].id).toBe("project-conventions-b");
@@ -172,6 +175,7 @@ describe("ensureMentalModels", () => {
 			"omp",
 			[{ id: "user-preferences", name: "User Preferences", sourceQuery: "new query", tags: [] }],
 			false,
+			undefined,
 		);
 		expect(calls.created).toHaveLength(0);
 	});
@@ -189,7 +193,7 @@ describe("ensureMentalModels", () => {
 		} as unknown as HindsightApi;
 
 		await expect(
-			ensureMentalModels(api, "omp", [{ id: "x", name: "X", sourceQuery: "q", tags: [] }], false),
+			ensureMentalModels(api, "omp", [{ id: "x", name: "X", sourceQuery: "q", tags: [] }], false, undefined),
 		).resolves.toBeUndefined();
 		expect(calls.created).toHaveLength(0);
 	});

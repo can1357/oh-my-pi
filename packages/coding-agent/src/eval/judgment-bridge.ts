@@ -35,6 +35,7 @@ import {
 	sharedJudgmentCache,
 } from "../judgment";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import type { ToolSession } from "../tools";
 import { withBridgeTimeoutPause } from "./bridge-timeout";
 import { type EvalCompletionBridgeOptions, evalRequestSlots } from "./completion-bridge";
 
@@ -233,17 +234,20 @@ export function toEvalJudgmentResult(result: JudgmentResult<Questions>): EvalJud
 /**
  * Resolve the judge role chain for a bridge call's session; `purpose` labels its
  * cost on the session ledger. `onUsage` additionally observes every attempt
- * (retries and failures included) alongside the ledger.
+ * (retries and failures included) alongside the ledger. `signal` is the
+ * cancellation of whoever owns the judgments (the cell, a batch): the judge
+ * carries it from construction, so none of its judgments outlives that owner.
  */
 export function sessionJudge(
-	options: Pick<EvalCompletionBridgeOptions, "session">,
+	session: ToolSession,
+	signal: AbortSignal | undefined,
 	purpose: string,
 	onUsage?: (usage: JudgmentUsage) => void,
 ): ChainJudge {
-	const { session } = options;
 	const registry = session.modelRegistry;
 	if (!registry) throw new ToolError("judge() has no model registry.");
 	const journal = journalJudgmentUsage(session.sessionManager);
+	// model-request: caller sessionJudge — the judge carries the `signal` its caller passes.
 	return resolveJudge({
 		settings: session.settings,
 		registry,
@@ -259,6 +263,7 @@ export function sessionJudge(
 						onUsage(usage);
 					}
 				: (onUsage ?? journal),
+		signal,
 	});
 }
 
@@ -270,7 +275,9 @@ export async function runEvalJudgment(
 	if (!isRecord(args)) throw invalid("expected { state, questions }");
 	const state = parseState(args.state);
 	const questions = parseQuestions(args.questions);
-	const judge = sessionJudge(options, "judge");
+	// model-request: turn — the cell's signal: its tool call's while the turn awaits the cell, its job's once the
+	// cell is backgrounded, which stops when the session begins disposing (`bindOwnerDisposal`).
+	const judge = sessionJudge(options.session, options.signal, "judge");
 	const signal = options.signal;
 	return withBridgeTimeoutPause(options.emitStatus, async () => {
 		await evalRequestSlots.acquire(signal);

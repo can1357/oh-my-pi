@@ -286,6 +286,7 @@ export async function fetchMarketplace(source: string, cacheDir: string): Promis
 	}
 
 	// type === "url"
+	// model-request: none — a plugin marketplace catalog.
 	const response = await fetch(source, { signal: AbortSignal.timeout(60_000) });
 	if (!response.ok) {
 		throw new Error(

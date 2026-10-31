@@ -14,7 +14,7 @@
  */
 import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
-import { AsyncJobError } from "../async";
+import { AsyncJobError, SUBAGENT_TEARDOWN_DECIDES } from "../async";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
 import { AgentRegistry } from "../registry/agent-registry";
 import type { AgentSession } from "../session/agent-session";
@@ -108,7 +108,7 @@ async function restoreSubagents(session: AgentSession, options: RestoreOptions):
 				}
 				return structuredOutput ? { text, structured: structuredOutput } : text;
 			},
-			{ id, agentId: id, ownerId: ref.parentId },
+			{ id, agentId: id, ownerId: ref.parentId, survivesBeginDispose: SUBAGENT_TEARDOWN_DECIDES },
 		);
 		restored.push(id);
 	}

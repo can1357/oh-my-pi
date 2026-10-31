@@ -21,6 +21,7 @@ export async function readOpenRouterGenerationError(args: {
 	try {
 		const url = new URL(`${args.baseUrl.replace(/\/$/, "")}/generation`);
 		url.searchParams.set("id", args.responseId);
+		// model-request: none — looks up a finished generation's cost, not a model request.
 		const response = await (args.fetch ?? fetch)(url.toString(), {
 			method: "GET",
 			headers: args.headers,

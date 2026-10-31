@@ -120,6 +120,7 @@ export function ollamaCloudModelManagerOptions(
 			if (!apiKey) {
 				return [];
 			}
+			// model-request: none — model discovery (listing Ollama's models), not inference.
 			const response = await fetchWithRetry(`${baseUrl}/api/tags`, {
 				method: "GET",
 				headers: createCloudHeaders(apiKey),

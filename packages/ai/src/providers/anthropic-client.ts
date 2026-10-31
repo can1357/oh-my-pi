@@ -21,8 +21,10 @@
  *   with up to 25% jitter).
  */
 import { scheduler } from "node:timers/promises";
+import { isRequestRefusal } from "@oh-my-pi/pi-utils/request-hold-scope";
 import * as AIError from "../error";
 import { AnthropicApiError, AnthropicConnectionError, AnthropicConnectionTimeoutError } from "../error";
+import { gatedFetch } from "../request-hold";
 
 export { AnthropicApiError, AnthropicConnectionError, AnthropicConnectionTimeoutError };
 
@@ -256,7 +258,8 @@ export class AnthropicHttpClient {
 		options?: AnthropicRequestOptions,
 	): Promise<Response> {
 		const opts = this.#options;
-		const fetchFn: FetchImpl = opts.fetch ?? fetch;
+		// model-request: transport stream — the Anthropic client's requests.
+		const fetchFn: FetchImpl = gatedFetch(opts.fetch);
 		const callerSignal = options?.signal;
 		const timeoutMs = options?.timeout ?? opts.timeout ?? DEFAULT_TIMEOUT_MS;
 		const maxRetries = Math.max(0, options?.maxRetries ?? opts.maxRetries ?? DEFAULT_MAX_RETRIES);
@@ -273,6 +276,8 @@ export class AnthropicHttpClient {
 				response = await this.#fetchOnce(fetchFn, url, method, headers, body, timeoutMs, callerSignal);
 			} catch (error) {
 				if (callerSignal?.aborted) throw createAbortError();
+				// Refused by the request hold (held, or made in shared work): every retry is refused the same way.
+				if (isRequestRefusal(error)) throw error;
 				if (attempt < maxRetries) {
 					await this.#backoff(attempt, undefined, callerSignal);
 					continue;

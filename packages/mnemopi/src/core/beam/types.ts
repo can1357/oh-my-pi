@@ -197,6 +197,11 @@ export interface RecallOptions {
 	 * {@link RECALL_CONTENT_PREVIEW_CHARS} (500).
 	 */
 	contentPreviewChars?: number;
+	/**
+	 * Cancels the recall's query-embedding request: one asked for after it aborts is not sent, and
+	 * one in flight stops. The recall then ranks without an embedding.
+	 */
+	signal?: AbortSignal;
 }
 
 export interface RecallEnhancedOptions extends RecallOptions {

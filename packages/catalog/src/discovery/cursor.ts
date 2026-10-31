@@ -1,6 +1,7 @@
 import * as http2 from "node:http2";
 import { type } from "@oh-my-pi/omptype";
 import { slugify } from "@oh-my-pi/pi-utils";
+import { admitNetworkSend, cutIfHeldBefore, isRequestRefusal } from "@oh-my-pi/pi-utils/request-hold-scope";
 import { collapseVariants, type EffortVariantFamily, reviewedVariantFamilyId } from "../compat/collapse";
 import { compareRevision, parseRevision } from "../compat/revision";
 import { resolveCatalogAxes, resolveModelPolicy } from "../compat/resolve";
@@ -182,7 +183,9 @@ export async function fetchCursorUsableModels(
  * One unary RPC under a single deadline. HTTP/1.1 fetch goes first; the
  * HTTP/2 Connect retry runs only after a transport-level failure (h2-only
  * endpoints) and only with the remaining budget. An HTTP response of any
- * status, or a deadline abort, is final.
+ * status, or a deadline abort, is final. So is a refusal of the provider-request
+ * hold: the caller's owner ended while it was held, which is no transport failure,
+ * and retrying on another transport would send what the hold refused.
  */
 async function fetchCursorUnary(
 	baseUrl: string,
@@ -195,6 +198,7 @@ async function fetchCursorUnary(
 	const signal = AbortSignal.timeout(timeoutMs);
 	let response: Response;
 	try {
+		// model-request: none — model discovery (listing a provider's models), not inference.
 		response = await fetch(new URL(path, baseUrl), {
 			method: "POST",
 			headers: {
@@ -205,7 +209,8 @@ async function fetchCursorUnary(
 			body,
 			signal,
 		});
-	} catch {
+	} catch (error) {
+		if (isRequestRefusal(error)) throw error;
 		const remainingMs = deadline - Date.now();
 		if (signal.aborted || remainingMs <= 0) return null;
 		// Older/custom Cursor endpoints may accept only an HTTP/2 Connect request.
@@ -219,7 +224,11 @@ async function fetchCursorUnary(
 	}
 }
 
-/** HTTP/2 transport used by Cursor's unary protobuf RPCs. */
+/**
+ * HTTP/2 transport used by Cursor's unary protobuf RPCs. It is no `fetch`, so the hold's backstop does
+ * not see it: it asks the hold itself in the turn it connects, and is cut if the hold begins before
+ * its response does.
+ */
 async function fetchViaHttp2(
 	baseUrl: string,
 	path: string,
@@ -228,12 +237,16 @@ async function fetchViaHttp2(
 	timeoutMs: number,
 ): Promise<Uint8Array | null> {
 	const { promise, resolve } = Promise.withResolvers<Uint8Array | null>();
+	const refusal = admitNetworkSend();
+	if (refusal) await refusal;
+	// model-request: none — lists Cursor's available models (a catalog read, not a model request), bounded by `timeoutMs`; asks the hold above.
 	const client = http2.connect(baseUrl);
 	let settled = false;
 	const finish = (value: Uint8Array | null): void => {
 		if (settled) return;
 		settled = true;
 		clearTimeout(timer);
+		releaseHoldCut();
 		client.close();
 		resolve(value);
 	};
@@ -241,6 +254,10 @@ async function fetchViaHttp2(
 		client.destroy();
 		finish(null);
 	}, timeoutMs);
+	const releaseHoldCut = cutIfHeldBefore(() => {
+		client.destroy();
+		finish(null);
+	});
 
 	client.on("error", () => finish(null));
 	const req = client.request({
@@ -256,6 +273,7 @@ async function fetchViaHttp2(
 	req.on("end", () => finish(new Uint8Array(Buffer.concat(chunks))));
 	req.on("error", () => finish(null));
 	req.on("response", headers => {
+		releaseHoldCut();
 		const status = Number(headers[":status"] ?? 0);
 		if (status < 200 || status >= 300) finish(null);
 	});

@@ -28,6 +28,7 @@ interface Harness {
 	settings: Settings;
 	modelRegistry: ModelRegistry;
 	sessionId: string;
+	signal: AbortSignal;
 }
 
 function createHarness(root: string): Harness {
@@ -48,6 +49,7 @@ function createHarness(root: string): Harness {
 		}),
 		modelRegistry,
 		sessionId: "01900000-0000-7000-8000-000000000001",
+		signal: new AbortController().signal,
 	};
 }
 

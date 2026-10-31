@@ -130,6 +130,7 @@ export function createControlHandler(
 			const callback = `http://127.0.0.1:${body.callbackPort}${RENDER_CALLBACK_PATH}${encodeURIComponent(body.key)}`;
 			const token = body.callbackToken;
 			const publication = await backend.ensureLazy(body.key, body.mimeType, async () => {
+				// model-request: none — the broker's render callback to its own host.
 				const response = await fetch(callback, {
 					headers: { [RENDER_CALLBACK_TOKEN_HEADER]: token },
 					signal: AbortSignal.timeout(CALLBACK_TIMEOUT_MS),

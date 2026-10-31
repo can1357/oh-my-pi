@@ -811,6 +811,7 @@ async function connectTcpSocket(host: string, port: number, onClose?: () => void
 		},
 	});
 
+	// model-request: none — connects to a debug adapter's TCP port, a local service.
 	void Bun.connect({
 		hostname: host,
 		port,
@@ -972,6 +973,7 @@ export async function connectSocket(options: { unix: string }, timeoutMs: number
 		() => clearTimeout(timer),
 	);
 
+	// model-request: none — connects to a debug adapter's unix socket, a local service.
 	Bun.connect({
 		unix: options.unix,
 		socket: {

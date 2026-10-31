@@ -185,6 +185,7 @@ async function readResponseWithLimit(
 export async function fetchBinary(url: string, timeout: number = 20, signal?: AbortSignal): Promise<BinaryFetchResult> {
 	const requestSignal = ptree.combineSignals(signal, timeout * 1000);
 	try {
+		// model-request: none — a web page, not a model request.
 		const response = await fetch(url, {
 			signal: requestSignal,
 			headers: {

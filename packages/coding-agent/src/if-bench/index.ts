@@ -120,6 +120,7 @@ export async function runIfBenchCommand(
 			nyaMax,
 			maxTokens,
 			par,
+			// model-request: no-session — `omp if-bench` drives its own requests from the command line; no session exists.
 			stream: deps.streamSimple ?? streamSimple,
 			now: deps.now ?? (() => performance.now()),
 			randomSessionId: deps.randomSessionId ?? (() => Bun.randomUUIDv7()),

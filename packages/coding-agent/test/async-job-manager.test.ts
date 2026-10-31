@@ -1091,4 +1091,120 @@ describe("AsyncJobManager", () => {
 		await expect(reap).resolves.toBe(true);
 		expect(manager.getJob("hung-1")?.status).toBe("cancelled");
 	});
+
+	describe("owner disposal", () => {
+		/** Register a job for `ownerId` that runs until it is cancelled; returns its id. */
+		function registerHeld(
+			manager: AsyncJobManager,
+			ownerId: string,
+			options: { foreground?: boolean; survivesBeginDispose?: string } = {},
+		): string {
+			return manager.register(
+				"eval",
+				"held",
+				async ({ signal }) => {
+					const { promise, resolve } = Promise.withResolvers<void>();
+					if (signal.aborted) resolve();
+					else signal.addEventListener("abort", () => resolve(), { once: true });
+					await promise;
+					return "stopped";
+				},
+				{ ownerId, ...options },
+			);
+		}
+
+		test("cancels the owner's background jobs when its disposal begins, and no one else's", () => {
+			const manager = new AsyncJobManager({});
+			const disposal = new AbortController();
+			manager.bindOwnerDisposal("Main", disposal.signal);
+			const own = registerHeld(manager, "Main");
+			const other = registerHeld(manager, "Sub");
+
+			disposal.abort();
+
+			expect(manager.getJob(own)?.status).toBe("cancelled");
+			expect(manager.getJob(own)?.abortController.signal.aborted).toBe(true);
+			expect(manager.getJob(other)?.status).toBe("running");
+			manager.cancelAll();
+		});
+
+		test("leaves a foreground-backed job to its call until it is backgrounded", () => {
+			const manager = new AsyncJobManager({});
+			const disposal = new AbortController();
+			manager.bindOwnerDisposal("Main", disposal.signal);
+			const job = registerHeld(manager, "Main", { foreground: true });
+
+			disposal.abort();
+			expect(manager.getJob(job)?.status).toBe("running");
+
+			manager.backgroundJob(job);
+			expect(manager.getJob(job)?.status).toBe("cancelled");
+		});
+
+		test("starts a background job registered after disposal began already cancelled", async () => {
+			const manager = new AsyncJobManager({});
+			const disposal = new AbortController();
+			manager.bindOwnerDisposal("Main", disposal.signal);
+			disposal.abort();
+			let abortedAtStart: boolean | undefined;
+
+			const job = manager.register(
+				"eval",
+				"late",
+				async ({ signal }) => {
+					abortedAtStart = signal.aborted;
+					return "never ran";
+				},
+				{ ownerId: "Main" },
+			);
+			await manager.waitForAll();
+
+			expect(abortedAtStart).toBe(true);
+			expect(manager.getJob(job)?.status).toBe("cancelled");
+			expect(manager.getDeliveryState().queued).toBe(0);
+		});
+
+		test("keeps a job that declares why it survives the owner's disposal beginning", () => {
+			const manager = new AsyncJobManager({});
+			const disposal = new AbortController();
+			manager.bindOwnerDisposal("Main", disposal.signal);
+			const before = registerHeld(manager, "Main", { survivesBeginDispose: "ended by the owner's dispose()" });
+
+			disposal.abort();
+			const after = registerHeld(manager, "Main", { survivesBeginDispose: "ended by the owner's dispose()" });
+
+			expect(manager.getJob(before)?.status).toBe("running");
+			expect(manager.getJob(after)?.status).toBe("running");
+			manager.cancelAll();
+		});
+
+		test("a revived owner's binding outlives its predecessor's disposal and unbind", () => {
+			const manager = new AsyncJobManager({});
+			const parked = new AbortController();
+			const unbindParked = manager.bindOwnerDisposal("Sub", parked.signal);
+			const revived = new AbortController();
+			manager.bindOwnerDisposal("Sub", revived.signal);
+
+			parked.abort();
+			unbindParked();
+			const job = registerHeld(manager, "Sub");
+			expect(manager.getJob(job)?.status).toBe("running");
+
+			revived.abort();
+			expect(manager.getJob(job)?.status).toBe("cancelled");
+		});
+
+		test("stops cancelling an owner's new jobs once its binding is removed", () => {
+			const manager = new AsyncJobManager({});
+			const disposal = new AbortController();
+			const unbind = manager.bindOwnerDisposal("Sub", disposal.signal);
+			disposal.abort();
+			unbind();
+
+			const job = registerHeld(manager, "Sub");
+
+			expect(manager.getJob(job)?.status).toBe("running");
+			manager.cancelAll();
+		});
+	});
 });

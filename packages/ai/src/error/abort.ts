@@ -1,3 +1,4 @@
+import { markRequestRefusal } from "@oh-my-pi/pi-utils/request-hold-scope";
 import { attach, create, Flag } from "./flags";
 
 /**
@@ -14,6 +15,41 @@ export class AbortError extends Error {
 		super(message, options?.cause === undefined ? undefined : { cause: options.cause });
 		this.name = "AbortError";
 		attach(this, create(Flag.Abort));
+	}
+}
+
+/**
+ * A request its provider-request hold refused: its owner began disposing, and the request's signal or
+ * its scope ended while it waited. Terminal: a retry is refused the same way, so no retry loop replays
+ * it (`isRequestRefusal` in `@oh-my-pi/pi-utils`).
+ */
+export class RequestHeldError extends AbortError {
+	constructor(message: string, options?: { cause?: unknown }) {
+		super(message, options);
+		markRequestRefusal(this);
+	}
+}
+
+/**
+ * A caller stopped waiting for shared work (a credential refresh) that goes on without it.
+ * `sharedFailure` settles, never rejecting, with the work's own failure if it fails, or `undefined`:
+ * a provider's answer the work receives after the caller left is still that answer, and whoever
+ * records answers (a rate-limit block, a dead grant) can still act on it.
+ */
+export class SharedWorkLeftError extends AbortError {
+	readonly sharedFailure: Promise<unknown>;
+	constructor(message: string, sharedFailure: Promise<unknown>) {
+		super(message);
+		this.sharedFailure = sharedFailure;
+	}
+}
+
+/** A model request made in shared work: that work belongs to no caller, so nothing would end the request. */
+export class OwnerlessRequestError extends Error {
+	constructor() {
+		super("Model request refused: it was made in shared work (runOutsideRequestHold), which has no owner to end it");
+		this.name = "OwnerlessRequestError";
+		markRequestRefusal(this);
 	}
 }
 

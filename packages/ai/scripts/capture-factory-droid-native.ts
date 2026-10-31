@@ -100,6 +100,7 @@ const server = Bun.serve({
 			if (!projectHistory) delete projected.body["<history-thinking>"];
 			requests.push({ request: projected, historyThinking });
 		}
+		// model-request: no-session — a developer capture script run from the command line; no session exists.
 		const upstream = await fetch(`${values.origin}${url.pathname}${url.search}`, {
 			method: request.method,
 			headers: forwardableHeaders(request.headers),

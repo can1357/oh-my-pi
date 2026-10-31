@@ -55,6 +55,7 @@ export async function pollCursorAuth(
 		await Bun.sleep(delay);
 
 		try {
+			// model-request: none — an OAuth login poll, not a model request.
 			const response = await fetch(`${CURSOR_POLL_URL}?uuid=${uuid}&verifier=${verifier}`);
 
 			if (response.status === 404) {
@@ -121,10 +122,12 @@ export async function loginCursorHook(callbacks: OAuthController): Promise<OAuth
 		url => callbacks.onAuth?.({ url }),
 		callbacks.onProgress ? () => callbacks.onProgress?.("Waiting for browser authentication...") : undefined,
 	);
+	// model-request: none — reads the account email at login, not a model request.
 	return withCursorAccountEmail(credentials, callbacks.fetch ?? fetch, callbacks.signal);
 }
 
 export async function refreshCursorToken(refreshToken: string, signal?: AbortSignal): Promise<OAuthCredentials> {
+	// model-request: none — an OAuth token refresh, not a model request.
 	const response = await fetch(CURSOR_REFRESH_URL, {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
@@ -170,6 +173,7 @@ export async function refreshCursorHook(
 ): Promise<OAuthCredentials> {
 	const refreshed = await refreshCursorToken(credentials.refresh, signal);
 	// A stored email survives the refresh merge; rows stored before email capture gain it here.
+	// model-request: none — reads the account email after a refresh, not a model request.
 	return credentials.email ? refreshed : withCursorAccountEmail(refreshed, fetch, signal);
 }
 
@@ -202,6 +206,7 @@ export function cursorConnectRequest(accessToken: string, signal?: AbortSignal):
  */
 export async function fetchCursorAccountEmail(
 	accessToken: string,
+	// model-request: none — reads the account email, not a model request.
 	fetchImpl: FetchImpl = fetch,
 	signal?: AbortSignal,
 ): Promise<string | undefined> {

@@ -132,6 +132,7 @@ async function callSearch(
 	maxTokens?: number,
 	temperature?: number,
 	signal?: AbortSignal,
+	// model-request: caller callSearch(signal) — Claude's web search: every attempt carries the `signal` its caller passes.
 	fetchImpl: FetchImpl = fetch,
 	timeoutMs?: number,
 ): Promise<AnthropicApiResponse> {
@@ -350,6 +351,7 @@ export async function searchAnthropic(params: SearchParams): Promise<SearchRespo
 				params.sessionId,
 				accountId,
 			);
+			// model-request: turn — Claude's web search for the web_search tool call, with its signal.
 			return callSearch(
 				auth,
 				configuredHeaders,

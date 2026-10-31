@@ -1,5 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import { extractRetryHint, fetchWithRetry, isUnexpectedSocketCloseMessage } from "@oh-my-pi/pi-utils/fetch-retry";
+import {
+	extractRetryHint,
+	fetchWithRetry,
+	isRetryableError,
+	isUnexpectedSocketCloseMessage,
+} from "@oh-my-pi/pi-utils/fetch-retry";
+import { markRequestRefusal } from "@oh-my-pi/pi-utils/request-hold-scope";
 
 /** Await a rejection and narrow it to `Error` without asserting a shape. */
 async function rejectionOf(promise: Promise<unknown>): Promise<Error> {
@@ -162,6 +168,48 @@ describe("fetchWithRetry", () => {
 		);
 
 		expect(error.message).toBe("Network error: getaddrinfo ENOTFOUND api.openai.com");
+	});
+
+	it("stops at a refusal of the provider-request hold instead of retrying it", async () => {
+		// A held request whose owner ended, or one made where no owner exists, is refused the same way on
+		// every attempt: replaying it only keeps a dead request alive through the backoff.
+		let attempts = 0;
+		const refusal = Object.assign(new Error("Provider request held: its owner began disposing"), {
+			name: "AbortError",
+		});
+		markRequestRefusal(refusal);
+		const error = await rejectionOf(
+			fetchWithRetry("https://api.example.test/v1/chat/completions", {
+				fetch: async () => {
+					attempts++;
+					throw refusal;
+				},
+				maxAttempts: 3,
+				defaultDelayMs: 0,
+			}),
+		);
+
+		expect({ attempts, error, retryable: isRetryableError(refusal) }).toEqual({
+			attempts: 1,
+			error: refusal,
+			retryable: false,
+		});
+	});
+
+	it("still retries an ordinary abort that is not a refusal (control)", async () => {
+		let attempts = 0;
+		await rejectionOf(
+			fetchWithRetry("https://api.example.test/v1/chat/completions", {
+				fetch: async () => {
+					attempts++;
+					throw Object.assign(new Error("The operation was aborted"), { name: "AbortError" });
+				},
+				maxAttempts: 3,
+				defaultDelayMs: 0,
+			}),
+		);
+
+		expect(attempts).toBe(3);
 	});
 });
 

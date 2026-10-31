@@ -50,6 +50,7 @@ export async function loadCustomShare(): Promise<LoadedCustomShare | null> {
 	}
 
 	try {
+		// model-request: extension — loads the user's custom share script; the extension boundary governs its requests.
 		const module = await import(scriptPath);
 		const fn = module.default;
 

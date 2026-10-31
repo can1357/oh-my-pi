@@ -1,4 +1,6 @@
 import type { FetchImpl } from "@oh-my-pi/pi-utils";
+import { runOutsideRequestHold } from "@oh-my-pi/pi-utils/request-hold-scope";
+import { fetchKey, SharedFlight } from "@oh-my-pi/pi-utils/shared-flight";
 import type { AntigravityModelWireProfile } from "../types";
 
 /**
@@ -45,8 +47,20 @@ const ANTIGRAVITY_VERSION_FETCH_TIMEOUT_MS = 5_000;
 const ANTIGRAVITY_VERSION_RETRY_MS = 10 * 60_000;
 
 let discoveredAntigravityVersion: string | null = null;
-let antigravityVersionFetch: Promise<void> | null = null;
-let antigravityVersionFailedAt: number | undefined;
+/** The lookup in flight through each `fetch`, by its {@link fetchKey}. */
+const antigravityVersionFetches = new Map<number, SharedFlight<void>>();
+/** When the last lookup through each `fetch` failed. */
+let antigravityVersionFailedAt = new WeakMap<FetchImpl, number>();
+
+/**
+ * Test seam: forget the discovered version, every lookup in flight and every recorded failure. The
+ * state is process-wide, so one test file's successful lookup would otherwise skip another's.
+ */
+export function __resetAntigravityVersionForTests(): void {
+	discoveredAntigravityVersion = null;
+	antigravityVersionFetches.clear();
+	antigravityVersionFailedAt = new WeakMap();
+}
 
 /** Current Antigravity client version: env override → manifest-discovered → pinned fallback. */
 export function getAntigravityVersion(): string {
@@ -70,45 +84,73 @@ export function parseAntigravityManifestVersion(yamlText: string): string | null
 /**
  * Resolves the latest Antigravity release from the official update manifest.
  * Success is cached for the process lifetime; failures are silent (the pinned
- * fallback stays valid) and suppress further lookups for
- * `ANTIGRAVITY_VERSION_RETRY_MS`. Skipped entirely when PI_AI_ANTIGRAVITY_VERSION is set.
+ * fallback stays valid) and suppress further lookups through the same `fetch`
+ * for `ANTIGRAVITY_VERSION_RETRY_MS`. Skipped entirely when PI_AI_ANTIGRAVITY_VERSION is set.
  *
- * The lookup is shared by concurrent callers, so it is bounded only by its own
- * timeout; `signal` ends this caller's wait without cancelling the lookup.
+ * The lookup is shared by concurrent callers of the same `fetch`, so it runs on its own signal, which
+ * ends only once every caller has left, and is bounded by its own timeout; `signal` ends this caller's
+ * wait without cancelling the lookup for the others. It starts outside the caller's provider-request
+ * hold, and a held caller starts none: the pinned fallback serves it, as it does when discovery fails.
  */
-export function ensureAntigravityVersion(fetcher: FetchImpl = fetch, signal?: AbortSignal): Promise<void> {
-	if (process.env.PI_AI_ANTIGRAVITY_VERSION || discoveredAntigravityVersion) return Promise.resolve();
-	if (!antigravityVersionFetch) {
-		if (
-			antigravityVersionFailedAt !== undefined &&
-			Date.now() - antigravityVersionFailedAt < ANTIGRAVITY_VERSION_RETRY_MS
-		) {
-			return Promise.resolve();
-		}
-		antigravityVersionFetch = (async () => {
-			try {
-				const response = await fetcher(ANTIGRAVITY_VERSION_MANIFEST_URL, {
-					headers: { "Cache-Control": "no-cache", "User-Agent": "electron-builder" },
-					signal: AbortSignal.timeout(ANTIGRAVITY_VERSION_FETCH_TIMEOUT_MS),
-				});
-				if (response.ok) {
-					discoveredAntigravityVersion = parseAntigravityManifestVersion(await response.text());
-				}
-			} catch {
-				// Silent: the pinned fallback remains valid when version discovery fails.
-			} finally {
-				antigravityVersionFetch = null;
-				if (!discoveredAntigravityVersion) antigravityVersionFailedAt = Date.now();
-			}
-		})();
+// model-request: none — fetches the client version Antigravity requires, not a model request.
+export async function ensureAntigravityVersion(fetcher: FetchImpl = fetch, signal?: AbortSignal): Promise<void> {
+	if (process.env.PI_AI_ANTIGRAVITY_VERSION || discoveredAntigravityVersion) return;
+	const key = fetchKey(fetcher);
+	let lookup = antigravityVersionFetches.get(key);
+	if (lookup?.abandoned) {
+		// Every caller left that lookup; it stops at once. Wait it out, then look again.
+		await waitUntilAborted(lookup.settled, signal);
+		if (!signal?.aborted) await ensureAntigravityVersion(fetcher, signal);
+		return;
 	}
-	const lookup = antigravityVersionFetch;
-	if (!signal) return lookup;
-	if (signal.aborted) return Promise.resolve();
+	if (!lookup) {
+		const failedAt = antigravityVersionFailedAt.get(fetcher);
+		if (failedAt !== undefined && Date.now() - failedAt < ANTIGRAVITY_VERSION_RETRY_MS) return;
+		const started = SharedFlight.start(signal, lifetime =>
+			runOutsideRequestHold(async () => {
+				try {
+					const response = await fetcher(ANTIGRAVITY_VERSION_MANIFEST_URL, {
+						headers: { "Cache-Control": "no-cache", "User-Agent": "electron-builder" },
+						signal: AbortSignal.any([lifetime, AbortSignal.timeout(ANTIGRAVITY_VERSION_FETCH_TIMEOUT_MS)]),
+					});
+					if (response.ok) {
+						discoveredAntigravityVersion = parseAntigravityManifestVersion(await response.text());
+					}
+				} catch {
+					// Silent: the pinned fallback remains valid when version discovery fails.
+				} finally {
+					antigravityVersionFetches.delete(key);
+					// A lookup every caller left did not fail; it must not suppress the next caller's.
+					if (!discoveredAntigravityVersion && !lifetime.aborted) {
+						antigravityVersionFailedAt.set(fetcher, Date.now());
+					}
+				}
+			}),
+		);
+		if (started instanceof Promise) {
+			// Refused to a held caller. Nothing was started; the pinned fallback serves it.
+			void started.catch(() => {});
+			return;
+		}
+		antigravityVersionFetches.set(key, started);
+		lookup = started;
+	}
+	// Failures stay silent, the caller's own abort included: it stops waiting and keeps the fallback.
+	await lookup.join(signal).catch(() => {});
+}
+
+/** Wait for `promise`, or until `signal` aborts, whichever comes first; never rejects. */
+async function waitUntilAborted(promise: Promise<void>, signal: AbortSignal | undefined): Promise<void> {
+	if (!signal) return promise;
+	if (signal.aborted) return;
 	const { promise: aborted, resolve } = Promise.withResolvers<void>();
-	const onAbort = () => resolve();
+	const onAbort = (): void => resolve();
 	signal.addEventListener("abort", onAbort, { once: true });
-	return Promise.race([lookup, aborted]).finally(() => signal.removeEventListener("abort", onAbort));
+	try {
+		await Promise.race([promise, aborted]);
+	} finally {
+		signal.removeEventListener("abort", onAbort);
+	}
 }
 
 /**

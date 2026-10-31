@@ -1424,6 +1424,8 @@ export class SessionAdvisors {
 				// not the same permission as calling one of its tools.
 				mcpResources: this.#advisorMcpResources,
 			});
+			// model-request: transport streamSimple — the advisor agent's stream function; its requests are the advisor's turns, owned by the
+			// advisor runtime, which the session stops when it begins disposing (`stopRuntime`).
 			const baseAdvisorStreamFn = this.#advisorStreamFn ?? streamSimple;
 			const advisorStreamFn: StreamFn = (requestModel, context, streamOptions) => {
 				// Read per request so a mid-session `providers.openaiWebsockets` change reaches advisors.
@@ -1446,6 +1448,8 @@ export class SessionAdvisors {
 				}
 				return baseAdvisorStreamFn(requestModel, context, options);
 			};
+			// model-request: session — an advisor agent: its runtime is disposed, aborting the loop, when the session begins
+			// disposing (`stopRuntime`).
 			const advisorAgent = new Agent({
 				initialState: {
 					systemPrompt,
@@ -2550,6 +2554,7 @@ export class SessionAdvisors {
 				? buildSessionMetadata(advisorProviderSessionId, candidate.provider, this.#host.modelRegistry.authStorage)
 				: undefined;
 			try {
+				// model-request: session — the advisor's maintenance signal, which ends with the advisor runtime.
 				compactResult = await compact(
 					candidatePreparation,
 					candidate,

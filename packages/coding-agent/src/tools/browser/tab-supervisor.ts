@@ -2348,6 +2348,7 @@ async function raceWithTimeout<T>(
 async function spawnTabWorker(): Promise<WorkerHandle> {
 	try {
 		const hostEntry = workerHostEntry();
+		// model-request: none — the worker drives a browser tab over its DevTools connection, not a model request.
 		const worker = hostEntry
 			? new Worker(hostEntry, { type: "module", argv: ["__omp_worker_tab"] })
 			: new Worker(new URL("./tab-worker-entry.ts", import.meta.url).href, { type: "module" });

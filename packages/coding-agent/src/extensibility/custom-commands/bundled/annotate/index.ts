@@ -73,6 +73,7 @@ const defaultTextAnnotationDependencies: TextAnnotationDependencies = {
 	acquireFileTextReviewSource,
 	createPromptTextReviewSource,
 	showTextReviewOverlay,
+	// model-request: caller generateTextReviewContextSummary — `runAnnotateCommand` calls it with `ctx.signal`.
 	generateTextReviewContextSummary,
 };
 
@@ -309,7 +310,9 @@ export async function runAnnotateCommand(
 	if (shouldSummarizeTextReviewSource(source)) {
 		ctx.ui.setStatus("annotate-summary", "Rephrasing annotation source with the session model…");
 		try {
-			const generated = await textDependencies.generateTextReviewContextSummary(ctx, source.text);
+			// model-request: session — `ctx.signal`, the lifetime of the session running the command, which it aborts
+			// when it begins disposing.
+			const generated = await textDependencies.generateTextReviewContextSummary(ctx, source.text, ctx.signal);
 			contextSummary =
 				typeof generated === "string" ? normalizeTextReviewContextSummary(generated) || undefined : undefined;
 			if (!contextSummary) {

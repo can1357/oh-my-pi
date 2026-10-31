@@ -90,6 +90,7 @@ export function requireCredential(config: DestinationRuntimeConfig, key: string)
 
 /** Select the injected request implementation, or Bun's global fetch by default. */
 export function fetchFor(config: DestinationRuntimeConfig): FetchImpl {
+	// model-request: none — blob uploads to image and file hosts, not model requests.
 	return config.fetch ?? globalThis.fetch;
 }
 

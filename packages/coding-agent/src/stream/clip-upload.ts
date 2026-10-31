@@ -33,6 +33,7 @@ export async function uploadClip(options: ClipUploadOptions): Promise<ClipUpload
 		...(options.description !== undefined && { description: options.description }),
 	};
 	const body = JSON.stringify(stamped) + options.recording.slice(options.recording.indexOf("\n"));
+	// model-request: none — uploads a stream clip, not a model request.
 	const response = await fetch(`${base.origin}${base.pathname.replace(/\/+$/, "")}${STREAM_ROUTES.clips}`, {
 		method: "POST",
 		headers: {

@@ -45,6 +45,8 @@ export class YieldQueue {
 	readonly #dispatchers = new Map<string, StoredDispatcher>();
 	readonly #entries = new Map<string, StoredEntry[]>();
 	#idleFlushPending = false;
+	/** Set by {@link close}: the host is going away, and entries are refused. */
+	#closed = false;
 
 	constructor(options: YieldQueueOptions) {
 		this.#options = options;
@@ -77,10 +79,15 @@ export class YieldQueue {
 		return promise;
 	}
 
+	/** Queue `entry`; true when the queue settles it (delivers or rejects), false when nothing will. */
 	#enqueue(kind: string, entry: StoredEntry): boolean {
 		if (!this.#dispatchers.has(kind)) {
 			logger.warn("Yield queue entry ignored for unregistered kind", { kind });
 			return false;
+		}
+		if (this.#closed) {
+			entry.reject?.(new Error("Yield queue closed before dispatch"));
+			return true;
 		}
 		let entries = this.#entries.get(kind);
 		if (!entries) {
@@ -211,6 +218,16 @@ export class YieldQueue {
 		for (const entries of this.#entries.values()) this.#rejectEntries(entries, error);
 		this.#entries.clear();
 		this.#idleFlushPending = false;
+	}
+
+	/**
+	 * Drop every queued entry and refuse later ones, for a host that is going away. An entry
+	 * that arrives afterwards (a notification a timer delivers during teardown) is rejected
+	 * rather than scheduling an idle flush that would start a turn.
+	 */
+	close(): void {
+		this.#closed = true;
+		this.clear();
 	}
 
 	/** Clear a scheduled-flush latch when its host task is cancelled before running. */

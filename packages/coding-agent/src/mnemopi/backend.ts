@@ -296,7 +296,9 @@ export const mnemopiBackend: MemoryBackend = {
 			return { backend: "mnemopi", query, count: 0, items: [], message: "Search aborted." };
 		}
 		const limit = clampLimit(options?.limit);
-		const results = (await primary.recallResultsScoped(query)).slice(0, limit);
+		// model-request: extension — memory search for an extension through the memory-backend runtime; it carries the
+		// `options.signal` the extension passes.
+		const results = (await primary.recallResultsScoped(query, options?.signal)).slice(0, limit);
 		if (options?.signal?.aborted) {
 			return { backend: "mnemopi", query, count: 0, items: [], message: "Search aborted." };
 		}
@@ -631,6 +633,9 @@ async function resolveMnemopiProviderOptions(
 					}
 					// `auto` has no per-request classifier here, so it sends no effort, like an omitted suffix.
 					const level = concreteThinkingLevel(thinkingLevel);
+					// model-request: outlives-disposal — Mnemopi's completion function: the library extracts memories after
+					// turns and consolidates them, and the session's dispose() flushes and consolidates on purpose (bounded
+					// by mnemopiConsolidateTimeoutMs) so what the closing session learned is stored.
 					const message = await retryTransientCompletion(
 						() =>
 							withLoopPhase("mnemopi.extract", () =>

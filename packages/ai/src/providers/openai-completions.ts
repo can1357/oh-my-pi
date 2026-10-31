@@ -13,6 +13,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
+import { gatedFetch } from "../request-hold";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import { getKimiCommonHeaders } from "../registry/oauth/kimi";
 import { getEnvApiKey } from "../env-api-key";
@@ -958,7 +959,8 @@ const streamOpenAICompletionsOnce = (
 						signal: requestSignal,
 						maxAttempts: options?.maxHttpAttempts,
 						fetch: wrapFetchForCopilotFallback(
-							wrapFetchForRequestCompression(options?.fetch ?? fetch, model),
+							// model-request: transport stream — the chat-completions stream's requests.
+							wrapFetchForRequestCompression(gatedFetch(options?.fetch), model),
 							model.provider === "github-copilot",
 							resolveCopilotRequestIdentity(options?.headers),
 							copilotCacheKey,

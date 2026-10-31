@@ -117,6 +117,7 @@ const MAX_RESULT_NODES = 10;
 const MAX_HTML_LENGTH = 300;
 
 function buildEvaluator(params: string[], body: string): (...args: unknown[]) => unknown {
+	// model-request: none — builds a page function that Puppeteer serializes into the browser page; it never runs in this process.
 	return new Function(
 		...params,
 		`const previousAxe = Object.getOwnPropertyDescriptor(window, "axe");

@@ -3,6 +3,7 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { admitNetworkSend } from "@oh-my-pi/pi-utils/request-hold-scope";
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
@@ -141,6 +142,10 @@ export class CmuxSocketClient {
 	async #openSocket(): Promise<void> {
 		const relayEndpoint = this.#parseRelayEndpoint();
 		const relayCredentials = relayEndpoint ? await this.#loadRelayCredentials(relayEndpoint) : null;
+		// A held job connects nothing, and a raw socket is no fetch the hold's backstop sees: ask it here.
+		const refusal = admitNetworkSend();
+		if (refusal) await refusal;
+		// model-request: none — connects to the cmux browser host (its relay or its local socket), not a model request; asks the hold above.
 		const socket = relayEndpoint
 			? net.createConnection({ host: relayEndpoint.host, port: relayEndpoint.port })
 			: net.createConnection({ path: this.#socketPath });

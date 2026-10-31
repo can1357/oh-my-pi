@@ -266,14 +266,26 @@ function cloudClientFor(runtime: SlashCommandRuntime, credentialId?: number): Co
 	return new CodexSecurityCloudClient({ authStorage, account });
 }
 
+/**
+ * The cancellation for a `/security cloud` command's requests. The command runs against its session,
+ * outside any turn, so its requests stop when that session begins disposing, or when the host cancels
+ * the command.
+ */
+function cloudCommandSignal(runtime: SlashCommandRuntime): AbortSignal {
+	const sessionSignal = runtime.session.disposeSignal;
+	return runtime.signal ? AbortSignal.any([sessionSignal, runtime.signal]) : sessionSignal;
+}
+
 async function handleCloudCommand(runtime: SlashCommandRuntime, rest: string): Promise<void> {
 	const { verb, rest: optionsText } = parseSubcommand(rest);
 	const subcommand = verb || "scans";
 	const options = parseCloudOptions(optionsText, subcommand);
 	const client = cloudClientFor(runtime, options.credentialId);
+	const signal = cloudCommandSignal(runtime);
 	switch (subcommand) {
 		case "scans": {
-			const configurations = await client.listAllConfigurations();
+			// model-request: session — the command's session's disposal signal, joined to the host's cancellation.
+			const configurations = await client.listAllConfigurations(signal);
 			await runtime.output(
 				configurations.length === 0
 					? "No Codex Security cloud scan configurations are available for this account."
@@ -299,11 +311,13 @@ async function handleCloudCommand(runtime: SlashCommandRuntime, rest: string): P
 			if (!options.repositoryId || !options.repositoryUrl || !options.environmentId) {
 				throw new Error("cloud start requires --repo-id, --repo-url, and --environment");
 			}
+			// model-request: session — the command's session's disposal signal, joined to the host's cancellation.
 			const configuration = await client.startScan({
 				repositoryId: options.repositoryId,
 				repositoryUrl: options.repositoryUrl,
 				environmentId: options.environmentId,
 				lookbackDays: options.lookbackDays,
+				signal,
 			});
 			await runtime.output(
 				`Codex Security cloud scan ${configuration.id} started for ${configuration.repositoryUrl}. This consumes cloud scan allowance.`,
@@ -312,16 +326,20 @@ async function handleCloudCommand(runtime: SlashCommandRuntime, rest: string): P
 		}
 		case "status": {
 			if (!options.configurationId) throw new Error("cloud status requires a configuration id");
-			await runtime.output(JSON.stringify(await client.getStats(options.configurationId), null, 2));
+			// model-request: session — the command's session's disposal signal, joined to the host's cancellation.
+			const stats = await client.getScanStats(options.configurationId, signal);
+			await runtime.output(JSON.stringify(stats, null, 2));
 			return;
 		}
 		case "pull": {
 			if (!options.configurationId) throw new Error("cloud pull requires a configuration id");
-			const store = await SecurityStore.openForCwd(runtime.cwd);
+			const store = await SecurityStore.openForCwd(runtime.cwd, { signal });
+			// model-request: session — the command's session's disposal signal, joined to the host's cancellation.
 			const bundle = await pullCodexSecurityCloudResults({
 				client,
 				configurationId: options.configurationId,
 				store,
+				signal,
 			});
 			await runtime.output(
 				`Imported ${bundle.findings.length} Codex Security cloud finding(s) as security scan ${bundle.scan.id}.`,

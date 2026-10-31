@@ -2,6 +2,7 @@ import * as net from "node:net";
 import * as tls from "node:tls";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { AbortError } from "../error/abort";
+import { admitSend, cutIfHeldBeforeResponse } from "../request-hold";
 import { StreamTimeoutError, ValidationError } from "../error/validation";
 import type { FetchImpl } from "../types";
 
@@ -267,6 +268,7 @@ export function installGlobalProxyFetch(): void {
 		return;
 	}
 	globalProxyFetchInstalled = true;
+	// model-request: none — wraps the global fetch in the proxy; a request through it is declared where it is made.
 	globalThis.fetch = wrapFetchWithProxyUrl(globalThis.fetch, proxyUrl) as typeof globalThis.fetch;
 	logger.debug("global proxy fetch installed", {
 		proxy: proxyLogTarget(proxyUrl),
@@ -286,6 +288,8 @@ export interface ConnectProxiedSocketOptions {
 /**
  * Tunnel a socket connection through an HTTP CONNECT proxy.
  * This is used specifically to wrap Node's `http2.connect(baseUrl, { createConnection })` for Cursor.
+ * The provider-request hold is asked in the turn the connection to the proxy opens; the caller asks
+ * it again before it sends its request over the tunnel.
  */
 export async function connectProxiedSocket(
 	proxyUrlStr: string,
@@ -313,12 +317,14 @@ export async function connectProxiedSocket(
 	let timeout: NodeJS.Timeout | undefined;
 	let responseData = "";
 	let settled = false;
+	let releaseHoldCut = (): void => {};
 
 	const cleanup = (): void => {
 		if (timeout) {
 			clearTimeout(timeout);
 			timeout = undefined;
 		}
+		releaseHoldCut();
 		options?.signal?.removeEventListener("abort", onAbort);
 		rawSocket?.off("error", onRawError);
 		rawSocket?.off(readyEvent, onProxyReady);
@@ -382,8 +388,9 @@ export async function connectProxiedSocket(
 			rejectOnce(new ValidationError(`Proxy tunnel failed: ${firstLine}`));
 			return;
 		}
-
 		const tlsOptions = options?.tls;
+		// No new connection and no request: TLS to the target over the tunnel this call opened.
+		// model-request: transport stream — TLS over the Cursor agent stream's proxy tunnel.
 		const newTunnelSocket: tls.TLSSocket = tls.connect({
 			...tlsOptions,
 			socket: rawSocket,
@@ -415,15 +422,11 @@ export async function connectProxiedSocket(
 		});
 	};
 
-	options?.signal?.addEventListener("abort", onAbort, { once: true });
-	if (options?.timeoutMs !== undefined && Number.isFinite(options.timeoutMs) && options.timeoutMs > 0) {
-		const timeoutMs = Math.trunc(options.timeoutMs);
-		timeout = setTimeout(() => {
-			rejectOnce(new StreamTimeoutError(`Proxy tunnel timed out after ${timeoutMs}ms`));
-		}, timeoutMs);
-		timeout.unref?.();
-	}
-
+	// The hold is asked in the same turn the connection opens: nothing from here to `connect` awaits.
+	// It is asked before the abort listener and the timer exist, which a refusal would leave behind.
+	const refusal = admitSend(options?.signal);
+	if (refusal) await refusal;
+	// model-request: transport stream — the Cursor agent stream's connection to its proxy.
 	const rawSocket = useProxySsl
 		? tls.connect({
 				host: proxyHost,
@@ -435,6 +438,17 @@ export async function connectProxiedSocket(
 			});
 	rawSocket.once("error", onRawError);
 	rawSocket.once(readyEvent, onProxyReady);
+	// The CONNECT request goes out once the proxy accepts the connection: a hold that begins before the
+	// tunnel is ready cuts it, like any request still waiting for its response (see `request-hold.ts`).
+	releaseHoldCut = cutIfHeldBeforeResponse(reason => rejectOnce(reason));
+	options?.signal?.addEventListener("abort", onAbort, { once: true });
+	if (options?.timeoutMs !== undefined && Number.isFinite(options.timeoutMs) && options.timeoutMs > 0) {
+		const timeoutMs = Math.trunc(options.timeoutMs);
+		timeout = setTimeout(() => {
+			rejectOnce(new StreamTimeoutError(`Proxy tunnel timed out after ${timeoutMs}ms`));
+		}, timeoutMs);
+		timeout.unref?.();
+	}
 
 	return promise;
 }

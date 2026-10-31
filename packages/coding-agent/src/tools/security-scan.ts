@@ -191,6 +191,7 @@ export class SecurityScanTool implements AgentTool<typeof securityScanSchema, Se
 				);
 			}
 			case "cloud_scans": {
+				// model-request: turn — the security_scan tool call's signal.
 				const configurations = await cloudClientForSession(
 					this.session,
 					params.credential_id,
@@ -208,6 +209,7 @@ export class SecurityScanTool implements AgentTool<typeof securityScanSchema, Se
 				);
 			}
 			case "cloud_start": {
+				// model-request: turn — the security_scan tool call's signal.
 				const configuration = await cloudClientForSession(this.session, params.credential_id).startScan({
 					repositoryId: requireValue(params.repository_id, "repository_id"),
 					repositoryUrl: requireValue(params.repository_url, "repository_url"),
@@ -224,7 +226,8 @@ export class SecurityScanTool implements AgentTool<typeof securityScanSchema, Se
 				);
 			}
 			case "cloud_status": {
-				const stats = await cloudClientForSession(this.session, params.credential_id).getStats(
+				// model-request: turn — the security_scan tool call's signal.
+				const stats = await cloudClientForSession(this.session, params.credential_id).getScanStats(
 					requireValue(params.cloud_configuration_id, "cloud_configuration_id"),
 					signal,
 				);
@@ -235,6 +238,7 @@ export class SecurityScanTool implements AgentTool<typeof securityScanSchema, Se
 			}
 			case "cloud_pull": {
 				const store = await SecurityStore.openForCwd(this.session.cwd, { signal });
+				// model-request: turn — the security_scan tool call's signal.
 				const bundle = await pullCodexSecurityCloudResults({
 					client: cloudClientForSession(this.session, params.credential_id),
 					configurationId: requireValue(params.cloud_configuration_id, "cloud_configuration_id"),

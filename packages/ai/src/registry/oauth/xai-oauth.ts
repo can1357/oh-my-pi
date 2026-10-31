@@ -85,6 +85,7 @@ async function xaiOAuthDiscovery(
 	fetchOverride?: FetchImpl,
 	signal?: AbortSignal,
 ): Promise<XAIOAuthDiscovery> {
+	// model-request: none — OAuth discovery, not a model request.
 	const fetchImpl = fetchOverride ?? fetch;
 	let response: Response;
 	try {
@@ -195,6 +196,7 @@ export async function fetchXAIOAuthIdentity(
 ): Promise<XAIOAuthIdentity | null> {
 	const token = accessToken.trim();
 	if (!token) return null;
+	// model-request: none — reads the OAuth user, not a model request.
 	const fetchImpl = fetchOverride ?? fetch;
 	try {
 		const response = await fetchImpl(XAI_OAUTH_USERINFO_URL, {

@@ -311,6 +311,7 @@ async function resolveGroundingRedirect(
 	signal: AbortSignal | undefined,
 ): Promise<string> {
 	try {
+		// model-request: none — a HEAD probe resolving a grounding redirect, not a model request.
 		const response = await (fetchImpl ?? fetch)(proxyUrl, {
 			method: "HEAD",
 			redirect: "manual",
@@ -440,6 +441,7 @@ async function callGeminiSearch(
 		}
 		(requestBody.request as Record<string, unknown>).generationConfig = generationConfig;
 	}
+	// model-request: turn — Gemini's grounded search, a model request made by the web_search tool call with its signal.
 	const response = await fetchWithRetry(() => `${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
 		method: "POST",
 		headers: {
@@ -513,6 +515,7 @@ async function callGeminiDeveloperSearch(
 		requestBody.generationConfig = generationConfig;
 	}
 
+	// model-request: turn — Gemini's grounded search, a model request made by the web_search tool call with its signal.
 	const response = await fetchWithRetry(() => `${endpoint.url}/models/${model}:streamGenerateContent?alt=sse`, {
 		method: "POST",
 		headers: {

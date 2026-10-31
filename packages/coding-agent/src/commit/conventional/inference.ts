@@ -117,6 +117,8 @@ export class OmpCommitInference implements CommitInference {
 				this.#onProgress?.(request.progressLabel);
 				const timeout = AbortSignal.timeout(120_000);
 				const signal = this.#signal ? AbortSignal.any([this.#signal, timeout]) : timeout;
+				// model-request: no-session — the conventional-commit pipeline of `omp commit` and the git TUI, which run
+				// from the command line with no session; `this.#signal` is the command's cancellation.
 				const message = await completeSimple(
 					target.model,
 					{

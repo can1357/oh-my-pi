@@ -127,6 +127,7 @@ export async function classifyAutoPrewalk(
 	deps: ClassifyAutoPrewalkDeps,
 ): Promise<AutoPrewalkDecision | undefined> {
 	if (isLowSignalTitleInput(input.request) || !hasNativeJudge(deps.settings, deps.registry)) return undefined;
+	// model-request: caller classifyAutoPrewalk — the judge carries `deps.signal`, the caller's cancellation.
 	const judge = resolveJudge({
 		settings: deps.settings,
 		registry: deps.registry,
@@ -135,6 +136,8 @@ export async function classifyAutoPrewalk(
 		onUsage: deps.onUsage,
 		telemetry: deps.telemetry,
 		cache: sharedJudgmentCache(),
+		// The session's disposal signal among others; bound here so no call on this judge outlives it.
+		signal: deps.signal,
 	});
 	const timeout = AbortSignal.timeout(AUTO_PREWALK_TIMEOUT_MS);
 	const options = { signal: deps.signal ? AbortSignal.any([deps.signal, timeout]) : timeout };

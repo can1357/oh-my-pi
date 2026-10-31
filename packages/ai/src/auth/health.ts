@@ -164,7 +164,6 @@ export class CredentialHealth implements HealthApi {
 					report = await raceSignal(
 						this.#deps.usage.report(provider, entry.credential, {
 							baseUrl: options.baseUrl,
-							timeoutMs: this.#deps.usage.requestTimeoutMs,
 							signal: options.signal,
 						}),
 						options.signal,

@@ -99,6 +99,7 @@ export function currentLiveVersion(): number {
 /** Owns the `/api/events` stream; mount once at the app root. */
 export function LiveProvider({ children }: { children: ReactNode }) {
 	useEffect(() => {
+		// model-request: none — the stats dashboard's live events, in the browser.
 		const source = new EventSource("/api/events");
 		source.onopen = () => setConnected(true);
 		source.onerror = () => setConnected(false);

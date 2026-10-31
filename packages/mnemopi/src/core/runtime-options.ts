@@ -29,7 +29,8 @@ export type MnemopiLlmCompletion = (
 export type EmbeddingOutput = AsyncIterable<number[][]>;
 
 export interface MnemopiEmbeddingProvider {
-	embed(texts: readonly string[]): EmbeddingOutput | Promise<EmbeddingOutput>;
+	/** `options.signal` is the caller's cancellation; a provider that makes a request should honour it. */
+	embed(texts: readonly string[], options?: { signal?: AbortSignal }): EmbeddingOutput | Promise<EmbeddingOutput>;
 	available?(): boolean | Promise<boolean>;
 }
 
@@ -110,7 +111,7 @@ export function mnemopiDebugEnabled(): boolean {
 export function resolveEmbeddingProvider(
 	provider:
 		| MnemopiEmbeddingProvider
-		| ((texts: readonly string[]) => EmbeddingOutput | Promise<EmbeddingOutput>)
+		| ((texts: readonly string[], options?: { signal?: AbortSignal }) => EmbeddingOutput | Promise<EmbeddingOutput>)
 		| undefined,
 ): MnemopiEmbeddingProvider | undefined {
 	if (provider === undefined) {

@@ -52,6 +52,7 @@ export async function oauthFetch(
 	const timeoutSignal = AbortSignal.timeout(timeoutMs);
 	const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 	try {
+		// model-request: none — an OAuth login request, not a model request.
 		return await fetch(url, { ...init, signal: requestSignal });
 	} catch (err) {
 		if (signal?.aborted) {

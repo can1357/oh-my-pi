@@ -677,6 +677,7 @@ async function shareViaServer(
 async function uploadToServer(sealed: Uint8Array, base: string): Promise<string> {
 	let res: Response;
 	try {
+		// model-request: none — uploads a shared transcript.
 		res = await fetch(base, {
 			method: "POST",
 			headers: { "Content-Type": "application/octet-stream" },

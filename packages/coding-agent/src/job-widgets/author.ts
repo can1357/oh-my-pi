@@ -215,6 +215,8 @@ export function createModelJobWidgetAuthor(options: ModelJobWidgetAuthorOptions)
 		// The system prompt and schema are the reusable prefix (cached by the provider). The job's
 		// samples never repeat, so a cache breakpoint on them would only bill a cache write.
 		markPerCallContextMessage(message);
+		// model-request: session — the widget registry's request for one job: its signal ends with that job (cancelled when
+		// the session owning it begins disposing, unless it runs a subagent, which dispose() ends) or with the registry.
 		const response = await instrumentedCompleteSimple(
 			model,
 			{

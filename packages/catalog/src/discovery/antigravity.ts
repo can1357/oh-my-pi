@@ -293,6 +293,7 @@ async function fetchAntigravityDiscoveryResponse(
 	options: FetchAntigravityDiscoveryModelsOptions,
 ): Promise<AntigravityDiscoveryResponse | null> {
 	if (options.userAgent === undefined) {
+		// model-request: none — fetches the client version Antigravity requires, not a model request.
 		await ensureAntigravityVersion(options.fetcher ?? fetch, options.signal);
 	}
 

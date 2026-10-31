@@ -22,6 +22,7 @@ const version = versionFlag === -1 ? "3.4.0" : args[versionFlag + 1];
 if (!version) throw new Error("--version needs a value");
 
 const url = `https://raw.githubusercontent.com/ryanoasis/nerd-fonts/v${version}/glyphnames.json`;
+// model-request: none — downloads a glyph table at build time, not a model request.
 const response = await fetch(url);
 if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`);
 // `glyphnames.json` maps `<class>-<name>` to `{ char, code }`, plus one METADATA record.

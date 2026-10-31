@@ -37,6 +37,7 @@ async function loadCommandModule(
 	sharedApi: CustomCommandAPI,
 ): Promise<{ commands: CustomCommand[] | null; error: string | null }> {
 	try {
+		// model-request: extension — loads a custom command module; the extension boundary governs its requests.
 		const module = await import(commandPath);
 		const factory = (module.default ?? module) as CustomCommandFactory;
 

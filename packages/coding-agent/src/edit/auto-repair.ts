@@ -372,6 +372,7 @@ export async function attemptEditAutoRepair(options: {
 	const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
 	const complete = async (builtPrompt: string): Promise<string> => {
 		session.costGate?.admit();
+		// model-request: caller attemptEditAutoRepair — its caller's `signal`, joined to the repair deadline.
 		const response = await retryTransientCompletion(
 			() =>
 				completeSimple(

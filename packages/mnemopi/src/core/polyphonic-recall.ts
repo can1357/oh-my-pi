@@ -758,6 +758,8 @@ export function polyphonicRecall(
 	// Voice fan-out, graph walk and fusion run synchronously on the caller's event loop;
 	// label them so a stall is attributable.
 	return withLoopPhase("mnemopi.recall", () => {
+		// model-request: none — the polyphonic engine's in-memory ranking (its `recall` shares the name); it makes no
+		// request and uses the query embedding `orchestrateRecall` already derived.
 		return getPolyphonicEngine(beam).recall(
 			query,
 			options.queryEmbedding ?? null,

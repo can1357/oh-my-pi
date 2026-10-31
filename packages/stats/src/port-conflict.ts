@@ -53,6 +53,7 @@ async function probeStatsDashboard(port: number, hostname: string): Promise<Stat
 	const urlHostname = probeHostname.includes(":") ? `[${probeHostname}]` : probeHostname;
 	const signal = AbortSignal.timeout(STATS_PROBE_TIMEOUT_MS);
 	try {
+		// model-request: none — probes a stats dashboard already on the port.
 		const response = await fetch(`http://${urlHostname}:${port}/api/stats/models`, { signal });
 		const dashboardVersionHeader = response.headers.get(STATS_DASHBOARD_HEADER);
 		const dashboardVersion = dashboardVersionHeader === null ? Number.NaN : Number(dashboardVersionHeader);

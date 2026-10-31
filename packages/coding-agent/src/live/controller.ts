@@ -111,6 +111,12 @@ export class LiveSessionController {
 	readonly #sdpOffer: string | undefined;
 
 	#transport: CodexLiveTransport | undefined;
+	/** Aborted by `stop()`. Joined to the session's disposal signal, it is the call's signal. */
+	readonly #lifetime = new AbortController();
+	/** The call's signal, set when `start()` creates the transport. */
+	#callSignal: AbortSignal | undefined;
+	/** Whether the transport finished connecting, so the call has an open sideband to close politely. */
+	#connected = false;
 	#recorder: AudioCapture | undefined;
 	#unsubscribeSession: (() => void) | undefined;
 	#sendChain: Promise<void> = Promise.resolve();
@@ -185,12 +191,19 @@ export class LiveSessionController {
 		try {
 			const user = currentUser();
 			const instructions = prompt.render(this.#instructionsTemplate, user);
+			// The call belongs to this controller and to the session it delegates to: `stop()` and the session's
+			// disposal both end it, and the transport sends nothing once this signal aborts. A session that begins
+			// disposing closes the transport through it, so the controller stops with it.
+			const signal = AbortSignal.any([this.#lifetime.signal, this.#session.disposeSignal]);
+			signal.addEventListener("abort", () => void this.stop(), { once: true });
+			this.#callSignal = signal;
 			const transport = new CodexLiveTransport({
 				authStorage: this.#session.modelRegistry.authStorage,
 				sessionId: this.#session.sessionId,
 				instructions,
 				voice: this.#voice,
 				sdpOffer: this.#sdpOffer,
+				signal,
 				callbacks: {
 					onEvent: event => this.#guardEvent(() => this.#handleLiveEvent(event)),
 					onOutputLevel: level => this.#guardEvent(() => this.#handleOutputLevel(level)),
@@ -198,6 +211,7 @@ export class LiveSessionController {
 			});
 			this.#transport = transport;
 			await transport.connect();
+			this.#connected = true;
 			if (this.#stopped) {
 				throw this.#failure ?? new Error("The live session stopped while connecting.");
 			}
@@ -231,7 +245,8 @@ export class LiveSessionController {
 			this.#refreshAudioPhase();
 		} catch (cause) {
 			const error = errorFrom(cause);
-			this.#reportFailure(error);
+			// A stopped controller emits its own terminal callback; the abort that stop caused is not a failure.
+			if (!this.#stopped) this.#reportFailure(error);
 			await this.stop();
 			throw error;
 		}
@@ -261,6 +276,9 @@ export class LiveSessionController {
 
 	async #stop(): Promise<void> {
 		this.#stopped = true;
+		// A call that has not connected owes the server no close message: end its lifetime now, which cancels its
+		// credential lookup and signaling, so nothing they were awaiting can send after `stop()` resolves.
+		if (!this.#connected) this.#lifetime.abort();
 		this.#outputActivity.dispose();
 		this.#unsubscribeSession?.();
 		this.#unsubscribeSession = undefined;
@@ -280,10 +298,14 @@ export class LiveSessionController {
 		const transport = this.#transport;
 		this.#transport = undefined;
 		if (transport) {
-			try {
-				await transport.send(buildSessionClose());
-			} catch (cause) {
-				cleanupError ??= errorFrom(cause);
+			// The close message travels on the open sideband. A call whose signal has aborted (it never connected,
+			// or its session began disposing) has already closed that.
+			if (!this.#callSignal?.aborted) {
+				try {
+					await transport.send(buildSessionClose());
+				} catch (cause) {
+					cleanupError ??= errorFrom(cause);
+				}
 			}
 			try {
 				await transport.close();
@@ -291,6 +313,8 @@ export class LiveSessionController {
 				cleanupError ??= errorFrom(cause);
 			}
 		}
+		// Nothing the call started may reach the network once `stop()` resolves.
+		this.#lifetime.abort();
 
 		if (cleanupError) this.#emitPhaseSafely("error");
 		this.#emitTerminal(cleanupError);

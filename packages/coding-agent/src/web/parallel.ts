@@ -307,6 +307,7 @@ export async function searchWithParallel(
 		);
 	}
 
+	// model-request: none — the Parallel search API, not a model request.
 	const fetchImpl = options.fetch ?? fetch;
 	const response = await fetchImpl(PARALLEL_SEARCH_URL, {
 		method: "POST",
@@ -341,6 +342,7 @@ export async function extractWithParallel(
 		);
 	}
 
+	// model-request: none — the Parallel extract API, not a model request.
 	const fetchImpl = options.fetch ?? fetch;
 	const response = await fetchImpl(PARALLEL_EXTRACT_URL, {
 		method: "POST",

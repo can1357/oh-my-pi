@@ -264,6 +264,7 @@ async function postXAIResponses(
 	body: Record<string, unknown>,
 	transport: XAIHttpTransport,
 ): Promise<Response> {
+	// model-request: turn — xAI's web search, a model request made by the web_search tool call with its signal.
 	return (request.fetch ?? fetch)(`${transport.baseURL.replace(/\/+$/, "")}/responses`, {
 		method: "POST",
 		headers: {

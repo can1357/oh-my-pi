@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { AsyncJobManager, type AsyncJob } from "../../src/async/job-manager";
+import { type AsyncJob, AsyncJobManager, SUBAGENT_TEARDOWN_DECIDES } from "../../src/async/job-manager";
 import { type JobWidgetAuthorRequest, JobWidgets, TextTap } from "../../src/job-widgets";
 
 const REQ_SPEC = {
@@ -120,6 +120,40 @@ describe("job widget registry", () => {
 		answers[1]?.resolve({ skip: "no metric to chart" });
 		await settle();
 		expect(widgets.view(job)?.state).toBe("fallback");
+	});
+
+	it("ends a spec request when its job's owner begins disposing, also for a job that survives that", async () => {
+		const signals: AbortSignal[] = [];
+		const manager = new AsyncJobManager({});
+		managers.push(manager);
+		const disposal = new AbortController();
+		manager.bindOwnerDisposal("Main", disposal.signal);
+		const widgets = new JobWidgets({
+			authorAfterMs: 0,
+			minIngestMs: 0,
+			author: (_request, signal) => {
+				signals.push(signal);
+				return new Promise<unknown>(() => {});
+			},
+		});
+		const tap = new TextTap("out", "stdout+stderr");
+		const id = manager.register("task", "subagent", () => new Promise<string>(() => {}), {
+			ownerId: "Main",
+			survivesBeginDispose: SUBAGENT_TEARDOWN_DECIDES,
+			widgetInputs: { sources: () => [tap], brief: () => ({ kind: "bash", command: "bench" }) },
+		});
+		const job = manager.getJob(id) as AsyncJob;
+		tap.append("req 1 rps=40\nreq 2 rps=48\nreq 3 rps=52\n");
+		widgets.view(job);
+		expect(signals).toHaveLength(1);
+		expect(signals[0]?.aborted).toBe(false);
+
+		disposal.abort();
+
+		// The job lives on, held for its owner's teardown; the spec about it is no longer wanted.
+		expect(job.status).toBe("running");
+		expect(signals[0]?.aborted).toBe(true);
+		manager.cancelAll();
 	});
 
 	it("retries a rejected spec once per attempt with the errors, and stops after three attempts", async () => {

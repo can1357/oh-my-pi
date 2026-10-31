@@ -1,6 +1,6 @@
 import { clearSubmittedText } from "./helpers/draft";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
-import { journalJudgmentUsage, resolveJudge, sharedJudgmentCache } from "../judgment";
+import { journalJudgmentUsage } from "../judgment";
 import type { AgentSession } from "../session/agent-session";
 import type { SessionOAuthAccountList } from "../session/agent-session-types";
 import {
@@ -191,14 +191,13 @@ function launchSessionStatsDashboard(
 	args: StatsDashboardArgs,
 	owner: Pick<SlashCommandRuntime, "settings" | "session" | "sessionManager">,
 ): Promise<StatsDashboardLaunchResult> {
-	const judge = resolveJudge({
+	// Through the session, so the judge carries its disposal signal; the overrides keep this
+	// judge's own dependencies (no session-model fallback, the runtime's settings and ledger).
+	const judge = owner.session.createJudge("stats_frustration", {
 		settings: owner.settings,
-		registry: owner.session.modelRegistry,
-		sessionId: owner.session.sessionId,
-		purpose: "stats_frustration",
+		sessionModel: undefined,
+		metadataResolver: undefined,
 		onUsage: journalJudgmentUsage(owner.sessionManager),
-		telemetry: owner.session.agent.telemetry,
-		cache: sharedJudgmentCache(),
 	});
 	return launchStatsDashboard(args, async () => judge);
 }

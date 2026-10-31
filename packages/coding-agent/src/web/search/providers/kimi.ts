@@ -110,6 +110,8 @@ async function callKimiSearch(
 		fetch?: FetchImpl;
 	},
 ): Promise<{ response: KimiSearchResponse; requestId?: string }> {
+	// model-request: none — Kimi's search API (`/coding/v1/search`), not a model request; the vendor's credential does not
+	// make it one.
 	const fetchImpl = params.fetch ?? fetch;
 	const response = await fetchImpl(resolveBaseUrl(), {
 		method: "POST",

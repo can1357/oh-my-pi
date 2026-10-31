@@ -403,6 +403,7 @@ export async function fetchResourceMetadataScopes(
 	resourceMetadataUrl: string,
 	opts?: { fetch?: FetchImpl; signal?: AbortSignal },
 ): Promise<string | undefined> {
+	// model-request: none — MCP OAuth discovery, not a model request.
 	const fetchImpl: FetchImpl = opts?.fetch ?? fetch;
 	try {
 		const resp = await fetchImpl(resourceMetadataUrl, {
@@ -474,6 +475,7 @@ export async function discoverOAuthEndpoints(
 	resourceMetadataUrl?: string,
 	opts?: { fetch?: FetchImpl; protectedScopes?: string; signal?: AbortSignal },
 ): Promise<OAuthEndpoints | null> {
+	// model-request: none — MCP OAuth discovery, not a model request.
 	const fetchImpl: FetchImpl = opts?.fetch ?? fetch;
 	// Authorization servers are not protected resources: probing
 	// `oauth-protected-resource` here would follow another resource's

@@ -17,6 +17,7 @@
 import { fetchWithRetry, readSseJsonOrText, type SseEventObserver } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { OpenAIHttpError } from "../error";
+import { gatedFetch } from "../request-hold";
 
 export { OpenAIHttpError };
 
@@ -105,7 +106,8 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
 			headers: { "Content-Type": "application/json", Accept: "text/event-stream", ...init.headers },
 			body: JSON.stringify(init.body),
 			signal: init.signal,
-			fetch: init.fetch,
+			// model-request: transport stream — the OpenAI-protocol streams' requests (Azure, chat completions, Responses).
+			fetch: gatedFetch(init.fetch),
 			maxAttempts: init.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
 			// A proxy concurrency-admission 429 (`rate_limit_type: max_parallel_requests`)
 			// surfaces immediately instead of being slept-and-retried here; session

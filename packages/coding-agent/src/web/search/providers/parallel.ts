@@ -179,6 +179,7 @@ async function searchWithAuthStorage(
 	return withAuth(
 		keyOrResolver,
 		async key => {
+			// model-request: none — the Parallel search API, not a model request.
 			const response = await (params.fetch ?? fetch)(PARALLEL_SEARCH_URL, {
 				method: "POST",
 				headers: {

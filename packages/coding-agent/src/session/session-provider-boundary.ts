@@ -306,6 +306,7 @@ export class SessionProviderBoundary {
 
 		let blocks: TextContent[];
 		try {
+			// model-request: caller buildImageDescriptionNotice — the `signal` its caller passes.
 			blocks = await describeAttachedImagesForTextModel(
 				normalizedImages,
 				{

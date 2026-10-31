@@ -326,6 +326,8 @@ export class CacheWarmer {
 	/** Entry the in-flight request will write, published only once its response confirms it. */
 	#pendingEntry?: TrackedCacheEntry;
 	#inactive: CacheWarmingStatus;
+	/** Set by {@link dispose}: the host is going away, and nothing arms again. */
+	#disposed = false;
 	readonly #deps: CacheWarmerDeps;
 	/** Called with every paid warm response, including one that missed the cache or was aborted after acceptance. */
 	onWarmed?: (message: AssistantMessage, extensionOverride: boolean) => void;
@@ -374,6 +376,7 @@ export class CacheWarmer {
 
 	/** Keep the prompt cache entry written by `request` warm while `isCurrent` holds. */
 	start(request: CacheWarmRequest, isCurrent: () => boolean): void {
+		if (this.#disposed) return;
 		this.#clearRun();
 		// A string key is classified up front. Resolver keys (rotating
 		// credentials) cannot be inspected without consuming them; they start on
@@ -474,6 +477,20 @@ export class CacheWarmer {
 		this.#entry = undefined;
 		this.#pendingEntry = undefined;
 		this.#stop("inactive");
+	}
+
+	/**
+	 * Stop for good, for a host that is going away: cancel the run, abort a refresh in flight,
+	 * drop the host's callbacks so a refresh already accepted reports to nobody, and ignore every
+	 * later {@link start}. A request the host still sends while it unwinds must not arm a refresh
+	 * that outlives the host.
+	 */
+	dispose(): void {
+		this.#disposed = true;
+		this.onWarmed = undefined;
+		this.onRefreshStart = undefined;
+		this.onRefreshEnd = undefined;
+		this.cancel();
 	}
 
 	#delayFor(model: Model<Api>, tier: PromptCacheTier): number | undefined {

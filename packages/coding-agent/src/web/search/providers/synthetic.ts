@@ -42,6 +42,7 @@ async function callSyntheticSearch(
 	apiKey: string,
 	query: string,
 	signal?: AbortSignal,
+	// model-request: none — the Synthetic search API, not a model request.
 	fetchImpl: FetchImpl = fetch,
 	timeoutMs?: number,
 ): Promise<SyntheticSearchResponse> {

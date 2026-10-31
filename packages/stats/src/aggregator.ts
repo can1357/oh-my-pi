@@ -142,8 +142,10 @@ interface WorkerHandle {
 function createSyncWorker(): Worker {
 	const hostEntry = workerHostEntry();
 	if (hostEntry) {
+		// model-request: none — the worker syncs session files into the local stats database and sends nothing.
 		return new Worker(hostEntry, { type: "module", argv: ["__omp_worker_stats_sync"] });
 	}
+	// model-request: none — the worker syncs session files into the local stats database and sends nothing.
 	return new Worker(new URL("./sync-worker.ts", import.meta.url).href, { type: "module" });
 }
 

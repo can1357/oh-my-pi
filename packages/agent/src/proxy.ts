@@ -14,6 +14,7 @@ import {
 	type StopReason,
 	type ToolCall,
 } from "@oh-my-pi/pi-ai";
+import { gatedFetch } from "@oh-my-pi/pi-ai/request-hold";
 import {
 	clearStreamingPartialJson,
 	kStreamingPartialJson,
@@ -133,7 +134,8 @@ export function streamProxy(model: Model, context: Context, options: ProxyStream
 		}
 
 		try {
-			response = await (options.fetch ?? fetch)(`${options.proxyUrl}/api/stream`, {
+			// model-request: transport streamProxy — the proxy stream's request.
+			response = await gatedFetch(options.fetch)(`${options.proxyUrl}/api/stream`, {
 				method: "POST",
 				headers: {
 					Authorization: `Bearer ${options.authToken}`,

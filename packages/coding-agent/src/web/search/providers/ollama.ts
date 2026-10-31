@@ -41,6 +41,7 @@ async function callOllamaSearch(
 	query: string,
 	maxResults: number,
 	signal?: AbortSignal,
+	// model-request: none — Ollama's web search API, not a model request.
 	fetchImpl: FetchImpl = fetch,
 	timeoutMs?: number,
 ): Promise<OllamaSearchResponse> {

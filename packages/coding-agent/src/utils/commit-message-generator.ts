@@ -77,13 +77,14 @@ function getSmolModelCandidates(
 
 /**
  * Generate a commit message from a unified diff.
- * Returns null if generation fails (caller should fall back to generic message).
+ * Returns null if generation fails or `signal` aborts (caller should fall back to generic message).
  */
 export async function generateCommitMessage(
 	diff: string,
 	registry: ModelRegistry,
 	settings: Settings,
-	sessionId?: string,
+	sessionId: string | undefined,
+	signal: AbortSignal | undefined,
 ): Promise<string | null> {
 	const candidates = getSmolModelCandidates(registry, settings);
 	if (candidates.length === 0) {
@@ -101,11 +102,13 @@ export async function generateCommitMessage(
 	const userMessage = `<diff>\n${truncatedDiff}\n</diff>`;
 
 	for (const candidate of candidates) {
-		const apiKey = await registry.getApiKey(candidate.model, sessionId);
+		if (signal?.aborted) return null;
+		const apiKey = await registry.getApiKey(candidate.model, sessionId, { signal });
 		if (!apiKey) continue;
 
 		try {
 			const maxTokens = COMMIT_MAX_TOKENS;
+			// model-request: caller generateCommitMessage — the `signal` its caller passes.
 			const response = await retryTransientCompletion(
 				() =>
 					completeSimple(
@@ -119,9 +122,10 @@ export async function generateCommitMessage(
 							sessionId,
 							maxTokens,
 							reasoning: toReasoningEffort(candidate.thinkingLevel),
+							signal,
 						},
 					),
-				{ provider: candidate.model.provider },
+				{ provider: candidate.model.provider, signal },
 			);
 
 			if (response.stopReason === "error") {

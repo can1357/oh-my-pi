@@ -141,6 +141,7 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 				requestInit.body = body;
 			}
 
+			// model-request: none — a web page, not a model request.
 			const response = await fetch(url, requestInit);
 
 			const rawContentType = response.headers.get("content-type") ?? "";

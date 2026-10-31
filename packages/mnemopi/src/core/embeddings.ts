@@ -31,7 +31,8 @@ export type Vector = Float32Array;
 export type EmbeddingMatrix = Vector[];
 
 export interface EmbeddingProvider {
-	embed(texts: readonly string[]): EmbeddingOutput | Promise<EmbeddingOutput>;
+	/** `options.signal` is the caller's cancellation; a provider that makes a request should honour it. */
+	embed(texts: readonly string[], options?: { signal?: AbortSignal }): EmbeddingOutput | Promise<EmbeddingOutput>;
 	available?(): boolean | Promise<boolean>;
 }
 
@@ -361,7 +362,12 @@ async function getLocalModel(): Promise<LocalEmbeddingModel | null> {
 	}
 }
 
-async function embedApi(texts: readonly string[]): Promise<EmbeddingMatrix | null> {
+/**
+ * Embed `texts` through the configured HTTP endpoint. `signal` is the caller's cancellation: once it
+ * aborts no attempt is sent (credential resolution included), and one in flight stops. Each attempt
+ * also has its own 30-second deadline.
+ */
+async function embedApi(texts: readonly string[], signal?: AbortSignal): Promise<EmbeddingMatrix | null> {
 	const baseUrl = embeddingBaseUrl();
 	const isCustom = !hostMatchesUrl(baseUrl, "openrouter");
 	const apiKey = embeddingApiKey();
@@ -375,27 +381,36 @@ async function embedApi(texts: readonly string[]): Promise<EmbeddingMatrix | nul
 		// rotation) when `apiKey` is a resolver. The 429 backoff stays inside
 		// the attempt via fetchWithRetry. An empty static key attempts without
 		// an Authorization header (local/proxy setups).
-		const response = await withAuth(apiKey, async key => {
-			const headers: Record<string, string> = {
-				"Content-Type": "application/json",
-				...getOpenRouterHeaders(),
-			};
-			if (key !== "") {
-				headers.Authorization = `Bearer ${key}`;
-			}
-			const res = await fetchWithRetry(`${baseUrl.replace(/\/+$/, "")}/embeddings`, {
-				method: "POST",
-				headers,
-				body,
-				signal: AbortSignal.timeout(30000),
-				maxAttempts: 3,
-				defaultDelayMs: attempt => 2 ** attempt * 1000,
-			});
-			if (res.status === 401) {
-				throw new ProviderHttpError("mnemopi embedding request unauthorized (401)", 401, { headers: res.headers });
-			}
-			return res;
-		});
+		const response = await withAuth(
+			apiKey,
+			async key => {
+				const headers: Record<string, string> = {
+					"Content-Type": "application/json",
+					...getOpenRouterHeaders(),
+				};
+				if (key !== "") {
+					headers.Authorization = `Bearer ${key}`;
+				}
+				const timeout = AbortSignal.timeout(30000);
+				const attemptSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
+				// model-request: caller embedApi — the `signal` its caller passes, with a per-attempt deadline.
+				const res = await fetchWithRetry(`${baseUrl.replace(/\/+$/, "")}/embeddings`, {
+					method: "POST",
+					headers,
+					body,
+					signal: attemptSignal,
+					maxAttempts: 3,
+					defaultDelayMs: attempt => 2 ** attempt * 1000,
+				});
+				if (res.status === 401) {
+					throw new ProviderHttpError("mnemopi embedding request unauthorized (401)", 401, {
+						headers: res.headers,
+					});
+				}
+				return res;
+			},
+			{ signal },
+		);
 		if (!response.ok) {
 			return null;
 		}
@@ -487,7 +502,8 @@ export function availableApi(): boolean {
 	return embeddingKeyConfigured();
 }
 
-export async function embedQuery(text: string): Promise<Vector | null> {
+/** Embed one query, cached. `signal` cancels the embedding request; a cancelled query yields `null`. */
+export async function embedQuery(text: string, signal?: AbortSignal): Promise<Vector | null> {
 	if (text === "" || embeddingsDisabled()) {
 		return null;
 	}
@@ -496,7 +512,8 @@ export async function embedQuery(text: string): Promise<Vector | null> {
 	if (cached !== undefined) {
 		return cached;
 	}
-	const vectors = await embed([text]);
+	// model-request: caller embedQuery — the `signal` its caller passes.
+	const vectors = await embed([text], signal);
 	const vector = vectors?.[0] ?? null;
 	if (vector !== null) {
 		queryCache.set(key, vector);
@@ -504,28 +521,33 @@ export async function embedQuery(text: string): Promise<Vector | null> {
 	return vector;
 }
 
-export async function embed(texts: readonly string[]): Promise<EmbeddingMatrix | null> {
-	if (texts.length === 0 || embeddingsDisabled()) {
+/**
+ * Embed `texts` with the active provider, the HTTP endpoint or the local model. `signal` cancels a
+ * provider or HTTP request; once it has aborted nothing is embedded and the result is `null`.
+ */
+export async function embed(texts: readonly string[], signal?: AbortSignal): Promise<EmbeddingMatrix | null> {
+	if (texts.length === 0 || embeddingsDisabled() || signal?.aborted) {
 		return null;
 	}
 	texts = capInputs(texts);
 	const activeProvider = resolveEmbeddingProvider(activeEmbeddingOptions()?.provider);
 	if (activeProvider !== undefined) {
 		try {
-			return await collectMatrix(await activeProvider.embed(texts));
+			return await collectMatrix(await activeProvider.embed(texts, { signal }));
 		} catch {
 			return null;
 		}
 	}
 	if (providerOverride !== null) {
 		try {
-			return await collectMatrix(await providerOverride.embed(texts));
+			return await collectMatrix(await providerOverride.embed(texts, { signal }));
 		} catch {
 			return null;
 		}
 	}
 	if (isApiModel(defaultModel())) {
-		return embedApi(texts);
+		// model-request: caller embed — the `signal` its caller passes.
+		return embedApi(texts, signal);
 	}
 	if (texts.length === 1) {
 		const key = queryCacheKey(texts[0] ?? "");

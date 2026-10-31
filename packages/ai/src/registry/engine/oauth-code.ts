@@ -106,6 +106,7 @@ export class DeclarativeOAuthCodeFlow extends OAuthCallbackFlow {
 		this.#rule = rule;
 		this.#provider = policy.id;
 		this.#label = policy.name;
+		// model-request: none — an OAuth code login, not a model request.
 		this.#fetch = ctrl.fetch ?? fetch;
 	}
 

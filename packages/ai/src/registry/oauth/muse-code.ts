@@ -73,6 +73,7 @@ export async function requestMuseCodeKey(
 	accessToken: string,
 	options: MuseCodeKeyRequestOptions = {},
 ): Promise<MuseCodeKeyResponse> {
+	// model-request: none — mints an API key at login, not a model request.
 	const response = await (options.fetch ?? fetch)(MUSE_KEY_URL, {
 		method: "POST",
 		headers: {

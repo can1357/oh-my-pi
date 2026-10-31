@@ -191,6 +191,9 @@ export async function callConfiguredCompletion(
 	try {
 		const message = await retryTransientCompletion(
 			() =>
+				// model-request: no-session — Mnemopi's own pi-ai completion, for a host that configures a pi-ai model
+				// rather than a completion function. The coding agent supplies its completion function
+				// (mnemopi/backend.ts), so no session reaches this.
 				completeSimple(
 					model,
 					{
@@ -347,6 +350,9 @@ export async function callRemoteLlm(
 		temperature,
 		stop: ["</s>", "<|user|>"],
 	});
+	// model-request: outlives-disposal — Mnemopi's remote LLM (`mnemopi.llmMode: remote`). It writes memories (extraction,
+	// consolidation), which the session's dispose() flushes on purpose, bounded by its consolidation timeout: the same
+	// decision as the managed completion adapter. A 60-second deadline bounds each request.
 	const fetchImpl = options.fetch ?? fetch;
 	try {
 		// withAuth re-resolves the key on 401 (force-refresh, then sibling
@@ -357,6 +363,7 @@ export async function callRemoteLlm(
 			if (key !== "") {
 				headers.Authorization = `Bearer ${key}`;
 			}
+			// model-request: outlives-disposal — Mnemopi's remote LLM, as above: memory writes the session's dispose() flushes.
 			const res = await fetchWithRetry(`${baseUrl}/chat/completions`, {
 				method: "POST",
 				headers,

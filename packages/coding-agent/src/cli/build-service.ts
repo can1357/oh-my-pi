@@ -273,6 +273,7 @@ export async function fetchBuild(selector: BuildSelector, options: FetchBuildOpt
 	let response: Response;
 	let body: unknown;
 	try {
+		// model-request: none — the build service's metadata, not a model request.
 		response = await (options.fetchImpl ?? fetch)(url, {
 			headers: { Accept: "application/json", "User-Agent": `${APP_NAME}/${VERSION}` },
 			signal: withTimeoutSignal(timeoutMs),

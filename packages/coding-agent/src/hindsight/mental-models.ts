@@ -144,12 +144,14 @@ export async function ensureMentalModels(
 	bankId: string,
 	seeds: MentalModelSeed[],
 	debug: boolean,
+	signal: AbortSignal | undefined,
 ): Promise<void> {
 	if (seeds.length === 0) return;
 
 	let existing: MentalModelSummary[];
 	try {
-		const list = await client.listMentalModels(bankId, { detail: "metadata" });
+		// model-request: caller ensureMentalModels — the `signal` its caller passes.
+		const list = await client.listMentalModels(bankId, { detail: "metadata", signal });
 		existing = list.items ?? [];
 	} catch (err) {
 		logger.debug("Hindsight: ensureMentalModels list failed", { bankId, error: String(err) });
@@ -159,11 +161,13 @@ export async function ensureMentalModels(
 	for (const seed of seeds) {
 		if (seedAlreadyExists(seed, existing)) continue;
 		try {
+			// model-request: caller ensureMentalModels — the `signal` its caller passes.
 			await client.createMentalModel(bankId, seed.name, seed.sourceQuery, {
 				id: seed.id,
 				tags: seed.tags.length > 0 ? seed.tags : undefined,
 				maxTokens: seed.maxTokens,
 				trigger: seed.trigger,
+				signal,
 			});
 			if (debug) {
 				logger.debug("Hindsight: seeded mental model", { bankId, id: seed.id, tags: seed.tags });
@@ -210,10 +214,12 @@ export async function tryLoadMentalModelsBlock(
 	bankId: string,
 	budgetChars: number = MENTAL_MODEL_RENDER_BUDGET_CHARS_DEFAULT,
 	visibleTags?: readonly string[],
+	signal?: AbortSignal,
 ): Promise<MentalModelsBlockLoadResult> {
 	let response: MentalModelListResponse;
 	try {
-		response = await client.listMentalModels(bankId, { detail: "content" });
+		// model-request: caller tryLoadMentalModelsBlock — the `signal` its caller passes.
+		response = await client.listMentalModels(bankId, { detail: "content", signal });
 	} catch (err) {
 		logger.debug("Hindsight: loadMentalModelsBlock list failed", { bankId, error: String(err) });
 		return { ok: false };
@@ -249,8 +255,10 @@ export async function loadMentalModelsBlock(
 	bankId: string,
 	budgetChars: number = MENTAL_MODEL_RENDER_BUDGET_CHARS_DEFAULT,
 	visibleTags?: readonly string[],
+	signal?: AbortSignal,
 ): Promise<string | undefined> {
-	const result = await tryLoadMentalModelsBlock(client, bankId, budgetChars, visibleTags);
+	// model-request: caller loadMentalModelsBlock — the `signal` its caller passes.
+	const result = await tryLoadMentalModelsBlock(client, bankId, budgetChars, visibleTags, signal);
 	return result.ok ? result.block : undefined;
 }
 

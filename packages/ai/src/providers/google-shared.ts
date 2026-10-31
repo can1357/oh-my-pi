@@ -8,6 +8,7 @@ import { readSseJson, type SseEventObserver } from "@oh-my-pi/pi-utils";
 import { renderDemotedThinking } from "../dialect/demotion";
 import { ThinkingFenceStripper } from "../dialect/thinking-fence-strip";
 import * as AIError from "../error";
+import { gatedFetch } from "../request-hold";
 import type {
 	Api,
 	AssistantMessage,
@@ -1063,7 +1064,8 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 			};
 
 			const bodyJson = JSON.stringify(paramsToWireBody(params));
-			const fetchImpl = plan.fetch ?? options?.fetch ?? (globalThis.fetch.bind(globalThis) as FetchImpl);
+			// model-request: transport stream — the Google stream's request.
+			const fetchImpl = gatedFetch(plan.fetch ?? options?.fetch);
 			// Bun's native fetch ceiling is disabled (`timeout: false`) so configurable
 			// watchdogs govern slow-prefill streams (issues #2422, #16991). Direct callers
 			// that bypass `register-builtins` (which installs the iterator-level

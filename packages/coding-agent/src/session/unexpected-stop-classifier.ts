@@ -85,6 +85,7 @@ export async function classifyUnexpectedStop(
 	deps: ClassifyUnexpectedStopDeps,
 ): Promise<boolean | undefined> {
 	try {
+		// model-request: caller classifyUnexpectedStop — the judge carries `deps.signal`, the caller's cancellation.
 		const judge = resolveJudge({
 			settings: deps.settings,
 			registry: deps.registry,
@@ -95,6 +96,8 @@ export async function classifyUnexpectedStop(
 			onUsage: deps.onUsage,
 			telemetry: deps.telemetry,
 			cache: sharedJudgmentCache(),
+			// The post-prompt signal, which disposal aborts; bound here so no call on this judge outlives it.
+			signal: deps.signal,
 		});
 		const request = stop.request?.trim().slice(0, REQUEST_CHARS);
 		const state: JudgmentState = request ? { request, message: stop.message } : { message: stop.message };

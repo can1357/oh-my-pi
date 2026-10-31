@@ -17,6 +17,7 @@ interface KiloDeviceAuthPollResponse {
 }
 
 export async function loginKilo(callbacks: OAuthController): Promise<OAuthCredentials> {
+	// model-request: none — an OAuth device login, not a model request.
 	const fetchImpl = callbacks.fetch ?? fetch;
 	const initiateResponse = await fetchImpl(`${KILO_DEVICE_AUTH_BASE_URL}/codes`, {
 		method: "POST",

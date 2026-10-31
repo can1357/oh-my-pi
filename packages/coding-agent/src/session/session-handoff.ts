@@ -171,11 +171,12 @@ export class SessionHandoff {
 				},
 				model.provider,
 			);
+			// model-request: session — the handoff's signal, which `beginDispose()` aborts; a handoff asked for after it is refused.
 			const rawHandoffText = await generateHandoffFromContext(
 				obfuscateProviderContext(this.#host.obfuscator(), handoffContext),
 				model,
 				{
-					streamOptions: handoffStreamOptions,
+					streamOptions: { ...handoffStreamOptions, signal: handoffSignal },
 					completeImpl: async (requestModel, requestContext, requestOptions) => {
 						const stream = await this.#host.sideStreamFn(requestModel, requestContext, requestOptions);
 						return stream.result();

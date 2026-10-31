@@ -69,6 +69,7 @@ function installLocalModelInitializer(setInitializer: (initializer: LocalModelIn
  */
 export async function loadMnemopi(): Promise<typeof MnemopiNs> {
 	if (!mnemopiMod) {
+		// model-request: none — loads the Mnemopi module; its requests are declared inside the package, where the walk follows them.
 		mnemopiMod = await import("@oh-my-pi/pi-mnemopi");
 		installLocalModelInitializer(mnemopiMod.setLocalModelInitializer);
 	}
@@ -78,6 +79,7 @@ export async function loadMnemopi(): Promise<typeof MnemopiNs> {
 /** Lazily load `@oh-my-pi/pi-mnemopi/core` (memoized). */
 export async function loadMnemopiCore(): Promise<typeof MnemopiCoreNs> {
 	if (!mnemopiCoreMod) {
+		// model-request: none — loads Mnemopi's core module; its requests are declared inside the package, where the walk follows them.
 		mnemopiCoreMod = await import("@oh-my-pi/pi-mnemopi/core");
 		installLocalModelInitializer(mnemopiCoreMod.setLocalModelInitializer);
 	}
@@ -432,7 +434,12 @@ export class MnemopiSessionState {
 		});
 	}
 
-	async collectScopedRecallResults(query: string): Promise<RecallResult[]> {
+	/**
+	 * Recall `query` from every scoped bank. `signal` is the reader's cancellation (a tool call, the
+	 * prompt or compaction being prepared): it stops each bank's query-embedding request, and once it
+	 * has aborted no further bank is read and the recall rejects.
+	 */
+	async collectScopedRecallResults(query: string, signal?: AbortSignal): Promise<RecallResult[]> {
 		const merged: RecallResult[] = [];
 		const byId = new Map<string, number>();
 		const byContent = new Map<string, number>();
@@ -449,9 +456,12 @@ export class MnemopiSessionState {
 			let targetSucceeded = false;
 			try {
 				for (const recallQuery of queries) {
+					signal?.throwIfAborted();
+					// model-request: caller collectScopedRecallResults — the reader's `signal` its caller passes.
 					const results = await target.memory.recallEnhanced(recallQuery, this.config.recallLimit, {
 						includeFacts: true,
 						channelId: target.bank,
+						signal,
 					});
 					targetSucceeded = true;
 					withLoopPhase("mnemopi.recall", () => {
@@ -461,6 +471,7 @@ export class MnemopiSessionState {
 					});
 				}
 			} catch (error) {
+				if (signal?.aborted) throw error;
 				const failure = toError(error);
 				failures.push({ bank: target.bank, error: failure });
 				logger.warn("Mnemopi: scoped recall target failed", {
@@ -485,8 +496,9 @@ export class MnemopiSessionState {
 		});
 	}
 
-	recallResultsScoped(query: string): Promise<RecallResult[]> {
-		return this.collectScopedRecallResults(query);
+	recallResultsScoped(query: string, signal?: AbortSignal): Promise<RecallResult[]> {
+		// model-request: caller recallResultsScoped — the reader's `signal` its caller passes.
+		return this.collectScopedRecallResults(query, signal);
 	}
 
 	formatScopedRecallContext(
@@ -532,12 +544,20 @@ export class MnemopiSessionState {
 	}
 
 	async recallForContext(query: string, signal?: AbortSignal): Promise<string | undefined> {
+		// model-request: caller recallForContext(signal) — the `signal` its caller passes.
 		return (await this.#recallBlock(query, signal))?.text || undefined;
 	}
 
 	/** Recalls `query` into a prompt block plus the memories it holds; undefined when aborted. */
 	async #recallBlock(query: string, signal?: AbortSignal): Promise<RecallBlock | undefined> {
-		const results = await this.collectScopedRecallResults(query);
+		let results: RecallResult[];
+		try {
+			// model-request: caller #recallBlock — the `signal` its caller passes.
+			results = await this.collectScopedRecallResults(query, signal);
+		} catch (error) {
+			if (signal?.aborted) return undefined;
+			throw error;
+		}
 		if (signal?.aborted) return undefined;
 		if (results.length === 0) return { text: "", memories: [] };
 		const { text, offsets } = formatRecallBlock(results);
@@ -652,6 +672,7 @@ export class MnemopiSessionState {
 			const query = composeRecallQuery(latestPrompt, queryMessages, this.config.recallContextTurns);
 			return truncateRecallQuery(query, latestPrompt, this.config.recallMaxQueryChars);
 		});
+		// model-request: turn — the prompt preparation's signal, which `abort()` cancels.
 		const recall = await this.#recallBlock(truncated, signal);
 		const record = recall && this.#deliveredRecall(recall, budget);
 		// The staged block and the transcript carry it as delivered; the session caches the
@@ -682,6 +703,8 @@ export class MnemopiSessionState {
 			const query = composeRecallQuery(lastUser.content, flat, this.config.recallContextTurns);
 			return truncateRecallQuery(query, lastUser.content, this.config.recallMaxQueryChars);
 		});
+		// model-request: session — the compaction's signal, which `beginDispose()` aborts. (Mnemopi's own recall; the walk
+		// matches it by name against the Hindsight state's `recallForContext`.)
 		return await this.recallForContext(truncated, signal);
 	}
 
@@ -815,9 +838,12 @@ export class MnemopiSessionState {
 				return truncateRecallQuery(query, lastUser.content, this.config.recallMaxQueryChars);
 			});
 			try {
-				const recall = await this.#recallBlock(truncated);
-				record = recall && this.#deliveredRecall(recall, block => this.budgetRecallBlock(block));
-				context = recall?.text;
+				// model-request: session — a background lookup on `agent_start` that no turn awaits: the session's
+				// disposal signal. A cancelled lookup leaves the first recall for the next turn.
+				const recall = await this.#recallBlock(truncated, this.session.disposeSignal);
+				if (!recall) return;
+				record = this.#deliveredRecall(recall, block => this.budgetRecallBlock(block));
+				context = recall.text;
 			} catch (error) {
 				logger.warn("Mnemopi: auto-recall failed", {
 					bank: this.config.bank,

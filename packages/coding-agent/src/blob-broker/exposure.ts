@@ -173,6 +173,7 @@ function boundedInteger(value: number | undefined, fallback: number, maximum: nu
  */
 export async function probeExposureHealth(
 	baseUrl: string,
+	// model-request: none — a health probe of the broker's public exposure.
 	fetchFn: typeof globalThis.fetch = globalThis.fetch,
 	options: ExposureHealthProbeOptions = {},
 ): Promise<void> {

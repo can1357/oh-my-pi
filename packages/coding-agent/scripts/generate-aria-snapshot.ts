@@ -159,6 +159,7 @@ async function main(): Promise<void> {
 		// Fetch pinned upstream sources into the temp dir.
 		for (const [src, dst] of VENDOR_FILES) {
 			const url = `${RAW_BASE}/${src}`;
+			// model-request: none — downloads pinned upstream sources at build time, not a model request.
 			const res = await fetch(url);
 			if (!res.ok) throw new Error(`Failed to fetch ${url}: ${res.status}`);
 			await Bun.write(path.join(tmp, dst), await res.text());

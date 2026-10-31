@@ -1,3 +1,4 @@
+import { admitNetworkSend } from "@oh-my-pi/pi-utils/request-hold-scope";
 import {
 	STREAM_CLOSE_BAD_CHANNEL,
 	STREAM_CLOSE_FORBIDDEN,
@@ -99,8 +100,16 @@ export class StreamServerClient {
 			this.#failUnauthorized("no stencil.so credential");
 			return;
 		}
+		// A held scope opens no connection, and a WebSocket is no fetch the hold's backstop sees: ask it here.
+		// Refused, this client stays closed; the owner's teardown ends it.
+		const refusal = admitNetworkSend();
+		if (refusal) {
+			await refusal.catch(() => undefined);
+			return;
+		}
 		let socket: WebSocket;
 		try {
+			// model-request: none — the stream server's socket, not a model request; asks the hold above.
 			socket = new WebSocket(this.#options.url, { headers: { Authorization: `Bearer ${token}` } });
 		} catch {
 			this.#scheduleReconnect();

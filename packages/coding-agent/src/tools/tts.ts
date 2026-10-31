@@ -103,6 +103,7 @@ async function synthesizeCloud(
 	signal: AbortSignal | undefined,
 ): Promise<AgentToolResult<TtsToolDetails, TtsSchemaType>> {
 	const sessionId = ctx.sessionManager.getSessionId();
+	// model-request: caller synthesizeCloud — the tool call's `signal` its caller passes.
 	const result = await synthesizeSpeech(
 		model,
 		{
@@ -212,6 +213,7 @@ export const ttsTool: CustomTool<typeof ttsSchema, TtsToolDetails> = {
 					return await synthesizeLocal(model, params, settingsInstance, cwd, outputPath, signal);
 				}
 				if (model.api === "xai-tts" || model.api === "openai-speech") {
+					// model-request: turn — the speech tool call's signal.
 					return await synthesizeCloud(model, params, ctx, outputPath, displayPath, codec, signal);
 				}
 				throw new Error(`Unsupported speech model API: ${model.api}`);

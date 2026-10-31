@@ -87,6 +87,8 @@ export async function runSharpshooterConsolidation(options: {
 	modelRegistry: ModelRegistry;
 	sessionId: string;
 	force?: boolean;
+	/** The owner's cancellation: the scheduler's, or the session's for a forced run. */
+	signal: AbortSignal;
 }): Promise<SharpshooterConsolidationResult> {
 	const bankDir = sharpshooterBankDir(options.agentDir, options.cwd);
 	try {
@@ -101,6 +103,7 @@ export async function runSharpshooterConsolidation(options: {
 			sharpshooterLockPath(options.agentDir, options.cwd),
 			async () => {
 				acquired = true;
+				// model-request: caller runSharpshooterConsolidation — the owner `signal` in its caller's options.
 				return await consolidateLocked(options, bankDir);
 			},
 			{ retries: 1, retryDelayMs: 1 },
@@ -119,6 +122,7 @@ async function consolidateLocked(
 		modelRegistry: ModelRegistry;
 		sessionId: string;
 		force?: boolean;
+		signal: AbortSignal;
 	},
 	bankDir: string,
 ): Promise<SharpshooterConsolidationResult> {
@@ -155,6 +159,7 @@ async function consolidateLocked(
 			maxFileLines: SHARPSHOOTER_MAX_FILE_LINES,
 		});
 
+		// model-request: caller consolidateLocked — the owner `signal` in its caller's options.
 		const response = await retryTransientCompletion(
 			() =>
 				completeSimple(
@@ -170,9 +175,10 @@ async function consolidateLocked(
 						maxTokens: 8192,
 						reasoning: clampThinkingLevelForModel(model, Effort.Medium),
 						toolChoice: "required",
+						signal: options.signal,
 					},
 				),
-			{ provider: model.provider },
+			{ provider: model.provider, signal: options.signal },
 		);
 		if (response.stopReason === "error") {
 			throw new Error(response.errorMessage || "sharpshooter consolidation model error");

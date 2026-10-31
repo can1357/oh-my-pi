@@ -951,7 +951,8 @@ export async function recall(
 		// `embedQuery()` returns null when embeddings are disabled or no provider is configured,
 		// so this is a no-op when the user has not wired one up. Float32Array → number[]
 		// because RecallOptions exposes the narrower public shape.
-		const derived = query.length > 0 ? await embedQuery(query) : null;
+		// model-request: caller recall(options.signal) — the query embedding stops on the reader's `signal`.
+		const derived = query.length > 0 ? await embedQuery(query, options.signal) : null;
 		temporalOptions.queryEmbedding = derived === null ? null : Array.from(derived);
 	}
 	return withLoopPhase("mnemopi.recall", () => {
@@ -1049,13 +1050,15 @@ export async function recallEnhanced(
 ): Promise<RecallResult[]> {
 	const polyphonic = polyphonicRecallEnabled(process.env, beam.config?.polyphonicRecall);
 	const cacheEnabled = isQueryCacheEnabled(options.useCache !== false, process.env, beam.config?.enhancedRecall);
+	// model-request: caller recallEnhanced(options.signal) — the linear path carries the reader's `signal`.
 	if (!polyphonic && !cacheEnabled) return linearRecallEnhanced(beam, query, topK, options);
 
 	// Derive the query embedding once: it feeds the cache's semantic tiers, the linear
 	// ranking and the polyphonic vector voice. Same three-state contract as `recall()`.
 	let queryEmbedding = options.queryEmbedding;
 	if (queryEmbedding === undefined) {
-		const derived = query.length > 0 ? await embedQuery(query) : null;
+		// model-request: caller recallEnhanced(options.signal) — the query embedding stops on the reader's `signal`.
+		const derived = query.length > 0 ? await embedQuery(query, options.signal) : null;
 		queryEmbedding = derived === null ? null : Array.from(derived);
 	}
 	const runOptions: RecallEnhancedOptions & RecallOptionsInternal = {
@@ -1095,6 +1098,7 @@ export async function recallEnhanced(
 		popLoopPhase();
 	}
 
+	// model-request: caller recallEnhanced(options.signal) — `runOptions` carries the reader's `signal` on either path.
 	const results = polyphonic
 		? await polyphonicRecallEnhanced(beam, query, topK, runOptions)
 		: await linearRecallEnhanced(beam, query, topK, runOptions);
@@ -1121,6 +1125,7 @@ async function linearRecallEnhanced(
 		useIntent: options.useIntent !== false,
 		useMmr: options.useMmr !== false,
 	};
+	// model-request: caller linearRecallEnhanced(options.signal) — `enhancedOptions` spreads `options`, `signal` included.
 	const results = await recall(beam, query, Math.max(topK * 2, topK), {
 		...enhancedOptions,
 		updateRecallCounts: false,
@@ -1152,7 +1157,9 @@ async function polyphonicRecallEnhanced(
 	if (topK <= 0) return [];
 	// A wider pool than requested so filters applied below still leave `topK` rows.
 	const pool = Math.max(topK * 2, topK);
+	// model-request: caller polyphonicRecallEnhanced(options.signal) — the baseline carries the reader's `signal`.
 	const baseline = await linearRecallEnhanced(beam, query, pool, options);
+	// model-request: caller polyphonicRecallEnhanced(options.signal) — the options spread carries the reader's `signal`.
 	const fused = await orchestrateRecall(beam, query, pool, {
 		...options,
 		includeFacts: options.includeFacts === true,

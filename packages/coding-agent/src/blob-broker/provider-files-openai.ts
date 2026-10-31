@@ -72,6 +72,8 @@ export function createOpenAIFileClient(
 	if (!isOfficialOpenAIResponsesModel(model)) return null;
 	if (credential.trim().length === 0) throw new Error("An OpenAI API credential is required for file uploads");
 
+	// model-request: none — a credentialed upload to OpenAI's file store for the blob broker: provider HTTP, but not
+	// inference.
 	const request = fetchImpl ?? globalThis.fetch;
 	const authorization = `Bearer ${credential}`;
 

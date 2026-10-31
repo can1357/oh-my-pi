@@ -3,7 +3,11 @@ import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
+import {
+	ASYNC_JOB_MANAGER_SHUTDOWN_REASON,
+	AsyncJobManager,
+	SUBAGENT_TEARDOWN_DECIDES,
+} from "@oh-my-pi/pi-coding-agent/async";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { HindsightSessionState } from "@oh-my-pi/pi-coding-agent/hindsight/state";
@@ -91,7 +95,8 @@ describe("AgentSession concurrent disposal", () => {
 				await aborted.promise;
 				return "stopped";
 			},
-			{ ownerId: "Main", agentId: "Sub" },
+			// A subagent job, registered as the task tool registers one: its end is dispose()'s to choose.
+			{ ownerId: "Main", agentId: "Sub", survivesBeginDispose: SUBAGENT_TEARDOWN_DECIDES },
 		);
 		const current = createSession(owned);
 
@@ -127,7 +132,7 @@ describe("AgentSession concurrent disposal", () => {
 				await aborted.promise;
 				return "stopped";
 			},
-			{ ownerId: "Sub", agentId: "NestedChild" },
+			{ ownerId: "Sub", agentId: "NestedChild", survivesBeginDispose: SUBAGENT_TEARDOWN_DECIDES },
 		);
 		const current = createSession(undefined, { agentId: "Sub", asyncJobManager: shared });
 

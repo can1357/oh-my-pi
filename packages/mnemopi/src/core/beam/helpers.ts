@@ -725,6 +725,8 @@ export interface EmbedItem {
 
 async function runEmbedding(beam: BeamMemoryState, items: readonly EmbedItem[]): Promise<void> {
 	try {
+		// model-request: outlives-disposal — embeds memories just stored: part of the memory write, which the session's
+		// dispose() flushes on purpose (`flushExtractions`), bounded by its consolidation timeout.
 		const matrix = await embed(items.map(item => item.content));
 		if (matrix === null) return;
 		// Persisting the vectors runs synchronously on the caller's event loop; label it so a

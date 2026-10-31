@@ -169,8 +169,12 @@ export class AgentLifecycleManager {
 	#persistedReviverFactory: PersistedSubagentReviverFactory | undefined;
 	/** Resolves the TTL applied when a cold-revived ref is adopted on demand (read per revive). */
 	#persistedReviveTtlMs: () => number = () => 0;
-	/** Set once {@link dispose} runs; blocks late revivals from adopting into a torn-down manager. */
+	/** Set once {@link dispose} runs; blocks late revivals and adoptions from joining a torn-down manager. */
 	#disposed = false;
+	/** Deadline of the teardown in progress, which an agent adopted during it shares; undefined otherwise. */
+	#teardownDeadlineAt: number | undefined;
+	/** Teardown releases not yet settled, including those of agents adopted after teardown began. */
+	readonly #teardownReleases = new Set<Promise<void>>();
 
 	constructor(registry: AgentRegistry = AgentRegistry.global()) {
 		this.#registry = registry;
@@ -194,6 +198,12 @@ export class AgentLifecycleManager {
 	 * status to "idle". Arms the TTL timer (idleTtlMs <= 0 adopts without one).
 	 * When `expected` is given, the adoption is refused if the id no longer
 	 * resolves to that ref (or that ref's session).
+	 *
+	 * Once teardown has begun, the agent is released at once instead, as teardown
+	 * released every agent adopted before it: session disposed, owned resources
+	 * released, ref unregistered. Its result has already reached the caller and its
+	 * transcript stays on disk, restorable as parked; only the live session goes,
+	 * which nothing would park, revive, or release once its owner is gone.
 	 */
 	adopt(id: string, opts: AdoptOptions, expected?: AgentRefExpectation): void {
 		if (id === MAIN_AGENT_ID) return;
@@ -211,6 +221,10 @@ export class AgentLifecycleManager {
 			onRelease: opts.onRelease,
 		};
 		this.#adopted.set(id, adopted);
+		if (this.#disposed) {
+			this.#releaseForTeardown(id, ref);
+			return;
+		}
 		this.#armTimer(id, adopted);
 	}
 
@@ -595,32 +609,49 @@ export class AgentLifecycleManager {
 		return true;
 	}
 
-	/** Teardown everything; disposing the global manager makes its next owner a fresh instance. */
+	/**
+	 * Teardown everything; disposing the global manager makes its next owner a fresh instance.
+	 * Settles once every agent it owned is released, including one adopted while it ran.
+	 */
 	async dispose(deadlineAt: number = Date.now() + AGENT_RELEASE_GRACE_MS): Promise<void> {
 		this.#unsubscribe?.();
 		this.#disposed = true;
 		this.#unsubscribe = undefined;
-		const ids = [...new Set([...this.#adopted.keys(), ...this.#parks.keys()])];
-		await Promise.all(
-			ids.map(async id => {
-				const release = this.release(id).then(() => {});
-				try {
-					await untilAborted(AbortSignal.timeout(Math.max(0, deadlineAt - Date.now())), () => release);
-				} catch (error) {
-					if (Date.now() >= deadlineAt) {
-						trackLateCleanup(release, { id, resource: "adopted-agent" });
-					}
-					logger.warn("Agent cleanup exceeded its deadline", {
-						id,
-						error: error instanceof Error ? error.message : String(error),
-					});
-				}
-			}),
-		);
+		this.#teardownDeadlineAt = deadlineAt;
+		for (const id of new Set([...this.#adopted.keys(), ...this.#parks.keys()])) this.#releaseForTeardown(id);
+		// An agent that finishes while these run is adopted and released too, so wait until no
+		// release is left, not only for the ones started here.
+		while (this.#teardownReleases.size > 0) await Promise.all(this.#teardownReleases);
+		this.#teardownDeadlineAt = undefined;
 		this.#revivals.clear();
 		this.#parks.clear();
 		this.#persistedReviverFactory = undefined;
 		if (AgentLifecycleManager.#global === this) AgentLifecycleManager.#global = undefined;
+	}
+
+	/**
+	 * Release `id` as part of teardown, waiting no later than the teardown's deadline, or a
+	 * grace period of its own for an agent adopted after teardown finished. A release past
+	 * the deadline goes on as tracked late cleanup.
+	 */
+	#releaseForTeardown(id: string, expected?: AgentRef): void {
+		const deadlineAt = this.#teardownDeadlineAt ?? Date.now() + AGENT_RELEASE_GRACE_MS;
+		const release = this.release(id, expected).then(() => {});
+		const settled = (async () => {
+			try {
+				await untilAborted(AbortSignal.timeout(Math.max(0, deadlineAt - Date.now())), () => release);
+			} catch (error) {
+				if (Date.now() >= deadlineAt) {
+					trackLateCleanup(release, { id, resource: "adopted-agent" });
+				}
+				logger.warn("Agent cleanup exceeded its deadline", {
+					id,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		})();
+		this.#teardownReleases.add(settled);
+		void settled.then(() => this.#teardownReleases.delete(settled));
 	}
 
 	async #revive(id: string, revive: AgentReviver, ref: AgentRef, adopted: AdoptedAgent): Promise<AgentSession> {

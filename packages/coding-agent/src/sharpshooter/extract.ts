@@ -55,14 +55,21 @@ const kExtractionInFlight = Symbol("sharpshooter.extractionInFlight");
 // 2 is the smallest floor that still drops one-character acks ("好", "y").
 const MIN_PROMPT_LENGTH_FLOOR = 2;
 
+/** The session's extraction in flight, and the cancellation that ends it. */
+interface ExtractionInFlight {
+	run: Promise<void>;
+	abort: AbortController;
+}
+
 interface ExtractionHost extends AgentSession {
-	[kExtractionInFlight]?: Promise<void>;
+	[kExtractionInFlight]?: ExtractionInFlight;
 }
 
 /**
- * Await the session's in-flight extraction, bounded by `timeoutMs`. Called from
- * session disposal so short-lived processes (print mode) do not exit before a
- * just-fired extraction persists its deltas.
+ * Await the session's in-flight extraction, bounded by `timeoutMs`, then cancel it if it is still
+ * running. Called from session disposal so short-lived processes (print mode) do not exit before a
+ * just-fired extraction persists its deltas; a reply that lands within the bound is kept, and past it
+ * the request is cancelled, so none is paid for whose reply nobody keeps.
  */
 export async function flushSharpshooterExtraction(session: AgentSession, timeoutMs = 5_000): Promise<void> {
 	const pending = (session as ExtractionHost)[kExtractionInFlight];
@@ -71,9 +78,10 @@ export async function flushSharpshooterExtraction(session: AgentSession, timeout
 	const bound = Promise.withResolvers<void>();
 	const timer = setTimeout(bound.resolve, Math.max(0, timeoutMs));
 	try {
-		await Promise.race([pending, bound.promise]);
+		await Promise.race([pending.run, bound.promise]);
 	} finally {
 		clearTimeout(timer);
+		pending.abort.abort();
 	}
 }
 
@@ -193,6 +201,7 @@ export function maybeStartSharpshooterExtraction(options: {
 }): void {
 	try {
 		const { session } = options;
+		// A disposing session starts no extraction; one already running is the flush `dispose()` bounds.
 		if (session.isDisposed || (session as ExtractionHost)[kExtractionInFlight]) return;
 		const envelope = buildSharpshooterEnvelope(session.messages, options.message);
 		if (!envelope) return;
@@ -206,7 +215,8 @@ export function maybeStartSharpshooterExtraction(options: {
 		}
 		if (characters < minLength) return;
 
-		const run = runSharpshooterExtraction(options, envelope)
+		const abort = new AbortController();
+		const run = runSharpshooterExtraction(options, envelope, abort.signal)
 			.catch(error => {
 				logger.debug("Sharpshooter extraction failed", {
 					error: String(error),
@@ -216,7 +226,7 @@ export function maybeStartSharpshooterExtraction(options: {
 			.finally(() => {
 				(session as ExtractionHost)[kExtractionInFlight] = undefined;
 			});
-		(session as ExtractionHost)[kExtractionInFlight] = run;
+		(session as ExtractionHost)[kExtractionInFlight] = { run, abort };
 	} catch (error) {
 		logger.debug("Sharpshooter extraction could not start", { error: String(error) });
 	}
@@ -230,12 +240,17 @@ async function runSharpshooterExtraction(
 		agentDir: string;
 	},
 	envelope: SharpshooterEnvelope,
+	signal: AbortSignal,
 ): Promise<void> {
 	const { session, settings, modelRegistry, agentDir } = options;
 	const model = await resolveSharpshooterModel(settings, modelRegistry);
-	if (!model || session.isDisposed) return;
+	if (!model || signal.aborted) return;
 
 	const input = prompt.render(extractInputTemplate, { ...envelope });
+	// model-request: outlives-disposal — the extraction for a prompt sent before disposal began. It may run on
+	// while the session closes, and `dispose()` waits for it up to its flush bound so a print-mode exit keeps the
+	// prompt's deltas; at that bound `flushSharpshooterExtraction` cancels it through `signal`. None starts once
+	// disposal has begun.
 	const response = await retryTransientCompletion(
 		() =>
 			completeSimple(
@@ -251,10 +266,12 @@ async function runSharpshooterExtraction(
 					maxTokens: 2048,
 					reasoning: clampThinkingLevelForModel(model, Effort.Low),
 					toolChoice: "required",
+					signal,
 				},
 			),
-		{ provider: model.provider },
+		{ provider: model.provider, signal },
 	);
+	if (signal.aborted || response.stopReason === "aborted") return;
 	if (response.stopReason === "error") {
 		throw new Error(response.errorMessage || "Sharpshooter extraction model error");
 	}
@@ -269,7 +286,8 @@ async function runSharpshooterExtraction(
 		for (const candidate of args.deltas) {
 			const delta = admitDelta(candidate, envelope.prompt, session.sessionId);
 			if (!delta) continue;
-			if (session.isDisposed) return;
+			// A reply that arrived within the flush bound is kept, also on a disposing session.
+			if (signal.aborted) return;
 			await appendSharpshooterDelta(agentDir, session.sessionManager.getCwd(), delta);
 		}
 	}

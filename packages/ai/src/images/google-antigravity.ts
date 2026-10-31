@@ -8,6 +8,7 @@ import { getAntigravityHeaders } from "@oh-my-pi/pi-catalog/wire/gemini-headers"
 import { readSseJson } from "@oh-my-pi/pi-utils";
 import { withAuth } from "../auth-retry";
 import * as AIError from "../error";
+import { gatedFetch } from "../request-hold";
 import { errorMessage, ImageApiError, usageFromWire, validateImageInput } from "./shared";
 import type { GeneratedImage, ImageGenerationOptions, ImageGenerationRequest, ImageGenerationResult } from "./types";
 
@@ -139,7 +140,8 @@ export async function generateAntigravityImage(
 	options: ImageGenerationOptions,
 ): Promise<ImageGenerationResult> {
 	for (const image of request.inputImages ?? []) validateImageInput(image);
-	const fetchImpl = options.fetch ?? fetch;
+	// model-request: transport generateImage — the image request.
+	const fetchImpl = gatedFetch(options.fetch);
 	const response = await withAuth(
 		options.apiKey,
 		async rawKey => {
@@ -147,7 +149,8 @@ export async function generateAntigravityImage(
 			if (!credentials) {
 				throw new AIError.ValidationError("Antigravity image credentials must contain token and projectId");
 			}
-			const target = await resolveTarget(model, credentials, fetchImpl, options.signal);
+			// Target discovery runs shared work (the Antigravity version lookup), which a gated fetch would refuse.
+			const target = await resolveTarget(model, credentials, options.fetch, options.signal);
 			const body = buildRequest(request, target.model, credentials.projectId);
 			let lastError: ImageApiError | undefined;
 			for (let index = 0; index < target.endpoints.length; index++) {

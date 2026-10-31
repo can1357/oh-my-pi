@@ -334,6 +334,7 @@ async function enableAllGitHubCopilotModels(
  * @param options.signal - Optional AbortSignal for cancellation
  */
 export async function loginGitHubCopilot(options: GitHubCopilotLoginOptions): Promise<OAuthCredentials> {
+	// model-request: none — an OAuth login, not a model request.
 	const fetchImpl = options.fetch ?? fetch;
 	const input = await options.onPrompt({
 		message: "GitHub Enterprise URL/domain (blank for github.com)",

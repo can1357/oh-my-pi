@@ -26,6 +26,7 @@ import type { Api, FetchImpl } from "@oh-my-pi/pi-catalog/types";
 import { $env, isRecord, parseImageMetadata } from "@oh-my-pi/pi-utils";
 import { type ApiKey, withAuth } from "../auth-retry";
 import * as AIError from "../error";
+import { gatedFetch } from "../request-hold";
 import { validateImageInput } from "../images/shared";
 import { withInferenceUserAgent } from "../providers/inference-headers";
 import { redactSensitiveInObject } from "../providers/transform-messages";
@@ -343,7 +344,8 @@ export class NativeJudge implements Judge {
 		this.baseUrl = (options.baseUrl ?? typesafeBaseUrl()).replace(/\/+$/, "");
 		this.model = options.model ?? typesafeModel();
 		this.#headers = options.headers;
-		this.#fetch = options.fetch ?? fetch;
+		// model-request: transport createNativeJudge, NativeJudge — the native judge's endpoint.
+		this.#fetch = gatedFetch(options.fetch);
 		this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 		if (options.maxQuestions !== undefined && !(Number.isInteger(options.maxQuestions) && options.maxQuestions > 0)) {
 			throw new RangeError(`NativeJudge maxQuestions must be a positive integer, got ${options.maxQuestions}`);

@@ -373,6 +373,7 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 	) {
 		super(ctrl, resolveCallbackOptions(config));
 		this.#resolvedClientId = this.#resolveClientId(config);
+		// model-request: none — an MCP OAuth login, not a model request.
 		this.#fetch = config.fetch ?? ctrl.fetch ?? fetch;
 		this.#resource = this.#filterResourceIndicator(
 			resolveResourceUri(config.resource ?? this.#resourceFromAuthorizationUrl(config.authorizationUrl)),
@@ -807,6 +808,7 @@ export async function refreshMCPOAuthToken(
 	opts?: RefreshMCPOAuthTokenOptions,
 ): Promise<OAuthCredentials> {
 	const optsFromTrailing = typeof resourceOrOpts === "string" ? opts : resourceOrOpts;
+	// model-request: none — an MCP OAuth token exchange, not a model request.
 	const fetchImpl: FetchImpl = optsFromTrailing?.fetch ?? fetch;
 	const resource = typeof resourceOrOpts === "string" ? resourceOrOpts : undefined;
 	// Filter against the authorization-server origin when known (RFC 8414

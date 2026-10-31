@@ -369,6 +369,7 @@ export const handleDocsRs: SpecialHandler = async (
 
 		try {
 			const requestSignal = ptree.combineSignals(signal, timeout * 1000);
+			// model-request: none — a docs.rs page, not a model request.
 			const response = await fetch(jsonUrl, {
 				signal: requestSignal,
 				headers: { "User-Agent": USER_AGENT, Accept: "application/gzip" },

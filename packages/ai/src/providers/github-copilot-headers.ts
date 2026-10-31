@@ -7,6 +7,7 @@ import {
 } from "@oh-my-pi/pi-catalog/wire/github-copilot";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { $env, logger } from "@oh-my-pi/pi-utils";
+import { gatedFetch } from "../request-hold";
 import type { FetchImpl, Message } from "../types";
 /**
  * Infer whether the current request to Copilot is user-initiated or agent-initiated.
@@ -200,7 +201,8 @@ export function wrapFetchForCopilotFallback(
 	 */
 	cacheSnapshot?: string | null,
 ): FetchImpl {
-	const inner = base ?? fetch;
+	// model-request: transport stream — Copilot stream requests with their identity headers.
+	const inner = gatedFetch(base);
 	if (!enabled) return inner;
 	const cliIntegrationId = COPILOT_CAPI_IDENTITY_HEADERS["Copilot-Integration-Id"];
 	return async (input, init) => {

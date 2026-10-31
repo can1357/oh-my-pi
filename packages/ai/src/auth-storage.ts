@@ -210,7 +210,14 @@ export class AuthStorage {
 			affinity,
 			strategies,
 			usageProviders,
-			fetch: options.usageFetch ?? fetch,
+			// The global is read per request, not captured here: storage built before the provider-request hold
+			// wrapped `fetch` must still send through that wrapper, so a held caller's request waits.
+			// model-request: none — the provider usage and saved-reset endpoints (account limits), not a model request.
+			fetch:
+				options.usageFetch ??
+				Object.assign((input: string | URL | Request, init?: RequestInit) => globalThis.fetch(input, init), {
+					preconnect: (...args: Parameters<typeof fetch.preconnect>) => globalThis.fetch.preconnect(...args),
+				}),
 			requestTimeoutMs: options.usageRequestTimeoutMs ?? DEFAULT_USAGE_REQUEST_TIMEOUT_MS,
 			logger:
 				options.usageLogger ??

@@ -149,6 +149,7 @@ async function loadHook(hookPath: string, cwd: string): Promise<{ hook: LoadedHo
 
 	try {
 		// Import the module using native Bun import
+		// model-request: extension — loads a hook module; the extension boundary governs its requests.
 		const module = await withHostGuard(() => import(resolvedPath));
 		const factory = module.default as HookFactory;
 

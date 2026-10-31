@@ -85,6 +85,7 @@ export async function askImageQuestion(
 	image: LoadedImageInput,
 	question: string,
 	signal: AbortSignal | undefined,
+	// model-request: caller askImageQuestion — the default completion, sent below with the caller's signal.
 	completeImpl: typeof completeSimple = completeSimple,
 ): Promise<ImageQuestionResult> {
 	if (cfgImagesBlockImages.get(session.settings)) {
@@ -114,7 +115,8 @@ export async function askImageQuestion(
 	const timeoutMs = cfgImagesQuestionTimeoutMs.get(session.settings);
 	const hasTimeout = typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0;
 	const timeoutSignal = hasTimeout ? AbortSignal.timeout(timeoutMs) : undefined;
-	const effectiveSignal = timeoutSignal ? (signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal) : signal;
+	const effectiveSignal =
+		timeoutSignal && signal ? AbortSignal.any([signal, timeoutSignal]) : (timeoutSignal ?? signal);
 	const timedOut = (): boolean => Boolean(timeoutSignal?.aborted) && !signal?.aborted;
 	const formatTimeoutMessage = (): string => {
 		const seconds = timeoutMs % 1000 === 0 ? `${timeoutMs / 1000}` : (timeoutMs / 1000).toFixed(1);
@@ -137,6 +139,7 @@ export async function askImageQuestion(
 	session.costGate?.admit();
 	let response: AssistantMessage;
 	try {
+		// model-request: caller askImageQuestion — its caller's signal, joined to the question deadline.
 		response = await instrumentedCompleteSimple(
 			model,
 			{

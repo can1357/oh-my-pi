@@ -3688,6 +3688,7 @@ export class SessionMaintenance {
 			}
 
 			try {
+				// model-request: session — the compaction's signal, which `beginDispose()` aborts (`abortCompaction`).
 				return await compact(
 					this.#host.obfuscatePreparationForProvider(preparation),
 					candidate,
@@ -5597,6 +5598,7 @@ export class SessionMaintenance {
 					let attempt = 0;
 					while (true) {
 						try {
+							// model-request: session — the auto-compaction's signal, which `beginDispose()` aborts.
 							compactResult = await compact(
 								this.#host.obfuscatePreparationForProvider(preparation),
 								candidate,

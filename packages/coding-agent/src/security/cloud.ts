@@ -192,6 +192,7 @@ export class CodexSecurityCloudClient {
 		this.#authStorage = options.authStorage;
 		this.#account = options.account;
 		this.#baseUrl = (options.baseUrl ?? DEFAULT_CLOUD_BASE_URL).replace(/\/$/, "");
+		// model-request: caller #fetch — the client's transport; each request sends with the signal its caller passes.
 		this.#fetch = options.fetch ?? fetch;
 	}
 
@@ -202,12 +203,16 @@ export class CodexSecurityCloudClient {
 		}
 		let rejectedAccessToken: string | undefined;
 		for (let attempt = 0; attempt < 2; attempt += 1) {
+			options.signal?.throwIfAborted();
 			const access = await resolveExactSecurityOAuthAccess(this.#authStorage, this.#account, {
 				forceRefresh: attempt > 0,
 				refreshReason: attempt > 0 ? "auth-recovery" : undefined,
 				rejectedAccessToken,
 				signal: options.signal,
 			});
+			// A credential lookup can finish after its caller was cancelled (a token refresh that ignores the
+			// signal): send nothing for a caller that has stopped.
+			options.signal?.throwIfAborted();
 			rejectedAccessToken = access.accessToken;
 			const body = typeof options.body === "function" ? options.body(access.accessToken) : options.body;
 			const headers: Record<string, string> = {
@@ -217,6 +222,7 @@ export class CodexSecurityCloudClient {
 			const accountId = access.accountId ?? this.#account.accountId;
 			if (accountId) headers["ChatGPT-Account-Id"] = accountId;
 			if (body) headers["Content-Type"] = "application/json";
+			// model-request: caller #request — the `signal` in its caller's options.
 			const response = await this.#fetch(url, {
 				method: options.method ?? "GET",
 				headers,
@@ -233,6 +239,7 @@ export class CodexSecurityCloudClient {
 	async listConfigurations(
 		options: { limit?: number; cursor?: string; signal?: AbortSignal } = {},
 	): Promise<CodexSecurityCloudConfigurationPage> {
+		// model-request: caller listConfigurations — the `signal` in its caller's options.
 		const raw = await this.#request("scan_configurations", {
 			query: { limit: options.limit ?? 100, cursor: options.cursor },
 			signal: options.signal,
@@ -248,6 +255,7 @@ export class CodexSecurityCloudClient {
 		const configurations: CodexSecurityCloudConfiguration[] = [];
 		let cursor: string | undefined;
 		do {
+			// model-request: caller listAllConfigurations — the `signal` its caller passes.
 			const page = await this.listConfigurations({ limit: 500, cursor, signal });
 			configurations.push(...page.items);
 			cursor = page.nextCursor;
@@ -258,6 +266,7 @@ export class CodexSecurityCloudClient {
 	async getConfiguration(configurationId: string, signal?: AbortSignal): Promise<CodexSecurityCloudConfiguration> {
 		let cursor: string | undefined;
 		do {
+			// model-request: caller getConfiguration — the `signal` its caller passes.
 			const page = await this.listConfigurations({ limit: 500, cursor, signal });
 			const found = page.items.find(item => item.id === configurationId || item.sourceId === configurationId);
 			if (found) return found;
@@ -274,6 +283,7 @@ export class CodexSecurityCloudClient {
 		) {
 			throw new Error("lookbackDays must be a positive integer or 'all'");
 		}
+		// model-request: caller startScan — the `signal` in its caller's input.
 		const raw = await this.#request("scan_configurations", {
 			method: "POST",
 			signal: input.signal,
@@ -298,7 +308,8 @@ export class CodexSecurityCloudClient {
 		return normalizeConfiguration(raw);
 	}
 
-	async getStats(configurationId: string, signal?: AbortSignal): Promise<CodexSecurityCloudStats> {
+	async getScanStats(configurationId: string, signal?: AbortSignal): Promise<CodexSecurityCloudStats> {
+		// model-request: caller getScanStats — the `signal` its caller passes.
 		const raw = await this.#request(`scan_configurations/${encodeURIComponent(configurationId)}/stats`, { signal });
 		const result: CodexSecurityCloudStats = {
 			configurationId,
@@ -336,6 +347,7 @@ export class CodexSecurityCloudClient {
 		const summaries: JsonObject[] = [];
 		let cursor: string | undefined;
 		do {
+			// model-request: caller listFindingDetails — the `signal` its caller passes.
 			const page = await this.#request("scan-findings", {
 				query: {
 					repo: repositoryUrl,
@@ -361,6 +373,7 @@ export class CodexSecurityCloudClient {
 				...(await Promise.all(
 					batch.map(item => {
 						const id = requiredString(item.hid ?? item.id, "finding id");
+						// model-request: caller listFindingDetails — the `signal` its caller passes.
 						return this.#request(`scan-findings/${encodeURIComponent(id)}`, { signal });
 					}),
 				)),
@@ -622,9 +635,12 @@ export async function pullCodexSecurityCloudResults(
 	input: PullCodexSecurityCloudResultsInput,
 ): Promise<SecurityScanBundle> {
 	const importedAt = new Date().toISOString();
+	// model-request: caller pullCodexSecurityCloudResults — the `signal` in its caller's input.
 	const configuration = await input.client.getConfiguration(input.configurationId, input.signal);
-	const stats = await input.client.getStats(configuration.id, input.signal);
+	// model-request: caller pullCodexSecurityCloudResults — the `signal` in its caller's input.
+	const stats = await input.client.getScanStats(configuration.id, input.signal);
 	await assertCloudRepositoryMatchesStore(configuration, input.store, input.signal);
+	// model-request: caller pullCodexSecurityCloudResults — the `signal` in its caller's input.
 	const details = await input.client.listFindingDetails(configuration.repositoryUrl, configuration, input.signal);
 	const scanId = createSecurityScanId();
 	const findings = details.map(item => normalizeFinding(item, scanId, configuration, importedAt));

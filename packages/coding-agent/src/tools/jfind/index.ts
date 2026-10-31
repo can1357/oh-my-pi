@@ -97,6 +97,8 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 				: formatPathRelativeToCwd(root.path, cwd, { trailingSlash: root.type === "directory" });
 		const registry = this.session.modelRegistry;
 		if (!registry) throw new ToolError("find has no model registry to resolve a judge from");
+		// model-request: turn — the tool call's signal (the cell's, when an eval cell calls `find`), which the judge
+		// carries from construction so none of its judgments outlives the call.
 		const judge = resolveJudge({
 			settings: this.session.settings,
 			registry,
@@ -106,6 +108,7 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 			telemetry: this.session.getTelemetry?.(),
 			cache: sharedJudgmentCache(),
 			costGate: this.session.costGate,
+			signal,
 		});
 		const started = performance.now();
 		const timeout = AbortSignal.timeout(FIND_TIMEOUT_MS);

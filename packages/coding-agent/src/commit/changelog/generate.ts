@@ -57,6 +57,7 @@ export async function generateChangelogEntries({
 		stat,
 		diff,
 	});
+	// model-request: no-session — changelog entries for `omp commit`, which runs from the command line; no session exists.
 	const response = await retryTransientCompletion(
 		() =>
 			completeSimple(

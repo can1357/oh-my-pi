@@ -52,6 +52,7 @@ async function callJinaSearch(
 	numResults: number,
 	site?: string,
 	signal?: AbortSignal,
+	// model-request: none — the Jina search API, not a model request.
 	fetchImpl: FetchImpl = fetch,
 	timeoutMs?: number,
 ): Promise<JinaSearchResponse> {

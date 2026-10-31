@@ -51,6 +51,7 @@ try {
 			manager.appendMessage(assistant(model, turn));
 		}
 		const session = new AgentSession({
+			// model-request: no-session — a benchmark measuring session construction; this agent is never prompted.
 			agent: new Agent({
 				initialState: {
 					model,

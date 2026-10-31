@@ -121,14 +121,25 @@ export class AuthBrokerClient {
 	readonly #token: string;
 	readonly #timeoutMs: number;
 	readonly #maxRetries: number;
-	readonly #fetch: typeof fetch;
+	/** An injected fetch; without one, each request reads the global `fetch` when it is made. */
+	readonly #fetchImpl: typeof fetch | undefined;
 
 	constructor(opts: AuthBrokerClientOptions) {
 		this.#baseUrl = opts.url.replace(/\/+$/, "");
 		this.#token = opts.token;
 		this.#timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 		this.#maxRetries = opts.maxRetries ?? DEFAULT_MAX_RETRIES;
-		this.#fetch = opts.fetchImpl ?? fetch;
+		this.#fetchImpl = opts.fetchImpl;
+	}
+
+	/**
+	 * The fetch for one request. The global is read per request, not captured at construction: a client
+	 * built before the provider-request hold wrapped `fetch` must still send through that wrapper, so a
+	 * request from a held caller waits like every other.
+	 */
+	get #fetch(): typeof fetch {
+		// model-request: none — the credential broker, not a model request.
+		return this.#fetchImpl ?? globalThis.fetch;
 	}
 
 	healthz(signal?: AbortSignal): Promise<HealthzResponse> {

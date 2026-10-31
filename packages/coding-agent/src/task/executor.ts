@@ -11,7 +11,13 @@ import { AgentBusyError, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-ag
 import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
 import { isCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { isRecord, logger, popLoopPhase, prompt, pushLoopPhase, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
-import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobError, AsyncJobManager, type AsyncJobRunResult } from "../async";
+import {
+	ASYNC_JOB_MANAGER_SHUTDOWN_REASON,
+	AsyncJobError,
+	AsyncJobManager,
+	type AsyncJobRunResult,
+	SUBAGENT_TEARDOWN_DECIDES,
+} from "../async";
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { ModelRegistry } from "../config/model-registry";
@@ -1664,6 +1670,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	// failures just leave the label unset.
 	const labelSource = assignment?.trim();
 	if (!args.description && args.modelRegistry && args.settings && labelSource) {
+		// model-request: turn — the subagent run's abort signal: the label names the run and stops with it.
 		generateTaskLabel(labelSource, args.modelRegistry, args.settings, id, abortSignal)
 			.then(label => {
 				if (!label || abortSignal.aborted || progress.description) return;
@@ -3297,6 +3304,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 						id,
 						agentId: id,
 						ownerId,
+						survivesBeginDispose: SUBAGENT_TEARDOWN_DECIDES,
 						widgetInputs: createTaskWidgetInputs({
 							manager,
 							agentId: id,
@@ -3556,8 +3564,16 @@ export async function finalizeSubagentLifecycle(args: {
 	cleanupDeadlineAt?: number;
 	onCleanupDeferred?: (completion: Promise<void>) => void;
 	onRelease?: () => Promise<void>;
+	/**
+	 * The lifecycle that owned the run when it started; defaults to the current
+	 * global. The agent is settled with that owner alone, so one that finishes
+	 * after its owner tore down is released with the owner's other agents, never
+	 * handed to whichever owner holds the global slot by then.
+	 */
+	lifecycle?: AgentLifecycleManager;
 }): Promise<void> {
 	const registry = AgentRegistry.global();
+	const lifecycle = args.lifecycle ?? AgentLifecycleManager.global();
 	const ref = registry.get(args.id);
 	const ownsRef = Boolean(ref && ref.session === args.session);
 	const cleanupDeadlineAt = args.cleanupDeadlineAt ?? Date.now() + 5000;
@@ -3606,7 +3622,7 @@ export async function finalizeSubagentLifecycle(args: {
 		if (ref && ownsRef) {
 			if (args.abortKind === "shutdown") {
 				try {
-					await AgentLifecycleManager.global().release(args.id, ref);
+					await lifecycle.release(args.id, ref);
 				} catch (error) {
 					logger.warn("runSubagent: failed to release session during manager shutdown", {
 						id: args.id,
@@ -3620,7 +3636,7 @@ export async function finalizeSubagentLifecycle(args: {
 				// decision is durable and a restart cannot rediscover the transcript
 				// as a revivable parked agent.
 				try {
-					await AgentLifecycleManager.global().release(args.id, ref, { tombstone: true });
+					await lifecycle.release(args.id, ref, { tombstone: true });
 				} catch (error) {
 					logger.warn("runSubagent: failed to persist kill tombstone", { id: args.id, error: String(error) });
 					registry.setStatus(args.id, "aborted", ref);
@@ -3650,7 +3666,7 @@ export async function finalizeSubagentLifecycle(args: {
 		await releaseOwnedResources();
 		return;
 	}
-	AgentLifecycleManager.global().adopt(
+	lifecycle.adopt(
 		args.id,
 		{
 			idleTtlMs: args.agentIdleTtlMs,
@@ -4254,6 +4270,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	const cleanupGraceMs = options.cleanupGraceMs ?? TASK_ABORT_CLEANUP_GRACE_MS;
 	const structured = options.structured !== false;
 	const startTime = Date.now();
+	// The lifecycle owner this run answers to is the one live now. A top-level
+	// session's teardown disposes it before aborting its own running tools, so a
+	// run it interrupts finishes after the global slot has moved on: settled with
+	// its own owner, the agent is released rather than adopted by the next one.
+	const lifecycle = AgentLifecycleManager.global();
 	// Set by the session's onFirstChatDispatch hook the first time the agent
 	// loop dispatches a chat request to the provider — the launch-complete boundary.
 	let firstChatDispatchAt: number | undefined;
@@ -5134,6 +5155,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					reviveSession,
 					cleanupDeadlineAt,
 					onRelease: options.onRelease,
+					lifecycle,
 					onCleanupDeferred: completion => {
 						deferredSessionShutdown = completion;
 						deferCleanup(completion);

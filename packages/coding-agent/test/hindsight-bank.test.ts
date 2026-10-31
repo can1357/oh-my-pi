@@ -269,9 +269,9 @@ describe("ensureBankExists", () => {
 		const seen = new Set<string>();
 		const config = baseConfig({ bankMission: "remember everything", retainMission: "extract facts" });
 
-		await ensureBankExists(client, "bank-a", config, seen);
-		await ensureBankExists(client, "bank-a", config, seen);
-		await ensureBankExists(client, "bank-b", config, seen);
+		await ensureBankExists(client, "bank-a", config, seen, undefined);
+		await ensureBankExists(client, "bank-a", config, seen, undefined);
+		await ensureBankExists(client, "bank-b", config, seen, undefined);
 
 		expect(createSpy).toHaveBeenCalledTimes(2);
 		expect(createSpy).toHaveBeenCalledWith(
@@ -290,8 +290,8 @@ describe("ensureBankExists", () => {
 		createSpy = vi.spyOn(HindsightApi.prototype, "createBank").mockResolvedValue({} as never);
 		const seen = new Set<string>();
 
-		await ensureBankExists(client, "bank", baseConfig({ bankMission: "" }), seen);
-		await ensureBankExists(client, "bank", baseConfig({ bankMission: "   " }), seen);
+		await ensureBankExists(client, "bank", baseConfig({ bankMission: "" }), seen, undefined);
+		await ensureBankExists(client, "bank", baseConfig({ bankMission: "   " }), seen, undefined);
 
 		expect(createSpy).toHaveBeenCalledTimes(1);
 		expect(createSpy).toHaveBeenCalledWith(
@@ -306,7 +306,7 @@ describe("ensureBankExists", () => {
 		const seen = new Set<string>();
 		const config = baseConfig({ bankMission: "do the thing" });
 
-		await expect(ensureBankExists(client, "bank-x", config, seen)).resolves.toBeUndefined();
+		await expect(ensureBankExists(client, "bank-x", config, seen, undefined)).resolves.toBeUndefined();
 		expect(seen.has("bank-x")).toBe(false);
 	});
 });

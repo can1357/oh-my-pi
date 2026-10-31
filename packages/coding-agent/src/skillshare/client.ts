@@ -268,6 +268,7 @@ export class SkillshareClient {
 
 		let response: Response;
 		try {
+			// model-request: none — the skill registry, not a model request.
 			response = await fetch(url, { method, headers, body, redirect: "follow" });
 		} catch (error) {
 			throw new Error(

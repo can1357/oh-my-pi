@@ -658,6 +658,7 @@ export async function renderHtmlToText(
 	// Per-attempt budget for remote endpoints so one stall cannot consume the
 	// whole reader-mode budget and starve the local fallbacks.
 	const remoteSignal = () => ptree.combineSignals(userSignal, remoteBudgetMs);
+	// model-request: none — the fetch tool's web requests, not model requests.
 	const fetchImpl = fetchOverride ?? fetch;
 
 	const runners: Record<FetchProvider, () => Promise<string | null>> = {

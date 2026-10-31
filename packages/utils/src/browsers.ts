@@ -200,6 +200,7 @@ async function downloadArchive(
 	destination: string,
 	onProgress: ((progress: BrowserDownloadProgress) => void) | undefined,
 ): Promise<void> {
+	// model-request: none — downloads a browser build.
 	const response = await fetch(url, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) });
 	if (!response.ok || !response.body) {
 		throw new Error(`Browser download failed (${response.status} ${response.statusText}) from ${url}`);

@@ -108,6 +108,7 @@ export async function scrapeWithFirecrawl(
 
 	const body = { url, formats: ["markdown"] };
 
+	// model-request: none — the Firecrawl scrape API, not a model request.
 	const response = await fetchWithRetry(resolveFirecrawlUrl("/scrape"), {
 		method: "POST",
 		headers: {

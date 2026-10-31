@@ -127,6 +127,7 @@ async function browseHtmlPage(
 
 /** Fetch with a fresh browser profile, escalating rejected production responses to the stealth browser. */
 export async function browserFetch(url: string, options: BrowserFetchOptions): Promise<LoadedHtmlPage> {
+	// model-request: none — a search result page, not a model request.
 	const fetchImpl = options.fetch ?? fetch;
 	let page: LoadedHtmlPage;
 	try {

@@ -8,7 +8,8 @@
  * every gateway client's 30-day sticky row resident.
  */
 import * as os from "node:os";
-import { getAppName, getInstallId, logger, postmortem } from "@oh-my-pi/pi-utils";
+import { getAppName, getInstallId, logger, postmortem, runOutsideRequestHold } from "@oh-my-pi/pi-utils";
+import { admitSharedStart } from "@oh-my-pi/pi-utils/request-hold-scope";
 import type { AuthCredentialStore } from "../auth/store";
 import {
 	type AuthCredential,
@@ -1360,7 +1361,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	 */
 	async fetchUsageReports(signal?: AbortSignal, provider?: Provider): Promise<UsageReport[] | null> {
 		this.#noteActivity();
-		const reports = await raceSignal(this.#loadUsageReports(provider), signal, "auth-broker request aborted");
+		const reports = await raceSignal(this.#loadUsageReports(provider, signal), signal, "auth-broker request aborted");
 		if (!reports) return null;
 		const visible = this.#filterUsageReports(this.#applyUsageOverlays(reports));
 		return provider === undefined ? visible : visible.filter(report => report.provider === provider);
@@ -1381,7 +1382,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		signal?: AbortSignal,
 	): Promise<UsageReport | null> {
 		this.#noteActivity();
-		const reports = await raceSignal(this.#loadUsageReports(provider), signal, "auth-broker request aborted");
+		const reports = await raceSignal(this.#loadUsageReports(provider, signal), signal, "auth-broker request aborted");
 		const visibleReports = reports ? this.#filterUsageReports(reports) : null;
 		const matched = visibleReports ? matchUsageReport(visibleReports, provider, credential) : null;
 		const overlay = this.#getActiveUsageOverlay(provider, credential);
@@ -1500,7 +1501,8 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		return maximum;
 	}
 
-	#loadUsageReports(provider?: Provider): Promise<UsageReport[] | null> {
+	/** `signal` is the caller's: it decides only whether a held caller may start a lookup. */
+	#loadUsageReports(provider?: Provider, signal?: AbortSignal): Promise<UsageReport[] | null> {
 		// An existing aggregate result covers a provider lookup too. The reverse
 		// is not true: a partial cache must never hide other providers from /usage.
 		const now = Date.now();
@@ -1520,30 +1522,37 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		const existing = this.#usageInflight.get(provider) ?? this.#usageInflight.get(undefined);
 		if (existing) return existing;
 		const epoch = this.#usageCacheEpoch;
-		const inflight = this.#client
-			.fetchUsage({ provider, maxAccountsPerProvider: this.#maxBrokerUsageAccounts(provider) })
-			.then(body => {
-				if (epoch !== this.#usageCacheEpoch) {
+		// A held caller must not start the lookup for the others; it may only join one in flight.
+		const refusal = admitSharedStart(signal);
+		if (refusal) return refusal;
+		// Shared by every caller, so started outside the caller's provider-request hold, the reload an
+		// invalidation calls for included.
+		const inflight: Promise<UsageReport[] | null> = runOutsideRequestHold(() =>
+			this.#client
+				.fetchUsage({ provider, maxAccountsPerProvider: this.#maxBrokerUsageAccounts(provider) })
+				.then(body => {
+					if (epoch !== this.#usageCacheEpoch) {
+						if (this.#usageInflight.get(provider) === inflight) this.#usageInflight.delete(provider);
+						return this.#loadUsageReports(provider);
+					}
+					// Older brokers ignore the query and still return an aggregate.
+					// Keep it scoped locally; a scoped response is never an aggregate cache.
+					const reports =
+						provider === undefined ? body.reports : body.reports.filter(report => report.provider === provider);
+					this.#usageCache.set(provider, { reports, fetchedAt: Date.now() });
+					return reports;
+				})
+				.catch(error => {
+					logger.warn("auth-broker usage fetch failed", { error: String(error) });
+					// Documented 15s TTL fallback, isolated to the requested scope.
+					// Invalidation preserves this cooldown, as it does for aggregate polls.
+					this.#usageCache.set(provider, { reports: null, fetchedAt: Date.now() });
+					return null;
+				})
+				.finally(() => {
 					if (this.#usageInflight.get(provider) === inflight) this.#usageInflight.delete(provider);
-					return this.#loadUsageReports(provider);
-				}
-				// Older brokers ignore the query and still return an aggregate.
-				// Keep it scoped locally; a scoped response is never an aggregate cache.
-				const reports =
-					provider === undefined ? body.reports : body.reports.filter(report => report.provider === provider);
-				this.#usageCache.set(provider, { reports, fetchedAt: Date.now() });
-				return reports;
-			})
-			.catch(error => {
-				logger.warn("auth-broker usage fetch failed", { error: String(error) });
-				// Documented 15s TTL fallback, isolated to the requested scope.
-				// Invalidation preserves this cooldown, as it does for aggregate polls.
-				this.#usageCache.set(provider, { reports: null, fetchedAt: Date.now() });
-				return null;
-			})
-			.finally(() => {
-				if (this.#usageInflight.get(provider) === inflight) this.#usageInflight.delete(provider);
-			});
+				}),
+		);
 		this.#usageInflight.set(provider, inflight);
 		return inflight;
 	}
@@ -1598,12 +1607,19 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	#flushObservedUsage(): Promise<void> {
+		// The batch holds every session's usage, so its sends belong to none of them: chained outside
+		// whichever caller's provider-request hold scheduled the flush. Deliberately no `admitSharedStart`:
+		// a held caller that recorded usage (a response that began before its hold) must not hold or drop
+		// the live sessions' usage in the same batch. The send is accounting for spend already incurred,
+		// to the auth broker, never a model request.
 		// The tail never rejects, so one failed send cannot stall every later flush.
-		this.#observedUsageFlush = this.#observedUsageFlush
-			.then(() => this.#sendObservedUsage())
-			.catch(error => {
-				logger.debug("auth-broker observed usage flush failed", { error: String(error) });
-			});
+		this.#observedUsageFlush = runOutsideRequestHold(() =>
+			this.#observedUsageFlush
+				.then(() => this.#sendObservedUsage())
+				.catch(error => {
+					logger.debug("auth-broker observed usage flush failed", { error: String(error) });
+				}),
+		);
 		return this.#observedUsageFlush;
 	}
 

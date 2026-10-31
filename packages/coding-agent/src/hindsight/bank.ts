@@ -130,6 +130,7 @@ export async function ensureBankExists(
 	bankId: string,
 	config: HindsightConfig,
 	banksSet: Set<string>,
+	signal: AbortSignal | undefined,
 ): Promise<void> {
 	if (banksSet.has(bankId)) return;
 
@@ -137,9 +138,11 @@ export async function ensureBankExists(
 	const retainMission = config.retainMission?.trim();
 
 	try {
+		// model-request: caller ensureBankExists — the `signal` its caller passes.
 		await client.createBank(bankId, {
 			reflectMission: mission || undefined,
 			retainMission: retainMission || undefined,
+			signal,
 		});
 		banksSet.add(bankId);
 		if (banksSet.size > MISSION_SET_CAP) {

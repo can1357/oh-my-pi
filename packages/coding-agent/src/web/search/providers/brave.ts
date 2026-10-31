@@ -138,6 +138,7 @@ async function callBraveSearch(
 	const freshness = braveFreshness(parsed, params.recency);
 	if (freshness) url.searchParams.set("freshness", freshness);
 
+	// model-request: none — the Brave search API, not a model request.
 	const fetchImpl = params.fetch ?? fetch;
 	const response = await fetchImpl(url, {
 		headers: {

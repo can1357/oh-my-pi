@@ -151,7 +151,9 @@ export const getModels = getBundledModels;
 
 const ANTHROPIC_MESSAGES_API = {
 	// Loads the Anthropic transport on first invocation, not extension setup.
+	// model-request: extension — the legacy `/compat` Anthropic transport handed to extensions; the extension boundary governs its requests.
 	stream: streamAnthropic,
+	// model-request: extension — the legacy `/compat` Anthropic transport handed to extensions; the extension boundary governs its requests.
 	streamSimple: (model: Model<"anthropic-messages">, context: Context, options?: SimpleStreamOptions) =>
 		streamSimple(model, context, options),
 };
@@ -179,6 +181,7 @@ export function streamSimpleOpenAIResponses(
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
+	// model-request: extension — the legacy `/compat` OpenAI Responses stream handed to extensions; the extension boundary governs its requests.
 	return streamSimple(model, context, options);
 }
 /**
