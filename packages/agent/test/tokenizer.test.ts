@@ -105,12 +105,20 @@ describe("countTokens with modes", () => {
 				`import { Tokenizer } from ${JSON.stringify(path.join(import.meta.dir, "../src/tokenizer"))};
 				process.stdout.write(String(new Tokenizer({}).countTokens(${JSON.stringify(text)})));`,
 			],
-			{ env: { ...process.env, NODE_ENV: "production", PI_TOKENIZER_ACCURATE: "0" }, stdout: "pipe" },
+			{ env: { ...process.env, NODE_ENV: "production" }, stdout: "pipe" },
 		);
 		const counted = Number(await new Response(child.stdout).text());
 		expect(await child.exited).toBe(0);
 		expect(counted).toBe(natives.countTokens(text, natives.Encoding.O200kBase));
 		expect(counted).toBeGreaterThan(Buffer.byteLength(text) / 3);
+	});
+
+	test("counts GPT-4 in cl100k_base, not the o200k_base default", () => {
+		const gpt4 = getBundledModel("openai", "gpt-4");
+		const text = "Привет, как дела? Сегодня хорошая погода.";
+		const counted = new Tokenizer(gpt4).countTokens(text, "strict");
+		expect(counted).toBe(natives.countTokens(text, natives.Encoding.Cl100kBase));
+		expect(counted).toBeGreaterThan(natives.countTokens(text, natives.Encoding.O200kBase));
 	});
 
 	test("counts current fragment values without merging boundaries or retaining mutable arrays", () => {

@@ -33,6 +33,7 @@ const NATIVE_ENCODING: Record<ModelTokenizer, natives.Encoding> = {
 	"deepseek-v3": natives.Encoding.DeepSeekV3,
 	"kimi-k2": natives.Encoding.KimiK2,
 	glm5: natives.Encoding.Glm5,
+	cl100k: natives.Encoding.Cl100kBase,
 	o200k: natives.Encoding.O200kBase,
 };
 
@@ -364,8 +365,9 @@ export class Tokenizer {
 	/**
 	 * Whether `message`'s opaque reasoning payload (thinking signatures, redacted
 	 * thinking) may reach this reader: everything except what `transformMessages`
-	 * certainly strips from another model's turn. Without a reader identity,
-	 * every payload is charged.
+	 * certainly strips from another model's turn. Without a replay reader (no
+	 * model, or a `filterReasoningHistory` target) every payload is charged,
+	 * which overcounts a filtering reader's foreign turns.
 	 */
 	#receivesReasoningPayload(message: AssistantMessage): boolean {
 		const reader = this.#reasoningReader;
