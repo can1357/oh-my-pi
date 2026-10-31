@@ -102,86 +102,132 @@ export function restoreRecordPath(archiveFile: string): string {
 	return `${archiveFile}.restoring`;
 }
 
-/** How every restore record begins: the command that finishes the restore. */
-const RESTORE_RECORD_START = "omp gc --restore ";
-
 /**
- * Why the name of a restore record cannot take one, or undefined when it can:
- * when nothing is there, or a regular file that reads as a record a restore
- * wrote — its first line the command that finishes the restore. A link, a
- * FIFO, a device or a directory there, or a file holding anything else, is
- * not a record a restore wrote: the name being the expected one is not
- * evidence that what holds it is ours. Nothing is written through it,
- * waited on, replaced or removed in its place; the caller refuses, naming
- * it. `lstat`, so a link is judged as the link, and the file is read through
- * a descriptor that neither follows a link nor waits on a FIFO.
+ * Why the name of a restore record cannot serve as one, or undefined when it
+ * can: when nothing is there, or a regular file. A link, a FIFO, a device or a
+ * directory there is not a record a restore wrote; nothing is written through
+ * it, waited on, replaced or removed in its place, and the caller refuses,
+ * naming it. `lstat`, so a link is judged as the link. A regular file there is
+ * not judged by what it holds: whatever it holds, it is left — see
+ * {@link createRestoreRecord}.
  */
 export async function restoreRecordRefusal(record: string): Promise<string | undefined> {
 	const standing = await fs.lstat(record).catch((error: unknown) => {
 		if (isEnoent(error)) return undefined;
 		throw error;
 	});
-	if (!standing) return undefined;
-	const refuse = (what: string): string =>
-		`${record}, where a restore keeps its record of being unfinished, ${what}, not a record a restore wrote, ` +
-		`so nothing was restored and nothing was written to it; look at it, move it aside, and run the same command again`;
-	if (!standing.isFile()) {
-		return refuse(
-			standing.isSymbolicLink()
-				? "is a symbolic link"
-				: standing.isDirectory()
-					? "is a directory"
-					: standing.isFIFO()
-						? "is a FIFO"
-						: "is not a regular file",
-		);
-	}
-	let text: string;
-	try {
-		const handle = await openRegularFile(record);
-		if (!handle) return refuse("is not a regular file");
-		try {
-			text = await handle.readFile("utf8");
-		} finally {
-			await handle.close().catch(() => undefined);
-		}
-	} catch (error) {
-		return refuse(`could not be read (${errorText(error)})`);
-	}
-	return text.startsWith(RESTORE_RECORD_START) ? undefined : refuse("holds something else");
+	if (!standing || standing.isFile()) return undefined;
+	const what = standing.isSymbolicLink()
+		? "a symbolic link"
+		: standing.isDirectory()
+			? "a directory"
+			: standing.isFIFO()
+				? "a FIFO"
+				: "not a regular file";
+	return (
+		`${record}, where a restore keeps its record of being unfinished, is ${what}, not a record a restore wrote, ` +
+		`so nothing was restored and nothing was written to it; look at it, move it aside, and run the same command again. ` +
+		moveAsidePermission(record)
+	);
 }
 
 /**
- * Put `text` at a restore record's name without writing through what stands
- * there: into a file made for it alone, then renamed over the name, which
- * replaces a name and never writes into another file.
+ * What to do when moving a record aside is refused: the directory it is in —
+ * the archive bucket, which can be made read-only — has to be writable.
  */
-export async function writeRestoreRecord(record: string, text: string): Promise<void> {
-	const refused = await restoreRecordRefusal(record);
-	if (refused) throw new Error(refused);
+export function moveAsidePermission(record: string): string {
+	return (
+		`If moving it is refused permission, ${path.dirname(record)} is not writable: make it writable with ` +
+		`\`chmod u+w\` and move it again`
+	);
+}
+
+/**
+ * What is said about a regular file that stood at a restore record's name
+ * before this run: an earlier restore's record, or anything else — what it
+ * holds is no evidence either way. It is left, and while it is there the
+ * session is treated as unfinished.
+ */
+export function restoreRecordLeftNote(record: string): string {
+	return (
+		`${record} was there before this run — an earlier restore's record of being unfinished, or something else — and a ` +
+		`restore removes only the record it created in the same run, so it was left; while it is there this session is treated as ` +
+		`unfinished: look at it, and once the session holds everything, move it aside. ${moveAsidePermission(record)}`
+	);
+}
+
+/** The restore record this run made, held through the descriptor it was made with. */
+interface OwnRestoreRecord {
+	path: string;
+	handle: fs.FileHandle;
+	dev: number;
+	ino: number;
+}
+
+/**
+ * Make this run's restore record, holding `text`, or return undefined when
+ * something already has the name. It is created exclusively — `O_CREAT |
+ * O_EXCL`, which neither follows a link nor opens what is there — and its
+ * identity is taken from the descriptor it was created through, so what this
+ * run later rewrites or removes is the file it made, never one that has the
+ * name by then.
+ */
+async function createRestoreRecord(record: string, text: string): Promise<OwnRestoreRecord | undefined> {
 	await fs.mkdir(path.dirname(record), { recursive: true });
-	const fresh = `${record}.${randomBytes(8).toString("hex")}.tmp`;
-	const handle = await fs.open(fresh, "wx", 0o600);
+	let handle: fs.FileHandle;
 	try {
-		await handle.writeFile(text);
-	} finally {
-		await handle.close().catch(() => undefined);
+		handle = await fs.open(record, "wx", 0o600);
+	} catch (error) {
+		if (codeOf(error) === "EEXIST") return undefined;
+		throw error;
 	}
 	try {
-		await fs.rename(fresh, record);
+		await handle.writeFile(text);
+		const { dev, ino } = await handle.stat();
+		return { path: record, handle, dev, ino };
 	} catch (error) {
-		await fs.unlink(fresh).catch(() => undefined);
+		await handle.close().catch(() => undefined);
 		throw error;
 	}
 }
 
-/** Take a restore record's name down, removing only a regular file there. */
-export async function dropRestoreRecord(record: string): Promise<void> {
-	const refused = await restoreRecordRefusal(record);
-	if (refused) throw new Error(refused);
-	await fs.unlink(record).catch((error: unknown) => {
-		if (!isEnoent(error)) throw error;
-	});
+/** Put `text` in this run's record, through its descriptor: never through a name. */
+async function rewriteOwnRestoreRecord(own: OwnRestoreRecord, text: string): Promise<void> {
+	await own.handle.truncate(0);
+	await own.handle.write(text, 0);
+}
+
+/**
+ * Take this run's record down, or say why what has its name was left. The
+ * name is first renamed to one only this run knows, which moves exactly what
+ * has the name at that moment; that is removed only when it is the file this
+ * run created, by the identity taken at creation. Anything else is put back
+ * under its name with `link`, which replaces nothing, or, where that cannot
+ * be done, left where the rename put it and named.
+ */
+async function dropOwnRestoreRecord(own: OwnRestoreRecord): Promise<string | undefined> {
+	const aside = `${own.path}.${randomBytes(8).toString("hex")}.leaving`;
+	try {
+		await fs.rename(own.path, aside);
+	} catch (error) {
+		// Gone already: nothing has the name, which is what a finished
+		// restore leaves.
+		if (isEnoent(error)) return undefined;
+		throw error;
+	}
+	const moved = await fs.lstat(aside);
+	if (moved.dev === own.dev && moved.ino === own.ino) {
+		await fs.unlink(aside);
+		return undefined;
+	}
+	const replaced = `${own.path} held something other than the record this restore wrote`;
+	try {
+		await fs.link(aside, own.path);
+	} catch {
+		return `${replaced}; it is now at ${aside}, and nothing was removed: look at it and put it back if it is wanted`;
+	}
+	await fs.unlink(aside);
+	return `${replaced}, so it was left: look at it, and once the session holds everything, move it aside`;
 }
 
 /**
@@ -1673,7 +1719,8 @@ export function stagingResidueNote(dir: string, record: string, consequence: str
 		`${dir} is named by the staging record ${record}, ${consequence}. If a killed gc run left it, stop any gc run and ` +
 		`any use of this session, look at the record and the directory, then move both out of the session trees with ` +
 		`\`omp gc --quarantine ${shellQuote(path.basename(record))} --apply${agentDirFlag(agentDir)}\`, leave any ` +
-		`\`.restoring\` record where it is, and run the same command again. If no gc run made the directory, move only the ` +
+		`\`.restoring\` record where it is, and run the same command again; if it then reports that a \`.restoring\` ` +
+		`record was there before it, look at that record and move it aside. If no gc run made the directory, move only the ` +
 		`record out of ${path.dirname(record)} and run the same command again`
 	);
 }
@@ -2318,7 +2365,16 @@ export async function artifactRestoreConflicts(
 ): Promise<string[]> {
 	const archiveArtifacts = archiveFile.slice(0, -ARCHIVED_SESSION_SUFFIX.length);
 	const liveArtifacts = sessionFile.slice(0, -SESSION_SUFFIX.length);
-	if (!(await statIfPresent(archiveArtifacts))) return [];
+	// A killed restore stages in the live tree, so its residue is there, and
+	// it stops a restore whether or not the archive still has a tree to carry.
+	const liveResidue = async (): Promise<string[]> => {
+		const notes: string[] = [];
+		for (const { dir, record } of await recordedStagingIn(agentDir, liveArtifacts)) {
+			notes.push(stagingResidueNote(dir, record, LIVE_RESIDUE));
+		}
+		return notes;
+	};
+	if (!(await statIfPresent(archiveArtifacts))) return await liveResidue();
 	const archiveRoot = await fs.realpath(archiveArtifacts);
 	const isResidue = await stagingResidueUnder(agentDir, archiveArtifacts);
 	const conflicts: string[] = [];
@@ -2351,6 +2407,7 @@ export async function artifactRestoreConflicts(
 			unchecked(error);
 			return;
 		}
+
 		if (stat.isDirectory()) {
 			if (existing) {
 				let live: Stats | undefined;
@@ -2392,10 +2449,7 @@ export async function artifactRestoreConflicts(
 		);
 	};
 	await visit(archiveArtifacts, liveArtifacts);
-	// A killed restore stages in the live tree, so its residue is there.
-	for (const { dir, record } of await recordedStagingIn(agentDir, liveArtifacts)) {
-		conflicts.push(stagingResidueNote(dir, record, LIVE_RESIDUE));
-	}
+	conflicts.push(...(await liveResidue()));
 	return conflicts;
 }
 
@@ -2752,12 +2806,22 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 	// refused with "a running process owns this session" — the holder being
 	// this one's own leaked handle.
 	const record = restoreRecordPath(archiveFile);
+	let own: OwnRestoreRecord | undefined;
 	try {
 		// The record goes down before anything is published and comes up only
 		// when everything is home. Nothing that runs later has to work out from
 		// the live tree whether this finished, which is the question every
-		// earlier version of this got wrong in both directions.
-		await writeRestoreRecord(record, `${restoreCommand}\n`);
+		// earlier version of this got wrong in both directions. This run makes
+		// its own record and removes only that; a file already at the name —
+		// an earlier run's record, or anything else — keeps the session marked
+		// unfinished, and is left.
+		const refused = await restoreRecordRefusal(record);
+		if (refused) throw new Error(refused);
+		own = await createRestoreRecord(record, `${restoreCommand}\n`);
+		if (own === undefined) {
+			const late = await restoreRecordRefusal(record);
+			if (late) throw new Error(late);
+		}
 		const notes: string[] = [];
 		let bytes: number;
 		if (await statIfPresent(sessionPath)) {
@@ -2818,13 +2882,7 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 				// directory stays in the archive, and nothing here suggests
 				// removing it.
 				for (const [dir, staging] of leftOut) notRestored.push(stagingResidueNote(dir, staging, ARCHIVED_RESIDUE));
-				// A restore killed while it staged left its stage in the live
-				// tree; until that is moved out, this restore has not finished.
-				const residue = await recordedStagingIn(stagingAgentDir, liveArtifacts);
-				for (const { dir, record: staging } of residue) {
-					notRestored.push(stagingResidueNote(dir, staging, LIVE_RESIDUE));
-				}
-				artifactsRestored = leftOut.length === 0 && residue.length === 0;
+				artifactsRestored = leftOut.length === 0;
 			} catch (error) {
 				notRestored.push(
 					`the artifact tree (subagent transcripts, tool output) at ${archiveArtifacts} was not restored whole: ${
@@ -2833,11 +2891,31 @@ export async function restoreArchivedSessionLocked(archiveFile: string, agentDir
 				);
 			}
 		}
+		// A restore killed while it staged left its stage in the live tree;
+		// until that is moved out, this restore has not finished — whether or
+		// not the archive still has an artifact tree to carry.
+		try {
+			const residue = await recordedStagingIn(stagingAgentDir, liveArtifacts);
+			for (const { dir, record: staging } of residue) {
+				notRestored.push(stagingResidueNote(dir, staging, LIVE_RESIDUE));
+			}
+			if (residue.length > 0) artifactsRestored = false;
+		} catch (error) {
+			artifactsRestored = false;
+			notRestored.push(`the live artifact tree at ${liveArtifacts} could not be checked: ${errorText(error)}`);
+		}
 		notRestored.push(...notes);
-		if (notRestored.length === 0) await dropRestoreRecord(record);
-		else await writeRestoreRecord(record, `${restoreCommand}\n${notRestored.join("\n")}\n`);
+		if (own === undefined) {
+			if (await statIfPresent(record)) notRestored.push(restoreRecordLeftNote(record));
+		} else if (notRestored.length === 0) {
+			const left = await dropOwnRestoreRecord(own);
+			if (left) notRestored.push(left);
+		} else {
+			await rewriteOwnRestoreRecord(own, `${restoreCommand}\n${notRestored.join("\n")}\n`);
+		}
 		return { sessionPath, archivePath: archiveFile, bytes, artifactsRestored, notRestored };
 	} finally {
+		await own?.handle.close().catch(() => undefined);
 		leases.release();
 	}
 }

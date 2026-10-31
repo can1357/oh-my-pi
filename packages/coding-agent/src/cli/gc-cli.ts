@@ -62,7 +62,8 @@ import {
 	restoreArchivedSessionLocked,
 	artifactRestoreConflicts,
 	quarantineStagingRecord,
-	dropRestoreRecord,
+	moveAsidePermission,
+	restoreRecordLeftNote,
 	restoreRecordRefusal,
 	stagingResidueNote,
 	stagingResidueUnder,
@@ -2134,28 +2135,27 @@ async function copySessionIntoArchive(candidate: ArchiveCandidate): Promise<{ br
 		if (notes.length > 0) throw new Error(`${errorMessage(error)}; ${notes.join("; ")}`);
 		throw error;
 	}
-	// An earlier restore's record of being unfinished goes only when this
-	// archive covers what it says is outstanding. Clearing it because a
-	// later command ran is the same mistake as deleting by name: acting on
-	// the strength of something nobody checked. A live tree still missing an
-	// entry the archive holds would otherwise let the next ordinary resume
-	// open that session silently incomplete.
+	// An earlier restore's record of being unfinished is never removed here:
+	// this run did not write it, and a run removes only what it made itself.
+	// What a file at that name holds is no evidence of who wrote it — a crash,
+	// an older version or another program can leave anything there. It is
+	// reported, with what the live tree still lacks or that it lacks nothing.
 	const record = restoreRecordPath(destSession);
-	if (await pathExists(record)) {
+	const standing = await fs.lstat(record).catch((error: unknown) => {
+		if (codeOf(error) === "ENOENT") return undefined;
+		throw error;
+	});
+	if (standing) {
 		const outstanding = await archivedPathsWithoutLiveCopies(destSession, sourceSession);
-		if (outstanding.length === 0) {
-			try {
-				await dropRestoreRecord(record);
-			} catch (error) {
-				notes.push(errorMessage(error));
-			}
-		} else {
-			notes.push(
-				`${sourceSession} is still missing ${outstanding.length} of the entries the archive holds ` +
-					`(${outstanding[0]}${outstanding.length > 1 ? ", …" : ""}), so the unfinished restore recorded at ` +
-					`${record} was kept; run \`omp gc --restore ${shellQuote(path.basename(destSession, ".jsonl.gz"))} --apply${candidate.recovery}\``,
-			);
-		}
+		notes.push(
+			outstanding.length === 0
+				? `${record} records a restore that did not finish, and ${sourceSession} now holds every entry the archive ` +
+						`holds; this run did not write that record, so it was left — while it is there the session is treated ` +
+						`as unfinished: look at it, and move it aside. ${moveAsidePermission(record)}`
+				: `${sourceSession} is still missing ${outstanding.length} of the entries the archive holds ` +
+						`(${outstanding[0]}${outstanding.length > 1 ? ", …" : ""}), so the unfinished restore recorded at ` +
+						`${record} was kept; run \`omp gc --restore ${shellQuote(path.basename(destSession, ".jsonl.gz"))} --apply${candidate.recovery}\``,
+		);
 	}
 	return { brokenLinks, notes };
 }
@@ -2628,18 +2628,25 @@ export function renderText(result: GcResult): string {
 }
 
 /**
- * What `--restore --apply` would refuse, for the preview to say first: what
- * stands at the restore record's name, and conflicts in the artifact tree. A
- * preview that checks only the transcript exits 0 over a refusal applying
- * then reports.
+ * What `--restore --apply` would refuse or leave, for the preview to say
+ * first: what stands at the restore record's name — something that is not a
+ * regular file is refused, and a regular file is left, keeping the session
+ * unfinished — and conflicts in the artifact tree. A preview that checks
+ * only the transcript exits 0 over a refusal applying then reports.
  */
 async function previewArtifactConflicts(archiveFile: string, sessionPath: string, agentDir: string): Promise<string[]> {
 	const refusals: string[] = [];
+	const record = restoreRecordPath(archiveFile);
 	try {
-		const record = await restoreRecordRefusal(restoreRecordPath(archiveFile));
-		if (record) refusals.push(record);
+		const refused = await restoreRecordRefusal(record);
+		const standing = await fs.lstat(record).catch((error: unknown) => {
+			if (codeOf(error) === "ENOENT") return undefined;
+			throw error;
+		});
+		if (refused) refusals.push(refused);
+		else if (standing) refusals.push(restoreRecordLeftNote(record));
 	} catch (error) {
-		refusals.push(`${restoreRecordPath(archiveFile)} could not be looked at: ${errorMessage(error)}`);
+		refusals.push(`${record} could not be looked at: ${errorMessage(error)}`);
 	}
 	try {
 		refusals.push(
