@@ -506,7 +506,7 @@ export class HandedSignals {
  * `undefined`). Symbol-keyed host markers stay with the host, as `structuredClone` leaves them.
  */
 export function copyHostData<T>(value: T, signals?: HandedSignals): T {
-	return copyHostValue(value, new Map(), signals) as T;
+	return copyHostValue(value, new Map(), signals, false) as T;
 }
 
 /**
@@ -519,8 +519,12 @@ export function copyHostData<T>(value: T, signals?: HandedSignals): T {
  * extension's alone: every field a model declares ({@link MODEL_ROW}), and every field of the
  * shapes those fields declare in turn — its cost, its identity, its thinking — each read as the
  * host reads it (a class's getter or an inherited field included) and copied onto a plain object.
- * A `resolveHeaders` is the host's code, not data: the copy's calls it on the host's model, with a
- * signal of the host's own that follows the one the extension passes, and answers a copy.
+ * A field the type leaves open (`compat`, `kindConfig`, `headers`, `requestMetadata`) is read the
+ * same way all the way down: the host reads a value there by property access, so an object a class
+ * holds there arrives with what its getters answer, not as the `{}` its own fields would make. A
+ * getter that throws throws here, as it does when the host reads the model. A `resolveHeaders` is
+ * the host's code, not data: the copy's calls it on the host's model, with a signal of the host's
+ * own that follows the one the extension passes, and answers a copy.
  */
 export function handHostModel(model: Model<Api>): Model<Api> {
 	const copies = new Map<AuthorDataSchema, Map<object, unknown>>();
@@ -541,9 +545,9 @@ export function handHostModel(model: Model<Api>): Model<Api> {
 /**
  * Host data copied by the schema of what it is declared to be: a known shape field by field, read
  * the way a field read reads it — so a class's getter and an inherited field arrive as the host
- * sees them, which a copy of own enumerable fields would miss — and an open value as data
- * ({@link copyHostData}). The host's counterpart of `snapshotAuthorData`, without its refusal of
- * functions: this is the host's data, not an author's.
+ * sees them, which a copy of own enumerable fields would miss — and an open value as data read the
+ * same way ({@link copyHostRead}). The host's counterpart of `snapshotAuthorData`, without its
+ * refusal of functions: this is the host's data, not an author's.
  */
 function copyHostDeclared(
 	value: unknown,
@@ -551,7 +555,7 @@ function copyHostDeclared(
 	copies: Map<AuthorDataSchema, Map<object, unknown>>,
 ): unknown {
 	if (typeof value !== "object" || value === null) return value;
-	if (schema.kind === "data" || schema.kind === "callback") return copyHostData(value);
+	if (schema.kind === "data" || schema.kind === "callback") return copyHostRead(value);
 	let copied = copies.get(schema);
 	if (!copied) {
 		copied = new Map();
@@ -560,14 +564,14 @@ function copyHostDeclared(
 	const known = copied.get(value);
 	if (known !== undefined) return known;
 	if (schema.kind === "items") {
-		if (!Array.isArray(value)) return copyHostData(value);
+		if (!Array.isArray(value)) return copyHostRead(value);
 		const copy: unknown[] = [];
 		copied.set(value, copy);
 		for (let index = 0; index < value.length; index++)
 			copy[index] = copyHostDeclared(value[index], schema.items, copies);
 		return copy;
 	}
-	if (Array.isArray(value)) return copyHostData(value);
+	if (Array.isArray(value)) return copyHostRead(value);
 	const copy: Record<PropertyKey, unknown> = {};
 	copied.set(value, copy);
 	const copyFields = (fields: AuthorDataFields["fields"]): void => {
@@ -583,7 +587,7 @@ function copyHostDeclared(
 		case "variants": {
 			const tag: unknown = Reflect.get(value, schema.by);
 			const variant = schema.variants.get(tag);
-			if (!variant) return copyHostData(value);
+			if (!variant) return copyHostRead(value);
 			if (tag !== undefined) copy[schema.by] = tag;
 			copyFields(variant.fields);
 			return copy;
@@ -606,7 +610,42 @@ function handHostResolver(resolver: Function, model: Model<Api>): NonNullable<Mo
 	};
 }
 
-function copyHostValue(value: unknown, copies: Map<object, unknown>, signals: HandedSignals | undefined): unknown {
+/**
+ * Host data copied as {@link copyHostData} copies it, except that an object a class holds is read
+ * as the host reads it: its own enumerable fields and what the getters and inherited data fields
+ * of its classes answer. For a value the host reads by property access — a model's open fields —
+ * where a copy of own fields alone would hand an extension less than the host itself sees.
+ */
+function copyHostRead(value: unknown): unknown {
+	return copyHostValue(value, new Map(), undefined, true);
+}
+
+/** The keys a field read of a class instance answers for: its own enumerable fields, then the
+ *  getters and non-function data fields its classes define, nearest first. */
+function readableKeys(value: object): string[] {
+	const keys = new Set(Object.keys(value));
+	for (
+		let prototype: object | null = Object.getPrototypeOf(value);
+		prototype !== null && prototype !== Object.prototype;
+		prototype = Object.getPrototypeOf(prototype)
+	) {
+		for (const key of Object.getOwnPropertyNames(prototype)) {
+			if (key === "constructor" || key === "__proto__") continue;
+			const descriptor = Object.getOwnPropertyDescriptor(prototype, key);
+			if (descriptor?.get !== undefined || (descriptor !== undefined && typeof descriptor.value !== "function")) {
+				keys.add(key);
+			}
+		}
+	}
+	return [...keys];
+}
+
+function copyHostValue(
+	value: unknown,
+	copies: Map<object, unknown>,
+	signals: HandedSignals | undefined,
+	byRead: boolean,
+): unknown {
 	if (typeof value === "function") return undefined;
 	if (typeof value !== "object" || value === null) return value;
 	const known = copies.get(value);
@@ -639,7 +678,8 @@ function copyHostValue(value: unknown, copies: Map<object, unknown>, signals: Ha
 	if (Array.isArray(value)) {
 		const copy: unknown[] = [];
 		copies.set(value, copy);
-		for (let index = 0; index < value.length; index++) copy[index] = copyHostValue(value[index], copies, signals);
+		for (let index = 0; index < value.length; index++)
+			copy[index] = copyHostValue(value[index], copies, signals, byRead);
 		return copy;
 	}
 	if (types.isMap(value)) {
@@ -647,14 +687,14 @@ function copyHostValue(value: unknown, copies: Map<object, unknown>, signals: Ha
 		copies.set(value, copy);
 		for (const [key, item] of value) {
 			if (typeof key === "function" || typeof item === "function") continue;
-			copy.set(copyHostValue(key, copies, signals), copyHostValue(item, copies, signals));
+			copy.set(copyHostValue(key, copies, signals, byRead), copyHostValue(item, copies, signals, byRead));
 		}
 		return copy;
 	}
 	if (types.isSet(value)) {
 		const copy = new Set<unknown>();
 		copies.set(value, copy);
-		for (const item of value) if (typeof item !== "function") copy.add(copyHostValue(item, copies, signals));
+		for (const item of value) if (typeof item !== "function") copy.add(copyHostValue(item, copies, signals, byRead));
 		return copy;
 	}
 	if (types.isNativeError(value)) {
@@ -664,7 +704,7 @@ function copyHostValue(value: unknown, copies: Map<object, unknown>, signals: Ha
 			const raw: unknown = Reflect.get(value, key);
 			if (typeof raw === "function") continue;
 			Object.defineProperty(copy, key, {
-				value: copyHostValue(raw, copies, signals),
+				value: copyHostValue(raw, copies, signals, byRead),
 				enumerable: Object.getOwnPropertyDescriptor(value, key)?.enumerable === true,
 				writable: true,
 				configurable: true,
@@ -674,10 +714,13 @@ function copyHostValue(value: unknown, copies: Map<object, unknown>, signals: Ha
 	}
 	const copy: Record<string, unknown> = {};
 	copies.set(value, copy);
-	for (const key of Object.keys(value)) {
+	const prototype: unknown = Object.getPrototypeOf(value);
+	const keys =
+		byRead && prototype !== Object.prototype && prototype !== null ? readableKeys(value) : Object.keys(value);
+	for (const key of keys) {
 		const raw: unknown = Reflect.get(value, key);
 		if (typeof raw === "function") continue;
-		const item = copyHostValue(raw, copies, signals);
+		const item = copyHostValue(raw, copies, signals, byRead);
 		// Assigning an own `__proto__` key would set the copy's prototype; defined, it stays data.
 		if (key === "__proto__") {
 			Object.defineProperty(copy, key, { value: item, enumerable: true, writable: true, configurable: true });

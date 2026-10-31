@@ -267,7 +267,7 @@ export function bindInputScope(
  */
 export function adoptInputScope(target: Component, owner: Component): void {
 	const bound = inputScopes.get(owner);
-	if (bound === undefined || inputScopes.has(target)) return;
+	if (bound === undefined || bound.retired || !bound.scope.live || hasInputScope(target)) return;
 	inputScopes.set(target, {
 		scope: bound.scope,
 		retire: () => owner,
@@ -293,10 +293,12 @@ export function whenInputScopeGone(scope: ToolRendererScope, settle: () => void)
 	return () => scopeObligations.delete(obligation);
 }
 
-/** Whether `component` already takes input in a scope ({@link bindInputScope},
- *  {@link adoptInputScope}): a host binding a component an extension hands it keeps that one. */
+/** Whether `component` takes input in a scope that is still live ({@link bindInputScope},
+ *  {@link adoptInputScope}): a host binding a component an extension hands it keeps that one. A
+ *  binding whose scope has gone is no binding — a session that hands the TUI a component an earlier
+ *  session left behind binds it to its own scope — and a component is only ever retired once. */
 export function hasInputScope(component: Component): boolean {
-	return inputScopes.has(component);
+	return inputScopes.has(component) && !isRetiredInputScope(component);
 }
 
 /** Whether `component` is an extension's that has been, or is about to be, taken out of input:
@@ -322,7 +324,8 @@ export function unbindInputScope(component: Component): void {
 export function withInputScope<T>(component: Component | null | undefined, call: () => T): T | undefined {
 	const bound = component ? inputScopes.get(component) : undefined;
 	if (bound === undefined) return call();
-	if (!bound.scope.live) return undefined;
+	// A retired binding stays retired: a scope that comes back to life is a new session's.
+	if (bound.retired || !bound.scope.live) return undefined;
 	return bound.scope.run(call);
 }
 
@@ -358,7 +361,7 @@ export function inputRecipient(component: Component): Component | undefined {
 	let recipient: Component | undefined = component;
 	for (let hop = 0; recipient !== undefined && hop < 8; hop++) {
 		const bound = inputScopes.get(recipient);
-		if (bound === undefined || bound.scope.live) return recipient;
+		if (bound === undefined || (!bound.retired && bound.scope.live)) return recipient;
 		recipient = bound.successor;
 	}
 	return undefined;

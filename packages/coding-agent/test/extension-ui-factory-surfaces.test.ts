@@ -338,6 +338,65 @@ describe("data the host hands an extension", () => {
 		expect(typeof ctx.models.family(handed)).toBe("string");
 	});
 
+	test("a model's open fields held in classes arrive with what their getters answer", async () => {
+		const h = await interactiveSession();
+		const selected = h.session.model;
+		if (!selected) throw new Error("the session has no model");
+		const host: Model = selected;
+		class Route {
+			readonly #path = "/v1/route";
+			get path() {
+				return this.#path;
+			}
+			send(): string {
+				return this.#path;
+			}
+		}
+		class Metadata {
+			readonly tier = "gold";
+			get route() {
+				return new Route();
+			}
+		}
+		class Compat {
+			get supportsStore() {
+				return false;
+			}
+		}
+		class Effort {
+			get high() {
+				return 4096;
+			}
+		}
+		// The type leaves these fields open; an SDK caller may hold them in classes.
+		const model = {
+			...host,
+			compat: new Compat(),
+			requestMetadata: new Metadata(),
+			headers: new (class {
+				get "x-route"() {
+					return "r";
+				}
+			})(),
+			thinking: { ...host.thinking, effortBudgets: new Effort() },
+		} as unknown as Model;
+		const handed = h.runner.createContext(model).model;
+		if (!handed) throw new Error("the context hands no model");
+		const open: unknown = {
+			compat: handed.compat,
+			requestMetadata: handed.requestMetadata,
+			headers: handed.headers,
+			effortBudgets: handed.thinking?.effortBudgets,
+		};
+
+		expect(open).toEqual({
+			compat: { supportsStore: false },
+			requestMetadata: { tier: "gold", route: { path: "/v1/route" } },
+			headers: { "x-route": "r" },
+			effortBudgets: { high: 4096 },
+		});
+	});
+
 	test("is copied as data: a URL as a URL, a class instance as its fields, and a function nowhere", () => {
 		class Holder {
 			readonly #secret = "host state";
@@ -641,6 +700,104 @@ describe("what a session focuses or shows", () => {
 			{ name: "b", key: "b-live" },
 			{ name: "host", key: "host-next" },
 		]);
+	});
+
+	test("a component it focused and showed with no release between comes down with it", () => {
+		const h = focusHost();
+		const a = h.session();
+		const reused = h.named("reused");
+		a.tui.setFocus(reused);
+		a.tui.showOverlay(reused);
+		a.release();
+		h.drawn.length = 0;
+		h.tui.renderNow();
+		h.tui.injectDebugInput("next");
+
+		expect({ overlays: h.tui.overlayStack.length, drawn: h.drawn.includes("reused"), focus: h.focus() }).toEqual({
+			overlays: 0,
+			drawn: false,
+			focus: "host",
+		});
+		expect(h.seen).toEqual([{ name: "host", key: "next" }]);
+	});
+
+	test("a session that focused two of its components hands the keyboard back to the host's", () => {
+		const h = focusHost();
+		const a = h.session();
+		a.tui.setFocus(h.named("first"));
+		a.tui.setFocus(h.named("second"));
+		a.release();
+		h.tui.renderNow();
+		const afterSweep = h.focus();
+		h.tui.injectDebugInput("next");
+
+		expect({ afterSweep, focus: h.focus() }).toEqual({ afterSweep: "host", focus: "host" });
+		expect(h.seen).toEqual([{ name: "host", key: "next" }]);
+	});
+
+	test("a component a gone session left behind takes keys in the session that focuses it next", () => {
+		const h = focusHost();
+		const a = h.session();
+		const b = h.session();
+		const shared = h.named("shared");
+		a.tui.setFocus(shared);
+		a.release();
+		h.tui.injectDebugInput("host-key");
+		b.tui.setFocus(shared);
+		h.tui.injectDebugInput("b-key");
+		b.release();
+		h.tui.injectDebugInput("host-again");
+
+		expect(h.seen).toEqual([
+			{ name: "host", key: "host-key" },
+			{ name: "shared", key: "b-key" },
+			{ name: "host", key: "host-again" },
+		]);
+	});
+});
+
+describe("a component a session shows, measured at a loopback endpoint", () => {
+	test("focused and then shown through a real session, it sends nothing once dispose has returned", async () => {
+		const h = await interactiveSession();
+		const requests: string[] = [];
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch(request) {
+				requests.push(request.headers.get("authorization") ?? "");
+				return new Response("ok");
+			},
+		});
+		cleanups.push(() => server.stop(true));
+		const reused: Component = {
+			render: () => {
+				void fetch(`http://127.0.0.1:${server.port}/draw`, { headers: { authorization: "Bearer canary" } });
+				return ["reused"];
+			},
+			invalidate() {},
+			handleInput() {},
+		};
+		h.ui.setWidget("reuse", tui => {
+			tui.setFocus(reused);
+			tui.showOverlay(reused);
+			return { render: () => ["widget"], invalidate() {} };
+		});
+		h.mode.ui.renderNow();
+		const upWhileLive = h.mode.ui.overlayStack.some(entry => entry.component === reused);
+		await h.session.dispose();
+		await Bun.sleep(20);
+		const before = requests.length;
+		h.mode.ui.renderNow();
+		h.mode.ui.injectDebugInput("x");
+		h.mode.ui.renderNow();
+		await Bun.sleep(50);
+
+		expect({
+			upWhileLive,
+			drewWhileLive: before > 0,
+			requestsAfterDispose: requests.length - before,
+			stillUp: h.mode.ui.overlayStack.some(entry => entry.component === reused),
+		}).toEqual({ upWhileLive: true, drewWhileLive: true, requestsAfterDispose: 0, stillUp: false });
 	});
 });
 
