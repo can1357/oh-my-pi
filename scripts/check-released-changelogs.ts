@@ -54,9 +54,10 @@
  * already wrong at the base fails here too; it has to reach the base branch
  * another way, as a direct push.
  */
-import * as fs from "node:fs/promises";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { $ } from "bun";
+import { isEnoent } from "../packages/utils/src/fs-error.ts";
 import {
 	fixChangelogFile,
 	isSubsectionHeading,
@@ -396,9 +397,9 @@ async function git(args: readonly string[], cwd: string): Promise<{ ok: boolean;
 /** The file's type in the working tree, or undefined when it does not exist. */
 async function lstatOrUndefined(filePath: string): Promise<fs.Stats | undefined> {
 	try {
-		return await fs.lstat(filePath);
+		return await fs.promises.lstat(filePath);
 	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		if (isEnoent(error)) return undefined;
 		throw error;
 	}
 }
