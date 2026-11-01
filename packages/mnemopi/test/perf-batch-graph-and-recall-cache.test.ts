@@ -434,4 +434,76 @@ describe("performance optimizations: batched graph and recall cache", () => {
 
 		graph.close();
 	});
+
+	it("findRelatedMemories across a wide frontier (>900 nodes) processes chunks incrementally and preserves exact BFS first-seen suppression order", () => {
+		const db = new Database(":memory:");
+		const graph = new EpisodicGraph({ db });
+		const now = new Date().toISOString();
+
+		// Connect root to 1000 nodes at depth 1 (spanning 2 chunks: 0..899, 900..999)
+		const nodeCount = 1000;
+		for (let i = 0; i < nodeCount; i++) {
+			graph.addEdge({
+				source: "root",
+				target: `f_${i}`,
+				edgeType: "ctx",
+				weight: 0.8,
+				timestamp: now,
+			});
+		}
+
+		// Both f_50 (chunk 1) and f_950 (chunk 2) connect to shared_leaf, but f_50 has weight 0.7 and f_950 has weight 0.95
+		graph.addEdge({
+			source: "f_50",
+			target: "shared_leaf",
+			edgeType: "ctx",
+			weight: 0.7,
+			timestamp: now,
+		});
+		graph.addEdge({
+			source: "f_950",
+			target: "shared_leaf",
+			edgeType: "ctx",
+			weight: 0.95,
+			timestamp: now,
+		});
+
+		// f_950 also connects to leaf_950
+		graph.addEdge({
+			source: "f_950",
+			target: "leaf_950",
+			edgeType: "ctx",
+			weight: 0.6,
+			timestamp: now,
+		});
+
+		// Track calls to findEdgesTouching to ensure incremental chunking
+		let findEdgesCalls = 0;
+		const origFindEdgesTouching = graph.findEdgesTouching.bind(graph);
+		spyOn(graph, "findEdgesTouching").mockImplementation((nodeIds, edgeType, minWeight, limit) => {
+			findEdgesCalls++;
+			return origFindEdgesTouching(nodeIds, edgeType, minWeight, limit);
+		});
+
+		const related = graph.findRelatedMemories("root", 2, "ctx", 0.5);
+
+		// Depth 1: 1 call for [root]
+		// Depth 2: 1000 frontier nodes chunked into slices of 900 -> 2 calls
+		// Total findEdgesTouching calls = 3
+		expect(findEdgesCalls).toBe(3);
+
+		const shared = related.find(r => r.memoryId === "shared_leaf");
+		expect(shared).toBeDefined();
+		expect(shared?.depth).toBe(2);
+		// First-seen suppression: f_50 (processed in chunk 1) encountered shared_leaf first with weight 0.7,
+		// so f_950 (in chunk 2) cannot overwrite it despite higher weight (0.95)
+		expect(shared?.weight).toBe(0.7);
+
+		const leaf950 = related.find(r => r.memoryId === "leaf_950");
+		expect(leaf950).toBeDefined();
+		expect(leaf950?.depth).toBe(2);
+		expect(leaf950?.weight).toBe(0.6);
+
+		graph.close();
+	});
 });

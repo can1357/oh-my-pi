@@ -108,6 +108,7 @@ const EXTRACT_FACTS_MAX_CONTENT_LEN = 4096;
 const MAX_FACTS_PER_MEMORY = 5;
 const DEFAULT_LINK_THRESHOLD = 0.35;
 const MAX_SQL_IDS_PER_CHUNK = 900;
+const MAX_TRAVERSAL_EDGES_PER_CHUNK = 10_000;
 const LINK_CANDIDATE_BATCH_SIZE = 256;
 const LIVE_MEMORY_SQL = "superseded_by IS NULL AND (valid_until IS NULL OR valid_until > ?)";
 
@@ -474,25 +475,29 @@ export class EpisodicGraph {
 		for (let hop = 1; hop <= maxDepth; hop++) {
 			if (currentLevel.size === 0) break;
 			const nextLevel = new Set<string>();
-			const edges = this.findEdgesTouching([...currentLevel], edgeType, threshold);
-			const edgesByNode = new Map<string, GraphEdge[]>();
-			for (const mem of currentLevel) edgesByNode.set(mem, []);
-			for (const edge of edges) {
-				edgesByNode.get(edge.source)?.push(edge);
-				if (edge.target !== edge.source) edgesByNode.get(edge.target)?.push(edge);
-			}
-			for (const mem of currentLevel) {
-				for (const edge of edgesByNode.get(mem) ?? []) {
-					const neighbor = edge.source === mem ? edge.target : edge.source;
-					if (seen.has(neighbor)) continue;
-					seen.add(neighbor);
-					nextLevel.add(neighbor);
-					results.push({
-						memoryId: neighbor,
-						edgeType: edge.edgeType,
-						weight: edge.weight,
-						depth: hop,
-					});
+			const frontierIds = [...currentLevel];
+			for (let i = 0; i < frontierIds.length; i += MAX_SQL_IDS_PER_CHUNK) {
+				const chunk = frontierIds.slice(i, i + MAX_SQL_IDS_PER_CHUNK);
+				const edges = this.findEdgesTouching(chunk, edgeType, threshold, MAX_TRAVERSAL_EDGES_PER_CHUNK);
+				const edgesByNode = new Map<string, GraphEdge[]>();
+				for (const mem of chunk) edgesByNode.set(mem, []);
+				for (const edge of edges) {
+					edgesByNode.get(edge.source)?.push(edge);
+					if (edge.target !== edge.source) edgesByNode.get(edge.target)?.push(edge);
+				}
+				for (const mem of chunk) {
+					for (const edge of edgesByNode.get(mem) ?? []) {
+						const neighbor = edge.source === mem ? edge.target : edge.source;
+						if (seen.has(neighbor)) continue;
+						seen.add(neighbor);
+						nextLevel.add(neighbor);
+						results.push({
+							memoryId: neighbor,
+							edgeType: edge.edgeType,
+							weight: edge.weight,
+							depth: hop,
+						});
+					}
 				}
 			}
 			currentLevel = nextLevel;
@@ -508,14 +513,37 @@ export class EpisodicGraph {
 		nodeIds: readonly string[],
 		edgeType = "",
 		minWeight = 0,
-		limit = Number.MAX_SAFE_INTEGER,
+		limit = MAX_TRAVERSAL_EDGES_PER_CHUNK,
 	): GraphEdge[] {
 		const max = Math.max(0, Math.trunc(limit));
 		if (nodeIds.length === 0 || max === 0) return [];
 		const threshold = clampWeight(minWeight);
+		const hasSqlLimit = Number.isFinite(limit) && max > 0;
+
+		if (nodeIds.length <= MAX_SQL_IDS_PER_CHUNK) {
+			const placeholders = nodeIds.map(() => "?").join(", ");
+			const limitClause = hasSqlLimit ? " LIMIT ?" : "";
+			const rows =
+				edgeType.length > 0
+					? (this.db
+							.query(
+								`SELECT id, source, target, edge_type, weight, timestamp FROM graph_edges
+					 WHERE (source IN (${placeholders}) OR target IN (${placeholders})) AND edge_type = ? AND weight >= ?
+					 ORDER BY weight DESC, id${limitClause}`,
+							)
+							.all(...nodeIds, ...nodeIds, edgeType, threshold, ...(hasSqlLimit ? [max] : [])) as EdgeRow[])
+					: (this.db
+							.query(
+								`SELECT id, source, target, edge_type, weight, timestamp FROM graph_edges
+					 WHERE (source IN (${placeholders}) OR target IN (${placeholders})) AND weight >= ?
+					 ORDER BY weight DESC, id${limitClause}`,
+							)
+							.all(...nodeIds, ...nodeIds, threshold, ...(hasSqlLimit ? [max] : [])) as EdgeRow[]);
+			return rows.map(edgeFromRow);
+		}
+
 		const seenKeys = new Set<string>();
 		const collected: Array<{ id: number; edge: GraphEdge }> = [];
-		const hasSqlLimit = Number.isFinite(limit) && max > 0;
 
 		for (let i = 0; i < nodeIds.length; i += MAX_SQL_IDS_PER_CHUNK) {
 			const chunk = nodeIds.slice(i, i + MAX_SQL_IDS_PER_CHUNK);
