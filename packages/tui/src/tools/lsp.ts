@@ -180,7 +180,14 @@ function isStatusRow(line: string, glyph: string): boolean {
 	return line.startsWith(`${glyph} `);
 }
 
-function hasStatusRow(lines: readonly string[], glyph: string): boolean {
+/**
+ * Whether a result holds a status row drawn with `glyph`. Only the diagnostics action
+ * writes status rows; any other action's text is the server's (a `request` response
+ * verbatim), so a glyph there is content even at a line start. A result whose action
+ * is unknown keeps the inference.
+ */
+function hasStatusRow(action: string | undefined, lines: readonly string[], glyph: string): boolean {
+	if (action !== undefined && action !== "diagnostics") return false;
 	return lines.some(line => isStatusRow(line, glyph));
 }
 
@@ -212,11 +219,12 @@ export function renderResult(
 	const warningMatch = text.match(/(\d+)\s+warning\(s\)/);
 	const refMatch = text.match(/(\d+)\s+reference\(s\)/);
 	const symbolsMatch = text.match(/Symbols in (.+):/);
-	const hasStatusError = hasStatusRow(lines, theme.status.error);
 	const unreportedCount = lines.filter(line => UNREPORTED_LINE_RE.test(line)).length;
 
 	// Static request info
 	const request = args ?? result.details?.request;
+	const action = request?.action ?? result.details?.action;
+	const hasStatusError = hasStatusRow(action, lines, theme.status.error);
 	const requestLines: string[] = [];
 	if (request?.file) {
 		requestLines.push(formatStyledPath(request.file, theme));
@@ -275,7 +283,7 @@ export function renderResult(
 				bodyLines: [`${theme.styledSymbol("tool.lsp", "accent")} ${theme.fg("dim", "OK")}`],
 			};
 		}
-		return { label: "Response", state: "success", bodyLines: renderGeneric(text, lines, expanded, theme) };
+		return { label: "Response", state: "success", bodyLines: renderGeneric(text, lines, action, expanded, theme) };
 	};
 
 	return framedToolCard(theme, ({ contentWidth }) => {
@@ -797,9 +805,15 @@ function renderSymbols(symbolsMatch: RegExpMatchArray, lines: string[], expanded
 /**
  * Generic fallback rendering for unknown result types.
  */
-function renderGeneric(text: string, lines: string[], expanded: boolean, theme: Theme): string[] {
-	const hasError = text.includes("Error:") || hasStatusRow(lines, theme.status.error);
-	const hasSuccess = hasStatusRow(lines, theme.status.success) || text.includes("Applied");
+function renderGeneric(
+	text: string,
+	lines: string[],
+	action: string | undefined,
+	expanded: boolean,
+	theme: Theme,
+): string[] {
+	const hasError = text.includes("Error:") || hasStatusRow(action, lines, theme.status.error);
+	const hasSuccess = hasStatusRow(action, lines, theme.status.success) || text.includes("Applied");
 
 	const icon =
 		hasError && !hasSuccess
@@ -1162,6 +1176,7 @@ function describeLspLocations(
 function describeLspResult(result: ToolRenderResult<LspToolDetails>, args: LspParams | undefined): NativeToolView {
 	const request = args ?? result.details?.request;
 	const fallbackAction = result.details?.action ?? "request";
+	const action = request?.action ?? result.details?.action;
 	const content = result.content?.[0];
 	const text = content?.type === "text" ? (content.text ?? "") : "";
 	if (result.isError) return inlineErrorView(lspNativeHead(request, fallbackAction), text || "LSP request failed");
@@ -1180,7 +1195,7 @@ function describeLspResult(result: ToolRenderResult<LspToolDetails>, args: LspPa
 	}
 	if (
 		/\d+\s+(?:error|warning)\(s\)/.test(text) ||
-		hasStatusRow(lines, statusError) ||
+		hasStatusRow(action, lines, statusError) ||
 		(request?.action ?? fallbackAction) === "diagnostics"
 	) {
 		return describeLspDiagnostics(request, fallbackAction, lines);
@@ -1205,8 +1220,8 @@ function describeLspResult(result: ToolRenderResult<LspToolDetails>, args: LspPa
 			preview: { lines: 8 },
 		};
 	}
-	const hasError = text.includes("Error:") || hasStatusRow(lines, statusError);
-	const hasSuccess = hasStatusRow(lines, activeThemeSymbol("status.success")) || text.includes("Applied");
+	const hasError = text.includes("Error:") || hasStatusRow(action, lines, statusError);
+	const hasSuccess = hasStatusRow(action, lines, activeThemeSymbol("status.success")) || text.includes("Applied");
 	return {
 		tool: lspNativeHead(request, fallbackAction),
 		tone: hasError && !hasSuccess ? "error" : undefined,

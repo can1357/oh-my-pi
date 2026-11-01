@@ -20,12 +20,21 @@ function renderRequestResult(text: string): string {
 }
 
 describe("LSP status rows", () => {
-	// A status glyph can be plain text (ASCII `[-]`), so only a row that starts with one is a status row.
+	// A status glyph can be plain text (ASCII `[-]`), and a `request` response is the server's text
+	// verbatim, so only the diagnostics action's rows that start with a glyph are status rows.
 	it("keeps a response that mentions the error glyph mid-line as a response, not diagnostics", () => {
 		const text = renderRequestResult(`{"items": ["a ${theme.status.error} b"]}\nsecond line`);
 
 		expect(text).not.toContain("No issues");
 		expect(text).toContain(`{"items": ["a ${theme.status.error} b"]}`);
 		expect(text).toContain("second line");
+	});
+
+	it("keeps a request response whose line starts with the error glyph as a response", () => {
+		const text = renderRequestResult(`server ← custom/method:\n${theme.status.error} literal\nkeep-me`);
+
+		expect(text).not.toContain("No issues");
+		expect(text).toContain(`${theme.status.error} literal`);
+		expect(text).toContain("keep-me");
 	});
 });
