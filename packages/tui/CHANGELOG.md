@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Pressing `n` on Other now edits the custom answer like Enter, keeping its text and images ([#16510](https://github.com/can1357/oh-my-pi/pull/16510) by [@Komzpa](https://github.com/Komzpa))
 ### Added
 
 - `/btw` answers can show a steering prompt as a block behind a pink rail (a toned card in Tern) that `Alt+I` (`app.btw.inject`, remappable) sends to the main session; once sent it turns green with `➤` on each line, without moving ([#17618](https://github.com/can1357/oh-my-pi/pull/17618) by [@apullin](https://github.com/apullin))
