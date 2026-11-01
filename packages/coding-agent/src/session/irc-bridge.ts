@@ -27,6 +27,8 @@ export class IrcBridge {
 	/** A subagent's records from anyone but its parent: answered in their own turn, never by
 	 *  extending a finished one (whose text is the subagent's result). */
 	readonly #peerMessages = new WeakSet<AgentMessage>();
+	/** Follow-ups admitted here before a child receives its initial prompt. */
+	readonly #preBriefFollowUps = new WeakSet<AgentMessage>();
 
 	readonly #host: IrcBridgeHost;
 	#interrupts: AgentMessage[] = [];
@@ -65,7 +67,14 @@ export class IrcBridge {
 
 	/** Whether any undelivered IRC record remains queued. */
 	hasPending(): boolean {
-		return this.#interrupts.length > 0 || this.#asides.length > 0 || this.#deferredWakes.length > 0;
+		return (
+			this.#interrupts.length > 0 ||
+			this.#asides.length > 0 ||
+			this.#deferredWakes.length > 0 ||
+			this.#host.agent
+				.peekFollowUpQueue()
+				.some(record => record.role === "custom" && record.customType === "irc:incoming")
+		);
 	}
 
 	/** Whether an IRC message from `from` is still queued for a turn yet to run. */
@@ -165,9 +174,12 @@ export class IrcBridge {
 		const messages: IrcMessage[] = [];
 		const remainingInterrupts: AgentMessage[] = [];
 		const remainingAsides: AgentMessage[] = [];
+		const remainingFollowUps: AgentMessage[] = [];
+		const followUps = this.#host.agent.peekFollowUpQueue();
 		const queues = [
 			{ records: this.#interrupts, remaining: remainingInterrupts },
 			{ records: this.#asides, remaining: remainingAsides },
+			{ records: followUps, remaining: remainingFollowUps },
 		];
 		for (const queue of queues) {
 			for (const record of queue.records) {
@@ -216,14 +228,19 @@ export class IrcBridge {
 		}
 		this.#interrupts = remainingInterrupts;
 		this.#asides = remainingAsides;
+		if (remainingFollowUps.length !== followUps.length) this.#host.agent.replaceQueue("followUp", remainingFollowUps);
 		return messages;
 	}
 
 	/** Delivers an IRC message into the recipient session without awaiting any wake turn. */
 	async deliver(msg: IrcMessage): Promise<"injected" | "woken"> {
 		if (this.#host.isDisposed()) throw new Error("Recipient session is disposed.");
+		const recipient = AgentRegistry.global().get(msg.to);
 		const streaming = this.#host.isStreaming();
-		const planModeIdle = !streaming && this.#host.planModeEnabled();
+		// Only the executor's explicit reservation owns the pre-brief window.
+		// A prompt in flight still accepts parent steering; a stale running ref wakes normally.
+		const dispatchPending = recipient?.initialPromptPending === true && recipient.status === "running" && !streaming;
+		const planModeIdle = !streaming && !dispatchPending && this.#host.planModeEnabled();
 		const registry = AgentRegistry.global();
 		const parentId = registry.get(msg.to)?.parentId;
 		const fromParent = parentId === msg.from;
@@ -251,6 +268,7 @@ export class IrcBridge {
 		const relayOnStop =
 			!streaming &&
 			!planModeIdle &&
+			(!dispatchPending || peerMessage) &&
 			msg.to !== MAIN_AGENT_ID &&
 			msg.wakeRelay !== true &&
 			msg.broadcast !== true &&
@@ -287,6 +305,15 @@ export class IrcBridge {
 		};
 		if (peerMessage) this.#peerMessages.add(record);
 		void this.#host.emitSessionEvent({ type: "irc_message", message: record });
+		if (dispatchPending) {
+			// Peers retain a separate monitored wake after publication, never the brief's result boundary.
+			if (peerMessage) this.queueDeferredWake([record]);
+			else {
+				this.#preBriefFollowUps.add(record);
+				this.#host.agent.followUp(record);
+			}
+			return "injected";
+		}
 		if (streaming) {
 			if (fromParent && !peerMessage) {
 				const steer: AgentMessage = {
@@ -325,7 +352,33 @@ export class IrcBridge {
 
 	/** Persists queued IRC records that missed their step-boundary injection. */
 	flushPending(): void {
-		for (const record of this.drainPending()) {
+		const records = this.drainPending();
+		// A failed setup never runs the loop that drains pre-brief follow-ups.
+		// Persist them at disposal, but never hoist them ahead of a live brief.
+		if (this.#host.isDisposed()) {
+			const followUps = this.#host.agent.peekFollowUpQueue();
+			const incoming = followUps.filter(record => this.#preBriefFollowUps.has(record));
+			if (incoming.length > 0) {
+				const consumed = new Set(incoming);
+				this.#host.agent.replaceQueue(
+					"followUp",
+					followUps.filter(record => !consumed.has(record)),
+				);
+				records.push(...incoming);
+			}
+			records.push(...this.drainDeferredWakes());
+		}
+		for (const record of records) {
+			if (this.#host.isDisposed() && record.role === "custom") {
+				this.#host.sessionManager.appendCustomMessageEntry(
+					record.customType,
+					record.content,
+					record.display,
+					record.details,
+					record.attribution ?? "agent",
+				);
+				continue;
+			}
 			this.#host.agent.emitExternalEvent({ type: "message_start", message: record });
 			this.#host.agent.emitExternalEvent({ type: "message_end", message: record });
 		}

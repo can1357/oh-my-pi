@@ -904,6 +904,8 @@ export interface CreateAgentSessionOptions {
 	 * top-level "Main" session, which has no parent.
 	 */
 	parentAgentId?: string;
+	/** Reserve a newly spawned child's first prompt for its executor before attaching the session. */
+	initialPromptPending?: boolean;
 
 	/** Session manager. Default: session stored under the configured agentDir sessions root */
 	sessionManager?: SessionManager;
@@ -4503,6 +4505,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			session: null,
 			sessionFile: sessionManager.getSessionFile() ?? null,
 			status: "running" as const,
+			initialPromptPending: options.initialPromptPending,
 		};
 		registeredAgentRef =
 			options.expectedAgentRef === undefined
