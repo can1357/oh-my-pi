@@ -126,6 +126,7 @@ export class PrewalkCoordinator {
 	#prewalk: Prewalk | undefined;
 	#planInjected = false;
 	#continuePending = false;
+	#continueIssued = false;
 	#todoSeen = false;
 	#planYolo: PlanYolo | undefined;
 	#planYoloPreviousNonMCPPresentation: { enabled: string[]; mounted: string[]; registered: string[] } | undefined;
@@ -178,6 +179,7 @@ export class PrewalkCoordinator {
 		this.#autoArm = undefined;
 		this.#planInjected = false;
 		this.#continuePending = false;
+		this.#continueIssued = false;
 		this.#todoSeen = false;
 	}
 
@@ -247,12 +249,8 @@ export class PrewalkCoordinator {
 		return cfgPrewalkAuto.get(this.#host.settings);
 	}
 
-	/**
-	 * Starts a new user task under `prewalk.auto: on`. An auto handoff belongs to the task that armed it, so the
-	 * session returns to that task's planning model unless a later explicit selection took ownership. An auto arm
-	 * the previous task never used is dropped so this task is judged on its own. Manual and configured arms stay.
-	 */
 	async beginAutoTask(): Promise<void> {
+		this.#continueIssued = false;
 		if (this.#autoMode() !== "on") return;
 		if (this.#autoArm && this.#autoArm === this.#prewalk) {
 			this.#scrubPlanNudge(undefined, true);
@@ -324,13 +322,15 @@ export class PrewalkCoordinator {
 			this.#disarmNoop(prewalk);
 			return;
 		}
-		if (context.toolResults.some(result => result.toolName === "todo" && !result.isError)) this.#todoSeen = true;
+		const todoProgress = context.toolResults.some(result => result.toolName === "todo" && !result.isError);
+		if (todoProgress) this.#todoSeen = true;
 
 		const hasToolResults = context.toolResults.length > 0;
-		if (this.#planInjected && hasToolResults) {
+		if (hasToolResults && this.#planInjected && (!this.#continueIssued || todoProgress)) {
 			this.#continuePending = true;
-		} else if (this.#continuePending) {
+		} else if (!hasToolResults && this.#continuePending) {
 			this.#continuePending = false;
+			this.#continueIssued = true;
 			this.#host.agent.steer({
 				role: "custom",
 				customType: PREWALK_CONTINUE_MESSAGE_TYPE,
