@@ -9,6 +9,7 @@ use gix::bstr::ByteSlice;
 
 use super::{
 	GitRepo,
+	cli::Capture,
 	open::{load_index_or_empty, status_with_fresh_index},
 };
 use crate::{
@@ -760,8 +761,10 @@ impl GitRepo {
 	/// (it reaches what it can open and fails otherwise, rather than warning).
 	/// An error when git may have reported a directory this cannot name: its
 	/// stderr outgrew the capture, and the cut may have taken one of those
-	/// reports, or a report is there with no readable name. Either way the
-	/// listing's completeness is unknown.
+	/// reports; the capture stopped before git's stderr ended (a failed read,
+	/// or a reader thread that could not start or panicked); or a report is
+	/// there with no readable name. Either way the listing's completeness is
+	/// unknown.
 	pub fn ls_files_with_warnings(
 		&self,
 		others: bool,
@@ -786,7 +789,7 @@ impl GitRepo {
 		others: bool,
 		exclude_standard: bool,
 		paths: &BTreeSet<String>,
-	) -> Result<(Vec<String>, String)> {
+	) -> Result<(Vec<String>, Capture)> {
 		if self.is_reftable() || others {
 			let mut args = vec!["ls-files".to_owned(), "-z".to_owned()];
 			if others {
@@ -809,19 +812,23 @@ impl GitRepo {
 			match cli_text_and_warnings_capped(self.root(), &args, timeout, path_list_capture_limit())
 			{
 				// The subprocess capture is capped, and this output is the
-				// return value rather than a diagnostic: a short list would
-				// silently hide paths, so re-run the walk in-process. Reftable
-				Ok((text, _)) if super::cli::is_truncated(&text) => {
+				// return value rather than a diagnostic: a list cut at the cap,
+				// or one whose capture stopped early, would silently hide
+				// paths, so re-run the walk in-process. Reftable repos cannot
+				// be walked in-process, so they fail.
+				Ok((stdout, _)) if super::cli::is_truncated(&stdout.text) || stdout.loss.is_some() => {
 					if self.is_reftable() {
-						return Err(Error::backend(
-							"git ls-files",
-							"path list exceeded the subprocess capture limit",
-						));
+						let reason = stdout.loss.map_or_else(
+							|| "path list exceeded the subprocess capture limit".to_owned(),
+							|loss| format!("path list was not captured whole: {loss}"),
+						);
+						return Err(Error::backend("git ls-files", reason));
 					}
 				},
-				Ok((text, warnings)) => {
+				Ok((stdout, warnings)) => {
 					return Ok((
-						text
+						stdout
+							.text
 							.split('\0')
 							.filter(|path| !path.is_empty())
 							.map(str::to_owned)
@@ -849,7 +856,7 @@ impl GitRepo {
 				.collect();
 			out.sort();
 			out.dedup();
-			return Ok((out, String::new()));
+			return Ok((out, Capture::default()));
 		}
 		let repo = self.gix()?;
 		let mut platform = status_with_fresh_index(&repo, "git ls-files")?
@@ -882,7 +889,7 @@ impl GitRepo {
 		out.sort();
 		// The in-process walk reaches what it can open and fails otherwise, so
 		// it has no warnings to report.
-		Ok((out, String::new()))
+		Ok((out, Capture::default()))
 	}
 
 	/// List recursive blob paths in a tree, optionally filtered by pathspec-like
@@ -1161,10 +1168,13 @@ fn cli_text_owned_capped(
 	timeout: std::time::Duration,
 	limit: usize,
 ) -> Result<String> {
-	Ok(cli_text_and_warnings_capped(cwd, args, timeout, limit)?.0)
+	Ok(cli_text_and_warnings_capped(cwd, args, timeout, limit)?
+		.0
+		.text)
 }
 
-/// [`cli_text_owned_capped`], keeping what the command said on stderr.
+/// [`cli_text_owned_capped`], keeping what the command said on stderr, and
+/// keeping for each stream why its capture stopped early, if it did.
 ///
 /// `git ls-files --others` reports a directory it could not open as a warning
 /// and exits 0, so the listing alone cannot say whether it is complete. The
@@ -1176,10 +1186,11 @@ fn cli_text_and_warnings_capped(
 	args: &[String],
 	timeout: std::time::Duration,
 	limit: usize,
-) -> Result<(String, String)> {
+) -> Result<(Capture, Capture)> {
 	let output = super::cli::run_sync_capped(cwd, args, timeout, limit)?;
-	let warnings = output.stderr.clone();
-	Ok((output.into_checked(args)?.stdout, warnings))
+	let warnings = Capture { text: output.stderr.clone(), loss: output.stderr_loss.clone() };
+	let output = output.into_checked(args)?;
+	Ok((Capture { text: output.stdout, loss: output.stdout_loss }, warnings))
 }
 
 /// The opening of git's report of a directory it could not open. The path
@@ -1190,14 +1201,25 @@ const COULD_NOT_OPEN: &str = "warning: could not open directory '";
 ///
 /// The listing silently lacks every such directory, so this answer fails
 /// closed whenever git may have reported one it cannot name: when the capture
-/// cut stderr (the report may be in the part that was dropped), and when a
-/// report is present but no directory can be read out of it. Everything else
-/// on stderr is skipped, because it is not a report of an unread directory:
-/// traces, anything a hook printed, and access warnings for single files git
-/// still walked past (an unreadable `.gitignore` warns, and its subtree is
-/// still listed). Refusing on those refused healthy captures. The form is
-/// fixed because this module forces `LC_MESSAGES=C`.
-fn unreadable_directories(stderr: &str) -> Result<Vec<String>> {
+/// stopped before git's stderr ended, or cut it at the limit (the report may
+/// be in the part that never arrived), and when a report is present but no
+/// directory can be read out of it. Everything else on stderr is skipped,
+/// because it is not a report of an unread directory: traces, anything a hook
+/// printed, and access warnings for single files git still walked past (an
+/// unreadable `.gitignore` warns, and its subtree is still listed). Refusing
+/// on those refused healthy captures. The form is fixed because this module
+/// forces `LC_MESSAGES=C`.
+fn unreadable_directories(warnings: &Capture) -> Result<Vec<String>> {
+	if let Some(loss) = &warnings.loss {
+		return Err(Error::backend(
+			"git ls-files",
+			format!(
+				"its warnings were not captured whole ({loss}), so the directories it could not open \
+				 are unknown"
+			),
+		));
+	}
+	let stderr = warnings.text.as_str();
 	if super::cli::is_truncated(stderr) {
 		return Err(Error::backend(
 			"git ls-files",
@@ -1672,6 +1694,11 @@ mod tests {
 		Ok(())
 	}
 
+	/// A stderr capture that got all of `text`.
+	fn whole(text: &str) -> Capture {
+		Capture { text: text.to_owned(), loss: None }
+	}
+
 	#[test]
 	fn unreadable_directories_reads_only_the_could_not_open_warning() -> TestResult {
 		// A trace line and a per-file access warning are not directories git
@@ -1684,8 +1711,8 @@ mod tests {
 			"warning: could not open directory 'b/c/': Permission denied",
 		]
 		.join("\n");
-		assert_eq!(unreadable_directories(&stderr)?, ["b/c", "it's': odd"]);
-		assert!(unreadable_directories("")?.is_empty());
+		assert_eq!(unreadable_directories(&whole(&stderr))?, ["b/c", "it's': odd"]);
+		assert!(unreadable_directories(&whole(""))?.is_empty());
 		Ok(())
 	}
 
@@ -1750,8 +1777,14 @@ mod tests {
 		// Pin the precondition: at this cap stderr really is cut and stdout is
 		// not, so the error below comes from the cut warnings alone.
 		let (stdout, stderr) = capped?;
-		assert!(!super::super::cli::is_truncated(&stdout), "stdout must fit the cap: {stdout:?}");
-		assert!(super::super::cli::is_truncated(&stderr), "stderr must overflow the cap: {stderr:?}");
+		assert!(
+			!super::super::cli::is_truncated(&stdout.text),
+			"stdout must fit the cap: {stdout:?}"
+		);
+		assert!(
+			super::super::cli::is_truncated(&stderr.text),
+			"stderr must overflow the cap: {stderr:?}"
+		);
 		let err = listed.expect_err("a cut warning stream must not answer");
 		assert!(err.to_string().contains("capture limit"), "unexpected error: {err}");
 		Ok(())
@@ -1772,10 +1805,10 @@ mod tests {
 		// Directory `x/': y\nz`: the first line already reads as a whole
 		// report, so the name comes out short, but a name comes out.
 		let lf_after_close = "warning: could not open directory 'x/': y\nz/': Permission denied\n";
-		assert_eq!(unreadable_directories(lf)?, ["locked\npart"]);
-		assert_eq!(unreadable_directories(crlf)?, ["locked?\npart"]);
-		assert_eq!(unreadable_directories(lf_then_plain)?, ["a\nb", "plain"]);
-		assert_eq!(unreadable_directories(lf_after_close)?, ["x"]);
+		assert_eq!(unreadable_directories(&whole(lf))?, ["locked\npart"]);
+		assert_eq!(unreadable_directories(&whole(crlf))?, ["locked?\npart"]);
+		assert_eq!(unreadable_directories(&whole(lf_then_plain))?, ["a\nb", "plain"]);
+		assert_eq!(unreadable_directories(&whole(lf_after_close))?, ["x"]);
 		Ok(())
 	}
 
@@ -1785,9 +1818,12 @@ mod tests {
 		// empty list read as a complete walk. git caps a report at 4 KiB, so a
 		// path past PATH_MAX is cut before it closes; these are git 2.43's
 		// bytes for 24 nested 199-byte names.
-		let path: String = (0..24)
-			.map(|level| format!("{level}{}/", "x".repeat(198)))
-			.collect();
+		let mut path = String::new();
+		for level in 0..24 {
+			path += &level.to_string();
+			path += &"x".repeat(198);
+			path.push('/');
+		}
 		let mut cut = format!("warning: could not open directory '{path}': File name too long");
 		cut.truncate(4095);
 		cut.push('\n');
@@ -1795,8 +1831,29 @@ mod tests {
 		let then_plain =
 			format!("{cut}warning: could not open directory 'plain/': Permission denied\n");
 		for stderr in [&cut, &then_plain] {
-			let err = unreadable_directories(stderr).expect_err("an unnamed report must not answer");
+			let err =
+				unreadable_directories(&whole(stderr)).expect_err("an unnamed report must not answer");
 			assert!(err.to_string().contains("without a readable name"), "unexpected error: {err}");
+		}
+	}
+
+	#[test]
+	fn unreadable_directories_refuses_a_capture_that_stopped_early() {
+		// Failure mode: a stderr capture that failed came back as silence,
+		// which read as a walk that reached every directory. Each cause is
+		// named, so the refusal says which one it was.
+		use super::super::cli::CaptureLoss;
+		let losses = [
+			(CaptureLoss::Read("Input/output error (os error 5)".to_owned()), "reading it failed"),
+			(CaptureLoss::Spawn("Resource temporarily unavailable".to_owned()), "could not start"),
+			(CaptureLoss::Panic, "panicked"),
+		];
+		for (loss, cause) in losses {
+			let silence = Capture { text: String::new(), loss: Some(loss) };
+			let err = unreadable_directories(&silence).expect_err("a lost capture must not answer");
+			let message = err.to_string();
+			assert!(message.contains("not captured whole"), "unexpected error: {message}");
+			assert!(message.contains(cause), "cause not named: {message}");
 		}
 	}
 
@@ -1861,7 +1918,7 @@ mod tests {
 
 		// Pin the precondition: git did warn, so the answer below is the
 		// parser passing the warning by, not a quiet stderr.
-		let (_, stderr) = warned?;
+		let (_, Capture { text: stderr, .. }) = warned?;
 		assert!(stderr.contains("warning: unable to access '.gitignore'"), "{stderr:?}");
 		let (paths, unreadable) = listed?;
 		assert_eq!(paths, [".gitignore", "unseen/work"]);

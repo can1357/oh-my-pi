@@ -43,11 +43,48 @@ const TRUNCATION_MARKER: &str = "\n[git subprocess output truncated at the captu
 #[derive(Debug, Clone)]
 pub(crate) struct CliOutput {
 	/// Process exit code (`124` designates a deadline kill).
-	pub exit_code: i32,
+	pub exit_code:   i32,
 	/// Captured stdout, possibly truncated.
-	pub stdout:    String,
+	pub stdout:      String,
 	/// Captured stderr, possibly truncated.
-	pub stderr:    String,
+	pub stderr:      String,
+	/// Why the stdout capture stopped before the stream ended, if it did.
+	pub stdout_loss: Option<CaptureLoss>,
+	/// Why the stderr capture stopped before the stream ended, if it did.
+	pub stderr_loss: Option<CaptureLoss>,
+}
+
+/// Why a stream's capture stopped before the stream ended.
+///
+/// The text kept is then short with nothing in it to say so, unlike a capture
+/// cut at the limit, and an empty one reads as a quiet child. A caller whose
+/// answer depends on having the whole stream must not give it.
+#[derive(Debug, Clone)]
+pub(crate) enum CaptureLoss {
+	/// A read on the pipe failed with something other than an interrupt.
+	Read(String),
+	/// The thread that drains the pipe could not start, so nothing was read.
+	Spawn(String),
+	/// The thread that drains the pipe panicked, and what it read is gone.
+	Panic,
+}
+
+impl std::fmt::Display for CaptureLoss {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			Self::Read(err) => write!(f, "reading it failed: {err}"),
+			Self::Spawn(err) => write!(f, "the thread that reads it could not start: {err}"),
+			Self::Panic => f.write_str("the thread that reads it panicked"),
+		}
+	}
+}
+
+/// One drained stream: the text kept, and why draining stopped early if it
+/// did.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Capture {
+	pub text: String,
+	pub loss: Option<CaptureLoss>,
 }
 
 impl CliOutput {
@@ -243,7 +280,15 @@ pub(crate) async fn run(cwd: &Path, args: &[String], options: &RunOptions) -> Re
 	let stderr = stderr_task
 		.await
 		.map_err(|err| Error::backend("git run", err))??;
-	Ok(CliOutput { exit_code: exit.code().unwrap_or(-1), stdout, stderr })
+	// A failed read or reader task already failed the run above, so nothing
+	// here was lost silently.
+	Ok(CliOutput {
+		exit_code: exit.code().unwrap_or(-1),
+		stdout,
+		stderr,
+		stdout_loss: None,
+		stderr_loss: None,
+	})
 }
 
 /// Run `git` asynchronously and map a non-zero exit to [`Error::Cli`].
@@ -363,8 +408,10 @@ fn run_sync_impl(
 		}
 	}
 	let mut child = cmd.spawn().map_err(|err| spawn_error(cwd, err))?;
-	let stdout = spawn_sync_reader("git-cli-stdout", child.stdout.take(), limit);
-	let stderr = spawn_sync_reader("git-cli-stderr", child.stderr.take(), limit);
+	let stdout =
+		spawn_sync_reader("git-cli-stdout", child.stdout.take().expect("stdout piped"), limit);
+	let stderr =
+		spawn_sync_reader("git-cli-stderr", child.stderr.take().expect("stderr piped"), limit);
 	std::thread::scope(|scope| {
 		// The writer runs beside the deadline loop: a child that stops reading
 		// must still be killed on time, and the kill closes the pipe, which
@@ -396,8 +443,8 @@ fn run_sync_impl(
 fn wait_sync(
 	argv: &[String],
 	mut child: std::process::Child,
-	stdout: Option<std::thread::JoinHandle<String>>,
-	stderr: Option<std::thread::JoinHandle<String>>,
+	stdout: SyncReader,
+	stderr: SyncReader,
 	timeout: Duration,
 ) -> Result<CliOutput> {
 	let deadline = std::time::Instant::now() + timeout;
@@ -414,42 +461,68 @@ fn wait_sync(
 	};
 	// The child has exited (or been killed), so the pipes reach EOF and the
 	// readers terminate; join can only block briefly on the final drain.
-	let stdout = stdout.map_or_default(|h| h.join().unwrap_or_default());
-	let stderr = stderr.map_or_default(|h| h.join().unwrap_or_default());
+	let stdout = finish_sync_reader(stdout);
+	let stderr = finish_sync_reader(stderr);
 	let Some(status) = status else {
 		return Err(Error::CliTimeout { command: format!("git {}", argv.join(" ")) });
 	};
-	Ok(CliOutput { exit_code: status.code().unwrap_or(-1), stdout, stderr })
+	Ok(CliOutput {
+		exit_code:   status.code().unwrap_or(-1),
+		stdout:      stdout.text,
+		stderr:      stderr.text,
+		stdout_loss: stdout.loss,
+		stderr_loss: stderr.loss,
+	})
 }
+
+/// A stream's reader thread, or why it could not start.
+type SyncReader = std::result::Result<std::thread::JoinHandle<Capture>, CaptureLoss>;
 
 /// Drain a child stream on a helper thread, mirroring [`read_capped`].
 ///
-/// `None` when the stream is absent or the thread cannot be spawned (e.g.
-/// under the same memory pressure that motivates the CLI path); dropping the
-/// stream then closes the pipe, so a chatty child fails with EPIPE and
-/// surfaces as a non-zero exit instead of a hang.
+/// The thread may fail to start under the same memory pressure that
+/// motivates the CLI path. Dropping the stream then closes the pipe: a chatty
+/// child fails with EPIPE and surfaces as a non-zero exit instead of a hang,
+/// and a quiet one exits 0, which is why the loss is kept.
 fn spawn_sync_reader(
 	name: &'static str,
-	stream: Option<impl std::io::Read + Send + 'static>,
+	stream: impl std::io::Read + Send + 'static,
 	limit: usize,
-) -> Option<std::thread::JoinHandle<String>> {
-	let stream = stream?;
+) -> SyncReader {
 	std::thread::Builder::new()
 		.name(name.into())
 		.spawn(move || read_capped_sync(stream, limit))
-		.ok()
+		.map_err(|err| CaptureLoss::Spawn(err.to_string()))
+}
+
+/// What a [`spawn_sync_reader`] thread captured. One that never started, or
+/// that panicked, leaves nothing the caller can take as the whole stream.
+fn finish_sync_reader(reader: SyncReader) -> Capture {
+	let loss = match reader.map(std::thread::JoinHandle::join) {
+		Ok(Ok(capture)) => return capture,
+		Ok(Err(_panic)) => CaptureLoss::Panic,
+		Err(loss) => loss,
+	};
+	Capture { text: String::new(), loss: Some(loss) }
 }
 
 /// Synchronous mirror of [`read_capped`]: cap retention at `limit` while
-/// draining to EOF so the child never blocks.
-fn read_capped_sync(mut stream: impl std::io::Read, limit: usize) -> String {
+/// draining to EOF so the child never blocks. An interrupted read is retried;
+/// any other read error ends the capture, and is kept as its loss.
+fn read_capped_sync(mut stream: impl std::io::Read, limit: usize) -> Capture {
 	let mut retained: Vec<u8> = Vec::new();
 	let mut buf = [0u8; 8 * 1024];
 	let mut truncated = false;
+	let mut loss = None;
 	loop {
 		let n = match stream.read(&mut buf) {
-			Ok(0) | Err(_) => break,
+			Ok(0) => break,
 			Ok(n) => n,
+			Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+			Err(err) => {
+				loss = Some(CaptureLoss::Read(err.to_string()));
+				break;
+			},
 		};
 		if truncated {
 			continue;
@@ -466,7 +539,7 @@ fn read_capped_sync(mut stream: impl std::io::Read, limit: usize) -> String {
 	if truncated {
 		text.push_str(TRUNCATION_MARKER);
 	}
-	text
+	Capture { text, loss }
 }
 
 fn spawn_error(cwd: &Path, err: std::io::Error) -> Error {
@@ -728,5 +801,79 @@ mod tests {
 			String::from_utf8_lossy(&child.stdout),
 			String::from_utf8_lossy(&child.stderr)
 		);
+	}
+
+	/// Replays scripted reads, then reports the end of the stream.
+	struct Scripted(std::collections::VecDeque<std::io::Result<&'static [u8]>>);
+
+	impl std::io::Read for Scripted {
+		fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+			let Some(step) = self.0.pop_front() else {
+				return Ok(0);
+			};
+			let chunk = step?;
+			buf[..chunk.len()].copy_from_slice(chunk);
+			Ok(chunk.len())
+		}
+	}
+
+	const WARNING_A: &[u8] = b"warning: could not open directory 'a/': Permission denied\n";
+	const WARNING_B: &[u8] = b"warning: could not open directory 'b/': Permission denied\n";
+
+	#[test]
+	fn an_interrupted_read_does_not_end_the_capture() {
+		// Failure mode: EINTR read as the end of the stream, so the warning
+		// after it was dropped and the capture still looked whole.
+		let reads = Scripted(
+			[Ok(WARNING_A), Err(std::io::ErrorKind::Interrupted.into()), Ok(WARNING_B)].into(),
+		);
+		let capture = read_capped_sync(reads, OUTPUT_LIMIT_BYTES);
+		assert_eq!(capture.text.as_bytes(), [WARNING_A, WARNING_B].concat());
+		assert!(capture.loss.is_none(), "{:?}", capture.loss);
+	}
+
+	#[test]
+	fn a_failed_read_is_a_lost_capture() {
+		// Failure mode: a read error was taken for the end of the stream, and
+		// the short text read as all the child said.
+		let reads = Scripted(
+			[Ok(WARNING_A), Err(std::io::Error::other("injected read failure")), Ok(WARNING_B)].into(),
+		);
+		let capture = read_capped_sync(reads, OUTPUT_LIMIT_BYTES);
+		assert_eq!(capture.text.as_bytes(), WARNING_A);
+		assert!(
+			matches!(&capture.loss, Some(CaptureLoss::Read(err)) if err.contains("injected read failure")),
+			"{:?}",
+			capture.loss
+		);
+	}
+
+	/// A stream whose reader panics.
+	struct Panics;
+
+	impl std::io::Read for Panics {
+		fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+			panic!("reader panic injected by the test");
+		}
+	}
+
+	#[test]
+	fn a_panicked_reader_is_a_lost_capture() {
+		// Failure mode: the join error became an empty string, which reads as
+		// a child that printed nothing.
+		let child = std::process::Command::new("git")
+			.arg("--version")
+			.stdout(Stdio::null())
+			.stderr(Stdio::null())
+			.spawn()
+			.expect("spawn git");
+		let quiet = spawn_sync_reader("git-cli-test-stdout", std::io::empty(), OUTPUT_LIMIT_BYTES);
+		let panics = spawn_sync_reader("git-cli-test-stderr", Panics, OUTPUT_LIMIT_BYTES);
+		let out =
+			wait_sync(&["--version".to_owned()], child, quiet, panics, SYNC_TIMEOUT).expect("wait");
+		assert_eq!(out.exit_code, 0, "{out:?}");
+		assert!(out.stderr.is_empty(), "{out:?}");
+		assert!(matches!(out.stderr_loss, Some(CaptureLoss::Panic)), "{out:?}");
+		assert!(out.stdout_loss.is_none(), "{out:?}");
 	}
 }
