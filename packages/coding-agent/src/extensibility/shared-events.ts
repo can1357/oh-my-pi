@@ -62,12 +62,14 @@ export interface SessionSwitchEvent {
  * Handlers observe; they cannot refuse the move, which has already happened by
  * the time it is announced — the session had nowhere else to save.
  *
- * The session's next tool call and model request, and its `session_shutdown`,
- * wait for these handlers, so a handler that rekeys state to `sessionId` is
- * done before work runs under it. Moves are announced one at a time, in order.
- * Work already running when the move happened — a tool call in flight, a cell
- * it started — is not held back. A handler that waits for this session's next
- * tool call waits for itself.
+ * Handlers run after the previous move's, so moves are handled in order. A
+ * handler is given 2 seconds (`SESSION_MOVED_HANDLER_GRACE_MS`), counted from
+ * the move: the session's next tool call and model request wait that long for
+ * the handlers, which is long enough to rekey state to `sessionId`. One that
+ * takes longer is not waited for — that work goes ahead under the new id
+ * while the handler runs — and `session_shutdown` does not wait for it at
+ * all. Work already running when the move happened — a tool call in flight, a
+ * cell it started — is not held back either.
  */
 export interface SessionMovedEvent {
 	type: "session_moved";

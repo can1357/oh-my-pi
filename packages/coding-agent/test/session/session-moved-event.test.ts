@@ -9,7 +9,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type { SessionEvent } from "@oh-my-pi/pi-coding-agent/extensibility/shared-events";
-import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentSession, SESSION_MOVED_HANDLER_GRACE_MS } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -157,13 +157,10 @@ describe("a session that had to leave its file", () => {
 		return { session, sessionManager };
 	}
 
-	it("runs no tool under the new id until the session_moved handlers have finished", async () => {
-		using tempDir = TempDir.createSync("@omp-session-moved-");
-		const order: string[] = [];
-		const handlerStarted = Promise.withResolvers<void>();
-		const handlerMayFinish = Promise.withResolvers<void>();
-		const schema = type({});
-		const probe: AgentTool<typeof schema> = {
+	const schema = type({});
+	/** A tool that records when it runs. */
+	function probeTool(order: string[]): AgentTool<typeof schema> {
+		return {
 			name: "probe",
 			label: "Probe",
 			description: "Records when it runs",
@@ -173,6 +170,34 @@ describe("a session that had to leave its file", () => {
 				return { content: [{ type: "text", text: "ok" }], details: {} };
 			},
 		};
+	}
+
+	/** The hook the agent loop runs before every tool call, asked for `tool`: what it said. */
+	function toolGate(session: AgentSession, tool: AgentTool, signal?: AbortSignal): Promise<string> {
+		const toolCall = { type: "toolCall" as const, id: "probe-1", name: tool.name, arguments: {} };
+		return Promise.resolve(
+			session.agent.beforeToolCall?.(
+				{
+					assistantMessage: { role: "assistant", content: [toolCall] } as unknown as AssistantMessage,
+					toolCall,
+					tool,
+					args: {},
+					context: { systemPrompt: [], messages: [], tools: [] } as unknown as AgentContext,
+				},
+				signal,
+			),
+		).then(
+			() => "went ahead",
+			(error: unknown) => (error instanceof Error ? error.message : String(error)),
+		);
+	}
+
+	it("holds a tool under the new id for a session_moved handler that finishes within its grace", async () => {
+		using tempDir = TempDir.createSync("@omp-session-moved-");
+		const order: string[] = [];
+		const handlerStarted = Promise.withResolvers<void>();
+		const handlerMayFinish = Promise.withResolvers<void>();
+		const probe = probeTool(order);
 		const { session, sessionManager } = await sessionOverOwnedFile(
 			tempDir,
 			pi => {
@@ -191,33 +216,70 @@ describe("a session that had to leave its file", () => {
 			await sessionManager.flush();
 			await handlerStarted.promise;
 
-			// The hook the agent loop runs before every tool call, asked while
-			// the handler is still running by a caller that is cancelled: one
-			// that waits for the handler can only answer with the cancellation.
-			const cancelled = AbortSignal.abort(new Error("cancelled by the caller"));
-			const toolCall = { type: "toolCall" as const, id: "probe-1", name: "probe", arguments: {} };
-			const gate = await Promise.resolve(
-				session.agent.beforeToolCall?.(
-					{
-						assistantMessage: { role: "assistant", content: [toolCall] } as unknown as AssistantMessage,
-						toolCall,
-						tool: probe as AgentTool,
-						args: {},
-						context: { systemPrompt: [], messages: [], tools: [] } as unknown as AgentContext,
-					},
-					cancelled,
-				),
-			).then(
-				() => "went ahead",
-				(error: unknown) => (error instanceof Error ? error.message : String(error)),
+			// Asked while the handler is still running, by a caller that is
+			// cancelled: a hook that waits for the handler can only answer with
+			// the cancellation.
+			expect(await toolGate(session, probe, AbortSignal.abort(new Error("cancelled by the caller")))).toBe(
+				"cancelled by the caller",
 			);
-			expect(gate).toBe("cancelled by the caller");
 
 			// And a real turn: its tool runs once the handler has finished.
 			const turn = session.prompt("go");
 			handlerMayFinish.resolve();
 			await turn;
 			expect(order).toEqual(["handler started", "handler finished", "tool ran"]);
+		} finally {
+			handlerMayFinish.resolve();
+			await session.dispose();
+		}
+	}, 30_000);
+
+	it("goes ahead after the grace when a handler does not return, and shuts down without waiting for it", async () => {
+		using tempDir = TempDir.createSync("@omp-session-moved-");
+		const order: string[] = [];
+		const handlerStarted = Promise.withResolvers<number>();
+		// Released only after the test has measured everything: until then
+		// this handler never returns.
+		const handlerMayFinish = Promise.withResolvers<void>();
+		const probe = probeTool(order);
+		const { session, sessionManager } = await sessionOverOwnedFile(
+			tempDir,
+			pi => {
+				pi.on("session_moved", async () => {
+					handlerStarted.resolve(performance.now());
+					await handlerMayFinish.promise;
+					order.push("handler finished");
+				});
+				pi.on("session_shutdown", async () => {
+					order.push("shutdown");
+				});
+			},
+			[probe],
+		);
+		// What `waited` came to, or "still waiting" after `ms`. Real time, on
+		// purpose: the grace is a bound on how long a user waits, so it is
+		// measured on the clock the user waits on. Every bound here is under
+		// the extension runner's own 30-second cap on a handler, so a wait for
+		// the handler itself would still be waiting.
+		const within = (ms: number, waited: Promise<string>) =>
+			Promise.race([waited, Bun.sleep(ms).then(() => "still waiting")]);
+		try {
+			sessionManager.appendMessage({ role: "user", content: "a turn worth saving", timestamp: Date.now() });
+			await sessionManager.flush();
+			const started = await handlerStarted.promise;
+
+			// Without a cancellation: the hook gives the handler its grace, then
+			// goes ahead with the handler still running.
+			expect(await within(SESSION_MOVED_HANDLER_GRACE_MS + 5_000, toolGate(session, probe))).toBe("went ahead");
+			expect(performance.now() - started).toBeGreaterThanOrEqual(SESSION_MOVED_HANDLER_GRACE_MS - 50);
+			// Teardown does not wait for the handler at all.
+			expect(
+				await within(
+					5_000,
+					session.dispose().then(() => "disposed"),
+				),
+			).toBe("disposed");
+			expect(order).toEqual(["shutdown"]);
 		} finally {
 			handlerMayFinish.resolve();
 			await session.dispose();

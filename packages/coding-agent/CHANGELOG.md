@@ -4,7 +4,7 @@
 
 ### Added
 
-- Extensions and hooks can observe `session_moved`: this session had to leave its file and carries on under a new id, with the old id, the new one and the reason — an identity change nobody chose, which `session_switch` never reported. The session's next tool call and model request, and its `session_shutdown`, wait for the handlers, so state rekeyed to the new id is ready before anything runs under it ([#17421](https://github.com/can1357/oh-my-pi/pull/17421) by [@sjawhar](https://github.com/sjawhar))
+- Extensions and hooks can observe `session_moved`: this session had to leave its file and carries on under a new id, with the old id, the new one and the reason — an identity change nobody chose, which `session_switch` never reported. The session's next tool call and model request give the handlers up to two seconds from the move to rekey state to the new id; a handler that takes longer is not waited for, and `session_shutdown` does not wait for them at all ([#17421](https://github.com/can1357/oh-my-pi/pull/17421) by [@sjawhar](https://github.com/sjawhar))
 
 ### Fixed
 

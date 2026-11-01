@@ -608,6 +608,21 @@ const cfgWorkspacePromptInputs = combine({
 
 const PLAN_MODE_REMINDER_MAX = 3;
 const POST_PROMPT_DRAIN_TIMEOUT_MS = 5_000;
+/**
+ * How long the next tool call or model request after a move gives the
+ * `session_moved` handlers before it goes ahead without them. A handler that
+ * takes longer is not waited for: the session carries on under the new id
+ * while it runs. So this is what a handler that never returns costs a user —
+ * one wait of this length after each move — and all it costs.
+ *
+ * Measured: with omp's own heaviest handler (autoresearch's rehydrate; the
+ * SDK bridge and the Warp emitter do less) and without it, 200 moves let the
+ * next tool call through in 2.8 ms at the median and 74 ms at worst, on a
+ * 64-core host at a load average of 207. Two seconds is 27 times that worst
+ * case, and the budget `session_shutdown` handlers already get
+ * (`SESSION_SHUTDOWN_HANDLER_TIMEOUT_MS`).
+ */
+export const SESSION_MOVED_HANDLER_GRACE_MS = 2_000;
 const AGENT_START_POLICY_MAX_ATTEMPTS = 3;
 /**
  * How long the first turn waits for deferred UI/RPC MCP startup (the sdk's startup barrier
@@ -988,12 +1003,17 @@ export class AgentSession implements SettingsScope {
 	#unsubscribeSessionMoved?: () => void;
 	/**
 	 * Every `session_moved` announcement so far, its handlers run one move at a
-	 * time. Tool calls and model requests wait for it: a handler that rekeys
-	 * state to the new id has to be done before work runs under that id.
+	 * time. Settles when the last of them has, or the runner gave up on it.
 	 */
-	#movesAnnounced: Promise<void> = Promise.resolve();
-	/** How many of those announcements have handlers still running. */
+	#movesHandled: Promise<void> = Promise.resolve();
+	/** How many announcements have handlers still running. */
 	#movesPending = 0;
+	/**
+	 * What the next tool call or model request waits for: the handlers of
+	 * every move so far, or {@link SESSION_MOVED_HANDLER_GRACE_MS} after the
+	 * latest was announced, whichever comes first. `undefined` once it has opened.
+	 */
+	#movesGate: Promise<void> | undefined;
 	/** Agent message count when {@link #disconnectFromAgent} unsubscribed; messages past it reached no persisting handler. */
 	#disconnectedMessageCount?: number;
 	#cancelExitRecorder?: () => void;
@@ -2191,9 +2211,11 @@ export class AgentSession implements SettingsScope {
 			const runner = this.#extensionRunner;
 			if (!runner || !liveForMoves) return;
 			// The move happens inside a synchronous write, so its handlers cannot
-			// be awaited here. They are kept instead, after the previous move's,
-			// and the next tool call or model request waits for them — as
-			// `session_switch`'s callers wait for theirs.
+			// be awaited here. They run after the previous move's, so moves are
+			// handled in order, and the next tool call or model request gives
+			// them `SESSION_MOVED_HANDLER_GRACE_MS` from now to rekey state to the
+			// new id. A handler that takes longer is not waited for: an unbounded
+			// wait would let any extension that never returns hold the session.
 			const event = {
 				type: "session_moved",
 				reason: notice.reason,
@@ -2202,13 +2224,24 @@ export class AgentSession implements SettingsScope {
 				previousSessionFile: notice.from,
 				sessionFile: notice.to,
 			} as const;
-			this.#movesPending++;
-			this.#movesAnnounced = this.#movesAnnounced
-				.then(() => runner.emit(event))
+			const emit = async () => {
+				await runner.emit(event);
+			};
+			const handled = (this.#movesPending === 0 ? emit() : this.#movesHandled.then(emit))
 				.catch(error => logger.warn("session_moved handlers failed", { error: toError(error).message }))
 				.finally(() => {
 					this.#movesPending--;
 				});
+			this.#movesPending++;
+			this.#movesHandled = handled;
+			const grace = Promise.withResolvers<void>();
+			const timer = setTimeout(grace.resolve, SESSION_MOVED_HANDLER_GRACE_MS);
+			timer.unref?.();
+			const gate = Promise.race([handled, grace.promise]).finally(() => {
+				clearTimeout(timer);
+				if (this.#movesGate === gate) this.#movesGate = undefined;
+			});
+			this.#movesGate = gate;
 		});
 		liveForMoves = true;
 		this.#cacheWarmer = config.cacheWarmer;
@@ -5698,14 +5731,17 @@ export class AgentSession implements SettingsScope {
 		return this.#ttsr.afterToolCall(ctx);
 	}
 	/**
-	 * Once the `session_moved` handlers announced so far have finished. Work
-	 * that runs under the id a move gave this session — a tool call, a model
-	 * request — starts after them; a cancelled caller stops waiting. A handler
-	 * that itself waits for this session's next tool call waits for itself.
+	 * Once the handlers of every `session_moved` announcement so far have
+	 * finished, or {@link SESSION_MOVED_HANDLER_GRACE_MS} after the latest
+	 * announcement, whichever comes first — and then the same for a move
+	 * announced while it waited. Work that runs under the id a move gave this
+	 * session — a tool call, a model request — gives the handlers that long to
+	 * rekey state to it, and no longer; a cancelled caller stops waiting at once.
 	 */
 	async #afterMovesAnnounced(signal: AbortSignal | undefined): Promise<void> {
-		while (this.#movesPending > 0) {
-			await (signal ? Promise.race([this.#movesAnnounced, abortRejection(signal)]) : this.#movesAnnounced);
+		// A gate clears itself as it opens, so what is here after one opens is a later move's.
+		for (let gate = this.#movesGate; gate; gate = this.#movesGate) {
+			await (signal ? Promise.race([gate, abortRejection(signal)]) : gate);
 		}
 	}
 
@@ -6473,13 +6509,13 @@ export class AgentSession implements SettingsScope {
 		this.#cancelFatalRecoveryHint = undefined;
 		// The exit record can be this session's first write, and so the one that
 		// finds the file owned by another process and moves the session: its
-		// `session_moved` is delivered, and its handlers have finished, before
-		// `session_shutdown` runs under the new id. A move during the rest of
-		// teardown reaches no handler — the session is going away — and the
-		// subscription must not outlive it in the manager.
+		// `session_moved` is announced before `session_shutdown`, and its
+		// handlers are not waited for — one that never returns must not hold
+		// teardown. A move during the rest of teardown reaches no handler — the
+		// session is going away — and the subscription must not outlive it in
+		// the manager.
 		this.#unsubscribeSessionMoved?.();
 		this.#unsubscribeSessionMoved = undefined;
-		await this.#afterMovesAnnounced(undefined);
 		try {
 			await emitSessionShutdownEvent(this.#extensionRunner);
 		} catch (error) {
