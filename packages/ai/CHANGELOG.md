@@ -9,6 +9,11 @@
 ### Added
 
 - `/login mistral` signs in through the browser like the Mistral Vibe CLI and stores the minted API key, whose usage counts against the plan's Vibe Code quota instead of pay-as-you-go API credits; `MISTRAL_API_KEY` still works ([#13875](https://github.com/can1357/oh-my-pi/pull/13875) by [@Gauthier-Huguenin](https://github.com/Gauthier-Huguenin), continued in [#17672](https://github.com/can1357/oh-my-pi/pull/17672) by [@abilliontokens](https://github.com/abilliontokens))
+
+### Fixed
+
+- Fixed fresh auth-broker snapshot caches retaining stale credentials: startup now revalidates through the configured client transport under one shared 500 ms deadline (or a supplied revalidation signal), falls back to cache for unavailable or slow brokers, and preserves 401/403 token-rejection errors ([#11073](https://github.com/can1357/oh-my-pi/pull/11073) by [@pedropaulovc](https://github.com/pedropaulovc)).
+
 ## [18.15.0] - 2026-11-01
 
 ### Fixed
