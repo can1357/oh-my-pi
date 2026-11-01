@@ -510,6 +510,25 @@ describe("check-released-changelogs", () => {
 	);
 
 	test(
+		"rejects more releases gone behind the base's own footer, which the fixer never writes again",
+		async () => {
+			const repo = await repoWith(THREE_RELEASES);
+			const first = (await repo.git("rev-parse", "HEAD")).output.trim();
+			await repo.write(`${THREE_RELEASES}\n${fixerFooter(first)}\n`);
+			await repo.git("commit", "-qam", "chore: archive footer");
+			const newest = RELEASES.slice(0, RELEASES.indexOf("## [1.1.0]"));
+			await repo.write(
+				`# Changelog\n\n## [Unreleased]\n\n### Added\n\n- ${"x".repeat(MAX_CHANGELOG_BYTES)}\n\n${newest}${fixerFooter(first)}\n`,
+			);
+
+			const result = await check(repo, "--base", "HEAD");
+			expect(result.exitCode).toBe(1);
+			expect(result.output).toContain(`${CHANGELOG}: ## [1.1.0] - 2026-02-01\n  Missing here.`);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
 		"passes what the fixer normalizes inside a released section, and still fails an entry added there",
 		async () => {
 			// Committed un-normalized: a stray blank between bullets, a padded heading,
