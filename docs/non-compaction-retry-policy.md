@@ -63,6 +63,7 @@ Current retryable categories include:
 - provider-suggested retry wording, including OpenAI `retry your request` failures
 - network/connection/socket failures, refused/closed connections, upstream connect/reset-before-headers, socket hang up, timeout/timed out, fetch failed, terminated, retry delay wording, and unexpected socket close messages
 - premature upstream WebSocket closure before `response.completed`, including gateway `stream_incomplete` failures delivered inside an HTTP 200 SSE response; terminal HTTP client errors and replay-unsafe output still prevent retry
+- Anthropic's empty-prepaid-balance rejection (`AIError.isCreditBalanceTooLow`): an `invalid_request_error` whose message begins `Your credit balance is too low`, as an HTTP 400 body or as an in-stream `error` event after a 200; no other 400 `invalid_request_error` matches
 
 The normalized classifier recognizes the transient categories above from structured flags/status and provider-aware text patterns. Classifier refusals remain a separate typed `stopDetails` decision.
 
@@ -130,7 +131,7 @@ Backoff sequence with default settings, before jitter:
 
 The actual local sleep is 75–100% of the nominal value, matching Anthropic-style retry jitter so concurrent sessions do not retry in lockstep.
 
-Delay override inputs can come from parsed retry headers (`retry-after-ms`, `retry-after`, `x-ratelimit-reset-ms`, `x-ratelimit-reset`) or usage-limit backoff. Without provider timing, recognized concurrency/rate-limit reasons can impose their own wait windows. Credential/model fallback switches set delay to `0`; otherwise parsed hints can extend the capped local delay.
+Delay override inputs can come from parsed retry headers (`retry-after-ms`, `retry-after`, `x-ratelimit-reset-ms`, `x-ratelimit-reset`) or usage-limit backoff. Without provider timing, recognized concurrency/rate-limit reasons can impose their own wait windows. An Anthropic credit-balance rejection waits at least 30 seconds before each retry, so the default budget of 10 retries covers 5 minutes before the error surfaces. Credential/model fallback switches set delay to `0`; otherwise parsed hints can extend the capped local delay.
 
 If the delay exceeds `retry.maxDelayMs` and no switch succeeds, retry normally fails immediately. `retry.waitForUsageReset: true` permits a longer usage-limit wait only when timing is authoritative (parsed provider reset timing or a complete usage-report future reset), not a guessed exhaustion backoff. Long waits remain abortable and are chunked to avoid timer overflow; they also hold unattended/subagent runs.
 
@@ -162,6 +163,8 @@ On `auto_retry_start`, EventController (`#handleAutoRetryStart`):
 `Esc` cancellation dispatches on live session state rather than a swapped handler: the input controller checks `viewSession.isRetrying` and calls `viewSession.abortRetry()` (alongside its compaction/handoff abort checks).
 
 On `auto_retry_end` (`#handleAutoRetryEnd`), it stops and clears the `retryLoader` and status container.
+
+A subagent's row in the parent's `task` card shows the same state as `retrying attempt/maxAttempts in Ns: <reason>`, and `auto-retry gave up after N attempts: <reason>` once it stops. When the error is a provider's `<status> <JSON body>`, the reason is the status and the body's `error.message`, not the start of the JSON envelope.
 
 ## Streaming and prompt completion behavior
 

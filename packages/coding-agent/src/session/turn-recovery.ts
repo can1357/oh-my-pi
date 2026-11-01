@@ -108,6 +108,14 @@ const EMPTY_STOP_MAX_RETRIES = 3;
 const MALFORMED_FUNCTION_CALL_MAX_RETRIES = 3;
 const STREAM_STALL_CONTINUE_MAX_RETRIES = 3;
 const SIBLING_UNBLOCK_BUFFER_MS = 1_000;
+// Spacing between retries of Anthropic's empty-prepaid-balance rejection
+// (AIError.isCreditBalanceTooLow), which lifts once the balance is topped up.
+// Two observed outages each ended within 3 minutes of the first rejection.
+// With the default budget (retry.maxRetries = 10) this spacing waits 5
+// minutes in all before the rejection surfaces; the default backoff, capped
+// at 8 s, would spend all ten retries in under a minute. Each wait stays far
+// below the default retry.maxDelayMs.
+const CREDIT_BALANCE_RETRY_DELAY_MS = 30_000;
 const NON_WHITESPACE_RE = /\S/;
 const USAGE_PREFLIGHT_BLOCKED_PREFIX = "Usage preflight blocked:";
 const STREAM_STALL_ERROR_RE = /stream stall/i;
@@ -2710,6 +2718,11 @@ export class TurnRecovery {
 		) {
 			const reasonBackoffMs = calculateRateLimitBackoffMs(rateLimitReason);
 			if (reasonBackoffMs > delayMs) delayMs = reasonBackoffMs;
+		}
+		// An empty prepaid balance lifts within minutes: space the retries so the
+		// budget outlasts it (see CREDIT_BALANCE_RETRY_DELAY_MS).
+		if (AIError.isCreditBalanceTooLow(message.errorStatus, errorMessage) && delayMs < CREDIT_BALANCE_RETRY_DELAY_MS) {
+			delayMs = CREDIT_BALANCE_RETRY_DELAY_MS;
 		}
 		let switchedCredential = false;
 		let switchedModel = false;

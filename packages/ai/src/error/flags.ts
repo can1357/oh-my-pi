@@ -10,6 +10,7 @@ import {
 import {
 	is402BillingCapBody,
 	isAccountScopedCapText,
+	isCreditBalanceTooLow,
 	isDashScopeTokenLimitText,
 	isOpaqueStatusBody,
 	isUsageLimitStatus,
@@ -732,6 +733,9 @@ function classifyText(
 		// Same shape for Aliyun's multimodal gateway: a flaky 400 on valid inline
 		// images — replay succeeds (see the pattern's rationale).
 		if (statusClean === 400 && ALIYUN_MM_GATEWAY_PATTERN.test(cleanMessage)) kinds |= Flag.Transient;
+		// Anthropic's empty-prepaid-balance rejection lifts once the balance is
+		// refilled (see isCreditBalanceTooLow for why the match stays narrow).
+		if (isCreditBalanceTooLow(statusClean, cleanMessage)) kinds |= Flag.Transient;
 		if (matchesStrictToolsRejection(cleanMessage, statusClean)) kinds |= Flag.Grammar;
 		if (matchesFastModeUnsupported(cleanMessage, statusClean)) kinds |= Flag.FastModeUnsupported;
 		if (matchesCacheControlRejection(cleanMessage, statusClean)) kinds |= Flag.CacheControlUnsupported;

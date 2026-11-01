@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed every in-flight subagent being killed mid-request by an Anthropic "Your credit balance is too low" outage that clears in minutes: the session now shows the wait and retries every 30 seconds for up to 5 minutes before it returns the original error
+
 ## [18.14.2] - 2026-10-31
 
 ### Added

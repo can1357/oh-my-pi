@@ -153,6 +153,32 @@ function parseJsonBody(errorMessage: string): Record<string, unknown> | undefine
 	}
 }
 
+// Anthropic answers `invalid_request_error` "Your credit balance is too low to
+// access the Anthropic API. …" while the account's prepaid balance is empty,
+// either as the HTTP 400 body or, after a 200, as an in-stream `error` event
+// (rendered `Anthropic stream error (<type>): <message>`). Observed clearing
+// on its own within minutes once the balance was topped up again, so a later
+// replay of the same request can succeed. Every fact below is required: the
+// 400 (or the stream event), the error type, and the leading sentence. A
+// malformed request, an unsupported parameter or a too-long prompt is also a
+// 400 `invalid_request_error`, and those replay identically.
+const CREDIT_BALANCE_TOO_LOW_PREFIX = "Your credit balance is too low";
+const CREDIT_BALANCE_STREAM_ERROR_PREFIX = `Anthropic stream error (invalid_request_error): ${CREDIT_BALANCE_TOO_LOW_PREFIX}`;
+
+/** Whether an error is Anthropic's empty-prepaid-balance rejection, which lifts once the balance is refilled. */
+export function isCreditBalanceTooLow(status: number | undefined, message: string | undefined): boolean {
+	if (!message) return false;
+	if (message.startsWith(CREDIT_BALANCE_STREAM_ERROR_PREFIX)) return true;
+	// A message that lost its structured status still leads with it (`400 {…}`).
+	if ((status ?? (message.startsWith("400 ") ? 400 : undefined)) !== 400) return false;
+	const error = asRecord(parseJsonBody(message)?.error);
+	return (
+		error?.type === "invalid_request_error" &&
+		typeof error.message === "string" &&
+		error.message.startsWith(CREDIT_BALANCE_TOO_LOW_PREFIX)
+	);
+}
+
 /**
  * Classify structured Google RESOURCE_EXHAUSTED bodies before consulting text.
  * Cloud Code Assist prefixes the JSON with its HTTP error label, so accept an

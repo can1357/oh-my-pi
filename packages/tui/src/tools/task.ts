@@ -712,6 +712,27 @@ function toolCallDetail(intent: string | undefined, args: string | undefined, ar
 }
 
 /**
+ * The reason a retry row shows. A provider's HTTP failure arrives as
+ * `<status> <JSON body>`, so a short preview held only envelope keys
+ * (`400 {"type":"error","error":{"type":…`) and never the sentence saying why
+ * the request failed, which is what a waiting subagent waits on. Lead with the
+ * body's `error.message`; any other text passes through unchanged.
+ */
+function retryReason(errorMessage: string): string {
+	const match = /^(\d{3}) (\{.*\})/.exec(errorMessage.split("\n", 1)[0] ?? "");
+	if (!match) return errorMessage;
+	let body: unknown;
+	try {
+		body = JSON.parse(match[2]!);
+	} catch {
+		return errorMessage;
+	}
+	const error = isRecord(body) ? body.error : undefined;
+	const message = isRecord(error) ? error.message : undefined;
+	return typeof message === "string" && message.trim() ? `${match[1]} ${message}` : errorMessage;
+}
+
+/**
  * Render streaming progress for a single agent.
  */
 function renderAgentProgress(
@@ -816,12 +837,12 @@ function renderAgentProgress(
 		const waitLabel = remainingMs > 0 ? `in ${formatDuration(remainingMs)}` : "now";
 		const summary =
 			`retrying ${progress.retryState.attempt}/${progress.retryState.maxAttempts} ${waitLabel}: ` +
-			previewLine(sanitizeText(progress.retryState.errorMessage), 60);
+			previewLine(sanitizeText(retryReason(progress.retryState.errorMessage)), 60);
 		lines.push(`${continuePrefix}${theme.tree.hook} ${theme.fg("warning", summary)}`);
 	} else if (progress.retryFailure && progress.status !== "running") {
 		const summary = `auto-retry gave up after ${progress.retryFailure.attempt} attempt${
 			progress.retryFailure.attempt === 1 ? "" : "s"
-		}: ${previewLine(sanitizeText(progress.retryFailure.errorMessage), 80)}`;
+		}: ${previewLine(sanitizeText(retryReason(progress.retryFailure.errorMessage)), 80)}`;
 		lines.push(`${continuePrefix}${theme.tree.hook} ${theme.fg("error", summary)}`);
 	}
 
