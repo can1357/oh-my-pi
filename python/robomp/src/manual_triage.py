@@ -87,7 +87,9 @@ async def build_issues_opened_payload(github: GitHubBackend, repo_full: str, num
     }
 
 
-async def enqueue_manual_triage(*, db: Database, github: GitHubBackend, repo_full: str, number: int) -> str:
+async def enqueue_manual_triage(
+    *, db: Database, github: GitHubBackend, repo_full: str, number: int, platform: str = "github"
+) -> str:
     """Fetch the issue from GitHub and queue it for the worker pool.
 
     Returns the delivery_id. A row may already exist from a previous manual
@@ -108,6 +110,7 @@ async def enqueue_manual_triage(*, db: Database, github: GitHubBackend, repo_ful
         payload=payload,
         state="queued",
         allowed_existing_states=INACTIVE_EVENT_STATES,
+        platform=platform,
     )
     if not replaced:
         current = db.get_event(delivery)
