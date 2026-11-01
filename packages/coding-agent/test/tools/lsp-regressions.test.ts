@@ -904,7 +904,12 @@ describe("lsp regressions", () => {
 				rootMarkers: [],
 				isLinter: true,
 			};
-			const refactor = { title: "Convert named imports to namespace import", kind: "refactor.rewrite" };
+			// Two distinct actions sharing kind and title (different `data`), as servers emit per target.
+			const refactors = [1, 2].map(target => ({
+				title: "Convert named imports to namespace import",
+				kind: "refactor.rewrite",
+				data: { target },
+			}));
 			installFakeLsp((message, srv) => {
 				if (message.method === "initialize") {
 					srv.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: { codeActionProvider: true } } });
@@ -925,9 +930,13 @@ describe("lsp regressions", () => {
 						},
 					};
 					// Like typescript-language-server: source actions only on an explicit `source` request.
-					// The refactor comes back regardless of `only`, as from servers that ignore the filter.
+					// The refactors come back regardless of `only`, as from servers that ignore the filter.
 					const wantsSource = params.context.only?.some(kind => kind.startsWith("source")) ?? false;
-					srv.send({ jsonrpc: "2.0", id: message.id, result: wantsSource ? [refactor, organize] : [refactor] });
+					srv.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						result: wantsSource ? [...refactors, organize] : refactors,
+					});
 				} else if (message.method === "shutdown") {
 					srv.send({ jsonrpc: "2.0", id: message.id, result: null });
 				} else if (message.method === "exit") {
@@ -946,7 +955,7 @@ describe("lsp regressions", () => {
 			});
 			expect(listed.content[0]).toMatchObject({
 				type: "text",
-				text: "2 code action(s):\n  0: [refactor.rewrite] Convert named imports to namespace import\n  1: [source.organizeImports] Organize Imports",
+				text: "3 code action(s):\n  0: [refactor.rewrite] Convert named imports to namespace import\n  1: [refactor.rewrite] Convert named imports to namespace import\n  2: [source.organizeImports] Organize Imports",
 			});
 
 			await tool.execute("apply-source-action", {

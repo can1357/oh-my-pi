@@ -1468,7 +1468,9 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					const result =
 						!apply && query
 							? ((await requestActions([query])) ?? [])
-							: mergeCodeActions(await Promise.all([requestActions(undefined), requestActions(["source"])]));
+							: mergeCodeActions(
+									...(await Promise.all([requestActions(undefined), requestActions(["source"])])),
+								);
 
 					if (result.length === 0) {
 						output = "No code actions available";
