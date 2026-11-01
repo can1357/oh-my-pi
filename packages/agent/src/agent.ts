@@ -177,6 +177,11 @@ export interface AgentOptions {
 	 * Shared provider state map for session-scoped transport/session caches.
 	 */
 	providerSessionState?: Map<string, ProviderSessionState>;
+	/**
+	 * Tool definitions already sent, for an Agent that replays another Agent's request history
+	 * (see {@link Agent.copySentToolDefinitions}). Defaults to an empty store.
+	 */
+	sentToolDefinitions?: SentToolDefinitions;
 
 	/**
 	 * Resolves an API key or resolver dynamically for each LLM call.
@@ -569,6 +574,7 @@ export class Agent {
 		this.#deadline = opts.deadline;
 		this.#promptCacheKey = opts.promptCacheKey;
 		this.#providerSessionState = opts.providerSessionState;
+		if (opts.sentToolDefinitions) this.#sentToolDefinitions = opts.sentToolDefinitions;
 		this.#thinkingBudgets = opts.thinkingBudgets;
 		this.#temperature = opts.temperature;
 		this.#topP = opts.topP;
@@ -641,6 +647,14 @@ export class Agent {
 	 */
 	set promptCacheKey(value: string | undefined) {
 		this.#promptCacheKey = value;
+	}
+
+	/**
+	 * A detached copy of the tool definitions this agent has sent (`AgentOptions.sentToolDefinitions`), without the
+	 * names `keep` rejects.
+	 */
+	copySentToolDefinitions(keep?: (name: string) => boolean): SentToolDefinitions {
+		return this.#sentToolDefinitions.copy(keep);
 	}
 
 	/**

@@ -25,7 +25,7 @@ import { fallbackCreditTargets } from "@oh-my-pi/pi-catalog/compat/fallback-cred
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
-import { isUnexpectedSocketCloseMessage, logger, prompt, sleepLong } from "@oh-my-pi/pi-utils";
+import { isUnexpectedSocketCloseMessage, logger, prompt, sleepLong, sleepUntil } from "@oh-my-pi/pi-utils";
 import { isApiKeyCommandFailureMessage } from "../config/api-key-resolver";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelStringWithRouting, resolveModelOverride } from "../config/model-resolver";
@@ -2040,65 +2040,7 @@ export class TurnRecovery {
 		}
 		if (!cfgRetryModelFallback.get(this.#host.settings) || this.#host.modelFallbackDisabled?.()) return false;
 
-		let fallback: { role: string; selector: RetryFallbackSelector; apiKey: string } | undefined;
-		const ceiling = this.#host.thinkingLevelCeiling();
-		const chainKeys = this.retryFallbackChainKeys(currentSelector, currentModel);
-		for (const role of chainKeys) {
-			for (const candidate of this.findRetryFallbackCandidates(role, currentSelector, currentModel)) {
-				if (this.isRetryFallbackSelectorSuppressed(candidate)) continue;
-				const resolved = resolveModelOverride([candidate.raw], this.#host.modelRegistry, this.#host.settings);
-				const candidateModel = resolved.model ?? this.#host.modelRegistry.find(candidate.provider, candidate.id);
-				if (!candidateModel || !this.#host.modelRegistry.hasConfiguredAuth(candidateModel)) continue;
-				if (ceiling !== undefined && !modelSupportsEffortCeiling(candidateModel, ceiling)) continue;
-				// A usage fallback must also fit: skip a candidate whose window cannot
-				// hold the live context so we never switch onto an oversized request
-				// (issue #8065).
-				if (!this.#host.contextFitsModel(candidateModel)) continue;
-				try {
-					const candidateHealth = await this.#host.modelRegistry.authStorage.health.model(
-						candidateModel.provider,
-						{
-							modelId: candidateModel.id,
-							sessionId: this.#host.sessionId(),
-							baseUrl: candidateModel.baseUrl,
-							reserveFraction: cfgRetryUsageReservePct.get(this.#host.settings) / 100,
-							signal,
-						},
-					);
-					if (signal.aborted || !modelsAreEqual(this.#host.model(), currentModel)) return false;
-					if (candidateHealth.state === "depleted" || candidateHealth.state === "reserve") continue;
-					if (candidateHealth.state === "healthy") {
-						const selected = candidateHealth.accounts.find(account => account.selected);
-						if (
-							selected &&
-							selected.state !== "healthy" &&
-							candidateHealth.accounts.some(account => account.state === "healthy")
-						) {
-							this.#host.modelRegistry.authStorage.sessions.release(
-								candidateModel.provider,
-								this.#host.sessionId(),
-							);
-						}
-					}
-				} catch {
-					if (signal.aborted || !modelsAreEqual(this.#host.model(), currentModel)) return false;
-					// Unknown usage fails open for an otherwise valid fallback.
-				}
-				if (signal.aborted || !modelsAreEqual(this.#host.model(), currentModel)) return false;
-				let apiKey: string | undefined;
-				try {
-					apiKey = await this.#host.modelRegistry.getApiKey(candidateModel, this.#host.sessionId(), { signal });
-				} catch {
-					if (signal.aborted || !modelsAreEqual(this.#host.model(), currentModel)) return false;
-					continue;
-				}
-				if (signal.aborted || !modelsAreEqual(this.#host.model(), currentModel)) return false;
-				if (!apiKey) continue;
-				fallback = { role, selector: candidate, apiKey };
-				break;
-			}
-			if (fallback) break;
-		}
+		const fallback = await this.#findKeyedRetryFallback(currentSelector, currentModel, signal);
 		if (!fallback) return false;
 
 		let shouldFallback = health.state === "depleted" || reservePolicy === "auto" || !confirmer;
@@ -2137,6 +2079,89 @@ export class TurnRecovery {
 			signal,
 			reason: describeUsageFallback(health, cfgRetryUsageReservePct.get(this.#host.settings)),
 		});
+	}
+
+	/**
+	 * Switches off a model whose provider has no usable credential onto the first
+	 * keyed fallback candidate. Unpinned, so the primary is restored once its
+	 * credential returns.
+	 */
+	async applyMissingCredentialFallback(signal: AbortSignal): Promise<boolean> {
+		if (!cfgRetryModelFallback.get(this.#host.settings) || this.#host.modelFallbackDisabled?.()) return false;
+		const currentModel = this.#host.model();
+		if (!currentModel) return false;
+		const currentSelector = formatRetryFallbackSelector(currentModel, this.#host.thinkingLevel());
+		const fallback = await this.#findKeyedRetryFallback(currentSelector, currentModel, signal);
+		if (!fallback) return false;
+		return this.applyRetryFallbackCandidate(fallback.role, fallback.selector, currentSelector, {
+			apiKey: fallback.apiKey,
+			signal,
+			reason: `no credential for ${currentModel.provider}`,
+		});
+	}
+
+	/** First keyed, eligible fallback candidate; undefined when none or when the walk went stale. */
+	async #findKeyedRetryFallback(
+		currentSelector: string,
+		currentModel: Model,
+		signal: AbortSignal,
+	): Promise<{ role: string; selector: RetryFallbackSelector; apiKey: string } | undefined> {
+		const stale = () => signal.aborted || !modelsAreEqual(this.#host.model(), currentModel);
+		const ceiling = this.#host.thinkingLevelCeiling();
+		for (const role of this.retryFallbackChainKeys(currentSelector, currentModel)) {
+			for (const candidate of this.findRetryFallbackCandidates(role, currentSelector, currentModel)) {
+				if (this.isRetryFallbackSelectorSuppressed(candidate)) continue;
+				const resolved = resolveModelOverride([candidate.raw], this.#host.modelRegistry, this.#host.settings);
+				const candidateModel = resolved.model ?? this.#host.modelRegistry.find(candidate.provider, candidate.id);
+				if (!candidateModel || !this.#host.modelRegistry.hasConfiguredAuth(candidateModel)) continue;
+				if (ceiling !== undefined && !modelSupportsEffortCeiling(candidateModel, ceiling)) continue;
+				// Skip a candidate whose window cannot hold the live context so we
+				// never switch onto an oversized request (issue #8065).
+				if (!this.#host.contextFitsModel(candidateModel)) continue;
+				try {
+					const candidateHealth = await this.#host.modelRegistry.authStorage.health.model(
+						candidateModel.provider,
+						{
+							modelId: candidateModel.id,
+							sessionId: this.#host.sessionId(),
+							baseUrl: candidateModel.baseUrl,
+							reserveFraction: cfgRetryUsageReservePct.get(this.#host.settings) / 100,
+							signal,
+						},
+					);
+					if (stale()) return undefined;
+					if (candidateHealth.state === "depleted" || candidateHealth.state === "reserve") continue;
+					if (candidateHealth.state === "healthy") {
+						const selected = candidateHealth.accounts.find(account => account.selected);
+						if (
+							selected &&
+							selected.state !== "healthy" &&
+							candidateHealth.accounts.some(account => account.state === "healthy")
+						) {
+							this.#host.modelRegistry.authStorage.sessions.release(
+								candidateModel.provider,
+								this.#host.sessionId(),
+							);
+						}
+					}
+				} catch {
+					if (stale()) return undefined;
+					// Unknown usage fails open for an otherwise valid fallback.
+				}
+				if (stale()) return undefined;
+				let apiKey: string | undefined;
+				try {
+					apiKey = await this.#host.modelRegistry.getApiKey(candidateModel, this.#host.sessionId(), { signal });
+				} catch {
+					if (stale()) return undefined;
+					continue;
+				}
+				if (stale()) return undefined;
+				if (!apiKey) continue;
+				return { role, selector: candidate, apiKey };
+			}
+		}
+		return undefined;
 	}
 
 	async #confirmUsageFallback(
@@ -3102,6 +3127,8 @@ export class TurnRecovery {
 		}
 
 		await this.#recordPendingRetryError(message, id, { switchedCredential, switchedModel, delayMs });
+		// Quota resets elapse while the machine sleeps; capture the deadline before event delivery.
+		const usageResetDeadline = AIError.is(id, AIError.Flag.UsageLimit) ? Date.now() + delayMs : undefined;
 
 		await this.#host.emitSessionEvent({
 			type: "auto_retry_start",
@@ -3128,15 +3155,16 @@ export class TurnRecovery {
 		this.#maybeInjectThinkingLoopRedirect(id);
 		this.#maybeInjectMalformedFunctionCallRedirect(id, maxRetries, preserveFailedTurn, switchedModel);
 
-		// Day-scale provider waits (a monthly quota reset parsed from the error
-		// text) exceed the signed 32-bit timer limit; sleepLong chunks the sleep
-		// so the full wait elapses instead of overflowing the timer. `delayMs`
-		// stays exact for events and the retry deadline computation.
+		// Quota waits follow the wall clock; ordinary backoff stays monotonic.
 		const retryAbortController = new AbortController();
 		this.#retryAbortController?.abort();
 		this.#retryAbortController = retryAbortController;
 		try {
-			await sleepLong(delayMs, retryAbortController.signal);
+			if (usageResetDeadline !== undefined) {
+				await sleepUntil(usageResetDeadline, retryAbortController.signal);
+			} else {
+				await sleepLong(delayMs, retryAbortController.signal);
+			}
 		} catch {
 			if (this.#retryAbortController !== retryAbortController) {
 				return false;

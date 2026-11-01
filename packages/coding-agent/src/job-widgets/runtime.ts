@@ -308,6 +308,7 @@ export interface JobWidgetSourceSample {
 
 /** Job facts a view needs besides the derived state. */
 export interface JobWidgetViewContext {
+	/** The fallback view's title: what the job is for, else its label. */
 	label: string;
 	/** A task's stage in its own words, from its progress; the stage line whenever present. */
 	stage?: string;

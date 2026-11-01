@@ -11,6 +11,7 @@ import {
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { fetchWithRetry } from "@oh-my-pi/pi-utils";
 import { type CompleteOptions, callHostLlm, getHostLlmBackend } from "./llm-backends";
+import { envFlag, envInt, envString } from "../util/env";
 import {
 	getMnemopiRuntimeOptions,
 	isPiAiModel,
@@ -29,12 +30,6 @@ export const DEFAULT_MODEL_REPO =
 export const DEFAULT_MODEL_FILE =
 	ENV_MODEL_REPO !== "" && ENV_MODEL_FILE !== "" ? ENV_MODEL_FILE : "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf";
 
-const TRUE_VALUES: Record<string, true> = { "1": true, true: true, yes: true, on: true };
-
-function env(name: string): string {
-	return process.env[name] ?? "";
-}
-
 function activeLlmOptions() {
 	return getMnemopiRuntimeOptions()?.llm;
 }
@@ -46,16 +41,6 @@ function activeCustomCompletion(): MnemopiLlmCompletion | undefined {
 function activePiAiModel(): Model<Api> | undefined {
 	const model = activeLlmOptions()?.model;
 	return isPiAiModel(model) ? model : undefined;
-}
-
-function envBool(name: string, defaultValue: boolean): boolean {
-	const value = env(name).trim().toLowerCase();
-	return value === "" ? defaultValue : TRUE_VALUES[value] === true;
-}
-
-function envInt(name: string, defaultValue: number): number {
-	const parsed = Number.parseInt(env(name), 10);
-	return Number.isFinite(parsed) ? parsed : defaultValue;
 }
 
 function stripTrailingSlash(value: string): string {
@@ -74,7 +59,7 @@ function llmEnabled(): boolean {
 	if (activeCustomCompletion() !== undefined || activePiAiModel() !== undefined) {
 		return true;
 	}
-	return envBool("MNEMOPI_LLM_ENABLED", true);
+	return envFlag("MNEMOPI_LLM_ENABLED", true);
 }
 
 function llmMaxTokens(): number {
@@ -97,7 +82,7 @@ function hostLlmEnabled(): boolean {
 	if (active?.baseUrl !== undefined || (typeof active?.model === "string" && active.model !== "")) {
 		return false;
 	}
-	return envBool("MNEMOPI_HOST_LLM_ENABLED", false);
+	return envFlag("MNEMOPI_HOST_LLM_ENABLED", false);
 }
 
 function hostLlmContextTokens(): number {
@@ -109,7 +94,7 @@ function llmBaseUrl(): string {
 	if (active?.baseUrl !== undefined) {
 		return stripTrailingSlash(active.baseUrl);
 	}
-	return stripTrailingSlash(env("MNEMOPI_LLM_BASE_URL"));
+	return stripTrailingSlash(envString("MNEMOPI_LLM_BASE_URL"));
 }
 
 function llmModelName(): string {
@@ -117,7 +102,7 @@ function llmModelName(): string {
 	if (typeof model === "string") {
 		return model;
 	}
-	return env("MNEMOPI_LLM_MODEL") || "local";
+	return envString("MNEMOPI_LLM_MODEL") || "local";
 }
 
 function llmApiKey(): ApiKey {
@@ -125,11 +110,11 @@ function llmApiKey(): ApiKey {
 	if (active?.apiKey !== undefined) {
 		return active.apiKey;
 	}
-	return env("MNEMOPI_LLM_API_KEY");
+	return envString("MNEMOPI_LLM_API_KEY");
 }
 
 function sleepPrompt(): string {
-	return env("MNEMOPI_SLEEP_PROMPT").trim();
+	return envString("MNEMOPI_SLEEP_PROMPT").trim();
 }
 
 function memoryLines(memories: readonly string[]): string {
@@ -248,8 +233,8 @@ async function tryHostLlm(prompt: string, maxTokens: number, temperature: number
 		maxTokens,
 		temperature,
 		timeout: 15,
-		provider: env("MNEMOPI_HOST_LLM_PROVIDER").trim() || null,
-		model: env("MNEMOPI_HOST_LLM_MODEL").trim() || null,
+		provider: envString("MNEMOPI_HOST_LLM_PROVIDER").trim() || null,
+		model: envString("MNEMOPI_HOST_LLM_MODEL").trim() || null,
 	});
 	const text = typeof raw === "string" ? raw.trim() : "";
 	return [true, text === "" ? null : text];
@@ -418,7 +403,7 @@ async function summarizeChunk(
 		return null;
 	}
 
-	if (llmEnabled() && llmBaseUrl() !== "" && !envBool("MNEMOPI_FORCE_LOCAL", false)) {
+	if (llmEnabled() && llmBaseUrl() !== "" && !envFlag("MNEMOPI_FORCE_LOCAL", false)) {
 		const raw = await callRemoteLlm(prompt, 0.3, options);
 		if (raw !== null) {
 			const cleaned = cleanOutput(raw);
@@ -475,7 +460,7 @@ export async function complete(
 	if (attempted) {
 		return hostText;
 	}
-	if (llmEnabled() && llmBaseUrl() !== "" && !envBool("MNEMOPI_FORCE_LOCAL", false)) {
+	if (llmEnabled() && llmBaseUrl() !== "" && !envFlag("MNEMOPI_FORCE_LOCAL", false)) {
 		const remote = await callRemoteLlm(prompt, temperature, options);
 		return remote === null ? null : cleanOutput(remote) || null;
 	}
