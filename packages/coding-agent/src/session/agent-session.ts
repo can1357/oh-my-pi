@@ -7039,12 +7039,12 @@ export class AgentSession implements SettingsScope {
 		return this.#tools.getToolByName(name);
 	}
 
-	/** Looks up an enabled eval-bridge tool with the session's permission gate applied. */
+	/** Looks up an enabled/activatable eval tool with the session's permission gate applied. */
 	getToolForEvalBridge(name: string): AgentTool | undefined {
 		return this.#tools.getToolForEvalBridge(name);
 	}
 
-	/** Names currently authorized through the eval bridge. */
+	/** Enabled tool-name examples advertised by eval, not an exhaustive invocation allowlist. */
 	getEvalBridgeToolNames(): string[] {
 		return this.#tools.getEvalBridgeToolNames();
 	}
