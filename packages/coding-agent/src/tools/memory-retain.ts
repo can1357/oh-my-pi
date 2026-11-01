@@ -43,10 +43,10 @@ export class MemoryRetainTool implements AgentTool<MemoryRetainSchema, MemoryRet
 		(args as Partial<MemoryRetainParams>).items?.some(item => item.scope === "global") ? "write" : "read";
 	readonly label = "Retain";
 	get description(): string {
-		return prompt.render(retainDescription, { globalScope: isGlobalMemoryScopeAvailable(this.session.settings) });
+		return prompt.render(retainDescription, { globalScope: isGlobalMemoryScopeAvailable(this.session) });
 	}
 	get parameters(): MemoryRetainSchema {
-		return isGlobalMemoryScopeAvailable(this.session.settings) ? memoryRetainSchemaWithScope : memoryRetainSchemaBase;
+		return isGlobalMemoryScopeAvailable(this.session) ? memoryRetainSchemaWithScope : memoryRetainSchemaBase;
 	}
 	readonly strict = true;
 	readonly loadMode = "discoverable";

@@ -57,10 +57,10 @@ export class LearnTool implements AgentTool<LearnSchema> {
 	};
 	readonly label = "Learn";
 	get description(): string {
-		return prompt.render(learnDescription, { globalScope: isGlobalMemoryScopeAvailable(this.session.settings) });
+		return prompt.render(learnDescription, { globalScope: isGlobalMemoryScopeAvailable(this.session) });
 	}
 	get parameters(): LearnSchema {
-		return isGlobalMemoryScopeAvailable(this.session.settings) ? learnSchemaWithScope : learnSchemaBase;
+		return isGlobalMemoryScopeAvailable(this.session) ? learnSchemaWithScope : learnSchemaBase;
 	}
 	readonly strict = true;
 	readonly loadMode = "essential" as const;
