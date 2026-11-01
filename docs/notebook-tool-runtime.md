@@ -94,6 +94,9 @@ Kernel semantics are implemented in `executePython` / `PythonKernel` and apply t
 - `session` (default)
    - kernels are cached by `(session id, cwd, interpreter)`
    - multiple owners can share a retained kernel for the same key
+   - a kernel left behind is reclaimed: once every owner registered against it has run its latest cell under another key, it is shut down after `eval.kernelReclaimGraceMs` (default 120,000 ms; `0` never reclaims), counted from that move, not from when the kernel fell idle. A cell running in it or a subagent that can still call its kernel-defined tools keeps it until that work ends; an owner returning inside the grace keeps the same kernel and namespace
+   - a reclaim loses the namespace and anything a finished cell left running — a thread, a subprocess, a write not yet flushed — because the shutdown ends with a process-group `SIGKILL`. The owner's first cell under that key on a new kernel, including one that lands while the old runner is still exiting, opens with a line naming the directory and saying so; another agent arriving at that key and an owner that resets it are not told
+   - a reclaim that cannot confirm the exit keeps the kernel for owner disposal, which retries it once, and then for the process-wide disposal; a runner stuck in uninterruptible kernel I/O (`D` state) can be neither killed nor waited out (see `docs/python-repl.md`)
    - foreground eval tool calls use exclusive concurrency; this is not a blanket lock on background cells or kernel-defined tool requests
    - dead kernels are replaced before execution
 - `per-call`
