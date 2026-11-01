@@ -2,29 +2,31 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as url from "node:url";
 import { $which, isWsl, logger } from "@oh-my-pi/pi-utils";
+import { probeStdout } from "./bounded-probe";
 
 const URL_SCHEME_PATTERN = /^[a-zA-Z][a-zA-Z\d+.-]*:/;
 
-function getExistingWslLocalPath(urlOrPath: string): string | undefined {
-	if (!isWsl() || !$which("wslview")) {
-		return undefined;
+/**
+ * Local filesystem path for `urlOrPath`, or `undefined` when it is a URL or does
+ * not exist. Pure filesystem/env checks so the WSL check stays synchronous while
+ * the `wslpath` conversion becomes an async probe; a non-local `file://host/…`
+ * URL resolves to `undefined` so the caller falls back to `xdg-open` instead of
+ * throwing out of the best-effort path.
+ */
+function wslLocalPathFor(urlOrPath: string): string | undefined {
+	if (!isWsl() || !$which("wslview")) return undefined;
+	let localPath: string | undefined;
+	if (urlOrPath.startsWith("file://")) {
+		try {
+			localPath = url.fileURLToPath(urlOrPath);
+		} catch {
+			return undefined;
+		}
+	} else {
+		localPath = URL_SCHEME_PATTERN.test(urlOrPath) ? undefined : path.resolve(urlOrPath);
 	}
-
-	try {
-		const localPath = urlOrPath.startsWith("file://")
-			? url.fileURLToPath(urlOrPath)
-			: URL_SCHEME_PATTERN.test(urlOrPath)
-				? undefined
-				: path.resolve(urlOrPath);
-		if (!localPath || !fs.existsSync(localPath)) return undefined;
-
-		const result = Bun.spawnSync(["wslpath", "-w", localPath], { stdout: "pipe", stderr: "ignore" });
-		if (result.exitCode !== 0) return undefined;
-
-		return result.stdout.toString().trim() || undefined;
-	} catch {
-		return undefined;
-	}
+	if (!localPath || !fs.existsSync(localPath)) return undefined;
+	return localPath;
 }
 
 /**
@@ -80,11 +82,29 @@ export function openPath(urlOrPath: string): void {
 			cmd = windowsOpenerCommand(urlOrPath);
 			break;
 		default: {
-			const wslPath = getExistingWslLocalPath(urlOrPath);
-			cmd = wslPath ? ["wslview", wslPath] : ["xdg-open", urlOrPath];
-			break;
+			const localPath = wslLocalPathFor(urlOrPath);
+			if (!localPath) {
+				cmd = ["xdg-open", urlOrPath];
+				break;
+			}
+			// `wslview` wants a Windows path. Resolving it is an async probe
+			// (bounded by the shared probe budget), so the returning opener is
+			// spawned from the continuation rather than inline — a wedged interop
+			// pipe (issue #8402) can no longer block the calling thread. The
+			// fallback is the same `xdg-open` decision the other failure paths
+			// produce.
+			void probeStdout(["wslpath", "-w", localPath]).then(
+				wslPath => spawnOpener(wslPath ? ["wslview", wslPath] : ["xdg-open", urlOrPath], urlOrPath),
+				() => spawnOpener(["xdg-open", urlOrPath], urlOrPath),
+			);
+			return;
 		}
 	}
+	spawnOpener(cmd, urlOrPath);
+}
+
+/** Spawn a resolved opener command, recording delayed failures as log telemetry. */
+function spawnOpener(cmd: string[], urlOrPath: string): void {
 	let child: Bun.Subprocess | undefined;
 	try {
 		child = Bun.spawn(cmd, {
