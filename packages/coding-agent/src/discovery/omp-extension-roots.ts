@@ -342,8 +342,8 @@ export async function listOmpExtensionRoots(ctx: LoadContext): Promise<OmpExtens
 /**
  * Enumerate every enabled npm/link plugin's package directory so its conventional
  * `skills/`, `hooks/`, `tools/`, `commands/`, `rules/`, `prompts/`, and
- * `.mcp.json` are wired into discovery — mirrors how `getAllPluginExtensionPaths`
- * already feeds the extension factory loader.
+ * `.mcp.json` are wired into discovery — mirrors how `listPackageExtensionModules`
+ * already feeds plugin entries to the extension factory loader.
  *
  * Marketplace installs also create runtime symlinks for enable-state persistence,
  * but their resources are discovered through the `claude-plugins` provider.

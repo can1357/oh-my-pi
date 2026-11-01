@@ -96,7 +96,7 @@ import {
 } from "./acp-event-mapper";
 import { ACP_TERMINAL_AUTH_FLAG } from "./terminal-auth";
 
-import { cfgDisabledExtensions } from "../../extensibility/settings";
+import { cfgDisabledExtensions, cfgExtensions } from "../../extensibility/settings";
 import { cfgPlanEnabled } from "../../plan-mode/settings";
 
 const ACP_DEFAULT_MODE_ID = "default";
@@ -1498,7 +1498,12 @@ export class AcpAgent implements Agent {
 				const cwd = typeof params.cwd === "string" ? (params.cwd as string) : undefined;
 				const sm = await Settings.init();
 				const disabledIds = cfgDisabledExtensions.get(sm);
-				const extensions = await loadAllExtensions(cwd, disabledIds);
+				const extensions = await loadAllExtensions(cwd, disabledIds, {
+					explicit: [],
+					mode: "merge",
+					configured: cfgExtensions.get(sm),
+					configuredLevel: sm.extensionsSourceLevel(),
+				});
 				return { extensions: extensions as unknown as Array<{ [key: string]: unknown }> };
 			}
 			case "_omp/extensions/toggle": {
