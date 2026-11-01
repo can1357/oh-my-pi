@@ -5766,13 +5766,18 @@ export class AgentSession implements SettingsScope {
 		}, SESSION_MOVED_HANDLER_GRACE_MS);
 		try {
 			// A gate clears itself as it opens, so what is here after one opens is a later move's.
-			for (let gate: Promise<void> | undefined = this.#movesGate; gate && !expired; gate = this.#movesGate) {
+			for (let gate = this.#peekMovesGate(); gate && !expired; gate = this.#peekMovesGate()) {
 				const waits = [gate, deadline.promise];
 				await (signal ? Promise.race([...waits, abortRejection(signal)]) : Promise.race(waits));
 			}
 		} finally {
 			clearTimeout(timer);
 		}
+	}
+
+	/** The current move gate, read without the narrowing a caller's own check gave the field. */
+	#peekMovesGate(): Promise<void> | undefined {
+		return this.#movesGate;
 	}
 
 	/**
