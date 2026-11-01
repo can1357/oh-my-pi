@@ -1069,4 +1069,115 @@ Tail content
 		expect(stored.subarray(0, 3).equals(prefix)).toBe(true);
 		expect(stored.toString("latin1")).toContain("Authorization: Bearer [REDACTED]");
 	});
+
+	it("redacts short Bearer authorization credentials and short URL userinfo passwords", () => {
+		const shortBearer = "Authorization: Bearer abc";
+		const scrubbedBearer = scrubLiveCredentials(shortBearer);
+		expect(scrubbedBearer.matchedTypes).toContain("auth_bearer_basic");
+		expect(scrubbedBearer.content).toBe("Authorization: Bearer [REDACTED]");
+
+		const shortUrl = "https://u:p@example.com";
+		const scrubbedUrl = scrubLiveCredentials(shortUrl);
+		expect(scrubbedUrl.matchedTypes).toContain("basic_auth_url");
+		expect(scrubbedUrl.content).toBe("https://u:[REDACTED]@example.com");
+	});
+
+	it("preserves known binary MIME raw bytes even when charset is present in data URI", () => {
+		const blobRoot = useTempBlobDir();
+		const fakePdfBytes = Buffer.from("%PDF-1.4\nfake pdf binary payload \x00\x01\x02\xff");
+		const pdfUri = `data:application/pdf;charset=utf-8;base64,${fakePdfBytes.toString("base64")}`;
+
+		const [, meta] = sanitizeContent(pdfUri);
+		expect(meta.mime).toBe("application/pdf");
+		expect(meta.extraction_reason).toBe("data_uri");
+		const sha = (meta.blob_ref ?? "").replace("blob://sha256/", "");
+		const stored = readFileSync(join(blobRoot, sha.slice(0, 2), sha.slice(0, 4), sha));
+		expect(stored).toEqual(fakePdfBytes);
+	});
+
+	it("handles data URIs embedded in prose with trailing delimiters while preserving clean data URIs", () => {
+		const blobRoot = useTempBlobDir();
+		const secret = "Authorization: Bearer mySecretToken12345";
+		const b64 = Buffer.from(secret, "utf8").toString("base64");
+		const input = `see (data:text/plain;base64,${b64}) or [link](data:text/plain,hello)`;
+		const sanitized = sanitizeTextField(input);
+		expect(sanitized).toBe("see (Authorization: Bearer [REDACTED]) or [link](data:text/plain,hello)");
+
+		const outerUri = `data:text/plain;base64,${Buffer.from(input, "utf8").toString("base64")}`;
+		const [, meta] = sanitizeContent(outerUri);
+		expect(meta.redacted_secrets).toContain("auth_bearer_basic");
+		const sha = (meta.blob_ref ?? "").replace("blob://sha256/", "");
+		const stored = readFileSync(join(blobRoot, sha.slice(0, 2), sha.slice(0, 4), sha), "utf8");
+		expect(stored).toBe("see (Authorization: Bearer [REDACTED]) or [link](data:text/plain,hello)");
+		expect(stored).not.toContain("mySecretToken12345");
+
+		const leadingDataInput = `data:text/plain;base64,SGVsbG8= see (data:text/plain;base64,${b64})`;
+		expect(sanitizeTextField(leadingDataInput)).toBe(
+			"data:text/plain;base64,SGVsbG8= see (Authorization: Bearer [REDACTED])",
+		);
+	});
+
+	it("strips injected tags across passes that uncover new data URIs", () => {
+		const secret = "Authorization: Bearer passSecret12345";
+		const b64 = Buffer.from(secret, "utf8").toString("base64");
+		const hiddenDataUri = `da<private>x</private>ta:text/plain;base64,${b64}`;
+		const sanitized = sanitizeTextField(hiddenDataUri);
+		expect(sanitized).toBe("Authorization: Bearer [REDACTED]");
+	});
+
+	it("rejects data URL nesting beyond maximum scan depth and replaces with placeholder", () => {
+		const blobRoot = useTempBlobDir();
+		let uri = "Authorization: Bearer deeplyNestedSecret999";
+		for (let i = 0; i < 5; i++) {
+			uri = `data:text/plain;base64,${Buffer.from(uri, "utf8").toString("base64")}`;
+		}
+
+		const sanitizedText = sanitizeTextField(uri);
+		expect(sanitizedText).toBe("[REDACTED_NESTED_DATA_URI]");
+
+		const [, meta] = sanitizeContent(uri);
+		expect(meta.redacted_secrets).toContain("nested_data_uri");
+		const sha = (meta.blob_ref ?? "").replace("blob://sha256/", "");
+		const stored = readFileSync(join(blobRoot, sha.slice(0, 2), sha.slice(0, 4), sha), "utf8");
+		expect(stored).toBe("[REDACTED_NESTED_DATA_URI]");
+		expect(stored).not.toContain("deeplyNestedSecret999");
+	});
+
+	it("sanitizes auxiliary string and JSON/array fields on memory rows", () => {
+		const row = sanitizeMemoryRow({
+			id: "m_aux",
+			scope: "project_<private>secret-tag</private>main",
+			author_id: "user_<private>id</private>admin",
+			channel_id: "chan Authorization: Bearer chanSecret12345",
+			memory_type: "fact_<script>alert(1)</script>",
+			tier: "tier_<private>1</private>",
+			tier_label: "label_<system-x>active</system-x>",
+			source: "src Authorization: Bearer srcSecret12345",
+			summary: "summary_<private>secret</private>tail",
+			category: "cat_<system-cat>important</system-cat>doc",
+			veracity: "veracity_<private>confirmed</private>",
+			temporal_tags: JSON.stringify(["tag1", "<system-t>today</system-t>post"]),
+			entities: ["entity1", "Authorization: Bearer entitySecret12345"],
+			tags: ["tag_<private>p</private>tagval"],
+			sources_json: JSON.stringify({ src: "<system-src>url</system-src>srctail" }),
+			custom_extra_field: "extra_<system-extra>val</system-extra>data",
+		});
+
+		expect(row.scope).toBe("project_main");
+		expect(row.author_id).toBe("user_admin");
+		expect(row.channel_id).toBe("chan Authorization: Bearer [REDACTED]");
+		expect(row.source).toBe("src Authorization: Bearer [REDACTED]");
+		expect(row.summary).toBe("summary_tail");
+		expect(row.category).toBe("cat_doc");
+		expect(row.custom_extra_field).toBe("extra_data");
+
+		const temporalTags = JSON.parse(row.temporal_tags) as string[];
+		expect(temporalTags).toEqual(["tag1", "post"]);
+
+		expect(row.entities).toEqual(["entity1", "Authorization: Bearer [REDACTED]"]);
+		expect(row.tags).toEqual(["tag_tagval"]);
+
+		const sourcesJson = JSON.parse(row.sources_json) as Record<string, string>;
+		expect(sourcesJson.src).toBe("srctail");
+	});
 });
