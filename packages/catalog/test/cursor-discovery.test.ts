@@ -425,9 +425,10 @@ describe("fetchCursorUsableModels", () => {
 				description: "Anthropic's earlier flagship model, great for difficult tasks.",
 				thinking: {
 					mode: "effort",
-					efforts: ["high"],
+					efforts: ["medium", "high"],
 					effortRouting: {
 						off: "claude-4.6-opus-low",
+						medium: "claude-4.6-opus-medium",
 						high: "claude-4.6-opus-high",
 					},
 				},
@@ -440,6 +441,14 @@ describe("fetchCursorUsableModels", () => {
 				parameters: [
 					{ id: "thinking_effort", value: "low" },
 					{ id: "thinking", value: "false" },
+					{ id: "context", value: "300k" },
+				],
+				maxMode: false,
+			},
+			"claude-4.6-opus-medium": {
+				modelId: "claude-4.6-opus",
+				parameters: [
+					{ id: "thinking_effort", value: "medium" },
 					{ id: "context", value: "300k" },
 				],
 				maxMode: false,
@@ -477,7 +486,7 @@ describe("fetchCursorUsableModels", () => {
 				}),
 			}),
 		);
-		expect(models?.some(model => model.id === "claude-4.6-opus-medium")).toBe(false);
+		// `medium` stays: the usable list omits it, but the Run endpoint accepts it (#15527).
 		expect(models?.some(model => model.id === "claude-4.6-opus-xhigh")).toBe(false);
 		expect(models?.some(model => model.id === "fable-retention")).toBe(false);
 
@@ -611,6 +620,57 @@ describe("fetchCursorUsableModels", () => {
 		const details = fromBinary(AvailableModelsResponse_ModelDetailsSchema, encoded);
 		expect(details.name).toBe("fixture");
 		expect(details.vendor?.id).toBe(ModelVendorId.ANTHROPIC);
+	});
+	it("keeps rich lanes that GetUsableModels omits but the Run endpoint accepts", async () => {
+		// #15527: Cursor's usable list under-reports entitlement — glm-5p3* slugs
+		// are absent while the Run endpoint validates them. A supportsAgent
+		// model must stay on the roster even when no slug intersects the
+		// usable set, or the lane is invisible with no way to select it.
+		const usable = create(GetUsableModelsResponseSchema, {
+			models: ["glm-5.2-high", "glm-5.2-max"].map(modelId => create(ModelDetailsSchema, { modelId })),
+		});
+		const available = create(AvailableModelsResponseSchema, {
+			models: [
+				create(AvailableModelsResponse_ModelDetailsSchema, {
+					name: "glm-5p3",
+					supportsAgent: true,
+					requiresDataRetention: false,
+					legacySlugs: ["glm-5p3", "glm-5p3-low", "glm-5p3-high", "glm-5p3-max"],
+					variants: [
+						richVariant("glm-5p3-low", { reasoning: "low" }),
+						richVariant("glm-5p3-high", { reasoning: "high" }),
+						richVariant("glm-5p3-max", { reasoning: "max" }),
+					],
+				}),
+			],
+		});
+		const rpcBaseUrl = await startCursorDiscoveryRpcServer({
+			"/agent.v1.AgentService/GetUsableModels": toBinary(GetUsableModelsResponseSchema, usable),
+			"/aiserver.v1.AiService/AvailableModels": toBinary(AvailableModelsResponseSchema, available),
+		});
+
+		const models = await fetchCursorUsableModels({
+			apiKey: "account-token",
+			baseUrl: rpcBaseUrl,
+			timeoutMs: 1_000,
+		});
+
+		const lane = models?.find(model => model.id === "glm-5p3");
+		expect(lane).toBeDefined();
+		expect(lane?.cursorModelRoutes).toEqual({
+			"glm-5p3-low": {
+				modelId: "glm-5p3",
+				parameters: [{ id: "reasoning", value: "low" }],
+			},
+			"glm-5p3-high": {
+				modelId: "glm-5p3",
+				parameters: [{ id: "reasoning", value: "high" }],
+			},
+			"glm-5p3-max": {
+				modelId: "glm-5p3",
+				parameters: [{ id: "reasoning", value: "max" }],
+			},
+		});
 	});
 
 	it("uses Cursor's HTTP/1 unary RPC shape for rich discovery", async () => {

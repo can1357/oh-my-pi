@@ -251,6 +251,12 @@
 
 ## [18.10.4] - 2026-10-13
 
+### Fixed
+
+- Cursor model discovery no longer drops models the account can run when Cursor's `GetUsableModels` list under-reports entitlement — agent-capable models advertised by `AvailableModels` (e.g. GLM-5.3) stay on the roster even when no wire slug appears in the usable list ([#15527](https://github.com/can1357/oh-my-pi/issues/15527), fixed in [#15540](https://github.com/can1357/oh-my-pi/pull/15540) by [@zhoffm](https://github.com/zhoffm))
+
+## [18.10.2] - 2026-10-12
+
 ### Added
 
 - Added Muse Code's subscription-only Muse Wonder Full and Wonder contributor tiers with the `max` effort, recording API-equivalent cost instead of $0: Wonder Full at Muse Wonder's $4 input / $0.20 cached / $20 output per 1M tokens, contributor tiers at the measured $1.60 / $0.08 / $8 ([#15522](https://github.com/can1357/oh-my-pi/pull/15522) by [@eggpeat](https://github.com/eggpeat))
