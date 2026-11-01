@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed the bash tool's `wait "$!"` failing with `no such job` instead of waiting when the backgrounded command was a function, subshell or brace group: `$!` now identifies a job the shell runs itself, `jobs -p` and `jobs -l` show it, and `wait`, `kill` and the newly implemented `disown` accept it; it is not an operating-system process id, so tools outside the shell (`ps`, `/proc`, another shell's `kill`) will not find it
+- Fixed the bash tool's `wait "$!"` failing with `no such job` instead of waiting when the backgrounded command was a function, subshell or brace group: `$!` now identifies a job the shell runs itself, `jobs -p` and `jobs -l` show it, and `wait`, `kill` and the newly implemented `disown` accept it; it is not an operating-system process id, so tools outside the shell (`ps`, `/proc`, another shell's `kill`) will not find it ([#17678](https://github.com/can1357/oh-my-pi/pull/17678) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.2] - 2026-10-31
 
