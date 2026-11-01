@@ -146,6 +146,15 @@ pub struct VcsCommitAuthor {
 	pub email: String,
 	pub date:  Option<String>,
 }
+/// An untracked listing with git's own report of what it could not read.
+#[napi(object)]
+pub struct LsFilesWithWarnings {
+	/// The untracked paths git listed.
+	pub paths:      Vec<String>,
+	/// Directories git reported it could not open, so the listing is short.
+	pub unreadable: Vec<String>,
+}
+
 /// Commit metadata.
 #[napi(object)]
 pub struct VcsCommitDetails {
@@ -697,6 +706,20 @@ impl VcsRepo {
 			repo.ls_files(others, exclude_standard)
 		})
 	}
+
+	/// Untracked paths, plus the directories git said it could not open.
+	#[napi]
+	pub fn ls_files_with_warnings(
+		&self,
+		others: bool,
+		exclude_standard: bool,
+		signal: Option<Unknown>,
+	) -> Promise<LsFilesWithWarnings> {
+		repo_blocking("vcs.lsFilesWithWarnings", self.inner.clone(), signal, move |repo| {
+			let (paths, unreadable) = repo.ls_files_with_warnings(others, exclude_standard)?;
+			Ok(LsFilesWithWarnings { paths, unreadable })
+		})
+	}
 }
 
 /// In-process Git repository handle.
@@ -994,6 +1017,24 @@ impl VcsGitRepo {
 	) -> Promise<Vec<String>> {
 		blocking("vcs.lsFiles", self.inner.clone(), signal, move |r| {
 			r.ls_files(others, exclude_standard)
+		})
+	}
+
+	/// Untracked paths, plus the directories git said it could not open.
+	///
+	/// `git ls-files --others` warns and exits 0 when it cannot open a
+	/// directory, so the list alone cannot say whether it is complete. A
+	/// caller that deletes a workspace on the strength of it needs both.
+	#[napi]
+	pub fn ls_files_with_warnings(
+		&self,
+		others: bool,
+		exclude_standard: bool,
+		signal: Option<Unknown>,
+	) -> Promise<LsFilesWithWarnings> {
+		blocking("vcs.lsFilesWithWarnings", self.inner.clone(), signal, move |r| {
+			let (paths, unreadable) = r.ls_files_with_warnings(others, exclude_standard)?;
+			Ok(LsFilesWithWarnings { paths, unreadable })
 		})
 	}
 

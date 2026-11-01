@@ -37,6 +37,7 @@ import isolationRecoveryHintTemplate from "../prompts/tools/isolation-recovery-h
 import salvagedChildHintTemplate from "../prompts/tools/salvaged-child-hint.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { createReleaseHold, type ReleaseHold } from "../utils/release-hold";
+import { leaseIsolationWorkspace } from "./isolation-lease";
 import type { TaskEffort } from "@oh-my-pi/pi-tui/thinking";
 import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../irc/messaging";
@@ -1027,11 +1028,23 @@ function describeSalvagedWork(result: SingleResult): string {
  * bookkeeping; none of that can reach the one object both parties hold.
  */
 export async function runStructuredSubagent(request: StructuredSubagentRequest): Promise<StructuredSubagentResult> {
-	const hold = request.onRelease ? createReleaseHold(request.onRelease) : undefined;
+	// A child that inherits its parent's cwd runs in a sandbox it did not
+	// materialise and does not own. Holding it keeps the owner's teardown
+	// waiting for this child rather than deleting the workspace under it; the
+	// hold ends where everything else this child holds ends.
+	const workspace = await leaseIsolationWorkspace(request.session.cwd);
+	const callerRelease = request.onRelease;
+	const hold = createReleaseHold(async () => {
+		try {
+			await callerRelease?.();
+		} finally {
+			await workspace();
+		}
+	});
 	try {
 		return await runStructuredSubagentDispatch(request, hold);
 	} finally {
-		if (hold?.isOwed()) await hold();
+		if (hold.isOwed()) await hold();
 	}
 }
 

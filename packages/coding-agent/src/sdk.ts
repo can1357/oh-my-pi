@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { scheduler } from "node:timers/promises";
 import {
 	Agent,
 	type AgentEvent,
@@ -167,6 +168,14 @@ import { MEMORY_BACKEND_TOOL_NAMES } from "./memory-backend/tool-names";
 import type { MnemopiSessionState } from "./mnemopi/state";
 import mcpXdevGuidanceTemplate from "./prompts/system/mcp-xdev-guidance.md" with { type: "text" };
 import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with { type: "text" };
+/**
+ * How long a session being disposed keeps its isolation lease once disposal
+ * has started. Long enough for a shutdown writer to finish, short enough that
+ * a disposal that never finishes cannot hold a workspace for ever.
+ */
+const SESSION_LEASE_DISPOSE_GRACE_MS = 30_000;
+
+import { leaseIsolationWorkspace, markUnfinishedWriter } from "./task/isolation-lease";
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
 import { type AgentKind, type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "./registry/agent-registry";
 import {
@@ -2408,6 +2417,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// mutation (any tool) bumped it in the meantime.
 		const fileMutationVersions = new Map<string, number>();
 		const disposeCallbacks = new Set<() => void>();
+		/** Run the moment disposal starts, before anything it might wait on. */
+		const beginDisposeCallbacks = new Set<() => void>();
 		const activeToolNames = new Set<string>();
 		const toolRegistry = new Map<string, Tool & Pick<ToolDefinition, "defaultInactive">>();
 		const setActiveToolNames = (names: Iterable<string>): void => {
@@ -4483,6 +4494,200 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			model => modelRegistry.getApiKey(model, providerSessionId),
 		);
 		disposeCallbacks.add(() => blobBroker.dispose());
+		// A session opened inside a task-isolation sandbox is a user of a
+		// workspace it did not materialise, and may well be in another process
+		// than the run that owns it. Holding a lease keeps that owner's teardown
+		// — capture included — waiting for this session rather than deleting the
+		// directory it is working in.
+		// A session opened inside a task-isolation sandbox is a user of a
+		// workspace it did not materialise, and may be in another process than
+		// the run that owns it. The lease keeps that owner's teardown — capture
+		// included — waiting for this session. It carries the agent id, so the
+		// owner's own child session never pins its own run's sandbox, and it is
+		// dropped at the *start* of disposal: a session being torn down is no
+		// longer a user, and a disposal that stalls must not hold a workspace
+		// and a kernel behind it.
+		const workspaceLease = await leaseIsolationWorkspace(sessionManager.getCwd(), { agentId: resolvedAgentId });
+		let workspaceLeaseTimer: NodeJS.Timeout | undefined;
+		/** Record publication and clearing that disposal must not finish ahead of. */
+		let pendingWriterWork: Promise<void> | undefined;
+		let workspaceLeaseDropped = false;
+		/**
+		 * One record for this session, created at most once and cleared at most
+		 * once. Two records — one at the start of disposal and another at the
+		 * grace — left the second uncleared, and a workspace nobody could reuse.
+		 */
+		let writerRecord: Promise<() => Promise<void>> | undefined;
+		/**
+		 * Bumped by every clear, so a grace timer armed before that clear
+		 * cannot recreate a record nobody is left to clear.
+		 */
+		let writerRecordGeneration = 0;
+		const recordWriter = (generation: number): Promise<() => Promise<void>> => {
+			if (generation !== writerRecordGeneration) return Promise.resolve(async () => {});
+			// A rejection is not cached: re-awaiting a settled rejection is not a
+			// retry, and the "five attempts" around this made exactly one real
+			// one. A failure drops the memo so the next call tries again.
+			writerRecord ??= markUnfinishedWriter(sessionManager.getCwd()).catch((error: unknown) => {
+				writerRecord = undefined;
+				throw error;
+			});
+			return writerRecord;
+		};
+		const clearWriterRecord = async (): Promise<void> => {
+			if (writerRecord === undefined) return;
+			const clear = await writerRecord.catch(() => undefined);
+			if (clear === undefined) return;
+			for (let attempt = 0; attempt < 5; attempt += 1) {
+				try {
+					await clear();
+					writerRecord = undefined;
+					writerRecordGeneration += 1;
+					return;
+				} catch (error) {
+					logger.warn("could not clear this session's unfinished-writer record; retrying", {
+						attempt,
+						error: String(error),
+					});
+					await scheduler.wait(200);
+				}
+			}
+			// Still there. Giving up here leaves a live record nothing can
+			// finish — the sandbox is then pinned for this process's life even
+			// though the writer is long done — so keep trying in the
+			// background, unreferenced, until it goes or the process does.
+			// One attempt at a time: an interval that starts work without
+			// awaiting the previous attempt had three clears in flight at once.
+			let clearing = false;
+			const slowRetry = setInterval(() => {
+				if (clearing) return;
+				clearing = true;
+				void clear().then(
+					() => {
+						clearInterval(slowRetry);
+						writerRecord = undefined;
+						writerRecordGeneration += 1;
+						clearing = false;
+					},
+					() => {
+						clearing = false;
+					},
+				);
+			}, 5_000);
+			slowRetry.unref?.();
+		};
+		const dropWorkspaceLease = (): void => {
+			if (workspaceLeaseDropped) return;
+			// Marked dropped only once the lease is really gone: a removal that
+			// failed transiently must leave this retryable, not report a lease
+			// still on disk as released.
+			void (async () => {
+				for (let attempt = 0; attempt < 5 && !workspaceLeaseDropped; attempt += 1) {
+					try {
+						await workspaceLease();
+						workspaceLeaseDropped = true;
+						clearTimeout(workspaceLeaseTimer);
+						return;
+					} catch (error) {
+						logger.warn("isolation workspace lease could not be dropped; retrying", {
+							attempt,
+							error: String(error),
+						});
+						await scheduler.wait(200);
+					}
+				}
+			})();
+		};
+		// Held until disposal *finishes*: a shutdown writer still saving into
+		// the workspace is a user of it, and dropping the lease when disposal
+		// merely starts lets the owner delete the directory under that write.
+		disposeCallbacks.add(() => {
+			// Awaited by the dispose wrapper below: a detached callback lets
+			// disposal end while this session's record is still unpublished,
+			// and an unpublished record protects nothing.
+			pendingWriterWork = (async () => {
+				// Disposal ending is not proof that a handler it abandoned at its
+				// timeout has stopped. When it did, the record stays: it names
+				// this process, so it retires when this process does, and until
+				// then nothing deletes or reuses the workspace underneath that
+				// handler.
+				if (session.hasAbandonedShutdownWork()) {
+					logger.warn("keeping this session's unfinished-writer record: disposal abandoned a shutdown handler", {
+						id: resolvedAgentId,
+					});
+					// The lease goes only once the record is on disk, here as at
+					// the grace: catching the failure and dropping it anyway is
+					// how a late write ends up with `ENOENT` and no capture.
+					let published = false;
+					for (let attempt = 0; attempt < 5 && !published; attempt += 1) {
+						try {
+							await recordWriter(writerRecordGeneration);
+							published = true;
+						} catch (error) {
+							logger.warn("could not record this session as an unfinished writer; retrying", {
+								attempt,
+								error: String(error),
+							});
+							await scheduler.wait(200);
+						}
+					}
+					if (!published) {
+						logger.warn("keeping this session's workspace lease: its writer record could not be published", {
+							id: resolvedAgentId,
+						});
+						return;
+					}
+				} else {
+					await clearWriterRecord();
+				}
+				dropWorkspaceLease();
+			})();
+		});
+		// Bounded from the moment disposal starts, because a disposal that
+		// never finishes would otherwise hold the sandbox — and the kernel
+		// behind it — for the life of the host.
+		beginDisposeCallbacks.add(() => {
+			// Recorded for the whole of disposal: a shutdown handler that outruns
+			// its own timeout is still writing here while disposal finishes.
+			const armedGeneration = writerRecordGeneration;
+			pendingWriterWork = recordWriter(armedGeneration)
+				.then(() => undefined)
+				.catch(error => {
+					logger.warn("could not record this session as an unfinished writer", { error: String(error) });
+				});
+			workspaceLeaseTimer = setTimeout(() => {
+				logger.warn("session disposal outran its workspace lease grace; dropping the lease", {
+					id: resolvedAgentId,
+					graceMs: SESSION_LEASE_DISPOSE_GRACE_MS,
+				});
+				// The same record, not a second one. Giving the lease up is how a
+				// stalled disposal stops holding a kernel; it is not a statement
+				// that this session has stopped writing.
+				// The lease goes only once the record is really on disk. A
+				// publication that *failed* is not a publication that finished,
+				// and dropping protection on it hands the workspace to a
+				// teardown while this session is still writing.
+				void (async () => {
+					for (let attempt = 0; attempt < 5; attempt += 1) {
+						try {
+							await recordWriter(armedGeneration);
+							dropWorkspaceLease();
+							return;
+						} catch (error) {
+							logger.warn("could not record an unfinished writer; keeping the workspace lease", {
+								attempt,
+								error: String(error),
+							});
+							await scheduler.wait(200);
+						}
+					}
+					logger.warn("keeping this session's workspace lease: its writer record could not be published", {
+						id: resolvedAgentId,
+					});
+				})();
+			}, SESSION_LEASE_DISPOSE_GRACE_MS);
+			workspaceLeaseTimer.unref?.();
+		});
 		// Always installed; the getter-backed options are snapshotted per request,
 		// so `snapcompact.*` changes apply on the next call (a no-op while both are off).
 		const snapcompactInline = new SnapcompactInlineTransformer(
@@ -5344,6 +5549,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					// begins — the lifecycle await below opens an async gap before
 					// AgentSession.dispose() would otherwise set its guards.
 					session.beginDispose();
+					// A session being torn down is no longer a user of anything it
+					// held: a hold dropped only at the end of disposal outlives a
+					// disposal that stalls, and keeps whatever is waiting on it
+					// waiting for ever.
+					for (const callback of beginDisposeCallbacks) {
+						try {
+							callback();
+						} catch (error) {
+							logger.warn("begin-dispose callback failed", { error: String(error) });
+						}
+					}
+					beginDisposeCallbacks.clear();
 					if (agentKind === "main") {
 						// Top-level teardown owns the global agent lifecycle: park timers,
 						// adopted subagent sessions, revivers. Tear it down while shared
@@ -5384,6 +5601,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					unregisterMcpPostmortem?.();
 					for (const callback of disposeCallbacks) callback();
 					disposeCallbacks.clear();
+					// Disposal does not end while this session's writer record is
+					// still being published or cleared: an unpublished record
+					// protects nothing, and the owner's cleanup runs the moment
+					// disposal returns.
+					await pendingWriterWork;
 					// Drop refs so the process-global postmortem list doesn't retain
 					// the bridge closure past explicit dispose.
 					unsubscribeMcpNotifications = undefined;
