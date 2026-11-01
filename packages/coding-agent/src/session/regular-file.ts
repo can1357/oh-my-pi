@@ -227,19 +227,20 @@ export type HeldDirectoryRemoval = "removed" | "absent" | "kept" | "not-empty";
 
 /**
  * Remove `dir` only while its name holds `held`, a directory this run holds
- * open: one it made through {@link makeHeldDirectory}, or one a reclaim
- * proved and opened. Throws what the look or the `rmdir` threw, for the
- * caller to report.
+ * open — for a directory at a name only this run knows: a staging directory
+ * it minted at a random name, or the private name
+ * {@link removeDirectoryOthersMayName} moved a directory to. Throws what the
+ * look or the `rmdir` threw, for the caller to report.
  *
  * `rmdir` removes nothing but an empty directory, and an empty directory is
  * not nothing: one somebody put at the name has its own owner, mode and
- * extended attributes, and a review lost one to an `rmdir` by name that
- * reported success. So the name is looked at the instant before the `rmdir`
- * and must hold the held directory, whose inode number no other directory
- * can be given while this run holds its descriptor. One gap is left, as for
- * a file — see {@link unlinkFileNoOneElseWrites}: an empty directory renamed
- * onto the name between that look and the `rmdir` is removed, because POSIX
- * has no rmdir-if-this-inode.
+ * extended attributes. So the name is looked at the instant before the
+ * `rmdir` and must hold the held directory, whose inode number no other
+ * directory can be given while this run holds its descriptor. One gap is
+ * left, as for a file — see {@link unlinkFileNoOneElseWrites}: an empty
+ * directory renamed onto the name between that look and the `rmdir` is
+ * removed, because POSIX has no rmdir-if-this-inode. At a name nobody else
+ * knows, only a process watching for it can reach that gap.
  */
 export async function removeHeldDirectory(dir: string, held: HeldFile): Promise<HeldDirectoryRemoval> {
 	const standing = await fs.lstat(dir).catch((error: unknown) => {
@@ -257,6 +258,89 @@ export async function removeHeldDirectory(dir: string, held: HeldFile): Promise<
 		throw error;
 	}
 	return "removed";
+}
+
+/**
+ * Remove `dir`, at a name any process of this user can know — a live
+ * artifact directory a reclaim proved — only once it has been moved to a
+ * private name and found there to be `held`, the directory this run holds
+ * open.
+ *
+ * An `rmdir` of the known name, even straight after a look at it, removed an
+ * empty directory a review renamed onto that name between the two, with its
+ * extended attribute, and the reclaim exited 0. So the directory is moved
+ * first, the way {@link moveAside} moves a file: onto an empty placeholder
+ * this run makes and holds at `.<name>.<16 random hex digits>.leaving`, by a
+ * rename that takes whatever has the name at that instant. What moved is then
+ * judged at the private name — see {@link removeHeldDirectory}, whose one gap
+ * is there now, at a name only a process watching for it can learn. Anything
+ * but the held directory, and the held directory once something is in it, is
+ * renamed back under its name, which then has to be free: if something has
+ * taken it meanwhile, what moved stays at the private name, and the error says
+ * where. A rename back onto a name that became an empty directory in the
+ * instant after that look replaces it — a second race on a path that has
+ * already lost the first — because POSIX has no rename that refuses to
+ * replace.
+ *
+ * A directory with something in it is not moved at all, so a writer filling
+ * it is not sent looking for it under another name.
+ */
+export async function removeDirectoryOthersMayName(dir: string, held: HeldFile): Promise<HeldDirectoryRemoval> {
+	const standing = await fs.lstat(dir).catch((error: unknown) => {
+		if (isEnoent(error)) return undefined;
+		throw error;
+	});
+	if (!standing) return "absent";
+	if (!standing.isDirectory() || standing.dev !== held.dev || standing.ino !== held.ino) return "kept";
+	// `/dev/fd/<n>` lists the directory the descriptor holds, wherever its
+	// name has gone; Windows has none, and its name is the next best look.
+	const inside = process.platform === "win32" ? dir : `/dev/fd/${held.handle.fd}`;
+	if ((await fs.readdir(inside)).length > 0) return "not-empty";
+	let aside: string | undefined;
+	let placeholder: HeldFile | undefined;
+	for (let attempt = 0; attempt < ASIDE_ATTEMPTS && aside === undefined; attempt++) {
+		const candidate = asideName(dir);
+		try {
+			placeholder = await makeHeldDirectory(candidate, 0o700);
+			aside = candidate;
+		} catch (error) {
+			if (!isEexist(error)) throw error;
+		}
+	}
+	if (aside === undefined || placeholder === undefined) {
+		throw new Error(
+			`${dir} could not be moved aside to be removed: ${ASIDE_ATTEMPTS} private names in a row were taken`,
+		);
+	}
+	try {
+		await fs.rename(dir, aside);
+	} catch (error) {
+		// Nothing moved: the placeholder, still this run's, goes again.
+		const left = await removeHeldDirectory(aside, placeholder).catch(() => "kept" as const);
+		if (left !== "removed") {
+			throw new Error(`${dir} could not be moved aside to be removed (${errorText(error)}), and ${aside} was left`, {
+				cause: error,
+			});
+		}
+		if (isEnoent(error)) return "absent";
+		throw error;
+	} finally {
+		await placeholder.handle.close().catch(() => undefined);
+	}
+	const removal = await removeHeldDirectory(aside, held);
+	if (removal === "removed" || removal === "absent") return removal;
+	const back = await fs.lstat(dir).catch((error: unknown) => {
+		if (isEnoent(error)) return undefined;
+		throw error;
+	});
+	if (back) {
+		throw new Error(
+			`${dir} was moved aside to be removed and ${removal === "kept" ? "was not the directory this run proved" : "had something in it"}, ` +
+				`and something else has taken its name since, so what moved was left at ${aside}`,
+		);
+	}
+	await fs.rename(aside, dir);
+	return removal;
 }
 
 /**
@@ -536,12 +620,73 @@ const ASIDE_ATTEMPTS = 8;
  * Either way the file is the user's to look at, compare with what stands at
  * the name it came from, and remove.
  *
- * And one writer stays outside any removal: one that held the file open
- * from before and writes through that descriptor after the judgment, which
- * no removal by any program can see.
+ * And one writer is outside what this judges: one that held the file open
+ * from before and writes through that descriptor after the judgment. Its
+ * write lands in the inode this unlinks. A caller removing a file such a
+ * writer may hold — a reclaim giving up live files — moves its files aside
+ * with {@link moveAside} and asks `openFileHolders` (`open-file-holders.ts`)
+ * who holds them before it judges any.
  */
 export async function removeFileOthersMayWrite(file: string, rule: OthersMayWriteRule): Promise<OthersMayWriteRemoval> {
-	const kept = (why: string, cause?: unknown): OthersMayWriteRemoval => ({
+	const moved = await moveAside(file, rule);
+	if (moved.outcome !== "moved") return moved;
+	const { aside } = moved;
+	let why: string | undefined;
+	try {
+		const standing = await fs.lstat(aside);
+		const handle = standing.isFile()
+			? await openRegularFile(aside, { noFollow: true }).catch(notRegularAsAbsent)
+			: undefined;
+		try {
+			why = await rule.judge(standing, handle);
+		} finally {
+			await handle?.close().catch(() => undefined);
+		}
+	} catch (error) {
+		why = `${file} could not be checked (${errorText(error)})`;
+	}
+	if (why === undefined && rule.replaceWith) {
+		try {
+			await rule.replaceWith();
+		} catch (error) {
+			why = `${file} could not be replaced (${errorText(error)})`;
+		}
+	}
+	if (why === undefined) {
+		try {
+			await fs.unlink(aside);
+			return { outcome: "removed" };
+		} catch (error) {
+			// Replaced, the name already holds its replacement, and only the old
+			// file's private name is left over; otherwise the file goes back.
+			if (rule.replaceWith) {
+				return {
+					outcome: "removed",
+					note: `${file} was replaced, and what it held could not be removed from ${aside} (${errorText(error)})`,
+				};
+			}
+			why = `${file} could not be removed (${errorText(error)})`;
+		}
+	}
+	return { outcome: "kept", note: (await putBack(file, aside, why)) ?? `${why}, so it was left as it is` };
+}
+
+/** What {@link moveAside} did with a name: moved what it held to `aside`, found nothing, or kept it. */
+export type MoveAside = { outcome: "moved"; aside: string } | Exclude<OthersMayWriteRemoval, { outcome: "removed" }>;
+
+/**
+ * The first half of {@link removeFileOthersMayWrite}: move what `file` holds,
+ * once `rule.matches` it, to a private name beside it — an empty placeholder
+ * this run creates with `O_EXCL` and holds, then the file renamed onto it —
+ * and say where. The caller judges what moved there and either unlinks it or
+ * gives it to {@link putBack}. Taken apart so a caller can move a whole set
+ * of files aside before it asks anything about any of them.
+ */
+export async function moveAside(
+	file: string,
+	rule: Pick<OthersMayWriteRule, "matches" | "mismatch">,
+): Promise<MoveAside> {
+	const kept = (why: string, cause?: unknown): MoveAside => ({
 		outcome: "kept",
 		note: `${why}, so it was left as it is`,
 		cause,
@@ -557,10 +702,7 @@ export async function removeFileOthersMayWrite(file: string, rule: OthersMayWrit
 	let aside: string | undefined;
 	let placeholder: HeldFile | undefined;
 	for (let attempt = 0; attempt < ASIDE_ATTEMPTS && aside === undefined; attempt++) {
-		const candidate = path.join(
-			path.dirname(file),
-			`.${path.basename(file)}.${randomBytes(8).toString("hex")}.leaving`,
-		);
+		const candidate = asideName(file);
 		try {
 			const handle = await createExclusive(candidate, 0o600);
 			const { dev, ino } = await handle.stat().catch(async (error: unknown) => {
@@ -592,62 +734,34 @@ export async function removeFileOthersMayWrite(file: string, rule: OthersMayWrit
 		);
 	}
 	await placeholder.handle.close().catch(() => undefined);
-	let why: string | undefined;
-	try {
-		const moved = await fs.lstat(aside);
-		const handle = moved.isFile()
-			? await openRegularFile(aside, { noFollow: true }).catch(notRegularAsAbsent)
-			: undefined;
-		try {
-			why = await rule.judge(moved, handle);
-		} finally {
-			await handle?.close().catch(() => undefined);
-		}
-	} catch (error) {
-		why = `${file} could not be checked (${errorText(error)})`;
-	}
-	if (why === undefined && rule.replaceWith) {
-		try {
-			await rule.replaceWith();
-		} catch (error) {
-			why = `${file} could not be replaced (${errorText(error)})`;
-		}
-	}
-	if (why === undefined) {
-		try {
-			await fs.unlink(aside);
-			return { outcome: "removed" };
-		} catch (error) {
-			// Replaced, the name already holds its replacement, and only the old
-			// file's private name is left over; otherwise the file goes back.
-			if (rule.replaceWith) {
-				return {
-					outcome: "removed",
-					note: `${file} was replaced, and what it held could not be removed from ${aside} (${errorText(error)})`,
-				};
-			}
-			why = `${file} could not be removed (${errorText(error)})`;
-		}
-	}
+	return { outcome: "moved", aside };
+}
+
+/**
+ * Put what {@link moveAside} moved to `aside` back under `file`, with
+ * `link`, which replaces nothing: if something has taken the name meanwhile,
+ * what moved stays at the private name. Undefined once it is back under its
+ * name alone; otherwise the sentence saying where it is, `why` first.
+ */
+export async function putBack(file: string, aside: string, why: string): Promise<string | undefined> {
 	try {
 		await fs.link(aside, file);
 	} catch (error) {
-		return {
-			outcome: "kept",
-			note: isEexist(error)
-				? `${why}, and something else took its name meanwhile, so it was left at ${aside}`
-				: `${why}, and it could not be put back (${errorText(error)}), so it was left at ${aside}`,
-		};
+		return isEexist(error)
+			? `${why}, and something else took its name meanwhile, so it was left at ${aside}`
+			: `${why}, and it could not be put back (${errorText(error)}), so it was left at ${aside}`;
 	}
 	try {
 		await fs.unlink(aside);
 	} catch (error) {
-		return {
-			outcome: "kept",
-			note: `${why}, so it was put back, and its second name ${aside} could not be removed (${errorText(error)})`,
-		};
+		return `${why}, so it was put back, and its second name ${aside} could not be removed (${errorText(error)})`;
 	}
-	return kept(why);
+	return undefined;
+}
+
+/** A private name beside `entry`: `.<name>.<16 random hex digits>.leaving`. */
+function asideName(entry: string): string {
+	return path.join(path.dirname(entry), `.${path.basename(entry)}.${randomBytes(8).toString("hex")}.leaving`);
 }
 
 function errorText(error: unknown): string {

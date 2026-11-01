@@ -1021,14 +1021,20 @@ describe("runGcCommand cold-session archive", () => {
 			cpSpy.mockRestore();
 		}
 
+		const archivedTree = path.join(archiveDir, "rollback");
 		expect(result.archive?.archived).toBe(0);
-		expect(result.archive?.errors).toEqual([`${session}: artifact move failed`]);
+		expect(result.archive?.errors).toEqual([
+			`${session}: artifact move failed; the directory this run made in the archive was left, emptied of what it put there: ${archivedTree}`,
+		]);
 		// Nothing is given up by archiving, so a failure part-way leaves the
 		// live session exactly as it was and a partial archive beside it for a
-		// later run to supersede.
+		// later run to supersede: the transcript, and the directory it made for
+		// the tree, empty — no look after a `mkdir` tells the directory it made
+		// from one put at its name, so it removes neither.
 		expect(await Bun.file(session).bytes()).toEqual(original);
 		expect(await Bun.file(path.join(artifacts, "0.bash.log")).text()).toBe("retained artifact");
-		expect((await fs.readdir(archiveDir)).sort()).toEqual(["rollback.jsonl.gz"]);
+		expect((await fs.readdir(archiveDir)).sort()).toEqual(["rollback", "rollback.jsonl.gz"]);
+		expect(await fs.readdir(archivedTree)).toEqual([]);
 		expect((await fs.readdir(path.dirname(session))).sort()).toEqual(["rollback", "rollback.jsonl"]);
 	});
 

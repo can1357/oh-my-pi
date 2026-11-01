@@ -1134,6 +1134,22 @@ async function assertLiveTreeHoldsArchive(
 }
 
 /**
+ * The permission bits a directory gc makes for one whose mode is `mode`:
+ * that mode with the owner's read, write and search added, so the copy can
+ * fill it — an archived `0500` directory taken as it is could not be filled.
+ *
+ * It is also the most an archived directory may grant for its live one, and
+ * that is the whole of how a directory's privacy survives the three commands:
+ * the archive makes a directory with this and narrows one it already holds to
+ * it, a reclaim keeps a live directory whose archived copy grants more, and a
+ * restore makes a directory with this of the archived mode. The owner's bits
+ * are the one widening, and only the owner gains by it.
+ */
+export function directoryModeFor(mode: number): number {
+	return (mode & 0o777) | 0o700;
+}
+
+/**
  * Copy one entry out of the archive, resolving symlinks into real files.
  *
  * Each file is staged in a directory this run mints beside its destination
@@ -1211,13 +1227,12 @@ async function copyEntryDereferenced(
 		// {@link makeHeldDirectory}: a mode set after the `mkdir`, by name or
 		// through a descriptor opened after it, reached a directory a writer
 		// swapped in between the two, and gave somebody's private directory
-		// the archived `0777`. The mode is the archived one with the owner's
-		// read, write and search added, so the restore can fill it — an
-		// archived `0500` directory taken as it is could not be filled — and
-		// the umask narrows it as it narrows any directory this user makes. A
-		// directory the live tree already holds keeps its own permissions:
-		// merging an archive into a private `0700` directory must not widen it.
-		const mode = (stat.mode & 0o777) | 0o700;
+		// the archived `0777`. The mode is {@link directoryModeFor} the
+		// archived one, narrowed by the umask as any directory this user makes
+		// is. A directory the live tree already holds keeps its own
+		// permissions: merging an archive into a private `0700` directory must
+		// not widen it.
+		const mode = directoryModeFor(stat.mode);
 		if (!existing) {
 			if (plan) await planWritableDirectory(path.dirname(destination), plan, source);
 			assertUmaskKeepsOwnerWrite(destination, mode, source);
