@@ -130,6 +130,8 @@ export class BeamMemory implements BeamMemoryState {
 	readonly caches: BeamCaches;
 	readonly config: BeamConfig;
 	readonly pendingExtractions: Set<Promise<void>> = new Set();
+	readonly pendingExtractionIds = new Map<string, Set<number>>();
+	readonly extractionCancelSeq = new Map<string, number>();
 	#closed = false;
 
 	constructor(options?: BeamMemoryOptions);
@@ -245,8 +247,8 @@ export class BeamMemory implements BeamMemoryState {
 		return updateWorking(this, memoryId, content, importance);
 	}
 
-	get(memoryId: string): unknown | null {
-		return get(this, memoryId);
+	get(memoryId: string, channelId?: string | null): unknown | null {
+		return get(this, memoryId, channelId);
 	}
 
 	forgetWorking(memoryId: string): boolean {
@@ -290,8 +292,8 @@ export class BeamMemory implements BeamMemoryState {
 		return formatContext(this, results, format);
 	}
 
-	factRecall(query: string, topK = 30): RecallResult[] {
-		return factRecall(this, query, topK);
+	factRecall(query: string, topK = 30, channelId?: string | null): RecallResult[] {
+		return factRecall(this, query, topK, channelId ?? this.channelId ?? null);
 	}
 
 	getEpisodicStats(

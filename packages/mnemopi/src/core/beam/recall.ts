@@ -435,19 +435,64 @@ function factsHaveScopeColumn(beam: BeamMemoryState): boolean {
 	return rows.some(row => asString(row.name) === "scope");
 }
 
-function factVisibilityWhere(beam: BeamMemoryState, tableAlias: string): { where: string; params: DbValue[] } {
+function factsHaveTierColumn(beam: BeamMemoryState): boolean {
+	const rows = queryAll(beam, "PRAGMA table_info(facts)");
+	return rows.some(row => asString(row.name) === "source_tier");
+}
+
+function factsHaveChannelColumn(beam: BeamMemoryState): boolean {
+	const rows = queryAll(beam, "PRAGMA table_info(facts)");
+	return rows.some(row => asString(row.name) === "channel_id");
+}
+
+function factVisibilityWhere(beam: BeamMemoryState, tableAlias: string, channelId?: string | null): { where: string; params: DbValue[] } {
 	const prefix = tableAlias.length === 0 ? "" : `${tableAlias}.`;
-	const scope = factsHaveScopeColumn(beam)
-		? `(${prefix}session_id = ? OR ${prefix}scope = 'global')`
+	const hasScopeColumn = factsHaveScopeColumn(beam);
+	const hasChannelColumn = factsHaveChannelColumn(beam);
+	// A fact extracted from a channel-scoped source stays recallable through
+	// that channel (the source memory was visible there); without the channel
+	// stamp it is visible only to its session or globally. The fallback is
+	// limited to facts that are themselves channel-scoped: a session-scoped
+	// fact whose source is later widened must not become channel-visible
+	// retroactively (no-retroactive-widening policy).
+	const channelClause = hasScopeColumn && hasChannelColumn ? ` OR (${prefix}scope = 'channel' AND ${prefix}channel_id IS NOT NULL AND ${prefix}channel_id = ?)` : "";
+	const scope = hasScopeColumn
+		? `(${prefix}session_id = ? OR ${prefix}scope = 'global'${channelClause})`
 		: `${prefix}session_id = ?`;
-	// A fact is a derivative of the working_memory row it was extracted from: once that row is
-	// explicitly superseded (`memory_edit invalidate`) or has expired, the fact must stop
-	// surfacing — otherwise an explicit invalidation is silently defeated at the fact layer.
-	// Correlated EXISTS probes the source's primary key (same shape as the fts_working /
-	// fts_episodes visibility predicates). Facts whose source row no longer exists stay
-	// visible: nothing contradicts them.
-	const sourceSuperseded = `NOT EXISTS (SELECT 1 FROM working_memory w WHERE w.id = ${prefix}source_msg_id AND (w.superseded_by IS NOT NULL OR (w.valid_until IS NOT NULL AND w.valid_until <= ?)))`;
-	return { where: `${scope} AND ${sourceSuperseded}`, params: [beam.sessionId, nowIso()] };
+	const channelParams: DbValue[] = hasScopeColumn && hasChannelColumn ? [channelId ?? null] : [];
+	// A fact is a derivative of the memory row it was extracted from — a working_memory
+	// entry or the episode a consolidation produced: once that source is explicitly
+	// superseded (`memory_edit invalidate`) or has expired, the fact must stop surfacing,
+	// otherwise an explicit invalidation is silently defeated at the fact layer.
+	// Each correlated EXISTS probe follows the fact's recorded provenance tier
+	// (same shape as the fts_working / fts_episodes visibility predicates): a
+	// working-derived fact is judged by the working row alone and an
+	// episode-derived fact by the episode row alone, so a retired or private
+	// same-id row in the other tier does not affect it. Only legacy rows
+	// without provenance keep the conservative both-tiers probe. Facts whose
+	// source row no longer exists stay visible: nothing contradicts them.
+	const hasTierColumn = factsHaveTierColumn(beam);
+	const workingSuperseded = `NOT EXISTS (SELECT 1 FROM working_memory w WHERE w.id = ${prefix}source_msg_id AND (w.superseded_by IS NOT NULL OR (w.valid_until IS NOT NULL AND w.valid_until <= ?)))`;
+	const episodeSupersededRaw = `NOT EXISTS (SELECT 1 FROM episodic_memory e WHERE e.id = ${prefix}source_msg_id AND (e.superseded_by IS NOT NULL OR (e.valid_until IS NOT NULL AND e.valid_until <= ?)))`;
+	const sourceSuperseded = hasTierColumn ? `(${prefix}source_tier = 'episodic' OR ${workingSuperseded})` : workingSuperseded;
+	const episodeSuperseded = hasTierColumn ? `(${prefix}source_tier = 'working' OR ${episodeSupersededRaw})` : episodeSupersededRaw;
+	// A fact must never outshine its source: if the source row still exists but
+	// was narrowed from global to session scope after extraction, the fact must
+	// stop being visible cross-session (or the narrowing would be silently
+	// defeated at the fact layer). Sources that no longer exist stay visible.
+	// A NULL scope is treated as 'session', and a NULL owner matches no
+	// caller session — including an explicitly empty session id, which a
+	// COALESCE to '' would wrongly equate with the missing owner.
+	// A channel-scoped source is visible to caller sessions inside that
+	// channel — the same rule the memory recall itself applies — so the
+	// fact's source probes must grant it or every extracted fact from a
+	// channel memory stays locked to the writing session.
+	const channelProbeParams: DbValue[] = hasChannelColumn ? [channelId ?? null] : [];
+	const workingVisible = `NOT EXISTS (SELECT 1 FROM working_memory w WHERE w.id = ${prefix}source_msg_id AND NOT (COALESCE(w.scope, 'session') = 'global' OR (w.session_id IS NOT NULL AND w.session_id = ?)${hasChannelColumn ? ` OR (w.scope = 'channel' AND w.channel_id IS NOT NULL AND w.channel_id = ?)` : ""}))`;
+	const episodeVisibleRaw = `NOT EXISTS (SELECT 1 FROM episodic_memory e WHERE e.id = ${prefix}source_msg_id AND NOT (COALESCE(e.scope, 'session') = 'global' OR (e.session_id IS NOT NULL AND e.session_id = ?)${hasChannelColumn ? ` OR (e.scope = 'channel' AND e.channel_id IS NOT NULL AND e.channel_id = ?)` : ""}))`;
+	const sourceVisible = hasTierColumn ? `(${prefix}source_tier = 'episodic' OR ${workingVisible})` : workingVisible;
+	const episodeVisible = hasTierColumn ? `(${prefix}source_tier = 'working' OR ${episodeVisibleRaw})` : episodeVisibleRaw;
+	return { where: `${scope} AND ${sourceSuperseded} AND ${episodeSuperseded} AND ${sourceVisible} AND ${episodeVisible}`, params: [beam.sessionId, ...channelParams, nowIso(), nowIso(), beam.sessionId, ...channelProbeParams, beam.sessionId, ...channelProbeParams] };
 }
 
 function buildWhere(
@@ -1127,7 +1172,7 @@ async function linearRecallEnhanced(
 	});
 	return withLoopPhase("mnemopi.recall", () => {
 		if (options.includeFacts === true) {
-			const facts = factRecall(beam, query, factRecallLimit(topK));
+			const facts = factRecall(beam, query, factRecallLimit(topK), options.channelId ?? null);
 			results.push(...facts);
 		}
 		results.sort((left, right) => (right.score ?? 0) - (left.score ?? 0));
@@ -1328,12 +1373,12 @@ export function formatContext(beam: BeamMemoryState, results: readonly RecallRes
 	return lines.join("\n");
 }
 
-export function factRecall(beam: BeamMemoryState, query: string, topK = 30): FactRecallResult[] {
+export function factRecall(beam: BeamMemoryState, query: string, topK = 30, channelId?: string | null): FactRecallResult[] {
 	if (topK <= 0 || !tableExists(beam, "facts")) return [];
 	let matched: Row[] = [];
 	if (tableExists(beam, "fts_facts")) {
 		try {
-			const visibility = factVisibilityWhere(beam, "facts");
+			const visibility = factVisibilityWhere(beam, "facts", channelId);
 			matched = queryAll(
 				beam,
 				`SELECT fts_facts.rowid, fts_facts.rank
@@ -1351,7 +1396,7 @@ export function factRecall(beam: BeamMemoryState, query: string, topK = 30): Fac
 	if (matched.length === 0) {
 		const seen = new Set<number>();
 		for (const token of expandedTokens(query).slice(0, 6)) {
-			const visibility = factVisibilityWhere(beam, "");
+			const visibility = factVisibilityWhere(beam, "", channelId);
 			const rows = queryAll(
 				beam,
 				`SELECT rowid
@@ -1372,7 +1417,7 @@ export function factRecall(beam: BeamMemoryState, query: string, topK = 30): Fac
 	if (matched.length === 0) return [];
 	const rowids = matched.map(row => asNumber(row.rowid)).filter(rowid => rowid > 0);
 	if (rowids.length === 0) return [];
-	const visibility = factVisibilityWhere(beam, "");
+	const visibility = factVisibilityWhere(beam, "", channelId);
 	const ranks = normalizeRanks(matched, "rowid");
 	const rows = queryAll(
 		beam,

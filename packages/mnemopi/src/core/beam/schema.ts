@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { ensureFactsFtsUpdateTrigger } from "../facts-fts";
 
 type PragmaTableInfoRow = {
 	name: string;
@@ -51,7 +52,8 @@ export function initBeam(db: Database): void {
 			event_date_precision TEXT DEFAULT 'unknown',
 			temporal_tags TEXT DEFAULT '[]',
 			corrected_by INTEGER DEFAULT NULL,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			generation TEXT DEFAULT NULL
 		)
 	`);
 
@@ -110,6 +112,11 @@ export function initBeam(db: Database): void {
 	addColumnIfMissing(db, "episodic_memory", "memory_type", "TEXT DEFAULT 'unknown'");
 	addColumnIfMissing(db, "episodic_memory", "binary_vector", "BLOB");
 	const consolidatedAtAdded = addColumnIfMissing(db, "working_memory", "consolidated_at", "TEXT");
+	// Per-insert generation token: created_at has one-second precision and force
+	// imports can preserve exported values, so it cannot distinguish a delete +
+	// re-create within the same second. Existing rows keep NULL; every insert
+	// path writes a fresh unique value.
+	addColumnIfMissing(db, "working_memory", "generation", "TEXT DEFAULT NULL");
 	if (consolidatedAtAdded) {
 		db.run("UPDATE working_memory SET consolidated_at = ? WHERE consolidated_at IS NULL", [new Date().toISOString()]);
 	}
@@ -346,6 +353,9 @@ export function initBeam(db: Database): void {
 		CREATE TABLE IF NOT EXISTS facts (
 			fact_id TEXT PRIMARY KEY,
 			session_id TEXT NOT NULL,
+			scope TEXT DEFAULT 'session',
+			source_tier TEXT DEFAULT NULL,
+			channel_id TEXT DEFAULT NULL,
 			subject TEXT NOT NULL,
 			predicate TEXT NOT NULL,
 			object TEXT NOT NULL,
@@ -360,6 +370,19 @@ export function initBeam(db: Database): void {
 		"CREATE INDEX IF NOT EXISTS idx_facts_subject ON facts(subject)",
 		"CREATE INDEX IF NOT EXISTS idx_facts_source ON facts(source_msg_id)",
 	]);
+	// Existing banks predate the column; the read side (factVisibilityWhere in
+	// recall.ts) already probes for it. Pre-existing rows keep the 'session'
+	// default — no retroactive widening to 'global'.
+	addColumnIfMissing(db, "facts", "scope", "TEXT DEFAULT 'session'");
+	// Fact provenance: which tier (working/episodic) the source memory lived in
+	// when the fact was written. Legacy rows keep NULL; tier-scoped cleanup (id
+	// collisions across tiers) uses it to retire one tier's derivatives without
+	// destroying the other tier's.
+	addColumnIfMissing(db, "facts", "source_tier", "TEXT DEFAULT NULL");
+	// The source row's channel, so channel-scoped facts stay recallable through
+	// their channel (the memory itself was, but the fact only carried the
+	// writing session before).
+	addColumnIfMissing(db, "facts", "channel_id", "TEXT DEFAULT NULL");
 	db.run(`
 		CREATE VIRTUAL TABLE IF NOT EXISTS fts_facts USING fts5(
 			subject, predicate, object, content='facts'
@@ -375,6 +398,13 @@ export function initBeam(db: Database): void {
 			VALUES ('delete', old.rowid, old.subject, old.predicate, old.object);
 		END`,
 	]);
+	// In-place UPDATEs (re-stored facts, belief revisions) would leave the
+	// external-content index stale without the shared update trigger
+	// (core/facts-fts.ts), which the standalone graph path uses too. When this
+	// index adopts a facts table that already carries rows (a standalone graph
+	// bank), the helper backfills it with a rebuild before enabling updates,
+	// so the first fact update cannot hit a missing-index delete.
+	ensureFactsFtsUpdateTrigger(db);
 
 	for (const table of ["working_memory", "episodic_memory"] as const) {
 		addColumnIfMissing(db, table, "event_date", "TEXT DEFAULT NULL");

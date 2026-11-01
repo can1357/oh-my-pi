@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { EpisodicGraph, type GraphEdge } from "@oh-my-pi/pi-mnemopi/core/episodic-graph";
+import { EpisodicGraph, type Fact, type GraphEdge } from "@oh-my-pi/pi-mnemopi/core/episodic-graph";
 import { closeQuietly, openDatabase } from "@oh-my-pi/pi-mnemopi/db";
 
 function withGraph<T>(fn: (graph: EpisodicGraph) => T): T {
@@ -240,5 +240,155 @@ describe("EpisodicGraph scoring and proactive links", () => {
 			expect(toAlice.some(item => item.edgeType === "related_to")).toBe(false);
 			expect(toAlice.find(item => item.edgeType === "ctx")?.weight).toBe(references?.weight);
 		});
+	});
+});
+
+describe("EpisodicGraph fact scope (e7)", () => {
+	const fact = (id: string): Fact => ({
+		id,
+		subject: "Alice",
+		predicate: "is",
+		object: "engineer",
+		timestamp: "2026-01-01T00:00:00.000Z",
+		confidence: 0.7,
+	});
+
+	it("leaves a private fact untouched when another session re-stores the same id with different content", () => {
+		withGraph(graph => {
+			graph.storeFact(fact("fact_clobber"), "mem_a", "session-a", "session");
+			graph.storeFact({ ...fact("fact_clobber"), subject: "Bob", object: "injected" }, "mem_b", "session-b", "session");
+			const row = graph.db
+				.query("SELECT session_id, subject, object, source_msg_id FROM facts WHERE fact_id = 'fact_clobber'")
+				.get() as { session_id: string; subject: string; object: string; source_msg_id: string };
+			expect(row.session_id).toBe("session-a");
+			expect(row.subject).toBe("Alice");
+			expect(row.object).toBe("engineer");
+			expect(row.source_msg_id).toBe("mem_a");
+		});
+	});
+
+	it("keeps the original owner when a session-scoped fact is re-stored from another session", () => {
+		withGraph(graph => {
+			graph.storeFact(fact("fact_owner"), "mem_owner", "session-a", "session");
+			graph.storeFact(fact("fact_owner"), "mem_owner", "session-b", "session");
+			const row = graph.db
+				.query("SELECT session_id, scope FROM facts WHERE fact_id = 'fact_owner'")
+				.get() as { session_id: string; scope: string };
+			expect(row.session_id).toBe("session-a");
+			expect(row.scope).toBe("session");
+		});
+	});
+
+	it("keeps the original owner for channel-scoped facts on cross-session re-stores", () => {
+		withGraph(graph => {
+			graph.storeFact(fact("fact_channel_owner"), "mem_ch", "session-a", "channel");
+			graph.storeFact(fact("fact_channel_owner"), "mem_ch", "session-b", "channel");
+			const row = graph.db
+				.query("SELECT session_id, scope FROM facts WHERE fact_id = 'fact_channel_owner'")
+				.get() as { session_id: string; scope: string };
+			expect(row.session_id).toBe("session-a");
+			expect(row.scope).toBe("channel");
+		});
+	});
+
+	it("installs the FTS update trigger when opening an old-shape bank with fts_facts directly", () => {
+		const db = openDatabase(":memory:");
+		try {
+			db.run(`
+				CREATE TABLE facts (
+					fact_id TEXT PRIMARY KEY,
+					session_id TEXT DEFAULT 'default',
+					subject TEXT NOT NULL,
+					predicate TEXT NOT NULL,
+					object TEXT NOT NULL,
+					timestamp TEXT,
+					source_msg_id TEXT,
+					confidence REAL DEFAULT 0.5,
+					created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+				)
+			`);
+			db.run("CREATE VIRTUAL TABLE fts_facts USING fts5(subject, predicate, object, content='facts')");
+			db.run(`CREATE TRIGGER facts_ai AFTER INSERT ON facts BEGIN
+				INSERT INTO fts_facts(rowid, subject, predicate, object)
+				VALUES (new.rowid, new.subject, new.predicate, new.object);
+			END`);
+			const graph = new EpisodicGraph({ db });
+			const triggers = db
+				.query("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'facts_au'")
+				.all() as { name: string }[];
+			expect(triggers).toHaveLength(1);
+			const fact = {
+				id: "fact_standalone",
+				subject: "relay",
+				predicate: "uses",
+				object: "vaultword",
+				timestamp: "2026-01-01T00:00:00.000Z",
+				confidence: 0.7,
+			};
+			graph.storeFact(fact, "m_st", "test");
+			graph.storeFact({ ...fact, object: "safeword" }, "m_st", "test");
+			const stale = db.query("SELECT count(*) AS n FROM fts_facts WHERE fts_facts MATCH 'vaultword'").get() as { n: number };
+			const fresh = db.query("SELECT count(*) AS n FROM fts_facts WHERE fts_facts MATCH 'safeword'").get() as { n: number };
+			expect(stale.n).toBe(0);
+			expect(fresh.n).toBe(1);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("stores fresh facts with global scope and keeps the scope of re-stored facts", () => {
+		withGraph(graph => {
+			graph.storeFact(fact("fact_scope_new"), "mem_scope_1", "test");
+			const first = graph.db.query("SELECT scope FROM facts WHERE fact_id = 'fact_scope_new'").get() as { scope: string };
+			expect(first.scope).toBe("global");
+
+			// Observable downstream effect of the explicit 'session' scope: a
+			// later store of the same fact id from a different session must not
+			// clobber its content — the upsert guard keys off the stored scope
+			// and session, not the supplied option.
+			graph.storeFact(fact("fact_scope_arg"), "mem_scope_3", "test", "session");
+			graph.storeFact({ ...fact("fact_scope_arg"), object: "overwriter" }, "mem_scope_3", "other");
+			const kept = graph.db
+				.query("SELECT object FROM facts WHERE fact_id = 'fact_scope_arg'")
+				.get() as { object: string };
+			expect(kept.object).toBe("engineer");
+
+			graph.db.run("UPDATE facts SET scope = 'session' WHERE fact_id = 'fact_scope_new'");
+			graph.storeFact(fact("fact_scope_new"), "mem_scope_1", "test");
+			const row = graph.db
+				.query("SELECT scope, object FROM facts WHERE fact_id = 'fact_scope_new'")
+				.get() as { scope: string; object: string };
+			expect(row.scope).toBe("session");
+			expect(row.object).toBe("engineer");
+		});
+	});
+
+	it("adds the scope column to a graph-created old-shape facts table", () => {
+		const db = openDatabase(":memory:");
+		try {
+			db.run(
+				`
+					CREATE TABLE facts (
+						fact_id TEXT PRIMARY KEY,
+						session_id TEXT DEFAULT 'default',
+						subject TEXT NOT NULL,
+						predicate TEXT NOT NULL,
+						object TEXT NOT NULL,
+						timestamp TEXT,
+						source_msg_id TEXT,
+						confidence REAL DEFAULT 0.5,
+						created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+					)
+				`,
+			);
+			const graph = new EpisodicGraph({ db });
+			const cols = (db.query("PRAGMA table_info(facts)").all() as { name: string }[]).map(row => row.name);
+			expect(cols).toContain("scope");
+			graph.storeFact(fact("fact_scope_ddl"), "mem_scope_2", "test");
+			const row = db.query("SELECT scope FROM facts WHERE fact_id = 'fact_scope_ddl'").get() as { scope: string };
+			expect(row.scope).toBe("global");
+		} finally {
+			closeQuietly(db);
+		}
 	});
 });
