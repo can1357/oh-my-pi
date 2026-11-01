@@ -1,4 +1,4 @@
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, toError } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
 import { type OutputArtifactError, OutputSink } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { statusEventKey } from "@oh-my-pi/pi-tui/tools/eval";
@@ -621,7 +621,7 @@ export async function executeWithKernelBase<
 				stdinRequested: false,
 			};
 		}
-		const error = err instanceof Error ? err : new Error(String(err));
+		const error = toError(err);
 		logger.error(`${errorLogLabel} execution failed`, { error: error.message });
 		// The notice was claimed for this cell; a thrown error drops streamed output, so carry it here.
 		if (restartNotice) error.message = `${restartNotice}\n${error.message}`;

@@ -708,11 +708,11 @@ export async function buildInMemoryMultiRangeResult(
 	resultBuilder.text(finalText);
 	return resultBuilder.done();
 }
-export function decodeUtf8Text(bytes: Uint8Array): string | null {
+export function decodeUtf8Text(bytes: Uint8Array, options?: { preserveBom?: boolean }): string | null {
 	if (bytes.indexOf(0) !== -1) return null;
 
 	try {
-		return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+		return new TextDecoder("utf-8", { fatal: true, ignoreBOM: options?.preserveBom === true }).decode(bytes);
 	} catch {
 		return null;
 	}

@@ -53,6 +53,7 @@
  * re-attached to the compaction summary message on every context rebuild.
  */
 
+import { type } from "@oh-my-pi/omptype";
 import type { Api, ImageContent, Message, Model, TextContent } from "@oh-my-pi/pi-ai";
 import { reachesBudgetedHost } from "@oh-my-pi/pi-ai/providers/anthropic-state";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
@@ -320,32 +321,25 @@ export const SHAPES = {
 	legacy: priceShape(SHAPE_VARIANTS["5x8-sent"], { api: "anthropic-messages" }),
 } satisfies Record<string, Shape>;
 
+/** In-memory shapes may carry optional keys as `undefined`. */
+const ShapeSchema = type({
+	font: "'5x8' | '8x8' | '6x12' | '8x13' | 'silver'",
+	cellWidth: "number > 0",
+	cellHeight: "number > 0",
+	"stretch?": "boolean | undefined",
+	variant: "'sent' | 'bw'",
+	"stopwordDim?": "boolean | undefined",
+	"columns?": "1 | 2 | undefined",
+	lineRepeat: "number > 0",
+	frameSize: "number > 0",
+	frameTokenEstimate: "number > 0",
+	"frameTokensVerified?": "boolean | undefined",
+	"imageDetail?": "'auto' | 'low' | 'high' | 'original' | undefined",
+});
+
 /** Runtime guard for shape overrides loaded from config or preserve data. */
 export function isShape(value: unknown): value is Shape {
-	if (!value || typeof value !== "object") return false;
-	const shape = value as Record<string, unknown>;
-	const font = shape.font;
-	const variant = shape.variant;
-	const detail = shape.imageDetail;
-	return (
-		(font === "5x8" || font === "8x8" || font === "6x12" || font === "8x13" || font === "silver") &&
-		typeof shape.cellWidth === "number" &&
-		shape.cellWidth > 0 &&
-		typeof shape.cellHeight === "number" &&
-		shape.cellHeight > 0 &&
-		(shape.stretch === undefined || typeof shape.stretch === "boolean") &&
-		(variant === "sent" || variant === "bw") &&
-		(shape.stopwordDim === undefined || typeof shape.stopwordDim === "boolean") &&
-		(shape.columns === undefined || shape.columns === 1 || shape.columns === 2) &&
-		typeof shape.lineRepeat === "number" &&
-		shape.lineRepeat > 0 &&
-		typeof shape.frameSize === "number" &&
-		shape.frameSize > 0 &&
-		typeof shape.frameTokenEstimate === "number" &&
-		shape.frameTokenEstimate > 0 &&
-		(shape.frameTokensVerified === undefined || typeof shape.frameTokensVerified === "boolean") &&
-		(detail === undefined || detail === "auto" || detail === "low" || detail === "high" || detail === "original")
-	);
+	return ShapeSchema.allows(value);
 }
 
 /** Eval-winning variant per wire family (fallback when the model id matches

@@ -44,6 +44,7 @@ interface AppKeybindings {
 	"app.message.followUp": true;
 	"app.retry": true;
 	"app.message.dequeue": true;
+	"app.btw.inject": true;
 	"app.clipboard.pasteImage": true;
 	"app.clipboard.pasteTextRaw": true;
 	"app.clipboard.copyLine": true;
@@ -181,6 +182,10 @@ export const KEYBINDINGS = {
 		// for character composition, leaving Alt+Up unreachable there.
 		defaultKeys: ["alt+up", "shift+up"],
 		description: "Dequeue message",
+	},
+	"app.btw.inject": {
+		defaultKeys: "alt+i",
+		description: "Send a /btw answer's steering prompt to the main session",
 	},
 	"app.clipboard.pasteImage": {
 		defaultKeys: getDefaultPasteImageKeys(),
