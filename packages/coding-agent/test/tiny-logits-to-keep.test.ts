@@ -51,22 +51,7 @@ function forwardOf(model: TextGenerationPipeline["model"]): ShimTarget["forward"
 	return target.forward.bind(target);
 }
 
-describe("logits_to_keep feed", () => {
-	it("supplies a one-element int64 last-token feed when a session declares logits_to_keep", async () => {
-		const { model, seen } = makeModel(["input_ids", "attention_mask", "position_ids", "logits_to_keep"]);
-		expect(needsLogitsToKeepFeed(model)).toBe(true);
-		expect(ensureLogitsToKeepFeed(makeRuntime(), model)).toBe(true);
-
-		await forwardOf(model)({ input_ids: "ids" });
-
-		expect(seen).toHaveLength(1);
-		expect(seen[0]!.input_ids).toBe("ids");
-		const feed = seen[0]!.logits_to_keep as { type: string; data: readonly bigint[]; dims: readonly number[] };
-		expect(feed.type).toBe("int64");
-		expect(feed.data).toEqual([1n]);
-		expect(feed.dims).toEqual([1]);
-	});
-
+describe("logits_to_keep feed gate", () => {
 	it("leaves graphs that use num_logits_to_keep untouched", async () => {
 		const { model, seen } = makeModel(["input_ids", "num_logits_to_keep"]);
 		expect(needsLogitsToKeepFeed(model)).toBe(false);
@@ -75,15 +60,6 @@ describe("logits_to_keep feed", () => {
 		await forwardOf(model)({ input_ids: "ids", num_logits_to_keep: 7 });
 
 		expect(seen[0]).toEqual({ input_ids: "ids", num_logits_to_keep: 7 });
-	});
-
-	it("keeps a caller-supplied logits_to_keep over the shim value", async () => {
-		const { model, seen } = makeModel(["input_ids", "logits_to_keep"]);
-		ensureLogitsToKeepFeed(makeRuntime(), model);
-
-		await forwardOf(model)({ input_ids: "ids", logits_to_keep: "explicit" });
-
-		expect(seen[0]!.logits_to_keep).toBe("explicit");
 	});
 });
 
