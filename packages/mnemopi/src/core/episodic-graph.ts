@@ -480,13 +480,29 @@ export class EpisodicGraph {
 			for (let i = 0; i < frontierIds.length; i += MAX_SQL_IDS_PER_CHUNK) {
 				const chunk = frontierIds.slice(i, i + MAX_SQL_IDS_PER_CHUNK);
 				const placeholders = chunk.map(() => "?").join(", ");
-				const edgesByNode = new Map<string, Map<string, GraphEdge>>();
-				for (const mem of chunk) edgesByNode.set(mem, new Map());
-				const chunkUnseenNeighbors = new Set<string>();
+				const chunkIndex = new Map<string, number>();
+				for (let c = 0; c < chunk.length; c++) {
+					chunkIndex.set(chunk[c]!, c);
+				}
+				const bestByNeighbor = new Map<string, { frontierIdx: number; order: number; edge: GraphEdge }>();
+				let edgeOrder = 0;
 				let lastWeight: number | null = null;
 				let lastId: number | null = null;
 
-				while (chunkUnseenNeighbors.size < MAX_TRAVERSAL_EDGES_PER_CHUNK) {
+				const recordCandidate = (frontierId: string, neighborId: string, row: EdgeRow): void => {
+					const frontierIdx = chunkIndex.get(frontierId);
+					if (frontierIdx === undefined) return;
+					const existing = bestByNeighbor.get(neighborId);
+					if (existing === undefined || frontierIdx < existing.frontierIdx) {
+						bestByNeighbor.set(neighborId, {
+							frontierIdx,
+							order: edgeOrder++,
+							edge: edgeFromRow(row),
+						});
+					}
+				};
+
+				while (bestByNeighbor.size < MAX_TRAVERSAL_EDGES_PER_CHUNK) {
 					const paginationCondition =
 						lastWeight !== null && lastId !== null ? " AND (weight < ? OR (weight = ? AND id > ?))" : "";
 					const querySql =
@@ -518,21 +534,13 @@ export class EpisodicGraph {
 						}
 
 						if (!seen.has(row.target)) {
-							const nodeEdges = edgesByNode.get(row.source);
-							if (nodeEdges && !nodeEdges.has(row.target)) {
-								nodeEdges.set(row.target, edgeFromRow(row));
-							}
-							chunkUnseenNeighbors.add(row.target);
+							recordCandidate(row.source, row.target, row);
 						}
 						if (row.target !== row.source && !seen.has(row.source)) {
-							const nodeEdges = edgesByNode.get(row.target);
-							if (nodeEdges && !nodeEdges.has(row.source)) {
-								nodeEdges.set(row.source, edgeFromRow(row));
-							}
-							chunkUnseenNeighbors.add(row.source);
+							recordCandidate(row.target, row.source, row);
 						}
 
-						if (chunkUnseenNeighbors.size >= MAX_TRAVERSAL_EDGES_PER_CHUNK) {
+						if (bestByNeighbor.size >= MAX_TRAVERSAL_EDGES_PER_CHUNK) {
 							break;
 						}
 					}
@@ -540,18 +548,19 @@ export class EpisodicGraph {
 					if (rows.length < FRONTIER_EDGE_PAGE_SIZE) break;
 				}
 
-				for (const mem of chunk) {
-					for (const [neighbor, edge] of edgesByNode.get(mem) ?? []) {
-						if (seen.has(neighbor)) continue;
-						seen.add(neighbor);
-						nextLevel.add(neighbor);
-						results.push({
-							memoryId: neighbor,
-							edgeType: edge.edgeType,
-							weight: edge.weight,
-							depth: hop,
-						});
-					}
+				const chosen = Array.from(bestByNeighbor.entries()).sort(
+					(a, b) => a[1].frontierIdx - b[1].frontierIdx || a[1].order - b[1].order,
+				);
+				for (const [neighbor, { edge }] of chosen) {
+					if (seen.has(neighbor)) continue;
+					seen.add(neighbor);
+					nextLevel.add(neighbor);
+					results.push({
+						memoryId: neighbor,
+						edgeType: edge.edgeType,
+						weight: edge.weight,
+						depth: hop,
+					});
 				}
 			}
 			currentLevel = nextLevel;

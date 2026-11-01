@@ -44,4 +44,27 @@ describe("episodic-graph traversal regression", () => {
 
 		graph.close();
 	});
+
+	it("attributes shared unseen neighbors across a frontier chunk to the earliest frontier node in chunk order", () => {
+		const db = new Database(":memory:");
+		const graph = new EpisodicGraph({ db });
+		const now = new Date().toISOString();
+
+		graph.addEdge({ source: "root", target: "f1", edgeType: "ctx", weight: 0.9, timestamp: now });
+		graph.addEdge({ source: "root", target: "f2", edgeType: "ctx", weight: 0.8, timestamp: now });
+
+		// f2 has a higher weight edge to shared_neighbor (0.95), but f1 appears earlier in the frontier chunk
+		// with weight 0.4; f1 should claim shared_neighbor with its own strongest edge (0.4), matching per-node order.
+		graph.addEdge({ source: "f2", target: "shared_neighbor", edgeType: "from_f2", weight: 0.95, timestamp: now });
+		graph.addEdge({ source: "f1", target: "shared_neighbor", edgeType: "from_f1", weight: 0.4, timestamp: now });
+		graph.addEdge({ source: "f1", target: "shared_neighbor", edgeType: "from_f1_weaker", weight: 0.2, timestamp: now });
+
+		const related = graph.findRelatedMemories("root", 2, "", 0.05);
+		const shared = related.filter(r => r.memoryId === "shared_neighbor");
+		expect(shared).toHaveLength(1);
+		expect(shared[0]?.edgeType).toBe("from_f1");
+		expect(shared[0]?.weight).toBe(0.4);
+
+		graph.close();
+	});
 });
