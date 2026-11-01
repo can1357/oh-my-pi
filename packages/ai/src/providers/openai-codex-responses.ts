@@ -77,7 +77,7 @@ import {
 	getHeadersFromError,
 	getRetryAfterMsFromHeaders,
 	type HeadersLike,
-	transportRetryBounds,
+	retryWaitBounds,
 } from "../utils/retry-after";
 import { adaptSchemaForStrict, NO_STRICT, sanitizeSchemaForOpenAIResponses, toolWireSchema } from "../utils/schema";
 import { notifyRawSseEvent } from "../utils/sse-debug";
@@ -4688,7 +4688,7 @@ async function openCodexSseEventStream(
 	signal: AbortSignal | undefined,
 	firstEventTimeoutMs: number | undefined,
 	codexSseMaxAttempts: number | undefined,
-	/** The caller's `StreamOptions.maxRetryDelayMs`, which bounds this transport's retries ({@link transportRetryBounds}). */
+	/** The caller's `StreamOptions.maxRetryDelayMs`, which bounds this transport's retries ({@link retryWaitBounds}). */
 	maxRetryDelayMs: number | undefined,
 	onSseEvent?: OpenAICodexResponsesOptions["onSseEvent"],
 	fetchOverride?: FetchImpl,
@@ -4742,7 +4742,7 @@ async function openCodexSseEventStream(
 			sentModelsEtagHeader: headers.has(X_MODELS_ETAG_HEADER),
 		});
 
-	const retryBounds = transportRetryBounds(maxRetryDelayMs, CODEX_RATE_LIMIT_BUDGET_MS);
+	const retryBounds = retryWaitBounds(maxRetryDelayMs, CODEX_RATE_LIMIT_BUDGET_MS);
 	let response: Response;
 	try {
 		response = await fetchWithRetry(url, {
@@ -4763,7 +4763,7 @@ async function openCodexSseEventStream(
 			maxDelayMs: retryBounds.maxDelayMs,
 			// A refusal whose headers name a longer wait than the caller's cap is
 			// surfaced at once, with that wait on the failed message.
-			shouldRetryResponse: response => !retryBounds.declines(response),
+			shouldRetryResponse: response => !retryBounds.declines(response.headers),
 			fetch: fetchAttempt,
 			timeout: false,
 		});
