@@ -568,11 +568,13 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 				const lower = trimmed.toLowerCase();
 				if (["true", "1", "yes", "on"].includes(lower)) return true as T;
 				if (["false", "0", "no", "off"].includes(lower)) return false as T;
-				throw new Error(`Invalid boolean value: ${text}. Use true/false, yes/no, on/off, or 1/0`);
+				throw new Error(
+					`Invalid boolean value: ${describeRejectedValue(text)}. Use true/false, yes/no, on/off, or 1/0`,
+				);
 			}
 			case "number": {
 				const parsed = trimmed === "" ? Number.NaN : Number(trimmed);
-				if (!Number.isFinite(parsed)) throw new Error(`Invalid number: ${text}`);
+				if (!Number.isFinite(parsed)) throw new Error(`Invalid number: ${describeRejectedValue(text)}`);
 				return parsed as T;
 			}
 			case "array":
@@ -581,9 +583,11 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 				try {
 					parsed = JSON.parse(trimmed);
 				} catch {
-					throw new Error(`Invalid ${this.definition.type} JSON: ${text}`);
+					throw new Error(`Invalid ${this.definition.type} JSON: ${describeRejectedValue(text)}`);
 				}
-				if (!this.accepts(parsed)) throw new Error(`Invalid ${this.definition.type} JSON: ${text}`);
+				if (!this.accepts(parsed)) {
+					throw new Error(`Invalid ${this.definition.type} JSON: ${describeRejectedValue(text)}`);
+				}
 				return parsed as T;
 			}
 			case "string":
@@ -599,7 +603,7 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 				}
 				const valid = this.enumValues;
 				if (valid && !valid.includes(value)) {
-					throw new Error(`Invalid value: ${text}. Valid values: ${valid.join(", ")}`);
+					throw new Error(`Invalid value: ${describeRejectedValue(text)}. Valid values: ${valid.join(", ")}`);
 				}
 				return value as T;
 			}
@@ -698,7 +702,7 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 		}
 		this.definition.validate?.(value);
 		if (!this.accepts(value)) {
-			throw new Error(`Invalid value for ${this.id}: ${Bun.inspect(value)} (expected ${this.expected})`);
+			throw new Error(`Invalid value for ${this.id}: ${describeRejectedValue(value)} (expected ${this.expected})`);
 		}
 	}
 
@@ -886,6 +890,20 @@ export function rejectedValueMetadata(value: unknown): RejectedValueMetadata {
 	return { valueType, valueLength };
 }
 
+/** A rejected value's shape as a message shows it, `string (length 9)`: never its text. */
+export function formatRejectedValue({ valueType, valueLength }: RejectedValueMetadata): string {
+	return `${valueType} (length ${valueLength})`;
+}
+
+/**
+ * A value a setting rejects, as an error or warning may name it: its type and length only. A token
+ * pasted under the wrong key is the likeliest rejected value, and these messages reach the log and
+ * the terminal.
+ */
+export function describeRejectedValue(value: unknown): string {
+	return formatRejectedValue(rejectedValueMetadata(value));
+}
+
 /** A config file's rejected setting, safe to show through `Settings.ignoredValues`. */
 export interface IgnoredValue extends RejectedValueMetadata {
 	readonly setting: AnySetting;
@@ -914,15 +932,17 @@ export interface WarnState {
 /**
  * Registry plumbing run by `Settings` when it derives `target` from `source` (overlays, cwd clones):
  * `target` takes over `source`'s warn-once diagnostics, so the values it inherits are not reported again.
+ * An overlay loads no files of its own and reads its parent's dropped values live
+ * (`Settings.ignoredValues`), so it passes `dropped: false` rather than take a copy that goes stale.
  */
-export function inheritWarnings(target: Settings, source: Settings): void {
+export function inheritWarnings(target: Settings, source: Settings, { dropped: copyDropped = true } = {}): void {
 	const { invalid, items, dropped } = target.warnState;
 	invalid.clear();
 	items.clear();
 	dropped.clear();
 	for (const [id, value] of source.warnState.invalid) invalid.set(id, value);
 	for (const [id, entries] of source.warnState.items) items.set(id, new Set(entries));
-	for (const [file, values] of source.warnState.dropped) dropped.set(file, values);
+	if (copyDropped) for (const [file, values] of source.warnState.dropped) dropped.set(file, values);
 }
 
 /**

@@ -8,7 +8,13 @@
 import { APP_NAME, getAgentDir, isRecord } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { orderedSettings } from "../config/all-settings";
-import { type AnySetting, lookup, rejectedValueMetadata } from "../config/registry";
+import {
+	type AnySetting,
+	describeRejectedValue,
+	formatRejectedValue,
+	lookup,
+	rejectedValueMetadata,
+} from "../config/registry";
 import { Settings, settings } from "../config/settings";
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import { initXdg } from "./commands/init-xdg";
@@ -186,18 +192,13 @@ function ignoredEntries(setting?: AnySetting): [id: string, entry: IgnoredEntry]
 		]);
 }
 
-/** A rejected value's safe human description: never echo invalid file contents into a terminal. */
-function ignoredDescription(valueType: string, valueLength: number): string {
-	return `${valueType} (length ${valueLength})`;
-}
-
 /** Prints, on stderr, safe metadata for each ignored config value: a hand-edited mistake is otherwise invisible here. */
 function warnIgnored(setting?: AnySetting): void {
 	for (const [id, entry] of ignoredEntries(setting)) {
 		const where = entry.source === undefined ? "" : ` in ${entry.source}`;
 		console.error(
 			chalk.yellow(
-				`${theme.status.warning} Ignored ${id}${where}: ${ignoredDescription(entry.valueType, entry.valueLength)}; expected ${entry.expected}.`,
+				`${theme.status.warning} Ignored ${id}${where}: ${formatRejectedValue(entry)}; expected ${entry.expected}.`,
 			),
 		);
 	}
@@ -363,9 +364,7 @@ async function handleListLayer(scope: ConfigScope, flags: { json?: boolean }): P
 	for (const [def, value] of entries) {
 		const rejected = ignored(def, value);
 		const valueStr = rejected
-			? chalk.yellow(
-					`(ignored: ${ignoredDescription(rejectedValueMetadata(value).valueType, rejectedValueMetadata(value).valueLength)})`,
-				)
+			? chalk.yellow(`(ignored: ${describeRejectedValue(value)})`)
 			: def.setting.isCredential && value
 				? REDACTED
 				: formatValue(value);
