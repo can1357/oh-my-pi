@@ -35,6 +35,7 @@ import {
 import {
 	type AuthGatewayClient,
 	DEFAULT_AUTH_GATEWAY_BIND,
+	gatewayRouteAccepts,
 	type ModelResolveOptions,
 	parseAuthGatewayClients,
 	startAuthGateway,
@@ -227,10 +228,21 @@ const GATEWAY_MODEL_KINDS: readonly ModelKind[] = [
 	"video",
 ];
 
-/** Every registry model of a kind the gateway can route, bundled catalog order within each kind. */
-export function gatewayRoutableModels(registry: ModelRegistry): Model<Api>[] {
+/**
+ * Every registry model a gateway route can serve ({@link gatewayRouteAccepts}: a routable kind on an API its route
+ * accepts, never an on-device runner), bundled catalog order within each kind. `availableOnly` restricts to models
+ * with usable auth (`getAvailable`) instead of the whole catalog (`getAll`).
+ */
+export function gatewayRoutableModels(
+	registry: Pick<ModelRegistry, "getAll" | "getAvailable">,
+	availableOnly = false,
+): Model<Api>[] {
 	const models: Model<Api>[] = [];
-	for (const kind of GATEWAY_MODEL_KINDS) models.push(...registry.getAll(kind));
+	for (const kind of GATEWAY_MODEL_KINDS) {
+		for (const model of availableOnly ? registry.getAvailable(kind) : registry.getAll(kind)) {
+			if (gatewayRouteAccepts(kind, model.api)) models.push(model);
+		}
+	}
 	return models;
 }
 
