@@ -1,7 +1,7 @@
-import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { $env } from "@oh-my-pi/pi-utils";
+import { readOptionalFileTextSync } from "@oh-my-pi/pi-utils/regular-file";
 
 /** INI sections with `profile ` / `sso-session ` prefixes normalized. */
 export type AwsIniFile = Record<string, Record<string, string>>;
@@ -34,7 +34,11 @@ export function parseAwsIni(text: string): AwsIniFile {
 
 function readAwsIniSync(filePath: string): AwsIniFile | undefined {
 	try {
-		return parseAwsIni(fs.readFileSync(filePath, "utf8"));
+		// Judged a regular file before a byte is read: this runs at every
+		// session start, and a FIFO at `~/.aws/credentials` would otherwise be
+		// waited on, or have what is written to it taken. Reported and skipped.
+		const text = readOptionalFileTextSync(filePath);
+		return text === undefined ? undefined : parseAwsIni(text);
 	} catch {
 		return undefined;
 	}

@@ -5,6 +5,7 @@
  */
 
 import { getMCPConfigPath, logger } from "@oh-my-pi/pi-utils";
+import { NotARegularFile, reportSkippedFile } from "@oh-my-pi/pi-utils/regular-file";
 import { mcpCapability } from "../capability/mcp";
 import type { EffectiveExtensionRoots, SourceMeta } from "../capability/types";
 import type { MCPServer } from "../discovery";
@@ -122,6 +123,7 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 		}
 		userConfig = config as MCPConfigFile;
 	} catch (error) {
+		if (error instanceof NotARegularFile) reportSkippedFile(error);
 		logger.warn("Ignoring unreadable user MCP config for server lists", { path: userPath, error: String(error) });
 		userConfig = { mcpServers: {} };
 	}

@@ -2,6 +2,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getAgentDir, isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
+import { readOptionalFileText } from "@oh-my-pi/pi-utils/regular-file";
 import { expandAtImports } from "../discovery/at-imports";
 import activeRepoWatchdogTemplate from "../prompts/advisor/active-repo-watchdog.md" with { type: "text" };
 import contextFilesTemplate from "../prompts/advisor/context-files.md" with { type: "text" };
@@ -105,7 +106,10 @@ export async function collectConfigCandidates(
 	const items: ConfigCandidate[] = [];
 	for (const candidate of candidates) {
 		try {
-			const content = await Bun.file(candidate).text();
+			// Judged a regular file before a byte is read: a FIFO at a
+			// candidate name is reported and skipped, never waited on or drained.
+			const content = await readOptionalFileText(candidate);
+			if (content === undefined) continue;
 			const parent = path.dirname(candidate);
 			const baseName = parent.split(path.sep).pop() ?? "";
 			const isUser = userPaths.has(candidate);

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed omp hanging, or taking input written for someone else, when a FIFO, socket or device stands at a file it reads at startup. `models.yml`, `mcp.json`, `plugin-overrides.json`, `WATCHDOG.md`/`.yml`/`.yaml`, `skills.lock.json`, `PERSONALITY.md`, `~/.idapro/ida-config.json`, the legacy `settings.json` and the plugin lock are now passed over with a note that names the file; `config.yml` and a `--config` overlay stop the command with that note, as an unreadable `config.yml` already did
+
 ## [18.14.2] - 2026-10-31
 
 ### Added

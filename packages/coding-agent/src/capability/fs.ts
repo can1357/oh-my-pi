@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { readOptionalFileText } from "@oh-my-pi/pi-utils/regular-file";
 
 const contentCache = new Map<string, string | null>();
 const dirCache = new Map<string, fs.Dirent[]>();
@@ -15,17 +16,14 @@ export async function readFile(filePath: string): Promise<string | null> {
 	}
 
 	try {
-		// Gate on the file type first: discovery scans foreign config dirs
-		// (~/.claude, ~/.cursor, project trees), and reading a FIFO/socket/char
-		// device with `.text()` blocks until EOF — i.e. forever — hanging
-		// startup with zero output. `stat` follows symlinks, so symlinked
-		// context files (CLAUDE.md -> AGENTS.md) still resolve.
-		const stats = await fs.promises.stat(abs);
-		if (!stats.isFile()) {
-			contentCache.set(abs, null);
-			return null;
-		}
-		const content = await Bun.file(abs).text();
+		// Judged a regular file on the descriptor before a byte is read:
+		// discovery scans foreign config dirs (~/.claude, ~/.cursor, project
+		// trees), and reading a FIFO, socket or device blocks until EOF — i.e.
+		// forever — hanging startup with zero output, or takes what is written
+		// to it. A look at the name first and a read by name after it left a
+		// FIFO put there in between to be read. The open follows links, so
+		// symlinked context files (CLAUDE.md -> AGENTS.md) still resolve.
+		const content = (await readOptionalFileText(abs)) ?? null;
 		contentCache.set(abs, content);
 		return content;
 	} catch {

@@ -19,6 +19,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { $env, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { readOptionalFileText } from "@oh-my-pi/pi-utils/regular-file";
 import * as AIError from "../error";
 import type { FetchImpl } from "../types";
 import { raceWithSignal } from "../utils/abort";
@@ -172,7 +173,11 @@ function readEnvCredentials(): ResolvedCredentials | undefined {
 
 async function readIniFile(p: string): Promise<AwsIniFile | undefined> {
 	try {
-		const text = await fs.promises.readFile(p, "utf8");
+		// Judged a regular file before a byte is read: a FIFO at
+		// `~/.aws/credentials` is reported and passed over, never waited on or
+		// drained — the read runs at every session start.
+		const text = await readOptionalFileText(p);
+		if (text === undefined) return undefined;
 		return parseAwsIni(text);
 	} catch (err) {
 		if (isEnoent(err)) return undefined;

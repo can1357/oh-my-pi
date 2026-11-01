@@ -3,6 +3,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { parseEnv } from "node:util";
 import { getAgentDir, getConfigRootDir, getProjectDir, refreshDirsFromEnv } from "./dirs";
+import {
+	NotARegularFile,
+	PipeNotAnswered,
+	readRegularFileOrPipeTextSync,
+	reportFileWait,
+	reportSkippedFile,
+} from "./regular-file";
 import { isBunTestRuntime } from "./test-runtime";
 
 export * from "./test-runtime";
@@ -260,20 +267,79 @@ export function getDotenvEnvValues(
 }
 
 /**
+ * How long a `.env` that is a named pipe gets, from the open, to be written to
+ * its end. 1Password mounts `.env` files as named pipes on purpose and writes
+ * the file when a reader opens it, after an authorization prompt if it is
+ * locked. This bound was not measured against a real 1Password mount. It is a
+ * guess: long enough for a mount that answers at once or a prompt answered
+ * promptly, short enough that a pipe nothing serves costs one pause, not a
+ * hang. A slower answer leaves that file's variables unset, and the note says so.
+ */
+const ENV_PIPE_DEADLINE_MS = 10_000;
+
+/** How long a `.env` pipe may stay silent before omp says it is waiting: a mount that answers at once needs no note. */
+const ENV_PIPE_NOTICE_AFTER_MS = 500;
+
+/** `.env` pipes that did not answer in time: this process does not wait on them again. */
+const unansweredEnvPipes = new Set<string>();
+
+function envFileText(filePath: string): string | undefined {
+	if (unansweredEnvPipes.has(filePath)) return undefined;
+	const bound = `${ENV_PIPE_DEADLINE_MS / 1000} s`;
+	try {
+		return readRegularFileOrPipeTextSync(filePath, {
+			deadlineMs: ENV_PIPE_DEADLINE_MS,
+			noticeAfterMs: ENV_PIPE_NOTICE_AFTER_MS,
+			onWait: started =>
+				reportFileWait(
+					`omp is waiting up to ${bound} for ${filePath}: it is a named pipe (1Password mounts .env files this way), ` +
+						`and ${started ? "what is writing it has not finished" : "nothing has written it yet"}. Ctrl-C stops omp.`,
+				),
+		});
+	} catch (error) {
+		if (error instanceof NotARegularFile) {
+			reportSkippedFile(error);
+			return undefined;
+		}
+		if (!(error instanceof PipeNotAnswered)) throw error;
+		unansweredEnvPipes.add(filePath);
+		reportSkippedFile({
+			file: filePath,
+			message:
+				`omp did not load ${filePath}: it is a named pipe, and ` +
+				`${error.started ? "what was writing it stopped before the end" : "nothing wrote to it"} within ${bound}, ` +
+				`so every variable it sets is unset for this command. Unlock or start what serves it, ` +
+				`or put a regular file there.`,
+		});
+		return undefined;
+	}
+}
+
+/**
  * Parses a complete .env file with the runtime's dotenv grammar, then retains
  * only shell-identifier names and spawn-safe values before mirroring valid
  * `OMP_` variables to their `PI_` aliases.
+ *
+ * Read through a descriptor judged before a byte is read, because every command
+ * reads `$HOME/.env` first. A regular file is read. A named pipe is read only to
+ * its end within {@link ENV_PIPE_DEADLINE_MS}, and never in part: 1Password
+ * serves `.env` files that way, and a pipe nothing serves would otherwise stop
+ * every command for ever. A socket, device or directory is reported and left
+ * unread.
  */
 export function parseEnvFile(filePath: string): Record<string, string> {
 	const result: Record<string, string> = {};
 	try {
-		const parsed = parseEnv(fs.readFileSync(filePath, "utf-8"));
-		for (const key in parsed) {
-			const value = parsed[key];
-			if (value !== undefined && isValidEnvName(key) && isSafeEnvValue(value)) result[key] = value;
+		const text = envFileText(filePath);
+		if (text !== undefined) {
+			const parsed = parseEnv(text);
+			for (const key in parsed) {
+				const value = parsed[key];
+				if (value !== undefined && isValidEnvName(key) && isSafeEnvValue(value)) result[key] = value;
+			}
 		}
 	} catch {
-		// File doesn't exist or can't be read - return empty result
+		// The file can't be read or parsed - return empty result
 	}
 
 	// OMP_ overrides PI_

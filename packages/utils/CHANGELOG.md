@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `@oh-my-pi/pi-utils/regular-file`, which reads a file only after `fstat` on the opened descriptor shows a regular file, and throws `NotARegularFile` naming the file for a FIFO, socket, device or directory, whether the name is one or links to one
+
+### Fixed
+
+- Fixed every command hanging when nothing writes to a named pipe at `~/.env`, `~/.omp/.env`, `~/.omp/agent/.env` or the project's `.env`. A pipe there (1Password mounts `.env` files this way) is now read to its end within 10 seconds, a bound guessed rather than measured against 1Password; after that the command goes on with a note that the file's variables are unset, and Ctrl-C stops the wait. A socket, device or directory there is passed over with a note
+
 ## [18.14.2] - 2026-10-31
 
 ### Added

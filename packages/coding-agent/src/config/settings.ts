@@ -31,6 +31,13 @@ import {
 	procmgr,
 } from "@oh-my-pi/pi-utils";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
+import {
+	absentFile,
+	NotARegularFile,
+	openRegularFile,
+	openRegularFileSync,
+	reportSkippedFile,
+} from "@oh-my-pi/pi-utils/regular-file";
 import { isLightTheme } from "@oh-my-pi/pi-tui/theme/theme";
 import { JSONC, YAML } from "bun";
 import { invalidate as invalidateCapabilityFsCache } from "../capability/fs";
@@ -57,6 +64,34 @@ import {
 import "./all-settings";
 import { cfgModelRoles, cfgModelRoleStorage } from "./model-settings";
 import { cfgShellPath } from "../exec/settings";
+
+/**
+ * Settings files are read through a descriptor that `@oh-my-pi/pi-utils/regular-file` has
+ * judged a regular file before a byte is read. A FIFO at a settings path — or a link to one —
+ * would otherwise block the read until something wrote to it, and these reads run at startup
+ * for every command, before anything can report it. Anything at the name that is not a regular
+ * file throws `NotARegularFile`, and nothing there throws `ENOENT`, as a read by name did.
+ */
+async function readSettingsFile(filePath: string): Promise<{ source: string; stat: fs.BigIntStats }> {
+	const handle = await openRegularFile(filePath);
+	if (!handle) throw absentFile(filePath);
+	try {
+		return { source: await handle.readFile("utf8"), stat: await handle.stat({ bigint: true }) };
+	} finally {
+		await handle.close();
+	}
+}
+
+/** {@link readSettingsFile} for the synchronous paths. */
+function readSettingsFileSync(filePath: string): { source: string; stat: fs.BigIntStats } {
+	const fd = openRegularFileSync(filePath);
+	if (fd === undefined) throw absentFile(filePath);
+	try {
+		return { source: fs.readFileSync(fd, "utf8"), stat: fs.fstatSync(fd, { bigint: true }) };
+	} finally {
+		fs.closeSync(fd);
+	}
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Types
@@ -2010,8 +2045,7 @@ export class Settings {
 
 	#readYamlGeneration(filePath: string): YamlGeneration {
 		try {
-			const source = fs.readFileSync(filePath, "utf8");
-			const stat = fs.statSync(filePath, { bigint: true });
+			const { source, stat } = readSettingsFileSync(filePath);
 			return {
 				kind: "content",
 				source,
@@ -2043,7 +2077,7 @@ export class Settings {
 		if (!this.#persist || !this.#configPath) return true;
 		let source: string;
 		try {
-			source = fs.readFileSync(this.#configPath, "utf8");
+			source = readSettingsFileSync(this.#configPath).source;
 		} catch (error) {
 			return isEnoent(error) && value === undefined;
 		}
@@ -2065,8 +2099,9 @@ export class Settings {
 		let content: string;
 		let generation: YamlContentGeneration;
 		try {
-			content = await fs.promises.readFile(filePath, "utf8");
-			const stat = await fs.promises.stat(filePath, { bigint: true });
+			const read = await readSettingsFile(filePath);
+			content = read.source;
+			const stat = read.stat;
 			generation = {
 				kind: "content",
 				source: content,
@@ -2551,7 +2586,7 @@ export class Settings {
 	async #loadOverlayYaml(filePath: string, captureLegacyChangelogVersion = true): Promise<RawSettings> {
 		let content: string;
 		try {
-			content = await Bun.file(filePath).text();
+			content = (await readSettingsFile(filePath)).source;
 		} catch (error) {
 			throw new Error(
 				isEnoent(error)
@@ -2581,7 +2616,7 @@ export class Settings {
 
 		const settingsJsonPath = path.join(this.#agentDir, "settings.json");
 		try {
-			const parsed: unknown = JSONC.parse(await Bun.file(settingsJsonPath).text());
+			const parsed: unknown = JSONC.parse((await readSettingsFile(settingsJsonPath)).source);
 			if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
 				settings = this.#deepMerge(settings, this.#migrateRawSettings(parsed as RawSettings));
 				migrated = true;
@@ -2590,7 +2625,8 @@ export class Settings {
 				logger.warn("Settings: ignoring non-object legacy settings.json", { path: settingsJsonPath });
 			}
 		} catch (error) {
-			if (!isEnoent(error)) {
+			if (error instanceof NotARegularFile) reportSkippedFile(error);
+			else if (!isEnoent(error)) {
 				logger.warn("Settings: failed to read legacy settings.json", {
 					path: settingsJsonPath,
 					error: String(error),
@@ -3608,7 +3644,7 @@ export class Settings {
 		if (!legacy) return;
 		const markerPath = getLastChangelogVersionPath(this.#agentDir);
 		try {
-			if ((await Bun.file(markerPath).text()).trim()) return;
+			if ((await readSettingsFile(markerPath)).source.trim()) return;
 		} catch (error) {
 			if (!isEnoent(error)) return;
 		}
