@@ -188,7 +188,7 @@ export function parseChangelog(content: string): ChangelogDocument {
 	};
 }
 
-function parseReleaseSection(heading: string, bodyLines: readonly NumberedLine[]): ReleaseSection {
+export function parseReleaseSection(heading: string, bodyLines: readonly NumberedLine[]): ReleaseSection {
 	const leadingLines: NumberedLine[] = [];
 	const subsections: Subsection[] = [];
 	let index = 0;
@@ -399,7 +399,8 @@ function compactAdjacentListSpacing(lines: readonly string[]): string[] {
 	return flattenedItems;
 }
 
-function normalizeSection(section: ReleaseSection): FixCounters {
+/** Normalizes one section in place: trims, merges duplicate `###` headings, drops empty ones, compacts bullet spacing. */
+export function normalizeSection(section: ReleaseSection): FixCounters {
 	const counters: FixCounters = {
 		promotedItems: 0,
 		mergedDuplicateHeadings: 0,

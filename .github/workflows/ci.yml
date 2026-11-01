@@ -232,9 +232,10 @@ jobs:
    # A push to main is not checked: that is how a release arrives, and
    # `bun run release` rewrites released sections on purpose. It cannot carry
    # the defect either, since scripts/merge-pr.ts runs the same check before
-   # it commits a maintainer merge. A pull request into `omp2` is not checked
-   # because its released sections are its own, and merging main into it
-   # replaces them legitimately.
+   # it commits a maintainer merge; that also covers a re-run of an old job,
+   # which re-checks the old merge commit against the old base. A pull request
+   # into `omp2` is not checked because its released sections are its own, and
+   # merging main into it replaces them legitimately.
    changelog_released_sections:
       name: Check released changelog sections
       if: github.event_name == 'pull_request' && github.base_ref == 'main'
@@ -248,15 +249,20 @@ jobs:
            with:
               bun-version: 1.4.4
          - name: Compare released sections with the base branch
+           env:
+              PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
            run: |
               # The base is the merge commit's first parent, never a two-dot
-              # diff against the moving `origin/main`. A base this job cannot
-              # read fails it: an unknown base never passes.
-              git rev-parse --verify --quiet --end-of-options 'HEAD^2' >/dev/null || {
-                echo "::error::HEAD is not the pull request merge commit; the base branch tip is unknown."
+              # diff against the moving `origin/main`. The second parent must be
+              # this pull request's head, which proves HEAD is the merge GitHub
+              # built and HEAD^1 the base. A base this job cannot read fails it:
+              # an unknown base never passes.
+              second_parent=$(git rev-parse --verify --quiet --end-of-options 'HEAD^2' || true)
+              if [ -z "$PR_HEAD_SHA" ] || [ "$second_parent" != "$PR_HEAD_SHA" ]; then
+                echo "::error title=Released changelog check could not run::HEAD is not the merge of this pull request's head ($PR_HEAD_SHA) into its base, so the base is unknown."
                 exit 1
-              }
-              bun scripts/check-released-changelogs.ts --base HEAD^1
+              fi
+              bun scripts/check-released-changelogs.ts --base HEAD^1 --github-annotations
 
    # Rust validation (tests, clippy, rustfmt) runs on non-PR events only.
    # Native-changing PRs are rare enough that they do not warrant PR-side

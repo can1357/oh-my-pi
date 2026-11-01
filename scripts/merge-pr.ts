@@ -168,7 +168,7 @@ if (import.meta.main) {
 	}
 	console.error(report);
 	console.error(
-		"\nThe merge is not committed. Fix the changelog, `git add` it, then `git commit --no-edit` keeps the merge message.",
+		"\nThe merge is not committed. Fix the changelogs as listed above, `git add` them, then `git commit --no-edit` keeps the merge message.",
 	);
 	process.exit(1);
 }

@@ -3,7 +3,8 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { $ } from "bun";
-import { runChangelogFixer } from "./fix-changelogs";
+import { FIX_COMMAND } from "./check-released-changelogs";
+import { type RunChangelogFixerResult, runChangelogFixer } from "./fix-changelogs";
 import { updateChangelogsForRelease } from "./release";
 
 const CHANGELOG = "packages/tui/CHANGELOG.md";
@@ -23,6 +24,30 @@ ${FIRST_ENTRY}
 
 - Fixed an old bug
 `;
+const THREE_RELEASES = `# Changelog
+
+## [Unreleased]
+
+## [1.2.0] - 2026-03-01
+
+### Added
+
+- Added a newest feature
+
+## [1.1.0] - 2026-02-01
+
+### Fixed
+
+- Fixed a middle bug
+
+## [1.0.0] - 2026-01-01
+
+### Fixed
+
+- Fixed an old bug
+`;
+const ARCHIVE_FOOTER =
+	"Older entries are archived in [packages/tui/CHANGELOG.md@abcdef012345](https://github.com/can1357/oh-my-pi/blob/abcdef012345/packages/tui/CHANGELOG.md).";
 const GIT_ENV = {
 	...process.env,
 	GIT_CONFIG_GLOBAL: "/dev/null",
@@ -68,39 +93,50 @@ function repoAt(dir: string): Repo {
 	};
 }
 
-/** main with BASE_CHANGELOG tagged v1.0.0, and the repository's union merge driver for changelogs. */
-async function baseRepo(): Promise<Repo> {
+/** A repository whose main holds `content`, committed and tagged v1.0.0, with the repository's union merge driver. */
+async function repoWith(content: string): Promise<Repo> {
 	const repo = repoAt(await tempDir("released-changelogs-"));
 	await repo.git("init", "-q", "-b", "main");
 	await Bun.write(path.join(repo.dir, ".gitattributes"), "packages/*/CHANGELOG.md merge=union\n");
-	await repo.write(BASE_CHANGELOG);
+	await repo.write(content);
 	await repo.git("add", "-A");
 	await repo.git("commit", "-qm", "chore: start");
 	await repo.git("tag", "v1.0.0");
 	return repo;
 }
 
-/** The changelog half of `bun run release`, committed as the release script names it. */
+/** Runs the repository's changelog fixer, as `bun run fix:changelogs` does. */
+async function fixChangelogs(repo: Repo, maxBytes?: number): Promise<RunChangelogFixerResult> {
+	return runChangelogFixer({ repoRoot: repo.dir, maxBytes });
+}
+
+/** The changelog half of `bun run release`, committed and tagged as the release script does. */
 async function cutRelease(repo: Repo, version: string): Promise<void> {
 	const log = spyOn(console, "log").mockImplementation(() => {});
 	try {
-		await runChangelogFixer({ repoRoot: repo.dir });
+		await fixChangelogs(repo);
 		await updateChangelogsForRelease(version, repo.dir);
 	} finally {
 		log.mockRestore();
 	}
 	await repo.git("commit", "-qam", `chore: bump version to ${version}`);
+	await repo.git("tag", `v${version}`);
 }
 
 /** `feature` adds BRANCH_ENTRY under [Unreleased]; meanwhile main releases 1.1.0. */
 async function branchBehindRelease(): Promise<Repo> {
-	const repo = await baseRepo();
+	const repo = await repoWith(BASE_CHANGELOG);
 	await repo.git("checkout", "-qb", "feature");
 	await repo.write(BASE_CHANGELOG.replace(`${FIRST_ENTRY}\n`, `${FIRST_ENTRY}\n${BRANCH_ENTRY}\n`));
 	await repo.git("commit", "-qam", "feat: add branch entry");
 	await repo.git("checkout", "-q", "main");
 	await cutRelease(repo, "1.1.0");
 	return repo;
+}
+
+/** The part of a changelog above its first released section. */
+function unreleasedPart(content: string): string {
+	return content.slice(0, content.search(/^## \[\d/m));
 }
 
 async function runScript(
@@ -117,9 +153,13 @@ async function runScript(
 	return { exitCode: result.exitCode, output: `${result.stdout}${result.stderr}` };
 }
 
+function check(repo: Repo, ...args: string[]): Promise<{ exitCode: number; output: string }> {
+	return runScript(repo.dir, "check-released-changelogs.ts", args);
+}
+
 describe("check-released-changelogs", () => {
 	test(
-		"fails, naming file, section, line and destination, when merging a release moves a branch entry into it",
+		"fails a merge across a release with the moved line and the fix command, and that command makes it pass",
 		async () => {
 			const repo = await branchBehindRelease();
 			await repo.git("checkout", "-q", "feature");
@@ -130,110 +170,238 @@ describe("check-released-changelogs", () => {
 				new RegExp(`## \\[1\\.1\\.0\\] - [0-9-]+\\n\\n### Added\\n\\n${FIRST_ENTRY}\\n${BRANCH_ENTRY}\\n`),
 			);
 
-			const check = await runScript(repo.dir, "check-released-changelogs.ts", ["--base", "main"]);
-			expect(check.exitCode).toBe(1);
-			expect(check.output).toContain(`${CHANGELOG}: ## [1.1.0] - `);
-			expect(check.output).toContain(
-				`Added under \`### Added\`; move under \`## [Unreleased]\`, \`### Added\`:\n    ${BRANCH_ENTRY}\n`,
+			const failed = await check(repo, "--base", "main");
+			expect(failed.exitCode).toBe(1);
+			expect(failed.output).toContain(`${CHANGELOG}: ## [1.1.0] - `);
+			expect(failed.output).toContain(
+				`Added under \`### Added\`; it belongs under \`## [Unreleased]\`, \`### Added\`:\n    ${BRANCH_ENTRY}\n`,
 			);
+			expect(failed.output).toContain(FIX_COMMAND);
+
+			const fixed = await fixChangelogs(repo);
+			expect(fixed.changedFiles.map(file => file.promotedItems)).toEqual([1]);
+			expect(unreleasedPart(await repo.read())).toContain(BRANCH_ENTRY);
+
+			const passed = await check(repo, "--base", "main");
+			expect(passed.output).toContain("Released changelog sections match");
+			expect(passed.exitCode).toBe(0);
 		},
 		TEST_TIMEOUT_MS,
 	);
 
 	test(
-		"passes once the merged branch keeps its entries under [Unreleased]",
+		"passes a release commit, which turns [Unreleased] into a released section, and still fails an edit after it",
 		async () => {
-			const repo = await branchBehindRelease();
-			await repo.git("checkout", "-q", "feature");
-			await repo.git("merge", "--no-edit", "main");
-			const merged = await repo.read();
-			await repo.write(
-				merged
-					.replace(`${FIRST_ENTRY}\n${BRANCH_ENTRY}\n`, `${FIRST_ENTRY}\n`)
-					.replace("## [Unreleased]\n\n", `## [Unreleased]\n\n### Added\n\n${BRANCH_ENTRY}\n\n`),
-			);
-			await repo.git("commit", "-qam", "docs: move the entry back under [Unreleased]");
-
-			const check = await runScript(repo.dir, "check-released-changelogs.ts", ["--base", "main"]);
-			expect(check.output).toContain("Released changelog sections match");
-			expect(check.exitCode).toBe(0);
-		},
-		TEST_TIMEOUT_MS,
-	);
-
-	test(
-		"passes a release commit, which turns [Unreleased] into a new released section above the old ones",
-		async () => {
-			const repo = await baseRepo();
+			const repo = await repoWith(BASE_CHANGELOG);
 			const beforeRelease = (await repo.git("rev-parse", "HEAD")).output.trim();
 			await cutRelease(repo, "1.1.0");
 			expect(await repo.read()).toMatch(/^# Changelog\n\n## \[Unreleased\]\n\n## \[1\.1\.0\] - /);
 
-			const check = await runScript(repo.dir, "check-released-changelogs.ts", ["--base", beforeRelease]);
-			expect(check.output).toContain("Released changelog sections match");
-			expect(check.exitCode).toBe(0);
-		},
-		TEST_TIMEOUT_MS,
-	);
+			const released = await check(repo, "--base", beforeRelease);
+			expect(released.output).toContain("Released changelog sections match");
+			expect(released.exitCode).toBe(0);
 
-	test.each([
-		{
-			name: "a released line removed",
-			edit: (content: string) => content.replace("- Fixed an old bug\n", ""),
-			expected: "Removed; put back:\n    - Fixed an old bug",
-		},
-		{
-			name: "a released section dropped",
-			edit: (content: string) => content.slice(0, content.indexOf("## [1.0.0]")),
-			expected: "Missing here. The base has this section (3 lines)",
-		},
-	])(
-		"fails on $name",
-		async ({ edit, expected }) => {
-			const repo = await baseRepo();
-			await repo.write(edit(await repo.read()));
-
-			const check = await runScript(repo.dir, "check-released-changelogs.ts", ["--base", "HEAD"]);
-			expect(check.exitCode).toBe(1);
-			expect(check.output).toContain(`${CHANGELOG}: ## [1.0.0] - 2026-01-01\n  ${expected}`);
+			await repo.write((await repo.read()).replace("- Fixed an old bug\n", "- Fixed an old bug, reworded\n"));
+			const edited = await check(repo, "--base", beforeRelease);
+			expect(edited.exitCode).toBe(1);
+			expect(edited.output).toContain("Removed; put back:\n    - Fixed an old bug\n");
 		},
 		TEST_TIMEOUT_MS,
 	);
 
 	test(
-		"passes blank-line layout that scripts/fix-changelogs.ts rewrites inside a released section",
+		"fails a removed released line without offering the fix command, which cannot restore it",
 		async () => {
-			const released = `# Changelog
+			const twoBullets = BASE_CHANGELOG.replace(
+				"- Fixed an old bug\n",
+				"- Fixed an old bug\n- Fixed another old bug\n",
+			);
+			const repo = await repoWith(twoBullets);
+			await repo.write(BASE_CHANGELOG.replace("- Fixed an old bug\n", "- Fixed another old bug\n"));
+
+			const result = await check(repo, "--base", "HEAD");
+			expect(result.exitCode).toBe(1);
+			expect(result.output).toContain(
+				`${CHANGELOG}: ## [1.0.0] - 2026-01-01\n  Removed; put back:\n    - Fixed an old bug\n`,
+			);
+			expect(result.output).not.toContain(FIX_COMMAND);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"fails a released section dropped without an archive footer",
+		async () => {
+			const repo = await repoWith(THREE_RELEASES);
+			await repo.write(THREE_RELEASES.slice(0, THREE_RELEASES.indexOf("## [1.0.0]")));
+
+			const result = await check(repo, "--base", "HEAD");
+			expect(result.exitCode).toBe(1);
+			expect(result.output).toContain(
+				`${CHANGELOG}: ## [1.0.0] - 2026-01-01\n  Missing here. Restore it from \`git show `,
+			);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"passes the fixer's size-limit archive, which moves the oldest sections behind a footer, and still checks what remains",
+		async () => {
+			const repo = await repoWith(THREE_RELEASES);
+
+			const fixed = await fixChangelogs(repo, 1);
+			const collapsed = fixed.changedFiles[0]?.collapsedReleases ?? 0;
+			expect(collapsed).toBeGreaterThan(0);
+			const content = await repo.read();
+			expect(content).toContain("Older entries are archived in [");
+			expect(content).not.toContain("## [1.0.0]");
+
+			const archived = await check(repo, "--base", "HEAD");
+			expect(archived.output).toContain(`; ${collapsed} oldest archived behind a new size-limit footer.`);
+			expect(archived.exitCode).toBe(0);
+
+			await repo.write(content.replace("- Added a newest feature\n", `- Added a newest feature\n${BRANCH_ENTRY}\n`));
+			const added = await check(repo, "--base", "HEAD");
+			expect(added.exitCode).toBe(1);
+			expect(added.output).toContain(`${CHANGELOG}: ## [1.2.0] - 2026-03-01\n  Added under \`### Added\``);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"fails a section missing from the middle even when an archive footer was added",
+		async () => {
+			const repo = await repoWith(THREE_RELEASES);
+			const middle = THREE_RELEASES.slice(
+				THREE_RELEASES.indexOf("## [1.1.0]"),
+				THREE_RELEASES.indexOf("## [1.0.0]"),
+			);
+			await repo.write(`${THREE_RELEASES.replace(middle, "")}\n${ARCHIVE_FOOTER}\n`);
+
+			const result = await check(repo, "--base", "HEAD");
+			expect(result.exitCode).toBe(1);
+			expect(result.output).toContain(`${CHANGELOG}: ## [1.1.0] - 2026-02-01\n  Missing here.`);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"passes what the fixer normalizes inside a released section, and still fails an entry added there",
+		async () => {
+			// Committed un-normalized: a stray blank between bullets, a padded heading,
+			// a repeated `### Fixed` and an empty `### Removed`.
+			const unnormalized = `# Changelog
 
 ## [Unreleased]
 
 ## [1.0.0] - 2026-01-01
 
-### Fixed
+###  Fixed  
 
 - Fixed an old bug
+
 - Fixed another old bug
+
+### Fixed
+
+- Fixed a third old bug
+
+### Removed
 `;
-			const repo = repoAt(await tempDir("released-changelogs-blank-"));
-			await repo.git("init", "-q", "-b", "main");
-			await repo.write(released);
-			await repo.git("add", "-A");
-			await repo.git("commit", "-qm", "release 1.0.0");
-			await repo.git("tag", "v1.0.0");
+			const repo = await repoWith(unnormalized);
 
-			// A blank line between two bullets of the released section; the fixer drops it.
-			await repo.write(released.replace("- Fixed an old bug\n", "- Fixed an old bug\n\n"));
-			const log = spyOn(console, "log").mockImplementation(() => {});
-			try {
-				await runChangelogFixer({ repoRoot: repo.dir });
-			} finally {
-				log.mockRestore();
-			}
-			expect(await repo.read()).toBe(released);
+			const fixed = await fixChangelogs(repo);
+			expect(fixed.changedFiles).toHaveLength(1);
+			const normalized = await repo.read();
+			expect(normalized).not.toBe(unnormalized);
 
-			const check = await runScript(repo.dir, "check-released-changelogs.ts", ["--base", "HEAD"]);
-			expect(check.output).toContain("Released changelog sections match");
-			expect(check.exitCode).toBe(0);
+			const passed = await check(repo, "--base", "HEAD");
+			expect(passed.output).toContain("Released changelog sections match");
+			expect(passed.exitCode).toBe(0);
+
+			await repo.write(
+				normalized.replace("- Fixed a third old bug\n", `- Fixed a third old bug\n${BRANCH_ENTRY}\n`),
+			);
+			const added = await check(repo, "--base", "HEAD");
+			expect(added.exitCode).toBe(1);
+			expect(added.output).toContain(`\`### Fixed\`:\n    ${BRANCH_ENTRY}\n`);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"passes a released section with no entries disappearing, as a release removes those, but not one with entries",
+		async () => {
+			const withEmpty = BASE_CHANGELOG.replace("## [1.0.0]", "## [1.0.1] - 2026-01-02\n\n## [1.0.0]");
+			const repo = await repoWith(withEmpty);
+			await repo.write(BASE_CHANGELOG);
+
+			const emptyGone = await check(repo, "--base", "HEAD");
+			expect(emptyGone.output).toContain("Released changelog sections match");
+			expect(emptyGone.exitCode).toBe(0);
+
+			await repo.write(BASE_CHANGELOG.slice(0, BASE_CHANGELOG.indexOf("## [1.0.0]")));
+			const entriesGone = await check(repo, "--base", "HEAD");
+			expect(entriesGone.exitCode).toBe(1);
+			expect(entriesGone.output).toContain(`${CHANGELOG}: ## [1.0.0] - 2026-01-01\n  Missing here.`);
+			expect(entriesGone.output).not.toContain("## [1.0.1]");
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"fails a duplicated released section by asking to delete the extra copy, not to move it",
+		async () => {
+			const repo = await repoWith(BASE_CHANGELOG);
+			const released = BASE_CHANGELOG.slice(BASE_CHANGELOG.indexOf("## [1.0.0]"));
+			await repo.write(`${BASE_CHANGELOG}\n${released}`);
+
+			const result = await check(repo, "--base", "HEAD");
+			expect(result.exitCode).toBe(1);
+			expect(result.output).toContain("This heading appears 2 times here and 1 at the base.");
+			expect(result.output).toContain(
+				"Repeated; the base has these fewer times, delete the extra:\n    ## [1.0.0] - 2026-01-01\n    ### Fixed\n    - Fixed an old bug\n",
+			);
+			expect(result.output).not.toContain("it belongs under `## [Unreleased]`");
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"fails reordered released lines",
+		async () => {
+			const twoBullets = BASE_CHANGELOG.replace(
+				"- Fixed an old bug\n",
+				"- Fixed an old bug\n- Fixed another old bug\n",
+			);
+			const repo = await repoWith(twoBullets);
+			await repo.write(
+				BASE_CHANGELOG.replace("- Fixed an old bug\n", "- Fixed another old bug\n- Fixed an old bug\n"),
+			);
+
+			const result = await check(repo, "--base", "HEAD");
+			expect(result.exitCode).toBe(1);
+			expect(result.output).toContain("Same lines in a different order; restore the base's order.");
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"marks the changed file at its section heading for GitHub with --github-annotations",
+		async () => {
+			const repo = await branchBehindRelease();
+			await repo.git("checkout", "-q", "feature");
+			await repo.git("merge", "--no-edit", "main");
+			const headingLine = (await repo.read()).split("\n").findIndex(line => line.startsWith("## [1.1.0]")) + 1;
+
+			const result = await check(repo, "--base", "main", "--github-annotations");
+			expect(result.exitCode).toBe(1);
+			expect(result.output).toMatch(
+				new RegExp(
+					`^::error file=packages/tui/CHANGELOG\\.md,line=${headingLine},title=Released changelog section changed::## \\[1\\.1\\.0\\] - [0-9-]+: 1 line\\(s\\) added\\. Run \`bun run fix:changelogs\``,
+					"m",
+				),
+			);
 		},
 		TEST_TIMEOUT_MS,
 	);
@@ -251,13 +419,50 @@ describe("check-released-changelogs", () => {
 			await repoAt(clones).git("clone", "-q", "--depth", "1", `file://${repo.dir}`, depth1);
 			await repoAt(clones).git("clone", "-q", "--depth", "2", `file://${repo.dir}`, depth2);
 
-			const shallow = await runScript(depth1, "check-released-changelogs.ts", ["--base", "HEAD^1"]);
+			const shallow = await runScript(depth1, "check-released-changelogs.ts", [
+				"--base",
+				"HEAD^1",
+				"--github-annotations",
+			]);
 			expect(shallow.exitCode).toBe(2);
-			expect(shallow.output).toContain("cannot resolve --base HEAD^1 to a commit");
+			expect(shallow.output).toContain(
+				"::error title=Released changelog check could not run::cannot resolve --base HEAD^1",
+			);
 
 			const fetched = await runScript(depth2, "check-released-changelogs.ts", ["--base", "HEAD^1"]);
 			expect(fetched.exitCode).toBe(1);
 			expect(fetched.output).toContain(`    ${BRANCH_ENTRY}\n`);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test.each([
+		{
+			name: "no changelog exists at the base",
+			args: ["--base", "HEAD~1"],
+			expected: "no packages/*/CHANGELOG.md exists both at",
+		},
+		{ name: "--base is missing", args: [], expected: "error: --base is required" },
+		{
+			name: "an argument is unknown",
+			args: ["--base", "HEAD", "--bogus"],
+			expected: "error: unexpected argument --bogus",
+		},
+	])(
+		"exits 2 and compares nothing when $name",
+		async ({ args, expected }) => {
+			const repo = repoAt(await tempDir("released-changelogs-none-"));
+			await repo.git("init", "-q", "-b", "main");
+			await Bun.write(path.join(repo.dir, "README.md"), "readme\n");
+			await repo.git("add", "-A");
+			await repo.git("commit", "-qm", "chore: no changelog yet");
+			await repo.write(BASE_CHANGELOG);
+			await repo.git("add", "-A");
+			await repo.git("commit", "-qm", "chore: add changelog");
+
+			const result = await check(repo, ...args);
+			expect(result.exitCode).toBe(2);
+			expect(result.output).toContain(expected);
 		},
 		TEST_TIMEOUT_MS,
 	);
@@ -279,7 +484,7 @@ describe("merge-pr", () => {
 	}
 
 	test(
-		"leaves the merge uncommitted when it would move a branch entry into a released section",
+		"leaves a merge that moves a branch entry into a released section uncommitted, until the named fix",
 		async () => {
 			const repo = await branchBehindRelease();
 			const mainTip = (await repo.git("rev-parse", "HEAD")).output.trim();
@@ -288,16 +493,13 @@ describe("merge-pr", () => {
 			expect(merge.exitCode).toBe(1);
 			expect(merge.output).toContain(`${CHANGELOG}: ## [1.1.0] - `);
 			expect(merge.output).toContain(`    ${BRANCH_ENTRY}\n`);
+			expect(merge.output).toContain(FIX_COMMAND);
 			expect((await repo.git("rev-parse", "HEAD")).output.trim()).toBe(mainTip);
 			expect((await repo.git("rev-parse", "-q", "--verify", "MERGE_HEAD")).exitCode).toBe(0);
 
-			// The fix the report asks for, then the commit it names.
-			const merged = await repo.read();
-			await repo.write(
-				merged
-					.replace(`${FIRST_ENTRY}\n${BRANCH_ENTRY}\n`, `${FIRST_ENTRY}\n`)
-					.replace("## [Unreleased]\n\n", `## [Unreleased]\n\n### Added\n\n${BRANCH_ENTRY}\n\n`),
-			);
+			// The fix the report names, then the commit it names.
+			await fixChangelogs(repo);
+			expect(unreleasedPart(await repo.read())).toContain(BRANCH_ENTRY);
 			await repo.git("add", CHANGELOG);
 			expect((await repo.git("commit", "--no-edit")).exitCode).toBe(0);
 			expect((await repo.git("log", "-1", "--format=%s")).output.trim()).toBe(
@@ -310,7 +512,7 @@ describe("merge-pr", () => {
 	test(
 		"commits a merge that keeps released sections unchanged, with the merge-commit message",
 		async () => {
-			const repo = await baseRepo();
+			const repo = await repoWith(BASE_CHANGELOG);
 			await repo.git("checkout", "-qb", "feature");
 			await repo.write(BASE_CHANGELOG.replace(`${FIRST_ENTRY}\n`, `${FIRST_ENTRY}\n${BRANCH_ENTRY}\n`));
 			await repo.git("commit", "-qam", "feat: add branch entry");

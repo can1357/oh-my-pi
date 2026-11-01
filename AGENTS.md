@@ -330,7 +330,7 @@ Location: `packages/*/CHANGELOG.md` (per package).
 
 - New entries always go under `## [Unreleased]`.
 - Entries are one line, brief, and user-facing: lead with what the user will see or can now do. Root-cause narration and implementation detail belong in the commit/PR, not the changelog.
-- Never modify already-released sections (e.g., `## [0.12.2]`) — they are immutable. A merge across a release (main into your branch, or your branch into main) can move your `[Unreleased]` entries into the new release section without a conflict. CI fails a PR whose merge result does that, and `scripts/merge-pr.ts` refuses to commit such a merge. After merging main, check with `bun scripts/check-released-changelogs.ts --base origin/main`.
+- Never modify already-released sections (e.g., `## [0.12.2]`) — they are immutable. A merge across a release (main into your branch, or your branch into main) can move your `[Unreleased]` entries into the new release section without a conflict. CI fails a PR whose merge result does that, and `scripts/merge-pr.ts` refuses to commit such a merge. `bun run fix:changelogs` moves the entries back; check with `bun scripts/check-released-changelogs.ts --base origin/main`.
 - Don't flag changelog section order or formatting in reviews or PRs — `bun run release` runs `fix-changelogs` which normalizes everything automatically.
 
 **Attribution:**
