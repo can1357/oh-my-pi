@@ -7067,6 +7067,42 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 		assert!(failures.is_empty(), "asynchronous subshell rows failed:\n{}", failures.join("\n"));
 	}
 
+	/// A subshell's error goes to the standard error in effect where it
+	/// happened, as in Bash 5.2.21: a redirection on the failing command
+	/// captures it, and nothing reaches the shell's own standard error. The
+	/// error must land only inside `ERR=<…>`.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn subshell_errors_follow_the_failing_commands_redirection() {
+		let _guard = shell_test_lock().lock().await;
+		let dir = tempfile::tempdir().expect("scratch directory");
+		let err_file = quote_arg(&dir.path().join("err").to_string_lossy());
+		let fail = ": \"${missing:?BOOM}\"";
+		let rows = [
+			("background", format!("{{ {fail}; }} 2>{err_file} & wait")),
+			("coprocess", format!("coproc {{ {fail}; }} 2>{err_file}; wait")),
+			("process substitution", format!("/bin/cat <({{ {fail}; }} 2>{err_file})")),
+			("subshell", format!("( {{ {fail}; }} 2>{err_file} )")),
+			("function definition", format!("f() {{ {fail}; }} 2>{err_file}; f & wait")),
+		];
+
+		let mut failures = Vec::new();
+		for (form, command) in rows {
+			let shell = Shell::new(None);
+			let command =
+				format!("{command}; printf 'ERR=<%s>\\n' \"$(/bin/cat {err_file})\"; rm -f {err_file}");
+			match run_collecting(&shell, &command).await {
+				Err(err) => failures.push(format!("{form}: Shell::run rejected: {err:#}")),
+				Ok((_, output)) => {
+					if !(output.starts_with("ERR=<") && output.matches("BOOM").count() == 1) {
+						failures.push(format!("{form}: {output:?}"));
+					}
+				},
+			}
+		}
+		assert!(failures.is_empty(), "errors escaped their redirection:\n{}", failures.join("\n"));
+	}
+
 	/// `live_background_job_count` reports 0 when the session has no live
 	/// external background jobs and 1 while one is running. The host relies on
 	/// this to retain a per-call shell whose `&`/`nohup` child is still alive
