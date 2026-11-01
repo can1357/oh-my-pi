@@ -1,5 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { extractLeadingCdTarget, lexShellCommand, readShellWord } from "@oh-my-pi/pi-coding-agent/tools/shell-tokenize";
+import {
+	extractLeadingCdTarget,
+	lexShellCommand,
+	readShellWord,
+	tokenizeShellSegments,
+} from "@oh-my-pi/pi-coding-agent/tools/shell-tokenize";
 
 describe("lexShellCommand", () => {
 	it("splits words from separators, keeping verbatim spelling beside the quote-removed value", () => {
@@ -16,6 +21,25 @@ describe("lexShellCommand", () => {
 			"a b",
 			"2>",
 			"1",
+		]);
+	});
+
+	it("keeps ANSI-C strings and comments whole so a rewriter reassembles the exact input", () => {
+		// The anonymizer rewrites words from `raw`: an escaped quote inside `$'...'` or a
+		// quote/operator inside a `#` comment must not move a word boundary.
+		const command = "printf $'a\\'b; c' ; echo ok # it's; x\nsudo whoami";
+		const tokens = lexShellCommand(command);
+		expect(tokens.map(token => token.raw).join("")).toBe(command);
+		expect(tokens.filter(token => token.kind === "word").map(token => token.raw)).toEqual([
+			"printf",
+			"$'a\\'b; c'",
+			"echo",
+			"ok",
+			"#",
+			"it's;",
+			"x",
+			"sudo",
+			"whoami",
 		]);
 	});
 });
@@ -122,5 +146,107 @@ describe("readShellWord", () => {
 	it("returns undefined for empty or all-whitespace input", () => {
 		expect(readShellWord("")).toBeUndefined();
 		expect(readShellWord("   ")).toBeUndefined();
+	});
+});
+
+describe("tokenizeShellSegments", () => {
+	it("keeps a multiline ANSI-C string open as one word, then splits", () => {
+		// `$'...\'` stays open across newlines: the escaped quote does not
+		// close it. `echo AFTER` is string CONTENT, like bash prints it; the
+		// contract's fix is that it is no longer read as the closing quote,
+		// so the segment after the string is `echo REACHED`, not the payload.
+		// Probed against bash: one printf, then `echo REACHED`.
+		const command = "printf $'prefix \\'\necho AFTER\n' ; echo REACHED";
+		expect(tokenizeShellSegments(command)).toEqual([
+			["printf", "$prefix \\'\necho AFTER\n"],
+			["echo", "REACHED"],
+		]);
+	});
+
+	it("closes a plain quoted string on the first apostrophe", () => {
+		// A backslash is literal inside plain quotes: nothing is escaped.
+		const command = "echo 'a\\b'; echo NEXT";
+		expect(tokenizeShellSegments(command)).toEqual([
+			["echo", "a\\b"],
+			["echo", "NEXT"],
+		]);
+	});
+
+	it("closes an ANSI-C string at its own closing quote, one line later", () => {
+		const command = "printf $'a\\'b\n' ; echo REACHED";
+		expect(tokenizeShellSegments(command)).toEqual([
+			["printf", "$a\\'b\n"],
+			["echo", "REACHED"],
+		]);
+	});
+
+	it("treats a quoted apostrophe after a bare word as plain quoting", () => {
+		// The sensory trap: `x '...'` is a plain string; only `$'...'` escapes.
+		const command = "echo x'not ansi'; echo REACHED";
+		expect(tokenizeShellSegments(command)).toEqual([
+			["echo", "xnot ansi"],
+			["echo", "REACHED"],
+		]);
+	});
+
+	it("keeps a command after an escaped dollar that only looks ANSI-C", () => {
+		// Codex review: `\$'` is NOT an ANSI-C opener; the dollar is escaped,
+		// so the string is plain and closes at the FIRST apostrophe. The
+		// `; sudo whoami` after it must split into its own segment. Probed
+		// against bash: `$a\` printed, then sudo runs.
+		const command = "echo \\$'a\\'; sudo whoami";
+		expect(tokenizeShellSegments(command)).toEqual([
+			["echo", "$a\\"],
+			["sudo", "whoami"],
+		]);
+	});
+
+	it("opens an ANSI-C string after an escaped backslash, then splits at the semicolon", () => {
+		// `\\` is one literal backslash, so the dollar after it is live and `$'a\'X'`
+		// is one ANSI-C string. The `; sudo whoami` that follows must be its own
+		// segment, or a `sudo *` deny rule never sees it.
+		const command = "echo \\\\$'a\\'X' ; sudo whoami";
+		expect(tokenizeShellSegments(command)).toEqual([
+			["echo", "\\$a\\'X"],
+			["sudo", "whoami"],
+		]);
+	});
+
+	it("keeps a # after an escaped space as text, so the next command still splits", () => {
+		// `foo\ #` is one word (`foo #`): the `#` does not start a word, so no comment
+		// swallows the `; sudo whoami` that bash then runs.
+		const command = "echo foo\\ #; sudo whoami";
+		expect(tokenizeShellSegments(command)).toEqual([
+			["echo", "foo #"],
+			["sudo", "whoami"],
+		]);
+	});
+
+	it("reads a dollar-single-quote string as plain quoting when ANSI-C quoting is off", () => {
+		// dash: `$'a\\'` is a literal dollar and the word `a\\`, so the semicolon after it splits.
+		expect(tokenizeShellSegments("echo $'a\\'; sudo whoami", { ansiC: false })).toEqual([
+			["echo", "$a\\"],
+			["sudo", "whoami"],
+		]);
+		expect(tokenizeShellSegments("echo $'a\\'; sudo whoami")).toEqual([["echo", "$a\\'; sudo whoami"]]);
+	});
+
+	it("starts no comment at a hash when comments are off", () => {
+		expect(tokenizeShellSegments("echo @(#); sudo whoami", { comments: false })).toEqual([
+			["echo", "@"],
+			["#"],
+			["sudo", "whoami"],
+		]);
+	});
+
+	it("does not open a quote inside a comment", () => {
+		// Codex review: a `#` comment runs to end of line and the `$'\'`
+		// inside it opens nothing, so `sudo whoami` on the next line stays a
+		// command of its own. Probed against bash: `ok`, then sudo runs.
+		const command = "echo ok # $'\\'\nsudo whoami";
+		expect(tokenizeShellSegments(command)).toEqual([
+			["echo", "ok", "$'\\'"],
+			["sudo", "whoami"],
+		]);
 	});
 });

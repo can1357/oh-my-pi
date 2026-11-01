@@ -49,7 +49,12 @@ import { formatArtifactErrorNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { resolveInlineByteCapBudget } from "./output-meta";
 import { resolveToCwd } from "./path-utils";
-import { extractLeadingCdTarget, extractLiteralAndChainSegments, tokenizeShellSegments } from "./shell-tokenize";
+import {
+	CONSERVATIVE_SHELL_LEX_VARIANTS,
+	extractLeadingCdTarget,
+	extractLiteralAndChainSegments,
+	tokenizeShellSegments,
+} from "./shell-tokenize";
 import { ToolAbortError } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
@@ -282,10 +287,23 @@ function commandMatchesBashApprovalPattern(command: string, pattern: string): bo
 // a compound line (`cd x && rm -rf /`, `sleep 1 & rm -rf /`) is still caught.
 // Reuse the shared shell tokenizer so segmentation stays in one place and honors
 // every command boundary (`;`, `&&`, `||`, `|`, `&`, subshells, newlines).
+//
+// The tokenizer is not a full parser, and shells disagree on `$'...'` quoting and on
+// where `#` starts a comment. A deny or prompt rule therefore collects the segments of
+// every dialect reading, and of every line on its own when a here-doc may be present,
+// whose bodies the tokenizer cannot see: a quote inside one would otherwise swallow the
+// commands after it. Extra readings only add matches, so a hidden command costs at most
+// a prompt. `allow` never uses this: it needs the whole command free of shell control.
 function bashCommandSegments(command: string): string[] {
-	return tokenizeShellSegments(command)
-		.map(segment => segment.join(" "))
-		.filter(segment => segment.length > 0);
+	const texts = command.includes("<<") ? [command, ...command.split("\n")] : [command];
+	const segments = new Set<string>();
+	for (const text of texts) {
+		for (const variant of CONSERVATIVE_SHELL_LEX_VARIANTS) {
+			for (const segment of tokenizeShellSegments(text, variant)) segments.add(segment.join(" "));
+		}
+	}
+	segments.delete("");
+	return [...segments];
 }
 
 // `deny`/`prompt` matching: the rule fires when its glob matches the whole
