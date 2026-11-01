@@ -9,6 +9,8 @@
 ### Added
 
 - `/login mistral` signs in through the browser like the Mistral Vibe CLI and stores the minted API key, whose usage counts against the plan's Vibe Code quota instead of pay-as-you-go API credits; `MISTRAL_API_KEY` still works ([#13875](https://github.com/can1357/oh-my-pi/pull/13875) by [@Gauthier-Huguenin](https://github.com/Gauthier-Huguenin), continued in [#17672](https://github.com/can1357/oh-my-pi/pull/17672) by [@abilliontokens](https://github.com/abilliontokens))
+- Added an opt-in bounded prompt-cache diagnostic journal with HMAC-derived request/prefix fingerprints, Anthropic attempt correlation, captured-wire/prepared-body provenance, honest usage estimates, reset classifications, and no persisted prompt content (`PI_PROMPT_CACHE_DEBUG=1`) ([#11938](https://github.com/can1357/oh-my-pi/pull/11938) by [@pedropaulovc](https://github.com/pedropaulovc)).
+
 ## [18.15.0] - 2026-11-01
 
 ### Fixed
@@ -44,9 +46,6 @@
 - Fixed the `omp auth-gateway` Responses endpoint rejecting documented null values for temperature, `top_p`, output limits, reasoning, and reasoning summaries ([#17466](https://github.com/can1357/oh-my-pi/pull/17466) by [@Xytronix](https://github.com/Xytronix)).
 - Fixed provider HTTP errors printing the response body twice when the thrown error already carried it, including responses with a retry header ([#17503](https://github.com/can1357/oh-my-pi/pull/17503) by [@metaphoric-dev](https://github.com/metaphoric-dev))
 - Fixed Gemini tool calls through the `omp auth-gateway` chat-completions endpoint failing on the next turn: the gateway now returns each call's thought signature in `extra_content` and replays the one a client sends back ([#17509](https://github.com/can1357/oh-my-pi/pull/17509) by [@justdoGIT](https://github.com/justdoGIT))
-### Added
-
-- Added an opt-in bounded prompt-cache diagnostic journal with HMAC-derived request/prefix fingerprints, Anthropic attempt correlation, captured-wire/prepared-body provenance, honest usage estimates, reset classifications, and no persisted prompt content (`PI_PROMPT_CACHE_DEBUG=1`) ([#11938](https://github.com/can1357/oh-my-pi/pull/11938) by [@pedropaulovc](https://github.com/pedropaulovc)).
 
 ## [18.14.1] - 2026-10-31
 
