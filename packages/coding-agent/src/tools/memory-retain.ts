@@ -56,13 +56,47 @@ export class MemoryRetainTool implements AgentTool<MemoryRetainSchema, MemoryRet
 
 	static createIf(session: ToolSession): MemoryRetainTool | null {
 		const backend = cfgMemoryBackend.get(session.settings);
-		if (backend !== "hindsight" && backend !== "mnemopi") return null;
+		if (backend !== "hindsight" && backend !== "mnemopi" && backend !== "mnemosyne-oss") return null;
 		if (backend === "hindsight" && !isHindsightConfigured(loadHindsightConfig(session.settings))) return null;
 		return new MemoryRetainTool(session);
 	}
 
 	async execute(_id: string, params: MemoryRetainParams): Promise<AgentToolResult<MemoryRetainDetails>> {
 		const backend = cfgMemoryBackend.get(this.session.settings);
+		if (backend === "mnemosyne-oss") {
+			const state = this.session.getMnemosyneOssSessionState?.();
+			const owner = state?.aliasOf ?? state;
+			if (!owner) throw new Error("Mnemosyne OSS backend is not initialised for this session.");
+			if (params.items.some(item => item.scope === "global")) {
+				throw new Error("Global memory scope is only available with the Mnemopi backend.");
+			}
+			const storedIds: string[] = [];
+			for (const [index, item] of params.items.entries()) {
+				try {
+					storedIds.push(
+						await owner.save({
+							content: item.content,
+							context: item.context,
+							source: "coding-agent-retain",
+							importance: 0.75,
+						}),
+					);
+				} catch (error) {
+					const reason = error instanceof Error ? error.message : String(error);
+					const kept =
+						storedIds.length === 0 ? "Nothing was stored." : `Stored and kept: ${storedIds.join(", ")}.`;
+					throw new Error(
+						`Mnemosyne OSS did not store item ${index + 1} of ${params.items.length}: ${reason}. ${kept}`,
+						{ cause: error },
+					);
+				}
+			}
+			const count = params.items.length;
+			return {
+				content: [{ type: "text", text: `${count} ${count === 1 ? "memory" : "memories"} stored.` }],
+				details: { count },
+			};
+		}
 		if (backend === "mnemopi") {
 			const state = this.session.getMnemopiSessionState?.();
 			if (!state) {

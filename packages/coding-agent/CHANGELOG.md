@@ -826,6 +826,9 @@
 ### Changed
 
 - Tool approval prompts list Approve, Approve `<tool>` for this session, and Deny again: with an empty composer, pick with the arrow keys and Enter; typing in the composer denies and steers instead, and the Deny row reads "Deny and send message" while you do
+### Added
+
+- Added `memory.backend: mnemosyne-oss`, which runs your own Mnemosyne 4.x Python SDK so recall, retain, and `memory://<id>` reads use the same local SQLite banks as other Mnemosyne clients ([#15687](https://github.com/can1357/oh-my-pi/pull/15687), based on [#9211](https://github.com/can1357/oh-my-pi/pull/9211) by [@wannfq](https://github.com/wannfq))
 
 ### Fixed
 
