@@ -58,7 +58,7 @@ interface Rule {
 
 Capability identity is `rule.name` plus the rule's model scope (`models`, `providers`, `class`, `family`); an unscoped rule's identity is its name alone.
 
-Consequence: precedence and deduplication are name-based within one model scope. Two files with the same `name` and the same (or no) model scope are the same logical rule; same-named files with different model scopes are distinct variants, and the session keeps the first variant that admits its model (§5).
+Consequence: precedence and deduplication are name-based across sources. The highest-precedence source directory that defines a `name` owns it, and every same-named rule from any other directory is shadowed on every model. Within that directory, same-named files with different model scopes are distinct variants (for example `foo.md` and `foo.mdc` in one `rules/` directory), and the session keeps the first variant that admits its model (§5).
 
 ## 2. Discovery sources and normalization
 
@@ -182,13 +182,13 @@ Fallback limitations:
 
 ## 4. Provider precedence and deduplication
 
-`loadCapability("rules")` (`capability/index.ts`) merges provider outputs and then deduplicates by `rule.name` plus model scope.
+`loadCapability("rules")` (`capability/index.ts`) merges provider outputs and then deduplicates by `rule.name`, keeping same-named variants with different model scopes only from the first source directory.
 
 ### Precedence model
 
 - Providers are ordered by priority descending.
 - Equal priority keeps registration order (`cursor` before `windsurf` from `discovery/index.ts`).
-- Dedup is first-wins: first encountered rule name (with its model scope) is kept; later same-name items with the same model scope are marked `_shadowed` in `all` and excluded from `items`.
+- Dedup is first-wins: the first encountered rule name is kept; a later same-name item is marked `_shadowed` in `all` and excluded from `items` unless it comes from the same provider and directory with a different model scope.
 
 Effective rule provider order is currently:
 
@@ -286,7 +286,7 @@ After rule discovery in `createAgentSession` (`sdk.ts`), `bucketRules(...)` appl
 - The scope is evaluated against the model that receives the prompt: the session's model for the main agent, the subagent's own model for a subagent, and the advisor's model for an advisor (see [advisor-watchdog.md](advisor-watchdog.md)). Judged TTSR rules are scoped by the session model, whose output is judged, not by the judge model.
 - Every model change re-scopes immediately: `/model`, `setModel`, and retry fallbacks replace the TTSR registrations and the `rule://` snapshot. The system prompt is rebuilt only when the always-apply or rulebook rules it renders change, so a retry fallback to a model with the same matched set keeps the prompt bytes and its prompt cache. A request already in flight keeps the prompt it was sent with.
 - `omp ttsr list` and `omp ttsr scan` ignore model scope; `omp ttsr test --model <selector>` evaluates it for the resolved model. Without `--model`, model scope is ignored and same-named variants collapse to the highest-precedence one (TTSR registrations are keyed by name), so pass `--model` to test a specific variant.
-- Precedence consequence: a scoped rule only shadows same-named rules on the models it admits. A project rule `X` with `family: opus` overrides a user or builtin `X` on Opus, but on every other model the user or builtin `X` still applies. To override a rule everywhere, leave the scope off.
+- Precedence consequence: a scoped rule shadows every lower-precedence same-named rule on every model, not only on the models it admits. A project rule `X` with `family: opus` replaces a user or builtin `X` on Opus and leaves no `X` on any other model. To restrict an inherited rule to some models while keeping it elsewhere, add your own copy of it next to the scoped override, under the same name with a scope for the models that should keep it (for example `X.md` with `family: opus` and `X.mdc` with `family: sonnet` in one `rules/` directory). Same-named variants share one extension id (`rule:X`), so the extensions dashboard toggles them together.
 
    ```yaml
    # Opus on any host:

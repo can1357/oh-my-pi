@@ -225,7 +225,7 @@ Do not edit generated files.
 - It is re-discovered from disk when a session starts and on session-scoped rebuilds such as `/clear` and `/new`, so creating or editing it while OMP is running takes effect at the next reset — no restart required.
 - It is **always sticky**: frontmatter cannot make it non-sticky. If you want conditional or opt-in behavior, write a normal rule file instead (see [Skills](./skills.md)).
 - Model-scope frontmatter (`models`, `providers`, `class`, `family`) still applies: a scoped `RULES.md` is carried only while the session runs on a matching model, and it also reaches advisors running on a matching model. See [Rulebook matching pipeline](./rulebook-matching-pipeline.md#models-providers-class-and-family).
-- User and project candidates have distinct rule names: `RULES` and `RULES@project`. Both can load together. Rule deduplication is name-based within one model scope, so avoid regular rules with these names: native regular rules load earlier and can shadow a sticky candidate with the same scope.
+- User and project candidates have distinct rule names: `RULES` and `RULES@project`. Both can load together. Rule deduplication is name-based, so avoid regular rules with these names: native regular rules load earlier and can shadow a sticky candidate.
 - Always-apply content already present in a custom prompt, append text, or context file is omitted from the generated always-apply section by normalized paragraph containment; the content still travels in the source that contains it.
 
 Keep `RULES.md` short. Long background belongs in `AGENTS.md`; both generated context and always-apply rules occupy system-prompt context on requests.

@@ -4,6 +4,7 @@
  * Project-specific rules from Cursor (.mdc), Windsurf (.md), and Cline formats.
  * Translated to a canonical shape regardless of source format.
  */
+import * as path from "node:path";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { modelMatchesGlob } from "../config/model-glob";
 import { defineCapability } from ".";
@@ -284,8 +285,8 @@ export function ruleAppliesToModel(
 
 /**
  * Canonical identity of a rule's model scope: empty for an unscoped rule,
- * otherwise a stable encoding of every scope field. Same-named rules with
- * different scopes are distinct rules.
+ * otherwise a stable encoding of every scope field. Same-named rules from one
+ * source directory with different scopes are distinct variants.
  */
 export function ruleModelScopeKey(rule: Pick<Rule, "models" | "providers" | "class" | "family">): string {
 	const fields = [rule.models, rule.providers, rule.class, rule.family];
@@ -455,6 +456,10 @@ export function resetActiveRulesForTests(): void {
 	activeRules = [];
 }
 
+function ruleSourceDir(rule: Rule): string {
+	return `${rule._source.provider}\0${path.dirname(rule._source.path)}`;
+}
+
 export const ruleCapability = defineCapability<Rule>({
 	id: "rules",
 	displayName: "Rules",
@@ -463,6 +468,9 @@ export const ruleCapability = defineCapability<Rule>({
 		const scopeKey = ruleModelScopeKey(rule);
 		return scopeKey ? `${rule.name}\0${scopeKey}` : rule.name;
 	},
+	// Same-named rules with different model scopes are variants only within one source directory;
+	// across sources the highest-precedence one shadows every other on every model.
+	equivalent: (left, right) => left.name === right.name && ruleSourceDir(left) !== ruleSourceDir(right),
 	toExtensionId: rule => `rule:${rule.name}`,
 	validate: rule => {
 		if (!rule.name) return "Missing rule name";
