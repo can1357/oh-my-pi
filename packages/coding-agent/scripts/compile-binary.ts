@@ -60,8 +60,8 @@ export async function compileCodingAgent(options: CodingAgentCompileOptions): Pr
 			format: "esm",
 			bytecode: true,
 			splitting: true,
-			// Discovery entry chunks can share a hash; include their source names to avoid collisions.
-			naming: { chunk: "chunks/[name]-[hash].[ext]" },
+			// Identical discovery modules can share both basename and hash; retain their source directories.
+			naming: { chunk: "chunks/[dir]/[name]-[hash].[ext]" },
 			minify: {
 				identifiers: options.minifyIdentifiers ?? false,
 				keepNames: true,
