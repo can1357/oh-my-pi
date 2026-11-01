@@ -35,7 +35,7 @@ import {
 } from "../native/node";
 import { plainText } from "../native/spans";
 import { Memo } from "../native/memo";
-import { fileHref, fileRow, inlineErrorView } from "../tools/native-view";
+import { fileHref, fileRow, inlineErrorView, urlHref } from "../tools/native-view";
 
 /**
  * Extract the read call's target path. `path` is the canonical arg; `file_path`
@@ -711,7 +711,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		return {
 			target: filePath ? `${filePath}${split.sel ? `:${split.sel}` : ""}` : "…",
 			targetKind: "path",
-			href: fileHref(linkPathForTargets(row.targets)),
+			href: fileHref(linkPathForTargets(row.targets)) ?? urlHref(split.path),
 			meta: correctedFrom ? [`corrected from ${shortenPath(correctedFrom)}`] : undefined,
 			badges: conflicts
 				? [{ text: `${conflicts} conflict${conflicts === 1 ? "" : "s"}`, tone: "warning" }]
@@ -734,7 +734,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 					: undefined;
 		return fileRow(shortenPath(split.sel ? split.path : row.targetPath), {
 			range: split.sel ? `:${split.sel}` : undefined,
-			href: fileHref(linkPathForTargets(row.targets)),
+			href: fileHref(linkPathForTargets(row.targets)) ?? urlHref(split.path),
 			icon: status === "error" ? "x-circle" : undefined,
 			tone: READ_STATUS_TONE[status],
 			chip: conflicts ? { text: `${conflicts} conflict${conflicts === 1 ? "" : "s"}` } : undefined,

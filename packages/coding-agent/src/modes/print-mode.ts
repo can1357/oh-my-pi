@@ -361,12 +361,6 @@ async function runPrintModeCore(
 		// In JSON mode, output all events
 		if (mode === "json") {
 			writeStdoutLine(`${JSON.stringify(printableEvent(event))}\n`);
-		} else if (event.type === "auto_retry_start") {
-			// Text mode prints only the answer on stdout. Name the wait on stderr
-			// in the terminal's words, or a backoff looks like a hung run.
-			writeStderrLine(
-				`Retrying (${event.attempt}/${event.maxAttempts}) in ${formatDuration(event.delayMs)}: ${singleLine(httpErrorReason(event.errorMessage, event.errorClassificationMessage))}`,
-			);
 		} else if (
 			event.type === "notice" &&
 			(event.source === CREDENTIAL_DISABLED_NOTICE_SOURCE ||
@@ -378,6 +372,13 @@ async function runPrintModeCore(
 			// say when it crossed its cost thresholds, and a memory failure must not pass
 			// as an answer that used memories.
 			writeStderrLine(event.source === COST_GATE_NOTICE_SOURCE ? event.message : `Warning: ${event.message}`);
+		} else if (event.type === "auto_retry_start") {
+			// Text mode shows only `Working...` while a turn runs; a turn stuck retrying
+			// (offline, an outage) must say why instead of looking like a slow answer,
+			// and how long it waits, as the terminal's retry line does.
+			writeStderrLine(
+				`Retrying (${event.attempt}/${event.maxAttempts}) in ${formatDuration(event.delayMs)}: ${singleLine(httpErrorReason(event.errorMessage, event.errorClassificationMessage))}`,
+			);
 		}
 	});
 
