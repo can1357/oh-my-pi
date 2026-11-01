@@ -4,7 +4,7 @@
 
 ### Changed
 
-- The transcript and the retry notice show the server's retry wait from the structured `errorRetryAfterMs`, `retryAfterMs` and `finalRetryAfterMs` fields; an error with no structured wait shows none
+- The transcript and the retry notice show the server's retry wait from the structured `errorRetryAfterMs`, `retryAfterMs` and `finalRetryAfterMs` fields; an error with no structured wait shows none ([#17643](https://github.com/can1357/oh-my-pi/pull/17643) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.13.3] - 2026-10-28
 

@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `errorRetryAfterMs` to the collab `AssistantMessage` and the wait fields to the `auto_retry_start` (`retryAfterMs`) and `auto_retry_end` (`finalRetryAfterMs`) events
+- Added `errorRetryAfterMs` to the collab `AssistantMessage` and the wait fields to the `auto_retry_start` (`retryAfterMs`) and `auto_retry_end` (`finalRetryAfterMs`) events ([#17643](https://github.com/can1357/oh-my-pi/pull/17643) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.2] - 2026-10-31
 

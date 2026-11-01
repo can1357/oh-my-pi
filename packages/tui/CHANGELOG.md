@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Error rows (an assistant turn's error, the tree selector, the `/btw` history, task progress, the agents hub) render the server's retry wait from the structured `errorRetryAfterMs` as ` (retry after 30.0s)`, cutting a long error to fit before the wait so the wait is never truncated; a row with no structured wait shows none
+- Error rows (an assistant turn's error, the tree selector, the `/btw` history, task progress, the agents hub) render the server's retry wait from the structured `errorRetryAfterMs` as ` (retry after 30.0s)`, cutting a long error to fit before the wait so the wait is never truncated; a row with no structured wait shows none ([#17643](https://github.com/can1357/oh-my-pi/pull/17643) by [@sjawhar](https://github.com/sjawhar))
 ### Breaking Changes
 
 - `GroupedLineContext.isUrl` is replaced by `url`, the internal URL a header names or a body row belongs to ([#17608](https://github.com/can1357/oh-my-pi/pull/17608) by [@JustasMasiulis](https://github.com/JustasMasiulis))
