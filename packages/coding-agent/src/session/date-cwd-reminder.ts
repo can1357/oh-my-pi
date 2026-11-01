@@ -46,6 +46,11 @@ export interface DateCwdReminderJournal {
 	/** Placements recorded on the session's current branch, oldest first. */
 	load(): readonly DateCwdReminderPlacement[];
 	record(placement: DateCwdReminderPlacement): void;
+	/**
+	 * The transcript the journal reads and writes. A change (a switched-in session) makes the
+	 * injector forget what it sent: the new transcript's turns were sent with its own reminders.
+	 */
+	scope?(): string | undefined;
 }
 
 function placementOfEntry(entry: SessionEntry): DateCwdReminderPlacement | undefined {
@@ -67,12 +72,14 @@ function firstTurnDigest(message: UserMessage): string {
 export function createSessionDateCwdReminderJournal(sessionManager: {
 	getBranchView(): readonly SessionEntry[];
 	appendCustomEntry(customType: string, data?: unknown): string;
+	getSessionId(): string;
 }): DateCwdReminderJournal {
 	return {
 		load: () => sessionManager.getBranchView().flatMap(entry => placementOfEntry(entry) ?? []),
 		record: placement => {
 			sessionManager.appendCustomEntry(DATE_CWD_REMINDER_CUSTOM_TYPE, placement);
 		},
+		scope: () => sessionManager.getSessionId(),
 	};
 }
 
@@ -167,14 +174,21 @@ const MAX_ROOTS = 8;
 export class DateCwdReminderInjector {
 	#states = new Map<string, RootState>();
 	readonly #journal: DateCwdReminderJournal | undefined;
+	#scope: string | undefined;
 
 	constructor(journal?: DateCwdReminderJournal) {
 		this.#journal = journal;
+		this.#scope = journal?.scope?.();
 	}
 
 	/** Apply the current reminder while preserving all earlier injected bytes. */
 	transform(context: Context, date: string, cwd: string): Context {
 		if (!context.systemPrompt || context.systemPrompt.length === 0 || context.messages.length === 0) return context;
+		const scope = this.#journal?.scope?.();
+		if (scope !== this.#scope) {
+			this.#states.clear();
+			this.#scope = scope;
+		}
 		const reminder = renderDateCwdReminder(date, cwd);
 		const messages = this.#inject(context.messages, reminder);
 		return messages === context.messages ? context : { ...context, messages };
@@ -383,12 +397,15 @@ export class DateCwdReminderInjector {
 			seen: new Set(),
 			counts,
 		};
+		// A journaled turn was sent even when no reply followed it (an interrupted request).
+		let lastSent = messages.findLastIndex(message => message.role === "assistant");
 		for (const placement of placements) {
 			if (placement.conversation !== conversation) continue;
 			// The conversation's first turn may be back under a new key; it is this request's first turn.
 			const turn = placement.turn === conversation ? root : placement.turn;
 			const index = indexOf.get(turn);
 			if (index === undefined) continue;
+			lastSent = Math.max(lastSent, index);
 			if (placement.placement === "control") {
 				state.controls.push({ anchor: turn, message: createReminderControl(placement.reminder) });
 				continue;
@@ -401,8 +418,7 @@ export class DateCwdReminderInjector {
 				injected: injectReminder(source, placement.reminder),
 			});
 		}
-		const lastReply = messages.findLastIndex(message => message.role === "assistant");
-		for (let index = 0; index <= lastReply; index++) state.seen.add(keys[index]!);
+		for (let index = 0; index <= lastSent; index++) state.seen.add(keys[index]!);
 		state.reminder = this.#carriedReminder(state, keys);
 		return state;
 	}
