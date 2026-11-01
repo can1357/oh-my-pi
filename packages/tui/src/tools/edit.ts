@@ -45,7 +45,13 @@ import {
 import type { ToolActivityContext, ToolActivitySummary } from "./renderer";
 import { fileHyperlink, Hasher, type RenderCache, renderStatusLine, truncateToWidth, WidthAwareText } from "../render";
 import { framedToolCard } from "../render/tool-card";
-import { HL_FILE_PREFIX, HL_FILE_SUFFIX, HL_MOVE_KEYWORD, HL_REM_KEYWORD } from "./hashline-format";
+import {
+	HASHLINE_TAG_SUFFIX_RE,
+	HL_FILE_PREFIX,
+	HL_FILE_SUFFIX,
+	HL_MOVE_KEYWORD,
+	HL_REM_KEYWORD,
+} from "./hashline-format";
 
 /** Edit payload syntax selected by the caller. */
 export type EditMode = "replace" | "patch" | "hashline" | "apply_patch" | "sloppy";
@@ -664,9 +670,12 @@ function getCallPreview(
 
 const MISSING_APPLY_PATCH_END_ERROR = "The last line of the patch must be '*** End Patch'";
 
+/** A model-typed `[path#tag]` header may spell the tag in lowercase. */
+const TYPED_TAG_SUFFIX_RE = new RegExp(HASHLINE_TAG_SUFFIX_RE.source, "i");
+
 function normalizeHashlineInputPreviewPath(rawPath: string): string {
 	const trimmed = rawPath.trim();
-	const hashStart = /#[0-9a-fA-F]{4}$/u.exec(trimmed)?.index;
+	const hashStart = TYPED_TAG_SUFFIX_RE.exec(trimmed)?.index;
 	const withoutHash = hashStart === undefined ? trimmed : trimmed.slice(0, hashStart);
 	if (withoutHash.length < 2) return withoutHash;
 	const first = withoutHash[0];
