@@ -8,7 +8,7 @@ import type { TUI } from "../src/index";
 import { CopySelectorComponent } from "../src/overlays/copy-selector";
 import { type BranchVariantPath, RewindSelectorComponent } from "../src/overlays/rewind-selector";
 import { TreeSelectorComponent, type TreeSelectorNode } from "../src/overlays/tree-selector";
-import { initTheme } from "../src/theme";
+import { initTheme, setTheme } from "../src/theme";
 
 const pickerCx: DescribeContext = {
 	cols: 120,
@@ -333,6 +333,28 @@ describe("session tree picker", () => {
 		expect(byId.get("u3")?.badges).toEqual([{ text: "idea", tone: "warning" }]);
 		expect((byId.get("u2")?.depth ?? 0) > (byId.get("a1")?.depth ?? 0)).toBe(true);
 		expect(p.selected).toBe("a3");
+	});
+
+	test("an open tree keeps user and assistant labels apart as the theme switches", async () => {
+		const selector = treeSelector();
+		const labelStyles = () => {
+			const items = treeProps(selector).items ?? [];
+			return ["u1", "a1"].map(id => {
+				const label = items.find(item => item.id === id)?.label;
+				return typeof label === "string" ? undefined : label?.[0]?.s;
+			});
+		};
+		try {
+			await setTheme("dark-github");
+			expect(labelStyles()).toEqual(["accent strong", "success"]);
+			// `dark-terminal` paints `accent` and `success` the same green.
+			await setTheme("dark-terminal");
+			expect(labelStyles()).toEqual(["accent strong", "statusLinePath"]);
+			await setTheme("dark-github");
+			expect(labelStyles()).toEqual(["accent strong", "success"]);
+		} finally {
+			await initTheme(false);
+		}
 	});
 
 	test("message labels fold \\r and Unicode line separators without flattening the selected preview", () => {

@@ -108,19 +108,119 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		},
 	});
 
-	const output = async (...args) => {
-		let opts = {};
-		let ids = args;
-		if (args.length > 0) {
-			const last = args.at(-1);
-			if (last && typeof last === "object" && !Array.isArray(last)) {
-				opts = last;
-				ids = args.slice(0, -1);
+	// `.key`, `[index]`, `["key"]` chains, as Python `output(query=)`: a missing key or index yields null.
+	const queryTokens = query => {
+		let text = query.trim();
+		if (text.startsWith(".")) text = text.slice(1);
+		const tokens = [];
+		let key = "";
+		for (let i = 0; i < text.length; i++) {
+			const ch = text[i];
+			if (ch !== "." && ch !== "[") {
+				key += ch;
+				continue;
+			}
+			if (key) tokens.push(key);
+			key = "";
+			if (ch === "[") {
+				const close = text.indexOf("]", i + 1);
+				const end = close === -1 ? text.length : close;
+				const inner = text.slice(i + 1, end);
+				if (inner.length >= 2 && inner.startsWith('"') && inner.endsWith('"')) tokens.push(inner.slice(1, -1));
+				else if (/^\s*-?\d+\s*$/.test(inner)) tokens.push(Number(inner));
+				else throw new TypeError(`output() query has an invalid index [${inner}] in ${JSON.stringify(query)}`);
+				i = end;
 			}
 		}
-		const reads = ids.map(id => tool.read({ path: `agent://${id}`, ...opts }));
-		const values = await Promise.all(reads);
-		return values.length === 1 ? values[0] : values;
+		if (key) tokens.push(key);
+		return tokens;
+	};
+	const applyQuery = (data, query) => {
+		let current = data;
+		for (const token of queryTokens(query)) {
+			if (typeof token === "number") {
+				if (!Array.isArray(current) || token >= current.length || token < -current.length) return null;
+				current = current.at(token);
+			} else {
+				if (!isPlainObject(current) || !Object.hasOwn(current, token)) return null;
+				current = current[token];
+			}
+		}
+		return current;
+	};
+	// A bounded raw read locates a published `<id>.md`, which the helper can read verbatim past the
+	// read tool's page limit. A protocol resource can also name that file while prepending a warning
+	// (for a superseded run); only bypass the protocol when the preview matches the file's first line.
+	// `published` is the unannotated file, which a query parses as `agent://<id>/<path>` extraction does.
+	const outputSource = async id => {
+		const path = `agent://${id}`;
+		const located = await globalThis.__omp_call_tool__("read", { path: `${path}:raw:1-1` });
+		const filePath = located?.details?.resolvedPath;
+		const published = typeof filePath === "string" ? await callHelper("read", filePath) : undefined;
+		if (published !== undefined) {
+			const lineEnd = published.indexOf("\n");
+			const prefixLength = Math.min(lineEnd < 0 ? published.length : lineEnd, 100);
+			if (prefixLength > 0 ? located?.text?.startsWith(published.slice(0, prefixLength)) : located?.text === "") {
+				return { path: filePath, content: published, published };
+			}
+		}
+		return { path, content: await readToolText(path), published };
+	};
+	// Lines as Python's `splitlines()` counts them: a trailing newline adds no empty line.
+	const sourceLines = content => {
+		const lines = content.split(/\r?\n/);
+		if (lines.at(-1) === "") lines.pop();
+		return lines;
+	};
+	// One output's selection; options, results and errors match Python `output()` in `eval/py/prelude.py`.
+	const selectOutput = async (id, { format = "raw", query, offset, limit }) => {
+		const { path, content, published } = await outputSource(id);
+		let selected = content;
+		let range;
+		let lines;
+		if (query) {
+			let value;
+			try {
+				value = JSON.parse(published ?? content);
+			} catch (error) {
+				throw new Error(`Output ${id} is not valid JSON: ${error.message}`);
+			}
+			selected = JSON.stringify(applyQuery(value, query), null, 2) ?? "null";
+		} else if (!isNil(offset) || !isNil(limit)) {
+			lines = sourceLines(content);
+			const totalLines = lines.length;
+			const startLine = Math.max(1, offset ?? 1);
+			if (startLine > totalLines) {
+				throw new RangeError(`Offset ${startLine} is beyond end of output (${totalLines} lines) for ${id}`);
+			}
+			const endLine = Math.min(totalLines, startLine + (limit ?? totalLines - startLine + 1) - 1);
+			selected = lines.slice(startLine - 1, endLine).join("\n");
+			range = { start_line: startLine, end_line: endLine, total_lines: totalLines };
+		}
+		if (format === "stripped") selected = selected.replace(/\x1b\[[0-9;]*m/g, "");
+		if (format !== "json") return { id, content: selected };
+		const entry = {
+			id,
+			path,
+			line_count: (lines ?? sourceLines(query ? selected : content)).length,
+			char_count: query ? selected.length : content.length,
+			content: selected,
+		};
+		if (range) entry.range = range;
+		if (query) entry.query = query;
+		return entry;
+	};
+	const output = async (...args) => {
+		const last = args.at(-1);
+		const opts = isPlainObject(last) ? last : {};
+		const ids = isPlainObject(last) ? args.slice(0, -1) : args;
+		if (ids.length === 0) throw new TypeError("output() requires at least one output ID");
+		if (opts.query && (!isNil(opts.offset) || !isNil(opts.limit))) {
+			throw new TypeError("output() query cannot be combined with offset/limit");
+		}
+		const results = await Promise.all(ids.map(id => selectOutput(id, opts)));
+		if (results.length > 1) return results;
+		return opts.format === "json" ? results[0] : results[0].content;
 	};
 
 	const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
@@ -467,8 +567,8 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 				"agent",
 				opts,
 				rest,
-				["agent", "label", "schema", "isolated", "apply", "merge", "schemaMode", "tools"],
-				"{ agent, label, schema, schemaMode, isolated, apply, merge, tools }",
+				["agent", "label", "schema", "isolated", "apply", "merge", "schemaMode", "tools", "model"],
+				"{ agent, label, schema, schemaMode, isolated, apply, merge, tools, model }",
 			);
 			const result = await globalThis.__omp_call_tool__("__agent__", { prompt, ...options });
 			if (!result || typeof result.id !== "string") throw new Error("agent() did not return a handle");
@@ -531,8 +631,8 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 			"workpool",
 			opts,
 			rest,
-			["name", "context", "tools"],
-			"{ name, context, tools }",
+			["name", "context", "tools", "model"],
+			"{ name, context, tools, model }",
 		);
 		const result = await globalThis.__omp_call_tool__("__workpool__", {
 			op: "create",

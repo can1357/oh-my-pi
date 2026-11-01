@@ -67,7 +67,7 @@ class "xai" {
 			}
 		}
 	}
-	thinking-loop-guard "xai"
+	thinking-loop-guard "semantic"
 }
 
 // Same-provider swap targets for hosted search and image generation.
