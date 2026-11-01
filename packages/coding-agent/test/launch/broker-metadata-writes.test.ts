@@ -189,13 +189,17 @@ describe("daemon metadata writes", () => {
 		const broker = startBroker(projectDir, runtimeDir);
 		const rename = fs.rename;
 		const platform = Object.getOwnPropertyDescriptor(process, "platform");
-		let denied = false;
+		let denials = 0;
 		const renameSpy = spyOn(fs, "rename").mockImplementation(async (source, target) => {
-			if (!denied && target === metadataPath && (await fs.readFile(source, "utf8")).includes('"state":"exited"')) {
-				denied = true;
+			if (
+				denials < 2 &&
+				target === metadataPath &&
+				(await fs.readFile(source, "utf8")).includes('"state":"exited"')
+			) {
 				// Simulate Windows replacement semantics for this broker's final write.
 				Object.defineProperty(process, "platform", { value: "win32" });
-				throw Object.assign(new Error("rename denied by reader"), { code: "EPERM" });
+				const code = denials++ === 0 ? "EEXIST" : "EPERM";
+				throw Object.assign(new Error("rename denied by reader"), { code });
 			}
 			return rename(source, target);
 		});
@@ -228,7 +232,7 @@ describe("daemon metadata writes", () => {
 				renameSpy.mockRestore();
 			}
 		}
-		expect(denied).toBe(true);
+		expect(denials).toBe(2);
 		expect(await Bun.file(metadataPath).json()).toMatchObject({ daemon: { state: "exited" } });
 	}, 20_000);
 
