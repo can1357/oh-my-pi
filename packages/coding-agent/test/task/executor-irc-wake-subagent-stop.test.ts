@@ -482,6 +482,67 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 		expect(artifact).not.toContain("REFUSED-PAYLOAD");
 	});
 
+	it("stops a refusal continuation still running when the user resumes, and cancels the pass", async () => {
+		const continuationStarted = Promise.withResolvers<void>();
+		const run = await setup({
+			responses: [
+				yieldCall("REFUSED-PAYLOAD"),
+				() => {
+					continuationStarted.resolve();
+					// A provider call that would outlast the test unless the turn is stopped.
+					return { ...yieldCall("UNJUDGED-CONTINUATION"), delayMs: 60_000 };
+				},
+				{ content: ["resumed for the user"] },
+			],
+			onStop: () => ({ decision: "block", reason: "keep going" }),
+		});
+
+		await deliverWake(run.session, "m1");
+		await continuationStarted.promise;
+		await run.session.resume();
+		await run.session.waitForIrcReplies();
+		await run.session.waitForIdle();
+
+		expect(run.stopEvents).toHaveLength(1);
+		expect(await Bun.file(run.artifact).exists()).toBe(false);
+		expect(run.lifecycle.map(frame => frame.status)).toContain("aborted");
+		expect(run.lifecycle.map(frame => frame.status)).not.toContain("failed");
+	});
+
+	it("holds an extension's idle aside until the wake's result is published", async () => {
+		const stopEntered = Promise.withResolvers<void>();
+		const releaseStop = Promise.withResolvers<void>();
+		let published: boolean | undefined;
+		const run = await setup({
+			responses: [
+				yieldCall("WAKE-PAYLOAD"),
+				async () => {
+					published = await Bun.file(run.artifact).exists();
+					return { content: ["handled the aside"] };
+				},
+			],
+			onStop: async () => {
+				stopEntered.resolve();
+				await releaseStop.promise;
+				return undefined;
+			},
+		});
+
+		await deliverWake(run.session, "m1");
+		await stopEntered.promise;
+		const sent = run.session.sendCustomMessage(
+			{ customType: "ext-aside", content: "extension aside", display: false },
+			{ deliverAs: "aside" },
+		);
+		releaseStop.resolve();
+		await sent;
+		await run.session.waitForIrcReplies();
+		await run.session.waitForIdle();
+
+		expect(published).toBe(true);
+		expect(await Bun.file(run.artifact).text()).toContain("WAKE-PAYLOAD");
+	});
+
 	it("fails a follow-up cancelled while it waits out a wake's stop pass, without running it", async () => {
 		const stopEntered = Promise.withResolvers<void>();
 		const releaseStop = Promise.withResolvers<void>();
