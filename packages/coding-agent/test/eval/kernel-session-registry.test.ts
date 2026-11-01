@@ -1,4 +1,5 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
+import { MAX_TIMER_DELAY_MS } from "@oh-my-pi/pi-utils";
 import { createKernelSessionRegistry, type KernelSession } from "../../src/eval/kernel-session-registry";
 
 interface TestOptions {
@@ -74,6 +75,26 @@ async function waitUntil(condition: () => boolean, timeoutMs = 2_000): Promise<v
 		if (Date.now() > deadline) throw new Error("condition not reached before timeout");
 		await Bun.sleep(5);
 	}
+}
+
+async function collected(ref: WeakRef<object>, deadlineMs: number): Promise<boolean> {
+	const deadline = Date.now() + deadlineMs;
+	for (;;) {
+		Bun.gc(true);
+		if (ref.deref() === undefined) return true;
+		if (Date.now() > deadline) return false;
+		await Bun.sleep(50);
+	}
+}
+
+/** Kept out of the test body so no strong local binding outlives the capture. */
+function weakRefToPresentSession(
+	registry: ReturnType<typeof createFakeRegistry>["registry"],
+	options: TestOptions,
+): WeakRef<object> {
+	const session = registry.getPresentSession("/tmp", options);
+	if (!session) throw new Error("no present session to observe");
+	return new WeakRef(session);
 }
 
 describe("kernel session recovery", () => {
@@ -685,6 +706,61 @@ describe("idle kernel shutdown", () => {
 			await waitUntil(() => kernels[0]?.alive === false);
 			expect(vetoes).toBe(2);
 		} finally {
+			await registry.disposeAll();
+		}
+	});
+
+	it("discards an idle-shutdown approval when a cell ran while the probe was pending", async () => {
+		const firstProbe = Promise.withResolvers<boolean>();
+		let probes = 0;
+		const { kernels, registry, ran, cell } = idleRegistry(() => {
+			probes += 1;
+			return probes === 1 ? firstProbe.promise : Promise.resolve(true);
+		});
+		try {
+			await cell("setup");
+			await waitUntil(() => probes === 1);
+			await cell("during probe");
+			firstProbe.resolve(true);
+			await Bun.sleep(0);
+			expect(kernels[0]?.alive).toBe(true);
+			// Only the idle timer the second cell re-armed may reap, after its own full window.
+			await waitUntil(() => kernels[0]?.alive === false);
+			expect(probes).toBe(2);
+			expect(ran.map(entry => entry.kernel)).toEqual([0, 0]);
+		} finally {
+			firstProbe.resolve(false);
+			await registry.disposeAll();
+		}
+	});
+
+	it("releases an owner-disposed session without waiting for its idle timer", async () => {
+		const { registry } = createFakeRegistry(async (_kernel, code) => ({ cancelled: false, value: code }));
+		const options: TestOptions = { sessionId: "owned", kernelOwnerId: "owner", kernelIdleShutdownMs: 60_000 };
+		try {
+			await registry.executeOnSession("setup", "/tmp", options);
+			const sessionRef = weakRefToPresentSession(registry, options);
+			await registry.disposeByOwner("owner");
+			expect(await collected(sessionRef, 2_000)).toBe(true);
+		} finally {
+			await registry.disposeAll();
+		}
+	});
+
+	it("keeps a kernel through an idle window longer than the native timer limit", async () => {
+		const idleMs = 30 * 24 * 60 * 60 * 1000;
+		vi.useFakeTimers();
+		const { kernels, registry } = createFakeRegistry(async (_kernel, code) => ({ cancelled: false, value: code }));
+		try {
+			await registry.executeOnSession("setup", "/tmp", { sessionId: "long", kernelIdleShutdownMs: idleMs });
+			vi.advanceTimersByTime(MAX_TIMER_DELAY_MS + 1_000);
+			expect(kernels[0]?.alive).toBe(true);
+			vi.advanceTimersByTime(idleMs - MAX_TIMER_DELAY_MS - 2_000);
+			expect(kernels[0]?.alive).toBe(true);
+			vi.advanceTimersByTime(2_000);
+			expect(kernels[0]?.alive).toBe(false);
+		} finally {
+			vi.useRealTimers();
 			await registry.disposeAll();
 		}
 	});

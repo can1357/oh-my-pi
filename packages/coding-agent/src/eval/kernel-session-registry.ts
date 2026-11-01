@@ -1,6 +1,6 @@
 import * as path from "node:path";
 
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, MAX_TIMER_DELAY_MS } from "@oh-my-pi/pi-utils";
 import {
 	attachSessionOwner,
 	type CancelledErrorClass,
@@ -153,6 +153,10 @@ export function createKernelSessionRegistry<
 	const busySessions = new Map<string, number>();
 	const idleShutdownMs = new Map<string, number>();
 	const idleTimers = new Map<string, { session: TSession; timer: NodeJS.Timeout }>();
+	// Bumped on every busy mark from one counter, so an idle probe that straddles any activity, or a key
+	// forgotten and re-created, never matches the generation it captured.
+	const idleGenerations = new Map<string, number>();
+	let idleGenerationSeq = 0;
 	// An idle shutdown keeps the session record, so the next call replaces the dead kernel and reports the restart.
 	const reapingSessions = new Map<string, Promise<void>>();
 
@@ -334,6 +338,12 @@ export function createKernelSessionRegistry<
 		idleTimers.delete(sessionKey);
 	}
 
+	function forgetIdleState(sessionKey: string): void {
+		clearIdleTimer(sessionKey);
+		idleShutdownMs.delete(sessionKey);
+		idleGenerations.delete(sessionKey);
+	}
+
 	function canReapIdle(sessionKey: string, session: TSession, kernel: TKernel): boolean {
 		return (
 			sessions.get(sessionKey) === session &&
@@ -351,25 +361,45 @@ export function createKernelSessionRegistry<
 		clearIdleTimer(sessionKey);
 		const delayMs = idleShutdownMs.get(sessionKey) ?? 0;
 		const session = sessions.get(sessionKey);
-		if (!(delayMs > 0) || !session || busySessions.has(sessionKey) || !session.kernel.isAlive()) return;
-		const timer = setTimeout(() => {
-			if (idleTimers.get(sessionKey)?.timer === timer) idleTimers.delete(sessionKey);
-			void reapIdleSession(sessionKey, session);
-		}, delayMs);
-		timer.unref?.();
-		idleTimers.set(sessionKey, { session, timer });
+		if (!session) {
+			if (!busySessions.has(sessionKey)) forgetIdleState(sessionKey);
+			return;
+		}
+		if (!(delayMs > 0) || busySessions.has(sessionKey) || !session.kernel.isAlive()) return;
+		// Delays past the 32-bit timer limit fire almost at once, so long windows chain bounded timers.
+		const deadline = performance.now() + delayMs;
+		const schedule = (): void => {
+			const timer = setTimeout(
+				() => {
+					if (idleTimers.get(sessionKey)?.timer !== timer) return;
+					if (deadline - performance.now() > 0) {
+						schedule();
+						return;
+					}
+					idleTimers.delete(sessionKey);
+					void reapIdleSession(sessionKey, session);
+				},
+				Math.min(Math.max(0, deadline - performance.now()), MAX_TIMER_DELAY_MS),
+			);
+			timer.unref?.();
+			idleTimers.set(sessionKey, { session, timer });
+		};
+		schedule();
 	}
 
 	async function reapIdleSession(sessionKey: string, session: TSession): Promise<void> {
 		const kernel = session.kernel;
 		if (!canReapIdle(sessionKey, session, kernel)) return;
 		if (descriptor.canShutdownIdle) {
+			const generation = idleGenerations.get(sessionKey);
 			let allowed: boolean;
 			try {
 				allowed = await descriptor.canShutdownIdle(session);
 			} catch {
 				allowed = false;
 			}
+			// Activity during the probe already restarted the idle window; this verdict is stale.
+			if (idleGenerations.get(sessionKey) !== generation) return;
 			if (!allowed) {
 				if (canReapIdle(sessionKey, session, kernel)) armIdleShutdown(sessionKey);
 				return;
@@ -396,6 +426,7 @@ export function createKernelSessionRegistry<
 
 	function markBusy(sessionKey: string): () => void {
 		busySessions.set(sessionKey, (busySessions.get(sessionKey) ?? 0) + 1);
+		idleGenerations.set(sessionKey, ++idleGenerationSeq);
 		clearIdleTimer(sessionKey);
 		let released = false;
 		return () => {
@@ -435,6 +466,7 @@ export function createKernelSessionRegistry<
 		for (const { timer } of idleTimers.values()) clearTimeout(timer);
 		idleTimers.clear();
 		idleShutdownMs.clear();
+		idleGenerations.clear();
 		if (descriptor.clearResetsOnDisposeAll) resettingSessions.clear();
 		const all = [...sessions.entries()];
 		for (const [id, session] of all) {
@@ -492,7 +524,9 @@ export function createKernelSessionRegistry<
 		}
 		for (const session of toShutdown) {
 			descriptor.invalidateSession?.(session);
-			if (sessions.get(session.sessionKey) === session) sessions.delete(session.sessionKey);
+			if (sessions.get(session.sessionKey) !== session) continue;
+			sessions.delete(session.sessionKey);
+			forgetIdleState(session.sessionKey);
 		}
 		const shutdowns = toShutdown.map(session => settleShutdown(session, false));
 		const started = await Promise.allSettled(startingToShutdown.map(starting => starting.promise));
@@ -500,7 +534,10 @@ export function createKernelSessionRegistry<
 			if (result.status !== "fulfilled") continue;
 			const session = result.value;
 			descriptor.invalidateSession?.(session);
-			if (sessions.get(session.sessionKey) === session) sessions.delete(session.sessionKey);
+			if (sessions.get(session.sessionKey) === session) {
+				sessions.delete(session.sessionKey);
+				forgetIdleState(session.sessionKey);
+			}
 			toShutdown.push(session);
 			shutdowns.push(settleShutdown(session, false));
 		}
@@ -542,7 +579,9 @@ export function createKernelSessionRegistry<
 		if (options.bridge && !options.bridgeSessionId) {
 			options.bridgeSessionId = sessionId;
 		}
-		idleShutdownMs.set(sessionKey, Math.max(0, options.kernelIdleShutdownMs ?? 0));
+		const idleMs = options.kernelIdleShutdownMs ?? 0;
+		if (idleMs > 0) idleShutdownMs.set(sessionKey, idleMs);
+		else idleShutdownMs.delete(sessionKey);
 		const release = markBusy(sessionKey);
 		try {
 			return await executeOnBusySession(code, cwd, options, sessionId, sessionKey);
