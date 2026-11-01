@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import { resolveModels, runTinyModelsCommand } from "@oh-my-pi/pi-coding-agent/cli/tiny-models-cli";
-import { tinyModelSupportsBackend } from "@oh-my-pi/pi-coding-agent/tiny/backend-policy";
+import { tinyModelBackendRefusal, tinyModelSupportsBackend } from "@oh-my-pi/pi-coding-agent/tiny/backend-policy";
 import { TINY_LOCAL_MODELS } from "@oh-my-pi/pi-coding-agent/tiny/models";
 import { mlxLaunch, tinyTitleClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
 
@@ -142,5 +142,19 @@ describe("mlx backend model gate", () => {
 
 	it("builds a launch for a model mlx-lm can load", () => {
 		expect(mlxLaunch("lfm2-1.2b", () => {}).backend).toBe("mlx");
+	});
+});
+
+describe("tiny backend policy", () => {
+	it("pins the reviewed refusals for the restricted models", () => {
+		// qwen3-1.7b: ONNX cannot run its RotaryEmbedding cache updates, MLX can.
+		expect(tinyModelBackendRefusal("qwen3-1.7b", "onnx")).toMatch(/RotaryEmbedding/);
+		expect(tinyModelBackendRefusal("qwen3-1.7b", "mlx")).toBeUndefined();
+		// lfm3-1.7b: the pinned mlx-lm has no lfm3 architecture, ONNX runs it.
+		expect(tinyModelBackendRefusal("lfm3-1.7b", "mlx")).toMatch(/lfm3/);
+		expect(tinyModelBackendRefusal("lfm3-1.7b", "onnx")).toBeUndefined();
+		// An unrestricted model is loadable by both backends.
+		expect(tinyModelBackendRefusal("lfm2-1.2b", "onnx")).toBeUndefined();
+		expect(tinyModelBackendRefusal("lfm2-1.2b", "mlx")).toBeUndefined();
 	});
 });
