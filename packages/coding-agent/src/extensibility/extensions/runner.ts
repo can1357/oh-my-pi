@@ -501,6 +501,13 @@ interface ToolRegistrationScope {
 	closed: boolean;
 }
 
+/** One extension's place in its delivery queue for one {@link ExtensionRunner.emit} call. */
+interface DeliveryTurn {
+	/** Settles once the extension has handled every earlier event; undefined when its queue was idle. */
+	ready: Promise<void> | undefined;
+	release: () => void;
+}
+
 /** Identity reported by a session that is not a subagent and received no explicit identity. */
 export const TOP_LEVEL_AGENT: ExtensionAgentIdentity = Object.freeze({
 	kind: "main",
@@ -552,6 +559,8 @@ export class ExtensionRunner {
 	#warnedLinkSchemes = new Set<string>();
 	#toolRegistrationScope = new AsyncLocalStorage<ToolRegistrationScope>();
 	#toolRegistrationBarrier: Promise<void> | undefined;
+	/** Latest pending delivery per extension; see {@link #reserveDeliveryTurns}. Absent while idle. */
+	#deliveryTails = new Map<Extension, Promise<void>>();
 	#initialized = false;
 	/** Full load order, captured on the first {@link setSuspendedExtensions} call. */
 	#loadOrder: Extension[] | undefined;
@@ -1854,50 +1863,58 @@ export class ExtensionRunner {
 			return result as RunnerEmitResult<TEvent>;
 		}
 
-		for (const ext of extensions) {
-			const handlers = ext.handlers.get(event.type);
-			if (!handlers || handlers.length === 0) continue;
-			ctx ??= this.createContext();
+		const turns = this.#reserveDeliveryTurns(extensions, event.type);
+		try {
+			for (const ext of extensions) {
+				const handlers = ext.handlers.get(event.type);
+				if (!handlers || handlers.length === 0) continue;
+				const turn = turns?.get(ext);
+				if (turn?.ready) await turn.ready;
+				ctx ??= this.createContext();
 
-			for (const handler of handlers) {
-				const handlerResult = await this.#runHandlerWithTimeout(
-					handler,
-					event,
-					ctx,
-					ext,
-					handlerTimeoutForEvent(event.type),
-				);
+				for (const handler of handlers) {
+					const handlerResult = await this.#runHandlerWithTimeout(
+						handler,
+						event,
+						ctx,
+						ext,
+						handlerTimeoutForEvent(event.type),
+					);
 
-				if (this.#isSessionBeforeEvent(event) && handlerResult) {
-					result = handlerResult as SessionBeforeEventResult;
-					if (result.cancel) {
-						return result as RunnerEmitResult<TEvent>;
+					if (this.#isSessionBeforeEvent(event) && handlerResult) {
+						result = handlerResult as SessionBeforeEventResult;
+						if (result.cancel) {
+							return result as RunnerEmitResult<TEvent>;
+						}
 					}
-				}
 
-				if (event.type === "session.compacting" && handlerResult) {
-					result = handlerResult as SessionCompactingResult;
-				}
-
-				if (event.type === "session_stop" && handlerResult) {
-					const stopResult = handlerResult as SessionStopEventResult;
-					if (stopResult.decision === "block") {
-						return stopResult as RunnerEmitResult<TEvent>;
+					if (event.type === "session.compacting" && handlerResult) {
+						result = handlerResult as SessionCompactingResult;
 					}
-					const continuationContext = stopResult.additionalContext || stopResult.reason;
-					if (stopResult.continue === true && continuationContext) {
-						if (result) {
-							const prior = result as SessionStopEventResult;
-							result = {
-								continue: true,
-								additionalContext: `${prior.additionalContext || prior.reason}\n\n${continuationContext}`,
-							};
-						} else {
-							result = stopResult;
+
+					if (event.type === "session_stop" && handlerResult) {
+						const stopResult = handlerResult as SessionStopEventResult;
+						if (stopResult.decision === "block") {
+							return stopResult as RunnerEmitResult<TEvent>;
+						}
+						const continuationContext = stopResult.additionalContext || stopResult.reason;
+						if (stopResult.continue === true && continuationContext) {
+							if (result) {
+								const prior = result as SessionStopEventResult;
+								result = {
+									continue: true,
+									additionalContext: `${prior.additionalContext || prior.reason}\n\n${continuationContext}`,
+								};
+							} else {
+								result = stopResult;
+							}
 						}
 					}
 				}
+				turn?.release();
 			}
+		} finally {
+			if (turns) for (const turn of turns.values()) turn.release();
 		}
 
 		// Handlers for these events export session-scoped environment (a session
@@ -1913,6 +1930,37 @@ export class ExtensionRunner {
 		}
 
 		return result as RunnerEmitResult<TEvent>;
+	}
+
+	/**
+	 * Queue an event behind each subscribed extension's earlier events before
+	 * the first await, so every extension handles events in emission order even
+	 * while an earlier-loaded extension is still handling one: otherwise a slow
+	 * `tool_execution_start` handler lets the call's `tool_execution_end` reach
+	 * later extensions first (#17680). Load order within one event is kept.
+	 *
+	 * Emits made inside a running handler (open handler scope) skip the queue:
+	 * that handler may be awaiting them (`ctx.newSession()` from `agent_end`),
+	 * and queueing them behind it, or behind a later extension still waiting
+	 * for it, would deadlock until the handler timeout.
+	 */
+	#reserveDeliveryTurns(extensions: readonly Extension[], type: string): Map<Extension, DeliveryTurn> | undefined {
+		const scope = this.#toolRegistrationScope.getStore();
+		if (scope && !scope.closed) return undefined;
+		let turns: Map<Extension, DeliveryTurn> | undefined;
+		for (const ext of extensions) {
+			if (!ext.handlers.get(type)?.length) continue;
+			const ready = this.#deliveryTails.get(ext);
+			const { promise, resolve } = Promise.withResolvers<void>();
+			this.#deliveryTails.set(ext, promise);
+			const release = () => {
+				resolve();
+				if (this.#deliveryTails.get(ext) === promise) this.#deliveryTails.delete(ext);
+			};
+			turns ??= new Map();
+			turns.set(ext, { ready, release });
+		}
+		return turns;
 	}
 
 	/**
