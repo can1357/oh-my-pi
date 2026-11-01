@@ -334,6 +334,35 @@ if (run.exitCode !== 0) throw new Error(${JSON.stringify(`${name}-probe is not o
 		expect(result.shell).toEqual([{ output: "convtool ran\n", exitCode: 0 }]);
 	});
 
+	test("a normal session's shell runs a command from a plugin that ships only commands", async () => {
+		// No extension, no tool: only the session's ambient selection can put this plugin's directory on PATH.
+		const pluginDir = path.join(pluginsDir, "node_modules", "cmdonly");
+		await writeBinPlugin(pluginDir, "cmdonly", {});
+		await fs.rm(path.join(pluginDir, "ext.js"));
+		await fs.rm(path.join(pluginDir, "tool.js"));
+		await declare(["cmdonly"]);
+
+		const result = await run({ route: "sdk", commands: ["cmdonly-probe"] });
+
+		expect(result.shell).toEqual([{ output: "cmdonly ran\n", exitCode: 0 }]);
+	});
+
+	test("a normal session after an explicit-only session in the same process runs its plugin's command in its shell", async () => {
+		// The explicit-only session loads none of this plugin's code, and its shell runs a command
+		// before the normal session puts the plugin's directory on PATH.
+		await writeBinPlugin(path.join(pluginsDir, "node_modules", "secondsession"), "secondsession", {
+			extensions: ["ext.js"],
+		});
+		await declare(["secondsession"]);
+		const explicit = path.join(root, "explicit.js");
+		await Bun.write(explicit, "export default function () {}\n");
+
+		const result = await run({ route: "secondSession", explicitPath: explicit, commands: ["secondsession-probe"] });
+
+		expect(result.probes).toEqual({ secondsession: "secondsession ran\n" });
+		expect(result.shell).toEqual([{ output: "secondsession ran\n", exitCode: 0 }]);
+	});
+
 	test("a tool in a plugin's conventional `tools/` directory gets the plugin's command when `tools/` links out of the package", async () => {
 		// The `tools/` scan names the module under the plugin's installed path; its realpath lies outside the package.
 		const pluginDir = path.join(pluginsDir, "node_modules", "linkedtools");
@@ -369,7 +398,7 @@ if (run.exitCode !== 0) throw new Error(${JSON.stringify(`${name}-probe is not o
 		});
 		await declare(["preload"]);
 
-		// One selector per process, so neither can supply the other's PATH entry.
+		// One selector per process. The selectors put nothing on PATH: the session's import of the preloaded modules does.
 		const extensions = await run({ route: "preloaded", selector: "extensions" });
 		const tools = await run({ route: "preloaded", selector: "tools" });
 
@@ -379,6 +408,22 @@ if (run.exitCode !== 0) throw new Error(${JSON.stringify(`${name}-probe is not o
 		expect(tools.selected).toEqual([path.join(pluginsDir, "node_modules", "preload", "tool.js")]);
 		expect(tools.tools).toContain("preload_probe");
 		expect(tools.probes).toEqual({ preload: "preload ran\n" });
+	});
+
+	test("listing the installed plugins' modules leaves PATH alone", async () => {
+		await writeBinPlugin(path.join(pluginsDir, "node_modules", "listed"), "listed", {
+			extensions: ["ext.js"],
+			tools: "tool.js",
+		});
+		await declare(["listed"]);
+
+		const result = await run({ route: "select" });
+
+		expect(result.selected).toEqual([
+			path.join(pluginsDir, "node_modules", "listed", "ext.js"),
+			path.join(pluginsDir, "node_modules", "listed", "tool.js"),
+		]);
+		expect(result.PATH).toBe(BASE_PATH);
 	});
 
 	test("install validation puts the candidate's directories on PATH before its extension evaluates", async () => {

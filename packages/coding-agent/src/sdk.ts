@@ -130,6 +130,7 @@ import {
 import type { UserWaitTracker } from "./extensibility/extensions/user-wait";
 import { formatExtensionLoadNotifications } from "./extensibility/extensions/load-errors";
 import { partitionStartupExtensions, recordStartupVerdicts } from "./extensibility/extensions/startup-deferral";
+import { prependEnabledPluginBinDirs } from "./extensibility/plugins/loader";
 import {
 	createSkillDescriptionCompressor,
 	openSessionSkillDescriptionStore,
@@ -1107,6 +1108,12 @@ type CliExtensionProviderOptions = ExtensionDiscoveryOptions & {
 	discoverModels?: boolean;
 };
 
+/** Whether a session with these options discovers ambient extensions; `--no-extensions` and trusted allowlists do not. */
+function discoversAmbientExtensions(options: ExtensionDiscoveryOptions): boolean {
+	const roots = options.extensionRoots?.();
+	return !(roots ? roots.mode === "explicit-only" : options.disableExtensionDiscovery);
+}
+
 /**
  * Path-only counterpart of {@link loadSessionExtensions}: the FS-heavy scan
  * without the per-session module load. Subagents reuse the parent's path list
@@ -1121,7 +1128,7 @@ export async function discoverSessionExtensionPaths(
 ): Promise<string[]> {
 	const roots = options.extensionRoots?.();
 	const explicit = roots?.explicit ?? options.additionalExtensionPaths ?? [];
-	const explicitOnly = roots ? roots.mode === "explicit-only" : options.disableExtensionDiscovery;
+	const explicitOnly = !discoversAmbientExtensions(options);
 	const configuredPaths = explicitOnly
 		? [...explicit]
 		: [...explicit, ...(roots?.configured ?? cfgExtensions.get(settings))];
@@ -1153,6 +1160,8 @@ export async function loadSessionExtensions(
 	loadOptions: { deferStartupSafe?: boolean } = {},
 ): Promise<LoadExtensionsResult & { deferredPaths: string[] }> {
 	const paths = await discoverSessionExtensionPaths(options, cwd, settings);
+	// The session's ambient selection: a plugin that ships only commands has them too.
+	if (discoversAmbientExtensions(options)) await prependEnabledPluginBinDirs(cwd);
 	const storage = settings.getStorage();
 	const { eager, deferred } =
 		loadOptions.deferStartupSafe && storage
@@ -2867,6 +2876,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			extensionPaths = await logger.time("discoverSessionExtensionPaths", () =>
 				discoverSessionExtensionPaths(options, cwd, settings),
 			);
+			// The session's ambient selection: a plugin that ships only commands has them too.
+			if (discoversAmbientExtensions(options)) await prependEnabledPluginBinDirs(cwd);
 			extensionsResult = await logger.time("loadExtensions", loadExtensions, extensionPaths, cwd, eventBus);
 			for (const { path, error } of extensionsResult.errors) {
 				logger.error("Failed to load extension", { path, error });

@@ -218,7 +218,9 @@ export class CustomToolLoader {
 }
 
 /**
- * Load all tools from configuration.
+ * Load all tools from configuration. The `bin` directories of the enabled
+ * plugins that own any of the tool modules go on PATH first, so a plugin's tool
+ * finds its commands when it evaluates.
  * @param pathsWithSources - Array of tool paths with optional source metadata
  * @param cwd - Current working directory for resolving relative paths
  * @param builtInToolNames - Names of built-in tools to check for conflicts
@@ -234,6 +236,10 @@ export async function loadCustomTools(
 		reject?(reason: string): Promise<AgentToolResult<unknown> | undefined>;
 	}) => void,
 ) {
+	await prependBinDirsOfOwningPlugins(
+		cwd,
+		pathsWithSources.map(({ path: toolPath }) => resolvePath(toolPath, cwd)),
+	);
 	const loader = new CustomToolLoader(cwd, builtInToolNames, pushPendingAction);
 	await loader.load(pathsWithSources);
 	return {
@@ -290,15 +296,8 @@ export async function discoverCustomToolPaths(
 			level: tool.level,
 		});
 	}
-	// An installed plugin's conventional `tools/` modules arrive through this scan,
-	// not its manifest: their plugins' `bin` directories go on PATH here.
-	await prependBinDirsOfOwningPlugins(
-		cwd,
-		discoveredTools.items.map(tool => tool.path),
-	);
 
-	// 2. Plugin tools: ~/.omp/plugins/node_modules/*/. Selecting them puts the
-	// plugins' `bin` directories on PATH before any tool module is imported.
+	// 2. Plugin tools: ~/.omp/plugins/node_modules/*/
 	for (const pluginPath of await getAllPluginToolPaths(cwd)) {
 		addPath(pluginPath, { provider: "plugin", providerName: "Plugin", level: "user" });
 	}

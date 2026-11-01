@@ -32,11 +32,13 @@ export interface RunnerScenario {
 		| "sdk"
 		| "acp"
 		| "preloaded"
+		| "select"
 		| "explicitSession"
+		| "secondSession"
 		| "subagent"
 		| "isolation";
 	cwd: string;
-	/** `explicitSession`: the one extension file to load. */
+	/** `explicitSession`, `secondSession` (the first session): the one extension file to load. */
 	explicitPath?: string;
 	/** `install`: the package directory `bun install` would place under node_modules. */
 	installSource?: string;
@@ -45,7 +47,7 @@ export interface RunnerScenario {
 	selector?: "extensions" | "tools";
 	/** `subagent`: the child session's cwd. */
 	childCwd?: string;
-	/** `sdk`, `explicitSession`, `subagent` (the child): commands to run, in order, through the session's own shell. `isolation`: through `/bin/sh` in this process, after the inner case. */
+	/** `sdk`, `explicitSession`, `secondSession` (the second session), `subagent` (the child): commands to run, in order, through the session's own shell. `isolation`: through `/bin/sh` in this process, after the inner case. */
 	commands?: string[];
 	/** `isolation`: the case this process runs through `runCase`, in its own cwd. */
 	inner?: Omit<RunnerScenario, "cwd">;
@@ -176,6 +178,15 @@ async function runRoute(scenario: RunnerScenario): Promise<RunnerResult> {
 			result.errors = extensionsResult.errors.map(error => error.error);
 			break;
 		}
+		case "select": {
+			// A caller that only lists the installed plugins' modules, as a plugin
+			// catalog does, and imports none of them.
+			result.selected = [
+				...(await getAllPluginExtensionPaths(scenario.cwd)),
+				...(await getAllPluginToolPaths(scenario.cwd)),
+			];
+			break;
+		}
 		case "explicitSession": {
 			// `omp --no-extensions -e <file>`.
 			const { session, extensionsResult } = await createSession(scenario.cwd, {
@@ -189,6 +200,21 @@ async function runRoute(scenario: RunnerScenario): Promise<RunnerResult> {
 				.filter(extensionPath => !extensionPath.startsWith("<inline"));
 			result.errors = extensionsResult.errors.map(error => error.error);
 			result.tools = session.getAllToolNames();
+			result.shell = await runInSessionShell(session, scenario.commands);
+			break;
+		}
+		case "secondSession": {
+			// Two sessions in turn in one process, as an SDK host runs them: an
+			// explicit-only session whose shell runs a command first, then a normal
+			// session in the same cwd.
+			const first = await createSession(scenario.cwd, {
+				disableExtensionDiscovery: true,
+				additionalExtensionPaths: [scenario.explicitPath ?? ""],
+			});
+			await runInSessionShell(first.session, ["true"]);
+			await first.session.dispose();
+			const { session } = await createSession(scenario.cwd);
+			sessions.push(session);
 			result.shell = await runInSessionShell(session, scenario.commands);
 			break;
 		}
