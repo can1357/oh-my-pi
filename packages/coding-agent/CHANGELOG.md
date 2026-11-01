@@ -19,6 +19,7 @@
 
 ### Fixed
 
+- Fixed `OTEL_*` variables defined in omp's own `.env` files (agent dir, config root, home) leaking into the programs omp runs: shell and PTY commands, subagent shells, LSP/DAP/MCP servers, plugin installers and worker processes no longer inherit omp's exporter endpoint, auth headers or content-capture setting. Variables exported in your shell still pass through. ([#17685](https://github.com/can1357/oh-my-pi/pull/17685) by [@Flare576](https://github.com/Flare576))
 - Fixed a `!` or `$` command run while the agent works floating over the composer in Tern, where expanding its output covered the conversation; it now sits at the end of the conversation
 - Fixed `out://` replies sent from an eval cell (`tool.write` to `out://`, or `tool.bash` with `> out://`) never appearing even though the write reported "Shown to the user."; they now draw as replies after the eval card, and are refused where nothing would show them (a backgrounded cell, a browser tab script)
 - Fixed a `write` to `out://` (such as `out://baselines.md`) drawing as a Write card with line numbers instead of a reply streaming as prose

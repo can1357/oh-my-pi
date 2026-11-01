@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import * as path from "node:path";
 import type { ProgressInfo } from "@huggingface/transformers";
 import {
+	childProcessEnv,
 	ensureRuntimeInstalled,
 	getTinyModelsCacheDir,
 	installRuntimeModuleResolver,
@@ -210,7 +211,7 @@ async function installOnnxRuntimeCudaProviders(packageDir: string, runtimeDir: s
 
 	const proc = Bun.spawn([process.execPath, script], {
 		cwd: runtimeDir,
-		env: { ...Bun.env, BUN_BE_BUN: "1", ONNXRUNTIME_NODE_INSTALL: ONNX_RUNTIME_CUDA_INSTALL },
+		env: childProcessEnv({ BUN_BE_BUN: "1", ONNXRUNTIME_NODE_INSTALL: ONNX_RUNTIME_CUDA_INSTALL }),
 		stdout: "pipe",
 		stderr: "pipe",
 	});

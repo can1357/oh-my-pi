@@ -1,6 +1,6 @@
 import * as path from "node:path";
 import * as timers from "node:timers/promises";
-import { logger, ptree, untilAborted } from "@oh-my-pi/pi-utils";
+import { childProcessEnv, logger, ptree, untilAborted } from "@oh-my-pi/pi-utils";
 import { NON_INTERACTIVE_ENV } from "../exec/non-interactive-env";
 import { DapClient } from "./client";
 import type {
@@ -1378,11 +1378,7 @@ export class DapSessionManager {
 			const proc = ptree.spawn(args.args, {
 				cwd: path.resolve(session.cwd, args.cwd ?? "."),
 				stdin: "pipe",
-				env: {
-					...Bun.env,
-					...NON_INTERACTIVE_ENV,
-					...env,
-				},
+				env: childProcessEnv({ ...NON_INTERACTIVE_ENV, ...env }),
 				detached: true,
 			});
 			// Consume the child's stdout — ptree pipes it but drains only stderr,

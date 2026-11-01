@@ -1,5 +1,5 @@
 import * as fs from "node:fs/promises";
-import { isEnoent, logger, ptree } from "@oh-my-pi/pi-utils";
+import { childProcessEnv, isEnoent, logger, ptree } from "@oh-my-pi/pi-utils";
 import { NON_INTERACTIVE_ENV } from "../exec/non-interactive-env";
 import { encodeMessageFrame, MessageFramer, MessageFramingError } from "../jsonrpc/message-framing";
 import { ToolAbortError } from "../tools/tool-errors";
@@ -114,10 +114,7 @@ export class DapClient {
 		// so the adapter process tree has no controlling terminal. Without this,
 		// debuggee children can reach /dev/tty and trigger SIGTTIN, suspending
 		// the parent harness under shell job control.
-		const env = {
-			...Bun.env,
-			...NON_INTERACTIVE_ENV,
-		};
+		const env = childProcessEnv(NON_INTERACTIVE_ENV);
 		const proc = ptree.spawn([adapter.resolvedCommand, ...adapter.args], {
 			cwd,
 			stdin: "pipe",
@@ -183,10 +180,7 @@ export class DapClient {
 		const proc = ptree.spawn([adapter.resolvedCommand, ...args], {
 			cwd,
 			stdin: "pipe",
-			env: {
-				...Bun.env,
-				...NON_INTERACTIVE_ENV,
-			},
+			env: childProcessEnv(NON_INTERACTIVE_ENV),
 			detached: true,
 		});
 
@@ -222,10 +216,7 @@ export class DapClient {
 	 * macOS/other: the adapter dials into our TCP listener via --client-addr
 	 */
 	static async #spawnSocket({ adapter, cwd, socketReadyTimeoutMs }: DapSpawnOptions): Promise<DapClient> {
-		const env = {
-			...Bun.env,
-			...NON_INTERACTIVE_ENV,
-		};
+		const env = childProcessEnv(NON_INTERACTIVE_ENV);
 		const timeoutMs = socketReadyTimeoutMs ?? SOCKET_READY_TIMEOUT_MS;
 		const isLinux = process.platform === "linux";
 

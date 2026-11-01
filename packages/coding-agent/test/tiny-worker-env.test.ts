@@ -1,4 +1,6 @@
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { ipcEndpoint } from "@oh-my-pi/pi-natives";
 import { sharedWorkerLogPath } from "@oh-my-pi/pi-coding-agent/subprocess/shared-worker";
@@ -25,6 +27,49 @@ describe("workerEnvFromParent", () => {
 			else process.env.GIT_DIR = previous;
 		}
 	});
+});
+
+describe("workerEnvFromParent and OTEL_* from omp's own .env", () => {
+	it.skipIf(process.platform === "win32")(
+		"drops values omp loaded from its agent .env and keeps the rest",
+		async () => {
+			const home = fs.mkdtempSync(path.join(os.tmpdir(), "omp-worker-env-"));
+			try {
+				const agentDir = path.join(home, "agent");
+				fs.mkdirSync(agentDir);
+				fs.writeFileSync(path.join(agentDir, ".env"), "OTEL_PROBE_AGENT=agent\nOTEL_PROBE_SHELL=agent-file\n");
+				const modulePath = path.join(import.meta.dir, "..", "src", "subprocess", "worker-client.ts");
+				const script = [
+					`import { workerEnvFromParent } from ${JSON.stringify(modulePath)};`,
+					"const env = workerEnvFromParent({ OTEL_PROBE_EXPLICIT: 'overlay' });",
+					"process.stdout.write(JSON.stringify([env.OTEL_PROBE_AGENT ?? null, env.OTEL_PROBE_SHELL ?? null, env.OTEL_PROBE_EXPLICIT ?? null, Bun.env.OTEL_PROBE_AGENT ?? null]));",
+				].join("\n");
+				const proc = Bun.spawn([process.execPath, "--no-install", "--eval", script], {
+					cwd: home,
+					env: {
+						...process.env,
+						HOME: home,
+						USERPROFILE: home,
+						PI_CODING_AGENT_DIR: agentDir,
+						PI_PROFILE: undefined,
+						OTEL_PROBE_AGENT: undefined,
+						OTEL_PROBE_SHELL: "from-shell",
+					},
+					stdout: "pipe",
+					stderr: "pipe",
+				});
+				const [stdout, stderr, exitCode] = await Promise.all([
+					new Response(proc.stdout).text(),
+					new Response(proc.stderr).text(),
+					proc.exited,
+				]);
+				expect(exitCode, stderr).toBe(0);
+				expect(JSON.parse(stdout)).toEqual([null, "from-shell", "overlay", "agent"]);
+			} finally {
+				fs.rmSync(home, { force: true, recursive: true });
+			}
+		},
+	);
 });
 
 describe("tinyWorkerEnvOverlay", () => {

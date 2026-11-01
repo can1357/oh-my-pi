@@ -1,6 +1,14 @@
 import * as os from "node:os";
 import * as path from "node:path";
-import { isEnoent, logger, postmortem, ptree, stableStringifyJson, untilAborted } from "@oh-my-pi/pi-utils";
+import {
+	childProcessEnv,
+	isEnoent,
+	logger,
+	postmortem,
+	ptree,
+	stableStringifyJson,
+	untilAborted,
+} from "@oh-my-pi/pi-utils";
 import { encodeMessageFrame, MessageFramer } from "../jsonrpc/message-framing";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { resolveSyscallTarget } from "../tools/path-utils";
@@ -1360,7 +1368,7 @@ export async function getOrCreateClient(
 		proc ??= ptree.spawn([command, ...args], {
 			cwd,
 			stdin: "pipe",
-			env: env ? { ...Bun.env, ...env } : undefined,
+			env: env ? childProcessEnv(env) : undefined,
 		});
 
 		const projectLoad = createProjectLoad();

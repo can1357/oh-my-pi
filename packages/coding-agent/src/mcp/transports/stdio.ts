@@ -7,7 +7,7 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getProjectDir, readJsonl } from "@oh-my-pi/pi-utils";
+import { childProcessEnv, getProjectDir, readJsonl } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
 import { hostHasInheritableConsole } from "../../eval/py/spawn-options";
 import type {
@@ -590,10 +590,7 @@ export class StdioTransport implements MCPTransport {
 		signal?.throwIfAborted();
 		if (this.#connected) return;
 
-		const env = {
-			...Bun.env,
-			...this.config.env,
-		};
+		const env = childProcessEnv(this.config.env);
 		const cwd = this.config.cwd ?? getProjectDir();
 		const spawnCommand = await resolveStdioSpawnCommand(this.config, {
 			cwd,
