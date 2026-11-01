@@ -19,6 +19,7 @@
 
 ### Fixed
 
+- Fixed text overlapping and stale rows freezing on screen while streaming responses in Windows Terminal and other ConPTY-class hosts: transcript rows no longer paint into the terminal's final column, which could advance the grid a row early and stack new text over old ([#9783](https://github.com/can1357/oh-my-pi/issues/9783))
 - Fixed collapsed AST Grep showing no matches when its first file or folder was taller than the preview, and its `… N more` row counting hidden folders instead of hidden matches ([#17608](https://github.com/can1357/oh-my-pi/pull/17608) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Fixed collapsed AST Edit overflowing its preview when the first file's diff was long ([#17608](https://github.com/can1357/oh-my-pi/pull/17608) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Fixed search and diagnostic file paths in Tern dropping the leading `/` of absolute paths and a folder's own `(…)` ending, and AST Edit diffs in Tern losing highlighting to the file's `#tag`; a file name ending in lowercase or other-length `#…` text keeps it ([#17608](https://github.com/can1357/oh-my-pi/pull/17608) by [@JustasMasiulis](https://github.com/JustasMasiulis))

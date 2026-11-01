@@ -4119,6 +4119,17 @@ export class TUI extends Container {
 
 	#prepareLine(raw: string, width: number, widthEpoch: number, imageProtocol: ImageProtocol | null): PreparedLine {
 		const safeWidth = Number.isFinite(width) ? Math.max(1, Math.trunc(width)) : 1;
+		// ConPTY-class hosts can materialize a pending wrap before a following
+		// cursor-addressing sequence even while DECAWM is disabled (#9783): a row
+		// written to the final column can advance the grid one physical row early,
+		// and `\n`-chain retirement compounds that drift per row — new paint lands
+		// over old rows and the damage persists into scrollback until a resize
+		// rebuild. Prevention is total when no prepared row ever reaches the final
+		// column, so on those hosts every row is fitted to width - 1. The stored
+		// PreparedLine.width stays PHYSICAL: CUP coordinates, rewrite comparison,
+		// and the memo key are unaffected; the classification flag is immutable
+		// post-construction, so the cap can never stale-cache.
+		const capWidth = safeWidth > 1 && this.terminal.hostOwnsGridOnResize === true ? safeWidth - 1 : safeWidth;
 		const maxSourceLength = Math.min(
 			LINE_FIT_MAX_SOURCE_CODE_UNITS,
 			Math.max(LINE_FIT_MIN_SOURCE_CODE_UNITS, safeWidth * LINE_FIT_SOURCE_WIDTH_MULTIPLIER),
@@ -4176,8 +4187,8 @@ export class TUI extends Container {
 		// or remove ANSI/image markers, and such a row was already non-ASCII, so
 		// the source classification remains exact when normalization allocates.
 		let line = normalized;
-		if ((classification.asciiWidth ?? visibleWidth(normalized)) > width) {
-			line = truncateToWidth(normalized, width, Ellipsis.Omit);
+		if ((classification.asciiWidth ?? visibleWidth(normalized)) > capWidth) {
+			line = truncateToWidth(normalized, capWidth, Ellipsis.Omit);
 			classification = this.#classifyLine(line, safeWidth);
 		}
 		return {
