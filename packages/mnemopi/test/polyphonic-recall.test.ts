@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { type BeamMemoryState, initBeam } from "@oh-my-pi/pi-mnemopi/core/beam";
 import { PolyphonicRecallEngine, polyphonicRecall } from "@oh-my-pi/pi-mnemopi/core/polyphonic-recall";
-import { closeQuietly, openDatabase } from "@oh-my-pi/pi-mnemopi/db";
+import { closeQuietly, onDatabaseClose, openDatabase } from "@oh-my-pi/pi-mnemopi/db";
 import { currentLoopPhase } from "@oh-my-pi/pi-utils";
 
 function makeBeam(): BeamMemoryState {
@@ -343,19 +343,57 @@ describe("PolyphonicRecallEngine", () => {
 		const beam = makeBeam();
 		const engine = new PolyphonicRecallEngine({ db: beam.db, sessionId: beam.sessionId, channelId: beam.channelId });
 		insertWorking(beam, "wm-direct-close", "Direct close test memory", 0.9);
+		const embeddingJson = JSON.stringify([1, 0]);
 		beam.db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, 'test')", [
 			"wm-direct-close",
-			JSON.stringify([1, 0]),
+			embeddingJson,
 		]);
 
-		// Populate the embedding cache for this db instance
-		const hits = engine.vectorVoice([1, 0]).map(h => h.memoryId);
-		expect(hits).toContain("wm-direct-close");
+		let directCloseCount = 0;
+		onDatabaseClose(beam.db, () => {
+			directCloseCount += 1;
+		});
 
-		// Direct close without closeQuietly
-		beam.db.close();
+		// Cold call parses JSON and warms the embedding cache for this db instance
+		const parseSpy = spyOn(JSON, "parse");
+		try {
+			parseSpy.mockClear();
+			const hits = engine.vectorVoice([1, 0]).map(h => h.memoryId);
+			expect(hits).toContain("wm-direct-close");
+			expect(parseSpy).toHaveBeenCalledTimes(1);
 
-		// Calling close again or closeQuietly is safe and callbacks are already drained
-		expect(() => closeQuietly(beam.db)).not.toThrow();
+			// Warm call should hit cache without parsing JSON again
+			parseSpy.mockClear();
+			const warmHits = engine.vectorVoice([1, 0]).map(h => h.memoryId);
+			expect(warmHits).toContain("wm-direct-close");
+			expect(parseSpy).toHaveBeenCalledTimes(0);
+
+			// Direct close without closeQuietly
+			beam.db.close();
+			expect(directCloseCount).toBe(1);
+
+			// Calling close again or closeQuietly is safe and callbacks are already drained
+			expect(() => closeQuietly(beam.db)).not.toThrow();
+			expect(directCloseCount).toBe(1);
+
+			// Stub db.query on the closed database object to return the same row
+			beam.db.query = (() => ({
+				all: () => [
+					{
+						memory_id: "wm-direct-close",
+						embedding_json: embeddingJson,
+						embedding_tier: "working",
+					},
+				],
+			})) as unknown as typeof beam.db.query;
+
+			// Because db.close() cleared the DB-scoped embedding cache, vectorVoice must parse JSON again
+			parseSpy.mockClear();
+			const postCloseHits = engine.vectorVoice([1, 0]).map(h => h.memoryId);
+			expect(postCloseHits).toContain("wm-direct-close");
+			expect(parseSpy).toHaveBeenCalledTimes(1);
+		} finally {
+			parseSpy.mockRestore();
+		}
 	});
 });
