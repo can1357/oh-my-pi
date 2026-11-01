@@ -813,9 +813,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			// workspace, for work that was in fact captured: hand back what the
 			// release wrote.
 			await releasePromise;
-			const released = await reportingFinalCapture(
-				rememberAgentArtifacts({ ...result, ...(releasedCapture ?? {}) }),
-			);
+			const released = await reportingFinalCapture(rememberAgentArtifacts({ ...result, ...releasedCapture }));
 			if (releaseCaptureError === undefined) return released;
 			// The workspace is kept by the locked capture that refused; name it,
 			// because it holds the only copy of what could not be captured.
