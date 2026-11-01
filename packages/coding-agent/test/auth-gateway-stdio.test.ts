@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { selectorCandidates } from "@oh-my-pi/pi-coding-agent/cli/auth-gateway-stdio";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -76,5 +77,28 @@ describe("auth-gateway stdio model selectors", () => {
 			getAvailable: (kind = "chat") => (kind === "all" ? [runner, mini] : [mini]),
 		};
 		expect(selectorCandidates(mini.id, Settings.isolated({}), registryWithRunner)).toEqual([mini]);
+	});
+
+	it("keeps a known provider's prefix locked, so `proxy/foo` never resolves to another provider's `proxy/foo-latest`", () => {
+		const routed = buildModel({
+			id: "proxy/foo-latest",
+			name: "Foo",
+			api: "openai-completions",
+			provider: "custom-gateway",
+			baseUrl: "https://gateway.example/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 8_192,
+		});
+		// `proxy` is a configured discovery provider whose catalog is still empty.
+		const proxyRegistry = {
+			getAll: () => [routed],
+			getAvailable: () => [routed],
+			hasProvider: (provider: string) => provider === "proxy",
+		};
+		expect(selectorCandidates("proxy/foo", Settings.isolated({}), proxyRegistry)).toEqual([]);
+		expect(selectorCandidates("proxy/foo-latest", Settings.isolated({}), proxyRegistry)).toEqual([routed]);
 	});
 });
