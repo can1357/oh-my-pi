@@ -1160,4 +1160,45 @@ describe("PolyphonicRecallEngine", () => {
 			closeQuietly(beam.db);
 		}
 	});
+
+	it("excludes grammatical tenses (e.g. 过去式) from TR ability and routes what is 过去式 to IE", () => {
+		const beam = makeBeam();
+		try {
+			beam.db.run(
+				`INSERT INTO memoria_facts
+					(session_id, message_idx, fact_type, key, value, context_snippet, importance, source_memory_id)
+					VALUES
+					(?, 0, 'entity', '过去式', 'past tense grammatical form', 'grammar reference', 0.95, 'wm-tense')`,
+				[beam.sessionId],
+			);
+			const result = memoriaRetrieve(beam, "what is 过去式", null, 10);
+			expect(result.ability).toBe("IE");
+			expect(result.results.length).toBeGreaterThan(0);
+			expect((result.results as Array<{ key?: string }>)[0]?.key).toBe("过去式");
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
+
+	it("retains target in token budget for long queries with non-ASCII terms and retrieves both Москва and target facts", () => {
+		const beam = makeBeam();
+		try {
+			beam.db.run(
+				`INSERT INTO memoria_facts
+					(session_id, message_idx, fact_type, key, value, context_snippet, importance, source_memory_id)
+					VALUES
+					(?, 0, 'entity', 'target', 'prod-cluster', 'deployment target specification', 0.9, 'wm-target'),
+					(?, 0, 'entity', 'Москва', 'capital city', 'russian office deployment', 0.9, 'wm-moscow')`,
+				[beam.sessionId, beam.sessionId],
+			);
+			const query = "what is москва project deployment status owner version target";
+			const result = memoriaRetrieve(beam, query, "IE", 10);
+			expect(result.ability).toBe("IE");
+			const keys = (result.results as Array<{ key?: string }>).map(r => r.key);
+			expect(keys).toContain("Москва");
+			expect(keys).toContain("target");
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
 });

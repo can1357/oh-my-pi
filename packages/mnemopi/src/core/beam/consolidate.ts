@@ -331,9 +331,7 @@ function makeQuestionTokenGroups(query: string): {
 			}
 			pushUnique(shingles, token);
 		} else {
-			for (const variant of unicodeCaseVariants(rawToken)) {
-				pushUnique(primary, variant);
-			}
+			pushUnique(primary, token);
 		}
 	}
 
@@ -975,11 +973,14 @@ function factRetrieve(beam: BeamMemoryState, query: string, topK: number): Memor
 	const clauses: string[] = [];
 	const params: SQLQueryBindings[] = [sourceSession(beam)];
 	for (const token of tokens) {
-		clauses.push(
-			"(lower(key) LIKE ? ESCAPE '\\' OR lower(value) LIKE ? ESCAPE '\\' OR lower(context_snippet) LIKE ? ESCAPE '\\')",
-		);
-		const like = `%${escapeLike(token)}%`;
-		params.push(like, like, like);
+		const variants = /^[\x00-\x7f]*$/.test(token) ? [token] : unicodeCaseVariants(token);
+		const subClauses: string[] = [];
+		for (const v of variants) {
+			subClauses.push("(key LIKE ? ESCAPE '\\' OR value LIKE ? ESCAPE '\\' OR context_snippet LIKE ? ESCAPE '\\')");
+			const like = `%${escapeLike(v)}%`;
+			params.push(like, like, like);
+		}
+		clauses.push(subClauses.length === 1 ? (subClauses[0] as string) : `(${subClauses.join(" OR ")})`);
 	}
 	const where = clauses.length === 0 ? "1=1" : clauses.join(" OR ");
 	const trimmed = query.trim().toLowerCase();
@@ -996,11 +997,19 @@ function factRetrieve(beam: BeamMemoryState, query: string, topK: number): Memor
 	for (const p of primary) {
 		const w = codePointLength(p);
 		const exactBonus = exactPrimarySet.has(p) ? w * 2 : 0;
-		const like = `%${escapeLike(p)}%`;
+		const variants = /^[\x00-\x7f]*$/.test(p) ? [p] : unicodeCaseVariants(p);
+		const inPlaceholders = variants.map(() => "?").join(", ");
+		const likePairs = variants.flatMap(() => ["key LIKE ? ESCAPE '\\'", "value LIKE ? ESCAPE '\\'"]).join(" OR ");
+		const contextLikes = variants.map(() => "context_snippet LIKE ? ESCAPE '\\'").join(" OR ");
 		scoreExprs.push(
-			`(CASE WHEN lower(key) = ? OR lower(value) = ? THEN ${w * 8 + exactBonus} WHEN lower(key) LIKE ? ESCAPE '\\' OR lower(value) LIKE ? ESCAPE '\\' THEN ${w * 4 + exactBonus} WHEN lower(context_snippet) LIKE ? ESCAPE '\\' THEN ${w} ELSE 0 END)`,
+			`(CASE WHEN key IN (${inPlaceholders}) OR value IN (${inPlaceholders}) THEN ${w * 8 + exactBonus} WHEN ${likePairs} THEN ${w * 4 + exactBonus} WHEN ${contextLikes} THEN ${w} ELSE 0 END)`,
 		);
-		orderParams.push(p, p, like, like, like);
+		orderParams.push(
+			...variants,
+			...variants,
+			...variants.flatMap(v => [`%${escapeLike(v)}%`, `%${escapeLike(v)}%`]),
+			...variants.map(v => `%${escapeLike(v)}%`),
+		);
 	}
 	const exactMatchClause = scoreExprs.length > 0 ? `(${scoreExprs.join(" + ")}) DESC, ` : "";
 	const allParams = [...params, ...orderParams, topK];
@@ -1019,9 +1028,14 @@ function timelineRetrieve(beam: BeamMemoryState, query: string, topK: number): M
 	const clauses: string[] = [];
 	const params: SQLQueryBindings[] = [sourceSession(beam)];
 	for (const token of tokens) {
-		clauses.push("(lower(description) LIKE ? ESCAPE '\\' OR date LIKE ? ESCAPE '\\')");
-		const like = `%${escapeLike(token)}%`;
-		params.push(like, like);
+		const variants = /^[\x00-\x7f]*$/.test(token) ? [token] : unicodeCaseVariants(token);
+		const subClauses: string[] = [];
+		for (const v of variants) {
+			subClauses.push("(description LIKE ? ESCAPE '\\' OR date LIKE ? ESCAPE '\\')");
+			const like = `%${escapeLike(v)}%`;
+			params.push(like, like);
+		}
+		clauses.push(subClauses.length === 1 ? (subClauses[0] as string) : `(${subClauses.join(" OR ")})`);
 	}
 	const where = clauses.length === 0 ? "1=1" : clauses.join(" OR ");
 	const trimmed = query.trim().toLowerCase();
@@ -1076,11 +1090,12 @@ function timelineRetrieve(beam: BeamMemoryState, query: string, topK: number): M
 		const isGeneric = genericTimelineWords.has(lowerP);
 		const w = isGeneric ? 1 : codePointLength(p);
 		const exactBonus = exactPrimarySet.has(p) && !isGeneric ? w * 2 : 0;
-		const like = `%${escapeLike(p)}%`;
-		scoreExprs.push(
-			`(CASE WHEN lower(description) LIKE ? ESCAPE '\\' OR date LIKE ? ESCAPE '\\' THEN ${w * 4 + exactBonus} ELSE 0 END)`,
-		);
-		orderParams.push(like, like);
+		const variants = /^[\x00-\x7f]*$/.test(p) ? [p] : unicodeCaseVariants(p);
+		const descLikes = variants
+			.flatMap(() => ["description LIKE ? ESCAPE '\\'", "date LIKE ? ESCAPE '\\'"])
+			.join(" OR ");
+		scoreExprs.push(`(CASE WHEN ${descLikes} THEN ${w * 4 + exactBonus} ELSE 0 END)`);
+		orderParams.push(...variants.flatMap(v => [`%${escapeLike(v)}%`, `%${escapeLike(v)}%`]));
 	}
 	const rankClause = scoreExprs.length > 0 ? `(${scoreExprs.join(" + ")}) DESC, ` : "";
 	const allParams = [...params, ...orderParams, topK];
@@ -1099,11 +1114,14 @@ function kgRetrieve(beam: BeamMemoryState, query: string, topK: number): Memoria
 	const clauses: string[] = [];
 	const params: SQLQueryBindings[] = [sourceSession(beam)];
 	for (const token of tokens) {
-		clauses.push(
-			"(lower(subject) LIKE ? ESCAPE '\\' OR lower(predicate) LIKE ? ESCAPE '\\' OR lower(object) LIKE ? ESCAPE '\\')",
-		);
-		const like = `%${escapeLike(token)}%`;
-		params.push(like, like, like);
+		const variants = /^[\x00-\x7f]*$/.test(token) ? [token] : unicodeCaseVariants(token);
+		const subClauses: string[] = [];
+		for (const v of variants) {
+			subClauses.push("(subject LIKE ? ESCAPE '\\' OR predicate LIKE ? ESCAPE '\\' OR object LIKE ? ESCAPE '\\')");
+			const like = `%${escapeLike(v)}%`;
+			params.push(like, like, like);
+		}
+		clauses.push(subClauses.length === 1 ? (subClauses[0] as string) : `(${subClauses.join(" OR ")})`);
 	}
 	const where = clauses.length === 0 ? "1=1" : clauses.join(" OR ");
 	const trimmed = query.trim().toLowerCase();
@@ -1117,11 +1135,19 @@ function kgRetrieve(beam: BeamMemoryState, query: string, topK: number): Memoria
 	for (const p of primary) {
 		const w = codePointLength(p);
 		const exactBonus = exactPrimarySet.has(p) ? w * 2 : 0;
-		const like = `%${escapeLike(p)}%`;
+		const variants = /^[\x00-\x7f]*$/.test(p) ? [p] : unicodeCaseVariants(p);
+		const inPlaceholders = variants.map(() => "?").join(", ");
+		const likeParts = variants
+			.flatMap(() => ["subject LIKE ? ESCAPE '\\'", "predicate LIKE ? ESCAPE '\\'", "object LIKE ? ESCAPE '\\'"])
+			.join(" OR ");
 		scoreExprs.push(
-			`(CASE WHEN lower(subject) = ? OR lower(object) = ? THEN ${w * 8 + exactBonus} WHEN lower(subject) LIKE ? ESCAPE '\\' OR lower(predicate) LIKE ? ESCAPE '\\' OR lower(object) LIKE ? ESCAPE '\\' THEN ${w * 4 + exactBonus} ELSE 0 END)`,
+			`(CASE WHEN subject IN (${inPlaceholders}) OR object IN (${inPlaceholders}) THEN ${w * 8 + exactBonus} WHEN ${likeParts} THEN ${w * 4 + exactBonus} ELSE 0 END)`,
 		);
-		orderParams.push(p, p, like, like, like);
+		orderParams.push(
+			...variants,
+			...variants,
+			...variants.flatMap(v => [`%${escapeLike(v)}%`, `%${escapeLike(v)}%`, `%${escapeLike(v)}%`]),
+		);
 	}
 	const rankClause = scoreExprs.length > 0 ? `(${scoreExprs.join(" + ")}) DESC, ` : "";
 	const allParams = [...params, ...orderParams, topK];
