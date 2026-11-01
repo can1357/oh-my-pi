@@ -24,7 +24,7 @@ import { type ConfiguredThinkingLevel, concreteThinkingLevel, toReasoningEffort 
 import { fetchWithRetry, USER_AGENT } from "@oh-my-pi/pi-utils";
 
 import type { SearchCitation, SearchResponse, SearchSource } from "../types";
-import type { ModelRegistry } from "../../../config/model-registry";
+import type { SearchModelRegistry } from "./base";
 import { SearchProviderError } from "../../../web/search/types";
 import { formatQuery, GOOGLE_QUERY_SYNTAX, parseSearchQuery, type StructuredQuery } from "../query";
 import type { SearchParams } from "./base";
@@ -78,7 +78,7 @@ export interface GeminiSearchParams extends GeminiToolParams {
 	authStorage: AuthStorage;
 	model: Model<Api>;
 	thinkingLevel?: ConfiguredThinkingLevel;
-	modelRegistry: ModelRegistry;
+	modelRegistry: SearchModelRegistry;
 	sessionId?: string;
 	fetch?: FetchImpl;
 }

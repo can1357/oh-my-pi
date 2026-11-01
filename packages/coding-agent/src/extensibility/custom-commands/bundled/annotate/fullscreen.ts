@@ -3,6 +3,7 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { TUI } from "@oh-my-pi/pi-tui";
 import { AnnotationOverlay } from "@oh-my-pi/pi-tui/overlays/annotation-overlay";
 import type { CustomCommandContext } from "../../../../extensibility/custom-commands/types";
+import type { ReadonlySessionManager } from "../../../../session/session-manager";
 import type {
 	CodeReviewOverlayResult,
 	TextReviewOverlayResult,
@@ -13,8 +14,11 @@ import type { ResolvedReviewTarget } from "../review/target";
 import { getEditorCommand, openEditorOnPath, openInEditor } from "../../../../utils/external-editor";
 import { type AnnotationDraft, openAnnotationDraft } from "./draft-store";
 
-/** What the overlay host reads: the UI surface plus the live session cwd for editor paths. */
-export type AnnotationOverlayContext = Pick<CustomCommandContext, "ui" | "cwd" | "sessionManager">;
+/** What the overlay host reads: the UI surface, the live session cwd for editor paths, and where
+ *  the session keeps its drafts. An extension's context hands this as a command's does. */
+export type AnnotationOverlayContext = Pick<CustomCommandContext, "ui" | "cwd"> & {
+	sessionManager: Pick<ReadonlySessionManager, "getCwd" | "getArtifactsDir" | "getSessionId" | "ensureOnDisk">;
+};
 
 const ANNOTATION_OVERLAY_OPTIONS = {
 	width: "100%",

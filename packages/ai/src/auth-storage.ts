@@ -199,7 +199,8 @@ export class AuthStorage {
 		const usageProviders = options.usageProviderResolver ?? defaultUsageProvider;
 		// Key reports by the effective provider (runtime extension override first), so an
 		// override's `cacheVersion` separates its rows from other processes sharing the store.
-		const usageCache = new UsageCache(store, pool, provider => usage.providerFor(provider));
+		// The service reads it through the answering registration's gate.
+		const usageCache = new UsageCache(store, pool, provider => usage.cacheVersionFor(provider));
 		const blocks = new CredentialBlocks({ store, pool, health: blockHealth, usageCache, strategies });
 		const affinity = new SessionAffinity(store, pool, overrides, this.#restrictions);
 		const usage = new UsageService({

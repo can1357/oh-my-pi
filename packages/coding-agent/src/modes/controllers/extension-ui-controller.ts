@@ -4,6 +4,13 @@ import { Container, Spacer, Text } from "@oh-my-pi/pi-tui";
 import type { CollabUiRequestDraft, CollabUiSelectItem } from "@oh-my-pi/pi-wire";
 import type { CollabHost } from "../../collab/host";
 import { formatKeyHint, formatKeyHints, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+import {
+	bindInputScope,
+	SafeToolRendererComponent,
+	toolRendererScope,
+	unbindInputScope,
+	withInputScope,
+} from "@oh-my-pi/pi-tui/tools/renderer-scope";
 import type {
 	CompactOptions,
 	ExtensionActions,
@@ -16,6 +23,7 @@ import type {
 	ExtensionContextActions,
 	ExtensionCustomOptions,
 	ExtensionError,
+	ExtensionRunner,
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
 	ExtensionUISelectItem,
@@ -26,6 +34,7 @@ import type {
 	SendUserMessageHandler,
 	TerminalInputHandler,
 } from "../../extensibility/extensions";
+import { runExtensionCompact, runExtensionSetModel } from "../../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
 import { cfgExtensionAssistantTextRenderers } from "../../extensibility/settings";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
@@ -136,16 +145,39 @@ export class ExtensionUiController {
 	constructor(private ctx: InteractiveModeContext) {}
 
 	#syncExtensionComposerShapes(): void {
-		this.disposeComposerShapes();
-		for (const definition of this.ctx.session.extensionRunner?.getComposerShapes() ?? []) {
+		const runner = this.ctx.session.extensionRunner;
+		// A shape a session registers is installed, and one its end withdraws is taken out of the
+		// host's registries, so the selector and the drawn prompt show what is registered now. One
+		// subscription per runner, kept while shapes are reinstalled: a reinstall never subscribes
+		// again, so one change is one reinstall.
+		if (runner !== this.#composerShapeRunner) {
+			this.#composerShapeSubscription?.();
+			this.#composerShapeRunner = runner;
+			this.#composerShapeSubscription = runner?.onComposerShapesChanged(() => this.#installComposerShapes());
+		}
+		this.#installComposerShapes();
+	}
+
+	/** Installs the runner's composer shapes in place of the ones installed before. */
+	#installComposerShapes(): void {
+		for (const dispose of this.#composerShapeDisposers.splice(0)) dispose();
+		for (const definition of this.#composerShapeRunner?.getComposerShapes() ?? []) {
 			this.#composerShapeDisposers.push(installExtensionComposerShape(definition));
 		}
 		this.ctx.syncComposerShape();
 		this.ctx.syncExtensionLinks();
 	}
 
-	/** Remove extension-owned composer styles from the process registries. */
+	/** The runner whose composer shape changes this controller follows, and how it stops. */
+	#composerShapeRunner: ExtensionRunner | undefined;
+	#composerShapeSubscription: (() => void) | undefined;
+
+	/** Remove extension-owned composer styles from the process registries, and stop following the
+	 *  runner's changes to them. */
 	disposeComposerShapes(): void {
+		this.#composerShapeSubscription?.();
+		this.#composerShapeSubscription = undefined;
+		this.#composerShapeRunner = undefined;
 		for (const dispose of this.#composerShapeDisposers.splice(0)) dispose();
 	}
 
@@ -260,12 +292,7 @@ export class ExtensionUiController {
 			getActiveTools: () => this.ctx.session.getEnabledToolNames(),
 			getAllTools: () => this.ctx.session.getAllToolInfos(),
 			setActiveTools: toolNames => this.ctx.session.setActiveToolsByName(toolNames),
-			setModel: async model => {
-				const key = await this.ctx.session.modelRegistry.getApiKey(model);
-				if (!key) return false;
-				await this.ctx.session.setModel(model);
-				return true;
-			},
+			setModel: (model, owner) => runExtensionSetModel(this.ctx.session, model, owner),
 			getThinkingLevel: () => this.ctx.session.thinkingLevel,
 			setThinkingLevel: level => this.ctx.session.setThinkingLevel(level),
 			getServiceTiers: () => this.ctx.session.serviceTierByFamily,
@@ -285,7 +312,7 @@ export class ExtensionUiController {
 			openPlanReview: () => this.ctx.openPlanReview({ fromExtension: true }),
 			sessionModes: this.ctx.sessionModes,
 			getContextUsage: () => this.ctx.session.getContextUsage(),
-			compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
+			compact: instructionsOrOptions => runExtensionCompact(this.ctx.session, instructionsOrOptions),
 			getSystemPrompt: () => this.ctx.session.systemPrompt,
 			runEphemeralTurn: args => this.ctx.session.runEphemeralTurn(args),
 			startLive: options => this.ctx.startRemoteLive(options),
@@ -419,7 +446,8 @@ export class ExtensionUiController {
 		}
 
 		const target = placement === "belowEditor" ? this.#hookWidgetsBelow : this.#hookWidgetsAbove;
-		target.set(key, this.#createHookWidget(content));
+		const widget = this.#createHookWidget(key, content);
+		if (widget) target.set(key, widget);
 		this.#rebuildHookWidgets();
 	}
 
@@ -429,7 +457,14 @@ export class ExtensionUiController {
 		widgets.delete(key);
 	}
 
-	#createHookWidget(content: ExtensionWidgetContent): ExtensionUiComponent {
+	/**
+	 * The widget `content` draws. An extension's factory carries the scope its session's code runs
+	 * in (`ToolRendererScope`, set by the `ctx.ui` it was handed): its component is mounted through
+	 * that scope (`SafeToolRendererComponent`), so every call into it runs as the session's work and
+	 * none once the session has gone — the widget then draws nothing, as if it had never been set.
+	 * A factory refused because the session has already gone mounts no widget.
+	 */
+	#createHookWidget(key: string, content: ExtensionWidgetContent): ExtensionUiComponent | undefined {
 		if (Array.isArray(content)) {
 			const container = new Container();
 			for (const line of content.slice(0, MAX_WIDGET_LINES)) {
@@ -443,7 +478,11 @@ export class ExtensionUiController {
 		if (content === undefined) {
 			throw new Error("Widget content missing");
 		}
-		return content(this.ctx.ui, theme);
+		const scope = toolRendererScope(content);
+		const component = content(this.ctx.ui, theme);
+		if (scope === undefined) return component;
+		if (!component) return undefined;
+		return new SafeToolRendererComponent(key, "widget", component, () => undefined, scope);
 	}
 
 	#rebuildHookWidgets(): void {
@@ -493,12 +532,7 @@ export class ExtensionUiController {
 			getActiveTools: () => this.ctx.session.getEnabledToolNames(),
 			getAllTools: () => this.ctx.session.getAllToolInfos(),
 			setActiveTools: toolNames => this.ctx.session.setActiveToolsByName(toolNames),
-			setModel: async model => {
-				const key = await this.ctx.session.modelRegistry.getApiKey(model);
-				if (!key) return false;
-				await this.ctx.session.setModel(model);
-				return true;
-			},
+			setModel: (model, owner) => runExtensionSetModel(this.ctx.session, model, owner),
 			getThinkingLevel: () => this.ctx.session.thinkingLevel,
 			setThinkingLevel: (level, persist) => this.ctx.session.setThinkingLevel(level, persist),
 			getServiceTiers: () => this.ctx.session.serviceTierByFamily,
@@ -518,7 +552,7 @@ export class ExtensionUiController {
 			openPlanReview: () => this.ctx.openPlanReview({ fromExtension: true }),
 			sessionModes: this.ctx.sessionModes,
 			getContextUsage: () => this.ctx.session.getContextUsage(),
-			compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
+			compact: instructionsOrOptions => runExtensionCompact(this.ctx.session, instructionsOrOptions),
 			getSystemPrompt: () => this.ctx.session.systemPrompt,
 			runEphemeralTurn: args => this.ctx.session.runEphemeralTurn(args),
 			startLive: options => this.ctx.startRemoteLive(options),
@@ -634,12 +668,16 @@ export class ExtensionUiController {
 		for (const registeredTool of runner?.getAllRegisteredTools() ?? []) {
 			if (registeredTool.definition.onSession) {
 				try {
-					await registeredTool.definition.onSession(event, {
-						...runner!.createContext(),
-						ui: uiContext,
-						hasUI: true,
-						compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
-					});
+					// Through runScoped like every other extension callback: this controller invokes
+					// it directly, so without that the runner never knows the tool is still running.
+					await runner!.runScoped(() =>
+						registeredTool.definition.onSession!(event, {
+							...runner!.createContext(),
+							ui: runner!.handedUIContext(uiContext),
+							hasUI: true,
+							compact: instructionsOrOptions => runExtensionCompact(this.ctx.session, instructionsOrOptions),
+						}),
+					);
 				} catch (err) {
 					this.showToolError(registeredTool.definition.name, err instanceof Error ? err.message : String(err));
 				}
@@ -1339,7 +1377,9 @@ export class ExtensionUiController {
 		let editorReplaced = false;
 
 		const cleanup = () => {
-			component?.dispose?.();
+			// An extension's component is disposed inside its scope, and not at all once that has gone.
+			if (component) withInputScope(component, () => component?.dispose?.());
+			if (component) unbindInputScope(component);
 			overlayHandle?.hide();
 			overlayHandle = undefined;
 			if (editorReplaced) {
@@ -1370,13 +1410,36 @@ export class ExtensionUiController {
 		}
 		options?.signal?.addEventListener("abort", onAbort, { once: true });
 
+		// An extension's factory carries the scope its session's code runs in. Its component takes the
+		// user's keystrokes, so the TUI hands it input and focus only inside that scope; once the scope
+		// has gone the dialog is closed — as an aborted one is — before anything of it runs again.
+		const scope = toolRendererScope(factory);
 		Promise.try(() => factory(this.ctx.ui, theme, keybindings, close))
 			.then(c => {
+				if (!c) {
+					fail(new DOMException("Extension session retired", "AbortError"));
+					return;
+				}
 				if (closed) {
-					c.dispose?.();
+					if (!scope) c.dispose?.();
+					else if (scope.live) scope.run(() => c.dispose?.());
+					return;
+				}
+				// A component that arrives after its session has gone is refused before anything of the
+				// dialog's runs again: its `overlayOptions` and `onHandle` are that session's code too.
+				if (scope && !scope.live) {
+					fail(new DOMException("Extension session retired", "AbortError"));
 					return;
 				}
 				component = c;
+				if (scope) {
+					// What still reaches it outside the admission while the session is live (the overlay
+					// draw, `ownsFocusTarget`, this method's `getText`/`setText`) is listed at `bindInputScope`.
+					bindInputScope(c, scope, () => {
+						fail(new DOMException("Extension session retired", "AbortError"));
+						return undefined;
+					});
+				}
 				if (options?.overlay) {
 					const overlayOptions =
 						typeof options.overlayOptions === "function" ? options.overlayOptions() : options.overlayOptions;
@@ -1440,14 +1503,11 @@ export class ExtensionUiController {
 		this.ctx.present(errorText);
 	}
 	async #handleInteractiveCompact(instructionsOrOptions: string | CompactOptions | undefined): Promise<void> {
-		await this.ctx.executeCompaction(instructionsOrOptions, false);
-	}
-
-	async #compactSession(instructionsOrOptions: string | CompactOptions | undefined): Promise<void> {
-		const instructions = typeof instructionsOrOptions === "string" ? instructionsOrOptions : undefined;
-		const options =
-			instructionsOrOptions && typeof instructionsOrOptions === "object" ? instructionsOrOptions : undefined;
-		await this.ctx.session.compact(instructions, options);
+		// The interactive compaction (status, loader, transcript) runs on the copy the helper takes.
+		await runExtensionCompact(
+			{ compact: (instructions, options) => this.ctx.executeCompaction(options ?? instructions, false) },
+			instructionsOrOptions,
+		);
 	}
 
 	async #updateSessionName(name: string): Promise<void> {

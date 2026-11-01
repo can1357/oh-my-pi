@@ -14,6 +14,7 @@ import { CustomToolAdapter } from "../extensibility/custom-tools/wrapper";
 import type { ExtensionRunner, SourceInfo, ToolInfo } from "../extensibility/extensions";
 import { type EvalPreludeDefinition, evalPreludeSummary } from "../eval/preludes";
 import { isEvalBridgeToolCallable } from "../eval/tool-bridge-policy";
+import { fromHostCall, handHostModel } from "../extensibility/extensions/boundary-data";
 import { ExtensionToolWrapper } from "../extensibility/extensions/wrapper";
 import { loadSkills, type Skill, type SkillWarning, setActiveSkills } from "../extensibility/skills";
 import { type LocalProtocolOptions } from "../internal-urls";
@@ -131,6 +132,9 @@ export interface SessionToolsHost {
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
 	notifyCommandMetadataChanged(): void;
 	localProtocolOptions(): LocalProtocolOptions;
+	/** The session's services as an extension's context hands them (`context-surfaces.ts`), for a
+	 *  custom tool called without the agent loop's context. */
+	customToolSurfaces(): Pick<CustomToolContext, "sessionManager" | "modelRegistry" | "localProtocolOptions">;
 	/** Live enabled eval preludes; candidates for the next base rebuild's advertised snapshot. */
 	evalPreludes(): readonly EvalPreludeDefinition[];
 	/** Live user-tagged model agents; candidates for the next base rebuild's advertised snapshot. */
@@ -439,19 +443,41 @@ export class SessionTools {
 	 * Session-lifetime factory shared by every custom-tool wrapper. Defining it
 	 * outside the refresh frame prevents wrappers from retaining rollback maps
 	 * from earlier MCP generations through a shared lexical environment.
+	 *
+	 * What a manager tool is handed when it is called without the agent loop's context. A manager
+	 * tool is whatever the host hands in as an MCP tool: the MCP bridge's (`MCPTool`,
+	 * `DeferredMCPTool`), a subagent's MCP proxies, and any tool an SDK host passes to
+	 * `refreshMCPTools` or as `mcpTools`. Each is handed the session's `Settings` here and on its
+	 * first pass alike (`sdk.ts` `createCustomToolContext`), so a refresh never changes what a tool
+	 * receives: the bridge resolves the internal URLs in a tool's arguments with them (`memory://`
+	 * honors the session's memory backend and identity), and a host tool's GitHub cache honors the
+	 * session's policy, kill switch included. A tool an extension registers runs through
+	 * `RegisteredToolAdapter`, and one an SDK host hands in as a custom tool through
+	 * `createCustomToolContext` without them. What a tool's name answers with follows the route that
+	 * installed the tool registered under it: a refresh that installs a tool installs it as a
+	 * manager tool, whatever else the host once handed it in as; a tool the session already held
+	 * and keeps through the refresh (`deduplicateMCPToolsByName`) keeps its route. The session's
+	 * services are the surfaces an extension's context hands, the model a copy (`handHostModel`).
 	 */
-	readonly #getCustomToolContext = (): CustomToolContext => ({
-		sessionManager: this.#host.sessionManager,
-		modelRegistry: this.#host.modelRegistry,
-		model: this.#host.model(),
-		isIdle: () => !this.#host.isStreaming(),
-		hasQueuedMessages: () => this.#host.queuedMessageCount() > 0,
-		abort: () => {
-			this.#host.agent.abort();
-		},
-		settings: this.#host.settings,
-		localProtocolOptions: this.#host.localProtocolOptions(),
-	});
+	readonly #getCustomToolContext = (): CustomToolContext => {
+		const host = this.#host;
+		return {
+			...host.customToolSurfaces(),
+			get model() {
+				// The host's getter may throw: its failure crosses as a copy, as the model does. A manager
+				// tool is host code with no session to answer for, so the copy's `resolveHeaders` calls
+				// the host's whenever it is called.
+				const model = fromHostCall(() => host.model());
+				return model && handHostModel(model, fromHostCall);
+			},
+			isIdle: () => !host.isStreaming(),
+			hasQueuedMessages: () => host.queuedMessageCount() > 0,
+			abort: () => {
+				host.agent.abort();
+			},
+			settings: host.settings,
+		};
+	};
 	#setActiveToolNames: SessionToolsOptions["setActiveToolNames"];
 	#ensureWriteRegistered: SessionToolsOptions["ensureWriteRegistered"];
 	#isDeviceOnlyWrite: SessionToolsOptions["isDeviceOnlyWrite"];

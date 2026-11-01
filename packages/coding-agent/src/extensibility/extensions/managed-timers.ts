@@ -22,22 +22,35 @@ export type ManagedTimerErrorHandler = (event: string, error: string, stack?: st
 export class ManagedTimers {
 	readonly #timers = new Set<Timer>();
 
-	constructor(private readonly onError: ManagedTimerErrorHandler) {}
+	/** @param onError reports a throw or rejection from a managed callback.
+	 *  @param own wraps the callback with whoever owns extension-callback lifetimes: it refuses
+	 *  once that owner has retired, and counts the call while it runs.
+	 *  Clearing a handle stops future firings; it says nothing about a callback already running,
+	 *  and `clearAll()` on teardown is exactly the moment one is most likely to be mid-flight. */
+	constructor(
+		private readonly onError: ManagedTimerErrorHandler,
+		private readonly own: <A extends unknown[], R>(fn: (...args: A) => R) => (...args: A) => R | undefined = fn => fn,
+	) {}
 
-	/** Schedule a repeating callback whose throws are contained. */
+	/** Schedule a repeating callback whose throws are contained. It is owned when it is scheduled,
+	 *  so it belongs to the session whose code scheduled it, whichever the runtime serves when it
+	 *  fires. */
 	setInterval(callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]): Timer {
-		const timer = setInterval(() => this.#run("interval", callback, args), ms, ...args);
+		const owned = this.own(callback);
+		const timer = setInterval(() => this.#run("interval", owned, args), ms, ...args);
 		timer.unref?.();
 		this.#timers.add(timer);
 		return timer;
 	}
 
-	/** Schedule a one-shot callback whose throws are contained. Deregisters after it fires. */
+	/** Schedule a one-shot callback whose throws are contained. Deregisters after it fires. Owned
+	 *  when it is scheduled, as {@link setInterval}'s is. */
 	setTimeout(callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]): Timer {
+		const owned = this.own(callback);
 		const timer = setTimeout(
 			() => {
 				this.#timers.delete(timer);
-				this.#run("timeout", callback, args);
+				this.#run("timeout", owned, args);
 			},
 			ms,
 			...args,
@@ -63,11 +76,21 @@ export class ManagedTimers {
 		this.#timers.clear();
 	}
 
-	#run(kind: "interval" | "timeout", callback: (...args: unknown[]) => void, args: unknown[]): void {
+	#run(kind: "interval" | "timeout", owned: (...args: unknown[]) => unknown, args: unknown[]): void {
 		try {
-			const result = callback(...args) as unknown;
-			if (result instanceof Promise) {
-				result.catch((err: unknown) => this.#report(kind, err));
+			// The CALLBACK is owned, not its result: clearing a handle stops future firings, and a
+			// result can only be reported after the call already happened. A retired session's
+			// timer must not run at all — including one a suspended callback scheduled after
+			// teardown — so the owner refuses it here.
+			const result: unknown = owned(...args);
+			// Thenable duck-typing, not `instanceof`: a callback from another realm or a hand-rolled
+			// thenable rejects just as loudly, and an unreported rejection here is the
+			// uncaughtException this class exists to prevent.
+			if (result !== null && (typeof result === "object" || typeof result === "function")) {
+				const then = (result as { then?: unknown }).then;
+				if (typeof then === "function") {
+					Promise.resolve(result as PromiseLike<unknown>).catch((err: unknown) => this.#report(kind, err));
+				}
 			}
 		} catch (err) {
 			this.#report(kind, err);

@@ -7,13 +7,13 @@ import type { ImageContent, Message, Model, TextContent } from "@oh-my-pi/pi-ai"
 import type { Component, TUI } from "@oh-my-pi/pi-tui";
 import type { logger as PiLogger } from "@oh-my-pi/pi-utils";
 import type { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
-import type { ModelRegistry } from "../../config/model-registry";
+import type { ExtensionModelRegistry, ExtensionSessionManager } from "../extensions/context-surfaces";
 import type { EditToolDetails } from "@oh-my-pi/pi-tui/tools/edit";
 import type { ExecOptions, ExecResult } from "../../exec/exec";
 import type * as PiCodingAgent from "../../index";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import type { CustomMessagePayload } from "../../session/messages";
-import type { ReadonlySessionManager, SessionManager } from "../../session/session-manager";
+import type { SessionManager } from "../../session/session-manager";
 import type { BashToolDetails } from "@oh-my-pi/pi-tui/tools/bash";
 import type { GlobToolDetails } from "@oh-my-pi/pi-tui/tools/glob";
 import type { GrepToolDetails } from "@oh-my-pi/pi-tui/tools/grep";
@@ -185,10 +185,11 @@ export interface HookContext {
 	hasUI: boolean;
 	/** Current working directory */
 	cwd: string;
-	/** Session manager (read-only) - use pi.sendMessage()/pi.appendEntry() for writes */
-	sessionManager: ReadonlySessionManager;
-	/** Model registry - use for API key resolution and model retrieval */
-	modelRegistry: ModelRegistry;
+	/** Session manager (read-only): the members `ReadonlySessionManager` declares, answering copies.
+	 *  Use pi.sendMessage()/pi.appendEntry() for writes. */
+	sessionManager: ExtensionSessionManager;
+	/** Model registry for catalog queries and API key resolution; see `ExtensionModelRegistry`. */
+	modelRegistry: ExtensionModelRegistry;
 	/** Current model (may be undefined if no model is selected yet) */
 	model: Model | undefined;
 	/** Whether the agent is idle (not streaming) */

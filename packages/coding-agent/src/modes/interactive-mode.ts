@@ -268,6 +268,12 @@ import type { BashExecutionComponent } from "@oh-my-pi/pi-tui/chat/bash-executio
 import { ChatBlock, type ChatBlockHost } from "@oh-my-pi/pi-tui/chrome/chat-block";
 import { CodexResetFireworksController } from "@oh-my-pi/pi-tui/overlays/codex-reset-fireworks";
 import { type ComposerNativeState, CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
+import {
+	bindInputScope,
+	scopedAutocompleteProvider,
+	toolRendererScope,
+	unbindInputScope,
+} from "@oh-my-pi/pi-tui/tools/renderer-scope";
 import { DynamicBorder } from "@oh-my-pi/pi-tui/chrome/dynamic-border";
 import { EditorTopGap } from "@oh-my-pi/pi-tui/prompt/editor-top-gap";
 import { ErrorBannerComponent } from "@oh-my-pi/pi-tui/overlays/error-banner";
@@ -555,6 +561,19 @@ const EDITOR_RESERVED_ROWS = 12;
 const EDITOR_FALLBACK_ROWS = 24;
 const EDITOR_MIN_CHROME_ROWS = 4; // rows reserved for transcript + status on small terms
 const EDITOR_MIN_RENDERED_ROWS = 3; // bordered editor floor: top+bottom border + 1 content row
+
+/**
+ * `editor[key]` read as data: an own value property's value, never an accessor's. The host sets
+ * these fields itself; an extension's editor could have turned either into an accessor, and the
+ * host reads them when it swaps that editor out — after the extension's session has gone too.
+ */
+function editorFieldValue<K extends "attachmentChips" | "disableSubmit">(
+	editor: CustomEditor,
+	key: K,
+): CustomEditor[K] | undefined {
+	const field = Object.getOwnPropertyDescriptor(editor, key);
+	return field && "value" in field ? (field.value as CustomEditor[K]) : undefined;
+}
 
 /**
  * Editor max-height cap for a terminal of `terminalRows` rows.
@@ -3089,14 +3108,22 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (!base) return;
 		let provider = base;
 		for (const factory of this.#autocompleteProviderFactories) {
+			// An extension's factory carries the scope its session's code runs in: once that has gone
+			// it adds nothing, and the provider it made is called only through it.
+			const scope = toolRendererScope(factory);
+			if (scope && !scope.live) continue;
 			try {
 				const wrapped = factory(provider);
-				if (
-					wrapped &&
+				const isProvider = (): boolean =>
+					!!wrapped &&
 					typeof wrapped.getSuggestions === "function" &&
-					typeof wrapped.applyCompletion === "function"
-				) {
-					provider = wrapped;
+					typeof wrapped.applyCompletion === "function";
+				if (scope ? scope.run(isProvider) : isProvider()) {
+					provider = scope
+						? scopedAutocompleteProvider(wrapped, provider, scope, () =>
+								queueMicrotask(() => this.#applyAutocompleteProvider()),
+							)
+						: wrapped;
 				} else {
 					logger.warn("Extension autocomplete provider factory returned an invalid provider; skipping it");
 				}
@@ -8187,11 +8214,35 @@ export class InteractiveMode implements InteractiveModeContext {
 	setEditorComponent(
 		factory: ((tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => CustomEditor) | undefined,
 	): void {
+		// An extension's factory answers nothing once its session has gone: the host's editor then.
+		const created = factory?.(this.ui, getEditorTheme(), this.keybindings);
+		// Its editor takes every keystroke the user types, so the TUI hands it input and focus only
+		// inside the session's scope, and the moment that scope has gone the host swaps its own editor
+		// back in, with the user's text (`bindInputScope`). Bound before it is focused below. What still
+		// reaches it outside the admission while the session is live is listed at `bindInputScope`.
+		const scope = created && factory ? toolRendererScope(factory) : undefined;
+		if (created && scope) bindInputScope(created, scope, () => this.#restoreHostEditor(created));
+		this.#installEditor(created ?? new CustomEditor(getEditorTheme()), created ? factory : undefined);
+	}
+
+	/** An extension's editor whose session has gone, replaced by the host's own with the same text;
+	 *  answers the editor that takes its input (`bindInputScope`). */
+	#restoreHostEditor(retired: CustomEditor): CustomEditor | undefined {
+		if (this.editor !== retired) return undefined;
+		this.#installEditor(new CustomEditor(getEditorTheme()), undefined);
+		return this.editor;
+	}
+
+	#installEditor(
+		nextEditor: CustomEditor,
+		factory: ((tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => CustomEditor) | undefined,
+	): void {
 		const previousEditor = this.editor;
-		const previousText = previousEditor.getText();
-		const nextEditor = factory
-			? factory(this.ui, getEditorTheme(), this.keybindings)
-			: new CustomEditor(getEditorTheme());
+		unbindInputScope(previousEditor);
+		// Read through the host's own `getText`, not the instance's: an extension's editor may have
+		// replaced its method, and none of its code may run here — above all when this swap is how
+		// the host takes a retired extension's editor out of input. Its fields are read as data.
+		const previousText = CustomEditor.prototype.getText.call(previousEditor);
 		this.#editorComponentFactory = factory;
 		nextEditor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		nextEditor.setImeSafeCursorLayout(cfgTuiImeSafeCursor.get(this.settings));
@@ -8208,7 +8259,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		nextEditor.prediction = () => this.#eventController.composerPrediction.text;
 		nextEditor.composerState = () => this.#composerNativeState();
 		nextEditor.onToggleDictation = () => void this.#toggleComposerDictation();
-		nextEditor.attachmentChips = previousEditor.attachmentChips;
+		nextEditor.attachmentChips = editorFieldValue(previousEditor, "attachmentChips");
 		nextEditor.imageReferenceHyperlink = imageReferenceHyperlink;
 		nextEditor.skillFilePath = name => this.skillCommands.get(`skill:${name}`)?.filePath;
 		nextEditor.modelMentionLabel = selector => {
@@ -8224,7 +8275,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.ui.requestRender();
 		};
 		// A swap during startup keeps the bootstrap submit gate until init lifts it.
-		nextEditor.disableSubmit = previousEditor.disableSubmit;
+		nextEditor.disableSubmit = editorFieldValue(previousEditor, "disableSubmit") === true;
 		nextEditor.setShimmerRepaintHandler(() => this.ui.requestComponentRender(nextEditor));
 		this.editor = nextEditor;
 		this.composer.setEditor(nextEditor);

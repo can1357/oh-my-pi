@@ -72,7 +72,10 @@ export default function (api) {
 	registerFixtureProvider(api);
 	api.registerCommand("settings-session-smoke", {
 		handler: async (_args, ctx) => {
-			const { createAgentSession, Settings, AgentRegistry, SessionManager, ModelRegistry } = api.pi;
+			const { createAgentSession, Settings, AgentRegistry, SessionManager, ModelRegistry, AuthStorage } = api.pi;
+			// The children's credentials: the fixture provider's key is in its registration, and an
+			// extension's context does not hand the host's credential store (ctx.modelRegistry).
+			const auth = await AuthStorage.create(fixture.agentDir + "/settings-session-auth.db");
 			const sessions = [];
 			const entered = [Promise.withResolvers(), Promise.withResolvers()];
 			const disposedA = Promise.withResolvers();
@@ -93,7 +96,7 @@ export default function (api) {
 					const { session } = await createAgentSession({
 						cwd: fixture.cwd, agentDir: fixture.agentDir, settings,
 						agentRegistry: new AgentRegistry(),
-						modelRegistry: new ModelRegistry(ctx.modelRegistry.authStorage, fixture.agentDir + "/models.yml"),
+						modelRegistry: new ModelRegistry(auth, fixture.agentDir + "/models.yml"),
 						sessionManager: SessionManager.inMemory(fixture.cwd),
 						// Merge mode lets runtime settings supply roots. Empty preloaded
 						// paths prevent this driver extension from loading recursively.
@@ -150,6 +153,7 @@ export default function (api) {
 			} finally {
 				disposedA.resolve();
 				for (const session of sessions) await session.dispose();
+				auth.close();
 				ctx.shutdown();
 			}
 		},

@@ -2259,6 +2259,65 @@ describe("ModelRegistry runtime discovery", () => {
 		}
 	});
 
+	test("selected model refresh patches the row of the provider it probed, not one a later read names", async () => {
+		writeModelCache(
+			"llama.cpp",
+			Date.now(),
+			[
+				buildModel({
+					id: "cold-preset",
+					name: "cold-preset",
+					provider: "llama.cpp",
+					api: "openai-responses",
+					baseUrl: "http://127.0.0.1:8080",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 128000,
+					maxTokens: 32768,
+				}),
+			],
+			true,
+			"",
+			cacheDbPath,
+		);
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:8080/models") {
+				return Response.json({
+					data: [{ id: "cold-preset", status: { value: "unloaded", args: ["--ctx-size", "16384"] } }],
+				});
+			}
+			if (url === "http://127.0.0.1:8080/props") {
+				return Response.json({ default_generation_settings: { params: {}, n_ctx: 0 } });
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		const probed = registry.find("llama.cpp", "cold-preset");
+		const target = getBundledModels("anthropic")[0];
+		if (!probed || !target) throw new Error("expected the cached llama.cpp row and a bundled anthropic row");
+		const targetWindow = registry.find("anthropic", target.id)?.contextWindow;
+		expect(targetWindow).not.toBe(16384);
+		// The lazy-discovery check reads `llama.cpp/cold-preset`; every later read names the anthropic row.
+		const supplied = { ...probed };
+		const reads = { provider: 0, id: 0 };
+		Object.defineProperty(supplied, "provider", {
+			enumerable: true,
+			get: () => (reads.provider++ === 0 ? "llama.cpp" : "anthropic"),
+		});
+		Object.defineProperty(supplied, "id", {
+			enumerable: true,
+			get: () => (reads.id++ === 0 ? "cold-preset" : target.id),
+		});
+
+		const refreshed = await registry.refreshSelectedModelMetadata(supplied);
+
+		expect(registry.find("anthropic", target.id)?.contextWindow).toBe(targetWindow);
+		expect(registry.find("llama.cpp", "cold-preset")?.contextWindow).toBe(16384);
+		expect([refreshed.provider, refreshed.id, refreshed.contextWindow]).toEqual(["llama.cpp", "cold-preset", 16384]);
+	});
+
 	test("llama.cpp selected model refresh patches newly loaded meta n_ctx and unlimited output limit", async () => {
 		writeModelCache(
 			"llama.cpp",

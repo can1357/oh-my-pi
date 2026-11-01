@@ -40,6 +40,7 @@ import {
 } from "@oh-my-pi/pi-wire";
 import type { Terminal } from "../terminal";
 import { getCurrentThemeName, isLightTheme, setNativeSymbolPreset } from "../theme/theme";
+import { inputRecipient, withInputScope } from "../tools/renderer-scope";
 import type { Component, OverlayOptions, RenderScheduler, RenderTimer } from "../tui";
 import { TspDocument } from "./apply";
 import { getNativeBlob, type NativeBlob } from "./blobs";
@@ -830,8 +831,17 @@ export class NativeBackend {
 		>,
 	): void {
 		const reconciler = this.#surfaceFor(event.sf)?.reconciler;
-		const target = reconciler?.target(event.id);
-		if (!reconciler || !target?.component.handleNativeEvent) return;
+		// An event the terminal sent before it saw the frame that replaced its target is still
+		// addressed to the old one (`departedTarget`): remembered only for an extension's component
+		// taken out of input, so it reaches what the host put in its place or nothing.
+		const target = reconciler?.target(event.id) ?? reconciler?.departedTarget(event.id);
+		if (!reconciler || !target) return;
+		// An event addressed to a component an extension supplied goes to whoever takes its input
+		// (`inputRecipient`): the component itself, asked and handed the event inside its session's
+		// scope; once that scope has gone, what the host put in its place — its own editor, holding the
+		// same text, so an edit typed in that moment is not lost — or nowhere, for a dialog it closed.
+		const recipient = inputRecipient(target.component);
+		if (!recipient || !withInputScope(recipient, () => !!recipient.handleNativeEvent)) return;
 		// Explicit sends must address the live editor, not a stale or invented
 		// descendant id that merely shares the component's namespace.
 		if (event.ev === "send" && (!this.#live || reconciler.focusTarget(target.component) !== event.id)) return;
@@ -871,8 +881,13 @@ export class NativeBackend {
 				ui = { type: "send", key: target.keypath, text: event.text };
 				break;
 		}
-		target.component.handleNativeEvent(ui);
-		this.#host.requestRender();
+		const handled = withInputScope(recipient, () => {
+			const handleNativeEvent = recipient.handleNativeEvent;
+			if (!handleNativeEvent) return false;
+			handleNativeEvent.call(recipient, ui);
+			return true;
+		});
+		if (handled) this.#host.requestRender();
 	}
 
 	/**

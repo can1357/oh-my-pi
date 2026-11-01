@@ -10,6 +10,7 @@ import {
 	type ToolLoadMode,
 } from "@oh-my-pi/pi-agent-core";
 import type { ComputerSafetyCheck, ImageContent, Static, TextContent, TSchema } from "@oh-my-pi/pi-ai";
+import { AdmittedSignal } from "@oh-my-pi/pi-ai/auth/provider-gate";
 import { prompt, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import nativeDelegationTemplate from "../../prompts/tools/native-delegation.md" with { type: "text" };
@@ -28,8 +29,12 @@ import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { withFileMutationSession } from "../../tools/file-write-fallback";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
+import { pinInputScope, type ToolRendererScope } from "@oh-my-pi/pi-tui/tools/renderer-scope";
+import { copyHostData, copyToolResult, copyToolView, registeredToolOwner } from "./boundary-data";
+import { providerCallGate } from "./callback-ownership";
+import { handTheme } from "./context-surfaces";
 import type { ExtensionRunner } from "./runner";
-import type { ExtensionAgentIdentity, RegisteredTool, ToolCallEventResult } from "./types";
+import type { ExtensionAgentIdentity, ExtensionCallbackOwner, RegisteredTool, ToolCallEventResult } from "./types";
 
 /**
  * Second `renderCall` argument that satisfies both the omp and the upstream-pi
@@ -62,6 +67,29 @@ function renderOptionsWithTheme<T extends object>(options: T, theme: Theme): T &
 }
 
 /**
+ * The scope a tool another owner registered draws in, as a host mounting what it returns uses it
+ * (`SafeToolRendererComponent`): live while both the executing runner's scope and the tool's owner
+ * are, and running in the owner's admission inside the runner's. Pinned, it is the pair of the
+ * runner's current session and the owner's (`forSession`), so a component the tool returned in one
+ * of its owner's sessions draws nothing once that session has gone, whatever the runner serves.
+ */
+function ownedRendererScope(runnerScope: ToolRendererScope, owner: ExtensionCallbackOwner): ToolRendererScope {
+	const pair = (outer: ToolRendererScope, inner: ExtensionCallbackOwner): ToolRendererScope => ({
+		get live() {
+			return outer.live && !inner.isRetired;
+		},
+		run<T>(call: () => T): T {
+			if (inner.isRetired) throw new Error("Extension session retired; its renderers are no longer callable");
+			return outer.run(() => inner.runOwned(call));
+		},
+	});
+	const scope = pair(runnerScope, owner);
+	return Object.assign(scope, {
+		pin: () => pair(pinInputScope(runnerScope), owner.forSession?.() ?? owner),
+	});
+}
+
+/**
  * Adapts a RegisteredTool into an AgentTool.
  */
 export class RegisteredToolAdapter implements AgentTool<any, any, any> {
@@ -79,38 +107,112 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
 
 	renderCall?: (args: any, options: any, theme: any) => any;
 	renderResult?: (result: any, options: any, theme: any, args?: any) => any;
+	describeCall?: RegisteredTool["definition"]["describeCall"];
+	describeResult?: RegisteredTool["definition"]["describeResult"];
+	/** The scope a host runs the components this tool's renderers return in: the session's
+	 *  admission, which the TUI cannot import (`@oh-my-pi/pi-tui/tools/renderer-scope`). */
+	readonly rendererScope: ToolRendererScope;
 	readonly loadMode: ToolLoadMode;
 
+	/**
+	 * The renderers are the boundary too, in both directions. Each runs inside this session's
+	 * admission ({@link ExtensionRunner.runScoped}) and not at all once the session has gone, on
+	 * copies of what the host hands it: the call's arguments and render options, the result. What
+	 * a describe hook answers is data and is copied there (`copyToolView`). What a render hook
+	 * answers is a component, the extension's live code: it is handed back as it is, and every
+	 * host that mounts it runs it through {@link rendererScope} (`SafeToolRendererComponent`).
+	 */
 	constructor(
 		private registeredTool: RegisteredTool,
 		private runner: ExtensionRunner,
 	) {
 		applyToolProxy(registeredTool.definition, this);
-		this.loadMode = defaultLoadModeForToolName(registeredTool.definition.name, registeredTool.definition.loadMode);
+		const { definition, extensionPath } = registeredTool;
+		const name = definition.name;
+		this.loadMode = defaultLoadModeForToolName(name, definition.loadMode);
+		// A tool belongs to whoever registered it — a session, or the runtime whose factory loaded
+		// it — and this runner may be another runtime's, executing it for its own session. What the
+		// tool does is its owner's work, then: run, cancelled and drawn in its owner's admission,
+		// inside this runner's, so nothing of it outlives either, and its abort listener and the
+		// components it returns answer to its owner's lifetime, not to the executing session's.
+		const owner = registeredToolOwner(definition);
+		this.#owner = owner !== undefined && owner !== runner.callbackOwner ? owner : undefined;
+		this.rendererScope = this.#owner ? ownedRendererScope(runner.rendererScope, this.#owner) : runner.rendererScope;
+		const scoped = <T>(call: () => T): T | undefined => this.#scoped(call);
 
 		// Only define render methods when the underlying definition provides them.
 		// If these exist unconditionally on the prototype, ToolExecutionComponent
 		// enters the custom-renderer path, gets undefined back, and silently
 		// discards tool result text (extensions without renderers show blank).
-		if (registeredTool.definition.renderCall) {
+		const { renderCall, renderResult, describeCall, describeResult } = definition;
+		if (renderCall) {
 			this.renderCall = (args: any, options: any, theme: any) =>
-				registeredTool.definition.renderCall!(
-					args,
-					renderOptionsWithTheme(options, theme as Theme),
-					theme as Theme,
+				scoped(() =>
+					renderCall(
+						copyHostData(args),
+						renderOptionsWithTheme(copyHostData(options), handTheme(theme)),
+						handTheme(theme),
+					),
 				);
 		}
-		if (registeredTool.definition.renderResult) {
+		if (renderResult) {
 			this.renderResult = (result: any, options: any, theme: any, args?: any) =>
-				registeredTool.definition.renderResult!(
-					result,
-					{ expanded: options.expanded, isPartial: options.isPartial, spinnerFrame: options.spinnerFrame },
-					theme as Theme,
-					args,
+				scoped(() =>
+					renderResult(
+						copyHostData(result),
+						{ expanded: options.expanded, isPartial: options.isPartial, spinnerFrame: options.spinnerFrame },
+						handTheme(theme),
+						copyHostData(args),
+					),
+				);
+		}
+		if (describeCall) {
+			this.describeCall = (args, options) =>
+				scoped(() =>
+					copyToolView(
+						describeCall(copyHostData(args), copyHostData(options)),
+						name,
+						extensionPath,
+						"describeCall() view",
+					),
+				);
+		}
+		if (describeResult) {
+			this.describeResult = (result, options, args) =>
+				scoped(() =>
+					copyToolView(
+						describeResult(copyHostData(result), copyHostData(options), copyHostData(args)),
+						name,
+						extensionPath,
+						"describeResult() view",
+					),
 				);
 		}
 	}
 
+	/** The tool's owner when it is not this runner's own runtime ({@link registeredToolOwner}). */
+	readonly #owner: ExtensionCallbackOwner | undefined;
+
+	/** Runs `call` in this runner's admission and, for a tool another owner registered, in that
+	 *  owner's inside it; nothing once either has gone. */
+	#scoped<T>(call: () => T): T | undefined {
+		const owner = this.#owner;
+		if (!owner) return this.runner.runScoped(call);
+		return this.runner.runScoped(() => (owner.isRetired ? undefined : owner.runOwned(call)));
+	}
+
+	/**
+	 * Run the extension's `execute` — the boundary between an extension tool and the host. It runs
+	 * inside the admission {@link ExtensionToolWrapper} opens around every tool, so the copies taken
+	 * here are taken inside it: `execute` is handed a copy of the params (the host's are the model's
+	 * call, persisted and handed to `tool_result` afterwards), and the partial results it streams
+	 * through `onUpdate` and the result it resolves with are copied by their schema before the host
+	 * reads them. Its signal is the one this admission aborts (`AdmittedSignal`), with the caller's
+	 * reason and in the same turn, and it stops following the caller's when `execute` settles: a
+	 * listener the tool installs runs as the session's work and never after the call. Built-in,
+	 * MCP-manager and RPC host tools reach the wrapper without this adapter; their results are the
+	 * host's data and are not copied.
+	 */
 	async execute(
 		toolCallId: string,
 		params: any,
@@ -118,24 +220,42 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
 		onUpdate?: AgentToolUpdateCallback<any>,
 		context?: AgentToolContext,
 	) {
-		// Bind the extension context to this tool's own name so `ctx.invokeTool` delegates to the
-		// native built-in of the same name (present only when this tool re-registers a built-in). The
-		// wrapper's own context, abort signal, and progress callback are inherited by the delegated
-		// call, so a bare `ctx.invokeTool(params)` keeps the caller's `toolCall`/provider metadata
-		// (write/edit LSP batching, computer safety acknowledgement), stops when the outer call is
-		// aborted, and still streams native progress.
-		return this.registeredTool.definition.execute(
-			toolCallId,
-			params,
-			signal,
-			onUpdate,
-			this.runner.createContext(undefined, {
-				toolName: this.registeredTool.definition.name,
-				context,
-				signal,
-				onUpdate,
-			}),
-		);
+		const { definition, extensionPath } = this.registeredTool;
+		const name = definition.name;
+		const owner = this.#owner;
+		const call = async () => {
+			// Admitted inside the owner's admission, so the abort the caller's signal carries in runs
+			// as the owner's work: a listener the tool installs answers to the session that
+			// registered it, never to the one executing it or to the session after.
+			const handedSignal = new AdmittedSignal(owner ? providerCallGate(owner) : this.runner.callbackGate, signal);
+			try {
+				// Bind the extension context to this tool's own name so `ctx.invokeTool` delegates to the
+				// native built-in of the same name (present only when this tool re-registers a built-in).
+				// The wrapper's own context, abort signal, and progress callback are inherited by the
+				// delegated call, so a bare `ctx.invokeTool(params)` keeps the caller's
+				// `toolCall`/provider metadata (write/edit LSP batching, computer safety acknowledgement),
+				// stops when the outer call is aborted, and still streams native progress. Those are host
+				// calls, so they follow the caller's own signal.
+				const result = await definition.execute(
+					toolCallId,
+					copyHostData(params),
+					handedSignal.admit(),
+					onUpdate &&
+						(partial => onUpdate(copyToolResult(partial, name, extensionPath, "onUpdate() partial result"))),
+					this.runner.createContext(undefined, {
+						toolName: name,
+						context,
+						signal,
+						onUpdate,
+					}),
+				);
+				return copyToolResult(result, name, extensionPath, "execute() result");
+			} finally {
+				handedSignal.release();
+			}
+		};
+		// An owner that has gone refuses through the definition itself, which says why.
+		return owner && !owner.isRetired ? await owner.runOwned(call) : await call();
 	}
 }
 
@@ -500,11 +620,15 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			// expose its settings to registered tools and any fallback handlers they
 			// trigger. `sdk.ts` wraps the whole tool registry with this class whenever
 			// a runner exists.
-			result = await this.runner.runScoped(() =>
+			const executed = await this.runner.runScoped(() =>
 				withFileMutationSession(this.runner.sessionId, () =>
 					this.tool.execute(toolCallId, effectiveParams, signal, onUpdate, context),
 				),
 			);
+			// `runScoped` refuses once the session is retired: its extensions must not run after
+			// disposal, and a tool call arriving then has no session left to act on.
+			if (executed === undefined) throw new Error("Session disposed; extension tool was not executed");
+			result = executed;
 		} catch (err) {
 			executionError = err instanceof Error ? err : new Error(String(err));
 			result = {

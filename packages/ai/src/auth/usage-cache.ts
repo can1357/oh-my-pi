@@ -2,7 +2,7 @@ import type { AuthCredentialStore } from "./store";
 import type { AuthCredential, OAuthCredential } from "./types";
 import type { CredentialPool } from "./pool";
 import type { Provider } from "../types";
-import type { UsageCredential, UsageProvider, UsageReport } from "../usage";
+import type { UsageCredential, UsageReport } from "../usage";
 import { isRecord } from "../utils";
 
 const USAGE_CACHE_PREFIX = "usage_cache:";
@@ -150,15 +150,17 @@ export class UsageCache {
 	#usageReportCacheKeysByProvider: Map<Provider, Set<string>> = new Map();
 	#store: AuthCredentialStore;
 	#pool: CredentialPool;
-	#usageProviders: (provider: Provider) => UsageProvider | undefined;
+	/** The answering usage provider's `cacheVersion`. The usage service reads it through that
+	 *  registration's gate and contains a throw, so the author's object never reaches the cache. */
+	#cacheVersion: (provider: Provider) => number | undefined;
 	constructor(
 		store: AuthCredentialStore,
 		pool: CredentialPool,
-		usageProviders: (provider: Provider) => UsageProvider | undefined,
+		cacheVersion: (provider: Provider) => number | undefined,
 	) {
 		this.#store = store;
 		this.#pool = pool;
-		this.#usageProviders = usageProviders;
+		this.#cacheVersion = cacheVersion;
 		// Opportunistic hygiene, once per AuthStorage lifetime: drop expired
 		// cache rows (24h last-good retention). A cheap indexed DELETE;
 		// failures must never block construction.
@@ -241,7 +243,7 @@ export class UsageCache {
 	}
 
 	#usageCacheProviderKey(provider: Provider): string {
-		const cacheVersion = this.#usageProviders(provider)?.cacheVersion;
+		const cacheVersion = this.#cacheVersion(provider);
 		return cacheVersion === undefined ? provider : `${cacheVersion}:${provider}`;
 	}
 

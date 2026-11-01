@@ -7,7 +7,7 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import { MissingApiKeyError, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { DEFAULT_XAI_VOICE_ID, synthesizeSpeech, XAI_MAX_TEXT_LENGTH } from "@oh-my-pi/pi-ai/speech";
 import { prompt } from "@oh-my-pi/pi-utils";
-import type { ModelRegistry } from "../config/model-registry";
+import type { ModelBrowserRegistry } from "@oh-my-pi/pi-tui/overlays/model-browser";
 import { resolveRoleChain, type RoleChainCandidate } from "../config/model-resolver";
 import { roleCandidatePool } from "../config/model-roles";
 import { settings, type Settings } from "../config/settings";
@@ -51,10 +51,12 @@ interface TtsToolDetails {
 	backend: TtsBackend;
 }
 
-/** Resolve speech candidates while preserving every explicitly configured slot. */
+/** Resolve speech candidates while preserving every explicitly configured slot. Reads only the
+ *  catalog: the tool runs as an extension tool, whose context hands the registry as an extension
+ *  gets it (`ExtensionModelRegistry`). */
 export function resolveSpeechCandidates(
 	settingsInstance: Settings,
-	modelRegistry: ModelRegistry,
+	modelRegistry: ModelBrowserRegistry,
 	wantsMp3: boolean,
 ): RoleChainCandidate[] {
 	const pool = roleCandidatePool("speech", settingsInstance, modelRegistry);

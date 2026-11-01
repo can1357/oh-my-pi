@@ -19,6 +19,7 @@ import { type RoleChainCandidate, resolveModelRoleValue, resolveRoleChain } from
 import { roleCandidatePool } from "../config/model-roles";
 import { isAuthenticated, type ModelRegistry } from "../config/model-registry";
 import { settings } from "../config/settings";
+import type { ModelBrowserRegistry } from "@oh-my-pi/pi-tui/overlays/model-browser";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import imageGenDescription from "../prompts/tools/image-gen.md" with { type: "text" };
 import { resolveConfiguredModelTarget } from "../session/role-models";
@@ -141,10 +142,11 @@ async function saveImagesToTemp(images: ImageGenerationResult["images"]): Promis
 /**
  * Chat model that relays a hosted Responses image model's `image_generation`
  * call: the session model when it can carry the tool on the same provider,
- * otherwise the cheapest available carrier there.
+ * otherwise the cheapest available carrier there. Reads only the catalog: the tool
+ * runs as an extension tool, whose context hands the registry as an extension gets it.
  */
 function resolveHostedImageCarrier(
-	modelRegistry: ModelRegistry,
+	modelRegistry: ModelBrowserRegistry,
 	selectedModel: Model,
 	activeModel: Model | undefined,
 ): Model | undefined {

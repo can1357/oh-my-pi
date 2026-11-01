@@ -13,6 +13,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
+import { setImmediate } from "node:timers/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
@@ -76,10 +77,20 @@ describe("loadExtensions per-session binding (#2190 review fix)", () => {
 		// MUST NOT be shared, or per-session flags/registrations bleed across.
 		expect(subagent.runtime).not.toBe(parent.runtime);
 
-		// Each factory saw the eventBus passed to its own loadExtensions call.
+		// Each factory saw a view of the eventBus passed to its own loadExtensions call: the view
+		// is bound to that session's callback owner, so a subscription made from a captured `pi`
+		// belongs to the session that handed it out. The transport is the bus itself.
 		const bindings = (globalThis as { __bindings?: { events: EventBus }[] }).__bindings ?? [];
 		expect(bindings).toHaveLength(2);
-		expect(bindings[0]?.events).toBe(parentEventBus);
-		expect(bindings[1]?.events).toBe(subagentEventBus);
+		expect(bindings[0]?.events).not.toBe(bindings[1]?.events);
+		const parentSeen: string[] = [];
+		const subagentSeen: string[] = [];
+		bindings[0]?.events.on("binding-probe", data => parentSeen.push(String(data)));
+		bindings[1]?.events.on("binding-probe", data => subagentSeen.push(String(data)));
+		parentEventBus.emit("binding-probe", "parent");
+		subagentEventBus.emit("binding-probe", "subagent");
+		await setImmediate();
+		expect(parentSeen).toEqual(["parent"]);
+		expect(subagentSeen).toEqual(["subagent"]);
 	});
 });

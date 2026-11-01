@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
+import type { Subprocess } from "bun";
 import { isRecord, readJsonl, TempDir } from "@oh-my-pi/pi-utils";
 import type { ExtensionAskDialogQuestion } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import {
@@ -24,6 +25,52 @@ function respond(pendingRequests: Map<string, PendingExtensionRequest>, id: stri
 	const request = pendingRequests.get(id);
 	if (!request) throw new Error(`Expected pending RPC dialog request ${id}`);
 	request.resolve({ type: "extension_ui_response", id, ...payload } as RpcExtensionUIResponse);
+}
+
+/**
+ * How long a test that spawns an omp child gives it, from spawn to its last frame: one deadline for
+ * the child and the test alike. The child starts a whole runtime, which takes seconds on a quiet
+ * machine and can take minutes on a saturated one, so the deadline is generous and set per run
+ * (`OMP_TEST_CHILD_DEADLINE_MS`). A per-test timeout overrides `bun test --timeout`, and a test cannot
+ * read that option, so this constant is what both the child and the test's own timeout follow.
+ */
+const CHILD_DEADLINE_MS = Number(Bun.env.OMP_TEST_CHILD_DEADLINE_MS) || 120_000;
+/** The test's own timeout: past the child's deadline, so the deadline's message is what fails it. */
+const CHILD_TEST_TIMEOUT_MS = CHILD_DEADLINE_MS + 15_000;
+/**
+ * The runtime's own reaper for each child (`Bun.spawn`'s `timeout`), past the deadline so the
+ * deadline's message is what a slow child fails with: it stops a child no test is left to stop —
+ * one whose test threw before its deadline was armed, or one the test runner abandoned.
+ */
+const CHILD_REAP_MS = CHILD_DEADLINE_MS + 10_000;
+
+/**
+ * The deadline for one omp child ({@link CHILD_DEADLINE_MS}). When it passes the child is stopped,
+ * and `assertMet` fails the test saying the child did not finish in time, with what it wrote to
+ * stderr — rather than leaving a killed child's exit code or missing frames to read as a product
+ * failure. Disposing it clears the timer and stops a child still running, so none outlives its test.
+ */
+function childDeadline(child: Subprocess, label: string) {
+	let passed = false;
+	// A real timer on purpose: the child is a real process on the machine's clock, which a fake clock
+	// in this test process cannot drive.
+	const timer = setTimeout(() => {
+		passed = true;
+		child.kill();
+	}, CHILD_DEADLINE_MS);
+	return {
+		[Symbol.dispose]: () => {
+			clearTimeout(timer);
+			if (child.exitCode === null && child.signalCode === null) child.kill();
+		},
+		assertMet: async (stderr: Promise<string>): Promise<void> => {
+			if (!passed) return;
+			throw new Error(
+				`${label}: the child process did not finish within ${CHILD_DEADLINE_MS} ms, so it was stopped ` +
+					`(a loaded machine can need more: set OMP_TEST_CHILD_DEADLINE_MS). Its stderr:\n${await stderr}`,
+			);
+		},
+	};
 }
 
 const dbQuestion: ExtensionAskDialogQuestion = {
@@ -91,13 +138,15 @@ export default function (pi) {
 `;
 
 describe("RPC extension UI", () => {
-	it("keeps extension dialogs headless while tool selections round-trip", async () => {
-		await using temp = await TempDir.create("@rpc-headless-tool-ui-");
-		const fixturePath = temp.join("runtime.ts");
-		const sourceDir = path.resolve(import.meta.dir, "../src");
-		await Bun.write(
-			fixturePath,
-			`
+	it(
+		"keeps extension dialogs headless while tool selections round-trip",
+		async () => {
+			await using temp = await TempDir.create("@rpc-headless-tool-ui-");
+			const fixturePath = temp.join("runtime.ts");
+			const sourceDir = path.resolve(import.meta.dir, "../src");
+			await Bun.write(
+				fixturePath,
+				`
 import { createAgentSession, Settings } from ${JSON.stringify(path.join(sourceDir, "sdk.ts"))};
 import { runRpcMode } from ${JSON.stringify(path.join(sourceDir, "modes/rpc/rpc-mode.ts"))};
 globalThis.fetch = async () => { throw new Error("Offline UI fixture refuses network"); };
@@ -126,55 +175,59 @@ await runRpcMode(session, {
   },
 });
 `,
-		);
-		const child = Bun.spawn([process.execPath, fixturePath], {
-			cwd: temp.path(),
-			env: {
-				PATH: Bun.env.PATH,
-				HOME: temp.join("home"),
-				PI_CODING_AGENT_DIR: temp.join("agent"),
-				XDG_CONFIG_HOME: temp.join("config"),
-				XDG_DATA_HOME: temp.join("data"),
-				XDG_CACHE_HOME: temp.join("cache"),
-				CI: "true",
-				PI_NO_TITLE: "1",
-			},
-			stdin: "pipe",
-			stdout: "pipe",
-			stderr: "pipe",
-			timeout: 20_000,
-		});
-		const stderr = new Response(child.stderr).text();
-		const requests: Record<string, unknown>[] = [];
-		let result: unknown;
-		try {
-			for await (const frame of readJsonl<unknown>(child.stdout)) {
-				if (!isRecord(frame) || frame.type !== "extension_ui_request") continue;
-				requests.push(frame);
-				if (frame.method === "select") {
-					child.stdin.write(
-						`${JSON.stringify({ type: "extension_ui_response", id: frame.id, value: "Deploy" })}\n`,
-					);
-					await child.stdin.flush();
-				} else if (frame.method === "notify") {
-					if (typeof frame.message === "string") result = JSON.parse(frame.message);
-					break;
-				} else {
-					throw new Error(`Unexpected extension UI: ${JSON.stringify(frame)}`);
+			);
+			const child = Bun.spawn([process.execPath, fixturePath], {
+				cwd: temp.path(),
+				env: {
+					PATH: Bun.env.PATH,
+					HOME: temp.join("home"),
+					PI_CODING_AGENT_DIR: temp.join("agent"),
+					XDG_CONFIG_HOME: temp.join("config"),
+					XDG_DATA_HOME: temp.join("data"),
+					XDG_CACHE_HOME: temp.join("cache"),
+					CI: "true",
+					PI_NO_TITLE: "1",
+				},
+				stdin: "pipe",
+				stdout: "pipe",
+				stderr: "pipe",
+				timeout: CHILD_REAP_MS,
+			});
+			using deadline = childDeadline(child, "RPC UI fixture");
+			const stderr = new Response(child.stderr).text();
+			const requests: Record<string, unknown>[] = [];
+			let result: unknown;
+			try {
+				for await (const frame of readJsonl<unknown>(child.stdout)) {
+					if (!isRecord(frame) || frame.type !== "extension_ui_request") continue;
+					requests.push(frame);
+					if (frame.method === "select") {
+						child.stdin.write(
+							`${JSON.stringify({ type: "extension_ui_response", id: frame.id, value: "Deploy" })}\n`,
+						);
+						await child.stdin.flush();
+					} else if (frame.method === "notify") {
+						if (typeof frame.message === "string") result = JSON.parse(frame.message);
+						break;
+					} else {
+						throw new Error(`Unexpected extension UI: ${JSON.stringify(frame)}`);
+					}
 				}
+			} finally {
+				child.stdin.end();
+				await child.exited;
 			}
-		} finally {
-			child.stdin.end();
-			await child.exited;
-		}
-		expect(result, await stderr).toEqual({
-			toolHasUI: true,
-			selected: "Deploy",
-			extension: { hasUI: false, confirmed: false },
-		});
-		expect(requests.map(frame => frame.method)).toEqual(["select", "notify"]);
-		expect(requests[0]).toMatchObject({ title: "Tool choice", options: ["Keep", "Deploy"] });
-	}, 30_000);
+			await deadline.assertMet(stderr);
+			expect(result, await stderr).toEqual({
+				toolHasUI: true,
+				selected: "Deploy",
+				extension: { hasUI: false, confirmed: false },
+			});
+			expect(requests.map(frame => frame.method)).toEqual(["select", "notify"]);
+			expect(requests[0]).toMatchObject({ title: "Tool choice", options: ["Keep", "Deploy"] });
+		},
+		CHILD_TEST_TIMEOUT_MS,
+	);
 
 	/** Spawns an RPC runtime whose extension awaits a `confirm` in `session_start` and has a `/probe` command. */
 	async function spawnStartupDialogRuntime(temp: TempDir) {
@@ -221,59 +274,74 @@ await runRpcMode(session);
 			stdin: "pipe",
 			stdout: "pipe",
 			stderr: "pipe",
-			timeout: 20_000,
+			timeout: CHILD_REAP_MS,
 		});
 	}
 
-	it("answers a dialog session_start awaits, running commands sent meanwhile only after startup, in order", async () => {
-		await using temp = await TempDir.create("@rpc-startup-dialog-");
-		const child = await spawnStartupDialogRuntime(temp);
-		const stderr = new Response(child.stderr).text();
-		const seen: string[] = [];
-		let confirmId: unknown;
-		for await (const frame of readJsonl<unknown>(child.stdout)) {
-			if (!isRecord(frame)) continue;
-			if (frame.type === "extension_ui_request" && frame.method === "confirm") {
-				confirmId = frame.id;
-				// Held until startup finishes (had one run at once, its response would precede the confirm's
-				// notify) and then run in arrival order. set_ask_dialog is served during startup and takes effect.
-				for (const id of ["s1", "s2"]) child.stdin.write(`${JSON.stringify({ id, type: "get_state" })}\n`);
-				child.stdin.write(`${JSON.stringify({ id: "p", type: "prompt", message: "/probe" })}\n`);
-				child.stdin.write(`${JSON.stringify({ id: "s3", type: "get_state" })}\n`);
-				child.stdin.write(`${JSON.stringify({ id: "ask", type: "set_ask_dialog", enabled: true })}\n`);
-				await child.stdin.flush();
-			} else if (frame.type === "response" && frame.id === "ask") {
-				seen.push("ask");
-				child.stdin.write(`${JSON.stringify({ type: "extension_ui_response", id: confirmId, confirmed: true })}\n`);
-				await child.stdin.flush();
-			} else if (frame.type === "extension_ui_request" && frame.method === "notify") {
-				seen.push(String(frame.message));
-			} else if (frame.type === "response" && typeof frame.id === "string" && /^(s\d|p)$/.test(frame.id)) {
-				seen.push(`${frame.id}:${frame.success}`);
-				// Drain stdout to its end: closing the reader early would break the child's output pipe.
-				if (frame.id === "s3") child.stdin.end();
+	it(
+		"answers a dialog session_start awaits, running commands sent meanwhile only after startup, in order",
+		async () => {
+			await using temp = await TempDir.create("@rpc-startup-dialog-");
+			const child = await spawnStartupDialogRuntime(temp);
+			using deadline = childDeadline(child, "RPC startup-dialog fixture");
+			const stderr = new Response(child.stderr).text();
+			const seen: string[] = [];
+			let confirmId: unknown;
+			for await (const frame of readJsonl<unknown>(child.stdout)) {
+				if (!isRecord(frame)) continue;
+				if (frame.type === "extension_ui_request" && frame.method === "confirm") {
+					confirmId = frame.id;
+					// Held until startup finishes (had one run at once, its response would precede the confirm's
+					// notify) and then run in arrival order. set_ask_dialog is served during startup and takes effect.
+					for (const id of ["s1", "s2"]) child.stdin.write(`${JSON.stringify({ id, type: "get_state" })}\n`);
+					child.stdin.write(`${JSON.stringify({ id: "p", type: "prompt", message: "/probe" })}\n`);
+					child.stdin.write(`${JSON.stringify({ id: "s3", type: "get_state" })}\n`);
+					child.stdin.write(`${JSON.stringify({ id: "ask", type: "set_ask_dialog", enabled: true })}\n`);
+					await child.stdin.flush();
+				} else if (frame.type === "response" && frame.id === "ask") {
+					seen.push("ask");
+					child.stdin.write(
+						`${JSON.stringify({ type: "extension_ui_response", id: confirmId, confirmed: true })}\n`,
+					);
+					await child.stdin.flush();
+				} else if (frame.type === "extension_ui_request" && frame.method === "notify") {
+					seen.push(String(frame.message));
+				} else if (frame.type === "response" && typeof frame.id === "string" && /^(s\d|p)$/.test(frame.id)) {
+					seen.push(`${frame.id}:${frame.success}`);
+					// Drain stdout to its end: closing the reader early would break the child's output pipe.
+					if (frame.id === "s3") child.stdin.end();
+				}
 			}
-		}
-		await child.exited;
-		// The probe's own frames race the later state responses; every other frame's order is fixed.
-		expect(
-			seen.filter(entry => entry !== "p:true" && entry !== "askDialog:function"),
-			await stderr,
-		).toEqual(["ask", "true", "s1:true", "s2:true", "s3:true"]);
-		expect(seen).toContain("askDialog:function");
-	}, 30_000);
+			await child.exited;
+			await deadline.assertMet(stderr);
+			// The probe's own frames race the later state responses; every other frame's order is fixed.
+			expect(
+				seen.filter(entry => entry !== "p:true" && entry !== "askDialog:function"),
+				await stderr,
+			).toEqual(["ask", "true", "s1:true", "s2:true", "s3:true"]);
+			expect(seen).toContain("askDialog:function");
+		},
+		CHILD_TEST_TIMEOUT_MS,
+	);
 
-	it("rejects a dialog session_start awaits when stdin closes, so the process still exits", async () => {
-		await using temp = await TempDir.create("@rpc-startup-dialog-eof-");
-		const child = await spawnStartupDialogRuntime(temp);
-		const stderr = new Response(child.stderr).text();
-		// Read to the end of stdout: closing it early would fail the child's output, not exercise the EOF.
-		for await (const frame of readJsonl<unknown>(child.stdout)) {
-			if (isRecord(frame) && frame.type === "extension_ui_request" && frame.method === "confirm") child.stdin.end();
-		}
-		const exitCode = await child.exited;
-		expect({ exitCode, signal: child.signalCode }, await stderr).toEqual({ exitCode: 0, signal: null });
-	}, 30_000);
+	it(
+		"rejects a dialog session_start awaits when stdin closes, so the process still exits",
+		async () => {
+			await using temp = await TempDir.create("@rpc-startup-dialog-eof-");
+			const child = await spawnStartupDialogRuntime(temp);
+			using deadline = childDeadline(child, "RPC startup-dialog EOF fixture");
+			const stderr = new Response(child.stderr).text();
+			// Read to the end of stdout: closing it early would fail the child's output, not exercise the EOF.
+			for await (const frame of readJsonl<unknown>(child.stdout)) {
+				if (isRecord(frame) && frame.type === "extension_ui_request" && frame.method === "confirm")
+					child.stdin.end();
+			}
+			const exitCode = await child.exited;
+			await deadline.assertMet(stderr);
+			expect({ exitCode, signal: child.signalCode }, await stderr).toEqual({ exitCode: 0, signal: null });
+		},
+		CHILD_TEST_TIMEOUT_MS,
+	);
 
 	it("keeps the label-only wire shape for bare options", async () => {
 		const pendingRequests = new Map<string, PendingExtensionRequest>();
@@ -398,12 +466,14 @@ await runRpcMode(session);
 		await explicitUnmaskedResult;
 	});
 
-	it("rejects secret login input, completes ordinary OAuth input, and logs the stored account out", async () => {
-		await using temp = await TempDir.create("@rpc-login-");
-		const extensionPath = temp.join("login.mjs");
-		await Bun.write(
-			extensionPath,
-			`
+	it(
+		"rejects secret login input, completes ordinary OAuth input, and logs the stored account out",
+		async () => {
+			await using temp = await TempDir.create("@rpc-login-");
+			const extensionPath = temp.join("login.mjs");
+			await Bun.write(
+				extensionPath,
+				`
 export default function(pi) {
   globalThis.fetch = async () => { throw new Error("Offline login fixture refuses network"); };
   // rpc-alias is a second login for rpc-ordinary's credentials, like openai-codex-device.
@@ -432,152 +502,157 @@ export default function(pi) {
   }
 }
 `,
-		);
-		const child = Bun.spawn(
-			[
-				process.execPath,
-				path.join(import.meta.dir, "..", "src", "cli.ts"),
-				"--trusted-extension",
-				extensionPath,
-				"--mode",
-				"rpc",
-				"--provider",
-				"anthropic",
-				"--model",
-				"claude-sonnet-4-5",
-			],
-			{
-				cwd: temp.path(),
-				env: {
-					PATH: Bun.env.PATH,
-					HOME: temp.join("home"),
-					PI_CODING_AGENT_DIR: temp.join("agent"),
-					XDG_CONFIG_HOME: temp.join("config"),
-					XDG_DATA_HOME: temp.join("data"),
-					XDG_CACHE_HOME: temp.join("cache"),
-					CI: "true",
-					PI_NO_TITLE: "1",
+			);
+			const child = Bun.spawn(
+				[
+					process.execPath,
+					path.join(import.meta.dir, "..", "src", "cli.ts"),
+					"--trusted-extension",
+					extensionPath,
+					"--mode",
+					"rpc",
+					"--provider",
+					"anthropic",
+					"--model",
+					"claude-sonnet-4-5",
+				],
+				{
+					cwd: temp.path(),
+					env: {
+						PATH: Bun.env.PATH,
+						HOME: temp.join("home"),
+						PI_CODING_AGENT_DIR: temp.join("agent"),
+						XDG_CONFIG_HOME: temp.join("config"),
+						XDG_DATA_HOME: temp.join("data"),
+						XDG_CACHE_HOME: temp.join("cache"),
+						CI: "true",
+						PI_NO_TITLE: "1",
+					},
+					stdin: "pipe",
+					stdout: "pipe",
+					stderr: "pipe",
+					timeout: CHILD_REAP_MS,
 				},
-				stdin: "pipe",
-				stdout: "pipe",
-				stderr: "pipe",
-				timeout: 20_000,
-			},
-		);
-		const stdout = new Response(child.stdout).body;
-		if (!stdout) throw new Error("RPC login fixture did not expose stdout");
-		const stderr = new Response(child.stderr).text();
-		const inputTitles: string[] = [];
-		let secretResponse: unknown;
-		let ordinaryResponse: unknown;
-		let loggedInProvidersResponse: unknown;
-		let noProviderResponse: unknown;
-		let accountsResponse: unknown;
-		let logoutResponse: unknown;
-		let staleLogoutResponse: unknown;
-		let providersResponse: unknown;
-		let loggedOutCredentialId: unknown;
-		const send = async (frame: object) => {
-			child.stdin.write(`${JSON.stringify(frame)}\n`);
-			await child.stdin.flush();
-		};
+			);
+			using deadline = childDeadline(child, "RPC login fixture");
+			const stdout = new Response(child.stdout).body;
+			if (!stdout) throw new Error("RPC login fixture did not expose stdout");
+			const stderr = new Response(child.stderr).text();
+			const inputTitles: string[] = [];
+			let secretResponse: unknown;
+			let ordinaryResponse: unknown;
+			let loggedInProvidersResponse: unknown;
+			let noProviderResponse: unknown;
+			let accountsResponse: unknown;
+			let logoutResponse: unknown;
+			let staleLogoutResponse: unknown;
+			let providersResponse: unknown;
+			let loggedOutCredentialId: unknown;
+			const send = async (frame: object) => {
+				child.stdin.write(`${JSON.stringify(frame)}\n`);
+				await child.stdin.flush();
+			};
 
-		try {
-			await send({ type: "login", providerId: "rpc-secret", id: "secret" });
-			for await (const frame of readJsonl<unknown>(stdout)) {
-				if (!isRecord(frame)) continue;
-				if (frame.type === "extension_ui_request" && frame.method === "input") {
-					if (typeof frame.id !== "string" || typeof frame.title !== "string") {
-						throw new Error("RPC input request did not carry string id and title");
+			try {
+				await send({ type: "login", providerId: "rpc-secret", id: "secret" });
+				for await (const frame of readJsonl<unknown>(stdout)) {
+					if (!isRecord(frame)) continue;
+					if (frame.type === "extension_ui_request" && frame.method === "input") {
+						if (typeof frame.id !== "string" || typeof frame.title !== "string") {
+							throw new Error("RPC input request did not carry string id and title");
+						}
+						inputTitles.push(frame.title);
+						await send({ type: "extension_ui_response", id: frame.id, value: crypto.randomUUID() });
+					} else if (frame.type === "response" && frame.id === "secret") {
+						secretResponse = frame;
+						await send({ type: "login", providerId: "rpc-ordinary", id: "ordinary" });
+					} else if (frame.type === "response" && frame.id === "ordinary") {
+						ordinaryResponse = frame;
+						await send({ type: "get_login_providers", id: "loggedIn" });
+					} else if (frame.type === "response" && frame.id === "loggedIn") {
+						loggedInProvidersResponse = frame;
+						await send({ type: "get_logout_accounts", providerId: "rpc-alias", id: "accounts" });
+					} else if (frame.type === "response" && frame.id === "accounts") {
+						accountsResponse = frame;
+						const accounts =
+							isRecord(frame.data) && Array.isArray(frame.data.accounts) ? frame.data.accounts : [];
+						loggedOutCredentialId = isRecord(accounts[0]) ? accounts[0].credentialId : undefined;
+						await send({
+							type: "logout",
+							providerId: "rpc-alias",
+							credentialId: loggedOutCredentialId,
+							id: "logout",
+						});
+					} else if (frame.type === "response" && frame.id === "logout") {
+						logoutResponse = frame;
+						await send({
+							type: "logout",
+							providerId: "rpc-ordinary",
+							credentialId: loggedOutCredentialId,
+							id: "stale",
+						});
+					} else if (frame.type === "response" && frame.id === "stale") {
+						staleLogoutResponse = frame;
+						// Without a provider the credential store would list every provider's accounts.
+						await send({ type: "get_logout_accounts", id: "noProvider" });
+					} else if (frame.type === "response" && frame.id === "noProvider") {
+						noProviderResponse = frame;
+						await send({ type: "get_login_providers", id: "providers" });
+					} else if (frame.type === "response" && frame.id === "providers") {
+						providersResponse = frame;
+						break;
 					}
-					inputTitles.push(frame.title);
-					await send({ type: "extension_ui_response", id: frame.id, value: crypto.randomUUID() });
-				} else if (frame.type === "response" && frame.id === "secret") {
-					secretResponse = frame;
-					await send({ type: "login", providerId: "rpc-ordinary", id: "ordinary" });
-				} else if (frame.type === "response" && frame.id === "ordinary") {
-					ordinaryResponse = frame;
-					await send({ type: "get_login_providers", id: "loggedIn" });
-				} else if (frame.type === "response" && frame.id === "loggedIn") {
-					loggedInProvidersResponse = frame;
-					await send({ type: "get_logout_accounts", providerId: "rpc-alias", id: "accounts" });
-				} else if (frame.type === "response" && frame.id === "accounts") {
-					accountsResponse = frame;
-					const accounts = isRecord(frame.data) && Array.isArray(frame.data.accounts) ? frame.data.accounts : [];
-					loggedOutCredentialId = isRecord(accounts[0]) ? accounts[0].credentialId : undefined;
-					await send({
-						type: "logout",
-						providerId: "rpc-alias",
-						credentialId: loggedOutCredentialId,
-						id: "logout",
-					});
-				} else if (frame.type === "response" && frame.id === "logout") {
-					logoutResponse = frame;
-					await send({
-						type: "logout",
-						providerId: "rpc-ordinary",
-						credentialId: loggedOutCredentialId,
-						id: "stale",
-					});
-				} else if (frame.type === "response" && frame.id === "stale") {
-					staleLogoutResponse = frame;
-					// Without a provider the credential store would list every provider's accounts.
-					await send({ type: "get_logout_accounts", id: "noProvider" });
-				} else if (frame.type === "response" && frame.id === "noProvider") {
-					noProviderResponse = frame;
-					await send({ type: "get_login_providers", id: "providers" });
-				} else if (frame.type === "response" && frame.id === "providers") {
-					providersResponse = frame;
-					break;
 				}
+			} finally {
+				child.stdin.end();
+				child.kill();
+				await child.exited;
 			}
-		} finally {
-			child.stdin.end();
-			child.kill();
-			await child.exited;
-		}
 
-		if (!providersResponse) throw new Error(`RPC login fixture did not finish: ${await stderr}`);
-		await stderr;
-		expect(secretResponse).toMatchObject({
-			type: "response",
-			command: "login",
-			success: false,
-			error: expect.stringContaining("requires secret input"),
-		});
-		expect(inputTitles).toEqual(["rpc-ordinary"]);
-		expect(ordinaryResponse).toMatchObject({ type: "response", command: "login", success: true });
-		expect(loggedInProvidersResponse).toMatchObject({
-			data: {
-				providers: expect.arrayContaining([
-					expect.objectContaining({ id: "rpc-ordinary", authenticated: true }),
-					// The alias stores under rpc-ordinary, so it is authenticated by the same credential.
-					expect.objectContaining({ id: "rpc-alias", authenticated: true }),
-				]),
-			},
-		});
-		expect(accountsResponse).toMatchObject({
-			success: true,
-			data: { accounts: [expect.objectContaining({ provider: "rpc-ordinary", active: true })] },
-		});
-		expect(logoutResponse).toEqual({ id: "logout", type: "response", command: "logout", success: true, data: {} });
-		expect(staleLogoutResponse).toMatchObject({
-			command: "logout",
-			success: false,
-			error: expect.stringContaining("is not stored for rpc-ordinary"),
-		});
-		expect(noProviderResponse).toMatchObject({ command: "get_logout_accounts", success: false });
-		expect(providersResponse).toMatchObject({
-			success: true,
-			data: {
-				providers: expect.arrayContaining([
-					expect.objectContaining({ id: "rpc-secret", authenticated: false }),
-					expect.objectContaining({ id: "rpc-ordinary", authenticated: false }),
-					expect.objectContaining({ id: "rpc-alias", authenticated: false }),
-				]),
-			},
-		});
-	}, 30_000);
+			await deadline.assertMet(stderr);
+			if (!providersResponse) throw new Error(`RPC login fixture did not finish: ${await stderr}`);
+			await stderr;
+			expect(secretResponse).toMatchObject({
+				type: "response",
+				command: "login",
+				success: false,
+				error: expect.stringContaining("requires secret input"),
+			});
+			expect(inputTitles).toEqual(["rpc-ordinary"]);
+			expect(ordinaryResponse).toMatchObject({ type: "response", command: "login", success: true });
+			expect(loggedInProvidersResponse).toMatchObject({
+				data: {
+					providers: expect.arrayContaining([
+						expect.objectContaining({ id: "rpc-ordinary", authenticated: true }),
+						// The alias stores under rpc-ordinary, so it is authenticated by the same credential.
+						expect.objectContaining({ id: "rpc-alias", authenticated: true }),
+					]),
+				},
+			});
+			expect(accountsResponse).toMatchObject({
+				success: true,
+				data: { accounts: [expect.objectContaining({ provider: "rpc-ordinary", active: true })] },
+			});
+			expect(logoutResponse).toEqual({ id: "logout", type: "response", command: "logout", success: true, data: {} });
+			expect(staleLogoutResponse).toMatchObject({
+				command: "logout",
+				success: false,
+				error: expect.stringContaining("is not stored for rpc-ordinary"),
+			});
+			expect(noProviderResponse).toMatchObject({ command: "get_logout_accounts", success: false });
+			expect(providersResponse).toMatchObject({
+				success: true,
+				data: {
+					providers: expect.arrayContaining([
+						expect.objectContaining({ id: "rpc-secret", authenticated: false }),
+						expect.objectContaining({ id: "rpc-ordinary", authenticated: false }),
+						expect.objectContaining({ id: "rpc-alias", authenticated: false }),
+					]),
+				},
+			});
+		},
+		CHILD_TEST_TIMEOUT_MS,
+	);
 });
 
 describe("RPC ask dialog", () => {
@@ -707,123 +782,129 @@ describe("RPC ask dialog", () => {
 		expect(onTimeout).not.toHaveBeenCalled();
 	});
 
-	it("keeps select prompts until the host opts in, then sends each ask as one dialog", async () => {
-		await using temp = await TempDir.create("@rpc-ask-dialog-");
-		const extensionPath = temp.join("scripted-ask.ts");
-		await Bun.write(extensionPath, scriptedAskProvider);
-		const child = Bun.spawn(
-			[
-				process.execPath,
-				path.join(import.meta.dir, "..", "src", "cli.ts"),
-				"--trusted-extension",
-				extensionPath,
-				"--mode",
-				"rpc-ui",
-				"--no-session",
-			],
-			{
-				cwd: temp.path(),
-				env: {
-					PATH: Bun.env.PATH,
-					HOME: temp.join("home"),
-					PI_CODING_AGENT_DIR: temp.join("agent"),
-					XDG_CONFIG_HOME: temp.join("config"),
-					XDG_DATA_HOME: temp.join("data"),
-					XDG_CACHE_HOME: temp.join("cache"),
-					CI: "true",
-					PI_NO_TITLE: "1",
+	it(
+		"keeps select prompts until the host opts in, then sends each ask as one dialog",
+		async () => {
+			await using temp = await TempDir.create("@rpc-ask-dialog-");
+			const extensionPath = temp.join("scripted-ask.ts");
+			await Bun.write(extensionPath, scriptedAskProvider);
+			const child = Bun.spawn(
+				[
+					process.execPath,
+					path.join(import.meta.dir, "..", "src", "cli.ts"),
+					"--trusted-extension",
+					extensionPath,
+					"--mode",
+					"rpc-ui",
+					"--no-session",
+				],
+				{
+					cwd: temp.path(),
+					env: {
+						PATH: Bun.env.PATH,
+						HOME: temp.join("home"),
+						PI_CODING_AGENT_DIR: temp.join("agent"),
+						XDG_CONFIG_HOME: temp.join("config"),
+						XDG_DATA_HOME: temp.join("data"),
+						XDG_CACHE_HOME: temp.join("cache"),
+						CI: "true",
+						PI_NO_TITLE: "1",
+					},
+					stdin: "pipe",
+					stdout: "pipe",
+					stderr: "pipe",
+					timeout: CHILD_REAP_MS,
 				},
-				stdin: "pipe",
-				stdout: "pipe",
-				stderr: "pipe",
-				timeout: 30_000,
-			},
-		);
-		const stdout = new Response(child.stdout).body;
-		if (!stdout) throw new Error("RPC ask fixture did not expose stdout");
-		const stderr = new Response(child.stderr).text();
-		const send = async (frame: object) => {
-			child.stdin.write(`${JSON.stringify(frame)}\n`);
-			await child.stdin.flush();
-		};
-		const selectRequests: Record<string, unknown>[] = [];
-		const askRequests: Record<string, unknown>[] = [];
-		const toolResults: unknown[] = [];
-		let optInResponse: unknown;
-		let finished = false;
+			);
+			using deadline = childDeadline(child, "RPC ask fixture");
+			const stdout = new Response(child.stdout).body;
+			if (!stdout) throw new Error("RPC ask fixture did not expose stdout");
+			const stderr = new Response(child.stderr).text();
+			const send = async (frame: object) => {
+				child.stdin.write(`${JSON.stringify(frame)}\n`);
+				await child.stdin.flush();
+			};
+			const selectRequests: Record<string, unknown>[] = [];
+			const askRequests: Record<string, unknown>[] = [];
+			const toolResults: unknown[] = [];
+			let optInResponse: unknown;
+			let finished = false;
 
-		try {
-			// The provider exists only once the extension loads, so select it over RPC.
-			await send({ type: "set_model", id: "model", provider: "scripted", modelId: "ask" });
-			for await (const frame of readJsonl<unknown>(stdout)) {
-				if (!isRecord(frame)) continue;
-				if (frame.type === "response" && frame.id === "model") {
-					if (frame.success !== true) throw new Error(`Scripted model unavailable: ${JSON.stringify(frame)}`);
-					await send({ type: "prompt", id: "fallback", message: JSON.stringify({ questions: [dbQuestion] }) });
-				} else if (frame.type === "extension_ui_request" && frame.method === "select") {
-					selectRequests.push(frame);
-					await send({ type: "extension_ui_response", id: frame.id, value: "Postgres" });
-				} else if (frame.type === "extension_ui_request" && frame.method === "ask") {
-					askRequests.push(frame);
-					await send({
-						type: "extension_ui_response",
-						id: frame.id,
-						answers: [
-							{ id: "db", selectedOptions: [], customInput: "DuckDB" },
-							{ id: "features", selectedOptions: ["Auth", "Search"] },
-						],
-					});
-				} else if (frame.type === "tool_execution_end" && frame.toolName === "ask") {
-					toolResults.push(frame.result);
-				} else if (frame.type === "prompt_result" && frame.id === "fallback") {
-					await send({ type: "set_ask_dialog", id: "opt-in", enabled: true });
-				} else if (frame.type === "response" && frame.id === "opt-in") {
-					optInResponse = frame;
-					await send({
-						type: "prompt",
-						id: "dialog",
-						message: JSON.stringify({ questions: [dbQuestion, featuresQuestion] }),
-					});
-				} else if (frame.type === "prompt_result" && frame.id === "dialog") {
-					finished = true;
-					break;
+			try {
+				// The provider exists only once the extension loads, so select it over RPC.
+				await send({ type: "set_model", id: "model", provider: "scripted", modelId: "ask" });
+				for await (const frame of readJsonl<unknown>(stdout)) {
+					if (!isRecord(frame)) continue;
+					if (frame.type === "response" && frame.id === "model") {
+						if (frame.success !== true) throw new Error(`Scripted model unavailable: ${JSON.stringify(frame)}`);
+						await send({ type: "prompt", id: "fallback", message: JSON.stringify({ questions: [dbQuestion] }) });
+					} else if (frame.type === "extension_ui_request" && frame.method === "select") {
+						selectRequests.push(frame);
+						await send({ type: "extension_ui_response", id: frame.id, value: "Postgres" });
+					} else if (frame.type === "extension_ui_request" && frame.method === "ask") {
+						askRequests.push(frame);
+						await send({
+							type: "extension_ui_response",
+							id: frame.id,
+							answers: [
+								{ id: "db", selectedOptions: [], customInput: "DuckDB" },
+								{ id: "features", selectedOptions: ["Auth", "Search"] },
+							],
+						});
+					} else if (frame.type === "tool_execution_end" && frame.toolName === "ask") {
+						toolResults.push(frame.result);
+					} else if (frame.type === "prompt_result" && frame.id === "fallback") {
+						await send({ type: "set_ask_dialog", id: "opt-in", enabled: true });
+					} else if (frame.type === "response" && frame.id === "opt-in") {
+						optInResponse = frame;
+						await send({
+							type: "prompt",
+							id: "dialog",
+							message: JSON.stringify({ questions: [dbQuestion, featuresQuestion] }),
+						});
+					} else if (frame.type === "prompt_result" && frame.id === "dialog") {
+						finished = true;
+						break;
+					}
 				}
+			} finally {
+				child.stdin.end();
+				child.kill();
+				await child.exited;
 			}
-		} finally {
-			child.stdin.end();
-			child.kill();
-			await child.exited;
-		}
 
-		if (!finished) throw new Error(`RPC ask fixture did not finish: ${await stderr}`);
-		await stderr;
-		expect(selectRequests).toHaveLength(1);
-		expect(selectRequests[0]).toMatchObject({ method: "select", title: "Which database?" });
-		expect(optInResponse).toEqual({
-			id: "opt-in",
-			type: "response",
-			command: "set_ask_dialog",
-			success: true,
-			data: { enabled: true },
-		});
-		expect(askRequests).toEqual([
-			{
-				type: "extension_ui_request",
-				id: expect.any(String),
-				method: "ask",
-				questions: [dbQuestion, featuresQuestion],
-			},
-		]);
-		expect(toolResults).toEqual([
-			expect.objectContaining({ details: expect.objectContaining({ selectedOptions: ["Postgres"] }) }),
-			expect.objectContaining({
-				details: {
-					results: [
-						expect.objectContaining({ id: "db", selectedOptions: [], customInput: "DuckDB" }),
-						expect.objectContaining({ id: "features", selectedOptions: ["Auth", "Search"] }),
-					],
+			await deadline.assertMet(stderr);
+			if (!finished) throw new Error(`RPC ask fixture did not finish: ${await stderr}`);
+			await stderr;
+			expect(selectRequests).toHaveLength(1);
+			expect(selectRequests[0]).toMatchObject({ method: "select", title: "Which database?" });
+			expect(optInResponse).toEqual({
+				id: "opt-in",
+				type: "response",
+				command: "set_ask_dialog",
+				success: true,
+				data: { enabled: true },
+			});
+			expect(askRequests).toEqual([
+				{
+					type: "extension_ui_request",
+					id: expect.any(String),
+					method: "ask",
+					questions: [dbQuestion, featuresQuestion],
 				},
-			}),
-		]);
-	}, 60_000);
+			]);
+			expect(toolResults).toEqual([
+				expect.objectContaining({ details: expect.objectContaining({ selectedOptions: ["Postgres"] }) }),
+				expect.objectContaining({
+					details: {
+						results: [
+							expect.objectContaining({ id: "db", selectedOptions: [], customInput: "DuckDB" }),
+							expect.objectContaining({ id: "features", selectedOptions: ["Auth", "Search"] }),
+						],
+					},
+				}),
+			]);
+		},
+		CHILD_TEST_TIMEOUT_MS,
+	);
 });

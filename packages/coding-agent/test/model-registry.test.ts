@@ -2548,6 +2548,102 @@ describe("ModelRegistry", () => {
 			expect(await enabled.getApiKeyForProvider("github-copilot")).toBeDefined();
 		});
 	});
+	describe("the value a check reads is the value its action uses", () => {
+		/** A plain model row whose `field` answers `first` on its first read and `later` on every read after. */
+		function switching(field: keyof Model, first: unknown, later: unknown): Model {
+			let reads = 0;
+			const model = {
+				id: "switching",
+				name: "switching",
+				api: "openai-completions",
+				provider: "checked-safe",
+				baseUrl: "https://checked.invalid/v1",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 10_000,
+				maxTokens: 100,
+			} as Model;
+			Object.defineProperty(model, field, { enumerable: true, get: () => (reads++ === 0 ? first : later) });
+			return model;
+		}
+
+		test("the provider checked against disabledProviders is the provider whose credential is resolved", async () => {
+			authStorage.keys.setRuntime("checked-safe", "safe-secret");
+			authStorage.keys.setRuntime("checked-blocked", "blocked-secret");
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+				settings: Settings.isolated({ disabledProviders: ["checked-blocked"] }),
+			});
+
+			expect(await registry.getApiKey(switching("provider", "checked-blocked", "checked-blocked"))).toBeUndefined();
+			expect(await registry.getApiKey(switching("provider", "checked-safe", "checked-blocked"))).toBe("safe-secret");
+		});
+
+		test("the legacy facade's headers belong to the provider whose key it resolved", async () => {
+			writeRawModelsJson({ anthropic: { headers: { "x-anthropic-tenant": "anthropic-only" } } });
+			authStorage.keys.setRuntime("checked-safe", "safe-secret");
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+
+			expect(await registry.getApiKeyAndHeaders(switching("provider", "checked-safe", "anthropic"))).toEqual({
+				ok: true,
+				apiKey: "safe-secret",
+				headers: undefined,
+			});
+		});
+
+		test("a provider credential request reads each option once and passes on the model id it looked up", async () => {
+			authStorage.keys.setRuntime("checked-safe", "safe-secret");
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const looked: string[] = [];
+			const passed: Array<string | undefined> = [];
+			const find = registry.find.bind(registry);
+			spies.push(
+				spyOn(registry, "find").mockImplementation((provider, modelId) => {
+					looked.push(modelId);
+					return find(provider, modelId);
+				}),
+			);
+			const getWithCredential = authStorage.keys.getWithCredential.bind(authStorage.keys);
+			spies.push(
+				spyOn(authStorage.keys, "getWithCredential").mockImplementation((provider, sessionId, options) => {
+					passed.push(options?.modelId);
+					return getWithCredential(provider, sessionId, options);
+				}),
+			);
+			const reads = { modelId: 0, forceRefresh: 0 };
+			const options = {
+				get modelId() {
+					return reads.modelId++ === 0 ? "first-model" : "second-model";
+				},
+				get forceRefresh() {
+					reads.forceRefresh++;
+					return false;
+				},
+			};
+
+			expect((await registry.getApiKeyWithCredentialForProvider("checked-safe", undefined, options))?.apiKey).toBe(
+				"safe-secret",
+			);
+			expect(reads).toEqual({ modelId: 1, forceRefresh: 1 });
+			expect(looked).toEqual(["first-model"]);
+			expect(passed).toEqual(["first-model"]);
+		});
+
+		test("a model's headers come from the resolver and the headers it checked", async () => {
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const checked = async () => ({ "x-resolver": "checked" });
+			const other = async () => ({ "x-resolver": "other" });
+
+			expect(await registry.resolveModelHeaders(switching("resolveHeaders", checked, other))).toEqual({
+				"x-resolver": "checked",
+			});
+			expect(
+				await registry.resolveModelHeaders(
+					switching("headers", { "x-header": "checked" }, { "x-header": "other" }),
+				),
+			).toEqual({ "x-header": "checked" });
+		});
+	});
 	describe("extended context", () => {
 		const thinking: ThinkingConfig = {
 			mode: "effort",

@@ -1,6 +1,6 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
-import { getOAuthApiKey, getOAuthProvider } from "../registry/oauth";
+import { getOAuthApiKey, getOAuthProviderEntry } from "../registry/oauth";
 import type { OAuthCredentials, OAuthProvider } from "../registry/oauth/types";
 import type { Provider } from "../types";
 import type { CredentialRankingContext, CredentialRankingStrategy, PlanGate, UsageReport } from "../usage";
@@ -17,6 +17,7 @@ import {
 } from "./blocks";
 import type { AccountPolicies } from "./policy";
 import { authCredentialEquals, type CredentialPool } from "./pool";
+import { callThroughGate, handOAuthCredentials } from "./provider-gate";
 import {
 	orderUsageRankedCandidates,
 	planPriority,
@@ -1134,7 +1135,7 @@ export class CredentialSelector {
 
 		try {
 			let result: { newCredentials: OAuthCredentials; apiKey: string } | null;
-			const customProvider = getOAuthProvider(provider);
+			const customProvider = getOAuthProviderEntry(provider);
 			if (customProvider) {
 				const refreshedCredentials = await this.#deps.refresher.refresh(
 					provider,
@@ -1142,9 +1143,24 @@ export class CredentialSelector {
 					credentialId,
 					options?.signal,
 				);
-				const apiKey = customProvider.getApiKey
-					? customProvider.getApiKey(refreshedCredentials)
-					: refreshedCredentials.access;
+				// Selected again after the await: the registration chosen before the refresh may have
+				// retired during it, and then an earlier live one answers.
+				const { provider: custom, gate } = getOAuthProviderEntry(provider) ?? customProvider;
+				// The capability read is the author's code as much as the call (it may be a getter),
+				// so both run as the owning session's work, and the function read is the one called.
+				// A session's `getApiKey` is handed a copy: `refreshedCredentials` is the host's record —
+				// the pool's entry, or the refresh it just stored — and is what the merge below reads,
+				// so a getter or assignment on it would decide what is stored. What the author returns
+				// is the key; changing what it was handed changes nothing the host keeps. A host
+				// registration is handed the record itself, as it always has been.
+				const apiKey = callThroughGate(gate, () => {
+					const getApiKey = custom.getApiKey;
+					return getApiKey
+						? Reflect.apply(getApiKey, custom, [
+								gate ? handOAuthCredentials(refreshedCredentials) : refreshedCredentials,
+							])
+						: refreshedCredentials.access;
+				});
 				result = { newCredentials: refreshedCredentials, apiKey };
 			} else {
 				// Refresh first through the broker-aware single-flighted machinery

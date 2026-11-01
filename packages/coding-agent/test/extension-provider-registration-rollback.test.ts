@@ -51,6 +51,7 @@ describe("extension provider registration rollback", () => {
 				name: "cliproxyapi",
 				config: { baseUrl: "https://replacement.example.invalid/v1" },
 				sourceId: "pi-cliproxyapi-provider@1.4.13",
+				owner: runtime,
 			},
 		]);
 	});
@@ -120,9 +121,11 @@ describe("extension provider registration rollback", () => {
 		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
 		try {
 			const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.json"));
-			modelRegistry.registerProvider("cliproxyapi", testProviderConfig, "pi-cliproxyapi-provider");
-
 			const runtime = new ExtensionRuntime();
+			// Drained the way session creation drains it: as this runtime's registration. A
+			// session's withdrawal takes away its own registration, not one the host made.
+			modelRegistry.registerProvider("cliproxyapi", testProviderConfig, "pi-cliproxyapi-provider", runtime);
+
 			const events = new EventBus();
 			let replaceProvider: (() => void) | undefined;
 			const extension = await loadExtensionFromFactory(
@@ -223,6 +226,7 @@ describe("extension provider registration rollback", () => {
 				return report;
 			},
 		};
+		const originalFetchUsage = extensionUsage.fetchUsage;
 
 		try {
 			const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.json"));
@@ -243,7 +247,11 @@ describe("extension provider registration rollback", () => {
 			}
 
 			await expect(authStorage.usage.reports()).resolves.toEqual([report]);
+			// The object an extension registered is stored exactly as it handed it over: its
+			// lifetime is kept beside the registration, not wrapped around it, so identity,
+			// shape and receiver are the author's throughout.
 			expect(authStorage.usage.providerFor(provider)).toBe(extensionUsage);
+			expect(extensionUsage.fetchUsage).toBe(originalFetchUsage);
 
 			modelRegistry.unregisterProvider(provider);
 			expect(authStorage.usage.providerFor(provider)).toBeUndefined();
@@ -255,6 +263,63 @@ describe("extension provider registration rollback", () => {
 			expect(authStorage.usage.providerFor("synthetic")).toBe(syntheticOverride);
 			modelRegistry.unregisterProvider("synthetic");
 			expect(authStorage.usage.providerFor("synthetic")).toBe(builtinUsage);
+		} finally {
+			authStorage.close();
+			tempDir.removeSync();
+		}
+	});
+
+	test("keeps a class-written usage provider intact, and stops selecting it once its session goes", async () => {
+		// What an extension hands over is not always an object literal: a class instance keeps
+		// its methods on the prototype and its state in private fields. It is stored as it was
+		// written — the real consumer calls it with itself as the receiver, so `#private` works
+		// — and the session that registered it decides whether it may be called at all.
+		const tempDir = TempDir.createSync("@extension-usage-class-");
+		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+		const provider = "extension-usage-class";
+		let calls = 0;
+		class ClassUsage {
+			readonly #id = provider;
+			get id(): string {
+				return this.#id;
+			}
+			async fetchUsage(): Promise<UsageReport | null> {
+				calls++;
+				// Reads a private field: proof the method ran against this instance.
+				return { provider: this.#id, fetchedAt: 1, limits: [] };
+			}
+		}
+		const extensionUsage = new ClassUsage();
+		try {
+			const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.json"));
+			const runtime = new ExtensionRuntime();
+			const release = runtime.beginSession();
+			await loadExtensionFromFactory(
+				pi => {
+					pi.registerProvider(provider, { apiKey: "class-usage-key", usage: extensionUsage });
+				},
+				process.cwd(),
+				new EventBus(),
+				runtime,
+				provider,
+			);
+			for (const registration of runtime.pendingProviderRegistrations) {
+				modelRegistry.registerProvider(registration.name, registration.config, registration.sourceId);
+			}
+
+			// Stored as written: same object, prototype method, getter and private field alike.
+			expect(authStorage.usage.providerFor(provider)).toBe(extensionUsage);
+			await expect(authStorage.usage.reports()).resolves.toEqual([{ provider, fetchedAt: 1, limits: [] }]);
+			expect(calls).toBe(1);
+
+			// Its session goes: the entry stops being selected, so the consumer never reaches it.
+			release();
+			expect(authStorage.usage.providerFor(provider)).toBeUndefined();
+			await expect(authStorage.usage.reports()).resolves.toEqual([]);
+			expect(calls).toBe(1);
+
+			modelRegistry.unregisterProvider(provider);
+			expect(authStorage.usage.providerFor(provider)).toBeUndefined();
 		} finally {
 			authStorage.close();
 			tempDir.removeSync();
