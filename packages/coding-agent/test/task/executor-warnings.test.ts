@@ -1,4 +1,9 @@
 import { describe, expect, it } from "bun:test";
+
+const testTerminalContext = {
+	terminalYieldAccepted: false,
+	yieldInvalidatedByAsync: false,
+};
 import {
 	finalizeSubprocessOutput,
 	SUBAGENT_WARNING_MISSING_YIELD,
@@ -9,6 +14,7 @@ import {
 describe("subagent warning injection", () => {
 	it("injects null-data warning when yield is success without data", () => {
 		const result = finalizeSubprocessOutput({
+			terminalContext: testTerminalContext,
 			rawOutput: "partial output",
 			exitCode: 0,
 			stderr: "",
@@ -24,6 +30,7 @@ describe("subagent warning injection", () => {
 
 	it("marks structured output invalid, not silently valid, when a schema-bearing yield has no data", () => {
 		const result = finalizeSubprocessOutput({
+			terminalContext: testTerminalContext,
 			rawOutput: "partial output",
 			exitCode: 0,
 			stderr: "",
@@ -47,6 +54,7 @@ describe("subagent warning injection", () => {
 
 	it("leaves the exit code untouched for a null yield in permissive mode", () => {
 		const result = finalizeSubprocessOutput({
+			terminalContext: testTerminalContext,
 			rawOutput: "partial output",
 			exitCode: 0,
 			stderr: "",
@@ -64,6 +72,7 @@ describe("subagent warning injection", () => {
 
 	it("injects missing-submit warning when subagent exits cleanly without yield", () => {
 		const result = finalizeSubprocessOutput({
+			terminalContext: testTerminalContext,
 			rawOutput: "",
 			exitCode: 0,
 			stderr: "",
@@ -79,6 +88,7 @@ describe("subagent warning injection", () => {
 
 	it("does not inject missing-submit warning when fallback completion is recoverable", () => {
 		const result = finalizeSubprocessOutput({
+			terminalContext: testTerminalContext,
 			rawOutput: '{"data":{"ok":true}}',
 			exitCode: 0,
 			stderr: "",
@@ -94,6 +104,7 @@ describe("subagent warning injection", () => {
 
 	it("prefixes missing-submit warning on stop outputs", () => {
 		const result = finalizeSubprocessOutput({
+			terminalContext: testTerminalContext,
 			rawOutput: "agent stopped after writing analysis",
 			exitCode: 0,
 			stderr: "",
@@ -108,6 +119,7 @@ describe("subagent warning injection", () => {
 
 	it("does not inject missing-submit warning when execution exits non-zero", () => {
 		const result = finalizeSubprocessOutput({
+			terminalContext: testTerminalContext,
 			rawOutput: "",
 			exitCode: 1,
 			stderr: "subagent terminated",
@@ -124,6 +136,7 @@ describe("subagent warning injection", () => {
 
 	it("normalizes explicit aborted yield into aborted payload", () => {
 		const result = finalizeSubprocessOutput({
+			terminalContext: testTerminalContext,
 			rawOutput: "partial output",
 			exitCode: 1,
 			stderr: "old error",
@@ -142,6 +155,7 @@ describe("subagent warning injection", () => {
 
 	it("accepts successful yield data without warning", () => {
 		const result = finalizeSubprocessOutput({
+			terminalContext: testTerminalContext,
 			rawOutput: "should be replaced",
 			exitCode: 0,
 			stderr: "",
@@ -173,18 +187,27 @@ describe("subagent warning injection", () => {
 			},
 			outputSchemaSource: "caller" as const,
 		};
-		const strict = finalizeSubprocessOutput({ ...args, outputSchemaMode: "strict" });
+		const strict = finalizeSubprocessOutput({
+			terminalContext: testTerminalContext,
+			...args,
+			outputSchemaMode: "strict",
+		});
 		expect(strict.exitCode).toBe(0);
 		expect(strict.structuredOutput?.status).toBe("valid");
 		expect(strict.structuredOutput?.data).toEqual({ status: "done", detail: {} });
 
-		const permissive = finalizeSubprocessOutput({ ...args, outputSchemaMode: "permissive" });
+		const permissive = finalizeSubprocessOutput({
+			terminalContext: testTerminalContext,
+			...args,
+			outputSchemaMode: "permissive",
+		});
 		expect(permissive.exitCode).toBe(1);
 		expect(permissive.structuredOutput?.status).toBe("invalid");
 	});
 
 	it("does not inject missing-submit warning when no schema and raw text exists", () => {
 		const result = finalizeSubprocessOutput({
+			terminalContext: testTerminalContext,
 			rawOutput: "plain text notes",
 			exitCode: 0,
 			stderr: "",
@@ -206,6 +229,7 @@ describe("subagent warning injection", () => {
 		// `schema_violation`, opaquely swapping the agent's accepted output for an
 		// error blob. Reports #2, #8, #11, #16, #17, #20.
 		const result = finalizeSubprocessOutput({
+			terminalContext: testTerminalContext,
 			rawOutput: "",
 			exitCode: 0,
 			stderr: "",
@@ -244,6 +268,7 @@ describe("subagent warning injection", () => {
 		// emit `schema_violation: invalid output schema` even though yield accepted
 		// it, which surprised users dispatching prose review batches. Report #60.
 		const result = finalizeSubprocessOutput({
+			terminalContext: testTerminalContext,
 			rawOutput: "",
 			exitCode: 0,
 			stderr: "",
@@ -260,6 +285,7 @@ describe("subagent warning injection", () => {
 
 	it("assembles incremental typed yield sections on idle", () => {
 		const result = finalizeSubprocessOutput({
+			terminalContext: testTerminalContext,
 			rawOutput: "",
 			exitCode: 0,
 			stderr: "",
@@ -289,6 +315,7 @@ describe("subagent warning injection", () => {
 
 	it("validates assembled typed yield data against the output schema", () => {
 		const result = finalizeSubprocessOutput({
+			terminalContext: testTerminalContext,
 			rawOutput: "",
 			exitCode: 0,
 			stderr: "",
@@ -315,6 +342,7 @@ describe("subagent warning injection", () => {
 
 	it("assembles a single incremental array-typed section into a one-element list", () => {
 		const result = finalizeSubprocessOutput({
+			terminalContext: testTerminalContext,
 			rawOutput: "",
 			exitCode: 0,
 			stderr: "",
@@ -355,6 +383,7 @@ describe("subagent warning injection", () => {
 		// Reviewer re-yields `explanation` after async jobs settle (#13448); wrapping
 		// the repeat into `["A", "B"]` failed `explanation: string` validation.
 		const result = finalizeSubprocessOutput({
+			terminalContext: testTerminalContext,
 			rawOutput: "",
 			exitCode: 0,
 			stderr: "",
@@ -394,6 +423,7 @@ describe("subagent warning injection", () => {
 	it("keeps the latest scalar section when properties live in JTD discriminator variants", () => {
 		// A discriminator compiles to a root `oneOf`; shapes must come from the variants.
 		const result = finalizeSubprocessOutput({
+			terminalContext: testTerminalContext,
 			rawOutput: "",
 			exitCode: 0,
 			stderr: "",
@@ -423,6 +453,7 @@ describe("subagent warning injection", () => {
 
 	it("clears a discarded scalar override after a valid replacement", () => {
 		const result = finalizeSubprocessOutput({
+			terminalContext: testTerminalContext,
 			rawOutput: "",
 			exitCode: 0,
 			stderr: "",
@@ -455,6 +486,7 @@ describe("subagent warning injection", () => {
 
 	it("uses last assistant text as the raw result for terminal string-typed yields without data", () => {
 		const result = finalizeSubprocessOutput({
+			terminalContext: testTerminalContext,
 			rawOutput: "",
 			exitCode: 0,
 			stderr: "",
@@ -474,6 +506,7 @@ describe("subagent warning injection", () => {
 		// turn and dropped earlier incremental sections; the sections are the work
 		// product, so they must survive the finalize.
 		const result = finalizeSubprocessOutput({
+			terminalContext: testTerminalContext,
 			rawOutput: "",
 			exitCode: 0,
 			stderr: "",
@@ -496,6 +529,7 @@ describe("subagent warning injection", () => {
 		// was treated as a section labeled "result", nesting the payload one level
 		// deep so every required field read as missing (schema_violation).
 		const result = finalizeSubprocessOutput({
+			terminalContext: testTerminalContext,
 			rawOutput: "",
 			exitCode: 0,
 			stderr: "",
@@ -529,6 +563,7 @@ describe("subagent warning injection", () => {
 
 	it("serializes untyped useLastTurn yield as raw text", () => {
 		const result = finalizeSubprocessOutput({
+			terminalContext: testTerminalContext,
 			rawOutput: "",
 			exitCode: 0,
 			stderr: "",
@@ -545,6 +580,7 @@ describe("subagent warning injection", () => {
 
 	it("rejects exhausted schema retries in strict mode and retains parsed validation metadata", () => {
 		const result = finalizeSubprocessOutput({
+			terminalContext: testTerminalContext,
 			rawOutput: "",
 			exitCode: 0,
 			stderr: "",

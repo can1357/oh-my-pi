@@ -540,6 +540,7 @@
 
 ### Fixed
 
+- Fixed native subagent task finalization reporting a successful structured result alongside a failed terminal exit; final nonzero exits now invalidate structured metadata while committed successful yields and permissive/schema-overridden output remain unchanged ([#16696](https://github.com/can1357/oh-my-pi/pull/16696) by [@thieuson1984](https://github.com/thieuson1984))
 - Fixed subagents whose role has an explicitly empty fallback chain falling back through the `default` chain when the default role uses the same model, including after a retry fallback, prewalk or context promotion briefly switched models or the subagent was revived ([#16548](https://github.com/can1357/oh-my-pi/pull/16548) by [@eggpeat](https://github.com/eggpeat))
 - Fixed `/usage` and `omp usage --json` listing identity-less OAuth accounts such as Devin as missing usage beside their working reports ([#16549](https://github.com/can1357/oh-my-pi/pull/16549) by [@eggpeat](https://github.com/eggpeat))
 - Fixed releasing or reaping a browser tab returning while Chromium still listed the page; the close now waits until Chromium reports the tab destroyed ([#16680](https://github.com/can1357/oh-my-pi/pull/16680) by [@H4vC](https://github.com/H4vC))

@@ -665,7 +665,7 @@ function resolveFallbackCompletion(rawOutput: string, outputSchema: unknown): { 
 	return { data: candidate };
 }
 
-interface FinalizeSubprocessOutputArgs {
+export interface FinalizeSubprocessOutputArgs {
 	rawOutput: string;
 	exitCode: number;
 	stderr: string;
@@ -678,6 +678,14 @@ interface FinalizeSubprocessOutputArgs {
 	lastAssistantText?: string;
 	/** `false` = no `yield` tool: `rawOutput` is the final assistant message, returned verbatim. Default `true`. */
 	structured?: boolean;
+	/** Current run-monitor terminal state. */
+	terminalContext: {
+		terminalYieldAccepted: boolean;
+		yieldInvalidatedByAsync: boolean;
+		abortKind?: AbortReason;
+		budgetStopRequested?: boolean;
+		budgetLimitExceeded?: boolean;
+	};
 }
 
 interface FinalizeSubprocessOutputResult {
@@ -722,6 +730,7 @@ function buildSchemaViolationOutcome(
 
 export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): FinalizeSubprocessOutputResult {
 	let { rawOutput, exitCode, stderr } = args;
+	const initialExitCode = exitCode;
 	const { yieldItems, doneAborted, signalAborted, outputSchema, lastAssistantText } = args;
 	const mode = args.outputSchemaMode ?? "permissive";
 	const source = args.outputSchemaSource ?? (outputSchema === undefined ? "none" : "session");
@@ -729,10 +738,10 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 	let structuredOutput: StructuredSubagentOutput | undefined;
 	let abortedViaYield = false;
 	const hasYield = Array.isArray(yieldItems) && yieldItems.length > 0;
+	const lastYield = hasYield ? yieldItems[yieldItems.length - 1] : undefined;
 	const hadFailureBeforeYield = exitCode !== 0 && stderr.trim().length > 0;
 
 	if (hasYield) {
-		const lastYield = yieldItems[yieldItems.length - 1];
 		if (lastYield?.status === "aborted") {
 			abortedViaYield = true;
 			exitCode = 0;
@@ -875,6 +884,42 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 		}
 	}
 
+	// A committed terminal success wins over late external cancellation. Any other terminal
+	// condition (no committed result, nonzero exit, abort/signal, or an abort cause) fails closed.
+	// A final nonzero exit additionally invalidates valid structured metadata, preserving data.
+	if (!abortedViaYield) {
+		const context = args.terminalContext;
+		const committedSuccessfulYield = context.terminalYieldAccepted && !context.yieldInvalidatedByAsync;
+		// A soft budget stop deliberately drives one tool-less wrap-up for an unstructured run.
+		// A clean, non-empty final message is a delivered result, not a hard budget failure.
+		const softBudgetMessageResult =
+			args.structured === false &&
+			context.abortKind === "budget" &&
+			context.budgetStopRequested === true &&
+			context.budgetLimitExceeded !== true &&
+			!context.yieldInvalidatedByAsync &&
+			!doneAborted &&
+			!signalAborted &&
+			initialExitCode === 0 &&
+			exitCode === 0 &&
+			!hasYield &&
+			rawOutput.trim().length > 0;
+		const terminalFailure =
+			!committedSuccessfulYield &&
+			!softBudgetMessageResult &&
+			(initialExitCode !== 0 || doneAborted || signalAborted || context.abortKind !== undefined);
+		if (terminalFailure && exitCode === 0) {
+			exitCode = 1;
+			if (!stderr) stderr = "Subagent terminated before committing a result";
+		}
+		if (exitCode !== 0 && includeStructuredOutput && structuredOutput?.status === "valid") {
+			structuredOutput = {
+				...structuredOutput,
+				status: "invalid",
+				error: stderr || "terminal failure",
+			};
+		}
+	}
 	return { rawOutput, exitCode, stderr, abortedViaYield, hasYield, structuredOutput };
 }
 
@@ -1285,6 +1330,8 @@ interface SubagentRunMonitor {
 	runtimeLimitExceeded(): boolean;
 	/** True once the soft-budget stop fired: the free-running turn was aborted and the run is being driven to a forced final yield. */
 	budgetStopRequested(): boolean;
+	/** True when the budget grace was exhausted and a hard budget abort was requested. */
+	budgetLimitExceeded(): boolean;
 	/** Resolves when the budget-stop session abort has settled (immediately when no stop fired). */
 	waitForBudgetStop(): Promise<void>;
 	/**
@@ -2316,6 +2363,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			budgetLimitExceeded ||
 			budgetStopRequested,
 		budgetStopRequested: () => budgetStopRequested,
+		budgetLimitExceeded: () => budgetLimitExceeded,
 		waitForBudgetStop: () => budgetStopAbortPromise ?? Promise.resolve(),
 		yieldInvalidatedByAsync: () => yieldInvalidatedByAsync,
 		yieldTurnStopRequested: () => yieldTurnStopRequested,
@@ -2850,6 +2898,13 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 			outputSchemaSource: args.outputSchemaSource,
 			lastAssistantText: monitor.lastReportTurnText(),
 			structured,
+			terminalContext: {
+				terminalYieldAccepted: monitor.yieldCalled(),
+				yieldInvalidatedByAsync: monitor.yieldInvalidatedByAsync(),
+				abortKind: monitor.abortKind(),
+				budgetStopRequested: monitor.budgetStopRequested(),
+				budgetLimitExceeded: monitor.budgetLimitExceeded(),
+			},
 		});
 	} finally {
 		popLoopPhase();
@@ -2962,8 +3017,15 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	// to the caller via `progress.extractedToolData`, but the exit status must
 	// reflect the timeout so on-call doesn't mistake a stuck run for success.
 	const runtimeLimitExceeded = monitor.runtimeLimitExceeded();
-	if (runtimeLimitExceeded && exitCode === 0) {
-		exitCode = 1;
+	if (runtimeLimitExceeded) {
+		if (exitCode === 0) exitCode = 1;
+		if (finalized.structuredOutput?.status === "valid") {
+			finalized.structuredOutput = {
+				...finalized.structuredOutput,
+				status: "invalid",
+				error: stderr || "Subagent exceeded its runtime limit",
+			};
+		}
 	}
 	const wasAborted =
 		runtimeLimitExceeded || Boolean(done.aborted) || abortedViaYield || (!hasYield && Boolean(signal?.aborted));
