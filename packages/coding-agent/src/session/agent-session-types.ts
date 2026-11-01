@@ -216,6 +216,13 @@ export interface AgentSessionConfig {
 	 * startup fallback, are not affected.
 	 */
 	disableModelFallback?: boolean;
+	/** Never promote to a larger-context model; implied by {@link disableModelFallback}. */
+	disableContextPromotion?: boolean;
+	/**
+	 * Chain key every fallback walk consults first, ahead of model-keyed and wildcard chains
+	 * that cover the current model. Per-call `model` subagents pin their `subagent:<id>` chain.
+	 */
+	pinnedRetryFallbackRole?: string;
 	/** Retry chain ownership when startup selected one of its fallback entries. */
 	initialRetryFallback?: InitialRetryFallbackState;
 	/** Skip retry.fallbackChains validation at construction; the host calls `validateRetryFallbackChains()` later. */

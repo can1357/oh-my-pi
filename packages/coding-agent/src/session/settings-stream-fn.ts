@@ -60,7 +60,7 @@ export interface SettingsStreamSlowModeContext {
 	notify?: (level: "info" | "warning" | "error", message: string) => void;
 	/** Record which account lane served the session's latest Anthropic request. */
 	onLane?: (lane: string) => void;
-	/** Never inject the opt-in server-side fallback chain (per-call `model` workers never switch models). */
+	/** Never allow server-side model switches; per-call workers use separately checked client-side fallbacks only. */
 	disableServerSideFallback?: boolean;
 }
 
@@ -179,8 +179,8 @@ export function createSettingsAwareStreamFn(
 			liveSteering: cfgProvidersOpenaiLiveSteering.get(settings) ? streamOptions?.liveSteering : undefined,
 			...(fallbacks !== undefined ? { fallbacks } : {}),
 			...(storeResponses !== undefined ? { storeResponses } : {}),
-			// A per-call worker never switches models: no fallback chain, including a
-			// caller-supplied one, and Factory drops its own refusal chain.
+			// A per-call request never delegates model selection to the server: omit even a
+			// caller-supplied chain, and make Factory drop its own refusal chain.
 			...(slowModeContext?.disableServerSideFallback
 				? { fallbacks: undefined, disableServerSideFallback: true }
 				: {}),

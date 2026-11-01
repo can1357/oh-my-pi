@@ -29,6 +29,7 @@ import {
 	resolveAgentAdvisorSelection,
 	resolveAgentPrewalkPattern,
 	resolveConfiguredModelPatterns,
+	resolveExactModelIdentity,
 	resolveExplicitModelRole,
 	resolveModelOverride,
 	resolveModelOverrideWithAuthFallback,
@@ -79,7 +80,8 @@ import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
 import type { AuthStorage } from "../session/auth-storage";
 import type { CostGate } from "../session/cost-gate";
 import { SKILL_PROMPT_MESSAGE_TYPE } from "../session/messages";
-import { hasConversationalHistory, SessionManager } from "../session/session-manager";
+import { EPHEMERAL_MODEL_CHANGE_ROLE } from "../session/session-entries";
+import { extractSessionInit, hasConversationalHistory, SessionManager } from "../session/session-manager";
 import { truncateTail } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import {
 	AUTO_THINKING,
@@ -134,12 +136,18 @@ import {
 	type YieldItem,
 } from "@oh-my-pi/pi-tui/tools/task";
 import { yieldSectionShapes } from "./yield-assembly";
-import { assertPerCallModelApproved, PerCallModelError, type PerCallModelGrants } from "./model-approval";
+import {
+	assertPerCallDispatchModel,
+	assertPerCallModelApproved,
+	PerCallModelError,
+	type PerCallModelGrants,
+} from "./model-approval";
 import { assembleYieldResult } from "@oh-my-pi/pi-tui/tools/task-yield-assembly";
 import {
 	cfgTaskPrewalk,
 	cfgTaskAgentPrewalk,
 	cfgTaskMaxEffort,
+	perCallModelFallbacksEnabled,
 	cfgTaskSoftRequestBudgetNotice,
 	cfgTaskSoftRequestBudget,
 	cfgTaskAgentSoftRequestBudget,
@@ -4088,7 +4096,7 @@ function restoreSubagentSettings(recipe: SubagentSettingsRecipe): Settings {
 interface WarmReviveCapture {
 	sessionFile: string;
 	spec: SubagentSessionSpec;
-	/** A per-call worker never switches models; its warm revive keeps only the exact saved model. */
+	/** A per-call worker never switches models by hand; it revives only on the exact model it last ran. */
 	perCallModel: boolean;
 	/** Re-captured whenever the live session is disposed, so a revive restores its latest settings writes. */
 	settings: SubagentSettingsRecipe;
@@ -4137,6 +4145,23 @@ export async function replayRevivedAgentStart(session: AgentSession): Promise<vo
 }
 
 /**
+ * The exact model a per-call worker last ran: the newest retry-fallback switch on the branch
+ * (`task.perCallModelFallbacks: runtime`, recorded as its routed identity, including a switch
+ * back to the primary), else the canonical identity the spawn persisted separately from effort.
+ * A later explicit selection (`/model`, `/switch`) clears that fallback; revival then uses
+ * the canonical identity rather than adopting the session-local switch.
+ */
+export function lastRunPerCallModel(session: SessionManager, savedIdentity: string): string {
+	const branch = session.getBranch();
+	for (let index = branch.length - 1; index >= 0; index--) {
+		const entry = branch[index];
+		if (entry.type !== "model_change") continue;
+		return entry.role === EPHEMERAL_MODEL_CHANGE_ROLE && entry.model ? entry.model : savedIdentity;
+	}
+	return savedIdentity;
+}
+
+/**
  * Lifecycle reviver for a parked subagent: park closed the JSONL writer, so reopening takes the
  * single-writer lock cleanly and restores the full message history (createAgentSession →
  * agent.replaceMessages). Isolated runs keep their worktree for the same lifecycle, so they use
@@ -4156,6 +4181,35 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
 				`Cannot revive subagent "${id}": session file "${capture.sessionFile}" has no message history ` +
 					`(truncated to header/session_init). The agent was not revived.`,
 			);
+		}
+		// A per-call worker revives on the exact model it last ran, as persisted revival does: a
+		// runtime fallback recorded since spawn replaces the spawn's model, never a similar one.
+		let perCallModel: Model | undefined;
+		let perCallThinkingLevel: ConfiguredThinkingLevel | null | undefined;
+		if (capture.perCallModel) {
+			try {
+				const init = extractSessionInit(reopened.getEntries());
+				if (!init?.perCallModelIdentity || init.perCallThinkingLevel === undefined) {
+					throw new PerCallModelError(
+						`Cannot revive subagent "${id}": its per-call model identity and thinking level were not recorded separately, so they cannot be restored exactly. The agent was not revived.`,
+					);
+				}
+				const modelRegistry = capture.spec.options.modelRegistry;
+				await modelRegistry?.awaitBackgroundRefresh();
+				const identity = lastRunPerCallModel(reopened, init.perCallModelIdentity);
+				perCallModel = modelRegistry ? resolveExactModelIdentity(identity, modelRegistry) : undefined;
+				if (!perCallModel) {
+					throw new PerCallModelError(
+						`Cannot revive subagent "${id}": its per-call model ${identity} is no longer available. A per-call worker revives only on its exact saved model.`,
+					);
+				}
+				capture.spec.options.assertDispatchModel?.(perCallModel);
+				assertModelSupportsEffortCeiling(perCallModel, cfgTaskMaxEffort.get(capture.settings.parent));
+				perCallThinkingLevel = init.perCallThinkingLevel;
+			} catch (error) {
+				await reopened.close();
+				throw error;
+			}
 		}
 		if (capture.parentArtifactManager) {
 			reopened.adoptArtifactManager(capture.parentArtifactManager);
@@ -4178,7 +4232,7 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
 		// transcript restores the effort, and the spawn selection only backs the model up when it is
 		// unavailable. The spawn's prewalk stays configured; the coordinator sees it was spent. A seance
 		// fork's selections belong to its source run, never to the consult.
-		// A per-call worker never switches models, so its warm revive never prepends a session-local switch.
+		// A per-call worker never switches models by hand, so its warm revive never prepends a session-local switch.
 		const sessionLocalModel =
 			capture.spec.preparedSession || capture.perCallModel
 				? undefined
@@ -4193,6 +4247,14 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
 				);
 				({ session: revived } = await createAgentSession({
 					...options,
+					...(perCallModel
+						? {
+								model: perCallModel,
+								thinkingLevel: perCallThinkingLevel ?? undefined,
+								thinkingLevelCeiling: cfgTaskMaxEffort.get(capture.settings.parent),
+								disableModelFallback: !perCallModelFallbacksEnabled(capture.settings.parent),
+							}
+						: undefined),
 					...(sessionLocalModel
 						? {
 								model: undefined,
@@ -4213,6 +4275,17 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
 						? agentAccountPools[capture.agentName]
 						: undefined,
 				}));
+				if (perCallModel) {
+					const saved = formatModelStringWithRouting(perCallModel);
+					const identity = revived.model ? formatModelStringWithRouting(revived.model) : undefined;
+					if (identity !== saved) {
+						await revived.dispose();
+						throw new PerCallModelError(
+							`Cannot revive subagent "${id}": its per-call model ${saved} is no longer available${identity ? ` (resolution found ${identity})` : ""}. A per-call worker revives only on its exact saved model.`,
+						);
+					}
+					if (perCallThinkingLevel === null) revived.setThinkingLevel(undefined);
+				}
 			} catch (error) {
 				mcpFollower?.dispose();
 				throw error;
@@ -4679,7 +4752,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// session-level --prewalk. The bundled generic `task` agent has no
 			// frontmatter default; the `task.prewalk` toggle (default off) arms it.
 			// Resolution failures skip prewalk instead of failing the spawn. A per-call
-			// worker never switches models, so it never prewalks.
+			// worker only switches models through approved runtime fallbacks, so it never prewalks.
 			const perCallModelGrants = options.perCallModelGrants;
 			let prewalk: Prewalk | undefined;
 			const prewalkPattern =
@@ -4775,13 +4848,18 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					thinkingLevel: effectiveThinkingLevel,
 					...(perCallModelGrants
 						? {
-								// Every request stays on an approved model that can run at or below the spawn's effort ceiling.
+								// Every request stays on an approved model (or, with runtime fallbacks, a configured
+								// chain model) that can run at or below the spawn's effort ceiling.
 								assertDispatchModel: (dispatchModel: Model) => {
-									assertPerCallModelApproved(dispatchModel, perCallModelGrants, modelRegistry);
+									assertPerCallDispatchModel(dispatchModel, perCallModelGrants, modelRegistry);
 									if (spawnEffortCeiling) assertModelSupportsEffortCeiling(dispatchModel, spawnEffortCeiling);
 								},
-								disableModelFallback: true,
+								disableModelFallback: !perCallModelFallbacksEnabled(settings),
+								disableContextPromotion: true,
 								disableServerSideFallback: true,
+								// Walk the worker's own chain first: a model-keyed or wildcard chain that covers
+								// its model would otherwise outrank it and strand it on refused entries.
+								pinnedRetryFallbackRole: subagentRetryFallbackRole(id),
 							}
 						: {}),
 					thinkingLevelCeiling: spawnEffortCeiling,

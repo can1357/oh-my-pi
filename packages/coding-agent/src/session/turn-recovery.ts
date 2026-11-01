@@ -277,6 +277,8 @@ export interface TurnRecoveryHost {
 	thinkingLevelCeiling(): Effort | undefined;
 	/** The session never switches to a retry fallback model (a per-call `model` subagent). */
 	modelFallbackDisabled?(): boolean;
+	/** Chain key the fallback walk consults first when no walk has pinned one (a per-call `model` subagent's own chain). */
+	pinnedRetryFallbackRole?(): string | undefined;
 	isDisposed(): boolean;
 	isStreaming(): boolean;
 	isCompacting(): boolean;
@@ -1921,8 +1923,8 @@ export class TurnRecovery {
 
 	/**
 	 * Chain keys to consult for the active model, most specific walk first: the
-	 * chain that owns the current fallback walk, then the chain the CURRENT model
-	 * owns when that is a different key.
+	 * chain that owns the current fallback walk (or, before any hop, the session's
+	 * pinned chain), then the chain the CURRENT model owns when that is a different key.
 	 *
 	 * The second key is what makes a chain reachable from the end of another one.
 	 * `#activeRetryFallback.role` is pinned at the first hop and never
@@ -1941,7 +1943,7 @@ export class TurnRecovery {
 		currentModel: Model | null | undefined = this.#host.model(),
 		options?: { pinnedRole?: string; roleHint?: string },
 	): string[] {
-		const pinned = options?.pinnedRole ?? this.#activeRetryFallback?.role;
+		const pinned = options?.pinnedRole ?? this.#activeRetryFallback?.role ?? this.#host.pinnedRetryFallbackRole?.();
 		const current = this.resolveRetryFallbackRole(currentSelector, currentModel, options?.roleHint);
 		if (!pinned) return current ? [current] : [];
 		return current && current !== pinned ? [pinned, current] : [pinned];

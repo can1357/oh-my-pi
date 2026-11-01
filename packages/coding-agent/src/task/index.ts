@@ -92,6 +92,7 @@ import {
 	cfgTaskMaxConcurrency,
 	cfgTaskMaxRecursionDepth,
 	cfgTaskMaxRuntimeMs,
+	perCallModelFallbacksEnabled,
 	cfgTaskSpeculativeLaunch,
 	cfgTaskStructured,
 	perCallModelEnabled,
@@ -162,6 +163,7 @@ interface TaskDescriptionOptions {
 	effortEnabled: boolean;
 	perCallModelEnabled: boolean;
 	perCallModelAdvertisement?: PerCallModelAdvertisement;
+	perCallModelFallbacks: boolean;
 	evalToolsEnabled: boolean;
 	structured: boolean;
 	file: boolean;
@@ -215,6 +217,7 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		effortEnabled: options.effortEnabled,
 		perCallModelEnabled: options.perCallModelEnabled,
 		perCallModelAdvertisement: options.perCallModelAdvertisement,
+		perCallModelFallbacks: options.perCallModelFallbacks,
 		evalToolsEnabled: options.evalToolsEnabled,
 		structured: options.structured,
 		file: options.file,
@@ -374,8 +377,8 @@ function validateModel(
 function spawnModelFields(params: TaskParams): Pick<StructuredSubagentRequest, "perCallModel" | "seanceModel"> {
 	if (params.model === undefined) return {};
 	if (params.agent === SEANCE_AGENT_NAME) return { seanceModel: params.model };
-	// `validateModel` rejected anything but one string before dispatch.
-	return typeof params.model === "string" ? { perCallModel: params.model } : {};
+	// `validateModel` rejected anything but one selector or a list of them before dispatch.
+	return { perCallModel: params.model };
 }
 
 /**
@@ -872,6 +875,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			file: cfgTaskFile.get(this.session.settings),
 			defaultAgent: this.#defaultAgent(),
 			seanceFields: this.#seanceSchemaFields(),
+			perCallModel: perCallModelEnabled(this.session.settings, "task"),
 		});
 	}
 
@@ -914,6 +918,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						this.session.modelRegistry,
 					)
 				: undefined,
+			perCallModelFallbacks: perCallModelFallbacksEnabled(this.session.settings),
 			evalToolsEnabled: evalToolsEnabled(this.session),
 			structured: this.#isStructured(),
 			file: cfgTaskFile.get(this.session.settings),

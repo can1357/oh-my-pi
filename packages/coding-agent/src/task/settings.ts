@@ -315,7 +315,7 @@ export const cfgTaskPerCallModel = register({
 		group: "Subagents",
 		label: "Per-Call Model",
 		description:
-			"Whether a subagent call may pick its model with one exact provider/model-id[@upstream][:level] selector. An @upstream pin is part of the model identity and is supported only by aggregators. Only models the configuration already routes to are accepted. Project settings can turn it off but not on, and never approve a model.",
+			"Whether a subagent call may pick its model with an exact provider/model-id[@upstream][:level], a configured @role[:level], or an ordered list of them. An @upstream pin is part of the model identity and is supported only by aggregators. Only models the operator already routes to are accepted. Project settings can turn it off but not on, and never approve a model.",
 		options: [
 			{ value: "off", label: "Off", description: "Reject `model` on task items and eval agent()/workpool()" },
 			{ value: "eval", label: "Eval only", description: "Accept `model` in eval agent() and workpool() only" },
@@ -337,20 +337,20 @@ export function perCallModelEnabled(settings: Settings, invocationKind: "task" |
 }
 
 /**
- * Validates `task.perCallModelAllow`: a list of exact `provider/model-id` strings. A non-string
- * entry fails load and writes instead of reaching approval as an entry that matches nothing.
+ * Validates `task.perCallModelAllow`: exact model ids, configured role selectors, or scoped globs.
+ * A non-string entry fails load and writes instead of reaching approval as an entry that matches nothing.
  */
 function validatePerCallModelAllow(value: unknown): void {
 	if (value === undefined || value === null) return;
 	if (!Array.isArray(value)) {
 		throw new Error(
-			`Invalid task.perCallModelAllow: expected a list of provider/model-id strings, got ${Bun.inspect(value)}.`,
+			`Invalid task.perCallModelAllow: expected a list of model selectors or scoped globs, got ${Bun.inspect(value)}.`,
 		);
 	}
 	for (const [index, entry] of value.entries()) {
 		if (typeof entry === "string") continue;
 		throw new Error(
-			`Invalid task.perCallModelAllow[${index}]: expected a provider/model-id string, got ${Bun.inspect(entry)}.`,
+			`Invalid task.perCallModelAllow[${index}]: expected a model selector or scoped glob string, got ${Bun.inspect(entry)}.`,
 		);
 	}
 }
@@ -368,9 +368,37 @@ export const cfgTaskPerCallModelAllow = register({
 		// The editor writes the global layer; hide a project-supplied list so the repository cannot promote it.
 		condition: "perCallModelAllowNotProject",
 		description:
-			"Exact selectors: `provider/model-id`, including `@upstream` only for a pinned OpenRouter/Vercel route (e.g. `openrouter/x@y`). When set, a per-call model must also be listed here. Empty: every model the configuration grants. A project list can only narrow this one.",
+			'Exact provider/model-id[@upstream] entries, configured @role entries or scoped globs, e.g. ["anthropic/claude-sonnet-4-5", "@review", "openai/*"]. Only * and ? are glob syntax; brackets are literal. Wildcards never match @, even inside an id: spell it out, e.g. google-vertex/claude-*@default. A per-call model must be granted and match both the operator and live allowlists when set; neither list widens grants. Empty: every model the operator grants. Project settings can only narrow.',
 	},
 });
+
+export const cfgTaskPerCallModelFallbacks = register({
+	id: "task.perCallModelFallbacks",
+	type: "enum",
+	values: ["off", "runtime"] as const,
+	default: "off",
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Per-Call Model Fallbacks",
+		description:
+			"Whether a per-call subagent may switch models when a request fails. Retry-chain entries grant dispatch only, never selection in `model`. Project and subagent settings can turn this off but not on.",
+		options: [
+			{ value: "off", label: "Off", description: "The subagent fails instead of switching models" },
+			{
+				value: "runtime",
+				label: "Runtime",
+				description:
+					"The subagent may retry on its later candidates and on concrete retry.fallbackChains models; nothing else",
+			},
+		],
+	},
+});
+
+/** Operator opt-in; project and subagent-derived settings can only disable runtime fallback. */
+export function perCallModelFallbacksEnabled(settings: Settings): boolean {
+	return [settings.grantAuthority(), settings].every(layers => cfgTaskPerCallModelFallbacks.get(layers) === "runtime");
+}
 
 export const cfgTaskMaxConcurrency = register({
 	id: "task.maxConcurrency",

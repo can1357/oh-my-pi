@@ -2254,7 +2254,7 @@ export interface TaskItem {
 	agent?: string;
 	/** Historical source session selected by the bundled consult agent. */
 	sourceSession?: string;
-	/** Bundled seance: override for the source session's saved model. Any other agent: one exact per-call model, gated by `task.perCallModel`. */
+	/** Bundled seance: override for the source session's saved model. Any other agent: the per-call model (exact ids or configured `@role`s, one or an ordered list), gated by `task.perCallModel`. */
 	model?: string | string[];
 	/** Inline instructions; exactly one of task or taskFile is required. */
 	task?: string;

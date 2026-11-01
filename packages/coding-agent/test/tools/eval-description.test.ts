@@ -132,9 +132,31 @@ describe("eval tool description", () => {
 			expect(texts[0].match(/model\?=None/g)).toHaveLength(2);
 			for (const text of texts) {
 				// The allowlist admits only slow's model; smol's would be refused at dispatch.
-				expect(text).toContain("`openai/gpt-5.5` (slow)");
+				expect(text).toContain("`@slow` → `openai/gpt-5.5`");
 				expect(text).not.toContain("anthropic/claude-haiku-4-5");
+				expect(text).toContain("ordered list");
+				expect(text).toContain("First available candidate with working credentials wins at spawn");
+				expect(text).toContain("No runtime model fallback.");
 			}
+		}
+	});
+
+	it.each(["off", "runtime"] as const)("advertises only the active per-call fallback rule (%s)", fallbacks => {
+		const tool = new EvalTool(
+			makeSession({
+				readActive: false,
+				settings: {
+					"task.perCallModel": "eval",
+					"task.perCallModelFallbacks": fallbacks,
+					modelRoles: { review: "mock/primary" },
+				},
+			}),
+		);
+		for (const text of [tool.docTopics().agents ?? "", tool.description]) {
+			expect(text).toContain("`@review` → `mock/primary`");
+			expect(text.includes("operator-configured fallback models")).toBe(fallbacks === "runtime");
+			expect(text.includes("No runtime model fallback.")).toBe(fallbacks === "off");
+			expect(text).toContain("Context promotion and prewalk are off.");
 		}
 	});
 

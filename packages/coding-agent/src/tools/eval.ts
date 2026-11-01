@@ -68,7 +68,7 @@ import {
 	cfgEvalAutoProvision,
 	cfgEvalToolsEnabled,
 } from "../eval/settings";
-import { cfgTaskMaxRecursionDepth, perCallModelEnabled } from "../task/settings";
+import { cfgTaskMaxRecursionDepth, perCallModelEnabled, perCallModelFallbacksEnabled } from "../task/settings";
 import { getPerCallModelAdvertisement, type PerCallModelAdvertisement } from "../task/model-approval";
 import { cfgToolsMaxTimeout, cfgToolsSpeculativeExecutionEnabled } from "./settings";
 
@@ -207,6 +207,8 @@ export interface EvalToolDescriptionOptions {
 	toolNames?: readonly string[];
 	/** Configured global ceiling for nonzero cell deadlines. */
 	maxTimeout?: number;
+	/** `task.perCallModelFallbacks: runtime` lets a per-call worker fall back to configured chain models. Default: false. */
+	perCallModelFallbacks?: boolean;
 }
 
 function evalTemplateContext(options: EvalToolDescriptionOptions) {
@@ -228,6 +230,7 @@ function evalTemplateContext(options: EvalToolDescriptionOptions) {
 		timeoutMax: TOOL_TIMEOUTS.eval.max,
 		configuredMaxTimeout: options.maxTimeout !== undefined && options.maxTimeout > 0 ? options.maxTimeout : undefined,
 		timeoutCeiling: clampTimeout("eval", TOOL_TIMEOUTS.eval.max, options.maxTimeout),
+		perCallModelFallbacks: options.perCallModelFallbacks ?? false,
 	};
 }
 
@@ -409,6 +412,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				: undefined,
 			toolNames: session.getEvalBridgeToolNames?.(),
 			maxTimeout: cfgToolsMaxTimeout.get(session.settings),
+			perCallModelFallbacks: perCallModelFallbacksEnabled(session.settings),
 		};
 	}
 
