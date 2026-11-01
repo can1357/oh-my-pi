@@ -682,6 +682,8 @@ export class VibeSessionRegistry {
 			session: null,
 			sessionFile: childSessionFile,
 			status: "aborted",
+			// Same worker and transcript: a later reopen is a revival, not a replacement.
+			identityToken: existing?.identityToken,
 		});
 	}
 

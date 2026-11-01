@@ -73,6 +73,12 @@ export interface AgentRef {
 	/** Null exactly when parked/aborted. */
 	session: AgentSession | null;
 	sessionFile: string | null;
+	/**
+	 * Opaque lifetime identity. Registry ids are reusable display names; code
+	 * that acts on a captured ancestor must pair the name with this token.
+	 * Revival keeps it. A replacement registration gets a new one.
+	 */
+	identityToken: string;
 	createdAt: number;
 	lastActivity: number;
 	/** Short gist of what the agent is currently doing (latest intent or tool), for the work-aware roster. Display-only. */
@@ -119,6 +125,8 @@ export interface RegisterInput {
 	lastActivity?: number;
 	/** Persisted identity and telemetry restored after the live observer is gone. */
 	history?: AgentHistorySummary;
+	/** Identity token retained by an in-process revival. */
+	identityToken?: string;
 	/** Run lifecycle milestones restored from persisted history, when known. */
 	lifecycle?: AgentRunLifecycle;
 }
@@ -165,6 +173,7 @@ export class AgentRegistry {
 			status: input.status ?? "running",
 			session: input.session,
 			sessionFile: input.sessionFile ?? null,
+			identityToken: input.identityToken ?? crypto.randomUUID(),
 			createdAt: input.createdAt ?? now,
 			lastActivity: input.lastActivity ?? now,
 			activity: input.activity,
@@ -206,6 +215,7 @@ export class AgentRegistry {
 			session: null,
 			sessionFile: current.sessionFile,
 			status: "parked",
+			identityToken: current.identityToken,
 			createdAt: current.createdAt,
 			history: current.history,
 		});

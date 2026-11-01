@@ -18,8 +18,10 @@
  *    leaves no unhandled rejection to take the host down.
  * 7. Cancelling a blocking call stops its clock at once, even while the
  *    cancelled child is still winding down.
- * 8. An ancestor removed from the registry after dispatch does not cut the
- *    chain: the escalation reaches the live agent above it.
+ * 8. An id is a name, not an identity. An ancestor removed and replaced
+ *    after dispatch by an unrelated agent under the same id is skipped: the
+ *    escalation reaches the original live agent above it. An owner replaced
+ *    the same way is never told; the escalation still goes up the chain.
  * 9. A child started speculatively, while its call still streams, is on the
  *    clock from its start, and adoption by the finished call adds no second
  *    clock.
@@ -452,7 +454,7 @@ describe("subagent due-by", () => {
 	);
 
 	it(
-		"escalates past an ancestor removed from the registry to the live agent above it",
+		"skips a replacement that reuses a removed ancestor's id, then escalates to the live original ancestor",
 		async () => {
 			const boss = await agent({ id: "Boss", kind: "main" });
 			const registry = AgentRegistry.global();
@@ -461,12 +463,62 @@ describe("subagent due-by", () => {
 			const run = lead.session.prompt("dispatch");
 			await childStarted.promise;
 			registry.unregister("Mid");
+			// Same id, different lifetime: the new Mid must never receive Lead's
+			// old escalation. It happens to use Other's live session here.
+			const replacement = await agent({ id: "Other", kind: "main" });
+			registry.register({
+				id: "Mid",
+				displayName: "Replacement Mid",
+				kind: "sub",
+				parentId: "Other",
+				session: replacement.session,
+			});
 
-			await boss.seen(ESCALATION);
+			const recipient = await Promise.race([
+				boss.seen(ESCALATION).then(() => "Boss"),
+				replacement.seen(ESCALATION).then(() => "replacement"),
+			]);
+			expect(recipient).toBe("Boss");
+			expect(boss.contexts).toHaveLength(1);
 			expect(JSON.stringify(boss.contexts.at(-1)!.messages)).toContain("dispatched by `Lead`");
+			expect(replacement.saw(ESCALATION)).toBe(false);
 			expect(lead.notices.filter(notice => notice.message.includes(ESCALATION))).toEqual([]);
 			child.resolve(childResult("Gate", "gate"));
 			await run;
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"never tells a replacement that reuses the owner's id, and escalates to the owner's live dispatcher",
+		async () => {
+			const boss = await agent({ id: "Boss", kind: "main" });
+			const lead = await agent({ id: "Lead", kind: "sub", parentId: "Boss", dispatch: dispatch("task", "Slow") });
+			await lead.session.prompt("dispatch");
+			await childStarted.promise;
+			const registry = AgentRegistry.global();
+			registry.unregister("Lead");
+			const replacement = await agent({ id: "Other", kind: "main" });
+			registry.register({
+				id: "Lead",
+				displayName: "Replacement Lead",
+				kind: "sub",
+				parentId: "Other",
+				session: replacement.session,
+			});
+
+			const recipient = await Promise.race([
+				boss.seen(ESCALATION).then(() => "Boss"),
+				replacement.seen(OWNER_NOTICE).then(() => "replacement"),
+			]);
+			expect(recipient).toBe("Boss");
+			const escalation = JSON.stringify(boss.contexts.at(-1)!.messages);
+			expect(escalation).toContain("dispatched by `Lead`");
+			expect(escalation).toContain("so no notice was queued for it");
+			expect(replacement.saw(OWNER_NOTICE)).toBe(false);
+			expect(lead.saw(OWNER_NOTICE)).toBe(false);
+			child.resolve(childResult("Slow", "task"));
+			await manager.getJob("Slow")?.promise;
 		},
 		TEST_TIMEOUT_MS,
 	);

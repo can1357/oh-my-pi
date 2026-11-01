@@ -88,6 +88,19 @@ describe("AgentLifecycleManager", () => {
 		expect(registry.get("generation-Sub")).toBeUndefined();
 	});
 
+	it("keeps an identity token through revival but mints a new one for a replacement id", () => {
+		const original = registerIdleSub("identity-Sub", null);
+		const originalToken = original.identityToken;
+		registry.setStatus("identity-Sub", "aborted", original);
+
+		const revived = registry.reopen("identity-Sub", original);
+		expect(revived?.identityToken).toBe(originalToken);
+
+		registry.unregister("identity-Sub", revived);
+		const replacement = registerIdleSub("identity-Sub", null);
+		expect(replacement.identityToken).not.toBe(originalToken);
+	});
+
 	it("global() rebinds to the current registry after a lone AgentRegistry reset so release still emits aborted", async () => {
 		// A prior test file constructed the lifecycle global against registry A,
 		// then reset only the registry — the global is now registry B. The stranded
