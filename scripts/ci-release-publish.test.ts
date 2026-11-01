@@ -140,26 +140,24 @@ describe("concurrent publish runner", () => {
 
 describe("published legal payloads", () => {
 	it("selects the exact payload for MIT packages", () => {
-		expect(legalPayloadFiles("MIT")).toEqual(["LICENSE", "THIRD-PARTY-NOTICES.txt"]);
+		expect(legalPayloadFiles("MIT")).toEqual(["LICENSE"]);
 		expect(() => legalPayloadFiles("MIT OR Apache-2.0")).toThrow("Unsupported package license: MIT OR Apache-2.0");
 		expect(() => legalPayloadFiles(undefined)).toThrow("Unsupported package license: <missing>");
 	});
 
-	it("stages missing legal files without replacing package-local text", async () => {
+	it("stages a missing license without replacing package-local text", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-publish-legal-"));
 		const pkgDir = path.join(root, "package");
 		await fs.mkdir(pkgDir);
 		try {
 			await Promise.all([
 				Bun.write(path.join(root, "LICENSE"), "root MIT\n"),
-				Bun.write(path.join(root, "THIRD-PARTY-NOTICES.txt"), "notices\n"),
 				Bun.write(path.join(pkgDir, "LICENSE"), "package MIT\n"),
 			]);
 
 			const files = await stageLegalPayloads(pkgDir, "MIT", true, root);
-			expect(files).toEqual(["LICENSE", "THIRD-PARTY-NOTICES.txt"]);
+			expect(files).toEqual(["LICENSE"]);
 			expect(await Bun.file(path.join(pkgDir, "LICENSE")).text()).toBe("package MIT\n");
-			expect(await Bun.file(path.join(pkgDir, "THIRD-PARTY-NOTICES.txt")).text()).toBe("notices\n");
 		} finally {
 			await fs.rm(root, { recursive: true, force: true });
 		}
@@ -196,8 +194,8 @@ describe("published legal payloads", () => {
 				"native/vcs.d.ts",
 				"native/embedded-addon.js",
 				"README.md",
-				"LICENSE",
 				"THIRD-PARTY-NOTICES.txt",
+				"LICENSE",
 			]);
 		} finally {
 			await fs.rm(pkgDir, { recursive: true, force: true });
@@ -242,7 +240,7 @@ describe("published manifest topology", () => {
 		if (!pkg) throw new Error("utils missing from publish set");
 
 		const manifest = await rewriteManifest(pkg, false);
-		expect(manifest.files).toEqual(expect.arrayContaining(["LICENSE", "THIRD-PARTY-NOTICES.txt"]));
+		expect(manifest.files).toEqual(expect.arrayContaining(["LICENSE"]));
 		expect(manifest.main).toBe("./src/index.ts");
 		expect(manifest.exports).toEqual({
 			".": {

@@ -25,11 +25,7 @@ fn cstr(path: &Path) -> io::Result<CString> {
 }
 
 fn cvt(ret: libc::c_int) -> io::Result<()> {
-	if ret == -1 {
-		Err(io::Error::last_os_error())
-	} else {
-		Ok(())
-	}
+	(ret != -1).ok_or_else(io::Error::last_os_error)
 }
 
 pub(crate) fn set_dir_mode(builder: &mut fs::DirBuilder, mode: Option<u32>) {

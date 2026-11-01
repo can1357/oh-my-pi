@@ -26,6 +26,19 @@ describe("createAbortSourceTracker", () => {
 		expect(tracker.getLocalAbortReason()).toBeUndefined();
 	});
 
+	it("reports the caller's own abort reason even when a local watchdog fired first, and none for a bare abort", () => {
+		const caller = new AbortController();
+		const tracker = createAbortSourceTracker(caller.signal);
+		tracker.abortLocally(new Error("idle timeout"));
+		caller.abort("Interrupted by user");
+		expect(tracker.getCallerAbortReason()).toBe("Interrupted by user");
+
+		const bare = new AbortController();
+		const untold = createAbortSourceTracker(bare.signal);
+		bare.abort();
+		expect(untold.getCallerAbortReason()).toBeUndefined();
+	});
+
 	it("reports local abort when only a local watchdog fires (no caller signal)", () => {
 		const tracker = createAbortSourceTracker(undefined);
 		const reason = new Error("idle timeout");

@@ -5,8 +5,9 @@
 //!
 //! - `PI_SMART_GIT`: `git worktree add` creates linked worktrees through
 //!   [`pi_vcs`], described below.
-//! - `PI_GIT_GUARD`: commands that discard or move work in a shared checkout
-//!   are refused before git runs; see [`guard`].
+//! - `PI_GIT_GUARD`: commands that discard or move work are refused in a
+//!   checkout other sessions may share, and run after saving what they discard
+//!   in a worktree of one's own; see [`guard`].
 //!
 //! `git worktree add` checks out every file of the target commit. pi-vcs
 //! instead copy-on-write clones the source checkout (APFS `clonefile`, Linux
@@ -115,9 +116,17 @@ impl<const SMART_WORKTREE: bool, const GUARD: bool> builtins::Command
 	) -> impl Future<Output = Result<ExecutionResult, Error>> + Send {
 		let args = self.args.clone();
 		async move {
-			if GUARD && let Some(refusal) = guard::Review::of(context.shell, &args).refusal().await? {
-				let _ = context.stderr().write_all(refusal.as_bytes());
-				return Ok(ExecutionResult::new(guard::REFUSED_EXIT));
+			if GUARD {
+				match guard::Review::of(context.shell, &args).decide().await? {
+					guard::Decision::Run => {},
+					guard::Decision::RunNoted(note) => {
+						let _ = context.stderr().write_all(note.as_bytes());
+					},
+					guard::Decision::Refuse(refusal) => {
+						let _ = context.stderr().write_all(refusal.as_bytes());
+						return Ok(ExecutionResult::new(guard::REFUSED_EXIT));
+					},
+				}
 			}
 			if SMART_WORKTREE
 				&& let Some(request) = AddRequest::parse(&args)

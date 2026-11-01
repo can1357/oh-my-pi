@@ -10,10 +10,13 @@ import { theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../types";
 import { createAssistantMessageComponent } from "@oh-my-pi/pi-tui/prompt/interactive-context-helpers";
 
-import { cfgLiveVoice } from "../../live/settings";
+import type { ExtensionLiveSession, ExtensionLiveStartOptions } from "../../extensibility/extensions/types";
+import { resolveLiveVoice } from "../../live/settings";
 
 const ANIMATION_INTERVAL_MS = 80;
 type LiveSessionFactory = (options: LiveSessionControllerOptions) => LiveSessionController;
+/** A started session, or the connect failure `#finish` has already shown and cleaned up. */
+type LiveStartOutcome = { session: LiveSessionController } | { error: Error };
 
 const LIVE_MESSAGE_USAGE: AssistantMessage["usage"] = {
 	input: 0,
@@ -25,6 +28,15 @@ const LIVE_MESSAGE_USAGE: AssistantMessage["usage"] = {
 };
 function errorFrom(cause: unknown): Error {
 	return cause instanceof Error ? cause : new Error(String(cause));
+}
+
+/** Runs an extension's live observer; its failures are logged, never turned into a session failure. */
+function notifyRemote(callback: () => void): void {
+	try {
+		callback();
+	} catch (cause) {
+		logger.warn("Live session observer threw", { error: errorFrom(cause).message });
+	}
 }
 
 /** Owns the editor-replacing visualizer and realtime session lifecycle for `/live`. */
@@ -60,8 +72,37 @@ export class LiveCommandController {
 			await this.stop();
 			return;
 		}
-		if (this.#settling) await this.#settling;
-		await this.#start();
+		while (this.#settling) await this.#settling;
+		// Another start may have claimed the slot while the previous session finished closing.
+		if (this.#session) return;
+		// A connect failure was already shown; anything else (factory, mounting) propagates.
+		await this.#start(resolveLiveVoice(this.#ctx.settings));
+	}
+
+	/**
+	 * Start a live session whose audio runs on a caller-owned WebRTC peer. The visualizer shows
+	 * it as it shows `/live`, and `/live` or the stop key ends it.
+	 */
+	async startRemote(options: ExtensionLiveStartOptions): Promise<ExtensionLiveSession> {
+		// Untyped callers: without an offer the controller would open the host microphone instead.
+		if (typeof options.sdpOffer !== "string" || !options.sdpOffer.trim()) {
+			throw new Error("startLive requires a non-empty sdpOffer");
+		}
+		while (this.#settling) await this.#settling;
+		const voice = resolveLiveVoice(this.#ctx.settings, options.voice);
+		const outcome = await this.#start(voice, options);
+		if ("error" in outcome) throw outcome.error;
+		const { session } = outcome;
+		const stop = async (): Promise<void> => {
+			if (this.#session === session) await this.stop();
+			else await session.stop();
+		};
+		const sdpAnswer = session.sdpAnswer;
+		if (sdpAnswer === undefined) {
+			await stop();
+			throw new Error("The live session stopped before its SDP answer was available");
+		}
+		return { sdpAnswer, voice, stop };
 	}
 
 	/** Stop the active live session and restore the editor. */
@@ -93,7 +134,12 @@ export class LiveCommandController {
 		}
 	}
 
-	async #start(): Promise<void> {
+	/**
+	 * Starts a session. A connect failure is shown, cleaned up and returned; the slot check and
+	 * claim (`#session = session`) run synchronously, so concurrent starts cannot both win.
+	 */
+	async #start(voice: string, remote?: ExtensionLiveStartOptions): Promise<LiveStartOutcome> {
+		if (this.#session) throw new Error("A live session is already active");
 		this.#assistantTranscriptTurn = 0;
 		this.#assistantTranscriptStartedAt = 0;
 		const visualizer = new LiveVisualizer({
@@ -108,9 +154,12 @@ export class LiveCommandController {
 		const options: LiveSessionControllerOptions = {
 			session: this.#ctx.session,
 			extractAssistantText: message => this.#ctx.extractAssistantText(message),
-			voice: cfgLiveVoice.get(this.#ctx.settings),
+			voice,
+			instructions: remote?.instructions,
+			sdpOffer: remote?.sdpOffer,
 			callbacks: {
 				onPhase: phase => {
+					notifyRemote(() => remote?.onPhase?.(phase));
 					if (this.#visualizer !== visualizer) return;
 					visualizer.setPhase(phase);
 					this.#ctx.ui.requestComponentRender(visualizer);
@@ -122,6 +171,7 @@ export class LiveCommandController {
 					visualizer.setInputLevel(input);
 				},
 				onTranscript: transcript => {
+					if (transcript) notifyRemote(() => remote?.onTranscript?.(transcript));
 					if (this.#visualizer !== visualizer) return;
 					if (!transcript) {
 						visualizer.clearTranscript();
@@ -133,20 +183,33 @@ export class LiveCommandController {
 						this.#presentAssistantTranscript(transcript);
 					}
 				},
-				onTerminal: error => this.#finish(session, error),
+				onTerminal: error => {
+					this.#finish(session, error);
+					notifyRemote(() => remote?.onEnd?.(error));
+				},
 			},
 		};
-		const session = this.#createSession ? this.#createSession(options) : new LiveSessionController(options);
+		let session: LiveSessionController;
+		try {
+			session = this.#createSession ? this.#createSession(options) : new LiveSessionController(options);
+		} catch (cause) {
+			// No session to finish: put the editor back before the failure propagates.
+			this.#restoreEditor();
+			throw cause;
+		}
 		this.#session = session;
 
 		try {
 			await session.start();
 		} catch (cause) {
+			const error = errorFrom(cause);
 			if (this.#session === session) {
 				await session.stop();
-				this.#finish(session, errorFrom(cause));
+				this.#finish(session, error);
 			}
+			return { error };
 		}
+		return { session };
 	}
 
 	#presentAssistantTranscript(transcript: LiveTranscript): void {

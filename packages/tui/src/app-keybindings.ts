@@ -59,10 +59,13 @@ interface AppKeybindings {
 	"app.session.rename": true;
 	"app.session.delete": true;
 	"app.session.deleteNoninvasive": true;
+	"app.session.pin": true;
+	"app.session.unpin": true;
 	"app.tree.previousBranch": true;
 	"app.tree.nextBranch": true;
 	"app.plan.toggle": true;
 	"app.history.search": true;
+	"app.links.hint": true;
 	"app.stt.pushToTalk": true;
 	"app.stt.toggle": true;
 	"app.live.toggle": true;
@@ -239,6 +242,14 @@ export const KEYBINDINGS = {
 		defaultKeys: "ctrl+backspace",
 		description: "Delete session (non-invasive)",
 	},
+	"app.session.pin": {
+		defaultKeys: "alt+k",
+		description: "Pin the selected session in the resume picker",
+	},
+	"app.session.unpin": {
+		defaultKeys: "alt+shift+k",
+		description: "Unpin the selected session in the resume picker",
+	},
 	"app.tree.previousBranch": {
 		defaultKeys: [],
 		description: "Jump to the previous branch in /tree",
@@ -254,6 +265,10 @@ export const KEYBINDINGS = {
 	"app.history.search": {
 		defaultKeys: "ctrl+r",
 		description: "Search history",
+	},
+	"app.links.hint": {
+		defaultKeys: "alt+o",
+		description: "Pick an extension link on screen by its hint tag",
 	},
 	"app.stt.pushToTalk": {
 		defaultKeys: "space",

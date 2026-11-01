@@ -1,9 +1,11 @@
 name: "Compose bazel cache config"
 description: >
-   Emits a bazelrc fragment wiring the cluster remote cache. Every Bazel job
-   runs on omp-kata, where the pod env carries the bazel-remote credentials;
-   elsewhere (no credentials) the fragment carries only --config=ci and the
-   build runs uncached.
+   Emits a bazelrc fragment wiring the vmon node's Bazel HTTP cache. Every
+   Bazel job runs on a vmon `omp-ci` sandbox (VMON_CI=1), whose template bakes
+   the repository/xwin caches at /opt/bazel-repo-cache, and whose node serves
+   a per-repository Bazel cache at $VMON_CACHE_URL/bazel: written by branch
+   and tag jobs, read-only for pull requests. Elsewhere the fragment carries
+   only --config=ci and the build runs uncached.
 
 outputs:
    rc:
@@ -18,41 +20,35 @@ runs:
         shell: bash
         run: |
            set -euo pipefail
-           if [ -n "${BAZEL_REMOTE_USER:-}" ] || [ -n "${BAZEL_REMOTE_PASSWORD:-}" ]; then
-             if [ -z "${BAZEL_REMOTE_USER:-}" ] || [ -z "${BAZEL_REMOTE_PASSWORD:-}" ]; then
-               echo "::error::BAZEL_REMOTE_USER and BAZEL_REMOTE_PASSWORD must both be set"
-               exit 1
-             fi
-             remote=true
-           else
-             remote=false
-             echo "::notice title=Bazel cache::No cluster remote-cache credentials on this runner; building uncached."
+           rc="$RUNNER_TEMP/bazel-cache.rc"
+           echo "rc=$rc" >> "$GITHUB_OUTPUT"
+           if [ "${VMON_CI:-}" != 1 ]; then
+             echo "::notice title=Bazel cache::Not a vmon runner; building uncached."
+             echo "common --config=ci" > "$rc"
+             exit 0
            fi
 
-           rc="$RUNNER_TEMP/bazel-cache.rc"
-           if [ "$remote" = "true" ]; then
-             # Mask the derived credential BEFORE writing the rc: config=ci
-             # enables --announce_rc, which prints --remote_header verbatim.
-             # Mask lines inside the redirected block below would land in the
-             # rc file itself and mask nothing.
-             raw_auth="${BAZEL_REMOTE_USER}:${BAZEL_REMOTE_PASSWORD}"
-             auth="$(printf %s "$raw_auth" | base64 | tr -d '\n')"
-             echo "::add-mask::$raw_auth"
-             echo "::add-mask::$auth"
-             {
-               # The PVC mount lives outside $HOME. Pods are single-job and
-               # use RUNNER_TEMP for Bazel's output root.
-               echo "startup --output_user_root=$RUNNER_TEMP/bazel-root"
-               echo "common --config=ci"
-               echo "common --repository_cache=/opt/bazel-repo-cache"
-               echo "common --repo_env=OMP_XWIN_CACHE_DIR=/opt/bazel-repo-cache/xwin"
-               echo "common --config=cache-rw"
-               echo "common --remote_cache=grpcs://bazel-remote.bazel-cache.svc.cluster.local:9092"
-               echo "common --tls_certificate=infra/bazel-remote/ca.crt"
-               echo "common --remote_header='authorization=Basic ${auth}'"
-               echo "common --remote_download_toplevel"
-             } > "$rc"
-           else
-             echo "common --config=ci" > "$rc"
+           # Template-baked (infra/vmon/omp_ci_template.py warms both with
+           # these exact values, so repo-contents-cache keys match).
+           {
+             echo "common --config=ci"
+             echo "common --repository_cache=/opt/bazel-repo-cache"
+             echo "common --repo_env=OMP_XWIN_CACHE_DIR=/opt/bazel-repo-cache/xwin"
+           } > "$rc"
+
+           if [ -z "${VMON_CACHE_URL:-}" ]; then
+             echo "::warning title=Bazel cache::The vmon node serves no Bazel cache; building without a remote cache."
+             exit 0
            fi
-           echo "rc=$rc" >> "$GITHUB_OUTPUT"
+           # The node refuses writes from pull request jobs; PRs
+           # (pull_request_target included) skip uploads instead of
+           # collecting 403 warnings.
+           case "${GITHUB_EVENT_NAME:-}" in
+             pull_request*) mode=cache-ro ;;
+             *) mode=cache-rw ;;
+           esac
+           {
+             echo "common --config=${mode}"
+             echo "common --remote_cache=${VMON_CACHE_URL}/bazel"
+           } >> "$rc"
+           echo "::notice title=Bazel cache::Using the vmon node's Bazel cache (${mode})."

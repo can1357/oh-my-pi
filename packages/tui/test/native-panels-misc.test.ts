@@ -89,7 +89,7 @@ describe("MoveOverlay native events", () => {
 });
 
 describe("AnnotationOverlay native esc", () => {
-	it("drops a note draft first, then closes the review without a result", () => {
+	it("saves an active note draft and closes the review", () => {
 		const onComplete = vi.fn();
 		const tui = { terminal: { rows: 40, columns: 100 }, requestRender: () => {} } as unknown as TUI;
 		const overlay = new AnnotationOverlay(
@@ -102,10 +102,11 @@ describe("AnnotationOverlay native esc", () => {
 		overlay.handleInput("A");
 		overlay.handleInput("x");
 		overlay.handleNativeEvent(CLOSE_CLICK);
-		expect(onComplete).not.toHaveBeenCalled();
-		expect(overlay.getTextAnnotations()).toEqual([]);
-		overlay.handleNativeEvent(CLOSE_CLICK);
 		expect(onComplete).toHaveBeenCalledWith(undefined);
+		expect(overlay.getTextAnnotations()).toEqual([]);
+		expect(overlay.getDraft()).toMatchObject({ kind: "text", editor: { text: "x" } });
+		overlay.handleNativeEvent(CLOSE_CLICK);
+		expect(onComplete).toHaveBeenCalledTimes(1);
 	});
 });
 

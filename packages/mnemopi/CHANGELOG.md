@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [18.14.2] - 2026-10-31
+
+### Fixed
+
+- Fixed heuristic episodic facts storing word fragments (`Drafting is active.` → `ctive`), truncated multiword objects, or nothing for `has an …` sentences ([#17511](https://github.com/can1357/oh-my-pi/issues/17511))
+
+## [18.13.3] - 2026-10-28
+
 ### Changed
 
 - Updated Bun engine requirement to ≥1.4.4

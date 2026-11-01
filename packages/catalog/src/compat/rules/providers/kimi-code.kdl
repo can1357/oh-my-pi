@@ -2,6 +2,7 @@
 
 provider "kimi-code" {
 	default-model "kimi-for-coding"
+	dynamic-models-authoritative #true
 	discovery label="Kimi Code" {
 		env "KIMI_API_KEY"
 	}
@@ -38,6 +39,11 @@ provider "kimi-code" {
 		supports-developer-role #false
 		thinking-efforts "minimal" "low" "medium" "high"
 		thinking-format "zai"
+	}
+	// K2.7 Code Highspeed always thinks (`supports_thinking_type: "only"`) but
+	// exposes no adjustable effort ladder (`think_efforts` is omitted).
+	models "kimi-for-coding-highspeed" {
+		thinking-efforts
 	}
 
 	// /coding/v1/models carries no pricing. `cost-fallback` seeds the public

@@ -36,7 +36,6 @@ import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 import { HookEditorComponent } from "./hook-editor";
 import {
 	buildBrowserItems,
-	MODEL_PICKER_COLUMNS,
 	ModelBrowser,
 	type ModelBrowserItem,
 	type ModelBrowserSource,
@@ -749,16 +748,8 @@ export class AdvisorConfigOverlayComponent implements Component {
 				size: "md",
 				layout: "rows",
 				preview: "below",
-				query: browser.query,
-				cursor: browser.cursor,
 				placeholder: "Search models…",
-				columns: MODEL_PICKER_COLUMNS,
-				...catalogue,
-				order: order.order,
-				...(order.hits ? { hits: order.hits } : {}),
-				selected: browser.pickerSelected,
-				...(this.#modelCurrent ? { current: [this.#modelCurrent] } : {}),
-				total: browser.baseCount,
+				...browser.pickerRows(catalogue, order, this.#modelCurrent),
 				empty: "No models available",
 				actions: [
 					pickerAction("use", "Use for advisor", "enter", { primary: true }),

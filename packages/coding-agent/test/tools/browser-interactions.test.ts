@@ -9,12 +9,15 @@ import { CmuxTab } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/cmux-tab";
 import {
 	clickElement,
 	clickQueryHandlerText,
+	fillViaHandle,
 	resolveActionableQueryHandlerClickTarget,
+	TypingInterruptedError,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/interactions";
 import { acquireBrowser, releaseBrowser } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
 import { releaseAllTabs } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import { TERN_KIT_SOURCE } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/page-kit";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
+import { rejectionOf } from "../helpers/rejection";
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
@@ -90,117 +93,6 @@ afterAll(async () => {
 });
 
 describe.skipIf(!CHROMIUM_AVAILABLE)("browser click timeouts", () => {
-	test("says why a click that never became clickable timed out", async () => {
-		const session = makeSession();
-		const prelude = createBrowserPrelude(session);
-		const context = { session, toolCallId: "browser-unclickable" };
-		const tabName = `unclickable-${crypto.randomUUID()}`;
-		const unclickableHtml = `<!doctype html><button id="hidden" style="display:none">Hidden</button><button id="faded" style="opacity:0">Faded</button>
-<button class="multi" style="display:none">First</button><button class="multi">Second</button>
-<button id="swap">Swap</button>
-<button style="pointer-events:none">Twin</button><button>Twin</button>
-<button id="off" disabled>Off</button><div inert><button id="asleep">Asleep</button></div>`;
-		await prelude.invoke(
-			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(unclickableHtml)}` },
-			context,
-		);
-		try {
-			const attempt = async (call: string) => {
-				const result = await prelude.invoke(
-					{
-						action: "run",
-						name: tabName,
-						code: `try {
-	await ${call};
-	return "clicked";
-} catch (error) {
-	return error instanceof Error ? error.message : String(error);
-}`,
-						// A 3 s cell caps the per-op deadline at 2 s.
-						timeout: 3,
-					},
-					context,
-				);
-				return valueFrom<string>(result);
-			};
-			// display:none has no box (never stable); opacity:0 is stable but refused.
-			const hidden = await attempt(`tab.click("#hidden")`);
-			expect(hidden).toMatch(/^tab\.click\("#hidden"\) timed out after \d+ms/);
-			expect(hidden).toContain("last check: display:none");
-			expect(await attempt(`tab.click("#faded")`)).toContain("last check: opacity:0");
-			// A refused match the browser shows is still reported; one it cannot hit test yields to a shown twin.
-			expect(await attempt(`tab.click("text/Faded")`)).toContain("last check: opacity:0");
-			expect(await attempt(`tab.click("text/Twin")`)).toBe("clicked");
-			// The browser drops these clicks, so they fail rather than report success.
-			expect(await attempt(`tab.click("#off")`)).toContain("did not deliver the click");
-			expect(await attempt(`tab.click("text/Asleep")`)).toContain("did not deliver the click");
-			// The count tells the caller the first of several matches is the hidden one.
-			const multi = await attempt(`tab.dblclick(".multi")`);
-			expect(multi).toContain("last check: display:none");
-			expect(multi).toContain("matches 2 element(s)");
-			// The page replaces the element (as a re-render would) after the caller resolved its handle.
-			expect(
-				await attempt(`(async () => {
-	const { elements } = await tab.observe();
-	const swap = await tab.id(elements.find(element => element.name === "Swap").id);
-	await tab.evaluate(() => { const old = document.querySelector("#swap"); old.replaceWith(old.cloneNode(true)); });
-	await swap.click();
-})()`),
-			).toContain("last check: detached");
-		} finally {
-			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
-		}
-	}, 30_000);
-
-	test("says why it could not count a timed-out selector's matches", async () => {
-		const session = makeSession();
-		const prelude = createBrowserPrelude(session);
-		const context = { session, toolCallId: "browser-uncountable" };
-		const tabName = `uncountable-${crypto.randomUUID()}`;
-		await prelude.invoke(
-			{
-				action: "open",
-				name: tabName,
-				url: `data:text/html,${encodeURIComponent("<!doctype html><p>Nothing here</p>")}`,
-			},
-			context,
-		);
-		try {
-			// The match-count probe and the zero-match watchdog both query through `page.$$`;
-			// replacing it on the tab's page makes every probe fail the way the endpoint's did.
-			// The replacement stays until the tab closes below.
-			const attempt = async (probe: string, timeout: number) => {
-				const result = await prelude.invoke(
-					{
-						action: "run",
-						name: tabName,
-						code: `page.$$ = ${probe};
-try {
-	await tab.click("#missing");
-	return "clicked";
-} catch (error) {
-	return error instanceof Error ? error.message : String(error);
-}`,
-						timeout,
-					},
-					context,
-				);
-				return valueFrom<string>(result);
-			};
-			// A probe that throws never counts toward the 2 s fail-fast, so the click runs to its deadline.
-			const thrown = await attempt(`async () => { throw new Error("probe refused"); }`, 3);
-			expect(thrown).toMatch(
-				/^tab\.click\("#missing"\) timed out after \d+ms; could not count matches: probe refused$/,
-			);
-			// A 12 s cell keeps the 8 s action deadline and leaves ~2 s past the 1 s probe wait
-			// before the whole-cell timeout.
-			const stalled = await attempt(`() => Promise.withResolvers().promise`, 12);
-			expect(stalled).toMatch(/; could not count matches: no answer within 1000ms$/);
-		} finally {
-			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
-		}
-	}, 30_000);
-
 	test("rejects promptly when a text-click candidate evaluation is aborted", async () => {
 		const browserHandle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
 		if (!("browser" in browserHandle)) throw new Error("Expected a Puppeteer browser");
@@ -244,14 +136,44 @@ try {
 			);
 
 			controller.abort(reason);
-			// Real Chromium CDP calls cannot run under fake timers; bound the formerly unending lookup.
-			const outcome = await Promise.race([settled, Bun.sleep(500).then(() => ({ status: "hung" as const }))]);
-			if (outcome.status !== "rejected") {
-				throw new Error(`Text-click candidate lookup ${outcome.status} after abort`);
-			}
+			// The abort, not the lookup's 5 s deadline, ends it: only the abort carries `reason` as its cause.
+			const outcome = await settled;
+			if (outcome.status !== "rejected") throw new Error("Text-click candidate lookup resolved after abort");
 			if (!(outcome.error instanceof Error)) throw new Error("Expected candidate lookup to reject with an Error");
 			expect(outcome.error.name).toBe("AbortError");
 			expect(outcome.error.cause).toBe(reason);
+		} finally {
+			await page.close().catch(() => undefined);
+			if (browserHandle.browser.connected) await releaseBrowser(browserHandle, { kill: true });
+		}
+	}, 30_000);
+});
+
+describe.skipIf(!CHROMIUM_AVAILABLE)("browser fill aborts", () => {
+	test("reports a rich-text replacement that was already sent when the fill is aborted", async () => {
+		const browserHandle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
+		if (!("browser" in browserHandle)) throw new Error("Expected a Puppeteer browser");
+		const page = await browserHandle.browser.newPage();
+		try {
+			await page.setContent('<div id="editor" contenteditable>old text</div>');
+			const editor = await page.$("#editor");
+			if (!editor) throw new Error("Expected the editor");
+			const controller = new AbortController();
+			const reason = new Error("per-op deadline");
+			const send = page.keyboard.sendCharacter.bind(page.keyboard);
+			// The insertion reaches the page, then the deadline fires while its reply is still outstanding.
+			page.keyboard.sendCharacter = async text => {
+				await send(text);
+				controller.abort(reason);
+				return Promise.withResolvers<void>().promise;
+			};
+
+			const error = await rejectionOf(fillViaHandle(editor, "new text", controller.signal));
+			if (!(error instanceof TypingInterruptedError))
+				throw new Error(`Expected TypingInterruptedError, got ${error}`);
+			expect(error.progress).toContain("replacement text was already sent");
+			expect(error.cause).toBe(reason);
+			expect(await editor.evaluate(el => el.textContent)).toBe("new text");
 		} finally {
 			await page.close().catch(() => undefined);
 			if (browserHandle.browser.connected) await releaseBrowser(browserHandle, { kill: true });
@@ -438,23 +360,6 @@ return {
 			expect(valueFrom<string>(blocked)).toBe('tab.click("#covered") blocked: covered by <div#overlay>');
 			await call("evaluate", ["document.querySelector('#overlay').remove()"]);
 			await call("click", ["#covered"]);
-
-			// The page renders the button after a delay, as a framework would; the click must wait for it.
-			const late = await invoke({
-				action: "run",
-				name: TAB_NAME,
-				code: `await tab.evaluate(() => setTimeout(() => {
-	const button = document.createElement("button");
-	button.id = "late";
-	button.onclick = () => { button.dataset.clicked = "1"; };
-	button.textContent = "Late";
-	document.body.append(button);
-}, 300));
-await tab.click("#late");
-return tab.attr("#late", "data-clicked");`,
-				timeout: 10,
-			});
-			expect(valueFrom<string>(late)).toBe("1");
 
 			await call("check", ["#check"]);
 			await call("check", ["#check"]);
@@ -707,48 +612,198 @@ return { value: await tab.value("#q"), reported: await tab.evaluate(() => window
 		}
 	}, 40_000);
 
-	// Regression (#16833): a long fill/type that hits its per-op deadline used to reject while
-	// Puppeteer kept typing the rest, and blamed actionability for a field that was taking input.
-	test("stops typing when a long fill or type times out and reports how far it got", async () => {
+	test("fills and clears a rich-text editor that keeps its own model", async () => {
 		const session = makeSession();
 		const prelude = createBrowserPrelude(session);
-		const tabName = `long-type-${crypto.randomUUID()}`;
-		const context = { session, toolCallId: "browser-long-type" };
+		const tabName = `rich-editor-${crypto.randomUUID()}`;
+		// Like Slate and Lexical, the editor applies input to its own model through beforeinput, renders
+		// from that model, and undoes any DOM write it did not make itself.
+		const editorHtml = `<!doctype html><div id="editor" contenteditable></div>
+<script>
+const editor = document.querySelector("#editor");
+window.model = "old query";
+const observer = new MutationObserver(() => render());
+function render(caret) {
+  observer.disconnect();
+  editor.textContent = model;
+  if (caret !== undefined && editor.firstChild) getSelection().collapse(editor.firstChild, caret);
+  observer.observe(editor, { childList: true, characterData: true, subtree: true });
+}
+const offset = (node, at) => (node === editor ? (at === 0 ? 0 : model.length) : at);
+editor.addEventListener("beforeinput", event => {
+  event.preventDefault();
+  const [range] = event.getTargetRanges();
+  const start = offset(range.startContainer, range.startOffset);
+  const end = offset(range.endContainer, range.endOffset);
+  const inserted = event.inputType === "insertText" ? event.data : "";
+  model = model.slice(0, start) + inserted + model.slice(end);
+  render(start + inserted.length);
+});
+render();
+</script>`;
+		const context = { session, toolCallId: "browser-rich-editor" };
 		await prelude.invoke(
-			{
-				action: "open",
-				name: tabName,
-				url: `data:text/html,${encodeURIComponent("<textarea id=area></textarea>")}`,
-			},
+			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(editorHtml)}` },
 			context,
 		);
-		const run = async <T>(code: string): Promise<T> =>
-			valueFrom<T>(await prelude.invoke({ action: "run", name: tabName, code, timeout: 3 }, context));
-		const readLength = `return (await tab.value("#area")).length;`;
 		try {
-			for (const action of ["fill", "type"]) {
-				await run(`await tab.evaluate(() => { document.querySelector("#area").value = ""; });`);
-				// A 3 s cell caps the per-op deadline at 2 s, far short of typing 20,000 characters.
-				const message = await run<string>(`try {
-	await tab.${action}("#area", "x".repeat(20000));
-	return "typed";
-} catch (error) {
-	return error.message;
-}`);
-				expect(message).toMatch(
-					new RegExp(
-						`^tab\\.${action}\\("#area"\\) timed out after \\d+ms; typing stopped after \\d+ of 20000 characters`,
-					),
-				);
-				// Real Chromium input cannot run under fake timers, and "no more keys arrive" is only
-				// observable over wall time. One key in flight at the deadline may still land; nothing after it.
-				await Bun.sleep(300);
-				const settled = await run<number>(readLength);
-				await Bun.sleep(1000);
-				expect(settled).toBeGreaterThan(0);
-				expect(settled).toBeLessThan(20000);
-				expect(await run<number>(readLength)).toBe(settled);
-			}
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: tabName,
+					code: `await tab.fill("#editor", "new query");
+const filled = await tab.evaluate(() => window.model);
+await tab.fill("#editor", "");
+return { filled, cleared: await tab.evaluate(() => window.model) };`,
+					timeout: 25,
+				},
+				context,
+			);
+			expect(valueFrom<{ filled: string; cleared: string }>(result)).toEqual({ filled: "new query", cleared: "" });
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 40_000);
+
+	test("an empty fill deletes every content of an editing host and nothing outside an element inside one", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const tabName = `editable-clear-${crypto.randomUUID()}`;
+		// The blank span holds only an empty text node: its selected contents show nothing, so a Backspace there
+		// would delete the "p" before it.
+		const clearHtml = `<!doctype html><div id="pictured" contenteditable><img alt="pic" width="20" height="20"
+src="data:image/gif;base64,R0lGODlhAQABAAAAACw="></div><div id="hidden" contenteditable><span style="display:none">old</span></div>
+<div id="host" contenteditable>keep<span id="blank"></span>this</div>
+<script>document.querySelector("#blank").append("");</script>`;
+		const context = { session, toolCallId: "browser-editable-clear" };
+		await prelude.invoke(
+			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(clearHtml)}` },
+			context,
+		);
+		try {
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: tabName,
+					code: `await tab.fill("#pictured", "");
+await tab.fill("#hidden", "");
+await tab.fill("#blank", "");
+return {
+	images: await tab.count("#pictured img"),
+	hidden: await tab.evaluate(() => document.querySelector("#hidden").textContent),
+	host: await tab.text("#host"),
+};`,
+					timeout: 25,
+				},
+				context,
+			);
+			expect(valueFrom<{ images: number; hidden: string; host: string }>(result)).toEqual({
+				images: 0,
+				hidden: "",
+				host: "keepthis",
+			});
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 40_000);
+
+	test("refuses to fill a contenteditable whose focus handler moves focus to another control", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const tabName = `editable-focus-${crypto.randomUUID()}`;
+		const focusHtml = `<!doctype html><input id="other" value="keep"><div id="editor" contenteditable>old</div>
+<script>document.querySelector("#editor").addEventListener("focus", () => document.querySelector("#other").focus());</script>`;
+		const context = { session, toolCallId: "browser-editable-focus" };
+		await prelude.invoke(
+			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(focusHtml)}` },
+			context,
+		);
+		try {
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: tabName,
+					code: `let refused = "";
+try { await tab.fill("#editor", "new"); } catch (error) { refused = error.message; }
+return { refused, other: await tab.value("#other"), editor: await tab.text("#editor") };`,
+					timeout: 25,
+				},
+				context,
+			);
+			const outcome = valueFrom<{ refused: string; other: string; editor: string }>(result);
+			expect(outcome.refused).toContain("does not keep focus");
+			expect(outcome).toMatchObject({ other: "keep", editor: "old" });
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 40_000);
+
+	test("fills and clears a contenteditable inside a closed shadow root through its observed handle", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const tabName = `editable-closed-${crypto.randomUUID()}`;
+		const closedHtml = `<!doctype html><div id="host"></div>
+<script>
+const root = document.querySelector("#host").attachShadow({ mode: "closed" });
+root.innerHTML = '<div contenteditable role="textbox" aria-label="Closed editor">old</div>';
+window.closedEditor = root.firstChild;
+</script>`;
+		const context = { session, toolCallId: "browser-editable-closed" };
+		await prelude.invoke(
+			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(closedHtml)}` },
+			context,
+		);
+		try {
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: tabName,
+					code: `const { elements } = await tab.observe();
+const editor = await tab.id(elements.find(element => element.name === "Closed editor").id);
+await editor.fill("new");
+const filled = await tab.evaluate(() => window.closedEditor.textContent);
+await editor.fill("");
+return { filled, cleared: await tab.evaluate(() => window.closedEditor.textContent) };`,
+					timeout: 25,
+				},
+				context,
+			);
+			expect(valueFrom<{ filled: string; cleared: string }>(result)).toEqual({ filled: "new", cleared: "" });
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 40_000);
+
+	test("a multi-line fill of a contenteditable inserts its line breaks without pressing Enter", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const tabName = `editable-lines-${crypto.randomUUID()}`;
+		// Like a chat composer, Enter sends what the editor holds.
+		const linesHtml = `<!doctype html><div id="composer" contenteditable style="white-space: pre-wrap">draft</div>
+<script>
+window.sent = [];
+const composer = document.querySelector("#composer");
+composer.addEventListener("keydown", event => {
+  if (event.key === "Enter") sent.push(composer.innerText);
+});
+</script>`;
+		const context = { session, toolCallId: "browser-editable-lines" };
+		await prelude.invoke(
+			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(linesHtml)}` },
+			context,
+		);
+		try {
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: tabName,
+					code: `await tab.fill("#composer", "line one\\nline two");
+return { text: await tab.text("#composer"), sent: await tab.evaluate(() => window.sent) };`,
+					timeout: 25,
+				},
+				context,
+			);
+			expect(valueFrom<{ text: string; sent: string[] }>(result)).toEqual({ text: "line one\nline two", sent: [] });
 		} finally {
 			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
 		}

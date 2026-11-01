@@ -580,9 +580,9 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	};
 
 	const options: ParsedRequest["options"] = {};
-	if (data.max_output_tokens !== undefined) options.maxOutputTokens = data.max_output_tokens;
-	if (data.temperature !== undefined) options.temperature = data.temperature;
-	if (data.top_p !== undefined) options.topP = data.top_p;
+	if (typeof data.max_output_tokens === "number") options.maxOutputTokens = data.max_output_tokens;
+	if (typeof data.temperature === "number") options.temperature = data.temperature;
+	if (typeof data.top_p === "number") options.topP = data.top_p;
 	if (data.stop !== undefined && data.stop !== null) {
 		options.stopSequences = typeof data.stop === "string" ? [data.stop] : data.stop;
 	}

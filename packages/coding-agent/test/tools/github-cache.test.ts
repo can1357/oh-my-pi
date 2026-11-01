@@ -17,6 +17,7 @@ import {
 	getCachedGeneration,
 	getOrFetchView,
 	getRetainedGeneration,
+	invalidateAllForRepo,
 	openDb,
 	putCached,
 	resetForTests as resetCacheForTests,
@@ -574,6 +575,49 @@ describe("getOrFetchView (TTL semantics)", () => {
 		vi.spyOn(Date, "now").mockReturnValue(now + 3700_000);
 		expect(getRetainedGeneration(TEST_REPO, "pr-diff", 92, false, fetchedAt, undefined, settings)).toBeNull();
 		expect(getCachedGeneration(TEST_REPO, "pr-diff", 92, false, fetchedAt)).toBeNull();
+	});
+
+	it("does not let a refresh started before an invalidation overwrite the post-invalidation row", async () => {
+		const oldRefresh = Promise.withResolvers<{
+			rendered: string;
+			sourceUrl: undefined;
+			payload: { head: string };
+		}>();
+		const started = Promise.withResolvers<void>();
+		putCached({
+			repo: TEST_REPO,
+			kind: "pr-diff",
+			number: 54,
+			includeComments: false,
+			rendered: "head A",
+			payload: { head: "A" },
+			fetchedAt: Date.now() - 300_000,
+		});
+		const options = {
+			repo: TEST_REPO,
+			kind: "pr-diff" as const,
+			number: 54,
+			includeComments: false,
+			settings: Settings.isolated({ "github.cache.softTtlSec": 60 }),
+			fetchFresh: () => {
+				started.resolve();
+				return oldRefresh.promise;
+			},
+		};
+		expect((await getOrFetchView(options)).status).toBe("stale");
+		await started.promise;
+		invalidateAllForRepo(TEST_REPO);
+		const next = await getOrFetchView({
+			...options,
+			fetchFresh: async () => ({ rendered: "head B", sourceUrl: undefined, payload: { head: "B" } }),
+		});
+		expect(next.rendered).toBe("head B");
+		oldRefresh.resolve({ rendered: "head A", sourceUrl: undefined, payload: { head: "A" } });
+		// Drain the queued refresh's store and finally callbacks, not an OS clock.
+		await oldRefresh.promise;
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(getCached(TEST_REPO, "pr-diff", 54, false)?.rendered).toBe("head B");
 	});
 
 	it("treats past-hard-TTL rows as cache misses (fetcher runs)", async () => {

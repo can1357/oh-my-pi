@@ -77,12 +77,10 @@ function validateGitSpec(spec: string): void {
 }
 
 function gitInstallSpec(original: string, source: GitSource): string {
-	// bun resolves GitHub specs natively (shorthand → tarball, inline-credential
-	// URLs → git clone with those credentials); forward them untouched.
-	if (source.host === "github.com") {
-		return original;
-	}
 	const withRef = !source.ref || source.repo.includes("#") ? source.repo : `${source.repo}#${source.ref}`;
+	// bun accepts GitHub shorthands and URLs verbatim, but reads pi's `git:`
+	// prefix as a host named "git"; only that form takes the parsed URL.
+	if (source.host === "github.com") return /^git:(?!\/\/)/i.test(original) ? withRef : original;
 	if (/^(https?|ssh):\/\//i.test(withRef) && !/^git\+/i.test(withRef)) {
 		// bun auto-detects git only for GitHub-hosted URLs — prefix `git+` so any
 		// git host is cloned via git instead of being misread as an npm tarball
@@ -492,6 +490,7 @@ export class PluginManager {
 	 * - npm specs: `pkg`, `pkg@1.2.3`, `@scope/pkg`, `pkg[features]`
 	 * - namespaced git shorthand: `github:user/repo[#ref]`, `gitlab:`, `bitbucket:`,
 	 *   `codeberg:`, `sourcehut:`/`srht:`
+	 * - pi-style git shorthand: `git:github.com/user/repo`, `git:git@github.com:user/repo`
 	 * - full git URLs: `https://github.com/user/repo`, `git@github.com:user/repo`,
 	 *   `ssh://…`, `git+https://…`
 	 *

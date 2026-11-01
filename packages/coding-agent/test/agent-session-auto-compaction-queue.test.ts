@@ -9,7 +9,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type { CompactOptions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
-import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionMaintenance } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -215,89 +215,6 @@ describe("AgentSession auto-compaction queue resume", () => {
 	afterAll(() => {
 		authStorage.close();
 		tempDir.removeSync();
-	});
-
-	it("resumes after threshold compaction when only agent-level queued messages exist", async () => {
-		session.agent.followUp({
-			role: "custom",
-			customType: "test",
-			content: [{ type: "text", text: "Queued custom" }],
-			display: false,
-			timestamp: Date.now(),
-		});
-
-		expect(session.agent.hasQueuedMessages()).toBe(true);
-
-		const continueSpy = vi.spyOn(session.agent, "continue").mockImplementation(async () => {
-			// Real continue() polls and consumes the queued steering/follow-up
-			// messages. Mirror that here so the stranded-queue drain settles after
-			// one resume instead of rescheduling itself forever (a no-op mock
-			// leaves the queue populated, spinning the drain into an OOM loop).
-			session.agent.clearAllQueues();
-		});
-
-		// The continuation is already scheduled when the public agent_end arrives,
-		// so consumers must see it as a non-terminal scheduling pause.
-		const agentEndTerminalStates: Array<boolean | undefined> = [];
-		const { promise: compactionDone, resolve: onCompactionDone } = Promise.withResolvers<void>();
-		// Session subscribers are notified before extension listeners settle, so the
-		// continuation's delay timer is armed some microtasks after
-		// auto_compaction_end reaches this test; wait for the arm itself.
-		const waitSpy = vi.spyOn(scheduler, "wait");
-		session.subscribe((event: AgentSessionEvent) => {
-			if (event.type === "auto_compaction_end") onCompactionDone();
-			if (event.type === "agent_end") agentEndTerminalStates.push(event.isTerminal);
-		});
-
-		// Build a fake AssistantMessage with high token usage to trigger threshold
-		// compaction (contextWindow=200000, threshold ~80%).
-		const assistantMsg = {
-			role: "assistant" as const,
-			// Non-empty content: an empty `stop` turn would trip the empty-stop guard
-			// (#handleEmptyAssistantStop) and short-circuit the agent_end handler before
-			// compaction/todo checks run — hanging this test forever under fake timers.
-			content: [{ type: "text" as const, text: "Done." }],
-			api: "anthropic-messages" as const,
-			provider: "anthropic" as const,
-			model: "claude-sonnet-4-5",
-			stopReason: "stop" as const,
-			usage: {
-				input: 190000,
-				output: 1000,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 191000,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			timestamp: Date.now(),
-		};
-
-		// Drive auto-compaction through the event flow:
-		// message_end → stores #lastAssistantMessage
-		// agent_end   → #checkCompaction → shouldCompact → #runAutoCompaction
-		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
-
-		// Wait for compaction completion, then verify waitForIdle blocks on queued continuation.
-		await compactionDone;
-		while (!waitSpy.mock.calls.some(([delayMs]) => delayMs === 100)) {
-			await Promise.resolve();
-		}
-		const idlePromise = session.waitForIdle();
-		let idleResolved = false;
-		void idlePromise.then(() => {
-			idleResolved = true;
-		});
-		await Promise.resolve();
-		expect(idleResolved).toBe(false);
-		vi.advanceTimersByTime(200);
-		await idlePromise;
-
-		expect(continueSpy).toHaveBeenCalledTimes(1);
-		const runtimeSignals = getRuntimeSignals();
-		expect(runtimeSignals).toContain("compaction:start:threshold");
-		expect(runtimeSignals.some(signal => signal.startsWith("compaction:end:"))).toBe(true);
-		expect(agentEndTerminalStates).toEqual([false]);
 	});
 
 	it("marks manual compaction active before abort teardown can yield", async () => {

@@ -39,7 +39,6 @@ export interface SetupHost extends SetupUiHost {
 	saveColorBlindMode(enabled: boolean): void;
 	saveTheme(mode: "dark" | "light", name: string): void;
 	captureBrowserSession(request: OAuthBrowserSessionRequest, signal?: AbortSignal): Promise<string>;
-	copyToClipboard(text: string): Promise<void>;
 	openInBrowser(url: string): void;
 	markComplete(version: number): Promise<void>;
 	playWelcomeIntro(): void;
@@ -81,11 +80,29 @@ export interface SetupSceneController extends Component {
 	routeMouse?(event: SgrMouseEvent, line: number, col: number): void;
 }
 
+/**
+ * Role of the sheet (`picker` or `overlay`) an interactive scene presents in a
+ * TSP terminal. The terminal's setup stylesheet seats it under the wizard's
+ * brand and stepper instead of floating it over a dimmed page.
+ */
+export const SETUP_SHEET_ROLE = "omp.setup.sheet";
+
+/** Surface role of the setup page (wizard and startup splash) in a TSP terminal. */
+export const SETUP_SURFACE_ROLE = "omp.app.setup";
+
 /** Versioned onboarding scene definition. */
 export interface SetupScene {
 	id: string;
 	title: string;
+	/** Short label for the wizard's stepper (`Sign in`, `Model`). */
+	step: string;
 	minVersion: number;
+	/**
+	 * Configures something only the cell-grid renderer draws (glyphs, composer
+	 * shape, theme). A TSP terminal draws those itself, so the wizard skips the
+	 * scene while a native surface is live.
+	 */
+	ansiOnly?: boolean;
 	shouldRun?(ctx: SetupHost): boolean | Promise<boolean>;
 	mount(host: SetupSceneHost): SetupSceneController;
 }

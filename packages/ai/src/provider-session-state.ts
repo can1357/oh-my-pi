@@ -39,7 +39,7 @@
  */
 
 import { clearAnthropicFastModeFallback } from "./providers/anthropic-state";
-import { resetOpenAIResponsesAccountScopedState } from "./providers/openai-responses";
+import { resetOpenAIResponsesAccountScopedState } from "./providers/openai-responses-state";
 import type { ProviderSessionState } from "./types";
 
 /**

@@ -715,6 +715,20 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 		}
 	});
 
+	it("prints JSON text as text plus a JSON view, other long strings as text only", async () => {
+		const kernel = await PythonKernel.start({ cwd: MATPLOTLIB_TEST_CWD });
+		try {
+			const value = { items: Array.from({ length: 30 }, (_, i) => i) };
+			const text = JSON.stringify(value);
+			const result = await executePythonWithKernel(kernel, `print(${JSON.stringify(text)})\nprint('{' + 'x' * 100)`);
+			expect(result.exitCode).toBe(0);
+			expect(result.output).toBe(`${text}\n{${"x".repeat(100)}\n`);
+			expect(result.displayOutputs).toEqual([{ type: "view", text, view: { kind: "json", value } }]);
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
 	it("prints an image dict as a placeholder and emits the image with its metadata", async () => {
 		const kernel = await PythonKernel.start({ cwd: MATPLOTLIB_TEST_CWD });
 		try {

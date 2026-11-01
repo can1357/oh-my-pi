@@ -19,7 +19,6 @@ import { attach, create, Flag, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { getCodexAttestationHeader } from "@oh-my-pi/pi-ai/providers/openai-codex-attestation";
 import { createOpenAICodexCompactionRequestContext } from "@oh-my-pi/pi-ai/providers/openai-codex-compaction";
 import { applyCodexResponsesLiteShape } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
-import { createOpenAICodexCompatibilityMetadata } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import {
 	applyInferenceHeaders,
 	applySessionHeader,
@@ -847,7 +846,10 @@ export function buildOpenAiNativeHistory(
 		msgIndex++;
 	}
 
-	return stripOpenAIResponsesOutputOnlyStatusesForReplay(hoistInterleavedResponsesToolBatchMessages(input));
+	const replay = stripOpenAIResponsesOutputOnlyStatusesForReplay(hoistInterleavedResponsesToolBatchMessages(input));
+	// Backend-only metadata on captured output items; Codex rejects it as an unknown input parameter.
+	if (!replay.some(item => Object.hasOwn(item, "internal_chat_message_metadata_passthrough"))) return replay;
+	return replay.map(({ internal_chat_message_metadata_passthrough: _internalMetadata, ...item }) => item);
 }
 
 // ============================================================================
@@ -950,6 +952,9 @@ export async function requestOpenAiRemoteCompaction(
 
 	// Codex endpoints require additional auth headers
 	if (isCodexResponses) {
+		// Keep transport loading on the actual Codex request path, not compaction policy inspection.
+		const { createOpenAICodexCompatibilityMetadata } =
+			await import("@oh-my-pi/pi-ai/providers/openai-codex-responses");
 		const accountId = getCodexAccountId(apiKey);
 		if (accountId) {
 			headers[OPENAI_HEADERS.ACCOUNT_ID] = accountId;
