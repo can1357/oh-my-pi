@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Windows daemon metadata writes being lost when `omp ps` or another reader briefly holds `meta.json` open ([#17686](https://github.com/can1357/oh-my-pi/issues/17686)).
+
 ## [18.14.2] - 2026-10-31
 
 ### Added

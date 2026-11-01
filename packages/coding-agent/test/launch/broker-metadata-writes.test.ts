@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { PsScope } from "@oh-my-pi/pi-tui/apps/ps-data";
@@ -177,6 +177,59 @@ describe("daemon metadata writes", () => {
 		const metadata = await Bun.file(metadataPath).text();
 		expect(metadata).not.toContain("SPEC_ONLY_MARKER_");
 		expect(JSON.parse(metadata)).toMatchObject({ daemon: { state: "exited" } });
+	}, 20_000);
+
+	it("persists a terminal state after a transient metadata rename denial", async () => {
+		using tempDir = TempDir.createSync("@omp-broker-rename-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		const metadataPath = path.join(runtimeDir, "daemons", "rename", "meta.json");
+		await fs.mkdir(projectDir);
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const broker = startBroker(projectDir, runtimeDir);
+		const rename = fs.rename;
+		const platform = Object.getOwnPropertyDescriptor(process, "platform");
+		let denied = false;
+		const renameSpy = spyOn(fs, "rename").mockImplementation(async (source, target) => {
+			if (!denied && target === metadataPath && (await fs.readFile(source, "utf8")).includes('"state":"exited"')) {
+				denied = true;
+				// Simulate Windows replacement semantics for this broker's final write.
+				Object.defineProperty(process, "platform", { value: "win32" });
+				throw Object.assign(new Error("rename denied by reader"), { code: "EPERM" });
+			}
+			return rename(source, target);
+		});
+		try {
+			await broker.listening;
+			await client.request({
+				op: "start",
+				spec: {
+					name: "rename",
+					application: process.execPath,
+					args: ["-e", "process.exit(0)"],
+					env: {},
+					cwd: projectDir,
+					pty: false,
+					restart: "no",
+					persist: false,
+					detached: false,
+				},
+			});
+			const waited = await client.request({ op: "wait", name: "rename", for: "exit", timeoutMs: 10_000 });
+			if (waited.op !== "wait") throw new Error("unexpected wait result");
+			expect(waited.daemon.state).toBe("exited");
+		} finally {
+			try {
+				await client.request({ op: "shutdown" }).catch(() => undefined);
+				client.close();
+				await broker.finished;
+			} finally {
+				if (platform) Object.defineProperty(process, "platform", platform);
+				renameSpy.mockRestore();
+			}
+		}
+		expect(denied).toBe(true);
+		expect(await Bun.file(metadataPath).json()).toMatchObject({ daemon: { state: "exited" } });
 	}, 20_000);
 
 	it("lists split-layout and legacy records in `omp ps` offline and while the broker is live", async () => {

@@ -4,7 +4,16 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { FileLock, IpcConnection, IpcServer, Process, type PtyRunResult, PtySession } from "@oh-my-pi/pi-natives";
-import { isEnoent, isRecord, logger, postmortem, procmgr, sanitizeText, setProcessName } from "@oh-my-pi/pi-utils";
+import {
+	hasFsCode,
+	isEnoent,
+	isRecord,
+	logger,
+	postmortem,
+	procmgr,
+	sanitizeText,
+	setProcessName,
+} from "@oh-my-pi/pi-utils";
 import { TerminalQueryResponder } from "@oh-my-pi/pi-utils/vterm";
 import { hostHasInheritableConsole } from "../eval/py/spawn-options";
 import {
@@ -73,6 +82,9 @@ const LEASE_HANDOFF_GRACE_MS = 500;
 const LEASE_PROBE_TIMEOUT_MS = 250;
 const LOG_FILE = "output.log";
 const PREVIOUS_LOG_FILE = "output.previous.log";
+const RENAME_RETRY_BUDGET_MS = 2_000;
+const RENAME_RETRY_INITIAL_MS = 5;
+const RENAME_RETRY_MAX_MS = 100;
 const DAEMON_SPAWN_OPTIONS = resolveDaemonSpawnOptions({
 	platform: process.platform,
 	hostHasInheritableConsole: hostHasInheritableConsole(),
@@ -190,11 +202,24 @@ function syncReadyPending(record: ManagedDaemon): void {
 	record.snapshot.readyPending = pending.length > 0 ? pending : undefined;
 }
 
-/** Replace `filePath` via a pid-scoped temp file so readers never see a partial write. */
+/** Replace via a pid-scoped temp file; Windows may briefly deny replacement while a reader holds the target. */
 async function writeFileAtomic(filePath: string, content: string): Promise<void> {
 	const tempPath = `${filePath}.${process.pid}.tmp`;
 	await Bun.write(tempPath, content);
-	await fs.rename(tempPath, filePath);
+	const deadline = Date.now() + RENAME_RETRY_BUDGET_MS;
+	for (let failures = 0; ; failures++) {
+		try {
+			await fs.rename(tempPath, filePath);
+			return;
+		} catch (error) {
+			if (process.platform !== "win32" || (!hasFsCode(error, "EPERM") && !hasFsCode(error, "EACCES"))) {
+				throw error;
+			}
+			const remaining = deadline - Date.now();
+			if (remaining <= 0) throw error;
+			await Bun.sleep(Math.min(remaining, RENAME_RETRY_MAX_MS, RENAME_RETRY_INITIAL_MS * 2 ** failures));
+		}
+	}
 }
 
 async function fileTextSlice(filePath: string, head: boolean): Promise<string> {
