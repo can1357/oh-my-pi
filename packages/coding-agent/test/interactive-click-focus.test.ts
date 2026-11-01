@@ -8,7 +8,6 @@ import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extens
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { cfgExtensionAssistantTextRenderers } from "@oh-my-pi/pi-coding-agent/extensibility/settings";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
-import { ChatTranscriptBuilder } from "@oh-my-pi/pi-tui/chat/chat-transcript-builder";
 import { Composer } from "@oh-my-pi/pi-tui/prompt/composer";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
@@ -767,11 +766,14 @@ describe("inline click-to-focus geometry", () => {
 		cfgExtensionAssistantTextRenderers.set(mode.settings, true);
 		const { extension } = installDemoLinkExtension();
 		let linked = false;
-		extension.assistantTextRenderers.push(({ text, message }) =>
-			linked && message.timestamp === 1
+		// The replies the extension's renderer drew: what the link check replayed.
+		const drawn = new Set<number>();
+		extension.assistantTextRenderers.push(({ text, message }) => {
+			drawn.add(message.timestamp);
+			return linked && message.timestamp === 1
 				? text.replace("Early reply", "Early [the early link](demo:early)")
-				: undefined,
-		);
+				: undefined;
+		});
 		await mode.init({ suppressWelcomeIntro: true });
 		void mode.getUserInput();
 		await term.waitForRender();
@@ -789,26 +791,18 @@ describe("inline click-to-focus geometry", () => {
 		await mode.renderInitialMessages();
 		await term.waitForRender(() => screen().some(row => row.includes("Filler paragraph 19.")));
 
-		const replayed: number[] = [];
-		const rebuild = ChatTranscriptBuilder.prototype.rebuild;
-		vi.spyOn(ChatTranscriptBuilder.prototype, "rebuild").mockImplementation(
-			function (this: ChatTranscriptBuilder, entries) {
-				replayed.push(entries.length);
-				rebuild.call(this, entries);
-			},
-		);
 		const misses = () => statuses.filter(status => status === "No extension links in the transcript").length;
-		term.sendInput("\x1bo");
-		await term.waitForRender(() => misses() === 1);
-		expect(replayed).toEqual([41]);
+		const press = async (miss: number) => {
+			drawn.clear();
+			term.sendInput("\x1bo");
+			await term.waitForRender(() => misses() === miss);
+			return [...drawn].sort((a, b) => a - b);
+		};
+		expect(await press(1)).toContain(1);
 		// A new turn: only the last turn found before (which may still change) and the new one replay.
 		appendTurn(20);
-		term.sendInput("\x1bo");
-		await term.waitForRender(() => misses() === 2);
-		expect(replayed).toEqual([41, 4]);
-		term.sendInput("\x1bo");
-		await term.waitForRender(() => misses() === 3);
-		expect(replayed).toEqual([41, 4, 2]);
+		expect(await press(2)).toEqual([139, 141]);
+		expect(await press(3)).toEqual([141]);
 
 		// The extension redraws the early reply, now with a link (in scrollback): the key finds it.
 		linked = true;
@@ -847,7 +841,7 @@ describe("inline click-to-focus geometry", () => {
 		await expectClosed();
 		runner.setSuspendedExtensions(() => false);
 		// Resumed, the reply is rebuilt with its link drawn as a label again.
-		await Promise.resolve();
+		await term.waitForRender(() => screen().some(row => row.includes("See the late link here.")));
 
 		await openBrowser();
 		cfgExtensionAssistantTextRenderers.set(mode.settings, false);
