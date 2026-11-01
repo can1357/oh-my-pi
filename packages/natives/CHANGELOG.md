@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Clarified hashline edit instructions for current-session tags, raw reads, clipped lines, and re-reading reformatted writes ([#16000](https://github.com/can1357/oh-my-pi/issues/16000), [#16253](https://github.com/can1357/oh-my-pi/pull/16253) by [@apoc](https://github.com/apoc))
+
 ### Fixed
 
 - Fixed the bash tool's shell stopping with status 1 and no message after about 40 levels of nested functions, `eval` or `source` when the process may open only 1,024 files; a shell that runs out of open files now says so and names the limit to raise ([#17668](https://github.com/can1357/oh-my-pi/pull/17668) by [@sjawhar](https://github.com/sjawhar))
