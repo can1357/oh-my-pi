@@ -252,9 +252,18 @@ pub enum ErrorKind {
 	#[error("interrupted")]
 	Interrupted,
 
-	/// Maximum function call depth was exceeded.
-	#[error("maximum function call depth exceeded")]
-	MaxFunctionCallDepthExceeded,
+	/// A function call would nest functions deeper than the shell allows.
+	#[error("{0}: maximum function nesting level exceeded ({1})")]
+	MaxFunctionNestingExceeded(String, usize),
+
+	/// A `source` would nest sourced files deeper than the shell allows.
+	#[error("{0}: maximum source nesting level exceeded ({1})")]
+	MaxSourceNestingExceeded(String, usize),
+
+	/// An `eval` would nest evals deeper than the shell allows. The `eval`
+	/// builtin names itself in front of this message.
+	#[error("maximum eval nesting level exceeded ({0})")]
+	MaxEvalNestingExceeded(usize),
 
 	/// System time error.
 	#[error("system time error: {0}")]
@@ -358,11 +367,22 @@ pub trait BuiltinError: std::error::Error + ConvertibleToExitCode + Send + Sync 
 	fn as_io_error(&self) -> Option<&std::io::Error> {
 		None
 	}
+
+	/// Whether this error abandons the whole command it occurred in, as Bash
+	/// does when a function or `eval` would nest too deep, rather than failing
+	/// only the command that raised it.
+	fn abandons_command(&self) -> bool {
+		false
+	}
 }
 
 impl BuiltinError for Error {
 	fn as_io_error(&self) -> Option<&std::io::Error> {
 		self.as_io_error()
+	}
+
+	fn abandons_command(&self) -> bool {
+		self.abandons_command()
 	}
 }
 
@@ -453,6 +473,18 @@ impl Error {
 			ErrorKind::IoError(io_err) => Some(io_err),
 			ErrorKind::BuiltinError(inner, _) => inner.as_io_error(),
 			_ => None,
+		}
+	}
+
+	/// Returns whether this error abandons the whole command it occurred in,
+	/// as Bash does when a function or `eval` would nest too deep: the callers
+	/// up to the enclosing top-level command (or `eval` or sourced file) stop
+	/// too, instead of carrying on as if one command had failed.
+	pub fn abandons_command(&self) -> bool {
+		match &self.kind {
+			ErrorKind::MaxFunctionNestingExceeded(..) | ErrorKind::MaxEvalNestingExceeded(..) => true,
+			ErrorKind::BuiltinError(inner, _) => inner.abandons_command(),
+			_ => false,
 		}
 	}
 

@@ -499,6 +499,32 @@ impl Execute for ast::Program {
 	}
 }
 
+/// Stack left on the current thread below which nested execution continues on
+/// a stack segment allocated for it. One level of shell nesting takes 24 to
+/// 110 KiB of native stack in an optimized build, and several times that in a
+/// debug build, so this leaves each level, and the command it runs, room on
+/// the stack it starts on.
+const NESTED_EXECUTION_RED_ZONE: usize = 1024 * 1024;
+
+/// Size of each stack segment allocated for nested execution. Its pages are
+/// committed only as they are touched, and it is freed when the poll that
+/// needed it returns.
+const NESTED_EXECUTION_STACK_SEGMENT: usize = 8 * 1024 * 1024;
+
+/// Polls `future` on a newly allocated stack segment whenever the current
+/// stack is nearly exhausted. Without this, shell code nested a few dozen
+/// levels deep runs off the end of the thread's stack, and the host process
+/// dies with a segmentation fault.
+async fn with_stack_headroom<F: Future>(future: F) -> F::Output {
+	let mut future = std::pin::pin!(future);
+	std::future::poll_fn(|cx| {
+		stacker::maybe_grow(NESTED_EXECUTION_RED_ZONE, NESTED_EXECUTION_STACK_SEGMENT, || {
+			future.as_mut().poll(cx)
+		})
+	})
+	.await
+}
+
 #[async_trait::async_trait]
 impl Execute for ast::CompoundList {
 	async fn execute(
@@ -506,39 +532,49 @@ impl Execute for ast::CompoundList {
 		shell: &mut Shell<impl extensions::ShellExtensions>,
 		params: &ExecutionParameters,
 	) -> Result<ExecutionResult, error::Error> {
+		// Every level of nesting (a function body, a sourced file, an eval
+		// string, a compound command) executes a compound list.
+		with_stack_headroom(execute_compound_list(self, shell, params)).await
+	}
+}
+
+async fn execute_compound_list(
+	list: &ast::CompoundList,
+	shell: &mut Shell<impl extensions::ShellExtensions>,
+	params: &ExecutionParameters,
+) -> Result<ExecutionResult, error::Error> {
+	ensure_not_cancelled(params)?;
+	let mut result = ExecutionResult::success();
+
+	for ast::CompoundListItem(ao_list, sep) in &list.0 {
 		ensure_not_cancelled(params)?;
-		let mut result = ExecutionResult::success();
+		let run_async = matches!(sep, ast::SeparatorOperator::Async);
 
-		for ast::CompoundListItem(ao_list, sep) in &self.0 {
-			ensure_not_cancelled(params)?;
-			let run_async = matches!(sep, ast::SeparatorOperator::Async);
+		if run_async {
+			let job = spawn_async_ao_list_as_job(ao_list, shell, params).await?;
+			let job_formatted = job.to_pid_style_string();
 
-			if run_async {
-				let job = spawn_async_ao_list_as_job(ao_list, shell, params).await?;
-				let job_formatted = job.to_pid_style_string();
-
-				if shell.options().interactive && !shell.is_subshell() {
-					params
-						.stderr(shell)
-						.write_all_async(format!("{job_formatted}\n").as_bytes())
-						.await?;
-				}
-
-				result = ExecutionResult::success();
-			} else {
-				result = ao_list.execute(shell, params).await?;
-
-				// Update status
-				shell.set_last_exit_status(result.exit_code.into());
+			if shell.options().interactive && !shell.is_subshell() {
+				params
+					.stderr(shell)
+					.write_all_async(format!("{job_formatted}\n").as_bytes())
+					.await?;
 			}
 
-			if !result.is_normal_flow() {
-				break;
-			}
+			result = ExecutionResult::success();
+		} else {
+			result = ao_list.execute(shell, params).await?;
+
+			// Update status
+			shell.set_last_exit_status(result.exit_code.into());
 		}
 
-		Ok(result)
+		if !result.is_normal_flow() {
+			break;
+		}
 	}
+
+	Ok(result)
 }
 
 async fn spawn_async_ao_list_as_job<'a, SE: extensions::ShellExtensions>(
@@ -1871,6 +1907,9 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 
 			match execute_command(context, params, cmd_name, assignments, args).await {
 				Ok(result) => Ok(result),
+				// Leave this one to the enclosing top-level command (or eval or
+				// sourced file), which reports it once and moves on, as Bash does.
+				Err(err) if err.abandons_command() => Err(err),
 				Err(err) => {
 					if !quiet_token.as_ref().is_some_and(CancellationToken::is_cancelled) {
 						let _ = parent_shell.display_error(&mut stderr, &err).await;

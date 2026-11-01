@@ -83,6 +83,17 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 		call_type: callstack::ScriptCallType,
 	) -> Result<ExecutionResult, error::Error> {
 		let path = path.as_ref();
+		if matches!(call_type, callstack::ScriptCallType::Source)
+			&& self.call_stack.script_source_depth() >= callstack::DEFAULT_NESTING_LIMIT
+		{
+			return Err(
+				error::ErrorKind::MaxSourceNestingExceeded(
+					path.to_string_lossy().into_owned(),
+					callstack::DEFAULT_NESTING_LIMIT,
+				)
+				.into(),
+			);
+		}
 		tracing::debug!("sourcing: {}", path.display());
 
 		let mut options = pi_vfs::OpenOptions::new();
@@ -149,11 +160,14 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 		params: &ExecutionParameters,
 		call_type: callstack::ScriptCallType,
 	) -> Result<ExecutionResult, error::Error> {
-		let mut reader = std::io::BufReader::new(file);
-		let mut parser = brush_parser::Parser::new(&mut reader, &self.parser_options());
-
-		tracing::debug!(target: trace_categories::PARSE, "Parsing sourced file: {}", source_info.source);
-		let parse_result = parser.parse_program();
+		// Parse the whole file, then close it before running it, as Bash does,
+		// so that nested `source` commands do not each hold a descriptor open.
+		let parse_result = {
+			let mut reader = std::io::BufReader::new(file);
+			let mut parser = brush_parser::Parser::new(&mut reader, &self.parser_options());
+			tracing::debug!(target: trace_categories::PARSE, "Parsing sourced file: {}", source_info.source);
+			parser.parse_program()
+		};
 
 		let script_positional_args = args.map(Into::into);
 
@@ -188,6 +202,32 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 		self
 			.run_parsed_result(parse_result, source_info, params)
 			.await
+	}
+
+	/// Executes the given string as the `eval` builtin does, refusing with
+	/// Bash's `maximum eval nesting level exceeded` error once evals nest
+	/// [`callstack::DEFAULT_NESTING_LIMIT`] deep.
+	///
+	/// # Arguments
+	///
+	/// * `command` - The command to execute.
+	/// * `source_info` - Information about the source of the command text.
+	/// * `params` - Execution parameters.
+	pub async fn eval_string<S: Into<String>>(
+		&mut self,
+		command: S,
+		source_info: &crate::SourceInfo,
+		params: &ExecutionParameters,
+	) -> Result<ExecutionResult, error::Error> {
+		if self.call_stack.eval_depth() >= callstack::DEFAULT_NESTING_LIMIT {
+			return Err(
+				error::ErrorKind::MaxEvalNestingExceeded(callstack::DEFAULT_NESTING_LIMIT).into(),
+			);
+		}
+		self.call_stack.enter_eval();
+		let result = self.run_string(command, source_info, params).await;
+		self.call_stack.leave_eval();
+		result
 	}
 
 	/// Executes the given command, provided to a shell executable on the command

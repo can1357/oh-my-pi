@@ -10,6 +10,14 @@ use brush_parser::ast::SourceLocation;
 
 use crate::{functions, traps};
 
+/// How deep sourced files, evals, and (unless `FUNCNEST` holds a positive
+/// number) function calls may nest before the shell refuses the next level
+/// with Bash's `maximum ... nesting level exceeded` error. zsh ships the same
+/// default for its `FUNCNEST`, to stop a runaway recursion before it crashes
+/// the shell. Each level holds 24 to 110 KiB of native stack in an optimized
+/// build until it returns.
+pub const DEFAULT_NESTING_LIMIT: usize = 500;
+
 /// Encapsulates info regarding a script call.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -290,6 +298,7 @@ pub struct CallStack {
 	frames: VecDeque<Frame>,
 	func_call_depth: usize,
 	script_source_depth: usize,
+	eval_depth: usize,
 	active_trap_signals: HashSet<traps::TrapSignal>,
 	trap_delivery_suppress_count: usize,
 }
@@ -600,6 +609,22 @@ impl CallStack {
 	/// Returns the current depth of sourced script calls in the call stack.
 	pub const fn script_source_depth(&self) -> usize {
 		self.script_source_depth
+	}
+
+	/// Returns how many `eval` commands are currently executing, one inside
+	/// another.
+	pub const fn eval_depth(&self) -> usize {
+		self.eval_depth
+	}
+
+	/// Records that an `eval` command has started executing.
+	pub(crate) const fn enter_eval(&mut self) {
+		self.eval_depth += 1;
+	}
+
+	/// Records that an `eval` command has finished executing.
+	pub(crate) const fn leave_eval(&mut self) {
+		self.eval_depth = self.eval_depth.saturating_sub(1);
 	}
 
 	/// Returns whether the given trap signal is currently being handled

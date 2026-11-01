@@ -7105,6 +7105,137 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 		assert_eq!(exit_code("false; exit 0").await, Some(1), "errexit option lost");
 	}
 
+	/// Runs `command` in the persistent `shell` and returns its exit code and
+	/// everything it wrote.
+	async fn run_captured_in(shell: &Shell, command: &str) -> (Option<i32>, String) {
+		let (tx, rx) = flume::unbounded();
+		let result = shell
+			.run(
+				ShellRunOptions { command: command.into(), ..Default::default() },
+				Some(tx),
+				CancelToken::default(),
+			)
+			.await
+			.expect("run");
+		(result.exit_code, rx.try_iter().collect())
+	}
+
+	/// A function recursion as deep as the nesting limit runs to the end. Each
+	/// level holds tens of KiB of native stack, so before nested execution
+	/// moved to stack segments this ran off the 2 MiB stack of the Tokio worker
+	/// running the shell at about 28 levels, and the host process died with
+	/// SIGSEGV.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn function_recursion_as_deep_as_the_nesting_limit_completes() {
+		let (result, output) = execute_captured(
+			"walk() { local n=$1 d; if (( n > 1 )); then for d in a; do walk $(( n - 1 )); done; fi; \
+			 }\nwalk 500\necho \"walked=$?\""
+				.into(),
+		)
+		.await;
+		assert_eq!((result.exit_code, output.as_str()), (Some(0), "walked=0\n"));
+	}
+
+	/// A function that never stops recursing is refused at the nesting limit
+	/// with Bash's message, the rest of that command is skipped with status 1,
+	/// and the session keeps working. Before, it killed the host process.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn runaway_function_recursion_is_refused_and_the_session_survives() {
+		let _guard = shell_test_lock().lock().await;
+		let shell = Shell::new(None);
+		let (code, output) =
+			run_captured_in(&shell, "f() { f; }\nf; echo skipped\necho \"after=$?\"").await;
+		assert_eq!(code, Some(0), "{output}");
+		let lines: Vec<&str> = output.lines().collect();
+		assert_eq!(lines.len(), 2, "{output}");
+		assert!(lines[0].ends_with("f: maximum function nesting level exceeded (500)"), "{output}");
+		assert_eq!(lines[1], "after=1");
+
+		let (code, output) = run_captured_in(&shell, "f() { echo alive; }; f").await;
+		assert_eq!((code, output.as_str()), (Some(0), "alive\n"));
+	}
+
+	/// `FUNCNEST` sets the function nesting limit as it does in Bash: a lower
+	/// value refuses sooner with the same message, and a higher one lets a
+	/// script recurse past the default.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn funcnest_sets_the_function_nesting_limit() {
+		let (_, output) = execute_captured(
+			"FUNCNEST=3\nf() { echo \"in $1\"; f $(( $1 + 1 )); }\nf 0\necho \"after=$?\"".into(),
+		)
+		.await;
+		let lines: Vec<&str> = output.lines().collect();
+		assert_eq!(lines.len(), 5, "{output}");
+		assert_eq!(lines[..3], ["in 0", "in 1", "in 2"]);
+		assert!(lines[3].ends_with("f: maximum function nesting level exceeded (3)"), "{output}");
+		assert_eq!(lines[4], "after=1");
+
+		let (_, output) = execute_captured(
+			"FUNCNEST=600\nr() { if (( $1 > 1 )); then r $(( $1 - 1 )); fi; }\nr 600\necho \
+			 \"deep=$?\""
+				.into(),
+		)
+		.await;
+		assert_eq!(output, "deep=0\n");
+	}
+
+	/// Raises this process's soft descriptor limit toward its hard limit, as
+	/// omp's Bun host does at startup. Each nesting level holds about 25
+	/// duplicated descriptors, so a run 500 levels deep needs far more than a
+	/// 1,024 soft limit, and an error reported from that deep cannot be written
+	/// past it. 65,536 covers 500 levels with room to spare.
+	#[cfg(unix)]
+	fn raise_open_file_limit() {
+		let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+		// SAFETY: `limit` is a valid, writable `rlimit` for the duration of the
+		// call.
+		assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) }, 0);
+		limit.rlim_cur = limit.rlim_max.min(65_536);
+		// SAFETY: `limit` is a valid `rlimit`; raising the soft limit up to the
+		// hard limit needs no privilege.
+		let raised = unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit) };
+		assert_eq!(raised, 0, "raise RLIMIT_NOFILE to {}", limit.rlim_cur);
+	}
+
+	/// An `eval` that evaluates itself forever is refused at the nesting limit
+	/// with Bash's message and status 1. Before, it killed the host process at
+	/// about 31 levels.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn runaway_eval_recursion_is_refused() {
+		raise_open_file_limit();
+		let (_, output) =
+			execute_captured("e='eval \"$e\"'\neval \"$e\"\necho \"after=$?\"".into()).await;
+		let lines: Vec<&str> = output.lines().collect();
+		assert_eq!(lines.len(), 2, "{output}");
+		assert!(lines[0].ends_with("eval: maximum eval nesting level exceeded (500)"), "{output}");
+		assert_eq!(lines[1], "after=1");
+	}
+
+	/// A file that sources itself forever is refused at the nesting limit with
+	/// Bash's message and status 1. Before, it killed the host process at about
+	/// 30 levels.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn runaway_source_recursion_is_refused() {
+		raise_open_file_limit();
+		let dir = tempfile::tempdir().expect("temp dir");
+		let script = dir.path().join("again.sh");
+		std::fs::write(&script, ". \"$AGAIN\"\n").expect("write script");
+		let (_, output) = execute_captured(format!(
+			"AGAIN={}\n. \"$AGAIN\"\necho \"after=$?\"",
+			quote_arg(&script.to_string_lossy())
+		))
+		.await;
+		let lines: Vec<&str> = output.lines().collect();
+		assert_eq!(lines.len(), 2, "{output}");
+		assert!(
+			lines[0].ends_with("again.sh: maximum source nesting level exceeded (500)"),
+			"{output}"
+		);
+		assert_eq!(lines[1], "after=1");
+	}
+
 	/// `Shell::pids` reports the in-flight run's live external children without
 	/// waiting on the session lock that the running command holds, and goes
 	/// empty once the run returns — including through cancellation.

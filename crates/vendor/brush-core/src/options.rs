@@ -198,8 +198,6 @@ pub struct RuntimeOptions {
 	pub sh_mode:                    bool,
 	/// Whether to treat external commands as session leaders.
 	pub external_cmd_leads_session: bool,
-	/// Maximum function call depth.
-	pub max_function_call_depth:    Option<usize>,
 }
 
 impl RuntimeOptions {
@@ -249,7 +247,6 @@ impl RuntimeOptions {
 			glob_ranges_use_c_locale: true,
 			glob_skip_dots: true,
 			patsub_replacement: true,
-			max_function_call_depth: create_options.max_function_call_depth,
 			..Self::default()
 		};
 
