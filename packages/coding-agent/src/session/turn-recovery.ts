@@ -77,6 +77,7 @@ import {
 	type ServingModel,
 	validateRetryFallbackChains,
 } from "./retry-fallback-chains";
+import { coolDownExhaustedProvider, isProviderExhaustionError } from "./provider-exhaustion";
 import { describeUsageFallback } from "./retry-fallback-reason";
 import { getLatestCompactionEntry } from "./session-context";
 import { EPHEMERAL_MODEL_CHANGE_ROLE, type SessionEntry } from "./session-entries";
@@ -2922,6 +2923,19 @@ export class TurnRecovery {
 			siblingAvailabilityWaitMs !== undefined &&
 			effectiveUsageLimitWaitMs !== undefined &&
 			effectiveUsageLimitWaitMs <= retrySettings.maxDelayMs;
+		// A provider-wide cooldown is only warranted once credential rotation has established that no
+		// sibling account can serve the request now or after a short wait. Cool the provider that
+		// failed, not the active model: /switch may have changed it.
+		if (
+			!staleOpenAIResponsesReplayError &&
+			!switchedCredential &&
+			!waitForSiblingCredential &&
+			isProviderExhaustionError(message.errorStatus, message.errorMessage)
+		) {
+			coolDownExhaustedProvider(message.provider, {
+				reason: `${message.errorStatus ?? ""} ${message.errorMessage ?? "provider exhausted"}`.trim(),
+			});
+		}
 		const longUsageLimitFallback =
 			currentModel !== undefined &&
 			resolveModelPolicy(currentModel).catalog.longUsageLimitFallback === true &&

@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
@@ -43,7 +44,9 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { computerTurnInFlight, registerComputerController } from "@oh-my-pi/pi-coding-agent/tools/computer/supervisor";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { resolveSubagentRetryFallbackCandidates } from "@oh-my-pi/pi-coding-agent/task/executor";
+import { isProviderExhausted, isProviderExhaustionError } from "@oh-my-pi/pi-coding-agent/session/provider-exhaustion";
+import { getProviderCooldownsPath, TempDir } from "@oh-my-pi/pi-utils";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
@@ -315,11 +318,14 @@ describe("AgentSession retry fallback", () => {
 	});
 
 	afterAll(() => {
+		fs.rmSync(getProviderCooldownsPath(), { force: true });
 		authStorage.close();
 		tempDir.removeSync();
 	});
 
 	beforeEach(() => {
+		// Provider exhaustion cooldowns persist on disk; never let one test's ban reach the next.
+		fs.rmSync(getProviderCooldownsPath(), { force: true });
 		// Reset to the shared registry (a few tests reassign it to a scoped
 		// instance) and clear cooldown suppressions left by fallback-path tests
 		// (default 5-minute suppression) so state never leaks between tests.
@@ -9148,5 +9154,93 @@ describe("AgentSession retry fallback", () => {
 
 		expect(requestedModels).toContain("openrouter/z-ai/glm-4.7@chutes");
 		expect(getLastAssistantMessage(session).stopReason).not.toBe("error");
+	});
+	it("cools a balance-exhausted provider across workers but not transient failures", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const nextModel = getBundledModel("openai", "gpt-4o-mini");
+		const laterModel = getBundledModel("google", "gemini-1.5-pro");
+		if (!primaryModel || !nextModel || !laterModel) throw new Error("Expected bundled test models to exist");
+
+		const requestedModels: string[] = [];
+		const mock = createMockModel({ provider: primaryModel.provider });
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				if (model.provider === primaryModel.provider) {
+					mock.push({ throw: Object.assign(new Error("402 Insufficient Balance"), { status: 402 }) });
+				} else {
+					mock.push({ content: [`ok:${model.provider}/${model.id}`] });
+				}
+				return mock.stream(model, context, options);
+			},
+		});
+		vi.spyOn(modelRegistry.authStorage.limits, "markReached").mockResolvedValue({ switched: false });
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 1,
+			"retry.maxRetries": 1,
+			"retry.fallbackChains": {
+				default: [`${nextModel.provider}/${nextModel.id}`, `${laterModel.provider}/${laterModel.id}`],
+			},
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+
+		await session.prompt("Fail over after provider balance exhaustion");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([
+			`${primaryModel.provider}/${primaryModel.id}`,
+			`${nextModel.provider}/${nextModel.id}`,
+		]);
+		expect(isProviderExhausted(primaryModel.provider)).toBe(true);
+		const workerTwoCandidates = resolveSubagentRetryFallbackCandidates(
+			[
+				`${primaryModel.provider}/${primaryModel.id}`,
+				`${nextModel.provider}/${nextModel.id}`,
+				`${laterModel.provider}/${laterModel.id}`,
+			],
+			modelRegistry,
+			settings,
+		);
+		expect(workerTwoCandidates[0]?.model.provider).toBe(nextModel.provider);
+		expect(workerTwoCandidates.some(candidate => candidate.model.provider === primaryModel.provider)).toBe(false);
+		expect(isProviderExhaustionError(429, "429 rate limit")).toBe(false);
+		expect(isProviderExhaustionError(500, "500 server error")).toBe(false);
+	});
+	it("does not cool a provider while credential rotation still has a sibling account", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!primaryModel) throw new Error("Expected bundled test model to exist");
+
+		let calls = 0;
+		const mock = createMockModel({ provider: primaryModel.provider });
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				calls++;
+				if (calls === 1)
+					mock.push({ throw: Object.assign(new Error("402 Insufficient Balance"), { status: 402 }) });
+				else mock.push({ content: ["ok"] });
+				return mock.stream(model, context, options);
+			},
+		});
+		// The first account is spent but a sibling credential takes over.
+		vi.spyOn(modelRegistry.authStorage.limits, "markReached").mockResolvedValue({ switched: true });
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 1,
+			"retry.maxRetries": 2,
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+
+		await session.prompt("Rotate to the sibling account");
+		await session.waitForIdle();
+
+		expect(calls).toBe(2);
+		expect(isProviderExhausted(primaryModel.provider)).toBe(false);
 	});
 });
