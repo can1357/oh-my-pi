@@ -172,6 +172,19 @@ export function renderCall(args: LspParams, _options: RenderResultOptions, theme
 const UNREPORTED_LINE_RE = /\bno diagnostics report yet\b/;
 
 /**
+ * Whether a line is one of the LSP tool's per-file status rows (`<glyph> <path>: …`).
+ * Only a row's start counts: response text such as source or hover content can hold
+ * the same characters (ASCII `[-]`).
+ */
+function isStatusRow(line: string, glyph: string): boolean {
+	return line.startsWith(`${glyph} `);
+}
+
+function hasStatusRow(lines: readonly string[], glyph: string): boolean {
+	return lines.some(line => isStatusRow(line, glyph));
+}
+
+/**
  * Render LSP tool result with intelligent formatting based on result type.
  * Detects hover, diagnostics, references, symbols, etc. and formats accordingly.
  */
@@ -199,7 +212,7 @@ export function renderResult(
 	const warningMatch = text.match(/(\d+)\s+warning\(s\)/);
 	const refMatch = text.match(/(\d+)\s+reference\(s\)/);
 	const symbolsMatch = text.match(/Symbols in (.+):/);
-	const hasStatusError = text.includes(theme.status.error);
+	const hasStatusError = hasStatusRow(lines, theme.status.error);
 	const unreportedCount = lines.filter(line => UNREPORTED_LINE_RE.test(line)).length;
 
 	// Static request info
@@ -426,7 +439,7 @@ function renderDiagnostics(
 	if (unreportedLines.length > 0) meta.push(formatCount("unverified file", unreportedLines.length));
 	if (meta.length === 0) meta.push("No issues");
 
-	const diagLines = lines.filter(l => l.includes(theme.status.error) || /:\d+:\d+/.test(l));
+	const diagLines = lines.filter(l => isStatusRow(l, theme.status.error) || /:\d+:\d+/.test(l));
 	const parsedDiagnostics = diagLines
 		.map(line => parseDiagnosticMessage(line.trim()))
 		.filter((diag): diag is ParsedDiagnostic => diag !== null);
@@ -785,8 +798,8 @@ function renderSymbols(symbolsMatch: RegExpMatchArray, lines: string[], expanded
  * Generic fallback rendering for unknown result types.
  */
 function renderGeneric(text: string, lines: string[], expanded: boolean, theme: Theme): string[] {
-	const hasError = text.includes("Error:") || text.includes(theme.status.error);
-	const hasSuccess = text.includes(theme.status.success) || text.includes("Applied");
+	const hasError = text.includes("Error:") || hasStatusRow(lines, theme.status.error);
+	const hasSuccess = hasStatusRow(lines, theme.status.success) || text.includes("Applied");
 
 	const icon =
 		hasError && !hasSuccess
@@ -1167,7 +1180,7 @@ function describeLspResult(result: ToolRenderResult<LspToolDetails>, args: LspPa
 	}
 	if (
 		/\d+\s+(?:error|warning)\(s\)/.test(text) ||
-		text.includes(statusError) ||
+		hasStatusRow(lines, statusError) ||
 		(request?.action ?? fallbackAction) === "diagnostics"
 	) {
 		return describeLspDiagnostics(request, fallbackAction, lines);
@@ -1192,8 +1205,8 @@ function describeLspResult(result: ToolRenderResult<LspToolDetails>, args: LspPa
 			preview: { lines: 8 },
 		};
 	}
-	const hasError = text.includes("Error:") || text.includes(statusError);
-	const hasSuccess = text.includes(activeThemeSymbol("status.success")) || text.includes("Applied");
+	const hasError = text.includes("Error:") || hasStatusRow(lines, statusError);
+	const hasSuccess = hasStatusRow(lines, activeThemeSymbol("status.success")) || text.includes("Applied");
 	return {
 		tool: lspNativeHead(request, fallbackAction),
 		tone: hasError && !hasSuccess ? "error" : undefined,
