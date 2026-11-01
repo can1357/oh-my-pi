@@ -67,28 +67,40 @@ fn timeout_stops_a_loop_that_never_yields() {
 /// Without the yield this script hung on a 4-worker runtime when an external
 /// command (`mkfifo` here; `/usr/bin/touch t` too, a builtin does not) ran
 /// just before the background loop: it never got past `sleep 0.2`, so neither
-/// `kill %1` nor `wait` ran. The test asserts only that the script reaches its
-/// end: `kill %1` marks the job done, so `wait` returns whether or not the loop
-/// stopped.
+/// `kill %1` nor `wait` ran. `kill %1` marks the job done whether or not the
+/// loop stops, so the script checks that the loop stopped: the file it writes
+/// must not grow after `kill %1`. Without `kill %1` the same file keeps
+/// growing.
 #[test]
-fn background_loop_after_an_external_command_lets_the_script_reach_kill_and_wait() {
+fn kill_stops_a_background_loop_after_an_external_command() {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let output = run_within(
-		"mkfifo f; while :; do :; done & sleep 0.2; kill %1; wait; echo end",
+		"mkfifo p; while :; do echo x >> f; done & sleep 0.2; kill %1; wait; sleep 0.1; a=$(wc -c < \
+		 f); sleep 0.2; b=$(wc -c < f); [ \"$a\" = \"$b\" ] && echo stopped; echo end",
 		Some(dir.path()),
 		None,
 		Duration::from_secs(10),
 	)
 	.expect("the script did not reach its end within 10 s");
+	assert!(output.contains("stopped"), "the loop kept writing after `kill %1`: {output:?}");
 	assert!(output.contains("end"), "the script did not finish: {output:?}");
 }
 
 /// pi-shell aborts a cancelled run after a 2 s grace period, so a run that
-/// ends in under 2 s shows the cancellation itself reached the loop.
+/// ends in under 2 s, reports the interruption and runs no later command shows
+/// the cancellation itself reached the loop.
 #[test]
 fn cancelling_the_run_stops_a_loop_under_timeout() {
 	let started = Instant::now();
-	run_within("timeout 30 eval 'while :; do :; done'", None, Some(500), Duration::from_secs(10))
-		.expect("the cancelled run did not end within 10 s");
+	let output = run_within(
+		"timeout 30 eval 'while :; do :; done'; echo after",
+		None,
+		Some(500),
+		Duration::from_secs(10),
+	)
+	.expect("the cancelled run did not end within 10 s");
 	assert!(started.elapsed() < Duration::from_secs(2), "took {:?}", started.elapsed());
+	assert!(output.contains("interrupted"), "the cancelled run lost its diagnostics: {output:?}");
+	assert!(!output.contains("after"), "the cancelled run kept running: {output:?}");
+	assert!(output.ends_with("[run: None]"), "the cancelled run reported an exit code: {output:?}");
 }

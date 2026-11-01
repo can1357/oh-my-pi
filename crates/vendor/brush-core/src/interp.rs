@@ -2896,7 +2896,7 @@ mod tests {
 		let (interrupted, cancellation_task_ran) = result_rx
 			.recv_timeout(Duration::from_secs(2))
 			.expect("interpreter did not yield to the cancellation task");
-		assert!(cancellation_task_ran, "cancellation task ran on the interpreter runtime");
-		assert!(interrupted, "the cancelled loop stopped");
+		assert!(cancellation_task_ran, "the cancellation task never ran on the interpreter runtime");
+		assert!(interrupted, "the cancelled loop did not stop");
 	}
 }
