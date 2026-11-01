@@ -3574,8 +3574,12 @@ async function runWakeStopPasses(
 		continueWith: async text => {
 			await hold.prompt(text, { attribution: "agent", synthetic: true, runCommands: false, throwOnDrop: true });
 			await untilAborted(signal, () => session.waitForIdle());
-			// A delivered async result un-latches the yield.
-			await untilAborted(signal, () => session.settleAsyncWork());
+			// A delivered async result un-latches the yield. Each settle covers one
+			// generation; a delivery turn may start more owner work, so settle until
+			// none is left before the next pass judges the candidate.
+			do {
+				await untilAborted(signal, () => session.settleAsyncWork());
+			} while (session.hasPendingAsyncWork());
 			await untilAborted(signal, () => monitor.waitForYieldTurnStop());
 		},
 	};
@@ -4204,10 +4208,12 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	// under the active turn or hanging the pool.
 	let ownershipWaits = 0;
 	const acquireOwnership = async (): Promise<void> => {
-		// A wake turn's `subagent_stop` pass holds the session until it publishes:
-		// attaching this turn's monitor sooner would let it see the holder's turns.
-		await session.waitForStopPasses(signal);
-		while (session.isStreaming && ownershipWaits < 3) {
+		for (;;) {
+			// A wake turn's `subagent_stop` pass holds the session until it publishes:
+			// attaching this turn's monitor sooner would let it see the holder's turns.
+			// Rechecked after every idle wait: the turn waited out may take a hold as it ends.
+			await session.waitForStopPasses(signal);
+			if (!session.isStreaming || ownershipWaits >= 3) break;
 			ownershipWaits++;
 			if (signal) {
 				await untilAborted(signal, () => session.waitForIdle());

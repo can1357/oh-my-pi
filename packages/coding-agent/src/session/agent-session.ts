@@ -8348,13 +8348,6 @@ export class AgentSession implements SettingsScope {
 			return true;
 		}
 
-		// A `subagent_stop` pass holds this session until its verdict is published.
-		// Only the holder's own turns run meanwhile: an explicit user prompt cancels
-		// the pass, any other prompt waits it out.
-		if (!holder && this.#stopPassHolds.size > 0) {
-			await this.#waitOutStopPasses(options?.userInitiated === true || promptAttribution === "user");
-		}
-
 		// Captured before the normalization/vision-description awaits below so an
 		// abort() landing during either can be told apart from a fresh submission —
 		// see the drop check right after those awaits.
@@ -8386,6 +8379,15 @@ export class AgentSession implements SettingsScope {
 		const imageDescriptionNotice = normalizedImages?.length
 			? await this.#buildImageDescriptionNotice(normalizedImages)
 			: undefined;
+
+		// A `subagent_stop` pass holds this session until its verdict is published.
+		// Only the holder's own turns run meanwhile: an explicit user prompt cancels
+		// the pass, any other prompt waits it out. Checked after preprocessing, with
+		// no await between here and dispatch, so a hold taken while images were being
+		// prepared is honored too.
+		if (!holder && this.#stopPassHolds.size > 0) {
+			await this.#waitOutStopPasses(options?.userInitiated === true || promptAttribution === "user");
+		}
 
 		// abort() bumps #promptGeneration and can land while normalization and the
 		// vision-description call above are still in flight. #promptWithMessage below
@@ -12830,24 +12832,21 @@ export class AgentSession implements SettingsScope {
 		};
 	}
 
-	/** Resolves once no {@link holdForStopPass} hold is active, or once `signal` aborts. */
+	/**
+	 * Resolves once no {@link holdForStopPass} hold is active. Rejects when
+	 * `signal` aborts while a hold is still active, so a cancelled caller cannot
+	 * mistake the cancellation for ownership.
+	 */
 	waitForStopPasses(signal?: AbortSignal): Promise<void> {
 		return this.#waitOutStopPasses(false, signal);
 	}
 
 	/** Waits until no stop-pass hold is active; `cancel` (an explicit user prompt) first cancels every held pass. */
 	async #waitOutStopPasses(cancel: boolean, signal?: AbortSignal): Promise<void> {
-		if (this.#stopPassHolds.size === 0) return;
-		const aborted = Promise.withResolvers<void>();
-		const onAbort = (): void => aborted.resolve();
-		signal?.addEventListener("abort", onAbort, { once: true });
-		try {
-			while (this.#stopPassHolds.size > 0 && !signal?.aborted) {
-				if (cancel) for (const hold of this.#stopPassHolds) hold.cancel.abort();
-				await Promise.race([this.#stopPassChanged.promise, aborted.promise]);
-			}
-		} finally {
-			signal?.removeEventListener("abort", onAbort);
+		while (this.#stopPassHolds.size > 0) {
+			if (cancel) for (const hold of this.#stopPassHolds) hold.cancel.abort();
+			const changed = this.#stopPassChanged.promise;
+			await (signal ? untilAborted(signal, changed) : changed);
 		}
 	}
 
