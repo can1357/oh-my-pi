@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a context file including the same file twice losing the second copy, leaving a literal `@path` in the prompt instead of the included content ([#16656](https://github.com/can1357/oh-my-pi/pull/16656) by [@adi-IL](https://github.com/adi-IL))
+
 ## [18.14.2] - 2026-10-31
 
 ### Added
