@@ -31,6 +31,8 @@ export interface MagicKeywordContext {
 	js: boolean;
 	/** `eval.workpool.freshAgents`: whether workpools spawn a new agent per item instead of reusing workers. */
 	freshAgents: boolean;
+	/** `task.perCallModel` admits `model` on eval `agent()`/`workpool()` (`eval` or `on`). */
+	perCallModel: boolean;
 }
 
 /** One magic keyword: trigger word, gradient, settings copy, and the notice it injects. */
@@ -70,8 +72,14 @@ export function renderWorkflowNotice({
 	py,
 	js,
 	freshAgents,
-}: Pick<MagicKeywordContext, "taskBatch" | "scoutAvailable" | "evalTools" | "py" | "js" | "freshAgents">): string {
-	return prompt.render(workflowNotice, { taskBatch, scoutAvailable, evalTools, py, js, freshAgents }).trim();
+	perCallModel,
+}: Pick<
+	MagicKeywordContext,
+	"taskBatch" | "scoutAvailable" | "evalTools" | "py" | "js" | "freshAgents" | "perCallModel"
+>): string {
+	return prompt
+		.render(workflowNotice, { taskBatch, scoutAvailable, evalTools, py, js, freshAgents, perCallModel })
+		.trim();
 }
 
 export const MAGIC_KEYWORDS = [

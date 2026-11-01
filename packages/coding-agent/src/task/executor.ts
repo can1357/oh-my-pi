@@ -82,7 +82,10 @@ import { SKILL_PROMPT_MESSAGE_TYPE } from "../session/messages";
 import { hasConversationalHistory, SessionManager } from "../session/session-manager";
 import { truncateTail } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import {
+	AUTO_THINKING,
+	assertModelSupportsEffortCeiling,
 	type ConfiguredThinkingLevel,
+	clampThinkingLevelToCeiling,
 	prewalkWouldBeNoop,
 	resolveTaskEffortLevel,
 	type TaskEffort,
@@ -131,6 +134,7 @@ import {
 	type YieldItem,
 } from "@oh-my-pi/pi-tui/tools/task";
 import { yieldSectionShapes } from "./yield-assembly";
+import { assertPerCallModelApproved, PerCallModelError, type PerCallModelGrants } from "./model-approval";
 import { assembleYieldResult } from "@oh-my-pi/pi-tui/tools/task-yield-assembly";
 import {
 	cfgTaskPrewalk,
@@ -441,6 +445,8 @@ export interface ExecutorOptions {
 	 * if the resolved subagent model has no working credentials. See #985.
 	 */
 	parentActiveModelPattern?: string;
+	/** Set for a per-call `model`; every model the child sends to must stay approved by these grants. */
+	perCallModelGrants?: PerCallModelGrants;
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Caller-requested coarse effort (`lo`/`med`/`hi`); maps onto the resolved model's supported thinking range and wins over {@link thinkingLevel}. */
 	effort?: TaskEffort;
@@ -1160,42 +1166,45 @@ export function createSubagentSettings(
 		modelThresholdsEnabled: cfgCompactionModelThresholdsEnabled.get(baseSettings),
 	};
 	// Every other setting reads through to the parent live; writes on the overlay stay local.
-	const subagentSettings: SubagentChainSettings = baseSettings.overlay({
-		...(inheritedRootThresholds && {
-			"compaction.thresholdPercent": inheritedRootThresholds.thresholdPercent,
-			"compaction.thresholdTokens": inheritedRootThresholds.thresholdTokens,
-			"compaction.modelThresholdsEnabled": inheritedRootThresholds.modelThresholdsEnabled,
-		}),
-		// A subagent's thinking level is chosen at spawn (agent definition, `effort`, or this
-		// snapshot of the parent default); a later parent default edit must not re-steer it.
-		defaultThinkingLevel: cfgDefaultThinkingLevel.get(baseSettings),
-		"tier.openai": subagentTiers.openai ?? "none",
-		"tier.anthropic": subagentTiers.anthropic ?? "none",
-		"tier.google": subagentTiers.google ?? "none",
-		// Async jobs and bash/eval auto-backgrounding are inherited from the parent:
-		// background jobs are owner-routed to the subagent's own session, and
-		// the run driver's quiescence barrier + teardown reap guarantee no
-		// owner job outlives the run, so worktree capture/cleanup stays
-		// race-free (previously both were force-disabled here).
+	const subagentSettings: SubagentChainSettings = baseSettings.overlay(
+		{
+			...(inheritedRootThresholds && {
+				"compaction.thresholdPercent": inheritedRootThresholds.thresholdPercent,
+				"compaction.thresholdTokens": inheritedRootThresholds.thresholdTokens,
+				"compaction.modelThresholdsEnabled": inheritedRootThresholds.modelThresholdsEnabled,
+			}),
+			// A subagent's thinking level is chosen at spawn (agent definition, `effort`, or this
+			// snapshot of the parent default); a later parent default edit must not re-steer it.
+			defaultThinkingLevel: cfgDefaultThinkingLevel.get(baseSettings),
+			"tier.openai": subagentTiers.openai ?? "none",
+			"tier.anthropic": subagentTiers.anthropic ?? "none",
+			"tier.google": subagentTiers.google ?? "none",
+			// Async jobs and bash/eval auto-backgrounding are inherited from the parent:
+			// background jobs are owner-routed to the subagent's own session, and
+			// the run driver's quiescence barrier + teardown reap guarantee no
+			// owner job outlives the run, so worktree capture/cleanup stays
+			// race-free (previously both were force-disabled here).
 
-		// Subagents run headless — there is no UI to confirm prompts against, so
-		// the parent task approval is the authorization boundary. Use yolo mode
-		// to preserve unattended subagent execution. User `tools.approval` policies still apply.
-		"tools.approvalMode": "yolo",
-		// Subagents run unadvised by default; runSubprocess opts a spawn back in
-		// per agent (frontmatter `advisor` / `task.agentAdvisor`) via overrides.
-		"advisor.enabled": false,
-		// A subagent assignment is one turn: its tool loop ends only when the run
-		// yields, so post-turn `checkCompaction` (driven from `agent_end`) fires
-		// after the run is over and `maintainContextMidRun` is the only proactive
-		// compaction the child ever reaches. `compaction.midTurnEnabled` encodes an
-		// interactive preference — keep compaction boundaries on real user turns —
-		// that has no counterpart here, so inheriting `false` left hours-long
-		// worker runs sailing past the configured threshold until the provider
-		// rejected the context (#13211). A per-spawn override still wins.
-		"compaction.midTurnEnabled": true,
-		...overrides,
-	});
+			// Subagents run headless — there is no UI to confirm prompts against, so
+			// the parent task approval is the authorization boundary. Use yolo mode
+			// to preserve unattended subagent execution. User `tools.approval` policies still apply.
+			"tools.approvalMode": "yolo",
+			// Subagents run unadvised by default; runSubprocess opts a spawn back in
+			// per agent (frontmatter `advisor` / `task.agentAdvisor`) via overrides.
+			"advisor.enabled": false,
+			// A subagent assignment is one turn: its tool loop ends only when the run
+			// yields, so post-turn `checkCompaction` (driven from `agent_end`) fires
+			// after the run is over and `maintainContextMidRun` is the only proactive
+			// compaction the child ever reaches. `compaction.midTurnEnabled` encodes an
+			// interactive preference — keep compaction boundaries on real user turns —
+			// that has no counterpart here, so inheriting `false` left hours-long
+			// worker runs sailing past the configured threshold until the provider
+			// rejected the context (#13211). A per-spawn override still wins.
+			"compaction.midTurnEnabled": true,
+			...overrides,
+		},
+		{ derived: true },
+	);
 	subagentSettings[kRootCompactionThresholds] = rootThresholds;
 	return subagentSettings;
 }
@@ -4077,6 +4086,8 @@ function restoreSubagentSettings(recipe: SubagentSettingsRecipe): Settings {
 interface WarmReviveCapture {
 	sessionFile: string;
 	spec: SubagentSessionSpec;
+	/** A per-call worker never switches models; its warm revive keeps only the exact saved model. */
+	perCallModel: boolean;
 	/** Re-captured whenever the live session is disposed, so a revive restores its latest settings writes. */
 	settings: SubagentSettingsRecipe;
 	parentArtifactManager: ArtifactManager | undefined;
@@ -4165,7 +4176,11 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
 		// transcript restores the effort, and the spawn selection only backs the model up when it is
 		// unavailable. The spawn's prewalk stays configured; the coordinator sees it was spent. A seance
 		// fork's selections belong to its source run, never to the consult.
-		const sessionLocalModel = capture.spec.preparedSession ? undefined : reopened.getSessionLocalModelChange()?.model;
+		// A per-call worker never switches models, so its warm revive never prepends a session-local switch.
+		const sessionLocalModel =
+			capture.spec.preparedSession || capture.perCallModel
+				? undefined
+				: reopened.getSessionLocalModelChange()?.model;
 		try {
 			try {
 				const options = buildSubagentSessionOptions(
@@ -4513,6 +4528,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 			checkAbort();
 
+			if (options.perCallModelGrants) {
+				await awaitAbortable(modelRegistry.awaitBackgroundRefresh());
+			}
 			const configuredModelPatterns = resolveConfiguredModelPatterns(modelPatterns, settings);
 			const inheritedRetryFallbackChain =
 				configuredModelPatterns.length === 1
@@ -4535,8 +4553,14 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					modelRegistry,
 					settings,
 					id,
+					options.perCallModelGrants ? { exactOnly: true } : undefined,
 				),
 			);
+			if (options.perCallModelGrants && !model) {
+				throw new PerCallModelError(
+					`Requested exact model ${JSON.stringify(modelPatterns)} is unavailable. Use an exact provider/model[:level] selector; do not substitute another model.`,
+				);
+			}
 			if (modelResolutionWarning) {
 				logger.warn("Subagent model resolution warning", {
 					warning: modelResolutionWarning,
@@ -4550,6 +4574,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					resolvedProvider: model.provider,
 					resolvedModel: model.id,
 				});
+			}
+			// Preflight skips these checks while the registry is cold, so hold the model
+			// a per-call child actually starts on to them before its session exists.
+			if (options.perCallModelGrants && model) {
+				assertPerCallModelApproved(model, options.perCallModelGrants, modelRegistry);
 			}
 			// The exact-name `task.agentServiceTierOverrides` entry dispatch resolved
 			// for this agent. The session evaluates it against its final model —
@@ -4589,13 +4618,22 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// through to the normal selectors below.
 			// The ceiling outlives initial resolution: it rides into the session so
 			// retry-fallback recovery can never clamp effort back up past it.
-			const spawnEffortCeiling = options.effort !== undefined ? cfgTaskMaxEffort.get(settings) : undefined;
+			// A per-call `model` is caller-chosen too, so its `:level` is held to the same
+			// ceiling, and a model whose lowest effort is above it fails the spawn
+			// exactly as an `effort` hint does.
+			const spawnEffortCeiling =
+				options.effort !== undefined || options.perCallModelGrants ? cfgTaskMaxEffort.get(settings) : undefined;
+			if (model && spawnEffortCeiling) assertModelSupportsEffortCeiling(model, spawnEffortCeiling);
 			const effortLevel =
 				options.effort !== undefined
 					? resolveTaskEffortLevel(model, options.effort, spawnEffortCeiling)
 					: undefined;
+			const explicitLevel =
+				explicitThinkingLevel && resolvedThinkingLevel !== AUTO_THINKING
+					? clampThinkingLevelToCeiling(model, resolvedThinkingLevel, spawnEffortCeiling)
+					: resolvedThinkingLevel;
 			if (model) {
-				const displayLevel = effortLevel ?? (explicitThinkingLevel ? resolvedThinkingLevel : undefined);
+				const displayLevel = effortLevel ?? (explicitThinkingLevel ? explicitLevel : undefined);
 				progress.resolvedModelIdentity = formatModelStringWithRouting(model);
 				progress.resolvedThinkingLevel = displayLevel;
 				progress.resolvedModel =
@@ -4607,7 +4645,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// model pattern > agent-definition default (e.g. task's `auto`) >
 			// pattern-derived level.
 			const effectiveThinkingLevel =
-				effortLevel ?? (explicitThinkingLevel ? resolvedThinkingLevel : (thinkingLevel ?? resolvedThinkingLevel));
+				effortLevel ?? (explicitThinkingLevel ? explicitLevel : (thinkingLevel ?? resolvedThinkingLevel));
 			resolvedAt = performance.now();
 			const effectiveCwd = worktree ?? cwd;
 			const fork = preparedSession?.fork;
@@ -4638,14 +4676,17 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// fast/cheap target at its first edit/write — the same mechanism as the
 			// session-level --prewalk. The bundled generic `task` agent has no
 			// frontmatter default; the `task.prewalk` toggle (default off) arms it.
-			// Resolution failures skip prewalk instead of failing the spawn.
+			// Resolution failures skip prewalk instead of failing the spawn. A per-call
+			// worker never switches models, so it never prewalks.
+			const perCallModelGrants = options.perCallModelGrants;
 			let prewalk: Prewalk | undefined;
-			const prewalkPattern = preparedSession
-				? undefined
-				: resolveAgentPrewalkPattern({
-						settingsOverride: cfgTaskAgentPrewalk.get(settings)[agent.name],
-						agentPrewalk: resolveAgentPrewalkDefault(agent, cfgTaskPrewalk.get(settings)),
-					});
+			const prewalkPattern =
+				preparedSession || perCallModelGrants
+					? undefined
+					: resolveAgentPrewalkPattern({
+							settingsOverride: cfgTaskAgentPrewalk.get(settings)[agent.name],
+							agentPrewalk: resolveAgentPrewalkDefault(agent, cfgTaskPrewalk.get(settings)),
+						});
 			if (prewalkPattern) {
 				await awaitAbortable(modelRegistry.awaitBackgroundRefresh());
 				const resolvedPrewalk = resolveModelOverride([prewalkPattern], modelRegistry, settings);
@@ -4730,6 +4771,17 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					modelPatternDefaultFallbackChain:
 						model || modelOverride === undefined ? undefined : inheritedRetryFallbackChain,
 					thinkingLevel: effectiveThinkingLevel,
+					...(perCallModelGrants
+						? {
+								// Every request stays on an approved model that can run at or below the spawn's effort ceiling.
+								assertDispatchModel: (dispatchModel: Model) => {
+									assertPerCallModelApproved(dispatchModel, perCallModelGrants, modelRegistry);
+									if (spawnEffortCeiling) assertModelSupportsEffortCeiling(dispatchModel, spawnEffortCeiling);
+								},
+								disableModelFallback: true,
+								disableServerSideFallback: true,
+							}
+						: {}),
 					thinkingLevelCeiling: spawnEffortCeiling,
 					// Subagents are short-lived; never schedule background warm requests.
 					cacheWarming: false,
@@ -4901,6 +4953,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				const reviveCapture: WarmReviveCapture = {
 					sessionFile,
 					spec: sessionSpec,
+					perCallModel: perCallModelGrants !== undefined,
 					settings: captureSubagentSettings(settings, subagentSettings),
 					parentArtifactManager: preparedSession ? undefined : options.parentArtifactManager,
 					keepTodo: prewalk !== undefined,
@@ -4954,6 +5007,14 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				agent: agent.name,
 				modelRole: modelRole ?? resolveExplicitModelRole(modelOverride ?? agent.model, subagentSettings),
 				resolvedModel: progress.resolvedModel,
+				...(perCallModelGrants
+					? {
+							perCallModel: true,
+							// Display selectors can conflate literal :level ids with effort, so revival records each separately.
+							perCallModelIdentity: formatModelStringWithRouting(session.model!),
+							perCallThinkingLevel: session.configuredThinkingLevel() ?? null,
+						}
+					: {}),
 				// Deferred model resolution installs this role inside createAgentSession,
 				// so read it back from the settings both install paths write.
 				retryFallback: getRetryFallbackRole(subagentSettings, subagentRetryFallbackRole(id)),
