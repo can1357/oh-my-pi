@@ -9,6 +9,7 @@
 ### Added
 
 - Added `FILE_NAME_COLOR`, `formatStyledPath` and `pathNameStart` to `render/render-utils` for paths in tool bodies and Tern file rows; `createGroupedRowStyler`, `groupedLinkTargets`, `fitGroupsToBudget`, `groupsByFile` and `isMatchRow` to `tools/grouped-file-output`; `splitReadQuery` to `tools/read`; and `HASHLINE_TAG_SUFFIX_RE` to `tools/hashline-format`. `classifyGroupedLines` reports each file header's full `displayPath` and `suffix`, and a `TranscriptStatusPart` without `color` keeps its already-styled text ([#17608](https://github.com/can1357/oh-my-pi/pull/17608) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- `CustomMessage` and custom message transcript entries have an optional `tag`, a caller correlation id that stays with the message when a transcript is rebuilt ([#14323](https://github.com/can1357/oh-my-pi/pull/14323) by [@sjawhar](https://github.com/sjawhar))
 
 ### Changed
 

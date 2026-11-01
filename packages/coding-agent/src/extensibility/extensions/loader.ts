@@ -52,6 +52,8 @@ import type {
 	PreparedExtension,
 	ProviderConfig,
 	RegisteredCommand,
+	SendUserInputOptions,
+	SendUserInputResult,
 	SourceInfo,
 	ToolDefinition,
 	ToolInfo,
@@ -135,6 +137,10 @@ export class ExtensionRuntime implements IExtensionRuntime {
 	}
 
 	sendUserMessage(): void {
+		throw new ExtensionRuntimeNotInitializedError();
+	}
+
+	sendUserInput(): Promise<SendUserInputResult> {
 		throw new ExtensionRuntimeNotInitializedError();
 	}
 
@@ -348,6 +354,10 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 
 	sendUserMessage(content: string | (TextContent | ImageContent)[], options?: SendUserMessageOptions): void {
 		this.runtime.sendUserMessage(content, options);
+	}
+
+	sendUserInput(text: string, options?: SendUserInputOptions): Promise<SendUserInputResult> {
+		return this.runtime.sendUserInput(text, options);
 	}
 
 	appendEntry(customType: string, data?: unknown): void {

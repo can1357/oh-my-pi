@@ -6,6 +6,10 @@
 
 - Fixed Codex conversation replay failing with an unknown `internal_chat_message_metadata_passthrough.content_token_count` parameter by omitting backend-internal response metadata from replayed input ([#17590](https://github.com/can1357/oh-my-pi/pull/17590) by [@briankeefe](https://github.com/briankeefe)).
 
+### Added
+
+- `UserMessage` has an optional `tag`, a caller correlation id that stays with the message and is never sent to providers ([#14323](https://github.com/can1357/oh-my-pi/pull/14323) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.14.2] - 2026-10-31
 
 ### Breaking Changes

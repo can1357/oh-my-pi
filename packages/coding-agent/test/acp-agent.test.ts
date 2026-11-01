@@ -9,7 +9,7 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import type { ExtensionActions, ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { buildSkillPromptMessage } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
@@ -554,6 +554,8 @@ async function createHarness(
 		permissionHandler?: (request: RequestPermissionRequest) => void;
 		/** Gives each session the factory creates a real extension runner with no extensions. */
 		extensionRunners?: boolean;
+		/** Runs on each session the agent's factory creates, before the agent configures it. */
+		decorateSession?: (session: FakeAgentSession) => void;
 		/** Exposed to each created session's `modelRegistry` for MCP credential round-trips. */
 		authStorage?: AuthStorage;
 	} = {},
@@ -606,6 +608,7 @@ async function createHarness(
 				{} as ModelRegistry,
 			);
 		}
+		options.decorateSession?.(session);
 		const setToolUIContext = vi.fn();
 		sessions.push(session);
 		setToolUIContextSpies.push(setToolUIContext);
@@ -2510,6 +2513,137 @@ describe("ACP agent", () => {
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
+	});
+
+	it("runs a built-in an extension sends through sendUserInput with the hooks ACP gives typed input", async () => {
+		let actions: ExtensionActions | undefined;
+		const bootstrapped = Promise.withResolvers<void>();
+		const harness = await createHarness({
+			sessionUpdateHook: notification => {
+				if (notification.update.sessionUpdate === "session_info_update") bootstrapped.resolve();
+			},
+			decorateSession: session => {
+				Object.assign(session, {
+					titleGenerationSignal: new AbortController().signal,
+					// `/rename` asks the session for the title; a typed one passes through uncarded.
+					renameTitle: async (title?: string) => title || null,
+					extensionRunner: {
+						initialize: (extensionActions: ExtensionActions) => {
+							actions = extensionActions;
+						},
+						emit: async () => undefined,
+						hasHandlers: () => false,
+						getRegisteredCommands: () => [],
+					},
+				});
+			},
+		});
+		vi.useFakeTimers();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		if (!actions?.sendUserInput) throw new Error("expected ACP to wire the extension sendUserInput action");
+		// Once the bootstrap updates have gone out the client has the session id; input sent
+		// before that is the next test's case.
+		await advanceBootstrapGuard();
+		await bootstrapped.promise;
+		vi.useRealTimers();
+
+		const result = await actions.sendUserInput("/rename Bridge title");
+
+		expect(result).toEqual({ handled: "command", output: "Session renamed to Bridge title." });
+		const updates = harness.updates.filter(n => n.sessionId === created.sessionId).map(n => n.update);
+		expect(updates).toContainEqual(
+			expect.objectContaining({ sessionUpdate: "session_info_update", title: "Bridge title" }),
+		);
+		expect(updates).toContainEqual(
+			expect.objectContaining({
+				sessionUpdate: "agent_message_chunk",
+				content: { type: "text", text: "Session renamed to Bridge title." },
+			}),
+		);
+
+		harness.abortController.abort();
+	});
+
+	it("gives /mcp an extension sends through sendUserInput the session's live MCP manager, as typed input gets it", async () => {
+		// A client-declared server lives only in the session's MCP manager, in no config file. Typed
+		// `/mcp reauth broken` resolves it there (and answers with the stdio guidance); without the
+		// manager the same text sent by an extension would answer "not found".
+		let actions: ExtensionActions | undefined;
+		const harness = await createHarness({
+			decorateSession: session => {
+				Object.assign(session, {
+					extensionRunner: {
+						initialize: (extensionActions: ExtensionActions) => {
+							actions = extensionActions;
+						},
+						emit: async () => undefined,
+						hasHandlers: () => false,
+						getRegisteredCommands: () => [],
+					},
+				});
+			},
+		});
+		await harness.agent.newSession({
+			cwd: harness.cwdA,
+			mcpServers: [{ name: "broken", command: "/nonexistent/omp-fixture-binary", args: [], env: [] }],
+		});
+		if (!actions?.sendUserInput) throw new Error("expected ACP to wire the extension sendUserInput action");
+
+		const result = await actions.sendUserInput("/mcp reauth broken");
+
+		expect(result).toMatchObject({
+			handled: "command",
+			output: expect.stringContaining("stdio servers manage their own credentials"),
+		});
+
+		harness.abortController.abort();
+	}, 15_000);
+
+	it("reports nothing to the client for a built-in a session_start handler sends before the session/new response", async () => {
+		// A client drops notifications for a session id it has not received yet, which is why
+		// `#scheduleBootstrapUpdates` defers the first ones. `session_start` runs inside
+		// `newSession`, so input an extension sends from it must not report around that guard.
+		let actions: ExtensionActions | undefined;
+		let startResult: unknown;
+		let responded = false;
+		const bootstrapTitle = Promise.withResolvers<string | null | undefined>();
+		const harness = await createHarness({
+			sessionUpdateHook: notification => {
+				if (responded && notification.update.sessionUpdate === "session_info_update") {
+					bootstrapTitle.resolve(notification.update.title);
+				}
+			},
+			decorateSession: session => {
+				Object.assign(session, {
+					titleGenerationSignal: new AbortController().signal,
+					// `/rename` asks the session for the title; a typed one passes through uncarded.
+					renameTitle: async (title?: string) => title || null,
+					extensionRunner: {
+						initialize: (extensionActions: ExtensionActions) => {
+							actions = extensionActions;
+						},
+						emit: async (event: { type: string }) => {
+							if (event.type === "session_start") {
+								startResult = await actions?.sendUserInput?.("/rename Early title");
+							}
+						},
+						hasHandlers: () => false,
+						getRegisteredCommands: () => [],
+					},
+				});
+			},
+		});
+		vi.useFakeTimers();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		responded = true;
+
+		expect(startResult).toEqual({ handled: "command", output: "Session renamed to Early title." });
+		expect(harness.updates.filter(n => n.sessionId === created.sessionId)).toEqual([]);
+		// The rename still reaches the client, in the first updates after the guard.
+		await advanceBootstrapGuard();
+		expect(await bootstrapTitle.promise).toBe("Early title");
+
+		harness.abortController.abort();
 	});
 
 	it("auto-cancels an in-progress turn and queues a new prompt when called mid-flight", async () => {
