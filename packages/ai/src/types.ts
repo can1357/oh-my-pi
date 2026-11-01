@@ -1296,6 +1296,13 @@ export interface AssistantMessage {
 	model: string;
 	/** Stored credential row that produced this turn; absent for external or unknown keys. */
 	credentialId?: number;
+	/**
+	 * Store epoch under which {@link credentialId} was assigned, when the request's
+	 * resolver attested it. A mismatch against the storage's current epoch means the
+	 * id belongs to a retired store and may name a different credential, so consumers
+	 * reusing the id later must drop it (see `AuthStorage.credentialStoreEpoch`).
+	 */
+	credentialStoreEpoch?: number;
 	contextSnapshot?: ContextSnapshot;
 	retryRecovery?: AssistantRetryRecovery;
 	responseId?: string; // Provider-specific response/message identifier when the upstream API exposes one

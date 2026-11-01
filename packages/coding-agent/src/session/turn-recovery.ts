@@ -10,6 +10,7 @@ import type {
 	AssistantRetryRecovery,
 	AssistantRetryRecoveryKind,
 	CodexCompactionContext,
+	CredentialRankingStrategy,
 	Effort,
 	Model,
 	ModelUsageHealth,
@@ -21,6 +22,7 @@ import { calculateRateLimitBackoffMs, parseRateLimitReason } from "@oh-my-pi/pi-
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { shouldDropTruncatedThinkingOnlyAssistant } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
+import { credentialBlockScopesForRequest, defaultRankingStrategy } from "@oh-my-pi/pi-ai/usage/registry";
 import { fallbackCreditTargets } from "@oh-my-pi/pi-catalog/compat/fallback-credit";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
@@ -375,6 +377,9 @@ type RetryPolicyOptions = {
 };
 
 type UsageLimitOutcome = {
+	/** The model the block was recorded against — the failing model, not necessarily the active one (#17098). */
+	attributedProvider: string;
+	attributedModelId: string;
 	switchedCredential: boolean;
 	retryAfterMs: number;
 	retryAtMs: number | undefined;
@@ -383,6 +388,51 @@ type UsageLimitOutcome = {
 	priorBlockedUntilTimed: boolean | undefined;
 	reportResetAtMs: number | undefined;
 };
+
+/**
+ * Whether a usage-limit block recorded against the attributed model still covers the
+ * active model's credential pool. Uses the same per-provider ranking strategy the
+ * mark itself used, so the comparison cannot drift from how blocks are scoped:
+ * an unscoped provider (e.g. ordinary Anthropic models) blocks provider-wide, while
+ * scoped providers (Codex `spark` vs `chat`, Claude tier lines) only cover models in
+ * the same block scope. The mark writes the attributed request's primary block
+ * scope, while a request CHECKS every scope `credentialBlockScopesForRequest`
+ * expands (the strategy's `blockScopes` entries plus the model-policy scope), so
+ * coverage is "the written scope is among the active request's checked scopes" —
+ * a strategy whose requests check a compat/shared scope still sees blocks written
+ * under that scope even when the primaries differ. The strategy is resolved through
+ * the ACTIVE AuthStorage's resolver (default: the bundled strategies) — an embedder
+ * overriding `rankingStrategyResolver` marks scopes through that resolver, and a
+ * coverage decision made against the static default could disagree with what the
+ * mark wrote. Exposed for tests.
+ */
+export function usageLimitBlockCoversModel(
+	attributedProvider: string,
+	attributedModelId: string,
+	activeProvider: string,
+	activeModelId: string,
+	resolveStrategy: (provider: string) => CredentialRankingStrategy | undefined = defaultRankingStrategy,
+): boolean {
+	if (attributedProvider !== activeProvider) return false;
+	const strategy = resolveStrategy(attributedProvider);
+	const attributedContext = { modelId: attributedModelId };
+	const writtenScope = strategy?.blockScope?.(attributedContext);
+	// No primary scope means the mark is provider-wide (unscoped strategies),
+	// which covers every model of the provider. An empty string is the same
+	// provider-wide marker: CredentialBlocks folds "" into the bare provider
+	// key (scopedBackoffKey), which every request of the provider checks,
+	// while credentialBlockScopesForRequest omits the empty value — so a
+	// literal includes("") would mislabel the live outcome as stale.
+	if (writtenScope === undefined || writtenScope === "") return true;
+	const activeContext = { modelId: activeModelId };
+	const activeScopes = credentialBlockScopesForRequest(
+		activeProvider,
+		strategy,
+		activeContext,
+		strategy?.blockScope?.(activeContext),
+	);
+	return activeScopes.includes(writtenScope);
+}
 
 /** Owns terminal-stop recovery, automatic retries, and fallback routing. */
 export class TurnRecovery {
@@ -832,22 +882,61 @@ export class TurnRecovery {
 		let recorded = this.#usageLimitOutcomes.get(message);
 		if (!recorded) {
 			const errorMessage = message.errorMessage || "Unknown error";
-			const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage);
+			// Attribute the block to the model that actually returned the error,
+			// not the active selection: an in-flight run of the previous provider
+			// can settle with a usage-limit error after a fallback switch already
+			// moved the session, and marking the switched-in provider would block
+			// its healthy account for the failing provider's quota window (#17098).
+			// Origins that do not resolve in the registry (synthetic or removed
+			// models) keep the active selection, matching the previous behavior.
+			const failingModel =
+				message.provider !== activeModel.provider || message.model !== activeModel.id
+					? this.#host.modelRegistry.find(message.provider, message.model)
+					: undefined;
+			const attributed = failingModel ?? activeModel;
+			// Parse the retry timing as the attributed provider: naive `reset at`
+			// stamps follow the provider's own catalog timezone (Z.AI/GLM +08:00),
+			// and reading the active provider's policy after a switch would skew
+			// the stored block by hours.
+			const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage, attributed.provider);
 			const retryAfterMs = parsedRetryAfterMs ?? calculateRateLimitBackoffMs(parseRateLimitReason(errorMessage));
 			recorded = (async (): Promise<UsageLimitOutcome> => {
 				const outcome = await this.#host.modelRegistry.authStorage.limits.markReached(
-					activeModel.provider,
+					attributed.provider,
 					this.#host.sessionId(),
 					{
 						retryAfterMs,
 						// Provider-stated timing only when the error text parsed;
 						// the 30-minute fallback is a guess.
 						providerTimed: parsedRetryAfterMs !== undefined,
-						baseUrl: activeModel.baseUrl,
-						modelId: activeModel.id,
+						baseUrl: attributed.baseUrl,
+						modelId: attributed.id,
+						// Park the block on the credential that actually served the
+						// failing request: a delayed settle can race a sibling
+						// rotation that already moved the provider's session
+						// affinity, and the affinity-resolved target would block a
+						// healthy credential for the failing account's window.
+						// Fence the id to the store that issued it: a live
+						// auth.broker.url change (AuthStorage.replaceStore) retires
+						// the old store's row ids, the replacement store can
+						// reuse the same numeric id for a different account, and
+						// each store's epoch is based at its own random value, so
+						// an independent store (an SDK getApiKey override backed
+						// by another AuthStorage) never validates its row ids
+						// here — any epoch mismatch drops the pin and falls back
+						// to affinity resolution. Messages without an epoch
+						// (older sessions, resolvers that cannot attest one)
+						// keep the pin.
+						credentialId:
+							message.credentialStoreEpoch === undefined ||
+							message.credentialStoreEpoch === this.#host.modelRegistry.authStorage.credentialStoreEpoch
+								? message.credentialId
+								: undefined,
 					},
 				);
 				return {
+					attributedProvider: attributed.provider,
+					attributedModelId: attributed.id,
 					switchedCredential: outcome.switched,
 					retryAfterMs,
 					retryAtMs: outcome.retryAtMs,
@@ -873,9 +962,11 @@ export class TurnRecovery {
 		return this.#promptAgentWithIdleRetry(messages, options, onClaimed);
 	}
 
-	/** Parses provider retry and rate-limit reset hints into a delay. */
-	parseRetryAfterMsFromError(errorMessage: string): number | undefined {
-		return this.#parseRetryAfterMsFromError(errorMessage);
+	/** Parses provider retry and rate-limit reset hints into a delay. Pass the error's
+	 * attributed provider when it may differ from the active one: naive `reset at`
+	 * stamps follow the provider's own catalog timezone. */
+	parseRetryAfterMsFromError(errorMessage: string, provider?: string): number | undefined {
+		return this.#parseRetryAfterMsFromError(errorMessage, provider);
 	}
 
 	/**
@@ -2623,12 +2714,15 @@ export class TurnRecovery {
 		return true;
 	}
 
-	#parseRetryAfterMsFromError(errorMessage: string): number | undefined {
+	#parseRetryAfterMsFromError(errorMessage: string, provider?: string): number | undefined {
 		// Single call into the provider-aware parser: it merges every supported
 		// form (account resets, retry-after-ms, legacy retry-after /
 		// x-ratelimit-reset text) by longest-wins, so a shorter reset phrase
 		// can never shadow a longer retry signal carried in the same message.
-		return extractProviderRetryHint(this.#host.model()?.provider, errorMessage);
+		// Provider-aware: naive `reset at` stamps must be read with the
+		// provider's own catalog timezone; callers pass the attributed
+		// provider when the error may originate from a non-active one.
+		return extractProviderRetryHint(provider ?? this.#host.model()?.provider, errorMessage);
 	}
 
 	/**
@@ -2710,8 +2804,48 @@ export class TurnRecovery {
 			(message.errorStatus === 429 || rateLimitReason === "RATE_LIMIT_EXCEEDED");
 		const staleOpenAIResponsesReplayError = AIError.is(id, AIError.Flag.StaleResponsesItem);
 		const accountPolicyDenial = AIError.is(id, AIError.Flag.AccountPolicy);
-		const recordedUsageLimitOutcome = await this.#usageLimitOutcomes.get(message);
-		const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage);
+		let recordedUsageLimitOutcome = await this.#usageLimitOutcomes.get(message);
+		// Provider-aware parse: a recorded outcome pins the error's origin, so
+		// naive `reset at` stamps read with the attributed provider's timezone
+		// even while the session is served by another model.
+		let parsedRetryAfterMs = this.#parseRetryAfterMsFromError(
+			errorMessage,
+			recordedUsageLimitOutcome?.attributedProvider,
+		);
+		// #17098: an in-flight run of a previous provider settles after a
+		// fallback switch already moved the session. The outcome and the
+		// error text's timing describe the failing provider's accounts, so
+		// they must not redeem resets, wait out quota windows, or cool down
+		// selectors for the model now serving the session — that model is
+		// itself the recovery. Drop both, leaving the plain same-model
+		// backoff retry below; the block itself was already recorded against
+		// the failing provider by recordUsageLimitOutcome.
+		// Same-pool attribution is NOT stale: when the attributed model's block
+		// scope covers the active model (Anthropic's unscoped blocks, Codex's
+		// chat scope shared by ordinary Codex models), the block the mark
+		// installed still covers the active model's pool, so the
+		// rotation/redemption signals stay valid and must not be discarded.
+		// Scoped mismatches (Codex `spark` vs ordinary `chat`, distinct Claude
+		// tiers) are stale exactly like cross-provider ones.
+		const retryPolicyModel = this.#host.model();
+		const strategyResolver = this.#host.modelRegistry.authStorage.rankingStrategyResolver;
+		// Read through the closure so the revalidation below sees the latest
+		// state after a stale outcome has been dropped.
+		const outcomeIsStaleFor = (model: Model | undefined): boolean =>
+			recordedUsageLimitOutcome !== undefined &&
+			model !== undefined &&
+			!usageLimitBlockCoversModel(
+				recordedUsageLimitOutcome.attributedProvider,
+				recordedUsageLimitOutcome.attributedModelId,
+				model.provider,
+				model.id,
+				strategyResolver,
+			);
+		let staleUsageLimitOutcome = outcomeIsStaleFor(retryPolicyModel);
+		if (staleUsageLimitOutcome) {
+			recordedUsageLimitOutcome = undefined;
+			parsedRetryAfterMs = undefined;
+		}
 		let delayMs = staleOpenAIResponsesReplayError
 			? 0
 			: calculateRetryBackoffDelayMs(retrySettings.baseDelayMs, this.#retryAttempt);
@@ -2741,7 +2875,7 @@ export class TurnRecovery {
 		// Set when a usage-limit error pinned the wait to credential
 		// availability — suppresses the generic retry-after bump below.
 		let usageLimitWaitMs: number | undefined;
-		const siblingAvailabilityWaitMs =
+		let siblingAvailabilityWaitMs =
 			recordedUsageLimitOutcome?.retryAtMs === undefined
 				? undefined
 				: Math.max(0, recordedUsageLimitOutcome.retryAtMs - Date.now()) + SIBLING_UNBLOCK_BUFFER_MS;
@@ -2860,6 +2994,28 @@ export class TurnRecovery {
 
 		const allowModelFallback = options?.allowModelFallback !== false && !this.#host.modelFallbackDisabled?.();
 		const currentModel = this.#host.model();
+		// #17571 (review): the reset-redeem lookup above awaited network work, and
+		// the user may have switched models across that await. An outcome that
+		// covered the pre-await model can be out of pool for the post-await one —
+		// keeping it would set the new model's wait/fail-fast deadline or fallback
+		// cooldown from a block that belongs to a different pool. Revalidate
+		// against the post-await model and drop stale signals wholesale, exactly
+		// like the pre-await check above did.
+		if (recordedUsageLimitOutcome !== undefined && outcomeIsStaleFor(currentModel)) {
+			staleUsageLimitOutcome = true;
+			recordedUsageLimitOutcome = undefined;
+			parsedRetryAfterMs = undefined;
+			// Every wait derived from the outcome is as stale as the outcome
+			// itself — the sibling-availability deadline included, or the
+			// dropped block's window still fail-fasts the healthy model. The
+			// redeem branch already raised delayMs to that window, so restore
+			// the plain backoff the pre-await code started from.
+			usageLimitWaitMs = undefined;
+			siblingAvailabilityWaitMs = undefined;
+			delayMs = staleOpenAIResponsesReplayError
+				? 0
+				: calculateRetryBackoffDelayMs(retrySettings.baseDelayMs, this.#retryAttempt);
+		}
 		const currentSelector = currentModel
 			? formatRetryFallbackSelector(currentModel, this.#host.thinkingLevel())
 			: undefined;
@@ -2978,6 +3134,12 @@ export class TurnRecovery {
 				allowModelFallback &&
 				retrySettings.modelFallback &&
 				retryFallbackAdmits(retrySettings.fallbackOn, AIError.is(id, AIError.Flag.UsageLimit)) &&
+				// A stale out-of-pool usage limit is not a health signal for the
+				// active selector: walking the chain here cools down the healthy
+				// fallback with a generic heuristic window and swaps it away
+				// without ever trying it (#17098, #17571). The switch to the
+				// active model already IS the recovery — retry it plainly below.
+				!staleUsageLimitOutcome &&
 				!thinkingLoop &&
 				!sameModelSteerReplay &&
 				!waitForSiblingCredential &&

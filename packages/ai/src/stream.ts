@@ -1235,6 +1235,7 @@ function streamSimpleRequest<TApi extends Api>(
 			apiKey?: string,
 			credentialId?: number,
 			oauthIdentity?: OAuthRequestIdentity,
+			credentialStoreEpoch?: number,
 		): Promise<AuthRetryFailure | undefined> => {
 			const bufferedEvents: AssistantMessageEvent[] = [];
 			let emittedReplayUnsafeEvent = false;
@@ -1251,6 +1252,11 @@ function streamSimpleRequest<TApi extends Api>(
 						if ("partial" in event) event.partial.credentialId = credentialId;
 						else if (event.type === "done") event.message.credentialId = credentialId;
 						else event.error.credentialId = credentialId;
+					}
+					if (credentialStoreEpoch !== undefined) {
+						if ("partial" in event) event.partial.credentialStoreEpoch = credentialStoreEpoch;
+						else if (event.type === "done") event.message.credentialStoreEpoch = credentialStoreEpoch;
+						else event.error.credentialStoreEpoch = credentialStoreEpoch;
 					}
 					if (!emittedReplayUnsafeEvent && event.type === "start") {
 						bufferedEvents.push(event);
@@ -1281,6 +1287,7 @@ function streamSimpleRequest<TApi extends Api>(
 				if (!outer.done) {
 					const result = await inner.result();
 					if (credentialId !== undefined) result.credentialId = credentialId;
+					if (credentialStoreEpoch !== undefined) result.credentialStoreEpoch = credentialStoreEpoch;
 					outer.end(result);
 				}
 			} catch (error) {
@@ -1313,11 +1320,13 @@ function streamSimpleRequest<TApi extends Api>(
 			let lastKey: string | undefined;
 			let credentialId: number | undefined;
 			let oauthIdentity: OAuthRequestIdentity | undefined;
+			let credentialStoreEpoch: number | undefined;
 			try {
 				const resolved = await apiKeyResolver({ lastChance: false, error: undefined, signal });
 				lastKey = resolvedApiKeyBearer(resolved);
 				credentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
 				oauthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
+				credentialStoreEpoch = typeof resolved === "string" ? undefined : resolved?.credentialStoreEpoch;
 			} catch (error) {
 				// A thrown resolver is a broker/OAuth/network failure, not a missing
 				// key — surface the cause instead of masking it as "No API key".
@@ -1339,7 +1348,7 @@ function streamSimpleRequest<TApi extends Api>(
 				return;
 			}
 			const retryState = createAuthRetryKeyState(lastKey);
-			let failure = await runAttempt(lastKey, credentialId, oauthIdentity);
+			let failure = await runAttempt(lastKey, credentialId, oauthIdentity, credentialStoreEpoch);
 			if (!failure) return;
 			while (true) {
 				// Caller aborted between attempts: don't mint a fresh token or fire
@@ -1347,6 +1356,7 @@ function streamSimpleRequest<TApi extends Api>(
 				if (signal?.aborted) break;
 				let nextCredentialId: number | undefined;
 				let nextOAuthIdentity: OAuthRequestIdentity | undefined;
+				let nextCredentialStoreEpoch: number | undefined;
 				const nextKey = await resolveNextAuthRetryKey(
 					retryState,
 					apiKeyResolver,
@@ -1355,10 +1365,11 @@ function streamSimpleRequest<TApi extends Api>(
 					resolved => {
 						nextCredentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
 						nextOAuthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
+						nextCredentialStoreEpoch = typeof resolved === "string" ? undefined : resolved?.credentialStoreEpoch;
 					},
 				);
 				if (nextKey === undefined) break;
-				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity);
+				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity, nextCredentialStoreEpoch);
 				if (!next) return;
 				failure = next;
 			}

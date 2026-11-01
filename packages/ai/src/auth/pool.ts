@@ -22,6 +22,30 @@ import type { UsageCredential } from "../usage";
 
 const OAUTH_BEARER_FINGERPRINT_HISTORY_LIMIT = 8;
 const MAX_PENDING_DISABLED_EVENTS = 32;
+/** Cache row holding this backing store's epoch base; see {@link readOrMintStoreEpochBase}. */
+const STORE_EPOCH_BASE_CACHE_KEY = "store:epoch-base";
+/** Cache rows expire in seconds; ten years reads as "does not expire" for a per-store base. */
+const STORE_EPOCH_BASE_TTL_SEC = 10 * 365 * 24 * 60 * 60;
+
+/**
+ * Random, persisted-per-backing-store base for the credential store epoch.
+ * Row ids are only unique within one store, so two independent stores (an SDK
+ * session resolving through a second `AuthStorage`) must never report the same
+ * epoch: a foreign pin would otherwise be accepted and block this registry's
+ * unrelated healthy row that happens to reuse the same numeric id. The base is
+ * minted once and cached in the store itself, so reopening the same backing
+ * store keeps the epoch stable across restarts, while a different store yields
+ * a different base.
+ */
+function readOrMintStoreEpochBase(store: AuthCredentialStore): number {
+	const cached = store.getCache(STORE_EPOCH_BASE_CACHE_KEY, { includeExpired: true });
+	const parsed = cached === null ? undefined : Number(cached);
+	if (parsed !== undefined && Number.isInteger(parsed) && parsed >= 0) return parsed;
+	// 47 random bits: always a positive integer that stays exact in JSON and SQLite.
+	const base = Math.floor(Math.random() * 2 ** 47);
+	store.setCache(STORE_EPOCH_BASE_CACHE_KEY, String(base), Math.floor(Date.now() / 1000) + STORE_EPOCH_BASE_TTL_SEC);
+	return base;
+}
 
 /** SHA-256 bearer fingerprint, so superseded OAuth token bytes never enter the identity cache. */
 function fingerprintOAuthBearer(bearer: string): string {
@@ -103,6 +127,14 @@ export class CredentialPool implements CredentialsApi {
 	 */
 	#pendingDisabledEvents: CredentialDisabledEvent[] = [];
 	#generation = 1;
+	/**
+	 * Monotonic epoch of the backing credential store: a per-store random base
+	 * (see {@link readOrMintStoreEpochBase}) plus one advance per
+	 * `AuthStorage.replaceStore` (adopted by the replacement pool). The base
+	 * keeps two independent stores from ever agreeing — row ids are only unique
+	 * within one store — and the increment retires ids captured before a swap.
+	 */
+	#storeEpoch: number;
 	#generationListeners: Set<(generation: number) => void> = new Set();
 	#closed = false;
 
@@ -112,6 +144,7 @@ export class CredentialPool implements CredentialsApi {
 	constructor(store: AuthCredentialStore, options: CredentialPoolOptions) {
 		this.#store = store;
 		this.#options = options;
+		this.#storeEpoch = readOrMintStoreEpochBase(store);
 	}
 
 	get closed(): boolean {
@@ -206,10 +239,18 @@ export class CredentialPool implements CredentialsApi {
 		}
 	}
 
+	/** Current store epoch; see {@link CredentialPool.#storeEpoch}. */
+	get storeEpoch(): number {
+		return this.#storeEpoch;
+	}
+
 	/**
 	 * Take over the subscribers, buffered disable events, and generation counter of
 	 * the pool this one replaces (store swap). Listener sets are shared, so
-	 * unsubscribe functions handed out by `previous` keep working.
+	 * unsubscribe functions handed out by `previous` keep working. Also advances
+	 * the store epoch: row ids pinned before the swap belong to the retired
+	 * store, and the replacement store may reuse the same numeric id for a
+	 * different credential.
 	 */
 	adoptSubscribers(previous: CredentialPool): void {
 		this.#credentialDisabledListeners = previous.#credentialDisabledListeners;
@@ -217,6 +258,7 @@ export class CredentialPool implements CredentialsApi {
 		this.#pendingDisabledEvents = previous.#pendingDisabledEvents;
 		previous.#pendingDisabledEvents = [];
 		this.#generation = previous.#generation;
+		this.#storeEpoch = previous.#storeEpoch + 1;
 	}
 
 	onGeneration(listener: (generation: number) => void): () => void {

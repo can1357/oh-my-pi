@@ -43,6 +43,16 @@ export interface ResolvedApiKey {
 	/** Durable row id of the credential that supplied this bearer, when known. */
 	credentialId?: number;
 	/**
+	 * Store epoch under which {@link credentialId} was assigned; `undefined`
+	 * when the resolver cannot attest it. `AuthStorage.replaceStore` retires the
+	 * issuing store, the replacement store can reuse the id for a different
+	 * credential, and each store's epoch is based at its own random value, so an
+	 * id resolved through an independent store never validates here; delayed
+	 * consumers must re-check the epoch before reusing the id (see
+	 * `AuthStorage.credentialStoreEpoch`).
+	 */
+	credentialStoreEpoch?: number;
+	/**
 	 * The OAuth access token behind this bearer, when the bearer came from a
 	 * stored OAuth credential. A provider whose API key wraps the token in a
 	 * structured document makes the two differ, so a 401 recovery names this

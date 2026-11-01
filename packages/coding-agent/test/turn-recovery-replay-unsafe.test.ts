@@ -1,6 +1,6 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { AgentMessage, SyntheticToolResultDetails } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, CredentialRankingStrategy, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -12,6 +12,7 @@ import {
 	type RecoveryCompactionResult,
 	TurnRecovery,
 	type TurnRecoveryHost,
+	usageLimitBlockCoversModel,
 } from "@oh-my-pi/pi-coding-agent/session/turn-recovery";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createProviderErrorMessage } from "../../ai/src/providers/error-message";
@@ -133,6 +134,10 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 	afterAll(() => {
 		authStorage.close();
 		tempDir.removeSync();
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
 	});
 
 	it("rolls back a usage fallback cancelled during model reconciliation", async () => {
@@ -380,6 +385,371 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			errorMessage: "429 Weekly usage limit reached. type=GoUsageLimitError retry-after-ms=3242000",
 		} as AssistantMessage;
 		expect(recovery.isRetryableError(message)).toBe(false);
+	});
+
+	it("records a delayed usage limit against the provider that failed, not the switched-in fallback", async () => {
+		const codex = getBundledModel("openai-codex", "gpt-6.1-sol");
+		if (!codex) throw new Error("Expected bundled openai-codex model gpt-6.1-sol");
+		// The session already fell back to Anthropic when an in-flight Codex run
+		// settles with its usage-limit error (#17098): the block must land on
+		// the Codex credential that failed, not the healthy fallback provider.
+		const host = createHost(model, modelRegistry);
+		const recovery = new TurnRecovery(host);
+		const markReached = vi.spyOn(authStorage.limits, "markReached").mockResolvedValue({ switched: false });
+		const failed: AssistantMessage = {
+			...makeMessage([], codex),
+			errorMessage: "429 usage_limit_reached: You've reached your ChatGPT plan limit. Try again in ~9701 min.",
+			// The request resolved against this credential; the block must target
+			// it even if a sibling rotation already moved the session affinity.
+			credentialId: 42,
+		};
+		await recovery.recordUsageLimitOutcome(failed);
+		expect(markReached).toHaveBeenCalledTimes(1);
+		// The whole attribution must describe the failing model, not the
+		// switched-in fallback: provider, modelId, baseUrl, and the failing
+		// request's credential all say codex.
+		expect(markReached).toHaveBeenCalledWith("openai-codex", "test-session", {
+			retryAfterMs: expect.any(Number),
+			providerTimed: true,
+			baseUrl: codex.baseUrl,
+			modelId: codex.id,
+			credentialId: 42,
+		});
+	});
+
+	it("drops the pinned credential id when its store generation was replaced", async () => {
+		const codex = getBundledModel("openai-codex", "gpt-6.1-sol");
+		if (!codex) throw new Error("Expected bundled openai-codex model gpt-6.1-sol");
+		const host = createHost(model, modelRegistry);
+		const recovery = new TurnRecovery(host);
+		const markReached = vi.spyOn(authStorage.limits, "markReached").mockResolvedValue({ switched: false });
+		const base = {
+			...makeMessage([], codex),
+			errorMessage: "429 usage_limit_reached: You've reached your ChatGPT plan limit. Try again in ~9701 min.",
+		} as AssistantMessage;
+		// The pin was minted by a previous store generation: replaceStore
+		// retires the old store's row ids, and the current store may reuse id 42
+		// for a different account, so the mark must fall back to affinity
+		// resolution instead of pinning an unrelated healthy credential.
+		const staleStorePin: AssistantMessage = {
+			...base,
+			credentialId: 42,
+			credentialStoreEpoch: authStorage.credentialStoreEpoch + 1,
+		};
+		await recovery.recordUsageLimitOutcome(staleStorePin);
+		expect(markReached).toHaveBeenLastCalledWith("openai-codex", "test-session", {
+			retryAfterMs: expect.any(Number),
+			providerTimed: true,
+			baseUrl: codex.baseUrl,
+			modelId: codex.id,
+			credentialId: undefined,
+		});
+		// A pin from the current store generation keeps targeting the row.
+		const currentStorePin: AssistantMessage = {
+			...base,
+			credentialId: 42,
+			credentialStoreEpoch: authStorage.credentialStoreEpoch,
+		};
+		await recovery.recordUsageLimitOutcome(currentStorePin);
+		expect(markReached).toHaveBeenLastCalledWith("openai-codex", "test-session", {
+			retryAfterMs: expect.any(Number),
+			providerTimed: true,
+			baseUrl: codex.baseUrl,
+			modelId: codex.id,
+			credentialId: 42,
+		});
+	});
+
+	it("drops the credential pin when its epoch belongs to an independent store", async () => {
+		const codex = getBundledModel("openai-codex", "gpt-6.1-sol");
+		if (!codex) throw new Error("Expected bundled openai-codex model gpt-6.1-sol");
+		// An SDK session can resolve keys through a second AuthStorage
+		// (`options.getApiKey`): that store stamps its own epoch onto the
+		// message, and row ids are only unique within one store, so the foreign
+		// epoch must never validate against this registry — otherwise the pin
+		// would block this registry's unrelated healthy row that happens to
+		// reuse the same numeric id.
+		const foreign = await AuthStorage.create(tempDir.join("foreign-auth.db"));
+		try {
+			expect(foreign.credentialStoreEpoch).not.toBe(authStorage.credentialStoreEpoch);
+			const host = createHost(model, modelRegistry);
+			const recovery = new TurnRecovery(host);
+			const markReached = vi.spyOn(authStorage.limits, "markReached").mockResolvedValue({ switched: false });
+			const foreignStorePin: AssistantMessage = {
+				...makeMessage([], codex),
+				errorMessage: "429 usage_limit_reached: You've reached your ChatGPT plan limit. Try again in ~9701 min.",
+				credentialId: 42,
+				credentialStoreEpoch: foreign.credentialStoreEpoch,
+			};
+			await recovery.recordUsageLimitOutcome(foreignStorePin);
+			expect(markReached).toHaveBeenCalledTimes(1);
+			expect(markReached).toHaveBeenCalledWith("openai-codex", "test-session", {
+				retryAfterMs: expect.any(Number),
+				providerTimed: true,
+				baseUrl: codex.baseUrl,
+				modelId: codex.id,
+				credentialId: undefined,
+			});
+		} finally {
+			foreign.close();
+		}
+	});
+
+	it("keeps a delayed foreign-provider usage limit out of the active model's retry policy", async () => {
+		const codex = getBundledModel("openai-codex", "gpt-6.1-sol");
+		if (!codex) throw new Error("Expected bundled openai-codex model gpt-6.1-sol");
+		// #17098: the session already fell back to Anthropic when the in-flight
+		// Codex run settles with its usage-limit error. The block is recorded
+		// against Codex; the retry policy for the healthy switched-in model must
+		// not spend that outcome — no reset redemption on the Anthropic account,
+		// no Codex quota-window wait on the retry, and no Codex-window cooldown
+		// on the Anthropic selector.
+		const host = createHost(model, modelRegistry);
+		const maybeAutoRedeemReset = vi.spyOn(host, "maybeAutoRedeemReset").mockResolvedValue({ restored: false });
+		const events: { type: string; delayMs?: number }[] = [];
+		host.emitSessionEvent = async event => {
+			events.push(
+				event.type === "auto_retry_start" ? { type: event.type, delayMs: event.delayMs } : { type: event.type },
+			);
+		};
+		const recovery = new TurnRecovery(host);
+		const noteCooldown = vi.spyOn(recovery, "noteRetryFallbackCooldown").mockImplementation(() => {});
+		vi.spyOn(authStorage.limits, "markReached").mockResolvedValue({ switched: false });
+		const failed: AssistantMessage = {
+			...makeMessage([], codex),
+			errorMessage: "429 usage_limit_reached: You've reached your ChatGPT plan limit. Try again in ~9701 min.",
+		};
+		// agent-session.ts records the outcome before the retry policy runs.
+		await recovery.recordUsageLimitOutcome(failed);
+
+		const retried = await recovery.handleRetryableError(failed);
+
+		expect(maybeAutoRedeemReset).not.toHaveBeenCalled();
+		// The walk itself is bypassed for a stale cross-provider outcome: the
+		// active selector is healthy, so it gets neither a cooldown (not even
+		// the generic heuristic one) nor a fallback swap — the session just
+		// retries the active model plainly.
+		expect(noteCooldown).not.toHaveBeenCalled();
+		const retryStart = events.find(event => event.type === "auto_retry_start");
+		expect(retried).toBe(true);
+		expect(retryStart).toBeDefined();
+		// The ~9701-minute Codex window must not hold back the healthy model:
+		// the generic backoff stays far below retry.maxDelayMs.
+		expect(retryStart?.delayMs ?? Number.POSITIVE_INFINITY).toBeLessThan(60_000);
+	});
+
+	it("keeps a same-provider outcome for a sibling model on the shared quota pool", async () => {
+		const codexSol = getBundledModel("openai-codex", "gpt-6.1-sol");
+		const codexAstra = getBundledModel("openai-codex", "gpt-6-astra");
+		if (!codexSol || !codexAstra) throw new Error("Expected bundled openai-codex models gpt-6.1-sol and gpt-6-astra");
+		// Two non-Spark Codex models share the chat quota scope: a usage limit
+		// recorded against one covers the pool the active sibling also draws
+		// from, so the outcome is NOT stale — its rotation signal must still
+		// reach the retry policy for the active model.
+		const host = createHost(codexSol, modelRegistry);
+		const maybeAutoRedeemReset = vi.spyOn(host, "maybeAutoRedeemReset").mockResolvedValue({ restored: false });
+		const events: { type: string; delayMs?: number }[] = [];
+		host.emitSessionEvent = async event => {
+			events.push(
+				event.type === "auto_retry_start" ? { type: event.type, delayMs: event.delayMs } : { type: event.type },
+			);
+		};
+		const recovery = new TurnRecovery(host);
+		const noteCooldown = vi.spyOn(recovery, "noteRetryFallbackCooldown").mockImplementation(() => {});
+		// A sibling credential is free right now: markReached rotates to it.
+		vi.spyOn(authStorage.limits, "markReached").mockResolvedValue({ switched: true });
+		const failed: AssistantMessage = {
+			...makeMessage([], codexAstra),
+			errorMessage: "429 usage_limit_reached: You've reached your ChatGPT plan limit. Try again in ~9701 min.",
+		};
+		await recovery.recordUsageLimitOutcome(failed);
+
+		const retried = await recovery.handleRetryableError(failed);
+
+		// The outcome survived attribution to a sibling model: its rotation
+		// signal is consumed — retry proceeds at zero delay on the switched
+		// sibling instead of a generic backoff. (A dropped outcome would lose
+		// switchedCredential and fall back to a nonzero heuristic delay.)
+		expect(retried).toBe(true);
+		const retryStart = events.find(event => event.type === "auto_retry_start");
+		expect(retryStart).toBeDefined();
+		expect(retryStart?.delayMs).toBe(0);
+		// Rotation already moved the pool; no redeem walk and no selector
+		// cooldown are needed once the outcome's switch is honored.
+		expect(maybeAutoRedeemReset).not.toHaveBeenCalled();
+		expect(noteCooldown).not.toHaveBeenCalled();
+	});
+
+	it("scopes block coverage by quota pool, not by provider", () => {
+		// Codex `spark` and ordinary `chat` meters are disjoint pools: a Spark
+		// block must not be treated as covering an ordinary chat model even
+		// though both share the openai-codex provider.
+		expect(usageLimitBlockCoversModel("openai-codex", "gpt-5.3-codex-spark", "openai-codex", "gpt-6.1-sol")).toBe(
+			false,
+		);
+		expect(usageLimitBlockCoversModel("openai-codex", "gpt-6.1-sol", "openai-codex", "gpt-5.3-codex-spark")).toBe(
+			false,
+		);
+		// Two ordinary Codex models share the chat scope: covered both ways.
+		expect(usageLimitBlockCoversModel("openai-codex", "gpt-6.1-sol", "openai-codex", "gpt-6-astra")).toBe(true);
+		// Anthropic's ordinary models carry no block scope: provider-wide.
+		expect(usageLimitBlockCoversModel("anthropic", "claude-sonnet-4-5", "anthropic", "claude-sonnet-4-5-v2")).toBe(
+			true,
+		);
+		// Cross-provider is never covered.
+		expect(usageLimitBlockCoversModel("openai-codex", "gpt-6.1-sol", "anthropic", "claude-sonnet-4-5")).toBe(false);
+		// Same model is trivially covered.
+		expect(
+			usageLimitBlockCoversModel("openai-codex", "gpt-5.3-codex-spark", "openai-codex", "gpt-5.3-codex-spark"),
+		).toBe(true);
+	});
+
+	it("honors every scope the active request checks, not just the primary block scope", () => {
+		// A resolver whose requests check a compat scope of another tier: the
+		// mark is written under the attributed request's primary scope, but the
+		// active request still checks that scope, so the block genuinely binds
+		// it and the outcome is NOT stale — comparing only the two primaries
+		// would wrongly drop live rotation/reset/wait signals.
+		const compatTiered = {
+			blockScope: (ctx?: { modelId?: string }) => `scope-${ctx?.modelId === "model-b" ? "b" : "a"}`,
+			blockScopes: (ctx?: { modelId?: string }) =>
+				ctx?.modelId === "model-b" ? ["scope-b", "scope-a"] : ["scope-a"],
+		} as unknown as CredentialRankingStrategy;
+		const resolver = (provider: string) => (provider === "openai-codex" ? compatTiered : undefined);
+		expect(usageLimitBlockCoversModel("openai-codex", "model-a", "openai-codex", "model-b", resolver)).toBe(true);
+		// Without the shared checked scope the pools are disjoint: stale.
+		const disjoint = {
+			blockScope: (ctx?: { modelId?: string }) => `scope-${ctx?.modelId}`,
+			blockScopes: (ctx?: { modelId?: string }) => [`scope-${ctx?.modelId}`],
+		} as unknown as CredentialRankingStrategy;
+		expect(
+			usageLimitBlockCoversModel("openai-codex", "model-a", "openai-codex", "model-b", provider =>
+				provider === "openai-codex" ? disjoint : undefined,
+			),
+		).toBe(false);
+		// The bundled Codex strategy's legacy "shared" read scope must NOT make
+		// a spark mark cover chat: usage-limit marks are written under the
+		// attributed request's primary scope only, and no request's primary is
+		// "shared".
+		expect(usageLimitBlockCoversModel("openai-codex", "gpt-5.3-codex-spark", "openai-codex", "gpt-6.1-sol")).toBe(
+			false,
+		);
+	});
+
+	it("resolves block coverage through the supplied strategy resolver, not just the bundled default", () => {
+		// An embedder overriding AuthStorage's `rankingStrategyResolver` marks
+		// scopes through that resolver; a coverage check consulting only the
+		// bundled default could disagree with what the mark actually wrote.
+		const codexPool = { blockScope: () => "codex-unified" } as unknown as CredentialRankingStrategy;
+		const resolver = (provider: string) => (provider === "openai-codex" ? codexPool : undefined);
+		// Under the bundled default these are disjoint pools (spark vs chat).
+		expect(usageLimitBlockCoversModel("openai-codex", "gpt-5.3-codex-spark", "openai-codex", "gpt-6.1-sol")).toBe(
+			false,
+		);
+		// Under the embedder's unified scope the same pair is covered.
+		expect(
+			usageLimitBlockCoversModel("openai-codex", "gpt-5.3-codex-spark", "openai-codex", "gpt-6.1-sol", resolver),
+		).toBe(true);
+		// A resolver that scopes only the attributed provider still applies to it.
+		expect(usageLimitBlockCoversModel("openai-codex", "gpt-6.1-sol", "openai-codex", "gpt-6.1-sol", resolver)).toBe(
+			true,
+		);
+		// Cross-provider stays uncovered regardless of the resolver.
+		expect(
+			usageLimitBlockCoversModel("openai-codex", "gpt-6.1-sol", "anthropic", "claude-sonnet-4-5", resolver),
+		).toBe(false);
+	});
+
+	it("treats an empty-string block scope as provider-wide, like CredentialBlocks does", () => {
+		// An SDK-supplied resolver whose global scope is "" writes the mark to
+		// the bare provider key — scopedBackoffKey folds "" into the provider
+		// key, which every request of the provider checks — while
+		// credentialBlockScopesForRequest omits the empty value. Falling
+		// through to `includes("")` would label the live outcome stale and
+		// discard a valid sibling rotation / reset-wait signal.
+		const emptyScope = { blockScope: () => "" } as unknown as CredentialRankingStrategy;
+		const resolver = (provider: string) => (provider === "openai-codex" ? emptyScope : undefined);
+		expect(usageLimitBlockCoversModel("openai-codex", "model-a", "openai-codex", "model-b", resolver)).toBe(true);
+		// The reverse direction stays uncovered: an active request scoped ""
+		// checks only the provider key, so a mark written under a real scope
+		// ("scope-a") does not bind it.
+		const mixed = {
+			blockScope: (ctx?: { modelId?: string }) => (ctx?.modelId === "model-a" ? "scope-a" : ""),
+		} as unknown as CredentialRankingStrategy;
+		expect(
+			usageLimitBlockCoversModel("openai-codex", "model-a", "openai-codex", "model-b", provider =>
+				provider === "openai-codex" ? mixed : undefined,
+			),
+		).toBe(false);
+	});
+
+	it("drops an outcome that went stale while the reset-redeem lookup awaited", async () => {
+		const codexSol = getBundledModel("openai-codex", "gpt-6.1-sol");
+		const codexAstra = getBundledModel("openai-codex", "gpt-6-astra");
+		const claude = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!codexSol || !codexAstra || !claude) throw new Error("Expected bundled codex/anthropic models");
+		// #17571 (review): the outcome is attributed to astra while sol serves
+		// the session — same chat pool, NOT stale, so the redeem branch runs.
+		// The user then switches to Claude while the redeem lookup awaits: the
+		// still-recorded outcome must be revalidated against the post-await
+		// model and dropped, instead of setting Claude's retry deadline or
+		// cooldown from a Codex block.
+		const host = createHost(codexSol, modelRegistry);
+		const maybeAutoRedeemReset = vi.spyOn(host, "maybeAutoRedeemReset").mockImplementation(async () => {
+			vi.spyOn(host, "model").mockReturnValue(claude);
+			return { restored: false };
+		});
+		const events: { type: string; delayMs?: number }[] = [];
+		host.emitSessionEvent = async event => {
+			events.push(
+				event.type === "auto_retry_start" ? { type: event.type, delayMs: event.delayMs } : { type: event.type },
+			);
+		};
+		const recovery = new TurnRecovery(host);
+		const noteCooldown = vi.spyOn(recovery, "noteRetryFallbackCooldown").mockImplementation(() => {});
+		vi.spyOn(authStorage.limits, "markReached").mockResolvedValue({ switched: false });
+		const failed: AssistantMessage = {
+			...makeMessage([], codexAstra),
+			errorMessage: "429 usage_limit_reached: You've reached your ChatGPT plan limit. Try again in ~9701 min.",
+		};
+		await recovery.recordUsageLimitOutcome(failed);
+
+		const retried = await recovery.handleRetryableError(failed);
+
+		// The outcome was live for the pre-await model, so the redeem lookup ran…
+		expect(maybeAutoRedeemReset).toHaveBeenCalled();
+		expect(retried).toBe(true);
+		const retryStart = events.find(event => event.type === "auto_retry_start");
+		expect(retryStart).toBeDefined();
+		// …but the model switched across the await, so the ~9701-minute Codex
+		// window must not hold back the Claude retry: generic backoff only.
+		expect(retryStart?.delayMs ?? Number.POSITIVE_INFINITY).toBeLessThan(60_000);
+		expect(noteCooldown).not.toHaveBeenCalled();
+	});
+
+	it("parses a naive reset stamp with the attributed provider's timezone", async () => {
+		const codex = getBundledModel("openai-codex", "gpt-6.1-sol");
+		if (!codex) throw new Error("Expected bundled openai-codex model gpt-6.1-sol");
+		// A delayed Z.AI-style error settling while the session runs Anthropic:
+		// the naive `reset at` stamp must be read as +08:00 (Z.AI's catalog
+		// policy), not as the active provider's interpretation. Parsing it as
+		// UTC would stretch the stored block by 8 hours.
+		const host = createHost(model, modelRegistry);
+		const recovery = new TurnRecovery(host);
+		const resetAt = new Date(Date.now() + 12 * 3_600_000);
+		const pad = (n: number) => String(n).padStart(2, "0");
+		const naiveStamp = `${resetAt.getUTCFullYear()}-${pad(resetAt.getUTCMonth() + 1)}-${pad(resetAt.getUTCDate())} ${pad(resetAt.getUTCHours())}:${pad(resetAt.getUTCMinutes())}:${pad(resetAt.getUTCSeconds())}`;
+		const message = `429 rate limit exceeded. Your limit will reset at ${naiveStamp}`;
+
+		const asZai = recovery.parseRetryAfterMsFromError(message, "zai");
+		const asActiveAnthropic = recovery.parseRetryAfterMsFromError(message);
+
+		// +08:00 reads the wall clock 8h earlier than UTC: both parse to a
+		// future instant, 8 hours apart, with the Z.AI reading shorter.
+		expect(asZai).toBeDefined();
+		expect(asActiveAnthropic).toBeDefined();
+		expect(asActiveAnthropic! - asZai!).toBeCloseTo(8 * 3_600_000, -4);
+		expect(asZai!).toBeLessThan(12 * 3_600_000);
 	});
 
 	it("allows replay-safe hard fallback and excludes committed text with a configured chain", () => {
