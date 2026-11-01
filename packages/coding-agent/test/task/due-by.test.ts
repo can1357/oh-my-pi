@@ -14,6 +14,15 @@
  *    warning.
  * 4. A child that finishes before its due-by produces no notice anywhere.
  * 5. A child that fails loudly is reported as today, with no due-by notice.
+ * 6. With the notices turned off (`task.dueMinutes: 0`), cancelling a child
+ *    leaves no unhandled rejection to take the host down.
+ * 7. Cancelling a blocking call stops its clock at once, even while the
+ *    cancelled child is still winding down.
+ * 8. An ancestor removed from the registry after dispatch does not cut the
+ *    chain: the escalation reaches the live agent above it.
+ * 9. A child started speculatively, while its call still streams, is on the
+ *    clock from its start, and adoption by the finished call adds no second
+ *    clock.
  *
  * Due-bys here are a fraction of a second and the clock runs on real timers:
  * the session's idle flush and the agent loop's interrupt poll, which carry
@@ -21,7 +30,9 @@
  * would change the delivery path under test.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import type { AgentToolCall, SpeculativeOperationSink } from "@oh-my-pi/pi-agent-core";
 import * as path from "node:path";
+import { setImmediate } from "node:timers/promises";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Context } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
@@ -36,6 +47,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
+import type { TaskLaunchSession } from "@oh-my-pi/pi-coding-agent/task/speculative-launch";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -47,6 +59,13 @@ const ESCALATION = "is taking more than twice as long as";
 const DUE_MINUTES = 0.005; // 300 ms
 const DUE_MS = DUE_MINUTES * 60_000;
 const TEST_TIMEOUT_MS = 20_000;
+/**
+ * For the cases that must produce no notice: a child that settles at once
+ * still takes several hundred milliseconds to settle on a loaded machine,
+ * which would pass the 300 ms due-by legitimately.
+ */
+const SLACK_DUE_MINUTES = 0.04; // 2.4 s
+const SLACK_DUE_MS = SLACK_DUE_MINUTES * 60_000;
 
 const zeroUsage = {
 	input: 0,
@@ -60,11 +79,21 @@ const zeroUsage = {
 /** Owner-visible record of one agent: every model request, and the UI notices of its session. */
 interface Observed {
 	session: AgentSession;
+	task: TaskTool;
 	contexts: Context[];
 	notices: Array<Extract<AgentSessionEvent, { type: "notice" }>>;
 	/** Resolves with the request time once a model request contains `needle`. */
 	seen(needle: string): Promise<number>;
 	saw(needle: string): boolean;
+	/** How many messages of the latest model request contain `needle`. */
+	count(needle: string): number;
+}
+
+function aborted(signal: AbortSignal | undefined): Promise<void> {
+	const { promise, resolve } = Promise.withResolvers<void>();
+	if (!signal || signal.aborted) resolve();
+	else signal.addEventListener("abort", () => resolve(), { once: true });
+	return promise;
 }
 
 function childResult(id: string, agent: string, overrides: Partial<SingleResult> = {}): SingleResult {
@@ -136,6 +165,7 @@ describe("subagent due-by", () => {
 		kind: AgentKind;
 		parentId?: string;
 		dispatch?: Record<string, unknown>;
+		settings?: Record<string, unknown>;
 	}): Promise<Observed> {
 		const model = createMockModel({ provider: "openai", id: "gpt-test" }).model;
 		const settings = Settings.isolated({
@@ -144,6 +174,7 @@ describe("subagent due-by", () => {
 			"launch.enabled": false,
 			"async.enabled": true,
 			"task.batch": false,
+			...options.settings,
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 		const registry = AgentRegistry.global();
@@ -214,6 +245,7 @@ describe("subagent due-by", () => {
 		});
 		return {
 			session,
+			task,
 			contexts,
 			notices,
 			seen: needle => {
@@ -223,6 +255,8 @@ describe("subagent due-by", () => {
 				return promise;
 			},
 			saw: needle => contexts.some(context => JSON.stringify(context.messages).includes(needle)),
+			count: needle =>
+				(contexts.at(-1)?.messages ?? []).filter(message => JSON.stringify(message).includes(needle)).length,
 		};
 	}
 
@@ -318,12 +352,18 @@ describe("subagent due-by", () => {
 		"produces no notice for a child that finishes before its due-by",
 		async () => {
 			const boss = await agent({ id: "Boss", kind: "main" });
-			const lead = await agent({ id: "Lead", kind: "sub", parentId: "Boss", dispatch: dispatch("task", "Quick") });
+			const lead = await agent({
+				id: "Lead",
+				kind: "sub",
+				parentId: "Boss",
+				dispatch: dispatch("task", "Quick", SLACK_DUE_MINUTES),
+			});
 			child.resolve(childResult("Quick", "task", { output: "QUICK_RESULT" }));
+			const dispatchedAt = Date.now();
 			await lead.session.prompt("dispatch");
 			await lead.seen("QUICK_RESULT");
 			// Wait past both stages of the clock (real time, see the file header).
-			await Bun.sleep(2 * DUE_MS + 500);
+			await Bun.sleep(Math.max(0, dispatchedAt + 2 * SLACK_DUE_MS + 500 - Date.now()));
 			await lead.session.waitForIdle();
 			for (const observed of [boss, lead]) {
 				expect(observed.saw(OWNER_NOTICE)).toBe(false);
@@ -337,16 +377,157 @@ describe("subagent due-by", () => {
 	it(
 		"reports a loudly failing child as before, with no due-by notice",
 		async () => {
-			const owner = await agent({ id: "Main", kind: "main", dispatch: dispatch("task", "Broken") });
+			const owner = await agent({
+				id: "Main",
+				kind: "main",
+				dispatch: dispatch("task", "Broken", SLACK_DUE_MINUTES),
+			});
 			child.resolve(childResult("Broken", "task", { exitCode: 1, error: "LOUD_FAILURE", output: "" }));
+			const dispatchedAt = Date.now();
 			await owner.session.prompt("dispatch");
 			// Today's loud path: the owner reads the failed result as a background-job notice.
 			await owner.seen('<task-result id=\\"Broken\\" agent=\\"task\\" status=\\"failed (exit 1)\\"');
 			expect(manager.getJob("Broken")?.status).toBe("failed");
-			await Bun.sleep(2 * DUE_MS + 500);
+			await Bun.sleep(Math.max(0, dispatchedAt + 2 * SLACK_DUE_MS + 500 - Date.now()));
 			await owner.session.waitForIdle();
 			expect(owner.saw(OWNER_NOTICE)).toBe(false);
 			expect(owner.notices.filter(notice => notice.message.includes(ESCALATION))).toEqual([]);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"leaves no unhandled rejection when a child is cancelled with the notices turned off",
+		async () => {
+			const rejections: unknown[] = [];
+			const onRejection = (reason: unknown) => rejections.push(reason);
+			process.on("unhandledRejection", onRejection);
+			try {
+				const { dueMinutes: _stated, ...unstated } = dispatch("task", "Quiet");
+				const owner = await agent({
+					id: "Main",
+					kind: "main",
+					dispatch: unstated,
+					settings: { "task.dueMinutes": 0 },
+				});
+				await owner.session.prompt("dispatch");
+				await childStarted.promise;
+				expect(manager.cancel("Quiet")).toBe(true);
+				// Unhandled rejections are reported once the microtask queue drains.
+				await setImmediate();
+				await setImmediate();
+				child.resolve(childResult("Quiet", "task"));
+				await manager.getJob("Quiet")?.promise;
+				await setImmediate();
+				expect(rejections).toEqual([]);
+				expect(manager.getJob("Quiet")?.status).toBe("cancelled");
+				expect(owner.saw(OWNER_NOTICE)).toBe(false);
+			} finally {
+				process.off("unhandledRejection", onRejection);
+			}
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"stops the clock when a blocking call is cancelled, while its child is still winding down",
+		async () => {
+			const boss = await agent({ id: "Boss", kind: "main" });
+			const lead = await agent({ id: "Lead", kind: "sub", parentId: "Boss", dispatch: dispatch("gate", "Gate") });
+			const run = lead.session.prompt("dispatch").catch(() => {});
+			const childSignal = await childStarted.promise;
+			const stopping = lead.session.abort();
+			await aborted(childSignal);
+			// The mocked child ignores the abort and has not returned; wait past
+			// both stages of the clock (real time, see the file header).
+			await Bun.sleep(2 * DUE_MS + 500);
+			expect(boss.saw(ESCALATION)).toBe(false);
+			expect(boss.notices).toEqual([]);
+			expect(lead.notices.filter(notice => notice.message.includes(ESCALATION))).toEqual([]);
+			child.resolve(childResult("Gate", "gate"));
+			await stopping;
+			await run;
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"escalates past an ancestor removed from the registry to the live agent above it",
+		async () => {
+			const boss = await agent({ id: "Boss", kind: "main" });
+			const registry = AgentRegistry.global();
+			registry.register({ id: "Mid", displayName: "Mid", kind: "sub", parentId: "Boss", session: null });
+			const lead = await agent({ id: "Lead", kind: "sub", parentId: "Mid", dispatch: dispatch("gate", "Gate") });
+			const run = lead.session.prompt("dispatch");
+			await childStarted.promise;
+			registry.unregister("Mid");
+
+			await boss.seen(ESCALATION);
+			expect(JSON.stringify(boss.contexts.at(-1)!.messages)).toContain("dispatched by `Lead`");
+			expect(lead.notices.filter(notice => notice.message.includes(ESCALATION))).toEqual([]);
+			child.resolve(childResult("Gate", "gate"));
+			await run;
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"names the agent the escalation will reach, and says the owner's notice was queued, not read",
+		async () => {
+			const boss = await agent({ id: "Boss", kind: "main" });
+			const lead = await agent({ id: "Lead", kind: "sub", parentId: "Boss", dispatch: dispatch("task", "Slow") });
+			await lead.session.prompt("dispatch");
+			await childStarted.promise;
+
+			await lead.seen(OWNER_NOTICE);
+			expect(JSON.stringify(lead.contexts.at(-1)!.messages)).toContain(
+				"the nearest live agent above you is told (now `Boss`)",
+			);
+			await boss.seen(ESCALATION);
+			const escalation = JSON.stringify(boss.contexts.at(-1)!.messages);
+			expect(escalation).toContain("A notice for `Lead` was queued at");
+			expect(escalation).not.toContain("was told");
+			child.resolve(childResult("Slow", "task", { output: "SLOW_RESULT" }));
+			await lead.seen("SLOW_RESULT");
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"starts the clock of a speculatively launched child at its launch, and adoption adds no second clock",
+		async () => {
+			const owner = await agent({ id: "Main", kind: "main", settings: { "task.batch": true } });
+			const sink: SpeculativeOperationSink = {
+				maxInFlight: 2,
+				admit: async () => undefined,
+				authorizeLaunch: async () => ({ allowed: true }),
+				close: () => {},
+			};
+			const toolCall: AgentToolCall = { type: "toolCall", id: "spec-tc", name: "task", arguments: {} };
+			const args = { context: "ctx", tasks: [dispatch("task", "Spec")] };
+			const launch = (await owner.task.speculation.stream?.open({
+				coordinator: sink,
+				parentToolCallId: toolCall.id,
+			})) as TaskLaunchSession | undefined;
+			if (!launch) throw new Error("expected a task launch session");
+			const launchedAt = Date.now();
+			// The item has closed; the call itself is still streaming.
+			const json = JSON.stringify(args);
+			launch.update(toolCall, json.slice(0, json.length - 2));
+			await childStarted.promise;
+
+			const toldAt = await owner.seen(OWNER_NOTICE);
+			expect(toldAt - launchedAt).toBeGreaterThanOrEqual(DUE_MS);
+			launch.finalize({ toolCall, args });
+			await owner.task.execute(toolCall.id, args);
+			expect(executorModule.runSubprocess).toHaveBeenCalledTimes(1);
+			// Past both stages of any clock adoption might have started.
+			await Bun.sleep(2 * DUE_MS + 500);
+			await owner.session.waitForIdle();
+			expect(owner.count(OWNER_NOTICE)).toBe(1);
+			expect(owner.notices.filter(notice => notice.message.includes(ESCALATION))).toHaveLength(1);
+			child.resolve(childResult("Spec", "task"));
+			await manager.getJob("Spec")?.promise;
 		},
 		TEST_TIMEOUT_MS,
 	);

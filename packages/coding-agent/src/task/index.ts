@@ -25,7 +25,7 @@ import type {
 	ToolSpeculationPolicy,
 } from "@oh-my-pi/pi-agent-core";
 import type { Usage } from "@oh-my-pi/pi-ai";
-import { $env, formatDuration, isRecord, logger, prompt, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
+import { $env, formatDuration, isRecord, logger, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "..";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { Settings } from "../config/settings";
@@ -62,6 +62,7 @@ import { type DiscoveryResult, discoverAgents } from "./discovery";
 import { createEvalCustomTools, describeEvalTools, evalToolsEnabled } from "./eval-tools";
 import { getPerCallModelAdvertisement, type PerCallModelAdvertisement } from "./model-approval";
 import { generateTaskName, sanitizeAgentId } from "./name-generator";
+import { ancestorsOf } from "./due-by";
 import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
 import { renderResult, renderCall as renderTaskCall } from "@oh-my-pi/pi-tui/tools/task";
@@ -1016,7 +1017,14 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		return manager;
 	}
 
-	/** Start one spawn's subagent run behind the session semaphore. */
+	/**
+	 * Start one spawn's subagent run behind the session semaphore, and its
+	 * due-by clock with it: every path (inline, background job, speculative
+	 * launch while the call streams) creates its run here, so the clock starts
+	 * when the child does, with the due-by read now. The dispatcher's
+	 * `dueMinutes`, else `task.dueMinutes`; the clock stops when the run settles
+	 * or is cancelled. Nothing here stops or cancels the child.
+	 */
 	#launch(spawn: {
 		toolCallId: string;
 		params: SpawnParams;
@@ -1024,7 +1032,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		agentId?: string;
 		detached: boolean;
 	}): SpawnRun {
-		return new SpawnRun(
+		const spawnRun = new SpawnRun(
 			this.#permit,
 			run =>
 				this.#runSpawn(
@@ -1041,6 +1049,24 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				),
 			{ agentId: spawn.agentId, detached: spawn.detached },
 		);
+		if (spawn.agentId !== undefined) {
+			const registry = AgentRegistry.global();
+			const ownerId = this.session.getAgentId?.() ?? MAIN_AGENT_ID;
+			const minutes = spawn.params.dueMinutes ?? cfgTaskDueMinutes.get(this.session.settings);
+			registry.dueBy.arm(
+				{
+					childId: spawn.agentId,
+					ownerId,
+					ancestors: ancestorsOf(registry, ownerId),
+					agent: spawn.params.agent ?? "task",
+					dispatchedAt: Date.now(),
+					dueMs: minutes * 60_000,
+					stated: spawn.params.dueMinutes !== undefined,
+				},
+				{ settled: spawnRun.result, signal: spawnRun.signal },
+			);
+		}
+		return spawnRun;
 	}
 
 	/**
@@ -1600,7 +1626,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				transcriptAvailable: aborted ? await hasResolvableTranscript(agentId) : true,
 			})}`;
 		};
-		const jobId = manager.register(
+		return manager.register(
 			"task",
 			agentId,
 			async ({ jobId, signal: runSignal, reportProgress, markRunning }) => {
@@ -1772,33 +1798,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				},
 			},
 		);
-		// Cancelling the job settles it as far as the owner is concerned, even
-		// while a run that ignores the abort is still winding down.
-		const job = manager.getJob(jobId);
-		this.#armDueBy(agentId, spawnParams, job ? untilAborted(job.abortController.signal, job.promise) : undefined);
-		return jobId;
-	}
-
-	/**
-	 * Start one spawn's due-by clock at dispatch: the dispatcher's `dueMinutes`,
-	 * else `task.dueMinutes`. The owner is told when the child runs past it,
-	 * the owner's owner at twice the time; the clock stops once `settled`
-	 * settles. Nothing here stops or cancels the child.
-	 */
-	#armDueBy(childId: string | undefined, spawn: SpawnParams, settled: Promise<unknown> | undefined): void {
-		if (childId === undefined || settled === undefined) return;
-		const minutes = spawn.dueMinutes ?? cfgTaskDueMinutes.get(this.session.settings);
-		AgentRegistry.global().dueBy.arm(
-			{
-				childId,
-				ownerId: this.session.getAgentId?.() ?? MAIN_AGENT_ID,
-				agent: spawn.agent ?? "task",
-				dispatchedAt: Date.now(),
-				dueMs: minutes * 60_000,
-				stated: spawn.dueMinutes !== undefined,
-			},
-			settled,
-		);
 	}
 
 	/**
@@ -1818,17 +1817,15 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	): Promise<AgentToolResult<TaskToolDetails>> {
 		if (spawns.length === 1) {
 			const spawn = spawns[0]!;
-			const spawnParams = spawnParamsFor(params, spawn.item, defaultAgent);
 			const run =
 				spawn.run ??
 				this.#launch({
 					toolCallId,
-					params: spawnParams,
+					params: spawnParamsFor(params, spawn.item, defaultAgent),
 					index: spawn.index,
 					agentId: spawn.preAllocatedId,
 					detached: false,
 				});
-			this.#armDueBy(spawn.preAllocatedId ?? run.identity.agentId, spawnParams, run.result);
 			run.attach({ signal, onUpdate });
 			return await run.result;
 		}
@@ -1898,17 +1895,15 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			spawns,
 			spawns.length,
 			async (spawn, _position, workerSignal) => {
-				const spawnParams = spawnParamsFor(params, spawn.item, defaultAgent);
 				const run =
 					spawn.run ??
 					this.#launch({
 						toolCallId,
-						params: spawnParams,
+						params: spawnParamsFor(params, spawn.item, defaultAgent),
 						index: spawn.index,
 						agentId: spawn.preAllocatedId,
 						detached: false,
 					});
-				this.#armDueBy(spawn.preAllocatedId ?? run.identity.agentId, spawnParams, run.result);
 				run.attach({
 					signal: workerSignal,
 					onUpdate: onItemProgress

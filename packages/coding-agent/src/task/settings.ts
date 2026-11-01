@@ -458,13 +458,13 @@ export const cfgTaskDueMinutes = register({
 		group: "Subagents",
 		label: "Subagent Due-By",
 		description:
-			"Minutes after dispatch by which a subagent is expected to finish when the dispatcher sets no `dueMinutes`. Past it, the agent that dispatched it gets a notice that it is taking longer than expected; at twice the time, that agent's own dispatcher is told (for the top-level session, a warning in the UI). Nothing is stopped. 0 disables the notices.",
+			"Minutes after dispatch by which a subagent is expected to finish when the dispatcher sets no `dueMinutes`. Past it, the agent that dispatched it gets a notice that it is taking longer than expected; at twice the time, the nearest live agent above that one is told (or the person, through a warning in the UI). Nothing is stopped. 0 disables the notices for dispatches that set no `dueMinutes`.",
 		options: [
 			{ value: "0", label: "Disabled" },
-			{ value: "30", label: "30 minutes" },
 			{ value: "60", label: "1 hour" },
-			{ value: "120", label: "2 hours", description: "Default" },
+			{ value: "120", label: "2 hours" },
 			{ value: "240", label: "4 hours" },
+			{ value: "360", label: "6 hours", description: "Default" },
 		],
 	},
 });

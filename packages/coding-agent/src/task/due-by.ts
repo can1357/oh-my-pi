@@ -16,19 +16,24 @@ import { MAIN_AGENT_ID } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
 import { formatDuration, logger, prompt } from "@oh-my-pi/pi-utils";
 import escalationTemplate from "../prompts/tools/subagent-overdue-escalation.md" with { type: "text" };
 import ownerTemplate from "../prompts/tools/subagent-overdue.md" with { type: "text" };
-import type { AgentRef, AgentRegistry } from "../registry/agent-registry";
+import type { AgentRegistry } from "../registry/agent-registry";
 import type { CustomMessage } from "../session/messages";
 
 /**
  * Due-by, in minutes, for a dispatch that names none (`task.dueMinutes`).
  *
- * Measured over one week of a busy multi-agent workload (22,531 completed
- * `task` runs, 2026-10-24 to 2026-10-31): median 18 min, p90 115 min. On a
- * median day 9% of runs took 2 h or longer and 2.5% took 4 h or longer. So
- * with this default, an owner that names no due-by hears about roughly one
- * normal run in ten, and its own owner about one in forty.
+ * Chosen so a dispatcher that names nothing is rarely told about a job that
+ * behaves as intended. Over one week of a busy multi-agent workload
+ * (2026-10-24 to 2026-10-31), subagent sessions (29,769) ran a median 19.7 min
+ * and a p90 of 198 min; 14.6% ran 2 h or more, 8.5% 4 h, 5.8% 6 h and 2.4%
+ * 12 h. Session length includes idle follow-up turns, so it overstates run
+ * length: over the same week, completed `task` calls (22,531) passed 6 h in
+ * 1.3% and 12 h in 0.2%. So with 6 h, an owner that names no due-by is told
+ * about at most one normal job in seventeen, and its own owner, at 12 h,
+ * about one in forty. A 2 h default would have told the owner about one in
+ * seven. Work expected to finish sooner, or to run longer, names its own.
  */
-export const DEFAULT_TASK_DUE_MINUTES = 120;
+export const DEFAULT_TASK_DUE_MINUTES = 360;
 
 /** Custom message type of a due-by notice. */
 export const SUBAGENT_OVERDUE_MESSAGE_TYPE = "subagent-overdue";
@@ -42,12 +47,38 @@ export interface SubagentDispatch {
 	childId: string;
 	/** Registry id of the agent that dispatched it. */
 	ownerId: string;
+	/**
+	 * The owner's own dispatchers, nearest first, read from the registry at
+	 * dispatch. The escalation goes to the first of them still live, so an
+	 * ancestor removed from the registry later does not cut the chain.
+	 */
+	ancestors: readonly string[];
 	/** Agent type of the child, for the notice. */
 	agent: string;
 	dispatchedAt: number;
 	dueMs: number;
 	/** The dispatcher named the due-by, rather than taking the default. */
 	stated: boolean;
+}
+
+/** What ends a watch: the run settling, or the run being cancelled. */
+export interface SubagentRunWatch {
+	/** Settles (either way) when the run ends; observed here, never left unhandled. */
+	settled: Promise<unknown>;
+	/** Aborted when the run is cancelled, even while it is still winding down. */
+	signal: AbortSignal;
+}
+
+/** The owner's dispatchers, nearest first, as the registry records them now. */
+export function ancestorsOf(registry: AgentRegistry, ownerId: string): string[] {
+	const ancestors: string[] = [];
+	const seen = new Set<string>([ownerId]);
+	for (let id = registry.get(ownerId)?.parentId; id !== undefined && !seen.has(id);) {
+		seen.add(id);
+		ancestors.push(id);
+		id = registry.get(id)?.parentId;
+	}
+	return ancestors;
 }
 
 /** One rendered notice queued for an agent; dropped unread once the child settles. */
@@ -84,22 +115,41 @@ export class SubagentDueClock {
 	}
 
 	/**
-	 * Watch one dispatch until `settled` settles (fulfilled or rejected). A
-	 * non-positive due-by arms nothing.
+	 * Watch one dispatch until its run settles or is cancelled. A non-positive
+	 * due-by arms nothing. Timers count on the monotonic clock, so a wall-clock
+	 * step neither advances nor delays them.
 	 */
-	arm(dispatch: SubagentDispatch, settled: Promise<unknown>): void {
-		if (!(dispatch.dueMs > 0)) return;
+	arm(dispatch: SubagentDispatch, run: SubagentRunWatch): void {
 		let done = false;
-		let ownerTold = false;
 		const own = new Set<NodeJS.Timeout>();
-		const at = (when: number, fire: () => void): void => {
-			const delay = when - Date.now();
+		const disarm = () => {
+			if (done) return;
+			done = true;
+			for (const timer of own) {
+				clearTimeout(timer);
+				this.#timers.delete(timer);
+			}
+			own.clear();
+			run.signal.removeEventListener("abort", disarm);
+		};
+		// Observed whether or not the clock arms: a rejection here must never
+		// reach the host as unhandled.
+		run.settled.then(disarm, disarm);
+		if (!(dispatch.dueMs > 0) || run.signal.aborted) {
+			disarm();
+			return;
+		}
+		run.signal.addEventListener("abort", disarm, { once: true });
+		const start = performance.now() - Math.max(0, Date.now() - dispatch.dispatchedAt);
+		let ownerQueued = false;
+		const at = (offsetMs: number, fire: () => void): void => {
+			const delay = start + offsetMs - performance.now();
 			const timer = setTimeout(
 				() => {
 					own.delete(timer);
 					this.#timers.delete(timer);
 					if (done) return;
-					if (delay > MAX_TIMER_MS) at(when, fire);
+					if (delay > MAX_TIMER_MS) at(offsetMs, fire);
 					else fire();
 				},
 				Math.min(Math.max(0, delay), MAX_TIMER_MS),
@@ -109,21 +159,12 @@ export class SubagentDueClock {
 			this.#timers.add(timer);
 		};
 		const isSettled = () => done;
-		at(dispatch.dispatchedAt + dispatch.dueMs, () => {
-			ownerTold = this.#tellOwner(dispatch, isSettled);
+		at(dispatch.dueMs, () => {
+			ownerQueued = this.#tellOwner(dispatch, isSettled);
 		});
-		at(dispatch.dispatchedAt + 2 * dispatch.dueMs, () => {
-			this.#escalate(dispatch, ownerTold, isSettled);
+		at(2 * dispatch.dueMs, () => {
+			this.#escalate(dispatch, ownerQueued, isSettled);
 		});
-		const disarm = () => {
-			done = true;
-			for (const timer of own) {
-				clearTimeout(timer);
-				this.#timers.delete(timer);
-			}
-			own.clear();
-		};
-		settled.then(disarm, disarm);
 	}
 
 	/** Clear every pending timer. */
@@ -147,7 +188,7 @@ export class SubagentDueClock {
 		};
 	}
 
-	/** Returns whether a live owner session received the notice. */
+	/** Returns whether a notice was queued for a live owner session (queued, not read). */
 	#tellOwner(dispatch: SubagentDispatch, isSettled: () => boolean): boolean {
 		const owner = this.#registry.get(dispatch.ownerId);
 		if (!owner?.session) {
@@ -160,36 +201,33 @@ export class SubagentDueClock {
 		const text = prompt.render(ownerTemplate, {
 			...this.#childView(dispatch, Date.now()),
 			escalateAt: isoMinute(dispatch.dispatchedAt + 2 * dispatch.dueMs),
-			escalateTo: owner.parentId,
+			// Who the escalation would reach if it fired now: the same walk #escalate makes.
+			hasAncestors: dispatch.ancestors.length > 0,
+			escalateTo: dispatch.ancestors.find(id => this.#registry.get(id)?.session),
 		});
 		owner.session.notifySubagentOverdue({ childId: dispatch.childId, stage: "owner", text, isSettled });
 		return true;
 	}
 
-	#escalate(dispatch: SubagentDispatch, ownerTold: boolean, isSettled: () => boolean): void {
+	#escalate(dispatch: SubagentDispatch, ownerQueued: boolean, isSettled: () => boolean): void {
 		const now = Date.now();
 		const owner = this.#registry.get(dispatch.ownerId);
 		const text = prompt.render(escalationTemplate, {
 			...this.#childView(dispatch, now),
 			ownerBlocked: !!owner?.session && this.#registry.awaits.blocksOn(dispatch.ownerId, dispatch.childId, now),
-			ownerTold,
+			ownerQueued,
 		});
 		// The owner's owner is the nearest live agent above the owner; past the
 		// top-level session it is the person at that session's UI.
-		const seen = new Set<string>([dispatch.ownerId]);
-		let top: AgentRef | undefined = owner;
-		for (let id = owner?.parentId; id !== undefined && !seen.has(id);) {
-			seen.add(id);
-			const ref = this.#registry.get(id);
-			if (!ref) break;
-			if (ref.session) {
-				ref.session.notifySubagentOverdue({ childId: dispatch.childId, stage: "escalation", text, isSettled });
-				return;
-			}
-			top = ref;
-			id = ref.parentId;
+		for (const id of dispatch.ancestors) {
+			const session = this.#registry.get(id)?.session;
+			if (!session) continue;
+			session.notifySubagentOverdue({ childId: dispatch.childId, stage: "escalation", text, isSettled });
+			return;
 		}
-		const session = top?.session ?? this.#registry.get(MAIN_AGENT_ID)?.session;
+		// No live ancestor: the person at the main session's UI, or at the owner's own when it is the top.
+		const session =
+			(dispatch.ancestors.length > 0 ? this.#registry.get(MAIN_AGENT_ID)?.session : undefined) ?? owner?.session;
 		session?.emitNotice("warning", text, SUBAGENT_OVERDUE_MESSAGE_TYPE);
 	}
 }
