@@ -1,5 +1,6 @@
 import { popLoopPhase, pushLoopPhase, withLoopPhase } from "@oh-my-pi/pi-utils";
 import {
+	DENSE_CANDIDATE_LIMIT,
 	importedWeight,
 	inferredWeight,
 	normalizedRecallWeights,
@@ -22,6 +23,7 @@ import { adjustWeights, classifyIntent } from "../query-intent";
 import { getSynonyms, STOP_WORDS as QUERY_STOP_WORDS } from "../synonyms";
 import { extractTemporal } from "../temporal-parser";
 import { cosineSimilarity } from "../vector-math";
+import { cachedEmbeddings } from "./embedding-cache";
 import type { BeamMemoryState, RecallEnhancedOptions, RecallOptions, RecallResult } from "./types";
 
 type DbValue = string | number | null | Uint8Array;
@@ -52,6 +54,8 @@ type CandidateSignals = {
 	fts: number;
 	ftsMatched: boolean;
 	dense: number;
+	/** The row has a stored vector that was scored against the query, so `dense` is a real score even at 0. */
+	embedded: boolean;
 	keyword: number;
 	candidateSource: "fts" | "vec" | "fallback";
 };
@@ -572,24 +576,6 @@ function normalizeRanks(rows: readonly Row[], key: string): Map<string | number,
 	return out;
 }
 
-function parseEmbedding(raw: unknown): number[] | null {
-	if (typeof raw !== "string") return null;
-	try {
-		const parsed = JSON.parse(raw) as unknown;
-		if (!Array.isArray(parsed)) return null;
-		// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
-		const vector = new Array<number>(parsed.length);
-		for (let i = 0; i < parsed.length; i += 1) {
-			const value = Number(parsed[i]);
-			if (!Number.isFinite(value)) return null;
-			vector[i] = value;
-		}
-		return vector;
-	} catch {
-		return null;
-	}
-}
-
 function vectorSimilarities(
 	beam: BeamMemoryState,
 	memoryIds: readonly string[],
@@ -604,18 +590,8 @@ function vectorSimilarities(
 	) {
 		return out;
 	}
-	for (let offset = 0; offset < memoryIds.length; offset += 500) {
-		const chunk = memoryIds.slice(offset, offset + 500);
-		const rows = queryAll(
-			beam,
-			`SELECT memory_id, embedding_json FROM memory_embeddings WHERE memory_id IN (${placeholders(chunk.length)})`,
-			chunk,
-		);
-		for (const row of rows) {
-			const vector = parseEmbedding(row.embedding_json);
-			const id = asString(row.memory_id);
-			if (vector !== null && id.length > 0) out.set(id, Math.max(0, cosineSimilarity(queryEmbedding, vector)));
-		}
+	for (const [id, vector] of cachedEmbeddings(beam.db, memoryIds)) {
+		out.set(id, Math.max(0, cosineSimilarity(queryEmbedding, vector)));
 	}
 	return out;
 }
@@ -628,7 +604,7 @@ function allVisibleIds(
 	const { where, params } = buildWhere(beam, "", options);
 	const rows = queryAll(beam, `SELECT id FROM ${table} WHERE ${where} ORDER BY timestamp DESC LIMIT ?`, [
 		...params,
-		DEFAULT_LIMIT,
+		DENSE_CANDIDATE_LIMIT,
 	]);
 	return rows.map(row => asString(row.id)).filter(Boolean);
 }
@@ -668,6 +644,7 @@ function fetchCandidates(
 				fts,
 				ftsMatched,
 				dense,
+				embedded: vecScores.has(id),
 				keyword: 0,
 				candidateSource: ftsMatched ? "fts" : dense > 0 ? "vec" : "fallback",
 			},
@@ -691,7 +668,7 @@ function fallbackCandidates(
 	return rows.map(row => ({
 		row,
 		tierLabel,
-		signals: { fts: 0, ftsMatched: false, dense: 0, keyword: 0, candidateSource: "fallback" },
+		signals: { fts: 0, ftsMatched: false, dense: 0, embedded: false, keyword: 0, candidateSource: "fallback" },
 	}));
 }
 
@@ -724,7 +701,10 @@ function scoreCandidate(
 	} else {
 		const kwShare = (1 - importanceWeight) * 0.6;
 		baseScore = keyword * kwShare + importance * importanceWeight + keyword * keyword * 0.08;
-		if (candidate.signals.dense > 0) baseScore = baseScore * 0.8 + candidate.signals.dense * 0.2;
+		// An equal share: at 0.2, rows that only repeat the query's words outranked rows that answer it by meaning.
+		// Only rows with a stored vector are blended (a similarity of 0 counts): a row whose embedding has not landed
+		// yet, fresh from remember() or mid re-embed after a model change, keeps its keyword score rather than half.
+		if (candidate.signals.embedded) baseScore = baseScore * 0.5 + candidate.signals.dense * 0.5;
 	}
 	let score = baseScore * (0.7 + 0.3 * decay);
 	const temporalWeight = options.temporalWeight ?? 0;
@@ -790,7 +770,7 @@ function scoreCandidate(
 function explain(tierLabel: TierLabel, signals: CandidateSignals, lexical: number, temporalScore: number): string {
 	const parts: string[] = [tierLabel, signals.candidateSource];
 	if (lexical > 0) parts.push(`keyword=${round4(lexical)}`);
-	if (signals.dense > 0) parts.push(`dense=${round4(signals.dense)}`);
+	if (signals.embedded) parts.push(`dense=${round4(signals.dense)}`);
 	if (temporalScore > 0) parts.push(`temporal=${round4(temporalScore)}`);
 	return parts.join(" ");
 }
@@ -909,6 +889,9 @@ function collectMemoryCandidates(
 					.map(([id]) => id),
 			]),
 		];
+		// Keyword hits older than the scored window are candidates too: score their vectors so they blend like the rest.
+		const outside = wmIds.filter(id => !wmVec.has(id));
+		for (const [id, similarity] of vectorSimilarities(beam, outside, queryEmbedding)) wmVec.set(id, similarity);
 		const emIds = [...emVec.entries()]
 			.sort((a, b) => b[1] - a[1])
 			.slice(0, limit)
@@ -986,6 +969,32 @@ export async function recall(
 		if (temporalOptions.updateRecallCounts !== false) updateRecallCounts(beam, finalResults, temporalOptions);
 		return finalResults;
 	});
+}
+
+const WARM_BATCH_IDS = 100;
+
+/**
+ * Decodes into the embedding cache the vectors a recall with `options` would score, so recall reads none of them
+ * from the database. Yields before each database access and stops when `signal` aborts or a transaction opens,
+ * leaving the rest to demand loading. Changes no rows and no recall counts.
+ */
+export async function warmRecallCache(
+	beam: BeamMemoryState,
+	options: RecallOptionsInternal,
+	signal: AbortSignal,
+): Promise<void> {
+	const tables: readonly ("working_memory" | "episodic_memory")[] =
+		options.includeWorking === false ? ["episodic_memory"] : ["working_memory", "episodic_memory"];
+	for (const table of tables) {
+		await Bun.sleep(0);
+		if (signal.aborted || beam.db.inTransaction) return;
+		const ids = allVisibleIds(beam, table, options);
+		for (let offset = 0; offset < ids.length; offset += WARM_BATCH_IDS) {
+			await Bun.sleep(0);
+			if (signal.aborted || beam.db.inTransaction) return;
+			cachedEmbeddings(beam.db, ids.slice(offset, offset + WARM_BATCH_IDS));
+		}
+	}
 }
 
 function diversifyByCoverage(

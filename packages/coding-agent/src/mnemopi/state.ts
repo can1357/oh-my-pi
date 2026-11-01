@@ -265,6 +265,7 @@ export class MnemopiSessionState {
 	unsubscribe?: () => void;
 	#retentionCursorLoaded = false;
 	#recallGeneration = 0;
+	#embeddingWarmup?: AbortController;
 
 	constructor(options: MnemopiSessionStateOptions) {
 		this.sessionId = options.sessionId;
@@ -868,6 +869,31 @@ export class MnemopiSessionState {
 	}
 
 	/**
+	 * Decodes the vectors auto-recall will read, in the background, so the first recall finds them cached. Never
+	 * awaited: startup and recall do not wait for it, and recall still decodes whatever the warmup has not reached.
+	 */
+	startEmbeddingWarmup(): void {
+		if (this.aliasOf || !this.config.autoRecall || this.config.providerOptions.noEmbeddings === true) return;
+		if (this.#embeddingWarmup) return;
+		const controller = new AbortController();
+		this.#embeddingWarmup = controller;
+		void this.#warmEmbeddings(controller.signal).catch(error => {
+			this.#logLifecycleFailure(
+				"embedding warmup",
+				this.scoped.recall.map(target => target.bank),
+				error,
+			);
+		});
+	}
+
+	async #warmEmbeddings(signal: AbortSignal): Promise<void> {
+		for (const target of this.scoped.recall) {
+			if (signal.aborted) return;
+			await target.memory.beam.warmRecallCache({ channelId: target.bank }, signal);
+		}
+	}
+
+	/**
 	 * Capture the current transcript by default, drain in-flight fact extraction,
 	 * and optionally run beam consolidation on every owned bank.
 	 * The explicit `/memory enqueue` path
@@ -952,6 +978,8 @@ export class MnemopiSessionState {
 
 	async dispose(options: { consolidate?: boolean; timeoutMs?: number; retain?: boolean } = {}): Promise<void> {
 		this.#recallGeneration++;
+		// Stop decoding before anything else: the close below may wait on consolidation.
+		this.#embeddingWarmup?.abort();
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
 		if (this.aliasOf) return;
