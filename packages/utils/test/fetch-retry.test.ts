@@ -208,6 +208,22 @@ describe("fetchWithRetry", () => {
 
 		expect(error.message).toBe("Network error: getaddrinfo ENOTFOUND api.openai.com");
 	});
+
+	it("returns a 429 at once when its duplicate Retry-After lines, arriving joined, name a wait past maxDelayMs", async () => {
+		let calls = 0;
+		const response = await fetchWithRetry("https://example.invalid/joined-retry-after", {
+			fetch: async () => {
+				calls++;
+				return new Response("rate limited", { status: 429, headers: { "retry-after": "9, 120" } });
+			},
+			maxAttempts: 3,
+		});
+
+		// 120 s is past the default 60 s cap: the caller fails fast instead of
+		// retrying on a 500 ms backoff the server's 120 s forbids.
+		expect(calls).toBe(1);
+		expect(response.status).toBe(429);
+	});
 });
 
 describe("extractRetryHint", () => {
@@ -421,4 +437,16 @@ describe("extractRetryHint", () => {
 			expect(Math.abs(hint! - expected)).toBeLessThan(1000);
 		});
 	});
+
+	it.each([
+		["retry-after", "9, 120", 120_000],
+		["retry-after-ms", "100, 9000", 9_000],
+	] as [string, string, number][])(
+		"reads the longest part of a joined %s header (%s), as longestRetryHint does",
+		(name, value, expected) => {
+			const headers = new Headers({ [name]: value });
+			expect(extractRetryHint(headers)).toBe(expected);
+			expect(longestRetryHint(headers)).toBe(expected);
+		},
+	);
 });

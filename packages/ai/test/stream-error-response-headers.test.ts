@@ -24,7 +24,7 @@ import * as http2 from "node:http2";
 import type { Socket } from "node:net";
 import { stream } from "@oh-my-pi/pi-ai/stream";
 import type { Api, AssistantMessage, Context, Model } from "@oh-my-pi/pi-ai/types";
-import { getFailureRetryAfterMs, providerRetryWaitMs, transportRetryBounds } from "@oh-my-pi/pi-ai/utils/retry-after";
+import { getFailureRetryAfterMs, providerRetryWaitMs, retryWaitBounds } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { GetUserJwtResponseSchema } from "@oh-my-pi/pi-catalog/discovery/devin-proto";
 import { create, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
@@ -801,6 +801,21 @@ describe("transport retries of a refusal keep to the caller's maxRetryDelayMs", 
 		),
 		cut: false,
 	});
+	/**
+	 * A usage-limit 429, which no provider loop above the transport retries, so
+	 * every request after the first is the transport's; its body names no wait,
+	 * so only `headers` state one.
+	 */
+	const rateLimited = (headers: Record<string, string>): StreamReply => ({
+		status: 429,
+		headers: { "content-type": "application/json", ...headers },
+		body: encoder.encode(
+			JSON.stringify({
+				error: { type: "rate_limit_error", code: "usage_limit_reached", message: "usage_limit_reached" },
+			}),
+		),
+		cut: false,
+	});
 
 	for (const name of TRANSPORT_ROUTES) {
 		it(`${name}: a 429 whose Retry-After exceeds the cap is surfaced after one request`, async () => {
@@ -822,6 +837,31 @@ describe("transport retries of a refusal keep to the caller's maxRetryDelayMs", 
 			expect(streamRequests).toBeGreaterThan(1);
 			expect(message.errorStatus).toBe(429);
 			expect(message.errorRetryAfterMs).toBe(10);
+		}, 30_000);
+
+		it(`${name}: a 429 saying Retry-After: 0 beside a two-hour window reset is retried at once under a 60 s cap`, async () => {
+			const { message, streamRequests } = await runAgainst(
+				provider(name),
+				[rateLimited({ "retry-after": "0", "x-ratelimit-reset": "7200" })],
+				{ maxRetryDelayMs: 60_000 },
+			);
+
+			expect(streamRequests).toBeGreaterThan(1);
+			expect(message.errorStatus).toBe(429);
+			// The server asked for an immediate retry; the layer above must not wait two hours.
+			expect(message.errorRetryAfterMs).toBe(0);
+		}, 30_000);
+
+		it(`${name}: a 429 whose duplicate Retry-After lines arrive joined ("9, 120") is read as 120 s and surfaced under a 60 s cap`, async () => {
+			const { message, streamRequests } = await runAgainst(
+				provider(name),
+				[rateLimited({ "retry-after": "9, 120" })],
+				{ maxRetryDelayMs: 60_000 },
+			);
+
+			expect(streamRequests).toBe(1);
+			expect(message.errorStatus).toBe(429);
+			expect(message.errorRetryAfterMs).toBe(120_000);
 		}, 30_000);
 	}
 });
@@ -849,40 +889,41 @@ describe("Codex structured protocol headers keep precedence over the HTTP respon
 	}, 30_000);
 });
 
-describe("transportRetryBounds", () => {
-	const refusalWith = (headers: Record<string, string>) => new Response(null, { status: 429, headers });
-
-	it("bounds every sleep by the caller's cap and declines a longer stated wait", () => {
-		const bounds = transportRetryBounds(1_000, 60_000);
+describe("retryWaitBounds", () => {
+	it("bounds every sleep by the caller's cap and declines a longer stated wait, given headers or a wait", () => {
+		const bounds = retryWaitBounds(1_000, 60_000);
 
 		expect(bounds.maxDelayMs).toBe(1_000);
-		expect(bounds.declines(refusalWith({ "retry-after": "9" }))).toBe(true);
-		expect(bounds.declines(refusalWith({ "retry-after-ms": "9000" }))).toBe(true);
-		expect(bounds.declines(refusalWith({ "x-ratelimit-reset": "30" }))).toBe(true);
-		expect(bounds.declines(refusalWith({ "retry-after": "0.5" }))).toBe(false);
-		expect(bounds.declines(refusalWith({}))).toBe(false);
+		expect(bounds.declines(new Headers({ "retry-after": "9" }))).toBe(true);
+		expect(bounds.declines({ "retry-after-ms": "9000" })).toBe(true);
+		expect(bounds.declines(new Headers({ "x-ratelimit-reset": "30" }))).toBe(true);
+		expect(bounds.declines(new Headers({ "retry-after": "0.5" }))).toBe(false);
+		expect(bounds.declines(new Headers())).toBe(false);
+		expect(bounds.declines(9_000)).toBe(true);
+		expect(bounds.declines(500)).toBe(false);
+		expect(bounds.declines(undefined)).toBe(false);
 	});
 
 	it("reads the longest header wait, as the failed message's field does", () => {
 		expect(
-			transportRetryBounds(1_000, 60_000).declines(refusalWith({ "retry-after-ms": "100", "retry-after": "9" })),
+			retryWaitBounds(1_000, 60_000).declines(new Headers({ "retry-after-ms": "100", "retry-after": "9" })),
 		).toBe(true);
 	});
 
 	it("keeps the transport's own ceiling when the caller sets no cap", () => {
-		const bounds = transportRetryBounds(undefined, 60_000);
+		const bounds = retryWaitBounds(undefined, 60_000);
 
 		expect(bounds.maxDelayMs).toBe(60_000);
-		expect(bounds.declines(refusalWith({ "retry-after": "9" }))).toBe(false);
-		expect(bounds.declines(refusalWith({ "retry-after": "120" }))).toBe(true);
+		expect(bounds.declines(new Headers({ "retry-after": "9" }))).toBe(false);
+		expect(bounds.declines(new Headers({ "retry-after": "120" }))).toBe(true);
 	});
 
 	it("bounds nothing when the caller's cap is not positive", () => {
 		for (const cap of [0, -1]) {
-			const bounds = transportRetryBounds(cap, 60_000);
+			const bounds = retryWaitBounds(cap, 60_000);
 
 			expect(bounds.maxDelayMs).toBe(Number.POSITIVE_INFINITY);
-			expect(bounds.declines(refusalWith({ "retry-after": "3600" }))).toBe(false);
+			expect(bounds.declines(new Headers({ "retry-after": "3600" }))).toBe(false);
 		}
 	});
 });

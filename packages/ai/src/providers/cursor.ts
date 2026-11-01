@@ -228,8 +228,8 @@ import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { connectProxiedSocket, getProxyForUrl, wrapFetchForProxy } from "../utils/proxy";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
-import { getStatedRetryAfterMs } from "../utils/retry-after";
-import { DEFAULT_MAX_RETRY_DELAY_MS, resolveRetryDelayMs, waitForRetry } from "../utils/retry-wait";
+import { providerFailureWaitMs, retryWaitBounds } from "../utils/retry-after";
+import { DEFAULT_MAX_RETRY_DELAY_MS, waitForRetry } from "../utils/retry-wait";
 import { sanitizeSchemaForCursor, toolWireSchema } from "../utils/schema";
 import { createWireAttempts, providerReplaysFrom, type WireAttempts, wireAttemptsOf } from "../utils/wire-attempts";
 import { formatConnectEndStreamError, hasRetryableCursorErrorDetail } from "./connect-error-detail";
@@ -2238,14 +2238,18 @@ function streamCursorWithWireMode(
 			const backoffDelayMs = maxRetryDelayMs > 0 ? Math.min(uncappedDelayMs, maxRetryDelayMs) : uncappedDelayMs;
 			// The wait this attempt stated, its accepted response's headers included;
 			// a stated wait past the caller's bounds surfaces the failure instead.
-			const retryDelayMs = canRetryFromCheckpoint
-				? resolveRetryDelayMs(
-						getStatedRetryAfterMs(model.provider, error, { streamResponseHeaders }),
-						backoffDelayMs,
-						options,
-						error,
-					)
+			const statedWaitMs = canRetryFromCheckpoint
+				? providerFailureWaitMs(model.provider, error, { streamResponseHeaders })
 				: undefined;
+			const retryDelayMs =
+				canRetryFromCheckpoint &&
+				!retryWaitBounds(
+					options?.maxRetryDelayMs,
+					DEFAULT_MAX_RETRY_DELAY_MS,
+					options?.providerRetryWaitCeilingMs,
+				).declines(statedWaitMs, error)
+					? Math.max(statedWaitMs ?? 0, backoffDelayMs)
+					: undefined;
 			if (
 				retryDelayMs !== undefined &&
 				openBlockState !== undefined &&

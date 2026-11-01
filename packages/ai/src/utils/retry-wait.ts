@@ -84,27 +84,6 @@ export function hasRefusedRetryWaitNote(message: string): boolean {
 }
 
 /**
- * Delay before a provider retry: the longer of the wait the server stated and
- * the loop's own backoff. `undefined` means the stated wait exceeds
- * {@link statedRetryWaitLimit}: the caller surfaces `failure` instead of parking
- * the stream, and `failure` is marked ({@link markRetryWaitRefused}).
- */
-export function resolveRetryDelayMs(
-	statedWaitMs: number | undefined,
-	backoffMs: number,
-	policy: StatedWaitPolicy | undefined,
-	failure?: unknown,
-): number | undefined {
-	if (statedWaitMs === undefined) return backoffMs;
-	const limit = statedRetryWaitLimit(policy);
-	if (statedWaitMs > limit.limitMs) {
-		markRetryWaitRefused(failure, { ...limit, waitMs: statedWaitMs });
-		return undefined;
-	}
-	return Math.max(statedWaitMs, backoffMs);
-}
-
-/**
  * Waits `delayMs` between retry attempts. Honors the caller's retry-wait hook
  * when one is set (tests and custom transports inject it to avoid real sleeps)
  * and otherwise sleeps on `signal`, so an abort rejects instead of the retry

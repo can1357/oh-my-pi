@@ -18,11 +18,11 @@
 import * as AIError from "../error";
 import type { AssistantMessage, AssistantMessageEvent, Context, FetchImpl } from "../types";
 import { AssistantMessageEventStream } from "./event-stream";
-import { providerRetryWaitMs } from "./retry-after";
+import { providerRetryWaitMs, retryWaitBounds } from "./retry-after";
 import {
+	DEFAULT_MAX_RETRY_DELAY_MS,
 	hasRefusedRetryWaitNote,
 	refusedRetryWaitNote,
-	resolveRetryDelayMs,
 	retryWaitRefusal,
 	waitForRetry,
 } from "./retry-wait";
@@ -210,19 +210,22 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 			// as session retry reads it: the response headers' wait
 			// (`errorRetryAfterMs`) with the message's relative waits beside it, else
 			// the message's text. A wait past the caller's bounds surfaces the failure.
+			const statedWaitMs = retryProviderError
+				? providerRetryWaitMs(
+						failedMessage?.provider,
+						failedMessage?.errorMessage,
+						failedMessage?.errorRetryAfterMs,
+					)
+				: undefined;
 			const delayMs = retryEmpty
 				? EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** emptyRetries
-				: retryProviderError
-					? resolveRetryDelayMs(
-							providerRetryWaitMs(
-								failedMessage?.provider,
-								failedMessage?.errorMessage,
-								failedMessage?.errorRetryAfterMs,
-							),
-							EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** providerErrorRetries,
-							options,
-							failedMessage,
-						)
+				: retryProviderError &&
+					  !retryWaitBounds(
+							options?.maxRetryDelayMs,
+							DEFAULT_MAX_RETRY_DELAY_MS,
+							options?.providerRetryWaitCeilingMs,
+					  ).declines(statedWaitMs, failedMessage)
+					? Math.max(statedWaitMs ?? 0, EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** providerErrorRetries)
 					: undefined;
 
 			if (delayMs !== undefined && !signal?.aborted) {
@@ -263,7 +266,7 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 
 /**
  * `event`, when this wrapper refused the wait its failed message states
- * ({@link resolveRetryDelayMs}), with the message saying so, unless the layer
+ * (`RetryWaitBounds.declines`), with the message saying so, unless the layer
  * below already did. The note's text is kept out of the classification
  * (`errorClassificationMessage`). A copy: the message belongs to the layer below.
  */

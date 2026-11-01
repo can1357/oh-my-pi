@@ -76,14 +76,14 @@ import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResp
 import {
 	getHeadersFromError,
 	getRetryAfterMsFromHeaders,
-	getStatedRetryAfterMs,
+	providerFailureWaitMs,
 	type HeadersLike,
-	transportRetryBounds,
+	retryWaitBounds,
 } from "../utils/retry-after";
 import {
 	markRetryWaitRefused,
 	type RetryWaitHook,
-	resolveRetryDelayMs,
+	DEFAULT_MAX_RETRY_DELAY_MS,
 	type StatedWaitPolicy,
 	waitForRetry,
 } from "../utils/retry-wait";
@@ -3238,15 +3238,16 @@ class CodexStreamProcessor {
 		// The wait this attempt stated: its error event's headers, else its
 		// accepted SSE response's (a WebSocket attempt has none). A wait past the
 		// caller's bounds surfaces the failure instead.
-		const delayMs = resolveRetryDelayMs(
-			getStatedRetryAfterMs(this.model.provider, error, {
-				streamResponseHeaders: this.requestContext.streamResponseHeaders,
-			}),
-			CODEX_RETRY_DELAY_MS * (this.runtime.providerRetryAttempt + 1),
-			this.options,
-			error,
+		const statedWaitMs = providerFailureWaitMs(this.model.provider, error, {
+			streamResponseHeaders: this.requestContext.streamResponseHeaders,
+		});
+		const retryBounds = retryWaitBounds(
+			this.options?.maxRetryDelayMs,
+			DEFAULT_MAX_RETRY_DELAY_MS,
+			this.options?.providerRetryWaitCeilingMs,
 		);
-		if (delayMs === undefined) return false;
+		if (retryBounds.declines(statedWaitMs, error)) return false;
+		const delayMs = Math.max(statedWaitMs ?? 0, CODEX_RETRY_DELAY_MS * (this.runtime.providerRetryAttempt + 1));
 
 		// A leading `output_item.added` already pushed a `*_start` for the (empty)
 		// open block; balance it with the matching end before the reset+replay so
@@ -4710,7 +4711,7 @@ async function openCodexSseEventStream(
 	codexSseMaxAttempts: number | undefined,
 	/**
 	 * The caller's `maxRetryDelayMs` and `providerRetryWaitCeilingMs`, which bound
-	 * this transport's retries ({@link transportRetryBounds}).
+	 * this transport's retries ({@link retryWaitBounds}).
 	 */
 	retryPolicy: StatedWaitPolicy | undefined,
 	/** The caller's `StreamOptions.providerRetryWait`, which every transport retry sleeps through. */
@@ -4767,7 +4768,7 @@ async function openCodexSseEventStream(
 			sentModelsEtagHeader: headers.has(X_MODELS_ETAG_HEADER),
 		});
 
-	const retryBounds = transportRetryBounds(
+	const retryBounds = retryWaitBounds(
 		retryPolicy?.maxRetryDelayMs,
 		CODEX_RATE_LIMIT_BUDGET_MS,
 		retryPolicy?.providerRetryWaitCeilingMs,
@@ -4793,7 +4794,7 @@ async function openCodexSseEventStream(
 			retryWait,
 			// A refusal whose headers name a longer wait than the caller's bounds is
 			// surfaced at once, with that wait on the failed message.
-			shouldRetryResponse: response => !retryBounds.declines(response),
+			shouldRetryResponse: response => !retryBounds.declines(response.headers),
 			fetch: fetchAttempt,
 			timeout: false,
 		});
@@ -4818,7 +4819,7 @@ async function openCodexSseEventStream(
 		try {
 			const error = await CodexApiError.fromResponse(response);
 			// A refusal the caller's bounds kept from a retry says so in the failed message.
-			const refused = AIError.isTransientStatus(response.status) ? retryBounds.refusal(response) : undefined;
+			const refused = AIError.isTransientStatus(response.status) ? retryBounds.refusal(response.headers) : undefined;
 			if (refused !== undefined) markRetryWaitRefused(error, refused);
 			throw error;
 		} finally {
