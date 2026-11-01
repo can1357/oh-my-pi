@@ -5,6 +5,7 @@ import {
 	IndexedSessionStorage,
 	type SessionStorageBackend,
 } from "@oh-my-pi/pi-coding-agent/session/indexed-session-storage";
+import { parseSessionContent } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import {
 	FileSessionStorage,
@@ -98,25 +99,7 @@ type SavedRecord = {
 	message?: { role: string };
 };
 async function records(storage: SessionStorage, file: string) {
-	return (await storage.readText(file))
-		.split("\n")
-		.filter(Boolean)
-		.map(line => JSON.parse(line) as SavedRecord);
-}
-function pauseTitle(storage: SessionStorage) {
-	const entered = Promise.withResolvers<void>(),
-		gate = Promise.withResolvers<void>();
-	const original = storage.updateSessionTitle.bind(storage);
-	let first = true;
-	const spy = spyOn(storage, "updateSessionTitle").mockImplementation(async (file, update) => {
-		if (first) {
-			first = false;
-			entered.resolve();
-			await gate.promise;
-		}
-		await original(file, update);
-	});
-	return { entered: entered.promise, release: () => gate.resolve(), restore: () => spy.mockRestore() };
+	return parseSessionContent(await storage.readText(file)).entries as SavedRecord[];
 }
 const mutations = ["task-key", "add-workspace", "remove-workspace", "set-workspaces", "second-title"] as const;
 type Mutation = (typeof mutations)[number];
@@ -155,15 +138,14 @@ function assertMutation(saved: SavedRecord[], mutation: Mutation, workspace: str
 }
 for (const kind of kinds)
 	describe(kind, () => {
-		it("keeps ordinary appends hot while a title slot update is pending", async () => {
+		it("keeps ordinary appends ordered after an unawaited title change", async () => {
 			const { manager, storage } = await fixture(kind);
-			const gate = pauseTitle(storage);
+
 			const naming = manager.setSessionName("first", "user");
-			await gate.entered;
+
 			const id = manager.appendCustomEntry("during-title", { value: 1 });
 			manager.appendMessage({ role: "user", content: "during title", timestamp: Date.now() });
 			try {
-				gate.release();
 				await naming;
 				await manager.flush();
 				manager.seal();
@@ -173,34 +155,31 @@ for (const kind of kinds)
 				expect(saved.some(entry => entry.type === "message" && entry.message?.role === "user")).toBe(true);
 				expect(saved[0].title).toBe("first");
 			} finally {
-				gate.release();
 				await naming.catch(() => {});
 				await manager.close().catch(() => {});
-				gate.restore();
+
 				manager.releaseRetainedEntries();
 			}
 		});
 		for (const mutation of mutations) {
-			it(`preserves ${mutation} queued behind an in-flight title update when sealed`, async () => {
+			it(`preserves ${mutation} alongside an unawaited title change when sealed`, async () => {
 				const { manager, storage, workspace } = await fixture(kind);
 				if (mutation === "remove-workspace") await manager.addWorkspaceDirectory(workspace);
-				const gate = pauseTitle(storage);
+
 				const naming = manager.setSessionName("first", "user");
-				await gate.entered;
+
 				const changing = mutate(manager, mutation, workspace);
 				try {
-					gate.release();
-					await naming;
 					manager.seal();
+					await naming;
 					await changing;
 					await manager.close();
 					assertMutation(await records(storage, manager.getSessionFile()!), mutation, workspace);
 				} finally {
-					gate.release();
 					await naming.catch(() => {});
 					await changing.catch(() => {});
 					await manager.close().catch(() => {});
-					gate.restore();
+
 					manager.releaseRetainedEntries();
 				}
 			});
@@ -261,16 +240,16 @@ it("does not rewrite against the Indexed backend's optimistic size during a titl
 	}
 });
 for (const kind of kinds)
-	it(`${kind} repairs an older in-flight title after a synchronous flush saves a newer title`, async () => {
+	it(`${kind} keeps the latest overlapping title exactly once through synchronous flush`, async () => {
 		const { manager, storage } = await fixture(kind);
-		const gate = pauseTitle(storage);
+
 		const first = manager.setSessionName("first", "user");
-		await gate.entered;
+
 		const latest = manager.setSessionName("latest", "user");
 		try {
 			manager.flushSync();
 			await storage.drain();
-			gate.release();
+
 			await first;
 			await latest;
 			await manager.flush();
@@ -284,11 +263,10 @@ for (const kind of kinds)
 			await manager.close();
 			expect((await records(storage, manager.getSessionFile()!))[0].title).toBe("latest");
 		} finally {
-			gate.release();
 			await first.catch(() => {});
 			await latest.catch(() => {});
 			await manager.close().catch(() => {});
-			gate.restore();
+
 			manager.releaseRetainedEntries();
 		}
 	});

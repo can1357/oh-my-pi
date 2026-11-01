@@ -10,7 +10,7 @@ import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { parseJsonlLenient } from "@oh-my-pi/pi-utils/stream";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
 import { EVAL_STATE_CONTEXT_TYPE } from "../eval/state";
-import { visitEntriesFromFile } from "./session-loader";
+import { readLatestSessionTitle, visitEntriesFromFile } from "./session-loader";
 import { computeDefaultSessionDir } from "./session-paths";
 import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
 import { lookupSessionTitle, recordSessionTitle } from "./session-index";
@@ -84,10 +84,8 @@ const SESSION_LIST_MAX_WORKERS = 16;
  * refreshes (resume picker opens, startup recent-sessions, cross-project
  * scans) skip the open+read+parse for unchanged files. The `statSync` still
  * runs on every scan — it IS the invalidation check: a hit requires both
- * `mtimeMs` and `size` to match. This covers the two mutation paths:
- * - streaming appends grow `size` (and bump `mtimeMs`);
- * - `updateSessionTitle` rewrites the fixed-width title slot in place via
- *   `writeSync`, which leaves `size` unchanged but updates `mtimeMs`.
+ * `mtimeMs` and `size` to match. Appended title changes grow `size`, while
+ * full rewrites (and legacy fixed-slot updates) also invalidate by `mtimeMs`.
  * Negative results (unparseable files) are cached too, as `undefined` info.
  * Entries are small header objects, so a generous cap is cheap.
  */
@@ -401,10 +399,10 @@ function getSessionListWorkerCount(fileCount: number): number {
 }
 
 /**
- * Scan a single session file into a {@link SessionInfo}. Always reads the 4 KB
- * header/first-message prefix; only reads the 32 KB tail window (and derives
- * {@link SessionStatus}) when `withStatus` is set — the recent/most-recent
- * lookups skip it.
+ * Scan a single session file into a {@link SessionInfo}. Reads the 4 KB
+ * header/first-message prefix and scans journal title metadata without
+ * retaining historical payloads. The 32 KB status tail is read only when
+ * `withStatus` is set.
  */
 async function scanSessionFile(
 	file: string,
@@ -442,6 +440,7 @@ async function scanSessionFile(
 			cache.set(cacheKey, { mtimeMs: stat.mtimeMs, size: stat.size, info: undefined });
 			return undefined;
 		}
+		const latestTitle = await readLatestSessionTitle(file, storage);
 
 		let parsedMessageCount = 0;
 		let assistantTurns = 0;
@@ -492,7 +491,7 @@ async function scanSessionFile(
 			path: file,
 			id: header.id,
 			cwd: header.cwd ?? "",
-			title: header.title ?? shortSummary,
+			title: latestTitle?.title ?? header.title ?? shortSummary,
 			parentSessionPath: header.parentSession,
 			continuationOf: header.continuationOf,
 			created: new Date(header.timestamp ?? ""),

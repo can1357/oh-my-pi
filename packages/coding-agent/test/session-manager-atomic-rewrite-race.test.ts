@@ -19,7 +19,6 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
-import type { SessionTitleUpdate } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 
 interface DetachableWriter extends SessionStorageWriter {
 	detach(): void;
@@ -229,12 +228,6 @@ describe("SessionManager atomic rewrite race", () => {
 		const sessionFile = sessionManager.getSessionFile();
 		if (!sessionFile) throw new Error("Expected session file");
 		const content = await storage.readText(sessionFile);
-		const [titleSlot] = content.split("\n");
-		expect(JSON.parse(titleSlot ?? "{}")).toMatchObject({
-			type: "title",
-			title: "Post rewrite title",
-			source: "user",
-		});
 		expect(content).toContain("newer summary");
 		expect(content).toContain("during rewrite prompt");
 		expect(content).toContain("during rewrite custom");
@@ -248,6 +241,8 @@ describe("SessionManager atomic rewrite race", () => {
 			initialCwd: "/cwd",
 			suppressBreadcrumb: true,
 		});
+		expect(reloaded.getSessionName()).toBe("Post rewrite title");
+		expect(reloaded.titleSource).toBe("user");
 		const branch = reloaded.getBranch();
 		expect(branch.some(entry => entry.type === "compaction" && entry.summary === "newer summary")).toBe(true);
 		expect(
@@ -660,20 +655,10 @@ describe("SessionManager atomic rewrite fence spans writer.close()", () => {
 	});
 });
 
-class TitleFallbackPausingStorage extends MemorySessionStorage {
+class TitleRewritePausingStorage extends MemorySessionStorage {
 	readonly writeStarted = Promise.withResolvers<void>();
 	readonly allowWrite = Promise.withResolvers<void>();
 	writeTextAtomicCalls = 0;
-	failNextUpdateTitle = false;
-
-	override async updateSessionTitle(path: string, update: SessionTitleUpdate): Promise<void> {
-		if (this.failNextUpdateTitle) {
-			this.failNextUpdateTitle = false;
-			throw new Error("updateSessionTitle forced failure");
-		}
-		return super.updateSessionTitle(path, update);
-	}
-
 	override async writeTextAtomic(path: string, content: string, options?: WriteTextAtomicOptions): Promise<void> {
 		this.writeTextAtomicCalls += 1;
 		this.writeStarted.resolve();
@@ -683,16 +668,14 @@ class TitleFallbackPausingStorage extends MemorySessionStorage {
 	}
 }
 
-describe("SessionManager title-change fallback fenced-append durability", () => {
-	it("loops on the dirty flag so fenced appends during the fallback rewrite persist", async () => {
-		const storage = new TitleFallbackPausingStorage();
+describe("SessionManager title changes during a fenced rewrite", () => {
+	it("preserves the rename and following appends when they supersede a paused rewrite", async () => {
+		const storage = new TitleRewritePausingStorage();
 		const sessionManager = SessionManager.create("/cwd", "/sessions", storage);
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected built-in anthropic model");
 
-		// Materialize the session on disk with a title slot present so a later
-		// setSessionName takes the append-then-updateSessionTitle try branch
-		// instead of the up-front #rewriteAtomically fallback.
+		// Materialize the journal before testing a concurrent ordinary rewrite.
 		sessionManager.appendMessage({
 			role: "assistant",
 			content: [{ type: "text", text: "seed response" }],
@@ -715,12 +698,11 @@ describe("SessionManager title-change fallback fenced-append durability", () => 
 		await sessionManager.flush();
 		expect(storage.writeTextAtomicCalls).toBe(0);
 
-		// Force the try branch to fail so the catch runs the atomic-rewrite loop.
-		storage.failNextUpdateTitle = true;
-		const rename = sessionManager.setSessionName("second title", "user", "test");
+		const rewrite = sessionManager.rewriteEntries();
 		await storage.writeStarted.promise;
+		const rename = sessionManager.setSessionName("second title", "user", "test");
 
-		// Fenced appends during the paused fallback rewrite supersede the atomic
+		// Fenced title and message appends supersede the paused atomic rewrite
 		// with a synchronous full-body rewrite, so they are on disk before the
 		// paused publish resumes. The abandoned atomic's body must not clobber
 		// them when released.
@@ -738,6 +720,7 @@ describe("SessionManager title-change fallback fenced-append durability", () => 
 		expect(midContent).toContain('"customType":"during_title_fallback_custom"');
 
 		storage.allowWrite.resolve();
+		await rewrite;
 		await rename;
 		await sessionManager.flush();
 
@@ -747,9 +730,7 @@ describe("SessionManager title-change fallback fenced-append durability", () => 
 		expect(content).toContain('"title":"second title"');
 		expect(content).toContain("during title fallback");
 		expect(content).toContain('"customType":"during_title_fallback_custom"');
-		// At least the failed title path's atomic fallback ran once; fenced
-		// appends may have superseded it via writeTextSync without a second
-		// atomic pass.
+		// The explicitly requested ordinary rewrite was fenced before the rename.
 		expect(storage.writeTextAtomicCalls).toBeGreaterThanOrEqual(1);
 	});
 });

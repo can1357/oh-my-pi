@@ -131,6 +131,8 @@ export interface LoadSessionOptions {
 export interface SessionLoadResult {
 	entries: FileEntry[];
 	titleSlot: SessionTitleUpdate | undefined;
+	/** Last title change in physical journal order, independent of the active branch. */
+	latestTitle?: SessionTitleUpdate;
 	malformedRecords: number;
 	/** Byte length of the snapshot actually parsed, or `null` when the path did not exist. */
 	sourceSize?: number | null;
@@ -149,7 +151,7 @@ function isValidSessionHeader(entry: FileEntry | undefined): entry is SessionHea
 	return entry?.type === "session" && typeof entry.id === "string";
 }
 
-function applyTitleSlot(entry: FileEntry | undefined, slot: SessionTitleUpdate | undefined): void {
+function applySessionTitle(entry: FileEntry | undefined, slot: SessionTitleUpdate | undefined): void {
 	if (!slot || !isValidSessionHeader(entry)) return;
 	if (slot.title && slot.title.length > 0) {
 		entry.title = slot.title;
@@ -163,7 +165,12 @@ function applyTitleSlot(entry: FileEntry | undefined, slot: SessionTitleUpdate |
 	}
 }
 
-/** Parse session JSONL while stripping and folding the optional fixed title slot. */
+function titleUpdateFromEntry(entry: FileEntry): SessionTitleUpdate | undefined {
+	if (entry?.type !== "title_change") return undefined;
+	return { title: entry.title, source: entry.source, updatedAt: entry.timestamp };
+}
+
+/** Parse session JSONL, folding journal title changes over the optional fixed title slot. */
 export function parseSessionContent(content: string): SessionLoadResult {
 	const { body, slot } = splitTitleSlot(content);
 	let malformedRecords = 0;
@@ -172,10 +179,13 @@ export function parseSessionContent(content: string): SessionLoadResult {
 			malformedRecords++;
 		},
 	}) as FileEntry[];
-	applyTitleSlot(entries[0], slot);
+	let latestTitle: SessionTitleUpdate | undefined;
+	for (const entry of entries) latestTitle = titleUpdateFromEntry(entry) ?? latestTitle;
+	applySessionTitle(entries[0], latestTitle ?? slot);
 	return {
 		entries,
 		titleSlot: slot,
+		latestTitle,
 		malformedRecords,
 		sourceSize: Buffer.byteLength(content, "utf8"),
 		invalidHeader: entries.length > 0 ? !isValidSessionHeader(entries[0]) : malformedRecords > 0,
@@ -331,7 +341,7 @@ export async function visitEntriesFromFileStream(
 				const entry = value as FileEntry;
 				if (!sawFirstEntry) {
 					sawFirstEntry = true;
-					applyTitleSlot(entry, titleSlot);
+					applySessionTitle(entry, titleSlot);
 				}
 				try {
 					if (visit(entry) === false) {
@@ -472,10 +482,12 @@ export async function loadEntriesFromFileStream(
 	const entries: FileEntry[] = [];
 	let malformedRecords = 0;
 	let bytesConsumed = 0;
+	let latestTitle: SessionTitleUpdate | undefined;
 	const titleSlot = await visitEntriesFromFileStream(
 		filePath,
 		entry => {
 			entries.push(entry);
+			latestTitle = titleUpdateFromEntry(entry) ?? latestTitle;
 		},
 		{
 			onMalformedRecord: () => {
@@ -487,13 +499,57 @@ export async function loadEntriesFromFileStream(
 			},
 		},
 	);
+	applySessionTitle(entries[0], latestTitle);
 	return {
 		entries,
 		titleSlot,
+		latestTitle,
 		malformedRecords,
 		sourceSize: bytesConsumed,
 		invalidHeader: entries.length > 0 ? !isValidSessionHeader(entries[0]) : malformedRecords > 0,
 	};
+}
+
+/** Scan title metadata without retaining historical journal payloads. */
+export async function readLatestSessionTitle(
+	filePath: string,
+	storage: SessionStorage,
+): Promise<SessionTitleUpdate | undefined> {
+	let latestTitle: SessionTitleUpdate | undefined;
+	if (storage instanceof FileSessionStorage) {
+		await visitEntriesFromFileStream(filePath, entry => {
+			latestTitle = titleUpdateFromEntry(entry) ?? latestTitle;
+		});
+		return latestTitle;
+	}
+	// Remote storage exposes text, not a stream. Parse bounded string windows
+	// with the same newline recovery as parseJsonlLenient, retaining only title
+	// metadata rather than a full journal array or a second UTF-8 body copy.
+	const content = await storage.readText(filePath);
+	const initialWindow = 64 * 1024;
+	let window = initialWindow;
+	let start = 0;
+	while (start < content.length) {
+		const newline = content.indexOf("\n", start + window);
+		const end = newline === -1 ? content.length : newline + 1;
+		const { values, error, read, done } = Bun.JSONL.parseChunk(content.slice(start, end));
+		for (const entry of values as FileEntry[]) latestTitle = titleUpdateFromEntry(entry) ?? latestTitle;
+		if (error) {
+			const nextNewline = content.indexOf("\n", start + read);
+			if (nextNewline === -1) break;
+			start = nextNewline + 1;
+		} else if (done) {
+			start = end;
+		} else if (read > 0) {
+			start += read;
+		} else {
+			if (end === content.length) break;
+			window *= 2;
+			continue;
+		}
+		window = initialWindow;
+	}
+	return latestTitle;
 }
 /** Exported for compaction.test.ts */
 export function parseSessionEntries(content: string): FileEntry[] {

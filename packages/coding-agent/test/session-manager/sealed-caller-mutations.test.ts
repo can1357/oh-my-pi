@@ -125,15 +125,19 @@ for (const kind of kinds) {
 	it(`preserves sealed title rewrite for ${kind}`, async () => {
 		const { manager, storage, file } = await fixture(kind);
 		const naming = manager.setSessionName("Title at shutdown", "user");
-		const pending = captureBeforeSeal(manager);
+		manager.seal();
 		try {
 			await naming;
 			await manager.close();
 			const journal = await records(storage, file);
-			expect(journal.find(entry => entry.type === "session").title).toBe("Title at shutdown");
+			const reader = await SessionManager.open(file, undefined, storage);
+			try {
+				expect(reader.getSessionName()).toBe("Title at shutdown");
+			} finally {
+				await reader.close();
+				reader.releaseRetainedEntries();
+			}
 			expect(journal.some(entry => entry.type === "title_change" && entry.title === "Title at shutdown")).toBe(true);
-			expect(pending.onDisk).toBe(false);
-			expect(pending.needsRewrite).toBe(true);
 		} finally {
 			await manager.close();
 			manager.releaseRetainedEntries();
@@ -199,10 +203,8 @@ for (const kind of kinds) {
 
 class ObservedStorage extends MemorySessionStorage {
 	beforePersistence: (() => void) | undefined;
-	titleGate: Promise<void> | undefined;
 	atomicGate: Promise<void> | undefined;
 	readonly atomicStarted = Promise.withResolvers<void>();
-	readonly titleStarted = Promise.withResolvers<void>();
 	override async writeTextAtomic(file: string, text: string, options?: WriteTextAtomicOptions) {
 		this.beforePersistence?.();
 		if (this.atomicGate) {
@@ -211,14 +213,8 @@ class ObservedStorage extends MemorySessionStorage {
 		}
 		await super.writeTextAtomic(file, text, options);
 	}
-	override async updateSessionTitle(file: string, title: SessionTitleUpdate) {
-		this.beforePersistence?.();
-		this.titleStarted.resolve();
-		await this.titleGate;
-		await super.updateSessionTitle(file, title);
-	}
 }
-it("does not let an incremental title commit clear a newer entry rewrite", async () => {
+it("preserves a newer entry rewrite queued after an unawaited title through seal", async () => {
 	const dir = TempDir.createSync("@pi-title-revision-");
 	dirs.push(dir);
 	const storage = new ObservedStorage();
@@ -226,10 +222,7 @@ it("does not let an incremental title commit clear a newer entry rewrite", async
 	manager.appendMessage(makeAssistantMessage());
 	const id = manager.appendCustomEntry("mutable", { value: "old" });
 	await manager.flush();
-	const gate = Promise.withResolvers<void>();
-	storage.titleGate = gate.promise;
 	const naming = manager.setSessionName("first", "user");
-	await storage.titleStarted.promise;
 	const entry = manager.getEntry(id);
 	if (entry?.type !== "custom") throw new Error("Expected custom entry");
 	entry.data = { value: "new" };
@@ -237,20 +230,18 @@ it("does not let an incremental title commit clear a newer entry rewrite", async
 	storage.atomicGate = atomic.promise;
 	const rewriting = manager.rewriteEntries();
 	try {
-		gate.resolve();
-		await naming;
 		await storage.atomicStarted.promise;
 		expect(manager.captureState().onDisk).toBe(false);
 		expect(manager.captureState().needsRewrite).toBe(true);
+		manager.seal();
 		atomic.resolve();
 		await rewriting;
-		manager.seal();
+		await naming;
 		await manager.close();
 		expect((await records(storage, manager.getSessionFile()!)).find(item => item.id === id).data).toEqual({
 			value: "new",
 		});
 	} finally {
-		gate.resolve();
 		atomic.resolve();
 		await naming;
 		await rewriting;
@@ -277,7 +268,7 @@ const sweep = [
 ] as const;
 describe("caller mutation persistence-boundary sweep", () => {
 	for (const method of sweep)
-		it(`${method} marks its journal non-current before awaiting persistence`, async () => {
+		it(`${method} preserves its journal at the persistence boundary`, async () => {
 			const dir = TempDir.createSync("@pi-mutation-sweep-");
 			dirs.push(dir);
 			const storage = new ObservedStorage();
@@ -341,8 +332,16 @@ describe("caller mutation persistence-boundary sweep", () => {
 						await manager.recoverPersistenceFromCurrentState();
 						break;
 				}
-				expect(observations.length).toBeGreaterThan(0);
-				for (const observation of observations) expect(observation.onDisk).toBe(false);
+				if (method === "setSessionName") {
+					expect(
+						(await records(storage, manager.getSessionFile()!)).some(
+							entry => entry.type === "title_change" && entry.title === "sweep",
+						),
+					).toBe(true);
+				} else {
+					expect(observations.length).toBeGreaterThan(0);
+					for (const observation of observations) expect(observation.onDisk).toBe(false);
+				}
 			} finally {
 				storage.beforePersistence = undefined;
 				await manager.close();
@@ -395,10 +394,10 @@ it("keeps the complete async mutation audit roster synchronized with SessionMana
 	expect(callers("#rewriteAtomically")).toEqual(
 		[
 			"#appendEntriesAtomicallyLocked",
-			"#persistTitleChangeEntry",
 			"#persistWorkspaceDirectoriesChange",
 			"#setSessionFile",
 			"ensureOnDisk",
+			"flush",
 			"fork",
 			"forkFrom",
 			"moveTo",
@@ -409,7 +408,7 @@ it("keeps the complete async mutation audit roster synchronized with SessionMana
 		].sort(),
 	);
 	expect(callers("#scheduleDiskWork")).toEqual(
-		["#drainAndCloseWriter", "#persistTitleChangeEntry", "#rewriteAtomically", "close", "flush"].sort(),
+		["#drainAndCloseWriter", "#rewriteAtomically", "close", "flush"].sort(),
 	);
 	const current = declaration.body.body.find(
 		member => member.type === "ClassPrivateProperty" && member.key.id.name === "fileIsCurrent",
@@ -426,21 +425,27 @@ it("keeps the complete async mutation audit roster synchronized with SessionMana
 		expect(text).not.toMatch(/manager\.#fileIsCurrent\s*=\s*true/);
 	}
 });
-it("keeps the file title-slot append fast path as explicit queued debt rather than a full rewrite", async () => {
+it("persists the file title as an ordinary append before yielding without a full rewrite", async () => {
 	const { manager, storage, file } = await fixture("malformed");
 	await manager.rewriteEntries();
+	const sync = spyOn(storage as FileSessionStorage, "writeLinesSync");
+	const atomic = spyOn(storage as FileSessionStorage, "writeLinesAtomic");
 	const naming = manager.setSessionName("fast path", "user");
 	const pending = manager.captureState();
 	try {
-		expect(pending.onDisk).toBe(false);
-		expect(pending.needsRewrite).toBe(true);
+		expect(pending.onDisk).toBe(true);
+		expect(pending.needsRewrite).toBe(false);
 		manager.seal();
 		await naming;
 		await manager.close();
 		expect(
 			(await records(storage, file)).some(entry => entry.type === "title_change" && entry.title === "fast path"),
 		).toBe(true);
+		expect(sync).not.toHaveBeenCalled();
+		expect(atomic).not.toHaveBeenCalled();
 	} finally {
+		sync.mockRestore();
+		atomic.mockRestore();
 		await manager.close();
 		manager.releaseRetainedEntries();
 	}
