@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed reading a large SQLite table freezing the harness for seconds while counting the rows behind a paged `read`; the continuation footer now shows a bounded lower bound like `[50000+ more rows]` ([#17554](https://github.com/can1357/oh-my-pi/pull/17554) by [@Bensonluo](https://github.com/Bensonluo)).
 ## [18.15.0] - 2026-11-01
 
 ### Added

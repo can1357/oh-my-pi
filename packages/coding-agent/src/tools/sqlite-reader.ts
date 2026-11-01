@@ -684,13 +684,23 @@ function loadRowEstimates(db: Database): Map<string, number> {
 }
 
 /**
- * Counts a table while reading at most `cap + 1` rows. Returns an exact count
- * when the table holds `cap` rows or fewer, otherwise a lower bound of `cap`.
- * Bounds the worst-case scan so a stale or missing estimate can never trigger a
- * full-table scan on the JS thread.
+ * Counts a table — optionally filtered by an already-validated `whereClause` —
+ * while reading at most `cap + 1` rows. Returns an exact count when the result
+ * set holds `cap` rows or fewer, otherwise a lower bound of `cap`. Bounds the
+ * worst-case scan so a stale or missing estimate (or a paged read) can never
+ * trigger a full-table scan on the JS thread. A filtered probe additionally
+ * requires the table itself to fit under `cap`: its `LIMIT` caps *matched*
+ * rows, not *visited* rows, so on a larger table a selective unindexed filter
+ * would still visit every row. When that gate skips the probe it reports
+ * `atLeast 0`; `queryRows` combines that with the page's lookahead fact.
  */
-function probeRowCount(db: Database, table: string, cap: number): TableRowCount {
-	const sql = `SELECT COUNT(*) AS count FROM (SELECT 1 FROM ${quoteSqliteIdentifier(table)} LIMIT ${cap + 1})`;
+function probeRowCount(db: Database, table: string, cap: number, whereClause = ""): TableRowCount {
+	if (whereClause) {
+		const estimate = loadRowEstimates(db).get(table);
+		if (estimate !== undefined && estimate > cap) return { kind: "atLeast", rows: 0 };
+		if (probeRowCount(db, table, cap).kind !== "exact") return { kind: "atLeast", rows: 0 };
+	}
+	const sql = `SELECT COUNT(*) AS count FROM (SELECT 1 FROM ${quoteSqliteIdentifier(table)}${whereClause} LIMIT ${cap + 1})`;
 	const counted = db.query<SqliteCountRow, []>(sql).get()?.count ?? 0;
 	return counted > cap ? { kind: "atLeast", rows: cap } : { kind: "exact", rows: counted };
 }
@@ -754,8 +764,8 @@ export function resolveTableRowLookup(db: Database, table: string): SqliteRowLoo
 export function queryRows(
 	db: Database,
 	table: string,
-	opts: { limit: number; offset: number; order?: string; where?: string },
-): { columns: string[]; rows: Record<string, unknown>[]; totalCount: number } {
+	opts: { limit: number; offset: number; order?: string; where?: string; probeCap?: number },
+): { columns: string[]; rows: Record<string, unknown>[]; totalCount: TableRowCount } {
 	getTableMasterRow(db, table);
 	// table_info omits generated columns; use the columns SELECT * actually returns.
 	const columns = db.query<SqliteRow, []>(`SELECT * FROM ${quoteSqliteIdentifier(table)} LIMIT 0`).columnNames;
@@ -769,21 +779,30 @@ export function queryRows(
 			"SQLite where clause changed the expected pagination parameters; use q=SELECT ... for raw SQL",
 		);
 	}
-	const countRows = (): number =>
-		db.query<SqliteCountRow, []>(`SELECT COUNT(*) AS count FROM ${quoteSqliteIdentifier(table)}${whereClause}`).get()
-			?.count ?? 0;
+	const probeCap = opts.probeCap ?? ROW_COUNT_PROBE_CAP;
 	if (!Number.isSafeInteger(opts.limit) || opts.limit < 1 || !Number.isSafeInteger(opts.offset) || opts.offset < 0) {
-		const totalCount = countRows();
+		const totalCount = probeRowCount(db, table, probeCap, whereClause);
 		return { columns, rows: statement.all(opts.limit, opts.offset), totalCount };
 	}
 	// Fetch one row past the page: a page that ends the result set already knows
-	// its exact total, so only a page with rows behind it (or an offset past the
-	// end) pays for the full `COUNT(*)` scan.
+	// its exact total; any other page probes the remaining total with the same
+	// bounded read the listing uses, never a full `COUNT(*)` scan.
 	const fetched = statement.all(opts.limit + 1, opts.offset);
 	const hasMore = fetched.length > opts.limit;
 	const rows = hasMore ? fetched.slice(0, opts.limit) : fetched;
 	const endsResultSet = !hasMore && (rows.length > 0 || opts.offset === 0);
-	return { columns, rows, totalCount: endsResultSet ? opts.offset + rows.length : countRows() };
+	const shown = opts.offset + rows.length;
+	let totalCount: TableRowCount = endsResultSet
+		? { kind: "exact", rows: shown }
+		: probeRowCount(db, table, probeCap, whereClause);
+	// The lookahead row proves at least one more row exists. When the shown rows
+	// have reached the probe's lower bound, that bound can no longer justify a
+	// continuation footer (the page would dead-end at the cap), so strengthen the
+	// bound to the lookahead fact — still a true lower bound, no extra scanning.
+	if (hasMore && totalCount.kind === "atLeast" && totalCount.rows <= shown) {
+		totalCount = { kind: "atLeast", rows: shown + 1 };
+	}
+	return { columns, rows, totalCount };
 }
 
 export function getRowByKey(
@@ -945,6 +964,18 @@ function formatRowCount(count: TableRowCount): string {
 	}
 }
 
+/**
+ * The continuation footer's "N more rows" phrase for the rows behind `shown`,
+ * or null when the count proves none remain. A capped or estimated count
+ * renders its lower bound with the same marker the listing uses (`N+` / `~N`).
+ */
+export function formatRemainingRows(count: TableRowCount, shown: number): string | null {
+	const remaining = count.rows - shown;
+	if (remaining <= 0) return null;
+	const marker = count.kind === "atLeast" ? "+" : count.kind === "estimate" ? "~" : "";
+	return `${remaining}${marker} more rows`;
+}
+
 export function renderTableList(tables: SqliteTableSummary[]): string {
 	if (tables.length === 0) {
 		return "(no tables)";
@@ -983,7 +1014,7 @@ export function renderTable(
 	columns: string[],
 	rows: Record<string, unknown>[],
 	meta: {
-		totalCount: number;
+		totalCount: TableRowCount;
 		offset: number;
 		limit: number;
 		table: string;
@@ -993,17 +1024,14 @@ export function renderTable(
 	},
 ): string {
 	const parts = [buildAsciiTable(columns, rows)];
-	const shown = Math.min(meta.totalCount, meta.offset + rows.length);
-	if (shown < meta.totalCount) {
-		const remaining = meta.totalCount - shown;
+	const remaining = formatRemainingRows(meta.totalCount, meta.offset + rows.length);
+	if (remaining !== null) {
 		const nextOffset = meta.offset + rows.length;
 		const params = new URLSearchParams({ limit: String(meta.limit), offset: String(nextOffset) });
 		if (meta.where !== undefined) params.set("where", meta.where);
 		if (meta.order !== undefined) params.set("order", meta.order);
 		// Keep the full selector usable even when an encoded filter exceeds the table's width.
-		parts.push(
-			replaceTabs(`[${remaining} more rows; append :${meta.table}?${params} to the database path to continue]`),
-		);
+		parts.push(replaceTabs(`[${remaining}; append :${meta.table}?${params} to the database path to continue]`));
 	}
 	return parts.join("\n");
 }

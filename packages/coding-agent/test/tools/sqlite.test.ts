@@ -10,6 +10,7 @@ import {
 	listTables,
 	parseSqlitePathCandidates,
 	parseSqliteSelector,
+	queryRows,
 	renderTable,
 	renderTableList,
 } from "@oh-my-pi/pi-coding-agent/tools/sqlite-reader";
@@ -497,7 +498,7 @@ describe("SQLite tool support", () => {
 
 	it("truncates wide rows to the configured table width", () => {
 		const rendered = renderTable(["id", "payload"], [{ id: 1, payload: "x".repeat(320) }], {
-			totalCount: 1,
+			totalCount: { kind: "exact", rows: 1 },
 			offset: 0,
 			limit: 20,
 			table: "wide_rows",
@@ -515,7 +516,7 @@ describe("SQLite tool support", () => {
 		for (let i = 1; i <= 32; i++) row[`col_${i}`] = `value_${i}`;
 
 		const rendered = renderTable(columns, [row], {
-			totalCount: 1,
+			totalCount: { kind: "exact", rows: 1 },
 			offset: 0,
 			limit: 20,
 			table: "wide_columns",
@@ -720,5 +721,199 @@ describe("SQLite table listing row counts", () => {
 		const rendered = renderTableList(listTables(base, { probeCap: 3 }));
 		expect(rendered).toContain("big (3+ rows)");
 		expect(rendered).toContain("small (2 rows)");
+	});
+});
+
+describe("SQLite paged row counts (#17535)", () => {
+	// The paged total uses the listing's bounded-probe contract, never an
+	// unbounded exact COUNT(*) over the filtered table.
+	let db: Database;
+
+	beforeAll(() => {
+		db = new Database(":memory:");
+		db.run("CREATE TABLE items (id INTEGER PRIMARY KEY, v TEXT NOT NULL)");
+		const stmt = db.prepare("INSERT INTO items (v) VALUES (?)");
+		for (let i = 0; i < 6; i++) stmt.run("x");
+	});
+
+	afterAll(() => db.close());
+
+	it("probes the total instead of counting past the cap when more rows remain", () => {
+		const page = queryRows(db, "items", { limit: 2, offset: 0, probeCap: 5 });
+		expect(page.totalCount).toEqual({ kind: "atLeast", rows: 5 });
+	});
+
+	it("counts exactly when the filtered table fits under the cap", () => {
+		const page = queryRows(db, "items", { limit: 2, offset: 0, probeCap: 10 });
+		expect(page.totalCount).toEqual({ kind: "exact", rows: 6 });
+	});
+
+	it("keeps the exact total for a page that ends the result set", () => {
+		const page = queryRows(db, "items", { limit: 4, offset: 2, probeCap: 3 });
+		expect(page.totalCount).toEqual({ kind: "exact", rows: 6 });
+	});
+
+	it("bounds the probe with the where clause applied", () => {
+		const page = queryRows(db, "items", { limit: 2, offset: 0, probeCap: 3, where: "id > 1" });
+		expect(page.totalCount).toEqual({ kind: "atLeast", rows: 3 });
+	});
+
+	it("keeps the footer when the page ends exactly at the probe cap and the lookahead row proves more rows", () => {
+		// 51 rows, probeCap 50: the page showing rows 46..50 (shown == cap) must
+		// still render a continuation footer — the limit+1 lookahead proves row 51
+		// exists, so the total strengthens to a lower bound of shown + 1.
+		const big = new Database(":memory:");
+		try {
+			big.run("CREATE TABLE cap_items (id INTEGER PRIMARY KEY)");
+			big.run(
+				"WITH RECURSIVE seq(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM seq WHERE i < 51) INSERT INTO cap_items SELECT i FROM seq",
+			);
+			const page = queryRows(big, "cap_items", { limit: 5, offset: 45, probeCap: 50 });
+			expect(page.totalCount).toEqual({ kind: "atLeast", rows: 51 });
+			const rendered = renderTable(page.columns, page.rows, {
+				totalCount: page.totalCount,
+				offset: 45,
+				limit: 5,
+				table: "cap_items",
+				dbPath: "cap_items.db",
+			});
+			expect(rendered).toContain(
+				"[1+ more rows; append :cap_items?limit=5&offset=50 to the database path to continue]",
+			);
+		} finally {
+			big.close();
+		}
+	});
+
+	it("renders a lower-bound footer for capped counts", () => {
+		const rendered = renderTable(["id"], [{ id: 1 }], {
+			totalCount: { kind: "atLeast", rows: 5 },
+			offset: 0,
+			limit: 1,
+			table: "items",
+			dbPath: "items.db",
+		});
+		expect(rendered).toContain("[4+ more rows;");
+	});
+
+	it("renders the exact footer when the count is exact", () => {
+		const rendered = renderTable(["id"], [{ id: 1 }], {
+			totalCount: { kind: "exact", rows: 6 },
+			offset: 0,
+			limit: 1,
+			table: "items",
+			dbPath: "items.db",
+		});
+		expect(rendered).toContain("[5 more rows;");
+	});
+});
+
+describe("SQLite read of a large table (#17535)", () => {
+	// One row past the default probe cap: the paged footer must come from the
+	// bounded probe (lower bound), not an exact whole-table COUNT(*).
+	let tmpDir: string;
+	let sqlitePath: string;
+	let readTool: ReadTool;
+
+	beforeAll(async () => {
+		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "sqlite-large-test-"));
+		sqlitePath = path.join(tmpDir, "large.sqlite");
+		const db = new Database(":memory:");
+		try {
+			db.run("CREATE TABLE events (id INTEGER PRIMARY KEY, kind TEXT NOT NULL)");
+			db.run(`
+				WITH RECURSIVE seq(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM seq WHERE i < 50001)
+				INSERT INTO events (kind) SELECT 'tick' FROM seq
+			`);
+			await fs.writeFile(sqlitePath, db.serialize());
+		} finally {
+			db.close();
+		}
+		readTool = new ReadTool(createSession(tmpDir));
+	});
+
+	afterAll(async () => {
+		await removeWithRetries(tmpDir);
+	});
+
+	it("caps the paged-count footer instead of counting the whole table", async () => {
+		const result = await readTool.execute("sqlite-large-page", { path: `${sqlitePath}:events?limit=5` });
+		const text = getText(result);
+
+		expect(text).toContain("[49995+ more rows; append :events?limit=5&offset=5 to the database path to continue]");
+	});
+
+	it("caps the schema sample footer instead of counting the whole table", async () => {
+		const result = await readTool.execute("sqlite-large-schema", { path: `${sqlitePath}:events` });
+		const text = getText(result);
+
+		expect(text).toContain("[49995+ more rows; append :events?limit=20&offset=5 to the database path to continue]");
+	});
+});
+
+describe("SQLite filtered count probe bounds (#17535)", () => {
+	// A filtered probe's LIMIT caps *matched* rows, not *visited* rows: with a
+	// selective unindexed filter on a table larger than the cap, SQLite must
+	// visit every table row to prove the count — the same synchronous
+	// full-table scan the bounded probe exists to prevent. The probe must be
+	// skipped unless the table itself provably fits under the cap.
+	it("skips the filtered probe when the table exceeds the cap", () => {
+		const db = new Database(":memory:");
+		try {
+			db.run("CREATE TABLE wide (id INTEGER PRIMARY KEY, flag INTEGER NOT NULL)");
+			db.run(
+				"WITH RECURSIVE seq(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM seq WHERE i < 2000) INSERT INTO wide SELECT i, CASE WHEN i <= 40 THEN 1 ELSE 0 END FROM seq",
+			);
+			const page = queryRows(db, "wide", { limit: 5, offset: 0, probeCap: 50, where: "flag = 1" });
+			// An exact 40 would prove the probe ran (and visited all 2000 rows
+			// to find only 40 matches); the lookahead row is the honest bound.
+			expect(page.totalCount).toEqual({ kind: "atLeast", rows: 6 });
+		} finally {
+			db.close();
+		}
+	});
+
+	it("keeps the exact filtered count when the table fits under the cap", () => {
+		const db = new Database(":memory:");
+		try {
+			db.run("CREATE TABLE small (id INTEGER PRIMARY KEY, flag INTEGER NOT NULL)");
+			db.run(
+				"WITH RECURSIVE seq(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM seq WHERE i < 100) INSERT INTO small SELECT i, CASE WHEN i <= 40 THEN 1 ELSE 0 END FROM seq",
+			);
+			const page = queryRows(db, "small", { limit: 5, offset: 0, probeCap: 200, where: "flag = 1" });
+			expect(page.totalCount).toEqual({ kind: "exact", rows: 40 });
+		} finally {
+			db.close();
+		}
+	});
+
+	it("trusts a planner estimate above the cap to skip the filtered probe", () => {
+		const db = new Database(":memory:");
+		try {
+			db.run("CREATE TABLE analyzed (id INTEGER PRIMARY KEY, flag INTEGER NOT NULL)");
+			db.run(
+				"WITH RECURSIVE seq(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM seq WHERE i < 2000) INSERT INTO analyzed SELECT i, CASE WHEN i <= 40 THEN 1 ELSE 0 END FROM seq",
+			);
+			db.run("ANALYZE");
+			const page = queryRows(db, "analyzed", { limit: 5, offset: 0, probeCap: 50, where: "flag = 1" });
+			expect(page.totalCount).toEqual({ kind: "atLeast", rows: 6 });
+		} finally {
+			db.close();
+		}
+	});
+
+	it("reports no count for a past-the-end filtered page on a table above the cap", () => {
+		const db = new Database(":memory:");
+		try {
+			db.run("CREATE TABLE past_end (id INTEGER PRIMARY KEY, flag INTEGER NOT NULL)");
+			db.run(
+				"WITH RECURSIVE seq(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM seq WHERE i < 2000) INSERT INTO past_end SELECT i, CASE WHEN i <= 40 THEN 1 ELSE 0 END FROM seq",
+			);
+			const page = queryRows(db, "past_end", { limit: 5, offset: 100, probeCap: 50, where: "flag = 1" });
+			expect(page.rows.length).toBe(0);
+			expect(page.totalCount).toEqual({ kind: "atLeast", rows: 0 });
+		} finally {
+			db.close();
+		}
 	});
 });
