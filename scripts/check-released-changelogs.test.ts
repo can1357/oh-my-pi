@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { $ } from "bun";
 import { FIX_COMMAND } from "./check-released-changelogs";
-import { type RunChangelogFixerResult, runChangelogFixer } from "./fix-changelogs";
+import { MAX_CHANGELOG_BYTES, type RunChangelogFixerResult, runChangelogFixer } from "./fix-changelogs";
 import { updateChangelogsForRelease } from "./release";
 
 const CHANGELOG = "packages/tui/CHANGELOG.md";
@@ -106,8 +106,8 @@ async function repoWith(content: string): Promise<Repo> {
 }
 
 /** Runs the repository's changelog fixer, as `bun run fix:changelogs` does. */
-async function fixChangelogs(repo: Repo, maxBytes?: number): Promise<RunChangelogFixerResult> {
-	return runChangelogFixer({ repoRoot: repo.dir, maxBytes });
+async function fixChangelogs(repo: Repo): Promise<RunChangelogFixerResult> {
+	return runChangelogFixer({ repoRoot: repo.dir });
 }
 
 /** The changelog half of `bun run release`, committed and tagged as the release script does. */
@@ -245,25 +245,36 @@ describe("check-released-changelogs", () => {
 	);
 
 	test(
-		"passes the fixer's size-limit archive, which moves the oldest sections behind a footer, and still checks what remains",
+		"passes the fixer's archive when new [Unreleased] entries push a changelog over the size limit, and still checks what remains",
 		async () => {
-			const repo = await repoWith(THREE_RELEASES);
+			// A valid changelog just under the default limit; eight new entries take it over,
+			// and `bun run fix:changelogs` moves the oldest release behind a footer.
+			let content =
+				"# Changelog\n\n## [Unreleased]\n\n## [1.1.0] - 2026-02-01\n\n### Fixed\n\n- Fixed a recent bug\n\n## [1.0.0] - 2026-01-01\n\n### Fixed\n\n";
+			for (let index = 0; ; index++) {
+				const line = `- Fixed historical rendering regression ${index} in the terminal screen.\n`;
+				if (Buffer.byteLength(content + line) > MAX_CHANGELOG_BYTES - 128) break;
+				content += line;
+			}
+			const repo = await repoWith(content);
+			const entries = Array.from({ length: 8 }, (_, index) => `- Added a new terminal feature ${index}\n`).join("");
+			await repo.write(content.replace("## [Unreleased]\n", `## [Unreleased]\n\n### Added\n\n${entries}`));
+			expect(Buffer.byteLength(await repo.read())).toBeGreaterThan(MAX_CHANGELOG_BYTES);
 
-			const fixed = await fixChangelogs(repo, 1);
-			const collapsed = fixed.changedFiles[0]?.collapsedReleases ?? 0;
-			expect(collapsed).toBeGreaterThan(0);
-			const content = await repo.read();
-			expect(content).toContain("Older entries are archived in [");
-			expect(content).not.toContain("## [1.0.0]");
+			const fixed = await fixChangelogs(repo);
+			expect(fixed.changedFiles.map(file => file.collapsedReleases)).toEqual([1]);
+			const archivedContent = await repo.read();
+			expect(archivedContent).toContain("Older entries are archived in [");
+			expect(archivedContent).not.toContain("## [1.0.0]");
 
 			const archived = await check(repo, "--base", "HEAD");
-			expect(archived.output).toContain(`; ${collapsed} oldest archived behind a new size-limit footer.`);
+			expect(archived.output).toContain("; 1 oldest archived behind a new size-limit footer.");
 			expect(archived.exitCode).toBe(0);
 
-			await repo.write(content.replace("- Added a newest feature\n", `- Added a newest feature\n${BRANCH_ENTRY}\n`));
+			await repo.write(archivedContent.replace("- Fixed a recent bug\n", `- Fixed a recent bug\n${BRANCH_ENTRY}\n`));
 			const added = await check(repo, "--base", "HEAD");
 			expect(added.exitCode).toBe(1);
-			expect(added.output).toContain(`${CHANGELOG}: ## [1.2.0] - 2026-03-01\n  Added under \`### Added\``);
+			expect(added.output).toContain(`${CHANGELOG}: ## [1.1.0] - 2026-02-01\n  Added under \`### Fixed\``);
 		},
 		TEST_TIMEOUT_MS,
 	);
@@ -330,21 +341,24 @@ describe("check-released-changelogs", () => {
 	);
 
 	test(
-		"passes a released section with no entries disappearing, as a release removes those, but not one with entries",
+		"passes a release that removes an empty released version, but not a released section with entries going",
 		async () => {
-			const withEmpty = BASE_CHANGELOG.replace("## [1.0.0]", "## [1.0.1] - 2026-01-02\n\n## [1.0.0]");
+			const withEmpty = BASE_CHANGELOG.replace("## [1.0.0]", "## [0.9.0] - 2025-12-01\n\n## [1.0.0]");
 			const repo = await repoWith(withEmpty);
-			await repo.write(BASE_CHANGELOG);
+			const beforeRelease = (await repo.git("rev-parse", "HEAD")).output.trim();
+			await cutRelease(repo, "1.1.0");
+			const released = await repo.read();
+			expect(released).not.toContain("## [0.9.0]");
 
-			const emptyGone = await check(repo, "--base", "HEAD");
+			const emptyGone = await check(repo, "--base", beforeRelease);
 			expect(emptyGone.output).toContain("Released changelog sections match");
 			expect(emptyGone.exitCode).toBe(0);
 
-			await repo.write(BASE_CHANGELOG.slice(0, BASE_CHANGELOG.indexOf("## [1.0.0]")));
-			const entriesGone = await check(repo, "--base", "HEAD");
+			await repo.write(released.slice(0, released.indexOf("## [1.0.0]")));
+			const entriesGone = await check(repo, "--base", beforeRelease);
 			expect(entriesGone.exitCode).toBe(1);
 			expect(entriesGone.output).toContain(`${CHANGELOG}: ## [1.0.0] - 2026-01-01\n  Missing here.`);
-			expect(entriesGone.output).not.toContain("## [1.0.1]");
+			expect(entriesGone.output).not.toContain("## [0.9.0]");
 		},
 		TEST_TIMEOUT_MS,
 	);
