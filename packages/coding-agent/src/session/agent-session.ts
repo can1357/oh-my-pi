@@ -12981,8 +12981,12 @@ export class AgentSession implements SettingsScope {
 		// No breakpoint after it can be read by the next request.
 		let volatileSuffix = false;
 		if (history?.length) {
-			// Detach before the conversion pipeline can await or mutate caller-owned messages.
-			const detachedHistory = structuredClone(history);
+			// Detach the message and content-block containers without recursively
+			// cloning nested payloads; the conversion pipeline treats those as immutable.
+			const detachedHistory = history.map((message): AgentMessage => {
+				if (!("content" in message) || !Array.isArray(message.content)) return { ...message };
+				return { ...message, content: message.content.map(block => ({ ...block })) } as AgentMessage;
+			});
 			for (const message of detachedHistory) {
 				if (message.role === "custom" && message.customType === IMAGE_ATTACHMENT_DESCRIPTION_TYPE) {
 					volatileSuffix = true;
