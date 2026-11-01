@@ -31,6 +31,11 @@ import {
 import { getHistoryDbPath } from "@oh-my-pi/pi-utils/dirs";
 import { getDbBusyTimeoutMs, isBunTestRuntime } from "@oh-my-pi/pi-utils/env";
 import * as logger from "@oh-my-pi/pi-utils/logger";
+import {
+	type HistoryDatabaseRegistration,
+	prepareHistoryDatabaseOpen,
+	registerHistoryDatabase,
+} from "./history-database";
 
 const SESSION_INDEX_DDL = `
 CREATE TABLE IF NOT EXISTS session_titles (
@@ -56,6 +61,7 @@ interface SessionIndexHandle {
 	upsertTitle: Statement;
 	selectTitle: Statement;
 	insertRecap: Statement;
+	registration: HistoryDatabaseRegistration;
 }
 
 let handle: SessionIndexHandle | undefined;
@@ -65,12 +71,8 @@ let failedPath: string | undefined;
 function closeHandle(): void {
 	if (!handle) return;
 	try {
-		handle.upsertTitle.finalize();
-		handle.selectTitle.finalize();
-		handle.insertRecap.finalize();
-		handle.db.close();
+		handle.registration.close({ checkpoint: false });
 	} catch {}
-	handle = undefined;
 }
 
 function openSessionIndex(): SessionIndexHandle | undefined {
@@ -93,12 +95,13 @@ function openSessionIndex(): SessionIndexHandle | undefined {
 	if (failedPath === dbPath) return undefined;
 	closeHandle();
 	try {
+		if (!prepareHistoryDatabaseOpen(dbPath)) return undefined;
 		fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 		const db = new Database(dbPath);
 		// Install the busy handler BEFORE any lock-taking statement (see #2421).
 		db.run(`PRAGMA busy_timeout = ${getDbBusyTimeoutMs()}`);
 		db.run(`PRAGMA journal_mode=WAL;\nPRAGMA synchronous=NORMAL;\n${SESSION_INDEX_DDL}`);
-		handle = {
+		const index: SessionIndexHandle = {
 			dbPath,
 			identity: sqliteFileIdentity(dbPath),
 			db,
@@ -111,7 +114,20 @@ ON CONFLICT(session_id) DO UPDATE SET
 			`),
 			selectTitle: db.prepare("SELECT title FROM session_titles WHERE session_id = ? AND typeof(title) = 'text'"),
 			insertRecap: db.prepare("INSERT INTO session_recaps (session_id, cwd, recap) VALUES (?, ?, ?)"),
+			registration: registerHistoryDatabase({
+				db,
+				finalize: () => {
+					index.upsertTitle.finalize();
+					index.selectTitle.finalize();
+					index.insertRecap.finalize();
+					if (handle === index) handle = undefined;
+				},
+				reopen: () => {
+					if (!openSessionIndex()) throw new Error("Session index unavailable after reopening history database");
+				},
+			}),
 		};
+		handle = index;
 		failedPath = undefined;
 		return handle;
 	} catch (error) {
@@ -132,7 +148,8 @@ export function recordSessionTitle(sessionId: string, title: string): void {
 	const index = openSessionIndex();
 	if (!index) return;
 	try {
-		index.upsertTitle.run(sessionId, title);
+		if (!index.registration.beforeWrite()) return;
+		handle?.upsertTitle.run(sessionId, title);
 	} catch (error) {
 		logger.debug("Session title index write failed", { sessionId, error: String(error) });
 	}
@@ -159,7 +176,8 @@ export function recordSessionRecap(sessionId: string, cwd: string, recap: string
 	const index = openSessionIndex();
 	if (!index) return;
 	try {
-		index.insertRecap.run(sessionId, cwd, recap);
+		if (!index.registration.beforeWrite()) return;
+		handle?.insertRecap.run(sessionId, cwd, recap);
 	} catch (error) {
 		logger.debug("Session recap journal write failed", { sessionId, error: String(error) });
 	}
