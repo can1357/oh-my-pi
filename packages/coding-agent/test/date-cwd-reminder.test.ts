@@ -843,6 +843,33 @@ describe("date-cwd-reminder", () => {
 				expect(moved.messages[4]?.content).toBe(`${renderDateCwdReminder("2026-08-16", "/work")}\n\nnext`);
 			});
 
+			it("sends turns another process appended with that process's reminders after a reload", () => {
+				using tempDir = TempDir.createSync("@pi-date-cwd-reload-");
+				const sessionManager = SessionManager.inMemory(tempDir.path());
+				const send = (injector: DateCwdReminderInjector, messages: Message[], date: string) =>
+					injector.transform({ systemPrompt: ["system"], messages }, date, "/work");
+				const first: Message = { role: "user", content: "first", timestamp: 1 };
+				const reply = createAssistantMessage("a");
+				const second: Message = { role: "user", content: "second", timestamp: 5 };
+				const secondReply = createAssistantMessage("b");
+				const here = new DateCwdReminderInjector(createSessionDateCwdReminderJournal(sessionManager));
+				sessionManager.appendMessage(first);
+				send(here, [first], "2026-08-14");
+				sessionManager.appendMessage(reply);
+
+				// Another process continues the same session the next day; this one then reloads it.
+				const elsewhere = new DateCwdReminderInjector(createSessionDateCwdReminderJournal(sessionManager));
+				sessionManager.appendMessage(second);
+				const sentElsewhere = send(elsewhere, [first, reply, second], "2026-08-15");
+				sessionManager.appendMessage(secondReply);
+				const third: Message = { role: "user", content: "third", timestamp: 9 };
+				sessionManager.appendMessage(third);
+				const reloaded = send(here, [first, reply, second, secondReply, third], "2026-08-15");
+
+				expect(wireOf(reloaded).slice(0, 3)).toEqual(wireOf(sentElsewhere));
+				expect(reloaded.messages[4]?.content).toBe("third");
+			});
+
 			it("starts the history after /clear afresh even when its first turn repeats an earlier one", () => {
 				using tempDir = TempDir.createSync("@pi-date-cwd-clear-");
 				const sessionManager = SessionManager.inMemory(tempDir.path());
