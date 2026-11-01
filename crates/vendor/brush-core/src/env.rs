@@ -218,11 +218,7 @@ impl ShellEnvironment {
 	/// and a map built in one step. Each variable looked at is one step of an
 	/// [`crate::interp::ElementBudget`]. Shadowing is resolved as
 	/// [`Self::iter_exported`] resolves it, the innermost exported variable of
-	/// each name winning, by looking the name up in the scopes inside the one
-	/// it is in. **Nothing is collected to resolve it**: a set of the names
-	/// seen grows with the environment, and growing it rehashes all of it in
-	/// one step — 249 ms at a million exported variables, the longest step
-	/// left once the walk was divided.
+	/// each name winning ([`Self::innermost_divided`]).
 	///
 	/// # Errors
 	///
@@ -253,6 +249,21 @@ impl ShellEnvironment {
 	/// The innermost variable of each name among those `counts` accepts,
 	/// every variable looked at one step of an
 	/// [`crate::interp::ElementBudget`].
+	///
+	/// **A name is hashed only when it can shadow or be shadowed, and then a
+	/// stride at a time.** The walk goes from the innermost scope out and
+	/// keeps the names found, keyed by their hash
+	/// ([`crate::interp::hash_in_strides`]). Three earlier versions held the
+	/// worker. A set that grew as it filled rehashed all of it in one step:
+	/// 249 ms at a million exported variables. Looking each name up in every
+	/// scope inside its own hashed a 1 MiB exported name once per scope: 16
+	/// nested shell functions held `/usr/bin/true` 6.2 ms under load, against
+	/// 1.7 at the base. A set keyed by the name itself hashed a 64 MiB exported
+	/// name in one call: 10.1 ms quiet and 28.8 loaded, where the lookup before
+	/// it never hashed that name at all. The map is sized before the walk, so
+	/// it never grows. A name in the outermost scope is never added, since no
+	/// scope is left outside it, and is not hashed while no name has been
+	/// added, since then nothing can shadow it.
 	async fn innermost_divided(
 		&self,
 		params: &crate::ExecutionParameters,
@@ -260,16 +271,32 @@ impl ShellEnvironment {
 	) -> Result<Vec<(&String, &ShellVariable)>, error::Error> {
 		let mut budget = crate::interp::ElementBudget::new();
 		let mut found = Vec::new();
+		let state = std::hash::RandomState::new();
+		// The names found so far, by hash; only an inner scope's are added.
+		let inner_variables = self.scopes.iter().skip(1).map(|(_, map)| map.variables.len()).sum();
+		let mut seen: HashMap<u64, Vec<&String>> = HashMap::with_capacity(inner_variables);
 		for (depth, (_, var_map)) in self.scopes.iter().enumerate().rev() {
-			let inner = &self.scopes[depth + 1..];
+			let outermost = depth == 0;
 			for (name, var) in var_map.iter() {
 				let due = budget.charge(0);
 				if due > 0 {
 					crate::interp::loop_checkpoints(params, due).await?;
 				}
-				if counts(var) && !inner.iter().any(|(_, map)| map.get(name).is_some_and(counts)) {
-					found.push((name, var));
+				if !counts(var) {
+					continue;
 				}
+				if outermost && seen.is_empty() {
+					found.push((name, var));
+					continue;
+				}
+				let hash = crate::interp::hash_in_strides(params, &mut budget, &state, name).await?;
+				if seen.get(&hash).is_some_and(|names| names.iter().any(|seen_name| *seen_name == name)) {
+					continue;
+				}
+				if !outermost {
+					seen.entry(hash).or_default().push(name);
+				}
+				found.push((name, var));
 			}
 		}
 		Ok(found)

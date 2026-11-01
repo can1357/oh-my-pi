@@ -107,18 +107,36 @@ pub(crate) async fn expand_and_eval(
 	// no expression holds, so `$(( ' ' ))` and `x[' ']=v` are syntax errors as
 	// in Bash, while the double quotes of `$(( "1"+2 ))` are removed. Taking
 	// single quotes out first had turned `' '` into a blank expression, which
-	// is zero. The text can be any length, so the quoted copy is made in
-	// strides.
-	let mut quoted = String::with_capacity(expr.len() + 2);
-	quoted.push('"');
-	interp::push_str_in_strides(params, &mut quoted, expr)
-		.await
-		.map_err(|_e| EvalError::FailedToExpandExpression(String::new()))?;
-	quoted.push('"');
-	let options = expansion::ExpanderOptions { tilde_expand: false, ..Default::default() };
-	let expanded_self = expansion::basic_expand_word_with_options(shell, params, &quoted, &options)
-		.await
-		.map_err(|_e| EvalError::FailedToExpandExpression(expr.to_owned()))?;
+	// is zero.
+	//
+	// **An expression with nothing to expand is its own expansion.** Inside
+	// double quotes only `$`, `` ` `` and `\` expand and `"` is removed, so
+	// text without them comes out as it went in. The quotes added defeat the
+	// expander's own test for such a word, so expanding it anyway parsed every
+	// expression as a word, however short; with a clock read on every quoted
+	// copy, that made arithmetic loops 29–55% slower than on the base.
+	let expanded_self = if expr.len() <= interp::DIVIDE_COPY_ABOVE_BYTES
+		&& !expr.contains(['$', '`', '\\', '"'])
+	{
+		expr.to_owned()
+	} else {
+		// Only a long text is copied in strides: a strided copy spends a
+		// checkpoint that reads the thread's CPU clock, a system call.
+		let mut quoted = String::with_capacity(expr.len() + 2);
+		quoted.push('"');
+		if expr.len() <= interp::DIVIDE_COPY_ABOVE_BYTES {
+			quoted.push_str(expr);
+		} else {
+			interp::push_str_in_strides(params, &mut quoted, expr)
+				.await
+				.map_err(|_e| EvalError::FailedToExpandExpression(String::new()))?;
+		}
+		quoted.push('"');
+		let options = expansion::ExpanderOptions { tilde_expand: false, ..Default::default() };
+		expansion::basic_expand_word_with_options(shell, params, &quoted, &options)
+			.await
+			.map_err(|_e| EvalError::FailedToExpandExpression(expr.to_owned()))?
+	};
 
 	// Now parse.
 	let expr = parse_expression(expanded_self).await?;
@@ -140,17 +158,55 @@ pub(crate) async fn expand_and_eval(
 /// Bash, not the value of `y`, because the value was expanded once on its way
 /// to the assignment.
 ///
+/// `assigned` is the variable the value is being assigned to, when it is
+/// assigned by name rather than as an element. Bash makes that variable
+/// visible before it evaluates the value, so under `set -u` a reference to it
+/// reads an unset variable as zero rather than failing: `set -u; declare -i
+/// count; count=count+1` sets `count` to 1. Any other unset name still fails.
+///
 /// # Arguments
 ///
 /// * `shell` - The shell to use for evaluation.
 /// * `params` - The execution parameters of the run doing the evaluation.
+/// * `assigned` - The variable being assigned by name, if any.
 /// * `value` - The expanded value to evaluate.
 pub async fn eval_expanded(
 	shell: &mut Shell<impl extensions::ShellExtensions>,
 	params: &ExecutionParameters,
+	assigned: Option<&str>,
 	value: String,
 ) -> Result<i64, EvalError> {
-	evaluate(shell, params, &parse_expression(value).await?).await
+	let expr = parse_expression(value).await?;
+	Evaluator { shell, params, assigned, nodes: 0 }.run(&expr).await
+}
+
+/// Parses the arithmetic text a builtin was handed (`let`, a subscript given
+/// to `unset`), with the parser's own error: in place, with the parser's
+/// cache, up to [`PARSE_IN_PLACE_BYTES`], and otherwise from a copy made in
+/// strides, without the cache, off the worker. `let` had parsed every
+/// expression in place with the cache, whose key is the whole text: eight
+/// distinct 8 MiB expressions peaked at 137 MB through `let` against 33 MB
+/// through `declare -i`.
+///
+/// # Errors
+///
+/// Returns the parser's error for text that is not an expression,
+/// [`crate::error::ErrorKind::Interrupted`] if the run is cancelled while the
+/// text is copied, and [`crate::error::ErrorKind::ThreadingError`] if the
+/// blocking worker did not run the parse.
+pub async fn parse_for_builtin(
+	params: &ExecutionParameters,
+	text: &str,
+) -> Result<ast::ArithmeticExpr, crate::error::Error> {
+	if text.len() <= PARSE_IN_PLACE_BYTES {
+		return Ok(brush_parser::arithmetic::parse(text)?);
+	}
+	let owned = interp::clone_in_strides(params, text).await?;
+	match parse_uncached_off_worker(owned).await {
+		Ok(Ok(parsed)) => Ok(parsed),
+		Ok(Err((error, _text))) => Err(error.into()),
+		Err(join_error) => Err(crate::error::ErrorKind::ThreadingError(join_error).into()),
+	}
 }
 
 /// The longest expression parsed in place, on the runtime's worker.
@@ -175,17 +231,37 @@ const PARSE_IN_PLACE_BYTES: usize = 8 * 1024;
 /// cache, unless this is one already (see
 /// [`commands::builtin_on_blocking_worker`]).
 async fn parse_expression(expanded: String) -> Result<ast::ArithmeticExpr, EvalError> {
-	if expanded.len() <= PARSE_IN_PLACE_BYTES || commands::builtin_on_blocking_worker() {
+	if expanded.len() <= PARSE_IN_PLACE_BYTES {
 		return brush_parser::arithmetic::parse(&expanded).map_err(|_e| EvalError::ParseError(expanded));
 	}
-	let parsed = tokio::task::spawn_blocking(move || {
-		brush_parser::arithmetic::parse_uncached(&expanded).map_err(|_e| EvalError::ParseError(expanded))
-	})
-	.await;
+	// The parse error names the text, so the text is kept for it.
+	let parsed = parse_uncached_off_worker(expanded).await;
 	match parsed {
-		Ok(parsed) => parsed,
-		Err(join_error) if join_error.is_panic() => std::panic::resume_unwind(join_error.into_panic()),
+		Ok(Ok(parsed)) => Ok(parsed),
+		Ok(Err((_error, text))) => Err(EvalError::ParseError(text)),
 		Err(_) => Err(EvalError::ParseAbandoned),
+	}
+}
+
+/// What [`parse_uncached_off_worker`] returns: the expression, or the
+/// parser's error and the text it could not parse.
+type UncachedParse = Result<ast::ArithmeticExpr, (brush_parser::WordParseError, String)>;
+
+/// Parses `text`, which is longer than [`PARSE_IN_PLACE_BYTES`], without the
+/// parser's cache — on a blocking worker, or in place on a builtin that is on
+/// one already ([`commands::builtin_on_blocking_worker`]). A panic in the
+/// parse is resumed here.
+async fn parse_uncached_off_worker(text: String) -> Result<UncachedParse, tokio::task::JoinError> {
+	let parse = move || match brush_parser::arithmetic::parse_uncached(&text) {
+		Ok(parsed) => Ok(parsed),
+		Err(error) => Err((error, text)),
+	};
+	if commands::builtin_on_blocking_worker() {
+		return Ok(parse());
+	}
+	match tokio::task::spawn_blocking(parse).await {
+		Err(join_error) if join_error.is_panic() => std::panic::resume_unwind(join_error.into_panic()),
+		other => other,
 	}
 }
 
@@ -202,12 +278,58 @@ pub async fn evaluate(
 	params: &ExecutionParameters,
 	expr: &ast::ArithmeticExpr,
 ) -> Result<i64, EvalError> {
-	Evaluator { shell, params, nodes: 0 }.run(expr, 0).await
+	Evaluator { shell, params, assigned: None, nodes: 0 }.run(expr).await
 }
 
-/// What [`Evaluator::run_nested`] returns: boxed, because that is where the
-/// evaluation recurses.
-type NestedRun<'e> = std::pin::Pin<Box<dyn Future<Output = Result<i64, EvalError>> + Send + 'e>>;
+/// The referenced expressions one evaluation is inside, innermost last, kept
+/// while their level is evaluated so that the steps evaluating them can
+/// borrow them as they borrow the root.
+///
+/// **A referenced value that is itself an expression is evaluated on the
+/// same explicit stack, not by a nested run.** A nested run is one more poll
+/// on the thread's stack per level. A chain of references, such as a cycle,
+/// is followed to [`MAX_VARIABLE_DEREF_DEPTH`] levels before it is refused,
+/// and at that depth the nested runs overflowed a 2 MiB thread stack and
+/// aborted the process.
+///
+/// **An expression is freed when its level is left**, as a nested run freed
+/// it, so the evaluation holds no more of them than it is levels deep. Kept to
+/// the end, an expression that reads one a million times would hold a million
+/// of them, and free them all in one step.
+#[derive(Default)]
+struct Kept(std::cell::RefCell<Vec<std::sync::Arc<ast::ArithmeticExpr>>>);
+
+impl Kept {
+	/// Keeps `expr` until the matching [`Self::release`], returning it
+	/// borrowed.
+	fn keep(&self, expr: ast::ArithmeticExpr) -> &ast::ArithmeticExpr {
+		let kept = std::sync::Arc::new(expr);
+		let pointer = std::sync::Arc::as_ptr(&kept);
+		self.0.borrow_mut().push(kept);
+		// SAFETY: the value is in an allocation of its own, which the list
+		// growing never moves, and nothing takes it mutably. It is freed only
+		// with `self`, or by `release`, whose caller holds no reference to it
+		// by then; so it lives, unchanged, as long as the reference returned
+		// is held.
+		unsafe { &*pointer }
+	}
+
+	/// Frees the expression kept last.
+	///
+	/// # Safety
+	///
+	/// The caller holds no reference [`Self::keep`] returned for it.
+	unsafe fn release(&self) {
+		drop(self.0.borrow_mut().pop());
+	}
+}
+
+/// What reading a referenced value comes to: a number, or an expression to
+/// evaluate one level deeper.
+enum Read {
+	Value(i64),
+	Expression(ast::ArithmeticExpr),
+}
 
 /// One evaluation of a parsed expression: the shell it reads and writes, the
 /// run it belongs to, and how many nodes it has evaluated.
@@ -229,13 +351,16 @@ type NestedRun<'e> = std::pin::Pin<Box<dyn Future<Output = Result<i64, EvalError
 /// `async` evaluator boxes a future at every node, and that cost arithmetic
 /// 2.4–9.8% of its throughput on the gate machine. The stacks hold their first
 /// [`INLINE_STEPS`] entries in place, so an ordinary expression allocates
-/// nothing at all. The one recursion left is a referenced value that is
-/// itself an expression (`a=b+1; (( a ))`), which a nested run evaluates one
-/// level deeper.
+/// nothing at all. A referenced value that is itself an expression
+/// (`a=b+1; (( a ))`) is evaluated on the same stack one level deeper
+/// ([`Kept`]).
 struct Evaluator<'s, 'p, SE: extensions::ShellExtensions> {
-	shell:  &'s mut Shell<SE>,
-	params: &'p ExecutionParameters,
-	nodes:  usize,
+	shell:    &'s mut Shell<SE>,
+	params:   &'p ExecutionParameters,
+	/// The variable being assigned by name, which `set -u` does not refuse
+	/// to read ([`eval_expanded`]).
+	assigned: Option<&'p str>,
+	nodes:    usize,
 }
 
 /// A step [`Evaluator::run`] still has to take. A step that takes values takes
@@ -281,6 +406,9 @@ enum Step<'a> {
 	/// Take an element's index and then a new value, and assign the value to
 	/// that element of the array named here; the result below them stays.
 	UnaryAssignElement(&'a str),
+	/// Leave a referenced value's expression, one level up, and free it
+	/// ([`Kept::release`]).
+	Leave,
 }
 
 /// How many entries a run's stacks hold in place before they spill to the
@@ -344,9 +472,11 @@ impl InlineStack<i64> {
 
 impl<SE: extensions::ShellExtensions> Evaluator<'_, '_, SE> {
 	/// Evaluates `root` on explicit stacks, spending a checkpoint before every
-	/// [`interp::ELEMENT_CHECKPOINT_STRIDE`]-th node. `depth` is how many
-	/// referenced values this run is inside.
-	async fn run(&mut self, root: &ast::ArithmeticExpr, depth: u32) -> Result<i64, EvalError> {
+	/// [`interp::ELEMENT_CHECKPOINT_STRIDE`]-th node.
+	async fn run(&mut self, root: &ast::ArithmeticExpr) -> Result<i64, EvalError> {
+		let kept = Kept::default();
+		// How many referenced values the step being taken is inside.
+		let mut depth: u32 = 0;
 		let mut steps = InlineStack::new(Step::Truth);
 		let mut values = InlineStack::new(0);
 		steps.push(Step::Eval(root));
@@ -364,13 +494,15 @@ impl<SE: extensions::ShellExtensions> Evaluator<'_, '_, SE> {
 					// A plain reference, the commonest node, is read here rather
 					// than scheduled.
 					if let ast::ArithmeticExpr::Reference(ast::ArithmeticTarget::Variable(name)) = expr {
-						values.push(self.variable_value(name, depth).await?);
+						let read = self.read_variable(name).await?;
+						Self::enter(&kept, read, &mut depth, &mut steps, &mut values)?;
 					} else {
 						Self::schedule(&mut steps, expr);
 					}
 				},
 				Step::Deref(ast::ArithmeticTarget::Variable(name)) => {
-					values.push(self.variable_value(name, depth).await?);
+					let read = self.read_variable(name).await?;
+					Self::enter(&kept, read, &mut depth, &mut steps, &mut values)?;
 				},
 				Step::Deref(ast::ArithmeticTarget::ArrayElement(name, index_expr)) => {
 					steps.push(Step::DerefElement(name));
@@ -385,15 +517,16 @@ impl<SE: extensions::ShellExtensions> Evaluator<'_, '_, SE> {
 						.map_or_else(|| Ok(None), |(_, v)| v.value().get_at(index_str.as_str(), shell))
 						.map_err(|_err| EvalError::FailedToAccessArray)?
 						.unwrap_or(Cow::Borrowed(""));
-					let value = match parse_short(text)? {
-						Referenced::Value(value) => value,
-						Referenced::Expression(expr) => self.nested_value(expr, depth).await?,
-						Referenced::Long(text) => {
-							let expr = parse_long(self.params, text).await?;
-							self.nested_value(expr, depth).await?
-						},
-					};
-					values.push(value);
+					let referenced = parse_short(text)?;
+					let read = resolve(self.params, referenced).await?;
+					Self::enter(&kept, read, &mut depth, &mut steps, &mut values)?;
+				},
+				Step::Leave => {
+					depth -= 1;
+					// SAFETY: every step that borrows the expression this
+					// level evaluated was pushed after this one, so all of them
+					// have been taken, and the values are numbers.
+					unsafe { kept.release() };
 				},
 				Step::Unary(op) => {
 					let operand = values.take();
@@ -542,39 +675,35 @@ impl<SE: extensions::ShellExtensions> Evaluator<'_, '_, SE> {
 	/// The value of the variable `name`, read as an expression. A value within
 	/// [`PARSE_IN_PLACE_BYTES`] is parsed in place and a number needs nothing
 	/// more, which is the usual case, and takes no await.
-	async fn variable_value(&mut self, name: &str, depth: u32) -> Result<i64, EvalError> {
-		match parse_short(referenced_text(self.shell, name)?)? {
-			Referenced::Value(value) => Ok(value),
-			Referenced::Expression(expr) => self.nested_value(expr, depth).await,
-			Referenced::Long(text) => {
-				let expr = parse_long(self.params, text).await?;
-				self.nested_value(expr, depth).await
+	async fn read_variable(&self, name: &str) -> Result<Read, EvalError> {
+		let exempt = self.assigned == Some(name);
+		let referenced = parse_short(referenced_text(self.shell, name, exempt)?)?;
+		resolve(self.params, referenced).await
+	}
+
+	/// Leaves a referenced value's number, or schedules its expression one
+	/// level deeper. Literals don't need depth tracking — they can't cause
+	/// recursion — so only an expression counts a level, as in Bash, and one
+	/// past [`MAX_VARIABLE_DEREF_DEPTH`] is refused.
+	fn enter<'k>(
+		kept: &'k Kept,
+		read: Read,
+		depth: &mut u32,
+		steps: &mut InlineStack<Step<'k>>,
+		values: &mut InlineStack<i64>,
+	) -> Result<(), EvalError> {
+		match read {
+			Read::Value(value) => values.push(value),
+			Read::Expression(expr) => {
+				if *depth + 1 > MAX_VARIABLE_DEREF_DEPTH {
+					return Err(EvalError::RecursionLimitExceeded);
+				}
+				*depth += 1;
+				steps.push(Step::Leave);
+				steps.push(Step::Eval(kept.keep(expr)));
 			},
 		}
-	}
-
-	/// The value of a referenced value's parse: a literal as it is, and
-	/// anything else evaluated by a nested run, one level deeper.
-	async fn nested_value(&mut self, parsed: ast::ArithmeticExpr, depth: u32) -> Result<i64, EvalError> {
-		// Literals don't need depth tracking — they can't cause recursion.
-		// Only increment depth when the parsed value requires further evaluation
-		// (i.e., it references other variables), matching bash's behavior.
-		if let ast::ArithmeticExpr::Literal(value) = parsed {
-			return Ok(value);
-		}
-
-		let new_depth = depth + 1;
-		if new_depth > MAX_VARIABLE_DEREF_DEPTH {
-			return Err(EvalError::RecursionLimitExceeded);
-		}
-
-		self.run_nested(&parsed, new_depth).await
-	}
-
-	/// [`Self::run`] for a referenced value's expression, boxed, since it is
-	/// the one place the evaluation recurses.
-	fn run_nested<'e>(&'e mut self, expr: &'e ast::ArithmeticExpr, depth: u32) -> NestedRun<'e> {
-		Box::pin(self.run(expr, depth))
+		Ok(())
 	}
 
 	fn assign_variable(&mut self, name: &str, value: i64) -> Result<(), EvalError> {
@@ -665,10 +794,12 @@ fn apply_binary_op(op: ast::BinaryOperator, left: i64, right: i64) -> Result<i64
 /// The text the variable called `name` holds, read in place. Reading it
 /// through [`crate::variables::ShellVariable::resolve_value`] copied the
 /// whole value first, every element of an array included, to read one string
-/// of it.
+/// of it. An unset variable reads as empty, and fails under `set -u` unless
+/// it is `exempt`, the variable being assigned.
 fn referenced_text<'a>(
 	shell: &'a Shell<impl extensions::ShellExtensions>,
 	name: &str,
+	exempt: bool,
 ) -> Result<Cow<'a, str>, EvalError> {
 	if let Some(variable) = shell.env_var(name) {
 		match variable.value_in_place(shell) {
@@ -680,7 +811,7 @@ fn referenced_text<'a>(
 		}
 	}
 
-	if shell.options().treat_unset_variables_as_error {
+	if shell.options().treat_unset_variables_as_error && !exempt {
 		return Err(EvalError::ExpandingUnsetVariable(name.into()));
 	}
 
@@ -692,18 +823,18 @@ fn referenced_text<'a>(
 enum Referenced<'a> {
 	/// A number: the usual case.
 	Value(i64),
-	/// An expression, which a nested run evaluates.
+	/// An expression, evaluated one level deeper on the same stack.
 	Expression(ast::ArithmeticExpr),
 	/// Text longer than [`PARSE_IN_PLACE_BYTES`], for [`parse_long`].
 	Long(Cow<'a, str>),
 }
 
 /// Parses the text a reference reads in place, with the parser's cache, up
-/// to [`PARSE_IN_PLACE_BYTES`], or on a builtin's blocking worker; longer text
-/// is left for [`parse_long`]. **The gate is the length of the text parsed,
+/// to [`PARSE_IN_PLACE_BYTES`]; longer text is left for [`parse_long`], which
+/// parses it without the cache. **The gate is the length of the text parsed,
 /// not of the expression that named it.**
 fn parse_short(text: Cow<'_, str>) -> Result<Referenced<'_>, EvalError> {
-	if text.len() > PARSE_IN_PLACE_BYTES && !commands::builtin_on_blocking_worker() {
+	if text.len() > PARSE_IN_PLACE_BYTES {
 		return Ok(Referenced::Long(text));
 	}
 	match brush_parser::arithmetic::parse(&text) {
@@ -723,6 +854,19 @@ async fn parse_long(params: &ExecutionParameters, text: Cow<'_, str>) -> Result<
 			.map_err(|_interrupted| EvalError::Interrupted)?,
 	};
 	parse_expression(owned).await
+}
+
+/// What a referenced value's text comes to, its long text parsed off the
+/// worker.
+async fn resolve(params: &ExecutionParameters, referenced: Referenced<'_>) -> Result<Read, EvalError> {
+	Ok(match referenced {
+		Referenced::Value(value) => Read::Value(value),
+		Referenced::Expression(expr) => Read::Expression(expr),
+		Referenced::Long(text) => match parse_long(params, text).await? {
+			ast::ArithmeticExpr::Literal(value) => Read::Value(value),
+			expr => Read::Expression(expr),
+		},
+	})
 }
 
 const fn bool_to_i64(value: bool) -> i64 {
@@ -831,5 +975,37 @@ mod tests {
 			evaluate(&mut shell, &params, &expr).await,
 			Err(EvalError::RecursionLimitExceeded)
 		));
+	}
+
+	/// A chain of references as deep as the limit needs no stack per level:
+	/// on a thread with half a test thread's stack, 1,000 levels evaluate and
+	/// a cycle is refused at the limit. Nesting a run per level overflowed a
+	/// 2 MiB stack at the limit and aborted the process.
+	#[test]
+	fn reference_chains_take_no_stack_per_level() {
+		let evaluation = std::thread::Builder::new()
+			.stack_size(1024 * 1024)
+			.spawn(|| {
+				let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+				runtime.block_on(async {
+					let mut shell = Shell::builder().build().await.expect("shell");
+					for level in 0..1000 {
+						let value = if level == 999 { String::from("7") } else { std::format!("v{}+0", level + 1) };
+						shell.env_mut().set_global(std::format!("v{level}"), ShellVariable::new(value)).expect("v");
+					}
+					assert_eq!(evaluated(&mut shell, "v0").await, 7);
+
+					shell.env_mut().set_global("p", ShellVariable::new(String::from("q"))).expect("p");
+					shell.env_mut().set_global("q", ShellVariable::new(String::from("p"))).expect("q");
+					let params = shell.default_exec_params();
+					let expr = brush_parser::arithmetic::parse("p").expect("parses");
+					assert!(matches!(
+						evaluate(&mut shell, &params, &expr).await,
+						Err(EvalError::RecursionLimitExceeded)
+					));
+				});
+			})
+			.expect("thread");
+		evaluation.join().expect("the evaluation finished without overflowing its stack");
 	}
 }

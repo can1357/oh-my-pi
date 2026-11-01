@@ -127,7 +127,7 @@ impl ExportCommand {
 					ast::AssignmentValue::Scalar(s) => {
 						let value = brush_core::clone_in_strides(&context.params, s.as_ref()).await?;
 						variables::ShellValueLiteral::Scalar(if integer {
-							variables::integer_value(context.shell, &context.params, value).await?
+							variables::integer_value(context.shell, &context.params, Some(name.as_str()), value).await?
 						} else {
 							value
 						})

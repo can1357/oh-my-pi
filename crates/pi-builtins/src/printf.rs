@@ -195,6 +195,7 @@ async fn write_uucore_items(
 	writer: &mut impl Write,
 ) -> Result<(), brush_core::Error> {
 	let mut format_args_wrapper = format::FormatArguments::new(format_args);
+	let consumes = consumes_arguments(format_items);
 	let mut budget = brush_core::ElementBudget::new();
 	// Keep going until we've exhausted all format arguments. Also make sure to
 	// run at least once even if there's no format arguments.
@@ -209,7 +210,7 @@ async fn write_uucore_items(
 				break;
 			}
 		}
-		if !next_batch(format_args, &mut format_args_wrapper) {
+		if !next_batch(consumes, format_args, &mut format_args_wrapper) {
 			break;
 		}
 	}
@@ -224,13 +225,14 @@ fn write_uucore_items_in_place(
 	writer: &mut impl Write,
 ) -> Result<(), brush_core::Error> {
 	let mut format_args_wrapper = format::FormatArguments::new(format_args);
+	let consumes = consumes_arguments(format_items);
 	while format_args.is_empty() || !format_args_wrapper.is_exhausted() {
 		for item in format_items {
 			if write_item(item, writer, &mut format_args_wrapper)? == ControlFlow::Break(()) {
 				break;
 			}
 		}
-		if !next_batch(format_args, &mut format_args_wrapper) {
+		if !next_batch(consumes, format_args, &mut format_args_wrapper) {
 			break;
 		}
 	}
@@ -253,12 +255,25 @@ fn write_item(
 	})
 }
 
+/// Whether the format takes any argument: a format of only text and `%%`
+/// takes none, so running it again can never use one up.
+fn consumes_arguments(format_items: &[format::FormatItem<format::EscapedChar>]) -> bool {
+	format_items.iter().any(|item| matches!(item, format::FormatItem::Spec(_)))
+}
+
 /// Starts the next batch of arguments, returning whether there is one to run
 /// the format over.
+///
+/// A format that takes no argument runs once, as in Bash, whatever is left:
+/// `printf '%%\n' a` printed `%` without end, since no pass used `a` up.
 fn next_batch(
+	consumes: bool,
 	format_args: &[format::FormatArgument],
 	format_args_wrapper: &mut format::FormatArguments<'_>,
 ) -> bool {
+	if !consumes {
+		return false;
+	}
 	if !format_args_wrapper.is_exhausted() {
 		format_args_wrapper.start_next_batch();
 	}

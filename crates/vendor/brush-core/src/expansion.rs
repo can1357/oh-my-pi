@@ -2058,7 +2058,8 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		let integer =
 			self.shell.env().get(variable_name).is_some_and(|(_, var)| var.is_treated_as_integer());
 		let (value, evaluated) = if integer {
-			let value = crate::variables::integer_value(self.shell, self.params, value).await?;
+			let assigned = index.is_none().then_some(variable_name.as_str());
+			let value = crate::variables::integer_value(self.shell, self.params, assigned, value).await?;
 			(value.clone(), Some(value))
 		} else {
 			(value, None)

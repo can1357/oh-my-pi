@@ -37,7 +37,6 @@ use std::{
 	ffi::OsString,
 	future::poll_fn,
 	io::{self, BufWriter, LineWriter, Read, Write},
-	marker::PhantomData,
 	panic::{AssertUnwindSafe, catch_unwind},
 	path::{Path, PathBuf},
 	pin::pin,
@@ -720,7 +719,7 @@ impl Host {
 	/// The shell's exported variables are *not* present in the host process
 	/// environment, so `std::env::var` would miss them.
 	pub fn var(&self, key: &str) -> Option<&str> {
-		self.env.get(key).map(String::as_str)
+		self.env.get(key)
 	}
 
 	/// The exported shell environment, for building a child process
@@ -1348,9 +1347,13 @@ async fn changed_env(
 				vars.remove(name);
 			},
 			EnvChange::Set(name, value) => {
-				let mut var = brush_core::ShellVariable::new(brush_core::ShellValue::String(value.clone()));
+				// A replacement value can be any length: `env A="$big" cmd`
+				// held the worker 108.9 ms copying it in one `clone`.
+				let value = brush_core::clone_charged(params, &mut budget, value).await?;
+				let name = brush_core::clone_charged(params, &mut budget, name).await?;
+				let mut var = brush_core::ShellVariable::new(brush_core::ShellValue::String(value));
 				var.export();
-				vars.insert(name.clone(), var);
+				vars.insert(name, var);
 			},
 		}
 	}
@@ -1384,16 +1387,25 @@ async fn dispatch<SE: ShellExtensions>(
 	let mut params = base.clone();
 	params.set_fd(OpenFiles::STDIN_FD, or_null(command.stdin)?);
 	let cancel = params.cancel_token();
-	let mut args: Vec<CommandArg> = command
-		.argv
-		.into_iter()
-		.map(|arg| CommandArg::from(arg.to_string_lossy().into_owned()))
-		.collect();
-	let name = args.first().map_or_default(ToString::to_string);
-	let argv0 = command.argv0.map(|argv0| argv0.to_string_lossy().into_owned());
-	if let (Some(argv0), Some(first)) = (&argv0, args.first_mut()) {
-		*first = CommandArg::from(argv0.clone());
+	// Each argument is a step, and a long one is not copied in one: `env
+	// --argv0 "$big"` read a 64 MiB `argv[0]` and copied it twice here.
+	let mut budget = brush_core::ElementBudget::new();
+	let mut texts = Vec::with_capacity(command.argv.len());
+	for arg in command.argv {
+		texts.push(os_into_string(base, &mut budget, arg).await?);
 	}
+	let name = match texts.first() {
+		Some(first) => brush_core::clone_charged(base, &mut budget, first).await?,
+		None => String::new(),
+	};
+	let argv0 = match command.argv0 {
+		Some(argv0) => Some(os_into_string(base, &mut budget, argv0).await?),
+		None => None,
+	};
+	if let (Some(argv0), Some(first)) = (&argv0, texts.first_mut()) {
+		*first = brush_core::clone_charged(base, &mut budget, argv0).await?;
+	}
+	let args: Vec<CommandArg> = texts.into_iter().map(CommandArg::from).collect();
 	let mut simple =
 		SimpleCommand::new(ShellForCommand::ParentShell(shell), params, name, args);
 	simple.use_functions = false;
@@ -1419,6 +1431,32 @@ async fn dispatch<SE: ShellExtensions>(
 		},
 	};
 	wait_status(spawned, cancel).await
+}
+
+/// `text` as a `String`, read as `to_string_lossy` reads it, as one step of
+/// `budget`. Text that is UTF-8 already is taken without a copy; checking
+/// that reads all of it, so a text longer than
+/// [`brush_core::DIVIDE_COPY_ABOVE_BYTES`] is checked on a blocking worker,
+/// unless this is one already.
+async fn os_into_string(
+	params: &ExecutionParameters,
+	budget: &mut brush_core::ElementBudget,
+	text: OsString,
+) -> Result<String, Error> {
+	let long = text.len() > brush_core::DIVIDE_COPY_ABOVE_BYTES;
+	let due = budget.charge(if long { 0 } else { text.len() });
+	if due > 0 {
+		brush_core::loop_checkpoints(params, due).await?;
+	}
+	let convert = |text: OsString| text.into_string().unwrap_or_else(|text| text.to_string_lossy().into_owned());
+	if !long || brush_core::commands::builtin_on_blocking_worker() {
+		return Ok(convert(text));
+	}
+	match tokio::task::spawn_blocking(move || convert(text)).await {
+		Ok(text) => Ok(text),
+		Err(join_error) if join_error.is_panic() => std::panic::resume_unwind(join_error.into_panic()),
+		Err(join_error) => Err(brush_core::ErrorKind::ThreadingError(join_error).into()),
+	}
 }
 
 /// Waits for a spawned command, keeping the signal that killed a process
@@ -2044,13 +2082,13 @@ impl Spec {
 
 /// Adapter turning an [`AsyncUtility`] into a brush builtin; see [`Util`].
 pub(crate) struct AsyncUtil<U: AsyncUtility> {
-	argv:    Vec<String>,
-	_marker: PhantomData<fn() -> U>,
+	/// The parse [`builtins::Command::new`] made, taken by `execute`.
+	parsed: Mutex<Option<Result<U, Finished>>>,
 }
 
 impl<U: AsyncUtility> clap::FromArgMatches for AsyncUtil<U> {
 	fn from_arg_matches(_matches: &clap::ArgMatches) -> Result<Self, clap::Error> {
-		Ok(Self { argv: Vec::new(), _marker: PhantomData })
+		Ok(Self { parsed: Mutex::new(None) })
 	}
 
 	fn update_from_arg_matches(&mut self, _matches: &clap::ArgMatches) -> Result<(), clap::Error> {
@@ -2077,31 +2115,47 @@ impl<U: AsyncUtility> builtins::Command for AsyncUtil<U> {
 	where
 		I: IntoIterator<Item = String>,
 	{
-		Ok(Self { argv: args.into_iter().collect(), _marker: PhantomData })
+		let parsed = parse_utility_argv::<U>(args.into_iter().collect(), Spec::of_async::<U>());
+		Ok(Self { parsed: Mutex::new(Some(parsed)) })
 	}
 
 	async fn execute<SE: ShellExtensions>(
 		&self,
 		context: ExecutionContext<'_, SE>,
 	) -> Result<ExecutionResult, Self::Error> {
-		run_async_utility::<U, SE>(context, self.argv.clone()).await
+		let parsed = self.parsed.lock().take();
+		match parsed {
+			Some(Ok(parsed)) => run_async_utility::<U, SE>(context, parsed).await,
+			Some(Err(finished)) => Ok(finished.report(&context)),
+			None => Err(executed_twice(U::NAME)),
+		}
 	}
 }
 
 /// Adapter turning a [`Utility`] into a brush builtin.
 ///
-/// Holds the raw argument vector rather than a parsed `U`: parse failures must
-/// be reported on the utility's own terms (help on stdout, usage errors with
-/// the utility's exit status) rather than through brush's generic usage-error
-/// path.
+/// Parses the arguments itself rather than through brush's generic parse:
+/// parse failures must be reported on the utility's own terms (help on
+/// stdout, usage errors with the utility's exit status) rather than through
+/// brush's generic usage-error path.
+///
+/// **The parse is made in [`builtins::Command::new`]**, which brush calls off
+/// the worker for arguments of more than one step
+/// (`brush_core::builtins::parse_builtin_args`), and is taken, not copied,
+/// when the builtin runs. Holding the arguments and parsing them in `execute`
+/// copied and parsed them on the worker: `env "A=$big" /usr/bin/true` with a
+/// 64 MiB value held it 110.8 ms in one poll, five passes over the value —
+/// the copy of the arguments, clap's copy of them, its parse, the copy its
+/// value parser keeps, and a UTF-8 check — and `env --argv0 "$big"` held it
+/// 155 ms, with two more copies in `env`'s own option scan.
 pub(crate) struct Util<U: Utility> {
-	argv:    Vec<String>,
-	_marker: PhantomData<fn() -> U>,
+	/// The parse [`builtins::Command::new`] made, taken by `execute`.
+	parsed: Mutex<Option<Result<U, Finished>>>,
 }
 
 impl<U: Utility> clap::FromArgMatches for Util<U> {
 	fn from_arg_matches(_matches: &clap::ArgMatches) -> Result<Self, clap::Error> {
-		Ok(Self { argv: Vec::new(), _marker: PhantomData })
+		Ok(Self { parsed: Mutex::new(None) })
 	}
 
 	fn update_from_arg_matches(&mut self, _matches: &clap::ArgMatches) -> Result<(), clap::Error> {
@@ -2128,27 +2182,35 @@ impl<U: Utility> builtins::Command for Util<U> {
 	where
 		I: IntoIterator<Item = String>,
 	{
-		Ok(Self { argv: args.into_iter().collect(), _marker: PhantomData })
+		let parsed = parse_utility_argv::<U>(args.into_iter().collect(), Spec::of_sync::<U>());
+		Ok(Self { parsed: Mutex::new(Some(parsed)) })
 	}
 
 	async fn execute<SE: ShellExtensions>(
 		&self,
 		context: ExecutionContext<'_, SE>,
 	) -> Result<ExecutionResult, Self::Error> {
-		run_utility::<U, SE>(context, self.argv.clone()).await
+		let parsed = self.parsed.lock().take();
+		match parsed {
+			Some(Ok(parsed)) => run_utility::<U, SE>(context, parsed).await,
+			Some(Err(finished)) => Ok(finished.report(&context)),
+			None => Err(executed_twice(U::NAME)),
+		}
 	}
 }
 
-/// Drives a utility from raw arguments to an exit status.
+/// The error for a utility builtin run a second time: brush builds a builtin
+/// for each command it runs, and its parse is taken by the first run.
+fn executed_twice(name: &str) -> Error {
+	brush_core::ErrorKind::InternalError(format!("{name}: builtin ran twice")).into()
+}
+
+/// Drives a parsed utility to an exit status.
 async fn run_utility<U: Utility, SE: ShellExtensions>(
 	context: ExecutionContext<'_, SE>,
-	argv: Vec<String>,
+	parsed: U,
 ) -> Result<ExecutionResult, Error> {
 	let spec = Spec::of_sync::<U>();
-	let parsed = match parse_utility_argv::<U, SE>(&context, argv, spec) {
-		Ok(parsed) => parsed,
-		Err(done) => return done,
-	};
 	let (env, template) = copy_for_utility(&context, spec).await?;
 	let Prepared { parsed, mut host, runner, cancel, cancel_flag, _cancel_on_drop } =
 		match prepare::<U, SE>(context, parsed, spec, env, template) {
@@ -2172,17 +2234,13 @@ async fn run_utility<U: Utility, SE: ShellExtensions>(
 	Ok(ExecutionResult::new((code & 0xff) as u8))
 }
 
-/// Drives an [`AsyncUtility`] from raw arguments to an exit status, awaiting
-/// its body on the shell task.
+/// Drives a parsed [`AsyncUtility`] to an exit status, awaiting its body on
+/// the shell task.
 async fn run_async_utility<U: AsyncUtility, SE: ShellExtensions>(
 	context: ExecutionContext<'_, SE>,
-	argv: Vec<String>,
+	parsed: U,
 ) -> Result<ExecutionResult, Error> {
 	let spec = Spec::of_async::<U>();
-	let parsed = match parse_utility_argv::<U, SE>(&context, argv, spec) {
-		Ok(parsed) => parsed,
-		Err(done) => return done,
-	};
 	let (env, template) = copy_for_utility(&context, spec).await?;
 	let Prepared { parsed, mut host, runner, cancel, cancel_flag, _cancel_on_drop } =
 		match prepare::<U, SE>(context, parsed, spec, env, template) {
@@ -2207,64 +2265,120 @@ struct Prepared<P, SE: ShellExtensions> {
 	_cancel_on_drop:  CancelOnDrop,
 }
 
-/// Rewrites and parses `argv`. `Err` carries the finished result when the
-/// invocation ends there (usage error, `--help`).
-fn parse_utility_argv<P: clap::Parser, SE: ShellExtensions>(
-	context: &ExecutionContext<'_, SE>,
-	argv: Vec<String>,
-	spec: Spec,
-) -> Result<P, Result<ExecutionResult, Error>> {
+/// A utility invocation that ended while its arguments were parsed (a usage
+/// error, `--help`): what it prints, where, and its status.
+struct Finished {
+	text:        String,
+	on_stdout:   bool,
+	usage_error: u8,
+}
+
+impl Finished {
+	/// Prints the text and gives the invocation's result: success for what
+	/// belongs on stdout (`--help`, `--version`), the usage error otherwise.
+	fn report<SE: ShellExtensions>(self, context: &ExecutionContext<'_, SE>) -> ExecutionResult {
+		if self.on_stdout {
+			let _ = write!(context.stdout(), "{}", self.text);
+			return ExecutionResult::success();
+		}
+		let _ = write!(context.stderr(), "{}", self.text);
+		ExecutionResult::new(self.usage_error)
+	}
+}
+
+/// Rewrites and parses `argv`. `Err` carries what the invocation prints when
+/// it ends there (usage error, `--help`).
+fn parse_utility_argv<P: clap::Parser>(argv: Vec<String>, spec: Spec) -> Result<P, Finished> {
 	let argv: Vec<OsString> = argv.into_iter().map(OsString::from).collect();
+	let argv = (spec.rewrite_argv)(argv).map_err(|message| Finished {
+		text:        format!("{}: {message}\n", spec.name),
+		on_stdout:   false,
+		usage_error: spec.usage_error,
+	})?;
 
-	let argv = match (spec.rewrite_argv)(argv) {
-		Ok(argv) => argv,
-		Err(message) => {
-			let _ = writeln!(context.stderr(), "{}: {message}", spec.name);
-			return Err(Ok(ExecutionResult::new(spec.usage_error)));
-		},
-	};
-
-	match P::try_parse_from(&argv) {
-		Ok(parsed) => Ok(parsed),
-		Err(err) => {
-			// clap reports `--help` and `--version` as errors; those belong on
-			// stdout with a success status, everything else on stderr.
-			let rendered = err.to_string();
-			if err.use_stderr() {
-				let _ = write!(context.stderr(), "{rendered}");
-				return Err(Ok(ExecutionResult::new(spec.usage_error)));
-			}
-			let _ = write!(context.stdout(), "{rendered}");
-			Err(Ok(ExecutionResult::success()))
-		},
-	}
+	// clap reports `--help` and `--version` as errors; those belong on stdout
+	// with a success status, everything else on stderr.
+	P::try_parse_from(&argv).map_err(|err| {
+		let on_stdout = !err.use_stderr();
+		Finished { text: err.to_string(), on_stdout, usage_error: spec.usage_error }
+	})
 }
 
-/// A host's copy of the exported environment, freed where freeing it cannot
-/// hold the worker ([`brush_core::variables::free_off_worker`]): an async
-/// utility's host is dropped on the shell's task, and a hundred thousand
-/// entries are two hundred thousand frees.
-struct ExportedEnv(HashMap<String, String>);
-
-impl std::ops::Deref for ExportedEnv {
-	type Target = HashMap<String, String>;
-
-	fn deref(&self) -> &Self::Target {
-		&self.0
-	}
+/// A host's copy of the exported environment.
+///
+/// **A name is hashed a stride at a time, where it is copied.** A map keyed
+/// by the name hashes all of it in one call: `cat </dev/null` with one
+/// exported variable whose name is 1 MiB long held the worker for that hash,
+/// and a 64 MiB name 37.4 ms. So the map is keyed by the name's hash, which
+/// [`ExportedEnv::insert_divided`] computes in strides, and the few names that
+/// share a hash sit side by side under it.
+///
+/// Freed where freeing it cannot hold the worker
+/// ([`brush_core::variables::free_off_worker`]): an async utility's host is
+/// dropped on the shell's task, and a hundred thousand entries are two
+/// hundred thousand frees.
+#[derive(Default)]
+struct ExportedEnv {
+	/// The keys every name is hashed with.
+	seed: std::hash::RandomState,
+	/// The variables, by the hash of their name.
+	vars: HashMap<u64, Vec<(String, String)>>,
+	len:  usize,
 }
 
-impl std::ops::DerefMut for ExportedEnv {
-	fn deref_mut(&mut self) -> &mut Self::Target {
-		&mut self.0
+impl ExportedEnv {
+	fn with_capacity(capacity: usize) -> Self {
+		Self { seed: std::hash::RandomState::new(), vars: HashMap::with_capacity(capacity), len: 0 }
+	}
+
+	/// The value of the variable `name`. `name` is hashed in one step: the
+	/// names a utility looks up are its own, and short.
+	fn get(&self, name: &str) -> Option<&str> {
+		let found = self.vars.get(&brush_core::hash_in_one_step(&self.seed, name))?;
+		found.iter().find(|(key, _)| key == name).map(|(_, value)| value.as_str())
+	}
+
+	fn iter(&self) -> impl Iterator<Item = (&String, &String)> {
+		self.vars.values().flatten().map(|(name, value)| (name, value))
+	}
+
+	/// Sets `name` to `value`, hashing `name` a stride at a time, each stride
+	/// a step of `budget`.
+	async fn insert_divided(
+		&mut self,
+		params: &ExecutionParameters,
+		budget: &mut brush_core::ElementBudget,
+		name: String,
+		value: String,
+	) -> Result<(), Error> {
+		let hash = brush_core::hash_in_strides(params, budget, &self.seed, &name).await?;
+		self.insert_hashed(hash, name, value);
+		Ok(())
+	}
+
+	/// [`Self::insert_divided`] in one step, for a short name.
+	#[cfg(test)]
+	fn insert(&mut self, name: String, value: String) {
+		self.insert_hashed(brush_core::hash_in_one_step(&self.seed, &name), name, value);
+	}
+
+	fn insert_hashed(&mut self, hash: u64, name: String, value: String) {
+		let entries = self.vars.entry(hash).or_default();
+		match entries.iter_mut().find(|(key, _)| *key == name) {
+			Some((_, old)) => *old = value,
+			None => {
+				entries.push((name, value));
+				self.len += 1;
+			},
+		}
 	}
 }
 
 impl Drop for ExportedEnv {
 	fn drop(&mut self) {
-		let env = std::mem::take(&mut self.0);
-		let allocations = env.len().saturating_mul(2);
-		brush_core::variables::free_off_worker(env, allocations);
+		let vars = std::mem::take(&mut self.vars);
+		let allocations = self.len.saturating_mul(2);
+		brush_core::variables::free_off_worker(vars, allocations);
 	}
 }
 
@@ -2274,19 +2388,20 @@ impl Drop for ExportedEnv {
 /// Every utility builtin takes this snapshot, so a copy made in one step was
 /// a hold on every call: `cat </dev/null` with 100,000 exported variables held
 /// the worker 21.6–22.6 ms, and with one 64 MiB exported value 26.7–27.4 ms.
-/// Each variable is a step charged its bytes, and a long value is copied in
-/// strides.
+/// Each variable is a step charged its bytes, and a long name or value is
+/// copied, and a long name hashed, in strides.
 async fn exported_environment<SE: ShellExtensions>(
 	context: &ExecutionContext<'_, SE>,
 ) -> Result<ExportedEnv, Error> {
 	let exported = context.shell.env().exported_divided(&context.params).await?;
-	let mut env = ExportedEnv(HashMap::with_capacity(exported.len()));
+	let mut env = ExportedEnv::with_capacity(exported.len());
 	let mut budget = brush_core::ElementBudget::new();
 	for (name, variable) in exported {
 		if variable.value().is_set() {
 			let value = variable.value().to_cow_str(context.shell);
 			let value = brush_core::clone_charged(&context.params, &mut budget, &value).await?;
-			env.insert(name.clone(), value);
+			let name = brush_core::clone_charged(&context.params, &mut budget, name).await?;
+			env.insert_divided(&context.params, &mut budget, name, value).await?;
 		}
 	}
 	Ok(env)
@@ -2703,9 +2818,9 @@ mod testing {
 	use parking_lot::Mutex;
 
 	use super::{
-		Arc, AtomicBool, CommandCancel, GuardedStream, HashMap, Host, OpenFile, OpenFiles, OsString,
-		PathBuf, Read, ShellPaths, Sigpipe, SigpipeGuard, Stdin, StreamWriter, Utility, Write, io, openfiles,
-		output_handle, run_caught,
+		Arc, AtomicBool, CommandCancel, GuardedStream, Host, OpenFile, OpenFiles, PathBuf, Read,
+		ShellPaths, Sigpipe, SigpipeGuard, Stdin, StreamWriter, Utility, Write, io, openfiles,
+		output_handle, parse_utility_argv, run_caught,
 		AsyncStreams, AsyncUtility, Spec, async_out_for, run_caught_async,
 	};
 
@@ -2837,7 +2952,7 @@ mod testing {
 				umask:                 Default::default(),
 				name:                  name.to_string(),
 				paths:                 ShellPaths::with_cwd(cwd),
-				env:                   crate::host::ExportedEnv(HashMap::new()),
+				env:                   crate::host::ExportedEnv::default(),
 				cancel,
 				exit_code:             0,
 				stdin_is_search_input: false,
@@ -2966,24 +3081,14 @@ mod testing {
 	/// Rewrites and parses `argv` as the adapter does; `Err` is the exit status
 	/// of an invocation that ends before the body (usage error, `--help`).
 	fn parse_for_test<P: clap::Parser>(spec: Spec, argv: &[&str], host: &mut Host) -> Result<P, i32> {
-		let full: Vec<OsString> = std::iter::once(OsString::from(spec.name))
-			.chain(argv.iter().map(OsString::from))
-			.collect();
-		let full = match (spec.rewrite_argv)(full) {
-			Ok(full) => full,
-			Err(message) => {
-				let _ = writeln!(host.stderr, "{}: {message}", spec.name);
-				return Err(i32::from(spec.usage_error));
-			},
-		};
-		P::try_parse_from(&full).map_err(|err| {
-			let rendered = err.to_string();
-			if err.use_stderr() {
-				let _ = write!(host.stderr, "{rendered}");
-				i32::from(spec.usage_error)
-			} else {
-				let _ = write!(host.stdout, "{rendered}");
+		let full = std::iter::once(spec.name).chain(argv.iter().copied()).map(String::from).collect();
+		parse_utility_argv::<P>(full, spec).map_err(|finished| {
+			if finished.on_stdout {
+				let _ = write!(host.stdout, "{}", finished.text);
 				0
+			} else {
+				let _ = write!(host.stderr, "{}", finished.text);
+				i32::from(finished.usage_error)
 			}
 		})
 	}

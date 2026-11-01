@@ -26,7 +26,7 @@ impl builtins::Command for LetCommand {
 		}
 
 		for expr in &self.exprs {
-			let parsed = brush_parser::arithmetic::parse(expr.as_str())?;
+			let parsed = arithmetic::parse_for_builtin(&context.params, expr.as_str()).await?;
 			let evaluated = arithmetic::evaluate(context.shell, &context.params, &parsed).await?;
 
 			if evaluated == 0 {

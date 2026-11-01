@@ -1767,19 +1767,32 @@ mod regression {
 			shell.env_mut().set_global("big", variable).expect("big");
 		}
 
+		/// An exported variable whose name is [`ONE_HUGE_ELEMENT_BYTES`] long.
+		fn one_huge_exported_name(shell: &mut Shell<DefaultShellExtensions>) {
+			let mut variable = ShellVariable::new(ShellValue::String(String::from("x")));
+			variable.export();
+			shell.env_mut().set_global("v".repeat(ONE_HUGE_ELEMENT_BYTES), variable).expect("long name");
+		}
+
 		/// **What starting a command touches is everything composed into it.**
 		/// A hundred thousand small exported variables held the worker
 		/// 90.8 ms before `/usr/bin/true`, 418.6 ms under load, though none
 		/// was long; an argument or a variable too long for the operating
 		/// system is still copied to where the command starts, and refused
 		/// there by the spawn rather than by a length check of the shell's.
+		/// Inside a function, where a name can be shadowed, a long exported
+		/// name was hashed in one call to resolve shadowing: 10.1 ms quiet for
+		/// a 64 MiB name with nothing exported inside the function, which
+		/// needs no hashing at all, and as long with something exported there.
 		#[test]
 		fn starting_an_external_command_yields_throughout() {
-			let cases: [(&str, fn(&mut Shell<DefaultShellExtensions>)); 4] = [
+			let cases: [(&str, fn(&mut Shell<DefaultShellExtensions>)); 6] = [
 				("o=$open; /usr/bin/true; closed=$close", many_exported),
 				("o=$open; /usr/bin/true; closed=$close", one_huge_exported),
 				("o=$open; /usr/bin/true \"$big\"; closed=$close", one_huge_scalar),
 				("o=$open; /usr/bin/true \"$big\" \"$big\"; closed=$close", one_huge_scalar),
+				("f() { /usr/bin/true; }; o=$open; f; closed=$close", one_huge_exported_name),
+				("f() { local -x inner=1; /usr/bin/true; }; o=$open; f; closed=$close", one_huge_exported_name),
 			];
 
 			for (command, prepare) in cases {

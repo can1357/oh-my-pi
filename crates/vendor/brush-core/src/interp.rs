@@ -836,6 +836,12 @@ pub async fn clone_in_strides(
 /// Appends `text` to `out`, spending a checkpoint before each
 /// [`BYTE_CHECKPOINT_STRIDE`] of it. See [`clone_in_strides`].
 ///
+/// Text of one stride or less is one step, and spends the checkpoint
+/// [`clone_in_strides`] spends for it, which reads the thread's clock one
+/// time in sixteen. A stride checkpoint reads it every time, a system call:
+/// spent before every short append, such as the quoted copy of each
+/// arithmetic expression, it made arithmetic loops 10–18% slower.
+///
 /// # Errors
 ///
 /// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part way,
@@ -845,6 +851,11 @@ pub async fn push_str_in_strides(
 	out: &mut String,
 	text: &str,
 ) -> Result<(), error::Error> {
+	if text.len() <= BYTE_CHECKPOINT_STRIDE {
+		loop_checkpoint(params).await?;
+		out.push_str(text);
+		return Ok(());
+	}
 	out.reserve(text.len());
 	let mut rest = text;
 	loop {
@@ -862,6 +873,50 @@ pub async fn push_str_in_strides(
 		out.push_str(piece);
 		rest = remaining;
 	}
+}
+
+/// The hash of `text` with the keys of `state`, read a stride at a time:
+/// each [`DIVIDE_COPY_ABOVE_BYTES`] of it is one step of `budget`.
+///
+/// Hashing a key is one call that reads all of it, and nothing can enter
+/// it: a map or set keyed by a 64 MiB variable name held the worker about
+/// 10 ms to insert it. A collection keyed by this hash, not by the text,
+/// never hashes the text in one step. [`hash_in_one_step`] gives the same
+/// value, for a lookup of a name known to be short.
+///
+/// # Errors
+///
+/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part way.
+pub async fn hash_in_strides(
+	params: &ExecutionParameters,
+	budget: &mut ElementBudget,
+	state: &std::hash::RandomState,
+	text: &str,
+) -> Result<u64, error::Error> {
+	let mut hasher = std::hash::BuildHasher::build_hasher(state);
+	for piece in hash_pieces(text) {
+		let due = budget.charge(piece.len());
+		if due > 0 {
+			loop_checkpoints(params, due).await?;
+		}
+		std::hash::Hasher::write(&mut hasher, piece);
+	}
+	Ok(std::hash::Hasher::finish(&hasher))
+}
+
+/// [`hash_in_strides`] in one step.
+pub fn hash_in_one_step(state: &std::hash::RandomState, text: &str) -> u64 {
+	let mut hasher = std::hash::BuildHasher::build_hasher(state);
+	for piece in hash_pieces(text) {
+		std::hash::Hasher::write(&mut hasher, piece);
+	}
+	std::hash::Hasher::finish(&hasher)
+}
+
+/// The pieces [`hash_in_strides`] and [`hash_in_one_step`] feed the hasher:
+/// the same for both, so the two agree whatever the hasher makes of a split.
+fn hash_pieces(text: &str) -> std::slice::Chunks<'_, u8> {
+	text.as_bytes().chunks(DIVIDE_COPY_ABOVE_BYTES)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2600,11 +2655,22 @@ async fn apply_assignment(
 		},
 		(None, _) => {},
 	}
+	// An integer append is computed here and written as a replacement
+	// ([`crate::variables::integer_append_value`]).
+	let mut append_write = assignment.append;
 	new_value = match new_value {
 		// The value after the subscript, the order Bash's side effects show:
 		// `a[i++]=i++` assigns `1` at `0`.
+		ShellValueLiteral::Scalar(value) if integer && assignment.append => {
+			append_write = false;
+			ShellValueLiteral::Scalar(
+				crate::variables::integer_append_value(shell, params, variable_name, array_index.as_deref(), value)
+					.await?,
+			)
+		},
 		ShellValueLiteral::Scalar(value) if integer => {
-			ShellValueLiteral::Scalar(crate::variables::integer_value(shell, params, value).await?)
+			let assigned = array_index.is_none().then_some(variable_name.as_str());
+			ShellValueLiteral::Scalar(crate::variables::integer_value(shell, params, assigned, value).await?)
 		},
 		ShellValueLiteral::Array(literal) if keyed || integer => ShellValueLiteral::Array(
 			literal.evaluate_elements(shell, params, index_start, integer).await?,
@@ -2624,7 +2690,7 @@ async fn apply_assignment(
 				match new_value {
 					ShellValueLiteral::Scalar(s) => {
 						existing_value
-							.assign_at_index_divided(array_index, s, assignment.append, params)
+							.assign_at_index_divided(array_index, s, append_write, params)
 							.await?;
 					},
 					ShellValueLiteral::Array(_) => {
@@ -2639,7 +2705,7 @@ async fn apply_assignment(
 					export = true;
 				}
 
-				existing_value.assign(new_value, assignment.append, params).await?;
+				existing_value.assign(new_value, append_write, params).await?;
 			}
 
 			if export {

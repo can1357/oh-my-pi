@@ -66,6 +66,10 @@ pub use interp::{
 	// the bytes it just read — needs the loop budget as well, for the same
 	// reason the interpreter's own field splitting does.
 	clone_in_strides,
+	// A builtin keying a map by a name the caller sized (a utility's
+	// environment snapshot).
+	hash_in_one_step,
+	hash_in_strides,
 	loop_checkpoints,
 	push_str_in_strides,
 };

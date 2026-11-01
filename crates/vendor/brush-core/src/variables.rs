@@ -1841,7 +1841,7 @@ impl ArrayLiteral {
 			let value = if integer {
 				// A parse, like a subscript's.
 				interp::loop_checkpoint(params).await?;
-				integer_value(shell, params, value).await?
+				integer_value(shell, params, None, value).await?
 			} else {
 				value
 			};
@@ -1861,20 +1861,79 @@ impl ArrayLiteral {
 /// is an error, as it is in Bash, not zero, and like Bash's it ends a
 /// non-interactive shell.
 ///
+/// `assigned` is the variable the value is assigned to by name, which
+/// `set -u` does not refuse to read while the value is evaluated, as in Bash
+/// ([`crate::arithmetic::eval_expanded`]); `None` for an element.
+///
 /// # Arguments
 ///
 /// * `shell` - The shell the value is evaluated in.
 /// * `params` - The execution parameters of the run doing the assignment.
+/// * `assigned` - The variable being assigned by name, if any.
 /// * `value` - The expanded value.
 pub async fn integer_value(
 	shell: &mut Shell<impl extensions::ShellExtensions>,
 	params: &ExecutionParameters,
+	assigned: Option<&str>,
 	value: String,
 ) -> Result<String, error::Error> {
-	match crate::arithmetic::eval_expanded(shell, params, value).await {
-		Ok(value) => Ok(value.to_string()),
-		Err(failed) => Err(fatal_unless_interrupted(failed)),
-	}
+	Ok(integer_of(shell, params, assigned, value).await?.to_string())
+}
+
+/// [`integer_value`] as a number.
+async fn integer_of(
+	shell: &mut Shell<impl extensions::ShellExtensions>,
+	params: &ExecutionParameters,
+	assigned: Option<&str>,
+	value: String,
+) -> Result<i64, error::Error> {
+	crate::arithmetic::eval_expanded(shell, params, assigned, value)
+		.await
+		.map_err(fatal_unless_interrupted)
+}
+
+/// The value `name+=value` leaves in a variable with the integer attribute,
+/// as Bash computes it: the variable's current value, evaluated as an
+/// expression **first**, plus `value` evaluated after it. Evaluating the
+/// value first let its side effects change what it was added to:
+/// `declare -i x=5; x+=x++` gave 11 where Bash gives 10. The caller then
+/// writes the sum as a replacement, not an append.
+///
+/// `element` is the subscript of the element appended to, expanded and
+/// evaluated already; `None` appends to the variable, which for an array is
+/// its element `0`.
+///
+/// # Arguments
+///
+/// * `shell` - The shell the values are evaluated in.
+/// * `params` - The execution parameters of the run doing the assignment.
+/// * `name` - The name of the variable appended to.
+/// * `element` - The subscript appended to, if any.
+/// * `value` - The expanded value appended.
+pub async fn integer_append_value(
+	shell: &mut Shell<impl extensions::ShellExtensions>,
+	params: &ExecutionParameters,
+	name: &str,
+	element: Option<&str>,
+	value: String,
+) -> Result<String, error::Error> {
+	let current = match shell.env().get(name) {
+		Some((_, var)) => {
+			let index = element.unwrap_or("0");
+			match var.value() {
+				ShellValue::IndexedArray(_) | ShellValue::AssociativeArray(_) => {
+					var.value().get_at(index, shell)?.map(Cow::into_owned)
+				},
+				value if value.is_set() => Some(value.to_cow_str(shell).into_owned()),
+				_ => None,
+			}
+		},
+		None => None,
+	};
+	let assigned = element.is_none().then_some(name);
+	let base = integer_of(shell, params, assigned, current.unwrap_or_default()).await?;
+	let added = integer_of(shell, params, assigned, value).await?;
+	Ok(base.wrapping_add(added).to_string())
 }
 
 /// The error a failed evaluation ends a non-interactive shell with, as Bash's
@@ -1905,7 +1964,7 @@ pub async fn value_for_variable(
 	value: String,
 ) -> Result<String, error::Error> {
 	if shell.env().get(name).is_some_and(|(_, var)| var.is_treated_as_integer()) {
-		integer_value(shell, params, value).await
+		integer_value(shell, params, Some(name), value).await
 	} else {
 		Ok(value)
 	}
