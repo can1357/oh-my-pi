@@ -14,6 +14,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { getRestorableSessionModels } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { EPHEMERAL_MODEL_CHANGE_ROLE } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { SessionMemory } from "@oh-my-pi/pi-coding-agent/session/session-memory";
 import { SessionTools } from "@oh-my-pi/pi-coding-agent/session/session-tools";
 import { encodeRawPng } from "@oh-my-pi/pi-coding-agent/utils/png-encode";
 import { AUTO_THINKING, resolveProvisionalAutoLevel } from "@oh-my-pi/pi-tui/thinking";
@@ -1121,6 +1122,68 @@ describe("AgentSession model persistence", () => {
 		session = undefined;
 		const resumed = await createStartupResumeSession(sessionFile);
 		expect(resumed.session.model?.id).toBe(newer.id);
+	});
+
+	it.each([
+		["keeps its requested effort when a rejected cwd hook rolls the switch back", "hook", undefined, Effort.Low],
+		["keeps its requested effort when a late failure rolls the switch back", "late", undefined, Effort.Low],
+		["yields to an effort selected after the rollback", "hook", Effort.High, Effort.High],
+	] as const)("a pending setModelTemporary %s", async (_name, failure, later, expected) => {
+		const source = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const pendingModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
+		const created = await createSession({ initialModel: source, persist: true });
+		const manager = created.session.sessionManager;
+		manager.appendMessage({ role: "user", content: "rollback keeps the requested effort", timestamp: Date.now() });
+		manager.appendMessage(createAssistantMessage("ready"));
+		const targetDir = TempDir.createSync("@pi-effort-rollback-target-");
+		const targetManager = SessionManager.create(targetDir.path(), targetDir.path());
+		targetManager.appendMessage({ role: "user", content: "rolled back transcript", timestamp: Date.now() });
+		await targetManager.ensureOnDisk();
+		const targetFile = targetManager.getSessionFile();
+		await targetManager.close();
+		if (!targetFile) throw new Error("Expected a target session");
+		expect(created.session.configuredThinkingLevel()).not.toBe(Effort.Low);
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const reconcile = SessionTools.prototype.reconcileThinkTool;
+		let held = false;
+		const reconciliation = vi.spyOn(SessionTools.prototype, "reconcileThinkTool").mockImplementation(async function (
+			this: SessionTools,
+			...args
+		) {
+			if (!held && created.session.model?.id === pendingModel.id) {
+				held = true;
+				entered.resolve();
+				await release.promise;
+			}
+			return reconcile.apply(this, args);
+		});
+		const targetReset =
+			failure === "late"
+				? vi
+						.spyOn(SessionMemory.prototype, "resetContextForNewTranscript")
+						.mockRejectedValueOnce(new Error("target reset failed"))
+				: undefined;
+		const pending = created.session.setModelTemporary(pendingModel, Effort.Low);
+		try {
+			await entered.promise;
+			if (failure === "hook") {
+				expect(await created.session.switchSession(targetFile, { onCwdChange: async () => false })).toBe(false);
+			} else {
+				await expect(created.session.switchSession(targetFile, { preserveLocalCwd: true })).rejects.toThrow(
+					"target reset failed",
+				);
+			}
+			expect(created.session.model?.id).toBe(pendingModel.id);
+			if (later) created.session.setThinkingLevel(later);
+		} finally {
+			release.resolve();
+			await pending;
+			reconciliation.mockRestore();
+			targetReset?.mockRestore();
+			targetDir.removeSync();
+		}
+		expect(created.session.configuredThinkingLevel()).toBe(expected);
 	});
 
 	it.each([...receiptPublications])(

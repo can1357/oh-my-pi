@@ -145,7 +145,7 @@ An automatic retry fallback to a different model or pinned upstream route supers
 
 An ephemeral fallback can become active while an earlier resume-eligible selection is still completing. That fallback does not cancel the earlier selection's resume record; only a newer resume-eligible model selection supersedes it.
 
-Receipt ownership transfers only when model assignment succeeds. Opening a saved session or reloading it gives that transcript its own receipt ownership; delayed completions from the outgoing transcript cannot journal into it. `/clear` keeps model-selection ownership while discarding queued conversation work. A rolled-back switch restores the original ownership, so selections made in the rejected session cannot suppress the original session's eligible receipt.
+Receipt ownership transfers only when model assignment succeeds. Opening a saved session or reloading it gives that transcript its own receipt ownership; delayed completions from the outgoing transcript cannot journal into it. `/clear` keeps model-selection ownership while discarding queued conversation work. A rolled-back switch restores the original ownership, so selections made in the rejected session cannot suppress the original session's eligible receipt, and a selection still completing keeps the thinking level it requested unless a later selection replaced it.
 
 `/new` inherits the active model, so an already-published selection can finish recording its routed selector in the new session. Selections still loading metadata or credentials are canceled before publication.
 

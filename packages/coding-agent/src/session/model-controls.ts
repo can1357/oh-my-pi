@@ -90,6 +90,11 @@ interface ModelPublicationScope {
 	resumePublication: number;
 }
 
+interface ModelPublicationSnapshot {
+	scope: ModelPublicationScope;
+	selectionGeneration: number;
+}
+
 /** Owns model selection, thinking effort, role cycling, and service tiers. */
 export class ModelControls {
 	readonly #host: ModelControlsHost;
@@ -140,14 +145,20 @@ export class ModelControls {
 		return this.#host.model();
 	}
 
-	beginPublicationScope(): ModelPublicationScope {
-		const previousScope = this.#publicationScope;
+	/** A transcript switch starts a fresh scope; the returned snapshot reinstates the origin if the switch rolls back. */
+	beginPublicationScope(): ModelPublicationSnapshot {
+		const snapshot = { scope: this.#publicationScope, selectionGeneration: this.#selectionGeneration };
 		this.#publicationScope = { preparation: {}, livePublication: 0, resumePublication: 0 };
-		return previousScope;
+		return snapshot;
 	}
 
-	restorePublicationScope(scope: ModelPublicationScope): void {
-		this.#publicationScope = scope;
+	/**
+	 * Rollback is not a selection: pending origin calls keep owning the models and effort they published.
+	 * shortcut: also forgets an `invalidateAutomaticSelection()` made mid-switch; count those apart if one must survive a rollback.
+	 */
+	restorePublicationScope(snapshot: ModelPublicationSnapshot): void {
+		this.#publicationScope = snapshot.scope;
+		this.#selectionGeneration = snapshot.selectionGeneration;
 	}
 
 	/** /new inherits published models, but not outgoing preparation that has yet to assign one. */
@@ -225,9 +236,8 @@ export class ModelControls {
 		this.#applyThinkingLevelToAgent(this.#thinkingLevel);
 	}
 
-	/** Restores an exact thinking snapshot after a failed session switch. */
+	/** Restores an exact thinking snapshot after a failed session switch; `restorePublicationScope` restores the selection epoch. */
 	restoreThinkingSnapshot(level: ThinkingLevel | undefined, auto: boolean, resolved: Effort | undefined): void {
-		this.#selectionGeneration++;
 		this.#thinkingLevel = level;
 		this.#autoThinking = auto;
 		this.#autoResolvedLevel = resolved;
