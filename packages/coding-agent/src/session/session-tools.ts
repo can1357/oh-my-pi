@@ -174,6 +174,10 @@ interface SessionToolsOptions {
 		toolNames: string[],
 		tools: Map<string, AgentTool>,
 	) => Promise<{ systemPrompt: string[]; xdevCatalogNames?: readonly string[] }>;
+	/** Re-scopes rules (prompt buckets, TTSR registrations, `rule://`) to the model that receives the prompt. */
+	rescopeRules?: (model: Model | undefined) => void;
+	/** Identity of the rules {@link rebuildSystemPrompt} currently renders. */
+	promptRulesKey?: () => string;
 	getMcpServerInstructions?: () => Map<string, string> | undefined;
 	xdev?: XdevState;
 	setActiveToolNames?: (names: Iterable<string>) => void;
@@ -434,6 +438,10 @@ export class SessionTools {
 	/** Inline-descriptor decision of the model the base prompt was rendered for. */
 	#promptInlineDescriptors: boolean | undefined;
 	#rebuildSystemPrompt: SessionToolsOptions["rebuildSystemPrompt"];
+	#rescopeRules: SessionToolsOptions["rescopeRules"];
+	#currentPromptRulesKey: SessionToolsOptions["promptRulesKey"];
+	/** Rules key of the committed base prompt. */
+	#promptRulesKey: string | undefined;
 	#getMcpServerInstructions: SessionToolsOptions["getMcpServerInstructions"];
 	/**
 	 * Session-lifetime factory shared by every custom-tool wrapper. Defining it
@@ -509,6 +517,8 @@ export class SessionTools {
 		this.#ensureGoalRegistered = options.ensureGoalRegistered;
 		this.#reconcileSettingsGatedTools = options.reconcileSettingsGatedTools;
 		this.#rebuildSystemPrompt = options.rebuildSystemPrompt;
+		this.#rescopeRules = options.rescopeRules;
+		this.#currentPromptRulesKey = options.promptRulesKey;
 		this.#getMcpServerInstructions = options.getMcpServerInstructions;
 		this.#xdev = options.xdev;
 		if (this.#xdev && this.#xdev.tools !== this.#toolRegistry) {
@@ -538,6 +548,7 @@ export class SessionTools {
 		for (const name of this.#xdev?.mountedNames ?? []) this.#enabledToolNames.add(name);
 		this.#promptModelKey = this.#currentPromptModelKey();
 		this.#promptInlineDescriptors = this.#currentInlineDescriptors();
+		this.#promptRulesKey = this.#currentPromptRulesKey?.();
 	}
 
 	/** Mutable registry shared with controller hosts that inspect available tools. */
@@ -993,18 +1004,26 @@ export class SessionTools {
 	 * (#11983), or the inline-descriptor decision, which also turns provider-side description pruning
 	 * on or off (#14200). The kept key makes a later switch back to the rendered model a no-op, and a
 	 * deliberate switch (`/model`, `setModel`) compares against the model the prompt describes.
+	 *
+	 * Both kinds re-scope model-scoped rules first: TTSR registrations and `rule://` follow the new
+	 * model at once, and the prompt is rebuilt when the always-apply or rulebook rules it renders
+	 * change. An in-flight request keeps the prompt it was sent with.
 	 */
 	async syncAfterModelChange(previousEditMode: EditMode, options?: { retryFallback?: boolean }): Promise<void> {
 		const currentEditMode = this.resolveActiveEditMode();
+		this.#rescopeRules?.(this.#host.model());
+		const rulesChanged = this.#currentPromptRulesKey?.() !== this.#promptRulesKey;
 		if (options?.retryFallback) {
 			const inlineDescriptorsChanged = this.#currentInlineDescriptors() !== this.#promptInlineDescriptors;
-			if (previousEditMode !== currentEditMode || inlineDescriptorsChanged) await this.refreshBaseSystemPrompt();
+			if (previousEditMode !== currentEditMode || inlineDescriptorsChanged || rulesChanged) {
+				await this.refreshBaseSystemPrompt();
+			}
 			return;
 		}
 		const editModeChanged = previousEditMode !== currentEditMode && this.getActiveToolNames().includes("edit");
 		// The system prompt selects model-specific policy even when it does not display the model id.
 		const modelChanged = this.#currentPromptModelKey() !== this.#promptModelKey;
-		if (editModeChanged || modelChanged) {
+		if (editModeChanged || modelChanged || rulesChanged) {
 			await this.refreshBaseSystemPrompt();
 		}
 	}
@@ -1491,6 +1510,7 @@ export class SessionTools {
 				this.#lastAppliedToolSignature = rebuiltSignature;
 				this.#promptModelKey = this.#currentPromptModelKey();
 				this.#promptInlineDescriptors = this.#currentInlineDescriptors();
+				this.#promptRulesKey = this.#currentPromptRulesKey?.();
 				this.#setBasePromptXdevNames(rebuiltXdevCatalogNames);
 				// The rebuilt prompt is a fresh roster snapshot. Keep the complete
 				// pending delta for a turn override that hides it, while separately
@@ -2329,6 +2349,7 @@ export class SessionTools {
 				this.#pendingToolRosterDeltaAfterBase = undefined;
 				this.#promptModelKey = this.#currentPromptModelKey();
 				this.#promptInlineDescriptors = this.#currentInlineDescriptors();
+				this.#promptRulesKey = this.#currentPromptRulesKey?.();
 				this.#lastAppliedToolSignature = signature;
 				return true;
 			},

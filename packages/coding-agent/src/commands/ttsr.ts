@@ -53,6 +53,10 @@ export default class Ttsr extends Command {
 		agent: Flags.string({
 			description: "Agent name to evaluate rule `agents` scoping as (ttsr test); defaults to main",
 		}),
+		model: Flags.string({
+			description:
+				"Model selector to evaluate rule `models`/`providers`/`class`/`family` scoping for (ttsr test); omitted = scope ignored and same-named variants collapse to the highest-precedence one",
+		}),
 		verbose: Flags.boolean({ char: "v", description: "Show every evaluated rule, not just triggered ones" }),
 		json: Flags.boolean({ description: "Output JSON" }),
 		"no-gitignore": Flags.boolean({ description: "Include files excluded by .gitignore (ttsr scan)" }),
@@ -69,6 +73,7 @@ export default class Ttsr extends Command {
 		"omp ttsr test --file src/foo.ts --source text",
 		"omp ttsr test --rule .omp/rules/no-any.md --source tool --path src/foo.ts 'const x: any = 1'",
 		"omp ttsr test --agent scout 'const x: any = 1'",
+		"omp ttsr test --model anthropic/claude-sonnet-4-5 'const x: any = 1'",
 		"echo 'Box::leak(&mut v)' | omp ttsr test --file - --path src/lib.rs",
 		"omp ttsr test --source tool --tool edit --path src/foo.ts 'const x: any = 1'",
 		"omp ttsr scan",
@@ -104,6 +109,7 @@ export default class Ttsr extends Command {
 						filePath: flags.path,
 						verbose: flags.verbose,
 						agent: flags.agent,
+						model: flags.model,
 					}
 				: undefined;
 

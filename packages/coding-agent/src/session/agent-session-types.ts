@@ -350,6 +350,10 @@ export interface AgentSessionConfig {
 		toolNames: string[],
 		tools: Map<string, AgentTool>,
 	) => Promise<{ systemPrompt: string[]; xdevCatalogNames?: readonly string[] }>;
+	/** Re-scopes rules (prompt buckets, TTSR registrations, `rule://`) to the model that receives the prompt. */
+	rescopeRules?: (model: Model | undefined) => void;
+	/** Identity of the rules the prompt builder currently renders; changes when re-scoping changes them. */
+	promptRulesKey?: () => string;
 	/** Tools mounted under `xd://`, for `/tools` display. */
 	getXdevToolEntries?: () => Array<{ name: string; summary: string }>;
 	/** `xd://` presentation state backed by the canonical tool map. */
@@ -421,6 +425,8 @@ export interface AgentSessionConfig {
 	advisorContextPrompt?: string;
 	/** Memory backend developer instructions rendered for advisor sessions. */
 	advisorMemoryPrompt?: string;
+	/** Renders the model-scoped always-apply rules that match an advisor's model. */
+	advisorModelRulesPrompt?: (model: Model) => string | undefined;
 	/** Advisors discovered from WATCHDOG.yml. */
 	advisorConfigs?: AdvisorConfig[];
 	/** Config problems collected during WATCHDOG.yml discovery. */

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { BUILTIN_DEFAULTS_PROVIDER_ID, type Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
+import {
+	BUILTIN_DEFAULTS_PROVIDER_ID,
+	type Rule,
+	type RuleScopeModel,
+} from "@oh-my-pi/pi-coding-agent/capability/rule";
 import { bucketRules } from "@oh-my-pi/pi-coding-agent/capability/rule-buckets";
 import { TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
 
@@ -20,6 +24,10 @@ function makeRule(partial: Partial<Rule>): Rule {
 		question: partial.question,
 		scope: partial.scope,
 		agents: partial.agents,
+		models: partial.models,
+		providers: partial.providers,
+		class: partial.class,
+		family: partial.family,
 		interruptMode: partial.interruptMode,
 		_source: partial._source ?? source("native"),
 	};
@@ -282,5 +290,83 @@ describe("bucketRules agent scoping", () => {
 		const mgr = new TtsrManager();
 		bucketRules([rule], mgr, { agentName: " Scout " });
 		expect(mgr.checkDelta("contains FORBIDDEN token", { source: "text" }).map(r => r.name)).toEqual(["scout-only"]);
+	});
+});
+
+describe("bucketRules model scoping", () => {
+	const opus: RuleScopeModel = {
+		provider: "anthropic",
+		id: "claude-opus-5",
+		identity: { class: "anthropic", family: "opus" },
+	};
+	const routedSonnet: RuleScopeModel = {
+		provider: "openrouter",
+		id: "anthropic/claude-sonnet-5",
+		identity: { class: "anthropic", family: "sonnet" },
+	};
+	const unclassified: RuleScopeModel = { provider: "local", id: "my-model", identity: { class: "unknown" } };
+
+	function bucketNames(rules: Rule[], model: RuleScopeModel | undefined) {
+		const mgr = new TtsrManager();
+		const { rulebookRules, alwaysApplyRules } = bucketRules(rules, mgr, { model });
+		return {
+			always: alwaysApplyRules.map(r => r.name),
+			rulebook: rulebookRules.map(r => r.name),
+			ttsr: mgr.getRules().map(r => r.name),
+		};
+	}
+
+	it("drops a non-matching scoped rule from every bucket and keeps unscoped rules", () => {
+		const rules = [
+			makeRule({ name: "opus-always", alwaysApply: true, models: ["*/claude-opus-*"] }),
+			makeRule({ name: "opus-book", description: "opus tips", family: ["opus"] }),
+			makeRule({ name: "opus-ttsr", condition: ["FORBIDDEN"], providers: ["anthropic"], family: ["opus"] }),
+			makeRule({ name: "plain-always", alwaysApply: true }),
+			makeRule({ name: "plain-ttsr", condition: ["FORBIDDEN"] }),
+		];
+
+		expect(bucketNames(rules, opus)).toEqual({
+			always: ["opus-always", "plain-always"],
+			rulebook: ["opus-book"],
+			ttsr: ["opus-ttsr", "plain-ttsr"],
+		});
+		expect(bucketNames(rules, routedSonnet)).toEqual({
+			always: ["plain-always"],
+			rulebook: [],
+			ttsr: ["plain-ttsr"],
+		});
+		// No model: scoping disabled (CLI inventories).
+		expect(bucketNames(rules, undefined)).toEqual(bucketNames(rules, opus));
+	});
+
+	it("ORs patterns within a field and ANDs across fields", () => {
+		const rule = makeRule({
+			name: "claude-direct",
+			alwaysApply: true,
+			class: ["anthropic", "openai"],
+			providers: ["anthropic"],
+		});
+		expect(bucketNames([rule], opus).always).toEqual(["claude-direct"]);
+		// Class matches, provider does not.
+		expect(bucketNames([rule], routedSonnet).always).toEqual([]);
+		// A family scope never matches a model without a family.
+		expect(bucketNames([makeRule({ name: "f", alwaysApply: true, family: ["*"] })], unclassified).always).toEqual([]);
+	});
+
+	it("keeps the first matching same-named variant", () => {
+		const opusVariant = makeRule({ name: "style", content: "opus", alwaysApply: true, family: ["opus"] });
+		const anthropicVariant = makeRule({
+			name: "style",
+			content: "anthropic",
+			alwaysApply: true,
+			class: ["anthropic"],
+		});
+		const pick = (model: RuleScopeModel) =>
+			bucketRules([opusVariant, anthropicVariant], new TtsrManager(), { model }).alwaysApplyRules.map(
+				r => r.content,
+			);
+
+		expect(pick(opus)).toEqual(["opus"]);
+		expect(pick(routedSonnet)).toEqual(["anthropic"]);
 	});
 });

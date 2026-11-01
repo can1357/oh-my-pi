@@ -48,6 +48,7 @@ import {
 	formatActiveRepoWatchdogPrompt,
 	formatAdvisorContextPrompt,
 	formatAdvisorMemoryPrompt,
+	formatAdvisorModelRulesPrompt,
 } from "./advisor";
 import { AsyncJobManager } from "./async";
 import { AutoLearnController, buildAutoLearnInstructions } from "./autolearn/controller";
@@ -57,6 +58,7 @@ import {
 	MAIN_AGENT_RULE_NAME,
 	type Rule,
 	ruleCapability,
+	ruleModelScopeKey,
 	setActiveRules,
 	SUB_AGENT_RULE_NAME,
 } from "./capability/rule";
@@ -2395,17 +2397,25 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			options.rules !== undefined
 				? { items: options.rules, warnings: undefined }
 				: await loadCapability<Rule>(ruleCapability.id, { cwd, agentDir });
+		// Provisional: the first prompt build re-buckets for the final startup model.
 		const { rulebookRules, alwaysApplyRules } = bucketRules(rulesResult.items, ttsrManager, {
 			builtinRules: ttsrSettings.builtinRules,
 			disabledRules: ttsrSettings.disabledRules,
 			agentName: resolvedAgentName,
+			model,
 		});
 		if (existingSession.injectedTtsrRules.length > 0) {
 			ttsrManager.restoreInjected(existingSession.injectedTtsrRules);
 		}
-		return { ttsrManager, rulebookRules, alwaysApplyRules, allRules: rulesResult.items };
+		return {
+			ttsrManager,
+			rulebookRules,
+			alwaysApplyRules,
+			allRules: rulesResult.items,
+			createScratchTtsrManager: () => new TtsrManager(() => cfgTtsr.get(settings)),
+		};
 	});
-	const { ttsrManager, allRules } = discovered;
+	const { ttsrManager, allRules, createScratchTtsrManager } = discovered;
 	// Mutable so the mid-session prompt rebuild (on /clear and /new) can re-discover
 	// rules from disk, mirroring the context-file refresh below (issue #10940). The
 	// same `ttsrManager` is reused, so restored TTSR injection state survives.
@@ -4177,6 +4187,42 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (!own || own.size === 0) return hosted;
 			return new Map([...own, ...hosted].sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)));
 		};
+		// Buckets the unfiltered rule snapshot (`toolSession.rules`) for the model that
+		// receives the prompt, and republishes the TTSR registrations and `rule://`
+		// snapshot. `toolSession.rules` stays unfiltered so subagents re-scope it
+		// under their own model.
+		const rescopeRules = (scopeModel: Model | undefined): void => {
+			const ttsrSettings = cfgTtsr.get(settings);
+			const buckets = bucketRules(toolSession.rules ?? allRules, ttsrManager, {
+				builtinRules: ttsrSettings.builtinRules,
+				disabledRules: ttsrSettings.disabledRules,
+				agentName: resolvedAgentName,
+				model: scopeModel,
+				replaceTtsrRules: true,
+			});
+			rulebookRules = buckets.rulebookRules;
+			alwaysApplyRules = buckets.alwaysApplyRules;
+			const nextActiveRules = [...rulebookRules, ...alwaysApplyRules, ...ttsrManager.getRules()];
+			toolSession.activeRules = nextActiveRules;
+			if (!options.parentTaskPrefix) {
+				setActiveRules(nextActiveRules);
+			}
+		};
+		/** Identity of the rules the prompt renders (always-apply and rulebook), including each variant's model scope. */
+		const promptRulesKey = (): string =>
+			[...alwaysApplyRules, ...rulebookRules].map(rule => `${rule.name}\0${ruleModelScopeKey(rule)}`).join("\n");
+		/** Always-apply bodies of model-scoped rules that match an advisor's model; unscoped rules never reach advisors. */
+		const advisorModelRulesPrompt = (advisorModel: Model): string | undefined => {
+			const ttsrSettings = cfgTtsr.get(settings);
+			// A scratch manager mirrors the session's TTSR routing without touching its registrations.
+			const buckets = bucketRules(toolSession.rules ?? allRules, createScratchTtsrManager(), {
+				builtinRules: ttsrSettings.builtinRules,
+				disabledRules: ttsrSettings.disabledRules,
+				agentName: resolvedAgentName,
+				model: advisorModel,
+			});
+			return formatAdvisorModelRulesPrompt(buckets.alwaysApplyRules.filter(rule => ruleModelScopeKey(rule) !== ""));
+		};
 		const rebuildSystemPrompt = async (
 			toolNames: string[],
 			tools: Map<string, AgentTool>,
@@ -4216,26 +4262,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					toolSession.contextFiles = contextFiles;
 					session.setAdvisorContextPrompt(formatAdvisorContextPrompt(contextFiles));
 				}
-				const ttsrSettings = cfgTtsr.get(settings);
-				const buckets = bucketRules(ruleItems, ttsrManager, {
-					builtinRules: ttsrSettings.builtinRules,
-					disabledRules: ttsrSettings.disabledRules,
-					agentName: resolvedAgentName,
-					replaceTtsrRules: true,
-				});
-				rulebookRules = buckets.rulebookRules;
-				alwaysApplyRules = buckets.alwaysApplyRules;
-				const nextActiveRules = [...rulebookRules, ...alwaysApplyRules, ...ttsrManager.getRules()];
 				// Refresh the session-local snapshots too: `rule://` resolution reads
 				// `toolSession.activeRules` and spawned subagents inherit `toolSession.rules`,
 				// so leaving the construction-time arrays would advertise a new `rule://<name>`
 				// the read tool rejects and hand children the stale set.
 				toolSession.rules = ruleItems;
-				toolSession.activeRules = nextActiveRules;
-				if (!options.parentTaskPrefix) {
-					setActiveRules(nextActiveRules);
-				}
 			}
+			// Every build, including the first, scopes rules to the model the prompt is built for.
+			rescopeRules(agent?.state.model ?? model);
 			const memoryBackend = restrictToolNames ? undefined : await resolveMemoryBackend(settings);
 			const memoryInstructions = memoryBackend
 				? await memoryBackend.buildDeveloperInstructions(agentDir, sessionManager.getCwd(), settings, session)
@@ -5039,6 +5073,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			advisorWatchdogPrompt,
 			advisorContextPrompt,
 			advisorMemoryPrompt,
+			advisorModelRulesPrompt,
 			advisorSharedInstructions: discoveredAdvisors.sharedInstructions,
 			advisorSharedMaxNotesPerUpdate: discoveredAdvisors.sharedMaxNotesPerUpdate,
 			advisorConfigs: discoveredAdvisors.advisors,
@@ -5118,6 +5153,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			advisorStreamFn: settingsAwareStreamFn,
 			convertToLlm: convertToLlmFinal,
 			rebuildSystemPrompt,
+			rescopeRules,
+			promptRulesKey,
 			getXdevToolEntries: () => (toolSession.xdev ? xdevEntries(toolSession.xdev) : []),
 			xdev: toolSession.xdev,
 			presentationPinnedToolNames,

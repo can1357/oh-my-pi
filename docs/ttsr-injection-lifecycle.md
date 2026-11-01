@@ -36,16 +36,17 @@ const { rulebookRules, alwaysApplyRules } = bucketRules(rulesResult.items, ttsrM
 	builtinRules: ttsrSettings.builtinRules,
 	disabledRules: ttsrSettings.disabledRules,
 	agentName: resolvedAgentName,
+	model,
 });
 ```
 
-`bucketRules(...)` drops names listed in `ttsr.disabledRules`, drops embedded builtin-defaults rules when `ttsr.builtinRules === false`, drops rules whose `agents` globs do not match this session's agent, registers accepted TTSR rules, and then routes the remaining rules to always-apply/rulebook buckets.
+`bucketRules(...)` drops names listed in `ttsr.disabledRules`, drops embedded builtin-defaults rules when `ttsr.builtinRules === false`, drops rules whose `agents` globs do not match this session's agent, drops rules whose model scope (`models`, `providers`, `class`, `family`) does not admit the session model, registers accepted TTSR rules, and then routes the remaining rules to always-apply/rulebook buckets. This first pass is provisional: the first prompt build re-buckets for the final startup model (after session restore and fallback resolution).
 
-Session-scoped prompt rebuilds re-discover and re-bucket rules (explicit rule sets are only re-bucketed). `replaceRules()` replaces registrations and clears stream buffers, preserving injection records for names still registered. Removed names lose their records; when TTSR is disabled, records are retained for re-enablement. The session-local and top-level active-rule URL snapshots are refreshed too.
+Session-scoped prompt rebuilds re-discover and re-bucket rules (explicit rule sets are only re-bucketed). Every model change, including a retry fallback, re-buckets the current rule snapshot for the new model and replaces the registrations, so judged rules are scoped by the session model whose output is judged, not by the judge model. `replaceRules()` replaces registrations and clears stream buffers, preserving injection records for names still registered. Removed names lose their records; when TTSR is disabled, records are retained for re-enablement. The session-local and top-level active-rule URL snapshots are refreshed too.
 
 ### Pre-registration dedupe behavior
 
-`loadCapability("rules")` deduplicates by `rule.name` with first-wins semantics (higher provider priority first). Shadowed duplicates are removed before TTSR registration.
+`loadCapability("rules")` deduplicates by `rule.name` plus model scope with first-wins semantics (higher provider priority first). Shadowed duplicates are removed before TTSR registration. Same-named variants with different model scopes survive discovery; `bucketRules(...)` keeps the first one that admits the session model.
 
 ### `TtsrManager.addRule()` behavior
 
@@ -306,4 +307,4 @@ A rule with `question` is judged: its natural-language question goes to the `jud
 
 `/omfg` generates `condition`, `astCondition`, or `question` rules, instructed to prefer the pattern triggers. It validates candidates against conversation history through the same completed-output view (`TtsrToolInspector.outputs`); a `question` candidate must pass its scope/prefilter and get a yes from the judge on one of the 8 most recent in-scope outputs. With no judge available, the user decides whether to save it unconfirmed.
 
-`omp ttsr list` shows each rule's `question`. `omp ttsr test` never calls the judge, so question rules report as not triggered, with their question shown. `omp ttsr scan` skips question rules: their conditions are prefilters, not violations.
+`omp ttsr test --agent <name>` and `--model <selector>` evaluate `agents` and model scope the way a session running as that agent on that model would; the selector resolves against the model catalog like `--model` elsewhere, and an unknown selector exits with an error. Without `--model`, model scope is ignored and same-named variants collapse to the highest-precedence one. `omp ttsr list` shows each rule's `question`. `omp ttsr test` never calls the judge, so question rules report as not triggered, with their question shown. `omp ttsr scan` skips question rules: their conditions are prefilters, not violations.

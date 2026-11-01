@@ -9,12 +9,20 @@
  *   1. disabledRules  — dropped before any bucket assignment
  *   2. builtin drop   — `builtinRules === false` drops `builtin-defaults` rules
  *   3. agents scope   — rules whose `agents` globs do not match `options.agentName` are dropped
- *   4. TTSR           — non-empty `condition`/`astCondition`/`question` the manager already tracks or newly accepts
- *   5. always         — `alwaysApply === true`
- *   6. rulebook       — has a `description`
+ *   4. model scope    — rules whose `models`/`providers`/`class`/`family` do not admit `options.model` are dropped;
+ *                       of the same-named rules left, the first (highest-precedence) one wins
+ *   5. TTSR           — non-empty `condition`/`astCondition`/`question` the manager already tracks or newly accepts
+ *   6. always         — `alwaysApply === true`
+ *   7. rulebook       — has a `description`
  */
 import type { TtsrManager } from "../export/ttsr";
-import { BUILTIN_DEFAULTS_PROVIDER_ID, type Rule, ruleAppliesToAgent } from "./rule";
+import {
+	BUILTIN_DEFAULTS_PROVIDER_ID,
+	type Rule,
+	type RuleScopeModel,
+	ruleAppliesToAgent,
+	ruleAppliesToModel,
+} from "./rule";
 
 export interface RuleBuckets {
 	rulebookRules: Rule[];
@@ -32,6 +40,12 @@ export interface BucketRulesOptions {
 	 * from every bucket. Omit to disable agent scoping (CLI inventory listings).
 	 */
 	agentName?: string;
+	/**
+	 * Model that receives this session's prompt. Rules whose model scope does not
+	 * admit it are dropped from every bucket. Omit to disable model scoping
+	 * (CLI inventory listings).
+	 */
+	model?: RuleScopeModel;
 	/** Replace existing TTSR registrations before bucketing this complete rule snapshot. */
 	replaceTtsrRules?: boolean;
 }
@@ -54,10 +68,15 @@ export function bucketRules(
 	}
 
 	const includedRules: Rule[] = [];
+	const includedNames = new Set<string>();
 	for (const rule of rules) {
 		if (disabled.has(rule.name)) continue;
 		if (!includeBuiltin && rule._source?.provider === BUILTIN_DEFAULTS_PROVIDER_ID) continue;
 		if (!ruleAppliesToAgent(rule, options.agentName)) continue;
+		if (!ruleAppliesToModel(rule, options.model)) continue;
+		// Discovery keeps same-named rules with different model scopes; downstream state is keyed by name.
+		if (includedNames.has(rule.name)) continue;
+		includedNames.add(rule.name);
 		includedRules.push(rule);
 	}
 

@@ -47,6 +47,7 @@ import {
 	parseConfiguredThinkingLevel,
 	resolveThinkingLevelForModel,
 } from "@oh-my-pi/pi-tui/thinking";
+import { globMatchesModel } from "./model-glob";
 import { isAuthenticated, kNoAuth, type ModelRegistry } from "./model-registry";
 import {
 	DEFAULT_MODEL_ROLE_ALIAS,
@@ -133,10 +134,7 @@ export interface ScopedModel {
 
 function matchingGlobModels(pattern: string, availableModels: readonly Model<Api>[]): Model<Api>[] {
 	const glob = new Bun.Glob(pattern.toLowerCase());
-	return availableModels.filter(model => {
-		const fullId = `${model.provider}/${model.id}`;
-		return glob.match(fullId.toLowerCase()) || glob.match(model.id.toLowerCase());
-	});
+	return availableModels.filter(model => globMatchesModel(glob, model));
 }
 
 function resolveGlobScopePattern(

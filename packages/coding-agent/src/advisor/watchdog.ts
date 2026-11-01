@@ -6,6 +6,7 @@ import { expandAtImports } from "../discovery/at-imports";
 import activeRepoWatchdogTemplate from "../prompts/advisor/active-repo-watchdog.md" with { type: "text" };
 import contextFilesTemplate from "../prompts/advisor/context-files.md" with { type: "text" };
 import memoryContextTemplate from "../prompts/advisor/memory-context.md" with { type: "text" };
+import modelRulesTemplate from "../prompts/advisor/model-rules.md" with { type: "text" };
 import type { ActiveRepoContext } from "@oh-my-pi/pi-tui/status-line/host";
 import { normalizePromptPath } from "../utils/prompt-path";
 
@@ -29,6 +30,15 @@ export function formatAdvisorContextPrompt(
 ): string | undefined {
 	if (contextFiles.length === 0) return undefined;
 	return prompt.render(contextFilesTemplate, { contextFiles }).trim() || undefined;
+}
+
+/**
+ * Render always-apply rule bodies scoped to an advisor's model into a block for
+ * that advisor's system prompt. Returns undefined when no rule matched.
+ */
+export function formatAdvisorModelRulesPrompt(rules: ReadonlyArray<{ content: string }>): string | undefined {
+	if (rules.length === 0) return undefined;
+	return prompt.render(modelRulesTemplate, { rules }).trim() || undefined;
 }
 
 /**

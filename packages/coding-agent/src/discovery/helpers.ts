@@ -250,6 +250,10 @@ function buildRule(
 		question,
 		scope,
 		agents: parseRuleAgents(frontmatter.agents),
+		models: parseRuleAgents(frontmatter.models),
+		providers: parseRuleAgents(frontmatter.providers),
+		class: parseRuleAgents(frontmatter.class),
+		family: parseRuleAgents(frontmatter.family),
 		interruptMode,
 		_source: source,
 	};

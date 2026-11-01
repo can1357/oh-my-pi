@@ -4,6 +4,8 @@
  * Project-specific rules from Cursor (.mdc), Windsurf (.md), and Cline formats.
  * Translated to a canonical shape regardless of source format.
  */
+import type { Api, Model } from "@oh-my-pi/pi-ai";
+import { modelMatchesGlob } from "../config/model-glob";
 import { defineCapability } from ".";
 import type { SourceMeta } from "./types";
 
@@ -36,6 +38,14 @@ export interface RuleFrontmatter {
 	scope?: string | string[];
 	/** Agent-name globs this rule applies to; absent = every agent. `main` targets the top-level session. */
 	agents?: string[] | string;
+	/** Model globs (`enabledModels` grammar) this rule applies to; absent = every model. */
+	models?: string[] | string;
+	/** Provider globs this rule applies to; absent = every provider. */
+	providers?: string[] | string;
+	/** Model class globs (catalog identity `class`) this rule applies to; absent = every class. */
+	class?: string[] | string;
+	/** Model family globs (catalog identity `family`) this rule applies to; absent = every family. */
+	family?: string[] | string;
 	/** Per-rule TTSR interrupt mode override. */
 	interruptMode?: "never" | "prose-only" | "tool-only" | "always";
 	[key: string]: unknown;
@@ -71,6 +81,14 @@ export interface Rule {
 	scope?: string[];
 	/** Lowercased agent-name globs this rule applies to (absent = every agent). */
 	agents?: string[];
+	/** Lowercased model globs matched against `provider/id` and the bare id (absent = every model). */
+	models?: string[];
+	/** Lowercased provider globs matched against `Model.provider` (absent = every provider). */
+	providers?: string[];
+	/** Lowercased globs matched against the model's identity class (absent = every class). */
+	class?: string[];
+	/** Lowercased globs matched against the model's identity family (absent = every family). */
+	family?: string[];
 	/** Per-rule TTSR interrupt mode override (falls back to global ttsr.interruptMode). */
 	interruptMode?: "never" | "prose-only" | "tool-only" | "always";
 	/** Source metadata */
@@ -225,6 +243,52 @@ export function ruleAppliesToAgent(rule: Pick<Rule, "agents">, agentName: string
 		}
 		return new Bun.Glob(pattern).match(name);
 	});
+}
+
+/** Model fields a rule's model scope is evaluated against. */
+export type RuleScopeModel = Pick<Model<Api>, "provider" | "id" | "identity">;
+
+function matchesAnyGlob(patterns: readonly string[] | undefined, value: string | undefined): boolean {
+	if (!patterns || patterns.length === 0) return true;
+	if (value === undefined) return false;
+	const subject = value.toLowerCase();
+	return patterns.some(raw => {
+		const pattern = raw.toLowerCase();
+		return pattern === subject || new Bun.Glob(pattern).match(subject);
+	});
+}
+
+/**
+ * Whether a rule's model scope (`models`, `providers`, `class`, `family`) admits
+ * `model`. Patterns within one field are alternatives; every present field must
+ * match. A rule without these fields applies to every model; `model === undefined`
+ * disables scoping (CLI inventory listings). A `family` scope never matches a
+ * model whose identity has no family.
+ */
+export function ruleAppliesToModel(
+	rule: Pick<Rule, "models" | "providers" | "class" | "family">,
+	model: RuleScopeModel | undefined,
+): boolean {
+	if (model === undefined) return true;
+	if (rule.models && rule.models.length > 0 && !rule.models.some(pattern => modelMatchesGlob(pattern, model))) {
+		return false;
+	}
+	return (
+		matchesAnyGlob(rule.providers, model.provider) &&
+		matchesAnyGlob(rule.class, model.identity.class) &&
+		matchesAnyGlob(rule.family, model.identity.family)
+	);
+}
+
+/**
+ * Canonical identity of a rule's model scope: empty for an unscoped rule,
+ * otherwise a stable encoding of every scope field. Same-named rules with
+ * different scopes are distinct rules.
+ */
+export function ruleModelScopeKey(rule: Pick<Rule, "models" | "providers" | "class" | "family">): string {
+	const fields = [rule.models, rule.providers, rule.class, rule.family];
+	if (fields.every(field => !field || field.length === 0)) return "";
+	return JSON.stringify(fields.map(field => (field ? [...field].sort() : [])));
 }
 /**
  * Heuristic for condition shorthand that looks like a file glob (for example `*.rs`).
@@ -393,7 +457,10 @@ export const ruleCapability = defineCapability<Rule>({
 	id: "rules",
 	displayName: "Rules",
 	description: "Project-specific rules and constraints (Cursor MDC, Windsurf, Cline formats)",
-	key: rule => rule.name,
+	key: rule => {
+		const scopeKey = ruleModelScopeKey(rule);
+		return scopeKey ? `${rule.name}\0${scopeKey}` : rule.name;
+	},
 	toExtensionId: rule => `rule:${rule.name}`,
 	validate: rule => {
 		if (!rule.name) return "Missing rule name";

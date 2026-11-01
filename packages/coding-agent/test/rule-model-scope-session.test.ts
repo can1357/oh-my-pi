@@ -1,0 +1,299 @@
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { Agent } from "@oh-my-pi/pi-agent-core";
+import { AuthStorage } from "@oh-my-pi/pi-ai";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { getActiveRules, resetActiveRulesForTests, type Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { removeWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+
+const OPUS_MARKER = "OPUS_ONLY_RULE_BODY_7f3a";
+const SONNET_MARKER = "SONNET_ONLY_RULE_BODY_2c9e";
+const ANTHROPIC_MARKER = "ANTHROPIC_RULE_BODY_51d0";
+const UNSCOPED_MARKER = "UNSCOPED_RULE_BODY_93b4";
+
+function rule(name: string, partial: Partial<Rule>): Rule {
+	return {
+		name,
+		path: `/rules/${name}.md`,
+		content: partial.content ?? name,
+		_source: { provider: "native", providerName: "native", path: `/rules/${name}.md`, level: "user" },
+		...partial,
+	};
+}
+
+// Same-named variants: the session renders whichever one admits its current model.
+const variantRules = [
+	rule("style", { content: OPUS_MARKER, alwaysApply: true, models: ["*/claude-opus-5"] }),
+	rule("style", { content: SONNET_MARKER, alwaysApply: true, family: ["sonnet"] }),
+];
+
+const opus = getBundledModel("anthropic", "claude-opus-5");
+const sonnet = getBundledModel("anthropic", "claude-sonnet-5");
+const sonnetSelector = `${sonnet.provider}/${sonnet.id}`;
+const opusSelector = `${opus.provider}/${opus.id}`;
+
+describe("model-scoped rules in a live session", () => {
+	let dir: string;
+	let authStorage: AuthStorage;
+	let modelRegistry: ModelRegistry;
+	const sessions: AgentSession[] = [];
+
+	beforeAll(async () => {
+		dir = path.join(os.tmpdir(), `pi-rule-model-scope-${Snowflake.next()}`);
+		await fs.mkdir(dir, { recursive: true });
+		authStorage = await AuthStorage.create(path.join(dir, "auth.db"));
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		modelRegistry = new ModelRegistry(authStorage);
+	});
+
+	afterEach(() => {
+		resetActiveRulesForTests();
+	});
+
+	afterAll(async () => {
+		for (const session of sessions) await session.dispose().catch(() => {});
+		authStorage.close();
+		await removeWithRetries(dir);
+	});
+
+	async function startSession(options: {
+		model?: typeof opus;
+		rules?: Rule[];
+		settings?: Settings;
+		sessionManager?: SessionManager;
+		taskDepth?: number;
+		toolNames?: string[];
+	}): Promise<AgentSession> {
+		const { session } = await createAgentSession({
+			cwd: dir,
+			agentDir: dir,
+			modelRegistry,
+			sessionManager: options.sessionManager ?? SessionManager.inMemory(),
+			settings: options.settings ?? Settings.isolated(),
+			model: options.model,
+			rules: options.rules ?? variantRules,
+			taskDepth: options.taskDepth,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			toolNames: options.toolNames ?? ["read"],
+		});
+		sessions.push(session);
+		return session;
+	}
+
+	function prompt(session: AgentSession): string {
+		return session.agent.state.systemPrompt.join("\n");
+	}
+
+	for (const includeModelInPrompt of [true, false]) {
+		it(`swaps the variant on every model switch (includeModelInPrompt=${includeModelInPrompt})`, async () => {
+			const session = await startSession({ model: opus, settings: Settings.isolated({ includeModelInPrompt }) });
+			expect(prompt(session)).toContain(OPUS_MARKER);
+			expect(prompt(session)).not.toContain(SONNET_MARKER);
+
+			await session.setModel(sonnet);
+			expect(prompt(session)).toContain(SONNET_MARKER);
+			expect(prompt(session)).not.toContain(OPUS_MARKER);
+			expect(getActiveRules().map(r => r.content)).toEqual([SONNET_MARKER]);
+
+			await session.setModel(opus);
+			expect(prompt(session)).toContain(OPUS_MARKER);
+			expect(prompt(session)).not.toContain(SONNET_MARKER);
+		});
+	}
+
+	it("renders the restored session model's variant at startup", async () => {
+		const settings = Settings.isolated();
+		settings.setModelRole("default", opusSelector);
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendModelChange(sonnetSelector);
+		const session = await startSession({ settings, sessionManager });
+
+		expect(session.model?.id).toBe(sonnet.id);
+		expect(prompt(session)).toContain(SONNET_MARKER);
+		expect(prompt(session)).not.toContain(OPUS_MARKER);
+	});
+
+	it("gives a subagent on another model its own variant", async () => {
+		const parent = await startSession({ model: opus });
+		const child = await startSession({ model: sonnet, taskDepth: 1 });
+		expect(prompt(parent)).toContain(OPUS_MARKER);
+		expect(prompt(child)).toContain(SONNET_MARKER);
+		expect(prompt(child)).not.toContain(OPUS_MARKER);
+	});
+
+	it("keeps both variants in the rules a spawned subagent inherits after a switch", async () => {
+		const parent = await startSession({ model: opus, toolNames: ["read", "task"] });
+		await parent.setModel(sonnet);
+		expect(prompt(parent)).toContain(SONNET_MARKER);
+		// The task tool spawns subagents with its ToolSession's `rules`.
+		const task = parent.getToolByName("task") as unknown as { tool?: { session?: { rules?: Rule[] } } };
+		const inherited = task.tool?.session?.rules?.map(r => r.content);
+		expect(inherited).toEqual([OPUS_MARKER, SONNET_MARKER]);
+	});
+
+	it("scopes the /btw side request to the current model", async () => {
+		const session = await startSession({ model: opus });
+		await session.setModel(sonnet);
+		// `/btw` (runEphemeralTurn) sends the side request context built from the live prompt.
+		const side = await session.agent.buildSideRequestContext([]);
+		const sidePrompt = (side.systemPrompt ?? []).join("\n");
+		expect(sidePrompt).toContain(SONNET_MARKER);
+		expect(sidePrompt).not.toContain(OPUS_MARKER);
+	});
+
+	it("re-scopes TTSR and rule:// on a retry fallback while keeping the prompt bytes", async () => {
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.fallbackChains": { default: [sonnetSelector] },
+			"edit.modelVariants": { [opus.id]: "replace", [sonnet.id]: "replace" },
+		});
+		settings.setModelRole("default", opusSelector);
+		const session = await startSession({
+			model: opus,
+			settings,
+			rules: [
+				// Rendered for both models: the prompt must not change on the hop.
+				rule("claude-style", { content: ANTHROPIC_MARKER, alwaysApply: true, class: ["anthropic"] }),
+				rule("plain", { content: UNSCOPED_MARKER, alwaysApply: true }),
+				rule("opus-guard", { condition: ["OPUS_FORBIDDEN"], family: ["opus"] }),
+				rule("sonnet-guard", { condition: ["SONNET_FORBIDDEN"], family: ["sonnet"] }),
+			],
+		});
+		expect(session.ttsrManager?.getRules().map(r => r.name)).toEqual(["opus-guard"]);
+
+		const mock = createMockModel();
+		const sentPrompts: Array<[string, string]> = [];
+		session.agent.streamFn = (model, context, options) => {
+			sentPrompts.push([model.id, (context.systemPrompt ?? []).join("\n")]);
+			mock.push(
+				model.id === opus.id
+					? { throw: "overloaded_error: provider returned error 503" }
+					: { content: ["Recovered on the fallback"] },
+			);
+			return mock.stream(model, context, options);
+		};
+
+		await session.prompt("Force a fallback off opus");
+		await session.waitForIdle();
+
+		expect(session.model?.id).toBe(sonnet.id);
+		const [firstModel, firstPrompt] = sentPrompts[0];
+		const [lastModel, lastPrompt] = sentPrompts.at(-1)!;
+		expect([firstModel, lastModel]).toEqual([opus.id, sonnet.id]);
+		expect(lastPrompt).toBe(firstPrompt);
+		expect(session.ttsrManager?.getRules().map(r => r.name)).toEqual(["sonnet-guard"]);
+		expect(getActiveRules().map(r => r.name)).not.toContain("opus-guard");
+		expect(getActiveRules().map(r => r.name)).toContain("sonnet-guard");
+	});
+
+	it("gives advisors only the always-apply rules scoped to their own model", async () => {
+		const settings = Settings.isolated();
+		settings.setModelRole("advisor", sonnetSelector);
+		const session = await startSession({
+			model: opus,
+			settings,
+			rules: [...variantRules, rule("plain", { content: UNSCOPED_MARKER, alwaysApply: true })],
+		});
+		session.setAdvisorEnabled(true);
+
+		const advisorPrompt = session.getAdvisorAgent()?.state.systemPrompt.join("\n") ?? "";
+		expect(advisorPrompt).toContain(SONNET_MARKER);
+		expect(advisorPrompt).not.toContain(OPUS_MARKER);
+		expect(advisorPrompt).not.toContain(UNSCOPED_MARKER);
+	});
+});
+
+describe("advisor model-scoped rules across an advisor model change", () => {
+	let dir: string;
+	let authStorage: AuthStorage;
+	let session: AgentSession | undefined;
+
+	beforeAll(async () => {
+		dir = path.join(os.tmpdir(), `pi-rule-model-scope-advisor-${Snowflake.next()}`);
+		await fs.mkdir(dir, { recursive: true });
+		authStorage = await AuthStorage.create(path.join(dir, "auth.db"));
+		authStorage.keys.setRuntime("anthropic", "test-key");
+	});
+
+	afterAll(async () => {
+		await session?.dispose().catch(() => {});
+		authStorage.close();
+		await removeWithRetries(dir);
+	});
+
+	it("rebuilds the advisor prompt for the fallback model", async () => {
+		const advisorFallback = getBundledModel("anthropic", "claude-opus-5");
+		const advisorPrimary = sonnet;
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.fallbackChains": { advisor: [opusSelector] },
+			"advisor.syncBacklog": "1",
+		});
+		settings.setModelRole("advisor", sonnetSelector);
+		const mainMock = createMockModel({ responses: [{ content: ["Primary complete"] }] });
+		const advisorMock = createMockModel();
+		const sentAdvisorPrompts: Array<[string, string]> = [];
+		const fallbackSucceeded = Promise.withResolvers<void>();
+		session = new AgentSession({
+			agent: new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: opus, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: mainMock.stream,
+			}),
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage),
+			advisorTools: [],
+			advisorConfigs: [{ name: "scoped", model: sonnetSelector }],
+			advisorModelRulesPrompt: model => (model.id === advisorPrimary.id ? SONNET_MARKER : OPUS_MARKER),
+			advisorStreamFn: (model, context, options) => {
+				sentAdvisorPrompts.push([model.id, (context.systemPrompt ?? []).join("\n")]);
+				advisorMock.push(
+					model.id === advisorPrimary.id
+						? { throw: "overloaded_error: provider returned error 503" }
+						: { content: ["Advisor recovered"] },
+				);
+				return advisorMock.stream(model, context, options);
+			},
+		});
+		session.subscribe(event => {
+			if (event.type === "retry_fallback_succeeded") fallbackSucceeded.resolve();
+		});
+
+		session.setAdvisorEnabled(true);
+		await session.prompt("Complete one primary turn");
+		await session.waitForIdle();
+		const timedOut = Promise.withResolvers<never>();
+		const timer = setTimeout(
+			() => timedOut.reject(new Error("advisor retry fallback did not succeed within 3s")),
+			3_000,
+		);
+		try {
+			await Promise.race([fallbackSucceeded.promise, timedOut.promise]);
+		} finally {
+			clearTimeout(timer);
+		}
+
+		expect(sentAdvisorPrompts.map(([id]) => id)).toEqual([advisorPrimary.id, advisorFallback.id]);
+		expect(sentAdvisorPrompts[0][1]).toContain(SONNET_MARKER);
+		expect(sentAdvisorPrompts[1][1]).toContain(OPUS_MARKER);
+		expect(sentAdvisorPrompts[1][1]).not.toContain(SONNET_MARKER);
+	});
+});

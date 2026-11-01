@@ -12,10 +12,15 @@
  *
  * `--agent <name>` on `omp ttsr test` evaluates the rule's `agents` frontmatter
  * scoping as that agent (default "main"); `omp ttsr list`/`scan` stay unfiltered.
+ * `--model <selector>` additionally evaluates the rule's model scope (`models`,
+ * `providers`, `class`, `family`) for that model; without it model scope is ignored
+ * and same-named variants collapse to the highest-precedence one.
  */
+import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { AstMatchStrictness, astMatch, FileType, type GlobMatch, glob } from "@oh-my-pi/pi-natives";
+import type { Api, Model } from "@oh-my-pi/pi-ai";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { getProjectDir } from "@oh-my-pi/pi-utils/dirs";
 import {
@@ -23,11 +28,15 @@ import {
 	compileRuleCondition,
 	MAIN_AGENT_RULE_NAME,
 	ruleAppliesToAgent,
+	ruleAppliesToModel,
 	type Rule,
 	ruleCapability,
 } from "../capability/rule";
 import { bucketRules } from "../capability/rule-buckets";
+import { ModelRegistry } from "../config/model-registry";
+import { formatModelString, getModelMatchPreferences, resolveCliModel } from "../config/model-resolver";
 import { Settings } from "../config/settings";
+import { AuthStorage, SqliteAuthCredentialStore } from "../session/auth-storage";
 import { cfgTtsr, type TtsrSettings } from "../export/ttsr-settings";
 import { initializeWithSettings, loadCapability } from "../discovery";
 import { buildRuleFromMarkdown, createSourceMeta } from "../discovery/helpers";
@@ -65,6 +74,8 @@ export interface TtsrTestArgs {
 	verbose?: boolean;
 	/** Agent name to evaluate rule `agents` scoping as; defaults to "main". */
 	agent?: string;
+	/** Model selector to evaluate rule model scoping for; omitted = model scope ignored. */
+	model?: string;
 }
 
 export interface TtsrScanArgs {
@@ -117,6 +128,8 @@ interface TestReport {
 	 */
 	inferenceNote?: string;
 	agent: string;
+	/** `provider/id` of the model rule model scoping was evaluated for. */
+	model?: string;
 }
 
 const STDIN_MARKER = "-";
@@ -291,7 +304,11 @@ function filterTtsrRulesForScan(
 	});
 }
 
-async function loadProjectTtsrRules(cwd: string, agentName?: string): Promise<{ rules: Rule[]; manager: TtsrManager }> {
+async function loadProjectTtsrRules(
+	cwd: string,
+	agentName?: string,
+	model?: Model<Api>,
+): Promise<{ rules: Rule[]; manager: TtsrManager }> {
 	const settingsInstance = await Settings.init({ cwd });
 	initializeWithSettings(settingsInstance);
 	const ttsrSettings = cfgTtsr.get(settingsInstance);
@@ -301,8 +318,34 @@ async function loadProjectTtsrRules(cwd: string, agentName?: string): Promise<{ 
 		builtinRules: ttsrSettings.builtinRules,
 		disabledRules: ttsrSettings.disabledRules,
 		agentName,
+		model,
 	});
 	return { rules: manager.getRules(), manager };
+}
+
+/**
+ * Resolve a `--model` selector against the model catalog (bundled plus
+ * `models.yml`). Only model identity is needed, so no credentials are read.
+ */
+async function resolveTtsrModel(selector: string, cwd: string): Promise<Model<Api>> {
+	const settings = await Settings.init({ cwd });
+	const authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
+	try {
+		const modelRegistry = new ModelRegistry(authStorage, undefined, { settings });
+		const resolved = resolveCliModel({
+			cliModel: selector,
+			modelRegistry,
+			availableModels: modelRegistry.getAll(),
+			settings,
+			preferences: getModelMatchPreferences(settings),
+		});
+		if (!resolved.model) {
+			throw new Error(resolved.error ?? `--model "${selector}" does not match any known model.`);
+		}
+		return resolved.model;
+	} finally {
+		authStorage.close();
+	}
 }
 
 async function loadProjectScanRules(cwd: string): Promise<Rule[]> {
@@ -335,12 +378,19 @@ async function readIsolatedRule(rulePath: string): Promise<Rule> {
 async function loadIsolatedRule(
 	rulePath: string,
 	agentName: string,
+	model?: Model<Api>,
 ): Promise<{ ok: true; rules: Rule[]; manager: TtsrManager } | { ok: false; unavailableMsg: string }> {
 	const rule = await readIsolatedRule(rulePath);
 	if (!ruleAppliesToAgent(rule, agentName)) {
 		return {
 			ok: false,
 			unavailableMsg: `Rule "${rule.name}" is scoped to agents [${(rule.agents ?? []).join(", ")}] and does not apply to agent "${agentName}". Re-run with --agent <one of those names>.`,
+		};
+	}
+	if (model && !ruleAppliesToModel(rule, model)) {
+		return {
+			ok: false,
+			unavailableMsg: `Rule "${rule.name}" is model-scoped and does not apply to model "${formatModelString(model)}". Re-run with --model <a model its models/providers/class/family admit>.`,
 		};
 	}
 	const manager = await createTtsrManager({
@@ -395,9 +445,24 @@ async function runTest(args: TtsrTestArgs, json: boolean, cwd: string): Promise<
 	};
 
 	const agent = (args.agent ?? "").trim().toLowerCase() || MAIN_AGENT_RULE_NAME;
+	const modelSelector = args.model?.trim();
+	let model: Model<Api> | undefined;
+	if (modelSelector) {
+		try {
+			model = await resolveTtsrModel(modelSelector, cwd);
+		} catch (error) {
+			const msg = error instanceof Error ? error.message : String(error);
+			if (json) {
+				process.stdout.write(`${JSON.stringify({ error: msg })}\n`);
+			} else {
+				process.stderr.write(`${chalk.red(msg)}\n`);
+			}
+			process.exit(1);
+		}
+	}
 	const loaded = args.rule
-		? await loadIsolatedRule(args.rule, agent)
-		: { ok: true as const, ...(await loadProjectTtsrRules(cwd, agent)) };
+		? await loadIsolatedRule(args.rule, agent, model)
+		: { ok: true as const, ...(await loadProjectTtsrRules(cwd, agent, model)) };
 
 	if (!loaded.ok) {
 		if (json) {
@@ -413,7 +478,7 @@ async function runTest(args: TtsrTestArgs, json: boolean, cwd: string): Promise<
 	if (rules.length === 0) {
 		const msg = args.rule
 			? "Rule registered but produced no TTSR entry."
-			: `No TTSR rules registered for this project as agent "${agent}". Rules scoped to other agents via \`agents\` are excluded — run \`omp ttsr list\` to see every rule, or pass --agent <name>.`;
+			: `No TTSR rules registered for this project as agent "${agent}"${model ? ` on model "${formatModelString(model)}"` : ""}. Rules scoped to other agents via \`agents\` or to other models are excluded — run \`omp ttsr list\` to see every rule, or pass --agent <name> / --model <selector>.`;
 		if (json) {
 			process.stdout.write(`${JSON.stringify({ error: msg })}\n`);
 		} else {
@@ -435,6 +500,7 @@ async function runTest(args: TtsrTestArgs, json: boolean, cwd: string): Promise<
 		notTriggered,
 		inferenceNote,
 		agent,
+		model: model ? formatModelString(model) : undefined,
 	};
 
 	if (json) {
@@ -449,7 +515,7 @@ function renderTestReport(report: TestReport, verbose: boolean, isolated: boolea
 	const ctxLabel = report.source === "tool" ? `tool:${report.tool ?? "?"}` : report.source;
 	const pathLabel = report.filePath ? ` path=${report.filePath}` : "";
 	process.stdout.write(
-		`${chalk.bold("TTSR test")} — source=${chalk.cyan(ctxLabel)}${pathLabel} agent=${chalk.cyan(report.agent)} snippet=${chalk.dim(`${report.snippetBytes}b`)}\n`,
+		`${chalk.bold("TTSR test")} — source=${chalk.cyan(ctxLabel)}${pathLabel} agent=${chalk.cyan(report.agent)}${report.model ? ` model=${chalk.cyan(report.model)}` : ""} snippet=${chalk.dim(`${report.snippetBytes}b`)}\n`,
 	);
 	process.stdout.write(`${chalk.dim(`  "${report.snippetPreview}"`)}\n\n`);
 	if (report.inferenceNote) {
