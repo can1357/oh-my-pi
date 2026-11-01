@@ -21,6 +21,13 @@ export interface FileLockOptions {
 /** An exclusive OS-backed lease. Releasing an already released handle is safe. */
 export interface FileLockHandle {
 	release(): void;
+	/**
+	 * Whether this handle still owns the lease, read from the lock itself.
+	 *
+	 * A caller that tracks ownership in its own boolean disagrees with the
+	 * lock as soon as anything releases it by another route.
+	 */
+	readonly acquired: boolean;
 }
 
 const DEFAULT_OPTIONS = {
