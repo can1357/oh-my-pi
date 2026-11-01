@@ -9,6 +9,7 @@ import {
 	getAgentDbPath,
 	getMemoriesDir,
 	isEnoent,
+	isRecord,
 	logger,
 	parseJsonlLenient,
 	peekFile,
@@ -19,13 +20,19 @@ import type { ModelRegistry } from "../config/model-registry";
 import { getModelMatchPreferences, resolveModelRoleValue } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import { redactMemorySecrets as redactSecrets } from "../memory-backend/redact";
-import type { MemoryBackendSaveInput, MemoryBackendSaveResult } from "../memory-backend/types";
+import type {
+	MemoryBackendSaveInput,
+	MemoryBackendSaveResult,
+	PendingInstructionsCommit,
+} from "../memory-backend/types";
 import consolidationTemplate from "../prompts/memories/consolidation.md" with { type: "text" };
 import consolidationSystemTemplate from "../prompts/memories/consolidation_system.md" with { type: "text" };
 import readPathTemplate from "../prompts/memories/read-path.md" with { type: "text" };
 import stageOneInputTemplate from "../prompts/memories/stage_one_input.md" with { type: "text" };
 import stageOneSystemTemplate from "../prompts/memories/stage_one_system.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
+import { MEMORY_SNAPSHOT_ENTRY_TYPE } from "../session/session-entries";
+import type { SessionManager } from "../session/session-manager";
 import {
 	claimStage1Jobs,
 	clearMemoryData as clearMemoryDataInDb,
@@ -160,8 +167,18 @@ export function startMemoryStartupTask(options: {
 		.finally(() => session.endLocalMemoryStartup?.(signal));
 }
 
+/**
+ * Transcript a memory prompt block is built for and recorded in.
+ *
+ * The branch view and the custom-entry append are optional so a caller that
+ * only holds a session file (a preview, a test double) can still ask for the
+ * memory block; such a transcript simply keeps no snapshot in the session file.
+ */
+export type MemoryTranscript = Pick<SessionManager, "getSessionFile"> &
+	Partial<Pick<SessionManager, "getBranchView" | "appendCustomEntry">>;
+
 interface MemoryInstructionSession {
-	sessionManager: Pick<AgentSession["sessionManager"], "getSessionFile">;
+	sessionManager: MemoryTranscript;
 	agent?: { state: { messages: readonly unknown[] } };
 }
 
@@ -176,20 +193,106 @@ function memoryConversationStarted(session: MemoryInstructionSession): boolean {
 	return (session.agent?.state.messages.length ?? 0) > 0;
 }
 
-interface CachedMemoryToolDeveloperInstructions {
+/** Memory block state of one transcript in this process. */
+interface TranscriptMemoryState {
+	/** Session file the state belongs to; another session file invalidates it. */
 	sessionFile: string | undefined;
+	/** Normalized project scope the state belongs to. */
+	scope: string;
+	/** Clear token the content was read under. */
+	token: string;
+	/**
+	 * Id of the branch entry the state was derived from.
+	 *
+	 * The active branch decides which snapshot the prompt carries: when the
+	 * leaf moves off that entry, the state no longer describes this branch and
+	 * the next build reselects the snapshot the branch holds.
+	 */
+	recordedEntryId: string | undefined;
+	/**
+	 * Id of the branch leaf the state was staged on; `null` for an empty branch.
+	 *
+	 * The commit that records the staged snapshot must land on the branch it
+	 * was staged for: the branch still holds this leaf while the leaf only
+	 * grew, and lost it when the leaf moved onto another branch.
+	 */
+	stagedLeafId: string | null;
+	/** The memory files' content the prompt block is built from. */
 	snapshot: MemoryToolDeveloperInstructionsSnapshot | undefined;
+	/** The rendered prompt block. */
 	value: string | undefined;
+	/** The snapshot is not in the transcript yet; the prompt commit records it. */
+	pending: boolean;
 }
 
-const memoryToolDeveloperInstructionsBySession = new WeakMap<
-	MemoryInstructionSession,
-	CachedMemoryToolDeveloperInstructions
->();
-const memoryToolDeveloperInstructionsByRoot = new Map<string, MemoryToolDeveloperInstructionsSnapshot | undefined>();
+const memoryStateByTranscript = new WeakMap<MemoryTranscript, TranscriptMemoryState>();
+/** Memory files' content of a project read before any transcript was involved. */
+const memoryBaselineByRoot = new Map<string, { snapshot: MemoryToolDeveloperInstructionsSnapshot; token: string }>();
 
-function getMemoryInstructionSessionFile(session: MemoryInstructionSession): string | undefined {
-	return session.sessionManager.getSessionFile() ?? undefined;
+/**
+ * Per-project file holding the clear token of the last `/memory clear`.
+ *
+ * A snapshot is only valid under the token it was read with. A clear writes a
+ * fresh token, so every snapshot taken before it — on any branch of any
+ * session of the project — is rejected and the memory is read from disk again.
+ * The token is a fresh random value, not a timestamp: two clears in the same
+ * millisecond must still retire the snapshots between them.
+ */
+function memoryClearTokenPath(memoryRoot: string): string {
+	return `${memoryRoot}.clear-token`;
+}
+
+async function readMemoryClearToken(memoryRoot: string): Promise<string> {
+	try {
+		return (await Bun.file(memoryClearTokenPath(memoryRoot)).text()).trim();
+	} catch (error) {
+		// A missing token means no clear yet; a removal racing the read must
+		// not fail the prompt build.
+		if (isEnoent(error)) return "";
+		throw error;
+	}
+}
+
+async function writeMemoryClearToken(memoryRoot: string): Promise<void> {
+	await Bun.write(memoryClearTokenPath(memoryRoot), crypto.randomUUID());
+}
+
+/**
+ * A memory snapshot recorded on a transcript's active branch.
+ */
+interface RecordedMemorySnapshot {
+	/** Id of the transcript entry holding it. */
+	entryId: string;
+	/** The memory files' content it holds. */
+	snapshot: MemoryToolDeveloperInstructionsSnapshot;
+}
+
+/**
+ * The snapshot recorded on the transcript's branch that still applies.
+ *
+ * `undefined` when the branch holds none, a malformed one, one taken for
+ * another project scope, or one taken before the project's last clear: such a
+ * snapshot holds memory the session may not use, so the memory files are read
+ * from disk instead.
+ */
+function findRecordedMemorySnapshot(
+	transcript: MemoryTranscript,
+	scope: string,
+	token: string,
+): RecordedMemorySnapshot | undefined {
+	const branch = transcript.getBranchView?.();
+	if (!branch) return undefined;
+	for (let index = branch.length - 1; index >= 0; index--) {
+		const entry = branch[index];
+		if (entry.type !== "custom" || entry.customType !== MEMORY_SNAPSHOT_ENTRY_TYPE) continue;
+		const data = entry.data;
+		if (!isRecord(data)) return undefined;
+		if (typeof data.summary !== "string" || typeof data.learned !== "string") return undefined;
+		if (typeof data.scope !== "string" || data.scope !== scope) return undefined;
+		if (typeof data.token !== "string" || data.token !== token) return undefined;
+		return { entryId: entry.id, snapshot: { summary: data.summary, learned: data.learned } };
+	}
+	return undefined;
 }
 
 async function readMemoryToolDeveloperInstructionsSnapshot(
@@ -210,6 +313,47 @@ async function readMemoryToolDeveloperInstructionsSnapshot(
 	return { summary, learned };
 }
 
+/**
+ * The memory content a prompt may carry.
+ *
+ * The summary and the lessons share ONE injection budget so the combined
+ * block stays within `summaryInjectionTokenLimit` (~4 chars/token, matching
+ * truncateByApproxTokens). With no summary, lessons get the whole budget.
+ * Clamp to 0: truncateByApproxTokens appends a marker, so a truncated summary
+ * can exceed `limit * 4` chars and drive the remainder negative — when the
+ * summary already fills the budget, lessons are simply dropped.
+ *
+ * Only bounded content is staged and recorded: the memory files can hold far
+ * more than a prompt can use, and a transcript that carried the surplus
+ * would grow with the whole memory store instead of the block it injected.
+ * `undefined` when nothing is injectable — an empty store, or a budget that
+ * leaves no room.
+ */
+function boundMemorySnapshot(
+	snapshot: MemoryToolDeveloperInstructionsSnapshot | undefined,
+	settings: Settings,
+): MemoryToolDeveloperInstructionsSnapshot | undefined {
+	if (!snapshot) return undefined;
+	const cfg = loadMemoryConfig(settings);
+	if (!cfg.enabled) return undefined;
+
+	const summaryOut = snapshot.summary
+		? truncateByApproxTokens(snapshot.summary, cfg.summaryInjectionTokenLimit).trim()
+		: "";
+	const learnedBudget = Math.max(0, cfg.summaryInjectionTokenLimit - Math.ceil(summaryOut.length / 4));
+	const learnedOut =
+		snapshot.learned && learnedBudget > 0 ? truncateByApproxTokens(snapshot.learned, learnedBudget).trim() : "";
+	if (!summaryOut && !learnedOut) return undefined;
+	return { summary: summaryOut, learned: learnedOut };
+}
+
+/**
+ * The prompt block of a memory snapshot.
+ *
+ * The snapshot is bounded already, so the block carries exactly the content
+ * the snapshot holds: a recorded snapshot rebuilds the very same block, and
+ * the recorded content stays as small as the block it stands for.
+ */
 function renderMemoryToolDeveloperInstructionsSnapshot(
 	snapshot: MemoryToolDeveloperInstructionsSnapshot | undefined,
 	settings: Settings,
@@ -219,44 +363,223 @@ function renderMemoryToolDeveloperInstructionsSnapshot(
 	if (!cfg.enabled) return undefined;
 	if (!snapshot.summary && !snapshot.learned) return undefined;
 
-	const summaryOut = snapshot.summary
-		? truncateByApproxTokens(snapshot.summary, cfg.summaryInjectionTokenLimit).trim()
-		: "";
-	// Lessons share ONE injection budget with the summary so the combined block
-	// stays within `summaryInjectionTokenLimit` (~4 chars/token, matching
-	// truncateByApproxTokens). With no summary, lessons get the whole budget.
-	// Clamp to 0: truncateByApproxTokens appends a marker, so a truncated summary
-	// can exceed `limit * 4` chars and drive the remainder negative — when the
-	// summary already fills the budget, lessons are simply dropped.
-	const learnedBudget = Math.max(0, cfg.summaryInjectionTokenLimit - Math.ceil(summaryOut.length / 4));
-	const learnedOut =
-		snapshot.learned && learnedBudget > 0 ? truncateByApproxTokens(snapshot.learned, learnedBudget).trim() : "";
-	if (!summaryOut && !learnedOut) return undefined;
-
 	return prompt.render(readPathTemplate, {
-		memory_summary: summaryOut,
-		learned: learnedOut,
+		memory_summary: snapshot.summary,
+		learned: snapshot.learned,
 	});
 }
 
-function cacheMemoryToolDeveloperInstructions(
-	session: MemoryInstructionSession,
-	sessionFile: string | undefined,
-	snapshot: MemoryToolDeveloperInstructionsSnapshot | undefined,
-	settings: Settings,
-): string | undefined {
-	const value = renderMemoryToolDeveloperInstructionsSnapshot(snapshot, settings);
-	memoryToolDeveloperInstructionsBySession.set(session, { sessionFile, snapshot, value });
-	return value;
+/**
+ * Drop the transcript's memory block after an explicit memory state change
+ * that must affect the active conversation immediately, such as `/memory
+ * clear`. The next build reads the memory files again and records the result.
+ */
+export function clearMemoryToolDeveloperInstructionsCache(transcript: MemoryTranscript | undefined): void {
+	if (transcript) memoryStateByTranscript.delete(transcript);
 }
 
 /**
- * Drop the per-session memory instruction snapshot after explicit memory state
- * changes that must affect the active conversation immediately, such as
- * `/memory clear`.
+ * Id of the entry the transcript's active branch ends on.
+ *
+ * `null` for an empty branch. The active branch is the path to the leaf, so it
+ * still holds a staged leaf while the leaf only grew, and lost it when the
+ * leaf moved onto another branch.
  */
-export function clearMemoryToolDeveloperInstructionsCache(session: MemoryInstructionSession | undefined): void {
-	if (session) memoryToolDeveloperInstructionsBySession.delete(session);
+function activeBranchLeafId(transcript: MemoryTranscript): string | null {
+	const branch = transcript.getBranchView?.();
+	if (!branch || branch.length === 0) return null;
+	return branch[branch.length - 1].id;
+}
+
+/**
+ * Whether the transcript still sits on the branch a snapshot was staged for.
+ *
+ * The session file must match: a session switch keeps the transcript object
+ * but swaps the file behind it. The branch must still hold the staged leaf, so
+ * a branch that grew keeps the snapshot and a leaf that moved onto another
+ * branch loses it.
+ */
+function stagedBranchStillHolds(transcript: MemoryTranscript, state: TranscriptMemoryState): boolean {
+	if ((transcript.getSessionFile() ?? undefined) !== state.sessionFile) return false;
+	const branch = transcript.getBranchView?.();
+	if (!branch) return false;
+	if (state.stagedLeafId === null) return true;
+	return branch.some(entry => entry.id === state.stagedLeafId);
+}
+
+/**
+ * The callback that records the memory block a prompt was built from.
+ *
+ * The transcript must not claim a memory block the session never sent: the
+ * snapshot is staged by the build and recorded only once the prompt that
+ * carries it commits.
+ */
+function memorySnapshotRecorder(transcript: MemoryTranscript, state: TranscriptMemoryState): () => void {
+	return () => {
+		if (!state.pending) return;
+		state.pending = false;
+		// The snapshot belongs to the branch it was staged for. A session switch
+		// or a leaf move since the staging would record it on another branch,
+		// whose transcript would then restore a block it never carried.
+		if (!stagedBranchStillHolds(transcript, state)) {
+			logger.debug("Discarded a stale memory snapshot commit", { sessionFile: state.sessionFile });
+			return;
+		}
+		const staged = state.snapshot;
+		// The state this process holds may have moved on (the startup refresh
+		// adopts a newer summary); it keeps its own pending flag, so only the
+		// recorded entry is carried over.
+		const current = memoryStateByTranscript.get(transcript);
+		const recorded = findRecordedMemorySnapshot(transcript, state.scope, state.token);
+		if (recorded && recorded.snapshot.summary === staged?.summary && recorded.snapshot.learned === staged?.learned) {
+			// The snapshot now lives on this branch: a leaf that moves off that
+			// entry re-stages the block for the branch it moved to.
+			state.stagedLeafId = recorded.entryId;
+			if (current) {
+				current.recordedEntryId = recorded.entryId;
+				current.stagedLeafId = recorded.entryId;
+			}
+			return;
+		}
+		const entryId = transcript.appendCustomEntry?.(MEMORY_SNAPSHOT_ENTRY_TYPE, {
+			summary: staged?.summary ?? "",
+			learned: staged?.learned ?? "",
+			scope: state.scope,
+			token: state.token,
+		});
+		if (!entryId) return;
+		state.stagedLeafId = entryId;
+		if (current) {
+			current.recordedEntryId = entryId;
+			current.stagedLeafId = entryId;
+		}
+	};
+}
+
+/**
+ * Rebind the transcript's memory state to the session file it now writes to.
+ *
+ * A branch into a new session file replaces the file but keeps the base
+ * prompt — and with it the memory block that prompt carries. The staged
+ * snapshot still names the source file, so the recorder that would record it
+ * drops it as stale: the new session's transcript would claim no memory block
+ * at all, and a later resume rereads the memory files and rebuilds a
+ * different prompt.
+ */
+export function rebindMemorySnapshotSessionFile(transcript: MemoryTranscript | undefined): void {
+	if (!transcript) return;
+	const state = memoryStateByTranscript.get(transcript);
+	if (!state) return;
+	const sessionFile = transcript.getSessionFile() ?? undefined;
+	if (sessionFile === state.sessionFile) return;
+	state.sessionFile = sessionFile;
+	// The snapshot now belongs to the branch the new file holds.
+	state.stagedLeafId = activeBranchLeafId(transcript);
+	state.pending = state.snapshot !== undefined;
+}
+
+/**
+ * The callback that records the memory block a prompt was built from.
+ *
+ * The transcript must not claim a memory block the session never sent: the
+ * snapshot is staged by the build and recorded only once the prompt that
+ * carries it commits. Returns `undefined` when nothing is staged.
+ */
+export function pendingMemorySnapshotCommit(transcript: MemoryTranscript | undefined): (() => void) | undefined {
+	if (!transcript) return undefined;
+	const state = memoryStateByTranscript.get(transcript);
+	if (!state?.pending) return undefined;
+	return memorySnapshotRecorder(transcript, state);
+}
+
+/**
+ * Whether a prompt still carries the staged memory block.
+ *
+ * The block is embedded in the project prompt, so a caller that replaces the
+ * prompt wholesale drops it. Matching ignores whitespace runs: the rendered
+ * prompt re-flows the block it embeds, and a replacement may split it across
+ * the prompt's parts — the provider receives the whole block either way, so
+ * the parts are joined with whitespace instead of matched one by one.
+ */
+function promptCarriesMemoryBlock(promptParts: readonly string[], memoryBlock: string | undefined): boolean {
+	if (!memoryBlock) return false;
+	const needle = memoryBlock.replace(/\s+/g, " ").trim();
+	if (!needle) return false;
+	const haystack = promptParts.join(" ").replace(/\s+/g, " ").trim();
+	return haystack.includes(needle);
+}
+
+/**
+ * Drop a staged memory block the prompt did not carry.
+ *
+ * The rejected block must not be reused: the next build reads the memory
+ * files again, so the first prompt that actually carries memory is built from
+ * the current state instead of the rejected one.
+ */
+function cancelStagedMemorySnapshot(transcript: MemoryTranscript, state: TranscriptMemoryState): void {
+	state.pending = false;
+	if (memoryStateByTranscript.get(transcript) === state) memoryStateByTranscript.delete(transcript);
+}
+
+/**
+ * The memory block staged for a prompt, and the commit that records it.
+ *
+ * The block is staged by the build and recorded only once the prompt carrying
+ * it commits. A prompt that replaced the block — an override that dropped it,
+ * or an empty prompt — cancels the staging instead: the transcript must not
+ * claim a memory block the session never sent, and the next build reads the
+ * current memory state rather than the rejected one.
+ *
+ * The branch the prompt is built for decides where the snapshot lands: a leaf
+ * that moved off the entry it was staged on re-stages it, so the branch the
+ * user continued on records a snapshot of its own instead of inheriting the
+ * one of the branch it left.
+ *
+ * `undefined` when nothing is staged: the memory files hold no injectable
+ * content.
+ */
+export function stagedMemorySnapshot(transcript: MemoryTranscript | undefined): PendingInstructionsCommit | undefined {
+	if (!transcript) return undefined;
+	const state = memoryStateByTranscript.get(transcript);
+	if (!state || state.snapshot === undefined) return undefined;
+	return {
+		commit(promptParts: readonly string[]) {
+			if (!stagedBranchStillHolds(transcript, state)) {
+				// The leaf moved onto another branch: the snapshot is staged
+				// again for the branch the prompt is built for, and recorded
+				// there.
+				state.stagedLeafId = activeBranchLeafId(transcript);
+				state.pending = true;
+			}
+			if (!promptCarriesMemoryBlock(promptParts, state.value)) {
+				cancelStagedMemorySnapshot(transcript, state);
+				return undefined;
+			}
+			if (!state.pending) return undefined;
+			return memorySnapshotRecorder(transcript, state);
+		},
+	};
+}
+
+/**
+ * Record the memory block a prompt carries on the transcript's current branch.
+ *
+ * A branch move — a rewind, an `ask` re-answer, a manual tool replay — leaves
+ * the prompt carrying the memory block while the branch the session continues
+ * on holds no snapshot of its own: a later resume rereads the memory files and
+ * rebuilds a different prompt. Recording the block on that branch keeps the
+ * transcript and the prompt in sync.
+ *
+ * Returns true when the branch recorded a snapshot.
+ */
+export function recordMemorySnapshotOnCurrentBranch(
+	transcript: MemoryTranscript | undefined,
+	promptParts: readonly string[],
+): boolean {
+	const recorder = stagedMemorySnapshot(transcript)?.commit(promptParts);
+	if (!recorder) return false;
+	recorder();
+	return true;
 }
 
 /**
@@ -265,9 +588,10 @@ export function clearMemoryToolDeveloperInstructionsCache(session: MemoryInstruc
  * Startup may finish after the first prompt build and write `memory_summary.md`.
  * The session adopts that summary only while it holds no messages: once a
  * request went out, signed thinking is bound to the prompt it carried, so the
- * new summary waits for the next session, whose cache key (session file) differs.
- * It must not reread `learned.md`, because a `learn` call racing with startup
- * belongs to the next session's memory prompt, not the active prompt-cache prefix.
+ * new summary waits for the next session, whose transcript records its own
+ * snapshot. It must not reread `learned.md`, because a `learn` call racing with
+ * startup belongs to the next session's memory prompt, not the active
+ * prompt-cache prefix.
  */
 export async function refreshMemoryToolDeveloperInstructionsCacheAfterStartup(
 	session: MemoryInstructionSession,
@@ -276,16 +600,44 @@ export async function refreshMemoryToolDeveloperInstructionsCacheAfterStartup(
 	settings: Settings,
 ): Promise<void> {
 	if (memoryConversationStarted(session)) return;
-	const sessionFile = getMemoryInstructionSessionFile(session);
-	const cached = memoryToolDeveloperInstructionsBySession.get(session);
+	const transcript = session.sessionManager;
 	const root = getMemoryRoot(agentDir, cwd);
+	const scope = normalizeScopeCwd(cwd);
+	const sessionFile = transcript.getSessionFile() ?? undefined;
+	// The clear token is read before the memory files: a clear that lands while
+	// they are read leaves this snapshot under the older token, so it is
+	// rejected instead of restoring cleared memory.
+	const token = await readMemoryClearToken(root);
 	const current = await readMemoryToolDeveloperInstructionsSnapshot(root, settings);
 	if (memoryConversationStarted(session)) return;
-	const baseline = memoryToolDeveloperInstructionsByRoot.get(root);
-	const cachedLearned = cached && cached.sessionFile === sessionFile ? cached.snapshot?.learned : undefined;
-	const learned = cachedLearned ?? baseline?.learned ?? "";
-	const snapshot = current ? { summary: current.summary, learned } : undefined;
-	cacheMemoryToolDeveloperInstructions(session, sessionFile, snapshot, settings);
+	// A clear that raced the read retired the snapshot: keep the cleared state.
+	if ((await readMemoryClearToken(root)) !== token) return;
+	// The conversation may have started while the token was read: the turn
+	// that went out was built from the old prompt, so the consolidated
+	// snapshot belongs to the next session, not to this one.
+	if (memoryConversationStarted(session)) return;
+
+	const state = memoryStateByTranscript.get(transcript);
+	const pinned =
+		state && state.sessionFile === sessionFile && state.scope === scope && state.token === token
+			? state.snapshot
+			: undefined;
+	const baseline = memoryBaselineByRoot.get(root);
+	const baselineLearned = baseline && baseline.token === token ? baseline.snapshot.learned : undefined;
+	const learned = pinned?.learned ?? baselineLearned ?? "";
+	const snapshot = current ? boundMemorySnapshot({ summary: current.summary, learned }, settings) : undefined;
+	memoryStateByTranscript.set(transcript, {
+		sessionFile,
+		scope,
+		token,
+		// The refreshed block still belongs to the branch the state was derived
+		// from: the branch decides whether the state still applies.
+		recordedEntryId: findRecordedMemorySnapshot(transcript, scope, token)?.entryId,
+		stagedLeafId: activeBranchLeafId(transcript),
+		snapshot,
+		value: renderMemoryToolDeveloperInstructionsSnapshot(snapshot, settings),
+		pending: snapshot !== undefined,
+	});
 }
 
 /**
@@ -294,30 +646,86 @@ export async function refreshMemoryToolDeveloperInstructionsCacheAfterStartup(
  * `cwd` is the session's project directory, the same scope consolidation and
  * `learn` write to; never `settings.getCwd()`, which an embedding host may pin
  * to one directory for sessions spanning several projects.
+ *
+ * With a transcript, the memory block is pinned: the first build of a session
+ * records the content it read in the transcript, and later builds — including
+ * those of a process that resumes the session — reuse that record instead of
+ * rereading the memory files, so a lesson another session learned or a
+ * consolidation that rewrote the summary cannot rewrite the prompt cache.
  */
 export async function buildMemoryToolDeveloperInstructions(
 	agentDir: string,
 	cwd: string,
 	settings: Settings,
-	session?: MemoryInstructionSession,
+	transcript?: MemoryTranscript,
 ): Promise<string | undefined> {
 	const root = getMemoryRoot(agentDir, cwd);
-	if (!session) {
-		const snapshot = await readMemoryToolDeveloperInstructionsSnapshot(root, settings);
-		memoryToolDeveloperInstructionsByRoot.set(root, snapshot);
+	const scope = normalizeScopeCwd(cwd);
+	if (!transcript) {
+		const token = await readMemoryClearToken(root);
+		const snapshot = boundMemorySnapshot(await readMemoryToolDeveloperInstructionsSnapshot(root, settings), settings);
+		if (snapshot) memoryBaselineByRoot.set(root, { snapshot, token });
 		return renderMemoryToolDeveloperInstructionsSnapshot(snapshot, settings);
 	}
 
-	const sessionFile = getMemoryInstructionSessionFile(session);
-	const cached = memoryToolDeveloperInstructionsBySession.get(session);
-	if (cached && cached.sessionFile === sessionFile) return cached.value;
+	const sessionFile = transcript.getSessionFile() ?? undefined;
+	const token = await readMemoryClearToken(root);
+	// The snapshot the active branch records decides what the prompt carries:
+	// a leaf that moved onto another branch must not keep the block of the
+	// branch it left.
+	const recorded = findRecordedMemorySnapshot(transcript, scope, token);
+	// The leaf the snapshot is staged on: the branch it belongs to.
+	const stagedLeafId = activeBranchLeafId(transcript);
+	const state = memoryStateByTranscript.get(transcript);
+	const reusable =
+		state && state.sessionFile === sessionFile && state.scope === scope && state.token === token ? state : undefined;
+	if (reusable && reusable.recordedEntryId === recorded?.entryId) {
+		// The state still describes the branch it was staged on only while that
+		// branch holds the staged leaf. A leaf that moved onto another branch
+		// leaves it behind: the commit that would record the snapshot there is
+		// rejected as stale, and the state would stay non-pending forever, so
+		// the destination branch never records a snapshot of its own. The
+		// snapshot is re-staged on the current branch instead, keeping the
+		// content this process already built.
+		if (!stagedBranchStillHolds(transcript, reusable)) {
+			reusable.stagedLeafId = stagedLeafId;
+			if (reusable.snapshot !== undefined) reusable.pending = true;
+		}
+		return reusable.value;
+	}
 
-	const snapshot = await readMemoryToolDeveloperInstructionsSnapshot(root, settings);
-	return cacheMemoryToolDeveloperInstructions(session, sessionFile, snapshot, settings);
+	// The leaf moved off the entry the state was derived from. A branch that
+	// records a snapshot of its own wins; a branch that records none keeps the
+	// content this process already built and stages it again, so the next
+	// commit records it there and a later resume restores the same block
+	// instead of rereading the memory files.
+	//
+	// A recorded snapshot was bounded by the budget in force when it was
+	// taken. The budget may have shrunk since, so it is bounded again here:
+	// a session resumed under a smaller budget must not inject the old,
+	// larger block.
+	const snapshot =
+		(recorded?.snapshot ? boundMemorySnapshot(recorded.snapshot, settings) : undefined) ??
+		reusable?.snapshot ??
+		boundMemorySnapshot(await readMemoryToolDeveloperInstructionsSnapshot(root, settings), settings);
+	const value = renderMemoryToolDeveloperInstructionsSnapshot(snapshot, settings);
+	memoryStateByTranscript.set(transcript, {
+		sessionFile,
+		scope,
+		token,
+		recordedEntryId: recorded?.entryId,
+		stagedLeafId,
+		snapshot,
+		value,
+		pending: snapshot !== undefined,
+	});
+	return value;
 }
 
 /**
- * Clear the persisted memory state and generated artifacts of one project.
+ * Clear all persisted memory state and generated artifacts, and retire every
+ * snapshot of the project: the next build of any session reads the memory
+ * files again instead of restoring cleared memory.
  */
 export async function clearMemoryData(agentDir: string, cwd: string): Promise<void> {
 	const db = openMemoryDb(getAgentDbPath(agentDir));
@@ -326,7 +734,17 @@ export async function clearMemoryData(agentDir: string, cwd: string): Promise<vo
 	} finally {
 		closeMemoryDb(db);
 	}
-	await fs.rm(getMemoryRoot(agentDir, cwd), { recursive: true, force: true });
+	const memoryRoot = getMemoryRoot(agentDir, cwd);
+	// The fresh token retires the recorded snapshots before the memory files
+	// go: a clear that dies half-way then leaves the snapshots rejected
+	// instead of restoring memory that no longer exists on disk.
+	await writeMemoryClearToken(memoryRoot);
+	await fs.rm(memoryRoot, { recursive: true, force: true });
+	// A builder that read the token above while the files were still on disk
+	// persisted the old content under it. A second rotation retires those
+	// snapshots too, so a cleared memory cannot be resurrected by a build
+	// that overlapped the removal.
+	await writeMemoryClearToken(memoryRoot);
 }
 
 /**

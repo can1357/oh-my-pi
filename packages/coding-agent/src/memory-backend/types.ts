@@ -12,6 +12,7 @@ import type { Settings } from "../config/settings";
 import type { HindsightSessionState } from "../hindsight/state";
 import type { MnemopiSessionState } from "../mnemopi/state";
 import type { AgentSession } from "../session/agent-session";
+import type { SessionManager } from "../session/session-manager";
 
 export type MemoryBackendId = "off" | "local" | "hindsight" | "mnemopi" | "sharpshooter";
 
@@ -76,6 +77,24 @@ export interface MemoryBackendOperationContext {
 	session?: AgentSession;
 }
 
+/**
+ * The memory block staged for a session's prompt, and the commit that records
+ * it.
+ */
+export interface PendingInstructionsCommit {
+	/**
+	 * The callback that records the staged memory block in the transcript once
+	 * the prompt carrying it commits, or `undefined` when the prompt does not
+	 * carry it.
+	 *
+	 * A prompt that replaced the staged block — an override that dropped it, or
+	 * an empty prompt — cancels the staging: the transcript must not claim a
+	 * memory block the session never sent, and the next build reads the
+	 * current memory state instead of the rejected one.
+	 */
+	commit(promptParts: readonly string[]): (() => void) | undefined;
+}
+
 export interface MemoryRuntimeContext {
 	status(): Promise<MemoryBackendStatus>;
 	search(query: string, options?: MemoryBackendSearchOptions): Promise<MemoryBackendSearchResult>;
@@ -121,13 +140,24 @@ export interface MemoryBackend {
 	 * Markdown injected as the system-prompt append section.
 	 * Returned on every prompt rebuild via `refreshBaseSystemPrompt()`.
 	 * `cwd` is the session's project directory and selects project-scoped memory.
+	 * `sessionManager` is the transcript the prompt is built for; the SDK passes
+	 * it even for the initial prompt, which is built before the session exists.
 	 */
 	buildDeveloperInstructions(
 		agentDir: string,
 		cwd: string,
 		settings: Settings,
 		session?: AgentSession,
+		sessionManager?: SessionManager,
 	): Promise<string | undefined>;
+
+	/**
+	 * The memory block staged by the last `buildDeveloperInstructions` call for
+	 * `sessionManager`, and the commit that records it.
+	 *
+	 * `undefined` when nothing is staged.
+	 */
+	pendingInstructionsCommit?(sessionManager: SessionManager): PendingInstructionsCommit | undefined;
 
 	/** Wipe all persisted state for this backend (slash `/memory clear`). */
 	clear(agentDir: string, cwd: string, session?: AgentSession): Promise<void>;
