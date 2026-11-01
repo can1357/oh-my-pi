@@ -124,6 +124,12 @@ export interface RuntimeChildrenOptions {
 	 * here are transient and need not also appear in `transientChrome`.
 	 */
 	readonly selfClearingChrome?: readonly Component[];
+	/** Allocate a live HUD and input against the same rendered sibling chrome. */
+	readonly allocation?: {
+		readonly hud: Component;
+		readonly input: Component;
+		readonly apply: (viewport: ViewportSize, chromeRows: number, renderInput: () => number) => void;
+	};
 }
 
 /** Controls the first terminal paint for a composer that does not already own the terminal. */
@@ -267,6 +273,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	#runtimeChildren: readonly Component[] = [];
 	#nativeDock: readonly Component[] | undefined;
 	#nativeTail: readonly Container[] = [];
+	#allocation: RuntimeChildrenOptions["allocation"];
 	/** Cache-driven status line shown until {@link setStatusComponent} mounts the session's. */
 	#startupStatus: StatusLineComponent | undefined;
 	#runtimeMounted = false;
@@ -474,9 +481,17 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		const ends: { root: Component; end: number }[] = [];
 		let transientRows = 0;
 		let selfClearingRows = 0;
+		const allocated = this.#allocateRuntimeRows(afterRoots, width, rows);
 		for (const root of afterRoots) {
 			const start = after.length;
-			this.#renderBelowRoot(root, width, after, afterSpans);
+			const cached = allocated?.get(root);
+			if (cached) {
+				after.push(...cached.lines);
+				for (const span of cached.spans)
+					afterSpans.push({ ...span, start: span.start + start, end: span.end + start });
+			} else {
+				this.#renderBelowRoot(root, width, after, afterSpans);
+			}
 			if (this.#selfClearingChrome.has(root)) selfClearingRows += after.length - start;
 			else if (this.#transientChrome.has(root)) transientRows += after.length - start;
 			ends.push({ root, end: after.length });
@@ -1088,6 +1103,34 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		offered.rows = [...headerRows, ...(transcript?.rows ?? [])];
 	}
 
+	/** Render ordinary chrome once, then let the host cap input before selecting HUD rows. */
+	#allocateRuntimeRows(
+		roots: readonly Component[],
+		width: number,
+		rows: number,
+	): Map<Component, { lines: string[]; spans: ViewportClickSpan[] }> | undefined {
+		const allocation = this.#allocation;
+		if (!allocation || !roots.includes(allocation.hud) || !roots.includes(allocation.input)) return undefined;
+		const rendered = new Map<Component, { lines: string[]; spans: ViewportClickSpan[] }>();
+		const render = (root: Component): number => {
+			let cached = rendered.get(root);
+			if (!cached) {
+				cached = { lines: [], spans: [] };
+				this.#renderBelowRoot(root, width, cached.lines, cached.spans);
+				rendered.set(root, cached);
+			}
+			return cached.lines.length;
+		};
+		let chromeRows = 0;
+		for (const root of roots) {
+			if (root !== allocation.hud && root !== allocation.input) chromeRows += render(root);
+		}
+		allocation.apply({ columns: width, rows }, chromeRows, () => render(allocation.input));
+		render(allocation.input);
+		render(allocation.hud);
+		return rendered;
+	}
+
 	#renderRoots(roots: readonly Component[], width: number): string[] {
 		const rows: string[] = [];
 		for (const root of roots) rows.push(...root.render(width));
@@ -1104,7 +1147,11 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		const transcriptIndex = roots.findIndex(root => root instanceof TranscriptContainer);
 		if (transcriptIndex < 0) return this.#renderRoots(roots, width);
 		const transcript = roots[transcriptIndex] as TranscriptContainer;
-		const after = this.#renderRoots(roots.slice(transcriptIndex + 1), width);
+		const afterRoots = roots.slice(transcriptIndex + 1);
+		const allocated = this.#allocateRuntimeRows(afterRoots, width, rows);
+		const after = allocated
+			? afterRoots.flatMap(root => allocated.get(root)!.lines)
+			: this.#renderRoots(afterRoots, width);
 		const transcriptRows = transcript.renderTail(width, Math.max(0, rows - after.length));
 		const pre =
 			transcriptRows.length + after.length >= rows ? [] : this.#renderRoots(roots.slice(0, transcriptIndex), width);
@@ -1274,6 +1321,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		this.#transientChrome = new Set(options.transientChrome);
 		this.#selfClearingChrome = new Set(options.selfClearingChrome);
 		this.#transientFloor = undefined;
+		this.#allocation = options.allocation;
 		this.ui.removeChild(this.#statusHost);
 		if (this.#runtimeMounted) {
 			for (const child of this.#runtimeChildren) this.ui.removeChild(child);
