@@ -902,4 +902,24 @@ mod tests {
 		assert_eq!(u8::from(waited.expect("pipeline still waitable").result.exit_code), 7);
 		Ok(())
 	}
+
+	/// An in-shell task leaves its job once it has finished, however it ended:
+	/// polling a spent handle panics with `JoinHandle polled after completion`,
+	/// which took down the run that next polled the job table.
+	#[tokio::test]
+	async fn a_task_that_ended_abnormally_is_not_polled_again() -> Result<()> {
+		let mut jobs = super::JobManager::new();
+		let task = tokio::spawn(async { panic!("job task failed") });
+		jobs.add_as_current(super::Job::new(
+			[super::JobTask::Internal(tokio_util::task::AbortOnDropHandle::new(task))],
+			"failing".into(),
+			super::JobState::Running,
+		));
+
+		assert!(jobs.wait_all().await.is_err(), "`wait` reports the task's failure");
+		// The table is polled again after every command.
+		assert_eq!(jobs.poll()?.len(), 1, "the finished job is reaped once");
+		assert!(jobs.jobs.is_empty());
+		Ok(())
+	}
 }
