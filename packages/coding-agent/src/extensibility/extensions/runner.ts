@@ -11,6 +11,7 @@ import {
 	isNonBlankContext,
 	joinAdditionalContext,
 } from "@oh-my-pi/pi-agent-core";
+import { messageEstimateVersion } from "@oh-my-pi/pi-agent-core/compaction";
 import type {
 	AssistantMessage,
 	CredentialDisabledEvent,
@@ -26,7 +27,7 @@ import {
 	setContextHistoryIndex,
 } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import type { KeyId } from "@oh-my-pi/pi-tui";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import { refreshShellConfigCache } from "@oh-my-pi/pi-utils/procmgr";
 import { MAIN_AGENT_RULE_NAME } from "../../capability/rule";
 import type { ModelRegistry } from "../../config/model-registry";
@@ -168,6 +169,122 @@ export function testSetSessionShutdownHandlerTimeoutMs(timeoutMs: number): void 
  *  uses its own short cap so teardown stays prompt. */
 function handlerTimeoutForEvent(eventType: string): number {
 	return eventType === "session_shutdown" ? sessionShutdownHandlerTimeoutMs : extensionHandlerTimeoutMs;
+}
+
+type ContextMessageMutationState = {
+	readonly source: AgentMessage;
+	readonly root: AgentMessage;
+	/** True when the clone holds descendants the mutation proxy cannot track (Map, Date, typed arrays, class instances). */
+	readonly opaque: boolean;
+	dirty: boolean;
+	readonly proxies: WeakMap<object, object>;
+};
+
+type ContextMessageProxyInfo = {
+	readonly state: ContextMessageMutationState;
+	readonly target: object;
+};
+
+const contextMessageProxyInfo = new WeakMap<object, ContextMessageProxyInfo>();
+
+type ContextMessageCloneEntry = {
+	readonly clone: AgentMessage;
+	/** {@link messageEstimateVersion} of the source when cloned; owner rewrites bump it. */
+	readonly version: number;
+	readonly opaque: boolean;
+};
+
+function cloneContextMessage(message: AgentMessage): AgentMessage {
+	try {
+		return structuredClone(message);
+	} catch {}
+	try {
+		return structuredCloneJSON(message);
+	} catch {}
+	return { ...message } as AgentMessage;
+}
+
+function hasOpaqueDescendant(value: unknown, seen = new Set<object>()): boolean {
+	if (value === null || typeof value !== "object") return false;
+	if (seen.has(value)) return false;
+	seen.add(value);
+	if (!isContextProxyableObject(value)) return true;
+	for (const key of Reflect.ownKeys(value)) {
+		const descriptor = Object.getOwnPropertyDescriptor(value, key);
+		if (!descriptor?.enumerable) continue;
+		if (hasOpaqueDescendant(Reflect.get(value, key), seen)) return true;
+	}
+	return false;
+}
+
+function isContextProxyableObject(value: unknown): value is object {
+	if (value === null || typeof value !== "object") return false;
+	if (Array.isArray(value)) return true;
+	const proto = Object.getPrototypeOf(value);
+	return proto === Object.prototype || proto === null;
+}
+
+function materializeContextMessageValue(value: unknown, seen = new WeakMap<object, unknown>()): unknown {
+	if (value === null || typeof value !== "object") return value;
+	const proxyInfo = contextMessageProxyInfo.get(value);
+	if (proxyInfo) return materializeContextMessageValue(proxyInfo.target, seen);
+	if (!isContextProxyableObject(value)) return value;
+	const seenValue = seen.get(value);
+	if (seenValue) return seenValue;
+	if (Array.isArray(value)) {
+		const copy: unknown[] = [];
+		seen.set(value, copy);
+		for (let index = 0; index < value.length; index++) {
+			copy[index] = materializeContextMessageValue(value[index], seen);
+		}
+		return copy;
+	}
+	const copy: Record<PropertyKey, unknown> = {};
+	seen.set(value, copy);
+	for (const key of Reflect.ownKeys(value)) {
+		const descriptor = Object.getOwnPropertyDescriptor(value, key);
+		if (!descriptor?.enumerable) continue;
+		copy[key] = materializeContextMessageValue(Reflect.get(value, key), seen);
+	}
+	return copy;
+}
+
+function materializeContextMessage(message: AgentMessage): AgentMessage {
+	const proxyInfo = contextMessageProxyInfo.get(message as object);
+	if (proxyInfo && proxyInfo.target === proxyInfo.state.root) return proxyInfo.state.root as AgentMessage;
+	return materializeContextMessageValue(message) as AgentMessage;
+}
+
+function createContextMessageMutationView<T extends object>(target: T, state: ContextMessageMutationState): T {
+	if (!isContextProxyableObject(target)) return target;
+	const existing = state.proxies.get(target);
+	if (existing) return existing as T;
+	const proxy = new Proxy(target, {
+		get(targetObject, property, receiver) {
+			const value = Reflect.get(targetObject, property, receiver);
+			if (!isContextProxyableObject(value)) return value;
+			return createContextMessageMutationView(value, state);
+		},
+		set(targetObject, property, value) {
+			state.dirty = true;
+			return Reflect.set(targetObject, property, materializeContextMessageValue(value));
+		},
+		deleteProperty(targetObject, property) {
+			state.dirty = true;
+			return Reflect.deleteProperty(targetObject, property);
+		},
+		defineProperty(targetObject, property, attributes) {
+			state.dirty = true;
+			const materializedAttributes: PropertyDescriptor = { ...attributes };
+			if ("value" in materializedAttributes) {
+				materializedAttributes.value = materializeContextMessageValue(materializedAttributes.value);
+			}
+			return Reflect.defineProperty(targetObject, property, materializedAttributes);
+		},
+	});
+	state.proxies.set(target, proxy);
+	contextMessageProxyInfo.set(proxy, { state, target });
+	return proxy as T;
 }
 
 const EXTENSION_HANDLER_TIMEOUT = Symbol("extensionHandlerTimeout");
@@ -550,6 +667,7 @@ export class ExtensionRunner {
 	#commandDiagnostics: Array<{ type: string; message: string; path: string }> = [];
 	/** Link schemes already reported as claimed by more than one extension. */
 	#warnedLinkSchemes = new Set<string>();
+	#contextMessageCloneCache = new WeakMap<AgentMessage, ContextMessageCloneEntry>();
 	#toolRegistrationScope = new AsyncLocalStorage<ToolRegistrationScope>();
 	#toolRegistrationBarrier: Promise<void> | undefined;
 	#initialized = false;
@@ -2231,24 +2349,56 @@ export class ExtensionRunner {
 		return transformed;
 	}
 
+	#getContextMessageClone(message: AgentMessage): ContextMessageCloneEntry {
+		// Owner rewrites (advisor eviction, prune/shake, /drop-images) mutate the message in place and
+		// bump its estimate version; a clone taken before that bump is stale.
+		const version = messageEstimateVersion(message);
+		const cached = this.#contextMessageCloneCache.get(message);
+		if (cached && cached.version === version) return cached;
+		const clone = cloneContextMessage(message);
+		const entry: ContextMessageCloneEntry = { clone, version, opaque: hasOpaqueDescendant(clone) };
+		// Opaque payloads cannot be change-tracked, so they are re-cloned on every call.
+		if (entry.opaque) this.#contextMessageCloneCache.delete(message);
+		else this.#contextMessageCloneCache.set(message, entry);
+		return entry;
+	}
+
 	async emitContext(messages: AgentMessage[], signal?: AbortSignal): Promise<AgentMessage[]> {
 		// Check if any extensions actually have context handlers before building
 		// the context object or cloning; this runs on every provider request.
 		if (!this.hasHandlers("context")) return messages;
 		const ctx = this.createContext();
 
-		let currentMessages: AgentMessage[];
-		try {
-			currentMessages = structuredClone(messages);
-		} catch {
-			// Messages may contain non-cloneable objects (e.g. in ToolResultMessage.details
-			// or ProviderPayload). Fall back to a shallow array clone — extensions should
-			// return new message arrays rather than mutating in place.
-			currentMessages = [...messages];
-		}
-		for (let index = 0; index < currentMessages.length; index++) {
-			const message = currentMessages[index];
-			if (message) setContextHistoryIndex(message, index);
+		const mutationStates: ContextMessageMutationState[] = [];
+		let currentMessages: AgentMessage[] = [];
+		for (let index = 0; index < messages.length; index++) {
+			const message = messages[index];
+			// Sparse slots stay aligned with history indexes and get no index stamp.
+			if (!message) {
+				currentMessages.push(message);
+				mutationStates.push({
+					source: message,
+					root: message,
+					opaque: false,
+					dirty: false,
+					proxies: new WeakMap(),
+				});
+				continue;
+			}
+			// Per-message clone cache; non-cloneable payloads (ToolResultMessage.details,
+			// ProviderPayload) degrade gracefully inside #getContextMessageClone instead of
+			// aborting the whole context build.
+			const { clone, opaque } = this.#getContextMessageClone(message);
+			setContextHistoryIndex(clone, index);
+			const mutationState: ContextMessageMutationState = {
+				source: message,
+				root: clone,
+				opaque,
+				dirty: false,
+				proxies: new WeakMap(),
+			};
+			mutationStates.push(mutationState);
+			currentMessages.push(createContextMessageMutationView(clone, mutationState));
 		}
 
 		for (const ext of this.extensions) {
@@ -2284,15 +2434,27 @@ export class ExtensionRunner {
 			}
 		}
 
+		currentMessages = currentMessages.map(message => materializeContextMessage(message));
+		for (const mutationState of mutationStates) {
+			if (mutationState.dirty) this.#contextMessageCloneCache.delete(mutationState.source);
+		}
 		for (const message of currentMessages) {
 			const historyIndex = getContextHistoryIndex(message);
 			const historyMessage = historyIndex === undefined ? undefined : messages[historyIndex];
 			if (historyMessage && historyIndex !== undefined) setContextHistoryIndex(historyMessage, historyIndex);
-			const unchanged = historyMessage !== undefined && Bun.deepEquals(message, historyMessage);
+			const unchanged =
+				historyMessage !== undefined &&
+				historyIndex !== undefined &&
+				this.#contextMessageCloneCache.get(historyMessage)?.clone === message &&
+				!mutationStates[historyIndex]?.opaque &&
+				!mutationStates[historyIndex]?.dirty
+					? true
+					: historyMessage !== undefined && Bun.deepEquals(message, historyMessage);
 			clearContextHistoryIndex(message);
 			if (historyMessage) clearContextHistoryIndex(historyMessage);
 			if (!unchanged) markPerCallContextMessage(message);
 		}
+		for (const mutationState of mutationStates) clearContextHistoryIndex(mutationState.root);
 		for (const message of messages) clearContextHistoryIndex(message);
 		// An aborted handler is skipped and its input kept unchanged. Never hand that
 		// untransformed (possibly unredacted) context back to a caller as if every hook ran.
