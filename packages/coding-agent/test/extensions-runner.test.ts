@@ -4329,6 +4329,53 @@ describe("ExtensionRunner", () => {
 				testSetExtensionHandlerTimeoutMs(EXTENSION_HANDLER_TIMEOUT_MS);
 			}
 		});
+
+		it("stops queueing a stalled extension's events behind each other after one handler budget", async () => {
+			// Real timers: the bound under test is the handler timeout itself, which
+			// runs on setTimeout/performance.now.
+			const budgetMs = 100;
+			testSetExtensionHandlerTimeoutMs(budgetMs);
+			const stall = Promise.withResolvers<void>();
+			try {
+				const entered: number[] = [];
+				const stalled = inlineExtension("stalled-updates", {
+					tool_execution_update: async () => {
+						entered.push(performance.now());
+						await stall.promise;
+					},
+				});
+				const runner = new ExtensionRunner(
+					[stalled],
+					new ExtensionRuntime(),
+					tempDir.path(),
+					sessionManager,
+					modelRegistry,
+				);
+				const timeouts: string[] = [];
+				runner.onError(error => timeouts.push(error.error));
+
+				const emittedAt = performance.now();
+				const updates = Array.from({ length: 4 }, (_, i) =>
+					runner.emit({
+						type: "tool_execution_update",
+						toolCallId: "call-1",
+						toolName: "bash",
+						args: {},
+						partialResult: i,
+					}),
+				);
+				await Promise.all(updates);
+
+				expect(timeouts).toHaveLength(4);
+				// Served one after another the fourth update would start after three
+				// full budgets; capped, every update starts within about one.
+				expect(entered).toHaveLength(4);
+				expect(Math.max(...entered) - emittedAt).toBeLessThan(2 * budgetMs);
+			} finally {
+				stall.resolve();
+				testSetExtensionHandlerTimeoutMs(EXTENSION_HANDLER_TIMEOUT_MS);
+			}
+		});
 	});
 
 	describe("credential_disabled", () => {
