@@ -477,6 +477,23 @@ export function formatCodeAction(action: CodeAction | Command, index: number): s
 	return `${index}: [${kind}] ${action.title}${preferred}${disabled}`;
 }
 
+/**
+ * Concatenates code action responses in order, dropping repeats by kind and title.
+ * `code_actions` merges its unfiltered and `source`-kind requests with this; servers that
+ * ignore `context.only` answer both with the same actions.
+ */
+export function mergeCodeActions(responses: ((CodeAction | Command)[] | null)[]): (CodeAction | Command)[] {
+	const seen = new Set<string>();
+	const merged: (CodeAction | Command)[] = [];
+	for (const action of responses.flatMap(response => response ?? [])) {
+		const key = `${"kind" in action ? (action.kind ?? "") : ""}\0${action.title}`;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		merged.push(action);
+	}
+	return merged;
+}
+
 export interface CodeActionApplyDependencies {
 	resolveCodeAction?: (action: CodeAction) => Promise<CodeAction>;
 	applyWorkspaceEdit: (edit: WorkspaceEdit) => Promise<string[]>;
