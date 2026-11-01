@@ -24,11 +24,12 @@ def pinned_snapshot(repo: Path, commit: str) -> Path:
 	"""A private directory holding exactly the files of `commit` in `repo`'s object store; removed at exit."""
 	# GIT_DIR, GIT_WORK_TREE and friends would make `-C repo` read another repository; replace refs could swap objects.
 	env = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
-	env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_NO_REPLACE_OBJECTS="1")
+	env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_NO_REPLACE_OBJECTS="1", GIT_TERMINAL_PROMPT="0")
 
 	def git(*args: str, stdin: bytes | None = None) -> bytes:
+		# Bounded, so a stalled Git (a lock, a hung credential prompt) fails the check instead of hanging it.
 		return subprocess.run(
-			["git", "-C", str(repo), *args], input=stdin, check=True, capture_output=True, env=env
+			["git", "-C", str(repo), *args], input=stdin, check=True, capture_output=True, env=env, timeout=300
 		).stdout
 
 	try:
@@ -43,7 +44,7 @@ def pinned_snapshot(repo: Path, commit: str) -> Path:
 					entries.append((mode, blob, os.fsdecode(name)))
 		# One batch call returns every blob as `<sha> blob <size>\n<bytes>\n`, in request order.
 		batch = git("cat-file", "--batch", stdin="".join(f"{blob}\n" for _, blob, _ in entries).encode())
-	except (OSError, subprocess.CalledProcessError) as error:
+	except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
 		sys.exit(f"{repo}: cannot read commit {commit} ({error}); redo the one-time setup")
 
 	dest = Path(tempfile.mkdtemp(prefix="memory-eval-src-"))
