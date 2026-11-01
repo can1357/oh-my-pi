@@ -523,12 +523,15 @@ const ASIDE_ATTEMPTS = 8;
  *   `.leaving` file beside it; the next `gc --archive --apply` takes it for an
  *   artifact and copies it into the archive with no error, and from then on
  *   the archive holds it and a restore brings it home like any other
- *   artifact. A transcript's `.leaving` name is in its bucket, outside every
- *   artifact tree, and nothing copies it. An archived artifact's — a
- *   superseded, withdrawn or rolled-back copy — is in the archived tree, and
- *   a restore brings it home as an artifact. A restore takes its record down
- *   only once the session is whole, so a kill there leaves a whole session
- *   and the record's text under the `.leaving` name.
+ *   artifact. A transcript's `.leaving` name is in its session bucket. A
+ *   restore brings the archived transcript home at its ordinary name and
+ *   leaves the whole copy under `.leaving`; the next `gc --archive --apply`
+ *   takes that copy as an artifact, reports success, and puts it in the
+ *   archive, from where a restore brings it home as an artifact. An archived
+ *   artifact's — a superseded, withdrawn or rolled-back copy — is in the
+ *   archived tree, and a restore brings it home as an artifact. A restore
+ *   takes its record down only once the session is whole, so a kill there
+ *   leaves a whole session and the record's text under the `.leaving` name.
  *
  * Either way the file is the user's to look at, compare with what stands at
  * the name it came from, and remove.
