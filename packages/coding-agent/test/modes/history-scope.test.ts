@@ -1,0 +1,162 @@
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import {
+	historyScopeKey,
+	historyScopeRing,
+	resolveHistoryScope,
+	type HistoryScopeContext,
+} from "@oh-my-pi/pi-coding-agent/modes/history-scope";
+import type { HistoryScopeKind } from "@oh-my-pi/pi-coding-agent/session/history-storage";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import * as utils from "@oh-my-pi/pi-utils";
+import { initGitFixture } from "../helpers/git";
+
+let tempDir: TempDir | null = null;
+
+beforeEach(() => {
+	tempDir = TempDir.createSync("@omp-history-scope-cfg-");
+});
+
+afterEach(async () => {
+	vi.restoreAllMocks();
+	if (tempDir) {
+		await tempDir.remove().catch(() => {});
+		tempDir = null;
+	}
+});
+
+describe("resolveHistoryScope", () => {
+	it("falls back to cwd — never to global — when the scope has no subject", async () => {
+		const dir = tempDir!;
+		const repo = path.join(dir.path(), "repo");
+		await fs.mkdir(repo, { recursive: true });
+		await initGitFixture(repo);
+		const outsideRepo: HistoryScopeContext = { sessionId: "", cwd: dir.path() };
+
+		expect(resolveHistoryScope("session", outsideRepo)).toEqual({ kind: "cwd", value: dir.path() });
+		expect(resolveHistoryScope("repo", outsideRepo)).toEqual({ kind: "cwd", value: dir.path() });
+		expect(resolveHistoryScope("nonsense" as HistoryScopeKind, outsideRepo)).toEqual({
+			kind: "cwd",
+			value: dir.path(),
+		});
+	});
+
+	it("resolves each scope to its own subject", async () => {
+		const dir = tempDir!;
+		const repo = path.join(dir.path(), "repo");
+		await fs.mkdir(repo, { recursive: true });
+		await initGitFixture(repo);
+		const context: HistoryScopeContext = { sessionId: "session-1", cwd: repo };
+
+		expect(resolveHistoryScope("session", context)).toEqual({ kind: "session", value: "session-1" });
+		expect(resolveHistoryScope("cwd", context)).toEqual({ kind: "cwd", value: repo });
+		expect(resolveHistoryScope("repo", context)).toEqual({ kind: "repo", value: repo });
+		expect(resolveHistoryScope("global", context)).toEqual({ kind: "global" });
+	});
+});
+
+describe("historyScopeRing", () => {
+	it("rotates the narrow-to-wide ring around the resolved start scope", async () => {
+		const dir = tempDir!;
+		const repo = path.join(dir.path(), "repo");
+		await fs.mkdir(repo, { recursive: true });
+		await initGitFixture(repo);
+		const context: HistoryScopeContext = { sessionId: "session-1", cwd: repo };
+
+		const ring = historyScopeRing("session", context);
+		expect(ring.map(scope => scope.kind)).toEqual(["session", "cwd", "repo", "global"]);
+		// Each entry must carry the subject reads are made with, not just its kind: an entry
+		// stripped down to `{ kind }` would silently return nothing for Ctrl+R.
+		for (const scope of ring) {
+			expect(scope).toEqual(resolveHistoryScope(scope.kind, context));
+		}
+		expect(ring[1]?.value).toBe(repo);
+		expect(ring[2]?.value).toBe(repo);
+		expect(historyScopeRing("repo", context).map(scope => scope.kind)).toEqual(["repo", "global", "session", "cwd"]);
+	});
+
+	it("resolves repository scope from a subdirectory or a linked worktree", async () => {
+		const dir = tempDir!;
+		const repo = path.join(dir.path(), "repo");
+		const sub = path.join(repo, "src", "deep");
+		const worktree = path.join(dir.path(), "repo-wt");
+		await fs.mkdir(sub, { recursive: true });
+		await initGitFixture(repo);
+		await vcs.requireGit(repo).commitCreate("init", { allowEmpty: true });
+		await vcs.requireGit(repo).worktreeAdd(worktree, "HEAD", { detach: true, clone: false });
+
+		// Without primary-root resolution the scope would carry the directory itself and
+		// `history.scope: repo` would stop matching the repository's other directories.
+		expect(resolveHistoryScope("repo", { sessionId: "s", cwd: sub })).toEqual({ kind: "repo", value: repo });
+		expect(resolveHistoryScope("repo", { sessionId: "s", cwd: worktree })).toEqual({ kind: "repo", value: repo });
+	});
+
+	it("drops repository scope outside a repository and starts on cwd, not global", () => {
+		const dir = tempDir!;
+		const context: HistoryScopeContext = { sessionId: "session-1", cwd: dir.path() };
+
+		const ring = historyScopeRing("repo", context);
+		// Without this, Ctrl+R would open on every project while the Up arrow reads cwd.
+		expect(ring.map(scope => scope.kind)).toEqual(["cwd", "global", "session"]);
+	});
+
+	it("drops session scope when there is no conversation id", () => {
+		const dir = tempDir!;
+		const context: HistoryScopeContext = { sessionId: "", cwd: dir.path() };
+
+		expect(historyScopeRing("global", context).map(scope => scope.kind)).toEqual(["global", "cwd"]);
+	});
+});
+
+describe("historyScopeKey", () => {
+	it("separates scopes that share a value but read different sets", () => {
+		// At a repository root, cwd and repo carry the same directory yet read different rows.
+		expect(historyScopeKey({ kind: "cwd", value: "/repo" })).not.toBe(
+			historyScopeKey({ kind: "repo", value: "/repo" }),
+		);
+		expect(historyScopeKey({ kind: "session", value: "a" })).not.toBe(
+			historyScopeKey({ kind: "session", value: "b" }),
+		);
+	});
+
+	it.skipIf(process.platform !== "linux")("keeps distinct-case folders as separate editor sources", async () => {
+		const dir = tempDir!;
+		const upper = dir.join("Work");
+		const lower = dir.join("work");
+		await fs.mkdir(upper);
+		await fs.mkdir(lower);
+		vi.spyOn(utils, "normalizePathForComparison").mockImplementation(input => path.resolve(input).toLowerCase());
+		for (const kind of ["cwd", "repo"] as const) {
+			expect(historyScopeKey({ kind, value: upper })).not.toBe(historyScopeKey({ kind, value: lower }));
+		}
+	});
+
+	it("does not merge distinct-case sources when paths are missing", () => {
+		const dir = tempDir!;
+		for (const kind of ["cwd", "repo"] as const) {
+			expect(historyScopeKey({ kind, value: dir.join("Missing") })).not.toBe(
+				historyScopeKey({ kind, value: dir.join("missing") }),
+			);
+		}
+	});
+
+	it("treats two spellings of one directory as the same data set", async () => {
+		const dir = tempDir!;
+		const repo = path.join(dir.path(), "repo");
+		const link = dir.join("repo-link");
+		await fs.mkdir(repo, { recursive: true });
+		await fs.symlink(repo, link, "dir");
+
+		// A different spelling must not look like a new scope: the editor would re-seed and
+		// drop recalled drafts even though the rows read back are identical.
+		expect(historyScopeKey({ kind: "cwd", value: link })).toBe(historyScopeKey({ kind: "cwd", value: repo }));
+		expect(historyScopeKey({ kind: "repo", value: link })).toBe(historyScopeKey({ kind: "repo", value: repo }));
+		// An empty value stays itself instead of resolving to the process directory, and the
+		// encoding of the key is deliberately not asserted: nothing parses it.
+		const empty = historyScopeKey({ kind: "cwd", value: "" });
+		expect(empty).not.toBe(historyScopeKey({ kind: "cwd", value: process.cwd() }));
+		expect(empty).not.toBe(historyScopeKey({ kind: "global" }));
+	});
+});

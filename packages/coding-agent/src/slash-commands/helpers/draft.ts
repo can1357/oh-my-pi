@@ -1,6 +1,7 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { shiftImageMarkers } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
 import type { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
+import type { RestoredQueuedMessage } from "../../session/agent-session-types";
 import type { ParsedSlashCommand, TuiSlashCommandRuntime } from "../types";
 
 /** Clear only text still owned by this submission, never a newer detached draft. */
@@ -27,6 +28,54 @@ export function restoreDetachedDraft(
 		editor.imageLinks = editor.pendingImageLinks;
 	}
 	editor.setCollapsedText([restoredText, currentText].filter(part => part.trim()).join("\n\n"));
+}
+
+/**
+ * Merge explicit queued entries, oldest first, ahead of the current draft.
+ * Existing draft images keep their positions; queued attachments append.
+ */
+export function restoreQueuedDraft(
+	editor: CustomEditor,
+	entries: readonly RestoredQueuedMessage[],
+	currentText?: string,
+): number {
+	if (entries.length === 0) return 0;
+	// Image markers are positional: `[Image #N]` ↔ `pendingImages[N-1]`
+	// (legacy drafts may still carry a trailing `attachment://N`). Each queued
+	// message numbered its references against its own local image list
+	// (1..K). Because we prepend the queued text but append the queued images
+	// to `pendingImages`, any existing draft images (M of them) — plus images
+	// already pulled in by earlier queued messages — shift the slot index that
+	// every reference must point to. Bumping each message's marker and URI
+	// indices by the running offset keeps the merged text aligned with the merged
+	// `pendingImages` order; draft markers stay valid because draft images
+	// keep their original positions.
+	const queuedImages = entries.flatMap(entry => entry.images ?? []);
+	let queuedText: string;
+	if (queuedImages.length > 0) {
+		const parts: string[] = [];
+		let imageOffset = editor.pendingImages.length;
+		for (const entry of entries) {
+			parts.push(shiftImageMarkers(entry.text, imageOffset));
+			if (entry.images?.length) imageOffset += entry.images.length;
+		}
+		queuedText = parts.join("\n\n");
+	} else {
+		queuedText = entries.map(entry => entry.text).join("\n\n");
+	}
+	const current = currentText ?? editor.getText();
+	const combinedText = [queuedText, current].filter(text => text.trim()).join("\n\n");
+	// Hand queued images back to the pending-image buffer first (links are
+	// re-materialized lazily), then set the text: setCollapsedText folds the
+	// renumbered `[Image #N, WxH]` references back into chip tokens, and the
+	// collapse only recognizes indices within the merged pendingImages range.
+	if (queuedImages.length > 0) {
+		editor.pendingImages.push(...queuedImages);
+		editor.pendingImageLinks.push(...queuedImages.map(() => undefined));
+		editor.imageLinks = editor.pendingImageLinks;
+	}
+	editor.setCollapsedText(combinedText);
+	return entries.length;
 }
 
 /** A text-only command gives a draft with images back instead of running without them; returns whether it refused. */

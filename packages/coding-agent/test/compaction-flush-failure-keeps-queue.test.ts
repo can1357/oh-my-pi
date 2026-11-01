@@ -67,7 +67,11 @@ describe("flushCompactionQueue failure", () => {
 		const live = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false }),
+			settings: Settings.isolated({
+				"compaction.enabled": false,
+				"retry.enabled": false,
+				"magicKeywords.ultrathink": true,
+			}),
 			modelRegistry: new ModelRegistry(authStorage, tempDir.join("models.yml")),
 		});
 		session = live;
@@ -84,6 +88,7 @@ describe("flushCompactionQueue failure", () => {
 	) {
 		return createInteractiveModeContext({
 			session: live,
+			sessionManager: live.sessionManager,
 			compactionQueuedMessages: [...typed],
 			skillCommands,
 			fileSlashCommands: new Set<string>(),
@@ -124,6 +129,73 @@ describe("flushCompactionQueue failure", () => {
 		await live.abort();
 		await running.catch(() => {});
 	});
+
+	it.each([true, false])(
+		"takes back a queued skill and its hidden companions after later delivery fails (willRetry=%s)",
+		async willRetry => {
+			const { live, running } = await startStreamingSession();
+			await live.sendUserMessage("from the extension", { deliverAs: "followUp" });
+			const extensionQueue = [...live.agent.peekFollowUpQueue()];
+			const skillPath = tempDir.join("rollback-skill.md");
+			await Bun.write(skillPath, "---\nname: rollback-skill\n---\nShip it.\n");
+			const skills = new Map<string, Skill>([
+				[
+					"skill:rollback-skill",
+					{
+						name: "rollback-skill",
+						description: "",
+						filePath: skillPath,
+						baseDir: tempDir.path(),
+						source: "test",
+					},
+				],
+			]);
+			const skill: CompactionQueuedMessage = {
+				text: "/skill:rollback-skill ultrathink",
+				mode: "followUp",
+			};
+			const first: CompactionQueuedMessage = { text: "typed first", mode: "steer" };
+			const failed: CompactionQueuedMessage = { text: "typed later", mode: "steer" };
+			const typed = willRetry ? [skill, failed] : [first, skill, failed];
+			const firstQueued = Promise.withResolvers<void>();
+			const prompt = live.prompt.bind(live);
+			vi.spyOn(live, "prompt").mockImplementation(async (text, options) => {
+				const sent = await prompt(text, options);
+				firstQueued.resolve();
+				return sent;
+			});
+			let hadHiddenCompanion = false;
+			let deliveredFollowUps: readonly string[] = [];
+			vi.spyOn(live, "steer").mockImplementation(async () => {
+				if (!willRetry) await firstQueued.promise;
+				// Inspect real queues before rollback: the skill has a hidden keyword companion.
+				const queued = live.agent.peekFollowUpQueue();
+				hadHiddenCompanion = queued.some(
+					message => message.role === "custom" && message.customType === "ultrathink-notice",
+				);
+				deliveredFollowUps = live.getQueuedMessages().followUp;
+				throw new Error("delivery failed");
+			});
+			const showError = vi.fn();
+			const ctx = flushContext(live, typed, showError, skills);
+
+			await new UiHelpers(ctx).flushCompactionQueue({ willRetry });
+
+			expect(hadHiddenCompanion).toBe(true);
+			expect(deliveredFollowUps).toEqual(["from the extension", skill.text]);
+			expect(showError).toHaveBeenCalledTimes(1);
+			expect(ctx.compactionQueuedMessages).toEqual(willRetry ? typed : [skill, failed]);
+			expect(ctx.compactionQueuedMessages.filter(message => message === skill)).toHaveLength(1);
+			// Raw queues include hidden companions; exact equality proves none leaked from the flush.
+			expect(live.agent.peekFollowUpQueue()).toEqual(extensionQueue);
+			expect(live.agent.peekSteeringQueue()).toHaveLength(willRetry ? 0 : 1);
+			expect(live.getQueuedMessages().steering).toEqual(willRetry ? [] : [first.text]);
+			expect(live.getQueuedMessages().followUp).toEqual(["from the extension"]);
+
+			await live.abort();
+			await running.catch(() => {});
+		},
+	);
 
 	it("keeps messages queued after the flush returned when its first prompt fails later", async () => {
 		const { live, running } = await startStreamingSession();
@@ -362,10 +434,15 @@ describe("flushCompactionQueue failure", () => {
 		await new UiHelpers(ctx).flushCompactionQueue({ willRetry: false });
 		// The later failure left the admitted skill prompt out of the restored batch.
 		expect(ctx.compactionQueuedMessages).toEqual([typed[1]]);
+		const recovered = Promise.withResolvers<void>();
+		vi.spyOn(ctx, "updatePendingMessagesDisplay").mockImplementation(() => {
+			if (ctx.compactionQueuedMessages.includes(typed[0])) recovered.resolve();
+		});
 
 		dropped.resolve();
-		// The flush reacts to the dispatch result before this await resumes.
+		// SDK settlement precedes the asynchronous UI recovery; wait for its consumer event.
 		await promptCustomMessage.mock.results[0]?.value;
+		await recovered.promise;
 		// The skill invocation was never sent, so it returns to the batch instead of being lost.
 		expect(ctx.compactionQueuedMessages).toEqual(typed);
 

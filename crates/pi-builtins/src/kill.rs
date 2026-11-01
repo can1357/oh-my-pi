@@ -1,6 +1,6 @@
 //! The `kill` builtin, moved from `pi-shell`.
 
-use std::io::Write;
+use std::{cell::OnceCell, io::Write};
 
 use brush_core::{
 	ExecutionExitCode, ExecutionResult, builtins, sys, traps::TrapSignal, ExecutionContext,
@@ -130,11 +130,15 @@ impl builtins::Command for KillCommand {
 			return Ok(ExecutionExitCode::InvalidUsage.into());
 		}
 
-		// One process-table walk for the whole invocation, and only when a signal
-		// will actually be delivered: `-l` and the signal-0 probe touch nothing.
-		// Every guard below reads this same resolved chain.
-		let host = signal.sends_signal().then(HostProcesses::resolve);
-		let blocks = |target: i32| host.as_ref().is_some_and(|host| blocks_target(host, target));
+		// Internal jobs never consult the OS-target guard. Resolve the host chain
+		// only when an actual signal first reaches that guard, then share its one
+		// process-table snapshot across all remaining external operands.
+		let host = OnceCell::new();
+		let sends_signal = signal.sends_signal();
+		// Own the cell so no shared borrow of a !Sync OnceCell crosses a job await.
+		let blocks = move |target: i32| {
+			sends_signal && blocks_target(host.get_or_init(HostProcesses::resolve), target)
+		};
 
 		// `kill -0` asks only whether a target exists. Unix answers per target with
 		// one syscall; elsewhere there is no such call, so the table is walked once

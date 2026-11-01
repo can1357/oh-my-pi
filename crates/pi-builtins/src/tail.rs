@@ -2316,7 +2316,7 @@ mod follow {
 			settings: &Settings,
 			#[cfg_attr(
 				not(unix),
-				expect(unused_variables, reason = "only unix detects a closed stdout pipe while idle")
+				expect(unused_variables, reason = "only unix detects a closed stdout pipe while following")
 			)]
 			stdout: &OpenFile,
 		) -> TailResult<()> {
@@ -2332,6 +2332,11 @@ mod follow {
 			loop {
 				if observer.cancel.load(Ordering::Relaxed) {
 					break;
+				}
+				// Unrelated watcher activity must not defer detecting a widowed pipe.
+				#[cfg(unix)]
+				if stdout_reader_gone(stdout) {
+					return Ok(());
 				}
 				let mut _read_some = false;
 		
@@ -2372,11 +2377,6 @@ mod follow {
 					// No kernel watcher observes these operands: inspect them
 					// through the provider, sleeping only after an idle pass.
 					if !observer.poll_provider(settings)? {
-						// Stop once the reader of our stdout pipe has gone away.
-						#[cfg(unix)]
-						if stdout_reader_gone(stdout) {
-							return Ok(());
-						}
 						if !sleep_interval(&observer.cancel, settings.sleep_sec) {
 							break;
 						}
@@ -2427,6 +2427,13 @@ mod follow {
 						// SIGSTOP) so each path prints once with one header. No spin or
 						// timed wait: later events start the next iteration at once.
 						while let Ok(Ok(event)) = observer.watcher_rx.as_mut().unwrap().receiver.try_recv() {
+							if observer.cancel.load(Ordering::Relaxed) {
+								return Ok(());
+							}
+							#[cfg(unix)]
+							if stdout_reader_gone(stdout) {
+								return Ok(());
+							}
 							process_event(&mut observer, event, settings, &mut paths)?;
 						}
 					},
@@ -2452,11 +2459,6 @@ mod follow {
 					},
 					Err(mpsc::RecvTimeoutError::Timeout) => {
 						timeout_counter += 1;
-						// Stop once the reader of our stdout pipe has gone away.
-						#[cfg(unix)]
-						if stdout_reader_gone(stdout) {
-							return Ok(());
-						}
 					},
 					Err(e) => {
 						return Err(TailError::message(format!("RecvTimeoutError: {}", e)));

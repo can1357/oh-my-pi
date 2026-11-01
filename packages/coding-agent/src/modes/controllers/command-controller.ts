@@ -49,7 +49,7 @@ import { MoveOverlay, type MoveOverlayResult } from "@oh-my-pi/pi-tui/overlays/m
 import { moveDirectorySource } from "../move-directory-source";
 import { getMarkdownTheme, getSymbolTheme, theme, type Theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../../modes/types";
-import { continuesConversation } from "../utils/conversation-position";
+import { continuesConversation } from "../../session/conversation-position";
 import { ContextViewer } from "@oh-my-pi/pi-tui/overlays/context-viewer";
 import type { OverlayHandle } from "@oh-my-pi/pi-tui";
 import { ReportPanel } from "@oh-my-pi/pi-tui/overlays/report-panel";

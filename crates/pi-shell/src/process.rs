@@ -697,6 +697,10 @@ impl Process {
 	/// signal abstraction, so the `signal` argument is ignored and the entire
 	/// tree is hard-killed via `TerminateProcess`. Defaults to the POSIX
 	/// hard-kill signal.
+	///
+	/// Returns a conservative count of successful signal deliveries: one per
+	/// successful group call or pinned-process send, not an exact count of
+	/// distinct recipients.
 	#[must_use]
 	pub fn kill_tree(&self, signal: Option<i32>) -> u32 {
 		self.signal_tree(signal.unwrap_or(KILL_SIGNAL))
@@ -788,46 +792,59 @@ impl Process {
 	/// as a false descendant; `TerminateProcess`-ing it drops the whole session
 	/// with no cleanup and no `session_exit` record (#7452, related #4605).
 	fn signal_tree_excluding(&self, signal: i32, protected: &HashSet<i32>) -> u32 {
-		let descendants = self.signalable_descendants(protected);
-		let mut signaled = 0u32;
-		// If self leads its own process group, also signal the group — this
-		// catches grandchildren reparented to init when their immediate parent
-		// died inside the descendant walk.
-		if let Some(pgid) = self.group_id()
-			&& pgid == self.inner.pid()
-		{
-			let _ = kill_process_group(pgid, signal);
-		}
-		for child in &descendants {
-			if child.inner.kill(signal) {
-				signaled += 1;
-			}
-		}
-		if !protected.contains(&self.pid()) && self.inner.kill(signal) {
-			signaled += 1;
-		}
-		signaled
+		let process_group = self.group_id().filter(|&pgid| pgid == self.pid());
+		self
+			.signal_tree_wave(signal, process_group, protected, Vec::new())
+			.0
 	}
 
-	/// Live descendants with every protected subtree pruned, not just the exact
-	/// protected pids.
-	///
-	/// The flattened descendant list can contain a protected node (the harness,
-	/// on a Windows PID-reuse false-descendant) *together with* that node's real
-	/// children, which were collected by recursing through it. Skipping only the
-	/// exact protected pid would still terminate those unrelated worker/tool
-	/// subprocesses, so drop every node whose recorded parent chain — within the
-	/// enumerated set — passes through a protected pid (#7452 review).
-	fn signalable_descendants(&self, protected: &HashSet<i32>) -> Vec<Self> {
-		let descendants = self.live_descendants();
-		let parents: HashMap<i32, i32> = descendants
-			.iter()
-			.filter_map(|descendant| descendant.ppid().map(|parent| (descendant.pid(), parent)))
-			.collect();
-		descendants
-			.into_iter()
-			.filter(|descendant| !pid_in_protected_subtree(descendant.pid(), protected, &parents))
-			.collect()
+	/// Snapshot the whole tree before signalling, then retain its eligible
+	/// descendants for the exit wait without opening another process reference.
+	fn signal_tree_wave(
+		&self,
+		signal: i32,
+		process_group: Option<i32>,
+		protected: &HashSet<i32>,
+		mut retained: Vec<Self>,
+	) -> (u32, Vec<Self>) {
+		// Exited pins must not reserve their numeric PIDs against fresh
+		// discoveries.
+		retained.retain(|process| process.status() == ProcessStatus::Running);
+		let mut processes = self.live_descendants();
+		if !retained.is_empty() {
+			// Coverage is independent of pin membership: a retained orphan still
+			// needs a fresh walk to find children it spawned during the grace
+			// period.
+			let mut covered: HashSet<i32> = processes.iter().map(Self::pid).collect();
+			// Retained pins are postorder. Refresh parents first so one walk
+			// covers their retained children, rather than rescanning
+			// every nested subtree.
+			for process in retained.iter().rev() {
+				if !covered.insert(process.pid()) {
+					continue;
+				}
+				let discovered = process.live_descendants();
+				covered.extend(discovered.iter().map(Self::pid));
+				processes.extend(discovered);
+			}
+			// New descendants precede their retained parents; original live
+			// handles remain pinned through delivery and the final exit
+			// wait.
+			processes.extend(retained);
+		}
+		// Observe the original root only after every candidate was captured.
+		// If it is still running, no captured matching PID can be a replacement.
+		// Otherwise preserve matching descendant pins and avoid an exited clone.
+		let root_running = self.status() == ProcessStatus::Running;
+		if root_running {
+			processes.push(self.clone());
+		}
+		let (signaled, mut descendants) =
+			signal_processes(signal, process_group.as_slice(), processes, protected);
+		if root_running {
+			descendants.retain(|process| process.pid() != self.pid());
+		}
+		(signaled, descendants)
 	}
 
 	async fn terminate_tree_impl(
@@ -844,17 +861,9 @@ impl Process {
 		let process_group = if group { self.group_id() } else { None };
 		let protected = host_protected_pids();
 
-		// Polite wave: SIGTERM the group, every live descendant, then the root.
-		if let Some(pgid) = process_group {
-			let _ = kill_process_group(pgid, TERM_SIGNAL);
-		}
-		let mut descendants = self.signalable_descendants(&protected);
-		for child in &descendants {
-			let _ = child.inner.kill(TERM_SIGNAL);
-		}
-		if !protected.contains(&self.pid()) {
-			let _ = self.inner.kill(TERM_SIGNAL);
-		}
+		// Polite wave: snapshot before the group signal can reparent descendants.
+		let (_, mut descendants) =
+			self.signal_tree_wave(TERM_SIGNAL, process_group, &protected, Vec::new());
 
 		// Optional grace wait. A negative `graceful_ms` skips the wait entirely
 		// (we still emit the polite signal so cleanup handlers can run before
@@ -872,22 +881,102 @@ impl Process {
 			}
 		}
 
-		// Hard wave. Re-walk the tree so any grandchild spawned during the grace
-		// period — or any process re-parented to the root — is signalled too.
-		if let Some(pgid) = process_group {
-			let _ = kill_process_group(pgid, KILL_SIGNAL);
-		}
-		descendants = self.signalable_descendants(&protected);
-		for child in &descendants {
-			let _ = child.inner.kill(KILL_SIGNAL);
-		}
-		if !protected.contains(&self.pid()) {
-			let _ = self.inner.kill(KILL_SIGNAL);
-		}
+		// Refresh the original root and retained orphan subtrees. Replacing the
+		// polite snapshot would lose escaped children when their parent exited.
+		(_, descendants) = self.signal_tree_wave(KILL_SIGNAL, process_group, &protected, descendants);
 
 		wait_for_exit(self, &descendants, Some(Duration::from_millis(u64::from(timeout_ms))), ct)
 			.await
 	}
+}
+
+/// Deliver one signal wave. Soft signals skip pinned members of successfully
+/// signalled groups so cleanup runs once. Hard signals always use pinned
+/// handles too: a process can escape its captured group before the group
+/// syscall. Each successful group call or pinned send counts once, not each
+/// recipient.
+fn signal_processes(
+	signal: i32,
+	pgids: &[i32],
+	mut processes: Vec<Process>,
+	protected: &HashSet<i32>,
+) -> (u32, Vec<Process>) {
+	// A pidfd pins identity, not the numeric PID after exit/reap. Union
+	// overlapping snapshots in place, checking an earlier pin only AFTER the
+	// incoming candidate has been captured. A live earlier pin proves both
+	// candidates identify the same generation; an exited one cannot win.
+	let mut seen_pids: HashMap<i32, usize> = HashMap::with_capacity(processes.len());
+	let mut kept = 0;
+	for incoming in 0..processes.len() {
+		let pid = processes[incoming].pid();
+		if let Some(&previous) = seen_pids.get(&pid) {
+			if processes[previous].status() != ProcessStatus::Running {
+				processes.swap(previous, incoming);
+			}
+		} else {
+			if kept != incoming {
+				processes.swap(kept, incoming);
+			}
+			seen_pids.insert(pid, kept);
+			kept += 1;
+		}
+	}
+	processes.truncate(kept);
+	// Stop parent links at the snapshot boundary. The host is the real parent
+	// of normal cancellation roots, not a protected node inside their trees.
+	let parents: HashMap<i32, i32> = processes
+		.iter()
+		.filter_map(|process| process.ppid().map(|parent| (process.pid(), parent)))
+		.filter(|(_, parent)| seen_pids.contains_key(parent))
+		.collect();
+	let mut protected_groups: HashSet<i32> = protected
+		.iter()
+		.filter_map(|&pid| Process::from_pid(pid))
+		.filter_map(|process| process.group_id())
+		.collect();
+	let soft_signal = signal != KILL_SIGNAL;
+	let mut process_groups = if soft_signal {
+		Vec::with_capacity(processes.len())
+	} else {
+		Vec::new()
+	};
+	processes.retain(|process| {
+		// Prune every protected subtree, not just the exact protected pids.
+		// A false Windows descendant can include the host's real workers too.
+		// Its group must also be excluded before removing it from the snapshot.
+		if pid_in_protected_subtree(process.pid(), protected, &parents) {
+			if let Some(pgid) = process.group_id() {
+				protected_groups.insert(pgid);
+			}
+			return false;
+		}
+		if soft_signal {
+			process_groups.push(process.group_id());
+		}
+		true
+	});
+
+	// Capture memberships before any delivery: signalling a parent can make
+	// descendants disappear from its tree, but their pinned handles remain
+	// valid.
+	let mut signaled = 0u32;
+	let mut signaled_groups: HashSet<i32> = pgids.iter().copied().collect();
+	signaled_groups.retain(|&pgid| {
+		if protected_groups.contains(&pgid) || !kill_process_group(pgid, signal) {
+			return false;
+		}
+		signaled += 1;
+		true
+	});
+	for (index, process) in processes.iter().enumerate() {
+		if soft_signal && process_groups[index].is_some_and(|pgid| signaled_groups.contains(&pgid)) {
+			continue;
+		}
+		if process.signal(signal) {
+			signaled += 1;
+		}
+	}
+	(signaled, processes)
 }
 
 /// The harness pid — the one process a run-cancellation sweep must never
@@ -1120,12 +1209,18 @@ impl TerminationTargets {
 	/// targets routinely exit between collection and signalling, and
 	/// the caller's policy is "best effort".
 	pub fn signal(&self, signal: i32) {
-		for &pgid in &self.pgids {
-			let _ = kill_process_group(pgid, signal);
-		}
+		let mut pgids = self.pgids.clone();
+		let mut processes = Vec::new();
 		for process in &self.processes {
-			let _ = process.signal_tree(signal);
+			if let Some(pgid) = process.group_id()
+				&& pgid == process.pid()
+			{
+				pgids.push(pgid);
+			}
+			processes.extend(process.live_descendants());
+			processes.push(process.clone());
 		}
+		let _ = signal_processes(signal, &pgids, processes, &host_protected_pids());
 	}
 }
 
@@ -1405,6 +1500,423 @@ mod tests {
 		let reaped = root.signal_tree_excluding(KILL_SIGNAL, &HashSet::new());
 		assert!(reaped >= 1, "an unprotected root must be signalled");
 		let _ = child.wait();
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn signal_wave_spares_protected_group_members() {
+		use std::{os::unix::process::CommandExt, process::Command, thread};
+
+		let mut protected_child = Command::new("sleep")
+			.arg("30")
+			.process_group(0)
+			.spawn()
+			.expect("spawn protected group leader");
+		let protected_pid = i32::try_from(protected_child.id()).expect("pid fits in i32");
+		let root = Process::from_pid(protected_pid).expect("pin protected leader");
+		let mut eligible_child = Command::new("sleep")
+			.arg("30")
+			.process_group(protected_pid)
+			.spawn()
+			.expect("spawn eligible group member");
+		let eligible_pid = i32::try_from(eligible_child.id()).expect("pid fits in i32");
+		let eligible = Process::from_pid(eligible_pid).expect("pin eligible member");
+		let protected = HashSet::from([protected_pid]);
+
+		let protected_count = root.signal_tree_excluding(KILL_SIGNAL, &protected);
+		let (eligible_count, _) = signal_processes(
+			KILL_SIGNAL,
+			&[protected_pid],
+			vec![eligible.clone(), root.clone()],
+			&protected,
+		);
+		eligible_child.wait().expect("reap eligible member");
+		thread::sleep(Duration::from_millis(50));
+		let protected_status = root.status();
+		let _ = protected_child.kill();
+		let _ = protected_child.wait();
+
+		assert_eq!(protected_count, 0, "a protected leader must not be signalled through its group");
+		assert_eq!(eligible_count, 1, "a refused group signal must retain the eligible pinned send");
+		assert_eq!(eligible.status(), ProcessStatus::Exited, "the eligible member must terminate");
+		assert_eq!(
+			protected_status,
+			ProcessStatus::Running,
+			"the protected group member must survive"
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn signal_wave_deduplicates_groups_and_keeps_stopped_escaped_processes() {
+		use std::{os::unix::process::CommandExt, process::Command};
+
+		let spawn = |pgid| {
+			Command::new("sleep")
+				.arg("30")
+				.process_group(pgid)
+				.spawn()
+				.expect("spawn group member")
+		};
+		let mut leader = spawn(0);
+		let pgid = i32::try_from(leader.id()).expect("pid fits in i32");
+		let mut member = spawn(pgid);
+		let mut escaped = spawn(0);
+		let pin = |child: &std::process::Child| {
+			Process::from_pid(i32::try_from(child.id()).expect("pid fits in i32")).expect("pin child")
+		};
+		let leader_process = pin(&leader);
+		let member_process = pin(&member);
+		let escaped_process = pin(&escaped);
+		let stopped = escaped_process.signal(libc::SIGSTOP);
+		let mut stop_status = 0;
+		let stopped_pid = if stopped {
+			// SAFETY: this is our unreaped child, and `stop_status` is writable.
+			unsafe { libc::waitpid(escaped_process.pid(), &raw mut stop_status, libc::WUNTRACED) }
+		} else {
+			-1
+		};
+		let processes =
+			vec![member_process, escaped_process.clone(), leader_process, escaped_process];
+		// A non-exiting signal proves soft group/pin dedup without relying on
+		// how quickly SIGKILL makes an individual pinned send fail.
+		let (signaled, _) =
+			signal_processes(libc::SIGSTOP, &[pgid, pgid], processes.clone(), &host_protected_pids());
+		let _ = signal_processes(KILL_SIGNAL, &[pgid, pgid], processes, &host_protected_pids());
+		let leader_status = leader.wait().expect("reap leader");
+		let member_status = member.wait().expect("reap member");
+		let escaped_status = escaped.wait().expect("reap stopped escaped process");
+
+		assert!(stopped, "the escaped process must accept SIGSTOP");
+		assert_eq!(stopped_pid, i32::try_from(escaped.id()).expect("pid fits in i32"));
+		assert!(libc::WIFSTOPPED(stop_status), "the escaped process must actually be stopped");
+		assert_eq!(signaled, 2, "count one successful group call and one deduplicated pinned send");
+		assert!(!leader_status.success(), "the group leader must terminate");
+		assert!(!member_status.success(), "the covered group member must terminate");
+		assert!(
+			!escaped_status.success(),
+			"a stopped process outside the group must still terminate"
+		);
+	}
+
+	#[cfg(target_os = "linux")]
+	fn assert_private_pid_namespace() {
+		assert_eq!(std::process::id(), 1, "run only under unshare -Urmpf --mount-proc");
+		let mapping = std::fs::read_to_string("/proc/self/uid_map").expect("read private uid map");
+		let rows: Vec<_> = mapping
+			.lines()
+			.filter(|line| !line.trim().is_empty())
+			.collect();
+		assert_eq!(rows.len(), 1, "a single mapped user namespace is required");
+		let columns: Vec<_> = rows[0].split_whitespace().collect();
+		assert_eq!(columns.len(), 3, "expected uid mapping columns");
+		assert_eq!(columns[2], "1", "refuse a host or full-range user namespace");
+	}
+
+	#[cfg(target_os = "linux")]
+	fn reuse_private_namespace_pid(pid: i32) {
+		// Both guards run before opening this namespaced sysctl for writing.
+		assert_private_pid_namespace();
+		std::fs::write("/proc/sys/kernel/ns_last_pid", (pid - 1).to_string())
+			.expect("set only the private namespace's next pid");
+	}
+
+	#[cfg(target_os = "linux")]
+	#[derive(Default)]
+	struct NamespaceChildren {
+		pins: Vec<Process>,
+		reap: Vec<i32>,
+	}
+
+	#[cfg(target_os = "linux")]
+	impl Drop for NamespaceChildren {
+		fn drop(&mut self) {
+			for pin in self.pins.iter().rev() {
+				let _ = pin.signal(KILL_SIGNAL);
+			}
+			for &pid in &self.reap {
+				// SAFETY: waitpid only reaps this fixture's children. A reused
+				// number never selects an unrelated process outside this namespace.
+				while unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) } < 0
+					&& std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
+				{
+				}
+			}
+		}
+	}
+
+	#[cfg(target_os = "linux")]
+	fn fork_paused_namespace_child() -> i32 {
+		// SAFETY: child executes only async-signal-safe libc calls after fork,
+		// never Rust allocation, locks, destructors, or the test runtime.
+		let pid = unsafe { libc::fork() };
+		assert!(pid >= 0, "fork private fixture child");
+		if pid == 0 {
+			// SAFETY: this is the freshly forked child; failure exits immediately.
+			unsafe {
+				if libc::setsid() < 0 {
+					libc::_exit(70);
+				}
+				loop {
+					libc::pause();
+				}
+			}
+		}
+		pid
+	}
+
+	#[cfg(target_os = "linux")]
+	#[tokio::test]
+	#[ignore = "requires private mapped PID namespace"]
+	async fn signal_wave_keeps_reused_pid_incoming_pin_in_private_namespace() {
+		assert_private_pid_namespace();
+		let mut fixture = NamespaceChildren::default();
+		let old_pid = fork_paused_namespace_child();
+		fixture.reap.push(old_pid);
+		let old = Process::from_pid(old_pid).expect("pin original identity");
+		fixture.pins.push(old.clone());
+		assert!(old.signal(KILL_SIGNAL), "kill original identity");
+		// SAFETY: old_pid is this fixture's unreaped direct child.
+		assert_eq!(unsafe { libc::waitpid(old_pid, std::ptr::null_mut(), 0) }, old_pid);
+		reuse_private_namespace_pid(old_pid);
+		let incoming_pid = fork_paused_namespace_child();
+		fixture.reap.push(incoming_pid);
+		let incoming = Process::from_pid(incoming_pid).expect("pin replacement identity");
+		fixture.pins.push(incoming.clone());
+		assert_eq!(incoming_pid, old_pid, "fixture must exercise actual numeric reuse");
+
+		let _ =
+			signal_processes(KILL_SIGNAL, &[], vec![old, incoming.clone()], &host_protected_pids());
+		let exited = incoming
+			.wait_for_exit(Some(Duration::from_secs(1)), CancelToken::default())
+			.await
+			.expect("wait for replacement identity");
+		drop(fixture);
+		assert!(exited, "an exited earlier pin must not suppress the replacement's hard send");
+	}
+
+	#[cfg(target_os = "linux")]
+	#[tokio::test]
+	#[ignore = "requires private mapped PID namespace"]
+	async fn signal_wave_wait_keeps_reused_root_pid_in_private_namespace() {
+		use std::{
+			io::{Read, Write},
+			os::fd::{AsRawFd, FromRawFd, OwnedFd},
+		};
+
+		assert_private_pid_namespace();
+		let pipe = || {
+			let mut fds = [-1; 2];
+			// SAFETY: fds is a writable pair; successful descriptors become owned.
+			assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "create fixture pipe");
+			// SAFETY: each newly created descriptor is transferred exactly once.
+			unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) }
+		};
+		let (ready_read, ready_write) = pipe();
+		let (command_read, command_write) = pipe();
+		let (result_read, result_write) = pipe();
+		let mut fixture = NamespaceChildren::default();
+		// SAFETY: all child branches below use only async-signal-safe libc calls.
+		let root_pid = unsafe { libc::fork() };
+		assert!(root_pid >= 0, "fork original root");
+		if root_pid == 0 {
+			// SAFETY: this branch never enters Rust runtime code after fork.
+			unsafe {
+				libc::close(ready_read.as_raw_fd());
+				libc::close(command_write.as_raw_fd());
+				libc::close(result_read.as_raw_fd());
+				libc::signal(libc::SIGTERM, libc::SIG_DFL);
+				let retained_pid = libc::fork();
+				if retained_pid < 0 {
+					libc::_exit(71);
+				}
+				if retained_pid == 0 {
+					if libc::setsid() < 0 {
+						libc::_exit(72);
+					}
+					libc::signal(libc::SIGTERM, libc::SIG_IGN);
+					let pid = libc::getpid();
+					if libc::write(
+						ready_write.as_raw_fd(),
+						(&raw const pid).cast(),
+						std::mem::size_of::<i32>(),
+					) != 4
+					{
+						libc::_exit(73);
+					}
+					libc::close(ready_write.as_raw_fd());
+					let mut command = 0u8;
+					if libc::read(command_read.as_raw_fd(), (&raw mut command).cast(), 1) != 1 {
+						libc::_exit(0);
+					}
+					libc::close(command_read.as_raw_fd());
+					let replacement = libc::fork();
+					if replacement < 0 {
+						libc::_exit(74);
+					}
+					if replacement == 0 {
+						if libc::setsid() < 0 {
+							libc::_exit(75);
+						}
+						let pid = libc::getpid();
+						if libc::write(
+							result_write.as_raw_fd(),
+							(&raw const pid).cast(),
+							std::mem::size_of::<i32>(),
+						) != 4
+						{
+							libc::_exit(76);
+						}
+						libc::close(result_write.as_raw_fd());
+						loop {
+							libc::pause();
+						}
+					}
+					libc::close(result_write.as_raw_fd());
+					loop {
+						libc::pause();
+					}
+				}
+				libc::close(ready_write.as_raw_fd());
+				libc::close(command_read.as_raw_fd());
+				libc::close(result_write.as_raw_fd());
+				loop {
+					libc::pause();
+				}
+			}
+		}
+		fixture.reap.push(root_pid);
+		drop(ready_write);
+		drop(command_read);
+		drop(result_write);
+		let root = Process::from_pid(root_pid).expect("pin original root");
+		fixture.pins.push(root.clone());
+		let mut ready = std::fs::File::from(ready_read);
+		let mut result = std::fs::File::from(result_read);
+		let mut control = std::fs::File::from(command_write);
+		let mut pid_bytes = [0u8; std::mem::size_of::<i32>()];
+		ready
+			.read_exact(&mut pid_bytes)
+			.expect("read escaped retained parent");
+		let retained_pid = i32::from_ne_bytes(pid_bytes);
+		fixture.reap.push(retained_pid);
+		let retained_parent = Process::from_pid(retained_pid).expect("pin retained parent");
+		fixture.pins.push(retained_parent.clone());
+		let protected = host_protected_pids();
+		let (_, retained) = root.signal_tree_wave(TERM_SIGNAL, None, &protected, Vec::new());
+		// SAFETY: this is the fixture's original direct child, killed by TERM.
+		assert_eq!(unsafe { libc::waitpid(root_pid, std::ptr::null_mut(), 0) }, root_pid);
+		reuse_private_namespace_pid(root_pid);
+		control.write_all(&[1]).expect("release orphan fork");
+		result
+			.read_exact(&mut pid_bytes)
+			.expect("read escaped replacement acknowledgement");
+		let replacement_pid = i32::from_ne_bytes(pid_bytes);
+		fixture.reap.push(replacement_pid);
+		let replacement =
+			Process::from_pid(replacement_pid).expect("pin replacement root-pid identity");
+		fixture.pins.push(replacement.clone());
+		assert_eq!(replacement_pid, root_pid, "fixture must reuse the original root number");
+
+		let (_, descendants) = root.signal_tree_wave(libc::SIGSTOP, None, &protected, retained);
+		assert!(retained_parent.signal(KILL_SIGNAL), "retire retained parent after STOP wave");
+		// SAFETY: as PID 1 we adopted the original root's orphaned child.
+		assert_eq!(unsafe { libc::waitpid(retained_pid, std::ptr::null_mut(), 0) }, retained_pid);
+		let exited = wait_for_exit(
+			&root,
+			&descendants,
+			Some(Duration::from_millis(50)),
+			CancelToken::default(),
+		)
+		.await
+		.expect("wait while replacement remains stopped and alive");
+		let replacement_status = replacement.status();
+		drop(fixture);
+		assert_eq!(replacement_status, ProcessStatus::Running, "SIGSTOP must not exit replacement");
+		assert!(
+			!exited,
+			"an exited root's numeric PID must not remove the replacement from the wait"
+		);
+	}
+
+	#[cfg(target_os = "linux")]
+	#[tokio::test]
+	async fn hard_wave_retains_escaped_orphan_and_refreshes_its_new_subtree() {
+		use std::{
+			io::{BufRead, BufReader, Write},
+			os::unix::process::CommandExt,
+			process::{Command, Stdio},
+		};
+
+		struct Fixture {
+			command: std::process::Child,
+			pins:    Vec<Process>,
+		}
+		impl Drop for Fixture {
+			fn drop(&mut self) {
+				for process in self.pins.iter().rev() {
+					let _ = process.kill_tree(Some(KILL_SIGNAL));
+				}
+				let _ = self.command.kill();
+				let _ = self.command.wait();
+			}
+		}
+
+		// The escaped shell ignores TERM and waits for an explicit command.
+		// Its new escaped child is created only after the original root is
+		// reaped.
+		let script = r#"trap 'exit 0' TERM
+setsid sh -c 'trap "" TERM; echo "$$"; read -r action || exit; setsid sh -c '"'"'trap "" TERM; echo "$$"; exec sleep 30'"'"' & wait' <&0 &
+wait
+"#;
+		let command = Command::new("sh")
+			.args(["-c", script])
+			.process_group(0)
+			.stdin(Stdio::piped())
+			.stdout(Stdio::piped())
+			.spawn()
+			.expect("spawn controlled orphan tree");
+		let mut fixture = Fixture { command, pins: Vec::new() };
+		let root = Process::from_pid(i32::try_from(fixture.command.id()).expect("pid fits"))
+			.expect("pin root");
+		fixture.pins.push(root.clone());
+		let mut control = fixture.command.stdin.take().expect("fixture control");
+		let mut output = BufReader::new(fixture.command.stdout.take().expect("fixture stdout"));
+		let mut line = String::new();
+		output
+			.read_line(&mut line)
+			.expect("read ready escaped child");
+		let child_pid = line.trim().parse().expect("escaped child pid");
+		let child = Process::from_pid(child_pid).expect("pin ready escaped child");
+		fixture.pins.push(child.clone());
+		let protected = host_protected_pids();
+		let (_, retained) =
+			root.signal_tree_wave(TERM_SIGNAL, root.group_id(), &protected, Vec::new());
+		fixture
+			.command
+			.wait()
+			.expect("reap original root during grace");
+		writeln!(control, "spawn").expect("release orphan fork");
+		line.clear();
+		output
+			.read_line(&mut line)
+			.expect("read acknowledged new grandchild");
+		let grandchild_pid = line.trim().parse().expect("new grandchild pid");
+		let grandchild = Process::from_pid(grandchild_pid).expect("pin acknowledged grandchild");
+		fixture.pins.push(grandchild.clone());
+
+		let (_, descendants) =
+			root.signal_tree_wave(KILL_SIGNAL, root.group_id(), &protected, retained);
+		let exited =
+			wait_for_exit(&root, &descendants, Some(Duration::from_secs(1)), CancelToken::default())
+				.await
+				.expect("wait for retained tree");
+		let child_status = child.status();
+		let grandchild_status = grandchild.status();
+
+		assert!(exited, "hard-wave success must include the retained orphan subtree");
+		assert_eq!(child_status, ProcessStatus::Exited, "the retained escaped child must exit");
+		assert_eq!(grandchild_status, ProcessStatus::Exited, "its newly discovered child must exit");
 	}
 
 	/// Regression test for the #7453 review: pruning a protected node must drop

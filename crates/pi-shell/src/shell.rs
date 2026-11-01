@@ -8468,18 +8468,35 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 
 	/// A consumer that exits early still ends the pipeline at once through a
 	/// tapped pipe: the relay lets go of the producer's end when `head`
-	/// leaves, so `tail -f` (idle, no further writes) sees its pipe widowed.
+	/// leaves, so `tail -f` (no further writes) sees its pipe widowed even while
+	/// unrelated sibling files keep its parent-directory watcher busy.
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn pipe_tap_widows_the_producer_when_the_consumer_exits() {
 		let _guard = shell_test_lock().lock().await;
-		let log = tempfile::NamedTempFile::new().expect("log file");
-		std::fs::write(log.path(), "first\nsecond\n").expect("write log");
-		let command = format!("tail -f {} | head -n 1", quote_arg(&log.path().to_string_lossy()));
+		let dir = tempfile::tempdir().expect("log directory");
+		let log = dir.path().join("followed.log");
+		std::fs::write(&log, "first\nsecond\n").expect("write log");
+		let command = format!("tail -f {} | head -n 1", quote_arg(&log.to_string_lossy()));
+		let stop = Arc::new(AtomicBool::new(false));
+		let noise_stop = Arc::clone(&stop);
+		let noise_path = dir.path().join("unrelated");
+		let noise = std::thread::spawn(move || -> std::io::Result<()> {
+			while !noise_stop.load(Ordering::Relaxed) {
+				std::fs::write(&noise_path, b"unrelated\n")?;
+				std::thread::sleep(Duration::from_millis(1));
+			}
+			Ok(())
+		});
 		let (_taps, run, rx) = run_tapped(&command, CancelToken::default());
 
-		let result = time::timeout(Duration::from_secs(10), run)
-			.await
+		let result = time::timeout(Duration::from_secs(10), run).await;
+		stop.store(true, Ordering::Relaxed);
+		noise
+			.join()
+			.expect("watcher noise thread panicked")
+			.expect("write unrelated sibling");
+		let result = result
 			.expect("tail -f kept following after head exited")
 			.expect("run task panicked")
 			.expect("run");

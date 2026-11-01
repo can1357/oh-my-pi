@@ -132,7 +132,11 @@ describe("SelectorController.showHistorySearch", () => {
 		const tui = { terminal: { columns: 120 } } as unknown as TUI;
 		const prompt = new HookEditorComponent(tui, "Other", undefined, onSubmit, vi.fn(), { promptStyle: true });
 		const slot = createEditorSlot(prompt);
-		const { ctx } = createCtx(slot, editor, prompt, { historyStorage: storage });
+		const { ctx } = createCtx(slot, editor, prompt, {
+			historyStorage: storage,
+			settings: Settings.isolated(),
+			sessionManager: { getSessionId: () => "history-focus" },
+		});
 
 		new SelectorController(ctx).showHistorySearch();
 		const [history] = slot.children;

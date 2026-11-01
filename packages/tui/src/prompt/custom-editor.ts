@@ -1062,7 +1062,7 @@ export class CustomEditor extends Editor {
 	}
 	/** Editing is available during bootstrap; atomic sends wait until submission is wired and enabled
 	 *  and no dictation is still writing into the draft. */
-	protected override get nativeSendable(): boolean {
+	override get nativeSendable(): boolean {
 		return (
 			!this.nativeKeyPassthrough &&
 			this.onSubmit !== undefined &&

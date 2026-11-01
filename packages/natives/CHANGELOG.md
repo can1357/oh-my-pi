@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `initGit` to initialize a checkout through the native VCS API without spawning Git from callers ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
+
+### Fixed
+
+- Preserved ordinary file and directory types for non-name-surrogate Windows reparse points, including cloud placeholders, when native path stats follow links ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
+- Fixed cancelled commands running termination cleanup more than once and being killed before cleanup finishes ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
+- Fixed hard process-tree termination missing a pinned child that escapes its process group during delivery, and graceful termination reporting success while escaped orphan descendants survive. Hard escalation retains eligible process handles, merges overlapping snapshots safely across numeric PID reuse, and refreshes orphan subtrees created during the grace period without repeating TERM cleanup ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
+- Avoided an unnecessary host-wide process scan when cancelling internal shell jobs, while retaining host-protection checks for external process targets ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
+- Fixed `tail -f` continuing to follow after its downstream reader exits when unrelated directory activity keeps its filesystem watcher busy ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
+
 ## [18.15.0] - 2026-11-01
 
 ### Fixed

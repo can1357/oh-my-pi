@@ -9,6 +9,7 @@ import {
 	getLogPath,
 	getProjectDir,
 	localDay,
+	pathIdentityKey,
 	relativePathWithinRoot,
 	setProjectDir,
 } from "@oh-my-pi/pi-utils/dirs";
@@ -83,6 +84,73 @@ describe("project directory state", () => {
 		expect(() => setProjectDir("/blocked/project")).toThrow("operation not permitted");
 		expect(getProjectDir()).toBe(originalProjectDir);
 		chdir.mockRestore();
+	});
+});
+
+describe("pathIdentityKey", () => {
+	it("groups physical and symlinked directory spellings", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-path-identity-"));
+		const directory = path.join(root, "Work");
+		const alias = path.join(root, "alias");
+		try {
+			fs.mkdirSync(directory);
+			fs.symlinkSync(directory, alias, "junction");
+			expect(pathIdentityKey(alias)).toBe(pathIdentityKey(directory));
+			expect(pathIdentityKey(path.join(directory, "."))).toBe(pathIdentityKey(directory));
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it.skipIf(process.platform !== "linux")("separates distinct-case existing directories", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-path-identity-"));
+		try {
+			const upper = path.join(root, "Work");
+			const lower = path.join(root, "work");
+			fs.mkdirSync(upper);
+			fs.mkdirSync(lower);
+			expect(pathIdentityKey(upper)).not.toBe(pathIdentityKey(lower));
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("preserves distinct-case missing paths instead of merging unavailable identities", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-path-identity-"));
+		try {
+			expect(pathIdentityKey(path.join(root, "Work"))).not.toBe(pathIdentityKey(path.join(root, "work")));
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it.each(["dev", "ino"] as const)("falls back to case-preserving spelling when %s is zero", field => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-path-identity-"));
+		const directory = path.join(root, "Work");
+		fs.mkdirSync(directory);
+		const stat = fs.statSync(directory, { bigint: true });
+		stat[field] = 0n;
+		const probe = spyOn(fs, "statSync").mockReturnValue(stat);
+		try {
+			expect(pathIdentityKey(directory)).toBe(`path:${fs.realpathSync(directory)}`);
+		} finally {
+			probe.mockRestore();
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("preserves resolved spelling when stat fails", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-path-identity-"));
+		const probe = spyOn(fs, "statSync").mockImplementation(() => {
+			throw Object.assign(new Error("access denied"), { code: "EACCES" });
+		});
+		try {
+			expect(pathIdentityKey(root)).toBe(`path:${fs.realpathSync(root)}`);
+			expect(pathIdentityKey(path.join(root, "Work"))).not.toBe(pathIdentityKey(path.join(root, "work")));
+		} finally {
+			probe.mockRestore();
+			fs.rmSync(root, { recursive: true, force: true });
+		}
 	});
 });
 
