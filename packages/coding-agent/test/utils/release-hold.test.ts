@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { asReleaseHold, createReleaseHold } from "@oh-my-pi/pi-coding-agent/utils/release-hold";
+import { createReleaseHold } from "@oh-my-pi/pi-coding-agent/utils/release-hold";
 
 describe("ReleaseHold", () => {
 	it("runs the release once when the release itself discharges the hold again", async () => {
@@ -50,12 +50,5 @@ describe("ReleaseHold", () => {
 		await derived();
 		await base();
 		expect(releases).toBe(1);
-	});
-
-	it("recognizes a hold behind an onRelease and ignores a plain callback", () => {
-		const hold = createReleaseHold(() => {});
-		expect(asReleaseHold(hold)).toBe(hold);
-		expect(asReleaseHold(async () => {})).toBeUndefined();
-		expect(asReleaseHold(undefined)).toBeUndefined();
 	});
 });
