@@ -204,6 +204,8 @@ Rules for TS code:
 
 **NEVER edit `packages/catalog/src/models.json` directly.** It is generated from upstream sources (stencil.so, provider catalog discovery, OpenCode docs) by `packages/catalog/scripts/generate-models.ts` and the descriptors/resolvers in `packages/catalog/src/provider-models/`. Hand-edits get overwritten on the next regen. The same applies to `packages/catalog/src/compat/rules.json`, compiled from the KDL tree by `bun run gen:compat`.
 
+Likewise, `packages/coding-agent/src/config/omp-config.schema.json` (the `config.yml` JSON Schema) is generated from the setting definitions by `bun run gen:config-schema`; regenerate it after changing a `register(...)` definition, never hand-edit it.
+
 To change an entry, fix the source:
 
 - **Model/provider policy** (identity, thinking ladders, wire quirks, modality/limit/pricing corrections, API routing, roster exclusions) → the KDL tree in `packages/catalog/src/compat/rules/` (see the section above).

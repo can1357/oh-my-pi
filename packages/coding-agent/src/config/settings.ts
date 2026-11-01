@@ -2640,6 +2640,7 @@ export class Settings {
 	}
 
 	/** Apply schema migrations to raw settings */
+	// Update LEGACY_SHAPES and REMOVED_KEYS in settings-json-schema.ts when adding a migration.
 	#migrateRawSettings(raw: RawSettings, captureLegacyChangelogVersion = true): RawSettings {
 		// queueMode -> steeringMode
 		if ("queueMode" in raw && !("steeringMode" in raw)) {

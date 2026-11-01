@@ -58,7 +58,10 @@ export const compressHelp = {
 	description: "Rewrite a text file into the dense prompt register, reporting what it drops",
 } satisfies CommandMetadata;
 
-export const configHelp = { description: "Manage configuration settings" } satisfies CommandMetadata;
+export const configHelp = {
+	description: "Manage configuration settings",
+	examples: ["# Print the JSON Schema for config.yml\n  omp config schema > omp-config.schema.json"],
+} satisfies CommandMetadata;
 
 export const dryBalanceHelp = {
 	description: "Dry-run OAuth account balancing across random session ids",

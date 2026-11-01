@@ -38,6 +38,18 @@ The canonical global file is YAML at `config.yml`; `config.yaml` is accepted as 
 - Empty YAML (or YAML `null`) is treated as an empty settings mapping. Other non-mapping top levels are invalid. On writable startup, `omp` moves a syntactically invalid or non-mapping persistent settings file to a uniquely named `.broken-*` backup and exits with the original error and backup path. A `--config` overlay with a bare array/scalar is also a hard error, but is not moved.
 - Invalid values for ordinary schema entries warn and read as their schema defaults. Settings with explicit validators, such as per-agent compaction triggers or provider concurrency limits, can reject the configuration instead. Unknown keys in hand-written files are not a substitute for a registered setting.
 
+## Editor validation (JSON Schema)
+
+Every release ships `omp-config.schema.json`, a JSON Schema for `config.yml` generated from the setting definitions; `omp config schema` prints the same schema for the installed version. Reference it with a top-level `$schema` key, which survives omp's own writes to the file (needs yaml-language-server 1.24.0 or newer):
+
+```yaml
+$schema: https://github.com/can1357/oh-my-pi/releases/latest/download/omp-config.schema.json
+```
+
+Older YAML language servers and JetBrains IDEs read a comment instead, `# yaml-language-server: $schema=<url>` or `# $schema: <url>` on the first line, but omp drops comments whenever it writes `config.yml` (`omp config set`, `/settings`). The association that always lasts is editor-side: VS Code `yaml.schemas` (for example `{ "<url>": ["**/.omp/**/config.yml"] }`) or a JetBrains JSON Schema mapping (Settings → Languages & Frameworks → Schemas and DTDs → JSON Schema Mappings). To match an older install, pin the release: `https://github.com/can1357/oh-my-pi/releases/download/vX.Y.Z/omp-config.schema.json`.
+
+The schema checks types, enum values, and known array entries, and rejects unknown keys inside a settings group (nested form only, such as `compaction: { enabled: false }`). Unknown top-level keys are allowed. Older shapes that omp still migrates on load validate but are marked deprecated. Map-valued settings such as `modelRoles` accept any object; their values are not validated.
+
 ## Reading and writing settings
 
 Use the interactive `/settings` panel inside a session, or the `omp config` command from a shell. The CLI reads effective values including setting environment variables. The panel shows and edits merged settings-layer values, not environment-supplied values; descriptions note active env overrides so env credentials are never pre-filled or persisted. Ordinary persistent writes land in the **global** file; model-selector role changes are the exception when `modelRoleStorage: project` (see [Where writes go](#where-writes-go)).
@@ -52,6 +64,7 @@ omp config set compaction.enabled false
 omp config set defaultThinkingLevel medium
 omp config reset steeringMode   # remove a key from config.yml so its default applies
 omp config path                 # print the active agent directory
+omp config schema               # print the JSON Schema for config.yml
 ```
 
 For users who want the full first-run animation on normal launches, set `startup.showSplash`:
@@ -72,6 +85,7 @@ This only controls the startup splash animation. It does not rerun setup or chan
 | `omp config reset <key>`       | Delete the global key, allowing another configured layer or the schema default to apply. Prints the resulting effective value, masking non-empty credentials as `********`; JSON omits a credential's `value` and emits `{ key, redacted: true }`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `omp config path`              | Print the active agent directory (honors `PI_CODING_AGENT_DIR`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `omp config init-xdg`          | On Linux and macOS, create the `omp` directories under the effective XDG data, state, and cache homes. It does not move existing files or set the XDG environment variables. Other platforms exit non-zero.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `omp config schema`            | Print the JSON Schema for `config.yml` to stdout without reading any settings (see [Editor validation](#editor-validation-json-schema)).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 
 `omp config` with no subcommand lists settings. `--help` or `-h` displays command help. The `--json` flag is accepted by `list`, `get`, `set`, and `reset`. `--scope` is accepted by `list` only.
 

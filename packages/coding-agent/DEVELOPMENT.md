@@ -31,6 +31,10 @@ exact asset from the Linux binary build alongside the release binaries. In a
 shell that sets `CI=true`, such as omp's bash tool, use
 `bun run gen:export-viewer --write` to update the metadata.
 
+After adding, removing, or changing a setting definition (`register(...)`), run
+`bun run gen:config-schema` and include `src/config/omp-config.schema.json`, the
+`config.yml` JSON Schema attached to every GitHub release; a test fails when it is stale.
+
 Exports from a source checkout inline the generated viewer, so `bun gen:export-viewer`
 followed by `/export` exercises local changes without publishing or a local
 server. Packaged releases reference their versioned `build.stencil.so` viewer.

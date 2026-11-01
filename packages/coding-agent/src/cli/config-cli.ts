@@ -10,6 +10,7 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import { orderedSettings } from "../config/all-settings";
 import { type AnySetting, lookup } from "../config/registry";
 import { Settings, settings } from "../config/settings";
+import { renderSettingsJsonSchema } from "../config/settings-json-schema";
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import { initXdg } from "./commands/init-xdg";
 
@@ -17,7 +18,7 @@ import { initXdg } from "./commands/init-xdg";
 // Types
 // =============================================================================
 
-export type ConfigAction = "list" | "get" | "set" | "reset" | "path" | "init-xdg";
+export type ConfigAction = "list" | "get" | "set" | "reset" | "path" | "init-xdg" | "schema";
 
 /** Layer `list --scope` reads as written: the agent dir's `config.yml`, or the project's settings files. */
 export type ConfigScope = "global" | "project";
@@ -68,7 +69,7 @@ function findSettingDef(path: string): CliSettingDef | undefined {
 // Argument Parser
 // =============================================================================
 
-const VALID_ACTIONS: ConfigAction[] = ["list", "get", "set", "reset", "path", "init-xdg"];
+const VALID_ACTIONS: ConfigAction[] = ["list", "get", "set", "reset", "path", "init-xdg", "schema"];
 
 /**
  * Parse config subcommand arguments.
@@ -169,6 +170,11 @@ export async function runConfigCommand(cmd: ConfigCommandArgs): Promise<void> {
 	if (cmd.flags.scope !== undefined && cmd.action !== "list") {
 		console.error(chalk.red("--scope applies to `config list` only"));
 		process.exit(1);
+	}
+	// The schema depends on the registry alone, so it never reads or initializes any config layer.
+	if (cmd.action === "schema") {
+		await writeStdout(renderSettingsJsonSchema());
+		return;
 	}
 	await Settings.init();
 
@@ -456,6 +462,7 @@ ${chalk.bold("Commands:")}
   reset <key>        Remove a setting from config.yml so its default applies
   path               Print the config directory path
   init-xdg           Initialize XDG Base Directory structure
+  schema             Print the JSON Schema for config.yml
 
 ${chalk.bold("Options:")}
   --json             Output as JSON
@@ -471,6 +478,7 @@ ${chalk.bold("Examples:")}
   ${APP_NAME} config list --json
   ${APP_NAME} config list --scope global --json
   ${APP_NAME} config init-xdg
+  ${APP_NAME} config schema > omp-config.schema.json
 
 ${chalk.bold("Boolean Values:")}
   true, false, yes, no, on, off, 1, 0

@@ -218,6 +218,40 @@ describe("config CLI schema coverage", () => {
 		const parsed: unknown = JSON.parse(output);
 		expect(parsed).toMatchObject({ modelRoles: { type: "record" } });
 	});
+	it("prints the committed config schema without reading config.yml", async () => {
+		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
+		const configPath = path.join(testAgentDir.path(), "config.yml");
+		const brokenConfig = "theme: [unterminated\n";
+		await Bun.write(configPath, brokenConfig);
+
+		const { exitCode, output, error } = await runCliProcess(["config", "schema"], {
+			PI_CODING_AGENT_DIR: testAgentDir.path(),
+		});
+
+		expect(exitCode).toBe(0);
+		expect(error).toBe("");
+		const committed = await Bun.file(
+			path.join(import.meta.dir, "..", "src", "config", "omp-config.schema.json"),
+		).text();
+		expect(output).toBe(committed);
+		expect(JSON.parse(output)).toMatchObject({ properties: { modelRoles: { type: "object" } } });
+		// Settings.init would move an unparseable config.yml to a `.broken-*` backup.
+		expect(await Bun.file(configPath).text()).toBe(brokenConfig);
+	});
+	it("keeps a top-level $schema key when config set rewrites config.yml", async () => {
+		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
+		const configPath = path.join(testAgentDir.path(), "config.yml");
+		const schemaUrl = "https://github.com/can1357/oh-my-pi/releases/latest/download/omp-config.schema.json";
+		await Bun.write(configPath, `$schema: ${schemaUrl}\n`);
+
+		const { exitCode, error } = await runCliProcess(["config", "set", "steeringMode", "all"], {
+			PI_CODING_AGENT_DIR: testAgentDir.path(),
+		});
+
+		expect(exitCode).toBe(0);
+		expect(error).toBe("");
+		expect(Bun.YAML.parse(await Bun.file(configPath).text())).toEqual({ $schema: schemaUrl, steeringMode: "all" });
+	});
 	it("reports the value written to config.yml and the layer that still overrides it", async () => {
 		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
 		const overlayPath = path.join(testAgentDir.path(), "overlay.yml");

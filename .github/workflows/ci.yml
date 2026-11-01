@@ -1088,6 +1088,7 @@ jobs:
               bun run ci:release:checksums SHA256SUMS.txt \
                 packages/coding-agent/binaries/omp-* \
                 packages/browser-relay/dist/omp-browser-relay-extension.zip \
+                packages/coding-agent/src/config/omp-config.schema.json \
                 LICENSE
          - name: Create GitHub Release
            uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
@@ -1097,6 +1098,7 @@ jobs:
               files: |
                  packages/coding-agent/binaries/omp-*
                  packages/browser-relay/dist/omp-browser-relay-extension.zip
+                 packages/coding-agent/src/config/omp-config.schema.json
                  LICENSE
                  SHA256SUMS.txt
               body_path: release-notes.md

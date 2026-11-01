@@ -166,6 +166,8 @@ Each setting is declared once with `register({ id, type, default, env?, protocol
 - `cfgX.provenance(scope)` — layer supplying the value: `"env" | "runtime" | "overlay" | "project" | "global" | "default"`.
 - `cfgX.layered(scope)` — the value from the settings layers alone, ignoring the environment variable (what the settings panel shows and edits).
 
+The definitions also generate `src/config/omp-config.schema.json`, the JSON Schema for `config.yml` printed by `omp config schema` and shipped with every release; regenerate it with `bun run gen:config-schema` after changing a definition (see [Editor validation](./settings.md#editor-validation-json-schema)).
+
 A configured value that does not fit the declared type (or enum values) is ignored with a warning and the default is used; a definition's `validate` rejects malformed values on load, on every reload, and before every write. A keep-last-good watcher reload, and a save that merges external edits to `config.yml`, keep only the invalid file's layer at its last good values (the warning names the file) while the other layers still refresh. A configured `null` generally counts as unset. Record entries such as model roles and model presets can use `null` in runtime or overlay layers as tombstones that hide lower-layer entries; project/global null entries remain unset.
 
 ### Layers (`src/config/settings.ts`)

@@ -527,6 +527,7 @@
 		"gen:export-viewer": "bun --cwd=../collab-web run gen:export-viewer",
 		"gen:bundle": "bun scripts/bundle-dist.ts",
 		"gen:rpc": "bun scripts/gen-rpc/index.ts",
+		"gen:config-schema": "bun scripts/gen-config-schema.ts",
 		"prepack": "bun run gen:export-viewer && bun run gen:bundle",
 		"bench:guard": "bun scripts/bench-guard.ts"
 	},

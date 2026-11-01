@@ -14,6 +14,11 @@ export function setActiveSymbolTheme(value: Theme | undefined): void {
 	active = value;
 }
 
+/** @internal The theme `activeThemeSymbol` reads, or `undefined` before any theme loads. */
+export function activeSymbolTheme(): Theme | undefined {
+	return active;
+}
+
 /** Symbol from the active theme, or the ascii preset before any theme loads. */
 export function activeThemeSymbol(key: SymbolKey): string {
 	return active ? active.symbol(key) : SYMBOL_PRESETS.ascii[key];
