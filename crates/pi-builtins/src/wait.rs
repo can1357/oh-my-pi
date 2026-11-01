@@ -4,7 +4,7 @@ use brush_core::{
 	ExecutionExitCode, ExecutionResult, builtins,
 	env::{EnvironmentLookup, EnvironmentScope},
 	int_utils,
-	jobs::{Job, JobSelector},
+	jobs::{Job, JobManager, JobSelector},
 	variables::ShellValueLiteral,
 };
 use clap::Parser;
@@ -41,13 +41,17 @@ impl builtins::Command for WaitCommand {
 			context.shell.env_mut().unset(variable)?;
 		}
 
-		let mut result = ExecutionResult::success();
-
 		if self.wait_for_first_or_next {
-			let selectors = match resolve_wait_selectors(&context, &self.ids)? {
-				WaitSelectorResolution::Selectors(selectors) => selectors,
-				WaitSelectorResolution::Failure(result) => return Ok(result),
-			};
+			let mut selectors = Vec::with_capacity(self.ids.len());
+			for id in &self.ids {
+				match next_wait_selector(context.shell.jobs(), id) {
+					Ok(selector) => selectors.push(selector),
+					Err(refusal) => {
+						writeln!(context.stderr(), "{}: {}", context.command_name, refusal.message)?;
+						return Ok(refusal.status.into());
+					},
+				}
+			}
 			let Some(waited) = context.shell.jobs_mut().wait_next(&selectors).await? else {
 				return Ok(ExecutionExitCode::NotFound.into());
 			};
@@ -57,47 +61,9 @@ impl builtins::Command for WaitCommand {
 			return Ok(waited.result);
 		}
 
+		let mut result = ExecutionResult::success();
 		let mut waited_identifier = None;
-		if !self.ids.is_empty() {
-			for id in &self.ids {
-				if id.starts_with('%') {
-					// It's a job spec.
-					if let Some(job) = context.shell.jobs_mut().resolve_job_spec(id) {
-						waited_identifier = Some(job_identifier(job));
-						result = if self.wait_for_terminate {
-							job.wait_for_termination().await?
-						} else {
-							job.wait().await?
-						};
-					} else {
-						writeln!(context.stderr(), "{}: no such job: {}", context.command_name, id)?;
-
-						result = ExecutionExitCode::GeneralError.into();
-					}
-				} else if let Ok(pid) = int_utils::parse::<i32>(id, 10) {
-					if let Some(job) = context.shell.jobs_mut().resolve_process_id(pid) {
-						waited_identifier = Some(pid.to_string());
-						result = if self.wait_for_terminate {
-							job.wait_for_termination().await?
-						} else {
-							job.wait().await?
-						};
-					} else {
-						writeln!(
-							context.stderr(),
-							"{}: pid {pid} is not a child of this shell",
-							context.command_name
-						)?;
-
-						result = ExecutionExitCode::NotFound.into();
-					}
-				} else {
-					writeln!(context.stderr(), "{}: no such job: {}", context.command_name, id)?;
-
-					result = ExecutionExitCode::GeneralError.into();
-				}
-			}
-		} else {
+		if self.ids.is_empty() {
 			// Wait for all jobs.
 			let jobs = if self.wait_for_terminate {
 				context.shell.jobs_mut().wait_all_for_termination().await?
@@ -113,6 +79,43 @@ impl builtins::Command for WaitCommand {
 			}
 		}
 
+		for id in &self.ids {
+			let selector = match wait_selector(context.shell.jobs(), id) {
+				Ok(selector) => selector,
+				Err(refusal) => {
+					writeln!(context.stderr(), "{}: {}", context.command_name, refusal.message)?;
+					result = refusal.status.into();
+					continue;
+				},
+			};
+			let identifier = match selector {
+				JobSelector::JobId(job_id) => context
+					.shell
+					.jobs()
+					.jobs
+					.iter()
+					.find(|job| job.id == job_id)
+					.map(job_identifier),
+				JobSelector::ProcessId(pid) => Some(pid.to_string()),
+			};
+			if let Some(waited) = context
+				.shell
+				.jobs_mut()
+				.wait_for(selector, self.wait_for_terminate)
+				.await?
+			{
+				result = waited;
+				waited_identifier = identifier;
+			} else {
+				let refusal = match selector {
+					JobSelector::ProcessId(pid) => not_a_child(pid),
+					JobSelector::JobId(_) => no_such_job(id),
+				};
+				writeln!(context.stderr(), "{}: {}", context.command_name, refusal.message)?;
+				result = refusal.status.into();
+			}
+		}
+
 		if let (Some(variable), Some(identifier)) = (&self.variable_to_receive_id, waited_identifier) {
 			assign_wait_variable(context.shell, variable, identifier)?;
 		}
@@ -121,45 +124,44 @@ impl builtins::Command for WaitCommand {
 	}
 }
 
-enum WaitSelectorResolution {
-	Selectors(Vec<JobSelector>),
-	Failure(ExecutionResult),
+/// Why `wait` refuses an operand: Bash's message and exit status.
+struct Refusal {
+	message: String,
+	status:  ExecutionExitCode,
 }
 
-fn resolve_wait_selectors<SE: brush_core::ShellExtensions>(
-	context: &brush_core::ExecutionContext<'_, SE>,
-	ids: &[String],
-) -> Result<WaitSelectorResolution, brush_core::Error> {
-	let mut selectors = Vec::new();
-	for id in ids {
-		if id.starts_with('%') {
-			if let Some(selector) = context.shell.jobs().resolve_job_spec_selector(id) {
-				selectors.push(selector);
-			} else {
-				writeln!(context.stderr(), "{}: no such job: {}", context.command_name, id)?;
-				return Ok(WaitSelectorResolution::Failure(
-					ExecutionExitCode::GeneralError.into(),
-				));
-			}
-		} else if let Ok(pid) = int_utils::parse::<i32>(id, 10) {
-			if context.shell.jobs().contains_process_id(pid) {
-				selectors.push(JobSelector::ProcessId(pid));
-			} else {
-				writeln!(
-					context.stderr(),
-					"{}: pid {pid} is not a child of this shell",
-					context.command_name
-				)?;
-				return Ok(WaitSelectorResolution::Failure(ExecutionExitCode::NotFound.into()));
-			}
-		} else {
-			writeln!(context.stderr(), "{}: no such job: {}", context.command_name, id)?;
-			return Ok(WaitSelectorResolution::Failure(
-				ExecutionExitCode::GeneralError.into(),
-			));
-		}
+fn no_such_job(id: &str) -> Refusal {
+	Refusal { message: format!("{id}: no such job"), status: ExecutionExitCode::NotFound }
+}
+
+fn not_a_child(pid: i32) -> Refusal {
+	Refusal {
+		message: format!("pid {pid} is not a child of this shell"),
+		status:  ExecutionExitCode::NotFound,
 	}
-	Ok(WaitSelectorResolution::Selectors(selectors))
+}
+
+/// Resolves an operand of `wait`: a job spec names a job in the table, and a
+/// number names a pid, whose job or kept status `wait` then looks up.
+fn wait_selector(jobs: &JobManager, id: &str) -> Result<JobSelector, Refusal> {
+	if id.starts_with('%') {
+		return jobs.resolve_job_spec_selector(id).ok_or_else(|| no_such_job(id));
+	}
+	int_utils::parse::<i32>(id, 10)
+		.map(JobSelector::ProcessId)
+		.map_err(|_| Refusal {
+			message: format!("`{id}': not a pid or valid job spec"),
+			status:  ExecutionExitCode::GeneralError,
+		})
+}
+
+/// Resolves an operand of `wait -n`, which only waits for jobs in the table.
+fn next_wait_selector(jobs: &JobManager, id: &str) -> Result<JobSelector, Refusal> {
+	match int_utils::parse::<i32>(id, 10) {
+		Ok(pid) if jobs.contains_process_id(pid) => Ok(JobSelector::ProcessId(pid)),
+		Ok(pid) => Err(not_a_child(pid)),
+		Err(_) => jobs.resolve_job_spec_selector(id).ok_or_else(|| no_such_job(id)),
+	}
 }
 
 fn assign_wait_variable(

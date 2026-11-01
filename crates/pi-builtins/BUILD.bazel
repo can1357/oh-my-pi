@@ -33,6 +33,7 @@ rust_library(
         "builtin.continue",
         "builtin.declare",
         "builtin.dirs",
+        "builtin.disown",
         "builtin.dot",
         "builtin.echo",
         "builtin.enable",

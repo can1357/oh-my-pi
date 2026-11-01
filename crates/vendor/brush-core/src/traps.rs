@@ -1,6 +1,11 @@
 //! Facilities for configuring trap handlers.
 
-use std::{collections::HashMap, fmt::Display, str::FromStr};
+use std::{
+	collections::{HashMap, HashSet},
+	fmt::Display,
+	str::FromStr,
+	sync::{Arc, Mutex, PoisonError},
+};
 
 use itertools::Itertools as _;
 
@@ -177,12 +182,69 @@ pub struct TrapHandler {
 	pub source_info: crate::SourceInfo,
 }
 
+/// Signals sent to a background job that runs inside the shell process, and
+/// the signals that job has trapped.
+///
+/// `kill` reads the trapped set: a signal the job trapped is left pending,
+/// and the job runs its trap at its next interpreter check, as a process runs
+/// a trap once its foreground command returns; any other signal ends the job.
+/// The job's own trap table writes the set, so only traps set inside the job
+/// count; one inherited from the shell that started the job does not, as an
+/// asynchronous subshell resets traps.
+#[derive(Default)]
+pub struct JobSignals {
+	trapped: Mutex<HashSet<TrapSignal>>,
+	pending: Mutex<Option<TrapSignal>>,
+}
+
+impl JobSignals {
+	/// Whether the job has a trap for `signal`.
+	pub fn is_trapped(&self, signal: TrapSignal) -> bool {
+		self
+			.trapped
+			.lock()
+			.unwrap_or_else(PoisonError::into_inner)
+			.contains(&signal)
+	}
+
+	/// Leaves `signal` pending for the job's trap.
+	pub fn deliver(&self, signal: TrapSignal) {
+		*self.pending.lock().unwrap_or_else(PoisonError::into_inner) = Some(signal);
+	}
+
+	/// Takes the signal left pending for the job's trap, if any.
+	pub fn take_pending(&self) -> Option<TrapSignal> {
+		self.pending.lock().unwrap_or_else(PoisonError::into_inner).take()
+	}
+
+	fn set_trapped(&self, signal: TrapSignal, trapped: bool) {
+		let mut set = self.trapped.lock().unwrap_or_else(PoisonError::into_inner);
+		if trapped {
+			set.insert(signal);
+		} else {
+			set.remove(&signal);
+		}
+	}
+}
+
 /// Configuration for trap handlers in the shell.
-#[derive(Clone, Default)]
+#[derive(Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TrapHandlerConfig {
 	/// Registered handlers for traps; maps signal type to command.
 	handlers: HashMap<TrapSignal, TrapHandler>,
+
+	/// The signal state of the background job this shell runs, when it runs
+	/// one inside the shell process. Not cloned: a subshell of the job is not
+	/// the job.
+	#[cfg_attr(feature = "serde", serde(skip))]
+	job_signals: Option<Arc<JobSignals>>,
+}
+
+impl Clone for TrapHandlerConfig {
+	fn clone(&self) -> Self {
+		Self { handlers: self.handlers.clone(), job_signals: None }
+	}
 }
 
 impl TrapHandlerConfig {
@@ -224,6 +286,9 @@ impl TrapHandlerConfig {
 		let _ = self
 			.handlers
 			.insert(signal_type, TrapHandler { command, source_info });
+		if let Some(job_signals) = &self.job_signals {
+			job_signals.set_trapped(signal_type, true);
+		}
 	}
 
 	/// Removes handlers for a trap signal.
@@ -233,5 +298,19 @@ impl TrapHandlerConfig {
 	/// * `signal_type` - The type of signal to remove handlers for.
 	pub fn remove_handlers(&mut self, signal_type: TrapSignal) {
 		self.handlers.remove(&signal_type);
+		if let Some(job_signals) = &self.job_signals {
+			job_signals.set_trapped(signal_type, false);
+		}
+	}
+
+	/// Makes this the trap table of a background job that runs inside the
+	/// shell process: traps set from now on are reported to `job_signals`.
+	pub(crate) fn attach_job_signals(&mut self, job_signals: Arc<JobSignals>) {
+		self.job_signals = Some(job_signals);
+	}
+
+	/// The signal state of the background job this shell runs, if any.
+	pub(crate) fn job_signals(&self) -> Option<&Arc<JobSignals>> {
+		self.job_signals.as_ref()
 	}
 }

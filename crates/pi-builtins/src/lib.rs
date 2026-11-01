@@ -26,6 +26,8 @@ mod continue_;
 mod declare;
 #[cfg(feature = "builtin.dirs")]
 mod dirs;
+#[cfg(feature = "builtin.disown")]
+mod disown;
 #[cfg(feature = "builtin.dot")]
 mod dot;
 #[cfg(feature = "builtin.echo")]
