@@ -10,7 +10,7 @@
 import { Loader } from "../components/loader";
 import { Text } from "../components/text";
 import { Container, type TUI } from "../tui";
-import { getSymbolTheme, theme } from "../theme/theme";
+import { theme } from "../theme/theme";
 import type { OutputArtifactError } from "../tools/streaming-output";
 import { formatArtifactErrorNotice, formatTruncationMetaNotice, type TruncationMeta } from "../tools/output-meta";
 import { DynamicBorder } from "../chrome/dynamic-border";
@@ -46,14 +46,15 @@ export type ExecutionColorKey = "dim" | "bashMode" | "pythonMode";
 /**
  * Build the spacer + top border + content container + bottom border scaffold
  * that bash and eval execution components share. The caller appends the
- * header (command vs `>>>` prompt) and the returned loader to
- * `contentContainer` so per-mode order is preserved.
+ * header (command vs `>>>` prompt) to `contentContainer` and keeps the run's
+ * state in `bottomBorder` ({@link executionStatusLabel}); the returned loader
+ * animates that label rather than taking a row of its own.
  */
 export function buildExecutionFrame(
 	parent: Container,
 	ui: TUI,
 	colorKey: ExecutionColorKey,
-): { contentContainer: Container; loader: Loader } {
+): { contentContainer: Container; loader: Loader; bottomBorder: DynamicBorder } {
 	const borderColor = (str: string) => theme.fg(colorKey, str);
 
 	parent.addChild(new DynamicBorder(borderColor));
@@ -66,21 +67,32 @@ export function buildExecutionFrame(
 		spinner => theme.fg(colorKey, spinner),
 		text => theme.fg("muted", text),
 		`Running… (${interruptKey()} to cancel)`,
-		getSymbolTheme().spinnerFrames,
+		// The status spinner, as on a running tool card's header.
+		theme.spinnerFrames,
 	);
 
-	parent.addChild(new DynamicBorder(borderColor));
-	return { contentContainer, loader };
+	const bottomBorder = new DynamicBorder(borderColor);
+	bottomBorder.setLabel(() => loader.inlineText());
+	parent.addChild(bottomBorder);
+	return { contentContainer, loader, bottomBorder };
+}
+
+/** The bottom-border marker of a settled run: `exit N` for a failure, `cancelled` for a cancel. */
+export function executionStatusLabel(
+	status: Exclude<ExecutionStatus, "running">,
+	exitCode: number | undefined,
+): string | undefined {
+	if (status === "cancelled") return theme.fg("warning", "cancelled");
+	if (status === "error") return theme.fg("error", `exit ${exitCode}`);
+	return undefined;
 }
 
 /**
- * Build the post-run status block (hidden-line hint, exit/cancel marker,
- * truncation notice). Returns undefined when there is nothing to display so
- * callers can skip appending a stray Text child.
+ * Build the post-run status block (hidden-line hint, truncation notice).
+ * Returns undefined when there is nothing to display so callers can skip
+ * appending a stray Text child.
  */
 export function buildStatusFooter(opts: {
-	status: ExecutionStatus;
-	exitCode: number | undefined;
 	truncation: TruncationMeta | undefined;
 	artifactError?: OutputArtifactError;
 	hiddenLineCount: number;
@@ -91,11 +103,6 @@ export function buildStatusFooter(opts: {
 
 	if (opts.hiddenLineCount > 0 && !opts.suppressHiddenCount) {
 		parts.push(theme.fg("dim", `… ${opts.hiddenLineCount} more lines (${expandKeyHint()} to expand)`));
-	}
-	if (opts.status === "cancelled") {
-		parts.push(theme.fg("warning", "(cancelled)"));
-	} else if (opts.status === "error") {
-		parts.push(theme.fg("error", `(exit ${opts.exitCode})`));
 	}
 	if (opts.truncation) {
 		parts.push(theme.fg("warning", formatTruncationMetaNotice(opts.truncation)));

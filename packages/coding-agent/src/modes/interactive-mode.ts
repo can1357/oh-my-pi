@@ -186,6 +186,7 @@ import {
 	FEED_MODEL_BADGE_WIDTH,
 	formatFeedModelBadge,
 	formatMoreItems,
+	formatStatusIcon,
 	isFeedModelBadgeEnabled,
 	previewLine,
 	replaceTabs,
@@ -1185,10 +1186,7 @@ function renderSubagentToolPreview(session: ObservableSession, width: number): s
 	const elapsedWidth = visibleWidth(elapsedLabel);
 	const hook = `${theme.fg("dim", theme.tree.hook)} `;
 	// Between calls the row keeps the last call, marked with how it ended.
-	const status =
-		!currentTool && recent
-			? `${theme.styledSymbol(recent.isError ? "status.error" : "status.success", recent.isError ? "error" : "success")} `
-			: "";
+	const status = !currentTool && recent ? `${formatStatusIcon(recent.isError ? "error" : "success", theme)} ` : "";
 	const prefixWidth = visibleWidth(hook) + visibleWidth(status);
 	// Reserve the elapsed marker first, then cap the tool name; the detail gets whatever is left.
 	const shortTool = truncateToWidth(replaceTabs(tool), Math.max(0, width - prefixWidth - elapsedWidth), "");
@@ -1227,7 +1225,7 @@ export function renderSubagentHudLines(
 	// rows budgeted to the full terminal width would wrap.
 	const contentColumns = Math.max(0, columns - getPaddingX(1) * 2);
 	const layout = layoutPinnedHud(running.length, expanded);
-	const dot = theme.styledSymbol("status.done", "accent");
+	const dot = formatStatusIcon("running", theme);
 	const items = running.slice(0, layout.itemRows);
 	const showModelBadge = isFeedModelBadgeEnabled();
 	const outerIndent = " ";

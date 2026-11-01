@@ -164,7 +164,7 @@ describe("subagent HUD lines", () => {
 			];
 			cfgTaskShowResolvedModelBadge.override(Settings.instance, false);
 			const disabled = render(sessions);
-			expect(disabled).toContain(`${theme.status.done} HiddenBadge: Inspect rendering`);
+			expect(disabled).toContain(`${theme.status.running} HiddenBadge: Inspect rendering`);
 			expect(disabled).not.toContain("openai/gpt-5");
 			expect(disabled).not.toContain(theme.icon.advisor);
 
@@ -244,7 +244,7 @@ describe("subagent HUD lines", () => {
 					progress: makeProgress({ id: "LegacyWorker", resolvedModel: "custom/model:high" }),
 				}),
 			]);
-			expect(out).toContain(`${theme.status.done} custom/model:high LegacyWorker`);
+			expect(out).toContain(`${theme.status.running} custom/model:high LegacyWorker`);
 			expect(out).not.toContain(theme.thinking.high.split(" ")[0]);
 		});
 	});

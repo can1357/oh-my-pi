@@ -25,7 +25,13 @@ import { outputBlockContentWidth, renderStatusLine } from "../render";
 import { framedToolCard } from "../render/tool-card";
 import { wrapPrefixedLine } from "../render/hanging-wrap";
 
-import { formatErrorMessage, formatMeta, formatTitle, sanitizeCarriageReturns } from "../render/render-utils";
+import {
+	formatErrorMessage,
+	formatMeta,
+	formatStatusIcon,
+	formatTitle,
+	sanitizeCarriageReturns,
+} from "../render/render-utils";
 
 /** Result for a single question */
 export interface QuestionResult {
@@ -176,10 +182,11 @@ function normalizeRenderQuestions(raw: unknown): NonNullable<AskRenderArgs["ques
 /** Render a custom free-text answer as a status line plus indented continuation rows. */
 function renderCustomInputLines(uiTheme: Theme, customInput: string): string[] {
 	const lines = customInput.split("\n");
-	const out: string[] = [
-		` ${uiTheme.styledSymbol("status.success", "success")} ${uiTheme.fg("toolOutput", lines[0] ?? "")}`,
-	];
-	for (let i = 1; i < lines.length; i++) out.push(`   ${uiTheme.fg("toolOutput", lines[i])}`);
+	const icon = formatStatusIcon("success", uiTheme);
+	// Continuation rows line up under the answer text, past the glyph's own width.
+	const indent = " ".repeat(visibleWidth(icon) + 2);
+	const out: string[] = [` ${icon} ${uiTheme.fg("toolOutput", lines[0] ?? "")}`];
+	for (let i = 1; i < lines.length; i++) out.push(`${indent}${uiTheme.fg("toolOutput", lines[i])}`);
 	return out;
 }
 
@@ -282,7 +289,7 @@ function renderAnswerOptionLines(
 
 	// Nothing was chosen (and no custom answer) → a lone cancelled marker.
 	if (selected.size === 0 && customInput === undefined && note === undefined) {
-		return [` ${uiTheme.styledSymbol("status.warning", "warning")} ${uiTheme.fg("warning", "Cancelled")}`];
+		return [` ${formatStatusIcon("warning", uiTheme)} ${uiTheme.fg("warning", "Cancelled")}`];
 	}
 
 	const out: string[] = [];

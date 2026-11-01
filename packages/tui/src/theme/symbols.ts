@@ -19,7 +19,6 @@ export type SymbolKey =
 	| "status.running"
 	| "status.shadowed"
 	| "status.aborted"
-	| "status.done"
 	// Navigation
 	| "nav.cursor"
 	| "nav.selected"
@@ -406,7 +405,6 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"status.running": "⟳",
 	"status.shadowed": "○",
 	"status.aborted": "⏹",
-	"status.done": "•",
 	// Navigation
 	"nav.cursor": "❯",
 	"nav.selected": "➤",
@@ -724,8 +722,6 @@ const NERD_SYMBOLS: SymbolMap = {
 	"status.shadowed": "\uf10c",
 	// pick:  | alt:  
 	"status.aborted": "\uf04d",
-	// pick: • | alt: ● ·
-	"status.done": "•",
 	// Navigation
 	// pick:  | alt:  
 	"nav.cursor": "\uf054",
@@ -1190,17 +1186,16 @@ const NERD_SYMBOLS: SymbolMap = {
 
 const ASCII_SYMBOLS: SymbolMap = {
 	// Status Indicators
-	"status.success": "[ok]",
-	"status.error": "[!!]",
+	"status.success": "[+]",
+	"status.error": "[-]",
 	"status.warning": "[!]",
 	"status.info": "[i]",
-	"status.pending": "[*]",
+	"status.pending": "[ ]",
 	"status.disabled": "[ ]",
 	"status.enabled": "[x]",
 	"status.running": "[~]",
 	"status.shadowed": "[/]",
-	"status.aborted": "[-]",
-	"status.done": "*",
+	"status.aborted": "[#]",
 	// Navigation
 	"nav.cursor": ">",
 	"nav.selected": "->",
@@ -1507,7 +1502,8 @@ export const SPINNER_FRAMES: Record<SymbolPreset, Record<SpinnerType, string[]>>
 		activity: ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
 	},
 	ascii: {
-		status: ["|", "/", "-", "\\"],
+		// Bracketed like the `status.*` glyphs, so a settling call keeps its column width.
+		status: ["[|]", "[/]", "[-]", "[\\]"],
 		activity: ["-", "\\", "|", "/"],
 	},
 };

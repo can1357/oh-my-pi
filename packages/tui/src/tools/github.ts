@@ -18,7 +18,6 @@ import {
 	formatStatusIcon,
 	PREVIEW_LIMITS,
 	replaceTabs,
-	type ToolUIColor,
 	type ToolUIStatus,
 	TRUNCATE_LENGTHS,
 	sanitizeDisplayWarning,
@@ -37,7 +36,6 @@ type GithubToolRenderArgs = {
 const SUCCESS_CONCLUSIONS = new Set(["success", "neutral", "skipped"]);
 const FAILURE_CONCLUSIONS = new Set(["failure", "timed_out", "cancelled", "action_required", "startup_failure"]);
 const RUNNING_STATUSES = new Set(["in_progress"]);
-const PENDING_STATUSES = new Set(["queued", "requested", "waiting", "pending"]);
 const FALLBACK_WIDTH = 80;
 
 const OP_TITLES: Record<string, string> = {
@@ -165,52 +163,16 @@ function formatRunLine(run: GhRunWatchRunDetails, theme: Theme): string {
 	return [title, ...meta].join("  ");
 }
 
-function getJobStateVisual(
-	job: GhRunWatchJobDetails,
-	theme: Theme,
-): { iconRaw: string; iconColor: ToolUIColor; textColor: ThemeColor } {
-	if (job.conclusion && SUCCESS_CONCLUSIONS.has(job.conclusion)) {
-		return {
-			iconRaw: theme.status.success,
-			iconColor: "accent",
-			textColor: "success",
-		};
-	}
-
-	if (job.conclusion && FAILURE_CONCLUSIONS.has(job.conclusion)) {
-		return {
-			iconRaw: theme.status.error,
-			iconColor: "error",
-			textColor: "error",
-		};
-	}
-
-	if (job.status && RUNNING_STATUSES.has(job.status)) {
-		return {
-			iconRaw: theme.status.enabled,
-			iconColor: "warning",
-			textColor: "warning",
-		};
-	}
-
-	if (job.status && PENDING_STATUSES.has(job.status)) {
-		return {
-			iconRaw: theme.status.shadowed,
-			iconColor: "muted",
-			textColor: "muted",
-		};
-	}
-
-	return {
-		iconRaw: theme.status.shadowed,
-		iconColor: "muted",
-		textColor: "muted",
-	};
+function getJobStateVisual(job: GhRunWatchJobDetails): { status: ToolUIStatus; textColor: ThemeColor } {
+	if (job.conclusion && SUCCESS_CONCLUSIONS.has(job.conclusion)) return { status: "success", textColor: "success" };
+	if (job.conclusion && FAILURE_CONCLUSIONS.has(job.conclusion)) return { status: "error", textColor: "error" };
+	if (job.status && RUNNING_STATUSES.has(job.status)) return { status: "running", textColor: "warning" };
+	return { status: "pending", textColor: "muted" };
 }
 
 function renderJobLine(job: GhRunWatchJobDetails, width: number, theme: Theme): string {
-	const visual = getJobStateVisual(job, theme);
-	const prefix = theme.fg(visual.iconColor, `${visual.iconRaw} `);
+	const visual = getJobStateVisual(job);
+	const prefix = `${formatStatusIcon(visual.status, theme)} `;
 	const durationLabel = job.durationSeconds !== undefined ? `${job.durationSeconds}s` : undefined;
 	const styledDuration = durationLabel ? theme.fg(visual.textColor, durationLabel) : undefined;
 	const reservedWidth = visibleWidth(prefix) + (styledDuration ? 1 + visibleWidth(styledDuration) : 0);
@@ -255,9 +217,8 @@ function renderFailedLogs(
 	const lines: string[] = [];
 	for (const entry of failedLogs) {
 		const context = entry.workflowName ? `${entry.workflowName}  #${entry.runId}` : `run #${entry.runId}`;
-		lines.push(
-			theme.fg("error", `${theme.status.error} ${replaceTabs(entry.jobName)}  ${theme.fg("muted", context)}`),
-		);
+		const jobName = theme.fg("error", replaceTabs(entry.jobName));
+		lines.push(`${formatStatusIcon("error", theme)} ${jobName}  ${theme.fg("muted", context)}`);
 
 		if (!entry.available || !entry.tail) {
 			lines.push(theme.fg("dim", truncateVisualWidth(`  ${formatUnavailableLog(entry)}`, Math.max(8, width))));
