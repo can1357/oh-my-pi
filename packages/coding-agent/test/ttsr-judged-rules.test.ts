@@ -7,15 +7,10 @@ import { JUDGED_CONTENT_MAX_TOKENS, ruleRecordKey, TtsrManager } from "@oh-my-pi
 import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TtsrCoordinator, type TtsrCoordinatorHost } from "@oh-my-pi/pi-coding-agent/session/ttsr-coordinator";
 import { countTokens, Encoding } from "@oh-my-pi/pi-natives";
+import { testRule } from "./helpers/rule-scope-fixtures";
 
 function judgedRule(name: string, fields: Partial<Rule>): Rule {
-	return {
-		name,
-		path: `/rules/${name}.md`,
-		content: `${name} guidance`,
-		_source: { provider: "test", providerName: "test", path: `/rules/${name}.md`, level: "project" },
-		...fields,
-	};
+	return testRule(name, { content: `${name} guidance`, ...fields });
 }
 
 /** Judge answering each question with the yes-probability its instructions map to (default 0). */

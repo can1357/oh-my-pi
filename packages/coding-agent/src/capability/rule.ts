@@ -283,16 +283,28 @@ export function ruleAppliesToModel(
 	);
 }
 
+/** Whether `rule` restricts the models it applies to: any non-empty `models`, `providers`, `class`, or `family`. */
+export function isModelScoped(rule: Pick<Rule, "models" | "providers" | "class" | "family">): boolean {
+	return [rule.models, rule.providers, rule.class, rule.family].some(field => field !== undefined && field.length > 0);
+}
+
 /**
  * Canonical identity of a rule's model scope: empty for an unscoped rule,
  * otherwise a stable encoding of every scope field. Same-named rules from one
  * source directory with different scopes are distinct variants.
  */
 export function ruleModelScopeKey(rule: Pick<Rule, "models" | "providers" | "class" | "family">): string {
+	if (!isModelScoped(rule)) return "";
 	const fields = [rule.models, rule.providers, rule.class, rule.family];
-	if (fields.every(field => !field || field.length === 0)) return "";
 	return JSON.stringify(fields.map(field => (field ? [...field].sort() : [])));
 }
+
+/** In-memory identity of a rule: its name when unscoped, otherwise its name and model scope. */
+export function ruleIdentityKey(rule: Pick<Rule, "name" | "models" | "providers" | "class" | "family">): string {
+	const scopeKey = ruleModelScopeKey(rule);
+	return scopeKey ? `${rule.name}\0${scopeKey}` : rule.name;
+}
+
 /**
  * Heuristic for condition shorthand that looks like a file glob (for example `*.rs`).
  */
@@ -464,10 +476,7 @@ export const ruleCapability = defineCapability<Rule>({
 	id: "rules",
 	displayName: "Rules",
 	description: "Project-specific rules and constraints (Cursor MDC, Windsurf, Cline formats)",
-	key: rule => {
-		const scopeKey = ruleModelScopeKey(rule);
-		return scopeKey ? `${rule.name}\0${scopeKey}` : rule.name;
-	},
+	key: ruleIdentityKey,
 	// Same-named rules with different model scopes are variants only within one source directory;
 	// across sources the highest-precedence one shadows every other on every model.
 	equivalent: (left, right) => left.name === right.name && ruleSourceDir(left) !== ruleSourceDir(right),

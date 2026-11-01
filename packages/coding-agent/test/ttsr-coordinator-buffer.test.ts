@@ -7,24 +7,16 @@ import { ruleRecordKey, TtsrManager } from "@oh-my-pi/pi-coding-agent/export/tts
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session-events";
 import { TtsrCoordinator, type TtsrCoordinatorHost } from "@oh-my-pi/pi-coding-agent/session/ttsr-coordinator";
 import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { testRule } from "./helpers/rule-scope-fixtures";
 
 const CONDITION = "FORBIDDEN";
 
 function makeRule(scope: string): Rule {
-	const name = `stream-boundary-${scope.replaceAll(/[^a-z0-9]+/gi, "-")}`;
-	return {
-		name,
-		path: `${name}.md`,
+	return testRule(`stream-boundary-${scope.replaceAll(/[^a-z0-9]+/gi, "-")}`, {
 		content: "Test reminder",
 		condition: [CONDITION],
 		scope: [scope],
-		_source: {
-			provider: "test",
-			providerName: "test",
-			path: `${name}.md`,
-			level: "project",
-		},
-	};
+	});
 }
 
 interface CoordinatorHostBundle {
@@ -455,14 +447,11 @@ describe("TTSR variant records across a model switch before delivery", () => {
  */
 describe("TTSR AST deferral", () => {
 	function astRule(): Rule {
-		return {
-			name: "no-inline-cast",
-			path: "no-inline-cast.md",
+		return testRule("no-inline-cast", {
 			content: "Test reminder",
 			astCondition: ["($X as { $$$BODY }).$PROP"],
 			scope: ["tool:edit(*.ts)"],
-			_source: { provider: "test", providerName: "test", path: "no-inline-cast.md", level: "project" },
-		};
+		});
 	}
 
 	function messageWithEditCall(id: string, args: Record<string, unknown>): AgentMessage {

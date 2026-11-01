@@ -25,20 +25,13 @@ This document covers the current Time Traveling Stream Rules (TTSR) runtime path
 At session creation, `createAgentSession()` loads discovered rules, constructs a `TtsrManager`, and buckets rules through `bucketRules(...)`:
 
 ```ts
-const ttsrSettings = cfgTtsr.get(settings);
 // Live source: enable/repeat/interrupt/context changes apply on the next check.
 const ttsrManager = new TtsrManager(() => cfgTtsr.get(settings));
-const rulesResult =
-	options.rules !== undefined
-		? { items: options.rules, warnings: undefined }
-		: await loadCapability<Rule>(ruleCapability.id, { cwd, agentDir });
-const { rulebookRules, alwaysApplyRules } = bucketRules(rulesResult.items, ttsrManager, {
-	builtinRules: ttsrSettings.builtinRules,
-	disabledRules: ttsrSettings.disabledRules,
-	agentName: resolvedAgentName,
-	model,
-});
+const allRules = await loadRuleSnapshot(cwd);
+const { rulebookRules, alwaysApplyRules } = bucketRules(allRules, ttsrManager, bucketOptions(model));
 ```
+
+`loadRuleSnapshot(cwd)` returns an explicit `options.rules` set, otherwise `loadCapability("rules")` for `cwd`; prompt rebuilds and live adds load through it too. `bucketOptions(model)` reads `ttsr.builtinRules` and `ttsr.disabledRules` live and adds the session's agent name and the given model.
 
 `bucketRules(...)` drops names listed in `ttsr.disabledRules`, drops embedded builtin-defaults rules when `ttsr.builtinRules === false`, drops rules whose `agents` globs do not match this session's agent, drops rules whose model scope (`models`, `providers`, `class`, `family`) does not admit the session model, registers accepted TTSR rules, and then routes the remaining rules to always-apply/rulebook buckets. This first pass is provisional: the first prompt build re-buckets for the final startup model (after session restore and fallback resolution).
 
@@ -46,7 +39,7 @@ Session-scoped prompt rebuilds re-discover and re-bucket rules (explicit rule se
 
 ### Pre-registration dedupe behavior
 
-`loadCapability("rules")` deduplicates by `rule.name` plus model scope with first-wins semantics (higher provider priority first). Shadowed duplicates are removed before TTSR registration. Same-named variants with different model scopes survive discovery; `bucketRules(...)` keeps the first one that admits the session model.
+`loadCapability("rules")` deduplicates by `rule.name` with first-wins semantics (higher provider priority first): the highest-precedence source directory that defines a name shadows every same-named rule from other directories, on every model. Only same-named variants with different model scopes from that one directory survive discovery (see [rulebook-matching-pipeline.md](rulebook-matching-pipeline.md) §1 and §4); `bucketRules(...)` keeps the first one that admits the session model. Shadowed duplicates are removed before TTSR registration.
 
 ### `TtsrManager.addRule()` behavior
 
@@ -252,7 +245,7 @@ Current runtime wiring:
 - non-interrupting tool-source matches are marked in memory when bucketed, then persisted from `afterToolCall` (or the bridged-call postflight) only when the matched tool's result is produced
 - `createAgentSession()` restores `existingSession.injectedTtsrRules` into the manager
 
-`ttsr_injection.injectedRules` stores record keys: the bare name for an unscoped rule, `<name>::scope:<hash>` for a model-scoped variant. The `ttsr-injection` custom message's `details.rules` keeps plain names. Older sessions that stored bare names keep working: a bare name restores as a record that suppresses every variant of that name.
+`ttsr_injection.injectedRules` stores record keys (§5), so older sessions that stored bare names keep working. The `ttsr-injection` custom message's `details.rules` keeps plain names.
 
 Injected-rule suppression is therefore restored from the current branch path. Persistence stores record keys, not the original turn age: `restoreInjected()` records each restored rule at message count zero. In `repeatMode: "after-gap"`, a resumed rule becomes eligible after `repeatGap` newly completed turns, regardless of how many turns elapsed before reload.
 

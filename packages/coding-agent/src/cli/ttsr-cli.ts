@@ -32,7 +32,7 @@ import {
 	type Rule,
 	ruleCapability,
 } from "../capability/rule";
-import { bucketRules } from "../capability/rule-buckets";
+import { bucketRules, ttsrRuleFilters } from "../capability/rule-buckets";
 import { ModelRegistry } from "../config/model-registry";
 import { formatModelString, getModelMatchPreferences, resolveCliModel } from "../config/model-resolver";
 import { Settings } from "../config/settings";
@@ -314,12 +314,7 @@ async function loadProjectTtsrRules(
 	const ttsrSettings = cfgTtsr.get(settingsInstance);
 	const manager = await createTtsrManager(ttsrSettings);
 	const result = await loadCapability<Rule>(ruleCapability.id, { cwd });
-	bucketRules(result.items, manager, {
-		builtinRules: ttsrSettings.builtinRules,
-		disabledRules: ttsrSettings.disabledRules,
-		agentName,
-		model,
-	});
+	bucketRules(result.items, manager, { ...ttsrRuleFilters(ttsrSettings), agentName, model });
 	return { rules: manager.getRules(), manager };
 }
 
@@ -356,10 +351,7 @@ async function loadProjectScanRules(cwd: string): Promise<Rule[]> {
 		return [];
 	}
 	const result = await loadCapability<Rule>(ruleCapability.id, { cwd });
-	return filterTtsrRulesForScan(result.items, {
-		builtinRules: ttsrSettings.builtinRules,
-		disabledRules: ttsrSettings.disabledRules,
-	});
+	return filterTtsrRulesForScan(result.items, ttsrRuleFilters(ttsrSettings));
 }
 
 async function readIsolatedRule(rulePath: string): Promise<Rule> {

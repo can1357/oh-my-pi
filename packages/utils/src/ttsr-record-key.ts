@@ -1,8 +1,4 @@
-/**
- * String format of TTSR injection-record keys, persisted in `ttsr_injection`
- * session entries: a bare rule name, or `<name>::scope:<lowercase hex hash>`
- * for a model-scoped variant of that rule.
- */
+/** Codec for TTSR injection-record keys; the format is specified in docs/ttsr-injection-lifecycle.md §5. */
 const SCOPED_RECORD_KEY = /^(.*)::scope:([0-9a-f]+)$/;
 
 /** Record key for rule `name`; a non-empty `scopeHash` (lowercase hex) marks a model-scoped variant. */

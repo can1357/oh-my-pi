@@ -55,14 +55,15 @@ import { AutoLearnController, buildAutoLearnInstructions } from "./autolearn/con
 import { createAutoresearchExtension } from "./autoresearch";
 import { loadCapability, reset as resetCapabilities } from "./capability";
 import {
+	isModelScoped,
 	MAIN_AGENT_RULE_NAME,
 	type Rule,
 	ruleCapability,
-	ruleModelScopeKey,
+	ruleIdentityKey,
 	setActiveRules,
 	SUB_AGENT_RULE_NAME,
 } from "./capability/rule";
-import { bucketRules } from "./capability/rule-buckets";
+import { type BucketRulesOptions, bucketRules, composeActiveRules, ttsrRuleFilters } from "./capability/rule-buckets";
 import type { EffectiveExtensionRoots } from "./capability/types";
 import { type OAuthAccountPools, SessionAccountPoolScope } from "./config/account-pools";
 import { shouldEnableAppendOnlyContext } from "./config/append-only-context-mode";
@@ -2386,24 +2387,29 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// Visuals (Mermaid, SVG figures, table charts) are drawn only in the top-level TUI transcript.
 	const tuiTranscript = options.tuiTranscript === true && !isSubagentSession;
 	const resolvedAgentName = (options.agentName ?? agentKind).trim().toLowerCase();
+	/**
+	 * The session's unfiltered rule snapshot for `ruleCwd`: the explicit
+	 * `options.rules`, else the rules on disk, deduplicated by precedence.
+	 */
+	const loadRuleSnapshot = async (ruleCwd: string): Promise<Rule[]> =>
+		options.rules ??
+		(await logger.time("discoverRules", () => loadCapability<Rule>(ruleCapability.id, { cwd: ruleCwd, agentDir })))
+			.items;
+	/** Bucketing filters for this session's rules from the live `ttsr.*` settings, scoped to `scopeModel`. */
+	const bucketOptions = (scopeModel: Model | undefined): BucketRulesOptions => ({
+		...ttsrRuleFilters(cfgTtsr.get(settings)),
+		agentName: resolvedAgentName,
+		model: scopeModel,
+	});
 
 	// Discover rules and bucket them in one pass to avoid repeated scans over large rule sets.
 	const discovered = await logger.time("discoverTtsrRules", async () => {
 		const { TtsrManager } = await import("./export/ttsr");
-		const ttsrSettings = cfgTtsr.get(settings);
 		// Live source: enable/repeat/interrupt/context changes apply on the next check.
 		const ttsrManager = new TtsrManager(() => cfgTtsr.get(settings));
-		const rulesResult =
-			options.rules !== undefined
-				? { items: options.rules, warnings: undefined }
-				: await loadCapability<Rule>(ruleCapability.id, { cwd, agentDir });
+		const allRules = await loadRuleSnapshot(cwd);
 		// Provisional: the first prompt build re-buckets for the final startup model.
-		const { rulebookRules, alwaysApplyRules } = bucketRules(rulesResult.items, ttsrManager, {
-			builtinRules: ttsrSettings.builtinRules,
-			disabledRules: ttsrSettings.disabledRules,
-			agentName: resolvedAgentName,
-			model,
-		});
+		const { rulebookRules, alwaysApplyRules } = bucketRules(allRules, ttsrManager, bucketOptions(model));
 		if (existingSession.injectedTtsrRules.length > 0) {
 			ttsrManager.restoreInjected(existingSession.injectedTtsrRules);
 		}
@@ -2411,7 +2417,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			ttsrManager,
 			rulebookRules,
 			alwaysApplyRules,
-			allRules: rulesResult.items,
+			allRules,
 			createScratchTtsrManager: () => new TtsrManager(() => cfgTtsr.get(settings)),
 		};
 	});
@@ -2621,7 +2627,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			refreshSkills: () => session.refreshSkills(),
 			skillRediscoveryHost: () => session.skillRediscoveryHost(),
 			rules: allRules,
-			activeRules: [...rulebookRules, ...alwaysApplyRules, ...ttsrManager.getRules()],
+			activeRules: composeActiveRules({ rulebookRules, alwaysApplyRules }, ttsrManager),
 			eventBus,
 			subagentEventBus,
 			outputSchema: options.outputSchema,
@@ -2780,7 +2786,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// registered with the manager and bucketed out before rulebook/always,
 			// so without this a TTSR-only rule (e.g. a triggered builtin) is not
 			// addressable and `rule://` reports "Available: none".
-			setActiveRules([...rulebookRules, ...alwaysApplyRules, ...ttsrManager.getRules()]);
+			setActiveRules(composeActiveRules({ rulebookRules, alwaysApplyRules }, ttsrManager));
 			if (asyncJobManager && !AsyncJobManager.instance()) AsyncJobManager.setInstance(asyncJobManager);
 		}
 		const localProtocolOptions = options.localProtocolOptions ?? {
@@ -4191,31 +4197,21 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// receives the prompt, and republishes the TTSR registrations and `rule://`
 		// snapshot. `toolSession.rules` stays unfiltered so subagents re-scope it
 		// under their own model.
+		const ruleSnapshot = (): Rule[] => toolSession.rules ?? allRules;
 		const rescopeRules = (scopeModel: Model | undefined, { keepTtsrBuffers = false } = {}): void => {
-			const ttsrSettings = cfgTtsr.get(settings);
-			const buckets = bucketRules(toolSession.rules ?? allRules, ttsrManager, {
-				builtinRules: ttsrSettings.builtinRules,
-				disabledRules: ttsrSettings.disabledRules,
-				agentName: resolvedAgentName,
-				model: scopeModel,
+			const buckets = bucketRules(ruleSnapshot(), ttsrManager, {
+				...bucketOptions(scopeModel),
 				replaceTtsrRules: true,
 				keepTtsrBuffers,
 			});
 			rulebookRules = buckets.rulebookRules;
 			alwaysApplyRules = buckets.alwaysApplyRules;
-			const nextActiveRules = [...rulebookRules, ...alwaysApplyRules, ...ttsrManager.getRules()];
+			const nextActiveRules = composeActiveRules(buckets, ttsrManager);
 			toolSession.activeRules = nextActiveRules;
 			if (!options.parentTaskPrefix) {
 				setActiveRules(nextActiveRules);
 			}
 		};
-		/** Rules on disk for `cwd`, deduplicated by precedence; `undefined` for a session handed an explicit rule set. */
-		const rediscoverRules = (cwd: string): Promise<Rule[]> | undefined =>
-			options.rules
-				? undefined
-				: logger
-						.time("rediscoverRules", () => loadCapability<Rule>(ruleCapability.id, { cwd, agentDir }))
-						.then(result => result.items);
 		/**
 		 * Adds a rule saved mid-session (`/omfg`) to the unfiltered snapshot and re-scopes.
 		 * A discovering session re-reads its rules, so the saved file replaces its older
@@ -4223,30 +4219,19 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		 * from the same file or appends the rule.
 		 */
 		const addRule = async (rule: Rule): Promise<void> => {
-			const rediscovered = rediscoverRules(sessionManager.getCwd());
-			toolSession.rules = rediscovered
-				? await rediscovered
-				: [
-						...(toolSession.rules ?? allRules).filter(existing => existing._source.path !== rule._source.path),
-						rule,
-					];
+			toolSession.rules = options.rules
+				? [...ruleSnapshot().filter(existing => existing._source.path !== rule._source.path), rule]
+				: await loadRuleSnapshot(sessionManager.getCwd());
 			// A live add can land mid-stream; the model is unchanged, so in-flight matching state stays valid.
 			rescopeRules(agent?.state.model ?? model, { keepTtsrBuffers: true });
 		};
 		/** Identity of the rules the prompt renders (always-apply and rulebook), including each variant's model scope. */
-		const promptRulesKey = (): string =>
-			[...alwaysApplyRules, ...rulebookRules].map(rule => `${rule.name}\0${ruleModelScopeKey(rule)}`).join("\n");
+		const promptRulesKey = (): string => [...alwaysApplyRules, ...rulebookRules].map(ruleIdentityKey).join("\n");
 		/** Always-apply bodies of model-scoped rules that match an advisor's model; unscoped rules never reach advisors. */
 		const advisorModelRulesPrompt = (advisorModel: Model): string | undefined => {
-			const ttsrSettings = cfgTtsr.get(settings);
 			// A scratch manager mirrors the session's TTSR routing without touching its registrations.
-			const buckets = bucketRules(toolSession.rules ?? allRules, createScratchTtsrManager(), {
-				builtinRules: ttsrSettings.builtinRules,
-				disabledRules: ttsrSettings.disabledRules,
-				agentName: resolvedAgentName,
-				model: advisorModel,
-			});
-			return formatAdvisorModelRulesPrompt(buckets.alwaysApplyRules.filter(rule => ruleModelScopeKey(rule) !== ""));
+			const buckets = bucketRules(ruleSnapshot(), createScratchTtsrManager(), bucketOptions(advisorModel));
+			return formatAdvisorModelRulesPrompt(buckets.alwaysApplyRules.filter(isModelScoped));
 		};
 		const rebuildSystemPrompt = async (
 			toolNames: string[],
@@ -4274,7 +4259,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 								...cfgDisabledExtensions.get(settings),
 							])
 						: undefined,
-					rediscoverRules(promptCwd) ?? options.rules,
+					loadRuleSnapshot(promptCwd),
 				]);
 				activeRepoContext = repoContext;
 				if (refreshedContextFiles !== undefined) {

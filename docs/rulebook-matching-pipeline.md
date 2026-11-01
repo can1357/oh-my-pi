@@ -357,7 +357,7 @@ This is advisory/contextual: prompt text asks the model to read applicable rules
 `RuleProtocolHandler` prefers the caller's session-local rules supplied in the resolution context, falling back to the process-global active-rule snapshot. `sdk.ts` installs both snapshots at creation and refreshes them on every prompt build and every model change:
 
 ```ts
-setActiveRules([...rulebookRules, ...alwaysApplyRules, ...ttsrManager.getRules()]);
+setActiveRules(composeActiveRules({ rulebookRules, alwaysApplyRules }, ttsrManager));
 ```
 
 Implications:

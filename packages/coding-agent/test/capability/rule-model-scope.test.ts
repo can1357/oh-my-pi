@@ -9,13 +9,14 @@ import {
 	ruleAppliesToModel,
 	ruleCapability,
 } from "@oh-my-pi/pi-coding-agent/capability/rule";
-import { bucketRules } from "@oh-my-pi/pi-coding-agent/capability/rule-buckets";
+import { bucketRules, composeActiveRules } from "@oh-my-pi/pi-coding-agent/capability/rule-buckets";
 // Importing discovery registers all providers as a side effect.
 import { loadCapability } from "@oh-my-pi/pi-coding-agent/discovery";
 import { BUILTIN_RULE_SOURCES } from "@oh-my-pi/pi-coding-agent/discovery/builtin-rules/index";
 import { buildRuleFromMarkdown, createSourceMeta } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+import { OPUS, ROUTED_SONNET, SONNET, UNCLASSIFIED } from "../helpers/rule-scope-fixtures";
 
 describe("model scope frontmatter", () => {
 	it("accepts a string, a comma-separated string, and a YAML sequence, lowercased", () => {
@@ -33,11 +34,6 @@ describe("model scope frontmatter", () => {
 });
 
 describe("ruleAppliesToModel on a routed model", () => {
-	const routed: RuleScopeModel = {
-		provider: "openrouter",
-		id: "anthropic/claude-sonnet-4.5",
-		identity: { class: "anthropic", family: "sonnet" },
-	};
 	const cases: Array<[string, Pick<Rule, "models" | "providers" | "class" | "family">, boolean]> = [
 		["`*` does not cross the routed id's slash", { models: ["claude-*"] }, false],
 		["`**/` spans the provider and upstream prefixes", { models: ["**/claude-*"] }, true],
@@ -46,21 +42,16 @@ describe("ruleAppliesToModel on a routed model", () => {
 	];
 	for (const [label, scope, expected] of cases) {
 		it(label, () => {
-			expect(ruleAppliesToModel(scope, routed)).toBe(expected);
+			expect(ruleAppliesToModel(scope, ROUTED_SONNET)).toBe(expected);
 		});
 	}
 });
 
 describe("malformed model scope globs", () => {
 	it("treat an unclosed bracket or brace as non-matching without throwing", () => {
-		const opus: RuleScopeModel = {
-			provider: "anthropic",
-			id: "claude-opus-5",
-			identity: { class: "anthropic", family: "opus" },
-		};
 		for (const pattern of ["claude-[", "claude-{opus", "[", "{"]) {
 			for (const field of ["models", "providers", "class", "family"] as const) {
-				expect(ruleAppliesToModel({ [field]: [pattern] }, opus)).toBe(false);
+				expect(ruleAppliesToModel({ [field]: [pattern] }, OPUS)).toBe(false);
 			}
 		}
 	});
@@ -102,39 +93,28 @@ describe("same-named rule discovery", () => {
 		return (await loadRules()).map(rule => rule.content.trim());
 	}
 
-	const opus: RuleScopeModel = {
-		provider: "anthropic",
-		id: "claude-opus-5",
-		identity: { class: "anthropic", family: "opus" },
-	};
-	const sonnet: RuleScopeModel = {
-		provider: "anthropic",
-		id: "claude-sonnet-5",
-		identity: { class: "anthropic", family: "sonnet" },
-	};
-	const unclassified: RuleScopeModel = { provider: "local", id: "my-model", identity: { class: "unknown" } };
-
 	/** Bodies of the rules a session on `model` would apply, across every bucket. */
 	function bodiesOn(rules: Rule[], model: RuleScopeModel): string[] {
 		const ttsrManager = new TtsrManager();
-		const { alwaysApplyRules, rulebookRules } = bucketRules(rules, ttsrManager, { model });
-		return [...alwaysApplyRules, ...rulebookRules, ...ttsrManager.getRules()].map(rule => rule.content.trim());
+		return composeActiveRules(bucketRules(rules, ttsrManager, { model }), ttsrManager).map(rule =>
+			rule.content.trim(),
+		);
 	}
 
 	it("lets a scoped project rule shadow a same-named user rule on every model", async () => {
 		writeRule(agentDir, "", "user");
 		writeRule(path.join(project, ".omp"), "family: opus", "project opus");
 		const rules = await loadRules();
-		expect(bodiesOn(rules, opus)).toEqual(["project opus"]);
-		expect(bodiesOn(rules, sonnet)).toEqual([]);
+		expect(bodiesOn(rules, OPUS)).toEqual(["project opus"]);
+		expect(bodiesOn(rules, SONNET)).toEqual([]);
 	});
 
 	it("lets a scoped project rule shadow a same-named builtin rule on every model", async () => {
 		const builtinName = BUILTIN_RULE_SOURCES[0].name;
 		writeRule(path.join(project, ".omp"), "family: opus", "project opus", `${builtinName}.md`);
 		const rules = await loadRules(builtinName);
-		expect(bodiesOn(rules, opus)).toEqual(["project opus"]);
-		expect(bodiesOn(rules, sonnet)).toEqual([]);
+		expect(bodiesOn(rules, OPUS)).toEqual(["project opus"]);
+		expect(bodiesOn(rules, SONNET)).toEqual([]);
 	});
 
 	it("keeps same-directory variants and applies each on its own model", async () => {
@@ -142,9 +122,9 @@ describe("same-named rule discovery", () => {
 		writeRule(path.join(project, ".omp"), "family: opus", "project opus", "style.md");
 		writeRule(path.join(project, ".omp"), "family: sonnet", "project sonnet", "style.mdc");
 		const rules = await loadRules();
-		expect(bodiesOn(rules, opus)).toEqual(["project opus"]);
-		expect(bodiesOn(rules, sonnet)).toEqual(["project sonnet"]);
-		expect(bodiesOn(rules, unclassified)).toEqual([]);
+		expect(bodiesOn(rules, OPUS)).toEqual(["project opus"]);
+		expect(bodiesOn(rules, SONNET)).toEqual(["project sonnet"]);
+		expect(bodiesOn(rules, UNCLASSIFIED)).toEqual([]);
 	});
 
 	it("keeps the unscoped precedence winner when the scopes are identical", async () => {

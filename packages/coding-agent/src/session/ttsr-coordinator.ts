@@ -76,6 +76,21 @@ export interface TtsrCoordinatorHost {
 	sessionGeneration(): number;
 }
 
+/**
+ * Rule names and delivery id of a `ttsr-injection` message's `details`;
+ * `undefined` when `details.rules` is not an array.
+ */
+function parseDeliveryDetails(details: unknown): { ruleNames: string[]; deliveryId: number | undefined } | undefined {
+	if (!details || typeof details !== "object" || Array.isArray(details)) return undefined;
+	const rules = "rules" in details ? details.rules : undefined;
+	if (!Array.isArray(rules)) return undefined;
+	const deliveryId = "deliveryId" in details ? details.deliveryId : undefined;
+	return {
+		ruleNames: rules.filter((ruleName): ruleName is string => typeof ruleName === "string"),
+		deliveryId: typeof deliveryId === "number" ? deliveryId : undefined,
+	};
+}
+
 /** Coordinates TTSR stream matching, interruption, injection, and resume gates. */
 export class TtsrCoordinator {
 	readonly #host: TtsrCoordinatorHost;
@@ -275,27 +290,22 @@ export class TtsrCoordinator {
 
 	/** Marks names persisted with a delivered TTSR injection as injected. */
 	markInjectedFromDetails(details: unknown): void {
-		if (!details || typeof details !== "object" || Array.isArray(details)) return;
-		const rules = "rules" in details ? details.rules : undefined;
-		if (!Array.isArray(rules)) return;
-		const deliveryId = "deliveryId" in details ? details.deliveryId : undefined;
-		const delivered = typeof deliveryId === "number" ? this.#deferredDeliveries.get(deliveryId) : undefined;
+		const delivery = parseDeliveryDetails(details);
+		if (!delivery) return;
+		const delivered =
+			delivery.deliveryId === undefined ? undefined : this.#deferredDeliveries.get(delivery.deliveryId);
 		if (delivered) {
 			this.#markInjected(delivered);
 		} else {
-			this.#markInjectedByNames(rules.filter((ruleName): ruleName is string => typeof ruleName === "string"));
+			this.#markInjectedByNames(delivery.ruleNames);
 		}
-		this.releaseDeferredReservationFromDetails(details);
+		if (delivery.deliveryId !== undefined) this.#releaseDeferredReservation(delivery.deliveryId, delivery.ruleNames);
 	}
 
 	/** Releases a queued delivery that was discarded before persistence. */
 	releaseDeferredReservationFromDetails(details: unknown): void {
-		if (!details || typeof details !== "object" || Array.isArray(details)) return;
-		const rules = "rules" in details ? details.rules : undefined;
-		const deliveryId = "deliveryId" in details ? details.deliveryId : undefined;
-		if (!Array.isArray(rules) || typeof deliveryId !== "number") return;
-		const ruleNames = rules.filter((ruleName): ruleName is string => typeof ruleName === "string");
-		this.#releaseDeferredReservation(deliveryId, ruleNames);
+		const delivery = parseDeliveryDetails(details);
+		if (delivery?.deliveryId !== undefined) this.#releaseDeferredReservation(delivery.deliveryId, delivery.ruleNames);
 	}
 
 	/** Delivers per-tool reminders through the trusted passive-context channel. */

@@ -16,21 +16,12 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
+import { testRule } from "./helpers/rule-scope-fixtures";
 
 const OPUS_MARKER = "OPUS_ONLY_RULE_BODY_7f3a";
 const SONNET_MARKER = "SONNET_ONLY_RULE_BODY_2c9e";
 const ANTHROPIC_MARKER = "ANTHROPIC_RULE_BODY_51d0";
 const UNSCOPED_MARKER = "UNSCOPED_RULE_BODY_93b4";
-
-function rule(name: string, partial: Partial<Rule>): Rule {
-	return {
-		name,
-		path: `/rules/${name}.md`,
-		content: partial.content ?? name,
-		_source: { provider: "native", providerName: "native", path: `/rules/${name}.md`, level: "user" },
-		...partial,
-	};
-}
 
 /** Points discovery's `os.homedir()` and the process-global agent dir at `home` for the running test. */
 function isolateHome(home: string): void {
@@ -42,8 +33,8 @@ function isolateHome(home: string): void {
 
 // Same-named variants: the session renders whichever one admits its current model.
 const variantRules = [
-	rule("style", { content: OPUS_MARKER, alwaysApply: true, models: ["*/claude-opus-5"] }),
-	rule("style", { content: SONNET_MARKER, alwaysApply: true, family: ["sonnet"] }),
+	testRule("style", { content: OPUS_MARKER, alwaysApply: true, models: ["*/claude-opus-5"] }),
+	testRule("style", { content: SONNET_MARKER, alwaysApply: true, family: ["sonnet"] }),
 ];
 
 const opus = getBundledModel("anthropic", "claude-opus-5");
@@ -184,10 +175,10 @@ describe("model-scoped rules in a live session", () => {
 			settings,
 			rules: [
 				// Rendered for both models: the prompt must not change on the hop.
-				rule("claude-style", { content: ANTHROPIC_MARKER, alwaysApply: true, class: ["anthropic"] }),
-				rule("plain", { content: UNSCOPED_MARKER, alwaysApply: true }),
-				rule("opus-guard", { condition: ["OPUS_FORBIDDEN"], family: ["opus"] }),
-				rule("sonnet-guard", { condition: ["SONNET_FORBIDDEN"], family: ["sonnet"] }),
+				testRule("claude-style", { content: ANTHROPIC_MARKER, alwaysApply: true, class: ["anthropic"] }),
+				testRule("plain", { content: UNSCOPED_MARKER, alwaysApply: true }),
+				testRule("opus-guard", { condition: ["OPUS_FORBIDDEN"], family: ["opus"] }),
+				testRule("sonnet-guard", { condition: ["SONNET_FORBIDDEN"], family: ["sonnet"] }),
 			],
 		});
 		expect(session.ttsrManager?.getRules().map(r => r.name)).toEqual(["opus-guard"]);
@@ -250,7 +241,7 @@ describe("model-scoped rules in a live session", () => {
 			// As `/omfg` does after saving: drop the cached file and directory snapshots.
 			for (const file of ["guard.md", "notes.md"]) invalidateCapabilityCache(path.join(projectDir, file));
 			invalidateCapabilityCache(projectDir);
-			await session.addRule(rule("guard", { path: path.join(projectDir, "guard.md") }));
+			await session.addRule(testRule("guard", { path: path.join(projectDir, "guard.md") }));
 		};
 		expect(bodies()).toEqual(["USER", "USER", "USER"]);
 
@@ -263,11 +254,11 @@ describe("model-scoped rules in a live session", () => {
 	it("keeps the in-flight stream buffer when a rule is added mid-stream", async () => {
 		const session = await startSession({
 			model: opus,
-			rules: [rule("spanning-guard", { condition: ["SPANNING_TOKEN"] })],
+			rules: [testRule("spanning-guard", { condition: ["SPANNING_TOKEN"] })],
 		});
 		const ttsr = session.ttsrManager!;
 		expect(ttsr.checkDelta("before SPANNING_", { source: "text" })).toEqual([]);
-		await session.addRule(rule("live-guard", { condition: ["LIVE_TOKEN"] }));
+		await session.addRule(testRule("live-guard", { condition: ["LIVE_TOKEN"] }));
 		expect(ttsr.checkDelta("TOKEN after", { source: "text" }).map(r => r.name)).toEqual(["spanning-guard"]);
 	});
 
@@ -281,7 +272,7 @@ describe("model-scoped rules in a live session", () => {
 			ttsrManager,
 		});
 		sessions.push(session);
-		await session.addRule(rule("live-guard", { condition: ["LIVE_TOKEN"] }));
+		await session.addRule(testRule("live-guard", { condition: ["LIVE_TOKEN"] }));
 		expect(ttsrManager.getRules().map(r => r.name)).toEqual(["live-guard"]);
 	});
 
@@ -293,7 +284,7 @@ describe("model-scoped rules in a live session", () => {
 		});
 		settings.setModelRole("default", opusSelector);
 		const session = await startSession({ model: opus, settings, rules: [] });
-		await session.addRule(rule("omfg-guard", { condition: ["OMFG_FORBIDDEN"] }));
+		await session.addRule(testRule("omfg-guard", { condition: ["OMFG_FORBIDDEN"] }));
 		expect(session.ttsrManager?.getRules().map(r => r.name)).toEqual(["omfg-guard"]);
 
 		const mock = createMockModel();
@@ -315,8 +306,8 @@ describe("model-scoped rules in a live session", () => {
 
 	it("persists the judged variant when the model changes while the judge decides", async () => {
 		const question = "Does the reply claim tests pass without having run them?";
-		const opusRule = rule("honest-tests", { question, scope: ["text"], family: ["opus"] });
-		const sonnetRule = rule("honest-tests", { question, scope: ["text"], family: ["sonnet"] });
+		const opusRule = testRule("honest-tests", { question, scope: ["text"], family: ["opus"] });
+		const sonnetRule = testRule("honest-tests", { question, scope: ["text"], family: ["sonnet"] });
 		const session = await startSession({
 			model: opus,
 			settings: Settings.isolated({ "compaction.enabled": false }),
@@ -403,7 +394,7 @@ describe("model-scoped rules in a live session", () => {
 		const session = await startSession({
 			model: opus,
 			settings,
-			rules: [...variantRules, rule("plain", { content: UNSCOPED_MARKER, alwaysApply: true })],
+			rules: [...variantRules, testRule("plain", { content: UNSCOPED_MARKER, alwaysApply: true })],
 		});
 		session.setAdvisorEnabled(true);
 

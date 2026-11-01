@@ -557,10 +557,8 @@ class StreamBuffer {
 }
 
 /**
- * Injection-record key for a rule: its name when unscoped, otherwise
- * `<name>::scope:<first 16 hex digits of the SHA-256 of the model scope>`, so
- * same-named model variants keep separate repeat state. Persisted in
- * `ttsr_injection` entries, so the hash must stay stable across runtimes.
+ * Injection-record key for a rule, in the format of docs/ttsr-injection-lifecycle.md §5.
+ * Keys are persisted, so the scope hash must stay stable across runtimes.
  */
 export function ruleRecordKey(rule: Pick<Rule, "name" | "models" | "providers" | "class" | "family">): string {
 	const scopeKey = ruleModelScopeKey(rule);

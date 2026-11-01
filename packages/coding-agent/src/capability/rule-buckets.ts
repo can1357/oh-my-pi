@@ -16,6 +16,7 @@
  *   7. rulebook       — has a `description`
  */
 import type { TtsrManager } from "../export/ttsr";
+import type { TtsrSettings } from "../export/ttsr-settings";
 import {
 	BUILTIN_DEFAULTS_PROVIDER_ID,
 	type Rule,
@@ -50,6 +51,21 @@ export interface BucketRulesOptions {
 	replaceTtsrRules?: boolean;
 	/** With `replaceTtsrRules`, keep the in-flight TTSR stream buffers (see `TtsrManager.replaceRules`). */
 	keepTtsrBuffers?: boolean;
+}
+
+/** The rule filters the `ttsr.*` settings impose: `ttsr.builtinRules` and `ttsr.disabledRules`. */
+export function ttsrRuleFilters(
+	settings: Pick<TtsrSettings, "builtinRules" | "disabledRules">,
+): Pick<BucketRulesOptions, "builtinRules" | "disabledRules"> {
+	return { builtinRules: settings.builtinRules, disabledRules: settings.disabledRules };
+}
+
+/** Rules a session can address via `rule://`: rulebook, then always-apply, then the TTSR registrations. */
+export function composeActiveRules(
+	buckets: Pick<RuleBuckets, "rulebookRules" | "alwaysApplyRules">,
+	ttsrManager: TtsrManager,
+): Rule[] {
+	return [...buckets.rulebookRules, ...buckets.alwaysApplyRules, ...ttsrManager.getRules()];
 }
 
 /**
