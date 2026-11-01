@@ -495,6 +495,10 @@ struct WordExpander<'a, SE: extensions::ShellExtensions> {
 	/// Whether to use heredoc expansion semantics (literal quotes, no brace
 	/// expansion).
 	heredoc_mode: bool,
+	/// Whether the next `basic_expand` parses the word of a parameter expansion
+	/// inside double quotes, wrapped in `"` or with its own enclosing quotes
+	/// removed (`brush_parser::word::parse_double_quoted_parameter_word`).
+	double_quoted_parameter_word: bool,
 }
 
 impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
@@ -510,6 +514,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			disable_pathname_expansion: false,
 			in_double_quotes: false,
 			heredoc_mode: false,
+			double_quoted_parameter_word: false,
 		}
 	}
 
@@ -535,6 +540,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			disable_pathname_expansion: !options.pathname_expand,
 			in_double_quotes: false,
 			heredoc_mode: false,
+			double_quoted_parameter_word: false,
 		}
 	}
 
@@ -612,6 +618,9 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 	async fn basic_expand(&mut self, word: &str) -> Result<Expansion, error::Error> {
 		tracing::debug!(target: trace_categories::EXPANSION, "Basic expanding: '{word}'");
 
+		// Applies to this word only, not to the words its pieces expand.
+		let double_quoted_parameter_word = std::mem::take(&mut self.double_quoted_parameter_word);
+
 		// Quick short circuit to avoid more expensive parsing. The characters below are
 		// understood to be the *only* ones indicative of *possible* expansion. There's
 		// still a possibility no expansion needs to be done, but that's okay; we'll
@@ -656,6 +665,11 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				self.heredoc_mode = false;
 
 				brush_parser::word::parse_heredoc(element.as_ref(), &self.parser_options)?
+			} else if double_quoted_parameter_word {
+				brush_parser::word::parse_double_quoted_parameter_word(
+					element.as_ref(),
+					&self.parser_options,
+				)?
 			} else {
 				brush_parser::word::parse(element.as_ref(), &self.parser_options)?
 			};
@@ -687,9 +701,12 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			{
 				// Remove the surrounding double-quotes and expand the content normally
 				// This requires us to temporarily clear in_double_quotes so the inner
-				// content gets normal processing.
+				// content gets normal processing. It is still the word of a `${...}`
+				// inside double quotes: its backquoted commands keep bash's rule for
+				// that word, and a leading `~` stays literal.
 				let previously_in_double_quotes = self.in_double_quotes;
 				self.in_double_quotes = false;
+				self.double_quoted_parameter_word = true;
 
 				// Now perform the expansion and make sure to restore the previous state,
 				// even if the expansion fails.
@@ -699,8 +716,9 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				result
 			} else {
 				// Not double-quoted - wrap in double-quotes to get double-quote parsing
-				// semantics
+				// semantics, keeping bash's rule for the word's backquoted commands.
 				let wrapped = std::format!("\"{word}\"");
+				self.double_quoted_parameter_word = true;
 				self.basic_expand(&wrapped).await
 			}
 		} else {

@@ -560,6 +560,25 @@ pub fn parse_heredoc(
         .map_err(|err| error::WordParseError::Word(word.to_owned(), err.into()))
 }
 
+/// Parse the word of a parameter expansion (such as `${parameter:-word}`) that sits inside
+/// double quotes, given wrapped in `"` or, when the whole word is one double-quoted string,
+/// without those quotes. Like [`parse`], except that a backquoted command anywhere in it keeps
+/// the backslash before `"`, one inside the word's own double quotes also loses the backslash
+/// before any character but `$`, `` ` ``, `"`, `\` and newline, and a leading `~` stays
+/// literal, as bash does in that word.
+///
+/// # Arguments
+///
+/// * `word` - The parameter expansion's word, wrapped in `"` or without its enclosing quotes.
+/// * `options` - The parser options to use.
+pub fn parse_double_quoted_parameter_word(
+    word: &str,
+    options: &ParserOptions,
+) -> Result<Vec<WordPieceWithSource>, error::WordParseError> {
+    expansion_parser::unexpanded_double_quoted_parameter_word(word, options)
+        .map_err(|err| error::WordParseError::Word(word.to_owned(), err.into()))
+}
+
 /// Parse the given word into a parameter expression.
 ///
 /// # Arguments
@@ -650,6 +669,26 @@ peg::parser! {
                 all_pieces.extend(pieces);
                 all_pieces
             }
+
+        // The word of a `${...}` expansion inside double quotes, which brush-core expands by
+        // parsing it wrapped in `"` or without its enclosing quotes. The double-quoted spans here,
+        // a wrapper's included, are the text that bash reads outside the word's own double
+        // quotes; the rest is the text that bash reads inside them. Bash leaves `\"` in that
+        // word's backquoted commands, so neither part gives them the double-quote rule; inside the
+        // word's own double quotes it first drops the backslash before any character but `$`,
+        // `` ` ``, `"`, `\` and newline, a backquoted command's text included. It takes no leading
+        // `~` as a tilde expansion.
+        pub(crate) rule unexpanded_double_quoted_parameter_word() -> Vec<WordPieceWithSource> =
+            traced(<double_quoted_parameter_word_piece()*>)
+
+        rule double_quoted_parameter_word_piece() -> WordPieceWithSource =
+            start_index:position!() "\"" pieces:double_quoted_sequence_inner(false)* "\"" end_index:position!() {
+                WordPieceWithSource { piece: WordPiece::DoubleQuotedSequence(pieces), start_index, end_index }
+            } /
+            start_index:position!() "`" c:backquoted_command(false, true) "`" end_index:position!() {
+                WordPieceWithSource { piece: WordPiece::BackquotedCommandSubstitution(c), start_index, end_index }
+            } /
+            word_piece_with_source(<![_]>, false /*in_command*/)
 
         // Takes a word as input.
         pub(crate) rule brace_expansions() -> Option<Vec<BraceExpressionOrText>> =
@@ -779,22 +818,24 @@ peg::parser! {
             command_substitution() /
             parameter_expansion()
 
-        rule double_quoted_word_piece() -> WordPiece =
+        // `quoted_backquotes`: whether a backquoted command here gets the double-quote rule (see
+        // `backquoted_char`); false only in a `${...}` word inside double quotes.
+        rule double_quoted_word_piece(quoted_backquotes: bool) -> WordPiece =
             arithmetic_expansion() /
             legacy_arithmetic_expansion() /
-            command_substitution() /
+            double_quoted_command_substitution(quoted_backquotes) /
             parameter_expansion() /
             double_quoted_escape_sequence() /
             double_quoted_text()
 
         rule double_quoted_sequence() -> Vec<WordPieceWithSource> =
-            "\"" i:double_quoted_sequence_inner()* "\"" { i }
+            "\"" i:double_quoted_sequence_inner(true)* "\"" { i }
 
         rule gettext_double_quoted_sequence() -> Vec<WordPieceWithSource> =
-            "$\"" i:double_quoted_sequence_inner()* "\"" { i }
+            "$\"" i:double_quoted_sequence_inner(true)* "\"" { i }
 
-        rule double_quoted_sequence_inner() -> WordPieceWithSource =
-            start_index:position!() piece:double_quoted_word_piece() end_index:position!() {
+        rule double_quoted_sequence_inner(quoted_backquotes: bool) -> WordPieceWithSource =
+            start_index:position!() piece:double_quoted_word_piece(quoted_backquotes) end_index:position!() {
                 WordPieceWithSource {
                     piece,
                     start_index,
@@ -1068,7 +1109,12 @@ peg::parser! {
 
         pub(crate) rule command_substitution() -> WordPiece =
             "$(" c:command_substitution_body() ")" { WordPiece::CommandSubstitution(c.to_owned()) } /
-            "`" c:backquoted_command() "`" { WordPiece::BackquotedCommandSubstitution(c) }
+            "`" c:backquoted_command(false, false) "`" { WordPiece::BackquotedCommandSubstitution(c) }
+
+        // In double quotes, bash also removes the backslash before `"` in a backquoted body.
+        rule double_quoted_command_substitution(quoted_backquotes: bool) -> WordPiece =
+            "`" c:backquoted_command(quoted_backquotes, false) "`" { WordPiece::BackquotedCommandSubstitution(c) } /
+            command_substitution()
 
         // Delimits the body with the tokenizer's here-document-aware scan (the one that already
         // produced this word) instead of `command()`: re-parsing the body as words let quotes and
@@ -1095,12 +1141,29 @@ peg::parser! {
             ([' ' | '\t'])+ {} /
             ['\'' | '`'] {}
 
-        rule backquoted_command() -> String =
-            chars:(backquoted_char()*) { chars.into_iter().collect() }
+        rule backquoted_command(in_double_quotes: bool, in_parameter_word_quotes: bool) -> String =
+            chars:(backquoted_char(in_double_quotes, in_parameter_word_quotes)*) {
+                let mut command: String = chars.into_iter().collect();
+                // `\\` before the closing backquote leaves the body ending in a lone backslash,
+                // which bash takes literally; escape it so that parsing the body does too.
+                if command.chars().rev().take_while(|c| *c == '\\').count() % 2 == 1 {
+                    command.push('\\');
+                }
+                command
+            }
 
-        rule backquoted_char() -> &'input str =
-            "\\`" { "`" } /
-            "\\\\" { "\\\\" } /
+        // As in bash, the body loses the backslash before `$`, `` ` `` and `\`, every
+        // backslash-newline, and, in double quotes, the backslash before `"`; any other backslash
+        // stays. Each nesting level so halves the backslashes that the level inside it sees.
+        // `in_parameter_word_quotes`: the backquotes are inside the double quotes of a `${...}`
+        // word that is itself inside double quotes, where bash first drops the backslash before
+        // any character but `$`, `` ` ``, `"`, `\` and newline (see
+        // `unexpanded_double_quoted_parameter_word`).
+        rule backquoted_char(in_double_quotes: bool, in_parameter_word_quotes: bool) -> &'input str =
+            "\\\n" { "" } /
+            "\\" s:$(['$' | '`' | '\\']) { s } /
+            is_true(in_double_quotes) "\\" s:$(['"']) { s } /
+            is_true(in_parameter_word_quotes) "\\" s:$([^'"']) { s } /
             s:$([^'`']) { s }
 
         rule arithmetic_expansion() -> WordPiece =

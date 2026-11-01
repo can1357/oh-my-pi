@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the bash tool's shell giving wrong output, or `command not found` errors that name backslashes, for backquote command substitutions nested three or more levels deep, and keeping the backslash before `$`, `\` or (in double quotes) `"` inside backquotes where Bash removes it; `"${v:-"~/x"}"` also no longer expands the `~`, as in Bash
+
 ## [18.15.0] - 2026-11-01
 
 ### Fixed
