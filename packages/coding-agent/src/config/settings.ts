@@ -1999,6 +1999,17 @@ export class Settings {
 		if (projectResult.status === "rejected") throw projectResult.reason;
 		if (globalResult.value) {
 			this.#global = globalResult.value;
+		} else if (!(await Bun.file(this.#configPath ?? path.join(this.#agentDir, "config.yml")).exists())) {
+			// There is no config.yml at all, so the settings this agent directory
+			// is actually configured with may still be in the legacy
+			// `settings.json` that a writing load would migrate. Reading them —
+			// and only reading them — is what keeps a read-only view from
+			// reporting schema defaults for a directory that is configured,
+			// which a caller deciding whether a destructive phase is enabled
+			// must not do. A config.yml that exists but could not be read is a
+			// different thing: the layer already in hand stays.
+			const legacy = await this.#readLegacySettingsJson();
+			if (Object.keys(legacy).length > 0) this.#global = legacy;
 		}
 
 		this.#project = projectResult.value;
@@ -2006,6 +2017,26 @@ export class Settings {
 		this.#rebuildMerged();
 		this.#validateAll();
 		return this;
+	}
+
+	/** Legacy `settings.json` as migrated raw settings, or empty when there is none to read. */
+	async #readLegacySettingsJson(): Promise<RawSettings> {
+		const settingsJsonPath = path.join(this.#agentDir, "settings.json");
+		try {
+			const parsed: unknown = JSONC.parse(await Bun.file(settingsJsonPath).text());
+			if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+				return this.#migrateRawSettings(parsed as RawSettings);
+			}
+			logger.warn("Settings: ignoring non-object legacy settings.json", { path: settingsJsonPath });
+		} catch (error) {
+			if (!isEnoent(error)) {
+				logger.warn("Settings: failed to read legacy settings.json", {
+					path: settingsJsonPath,
+					error: String(error),
+				});
+			}
+		}
+		return {};
 	}
 
 	#readYamlGeneration(filePath: string): YamlGeneration {

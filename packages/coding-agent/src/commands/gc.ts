@@ -13,13 +13,29 @@ export default class Gc extends Command {
 		json: Flags.boolean({ description: "Output JSON" }),
 		"agent-dir": Flags.string({ description: "Agent directory to maintain" }),
 		blobs: Flags.boolean({ description: "Sweep unreferenced blobs" }),
-		archive: Flags.boolean({ description: "Archive cold sessions" }),
+		archive: Flags.boolean({ description: "Copy cold sessions into the archive, keeping the live copy" }),
+		"forward-only": Flags.boolean({
+			description:
+				"Accept that a reclaimed session is reachable only from an omp with `gc --restore`; required by --reclaim --apply",
+		}),
 		wal: Flags.boolean({ description: "Checkpoint history/model database WAL files" }),
 		stale: Flags.boolean({
 			description: "Prune dangling session markers/breadcrumbs and old debug reports and collab replicas",
 		}),
 		compress: Flags.boolean({
 			description: "Store idle sessions with filesystem compression in place (APFS, NTFS)",
+		}),
+		restore: Flags.string({
+			description:
+				"Bring an archived session back by id prefix or archive path (runs alone; copies, keeps the archive, frees no space)",
+		}),
+		reclaim: Flags.string({
+			description:
+				"Give up the live copy of an archived session by id prefix or archive path (runs alone; the only step that deletes one)",
+		}),
+		quarantine: Flags.string({
+			description:
+				"Move a staging record a killed gc run left, and the directory it names, out of the session trees into gc-quarantine (runs alone; deletes nothing)",
 		}),
 		"cold-archive-after-days": Flags.integer({ description: "Minimum session age before archiving" }),
 		"retain-newest-global": Flags.integer({ description: "Always keep this many newest sessions active" }),
@@ -43,6 +59,10 @@ export default class Gc extends Command {
 				wal: flags.wal,
 				stale: flags.stale,
 				compress: flags.compress,
+				restore: flags.restore,
+				forwardOnly: flags["forward-only"],
+				reclaim: flags.reclaim,
+				quarantine: flags.quarantine,
 				coldArchiveAfterDays: flags["cold-archive-after-days"],
 				retainNewestGlobal: flags["retain-newest-global"],
 				retainNewestPerCwd: flags["retain-newest-per-cwd"],

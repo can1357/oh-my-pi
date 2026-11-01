@@ -57,5 +57,118 @@
 		"**/*.mjs",
 		"**/*.cjs",
 		"**/*.d.ts"
+	],
+	"overrides": [
+		{
+			"files": [
+				"packages/coding-agent/src/cli/gc-cli.ts",
+				"packages/coding-agent/src/session/session-archive.ts",
+				"packages/coding-agent/src/session/gc-lock.ts"
+			],
+			"rules": {
+				"eslint/no-restricted-globals": [
+					"error",
+					{
+						"name": "Bun",
+						"message": "Take Glob, CryptoHasher and sleep from session/gc-fs.ts: the Bun global carries Bun.file, Bun.write and Bun.spawn, which open a name and go through whatever is there."
+					},
+					{
+						"name": "require",
+						"message": "gc's modules import; a require can reach node:fs past the import rule. Take the filesystem from session/gc-fs.ts."
+					},
+					{
+						"name": "module",
+						"message": "gc's modules import; module.require can reach node:fs past the import rule. Take the filesystem from session/gc-fs.ts."
+					}
+				],
+				"eslint/no-restricted-properties": [
+					"error",
+					{
+						"object": "globalThis",
+						"property": "Bun",
+						"message": "Take Glob, CryptoHasher and sleep from session/gc-fs.ts: the Bun global carries Bun.file, Bun.write and Bun.spawn."
+					},
+					{
+						"object": "process",
+						"property": "getBuiltinModule",
+						"message": "process.getBuiltinModule reaches node:fs past the import rule. Take the filesystem from session/gc-fs.ts."
+					},
+					{
+						"object": "process",
+						"property": "binding",
+						"message": "process.binding reaches the filesystem past the import rule. Take the filesystem from session/gc-fs.ts."
+					}
+				],
+				"eslint/no-restricted-imports": [
+					"error",
+					{
+						"paths": [
+							{
+								"name": "bun",
+								"message": "Take Glob, CryptoHasher and sleep from session/gc-fs.ts: bun also exports file, write, mmap and spawn, which open a name and go through whatever is there."
+							},
+							{
+								"name": "bun:sqlite",
+								"message": "SQLite opens a database by path, past any descriptor check. Look at it through openRegularFile first, and say why at the import, the way checkpointWal does."
+							},
+							{
+								"name": "node:child_process",
+								"message": "A child process reads whatever path it is given, past every check here."
+							},
+							{
+								"name": "child_process",
+								"message": "A child process reads whatever path it is given, past every check here."
+							},
+							{
+								"name": "node:fs/promises",
+								"message": "Take the filesystem from session/gc-fs.ts, which has no call that opens a file, and open one with openRegularFile (session/regular-file.ts)."
+							},
+							{
+								"name": "node:fs",
+								"message": "Take the filesystem from session/gc-fs.ts, which has no call that opens a file, and open one with openRegularFile (session/regular-file.ts)."
+							},
+							{
+								"name": "fs/promises",
+								"message": "Take the filesystem from session/gc-fs.ts, which has no call that opens a file, and open one with openRegularFile (session/regular-file.ts)."
+							},
+							{
+								"name": "fs",
+								"message": "Take the filesystem from session/gc-fs.ts, which has no call that opens a file, and open one with openRegularFile (session/regular-file.ts)."
+							},
+							{
+								"name": "../session/session-loader",
+								"importNames": ["readSessionHeaderId"],
+								"message": "readSessionHeaderId opens by name; open with openRegularFile and use readSessionHeaderIdFromHandle."
+							},
+							{
+								"name": "./session-loader",
+								"importNames": ["readSessionHeaderId"],
+								"message": "readSessionHeaderId opens by name; open with openRegularFile and use readSessionHeaderIdFromHandle."
+							},
+							{
+								"name": "../session/session-listing",
+								"importNames": ["readSessionInfo"],
+								"message": "readSessionInfo reads by name; list with RegularFileSessionStorage."
+							},
+							{
+								"name": "../session/session-storage",
+								"importNames": ["FileSessionStorage"],
+								"message": "FileSessionStorage reads by name; use RegularFileSessionStorage (session/gc-session-storage.ts)."
+							},
+							{
+								"name": "./session-storage",
+								"importNames": ["FileSessionStorage"],
+								"message": "FileSessionStorage reads by name; use RegularFileSessionStorage (session/gc-session-storage.ts)."
+							},
+							{
+								"name": "@oh-my-pi/pi-utils",
+								"importNames": ["peekFile", "peekFileSync", "peekFileTail", "peekFileEnds"],
+								"message": "peekFile opens by name; open with openRegularFile and read the descriptor."
+							}
+						]
+					}
+				]
+			}
+		}
 	]
 }

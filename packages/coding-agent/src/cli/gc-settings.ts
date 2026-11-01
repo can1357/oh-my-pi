@@ -6,7 +6,13 @@ import { register } from "../config/registry";
 
 export const cfgGcBlobs = register({ id: "gc.blobs", type: "boolean", default: true });
 
-export const cfgGcArchive = register({ id: "gc.archive", type: "boolean", default: true });
+// Opt-in: archiving copies each cold session into `archive/sessions` and
+// keeps the live copy, so it frees no space by itself, and an omp without
+// `gc --restore` — every release up to and including 18.14.0 — can neither
+// find nor read what it writes. An unqualified `omp gc --apply` therefore
+// leaves cold-session storage alone; `--archive --apply` asks for the copy
+// by name, and `--reclaim --apply --forward-only` gives a live copy up.
+export const cfgGcArchive = register({ id: "gc.archive", type: "boolean", default: false });
 
 export const cfgGcWal = register({ id: "gc.wal", type: "boolean", default: true });
 
