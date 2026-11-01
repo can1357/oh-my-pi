@@ -845,7 +845,9 @@ async function handleToolCall(session: JsSession, msg: Extract<WorkerOutbound, {
 			onReply: pending.runState.onReply,
 			emitStatus: (event: JsStatusEvent) => {
 				trackDeferPhase(pending, event);
-				deliverRunOutput(pending.runState, "onDisplay", () => pending.runState.onDisplay?.({ type: "status", event }));
+				deliverRunOutput(pending.runState, "onDisplay", () =>
+					pending.runState.onDisplay?.({ type: "status", event }),
+				);
 			},
 		});
 		safeSend(session, { type: "tool-reply", id: msg.id, reply: { ok: true, value } });
