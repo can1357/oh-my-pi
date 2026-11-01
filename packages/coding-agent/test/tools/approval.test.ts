@@ -178,12 +178,8 @@ describe("tools.approval entries as a user writes them by hand", () => {
 			reason: 'tools.approval.bash is "block", not allow, deny or prompt',
 		});
 		resolveApproval(bash, {}, "yolo", userConfig);
-		expect(warn.mock.calls).toEqual([
-			[
-				"Approval: tools.approval entry is not allow, deny or prompt; asking instead",
-				{ tool: "bash", value: "block" },
-			],
-		]);
+		// The contract is the fields naming the tool and the value; the message wording is free to change.
+		expect(warn.mock.calls).toEqual([[expect.stringContaining("tools.approval"), { tool: "bash", value: "block" }]]);
 		// A record with the entry fixed and broken again is a new record, and warns again.
 		resolveApproval(bash, {}, "yolo", { bash: "block" });
 		expect(warn).toHaveBeenCalledTimes(2);
@@ -194,7 +190,7 @@ describe("tools.approval entries as a user writes them by hand", () => {
 		const resolved = resolveApproval(bash, {}, "yolo", { Bash: "deny" });
 		expect(resolved).toMatchObject({ policy: "deny", source: "user", policyKey: "Bash" });
 		expect(() => requiresApproval(bash, {}, "yolo", { Bash: "deny" })).toThrow('remove "tools.approval.Bash: deny"');
-		expect(warn).toHaveBeenCalledWith("Approval: tools.approval key matches a tool only by case", {
+		expect(warn).toHaveBeenCalledWith(expect.stringContaining("tools.approval"), {
 			key: "Bash",
 			tool: "bash",
 			value: "deny",

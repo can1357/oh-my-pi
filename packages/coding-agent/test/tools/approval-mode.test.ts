@@ -15,7 +15,10 @@ const BASE_SETTINGS = {
 	"async.enabled": false,
 	"bash.autoBackground.enabled": false,
 	"bashInterceptor.enabled": false,
-	"bash.patterns": [{ match: "rm -rf *", approval: "deny" }],
+	"bash.patterns": [
+		{ match: "rm -rf *", approval: "deny" },
+		{ match: "printf approval-audit*", approval: "allow" },
+	],
 } as const;
 
 function emptyWorkspaceTree(cwd: string) {
@@ -356,5 +359,54 @@ describe("tools.approvalMode setting", () => {
 				expect(entryWarnings).toHaveLength(warns ? 1 : 0);
 			});
 		}
+
+		// A `bash.patterns` allow is a tool-owned allow: it must not turn a mistyped restriction into a grant,
+		// while a deny, the user's or the tool's own, stays stronger than the unreadable entry.
+		const underAllowPattern: Array<[label: string, approval: unknown, command: string, refusal: string]> = [
+			[
+				"an unreadable entry",
+				{ bash: "prmopt" },
+				"printf approval-audit-executed",
+				'Reason: tools.approval.bash is "prmopt", not allow, deny or prompt',
+			],
+			[
+				"a value that is not a record",
+				"deny-bash",
+				"printf approval-audit-executed",
+				'Reason: tools.approval is "deny-bash", not a record of tool policies',
+			],
+			["a user deny", { bash: "deny" }, "printf approval-audit-executed", 'Tool "bash" is blocked by user policy'],
+			[
+				"a tool deny over an unreadable entry",
+				{ bash: "prmopt" },
+				"rm -rf /tmp/approval-audit-never",
+				'Tool "bash" is blocked by tool policy',
+			],
+		];
+		for (const [label, approval, command, refusal] of underAllowPattern) {
+			it(`does not run a pattern-allowed command under ${label}`, async () => {
+				vi.spyOn(logger, "warn").mockImplementation(() => {});
+				const settings = await loadHandWrittenConfig(tempDir, { tools: { approval } }, BASE_SETTINGS);
+				await expect(
+					bashTool().execute(`pattern-${label}`, { command }, undefined, undefined, {
+						settings,
+					} as AgentToolContext),
+				).rejects.toThrow(refusal);
+			});
+		}
+
+		it("still runs a pattern-allowed command with no tools.approval", async () => {
+			const settings = await loadHandWrittenConfig(tempDir, {}, BASE_SETTINGS);
+			const result = await bashTool().execute(
+				"pattern-control",
+				{ command: "printf approval-audit-ran" },
+				undefined,
+				undefined,
+				{
+					settings,
+				} as AgentToolContext,
+			);
+			expect(textOf(result)).toContain("approval-audit-ran");
+		});
 	});
 });

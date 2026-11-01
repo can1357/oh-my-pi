@@ -90,16 +90,25 @@ Resolution per tool call:
 
 1. Evaluate `tool.approval(args)`; omitted/malformed decisions default to tier `exec`.
 2. A tool-declared `policy: deny` always denies. A user `deny` is checked next and also always denies.
-3. In `yolo`, an explicit tool `allow`/`prompt` policy wins; otherwise the valid user policy wins, or the call is allowed. The `override` flag alone does not force a prompt in `yolo`.
-4. In non-yolo modes, an `override: true` decision allows only an accompanying tool `policy: allow`; every other non-denied case prompts.
-5. Without an override, an explicit tool `allow`/`prompt` policy wins, then a valid user policy wins.
-6. With no explicit policy, the active mode auto-approves or prompts by tier. In `always-ask-cached`, a call whose `approvalCacheTargets` are all granted is allowed instead.
+3. An unreadable user entry or value (below) prompts next, in every mode: it outranks a tool's own `allow` (a `bash.patterns` allow), an override's `allow` and the mode.
+4. In `yolo`, an explicit tool `allow`/`prompt` policy wins; otherwise the valid user policy wins, or the call is allowed. The `override` flag alone does not force a prompt in `yolo`.
+5. In non-yolo modes, an `override: true` decision allows only an accompanying tool `policy: allow`; every other non-denied case prompts.
+6. Without an override, an explicit tool `allow`/`prompt` policy wins, then a valid user policy wins.
+7. With no explicit policy, the active mode auto-approves or prompts by tier. In `always-ask-cached`, a call whose `approvalCacheTargets` are all granted is allowed instead.
 
 Policy strings are trimmed and case-normalized (`Deny` and ` deny` deny). Any other value — a typo (`denied`, `prmopt`), another word (`block`, `ask`), `true`, `false`, a number, or `null` (a key left empty) — reads as `prompt`, never as no policy: whoever wrote the entry meant to restrain that tool, so the call asks first and, with no interactive UI, is refused. A key that names the tool only by case (`Bash` for `bash`) applies its `deny` or `prompt` when the tool has no exact entry, never its `allow`. An unreadable entry still yields to a stricter policy that applies to the same call: the invoking tool's for a keyed sub-tool, the legacy name's for a renamed MCP tool. Each such entry logs a warning naming the tool and the value. `omp config set`, the settings panel and runtime overrides refuse such an entry, so only a hand-edited file can hold one.
 
-A whole `tools.approval` value that is not a record (`tools.approval: "deny-bash"`, a list) is the one malformed setting that does not fall back to its default. Unset means no policies, and under `yolo` no policy lets every call run, so such a value instead makes every tool call ask, read tools included, and is refused where nobody can answer. It logs `Approval: tools.approval is not a record of tool policies; asking before every tool call` once per value.
+A whole `tools.approval` value that is not a record (`tools.approval: "deny-bash"`, a list), when no layer supplies a usable record, is the one malformed setting that does not fall back to its default. Unset means no policies, and under `yolo` no policy lets every call run, so such a value instead makes every tool call ask, read tools included, and is refused where nobody can answer. It logs `Approval: tools.approval is not a record of tool policies; asking before every tool call` once per value. One exception: `tools.approval: null` (the key left empty) is unset, as `null` is for every setting, and means no policies. Unlike an entry, which names the tool its writer meant to restrain, an empty key names nothing to restrain.
 
-The prompt, the refusal without a UI (tool wrapper, Cursor exec bridge, eval preludes), the ACP permission request and the foreground computer-control dialog all carry a `Reason:` naming the unreadable entry or value and what it should be. These prompts are answered like any other: an ACP client's **Always allow** covers later calls the same way it does for a `tools.approval.<tool>: prompt` rule.
+The prompt, the refusal without a UI (tool wrapper, Cursor exec bridge, eval preludes), the ACP permission request and the foreground computer-control dialog all carry a `Reason:` naming the unreadable entry or value and what it should be. `computer.control.acquire` also returns it to the script as `setting` beside `reason` (`{ active: false, reason: "no-ui", setting: "tools.approval.computer.control is \"ask\", …" }`), so a script can tell a mistyped setting from an intentional prompt.
+
+What such a prompt costs, until the entry is fixed:
+
+- It asks before every call to that tool, or to every tool for a value that is not a record. Like a `tools.approval.<tool>: prompt` rule, it offers no **Approve for this session** answer and records no grant.
+- `--yolo` and `--auto-approve` do not lift it: they set the mode, and an unreadable policy outranks the mode.
+- An ACP client's **Always allow** does cover later calls, as it does for any prompt.
+
+To find it, `omp config get tools.approval` prints the value in effect, and `omp config list --scope global` and `omp config list --scope project` print what each layer's file holds. The interactive and RPC modes watch their config files, so correcting the file applies to the next call without a restart.
 
 Approval is resolved again after extension `tool_call` handlers revise the input, against the arguments that will actually execute. A deny blocks execution before a prompt; a call that still requires a prompt fails rather than silently allowing it when no interactive UI is available.
 

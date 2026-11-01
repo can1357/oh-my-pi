@@ -452,11 +452,12 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 					);
 				}
 				// An unreadable `tools.approval` entry or value made the call ask: the fix is in the config
-				// file, not the approval mode.
+				// file, not the approval mode, and the person needs to find which file.
 				if (resolved.source === "user" && resolved.reason) {
 					throw new Error(
 						`Tool "${this.tool.name}" requires approval but no interactive UI available.${userPolicyReasonLine(resolved)}\n` +
-							`Correct it in the config file, or approve the call from an interactive UI.`,
+							"`omp config get tools.approval` shows the value in effect, and `omp config list --scope global` " +
+							"or `--scope project` the file holding it.",
 					);
 				}
 				throw new Error(

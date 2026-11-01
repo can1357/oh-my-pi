@@ -23,6 +23,7 @@ import {
 	type ComputerSessionSnapshot,
 	type ComputerWorkerInbound,
 	type ComputerWorkerOutbound,
+	type ControlAnswer,
 	type ControlVerdict,
 	ESCAPE_AFTER_CALL_MESSAGE,
 	ESCAPE_REFUSED_MESSAGE,
@@ -438,7 +439,12 @@ export class ComputerSupervisor implements ComputerController {
 				verdict = approved ? "approved" : deadline.aborted ? "unanswered" : "denied";
 			}
 			if (controller.signal.aborted || this.#pending.get(message.runId) !== pending) verdict = "denied";
-			this.#safeSend({ type: "tool-reply", id: message.id, reply: { ok: true, value: verdict } });
+			// An unreadable `tools.approval` entry made this ask: the script hears which, not only the verdict.
+			const value: ControlAnswer | ControlVerdict =
+				verdict !== "approved" && resolved.source === "user" && resolved.reason
+					? { verdict, setting: resolved.reason }
+					: verdict;
+			this.#safeSend({ type: "tool-reply", id: message.id, reply: { ok: true, value } });
 		} catch (error) {
 			this.#safeSend({
 				type: "tool-reply",

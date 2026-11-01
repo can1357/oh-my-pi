@@ -2586,7 +2586,7 @@ describe("expanded computer APIs", () => {
 		},
 	);
 
-	it("still asks for control under an unreadable computer.control entry, naming it in the dialog", async () => {
+	it("still asks for control under an unreadable computer.control entry, and names it to the user and the script", async () => {
 		const native = new FakeNativeSession();
 		vi.spyOn(logger, "warn").mockImplementation(() => {});
 		using dir = TempDir.createSync("@pi-computer-control-entry-");
@@ -2603,19 +2603,28 @@ describe("expanded computer APIs", () => {
 			undefined,
 			NO_ESCAPE_STOPS,
 		);
+		const setting = 'tools.approval.computer.control is "ask", not allow, deny or prompt';
 		const confirm = vi.fn(async (_title: string, _body: string) => false);
 		try {
-			const result = await supervisor.run(
+			const asked = await supervisor.run(
 				'return await desktop.control.acquire({ reason: "Policy" })',
 				2_000,
 				snapshot(),
 				undefined,
 				{ ...confirmationContext(confirm), settings },
 			);
-			expect(result.returnValue).toEqual({ active: false, reason: "denied" });
-			expect(confirm.mock.calls[0]?.[1]).toContain(
-				'Reason: tools.approval.computer.control is "ask", not allow, deny or prompt',
+			expect(asked.returnValue).toEqual({ active: false, reason: "denied", setting });
+			expect(confirm.mock.calls[0]?.[1]).toContain(`Reason: ${setting}`);
+			// Headless, the script can tell the mistyped setting from an intentional prompt.
+			const headless = await supervisor.run(
+				'return await desktop.control.acquire({ reason: "Headless" })',
+				2_000,
+				snapshot(),
+				undefined,
+				{ hasUI: false, settings } as AgentToolContext,
 			);
+			expect(headless.returnValue).toEqual({ active: false, reason: "no-ui", setting });
+			expect(native.acquireCount).toBe(0);
 		} finally {
 			await supervisor.close();
 		}

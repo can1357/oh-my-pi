@@ -311,6 +311,11 @@ export interface UserPolicy {
 	 * matched by case alone, or part of a `tools.approval` value that is not a record.
 	 */
 	reason?: string;
+	/**
+	 * The entry or value could not be read as a policy, so it reads as `prompt`. Someone wrote it to
+	 * restrain the tool, so it outranks every allow a tool or mode would give; only a deny is stronger.
+	 */
+	unreadable?: true;
 }
 
 /**
@@ -354,6 +359,7 @@ function readUserEntry(userConfig: Record<string, unknown>, key: string, name: s
 			policy: "prompt",
 			key,
 			reason: `${describeValue(`tools.approval.${key}`, value)}, not allow, deny or prompt`,
+			unreadable: true,
 		};
 	}
 	warnEntryOnce(userConfig, key, "Approval: tools.approval key matches a tool only by case", {
@@ -367,6 +373,7 @@ function readUserEntry(userConfig: Record<string, unknown>, key: string, name: s
 		policy: policy ?? "prompt",
 		key,
 		reason: `${describeValue(`tools.approval.${key}`, value)}, which names ${name} only by case`,
+		...(policy === undefined ? { unreadable: true as const } : {}),
 	};
 }
 
@@ -383,7 +390,12 @@ function readUserEntry(userConfig: Record<string, unknown>, key: string, name: s
 export function userApprovalPolicy(userConfig: UserPolicies, name: string): UserPolicy | undefined {
 	if (Object.hasOwn(userConfig, UNREADABLE_RECORD)) {
 		const value = describeValue("tools.approval", userConfig[UNREADABLE_RECORD]);
-		return { policy: "prompt", key: name, reason: `${value}, not a record of tool policies such as {bash: deny}` };
+		return {
+			policy: "prompt",
+			key: name,
+			reason: `${value}, not a record of tool policies such as {bash: deny}`,
+			unreadable: true,
+		};
 	}
 	if (Object.hasOwn(userConfig, name)) return readUserEntry(userConfig, name, name);
 	let lowered: string | undefined;
@@ -493,7 +505,8 @@ export function approvalRestrictions(
  *     the invoking tool's own policy as the fallback when the user set none for
  *     the keyed sub-tool (e.g. an `xd://` device dispatch without a device
  *     policy still honors `tools.approval.write`).
- *  2. User per-tool override, if set and valid.
+ *  2. User per-tool override (see {@link userApprovalPolicy}). A deny, the tool's or the user's,
+ *     wins first; an unreadable entry or value then prompts, outranking any tool or mode allow.
  *  3. Active mode tier comparison. In `always-ask-cached`, a call whose
  *     `approvalCacheTargets` are all granted in `grants` is allowed instead
  *     (see {@link resolveCachedModeApproval}).
@@ -578,6 +591,11 @@ function resolvePolicy(
 			source: "user",
 			...userFields,
 		};
+	}
+	// An unreadable entry or value was written to restrain this tool: it outranks a tool's own allow
+	// (a `bash.patterns` allow, say), a safety override's allow and the mode. Only the denies above win.
+	if (user?.unreadable) {
+		return { policy: "prompt", tier: decision.tier, override: false, source: "user", ...userFields };
 	}
 
 	if (mode === "yolo") {
