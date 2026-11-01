@@ -12295,7 +12295,8 @@ export class AgentSession implements SettingsScope {
 		onPublished?: () => void,
 	): Promise<void> {
 		const currentModel = this.model;
-		const isChanging = !currentModel || !modelsAreEqual(currentModel, model);
+		const isChanging =
+			!currentModel || formatModelStringWithRouting(currentModel) !== formatModelStringWithRouting(model);
 		if (currentModel) {
 			this.#closeProviderSessionsForModelSwitch(currentModel, model);
 			if (isChanging) {
@@ -13267,8 +13268,7 @@ export class AgentSession implements SettingsScope {
 				const shouldResetProviderState =
 					switchingToDifferentSession ||
 					(currentModel !== undefined &&
-						(currentModel.provider !== targetModel.provider ||
-							currentModel.id !== targetModel.id ||
+						(formatModelStringWithRouting(currentModel) !== formatModelStringWithRouting(targetModel) ||
 							currentModel.api !== targetModel.api));
 				if (shouldResetProviderState) {
 					await this.#setModelWithProviderSessionReset(targetModel);
@@ -13428,7 +13428,9 @@ export class AgentSession implements SettingsScope {
 			if (previousModel) {
 				const rolledBackModel = this.model;
 				this.agent.setModel(previousModel);
-				modelRolledBack = !modelsAreEqual(rolledBackModel, previousModel);
+				modelRolledBack =
+					!rolledBackModel ||
+					formatModelStringWithRouting(rolledBackModel) !== formatModelStringWithRouting(previousModel);
 			}
 			this.#models.restoreThinkingSnapshot(previousThinkingLevel, previousAutoThinking, previousAutoResolvedLevel);
 			this.#models.restoreServiceTiers(previousServiceTierByFamily);

@@ -61,7 +61,7 @@ Calls to other tools do not trigger the handoff. A read-only `xd://` device requ
 
 The switch is one-shot: after the handoff, prewalk disarms itself, removes the planning nudge, and steers the target with an implementation checklist. It changes the session's active model and optional thinking level without rewriting model-role assignments. A same-model handoff can still change thinking; when the model, pinned upstream route, and effective thinking configuration already match, prewalk disarms without switching.
 
-Pinned upstream routes are saved with model selections, including the initial startup model and explicit selections made while opening another session, and preserved when resuming a session or reviving a parked subagent.
+Pinned upstream routes are saved with model selections, including the initial startup model and explicit selections made while opening another session, and preserved when resuming a session or reviving a parked subagent. A switch that changes only the route notifies subscribers like any other model change, including when reloading the current session.
 
 The handoff is recorded in the session, so resuming it, restoring it with `--restore`, or reviving a parked subagent continues on the handoff model and thinking level instead of returning to the planning model. A retry fallback taken after the handoff supersedes it, as for any session-local model. A revived subagent does not arm its prewalk again while it is still on that target.
 

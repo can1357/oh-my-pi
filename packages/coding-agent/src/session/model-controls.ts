@@ -105,6 +105,7 @@ export class ModelControls {
 	#autoThinking = false;
 	#autoResolvedLevel: Effort | undefined;
 	#selectionGeneration = 0;
+	#automaticInvalidation = 0;
 	#modelPublication = 0;
 	// /clear and /new keep published model owners; a rejected transcript switch restores them.
 	#publicationScope: ModelPublicationScope = { preparation: {}, livePublication: 0, resumePublication: 0 };
@@ -152,10 +153,7 @@ export class ModelControls {
 		return snapshot;
 	}
 
-	/**
-	 * Rollback is not a selection: pending origin calls keep owning the models and effort they published.
-	 * shortcut: also forgets an `invalidateAutomaticSelection()` made mid-switch; count those apart if one must survive a rollback.
-	 */
+	/** Rollback is not a selection: pending origin calls keep owning the models and effort they published. */
 	restorePublicationScope(snapshot: ModelPublicationSnapshot): void {
 		this.#publicationScope = snapshot.scope;
 		this.#selectionGeneration = snapshot.selectionGeneration;
@@ -166,8 +164,10 @@ export class ModelControls {
 		this.#publicationScope.preparation = {};
 	}
 
+	/** A /prewalk takeover cancels pending automatic selections, even across a switch that later rolls back. */
 	invalidateAutomaticSelection(): void {
 		this.#selectionGeneration++;
+		this.#automaticInvalidation++;
 	}
 
 	/** Effective metadata-clamped thinking level applied to the agent. */
@@ -356,17 +356,24 @@ export class ModelControls {
 		}
 
 		const generation = this.#selectionGeneration;
+		const invalidation = this.#automaticInvalidation;
 		const targetModel = await this.#host.modelRegistry.refreshSelectedModelMetadata(model);
 		while (this.#publicationScope.preparation !== preparation && this.#host.sessionGenerationSettled()) {
 			await this.#host.sessionGenerationSettled();
 		}
 		if (this.#publicationScope.preparation !== preparation) return false;
-		// An automatic switch yields to a model or effort selected while its metadata loaded.
-		if (selection === "automatic" && this.#selectionGeneration !== generation) return false;
+		// An automatic switch yields to a model or effort selected, or a /prewalk takeover made, while its metadata loaded.
+		if (
+			selection === "automatic" &&
+			(this.#selectionGeneration !== generation || this.#automaticInvalidation !== invalidation)
+		) {
+			return false;
+		}
 
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
 		this.#host.clearActiveRetryFallback();
 		let published = 0;
+		let publishedInvalidation = 0;
 		let publication = 0;
 		const role = options?.prewalk
 			? PREWALK_MODEL_CHANGE_ROLE
@@ -375,14 +382,15 @@ export class ModelControls {
 				: "temporary";
 		await this.#host.setModelWithProviderSessionReset(targetModel, selection, () => {
 			published = ++this.#selectionGeneration;
+			publishedInvalidation = this.#automaticInvalidation;
 			publication = scope.livePublication = ++this.#modelPublication;
 			if (role !== EPHEMERAL_MODEL_CHANGE_ROLE) scope.resumePublication = publication;
 		});
 		await this.#recordModelReceipt(targetModel, role, publication, scope);
 		if (this.#publicationScope !== scope) return false;
 
-		// A selection made while this one reconciled owns the effort.
-		if (this.#selectionGeneration === published) {
+		// A selection or /prewalk takeover made while this one reconciled owns the effort.
+		if (this.#selectionGeneration === published && this.#automaticInvalidation === publishedInvalidation) {
 			// Prefer explicit effort, then the model's default, then re-clamp the current level (or auto).
 			if (thinkingLevel !== undefined) {
 				this.setThinkingLevel(thinkingLevel);

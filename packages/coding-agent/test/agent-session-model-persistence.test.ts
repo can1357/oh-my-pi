@@ -196,6 +196,97 @@ describe("AgentSession model persistence", () => {
 		expect(modelChangedCount).toBe(1);
 	});
 
+	it("emits model_changed when only the upstream route changes", async () => {
+		const selector = "openrouter/anthropic/claude-sonnet-4.5";
+		const available = sharedModelRegistry.getAvailable();
+		const source = parseModelPattern(`${selector}@anthropic`, available).model;
+		const routed = parseModelPattern(`${selector}@google`, available).model;
+		if (!source || !routed) throw new Error("Expected routed OpenRouter models");
+		const created = await createSession({ initialModel: source });
+		let modelChangedCount = 0;
+		created.session.subscribe(event => {
+			if (event.type === "model_changed") modelChangedCount++;
+		});
+
+		await created.session.setModelTemporary(routed);
+
+		expect(formatModelStringWithRouting(created.session.model!)).toBe(`${selector}@google`);
+		expect(modelChangedCount).toBe(1);
+
+		await created.session.setModelTemporary(routed);
+		expect(modelChangedCount).toBe(1);
+	});
+
+	it("notifies subscribers of route-only same-session switches and reloads without duplicate events", async () => {
+		const selector = "openrouter/anthropic/claude-sonnet-4.5";
+		const available = sharedModelRegistry.getAvailable();
+		const source = parseModelPattern(`${selector}@anthropic`, available).model;
+		const target = parseModelPattern(`${selector}@google`, available).model;
+		if (!source || !target) throw new Error("Expected routed OpenRouter models");
+		const created = await createSession({ initialModel: source, persist: true });
+		const manager = created.session.sessionManager;
+		manager.appendModelChange(`${selector}@anthropic`, "default");
+		manager.appendMessage({ role: "user", content: "preserve this conversation", timestamp: Date.now() });
+		await manager.ensureOnDisk();
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session");
+		const routes: string[] = [];
+		created.session.subscribe(event => {
+			if (event.type === "model_changed") {
+				const model = created.session.model;
+				if (!model) throw new Error("Expected an active model when notified");
+				routes.push(formatModelStringWithRouting(model));
+			}
+		});
+
+		expect(await created.session.switchSession(sessionFile, { model: target })).toBe(true);
+		expect(routes).toEqual([`${selector}@google`]);
+		expect(await created.session.switchSession(sessionFile, { model: target })).toBe(true);
+		expect(routes).toEqual([`${selector}@google`]);
+
+		manager.appendModelChange(`${selector}@anthropic`);
+		await manager.ensureOnDisk();
+		await created.session.reload();
+		expect(routes).toEqual([`${selector}@google`, `${selector}@anthropic`]);
+		await created.session.reload();
+		expect(routes).toEqual([`${selector}@google`, `${selector}@anthropic`]);
+	});
+
+	it("tells subscribers when a rolled-back switch had changed only the upstream route", async () => {
+		const selector = "openrouter/anthropic/claude-sonnet-4.5";
+		const available = sharedModelRegistry.getAvailable();
+		const source = parseModelPattern(`${selector}@anthropic`, available).model;
+		if (!source) throw new Error("Expected a routed OpenRouter model");
+		const created = await createSession({ initialModel: source, persist: true });
+		const targetDir = TempDir.createSync("@pi-route-rollback-target-");
+		const targetManager = SessionManager.create(targetDir.path(), targetDir.path());
+		targetManager.appendModelChange(`${selector}@google`, "default");
+		targetManager.appendMessage({ role: "user", content: "route-only transcript", timestamp: Date.now() });
+		await targetManager.ensureOnDisk();
+		const targetFile = targetManager.getSessionFile();
+		await targetManager.close();
+		if (!targetFile) throw new Error("Expected a target session");
+		let modelChangedCount = 0;
+		created.session.subscribe(event => {
+			if (event.type === "model_changed") modelChangedCount++;
+		});
+		const targetReset = vi
+			.spyOn(SessionMemory.prototype, "resetContextForNewTranscript")
+			.mockRejectedValueOnce(new Error("target reset failed"));
+		try {
+			await expect(created.session.switchSession(targetFile, { preserveLocalCwd: true })).rejects.toThrow(
+				"target reset failed",
+			);
+		} finally {
+			targetReset.mockRestore();
+			targetDir.removeSync();
+		}
+
+		expect(formatModelStringWithRouting(created.session.model!)).toBe(`${selector}@anthropic`);
+		// One event announces the target's route, a second undoes it.
+		expect(modelChangedCount).toBe(2);
+	});
+
 	it("persists the default role when explicitly requested", async () => {
 		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
 		const nextModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
