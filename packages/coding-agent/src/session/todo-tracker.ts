@@ -80,6 +80,7 @@ export interface TodoTrackerHost {
 	hasPendingAsyncWake(): boolean;
 	getActiveToolNames(): string[];
 	getEnabledToolNames(): string[];
+	getMountedXdevToolNames(): string[];
 	toolRegistry(): Map<string, AgentTool>;
 	planModeEnabled(): boolean;
 	/** Whether prewalk will hand off after its plan nudge owns todo creation. */
@@ -359,6 +360,7 @@ export class TodoTracker {
 
 	#buildEagerPreludeContext(): { toolRefs: Record<string, string>; taskBatch: boolean } {
 		const wireName = (name: string): string => {
+			if (this.#host.getMountedXdevToolNames().includes(name)) return `xd://${name}`;
 			const tool = this.#host.toolRegistry().get(name);
 			return typeof tool?.customWireName === "string" ? tool.customWireName : name;
 		};

@@ -82,13 +82,18 @@ function evalEnd(
 		phases?: { name: string; tasks: { content: string; status: string }[] }[];
 	}>,
 	isError = false,
+	deferred = false,
 ): Extract<AgentSessionEvent, { type: "tool_execution_end" }> {
+	const details = statusEvents ? { statusEvents } : undefined;
 	return {
 		type: "tool_execution_end",
 		toolCallId,
-		toolName: "eval",
+		toolName: deferred ? "write" : "eval",
 		isError,
-		result: { content: [{ type: "text", text: "done" }], details: statusEvents ? { statusEvents } : undefined },
+		result: {
+			content: [{ type: "text", text: "done" }],
+			details: deferred ? { xdev: { tool: "eval", mode: "execute", inner: details } } : details,
+		},
 	} as unknown as Extract<AgentSessionEvent, { type: "tool_execution_end" }>;
 }
 
@@ -190,30 +195,32 @@ describe("EventController + Cursor todo bridge", () => {
 		expectRetirableResult(block);
 	});
 
-	it("shows current Todo phases rather than a snapshot captured during Eval", async () => {
+	it.each([false, true])("shows current Todo phases rather than Eval's snapshot (deferred=%s)", async deferred => {
 		const f = createFixture();
 		const recorded = [{ name: "Old", tasks: [{ content: "Earlier", status: "completed" }] }];
 		const current = [{ name: "Current", tasks: [{ content: "Later", status: "in_progress" as const }] }];
 		f.ctx.viewSession.getTodoPhases = () => current;
 
-		await f.controller.handleEvent(evalEnd("eval-todo-1", [{ op: "todo", committed: true, phases: recorded }]));
+		await f.controller.handleEvent(
+			evalEnd("eval-todo-1", [{ op: "todo", committed: true, phases: recorded }], false, deferred),
+		);
 
 		expect(f.ctx.setTodos).toHaveBeenCalledWith(current);
 	});
 
-	it("keeps the Todo panel current when Eval fails after a nested update", async () => {
+	it.each([false, true])("keeps Todo current when Eval fails after a nested update (deferred=%s)", async deferred => {
 		const f = createFixture();
 		const current = [{ name: "Current", tasks: [{ content: "Committed", status: "completed" as const }] }];
 		f.ctx.viewSession.getTodoPhases = () => current;
 
-		await f.controller.handleEvent(evalEnd("eval-todo-error", [{ op: "todo", committed: true }], true));
+		await f.controller.handleEvent(evalEnd("eval-todo-error", [{ op: "todo", committed: true }], true, deferred));
 
 		expect(f.ctx.setTodos).toHaveBeenCalledWith(current);
 	});
-	it("does not restart Todo auto-clear after a nested read-only view", async () => {
+	it.each([false, true])("does not restart Todo auto-clear after a nested view (deferred=%s)", async deferred => {
 		const f = createFixture();
 		f.ctx.viewSession.getTodoPhases = () => [];
-		await f.controller.handleEvent(evalEnd("eval-todo-view", [{ op: "todo", committed: false }]));
+		await f.controller.handleEvent(evalEnd("eval-todo-view", [{ op: "todo", committed: false }], false, deferred));
 		expect(f.ctx.setTodos).not.toHaveBeenCalled();
 	});
 

@@ -20,7 +20,7 @@ import {
 import type { ContextUsageBreakdown, SessionStats } from "./agent-session-types";
 import { getLatestCompactionEntry } from "./session-context";
 import type { SessionEntry } from "./session-entries";
-import type { SessionManager } from "./session-manager";
+import { type SessionManager, taskToolResultDetails } from "./session-manager";
 import { cfgSkillful } from "./settings";
 
 /** Non-message accounting recorded with a provider prompt. */
@@ -169,8 +169,8 @@ export class SessionStatsTracker {
 		for (const message of this.#host.agent.state.messages) {
 			if (message.role === "assistant") {
 				if (message.usage) addUsage(message.usage);
-			} else if (message.role === "toolResult" && message.toolName === "task") {
-				const usage = taskToolUsage(message.details);
+			} else if (message.role === "toolResult") {
+				const usage = taskToolUsage(taskToolResultDetails(message));
 				if (usage) addUsage(usage);
 			}
 		}
@@ -221,10 +221,9 @@ export class SessionStatsTracker {
 				userMessages++;
 			} else if (message.role === "toolResult") {
 				toolResults++;
-				if (message.toolName === "task") {
-					const usage = taskToolUsage(message.details);
-					if (usage) addUsage(usage);
-				} else if (message.toolName === "edit" && message.isError) {
+				const usage = taskToolUsage(taskToolResultDetails(message));
+				if (usage) addUsage(usage);
+				if (message.toolName === "edit" && message.isError) {
 					const { details } = message;
 					if (details && typeof details === "object" && "errorKind" in details) {
 						const kind = details.errorKind;

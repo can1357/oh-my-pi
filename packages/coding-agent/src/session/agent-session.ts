@@ -19,6 +19,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { isPromise } from "node:util/types";
+import { parseXdUrl, stripXdUrlPrefix } from "@oh-my-pi/pi-tui/tools/xd-url";
 
 import {
 	type AfterToolCallContext,
@@ -880,11 +881,19 @@ function ephemeralMaxTokensRejection(model: Model): string | undefined {
 
 /** True for transcript messages that create, use, or report on eval runtime state. */
 function isEvalActivity(message: AgentMessage): boolean {
-	if (message.role === "pythonExecution" || (message.role === "toolResult" && message.toolName === "eval")) {
-		return true;
+	if (message.role === "pythonExecution") return true;
+	if (message.role === "toolResult") {
+		const dispatch = writeDeviceDispatch(message.toolName, message);
+		return message.toolName === "eval" || (dispatch?.mode === "execute" && dispatch.tool === "eval");
 	}
 	return (
-		message.role === "assistant" && message.content.some(block => block.type === "toolCall" && block.name === "eval")
+		message.role === "assistant" &&
+		message.content.some(block => {
+			if (block.type !== "toolCall") return false;
+			if (stripXdUrlPrefix(block.name) === "eval") return true;
+			const target = block.arguments.path ?? block.arguments.file_path;
+			return block.name === "write" && typeof target === "string" && parseXdUrl(target)?.name === "eval";
+		})
 	);
 }
 
@@ -2087,6 +2096,7 @@ export class AgentSession implements SettingsScope {
 			hasPendingAsyncWake: () => this.#hasPendingAsyncWake(),
 			getActiveToolNames: () => this.getActiveToolNames(),
 			getEnabledToolNames: () => this.getEnabledToolNames(),
+			getMountedXdevToolNames: () => this.getMountedXdevToolNames(),
 			toolRegistry: () => this.#tools.registry,
 			planModeEnabled: () => this.#planModeState?.enabled === true,
 			prewalkWillHandoff: () => this.#prewalk.willHandoff,

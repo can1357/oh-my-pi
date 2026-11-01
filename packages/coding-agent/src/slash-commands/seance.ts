@@ -37,7 +37,8 @@ function parseSeanceArgs(args: string): ParsedSeanceArgs {
 }
 
 async function launchSeance(ctx: InteractiveModeContext, sourceSession: string, model?: string): Promise<void> {
-	const taskTool = ctx.session.agent.state.tools.find(tool => tool.name === "task");
+	const taskTool =
+		ctx.session.agent.state.tools.find(tool => tool.name === "task") ?? ctx.session.getToolForEvalBridge("task");
 	if (!taskTool) {
 		ctx.showError("The task tool is not available for /seance.");
 		return;

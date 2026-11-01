@@ -43,6 +43,11 @@ describe("issue #5764: registerTool loadMode default", () => {
 		expect(isMountableUnderXdev({ name: "lsp", loadMode: "discoverable" })).toBe(true);
 	});
 
+	it("keeps hidden forced-call tools out of discovery even when explicitly deferred", () => {
+		expect(isMountableUnderXdev({ name: "think", loadMode: "essential" }, true)).toBe(false);
+		expect(isMountableUnderXdev({ name: "goal", loadMode: "essential" }, true)).toBe(false);
+	});
+
 	it("defaults omitted loadMode to essential for essential built-in names, discoverable otherwise", () => {
 		expect(defaultLoadModeForToolName("read")).toBe("essential");
 		expect(defaultLoadModeForToolName("bash")).toBe("essential");

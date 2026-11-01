@@ -342,6 +342,7 @@ import {
 	cfgSecurityEnabled,
 	cfgSpeechgenEnabled,
 	cfgToolsAbortOnFabricatedResult,
+	cfgToolsForceDiscoverable,
 	cfgToolsIntentTracing,
 	cfgToolsMaxTimeout,
 	cfgToolsXdev,
@@ -2731,8 +2732,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		let computerPrelude: EvalPreludeDefinition | undefined;
 		let ratchetPrelude: EvalPreludeDefinition | undefined;
 		let archivePrelude: EvalPreludeDefinition | undefined;
+		const isEvalEnabled = (): boolean =>
+			activeToolNames.has("eval") || toolSession.xdev?.mountedNames.has("eval") === true;
 		const getEvalPreludes = (): readonly EvalPreludeDefinition[] => {
-			if (restrictToolNames || !toolRegistry.has("eval") || !activeToolNames.has("eval")) return [];
+			if (restrictToolNames || !toolRegistry.has("eval") || !isEvalEnabled()) return [];
 			const builtins: EvalPreludeDefinition[] = [];
 			if (cfgBrowserEnabled.get(settings)) {
 				browserPrelude ??= createBrowserPrelude(toolSession);
@@ -2793,7 +2796,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			restrictToolNames,
 			browserEnabled: cfgBrowserEnabled.get(settings),
 			evalRegistered: toolRegistry.has("eval"),
-			evalActive: activeToolNames.has("eval"),
+			evalActive: isEvalEnabled(),
 		});
 
 		// Restricted sessions cannot inherit or discover MCP capabilities.
@@ -4538,10 +4541,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		if (toolSession.xdev) {
 			const topLevelToolNames: string[] = [];
 			const mountedNames: string[] = [];
+			const forceDiscoverable = cfgToolsForceDiscoverable.get(settings);
 			for (const name of initialToolNames) {
 				const tool = toolRegistry.get(name);
 				const explicitlyRequested = presentationPinnedToolNames?.has(name) === true;
-				if (tool && xdevReadAvailable && xdevWriteAvailable && !explicitlyRequested && isMountableUnderXdev(tool))
+				if (
+					tool &&
+					xdevReadAvailable &&
+					xdevWriteAvailable &&
+					!explicitlyRequested &&
+					isMountableUnderXdev(tool, builtInRegistryToolNames.has(name) && forceDiscoverable.includes(name))
+				)
 					mountedNames.push(name);
 				else topLevelToolNames.push(name);
 			}

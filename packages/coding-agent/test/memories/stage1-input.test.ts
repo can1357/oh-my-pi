@@ -115,6 +115,31 @@ describe("buildStage1RolloutItems", () => {
 		]);
 	});
 
+	it("keeps deferred command results while preserving the output bound and execution-only filter", async () => {
+		const deviceResult = (id: string, tool: string, mode: string, text: string) => ({
+			role: "toolResult",
+			toolName: "write",
+			toolCallId: id,
+			content: [{ type: "text", text }],
+			details: { xdev: { tool, mode, inner: {} } },
+		});
+		const expected = [
+			deviceResult("bash-boundary", "bash", "execute", "x".repeat(32_000)),
+			deviceResult("eval-output", "eval", "execute", "42"),
+		];
+		const messages = [
+			...expected,
+			deviceResult("oversized", "eval", "execute", "x".repeat(32_001)),
+			deviceResult("empty", "bash", "execute", ""),
+			deviceResult("help", "eval", "help", "schema"),
+			deviceResult("other", "task", "execute", "subagent report"),
+			{ role: "toolResult", toolName: "write", content: [{ type: "text", text: "file saved" }] },
+		];
+		const filePath = path.join(tempDir, "deferred.jsonl");
+		await Bun.write(filePath, messages.map(message => JSON.stringify({ type: "message", message })).join("\n"));
+		expect(JSON.parse(await buildStage1RolloutItems(filePath, 100_000))).toEqual(expected);
+	});
+
 	it("rejects missing rollouts", async () => {
 		await expect(buildStage1RolloutItems(path.join(tempDir, "missing.jsonl"), 100)).rejects.toThrow();
 	});

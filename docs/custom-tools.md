@@ -168,7 +168,7 @@ Although the public `CustomTool` type also declares `formatApprovalDetails`, `de
 - Session bootstrap wraps included SDK-provided and discovered custom tools as extension tool definitions; library consumers may instead use `CustomToolAdapter` directly.
 - They are inserted into the session tool registry by name.
 - Unrestricted SDK bootstrap auto-enables custom and extension-registered tools unless the effective registry winner is hidden/default-inactive. Explicit `toolNames` can enable hidden tools. Restricted sessions exclude SDK-provided custom tools unless `allowRestrictedCustomTools: true`, and expose an opted-in custom tool only when its name appears in `toolNames`; ambient filesystem tool discovery is skipped.
-- With `tools.xdev` enabled and the `read`/`write` transport available, enabled discoverable tools are mounted under `xd://` rather than advertised as top-level functions. Explicitly requested tools and essential tools stay top-level.
+- With `tools.xdev` enabled and the `read`/`write` transport available, enabled discoverable tools are mounted under `xd://` rather than advertised as top-level functions. Explicitly requested tools and essential tools stay top-level, except built-ins selected by [`tools.forceDiscoverable`](./settings.md#tools-and-approvals).
 - CLI `--tools` validates against the fully discovered session registry, including registered custom tools. Unknown names and unavailable built-ins produce distinct errors.
 
 ## Rendering hooks

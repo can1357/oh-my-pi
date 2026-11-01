@@ -1022,6 +1022,19 @@ export const cfgToolsXdev = register({
 	},
 });
 
+export const cfgToolsForceDiscoverable = register({
+	id: "tools.forceDiscoverable",
+	type: "array",
+	default: EMPTY_STRING_ARRAY,
+	ui: {
+		tab: "tools",
+		group: "Discovery & MCP",
+		label: "Discoverable Built-ins",
+		description:
+			"Built-in tool names to mount under xd:// instead of exposing their schemas directly. Requires tools.xdev; use Catalog Only prompt docs for on-demand schemas. Existing safety pins and explicit tool selections stay top-level. Does not enable disabled tools.",
+	},
+});
+
 export const cfgToolsXdevDocs = register({
 	id: "tools.xdevDocs",
 	type: "enum",
@@ -1156,4 +1169,5 @@ export const cfgSessionToolGates = combine({
 	generateImage: cfgGenerateImageEnabled,
 	speechgen: cfgSpeechgenEnabled,
 	xdev: cfgToolsXdev,
+	forceDiscoverable: cfgToolsForceDiscoverable,
 });

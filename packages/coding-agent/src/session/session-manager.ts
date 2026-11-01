@@ -27,6 +27,7 @@ import {
 import { isTaskToolDetails, type StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import * as snapcompact from "@oh-my-pi/snapcompact";
+import { writeDeviceDispatch } from "../tools/resolve";
 import { moveFileAcrossDevices } from "../utils/atomic-file";
 import { hasAnnotationDraftsSync } from "../extensibility/custom-commands/bundled/annotate/draft-store";
 import { ArtifactManager } from "./artifacts";
@@ -417,12 +418,19 @@ function taskUsageFrom(details: unknown): Usage | undefined {
 	return maybeUsage !== null && typeof maybeUsage === "object" ? (maybeUsage as Usage) : undefined;
 }
 
+/** Task details keep their billing semantics when execution is routed through a device write. */
+export function taskToolResultDetails(message: { toolName: string; details?: unknown }): unknown {
+	if (message.toolName === "task") return message.details;
+	const dispatch = writeDeviceDispatch(message.toolName, message);
+	return dispatch?.tool === "task" && dispatch.mode === "execute" ? dispatch.inner : undefined;
+}
+
 function entryUsage(entry: SessionEntry): Usage | undefined {
 	if (entry.type === "model_usage") return entry.usage;
 	if (entry.type !== "message") return undefined;
 	const message = entry.message;
 	if (message.role === "assistant") return message.usage;
-	if (message.role === "toolResult" && message.toolName === "task") return taskUsageFrom(message.details);
+	if (message.role === "toolResult") return taskUsageFrom(taskToolResultDetails(message));
 	return undefined;
 }
 
@@ -4322,8 +4330,8 @@ export class SessionManager {
 	static #resetInheritedUsageCost(history: SessionEntry[]): void {
 		for (const entry of history) {
 			resetUsageCost(entryUsage(entry));
-			if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "task") {
-				resetTaskResultBilling(entry.message.details);
+			if (entry.type === "message" && entry.message.role === "toolResult") {
+				resetTaskResultBilling(taskToolResultDetails(entry.message));
 			}
 		}
 	}

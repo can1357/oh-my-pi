@@ -26,6 +26,7 @@ import readPathTemplate from "../prompts/memories/read-path.md" with { type: "te
 import stageOneInputTemplate from "../prompts/memories/stage_one_input.md" with { type: "text" };
 import stageOneSystemTemplate from "../prompts/memories/stage_one_system.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
+import { writeDeviceDispatch } from "../tools/resolve";
 import {
 	claimStage1Jobs,
 	clearMemoryData as clearMemoryDataInDb,
@@ -740,8 +741,9 @@ function shouldPersistResponseItemForMemories(message: AgentMessage): boolean {
 	if (role === "system" || role === "developer" || role === "user" || role === "assistant") {
 		return true;
 	}
-	if (role !== "toolResult") return false;
-	const toolName = (message as { toolName?: string }).toolName;
+	if (message.role !== "toolResult") return false;
+	const dispatch = writeDeviceDispatch(message.toolName, message);
+	const toolName = dispatch?.mode === "execute" ? dispatch.tool : message.toolName;
 	if (toolName === "bash" || toolName === "eval" || toolName === "read" || toolName === "grep") {
 		const text = extractMessageText(message);
 		return text.length > 0 && text.length <= 32_000;

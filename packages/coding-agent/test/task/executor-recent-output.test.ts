@@ -90,12 +90,16 @@ interface ScenarioResult {
 	observations: Observation[];
 	tools: Array<string | undefined>;
 	toolSnapshots: Array<
-		Pick<AgentProgress, "currentTool" | "currentToolArgs" | "currentToolIntent" | "lastIntent" | "recentTools">
+		Pick<
+			AgentProgress,
+			"currentTool" | "currentToolArgs" | "currentToolIntent" | "lastIntent" | "recentTools" | "inflightTaskDetails"
+		>
 	>;
 	/** Snapshot arrays captured by reference + a deep copy taken at observation time. */
 	immutability: Array<{ live: string[]; copy: string[] }>;
 	exitCode: number;
 	finalWant: string[];
+	extractedToolData?: Record<string, unknown[]>;
 }
 
 // AssistantMessage requires api/provider/usage/stopReason the executor never
@@ -277,13 +281,22 @@ async function runScenario(
 				currentToolIntent: progress.currentToolIntent,
 				lastIntent: progress.lastIntent,
 				recentTools: progress.recentTools.slice(),
+				inflightTaskDetails: progress.inflightTaskDetails,
 			});
 			observations.push({ got: [...progress.recentOutput], want: ref.expected() });
 			immutability.push({ live: progress.recentOutput, copy: [...progress.recentOutput] });
 		},
 	});
 
-	return { observations, tools, toolSnapshots, immutability, exitCode: result.exitCode, finalWant: ref.expected() };
+	return {
+		observations,
+		tools,
+		toolSnapshots,
+		immutability,
+		exitCode: result.exitCode,
+		finalWant: ref.expected(),
+		extractedToolData: result.extractedToolData,
+	};
 }
 
 function expectAllMatch(result: ScenarioResult, minObservations: number): void {
@@ -313,6 +326,39 @@ function mulberry32(seed: number): () => number {
 }
 describe("tool argument preview semantics", () => {
 	afterEach(() => vi.restoreAllMocks());
+
+	it("keeps deferred nested task progress visible and records completed tasks for billing", async () => {
+		const inner = { results: [], progress: [{ id: "Nested", cost: 0.25 }] };
+		const result = await runScenario([], {
+			events: [
+				{ type: "tool_execution_start", toolCallId: "nested", toolName: "write", args: { path: "xd://task" } },
+				{
+					type: "tool_execution_update",
+					toolCallId: "nested",
+					toolName: "write",
+					args: {},
+					partialResult: { content: [], details: { xdev: { tool: "task", mode: "execute", inner } } },
+				},
+				{ type: "tool_execution_start", toolCallId: "fresh", toolName: "write", args: { path: "XD://task" } },
+				{
+					type: "tool_execution_end",
+					toolCallId: "nested",
+					toolName: "write",
+					isError: false,
+					result: { content: [], details: { xdev: { tool: "task", mode: "execute", inner } } },
+				},
+			],
+		});
+		expect(result.toolSnapshots.some(snapshot => snapshot.inflightTaskDetails?.progress?.[0]?.id === "Nested")).toBe(
+			true,
+		);
+		expect(result.toolSnapshots.at(-1)?.inflightTaskDetails).toBeUndefined();
+		const fresh = result.toolSnapshots.find(snapshot => snapshot.currentToolArgs === "XD://task");
+		expect(fresh).toBeDefined();
+		expect(fresh?.inflightTaskDetails).toBeUndefined();
+		expect(result.extractedToolData?.task).toEqual([inner]);
+		expect(result.extractedToolData?.write).toBeUndefined();
+	});
 
 	it("does not reinterpret another tool's input as an edit path", async () => {
 		const result = await runScenario([], {

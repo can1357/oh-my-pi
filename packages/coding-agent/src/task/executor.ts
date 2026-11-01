@@ -23,6 +23,7 @@ import {
 	TRUNCATE_LENGTHS,
 } from "@oh-my-pi/pi-tui/render/render-utils";
 import { type EditMode, getEditInputPaths } from "@oh-my-pi/pi-tui/tools/edit";
+import { parseXdUrl } from "@oh-my-pi/pi-tui/tools/xd-url";
 import {
 	formatModelStringWithRouting,
 	resolveAgentAdvisorRolePattern,
@@ -79,7 +80,7 @@ import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
 import type { AuthStorage } from "../session/auth-storage";
 import type { CostGate } from "../session/cost-gate";
 import { SKILL_PROMPT_MESSAGE_TYPE } from "../session/messages";
-import { hasConversationalHistory, SessionManager } from "../session/session-manager";
+import { hasConversationalHistory, SessionManager, taskToolResultDetails } from "../session/session-manager";
 import { truncateTail } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import {
 	AUTO_THINKING,
@@ -125,12 +126,12 @@ import {
 import { seanceIsolationOptions } from "./seance-policy";
 import type { PreparedSeanceSession } from "./seance";
 import {
+	isTaskToolDetails,
 	type AgentProgress,
 	type SingleResult,
 	type StructuredSubagentOutput,
 	type StructuredSubagentSchemaMode,
 	type StructuredSubagentSchemaSource,
-	type TaskToolDetails,
 	type YieldItem,
 } from "@oh-my-pi/pi-tui/tools/task";
 import { yieldSectionShapes } from "./yield-assembly";
@@ -1890,7 +1891,12 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				}
 				// Reset any prior in-flight task snapshot so we don't show stale
 				// nested progress when the agent enters a fresh `task` call.
-				if (event.toolName === "task") {
+				if (
+					event.toolName === "task" ||
+					(event.toolName === "write" &&
+						typeof startArgs.path === "string" &&
+						parseXdUrl(startArgs.path)?.name === "task")
+				) {
 					progress.inflightTaskDetails = undefined;
 				}
 				break;
@@ -1944,6 +1950,13 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				// renderer doesn't double-count it against the final entry.
 				if (event.toolName === "task") {
 					progress.inflightTaskDetails = undefined;
+				}
+				if (event.toolName === "write") {
+					const details = taskToolResultDetails({ toolName: event.toolName, details: event.result.details });
+					if (isTaskToolDetails(details)) {
+						progress.inflightTaskDetails = undefined;
+						recordExtractedToolData("task", details);
+					}
 				}
 
 				// Check for registered subagent tool handler
@@ -2049,11 +2062,14 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				// `TaskToolDetails` (results + progress); we stash the latest
 				// snapshot so the parent UI can render the in-flight subtree
 				// without waiting for the call to finish.
-				if (event.toolName === "task") {
-					const partial = (event as { partialResult?: { details?: unknown } }).partialResult;
-					const details = partial && typeof partial === "object" ? partial.details : undefined;
-					if (details && typeof details === "object" && "results" in (details as TaskToolDetails)) {
-						progress.inflightTaskDetails = details as TaskToolDetails;
+				if (event.toolName === "task" || event.toolName === "write") {
+					const partial: unknown = event.partialResult;
+					const details = taskToolResultDetails({
+						toolName: event.toolName,
+						details: isRecord(partial) ? partial.details : undefined,
+					});
+					if (isTaskToolDetails(details)) {
+						progress.inflightTaskDetails = details;
 						flushProgress = true;
 					}
 				}

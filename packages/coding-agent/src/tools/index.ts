@@ -92,6 +92,7 @@ import {
 	cfgLaunchEnabled,
 	cfgSecurityEnabled,
 	cfgTodoEnabled,
+	cfgToolsForceDiscoverable,
 	cfgToolsXdev,
 	cfgWebSearchEnabled,
 } from "./settings";
@@ -911,11 +912,15 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	// Explicitly requested built-ins retain their top-level presentation.
 	const xdevEnabled = xdevRequested && tools.some(tool => tool.name === "write");
 	const mountBuiltinTools = requestedTools === undefined;
+	const forceDiscoverable = cfgToolsForceDiscoverable.get(session.settings);
 	if (xdevEnabled) {
 		const mountedNames = new Set<string>();
 		const kept: Tool[] = [];
 		for (const tool of tools) {
-			const mountable = mountBuiltinTools && isMountableUnderXdev(tool) && tool.name in BUILTIN_TOOLS;
+			const mountable =
+				mountBuiltinTools &&
+				tool.name in BUILTIN_TOOLS &&
+				isMountableUnderXdev(tool, forceDiscoverable.includes(tool.name));
 			if (mountable) mountedNames.add(tool.name);
 			else kept.push(tool);
 		}

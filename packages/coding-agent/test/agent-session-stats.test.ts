@@ -7,6 +7,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { SessionStatsTracker } from "@oh-my-pi/pi-coding-agent/session/session-stats";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { estimateToolSchemaTokens } from "@oh-my-pi/pi-tui/status-line/context-usage";
 
@@ -94,6 +95,89 @@ describe("AgentSession session stats", () => {
 		expect(stats.cost).toBe(6);
 		expect(stats.totalMessages).toBe(0);
 		expect(stats.assistantMessages).toBe(0);
+	});
+
+	it("counts deferred task usage once and clears inherited billing on fork", async () => {
+		const target = model();
+		using tempDir = TempDir.createSync("@omp-session-deferred-task-");
+		const manager = SessionManager.create(tempDir.path(), tempDir.path());
+		const usage: Usage = {
+			input: 11,
+			output: 7,
+			cacheRead: 3,
+			cacheWrite: 5,
+			totalTokens: 26,
+			cost: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, total: 10 },
+		};
+		const inner = { usage, results: [{ usage }], progress: [{ cost: 10 }] };
+		manager.appendMessage({
+			role: "assistant",
+			content: [],
+			api: target.api,
+			provider: target.provider,
+			model: target.id,
+			stopReason: "stop",
+			usage,
+			timestamp: 0,
+		});
+		for (const [index, xdev] of [
+			{ tool: "task", mode: "execute", inner },
+			{ tool: "task", mode: "help", inner },
+			{ tool: "bash", mode: "execute", inner },
+			{ tool: "task", mode: "execute" },
+		].entries()) {
+			manager.appendMessage({
+				role: "toolResult",
+				toolName: "write",
+				toolCallId: `device-${index}`,
+				content: [],
+				details: { xdev },
+				isError: index === 3,
+				timestamp: index + 1,
+			});
+		}
+		session = createStatsSession(manager, target);
+		expect(session.getSessionStats()).toMatchObject({
+			toolResults: 4,
+			tokens: { input: 22, output: 14, cacheRead: 6, cacheWrite: 10, total: 52 },
+			cost: 20,
+		});
+		const tracker = new SessionStatsTracker({
+			session,
+			agent: session.agent,
+			sessionManager: manager,
+			modelRegistry,
+			model: () => target,
+			sessionId: () => session!.sessionId,
+		});
+		expect(tracker.getTokenTotals()).toEqual(session.getSessionStats().tokens);
+		expect(manager.getUsageStatistics()).toMatchObject({ totalTokens: 52, cost: 20, subagentCost: 10 });
+		await manager.flush();
+		const file = manager.getSessionFile();
+		if (!file) throw new Error("Expected persisted session file");
+		await session.dispose();
+		session = undefined;
+		await manager.close();
+		const fork = await SessionManager.forkFrom(file, tempDir.path(), `${tempDir.path()}/fork`, undefined, {
+			resetInheritedCost: true,
+			suppressBreadcrumb: true,
+		});
+		try {
+			expect(fork.getUsageStatistics()).toMatchObject({ totalTokens: 52, cost: 0, subagentCost: 0 });
+			expect(fork.buildSessionContext().messages[1]).toMatchObject({
+				details: {
+					xdev: {
+						inner: {
+							usage: { cost: { total: 0 } },
+							results: [{ usage: { cost: { total: 0 } } }],
+							progress: [{ cost: 0 }],
+						},
+					},
+				},
+			});
+		} finally {
+			await fork.close();
+		}
 	});
 
 	it("keeps mixed peak and off-peak charges in session and footer totals after resume", async () => {

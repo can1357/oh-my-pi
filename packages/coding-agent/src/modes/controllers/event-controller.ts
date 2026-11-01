@@ -2285,11 +2285,18 @@ export class EventController {
 			}
 		}
 		if (syntheticFailureCard) this.#syntheticFailureCards.set(event.toolCallId, syntheticFailureCard);
+		const dispatch = writeDeviceDispatch(event.toolName, event.result);
 		if (event.toolName === "todo" && !event.isError) {
 			const details = event.result.details as { op?: string; phases?: TodoPhase[] } | undefined;
 			if (details?.op !== "view" && details?.phases) this.ctx.setTodos(details.phases);
 		}
-		if (event.toolName === "eval" && hasNestedTodo(event.result.details)) {
+		const evalDetails =
+			event.toolName === "eval"
+				? event.result.details
+				: dispatch?.mode === "execute" && dispatch.tool === "eval"
+					? dispatch.inner
+					: undefined;
+		if (hasNestedTodo(evalDetails)) {
 			this.ctx.setTodos(this.ctx.viewSession.getTodoPhases());
 		}
 		if (event.toolName === "todo" && event.isError) {
@@ -2318,7 +2325,6 @@ export class EventController {
 		// Plan approval rides a `write` to xd://propose: the dispatch metadata on
 		// the write details carries the approval payload as `inner`.
 		if (!event.isError) {
-			const dispatch = writeDeviceDispatch(event.toolName, event.result);
 			const details =
 				dispatch?.tool === PROPOSE_DEVICE_NAME && dispatch.mode === "execute" ? dispatch.inner : undefined;
 			if (
