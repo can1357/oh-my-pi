@@ -354,9 +354,11 @@ function applyUpstreamRouting(model: Model<Api>, upstream: string): Model<Api> {
 }
 
 const kProviderModelIndex = Symbol("model-resolver.providerIndex");
+const kProviderExactIndex = Symbol("model-resolver.providerExactIndex");
 const kProviderSpellingIndex = Symbol("model-resolver.providerSpellingIndex");
 type ModelsWithProviderIndex = readonly Model<Api>[] & {
 	[kProviderModelIndex]?: Map<string, Model<Api> | null>;
+	[kProviderExactIndex]?: Map<string, Model<Api> | null>;
 	[kProviderSpellingIndex]?: Map<string, Model<Api> | null>;
 };
 
@@ -392,6 +394,21 @@ function getProviderModelIndex(availableModels: readonly Model<Api>[]): Map<stri
 	if (cached) return cached;
 	const index = buildProviderIndex(availableModels, id => id.toLowerCase());
 	tagged[kProviderModelIndex] = index;
+	return index;
+}
+
+/**
+ * `provider\0id` → model with the id kept case-sensitive. Lets an exact id win
+ * when a provider carries ids differing only by case (a `models.yml` entry
+ * `MiMo-V2.6-Pro` beside the bundled `mimo-v2.6-pro`), which the
+ * case-insensitive {@link getProviderModelIndex} marks ambiguous.
+ */
+function getProviderExactIndex(availableModels: readonly Model<Api>[]): Map<string, Model<Api> | null> {
+	const tagged = availableModels as ModelsWithProviderIndex;
+	const cached = tagged[kProviderExactIndex];
+	if (cached) return cached;
+	const index = buildProviderIndex(availableModels, id => id);
+	tagged[kProviderExactIndex] = index;
 	return index;
 }
 
@@ -449,9 +466,15 @@ export function resolveProviderModelReference(
 	availableModels: readonly Model<Api>[],
 ): Model<Api> | undefined {
 	const normalizedProvider = provider.trim().toLowerCase();
-	const normalizedModelId = modelId.trim().toLowerCase();
+	const trimmedModelId = modelId.trim();
+	const normalizedModelId = trimmedModelId.toLowerCase();
 	if (!normalizedProvider || !normalizedModelId) {
 		return undefined;
+	}
+
+	const exactCase = getProviderExactIndex(availableModels).get(`${normalizedProvider}\u0000${trimmedModelId}`);
+	if (exactCase) {
+		return exactCase;
 	}
 
 	const index = getProviderModelIndex(availableModels);

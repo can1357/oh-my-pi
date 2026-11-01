@@ -4014,6 +4014,12 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#stopLoadingAnimation(true);
 		}
 		this.rebuildChatFromMessages();
+		// A /btw inject keeps its own retry (its key re-arms and it reports the reason); handing it
+		// to the editor as well would offer a second way to send it.
+		if (this.#btwController.reclaimDroppedPrompt(prompt)) {
+			this.ui.requestRender();
+			return;
+		}
 		// The rebuild drops transient notices, including the one that refused this prompt.
 		if (prompt.reason) this.showError(prompt.reason);
 		// The drop arrives asynchronously (after the abort settles); never clobber
@@ -9350,6 +9356,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	handleBtwFollowUpKey(): boolean {
 		return this.#btwController.handleFollowUp();
+	}
+
+	handleBtwInjectKey(): boolean {
+		return this.#btwController.handleInject();
 	}
 
 	async handleBtwBranch(

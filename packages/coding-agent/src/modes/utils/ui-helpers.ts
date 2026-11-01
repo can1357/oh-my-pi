@@ -104,7 +104,7 @@ import {
 import {
 	assistantHasVisibleContent,
 	assistantUsageIsBilled,
-	buildAsyncResultBlock,
+	buildAsyncResultComponent,
 	buildFileMentionBlock,
 	buildIrcMessageCard,
 	buildLaunchCompletionBlock,
@@ -122,6 +122,7 @@ import {
 	cfgTerminalShowImages,
 } from "../settings";
 import { cfgReadToolResultPreview } from "../../tools/settings";
+import type { DroppedPrompt } from "../../session/agent-session-types";
 
 interface RenderInitialMessagesOptions {
 	preserveExistingChat?: boolean;
@@ -243,6 +244,7 @@ function imageLinksForMessage(
 }
 
 const QUEUED_CONVERSATION_CHANGED = Symbol("queued conversation changed");
+const QUEUED_PROMPT_DROPPED = Symbol("queued prompt dropped");
 
 export class UiHelpers {
 	/**
@@ -330,7 +332,9 @@ export class UiHelpers {
 			case "custom": {
 				if (message.display) {
 					if (message.customType === "async-result") {
-						const component = buildAsyncResultBlock(message);
+						const renderer = this.ctx.viewSession.extensionRunner?.getMessageRenderer(message.customType);
+						const component = buildAsyncResultComponent(message, renderer);
+						component.setExpanded(this.ctx.toolOutputExpanded);
 						this.ctx.chatContainer.addChild(component);
 						break;
 					}
@@ -1584,10 +1588,14 @@ export class UiHelpers {
 				settled.resolve();
 			}
 		};
-		const reportFailure = (count: number, error: unknown) => {
+		const reportFailure = (count: number, error: unknown, reason?: string) => {
 			this.ctx.updatePendingMessagesDisplay();
 			if (error === QUEUED_CONVERSATION_CHANGED || error instanceof ConversationChangedError) {
 				this.ctx.showStatus("Conversation changed: unsent queued input returned to the editor");
+				return;
+			}
+			if (error === QUEUED_PROMPT_DROPPED) {
+				this.ctx.showStatus(reason ?? "Unsent queued input retained after prompt cancellation");
 				return;
 			}
 			this.ctx.showError(
@@ -1605,7 +1613,7 @@ export class UiHelpers {
 					continuesConversation(this.ctx.sessionManager, liveOrigin))
 			);
 		};
-		const restoreQueue = (error: unknown): Promise<void> => {
+		const restoreQueue = (error: unknown, reason?: string): Promise<void> => {
 			if (restored) return restoration ?? Promise.resolve();
 			restored = true;
 			restoration = (async () => {
@@ -1625,7 +1633,7 @@ export class UiHelpers {
 					message => !consumed.has(message) && (!firstLeftOut || message !== firstPrompt),
 				);
 				restoredToQueue = this.#returnCompactionEntries(batch, origin);
-				reportFailure(batch.length, error);
+				reportFailure(batch.length, error, reason);
 			})();
 			return restoration;
 		};
@@ -1648,15 +1656,15 @@ export class UiHelpers {
 			await putFirstBack();
 			reportFailure(1, error);
 		};
-		const onFirstDropped = async () => {
+		const onFirstDropped = async (reason?: string) => {
 			firstFailed = true;
 			firstAdmitted = undefined;
 			if (!restored) {
-				await restoreQueue(new Error("Queued prompt was not sent"));
+				await restoreQueue(QUEUED_PROMPT_DROPPED, reason);
 				return;
 			}
 			await putFirstBack();
-			this.ctx.updatePendingMessagesDisplay();
+			reportFailure(1, QUEUED_PROMPT_DROPPED, reason);
 		};
 		const onFirstQueued = (queued: readonly AgentMessage[]) => {
 			firstQueued = queued;
@@ -1731,6 +1739,7 @@ export class UiHelpers {
 				this.#assertQueuedLocalConversation(origin);
 				firstDispatched = true;
 				const disposeFirstPrompt = this.ctx.recordLocalSubmission(first.text, first.images?.length ?? 0);
+				let dropped: DroppedPrompt | undefined;
 				promptPromise = this.ctx.session
 					.prompt(first.text, {
 						streamingBehavior: first.mode,
@@ -1738,13 +1747,25 @@ export class UiHelpers {
 						conversationOrigin: origin,
 						onPromptQueued: onFirstQueued,
 						onPromptAdmitted: onFirstAdmitted,
+						onPromptDropped: prompt => {
+							dropped = prompt;
+							firstFailed = true;
+							firstAdmitted = undefined;
+						},
 					})
-					// Plain prompt drops already return through the session's
-					// promptDropped host hook; only custom prompts need onFirstDropped.
-					.catch(async (error: unknown) => {
-						disposeFirstPrompt();
-						await onFirstFailed(error);
-					});
+					// Recover outside the SDK admission bracket: restoration may
+					// await a transition whose hooks wait for this prompt to settle.
+					.then(
+						async () => {
+							if (!dropped) return;
+							disposeFirstPrompt();
+							await onFirstDropped(dropped.reason);
+						},
+						async (error: unknown) => {
+							disposeFirstPrompt();
+							await onFirstFailed(error);
+						},
+					);
 			}
 			for (const message of queuedMessages.slice(firstPromptIndex + 1)) {
 				await deliverQueuedMessage(message, onDelivered);

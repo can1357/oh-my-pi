@@ -76,6 +76,16 @@ export function compareRevision(a: Revision, b: Revision): number {
 	return a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
 }
 
+/** Whether a revision string parses and is at or above `floor`; `undefined` or unparsable is never. */
+export function revisionAtLeast(revision: string | undefined, floor: string): boolean {
+	if (revision === undefined) return false;
+	const parsedRevision = parseRevision(revision);
+	const parsedFloor = parseRevision(floor);
+	return (
+		parsedRevision !== undefined && parsedFloor !== undefined && compareRevision(parsedRevision, parsedFloor) >= 0
+	);
+}
+
 /** Renders a revision as its canonical `major.minor.patch` string. */
 export function formatRevision(revision: Revision): string {
 	return `${revision[0]}.${revision[1]}.${revision[2]}`;

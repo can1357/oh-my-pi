@@ -78,10 +78,12 @@ export type CommandMetadataChangedListener = () => void | Promise<void>;
 /** Public summary of an asynchronous job. */
 export type AsyncJobSnapshotItem = Pick<
 	AsyncJob,
-	"id" | "type" | "status" | "label" | "startTime" | "endTime" | "agentId" | "ownerId"
+	"id" | "type" | "status" | "label" | "intent" | "startTime" | "endTime" | "agentId" | "ownerId"
 > & {
 	/** Full command line of a job that runs a process; `label` is cut to 120 characters. */
 	command?: string;
+	/** One line on what the command does and when it ends, while widgets are on (`JobWidgetRegistry.caption`). */
+	caption?: string;
 };
 
 /** One async job as a job inspector (the jobs sheet) shows it beyond its snapshot row. */
@@ -228,6 +230,12 @@ export interface AgentSessionConfig {
 	prewalk?: Prewalk;
 	/** Keep `prewalk.auto` away from this session until `/new` (`--no-prewalk`). */
 	suppressAutoPrewalk?: boolean;
+	/**
+	 * Created to run an assignment its owner prompts once setup finishes (task executor spawns).
+	 * Until the first prompt, IRC messages never wake a turn the assignment would miss; see
+	 * `AgentSession.#wakeForIrc`.
+	 */
+	awaitingAssignment?: boolean;
 	/** Force read-only plan mode at start, auto-approve, then switch to the target. */
 	planYolo?: PlanYolo;
 	/** Initial per-family service tiers for the live session. */
@@ -476,8 +484,8 @@ export interface PromptOptions {
 	 * is pushed onto its steer/follow-up/aside queue (after image
 	 * normalization and vision-description preprocessing for that prompt); or
 	 * is routed to an extension command, before its handler runs. Admission is
-	 * not proof that a model call will occur. A prompt dropped, cancelled, or
-	 * failed before admission still only settles through the returned promise.
+	 * not proof that a model call will occur. Drops notify onPromptDropped or
+	 * the session host; other failures settle through the returned promise.
 	 */
 	onPromptAdmitted?: () => void;
 	/**
@@ -488,11 +496,17 @@ export interface PromptOptions {
 	 * is queued as an aside.
 	 */
 	onPromptQueued?: (queued: readonly AgentMessage[]) => void;
+	/**
+	 * Called synchronously when this user prompt is dropped before dispatch,
+	 * instead of the session host's setPromptDropped hook. Keep notification
+	 * synchronous; perform asynchronous recovery after the prompt settles.
+	 */
+	onPromptDropped?: (prompt: DroppedPrompt) => void;
 }
 
-/** Payload for {@link AgentSession.setPromptDropped}: a user prompt cancelled
- *  before it reached the agent (an abort or usage preflight denial raced turn
- *  setup), so it was never persisted to the session. */
+/** Payload for a submission's onPromptDropped or AgentSession.setPromptDropped:
+ *  a user prompt cancelled before it reached the agent, so it was never
+ *  persisted to the session. */
 export interface DroppedPrompt {
 	/** The prompt exactly as typed, before template/command expansion. */
 	text: string;

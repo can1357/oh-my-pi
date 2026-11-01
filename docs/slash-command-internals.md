@@ -300,6 +300,7 @@ TUI and ACP/RPC dispatch the shared built-in registry before `session.prompt(...
 - Each detached replay batch retains its original session and branch position. Active session transitions settle before replay judges that position; normal branch continuation remains valid, while a new session, another branch, or a completed switch returns only unconsumed input to the editor. Replay checks again after asynchronous commands/skill loading and passes explicit `conversationOrigin` data through the SDK's deferred-loading, maintenance, preprocessing, and admission boundaries. A transition which temporarily adopts another session but rolls back does not strand still-valid original input.
 - Successfully executed local commands, including `/new`, stay consumed even when their remaining batch no longer belongs to the current conversation. Restoring input does not write new prompt-history entries.
 - Failed compatible batches merge ahead of newer queued input in original submission order, including overlapping drains whose first prompts fail later. Recovery preserves exact message identities and hidden companions, never removes unrelated queued messages by text, and never assigns an old origin to a newer conversation's queue. Stale batches restore their own ordered remainder beside the current draft without changing the newer queue or its origin.
+- Detached plain prompts also own pre-dispatch cancellation recovery through `onPromptDropped`; they do not invoke the generic editor-restoration hook. Recovery runs after the SDK prompt settles, preserves batch identity, FIFO order, images and links, and reports cancellation without clearing a newer submission's optimistic row or loading state.
 
 ## 9) Error handling and failure surfaces
 
@@ -355,6 +356,33 @@ than a byte-for-byte native provider transcript.
 - Completed, cancelled, and failed panels close with `Esc`; their history stays
   saved. There is no hide-and-continue action or separate `x` cancellation key.
 - `c` copies the completed inline answer, or the selected topic's latest nonempty answer.
+- With `btw.inject` on (`/settings` → Interaction → "/btw Steering Inject"), a side
+  question that asks for a steering, correction, or instruction prompt for the main session
+  gets one in a single `<inject>…</inject>` block (the prompt shows the exact form). The
+  answer shows the block apart from its prose, behind a `btw.rail` (`▎`, pink while pending)
+  with "Inject into main session" on the row below; in Tern, which wraps rows itself, the
+  block is a toned card. `app.btw.inject` (`Alt+I` by default; see
+  [keybindings](keybindings.md)) sends its text as shown (trimmed, control sequences
+  stripped, tabs expanded) to the main session as a user message: a steer while the main
+  agent is running, else a new turn. It is never run as a slash command or expanded as a
+  prompt template; `^model` mentions and magic keywords apply as if typed.
+- The send counts once the main session admits it; sending turns the rail green, fills a
+  reserved column on every line with the send arrow (`nav.selected`, `➤` by default) and
+  relabels the row below "Injected into main session", without moving rows or the text
+  column. If the session drops it before dispatch (an Esc race, a usage preflight denial,
+  the cost cap) or refuses it before it reaches the transcript (no model or API key), the
+  block turns back to pending with the reason or a "not sent" status, and the key is the
+  one way to retry: the text does not also land in the editor. A failure after the message
+  reached the transcript or the steer queue keeps the block sent; Esc while the steer still
+  waits in the queue hands it back to the editor like any queued message. The key does
+  nothing while a send is in flight or a branch or session move is running.
+- A block splits out only while the answer streams or once its tag is closed: an unclosed
+  block in a finished answer stays plain text. The last opener that has a closing tag,
+  paired with the first close after it, is the block. Only answers from the current run
+  that were asked with `btw.inject` on can be sent, once each: in history, the latest
+  turn's block shows pending, sent turns keep their marks, and blocks from earlier turns or
+  runs read as plain text. Side answers about a focused subagent, and collab guests, get
+  neither the instruction nor the block.
 - After an inline BTW answer completes, `f` opens that topic's follow-up input
   directly, without requiring `/btw` first. The main editor must be empty and focused.
 - In history, `f` or `Enter` opens a native follow-up input for the selected topic.
@@ -487,3 +515,51 @@ Without an interactive UI, `code-review` delegates to `/review` instead of openi
 Estimate rules: Overview category and per-tool rows split the reported Used total by each row's estimated share, while entry headers show their own unscaled estimates, so the entries in a category need not add up to its Overview row; the Overview notes this under its legend. Skills is its own estimate-only row (the skill listing in the system prompt) and is subtracted from the System Prompt weight to avoid double counting. Multiple thinking blocks in one message share a total shown on a group heading, and grouped entries show `—`; empty interrupted thinking without usage shows `N/A · Interrupted`, not zero. Retained Anthropic web-search and tool-search calls and results appear in Tool Calls and Tool Output as JSON; opaque provider data (thinking signatures, `encrypted_content`, `encrypted_index`) is shown only as its size, such as `signature · 1,024 chars`, while still counted.
 
 Navigation uses the `tui.select.*` bindings: up/down select and scroll, confirm opens an entry, cancel goes back or closes, and page up/down scroll full-content view (see [keybindings](./keybindings.md)). In Tern, click selects, double-click opens, and the mouse wheel scrolls. Categories without entries cannot be opened. Opening the viewer does not submit the composer draft or interrupt a background turn.
+
+## 15) Bundled command note: `/review`
+
+`/review` does not run a reviewer itself. It builds a prompt and returns it to the main session, which then calls the `task` tool with `agent: "reviewer"`. The reviewer is an ordinary task agent, so discovery, model routing, and spawn limits follow [Task agent discovery](./task-agent-discovery.md).
+
+**Target.** `/review [ref] [instructions]` takes a GitHub PR URL, `pr://owner/repo/N`, a GitLab MR URL, or a fully qualified `mr://host/group/project/iid`. The first argument that parses as a ref is the target and the remaining words become extra instructions. Without a ref, an interactive session opens a Review Mode menu: up to three PRs or MRs mentioned in the conversation, a base branch, uncommitted changes, a specific commit, a specific open PR or MR, and custom instructions (the last only when no extra instructions were given). Without a UI and without a ref, the prompt asks for one reviewer task over recent code changes.
+
+**Fan-out.** The prompt asks for one reviewer task when the diff has fewer than 100 changed lines or at most two files. Larger diffs ask for more reviewers, up to 16 once a diff reaches 5000 changed lines, grouped by locality. A diff over 50,000 characters or 20 files is not inlined. The prompt then carries a short preview per file and tells each reviewer to read its own diff.
+
+**Result.** The bundled `reviewer` declares this `output` schema in its frontmatter:
+
+| Field | Type | Meaning |
+| ----- | ---- | ------- |
+| `overall_correctness` | `correct` or `incorrect` | Whether the change has bugs or blockers |
+| `explanation` | string | Verdict summary, 1 to 3 sentences |
+| `confidence` | number, 0.0 to 1.0 | Confidence in the verdict |
+| `findings` (optional) | list | One entry per issue: `title`, `body`, `priority` (0 blocks release to 3 nice to have), `confidence`, `file_path`, `line_start`, `line_end` |
+
+The schema applies only to structured runs: `task.structured` on, or `structured: true` in the agent definition. The bundled `reviewer` does not set `structured`, so with the default `task.structured: false` the task result is the reviewer's final message as text. The `/review` request also asks reviewers to report through incremental `yield` sections, and the `yield` tool exists only on structured runs. See [model and structured-output precedence](./task-agent-discovery.md#model-and-structured-output-precedence).
+
+**Replacing the reviewer.** `/review` looks the agent up by name, so any task agent whose frontmatter has `name: reviewer` replaces the bundled one. The first match wins in this order:
+
+1. nearest project `.omp/agents/*.md`
+2. user `~/.omp/agent/agents/*.md`
+3. `agents/` of enabled OMP extension packages
+4. Claude marketplace plugin agents
+5. the bundled `reviewer`
+
+Item 4 applies only with the `claude-plugins` provider enabled. User-scope roots from the foreign `~/.claude/plugins` tree also need the `claude` or `claude-plugins` user source. Claude-dialect plugin agents (foreign Claude roots and packages whose manifest declares the Claude format) drop their frontmatter `model`. OMP-native and Agent-Plugins-standard packages keep it. For a Claude-dialect `reviewer`, set `task.agentModelOverrides.reviewer` instead.
+
+The name comes from the frontmatter, not the file name. The replacement is the whole definition. Nothing merges with the bundled file, so restate `tools`, `spawns`, `model`, and `output` if the replacement needs them. To change only the model, set `task.agentModelOverrides.reviewer` instead. See [filesystem and plugin discovery](./task-agent-discovery.md#filesystem-and-plugin-discovery) and [merge and collision rules](./task-agent-discovery.md#merge-and-collision-rules).
+
+```md
+---
+name: reviewer
+description: Review a change against the team rubric.
+tools: read, grep, find, bash
+model: "@slow"
+autoloadSkills: [team-review-rubric]
+---
+
+Apply the rubric from the loaded skill. Report only issues introduced by the patch.
+```
+
+**`autoloadSkills` and `spawns`.** The bundled `reviewer` sets no `autoloadSkills` and sets `spawns: scout`.
+
+- `autoloadSkills` names skills from the parent session. Each one is injected as a hidden message before the reviewer's first prompt, like `/skill:<name>`. A name the parent does not know is ignored.
+- `spawns` limits which agents the reviewer may start with `task`. `scout` allows only an agent named `scout`, `*` allows any agent, and omitting it (with no `task` in `tools`) gives no spawning. When `tools` is declared and `spawns` is set, `task` is added to the tool list. At the maximum recursion depth `task` is removed and spawning is off.

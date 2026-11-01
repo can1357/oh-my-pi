@@ -6,12 +6,34 @@
 
 - Added `pathIdentityKey()` to group filesystem aliases without merging distinct-case directories on case-sensitive filesystems. It follows symlinks/junctions through device/inode identity and falls back to a case-preserving resolved path when identity is unavailable; existing path-spelling and containment normalization is unchanged ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 
+### Changed
+
+- `acp` runtime validators (`zNewSessionResponse`, `zSessionNotification`, …) now report each failing field's path and reason in `error.issues` instead of a single `Invalid <label>`; `ValidationError` issue paths are typed `PropertyKey[]` ([#17699](https://github.com/can1357/oh-my-pi/pull/17699))
+### Added
+
+- Added `isPidAlive` (signal-0 liveness probe) and `asStrictBytes` (a `Uint8Array` narrowed to its own `ArrayBuffer` for WebCrypto)
+
+## [18.15.0] - 2026-11-01
+
+### Added
+
+- Added abortable `sleepUntil` for wall-clock deadline waits that include system sleep, with bounded timer slices to recheck deadlines after resume ([#17606](https://github.com/can1357/oh-my-pi/pull/17606) by [@zhiland](https://github.com/zhiland)).
+
+### Fixed
+
+- Importing pi-utils no longer installs process-wide signal and fatal handlers in embedding hosts; exit-time cleanup stays installed ([#17674](https://github.com/can1357/oh-my-pi/issues/17674)).
+
+## [18.14.2] - 2026-10-31
+
+### Added
+
+- Added `oklabDistance`, the perceptual distance between two hex colors ([#17520](https://github.com/can1357/oh-my-pi/pull/17520))
+
 ## [18.14.1] - 2026-10-31
 
 ### Added
 
 - Added `isFileLockHeld`, which reports whether a file lock is held without acquiring it ([#17428](https://github.com/can1357/oh-my-pi/pull/17428) by [@andrebrait](https://github.com/andrebrait))
-- Added `oklabDistance`, the perceptual distance between two hex colors ([#17520](https://github.com/can1357/oh-my-pi/pull/17520))
 
 ## [18.14.0] - 2026-10-29
 

@@ -785,6 +785,10 @@ export class InputController {
 		for (const key of this.ctx.keybindings.getKeys("app.clipboard.copyLine")) {
 			this.ctx.editor.setCustomKeyHandler(key, () => this.handleCopyCurrentLine());
 		}
+		// A modifier chord, not a bare letter: it sends text into the main session, mid-run if it is working.
+		for (const key of this.ctx.keybindings.getKeys("app.btw.inject")) {
+			this.ctx.editor.setCustomKeyHandler(key, () => this.ctx.handleBtwInjectKey());
+		}
 		const hubKeys = new Set([
 			...this.ctx.keybindings.getKeys("app.agents.hub"),
 			...this.ctx.keybindings.getKeys("app.session.observe"),

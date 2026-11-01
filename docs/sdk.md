@@ -58,6 +58,10 @@ unsubscribe();
 await session.dispose();
 ```
 
+## Process shutdown
+
+Importing the SDK installs no signal or fatal-error handlers; the host owns its process lifecycle. OMP's registered cleanup still runs when the process exits. To run it earlier in an asynchronous shutdown, call `postmortem.cleanup()` from `@oh-my-pi/pi-utils` after disposing sessions.
+
 ## What `createAgentSession()` discovers by default
 
 `createAgentSession()` follows “provide to override, omit to discover”.
@@ -269,7 +273,9 @@ Related APIs:
 
 ### Admission and queued-message ownership
 
-`prompt()` and `promptCustomMessage()` accept `onPromptAdmitted`. It runs synchronously when an idle prompt enters its own turn setup, before preflight/provider dispatch; when streaming input enters its queue, after that input's image preprocessing; or before an extension command handler runs. Admission does not guarantee a model call or successful completion. Observe the returned promise for failures and drops.
+`prompt()` and `promptCustomMessage()` accept `onPromptAdmitted`. It runs synchronously when an idle prompt enters its own turn setup, before preflight/provider dispatch; when streaming input enters its queue, after that input's image preprocessing; or before an extension command handler runs. Admission does not guarantee a model call or successful completion. Observe the returned promise for failures.
+
+`prompt()` also accepts a synchronous `onPromptDropped(prompt)` callback when its caller owns recovery of unsent input. It replaces the session's `setPromptDropped` host hook for that submission and receives the original typed text, images, and optional refusal reason. Without an owner, the host hook keeps its existing behavior. The notification does not await asynchronous recovery: wait for the prompt promise to settle before recovery that depends on session transitions or admitted submissions. Drop notifications still precede any `PromptDroppedError` rejection requested with `throwOnDrop`.
 
 `onPromptQueued(queued)` reports the exact `AgentMessage` objects pushed onto a steering or follow-up queue, immediately before `onPromptAdmitted`. It includes that prompt's hidden companions in queue order, followed by the prompt itself. It is available on `prompt()`, `promptCustomMessage()`, `steer()`, and `followUp()`. It does not run for a prompt that starts its own turn or for aside delivery.
 

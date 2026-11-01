@@ -167,70 +167,82 @@ describe("compaction queue conversation ownership", () => {
 		expect(h.editor.imageLinks?.[0]).toBe("local://draft.png");
 	});
 
-	it.each([0, 1])(
-		"keeps detached batches ordered after real manual compaction (first failure=%s)",
-		async firstFailure => {
-			const compactEntered = Promise.withResolvers<void>();
-			const compactRelease = Promise.withResolvers<void>();
-			const h = await harness(pi => {
-				pi.on("session_before_compact", async event => {
-					compactEntered.resolve();
-					await compactRelease.promise;
-					return {
-						compaction: {
-							summary: "Earlier completed work.",
-							firstKeptEntryId: event.preparation.firstKeptEntryId,
-							tokensBefore: event.preparation.tokensBefore,
-						},
-					};
-				});
+	it.each([
+		{ firstCompletion: 0, lookupThrows: false },
+		{ firstCompletion: 1, lookupThrows: false },
+		{ firstCompletion: 0, lookupThrows: true },
+		{ firstCompletion: 1, lookupThrows: true },
+	])("keeps detached batches ordered after real manual compaction (%j)", async ({ firstCompletion, lookupThrows }) => {
+		const compactEntered = Promise.withResolvers<void>();
+		const compactRelease = Promise.withResolvers<void>();
+		const h = await harness(pi => {
+			pi.on("session_before_compact", async event => {
+				compactEntered.resolve();
+				await compactRelease.promise;
+				return {
+					compaction: {
+						summary: "Earlier completed work.",
+						firstKeptEntryId: event.preparation.firstKeptEntryId,
+						tokensBefore: event.preparation.tokensBefore,
+					},
+				};
 			});
-			h.manager.appendMessage({ role: "user", content: "completed request one", timestamp: 1 });
-			h.manager.appendMessage(assistantMsg("completed answer one"));
-			h.manager.appendMessage({ role: "user", content: "completed request two", timestamp: 2 });
-			h.manager.appendMessage(assistantMsg("completed answer two"));
-			h.agent.replaceMessages(h.manager.buildSessionContext().messages);
-			const reached = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
-			const release = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
-			const reports = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
-			let lookups = 0;
-			let reported = 0;
-			vi.spyOn(h.registry, "getApiKey").mockImplementation(async () => {
-				const index = lookups++;
-				if (index > 1) throw new Error("unexpected extra credential lookup");
-				reached[index].resolve();
-				await release[index].promise;
-				return undefined;
-			});
-			vi.spyOn(h.ctx, "showError").mockImplementation(() => reports[reported++]?.resolve());
-			h.helpers.queueCompactionMessage("older detached batch", "followUp");
-			const older = h.ctx.compactionQueuedMessages[0];
-			await h.helpers.flushCompactionQueue({ willRetry: false });
-			await reached[0].promise;
-			const compacting = h.commands.executeCompaction({ suppressContinuation: true });
-			try {
-				await compactEntered.promise;
-				h.editor.setText("newer detached batch");
-				await h.input.handleFollowUp();
-				const newer = h.ctx.compactionQueuedMessages[0];
-				compactRelease.resolve();
-				expect(await compacting).toBe("ok");
-				await reached[1].promise;
-				release[firstFailure].resolve();
-				await reports[0].promise;
-				release[1 - firstFailure].resolve();
-				await reports[1].promise;
-				expect(h.ctx.compactionQueuedMessages).toEqual([older, newer]);
-				expect(h.ctx.compactionQueuedMessages[0]).toBe(older);
-				expect(h.ctx.compactionQueuedMessages[1]).toBe(newer);
-				expect(h.session.getQueuedMessages()).toMatchObject({ steering: [], followUp: [] });
-			} finally {
-				compactRelease.resolve();
-				for (const barrier of release) barrier.resolve();
-				await compacting;
-			}
-		},
-	);
+		});
+		h.manager.appendMessage({ role: "user", content: "completed request one", timestamp: 1 });
+		h.manager.appendMessage(assistantMsg("completed answer one"));
+		h.manager.appendMessage({ role: "user", content: "completed request two", timestamp: 2 });
+		h.manager.appendMessage(assistantMsg("completed answer two"));
+		h.agent.replaceMessages(h.manager.buildSessionContext().messages);
+		const reached = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+		const release = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+		const reports = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+		let lookups = 0;
+		let reported = 0;
+		vi.spyOn(h.registry, "getApiKey").mockImplementation(async () => {
+			const index = lookups++;
+			if (index > 1) throw new Error("unexpected extra credential lookup");
+			reached[index].resolve();
+			await release[index].promise;
+			if (lookupThrows) throw new Error("Credential lookup failed");
+			return undefined;
+		});
+		let observeRecovery = false;
+		const report = () => {
+			if (!observeRecovery) return;
+			const index = reported++;
+			reports[index]?.resolve();
+		};
+		vi.spyOn(h.ctx, "showError").mockImplementation(report);
+		vi.spyOn(h.ctx, "showStatus").mockImplementation(report);
+		h.helpers.queueCompactionMessage("older detached batch", "followUp");
+		const older = h.ctx.compactionQueuedMessages[0];
+		await h.helpers.flushCompactionQueue({ willRetry: false });
+		await reached[0].promise;
+		const compacting = h.commands.executeCompaction({ suppressContinuation: true });
+		try {
+			await compactEntered.promise;
+			h.editor.setText("newer detached batch");
+			await h.input.handleFollowUp();
+			const newer = h.ctx.compactionQueuedMessages[0];
+			compactRelease.resolve();
+			expect(await compacting).toBe("ok");
+			await reached[1].promise;
+			observeRecovery = true;
+			release[firstCompletion].resolve();
+			await reports[0].promise;
+			release[1 - firstCompletion].resolve();
+			await reports[1].promise;
+			expect(h.ctx.compactionQueuedMessages).toEqual([older, newer]);
+			expect(h.ctx.compactionQueuedMessages[0]).toBe(older);
+			expect(h.ctx.compactionQueuedMessages[1]).toBe(newer);
+			expect(h.session.getQueuedMessages()).toMatchObject({ steering: [], followUp: [] });
+		} finally {
+			compactRelease.resolve();
+			for (const barrier of release) barrier.resolve();
+			await compacting;
+			await h.session.waitForAdmittedSubmissions();
+		}
+	});
 
 	it("consumes a real queued /new once and restores only its old-conversation remainder", async () => {
 		const h = await harness();
@@ -262,40 +274,54 @@ describe("compaction queue conversation ownership", () => {
 		expect(newSession).toHaveBeenCalledTimes(1);
 	});
 
-	it("returns a late old-conversation failure without taking the newer queue or its origin", async () => {
-		const h = await harness();
-		const entered = Promise.withResolvers<void>();
-		const release = Promise.withResolvers<void>();
-		const reported = Promise.withResolvers<void>();
-		vi.spyOn(h.registry, "getApiKey").mockImplementation(async () => {
-			entered.resolve();
-			await release.promise;
-			return undefined;
-		});
-		vi.spyOn(h.ctx, "showError").mockImplementation(() => reported.resolve());
-		h.helpers.queueCompactionMessage("old origin [Image #1]", "followUp", [originalImage]);
-		await h.helpers.flushCompactionQueue({ willRetry: false });
-		await entered.promise;
-		await h.session.newSession();
-		h.helpers.queueCompactionMessage("new origin [Image #1]", "followUp", [newerImage]);
-		const newer = h.ctx.compactionQueuedMessages[0];
-		const newerOrigin = h.ctx.compactionQueueOrigin;
-		h.editor.pendingImages = [newerImage];
-		h.editor.pendingImageLinks = ["local://current.png"];
-		h.editor.imageLinks = h.editor.pendingImageLinks;
-		h.editor.setText("current draft [Image #1]");
-		const recorded = h.history.getRecent(10);
-		release.resolve();
-		await reported.promise;
+	it.each([false, true])(
+		"returns a late old-conversation cancellation or failure without taking the newer queue or its origin (lookup throws=%s)",
+		async lookupThrows => {
+			const h = await harness();
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const reported = Promise.withResolvers<void>();
+			const unownedDrop = vi.fn();
+			h.session.setPromptDropped(unownedDrop);
+			vi.spyOn(h.registry, "getApiKey").mockImplementation(async () => {
+				entered.resolve();
+				await release.promise;
+				if (lookupThrows) throw new Error("Credential lookup failed");
+				return undefined;
+			});
+			try {
+				h.helpers.queueCompactionMessage("old origin [Image #1]", "followUp", [originalImage]);
+				await h.helpers.flushCompactionQueue({ willRetry: false });
+				await entered.promise;
+				await h.session.newSession();
+				h.helpers.queueCompactionMessage("new origin [Image #1]", "followUp", [newerImage]);
+				const newer = h.ctx.compactionQueuedMessages[0];
+				const newerOrigin = h.ctx.compactionQueueOrigin;
+				h.editor.pendingImages = [newerImage];
+				h.editor.pendingImageLinks = ["local://current.png"];
+				h.editor.imageLinks = h.editor.pendingImageLinks;
+				h.editor.setText("current draft [Image #1]");
+				const recorded = h.history.getRecent(10);
+				vi.spyOn(h.ctx, "showError").mockImplementation(() => reported.resolve());
+				vi.spyOn(h.ctx, "showStatus").mockImplementation(() => reported.resolve());
+				release.resolve();
+				await reported.promise;
 
-		expect(h.ctx.compactionQueuedMessages).toEqual([newer]);
-		expect(h.ctx.compactionQueueOrigin).toBe(newerOrigin);
-		expect(h.editor.getExpandedText()).toBe("old origin [Image #2]\n\ncurrent draft [Image #1]");
-		expect(h.editor.pendingImages).toEqual([newerImage, originalImage]);
-		expect(h.editor.pendingImageLinks[0]).toBe("local://current.png");
-		expect(h.history.getRecent(10)).toEqual(recorded);
-		expect(JSON.stringify(h.manager.getEntries())).not.toContain("old origin");
-	});
+				expect(h.ctx.compactionQueuedMessages).toEqual([newer]);
+				expect(h.ctx.compactionQueueOrigin).toBe(newerOrigin);
+				expect(h.editor.getExpandedText()).toBe("old origin [Image #2]\n\ncurrent draft [Image #1]");
+				expect(h.editor.pendingImages).toEqual([newerImage, originalImage]);
+				expect(h.editor.pendingImageLinks[0]).toBe("local://current.png");
+				expect(h.history.getRecent(10)).toEqual(recorded);
+				expect(JSON.stringify(h.manager.getEntries())).not.toContain("old origin");
+				// Batch recovery replaces generic host recovery; running both would duplicate or discard input.
+				expect(unownedDrop).not.toHaveBeenCalled();
+			} finally {
+				release.resolve();
+				await h.session.waitForAdmittedSubmissions();
+			}
+		},
+	);
 
 	it("rejects stale first admission after real deferred-extension loading without duplicate editor recovery", async () => {
 		const h = await harness();

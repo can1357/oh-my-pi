@@ -4,7 +4,6 @@ import {
 	findAnthropicCompactionCut,
 	type CompactionPreparation,
 	compact,
-	createFileOps,
 	DEFAULT_COMPACTION_SETTINGS,
 	getAnthropicCompactionPayload,
 	NativeCompactionError,
@@ -105,7 +104,7 @@ function makePreparation(overrides: Partial<CompactionPreparation> = {}): Compac
 		],
 		isSplitTurn: false,
 		tokensBefore: 100_000,
-		fileOps: createFileOps(),
+		fileOps: snapcompact.createFileOps(),
 		settings: { ...DEFAULT_COMPACTION_SETTINGS },
 		...overrides,
 	};
@@ -951,7 +950,7 @@ describe("compact() Anthropic native lane", () => {
 				],
 				turnPrefixMessages: [],
 				tokensBefore: 50_000,
-				fileOps: createFileOps(),
+				fileOps: snapcompact.createFileOps(),
 			});
 			expect(archived.summary).toContain("¶think:");
 			return { previousSummary: archived.summary, previousPreserveData: archived.preserveData };
