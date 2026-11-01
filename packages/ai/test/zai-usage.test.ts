@@ -105,6 +105,26 @@ describe("zai usage provider", () => {
 		]);
 	});
 
+	it("keeps distinct Z.AI quota windows without known durations", async () => {
+		const report = await zaiUsageProvider.fetchUsage!(
+			{ provider: "zai", credential: makeCredential(), signal: undefined },
+			makeCtx({
+				success: true,
+				data: {
+					limits: [
+						{ type: "TOKENS_LIMIT", percentage: 30, unit: 7, number: 1 },
+						{ type: "TOKENS_LIMIT", percentage: 40, unit: 8, number: 1 },
+					],
+				},
+			}),
+		);
+
+		expect(report).not.toBeNull();
+		const ranked = zaiRankingStrategy.findWindowLimits(report!);
+		expect(ranked.primary?.id).toBe("zai:tokens:1u7");
+		expect(ranked.secondary?.id).toBe("zai:tokens:1u8");
+	});
+
 	it("supports both api-key and oauth credentials, rejecting oauth rows with no access token", () => {
 		expect(zaiUsageProvider.supports!({ provider: "zai", credential: makeCredential(), signal: undefined })).toBe(
 			true,
@@ -208,10 +228,75 @@ describe("zai usage provider", () => {
 
 		expect(report).not.toBeNull();
 		const limit = report!.limits[0]!;
+		expect(limit.amount.unit).toBe("percent");
 		expect(limit.id).toBe("zai:credits:5h");
 		expect(limit.amount.used).toBeUndefined();
 		expect(limit.amount.usedFraction).toBeCloseTo(0.97, 5);
 		expect(limit.status).toBe("warning");
+	});
+
+	it("keeps credit units when only remaining is available", async () => {
+		const report = await zaiUsageProvider.fetchUsage!(
+			{ provider: "zai", credential: makeCredential(), signal: undefined },
+			makeCtx({
+				success: true,
+				data: {
+					limits: [{ type: "CREDIT_LIMIT", remaining: 1234, unit: 3, number: 5 }],
+				},
+			}),
+		);
+
+		expect(report).not.toBeNull();
+		const limit = report!.limits[0]!;
+		expect(limit.amount.unit).toBe("credits");
+		expect(limit.amount.remaining).toBe(1234);
+		expect(limit.amount.usedFraction).toBeUndefined();
+	});
+
+	it("keeps the server percentage for partial absolute meters", async () => {
+		const report = await zaiUsageProvider.fetchUsage!(
+			{ provider: "zai", credential: makeCredential(), signal: undefined },
+			makeCtx({
+				success: true,
+				data: {
+					limits: [
+						{ type: "CREDIT_LIMIT", currentValue: 1200, percentage: 12, unit: 3, number: 5 },
+						{ type: "CREDIT_LIMIT", usage: 10000, percentage: 12, unit: 6, number: 1 },
+						{ type: "CREDIT_LIMIT", remaining: 1234, percentage: 42, unit: 3, number: 5 },
+					],
+				},
+			}),
+		);
+
+		expect(report).not.toBeNull();
+		expect(report!.limits.map(limit => limit.amount.unit)).toEqual(["credits", "credits", "credits"]);
+		expect(report!.limits.map(limit => limit.amount.used)).toEqual([1200, undefined, undefined]);
+		expect(report!.limits.map(limit => limit.amount.limit)).toEqual([undefined, 10000, undefined]);
+		expect(report!.limits.map(limit => limit.amount.remaining)).toEqual([undefined, undefined, 1234]);
+		expect(report!.limits.map(limit => limit.amount.usedFraction)).toEqual([0.12, 0.12, 0.42]);
+		expect(report!.limits.map(limit => limit.status)).toEqual(["ok", "ok", "ok"]);
+	});
+
+	it("reports a remaining-only row at 100% as exhausted and ranks it above a lighter row in its window", async () => {
+		const report = await zaiUsageProvider.fetchUsage!(
+			{ provider: "zai", credential: makeCredential(), signal: undefined },
+			makeCtx({
+				success: true,
+				data: {
+					limits: [
+						{ type: "TOKENS_LIMIT", percentage: 10, unit: 3, number: 5 },
+						{ type: "CREDIT_LIMIT", remaining: 0, percentage: 100, unit: 3, number: 5 },
+						{ type: "CREDIT_LIMIT", currentValue: 5, usage: 0, percentage: 100, unit: 6, number: 1 },
+					],
+				},
+			}),
+		);
+
+		expect(report).not.toBeNull();
+		const credits = report!.limits.filter(limit => limit.id.startsWith("zai:credits:"));
+		expect(credits.map(limit => limit.amount.usedFraction)).toEqual([1, 1]);
+		expect(credits.map(limit => limit.status)).toEqual(["exhausted", "exhausted"]);
+		expect(zaiRankingStrategy.findWindowLimits(report!).primary?.id).toBe("zai:credits:5h");
 	});
 
 	it("keeps one ranked limit per window when tokens and credits meters coexist", async () => {
