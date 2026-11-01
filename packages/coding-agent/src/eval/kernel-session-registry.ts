@@ -205,7 +205,8 @@ export function createKernelSessionRegistry<
 	 * lost, so it is neither a live session nor anyone's notice — never put
 	 * back where a cell, the arming pass or a reclaim can reach it, which made
 	 * the reaper reclaim it again and record the loss once more for the owner
-	 * the disposal had just forgotten. Only `disposeAll` retries it.
+	 * the disposal had just forgotten. Its `ownerIds` now only say whose later
+	 * disposal retries it; `disposeAll` retries every one.
 	 */
 	const retained = new Set<TSession>();
 
@@ -523,7 +524,7 @@ export function createKernelSessionRegistry<
 
 	/**
 	 * Shut `session` down for a disposal. One that does not confirm is logged
-	 * and held in {@link retained} for `disposeAll`, never put back under its
+	 * and held in {@link retained} for the next disposal, never put back under its
 	 * key. Each attempt is bounded by the kernel's own shutdown escalation. A
 	 * signal cannot immediately end truly uninterruptible kernel I/O, and a
 	 * bounded wait cannot guarantee the exit: a runner in it outlasts the
@@ -549,7 +550,7 @@ export function createKernelSessionRegistry<
 	 * under its key or set aside — is shut down once more; a put-back session
 	 * another owner is still registered on only loses `ownerId`'s
 	 * registration. A kernel the disposal's own shutdown could not confirm is
-	 * not retried here; it is retained for `disposeAll`.
+	 * not retried here; it is retained for the next disposal.
 	 */
 	async function retryUnconfirmed(reclaimed: Iterable<TSession>, ownerId?: string): Promise<void> {
 		const retries: TSession[] = [];
@@ -679,6 +680,10 @@ export function createKernelSessionRegistry<
 		// What an earlier reclaim of this owner's kernels set aside gets its
 		// attempt with the ones joined here, after the wait.
 		for (const session of unconfirmed) if (owns(session)) reclaimed.add(session);
+		// What an earlier disposal of this owner could not confirm down is
+		// tried again alongside this one's own shutdowns.
+		const debts = [...retained].filter(owns);
+		for (const session of debts) retained.delete(session);
 		const toShutdown: TSession[] = [];
 		for (const [key, session] of Array.from(sessions.entries())) {
 			if (!owns(session)) continue;
@@ -715,10 +720,10 @@ export function createKernelSessionRegistry<
 				}),
 			),
 		);
-		await Promise.all([reclaims, started, ...toShutdown.map(shutDown)]);
+		await Promise.all([reclaims, started, ...toShutdown.map(shutDown), ...debts.map(shutDown)]);
 		// Each kernel of this owner a reclaim could not confirm — one joined
 		// above, or one an earlier reclaim set aside — gets one more attempt; one
-		// that still does not confirm is logged and kept for `disposeAll`.
+		// that still does not confirm is logged and retained.
 		await retryUnconfirmed(reclaimed, ownerId);
 		// A kernel this owner shared with another agent kept only its
 		// registration dropped above. Nobody is left to notice that, so the

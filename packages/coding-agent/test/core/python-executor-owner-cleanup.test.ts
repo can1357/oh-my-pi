@@ -321,12 +321,16 @@ describe("python executor owner cleanup", () => {
 		expect(unownedRetainedKernel.shutdown).toHaveBeenCalledTimes(1);
 	});
 
-	it("retains sessions whose kernel shutdown is not confirmed so a later dispose retries", async () => {
-		const kernel = new FakeKernel();
+	it("retains a kernel whose shutdown is not confirmed so a later dispose retries, without handing it to a new cell", async () => {
+		const stuck = new FakeKernel();
 		const unconfirmedShutdown = vi.fn(async (): Promise<KernelShutdownResult> => ({ confirmed: false }));
-		kernel.shutdown = unconfirmedShutdown;
+		stuck.shutdown = unconfirmedShutdown;
+		const fresh = new FakeKernel();
 		vi.spyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
-		const startSpy = vi.spyOn(PythonKernel, "start").mockResolvedValue(kernel as unknown as PythonKernelInstance);
+		const startSpy = vi
+			.spyOn(PythonKernel, "start")
+			.mockResolvedValueOnce(stuck as unknown as PythonKernelInstance)
+			.mockResolvedValueOnce(fresh as unknown as PythonKernelInstance);
 
 		await executePython("1", {
 			cwd: "/tmp/unconfirmed-shutdown",
@@ -339,20 +343,25 @@ describe("python executor owner cleanup", () => {
 		await disposeAllKernelSessions();
 		expect(unconfirmedShutdown).toHaveBeenCalledTimes(1);
 
-		// Re-executing the same session must reuse the retained kernel (no new start).
+		// The disposal ended that session: the same session id now runs on a
+		// fresh kernel, not on the one whose shutdown is still owed. Putting the
+		// disposed session back where a cell could reach it is what let a later
+		// reclaim re-arm on it and tell a disposed owner about it again.
 		await executePython("2", {
 			cwd: "/tmp/unconfirmed-shutdown",
 			sessionId: "unconfirmed-shutdown-session",
 			kernelMode: "session",
 		});
-		expect(startSpy).toHaveBeenCalledTimes(1);
-		expect(kernel.execute).toHaveBeenCalledTimes(2);
+		expect(startSpy).toHaveBeenCalledTimes(2);
+		expect(stuck.execute).toHaveBeenCalledTimes(1);
+		expect(fresh.execute).toHaveBeenCalledTimes(1);
 
-		// Swap to a confirmed shutdown so afterEach can drain the retained session.
+		// The next disposal retries the kernel it could not confirm.
 		const confirmedShutdown = vi.fn(async (): Promise<KernelShutdownResult> => ({ confirmed: true }));
-		kernel.shutdown = confirmedShutdown;
+		stuck.shutdown = confirmedShutdown;
 		await disposeAllKernelSessions();
 		expect(confirmedShutdown).toHaveBeenCalledTimes(1);
+		expect(fresh.shutdown).toHaveBeenCalledTimes(1);
 	});
 
 	it("retains owner mapping when owner-scoped shutdown is not confirmed", async () => {

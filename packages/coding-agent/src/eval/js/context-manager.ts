@@ -162,7 +162,7 @@ const reclaimedWorkers = new Map<string, Map<string, { kernelId: string; cwd: st
 interface UnconfirmedWorker {
 	worker: JsEvalWorkerHandle;
 	kernelId: string;
-	/** Owners whose disposal still retries it, once; that disposal drops itself from here. */
+	/** Owners whose disposal retries it; the owners it ran for, not a live registration. */
 	owners: Set<string>;
 }
 
@@ -171,7 +171,7 @@ interface UnconfirmedWorker {
  * rather than return with them forgotten. Each is out of `sessions` and dead
  * to every caller — no cell, reclaim or notice reaches it — so this is cleanup
  * debt only, kept apart from who owns a live context and who is owed a
- * notice. An owner's disposal retries that owner's once; the process-wide
+ * notice. An owner's disposal retries that owner's; the process-wide
  * disposal retries every one. A worker stuck in truly uninterruptible kernel
  * I/O stays until that I/O completes or is aborted.
  */
@@ -694,10 +694,6 @@ export async function disposeVmContextsByOwner(ownerId: string): Promise<void> {
 	]);
 	// A joined reclaim whose kill went unconfirmed gets one more attempt.
 	await retryUnconfirmedWorkers(unconfirmedOf(reclaiming));
-	// What is still unconfirmed is no longer this owner's to retry: only the
-	// process-wide disposal tries again, so a later disposal under the same
-	// owner id does not inherit a debt it never incurred.
-	for (const entry of unconfirmedWorkers) entry.owners.delete(ownerId);
 	// A context this owner shared with another agent kept only its registration
 	// dropped above. Nobody is left to notice that, so the arming question is
 	// asked again here: the agents it still belongs to may have moved away long
