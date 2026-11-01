@@ -10,6 +10,8 @@
 ### Fixed
 
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
+- Fixed an endless shell loop in one bash command taking the shell from every later command in the session; such a command is now cancelled by its own deadline, and `kill %N` reaches it ([#17662](https://github.com/can1357/oh-my-pi/pull/17662) by [@sjawhar](https://github.com/sjawhar))
+- Fixed `timeout` not stopping a `case` statement with thousands of patterns, or a command with a very long list of words, assignments, array elements, redirections or pipeline stages, until it had finished ([#17662](https://github.com/can1357/oh-my-pi/pull/17662) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 

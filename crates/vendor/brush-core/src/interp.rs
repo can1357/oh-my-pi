@@ -431,6 +431,15 @@ fn ensure_not_cancelled(params: &ExecutionParameters) -> Result<(), error::Error
 	Ok(())
 }
 
+/// Spends Tokio's cooperative budget, then checks for cancellation, so a loop
+/// of builtins returns `Pending` and the run's timer, `JoinHandle::abort` and
+/// the job's cancel token can reach it.
+async fn loop_checkpoint(params: &ExecutionParameters) -> Result<(), error::Error> {
+	tokio::task::coop::consume_budget().await;
+	// After the cooperative yield, so a cancellation raised while this task was
+	// parked is seen on the step that follows it.
+	ensure_not_cancelled(params)
+}
 
 #[derive(Clone, Debug, Default)]
 /// Policy for how to manage spawned external processes.
@@ -471,7 +480,7 @@ impl Execute for ast::Program {
 		let mut result = ExecutionResult::success();
 
 		for command in &self.complete_commands {
-			ensure_not_cancelled(params)?;
+			loop_checkpoint(params).await?;
 			// Execute the command and handle any errors without immediately propagating
 			// them. This allows interactive shells to continue executing subsequent
 			// commands even after errors.
@@ -510,7 +519,7 @@ impl Execute for ast::CompoundList {
 		let mut result = ExecutionResult::success();
 
 		for ast::CompoundListItem(ao_list, sep) in &self.0 {
-			ensure_not_cancelled(params)?;
+			loop_checkpoint(params).await?;
 			let run_async = matches!(sep, ast::SeparatorOperator::Async);
 
 			if run_async {
@@ -796,7 +805,7 @@ impl Execute for ast::AndOrList {
 		let mut result = self.first.execute(shell, &first_params).await?;
 
 		for (index, next_ao) in self.additional.iter().enumerate() {
-			ensure_not_cancelled(params)?;
+			loop_checkpoint(params).await?;
 			// Check for non-normal control flow.
 			if !result.is_normal_flow() {
 				break;
@@ -961,7 +970,7 @@ async fn spawn_pipeline_processes(
 	}
 
 	for (current_pipeline_index, command) in pipeline.seq.iter().enumerate() {
-		ensure_not_cancelled(params)?;
+		loop_checkpoint(params).await?;
 		//
 		// We run a command directly in the current shell if either of the following is
 		// true:
@@ -1163,9 +1172,7 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::Command {
 						let mut params = params;
 						Ok(ExecutionSpawnResult::StartedTask(tokio::spawn(async move {
 							if let Some(redirects) = &redirects {
-								for redirect in &redirects.0 {
-									setup_redirect(&mut shell, &mut params, redirect).await?;
-								}
+								setup_redirects(&mut shell, &mut params, redirects).await?;
 							}
 							compound.execute(&mut shell, &params).await
 						})))
@@ -1173,9 +1180,7 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::Command {
 					mut shell => {
 						// Set up any additional redirects.
 						if let Some(redirects) = redirects {
-							for redirect in &redirects.0 {
-								setup_redirect(&mut shell, &mut params, redirect).await?;
-							}
+							setup_redirects(&mut shell, &mut params, redirects).await?;
 						}
 
 						Ok(compound.execute(&mut shell, &params).await?.into())
@@ -1192,9 +1197,7 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::Command {
 			Self::ExtendedTest(e, redirects) => {
 				// Set up any additional redirects.
 				if let Some(redirects) = redirects {
-					for redirect in &redirects.0 {
-						setup_redirect(&mut pipeline_context.shell, &mut params, redirect).await?;
-					}
+					setup_redirects(&mut pipeline_context.shell, &mut params, redirects).await?;
 				}
 
 				// Evaluate the extended test expression.
@@ -1381,6 +1384,7 @@ impl Execute for ast::ForClauseCommand {
 		let mut expanded_values = vec![];
 		if let Some(unexpanded_values) = &self.values {
 			for value in unexpanded_values {
+				loop_checkpoint(params).await?;
 				let mut expanded = expansion::full_expand_and_split_word(shell, params, value).await?;
 				expanded_values.append(&mut expanded);
 			}
@@ -1390,7 +1394,7 @@ impl Execute for ast::ForClauseCommand {
 		}
 
 		for value in expanded_values {
-			ensure_not_cancelled(params)?;
+			loop_checkpoint(params).await?;
 			if shell.options().print_commands_and_arguments {
 				if let Some(unexpanded_values) = &self.values {
 					shell
@@ -1459,12 +1463,13 @@ impl Execute for ast::CaseClauseCommand {
 		let mut force_execute_next_case = false;
 
 		for case in &self.cases {
-			ensure_not_cancelled(params)?;
+			loop_checkpoint(params).await?;
 			if force_execute_next_case {
 				force_execute_next_case = false;
 			} else {
 				let mut matches = false;
 				for pattern in &case.patterns {
+					loop_checkpoint(params).await?;
 					let expanded_pattern = expansion::basic_expand_pattern(shell, params, pattern)
 						.await?
 						.set_extended_globbing(shell.options().extended_globbing)
@@ -1584,7 +1589,7 @@ impl Execute for (WhileOrUntil, &ast::WhileOrUntilClauseCommand) {
 		condition_params.suppress_errexit = true;
 
 		loop {
-			ensure_not_cancelled(params)?;
+			loop_checkpoint(params).await?;
 			let condition_result = test_condition.execute(shell, &condition_params).await?;
 
 			// Update status for condition
@@ -1657,7 +1662,7 @@ impl Execute for ast::ArithmeticForClauseCommand {
 		}
 
 		loop {
-			ensure_not_cancelled(params)?;
+			loop_checkpoint(params).await?;
 			if let Some(condition) = &self.condition {
 				// An empty condition (e.g., `for (( ; ; ))`) means "always true".
 				if !condition.value.is_empty() && condition.eval(shell, params, true).await? == 0 {
@@ -1752,7 +1757,7 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 		let status_change_count_before_expansion = context.shell.last_exit_status_change_count();
 
 		for item in prefix_iter.chain(cmd_name_items.iter()).chain(suffix_iter) {
-			ensure_not_cancelled(&params)?;
+			loop_checkpoint(&params).await?;
 			match item {
 				CommandPrefixOrSuffixItem::IoRedirect(redirect) => {
 					if let Err(e) = setup_redirect(&mut context.shell, &mut params, redirect).await {
@@ -1881,6 +1886,7 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 		} else {
 			// No command to run; assignments must be applied to this shell.
 			for assignment in assignments {
+				loop_checkpoint(&params).await?;
 				// Apply the assignment. Don't mark as fatal - let errors be handled
 				// at the program level so multiple complete_commands can execute independently.
 				apply_assignment(
@@ -1927,6 +1933,7 @@ async fn execute_command(
 	let mut guard = crate::env::ScopeGuard::new(&mut context.shell, EnvironmentScope::Command);
 
 	for assignment in &assignments {
+		loop_checkpoint(&params).await?;
 		// Ensure it's tagged as exported and created in the command scope.
 		apply_assignment(
 			assignment,
@@ -2010,6 +2017,7 @@ async fn expand_assignment_value(
 		ast::AssignmentValue::Array(arr) => {
 			let mut expanded_values = vec![];
 			for (key, value) in arr {
+				loop_checkpoint(params).await?;
 				if let Some(k) = key {
 					let expanded_key = expansion::basic_expand_assignment_word(shell, params, k)
 						.await?
@@ -2069,6 +2077,7 @@ async fn apply_assignment(
 		ast::AssignmentValue::Array(unexpanded_values) => {
 			let mut elements = vec![];
 			for (unexpanded_key, unexpanded_value) in unexpanded_values {
+				loop_checkpoint(params).await?;
 				let key = match unexpanded_key {
 					Some(unexpanded_key) => Some(
 						expansion::basic_expand_assignment_word(shell, params, unexpanded_key).await?,
@@ -2185,6 +2194,20 @@ async fn apply_assignment(
 	}
 
 	shell.env_mut().add(variable_name, new_var, creation_scope)
+}
+
+/// Sets up a compound command's redirections in order. A command can carry
+/// any number of them, so each passes a loop checkpoint first.
+async fn setup_redirects(
+	shell: &mut Shell<impl extensions::ShellExtensions>,
+	params: &mut ExecutionParameters,
+	redirects: &ast::RedirectList,
+) -> Result<(), error::Error> {
+	for redirect in &redirects.0 {
+		loop_checkpoint(params).await?;
+		setup_redirect(shell, params, redirect).await?;
+	}
+	Ok(())
 }
 
 #[expect(clippy::too_many_lines)]
@@ -2641,6 +2664,7 @@ pub(crate) async fn materialize_deferred_redirects(
 	params: &mut ExecutionParameters,
 ) -> Result<(), error::Error> {
 	for redirect in std::mem::take(&mut params.deferred_redirects) {
+		loop_checkpoint(params).await?;
 		match redirect {
 			DeferredRedirect::Open { fd, path, options, .. } => {
 				let file = shell.open_file(&options, &path, params).await.map_err(|err| {
@@ -2820,4 +2844,72 @@ fn setup_open_file_with_contents(
 	}
 
 	Ok(reader.into())
+}
+
+#[cfg(test)]
+mod tests {
+	use std::{
+		sync::{
+			Arc,
+			atomic::{AtomicBool, Ordering},
+			mpsc,
+		},
+		time::Duration,
+	};
+
+	use tokio::sync::oneshot;
+	use tokio_util::sync::CancellationToken;
+
+	#[test]
+	fn endless_builtin_loop_yields_to_a_cancellation_task() {
+		let (result_tx, result_rx) = mpsc::sync_channel(1);
+
+		std::thread::spawn(move || {
+			let runtime = tokio::runtime::Builder::new_multi_thread()
+				.worker_threads(1)
+				.enable_all()
+				.build()
+				.expect("runtime");
+			let result = runtime.block_on(async {
+				let cancellation = CancellationToken::new();
+				let cancellation_task_ran = Arc::new(AtomicBool::new(false));
+				let (loop_started_tx, loop_started_rx) = oneshot::channel();
+
+				let loop_cancellation = cancellation.clone();
+				let loop_task = tokio::spawn(async move {
+					let mut shell = crate::Shell::builder().build().await.expect("shell");
+					let mut params = shell.default_exec_params();
+					params.set_cancel_token(loop_cancellation);
+					loop_started_tx.send(()).expect("cancellation task waits for loop");
+					shell
+						.run_string(
+							"while ((1)); do ((1)); done",
+							&crate::SourceInfo::default(),
+							&params,
+						)
+						.await
+						.expect("loop parses")
+						.is_success()
+				});
+
+				let cancellation_task_ran_in_task = cancellation_task_ran.clone();
+				let cancellation_task = tokio::spawn(async move {
+					loop_started_rx.await.expect("loop starts");
+					cancellation_task_ran_in_task.store(true, Ordering::Release);
+					cancellation.cancel();
+				});
+
+				let loop_succeeded = loop_task.await.expect("loop task");
+				cancellation_task.await.expect("cancellation task");
+				(!loop_succeeded, cancellation_task_ran.load(Ordering::Acquire))
+			});
+			result_tx.send(result).expect("test waits for runtime");
+		});
+
+		let (interrupted, cancellation_task_ran) = result_rx
+			.recv_timeout(Duration::from_secs(2))
+			.expect("interpreter did not yield to the cancellation task");
+		assert!(cancellation_task_ran, "the cancellation task never ran on the interpreter runtime");
+		assert!(interrupted, "the cancelled loop did not stop");
+	}
 }
