@@ -364,6 +364,8 @@ export class ModelRegistry {
 	#warnedCompatKeys = new Set<string>();
 	#configWarnings: string[] = [];
 	#modelsConfigFile: ConfigFile<ModelsConfig>;
+	/** Last models config that loaded, served while a later edit fails to load. */
+	#lastLoadedModelsConfig: ModelsConfig | undefined;
 	#lastStaticLoadMtime: number | null = null;
 	#registeredProviderSources: Set<string> = new Set();
 	#providerDiscoveryStates: Map<string, ProviderDiscoveryState> = new Map();
@@ -1752,20 +1754,9 @@ export class ModelRegistry {
 				found: false,
 			};
 		}
-		const { value, error, status } = this.#modelsConfigFile.tryLoad();
-
-		if (status === "error") {
-			return {
-				models: [],
-				overrides: new Map(),
-				modelOverrides: new Map(),
-				keylessProviders: new Set(),
-				discoverableProviders: [],
-				configuredProviders: new Set(),
-				error,
-				found: true,
-			};
-		} else if (status === "not-found") {
+		const loaded = this.#modelsConfigFile.tryLoad();
+		if (loaded.status === "not-found") {
+			this.#lastLoadedModelsConfig = undefined;
 			return {
 				models: [],
 				overrides: new Map(),
@@ -1774,6 +1765,34 @@ export class ModelRegistry {
 				discoverableProviders: [],
 				configuredProviders: new Set(),
 				found: false,
+			};
+		}
+		let value: ModelsConfig;
+		let error: ConfigError | undefined;
+		if (loaded.status === "ok") {
+			value = loaded.value;
+			this.#lastLoadedModelsConfig = value;
+		} else if (this.#lastLoadedModelsConfig) {
+			// A models config that stops loading mid-session (typically a
+			// half-saved edit) keeps serving the last config that loaded, so its
+			// providers, overrides and API keys survive until the file loads
+			// again. The error is still reported through getError().
+			value = this.#lastLoadedModelsConfig;
+			error = loaded.error;
+			logger.warn("Models config failed to load; keeping the last config that loaded", {
+				path: this.#modelsConfigFile.path(),
+				error: String(loaded.error),
+			});
+		} else {
+			return {
+				models: [],
+				overrides: new Map(),
+				modelOverrides: new Map(),
+				keylessProviders: new Set(),
+				discoverableProviders: [],
+				configuredProviders: new Set(),
+				error: loaded.error,
+				found: true,
 			};
 		}
 
@@ -1896,6 +1915,7 @@ export class ModelRegistry {
 			keylessProviders,
 			discoverableProviders,
 			configuredProviders,
+			error,
 			found: true,
 		};
 	}
@@ -3067,7 +3087,7 @@ export class ModelRegistry {
 
 	/**
 	 * Get all models (built-in + custom) of one catalog kind.
-	 * If custom config had errors, returns only built-in models. The default
+	 * If models.yml failed to load when the registry was built, custom config is absent; a later reload that fails keeps the last config that loaded. The default
 	 * excludes role-specific runners so existing session callers remain chat-only.
 	 * Pass `"all"` to retrieve the complete catalog.
 	 */
