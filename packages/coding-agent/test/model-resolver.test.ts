@@ -390,6 +390,54 @@ function roleChainModel(provider: string, id: string): Model<Api> {
 	});
 }
 
+describe("explicit model ids fail closed", () => {
+	const haiku = roleChainModel("anthropic", "claude-haiku-4-5");
+	const availableModels = [haiku, ...mockModels];
+
+	test("missing explicit Haiku 5.5 does not silently select Haiku 4.5", () => {
+		const result = parseModelPattern("anthropic/claude-haiku-5-5", [haiku]);
+		expect(result.model).toBeUndefined();
+	});
+
+	test("explicit Haiku 5 cannot skip the earlier revision digit in Haiku 4.5", () => {
+		expect(parseModelPattern("anthropic/claude-haiku-5", [haiku]).model).toBeUndefined();
+	});
+
+	test("override skips a missing explicit id and selects the next entry with its thinking level", () => {
+		const result = resolveModelOverride(["anthropic/claude-haiku-5-5:medium", "anthropic/claude-sonnet-4-5:high"], {
+			getAvailable: () => availableModels,
+		});
+		expect(result.model?.provider).toBe("anthropic");
+		expect(result.model?.id).toBe("claude-sonnet-4-5");
+		expect(result.thinkingLevel).toBe(Effort.High);
+		expect(result.explicitThinkingLevel).toBe(true);
+	});
+
+	test("bare haiku still resolves by partial matching", () => {
+		const result = parseModelPattern("haiku", availableModels);
+		expect(result.model?.id).toBe("claude-haiku-4-5");
+	});
+
+	test("exact explicit id keeps its thinking suffix", () => {
+		const result = parseModelPattern("anthropic/claude-haiku-4-5:medium", availableModels);
+		expect(result.model?.provider).toBe("anthropic");
+		expect(result.model?.id).toBe("claude-haiku-4-5");
+		expect(result.thinkingLevel).toBe(Effort.Medium);
+		expect(result.explicitThinkingLevel).toBe(true);
+	});
+
+	test("exact raw aggregator id keeps precedence over a missing provider revision", () => {
+		const routed = roleChainModel("openrouter", "anthropic/claude-haiku-5-6");
+		expect(parseModelPattern("anthropic/claude-haiku-5-6", [haiku, routed]).model?.provider).toBe("openrouter");
+		expect(parseModelPattern("anthropic/claude-haiku-5-7", [haiku, routed]).model).toBeUndefined();
+	});
+
+	test("missing provider does not reinterpret an explicit selector as a partial raw id", () => {
+		const shadow = roleChainModel("custom", "anthropic/claude-haiku-5-5-preview");
+		expect(parseModelPattern("anthropic/claude-haiku-5-5", [shadow]).model).toBeUndefined();
+	});
+});
+
 describe("pickDefaultAvailableModel", () => {
 	test("does not auto-select Apple Foundation Models but retains explicit selection", () => {
 		const apple = buildModel({
