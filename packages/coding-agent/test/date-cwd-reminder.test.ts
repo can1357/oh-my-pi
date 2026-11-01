@@ -735,6 +735,80 @@ describe("date-cwd-reminder", () => {
 				expect(out.messages[0]?.content).toBe(`${renderDateCwdReminder("2026-08-17", "/work")}\n\nold`);
 			});
 
+			it("keeps the date of a turn whose request was interrupted before any reply", () => {
+				const { journal } = createJournal();
+				const first: Message = { role: "user", content: "first", timestamp: 1 };
+				const sent = new DateCwdReminderInjector(journal).transform(
+					{ systemPrompt: ["system"], messages: [first] },
+					"2026-08-14",
+					"/work",
+				);
+
+				const resumed = new DateCwdReminderInjector(journal).transform(
+					{ systemPrompt: ["system"], messages: [first] },
+					"2026-08-16",
+					"/work",
+				);
+
+				expect(wireOf(resumed).slice(0, 1)).toEqual(wireOf(sent));
+				expect(resumed.messages.at(-1)).toMatchObject({
+					role: "developer",
+					content: renderDateCwdReminder("2026-08-16", "/work"),
+				});
+			});
+
+			it("sends a switched-in transcript's turns with the reminders that transcript recorded", () => {
+				// Two forks of one session share their first turn; only the second fork sent `branch`.
+				const first: Message = { role: "user", content: "first", timestamp: 1 };
+				const branch: Message = { role: "user", content: "branch", timestamp: 7 };
+				const forks: Record<string, DateCwdReminderPlacement[]> = {
+					one: [],
+					two: [
+						{
+							conversation: "user:1:",
+							turn: "user:1:",
+							reminder: renderDateCwdReminder("2026-08-14", "/work"),
+							placement: "prefix",
+						},
+						{
+							conversation: "user:1:",
+							turn: "user:7:",
+							reminder: renderDateCwdReminder("2026-08-15", "/work"),
+							placement: "prefix",
+						},
+					],
+				};
+				let current = "one";
+				const journal: DateCwdReminderJournal = {
+					load: () => forks[current]!,
+					record: placement => {
+						forks[current]!.push(placement);
+					},
+					scope: () => current,
+				};
+				const injector = new DateCwdReminderInjector(journal);
+				injector.transform({ systemPrompt: ["system"], messages: [first] }, "2026-08-14", "/work");
+
+				current = "two";
+				const switched = injector.transform(
+					{
+						systemPrompt: ["system"],
+						messages: [
+							first,
+							createAssistantMessage("a"),
+							branch,
+							createAssistantMessage("b"),
+							{ role: "user", content: "next", timestamp: 9 },
+						],
+					},
+					"2026-08-16",
+					"/work",
+				);
+
+				expect(switched.messages[2]?.content).toBe(`${renderDateCwdReminder("2026-08-15", "/work")}\n\nbranch`);
+				expect(switched.messages[4]?.content).toBe(`${renderDateCwdReminder("2026-08-16", "/work")}\n\nnext`);
+			});
+
 			it("resends a retained turn with its own reminder after a compaction renumbered it", () => {
 				const { journal } = createJournal();
 				const earlier = new DateCwdReminderInjector(journal);
