@@ -624,6 +624,8 @@
 - Fixed supported Bedrock Claude models falling back to soft instead of remote compaction ([#16343](https://github.com/can1357/oh-my-pi/pull/16343) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
 - Fixed browser `tab.run(fn, [url])` and `browser.open("https://…")` failing with a bare "expects an options object"; the errors now say to pass `{ args: [...] }` and `browser.open({ url, name })` ([#16236](https://github.com/can1357/oh-my-pi/pull/16236) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the built-in `ts-set-map`, `ts-import-type` and `ts-no-any` rules reminding you about code they allow: an empty or computed `Set`/`Map`, a runtime `await import()`, or the word "any" in a comment ([#16242](https://github.com/can1357/oh-my-pi/pull/16242) by [@will-bogusz](https://github.com/will-bogusz))
+- Invalid model configuration retains validated last-good custom providers in memory and across restarts through a private sidecar. Commented JSONC snapshots retain their original parser, and CLI warnings report recovery only when a validated configuration was retained ([#16540](https://github.com/can1357/oh-my-pi/pull/16540) by [@Komzpa](https://github.com/Komzpa))
+- Invalid `models.yml` warnings report the offending YAML source line rather than JavaScript call-site lines or unrelated provider keys ([#16540](https://github.com/can1357/oh-my-pi/pull/16540) by [@Komzpa](https://github.com/Komzpa))
 
 ## [18.12.3] - 2026-10-19
 
