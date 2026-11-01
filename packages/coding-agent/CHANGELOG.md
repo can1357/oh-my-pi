@@ -10,6 +10,7 @@
 ### Fixed
 
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
+- `write` refuses an empty `content` payload instead of silently creating or truncating a zero-byte file; pass `allowEmpty: true` only to do that deliberately
 
 ## [18.15.0] - 2026-11-01
 

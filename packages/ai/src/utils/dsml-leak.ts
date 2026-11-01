@@ -30,6 +30,11 @@ const QUOTED_CODE_PATTERN = /(```|~~~)[\s\S]*?(?:\1|$)|`[^`\n]*`/g;
 const TRAILING_TOOL_NAME_LINE = /(^|\n)[ \t]*[A-Za-z_][\w.-]*[ \t]*\r?\n[ \t]*$/;
 const CLOSING_TAG_PATTERN = /^<\s*\//;
 const BLANK_LINE_PATTERN = /\r?\n[ \t]*\r?\n/;
+// Orphan closers left inside a tool-call argument by a degraded model. Canonical
+// DeepSeek closers end a parameter, invoke, or tool_calls envelope; hosts also
+// re-spell the parameter tag as parameter_name or invoke_param.
+const TOOL_ARGUMENT_MARKUP_PATTERN =
+	/<\s*\/\s*(?:(?:｜{1,2}|\|?DSML\|?)\s*)?(?:tool_calls?|invoke(?:_param)?|calls|parameter(?:_name)?)\b[^<>]*>?/giu;
 
 interface MarkupTag {
 	readonly index: number;
@@ -128,15 +133,80 @@ export function stripDsmlToolMarkup(text: string): string | undefined {
 }
 
 /**
+ * Strip leaked tool-call markup from one string tool argument. Canonical DSML
+ * and DeepSeek template tokens go through {@link stripDsmlToolMarkup}; hosts
+ * that re-spell a closing tag (observably `parameter_name` and `invoke_param`)
+ * are handled by {@link TOOL_ARGUMENT_MARKUP_PATTERN}. Returns `undefined` when
+ * the value carried no markup.
+ */
+function stripDsmlToolArgumentMarkup(value: string): string | undefined {
+	const canonical = stripDsmlToolMarkup(value);
+	let out = canonical ?? value;
+	const orphanStripped = out.replace(TOOL_ARGUMENT_MARKUP_PATTERN, "");
+	if (orphanStripped !== out) out = orphanStripped;
+	return out === value ? undefined : out;
+}
+
+/**
+ * Sanitize every string in a tool call's arguments, recursively. Returns the
+ * rebuilt record when any value changed, else `undefined`. Non-string leaves
+ * (numbers, booleans, null) pass through untouched.
+ */
+function sanitizeToolCallArguments(argumentsRecord: Record<string, unknown>): Record<string, unknown> | undefined {
+	let changed = false;
+	const walk = (value: unknown): unknown => {
+		if (typeof value === "string") {
+			const stripped = stripDsmlToolArgumentMarkup(value);
+			if (stripped === undefined) return value;
+			changed = true;
+			return stripped;
+		}
+		if (Array.isArray(value)) {
+			let arrayChanged = false;
+			const next = value.map(item => {
+				const stripped = walk(item);
+				if (stripped !== item) arrayChanged = true;
+				return stripped;
+			});
+			return arrayChanged ? next : value;
+		}
+		if (value !== null && typeof value === "object") {
+			let objectChanged = false;
+			const next: Record<string, unknown> = {};
+			for (const [key, item] of Object.entries(value)) {
+				const stripped = walk(item);
+				if (stripped !== item) objectChanged = true;
+				next[key] = stripped;
+			}
+			return objectChanged ? next : value;
+		}
+		return value;
+	};
+	const next = walk(argumentsRecord);
+	return changed && next !== argumentsRecord ? (next as Record<string, unknown>) : undefined;
+}
+
+/**
  * Remove leaked DSML tool-call markup from an assistant message before commit,
- * including reasoning blocks and turns with valid structured calls. Rewritten
- * thinking with an opaque signature is discarded; OpenAI-compatible reasoning
- * field names are replay markers, not signatures, and survive cleanup.
+ * including reasoning blocks, tool-call arguments, and turns with valid
+ * structured calls. Rewritten thinking with an opaque signature is discarded;
+ * OpenAI-compatible reasoning field names are replay markers, not signatures,
+ * and survive cleanup.
  */
 export function removeDsmlToolMarkupLeak(message: AssistantMessage): boolean {
 	let content: AssistantMessage["content"] | undefined;
 	for (let index = 0; index < message.content.length; index++) {
 		const block = message.content[index]!;
+		if (block.type === "toolCall") {
+			const sanitized = sanitizeToolCallArguments(block.arguments);
+			if (sanitized === undefined) {
+				content?.push(block);
+				continue;
+			}
+			content ??= message.content.slice(0, index);
+			content.push({ ...block, arguments: sanitized });
+			continue;
+		}
 		if (block.type !== "text" && block.type !== "thinking") {
 			content?.push(block);
 			continue;

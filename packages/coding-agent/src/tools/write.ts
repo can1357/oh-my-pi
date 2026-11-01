@@ -216,6 +216,7 @@ async function assertNotReadSelectorMisfire(target: string, content: string, cwd
 const writeSchema = type({
 	path: "string",
 	"content?": "string",
+	"allowEmpty?": "boolean",
 });
 
 /** Write arguments; `content` may be omitted only where the target scheme's write policy allows it. */
@@ -911,7 +912,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 
 	async execute(
 		_toolCallId: string,
-		{ path: rawPath, content: rawContent }: WriteParams,
+		{ path: rawPath, content: rawContent, allowEmpty }: WriteParams,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<WriteToolDetails>,
 		context?: AgentToolContext,
@@ -942,6 +943,24 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			policy?.scope === "coordination" ||
 			policy?.scope === "reply" ||
 			(target !== undefined && policy?.cancels?.(target.url) === true);
+		// A degraded model emits empty tool arguments (or a placeholder path) and the
+		// write silently truncates the target to zero bytes; the failure only surfaces
+		// on the next read. Require the explicit opt-in for an empty payload, except
+		// where the target scheme already declares content optional (coordination,
+		// replies, device dispatches, proc kill) or the write touches no files.
+		if (
+			content.length === 0 &&
+			allowEmpty !== true &&
+			!touchesNoFiles &&
+			!(target && policy?.contentOptional?.(target.url))
+		) {
+			// A selector-shaped target is a more specific failure than an empty
+			// payload; let the read-selector guard name it before the generic refusal.
+			await assertNotReadSelectorMisfire(path, content, this.session.cwd);
+			throw new ToolError(
+				`content is empty for ${path}. Pass the file contents, or set allowEmpty to true to deliberately create or truncate an empty file.`,
+			);
+		}
 		// A device-only session grants `write` purely as the device transport (see
 		// createTools): device dispatches, file-free writes, and the session's
 		// local:// sandbox proceed; every other target is rejected before any
