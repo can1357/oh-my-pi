@@ -381,8 +381,10 @@ function renderWaveHeader(
 	return `${fgOrPlain("accent", spinner)} Repairing [${bar}] ${parts.join(fgOrPlain("dim", " · "))}`;
 }
 
-function retryReason(errorMessage: string): string {
-	return sanitizeDisplaySingleLine(httpErrorReason(errorMessage)).replace(/\s+/g, " ").trim();
+function retryReason(retry: { errorMessage: string; errorClassificationMessage?: string }): string {
+	return sanitizeDisplaySingleLine(httpErrorReason(retry.errorMessage, retry.errorClassificationMessage))
+		.replace(/\s+/g, " ")
+		.trim();
 }
 
 function renderAgentRow(spinner: string, agentName: string, agent: RunningAgent): string {
@@ -435,7 +437,7 @@ function describeAgentLane(agentName: string, agent: RunningAgent, now: number):
 						max: progress.retryState.maxAttempts,
 						age: Math.max(0, now - progress.retryState.startedAtMs),
 						delay: progress.retryState.delayMs,
-						error: retryReason(progress.retryState.errorMessage),
+						error: retryReason(progress.retryState),
 					}
 				: null,
 			stats: {
@@ -457,7 +459,7 @@ function describeActivity(progress: AgentProgress | undefined): TspSpan[] {
 	if (progress.retryState) {
 		return [
 			span(
-				`retrying · ${progress.retryState.attempt}/${progress.retryState.maxAttempts}: ${retryReason(progress.retryState.errorMessage)}`,
+				`retrying · ${progress.retryState.attempt}/${progress.retryState.maxAttempts}: ${retryReason(progress.retryState)}`,
 				"warning",
 			),
 		];
@@ -535,7 +537,7 @@ function agentActivity(progress: AgentProgress | undefined): string {
 		return fgOrPlain(
 			"warning",
 			`retrying · ${progress.retryState.attempt}/${progress.retryState.maxAttempts}: ${truncateToWidth(
-				retryReason(progress.retryState.errorMessage),
+				retryReason(progress.retryState),
 				ACTIVITY_WIDTH,
 			)}`,
 		);

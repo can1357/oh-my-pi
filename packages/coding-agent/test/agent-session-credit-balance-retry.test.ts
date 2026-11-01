@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
@@ -9,6 +10,7 @@ import { runPrintMode } from "@oh-my-pi/pi-coding-agent/modes/print-mode";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import * as piUtils from "@oh-my-pi/pi-utils";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
@@ -21,6 +23,12 @@ const CREDIT_BALANCE_MESSAGE =
 const CREDIT_BALANCE_BODY = `{"type":"error","error":{"type":"invalid_request_error","message":"${CREDIT_BALANCE_MESSAGE}"},"request_id":"req_011CgbLuqzvWZWRDTHtaVVMj"}`;
 const CREDIT_BALANCE_EMBEDDED_DIAGNOSTIC = `Invalid tool schema. Offending schema: {"error":{"type":"invalid_request_error","message":"${CREDIT_BALANCE_MESSAGE}"}}`;
 const CREDIT_BALANCE_NON_ENVELOPE_BODY = `{"error":{"type":"invalid_request_error","message":"${CREDIT_BALANCE_MESSAGE}"}}`;
+// A provider body whose last line explains that the object above it is a
+// rejected example. The line has the shape of omp's own request-dump suffix,
+// but the provider sent it, so it is part of the rejection.
+const CREDIT_BALANCE_PROVIDER_DUMP_LINE = `${CREDIT_BALANCE_BODY}\nraw-http-request=Invalid tool schema; the preceding object is the rejected example, not an account-balance error`;
+const CREDIT_BALANCE_PROVIDER_SAVE_FAILED_LINE = `${CREDIT_BALANCE_BODY}\nraw-http-request-save-failed=Invalid tool schema; the preceding object is the rejected example`;
+const CREDIT_BALANCE_PROVIDER_RETRY_HINT = `${CREDIT_BALANCE_BODY} retry-after-ms=1`;
 // The session waits at least five minutes across the default ten retries and
 // jitters each wait above that floor so sessions do not retry in lockstep.
 const CREDIT_BALANCE_MIN_RETRY_DELAY_MS = 30_000;
@@ -311,6 +319,29 @@ describe("Anthropic credit-balance rejection", () => {
 		expect(final.errorMessage).toBe(`Retry budget exhausted after 10 retries: 400 ${CREDIT_BALANCE_BODY}`);
 	});
 
+	it("keeps the credit wait when omp's request-dump line wraps on a newline in the logs path", async () => {
+		const harness = await createHarness(n =>
+			n === 1 ? jsonResponse(400, CREDIT_BALANCE_BODY) : recoveredResponse(),
+		);
+		using logs = TempDir.createSync("@pi-credit-dump-");
+		const logsDir = path.join(logs.path(), "omp\nlogs");
+		// Dumps are off under the test runner; turn them on, into a directory
+		// whose name contains a newline, for this turn only.
+		vi.spyOn(piUtils, "isBunTestRuntime").mockReturnValue(false);
+		vi.spyOn(piUtils, "getLogsDir").mockReturnValue(logsDir);
+		mockSchedulerWaitWithClock();
+		await harness.session.prompt("Summarize the repository");
+		await harness.session.waitForIdle();
+
+		expect(harness.requests).toBe(2);
+		expect(harness.retryStarts).toHaveLength(1);
+		// The instrument: omp decorated the displayed error with a dump line that wraps.
+		expect(harness.retryStarts[0]!.errorMessage).toContain(`\nraw-http-request=${logsDir}`);
+		expect(harness.retryStarts[0]!.errorClassificationMessage).toBe(`400 ${CREDIT_BALANCE_BODY}`);
+		expectCreditBalanceRetryDelay(harness.retryStarts[0]!.delayMs);
+		expect(lastAssistant(harness.session).stopReason).toBe("stop");
+	});
+
 	it.each([
 		// A 400 of another type carrying the same sentence.
 		[
@@ -349,6 +380,22 @@ describe("Anthropic credit-balance rejection", () => {
 		],
 		// A non-JSON body that begins with the sentence has no structured envelope.
 		["a plaintext credit sentence", () => textResponse(400, CREDIT_BALANCE_MESSAGE), CREDIT_BALANCE_MESSAGE],
+		// Text after the envelope belongs to the provider's body, whatever it looks like.
+		[
+			"a provider line shaped like omp's request-dump suffix",
+			() => textResponse(400, CREDIT_BALANCE_PROVIDER_DUMP_LINE),
+			"the preceding object is the rejected example",
+		],
+		[
+			"a provider line shaped like omp's dump-failure suffix",
+			() => textResponse(400, CREDIT_BALANCE_PROVIDER_SAVE_FAILED_LINE),
+			"the preceding object is the rejected example",
+		],
+		[
+			"provider text shaped like omp's retry hint",
+			() => textResponse(400, CREDIT_BALANCE_PROVIDER_RETRY_HINT),
+			CREDIT_BALANCE_PROVIDER_RETRY_HINT,
+		],
 	])("fails at once on a 400 with %s", async (_label, response, expectedMessage) => {
 		const harness = await runTurn(() => response());
 

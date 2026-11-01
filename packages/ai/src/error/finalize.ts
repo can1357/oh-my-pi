@@ -1,7 +1,11 @@
 import type { Api } from "../types";
 import { callerAbortReason } from "./abort";
 import type { AbortSourceTracker } from "../utils/abort";
-import type { CapturedHttpErrorResponse, RawHttpRequestDump } from "../utils/http-inspector";
+import {
+	type CapturedHttpErrorResponse,
+	formatProviderErrorText,
+	type RawHttpRequestDump,
+} from "../utils/http-inspector";
 import { classify, classifyMessage, status } from "./flags";
 import { formatMessage } from "./format";
 
@@ -33,6 +37,13 @@ export interface FinalizeResult {
 	stopReason: "aborted" | "error";
 	/** User-facing message: a local abort reason, else the caller's abort reason, else from {@link formatMessage}. */
 	message: string;
+	/**
+	 * The provider's own error text when `message` adds omp's local diagnostics
+	 * (retry hint, request-dump line, provider rewrites) to it; undefined when
+	 * the two are equal or `message` is an abort reason. Providers store it as
+	 * `errorClassificationMessage`.
+	 */
+	providerMessage?: string;
 }
 
 /**
@@ -51,12 +62,20 @@ export async function finalize(error: unknown, opts: FinalizeOptions = {}): Prom
 	const currentStatus = errorStatus ?? opts.capturedErrorResponse?.status;
 
 	let message: string;
+	let providerMessage: string | undefined;
 	try {
 		const localReason = opts.abortTracker?.getLocalAbortReason();
 		const callerReason = opts.abortTracker
 			? opts.abortTracker.getCallerAbortReason()
 			: callerAbortReason(opts.signal);
-		message = localReason?.message ?? callerReason ?? (await formatMessage(error, opts));
+		const abortMessage = localReason?.message ?? callerReason ?? undefined;
+		if (abortMessage !== undefined) {
+			message = abortMessage;
+		} else {
+			message = await formatMessage(error, opts);
+			const providerText = formatProviderErrorText(error, opts.capturedErrorResponse);
+			if (providerText !== message) providerMessage = providerText;
+		}
 	} catch {
 		message = error instanceof Error ? error.message : String(error);
 	}
@@ -73,6 +92,7 @@ export async function finalize(error: unknown, opts: FinalizeOptions = {}): Prom
 		model: opts.model,
 		errorId: classify(classificationError, opts.api),
 		errorMessage: message,
+		errorClassificationMessage: providerMessage,
 		errorStatus: currentStatus,
 	});
 
@@ -81,5 +101,6 @@ export async function finalize(error: unknown, opts: FinalizeOptions = {}): Prom
 		status: currentStatus,
 		stopReason: aborted ? "aborted" : "error",
 		message,
+		...(providerMessage === undefined ? {} : { providerMessage }),
 	};
 }

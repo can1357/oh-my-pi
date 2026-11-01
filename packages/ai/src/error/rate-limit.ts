@@ -169,11 +169,16 @@ const CREDIT_BALANCE_STREAM_ERROR_PREFIX = `Anthropic stream error (invalid_requ
 // At least 30 s between retries, so the default ten retries (retry.maxRetries)
 // wait at least 5 minutes. The 30 s floor is a heuristic from two observed
 // outages, not a measured maximum outage. Up to 7.5 s of jitter on top keeps
-// sessions that failed together from retrying together.
+// sessions that failed together from retrying at the same instant.
 const CREDIT_BALANCE_BACKOFF_MS = 30 * 1000;
 const CREDIT_BALANCE_JITTER_MS = 7.5 * 1000;
 
-/** Whether an error is Anthropic's empty-prepaid-balance rejection, which lifts once the balance is refilled. */
+/**
+ * Whether an error is Anthropic's empty-prepaid-balance rejection, which lifts
+ * once the balance is refilled. `message` must be the provider's own text
+ * (`errorClassificationMessage ?? errorMessage`): any text after the envelope
+ * is part of the body, so such a body does not match.
+ */
 export function isCreditBalanceTooLow(status: number | undefined, message: string | undefined): boolean {
 	if (!message) return false;
 	if (message.startsWith(CREDIT_BALANCE_STREAM_ERROR_PREFIX)) return true;

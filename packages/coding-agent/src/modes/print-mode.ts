@@ -365,7 +365,7 @@ async function runPrintModeCore(
 			// Text mode prints only the answer on stdout. Name the wait on stderr
 			// in the terminal's words, or a backoff looks like a hung run.
 			writeStderrLine(
-				`Retrying (${event.attempt}/${event.maxAttempts}) in ${formatDuration(event.delayMs)}: ${singleLine(httpErrorReason(event.errorMessage))}`,
+				`Retrying (${event.attempt}/${event.maxAttempts}) in ${formatDuration(event.delayMs)}: ${singleLine(httpErrorReason(event.errorMessage, event.errorClassificationMessage))}`,
 			);
 		} else if (
 			event.type === "notice" &&

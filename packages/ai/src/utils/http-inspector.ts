@@ -161,15 +161,25 @@ export async function pruneHttpRequestDumps(dir: string, retention: HttpRequestD
 	}
 }
 
+/**
+ * The provider's error text: the thrown message, with a captured response body
+ * folded in. It carries none of omp's local diagnostics (retry hint,
+ * request-dump line), so callers can classify it without separating omp's text
+ * from the provider's.
+ */
+export function formatProviderErrorText(error: unknown, capturedErrorResponse?: CapturedHttpErrorResponse): string {
+	const captured = formatCapturedHttpErrorParts(capturedErrorResponse);
+	return captured
+		? mergeCapturedBody(errorMessageText(error), captured, capturedErrorResponse?.status)
+		: errorMessageText(error);
+}
+
 export async function finalizeErrorMessage(
 	error: unknown,
 	rawRequestDump: RawHttpRequestDump | undefined,
 	capturedErrorResponse?: CapturedHttpErrorResponse,
 ): Promise<string> {
-	const captured = formatCapturedHttpErrorParts(capturedErrorResponse);
-	const body = captured
-		? mergeCapturedBody(errorMessageText(error), captured, capturedErrorResponse?.status)
-		: errorMessageText(error);
+	const body = formatProviderErrorText(error, capturedErrorResponse);
 	const message = appendRetryAfterHint(body, capturedErrorResponse?.headers ?? getHeadersFromError(error));
 	return appendRawHttpRequestDumpFor400(message, error, rawRequestDump);
 }

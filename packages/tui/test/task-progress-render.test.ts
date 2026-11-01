@@ -842,10 +842,12 @@ describe("task progress rendering", () => {
 		}
 	});
 
-	// The `400 <JSON body>` an Anthropic rejection arrives as, with the dump
-	// pointer the provider appends on its own line.
-	const creditBalanceError =
-		'400 {"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."},"request_id":"req_011CgbLuqzvWZWRDTHtaVVMj"}\nraw-http-request=/tmp/http-400-requests/1.json';
+	// The `400 <JSON body>` an Anthropic rejection arrives as, and the display
+	// text omp builds from it: the provider text plus the request-dump line omp
+	// appends. The dump path holds a newline, so the line wraps.
+	const creditBalanceProviderError =
+		'400 {"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."},"request_id":"req_011CgbLuqzvWZWRDTHtaVVMj"}';
+	const creditBalanceError = `${creditBalanceProviderError}\nraw-http-request=/tmp/omp\nlogs/http-400-requests/1.json`;
 
 	it("names what a waiting subagent waits for, not the provider's JSON envelope", async () => {
 		const theme = (await getThemeByName("dark"))!;
@@ -855,6 +857,7 @@ describe("task progress rendering", () => {
 				maxAttempts: 10,
 				delayMs: 30_000,
 				errorMessage: creditBalanceError,
+				errorClassificationMessage: creditBalanceProviderError,
 				startedAtMs: Date.now(),
 			},
 		});
@@ -877,7 +880,11 @@ describe("task progress rendering", () => {
 		const theme = (await getThemeByName("dark"))!;
 		const progress = runningProgress({
 			status: "failed",
-			retryFailure: { attempt: 10, errorMessage: creditBalanceError },
+			retryFailure: {
+				attempt: 10,
+				errorMessage: creditBalanceError,
+				errorClassificationMessage: creditBalanceProviderError,
+			},
 		});
 		const row = Bun.stripANSI(
 			findRow(
@@ -907,7 +914,11 @@ describe("task progress rendering", () => {
 								finishedResult({
 									exitCode: 1,
 									error: creditBalanceError,
-									retryFailure: { attempt: 10, errorMessage: creditBalanceError },
+									retryFailure: {
+										attempt: 10,
+										errorMessage: creditBalanceError,
+										errorClassificationMessage: creditBalanceProviderError,
+									},
 								}),
 							],
 						},

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `errorClassificationMessage` to `auto_retry_start` and `finalErrorClassificationMessage` to `auto_retry_end` session and RPC events: the provider's own error text when the displayed message adds omp's retry hint or request-dump line ([#17656](https://github.com/can1357/oh-my-pi/pull/17656) by [@sjawhar](https://github.com/sjawhar))
+
 ### Fixed
 
 - Fixed an Anthropic "Your credit balance is too low" rejection ending every in-flight turn and subagent at once: the session now retries it about every 30 seconds (with jitter) for at least 5 minutes of backoff before it returns the original error, and `omp -p` prints each wait on stderr ([#17656](https://github.com/can1357/oh-my-pi/pull/17656) by [@sjawhar](https://github.com/sjawhar))

@@ -3697,6 +3697,11 @@ const streamAnthropicOnce = (
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = transport ? result.message : maybeAddReplayUnsignedThinkingHint(model, result.message);
+			// Recovery classifies the provider's own text. The display text can
+			// carry omp's retry hint, request-dump line and replay hint, and none
+			// of those may change how the rejection is classified.
+			const providerMessage = result.providerMessage ?? result.message;
+			output.errorClassificationMessage = providerMessage !== output.errorMessage ? providerMessage : undefined;
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({

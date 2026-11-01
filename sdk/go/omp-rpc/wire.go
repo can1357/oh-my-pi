@@ -4010,7 +4010,9 @@ type AutoRetryStartEvent struct {
 	MaxAttempts  int64  `json:"maxAttempts"`
 	DelayMs      int64  `json:"delayMs"`
 	ErrorMessage string `json:"errorMessage"`
-	ErrorID      *int64 `json:"errorId,omitempty"`
+	// The provider's own error text, when `errorMessage` adds omp's diagnostics (retry hint, request-dump line) to it.
+	ErrorClassificationMessage *string `json:"errorClassificationMessage,omitempty"`
+	ErrorID                    *int64  `json:"errorId,omitempty"`
 }
 
 func (v *AutoRetryStartEvent) UnmarshalJSON(data []byte) error {
@@ -4025,6 +4027,7 @@ func (v *AutoRetryStartEvent) decodeFrom(raw map[string]json.RawMessage) error {
 	d.required("maxAttempts", &out.MaxAttempts)
 	d.required("delayMs", &out.DelayMs)
 	d.required("errorMessage", &out.ErrorMessage)
+	d.optional("errorClassificationMessage", &out.ErrorClassificationMessage)
 	d.optional("errorId", &out.ErrorID)
 	if d.err != nil {
 		return d.err
@@ -4042,6 +4045,8 @@ type AutoRetryEndEvent struct {
 	Success    bool    `json:"success"`
 	Attempt    int64   `json:"attempt"`
 	FinalError *string `json:"finalError,omitempty"`
+	// The provider's own error text, when `finalError` adds omp's diagnostics to it.
+	FinalErrorClassificationMessage *string `json:"finalErrorClassificationMessage,omitempty"`
 	// Persisted retry errors whose presentation changed when the retry settled.
 	RetryErrors []map[string]json.RawMessage `json:"retryErrors"`
 }
@@ -4057,6 +4062,7 @@ func (v *AutoRetryEndEvent) decodeFrom(raw map[string]json.RawMessage) error {
 	d.required("success", &out.Success)
 	d.required("attempt", &out.Attempt)
 	d.optional("finalError", &out.FinalError)
+	d.optional("finalErrorClassificationMessage", &out.FinalErrorClassificationMessage)
 	d.defaulted("retryErrors", &out.RetryErrors, `[]`)
 	if d.err != nil {
 		return d.err

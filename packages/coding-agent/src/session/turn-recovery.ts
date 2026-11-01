@@ -111,6 +111,13 @@ const SIBLING_UNBLOCK_BUFFER_MS = 1_000;
 const NON_WHITESPACE_RE = /\S/;
 const USAGE_PREFLIGHT_BLOCKED_PREFIX = "Usage preflight blocked:";
 const STREAM_STALL_ERROR_RE = /stream stall/i;
+
+/** `auto_retry_end` field for the provider's own text when the turn's display text adds omp's diagnostics to it. */
+function finalErrorProviderText(message: AssistantMessage): { finalErrorClassificationMessage?: string } {
+	return message.errorClassificationMessage === undefined
+		? {}
+		: { finalErrorClassificationMessage: message.errorClassificationMessage };
+}
 const HTTP2_STREAM_RESET_ERROR_RE =
 	/stream closed with error code\s+nghttp2_(?:internal_error|refused_stream)|nghttp2_(?:internal_error|refused_stream)|HTTP2(?:StreamReset|RefusedStream)/i;
 // Gateway/provider closes a stream mid-generation without its terminal chunk
@@ -635,6 +642,7 @@ export class TurnRecovery {
 			success: false,
 			attempt,
 			finalError: message.errorMessage,
+			...finalErrorProviderText(message),
 		});
 		this.#clearPendingRetryErrors();
 	}
@@ -1464,6 +1472,7 @@ export class TurnRecovery {
 			api: activeModel.api,
 			errorId: message.errorId,
 			errorMessage: message.errorMessage,
+			errorClassificationMessage: message.errorClassificationMessage,
 			errorStatus: message.errorStatus,
 		});
 		message.errorId = id;
@@ -2625,7 +2634,12 @@ export class TurnRecovery {
 			// else would close it.
 			if (this.#retryPromise) {
 				await this.#closeRetrySaga(
-					{ success: false, attempt: this.#retryAttempt, finalError: message.errorMessage },
+					{
+						success: false,
+						attempt: this.#retryAttempt,
+						finalError: message.errorMessage,
+						...finalErrorProviderText(message),
+					},
 					{},
 				);
 			}
@@ -3016,7 +3030,12 @@ export class TurnRecovery {
 		// An empty prepaid balance lifts within minutes: wait at least 30 seconds
 		// and add jitter after any provider hint has selected the effective
 		// minimum. A fallback changes models immediately and skips this wait.
-		if (!switchedModel && AIError.isCreditBalanceTooLow(message.errorStatus, errorMessage)) {
+		// The check reads the provider's own text: omp's display text can carry
+		// a request-dump line whose path wraps, and that must not drop the wait.
+		if (
+			!switchedModel &&
+			AIError.isCreditBalanceTooLow(message.errorStatus, message.errorClassificationMessage ?? errorMessage)
+		) {
 			delayMs = calculateCreditBalanceBackoffMs(Math.max(delayMs, 30_000), retrySettings.maxDelayMs);
 		}
 
@@ -3025,7 +3044,7 @@ export class TurnRecovery {
 				const attempt = this.#retryAttempt - 1;
 				message.errorMessage = `Retry budget exhausted after ${attempt} ${attempt === 1 ? "retry" : "retries"}: ${errorMessage}`;
 				await this.#closeRetrySaga(
-					{ success: false, attempt, finalError: errorMessage },
+					{ success: false, attempt, finalError: errorMessage, ...finalErrorProviderText(message) },
 					{ terminalTurn: message, retryErrors: { status: "superseded" } },
 				);
 				return false;
@@ -3045,7 +3064,12 @@ export class TurnRecovery {
 			// an announcement that never resolves.
 			if (this.#retryAttempt > 1) {
 				await this.#closeRetrySaga(
-					{ success: false, attempt: this.#retryAttempt - 1, finalError: errorMessage },
+					{
+						success: false,
+						attempt: this.#retryAttempt - 1,
+						finalError: errorMessage,
+						...finalErrorProviderText(message),
+					},
 					{ terminalTurn: message },
 				);
 			}
@@ -3066,7 +3090,12 @@ export class TurnRecovery {
 			// Same auto_retry_end backstop as the classifier-refusal branch above.
 			if (this.#retryAttempt > 1) {
 				await this.#closeRetrySaga(
-					{ success: false, attempt: this.#retryAttempt - 1, finalError: errorMessage },
+					{
+						success: false,
+						attempt: this.#retryAttempt - 1,
+						finalError: errorMessage,
+						...finalErrorProviderText(message),
+					},
 					{ terminalTurn: message },
 				);
 			}
@@ -3098,6 +3127,9 @@ export class TurnRecovery {
 			maxAttempts: maxRetries,
 			delayMs,
 			errorMessage,
+			...(message.errorClassificationMessage === undefined
+				? {}
+				: { errorClassificationMessage: message.errorClassificationMessage }),
 			errorId: message.errorId,
 		});
 		if (this.#host.abortInProgress() || this.#host.promptGeneration() !== generation) {

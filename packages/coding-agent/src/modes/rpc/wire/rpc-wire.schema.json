@@ -3986,6 +3986,10 @@
 				"errorMessage": {
 					"type": "string"
 				},
+				"errorClassificationMessage": {
+					"type": "string",
+					"description": "The provider's own error text, when `errorMessage` adds omp's diagnostics (retry hint, request-dump line) to it."
+				},
 				"errorId": {
 					"type": "integer"
 				}
@@ -4012,6 +4016,10 @@
 				},
 				"finalError": {
 					"type": "string"
+				},
+				"finalErrorClassificationMessage": {
+					"type": "string",
+					"description": "The provider's own error text, when `finalError` adds omp's diagnostics to it."
 				},
 				"retryErrors": {
 					"type": "array",

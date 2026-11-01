@@ -3783,6 +3783,9 @@ pub struct AutoRetryStartEvent {
 	pub delay_ms: i64,
 	#[serde(rename = "errorMessage")]
 	pub error_message: String,
+	/// The provider's own error text, when `errorMessage` adds omp's diagnostics (retry hint, request-dump line) to it.
+	#[serde(rename = "errorClassificationMessage", default, skip_serializing_if = "Option::is_none")]
+	pub error_classification_message: Option<String>,
 	#[serde(rename = "errorId", default, skip_serializing_if = "Option::is_none")]
 	pub error_id: Option<i64>,
 }
@@ -3793,6 +3796,9 @@ pub struct AutoRetryEndEvent {
 	pub attempt: i64,
 	#[serde(rename = "finalError", default, skip_serializing_if = "Option::is_none")]
 	pub final_error: Option<String>,
+	/// The provider's own error text, when `finalError` adds omp's diagnostics to it.
+	#[serde(rename = "finalErrorClassificationMessage", default, skip_serializing_if = "Option::is_none")]
+	pub final_error_classification_message: Option<String>,
 	/// Persisted retry errors whose presentation changed when the retry settled.
 	#[serde(rename = "retryErrors", default = "default_auto_retry_end_event_retry_errors")]
 	pub retry_errors: Vec<Map<String, Value>>,

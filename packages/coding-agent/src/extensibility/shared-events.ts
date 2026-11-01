@@ -265,6 +265,8 @@ export interface AutoRetryStartEvent {
 	maxAttempts: number;
 	delayMs: number;
 	errorMessage: string;
+	/** The provider's own text, when `errorMessage` adds omp's diagnostics (retry hint, request-dump line) to it. */
+	errorClassificationMessage?: string;
 	errorId?: number;
 }
 
@@ -282,6 +284,8 @@ export interface AutoRetryEndEvent {
 	success: boolean;
 	attempt: number;
 	finalError?: string;
+	/** The provider's own text, when `finalError` adds omp's diagnostics to it. */
+	finalErrorClassificationMessage?: string;
 	retryErrors?: RetryErrorUpdate[];
 }
 

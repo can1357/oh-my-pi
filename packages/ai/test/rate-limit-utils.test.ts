@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { classify, Flag, is, isUsageLimit, retriable } from "@oh-my-pi/pi-ai/error/flags";
+import { httpErrorReason } from "@oh-my-pi/pi-ai/error/http-body";
 import {
 	calculateRateLimitBackoffMs,
 	is402BillingCapBody,
@@ -1104,9 +1105,7 @@ describe("isCreditBalanceTooLow", () => {
 
 	it("requires the whole 400 body to be the Anthropic error envelope", () => {
 		expect(isCreditBalanceTooLow(400, envelope)).toBe(true);
-		expect(
-			isCreditBalanceTooLow(undefined, `400 ${envelope} retry-after-ms=5000\nraw-http-request=/tmp/request.json`),
-		).toBe(true);
+		expect(isCreditBalanceTooLow(undefined, `400 ${envelope}`)).toBe(true);
 		expect(isCreditBalanceTooLow(400, `Invalid tool schema. Offending schema: ${envelope}`)).toBe(false);
 		expect(isCreditBalanceTooLow(400, JSON.stringify({ error: { type: "invalid_request_error", message } }))).toBe(
 			false,
@@ -1114,8 +1113,38 @@ describe("isCreditBalanceTooLow", () => {
 		expect(isCreditBalanceTooLow(400, message)).toBe(false);
 	});
 
+	// The classifier reads the provider's own text. Lines after the envelope are
+	// part of that body even when they look like the suffixes omp appends for
+	// display, so they are never removed to make the body parse.
+	it("keeps text after the envelope as part of the provider body", () => {
+		for (const suffix of [
+			"\nraw-http-request=Invalid tool schema; the preceding object is the rejected example",
+			"\nraw-http-request-save-failed=Invalid tool schema",
+			" retry-after-ms=1",
+		]) {
+			expect(isCreditBalanceTooLow(400, `400 ${envelope}${suffix}`)).toBe(false);
+			expect(is(classify(new ProviderHttpError(`400 ${envelope}${suffix}`, 400)), Flag.Transient)).toBe(false);
+		}
+	});
+
 	it("keeps an explicit status authoritative over a conflicting message prefix", () => {
 		expect(isCreditBalanceTooLow(403, `400 ${envelope}`)).toBe(false);
+	});
+});
+
+describe("httpErrorReason", () => {
+	const message = "Your credit balance is too low to access the Anthropic API.";
+	const body = `400 ${JSON.stringify({ type: "error", error: { type: "invalid_request_error", message } })}`;
+
+	it("shows the provider's error.message, read from the provider text when omp decorated the display text", () => {
+		expect(httpErrorReason(body)).toBe(`400 ${message}`);
+		expect(httpErrorReason(`${body}\nraw-http-request=/tmp/omp\nlogs/1.json`, body)).toBe(`400 ${message}`);
+	});
+
+	it("shows the whole display text when the provider body is not one JSON object", () => {
+		const explained = `${body}\nraw-http-request=Invalid tool schema; the preceding object is the rejected example`;
+		expect(httpErrorReason(explained)).toBe(explained);
+		expect(httpErrorReason(explained, explained)).toBe(explained);
 	});
 });
 
