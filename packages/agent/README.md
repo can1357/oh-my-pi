@@ -225,6 +225,11 @@ const unsubscribe = agent.subscribe(event => {
 unsubscribe();
 ```
 
+`emitExternalEvent` accepts message and tool events, but not `agent_end`: only
+the Agent run that owns a lifecycle can report its untagged end. A foreign
+producer must call `emitExternalAgentEnd({ type: "agent_end", messages }, source)`;
+subscribers can distinguish that source-tagged end from the Agent's own.
+
 ## Steering & Follow-up
 
 Queue messages to inject during tool execution (steering) or after the agent would otherwise stop (follow-up):
@@ -251,9 +256,61 @@ agent.followUp({
 Steering messages are checked after each tool call by default. Set `interruptMode` to `"wait"` to defer
 steering until the current turn completes.
 
+In `one-at-a-time` mode each boundary takes one delivery unit, and a unit holding a user-authored
+message (`attribution: "user"`, or a `role: "user"` message not attributed to an agent; see
+`isUserSteeringMessage`, or the host's own rule from `setSteeringPriority(predicate)`) goes ahead of
+agent-authored steering queued before it. A person's steer is read at the next boundary however many
+agent steers wait, except in the one delivery in five the allowance below gives to agent steering;
+user units keep their order, as do agent units. `all` mode delivers the whole queue in order. Priority
+follows attribution, not where the message was typed: a user-attributed steer that arrives over RPC,
+ACP or from a collaboration guest is a person's message, and goes in arrival order with the ones typed
+here. A host that sends user-attributed steers no person wrote should attribute them to the agent.
+
+An allowance keeps sustained user input from starving agent steering:
+
+- Once `MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING` (4) user units have been taken while agent steering
+  waits, the oldest waiting agent unit goes next, and the count starts again after it. An agent unit
+  with `k` agent units ahead of it when it is queued is taken within `5 × (k + 1)` deliveries. In that
+  one delivery in five, a person's next message is read one delivery later.
+- A unit counts from the moment it is taken: dequeued for the next model call, or claimed by live
+  steering for the response being streamed, before the transcript records it. A taken unit that never
+  reaches the transcript (its preparation fails or is cancelled, it is withdrawn ahead of an abort, or
+  its run ends first) gives its place back as if it was never taken; an agent unit that does leaves
+  the user units taken before and after it counting toward its wait again.
+- Whether a user unit counts is fixed when it is taken: it counts if an agent unit is queued at that
+  moment, wherever either sits, and does not count otherwise, even if the transcript records it after
+  an agent unit arrives.
+- Pending means in this `Agent`: another session or a subagent keeps its own queue and allowance. The
+  wait ends when no agent steering is pending here, so a cleared and re-queued message starts again,
+  and the same message queued twice is two units.
+- `prioritizeSteering(messages)` moves messages ahead of everything, the allowance included, so a host
+  can make the message that answers a denied tool call land right after the denial. A message stays
+  promoted until the transcript records every occurrence of it that was outstanding when it was
+  promoted: queued, or already taken and not yet recorded. A promoted user unit still counts, so each
+  one can delay a due agent unit by one delivery.
+
+A host that lists queued messages should pass `setSteeringPriority` the rule its list uses, so the list
+shows the order the agent reads them, and can read `peekNextSteering()` to say when an agent unit goes
+next; `onQueueChange` listeners also hear when `setSteeringMode`, `setSteeringPriority` or
+`setQueuedMessageGrouping` changes what that is. The rule must synchronously return `true` or `false`
+and change nothing: a rule that queues messages or changes the steering mode while it is asked breaks
+that contract, and the order it then produces is not defined. One that throws, or returns anything
+else (an `async` rule's `Promise`, resolved or rejected, fails with a `TypeError` that says to remove
+`async`/`await`), fails the delivery it is asked about with that error (the run reports it, or
+`continue()` rejects with it); the undelivered steering stays queued in order, and the agent runs again
+once the host fixes or removes the rule.
+
+Whatever ends a run, it gives back the steering it took and did not record, and stops streaming,
+before `agent_end` reaches subscribers, so a subscriber can start the next run from that event.
+`onQueueChange` listeners hear about the requeued steering only after `agent_end` reached every
+subscriber, so a queue view never shows that steering while the agent still reports itself streaming.
+
 Hosts can use `setQueuedMessageGrouping((previous, next) => boolean)` to keep adjacent companion
 records and their prompt together in `one-at-a-time` mode. Without a grouping predicate, records
-remain separate. `replaceQueue("steering" | "followUp", messages)` replaces only the selected queue.
+remain separate. Taking a user unit from the middle of the queue makes the records on either side of
+it adjacent though they never were, so a predicate should only join records that belong together
+wherever they sit (such as a companion and the prompt after it), not pair openers with closers.
+`replaceQueue("steering" | "followUp", messages)` replaces only the selected queue.
 
 ## Custom Message Types
 

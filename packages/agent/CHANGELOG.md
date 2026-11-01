@@ -2,9 +2,23 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- `Agent.emitExternalEvent` no longer accepts `agent_end` and throws if given one: only the run that owns a lifecycle reports its untagged end. Forward another producer's end with the new `Agent.emitExternalAgentEnd(event, source)`, which tags it with `source` ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
+
+### Added
+
+- `isUserSteeringMessage`, `steeringRangeState`, `Agent.setSteeringPriority(predicate)` and `Agent.peekNextSteering()`: the rule for which queued steering is a person's, a copy-free range classifier, a host's own rule for which steering goes first, and what the next steering delivery takes ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
+
 ### Changed
 
 - Deprecated `createFileOps`, `computeFileLists`, `formatFileOperations`, `upsertFileOperations`, `isUrlSchemePath` and `FileOperations` in `@oh-my-pi/pi-agent-core/compaction`; they now re-export `@oh-my-pi/snapcompact`, which callers should import directly
+- `one-at-a-time` steering delivers the first queued unit holding a user-authored message ahead of agent-authored steering queued before it, and the oldest waiting agent unit goes next once `MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING` (4) user units were taken while an agent unit waited, counting units live steering claims for a streaming response, so an agent unit with `k` agent units ahead of it is taken within `5 × (k + 1)` deliveries; `prioritizeSteering` still goes first; the mid-batch interrupt classifies that whole unit instead of the first queued message ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
+- `onQueueChange` listeners are also called when `setSteeringMode`, `setSteeringPriority` or `setQueuedMessageGrouping` changes which queued steering is delivered next ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
+
+### Fixed
+
+- Fixed `agent_end` from a run that ends by a thrown error, or by an abort that throws, reaching subscribers while `state.isStreaming` was still `true` and before the run requeued the steering it took and did not record; every run now requeues and stops streaming before `agent_end`, so a subscriber can start the next run from it ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 

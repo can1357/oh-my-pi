@@ -974,7 +974,7 @@ describe("AgentSession handoff", () => {
 			},
 			isError: false,
 		});
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMessage] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMessage] });
 		await drainMaintenance();
 
 		expect(handoffSpy).not.toHaveBeenCalled();
@@ -1033,7 +1033,7 @@ describe("AgentSession handoff", () => {
 
 		const handoffSpy = vi.spyOn(session, "handoff");
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMessage });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMessage] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMessage] });
 		await drainMaintenance();
 
 		expect(handoffSpy).not.toHaveBeenCalled();

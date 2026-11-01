@@ -166,7 +166,7 @@ describe("AgentSession per-turn prune persistence", () => {
 			timestamp: Date.now(),
 		};
 		session.agent.emitExternalEvent({ type: "message_end", message: finalAssistant });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [finalAssistant] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [finalAssistant] });
 		await session.waitForIdle();
 
 		// The per-turn pass rewrote the live context…
@@ -219,7 +219,7 @@ describe("AgentSession per-turn prune persistence", () => {
 				timestamp: Date.now(),
 			};
 			session.agent.emitExternalEvent({ type: "message_end", message: finalAssistant });
-			session.agent.emitExternalEvent({ type: "agent_end", messages: [finalAssistant] });
+			session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [finalAssistant] });
 			await session.waitForIdle();
 
 			// The run reports idle and publishes one terminal settle, so the UI
@@ -282,7 +282,7 @@ describe("AgentSession per-turn prune persistence", () => {
 		/** Commits a turn outside the agent loop (no advisor review); its agent end runs the prune pass. */
 		async function commitUnreviewedTurn(messages: AgentMessage[]): Promise<void> {
 			for (const message of messages) session.agent.emitExternalEvent({ type: "message_end", message });
-			session.agent.emitExternalEvent({ type: "agent_end", messages });
+			session.agent.emitExternalAgentEnd({ type: "agent_end", messages });
 			await session.waitForIdle();
 		}
 

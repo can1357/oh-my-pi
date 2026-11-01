@@ -1961,6 +1961,13 @@ export class AgentSession implements SettingsScope {
 			(previous, next) =>
 				isHiddenUserCompanion(previous) && (isHiddenUserCompanion(next) || isUserQueuedMessage(next)),
 		);
+		// One-at-a-time steering reads a person's message ahead of agent steering. The queue chips
+		// (getQueuedMessages) list exactly the messages this rule accepts, and the grouping above
+		// keeps each one's hidden companions in its unit, so the chips show the order the agent
+		// reads them; the first is read at the next boundary, unless four user units were already
+		// taken while an agent steer waited (MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING), in which case
+		// the oldest waiting agent steer goes first and the queue snapshot says so (agentSteeringNext).
+		this.agent.setSteeringPriority(isUserAuthoredQueuedMessage);
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
 		this.#ownsCostGate = config.costGate === undefined;
@@ -10386,7 +10393,8 @@ export class AgentSession implements SettingsScope {
 	 *  directives, which the user never sees.
 	 *  `forInterrupt` also withdraws input the run already dequeued but never recorded — live-steered
 	 *  into the aborted response, or taken for its next model call — and treats it as queued ahead of
-	 *  the rest (it was queued first). */
+	 *  the rest: a person's messages and agent steering each leave the queue in arrival order, so what
+	 *  the run took was queued before what remains of its own class. */
 	clearQueue(options?: { forInterrupt?: boolean }): {
 		steering: RestoredQueuedMessage[];
 		followUp: RestoredQueuedMessage[];
@@ -10457,15 +10465,26 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/** Chip texts for the queue display. Steering live steering took for the streaming response
-	 *  stays listed until the transcript records it, when the model actually switches to it. */
-	getQueuedMessages(): { steering: readonly string[]; followUp: readonly string[]; liveSteered: number } {
-		const liveSteered = this.agent.peekLiveSteeredMessages().filter(isUserAuthoredQueuedMessage).length;
+	 *  stays listed until the transcript records it, when the model actually switches to it.
+	 *  `agentSteeringNext`: the next steering delivery is agent-authored, so the first queued
+	 *  (not live-steered) `steering` chip is read one delivery later. */
+	getQueuedMessages(): {
+		steering: readonly string[];
+		followUp: readonly string[];
+		liveSteered: number;
+		agentSteeringNext: boolean;
+	} {
+		const live = this.agent.peekLiveSteeredMessages();
+		const liveSteered = live.filter(isUserAuthoredQueuedMessage).length;
+		const steering = [...live, ...this.agent.peekSteeringQueue()]
+			.filter(isUserAuthoredQueuedMessage)
+			.map(queueChipText);
 		return {
-			steering: [...this.agent.peekLiveSteeredMessages(), ...this.agent.peekSteeringQueue()]
-				.filter(isUserAuthoredQueuedMessage)
-				.map(queueChipText),
+			steering,
 			followUp: this.agent.peekFollowUpQueue().filter(isUserAuthoredQueuedMessage).map(queueChipText),
 			liveSteered,
+			agentSteeringNext:
+				steering.length > liveSteered && !this.agent.peekNextSteering().some(isUserAuthoredQueuedMessage),
 		};
 	}
 
@@ -10475,7 +10494,7 @@ export class AgentSession implements SettingsScope {
 	 *  about, so a mutation that leaves the displayable queue unchanged (e.g. an
 	 *  agent-authored aside, or a claim/restore round-trip) never re-emits. */
 	#lastEmittedQueueSnapshot:
-		| { steering: readonly string[]; followUp: readonly string[]; liveSteered: number }
+		| { steering: readonly string[]; followUp: readonly string[]; liveSteered: number; agentSteeringNext: boolean }
 		| undefined;
 
 	#emitQueueUpdateIfChanged(): void {
@@ -10486,6 +10505,7 @@ export class AgentSession implements SettingsScope {
 			last.steering.length === snapshot.steering.length &&
 			last.followUp.length === snapshot.followUp.length &&
 			last.liveSteered === snapshot.liveSteered &&
+			last.agentSteeringNext === snapshot.agentSteeringNext &&
 			last.steering.every((text, i) => text === snapshot.steering[i]) &&
 			last.followUp.every((text, i) => text === snapshot.followUp[i]);
 		if (unchanged) return;
@@ -10495,6 +10515,7 @@ export class AgentSession implements SettingsScope {
 			steering: [...snapshot.steering],
 			followUp: [...snapshot.followUp],
 			liveSteered: snapshot.liveSteered,
+			agentSteeringNext: snapshot.agentSteeringNext,
 		});
 	}
 

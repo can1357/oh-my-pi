@@ -603,7 +603,7 @@ describe("AgentSession dispose releases retained memory", () => {
 			timestamp: Date.now(),
 		};
 		agent.replaceMessages([message]);
-		agent.emitExternalEvent({ type: "agent_end", messages: agent.state.messages });
+		agent.emitExternalAgentEnd({ type: "agent_end", messages: agent.state.messages });
 		await reached.promise;
 
 		const resetDone = Promise.withResolvers<void>();

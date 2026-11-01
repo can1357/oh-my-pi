@@ -7,7 +7,7 @@
  * every snapshot.
  */
 import { afterEach, describe, expect, it } from "bun:test";
-import { Agent, type AgentEvent } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentExternalEvent } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -17,7 +17,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 
-function taskUpdate(state: "running" | "completed" | "failed", toolCallId = "task-1"): AgentEvent {
+function taskUpdate(state: "running" | "completed" | "failed", toolCallId = "task-1"): AgentExternalEvent {
 	return {
 		type: "tool_execution_update",
 		toolCallId,
@@ -33,10 +33,10 @@ function taskUpdate(state: "running" | "completed" | "failed", toolCallId = "tas
 				async: { state, jobId: "job-1", type: "task" },
 			},
 		},
-	} satisfies AgentEvent;
+	} satisfies AgentExternalEvent;
 }
 
-function taskEnd(state: "running" | "completed" | "failed", toolCallId = "task-1"): AgentEvent {
+function taskEnd(state: "running" | "completed" | "failed", toolCallId = "task-1"): AgentExternalEvent {
 	return {
 		type: "tool_execution_end",
 		toolCallId,
@@ -45,7 +45,7 @@ function taskEnd(state: "running" | "completed" | "failed", toolCallId = "task-1
 			content: [{ type: "text", text: `Task ${state}` }],
 			details: { async: { state, jobId: "job-1", type: "task" } },
 		},
-	} satisfies AgentEvent;
+	} satisfies AgentExternalEvent;
 }
 
 describe("AgentSession.activeToolExecutionUpdates cache lifecycle", () => {

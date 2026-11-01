@@ -115,7 +115,7 @@ async function runMaintenance(session: AgentSession): Promise<void> {
 	if (!model) throw new Error("Expected an active model");
 	const finalAssistant = assistant(model, [{ type: "text", text: "Done." }], Date.now());
 	session.agent.emitExternalEvent({ type: "message_end", message: finalAssistant });
-	session.agent.emitExternalEvent({ type: "agent_end", messages: [finalAssistant] });
+	session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [finalAssistant] });
 	await session.waitForIdle();
 }
 

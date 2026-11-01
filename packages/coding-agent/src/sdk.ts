@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import {
 	Agent,
-	type AgentEvent,
+	type AgentExternalEvent,
 	type AgentMessage,
 	type AgentOptions,
 	type AgentTelemetryConfig,
@@ -4041,7 +4041,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 
 		// oxlint-disable-next-line prefer-const -- captured by device closures before assignment
-		let cursorEventEmitter: ((event: AgentEvent) => void) | undefined;
+		let cursorEventEmitter: ((event: AgentExternalEvent) => void) | undefined;
 		// Cursor and the agent loop may call a mounted device by its top-level
 		// name. Resolve that name from the canonical map and apply the same
 		// execution-only ACP decorator used by `write xd://<tool>`; docs and

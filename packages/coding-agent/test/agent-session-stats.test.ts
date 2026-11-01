@@ -321,7 +321,7 @@ describe("AgentSession session stats", () => {
 			if (event.type === "agent_end") agentEnd.resolve();
 		});
 		agent.emitExternalEvent({ type: "turn_start" });
-		agent.emitExternalEvent({ type: "agent_end", messages: [] });
+		agent.emitExternalAgentEnd({ type: "agent_end", messages: [] });
 		await agentEnd.promise;
 
 		expect(lifecycleEvents).toEqual(["turn_start", "agent_end"]);

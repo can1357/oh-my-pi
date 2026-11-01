@@ -730,7 +730,7 @@ describe("AgentSession shake", () => {
 				timestamp: Date.now(),
 			};
 			session.agent.emitExternalEvent({ type: "message_end", message: assistantMessage });
-			session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMessage] });
+			session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMessage] });
 			await session.waitForIdle();
 
 			expect(shakeSpy).toHaveBeenCalledWith("elide", expect.anything());
@@ -772,7 +772,7 @@ describe("AgentSession shake", () => {
 				if (event.type === "auto_compaction_end" && event.action === "shake") onCompactionDone();
 			});
 			session.agent.emitExternalEvent({ type: "message_end", message: assistantMessage });
-			session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMessage] });
+			session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMessage] });
 
 			await compactionDone;
 			await session.waitForIdle();
@@ -831,7 +831,7 @@ describe("AgentSession shake", () => {
 				if (event.type === "auto_compaction_end" && event.action === "shake") onCompactionDone();
 			});
 			session.agent.emitExternalEvent({ type: "message_end", message: assistantMessage });
-			session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMessage] });
+			session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMessage] });
 
 			await compactionDone;
 			await session.waitForIdle();
@@ -898,7 +898,7 @@ describe("AgentSession shake", () => {
 				timestamp: Date.now(),
 			};
 			session.agent.emitExternalEvent({ type: "message_end", message: assistantMessage });
-			session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMessage] });
+			session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMessage] });
 			await shakeStarted;
 
 			expect(capturedIsCompacting).toBe(true);
@@ -941,7 +941,7 @@ describe("AgentSession shake", () => {
 				timestamp: Date.now(),
 			};
 			session.agent.emitExternalEvent({ type: "message_end", message: assistantMessage });
-			session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMessage] });
+			session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMessage] });
 			await session.waitForIdle();
 
 			// Shake fires once. The pre-fix bug auto-continued, which would re-trigger shake
@@ -995,7 +995,7 @@ describe("AgentSession shake", () => {
 				timestamp: Date.now(),
 			};
 			session.agent.emitExternalEvent({ type: "message_end", message: assistantMessage });
-			session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMessage] });
+			session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMessage] });
 			await session.waitForIdle();
 
 			expect(shakeSpy).toHaveBeenCalledTimes(1);
@@ -1066,7 +1066,7 @@ describe("AgentSession shake", () => {
 			};
 
 			session.agent.emitExternalEvent({ type: "message_end", message: assistantMessage });
-			session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMessage] });
+			session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMessage] });
 			await session.waitForIdle();
 
 			expect(shakeSpy).toHaveBeenCalledTimes(1);

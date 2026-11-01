@@ -27,6 +27,7 @@ interface QueueSnapshot {
 	steering: readonly string[];
 	followUp: readonly string[];
 	liveSteered: number;
+	agentSteeringNext: boolean;
 }
 
 describe("AgentSession queue_update events", () => {
@@ -79,6 +80,7 @@ describe("AgentSession queue_update events", () => {
 					steering: [...event.steering],
 					followUp: [...event.followUp],
 					liveSteered: event.liveSteered,
+					agentSteeringNext: event.agentSteeringNext,
 				});
 		});
 		return updates;
@@ -127,7 +129,7 @@ describe("AgentSession queue_update events", () => {
 		// displayable snapshot (steering still holds "kept"); it must not emit.
 		target.agent.clearFollowUpQueue();
 
-		expect(updates).toEqual([{ steering: ["kept"], followUp: [], liveSteered: 0 }]);
+		expect(updates).toEqual([{ steering: ["kept"], followUp: [], liveSteered: 0, agentSteeringNext: false }]);
 	});
 
 	it("satisfies the snapshot-string-removal invariant for every queued chip", async () => {
@@ -152,9 +154,14 @@ describe("AgentSession queue_update events", () => {
 
 		await target.prompt("hello");
 
-		expect(snapshot).toEqual({ steering: ["steer one"], followUp: ["follow one", "follow two"], liveSteered: 0 });
+		expect(snapshot).toEqual({
+			steering: ["steer one"],
+			followUp: ["follow one", "follow two"],
+			liveSteered: 0,
+			agentSteeringNext: false,
+		});
 		expect(removed).toEqual([true, true, true]);
-		expect(remaining).toEqual({ steering: [], followUp: [], liveSteered: 0 });
+		expect(remaining).toEqual({ steering: [], followUp: [], liveSteered: 0, agentSteeringNext: false });
 	});
 
 	it("keeps the queue snapshot truthful while a steer is claimed live", async () => {
@@ -186,13 +193,13 @@ describe("AgentSession queue_update events", () => {
 		await target.steer("use tabs");
 		await claimed.promise;
 
-		const afterClaim = { steering: ["use tabs"], followUp: [], liveSteered: 1 };
+		const afterClaim = { steering: ["use tabs"], followUp: [], liveSteered: 1, agentSteeringNext: false };
 		expect(target.getQueuedMessages()).toEqual(afterClaim);
 		expect(updates.at(-1)).toEqual(afterClaim);
 
 		// The interrupt path (Esc) is what takes a live-steered message back.
 		expect(target.clearQueue({ forInterrupt: true }).steering.map(message => message.text)).toEqual(["use tabs"]);
-		expect(updates.at(-1)).toEqual({ steering: [], followUp: [], liveSteered: 0 });
+		expect(updates.at(-1)).toEqual({ steering: [], followUp: [], liveSteered: 0, agentSteeringNext: false });
 		await target.abort();
 		await running;
 	});
@@ -242,7 +249,12 @@ describe("AgentSession queue_update events", () => {
 		await streaming.promise;
 		await target.steer("use tabs");
 		await claimed.promise;
-		expect(target.getQueuedMessages()).toEqual({ steering: ["use tabs"], followUp: [], liveSteered: 1 });
+		expect(target.getQueuedMessages()).toEqual({
+			steering: ["use tabs"],
+			followUp: [],
+			liveSteered: 1,
+			agentSteeringNext: false,
+		});
 
 		await running;
 
@@ -252,7 +264,7 @@ describe("AgentSession queue_update events", () => {
 		// integrates the steer into its response, so the agent afterwards
 		// restores it to the steering queue for a later turn — the arrival
 		// notification itself is this test's contract, not that restore.
-		expect(updates).toContainEqual({ steering: [], followUp: [], liveSteered: 0 });
+		expect(updates).toContainEqual({ steering: [], followUp: [], liveSteered: 0, agentSteeringNext: false });
 		expect(target.getQueuedMessages().liveSteered).toBe(0);
 	});
 });

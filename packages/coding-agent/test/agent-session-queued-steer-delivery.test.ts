@@ -22,7 +22,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import type { PromptTemplate } from "@oh-my-pi/pi-coding-agent/config/prompt-templates";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { tryRunRpcSkillCommand } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
+import { applyRpcQueueModeCommand, tryRunRpcSkillCommand } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 import { cfgMagicKeyword, cfgMagicKeywordsEnabled } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -216,6 +216,234 @@ describe("AgentSession queued steer delivery", () => {
 		}
 		expect(entry.message.attribution).toBe("agent");
 		expect(entry.message.steering).toBe(true);
+	});
+
+	describe("a typed steer queued behind extension steers", () => {
+		const CARDS = ["card one", "card two", "card three"];
+
+		/** Extension cards (`pi.sendMessage(..., { deliverAs: "steer", triggerTurn: true })`), then a person's Enter. */
+		async function queueCardsThenTypedSteer(target: AgentSession): Promise<void> {
+			for (const card of CARDS) {
+				await target.sendCustomMessage(
+					{ customType: "envoy-message", content: card, display: true },
+					{ deliverAs: "steer", triggerTurn: true },
+				);
+			}
+			await target.prompt("read me now", { streamingBehavior: "steer" });
+		}
+
+		function textsOf(call: MockModel["calls"][number]): string {
+			return JSON.stringify(call.context.messages);
+		}
+
+		function transcriptOrder(sessionManager: SessionManager): string[] {
+			return sessionManager.getEntries().flatMap(entry => {
+				if (entry.type === "custom_message" && entry.customType === "envoy-message") {
+					return [typeof entry.content === "string" ? entry.content : ""];
+				}
+				if (entry.type !== "message" || entry.message.role !== "user") return [];
+				const content = entry.message.content;
+				const text =
+					typeof content === "string"
+						? content
+						: content
+								.filter(part => part.type === "text")
+								.map(part => part.text)
+								.join("");
+				return [text];
+			});
+		}
+
+		it("reads it at the next model call and records it before the cards", async () => {
+			let queued: { steering: readonly string[] } | undefined;
+			const { session, sessionManager, mock } = await createSession([
+				async () => {
+					await queueCardsThenTypedSteer(session);
+					queued = session.getQueuedMessages();
+					return { content: ["working"] };
+				},
+				{ content: ["read the person"] },
+				{ content: ["read card one"] },
+				{ content: ["read card two"] },
+				{ content: ["read card three"] },
+			]);
+			session.setSteeringMode("one-at-a-time");
+
+			await session.prompt("start");
+			await session.waitForIdle();
+
+			// The chip lists only the person's message, and that message is the one read next.
+			expect(queued?.steering).toEqual(["read me now"]);
+			expect(textsOf(mock.calls[1])).toContain("read me now");
+			for (const card of CARDS) expect(textsOf(mock.calls[1])).not.toContain(card);
+			expect(textsOf(mock.calls[2])).toContain("card one");
+			expect(textsOf(mock.calls[2])).not.toContain("card two");
+			expect(mock.calls).toHaveLength(5);
+			expect(transcriptOrder(sessionManager)).toEqual(["start", "read me now", ...CARDS]);
+			expect(session.agent.hasQueuedMessages()).toBe(false);
+		});
+
+		it("orders steering by the rule the queue chips use, not by attribution alone", async () => {
+			const hidden: AgentMessage = {
+				role: "custom",
+				customType: "hidden-note",
+				content: "hidden user-attributed note",
+				display: false,
+				attribution: "user",
+				timestamp: Date.now(),
+			};
+			let queued: { steering: readonly string[] } | undefined;
+			const { session, mock } = await createSession([
+				async () => {
+					await session.sendCustomMessage(
+						{ customType: "envoy-message", content: "card one", display: true },
+						{ deliverAs: "steer", triggerTurn: true },
+					);
+					session.agent.steer(hidden);
+					await session.prompt("read me now", { streamingBehavior: "steer" });
+					queued = session.getQueuedMessages();
+					return { content: ["working"] };
+				},
+				{ content: ["read the person"] },
+				{ content: ["read the card"] },
+				{ content: ["read the note"] },
+			]);
+			session.setSteeringMode("one-at-a-time");
+
+			await session.prompt("start");
+			await session.waitForIdle();
+
+			// The chips list only the typed message, and it is the one read next; the hidden
+			// note is not a chip, so it keeps its place behind the card.
+			expect(queued?.steering).toEqual(["read me now"]);
+			expect(textsOf(mock.calls[1])).toContain("read me now");
+			expect(textsOf(mock.calls[2])).toContain("card one");
+			expect(textsOf(mock.calls[2])).not.toContain("hidden user-attributed note");
+			expect(textsOf(mock.calls[3])).toContain("hidden user-attributed note");
+		});
+
+		it("still delivers everything in queue order at the next boundary in all mode", async () => {
+			const { session, sessionManager, mock } = await createSession([
+				async () => {
+					await queueCardsThenTypedSteer(session);
+					return { content: ["working"] };
+				},
+				{ content: ["read all"] },
+			]);
+			session.setSteeringMode("all");
+
+			await session.prompt("start");
+			await session.waitForIdle();
+
+			expect(mock.calls).toHaveLength(2);
+			expect(transcriptOrder(sessionManager)).toEqual(["start", ...CARDS, "read me now"]);
+		});
+
+		it("Esc still returns the typed text to the editor and records the cards without a turn", async () => {
+			const { promise: queuedAll, resolve: markQueued } = Promise.withResolvers<void>();
+			const { session, sessionManager, mock } = await createSession([
+				async () => {
+					await queueCardsThenTypedSteer(session);
+					markQueued();
+					// The turn stays open (the abort cancels the delay), as a busy run's would.
+					return { content: ["working"], delayMs: 60_000 };
+				},
+			]);
+			session.setSteeringMode("one-at-a-time");
+
+			const running = session.prompt("start");
+			await queuedAll;
+			const restored = session.clearQueue({ forInterrupt: true });
+			await session.abort({ reason: USER_INTERRUPT_LABEL });
+			await session.waitForIdle();
+			await running.catch(() => {});
+
+			expect(restored.steering.map(message => message.text)).toEqual(["read me now"]);
+			expect(mock.calls).toHaveLength(1);
+			expect(transcriptOrder(sessionManager)).toEqual(["start", ...CARDS]);
+			expect(session.agent.hasQueuedMessages()).toBe(false);
+		});
+
+		it("says an agent message goes first once four typed messages went ahead of it", async () => {
+			const typed = ["typed 1", "typed 2", "typed 3", "typed 4", "typed 5"];
+			const flags: boolean[] = [];
+			const updates: boolean[] = [];
+			const readNext = async () => {
+				flags.push(session.getQueuedMessages().agentSteeringNext);
+				return { content: ["read"] };
+			};
+			const { session, sessionManager } = await createSession([
+				async () => {
+					await session.sendCustomMessage(
+						{ customType: "envoy-message", content: "card one", display: true },
+						{ deliverAs: "steer", triggerTurn: true },
+					);
+					for (const text of typed) await session.prompt(text, { streamingBehavior: "steer" });
+					return { content: ["working"] };
+				},
+				readNext,
+				readNext,
+				readNext,
+				readNext,
+				readNext,
+				readNext,
+			]);
+			session.setSteeringMode("one-at-a-time");
+			const unsubscribe = session.subscribe(event => {
+				if (event.type === "queue_update") updates.push(event.agentSteeringNext);
+			});
+
+			await session.prompt("start");
+			await session.waitForIdle();
+			unsubscribe();
+
+			// Model calls 1-4 read typed 1-4, call 5 the card, call 6 typed 5. During call 4 the chips list
+			// typed 5 alone while the card is read next, and the snapshot says so.
+			expect(flags).toEqual([false, false, false, true, false, false]);
+			expect(transcriptOrder(sessionManager)).toEqual(["start", ...typed.slice(0, 4), "card one", "typed 5"]);
+			expect(updates).toContain(true);
+			expect(updates.at(-1)).toBe(false);
+		});
+
+		it("publishes the change when set_steering_mode changes whether an agent message goes first", async () => {
+			const typed = ["typed 1", "typed 2", "typed 3", "typed 4", "typed 5"];
+			let latest: boolean | undefined;
+			let observed: { getter: boolean; published: boolean | undefined } | undefined;
+			const read = { content: ["read"] };
+			const { session, sessionManager } = await createSession([
+				async () => {
+					await session.sendCustomMessage(
+						{ customType: "envoy-message", content: "card one", display: true },
+						{ deliverAs: "steer", triggerTurn: true },
+					);
+					for (const text of typed) await session.prompt(text, { streamingBehavior: "steer" });
+					return { content: ["working"] };
+				},
+				read,
+				read,
+				read,
+				async () => {
+					// Four typed messages went ahead of the card, so it goes first; the mode change ends that.
+					applyRpcQueueModeCommand(session, { type: "set_steering_mode", mode: "all" });
+					observed = { getter: session.getQueuedMessages().agentSteeringNext, published: latest };
+					return { content: ["read"] };
+				},
+				read,
+			]);
+			session.setSteeringMode("one-at-a-time");
+			const unsubscribe = session.subscribe(event => {
+				if (event.type === "queue_update") latest = event.agentSteeringNext;
+			});
+
+			await session.prompt("start");
+			await session.waitForIdle();
+			unsubscribe();
+
+			// A client rendering from queue_update sees what get_state says.
+			expect(observed).toEqual({ getter: false, published: false });
+			// All mode reads the card and typed 5 together at the next boundary.
+			expect(transcriptOrder(sessionManager)).toEqual(["start", ...typed.slice(0, 4), "card one", "typed 5"]);
+		});
 	});
 
 	it("defaults direct user steers and idle prompts to user attribution", async () => {
@@ -563,7 +791,9 @@ describe("AgentSession queued steer delivery", () => {
 		const skillPath = path.join(tempDir, "SKILL.md");
 		await Bun.write(skillPath, "---\nname: reviewer\ndescription: Review code\n---\n\nReview the supplied code.\n");
 		const invocation = "/skill:reviewer  focus on risks\nand correctness";
-		let queued: { steering: readonly string[]; followUp: readonly string[]; liveSteered: number } | undefined;
+		let queued:
+			| { steering: readonly string[]; followUp: readonly string[]; liveSteered: number; agentSteeringNext: boolean }
+			| undefined;
 		let injected = false;
 		session.agent.setOnBeforeYield(async () => {
 			if (injected) return;
@@ -592,7 +822,7 @@ describe("AgentSession queued steer delivery", () => {
 		await session.prompt("start");
 		await session.waitForIdle();
 
-		expect(queued).toEqual({ steering: [invocation], followUp: [], liveSteered: 0 });
+		expect(queued).toEqual({ steering: [invocation], followUp: [], liveSteered: 0, agentSteeringNext: false });
 		const delivered = session.messages.filter(
 			(message): message is CustomMessage => message.role === "custom" && message.customType === "skill-prompt",
 		);
@@ -797,7 +1027,12 @@ describe("AgentSession queued steer delivery", () => {
 
 			expect(session.removeQueuedMessage("/review raw", "followUp")).toBe(true);
 			expect(session.removeQueuedMessage("/review expanded", "followUp")).toBe(true);
-			expect(session.getQueuedMessages()).toEqual({ steering: [], followUp: ["keep"], liveSteered: 0 });
+			expect(session.getQueuedMessages()).toEqual({
+				steering: [],
+				followUp: ["keep"],
+				liveSteered: 0,
+				agentSteeringNext: false,
+			});
 		});
 
 		it("removes a queued file-based slash command by its raw /cmd invocation", async () => {
@@ -884,7 +1119,12 @@ describe("AgentSession queued steer delivery", () => {
 			let promoted: boolean | undefined;
 			let promotedAgain: boolean | undefined;
 			let queueAfterPromotion:
-				| { steering: readonly string[]; followUp: readonly string[]; liveSteered: number }
+				| {
+						steering: readonly string[];
+						followUp: readonly string[];
+						liveSteered: number;
+						agentSteeringNext: boolean;
+				  }
 				| undefined;
 			session.agent.setOnBeforeYield(async () => {
 				if (injected) return;
@@ -923,7 +1163,12 @@ describe("AgentSession queued steer delivery", () => {
 			await session.waitForIdle();
 
 			expect(promoted).toBe(true);
-			expect(queueAfterPromotion).toEqual({ steering: [invocation], followUp: [], liveSteered: 0 });
+			expect(queueAfterPromotion).toEqual({
+				steering: [invocation],
+				followUp: [],
+				liveSteered: 0,
+				agentSteeringNext: false,
+			});
 			expect(promotedAgain).toBe(false);
 			const delivered = session.messages.filter(
 				(message): message is CustomMessage => message.role === "custom" && message.attribution === "user",
@@ -970,6 +1215,7 @@ describe("AgentSession queued steer delivery", () => {
 				steering: ["existing", "duplicate"],
 				followUp: ["unrelated", "duplicate"],
 				liveSteered: 0,
+				agentSteeringNext: false,
 			});
 			const delivered = session.messages.filter(message => message.role === "user");
 			expect(delivered.map(message => message.content)).toEqual(
@@ -1058,7 +1304,12 @@ describe("AgentSession queued steer delivery", () => {
 				// raw-text record must follow so the caller can still remove it by the
 				// exact "/cmd args" it originally submitted.
 				expect(session.promoteQueuedMessage("/cmd args")).toBe(true);
-				expect(session.getQueuedMessages()).toEqual({ steering: ["Expanded args"], followUp: [], liveSteered: 0 });
+				expect(session.getQueuedMessages()).toEqual({
+					steering: ["Expanded args"],
+					followUp: [],
+					liveSteered: 0,
+					agentSteeringNext: false,
+				});
 
 				expect(session.removeQueuedMessage("/cmd args", "steering")).toBe(true);
 				expect(session.getQueuedMessages().steering).toEqual([]);
@@ -1276,7 +1527,12 @@ describe("AgentSession queued steer delivery", () => {
 		it("wakes an idle follow-up and rejects a stale promotion without replaying it", async () => {
 			const { session, mock } = await createSession([{ content: ["delivered"] }]);
 			await session.followUp("wake me");
-			expect(session.getQueuedMessages()).toEqual({ steering: [], followUp: ["wake me"], liveSteered: 0 });
+			expect(session.getQueuedMessages()).toEqual({
+				steering: [],
+				followUp: ["wake me"],
+				liveSteered: 0,
+				agentSteeringNext: false,
+			});
 			const delivered = nextUserMessage(session, "wake me");
 
 			expect(session.promoteQueuedMessage("wake me")).toBe(true);

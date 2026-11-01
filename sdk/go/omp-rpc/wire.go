@@ -2210,6 +2210,8 @@ type QueuedMessagesState struct {
 	FollowUp []string `json:"followUp"`
 	// Leading `steering` entries are live steering already sent into the streaming response; `remove_queued_message` cannot reach them.
 	LiveSteered int64 `json:"liveSteered"`
+	// The next steering delivery is agent-authored, so the first queued (not live) `steering` entry is read one delivery later.
+	AgentSteeringNext bool `json:"agentSteeringNext"`
 }
 
 func (v *QueuedMessagesState) UnmarshalJSON(data []byte) error {
@@ -2222,6 +2224,7 @@ func (v *QueuedMessagesState) decodeFrom(raw map[string]json.RawMessage) error {
 	d.required("steering", &out.Steering)
 	d.required("followUp", &out.FollowUp)
 	d.defaulted("liveSteered", &out.LiveSteered, `0`)
+	d.defaulted("agentSteeringNext", &out.AgentSteeringNext, `false`)
 	if d.err != nil {
 		return d.err
 	}
@@ -2567,7 +2570,7 @@ func (v *SessionState) decodeFrom(raw map[string]json.RawMessage) error {
 	d.defaulted("queuedMessageCount", &out.QueuedMessageCount, `0`)
 	d.defaulted("hasPendingAsyncWork", &out.HasPendingAsyncWork, `false`)
 	d.defaulted("isSettled", &out.IsSettled, `false`)
-	d.defaulted("queuedMessages", &out.QueuedMessages, `{"steering":[],"followUp":[],"liveSteered":0}`)
+	d.defaulted("queuedMessages", &out.QueuedMessages, `{"steering":[],"followUp":[],"liveSteered":0,"agentSteeringNext":false}`)
 	d.defaulted("todoPhases", &out.TodoPhases, `[]`)
 	d.scalarOrArray("systemPrompt")
 	d.defaulted("systemPrompt", &out.SystemPrompt, `[]`)
@@ -3594,6 +3597,8 @@ type AgentEndEvent struct {
 	AwaitingAsyncWork *bool                      `json:"awaitingAsyncWork,omitempty"`
 	Telemetry         map[string]json.RawMessage `json:"telemetry,omitempty"`
 	Coverage          map[string]json.RawMessage `json:"coverage,omitempty"`
+	// Another producer that forwarded this end into the session; absent for the session's own run.
+	Source *string `json:"source,omitempty"`
 }
 
 func (v *AgentEndEvent) UnmarshalJSON(data []byte) error {
@@ -3611,6 +3616,7 @@ func (v *AgentEndEvent) decodeFrom(raw map[string]json.RawMessage) error {
 	d.optional("awaitingAsyncWork", &out.AwaitingAsyncWork)
 	d.optional("telemetry", &out.Telemetry)
 	d.optional("coverage", &out.Coverage)
+	d.optional("source", &out.Source)
 	if d.err != nil {
 		return d.err
 	}
@@ -4481,6 +4487,8 @@ type QueueUpdateEvent struct {
 	FollowUp []string `json:"followUp"`
 	// Leading `steering` entries are live steering already sent into the streaming response; `remove_queued_message` cannot reach them.
 	LiveSteered int64 `json:"liveSteered"`
+	// The next steering delivery is agent-authored, so the first queued (not live) `steering` entry is read one delivery later.
+	AgentSteeringNext bool `json:"agentSteeringNext"`
 }
 
 func (v *QueueUpdateEvent) UnmarshalJSON(data []byte) error {
@@ -4494,6 +4502,7 @@ func (v *QueueUpdateEvent) decodeFrom(raw map[string]json.RawMessage) error {
 	d.required("steering", &out.Steering)
 	d.required("followUp", &out.FollowUp)
 	d.defaulted("liveSteered", &out.LiveSteered, `0`)
+	d.defaulted("agentSteeringNext", &out.AgentSteeringNext, `false`)
 	if d.err != nil {
 		return d.err
 	}

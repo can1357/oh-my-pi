@@ -2916,6 +2916,9 @@ pub struct QueuedMessagesState {
 	/// Leading `steering` entries are live steering already sent into the streaming response; `remove_queued_message` cannot reach them.
 	#[serde(rename = "liveSteered", default = "default_queued_messages_state_live_steered")]
 	pub live_steered: i64,
+	/// The next steering delivery is agent-authored, so the first queued (not live) `steering` entry is read one delivery later.
+	#[serde(rename = "agentSteeringNext", default = "default_queued_messages_state_agent_steering_next")]
+	pub agent_steering_next: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3646,6 +3649,9 @@ pub struct AgentEndEvent {
 	pub telemetry: Option<Map<String, Value>>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub coverage: Option<Map<String, Value>>,
+	/// Another producer that forwarded this end into the session; absent for the session's own run.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3909,6 +3915,9 @@ pub struct QueueUpdateEvent {
 	/// Leading `steering` entries are live steering already sent into the streaming response; `remove_queued_message` cannot reach them.
 	#[serde(rename = "liveSteered", default = "default_queue_update_event_live_steered")]
 	pub live_steered: i64,
+	/// The next steering delivery is agent-authored, so the first queued (not live) `steering` entry is read one delivery later.
+	#[serde(rename = "agentSteeringNext", default = "default_queue_update_event_agent_steering_next")]
+	pub agent_steering_next: bool,
 }
 
 /// A session event, discriminated by `type`; `set_event_filter` selects which are sent.
@@ -5980,6 +5989,10 @@ fn default_queued_messages_state_live_steered() -> i64 {
 	serde_json::from_str("0").expect("valid wire default")
 }
 
+fn default_queued_messages_state_agent_steering_next() -> bool {
+	serde_json::from_str("false").expect("valid wire default")
+}
+
 fn default_session_state_is_streaming() -> bool {
 	serde_json::from_str("false").expect("valid wire default")
 }
@@ -6041,7 +6054,7 @@ fn default_session_state_is_settled() -> bool {
 }
 
 fn default_session_state_queued_messages() -> QueuedMessagesState {
-	serde_json::from_str("{\"steering\":[],\"followUp\":[],\"liveSteered\":0}").expect("valid wire default")
+	serde_json::from_str("{\"steering\":[],\"followUp\":[],\"liveSteered\":0,\"agentSteeringNext\":false}").expect("valid wire default")
 }
 
 fn default_session_state_todo_phases() -> Vec<TodoPhase> {
@@ -6070,6 +6083,10 @@ fn default_auto_retry_end_event_retry_errors() -> Vec<Map<String, Value>> {
 
 fn default_queue_update_event_live_steered() -> i64 {
 	serde_json::from_str("0").expect("valid wire default")
+}
+
+fn default_queue_update_event_agent_steering_next() -> bool {
+	serde_json::from_str("false").expect("valid wire default")
 }
 
 fn default_ask_question_multi() -> bool {

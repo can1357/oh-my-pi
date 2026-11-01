@@ -1876,22 +1876,42 @@ interface PreparedProviderCall {
 }
 
 /**
- * Classify the first `count` steering messages for a tool-batch interrupt:
- * any user-authored message wins, then agent-attributed user messages, else
- * system steering (advisor cards, hidden directives). Shared by the agent's
- * queue peek and the loop's live-taken steering.
+ * Whether a queued steering message is user-authored: user-attributed, or a user
+ * turn not attributed to an agent. A tool-batch interrupt classifies by it, and
+ * one-at-a-time steering delivers a unit holding one ahead of agent steering
+ * unless the host sets its own rule (`Agent.setSteeringPriority`).
+ */
+export function isUserSteeringMessage(message: AgentMessage): boolean {
+	const attribution = "attribution" in message ? message.attribution : undefined;
+	if (attribution === "user") return true;
+	return "role" in message && message.role === "user" && attribution !== "agent";
+}
+
+/**
+ * Classify the first `count` steering messages for a tool-batch interrupt: any
+ * user-authored message wins, then agent-attributed user messages, else system
+ * steering (advisor cards, hidden directives). Shared by the agent's queue peek
+ * and the loop's live-taken steering.
  */
 export function steeringQueueState(messages: readonly AgentMessage[], count = messages.length): SteeringQueueState {
+	// Only a count of exactly 0 is "nothing queued": a negative or NaN count classifies an empty
+	// range as queued system steering, as the published function always has.
 	if (count === 0) return { queued: false };
+	return classifySteering(messages, 0, count);
+}
+
+/** {@link steeringQueueState} for `messages[start, end)`, without copying the range. */
+export function steeringRangeState(messages: readonly AgentMessage[], start: number, end: number): SteeringQueueState {
+	if (start >= end) return { queued: false };
+	return classifySteering(messages, start, end);
+}
+
+function classifySteering(messages: readonly AgentMessage[], start: number, end: number): SteeringQueueState {
 	let hasAgentSteering = false;
-	for (let i = 0; i < count; i++) {
+	for (let i = start; i < end; i++) {
 		const message = messages[i];
-		const role = "role" in message ? message.role : undefined;
-		const attribution = "attribution" in message ? message.attribution : undefined;
-		if (attribution === "user") return { queued: true, source: "user" };
-		if (role !== "user") continue;
-		if (attribution !== "agent") return { queued: true, source: "user" };
-		hasAgentSteering = true;
+		if (isUserSteeringMessage(message)) return { queued: true, source: "user" };
+		if ("role" in message && message.role === "user") hasAgentSteering = true;
 	}
 	return { queued: true, source: hasAgentSteering ? "agent" : "system" };
 }

@@ -577,6 +577,9 @@ Clients should render the queue from these snapshots instead of tracking chips
 independently, and treat removal responses as confirmation rather than a second
 source of truth. `queuedMessageCount` also includes advisor cards and pending
 next-turn messages, so it is not necessarily the number of user-authored chips.
+`agentSteeringNext` is `true` when the next steering delivery is agent-authored
+(see `set_steering_mode`), so the first queued `steering` entry is read one
+delivery later; chips list only user-authored messages, so show this alongside them.
 
 ### `goal` payload
 
@@ -895,10 +898,12 @@ Common event types:
 Emitted whenever the displayable steering/follow-up queue changes: a `steer`,
 `follow_up`, or queued `prompt` adds to it; delivery into the transcript,
 `remove_queued_message`, an abort that drops in-flight queued messages,
-or a session switch removes from or clears it. The server coalesces this
+or a session switch removes from or clears it; a `set_steering_mode` that
+changes `agentSteeringNext` also sends it. The server coalesces this
 against the last value sent — a mutation that leaves the snapshot unchanged
-(for example, an agent-authored aside that never renders as a chip) never
-re-emits. `steering`/`followUp` mirror `get_state`'s `queuedMessages` field and
+(for example, an agent-authored aside that never renders as a chip and does not
+change `agentSteeringNext`) never re-emits. `steering`/`followUp`/`agentSteeringNext`
+mirror `get_state`'s `queuedMessages` field; `steering`/`followUp`
 carry the queue-chip text accepted by `remove_queued_message` while the message
 is still pending. Live-steered messages stay listed until recorded in the
 transcript, even after they cease to be removable. Render the queue from this
@@ -935,6 +940,7 @@ Each command replaces the whole filter state: omitting `messageUpdates` resets i
   isTerminal?: boolean;
   yielded?: boolean;
   awaitingAsyncWork?: boolean;
+  source?: string;
 }
 ```
 
@@ -947,6 +953,9 @@ no follow-up run occurs. The optional fields keep older frames terminal-compatib
 when `isTerminal` is absent. Use `yielded` for a prompt's yield and
 `session_settled` for quiescence, rather than assuming every non-terminal end
 guarantees another turn.
+
+`source` is set only when another producer forwarded the end into the session
+(`Agent.emitExternalAgentEnd`); the session's own runs never set it.
 
 ### Progress events
 
@@ -1280,7 +1289,7 @@ they do not write global `config.yml`. `set_auto_compaction` and
 ### Mode semantics
 
 - `set_steering_mode` / `set_follow_up_mode`
-   - `"one-at-a-time"`: dequeue one delivery group per queue drain, keeping hidden companions with their user message
+   - `"one-at-a-time"`: dequeue one delivery group per queue drain, keeping hidden companions with their user message; for steering, a group holding a user-authored message goes ahead of agent-authored steering queued before it, and the oldest waiting agent group goes next once 4 user groups have been taken while an agent group waited (a group counts from the moment it is taken, including one live steering claims for the streaming response, and stops counting if it never reaches the transcript), so an agent group with `k` agent groups ahead of it is delivered within `5 × (k + 1)` drains. Steering the host promoted for a denied tool call goes first regardless.
    - `"all"`: dequeue the entire queue at once
 - `set_interrupt_mode`
    - `"immediate"`: queued steering raises a cooperative signal for foreground tools, allowing auto-backgroundable work to step aside; it does not hard-kill or skip non-interruptible tools

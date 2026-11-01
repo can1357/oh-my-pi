@@ -578,6 +578,8 @@ class QueuedMessagesState:
     follow_up: tuple[str, ...]
     live_steered: int = 0
     """Leading `steering` entries are live steering already sent into the streaming response; `remove_queued_message` cannot reach them."""
+    agent_steering_next: bool = False
+    """The next steering delivery is agent-authored, so the first queued (not live) `steering` entry is read one delivery later."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -667,7 +669,7 @@ class SessionState:
     """Background jobs or deliveries can still inject a follow-up and wake the session."""
     is_settled: bool = False
     """Idle with nothing queued or pending; same predicate as `session_settled`."""
-    queued_messages: QueuedMessagesState = field(default_factory=lambda: parse_queued_messages_state({"steering": [], "followUp": [], "liveSteered": 0}, "queuedMessages"))
+    queued_messages: QueuedMessagesState = field(default_factory=lambda: parse_queued_messages_state({"steering": [], "followUp": [], "liveSteered": 0, "agentSteeringNext": False}, "queuedMessages"))
     todo_phases: tuple[TodoPhase, ...] = ()
     system_prompt: tuple[str, ...] = ()
     """System prompt sections, for session dumps."""
@@ -982,6 +984,8 @@ class AgentEndEvent:
     """Non-terminal end whose only possible resume is a background-job result."""
     telemetry: JsonObject | None = None
     coverage: JsonObject | None = None
+    source: str | None = None
+    """Another producer that forwarded this end into the session; absent for the session's own run."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -1236,6 +1240,8 @@ class QueueUpdateEvent:
     follow_up: tuple[str, ...]
     live_steered: int = 0
     """Leading `steering` entries are live steering already sent into the streaming response; `remove_queued_message` cannot reach them."""
+    agent_steering_next: bool = False
+    """The next steering delivery is agent-authored, so the first queued (not live) `steering` entry is read one delivery later."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -1934,6 +1940,7 @@ def parse_queued_messages_state(value: object, path: str = "QueuedMessagesState"
         steering=required(payload, "steering", array(decode_str), path),
         follow_up=required(payload, "followUp", array(decode_str), path),
         live_steered=defaulted(payload, "liveSteered", decode_int, path, 0),
+        agent_steering_next=defaulted(payload, "agentSteeringNext", decode_bool, path, False),
     )
 
 
@@ -2022,7 +2029,7 @@ def parse_session_state(value: object, path: str = "SessionState") -> SessionSta
         queued_message_count=defaulted(payload, "queuedMessageCount", decode_int, path, 0),
         has_pending_async_work=defaulted(payload, "hasPendingAsyncWork", decode_bool, path, False),
         is_settled=defaulted(payload, "isSettled", decode_bool, path, False),
-        queued_messages=defaulted(payload, "queuedMessages", parse_queued_messages_state, path, parse_queued_messages_state({"steering": [], "followUp": [], "liveSteered": 0}, path)),
+        queued_messages=defaulted(payload, "queuedMessages", parse_queued_messages_state, path, parse_queued_messages_state({"steering": [], "followUp": [], "liveSteered": 0, "agentSteeringNext": False}, path)),
         todo_phases=defaulted(payload, "todoPhases", array(parse_todo_phase), path, ()),
         system_prompt=defaulted(payload, "systemPrompt", scalar_or_array(decode_str), path, ()),
         dump_tools=defaulted(payload, "dumpTools", array(parse_tool_descriptor), path, ()),
@@ -2372,6 +2379,7 @@ def parse_agent_end_event(value: object, path: str = "AgentEndEvent") -> AgentEn
         awaiting_async_work=optional(payload, "awaitingAsyncWork", decode_bool, path),
         telemetry=optional(payload, "telemetry", decode_json_object, path),
         coverage=optional(payload, "coverage", decode_json_object, path),
+        source=optional(payload, "source", decode_str, path),
     )
 
 
@@ -2666,6 +2674,7 @@ def parse_queue_update_event(value: object, path: str = "QueueUpdateEvent") -> Q
         steering=required(payload, "steering", array(decode_str), path),
         follow_up=required(payload, "followUp", array(decode_str), path),
         live_steered=defaulted(payload, "liveSteered", decode_int, path, 0),
+        agent_steering_next=defaulted(payload, "agentSteeringNext", decode_bool, path, False),
     )
 
 

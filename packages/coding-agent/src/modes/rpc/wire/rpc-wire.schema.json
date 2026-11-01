@@ -2421,6 +2421,11 @@
 					"type": "integer",
 					"description": "Leading `steering` entries are live steering already sent into the streaming response; `remove_queued_message` cannot reach them.",
 					"default": 0
+				},
+				"agentSteeringNext": {
+					"type": "boolean",
+					"description": "The next steering delivery is agent-authored, so the first queued (not live) `steering` entry is read one delivery later.",
+					"default": false
 				}
 			},
 			"required": [
@@ -2708,7 +2713,8 @@
 					"default": {
 						"steering": [],
 						"followUp": [],
-						"liveSteered": 0
+						"liveSteered": 0,
+						"agentSteeringNext": false
 					}
 				},
 				"todoPhases": {
@@ -3684,6 +3690,10 @@
 					"type": "object",
 					"properties": {},
 					"additionalProperties": {}
+				},
+				"source": {
+					"type": "string",
+					"description": "Another producer that forwarded this end into the session; absent for the session's own run."
 				}
 			},
 			"required": [
@@ -4345,6 +4355,11 @@
 					"type": "integer",
 					"description": "Leading `steering` entries are live steering already sent into the streaming response; `remove_queued_message` cannot reach them.",
 					"default": 0
+				},
+				"agentSteeringNext": {
+					"type": "boolean",
+					"description": "The next steering delivery is agent-authored, so the first queued (not live) `steering` entry is read one delivery later.",
+					"default": false
 				}
 			},
 			"required": [

@@ -251,7 +251,7 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 		// Resume maintenance without extending the archived branch. Appending an
 		// assistant would make the retained user turn legitimately compactable.
 		if (options.appendAssistant) session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 		await compactionDone;
 		await session.waitForIdle();
 	}
