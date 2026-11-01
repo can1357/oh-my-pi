@@ -9,6 +9,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { createSettingsHost } from "@oh-my-pi/pi-coding-agent/config/settings-ui";
 import { cfgTuiMode, cfgTuiMouse } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { formatExtensionLink, setExtensionLinks } from "@oh-my-pi/pi-tui/render/extension-links";
 import * as themeModule from "@oh-my-pi/pi-tui/theme";
 import { Input, TUI, isKittyProtocolActive, setKittyProtocolActive } from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -57,6 +58,7 @@ describe("InteractiveMode fullscreen", () => {
 		await session?.dispose();
 		authStorage?.close();
 		tempDir?.removeSync();
+		setExtensionLinks([]);
 		resetSettingsForTest();
 	});
 
@@ -237,5 +239,57 @@ describe("InteractiveMode fullscreen", () => {
 		mode.ui.setFocus(mode.editor);
 		mode.ui.injectDebugInput("!");
 		expect(mode.editor.getText()).toBe("draft!");
+	});
+
+	it("returns search focus to the editor when the mouse starts a transcript selection", async () => {
+		mode.editor.setText("draft");
+		mode.present(new StaticLines(["selection target", ...Array.from({ length: 30 }, (_, i) => `line-${i}`)]));
+		cfgTuiMode.set(Settings.instance, "fullscreen");
+		await terminal.waitForRender();
+		mode.ui.injectDebugInput("\x06");
+		await terminal.waitForRender();
+
+		mode.ui.injectDebugInput("\x1b[<0;2;2M");
+		mode.ui.injectDebugInput("!");
+		await terminal.waitForRender();
+
+		expect(mode.ui.getFocused()).toBe(mode.editor);
+		expect(mode.editor.getText()).toBe("draft!");
+		expect(terminal.getViewport().join("\n")).not.toContain("find:");
+	});
+
+	it("returns search focus to the editor when the mouse clicks the composer", async () => {
+		mode.editor.setText("draft");
+		mode.present(new StaticLines(["composer target", ...Array.from({ length: 30 }, (_, i) => `line-${i}`)]));
+		cfgTuiMode.set(Settings.instance, "fullscreen");
+		await terminal.waitForRender();
+		mode.ui.injectDebugInput("\x06");
+		await terminal.waitForRender();
+
+		mode.ui.injectDebugInput("\x1b[<0;2;24M");
+		mode.ui.injectDebugInput("!");
+		await terminal.waitForRender();
+
+		expect(mode.ui.getFocused()).toBe(mode.editor);
+		expect(mode.editor.getText()).toBe("draft!");
+		expect(terminal.getViewport().join("\n")).not.toContain("find:");
+	});
+
+	it("feeds fullscreen rows into the extension link hint pipeline", async () => {
+		setExtensionLinks(["demo"]);
+		const line = `before ${formatExtensionLink("details", "demo:open/7", "test")} after`;
+		mode.present(new StaticLines([...Array.from({ length: 20 }, (_, i) => `line-${i}`), line]));
+		cfgTuiMode.set(Settings.instance, "fullscreen");
+		await terminal.waitForRender();
+		expect(mode.composer.viewportLinkCount()).toBe(1);
+
+		expect(mode.startLinkHints()).toBe(true);
+		await terminal.waitForRender();
+		expect(Bun.stripANSI(terminal.getViewport().join("\n"))).toContain("aetails");
+		expect(mode.linkHintsActive).toBe(true);
+
+		mode.typeLinkHint("a");
+		await terminal.waitForRender();
+		expect(mode.linkHintsActive).toBe(false);
 	});
 });

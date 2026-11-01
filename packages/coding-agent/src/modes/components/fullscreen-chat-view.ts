@@ -42,6 +42,8 @@ export interface FullscreenChatViewOptions {
 	requestRender?: () => void;
 	/** Moves terminal keyboard focus to a fullscreen-owned input (search). */
 	setFocus?: (component: Component) => void;
+	/** Renders fullscreen rows through the composer's viewport pipeline, including link hints. */
+	renderFullscreenViewport?: (rows: readonly string[], width: number) => readonly string[];
 }
 
 /**
@@ -319,7 +321,7 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 		}
 		// Only the active input emits an IME cursor marker.
 		rows.push(...(this.#search ? dockLines.map(line => line.replaceAll(CURSOR_MARKER, "")) : dockLines));
-		return rows;
+		return this.options.renderFullscreenViewport?.(rows, this.#width) ?? rows;
 	}
 
 	/** A muted chip row: left-aligned filling the row, or centered hugging its label. */
@@ -501,7 +503,7 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 			this.#draggingSelection = true;
 			this.#draggingScrollbar = false;
 			this.#followTail = false;
-			this.#search = undefined; // starting a selection leaves search mode
+			this.#closeSearch(true); // starting a selection leaves search mode
 			const clicks = this.#multiClickCount(event);
 			this.#selection =
 				clicks >= 2 ? this.#multiClickSelection(point.line, event.col, clicks) : { anchor: point, head: point };
@@ -519,7 +521,7 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 		if (dockRow < this.#editorDockRows.top || dockRow >= this.#editorDockRows.top + this.#editorDockRows.count) {
 			return;
 		}
-		this.#search = undefined; // clicking into the composer leaves search mode
+		this.#closeSearch(true); // clicking into the composer leaves search mode
 		this.options.editor().routeMouse(event, dockRow - this.#editorDockRows.top, event.col);
 	}
 
