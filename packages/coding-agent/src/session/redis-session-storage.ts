@@ -276,7 +276,7 @@ class RedisSessionStorageBackend implements SessionStorageBackend {
 		return Array.isArray(result) && Number(result[0]) === 1;
 	}
 
-	async updateSessionTitle(path: string, title: SessionTitleUpdate, mtimeMs: number): Promise<void> {
+	async updateSessionTitle(path: string, title: SessionTitleUpdate, mtimeMs: number, size?: number): Promise<void> {
 		await this.#client.send("EVAL", [
 			UPDATE_TITLE_SCRIPT,
 			"2",
@@ -284,7 +284,7 @@ class RedisSessionStorageBackend implements SessionStorageBackend {
 			this.#titleMetaKey(),
 			path,
 			String(mtimeMs),
-			encodeTitleMeta(title),
+			encodeTitleMeta(title, size),
 		]);
 	}
 

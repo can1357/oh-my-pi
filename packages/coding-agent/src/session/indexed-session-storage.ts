@@ -9,7 +9,7 @@ import {
 	type SessionStorageWriteOptions,
 	type WriteTextAtomicOptions,
 } from "./session-storage";
-import { isAssistantMessageLine, SESSION_TITLE_SLOT_BYTES } from "./session-entries";
+import { isAssistantMessageLine, SESSION_LIST_SUFFIX_BYTES, SESSION_TITLE_SLOT_BYTES } from "./session-entries";
 import { enoent } from "./session-storage-errors";
 import {
 	latestTitleChangeFromContent,
@@ -29,6 +29,8 @@ export interface SessionStorageIndexEntry {
 	titleUpdatedAt?: string;
 	/** Body byte length whose complete journal is represented by the title fields. */
 	titleIndexedSize?: number;
+	/** A compatibility backend whose persisted title fields are authoritative without a size column. */
+	titleMetadataAuthoritative?: boolean;
 }
 
 export interface SessionStorageBackend {
@@ -56,7 +58,7 @@ export interface SessionStorageBackend {
 	): Promise<void>;
 	/** Lazily publish legacy journal metadata only while the body still has `size` bytes. */
 	indexTitle?(path: string, title: SessionTitleUpdate | undefined, size: number): Promise<boolean | void>;
-	updateSessionTitle(path: string, title: SessionTitleUpdate, mtimeMs: number): Promise<void>;
+	updateSessionTitle(path: string, title: SessionTitleUpdate, mtimeMs: number, size?: number): Promise<void>;
 	truncate(path: string, mtimeMs: number): Promise<void>;
 	remove(paths: string[]): Promise<void>;
 	move(src: string, dst: string, mtimeMs: number): Promise<void>;
@@ -127,7 +129,7 @@ function uniquePaths(paths: readonly string[]): string[] {
 	return out;
 }
 function titleUpdateForIndex(entry: IndexEntry): SessionTitleUpdate | undefined {
-	if (!entry.titleUpdatedAt) return undefined;
+	if (entry.titleUpdatedAt === undefined) return undefined;
 	return { title: entry.title, source: entry.titleSource, updatedAt: entry.titleUpdatedAt };
 }
 
@@ -177,10 +179,18 @@ export class IndexedSessionStorage implements SessionStorage {
 		const rows = await this.#backend.loadIndex();
 		this.#index.clear();
 		for (const row of rows) {
-			const title = row.titleUpdatedAt
-				? { title: row.title, source: row.titleSource, updatedAt: row.titleUpdatedAt }
-				: null;
-			this.#setIndex(row.path, row.size, row.mtimeMs, title, row.titleIndexedSize);
+			const title =
+				row.titleUpdatedAt || row.titleMetadataAuthoritative
+					? { title: row.title, source: row.titleSource, updatedAt: row.titleUpdatedAt ?? "" }
+					: null;
+			// Empty updatedAt preserves a known legacy title/source without inventing a missing timestamp.
+			this.#setIndex(
+				row.path,
+				row.size,
+				row.mtimeMs,
+				title,
+				row.titleIndexedSize ?? (row.titleMetadataAuthoritative ? row.size : undefined),
+			);
 		}
 	}
 
@@ -280,14 +290,18 @@ export class IndexedSessionStorage implements SessionStorage {
 			title: title.title,
 			titleSource: title.source,
 			titleUpdatedAt: title.updatedAt,
-			titleIndexedSize: undefined,
+			titleIndexedSize: previous.size,
 			mtimeMs,
 		};
 		this.#index.set(path, next);
 		this.#pushFrame(path, { mtimeMs, previous });
-		const pending = this.#enqueuePath(path, () => this.#backend.updateSessionTitle(path, title, mtimeMs), {
-			trackDrain: false,
-		});
+		const pending = this.#enqueuePath(
+			path,
+			() => this.#backend.updateSessionTitle(path, title, mtimeMs, previous.size),
+			{
+				trackDrain: false,
+			},
+		);
 		this.#trackFrame(path, mtimeMs, pending);
 		try {
 			await pending;
@@ -369,10 +383,14 @@ export class IndexedSessionStorage implements SessionStorage {
 					latest = titleUpdateForIndex(current);
 					return;
 				}
-				// Pre-journal indexes cannot prove that a title was not appended in
-				// the unbounded middle. Reconcile only this requested legacy path,
-				// then persist its authority without rewriting the physical slot.
-				const content = await this.#backend.readFull(path);
+				// Small legacy rows fit entirely in the same bounded window listing uses.
+				// Larger rows need one full scan to rule out a title in the unbounded middle.
+				const boundedBytes = SESSION_TITLE_SLOT_BYTES + SESSION_LIST_SUFFIX_BYTES;
+				let content: string | null;
+				if (current.size > 0 && current.size <= boundedBytes) {
+					const [prefix] = await this.#backend.readSlices(path, boundedBytes, 0);
+					content = byteLength(prefix) === current.size ? prefix : await this.#backend.readFull(path);
+				} else content = await this.#backend.readFull(path);
 				if (content === null) throw enoent(path);
 				const size = byteLength(content);
 				latest =

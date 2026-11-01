@@ -157,6 +157,46 @@ describe("SessionManager + SqlSessionStorage (SQLite)", () => {
 		await client.end();
 	});
 
+	it("setSessionName persists metadata and listing across reopen with an external six-column schema", async () => {
+		const client = new SQL("sqlite::memory:");
+		try {
+			await client.unsafe(
+				"CREATE TABLE omp_session_files (path TEXT PRIMARY KEY, content TEXT NOT NULL, mtime_ms INTEGER NOT NULL, title TEXT, title_source TEXT, title_updated_at TEXT)",
+			);
+			const storage = await SqlSessionStorage.create({ client, createTable: false });
+			const sessionDir = virtualDir("/sessions/external-title");
+			const manager = SessionManager.create("/cwd", sessionDir, storage);
+			await manager.ensureOnDisk();
+			await manager.setSessionName("First title", "auto");
+			await manager.setSessionName("External schema title", "user");
+			await manager.close();
+			const file = manager.getSessionFile();
+			const rows = await client.unsafe(
+				"SELECT title, title_source, title_updated_at FROM omp_session_files WHERE path = ?",
+				[file],
+			);
+			expect(rows[0]).toMatchObject({ title: "External schema title", title_source: "user" });
+			expect(typeof rows[0]?.title_updated_at).toBe("string");
+			const queries: string[] = [];
+			const wrapped: SqlSessionStorageClient = {
+				options: { adapter: "sqlite" },
+				unsafe(query, values) {
+					queries.push(query);
+					return client.unsafe(query, values);
+				},
+				transaction(callback) {
+					return client.transaction(transaction => callback(transaction));
+				},
+			};
+			const reopened = await SqlSessionStorage.create({ client: wrapped, createTable: false });
+			const sessions = await SessionManager.list("/cwd", sessionDir, reopened);
+			expect(sessions.find(session => session.path === file)?.title).toBe("External schema title");
+			expect(queries.some(query => /SELECT\s+content\s+AS\s+content/i.test(query))).toBe(false);
+		} finally {
+			await client.end();
+		}
+	});
+
 	it("rejects a stale rewrite after another SQL storage appends", async () => {
 		const client = new SQL("sqlite::memory:");
 		const firstStorage = await SqlSessionStorage.create({ client });

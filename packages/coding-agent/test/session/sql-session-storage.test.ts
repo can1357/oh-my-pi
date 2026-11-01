@@ -420,6 +420,7 @@ describe("SqlSessionStorage (SQLite backend)", () => {
 			const content =
 				serializeTitleSlot({ title: "Stale", updatedAt: "t1" }) +
 				'{"type":"session","id":"legacy"}\n' +
+				`${JSON.stringify({ type: "custom", data: "x".repeat(256 * 1024) })}\n` +
 				'{"type":"title_change","title":"Legacy journal","source":"user","timestamp":"t2"}\n';
 			await client.unsafe("INSERT INTO omp_session_files VALUES (?, ?, ?, ?, ?, ?)", [
 				file,
@@ -534,11 +535,21 @@ describe("SqlSessionStorage (SQLite backend)", () => {
 		const client = new SQL("sqlite::memory:");
 		// Pre-create the table with the expected schema.
 		await client.unsafe(
-			`CREATE TABLE omp_session_files (path TEXT PRIMARY KEY, content TEXT NOT NULL, mtime_ms INTEGER NOT NULL, title TEXT, title_source TEXT, title_updated_at TEXT, title_indexed_size INTEGER)`,
+			`CREATE TABLE omp_session_files (path TEXT PRIMARY KEY, content TEXT NOT NULL, mtime_ms INTEGER NOT NULL, title TEXT, title_source TEXT, title_updated_at TEXT)`,
 		);
 		const storage = await SqlSessionStorage.create({ client, createTable: false });
 		await storage.writeText("/s/x.jsonl", "ok");
 		expect(await storage.readText("/s/x.jsonl")).toBe("ok");
+		const writer = storage.openWriter("/s/x.jsonl");
+		await writer.append('\n{"type":"title_change","title":"External schema","timestamp":"t2"}\n');
+		await writer.close();
+		expect(await storage.readLatestTitle("/s/x.jsonl")).toEqual({
+			title: "External schema",
+			source: undefined,
+			updatedAt: "t2",
+		});
+		await storage.refresh();
+		expect((await storage.readLatestTitle("/s/x.jsonl"))?.title).toBe("External schema");
 		await client.end();
 	});
 });

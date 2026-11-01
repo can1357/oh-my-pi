@@ -10,6 +10,7 @@ import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { parseJsonlLenient } from "@oh-my-pi/pi-utils/stream";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
 import { EVAL_STATE_CONTEXT_TYPE } from "../eval/state";
+import { SESSION_LIST_SUFFIX_BYTES } from "./session-entries";
 import { readLatestSessionTitle, visitEntriesFromFile } from "./session-loader";
 import { computeDefaultSessionDir } from "./session-paths";
 import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
@@ -70,12 +71,6 @@ export interface RecentSessionInfo {
 }
 
 const SESSION_LIST_PREFIX_BYTES = 4096;
-/**
- * Tail window read to derive {@link SessionStatus}. Large enough to capture a
- * typical final assistant turn (thinking + text); when the final message exceeds
- * it the status falls back to `unknown` rather than misreporting.
- */
-const SESSION_LIST_SUFFIX_BYTES = 32_768;
 const SESSION_LIST_PARALLEL_THRESHOLD = 64;
 const SESSION_LIST_MAX_WORKERS = 16;
 
@@ -441,6 +436,7 @@ async function scanSessionFile(
 			return undefined;
 		}
 		const latestTitle = await readLatestSessionTitle(file, storage);
+		const resolvedTitle = latestTitle ? (normalizeTitleOverride(latestTitle.title) ?? undefined) : header.title;
 
 		let parsedMessageCount = 0;
 		let assistantTurns = 0;
@@ -480,7 +476,11 @@ async function scanSessionFile(
 		// middle unexamined. When both windows miss, ask the backend for a full
 		// line-boundary scan rather than trusting the gap.
 		assistantTurns = Math.max(assistantTurns, countAssistantMarkers(content), countAssistantMarkers(suffix));
-		if (assistantTurns === 0 && storage.hasAssistantTurn) {
+		if (
+			assistantTurns === 0 &&
+			size > SESSION_LIST_PREFIX_BYTES + (withStatus ? SESSION_LIST_SUFFIX_BYTES : 0) &&
+			storage.hasAssistantTurn
+		) {
 			try {
 				if (await storage.hasAssistantTurn(file)) assistantTurns = 1;
 			} catch {
@@ -491,7 +491,7 @@ async function scanSessionFile(
 			path: file,
 			id: header.id,
 			cwd: header.cwd ?? "",
-			title: latestTitle ? latestTitle.title : (header.title ?? shortSummary),
+			title: resolvedTitle ?? shortSummary,
 			parentSessionPath: header.parentSession,
 			continuationOf: header.continuationOf,
 			created: new Date(header.timestamp ?? ""),
@@ -529,6 +529,14 @@ async function collectSessionsFromFileStride(
 	return sessions;
 }
 
+function compareSessionRecency(a: SessionInfo, b: SessionInfo): number {
+	return (
+		b.modified.getTime() - a.modified.getTime() ||
+		b.created.getTime() - a.created.getTime() ||
+		b.path.localeCompare(a.path)
+	);
+}
+
 async function collectSessionsFromFiles(
 	files: string[],
 	storage: SessionStorage,
@@ -546,12 +554,7 @@ async function collectSessionsFromFiles(
 					)
 				).flat();
 
-	sessions.sort(
-		(a, b) =>
-			b.modified.getTime() - a.modified.getTime() ||
-			b.created.getTime() - a.created.getTime() ||
-			b.path.localeCompare(a.path),
-	);
+	sessions.sort(compareSessionRecency);
 	return sessions;
 }
 
@@ -714,11 +717,19 @@ export async function findMostRecentNonEmptySession(
 	} catch {
 		return null;
 	}
+	let latest: SessionInfo | undefined;
+	let latestMtimeMs: number | undefined;
 	for (const { file, stat } of await newestSessionFiles(sessionDir, "*.jsonl", storage)) {
+		// Every file in the winning mtime cohort may have a newer header timestamp.
+		// Once that cohort ends, no older journal can outrank its useful sessions.
+		if (latest && stat.mtimeMs !== latestMtimeMs) break;
 		const session = await scanSessionFile(file, storage, true, stat);
-		if (session && !isEmptySession(session)) return file;
+		if (session && !isEmptySession(session) && (!latest || compareSessionRecency(session, latest) < 0)) {
+			latest = session;
+			latestMtimeMs = stat.mtimeMs;
+		}
 	}
-	return null;
+	return latest?.path ?? null;
 }
 
 /** Exported for testing */
@@ -1302,7 +1313,7 @@ async function newestSessionFiles(
 			} catch {}
 		}
 	}
-	return stated.sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
+	return stated.sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs || b.file.localeCompare(a.file));
 }
 
 /** Header-level {@link SessionInfo} with status for one session file; undefined when unreadable or not a session. */
