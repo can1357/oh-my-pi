@@ -161,6 +161,8 @@ Unless `bash.direnv` is `"off"`, preflight attempts to load the cwd's direnv/dev
 
 Successful exports retain their loaded environment and `DIRENV_*` state per `.envrc` directory. Each call still runs `direnv export json` to check direnv's watched inputs and authorization state, but an unchanged environment avoids re-running `.envrc` and devenv setup. OMP returns the complete diff relative to its process environment. A change to that process environment, or to the nanosecond timestamp, size, or existence of the `.envrc` or any direnv-watched path (including direnv's allow/deny files), restarts the load from a clean baseline; so does a warm export that reports any change. This cache does not modify OMP's process environment.
 
+The host's `NODE_CHANNEL_FD` and `NODE_CHANNEL_SERIALIZATION_MODE` describe its own IPC worker channel and must not be inherited by tool-call children. The child-shell environment, embedded shell host import, PTY command builder, and direnv preflight baseline strip these markers without changing the host environment or removing unrelated variables. Matching is case-insensitive on Windows and exact on POSIX. PTY caller-supplied environment values are still applied after inherited markers are removed.
+
 If the selected shell includes `bash`, it attempts `getOrCreateSnapshot()`:
 
 - snapshot captures aliases/functions/options from user rc,
