@@ -202,7 +202,12 @@ impl builtins::Command for TimeoutCommand {
 			None => TrapSignal::try_from("TERM").expect("SIGTERM must be a known signal"),
 		};
 
-		let child_cancel = CancellationToken::new();
+		// A child of the caller's token: cancelling the run reaches the command
+		// even while this builtin cannot act on `outer_cancelled` below.
+		let outer_cancel = context.cancel_token();
+		let child_cancel = outer_cancel
+			.as_ref()
+			.map_or_else(CancellationToken::new, CancellationToken::child_token);
 		let spawns = Arc::new(SpawnRecorder::default());
 		let mut params = context.params.clone();
 		// GNU runs the command in its own process group and signals the whole
@@ -230,10 +235,12 @@ impl builtins::Command for TimeoutCommand {
 		// Grab an owned stderr handle up front: `run_future` below holds the
 		// shell mutably, so `context.stderr()` is unavailable once it exists.
 		let mut stderr = context.stderr();
-		let outer_cancel = context.cancel_token();
 		let source_info = SourceInfo::from("pi-natives:timeout");
 		let run_future = context.shell.run_string(command_line, &source_info, &params);
 		tokio::pin!(run_future);
+
+		let outer_cancel_requested =
+			|| outer_cancel.as_ref().is_some_and(CancellationToken::is_cancelled);
 
 		let outer_cancelled = async {
 			match &outer_cancel {
@@ -254,7 +261,13 @@ impl builtins::Command for TimeoutCommand {
 		tokio::pin!(deadline);
 
 		tokio::select! {
-			result = &mut run_future => return result,
+			result = &mut run_future => {
+				return if outer_cancel_requested() {
+					Ok(ExecutionExitCode::Interrupted.into())
+				} else {
+					result
+				};
+			},
 			() = &mut outer_cancelled => {
 				child_cancel.cancel();
 				return Ok(ExecutionExitCode::Interrupted.into());
@@ -302,7 +315,12 @@ impl builtins::Command for TimeoutCommand {
 		tokio::pin!(kill_deadline);
 
 		let child_result = tokio::select! {
-			result = &mut run_future => reap(result)?,
+			result = &mut run_future => {
+				if outer_cancel_requested() {
+					return Ok(ExecutionExitCode::Interrupted.into());
+				}
+				reap(result)?
+			},
 			() = &mut outer_cancelled => {
 				child_cancel.cancel();
 				return Ok(ExecutionExitCode::Interrupted.into());
@@ -358,7 +376,11 @@ impl builtins::Command for TimeoutCommand {
 mod tests {
 	use std::{
 		io::{Read, Seek, SeekFrom},
-		time::Duration,
+		sync::{
+			atomic::{AtomicBool, Ordering},
+			mpsc,
+		},
+		time::{Duration, Instant},
 	};
 
 	use brush_core::{
@@ -367,6 +389,7 @@ mod tests {
 		openfiles::OpenFiles,
 	};
 	use clap::Parser;
+	use tokio_util::sync::CancellationToken;
 
 	use super::{TimeoutArgs, TimeoutCommand, parse_signal, signal_display};
 
@@ -419,6 +442,29 @@ mod tests {
 			_context: ExecutionContext<'_, SE>,
 		) -> Result<ExecutionResult, Self::Error> {
 			tokio::time::sleep(Duration::from_millis(300)).await;
+			Ok(ExecutionResult::new(99))
+		}
+	}
+
+	/// Set once [`SpinCommand`] starts spinning.
+	static SPIN_STARTED: AtomicBool = AtomicBool::new(false);
+
+	/// An in-process operand that never awaits: it spins until its
+	/// cancellation token is cancelled, so nothing else on its task runs.
+	#[derive(Parser)]
+	struct SpinCommand;
+
+	impl builtins::Command for SpinCommand {
+		type Error = brush_core::Error;
+
+		async fn execute<SE: brush_core::ShellExtensions>(
+			&self,
+			context: ExecutionContext<'_, SE>,
+		) -> Result<ExecutionResult, Self::Error> {
+			SPIN_STARTED.store(true, Ordering::SeqCst);
+			while !context.is_cancelled() {
+				std::hint::spin_loop();
+			}
 			Ok(ExecutionResult::new(99))
 		}
 	}
@@ -945,4 +991,57 @@ mod tests {
 			run_with_deadline("timeout --preserve-status 0.050 sleep 5").await;
 		assert_eq!(u8::from(result.exit_code), 143, "SIGTERM death is 128+15");
 	}
+
+	#[test]
+	fn caller_cancel_stops_an_operand_that_never_awaits() {
+		// Failure mode: cancelling a run hangs in `timeout 30 <in-process
+		// command that never awaits>`. The command keeps the task, so timeout's
+		// own select never sees the caller's cancellation; only a token derived
+		// from the caller's reaches the command. Once the command stops, the
+		// run must read as interrupted, not as the command's own status.
+		let caller = CancellationToken::new();
+		let token = caller.clone();
+		let (done_tx, done_rx) = mpsc::channel();
+		// A spinning operand would pin the runtime for good, so the runtime
+		// lives on a thread that is left behind when the test fails.
+		std::thread::spawn(move || {
+			let runtime = tokio::runtime::Builder::new_current_thread()
+				.enable_all()
+				.build()
+				.expect("runtime");
+			let result = runtime.block_on(async move {
+				let mut shell = test_shell().await;
+				shell.register_builtin(
+					"spin-test",
+					builtins::builtin::<SpinCommand, DefaultShellExtensions>(),
+				);
+				let mut params = shell.default_exec_params();
+				for fd in [OpenFiles::STDIN_FD, OpenFiles::STDOUT_FD, OpenFiles::STDERR_FD] {
+					params.set_fd(fd, brush_core::openfiles::null().expect("null device"));
+				}
+				params.set_cancel_token(token);
+				let timeout = <TimeoutCommand as builtins::Command>::new(
+					["timeout", "30", "spin-test"].map(String::from),
+				)
+				.expect("timeout argv");
+				let context =
+					ExecutionContext { shell: &mut shell, command_name: "timeout".into(), params };
+				builtins::Command::execute(&timeout, context).await
+			});
+			let _ = done_tx.send(result.map(|result| u8::from(result.exit_code)));
+		});
+
+		let started = Instant::now();
+		while !SPIN_STARTED.load(Ordering::SeqCst) {
+			assert!(started.elapsed() < Duration::from_secs(5), "spin-test never started");
+			std::thread::sleep(Duration::from_millis(1));
+		}
+		caller.cancel();
+		let status = done_rx
+			.recv_timeout(Duration::from_secs(5))
+			.expect("the operand still spins 5 s after the caller's token was cancelled")
+			.expect("timeout returned an error");
+		assert_eq!(status, 130, "a cancelled run must read as interrupted");
+	}
+
 }

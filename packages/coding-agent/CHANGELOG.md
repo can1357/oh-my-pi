@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `timeout` not passing caller cancellation to an in-process operand that never awaits.
+
 ## [18.14.2] - 2026-10-31
 
 ### Added
