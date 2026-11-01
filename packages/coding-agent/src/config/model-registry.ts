@@ -1445,6 +1445,13 @@ export class ModelRegistry {
 		return resolveModelCacheProviderId(providerId, { baseUrl });
 	}
 
+	#hasRuntimeBuiltInDiscoveryOverride(providerId: string): boolean {
+		return (
+			this.#runtimeProviderOverrides.get(providerId)?.baseUrl !== undefined ||
+			this.#runtimeProviderApiKeys.has(providerId)
+		);
+	}
+
 	#loadCachedStandardProviderModels(providerIds: readonly string[]): {
 		modelsByProvider: Map<string, Model<Api>[]>;
 		authoritativeFreshProviders: Set<string>;
@@ -1453,9 +1460,9 @@ export class ModelRegistry {
 		const authoritativeFreshProviders = new Set<string>();
 		using _cacheConnection = retainModelCacheConnection(this.#cacheDbPath);
 		for (const providerId of providerIds) {
-			// Runtime overrides need a resolved key to select their scoped cache.
+			// Runtime endpoint/key overrides need a resolved key to select their cache.
 			// The asynchronous manager hydrates it; never read the old endpoint here.
-			if (this.#runtimeProviderOverrides.has(providerId) || this.#runtimeProviderApiKeys.has(providerId)) continue;
+			if (this.#hasRuntimeBuiltInDiscoveryOverride(providerId)) continue;
 			const cacheProviderId = this.#resolveStartupModelCacheProviderId(providerId);
 			const cache = readModelCache<Api>(cacheProviderId, 24 * 60 * 60 * 1000, Date.now, this.#cacheDbPath);
 			const sharedCatalogProvider = MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP[providerId] === true;
@@ -2596,19 +2603,18 @@ export class ModelRegistry {
 	}
 
 	#scopeRuntimeBuiltInManagerOptions(options: ModelManagerOptions<Api>, apiKey?: string): ModelManagerOptions<Api> {
-		// These factories already scope their cache by resolved account and endpoint.
-		if (isCredentialScopedModelCacheProvider(options.providerId)) return options;
+		// Built-in account caches already include their endpoint and credentials.
+		if (
+			isCredentialScopedModelCacheProvider(options.providerId) ||
+			!this.#hasRuntimeBuiltInDiscoveryOverride(options.providerId)
+		) {
+			return options;
+		}
 		const override = this.#runtimeProviderOverrides.get(options.providerId);
-		if (!override && !this.#runtimeProviderApiKeys.has(options.providerId)) return options;
-		// An old request can still write its cache after registration changes.
-		// Keep transport/credential overrides out of that previous namespace.
+		// An old endpoint/key request can still write its cache after registration changes.
+		// Only inputs used by the built-in discovery factory need a separate namespace.
 		const scope = Bun.hash(
-			JSON.stringify([
-				override?.baseUrl ?? this.#providerOverrides.get(options.providerId)?.baseUrl,
-				apiKey,
-				override?.headers,
-				override?.authHeader,
-			]),
+			JSON.stringify([override?.baseUrl ?? this.#providerOverrides.get(options.providerId)?.baseUrl, apiKey]),
 		).toString(36);
 		return {
 			...options,
@@ -3893,7 +3899,9 @@ export class ModelRegistry {
 			},
 			"runtime-register",
 		);
-		this.#invalidateBuiltInRegistration(providerName);
+		if (config.baseUrl || config.apiKey || config.oauth || config.models?.length || config.fetchDynamicModels) {
+			this.#invalidateBuiltInRegistration(providerName);
+		}
 
 		if (config.streamSimple && config.api) {
 			const streamSimple = config.streamSimple;

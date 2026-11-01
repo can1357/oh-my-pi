@@ -577,6 +577,119 @@ describe("ModelRegistry runtime provider registration", () => {
 		expect(keyedRegistry.getProviderDiscoveryState(provider)?.models).toContain(modelId);
 	});
 
+	const policyOnlyRegistrations: Array<[string, ProviderConfigInput]> = [
+		[
+			"remoteCompaction",
+			{ remoteCompaction: { enabled: false, endpoint: "https://runtime.example.com/v1/compact" } },
+		],
+		["transport", { transport: "pi-native" }],
+	];
+
+	test.each(policyOnlyRegistrations)(
+		"retains a discovered model through offline cache hydration with a %s-only registration",
+		async (_name, policy) => {
+			const provider = "anthropic";
+			const modelId = "policy-only-endpoint-model";
+			const cacheDbPath = path.join(tempDir, "policy-only-models.db");
+			const modelUrl = "https://api.anthropic.com/v1/models";
+			const endpointRequests: string[] = [];
+			await authStorage.credentials.set(provider, {
+				type: "api_key",
+				key: "sk-ant-api03-policy-only-test",
+				source: "login",
+			});
+			const fetch: FetchImpl = async input => {
+				const url = input instanceof Request ? input.url : String(input);
+				if (url === "https://catalog.stencil.so/models.json.zstd") return Response.json({});
+				if (url === modelUrl) {
+					endpointRequests.push(url);
+					return Response.json({ data: [{ id: modelId }] });
+				}
+				throw new Error(`Unexpected URL: ${url}`);
+			};
+			const seeded = new ModelRegistry(authStorage, modelsJsonPath, { fetch, cacheDbPath });
+			await seeded.refreshProvider(provider, "online");
+			expect(seeded.find(provider, modelId)?.id).toBe(modelId);
+			expect(endpointRequests).toEqual([modelUrl]);
+
+			seeded.registerProvider(provider, policy, "ext://runtime");
+			await seeded.refreshProvider(provider, "offline");
+			expect(seeded.find(provider, modelId)).toMatchObject({ id: modelId, ...policy });
+
+			// A fresh registry has no in-memory discovery result to mask a cache miss.
+			const reloaded = new ModelRegistry(authStorage, modelsJsonPath, { fetch: offlineFetch, cacheDbPath });
+			reloaded.registerProvider(provider, policy, "ext://runtime");
+			expect(reloaded.find(provider, modelId)).toMatchObject({ id: modelId, ...policy });
+			await reloaded.refreshProvider(provider, "offline");
+			expect(reloaded.find(provider, modelId)).toMatchObject({ id: modelId, ...policy });
+			expect(reloaded.getAvailableForProviders(new Set([provider])).some(model => model.id === modelId)).toBe(true);
+
+			await reloaded.refresh("offline");
+			expect(reloaded.find(provider, modelId)).toMatchObject({ id: modelId, ...policy });
+			await reloaded.refreshDiscoverableProviders([provider], "online-if-uncached");
+			expect(reloaded.find(provider, modelId)).toMatchObject({ id: modelId, ...policy });
+			expect(fetchRequests).toEqual([]);
+		},
+	);
+
+	test.each(policyOnlyRegistrations)(
+		"keeps a pending discovery valid across a %s-only registration",
+		async (_name, policy) => {
+			const provider = "anthropic";
+			const modelId = "pending-policy-only-model";
+			const modelUrl = "https://api.anthropic.com/v1/models";
+			const started = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			let endpointRequests = 0;
+			await authStorage.credentials.set(provider, {
+				type: "api_key",
+				key: "sk-ant-api03-pending-policy-test",
+				source: "login",
+			});
+			const fetch: FetchImpl = async input => {
+				const url = input instanceof Request ? input.url : String(input);
+				if (url === "https://catalog.stencil.so/models.json.zstd") return Response.json({});
+				if (url !== modelUrl) throw new Error(`Unexpected URL: ${url}`);
+				endpointRequests++;
+				if (endpointRequests > 1) return new Response("unexpected duplicate request", { status: 503 });
+				started.resolve();
+				await release.promise;
+				return Response.json({ data: [{ id: modelId }] });
+			};
+			const pending = new ModelRegistry(authStorage, modelsJsonPath, {
+				fetch,
+				cacheDbPath: path.join(tempDir, "pending-policy-models.db"),
+			});
+			const first = pending.refreshDiscoverableProviders([provider], "online-if-uncached");
+			const timeout = Promise.withResolvers<never>();
+			const timer = setTimeout(() => timeout.reject(new Error("Anthropic model discovery did not start")), 2_000);
+			let second: Promise<void> | undefined;
+			try {
+				await Promise.race([
+					started.promise,
+					first.then(() => {
+						throw new Error("Anthropic model discovery finished without requesting its endpoint");
+					}),
+					timeout.promise,
+				]);
+				clearTimeout(timer);
+				pending.registerProvider(provider, policy, "ext://runtime");
+				second = pending.refreshDiscoverableProviders([provider], "online-if-uncached");
+				const nextTurn = Promise.withResolvers<void>();
+				setImmediate(nextTurn.resolve);
+				await nextTurn.promise;
+			} finally {
+				clearTimeout(timer);
+				release.resolve();
+				await Promise.all([first, second]);
+			}
+			expect(pending.find(provider, modelId)).toMatchObject({ id: modelId, ...policy });
+			expect(endpointRequests).toBe(1);
+			await pending.refreshProvider(provider, "offline");
+			expect(pending.find(provider, modelId)).toMatchObject({ id: modelId, ...policy });
+		},
+	);
+
 	test("configured discovery suppresses extension fetchDynamicModels for the same provider", async () => {
 		const providerName = "runtime-configured-provider";
 		fs.writeFileSync(

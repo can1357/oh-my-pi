@@ -50,11 +50,16 @@ export async function restoreSessionModels(
 	const cachedProviders = new Set<string>();
 	for (const provider of providers) {
 		const state = modelRegistry.getProviderDiscoveryState(provider);
-		// Only recheck account-scoped catalogs that actually served fresh cache.
+		// Only recheck built-in account catalogs that actually served fresh cache.
 		// A provider fetch already established the current roster; failed/stale
 		// discovery must not pay another network timeout. Public/configured
-		// catalogs retain their normal freshness policy.
-		if (isCredentialScopedModelCacheProvider(provider) && state?.source === "cache" && !state.stale) {
+		// catalogs and extension routes retain their normal freshness policy.
+		if (
+			modelRegistry.getDiscoveryProviderId(provider) === undefined &&
+			isCredentialScopedModelCacheProvider(provider) &&
+			state?.source === "cache" &&
+			!state.stale
+		) {
 			cachedProviders.add(provider);
 		}
 	}

@@ -2430,17 +2430,16 @@ describe("ModelRegistry", () => {
 			requested: string[],
 			provider: string,
 		): Promise<void> {
-			let timer: ReturnType<typeof setTimeout> | undefined;
 			const missing = () => new Error(`${provider} discovery did not start; requests: ${requested.join(", ")}`);
+			const timeout = Promise.withResolvers<never>();
+			const timer = setTimeout(() => timeout.reject(missing()), 2_000);
 			try {
 				await Promise.race([
 					started,
 					refresh.then(() => {
 						throw missing();
 					}),
-					new Promise<never>((_, reject) => {
-						timer = setTimeout(() => reject(missing()), 2_000);
-					}),
+					timeout.promise,
 				]);
 			} finally {
 				clearTimeout(timer);

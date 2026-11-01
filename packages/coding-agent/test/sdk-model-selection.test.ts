@@ -1999,6 +1999,119 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		},
 	);
 
+	async function buildCustomCopilotResumeOptions(route: "configured" | "extension") {
+		const options = buildResumeOptions();
+		const provider = "github-copilot";
+		const cachedId = "custom-copilot-cached-model";
+		const savedId = "custom-copilot-saved-model";
+		const savedSelector = `${provider}/${savedId}`;
+		const baseUrl = "https://custom-copilot.example.com";
+		const modelsPath = path.join(tempDir, "models.yml");
+		let fetches = 0;
+		let seeding = true;
+		const nextModelId = () => {
+			fetches++;
+			return seeding ? cachedId : savedId;
+		};
+		const fetchMock: FetchImpl = async input => {
+			const url = input instanceof Request ? input.url : String(input);
+			if (url !== `${baseUrl}/v1/models`) throw new Error(`Unexpected URL: ${url}`);
+			return Response.json({ data: [{ id: nextModelId(), context_length: 65_536 }] });
+		};
+		const providerConfig: ProviderConfigInput = {
+			baseUrl,
+			api: "openai-completions",
+			apiKey: "custom-copilot-test-key",
+			fetchDynamicModels: async () => [
+				{
+					id: nextModelId(),
+					name: "Custom Copilot model",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 65_536,
+					maxTokens: 4096,
+				},
+			],
+		};
+		const extensions: ExtensionFactory[] = [];
+		if (route === "configured") {
+			await Bun.write(
+				modelsPath,
+				JSON.stringify({
+					providers: {
+						[provider]: {
+							baseUrl,
+							api: "openai-completions",
+							auth: "none",
+							discovery: { type: "openai-models-list" },
+						},
+					},
+				}),
+			);
+			const configTime = new Date(Date.now() - 1000);
+			await fs.promises.utimes(modelsPath, configTime, configTime);
+		} else {
+			extensions.push(pi => pi.registerProvider(provider, providerConfig));
+		}
+
+		const seedRegistry = new ModelRegistry(options.authStorage, modelsPath, { fetch: fetchMock });
+		if (route === "extension") seedRegistry.registerProvider(provider, providerConfig);
+		await seedRegistry.refreshDiscoverableProviders([provider], "online");
+		expect(fetches).toBe(1);
+		expect(seedRegistry.find(provider, cachedId)).toBeDefined();
+		seeding = false;
+
+		const modelRegistry = new ModelRegistry(options.authStorage, modelsPath, { fetch: fetchMock });
+		if (route === "extension") modelRegistry.registerProvider(provider, providerConfig);
+		await modelRegistry.refreshDiscoverableProviders([provider], "online-if-uncached");
+		expect(fetches).toBe(1);
+		expect(modelRegistry.getProviderDiscoveryState(provider)).toMatchObject({ source: "cache", stale: false });
+		expect(modelRegistry.find(provider, cachedId)).toBeDefined();
+		expect(modelRegistry.find(provider, savedId)).toBeUndefined();
+		options.sessionManager.appendModelChange(savedSelector);
+		return {
+			...options,
+			modelRegistry,
+			extensions,
+			hasUI: true,
+			savedSelector,
+			fetchCount: () => fetches,
+		};
+	}
+
+	test.each(["configured", "extension"] as const)(
+		"refuses an unavailable saved model without refetching a fresh %s Copilot route",
+		async route => {
+			const options = await buildCustomCopilotResumeOptions(route);
+			const outcome = await createAgentSession({ ...options, allowSessionModelFallback: false }).then(
+				result => ({ result }),
+				error => ({ error }),
+			);
+			if ("result" in outcome) await outcome.result.session.dispose();
+			expect(options.fetchCount()).toBe(1);
+			expect("error" in outcome ? String(outcome.error) : "").toContain(
+				`Could not restore model ${options.savedSelector}`,
+			);
+		},
+	);
+
+	test.each(["configured", "extension"] as const)(
+		"keeps the default model and restore warning with a fresh %s Copilot route",
+		async route => {
+			const options = await buildCustomCopilotResumeOptions(route);
+			const { session, modelFallbackMessage } = await createAgentSession(options);
+			try {
+				expect(options.fetchCount()).toBe(1);
+				expect(session.model?.provider).toBe("anthropic");
+				expect(session.model?.id).toBe("claude-sonnet-4-5");
+				expect(modelFallbackMessage).toContain(`Could not restore model ${options.savedSelector}`);
+			} finally {
+				await session.dispose();
+			}
+		},
+	);
+
 	test("does not discover a known saved model when its credential is missing", async () => {
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);

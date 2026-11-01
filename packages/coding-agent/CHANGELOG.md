@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed saved Copilot and other discovery-backed models failing to restore after catalog invalidation when reopening or switching chats.
+- Fixed saved Copilot and other discovery-backed models failing to restore after catalog invalidation when reopening or switching chats ([#17670](https://github.com/can1357/oh-my-pi/pull/17670) by [@felipe-fontes](https://github.com/felipe-fontes)).
 
 ## [18.14.2] - 2026-10-31
 
