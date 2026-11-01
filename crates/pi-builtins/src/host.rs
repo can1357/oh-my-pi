@@ -796,6 +796,16 @@ impl Host {
 		self.fail(code);
 	}
 
+	/// Writes `<name>: <message>` to stderr and leaves the exit status alone:
+	/// a disclosure, not a failure.
+	///
+	/// Written through a duplicate of the stream, so a caller holding the
+	/// host immutably can report something it could not determine.
+	pub fn warn(&self, message: impl std::fmt::Display) {
+		let mut stderr = self.stderr_clone();
+		let _ = writeln!(stderr, "{}: {message}", self.name);
+	}
+
 	/// Writes `<name>: <message>` followed by GNU's `Try '<name> --help' for
 	/// more information.`, records exit status `code`, and returns it.
 	///
@@ -1625,6 +1635,16 @@ impl ChildEnv {
 			.envs(self.env.iter().map(|(k, v)| (k, v)))
 			.stderr(std::process::Stdio::piped());
 		Ok(command)
+	}
+
+	/// The shell's working directory, for something that resolves a relative
+	/// path the way the shell's children do without starting one.
+	///
+	/// `Err` when the shell sits in a virtual directory, which no process can
+	/// enter.
+	#[cfg(unix)]
+	pub fn native_cwd(&self) -> io::Result<&Path> {
+		native_working_dir(&self.filesystem, &self.cwd)
 	}
 
 	/// Drains a child's piped stderr into the command's standard error on a
@@ -2791,8 +2811,22 @@ mod testing {
 		stdin: &str,
 		cwd: impl Into<PathBuf>,
 	) -> (i32, Capture) {
+		run_util_env::<U>(argv, stdin, cwd, &[])
+	}
+
+	/// [`run_util`] with `env` exported in the host environment, for a utility
+	/// whose behaviour depends on a variable (the locale, `RSYNC_*`).
+	pub(crate) fn run_util_env<U: Utility>(
+		argv: &[&str],
+		stdin: &str,
+		cwd: impl Into<PathBuf>,
+		env: &[(&str, &str)],
+	) -> (i32, Capture) {
 		let spec = Spec::of_sync::<U>();
 		let (mut host, capture) = test_host(spec, stdin, cwd);
+		for (key, value) in env {
+			host.set_test_var(key, value);
+		}
 		let code = match parse_for_test::<U>(spec, argv, &mut host) {
 			Ok(parsed) => run_caught::<U>(parsed, &mut host),
 			Err(code) => code,
@@ -3394,7 +3428,7 @@ mod testing {
 
 #[cfg(test)]
 #[allow(unused_imports, reason = "used by utility test modules, which are feature-gated")]
-pub(crate) use testing::{Capture, run_async_util, run_script, run_util};
+pub(crate) use testing::{Capture, run_async_util, run_script, run_util, run_util_env};
 #[cfg(all(test, unix, feature = "util.grep"))]
 pub(crate) use testing::tree_with_sparse_file;
 

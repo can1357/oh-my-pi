@@ -47,7 +47,7 @@ use crate::rsync::flist::FlistOpts;
 use crate::rsync::flists::Flists;
 use crate::rsync::generator::{self, DestTrees, SibOut, Sibling};
 use crate::rsync::handshake::{self, Negotiated, Roles, Setup};
-use crate::rsync::iconv;
+use crate::rsync::iconv::{self, MsgCharset};
 use crate::rsync::log::{self, Info, LogCode, LogConfig, Logger, OutLevels, Role, Stats};
 use crate::rsync::meta::MetaOpts;
 use crate::rsync::mux::{IoCounters, Msg, MuxReader, MuxWriter, ReadConfig, ReadProbe, WriteConfig};
@@ -540,8 +540,9 @@ pub(crate) fn run(host: &mut Host, argv: Vec<OsString>) -> i32 {
 			io.print(&OutLevels::debug_help());
 			0
 		}
-		Err(err) => {
-			let logger = startup_logger(&io, server_like);
+		Err(failure) => {
+			let logger = startup_logger(&io, server_like, failure.allow_8bit_chars);
+			let err = failure.error;
 			report(&logger, &err);
 			logger.finish(err.code, err.site, &Stats::default(), false);
 			err.code
@@ -557,11 +558,33 @@ pub(crate) fn run(host: &mut Host, argv: Vec<OsString>) -> i32 {
 	if io.cancel.load(Ordering::Relaxed) { RERR_SIGNAL } else { code }
 }
 
-/// A logger for diagnostics before the run's own logger exists.
-fn startup_logger(io: &HostIo, am_server: bool) -> Logger {
+/// The charset the shell's locale lets printed messages carry (upstream
+/// setup_iconv's `ic_chck`, from `LC_ALL`/`LC_CTYPE`/`LANG`).
+///
+/// This is the one lookup every run makes, so it is the one that reports a
+/// locale libc could not be asked about: the escaping that follows is then a
+/// reading of the locale's name, not libc's answer, and silence about that
+/// would look like the C locale.
+fn msg_charset(io: &HostIo) -> MsgCharset {
+	let locale = iconv::locale_charset(&|key: &str| io.getenv(key), Some(&io.child));
+	if let Some(warning) = &locale.warning {
+		let _ = io.err.clone().write_all(format!("rsync: warning: {warning}\n").as_bytes());
+	}
+	MsgCharset::for_locale(&locale.charset)
+}
+
+/// A logger for diagnostics before the run's own logger exists. Upstream
+/// parses the options before `setup_iconv`, so there is no `ic_chck` to check
+/// a message against yet and `filtered_fwrite` escapes by printability:
+/// `env -i LC_ALL=C rsync --bad-ün` and the same under `C.UTF-8` both print
+/// `--bad-\#303\#274n`, while `rsync -8 --bad-ün` prints the bytes, so the
+/// `-8` the parser had already seen decides.
+fn startup_logger(io: &HostIo, am_server: bool, eight_bit_output: bool) -> Logger {
 	let cfg = LogConfig {
 		am_server,
 		human_readable: 1,
+		eight_bit_output,
+		charset: MsgCharset::Bytes,
 		time_zone: Some(io.tz.clone()),
 		..LogConfig::default()
 	};
@@ -577,6 +600,7 @@ fn log_config(io: &HostIo, opts: &Options, am_server: bool, local_server: bool) 
 		log_file_format: opts.logfile_format.clone(),
 		human_readable: u8::try_from(opts.human_readable).unwrap_or(u8::MAX),
 		eight_bit_output: opts.allow_8bit_chars,
+		charset: msg_charset(io),
 		stderr_mode: opts.stderr_mode(),
 		am_server,
 		quiet: opts.quiet > 0,
@@ -1662,7 +1686,9 @@ impl ClientRun<'_> {
 		}
 		let iconv = match (&opts.iconv_opt, setup_err.is_none()) {
 			(Some(spec), true) => {
-				let locale = iconv::locale_charset(&getenv);
+				// `log_config` has already made this lookup for the run's
+				// logger, and reported it if libc could not be asked.
+				let locale = iconv::locale_charset(&getenv, Some(&self.io.child)).charset;
 				match iconv::Iconv::with_locale(&os_bytes_lossy(spec), false, Some(&locale)) {
 					Ok(ic) => {
 						if logger.levels().debug(log::Debug::Iconv) >= 1 {
@@ -1910,7 +1936,7 @@ struct LocalServer {
 }
 
 fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
-	let startup = startup_logger(io, true);
+	let startup = startup_logger(io, true, opts.allow_8bit_chars);
 	if opts.am_daemon {
 		return daemon_refusal(&startup.with_role(Role::PreReceiver), 1975);
 	}
@@ -2050,7 +2076,8 @@ fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
 	};
 	let iconv = match (&opts.iconv_opt, setup_err.is_none()) {
 		(Some(spec), true) => {
-			let locale = iconv::locale_charset(&getenv);
+			// As in `client_main`: `log_config` has reported this lookup.
+			let locale = iconv::locale_charset(&getenv, Some(&io.child)).charset;
 			match iconv::Iconv::with_locale(&os_bytes_lossy(spec), true, Some(&locale)) {
 				Ok(ic) => {
 					if logger.levels().debug(log::Debug::Iconv) >= 1 {
