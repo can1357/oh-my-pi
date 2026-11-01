@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a due-by for subagents: `task` takes `dueMinutes` (default 2 hours, `task.dueMinutes`). A subagent past its due-by is not wrong; the expectation was. The agent that dispatched it is told this is taking longer than you said, and at twice the time the agent above that one is told (you, for the main session). Nothing is killed, cancelled or discarded
+
 ## [18.14.2] - 2026-10-31
 
 ### Added

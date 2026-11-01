@@ -12,6 +12,7 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "../session/agent-session";
 import { AgentAwaits } from "./agent-awaits";
+import { SubagentDueClock } from "../task/due-by";
 import { oneLineLabel } from "@oh-my-pi/pi-tui/tools/task";
 
 import { MAIN_AGENT_ID, type AgentStatus, type AgentMetricsSummary } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
@@ -134,6 +135,7 @@ export class AgentRegistry {
 
 	/** Reset the global registry. Test-only. */
 	static resetGlobalForTests(): void {
+		AgentRegistry.#global?.dueBy.dispose();
 		AgentRegistry.#global = new AgentRegistry();
 	}
 
@@ -141,6 +143,8 @@ export class AgentRegistry {
 	readonly #listeners = new Set<RegistryListener>();
 	/** Which of these agents are blocked until others finish. */
 	readonly awaits = new AgentAwaits();
+	/** Due-by clocks of dispatched subagents; tells owners, outside their own turns, when one runs late. */
+	readonly dueBy = new SubagentDueClock(this);
 
 	#matchesExpected(ref: AgentRef, expected?: AgentRefExpectation): boolean {
 		return expected === undefined || ref === expected || ref.session === expected;

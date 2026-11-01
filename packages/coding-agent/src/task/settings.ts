@@ -14,6 +14,7 @@ import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { isRecord, logger, setWorktreesDir } from "@oh-my-pi/pi-utils";
 import { setFeedModelBadgeEnabled } from "@oh-my-pi/pi-tui/render/render-utils";
 import { getThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
+import { DEFAULT_TASK_DUE_MINUTES } from "./due-by";
 
 const EMPTY_AGENT_SERVICE_TIER_OVERRIDES: Record<string, ServiceTierInheritSettingValue> = {};
 const EMPTY_AGENT_COMPACTION_THRESHOLD_OVERRIDES: Record<string, AgentCompactionThresholdOverride> = {};
@@ -444,6 +445,26 @@ export const cfgTaskMaxRuntimeMs = register({
 			{ value: "900000", label: "15 minutes" },
 			{ value: "1800000", label: "30 minutes" },
 			{ value: "3600000", label: "1 hour" },
+		],
+	},
+});
+
+export const cfgTaskDueMinutes = register({
+	id: "task.dueMinutes",
+	type: "number",
+	default: DEFAULT_TASK_DUE_MINUTES,
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Subagent Due-By",
+		description:
+			"Minutes after dispatch by which a subagent is expected to finish when the dispatcher sets no `dueMinutes`. Past it, the agent that dispatched it gets a notice that it is taking longer than expected; at twice the time, that agent's own dispatcher is told (for the top-level session, a warning in the UI). Nothing is stopped. 0 disables the notices.",
+		options: [
+			{ value: "0", label: "Disabled" },
+			{ value: "30", label: "30 minutes" },
+			{ value: "60", label: "1 hour" },
+			{ value: "120", label: "2 hours", description: "Default" },
+			{ value: "240", label: "4 hours" },
 		],
 	},
 });

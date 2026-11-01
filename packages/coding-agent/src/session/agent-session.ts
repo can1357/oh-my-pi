@@ -144,6 +144,7 @@ import type { EvalPreludeDefinition } from "../eval/preludes";
 import type { PythonResult } from "../eval/py/executor";
 import { EVAL_STATE_CONTEXT_TYPE, formatEvalStateContext, isEvalStateContext } from "../eval/state";
 import { WorkPoolRegistry } from "../task/workpool";
+import { buildSubagentOverdueMessage, SUBAGENT_OVERDUE_MESSAGE_TYPE, type SubagentOverdueEntry } from "../task/due-by";
 import { type BashPtyOptions, type BashResult, releaseShellSessions } from "../exec/bash-executor";
 import type { TtsrManager } from "../export/ttsr";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
@@ -2362,19 +2363,26 @@ export class AgentSession implements SettingsScope {
 				this.#isDisposed || !isLaunchCompletionOwner(entry.owner, this.sessionManager.getSessionId()),
 			build: buildLaunchCompletionBatchMessage,
 		});
+		// Due-by notices about subagents this agent dispatched (or its subagents
+		// did). A notice whose subagent settled before it was read is dropped.
+		this.yieldQueue.register<SubagentOverdueEntry>(SUBAGENT_OVERDUE_MESSAGE_TYPE, {
+			isStale: entry => this.#isDisposed || entry.isSettled(),
+			build: buildSubagentOverdueMessage,
+		});
 		// Background-job completions / late diagnostics are pulled into the run at
 		// each step boundary as non-interrupting asides. Peer IRCs share the aside
 		// injection boundary, but also expose a non-consuming interrupt peek so
 		// `wait` can return early before the boundary drains them.
 		this.agent.hasIrcInterrupts = () => this.#irc.hasInterrupts();
 		// Completion notices (finished background jobs, exited supervised
-		// processes) queue here for the same boundary; peeking them lets a
-		// `wait` return early rather than miss a queued completion. Entries
+		// processes) and due-by notices queue here for the same boundary;
+		// peeking them lets a `wait` return early rather than miss one. Entries
 		// consumed elsewhere since they queued (an eval cell awaiting the job)
 		// are dropped by the drain, so they must not cut a wait short.
 		this.agent.hasBackgroundCompletions = () =>
 			this.yieldQueue.hasDeliverable(LAUNCH_COMPLETION_MESSAGE_TYPE) ||
-			this.yieldQueue.hasDeliverable(ASYNC_RESULT_MESSAGE_TYPE);
+			this.yieldQueue.hasDeliverable(ASYNC_RESULT_MESSAGE_TYPE) ||
+			this.yieldQueue.hasDeliverable(SUBAGENT_OVERDUE_MESSAGE_TYPE);
 		// Passive asides (`deliverAs: "aside"`) also end an interruptible `wait`
 		// instead of sitting behind it. Deferred wakes are not peeked: no
 		// boundary injection would drain them. Foreground tools are unaffected.
@@ -3751,6 +3759,17 @@ export class AgentSession implements SettingsScope {
 	 */
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void {
 		this.#emit({ type: "notice", level, message, source });
+	}
+
+	/**
+	 * Queue a due-by notice about a subagent (one this agent dispatched, or one
+	 * dispatched by an agent it dispatched). An idle session gets a turn; a
+	 * running one reads it at the next step boundary, and a `wait` ends early.
+	 * Dropped unread once the subagent settles.
+	 */
+	notifySubagentOverdue(entry: SubagentOverdueEntry): void {
+		if (this.#isDisposed) return;
+		this.yieldQueue.enqueue(SUBAGENT_OVERDUE_MESSAGE_TYPE, entry);
 	}
 
 	#recordToolExecutionStart(event: Extract<AgentEvent, { type: "tool_execution_start" }>): void {
