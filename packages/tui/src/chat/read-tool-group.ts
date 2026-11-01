@@ -55,12 +55,19 @@ export function readArgsHaveTarget(args: unknown): boolean {
 	return readArgsTarget(args) !== undefined;
 }
 
+/** Whether a read target is an internal URL whose scheme opts into the compact transcript (skill://, rule://, omp://, xd://). */
+function isCompactInternalUrl(target: string): boolean {
+	const url = splitUrlScheme(target);
+	return (url && internalUrlSchemeSpec(url.scheme))?.compactTranscript === true;
+}
+
 /**
  * Whether a read collapses into the compact {@link ReadToolGroupComponent}
  * rather than a full tool execution. Filesystem/external targets always
  * collapse; registered internal-URL schemes render full so their resolved
  * content is visible, unless their spec declares `compactTranscript`
- * (device listings/docs read better in the compact grouped view).
+ * (instruction docs and device listings read better in the compact grouped view;
+ * their bodies stay reachable through the tool-output expansion toggle).
  */
 export function readArgsCollapseIntoGroup(args: unknown): boolean {
 	const target = readArgsTarget(args);
@@ -643,7 +650,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		const body: NativeChild[] = [];
 		let head: NativeToolHead;
 		// Previews (and a long error message) are what a collapse hides; plain rows always show.
-		let collapsible = previews.length > 0;
+		let collapsible = previews.length > 0 || (!this.#showContentPreview && this.#hasExpandableInternalRead());
 		if (rows.length <= 1) {
 			const row = rows[0];
 			const error = row && this.#statusForTargets(row.targets) === "error" ? this.#errorFor(row) : undefined;
@@ -742,6 +749,12 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			title: error,
 			key: row.targetPath,
 		});
+	}
+
+	/** Plain-text row tail naming why a read failed; previews are off for errors, so the row must carry it. */
+	#errorSuffix(row: ReadSummaryRow): string {
+		if (this.#statusForTargets(row.targets) !== "error") return "";
+		return ` ${theme.fg("error", `— ${this.#errorFor(row).split("\n", 1)[0]}`)}`;
 	}
 
 	/** The failure message of a row's failed read (its result text, `Error:` prefix dropped). */
@@ -932,7 +945,9 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			if (!this.#shouldRenderPreviewRow(row)) {
 				const statusSymbol = this.#formatStatus(this.#statusForTargets(row.targets));
 				const pathDisplay = this.#formatRowPath(row, HEADER_PATH_PAINT);
-				const lines = [` ${statusSymbol} ${theme.fg("toolTitle", theme.bold("Read"))} ${pathDisplay}`.trimEnd()];
+				const lines = [
+					` ${statusSymbol} ${theme.fg("toolTitle", theme.bold("Read"))} ${pathDisplay}${this.#errorSuffix(row)}`.trimEnd(),
+				];
 				const usageRows = this.#usageRowsBySummaryRow(displayRows).get(0) ?? [];
 				this.#appendUsageRows(lines, usageRows, "   ");
 				this.#text.setText(lines.join("\n"));
@@ -1048,7 +1063,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		usageRows: ReadUsageRow[],
 	): void {
 		const connector = index === total - 1 ? theme.tree.last : theme.tree.branch;
-		lines.push(`   ${theme.fg("dim", connector)} ${this.#formatRow(row)}`.trimEnd());
+		lines.push(`   ${theme.fg("dim", connector)} ${this.#formatRow(row)}${this.#errorSuffix(row)}`.trimEnd());
 
 		const connectorWidth = Bun.stringWidth(connector);
 		const continuation =
@@ -1277,7 +1292,17 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	}
 
 	#shouldRenderPreview(entry: ReadEntry): boolean {
-		return this.#showContentPreview && entry.contentText !== undefined;
+		if (entry.contentText === undefined) return false;
+		return this.#showContentPreview || (this.#expanded && isCompactInternalUrl(entry.path));
+	}
+
+	/** Compact internal-URL reads keep their body behind the tool-output expansion toggle when previews are off. */
+	#hasExpandableInternalRead(): boolean {
+		for (const entry of this.#entries.values()) {
+			if (entry.status !== "error" && entry.contentText !== undefined && isCompactInternalUrl(entry.path))
+				return true;
+		}
+		return false;
 	}
 
 	#formatStatus(status: ReadEntry["status"]): string {
