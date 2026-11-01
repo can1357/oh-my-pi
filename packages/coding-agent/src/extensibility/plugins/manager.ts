@@ -19,7 +19,12 @@ import { runBunCli } from "./bun-cli";
 import { refreshBunGitCache } from "./bun-git-cache";
 import { linkPluginDirectory } from "./directory-link";
 import { type GitSource, parseGitUrl } from "./git-url";
-import { prependPluginBinDirs, resolvePluginManifestEntries } from "./loader";
+import {
+	prependPluginBinDirs,
+	refusedPluginBinDirs,
+	resolvePluginManifestEntries,
+	withdrawPluginBinDirs,
+} from "./loader";
 import { getInstalledPluginsRegistryPath, readInstalledPluginsRegistry } from "./marketplace/registry";
 import { parsePluginId } from "./marketplace/types";
 import { extractPackageName, parsePluginSpec } from "./parser";
@@ -451,10 +456,15 @@ export class PluginManager {
 		}
 	}
 
-	async #validateInstalledExtensions(plugin: InstalledPlugin): Promise<void> {
+	/**
+	 * Load the candidate's declared extensions with its own `bin` directories on PATH, as a
+	 * session loading it would have them, and return the PATH entries added. When validation
+	 * fails, the entries are taken back off PATH before the error propagates.
+	 */
+	async #validateInstalledExtensions(plugin: InstalledPlugin): Promise<string[]> {
 		const declaredEntries = resolvePluginManifestEntries(plugin, "extensions");
 		if (declaredEntries.length === 0) {
-			return;
+			return [];
 		}
 
 		const errors: string[] = [];
@@ -467,17 +477,23 @@ export class PluginManager {
 			}
 		}
 
-		if (loadable.length > 0) {
-			// The candidate's own `bin` directories, as a session loading it would have them.
-			prependPluginBinDirs([plugin]);
-			const result = await loadExtensions(loadable, this.#cwd);
-			for (const failure of result.errors) {
-				errors.push(`${failure.path}: ${failure.error}`);
+		let added: string[] = [];
+		try {
+			if (loadable.length > 0) {
+				added = prependPluginBinDirs([plugin]);
+				const result = await loadExtensions(loadable, this.#cwd);
+				for (const failure of result.errors) {
+					errors.push(`${failure.path}: ${failure.error}`);
+				}
 			}
-		}
 
-		if (errors.length > 0) {
-			throw new Error(`Plugin ${plugin.name} extension validation failed:\n${errors.join("\n")}`);
+			if (errors.length > 0) {
+				throw new Error(`Plugin ${plugin.name} extension validation failed:\n${errors.join("\n")}`);
+			}
+			return added;
+		} catch (err) {
+			withdrawPluginBinDirs(added);
+			throw err;
 		}
 	}
 
@@ -552,6 +568,8 @@ export class PluginManager {
 		// node_modules entry even if a step between `bun install` and the final
 		// validation throws.
 		let actualName: string | undefined;
+		// The candidate's `bin` entries validation put on PATH, taken back off if a later step fails.
+		let candidateBinDirs: string[] = [];
 		try {
 			// Bun treats a dependency replacement from `repo#old-ref` to the same
 			// package at `repo`/`repo#new-ref` as a self-edge and bails with
@@ -699,7 +717,11 @@ export class PluginManager {
 				enabled,
 			};
 
-			await this.#validateInstalledExtensions(installedPlugin);
+			const binRefusals = refusedPluginBinDirs(installedPlugin);
+			if (binRefusals.length > 0) {
+				throw new Error(`Plugin ${installedPlugin.name} bin validation failed:\n${binRefusals.join("\n")}`);
+			}
+			candidateBinDirs = await this.#validateInstalledExtensions(installedPlugin);
 
 			// Update runtime config
 			const config = await this.#ensureConfigLoaded();
@@ -712,6 +734,7 @@ export class PluginManager {
 
 			return installedPlugin;
 		} catch (err) {
+			withdrawPluginBinDirs(candidateBinDirs);
 			try {
 				await this.#rollbackFailedInstall(
 					actualName ?? existingActualName,

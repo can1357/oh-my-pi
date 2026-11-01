@@ -334,6 +334,24 @@ if (run.exitCode !== 0) throw new Error(${JSON.stringify(`${name}-probe is not o
 		expect(result.shell).toEqual([{ output: "convtool ran\n", exitCode: 0 }]);
 	});
 
+	test("a tool in a plugin's conventional `tools/` directory gets the plugin's command when `tools/` links out of the package", async () => {
+		// The `tools/` scan names the module under the plugin's installed path; its realpath lies outside the package.
+		const pluginDir = path.join(pluginsDir, "node_modules", "linkedtools");
+		await writeBinPlugin(pluginDir, "linkedtools", {});
+		const sharedTools = path.join(root, "shared-tools");
+		await fs.mkdir(sharedTools, { recursive: true });
+		await fs.rename(path.join(pluginDir, "tool.js"), path.join(sharedTools, "linkedtools.js"));
+		await fs.symlink(sharedTools, path.join(pluginDir, "tools"));
+		await declare(["linkedtools"]);
+
+		const result = await run({ route: "tools" });
+
+		expect(result.toolErrors).toEqual([]);
+		expect(result.tools).toEqual(["linkedtools_probe"]);
+		expect(result.probes).toEqual({ linkedtools: "linkedtools ran\n" });
+		expect(result.PATH).toBe([binOf("linkedtools"), BASE_PATH].join(path.delimiter));
+	});
+
 	test("an ACP session imports a plugin's tool with the plugin's command on PATH", async () => {
 		await writeBinPlugin(path.join(pluginsDir, "node_modules", "acptool"), "acptool", { tools: "tool.js" });
 		await declare(["acptool"]);
@@ -373,6 +391,21 @@ if (run.exitCode !== 0) throw new Error(${JSON.stringify(`${name}-probe is not o
 		expect(result.errors).toEqual([]);
 		expect(result.probes).toEqual({ candidate: "candidate ran\n" });
 		expect(result.PATH).toBe([binOf("candidate"), BASE_PATH].join(path.delimiter));
+	});
+
+	test("a failed install takes the candidate's directories back off PATH", async () => {
+		await writeJson(path.join(pluginsDir, "package.json"), { name: "omp-plugins", private: true, dependencies: {} });
+		const source = path.join(root, "source", "rejected");
+		// Its extension loads, with its command on PATH; a second declared entry is missing, so validation fails.
+		await writeBinPlugin(source, "rejected", { extensions: ["ext.js", "missing.js"] });
+
+		const result = await run({ route: "install", installSource: source, installName: "rejected" });
+
+		expect(result.errors).toEqual([
+			expect.stringContaining("missing.js: declared extension entry not found on disk"),
+		]);
+		expect(result.probes).toEqual({ rejected: "rejected ran\n" });
+		expect(result.PATH).toBe(BASE_PATH);
 	});
 
 	test("a subagent in another project gets its parent's plugins and adds none of its own project's", async () => {
@@ -454,6 +487,31 @@ if (run.exitCode !== 0) throw new Error(${JSON.stringify(`${name}-probe is not o
 		expect(userWins.PATH).toBe(listed);
 	});
 
+	test("the user's command still wins when they list the installed path relatively, with a trailing separator, or with a `.` segment", async () => {
+		await writeBinPlugin(path.join(pluginsDir, "node_modules", "spelled"), "spelled", { extensions: ["ext.js"] });
+		await declare(["spelled"]);
+		const userBin = path.join(root, "userbin");
+		await fs.mkdir(userBin, { recursive: true });
+		await Bun.write(path.join(userBin, "spelled-probe"), '#!/bin/sh\necho "user ran"\n');
+		await fs.chmod(path.join(userBin, "spelled-probe"), 0o755);
+		const installed = binOf("spelled");
+		const spellings = [
+			// The runner's working directory is this directory (plugin-bin-path.harness.ts).
+			path.relative(import.meta.dir, installed),
+			`${installed}${path.sep}`,
+			[pluginsDir, "node_modules", ".", "spelled", "bin"].join(path.sep),
+		];
+
+		const outcomes: Array<{ spelling: string; probe: string | undefined; unchanged: boolean }> = [];
+		for (const spelling of spellings) {
+			const listed = [userBin, spelling, BASE_PATH].join(path.delimiter);
+			const result = await run({ route: "session" }, listed);
+			outcomes.push({ spelling, probe: result.probes.spelled, unchanged: result.PATH === listed });
+		}
+
+		expect(outcomes).toEqual(spellings.map(spelling => ({ spelling, probe: "user ran\n", unchanged: true })));
+	});
+
 	test("a bin entry that is not a directory adds nothing", async () => {
 		const pluginDir = path.join(pluginsDir, "node_modules", "epsilon");
 		await fs.mkdir(pluginDir, { recursive: true });
@@ -466,6 +524,34 @@ if (run.exitCode !== 0) throw new Error(${JSON.stringify(`${name}-probe is not o
 		await declare(["epsilon"]);
 
 		expect((await run({ route: "session" })).PATH).toBe(BASE_PATH);
+	});
+
+	test("a bin directory whose path holds the PATH separator is refused: install says why, and a session adds nothing", async () => {
+		const splitBin = `bin${path.delimiter}extra`;
+		const writeSplitPlugin = async (dir: string, name: string, manifest: Record<string, unknown>) => {
+			await fs.mkdir(path.join(dir, splitBin), { recursive: true });
+			await Bun.write(path.join(dir, splitBin, `${name}-probe`), `#!/bin/sh\necho "${name} ran"\n`);
+			await fs.chmod(path.join(dir, splitBin, `${name}-probe`), 0o755);
+			await writeJson(path.join(dir, "package.json"), {
+				name,
+				version: "1.0.0",
+				omp: { bin: splitBin, ...manifest },
+			});
+		};
+		// Install: a candidate whose only `bin` directory holds the separator.
+		await writeJson(path.join(pluginsDir, "package.json"), { name: "omp-plugins", private: true, dependencies: {} });
+		const source = path.join(root, "source", "splitcand");
+		await writeSplitPlugin(source, "splitcand", {});
+		const install = await run({ route: "install", installSource: source, installName: "splitcand" });
+		// A session: the same directory on an installed plugin (installed by an older omp, or linked).
+		await writeSplitPlugin(path.join(pluginsDir, "node_modules", "splitinst"), "splitinst", {});
+		await declare(["splitinst"]);
+		const session = await run({ route: "session" });
+
+		expect(install.errors).toHaveLength(1);
+		expect(install.errors[0]).toContain(path.join(pluginsDir, "node_modules", "splitcand", splitBin));
+		expect(install.errors[0]).toContain(`PATH separator "${path.delimiter}"`);
+		expect(session.PATH).toBe(BASE_PATH);
 	});
 
 	test("empty PATH entries survive, and an unset PATH gets only the plugin's directories", async () => {
@@ -488,28 +574,35 @@ if (run.exitCode !== 0) throw new Error(${JSON.stringify(`${name}-probe is not o
 		]);
 	});
 
-	test("an explicit-only session adds the directories of the plugins whose tools it loads, and no other plugin's", async () => {
+	test("an explicit-only session adds the directories of the plugins whose manifest tools it loads, and no other plugin's", async () => {
 		await writeBinPlugin(path.join(pluginsDir, "node_modules", "ambient"), "ambient", { extensions: ["ext.js"] });
-		// `--no-extensions` still loads installed plugins' tools.
+		// `--no-extensions` still loads the tools installed plugins name in their manifests.
 		await writeBinPlugin(path.join(pluginsDir, "node_modules", "ambienttool"), "ambienttool", { tools: "tool.js" });
-		await declare(["ambient", "ambienttool"]);
+		// It does not scan installed plugins' conventional `tools/` directories.
+		const convonly = path.join(pluginsDir, "node_modules", "convonly");
+		await writeBinPlugin(convonly, "convonly", {});
+		await fs.mkdir(path.join(convonly, "tools"), { recursive: true });
+		await fs.rename(path.join(convonly, "tool.js"), path.join(convonly, "tools", "convonly.js"));
+		await declare(["ambient", "ambienttool", "convonly"]);
 		const explicit = path.join(root, "explicit.js");
 		await Bun.write(explicit, "export default function () {}\n");
 
 		const result = await run({
 			route: "explicitSession",
 			explicitPath: explicit,
-			commands: ["ambienttool-probe", "ambient-probe"],
+			commands: ["ambienttool-probe", "ambient-probe", "convonly-probe"],
 		});
 
 		expect(result.extensions).toEqual([explicit]);
 		expect(result.errors).toEqual([]);
 		expect(result.tools).toContain("ambienttool_probe");
+		expect(result.tools).not.toContain("convonly_probe");
 		expect(result.probes).toEqual({ ambienttool: "ambienttool ran\n" });
 		expect(result.PATH).toBe([binOf("ambienttool"), BASE_PATH].join(path.delimiter));
-		// The session's shell: the tool plugin's command runs, the extension-only plugin's does not.
+		// The session's shell: the manifest-tool plugin's command runs; the extension-only and `tools/`-only plugins' do not.
 		expect(result.shell[0]).toEqual({ output: "ambienttool ran\n", exitCode: 0 });
 		expect(result.shell[1]?.exitCode).toBe(127);
+		expect(result.shell[2]?.exitCode).toBe(127);
 	});
 
 	test("a case leaves the process that runs it with its PATH, and with the agent directory it had before a profile", async () => {

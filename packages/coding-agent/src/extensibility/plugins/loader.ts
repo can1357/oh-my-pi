@@ -15,6 +15,7 @@ import {
 	isEnoent,
 	logger,
 	normalizePathForComparison,
+	relativePathWithinNormalizedRoot,
 } from "@oh-my-pi/pi-utils";
 import { getConfigDirPaths } from "../../config";
 import { registerPluginCacheInvalidator, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
@@ -428,7 +429,35 @@ export function resolvePluginExtensionPaths(plugin: InstalledPlugin): string[] {
 // =============================================================================
 
 /**
- * Put the manifest `bin` directories of `plugins` at the front of `PATH`.
+ * The manifest `bin` directories of `plugin`, each under the plugin's installed path
+ * (`<plugins root>/node_modules/<name>/<bin>`), never its realpath.
+ */
+export function pluginBinDirs(plugin: InstalledPlugin): string[] {
+	const declared: unknown = plugin.manifest.bin;
+	const dirs: string[] = [];
+	for (const entry of Array.isArray(declared) ? declared : [declared]) {
+		if (typeof entry === "string" && entry.length > 0) dirs.push(path.resolve(path.join(plugin.path, entry)));
+	}
+	return dirs;
+}
+
+/**
+ * Why each of `plugin`'s `bin` directories that cannot go on `PATH` is refused: a directory
+ * whose path holds the `PATH` separator would become several entries, none of them the
+ * directory, so none of its commands would run. Empty when every directory can go on `PATH`.
+ */
+export function refusedPluginBinDirs(plugin: InstalledPlugin): string[] {
+	return pluginBinDirs(plugin)
+		.filter(dir => dir.includes(path.delimiter))
+		.map(
+			dir =>
+				`bin directory ${dir} holds the PATH separator "${path.delimiter}": PATH would split it into several entries and none of its commands would run; rename the directory or move the plugins root`,
+		);
+}
+
+/**
+ * Put the manifest `bin` directories of `plugins` at the front of `PATH`, and return the
+ * entries added.
  *
  * Each entry is the plugin's installed path (`<plugins root>/node_modules/<name>/<bin>`), never
  * its realpath. The session and every process it starts keep this PATH, while a symlinked
@@ -440,20 +469,23 @@ export function resolvePluginExtensionPaths(plugin: InstalledPlugin): string[] {
  * installed path must be the first name for its directory on PATH: a shell keeps the path it
  * found for a command it already ran, so any other name ahead of it (an inherited entry naming the
  * realpath, which is the one that goes stale) would keep its commands on the old target. An
- * installed path already on PATH with no other name for its directory ahead of it is not added
- * again. Entries that are not directories add nothing. The inherited PATH string is kept as it was,
- * empty entries included. Entries stay for the life of the process.
+ * installed path already on PATH, under any spelling that resolves to it from this process's
+ * working directory (relative, with a trailing separator or `.` segments), with no other name for
+ * its directory ahead of it, is not added again. Entries that are not directories add nothing; a
+ * directory whose path holds the PATH separator is refused with a warning. The inherited PATH
+ * string is kept as it was, empty entries included. Entries stay for the life of the process.
  */
-export function prependPluginBinDirs(plugins: readonly InstalledPlugin[]): void {
+export function prependPluginBinDirs(plugins: readonly InstalledPlugin[]): string[] {
 	const inherited = process.env.PATH;
 	const pathEntries = (inherited ?? "").split(path.delimiter);
 	const identities = new Set<string>();
 	const added: string[] = [];
 	for (const plugin of plugins) {
-		const declared: unknown = plugin.manifest.bin;
-		for (const entry of Array.isArray(declared) ? declared : [declared]) {
-			if (typeof entry !== "string" || entry.length === 0) continue;
-			const dir = path.join(plugin.path, entry);
+		for (const refusal of refusedPluginBinDirs(plugin)) {
+			logger.warn(`plugins: ${plugin.name}: ${refusal}`);
+		}
+		for (const dir of pluginBinDirs(plugin)) {
+			if (dir.includes(path.delimiter)) continue;
 			let identity: string;
 			try {
 				identity = fs.realpathSync(dir);
@@ -463,12 +495,31 @@ export function prependPluginBinDirs(plugins: readonly InstalledPlugin[]): void 
 			}
 			if (identities.has(identity)) continue;
 			identities.add(identity);
-			const at = pathEntries.indexOf(dir);
+			// The installed path under any spelling: an entry that resolves to it from this process's
+			// working directory and names the same directory (a `..` through a symlink that leads
+			// elsewhere resolves to it lexically but names another directory, so it does not count).
+			const at = pathEntries.findIndex(
+				entry => entry.length > 0 && path.resolve(entry) === dir && namesDirectory(entry, identity),
+			);
 			if (at === -1 || pathEntries.slice(0, at).some(ahead => namesDirectory(ahead, identity))) added.push(dir);
 		}
 	}
-	if (added.length === 0) return;
+	if (added.length === 0) return added;
 	process.env.PATH = [...added, ...(inherited === undefined ? [] : [inherited])].join(path.delimiter);
+	return added;
+}
+
+/**
+ * Take `added`, the entries one {@link prependPluginBinDirs} call returned, back off the front of
+ * `PATH`, when nothing has gone ahead of them since; otherwise leave `PATH` as it is.
+ */
+export function withdrawPluginBinDirs(added: readonly string[]): void {
+	if (added.length === 0) return;
+	const entries = (process.env.PATH ?? "").split(path.delimiter);
+	if (added.some((dir, i) => entries[i] !== dir)) return;
+	const rest = entries.slice(added.length);
+	if (rest.length === 0) delete process.env.PATH;
+	else process.env.PATH = rest.join(path.delimiter);
 }
 
 /** Whether the PATH entry `entry` is a name for the directory whose realpath is `identity`. */
@@ -510,20 +561,24 @@ export async function getAllPluginToolPaths(cwd: string): Promise<string[]> {
 }
 
 /**
- * Put on PATH the `bin` directories of the enabled plugins whose package root
- * holds any of `modulePaths`, before any of those modules is imported. For
- * plugin modules found outside the manifest, such as the tools capability
- * discovery finds in a plugin's conventional `tools/` directory; a module under
- * no enabled plugin's root adds nothing. Roots and modules compare by realpath.
+ * Put on PATH the `bin` directories of the enabled plugins whose installed path holds any of
+ * `modulePaths`, before any of those modules is imported. For plugin modules found outside the
+ * manifest, such as the tools capability discovery finds in a plugin's conventional `tools/`
+ * directory, which it names under the plugin's installed path. Paths compare as configured, never
+ * by realpath, like the `PATH` entries themselves: a plugin's `tools/` may be a symlink out of its
+ * package, and its modules still belong to it. A module under no enabled plugin's installed path
+ * adds nothing.
  */
 export async function prependBinDirsOfOwningPlugins(cwd: string, modulePaths: readonly string[]): Promise<void> {
 	if (modulePaths.length === 0) return;
-	const modules = await Promise.all(modulePaths.map(p => fs.promises.realpath(p).catch(() => path.resolve(p))));
-	const owners: InstalledPlugin[] = [];
-	for (const plugin of await getEnabledPlugins(cwd)) {
-		const root = await fs.promises.realpath(plugin.path).catch(() => path.resolve(plugin.path));
-		if (modules.some(modulePath => modulePath.startsWith(root + path.sep))) owners.push(plugin);
-	}
+	const withBin = (await getEnabledPlugins(cwd)).filter(plugin => pluginBinDirs(plugin).length > 0);
+	if (withBin.length === 0) return;
+	const modules = modulePaths.map(modulePath => path.resolve(modulePath));
+	// Both sides are resolved the same way (lexically), which is all the helper needs.
+	const owners = withBin.filter(plugin => {
+		const root = path.resolve(plugin.path);
+		return modules.some(modulePath => Boolean(relativePathWithinNormalizedRoot(root, modulePath)));
+	});
 	prependPluginBinDirs(owners);
 }
 
