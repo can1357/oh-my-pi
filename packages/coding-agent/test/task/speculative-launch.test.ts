@@ -19,6 +19,7 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import { createSpeculativeToolExecutionConfig } from "@oh-my-pi/pi-coding-agent/speculation/host";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
+import * as evalToolsModule from "@oh-my-pi/pi-coding-agent/task/eval-tools";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import { BatchArgsScanner, type TaskLaunchSession } from "@oh-my-pi/pi-coding-agent/task/speculative-launch";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
@@ -188,6 +189,50 @@ describe("task speculative launch", () => {
 		await manager.getJob("Beta")!.promise;
 		expect(manager.getJob("Alpha")!.status).toBe("completed");
 		expect(manager.getJob("Beta")!.status).toBe("completed");
+	});
+	it("does not start a builtin unavailable to the selected agent", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [{ ...taskAgent, tools: ["read"] }],
+			projectAgentsDir: null,
+		});
+		const { session } = await openSession();
+		const unavailableBuiltin = {
+			context: "ctx",
+			tasks: [{ name: "Write", agent: "task", task: "Write the assigned file.", tools: ["write"] }],
+		};
+
+		session.update(toolCall, JSON.stringify(unavailableBuiltin));
+		const adopted = await session.adopt([
+			{ agent: "task", name: "Write", task: "Write the assigned file.", context: "ctx" },
+		]);
+
+		expect(adopted.size).toBe(0);
+	});
+
+	it("refuses speculation when a stripped built-in would fall back to a same-named eval tool", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [{ ...taskAgent, tools: ["read"] }],
+			projectAgentsDir: null,
+		});
+		// The eval kernel defines `write`, so dispatch would accept it as an eval tool; a child launched
+		// speculatively with the stripped list would not match the dispatched parameters.
+		vi.spyOn(evalToolsModule, "describeEvalTools").mockResolvedValue([
+			{ name: "write", description: "Write.", parameters: { type: "object", properties: {} }, language: "js" },
+		]);
+		const { session } = await openSession();
+		const withBuiltin = {
+			context: "ctx",
+			tasks: [
+				{ name: "Alpha", agent: "task", task: "Write the file.", tools: ["write"] },
+				{ name: "Beta", agent: "task", task: "Do B." },
+			],
+		};
+		const raw = JSON.stringify(withBuiltin);
+
+		session.update(toolCall, raw.slice(0, raw.indexOf('{"name":"Beta"') + 10));
+		await Bun.sleep(50);
+
+		expect(startedIds.size).toBe(0);
 	});
 
 	it("aborts launched agents when the finished call is invalid", async () => {
