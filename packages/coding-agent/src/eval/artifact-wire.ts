@@ -95,35 +95,97 @@ type Presence<T> = { readonly [K in keyof T]-?: {} extends Pick<T, K> ? "optiona
 
 /**
  * What the parser can deliver for each field of `T`, so what `T` may say a
- * field is. The parser checks only that a field is a string, so a required
- * field must be one — never a type that admits `undefined`, which the parser
- * would refuse — and an optional one, when it is there. A field named
- * `__proto__` cannot be one at all: written into a table it sets the table's
- * prototype rather than naming a key, and the parser would never read it.
+ * field is. The parser copies the fields its table lists and checks only that
+ * each is a string, so:
+ *
+ * - a required field is a string, never a type that admits `undefined`,
+ *   which the parser would refuse; an optional one is a string when present;
+ * - every field has a key a table can name: an index signature, plain or a
+ *   pattern, has fields a table never lists;
+ * - no field is named `__proto__`: written into a table it sets the table's
+ *   prototype rather than naming a key, and the parser would never read it.
+ *
+ * A field keyed by a symbol passes, and the parser never visits it; no
+ * bridge can carry one, since JSON and `postMessage` both drop them.
  */
 type WireFields<T> = {
-	[K in keyof T]: K extends "__proto__" ? never : {} extends Pick<T, K> ? string | undefined : string;
+	[K in keyof T]: K extends "__proto__"
+		? never
+		: {} extends Record<K, unknown>
+			? never
+			: {} extends Pick<T, K>
+				? string | undefined
+				: string;
 };
 
 /**
- * `T` when it is one shape; when it is several, a type nothing a parser
- * returns can be, whose text says why. A parser table describes one shape,
- * so a union parsed for one op — two request variants with the same `op` —
- * would have every shape but one parsed into the wrong one, its own fields
- * dropped. (The answer needs no such check: an interface is always one shape.)
+ * `unknown` when a table can list `T` whole; otherwise a type no table is,
+ * whose text says why. Both conditions are about `T` as a whole, so they are
+ * checked on its table rather than field by field in {@link WireFields}:
  *
- * Compared with the intersection of the members rather than with each
- * member: a second variant that only adds fields to the first is a subtype
- * of it, so the union is assignable to the first member alone, yet it is not
- * assignable to the shape that has every field.
+ * - `T` is one shape (see {@link SameFields});
+ * - no field of `T` is typed `any`, which every field check accepts — `any`
+ *   is assignable to whatever a check asks for — while the parser refuses or
+ *   drops whatever is not a string.
  */
-type OneShape<T> = [T] extends [AllOf<T>] ? T : "an op names exactly one request shape";
+type WholeTable<T> = [SameFields<T>] extends [true]
+	? 0 extends 1 & T[keyof T]
+		? "a wire field is never typed any"
+		: unknown
+	: "every shape of a wire message has the same fields";
 
-/** The intersection of the members of `T`. */
-type AllOf<T> = (T extends unknown ? (shape: T) => void : never) extends (shape: infer All) => void ? All : never;
+/** Every field any member of `T` has. */
+type FieldOf<T> = T extends unknown ? keyof T : never;
 
-/** The request shape for one op. */
-type RequestOf<Op extends ArtifactRequest["op"]> = Extract<ArtifactRequest, { op: Op }>;
+/** Every field any member of `T` has that may be absent from it. */
+type OptionalFieldOf<T> = T extends unknown ? { [K in keyof T]-?: {} extends Pick<T, K> ? K : never }[keyof T] : never;
+
+/**
+ * Whether every member of `T` has the same fields, each optional in all of
+ * them or in none. A parser table lists one set of fields, so a member with
+ * another set is parsed into the wrong one, its own fields dropped.
+ *
+ * Compared field by field, never by assignability: a second member that
+ * only adds an optional field, or an index signature, is assignable to the
+ * first and the first to it, yet a list of the first's fields drops it.
+ */
+type SameFields<T, Member = T> = [
+	Member extends unknown
+		? [FieldOf<T>] extends [keyof Member]
+			? [OptionalFieldOf<T>] extends [OptionalFieldOf<Member>]
+				? never
+				: false
+			: false
+		: never,
+] extends [never]
+	? true
+	: false;
+
+/**
+ * `T`, the request shapes that admit `Op`, when they are one shape and name
+ * `Op` alone; otherwise a type nothing a parser returns can be, whose text
+ * says why. A parser's table describes one shape for one op: a second shape
+ * for an op has its own fields dropped, and a shape whose `op` admits two
+ * ops is parsed by each of their parsers as if it were theirs.
+ */
+type OneShape<T, Op> = [OtherOps<T, Op>] extends [never]
+	? [SameFields<T>] extends [true]
+		? T
+		: "an op names exactly one request shape"
+	: "a request shape names exactly one op";
+
+/** The members of `T` whose `op` admits anything but `Op`. */
+type OtherOps<T, Op> = T extends { op: infer Ops } ? ([Ops] extends [Op] ? never : T) : T;
+
+/**
+ * The request shapes for one op: every shape whose `op` admits it. Not
+ * `Extract<ArtifactRequest, { op: Op }>`, which leaves a shape whose `op`
+ * admits two ops out of both of their parsers, where no check sees it.
+ */
+type RequestOf<Op extends ArtifactRequest["op"]> = Admitting<ArtifactRequest, Op>;
+
+/** The members of `T` whose `op` admits `Op`. */
+type Admitting<T, Op> = T extends { op: infer Ops } ? (Op extends Ops ? T : never) : never;
 
 const SETTLED_ARTIFACT_FIELDS: Presence<SettledArtifact> = {
 	path: "required",
@@ -143,13 +205,16 @@ const SETTLED_ARTIFACT_FIELDS: Presence<SettledArtifact> = {
  * request at run time. Each entry names its op, so its table is checked for
  * that shape's fields and `shapeOf` for their being strings; the mapped type
  * makes an op without an entry a compile error, and an entry may return only
- * `OneShape` of its op's requests, so an op that names two shapes is one too.
+ * `OneShape` of the shapes that admit its op, so a second shape for an op,
+ * or a shape whose `op` admits two, is one too. An op that is no literal at
+ * all — `string`, or a pattern such as `` `take-${string}` `` — is a key no
+ * entry has to exist for, so it is refused outright.
  * `artifact-wire-edits.test.ts` makes each of those edits to a copy of this
  * module and holds it to that.
  */
-const REQUEST_PARSERS: {
-	readonly [Op in ArtifactRequest["op"]]: (value: object) => OneShape<RequestOf<Op>> | null;
-} = {
+const REQUEST_PARSERS: [UnlistedOp<ArtifactRequest["op"]>] extends [never]
+	? { readonly [Op in ArtifactRequest["op"]]: (value: object) => OneShape<RequestOf<Op>, Op> | null }
+	: "a request op is a literal string" = {
 	answer: value =>
 		shapeOf<RequestOf<"answer">>({ op: "required", id: "required", root: "required", token: "optional" }, value),
 	locate: value =>
@@ -158,16 +223,20 @@ const REQUEST_PARSERS: {
 	release: value => shapeOf<RequestOf<"release">>({ op: "required", file: "required" }, value),
 };
 
+/** The members of `Op` no table key can name one by one: `string`, or a pattern. */
+type UnlistedOp<Op> = Op extends string ? ({} extends Record<Op, unknown> ? Op : never) : never;
+
 /**
  * Every field `fields` names, copied whole from `value`; `null` when a
  * required one is missing or is not a string.
  *
  * There is no per-field code to forget a field in: the table is the list,
- * and the table is checked against the type. The constraint is what makes
- * that check mean "parsed whole": each field of `T` is something this
- * parser hands back as it came.
+ * and the table is checked against the type — against one shape of it, so
+ * a type with two cannot hide the second's fields from it. The constraint is
+ * what makes that check mean "parsed whole": each field of `T` is something
+ * this parser hands back as it came.
  */
-function shapeOf<T extends WireFields<T>>(fields: Presence<T>, value: unknown): T | null {
+function shapeOf<T extends WireFields<T>>(fields: Presence<T> & WholeTable<T>, value: unknown): T | null {
 	if (typeof value !== "object" || value === null) return null;
 	const shaped: Record<string, string> = {};
 	// `Object.keys` types its result as `string[]`; these are the table's own keys.
@@ -195,6 +264,10 @@ function isRequestOp(op: unknown): op is ArtifactRequest["op"] {
 
 /** A reader's request, as it arrives at the host; `null` for anything that is not one. */
 export function artifactRequestOf(value: unknown): ArtifactRequest | null {
-	if (typeof value !== "object" || value === null || !("op" in value) || !isRequestOp(value.op)) return null;
-	return REQUEST_PARSERS[value.op](value);
+	if (typeof value !== "object" || value === null) return null;
+	// Every field read once, here, so the op that picks the parser is the op
+	// the parser reads — whatever `value` would answer if asked again.
+	const sent: Record<string, unknown> = { ...value };
+	const op = sent.op;
+	return isRequestOp(op) ? REQUEST_PARSERS[op](sent) : null;
 }

@@ -477,6 +477,23 @@ describe.skipIf(process.platform !== "linux")("artifact requests with an empty f
 	});
 });
 
+describe("an artifact request at the host", () => {
+	it("reads its op once, so the op that picks its parser is the op it parses", () => {
+		// No bridge delivers a getter; this one says `take` and then `__proto__`,
+		// which no parser answers to, so a second read cannot go unnoticed.
+		let reads = 0;
+		const sent = {
+			get op() {
+				reads++;
+				return reads === 1 ? "take" : "__proto__";
+			},
+			file: "file-1",
+		};
+		expect(artifactRequestOf(sent)).toEqual({ op: "take", file: "file-1" });
+		expect(reads).toBe(1);
+	});
+});
+
 /** The bridge value a host gives for `request`, as the JavaScript host sends it. */
 async function answerArtifact(
 	session: ToolSession,

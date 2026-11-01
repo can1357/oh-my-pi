@@ -7,9 +7,11 @@ import { TempDir } from "@oh-my-pi/pi-utils";
  * The wire's guarantee is about edits to it, so it is tested on edits.
  *
  * An edit that lets a reader send something the host's parser does not hand
- * back whole must not compile: a field that is not a string, a required field
- * whose type admits `undefined`, a field named `__proto__`, or a second request
- * shape for an op that already has one. If such an edit compiles, every
+ * back whole must not compile: a field that is not a string, or is typed
+ * `any`; a required field whose type admits `undefined`; a field named
+ * `__proto__`; a second request shape for an op that already has one, even
+ * one that only adds an optional field; or a request shape whose op admits
+ * more than one op. If such an edit compiles, every
  * request a reader sends in that shape either reaches the host and is refused
  * as "not a request this host answers" (`artifactRequestOf` returns `null`,
  * which is exactly what the bridge turns into that refusal) or arrives with a
@@ -102,6 +104,111 @@ const edits = {
 		sends: { op: "take", file: "file-1", attempt: undefined },
 		parse: request,
 		expected: { op: "take", file: "file-1", attempt: undefined },
+	},
+	"a second request shape for take that adds an optional field, its row unchanged": {
+		refusal: "an op names exactly one request shape",
+		changes: [
+			[
+				/\| \{ op: "take"; file: string \}/,
+				'| { op: "take"; file: string }\n\t| { op: "take"; file: string; receipt?: string }',
+			],
+		],
+		sends: { op: "take", file: "file-1", receipt: "receipt-1" },
+		parse: request,
+		expected: { op: "take", file: "file-1", receipt: "receipt-1" },
+	},
+	"a second request shape for take with an index signature, its row unchanged": {
+		refusal: "an op names exactly one request shape",
+		changes: [
+			[
+				/\| \{ op: "take"; file: string \}/,
+				'| { op: "take"; file: string }\n\t| { op: "take"; file: string; [key: string]: string }',
+			],
+		],
+		sends: { op: "take", file: "file-1", receipt: "receipt-1" },
+		parse: request,
+		expected: { op: "take", file: "file-1", receipt: "receipt-1" },
+	},
+	"a second request shape for take built by a mapped type, its row unchanged": {
+		refusal: "an op names exactly one request shape",
+		changes: [
+			[
+				/\| \{ op: "take"; file: string \}/,
+				'| { op: "take"; file: string }\n\t| ({ op: "take"; file: string } & { [K in "receipt"]?: string })',
+			],
+		],
+		sends: { op: "take", file: "file-1", receipt: "receipt-1" },
+		parse: request,
+		expected: { op: "take", file: "file-1", receipt: "receipt-1" },
+	},
+	"a second request shape for take built by a generic, its row unchanged": {
+		refusal: "an op names exactly one request shape",
+		changes: [
+			[/^/, "type WithReceipt<T> = T & { receipt?: string };\n"],
+			[
+				/\| \{ op: "take"; file: string \}/,
+				'| { op: "take"; file: string }\n\t| WithReceipt<{ op: "take"; file: string }>',
+			],
+		],
+		sends: { op: "take", file: "file-1", receipt: "receipt-1" },
+		parse: request,
+		expected: { op: "take", file: "file-1", receipt: "receipt-1" },
+	},
+	"a request shape whose op admits take and release": {
+		refusal: "a request shape names exactly one op",
+		changes: [
+			[
+				/\| \{ op: "take"; file: string \}/,
+				'| { op: "take"; file: string }\n\t| { op: "take" | "release"; file: string; receipt: string }',
+			],
+		],
+		sends: { op: "take", file: "file-1", receipt: "receipt-1" },
+		parse: request,
+		expected: { op: "take", file: "file-1", receipt: "receipt-1" },
+	},
+	"a request shape whose op is a pattern": {
+		refusal: "a request op is a literal string",
+		changes: [
+			[
+				/\| \{ op: "take"; file: string \}/,
+				`| { op: "take"; file: string }\n\t| { op: \`take-\${string}\`; file: string }`,
+			],
+		],
+		sends: { op: "take-now", file: "file-1" },
+		parse: request,
+		expected: { op: "take-now", file: "file-1" },
+	},
+	"a required field typed any on the take request, listed in its row": {
+		refusal: "a wire field is never typed any",
+		changes: [
+			[/\| \{ op: "take"; file: string \}/, '| { op: "take"; file: string; attempt: any }'],
+			[/(take:[^\n]*\{ op: "required", file: "required") \}/, '$1, attempt: "required" }'],
+		],
+		sends: { op: "take", file: "file-1", attempt: 3 },
+		parse: request,
+		expected: { op: "take", file: "file-1", attempt: 3 },
+	},
+	"an optional field typed any on the answer, listed in its table": {
+		refusal: "a wire field is never typed any",
+		changes: [
+			[/export interface SettledArtifact \{\n/, "export interface SettledArtifact {\n\tattempt?: any;\n"],
+			[/(const SETTLED_ARTIFACT_FIELDS: Presence<SettledArtifact> = \{\n)/, '$1\tattempt: "optional",\n'],
+		],
+		sends: { path: "/artifacts/0.read.log", device: "64768", inode: "12", attempt: 3 },
+		parse: answer,
+		expected: { path: "/artifacts/0.read.log", device: "64768", inode: "12", attempt: 3 },
+	},
+	"an answer field pattern, by a template-literal index signature": {
+		refusal: "x-",
+		changes: [
+			[
+				/export interface SettledArtifact \{\n/,
+				`export interface SettledArtifact {\n\t[key: \`x-\${string}\`]: string;\n`,
+			],
+		],
+		sends: { path: "/artifacts/0.read.log", device: "64768", inode: "12", "x-mount": "mount-1" },
+		parse: answer,
+		expected: { path: "/artifacts/0.read.log", device: "64768", inode: "12", "x-mount": "mount-1" },
 	},
 	"a field named __proto__ on the take request, listed in its row": {
 		refusal: "__proto__",
