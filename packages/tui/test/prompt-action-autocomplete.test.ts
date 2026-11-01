@@ -495,7 +495,26 @@ describe("model mention effort rows in the editor", () => {
 
 		expect(await acceptAfter("^x:", "h")).toBe("^a/x:high ");
 		expect(await acceptAfter("^x:", "\x7f")).toBe("^a/x ");
-		expect(await acceptAfter("/btw ^x:", "h")).toBe("/btw ^x:h");
+	});
+
+	it("keeps a mention popup in slash-command arguments open while it refreshes", async () => {
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider(mentionProvider([modelMentionItem("a", "x", "X One", FIVE_LEVELS)]));
+		const nextUpdate = () => {
+			const { promise, resolve } = Promise.withResolvers<void>();
+			editor.onAutocompleteUpdate = resolve;
+			return promise;
+		};
+		editor.insertText("/btw ^x:");
+		while (!editor.isShowingAutocomplete()) await nextUpdate();
+
+		const refreshed = nextUpdate();
+		editor.handleInput("h");
+		expect(editor.isShowingAutocomplete()).toBe(true);
+		await refreshed;
+		editor.handleInput("\t");
+
+		expect(editor.getText()).toBe("/btw ^a/x:high ");
 	});
 
 	it("leaves `#` tokens inside a mention to their own completions", async () => {

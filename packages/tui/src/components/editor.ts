@@ -5473,13 +5473,7 @@ export class Editor implements Component, Focusable {
 			this.#state.cursorLine,
 			this.#state.cursorCol,
 		);
-		if (completion.kind === "unhandled") {
-			if (!this.#autocompletePrefix.startsWith("^")) return false;
-			this.#cancelAutocomplete();
-			this.onAutocompleteUpdate?.();
-			void this.#tryTriggerAutocomplete();
-			return true;
-		}
+		if (completion.kind === "unhandled") return false;
 		this.#invalidateAutocompleteRequests();
 		if (completion.kind === "matched") {
 			this.#showAutocompleteSuggestions(completion.suggestions, "regular");
