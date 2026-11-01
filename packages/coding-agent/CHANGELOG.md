@@ -1,8 +1,8 @@
 # Changelog
 
 ## [Unreleased]
-
 ### Fixed
+
 - Fixed a copy-on-write worktree clone into a destination inside the checkout recursing into the source tree: such a destination is now refused, and the copy keeps nested repositories and submodules usable ([#16076](https://github.com/can1357/oh-my-pi/issues/16076), [#16097](https://github.com/can1357/oh-my-pi/pull/16097) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
