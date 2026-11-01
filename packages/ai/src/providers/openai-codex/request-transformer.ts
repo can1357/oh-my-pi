@@ -2,6 +2,7 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { requireSupportedEffort } from "@oh-my-pi/pi-catalog/model-thinking";
 import { $env } from "@oh-my-pi/pi-utils";
 import type { Model } from "../../types";
+import { stripOpenAIResponsesInternalMetadataForReplay } from "../../utils";
 import { mapOpenAIReasoningEffort } from "../openai-shared";
 
 /** Reasoning replay scope for the Codex Responses API (`reasoning.context`). */
@@ -180,15 +181,12 @@ function filterInput(input: InputItem[] | undefined): InputItem[] | undefined {
 
 	return input
 		.filter(item => item.type !== "item_reference")
-		.map(item => {
-			const stripId = item.type !== "computer_call" && item.id != null;
-			if (stripId || Object.hasOwn(item, "internal_chat_message_metadata_passthrough")) {
-				const { internal_chat_message_metadata_passthrough: _internalMetadata, ...rest } = item;
-				if (stripId) delete rest.id;
-				return rest as InputItem;
-			}
-			return item;
-		});
+		.map(item =>
+			stripOpenAIResponsesInternalMetadataForReplay(
+				item,
+				item.type !== "computer_call" && item.id != null ? "drop-id" : "preserve",
+			),
+		);
 }
 
 const CODEX_ORPHAN_OUTPUT_LIMIT = 16_000;

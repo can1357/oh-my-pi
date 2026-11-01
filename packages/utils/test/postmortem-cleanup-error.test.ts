@@ -13,7 +13,10 @@ async function runPostmortemProbe(
 	const root = await mkdtemp(join(tmpdir(), "omp-postmortem-probe-"));
 	const probePath = join(root, "probe.ts");
 	try {
-		await Bun.write(probePath, source);
+		await Bun.write(
+			probePath,
+			`import { postmortem as installedPostmortem } from "${postmortemModuleUrl}"; installedPostmortem.installProcessHandlers();\n${source}`,
+		);
 		const proc = Bun.spawn([process.execPath, probePath], {
 			cwd: process.cwd(),
 			stdout: "pipe",

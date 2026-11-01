@@ -144,6 +144,7 @@ The variables below supply credentials after runtime/config overrides and stored
 | `siliconflow-cn`                 | `SILICONFLOW_CN_API_KEY`                                                            |
 | `fireworks`                      | `FIREWORKS_API_KEY`                                                                 |
 | `together`                       | `TOGETHER_API_KEY`                                                                  |
+| `modular`                        | `MODULAR_API_KEY`                                                                   |
 | `typesafe`                       | `TYPESAFE_API_KEY`                                                                  |
 | `coreweave`                      | `COREWEAVE_API_KEY`, then `WANDB_API_KEY`                                           |
 | `nvidia`                         | `NVIDIA_API_KEY`                                                                    |

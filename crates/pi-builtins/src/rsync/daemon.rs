@@ -1029,7 +1029,7 @@ mod tests {
 		let Some(rsync) = ["/opt/homebrew/bin/rsync", "/usr/local/bin/rsync", "/usr/bin/rsync"]
 			.into_iter()
 			.map(Path::new)
-			.find(|p| p.exists() && is_samba_rsync(p))
+			.find(|p| p.exists() && is_protocol_33_samba_rsync(p))
 		else {
 			return;
 		};
@@ -1129,13 +1129,15 @@ mod tests {
 		assert_eq!(err.code, 5);
 	}
 
-	/// openrsync (`/usr/bin/rsync` on macOS) has no daemon mode.
+	/// A samba rsync whose daemon negotiates protocol 33, which the test pins.
+	/// openrsync (`/usr/bin/rsync` on macOS) has no daemon mode, and older
+	/// distro rsyncs (3.2.x, protocol 31) negotiate down.
 	#[cfg(unix)]
-	fn is_samba_rsync(path: &Path) -> bool {
-		std::process::Command::new(path)
-			.arg("--version")
-			.output()
-			.is_ok_and(|out| String::from_utf8_lossy(&out.stdout).starts_with("rsync  version 3."))
+	fn is_protocol_33_samba_rsync(path: &Path) -> bool {
+		std::process::Command::new(path).arg("--version").output().is_ok_and(|out| {
+			let version = String::from_utf8_lossy(&out.stdout);
+			version.starts_with("rsync  version 3.") && version.contains("protocol version 33")
+		})
 	}
 
 	#[test]
