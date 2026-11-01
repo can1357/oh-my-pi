@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Models configuration accepts `supportsPromptCacheBreakpoints` for custom OpenAI-compatible gateways ([#12880](https://github.com/can1357/oh-my-pi/pull/12880) by [@ZenAlexa](https://github.com/ZenAlexa)).
+
 ## [18.14.2] - 2026-10-31
 
 ### Added
