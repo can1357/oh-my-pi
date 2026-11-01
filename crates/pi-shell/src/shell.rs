@@ -6904,6 +6904,205 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 		assert!(!still_written(output.path()).await, "kill %1 did not end the compound loop");
 	}
 
+	/// Runs `command` in the persistent `shell` and returns its exit code and
+	/// everything it printed, or the error `Shell::run` rejected with.
+	async fn run_collecting(shell: &Shell, command: &str) -> Result<(Option<i32>, String)> {
+		let (tx, rx) = flume::unbounded::<String>();
+		let result = shell
+			.run(
+				ShellRunOptions { command: command.into(), ..Default::default() },
+				Some(tx),
+				CancelToken::default(),
+			)
+			.await?;
+		Ok((result.exit_code, rx.try_iter().collect()))
+	}
+
+	/// A background job whose expansion fails reports the error itself, and the
+	/// shell carries on, as in Bash 5.2.21. `Shell::run` rejected with
+	/// `JoinHandle polled after completion`: the job's error reached `wait`,
+	/// which left the job's finished task in the table, and the next poll of the
+	/// table polled that task again.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn background_expansion_error_is_reported_and_the_shell_carries_on() {
+		let _guard = shell_test_lock().lock().await;
+		let shell = Shell::new(None);
+
+		let (exit_code, output) =
+			run_collecting(&shell, "{ : \"${missing:?BOOM}\"; } & wait; printf 'PARENT=%s\\n' \"$?\"")
+				.await
+				.unwrap_or_else(|err| panic!("Shell::run rejected: {err:#}"));
+
+		assert_eq!(exit_code, Some(0), "output: {output:?}");
+		assert_eq!(output.matches("BOOM").count(), 1, "one diagnostic, from the job: {output:?}");
+		assert!(!output.contains("wait:"), "the job's error is not `wait`'s: {output:?}");
+		assert!(output.ends_with("PARENT=0\n"), "`wait` with no operand returns 0: {output:?}");
+
+		let (exit_code, output) = run_collecting(&shell, "printf 'NEXT\\n'")
+			.await
+			.unwrap_or_else(|err| panic!("the next run was rejected: {err:#}"));
+		assert_eq!((exit_code, output.as_str()), (Some(0), "NEXT\n"));
+	}
+
+	/// Every asynchronous subshell (a background job, a coprocess, a process
+	/// substitution) ends as a child shell process does: it reports its own
+	/// error, and only its exit status reaches the shell that started it, with
+	/// or without `wait`. Each row's last line and status are Bash 5.2.21's.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn asynchronous_subshells_report_their_own_errors() {
+		let _guard = shell_test_lock().lock().await;
+		// (form, command, expected output after any diagnostic, text the one
+		// diagnostic contains)
+		let rows: &[(&str, &str, &str, Option<&str>)] = &[
+			(
+				"background, wait for the job",
+				"{ : \"${missing:?BOOM}\"; } & wait %1; printf 'PARENT=%s\\n' \"$?\"",
+				"PARENT=1\n",
+				Some("BOOM"),
+			),
+			(
+				"background, wait -n",
+				"{ : \"${missing:?BOOM}\"; } & wait -n; printf 'PARENT=%s\\n' \"$?\"",
+				"PARENT=1\n",
+				Some("BOOM"),
+			),
+			(
+				"background, wait twice",
+				"{ : \"${missing:?BOOM}\"; } & wait; wait; printf 'PARENT=%s\\n' \"$?\"",
+				"PARENT=0\n",
+				Some("BOOM"),
+			),
+			(
+				"background, no wait",
+				"{ : \"${missing:?BOOM}\"; } & sleep 0.5; printf 'PARENT=%s\\n' \"$?\"",
+				"PARENT=0\n",
+				Some("BOOM"),
+			),
+			(
+				"background external command, failed expansion",
+				"/bin/echo \"${missing:?BOOM}\" & wait; printf 'PARENT=%s\\n' \"$?\"",
+				"PARENT=0\n",
+				Some("BOOM"),
+			),
+			(
+				"background external command, cannot start",
+				"/nonexistent/cmd & wait %1; printf 'PARENT=%s\\n' \"$?\"",
+				"PARENT=127\n",
+				Some("/nonexistent/cmd"),
+			),
+			(
+				"background pipeline, last stage cannot start",
+				"/bin/echo hi | /nonexistent/cmd & wait %1; printf 'PARENT=%s\\n' \"$?\"",
+				"PARENT=127\n",
+				Some("/nonexistent/cmd"),
+			),
+			(
+				"background, exit",
+				"{ exit 3; } & wait %1; printf 'PARENT=%s\\n' \"$?\"",
+				"PARENT=3\n",
+				None,
+			),
+			(
+				"background, break",
+				"for i in 1 2; do { break; } & wait %1; printf 'ITER=%s\\n' \"$i\"; done",
+				"ITER=1\nITER=2\n",
+				None,
+			),
+			(
+				"coprocess, wait",
+				"coproc { : \"${missing:?BOOM}\"; }; wait; printf 'PARENT=%s\\n' \"$?\"",
+				"PARENT=0\n",
+				Some("BOOM"),
+			),
+			(
+				"coprocess, no wait",
+				"coproc { : \"${missing:?BOOM}\"; }; sleep 0.5; printf 'PARENT=%s\\n' \"$?\"",
+				"PARENT=0\n",
+				Some("BOOM"),
+			),
+			(
+				"coprocess, exit",
+				"coproc { exit 3; }; wait %1; printf 'PARENT=%s\\n' \"$?\"",
+				"PARENT=3\n",
+				None,
+			),
+			(
+				"process substitution, read",
+				"/bin/cat <(: \"${missing:?BOOM}\"); printf 'PARENT=%s\\n' \"$?\"",
+				"PARENT=0\n",
+				Some("BOOM"),
+			),
+			(
+				"process substitution, write",
+				": > >(: \"${missing:?BOOM}\"); sleep 0.5; printf 'PARENT=%s\\n' \"$?\"",
+				"PARENT=0\n",
+				Some("BOOM"),
+			),
+		];
+
+		let mut failures = Vec::new();
+		for &(form, command, tail, diagnostic) in rows {
+			let shell = Shell::new(None);
+			let outcome = match run_collecting(&shell, command).await {
+				Err(err) => Err(format!("Shell::run rejected: {err:#}")),
+				Ok((exit_code, output)) => {
+					let diagnostics = diagnostic.map_or(0, |text| output.matches(text).count());
+					if exit_code == Some(0)
+						&& output.ends_with(tail)
+						&& diagnostics == usize::from(diagnostic.is_some())
+						&& !output.contains("wait:")
+					{
+						Ok(())
+					} else {
+						Err(format!("exit {exit_code:?}, output {output:?}"))
+					}
+				},
+			};
+			if let Err(observed) = outcome {
+				failures.push(format!("{form}: {observed}"));
+			}
+		}
+		assert!(failures.is_empty(), "asynchronous subshell rows failed:\n{}", failures.join("\n"));
+	}
+
+	/// A subshell's error goes to the standard error in effect where it
+	/// happened, as in Bash 5.2.21: a redirection on the failing command
+	/// captures it, and nothing reaches the shell's own standard error. The
+	/// error must land only inside `ERR=<…>`.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn subshell_errors_follow_the_failing_commands_redirection() {
+		let _guard = shell_test_lock().lock().await;
+		let dir = tempfile::tempdir().expect("scratch directory");
+		let err_file = quote_arg(&dir.path().join("err").to_string_lossy());
+		let fail = ": \"${missing:?BOOM}\"";
+		let rows = [
+			("background", format!("{{ {fail}; }} 2>{err_file} & wait")),
+			("coprocess", format!("coproc {{ {fail}; }} 2>{err_file}; wait")),
+			("process substitution", format!("/bin/cat <({{ {fail}; }} 2>{err_file})")),
+			("subshell", format!("( {{ {fail}; }} 2>{err_file} )")),
+			("function definition", format!("f() {{ {fail}; }} 2>{err_file}; f & wait")),
+		];
+
+		let mut failures = Vec::new();
+		for (form, command) in rows {
+			let shell = Shell::new(None);
+			let command =
+				format!("{command}; printf 'ERR=<%s>\\n' \"$(/bin/cat {err_file})\"; rm -f {err_file}");
+			match run_collecting(&shell, &command).await {
+				Err(err) => failures.push(format!("{form}: Shell::run rejected: {err:#}")),
+				Ok((_, output)) => {
+					if !(output.starts_with("ERR=<") && output.matches("BOOM").count() == 1) {
+						failures.push(format!("{form}: {output:?}"));
+					}
+				},
+			}
+		}
+		assert!(failures.is_empty(), "errors escaped their redirection:\n{}", failures.join("\n"));
+	}
+
 	/// `live_background_job_count` reports 0 when the session has no live
 	/// external background jobs and 1 while one is running. The host relies on
 	/// this to retain a per-call shell whose `&`/`nohup` child is still alive

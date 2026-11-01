@@ -16,6 +16,11 @@ pub struct Error {
 	/// Whether or not the error should be considered a "fatal" error that would
 	/// result in abnormal exit of a non-interactive shell.
 	fatal: bool,
+
+	/// Whether the error was already reported where it happened, with the
+	/// redirections in effect there; the command that later catches it then
+	/// does not report it again.
+	reported: bool,
 }
 
 /// Monolithic error type for the shell
@@ -444,7 +449,7 @@ where
 	ErrorKind: From<T>,
 {
 	fn from(convertible_to_kind: T) -> Self {
-		Self { kind: convertible_to_kind.into(), fatal: false }
+		Self { kind: convertible_to_kind.into(), fatal: false, reported: false }
 	}
 }
 
@@ -459,6 +464,18 @@ impl Error {
 	/// Returns whether or not this error is fatal.
 	pub const fn is_fatal(&self) -> bool {
 		self.fatal
+	}
+
+	/// Marks this error as reported where it happened.
+	#[must_use]
+	pub(crate) const fn into_reported(mut self) -> Self {
+		self.reported = true;
+		self
+	}
+
+	/// Returns whether this error was already reported where it happened.
+	pub const fn is_reported(&self) -> bool {
+		self.reported
 	}
 
 	/// Returns a reference to the error kind.
