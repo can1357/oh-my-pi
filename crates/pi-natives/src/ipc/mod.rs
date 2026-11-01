@@ -346,14 +346,15 @@ impl IpcConnection {
 			Duration::from_millis(u64::from(options.timeout_ms.unwrap_or(DEFAULT_CONNECT_TIMEOUT_MS)));
 		env.spawn_future_with_callback(
 			async move {
-				let connected =
-					match tokio::time::timeout(timeout, platform::connect(&endpoint, timeout)).await {
-						Ok(connected) => connected,
-						Err(_) => Err(IpcError::new(
+				let connected = tokio::time::timeout(timeout, platform::connect(&endpoint, timeout))
+					.await
+					.map_err(|_| {
+						IpcError::new(
 							"ETIMEDOUT",
 							format!("connect {endpoint} timed out after {} ms", timeout.as_millis()),
-						)),
-					};
+						)
+					})
+					.flatten();
 				Ok(connected.map(|stream| Self::spawn(stream, framing, max_frame_bytes)))
 			},
 			|env, outcome| outcome.map_err(|error| error.into_js(env)),

@@ -17,12 +17,12 @@ pub(super) fn human_readable(n: u64, base_1024: bool, from: u64, to: u64) -> Str
 	let base: u64 = if base_1024 { 1024 } else { 1000 };
 
 	let exact = if to <= from {
-		if from % to == 0 {
+		if from.is_multiple_of(to) {
 			n.checked_mul(from / to).map(|amt| (amt, 0, 0))
 		} else {
 			None
 		}
-	} else if from != 0 && to % from == 0 {
+	} else if from != 0 && to.is_multiple_of(from) {
 		let divisor = to / from;
 		let r10 = (n % divisor).wrapping_mul(10);
 		let r2 = (r10 % divisor).wrapping_mul(2);

@@ -219,7 +219,7 @@ fn format_member(member: &ClassMember) -> String {
 	let type_suffix = member
 		.type_name
 		.as_ref()
-		.map_or(String::new(), |kind| format!(": {kind}"));
+		.map_or_default(|kind| format!(": {kind}"));
 	format!("{}{}{}", member.visibility.marker(), member.name, type_suffix)
 }
 
@@ -751,10 +751,10 @@ pub fn render(text: &str, config: &AsciiConfig, mode: ColorMode, theme: &Theme) 
 				.unwrap_or(0)
 				+ 2;
 			let (base_middle_y, ideal_middle_x) = if from_bottom_y < to_top_y {
-				((from_bottom_y + 1 + to_top_y - 1) / 2, i32::midpoint(from_center_x, to_center_x))
+				(i32::midpoint(from_bottom_y, to_top_y), i32::midpoint(from_center_x, to_center_x))
 			} else if to.y + to.height - 1 < from.y {
 				let to_bottom_y = to.y + to.height - 1;
-				((to_bottom_y + 1 + from.y - 1) / 2, i32::midpoint(from_center_x, to_center_x))
+				(i32::midpoint(to_bottom_y, from.y), i32::midpoint(from_center_x, to_center_x))
 			} else {
 				(from_bottom_y.max(to.y + to.height - 1) + 2, i32::midpoint(from_center_x, to_center_x))
 			};

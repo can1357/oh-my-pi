@@ -44,6 +44,7 @@ import { extractUriScheme, InternalUrlRouter, type SchemeSpec, sessionResolveCon
 import { isMarkdownPath } from "@oh-my-pi/pi-tui/lang-from-path";
 import readDescription from "../prompts/tools/read.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
+import { McpResourceNotFoundError } from "../internal-urls/mcp-protocol";
 import { parseInternalUrl } from "../internal-urls/parse";
 import {
 	DEFAULT_MAX_BYTES,
@@ -1842,8 +1843,17 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						signal,
 					);
 				}
-				if (target.kind === "resource") return this.#handleInternalUrl(url, target.spec, parsed, question, signal);
-				located = { url, path: target.path, sel: target.sel, spec: target.spec };
+				if (target.kind === "resource") {
+					try {
+						return await this.#handleInternalUrl(url, target.spec, parsed, question, signal);
+					} catch (error) {
+						// An opaque `name:rest` that no MCP server advertises is most likely a plain
+						// path (`Dockerfile:5`), so read it as one instead of reporting an MCP miss.
+						if (!(error instanceof McpResourceNotFoundError) || url.includes("://")) throw error;
+					}
+				} else {
+					located = { url, path: target.path, sel: target.sel, spec: target.spec };
+				}
 			}
 		}
 		if (!located) {

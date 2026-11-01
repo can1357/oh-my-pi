@@ -87,6 +87,18 @@ Build invalidation is bounded: editing roboomp Python touches only the
 runtime layer; editing pi source rebuilds `oh-my-pi/pi:dev`, which
 roboomp's `Dockerfile.robomp` extends via `FROM ${PI_BASE}`.
 
+### Native artifact cache
+
+The shared native cache is stored in `/data/natives-cache`, inaccessible to slot
+users. Cache hits use independent reflinked files when supported, otherwise
+copies. Image-built artifacts seed the cache; successful tasks can add entries
+for newer source states. Consequently, tasks sharing a cache key must trust
+each other's executable artifacts, as with the shared Cargo and Rustup caches.
+
+To disable it in Compose, set `ROBOMP_NATIVES_CACHE_ENABLED=false` in `.env`
+and recreate the orchestrator. The former `/data/cache/pi-natives` cache is
+not reused; remove it after checking whether it contains sensitive data.
+
 ### Public URL
 
 roboomp does not ship a tunnel. Cloudflare, smee, ngrok are all fine. The
@@ -96,10 +108,10 @@ and `/replay` stay localhost-only.
 
 ### GitHub webhook
 
-In *Settings → Webhooks*: payload URL `https://…/webhook/github`, content
+In _Settings → Webhooks_: payload URL `https://…/webhook/github`, content
 type `application/json`, secret = `GITHUB_WEBHOOK_SECRET`, events =
-*Issues, Issue comments, Pull requests, Pull request reviews, Pull
-request review comments*, and *Workflow runs*. The last event is required
+_Issues, Issue comments, Pull requests, Pull request reviews, Pull
+request review comments_, and _Workflow runs_. The last event is required
 only for the release sentinel. GitHub's `ping` should produce
 `POST /webhook/github 202` within a second.
 
@@ -113,7 +125,7 @@ than `env_file:`, so `GITHUB_TOKEN` only reaches the gh-proxy container.
 
 `ROBOMP_RELEASE_SENTINEL_ENABLED=false` by default because this workflow may
 push directly to the default branch and move an existing release tag. Enable it
-only after adding the *Workflow runs* webhook event and **Actions: Read** PAT
+only after adding the _Workflow runs_ webhook event and **Actions: Read** PAT
 permission.
 
 For release commits whose subject starts with
@@ -220,17 +232,17 @@ The integration test spawns a real `omp --mode rpc` against an
 
 ## Troubleshooting
 
-| Symptom | Check |
-|---|---|
-| `401 invalid signature` | `GITHUB_WEBHOOK_SECRET` mismatch with the repo webhook config. |
-| Container exits with `PI_ROOT … missing` | `/work/pi` mount empty inside the container; on the host either run `docker compose` from `python/robomp/` so `PI_ROOT` defaults to `../..`, or export `PI_ROOT` to a valid omp checkout. |
-| `git push: Authentication required` | Bot PAT lacks push, or `ROBOMP_BOT_LOGIN` does not identify the PAT account's mention handle (production: `roboomp`, no `@`/`[bot]`). |
-| `refusing to push: commit author identity mismatch` | Some commit not authored as `ROBOMP_GIT_AUTHOR_*`. The error lists the offending shas; `git commit --amend --reset-author --no-edit`. |
-| `refusing to push: working tree is dirty` | Uncommitted agent edits. Or just call `gh_open_pr`, which auto-commits `bun run fix` output. |
-| `bun check failed before PR creation` | Fix the reported failure and retry `gh_open_pr`. |
-| `refusing to open PR: \`bun run test\` failed before open PR` | The repo suite is red at HEAD. Fix and commit, or `skip_checks=true` if the failure pre-exists on the default branch. |
-| `Failed to load pi_natives` | Wrong arch / missing native. `bun run pi:image` then `bun run robomp:build`. |
-| `No API key found for <provider>` | `~/.omp/agent/models.container.yml` mount missing or provider id mismatch with `ROBOMP_MODEL`. |
+| Symptom                                                       | Check                                                                                                                                                                                     |
+| ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `401 invalid signature`                                       | `GITHUB_WEBHOOK_SECRET` mismatch with the repo webhook config.                                                                                                                            |
+| Container exits with `PI_ROOT … missing`                      | `/work/pi` mount empty inside the container; on the host either run `docker compose` from `python/robomp/` so `PI_ROOT` defaults to `../..`, or export `PI_ROOT` to a valid omp checkout. |
+| `git push: Authentication required`                           | Bot PAT lacks push, or `ROBOMP_BOT_LOGIN` does not identify the PAT account's mention handle (production: `roboomp`, no `@`/`[bot]`).                                                     |
+| `refusing to push: commit author identity mismatch`           | Some commit not authored as `ROBOMP_GIT_AUTHOR_*`. The error lists the offending shas; `git commit --amend --reset-author --no-edit`.                                                     |
+| `refusing to push: working tree is dirty`                     | Uncommitted agent edits. Or just call `gh_open_pr`, which auto-commits `bun run fix` output.                                                                                              |
+| `bun check failed before PR creation`                         | Fix the reported failure and retry `gh_open_pr`.                                                                                                                                          |
+| `refusing to open PR: \`bun run test\` failed before open PR` | The repo suite is red at HEAD. Fix and commit, or `skip_checks=true` if the failure pre-exists on the default branch.                                                                     |
+| `Failed to load pi_natives`                                   | Wrong arch / missing native. `bun run pi:image` then `bun run robomp:build`.                                                                                                              |
+| `No API key found for <provider>`                             | `~/.omp/agent/models.container.yml` mount missing or provider id mismatch with `ROBOMP_MODEL`.                                                                                            |
 
 ## Layout
 

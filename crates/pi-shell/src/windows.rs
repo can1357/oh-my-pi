@@ -306,11 +306,11 @@ mod tests {
 		for _ in 0..2 {
 			let discovery = discover_git_with(
 				|| {
-					registry_calls.set(registry_calls.get() + 1);
+					registry_calls.update(|v| v + 1);
 					None
 				},
 				|| {
-					where_calls.set(where_calls.get() + 1);
+					where_calls.update(|v| v + 1);
 					None
 				},
 			);

@@ -1,12 +1,22 @@
-import { afterEach, expect, it, vi } from "bun:test";
+import { afterEach, expect, it, setSystemTime, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { RACY_STAMP_WINDOW_MS } from "@oh-my-pi/pi-coding-agent/tools/racy-stamp";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import * as ar from "@oh-my-pi/pi-utils/ar";
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+	vi.restoreAllMocks();
+	setSystemTime();
+});
+
+/** Pins the clock past the racy window of `filePath`'s last change, so the read tool caches its index. */
+async function settle(filePath: string): Promise<void> {
+	// The clock ticks in whole milliseconds; ctime carries a fraction.
+	setSystemTime(new Date(Math.ceil((await fs.stat(filePath)).ctimeMs) + RACY_STAMP_WINDOW_MS));
+}
 
 function makeSession(cwd: string): ToolSession {
 	return {
@@ -44,6 +54,7 @@ it("reuses a plain TAR index across member reads while its file-backed source re
 		["first.txt", "first"],
 		["second.txt", "second"],
 	]);
+	await settle(archivePath);
 	const reads: [number, number][] = [];
 	const openArchive = ar.openArchive;
 	const open = vi.spyOn(ar, "openArchive").mockImplementation(input => {
@@ -82,6 +93,7 @@ for (const change of ["rewrite", "replace"] as const) {
 		const originalTime = new Date("2020-01-02T00:00:00Z");
 		await fs.utimes(archivePath, originalTime, originalTime);
 		const originalStat = await fs.stat(archivePath);
+		await settle(archivePath);
 		const open = vi.spyOn(ar, "openArchive");
 		const tool = new ReadTool(makeSession(temp.path()));
 		const before = await tool.execute("before-change", { path: `${archivePath}:value.txt:raw` });

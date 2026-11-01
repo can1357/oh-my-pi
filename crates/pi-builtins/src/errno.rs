@@ -116,8 +116,7 @@ impl Utility for Errno {
 		let args: Vec<String> = self
 			.matches
 			.get_many::<String>(ARG_QUERY)
-			.map(|values| values.cloned().collect())
-			.unwrap_or_default();
+			.map_or_default(|values| values.cloned().collect());
 
 		if self.matches.get_flag(OPT_LIST) {
 			return list_all(host);

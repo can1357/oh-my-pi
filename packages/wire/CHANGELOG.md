@@ -2,10 +2,19 @@
 
 ## [Unreleased]
 
+## [18.14.2] - 2026-10-31
+
 ### Added
 
-- Added the TSP `json` kind (`TspJsonProps`: a raw JSON `value` and `open`, the container levels expanded below the top-level entries), which the terminal draws as an interactive tree
-- Added `TspEditorProps.typeahead`: a program that cannot read input yet asks the terminal to keep what is typed into the field, draw it at the caret and send it once the prop clears
+- Added `nums` to `code` props (`TspCodeProps`): each line's number, so one block can show non-contiguous lines with `…` gap rows where the numbers jump.
+- Added the TSP `button` kind (`TspButtonProps`: label, icon, keycaps, `default`/`primary`/`quiet`/`danger` variants, `sm`/`md` sizes, pressed, disabled with a reason, busy) and `tabs` `variant: "segmented"`.
+
+## [18.14.0] - 2026-10-29
+
+### Added
+
+- Added the TSP `json` kind for displaying raw JSON values as interactive, expandable trees in the terminal.
+- Added `TspEditorProps.typeahead` support so programs that cannot yet read input can preserve typed text, display it at the caret, and submit it when input becomes available.
 
 ## [18.13.3] - 2026-10-28
 

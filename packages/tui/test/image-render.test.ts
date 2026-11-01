@@ -174,6 +174,41 @@ describe("terminal image rendering", () => {
 		expect(budget.takeTransmits()).toEqual([]);
 	});
 
+	it("keeps a demoted image's drawn height only within a lowered row ceiling", () => {
+		terminal.imageProtocol = ImageProtocol.Kitty;
+		const budget = new ImageBudget(1);
+		const theme = { fallbackColor: (text: string) => text };
+		const image = new Image(
+			BASE64_ONE_PIXEL_PNG,
+			"image/png",
+			theme,
+			{ budget, imageKey: "shrunk", maxHeightCells: 10 },
+			SQUARE_DIMENSIONS,
+		);
+		const newer = new Image(
+			BASE64_ONE_PIXEL_PNG,
+			"image/png",
+			theme,
+			{ budget, imageKey: "newer", maxHeightCells: 1 },
+			SQUARE_DIMENSIONS,
+		);
+		budget.beginPass();
+		expect(image.render(20)).toHaveLength(10);
+		budget.endPass();
+
+		image.setMaxHeightCells(2);
+		budget.beginPass();
+		expect(image.render(20)).toHaveLength(2);
+		newer.render(20);
+		expect(budget.endPass()).toBe(true);
+		budget.beginPass();
+		const demoted = image.render(20);
+		newer.render(20);
+		budget.endPass();
+		expect(demoted).toHaveLength(2);
+		expect(demoted.at(-1)).toContain("[Image:");
+	});
+
 	it("uses intrinsic image size when no bounds are provided", () => {
 		terminal.imageProtocol = ImageProtocol.Kitty;
 		const result = renderImage(BASE64_DUMMY, SQUARE_DIMENSIONS);

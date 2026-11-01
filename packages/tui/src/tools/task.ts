@@ -1870,6 +1870,17 @@ function describeNestedTasks(
 	return out;
 }
 
+/** Earliest start seen per running subagent (`nowMs - durationMs`), so a snapshot with a stale or zero `durationMs` can't restart its timer. */
+const runStartMs = new Map<string, number>();
+
+function runningAge(progress: { id: string; durationMs: number }, nowMs: number): number {
+	const start = nowMs - Math.max(0, progress.durationMs);
+	const known = runStartMs.get(progress.id);
+	const anchor = known === undefined ? start : Math.min(known, start);
+	runStartMs.set(progress.id, anchor);
+	return Math.max(0, nowMs - anchor);
+}
+
 /** An `agent` node; its row's hover card shows the whole `assignment` the row only summarizes. */
 function agentNode(
 	p: TspAgentProps,
@@ -1927,7 +1938,7 @@ function describeProgressAgent(progress: AgentProgress, state: AgentDescribeStat
 				...contextStats(progress.contextTokens, progress.contextWindow),
 				done: running && progress.completionPercent !== undefined ? progress.completionPercent / 100 : undefined,
 				cost: progress.cost > 0 ? progress.cost : undefined,
-				...(running ? { age: progress.durationMs } : { took: progress.durationMs }),
+				...(running ? { age: runningAge(progress, nowMs) } : { took: progress.durationMs }),
 			},
 			retry,
 			badges: agentBadges(state.background, undefined),
@@ -2243,7 +2254,7 @@ export interface TaskItem {
 	agent?: string;
 	/** Historical source session selected by the bundled consult agent. */
 	sourceSession?: string;
-	/** Optional model selector override for the historical source session. */
+	/** Bundled seance: override for the source session's saved model. Any other agent: one exact per-call model, gated by `task.perCallModel`. */
 	model?: string | string[];
 	/** Inline instructions; exactly one of task or taskFile is required. */
 	task?: string;
@@ -2275,7 +2286,7 @@ export interface TaskParams {
 	agent?: string;
 	/** Historical source session selected by the bundled consult agent. */
 	sourceSession?: string;
-	/** Optional model selector override for the historical source session. */
+	/** See {@link TaskItem.model}. */
 	model?: string | string[];
 	/** The work (flat form). */
 	task?: string;

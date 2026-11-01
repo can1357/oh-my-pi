@@ -8,6 +8,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol
 
 from fastapi import Body, FastAPI, Header, HTTPException, Request, status
@@ -303,6 +304,9 @@ def _build_state(settings: Settings, pool_factory: _PoolFactory) -> dict[str, An
             max_entries_per_repo=settings.natives_cache_max_entries_per_repo,
             max_bytes=settings.natives_cache_max_bytes,
         )
+        seed_dir = Path("/opt/pi-natives-seed")
+        if seed_dir.is_dir():
+            natives_cache.import_image_seed(seed_dir)
     sandbox = SandboxManager(
         settings.workspace_root,
         transport=git_transport,

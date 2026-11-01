@@ -20,6 +20,7 @@ import { clampTimeout, resolveLspTimeouts, TOOL_TIMEOUTS } from "../tools/tool-t
 import {
 	applyWorkspaceEditWithLsp,
 	clearInitializationFailure,
+	ensureWorkspaceFolders,
 	getActiveClients,
 	getOrCreateClient,
 	isRustAnalyzerClient,
@@ -640,8 +641,24 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			for (const [serverName, serverConfig] of servers) {
 				throwIfAborted(signal);
 				let client: LspClient;
+				// A server that never received the rename's checkouts answers without them.
+				let folderError: unknown;
 				try {
 					client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
+					// Per renamed file, both sides, not per directory: a rename can span checkouts.
+					// One file per directory is enough, and one notification adds them all.
+					const byDir = new Map<string, string>();
+					for (const { oldUri, newUri } of pairs) {
+						for (const filePath of [uriToFile(oldUri), uriToFile(newUri)]) {
+							if (!byDir.has(path.dirname(filePath))) byDir.set(path.dirname(filePath), filePath);
+						}
+					}
+					try {
+						await ensureWorkspaceFolders(client, [...byDir.values()], signal);
+					} catch (err) {
+						if (err instanceof ToolAbortError || signal?.aborted) throw err;
+						folderError = err;
+					}
 					if (isProjectAwareLspServer(serverConfig)) {
 						await waitForProjectLoaded(client, signal);
 					}
@@ -663,7 +680,13 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						signal,
 					)) as WorkspaceEdit | null;
 					respondingServers.add(serverName);
-					if (result && (result.changes || result.documentChanges)) {
+					if (folderError !== undefined) {
+						// Its edits leave out the checkout it never loaded; method-not-found
+						// (below) means it has no rename edits to miss.
+						const msg = folderError instanceof Error ? folderError.message : String(folderError);
+						serverNotes.push(`  ${serverName}: could not add the rename's checkout to its workspace: ${msg}`);
+						hardFailures.push(serverName);
+					} else if (result && (result.changes || result.documentChanges)) {
 						perServerEdits.push({ serverName, edit: result });
 					}
 				} catch (err) {

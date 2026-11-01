@@ -1,6 +1,6 @@
 //! Byte input for the line-reading builtins (`read`, `mapfile`).
 
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek};
 
 use brush_core::{ErrorKind, openfiles::OpenFile};
 use tokio_util::sync::CancellationToken;
@@ -16,7 +16,7 @@ pub(crate) const CTRL_D: u8 = 0x04;
 /// The bytes of a read line as text: UTF-8 decoded once per line, invalid
 /// sequences replaced rather than each byte read as a Latin-1 character.
 pub(crate) fn decode_line(line: Vec<u8>) -> String {
-	String::from_utf8(line).unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned())
+	String::from_utf8_lossy_owned(line)
 }
 
 /// When a [`LineInput`] may read past the bytes it hands out.
@@ -101,7 +101,21 @@ impl LineInput {
 			let Ok(watched) = AsyncFd::with_interest(fd.try_clone_to_owned()?, Interest::READABLE) else {
 				return Ok(());
 			};
-			let readable = async { watched.readable().await.map(drop) };
+			let readable = async {
+				cfg_select! {
+					// kqueue never reports a FIFO's EOF on macOS (see
+					// `pi_vfs::readable_within`), so a writer that closes during
+					// the wait is seen by the check after each slice.
+					target_os = "macos" => loop {
+						match tokio::time::timeout(pi_vfs::POLL_SLICE, watched.readable()).await {
+							Ok(ready) => break ready.map(drop),
+							Err(_) if readable_now(fd)? => break Ok(()),
+							Err(_) => {},
+						}
+					},
+					_ => watched.readable().await.map(drop),
+				}
+			};
 			let waited = match cancel {
 				Some(token) => token.run_until_cancelled(readable).await,
 				None => Some(readable.await),
@@ -142,7 +156,7 @@ impl LineInput {
 		let unread = self.block.len() - self.pos;
 		if unread > 0
 			&& let OpenFile::File(file) = &mut self.input
-			&& file.seek(SeekFrom::Current(-(unread as i64))).is_ok()
+			&& file.seek_relative(-(unread as i64)).is_ok()
 		{
 			self.block.clear();
 			self.pos = 0;
@@ -150,23 +164,13 @@ impl LineInput {
 	}
 }
 
-/// Whether a read of `fd` would not block now: one `poll` with no timeout.
+/// Whether a read of `fd` would not block now.
 #[cfg(unix)]
 fn readable_now(fd: std::os::fd::BorrowedFd<'_>) -> io::Result<bool> {
-	use std::os::fd::AsRawFd;
-	let mut pfd = libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
 	loop {
-		// SAFETY: one `pollfd` valid for the call; `fd` is borrowed from a live
-		// descriptor for the whole call.
-		match unsafe { libc::poll(&mut pfd, 1, 0) } {
-			0 => return Ok(false),
-			ready if ready > 0 => return Ok(true),
-			_ => {
-				let error = io::Error::last_os_error();
-				if error.kind() != io::ErrorKind::Interrupted {
-					return Err(error);
-				}
-			},
+		match pi_vfs::readable_within(fd, std::time::Duration::ZERO) {
+			Err(error) if error.kind() == io::ErrorKind::Interrupted => {},
+			result => return result,
 		}
 	}
 }

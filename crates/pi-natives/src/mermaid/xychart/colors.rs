@@ -61,7 +61,7 @@ fn hex_to_hsl(hex: &str) -> (f64, f64, f64) {
 	}
 	let max = red.max(green).max(blue);
 	let min = red.min(green).min(blue);
-	let lightness = (max + min) / 2.0;
+	let lightness = max.midpoint(min);
 	if max == min {
 		return (0.0, 0.0, lightness * 100.0);
 	}

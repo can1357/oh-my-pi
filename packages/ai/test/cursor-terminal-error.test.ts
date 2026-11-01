@@ -20,6 +20,7 @@ import {
 	ReadArgsSchema,
 	StepCompletedUpdateSchema,
 	TextDeltaUpdateSchema,
+	TokenDeltaUpdateSchema,
 	ToolCallCompletedUpdateSchema,
 	ToolCallSchema,
 	ToolCallStartedUpdateSchema,
@@ -38,7 +39,7 @@ type Scenario =
 	| { kind: "connect-classification-detail-after-turn" }
 	| { kind: "connect-cursor-error-details-after-turn"; isRetryable: boolean }
 	| { kind: "connect-structured-error-after-turn" }
-	| { kind: "connect-provider-error-after-step"; isRetryable: boolean | undefined }
+	| { kind: "connect-provider-error-after-step"; isRetryable: boolean | undefined; sawTokens?: boolean }
 	| { kind: "cut-after-step-completed" }
 	| { kind: "cut-after-step-trailing-frames" }
 	| { kind: "cut-after-content-following-step" }
@@ -73,6 +74,20 @@ function textDeltaFrame(text: string): Buffer {
 				message: {
 					case: "textDelta",
 					value: create(TextDeltaUpdateSchema, { text }),
+				},
+			}),
+		},
+	});
+	return frameConnectMessage(toBinary(AgentServerMessageSchema, message));
+}
+function tokenDeltaFrame(tokens: number): Buffer {
+	const message = create(AgentServerMessageSchema, {
+		message: {
+			case: "interactionUpdate",
+			value: create(InteractionUpdateSchema, {
+				message: {
+					case: "tokenDelta",
+					value: create(TokenDeltaUpdateSchema, { tokens }),
 				},
 			}),
 		},
@@ -409,6 +424,7 @@ async function startServer(): Promise<string> {
 				}),
 				isExpected: true,
 			});
+			if (scenario.sawTokens) stream.write(tokenDeltaFrame(1));
 			stream.write(stepCompletedFrame());
 			stream.write(
 				connectEndErrorFrame("resource_exhausted", "Error", [
@@ -703,13 +719,19 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 	);
 
 	it.each([
-		{ isRetryable: false, retriable: false, status: 400 },
-		{ isRetryable: true, retriable: true, status: 503 },
-		{ isRetryable: undefined, retriable: true, status: 503 },
+		// This fixture has no session or conversation id, so it uses the
+		// ephemeral path. Its fresh one-off conversation cannot be poisoned by
+		// an earlier cut, and `finally` discards the rotation; Cursor's
+		// isRetryable verdict must stand. The persistent rotated case is covered
+		// by `cursor-conversation-rotate.test.ts`.
+		{ isRetryable: false, retriable: false, status: 400, sawTokens: false },
+		{ isRetryable: false, retriable: false, status: 400, sawTokens: true },
+		{ isRetryable: true, retriable: true, status: 503, sawTokens: false },
+		{ isRetryable: undefined, retriable: true, status: 503, sawTokens: false },
 	])(
-		"retries ERROR_PROVIDER_ERROR only when Cursor allows it (isRetryable=$isRetryable)",
-		async ({ isRetryable, retriable, status }) => {
-			scenario = { kind: "connect-provider-error-after-step", isRetryable };
+		"keeps Cursor's verdict on an ephemeral zero-token PROVIDER_ERROR (isRetryable=$isRetryable, sawTokens=$sawTokens)",
+		async ({ isRetryable, retriable, status, sawTokens }) => {
+			scenario = { kind: "connect-provider-error-after-step", isRetryable, sawTokens };
 			const baseUrl = await startServer();
 			const { result } = await collectStream(makeModel(baseUrl));
 			expect(result.stopReason).toBe("error");

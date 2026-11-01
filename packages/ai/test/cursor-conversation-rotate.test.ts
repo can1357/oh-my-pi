@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import * as http2 from "node:http2";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { streamCursor } from "@oh-my-pi/pi-ai/providers/cursor";
+import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
@@ -197,7 +199,7 @@ async function startServer(seenConversationIds: string[]): Promise<string> {
 /** Scripted fixture: each entry is a clean turn, rejection, or turn followed by a rejecting trailer. */
 async function startScriptedServer(
 	seen: WireRequest[],
-	script: Array<"reject" | "ok" | "turnEndedReject" | "checkpointProviderError">,
+	script: Array<"reject" | "ok" | "turnEndedReject" | "checkpointProviderError" | "cut">,
 ): Promise<string> {
 	server = http2.createServer();
 	server.on("session", session => {
@@ -214,6 +216,10 @@ async function startScriptedServer(
 			if (decision === "checkpointProviderError") {
 				stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
 				stream.write(checkpointThenProviderErrorFrames(decoded?.rootPromptMessagesJson ?? [], "call-read"));
+				stream.end();
+			} else if (decision === "cut") {
+				stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
+				stream.write(textDeltaFrame("partial"));
 				stream.end();
 			} else if (decision === "reject") {
 				stream.respond({ ":status": 200, "content-type": "application/connect+proto" }, { waitForTrailers: true });
@@ -279,12 +285,19 @@ async function runToEnd(
 	baseUrl: string,
 	sessionId: string,
 	ctx: Context = context,
-): Promise<{ type: "done" | "error"; message?: string }> {
+): Promise<{ type: "done" | "error"; message?: string; errorId?: number; errorStatus?: number }> {
 	const stream = streamCursor(makeModel(baseUrl), ctx, { apiKey: "test-token", sessionId });
-	let terminal: { type: "done" | "error"; message?: string } = { type: "done" };
+	let terminal: { type: "done" | "error"; message?: string; errorId?: number; errorStatus?: number } = {
+		type: "done",
+	};
 	for await (const event of stream) {
 		if (event.type === "error") {
-			terminal = { type: "error", message: event.error.errorMessage };
+			terminal = {
+				type: "error",
+				message: event.error.errorMessage,
+				errorId: event.error.errorId,
+				errorStatus: event.error.errorStatus,
+			};
 		}
 	}
 	await stream.result().catch(() => {});
@@ -445,5 +458,43 @@ describe("Cursor conversationId rotation (issue #8345)", () => {
 		expect(seen[1]?.conversationId).not.toBe("sess-provider-error");
 		expect(seen[1]?.action).toBe("resumeAction");
 		expect(seen[1]?.pendingToolCalls).toBe(0);
+	});
+
+	it("keeps the rotated retry alive after a cut turn hits the zero-token rejection", async () => {
+		// The live chain: a cut turn ends with `Cursor stream ended before
+		// turnEnded`, the automatic retry resumes the poisoned id and draws the
+		// zero-token PROVIDER_ERROR, and rotation must lead to another attempt
+		// instead of ending the turn.
+		const seen: WireRequest[] = [];
+		const baseUrl = await startScriptedServer(seen, ["cut", "checkpointProviderError", "ok"]);
+
+		const first = await runToEnd(baseUrl, "sess-cut-rotate", resumeContext());
+		expect(first.type).toBe("error");
+		expect(first.message).toContain("Cursor stream ended before turnEnded");
+
+		const second = await runToEnd(baseUrl, "sess-cut-rotate", resumeContext());
+		expect(second.type).toBe("error");
+		expect(second.message).toContain("PROVIDER_ERROR");
+		expect(second.errorStatus).toBe(400);
+		expect(AIError.retriable(second.errorId)).toBe(true);
+
+		expect((await runToEnd(baseUrl, "sess-cut-rotate", resumeContext())).type).toBe("done");
+		expect(seen).toHaveLength(3);
+		expect(seen[0]?.conversationId).toBe("sess-cut-rotate");
+		expect(seen[1]?.conversationId).toBe("sess-cut-rotate");
+		expect(seen[2]?.conversationId).not.toBe("sess-cut-rotate");
+	});
+
+	it("keeps Cursor's verdict when the session id is minted for this one call", async () => {
+		// `streamSimple` mints a session id when the caller passes none, so a
+		// caller's retry would open yet another conversation, never the rotated one.
+		const seen: WireRequest[] = [];
+		const baseUrl = await startScriptedServer(seen, ["checkpointProviderError"]);
+
+		const result = await streamSimple(makeModel(baseUrl), resumeContext(), { apiKey: "test-token" }).result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(400);
+		expect(AIError.retriable(result.errorId)).toBe(false);
+		expect(seen).toHaveLength(1);
 	});
 });

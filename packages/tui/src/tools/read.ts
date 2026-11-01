@@ -242,6 +242,20 @@ export function splitInternalUrlSel(
 	return { path, sel: chunks.join(":") };
 }
 
+/** A read query after a filesystem path: `?key=` (`?q=…`, `?limit=…&where=…`), not a `\\?\` long-path prefix. */
+const READ_QUERY_RE = /(?<!^\\\\)\?\w+=/;
+
+/**
+ * Split a filesystem read target from its query (`data.json?q=.items` →
+ * `data.json`, `?q=.items`), the display twin of the read tool's JSON, SQLite
+ * and image-question parsers. URLs own their query string and stay whole, as
+ * does a `?` inside a file name.
+ */
+export function splitReadQuery(readPath: string): { path: string; query?: string } {
+	const at = splitUrlScheme(readPath) ? -1 : readPath.search(READ_QUERY_RE);
+	return at > 0 ? { path: readPath.slice(0, at), query: readPath.slice(at) } : { path: readPath };
+}
+
 /** Recognize HTTP URLs and www-prefixed external read targets. */
 export function isReadableUrlPath(value: string): boolean {
 	return /^https?:\/\/?/i.test(value) || /^www\./i.test(value);
@@ -466,11 +480,11 @@ function readRangeStart(rawPath: string, args: ReadRenderArgs | undefined): numb
 }
 
 /**
- * Read content as numbered, wrapped `code` (no path header: the head names
- * the file), matching the ANSI preview's hanging wrap. Numbers come from
+ * Read content as one numbered, wrapped `code` block (no path header: the head
+ * names the file), matching the ANSI preview's hanging wrap. Numbers come from
  * `lineNumbers` (`displayContent`'s per-line numbers, `null` for an elided
- * block; runs split with `…` between) when they cover every line, else count
- * up from `start`.
+ * block, which Tern shows as a `…` gap row where the numbers jump) when they
+ * cover every line, else count up from `start`.
  */
 export function readContentCode(
 	content: string,
@@ -479,10 +493,11 @@ export function readContentCode(
 	path: string | undefined,
 ): NativeNode[] {
 	const lines = content.split("\n");
-	return numberedCode(
+	const block = numberedCode(
 		lines.map((text, i) => ({ n: numbers && numbers.length === lines.length ? numbers[i]! : start + i, text })),
 		{ path, wrap: true },
 	);
+	return block ? [block] : [];
 }
 
 /** An image content block as the read tool emits it (base64 data + mime type). */
