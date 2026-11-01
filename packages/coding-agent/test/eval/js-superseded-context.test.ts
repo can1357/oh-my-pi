@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { AsyncJobManager } from "../../src/async";
@@ -17,8 +17,20 @@ import { AgentOutputManager } from "../../src/task/output-manager";
 import type { ToolSession } from "../../src/tools";
 
 // The reclaim is deliberately deferred, so these exercise a real timer. The
-// grace is shortened to milliseconds, which is the behaviour under test.
+// grace is shortened to milliseconds, which is the behaviour under test. Fake
+// timers cannot stand in: the grace races real worker threads, whose startup,
+// messages and exit run on the platform clock.
 const TEST_GRACE_MS = 50;
+/** Slept through to let an armed grace expire at least once. */
+const PAST_GRACE_MS = TEST_GRACE_MS * 8;
+/**
+ * The longest a reclaimed worker gets to exit. The wait ends on the thread's
+ * own `close` event, so the budget only matters when the thread never ends;
+ * it is generous because the suite may share a loaded machine.
+ */
+const EXIT_BUDGET_MS = 15_000;
+/** The production close handshake's bound before teardown falls back to `terminate()`. */
+const CLOSE_HANDSHAKE_MS = 1_000;
 
 /** A session shaped as the executor consumes it: settings, jobs and a session file. */
 function makeSession(cwd: string, sessionFile: string): ToolSession {
@@ -43,40 +55,79 @@ function makeSession(cwd: string, sessionFile: string): ToolSession {
 
 /**
  * Worker identity as the kernel itself sees it: a fresh context answers with a
- * new id, a retained one answers with the id it was given.
+ * new mark, a retained one answers with the mark it was given. The mark is
+ * matched rather than taken as the whole output, so a notice a cell carries
+ * ahead of its result does not change the answer.
  */
 async function contextId(cwd: string, sessionId: string, ownerId: string): Promise<string> {
 	const sessionFile = path.join(cwd, "session.jsonl");
 	const result = await executeJs(
-		"globalThis.__contextMark ??= `ctx-${Math.random()}`; return globalThis.__contextMark;",
+		"globalThis.__contextMark ??= 'ctx-' + Math.random().toString(36).slice(2); return globalThis.__contextMark;",
 		{ cwd, sessionId, kernelOwnerId: ownerId, session: makeSession(cwd, sessionFile), timeoutMs: 30_000 },
 	);
 	if (result.exitCode !== 0) throw new Error(`cell failed: ${result.output}`);
-	return result.output.trim();
+	const mark = /ctx-[0-9a-z]+/.exec(result.output)?.[0];
+	if (mark === undefined) throw new Error(`cell answered without a context mark: ${result.output}`);
+	return mark;
+}
+
+/** One eval worker thread, observed from outside the handle the context manager drives. */
+interface ObservedWorker {
+	/** Resolves when the thread has exited, whatever made it exit. */
+	readonly exited: Promise<void>;
+	readonly hasExited: boolean;
+}
+
+interface WorkerObservation {
+	/** Every thread spawned since the observation began, in spawn order. */
+	readonly workers: readonly ObservedWorker[];
+	/** Resolves once the first thread exists. */
+	readonly firstSpawned: Promise<void>;
+	/** Put the previous worker factories back. */
+	restore(): void;
+	/** End every thread still running, so a failed test cannot leave one behind. */
+	terminateAll(): void;
 }
 
 /**
- * Run every context on a real eval worker thread, holding back the first
- * worker's `ready` until `gate` resolves, and resolve `spawned` once that
- * worker exists. A cold start that finishes after a later key's cell cannot be
+ * Run every context on a real eval worker thread, and observe each thread from
+ * outside: its `close` event is listened for at spawn, so `hasExited` reports
+ * the thread really ending — not that the context manager asked it to, and
+ * not that the registry forgot the context, which hands back a fresh one on
+ * the next cell whether or not the old thread is still running.
+ *
+ * The handle's teardown is the production one: a `close` request the worker
+ * acknowledges before it exits, bounded, then `terminate()`.
+ *
+ * `holdFirstReady`, when given, holds back the first worker's `ready` until it
+ * resolves. A cold start that finishes after a later key's cell cannot be
  * produced any other way: the delay is in worker startup, which the public
- * surface does not expose. Returns the restore from
- * {@link setJsEvalWorkerFactoriesForTests}.
+ * surface does not expose.
  */
-function holdFirstWorkerReady(gate: Promise<void>, spawned: PromiseWithResolvers<void>): () => void {
-	let holdNext = true;
+function observeWorkers(holdFirstReady?: Promise<void>): WorkerObservation {
+	const workers: ObservedWorker[] = [];
+	const threads: Worker[] = [];
+	const firstSpawned = Promise.withResolvers<void>();
 	const spawn = (): JsEvalWorkerHandle => {
 		const worker = new Worker(new URL("../../src/eval/js/worker-entry.ts", import.meta.url).href, {
 			type: "module",
 		});
-		const held = holdNext ? gate : undefined;
-		holdNext = false;
-		const handle: JsEvalWorkerHandle = {
+		const exited = Promise.withResolvers<void>();
+		const observed = { exited: exited.promise, hasExited: false };
+		worker.addEventListener("close", () => {
+			observed.hasExited = true;
+			exited.resolve();
+		});
+		const held = workers.length === 0 ? holdFirstReady : undefined;
+		workers.push(observed);
+		threads.push(worker);
+		firstSpawned.resolve();
+		return {
 			mode: "worker",
 			send: message => worker.postMessage(message),
 			onMessage(handler) {
 				const wrap = (event: MessageEvent): void => {
-					const message = event.data as WorkerOutbound;
+					const message: WorkerOutbound = event.data;
 					if (held && message.type === "ready") void held.then(() => handler(message));
 					else handler(message);
 				};
@@ -94,31 +145,76 @@ function holdFirstWorkerReady(gate: Promise<void>, spawned: PromiseWithResolvers
 				};
 			},
 			async close() {
-				const exited = Promise.withResolvers<void>();
-				const onClose = (): void => exited.resolve();
-				worker.addEventListener("close", onClose);
+				const acknowledged = Promise.withResolvers<void>();
+				const onMessage = (event: MessageEvent): void => {
+					const message: WorkerOutbound = event.data;
+					if (message.type === "closed") acknowledged.resolve();
+				};
+				const closed = Promise.withResolvers<boolean>();
+				const timeout = setTimeout(() => closed.resolve(false), CLOSE_HANDSHAKE_MS);
+				void Promise.all([acknowledged.promise, exited.promise]).then(() => closed.resolve(true));
+				worker.addEventListener("message", onMessage);
 				worker.postMessage({ type: "close" } satisfies WorkerInbound);
-				await exited.promise;
-				worker.removeEventListener("close", onClose);
-				return true;
+				try {
+					return await closed.promise;
+				} finally {
+					clearTimeout(timeout);
+					worker.removeEventListener("message", onMessage);
+				}
 			},
 			async terminate() {
 				worker.terminate();
 			},
 		};
-		spawned.resolve();
-		return handle;
 	};
-	return setJsEvalWorkerFactoriesForTests({ spawnProcess: spawn, spawnWorker: spawn });
+	const restore = setJsEvalWorkerFactoriesForTests({ spawnProcess: spawn, spawnWorker: spawn });
+	return {
+		workers,
+		firstSpawned: firstSpawned.promise,
+		restore,
+		terminateAll() {
+			for (const thread of threads) thread.terminate();
+		},
+	};
+}
+
+/** Whether `worker`'s thread exits within `budgetMs`; settles as soon as it does. */
+async function endsWithin(worker: ObservedWorker, budgetMs: number): Promise<boolean> {
+	if (worker.hasExited) return true;
+	const ended = Promise.withResolvers<boolean>();
+	const timeout = setTimeout(() => ended.resolve(false), budgetMs);
+	void worker.exited.then(() => ended.resolve(true));
+	try {
+		return await ended.promise;
+	} finally {
+		clearTimeout(timeout);
+	}
 }
 
 describe("superseded JavaScript contexts", () => {
+	let observation: WorkerObservation;
+
+	/** The `index`-th worker thread spawned in this test. */
+	function spawned(index: number): ObservedWorker {
+		const worker = observation.workers[index];
+		if (worker === undefined) {
+			throw new Error(`worker ${index} was never spawned (${observation.workers.length} were)`);
+		}
+		return worker;
+	}
+
+	beforeEach(() => {
+		observation = observeWorkers();
+	});
+
 	afterEach(async () => {
 		setSupersededKernelGraceMs();
 		await disposeAllVmContexts();
+		observation.restore();
+		observation.terminateAll();
 	});
 
-	it("drops the context a session leaves behind when its next cell runs under another key", async () => {
+	it("ends the worker a session leaves behind when its next cell runs under another key", async () => {
 		setSupersededKernelGraceMs(TEST_GRACE_MS);
 		using firstDir = TempDir.createSync("@js-superseded-a-");
 		using secondDir = TempDir.createSync("@js-superseded-b-");
@@ -126,37 +222,55 @@ describe("superseded JavaScript contexts", () => {
 		const first = await contextId(firstDir.path(), `js:cwd:${firstDir.path()}`, owner);
 		await contextId(secondDir.path(), `js:cwd:${secondDir.path()}`, owner);
 
-		// Past the grace, returning to the first key must answer from a fresh
-		// context: the retained one was shut down rather than kept for the life
-		// of the host process.
-		await Bun.sleep(TEST_GRACE_MS * 8);
+		// The stranded thread itself ends, rather than staying up for the life
+		// of the host process; the key its owner moved to keeps its own.
+		expect(await endsWithin(spawned(0), EXIT_BUDGET_MS)).toBe(true);
+		expect(spawned(1).hasExited).toBe(false);
 		expect(await contextId(firstDir.path(), `js:cwd:${firstDir.path()}`, owner)).not.toBe(first);
 	}, 60_000);
 
 	it("keeps the context and its globals when the session returns inside the grace", async () => {
-		setSupersededKernelGraceMs(60_000);
+		// Long enough that the round trip below lands inside it on a loaded
+		// machine; the key left behind afterwards is then watched expiring.
+		const roundTripGraceMs = 5_000;
+		setSupersededKernelGraceMs(roundTripGraceMs);
 		using firstDir = TempDir.createSync("@js-roundtrip-a-");
 		using secondDir = TempDir.createSync("@js-roundtrip-b-");
 		const owner = "agent-session:js-roundtrip";
 		const first = await contextId(firstDir.path(), `js:cwd:${firstDir.path()}`, owner);
 		await contextId(secondDir.path(), `js:cwd:${secondDir.path()}`, owner);
 		expect(await contextId(firstDir.path(), `js:cwd:${firstDir.path()}`, owner)).toBe(first);
+
+		// Returning left the second key behind. Its thread ending shows a grace
+		// was armed and ran out in this test, so the first thread outliving it
+		// is the return's doing, not a reclaim that never runs.
+		expect(await endsWithin(spawned(1), roundTripGraceMs + EXIT_BUDGET_MS)).toBe(true);
+		expect(spawned(0).hasExited).toBe(false);
+		expect(await contextId(firstDir.path(), `js:cwd:${firstDir.path()}`, owner)).toBe(first);
 	}, 60_000);
 
-	it("keeps a context a second agent still holds", async () => {
+	it("keeps a context a second agent still holds, and ends it once both agents have moved on", async () => {
 		setSupersededKernelGraceMs(TEST_GRACE_MS);
 		using sharedDir = TempDir.createSync("@js-shared-a-");
-		using otherDir = TempDir.createSync("@js-shared-b-");
+		using oneDir = TempDir.createSync("@js-shared-b-");
+		using twoDir = TempDir.createSync("@js-shared-c-");
 		const sessionId = `js:cwd:${sharedDir.path()}`;
 		const first = await contextId(sharedDir.path(), sessionId, "agent-session:js-one");
 		expect(await contextId(sharedDir.path(), sessionId, "agent-session:js-two")).toBe(first);
 
-		await contextId(otherDir.path(), `js:cwd:${otherDir.path()}`, "agent-session:js-one");
-		await Bun.sleep(TEST_GRACE_MS * 8);
+		await contextId(oneDir.path(), `js:cwd:${oneDir.path()}`, "agent-session:js-one");
+		await Bun.sleep(PAST_GRACE_MS);
+		expect(spawned(0).hasExited).toBe(false);
 		expect(await contextId(sharedDir.path(), sessionId, "agent-session:js-two")).toBe(first);
+
+		// Neither move drops an id from the shared context, so only where each
+		// agent is working now can tell that nobody is left on it.
+		await contextId(twoDir.path(), `js:cwd:${twoDir.path()}`, "agent-session:js-two");
+		expect(await endsWithin(spawned(0), EXIT_BUDGET_MS)).toBe(true);
+		expect(await contextId(sharedDir.path(), sessionId, "agent-session:js-one")).not.toBe(first);
 	}, 60_000);
 
-	it("keeps a context a borrower still holds past the grace", async () => {
+	it("keeps a context a borrower holds past the grace, and ends it once the borrow ends with no further cell there", async () => {
 		setSupersededKernelGraceMs(TEST_GRACE_MS);
 		using firstDir = TempDir.createSync("@js-borrow-a-");
 		using secondDir = TempDir.createSync("@js-borrow-b-");
@@ -168,47 +282,18 @@ describe("superseded JavaScript contexts", () => {
 		// it holds the context even while its owner runs elsewhere.
 		const release = borrowVmContext(firstKey);
 		await contextId(secondDir.path(), `js:cwd:${secondDir.path()}`, owner);
-		await Bun.sleep(TEST_GRACE_MS * 8);
-		expect(await contextId(firstDir.path(), firstKey, owner)).toBe(first);
-		release();
-	}, 60_000);
-
-	it("drops a context two agents shared once both have moved on", async () => {
-		setSupersededKernelGraceMs(TEST_GRACE_MS);
-		using sharedDir = TempDir.createSync("@js-both-left-a-");
-		using oneDir = TempDir.createSync("@js-both-left-b-");
-		using twoDir = TempDir.createSync("@js-both-left-c-");
-		const sessionId = `js:cwd:${sharedDir.path()}`;
-		const first = await contextId(sharedDir.path(), sessionId, "agent-session:js-left-one");
-		expect(await contextId(sharedDir.path(), sessionId, "agent-session:js-left-two")).toBe(first);
-
-		await contextId(oneDir.path(), `js:cwd:${oneDir.path()}`, "agent-session:js-left-one");
-		await contextId(twoDir.path(), `js:cwd:${twoDir.path()}`, "agent-session:js-left-two");
-		await Bun.sleep(TEST_GRACE_MS * 8);
-		// Neither move drops an id from the shared context, so only where each
-		// agent is working now can tell that nobody is left on it.
-		expect(await contextId(sharedDir.path(), sessionId, "agent-session:js-left-one")).not.toBe(first);
-	}, 60_000);
-
-	it("drops a borrowed context after the borrow ends, with no further cell there", async () => {
-		setSupersededKernelGraceMs(TEST_GRACE_MS);
-		using firstDir = TempDir.createSync("@js-rearm-a-");
-		using secondDir = TempDir.createSync("@js-rearm-b-");
-		const owner = "agent-session:js-rearm";
-		const firstKey = `js:cwd:${firstDir.path()}`;
-		const first = await contextId(firstDir.path(), firstKey, owner);
-
-		const release = borrowVmContext(firstKey);
-		await contextId(secondDir.path(), `js:cwd:${secondDir.path()}`, owner);
 		// The grace expires while the borrow holds the context, so that attempt
-		// declines; releasing it is the only thing that happens afterwards.
-		await Bun.sleep(TEST_GRACE_MS * 8);
+		// declines.
+		await Bun.sleep(PAST_GRACE_MS);
+		expect(spawned(0).hasExited).toBe(false);
+
+		// Releasing it is the only thing that happens afterwards.
 		release();
-		await Bun.sleep(TEST_GRACE_MS * 8);
+		expect(await endsWithin(spawned(0), EXIT_BUDGET_MS)).toBe(true);
 		expect(await contextId(firstDir.path(), firstKey, owner)).not.toBe(first);
 	}, 60_000);
 
-	it("drops a context borrowed after its owner had already moved on", async () => {
+	it("ends a context borrowed after its owner had already moved on", async () => {
 		setSupersededKernelGraceMs(TEST_GRACE_MS);
 		using firstDir = TempDir.createSync("@js-late-borrow-a-");
 		using secondDir = TempDir.createSync("@js-late-borrow-b-");
@@ -222,11 +307,11 @@ describe("superseded JavaScript contexts", () => {
 		// context sees: its owner is elsewhere and runs no further cell here.
 		const release = borrowVmContext(firstKey);
 		release();
-		await Bun.sleep(TEST_GRACE_MS * 8);
+		expect(await endsWithin(spawned(0), EXIT_BUDGET_MS)).toBe(true);
 		expect(await contextId(firstDir.path(), firstKey, owner)).not.toBe(first);
 	}, 60_000);
 
-	it("drops a shared context after the agent whose move armed it is disposed", async () => {
+	it("ends a shared context after the agent whose move armed it is disposed", async () => {
 		setSupersededKernelGraceMs(TEST_GRACE_MS);
 		using sharedDir = TempDir.createSync("@js-co-owner-a-");
 		using oneDir = TempDir.createSync("@js-co-owner-b-");
@@ -241,24 +326,24 @@ describe("superseded JavaScript contexts", () => {
 		// context, and cancels the grace on the way. The agent left registered
 		// moved away earlier and never comes back to arm another one.
 		await disposeVmContextsByOwner("agent-session:js-co-two");
-		await Bun.sleep(TEST_GRACE_MS * 8);
+		expect(await endsWithin(spawned(0), EXIT_BUDGET_MS)).toBe(true);
 		expect(await contextId(sharedDir.path(), sessionId, "agent-session:js-co-one")).not.toBe(first);
 	}, 60_000);
 
-	it("drops a context whose cold start finished after a newer key's cell", async () => {
+	it("ends a context whose cold start finished after a newer key's cell", async () => {
 		setSupersededKernelGraceMs(TEST_GRACE_MS);
 		using firstDir = TempDir.createSync("@js-overlap-a-");
 		using secondDir = TempDir.createSync("@js-overlap-b-");
 		const owner = "agent-session:js-overlap";
 		const firstKey = `js:cwd:${firstDir.path()}`;
 		const gate = Promise.withResolvers<void>();
-		const spawned = Promise.withResolvers<void>();
-		const restore = holdFirstWorkerReady(gate.promise, spawned);
+		observation.restore();
+		observation = observeWorkers(gate.promise);
 		try {
 			const older = contextId(firstDir.path(), firstKey, owner);
 			// The older key is registered as starting, and its worker will not
 			// report ready until the newer key's cell is done.
-			await spawned.promise;
+			await observation.firstSpawned;
 			await contextId(secondDir.path(), `js:cwd:${secondDir.path()}`, owner);
 			gate.resolve();
 			const first = await older;
@@ -266,15 +351,14 @@ describe("superseded JavaScript contexts", () => {
 			// Nothing the newer cell could scan knew the older context existed,
 			// and the owner has been at the newer key since before the older
 			// worker was ready.
-			await Bun.sleep(TEST_GRACE_MS * 8);
+			expect(await endsWithin(spawned(0), EXIT_BUDGET_MS)).toBe(true);
 			expect(await contextId(firstDir.path(), firstKey, owner)).not.toBe(first);
 		} finally {
 			gate.resolve();
-			restore();
 		}
 	}, 60_000);
 
-	it("drops a context when the key its owner moved to cannot start a worker", async () => {
+	it("ends a context when the key its owner moved to cannot start a worker", async () => {
 		setSupersededKernelGraceMs(TEST_GRACE_MS);
 		using firstDir = TempDir.createSync("@js-failed-move-a-");
 		using secondDir = TempDir.createSync("@js-failed-move-b-");
@@ -304,7 +388,7 @@ describe("superseded JavaScript contexts", () => {
 
 		// The failed cell is the last thing the registry sees; no later cell
 		// arrives to arm the first key's grace.
-		await Bun.sleep(TEST_GRACE_MS * 8);
+		expect(await endsWithin(spawned(0), EXIT_BUDGET_MS)).toBe(true);
 		expect(await contextId(firstDir.path(), firstKey, owner)).not.toBe(first);
 	}, 60_000);
 });

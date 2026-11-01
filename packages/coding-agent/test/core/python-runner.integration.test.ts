@@ -100,11 +100,24 @@ function isRunning(pid: number): boolean {
 	return state !== "" && !state.startsWith("Z");
 }
 
-/** Runs one cell on a retained kernel and returns the operating-system pid of its runner. */
+// The superseded-runner tests watch a real reclaim, so they run on a real
+// timer: the grace races real runner subprocesses, which no fake clock drives.
+// It is shortened from two minutes to the length below.
+const RECLAIM_GRACE_MS = 100;
+/** Slept through to let an armed grace expire several times over. */
+const PAST_GRACE_MS = RECLAIM_GRACE_MS * 10;
+/** The longest a reclaimed runner gets to exit; generous, since the suite may share a loaded machine. */
+const EXIT_BUDGET_MS = 20_000;
+
+/**
+ * Runs one cell on a retained kernel and returns the operating-system pid of
+ * its runner. The pid is matched by its tag rather than read as the whole
+ * output, so a notice the cell carries ahead of it does not change the answer.
+ */
 async function runnerPid(options: PythonExecutorOptions): Promise<number> {
-	const result = await executePython("import os; print(os.getpid())", options);
+	const result = await executePython("import os; print(f'runner-pid:{os.getpid()}')", options);
 	expect(result.exitCode).toBe(0);
-	const pid = Number(result.output.trim());
+	const pid = Number(/runner-pid:(\d+)/.exec(result.output)?.[1]);
 	expect(Number.isInteger(pid)).toBe(true);
 	return pid;
 }
@@ -175,9 +188,7 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 	}, 30_000);
 
 	it("ends the runner a session leaves behind when its next cell runs in another directory", async () => {
-		// Real timer on purpose: the grace is the behaviour under test, shortened
-		// so the test watches a real reclaim instead of waiting two minutes.
-		setSupersededKernelGraceMs(100);
+		setSupersededKernelGraceMs(RECLAIM_GRACE_MS);
 		using firstDir = TempDir.createSync("@python-runner-superseded-a-");
 		using secondDir = TempDir.createSync("@python-runner-superseded-b-");
 		const options = {
@@ -190,11 +201,15 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 		const second = await runnerPid({ ...options, cwd: secondDir.path(), reset: true });
 
 		expect(second).not.toBe(first);
-		expect(await waitForExit(first, 10_000)).toBe(true);
+		expect(await waitForExit(first, EXIT_BUDGET_MS)).toBe(true);
 		expect(isRunning(second)).toBe(true);
-	}, 40_000);
+	}, 60_000);
 
 	it("keeps the runner and its namespace when the session returns inside the grace", async () => {
+		// Long enough that the round trip below lands inside it on a loaded
+		// machine; the directory left behind afterwards is then watched expiring.
+		const roundTripGraceMs = 10_000;
+		setSupersededKernelGraceMs(roundTripGraceMs);
 		using firstDir = TempDir.createSync("@python-runner-roundtrip-a-");
 		using secondDir = TempDir.createSync("@python-runner-roundtrip-b-");
 		const options = {
@@ -205,78 +220,106 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 		};
 		const first = await runnerPid({ ...options, cwd: firstDir.path() });
 		await executePython("round_trip_marker = 'kept'", { ...options, cwd: firstDir.path() });
-		await runnerPid({ ...options, cwd: secondDir.path() });
+		const second = await runnerPid({ ...options, cwd: secondDir.path() });
 
-		const back = await executePython("import os; print(os.getpid(), round_trip_marker)", {
+		const back = await executePython("import os; print(f'runner-pid:{os.getpid()}', round_trip_marker)", {
 			...options,
 			cwd: firstDir.path(),
 		});
 		expect(back.exitCode).toBe(0);
-		expect(back.output.trim()).toBe(`${first} kept`);
-	}, 60_000);
+		expect(back.output).toContain(`runner-pid:${first} kept`);
 
-	it("keeps a superseded runner alive while it is still executing a cell", async () => {
-		setSupersededKernelGraceMs(100);
+		// Returning left the second directory's runner behind. Its exit shows a
+		// grace was armed and ran out in this test, so the first runner
+		// outliving it is the return's doing, not a reclaim that never runs.
+		expect(await waitForExit(second, roundTripGraceMs + EXIT_BUDGET_MS)).toBe(true);
+		expect(isRunning(first)).toBe(true);
+	}, 90_000);
+
+	it("keeps a superseded runner alive while it is still executing a cell, and ends it once the cell is done", async () => {
+		setSupersededKernelGraceMs(RECLAIM_GRACE_MS);
 		using firstDir = TempDir.createSync("@python-runner-busy-a-");
 		using secondDir = TempDir.createSync("@python-runner-busy-b-");
 		const options = {
 			sessionId: "busy-kernel",
 			kernelOwnerId: "agent-session:busy",
 			kernelMode: "session" as const,
-			timeoutMs: 30_000,
+			timeoutMs: 60_000,
 		};
+		// The cell runs until the test creates this file, so it is still
+		// executing for as long as the test needs, however slow the machine.
+		const finish = path.join(firstDir.path(), "finish");
 		const first = await runnerPid({ ...options, cwd: firstDir.path() });
 		const running = Promise.withResolvers<void>();
-		const slow = executePython("print('slow started', flush=True)\nimport time\ntime.sleep(6)\nprint('slow done')", {
-			...options,
-			cwd: firstDir.path(),
-			onChunk: chunk => {
-				if (chunk.includes("slow started")) running.resolve();
+		const slow = executePython(
+			[
+				"import os, time",
+				"print('slow started', flush=True)",
+				`while not os.path.exists(${JSON.stringify(finish)}): time.sleep(0.05)`,
+				"print('slow done')",
+			].join("\n"),
+			{
+				...options,
+				cwd: firstDir.path(),
+				onChunk: chunk => {
+					if (chunk.includes("slow started")) running.resolve();
+				},
 			},
-		});
+		);
 		await running.promise;
 
 		const second = await runnerPid({ ...options, cwd: secondDir.path() });
 		expect(second).not.toBe(first);
+		// Every grace that runs out while the cell is going declines.
+		await Bun.sleep(PAST_GRACE_MS);
 		expect(isRunning(first)).toBe(true);
 
+		await Bun.write(finish, "");
 		const slowResult = await slow;
 		expect(slowResult.exitCode).toBe(0);
 		expect(slowResult.output).toContain("slow done");
-	}, 60_000);
+		// The cell was all that held a runner its owner had left; with it done,
+		// the runner goes like any other left behind.
+		expect(await waitForExit(first, EXIT_BUDGET_MS)).toBe(true);
+		expect(isRunning(second)).toBe(true);
+	}, 90_000);
 
-	it("keeps a runner a second agent still holds when the first moves to another directory", async () => {
-		setSupersededKernelGraceMs(100);
-		using firstDir = TempDir.createSync("@python-runner-shared-a-");
-		using secondDir = TempDir.createSync("@python-runner-shared-b-");
+	it("keeps a runner a second agent still holds when the first moves away, and ends it once both have", async () => {
+		setSupersededKernelGraceMs(RECLAIM_GRACE_MS);
+		using sharedDir = TempDir.createSync("@python-runner-shared-a-");
+		using oneDir = TempDir.createSync("@python-runner-shared-b-");
+		using twoDir = TempDir.createSync("@python-runner-shared-c-");
 		const shared = {
 			sessionId: "shared-kernel",
 			kernelMode: "session" as const,
 			timeoutMs: 10_000,
-			cwd: firstDir.path(),
+			cwd: sharedDir.path(),
 		};
 		const first = await runnerPid({ ...shared, kernelOwnerId: "agent-session:one" });
 		await executePython("shared_marker = 'kept'", { ...shared, kernelOwnerId: "agent-session:two" });
 
-		const second = await runnerPid({
-			...shared,
-			cwd: secondDir.path(),
-			kernelOwnerId: "agent-session:one",
-		});
+		const second = await runnerPid({ ...shared, cwd: oneDir.path(), kernelOwnerId: "agent-session:one" });
 		expect(second).not.toBe(first);
 
-		// The co-owner's next cell proves the kernel survived: a reclaimed one
-		// would answer from a fresh runner with a new pid and no marker.
-		const kept = await executePython("import os; print(os.getpid(), shared_marker)", {
+		// Past the grace, the co-owner's next cell proves the runner survived: a
+		// reclaimed one would answer from a fresh runner with no marker.
+		await Bun.sleep(PAST_GRACE_MS);
+		const kept = await executePython("import os; print(f'runner-pid:{os.getpid()}', shared_marker)", {
 			...shared,
 			kernelOwnerId: "agent-session:two",
 		});
 		expect(kept.exitCode).toBe(0);
-		expect(kept.output.trim()).toBe(`${first} kept`);
-	}, 40_000);
+		expect(kept.output).toContain(`runner-pid:${first} kept`);
+
+		// Once the co-owner moves on too, nobody is left on the runner.
+		const third = await runnerPid({ ...shared, cwd: twoDir.path(), kernelOwnerId: "agent-session:two" });
+		expect(await waitForExit(first, EXIT_BUDGET_MS)).toBe(true);
+		expect(isRunning(second)).toBe(true);
+		expect(isRunning(third)).toBe(true);
+	}, 90_000);
 
 	it("ends a runner two agents shared once the one that armed it is disposed", async () => {
-		setSupersededKernelGraceMs(100);
+		setSupersededKernelGraceMs(RECLAIM_GRACE_MS);
 		using sharedDir = TempDir.createSync("@python-runner-co-owner-a-");
 		using oneDir = TempDir.createSync("@python-runner-co-owner-b-");
 		using twoDir = TempDir.createSync("@python-runner-co-owner-c-");
@@ -295,8 +338,8 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 		// and cancels its grace. The agent still registered left for another
 		// directory earlier and never comes back to start a new one.
 		await disposeKernelSessionsByOwner("agent-session:co-two");
-		expect(await waitForExit(first, 10_000)).toBe(true);
-	}, 40_000);
+		expect(await waitForExit(first, EXIT_BUDGET_MS)).toBe(true);
+	}, 60_000);
 
 	it("streams stdout chunks as they are produced", async () => {
 		using tempDir = TempDir.createSync("@python-runner-stream-");
