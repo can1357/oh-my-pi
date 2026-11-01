@@ -5,13 +5,14 @@
 ### Added
 
 - Added `retry.usageReserveConfirmTimeout` (seconds, default `0` waits forever): an unanswered "Coding-plan reserve reached" prompt keeps the current model when it expires ([#17400](https://github.com/can1357/oh-my-pi/pull/17400) by [@sjawhar](https://github.com/sjawhar))
+- Added `user_wait_start` (with `prompt`, `kind` and `toolCalls`) and `user_wait_end` session and RPC events around a dialog only a person can answer, and `waitKind` on `ExtensionUIDialogOptions` and `ExtensionCustomOptions` plus `toolCallId` on `ExtensionUIDialogOptions` for extension dialogs ([#17400](https://github.com/can1357/oh-my-pi/pull/17400) by [@sjawhar](https://github.com/sjawhar))
 
 ### Fixed
 
 - Fixed a session waiting on a dialog only a person can answer (the reserve prompt, an MCP sign-in, a `cfg://` write, a plan approval, a permission request) still reporting a working run: the terminal title and OSC 7501 record now show it blocked ([#17400](https://github.com/can1357/oh-my-pi/pull/17400) by [@sjawhar](https://github.com/sjawhar))
 - Fixed an SDK session built without an agent id spinning at full speed while another agent's background job ran, starving terminal input ([#17400](https://github.com/can1357/oh-my-pi/pull/17400) by [@sjawhar](https://github.com/sjawhar))
 - Fixed the status line and OSC 7501 record naming an approval that was already answered while another dialog stayed open ([#17400](https://github.com/can1357/oh-my-pi/pull/17400) by [@sjawhar](https://github.com/sjawhar))
-- Fixed an approval on a host with no approval dialog (RPC, ACP, extension hosts) being reported as a question; extension dialogs can declare `waitKind` and `toolCallId` ([#17400](https://github.com/can1357/oh-my-pi/pull/17400) by [@sjawhar](https://github.com/sjawhar))
+- Fixed an approval on a host with no approval dialog (RPC, ACP, extension hosts) being reported as a question ([#17400](https://github.com/can1357/oh-my-pi/pull/17400) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.2] - 2026-10-31
 
