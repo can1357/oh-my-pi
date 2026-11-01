@@ -270,7 +270,7 @@ export async function discoverSystemPromptOverride(cwd?: string): Promise<System
 	});
 	for (const level of ["project", "user"] as const) {
 		const text = result.items.find(item => item.level === level && (item.kind ?? "text") === "text");
-		if (text) return { kind: "text", path: text.path, content: text.content };
+		if (text) return { kind: "text", path: text.path, content: await expandAtImports(text.content, text.path) };
 		const template = result.items.find(item => item.level === level && (item.kind ?? "text") === "template");
 		if (template) {
 			if (!template.content.trim()) {
@@ -292,8 +292,17 @@ export async function loadSystemPromptTemplateFile(filePath: string): Promise<st
 	return text;
 }
 
+export interface ResolvePromptInputOptions {
+	/** Expand `@path` imports when the input is read from a file. Literal strings are never expanded. */
+	expandAtImports?: boolean;
+}
+
 /** Resolve input as file path or literal string */
-export async function resolvePromptInput(input: string | undefined, description: string): Promise<string | undefined> {
+export async function resolvePromptInput(
+	input: string | undefined,
+	description: string,
+	options: ResolvePromptInputOptions = {},
+): Promise<string | undefined> {
 	if (!input) {
 		return input;
 	} else if (input.includes("\n")) {
@@ -301,7 +310,8 @@ export async function resolvePromptInput(input: string | undefined, description:
 	}
 
 	try {
-		return await Bun.file(input).text();
+		const text = await Bun.file(input).text();
+		return options.expandAtImports ? await expandAtImports(text, input) : text;
 	} catch (error) {
 		if (!hasFsCode(error, "ENAMETOOLONG") && !isEnoent(error)) {
 			logger.warn(`Could not read ${description} file`, { path: input, error: String(error) });
@@ -862,7 +872,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 			"appendSystemPrompt",
 			providedResolvedAppendPrompt !== undefined
 				? Promise.resolve(providedResolvedAppendPrompt)
-				: resolvePromptInput(appendSystemPrompt, "append system prompt"),
+				: resolvePromptInput(appendSystemPrompt, "append system prompt", { expandAtImports: true }),
 			prepDefaults.resolvedAppendPrompt,
 		),
 		withDeadline("loadSystemPromptFiles", systemPromptCustomizationPromise, prepDefaults.systemPromptCustomization),

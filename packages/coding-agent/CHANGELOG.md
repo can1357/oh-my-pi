@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `@path` imports in `APPEND_SYSTEM.md` and `SYSTEM.md` being inserted into the system prompt as literal text instead of the imported file contents; an `--append-system-prompt` file path expands them too, while literal prompt text is left as is ([#17294](https://github.com/can1357/oh-my-pi/pull/17294) by [@Abelo9996](https://github.com/Abelo9996))
+
 ## [18.14.2] - 2026-10-31
 
 ### Added
