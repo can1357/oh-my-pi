@@ -3,7 +3,10 @@ import { logger, Snowflake, workerHostEntry } from "@oh-my-pi/pi-utils";
 import {
 	createWorkerHandle,
 	createWorkerSubprocess,
+	killWorkerSubprocess,
 	resolveWorkerSpawnCmd,
+	settlesWithin,
+	WORKER_EXIT_CONFIRM_MS,
 	workerEnvFromParent,
 } from "../../subprocess/worker-client";
 import type { ToolSession } from "../../tools";
@@ -12,9 +15,15 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { safeSend as safeSendIpc } from "../../utils/ipc";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../bridge-timeout";
 import { getEnabledEvalPreludes } from "../preludes";
-import { attachSessionOwner, EvalKernelNotRunningError, type SessionOwners } from "../executor-base";
+import {
+	attachSessionOwner,
+	EvalKernelNotRunningError,
+	formatKernelReclaimNotice,
+	type SessionOwners,
+} from "../executor-base";
 import { shouldDetachKernel } from "../py/spawn-options";
 import { updateEvalState } from "../state";
+import { SupersededKernelReaper, type SupersededReclaimOutcome } from "../superseded-reclaim";
 import type { EvalShadowCellSession } from "../speculation/cell-session";
 import { getActiveEvalShadowCell } from "../speculation/runtime-context";
 import type { ShadowPlan } from "../speculation/types";
@@ -49,8 +58,14 @@ export interface JsEvalWorkerHandle {
 	send(msg: WorkerInbound): void;
 	onMessage(handler: (msg: WorkerOutbound) => void): () => void;
 	onError(handler: (error: Error) => void): () => void;
+	/** Ask the worker to exit; true once it has, false when it did not answer in time. */
 	close(): Promise<boolean>;
-	terminate(): Promise<void>;
+	/**
+	 * Kill the worker; true once its exit has been seen, false when it was not
+	 * seen within {@link WORKER_EXIT_CONFIRM_MS}. Sending the kill is not the
+	 * answer: a caller that must not lose a live worker keeps it on false.
+	 */
+	terminate(): Promise<boolean>;
 }
 
 /** Startup dependencies overridden by tests to exercise process-to-Worker recovery. */
@@ -105,6 +120,12 @@ interface JsSession {
 	pendingShadowRuns: Map<string, PromiseWithResolvers<Extract<WorkerOutbound, { type: "shadow-run" }>>>;
 	ownerIds: Set<string>;
 	hasFallbackOwner: boolean;
+	/**
+	 * Callers currently holding this context: a cell from the moment it
+	 * acquires the session, and a borrower such as a subagent that can call the
+	 * context's kernel-defined tools.
+	 */
+	activeUses: number;
 }
 
 interface StartingJsSession extends SessionOwners {
@@ -112,8 +133,50 @@ interface StartingJsSession extends SessionOwners {
 }
 
 const sessions = new Map<string, JsSession>();
+/**
+ * The session key each explicit owner acquired last. A superseded context is
+ * only reclaimed once every owner registered against it has moved on, and
+ * `ownerIds` alone cannot say that: an id attached at one key stays there for
+ * the context's life.
+ */
+const ownerKeys = new Map<string, string>();
+const reaper = new SupersededKernelReaper<JsSession>();
 const startingSessions = new Map<string, StartingJsSession>();
 const resettingSessions = new Map<string, Promise<void>>();
+/**
+ * Workers a reclaim terminated, by owner and then by key: the worker that went
+ * and the directory it ran in. The next cell on such a key runs in a fresh
+ * worker with none of the globals, timers or subprocesses the caller built
+ * up, and nothing else here would say so — a reclaim that works is silent.
+ *
+ * Written in the same synchronous step that takes the context out of
+ * `sessions`, never after the kill it then awaits, so a cell, a reset or a
+ * disposal landing while the worker is still closing already sees it and
+ * nothing late writes it back. Said to that owner's next cell there that runs
+ * in a different worker, then dropped; also dropped by that owner's reset of
+ * the key, and with the owner when it is disposed.
+ */
+const reclaimedWorkers = new Map<string, Map<string, { kernelId: string; cwd: string }>>();
+
+/** A worker whose kill could not be confirmed: no context's any more, only a process still to end. */
+interface UnconfirmedWorker {
+	worker: JsEvalWorkerHandle;
+	kernelId: string;
+	/** Owners whose disposal retries it; the owners it ran for, not a live registration. */
+	owners: Set<string>;
+}
+
+/**
+ * Workers whose kill could not be confirmed, kept so a disposal can try again
+ * rather than return with them forgotten. Each is out of `sessions` and dead
+ * to every caller — no cell, reclaim or notice reaches it — so this is cleanup
+ * debt only, kept apart from who owns a live context and who is owed a
+ * notice. An owner's disposal retries that owner's; the process-wide
+ * disposal retries every one. A worker stuck in truly uninterruptible kernel
+ * I/O stays until that I/O completes or is aborted.
+ */
+const unconfirmedWorkers = new Set<UnconfirmedWorker>();
+
 // Worker startup (module-graph import + WorkerCore construction) is infrastructure
 // cost, not user compute. Floor it independently of Bun's 5s default per-test timeout
 // so a slow cold-start under load isn't aborted mid-init — terminating a still-
@@ -162,7 +225,7 @@ export async function executeInVmContext(options: {
 	timeoutMs?: number;
 	runState: VmRunState;
 }): Promise<{ value: unknown }> {
-	const { sessionKey } = options;
+	const { sessionKey, ownerId } = options;
 	if (options.reset) {
 		// Coalesce concurrent resets: an existing in-flight reset already
 		// produces a fresh context, so a follow-up `reset: true` cell should
@@ -181,35 +244,177 @@ export async function executeInVmContext(options: {
 				resettingSessions.delete(sessionKey);
 			}
 		}
+		// A caller that asked for a fresh context is not surprised by one, so
+		// what a reclaim took from this owner here goes unsaid rather than
+		// explaining a restart the caller ordered.
+		if (ownerId !== undefined) forgetReclaimedWorker(ownerId, sessionKey);
 	} else {
 		// Internal coordination: wait for any in-flight reset to settle and
 		// then run on the freshly-rebuilt context.
 		const inFlight = resettingSessions.get(sessionKey);
 		if (inFlight) await inFlight.catch(() => undefined);
 	}
-	const session = await acquireSession(
-		sessionKey,
-		{
-			cwd: options.cwd,
-			sessionId: options.sessionId,
-			localRoots: options.localRoots,
-			packageRoot: options.packageRoot,
-			packageEnvironment: options.packageEnvironment,
-		},
-		options.session,
-		options.timeoutMs,
-		options.ownerId,
-	);
-	const result = await runOnce(session, options);
-	if (session.state === "alive" && path.isAbsolute(options.filename)) {
-		updateEvalState(options.session, {
-			language: "js",
-			kernelId: session.kernelId,
-			alive: true,
-			loadedPath: options.filename,
-		});
+	// `acquireSession` records this owner at `sessionKey` before it knows
+	// whether a worker can be started there, so the move away from wherever the
+	// owner was is already real when a startup rejects — both spawn factories
+	// failing, an init that never answers. The boundary therefore opens
+	// *before* the acquisition: the rejection and the ordinary end of the cell
+	// leave through the same `finally`.
+	let session: JsSession | undefined;
+	try {
+		session = await acquireSession(
+			sessionKey,
+			{
+				cwd: options.cwd,
+				sessionId: options.sessionId,
+				localRoots: options.localRoots,
+				packageRoot: options.packageRoot,
+				packageEnvironment: options.packageEnvironment,
+			},
+			options.session,
+			options.timeoutMs,
+			ownerId,
+		);
+		reconcileSupersededJsSessions();
+		// The worker this owner had here was reclaimed while it worked
+		// elsewhere, so this cell is the first thing that can say the earlier
+		// globals are gone — including a cell that started while that worker
+		// was still closing. Emitted before the cell's own output, which also
+		// carries it when the cell throws, and after the acquisition so a
+		// startup that fails leaves it owed.
+		const reclaimed = ownerId === undefined ? undefined : reclaimedWorkers.get(ownerId)?.get(sessionKey);
+		if (reclaimed !== undefined && ownerId !== undefined) {
+			forgetReclaimedWorker(ownerId, sessionKey);
+			if (reclaimed.kernelId !== session.kernelId) {
+				options.runState.onText?.(`${formatKernelReclaimNotice("JS worker", reclaimed.cwd, "worker")}\n`);
+			}
+		}
+		const result = await runOnce(session, options);
+		if (session.state === "alive" && path.isAbsolute(options.filename)) {
+			updateEvalState(options.session, {
+				language: "js",
+				kernelId: session.kernelId,
+				alive: true,
+				loadedPath: options.filename,
+			});
+		}
+		return result;
+	} finally {
+		// This cell is done holding the context, and its owner may have moved on
+		// while it ran — an older key whose cold start finished last is
+		// superseded the moment its only cell ends.
+		if (session) session.activeUses -= 1;
+		reconcileSupersededJsSessions();
 	}
-	return result;
+}
+
+/**
+ * Arm or disarm the reclaim grace on every retained JavaScript context, in one
+ * pass over the registry. The grace runs from the moment a context is found
+ * superseded, not from when it falls idle.
+ *
+ * A retained JavaScript context is keyed by the eval session id, which ends in
+ * `:cwd:<cwd>`, so an owner that changes directory — or whose eval session id
+ * gains its on-disk session file — acquires a *new* worker and strands the
+ * previous one. Nothing reclaimed it: its heap stayed resident until the host
+ * process exited, whether it was the isolated subprocess or the Bun Worker
+ * thread the host falls back to, which no process list shows.
+ *
+ * Whether a context is stranded is a property of the registry as a whole —
+ * where each of its owners is working now — not of the call that happens to
+ * notice, so the question is asked about every context from every point that
+ * can change the answer: a cell acquiring or releasing one, a borrow ending,
+ * an owner departing. The rules match the Python registry's
+ * `reconcileSupersededSessions`: a context is armed once every agent
+ * registered against it has run its latest cell elsewhere, a caller holding it
+ * or work in flight keeps it alive when the grace expires, and a reclaim those
+ * guards stop is armed again rather than dropped.
+ */
+function reconcileSupersededJsSessions(): void {
+	for (const [key, session] of Array.from(sessions.entries())) {
+		// Armed on ownership alone; the fire-time guards decide. See the Python
+		// registry's `reconcileSupersededSessions` for why a busy context is armed.
+		if (isSuperseded(key, session)) reaper.schedule(session, () => reclaimSuperseded(key, session));
+		else reaper.cancel(session);
+	}
+}
+
+/** Terminate the worker under `key`, unless a fire-time guard still holds it. */
+async function reclaimSuperseded(key: string, session: JsSession): Promise<SupersededReclaimOutcome> {
+	if (!isSuperseded(key, session) || session.state !== "alive") return "settled";
+	if (session.activeUses > 0) return "deferred";
+	if (session.pending.size > 0 || session.pendingSnapshots.size > 0 || session.pendingShadowRuns.size > 0) {
+		return "deferred";
+	}
+	sessions.delete(key);
+	// The globals this key held are gone from the moment the context leaves
+	// the map: a cell arriving now gets a fresh worker while this one may take
+	// a second more to close. So the loss is recorded in this same step, not
+	// after the kill, and nothing that settles later writes it again.
+	for (const owner of session.ownerIds) {
+		let byKey = reclaimedWorkers.get(owner);
+		if (byKey === undefined) {
+			byKey = new Map();
+			reclaimedWorkers.set(owner, byKey);
+		}
+		byKey.set(key, { kernelId: session.kernelId, cwd: session.cwd });
+	}
+	await killSession(session, new ToolError("JS context left behind by its session"), { force: false });
+	return "settled";
+}
+
+function forgetReclaimedWorker(owner: string, key: string): void {
+	const byKey = reclaimedWorkers.get(owner);
+	if (byKey === undefined) return;
+	byKey.delete(key);
+	if (byKey.size === 0) reclaimedWorkers.delete(owner);
+}
+
+/**
+ * Whether `session` under `key` is one nobody is still working at, and may
+ * therefore be armed or shut down.
+ */
+function isSuperseded(key: string, session: JsSession): boolean {
+	if (sessions.get(key) !== session) return false;
+	return everyOwnerMovedAway(key, session);
+}
+
+/**
+ * Whether every agent registered against `session` has since run a cell under
+ * another key. A fallback owner is a session id invented for a caller that
+ * gave none, and two such callers are indistinguishable, so a context carrying
+ * one is never reclaimed.
+ */
+function everyOwnerMovedAway(key: string, session: JsSession): boolean {
+	if (session.hasFallbackOwner || session.ownerIds.size === 0) return false;
+	for (const owner of session.ownerIds) {
+		if (ownerKeys.get(owner) !== key) continue;
+		return false;
+	}
+	return true;
+}
+
+/**
+ * Hold the live JavaScript context for `sessionKey` so a superseded-context
+ * reclaim leaves it alone, and return the release. Borrowers that can call its
+ * kernel-defined tools between cells — a background subagent given `tools=[…]`
+ * — hold one for as long as that is true.
+ */
+export function borrowVmContext(sessionKey: string): () => void {
+	const session = sessions.get(sessionKey);
+	if (!session) return () => {};
+	session.activeUses += 1;
+	reaper.cancel(session);
+	let released = false;
+	return () => {
+		if (released) return;
+		released = true;
+		session.activeUses -= 1;
+		// The borrow was this context's only reason to be spared, and cancelling
+		// its timer was this borrow's doing: a context the owner had already left
+		// gets no later cell to arm it again.
+		reconcileSupersededJsSessions();
+	};
 }
 
 function isUnknownRecord(value: unknown): value is Record<string, unknown> {
@@ -386,21 +591,47 @@ export async function runIfSnapshotMatches(options: {
 export async function resetVmContext(sessionKey: string): Promise<void> {
 	const session = sessions.get(sessionKey) ?? (await startingSessions.get(sessionKey)?.promise.catch(() => undefined));
 	if (!session) return;
+	reaper.cancel(session);
 	sessions.delete(sessionKey);
 	await killSession(session, new ToolError("JS context reset"), { force: false });
 }
 
 export async function disposeAllVmContexts(): Promise<void> {
+	// A disposal never waits out a grace: the timers go, and the contexts they
+	// held are killed below like any other.
+	reaper.cancelAll();
+	ownerKeys.clear();
+	reclaimedWorkers.clear();
+	// A reclaim that fired just before the cancel removed its context from the
+	// map and may still be closing that worker; a dispose must not return
+	// while one is up. Joined alongside the kills below, not ahead of them.
+	const reclaiming = reaper.running();
+	const reclaims = reaper.settle();
+	// Workers an earlier kill could not confirm get their attempt alongside.
+	const earlier = [...unconfirmedWorkers];
 	const pending = [...startingSessions.values()].map(starting => starting.promise);
 	startingSessions.clear();
-	const started = await Promise.allSettled(pending);
 	const all = Array.from(sessions.values());
-	for (const result of started) {
-		if (result.status !== "fulfilled") continue;
-		if (!all.includes(result.value)) all.push(result.value);
-	}
 	sessions.clear();
-	await Promise.all(all.map(session => killSession(session, new ToolError("JS context disposed"), { force: false })));
+	const started = Promise.allSettled(pending).then(results =>
+		Promise.all(
+			results.flatMap(result => {
+				if (result.status !== "fulfilled" || all.includes(result.value)) return [];
+				const session = result.value;
+				if (sessions.get(session.sessionKey) === session) sessions.delete(session.sessionKey);
+				return [killSession(session, new ToolError("JS context disposed"), { force: false })];
+			}),
+		),
+	);
+	await Promise.all([
+		reclaims,
+		started,
+		retryUnconfirmedWorkers(earlier),
+		...all.map(session => killSession(session, new ToolError("JS context disposed"), { force: false })),
+	]);
+	// A joined reclaim whose kill went unconfirmed gets one more attempt; what
+	// this disposal's own kills could not confirm is kept for the next one.
+	await retryUnconfirmedWorkers(unconfirmedOf(reclaiming));
 }
 
 /**
@@ -408,14 +639,32 @@ export async function disposeAllVmContexts(): Promise<void> {
  * owners (e.g. an in-memory session keyed only by cwd) just drop the registration.
  */
 export async function disposeVmContextsByOwner(ownerId: string): Promise<void> {
+	// Everything up to the first `await` is one synchronous step, so no grace
+	// expires between the reclaims found running and the sweep.
+	//
+	// A reclaim already running removed its context from the map before it
+	// awaited the kill, so the sweep below cannot see that worker and would
+	// return while it is still up. This owner's reclaims are joined alongside
+	// its own kills; another owner's are not this disposal's to wait for.
+	const reclaiming = reaper.running().filter(session => session.ownerIds.has(ownerId));
+	const reclaims = reaper.settle(reclaiming);
+	// What an earlier kill of this owner's workers could not confirm gets its
+	// attempt alongside this disposal's own kills.
+	const earlier = [...unconfirmedWorkers].filter(entry => entry.owners.has(ownerId));
+	// This owner is gone, so it is at no key: a context it shared stops waiting
+	// on it, and nobody is left to tell what a reclaim took from it.
+	ownerKeys.delete(ownerId);
+	reclaimedWorkers.delete(ownerId);
 	const toKill: JsSession[] = [];
-	for (const session of Array.from(sessions.values())) {
+	for (const [key, session] of Array.from(sessions.entries())) {
 		if (!session.ownerIds.has(ownerId)) continue;
-		if (session.ownerIds.size === 1) {
-			toKill.push(session);
+		reaper.cancel(session);
+		if (session.ownerIds.size > 1) {
+			session.ownerIds.delete(ownerId);
 			continue;
 		}
-		session.ownerIds.delete(ownerId);
+		sessions.delete(key);
+		toKill.push(session);
 	}
 	const startingToKill: StartingJsSession[] = [];
 	for (const [sessionKey, starting] of Array.from(startingSessions.entries())) {
@@ -427,19 +676,62 @@ export async function disposeVmContextsByOwner(ownerId: string): Promise<void> {
 		}
 		starting.ownerIds.delete(ownerId);
 	}
-	for (const session of toKill) {
-		if (sessions.get(session.sessionKey) === session) sessions.delete(session.sessionKey);
-	}
-	const started = await Promise.allSettled(startingToKill.map(starting => starting.promise));
-	for (const result of started) {
-		if (result.status !== "fulfilled") continue;
-		const session = result.value;
-		if (sessions.get(session.sessionKey) === session) sessions.delete(session.sessionKey);
-		toKill.push(session);
-	}
-	await Promise.all(
-		toKill.map(session => killSession(session, new ToolError("JS context disposed"), { force: false })),
+	const started = Promise.allSettled(startingToKill.map(starting => starting.promise)).then(results =>
+		Promise.all(
+			results.flatMap(result => {
+				if (result.status !== "fulfilled") return [];
+				const session = result.value;
+				if (sessions.get(session.sessionKey) === session) sessions.delete(session.sessionKey);
+				return [killSession(session, new ToolError("JS context disposed"), { force: false })];
+			}),
+		),
 	);
+	await Promise.all([
+		reclaims,
+		started,
+		retryUnconfirmedWorkers(earlier),
+		...toKill.map(session => killSession(session, new ToolError("JS context disposed"), { force: false })),
+	]);
+	// A joined reclaim whose kill went unconfirmed gets one more attempt.
+	await retryUnconfirmedWorkers(unconfirmedOf(reclaiming));
+	// A context this owner shared with another agent kept only its registration
+	// dropped above. Nobody is left to notice that, so the arming question is
+	// asked again here: the agents it still belongs to may have moved away long
+	// ago.
+	reconcileSupersededJsSessions();
+}
+
+/** The unconfirmed workers left by the kills of `sessions`. */
+function unconfirmedOf(sessions: readonly JsSession[]): UnconfirmedWorker[] {
+	const kernelIds = new Set(sessions.map(session => session.kernelId));
+	return [...unconfirmedWorkers].filter(entry => kernelIds.has(entry.kernelId));
+}
+
+/**
+ * Kill each of `entries` again. One whose exit is now seen is forgotten; one
+ * that still cannot be confirmed — a process stuck in truly uninterruptible
+ * kernel I/O outlives every kill until that I/O completes or is aborted — is
+ * logged and kept.
+ */
+async function retryUnconfirmedWorkers(entries: readonly UnconfirmedWorker[]): Promise<void> {
+	await Promise.all(
+		entries.map(async entry => {
+			if (!unconfirmedWorkers.has(entry)) return;
+			if (await entry.worker.terminate().catch(() => false)) {
+				unconfirmedWorkers.delete(entry);
+				return;
+			}
+			logger.warn("JS eval worker still did not confirm exit; kept for the next disposal", {
+				kernelId: entry.kernelId,
+			});
+		}),
+	);
+}
+
+/** Keep `worker`, whose kill could not be confirmed, where a disposal will try again. */
+function keepUnconfirmedWorker(worker: JsEvalWorkerHandle, kernelId: string, owners: Iterable<string>): void {
+	logger.warn("JS eval worker did not confirm exit; kept for disposal to retry", { kernelId });
+	unconfirmedWorkers.add({ worker, kernelId, owners: new Set(owners) });
 }
 
 /**
@@ -465,6 +757,7 @@ export async function smokeTestJsEvalWorker(): Promise<void> {
 		pendingShadowRuns: new Map(),
 		ownerIds: new Set(),
 		hasFallbackOwner: false,
+		activeUses: 0,
 	};
 	try {
 		await initWorker(session, { cwd: process.cwd(), sessionId: "smoke" }, WORKER_INIT_TIMEOUT_MS);
@@ -596,6 +889,9 @@ async function acquireSession(
 	timeoutMs?: number,
 	ownerId?: string,
 ): Promise<JsSession> {
+	// Where this owner is working now: every key it is not at is one it has
+	// moved away from, which is what arms a reclaim.
+	if (ownerId !== undefined) ownerKeys.set(ownerId, sessionKey);
 	const existing = sessions.get(sessionKey);
 	if (existing && existing.state === "alive") {
 		existing.sessionId = snapshot.sessionId;
@@ -603,6 +899,11 @@ async function acquireSession(
 		existing.packageRoot = snapshot.packageRoot;
 		existing.packageEnvironment = snapshot.packageEnvironment;
 		attachSessionOwner(existing, snapshot.sessionId, ownerId);
+		// Reacquired inside its grace: keep the context and its globals.
+		reaper.cancel(existing);
+		// Held before returning, so no reclaim can run between this lookup and
+		// the caller taking its hold. The caller releases it.
+		existing.activeUses += 1;
 		markJsSessionAlive(existing, toolSession, snapshot.packageEnvironment);
 		return existing;
 	}
@@ -610,6 +911,7 @@ async function acquireSession(
 	if (starting) {
 		attachSessionOwner(starting, snapshot.sessionId, ownerId);
 		const session = await starting.promise;
+		session.activeUses += 1;
 		markJsSessionAlive(session, toolSession, snapshot.packageEnvironment);
 		return session;
 	}
@@ -635,6 +937,10 @@ async function acquireSession(
 			pendingShadowRuns: new Map(),
 			ownerIds: new Set(),
 			hasFallbackOwner: false,
+			// Born held for the caller that started it, which releases it when
+			// its cell ends; publishing to `sessions` precedes that hold by a
+			// tick otherwise.
+			activeUses: 1,
 		};
 		// Init headroom is the fixed infrastructure floor; the caller's per-cell timeout
 		// dominates when larger so users can grant more by raising `timeout` on a cell.
@@ -650,7 +956,9 @@ async function acquireSession(
 				// runtime failure must surface; running the cell on this host thread
 				// would make synchronous user code impossible to cancel.
 				const failed = session.worker;
-				await failed.terminate().catch(() => undefined);
+				if (!(await failed.terminate().catch(() => false))) {
+					keepUnconfirmedWorker(failed, session.kernelId, startingSession.ownerIds);
+				}
 				if (failed.mode === "worker") {
 					throw new Error(
 						`Failed to initialize isolated JS eval worker: ${error instanceof Error ? error.message : String(error)}`,
@@ -888,12 +1196,10 @@ async function killSession(session: JsSession, error: Error, options: { force: b
 	session.pendingSnapshots.clear();
 	for (const pending of session.pendingShadowRuns.values()) pending.reject(error);
 	session.pendingShadowRuns.clear();
-	if (options.force) {
-		await session.worker.terminate().catch(() => undefined);
-		return;
-	}
-	if (await session.worker.close().catch(() => false)) return;
-	await session.worker.terminate().catch(() => undefined);
+	const confirmed = options.force
+		? await session.worker.terminate().catch(() => false)
+		: (await session.worker.close().catch(() => false)) || (await session.worker.terminate().catch(() => false));
+	if (!confirmed) keepUnconfirmedWorker(session.worker, session.kernelId, session.ownerIds);
 }
 
 function markJsSessionAlive(session: JsSession, toolSession: ToolSession, environment: string | undefined): void {
@@ -1025,17 +1331,23 @@ function spawnJsProcess(): JsEvalWorkerHandle {
 			};
 			unsubscribe = base.onMessage(message => {
 				if (message.type !== "closed") return;
-				void base.terminate().finally(() => finish(true));
+				// Acknowledged: the kill below ends it, and only its seen exit
+				// means it closed.
+				clearTimeout(timeout);
+				void killWorkerSubprocess(spawned).then(finish);
 			});
 			const timeout = setTimeout(() => finish(false), WORKER_CLOSE_TIMEOUT_MS);
 			base.send({ type: "close" });
 			return await promise;
 		},
-		terminate: () => base.terminate(),
+		terminate: () => killWorkerSubprocess(spawned),
 	};
 }
 
 function wrapBunWorker(worker: Worker): JsEvalWorkerHandle {
+	// Watched from the start, so an exit that happened before teardown asked is still seen.
+	const exited = Promise.withResolvers<void>();
+	worker.addEventListener("close", () => exited.resolve(), { once: true });
 	return {
 		mode: "worker",
 		send(msg) {
@@ -1093,6 +1405,7 @@ function wrapBunWorker(worker: Worker): JsEvalWorkerHandle {
 		},
 		async terminate() {
 			worker.terminate();
+			return await settlesWithin(exited.promise, WORKER_EXIT_CONFIRM_MS);
 		},
 	};
 }

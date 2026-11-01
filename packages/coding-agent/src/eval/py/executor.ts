@@ -130,6 +130,8 @@ export interface PythonExecutorOptions {
 	bridgeSessionId?: string;
 	/** @internal Bridge endpoint info, set by `executePython` before delegating. */
 	bridge?: { url: string; token: string };
+	/** @internal Set by the session registry; see {@link KernelExecutorBaseOptions.claimKernelNotice}. */
+	claimKernelNotice?: () => string | undefined;
 }
 
 export interface PythonKernelExecutor {
@@ -568,6 +570,29 @@ export async function callPythonTool(
 		return { ok: false, error: "Python tool call returned an invalid response" };
 	}
 	return { ok: true, value: envelope.value };
+}
+
+/**
+ * Hold a retained Python kernel so the superseded-kernel reclaim leaves it
+ * alone, and return the release.
+ *
+ * Kernel-defined tools handed to a subagent are resolved against the *parent's*
+ * kernel identity, and the subagent calls them between the parent's own cells.
+ * Nothing else marks that kernel as in use, so without this hold the parent's
+ * next cell in another directory would shut the kernel out from under a live
+ * subagent. Release it once that subagent can no longer call the tools.
+ */
+export function borrowPythonKernelSession(options: {
+	cwd: string;
+	sessionId: string;
+	interpreter?: string;
+	kernelOwnerId?: string;
+}): () => void {
+	return sessionRegistry.borrowSession(normalizeKernelSessionCwd(options.cwd), {
+		sessionId: options.sessionId,
+		interpreter: options.interpreter,
+		kernelOwnerId: options.kernelOwnerId,
+	});
 }
 
 export async function disposeAllKernelSessions(): Promise<void> {

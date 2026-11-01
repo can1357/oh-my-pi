@@ -6218,6 +6218,17 @@ export class AgentSession implements SettingsScope {
 	 * double-drain the owned `AsyncJobManager` (issue #4080).
 	 */
 	#disposeCall?: Promise<void>;
+	/** Set when disposal abandoned a shutdown handler at its timeout rather than seeing it finish. */
+	#abandonedShutdownWork = false;
+
+	/**
+	 * Whether disposal left shutdown work running. Disposal ending is not proof
+	 * that a handler it timed out on has stopped, and anything that would
+	 * delete this session's workspace has to treat that as work in progress.
+	 */
+	hasAbandonedShutdownWork(): boolean {
+		return this.#abandonedShutdownWork;
+	}
 	dispose(options: AgentSessionDisposeOptions = {}): Promise<void> {
 		if (!this.#disposeCall) this.#disposeCall = this.#doDispose(options);
 		return this.#disposeCall;
@@ -6369,6 +6380,9 @@ export class AgentSession implements SettingsScope {
 		} catch (error) {
 			logger.warn("Failed to emit session_shutdown event", { error: String(error) });
 		}
+		// A handler abandoned at its timeout was not stopped: it may still be
+		// writing into this session's workspace after disposal returns.
+		this.#abandonedShutdownWork = (this.#extensionRunner?.timedOutHandlers ?? 0) > 0;
 
 		// Stop fallback extension timers before aborting deferred work they could enqueue.
 		this.#fallbackExtensionTimers?.clearAll();

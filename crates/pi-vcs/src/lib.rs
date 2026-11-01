@@ -230,6 +230,23 @@ impl Repo {
 		}
 	}
 
+	/// [`Self::ls_files`], with the directories git reported it could not read.
+	///
+	/// A `git ls-files --others` run that cannot open a directory warns and
+	/// exits 0, so a caller that deletes on the strength of the listing needs
+	/// to know the listing is short. Jujutsu has no untracked set, so its
+	/// answer is always complete.
+	pub fn ls_files_with_warnings(
+		&self,
+		others: bool,
+		exclude_standard: bool,
+	) -> Result<(Vec<String>, Vec<String>)> {
+		match self {
+			Self::Git(repo) => repo.ls_files_with_warnings(others, exclude_standard),
+			Self::Jj(workspace) => Ok((workspace.ls_files(others)?, Vec::new())),
+		}
+	}
+
 	/// List tracked paths, or untracked paths when `others` is true.
 	pub fn ls_files(&self, others: bool, exclude_standard: bool) -> Result<Vec<String>> {
 		match self {

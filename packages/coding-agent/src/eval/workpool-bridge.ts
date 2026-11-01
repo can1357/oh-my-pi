@@ -1,5 +1,5 @@
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
-import { createEvalCustomTools, describeEvalTools } from "../task/eval-tools";
+import { borrowEvalToolKernels, createEvalCustomTools, describeEvalTools } from "../task/eval-tools";
 import { invalidModelSelectorReason, resolveEffectiveSubagentPolicy } from "../task/structured-subagent";
 import { type WorkPoolPeekResult, type WorkPoolStatus, WorkPoolRegistry } from "../task/workpool";
 import type { ToolSession } from "../tools";
@@ -89,9 +89,8 @@ export async function runEvalWorkpool(args: unknown, options: EvalWorkpoolBridge
 			...(agent ? { agent } : {}),
 			...(model !== undefined ? { perCallModel: model } : {}),
 		});
-		const customTools = tools?.length
-			? createEvalCustomTools(options.session, await describeEvalTools(options.session, tools, options.signal))
-			: [];
+		const descriptors = tools?.length ? await describeEvalTools(options.session, tools, options.signal) : [];
+		const customTools = descriptors.length > 0 ? createEvalCustomTools(options.session, descriptors) : [];
 		const ownerId = options.session.getAgentId?.() ?? MAIN_AGENT_ID;
 		const registry = WorkPoolRegistry.global();
 		let name = requestedName ?? `${policy.agentName}-pool`;
@@ -102,12 +101,16 @@ export async function runEvalWorkpool(args: unknown, options: EvalWorkpoolBridge
 				name = `${base}-${suffix++}`;
 			}
 		}
+		// Workers call these tools on the creating session's kernel long after
+		// this cell ends: the pool holds it until no new turn can start, and
+		// each worker holds it again for its own lifecycle.
 		const pool = registry.create(options.session, {
 			name,
 			policy,
 			...(model !== undefined ? { model } : {}),
 			...(context ? { context } : {}),
 			customTools,
+			borrowKernels: () => borrowEvalToolKernels(options.session, descriptors),
 		});
 		options.emitStatus?.({ op: "workpool", action: "create", pool: name, count: pool.limit() });
 		return { name, agent: policy.agentName, limit: pool.limit() };
