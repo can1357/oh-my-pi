@@ -15,7 +15,7 @@ import { type CustomMessage, type FileMentionMessage, resolveAbortLabel, shouldR
 import { createIrcMessageCard } from "../tools/wait";
 import { formatArtifactErrorNotice, type OutputMeta } from "../tools/output-meta";
 import type { OutputArtifactError } from "../tools/streaming-output";
-import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../render/render-utils";
+import { formatStyledPath, replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../render/render-utils";
 import { canonicalizeMessage } from "./thinking-display";
 import { ToolActivityContainer } from "../chrome/tool-activity";
 import { type TranscriptBlock } from "../chrome/transcript-container";
@@ -137,9 +137,9 @@ export function buildLaunchCompletionBlock(message: CustomOrHookMessage): ToolAc
 }
 
 /**
- * Render a live IRC traffic custom message (`irc:incoming` / `irc:autoreply` /
- * `irc:relay`) as a transcript card. `getExpanded` supplies the live
- * expanded-state getter for the cached card.
+ * Render an IRC coordination custom message (`irc:incoming` / `irc:autoreply` /
+ * `irc:relay` / `irc:workpool`) as a tool-activity card. `getExpanded` supplies
+ * the live expanded-state getter for the cached card.
  */
 export function buildIrcMessageCard(message: CustomOrHookMessage, getExpanded: () => boolean): Component {
 	const details = (
@@ -161,19 +161,21 @@ export function buildIrcMessageCard(message: CustomOrHookMessage, getExpanded: (
 				: message.customType === "irc:workpool"
 					? ("workpool" as const)
 					: ("relay" as const);
-	return createIrcMessageCard(
-		{
-			kind,
-			from: details?.from,
-			to: details?.to,
-			body: kind === "incoming" ? details?.message : details?.body,
-			replyTo: details?.replyTo,
-			timestamp: message.timestamp,
-			pool: details?.pool,
-			mode: details?.mode,
-		},
-		getExpanded,
-		theme,
+	return new ToolActivityContainer(
+		createIrcMessageCard(
+			{
+				kind,
+				from: details?.from,
+				to: details?.to,
+				body: kind === "incoming" ? details?.message : details?.body,
+				replyTo: details?.replyTo,
+				timestamp: message.timestamp,
+				pool: details?.pool,
+				mode: details?.mode,
+			},
+			getExpanded,
+			theme,
+		),
 	);
 }
 
@@ -201,7 +203,7 @@ export function buildFileMentionBlock(files: FileMentionMessage["files"], indent
 			parts: [
 				{ text: theme.tree.last, color: "dim" },
 				{ text: "Read", color: "muted" },
-				{ text: file.path, color: "accent" },
+				{ text: formatStyledPath(file.path, theme) },
 				{ text: `(${detail})`, color: "dim" },
 			],
 			indent,

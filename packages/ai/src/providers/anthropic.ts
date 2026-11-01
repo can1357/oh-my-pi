@@ -89,7 +89,12 @@ import {
 import { withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
-import { getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
+import {
+	getStreamFirstEventTimeoutMs,
+	getStreamIdleTimeoutMs,
+	iterateWithIdleTimeout,
+	iterateWithTerminalGrace,
+} from "../utils/idle-iterator";
 import {
 	ANTHROPIC_SLOW_USAGE_LIMIT,
 	ANTHROPIC_USAGE_LIMIT_HEADER,
@@ -920,6 +925,22 @@ type RawMessagePingEvent = { type: "ping" };
 type AnthropicStreamEvent = RawMessageStreamEvent | RawMessagePingEvent;
 const ANTHROPIC_PING_EVENT: RawMessagePingEvent = { type: "ping" };
 
+/** A content delta that carries no bytes: a stalled relay can repeat these forever, so they are not stream progress. */
+function isEmptyContentDelta(event: AnthropicStreamEvent): boolean {
+	if (event.type !== "content_block_delta") return false;
+	const delta = event.delta;
+	switch (delta.type) {
+		case "text_delta":
+			return delta.text === "";
+		case "thinking_delta":
+			return delta.thinking === "";
+		case "input_json_delta":
+			return delta.partial_json === "";
+		default:
+			return false;
+	}
+}
+
 /**
  * In-stream `error` SSE frames carry an Anthropic error envelope:
  * `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`.
@@ -1114,6 +1135,16 @@ const PROVIDER_MAX_RETRIES = 10;
  * recovery path (#4900).
  */
 const PING_PROGRESS_MAX_IDLE_MULTIPLIER = 3;
+
+/**
+ * How long to keep reading the HTTP body after `message_stop`. The turn is
+ * complete at that frame, but cancelling a body whose terminal chunk has not
+ * arrived yet makes Bun close the socket instead of returning it to the pool,
+ * so every turn behind a relay that flushes `message_stop` separately pays a
+ * fresh connection (TCP, TLS, slow start). The drain runs after the turn
+ * completes; the window only elapses on hosts that hold the body open.
+ */
+const ANTHROPIC_POST_STOP_GRACE_MS = 2_500;
 
 /**
  * Log a malformed-stream-envelope anomaly without aborting the turn. The strict
@@ -2619,6 +2650,7 @@ const streamAnthropicOnce = (
 					let sawMessageStart = false;
 					let sawTerminalEnvelope = false;
 					let sawMessageStop = false;
+					let messageStopAtMs: number | undefined;
 					// Set when a duplicate message_start splices a second envelope onto
 					// the stream; closed indexes then refuse to reopen so replayed
 					// content cannot duplicate (see content_block_start guard).
@@ -2628,6 +2660,8 @@ const streamAnthropicOnce = (
 						number,
 						{
 							contentIndex: number;
+							/** True once a native signature_delta arrived; a block-start signature is only a fallback. */
+							signatureDeltaStarted?: boolean;
 							kind:
 								| "text"
 								| "thinking"
@@ -2666,7 +2700,9 @@ const streamAnthropicOnce = (
 						onFirstItemTimeout: () => activeAbortTracker.abortLocally(firstEventTimeoutAbortError),
 						abortSignal: options?.signal,
 						isProgressItem: item => {
-							if ((item as AnthropicStreamEvent).type === "ping") {
+							const event = item as AnthropicStreamEvent;
+							if (isEmptyContentDelta(event)) return false;
+							if (event.type === "ping") {
 								if (!sawNonPingEvent) return false;
 								if (pingProgressCapMs === undefined) return true;
 								return Date.now() - lastNonPingProgressAtMs < pingProgressCapMs;
@@ -2676,10 +2712,20 @@ const streamAnthropicOnce = (
 							return true;
 						},
 					});
+					const drainRequestAbortController = activeAbortTracker.requestAbortController;
+					const drainedAnthropicStream = iterateWithTerminalGrace(timedAnthropicStream, {
+						finishedAtMs: () => messageStopAtMs,
+						graceMs: ANTHROPIC_POST_STOP_GRACE_MS,
+						// The idle-timeout generator is parked mid-`next()` when the window
+						// closes; aborting the transport settles that read. A bare abort sets
+						// no local reason, so the completed turn is not reported as an error.
+						onGraceEnd: () => drainRequestAbortController.abort(),
+						awaitDrainOnReturn: options?.waitForTerminalDrain,
+					});
 					const observedAnthropicStream =
 						rawSseObserver && !recordsRawSseEvents
-							? observeDecodedAnthropicEvents(timedAnthropicStream, rawSseObserver)
-							: timedAnthropicStream;
+							? observeDecodedAnthropicEvents(drainedAnthropicStream, rawSseObserver)
+							: drainedAnthropicStream;
 					for await (const event of observedAnthropicStream) {
 						sawEvent = true;
 
@@ -2808,7 +2854,8 @@ const streamAnthropicOnce = (
 								const block: Block = {
 									type: "thinking",
 									thinking: event.content_block.thinking ?? "",
-									thinkingSignature: "",
+									thinkingSignature:
+										typeof event.content_block.signature === "string" ? event.content_block.signature : "",
 									[kStreamingBlockIndex]: event.index,
 								};
 								output.content.push(block);
@@ -2966,8 +3013,12 @@ const streamAnthropicOnce = (
 									continue;
 								}
 								streamedReplayUnsafeContent = true;
-								block.thinkingSignature = block.thinkingSignature || "";
-								block.thinkingSignature += event.delta.signature;
+								// Some compatible endpoints put the signature on block_start: a fallback that the
+								// first native delta replaces, not a prefix of the delta sequence.
+								block.thinkingSignature = openBlock.signatureDeltaStarted
+									? `${block.thinkingSignature ?? ""}${event.delta.signature}`
+									: event.delta.signature;
+								openBlock.signatureDeltaStarted = true;
 							}
 						} else if (event.type === "content_block_stop") {
 							if (sawTerminalEnvelope) {
@@ -3094,7 +3145,9 @@ const streamAnthropicOnce = (
 						} else if (event.type === "message_stop") {
 							sawTerminalEnvelope = true;
 							sawMessageStop = true;
-							// The protocol is complete even if a broken keep-alive leaves the HTTP body open.
+							// The protocol is complete even if a broken keep-alive leaves the HTTP
+							// body open; the terminal-grace wrapper drains the rest in the background.
+							messageStopAtMs = Date.now();
 							break;
 						}
 					}

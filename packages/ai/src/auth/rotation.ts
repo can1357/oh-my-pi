@@ -401,7 +401,8 @@ export class RateLimits implements LimitsApi {
 	 * For usage-limit and account-policy failures with no free sibling, sleeps
 	 * until the earliest sibling unblocks when that is at most
 	 * {@link SIBLING_UNBLOCK_WAIT_MAX_MS} away, then reports `afterSiblingWait`.
-	 * Aborting `options.signal` during that wait rejects.
+	 * Setting `options.waitForSibling` to false skips that wait without skipping
+	 * the failed credential's block. Aborting `options.signal` during the wait rejects.
 	 */
 	async rotate(
 		provider: string,
@@ -427,7 +428,7 @@ export class RateLimits implements LimitsApi {
 				credentialId: options?.credentialId,
 				signal: options?.signal,
 			});
-			return awaitSiblingUnblock(mark, options?.signal);
+			return awaitSiblingUnblock(mark, options?.signal, options?.waitForSibling);
 		}
 
 		const deniedModel = AIError.codexChatGPTAccountPolicyModel(error);
@@ -476,7 +477,7 @@ export class RateLimits implements LimitsApi {
 				routing,
 				false,
 			);
-			return strict ? { switched: false } : awaitSiblingUnblock(mark, options?.signal);
+			return strict ? { switched: false } : awaitSiblingUnblock(mark, options?.signal, options?.waitForSibling);
 		}
 
 		const providerKey = providerTypeKey(provider, sessionCredential.type);
@@ -542,9 +543,13 @@ export class RateLimits implements LimitsApi {
  * Turn a no-sibling mark into a rotation by sleeping out the soonest sibling
  * block when it expires within {@link SIBLING_UNBLOCK_WAIT_MAX_MS}.
  */
-async function awaitSiblingUnblock(mark: UsageLimitMarkResult, signal?: AbortSignal): Promise<CredentialRotation> {
+async function awaitSiblingUnblock(
+	mark: UsageLimitMarkResult,
+	signal?: AbortSignal,
+	waitForSibling = true,
+): Promise<CredentialRotation> {
 	if (mark.switched) return { switched: true };
-	if (mark.retryAtMs === undefined) return { switched: false };
+	if (!waitForSibling || mark.retryAtMs === undefined) return { switched: false };
 	const waitMs = mark.retryAtMs - Date.now() + SIBLING_UNBLOCK_SLACK_MS;
 	if (waitMs > SIBLING_UNBLOCK_WAIT_MAX_MS) return { switched: false };
 	if (waitMs > 0) await scheduler.wait(waitMs, { signal });

@@ -27,6 +27,7 @@ import {
 	cfgProvidersCacheRetention,
 	cfgProvidersMaxInFlightRequests,
 	cfgProvidersMuseCodeStoreResponses,
+	cfgProvidersOpenaiCodexDaybreak,
 	cfgProvidersOpenaiLiveSteering,
 	cfgProvidersOpenaiWebsockets,
 	cfgProvidersOpenrouterVariant,
@@ -49,7 +50,7 @@ function timeoutSecondsToMs(value: number): number | undefined {
 	return Math.max(1, Math.trunc(value * 1000));
 }
 
-/** Session wiring for Anthropic subscription wrap-up and slow mode (`providers.anthropic.slowMode`). */
+/** Session wiring for Anthropic subscription wrap-up and slow mode (`providers.anthropic.slowMode`), and server-side fallback opt-out. */
 export interface SettingsStreamSlowModeContext {
 	/** Defaults to the process-wide lane registry. */
 	lanes?: AnthropicSlowModeLanes;
@@ -59,6 +60,8 @@ export interface SettingsStreamSlowModeContext {
 	notify?: (level: "info" | "warning" | "error", message: string) => void;
 	/** Record which account lane served the session's latest Anthropic request. */
 	onLane?: (lane: string) => void;
+	/** Never inject the opt-in server-side fallback chain (per-call `model` workers never switch models). */
+	disableServerSideFallback?: boolean;
 }
 
 /**
@@ -133,6 +136,11 @@ export function createSettingsAwareStreamFn(
 		const storeResponses =
 			streamOptions?.storeResponses ??
 			(model.provider === "muse-code" ? cfgProvidersMuseCodeStoreResponses.get(settings) : undefined);
+		// Per request from this session's settings: the process-wide default in
+		// pi-ai follows whichever session bound effects last.
+		const codexAccessPrograms =
+			streamOptions?.codexAccessPrograms ??
+			(model.api === "openai-codex-responses" ? cfgProvidersOpenaiCodexDaybreak.get(settings) : undefined);
 		const maxInFlightRequests = validateProviderMaxInFlightRequests(
 			streamOptions?.maxInFlightRequests ?? cfgProvidersMaxInFlightRequests.get(settings),
 		);
@@ -171,6 +179,12 @@ export function createSettingsAwareStreamFn(
 			liveSteering: cfgProvidersOpenaiLiveSteering.get(settings) ? streamOptions?.liveSteering : undefined,
 			...(fallbacks !== undefined ? { fallbacks } : {}),
 			...(storeResponses !== undefined ? { storeResponses } : {}),
+			// A per-call worker never switches models: no fallback chain, including a
+			// caller-supplied one, and Factory drops its own refusal chain.
+			...(slowModeContext?.disableServerSideFallback
+				? { fallbacks: undefined, disableServerSideFallback: true }
+				: {}),
+			...(codexAccessPrograms !== undefined ? { codexAccessPrograms } : {}),
 			...(slowModeHooks !== undefined ? { anthropicSlowMode: slowModeHooks } : {}),
 		};
 		return base(model, context, merged);

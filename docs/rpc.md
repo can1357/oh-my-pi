@@ -230,6 +230,7 @@ correlate it via `id`. Ordering across concurrent commands is not guaranteed
 ### Session
 
 - `{ id?, type: "get_session_stats" }`
+- `{ id?, type: "get_session_lease", sessionIds: string[] }` → `data: { held: string[], unknown: string[] }`: which sessions a running omp (this process included) owns, probed without taking their ownership leases. Ids in neither list are free; `unknown` ids could not be probed. `omp session lease --json -- <id>...` answers the same without an RPC child (`--` keeps ids starting with `-` from parsing as options).
 - `{ id?, type: "export_html", outputPath?: string }`
 - `{ id?, type: "switch_session", sessionPath: string, provider?: string, modelId?: string }`
 - `{ id?, type: "branch", entryId: string }`
