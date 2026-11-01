@@ -758,8 +758,10 @@ impl GitRepo {
 	///
 	/// Empty when git walked everything, or when the in-process walk answered
 	/// (it reaches what it can open and fails otherwise, rather than warning).
-	/// An error when git's stderr outgrew the capture: the cut may have taken
-	/// one of those reports, so the listing's completeness is unknown.
+	/// An error when git may have reported a directory this cannot name: its
+	/// stderr outgrew the capture, and the cut may have taken one of those
+	/// reports, or a report is there with no readable name. Either way the
+	/// listing's completeness is unknown.
 	pub fn ls_files_with_warnings(
 		&self,
 		others: bool,
@@ -1180,15 +1182,21 @@ fn cli_text_and_warnings_capped(
 	Ok((output.into_checked(args)?.stdout, warnings))
 }
 
+/// The opening of git's report of a directory it could not open. The path
+/// follows raw, then `': ` and the reason.
+const COULD_NOT_OPEN: &str = "warning: could not open directory '";
+
 /// The directories a `git ls-files` run reported it could not open.
 ///
-/// Only that warning: git's stderr also carries traces, access warnings for
-/// individual files it did read, and anything a hook printed, and treating
-/// every line as an unread directory refused healthy captures. The form is
-/// fixed because this module forces `LC_MESSAGES=C`. A stderr cut at the
-/// capture limit answers nothing: the report of an unopened directory may be
-/// in the part that was dropped, and an empty list would then read as a
-/// complete walk.
+/// The listing silently lacks every such directory, so this answer fails
+/// closed whenever git may have reported one it cannot name: when the capture
+/// cut stderr (the report may be in the part that was dropped), and when a
+/// report is present but no directory can be read out of it. Everything else
+/// on stderr is skipped, because it is not a report of an unread directory:
+/// traces, anything a hook printed, and access warnings for single files git
+/// still walked past (an unreadable `.gitignore` warns, and its subtree is
+/// still listed). Refusing on those refused healthy captures. The form is
+/// fixed because this module forces `LC_MESSAGES=C`.
 fn unreadable_directories(stderr: &str) -> Result<Vec<String>> {
 	if super::cli::is_truncated(stderr) {
 		return Err(Error::backend(
@@ -1198,21 +1206,70 @@ fn unreadable_directories(stderr: &str) -> Result<Vec<String>> {
 		));
 	}
 	let mut out = Vec::new();
-	for line in stderr.lines() {
-		let Some(rest) = line.strip_prefix("warning: could not open directory '") else {
+	// git ends each report with a newline, so every report opens a line.
+	let mut rest = stderr;
+	while !rest.is_empty() {
+		let Some(record) = rest.strip_prefix(COULD_NOT_OPEN) else {
+			rest = rest.split_once('\n').map_or("", |(_, next)| next);
 			continue;
 		};
-		let Some(end) = rest.rfind("':") else {
-			continue;
+		let Some((name, next)) = could_not_open_record(record) else {
+			return Err(Error::backend(
+				"git ls-files",
+				"it reported a directory it could not open without a readable name, so the \
+				 directories it could not open are unknown",
+			));
 		};
-		let name = rest[..end].trim_end_matches('/');
-		if !name.is_empty() {
-			out.push(name.to_owned());
-		}
+		out.push(name.to_owned());
+		rest = next;
 	}
 	out.sort();
 	out.dedup();
 	Ok(out)
+}
+
+/// The directory one `could not open directory` report names, and the stderr
+/// that follows the report; `None` when no directory can be read out of it.
+///
+/// git writes the path raw, so a newline in a directory name is a newline in
+/// the report, and a report can span lines. It ends at the first line end
+/// where the text so far reads as `<path>': <reason>`. A line that opens the
+/// next report ends the search: git cut this one short (it caps a report at
+/// 4 KiB, which a path past `PATH_MAX` reaches), and its name is lost.
+///
+/// A name holding `/': ` and then a newline reads as a shorter name, since
+/// the report itself cannot tell the two apart. It is still a name, so the
+/// listing is still not taken as complete.
+fn could_not_open_record(record: &str) -> Option<(&str, &str)> {
+	let mut line_start = 0;
+	loop {
+		let line_end = record[line_start..]
+			.find('\n')
+			.map_or(record.len(), |at| line_start + at);
+		if let Some(name) = could_not_open_name(&record[..line_end]) {
+			return Some((name, record.get(line_end + 1..).unwrap_or_default()));
+		}
+		line_start = line_end + 1;
+		if line_start >= record.len() || record[line_start..].starts_with(COULD_NOT_OPEN) {
+			return None;
+		}
+	}
+}
+
+/// The directory in `text` when it reads as a whole report body:
+/// `<path>': <reason>`. git opens `.` for the top of the tree and `<dir>/`
+/// for anything below it, and the reason is the C locale's strerror text: one
+/// line holding no `'`. The last `': ` closes the path, since a name may hold
+/// `': ` itself.
+fn could_not_open_name(text: &str) -> Option<&str> {
+	let (path, reason) = text.rsplit_once("': ")?;
+	if reason.is_empty() || reason.contains(['\'', '\n']) {
+		return None;
+	}
+	if path == "." {
+		return Some(path);
+	}
+	path.strip_suffix('/').filter(|name| !name.is_empty())
 }
 
 /// Retention cap for path-list captures.
@@ -1697,6 +1754,173 @@ mod tests {
 		assert!(super::super::cli::is_truncated(&stderr), "stderr must overflow the cap: {stderr:?}");
 		let err = listed.expect_err("a cut warning stream must not answer");
 		assert!(err.to_string().contains("capture limit"), "unexpected error: {err}");
+		Ok(())
+	}
+
+	/// git's own bytes, captured from `git ls-files --others --exclude-standard
+	/// -z` (git 2.43, `LC_MESSAGES=C`) over mode-000 directories: a name is
+	/// written raw, a CR in it becomes `?`, and an LF stays an LF.
+	#[test]
+	fn unreadable_directories_reads_a_report_whose_name_spans_lines() -> TestResult {
+		// Failure mode: read line by line, the first line had the opening and
+		// no close and the second had no opening, both were dropped, and the
+		// empty list let the teardown delete the directory's only copy.
+		let lf = "warning: could not open directory 'locked\npart/': Permission denied\n";
+		let crlf = "warning: could not open directory 'locked?\npart/': Permission denied\n";
+		let lf_then_plain = "warning: could not open directory 'a\nb/': Permission denied\nwarning: \
+		                     could not open directory 'plain/': Permission denied\n";
+		// Directory `x/': y\nz`: the first line already reads as a whole
+		// report, so the name comes out short, but a name comes out.
+		let lf_after_close = "warning: could not open directory 'x/': y\nz/': Permission denied\n";
+		assert_eq!(unreadable_directories(lf)?, ["locked\npart"]);
+		assert_eq!(unreadable_directories(crlf)?, ["locked?\npart"]);
+		assert_eq!(unreadable_directories(lf_then_plain)?, ["a\nb", "plain"]);
+		assert_eq!(unreadable_directories(lf_after_close)?, ["x"]);
+		Ok(())
+	}
+
+	#[test]
+	fn unreadable_directories_refuses_a_report_it_cannot_name() {
+		// Failure mode: a report with no readable name was skipped, and the
+		// empty list read as a complete walk. git caps a report at 4 KiB, so a
+		// path past PATH_MAX is cut before it closes; these are git 2.43's
+		// bytes for 24 nested 199-byte names.
+		let path: String = (0..24)
+			.map(|level| format!("{level}{}/", "x".repeat(198)))
+			.collect();
+		let mut cut = format!("warning: could not open directory '{path}': File name too long");
+		cut.truncate(4095);
+		cut.push('\n');
+		// The next report's close must not be taken for this one's.
+		let then_plain =
+			format!("{cut}warning: could not open directory 'plain/': Permission denied\n");
+		for stderr in [&cut, &then_plain] {
+			let err = unreadable_directories(stderr).expect_err("an unnamed report must not answer");
+			assert!(err.to_string().contains("without a readable name"), "unexpected error: {err}");
+		}
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn ls_files_with_warnings_names_a_directory_whose_name_holds_a_newline() -> TestResult {
+		// Failure mode: git exits 0 with no paths and a report that spans two
+		// lines, and the listing came back empty and complete.
+		let (dir, repo) = repo()?;
+		let mut locked = Vec::new();
+		for name in ["locked\npart", "locked\r\npart"] {
+			let path = dir.path().join(name);
+			fs::create_dir(&path)?;
+			fs::write(path.join("only-copy.txt"), "x")?;
+			if !lock_dir(&path)? {
+				return Ok(());
+			}
+			locked.push(path);
+		}
+		let listed = repo.ls_files_with_warnings(true, true);
+		for path in &locked {
+			unlock_dir(path)?;
+		}
+
+		let (paths, unreadable) = listed?;
+		assert!(paths.is_empty(), "{paths:?}");
+		// git writes the CR as `?`, so that name is lossy; it is still a name,
+		// which is what stops the capture.
+		assert_eq!(unreadable.len(), 2, "{unreadable:?}");
+		assert!(unreadable.iter().any(|name| name == "locked\npart"), "{unreadable:?}");
+		Ok(())
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn ls_files_with_warnings_answers_past_an_unreadable_gitignore() -> TestResult {
+		// Failure mode: a refusal on a safe warning, which gets the refusal
+		// disabled. git cannot read the `.gitignore`, says so, and lists the
+		// subtree it would have ignored, so the listing is complete.
+		use std::os::unix::fs::PermissionsExt;
+		let (dir, repo) = repo()?;
+		let root = dir.path();
+		let gitignore = root.join(".gitignore");
+		fs::write(&gitignore, "unseen/\n")?;
+		fs::create_dir(root.join("unseen"))?;
+		fs::write(root.join("unseen").join("work"), "x")?;
+		fs::set_permissions(&gitignore, fs::Permissions::from_mode(0o000))?;
+		if fs::read(&gitignore).is_ok() {
+			fs::set_permissions(&gitignore, fs::Permissions::from_mode(0o600))?;
+			eprintln!("skipping: this process can read a mode-000 file");
+			return Ok(());
+		}
+		let args = ["ls-files", "-z", "--others", "--exclude-standard"].map(str::to_owned);
+		let warned = cli_text_and_warnings_capped(
+			root,
+			&args,
+			super::super::cli::SYNC_TIMEOUT,
+			super::super::cli::OUTPUT_LIMIT_BYTES,
+		);
+		let listed = repo.ls_files_with_warnings(true, true);
+		fs::set_permissions(&gitignore, fs::Permissions::from_mode(0o600))?;
+
+		// Pin the precondition: git did warn, so the answer below is the
+		// parser passing the warning by, not a quiet stderr.
+		let (_, stderr) = warned?;
+		assert!(stderr.contains("warning: unable to access '.gitignore'"), "{stderr:?}");
+		let (paths, unreadable) = listed?;
+		assert_eq!(paths, [".gitignore", "unseen/work"]);
+		assert!(unreadable.is_empty(), "{unreadable:?}");
+		Ok(())
+	}
+
+	/// Nest `depth` directories of 199-byte names in `root`, each made
+	/// relative to its parent, so the whole path can pass `PATH_MAX`.
+	#[cfg(unix)]
+	fn deep_tree(root: &Path, depth: usize) -> TestResult {
+		use std::{
+			ffi::CString,
+			os::fd::{AsRawFd, FromRawFd, OwnedFd},
+		};
+		let mut dir = OwnedFd::from(fs::File::open(root)?);
+		for level in 0..depth {
+			let name = CString::new(format!("{level}{}", "x".repeat(198)))?;
+			// SAFETY: `dir` is an open directory descriptor, and `name` is a
+			// NUL-terminated string that outlives the call.
+			if unsafe { libc::mkdirat(dir.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
+				return Err(std::io::Error::last_os_error().into());
+			}
+			// SAFETY: as for `mkdirat` above.
+			let child = unsafe {
+				libc::openat(
+					dir.as_raw_fd(),
+					name.as_ptr(),
+					libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+				)
+			};
+			if child < 0 {
+				return Err(std::io::Error::last_os_error().into());
+			}
+			// SAFETY: `child` was just opened by this call and nothing else
+			// owns it.
+			dir = unsafe { OwnedFd::from_raw_fd(child) };
+		}
+		Ok(())
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn ls_files_with_warnings_refuses_a_directory_past_path_max() -> TestResult {
+		// Failure mode: git cannot open a directory past PATH_MAX, exits 0,
+		// and cuts its report before the name closes; the report was skipped
+		// and the empty list read as a complete walk.
+		let (dir, repo) = repo()?;
+		deep_tree(dir.path(), 24)?;
+		match repo.ls_files_with_warnings(true, true) {
+			Err(err) => {
+				assert!(err.to_string().contains("without a readable name"), "unexpected error: {err}");
+			},
+			// A git that writes the whole report names the directory, which
+			// refuses the capture as well.
+			Ok((paths, unreadable)) => {
+				assert!(!unreadable.is_empty(), "a short listing answered as complete: {paths:?}");
+			},
+		}
 		Ok(())
 	}
 
