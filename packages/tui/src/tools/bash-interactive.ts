@@ -24,6 +24,8 @@ const MAX_LIVE_WRITE_QUEUE_CHUNKS = 512;
 const NATIVE_SHEET_INSET_COLS = 8;
 // Action id of the native Force kill button (mirrors Esc).
 const KILL_ACTION = "kill";
+// PTY grid rows a compact sheet shows — a password prompt and the line above it.
+const COMPACT_CONTENT_ROWS = 6;
 
 /**
  * Translates a TUI key event into the bytes a terminal would send to a PTY
@@ -92,8 +94,8 @@ export function normalizeInputForPty(data: string, applicationCursorKeysMode: bo
 }
 /** Interactive terminal overlay driven by an external PTY controller. */
 export class BashInteractiveOverlayComponent implements Component {
-	/** Native sheet: a full-pane glass overlay titled Console. */
-	readonly nativeOverlay = { role: "omp.overlay.console", size: "full", head: "Console" } as const;
+	/** Native sheet: a full-pane glass overlay titled Console, a small card for a password prompt. */
+	readonly nativeOverlay: NonNullable<Component["nativeOverlay"]>;
 	#terminal: XtermTerminalType;
 	#state: "running" | "complete" | "timed_out" | "killed" = "running";
 	#exitCode: number | undefined;
@@ -102,6 +104,7 @@ export class BashInteractiveOverlayComponent implements Component {
 	#onDispose: () => void = () => {};
 	readonly #backend: BashInteractiveTerminalBackend;
 	readonly #command: string;
+	readonly #compact: boolean;
 	readonly #uiTheme: Theme;
 	readonly #getTerminalRows: () => number;
 	#lastCols = 0;
@@ -120,8 +123,11 @@ export class BashInteractiveOverlayComponent implements Component {
 		getTerminalRows: () => number,
 		terminalCtor: typeof XtermModule.Terminal,
 		backend: BashInteractiveTerminalBackend,
+		compact = false,
 	) {
 		this.#command = command;
+		this.nativeOverlay = { role: "omp.overlay.console", size: compact ? "sm" : "full", head: "Console" };
+		this.#compact = compact;
 		this.#uiTheme = uiTheme;
 		this.#getTerminalRows = getTerminalRows;
 		this.#backend = backend;
@@ -260,6 +266,9 @@ export class BashInteractiveOverlayComponent implements Component {
 	}
 
 	#maxContentRows(): number {
+		// A password prompt is a line or two; the card shows the grid it needs
+		// rather than the pane, and a taller prompt scrolls inside it.
+		if (this.#compact) return Math.min(COMPACT_CONTENT_ROWS, Math.max(1, this.#getTerminalRows() - 4));
 		const maxOverlayRows = Math.max(5, Math.floor(this.#getTerminalRows() * 0.8));
 		return Math.max(1, maxOverlayRows - 4);
 	}

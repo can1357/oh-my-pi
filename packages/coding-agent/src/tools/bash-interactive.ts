@@ -29,6 +29,8 @@ export async function runInteractiveBashPty(
 		env?: Record<string, string>;
 		artifactPath?: string;
 		artifactId?: string;
+		/** A password prompt rather than a console: a small card, not the full pane. */
+		compact?: boolean;
 	},
 ): Promise<BashInteractiveResult> {
 	const settings = await Settings.init();
@@ -60,6 +62,7 @@ export async function runInteractiveBashPty(
 					() => tui.terminal.rows,
 					XtermTerminal,
 					{ resize: (columns, rows) => session.resize(columns, rows) },
+					options.compact === true,
 				);
 				let finished = false;
 				const finalize = (run: PtyRunResult) => {

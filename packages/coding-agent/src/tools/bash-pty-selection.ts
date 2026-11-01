@@ -142,12 +142,93 @@ function skipPrefixOperands(segment: string[], index: number): number {
 }
 
 function segmentNeedsAuthTerminal(segment: string[]): boolean {
-	const commandIndex = effectiveCommandIndex(segment);
-	if (commandIndex === -1) return false;
-	const command = baseName(segment[commandIndex]);
-	if (!TTY_AUTH_COMMANDS.has(command)) return false;
-	return authCommandMayPrompt(segment, commandIndex + 1, command);
+	return authCommandWord(segment) !== undefined;
 }
+
+/**
+ * The auth command word this segment runs (`doas`, `/usr/bin/sudo`), when the
+ * segment runs one and its own options leave the prompt possible.
+ */
+function authCommandWord(segment: string[]): string | undefined {
+	const commandIndex = effectiveCommandIndex(segment);
+	if (commandIndex === -1) return undefined;
+	const word = segment[commandIndex];
+	const command = baseName(word);
+	if (!TTY_AUTH_COMMANDS.has(command)) return undefined;
+	return authCommandMayPrompt(segment, commandIndex + 1, command) ? word : undefined;
+}
+
+/**
+ * The argv that asks an auth command whether it would prompt: the command word
+ * with `-n`, which makes it fail instead of reading a password, and a
+ * throwaway `true` so the probe cannot run the wrapped command. The wrapped
+ * command is left out on purpose — `doas` and `sudo` answer from the persisted
+ * credential or a passwordless rule before they look at it.
+ */
+export function authProbeArgv(command: string): string[] | undefined {
+	for (const segment of tokenizeShellSegments(command)) {
+		const word = authCommandWord(segment);
+		if (word !== undefined) return [word, "-n", "true"];
+	}
+	return undefined;
+}
+
+/** Exit status of a probe run, or undefined when the probe could not be started at all. */
+export type AuthProbeOutcome = number | undefined;
+
+/** Runs one probe argv; tests pass their own so no process is spawned. */
+export type AuthProbeRunner = (
+	argv: readonly string[],
+	options: { cwd: string | undefined; env: Record<string, string> | undefined },
+) => Promise<AuthProbeOutcome>;
+
+export interface AuthProbeOptions {
+	cwd?: string;
+	env?: Record<string, string>;
+	/** Replaces the spawn the probe runs through. */
+	run?: AuthProbeRunner;
+}
+
+/** Longest a probe may run before it is killed and read as "a password is asked". */
+const AUTH_PROBE_TIMEOUT_MS = 2_000;
+
+/**
+ * Whether the command really has to be asked for a password. `doas` and `sudo`
+ * take the answer from a persisted credential or a passwordless rule without
+ * touching the terminal, and the plain executor runs those commands exactly as
+ * well — so the interactive terminal, and the prompt the user has to answer in
+ * it, is only worth opening for a call the auth command says will prompt.
+ *
+ * Anything but a clean exit — a prompt needed, a spawn failure, a kill — keeps
+ * the terminal: reading a real prompt as "no prompt" leaves the command
+ * unauthenticated, while the reverse only opens a card for nothing.
+ */
+export async function authPromptRequired(command: string, options: AuthProbeOptions = {}): Promise<boolean> {
+	const argv = authProbeArgv(command);
+	if (argv === undefined) return false;
+	const exitCode = await (options.run ?? runAuthProbe)(argv, { cwd: options.cwd, env: options.env });
+	return exitCode !== 0;
+}
+
+const runAuthProbe: AuthProbeRunner = async (argv, options) => {
+	try {
+		const child = Bun.spawn(argv as string[], {
+			cwd: options.cwd,
+			env: options.env,
+			stdin: "ignore",
+			stdout: "ignore",
+			stderr: "ignore",
+		});
+		const timer = setTimeout(() => child.kill(), AUTH_PROBE_TIMEOUT_MS);
+		try {
+			return await child.exited;
+		} finally {
+			clearTimeout(timer);
+		}
+	} catch {
+		return undefined;
+	}
+};
 
 /**
  * Scan only the auth command's own leading options — a `-n` in the wrapped

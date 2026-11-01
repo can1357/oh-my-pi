@@ -89,7 +89,7 @@ import { formatCompactQuota } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import { resolveTernPane } from "../../tools/browser/tern/kind";
 import { TernError, type TernErrorKind, TernSocketClient } from "../../tools/browser/tern/wire";
 import { outputMeta } from "../../tools/output-meta";
-import { bashNeedsAuthTerminal, canUseInteractiveBashPty } from "../../tools/bash-pty-selection";
+import { authPromptRequired, bashNeedsAuthTerminal, canUseInteractiveBashPty } from "../../tools/bash-pty-selection";
 import { resolveToCwd, stripOuterDoubleQuotes } from "../../tools/path-utils";
 import { replaceTabs, shortenEmbeddedPaths, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import {
@@ -1907,12 +1907,15 @@ export class CommandController {
 		// neither the plain executor nor the headless `!` PTY forwards. Give such
 		// a command the same interactive overlay the bash tool uses, so the typed
 		// password reaches it. Input is forwarded only in that overlay; an
-		// ordinary `!` command keeps the transcript PTY replay.
+		// ordinary `!` command keeps the transcript PTY replay, and so does an
+		// auth command that a persisted credential or a passwordless rule spares
+		// from prompting at all.
 		const toolUi = this.ctx.getToolUIContext();
-		const interactivePty =
-			toolUi && canUseInteractiveBashPty(bashNeedsAuthTerminal(command), { hasUI: true, ui: toolUi })
-				? { ui: toolUi }
-				: undefined;
+		const authPty =
+			toolUi !== undefined &&
+			canUseInteractiveBashPty(bashNeedsAuthTerminal(command), { hasUI: true, ui: toolUi }) &&
+			(await authPromptRequired(command, { cwd: this.ctx.sessionManager.getCwd() }));
+		const interactivePty = authPty ? { ui: toolUi, compact: true } : undefined;
 
 		try {
 			const result = await this.ctx.session.executeBash(

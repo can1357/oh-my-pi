@@ -44,7 +44,18 @@ function writeAuthCommand(dir: string, name: "doas" | "sudo", body: string): str
 	return path;
 }
 
-const PROMPT_FOR_PASSWORD = "printf 'Password: ' > /dev/tty\nread -r _ < /dev/tty\nprintf 'authenticated\\n'";
+const PROMPT_FOR_PASSWORD = `if [ "$1" = "-n" ]; then printf 'doas: Authentication required\\n'; exit 1; fi
+printf 'Password: ' > /dev/tty
+read -r _ < /dev/tty
+printf 'authenticated\\n'`;
+
+/**
+ * A stand-in that answers `-n` the way a cached credential or a `nopass` rule
+ * answers the real one (success, no password), and reports which executor ran
+ * it: only the interactive overlay gives the command a terminal on stdout.
+ */
+const CACHED_CREDENTIAL = `if [ "$1" = "-n" ]; then exit 0; fi
+if [ -t 1 ]; then printf 'overlay\\n'; else printf 'plain\\n'; fi`;
 
 function makeSession(): ToolSession {
 	return {
@@ -123,11 +134,11 @@ describe("BashTool authentication terminal", () => {
 		expect(text).not.toContain("cannot authenticate");
 	});
 
-	it.skipIf(ptyUnavailable)("does not claim an auth command failed when it needs no password", async () => {
-		// A `NOPASSWD` rule or a cached credential is the normal case for a
-		// passwordless command, so a headless run that exits 0 must not be
-		// reported as an authentication failure.
-		const sudo = writeAuthCommand(tempDir.path(), "sudo", "printf 'ok\\n'");
+	it.skipIf(ptyUnavailable)("runs an auth command that will not prompt without a terminal", async () => {
+		// A `NOPASSWD` rule or a cached credential answers before the terminal is
+		// read, so the call runs on the plain executor and nothing claims it
+		// failed to authenticate.
+		const sudo = writeAuthCommand(tempDir.path(), "sudo", CACHED_CREDENTIAL);
 		const tool = new BashTool(makeSession());
 		const result = await tool.execute(
 			"call-nopasswd",
@@ -140,9 +151,27 @@ describe("BashTool authentication terminal", () => {
 		);
 		const text = resultText(result as { content: Array<{ type: string; text?: string }> });
 
-		expect(text).toContain("ok");
-		expect(text).toContain("no interactive terminal is available here");
+		expect(text).toContain("plain");
+		// The overlay is not needed, so its absence is not worth a notice either.
+		expect(text).not.toContain("no interactive terminal is available here");
 		expect(text).not.toContain("cannot authenticate");
+	});
+
+	it.skipIf(ptyUnavailable)("keeps an auth command that will not prompt off the overlay", async () => {
+		const doas = writeAuthCommand(tempDir.path(), "doas", CACHED_CREDENTIAL);
+		const tool = new BashTool(makeSession());
+		const ctx = { hasUI: true, ui: headlessUi() } as unknown as AgentToolContext;
+		const result = await tool.execute(
+			"call-cached-credential",
+			{ command: `${doas} true`, timeout: 20 },
+			undefined,
+			undefined,
+			ctx,
+		);
+		const text = resultText(result as { content: Array<{ type: string; text?: string }> });
+
+		expect(text).toContain("plain");
+		expect(text).not.toContain("overlay");
 	});
 
 	it.skipIf(ptyUnavailable)("leaves an explicit pty: false call on the plain executor", async () => {

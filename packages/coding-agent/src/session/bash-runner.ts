@@ -89,7 +89,7 @@ export class BashRunner {
 			 * that forwards the typed password, exactly as the bash tool's own
 			 * auth-terminal routing does.
 			 */
-			interactivePty?: { ui: BashInteractiveUi };
+			interactivePty?: { ui: BashInteractiveUi; compact?: boolean };
 		},
 	): Promise<BashResult> {
 		const target = this.#captureSessionTarget();
@@ -136,6 +136,7 @@ export class BashRunner {
 				result = options?.interactivePty
 					? await this.#runInteractiveBash(command, {
 							ui: options.interactivePty.ui,
+							compact: options.interactivePty.compact,
 							cwd,
 							env: shellEnv,
 							timeout,
@@ -175,6 +176,7 @@ export class BashRunner {
 		command: string,
 		options: {
 			ui: BashInteractiveUi;
+			compact?: boolean;
 			cwd: string;
 			env: Record<string, string> | undefined;
 			timeout: number;
@@ -196,6 +198,7 @@ export class BashRunner {
 			timeoutMs: options.timeout === 0 ? undefined : options.timeout,
 			signal: options.signal,
 			env: preflight.env,
+			compact: options.compact,
 		});
 	}
 
