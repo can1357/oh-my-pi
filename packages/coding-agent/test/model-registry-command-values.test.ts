@@ -118,6 +118,10 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 	let tempDir = "";
 	let authStorage: AuthStorage;
 	let modelsPath = "";
+	// A test registers the cleanup of a session, session manager or API registration as soon as
+	// it creates one, and afterEach runs it. A test body cannot own cleanup: a test that times
+	// out never reaches its own `finally`.
+	const cleanups: Array<() => unknown> = [];
 
 	beforeEach(async () => {
 		tempDir = path.join(os.tmpdir(), `pi-test-model-command-values-${Snowflake.next()}`);
@@ -126,19 +130,27 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		authStorage = await AuthStorage.create(":memory:");
 	});
 
-	afterEach(() => {
-		// Restore spies here, never in a test body: a test that times out never reaches its own
-		// restore, and a performance.now spy it leaves behind makes the next
-		// mockSchedulerWaitWithClock() wrap that spy in itself, so every later test in the file
-		// dies with RangeError: Maximum call stack size exceeded.
+	afterEach(async () => {
+		// Restore spies first, so a cleanup that throws or hangs cannot leave them installed. A
+		// performance.now spy left behind makes the next mockSchedulerWaitWithClock() throw.
 		vi.restoreAllMocks();
-		authStorage.close();
-		if (!tempDir || !fs.existsSync(tempDir)) return;
-		try {
-			removeSyncWithRetries(tempDir);
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "EBUSY") throw error;
+		const failures: unknown[] = [];
+		for (const cleanup of cleanups.splice(0).reverse()) {
+			try {
+				await cleanup();
+			} catch (error) {
+				failures.push(error);
+			}
 		}
+		authStorage.close();
+		if (tempDir && fs.existsSync(tempDir)) {
+			try {
+				removeSyncWithRetries(tempDir);
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "EBUSY") throw error;
+			}
+		}
+		if (failures.length > 0) throw new AggregateError(failures, "test cleanup failed");
 	});
 
 	test("provider apiKey and headers resolve from command stdout", async () => {
@@ -494,6 +506,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			},
 		});
 		const sessionManager = SessionManager.create(tempDir, path.join(tempDir, "sessions"));
+		cleanups.push(() => sessionManager.close());
 		const session = new AgentSession({
 			agent,
 			sessionManager,
@@ -507,6 +520,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			}),
 			modelRegistry: registry,
 		});
+		cleanups.push(() => session.dispose());
 		// Backoff sleeps advance a virtual clock instead of waiting; the wall
 		// clock the command failure window reads follows that same clock.
 		mockSchedulerWaitWithClock();
@@ -524,28 +538,23 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			if (event.type === "auto_retry_end") retryEnds.push(event);
 		});
 
-		try {
-			await session.prompt("Use the command-keyed provider.");
+		await session.prompt("Use the command-keyed provider.");
+		await session.waitForIdle();
+		const firstRun = { retries, helperRuns: fs.readFileSync(counterFile, "utf8").length };
+		if (manualRetry) {
+			expect(await session.retry()).toBe(true);
 			await session.waitForIdle();
-			const firstRun = { retries, helperRuns: fs.readFileSync(counterFile, "utf8").length };
-			if (manualRetry) {
-				expect(await session.retry()).toBe(true);
-				await session.waitForIdle();
-			}
-			const helperRuns = fs.readFileSync(counterFile, "utf8").length;
-			return {
-				lastMessage: agent.state.messages.at(-1),
-				sentKeys,
-				retries,
-				retryEnds,
-				helperRuns,
-				elapsedMs: Date.now() - wallStart,
-				manualRetry: { retries: retries - firstRun.retries, helperRuns: helperRuns - firstRun.helperRuns },
-			};
-		} finally {
-			await session.dispose();
-			await sessionManager.close();
 		}
+		const helperRuns = fs.readFileSync(counterFile, "utf8").length;
+		return {
+			lastMessage: agent.state.messages.at(-1),
+			sentKeys,
+			retries,
+			retryEnds,
+			helperRuns,
+			elapsedMs: Date.now() - wallStart,
+			manualRetry: { retries: retries - firstRun.retries, helperRuns: helperRuns - firstRun.helperRuns },
+		};
 	}
 
 	test.each([1, 10])(
@@ -570,6 +579,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 	test("a createAgentSession turn whose apiKey command failed retries and completes once the command recovers", async () => {
 		const mockSource = "test/model-registry-command-values/create-agent-session";
 		registerMockApi(mockSource);
+		cleanups.push(() => unregisterCustomApis(mockSource));
 		const tokenFile = path.join(tempDir, "token.txt");
 		const counterFile = path.join(tempDir, "counter.txt");
 		fs.writeFileSync(tokenFile, "FAIL");
@@ -620,6 +630,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			skipPythonPreflight: true,
 			toolNames: [],
 		});
+		cleanups.push(() => session.dispose());
 		mockSchedulerWaitWithClock();
 		const wallStart = Date.now();
 		const monotonicStart = performance.now();
@@ -630,19 +641,14 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			if (event.type === "auto_retry_end") retryEnds.push(event);
 		});
 
-		try {
-			await session.prompt("Use the command-keyed provider.");
-			await session.waitForIdle();
+		await session.prompt("Use the command-keyed provider.");
+		await session.waitForIdle();
 
-			const last = session.agent.state.messages.at(-1);
-			expect(last).toMatchObject({ role: "assistant", stopReason: "stop" });
-			expect(mock.calls).toHaveLength(1);
-			expect(retryEnds).toEqual([expect.objectContaining({ success: true })]);
-			expect(fs.readFileSync(counterFile, "utf8").length).toBeGreaterThanOrEqual(2);
-		} finally {
-			await session.dispose();
-			unregisterCustomApis(mockSource);
-		}
+		const last = session.agent.state.messages.at(-1);
+		expect(last).toMatchObject({ role: "assistant", stopReason: "stop" });
+		expect(mock.calls).toHaveLength(1);
+		expect(retryEnds).toEqual([expect.objectContaining({ success: true })]);
+		expect(fs.readFileSync(counterFile, "utf8").length).toBeGreaterThanOrEqual(2);
 	});
 
 	test("a turn whose apiKey command never produces a key stops after 3 command retries without a request", async () => {
