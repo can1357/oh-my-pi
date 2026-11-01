@@ -53,14 +53,15 @@ function texts(context: Context): string[] {
 	);
 }
 
+function messageText(message: AgentMessage): string {
+	if (!("content" in message)) return "";
+	return typeof message.content === "string"
+		? message.content
+		: message.content.map(part => ("text" in part ? part.text : "")).join("");
+}
+
 function transcriptTexts(agent: Agent): string[] {
-	return agent.state.messages
-		.filter(message => message.role === "user" || message.role === "custom")
-		.map(message =>
-			typeof message.content === "string"
-				? message.content
-				: message.content.map(part => ("text" in part ? part.text : "")).join(""),
-		);
+	return agent.state.messages.filter(message => message.role === "user" || message.role === "custom").map(messageText);
 }
 
 /**
@@ -561,58 +562,77 @@ describe("one-at-a-time steering: a person's message before agent steering", () 
 		expect(transcriptTexts(agent)).toEqual(["start", ...sent, "P11", "P12"]);
 	});
 
-	it("gives an aborted run's unrecorded places back before an agent_end subscriber can start the next run", async () => {
-		let aborting = true;
-		const mock = createMockModel({
-			// The first response waits until the abort cancels it; later ones answer at once.
-			handler: () => ({ content: ["ack"], delayMs: aborting ? 60_000 : 0 }),
-		});
-		const agent: Agent = new Agent({
-			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
-			convertToLlm,
-			steeringMode: "one-at-a-time",
-			streamFn: async (model, context, options) => {
-				if (aborting && options?.liveSteering) {
-					agent.steer(card(1));
-					agent.steer(person("P1"));
-					// Live steering claims P1-P4 for the streaming response, so card 1 is due next; P5
-					// arrives behind it. Then the run aborts, so none of the four is recorded.
-					let sent = 0;
-					const enough = Promise.withResolvers<void>();
-					const pump = new CodexSteerPump(
-						options.liveSteering,
-						{
-							steer: async () => {
-								sent++;
-								agent.steer(person(`P${sent + 1}`));
-								if (sent === 4) enough.resolve();
-								return { accepted: true, id: `steer-${sent}` };
+	// Each row ends the run through a different `agent_end`: the loop's own event when the abort cancels
+	// the response, the catch path's visible error when the provider throws, and the catch path's abort
+	// branch when the provider throws after the abort.
+	for (const [ending, stop] of [
+		["the abort cancels the response", "abort"],
+		["the provider throws", "throw"],
+		["the provider throws after an abort", "abort-then-throw"],
+	] as const) {
+		it(`gives a run's unrecorded places back before an agent_end subscriber can start the next run when ${ending}`, async () => {
+			let first = true;
+			const mock = createMockModel({
+				// The first response waits until the abort cancels it; later ones answer at once.
+				handler: () => ({ content: ["ack"], delayMs: first ? 60_000 : 0 }),
+			});
+			const agent: Agent = new Agent({
+				initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+				convertToLlm,
+				steeringMode: "one-at-a-time",
+				streamFn: async (model, context, options) => {
+					if (first && options?.liveSteering) {
+						agent.steer(card(1));
+						agent.steer(person("P1"));
+						// Live steering claims P1-P4 for the streaming response, so card 1 is due next; P5
+						// arrives behind it. Then the run ends, so none of the four is recorded.
+						let sent = 0;
+						const enough = Promise.withResolvers<void>();
+						const pump = new CodexSteerPump(
+							options.liveSteering,
+							{
+								steer: async () => {
+									sent++;
+									agent.steer(person(`P${sent + 1}`));
+									if (sent === 4) enough.resolve();
+									return { accepted: true, id: `steer-${sent}` };
+								},
 							},
-						},
-						messages => messages.map(message => ({ role: "user", content: message.content })),
-					);
-					pump.start("response-1");
-					await enough.promise;
-					await pump.finish();
-					agent.abort();
-				}
-				return mock.stream(model, context, options);
-			},
-		});
-		let continued: Promise<void> | undefined;
-		agent.subscribe(event => {
-			if (event.type !== "agent_end" || continued) return;
-			aborting = false;
-			continued = agent.continue();
-		});
+							messages => messages.map(message => ({ role: "user", content: message.content })),
+						);
+						pump.start("response-1");
+						await enough.promise;
+						await pump.finish();
+						if (stop !== "throw") agent.abort();
+						if (stop !== "abort") throw new Error("provider failed");
+					}
+					return mock.stream(model, context, options);
+				},
+			});
+			let atEnd: { undelivered: string[]; next: string[] } | undefined;
+			let continued: Promise<string> | undefined;
+			agent.subscribe(event => {
+				if (event.type !== "agent_end" || continued) return;
+				atEnd = {
+					undelivered: agent.peekUndeliveredQueuedMessages().map(messageText),
+					next: agent.peekNextSteering().map(messageText),
+				};
+				first = false;
+				continued = agent.continue().then(
+					() => "continued",
+					(error: unknown) => String(error),
+				);
+			});
 
-		await agent.prompt("start");
-		await continued;
+			await agent.prompt("start");
 
-		// The four aborted claims gave their places back before the next run took anything, so they
-		// go first again and card 1 waits for them.
-		expect(transcriptTexts(agent)).toEqual(["start", "P1", "P2", "P3", "P4", "card 1", "P5"]);
-	});
+			// At agent_end the four claims are back in the queue, oldest first, and nothing holds their places.
+			expect(atEnd).toEqual({ undelivered: [], next: ["P1"] });
+			expect(await continued).toBe("continued");
+			// So the run the subscriber started reads them first again, and card 1 waits for them.
+			expect(transcriptTexts(agent)).toEqual(["start", "P1", "P2", "P3", "P4", "card 1", "P5"]);
+		});
+	}
 
 	it("lets a due agent steer whose preparation fails go next once it is put back", async () => {
 		const mock = createMockModel({ handler: () => ({ content: ["ack"] }) });
@@ -701,4 +721,107 @@ describe("one-at-a-time steering: a person's message before agent steering", () 
 		// Each call's peek is the unit the following call took: transcript entries after "start" and U1.
 		expect(transcriptTexts(agent).slice(2)).toEqual(seen.map(([index]) => names[index]));
 	});
+
+	it("ends a run whose host priority rule throws, and runs again once the host removes the rule", async () => {
+		const agentRef = {} as { current: Agent };
+		let calls = 0;
+		const mock = createMockModel({
+			handler: () => {
+				// The second model call installs a rule that throws at the next steering selection.
+				if (++calls === 2) {
+					agentRef.current.setSteeringPriority(() => {
+						throw new Error("host rule failed");
+					});
+				}
+				return { content: ["ack"] };
+			},
+		});
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+			convertToLlm,
+			steeringMode: "one-at-a-time",
+		});
+		agentRef.current = agent;
+		agent.steer(card(1));
+		for (const text of ["U1", "U2", "U3", "U4", "U5"]) agent.steer(person(text));
+
+		await agent.continue().catch(() => undefined);
+
+		// The run reports the host's error and stops; what it did not deliver stays queued in order.
+		expect(agent.state.isStreaming).toBe(false);
+		expect(agent.state.error).toContain("host rule failed");
+		expect(transcriptTexts(agent)).toEqual(["U1", "U2"]);
+		expect(agent.peekSteeringQueue().map(messageText)).toEqual(["card 1", "U3", "U4", "U5"]);
+
+		agent.setSteeringPriority(undefined);
+		await agent.continue();
+		// The two units delivered before the failure kept their places, so card 1 is due after two more.
+		expect(transcriptTexts(agent)).toEqual(["U1", "U2", "U3", "U4", "card 1", "U5"]);
+	});
+
+	it("refuses a host priority rule that does not return a boolean instead of reading it as true", async () => {
+		const mock = createMockModel({ handler: () => ({ content: ["ack"] }) });
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+			convertToLlm,
+			steeringMode: "one-at-a-time",
+		});
+		// An async rule returns a Promise, which is truthy whatever it resolves to.
+		const asyncRule = (async () => false) as unknown as (message: AgentMessage) => boolean;
+		agent.setSteeringPriority(asyncRule);
+		agent.steer(card(1));
+		agent.steer(person("typed"));
+
+		const outcome = await agent.continue().then(
+			() => "delivered",
+			(error: unknown) => String(error),
+		);
+
+		expect(outcome).toContain("TypeError");
+		expect(outcome).toContain("setSteeringPriority");
+		expect(mock.calls).toHaveLength(0);
+		expect(agent.state.isStreaming).toBe(false);
+		expect(agent.peekSteeringQueue().map(messageText)).toEqual(["card 1", "typed"]);
+	});
+
+	it("keeps each queued occurrence of a promoted message ahead until the transcript records it", async () => {
+		const mock = createMockModel({ handler: () => ({ content: ["ack"] }) });
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+			convertToLlm,
+			steeringMode: "one-at-a-time",
+		});
+		const repeated = card(1);
+		agent.steer(repeated);
+		agent.steer(repeated);
+		agent.steer(person("U1"));
+		agent.prioritizeSteering([repeated]);
+
+		await agent.continue();
+
+		expect(transcriptTexts(agent)).toEqual(["card 1", "card 1", "U1"]);
+	});
+
+	for (const [setter, change, next] of [
+		["setSteeringMode", (agent: Agent) => agent.setSteeringMode("all"), ["card 1", "typed"]],
+		["setSteeringPriority", (agent: Agent) => agent.setSteeringPriority(() => false), ["card 1"]],
+		["setQueuedMessageGrouping", (agent: Agent) => agent.setQueuedMessageGrouping(() => true), ["card 1", "typed"]],
+	] as const) {
+		it(`tells queue observers when ${setter} changes what the next steering delivery takes`, () => {
+			const agent = new Agent({ convertToLlm, steeringMode: "one-at-a-time" });
+			agent.steer(card(1));
+			agent.steer(person("typed"));
+			expect(agent.peekNextSteering().map(messageText)).toEqual(["typed"]);
+			const observed: string[][] = [];
+			agent.onQueueChange(() => observed.push(agent.peekNextSteering().map(messageText)));
+
+			change(agent);
+
+			// An observer that re-reads the queue when told it changed shows what the next delivery takes now.
+			expect(observed.at(-1)).toEqual([...next]);
+		});
+	}
 });

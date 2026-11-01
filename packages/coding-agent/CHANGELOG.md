@@ -5,6 +5,7 @@
 ### Added
 
 - Added `agentSteeringNext` to RPC `queue_update` and `get_state` `queuedMessages`: `true` when the next steering delivery is agent-authored, so the first queued `steering` entry is read one delivery later ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
+- `set_steering_mode` now sends a `queue_update` when it changes `agentSteeringNext`, so RPC queue views keep showing whether an agent message goes first ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
 
 ### Fixed
 

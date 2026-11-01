@@ -256,7 +256,10 @@ message (`attribution: "user"`, or a `role: "user"` message not attributed to an
 `isUserSteeringMessage`, or the host's own rule from `setSteeringPriority(predicate)`) goes ahead of
 agent-authored steering queued before it. A person's steer is read at the next boundary however many
 agent steers wait, except in the one delivery in five the allowance below gives to agent steering;
-user units keep their order, as do agent units. `all` mode delivers the whole queue in order.
+user units keep their order, as do agent units. `all` mode delivers the whole queue in order. Priority
+follows attribution, not where the message was typed: a user-attributed steer that arrives over RPC,
+ACP or from a collaboration guest is a person's message, and goes in arrival order with the ones typed
+here. A host that sends user-attributed steers no person wrote should attribute them to the agent.
 
 An allowance keeps sustained user input from starving agent steering:
 
@@ -276,13 +279,21 @@ An allowance keeps sustained user input from starving agent steering:
   wait ends when no agent steering is pending here, so a cleared and re-queued message starts again,
   and the same message queued twice is two units.
 - `prioritizeSteering(messages)` moves messages ahead of everything, the allowance included, until
-  the transcript records them, so a host can make the message that answers a denied tool call land
-  right after the denial. A promoted user unit still counts, so each one can delay a due agent unit by
-  one delivery.
+  the transcript records them (each queued occurrence of a message moved), so a host can make the
+  message that answers a denied tool call land right after the denial. A promoted user unit still
+  counts, so each one can delay a due agent unit by one delivery.
 
 A host that lists queued messages should pass `setSteeringPriority` the rule its list uses, so the list
 shows the order the agent reads them, and can read `peekNextSteering()` to say when an agent unit goes
-next.
+next; `onQueueChange` listeners also hear when `setSteeringMode`, `setSteeringPriority` or
+`setQueuedMessageGrouping` changes what that is. The rule must return a boolean. One that throws, or
+returns anything else (a `Promise` from an `async` rule fails with a `TypeError`), fails the delivery
+it is asked about with that error (the run reports it, or `continue()` rejects with it); the
+undelivered steering stays queued in order, and the agent runs again once the host fixes or removes
+the rule.
+
+Whatever ends a run, it gives back the steering it took and did not record, and stops streaming,
+before `agent_end` reaches subscribers, so a subscriber can start the next run from that event.
 
 Hosts can use `setQueuedMessageGrouping((previous, next) => boolean)` to keep adjacent companion
 records and their prompt together in `one-at-a-time` mode. Without a grouping predicate, records

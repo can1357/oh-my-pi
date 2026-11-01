@@ -898,7 +898,8 @@ Common event types:
 Emitted whenever the displayable steering/follow-up queue changes: a `steer`,
 `follow_up`, or queued `prompt` adds to it; delivery into the transcript,
 `remove_queued_message`, an abort that drops in-flight queued messages,
-or a session switch removes from or clears it. The server coalesces this
+or a session switch removes from or clears it; a `set_steering_mode` that
+changes `agentSteeringNext` also sends it. The server coalesces this
 against the last value sent — a mutation that leaves the snapshot unchanged
 (for example, an agent-authored aside that never renders as a chip and does not
 change `agentSteeringNext`) never re-emits. `steering`/`followUp`/`agentSteeringNext`

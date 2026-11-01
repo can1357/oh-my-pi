@@ -22,7 +22,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import type { PromptTemplate } from "@oh-my-pi/pi-coding-agent/config/prompt-templates";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { tryRunRpcSkillCommand } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
+import { applyRpcQueueModeCommand, tryRunRpcSkillCommand } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 import { cfgMagicKeyword, cfgMagicKeywordsEnabled } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -403,6 +403,46 @@ describe("AgentSession queued steer delivery", () => {
 			expect(transcriptOrder(sessionManager)).toEqual(["start", ...typed.slice(0, 4), "card one", "typed 5"]);
 			expect(updates).toContain(true);
 			expect(updates.at(-1)).toBe(false);
+		});
+
+		it("publishes the change when set_steering_mode changes whether an agent message goes first", async () => {
+			const typed = ["typed 1", "typed 2", "typed 3", "typed 4", "typed 5"];
+			let latest: boolean | undefined;
+			let observed: { getter: boolean; published: boolean | undefined } | undefined;
+			const read = { content: ["read"] };
+			const { session, sessionManager } = await createSession([
+				async () => {
+					await session.sendCustomMessage(
+						{ customType: "envoy-message", content: "card one", display: true },
+						{ deliverAs: "steer", triggerTurn: true },
+					);
+					for (const text of typed) await session.prompt(text, { streamingBehavior: "steer" });
+					return { content: ["working"] };
+				},
+				read,
+				read,
+				read,
+				async () => {
+					// Four typed messages went ahead of the card, so it goes first; the mode change ends that.
+					applyRpcQueueModeCommand(session, { type: "set_steering_mode", mode: "all" });
+					observed = { getter: session.getQueuedMessages().agentSteeringNext, published: latest };
+					return { content: ["read"] };
+				},
+				read,
+			]);
+			session.setSteeringMode("one-at-a-time");
+			const unsubscribe = session.subscribe(event => {
+				if (event.type === "queue_update") latest = event.agentSteeringNext;
+			});
+
+			await session.prompt("start");
+			await session.waitForIdle();
+			unsubscribe();
+
+			// A client rendering from queue_update sees what get_state says.
+			expect(observed).toEqual({ getter: false, published: false });
+			// All mode reads the card and typed 5 together at the next boundary.
+			expect(transcriptOrder(sessionManager)).toEqual(["start", ...typed.slice(0, 4), "card one", "typed 5"]);
 		});
 	});
 
