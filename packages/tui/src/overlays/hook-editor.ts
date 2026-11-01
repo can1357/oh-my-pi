@@ -346,19 +346,6 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 		else this.#onSubmitCallback(text);
 	}
 
-	/**
-	 * Submit the text typed so far, or cancel when nothing is typed. For a host that must close
-	 * the prompt now (a message from the person superseded it) without losing their draft.
-	 * Clipboard reads still in flight are dropped. An attached image does not count as typed:
-	 * submit keeps only images whose markers are in the text.
-	 */
-	submitDraft(): void {
-		if (this.#disposed) return;
-		this.#pendingPastes.length = 0;
-		if (this.#editor.getExpandedText().trim().length === 0) this.#cancel();
-		else this.#submitCurrentText();
-	}
-
 	/** Whether this prompt opted into clipboard image attachments. */
 	get acceptsImages(): boolean {
 		return this.#acceptImages && !this.#disposed;

@@ -202,17 +202,44 @@ export function timedOutAskDialogResult(questions: ExtensionAskDialogQuestion[])
 }
 
 /**
+ * `signal.reason` when a message from the person superseded a dialog: they moved on without
+ * answering it. See {@link ExtensionUIDialogOptions.signal}.
+ */
+export class DialogSupersededError extends Error {
+	constructor() {
+		super("A message from the person superseded the dialog");
+		this.name = "DialogSupersededError";
+	}
+}
+
+/** True when `signal` closed a dialog because a message from the person superseded it. */
+export function isDialogSuperseded(signal: AbortSignal | undefined): boolean {
+	return signal?.aborted === true && signal.reason instanceof DialogSupersededError;
+}
+
+/**
+ * After a person's message withdraws a dialog a remote client shows (an RPC host, an ACP client), how long omp
+ * waits for the client's reply to it: an answer the client submitted before the withdrawal reached it, or its
+ * acknowledgement (RPC `cancelled: true`, ACP `-32800`). Either ends the wait at once. Neither protocol says when
+ * an answer was submitted, so for a client that sends neither, omp cannot tell an answer still in transit from
+ * none; it treats the dialog as unanswered once this long has passed, and an answer reaching it later is ignored.
+ * Waiting longer would hold back the person's message that long on every such client.
+ */
+export const WITHDRAWN_DIALOG_REPLY_MS = 2_000;
+
+/**
  * UI dialog options for extensions.
  */
 export interface ExtensionUIDialogOptions {
-	signal?: AbortSignal;
 	/**
-	 * Aborts when the dialog should close and hand back what the person has entered so far,
-	 * because a message from them superseded it. The interactive TUI's `askDialog` then
-	 * resolves a submit result with `interrupted: true`. Hosts that do not support it ignore
-	 * it, and the caller closes their dialog with `signal`.
+	 * Closes the dialog. A {@link DialogSupersededError} reason means a message from the person
+	 * superseded it, and the host hands back what the person had submitted, never text they had
+	 * not submitted: the interactive TUI's `askDialog` resolves a submit result with
+	 * `interrupted: true`, and a remote host (RPC, ACP) withdraws the dialog and resolves with an
+	 * answer its client sent before the withdrawal reached it. Any other reason: the answer no
+	 * longer matters, and the dialog resolves its cancelled value.
 	 */
-	interrupt?: AbortSignal;
+	signal?: AbortSignal;
 	timeout?: number;
 	/** Invoked when the UI times out while waiting for a selection/input */
 	onTimeout?: () => void;

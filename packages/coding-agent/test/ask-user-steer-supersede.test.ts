@@ -5,9 +5,10 @@
  * a second message sent while the dialog closes goes ahead of the card too.
  * While that message is unread, a later `ask` in the same batch closes without
  * showing. Answers the person already gave are returned, not dropped, including
- * one given in the same tick as the message, and a custom answer being typed is
- * not cut off. An ACP client is told to close the form. Agent-authored steering
- * alone leaves the dialog open, and `interruptMode: "wait"` keeps it open.
+ * one given in the same tick as the message; a custom answer still being typed
+ * is closed with the dialog and is not an answer. An ACP client is told to close
+ * the form. Agent-authored steering alone leaves the dialog open, and
+ * `interruptMode: "wait"` keeps it open.
  *
  * Real Agent, real AgentSession queue and real AskTool; only the dialog UI and
  * the model are stand-ins, except the ACP case, which runs the real ACP UI over
@@ -35,6 +36,7 @@ import {
 } from "@oh-my-pi/pi-utils/acp";
 import { Settings } from "../src/config/settings";
 import type { ExtensionUIContext, ExtensionUIDialogOptions } from "../src/extensibility/extensions";
+import { isDialogSuperseded } from "../src/extensibility/extensions/types";
 import { createAcpExtensionUiContext } from "../src/modes/acp/acp-agent";
 import { AgentSession } from "../src/session/agent-session";
 import { convertToLlm } from "../src/session/messages";
@@ -69,7 +71,6 @@ interface OpenDialog {
 /** A rich ask dialog on screen. */
 interface OpenRichDialog {
 	signal: AbortSignal | undefined;
-	interrupt: AbortSignal | undefined;
 	answer(result: ExtensionAskDialogResult | undefined): void;
 }
 
@@ -131,6 +132,11 @@ function createHarness(
 		args?: AskArgs;
 		/** Offer the rich ask dialog. */
 		rich?: boolean;
+		/**
+		 * What the rich dialog hands back when a person's message supersedes it. Absent, it closes
+		 * like any abort, as a host that does not know the superseded reason does.
+		 */
+		richSuperseded?: ExtensionAskDialogResult;
 		/** A real host's UI in place of the stand-in dialogs. */
 		ui?: ExtensionUIContext;
 	} = {},
@@ -190,8 +196,12 @@ function createHarness(
 								askDialog: (_questions: unknown[], dialog?: ExtensionUIDialogOptions) => {
 									shown++;
 									const { promise, resolve } = Promise.withResolvers<ExtensionAskDialogResult | undefined>();
-									dialog?.signal?.addEventListener("abort", () => resolve(undefined), { once: true });
-									richDialogs.push({ signal: dialog?.signal, interrupt: dialog?.interrupt, answer: resolve });
+									dialog?.signal?.addEventListener(
+										"abort",
+										() => resolve(isDialogSuperseded(dialog.signal) ? options.richSuperseded : undefined),
+										{ once: true },
+									);
+									richDialogs.push({ signal: dialog?.signal, answer: resolve });
 									return promise;
 								},
 							}
@@ -514,38 +524,39 @@ describe("ask answers given before a person's message closed the dialog", () => 
 		expect(text).not.toContain("Ask interrupted by message");
 	});
 
-	it("does not cut off a custom answer being typed, and returns it", async () => {
+	it("does not turn custom text still being typed into an answer when a person sends a message", async () => {
 		const { session, mock, nextDialog, askResults } = createHarness();
 		const run = session.prompt("start");
 		(await nextDialog()).answer("Other (type your own)");
 		const editor = await nextDialog();
 		expect(editor.kind).toBe("editor");
 
-		// A plain steer, which used to cut the editor off.
 		await typeMessage(session);
-		expect(editor.signal?.aborted ?? false).toBe(false);
-		editor.answer("my own answer");
+		expect(editor.signal?.aborted).toBe(true);
 		await run;
 		await session.waitForIdle();
 
-		expect(resultText(askResults[0])).toContain("my own answer");
+		expect(resultText(askResults[0])).toContain("Ask interrupted by message");
+		expect(resultText(askResults[0])).not.toContain("my own answer");
 		expect(mock.calls.some(call => requestHas(call, "please stop asking"))).toBe(true);
 	});
 
 	it("returns what a rich dialog hands back when interrupted", async () => {
-		const { session, nextRichDialog, askResults } = createHarness({ rich: true, args: THREE_QUESTIONS });
+		const { session, nextRichDialog, askResults } = createHarness({
+			rich: true,
+			args: THREE_QUESTIONS,
+			richSuperseded: {
+				kind: "submit",
+				interrupted: true,
+				results: [
+					richAnswer("color", ["Red"]),
+					{ ...richAnswer("size", []), unanswered: true },
+					richAnswer("shape", ["Square"]),
+				],
+			},
+		});
 		const run = session.prompt("start");
-		const dialog = await nextRichDialog();
-		dialog.interrupt?.addEventListener(
-			"abort",
-			() =>
-				dialog.answer({
-					kind: "submit",
-					interrupted: true,
-					results: [richAnswer("color", ["Red"]), richAnswer("size", []), richAnswer("shape", ["Square"])],
-				}),
-			{ once: true },
-		);
+		await nextRichDialog();
 
 		await typeMessage(session);
 		await run;
@@ -560,7 +571,7 @@ describe("ask answers given before a person's message closed the dialog", () => 
 		expect(resultText(askResults[0])).toContain("size");
 	});
 
-	it("closes a rich dialog whose host ignores the interrupt", async () => {
+	it("closes a rich dialog whose host does not know the superseded reason", async () => {
 		const { session, nextRichDialog, askResults } = createHarness({ rich: true });
 		const run = session.prompt("start");
 		const dialog = await nextRichDialog();

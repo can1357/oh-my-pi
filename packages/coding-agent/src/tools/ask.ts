@@ -23,6 +23,7 @@ import { replaceTabs, TERMINAL, truncateToWidth } from "@oh-my-pi/pi-tui";
 import { isRecord, logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 
 import type { ExtensionUISelectItem } from "../extensibility/extensions";
+import { DialogSupersededError } from "../extensibility/extensions/types";
 import { formatKeyHint, formatKeyHints } from "@oh-my-pi/pi-tui/app-keybindings";
 import { editorKey, editorKeys } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { theme } from "@oh-my-pi/pi-tui/theme";
@@ -199,11 +200,11 @@ interface AskSingleQuestionOptions {
 	/** Run abort: closes the question and throws. */
 	signal?: AbortSignal;
 	/**
-	 * A message from the person: closes an option picker, returning `interrupted` with what was
-	 * entered. An answer the picker already gave is kept. A custom answer being typed is not cut
-	 * off; the next picker returns instead.
+	 * Aborts, with a {@link DialogSupersededError}, when a message from the person supersedes the
+	 * question: the open picker or editor is withdrawn and settles with what the person had
+	 * submitted, and the question returns `interrupted` with the answers given so far.
 	 */
-	interrupt?: AbortSignal;
+	superseded?: AbortSignal;
 	initialSelection?: Pick<SelectionResult, "selectedOptions" | "customInput" | "note">;
 	navigation?: NavigationControls;
 }
@@ -244,7 +245,7 @@ async function askSingleQuestion(
 	multi: boolean,
 	options: AskSingleQuestionOptions = {},
 ): Promise<SelectionResult> {
-	const { recommended, timeout, signal, interrupt, initialSelection, navigation } = options;
+	const { recommended, timeout, signal, superseded, initialSelection, navigation } = options;
 	const doneLabel = getDoneOptionLabel();
 	let selectedOptions = [...(initialSelection?.selectedOptions ?? [])];
 	let customInput = initialSelection?.customInput;
@@ -272,14 +273,13 @@ async function askSingleQuestion(
 		const timeoutMs = typeof timeout === "number" && timeout > 0 ? timeout : undefined;
 		const timeoutController = timeoutMs === undefined ? undefined : new AbortController();
 		// The host closes the picker on any of these.
-		const closeSignals = [signal, interrupt, timeoutController?.signal].filter(
+		const closeSignals = [signal, superseded, timeoutController?.signal].filter(
 			(candidate): candidate is AbortSignal => candidate !== undefined,
 		);
 		const dialogSignal = closeSignals.length > 1 ? AbortSignal.any(closeSignals) : closeSignals[0];
-		// The wait ends at once on these. A person's message is not among them: an answer the host
-		// already gave must still be read, so the wait gives the host a turn (awaitSupersedable).
-		const interruptClose = interrupt ? new AbortController() : undefined;
-		const waitSignals = [signal, timeoutController?.signal, interruptClose?.signal].filter(
+		// The wait ends at once on these. A person's message is not among them: the host settles
+		// the picker itself, with an answer the person gave before the withdrawal reached them.
+		const waitSignals = [signal, timeoutController?.signal].filter(
 			(candidate): candidate is AbortSignal => candidate !== undefined,
 		);
 		const waitSignal = waitSignals.length > 1 ? AbortSignal.any(waitSignals) : waitSignals[0];
@@ -324,10 +324,8 @@ async function askSingleQuestion(
 				}
 				return selection;
 			};
-			const pending = waitSignal ? untilAborted(waitSignal, runSelect) : runSelect();
-			const choice =
-				interrupt && interruptClose ? await awaitSupersedable(pending, interrupt, interruptClose) : await pending;
-			if (choice === undefined && !timeoutTriggered && interrupt?.aborted && !signal?.aborted) {
+			const choice = waitSignal ? await untilAborted(waitSignal, runSelect) : await runSelect();
+			if (choice === undefined && !timeoutTriggered && superseded?.aborted && !signal?.aborted) {
 				return { choice: undefined, timedOut: false, interrupted: true };
 			}
 			if (!timeoutTriggered && choice === undefined && typeof timeout === "number") {
@@ -349,11 +347,13 @@ async function askSingleQuestion(
 		}
 	};
 
-	const promptForCustomInput = async (title: string): Promise<{ input: string | undefined }> => {
-		const dialogOptions = signal ? { signal } : undefined;
+	const promptForCustomInput = async (title: string): Promise<{ input: string | undefined; interrupted: boolean }> => {
+		// A message from the person closes the editor too: text not submitted is not an answer.
+		const editorSignal = signal && superseded ? AbortSignal.any([signal, superseded]) : (signal ?? superseded);
+		const dialogOptions = editorSignal ? { signal: editorSignal } : undefined;
 		const showCustomInput = () => ui.editor(title, undefined, dialogOptions, { promptStyle: true });
 		const input = signal ? await untilAborted(signal, showCustomInput) : await showCustomInput();
-		return { input };
+		return { input, interrupted: input === undefined && superseded?.aborted === true && !signal?.aborted };
 	};
 
 	const promptWithProgress = navigation?.progressText ? `${question} (${navigation.progressText})` : question;
@@ -411,6 +411,9 @@ async function askSingleQuestion(
 					break;
 				}
 				const customResult = await promptForCustomInput(`${prefix}${promptWithProgress}`);
+				if (customResult.interrupted) {
+					return { selectedOptions: Array.from(selected), customInput, note, timedOut, interrupted: true };
+				}
 				if (customResult.input === undefined) {
 					continue;
 				}
@@ -486,6 +489,8 @@ async function askSingleQuestion(
 					break;
 				}
 				const customResult = await promptForCustomInput(promptWithProgress);
+				if (customResult.interrupted)
+					return { selectedOptions, customInput, note, timedOut: false, interrupted: true };
 				if (customResult.input === undefined) {
 					continue;
 				}
@@ -537,57 +542,43 @@ function isAnswered(result: QuestionResult): boolean {
 
 /**
  * Result for an ask a message from the person superseded: the answers they gave before it,
- * so their work is not lost, and the questions left open. With no answer given it is the
- * "Ask interrupted by message" error, as before.
+ * so their work is not lost, and the questions left open, each with any note the person
+ * submitted on it. With nothing given it is the "Ask interrupted by message" error, as before.
  */
 function interruptedAnswers(
-	results: readonly QuestionResult[],
+	asked: readonly { result: QuestionResult; answered: boolean }[],
 	abortError: () => ToolAbortError,
 	imageBlocks: (ImageContent | TextContent)[] = [],
 ): AgentToolResult<AskToolDetails> {
-	const answered = results.filter(isAnswered);
-	if (answered.length === 0) throw abortError();
-	const open = results.filter(result => !isAnswered(result)).map(result => result.id);
-	const lines = [
-		"The user sent a message before finishing these questions; it follows this result.",
-		`Answers given:\n${answered.map(formatQuestionResult).join("\n")}`,
-	];
-	if (open.length > 0) lines.push(`Not answered: ${open.join(", ")}`);
+	const answered = asked.filter(entry => entry.answered).map(entry => entry.result);
+	const open = asked.filter(entry => !entry.answered).map(entry => entry.result);
+	if (answered.length === 0 && !open.some(result => result.note)) throw abortError();
+	const lines = ["The user sent a message before finishing these questions; it follows this result."];
+	if (answered.length > 0) lines.push(`Answers given:\n${answered.map(formatQuestionResult).join("\n")}`);
+	if (open.length > 0) lines.push(`Not answered: ${open.map(formatOpenQuestion).join(", ")}`);
 	return {
 		content: [{ type: "text" as const, text: lines.join("\n") }, ...imageBlocks],
 		details: { results: answered },
 	};
 }
 
-const HOST_IGNORED_INTERRUPT = Symbol("host ignored interrupt");
+/** An open question of an interrupted ask, with the note the person submitted on it. */
+function formatOpenQuestion(result: QuestionResult): string {
+	if (!result.note) return result.id;
+	const noteOn = result.noteOption === undefined ? "" : ` on ${result.noteOption}`;
+	return `${result.id} (note${noteOn}: ${result.note})`;
+}
 
 /**
- * Await a dialog that a message from the person may supersede. A host that honors
- * `interrupt` settles at once with what was entered; one that does not is closed through
- * `close` once a macrotask passes after the interrupt, and this resolves `undefined`. An
- * answer the host settled before that macrotask, even in the same tick as the interrupt,
- * is returned: the person gave it before their message took effect.
+ * A signal that aborts with a {@link DialogSupersededError} when `message` does: a dialog's
+ * `signal` for a message from the person.
  */
-async function awaitSupersedable<T>(
-	dialog: Promise<T>,
-	interrupt: AbortSignal,
-	close: AbortController,
-): Promise<T | undefined> {
-	const { promise: ignored, resolve } = Promise.withResolvers<typeof HOST_IGNORED_INTERRUPT>();
-	const onInterrupt = (): void => {
-		setImmediate(() => resolve(HOST_IGNORED_INTERRUPT));
-	};
-	if (interrupt.aborted) onInterrupt();
-	else interrupt.addEventListener("abort", onInterrupt, { once: true });
-	try {
-		const raced = await Promise.race([dialog, ignored]);
-		if (raced !== HOST_IGNORED_INTERRUPT) return raced;
-		dialog.catch(() => {});
-		close.abort();
-		return undefined;
-	} finally {
-		interrupt.removeEventListener("abort", onInterrupt);
-	}
+function supersedeOnMessage(message: AbortSignal): { signal: AbortSignal; [Symbol.dispose](): void } {
+	const controller = new AbortController();
+	const onMessage = (): void => controller.abort(new DialogSupersededError());
+	if (message.aborted) onMessage();
+	else message.addEventListener("abort", onMessage, { once: true });
+	return { signal: controller.signal, [Symbol.dispose]: () => message.removeEventListener("abort", onMessage) };
 }
 
 function formatSingleQuestionResponse(result: {
@@ -853,11 +844,14 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		// message reaches the agent first at the batch boundary. Any of their messages still unread counts, so a
 		// second ask in the same batch closes too instead of hiding that message. Peer IRC, asides, agent cards and
 		// finished background jobs are not the person's answer and leave the dialog open. Answers the person already
-		// gave are returned, not dropped.
+		// gave are returned, not dropped; text they had not submitted is not an answer.
 		const loopSteeringSignal = context?.toolCall?.steeringSignal;
 		using userSteering =
 			this.session.superviseUserSteering?.(loopSteeringSignal, "pending") ??
 			superviseUserSteering(loopSteeringSignal);
+		// The dialog's `signal` for that message: the host withdraws the dialog and settles it with what the
+		// person had submitted, including an answer a remote client sent before the withdrawal reached it.
+		using superseded = supersedeOnMessage(userSteering.signal);
 		const abortError = (): ToolAbortError =>
 			new ToolAbortError(userSteering.signal.aborted ? "Ask interrupted by message" : "Ask input was cancelled");
 		const cancelAsk = (): never => {
@@ -887,10 +881,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		const richAskDialog = extensionUi.askDialog;
 		if (richAskDialog) {
 			try {
-				// A person's message closes the dialog through `interrupt`, so a host that supports it
-				// hands back what was entered; one that does not is closed with `closeDialog`.
-				const closeDialog = new AbortController();
-				const richSignal = signal ? AbortSignal.any([signal, closeDialog.signal]) : closeDialog.signal;
+				const dialogSignal = signal ? AbortSignal.any([signal, superseded.signal]) : superseded.signal;
 				const showRichDialog = () =>
 					richAskDialog(
 						params.questions.map(q => ({
@@ -907,16 +898,13 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 						})),
 						{
 							timeout: timeout ?? undefined,
-							signal: richSignal,
-							interrupt: userSteering.signal,
+							signal: dialogSignal,
 							acceptImages: true,
 						},
 					);
-				const richResult = await awaitSupersedable(
-					untilAborted(richSignal, showRichDialog),
-					userSteering.signal,
-					closeDialog,
-				);
+				// Only the run's abort ends the wait at once. After a person's message the host settles the
+				// dialog itself, with an answer the person submitted before it, even one still on its way.
+				const richResult = signal ? await untilAborted(signal, showRichDialog) : await showRichDialog();
 				if (!richResult) return cancelAsk();
 				if (richResult.kind === "chat") {
 					const questionText = params.questions.map(q => q.question).join("\n");
@@ -965,7 +953,11 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 					});
 				}
 				if (richResult.interrupted) {
-					return interruptedAnswers(results, abortError, await this.#answerImageBlocks(answerImages, signal));
+					return interruptedAnswers(
+						results.map((result, index) => ({ result, answered: !richResult.results[index]?.unanswered })),
+						abortError,
+						await this.#answerImageBlocks(answerImages, signal),
+					);
 				}
 				if (params.questions.length === 1) {
 					const result = results[0];
@@ -1019,7 +1011,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 						recommended: q.recommended,
 						timeout: timeout ?? undefined,
 						signal,
-						interrupt: userSteering.signal,
+						superseded: superseded.signal,
 						initialSelection: options?.previous,
 						navigation: options?.navigation,
 					});
@@ -1043,7 +1035,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 				customInput,
 				note,
 			};
-			if (interrupted) return interruptedAnswers([answer], abortError);
+			if (interrupted) return interruptedAnswers([{ result: answer, answered: isAnswered(answer) }], abortError);
 
 			if (!timedOut && (cancelled || (selectedOptions.length === 0 && customInput === undefined))) cancelAsk();
 			const details: AskToolDetails = {
@@ -1100,16 +1092,16 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 					customInput,
 					note,
 				};
-				const asked = params.questions.map(
-					(question, index): QuestionResult =>
-						resultsByIndex[index] ?? {
-							id: question.id,
-							question: question.question,
-							options: question.options.map(o => o.label),
-							multi: question.multi ?? false,
-							selectedOptions: [],
-						},
-				);
+				const asked = params.questions.map((question, index) => {
+					const result: QuestionResult = resultsByIndex[index] ?? {
+						id: question.id,
+						question: question.question,
+						options: question.options.map(o => o.label),
+						multi: question.multi ?? false,
+						selectedOptions: [],
+					};
+					return { result, answered: isAnswered(result) };
+				});
 				return interruptedAnswers(asked, abortError);
 			}
 

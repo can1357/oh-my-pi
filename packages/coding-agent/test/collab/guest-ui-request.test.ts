@@ -30,6 +30,7 @@ import type {
 	ExtensionUIDialogOptions,
 	ExtensionUISelectItem,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import { DialogSupersededError } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
 import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AskDialogComponent } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
@@ -1175,7 +1176,7 @@ describe("guest ask closed by the host person's message", () => {
 		await host.start("ws://localhost:8787");
 		ctx.collabHost = host;
 		const controller = new ExtensionUiController(ctx);
-		const interrupt = new AbortController();
+		const superseded = new AbortController();
 		try {
 			const guest = await joinRawGuest(host.link, COLLAB_PROTO);
 			const welcome = await guest.nextFrame();
@@ -1193,7 +1194,7 @@ describe("guest ask closed by the host person's message", () => {
 					{ id: "second", question: "Second?", options: [{ label: "Beta" }] },
 					{ id: "third", question: "Third?", options: [{ label: "Delta" }] },
 				],
-				{ interrupt: interrupt.signal },
+				{ signal: superseded.signal },
 			);
 			// The host's person answers the first question; the guest answers it differently.
 			local?.handleInput("\r");
@@ -1201,7 +1202,7 @@ describe("guest ask closed by the host person's message", () => {
 			guest.socket.send({ t: "ui-response", reqId: (await nextRequest()).request.reqId, value: "Beta" });
 			await nextRequest();
 			// The guest is on the third question when the host's person sends a message.
-			interrupt.abort();
+			superseded.abort(new DialogSupersededError());
 
 			expect(await result).toMatchObject({
 				kind: "submit",
@@ -1214,7 +1215,7 @@ describe("guest ask closed by the host person's message", () => {
 			});
 			guest.socket.close();
 		} finally {
-			interrupt.abort();
+			superseded.abort();
 			await host.stop("test done");
 		}
 	});

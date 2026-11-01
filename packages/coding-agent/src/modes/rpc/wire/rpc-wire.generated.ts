@@ -1300,7 +1300,7 @@ export interface AskUiRequest {
 	timeout?: number;
 }
 
-/** Close the dialog opened by request `targetId`; a later answer to it is ignored. */
+/** Close the dialog opened by request `targetId`. When a person's message withdrew it, an answer the host sent before this arrived still counts, and a host closing it unanswered replies `cancelled: true`; otherwise a later answer is ignored. */
 export interface CancelUiRequest {
 	type: "extension_ui_request";
 	id: string;
@@ -1381,7 +1381,7 @@ export interface ConfirmUiResponse {
 	confirmed: boolean;
 }
 
-/** Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` then takes its recommended answers). */
+/** Dismisses a dialog, or acknowledges a `cancel` for one the host had not answered; `timedOut` reports the host's own deadline (an `ask` then takes its recommended answers). */
 export interface CancelUiResponse {
 	type: "extension_ui_response";
 	id: string;

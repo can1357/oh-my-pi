@@ -54,6 +54,11 @@ export interface ExtensionAskDialogResultItem {
 	/** Label of the option the note is on; unset when it is on the custom answer. */
 	noteOption?: string;
 	timedOut?: boolean;
+	/**
+	 * Set only in an `interrupted` result, on a question the person had not answered: it has no
+	 * selection and no custom answer. A note they submitted on it is still in `note`.
+	 */
+	unanswered?: boolean;
 }
 
 /** Answers submitted from the dialog. */
@@ -61,9 +66,11 @@ export interface ExtensionAskDialogSubmitResult {
 	kind: "submit";
 	results: ExtensionAskDialogResultItem[];
 	/**
-	 * Set when the host closed the dialog before the person submitted (a message from them
-	 * superseded it, `ExtensionUIDialogOptions.interrupt`): `results` hold what they had
-	 * entered, and unanswered questions have no selection and no custom input.
+	 * Set when the host closed the dialog before the person submitted it, because a message from
+	 * them superseded it. `results` hold each answer as the person last confirmed it (Enter on an
+	 * option or on a multi-select, a submitted custom answer) and every note they submitted; a
+	 * question with no confirmed answer is marked `unanswered`. Checks not yet confirmed and text
+	 * not yet submitted are not answers and are not included.
 	 */
 	interrupted?: boolean;
 }
@@ -177,6 +184,13 @@ interface AskDialogOptions {
 	inputGuard?: AskDialogInputGuard;
 }
 
+/** A question's answer as the person last confirmed it: Enter on it, or a submitted custom answer. */
+interface ConfirmedAnswer {
+	selectedOptions: ReadonlySet<string>;
+	customInput: string | undefined;
+	customInputImages: ImageContent[] | undefined;
+}
+
 interface QuestionState {
 	selectedOptions: Set<string>;
 	customInput: string | undefined;
@@ -184,6 +198,8 @@ interface QuestionState {
 	note: string | undefined;
 	noteImages: ImageContent[] | undefined;
 	noteRowKey: string | undefined;
+	/** What a dialog a message from the person closes hands back; checks toggled since are not in it. */
+	confirmed: ConfirmedAnswer | undefined;
 	cursorIndex: number;
 	scrollOffset: number;
 	manualScroll: boolean;
@@ -463,6 +479,12 @@ function clearNoteUnlessRow(state: QuestionState, rowKey: string): void {
 	if (state.noteRowKey !== undefined && state.noteRowKey !== rowKey) clearNote(state);
 }
 
+/** The option an `option:N` row key names; `undefined` for the Other row. */
+function optionForRowKey(question: ExtensionAskDialogQuestion, rowKey: string): ExtensionAskDialogOption | undefined {
+	const match = /^option:(\d+)$/.exec(rowKey);
+	return match?.[1] === undefined ? undefined : question.options[Number.parseInt(match[1], 10)];
+}
+
 /** The note that goes out with the answer (its row is part of it), and the option it is on (unset for Other). */
 function noteForSubmittedAnswer(
 	question: ExtensionAskDialogQuestion,
@@ -470,9 +492,7 @@ function noteForSubmittedAnswer(
 ): { text: string; option?: string } | undefined {
 	if (state.note === undefined || state.noteRowKey === undefined) return undefined;
 	if (state.noteRowKey === "other") return state.customInput !== undefined ? { text: state.note } : undefined;
-	const match = /^option:(\d+)$/.exec(state.noteRowKey);
-	const optionIndex = match?.[1] === undefined ? Number.NaN : Number.parseInt(match[1], 10);
-	const option = Number.isInteger(optionIndex) ? question.options[optionIndex] : undefined;
+	const option = optionForRowKey(question, state.noteRowKey);
 	return option && state.selectedOptions.has(option.label) ? { text: state.note, option: option.label } : undefined;
 }
 
@@ -636,6 +656,7 @@ export class AskDialogComponent implements Component {
 				note: undefined,
 				noteImages: undefined,
 				noteRowKey: undefined,
+				confirmed: undefined,
 				cursorIndex: clamp(recommended ?? 0, 0, maxIndex),
 				scrollOffset: 0,
 				manualScroll: false,
@@ -1121,6 +1142,8 @@ export class AskDialogComponent implements Component {
 		const rowItem = active ? this.#questionRows(active.question)[active.state.cursorIndex] : undefined;
 		if (!active || !rowItem) return;
 		if (rowItem.kind === "other" && this.#hasSubmitTab()) {
+			// Next on a multi-select confirms its checks, as Enter on one of its options does.
+			if (active.question.multi) this.#confirm(active.state);
 			this.#advanceAfterQuestion(active.state.customInput === undefined ? undefined : rowItem.key);
 			return;
 		}
@@ -1450,9 +1473,10 @@ export class AskDialogComponent implements Component {
 		if (question.multi) {
 			if (isEnter) {
 				// Enter confirms the current selection without toggling the
-				// focused option; Space toggles. Advances to the next question
-				// (submitting only for a single-question dialog), matching
-				// single-select Enter (#8252).
+				// focused option, an empty one too; Space toggles. Advances to the
+				// next question (submitting only for a single-question dialog),
+				// matching single-select Enter (#8252).
+				this.#confirm(state);
 				this.#advanceAfterQuestion(state.selectedOptions.has(option.label) ? rowItem.key : undefined);
 				return;
 			}
@@ -1469,7 +1493,17 @@ export class AskDialogComponent implements Component {
 		state.customInput = undefined;
 		state.customInputImages = undefined;
 		clearNoteUnlessRow(state, rowItem.key);
+		this.#confirm(state);
 		this.#advanceAfterQuestion(rowItem.key);
+	}
+
+	/** Record the question's current answer as the one the person confirmed. */
+	#confirm(state: QuestionState): void {
+		state.confirmed = {
+			selectedOptions: new Set(state.selectedOptions),
+			customInput: state.customInput,
+			customInputImages: state.customInputImages,
+		};
 	}
 
 	#handleSubmitTabInput(keyData: string): void {
@@ -1540,6 +1574,12 @@ export class AskDialogComponent implements Component {
 				state.customInput = undefined;
 				state.customInputImages = undefined;
 				clearNoteIfRow(state, rowItem.key);
+				// The confirmed answer loses it too; with no option left, nothing is confirmed.
+				const confirmed = state.confirmed;
+				state.confirmed =
+					confirmed && confirmed.selectedOptions.size > 0
+						? { ...confirmed, customInput: undefined, customInputImages: undefined }
+						: undefined;
 				return;
 			}
 			state.customInput = input.text;
@@ -1548,6 +1588,7 @@ export class AskDialogComponent implements Component {
 				state.selectedOptions.clear();
 				clearNoteUnlessRow(state, rowItem.key);
 			}
+			this.#confirm(state);
 			if (question.multi && this.#questions.length === 1) {
 				this.#activeTabIndex = this.#submitTabIndex();
 				this.#submitScrollOffset = 0;
@@ -1803,12 +1844,12 @@ export class AskDialogComponent implements Component {
 	}
 
 	/**
-	 * Close the dialog and submit what the person has entered so far, marked
-	 * `interrupted`: a message from them superseded the question, and their
-	 * answers must not be lost with it. While a host prompt is open, the dialog
-	 * closes once the prompt's answer is applied, so an answer the person
-	 * submitted just before the message is kept: the host must settle the prompt
-	 * (`HookEditorComponent.submitDraft()` keeps a draft being typed).
+	 * Close the dialog because a message from the person superseded it, and submit, marked
+	 * `interrupted`, each answer as they last confirmed it and every note they submitted. Text
+	 * they had not submitted and checks they had not confirmed are not answers and are left out.
+	 * While a host prompt is open, the dialog closes once the prompt settles: the host closes
+	 * the prompt (its unsubmitted text is dropped), and an answer the person submitted in it just
+	 * before the message is applied first and kept.
 	 */
 	interrupt(): void {
 		if (this.#closed) return;
@@ -1819,7 +1860,7 @@ export class AskDialogComponent implements Component {
 		this.#closed = true;
 		this.#countdown?.dispose();
 		this.#stopRingTick();
-		this.callbacks.onSubmit({ kind: "submit", results: this.#buildResults(), interrupted: true });
+		this.callbacks.onSubmit({ kind: "submit", results: this.#buildInterruptedResults(), interrupted: true });
 	}
 
 	#runDeferredInterrupt(): void {
@@ -1850,6 +1891,41 @@ export class AskDialogComponent implements Component {
 				noteImages: note === undefined ? undefined : state.noteImages,
 				noteOption: note?.option,
 				timedOut: state.timedOut || undefined,
+			});
+		}
+		return results;
+	}
+
+	#buildInterruptedResults(): ExtensionAskDialogResultItem[] {
+		const results: ExtensionAskDialogResultItem[] = [];
+		for (let index = 0; index < this.#questions.length; index++) {
+			const question = this.#questions[index];
+			const state = this.#states[index];
+			if (!question || !state) continue;
+			const confirmed = state.confirmed;
+			// An empty multi-select confirmed with Enter is the answer "none"; a single-select needs a pick.
+			const answered =
+				confirmed !== undefined &&
+				(question.multi === true || confirmed.selectedOptions.size > 0 || confirmed.customInput !== undefined);
+			const note = state.note?.trim() ? state.note : undefined;
+			const noteOption =
+				note === undefined || state.noteRowKey === undefined
+					? undefined
+					: optionForRowKey(question, state.noteRowKey)?.label;
+			results.push({
+				id: question.id,
+				question: question.question,
+				options: question.options.map(option => option.label),
+				multi: question.multi ?? false,
+				selectedOptions: answered
+					? question.options.map(option => option.label).filter(label => confirmed.selectedOptions.has(label))
+					: [],
+				customInput: answered ? confirmed.customInput : undefined,
+				customInputImages: answered ? confirmed.customInputImages : undefined,
+				note,
+				noteImages: note === undefined ? undefined : state.noteImages,
+				noteOption,
+				...(answered ? {} : { unanswered: true }),
 			});
 		}
 		return results;

@@ -3,6 +3,10 @@ import * as path from "node:path";
 import { isRecord, readJsonl, TempDir } from "@oh-my-pi/pi-utils";
 import type { ExtensionAskDialogQuestion } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import {
+	DialogSupersededError,
+	WITHDRAWN_DIALOG_REPLY_MS,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import {
 	type PendingExtensionRequest,
 	type RpcExtensionUIResponse,
 	requestRpcAskDialog,
@@ -352,6 +356,48 @@ await runRpcMode(session);
 			targetId: request.id,
 		});
 		expect(pendingRequests.size).toBe(0);
+	});
+
+	it("keeps an ask answer held in transit when a person message withdraws the dialog", async () => {
+		const pendingRequests = new Map<string, PendingExtensionRequest>();
+		const output = vi.fn<(frame: object) => void>();
+		const superseded = new AbortController();
+		const result = requestRpcAskDialog(pendingRequests, output, [dbQuestion], { signal: superseded.signal });
+		const request = requireRequest(output.mock.calls[0]?.[0]);
+
+		// The host submitted this answer before the person message, but its bytes have not reached
+		// omp's request resolver until after the message withdraws the visible dialog.
+		const response = { answers: [{ id: "db", selectedOptions: ["Postgres"] }] };
+		superseded.abort(new DialogSupersededError());
+		respond(pendingRequests, request.id, response);
+
+		expect(await result).toMatchObject({
+			kind: "submit",
+			results: [{ id: "db", selectedOptions: ["Postgres"] }],
+		});
+		expect(output).toHaveBeenLastCalledWith(
+			expect.objectContaining({ type: "extension_ui_request", method: "cancel", targetId: request.id }),
+		);
+	});
+
+	it("closes a withdrawn dialog unanswered when the host never replies to the cancel", async () => {
+		vi.useFakeTimers();
+		try {
+			const pendingRequests = new Map<string, PendingExtensionRequest>();
+			const output = vi.fn<(frame: object) => void>();
+			const superseded = new AbortController();
+			const result = requestRpcAskDialog(pendingRequests, output, [dbQuestion], { signal: superseded.signal });
+
+			superseded.abort(new DialogSupersededError());
+			vi.advanceTimersByTime(WITHDRAWN_DIALOG_REPLY_MS - 1);
+			expect(pendingRequests.size).toBe(1);
+			vi.advanceTimersByTime(1);
+
+			expect(await result).toBeUndefined();
+			expect(pendingRequests.size).toBe(0);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("emits secret in extension_ui_request when dialogOptions.secret is provided", async () => {

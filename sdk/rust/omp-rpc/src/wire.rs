@@ -4497,7 +4497,7 @@ pub struct AskUiRequest {
 	pub timeout: Option<i64>,
 }
 
-/// Close the dialog opened by request `targetId`; a later answer to it is ignored.
+/// Close the dialog opened by request `targetId`. When a person's message withdrew it, an answer the host sent before this arrived still counts, and a host closing it unanswered replies `cancelled: true`; otherwise a later answer is ignored.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CancelUiRequest {
 	pub id: String,
@@ -4565,7 +4565,7 @@ pub enum ExtensionUiRequest {
 	Editor(EditorUiRequest),
 	/// Every question of one `ask` tool call; sent only after `set_ask_dialog` enables it.
 	Ask(AskUiRequest),
-	/// Close the dialog opened by request `targetId`; a later answer to it is ignored.
+	/// Close the dialog opened by request `targetId`. When a person's message withdrew it, an answer the host sent before this arrived still counts, and a host closing it unanswered replies `cancelled: true`; otherwise a later answer is ignored.
 	Cancel(CancelUiRequest),
 	Notify(NotifyUiRequest),
 	SetStatus(SetStatusUiRequest),
@@ -4648,7 +4648,7 @@ pub struct ConfirmUiResponse {
 	pub confirmed: bool,
 }
 
-/// Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` then takes its recommended answers).
+/// Dismisses a dialog, or acknowledges a `cancel` for one the host had not answered; `timedOut` reports the host's own deadline (an `ask` then takes its recommended answers).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CancelUiResponse {
 	pub id: String,
@@ -4671,7 +4671,7 @@ pub enum ExtensionUiResponse {
 	ValueUiResponse(ValueUiResponse),
 	/// Answers a `confirm` request.
 	ConfirmUiResponse(ConfirmUiResponse),
-	/// Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` then takes its recommended answers).
+	/// Dismisses a dialog, or acknowledges a `cancel` for one the host had not answered; `timedOut` reports the host's own deadline (an `ask` then takes its recommended answers).
 	CancelUiResponse(CancelUiResponse),
 	/// Answers an `ask` request: one `AskAnswer` per question, in question order.
 	AnswersUiResponse(AnswersUiResponse),

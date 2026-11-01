@@ -26,6 +26,7 @@ import type {
 	SendUserMessageHandler,
 	TerminalInputHandler,
 } from "../../extensibility/extensions";
+import { isDialogSuperseded } from "../../extensibility/extensions/types";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
 import { cfgExtensionAssistantTextRenderers } from "../../extensibility/settings";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
@@ -813,43 +814,83 @@ export class ExtensionUiController {
 		const remoteAbort = new AbortController();
 		const parentSignal = dialogOptions?.signal;
 		const localSignal = parentSignal ? AbortSignal.any([parentSignal, localAbort.signal]) : localAbort.signal;
-		const remoteSignal = parentSignal ? AbortSignal.any([parentSignal, remoteAbort.signal]) : remoteAbort.signal;
-		const localWinner = this.#showLocalAskDialog(normalized, { ...dialogOptions, signal: localSignal }).then(
-			(value): CollabAskDialogWinner => ({ source: "local", value }),
-		);
-		// The guest's finished answers, by question index. They live here, not in the guest loop,
-		// so they outlive it when a person's message closes the local dialog first.
-		const guestAnswers: ExtensionAskDialogResultItem[] = [];
-		const remoteWinner: Promise<CollabAskDialogWinner> = this.#runGuestAskDialog(
-			host,
-			normalized,
-			remoteSignal,
-			guestAnswers,
-		).then(result => (result === "unavailable" ? localWinner : { source: "remote", value: result }));
-		const winner = await Promise.race([localWinner, remoteWinner]);
-		if (winner.source === "remote") localAbort.abort();
-		else remoteAbort.abort();
-		const value = winner.value;
-		if (winner.source === "local" && value?.kind === "submit" && value.interrupted) {
-			// Each question keeps the local answer when the host's person gave one (an option or
-			// a custom answer), else the guest's finished answer.
+		// A person's message (a superseded `signal`) closes the local dialog, which hands back the
+		// host's answers; the guest loop keeps its finished answers until that result wins the race.
+		// Any other abort ends the guest loop at once.
+		const onParentAbort = (): void => {
+			if (!isDialogSuperseded(parentSignal)) remoteAbort.abort(parentSignal?.reason);
+		};
+		if (parentSignal?.aborted) onParentAbort();
+		else parentSignal?.addEventListener("abort", onParentAbort, { once: true });
+		try {
+			const localWinner = this.#showLocalAskDialog(normalized, { ...dialogOptions, signal: localSignal }).then(
+				(value): CollabAskDialogWinner => ({ source: "local", value }),
+			);
+			// The guest's finished answers, by question index. They live here, not in the guest loop,
+			// so they outlive it when a person's message closes the local dialog first.
+			const guestAnswers: ExtensionAskDialogResultItem[] = [];
+			const remoteWinner: Promise<CollabAskDialogWinner> = this.#runGuestAskDialog(
+				host,
+				normalized,
+				remoteAbort.signal,
+				guestAnswers,
+			).then(result => (result === "unavailable" ? localWinner : { source: "remote", value: result }));
+			const winner = await Promise.race([localWinner, remoteWinner]);
+			if (winner.source === "remote") localAbort.abort();
+			else remoteAbort.abort();
+			const value = winner.value;
+			if (winner.source !== "local" || !isDialogSuperseded(parentSignal)) return value;
+			if (value?.kind === "chat" || (value?.kind === "submit" && !value.interrupted)) return value;
+			// The local dialog is interrupted, or never showed; with no guest answer there is nothing to add.
+			if (value === undefined && guestAnswers.length === 0) return value;
+			// A finished answer outranks no answer, whoever gave it: each question keeps the host's
+			// confirmed answer, else takes the guest's finished one. Text the host's person had not
+			// submitted is not in the local result, so it never replaces the guest's answer.
+			const local =
+				value?.results ??
+				normalized.map((question): ExtensionAskDialogResultItem => ({
+					id: question.id,
+					question: question.question,
+					options: question.options.map(option => option.label),
+					multi: question.multi ?? false,
+					selectedOptions: [],
+					unanswered: true,
+				}));
 			return {
-				...value,
-				results: value.results.map((local, index) =>
-					local.selectedOptions.length > 0 || local.customInput !== undefined
-						? local
-						: (guestAnswers[index] ?? local),
-				),
+				kind: "submit",
+				interrupted: true,
+				results: local.map((item, index) => {
+					const guest = guestAnswers[index];
+					if (!item.unanswered || !guest) return item;
+					// A note the host's person submitted on the question goes with the guest's answer.
+					return guest.note === undefined && item.note !== undefined
+						? { ...guest, note: item.note, noteImages: item.noteImages, noteOption: item.noteOption }
+						: guest;
+				}),
 			};
+		} finally {
+			parentSignal?.removeEventListener("abort", onParentAbort);
 		}
-		return value;
 	}
 
 	#showLocalAskDialog(
 		questions: ExtensionAskDialogQuestion[],
 		dialogOptions?: ExtensionUIDialogOptions,
 	): Promise<ExtensionAskDialogResult | undefined> {
-		return this.#presentDialog<ExtensionAskDialogResult>(dialogOptions?.signal, settle => {
+		// A message from the person (`signal` aborted with a `DialogSupersededError`) closes the
+		// dialog with the answers the person confirmed (`AskDialogComponent.interrupt`); any other
+		// abort cancels it. `#presentDialog` sees only a cancel, and drops a request still waiting
+		// for the surface on either.
+		const signal = dialogOptions?.signal;
+		const cancel = new AbortController();
+		let supersede: (() => void) | undefined;
+		const onAbort = (): void => {
+			if (supersede && isDialogSuperseded(signal)) supersede();
+			else cancel.abort(signal?.reason);
+		};
+		if (signal?.aborted) onAbort();
+		else signal?.addEventListener("abort", onAbort, { once: true });
+		const presented = this.#presentDialog<ExtensionAskDialogResult>(cancel.signal, settle => {
 			let promptEditor: HookEditorComponent | undefined;
 			let promptResolve: ((value: AskDialogPromptValue | undefined) => void) | undefined;
 			let closed = false;
@@ -957,14 +998,12 @@ export class ExtensionUiController {
 					inputGuard,
 				},
 			);
-			// A message from the person supersedes the ask: hand back what they entered,
-			// including a custom answer or note still being typed, instead of dropping it.
-			// An open prompt settles with its draft first; AskDialog applies a prompt's answer
-			// before it closes, so text submitted just before the message is kept as well.
-			const interrupt = dialogOptions?.interrupt;
-			const onInterrupt = (): void => {
+			// Text in an open prompt was never submitted, so the prompt closes without it. An answer
+			// the person submitted there just before the message is kept: AskDialog applies it
+			// before it closes.
+			supersede = (): void => {
 				if (closed) return;
-				promptEditor?.submitDraft();
+				if (promptResolve) finishPrompt(undefined);
 				askDialog.interrupt();
 			};
 			this.ctx.editorContainer.clear();
@@ -972,12 +1011,10 @@ export class ExtensionUiController {
 			if (inputGuard) this.ctx.editorContainer.addChild(this.ctx.editor);
 			this.ctx.ui.setFocus(askDialog);
 			this.ctx.ui.requestRender();
-			if (interrupt?.aborted) queueMicrotask(onInterrupt);
-			else interrupt?.addEventListener("abort", onInterrupt, { once: true });
 
 			return () => {
 				closed = true;
-				interrupt?.removeEventListener("abort", onInterrupt);
+				supersede = undefined;
 				askDialog?.dispose();
 				promptEditor?.dispose();
 				promptResolve?.(undefined);
@@ -989,6 +1026,7 @@ export class ExtensionUiController {
 				this.ctx.ui.requestRender();
 			};
 		});
+		return presented.finally(() => signal?.removeEventListener("abort", onAbort));
 	}
 
 	/**

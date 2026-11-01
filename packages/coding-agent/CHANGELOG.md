@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Fixed a message you type while `ask` waits being ignored when an agent card, peer message or aside arrived first; your message now closes the question, the agent reads it first, and the answers you already gave are kept ([#17585](https://github.com/can1357/oh-my-pi/pull/17585) by [@sjawhar](https://github.com/sjawhar))
+- Fixed a message you type while `ask` waits being ignored when an agent card, peer message or aside arrived first; your message now closes the question, the agent reads it first, and only answers you submitted are kept ([#17585](https://github.com/can1357/oh-my-pi/pull/17585) by [@sjawhar](https://github.com/sjawhar))
 - Fixed an ACP client keeping a form open after omp stopped waiting for its answer; omp now cancels the request and the client closes the form ([#17585](https://github.com/can1357/oh-my-pi/pull/17585) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.2] - 2026-10-31

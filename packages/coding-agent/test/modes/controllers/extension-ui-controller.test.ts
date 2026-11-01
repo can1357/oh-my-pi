@@ -4,6 +4,7 @@ import { stripVTControlCharacters } from "node:util";
 import { type Component, Container, isFocusable, type OverlayOptions, setKeybindings } from "@oh-my-pi/pi-tui";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { ExtensionAskDialogQuestion, ExtensionUIContext } from "../../../src/extensibility/extensions";
+import { DialogSupersededError } from "../../../src/extensibility/extensions/types";
 import { AskDialogComponent } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
@@ -179,27 +180,27 @@ describe("ExtensionUiController Ask dialog input", () => {
 		});
 	});
 
-	it("hands back a custom answer still being typed when a person's message closes the ask", async () => {
+	it("does not turn custom text still being typed into an answer when a person sends a message", async () => {
 		const harness = makeHarness();
-		const interrupt = new AbortController();
+		const superseded = new AbortController();
 		const pending = harness.controller.showAskDialog(
 			[
 				{ id: "first", question: "Which one?", options: [{ label: "Alpha" }] },
 				{ id: "second", question: "Then which?", options: [{ label: "Beta" }] },
 			],
-			{ interrupt: interrupt.signal },
+			{ signal: superseded.signal },
 		);
 		harness.handleInput("\x1b[B");
 		harness.handleInput("\r");
 		harness.handleInput("half typed");
-		interrupt.abort();
+		superseded.abort(new DialogSupersededError());
 
 		expect(await pending).toMatchObject({
 			kind: "submit",
 			interrupted: true,
 			results: [
-				{ id: "first", selectedOptions: [], customInput: "half typed" },
-				{ id: "second", selectedOptions: [], customInput: undefined },
+				{ id: "first", selectedOptions: [], customInput: undefined, unanswered: true },
+				{ id: "second", selectedOptions: [], customInput: undefined, unanswered: true },
 			],
 		});
 		expect(harness.getFocused()).toBe(harness.editor);
@@ -207,13 +208,13 @@ describe("ExtensionUiController Ask dialog input", () => {
 
 	it("keeps a custom answer submitted in the same tick as a person's message", async () => {
 		const harness = makeHarness();
-		const interrupt = new AbortController();
-		const pending = harness.controller.showAskDialog(questions, { interrupt: interrupt.signal });
+		const superseded = new AbortController();
+		const pending = harness.controller.showAskDialog(questions, { signal: superseded.signal });
 		harness.handleInput("\x1b[B");
 		harness.handleInput("\r");
 		harness.handleInput("just submitted");
 		harness.handleInput("\r");
-		interrupt.abort();
+		superseded.abort(new DialogSupersededError());
 
 		expect(await pending).toMatchObject({
 			kind: "submit",

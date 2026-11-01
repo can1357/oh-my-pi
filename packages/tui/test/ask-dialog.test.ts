@@ -1923,4 +1923,82 @@ describe("AskDialogComponent", () => {
 		expect(rows).toHaveLength(2);
 		expect(rows[1]).toContain("Retry now (Recommended) (2)");
 	});
+
+	it("interruption keeps a confirmed empty multi-select distinct from an unanswered question", () => {
+		const onSubmit = vi.fn();
+		const component = new AskDialogComponent(
+			[
+				{ id: "features", question: "Features?", options: [{ label: "Auth" }], multi: true },
+				{ id: "deploy", question: "Deploy?", options: [{ label: "Yes" }] },
+			],
+			{ onSubmit, onCancel: vi.fn(), onPrompt: vi.fn() },
+		);
+
+		component.handleInput(ENTER);
+		component.interrupt();
+
+		expect(onSubmit).toHaveBeenCalledWith({
+			kind: "submit",
+			interrupted: true,
+			results: [
+				expect.objectContaining({ id: "features", selectedOptions: [] }),
+				expect.objectContaining({ id: "deploy", selectedOptions: [], unanswered: true }),
+			],
+		});
+	});
+
+	it("interruption preserves a submitted note on an unselected option", async () => {
+		const onSubmit = vi.fn();
+		const component = new AskDialogComponent(
+			[
+				{ id: "deploy", question: "Deploy?", options: [{ label: "Yes" }] },
+				{ id: "next", question: "Next?", options: [{ label: "Continue" }] },
+			],
+			{
+				onSubmit,
+				onCancel: vi.fn(),
+				onPrompt: vi.fn().mockResolvedValue("Never deploy this to production"),
+			},
+		);
+
+		component.handleInput("n");
+		await Promise.resolve();
+		await Promise.resolve();
+		component.interrupt();
+
+		expect(onSubmit).toHaveBeenCalledWith({
+			kind: "submit",
+			interrupted: true,
+			results: [
+				expect.objectContaining({
+					id: "deploy",
+					selectedOptions: [],
+					note: "Never deploy this to production",
+					noteOption: "Yes",
+					unanswered: true,
+				}),
+				expect.objectContaining({ id: "next", unanswered: true }),
+			],
+		});
+	});
+
+	it("interruption keeps a multi-select as last confirmed, not checks toggled since", () => {
+		const onSubmit = vi.fn();
+		const component = new AskDialogComponent(
+			[
+				{ id: "features", question: "Features?", options: [{ label: "Auth" }, { label: "Billing" }], multi: true },
+				{ id: "deploy", question: "Deploy?", options: [{ label: "Yes" }] },
+			],
+			{ onSubmit, onCancel: vi.fn(), onPrompt: vi.fn() },
+		);
+
+		component.handleInput(SPACE);
+		component.handleInput(ENTER);
+		component.handleInput(SHIFT_TAB);
+		component.handleInput(DOWN);
+		component.handleInput(SPACE);
+		component.interrupt();
+
+		expect(onSubmit.mock.calls[0]?.[0].results[0]).toMatchObject({ id: "features", selectedOptions: ["Auth"] });
+	});
 });

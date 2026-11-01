@@ -30,7 +30,9 @@ import {
 	type ExtensionUISelectItem,
 	type ExtensionWidgetOptions,
 	getExtensionUISelectOptionLabel,
+	isDialogSuperseded,
 	timedOutAskDialogResult,
+	WITHDRAWN_DIALOG_REPLY_MS,
 } from "../../extensibility/extensions";
 import {
 	type BuiltSkillPromptMessage,
@@ -1191,6 +1193,7 @@ export async function requestRpcAskDialog(
 	return timedOut ? timedOutAskDialogResult(questions) : result;
 }
 
+/** Sends an RPC editor request; `editor` has no wire timeout. */
 export function requestRpcEditor(
 	pendingRequests: Map<string, PendingExtensionRequest>,
 	output: RpcOutput,
@@ -1199,63 +1202,21 @@ export function requestRpcEditor(
 	dialogOptions?: ExtensionUIDialogOptions,
 	editorOptions?: { promptStyle?: boolean },
 ): Promise<string | undefined> {
-	if (dialogOptions?.signal?.aborted) return Promise.resolve(undefined);
-
-	const id = Snowflake.next() as string;
-	const { promise, resolve, reject } = Promise.withResolvers<string | undefined>();
-	let settled = false;
-
-	const cleanup = () => {
-		dialogOptions?.signal?.removeEventListener("abort", onAbort);
-		pendingRequests.delete(id);
-	};
-	const finish = (value: string | undefined) => {
-		if (settled) return;
-		settled = true;
-		cleanup();
-		resolve(value);
-	};
-	const fail = (error: Error) => {
-		if (settled) return;
-		settled = true;
-		cleanup();
-		reject(error);
-	};
-	const onAbort = () => {
-		output({
-			type: "extension_ui_request",
-			id: Snowflake.next() as string,
-			method: "cancel",
-			targetId: id,
-		} as RpcExtensionUIRequest);
-		finish(undefined);
-	};
-
-	dialogOptions?.signal?.addEventListener("abort", onAbort, { once: true });
-	pendingRequests.set(id, {
-		resolve: response => {
-			if ("cancelled" in response && response.cancelled) {
-				finish(undefined);
-			} else if ("value" in response) {
-				finish(response.value);
-			} else {
-				finish(undefined);
-			}
-		},
-		reject: fail,
-	});
-	output({
-		type: "extension_ui_request",
-		id,
-		method: "editor",
-		title,
-		prefill,
-		promptStyle: editorOptions?.promptStyle,
-	} as RpcExtensionUIRequest);
-	return promise;
+	return requestRpcDialog(
+		pendingRequests,
+		output,
+		dialogOptions?.signal ? { signal: dialogOptions.signal } : undefined,
+		undefined,
+		{ method: "editor", title, prefill, promptStyle: editorOptions?.promptStyle },
+		response =>
+			"cancelled" in response && response.cancelled ? undefined : "value" in response ? response.value : undefined,
+	);
 }
 
-/** Sends an RPC extension dialog and cancels the remote presentation when its signal aborts. */
+/**
+ * Sends an RPC extension dialog and cancels the remote presentation when its signal aborts. When a person's
+ * message superseded the dialog, an answer the host sent before it received the `cancel` still settles it.
+ */
 export function requestRpcDialog<T>(
 	pendingRequests: Map<string, PendingExtensionRequest>,
 	output: RpcOutput,
@@ -1275,8 +1236,11 @@ export function requestRpcDialog<T>(
 		opts?.signal?.removeEventListener("abort", onAbort);
 		pendingRequests.delete(id);
 	};
-	// Tells the host to close a dialog omp has already settled, so a late answer
-	// cannot look actionable after abort or timeout.
+	const settleDefault = () => {
+		cleanup();
+		resolve(defaultValue);
+	};
+	// Tells the host to close a dialog omp no longer shows the person.
 	const cancelHostDialog = () =>
 		output({
 			type: "extension_ui_request",
@@ -1286,8 +1250,15 @@ export function requestRpcDialog<T>(
 		} as RpcExtensionUIRequest);
 	const onAbort = () => {
 		cancelHostDialog();
-		cleanup();
-		resolve(defaultValue);
+		if (!isDialogSuperseded(opts?.signal)) {
+			settleDefault();
+			return;
+		}
+		// The person moved on, but an answer they submitted before the `cancel` reached the host may
+		// still be on its way: the host's reply settles the dialog, as an answer or `cancelled: true`.
+		// A host that sends neither is closed after WITHDRAWN_DIALOG_REPLY_MS.
+		clearTimeout(timeoutId);
+		timeoutId = setTimeout(settleDefault, WITHDRAWN_DIALOG_REPLY_MS);
 	};
 	opts?.signal?.addEventListener("abort", onAbort, { once: true });
 
@@ -1295,8 +1266,7 @@ export function requestRpcDialog<T>(
 		timeoutId = setTimeout(() => {
 			opts.onTimeout?.();
 			cancelHostDialog();
-			cleanup();
-			resolve(defaultValue);
+			settleDefault();
 		}, opts.timeout);
 	}
 

@@ -136,13 +136,16 @@ export class AgentSideConnection {
 		return this.#connection.request("elicitation/create", params);
 	}
 	/**
-	 * Creates an elicitation on the client, returning a handle that cancels the pending wire
-	 * request (`$/cancel_request`) — used when the agent stops waiting for the answer, so the
-	 * client closes the form.
+	 * Creates an elicitation on the client, returning a handle for the pending wire request.
+	 * `cancel()` sends `$/cancel_request` and stops waiting, so the client closes a form whose
+	 * answer is no longer used. `withdraw()` sends it and keeps waiting: the client's response
+	 * still arrives, an answer the person submitted before the cancellation reached the client,
+	 * or `-32800`.
 	 */
 	unstable_createElicitationWithCancel(params: CreateElicitationRequest): {
 		promise: Promise<CreateElicitationResponse>;
 		cancel(): void;
+		withdraw(): void;
 	} {
 		return this.#connection.requestCancellable<CreateElicitationResponse>("elicitation/create", params);
 	}
