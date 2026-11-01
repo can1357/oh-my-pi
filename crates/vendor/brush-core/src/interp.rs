@@ -431,6 +431,43 @@ fn ensure_not_cancelled(params: &ExecutionParameters) -> Result<(), error::Error
 	Ok(())
 }
 
+/// Ends a subshell whose body failed with `error` as a child shell process
+/// ends: it reports the error on its own standard error and exits with the
+/// error's status, so its parent sees neither the error nor a request to exit,
+/// return or break. A cancelled subshell keeps the error, so cancellation still
+/// stops the parent and nothing reports the interruption.
+pub(crate) async fn end_failed_subshell(
+	subshell: &Shell<impl extensions::ShellExtensions>,
+	params: &ExecutionParameters,
+	error: error::Error,
+) -> Result<ExecutionResult, error::Error> {
+	if params.is_cancelled() {
+		return Err(error);
+	}
+	let _ = subshell.display_error(&mut params.stderr(subshell), &error).await;
+	Ok(ExecutionExitCode::from(&error).into())
+}
+
+/// The exit status an asynchronous subshell (a background job, a coprocess, a
+/// process substitution) ends with once its body has ended. Only that status
+/// reaches the shell that started it: the subshell reports its own error, and
+/// a request to exit, return or break ends the subshell alone. A cancelled one
+/// ends quietly with the interruption's status.
+async fn async_subshell_status(
+	subshell: &Shell<impl extensions::ShellExtensions>,
+	params: &ExecutionParameters,
+	body: Result<ExecutionResult, error::Error>,
+) -> ExecutionResult {
+	let status = match body {
+		Ok(result) => result.exit_code,
+		Err(error) => match end_failed_subshell(subshell, params, error).await {
+			Ok(result) => result.exit_code,
+			Err(error) => ExecutionExitCode::from(&error),
+		},
+	};
+	status.into()
+}
+
 
 #[derive(Clone, Debug, Default)]
 /// Policy for how to manage spawned external processes.
@@ -555,23 +592,32 @@ async fn spawn_async_ao_list_as_job<'a, SE: extensions::ShellExtensions>(
 	}
 
 	let direct_pipeline =
-		background_process_pipeline_for_async_job(ao_list, shell, &async_params).await?;
-	let job = if let Some((pipeline, detach_reparent)) = direct_pipeline {
-		// A transparent background wrapper (e.g. `nohup cmd &`) was unwrapped to its
-		// operand. Reparent that operand out of the shell's descendant tree so it
-		// survives the host's descendant-walk teardown — the persistence agents
-		// reach for `nohup` expecting.
-		async_params.detach_reparent = detach_reparent;
-		// The parent spawns this command before going on, so it must not wait for
-		// a FIFO's other end; see `DeferredRedirect`.
-		let mut direct_params = async_params.clone();
-		direct_params.defer_fifo_redirects = true;
-		match try_spawn_pipeline_as_job(&pipeline, ao_list.to_string(), shell, &direct_params).await? {
-			Some(job) => job,
-			None => spawn_async_ao_list_in_task(ao_list, shell, &async_params),
-		}
-	} else {
-		spawn_async_ao_list_in_task(ao_list, shell, &async_params)
+		background_process_pipeline_for_async_job(ao_list, shell, &async_params).await;
+	let spawned = match direct_pipeline {
+		Ok(Some((pipeline, detach_reparent))) => {
+			// A transparent background wrapper (e.g. `nohup cmd &`) was unwrapped to its
+			// operand. Reparent that operand out of the shell's descendant tree so it
+			// survives the host's descendant-walk teardown — the persistence agents
+			// reach for `nohup` expecting.
+			async_params.detach_reparent = detach_reparent;
+			// The parent spawns this command before going on, so it must not wait for
+			// a FIFO's other end; see `DeferredRedirect`.
+			let mut direct_params = async_params.clone();
+			direct_params.defer_fifo_redirects = true;
+			spawn_pipeline_as_job(&pipeline, ao_list.to_string(), shell, &direct_params).await
+		},
+		Ok(None) => Ok(spawn_async_ao_list_in_task(ao_list, shell, &async_params)),
+		Err(error) => Err(error),
+	};
+	let job = match spawned {
+		Ok(job) => job,
+		// The job's command failed to expand here, in the parent, before any of
+		// the job started: the failure is the job's, reported and ended as the
+		// job's own subshell would.
+		Err(error) => jobs::Job::finished(
+			ao_list.to_string(),
+			end_failed_subshell(shell, &async_params, error).await?,
+		),
 	};
 
 	shell.set_last_background_pid(job.last_pid());
@@ -713,29 +759,44 @@ fn unwrap_transparent_background_wrapper(pipeline: &ast::Pipeline) -> Option<ast
 	})
 }
 
-async fn try_spawn_pipeline_as_job<SE: extensions::ShellExtensions>(
+async fn spawn_pipeline_as_job<SE: extensions::ShellExtensions>(
 	pipeline: &ast::Pipeline,
 	command_line: String,
 	shell: &Shell<SE>,
 	params: &ExecutionParameters,
-) -> Result<Option<jobs::Job>, error::Error> {
+) -> Result<jobs::Job, error::Error> {
 	let mut subshell = shell.clone();
 	subshell.options_mut().interactive = false;
 
 	let spawn_results = spawn_pipeline_processes(pipeline, &mut subshell, params).await?;
 	let mut tasks = VecDeque::new();
+	// The status of the last stage when it ended without starting a process.
+	let mut ended_last_stage = None;
 
 	for spawn_result in spawn_results {
-		if let ExecutionWaitResult::Stopped(child) = spawn_result.poll().await? {
-			tasks.push_back(jobs::JobTask::External(child));
-		}
+		ended_last_stage = match spawn_result.poll().await? {
+			ExecutionWaitResult::Stopped(child) => {
+				tasks.push_back(jobs::JobTask::External(child));
+				None
+			},
+			ExecutionWaitResult::Completed(result) => Some(ExecutionResult::from(result.exit_code)),
+		};
 	}
 
 	if tasks.is_empty() {
-		return Ok(None);
+		// No process started: the command could not be redirected or run, and
+		// has said so. Running it again in a task would repeat its effects and
+		// its diagnostic.
+		let status = ended_last_stage.unwrap_or_else(ExecutionResult::success);
+		return Ok(jobs::Job::finished(command_line, status));
 	}
 
-	Ok(Some(jobs::Job::new(tasks, command_line, jobs::JobState::Running)))
+	let job = jobs::Job::new(tasks, command_line, jobs::JobState::Running);
+	// A job's status is its last stage's, also when only that stage failed to start.
+	Ok(match ended_last_stage {
+		Some(status) => job.with_final_status(status),
+		None => job,
+	})
 }
 
 fn spawn_async_ao_list_in_task<SE: extensions::ShellExtensions>(
@@ -764,9 +825,8 @@ fn spawn_async_ao_list_in_task<SE: extensions::ShellExtensions>(
 	cloned_params.set_cancel_token(cancellation.clone());
 
 	let join_handle = tokio::spawn(async move {
-		cloned_ao_list
-			.execute(&mut cloned_shell, &cloned_params)
-			.await
+		let body = cloned_ao_list.execute(&mut cloned_shell, &cloned_params).await;
+		async_subshell_status(&cloned_shell, &cloned_params, body).await
 	});
 
 	jobs::Job::new(
@@ -1325,19 +1385,27 @@ impl Execute for ast::CoprocessCommand {
 			.as_ref()
 			.map_or_else(CancellationToken::new, CancellationToken::child_token);
 		child_params.set_cancel_token(cancellation.clone());
+		// The coprocess reports its own error on the standard error it inherits,
+		// not through the pipes it shares with this shell.
+		let mut report_params = params.clone();
+		report_params.set_cancel_token(cancellation.clone());
 		let join_handle = tokio::spawn(async move {
-			let pipeline_context = PipelineExecutionContext {
-				shell:            commands::ShellForCommand::ParentShell(&mut child_shell),
-				process_group_id: None,
-				in_pipeline:       false,
-			};
-			let spawn_result = body
-				.execute_in_pipeline(pipeline_context, child_params)
-				.await?;
-			match spawn_result.wait_with_cancel(cancel_token).await? {
-				ExecutionWaitResult::Completed(result) => Ok(result),
-				ExecutionWaitResult::Stopped(_) => Ok(ExecutionResult::stopped()),
+			let ended = async {
+				let pipeline_context = PipelineExecutionContext {
+					shell:            commands::ShellForCommand::ParentShell(&mut child_shell),
+					process_group_id: None,
+					in_pipeline:       false,
+				};
+				let spawn_result = body
+					.execute_in_pipeline(pipeline_context, child_params)
+					.await?;
+				match spawn_result.wait_with_cancel(cancel_token).await? {
+					ExecutionWaitResult::Completed(result) => Ok(result),
+					ExecutionWaitResult::Stopped(_) => Ok(ExecutionResult::stopped()),
+				}
 			}
+			.await;
+			async_subshell_status(&child_shell, &report_params, ended).await
 		});
 
 		let job = shell.jobs_mut().add_as_current(
@@ -2738,14 +2806,11 @@ fn setup_process_substitution(
 	};
 
 	// Asynchronously spawn off the subshell; we intentionally don't block on its
-	// completion.
+	// completion. Nobody waits for its status, so it reports its own error.
 	let subshell_cmd = subshell_cmd.to_owned();
 	tokio::spawn(async move {
-		// Intentionally ignore the result of the subshell command.
-		let _ = subshell_cmd
-			.list
-			.execute(&mut subshell, &child_params)
-			.await;
+		let body = subshell_cmd.list.execute(&mut subshell, &child_params).await;
+		async_subshell_status(&subshell, &child_params, body).await;
 	});
 
 

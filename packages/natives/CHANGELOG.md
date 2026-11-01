@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the bash tool failing with `JoinHandle polled after completion` after `wait` for a background job or coprocess that hit an error; background jobs, coprocesses and process substitutions now print their own errors, and an `exit` or `break` in one no longer ends the shell that waits for it ([#17684](https://github.com/can1357/oh-my-pi/pull/17684) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.15.0] - 2026-11-01
 
 ### Fixed
