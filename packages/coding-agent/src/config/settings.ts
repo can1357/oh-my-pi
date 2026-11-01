@@ -2583,6 +2583,19 @@ export class Settings {
 		const asWritten = this.#migrateRawSettings(merged, quarantineInvalid);
 		const dropped = new Map<AnySetting, unknown>();
 		const settings = this.#dropRejected(asWritten, dropped);
+		// The files merged before the filter ran, so a rejected value in a higher file has already
+		// replaced what the lower files hold for that setting. Bring back what they hold that the setting
+		// accepts, merged in file order: a `tools.approval: {bash: deny}` in one file must not vanish
+		// because a higher file holds `tools.approval: "deny-bash"`.
+		for (const setting of dropped.keys()) {
+			let kept: unknown;
+			for (const item of items) {
+				const value = getByPath(item.data as RawSettings, setting.segments);
+				if (value === undefined || value === null || !setting.accepts(value)) continue;
+				kept = isRecord(kept) && isRecord(value) ? this.#deepMerge(kept, value) : value;
+			}
+			if (kept !== undefined) setByPath(settings, setting.segments, structuredClone(kept));
+		}
 		// One key for the project layer: a re-scope to another project replaces what the last one dropped.
 		const report = () =>
 			reportDropped(this, "project", dropped, (setting, value) => {

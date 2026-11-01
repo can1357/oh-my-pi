@@ -189,6 +189,35 @@ describe("settings registry", () => {
 		);
 	});
 
+	it("keeps what a lower project file holds when a higher project file holds a rejected value", async () => {
+		using dir = TempDir.createSync("@pi-settings-project-files-");
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			const agentDir = dir.join("agent");
+			const cwd = dir.join("project");
+			// The project's settings.json ranks below its config.yml.
+			await Bun.write(
+				path.join(cwd, ".omp", "settings.json"),
+				JSON.stringify({ temperature: 0.4, tools: { approval: { bash: "deny" } } }),
+			);
+			await Bun.write(
+				path.join(cwd, ".omp", "config.yml"),
+				YAML.stringify({ temperature: "hot", tools: { approval: "deny-bash" } }),
+			);
+			const settings = await Settings.loadReadOnly({ agentDir, cwd });
+			expect(lookup("tools.approval")?.get(settings)).toEqual({ bash: "deny" });
+			expect(cfgTemperature.get(settings)).toBe(0.4);
+			expect(
+				settings
+					.ignoredValues()
+					.map(ignored => ignored.setting.id)
+					.sort(),
+			).toEqual(["temperature", "tools.approval"]);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
 	it("shows an overlay a rejection its parent learns on a later reload", async () => {
 		using dir = TempDir.createSync("@pi-settings-rejected-overlay-");
 		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
