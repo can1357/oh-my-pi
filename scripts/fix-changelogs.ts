@@ -99,7 +99,7 @@ interface CliOptions {
 	help: boolean;
 }
 
-interface HistoricalReleaseRecovery {
+export interface HistoricalReleaseRecovery {
 	itemKeys: Set<string>;
 	sectionsByTitle: Map<string, ReleaseSection>;
 }
@@ -579,10 +579,11 @@ function appendArchiveFooter(body: string, archiveLink: string): string {
 
 /**
  * Collapse the oldest release sections of a rendered changelog until the file
- * (including the `archiveLink` footer) fits in `maxBytes`. The first two
- * sections — `[Unreleased]` plus the newest release — are always kept, so the
- * result may exceed `maxBytes` when those alone are over budget. Returns the
- * body without the footer appended.
+ * (including the `archiveLink` footer) fits in `maxBytes`. Every section up to
+ * and including the newest release is always kept — each `[Unreleased]` above
+ * it, even when a merge left more than one — so the result may exceed
+ * `maxBytes` when those alone are over budget. Returns the body without the
+ * footer appended.
  */
 export function collapseChangelogTail(
 	content: string,
@@ -596,10 +597,16 @@ export function collapseChangelogTail(
 
 	const lines = splitContentLines(content);
 	const headingLines: number[] = [];
+	let newestRelease: number | undefined;
 	for (let index = 0; index < lines.length; index++) {
-		if (isReleaseHeading(lines[index] ?? "")) headingLines.push(index);
+		const line = lines[index] ?? "";
+		if (!isReleaseHeading(line)) continue;
+		if (newestRelease === undefined && parseReleaseTitle(line) !== "Unreleased") newestRelease = headingLines.length;
+		headingLines.push(index);
 	}
-	if (headingLines.length <= 2) return { content, collapsedReleases: 0 };
+	if (newestRelease === undefined) return { content, collapsedReleases: 0 };
+	const minKeptSections = newestRelease + 1;
+	if (headingLines.length <= minKeptSections) return { content, collapsedReleases: 0 };
 
 	// cumulativeBytes[i] = byte length of lines[0..i) with a trailing newline per line.
 	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
@@ -616,8 +623,8 @@ export function collapseChangelogTail(
 	};
 
 	const budget = maxBytes - footerBytes;
-	let keptSections = 2;
-	for (let candidate = headingLines.length - 1; candidate >= 2; candidate--) {
+	let keptSections = minKeptSections;
+	for (let candidate = headingLines.length - 1; candidate >= minKeptSections; candidate--) {
 		if ((cumulativeBytes[bodyEndBeforeLine(headingLines[candidate] ?? 0)] ?? 0) <= budget) {
 			keptSections = candidate;
 			break;
@@ -936,6 +943,70 @@ async function changelogDiff(repoRoot: string, since: string, paths: readonly st
 	return git(["diff", "--unified=0", "--no-color", "--no-ext-diff", since, "--", ...paths], repoRoot);
 }
 
+export interface FixChangelogFileOptions {
+	/** Start lines of items added to a released section since the baseline; they move under `[Unreleased]`. */
+	promotableAddedItemStartLines: ReadonlySet<number>;
+	/** `--recover`: released sections and bullets from tagged history. */
+	historicalRecovery?: HistoricalReleaseRecovery;
+	maxBytes: number;
+	/** The commit the archive footer names; asked for only once the file is over `maxBytes`. */
+	archiveCommit: () => Promise<string | undefined>;
+}
+
+export interface FixChangelogFileResult extends FixCounters {
+	content: string;
+	collapsedReleases: number;
+}
+
+/**
+ * Everything `runChangelogFixer` does to one changelog's text. The two inputs
+ * that come from git (items added since the baseline, and the commit an
+ * archive footer names) are parameters.
+ */
+export async function fixChangelogFile(
+	changelogPath: string,
+	rawContent: string,
+	options: FixChangelogFileOptions,
+): Promise<FixChangelogFileResult> {
+	const { body: currentContent, archiveLink: existingArchiveLink } = splitArchiveFooter(rawContent);
+	const recoveredContent =
+		options.historicalRecovery === undefined
+			? currentContent
+			: rebuildReleasedSectionsFromHistory(currentContent, options.historicalRecovery.sectionsByTitle);
+	const result = fixChangelogContent(
+		recoveredContent,
+		options.promotableAddedItemStartLines,
+		options.historicalRecovery?.itemKeys ?? new Set<string>(),
+	);
+
+	let body = result.content;
+	let archiveLink = existingArchiveLink;
+	let collapsedReleases = 0;
+	const projectedBytes =
+		Buffer.byteLength(body, "utf8") + (archiveLink ? Buffer.byteLength(`\n${archiveLink}\n`, "utf8") : 0);
+	if (projectedBytes > options.maxBytes) {
+		const archiveCommit = await options.archiveCommit();
+		if (archiveCommit) {
+			const candidateLink = archiveLinkLine(changelogPath, archiveCommit);
+			const collapsed = collapseChangelogTail(body, candidateLink, options.maxBytes);
+			if (collapsed.collapsedReleases > 0) {
+				body = collapsed.content;
+				collapsedReleases = collapsed.collapsedReleases;
+				archiveLink = candidateLink;
+			}
+		}
+	}
+
+	return {
+		content: archiveLink ? appendArchiveFooter(body, archiveLink) : body,
+		promotedItems: result.promotedItems,
+		mergedDuplicateHeadings: result.mergedDuplicateHeadings,
+		removedEmptyHeadings: result.removedEmptyHeadings,
+		droppedReleasedDuplicates: result.droppedReleasedDuplicates,
+		collapsedReleases,
+	};
+}
+
 export async function runChangelogFixer(options: RunChangelogFixerOptions = {}): Promise<RunChangelogFixerResult> {
 	const repoRoot = await resolveRepoRoot(options.repoRoot);
 	const since = await resolveSince(repoRoot, options.since);
@@ -951,41 +1022,16 @@ export async function runChangelogFixer(options: RunChangelogFixerOptions = {}):
 	for (const changelogPath of paths) {
 		const absolutePath = path.join(repoRoot, changelogPath);
 		const rawContent = await Bun.file(absolutePath).text();
-		const { body: currentContent, archiveLink: existingArchiveLink } = splitArchiveFooter(rawContent);
-		const historicalRecovery = historicalRecoveryByPath.get(changelogPath);
-		const recoveredContent =
-			historicalRecovery === undefined
-				? currentContent
-				: rebuildReleasedSectionsFromHistory(currentContent, historicalRecovery.sectionsByTitle);
-		const result = fixChangelogContent(
-			recoveredContent,
-			addedItemLines.get(changelogPath) ?? new Set<number>(),
-			historicalRecovery?.itemKeys ?? new Set<string>(),
-		);
-
-		let body = result.content;
-		let archiveLink = existingArchiveLink;
-		let collapsedReleases = 0;
-		const maxBytes = options.maxBytes ?? MAX_CHANGELOG_BYTES;
-		const projectedBytes =
-			Buffer.byteLength(body, "utf8") + (archiveLink ? Buffer.byteLength(`\n${archiveLink}\n`, "utf8") : 0);
-		if (projectedBytes > maxBytes) {
+		const result = await fixChangelogFile(changelogPath, rawContent, {
+			promotableAddedItemStartLines: addedItemLines.get(changelogPath) ?? new Set<number>(),
+			historicalRecovery: historicalRecoveryByPath.get(changelogPath),
+			maxBytes: options.maxBytes ?? MAX_CHANGELOG_BYTES,
 			// The last commit touching this file still holds every section being
 			// collapsed (plus any earlier footer, chaining further back).
-			const archiveCommit = (await gitMaybe(["rev-list", "-1", "HEAD", "--", changelogPath], repoRoot))?.trim();
-			if (archiveCommit) {
-				const candidateLink = archiveLinkLine(changelogPath, archiveCommit);
-				const collapsed = collapseChangelogTail(body, candidateLink, maxBytes);
-				if (collapsed.collapsedReleases > 0) {
-					body = collapsed.content;
-					collapsedReleases = collapsed.collapsedReleases;
-					archiveLink = candidateLink;
-				}
-			}
-		}
-
-		const finalContent = archiveLink ? appendArchiveFooter(body, archiveLink) : body;
-		if (finalContent === rawContent) continue;
+			archiveCommit: async () =>
+				(await gitMaybe(["rev-list", "-1", "HEAD", "--", changelogPath], repoRoot))?.trim() || undefined,
+		});
+		if (result.content === rawContent) continue;
 
 		changedFiles.push({
 			path: changelogPath,
@@ -993,11 +1039,11 @@ export async function runChangelogFixer(options: RunChangelogFixerOptions = {}):
 			mergedDuplicateHeadings: result.mergedDuplicateHeadings,
 			droppedReleasedDuplicates: result.droppedReleasedDuplicates,
 			removedEmptyHeadings: result.removedEmptyHeadings,
-			collapsedReleases,
+			collapsedReleases: result.collapsedReleases,
 		});
 
 		if (options.write !== false) {
-			await Bun.write(absolutePath, finalContent);
+			await Bun.write(absolutePath, result.content);
 		}
 	}
 

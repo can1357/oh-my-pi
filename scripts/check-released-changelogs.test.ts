@@ -48,6 +48,13 @@ const THREE_RELEASES = `# Changelog
 `;
 const ARCHIVE_FOOTER =
 	"Older entries are archived in [packages/tui/CHANGELOG.md@abcdef012345](https://github.com/can1357/oh-my-pi/blob/abcdef012345/packages/tui/CHANGELOG.md).";
+const RELEASES = THREE_RELEASES.slice(THREE_RELEASES.indexOf("## [1.2.0]"));
+
+/** The footer `bun run fix:changelogs` writes when it archives sections that `commit` still holds. */
+function fixerFooter(commit: string): string {
+	const repo = process.env.OMP_REPO ?? process.env.GITHUB_REPOSITORY ?? "can1357/oh-my-pi";
+	return `Older entries are archived in [${CHANGELOG}@${commit.slice(0, 12)}](https://github.com/${repo}/blob/${commit}/${CHANGELOG}).`;
+}
 const GIT_ENV = {
 	...process.env,
 	GIT_CONFIG_GLOBAL: "/dev/null",
@@ -375,6 +382,129 @@ describe("check-released-changelogs", () => {
 			const result = await check(repo, "--base", "HEAD");
 			expect(result.exitCode).toBe(1);
 			expect(result.output).toContain(`${CHANGELOG}: ## [1.1.0] - 2026-02-01\n  Missing here.`);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"rejects an archive that drops the newest release behind two [Unreleased] headings, and passes the fixer's archive, which keeps it",
+		async () => {
+			const repo = await repoWith(THREE_RELEASES);
+			const baseline = (await repo.git("rev-parse", "HEAD")).output.trim();
+			const oversized = `# Changelog\n\n## [Unreleased]\n\n### Added\n\n- ${"x".repeat(MAX_CHANGELOG_BYTES)}\n\n## [Unreleased]\n`;
+			// What a collapse that keeps the first two sections, rather than the newest release, writes.
+			await repo.write(`${oversized}\n${fixerFooter(baseline)}\n`);
+			const dropped = await check(repo, "--base", "HEAD");
+			expect(dropped.exitCode).toBe(1);
+			expect(dropped.output).toContain(`${CHANGELOG}: ## [1.2.0] - 2026-03-01\n  Missing here.`);
+
+			await repo.write(`${oversized}\n${RELEASES}`);
+			const fixed = await fixChangelogs(repo);
+			expect(fixed.changedFiles.map(file => file.collapsedReleases)).toEqual([2]);
+			expect(await repo.read()).toContain("## [1.2.0] - 2026-03-01");
+			const archived = await check(repo, "--base", "HEAD");
+			expect(archived.output).toContain("; 2 oldest archived behind a new size-limit footer.");
+			expect(archived.exitCode).toBe(0);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"rejects an archive that only [Unreleased] copies of a released entry push over the limit, since the fixer drops the copies",
+		async () => {
+			const repo = await repoWith(THREE_RELEASES);
+			const baseline = (await repo.git("rev-parse", "HEAD")).output.trim();
+			const padded = `# Changelog\n\n## [Unreleased]\n\n### Added\n\n${"- Added a newest feature\n".repeat(18_000)}\n`;
+			const newest = RELEASES.slice(0, RELEASES.indexOf("## [1.1.0]"));
+			await repo.write(`${padded}${newest}${fixerFooter(baseline)}\n`);
+
+			const result = await check(repo, "--base", "HEAD");
+			expect(result.exitCode).toBe(1);
+			expect(result.output).toContain(`${CHANGELOG}: ## [1.1.0] - 2026-02-01\n  Missing here.`);
+			expect(result.output).toContain(`${CHANGELOG}: ## [1.0.0] - 2026-01-01\n  Missing here.`);
+
+			// With every release present, the fixer removes the copies and archives nothing.
+			await repo.write(`${padded}${RELEASES}`);
+			const fixed = await fixChangelogs(repo);
+			expect(fixed.changedFiles.map(file => [file.droppedReleasedDuplicates, file.collapsedReleases])).toEqual([
+				[18_000, 0],
+			]);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"rejects an archive of a changelog one byte under the limit, which the fixer leaves alone",
+		async () => {
+			const newest = "- Added a newest feature";
+			const filler = "x".repeat(MAX_CHANGELOG_BYTES - 2 - Buffer.byteLength(THREE_RELEASES));
+			const content = THREE_RELEASES.replace(newest, `${newest} ${filler}`);
+			expect(Buffer.byteLength(content)).toBe(MAX_CHANGELOG_BYTES - 1);
+			const repo = await repoWith(content);
+			const baseline = (await repo.git("rev-parse", "HEAD")).output.trim();
+			expect((await fixChangelogs(repo)).changedFiles).toEqual([]);
+
+			await repo.write(`${content.slice(0, content.indexOf("## [1.1.0]"))}${fixerFooter(baseline)}\n`);
+			const result = await check(repo, "--base", "HEAD");
+			expect(result.exitCode).toBe(1);
+			expect(result.output).toContain(`${CHANGELOG}: ## [1.1.0] - 2026-02-01\n  Missing here.`);
+			expect(result.output).toContain(`${CHANGELOG}: ## [1.0.0] - 2026-01-01\n  Missing here.`);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"passes the fixer's archive of a changelog one byte over the limit",
+		async () => {
+			const newest = "- Added a newest feature";
+			const filler = "x".repeat(MAX_CHANGELOG_BYTES - Buffer.byteLength(THREE_RELEASES));
+			const content = THREE_RELEASES.replace(newest, `${newest} ${filler}`);
+			expect(Buffer.byteLength(content)).toBe(MAX_CHANGELOG_BYTES + 1);
+			const repo = await repoWith(content);
+
+			const fixed = await fixChangelogs(repo);
+			expect(fixed.changedFiles.map(file => file.collapsedReleases)).toEqual([2]);
+			const result = await check(repo, "--base", "HEAD");
+			expect(result.output).toContain("; 2 oldest archived behind a new size-limit footer.");
+			expect(result.exitCode).toBe(0);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"rejects an archive behind a release section the base does not have, which leaves the base's newest release to be archived",
+		async () => {
+			const repo = await repoWith(THREE_RELEASES);
+			const baseline = (await repo.git("rev-parse", "HEAD")).output.trim();
+			await repo.write(
+				`# Changelog\n\n## [Unreleased]\n\n### Added\n\n- ${"x".repeat(MAX_CHANGELOG_BYTES)}\n\n## [9.9.9] - 2026-04-01\n\n### Added\n\n- Added a release main never cut\n\n${fixerFooter(baseline)}\n`,
+			);
+
+			const result = await check(repo, "--base", "HEAD");
+			expect(result.exitCode).toBe(1);
+			expect(result.output).toContain(`${CHANGELOG}: ## [1.2.0] - 2026-03-01\n  Missing here.`);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"rejects an archive that keeps the oldest release but drops the one the fixer archives with it",
+		async () => {
+			// Over the limit, the fixer archives 1.1.0 and 1.0.0 together; this keeps 1.0.0.
+			const repo = await repoWith(THREE_RELEASES);
+			const baseline = (await repo.git("rev-parse", "HEAD")).output.trim();
+			const newest = RELEASES.slice(0, RELEASES.indexOf("## [1.1.0]"));
+			const oldest = RELEASES.slice(RELEASES.indexOf("## [1.0.0]"));
+			await repo.write(
+				`# Changelog\n\n## [Unreleased]\n\n### Added\n\n- ${"x".repeat(MAX_CHANGELOG_BYTES)}\n\n${newest}${oldest}\n${fixerFooter(baseline)}\n`,
+			);
+
+			const result = await check(repo, "--base", "HEAD");
+			expect(result.exitCode).toBe(1);
+			expect(result.output).toContain(
+				`${CHANGELOG}: ## [1.1.0] - 2026-02-01\n  Missing here, and the new archive footer does not account for it`,
+			);
+			expect(result.output).not.toContain(`${CHANGELOG}: ## [1.0.0]`);
 		},
 		TEST_TIMEOUT_MS,
 	);

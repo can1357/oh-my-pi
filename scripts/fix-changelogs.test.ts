@@ -315,6 +315,15 @@ describe("collapseChangelogTail", () => {
 		expect(result.content).not.toContain("## [1.0.0]");
 	});
 
+	it("keeps every [Unreleased] section and the newest release when a merge left two [Unreleased] headings", () => {
+		const twoUnreleased = FOUR_SECTIONS.replace("## [1.2.0]", "## [Unreleased]\n\n## [1.2.0]");
+
+		const result = collapseChangelogTail(twoUnreleased, ARCHIVE_LINK, 16);
+
+		expect(result.collapsedReleases).toBe(2);
+		expect(result.content).toBe(`${twoUnreleased.slice(0, twoUnreleased.indexOf("\n\n## [1.1.0]"))}\n`);
+	});
+
 	it("leaves content under the budget untouched", () => {
 		const result = collapseChangelogTail(FOUR_SECTIONS, ARCHIVE_LINK, 1024 * 1024);
 
