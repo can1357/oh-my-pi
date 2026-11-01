@@ -9257,6 +9257,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			return true;
 		}
 
+		// A held `subagent_stop` pass: a user skill prompt cancels it, any other waits
+		// it out. Checked after preprocessing and the abort check above, with no await
+		// between here and dispatch, so a hold taken meanwhile is honored too.
+		await this.#waitOutStopPasses(message.attribution === "user");
+
 		// Image normalization and the vision-description call suspend after the
 		// isStreaming check above, so a concurrent submission can start a turn in
 		// between. Re-check before dispatch and queue with the already-prepared
