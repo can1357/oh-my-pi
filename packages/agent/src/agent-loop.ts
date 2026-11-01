@@ -53,7 +53,7 @@ import {
 	signalListLabel,
 } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import { isDsmlLeakRecoveryTarget, removeDsmlToolMarkupLeak } from "@oh-my-pi/pi-ai/utils/dsml-leak";
-import { cloneJsonTree, logger, sanitizeText, structuredCloneJSON } from "@oh-my-pi/pi-utils";
+import { cloneJsonTree, logger, sanitizeText, structuredCloneJSON, toError } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { LiveSteeringChannel } from "./live-steering";
 import { agentPauseGate } from "./pause";
@@ -1071,12 +1071,6 @@ function resolveIntentMode(intent: AgentTool["intent"]): "require" | "optional" 
 	return "require";
 }
 
-/**
- * Longest `i` value accepted as an intent; anything past this is a tool
- * payload the model put in the wrong field, not an intent.
- */
-const MAX_INTENT_LENGTH = 200;
-
 function extractIntent(args: Record<string, unknown>): { intent?: string; strippedArgs: Record<string, unknown> } {
 	const { [INTENT_FIELD]: intent, ...strippedArgs } = args;
 	if (typeof intent !== "string") {
@@ -1194,7 +1188,7 @@ function resolveAsides(entries: AsideMessage[] | undefined): AgentMessage[] {
 			if (message) out.push(message);
 		}
 	} catch (error) {
-		discardAsides(out, error instanceof Error ? error : new Error(String(error)));
+		discardAsides(out, toError(error));
 		throw error;
 	}
 	return out;
@@ -1976,6 +1970,9 @@ async function prepareProviderCall(
 			}),
 		};
 	}
+	// Before the transform too, so a request-size clamp in it measures the withdrawn definitions the provider
+	// re-declares; recomputed below against what the transform returns.
+	if (config.sentToolDefinitions) llmContext = config.sentToolDefinitions.withInactiveTools(llmContext);
 	if (config.transformProviderContext) {
 		llmContext = await config.transformProviderContext(llmContext, model);
 	}
@@ -1991,10 +1988,9 @@ async function prepareProviderCall(
 		};
 	}
 	// After `transformProviderContext`, so the recorded definitions are exactly what the provider receives.
-	if (config.sentToolDefinitions && llmContext.tools) {
-		config.sentToolDefinitions.record(llmContext.tools);
-		const inactiveTools = config.sentToolDefinitions.inactiveFor(llmContext.messages, llmContext.tools);
-		if (inactiveTools) llmContext = { ...llmContext, inactiveTools };
+	if (config.sentToolDefinitions) {
+		if (llmContext.tools) config.sentToolDefinitions.record(llmContext.tools);
+		llmContext = config.sentToolDefinitions.withInactiveTools(llmContext);
 	}
 	return { model, context: llmContext, promptToolWireTools, ownedDialect };
 }
@@ -3105,11 +3101,6 @@ async function prepareToolCallDispatch(
 				? { intent: undefined, strippedArgs: argsForExecution }
 				: extractIntent(toolCall.arguments);
 			argsForExecution = strippedArgs;
-			if (intent !== undefined && intent.length > MAX_INTENT_LENGTH && tool) {
-				entry.args = strippedArgs;
-				entry.validationErrorMessage = `\`${INTENT_FIELD}\` is a short intent label (at most ${MAX_INTENT_LENGTH} chars); the value you sent is ${intent.length} chars. The tool was not run. Put that content in the tool's own parameters and retry with a brief \`${INTENT_FIELD}\`.`;
-				continue;
-			}
 			if (intent) {
 				toolCall.intent = intent;
 			} else if (typeof tool?.intent === "function") {
@@ -3411,7 +3402,7 @@ async function executeToolCalls(
 		// also cascades: the freshly detached job's own completion re-triggers
 		// this check for the next command, so millisecond-long commands chain
 		// into separate background deliveries (#12869).
-		if (source === "irc" && softInterrupts) steeringSoftController.abort();
+		if (source === "irc" && softInterrupts) steeringSoftController.abort("irc");
 	};
 
 	const checkSteering = async (): Promise<void> => {
@@ -3450,7 +3441,7 @@ async function executeToolCalls(
 				interruptState.triggered = true;
 				interruptState.source = steeringSource ?? "unknown";
 				steeringAbortController.abort(TOOL_INTERRUPT_ABORT_REASON);
-				if (softInterrupts) steeringSoftController.abort();
+				if (softInterrupts) steeringSoftController.abort(interruptState.source);
 			}
 			return;
 		}

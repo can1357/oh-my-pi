@@ -141,7 +141,7 @@ function jobRow(job: JobSnapshot, theme: Theme): string {
 					: "done",
 		theme,
 	);
-	return `${icon} ${formatBadge(job.type, job.status === "failed" ? "error" : job.status === "cancelled" ? "warning" : "accent", theme)} ${theme.fg("toolOutput", safe(job.id))} ${theme.fg("dim", safe(job.label))} ${theme.fg("dim", formatDuration(job.durationMs))}`;
+	return `${icon} ${formatBadge(job.type, job.status === "failed" ? "error" : job.status === "cancelled" ? "warning" : "accent", theme)} ${theme.fg("toolOutput", safe(job.id))} ${theme.fg("dim", safe(job.intent || job.label))} ${theme.fg("dim", formatDuration(job.durationMs))}`;
 }
 
 /** Render live and completed process writes with the URL-selected operation. */
@@ -303,7 +303,7 @@ function jobItem(job: JobSnapshot, badge?: { text: string; tone: TspTone }): Nat
 		"item",
 		{
 			label: [span(job.type, "accent"), span(" "), span(safe(job.id), "toolOutput")],
-			detail: [span(safe(job.label), "muted")],
+			detail: [span(safe(job.intent || job.label), "muted")],
 			value: badge ? [span(badge.text, badge.tone)] : [span(formatDuration(job.durationMs), "muted")],
 			tone: badge?.tone ?? jobTone(job.status),
 		},

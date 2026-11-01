@@ -112,10 +112,14 @@ fn scan_with(
 }
 
 /// A canonical temporary directory (confinement compares physical paths; macOS's
-/// temp dir lives behind the `/var` symlink).
+/// temp dir lives behind the `/var` symlink). Resolved like `realpath`, not
+/// `std::fs::canonicalize`, which spells Windows paths `\\?\…` where `/` is no
+/// separator.
 fn canonical_tmp() -> (tempfile::TempDir, PathBuf) {
 	let tmp = tempfile::tempdir().unwrap();
-	let root = std::fs::canonicalize(tmp.path()).unwrap();
+	let root = pi_vfs::BlockingFs::native()
+		.canonicalize_with(tmp.path(), &pi_vfs::CanonicalizeOptions::default())
+		.unwrap();
 	(tmp, root)
 }
 
@@ -354,7 +358,7 @@ fn inc_recursion_segment_order_matches_reference() {
 		assert_eq!(parents, ["a", "a/b", "a/b/d", "a/e", "c", "c/g"]);
 		// The first list's parent is its "." entry; gap indices resolve to parents.
 		assert_eq!(fl.segment_parent(0), Some(1));
-		assert_eq!(fl.entry(6).unwrap().name(), b"a");
+		assert_eq!(fl.entry(starts[1] - 1).unwrap().name(), b"a");
 	}
 	let dir_names: Vec<String> = (0..got.dir_count())
 		.map(|i| String::from_utf8(got.dir_entry(i).unwrap().name()).unwrap())

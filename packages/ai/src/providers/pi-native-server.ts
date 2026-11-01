@@ -69,6 +69,7 @@ const ALLOWED_OPTION_KEYS: ReadonlySet<keyof SimpleStreamOptions> = new Set([
 	"promptCache",
 	"statefulResponses",
 	"storeResponses",
+	"codexAccessPrograms",
 	"streamFirstEventTimeoutMs",
 	"streamIdleTimeoutMs",
 	"reasoning",
@@ -265,24 +266,5 @@ export function encodeStream(
 	});
 }
 
-// ---------------------------------------------------------------------------
-// formatError
-// ---------------------------------------------------------------------------
-
-/**
- * Pi-native error envelope:
- *   `{ error: { type, message } }`
- *
- * Mirrors OpenAI's outer shape (which clients/SDKs already parse) without the
- * provider-specific status taxonomy — pi-native callers consume `type`
- * directly.
- */
-export function formatError(status: number, type: string, message: string): Response {
-	return new Response(JSON.stringify({ error: { type, message } }), {
-		status,
-		headers: {
-			"Content-Type": "application/json; charset=utf-8",
-			"Cache-Control": "no-store",
-		},
-	});
-}
+/** @deprecated Use `noStoreErrorResponse` from `auth-gateway/http`. */
+export { noStoreErrorResponse as formatError } from "../auth-gateway/http";

@@ -386,7 +386,7 @@ fn conflicting_options_are_rejected_with_reference_text() {
 		(&["-M", "a"], "Remote option must start with a dash: a"),
 		(&["--compare-dest=a", "--link-dest=b"], "ERROR: the --link-dest option conflicts with the --compare-dest option"),
 		(&["--read-batch=x", "--remove-source-files"], "--read-batch cannot be used with --remove-source-files"),
-		(&["--files-from=h:-"], "Invalid --files-from remote filename"),
+		(&["--files-from=hh:-"], "Invalid --files-from remote filename"),
 	];
 	for (args, text) in cases {
 		let mut full = args.to_vec();
@@ -455,7 +455,7 @@ fn environment_defaults() {
 		assert_eq!(get(&["a", "b"], &[("RSYNC_ICONV", "utf8")]).iconv_opt, Some("utf8".into()));
 		assert_eq!(get(&["--iconv=-", "a", "b"], &[]).iconv_opt, None);
 	}
-	assert!(get(&["--files-from=h:/l", "a", "b"], &[]).trust_sender_args);
+	assert!(get(&["--files-from=hh:/l", "a", "b"], &[]).trust_sender_args);
 }
 
 #[test]
@@ -538,7 +538,7 @@ fn server_args_pull_match_reference() {
 		),
 		(&["-a", "--info=progress2,name0", "-i"], &["-logDtpre.iLsfxCIvu", "--info=NAME0"]),
 		(&["-a", "--files-from=-", "--from0"], &["-logDtpRe.LsfxCIvu", "--files-from=-", "--from0"]),
-		(&["-a", "--files-from=h:/list"], &["-logDtpRe.LsfxCIvu", "--files-from", "/list"]),
+		(&["-a", "--files-from=hh:/list"], &["-logDtpRe.LsfxCIvu", "--files-from", "/list"]),
 		(&["-R", "--no-implied-dirs"], &["-Re.LsfxCIvu", "--no-implied-dirs"]),
 		(&["-a", "--checksum-seed=7", "--size-only", "--super", "--force"], &["-logDtpre.iLsfxCIvu", "--checksum-seed=7"]),
 		(
@@ -619,7 +619,7 @@ fn server_args_push_match_reference() {
 			&["-logDtpre.iLsfxCIvu", "--ignore-existing", "--existing", "--temp-dir", "/t\\ mp", "--fsync"],
 		),
 		(&["-a", "--files-from=-", "--from0"], &["-logDtpRe.LsfxCIvu"]),
-		(&["-a", "--files-from=h:/list"], &["-logDtpRe.LsfxCIvu", "--files-from", "/list"]),
+		(&["-a", "--files-from=hh:/list"], &["-logDtpRe.LsfxCIvu", "--files-from", "/list"]),
 		(&["-a", "--modify-window=2"], &["-logDtpre.iLsfxCIvu", "--modify-window=2"]),
 		(&["-a", "-@-1"], &["-logDtpre.iLsfxCIvu", "-@-1"]),
 		(
@@ -751,7 +751,7 @@ fn server_sender_side_and_server_only_rules() {
 		"rsync: on remote machine: --foo: unknown option"
 	);
 	assert_eq!(
-		msg(&["--server", "--files-from=h:x", ".", "d"]),
+		msg(&["--server", "--files-from=hh:x", ".", "d"]),
 		"rsync: The --files-from sent to the server cannot specify a host."
 	);
 	// Unknown --info words are ignored by a server.

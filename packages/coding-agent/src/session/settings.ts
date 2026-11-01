@@ -1,3 +1,4 @@
+import { isRecord } from "@oh-my-pi/pi-utils";
 import { combine, effect, register, type SettingValueOf } from "../config/registry";
 import {
 	SERVICE_TIER_ANTHROPIC_OPTIONS,
@@ -22,6 +23,7 @@ import {
 import { DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS, MAX_WEB_SEARCH_TIMEOUT_SECONDS } from "../web/search/types";
 import { DEFAULT_USAGE_RESERVE_PCT } from "@oh-my-pi/pi-ai/auth-storage";
 import { configureProviderStoreResponses } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
+import { configureCodexAccessPrograms } from "@oh-my-pi/pi-ai/providers/openai-codex/access-programs";
 import { configureProviderMaxInFlightRequests } from "@oh-my-pi/pi-ai/stream";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
@@ -166,10 +168,6 @@ export const cfgPrewalkAutoTarget = register({
 	},
 });
 
-function isLimitRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function isPositiveLimit(limit: unknown): limit is number {
 	return typeof limit === "number" && Number.isFinite(limit) && limit > 0;
 }
@@ -177,7 +175,7 @@ function isPositiveLimit(limit: unknown): limit is number {
 /** Per-provider request limits floored to whole numbers ≥ 1; non-positive or non-numeric entries are dropped. */
 export function normalizeProviderMaxInFlightRequests(value: unknown): Record<string, number> {
 	const normalized: Record<string, number> = {};
-	if (!isLimitRecord(value)) return normalized;
+	if (!isRecord(value)) return normalized;
 	for (const provider in value) {
 		const limit = value[provider];
 		if (isPositiveLimit(limit)) normalized[provider] = Math.max(1, Math.floor(limit));
@@ -191,7 +189,7 @@ export function normalizeProviderMaxInFlightRequests(value: unknown): Record<str
  * @throws Error naming every provider whose limit is not a positive number.
  */
 export function validateProviderMaxInFlightRequests(value: unknown): Record<string, number> {
-	if (isLimitRecord(value)) {
+	if (isRecord(value)) {
 		const invalidProviders: string[] = [];
 		for (const provider in value) if (!isPositiveLimit(value[provider])) invalidProviders.push(provider);
 		if (invalidProviders.length > 0) {
@@ -1199,6 +1197,22 @@ export const cfgProvidersMuseCodeStoreResponses = register({
 // Process-wide too, so side requests that call `completeSimple`/`streamSimple`
 // directly (titles, commit messages, memories) follow the setting.
 effect(cfgProvidersMuseCodeStoreResponses, enabled => configureProviderStoreResponses({ "muse-code": enabled }));
+
+export const cfgProvidersOpenaiCodexDaybreak = register({
+	id: "providers.openai-codex.daybreak",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "providers",
+		group: "Protocol",
+		label: "Codex Daybreak Blue",
+		description:
+			"Automatically request the Daybreak Blue cyber access program on ChatGPT accounts eligible for it. OpenAI may use content from Daybreak Blue sessions to improve its models. Does not cover dedicated Daybreak Blue models (gpt-daybreak-blue-*), which may still run as Daybreak sessions.",
+	},
+});
+// Sessions pass their own value per request; this process-wide default covers
+// callers without a session stream function (titles, commit messages, memories).
+effect(cfgProvidersOpenaiCodexDaybreak, enabled => configureCodexAccessPrograms(enabled));
 
 export const cfgProvidersCacheRetention = register({
 	id: "providers.cacheRetention",

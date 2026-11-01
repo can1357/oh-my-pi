@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the collab envelope helpers `packEnvelope`, `unpackEnvelope` and `rewriteEnvelopePeer`
+
+## [18.14.2] - 2026-10-31
+
+### Added
+
+- Added `nums` to `code` props (`TspCodeProps`): each line's number, so one block can show non-contiguous lines with `…` gap rows where the numbers jump.
+- Added the TSP `button` kind (`TspButtonProps`: label, icon, keycaps, `default`/`primary`/`quiet`/`danger` variants, `sm`/`md` sizes, pressed, disabled with a reason, busy) and `tabs` `variant: "segmented"`.
+
 ## [18.14.0] - 2026-10-29
 
 ### Added

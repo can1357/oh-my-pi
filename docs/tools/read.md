@@ -299,6 +299,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
    5. handle JSON directly, feeds via feed parser, plain text directly
    6. for HTML and non-raw mode, try declared markdown alternates, content negotiation, feed alternates, HTML-to-text renderers, extracted linked documents, then `llms.txt`
    7. fall back to raw body text/html
+- The native HTML renderer's front matter keeps the title, canonical, base, `description`, `author` and `article:published_time`/`article:modified_time` lines. `pruneFrontMatter()` folds every other `<meta>` line into one `meta_omitted` line naming the tags (25 at most, then `+N more`) and pointing to `:raw` for their values; it runs on the returned copy only, after the reader and fallback checks have judged the whole rendering.
 - Non-raw whole-URL output is wrapped with a small header; line selectors address body lines, not these header rows. Raw URL artifacts and search materialization use the same unwrapped body coordinates:
 
 ```text

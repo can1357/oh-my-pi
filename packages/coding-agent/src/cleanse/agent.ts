@@ -1,3 +1,4 @@
+import { type } from "@oh-my-pi/omptype";
 import { getProjectDir, isRecord, prompt } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../config/model-registry";
 import { formatModelString, resolveCliModel } from "../config/model-resolver";
@@ -21,27 +22,17 @@ import type { CleanseAgentOutcome, CleanseAssignment, CleanseDiagnostic, Cleanse
 
 const MAX_DIAGNOSTIC_MESSAGE = 4_000;
 
+/** One checker the discovery agent proposes. */
+const DiscoveredChecker = type({
+	label: "string",
+	"language?": "string",
+	"cwd?": "string",
+	command: type("string").array().atLeastLength(1),
+	"parser?": type.enumerated(...CLEANSE_PARSER_KINDS),
+});
+
 /** Structured output contract for the prompted checker-discovery agent. */
-const DISCOVERY_SCHEMA = {
-	type: "object",
-	required: ["checkers"],
-	properties: {
-		checkers: {
-			type: "array",
-			items: {
-				type: "object",
-				required: ["label", "command"],
-				properties: {
-					label: { type: "string" },
-					language: { type: "string" },
-					cwd: { type: "string" },
-					command: { type: "array", items: { type: "string" }, minItems: 1 },
-					parser: { type: "string", enum: [...CLEANSE_PARSER_KINDS] },
-				},
-			},
-		},
-	},
-};
+const DISCOVERY_SCHEMA = type({ checkers: DiscoveredChecker.array() }).toJsonSchema();
 
 /** Hooks used by the standalone command to render subagent lifecycle progress. */
 export interface CleanseAgentHooks {
@@ -229,23 +220,17 @@ export async function createCleanseAgentRuntime(options: {
 	};
 }
 
-/** Defensively validate discovery-agent output into runnable checker specs. */
+/** Defensively validate discovery-agent output into runnable checker specs, skipping invalid entries. */
 function parseDiscoverySpecs(data: unknown): CustomCleanseCheckerSpec[] {
 	if (!isRecord(data) || !Array.isArray(data.checkers)) return [];
 	const specs: CustomCleanseCheckerSpec[] = [];
 	for (const value of data.checkers) {
-		if (!isRecord(value)) continue;
-		const command = Array.isArray(value.command)
-			? value.command.filter((part): part is string => typeof part === "string" && part.length > 0)
-			: [];
-		if (typeof value.label !== "string" || !value.label.trim() || command.length === 0) continue;
-		specs.push({
-			label: value.label.trim(),
-			language: typeof value.language === "string" ? value.language : undefined,
-			cwd: typeof value.cwd === "string" ? value.cwd : undefined,
-			command,
-			parser: typeof value.parser === "string" ? value.parser : undefined,
-		});
+		const checker = DiscoveredChecker(value);
+		if (checker instanceof type.errors) continue;
+		const label = checker.label.trim();
+		const command = checker.command.filter(part => part.length > 0);
+		if (!label || command.length === 0) continue;
+		specs.push({ ...checker, label, command });
 	}
 	return specs;
 }

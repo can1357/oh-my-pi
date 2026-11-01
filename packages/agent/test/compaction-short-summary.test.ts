@@ -1,11 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import {
-	type CompactionPreparation,
-	compact,
-	createFileOps,
-	DEFAULT_COMPACTION_SETTINGS,
-} from "@oh-my-pi/pi-agent-core/compaction";
+import { type CompactionPreparation, compact, DEFAULT_COMPACTION_SETTINGS } from "@oh-my-pi/pi-agent-core/compaction";
+import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { AssistantMessage, Model, StopReason } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
@@ -53,7 +49,7 @@ function makePreparation(settings: Partial<CompactionPreparation["settings"]> = 
 		recentMessages: [{ role: "user", content: "recent msg", timestamp: Date.now() }],
 		isSplitTurn: false,
 		tokensBefore: 12_345,
-		fileOps: createFileOps(),
+		fileOps: snapcompact.createFileOps(),
 		settings: { ...DEFAULT_COMPACTION_SETTINGS, remoteEnabled: false, ...settings },
 	};
 }
@@ -89,7 +85,17 @@ describe("compaction short summary isolation", () => {
 
 	test("a short summary with no answer text omits shortSummary instead of storing an empty string", async () => {
 		const result = await compact(makePreparation(), getModel(), "key", undefined, undefined, {
-			completeImpl: completeWith(() => reply("length", [{ type: "thinking", thinking: "..." }])),
+			completeImpl: completeWith(() => reply("stop", [{ type: "thinking", thinking: "..." }])),
+			oneshotRetry: false,
+		});
+
+		expect(result.summary.startsWith(FULL_SUMMARY)).toBe(true);
+		expect("shortSummary" in result).toBe(false);
+	});
+
+	test("a short summary cut off at the output limit is omitted, not stored truncated", async () => {
+		const result = await compact(makePreparation(), getModel(), "key", undefined, undefined, {
+			completeImpl: completeWith(() => reply("length", [{ type: "text", text: "I fixed the thing and" }])),
 			oneshotRetry: false,
 		});
 

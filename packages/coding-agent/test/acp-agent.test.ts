@@ -27,6 +27,7 @@ import type {
 	UsageFallbackConfirmation,
 } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SILENT_ABORT_MARKER, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
+import type { ClientBridge } from "@oh-my-pi/pi-coding-agent/session/client-bridge";
 import { closeSessionIndex } from "@oh-my-pi/pi-coding-agent/session/session-index";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
@@ -38,6 +39,7 @@ import type {
 	CreateElicitationRequest,
 	CreateElicitationResponse,
 	PromptRequest,
+	RequestPermissionRequest,
 	SessionNotification,
 	Validator,
 } from "@oh-my-pi/pi-utils/acp";
@@ -135,6 +137,7 @@ class FakeAgentSession {
 	systemPrompt = "system";
 	disposed = false;
 	fastMode = false;
+	clientBridge: ClientBridge | undefined;
 	forcedToolChoice: string | undefined;
 	get settings(): Settings {
 		return Settings.instance;
@@ -342,10 +345,23 @@ class FakeAgentSession {
 		return undefined;
 	}
 
-	async switchSession(sessionPath: string): Promise<boolean> {
-		await this.sessionManager.setSessionFile(sessionPath);
+	readonly #sessionChangeCallbacks = new Set<() => void>();
+
+	registerSessionChangeCallback(callback: () => void): () => void {
+		this.#sessionChangeCallbacks.add(callback);
+		return () => this.#sessionChangeCallbacks.delete(callback);
+	}
+
+	#adoptDurableSession(): void {
+		const previous = this.sessionId;
 		this.sessionId = this.sessionManager.getSessionId();
 		this.agent.sessionId = this.sessionId;
+		if (this.sessionId !== previous) for (const callback of this.#sessionChangeCallbacks) callback();
+	}
+
+	async switchSession(sessionPath: string): Promise<boolean> {
+		await this.sessionManager.setSessionFile(sessionPath);
+		this.#adoptDurableSession();
 		return true;
 	}
 
@@ -358,8 +374,7 @@ class FakeAgentSession {
 
 	async newSession(): Promise<boolean> {
 		await this.sessionManager.newSession();
-		this.sessionId = this.sessionManager.getSessionId();
-		this.agent.sessionId = this.sessionId;
+		this.#adoptDurableSession();
 		return true;
 	}
 
@@ -381,7 +396,9 @@ class FakeAgentSession {
 
 	setActiveToolsByName(_toolNames: string[]): void {}
 
-	setClientBridge(_bridge: unknown): void {}
+	setClientBridge(bridge: ClientBridge): void {
+		this.clientBridge = bridge;
+	}
 
 	setMcpServerInstructionsSource(_source: unknown): void {}
 
@@ -487,6 +504,7 @@ type SetToolUIContextSpy = (uiContext: ExtensionUIContext, hasUI: boolean) => vo
 interface AgentHarness {
 	agent: AcpAgent;
 	updates: SessionNotification[];
+	extNotifications: Array<{ method: string; params: Record<string, unknown> }>;
 	abortController: AbortController;
 	sessions: FakeAgentSession[];
 	setToolUIContextSpies: SetToolUIContextSpy[];
@@ -534,6 +552,7 @@ async function createHarness(
 		clientCapabilities?: ClientCapabilities;
 		/** Runs before a notification is recorded, so a test can delay one delivery. */
 		sessionUpdateHook?: (notification: SessionNotification) => Promise<void> | void;
+		permissionHandler?: (request: RequestPermissionRequest) => void;
 		/** Gives each session the factory creates a real extension runner with no extensions. */
 		extensionRunners?: boolean;
 		/** Exposed to each created session's `modelRegistry` for MCP credential round-trips. */
@@ -552,6 +571,7 @@ async function createHarness(
 	await Settings.init({ agentDir, inMemory: true });
 
 	const updates: SessionNotification[] = [];
+	const extNotifications: AgentHarness["extNotifications"] = [];
 	const abortController = new AbortController();
 	const sessions: FakeAgentSession[] = [];
 	const setToolUIContextSpies: SetToolUIContextSpy[] = [];
@@ -562,6 +582,13 @@ async function createHarness(
 			// microtask before the push and perturb ordering-sensitive tests.
 			if (options.sessionUpdateHook) await options.sessionUpdateHook(notification);
 			updates.push(notification);
+		},
+		extNotification: async (method: string, params: Record<string, unknown>) => {
+			extNotifications.push({ method, params });
+		},
+		requestPermissionWithCancel: (request: RequestPermissionRequest) => {
+			options.permissionHandler?.(request);
+			return { promise: Promise.resolve({ outcome: { outcome: "cancelled" } }), cancel: () => {} };
 		},
 		unstable_createElicitation: options.elicitationHandler
 			? async (req: CreateElicitationRequest) => options.elicitationHandler!(req)
@@ -604,6 +631,7 @@ async function createHarness(
 	return {
 		agent,
 		updates,
+		extNotifications,
 		abortController,
 		sessions,
 		setToolUIContextSpies,
@@ -621,6 +649,48 @@ async function advanceBootstrapGuard(): Promise<void> {
 }
 
 describe("ACP agent", () => {
+	it("keeps the ACP handle after the durable session changes", async () => {
+		const elicitations: CreateElicitationRequest[] = [];
+		const permissions: RequestPermissionRequest[] = [];
+		const harness = await createHarness({
+			extensionRunners: true,
+			elicitationHandler: async request => {
+				elicitations.push(request);
+				return { action: "accept", content: { value: "Yes" } };
+			},
+			permissionHandler: request => permissions.push(request),
+		});
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		// This harness reset delegates to the real SessionManager, as extension
+		// ctx.newSession does, and rolls the durable identifier in place.
+		await session.newSession();
+		expect(session.sessionId).not.toBe(created.sessionId);
+
+		const response = await harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "ping" }],
+		});
+		expect(response.stopReason).toBe("end_turn");
+		expect(session.promptCalls).toContain("ping");
+		expect(harness.updates.some(update => update.update.sessionUpdate === "agent_message_chunk")).toBe(true);
+		expect(harness.updates.every(update => update.sessionId === created.sessionId)).toBe(true);
+
+		expect(await session.extensionRunner?.getUIContext().select("Continue?", ["Yes", "No"])).toBe("Yes");
+		expect(elicitations).toHaveLength(1);
+		expect(elicitations[0]).toMatchObject({ sessionId: created.sessionId });
+		await session.clientBridge?.requestPermission?.({ toolCallId: "call", toolName: "test", title: "Run tool" }, []);
+		expect(permissions).toHaveLength(1);
+		expect(permissions[0]?.sessionId).toBe(created.sessionId);
+
+		// After the handle closes (as across an agent restart), loading it reopens the conversation that continued under it.
+		const continued = session.sessionId;
+		await harness.agent.closeSession({ sessionId: created.sessionId });
+		await harness.agent.loadSession({ sessionId: created.sessionId, cwd: harness.cwdA, mcpServers: [] });
+		expect(harness.sessions.at(-1)?.sessionId).toBe(continued);
+		await harness.agent.dispose();
+	});
+
 	it("supports multiple live ACP sessions with model and lifecycle handlers", async () => {
 		const harness = await createHarness();
 		const first = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
@@ -945,19 +1015,49 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
+	it("buffers compaction notifications until the client knows the session", async () => {
+		const harness = await createHarness();
+		vi.useFakeTimers();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		const emit = (event: AgentSessionEvent) => {
+			for (const listener of session.listeners()) listener(event);
+		};
+
+		emit({ type: "auto_compaction_start", reason: "threshold", action: "context-full" });
+		expect(harness.extNotifications).toEqual([]);
+		await advanceBootstrapGuard();
+		emit({ type: "auto_compaction_end", action: "context-full", result: undefined, aborted: false, willRetry: true });
+		await Promise.resolve();
+
+		expect(harness.extNotifications).toEqual([
+			{
+				method: "_omp/compaction/start",
+				params: { sessionId: created.sessionId, reason: "threshold", action: "context-full" },
+			},
+			{
+				method: "_omp/compaction/end",
+				params: expect.objectContaining({
+					sessionId: created.sessionId,
+					action: "context-full",
+					aborted: false,
+					willRetry: true,
+				}),
+			},
+		]);
+	});
+
 	it("pushes config_option_update when thinking level changes internally", async () => {
 		// Internal callers (slash commands, model auto-adjust, extension UI) call
 		// AgentSession.setThinkingLevel directly without going through the ACP
-		// setSessionConfigOption surface. Once the session-lifetime subscription
-		// is installed (after the 50ms bootstrap guard so the response has
-		// reached the client first), those changes must surface to clients as
+		// setSessionConfigOption surface. Once lifetime delivery opens after the
+		// bootstrap guard, those changes must surface to clients as
 		// `config_option_update` so TORTAS-style fleet views stay in sync.
 		const harness = await createHarness();
 		vi.useFakeTimers();
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(created.sessionId)!;
-		// Advance past the 50ms bootstrap timer so the lifetime subscription is
-		// installed before we drive an internal thinking-level change.
+		// Open lifetime delivery before driving an internal thinking-level change.
 		await advanceBootstrapGuard();
 
 		const updatesBefore = harness.updates.length;
@@ -1004,8 +1104,8 @@ describe("ACP agent", () => {
 		const session = harness.findSession(created.sessionId)!;
 
 		const updatesBefore = harness.updates.length;
-		// Synchronously after `newSession` returns, the bootstrap timer has
-		// not fired yet, so the lifetime subscription is not installed.
+		// Without a prompt or the bootstrap timer firing, lifetime delivery
+		// remains gated even though event capture is already installed.
 		session.setThinkingLevel("high");
 
 		const beforeBootstrap = harness.updates
@@ -1016,8 +1116,7 @@ describe("ACP agent", () => {
 					notification.update.sessionUpdate === "config_option_update",
 			);
 		expect(beforeBootstrap.length).toBe(0);
-		// After advancing through the 50ms bootstrap timer, the subscription is
-		// installed and subsequent changes do surface.
+		// Opening delivery lets subsequent internal changes reach the client.
 		await advanceBootstrapGuard();
 		const baseline = harness.updates.length;
 		session.setThinkingLevel("medium");
@@ -1043,9 +1142,8 @@ describe("ACP agent", () => {
 		const harness = await createHarness();
 		vi.useFakeTimers();
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
-		// Wait past the bootstrap guard so the lifetime subscription is
-		// installed and the client-driven setSessionConfigOption produces
-		// exactly one notification through it.
+		// Open lifetime delivery so setSessionConfigOption produces exactly one
+		// notification through the session listener.
 		await advanceBootstrapGuard();
 
 		const updatesBefore = harness.updates.length;
@@ -1159,15 +1257,14 @@ describe("ACP agent", () => {
 		}
 	});
 
-	it("still pushes config_option_update for /effort before the lifetime subscription exists", async () => {
-		// Pre-bootstrap there is no lifetime subscription, so the explicit
-		// notifyConfigChanged is the only path that tells the client — same
-		// contract as `setSessionConfigOption`'s pre-bootstrap push.
+	it("pushes config_option_update for /effort before the bootstrap timer fires", async () => {
+		// An early client prompt opens lifetime delivery; /effort must emit
+		// exactly one config update without waiting for the bootstrap timer.
 		const harness = await createHarness();
 		vi.useFakeTimers();
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
-		// Deliberately do not advance the 50ms bootstrap guard: the lifetime
-		// subscription is not installed yet.
+		// Do not advance the guard: the prompt itself establishes that
+		// the client already knows this session.
 
 		const updatesBefore = harness.updates.length;
 		await harness.agent.prompt({
@@ -1192,8 +1289,8 @@ describe("ACP agent", () => {
 	it("pushes config_option_update when the model changes internally", async () => {
 		// Internal callers (prewalk hand-offs, retry-fallback, model cycling)
 		// change AgentSession's model directly without going through the ACP
-		// setSessionConfigOption surface. Once the session-lifetime subscription
-		// is installed, those changes must surface to clients as
+		// setSessionConfigOption surface. Once lifetime delivery is ready,
+		// those changes must surface to clients as
 		// `config_option_update` — otherwise a client's model indicator (e.g.
 		// Zed's status bar) goes stale the moment prewalk hands off to a
 		// cheaper model mid-session.
@@ -4091,37 +4188,6 @@ describe("ACP agent", () => {
 			});
 
 			expect(result).toBeUndefined();
-		});
-
-		it("reads the sessionId getter on every elicitation so mid-flight session changes are reflected", async () => {
-			// `record.session.sessionId` mutates when an extension command calls
-			// `ctx.switchSession` / `ctx.newSession`. Snapshotting it once at
-			// factory time would route later elicitations to the pre-switch id.
-			const { connection, calls } = createElicitConnection(async () => ({
-				action: "accept",
-				content: { value: "ok" },
-			}));
-			let currentSessionId = "session-before-switch";
-			const ctx = createAcpExtensionUiContext(connection, () => currentSessionId, FORM_CAPABILITIES);
-
-			await ctx.select("Pick", ["a"]);
-			currentSessionId = "session-after-switch";
-			await ctx.confirm("Continue?", "post-switch");
-			await ctx.input("Name?");
-
-			expect(calls).toHaveLength(3);
-			// Each call must be a session-scoped form elicitation. Spelled as three
-			// separate narrows because `mode === "form"` alone leaves both
-			// `ElicitationRequestScope` and `ElicitationSessionScope` in the union —
-			// only `"sessionId" in call` picks the session-scoped variant — and
-			// loop-style narrows don't propagate to the assertions below.
-			const [first, second, third] = calls;
-			if (first?.mode !== "form" || !("sessionId" in first)) throw new Error("first call missing sessionId");
-			if (second?.mode !== "form" || !("sessionId" in second)) throw new Error("second call missing sessionId");
-			if (third?.mode !== "form" || !("sessionId" in third)) throw new Error("third call missing sessionId");
-			expect(first.sessionId).toBe("session-before-switch");
-			expect(second.sessionId).toBe("session-after-switch");
-			expect(third.sessionId).toBe("session-after-switch");
 		});
 	});
 });

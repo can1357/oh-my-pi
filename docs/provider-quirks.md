@@ -228,8 +228,8 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/goog
 - **`streamGenerateContent` SSE protocol**: Streams are consumed via `readSseJson<GenerateContentResponse>` in `streamGoogleGenAI`.
 - **Thought parts & signature retention**: `isThinkingPart` identifies reasoning text when `part.thought === true`. `GoogleTextBlocks` folds streamed text and thought parts into blocks and keeps each `part.thoughtSignature` on the block whose part carried it, including the empty text part Gemini sends after a text reply's last chunk to sign the reply. In `convertMessages`, thought signatures are retained only when message provider/model match the target (`msg.provider === model.provider && msg.model === model.id`) and pass `isValidThoughtSignature` (base64 check); that model's own thinking replays as a `thought: true` part, signed or not, while other models' thinking arrives already demoted to text by `transformMessages`. For Gemini 3 tool calls lacking a valid signature, the public Gemini API emits the `skip_thought_signature_validator` bypass sentinel on every unsigned call. Cloud Code Assist / Antigravity emits it only when the first call of a turn is unsigned; signed-first parallel turns omit it from unsigned secondary calls. Vertex AI always omits the sentinel (#9638, #10602).
 - **Empty response retry loop**: `streamGoogleGenAI` guards against Gemini returning `finishReason: STOP` with blank content without calling tools. `hasMeaningfulGoogleContent` validates output; if empty, `streamGoogleGenAI` retries up to `MAX_EMPTY_STREAM_RETRIES` (2 retries, 3 total attempts) with exponential backoff (`EMPTY_STREAM_BASE_DELAY_MS * 2^attempt`) after resetting stream output via `resetGoogleStreamOutputForRetry`.
-- **Thinking loop guard**: Implemented in `packages/ai/src/utils/thinking-loop.ts` (`ThinkingLoopDetector`). Gemini, DeepSeek, and Grok model-id families are monitored before tool calls for these runaway shapes:
-   1. _Verbatim tail repetition_ (`EXACT_TAIL_WINDOW = 4096`, >= 180 repeated chars).
+- **Thinking loop guard**: Implemented in `packages/ai/src/utils/thinking-loop.ts` (`ThinkingLoopDetector`). The `thinking-loop-guard` catalog axis sets the level per model line (`loopGuardLevel`): Gemini, DeepSeek, and Grok are `semantic` (all shapes below), Claude is `off`, and every other model gets shape 1 only:
+   1. _Verbatim tail repetition_ (`EXACT_TAIL_WINDOW = 4096`, >= 180 repeated chars; >= 1024 when the cycle is long or spans a line break, since summarizers repeat status lines).
    2. _Near-duplicate segments_ (trigram Jaccard similarity >= 0.8 across last 16 segments).
    3. _Progress-lexicon stall_ (novelty <= 0.2 without new concrete reference anchors over 8 consecutive segments).
    4. Gemini's `GEMINI_HEADER_RUNAWAY_THRESHOLD = 24` halts streams emitting excessive titled reasoning summaries without acting. Triggers emit a synthetic retryable `error` tagged with `AIError.Flag.ThinkingLoop`.
@@ -1486,6 +1486,18 @@ Mistral AI provides access to Mistral, Codestral, Devstral, Ministral, and Pixtr
 
 - **Provider entry (`mistral`)**: `packages/catalog/src/compat/rules/providers/mistral.kdl` declares default model `devstral-medium-latest`. Environment keys: `MISTRAL_API_KEY`.
 - **Host Matching**: Host URL marker matching checks for `mistral.ai` (`packages/catalog/src/hosts.ts`: `mistral`).
+
+## Modular (`modular`)
+Modular Cloud serves open models on an OpenAI-compatible API at `https://api.modular.com/v1`. Requests use the OpenAI Chat Completions transport (`openai-completions`).
+
+### Special casings
+- **Thinking wire format**: `packages/catalog/src/compat/rules/providers/modular.kdl` uses OpenRouter's `reasoning` object for the whole provider (`thinking-format "openrouter"`), which the API accepts for every model, so a model models.dev adds later needs no rule of its own: on sends `reasoning.effort`, off sends `reasoning.enabled: false`. Two per-model overrides, as measured against the API: MiniMax M3.1 Flash takes a nested `reasoning.effort` (low through max) and always thinks, so it uses `thinking-requires-effort`. MiniMax M3 and Gemma 4 31B switch reasoning with `reasoning.enabled` and ignore effort, so they are toggle-only, with `enabled: true` sent through `when-thinking` extra-body.
+
+### Auth & usage
+- **API Key Login**: `packages/catalog/src/compat/rules/auth/modular.kdl` declares a `login "api-key"` rule pointing at the Modular Console and validates the key against `https://api.modular.com/v1/models`. Environment key: `MODULAR_API_KEY`.
+
+### Catalog model handling
+- **Catalog-only**: the models.dev `modular` entry (`openAiCompletionsDescriptor` in `packages/catalog/src/provider-models/openai-compat.ts`) supplies models, prices, and limits, and receives additive models.dev updates at runtime. There is no `/v1/models` discovery: that endpoint returns only ids, and it also lists models that are not sold on the shared endpoint yet.
 
 ## Moonshot (`moonshot`)
 

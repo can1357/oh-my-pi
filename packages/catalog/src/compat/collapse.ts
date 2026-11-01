@@ -240,7 +240,7 @@ function compiledTemplate(compiled: CompiledVariantFamily): VariantFamilyTemplat
 	const alternatives = [family.id, ...family.members, ...(family.extraAliases ?? [])].map(id =>
 		id
 			.split(REVISION_PLACEHOLDER)
-			.map(part => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+			.map(part => RegExp.escape(part))
 			.join(REVISION_CAPTURE),
 	);
 	const template: VariantFamilyTemplate = {

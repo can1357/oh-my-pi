@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/pi-utils",
-	"version": "18.14.0",
+	"version": "18.15.0",
 	"description": "Shared utilities for pi packages",
 	"keywords": [
 		"cli",
@@ -51,6 +51,7 @@
 		"fmt": "oxfmt --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts'"
 	},
 	"dependencies": {
+		"@oh-my-pi/omptype": "catalog:",
 		"@oh-my-pi/pi-natives": "catalog:"
 	},
 	"devDependencies": {

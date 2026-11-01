@@ -642,8 +642,8 @@ mod tests {
 				port:   0,
 			},
 			Case {
-				args:   &["h:a", ":b", ":c"],
-				remote: shell(None, "h"),
+				args:   &["hh:a", ":b", ":c"],
+				remote: shell(None, "hh"),
 				sender: true,
 				src:    &["a", "b", "c"],
 				dest:   None,
@@ -714,8 +714,8 @@ mod tests {
 				port:   0,
 			},
 			Case {
-				args:   &["h:a", ""],
-				remote: shell(None, "h"),
+				args:   &["hh:a", ""],
+				remote: shell(None, "hh"),
 				sender: true,
 				src:    &["a"],
 				dest:   Some(""),
@@ -1000,8 +1000,8 @@ mod tests {
 
 	#[test]
 	fn remote_args_follow_the_direction() {
-		assert_eq!(strs(&ok(&["h:a", ":b", "d"]).remote_args()), ["a", "b"]);
-		assert_eq!(strs(&ok(&["s", "h:x"]).remote_args()), ["x"]);
+		assert_eq!(strs(&ok(&["hh:a", ":b", "d"]).remote_args()), ["a", "b"]);
+		assert_eq!(strs(&ok(&["s", "hh:x"]).remote_args()), ["x"]);
 		assert!(ok(&["s", "d"]).remote_args().is_empty());
 	}
 }

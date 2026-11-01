@@ -1232,17 +1232,17 @@ async function targetIdForPage(page: Page): Promise<string> {
 
 async function createTrackedPage(
 	browser: Browser,
-	relay: { nearTargetId?: string } | undefined,
+	attach: { nearTargetId?: string } | undefined,
 	reportTarget: (targetId: string) => void,
 ): Promise<Page> {
 	let targetId: string;
-	if (relay) {
-		// The omp relay has no attachable browser target, so its tab is created over the root connection:
-		// unselected, in the browser of `nearTargetId` (the relay's own parameter) when given.
+	if (attach) {
+		// Attached browsers may have no page or browser target yet. Create through
+		// the root CDP connection; the relay also uses nearTargetId to choose Chrome.
 		const params: Protocol.Target.CreateTargetRequest & { nearTargetId?: string } = {
 			url: "about:blank",
 			background: true,
-			nearTargetId: relay.nearTargetId,
+			nearTargetId: attach.nearTargetId,
 		};
 		({ targetId } = await browserConnection(browser).send("Target.createTarget", params));
 		reportTarget(targetId);
@@ -1740,13 +1740,20 @@ export class WorkerCore {
 				// Create the target directly so its id is reportable before
 				// Puppeteer waits for target/page initialization. If that wait
 				// wedges, the supervisor can still close the created target.
-				const relay =
+				const attach =
 					payload.mode === "attach" && payload.page.kind === "create"
 						? { nearTargetId: payload.page.nearTargetId }
 						: undefined;
-				this.#page = await createTrackedPage(this.#browser, relay, targetId => {
-					this.#transport.send({ type: "page-created", targetId });
-				});
+				try {
+					this.#page = await createTrackedPage(this.#browser, attach, targetId => {
+						this.#transport.send({ type: "page-created", targetId });
+					});
+				} catch (error) {
+					if (!attach) throw error;
+					throw new ToolError(
+						`Could not create a managed tab in the attached browser profile: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				}
 				this.#observeDialogs();
 				if (payload.mode === "headless") {
 					await applyStealthPatches(this.#browser, this.#page, { browserSession: null, override: null });
@@ -1817,7 +1824,7 @@ export class WorkerCore {
 			if (payload.mode === "headless" && page && !page.isClosed()) {
 				await page.close().catch(() => undefined);
 			}
-			// So would a relay tab it opened in the background.
+			// Attached browsers also own tabs created by omp, including spawned Chrome.
 			if (payload.mode === "attach" && payload.page.kind === "create" && page && !page.isClosed()) {
 				await page.close().catch(() => undefined);
 			}
@@ -2267,8 +2274,7 @@ export class WorkerCore {
 							? `selector matches ${probe.count} element(s)`
 							: `could not count matches: ${probe.failure}`;
 				let hint = "";
-				if (interrupted)
-					hint = `; typing stopped after ${interrupted.typed} of ${interrupted.total} characters (the field keeps what was typed)`;
+				if (interrupted) hint = `; ${interrupted.progress}`;
 				else if (refusal)
 					hint = `; the element never became clickable (last check: ${refusal}${countNote ? `; ${countNote}` : ""})`;
 				else if (probe && "count" in probe) hint = formatSelectorMatchHint(probe.count);
