@@ -79,6 +79,35 @@ describe("Codex model discovery", () => {
 		});
 	});
 
+	it("prefers the reported default_reasoning_level over the vendor-default rule", async () => {
+		const result = await fetchCodexModels({
+			accessToken: "test-token",
+			fetchFn: async () =>
+				Response.json({
+					models: [
+						{ slug: "gpt-5.5", default_reasoning_level: "high" },
+						{
+							slug: "gpt-5.6-sol",
+							default_reasoning_level: "none",
+							supported_reasoning_levels: [{ effort: "low" }, { effort: "medium" }],
+						},
+						{ slug: "gpt-6-astra", default_reasoning_level: "bogus" },
+					],
+				}),
+		});
+		const built = (id: string) => {
+			const spec = result?.models.find(model => model.id === id);
+			if (!spec) throw new Error(`missing ${id}`);
+			return buildModel(spec);
+		};
+		// Reported level beats the rule's documented `medium`.
+		expect(built("gpt-5.5").vendorDefaultEffort).toBe(Effort.High);
+		// A reported `none` is kept, so the rule's documented `medium` cannot replace it.
+		expect(built("gpt-5.6-sol").vendorDefaultEffort).toBe("none");
+		// Unknown wire value and no documented default: stays unset.
+		expect(built("gpt-6-astra").vendorDefaultEffort).toBeUndefined();
+	});
+
 	it("carries use_responses_lite and prefer_websockets onto the model spec", async () => {
 		const fetchFn: typeof fetch = Object.assign(
 			async () =>
