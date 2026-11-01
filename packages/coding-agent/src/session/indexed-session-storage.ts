@@ -57,6 +57,12 @@ interface IndexEntry {
 	title?: string;
 	titleSource?: SessionTitleUpdate["source"];
 	titleUpdatedAt?: string;
+	/**
+	 * Set on an entry restored after a failed removal: the backend may have
+	 * deleted part of the path (Redis deletes the file key before the
+	 * metadata), so only a later full write confirms it again.
+	 */
+	unconfirmed?: true;
 }
 
 interface EnqueueOptions {
@@ -75,6 +81,8 @@ interface EnqueueOptions {
 interface IndexAppend {
 	mtimeMs: number;
 	previous: IndexEntry | undefined;
+	/** Set when the queued op removes the path (unlink, delete, rename source). */
+	removal?: true;
 }
 
 const RESOLVED = Promise.resolve();
@@ -182,6 +190,20 @@ export class IndexedSessionStorage implements SessionStorage {
 
 	existsSync(path: string): boolean {
 		return this.#index.has(path);
+	}
+
+	existsConfirmedSync(path: string): boolean {
+		const frames = this.#pendingFrames.get(path);
+		if (!frames) {
+			const entry = this.#index.get(path);
+			return entry !== undefined && !entry.unconfirmed;
+		}
+		// A removal in flight can delete the content before its op settles (Redis deletes the
+		// file key before the metadata), so the path is unconfirmed until the removal settles.
+		if (frames.some(frame => frame.removal)) return false;
+		// The oldest live frame's previous entry is the last state the backend confirmed.
+		const confirmed = frames[0]?.previous;
+		return confirmed !== undefined && !confirmed.unconfirmed;
 	}
 
 	/**
@@ -328,7 +350,7 @@ export class IndexedSessionStorage implements SessionStorage {
 					if (commitGuard && !commitGuard()) {
 						const current = this.#index.get(path);
 						if (current?.mtimeMs === mtimeMs) this.#restoreIndex(path, previous);
-						this.#dropFrame(path, mtimeMs);
+						this.#abandonFrame(path, mtimeMs);
 						return;
 					}
 					await this.#backend.writeFull(path, content, mtimeMs, title, options?.expectedSize);
@@ -363,7 +385,7 @@ export class IndexedSessionStorage implements SessionStorage {
 		const dstPrevious = this.#index.get(dst);
 		this.#index.delete(src);
 		this.#index.set(dst, { ...entry });
-		this.#pushFrame(src, { mtimeMs: entry.mtimeMs, previous: entry });
+		this.#pushFrame(src, { mtimeMs: entry.mtimeMs, previous: entry, removal: true });
 		this.#pushFrame(dst, { mtimeMs: entry.mtimeMs, previous: dstPrevious });
 		try {
 			await this.#enqueuePaths([src, dst], () => this.#backend.move(src, dst, entry.mtimeMs), { trackDrain: false });
@@ -381,7 +403,7 @@ export class IndexedSessionStorage implements SessionStorage {
 		const previous = this.#index.get(path);
 		if (!previous) throw enoent(path);
 		this.#index.delete(path);
-		this.#pushFrame(path, { mtimeMs: previous.mtimeMs, previous });
+		this.#pushFrame(path, { mtimeMs: previous.mtimeMs, previous, removal: true });
 		try {
 			await this.#enqueuePath(path, () => this.#backend.remove([path]), { trackDrain: false });
 			this.#dropFrame(path, previous.mtimeMs);
@@ -411,7 +433,9 @@ export class IndexedSessionStorage implements SessionStorage {
 			if (entry) previous.set(path, entry);
 			this.#index.delete(path);
 		}
-		for (const [path, entry] of previous) this.#pushFrame(path, { mtimeMs: sessionEntry.mtimeMs, previous: entry });
+		for (const [path, entry] of previous) {
+			this.#pushFrame(path, { mtimeMs: sessionEntry.mtimeMs, previous: entry, removal: true });
+		}
 
 		try {
 			await this.#enqueuePaths(paths, () => this.#backend.remove(paths), { trackDrain: false });
@@ -498,6 +522,8 @@ export class IndexedSessionStorage implements SessionStorage {
 			title: title === undefined ? current?.title : (title?.title ?? undefined),
 			titleSource: title === undefined ? current?.titleSource : (title?.source ?? undefined),
 			titleUpdatedAt: title === undefined ? current?.titleUpdatedAt : (title?.updatedAt ?? undefined),
+			// An append extends the current content, so it does not restore what a failed removal deleted.
+			...(current?.unconfirmed ? { unconfirmed: true } : {}),
 		});
 		if (mtimeMs > this.#nextMtimeMs) this.#nextMtimeMs = mtimeMs;
 	}
@@ -528,6 +554,22 @@ export class IndexedSessionStorage implements SessionStorage {
 	}
 
 	/**
+	 * Drop the frame of an op that never published. A newer frame was queued
+	 * on top of this op's unpublished entry, so it inherits this frame's
+	 * previous entry, keeping the oldest live frame's previous durable state.
+	 */
+	#abandonFrame(path: string, mtimeMs: number): void {
+		const frames = this.#pendingFrames.get(path);
+		if (!frames) return;
+		const index = frames.findIndex(frame => frame.mtimeMs === mtimeMs);
+		if (index < 0) return;
+		const [abandoned] = frames.splice(index, 1);
+		const next = frames[index];
+		if (abandoned && next) next.previous = abandoned.previous;
+		if (frames.length === 0) this.#pendingFrames.delete(path);
+	}
+
+	/**
 	 * Settle a failed optimistic frame. The frame drops; when newer frames
 	 * are still live their publishes will converge the backend past this
 	 * failure, so the next frame rebases onto this frame's previous instead
@@ -540,7 +582,8 @@ export class IndexedSessionStorage implements SessionStorage {
 	 * proves a newer commit won; an absent entry (unlink/rename-src
 	 * bookkeeping) or our own optimistic entry still restores. Rebased
 	 * chains stay exact: the oldest live frame's previous is always
-	 * durable state.
+	 * durable state. A failed removal may have deleted part of the path
+	 * before it failed, so the entry it hands on is marked unconfirmed.
 	 */
 	#failFrame(path: string, mtimeMs: number): void {
 		const frames = this.#pendingFrames.get(path);
@@ -550,10 +593,12 @@ export class IndexedSessionStorage implements SessionStorage {
 		const [failed] = frames.splice(index, 1);
 		if (failed === undefined) return;
 		const next = frames[index];
+		const previous =
+			failed.removal && failed.previous ? { ...failed.previous, unconfirmed: true as const } : failed.previous;
 		if (next === undefined) {
 			const current = this.#index.get(path);
-			if (current === undefined || current.mtimeMs === mtimeMs) this.#restoreIndex(path, failed.previous);
-		} else next.previous = failed.previous;
+			if (current === undefined || current.mtimeMs === mtimeMs) this.#restoreIndex(path, previous);
+		} else next.previous = previous;
 		if (frames.length === 0) this.#pendingFrames.delete(path);
 	}
 

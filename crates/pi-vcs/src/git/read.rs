@@ -223,16 +223,12 @@ impl GitRepo {
 	/// Whether a merge, rebase, cherry-pick, revert, or `am` is underway in
 	/// this checkout: the index holds unmerged entries, or the operation's
 	/// state files remain because it is resolved but not yet committed or
-	/// aborted (a phase `git ls-files --unmerged` no longer reports).
+	/// aborted (a phase `git ls-files --unmerged` no longer reports). A rebase
+	/// is underway while its state directory exists; git leaves `REBASE_HEAD`
+	/// behind after one finishes.
 	pub fn operation_in_progress(&self) -> Result<bool> {
-		const STATE: [&str; 6] = [
-			"MERGE_HEAD",
-			"CHERRY_PICK_HEAD",
-			"REVERT_HEAD",
-			"REBASE_HEAD",
-			"rebase-merge",
-			"rebase-apply",
-		];
+		const STATE: [&str; 5] =
+			["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply"];
 		if STATE
 			.iter()
 			.any(|name| self.info.git_dir.join(name).exists())
@@ -551,6 +547,18 @@ impl GitRepo {
 			out.push(commit_subject(&commit).map_err(|err| Error::backend("git log", err))?);
 		}
 		Ok(out)
+	}
+
+	/// Return each stash entry's commit subject, `stash@{0}` first: git's
+	/// `WIP on <branch>: …` or `On <branch>: <message>`.
+	pub fn stash_subjects(&self) -> Result<Vec<String>> {
+		if !self.ref_exists("refs/stash")? {
+			return Ok(Vec::new());
+		}
+		Ok(cli_text(self.root(), &["log", "--walk-reflogs", "--format=%s", "refs/stash"])?
+			.lines()
+			.map(str::to_owned)
+			.collect())
 	}
 
 	/// Return recent commits as `<short-sha> <subject>` lines.

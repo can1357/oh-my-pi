@@ -1,5 +1,5 @@
 import { SEANCE_SLASH_COMMAND } from "./seance";
-import { clearSubmittedText } from "./helpers/draft";
+import { clearSubmittedText, refuseImages, restoreDetachedDraft, runWithDetachedDraft } from "./helpers/draft";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { CompactionCancelledError } from "@oh-my-pi/pi-agent-core/compaction";
@@ -7,10 +7,11 @@ import { logger, setProjectDir } from "@oh-my-pi/pi-utils";
 import { clearClaudePluginRootsCache } from "../discovery/helpers";
 import { rebindMemoryBackendForCwd } from "../hindsight/backend";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../memory-backend";
+import { continuesConversation } from "../modes/utils/conversation-position";
 import type { FreshSessionResult, HandoffResult } from "../session/agent-session";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
-import { resolveResumableSession } from "../session/session-listing";
+import { resolveResumableSession, resolveResumeTarget } from "../session/session-listing";
 import { toggleSessionPin } from "../session/session-pins";
 import {
 	cleanSourceCheckoutIfConfigured,
@@ -275,7 +276,30 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 				runtime.ctx.showWarning(parsed.error);
 				return;
 			}
-			await runtime.ctx.handleCompactCommand(parsed.instructions, parsed.mode);
+			const { ctx } = runtime;
+			const origin = runtime.followUp;
+			// A switch still applying (or rolling back) decides which conversation is live; judge after it.
+			if (origin && ctx.session.isSessionTransitioning) await ctx.session.waitForSessionTransition();
+			if (origin && !continuesConversation(ctx.sessionManager, origin)) {
+				// Input hooks ran while the conversation changed: never compact one it was not sent in.
+				restoreDetachedDraft(ctx.editor, command.text, runtime.input?.images, runtime.input?.imageLinks);
+				ctx.showWarning("Conversation changed before /compact ran; returned it to the editor");
+				return;
+			}
+			if (origin && ctx.session.isStreaming) {
+				ctx.yieldCompaction = {
+					...origin,
+					text: command.text,
+					instructions: parsed.instructions,
+					mode: parsed.mode,
+				};
+				ctx.updatePendingMessagesDisplay();
+				ctx.showStatus("Queued compaction for when the agent yields");
+				// A prompt still in setup may bail without an agent run, and so without the settle that runs this.
+				ctx.runYieldCompaction();
+				return;
+			}
+			await ctx.handleCompactCommand(parsed.instructions, parsed.mode);
 		},
 	},
 	{
@@ -374,6 +398,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			return commandConsumed({ failed: handoffFailed });
 		},
 		handleTui: async (command, runtime) => {
+			if (refuseImages(command, runtime)) return;
 			const customInstructions = command.args || undefined;
 			clearSubmittedText(runtime);
 			await runtime.ctx.handleHandoffCommand(customInstructions);
@@ -398,18 +423,18 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 				runtime.ctx.showSessionSelector();
 				return;
 			}
-			const match = await resolveResumableSession(
+			const target = await resolveResumeTarget(
 				sessionArg,
 				runtime.ctx.sessionManager.getCwd(),
 				runtime.ctx.sessionManager.getSessionDir(),
 				{ allowGlobalFallback: true },
 			);
-			if (!match) {
+			if (!target) {
 				runtime.ctx.showError(`Session "${sessionArg}" not found`);
 				return;
 			}
 			try {
-				await runtime.ctx.handleResumeSession(match.session.path);
+				await runtime.ctx.handleResumeSession(target.session.path, { continuation: target.continuation });
 			} catch (error) {
 				// The picker reports a failed switch itself; `/resume <id>` has no picker.
 				runtime.ctx.showError(error instanceof Error ? error.message : String(error));
@@ -455,8 +480,12 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
 			const question = command.text.slice(`/${command.name}`.length).trim();
-			clearSubmittedText(runtime);
-			await runtime.ctx.handleBtwCommand(question);
+			await runWithDetachedDraft(
+				command,
+				runtime,
+				() => runtime.ctx.handleBtwCommand(question, runtime.input?.images),
+				{ restoreText: true },
+			);
 		},
 	},
 	{
@@ -467,8 +496,9 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
 			const work = command.text.slice(`/${command.name}`.length).trim();
-			clearSubmittedText(runtime);
-			await runtime.ctx.handleTanCommand(work);
+			await runWithDetachedDraft(command, runtime, () => runtime.ctx.handleTanCommand(work, runtime.input?.images), {
+				restoreText: true,
+			});
 		},
 	},
 	{
@@ -478,6 +508,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		inlineHint: "<complaint>",
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
+			if (refuseImages(command, runtime)) return;
 			const complaint = command.text.slice(`/${command.name}`.length).trim();
 			clearSubmittedText(runtime);
 			await runtime.ctx.handleOmfgCommand(complaint);
@@ -490,6 +521,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		inlineHint: "[request] [--all]",
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
+			if (refuseImages(command, runtime)) return;
 			const args = command.text.slice(`/${command.name}`.length).trim();
 			clearSubmittedText(runtime);
 			await runtime.ctx.handleCleanseCommand(args);

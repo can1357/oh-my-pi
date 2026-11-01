@@ -1,5 +1,5 @@
 import type { Component } from "../tui";
-import { getProjectDir } from "@oh-my-pi/pi-utils";
+import { getProjectDir, jsonContainerEnd } from "@oh-my-pi/pi-utils";
 import { highlightCode, type Theme } from "../theme/theme";
 import { renderStatusLine } from "../render/status-line";
 import { framedToolCard, type ToolCardSnapshot } from "../render/tool-card";
@@ -69,6 +69,8 @@ export interface BashToolDetails {
 	exitCode?: number;
 	/** True when the command was killed by its timeout deadline (not a failure). */
 	timedOut?: boolean;
+	/** Text the command wrote to `out://`, oldest first; transcripts draw each as a reply after the call. */
+	replies?: string[];
 	/** Live ACP update only; completed results refer to released terminals. */
 	terminalId?: string;
 	service?: {
@@ -174,28 +176,10 @@ function extractPartialBashEnv(partialJson: string | undefined): Readonly<Record
 	const objectStart = envStart === -1 ? -1 : partialJson.indexOf("{", envStart);
 	if (objectStart !== -1) {
 		// Scan only the env object: stop at its closing brace (outside strings)
-		// so the keys that follow it are not read as env assignments.
-		let objectEnd = partialJson.length;
-		let depth = 0;
-		for (let i = objectStart + 1; i < partialJson.length; i++) {
-			const ch = partialJson.charCodeAt(i);
-			if (ch === 0x22) {
-				// Skip the string body, honoring escapes; an unterminated string runs to the end.
-				for (i++; i < partialJson.length; i++) {
-					const inner = partialJson.charCodeAt(i);
-					if (inner === 0x5c) i++;
-					else if (inner === 0x22) break;
-				}
-			} else if (ch === 0x7b || ch === 0x5b) {
-				depth++;
-			} else if (ch === 0x7d || ch === 0x5d) {
-				if (depth === 0) {
-					objectEnd = i;
-					break;
-				}
-				depth--;
-			}
-		}
+		// so the keys that follow it are not read as env assignments. An
+		// unclosed object (still streaming) runs to the end.
+		const end = jsonContainerEnd(partialJson, objectStart);
+		const objectEnd = end === -1 ? partialJson.length : end - 1;
 		const envBody = partialJson.slice(objectStart + 1, objectEnd);
 		const matcher = /"([A-Za-z_][A-Za-z0-9_]*)"\s*:\s*"((?:\\.|[^"\\])*)(?:"|$)/gu;
 		for (const match of envBody.matchAll(matcher)) {

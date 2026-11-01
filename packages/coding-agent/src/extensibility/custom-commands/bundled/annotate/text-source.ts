@@ -6,7 +6,7 @@ import { isTranscriptEntry } from "../../../../session/session-context";
 import type { SessionEntry } from "../../../../session/session-entries";
 import type { TextReviewSource } from "@oh-my-pi/pi-tui/overlays/annotation-types";
 
-export type AnnotationSourceKind = "code-review" | "last" | "session" | "file" | "prompt";
+export type AnnotationSourceKind = "code-review" | "last" | "session" | "file" | "prompt" | "draft";
 
 export const ANNOTATION_SOURCE_CHOICES = [
 	{
@@ -33,6 +33,11 @@ export const ANNOTATION_SOURCE_CHOICES = [
 		kind: "prompt",
 		label: "Text prompt",
 		description: "Enter text directly for annotation",
+	},
+	{
+		kind: "draft",
+		label: "Saved draft",
+		description: "Resume notes kept when an annotation was closed without sending them",
 	},
 ] as const satisfies ReadonlyArray<{ kind: AnnotationSourceKind; label: string; description: string }>;
 

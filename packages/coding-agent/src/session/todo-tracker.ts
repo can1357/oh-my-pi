@@ -109,6 +109,10 @@ export class TodoTracker {
 	/** Replaces todo phases with a defensive clone. */
 	setPhases(phases: TodoPhase[]): void {
 		this.#phases = this.#clonePhases(phases);
+		// Every state write lands here — the native tool, a Cursor sync, or a
+		// bridged call — so the nudge budget re-arms on the progress it
+		// rations. Views, failed batches, and unchanged reads never arrive.
+		this.#midRunNudgeCount = 0;
 	}
 
 	/** Rehydrates todo phases from the current transcript branch. */
@@ -356,7 +360,7 @@ export class TodoTracker {
 
 	#buildEagerPreludeContext(): { toolRefs: Record<string, string>; taskBatch: boolean } {
 		const wireName = (name: string): string => {
-			if (name === "task" && this.#host.getMountedXdevToolNames().includes(name)) return `xd://${name}`;
+			if (this.#host.getMountedXdevToolNames().includes(name)) return `xd://${name}`;
 			const tool = this.#host.toolRegistry().get(name);
 			return typeof tool?.customWireName === "string" ? tool.customWireName : name;
 		};

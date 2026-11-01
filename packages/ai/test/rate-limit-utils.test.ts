@@ -11,6 +11,10 @@ import {
 	matchesUsageLimitText,
 	parseRateLimitReason,
 } from "@oh-my-pi/pi-ai/error/rate-limit";
+import { streamGoogle } from "@oh-my-pi/pi-ai/providers/google";
+import { streamGoogleGeminiCli } from "@oh-my-pi/pi-ai/providers/google-gemini-cli";
+import type { Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
 // MiniMax CN (minimax-code-cn) Token Plan exhaustion (2067): phrased 用量上限,
 // not 使用上限 like Zhipu.
@@ -31,6 +35,52 @@ function googleRpc429(reason: string, retryDelay?: string, message = "Resource e
 			retryDelay,
 		});
 	}
+	return `Cloud Code Assist API error (429): ${JSON.stringify({
+		error: {
+			code: 429,
+			message,
+			status: "RESOURCE_EXHAUSTED",
+			details,
+		},
+	})}`;
+}
+function googleRpcQuotaFailure429(
+	violations: Array<{ quotaId?: string; quotaMetric?: string; quotaValue?: string | number; description?: string }>,
+	retryDelay?: string,
+	message = "Resource has been exhausted (e.g. check quota).",
+): string {
+	const details: Array<Record<string, unknown>> = [
+		{
+			"@type": "type.googleapis.com/google.rpc.QuotaFailure",
+			violations,
+		},
+	];
+	if (retryDelay) {
+		details.push({
+			"@type": "type.googleapis.com/google.rpc.RetryInfo",
+			retryDelay,
+		});
+	}
+	return `Cloud Code Assist API error (429): ${JSON.stringify({
+		error: {
+			code: 429,
+			message,
+			status: "RESOURCE_EXHAUSTED",
+			details,
+		},
+	})}`;
+}
+
+function googleRpcRetryInfo429(
+	retryDelay: string,
+	message = "Resource has been exhausted (e.g. check quota).",
+): string {
+	const details: Array<Record<string, unknown>> = [
+		{
+			"@type": "type.googleapis.com/google.rpc.RetryInfo",
+			retryDelay,
+		},
+	];
 	return `Cloud Code Assist API error (429): ${JSON.stringify({
 		error: {
 			code: 429,
@@ -315,6 +365,237 @@ describe("parseRateLimitReason", () => {
 		const body = "Cloud Code Assist API error (429): Too many requests";
 		expect(parseRateLimitReason(body)).toBe("RATE_LIMIT_EXCEEDED");
 		expect(isUsageLimitOutcome(429, body)).toBe(false);
+	});
+
+	it("classifies structured MODEL_CAPACITY_EXHAUSTED as transient even on quota-worded message", () => {
+		const body = googleRpc429("MODEL_CAPACITY_EXHAUSTED", "10s", "Resource has been exhausted (e.g. check quota).");
+		expect(parseRateLimitReason(body)).toBe("MODEL_CAPACITY_EXHAUSTED");
+		expect(isUsageLimitOutcome(429, body)).toBe(false);
+	});
+
+	it("classifies structured QuotaFailure per-minute requests as transient RATE_LIMIT_EXCEEDED", () => {
+		const body = googleRpcQuotaFailure429(
+			[
+				{
+					quotaId: "GenerateContentRequestsPerMinutePerProjectPerModel",
+					quotaMetric: "Generate Content API requests",
+				},
+			],
+			"20s",
+			"Quota exceeded for quota metric 'Generate Content API requests'",
+		);
+		expect(parseRateLimitReason(body)).toBe("RATE_LIMIT_EXCEEDED");
+		expect(isUsageLimitOutcome(429, body)).toBe(false);
+	});
+
+	it("classifies structured QuotaFailure per-day requests as QUOTA_EXHAUSTED even when paired with per-minute violations or generic RATE_LIMIT_EXCEEDED", () => {
+		const minuteBeforeDaily = googleRpcQuotaFailure429(
+			[
+				{
+					quotaId: "GenerateContentRequestsPerMinutePerProjectPerModel",
+					quotaMetric: "Generate Content API requests",
+				},
+				{
+					quotaId: "GenerateContentRequestsPerDayPerProject",
+					quotaMetric: "Generate Content API requests",
+				},
+			],
+			"20s",
+		);
+		expect(parseRateLimitReason(minuteBeforeDaily)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(429, minuteBeforeDaily)).toBe(true);
+
+		const coReportedWithGenericRateLimit = JSON.stringify({
+			error: {
+				code: 429,
+				message: "Resource has been exhausted (e.g. check quota).",
+				status: "RESOURCE_EXHAUSTED",
+				details: [
+					{
+						"@type": "type.googleapis.com/google.rpc.ErrorInfo",
+						reason: "RATE_LIMIT_EXCEEDED",
+						domain: "googleapis.com",
+					},
+					{
+						"@type": "type.googleapis.com/google.rpc.QuotaFailure",
+						violations: [
+							{
+								quotaId: "GenerateRequestsPerDayPerProjectPerModel-FreeTier",
+								quotaMetric: "generativelanguage.googleapis.com/generate_content_free_tier_requests",
+							},
+						],
+					},
+					{
+						"@type": "type.googleapis.com/google.rpc.RetryInfo",
+						retryDelay: "20s",
+					},
+				],
+			},
+		});
+		expect(parseRateLimitReason(coReportedWithGenericRateLimit)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(429, coReportedWithGenericRateLimit)).toBe(true);
+	});
+
+	it("classifies structured QuotaFailure with quotaValue 0 as QUOTA_EXHAUSTED even on per-minute metrics", () => {
+		const zeroQuota = googleRpcQuotaFailure429(
+			[
+				{
+					quotaId: "GenerateContentRequestsPerMinutePerProjectPerModel",
+					quotaMetric: "Generate Content API requests",
+					quotaValue: "0",
+				},
+			],
+			"15s",
+		);
+		expect(parseRateLimitReason(zeroQuota)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(429, zeroQuota)).toBe(true);
+	});
+
+	it("classifies standalone RetryInfo on generic resource exhaustion according to delay threshold", () => {
+		const shortBody = googleRpcRetryInfo429("25s", "Resource has been exhausted (e.g. check quota).");
+		expect(parseRateLimitReason(shortBody)).toBe("RATE_LIMIT_EXCEEDED");
+		expect(isUsageLimitOutcome(429, shortBody)).toBe(false);
+
+		const longBody = googleRpcRetryInfo429("3600s", "Resource has been exhausted (e.g. check quota).");
+		expect(parseRateLimitReason(longBody)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(429, longBody)).toBe(true);
+	});
+
+	it("preserves structured Google 429 details through streamGoogle error extraction and classification", async () => {
+		const googleModel: Model<"google-generative-ai"> = buildModel({
+			id: "gemini-3-flash",
+			name: "Gemini 3 Flash",
+			api: "google-generative-ai",
+			provider: "google",
+			baseUrl: "https://generativelanguage.example/v1beta",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 32_000,
+		});
+		const context: Context = { messages: [{ role: "user", content: "hi", timestamp: 1 }] };
+
+		const runWith429 = async (rawBody: unknown) => {
+			const fetchImpl: FetchImpl = Object.assign(
+				async () =>
+					new Response(JSON.stringify(rawBody), {
+						status: 429,
+						headers: { "content-type": "application/json" },
+					}),
+				{ preconnect: globalThis.fetch.preconnect },
+			);
+			return streamGoogle(googleModel, context, { apiKey: "test-key", fetch: fetchImpl }).result();
+		};
+
+		const transientCapacity = await runWith429({
+			error: {
+				code: 429,
+				message: "Resource has been exhausted (e.g. check quota).",
+				status: "RESOURCE_EXHAUSTED",
+				details: [
+					{
+						"@type": "type.googleapis.com/google.rpc.ErrorInfo",
+						reason: "MODEL_CAPACITY_EXHAUSTED",
+						domain: "googleapis.com",
+					},
+					{
+						"@type": "type.googleapis.com/google.rpc.RetryInfo",
+						retryDelay: "10s",
+					},
+				],
+			},
+		});
+		expect(transientCapacity.stopReason).toBe("error");
+		expect(transientCapacity.errorStatus).toBe(429);
+		expect(is(transientCapacity.errorId ?? 0, Flag.UsageLimit)).toBe(false);
+		expect(isUsageLimitOutcome(transientCapacity.errorStatus, transientCapacity.errorMessage)).toBe(false);
+
+		const zeroEntitlement = await runWith429({
+			error: {
+				code: 429,
+				message: "Quota exceeded for quota metric 'Generate Content API requests'",
+				status: "RESOURCE_EXHAUSTED",
+				details: [
+					{
+						"@type": "type.googleapis.com/google.rpc.ErrorInfo",
+						reason: "RATE_LIMIT_EXCEEDED",
+						domain: "googleapis.com",
+					},
+					{
+						"@type": "type.googleapis.com/google.rpc.QuotaFailure",
+						violations: [
+							{
+								quotaId: "GenerateContentRequestsPerMinutePerProjectPerModel",
+								quotaMetric: "Generate Content API requests",
+								quotaValue: "0",
+							},
+						],
+					},
+				],
+			},
+		});
+		expect(zeroEntitlement.stopReason).toBe("error");
+		expect(zeroEntitlement.errorStatus).toBe(429);
+		expect(is(zeroEntitlement.errorId ?? 0, Flag.UsageLimit)).toBe(true);
+		expect(isUsageLimitOutcome(zeroEntitlement.errorStatus, zeroEntitlement.errorMessage)).toBe(true);
+	});
+	it("preserves in-band SSE error chunk details on streamGoogle and streamGoogleGeminiCli", async () => {
+		const sseErrorPayload =
+			'data: {"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"MODEL_CAPACITY_EXHAUSTED","domain":"googleapis.com"}]}}\n\n';
+
+		const context: Context = { messages: [{ role: "user", content: "hi", timestamp: 1 }] };
+
+		const sseFetch: FetchImpl = Object.assign(
+			async () =>
+				new Response(sseErrorPayload, {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				}),
+			{ preconnect: globalThis.fetch.preconnect },
+		);
+
+		// 1. Test streamGoogle
+		const googleModel: Model<"google-generative-ai"> = buildModel({
+			id: "gemini-3-flash",
+			name: "Gemini 3 Flash",
+			api: "google-generative-ai",
+			provider: "google",
+			baseUrl: "https://generativelanguage.example/v1beta",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 32_000,
+		});
+		const googleStream = streamGoogle(googleModel, context, { apiKey: "test-key", fetch: sseFetch });
+		const googleResult = await googleStream.result();
+		expect(googleResult.stopReason).toBe("error");
+		expect(parseRateLimitReason(googleResult.errorMessage ?? "")).toBe("MODEL_CAPACITY_EXHAUSTED");
+		expect(isUsageLimitOutcome(googleResult.errorStatus, googleResult.errorMessage)).toBe(false);
+
+		// 2. Test streamGoogleGeminiCli
+		const cliModel: Model<"google-gemini-cli"> = buildModel({
+			id: "gemini-2.5-flash",
+			name: "Gemini 2.5 Flash",
+			api: "google-gemini-cli",
+			provider: "google-gemini-cli",
+			baseUrl: "https://example.com",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 8192,
+		});
+		const cliStream = streamGoogleGeminiCli(cliModel, context, {
+			apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),
+			fetch: sseFetch,
+		});
+		const cliResult = await cliStream.result();
+		expect(cliResult.stopReason).toBe("error");
+		expect(cliResult.errorMessage).toBeDefined();
+		expect(parseRateLimitReason(cliResult.errorMessage ?? "")).toBe("MODEL_CAPACITY_EXHAUSTED");
+		expect(isUsageLimitOutcome(cliResult.errorStatus, cliResult.errorMessage)).toBe(false);
 	});
 });
 

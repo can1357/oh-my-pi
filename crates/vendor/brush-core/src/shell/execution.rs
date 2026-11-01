@@ -149,11 +149,15 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 		params: &ExecutionParameters,
 		call_type: callstack::ScriptCallType,
 	) -> Result<ExecutionResult, error::Error> {
-		let mut reader = std::io::BufReader::new(file);
-		let mut parser = brush_parser::Parser::new(&mut reader, &self.parser_options());
+		// The parser reads the whole script; the file closes before the script
+		// runs, so a nested `source` does not hold one descriptor per level.
+		let parse_result = {
+			let mut reader = std::io::BufReader::new(file);
+			let mut parser = brush_parser::Parser::new(&mut reader, &self.parser_options());
 
-		tracing::debug!(target: trace_categories::PARSE, "Parsing sourced file: {}", source_info.source);
-		let parse_result = parser.parse_program();
+			tracing::debug!(target: trace_categories::PARSE, "Parsing sourced file: {}", source_info.source);
+			parser.parse_program()
+		};
 
 		let script_positional_args = args.map(Into::into);
 
@@ -270,7 +274,9 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 		match result {
 			Ok(result) => Ok(result),
 			Err(err) => {
-				let _ = self.display_error(&mut params.stderr(self), &err).await;
+				if params.reports_errors() {
+					let _ = self.display_error(&mut params.stderr(self), &err).await;
+				}
 
 				let result = err.into_result(self);
 				self.set_last_exit_status(result.exit_code.into());

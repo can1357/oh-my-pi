@@ -63,8 +63,7 @@ impl Utility for Readlink {
 		let files: Vec<PathBuf> = self
 			.matches
 			.get_many::<OsString>(ARG_FILES)
-			.map(|values| values.map(PathBuf::from).collect())
-			.unwrap_or_default();
+			.map_or_default(|values| values.map(PathBuf::from).collect());
 
 		if files.is_empty() {
 			host.error("missing operand", 1);

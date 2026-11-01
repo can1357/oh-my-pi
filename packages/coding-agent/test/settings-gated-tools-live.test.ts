@@ -77,21 +77,25 @@ describe("settings-gated tools in a live session", () => {
 		await Promise.resolve();
 		await session.runToolRegistryMutation(async () => {});
 	}
+	const GREP_POLICY = "NEVER shell `grep`/`rg`/`awk`";
 
-	it("removes and restores grep in the request tools", async () => {
+	it("removes and restores grep in the request tools and system prompt", async () => {
 		const settings = Settings.isolated({});
 		const session = await startSession(settings);
 		expect(session.getActiveToolNames()).toContain("grep");
+		expect(session.systemPrompt.join("\n")).toContain(GREP_POLICY);
 
 		cfgGrepEnabled.set(settings, false);
 		await settle(session);
 		expect(session.getActiveToolNames()).not.toContain("grep");
 		expect(session.getToolByName("grep")).toBeUndefined();
+		expect(session.systemPrompt.join("\n")).not.toContain(GREP_POLICY);
 		expect(session.getActiveToolNames()).toContain("read");
 
 		cfgGrepEnabled.set(settings, true);
 		await settle(session);
 		expect(session.getActiveToolNames()).toContain("grep");
+		expect(session.systemPrompt.join("\n")).toContain(GREP_POLICY);
 	});
 
 	it("never widens an explicit tool list", async () => {
@@ -142,6 +146,39 @@ describe("settings-gated tools in a live session", () => {
 			.join("\n");
 		expect(text).toMatch(/tasks\??:/);
 		expect(session.getActiveToolNames()).toContain("write");
+	});
+
+	it("retains prelude capabilities when eval is deferred and removes them when eval is disabled", async () => {
+		const session = await startSession(
+			Settings.isolated({
+				"tools.forceDiscoverable": ["eval", "task"],
+				"browser.enabled": true,
+				"computer.enabled": true,
+				"ratchet.enabled": true,
+				"archive.enabled": true,
+			}),
+		);
+		expect(session.getActiveToolNames()).not.toContain("eval");
+		expect(session.getEvalPreludes().map(prelude => prelude.name)).toEqual([
+			"browser",
+			"computer",
+			"ratchet",
+			"archive",
+		]);
+		const result = await session.getToolByName("write")!.execute("deferred-preludes", {
+			path: "xd://eval",
+			content: JSON.stringify({ language: "js", code: "console.log(typeof archive)" }),
+		});
+		expect(result.isError).not.toBe(true);
+		expect(
+			result.content
+				.filter(part => part.type === "text")
+				.map(part => part.text)
+				.join("\n"),
+		).toContain("object");
+
+		await session.setActiveToolsByName(session.getEnabledToolNames().filter(name => name !== "eval"));
+		expect(session.getEvalPreludes()).toEqual([]);
 	});
 
 	it("repartitions a live task tool without disabling it, and honors the xdev switch", async () => {

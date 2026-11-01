@@ -16,6 +16,7 @@ import type { TruncationMeta } from "../tools/output-meta";
 import { resolveImageOptions } from "../render/render-utils";
 import { OutputPane } from "../render/output-pane";
 import { loadXtermTerminal, readTerminalRows, styleTerminalRow } from "../tools/terminal-output";
+import { normalizeInputForPty } from "../tools/bash-interactive";
 import { getSixelLineMask, isSixelPassthroughEnabled, sanitizeWithOptionalSixelPassthrough } from "../render/sixel";
 import {
 	buildExecutionFrame,
@@ -253,7 +254,13 @@ export class BashExecutionComponent extends Container {
 	/** Switch to PTY rendering and feed raw terminal bytes through the vterm replay. */
 	appendPtyChunk(chunk: string): void {
 		if (this.#status !== "running" && !this.#ptyWriting && this.#ptyQueue.length === 0) return;
-		this.#ptyMode = true;
+		if (!this.#ptyMode) {
+			this.#ptyMode = true;
+			// The pane's `styleLine` reads `#ptyMode`, so its styled rows change
+			// the moment this flips — with the rows themselves unchanged. The pane
+			// memoizes its styled output, so it has to be told.
+			this.#outputPane.invalidate();
+		}
 		this.#ptyReplayFinalized = false;
 		this.#ptyQueue.push(chunk);
 		if (this.#ptyQueue.length > MAX_PTY_QUEUE_CHUNKS) {
@@ -278,6 +285,11 @@ export class BashExecutionComponent extends Container {
 			});
 		}
 		this.#drainPtyQueue();
+	}
+
+	/** Bytes a terminal would send for a key event, honoring the command's cursor-key mode; "" for key releases. */
+	encodePtyInput(data: string): string {
+		return normalizeInputForPty(data, this.#ptyTerminal?.modes.applicationCursorKeysMode ?? false);
 	}
 
 	#drainPtyQueue(): void {

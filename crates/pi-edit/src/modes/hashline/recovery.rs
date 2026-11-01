@@ -86,6 +86,12 @@ fn build_line_map(previous: &str, current: &str) -> HashMap<u32, u32> {
 	map
 }
 
+/// The map from `previous`'s line numbers to `current`'s that recovery remaps
+/// anchors with: only lines an intervening change left untouched.
+pub(crate) fn current_line_map(previous: &str, current: &str) -> HashMap<u32, u32> {
+	build_line_map(previous, current)
+}
+
 fn duplicated_values(lines: &[&str]) -> HashSet<String> {
 	let mut seen = HashSet::new();
 	let mut duplicated = HashSet::new();
@@ -107,20 +113,14 @@ fn anchor_neighbors(anchor_lines: &HashSet<u32>, line_count: usize) -> HashMap<u
 	let mut sorted: Vec<_> = anchor_lines.iter().copied().collect();
 	sorted.sort_unstable();
 	let mut neighbors = HashMap::new();
-	let mut i = 0;
-	while i < sorted.len() {
-		let mut j = i;
-		while j + 1 < sorted.len() && sorted[j + 1] == sorted[j] + 1 {
-			j += 1;
-		}
-		let start = sorted[i];
-		let end = sorted[j];
+	for run in sorted.chunk_by(|&previous, &next| next == previous + 1) {
+		let start = run[0];
+		let end = run[run.len() - 1];
 		let before = (start > 1).then_some(start - 1);
 		let after = ((end as usize) < line_count).then_some(end + 1);
-		for &line in &sorted[i..=j] {
+		for &line in run {
 			neighbors.insert(line, Neighbors { before, after });
 		}
-		i = j + 1;
 	}
 	neighbors
 }

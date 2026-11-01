@@ -284,10 +284,14 @@ fn flush_compiled(
 		}) {
 		return;
 	}
-	if sections.is_empty() {
-		sections.push(CompiledSection { path: String::new(), ir: Vec::new() });
-	}
-	let ir = &mut sections.last_mut().expect("section exists").ir;
+	let ir = match sections.last_mut() {
+		Some(section) => &mut section.ir,
+		None => {
+			&mut sections
+				.push_mut(CompiledSection { path: String::new(), ir: Vec::new() })
+				.ir
+		},
+	};
 	ir.push(format!("{OPENER}{}", if all { "*" } else { "" }));
 	if let Some(RewriteBody { lines, insert: Some(at) }) = &put {
 		ir.extend(find);
@@ -525,9 +529,7 @@ pub fn normalize_input(input: &str) -> Result<String, EditError> {
 		while lines.last().is_some_and(|line| line.trim().is_empty()) {
 			lines.pop();
 		}
-		if lines.last().is_some_and(|line| line.trim() == "```") {
-			lines.pop();
-		}
+		lines.pop_if(|line| line.trim() == "```");
 	}
 	if lines.iter().any(|line| parse_header(line).is_some()) {
 		lines = compile_sections(&lines)?
@@ -1162,11 +1164,8 @@ fn embed_marker_lines(pattern_text: &str) -> String {
 			continue;
 		}
 		if added.len() == 1
-			&& out
-				.last()
-				.is_some_and(|anchor| is_near_variant(anchor, &added[0]))
+			&& let Some(anchor) = out.pop_if(|anchor| is_near_variant(anchor, &added[0]))
 		{
-			let anchor = out.pop().expect("checked anchor");
 			out.push(format!("{SELECT_OPEN}{anchor}{SELECT_DIVIDER}{}{SELECT_CLOSE}", added[0]));
 			continue;
 		}

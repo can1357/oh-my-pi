@@ -1,10 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
-import {
-	type OpenAIResponsesOptions,
-	openAIResponsesReplaysNativeHistory,
-	streamOpenAIResponses,
-} from "@oh-my-pi/pi-ai/providers/openai-responses";
+import { buildTransformedCodexRequestBody } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import { type OpenAIResponsesOptions, streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
 import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import type { AssistantMessage, Context, Model, ModelSpec, ProviderSessionState, Tool } from "@oh-my-pi/pi-ai/types";
 import {
@@ -15,6 +13,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import * as piUtils from "@oh-my-pi/pi-utils";
+import { createCodexModel } from "./helpers";
 
 const TEST_INSTALLATION_ID = "00000000-0000-4000-8000-000000000001";
 
@@ -436,6 +435,86 @@ function containsUserInputText(input: unknown[] | undefined, text: string): bool
 }
 
 describe("OpenAI responses history payload", () => {
+	it("replays frozen native computer calls without writing to stored history", async () => {
+		const model = { ...createCodexModel("gpt-5.5"), supportsComputerUse: true };
+		const computer = Object.freeze({
+			type: "computer_call",
+			id: "cu_stored",
+			call_id: "call_stored",
+			action: { type: "screenshot" },
+			pending_safety_checks: [],
+		});
+		const context: Context = {
+			messages: [
+				makeAssistantMessage(
+					[
+						computer,
+						{
+							type: "computer_call_output",
+							call_id: "call_stored",
+							output: { type: "computer_screenshot", image_url: "data:image/png;base64,AAEC" },
+						},
+					],
+					true,
+					"openai-codex",
+				),
+				{ role: "user", content: "Continue", timestamp: Date.now() },
+			],
+		};
+		const payload = await buildTransformedCodexRequestBody(model, context, undefined);
+		expect(findResponsesInputItem(payload.input, "computer_call")).toMatchObject({
+			id: "cu_stored",
+			call_id: "call_stored",
+		});
+		expect(computer.call_id).toBe("call_stored");
+	});
+
+	it.each([
+		{ provider: "openai", snapshot: false },
+		{ provider: "openai", snapshot: true },
+		{ provider: "openai-codex", snapshot: false },
+		{ provider: "openai-codex", snapshot: true },
+	] as const)(
+		"strips internal response metadata from $provider replay (snapshot=$snapshot) without changing stored history",
+		async ({ provider, snapshot }) => {
+			const message = Object.freeze({
+				type: "message",
+				role: "assistant",
+				phase: "commentary",
+				content: [{ type: "output_text", text: "Previous answer", annotations: [] }],
+				metadata: { turn_id: "turn_1" },
+				internal_chat_message_metadata_passthrough: {
+					content_token_count: 52,
+					create_time: 1793472704,
+					turn_id: "turn_1",
+				},
+			});
+			const context: Context = {
+				messages: [
+					snapshot
+						? {
+								role: "user",
+								content: "Compacted history",
+								providerPayload: createOpenAIResponsesHistoryPayload(provider, [message], false),
+								timestamp: Date.now(),
+							}
+						: makeAssistantMessage([message], true, provider),
+					{ role: "user", content: "Continue", timestamp: Date.now() },
+				],
+			};
+			const payload =
+				provider === "openai-codex"
+					? await buildTransformedCodexRequestBody(createCodexModel("gpt-5.5"), context, undefined)
+					: ((await captureResponsesPayload(getOpenAIReasoningModel("openai", "gpt-5-mini"), context)) as {
+							input?: unknown[];
+						});
+			const replayed = findResponsesInputItem(payload.input, "message");
+			const { internal_chat_message_metadata_passthrough: _internal, ...expected } = message;
+			expect(replayed).toEqual(expected);
+			expect(message.internal_chat_message_metadata_passthrough.content_token_count).toBe(52);
+		},
+	);
+
 	it("clamps stored original image hints when replay support is unknown", () => {
 		const items = [
 			{ type: "input_image", detail: "original", image_url: "data:image/png;base64,ZmFrZQ==" },

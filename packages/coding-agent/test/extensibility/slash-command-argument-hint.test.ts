@@ -36,4 +36,27 @@ describe("loadSlashCommands argument-hint", () => {
 			await fs.rm(cwd, { recursive: true, force: true });
 		}
 	});
+
+	test("parses side: true frontmatter, leaving other commands as main-session prompts", async () => {
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-side-cmd-"));
+		try {
+			const commandsDir = path.join(cwd, ".agent", "commands");
+			await fs.mkdir(commandsDir, { recursive: true });
+			await Bun.write(
+				path.join(commandsDir, "sitrep.md"),
+				["---", "description: Situation report", "side: true", "---", "Report status", ""].join("\n"),
+			);
+			await Bun.write(
+				path.join(commandsDir, "quoted.md"),
+				["---", "description: Quoted flag", 'side: "true"', "---", "Body", ""].join("\n"),
+			);
+
+			const commands = await loadSlashCommands({ cwd });
+
+			expect(commands.find(command => command.name === "sitrep")?.side).toBe(true);
+			expect(commands.find(command => command.name === "quoted")?.side).toBeUndefined();
+		} finally {
+			await fs.rm(cwd, { recursive: true, force: true });
+		}
+	});
 });

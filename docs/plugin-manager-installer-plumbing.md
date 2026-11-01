@@ -37,7 +37,7 @@ omp plugin install name@marketplace / omp install name@marketplace
 
 - `src/commands/plugin.ts` defines command/flags and forwards to `runPluginCommand`.
 - `src/cli/plugin-cli.ts` maps npm/link subcommands to `PluginManager` methods:
-  - `install`, `uninstall`, `list`, `link`, `doctor`, `features`, `config`, `enable`, `disable`, and npm/git `upgrade`
+   - `install`, `uninstall`, `list`, `link`, `doctor`, `features`, `config`, `enable`, `disable`, and npm/git `upgrade`
 - `discover`, marketplace `upgrade`, and `marketplace ...` subcommands use `MarketplaceManager`.
 - `upgrade <package-name>` updates an npm/git plugin; a bare name matching one installed marketplace plugin resolves to that marketplace ID instead. Multiple marketplace matches require qualification. `upgrade` without a target upgrades outdated marketplace plugins only.
 
@@ -50,9 +50,9 @@ The plugin root contains:
 - `package.json` — dependency manifest used by `bun install`/`bun uninstall` for npm-installed plugins
 - `node_modules/` — installed npm packages plus link and marketplace-cache symlinks
 - `omp-plugins.lock.json` — runtime state for npm/link/marketplace plugins:
-  - enabled/disabled per plugin
-  - selected feature set per plugin
-  - persisted plugin settings
+   - enabled/disabled per plugin
+   - selected feature set per plugin
+   - persisted plugin settings
 
 Project-root resolution first walks upward for the nearest `.omp/`; only when none exists does it use the nearest `.git` anchor. Project runtime plugins live in `<anchor>/.omp/plugins/{node_modules,omp-plugins.lock.json}`. Explicit marketplace project installs can create `<cwd>/.omp/plugins/` when neither anchor exists (except when cwd is home). Enabled project packages shadow user packages with the same package name; disabled project packages do not. npm/git/link CLI operations remain user-scoped; their install handler warns and ignores `--scope`.
 
@@ -64,6 +64,7 @@ Marketplace installs add registry and cache state alongside those runtime entrie
 - user plugins data root `installed_plugins.json` (`~/.omp/plugins/installed_plugins.json` by default) — user-scoped marketplace installs
 - `<anchor>/.omp/plugins/installed_plugins.json` — project-scoped marketplace installs
 - user plugins data root `cache/{marketplaces,plugins}/` — cached catalogs and plugin directories
+- user plugins data root `project_registries.json` — project `installed_plugins.json` files whose installs link into the shared plugin cache; consulted before a cached plugin directory is deleted, so cleanup run outside a project does not remove a directory that project still uses
 - `<scope>/plugins/node_modules/<package>` — symlink to the cached plugin, allowing its `package.json` `omp.extensions` and tools to load
 - `<scope>/plugins/omp-plugins.lock.json` — enablement and feature state shared with the runtime plugin loader
 
@@ -79,9 +80,9 @@ Marketplace installs add registry and cache state alongside those runtime entrie
 - `pkg[a,b]` -> enable named features
 - `@scope/pkg@1.2.3[feat]` -> scoped + versioned package with explicit feature selection
 
-`PluginManager.install` also accepts git sources (validated by `validateGitSpec` instead of the npm regex): namespaced shorthands `github:user/repo[#ref]`, `gitlab:`, `bitbucket:`, `codeberg:`, `sourcehut:`/`srht:`, and full git URLs (`https://github.com/user/repo`, `git@github.com:user/repo`, `ssh://…`, `git+https://…`). Git specs do not encode the package name, so install diffs `plugins/package.json#dependencies` before/after `bun install` to resolve it.
+`PluginManager.install` also accepts git sources (validated by `validateGitSpec` instead of the npm regex): namespaced shorthands `github:user/repo[#ref]`, `gitlab:`, `bitbucket:`, `codeberg:`, `sourcehut:`/`srht:`, pi-style `git:github.com/user/repo` and `git:git@github.com:user/repo`, and full git URLs (`https://github.com/user/repo`, `git@github.com:user/repo`, `ssh://…`, `git+https://…`). Git specs do not encode the package name, so install diffs `plugins/package.json#dependencies` before/after `bun install` to resolve it.
 
-Non-GitHub `https://`/`ssh://` specs are passed to bun with a `git+` prefix (bun only auto-detects git for GitHub-hosted URLs, so without it the spec is misread as an npm tarball); GitHub specs are forwarded unchanged. Inline userinfo credentials (`https://user:token@host/group/repo.git`) are stripped from those `git+` specs: `bun install` persists the spec verbatim into `plugins/package.json` and `bun.lock`, and a long-lived repository token must not land in those user files. Private repositories authenticate via SSH, a git credential helper, or `.netrc` instead — bun honors all of them natively.
+Pi-style `git:` GitHub sources are normalized to HTTPS or SSH URLs before calling bun, which otherwise treats `git` as the host. Other GitHub specs are forwarded unchanged. Non-GitHub `https://`/`ssh://` specs are passed to bun with a `git+` prefix (bun only auto-detects git for GitHub-hosted URLs, so without it the spec is misread as an npm tarball). Inline userinfo credentials (`https://user:token@host/group/repo.git`) are stripped from those `git+` specs: `bun install` persists the spec verbatim into `plugins/package.json` and `bun.lock`, and a long-lived repository token must not land in those user files. Private repositories authenticate via SSH, a git credential helper, or `.netrc` instead — bun honors all of them natively.
 
 `extractPackageName` strips an optional `npm:` prefix and version suffix for on-disk path lookup after install.
 
@@ -269,16 +270,16 @@ Operationally, `doctor --fix` can repair some drift (`bun install`, orphaned con
 ## Malformed/missing manifest behavior summary
 
 - Missing `omp`/`pi` field:
-  - install/list: tolerated (minimal manifest)
-  - runtime enabled-plugin discovery: skipped as non-plugin
+   - install/list: tolerated (minimal manifest)
+   - runtime enabled-plugin discovery: skipped as non-plugin
 - Unknown feature referenced by install spec or feature mutation: hard error with available feature list when the manifest declares a feature map; without a map, names can be retained without validation
 - Invalid or unreadable `plugin-overrides.json`: logged with its path and error, then ignored with fallback to the next project config path or `{}`. Missing files remain silent.
 - Missing tool/hook/command file paths referenced by manifest: silently ignored during resolver expansion; flagged as errors only by `doctor`
 
 ## Mode differences and precedence
 
-- `--dry-run` (install): returns a synthetic install result with no `bun install`, no network, and no lockfile/runtime-state writes (it still ensures the plugins `package.json` skeleton exists).
-- `--dry-run` for local link/install paths prints a preview without reading the package; marketplace install/uninstall previews perform local validation without mutation. Other actions do not necessarily consume this flag.
+- `--dry-run` (install): returns a synthetic install result with no `bun install`, no network, and no writes (not even the plugins `package.json` skeleton).
+- `--dry-run` for local link/install paths prints a preview without reading the package; marketplace install/uninstall previews perform local validation without mutation. Marketplace `upgrade --dry-run` reads only the registries, cached catalogs and local manifests: with no id it lists the outdated pairs `checkForUpdates` reports (what `upgradeAllPlugins` acts on); with an id it lists every scope `upgradePlugin`/`upgradePluginAcrossScopes` would force-reinstall, same or older catalog versions included (`previewUpgradePlugin`, which shares the scope resolution of those two methods and the `classifyVersionChange` rule of `checkForUpdates`). Other mutating actions (`marketplace add|remove|update`, `upgrade` of npm/git plugins, `enable`, `disable`, `features` changes, `config set|delete`, `doctor --fix`) reject `--dry-run` with exit code 1 before writing anything (npm/git `upgrade` first reports an unknown or linked plugin as the real command does); read-only actions ignore it.
 - `--json`: requested output formatting, not a transactional guarantee; marketplace mutation handlers do not all emit JSON.
 - Project overrides always take precedence over global lockfile for feature/settings view.
 - Effective enablement is `runtimeEnabled && !projectDisabled`.

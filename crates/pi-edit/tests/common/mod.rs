@@ -356,9 +356,5 @@ async fn run_case(case: &Value, default_mode: EditMode) -> Result<(), String> {
 			problems.push(format!("expected {writes} writes, got {actual}"));
 		}
 	}
-	if problems.is_empty() {
-		Ok(())
-	} else {
-		Err(problems.join("\n"))
-	}
+	problems.is_empty().ok_or_else(|| problems.join("\n"))
 }

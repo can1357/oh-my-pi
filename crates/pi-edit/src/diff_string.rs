@@ -97,28 +97,30 @@ fn parse_source_row_line_number(row: &str) -> Option<u32> {
 }
 
 fn normalize_diff_gap_rows(rows: &mut Vec<String>) {
-	let mut kept = Vec::with_capacity(rows.len());
-	for (index, row) in rows.iter().enumerate() {
-		if row != DIFF_GAP_ROW {
-			kept.push(row.clone());
+	let mut write_idx = 0;
+	for read_idx in 0..rows.len() {
+		if rows[read_idx] != DIFF_GAP_ROW {
+			rows.swap(write_idx, read_idx);
+			write_idx += 1;
 			continue;
 		}
-		if kept.is_empty() || kept.last().is_some_and(String::is_empty) {
+		if write_idx == 0 || rows[write_idx - 1].is_empty() {
 			continue;
 		}
-		let before = kept
+		let before = rows[..write_idx]
 			.iter()
 			.rev()
 			.find_map(|candidate| parse_source_row_line_number(candidate));
-		let after = rows[index + 1..]
+		let after = rows[read_idx + 1..]
 			.iter()
 			.filter(|candidate| !candidate.is_empty())
 			.find_map(|candidate| parse_source_row_line_number(candidate));
 		if matches!((before, after), (Some(left), Some(right)) if right > left + 1) {
-			kept.push(String::new());
+			rows[write_idx].clear();
+			write_idx += 1;
 		}
 	}
-	*rows = kept;
+	rows.truncate(write_idx);
 }
 
 fn adjusted_context_insert_index(rows: &[String], index: usize) -> usize {
@@ -821,25 +823,17 @@ fn is_patch_wrapper_line(line: &str) -> bool {
 /// Strip wrapper/metadata lines and trailing blank rows from a diff body.
 pub fn normalize_diff(diff: &str) -> String {
 	let mut lines = diff.split('\n').collect::<Vec<_>>();
-	while let Some(last_line) = lines.last().copied() {
-		if last_line.is_empty() || (last_line.trim().is_empty() && !is_diff_content_line(last_line)) {
-			lines.pop();
-		} else {
-			break;
-		}
-	}
+	while lines
+		.pop_if(|line| line.is_empty() || (line.trim().is_empty() && !is_diff_content_line(line)))
+		.is_some()
+	{}
 	if lines
 		.first()
 		.is_some_and(|line| is_patch_wrapper_line(line.trim()))
 	{
 		lines.remove(0);
 	}
-	if lines
-		.last()
-		.is_some_and(|line| is_patch_wrapper_line(line.trim()))
-	{
-		lines.pop();
-	}
+	lines.pop_if(|line| is_patch_wrapper_line(line.trim()));
 	lines.retain(|line| {
 		is_diff_content_line(line) || !matches_trimmed_prefix(line.trim(), &DIFF_METADATA_PREFIXES)
 	});
@@ -931,8 +925,8 @@ fn strip_line_number_prefixes(hunk: &mut DiffHunk) {
 		.filter_map(|captures| captures.get(1)?.as_str().parse::<u32>().ok())
 		.collect::<Vec<_>>();
 	let sequential = numbers
-		.windows(2)
-		.filter(|pair| pair[1] == pair[0] + 1)
+		.array_windows()
+		.filter(|&&[previous, next]| next == previous + 1)
 		.count();
 	if numbers.len() >= 3 && sequential < 1_usize.max(numbers.len() - 2) {
 		return;
@@ -956,6 +950,7 @@ fn parse_one_hunk(
 	lines: &[&str],
 	line_number: u32,
 	allow_missing_context: bool,
+	recover_line_numbers: bool,
 ) -> Result<ParseHunkResult, EditError> {
 	if lines.is_empty() {
 		return Err(parse_error("Diff does not contain any lines", line_number));
@@ -971,8 +966,7 @@ fn parse_one_hunk(
 		.then(|| parse_unified_hunk_header(header_trimmed))
 		.flatten();
 	let is_empty_context_marker = header_trimmed
-		.strip_prefix("@@")
-		.and_then(|rest| rest.strip_suffix("@@"))
+		.strip_circumfix("@@", "@@")
 		.is_some_and(|middle| middle.trim().is_empty());
 
 	if is_header_line && (header_trimmed == EMPTY_CHANGE_CONTEXT_MARKER || is_empty_context_marker) {
@@ -1132,7 +1126,9 @@ fn parse_one_hunk(
 			line_number + u32::try_from(start_index).unwrap_or(u32::MAX),
 		));
 	}
-	strip_line_number_prefixes(&mut hunk);
+	if recover_line_numbers {
+		strip_line_number_prefixes(&mut hunk);
+	}
 	Ok(ParseHunkResult { hunk, lines_consumed: parsed_lines + start_index })
 }
 
@@ -1190,8 +1186,17 @@ fn is_unified_diff_metadata_line(line: &str) -> bool {
 		.any(|prefix| line.starts_with(prefix))
 }
 
-/// Parse a diff body into hunks.
+/// Parse JSON patch hunks, recovering numbered read output when present.
 pub fn parse_diff_hunks(diff: &str) -> Result<Vec<DiffHunk>, EditError> {
+	parse_hunks(diff, true)
+}
+
+/// Codex `apply_patch` preserves numeric prefixes as literal content.
+pub(crate) fn parse_apply_patch_hunks(diff: &str) -> Result<Vec<DiffHunk>, EditError> {
+	parse_hunks(diff, false)
+}
+
+fn parse_hunks(diff: &str, recover_line_numbers: bool) -> Result<Vec<DiffHunk>, EditError> {
 	let multi_file_count = count_multi_file_markers(diff);
 	if multi_file_count > 1 {
 		return Err(EditError::Apply(format!(
@@ -1218,8 +1223,12 @@ pub fn parse_diff_hunks(diff: &str) -> Result<Vec<DiffHunk>, EditError> {
 		if trimmed.starts_with("@@") && lines[index + 1..].iter().all(|next| next.trim().is_empty()) {
 			break;
 		}
-		let parsed =
-			parse_one_hunk(&lines[index..], u32::try_from(index + 1).unwrap_or(u32::MAX), true)?;
+		let parsed = parse_one_hunk(
+			&lines[index..],
+			u32::try_from(index + 1).unwrap_or(u32::MAX),
+			true,
+			recover_line_numbers,
+		)?;
 		hunks.push(parsed.hunk);
 		index += parsed.lines_consumed;
 	}
@@ -1543,5 +1552,79 @@ mod tests {
 			LineDiff::new("a\nb\nc\n", "a\nB\nc\n").unified(Some(1), &BlockContextSource::default());
 		assert_eq!(result.diff, "@@ -1,3 +1,3 @@\n 1|a\n-2|b\n+2|B\n 3|c");
 		assert_eq!(result.first_changed_line, Some(2));
+	}
+
+	#[test]
+	fn unified_diff_omits_duplicate_and_boundary_gap_rows() {
+		let old = [
+			"function alpha() {",
+			"  const a1 = 1;",
+			"  const a2 = 2;",
+			"  const a3 = 3;",
+			"  const a4 = 4;",
+			"  return a1;",
+			"}",
+			"// spacer",
+			"function beta() {",
+			"  const b1 = 1;",
+			"  const b2 = 2;",
+			"  const b3 = 3;",
+			"  const b4 = 4;",
+			"  return b1;",
+			"}",
+		];
+		let mut new = old;
+		new[1] = "  const a1 = 100;";
+		new[13] = "  return b1 + 1;";
+
+		let result =
+			LineDiff::new(&old.join("\n"), &new.join("\n")).unified(Some(1), &source("sample.ts"));
+		let lines = result.diff.split('\n').collect::<Vec<_>>();
+		let closer = lines.iter().position(|line| *line == " 7|}").unwrap();
+		let opener = lines
+			.iter()
+			.position(|line| *line == " 9|function beta() {")
+			.unwrap();
+		assert!(opener > closer);
+		assert_eq!(lines[closer - 1], "");
+		assert_eq!(lines[closer + 1], "");
+		assert_eq!(lines[opener - 1], "");
+		assert_eq!(lines[opener + 1], "");
+		assert!(!lines.windows(2).any(|pair| pair == ["", ""]));
+		assert_ne!(lines.first(), Some(&""));
+		assert_ne!(lines.last(), Some(&""));
+
+		let contiguous_old = [
+			"function alpha() {",
+			"  const a1 = 1;",
+			"  const a2 = 2;",
+			"  const a3 = 3;",
+			"  const a4 = 4;",
+			"  return a1;",
+			"}",
+			"function beta() {",
+			"  const b1 = 1;",
+			"  const b2 = 2;",
+			"  const b3 = 3;",
+			"  const b4 = 4;",
+			"  return b1;",
+			"}",
+		];
+		let mut contiguous_new = contiguous_old;
+		contiguous_new[1] = "  const a1 = 100;";
+		contiguous_new[12] = "  return b1 + 1;";
+
+		let contiguous_result = LineDiff::new(&contiguous_old.join("\n"), &contiguous_new.join("\n"))
+			.unified(Some(1), &source("sample.ts"));
+		let contiguous_lines = contiguous_result.diff.split('\n').collect::<Vec<_>>();
+		let contiguous_closer = contiguous_lines
+			.iter()
+			.position(|line| *line == " 7|}")
+			.unwrap();
+		let contiguous_opener = contiguous_lines
+			.iter()
+			.position(|line| *line == " 8|function beta() {")
+			.unwrap();
+		assert_eq!(contiguous_opener, contiguous_closer + 1);
 	}
 }

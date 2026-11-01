@@ -599,4 +599,43 @@ describe("per-advisor syncBacklog override", () => {
 		expect(doc.warnings).toHaveLength(1);
 		expect(doc.warnings?.[0]).toContain("expected a YAML mapping");
 	});
+
+	it("parses, validates, and round-trips scope and includeReasoning", async () => {
+		const doc: WatchdogConfigDoc = {
+			advisors: [
+				{ name: "Main Only", scope: "main", includeReasoning: true },
+				{ name: "Subagent Evidence Only", scope: "subagent", includeReasoning: false },
+				{ name: "Both Scopes", scope: "all" },
+				{ name: "Default Scope" },
+			],
+		};
+		const file = path.join(tmp, "WATCHDOG.yml");
+		await saveWatchdogConfigFile(file, doc);
+
+		const text = await Bun.file(file).text();
+		expect(text).toContain("scope: main");
+		expect(text).toContain("scope: subagent");
+		expect(text).toContain("includeReasoning: false");
+		expect(await loadWatchdogConfigFile(file)).toEqual(doc);
+
+		const { advisors } = await discoverAdvisorConfigs(tmp, tmp);
+		expect(advisors.map(a => ({ name: a.name, scope: a.scope, includeReasoning: a.includeReasoning }))).toEqual([
+			{ name: "Main Only", scope: "main", includeReasoning: true },
+			{ name: "Subagent Evidence Only", scope: "subagent", includeReasoning: false },
+			{ name: "Both Scopes", scope: "all", includeReasoning: undefined },
+			{ name: "Default Scope", scope: undefined, includeReasoning: undefined },
+		]);
+
+		// Invalid scope drops only the bad entry
+		await Bun.write(
+			file,
+			["advisors:", "  - name: Valid", "    scope: main", "  - name: Invalid Scope", "    scope: worker-only"].join(
+				"\n",
+			),
+		);
+		const partial = await discoverAdvisorConfigs(tmp, tmp);
+		expect(partial.advisors.map(a => a.name)).toEqual(["Valid"]);
+		expect(partial.warnings).toHaveLength(1);
+		expect(partial.warnings[0]).toContain('"Invalid Scope"');
+	});
 });

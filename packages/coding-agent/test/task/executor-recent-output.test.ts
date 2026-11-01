@@ -339,6 +339,7 @@ describe("tool argument preview semantics", () => {
 					args: {},
 					partialResult: { content: [], details: { xdev: { tool: "task", mode: "execute", inner } } },
 				},
+				{ type: "tool_execution_start", toolCallId: "fresh", toolName: "write", args: { path: "XD://task" } },
 				{
 					type: "tool_execution_end",
 					toolCallId: "nested",
@@ -352,6 +353,9 @@ describe("tool argument preview semantics", () => {
 			true,
 		);
 		expect(result.toolSnapshots.at(-1)?.inflightTaskDetails).toBeUndefined();
+		const fresh = result.toolSnapshots.find(snapshot => snapshot.currentToolArgs === "XD://task");
+		expect(fresh).toBeDefined();
+		expect(fresh?.inflightTaskDetails).toBeUndefined();
 		expect(result.extractedToolData?.task).toEqual([inner]);
 		expect(result.extractedToolData?.write).toBeUndefined();
 	});

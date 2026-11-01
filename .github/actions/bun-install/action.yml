@@ -1,10 +1,11 @@
 name: "bun install (shared cache)"
 description: >
-   Ensure bun is on PATH, then run `bun install --frozen-lockfile` with a shared
-   package store. bun setup is skipped when the runner image already ships it
-   (the preloaded omp-kata image), and only fetched on runners that lack it
-   (e.g. GitHub-hosted). Self-hosted omp-kata runners use the mounted Bun store
-   PVC; GitHub-hosted runners use the stock actions/cache backend.
+   Ensure bun is on PATH, then run `bun install --frozen-lockfile` with a warm
+   package store. bun setup is skipped when the runner already ships a bun
+   that satisfies the repo pin (the vmon `omp-ci` template), and only fetched
+   on runners that lack it (e.g. GitHub-hosted). vmon runners use the store
+   baked into the template; GitHub-hosted runners use the stock actions/cache
+   backend.
 
 runs:
    using: composite
@@ -13,12 +14,12 @@ runs:
         id: env
         shell: bash
         run: |
-           # bun is baked into the omp-kata runner image — reuse it only when it
+           # bun is baked into the vmon omp-ci template — reuse it only when it
            # satisfies the repo pin (package.json "packageManager"). The pin is
            # either exact ("bun@1.4.2") or a floor ("bun@>=1.4"): an exact pin
            # installs that build on mismatch, a floor installs latest when the
            # preloaded bun is older than the floor. A lagging preloaded bun skews
-           # version-sensitive codegen (gen:tool-views) and test-runner behavior.
+           # version-sensitive codegen (gen:export-viewer) and test-runner behavior.
            want="$(sed -n 's/.*"packageManager": *"bun@\([^"]*\)".*/\1/p' package.json)"
            if [ -z "$want" ]; then
              echo "::error::could not read pinned bun version from package.json packageManager"
@@ -50,14 +51,14 @@ runs:
              echo "setup_bun=true" >> "$GITHUB_OUTPUT"
              echo "bun on runner: ${have:-none}; does not satisfy $want, installing $install"
            fi
-           # The repo keys "are we on can.internal infra?" off $BAZEL_REMOTE_USER
-           # (the bazel-remote-ci secret is envFrom-injected into every omp-kata
-           # runner pod). RUNNER_ENVIRONMENT is empty on ARC pods, so it is not a
-           # usable signal here. On infra, the ARC pod mounts the shared Bun
-           # store at the default cache path; off infra, actions/cache restores it.
-           if [ -n "${BAZEL_REMOTE_USER:-}" ]; then
-             echo "cache=mounted" >> "$GITHUB_OUTPUT"
-             echo "bun cache backend: mounted PVC (${BUN_INSTALL_CACHE_DIR:-${HOME}/.bun/install/cache})"
+           # vmon runners export VMON_CI=1 (the `ci` template's runner .env).
+           # Their omp-ci template bakes the bun store, warmed from a pinned
+           # checkout, at the default cache path: a lockfile change since the
+           # template build downloads only the delta. Elsewhere actions/cache
+           # restores it.
+           if [ "${VMON_CI:-}" = 1 ]; then
+             echo "cache=baked" >> "$GITHUB_OUTPUT"
+             echo "bun cache backend: omp-ci template store (${HOME}/.bun/install/cache)"
            else
              echo "cache=gha" >> "$GITHUB_OUTPUT"
              echo "bun cache backend: GitHub Actions cache"
@@ -92,25 +93,18 @@ runs:
            restore-keys: |
               bun-${{ runner.os }}-
 
-      # On-infra (omp-kata): the pod mounts a shared PVC at bun's store path.
-      - name: Prepare mounted bun store
-        if: steps.env.outputs.cache == 'mounted'
-        shell: bash
-        run: mkdir -p "${BUN_INSTALL_CACHE_DIR:-${HOME}/.bun/install/cache}"
-
       - name: Install dependencies
         shell: bash
         run: |
-           # The shared bun store (mounted PVC on omp-kata, actions/cache
-           # elsewhere) can hand a job a corrupt or partially written tarball
-           # when parallel jobs touch the same cache entry, so `bun install`
-           # aborts with `Fail extracting tarball for "<pkg>"`. That blob is
-           # content-hash-named, not derivable from the package name, so we
-           # can't evict just the bad entry — instead retry the install against
-           # a fresh job-local cache dir, forcing a clean re-download without
-           # mutating the shared store other concurrent jobs rely on. The warm
-           # shared cache stays the fast path; the cold retry only runs on the
-           # rare corruption (also covers a transient network blip on attempt 1).
+           # A restored or baked bun store can hand a job a corrupt or partially
+           # written tarball (an actions/cache entry saved while another job
+           # wrote the same entry), so `bun install` aborts with `Fail
+           # extracting tarball for "<pkg>"`. That blob is content-hash-named,
+           # not derivable from the package name, so we can't evict just the
+           # bad entry — instead retry the install against a fresh job-local
+           # cache dir, forcing a clean re-download. The warm store stays the
+           # fast path; the cold retry only runs on the rare corruption (also
+           # covers a transient network blip on attempt 1).
            if bun install --frozen-lockfile; then
              exit 0
            fi

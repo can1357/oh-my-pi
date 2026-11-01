@@ -66,15 +66,28 @@ export async function parseCodexError(response: Response): Promise<CodexErrorInf
 
 		const code = String((err as { code?: string; type?: string }).code ?? (err as { type?: string }).type ?? "");
 		errorCode = code || undefined;
-		const resetsAt = (err as { resets_at?: number }).resets_at ?? primary.resets_at ?? secondary.resets_at;
-		const mins = resetsAt ? Math.max(0, Math.round((resetsAt * 1000 - Date.now()) / 60000)) : undefined;
+		const errResetsAt = typeof err.resets_at === "number" ? err.resets_at : undefined;
+		const minutesUntil = (resetsAt: number | undefined): number | undefined =>
+			resetsAt ? Math.max(0, Math.round((resetsAt * 1000 - Date.now()) / 60000)) : undefined;
 
 		if (/usage_limit_reached|usage_not_included/i.test(code)) {
 			const planType = (err as { plan_type?: string }).plan_type;
 			const plan = planType ? ` (${String(planType).toLowerCase()} plan)` : "";
+			const mins = minutesUntil(errResetsAt ?? primary.resets_at ?? secondary.resets_at);
 			const when = mins !== undefined ? ` Try again in ~${mins} min.` : "";
 			friendlyMessage = `You have hit your ChatGPT usage limit${plan}.${when}`.trim();
 		} else if (/rate_limit_exceeded/i.test(code) || response.status === 429) {
+			// A rate limit (e.g. `turn_rate_limit_exceeded`, "Codex is at capacity")
+			// is not the plan window: a window with headroom would claim an
+			// hours-long wait that outranks the response's real Retry-After. Only
+			// the error's own `resets_at` or an exhausted window's reset applies;
+			// with both windows spent, the later reset is the one that unblocks.
+			let exhaustedResetsAt: number | undefined;
+			for (const window of [primary, secondary]) {
+				if (window.used_percent === undefined || window.used_percent < 100 || !window.resets_at) continue;
+				exhaustedResetsAt = Math.max(exhaustedResetsAt ?? 0, window.resets_at);
+			}
+			const mins = minutesUntil(errResetsAt ?? exhaustedResetsAt);
 			const when = mins !== undefined ? ` Try again in ~${mins} min.` : "";
 			friendlyMessage = `ChatGPT rate limit exceeded.${when}`.trim();
 		}

@@ -34,8 +34,9 @@ allow = [
     "Zlib",
 ]
 # inferno is CDDL-1.0-licensed. Keep this
-# package-scoped: distributions disclose source availability in the aggregate
-# notice rather than globally admitting CDDL dependencies.
+# package-scoped: distributions disclose source availability in the native
+# addon's notices (packages/natives/THIRD-PARTY-NOTICES.txt) rather than
+# globally admitting CDDL dependencies.
 exceptions = [
     { allow = ["CDDL-1.0"], crate = "inferno@0.12.8" },
     { allow = ["WTFPL"], crate = "terminfo@0.9.0" },

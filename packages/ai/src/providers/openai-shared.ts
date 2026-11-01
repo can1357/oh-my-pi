@@ -4,6 +4,7 @@ import { toFirepassWireModelId, toFireworksWireModelId } from "@oh-my-pi/pi-cata
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import type {
+	CatalogPolicyInputs,
 	OpenAICompat,
 	OpenAIReasoningDisableMode,
 	OpenAIStreamMarkupHealingPattern,
@@ -62,6 +63,7 @@ import {
 	type ToolResultMessage,
 	type Usage,
 } from "../types";
+import { mergeHeaders } from "./anthropic-headers";
 import { resolveCopilotRequestIdentity } from "./github-copilot-headers";
 import { resolveXaiBaseUrl } from "./xai-base-url";
 
@@ -104,6 +106,7 @@ import {
 	resolveGitHubCopilotBaseUrl,
 } from "./github-copilot-headers";
 import { servedModelFromOpenRouterReasoning } from "./anthropic-signature";
+import { getNativeFinishReasonError } from "./native-finish-reason";
 import type { ChatCompletionCreateParamsStreaming } from "./openai-chat-wire";
 import { type InputItem, sanitizeCodexCallId } from "./openai-codex/request-transformer";
 import type {
@@ -124,7 +127,12 @@ import type {
 	ResponseStatus,
 	ResponseStreamEvent,
 } from "./openai-responses-wire";
-import { applyInferenceHeaders, applySessionHeader, setHeaderIfAbsent } from "./inference-headers";
+import {
+	applyInferenceHeaders,
+	applySessionHeader,
+	resolveOpenCodeGoCacheAffinity,
+	setHeaderIfAbsent,
+} from "./inference-headers";
 import { isValidToolCallId, transformMessages } from "./transform-messages";
 import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER, partitionVisionContent } from "./vision-guard";
 
@@ -147,7 +155,15 @@ export interface OpenAIStrictToolsState {
 	};
 }
 
-export interface OpenAIRequestSetupModel extends OpenAIModelIdentity {
+/**
+ * The model a request setup may be built from: the transport facts it reads
+ * plus every fact the catalog policy cascade reads ({@link CatalogPolicyInputs}).
+ * `api` is required — the Go sibling cache-affinity rules are all `on-api`
+ * scoped, so a reduced model that omits it used to typecheck and silently
+ * leave the family header off. Callers handing a reduced model object must
+ * pass the real policy inputs; there is no default, inference, or fallback.
+ */
+export interface OpenAIRequestSetupModel extends OpenAIModelIdentity, CatalogPolicyInputs {
 	headers?: Record<string, string>;
 	premiumMultiplier?: number;
 	compat?: Pick<ResolvedOpenAISharedCompat, "promptCacheSessionHeader" | "sessionHeader">;
@@ -174,6 +190,15 @@ export interface OpenAIRequestSetupOptions {
 	};
 	sessionId?: string;
 	promptCacheSessionId?: string;
+	/**
+	 * Explicit prompt-cache identity only, never the sessionId fallback:
+	 * callers set it from the already-resolved `promptCacheSessionId` when an
+	 * explicit `promptCacheKey` was supplied, and leave it unset otherwise.
+	 * Feeds the Go sibling cache-affinity header so an ordinary conversation
+	 * id (especially one long enough to normalize to a `pc_` hash) can never
+	 * flip `x-opencode-session` on opted-in lanes.
+	 */
+	promptCacheAffinityKey?: string;
 }
 
 export interface OpenAIRequestSetup {
@@ -229,11 +254,11 @@ export function resolveOpenAIRequestSetup(
 		apiKey = $env.OPENAI_API_KEY;
 	}
 	const rawApiKey = apiKey;
-	let headers = { ...model.headers };
-	if (model.provider === "openrouter") {
-		Object.assign(headers, getOpenRouterHeaders());
-	}
-	Object.assign(headers, options.extraHeaders);
+	let headers = mergeHeaders(
+		model.headers,
+		model.provider === "openrouter" ? getOpenRouterHeaders() : undefined,
+		options.extraHeaders,
+	);
 	if (model.provider === "coreweave") {
 		applyCoreWeaveProjectHeader(headers);
 	}
@@ -321,11 +346,17 @@ export function resolveOpenAIRequestSetup(
 		query = { "api-version": options.azureChatCompletions.apiVersion };
 	}
 
+	// The conversation id stays authoritative for every native session header.
+	// On Go lanes opted into KDL `shared-prompt-cache`, `x-opencode-session`
+	// carries the explicit shared cache key instead (see
+	// resolveOpenCodeGoCacheAffinity).
 	const sessionId = options.sessionId ?? options.promptCacheSessionId;
 	applyInferenceHeaders(headers, {
 		provider: model.provider,
+		providerType: model.providerType,
 		protocol: "openai",
 		sessionId,
+		cacheAffinity: resolveOpenCodeGoCacheAffinity(model, options.promptCacheAffinityKey),
 	});
 	if (options.promptCacheSessionId && model.compat?.promptCacheSessionHeader) {
 		setHeaderIfAbsent(headers, model.compat.promptCacheSessionHeader, options.promptCacheSessionId);
@@ -1032,7 +1063,12 @@ export function resolveOpenAICompatPolicy<TApi extends Api>(
 	if (disabled && compat.supportsReasoningEffort && !omitReasoningEffort) {
 		if (disableMode === "none-effort") {
 			wireEffort = "none";
-		} else if (disableReason === "caller" && requestedEffort === undefined && disableMode === "lowest-effort") {
+		} else if (
+			modelSupported &&
+			disableReason === "caller" &&
+			requestedEffort === undefined &&
+			disableMode === "lowest-effort"
+		) {
 			const minEffort = getSupportedEfforts(model)[0];
 			if (minEffort === undefined) {
 				throw new AIError.ConfigurationError(
@@ -1532,21 +1568,25 @@ export function normalizeResponsesToolCallIdForTransform(
 	return `${normalized.callId}|${normalized.itemId}`;
 }
 
-type ResponsesToolCallKind = "function" | "custom" | "computer";
+/** Tool family of a Responses call/output item. */
+export type ResponsesToolCallKind = "function" | "custom" | "computer";
 
-function responsesToolCallKind(type: unknown): ResponsesToolCallKind | undefined {
+/** Tool family of a Responses call item type, or `undefined` for any other item. */
+export function responsesToolCallKind(type: unknown): ResponsesToolCallKind | undefined {
 	if (type === "function_call") return "function";
 	if (type === "custom_tool_call") return "custom";
 	if (type === "computer_call") return "computer";
 	return undefined;
 }
 
-function responsesToolOutputKind(type: unknown): ResponsesToolCallKind | undefined {
+/** Tool family of a Responses call-output item type, or `undefined` for any other item. */
+export function responsesToolOutputKind(type: unknown): ResponsesToolCallKind | undefined {
 	if (type === "function_call_output") return "function";
 	if (type === "custom_tool_call_output") return "custom";
 	if (type === "computer_call_output") return "computer";
 	return undefined;
 }
+
 function responseInputCallId(item: ResponseInput[number]): string | undefined {
 	if (!("call_id" in item)) return undefined;
 	return typeof item.call_id === "string" ? item.call_id : undefined;
@@ -3842,6 +3882,15 @@ export async function processResponsesStream<TApi extends Api>(
 				options?.requestServiceTier,
 			);
 			output.stopReason = mapOpenAIResponsesStopReason(response?.status);
+			const nativeError = getNativeFinishReasonError(
+				(response as { native_finish_reason?: unknown } | undefined)?.native_finish_reason,
+			);
+			if (nativeError) {
+				throw new AIError.ProviderResponseError(
+					response?.id ? `${nativeError}; response ID: ${response.id}` : nativeError,
+					{ provider: model.provider, kind: "output" },
+				);
+			}
 			if (response?.status === "failed" || response?.status === "cancelled") {
 				const error = response?.error ?? (response as any)?.status_details?.error;
 				const details = response?.incomplete_details;

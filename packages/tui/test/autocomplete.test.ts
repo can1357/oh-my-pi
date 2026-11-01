@@ -842,6 +842,11 @@ describe("CombinedAutocompleteProvider", () => {
 		});
 
 		it("skips the interim listing when the walk finishes quickly", async () => {
+			// An already-settled walk always beats the interim delay; a real walk can lose it on a loaded host.
+			spyOn(natives, "fuzzyFind").mockResolvedValue({
+				matches: [{ path: "other/widget.md", isDirectory: false, score: 1 }],
+				totalMatches: 1,
+			});
 			const partials: AutocompleteItem[][] = [];
 			const provider = new CombinedAutocompleteProvider([], baseDir);
 			const line = "@widget";
@@ -849,7 +854,7 @@ describe("CombinedAutocompleteProvider", () => {
 				partials.push(suggestions.items),
 			);
 
-			expect(result?.items.map(item => item.value)).toContain("@widget-app/");
+			expect(result?.items.map(item => item.value)).toEqual(["@other/widget.md"]);
 			expect(partials).toEqual([]);
 		});
 

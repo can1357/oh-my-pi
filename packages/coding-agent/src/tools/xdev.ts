@@ -63,6 +63,9 @@ export const XDEV_KEEP_TOP_LEVEL: Record<string, true> = {
 	web_search: true,
 };
 
+/** Hidden built-ins opt into the roster through their thinking and goal lifecycles, never forced discovery. */
+const XDEV_FORCE_DISCOVERY_EXCLUSIONS: Record<string, true> = { think: true, goal: true };
+
 /**
  * Tools that carry the `xd://` transport itself and therefore can never be
  * mounted as devices: `read xd://` lists/documents devices and
@@ -86,14 +89,14 @@ export function isMountableUnderXdev(
 	forceDiscoverable = false,
 ): boolean {
 	if (tool.name in XDEV_TRANSPORT_TOOLS || tool.name in XDEV_KEEP_TOP_LEVEL) return false;
-	return (forceDiscoverable && tool.name !== "think") || tool.loadMode === "discoverable";
+	return (forceDiscoverable && !(tool.name in XDEV_FORCE_DISCOVERY_EXCLUSIONS)) || tool.loadMode === "discoverable";
 }
 
 /** Dispatch metadata carried on write-tool details for renderer delegation. */
 export interface XdevDispatch {
 	tool: string;
 	mode: "help" | "execute";
-	/** Validated inner args, kept for renderer delegation on result rebuilds. */
+	/** Validated renderer args, projected where execution-only payloads are unnecessary. */
 	args?: Record<string, unknown>;
 	/**
 	 * Approval tier of the wrapped tool for {@link args} (`read` = no workspace
@@ -464,7 +467,11 @@ export async function dispatchXdevTool(
 		} catch {
 			tier = undefined;
 		}
-		xdev = { ...xdev, args: validated, tier };
+		// PR creation renders only its operation and repository. Keep the body
+		// in the validated execution input, not a second copy in result details.
+		const renderArgs =
+			name === "github" && validated.op === "pr_create" ? { op: validated.op, repo: validated.repo } : validated;
+		xdev = { ...xdev, args: renderArgs, tier };
 		if ("mcpReadOnlyHint" in canonical && canonical.mcpReadOnlyHint === true) xdev.readOnlyHint = true;
 		const innerOnUpdate: AgentToolUpdateCallback | undefined = onUpdate
 			? partial =>

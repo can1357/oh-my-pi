@@ -132,10 +132,15 @@ export function elapsed(age: number, stopped?: boolean): NativeNode {
 }
 
 /**
- * Keycap for one key id (`"ctrl+o"` → keys `["ctrl", "o"]`); the terminal
- * draws platform glyphs. A literal `+` key survives (`"+"`, `"ctrl++"`).
+ * The key names of one key id (`"ctrl+o"` → `["ctrl", "o"]`), as `kbd` and
+ * `button` `keys` take them. A literal `+` key survives (`"+"`, `"ctrl++"`).
  */
-export function kbd(key: string, nodeKey?: string): NativeNode {
+export function keyNames(key: string): string[] {
 	const keys = key === "+" ? ["+"] : key.endsWith("++") ? [...key.slice(0, -2).split("+"), "+"] : key.split("+");
-	return node("kbd", { keys: keys.filter(part => part.length > 0) }, undefined, nodeKey);
+	return keys.filter(part => part.length > 0);
+}
+
+/** Keycap for one key id ({@link keyNames}); the terminal draws platform glyphs. */
+export function kbd(key: string, nodeKey?: string): NativeNode {
+	return node("kbd", { keys: keyNames(key) }, undefined, nodeKey);
 }

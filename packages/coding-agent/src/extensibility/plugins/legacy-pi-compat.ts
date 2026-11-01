@@ -7,7 +7,7 @@ import { createRequire, isBuiltin } from "node:module";
 import * as path from "node:path";
 import * as url from "node:url";
 import type { ParseResult, ParserPlugin } from "@babel/parser";
-import { parse as parseBabel } from "@babel/parser";
+import type * as BabelParser from "@babel/parser";
 import {
 	getDbBusyTimeoutMs,
 	getLegacyPiExtensionCacheDbPath,
@@ -62,6 +62,8 @@ interface ExtensionSpecifierReference {
 }
 
 function parseExtensionSource(source: string, importerPath: string): ParseResult {
+	// Installing specifier hooks needs no parser; only a real source rewrite does.
+	const { parse: parseBabel }: typeof BabelParser = require("@babel/parser");
 	const extension = path.extname(importerPath).toLowerCase();
 	const plugins: ParserPlugin[] = ["decorators-legacy", "explicitResourceManagement"];
 	if (extension === ".ts" || extension === ".mts" || extension === ".cts" || extension === ".tsx") {
@@ -2052,10 +2054,6 @@ async function moduleRequiresNativeAddonUncached(modulePath: string): Promise<bo
 	return false;
 }
 
-function escapeRegExp(value: string): string {
-	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 // Source modules in an extension graph are discovered from parsed static,
 // dynamic, re-export, and direct CommonJS require specifiers. Parsing keeps
 // import-looking text in strings, templates, regex literals, and comments out
@@ -2544,7 +2542,7 @@ async function installExtensionGraphHook(
 	}
 
 	if (asyncModules.size > 0) {
-		const alternation = [...asyncModules.keys()].map(escapeRegExp).join("|");
+		const alternation = [...asyncModules.keys()].map(value => RegExp.escape(value)).join("|");
 		const filter = new RegExp(`^(?:${alternation})(?:\\?mtime=\\d+)?$`);
 		const hookId = Bun.hash(`${entryRealPath}\0async\0${[...asyncModules.keys()].join("\0")}`).toString(36);
 		Bun.plugin({
@@ -2585,7 +2583,7 @@ async function installExtensionGraphHook(
 	}
 
 	if (commonJsPaths.size > 0) {
-		const alternation = [...commonJsPaths].map(escapeRegExp).join("|");
+		const alternation = [...commonJsPaths].map(value => RegExp.escape(value)).join("|");
 		const filter = new RegExp(`^(?:${alternation})(?:\\?mtime=\\d+)?$`);
 		const hookId = Bun.hash(`${entryRealPath}\0commonjs\0${[...commonJsPaths].join("\0")}`).toString(36);
 		Bun.plugin({
@@ -2614,7 +2612,7 @@ async function installExtensionGraphHook(
 	}
 
 	if (synchronousSourcePaths.size > 0) {
-		const alternation = [...synchronousSourcePaths].map(escapeRegExp).join("|");
+		const alternation = [...synchronousSourcePaths].map(value => RegExp.escape(value)).join("|");
 		const filter = new RegExp(`^(?:${alternation})(?:\\?mtime=\\d+)?$`);
 		const hookId = Bun.hash(`${entryRealPath}\0sync-source\0${[...synchronousSourcePaths].join("\0")}`).toString(36);
 		Bun.plugin({

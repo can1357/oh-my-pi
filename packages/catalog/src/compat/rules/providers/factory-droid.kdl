@@ -345,6 +345,12 @@ provider "factory-droid" {
 			cost input=0 output=0 cache-read=0 cache-write=0
 			limits context=136464 max-tokens=65536
 		}
+		model "deepseek-v4.1-flash-1017" name="DeepSeek V4.1 Flash 1017" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=908928 max-tokens=131072
+		}
 		model "deepseek-v4.1-flash" name="DeepSeek V4.1 Flash" {
 			reasoning #true
 			input "text" "image"
@@ -404,6 +410,26 @@ provider "factory-droid" {
 			input "text"
 			cost input=0 output=0 cache-read=0 cache-write=0
 			limits context=196600 max-tokens=64000
+		}
+		// `generate_image` models, in the CLI's tool preference order. GPT Image 2
+		// is retired from the CLI's selectable chain and is not listed.
+		model "gpt-image-2.5-sunburst" name="GPT Image 2.5" {
+			reasoning #false
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+		}
+		model "gpt-image-2.5-flare" name="GPT Image 2.5 Flare" {
+			reasoning #false
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+		}
+		model "gemini-3-pro-image-preview" name="Gemini 3 Pro Image" {
+			reasoning #false
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
 		}
 	}
 
@@ -836,6 +862,23 @@ provider "factory-droid" {
 		thinking-requires-effort #true
 		thinking-default-level "high"
 	}
+	// Image models: the org's `imageGenerationEnabled` and
+	// `imageGenerationAllowedModelIds` managed settings gate them
+	// (discovery/factory-droid.ts), not feature flags. Credits follow the CLI's
+	// image registry: OpenAI output is image tokens at 6x input, Gemini's 60x.
+	models "gpt-image-2.5-sunburst" "gpt-image-2.5-flare" {
+		kind "image"
+		routing-family "openai"
+		upstream-rotation "openai"
+		credit-rates { input 2.0; output 6 }
+	}
+	models "gemini-3-pro-image-preview" {
+		kind "image"
+		routing-family "google"
+		upstream-rotation "google"
+		region-upstreams-us
+		credit-rates { input 0.8; output 60 }
+	}
 	models "inkling" {
 		routing-family "factory"
 		upstream-rotation "fireworks"
@@ -937,6 +980,17 @@ provider "factory-droid" {
 		thinking-efforts "high"
 		thinking-requires-effort #false
 		thinking-default-level "high"
+	}
+	models "deepseek-v4.1-flash-1017" {
+		routing-family "factory"
+		upstream-rotation "fireworks" "baseten" "databricks"
+		credit-rates { input 0.12; output 4; cache-read 0.024 }
+		// No bundled Fireworks row for the 1017 slug; Fireworks prices it like V4.1 Flash.
+		list-price-from "fireworks" "deepseek-v4.1-flash"
+		thinking-efforts "low" "high" "max"
+		thinking-requires-effort #false
+		thinking-default-level "high"
+		entitlement { feature-flag "deepseek_v4_1_flash_1017" }
 	}
 	models "deepseek-v4.1-flash" {
 		routing-family "factory"
@@ -1094,6 +1148,13 @@ provider "factory-droid" {
 			synthetic-reasoning-content-fallback " "
 		}
 	}
+	// Droid 0.250.0 configures the 1017 checkpoint's Baseten route with
+	// thinkingMode "reasoning-effort": thinking off is sent as `none`.
+	models "deepseek-v4.1-flash-1017" {
+		on-upstream "baseten" {
+			completions-reasoning-mode "effort"
+		}
+	}
 	// The replay codec follows the selected route, including EU GLM routes.
 	on-upstream "mistral" {
 		models "glm-*" "mistral-medium-3.5" "mistral-large-4" {
@@ -1130,6 +1191,12 @@ provider "factory-droid" {
 		on-upstream "snowflake" {
 			disabled-thinking "disabled"
 		}
+		// Factory's proxy honors `ttl: "1h"` without the extended-cache-ttl beta
+		// and the Anthropic and Bedrock upstreams reject the beta.
+		extended-cache-ttl-beta #false
+		on-upstream "anthropic" "vertex_anthropic" "bedrock_anthropic" "azure_anthropic" {
+			supports-long-cache-retention #true
+		}
 	}
 	// Adaptive models the registry marks `supportsDisabledThinking` send the
 	// explicit disabled form at Off on every upstream.
@@ -1137,8 +1204,13 @@ provider "factory-droid" {
 		"claude-opus-4-8-fast" "claude-opus-5" "claude-opus-5-fast" "claude-haiku-5-5" {
 		disabled-thinking "disabled"
 	}
+	// Cache entry lifetimes per retention tier, in seconds, for the cache warmer.
 	models "claude-*" "atlas-07-21" "aster-07-15" {
 		anthropic-thinking "adaptive-summarized"
+		prompt-cache {
+			short 300
+			long 3600
+		}
 	}
 	models "claude-opus-4-6" "claude-sonnet-4-6" {
 		anthropic-thinking "adaptive"

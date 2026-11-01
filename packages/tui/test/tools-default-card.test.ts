@@ -5,12 +5,12 @@ import { describeDefaultToolExecution, formatDefaultToolExecution } from "../src
 import type { RenderResultOptions } from "../src/tools/renderer";
 
 /** A generic (MCP/custom/extension) tool call that fell through to the fallback card. */
-function mcpResult(output: string, expanded: boolean): DefaultToolRenderInput {
+function mcpResult(output: string, expanded: boolean, json = false): DefaultToolRenderInput {
 	return {
 		label: "srv/mcp_tool",
 		args: { query: "tokyo" },
 		result: { output, isError: false },
-		options: { expanded, isPartial: false } satisfies RenderResultOptions,
+		options: { expanded, isPartial: false, json } satisfies RenderResultOptions,
 	};
 }
 
@@ -79,6 +79,19 @@ describe("generic fallback card", () => {
 		const largeChild = (describeDefaultToolExecution(mcpResult(large, true)).body ?? [])[0];
 		const props = largeChild && "k" in largeChild ? largeChild.p : undefined;
 		expect(props && "text" in props ? props.text : undefined).toBe(large);
+	});
+
+	it("sends JSON whole to a host that draws json, which never cuts it", () => {
+		const firstChild = (output: string) =>
+			(describeDefaultToolExecution(mcpResult(output, true, true)).body ?? [])[0];
+		for (const value of [{ query: "tokyo", hits: [1, 2, 3] }, { blob: "x".repeat(3000) }, { i: "kept" }]) {
+			expect(firstChild(JSON.stringify(value))).toMatchObject({ k: "json", p: { value } });
+		}
+		const items = Array.from({ length: 300 }, (_, i) => i);
+		const long = firstChild(JSON.stringify(items));
+		expect(long && "k" in long ? long.p : undefined).toEqual({ value: items });
+		// Still raw: a 64-bit id would round when parsed into a double.
+		expect(firstChild('{"id": 9223372036854775807}')).toMatchObject({ k: "ansi" });
 	});
 
 	it("expands JSON the tree would cut as every raw row", async () => {

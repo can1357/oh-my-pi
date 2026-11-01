@@ -330,15 +330,23 @@ describe("relay tabs Chrome detaches omp from", () => {
 	 * puts a tab on one; it cannot be re-adopted, so a detach releases the tab.
 	 */
 	async function openInlineRelayTab(): Promise<ChromeBackedExtension> {
+		try {
+			return await withoutWorkerThreads(openRelayTab);
+		} finally {
+			expect(getTab(name)).toMatchObject({ worker: { mode: "inline" } });
+		}
+	}
+
+	/** Runs `fn` while worker threads cannot start, so every tab worker it spawns falls back to an inline one. */
+	async function withoutWorkerThreads<T>(fn: () => Promise<T>): Promise<T> {
 		// `Worker` is typed as a constructor, which a throwing mock implementation does not satisfy.
 		const unavailable = spyOn(globalThis, "Worker").mockImplementation((() => {
 			throw new Error("Worker threads unavailable");
 		}) as never);
 		try {
-			return await openRelayTab();
+			return await fn();
 		} finally {
 			unavailable.mockRestore();
-			expect(getTab(name)).toMatchObject({ worker: { mode: "inline" } });
 		}
 	}
 
@@ -423,39 +431,6 @@ describe("relay tabs Chrome detaches omp from", () => {
 			expect(result.text).toContain(
 				"omp reattached to the same tab on a new worker, without reloading it, and then ran this call",
 			);
-		},
-		60_000,
-	);
-
-	it.skipIf(!CHROMIUM_AVAILABLE)(
-		"does not rerun a call detached before its code started once the re-adoption spent its budget",
-		async () => {
-			const ext = await openRelayTab();
-			await invoke({ action: "run", code: 'await tab.emulate({ userAgent: "omp-detach-test" });', timeout: 10 });
-			const tab = getTab(name);
-			if (tab?.backend !== "worker") throw new Error("expected a worker tab");
-			// Hold the re-adoption for the call's whole budget once the detached worker is gone. Real time: the
-			// re-adoption's own init deadline reads the same clock, so a faked clock would fail it instead.
-			const budgetMs = 1_000;
-			const terminate = tab.worker.terminate.bind(tab.worker);
-			const held = spyOn(tab.worker, "terminate").mockImplementation(async () => {
-				await terminate();
-				await Bun.sleep(budgetMs);
-			});
-			try {
-				const reapplying = ext.nextSend("Network.setUserAgentOverride");
-				const next = runInTab(name, { code: readMark.code, timeoutMs: budgetMs, session: tool }).catch(
-					(error: unknown) => error,
-				);
-				await reapplying;
-				await ext.chromeDetach("target_closed");
-				const failure = String(await next);
-				expect(failure).toContain("before this call, so its code did not run");
-				expect(failure).toContain(`used up this call's ${budgetMs}ms budget, so the call was not run again`);
-			} finally {
-				held.mockRestore();
-			}
-			expect((await invoke(readMark)).value).toBe("kept");
 		},
 		60_000,
 	);

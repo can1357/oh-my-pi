@@ -156,6 +156,28 @@ describe("issue #3656 /shake mid-stream preserves the in-flight assistant turn",
 		expect(pendingIdx).toBeGreaterThan(streamingIdx);
 	});
 
+	it("keeps text streamed after a tool call attached across a mid-stream rebuild", async () => {
+		const toolCall = assistantWithBash("echo hi").content[0]!;
+		const reply: AssistantMessage = {
+			...assistantWithBash("echo hi"),
+			content: [{ type: "text", text: "Before the call." }, toolCall, { type: "text", text: "After the call." }],
+		};
+		Object.defineProperty(session, "isStreaming", { configurable: true, get: () => true });
+		Object.defineProperty(session.agent.state, "streamMessage", { configurable: true, value: reply });
+		await mode.eventController.handleEvent({ type: "message_start", message: reply } as AgentSessionEvent);
+		await mode.eventController.handleEvent({ type: "message_update", message: reply } as AgentSessionEvent);
+		const drawsAfter = (child: unknown) =>
+			child instanceof AssistantMessageComponent &&
+			Bun.stripANSI(child.render(80).join("\n")).includes("After the call.");
+		const segment = mode.chatContainer.children.find(drawsAfter);
+		if (!segment) throw new Error("expected a component drawing the post-tool text");
+
+		mode.rebuildChatFromMessages();
+
+		expect(mode.chatContainer.children).toContain(segment);
+		expect(mode.chatContainer.children.filter(drawsAfter)).toHaveLength(1);
+	});
+
 	it("uses the rendered view session when preserving a focused subagent stream", () => {
 		const { streamingComponent, pendingTool } = makeStreamingFixture(false);
 		Object.defineProperty(mode, "viewSession", {
@@ -166,6 +188,7 @@ describe("issue #3656 /shake mid-stream preserves the in-flight assistant turn",
 				getToolByName: () => undefined,
 				sessionManager: { getCwd: () => tempDir.path() },
 				retryAttempt: undefined,
+				agent: { state: {} },
 			}),
 		});
 

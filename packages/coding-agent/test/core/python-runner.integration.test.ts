@@ -147,7 +147,10 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 
 		const next = await executePython("print(21 * 2)", options);
 		expect(next.exitCode).toBe(0);
-		expect(next.output.trim()).toBe("42");
+		// The crash ended the kernel, so the next cell runs on a new one and says its state is gone.
+		const [notice, value] = next.output.trim().split("\n");
+		expect(notice).toStartWith("Kernel restarted: the previous Python kernel is dead; state is unavailable.");
+		expect(value).toBe("42");
 		expect(await Bun.file(path.join(tempDir.path(), "effects.txt")).text()).toBe("once\n");
 	}, 30_000);
 
@@ -710,6 +713,20 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 			expect(result.exitCode).toBe(0);
 			expect(result.output).toBe("{'a': 1}\n[1, 2]\n");
 			expect(result.displayOutputs).toEqual([]);
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
+	it("prints JSON text as text plus a JSON view, other long strings as text only", async () => {
+		const kernel = await PythonKernel.start({ cwd: MATPLOTLIB_TEST_CWD });
+		try {
+			const value = { items: Array.from({ length: 30 }, (_, i) => i) };
+			const text = JSON.stringify(value);
+			const result = await executePythonWithKernel(kernel, `print(${JSON.stringify(text)})\nprint('{' + 'x' * 100)`);
+			expect(result.exitCode).toBe(0);
+			expect(result.output).toBe(`${text}\n{${"x".repeat(100)}\n`);
+			expect(result.displayOutputs).toEqual([{ type: "view", text, view: { kind: "json", value } }]);
 		} finally {
 			await kernel.shutdown();
 		}

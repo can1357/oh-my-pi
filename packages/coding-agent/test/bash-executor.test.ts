@@ -7,6 +7,7 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import type { ShellMinimizerSettings } from "@oh-my-pi/pi-coding-agent/exec/settings";
 import {
 	applyDirenvPreflight,
+	type BashResult,
 	buildMinimizerOptions,
 	executeBash,
 	isPersistentShellCdCommand,
@@ -263,6 +264,54 @@ describe("executeBash", () => {
 			env: { PI_TEST_ENV: "hello" },
 		});
 		expect(result.output.trim()).toBe("1:0:hello");
+	});
+
+	/** Creates a two-commit repo through `executeBash()`, isolated from user/system git config. */
+	async function createTwoCommitRepo(): Promise<(command: string) => Promise<BashResult>> {
+		const repoDir = path.join(tempDir, "repo");
+		const globalConfigPath = path.join(tempDir, "gitconfig");
+		fs.mkdirSync(repoDir);
+		fs.writeFileSync(globalConfigPath, "");
+		const sessionKey = `git-rebase-${path.basename(tempDir)}`;
+		const run = (command: string) =>
+			executeBash(command, {
+				cwd: repoDir,
+				timeout: 10_000,
+				sessionKey,
+				env: { GIT_CONFIG_GLOBAL: globalConfigPath, GIT_CONFIG_NOSYSTEM: "1" },
+			});
+		const setup = await run(
+			[
+				"git init -q -b main",
+				"git config user.email t@example.com",
+				"git config user.name t",
+				"echo first > first.txt && git add -A && git commit -qm first",
+				"echo second > second.txt && git add -A && git commit -qm second",
+			].join(" && "),
+		);
+		expect(setup).toMatchObject({ exitCode: 0 });
+		return run;
+	}
+
+	/** Writes a sequence-editor script that touches `marker` and exits with `exitCode`. */
+	function writeEditorScript(marker: string, exitCode: number): string {
+		const editorPath = path.join(tempDir, "sequence-editor.sh");
+		fs.writeFileSync(editorPath, `#!/bin/sh\ntouch ${shellQuote(marker)}\nexit ${exitCode}\n`);
+		fs.chmodSync(editorPath, 0o755);
+		return editorPath;
+	}
+
+	it("bypasses a configured git sequence.editor during interactive rebase", async () => {
+		if (process.platform === "win32" || !$which("git")) return;
+		const marker = path.join(tempDir, "sequence-editor-ran");
+		const editorPath = writeEditorScript(marker, 1);
+		const run = await createTwoCommitRepo();
+		expect(await run(`git config sequence.editor ${shellQuote(editorPath)}`)).toMatchObject({ exitCode: 0 });
+
+		const rebase = await run("git rebase -i HEAD~1");
+
+		expect(rebase).toMatchObject({ exitCode: 0 });
+		expect(fs.existsSync(marker)).toBe(false);
 	});
 
 	it("runs non-bash shellPath commands through the configured shell", async () => {
@@ -619,6 +668,60 @@ exit 64
 		} finally {
 			removeSyncWithRetries(shellDir);
 		}
+	});
+
+	it("lets the user answer a prompt in a zsh shortcut command through the PTY stdin writer (#17210)", async () => {
+		if (process.platform === "win32" || Bun.env.PI_NO_PTY === "1") {
+			return;
+		}
+		const zshPath = ["/bin/zsh", "/usr/bin/zsh", "/usr/local/bin/zsh", "/opt/homebrew/bin/zsh"].find(candidate =>
+			fs.existsSync(candidate),
+		);
+		if (!zshPath) {
+			return;
+		}
+		cfgShellPath.set(Settings.instance, zshPath);
+		vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
+			shell: zshPath,
+			args: ["-l", "-c"],
+			env: { PATH: Bun.env.PATH ?? "", HOME: tempDir, ZDOTDIR: tempDir, SHELL_SESSIONS_DISABLE: "1" },
+			prefix: undefined,
+		});
+
+		// Answer once the prompt is on screen and stdin is writable, in whichever
+		// order those two callbacks arrive — like a user at the keyboard.
+		let screen = "";
+		let write: ((data: string) => void) | undefined;
+		let answered = false;
+		const answer = () => {
+			if (answered || !write || !screen.includes("Choose [Y/n]:")) return;
+			answered = true;
+			write("y");
+		};
+		const result = await executeBash(
+			"printf 'Choose [Y/n]: '; read -k 1 answer; printf '\\nANSWER=%s\\n' \"$answer\"",
+			{
+				cwd: tempDir,
+				timeout: 15000,
+				useUserShell: true,
+				pty: {
+					cols: 80,
+					rows: 24,
+					onStdin: writer => {
+						write = writer;
+						answer();
+					},
+					onChunk: chunk => {
+						screen += chunk;
+						answer();
+					},
+				},
+			},
+		);
+
+		expect(result.timedOut).toBeUndefined();
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toContain("ANSWER=y");
 	});
 
 	it("returns a real PID for background external commands", async () => {

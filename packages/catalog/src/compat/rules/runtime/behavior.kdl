@@ -26,6 +26,11 @@ behavior {
 	// from seeding cross-provider bare-id enrichment references (#10932).
 	reference-isolated-providers "cline-pass"
 
+	// These hosts reuse an unchanged message prefix across turns; history
+	// rewrites otherwise discard their warm prompt cache.
+	append-only-context-providers "deepseek" "ollama" "ollama-cloud" "lm-studio" "llama.cpp" \
+		"google-antigravity" "google" "google-vertex"
+
 	// Discovered Responses/Codex models receive these additional operations.
 	model-operations provider="openai" {
 		exact "o3"
@@ -48,9 +53,11 @@ behavior {
 	cursor-model-parameter model="composer-2.5" id="fast" value="false"
 
 	// Cursor's dashboard splits native Grok/Composer traffic from all other
-	// models. Substring fallbacks cover newly discovered family revisions.
+	// models; Auto (`default`) bills to the Cursor-models pool on both legacy
+	// plans and the X Subscription. Substring fallbacks cover newly discovered
+	// family revisions.
 	quota-tiers provider="cursor" default="api" {
-		tier "auto" "composer-2.5"
+		tier "auto" "composer-2.5" "default"
 		fallback "auto" substring="grok"
 		fallback "auto" substring="composer"
 	}
@@ -93,8 +100,8 @@ behavior {
 	// (flat rate) or Standard Credits. Unknown ids have no inferred entitlement.
 	quota-tiers provider="factory-droid" {
 		tier "core" "inkling" "mistral-large-4" "mistral-medium-3.5" "glm-5.3-flash" "glm-5.3" "glm-5.2" "glm-5.2-fast" \
-			"kimi-k3" "qwen3.8-max" "nemotron-3-ultra" "deepseek-v4.1-flash" "deepseek-v4-flash-0731" \
-			"deepseek-v4-pro" "minimax-m3" "minimax-m2.7"
+			"kimi-k3" "qwen3.8-max" "nemotron-3-ultra" "deepseek-v4.1-flash" "deepseek-v4.1-flash-1017" \
+			"deepseek-v4-flash-0731" "deepseek-v4-pro" "minimax-m3" "minimax-m2.7"
 		tier "standard" "claude-fable-5.1" "claude-fable-5" "claude-opus-5-5" "claude-opus-5-5-fast" \
 			"claude-opus-5" "claude-opus-5-fast" "claude-opus-4-8" "claude-opus-4-8-fast" "claude-opus-4-7" \
 			"claude-opus-4-6" "claude-opus-4-5-20251101" "claude-sonnet-5-5" "claude-sonnet-5" \
@@ -104,14 +111,17 @@ behavior {
 			"gpt-5.4-mini-fast" "gpt-5.3-codex" "gpt-5.3-codex-fast" "gpt-5.2" "garnet-07-15" \
 			"gemini-3.1-pro-preview" "gemini-3.8-flash" "gemini-3.7-flash" "gemini-3.6-flash" \
 			"gemini-3.5-flash" "gemini-3-flash-preview" "grok-4.7" "grok-4.6" "grok-4.5" "atlas-07-21" \
-			"aster-07-15"
+			"aster-07-15" "gpt-image-2.5-sunburst" "gpt-image-2.5-flare" "gemini-3-pro-image-preview"
 	}
 	// Subscription eligibility for model-aware Codex credential routing.
+	// GPT-6.1 Terra launched for Plus, Pro, Enterprise, and Edu, not Free/Go
+	// (https://openai.com/index/introducing-gpt-6-1-terra/, 2026-10-26).
 	plan-requirement provider="openai-codex" {
 		tier "pro" substring="-spark"
 		tier "paid" exact="gpt-5.6" exact="gpt-5.6-sol" exact="gpt-5.6-sol-pro" \
 			exact="gpt-5.6-luna" exact="gpt-5.6-luna-pro" glob="*/gpt-5.6" glob="*/gpt-5.6-sol" \
-			glob="*/gpt-5.6-sol-pro" glob="*/gpt-5.6-luna" glob="*/gpt-5.6-luna-pro"
+			glob="*/gpt-5.6-sol-pro" glob="*/gpt-5.6-luna" glob="*/gpt-5.6-luna-pro" \
+			glob="gpt-6.1-terra*" glob="*/gpt-6.1-terra*"
 	}
 
 	// Z.AI and Zhipu emit timezone-naive account-reset wall clocks in Beijing
@@ -151,10 +161,12 @@ behavior {
 		exact="openai.gpt-5.5" exact="openai.gpt-5.6-luna" exact="openai.gpt-5.6-sol" exact="openai.gpt-5.6-terra"
 	// [1m] is a Claude Code selector convention, not an inference id.
 	exclude-models provider="zai" glob="*[1m]"
-	// Anthropic /v1/models rows OMP does not route: pre-tool-era snapshots and
-	// the 3.5/3.7 lanes Claude Code retired from the public roster.
-	exclude-models provider="anthropic" prefix="claude-3-5-haiku" prefix="claude-3-7-sonnet" \
-		exact="claude-3-opus-20240229" exact="claude-3-sonnet-20240229"
+	// Anthropic's retired snapshots and their aliases reject inference requests
+	// (https://platform.claude.com/docs/en/about-claude/model-deprecations).
+	exclude-models provider="anthropic" prefix="claude-3-5-haiku" prefix="claude-3-5-sonnet" \
+		prefix="claude-3-7-sonnet" prefix="claude-opus-4-1" exact="claude-3-haiku-20240307" \
+		exact="claude-3-opus-20240229" exact="claude-3-sonnet-20240229" exact="claude-opus-4-0" \
+		exact="claude-opus-4-20250514" exact="claude-sonnet-4-0" exact="claude-sonnet-4-20250514"
 	// Control-plane resource ids are not accepted by the inference API.
 	exclude-models provider="fireworks" prefix="accounts/fireworks/"
 	exclude-models provider="firepass" prefix="accounts/fireworks/"
@@ -273,7 +285,7 @@ behavior {
 	// responses pins are gateway-verified (deepseek-v4-flash 2026-08-08;
 	// muse-spark per opencode.ai/docs/go/#endpoints, #8957, #10610).
 	api-routes provider="opencode-go" {
-		route "google-generative-ai" exact="gemini-4-argon-contributor"
+		route "google-generative-ai" exact="gemini-4-argon" exact="gemini-4-argon-contributor"
 		route "anthropic-messages" exact="union-alpha"
 		route "openai-responses" prefix="muse-spark-" exact="deepseek-v4-flash" exact="muse-spark-1.2" \
 			exact="muse-spark-1.2-contributor" exact="muse-spark-1.3" exact="muse-spark-1.3-contributor"
@@ -296,14 +308,15 @@ behavior {
 			exact="gpt-5.6-sol" exact="gpt-5.6-sol-fast" exact="gpt-5.6-terra" exact="gpt-5.6-luna" \
 			exact="gpt-5.5" exact="gpt-5.5-fast" exact="gpt-5.5-pro" exact="gpt-5.4" exact="gpt-5.4-fast" \
 			exact="gpt-5.4-mini" exact="gpt-5.4-mini-fast" exact="gpt-5.3-codex" exact="gpt-5.3-codex-fast" \
-			exact="gpt-5.2" exact="grok-4.7" exact="grok-4.6" exact="grok-4.5"
+			exact="gpt-5.2" exact="grok-4.7" exact="grok-4.6" exact="grok-4.5" exact="gpt-image-2.5-sunburst" \
+			exact="gpt-image-2.5-flare"
 		route "google-generate" exact="garnet-07-15" exact="gemini-3.1-pro-preview" exact="gemini-3.8-flash" \
 			exact="gemini-3.7-flash" exact="gemini-3.6-flash" exact="gemini-3.5-flash" \
-			exact="gemini-3-flash-preview"
+			exact="gemini-3-flash-preview" exact="gemini-3-pro-image-preview"
 		route "openai-completions" exact="inkling" exact="mistral-large-4" exact="mistral-medium-3.5" exact="glm-5.3-flash" \
 			exact="glm-5.3" exact="glm-5.2" exact="glm-5.2-fast" exact="kimi-k3" exact="qwen3.8-max" \
-			exact="nemotron-3-ultra" exact="deepseek-v4.1-flash" exact="deepseek-v4-flash-0731" \
-			exact="deepseek-v4-pro" exact="minimax-m3"
+			exact="nemotron-3-ultra" exact="deepseek-v4.1-flash" exact="deepseek-v4.1-flash-1017" \
+			exact="deepseek-v4-flash-0731" exact="deepseek-v4-pro" exact="minimax-m3"
 	}
 
 	// Copilot serves these models with tighter effective limits than its
@@ -325,11 +338,14 @@ behavior {
 	}
 	// Kimi Code's /coding/v1/models envelope carries no output-limit field;
 	// these are the documented per-family caps (models.dev `kimi-for-coding`
-	// and `moonshotai` kimi-k3 entries, #6711). Legacy K2 rows keep their
+	// and `moonshotai` kimi-k3 entries, #6711; K3.1 Pro's documented
+	// `max_completion_tokens` default). Legacy K2 rows keep their
 	// discovery-reported values.
 	model-limits provider="kimi-code" {
 		limits "k3" max-tokens=131072
 		limits "k3-256k" max-tokens=131072
+		limits "k3.1-pro" max-tokens=131072
+		limits "k3.1-pro-highspeed" max-tokens=131072
 		limits "kimi-for-coding" max-tokens=32768
 		limits "kimi-for-coding-highspeed" max-tokens=32768
 	}
@@ -412,7 +428,6 @@ behavior {
 		model "oss-120b"
 		model "cerebras/zai-glm-4.7"
 		model "cerebras/zai-glm-4.6"
-		model "cerebras/zai-glm"
 		model "claude-haiku-4-5"
 		model "claude-haiku-4.5"
 		model "haiku-4-5"
@@ -447,7 +462,6 @@ behavior {
 		model "anthropic/claude-opus-5"
 		model "claude-opus-5"
 		model "opus-5"
-		model "openai-codex/gpt-5.5"
 		model "gpt-5.5"
 		model "claude-opus-4-8"
 		model "claude-opus-4.8"
@@ -463,6 +477,11 @@ behavior {
 		model "openrouter/google/gemini-3-pro-image"
 		model "google/gemini-3-pro-image"
 		model "deepinfra/black-forest-labs/FLUX-2-pro"
+		// Factory Droid last, in the CLI's own preference order: a Factory
+		// login alone can generate, and no other provider's turn moves.
+		model "factory-droid/gpt-image-2.5-sunburst"
+		model "factory-droid/gpt-image-2.5-flare"
+		model "factory-droid/gemini-3-pro-image-preview"
 	}
 	role-defaults "web" {
 		model "web/parallel"

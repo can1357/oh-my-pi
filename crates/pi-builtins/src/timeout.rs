@@ -214,6 +214,9 @@ impl builtins::Command for TimeoutCommand {
 			ProcessGroupPolicy::NewProcessGroup
 		};
 		params.set_cancel_token(child_cancel.clone());
+		// GNU's killed command says nothing; neither does the shell that ran an
+		// in-process operand once the limit cancels it.
+		params.set_quiet_cancellation(true);
 		params.set_spawn_observer(Arc::clone(&spawns) as Arc<dyn SpawnObserver>);
 
 		let mut command_line = String::new();
@@ -468,6 +471,269 @@ mod tests {
 		let result = run_with_deadline("timeout 0.010 slow-test").await;
 
 		assert_eq!(u8::from(result.exit_code), 124);
+	}
+
+	/// A shell with every builtin and in-process utility, as the bash tool's
+	/// shell has, working in `dir`.
+	#[cfg(unix)]
+	async fn full_shell(dir: &std::path::Path) -> Shell<DefaultShellExtensions> {
+		let mut shell = Shell::builder()
+			.builtins(crate::default_builtins(crate::BuiltinSet::BashMode))
+			.working_dir(dir.to_path_buf())
+			.build()
+			.await
+			.expect("build test shell");
+		for (name, registration) in crate::utility_builtins().into_iter().chain(crate::process_builtins()) {
+			shell.register_builtin(name, registration);
+		}
+		shell
+	}
+
+	/// What [`run_in_process`] saw.
+	#[cfg(unix)]
+	struct Ran {
+		status: u8,
+		stdout: String,
+		stderr: String,
+	}
+
+	/// Runs `command` (stdin closed, output captured) under `cancel`, if
+	/// given. The 1 s deadline is the contract: a command that ignores
+	/// cancellation never returns.
+	#[cfg(unix)]
+	async fn run_in_process(
+		shell: &mut Shell<DefaultShellExtensions>,
+		command: &str,
+		cancel: Option<tokio_util::sync::CancellationToken>,
+	) -> Ran {
+		let mut stdout = tempfile::tempfile().expect("create stdout capture");
+		let mut stderr = tempfile::tempfile().expect("create stderr capture");
+		let mut params = shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, brush_core::openfiles::null().expect("null device"));
+		params.set_fd(OpenFiles::STDOUT_FD, stdout.try_clone().expect("clone stdout capture").into());
+		params.set_fd(OpenFiles::STDERR_FD, stderr.try_clone().expect("clone stderr capture").into());
+		if let Some(token) = cancel {
+			params.set_cancel_token(token);
+		}
+		let result = tokio::time::timeout(
+			Duration::from_secs(1),
+			shell.run_string(command, &SourceInfo::default(), &params),
+		)
+		.await
+		.unwrap_or_else(|_| panic!("`{command}` ignored cancellation"))
+		.expect("execute test command");
+		let read_back = |file: &mut std::fs::File| {
+			file.seek(SeekFrom::Start(0)).expect("rewind capture");
+			let mut text = String::new();
+			file.read_to_string(&mut text).expect("read capture");
+			text
+		};
+		Ran { status: u8::from(result.exit_code), stdout: read_back(&mut stdout), stderr: read_back(&mut stderr) }
+	}
+
+	/// A scratch directory holding `sparse` and `sparse2`: 4 GiB files of NUL
+	/// bytes with no line breaks that take no disk space, too long to read
+	/// inside a short limit.
+	#[cfg(unix)]
+	fn sparse_dir() -> tempfile::TempDir {
+		let dir = tempfile::tempdir().expect("create scratch dir");
+		for name in ["sparse", "sparse2"] {
+			std::fs::File::create(dir.path().join(name))
+				.and_then(|file| file.set_len(4 << 30))
+				.expect("create sparse file");
+		}
+		dir
+	}
+
+	/// A utility reading a host file that never ends kept reading after the
+	/// limit: the builtin waits for its operand, so `timeout` never returned.
+	/// Once cancelled it says nothing about the cancelled read either
+	/// (`cat: /dev/zero: Operation canceled`); the shell's own
+	/// `error: interrupted` for the retired operand is not the utility's.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn in_process_reader_of_an_endless_file_stops_at_the_limit() {
+		let dir = tempfile::tempdir().expect("create scratch dir");
+		let ran = run_in_process(&mut full_shell(dir.path()).await, "timeout 0.2 cat /dev/zero", None).await;
+
+		assert_eq!(ran.status, 124);
+		assert!(!ran.stderr.contains("cat:"), "{}", ran.stderr);
+	}
+
+	/// `grep -z` over a large sparse file reads its NUL bytes as empty records,
+	/// so memory stays flat but the search runs for minutes.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn cancelled_grep_stops_without_a_diagnostic() {
+		let dir = sparse_dir();
+		let ran = run_in_process(&mut full_shell(dir.path()).await, "timeout 0.2 grep -z x sparse", None).await;
+
+		assert_eq!(ran.status, 124);
+		assert!(!ran.stderr.contains("grep:"), "{}", ran.stderr);
+	}
+
+	/// `diff` reads each file whole (`Fs::read`), which took no notice of the
+	/// token, so `timeout 150 diff -r` over a tree holding a huge sparse file
+	/// ran to the end of it.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn whole_file_read_of_a_sparse_file_stops_at_the_limit() {
+		let dir = sparse_dir();
+		let ran = run_in_process(&mut full_shell(dir.path()).await, "timeout 0.2 diff sparse sparse2", None).await;
+
+		assert_eq!(ran.status, 124);
+		assert!(!ran.stderr.contains("diff:"), "{}", ran.stderr);
+	}
+
+	/// `tail` panicked on the cancelled read (`tail: internal error`); what a
+	/// cancelled utility prints is dropped in one place for every utility.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn cancelled_utilities_print_nothing_about_it() {
+		let dir = sparse_dir();
+		let mut shell = full_shell(dir.path()).await;
+		for command in ["timeout 0.2 tail -n 1 sparse", "timeout 0.2 sha256sum /dev/zero"] {
+			let ran = run_in_process(&mut shell, command, None).await;
+			assert_eq!(ran.status, 124, "{command}");
+			assert!(!ran.stderr.contains("tail") && !ran.stderr.contains("sha256sum"), "{command}: {}", ran.stderr);
+		}
+	}
+
+	/// When the limit cancels an in-process operand, the shell that ran it
+	/// printed `error: interrupted` (and a builtin's own `mapfile:
+	/// interrupted`). GNU `timeout` kills its command, which says nothing; the
+	/// status alone reports the timeout.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn timeout_prints_nothing_of_its_own_when_the_limit_fires() {
+		let dir = tempfile::tempdir().expect("create scratch dir");
+		let mut shell = full_shell(dir.path()).await;
+		for command in [
+			"timeout 0.2 cat /dev/zero",
+			"timeout 0.2 mapfile -t a < /dev/zero",
+			"timeout 0.2 eval 'cat /dev/zero'",
+		] {
+			let ran = run_in_process(&mut shell, command, None).await;
+			assert_eq!((ran.status, ran.stderr.as_str()), (124, ""), "{command}");
+		}
+		let ran = run_in_process(&mut shell, "timeout 0.5 cat nosuch; echo st=$?", None).await;
+		assert!(ran.stderr.contains("nosuch"), "an error before the limit is still printed: {}", ran.stderr);
+	}
+
+	/// A cancelled read of standard input looked like EOF, so `md5sum` printed
+	/// the checksum of whatever prefix it had read, as if it were the input's.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn cancelled_stdin_read_reports_no_result_for_partial_input() {
+		let dir = tempfile::tempdir().expect("create scratch dir");
+		let ran =
+			run_in_process(&mut full_shell(dir.path()).await, "timeout 0.2 md5sum - < /dev/zero", None).await;
+
+		assert_eq!(ran.status, 124);
+		assert_eq!(ran.stdout, "");
+	}
+
+	/// `wc -c` counts a pipe with `splice`, which bypasses the cancellable
+	/// reads: behind a writer that never stops, `timeout` never returned.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn byte_count_of_an_endless_pipe_stops_at_the_limit() {
+		let dir = tempfile::tempdir().expect("create scratch dir");
+		let ran =
+			run_in_process(&mut full_shell(dir.path()).await, "cat /dev/zero | timeout 0.2 wc -c", None).await;
+
+		assert_eq!(ran.status, 124);
+		assert_eq!(ran.stdout, "");
+	}
+
+	/// `mapfile` reading a line that never ends did not check cancellation.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn mapfile_of_endless_input_stops_at_the_limit() {
+		let dir = tempfile::tempdir().expect("create scratch dir");
+		let ran =
+			run_in_process(&mut full_shell(dir.path()).await, "timeout 0.2 mapfile -t a < /dev/zero", None).await;
+
+		assert_eq!(ran.status, 124);
+	}
+
+	/// `mapfile` read its input without waiting for it first, so input that
+	/// paused before a delimiter or EOF (`{ printf x; sleep 60; } | timeout 1
+	/// mapfile a`) held the task that runs `timeout` in a blocking read, and
+	/// the limit never fired. Read a block at a time and, with `-n`, a byte at
+	/// a time.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn mapfile_of_paused_input_stops_at_the_limit() {
+		use std::io::Write as _;
+		let dir = tempfile::tempdir().expect("create scratch dir");
+		let fifo = dir.path().join("fifo");
+		pi_vfs::BlockingFs::native()
+			.make_node(&fifo, pi_vfs::NodeKind::Fifo, 0o600)
+			.expect("create FIFO");
+		let mut shell = full_shell(dir.path()).await;
+		for command in ["timeout 0.2 mapfile a < fifo", "timeout 0.2 mapfile -n 2 a < fifo"] {
+			let path = fifo.clone();
+			let writer = std::thread::spawn(move || {
+				let mut file = std::fs::OpenOptions::new()
+					.write(true)
+					.open(path)
+					.expect("open FIFO for writing");
+				file.write_all(b"x").expect("write to FIFO");
+				// Pauses past the test's deadline, then ends the input.
+				std::thread::sleep(Duration::from_secs(2));
+			});
+			let ran = run_in_process(&mut shell, command, None).await;
+			assert_eq!((ran.status, ran.stderr.as_str()), (124, ""), "{command}");
+			writer.join().expect("FIFO writer");
+		}
+	}
+
+	/// `ls -R` walked the whole tree before it looked at cancellation.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn recursive_listing_stops_at_the_limit() {
+		let dir = tempfile::tempdir().expect("create scratch dir");
+		let ran =
+			run_in_process(&mut full_shell(dir.path()).await, "timeout 0.2 ls -R / > /dev/null", None).await;
+
+		assert_eq!(ran.status, 124);
+	}
+
+	/// Opening a FIFO with no writer blocked in `open` until one came, past
+	/// the limit; now the open stops at the limit, and a writer that does come
+	/// is still read.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn reader_of_a_fifo_without_a_writer_stops_at_the_limit() {
+		let dir = tempfile::tempdir().expect("create scratch dir");
+		pi_vfs::BlockingFs::native()
+			.make_node(dir.path().join("fifo"), pi_vfs::NodeKind::Fifo, 0o600)
+			.expect("create FIFO");
+		let mut shell = full_shell(dir.path()).await;
+
+		let ran = run_in_process(&mut shell, "timeout 0.2 cat fifo", None).await;
+		assert_eq!(ran.status, 124);
+
+		let ran = run_in_process(&mut shell, "(sleep 0.1; echo hi > fifo) & timeout 0.8 cat fifo; wait", None).await;
+		assert_eq!((ran.status, ran.stdout.as_str()), (0, "hi\n"), "{}", ran.stderr);
+	}
+
+	/// A background in-process reader must stop when the run that started it
+	/// is cancelled (a tool abort); otherwise it keeps a core busy after the
+	/// session is gone.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn background_reader_stops_when_its_run_is_cancelled() {
+		let dir = tempfile::tempdir().expect("create scratch dir");
+		let mut shell = full_shell(dir.path()).await;
+		let run_token = tokio_util::sync::CancellationToken::new();
+		run_in_process(&mut shell, "cat /dev/zero > /dev/null &", Some(run_token.clone())).await;
+		run_token.cancel();
+
+		// `wait` returns once the job has ended; the deadline catches a job that
+		// keeps reading.
+		run_in_process(&mut shell, "wait", None).await;
 	}
 
 	#[tokio::test]

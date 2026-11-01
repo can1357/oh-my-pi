@@ -309,6 +309,32 @@ describe("loadEntriesFromFileStream (Bun.JSONL parity)", () => {
 		expect(await sessionLoader.readSessionHeaderId(file)).toBeUndefined();
 	});
 
+	it("reads a session id after a blank line and past the first read window, and one with no trailing newline", async () => {
+		const slotLine = serializeTitleSlot({ title: "Wide", source: "user", updatedAt: ISO });
+		const wideHeader = JSON.stringify({ ...HEADER, cwd: `/${"d".repeat(40 * 1024)}` });
+		const trailing = JSON.stringify(msg("m1", "s1", "x".repeat(2 * 1024 * 1024)));
+		const wide = await writeTemp(`${slotLine}\n${wideHeader}\n${trailing}\n`);
+		expect(await sessionLoader.readSessionHeaderId(wide)).toBe("s1");
+
+		const bare = path.join(path.dirname(wide), "bare.jsonl");
+		fs.writeFileSync(bare, JSON.stringify(HEADER));
+		expect(await sessionLoader.readSessionHeaderId(bare)).toBe("s1");
+	});
+
+	it("reads the session id of a pretty-printed header, including one past the first read window", async () => {
+		const trailing = `${JSON.stringify(msg("m1", "s1", "x".repeat(64 * 1024)))}\n`;
+		// Braces and escaped quotes inside a string value must not end the header early.
+		const pretty = await writeTemp(`${JSON.stringify({ ...HEADER, cwd: '/a}b"{' }, null, 2)}\n${trailing}`);
+		expect(await sessionLoader.readSessionHeaderId(pretty)).toBe("s1");
+
+		const wide = path.join(path.dirname(pretty), "wide.jsonl");
+		fs.writeFileSync(
+			wide,
+			`${JSON.stringify({ ...HEADER, cwd: `/${"d".repeat(40 * 1024)}` }, null, 2)}\n${trailing}`,
+		);
+		expect(await sessionLoader.readSessionHeaderId(wide)).toBe("s1");
+	});
+
 	it("stops after the first chunk of a delimiter-free file when the record cap is zero", async () => {
 		// No newline until EOF: the streaming loop's delimiter-free fast path skips
 		// the parser, so the record cap has to be enforced before buffering or the

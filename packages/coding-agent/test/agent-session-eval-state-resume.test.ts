@@ -131,3 +131,51 @@ it("keeps the previous process's request as the resumed request prefix", async (
 	const evalResult = fourth.findIndex(message => message.role === "toolResult" && message.toolCallId === "eval-2");
 	expect(fourth[evalResult + 1]?.role).toBe("developer");
 });
+
+it.each([
+	{ target: " XD://eval ", restoresState: true },
+	{ target: "eval", restoresState: false },
+	{ target: "xd://eval/helpers", restoresState: false },
+])("recognizes interrupted device activity for $target", async ({ target, restoresState }) => {
+	using caseDir = TempDir.createSync("@pi-deferred-eval-resume-");
+	auth = await AuthStorage.create(":memory:");
+	const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+	const manager = SessionManager.inMemory(caseDir.path());
+	manager.appendMessage({
+		role: "assistant",
+		content: [{ type: "toolCall", id: "interrupted", name: "write", arguments: { path: target, content: "{}" } }],
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		stopReason: "toolUse",
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		timestamp: Date.now(),
+	});
+	const session = new AgentSession({
+		agent: new Agent({ initialState: { model, tools: [], messages: manager.buildSessionContext().messages } }),
+		sessionManager: manager,
+		settings: Settings.isolated(),
+		modelRegistry: new ModelRegistry(auth),
+		evalToolSession: {
+			cwd: caseDir.path(),
+			hasUI: false,
+			settings: Settings.isolated(),
+			getSessionFile: () => null,
+			getSessionSpawns: () => null,
+			getEvalSessionId: () => `interrupted-${target}`,
+		},
+	});
+	sessions.push(session);
+	const snapshots = session
+		.buildDisplaySessionContext()
+		.messages.filter(message => message.role === "custom" && message.customType === "eval-state-context");
+	expect(snapshots).toHaveLength(restoresState ? 1 : 0);
+	if (restoresState) expect(snapshots[0]).toMatchObject({ content: expect.stringContaining("were not restored") });
+});

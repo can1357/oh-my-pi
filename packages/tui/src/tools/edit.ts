@@ -45,7 +45,13 @@ import {
 import type { ToolActivityContext, ToolActivitySummary } from "./renderer";
 import { fileHyperlink, Hasher, type RenderCache, renderStatusLine, truncateToWidth, WidthAwareText } from "../render";
 import { framedToolCard } from "../render/tool-card";
-import { HL_FILE_PREFIX, HL_FILE_SUFFIX, HL_MOVE_KEYWORD, HL_REM_KEYWORD } from "./hashline-format";
+import {
+	HASHLINE_TAG_SUFFIX_RE,
+	HL_FILE_PREFIX,
+	HL_FILE_SUFFIX,
+	HL_MOVE_KEYWORD,
+	HL_REM_KEYWORD,
+} from "./hashline-format";
 
 /** Edit payload syntax selected by the caller. */
 export type EditMode = "replace" | "patch" | "hashline" | "apply_patch" | "sloppy";
@@ -95,8 +101,10 @@ export interface EditToolPerFileResult {
 
 /** Diff, diagnostics, and snapshots returned by an edit. */
 export interface EditToolDetails {
-	/** Unified diff of the changes made */
+	/** Unified diff of the changes made; empty when the edit failed */
 	diff: string;
+	/** Why the edit failed, as the engine classed it (`unseen_lines`, `stale_tag`, `parse`, …) */
+	errorKind?: string;
 	/** Line number of the first change in the new file (for editor navigation) */
 	firstChangedLine?: number;
 	/** Diagnostic result (if available) */
@@ -662,9 +670,12 @@ function getCallPreview(
 
 const MISSING_APPLY_PATCH_END_ERROR = "The last line of the patch must be '*** End Patch'";
 
+/** A model-typed `[path#tag]` header may spell the tag in lowercase. */
+const TYPED_TAG_SUFFIX_RE = new RegExp(HASHLINE_TAG_SUFFIX_RE.source, "i");
+
 function normalizeHashlineInputPreviewPath(rawPath: string): string {
 	const trimmed = rawPath.trim();
-	const hashStart = /#[0-9a-fA-F]{4}$/u.exec(trimmed)?.index;
+	const hashStart = TYPED_TAG_SUFFIX_RE.exec(trimmed)?.index;
 	const withoutHash = hashStart === undefined ? trimmed : trimmed.slice(0, hashStart);
 	if (withoutHash.length < 2) return withoutHash;
 	const first = withoutHash[0];
@@ -1418,7 +1429,8 @@ function editFileParts(
 		filePathFromEditEntry(firstEdit?.rename) ??
 		filePathFromEditEntry(firstEdit?.move) ??
 		(details && "move" in details && typeof details.move === "string" ? details.move : undefined);
-	const editDiffPreview = details ? undefined : options.renderContext?.editDiffPreview;
+	// Details that only class a failure leave the streamed preview to locate it.
+	const editDiffPreview = details && !("errorKind" in details) ? undefined : options.renderContext?.editDiffPreview;
 	const previewDiff = editDiffPreview && !("error" in editDiffPreview) ? editDiffPreview.diff : undefined;
 	const diffText = isError ? undefined : details?.diff || previewDiff;
 	const firstChangedLine =
@@ -1530,8 +1542,9 @@ function renderSingleFileResult(
 			// what happened. The shared streaming `editDiffPreview` is a call-phase
 			// artifact (in a batch it reflects only the first file), so consulting it
 			// for an empty-diff delete/move/no-op result mislabels the card. Fall
-			// back to the preview only when no details exist yet.
-			const editDiffPreview = details ? undefined : renderContext?.editDiffPreview;
+			// back to the preview only when no details exist yet, or when they only
+			// class a failure.
+			const editDiffPreview = details && !("errorKind" in details) ? undefined : renderContext?.editDiffPreview;
 			const renderDiffFn = renderContext?.renderDiff ?? renderFallbackDiff;
 
 			if (diffSectionRenderDiffFn !== renderDiffFn) {

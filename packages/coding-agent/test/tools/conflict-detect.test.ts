@@ -146,16 +146,16 @@ describe("ConflictHistory", () => {
 		});
 		const second = history.register({
 			absolutePath: "/abs/a.ts",
-			displayPath: "a.ts",
+			displayPath: "./a.ts",
 			startLine: 10,
 			separatorLine: 12,
-			endLine: 16, // file gained 2 lines in the ours section
-			oursLines: ["new-ours-1", "new-ours-2", "new-ours-3"],
-			theirsLines: ["new-theirs"],
+			endLine: 14,
+			oursLines: ["old-ours"],
+			theirsLines: ["old-theirs"],
 		});
 		expect(second.id).toBe(first.id);
-		expect(history.get(first.id)?.endLine).toBe(16);
-		expect(history.get(first.id)?.oursLines).toEqual(["new-ours-1", "new-ours-2", "new-ours-3"]);
+		expect(history.get(first.id)?.displayPath).toBe("./a.ts");
+		expect(history.get(first.id)?.oursLines).toEqual(["old-ours"]);
 	});
 
 	it("invalidatePath drops entries scoped to one absolutePath", () => {
