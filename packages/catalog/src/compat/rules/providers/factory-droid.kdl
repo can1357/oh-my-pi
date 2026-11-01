@@ -375,6 +375,12 @@ provider "factory-droid" {
 			cost input=0 output=0 cache-read=0 cache-write=0
 			limits context=448000 max-tokens=64000
 		}
+		model "minimax-m3.1-flash" name="MiniMax M3.1 Flash" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=868928 max-tokens=131072
+		}
 		model "grok-4.7" name="Grok 4.7" {
 			reasoning #true
 			input "text" "image"
@@ -1031,6 +1037,18 @@ provider "factory-droid" {
 		thinking-default-level "high"
 		entitlement { feature-flag "minimax_m3" }
 	}
+	models "minimax-m3.1-flash" {
+		routing-family "factory"
+		upstream-rotation "fireworks"
+		credit-rates { input 0.06; output 4 }
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
+		thinking-requires-effort #true
+		thinking-default-level "max"
+		entitlement { feature-flag "minimax_m3_1_flash" }
+		on-upstream "fireworks" priority=10 {
+			completions-reasoning-mode "forced-on"
+		}
+	}
 	models "grok-4.7" {
 		routing-family "xai"
 		upstream-rotation "xai"
@@ -1110,7 +1128,7 @@ provider "factory-droid" {
 		supports-strict-mode #true
 	}
 	models "glm-*" "kimi-*" "deepseek-*" "nemotron-*" "inkling" "mistral-medium-3.5" "mistral-large-4" "qwen3.8-max" \
-		"minimax-m3" {
+		"minimax-m3" "minimax-m3.1-flash" {
 		clamp-output-to-model-max #true
 		completions-reasoning-mode "none"
 		completions-reasoning-history "omit"
@@ -1122,8 +1140,8 @@ provider "factory-droid" {
 			completions-reasoning-mode "effort"
 		}
 	}
-	// MiniMax M3 uses Completions with high effort, but NO reasoning_history.
-	models "minimax-m3" {
+	// MiniMax preserves assistant reasoning, but does not send request-level reasoning_history.
+	models "minimax-m3" "minimax-m3.1-flash" {
 		on-upstream "fireworks" priority=10 {
 			completions-reasoning-history "omit"
 		}

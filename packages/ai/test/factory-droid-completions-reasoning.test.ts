@@ -33,6 +33,145 @@ function toolTurn(key: string, model: string): Message[] {
 }
 
 describe("Factory Droid completions reasoning matrix", () => {
+	it.each([Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max])(
+		"sends MiniMax M3.1 Flash effort %s verbatim over Fireworks completions",
+		async reasoning => {
+			const captured: CapturedRequest[] = [];
+			const result = await streamFactoryDroid(
+				factoryModel("minimax-m3.1-flash"),
+				{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+				{
+					apiKey: "workos-token",
+					reasoning,
+					fetch: captureFetch(captured, completionsChunks("OK", "minimax-m3.1-flash")),
+				},
+			).result();
+			expect(result.stopReason).toBe("stop");
+			expect(result.content).toContainEqual({ type: "text", text: "OK" });
+			expect(captured[0].url).toBe("https://api.factory.ai/api/llm/o/v1/chat/completions");
+			expect(captured[0].headers["x-api-provider"]).toBe("fireworks");
+			expect(captured[0].body.model).toBe("minimax-m3.1-flash");
+			expect(captured[0].body.reasoning_effort).toBe(reasoning);
+			expect(Object.hasOwn(captured[0].body, "reasoning_history")).toBe(false);
+		},
+	);
+
+	it.each([
+		{
+			label: "clamps disabled reasoning to low and oversized output",
+			disableReasoning: true,
+			maxTokens: 131073,
+			effort: "low",
+			output: 131072,
+		},
+		{
+			label: "uses native max by default and preserves a smaller output bound",
+			disableReasoning: false,
+			maxTokens: 1024,
+			effort: "max",
+			output: 1024,
+		},
+	])("MiniMax M3.1 Flash $label", async ({ disableReasoning, maxTokens, effort, output }) => {
+		const captured: CapturedRequest[] = [];
+		const result = await streamFactoryDroid(
+			factoryModel("minimax-m3.1-flash"),
+			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{
+				apiKey: "workos-token",
+				disableReasoning,
+				maxTokens,
+				fetch: captureFetch(captured, completionsChunks("OK", "minimax-m3.1-flash")),
+			},
+		).result();
+		expect(result.stopReason).toBe("stop");
+		expect(captured[0].body.reasoning_effort).toBe(effort);
+		expect(captured[0].body.max_tokens).toBe(output);
+		expect(Object.hasOwn(captured[0].body, "reasoning_history")).toBe(false);
+	});
+
+	it("replays decoded MiniMax M3.1 Flash reasoning and matching tool result without request history", async () => {
+		const modelId = "minimax-m3.1-flash";
+		const model = factoryModel(modelId);
+		const captured: CapturedRequest[] = [];
+		const messages: Message[] = [{ role: "user", content: "inspect", timestamp: 1 }];
+		const tools = [{ name: "Read", description: "read", parameters: type({ path: "string" }) }];
+		const first = await streamFactoryDroid(
+			model,
+			{ messages, tools },
+			{
+				apiKey: "workos-token",
+				reasoning: Effort.Max,
+				fetch: captureFetch(captured, [
+					JSON.stringify({
+						id: "minimax-tool",
+						object: "chat.completion.chunk",
+						created: 1,
+						model: modelId,
+						choices: [
+							{
+								index: 0,
+								delta: {
+									reasoning_content: "inspect the file",
+									tool_calls: [
+										{
+											index: 0,
+											id: "call_read",
+											type: "function",
+											function: { name: "Read", arguments: '{"path":"/tmp/x"}' },
+										},
+									],
+								},
+								finish_reason: "tool_calls",
+							},
+						],
+					}),
+				]),
+			},
+		).result();
+		expect(first.stopReason).toBe("toolUse");
+		const call = first.content.find(block => block.type === "toolCall");
+		if (!call || call.type !== "toolCall") throw new Error("Missing decoded Read call");
+		expect(call.name).toBe("Read");
+		expect(call.arguments).toEqual({ path: "/tmp/x" });
+		messages.push(first, {
+			role: "toolResult",
+			toolCallId: call.id,
+			toolName: call.name,
+			content: [{ type: "text", text: "file body" }],
+			isError: false,
+			timestamp: 2,
+		});
+		const final = await streamFactoryDroid(
+			model,
+			{ messages, tools },
+			{
+				apiKey: "workos-token",
+				reasoning: Effort.Max,
+				fetch: captureFetch(captured, completionsChunks("DONE", modelId)),
+			},
+		).result();
+		expect(final.stopReason).toBe("stop");
+		expect(final.content).toContainEqual({ type: "text", text: "DONE" });
+		const replay = captured[1].body.messages as Array<Record<string, unknown>>;
+		const assistant = replay.find(message => message.role === "assistant");
+		expect(assistant?.reasoning_content).toBe("inspect the file");
+		expect(assistant?.tool_calls).toEqual([
+			{
+				id: call.id,
+				type: "function",
+				function: { name: "Read", arguments: JSON.stringify(call.arguments) },
+			},
+		]);
+		expect(replay.find(message => message.role === "tool")).toMatchObject({
+			tool_call_id: call.id,
+			content: "file body",
+		});
+		for (const request of captured) {
+			expect(request.body.reasoning_effort).toBe("max");
+			expect(Object.hasOwn(request.body, "reasoning_history")).toBe(false);
+		}
+	});
+
 	it("lets a caller override the pinned completions temperature", async () => {
 		const captured: CapturedRequest[] = [];
 		await streamFactoryDroid(
