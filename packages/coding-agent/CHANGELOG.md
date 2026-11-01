@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed background completions arriving during compaction or handoff starting on stale history or disappearing from the saved transcript, and blocking input submitted while they wait ([#17599](https://github.com/can1357/oh-my-pi/issues/17599)).
+- Fixed background completions arriving during compaction or handoff starting on stale history or disappearing from the saved transcript, and blocking input submitted while they wait ([#17599](https://github.com/can1357/oh-my-pi/issues/17599), [#17705](https://github.com/can1357/oh-my-pi/pull/17705) by [@shoucandanghehe](https://github.com/shoucandanghehe)).
 
 ## [18.15.0] - 2026-11-01
 
