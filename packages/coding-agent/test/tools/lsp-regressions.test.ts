@@ -895,6 +895,83 @@ describe("lsp regressions", () => {
 		}
 	});
 
+	it("lists and applies source actions the server only returns when asked for by kind", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-source-code-actions-");
+		try {
+			const serverConfig: ServerConfig = {
+				command: "fake-lsp",
+				fileTypes: [".ts"],
+				rootMarkers: [],
+				isLinter: true,
+			};
+			// Two distinct actions sharing kind and title (different `data`), as servers emit per target.
+			const refactors = [1, 2].map(target => ({
+				title: "Convert named imports to namespace import",
+				kind: "refactor.rewrite",
+				data: { target },
+			}));
+			installFakeLsp((message, srv) => {
+				if (message.method === "initialize") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: { codeActionProvider: true } } });
+				} else if (message.method === "textDocument/codeAction") {
+					const params = message.params as { textDocument: { uri: string }; context: { only?: string[] } };
+					const organize = {
+						title: "Organize Imports",
+						kind: "source.organizeImports",
+						edit: {
+							changes: {
+								[params.textDocument.uri]: [
+									{
+										range: { start: { line: 0, character: 0 }, end: { line: 1, character: 0 } },
+										newText: "organized\n",
+									},
+								],
+							},
+						},
+					};
+					// Like typescript-language-server: source actions only on an explicit `source` request.
+					// The refactors come back regardless of `only`, as from servers that ignore the filter.
+					const wantsSource = params.context.only?.some(kind => kind.startsWith("source")) ?? false;
+					srv.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						result: wantsSource ? [...refactors, organize] : refactors,
+					});
+				} else if (message.method === "shutdown") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					srv.exit(0);
+				}
+			});
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: { "fake-lsp": serverConfig } });
+			const client = await lspClient.getOrCreateClient(serverConfig, tempDir.path(), 1_000);
+			const targetPath = await openDocument(client, "target.ts");
+			const tool = new LspTool(makeLspSession(tempDir.path()));
+
+			const listed = await tool.execute("list-source-actions", {
+				action: "code_actions",
+				file: targetPath,
+				line: 1,
+			});
+			expect(listed.content[0]).toMatchObject({
+				type: "text",
+				text: "3 code action(s):\n  0: [refactor.rewrite] Convert named imports to namespace import\n  1: [refactor.rewrite] Convert named imports to namespace import\n  2: [source.organizeImports] Organize Imports",
+			});
+
+			await tool.execute("apply-source-action", {
+				action: "code_actions",
+				file: targetPath,
+				line: 1,
+				query: "Organize Imports",
+				apply: true,
+			});
+			expect(await Bun.file(targetPath).text()).toBe("organized\n");
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
 	it("returns an already-starting client without creating a second client", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-pending-client-");
 		const initialize = Promise.withResolvers<void>();

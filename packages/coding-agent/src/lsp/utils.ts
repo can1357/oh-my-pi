@@ -477,6 +477,21 @@ export function formatCodeAction(action: CodeAction | Command, index: number): s
 	return `${index}: [${kind}] ${action.title}${preferred}${disabled}`;
 }
 
+/**
+ * Appends the `extra` code actions that do not already appear, identically, in `base`.
+ * `code_actions` merges its unfiltered and `source`-kind requests with this; servers that
+ * ignore `context.only` answer both with the same actions. Same-titled actions that differ
+ * in any field (edit, command, data) stay distinct, as do repeats within one response.
+ */
+export function mergeCodeActions(
+	base: (CodeAction | Command)[] | null,
+	extra: (CodeAction | Command)[] | null,
+): (CodeAction | Command)[] {
+	const merged = base ?? [];
+	const seen = new Set(merged.map(action => JSON.stringify(action)));
+	return [...merged, ...(extra ?? []).filter(action => !seen.has(JSON.stringify(action)))];
+}
+
 export interface CodeActionApplyDependencies {
 	resolveCodeAction?: (action: CodeAction) => Promise<CodeAction>;
 	applyWorkspaceEdit: (edit: WorkspaceEdit) => Promise<string[]>;
