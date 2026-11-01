@@ -93,7 +93,10 @@ class ProtocolParsingTests(unittest.TestCase):
         questions = request.questions or ()
         self.assertEqual(
             questions[0].options,
-            (AskOption(label="Postgres", description="server"), AskOption(label="SQLite")),
+            (
+                AskOption(label="Postgres", description="server"),
+                AskOption(label="SQLite"),
+            ),
         )
         self.assertEqual(
             [(q.id, q.multi, q.recommended) for q in questions],
@@ -105,7 +108,11 @@ class ProtocolParsingTests(unittest.TestCase):
         # `remote` compaction action, fail to parse).
         cases = [
             (
-                {"type": "auto_compaction_start", "reason": "overflow", "action": "remote"},
+                {
+                    "type": "auto_compaction_start",
+                    "reason": "overflow",
+                    "action": "remote",
+                },
                 AutoCompactionStartEvent,
                 lambda e: e.action,
                 "remote",
@@ -117,7 +124,12 @@ class ProtocolParsingTests(unittest.TestCase):
                 ("paused", None),
             ),
             (
-                {"type": "notice", "level": "warning", "message": "disk full", "source": "session"},
+                {
+                    "type": "notice",
+                    "level": "warning",
+                    "message": "disk full",
+                    "source": "session",
+                },
                 NoticeEvent,
                 lambda e: (e.level, e.source),
                 ("warning", "session"),
@@ -137,13 +149,23 @@ class ProtocolParsingTests(unittest.TestCase):
                 ("miss", 3, "refresh missed the cache"),
             ),
             (
-                {"type": "thinking_level_changed", "thinkingLevel": "high", "configured": "auto", "resolved": "high"},
+                {
+                    "type": "thinking_level_changed",
+                    "thinkingLevel": "high",
+                    "configured": "auto",
+                    "resolved": "high",
+                },
                 ThinkingLevelChangedEvent,
                 lambda e: (e.thinking_level, e.configured, e.resolved),
                 ("high", "auto", "high"),
             ),
             (
-                {"type": "tool_stream_update", "toolCallId": "t1", "toolName": "bash", "update": {"chunk": "ok"}},
+                {
+                    "type": "tool_stream_update",
+                    "toolCallId": "t1",
+                    "toolName": "bash",
+                    "update": {"chunk": "ok"},
+                },
                 ToolStreamUpdateEvent,
                 lambda e: (e.tool_call_id, e.update),
                 ("t1", {"chunk": "ok"}),
@@ -151,7 +173,13 @@ class ProtocolParsingTests(unittest.TestCase):
             (
                 {
                     "type": "irc_message",
-                    "message": {"role": "custom", "customType": "irc", "content": "hi", "display": True, "timestamp": 1},
+                    "message": {
+                        "role": "custom",
+                        "customType": "irc",
+                        "content": "hi",
+                        "display": True,
+                        "timestamp": 1,
+                    },
                 },
                 IrcMessageEvent,
                 lambda e: e.message["customType"],
@@ -194,7 +222,13 @@ class ProtocolParsingTests(unittest.TestCase):
     def test_parse_live_frames(self) -> None:
         self.assertEqual(
             parse_notification(
-                {"type": "live_transcript", "role": "user", "turn": 3, "text": "hello", "final": False}
+                {
+                    "type": "live_transcript",
+                    "role": "user",
+                    "turn": 3,
+                    "text": "hello",
+                    "final": False,
+                }
             ),
             LiveTranscriptEvent(role="user", turn=3, text="hello", final=False),
         )

@@ -22,8 +22,9 @@ import (
 //	OMP_RPC_SMOKE=1 go test -run TestSmoke -v ./...
 //
 // PI_CODING_AGENT_DIR points at a fresh directory so no user configuration
-// applies. TestSmoke has no model and never prompts; TestSmokeModel prompts a
-// scripted local model (packages/coding-agent/test/rpc-wire/fake-openai-server.ts).
+// applies, and the scripted local model
+// (packages/coding-agent/test/rpc-wire/fake-openai-server.ts) is its only
+// model. TestSmoke never prompts; TestSmokeModel drives full turns.
 
 func repoRoot(t *testing.T) string {
 	t.Helper()
@@ -35,6 +36,39 @@ func repoRoot(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return root
+}
+
+// startFakeModel runs the scripted model server, which writes
+// agentDir/models.yml declaring fake/fake-model and serves until its stdin
+// closes. A run that never prompts still needs it: rpc mode exits at startup
+// when no model resolves, and a fresh agent dir has none unless the host's
+// environment carries provider credentials.
+func startFakeModel(t *testing.T, root, agentDir string) {
+	t.Helper()
+	model := exec.Command("bun", "packages/coding-agent/test/rpc-wire/fake-openai-server.ts", agentDir)
+	model.Dir = root
+	model.Stderr = os.Stderr
+	modelStdin, err := model.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	modelStdout, err := model.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := model.Start(); err != nil {
+		t.Fatal(err)
+	}
+	// Registered before the client's cleanup, so it runs after it.
+	t.Cleanup(func() {
+		_ = modelStdin.Close()
+		_ = model.Wait()
+	})
+	banner, err := bufio.NewReader(modelStdout).ReadString('\n')
+	if err != nil || !strings.HasPrefix(banner, "READY ") {
+		t.Fatalf("fake model: %q %v", banner, err)
+	}
+	t.Logf("fake model: %s", strings.TrimSpace(banner))
 }
 
 // frameLog records every frame a client delivers.
@@ -117,7 +151,9 @@ func TestSmoke(t *testing.T) {
 	root := repoRoot(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	client, log, finish := startServer(t, root, t.TempDir(), nil)
+	agentDir := t.TempDir()
+	startFakeModel(t, root, agentDir)
+	client, log, finish := startServer(t, root, agentDir, []string{"--model", "fake/fake-model"})
 
 	state, err := client.GetState(ctx)
 	if err != nil {
@@ -205,30 +241,7 @@ func TestSmoke(t *testing.T) {
 func TestSmokeModel(t *testing.T) {
 	root := repoRoot(t)
 	agentDir := t.TempDir()
-	model := exec.Command("bun", "packages/coding-agent/test/rpc-wire/fake-openai-server.ts", agentDir)
-	model.Dir = root
-	model.Stderr = os.Stderr
-	modelStdin, err := model.StdinPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	modelStdout, err := model.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := model.Start(); err != nil {
-		t.Fatal(err)
-	}
-	// Registered before the client's cleanup, so it runs after it.
-	t.Cleanup(func() {
-		_ = modelStdin.Close()
-		_ = model.Wait()
-	})
-	banner, err := bufio.NewReader(modelStdout).ReadString('\n')
-	if err != nil || !strings.HasPrefix(banner, "READY ") {
-		t.Fatalf("fake model: %q %v", banner, err)
-	}
-	t.Logf("fake model: %s", strings.TrimSpace(banner))
+	startFakeModel(t, root, agentDir)
 
 	var calls atomic.Int32
 	var callArgs atomic.Value

@@ -1,12 +1,13 @@
 //! Real-server smoke runs: `cargo test -- --ignored --nocapture` from this
-//! crate. Spawn the repository's `omp --mode rpc` with an isolated agent dir:
-//! `smoke_real_server` never calls a model; `smoke_scripted_model` talks to the
-//! scripted OpenAI-compatible server in `test/rpc-wire/fake-openai-server.ts`.
+//! crate. Spawn the repository's `omp --mode rpc` with an isolated agent dir
+//! and the scripted OpenAI-compatible server in
+//! `test/rpc-wire/fake-openai-server.ts` as its model: `smoke_real_server`
+//! never prompts, `smoke_scripted_model` drives full turns.
 
 use std::{
 	io::{BufRead, BufReader},
 	path::{Path, PathBuf},
-	process::{Command as Process, Stdio},
+	process::{Child, Command as Process, Stdio},
 	sync::{Arc, Mutex, mpsc::Receiver},
 	time::{Duration, Instant},
 };
@@ -72,15 +73,51 @@ fn notification_type(event: &Event) -> String {
 	}
 }
 
+/// Starts the scripted model server, which writes `<agent_dir>/models.yml`
+/// declaring `fake/fake-model` and serves until its stdin closes (when the
+/// returned child drops). A run that never prompts still needs it: rpc mode
+/// exits at startup when no model resolves, and an isolated agent dir has
+/// none unless the host's environment carries provider credentials.
+fn start_fake_model(repo: &Path, agent_dir: &Path) -> Child {
+	let mut model = Process::new("bun")
+		.arg("packages/coding-agent/test/rpc-wire/fake-openai-server.ts")
+		.arg(agent_dir)
+		.current_dir(repo)
+		.stdin(Stdio::piped())
+		.stdout(Stdio::piped())
+		.spawn()
+		.unwrap();
+	let mut first = String::new();
+	BufReader::new(model.stdout.take().unwrap())
+		.read_line(&mut first)
+		.unwrap();
+	println!("fake model: {}", first.trim());
+	assert!(first.starts_with("READY "), "{first}");
+	model
+}
+
+fn stop_fake_model(mut model: Child) {
+	drop(model.stdin.take());
+	let _ = model.wait();
+}
+
 #[test]
 #[ignore = "spawns the real omp server; run with --ignored"]
 fn smoke_real_server() {
 	let repo = repo_root();
 	let agent_dir = std::env::temp_dir().join(format!("omp-rpc-rust-smoke-{}", std::process::id()));
 	std::fs::create_dir_all(&agent_dir).unwrap();
+	let model = start_fake_model(&repo, &agent_dir);
 	let mut process = Process::new("bun");
 	process
-		.args(["packages/coding-agent/src/cli.ts", "--mode", "rpc", "--no-session"])
+		.args([
+			"packages/coding-agent/src/cli.ts",
+			"--mode",
+			"rpc",
+			"--no-session",
+			"--model",
+			"fake/fake-model",
+		])
 		.current_dir(&repo)
 		.env("PI_CODING_AGENT_DIR", &agent_dir);
 	let (client, events) = Client::spawn(process, ClientOptions::default()).expect("spawn + ready");
@@ -197,6 +234,7 @@ fn smoke_real_server() {
 		std::thread::sleep(Duration::from_millis(20));
 	}
 	println!("server group gone {:?} after drop", dropped.elapsed());
+	stop_fake_model(model);
 	let _ = std::fs::remove_dir_all(&agent_dir);
 }
 
@@ -219,20 +257,7 @@ fn smoke_scripted_model() {
 	let repo = repo_root();
 	let agent_dir = std::env::temp_dir().join(format!("omp-rpc-rust-model-{}", std::process::id()));
 	std::fs::create_dir_all(&agent_dir).unwrap();
-	let mut model = Process::new("bun")
-		.arg("packages/coding-agent/test/rpc-wire/fake-openai-server.ts")
-		.arg(&agent_dir)
-		.current_dir(&repo)
-		.stdin(Stdio::piped())
-		.stdout(Stdio::piped())
-		.spawn()
-		.unwrap();
-	let mut first = String::new();
-	BufReader::new(model.stdout.take().unwrap())
-		.read_line(&mut first)
-		.unwrap();
-	println!("fake model: {}", first.trim());
-	assert!(first.starts_with("READY "), "{first}");
+	let model = start_fake_model(&repo, &agent_dir);
 
 	let calls: Arc<Mutex<Vec<Map<String, Value>>>> = Arc::default();
 	let recorded = Arc::clone(&calls);
@@ -382,8 +407,7 @@ fn smoke_scripted_model() {
 	println!("events delivered: {}", seen.len());
 	assert_clean(&seen);
 	drop(client);
-	drop(model.stdin.take());
-	let _ = model.wait();
+	stop_fake_model(model);
 	let _ = std::fs::remove_dir_all(&agent_dir);
 }
 
