@@ -21,7 +21,8 @@ import type { MCPServerConnection, MCPToolDefinition } from "../../src/mcp/types
 import { Settings } from "../../src/config/settings";
 import { EditTool } from "../../src/edit";
 import type { ToolSession } from "../../src/tools";
-import { loadHandEditedSettings } from "../helpers/hand-edited-settings";
+import * as path from "node:path";
+import { loadHandEditedSettings, writeHandEditedConfig } from "../helpers/hand-edited-settings";
 
 type ApprovalTool = Pick<AgentTool, "name" | "approval" | "formatApprovalDetails">;
 
@@ -324,9 +325,10 @@ describe("tools.approval entries as a user writes them by hand", () => {
 		expect(warn.mock.calls.filter(([message]) => String(message).startsWith("Approval:"))).toHaveLength(1);
 	});
 
-	// #17600 drops a value a setting rejects where it is written, so the reader must tell a record in
-	// effect from an unreadable value that left none: both halves of the guard below are needed.
-	it("keeps a lower file's record in effect under a higher file's value that is not a record", async () => {
+	// A value someone wrote to restrain tools and that cannot be read is sticky at the whole-record
+	// level: the record still in effect keeps its denies, and every other call asks, even one that record
+	// allows. An allow under a rejected higher value used to apply; it now asks.
+	it("keeps a lower file's denies and asks for everything else under a higher file's value that is not a record", async () => {
 		vi.spyOn(logger, "warn").mockImplementation(() => {});
 		using dir = TempDir.createSync("@pi-approval-layers-");
 		const settings = await loadHandEditedSettings(dir, {
@@ -336,7 +338,32 @@ describe("tools.approval entries as a user writes them by hand", () => {
 		const { userPolicies } = resolveApprovalFromContext({ settings });
 		expect(resolveApproval(bash, {}, "yolo", userPolicies)).toMatchObject({ policy: "deny", source: "user" });
 		expect(resolveApproval(tool("read", "read"), {}, "always-ask", userPolicies)).toMatchObject({
-			policy: "allow",
+			policy: "prompt",
+			source: "user",
+			reason: "tools.approval is a string of 9 characters, not a record of tool policies such as {bash: deny}",
+		});
+	});
+
+	it("keeps a lower project file's deny under a higher project file's value that is not a record, with a --config record over both", async () => {
+		vi.spyOn(logger, "warn").mockImplementation(() => {});
+		using dir = TempDir.createSync("@pi-approval-project-files-");
+		const options = await writeHandEditedConfig(dir, { overlays: [{ tools: { approval: { read: "allow" } } }] });
+		await Bun.write(
+			path.join(options.cwd, ".omp", "settings.json"),
+			JSON.stringify({ tools: { approval: { bash: "deny" } } }),
+		);
+		await Bun.write(path.join(options.cwd, ".omp", "config.yml"), "tools:\n  approval: deny-bash\n");
+		const settings = await Settings.loadReadOnly(options);
+		const { userPolicies } = resolveApprovalFromContext({ settings });
+		// A pattern allow on bash would run the command if the lower deny were lost.
+		const patternAllow = tool("bash", { tier: "exec", policy: "allow" });
+		expect(resolveApproval(patternAllow, {}, "yolo", userPolicies)).toMatchObject({ policy: "deny", source: "user" });
+		expect(resolveApproval(tool("read", "read"), {}, "yolo", userPolicies)).toMatchObject({
+			policy: "prompt",
+			source: "user",
+		});
+		expect(resolveApproval(tool("write", "write"), {}, "yolo", userPolicies)).toMatchObject({
+			policy: "prompt",
 			source: "user",
 		});
 	});
@@ -359,10 +386,11 @@ describe("tools.approval entries as a user writes them by hand", () => {
 
 	it("refuses to write an entry no policy names", () => {
 		const settings = Settings.isolated();
+		// The refusal names the entry and its shape, never the text typed for it.
 		expect(() => cfgToolsApproval.set(settings, { bash: "block" })).toThrow(
-			'tools.approval entries must be allow, deny or prompt; got bash: "block"',
+			"tools.approval entries must be allow, deny or prompt; got bash: string (length 5)",
 		);
-		expect(() => Settings.isolated({ "tools.approval": { bash: null } })).toThrow("got bash: null");
+		expect(() => Settings.isolated({ "tools.approval": { bash: null } })).toThrow("got bash: null (length 4)");
 		// A policy in another case is still a policy, and the write keeps it.
 		cfgToolsApproval.override(settings, { bash: "Deny" });
 		const { userPolicies } = resolveApprovalFromContext({ settings });

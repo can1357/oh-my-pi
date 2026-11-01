@@ -99,40 +99,46 @@ const UNREADABLE_RECORD: unique symbol = Symbol("tools.approval is not a record"
 type UserPolicies = Record<string, unknown> & { [UNREADABLE_RECORD]?: RejectedValueMetadata };
 
 /** The marker record last built per settings instance, so its warning is logged once per value and file. */
-const unreadableRecords = new WeakMap<Settings, { key: string; policies: UserPolicies }>();
+const unreadableRecords = new WeakMap<
+	Settings,
+	{ key: string; configured: Record<string, unknown>; policies: UserPolicies }
+>();
 
 /**
- * The `tools.approval` record every approval check reads: the record in effect, or, when no layer
- * supplies a usable record and a config file holds a value that is not one (see
- * `Settings.ignoredValues`) or the key left empty, one that asks before every tool call (see
- * {@link UNREADABLE_RECORD}), warned about once per settings instance, value and file.
+ * The `tools.approval` record every approval check reads: the record in effect, or, when a config file
+ * holds a value that is not a record (see `Settings.ignoredValues`) or the key left empty, that record
+ * marked with {@link UNREADABLE_RECORD}: its denies still apply and every other tool call asks, warned
+ * about once per settings instance, value and file.
  */
 export function readUserApprovalPolicies(settings: Settings): Record<string, unknown> {
 	// Reading the handle first reports a rejected global value, which `ignoredValues` then lists.
-	const configured = cfgToolsApproval.get(settings);
-	// A usable record in effect wins, even under a malformed value a higher file holds: that value
-	// reads as unset where it is written, so the record beneath it is the one in effect.
-	if (cfgToolsApproval.isConfigured(settings)) return asPolicyMap(configured);
+	const configured = asPolicyMap(cfgToolsApproval.get(settings));
 	const ignored = settings.ignoredValues().find(item => item.setting === cfgToolsApproval);
 	const unreadable = ignored
 		? { valueType: ignored.valueType, valueLength: ignored.valueLength, source: ignored.source }
-		: settings.isConfiguredNull(cfgToolsApproval)
+		: !cfgToolsApproval.isConfigured(settings) && settings.isConfiguredNull(cfgToolsApproval)
 			? { ...rejectedValueMetadata(null), source: undefined }
 			: undefined;
-	if (!unreadable) return asPolicyMap(configured);
+	if (!unreadable) return configured;
+	// Unreadable is sticky at the whole-record level: a value someone wrote to restrain tools and that
+	// cannot be read never resolves in the permissive direction. The record still in effect keeps its
+	// denies; every other call asks.
 	const key = `${unreadable.valueType}:${unreadable.valueLength}:${unreadable.source ?? ""}`;
 	const cached = unreadableRecords.get(settings);
-	if (cached?.key === key) return cached.policies;
-	logger.warn("Approval: tools.approval is not a record of tool policies; asking before every tool call", {
-		valueType: unreadable.valueType,
-		valueLength: unreadable.valueLength,
-		expected: "a record of tool policies, such as {bash: deny}",
-		...(unreadable.source === undefined ? {} : { source: unreadable.source }),
-	});
+	if (cached?.key === key && cached.configured === configured) return cached.policies;
+	if (cached?.key !== key) {
+		logger.warn("Approval: tools.approval is not a record of tool policies; asking before every tool call", {
+			valueType: unreadable.valueType,
+			valueLength: unreadable.valueLength,
+			expected: "a record of tool policies, such as {bash: deny}",
+			...(unreadable.source === undefined ? {} : { source: unreadable.source }),
+		});
+	}
 	const policies: UserPolicies = {
+		...configured,
 		[UNREADABLE_RECORD]: { valueType: unreadable.valueType, valueLength: unreadable.valueLength },
 	};
-	unreadableRecords.set(settings, { key, policies });
+	unreadableRecords.set(settings, { key, configured, policies });
 	return policies;
 }
 
@@ -431,25 +437,25 @@ function readUserEntry(userConfig: Record<string, unknown>, key: string, name: s
  * never the text of a value that could not be read.
  */
 export function userApprovalPolicy(userConfig: UserPolicies, name: string): UserPolicy | undefined {
-	const unreadableRecord = userConfig[UNREADABLE_RECORD];
-	if (unreadableRecord) {
-		const value = describeUnreadable("tools.approval", unreadableRecord);
-		return {
-			policy: "prompt",
-			key: name,
-			reason: `${value}, not a record of tool policies such as {bash: deny}`,
-			unreadable: true,
-		};
-	}
-	if (Object.hasOwn(userConfig, name)) return readUserEntry(userConfig, name, name);
-	let lowered: string | undefined;
 	let found: UserPolicy | undefined;
-	for (const key in userConfig) {
-		if (!Object.hasOwn(userConfig, key) || key.length !== name.length) continue;
-		lowered ??= name.toLowerCase();
-		if (key.toLowerCase() === lowered) found = stricterUserPolicy(found, readUserEntry(userConfig, key, name));
+	if (Object.hasOwn(userConfig, name)) found = readUserEntry(userConfig, name, name);
+	else {
+		let lowered: string | undefined;
+		for (const key in userConfig) {
+			if (!Object.hasOwn(userConfig, key) || key.length !== name.length) continue;
+			lowered ??= name.toLowerCase();
+			if (key.toLowerCase() === lowered) found = stricterUserPolicy(found, readUserEntry(userConfig, key, name));
+		}
 	}
-	return found;
+	const unreadableRecord = userConfig[UNREADABLE_RECORD];
+	// Under a whole value that could not be read, only a deny the record in effect holds still applies.
+	if (!unreadableRecord || found?.policy === "deny") return found;
+	return {
+		policy: "prompt",
+		key: name,
+		reason: `${describeUnreadable("tools.approval", unreadableRecord)}, not a record of tool policies such as {bash: deny}`,
+		unreadable: true,
+	};
 }
 
 /**
