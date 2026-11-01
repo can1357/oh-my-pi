@@ -363,6 +363,47 @@ describe("AgentSession queued steer delivery", () => {
 			expect(transcriptOrder(sessionManager)).toEqual(["start", ...CARDS]);
 			expect(session.agent.hasQueuedMessages()).toBe(false);
 		});
+
+		it("says an agent message goes first once four typed messages went ahead of it", async () => {
+			const typed = ["typed 1", "typed 2", "typed 3", "typed 4", "typed 5"];
+			const flags: boolean[] = [];
+			const updates: boolean[] = [];
+			const readNext = async () => {
+				flags.push(session.getQueuedMessages().agentSteeringNext);
+				return { content: ["read"] };
+			};
+			const { session, sessionManager } = await createSession([
+				async () => {
+					await session.sendCustomMessage(
+						{ customType: "envoy-message", content: "card one", display: true },
+						{ deliverAs: "steer", triggerTurn: true },
+					);
+					for (const text of typed) await session.prompt(text, { streamingBehavior: "steer" });
+					return { content: ["working"] };
+				},
+				readNext,
+				readNext,
+				readNext,
+				readNext,
+				readNext,
+				readNext,
+			]);
+			session.setSteeringMode("one-at-a-time");
+			const unsubscribe = session.subscribe(event => {
+				if (event.type === "queue_update") updates.push(event.agentSteeringNext);
+			});
+
+			await session.prompt("start");
+			await session.waitForIdle();
+			unsubscribe();
+
+			// Model calls 1-4 read typed 1-4, call 5 the card, call 6 typed 5. During call 4 the chips list
+			// typed 5 alone while the card is read next, and the snapshot says so.
+			expect(flags).toEqual([false, false, false, true, false, false]);
+			expect(transcriptOrder(sessionManager)).toEqual(["start", ...typed.slice(0, 4), "card one", "typed 5"]);
+			expect(updates).toContain(true);
+			expect(updates.at(-1)).toBe(false);
+		});
 	});
 
 	it("defaults direct user steers and idle prompts to user attribution", async () => {
@@ -710,7 +751,9 @@ describe("AgentSession queued steer delivery", () => {
 		const skillPath = path.join(tempDir, "SKILL.md");
 		await Bun.write(skillPath, "---\nname: reviewer\ndescription: Review code\n---\n\nReview the supplied code.\n");
 		const invocation = "/skill:reviewer  focus on risks\nand correctness";
-		let queued: { steering: readonly string[]; followUp: readonly string[]; liveSteered: number } | undefined;
+		let queued:
+			| { steering: readonly string[]; followUp: readonly string[]; liveSteered: number; agentSteeringNext: boolean }
+			| undefined;
 		let injected = false;
 		session.agent.setOnBeforeYield(async () => {
 			if (injected) return;
@@ -739,7 +782,7 @@ describe("AgentSession queued steer delivery", () => {
 		await session.prompt("start");
 		await session.waitForIdle();
 
-		expect(queued).toEqual({ steering: [invocation], followUp: [], liveSteered: 0 });
+		expect(queued).toEqual({ steering: [invocation], followUp: [], liveSteered: 0, agentSteeringNext: false });
 		const delivered = session.messages.filter(
 			(message): message is CustomMessage => message.role === "custom" && message.customType === "skill-prompt",
 		);
@@ -944,7 +987,12 @@ describe("AgentSession queued steer delivery", () => {
 
 			expect(session.removeQueuedMessage("/review raw", "followUp")).toBe(true);
 			expect(session.removeQueuedMessage("/review expanded", "followUp")).toBe(true);
-			expect(session.getQueuedMessages()).toEqual({ steering: [], followUp: ["keep"], liveSteered: 0 });
+			expect(session.getQueuedMessages()).toEqual({
+				steering: [],
+				followUp: ["keep"],
+				liveSteered: 0,
+				agentSteeringNext: false,
+			});
 		});
 
 		it("removes a queued file-based slash command by its raw /cmd invocation", async () => {
@@ -1031,7 +1079,12 @@ describe("AgentSession queued steer delivery", () => {
 			let promoted: boolean | undefined;
 			let promotedAgain: boolean | undefined;
 			let queueAfterPromotion:
-				| { steering: readonly string[]; followUp: readonly string[]; liveSteered: number }
+				| {
+						steering: readonly string[];
+						followUp: readonly string[];
+						liveSteered: number;
+						agentSteeringNext: boolean;
+				  }
 				| undefined;
 			session.agent.setOnBeforeYield(async () => {
 				if (injected) return;
@@ -1070,7 +1123,12 @@ describe("AgentSession queued steer delivery", () => {
 			await session.waitForIdle();
 
 			expect(promoted).toBe(true);
-			expect(queueAfterPromotion).toEqual({ steering: [invocation], followUp: [], liveSteered: 0 });
+			expect(queueAfterPromotion).toEqual({
+				steering: [invocation],
+				followUp: [],
+				liveSteered: 0,
+				agentSteeringNext: false,
+			});
 			expect(promotedAgain).toBe(false);
 			const delivered = session.messages.filter(
 				(message): message is CustomMessage => message.role === "custom" && message.attribution === "user",
@@ -1117,6 +1175,7 @@ describe("AgentSession queued steer delivery", () => {
 				steering: ["existing", "duplicate"],
 				followUp: ["unrelated", "duplicate"],
 				liveSteered: 0,
+				agentSteeringNext: false,
 			});
 			const delivered = session.messages.filter(message => message.role === "user");
 			expect(delivered.map(message => message.content)).toEqual(
@@ -1205,7 +1264,12 @@ describe("AgentSession queued steer delivery", () => {
 				// raw-text record must follow so the caller can still remove it by the
 				// exact "/cmd args" it originally submitted.
 				expect(session.promoteQueuedMessage("/cmd args")).toBe(true);
-				expect(session.getQueuedMessages()).toEqual({ steering: ["Expanded args"], followUp: [], liveSteered: 0 });
+				expect(session.getQueuedMessages()).toEqual({
+					steering: ["Expanded args"],
+					followUp: [],
+					liveSteered: 0,
+					agentSteeringNext: false,
+				});
 
 				expect(session.removeQueuedMessage("/cmd args", "steering")).toBe(true);
 				expect(session.getQueuedMessages().steering).toEqual([]);
@@ -1423,7 +1487,12 @@ describe("AgentSession queued steer delivery", () => {
 		it("wakes an idle follow-up and rejects a stale promotion without replaying it", async () => {
 			const { session, mock } = await createSession([{ content: ["delivered"] }]);
 			await session.followUp("wake me");
-			expect(session.getQueuedMessages()).toEqual({ steering: [], followUp: ["wake me"], liveSteered: 0 });
+			expect(session.getQueuedMessages()).toEqual({
+				steering: [],
+				followUp: ["wake me"],
+				liveSteered: 0,
+				agentSteeringNext: false,
+			});
 			const delivered = nextUserMessage(session, "wake me");
 
 			expect(session.promoteQueuedMessage("wake me")).toBe(true);

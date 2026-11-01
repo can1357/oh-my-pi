@@ -255,18 +255,34 @@ In `one-at-a-time` mode each boundary takes one delivery unit, and a unit holdin
 message (`attribution: "user"`, or a `role: "user"` message not attributed to an agent; see
 `isUserSteeringMessage`, or the host's own rule from `setSteeringPriority(predicate)`) goes ahead of
 agent-authored steering queued before it. A person's steer is read at the next boundary however many
-agent steers wait; user units keep their order, as do agent units. Once
-`MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING` (4) user units have been recorded in the transcript while
-agent steering waits (counted since an agent unit was last recorded, including user units queued
-before it), the oldest waiting agent unit goes next, so sustained user input delays agent steering
-but never starves it: an agent unit with `k` agent units ahead of it when it is queued is read within
-`5 × (k + 1)` boundaries. A unit counts only once the transcript records it: one whose preparation
-fails or is cancelled, one withdrawn ahead of an abort, or one its run never recorded, counts for
-nothing. The wait ends when no agent steering is pending, so a cleared and re-queued message starts
-again; it does not depend on where a unit sits or which message object it holds, so
-`prioritizeSteering` cannot bypass it and the same message queued twice is two units.
-`all` mode delivers the whole queue in order. A host that lists queued messages should pass
-`setSteeringPriority` the rule its list uses, so the list shows the order the agent reads them.
+agent steers wait, except in the one delivery in five the allowance below gives to agent steering;
+user units keep their order, as do agent units. `all` mode delivers the whole queue in order.
+
+An allowance keeps sustained user input from starving agent steering:
+
+- Once `MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING` (4) user units have been taken while agent steering
+  waits, the oldest waiting agent unit goes next, and the count starts again after it. An agent unit
+  with `k` agent units ahead of it when it is queued is taken within `5 × (k + 1)` deliveries. In that
+  one delivery in five, a person's next message is read one delivery later.
+- A unit counts from the moment it is taken: dequeued for the next model call, or claimed by live
+  steering for the response being streamed, before the transcript records it. A taken unit that never
+  reaches the transcript (its preparation fails or is cancelled, it is withdrawn ahead of an abort, or
+  its run ends first) gives its place back as if it was never taken; an agent unit that does leaves
+  the user units taken before and after it counting toward its wait again.
+- Whether a user unit counts is fixed when it is taken: it counts if an agent unit is queued at that
+  moment, wherever either sits, and does not count otherwise, even if the transcript records it after
+  an agent unit arrives.
+- Pending means in this `Agent`: another session or a subagent keeps its own queue and allowance. The
+  wait ends when no agent steering is pending here, so a cleared and re-queued message starts again,
+  and the same message queued twice is two units.
+- `prioritizeSteering(messages)` moves messages ahead of everything, the allowance included, until
+  the transcript records them, so a host can make the message that answers a denied tool call land
+  right after the denial. A promoted user unit still counts, so each one can delay a due agent unit by
+  one delivery.
+
+A host that lists queued messages should pass `setSteeringPriority` the rule its list uses, so the list
+shows the order the agent reads them, and can read `peekNextSteering()` to say when an agent unit goes
+next.
 
 Hosts can use `setQueuedMessageGrouping((previous, next) => boolean)` to keep adjacent companion
 records and their prompt together in `one-at-a-time` mode. Without a grouping predicate, records

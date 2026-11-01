@@ -11,6 +11,7 @@ import {
 } from "@oh-my-pi/pi-agent-core";
 import type { Context, Message } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { CodexSteerPump } from "@oh-my-pi/pi-ai/providers/openai-codex/live-steering";
 
 /** An agent-authored card, as an extension's `sendMessage(..., { deliverAs: "steer" })` queues it. */
 function card(n: number): AgentMessage {
@@ -148,11 +149,11 @@ describe("one-at-a-time steering: a person's message before agent steering", () 
 		expect(transcriptTexts(agent)).toEqual(["start", "diagram description", "first", "second", "card 1", "card 2"]);
 	});
 
-	it("leaves agent-only steering in queue order", async () => {
+	it("treats an agent-attributed user message as agent steering, kept in queue order behind a person's", async () => {
 		const parent: AgentMessage = { role: "user", content: "parent", attribution: "agent", timestamp: 1 };
-		const { agent } = await runWithQueued([card(1), parent, card(2)]);
+		const { agent } = await runWithQueued([card(1), parent, person("typed"), card(2)]);
 
-		expect(transcriptTexts(agent)).toEqual(["start", "card 1", "parent", "card 2"]);
+		expect(transcriptTexts(agent)).toEqual(["start", "typed", "card 1", "parent", "card 2"]);
 	});
 
 	it("lets the host's priority rule decide which steering goes first", async () => {
@@ -384,8 +385,9 @@ describe("one-at-a-time steering: a person's message before agent steering", () 
 			});
 			const typed = person("typed");
 			const waiting = card(1);
-			agent.steer(typed);
+			// The card is queued first, so only the person-first rule takes `typed` ahead of it.
 			agent.steer(waiting);
+			agent.steer(typed);
 			agent.prepareQueuedMessages = () => {
 				if (failure === "throw") throw new Error("preparation failed");
 				if (failure === "abort") {
@@ -394,7 +396,7 @@ describe("one-at-a-time steering: a person's message before agent steering", () 
 				}
 				return { commit: () => undefined };
 			};
-			// As many failed attempts as the allowance holds; each puts the queue back untouched.
+			// As many failed attempts as the allowance holds; each puts the person's steer back at the front.
 			for (let attempt = 0; attempt < MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING; attempt++) {
 				await agent.continue().catch(() => undefined);
 				expect(agent.peekSteeringQueue()).toEqual([typed, waiting]);
@@ -448,14 +450,13 @@ describe("one-at-a-time steering: a person's message before agent steering", () 
 		expect(transcriptTexts(agent)).toEqual(["start", "card 1", "mine", "card 2"]);
 	});
 
-	it("keeps steeringQueueState's published results, including its edge counts", () => {
+	it("keeps steeringQueueState's published results and classifies a range without copying it", () => {
 		const queue = [card(1), person("typed")];
 		expect(steeringQueueState(queue)).toEqual({ queued: true, source: "user" });
 		expect(steeringQueueState(queue, 1)).toEqual({ queued: true, source: "system" });
 		expect(steeringQueueState(queue, 0)).toEqual({ queued: false });
-		expect(steeringQueueState(queue, -1)).toEqual({ queued: true, source: "system" });
-		expect(steeringQueueState(queue, Number.NaN)).toEqual({ queued: true, source: "system" });
 		expect(steeringRangeState(queue, 1, 2)).toEqual({ queued: true, source: "user" });
+		expect(steeringRangeState(queue, 0, 1)).toEqual({ queued: true, source: "system" });
 		expect(steeringRangeState(queue, 2, 2)).toEqual({ queued: false });
 	});
 
@@ -512,5 +513,136 @@ describe("one-at-a-time steering: a person's message before agent steering", () 
 		const skippedText = skipped?.result.content[0];
 		expect(skippedText?.type === "text" ? skippedText.text : "").toContain("Skipped due to queued user message");
 		expect(texts(mock.calls[1].context).at(-1)).toBe("stop and read this");
+	});
+
+	it("counts a unit live steering claims for the streaming response before the transcript records it", async () => {
+		const sent: string[] = [];
+		let typed = 1;
+		let pumped = false;
+		const mock = createMockModel({ handler: { content: ["ack"] } });
+		const agent: Agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			convertToLlm,
+			steeringMode: "one-at-a-time",
+			streamFn: async (model, context, options) => {
+				if (!pumped && options?.liveSteering) {
+					pumped = true;
+					agent.steer(card(1));
+					agent.steer(card(2));
+					agent.steer(person(`P${typed++}`));
+					// The real Codex pump claims while the response streams; the transcript records what it
+					// sent only when the response ends. A person types one more message per accepted steer.
+					const enough = Promise.withResolvers<void>();
+					const pump = new CodexSteerPump(
+						options.liveSteering,
+						{
+							steer: async (_responseId, items) => {
+								sent.push(String(items[0]?.content));
+								if (sent.length < 12) agent.steer(person(`P${typed++}`));
+								else enough.resolve();
+								return { accepted: true, id: `steer-${sent.length}` };
+							},
+						},
+						messages => messages.map(message => ({ role: "user", content: message.content })),
+					);
+					pump.start("response-1");
+					await enough.promise;
+					await pump.finish();
+				}
+				return mock.stream(model, context, options);
+			},
+		});
+
+		await agent.prompt("start");
+
+		// Four person units, then the oldest card; the count starts again after it, so the second card
+		// waits for four more, not for the transcript.
+		expect(sent).toEqual(["P1", "P2", "P3", "P4", "card 1", "P5", "P6", "P7", "P8", "card 2", "P9", "P10"]);
+		expect(transcriptTexts(agent)).toEqual(["start", ...sent, "P11", "P12"]);
+	});
+
+	it("lets a due agent steer whose preparation fails go next once it is put back", async () => {
+		const mock = createMockModel({ handler: () => ({ content: ["ack"] }) });
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+			convertToLlm,
+			steeringMode: "one-at-a-time",
+		});
+		const waiting = card(1);
+		agent.steer(waiting);
+		for (const text of ["U1", "U2", "U3", "U4", "U5"]) agent.steer(person(text));
+		let failed = false;
+		agent.prepareQueuedMessages = messages => {
+			if (failed || !messages.includes(waiting)) return undefined;
+			failed = true;
+			throw new Error("preparation failed");
+		};
+		await agent.continue().catch(() => undefined);
+		expect(failed).toBe(true);
+		expect(transcriptTexts(agent)).toEqual(["U1", "U2", "U3", "U4"]);
+
+		// The failed take gave its place back without starting a fresh allowance, so the card is still due.
+		await agent.continue();
+		expect(transcriptTexts(agent)).toEqual(["U1", "U2", "U3", "U4", "card 1", "U5"]);
+	});
+
+	it("delivers a prioritized steer next even when the allowance makes an agent steer due", async () => {
+		const urgent = person("URGENT");
+		const { agent } = await runWithQueued([card(1), person("U1"), person("U2"), person("U3"), person("U4")], {
+			arrivals: (call, target) => {
+				if (call !== 4) return;
+				// U4 was just taken: four user units went ahead of card 1, so it is due next. A host
+				// promotes the message that denied a tool call; it must land right after the denial.
+				target.steer(urgent);
+				target.prioritizeSteering([urgent]);
+			},
+		});
+
+		expect(transcriptTexts(agent)).toEqual(["start", "U1", "U2", "U3", "U4", "URGENT", "card 1"]);
+	});
+
+	it("keeps a prioritized steer first when its preparation fails and puts it back", async () => {
+		const mock = createMockModel({ handler: () => ({ content: ["ack"] }) });
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+			convertToLlm,
+			steeringMode: "one-at-a-time",
+		});
+		const urgent = person("URGENT");
+		const people = ["U1", "U2", "U3", "U4"].map(person);
+		agent.steer(card(1));
+		for (const message of people) agent.steer(message);
+		let failed = false;
+		agent.prepareQueuedMessages = messages => {
+			// Four user units went ahead of card 1; the denial arrives while the fourth is prepared.
+			if (messages.includes(people[3])) {
+				agent.steer(urgent);
+				agent.prioritizeSteering([urgent]);
+			}
+			if (failed || !messages.includes(urgent)) return undefined;
+			failed = true;
+			throw new Error("preparation failed");
+		};
+		await agent.continue().catch(() => undefined);
+		expect(failed).toBe(true);
+		expect(transcriptTexts(agent)).toEqual(["U1", "U2", "U3", "U4"]);
+
+		await agent.continue();
+		expect(transcriptTexts(agent)).toEqual(["U1", "U2", "U3", "U4", "URGENT", "card 1"]);
+	});
+
+	it("names the next steering delivery, agent steering once the allowance is spent", async () => {
+		const queued = [card(1), ...["U1", "U2", "U3", "U4", "U5"].map(person)];
+		const seen: number[][] = [];
+		await runWithQueued(queued, {
+			arrivals: (call, target) => {
+				if (call <= 5) seen.push(target.peekNextSteering().map(message => queued.indexOf(message)));
+			},
+		});
+
+		// Indexes into `queued`: U2, U3, U4, then card 1 once four user units were taken, then U5.
+		expect(seen).toEqual([[2], [3], [4], [0], [5]]);
 	});
 });

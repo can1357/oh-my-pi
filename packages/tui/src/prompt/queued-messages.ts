@@ -12,14 +12,17 @@ import { theme } from "../theme/theme";
 export interface QueuedMessageGroup {
 	readonly label: string;
 	readonly messages: readonly string[];
+	/** Shown with the heading and on the group's first pill, e.g. that something not listed goes first. */
+	readonly note?: string;
 }
 
 /**
  * Messages queued while the agent works, above the editor. ANSI: a heading
- * per group, numbered dim rows and the dequeue hint. Natively (§8.1): a
- * stack of pills, each `corner-down-right` · the text · `⌥↑ Edit`, the total
- * (`N queued`, not a position) in the first pill when more than one waits; the edit control sends
- * `queue.edit`, answered like the dequeue key.
+ * per group (with the group's note, if any), numbered dim rows and the dequeue
+ * hint. Natively (§8.1): a stack of pills, each `corner-down-right` · the text ·
+ * `⌥↑ Edit`, the total (`N queued`, not a position) in the first pill when more
+ * than one waits, and a group's note on that group's first pill; the edit control
+ * sends `queue.edit`, answered like the dequeue key.
  */
 export class QueuedMessagesBand extends Container {
 	readonly #native: NativeNode;
@@ -32,7 +35,8 @@ export class QueuedMessagesBand extends Container {
 		super();
 		this.addChild(new Spacer(1));
 		for (const group of groups) {
-			const heading = theme.fg("muted", `${group.label}${theme.sep.dot}${group.messages.length}`);
+			const counted = `${group.label}${theme.sep.dot}${group.messages.length}`;
+			const heading = theme.fg("muted", group.note ? `${counted}${theme.sep.dot}${group.note}` : counted);
 			this.addChild(new TruncatedText(heading, 1, 0));
 			for (let index = 0; index < group.messages.length; index++) {
 				const message = replaceTabs(group.messages[index] ?? "").replace(/\r?\n/g, " ↵ ");
@@ -70,6 +74,11 @@ export class QueuedMessagesBand extends Container {
 							undefined,
 							"count",
 						),
+					);
+				}
+				if (index === 0 && group.note) {
+					children.push(
+						node("badge", { text: group.note, title: group.note, role: "omp.queue.note" }, undefined, "note"),
 					);
 				}
 				children.push(

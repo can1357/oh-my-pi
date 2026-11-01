@@ -141,6 +141,7 @@ type QueuedMessages = {
 	steering: string[];
 	followUp: string[];
 	liveSteered: number;
+	agentSteeringNext?: boolean;
 };
 type AddMessageOptions = {
 	imageLinks?: readonly (string | undefined)[];
@@ -1295,7 +1296,12 @@ export class UiHelpers {
 		}
 
 		const groups = [
-			{ label: "Steering", messages: steeringMessages },
+			{
+				label: "Steering",
+				messages: steeringMessages,
+				// The chips list only your messages; one delivery in five goes to agent steering first.
+				note: queuedMessages.agentSteeringNext ? "an agent message goes first" : undefined,
+			},
 			{ label: "After yield", messages: followUpMessages },
 		].filter(group => group.messages.length > 0);
 		if (groups.length > 0) {

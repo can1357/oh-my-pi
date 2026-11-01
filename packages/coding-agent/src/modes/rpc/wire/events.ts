@@ -190,6 +190,13 @@ export const eventDefs = {
 				),
 				0,
 			),
+			agentSteeringNext: absentAs(
+				doc(
+					"boolean",
+					"The next steering delivery is agent-authored, so the first queued (not live) `steering` entry is read one delivery later.",
+				),
+				false,
+			),
 		},
 		"Coalesced snapshot of the displayable steering/follow-up queue, sent whenever it changes.",
 	),

@@ -2,9 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `agentSteeringNext` to RPC `queue_update` and `get_state` `queuedMessages`: `true` when the next steering delivery is agent-authored, so the first queued `steering` entry is read one delivery later ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
+
 ### Fixed
 
-- Fixed a message typed into a busy session waiting behind every extension or agent message queued before it, one per model turn, while the queue showed only `Steering · 1`; your queued message is now read at the next step, ahead of agent-authored steering ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
+- Fixed a message typed into a busy session waiting behind every extension or agent message queued before it, one per model turn, while the queue showed only `Steering · 1`; your queued message is now read at the next step, ahead of agent-authored steering, except that after 4 of yours the oldest waiting agent message goes first, and the queue then says "an agent message goes first" ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.2] - 2026-10-31
 
