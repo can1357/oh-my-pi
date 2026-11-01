@@ -62,6 +62,11 @@ describe("stripMemoryTags", () => {
 		expect(stripped).toContain("alpha");
 		expect(stripped).toContain("beta");
 	});
+
+	it("strips case-varied and unclosed injected memory blocks via the canonical tag scanner", () => {
+		expect(stripMemoryTags("keep <MEMORIES>secret</MEMORIES> after")).toBe("keep  after");
+		expect(stripMemoryTags("prefix <memories>truncated secret without closing tag")).toBe("prefix");
+	});
 });
 
 describe("composeRecallQuery", () => {

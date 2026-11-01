@@ -741,6 +741,17 @@ export function getGlobalWorkingStats(beam: BeamMemoryState): BeamStats {
 	return getWorkingStats(beam);
 }
 
+const SANITIZER_OWNED_METADATA_KEYS = [
+	"blob_ref",
+	"extraction_reason",
+	"original_size",
+	"sha256",
+	"mime",
+	"entropy",
+	"stripped_tags",
+	"redacted_secrets",
+] as const;
+
 export function updateWorking(
 	beam: BeamMemoryState,
 	memoryId: string,
@@ -748,16 +759,40 @@ export function updateWorking(
 	importance: number | null = null,
 ): boolean {
 	const existing = beam.db
-		.prepare("SELECT 1 FROM working_memory WHERE id = ? AND session_id = ?")
-		.get(memoryId, beam.sessionId);
+		.prepare("SELECT metadata_json FROM working_memory WHERE id = ? AND session_id = ?")
+		.get(memoryId, beam.sessionId) as { metadata_json?: string | null } | null;
 	if (!existing) return false;
 
-	const content = rawContent === null ? null : sanitizeContent(rawContent)[0];
+	const sanitized = rawContent === null ? null : sanitizeContent(rawContent);
+	const content = sanitized === null ? null : sanitized[0];
 	const assignments: string[] = [];
 	const params: SQLQueryBindings[] = [];
-	if (content !== null) {
-		assignments.push("content = ?", "embed_text = NULL");
-		params.push(content);
+	if (content !== null && sanitized !== null) {
+		const contentMeta = sanitized[1];
+		let baseMeta: Record<string, unknown> = {};
+		const rawExistingMeta = existing.metadata_json;
+		if (typeof rawExistingMeta === "string" && rawExistingMeta.trim().length > 0) {
+			try {
+				const parsed = JSON.parse(rawExistingMeta);
+				if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+					baseMeta = { ...(sanitizeMetadataRecord(parsed as Record<string, unknown>, true) ?? {}) };
+				}
+			} catch {
+				baseMeta = {};
+			}
+		}
+		for (const key of SANITIZER_OWNED_METADATA_KEYS) {
+			delete baseMeta[key];
+		}
+		const mergedMeta = { ...baseMeta, ...contentMeta };
+		const nextMetadataJson =
+			Object.keys(mergedMeta).length > 0
+				? JSON.stringify(mergedMeta)
+				: rawExistingMeta === null || rawExistingMeta === undefined
+					? null
+					: JSON.stringify({});
+		assignments.push("content = ?", "embed_text = NULL", "metadata_json = ?");
+		params.push(content, nextMetadataJson);
 	}
 	if (importance !== null) {
 		assignments.push("importance = ?");

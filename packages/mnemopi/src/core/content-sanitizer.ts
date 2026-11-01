@@ -89,6 +89,9 @@ function decodeBase64Payload(rawPayload: string): Buffer | null {
 			})()
 		: rawPayload;
 	const cleaned = candidate.replace(/\s+/g, "").replace(/-/g, "+").replace(/_/g, "/");
+	if (cleaned.length === 0) {
+		return Buffer.alloc(0);
+	}
 	if (cleaned.length >= 2 && cleaned.length % 4 !== 1 && /^[A-Za-z0-9+/]+={0,2}$/.test(cleaned)) {
 		const padded = cleaned.length % 4 === 0 ? cleaned : cleaned + "=".repeat(4 - (cleaned.length % 4));
 		if (BASE64_RE.test(padded)) {
@@ -795,7 +798,7 @@ const CREDENTIAL_RULES: ReadonlyArray<{
 	},
 	{
 		type: "npm_token",
-		pattern: compileCataloguePattern("NpmToken"),
+		pattern: /\bnpm_[A-Za-z0-9]{30,}\b/g,
 		replacement: "[REDACTED]",
 	},
 	{
@@ -841,7 +844,7 @@ const CREDENTIAL_RULES: ReadonlyArray<{
 	},
 	{
 		type: "basic_auth_url",
-		pattern: /(\b[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:)(?!\[REDACTED\]@)[^\s/@]+(@)/gi,
+		pattern: /(\b[a-z][a-z0-9+.-]*:\/\/[^\s/:@]*:)(?!\[REDACTED\]@)[^\s/@]+(@)/gi,
 		replacement: "$1[REDACTED]$2",
 	},
 	{
@@ -1153,16 +1156,18 @@ const CREDENTIAL_TERM_SUFFIX_RE =
 	/(?:^|[_.\s-])(?:token|tokens|secret|api[_.\s-]?key|private[_.\s-]?key|access[_.\s-]?key|secret[_.\s-]?key|password|passwd|pwd|credentials?)$/i;
 
 function isCredentialMetadataKey(key: string): boolean {
-	if (/^token$/i.test(key)) return true;
-	if (CREDENTIAL_TERM_SUFFIX_RE.test(key) && !/(?:^|[_.\s-])max[_.\s-]?tokens$/i.test(key)) {
+	const trimmed = key.trim();
+	if (/^(?:token|(?:proxy[_.\s-]?)?authorization)$/i.test(trimmed)) return true;
+	if (CREDENTIAL_TERM_SUFFIX_RE.test(trimmed) && !/(?:^|[_.\s-])max[_.\s-]?tokens$/i.test(trimmed)) {
 		return true;
 	}
-	if (CREDENTIAL_METADATA_KEY_EXCLUSION_RE.test(key)) return false;
-	return CREDENTIAL_METADATA_KEY_RE.test(key);
+	if (CREDENTIAL_METADATA_KEY_EXCLUSION_RE.test(trimmed)) return false;
+	return CREDENTIAL_METADATA_KEY_RE.test(trimmed);
 }
 
 function redactCredentialMetadataValue(val: unknown, stripTags = false): unknown {
 	if (typeof val === "string") return val.length > 0 ? "[REDACTED]" : val;
+	if (typeof val === "number" || typeof val === "boolean" || typeof val === "bigint") return "[REDACTED]";
 	if (Array.isArray(val)) return val.map(v => redactCredentialMetadataValue(v, stripTags));
 	if (val && typeof val === "object") {
 		const source = val as Record<string, unknown>;

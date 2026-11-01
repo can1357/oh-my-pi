@@ -3,12 +3,13 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { BeamMemory } from "@oh-my-pi/pi-mnemopi/core/beam";
+import { BeamMemory } from "../src/core/beam";
 import {
 	computeSha256,
 	isDataUri,
 	looksLikeBase64Blob,
 	parseDataUri,
+	redactMemorySecrets,
 	sanitizeContent,
 	sanitizeMemoryRow,
 	sanitizeMetadataRecord,
@@ -18,7 +19,7 @@ import {
 	shannonEntropy,
 	storeBlob,
 	stripInjectedMemoryTags,
-} from "@oh-my-pi/pi-mnemopi/core/content-sanitizer";
+} from "../src/core/content-sanitizer";
 
 const ORIGINAL_BLOB_DIR = process.env.MNEMOPI_BLOB_DIR;
 
@@ -1414,6 +1415,51 @@ Tail content
 			expect(callerOptions.metadata).toEqual({ tag: "clean" });
 			expect((callerOptions.metadata as Record<string, unknown>).blob_ref).toBeUndefined();
 			expect((callerOptions.metadata as Record<string, unknown>).extraction_reason).toBeUndefined();
+		} finally {
+			beam.close();
+		}
+	});
+
+	it("extracts zero-byte blob metadata for empty base64 data URIs", () => {
+		const [sanitized, meta] = sanitizeContent("data:text/plain;base64,");
+		expect(sanitized).toContain("[Binary content extracted: text/plain, 0 bytes");
+		expect(meta.original_size).toBe(0);
+		expect(typeof meta.blob_ref).toBe("string");
+	});
+
+	it("redacts URL userinfo passwords even when username is empty", () => {
+		const out = redactMemorySecrets("connect to https://:p@example.com/api");
+		expect(out).toBe("connect to https://:[REDACTED]@example.com/api");
+	});
+
+	it("redacts Authorization, Proxy-Authorization, and numeric values under credential metadata keys", () => {
+		const sanitized = sanitizeMetadataRecord<Record<string, unknown>>({
+			authorization: "Bearer abc",
+			"Proxy-Authorization": "Basic xyz",
+			password: 123456,
+			credentials: { pin: 9876, active: true },
+		});
+		expect(sanitized.authorization).toBe("[REDACTED]");
+		expect(sanitized["Proxy-Authorization"]).toBe("[REDACTED]");
+		expect(sanitized.password).toBe("[REDACTED]");
+		expect(sanitized.credentials).toEqual({ pin: "[REDACTED]", active: "[REDACTED]" });
+	});
+
+	it("refreshes and clears sanitizer metadata when updating working memory content", () => {
+		const beam = new BeamMemory({ dbPath: ":memory:", sessionId: "update-working-meta" });
+		try {
+			const id = beam.remember("initial plain text", { metadata: { custom: "keep" } });
+			expect(beam.updateWorking(id, "data:text/plain;base64,")).toBe(true);
+			const afterDataUri = beam.get(id) as Record<string, unknown> | null;
+			const meta1 = JSON.parse(String(afterDataUri?.metadata_json ?? "{}")) as Record<string, unknown>;
+			expect(meta1.custom).toBe("keep");
+			expect(meta1.original_size).toBe(0);
+			expect(typeof meta1.blob_ref).toBe("string");
+
+			expect(beam.updateWorking(id, "plain replacement without blob")).toBe(true);
+			const afterPlain = beam.get(id) as Record<string, unknown> | null;
+			const meta2 = JSON.parse(String(afterPlain?.metadata_json ?? "{}")) as Record<string, unknown>;
+			expect(meta2).toEqual({ custom: "keep" });
 		} finally {
 			beam.close();
 		}

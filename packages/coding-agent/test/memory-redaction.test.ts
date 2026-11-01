@@ -10,12 +10,13 @@ import { loadMnemopi, loadMnemopiCore, MnemopiSessionState } from "@oh-my-pi/pi-
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 const NPM_TOKEN = `npm_${"a1B2c3D4e5F6g7H8i9J0kLmNoPqRsTuVwXy".slice(0, 36)}`;
-const AWS_KEY = "AKIAIOSFODNN7EXAMPLE";
+const AWS_KEY = "AKIA1234567890ABCDEF";
 
 describe("memory secret redaction", () => {
 	it("redacts provider token shapes", () => {
 		expect(redactMemorySecrets(`token is ${NPM_TOKEN} ok`)).toBe("token is [REDACTED] ok");
 		expect(redactMemorySecrets(`id ${AWS_KEY}`)).toBe("id [REDACTED]");
+		expect(redactMemorySecrets("id AKIAIOSFODNN7EXAMPLE")).toBe("id AKIAIOSFODNN7EXAMPLE");
 		expect(redactMemorySecrets("ghp_abcdefghijklmnopqrstuvwxyz0123")).toBe("[REDACTED]");
 		expect(redactMemorySecrets("xoxb-1234567890-abcdef")).toBe("[REDACTED]");
 		expect(redactMemorySecrets("secret_aB3dEfGh1JkLmN0pQ")).toBe("[REDACTED]");
