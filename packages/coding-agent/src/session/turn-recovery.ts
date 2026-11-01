@@ -93,6 +93,7 @@ import {
 	cfgRetryEnabled,
 	cfgRetryModelFallback,
 	cfgRetryUsageAwareFallback,
+	cfgRetryUsageReserveConfirmTimeout,
 	cfgRetryUsageReservePct,
 	cfgRetryUsageReservePolicy,
 } from "./settings";
@@ -2160,18 +2161,64 @@ export class TurnRecovery {
 		return undefined;
 	}
 
+	/**
+	 * Ask the operator whether to leave the reserve-bound model. With a configured
+	 * deadline, keep the current model when nobody answers.
+	 *
+	 * The prompt is a real decision — a lane that pins its model pins it on
+	 * purpose — so the deadline never switches models on nobody's authority. It
+	 * aborts the dialog, returns "keep the current plan", and the caller records
+	 * the reserve approval so the turn goes on and the session does not ask again
+	 * for this model. The reserve is then spent down to `depleted`, where the
+	 * fallback no longer needs anyone's confirmation.
+	 */
 	async #confirmUsageFallback(
 		confirmer: UsageFallbackConfirmer,
 		confirmation: UsageFallbackConfirmation,
 		signal: AbortSignal,
 	): Promise<boolean> {
 		if (signal.aborted) return false;
+		const timeoutSeconds = Math.max(0, cfgRetryUsageReserveConfirmTimeout.get(this.#host.settings));
+		const unattended = new AbortController();
+		const expired = Promise.withResolvers<boolean>();
+		// Cancels the deadline in the `finally` below, so a dialog that settles
+		// first leaves no pending wait behind.
+		const deadlineCancelled = new AbortController();
+		if (timeoutSeconds > 0) {
+			// `sleepLong` owns the 32-bit chunking and the monotonic deadline: a
+			// raw `setTimeout(timeoutSeconds * 1000)` overflows above ~24.9 days
+			// and fires a millisecond in. `ref: false` keeps the pending deadline
+			// from holding the process open on its own.
+			void sleepLong(timeoutSeconds * 1000, deadlineCancelled.signal, { ref: false }).then(
+				() => {
+					// Close the dialog AND stop waiting on it: a confirmer that ignores
+					// its signal must not be able to hold the turn past the deadline.
+					unattended.abort();
+					expired.resolve(false);
+				},
+				// Cancelled with the dialog's answer; nothing is owed.
+				() => {},
+			);
+		}
 		const aborted = Promise.withResolvers<boolean>();
 		const onAbort = () => aborted.resolve(false);
 		signal.addEventListener("abort", onAbort, { once: true });
 		try {
-			return await Promise.race([confirmer(confirmation, signal), aborted.promise]);
+			const answer = await Promise.race([
+				confirmer(confirmation, AbortSignal.any([signal, unattended.signal])),
+				aborted.promise,
+				expired.promise,
+			]);
+			if (!unattended.signal.aborted || signal.aborted) return answer;
+			await this.#host.emitSessionEvent({
+				type: "notice",
+				level: "warning",
+				source: "usage",
+				message: `Nobody answered the reserve prompt for ${confirmation.from} in ${timeoutSeconds}s, so it keeps that model. Switch to ${confirmation.to} with /model.`,
+			});
+			return false;
 		} finally {
+			deadlineCancelled.abort();
 			signal.removeEventListener("abort", onAbort);
 		}
 	}

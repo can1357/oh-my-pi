@@ -590,8 +590,8 @@ async function createHarness(
 			options.permissionHandler?.(request);
 			return { promise: Promise.resolve({ outcome: { outcome: "cancelled" } }), cancel: () => {} };
 		},
-		unstable_createElicitation: options.elicitationHandler
-			? async (req: CreateElicitationRequest) => options.elicitationHandler!(req)
+		unstable_createElicitationWithCancel: options.elicitationHandler
+			? (req: CreateElicitationRequest) => ({ promise: options.elicitationHandler!(req), cancel: () => {} })
 			: undefined,
 		signal: abortController.signal,
 		closed: Promise.withResolvers<void>().promise,
@@ -3614,9 +3614,9 @@ describe("ACP agent", () => {
 		} {
 			const calls: CreateElicitationRequest[] = [];
 			const connection = {
-				unstable_createElicitation: async (req: CreateElicitationRequest) => {
+				unstable_createElicitationWithCancel: (req: CreateElicitationRequest) => {
 					calls.push(req);
-					return handler(req);
+					return { promise: handler(req), cancel: () => {} };
 				},
 			} as unknown as AgentSideConnection;
 			return { connection, calls };
@@ -3628,6 +3628,31 @@ describe("ACP agent", () => {
 		): request is Extract<CreateElicitationRequest, { mode: "form" }> {
 			return request.mode === "form";
 		}
+
+		it("cancels the client dialog when the wait's signal aborts before an answer", async () => {
+			// The reserve-deadline (and user-steering) path aborts the dialog's
+			// signal. A non-cancellable elicitation left the client showing the
+			// form while the caller moved on and a late answer was ignored; the
+			// bridge now cancels the wire request so the client tears the dialog down.
+			let cancelled = false;
+			const connection = {
+				unstable_createElicitationWithCancel: (_req: CreateElicitationRequest) => ({
+					// Nobody at the client answers; only the cancel can settle it.
+					promise: new Promise<CreateElicitationResponse>(() => {}),
+					cancel: () => {
+						cancelled = true;
+					},
+				}),
+			} as unknown as AgentSideConnection;
+			const ctx = createAcpExtensionUiContext(connection, () => "session-abort", FORM_CAPABILITIES);
+			const abort = new AbortController();
+
+			const pending = ctx.confirm!("Trust?", "startup", { signal: abort.signal });
+			abort.abort();
+
+			expect(await pending).toBe(false);
+			expect(cancelled).toBe(true);
+		});
 		it("translates a recommended single-choice ask into one form", async () => {
 			const { connection, calls } = createElicitConnection(async () => ({
 				action: "accept",

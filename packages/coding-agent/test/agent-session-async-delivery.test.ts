@@ -31,6 +31,7 @@ import {
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm, type CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { waitForSessionSettlement } from "@oh-my-pi/pi-coding-agent/session/session-settle";
 import { formatTaskResultSummary, INLINE_OUTPUT_CHARS } from "@oh-my-pi/pi-coding-agent/task/result-summary";
 
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -1289,5 +1290,51 @@ describe("AgentSession owner-routed async delivery", () => {
 		expect(session.hasPendingAsyncWork()).toBe(false);
 		expect(manager.isJobResultConsumed("sub-job")).toBe(true);
 		expect(mock.calls.some(call => JSON.stringify(call.context.messages).includes("QUEUED RESULT"))).toBe(true);
+	});
+
+	it("settles a session with no agent id while another owner's job runs", async () => {
+		// A session constructed without an `agentId` registers no delivery sink
+		// and no async-result yield-queue handler, so no job's result can ever
+		// inject here. Counting another owner's running job as this session's
+		// pending wake spins every consumer of the settle barrier below:
+		// `settleAsyncWork()` is owner-scoped and returns at once without an
+		// agent id, so the predicate would never turn false.
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const manager = new AsyncJobManager({});
+		AsyncJobManager.setInstance(manager);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+			asyncJobManager: manager,
+		});
+
+		const gate = Promise.withResolvers<string>();
+		manager.register("bash", "another owner's job", () => gate.promise, { id: "owned-elsewhere", ownerId: "Main" });
+
+		expect(session.hasPendingAsyncWork()).toBe(false);
+
+		// The shared barrier every run driver uses. Its `isCurrent` guard is
+		// bounded here so a session that keeps reporting the foreign job fails
+		// the assertion instead of looping until the test times out.
+		let polls = 0;
+		const settled = await waitForSessionSettlement(session, { isCurrent: () => ++polls < 50 });
+		expect(settled).toBe(true);
+		expect(manager.getJob("owned-elsewhere")?.status).toBe("running");
+
+		gate.resolve("done");
+		await manager.waitForOwnerJobs("Main");
 	});
 });

@@ -6,10 +6,16 @@
 
 - With the Hindsight memory backend, `retain` and `learn` can now store a memory with `scope: "global"` so every project recalls it. It is opt-in through the new `hindsight.globalScope` setting (off by default) and needs `global` or `per-project-tagged` scoping ([#17706](https://github.com/can1357/oh-my-pi/pull/17706) by [@alphastorm](https://github.com/alphastorm), from [#15030](https://github.com/can1357/oh-my-pi/pull/15030) by [@kithawk](https://github.com/kithawk)).
 - Added `btw.inject` (off by default; `/settings` → Interaction → "/btw Steering Inject"): when you ask `/btw` for a steering prompt, it drafts one in an `<inject>` block shown behind a pink rail, and `Alt+I` (`app.btw.inject`) sends it to the main session (as a steer while the agent runs, else as a new turn) from the inline answer or the BTW history sheet, once per answer from the current run. Once sent, the block turns green with `➤` on each line and "Injected into main session" below it; if the main session drops or refuses the send, the block turns back to pending and the same key retries ([#17618](https://github.com/can1357/oh-my-pi/pull/17618) by [@apullin](https://github.com/apullin))
+- Added `retry.usageReserveConfirmTimeout` (seconds, default `0` waits forever): an unanswered "Coding-plan reserve reached" prompt keeps the current model when it expires ([#17400](https://github.com/can1357/oh-my-pi/pull/17400) by [@sjawhar](https://github.com/sjawhar))
+- Added `user_wait_start` (with `prompt`, `kind` and `toolCalls`) and `user_wait_end` session and RPC events around a dialog only a person can answer, and `waitKind` on `ExtensionUIDialogOptions` and `ExtensionCustomOptions` plus `toolCallId` on `ExtensionUIDialogOptions` for extension dialogs ([#17400](https://github.com/can1357/oh-my-pi/pull/17400) by [@sjawhar](https://github.com/sjawhar))
 
 ### Fixed
 
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
+- Fixed a session waiting on a dialog only a person can answer (the reserve prompt, an MCP sign-in, a `cfg://` write, a plan approval, a permission request) still reporting a working run: the terminal title and OSC 7501 record now show it blocked ([#17400](https://github.com/can1357/oh-my-pi/pull/17400) by [@sjawhar](https://github.com/sjawhar))
+- Fixed an SDK session built without an agent id spinning at full speed while another agent's background job ran, starving terminal input ([#17400](https://github.com/can1357/oh-my-pi/pull/17400) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the status line and OSC 7501 record naming an approval that was already answered while another dialog stayed open ([#17400](https://github.com/can1357/oh-my-pi/pull/17400) by [@sjawhar](https://github.com/sjawhar))
+- Fixed an approval on a host with no approval dialog (RPC, ACP, extension hosts) being reported as a question ([#17400](https://github.com/can1357/oh-my-pi/pull/17400) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 

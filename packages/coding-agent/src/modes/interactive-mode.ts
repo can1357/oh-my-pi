@@ -2063,7 +2063,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		// An MCP sign-in can wait for the user mid-turn; like the auto-QA and cfg:// prompts below, it runs as a wait for
 		// the user (AgentSession.waitForUser).
 		this.mcpManager?.setAuthHandler((serverName, challenge) =>
-			this.session.waitForUser(() => new MCPCommandController(this).handleMCPAuthChallenge(serverName, challenge)),
+			this.session.waitForUser(
+				() => new MCPCommandController(this).handleMCPAuthChallenge(serverName, challenge),
+				`an MCP sign-in for ${serverName}`,
+			),
 		);
 		this.#eventBus = eventBus;
 		this.#subagentEventBus = subagentEventBus;
@@ -2411,7 +2414,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		// `Settings.instance` is the disk-backed singleton; passing it explicitly
 		// guarantees the decision persists even when the prompt is triggered
 		// from a subagent whose own `Settings` is an in-memory snapshot.
-		setAutoQaConsentHandler(() => this.session.waitForUser(() => this.#promptAutoQaConsent()), Settings.instance);
+		setAutoQaConsentHandler(
+			() => this.session.waitForUser(() => this.#promptAutoQaConsent(), "auto-QA consent", { kind: "permission" }),
+			Settings.instance,
+		);
 		// Same wiring for cfg:// writes: every settings change the agent makes is
 		// confirmed here, and `/save` persists to disk. Subagents and headless
 		// sessions are refused by the handler before reaching this host. Changes
@@ -2422,7 +2428,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			// like a timed `ask`.
 			approve: (request, options) =>
 				askTimeoutMs(this.session.settings) === undefined
-					? this.session.waitForUser(() => this.#promptCfgChange(request, options?.signal))
+					? this.session.waitForUser(
+							() => this.#promptCfgChange(request, options?.signal),
+							`a cfg:// write of ${request.path}`,
+							{ kind: "permission" },
+						)
 					: this.#promptCfgChange(request, options?.signal),
 			applied: change => {
 				if (change.settings !== this.session.settings) return;
@@ -2729,6 +2739,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		// startup; early dialog answers do not require that readiness signal.
 		if (options.autoStartCollab === true) this.collabController.autoStart();
 
+		// Subscribe to agent events before the startup hooks run: a `session_start`
+		// hook can raise a dialog only a person can answer, and that dialog holds
+		// init here. Its `user_wait_start`/`user_wait_end` bracket is published
+		// once, when the dialog opens and settles, so a subscription installed
+		// after the hooks returns would miss both and leave the title and the OSC
+		// record reporting an idle session while the dialog stands.
+		this.#subscribeToAgent();
+
 		// Initialize hooks with TUI-based UI context
 		await logger.time("InteractiveMode.init:hooks", () => this.initHooksAndCustomTools());
 		// A live `disabledExtensions` edit suspends or resumes extensions: drop (or restore) their link
@@ -2781,9 +2799,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		} catch (err) {
 			logger.warn("Failed to restore session draft", { error: String(err) });
 		}
-
-		// Subscribe to agent events
-		this.#subscribeToAgent();
 
 		// Job widgets refresh in the background; repaint the HUD and status line glance when one changes.
 		this.#syncJobWidgetsListener();

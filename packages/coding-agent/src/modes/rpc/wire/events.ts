@@ -193,6 +193,22 @@ export const eventDefs = {
 		},
 		"Coalesced snapshot of the displayable steering/follow-up queue, sent whenever it changes.",
 	),
+	UserWaitStartEvent: doc(
+		{
+			type: "'user_wait_start'",
+			prompt: doc("string", "What the session is asking a person to decide."),
+			"kind?": doc(
+				"'permission' | 'question'",
+				"Whether the dialog approves an operation or asks a question; absent when its opener named no classification.",
+			),
+			"toolCalls?": doc(
+				"string[]",
+				"Every tool call whose dialog is open, oldest first; absent when no open dialog belongs to one. A call that leaves this list between frames has had its own dialog answered, which is not the same moment as the last dialog settling.",
+			),
+		},
+		"The session opened a dialog only a person can answer and the turn is held until it settles.",
+	),
+	UserWaitEndEvent: doc({ type: "'user_wait_end'" }, "The last dialog waiting on a person settled; the turn goes on."),
 
 	RpcAgentEvent: doc(
 		[
@@ -229,6 +245,8 @@ export const eventDefs = {
 			"ThinkingLevelChangedEvent",
 			"GoalUpdatedEvent",
 			"QueueUpdateEvent",
+			"UserWaitStartEvent",
+			"UserWaitEndEvent",
 		].join(" | "),
 		"A session event, discriminated by `type`; `set_event_filter` selects which are sent.",
 	),

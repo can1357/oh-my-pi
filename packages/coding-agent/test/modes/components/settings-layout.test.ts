@@ -87,13 +87,16 @@ describe("settings layout", () => {
 			"retry.usageAwareFallback",
 			"retry.usageReservePct",
 			"retry.usageReservePolicy",
+			"retry.usageReserveConfirmTimeout",
 		]);
 		expect(defs[0]).toMatchObject({ type: "boolean", label: "Usage-Aware Fallback" });
 		expect(defs[1]?.condition?.()).toBe(false);
 		expect(defs[2]?.condition?.()).toBe(false);
+		expect(defs[3]?.condition?.()).toBe(false);
 		cfgRetryUsageAwareFallback.set(Settings.instance, true);
 		expect(defs[1]?.condition?.()).toBe(true);
 		expect(defs[2]?.condition?.()).toBe(true);
+		expect(defs[3]?.condition?.()).toBe(true);
 	});
 
 	it("renders preview inside SettingsSelectorComponent submenu without crashing", async () => {

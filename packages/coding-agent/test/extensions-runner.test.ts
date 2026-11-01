@@ -6,7 +6,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Type } from "@oh-my-pi/omptype/typebox";
-import type { AgentMessage, AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, type AgentTool, type AgentToolContext, runInToolCall } from "@oh-my-pi/pi-agent-core";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
@@ -160,6 +160,80 @@ describe("ExtensionRunner", () => {
 
 		runner.initialize(actions, contextActions, undefined, undefined, "tui");
 		expect(runner.createContext().mode).toBe("tui");
+	});
+
+	it("gives a tool call's context a ui whose dialogs name that call", async () => {
+		// A registered tool's own `ctx.ui` is the session's host UI, shared by
+		// everything: the dialog it raises has to say which call it belongs to,
+		// or a surface tracking that call never learns its wait ended.
+		const result = await loadTestExtensions();
+		const runner = new ExtensionRunner(
+			result.extensions,
+			result.runtime,
+			tempDir.path(),
+			sessionManager,
+			modelRegistry,
+		);
+		// The execution is live state, so each frame is read as it opens.
+		const frames: Array<{ prompt: string; declared?: string; call?: string; finished?: boolean }> = [];
+		runner.setUserWaitTracker((dialog, frame) => {
+			frames.push({
+				prompt: frame.prompt,
+				declared: frame.toolCallId,
+				call: frame.toolCallExecution?.toolCallId,
+				finished: frame.toolCallExecution?.finished,
+			});
+			return dialog();
+		});
+		runner.initialize(
+			{
+				sendMessage: () => {},
+				sendUserMessage: () => {},
+				appendEntry: () => {},
+				setLabel: () => {},
+				getActiveTools: () => [],
+				getAllTools: () => [],
+				setActiveTools: async () => {},
+				getCommands: () => [],
+				setModel: async () => false,
+				getThinkingLevel: () => undefined,
+				setThinkingLevel: () => {},
+				getSessionName: () => undefined,
+				setSessionName: async () => {},
+			},
+			{
+				getModel: () => undefined,
+				isIdle: () => true,
+				abort: () => {},
+				hasPendingMessages: () => false,
+				shutdown: () => {},
+				getContextUsage: () => undefined,
+				compact: async () => {},
+				getSystemPrompt: () => [],
+			},
+			undefined,
+			{ select: async () => "yes", notify: () => {} } as unknown as ExtensionUIContext,
+		);
+
+		const owner = {};
+		let keptPastTheCall: ExtensionUIContext | undefined;
+		await runInToolCall(owner, "call-1", async () => {
+			const ui = runner.createContext(undefined, { toolName: "ask", toolCallId: "call-1" }).ui;
+			keptPastTheCall = ui;
+			await ui.select("Proceed?", ["yes"]);
+			await ui.select("Declared by the call", ["yes"], { toolCallId: "call-2" });
+		});
+		// The holder keeps the `ui`, and the `ui` keeps the run it was handed to.
+		// That run is over, so the session reads it and claims no call.
+		await keptPastTheCall!.select("After the call", ["yes"]);
+		await runner.createContext().ui.select("Unrelated?", ["yes"]);
+
+		expect(frames).toEqual([
+			{ prompt: "Proceed?", declared: undefined, call: "call-1", finished: false },
+			{ prompt: "Declared by the call", declared: "call-2", call: undefined, finished: undefined },
+			{ prompt: "After the call", declared: undefined, call: "call-1", finished: true },
+			{ prompt: "Unrelated?", declared: undefined, call: undefined, finished: undefined },
+		]);
 	});
 
 	it("uses required context actions when command actions are unavailable", async () => {
@@ -2807,11 +2881,13 @@ describe("ExtensionRunner", () => {
 				{ type: "ui_select" },
 				{ type: "tool_approval_resolved", approved: true },
 			]);
-			expect(select).toHaveBeenCalledWith(expect.stringContaining("Allow tool: dangerous_tool"), [
-				"Approve",
-				"Approve dangerous_tool for this session",
-				"Deny",
-			]);
+			// The select is this host's approval dialog, so the call declares the
+			// wait it opens as a permission one, and which call it belongs to.
+			expect(select).toHaveBeenCalledWith(
+				expect.stringContaining("Allow tool: dangerous_tool"),
+				["Approve", "Approve dangerous_tool for this session", "Deny"],
+				{ waitKind: "permission", toolCallId: expect.any(String) },
+			);
 			delete globalState.__approvalEvents;
 		});
 
@@ -2847,7 +2923,10 @@ describe("ExtensionRunner", () => {
 			const critical = { ...approvalTool, approval: () => ({ tier: "exec" as const, override: true }) };
 			select.mockImplementationOnce(async () => "Approve");
 			await run(critical, "call-critical");
-			expect(select).toHaveBeenLastCalledWith(expect.any(String), ["Approve", "Deny"]);
+			expect(select).toHaveBeenLastCalledWith(expect.any(String), ["Approve", "Deny"], {
+				waitKind: "permission",
+				toolCallId: "call-critical",
+			});
 			// A new session starts without the grant.
 			await sessionManager.newSession();
 			await run(approvalTool, "call-new-session");

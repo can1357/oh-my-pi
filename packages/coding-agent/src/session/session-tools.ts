@@ -24,6 +24,7 @@ import { MEMORY_BACKEND_TOOL_NAMES } from "../memory-backend/tool-names";
 import { invalidateToolSchemaMetadata } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import type { MemoryBackendStartOptions, MemoryPromptPreparation } from "../memory-backend/types";
 import type { AgentDefinition } from "../task/types";
+import type { BlockedKind } from "../utils/run-status";
 import evalPreludeNoticePrompt from "../prompts/system/eval-prelude-notice.md" with { type: "text" };
 import sessionAgentNoticePrompt from "../prompts/system/session-agent-notice.md" with { type: "text" };
 import toolRosterNoticePrompt from "../prompts/system/tool-roster-notice.md" with { type: "text" };
@@ -136,7 +137,11 @@ export interface SessionToolsHost {
 	/** Live user-tagged model agents; candidates for the next base rebuild's advertised snapshot. */
 	sessionAgents(): readonly AgentDefinition[];
 	/** Runs a wait for the user's answer, such as an ACP client's permission request. */
-	waitForUser<T>(dialog: () => Promise<T>): Promise<T>;
+	waitForUser<T>(
+		dialog: () => Promise<T>,
+		prompt: string,
+		options?: { kind?: BlockedKind; toolCallId?: string },
+	): Promise<T>;
 }
 
 /** Registry delta applied by the SDK's settings-gated tool reconcile. */
@@ -1197,34 +1202,38 @@ export class SessionTools {
 					}
 					let raced: PermissionRaceResult;
 					try {
-						raced = await this.#host.waitForUser(() => {
-							const permissionPromise = bridge.requestPermission!(
-								{
-									toolCallId,
-									toolName: target.name,
-									title: permissionIntent.title,
-									...(target.name === "bash" ? { kind: "execute" } : {}),
-									status: "pending",
-									rawInput: args,
-									...(commandContent ? { content: commandContent } : {}),
-									locations: extractPermissionLocations(
-										args,
-										this.#host.sessionManager.getCwd(),
-										permissionIntent.paths,
-									),
-								},
-								PERMISSION_OPTIONS,
-								signal,
-								// The bridge cancels its pending wire dialog when the
-								// steer wins; the gate's own race above classifies the
-								// outcome either way. The derived signal keeps the wire
-								// cancel on user steering only — an agent-authored or
-								// IRC steer that aborted the loop signal leaves the
-								// client's dialog open.
-								userSteering.signal,
-							).then(outcome => ({ kind: "permission" as const, outcome }));
-							return Promise.race([permissionPromise, abortPromise, steerPromise]);
-						});
+						raced = await this.#host.waitForUser(
+							() => {
+								const permissionPromise = bridge.requestPermission!(
+									{
+										toolCallId,
+										toolName: target.name,
+										title: permissionIntent.title,
+										...(target.name === "bash" ? { kind: "execute" } : {}),
+										status: "pending",
+										rawInput: args,
+										...(commandContent ? { content: commandContent } : {}),
+										locations: extractPermissionLocations(
+											args,
+											this.#host.sessionManager.getCwd(),
+											permissionIntent.paths,
+										),
+									},
+									PERMISSION_OPTIONS,
+									signal,
+									// The bridge cancels its pending wire dialog when the
+									// steer wins; the gate's own race above classifies the
+									// outcome either way. The derived signal keeps the wire
+									// cancel on user steering only — an agent-authored or
+									// IRC steer that aborted the loop signal leaves the
+									// client's dialog open.
+									userSteering.signal,
+								).then(outcome => ({ kind: "permission" as const, outcome }));
+								return Promise.race([permissionPromise, abortPromise, steerPromise]);
+							},
+							`permission for ${target.name}`,
+							{ kind: "permission", toolCallId },
+						);
 					} finally {
 						signal?.removeEventListener("abort", onAbort);
 						steeringSignal.removeEventListener("abort", onLoopSteer);

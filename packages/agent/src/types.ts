@@ -26,6 +26,7 @@ import type { AppendOnlyContextManager } from "./append-only-context";
 import type { AgentRunCoverage, AgentRunSummary } from "./run-collector";
 import type { SentToolDefinitions } from "./sent-tool-definitions";
 import type { AgentTelemetryConfig } from "./telemetry";
+import type { ToolExecution } from "./tool-context";
 
 /** Stream function - can return sync or Promise for async config lookup */
 export type StreamFn = (
@@ -658,6 +659,13 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * capture, cost estimator, agent identity).
 	 */
 	telemetry?: AgentTelemetryConfig;
+	/**
+	 * Whose executions this loop's tool calls are. Work a tool starts is bound to the call and to
+	 * this owner for the length of that one execution ({@link runInToolCall}), so a host can tell
+	 * which of several agents sharing a process is executing a call id — two of them can hold the
+	 * same id at once. Without an owner nothing is bound and no work is attributed.
+	 */
+	owner?: object;
 }
 
 /**
@@ -668,6 +676,12 @@ export interface ToolCallContext {
 	index: number;
 	total: number;
 	toolCalls: Array<{ id: string; name: string }>;
+	/**
+	 * The run this call is about to make, when the executor prepared one. A context built for a
+	 * call keeps this rather than the call's id: the id is reused by a later run of the same call,
+	 * and a context kept past its own run must not speak for that one.
+	 */
+	execution?: ToolExecution;
 	/** Provider-native metadata for the current call, when present. */
 	providerMetadata?: ToolCallProviderMetadata;
 	/**

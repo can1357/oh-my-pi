@@ -241,6 +241,7 @@ function makeSession(
 		},
 		getToolByName: () => undefined,
 		activeToolExecutionUpdates: () => [...activeToolUpdates.values()],
+		activeUserWait: () => undefined,
 		getAsyncJobSnapshot: () => ({ running: runningJobIds.map(id => ({ id })) }),
 		hasBuiltInTool: () => true,
 		sessionManager: {

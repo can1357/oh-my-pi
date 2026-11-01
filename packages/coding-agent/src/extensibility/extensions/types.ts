@@ -79,6 +79,7 @@ import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer
 import type { CodeReviewAnnotation, TextReviewAnnotation } from "@oh-my-pi/pi-tui/overlays/annotation-types";
 export type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import type { ModelRegistry } from "../../config/model-registry";
+import type { BlockedKind } from "../../utils/run-status";
 import type { EditToolDetails } from "@oh-my-pi/pi-tui/tools/edit";
 import type { PythonResult } from "../../eval/py/executor";
 import type { BashResult } from "../../exec/bash-executor";
@@ -207,6 +208,18 @@ export function timedOutAskDialogResult(questions: ExtensionAskDialogQuestion[])
 export interface ExtensionUIDialogOptions {
 	signal?: AbortSignal;
 	timeout?: number;
+	/**
+	 * How a surface that reports run state classifies the wait this dialog opens. A dialog's method
+	 * only implies it — an approval a host without an approval dialog raises as a `select` reads as
+	 * a question — so a caller that knows it asks to approve an operation says so here.
+	 */
+	waitKind?: BlockedKind;
+	/**
+	 * The tool call this dialog was raised for, if any. It travels with the wait the dialog opens,
+	 * so a surface tracking that call knows when its own dialog settles instead of inferring it
+	 * from another dialog's words; a host may also use it to place the dialog beside the call.
+	 */
+	toolCallId?: string;
 	/** Invoked when the UI times out while waiting for a selection/input */
 	onTimeout?: () => void;
 	/** Invoked when the UI-managed timeout countdown starts */
@@ -266,6 +279,12 @@ export interface ExtensionCustomOptions {
 	onHandle?: (handle: OverlayHandle) => void;
 	/** Abort the custom UI and reject its promise. */
 	signal?: AbortSignal;
+	/**
+	 * How a surface that reports run state classifies the wait this dialog opens, as on
+	 * {@link ExtensionUIDialogOptions.waitKind}. A custom component carries no title and no method
+	 * that implies one, so a component asking to approve an operation says so here.
+	 */
+	waitKind?: BlockedKind;
 }
 
 /** Wrap the current autocomplete provider with additional behavior (pi-compatible). */
