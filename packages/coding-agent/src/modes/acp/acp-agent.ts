@@ -55,7 +55,6 @@ import {
 } from "../../extensibility/extensions";
 import { runExtensionCompact } from "../../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
-import { parseSkillInvocation } from "../../extensibility/skills";
 import { PYTHON_KERNEL_CANCEL_BUDGET_MS } from "../../eval/py/kernel";
 import { MCPManager } from "../../mcp/manager";
 import { reconnectMcpManagerServer } from "../../mcp/oauth-reauth";
@@ -66,7 +65,8 @@ import { normalizePlanTitle, type PlanApprovalDetails, resolveApprovedPlan } fro
 import { autosaveApprovedPlan } from "../../plan-mode/plan-autosave";
 import type { AgentSession, AgentSessionEvent } from "../../session/agent-session";
 import { BlobStore, resolveImageDataSync } from "../../session/blob-store";
-import { isSilentAbort, SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
+import { isSilentAbort, USER_INTERRUPT_LABEL } from "../../session/messages";
+import { dispatchSkillCommand, resolveSkillInvocation } from "../../session/skill-command";
 import type { UsageStatistics } from "../../session/session-entries";
 import type { SessionInfo as StoredSessionInfo } from "../../session/session-listing";
 import { SessionManager } from "../../session/session-manager";
@@ -1313,28 +1313,9 @@ export class AcpAgent implements Agent {
 	}
 
 	async #tryRunSkillCommand(record: ManagedSessionRecord, text: string): Promise<boolean> {
-		if (!record.session.skillsSettings?.enableSkillCommands) {
-			return false;
-		}
-		const parsed = parseSkillInvocation(text);
-		if (!parsed) {
-			return false;
-		}
-		const skill = record.session.skills.find(candidate => candidate.name === parsed.name);
-		if (!skill) {
-			return false;
-		}
-		const built = await record.session.buildUserSkillPrompt(skill, parsed);
-		await record.session.promptCustomMessage(
-			{
-				customType: SKILL_PROMPT_MESSAGE_TYPE,
-				content: built.message,
-				display: true,
-				details: built.details,
-				attribution: "user",
-			},
-			{ streamingBehavior: "steer" },
-		);
+		const invocation = resolveSkillInvocation(record.session, text);
+		if (!invocation) return false;
+		await dispatchSkillCommand(record.session, invocation);
 		return true;
 	}
 

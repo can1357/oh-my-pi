@@ -2539,7 +2539,10 @@ describe("ACP agent", () => {
 		expect(customMessage.content).toContain("# Sample\nDo work.");
 		expect(customMessage.content).toContain(`[Skill directory: ${skillDir}]`);
 		expect(customMessage.content).toContain("User: extra context");
-		expect(session.customMessageOptions[0]).toEqual({ streamingBehavior: "steer" });
+		expect(session.customMessageOptions[0]).toEqual({
+			streamingBehavior: "steer",
+			queueChipText: "/skill:sample extra context",
+		});
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
