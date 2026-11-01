@@ -159,12 +159,14 @@ export class OutputConsumerGuard {
 	}
 
 	/**
-	 * Opens a cell's result with the first consumer failure, saying what the
+	 * Ends a cell's result with the first consumer failure, saying what the
 	 * result still holds. Only a cell that ran to its end (`completed`) kept
 	 * running after the failure; a truncated result holds what truncation kept.
 	 * A failure the runtime caught (`runtimeFailure`) came from the output path
 	 * itself rather than from the consumer, so its output may be missing. A
-	 * rejection that settles after the result is assembled is only logged.
+	 * rejection that settles after the result is assembled is only logged. The
+	 * note follows the output, so whatever the output opens with, such as a
+	 * notice that the kernel restarted, stays the first thing in the result.
 	 */
 	annotate(
 		summary: { output: string; truncated: boolean; artifactId?: string | null },
@@ -175,18 +177,23 @@ export class OutputConsumerGuard {
 		const runtimeNote =
 			runtimeFailure &&
 			`Delivering the cell's output failed: ${runtimeFailure.message}. This result may be missing output.`;
-		if (!failure) return runtimeNote ? `[${runtimeNote}]\n${summary.output}` : summary.output;
-		const consumer = failure.callback === "onChunk" ? "stream output" : "display output";
-		const head = `The ${consumer} consumer failed: ${failure.message}.`;
-		const tail =
-			!completed || runtimeNote
-				? "Output shown while the cell ran may be incomplete."
-				: !summary.truncated
-					? "The cell kept running and this result holds all of its output; output shown while it ran may be incomplete."
-					: summary.artifactId
-						? `The cell kept running; this result is truncated as usual and the saved output is in artifact://${summary.artifactId}; output shown while it ran may be incomplete.`
-						: "The cell kept running; this result keeps its output up to the usual truncation and no full copy was saved; output shown while it ran may be incomplete.";
-		return `[${runtimeNote ? `${head} ${tail} ${runtimeNote}` : `${head} ${tail}`}]\n${summary.output}`;
+		let note = runtimeNote;
+		if (failure) {
+			const consumer = failure.callback === "onChunk" ? "stream output" : "display output";
+			const head = `The ${consumer} consumer failed: ${failure.message}.`;
+			const tail =
+				!completed || runtimeNote
+					? "Output shown while the cell ran may be incomplete."
+					: !summary.truncated
+						? "The cell kept running and this result holds all of its output; output shown while it ran may be incomplete."
+						: summary.artifactId
+							? `The cell kept running; this result is truncated as usual and the saved output is in artifact://${summary.artifactId}; output shown while it ran may be incomplete.`
+							: "The cell kept running; this result keeps its output up to the usual truncation and no full copy was saved; output shown while it ran may be incomplete.";
+			note = runtimeNote ? `${head} ${tail} ${runtimeNote}` : `${head} ${tail}`;
+		}
+		if (!note) return summary.output;
+		const separator = summary.output === "" || summary.output.endsWith("\n") ? "" : "\n";
+		return `${summary.output}${separator}[${note}]`;
 	}
 }
 

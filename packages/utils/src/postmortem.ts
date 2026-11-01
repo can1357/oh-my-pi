@@ -10,6 +10,7 @@ import * as fs from "node:fs";
 import { APP_NAME } from "./dirs";
 import * as logger from "./logger";
 import { restoreTerminalStderr } from "./stderr-guard";
+import { toError } from "./type-guards";
 
 // Cleanup reasons, in order of priority/meaning.
 export enum Reason {
@@ -538,9 +539,13 @@ export function markExpectedCleanupError<T extends object>(reason: T): T {
 
 function hasExpectedCleanupMarker(reason: unknown): boolean {
 	let current: unknown = reason;
-	for (let depth = 0; depth < 8 && current !== null && typeof current === "object"; depth++) {
-		if (Reflect.get(current, EXPECTED_CLEANUP) === true) return true;
-		current = Reflect.get(current, "cause");
+	try {
+		for (let depth = 0; depth < 8 && current !== null && typeof current === "object"; depth++) {
+			if (Reflect.get(current, EXPECTED_CLEANUP) === true) return true;
+			current = Reflect.get(current, "cause");
+		}
+	} catch {
+		// A Proxy's `get` trap threw: nothing marked it as expected cleanup.
 	}
 	return false;
 }
@@ -706,7 +711,7 @@ if (Bun.isMainThread) {
 				logger.warn("Ignoring expected cleanup exception", { err: thrown });
 				return;
 			}
-			const err = thrown instanceof Error ? thrown : new Error(String(thrown));
+			const err = toError(thrown);
 			// A worker IPC `send()` race can surface through either global error event;
 			// contain it in both. Stdout write disconnects are attributed to stdout by
 			// registerStdioDisconnectHandling's `error` listener, not classified here.
@@ -739,7 +744,8 @@ if (Bun.isMainThread) {
 			);
 		})
 		.on("unhandledRejection", async reason => {
-			const err = reason instanceof Error ? reason : new Error(String(reason));
+			// `toError` never throws: a reason whose conversion throws must still reach the interceptors.
+			const err = toError(reason);
 			if (handleWorkerSendEpipe(err)) return;
 			if (isExpectedCleanupError(reason)) {
 				logger.warn("Ignoring expected cleanup rejection", { err });

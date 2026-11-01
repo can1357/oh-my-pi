@@ -30,13 +30,14 @@ import { projectJavaScriptShadowPlan } from "./speculation";
 import { callSessionTool, type JsStatusEvent } from "./tool-bridge";
 // Coding-agent binary/bundle workers route through the CLI entrypoint with a
 // hidden argv mode, so compiled/npm builds only need one JavaScript entry.
-import type {
-	EvalPreludeSource,
-	JsToolRequest,
-	RunErrorPayload,
-	SessionSnapshot,
-	WorkerInbound,
-	WorkerOutbound,
+import {
+	type EvalPreludeSource,
+	type JsToolRequest,
+	type RunErrorPayload,
+	runErrorPayload,
+	type SessionSnapshot,
+	type WorkerInbound,
+	type WorkerOutbound,
 } from "./worker-protocol";
 
 export { rewriteImports, wrapCode } from "./shared/rewrite-imports";
@@ -863,7 +864,8 @@ async function handleToolCall(session: JsSession, msg: Extract<WorkerOutbound, {
 		});
 		safeSend(session, { type: "tool-reply", id: msg.id, reply: { ok: true, value } });
 	} catch (error) {
-		safeSend(session, { type: "tool-reply", id: msg.id, reply: { ok: false, error: toErrorPayload(error) } });
+		// A tool can throw any value, including one whose description throws; the reply must still go out.
+		safeSend(session, { type: "tool-reply", id: msg.id, reply: { ok: false, error: runErrorPayload(error) } });
 	} finally {
 		pending.toolCalls.delete(msg.id);
 		// Last call of a run whose worker result was withheld: settle it now.
@@ -973,19 +975,6 @@ function errorFromPayload(payload: RunErrorPayload): Error {
 	if (payload.name) error.name = payload.name;
 	if (payload.stack) error.stack = payload.stack;
 	return error;
-}
-
-function toErrorPayload(error: unknown): RunErrorPayload {
-	if (error instanceof Error) {
-		return {
-			name: error.name,
-			message: error.message,
-			stack: error.stack,
-			isAbort: error.name === "AbortError" || error.name === "ToolAbortError",
-			isToolError: error instanceof ToolError || error.name === "ToolError",
-		};
-	}
-	return { message: String(error) };
 }
 
 function logWorkerMessage(msg: Extract<WorkerOutbound, { type: "log" }>): void {

@@ -44,6 +44,8 @@ interface Consumers {
 	artifactPath?: string;
 	artifactId?: string;
 	signal?: AbortSignal;
+	/** Absent: 20 seconds. Set to `undefined` to run the cell with no timeout of its own. */
+	timeoutMs?: number;
 }
 
 /** Runs one cell in the session's retained runtime with caller-supplied output consumers. */
@@ -59,7 +61,7 @@ async function run(session: ToolSession, language: Language, code: string, consu
 		onStatus,
 		artifactPath: consumers.artifactPath,
 		artifactId: consumers.artifactId,
-		timeoutMs: 20_000,
+		timeoutMs: "timeoutMs" in consumers ? consumers.timeoutMs : 20_000,
 		signal: consumers.signal,
 	};
 	const result =
@@ -194,6 +196,39 @@ function hostileProxy(): object {
 	return new Proxy({}, new Proxy({}, { get: () => refuse }));
 }
 
+/** The built-in, restored after each test in case a value below left its replacement installed. */
+const OBJECT_TO_STRING = Object.prototype.toString;
+
+/**
+ * A value whose conversion to text replaces `Object.prototype.toString` with a
+ * function that returns an object, then throws: the next description attempt
+ * gets an object, not text. The replacement puts the built-in back the first
+ * time it runs, so the test process and the worker are not left changed.
+ */
+function retargetingToString(): object {
+	return {
+		[Symbol.toPrimitive]() {
+			const current = Object.prototype.toString as (() => string) & { original?: () => string };
+			const original = current.original ?? current;
+			const replacement = Object.assign(
+				() => {
+					Object.prototype.toString = original;
+					return Object.create(null);
+				},
+				{ original },
+			);
+			Object.prototype.toString = replacement as unknown as () => string;
+			throw new Error("the value refuses conversion");
+		},
+	};
+}
+
+/** {@link retargetingToString}, built inside a JavaScript cell. */
+const RETARGETING_TO_STRING_SOURCE =
+	"({ [Symbol.toPrimitive]() { const current = Object.prototype.toString; const original = current.original ?? current; " +
+	"const replacement = () => { Object.prototype.toString = original; return Object.create(null); }; " +
+	'replacement.original = original; Object.prototype.toString = replacement; throw new Error("the value refuses conversion"); } })';
+
 /**
  * Values a consumer may throw or reject with whose description is itself a
  * hazard: converting them to text or reading their message throws, or a
@@ -208,6 +243,11 @@ const THROWN_VALUES: ReadonlyArray<{ label: string; make: () => unknown; describ
 	{
 		label: "a proxy that refuses every operation",
 		make: hostileProxy,
+		described: "a thrown object that cannot be converted to text",
+	},
+	{
+		label: "a value whose conversion replaces Object.prototype.toString",
+		make: retargetingToString,
 		described: "a thrown object that cannot be converted to text",
 	},
 ];
@@ -226,6 +266,93 @@ function refusingLineOne(mode: FailureMode, make: () => unknown): (chunk: string
 		if (printsLine(chunk, "one")) throw make();
 	};
 }
+
+/** A Proxy revoked before it is thrown: every operation on it, `instanceof` included, throws. */
+function revokedProxy(): object {
+	const revocable = Proxy.revocable({}, {});
+	revocable.revoke();
+	return revocable.proxy;
+}
+
+/**
+ * Values whose description throws: converting them to text, reading their
+ * message or testing their prototype fails. `make` builds one in the test
+ * process, for a tool to throw; `source` builds the same value inside a
+ * JavaScript cell. `described` is how the result names each.
+ */
+const UNDESCRIBABLE_VALUES: ReadonlyArray<{ label: string; make: () => unknown; source: string; described: string }> = [
+	{
+		label: "a null-prototype object",
+		make: () => Object.create(null),
+		source: "Object.create(null)",
+		described: "[object Object]",
+	},
+	{
+		label: "an error whose message getter throws",
+		make: errorWithThrowingMessage,
+		source:
+			'Object.defineProperty(new Error("unused"), "message", { get() { throw new Error("the message getter failed"); } })',
+		described: "[object Error]",
+	},
+	{
+		label: "a proxy that refuses every operation",
+		make: hostileProxy,
+		source:
+			'new Proxy({}, new Proxy({}, { get: () => () => { throw new Error("the proxy refuses every operation"); } }))',
+		described: "a thrown object that cannot be converted to text",
+	},
+	{
+		label: "a revoked proxy",
+		make: revokedProxy,
+		source: "(() => { const revocable = Proxy.revocable({}, {}); revocable.revoke(); return revocable.proxy; })()",
+		described: "a thrown object that cannot be converted to text",
+	},
+	{
+		label: "a value whose conversion replaces Object.prototype.toString",
+		make: retargetingToString,
+		source: RETARGETING_TO_STRING_SOURCE,
+		described: "a thrown object that cannot be converted to text",
+	},
+];
+
+/**
+ * How a JavaScript cell can fail with a value: thrown before or after an await,
+ * or left as an unawaited rejection while the cell still runs. The worker
+ * attributes a floating rejection to the cell only while the cell is live, so
+ * that cell outlives the rejection by a pause inside the real runtime.
+ */
+const CELL_FAILURES: ReadonlyArray<{ label: string; code: (source: string) => string }> = [
+	{ label: "throws", code: source => `throw ${source};` },
+	{ label: "throws, after an await,", code: source => `await Promise.resolve(); throw ${source};` },
+	{
+		label: "leaves an unawaited promise rejected with",
+		code: source => `void Promise.reject(${source}); await new Promise(resolve => setTimeout(resolve, 300));`,
+	},
+];
+
+/** An MCP tool whose call fails by throwing `make()`. */
+function refusingTool(make: () => unknown): AgentTool {
+	return {
+		name: "mcp__fixture_refuse",
+		label: "MCP fixture",
+		description: "Fails with a value that cannot be described",
+		parameters: type({}),
+		mcpServerName: "fixture",
+		async execute() {
+			throw make();
+		},
+	} as AgentTool;
+}
+
+/** Calls the refusing tool and prints the error the cell receives. */
+const CALL_REFUSING_TOOL: Record<Language, string> = {
+	py: "try:\n    await tool.mcp__fixture_refuse({})\n    print('returned')\nexcept Exception as error:\n    print('caught', error)",
+	js: "try { await tool.mcp__fixture_refuse({}); print('returned'); } catch (error) { print('caught', error.message); }",
+};
+
+/** Raises a Python exception whose own `__str__` raises. */
+const RAISES_UNPRINTABLE =
+	"class Unprintable(Exception):\n    def __str__(self):\n        raise RuntimeError('str refused')\n\nraise Unprintable()";
 
 describe("eval output consumer failure", () => {
 	afterEach(async () => {
@@ -250,8 +377,8 @@ describe("eval output consumer failure", () => {
 			expect(failed.cancelled).toBe(false);
 			expect(failed.exitCode).toBe(0);
 			// The result holds the whole output, including what arrived after the consumer threw.
-			expect(failed.output).toContain("one\n");
-			expect(failed.output).toContain("two\n");
+			// It opens with the cell's own output, so a line the runtime leads with keeps its place.
+			expect(failed.output.startsWith("one\ntwo\n")).toBe(true);
 			// The consumer kept receiving the cell's later output.
 			expect(delivered.join("")).toContain("two");
 			// The failure reaches the caller when the cell is done, naming the consumer and the risk.
@@ -393,6 +520,9 @@ describe("eval output consumer failure", () => {
 
 		it(`${language}: a cell that times out after its consumer refused a printed line reports the failure without claiming the cell ran on`, async () => {
 			const session = makeSession(`consumer-timeout-${language}-${crypto.randomUUID()}`);
+			// Start the runtime first, so a slow kernel or worker start cannot delay the printed line.
+			const warm = await run(session, language, PID_CELL[language]);
+			expect(warm.exitCode).toBe(0);
 			const timeout = new AbortController();
 			let refusedLine = false;
 			const cell = await run(session, language, OUTLIVES_TIMEOUT[language], {
@@ -405,6 +535,9 @@ describe("eval output consumer failure", () => {
 					throw new Error("consumer refused a chunk");
 				},
 				signal: timeout.signal,
+				// No wall-clock timeout of the cell's own: only the refused line times it out, and the
+				// cell prints that line before its 30-second sleep, so it is always seen first.
+				timeoutMs: undefined,
 			});
 
 			expect(refusedLine).toBe(true);
@@ -500,6 +633,7 @@ describe("runtime output callback failure", () => {
 
 describe("output consumer failure with an arbitrary thrown value", () => {
 	afterEach(async () => {
+		Object.prototype.toString = OBJECT_TO_STRING;
 		await Promise.all([disposeAllKernelSessions(), disposeAllVmContexts()]);
 	});
 
@@ -532,6 +666,7 @@ describe("output consumer failure with an arbitrary thrown value", () => {
 
 describe("runtime output callback failure with an arbitrary thrown value", () => {
 	afterEach(async () => {
+		Object.prototype.toString = OBJECT_TO_STRING;
 		await disposeAllVmContexts();
 	});
 
@@ -583,4 +718,66 @@ describe("runtime output callback failure with an arbitrary thrown value", () =>
 			}, 120_000);
 		}
 	}
+});
+
+describe("a cell or tool failing with a value that cannot be described", () => {
+	afterEach(async () => {
+		Object.prototype.toString = OBJECT_TO_STRING;
+		await Promise.all([disposeAllKernelSessions(), disposeAllVmContexts()]);
+	});
+
+	for (const value of UNDESCRIBABLE_VALUES) {
+		for (const failure of CELL_FAILURES) {
+			it(`js: a cell that ${failure.label} ${value.label} fails at once, and the worker keeps its variables`, async () => {
+				const session = makeSession(`cell-thrown-js-${crypto.randomUUID()}`);
+				const before = await run(session, "js", `${PID_CELL.js}\nvar kept = 42;`);
+
+				const failed = await run(session, "js", failure.code(value.source));
+				const after = await run(session, "js", `${PID_CELL.js}\n${READ_KEPT.js}`);
+
+				// The cell failed by itself, instead of waiting for its timeout to kill the worker.
+				expect(failed.cancelled).toBe(false);
+				expect(failed.exitCode).toBe(1);
+				expect(failed.output).toContain(value.described);
+				expect(pidOf(after)).toBe(pidOf(before));
+				expect(after.output).toContain("kept 42");
+			}, 120_000);
+		}
+
+		for (const language of LANGUAGES) {
+			it(`${language}: a tool that throws ${value.label} fails the call with a description, and the runtime keeps its variables`, async () => {
+				const session = makeSession(`tool-thrown-${language}-${crypto.randomUUID()}`, refusingTool(value.make));
+				const before = await run(
+					session,
+					language,
+					`${PID_CELL[language]}\n${language === "py" ? "kept = 42" : "var kept = 42;"}`,
+				);
+
+				const cell = await run(session, language, CALL_REFUSING_TOOL[language]);
+				const after = await run(session, language, `${PID_CELL[language]}\n${READ_KEPT[language]}`);
+
+				expect(cell.cancelled).toBe(false);
+				expect(cell.exitCode).toBe(0);
+				expect(cell.output).toContain("caught");
+				expect(cell.output).toContain(value.described);
+				expect(pidOf(after)).toBe(pidOf(before));
+				expect(after.output).toContain("kept 42");
+			}, 120_000);
+		}
+	}
+
+	it("py: a cell that raises an exception whose __str__ raises fails at once, and the kernel keeps its variables", async () => {
+		const session = makeSession(`cell-unprintable-py-${crypto.randomUUID()}`);
+		const before = await run(session, "py", `${PID_CELL.py}\nkept = 42`);
+
+		const failed = await run(session, "py", RAISES_UNPRINTABLE);
+		const after = await run(session, "py", `${PID_CELL.py}\n${READ_KEPT.py}`);
+
+		// The cell failed by itself, instead of waiting for its timeout to interrupt or kill the kernel.
+		expect(failed.cancelled).toBe(false);
+		expect(failed.exitCode).toBe(1);
+		expect(failed.output).toContain("Unprintable");
+		expect(pidOf(after)).toBe(pidOf(before));
+		expect(after.output).toContain("kept 42");
+	}, 120_000);
 });

@@ -1,6 +1,6 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { EvalLanguage, EvalStatusEvent, EvalView } from "@oh-my-pi/pi-tui/tools/eval";
-import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
+import { describeThrown, isRecord } from "@oh-my-pi/pi-utils/type-guards";
 
 /** Kernel-defined tool metadata exposed to task subagents. */
 export interface EvalToolDescriptor {
@@ -66,15 +66,5 @@ export function outputConsumerFailure(
 	callback: EvalOutputConsumerFailure["callback"],
 	thrown: unknown,
 ): EvalOutputConsumerFailure {
-	try {
-		return { callback, message: thrown instanceof Error ? String(thrown.message) : String(thrown) };
-	} catch {
-		// Its own conversion threw; this one calls no `toString` or `valueOf` the value defines.
-	}
-	try {
-		return { callback, message: Object.prototype.toString.call(thrown) };
-	} catch {
-		// A Proxy throws even here.
-	}
-	return { callback, message: `a thrown ${typeof thrown} that cannot be converted to text` };
+	return { callback, message: describeThrown(thrown) };
 }
