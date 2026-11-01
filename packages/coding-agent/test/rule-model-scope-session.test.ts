@@ -14,7 +14,7 @@ import { ruleRecordKey, TtsrManager } from "@oh-my-pi/pi-coding-agent/export/tts
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { removeWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { logger, removeWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
 import { testRule } from "./helpers/rule-scope-fixtures";
 
@@ -260,6 +260,40 @@ describe("model-scoped rules in a live session", () => {
 		expect(ttsr.checkDelta("before SPANNING_", { source: "text" })).toEqual([]);
 		await session.addRule(testRule("live-guard", { condition: ["LIVE_TOKEN"] }));
 		expect(ttsr.checkDelta("TOKEN after", { source: "text" }).map(r => r.name)).toEqual(["spanning-guard"]);
+	});
+
+	it("warns when rediscovery does not return a rule added mid-session", async () => {
+		const project = path.join(dir, `add-rule-missing-${Snowflake.next()}`);
+		await fs.mkdir(path.join(project, ".git"), { recursive: true });
+		isolateHome(path.join(project, "home"));
+		const session = await startSession({
+			model: opus,
+			discoverRulesIn: project,
+			sessionManager: SessionManager.inMemory(project),
+		});
+		const warn = vi.spyOn(logger, "warn");
+		const unscanned = path.join(project, "unscanned", "ghost.md");
+
+		await session.addRule(testRule("ghost", { condition: ["GHOST_TOKEN"], path: unscanned }));
+
+		expect(warn).toHaveBeenCalledWith(expect.stringContaining("not active"), { path: unscanned });
+		expect(session.ttsrManager?.getRules().map(r => r.name)).not.toContain("ghost");
+	});
+
+	it("swaps the same-file entry or appends a rule added to an explicit rule set", async () => {
+		const session = await startSession({
+			model: opus,
+			rules: [testRule("guard", { condition: ["GUARD_TOKEN"], content: "OLD" })],
+		});
+		const registered = () => session.ttsrManager?.getRules().map(r => [r.name, r.content]);
+
+		await session.addRule(testRule("guard", { condition: ["GUARD_TOKEN"], content: "NEW" }));
+		expect(registered()).toEqual([["guard", "NEW"]]);
+		await session.addRule(testRule("extra", { condition: ["EXTRA_TOKEN"] }));
+		expect(registered()).toEqual([
+			["guard", "NEW"],
+			["extra", "extra"],
+		]);
 	});
 
 	it("registers a live-added rule with TTSR when the session has no sdk rule snapshot", async () => {

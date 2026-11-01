@@ -6,6 +6,7 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
 import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import { OmfgController } from "@oh-my-pi/pi-coding-agent/modes/controllers/omfg-controller";
+import { OmfgPanelComponent } from "@oh-my-pi/pi-tui/overlays/omfg-panel";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { Container, type TUI } from "@oh-my-pi/pi-tui";
@@ -57,12 +58,27 @@ interface Harness {
 	projectDir: string;
 	agentDir: string;
 	addRule: Mock<AddRule>;
+	showWarning: Mock<(message: string) => void>;
 	showHookSelector: Mock<ShowHookSelector>;
 	showHookConfirm: Mock<ShowHookConfirm>;
 	showHookInput: Mock<ShowHookInput>;
 }
 
 const tempRoots: string[] = [];
+
+/** A model turn that proposes the `ts-no-any` rule. */
+function tsNoAnyTurn(): Mock<RunEphemeralTurn> {
+	return vi.fn<RunEphemeralTurn>(async () => ({
+		replyText: JSON.stringify({
+			name: "ts-no-any",
+			description: "No any in TS edits",
+			condition: ": any",
+			scope: ["tool:edit(*.ts)", "tool:write(*.ts)"],
+			body: "Use `unknown` instead.",
+		}),
+		assistantMessage: createAssistantMessage([{ type: "text", text: "done" }]),
+	}));
+}
 
 function createAssistantMessage(content: AssistantMessage["content"]): AssistantMessage {
 	return {
@@ -99,6 +115,7 @@ async function createHarness(options: HarnessOptions): Promise<Harness> {
 	await fs.mkdir(agentDir, { recursive: true });
 
 	const addRule = vi.fn<AddRule>(async () => {});
+	const showWarning = vi.fn<(message: string) => void>();
 	const selectorChoices = [...(options.selectorChoices ?? [options.selectorChoice ?? PROJECT_OPTION])];
 	const showHookSelector = vi.fn<ShowHookSelector>(async () => selectorChoices.shift());
 	const showHookConfirm = vi.fn<ShowHookConfirm>(async () => options.confirmResult ?? true);
@@ -120,11 +137,22 @@ async function createHarness(options: HarnessOptions): Promise<Harness> {
 		settings: { getAgentDir: () => agentDir } as unknown as InteractiveModeContext["settings"],
 		showStatus: vi.fn(),
 		showError: vi.fn(),
+		showWarning,
 		showHookInput,
 		showHookSelector,
 		showHookConfirm,
 	} as unknown as InteractiveModeContext;
-	return { ctx, container, projectDir, agentDir, addRule, showHookSelector, showHookConfirm, showHookInput };
+	return {
+		ctx,
+		container,
+		projectDir,
+		agentDir,
+		addRule,
+		showWarning,
+		showHookSelector,
+		showHookConfirm,
+		showHookInput,
+	};
 }
 
 beforeAll(async () => {
@@ -180,18 +208,8 @@ describe("OmfgController", () => {
 
 	it("invalidates the discovery cache after saving so rediscovery observes the new rule", async () => {
 		clearCache();
-		const runEphemeralTurn = vi.fn<RunEphemeralTurn>(async () => ({
-			replyText: JSON.stringify({
-				name: "ts-no-any",
-				description: "No any in TS edits",
-				condition: ": any",
-				scope: ["tool:edit(*.ts)", "tool:write(*.ts)"],
-				body: "Use `unknown` instead.",
-			}),
-			assistantMessage: createAssistantMessage([{ type: "text", text: "done" }]),
-		}));
 		const harness = await createHarness({
-			runEphemeralTurn,
+			runEphemeralTurn: tsNoAnyTurn(),
 			messages: createMatchingMessages(),
 			selectorChoice: PROJECT_OPTION,
 		});
@@ -217,5 +235,25 @@ describe("OmfgController", () => {
 		// Without the post-write invalidation the cache would still serve the empty
 		// snapshot, and `replaceTtsrRules` would evict the freshly registered rule.
 		expect((await readDirEntries(rulesDir)).map(entry => entry.name)).toContain("ts-no-any.md");
+	});
+
+	it("reports a saved rule whose live registration failed as saved but not active", async () => {
+		const harness = await createHarness({
+			runEphemeralTurn: tsNoAnyTurn(),
+			messages: createMatchingMessages(),
+			selectorChoice: PROJECT_OPTION,
+		});
+		harness.addRule.mockRejectedValue(new Error("rediscovery failed"));
+		const markSaved = vi.spyOn(OmfgPanelComponent.prototype, "markSaved");
+		const markError = vi.spyOn(OmfgPanelComponent.prototype, "markError");
+		const warned = Promise.withResolvers<string>();
+		harness.showWarning.mockImplementation(message => warned.resolve(message));
+
+		await new OmfgController(harness.ctx).start("stop using any");
+
+		expect(await warned.promise).toContain("not activated this session");
+		expect(await Bun.file(path.join(harness.projectDir, ".omp", "rules", "ts-no-any.md")).exists()).toBe(true);
+		expect(markSaved).toHaveBeenCalledTimes(1);
+		expect(markError).not.toHaveBeenCalled();
 	});
 });

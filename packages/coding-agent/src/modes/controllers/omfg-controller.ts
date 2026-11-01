@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { CONFIG_DIR_NAME, prompt } from "@oh-my-pi/pi-utils";
+import { CONFIG_DIR_NAME, logger, prompt } from "@oh-my-pi/pi-utils";
 import { invalidate as invalidateCapabilityCache } from "../../capability";
 import type { Rule } from "../../capability/rule";
 import omfgUserPrompt from "../../prompts/system/omfg-user.md" with { type: "text" };
@@ -272,8 +272,23 @@ export class OmfgController {
 				target.filePath,
 				target.level,
 			);
-			await this.#registerLive(savedRule);
-			request.component.markSaved(shortenPath(target.filePath));
+			let activated = true;
+			try {
+				await this.#registerLive(savedRule);
+			} catch (error) {
+				// The file is on disk; only this session's live registration failed.
+				activated = false;
+				logger.warn("/omfg saved a rule but could not activate it this session", {
+					path: target.filePath,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+			if (!this.#isActiveRequest(request)) return { kind: "saved" };
+			const savedPath = shortenPath(target.filePath);
+			request.component.markSaved(savedPath);
+			if (!activated) {
+				this.ctx.showWarning(`Saved ${savedPath}, but not activated this session; it applies after /clear.`);
+			}
 			return { kind: "saved" };
 		}
 	}

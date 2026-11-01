@@ -4215,13 +4215,25 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		/**
 		 * Adds a rule saved mid-session (`/omfg`) to the unfiltered snapshot and re-scopes.
 		 * A discovering session re-reads its rules, so the saved file replaces its older
-		 * copy and takes its provider's precedence; an explicit rule set swaps the entry
-		 * from the same file or appends the rule.
+		 * copy and takes its provider's precedence, and a file discovery does not return
+		 * (unscanned location, disabled source, shadowed name) is logged and stays inactive.
+		 * An explicit rule set swaps the entry from the same file or appends the rule.
+		 * Rediscovery failures reject.
 		 */
 		const addRule = async (rule: Rule): Promise<void> => {
-			toolSession.rules = options.rules
-				? [...ruleSnapshot().filter(existing => existing._source.path !== rule._source.path), rule]
-				: await loadRuleSnapshot(sessionManager.getCwd());
+			if (options.rules) {
+				toolSession.rules = [
+					...ruleSnapshot().filter(existing => existing._source.path !== rule._source.path),
+					rule,
+				];
+			} else {
+				toolSession.rules = await loadRuleSnapshot(sessionManager.getCwd());
+				if (!toolSession.rules.some(existing => existing._source.path === rule._source.path)) {
+					logger.warn("Rule rediscovery did not find a rule added mid-session; it is not active", {
+						path: rule._source.path,
+					});
+				}
+			}
 			// A live add can land mid-stream; the model is unchanged, so in-flight matching state stays valid.
 			rescopeRules(agent?.state.model ?? model, { keepTtsrBuffers: true });
 		};
