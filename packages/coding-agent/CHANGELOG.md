@@ -92,6 +92,7 @@
 - On the Anthropic API, the newest message now keeps all its images up to the 128 MB request limit, past the 120 MB image budget ([#17492](https://github.com/can1357/oh-my-pi/pull/17492) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
+- A cancelled Bash command or Eval cell kept forwarding async-job progress after the tool call had already thrown, so a `tool_execution_update` could arrive after the matching `tool_execution_end`; both paths now stop forwarding before the terminal frame ([#12875](https://github.com/can1357/oh-my-pi/issues/12875)).
 
 - Fixed intercepted bash commands asking for approval before being blocked anyway ([#17502](https://github.com/can1357/oh-my-pi/pull/17502) by [@asuffield](https://github.com/asuffield))
 - Fixed account-policy recovery repeatedly rotating through denied credentials instead of surfacing the error or using the configured model fallback, including unnecessary sibling-unblock waits after the account allowance is spent ([#17439](https://github.com/can1357/oh-my-pi/pull/17439) by [@wolfiesch](https://github.com/wolfiesch))
