@@ -146,6 +146,7 @@ import type { PythonResult } from "../eval/py/executor";
 import { EVAL_STATE_CONTEXT_TYPE, formatEvalStateContext, isEvalStateContext } from "../eval/state";
 import { WorkPoolRegistry } from "../task/workpool";
 import { type BashPtyOptions, type BashResult, releaseShellSessions } from "../exec/bash-executor";
+import type { BashInteractiveUi } from "../tools/bash-interactive";
 import type { TtsrManager } from "../export/ttsr";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
 import type { CustomTool } from "../extensibility/custom-tools/types";
@@ -12568,7 +12569,12 @@ export class AgentSession implements SettingsScope {
 	executeBash(
 		command: string,
 		onChunk?: (chunk: string) => void,
-		options?: { excludeFromContext?: boolean; useUserShell?: boolean; pty?: BashPtyOptions },
+		options?: {
+			excludeFromContext?: boolean;
+			useUserShell?: boolean;
+			pty?: BashPtyOptions;
+			interactivePty?: { ui: BashInteractiveUi };
+		},
 	): Promise<BashResult> {
 		return this.#bash.executeBash(command, onChunk, options);
 	}
