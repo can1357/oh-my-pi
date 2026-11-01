@@ -707,6 +707,46 @@ describe.skipIf(process.platform === "win32")("a .env pipe is read until its wri
 	);
 
 	it(
+		"a function registered through onStopSignal and process.once keeps its once registration",
+		async () => {
+			const at = path.join(home, ".env");
+			mkfifo(at);
+			// Opens the pipe at once and answers a second later, after omp has said it is waiting.
+			const writer = Bun.spawn(
+				["sh", "-c", 'exec 3>"$0"; sleep 1; printf %s "$1" >&3', at, `${VARIABLE}=loaded\n`],
+				{ stdout: "ignore", stderr: "ignore" },
+			);
+			// The same function has one persistent registration and one once registration.
+			const listener = path.join(tempDir.path(), "reused-listener.ts");
+			fs.writeFileSync(
+				listener,
+				`import { onStopSignal } from ${mod("utils", "regular-file.ts")};\n` +
+					"export let calls = 0;\n" +
+					"const callback = () => {\n\tcalls++;\n};\n" +
+					'onStopSignal("SIGINT", callback);\n' +
+					'process.once("SIGTERM", callback);\n',
+			);
+			try {
+				const run = await runChild(
+					`import * as reused from ${JSON.stringify(listener)};
+				import ${mod("utils", "env.ts")};
+				process.emit("SIGTERM");
+				process.emit("SIGTERM");
+				console.log("calls=" + reused.calls + " listeners=" + process.listenerCount("SIGTERM"));`,
+					{},
+				);
+
+				expect(run.exit).toBe(0);
+				expect(run.stdout).toContain("calls=1 listeners=0");
+				expect(run.stderr).toContain("Ctrl-C takes effect when the wait ends.");
+			} finally {
+				writer.kill();
+			}
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
 		"a stop signal ends the wait at once when every stop listener was added through onStopSignal",
 		async () => {
 			mkfifo(path.join(home, ".env"));
@@ -776,6 +816,32 @@ describe.skipIf(process.platform === "win32")("a .env re-read while omp runs nev
 
 				expect(run.exit).toBe(0);
 				// The redactor knows the value, and the child shell does not inherit it.
+				expect(run.stdout).toContain("redactor=true");
+				expect(run.stdout).toContain("child=absent");
+				expect(saysNothingAboutFiles(run.stderr)).toBe(true);
+			} finally {
+				writer.kill();
+			}
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"a .env pipe loaded at startup is reused through a symbolic-link alias of the project",
+		async () => {
+			const alias = path.join(tempDir.path(), "project-link");
+			fs.symlinkSync(projectDir, alias);
+			// The writer answers once, as at startup, and is gone before the re-reads.
+			const writer = answeringWriter(path.join(projectDir, ".env"), `${VARIABLE}=loaded\n`);
+			try {
+				const run = await runChild(
+					`import { filterChildShellEnv, getDotenvEnvValues } from ${mod("utils", "index.ts")};
+				console.log("redactor=" + getDotenvEnvValues(${JSON.stringify(alias)}).includes("loaded"));
+				console.log("child=" + (filterChildShellEnv(process.env, ${JSON.stringify(alias)}).${VARIABLE} ?? "absent"));`,
+					{},
+				);
+
+				expect(run.exit).toBe(0);
 				expect(run.stdout).toContain("redactor=true");
 				expect(run.stdout).toContain("child=absent");
 				expect(saysNothingAboutFiles(run.stderr)).toBe(true);

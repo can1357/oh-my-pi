@@ -199,19 +199,22 @@ const PIPE_POLL_MS = 10;
 /** Signals a person or a supervisor sends to stop a process. */
 const STOP_SIGNALS = ["SIGINT", "SIGTERM"] as const;
 
-/** Set on a listener that {@link onStopSignal} added; global, so every copy of this module sees it. */
+/** Set on the private registration that {@link onStopSignal} adds; global, so every copy of this module sees it. */
 const PERSISTENT_STOP_LISTENER = Symbol.for("omp.persistentStopListener");
 
 /**
- * Add `listener` for `signal` with `process.on`, marked so that a pipe wait
- * ({@link readRegularFileOrPipeTextSync}) may take it off for its length and
- * put it back. Bun does not say whether a listener was added with
- * `process.once`, and one put back with `process.on` would run for every later
- * signal and never go; so a wait takes off only listeners added here.
+ * Add `listener` for `signal` with `process.on`, through a private registration
+ * marked so that a pipe wait ({@link readRegularFileOrPipeTextSync}) may take it
+ * off for its length and put it back. Bun does not say whether a listener was
+ * added with `process.once`, and one put back with `process.on` would run for
+ * every later signal and never go. Marking the registration instead of the
+ * caller's function keeps another `process.once` registration of that function
+ * unmarked.
  */
 export function onStopSignal(signal: (typeof STOP_SIGNALS)[number], listener: NodeJS.SignalsListener): void {
-	Object.defineProperty(listener, PERSISTENT_STOP_LISTENER, { value: true });
-	process.on(signal, listener);
+	const registration: NodeJS.SignalsListener = received => listener(received);
+	Object.defineProperty(registration, PERSISTENT_STOP_LISTENER, { value: true });
+	process.on(signal, registration);
 }
 
 /**

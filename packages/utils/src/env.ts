@@ -295,14 +295,28 @@ const ENV_PIPE_MAX_BYTES = 1024 * 1024;
 const ENV_PIPE_NOTICE_AFTER_MS = 500;
 
 /**
- * The text each `.env` read at startup held, by path. A child shell's
- * environment and the stream redactor read the project's `.env` files again;
- * when one is a named pipe, they take what startup read from it instead of
- * waiting on it again. 1Password's mounts are not built for repeated or
- * concurrent reads, and the values startup loaded are the ones those readers
- * need.
+ * The text each `.env` read at startup held, by canonical filesystem path. A
+ * child shell's environment and the stream redactor read the project's `.env`
+ * files again; when one is a named pipe, they take what startup read from it
+ * instead of waiting on it again. 1Password's mounts are not built for
+ * repeated or concurrent reads, and the values startup loaded are the ones
+ * those readers need.
  */
 const startupEnvText = new Map<string, string>();
+
+/**
+ * The filesystem path for a `.env` cache entry. A project may be reached
+ * through a symbolic-link alias after startup, but it must reuse text from the
+ * same FIFO rather than open the FIFO again. A missing path has no canonical
+ * target and keeps its lexical resolved path.
+ */
+function envFileKey(filePath: string): string {
+	try {
+		return fs.realpathSync.native(filePath);
+	} catch {
+		return path.resolve(filePath);
+	}
+}
 
 /** `.env` pipes that did not answer at startup: this process does not wait on them again. */
 const unansweredEnvPipes = new Set<string>();
@@ -314,7 +328,7 @@ const unansweredEnvPipes = new Set<string>();
  * check here can tell the two apart.
  */
 function startupEnvFileText(filePath: string): string | undefined {
-	const key = path.resolve(filePath);
+	const key = envFileKey(filePath);
 	if (unansweredEnvPipes.has(key)) return undefined;
 	const deadlineMs = isatty(0) && isatty(2) ? ENV_PIPE_TERMINAL_DEADLINE_MS : ENV_PIPE_DEADLINE_MS;
 	const bound = `${deadlineMs / 1000} s`;
@@ -367,7 +381,7 @@ function runtimeEnvFileText(filePath: string): string | undefined {
 		return readRegularFileTextSync(filePath);
 	} catch (error) {
 		if (!(error instanceof NotARegularFile)) throw error;
-		const loaded = error.kind === "a FIFO" ? startupEnvText.get(path.resolve(filePath)) : undefined;
+		const loaded = error.kind === "a FIFO" ? startupEnvText.get(envFileKey(filePath)) : undefined;
 		if (loaded !== undefined) return loaded;
 		reportSkippedFile(error);
 		return undefined;
