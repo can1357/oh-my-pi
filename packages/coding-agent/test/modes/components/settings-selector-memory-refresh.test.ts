@@ -8,6 +8,7 @@ import { initTheme } from "@oh-my-pi/pi-tui/theme";
 
 import { cfgHindsightApiToken } from "@oh-my-pi/pi-coding-agent/hindsight/settings";
 import { cfgMemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/settings";
+import { cfgGoalModelObjectiveUpdates } from "@oh-my-pi/pi-coding-agent/goals/settings";
 
 beforeAll(async () => {
 	await initTheme();
@@ -229,5 +230,33 @@ describe("SettingsSelectorComponent memory tab", () => {
 
 		comp.handleInput("\x1b");
 		expect(cancelCount).toBe(1);
+	});
+});
+
+describe("SettingsSelectorComponent goal objective updates", () => {
+	it("selects confirmation, trusted user requests, and disabled permissions from the goal setting submenu", () => {
+		const comp = createSelector();
+
+		for (const ch of "goal objective updates") comp.handleInput(ch);
+		comp.handleInput("\n");
+		const options = comp.render(120).join("\n");
+		expect(options).toContain("Disabled");
+		expect(options).toContain("Confirm each edit");
+		expect(options).toContain("On user request");
+
+		comp.handleInput("\x1b[B");
+		comp.handleInput("\n");
+		expect(cfgGoalModelObjectiveUpdates.get(settings)).toBe("confirm");
+
+		comp.handleInput("\n");
+		comp.handleInput("\x1b[B");
+		comp.handleInput("\n");
+		expect(cfgGoalModelObjectiveUpdates.get(settings)).toBe("on-request");
+
+		comp.handleInput("\n");
+		comp.handleInput("\x1b[A");
+		comp.handleInput("\x1b[A");
+		comp.handleInput("\n");
+		expect(cfgGoalModelObjectiveUpdates.get(settings)).toBe("disabled");
 	});
 });

@@ -116,6 +116,36 @@ Top-level entry modules: `cli.ts`, `main.ts`, `sdk.ts`, `index.ts` (SDK barrel),
 - [non-compaction-retry-policy.md](../../docs/non-compaction-retry-policy.md)
 - [handoff-generation-pipeline.md](../../docs/handoff-generation-pipeline.md)
 
+#### Model objective edits
+
+User `/goal set` calls [`GoalRuntime.replaceGoal`](src/goals/runtime.ts), which creates
+a fresh goal and resets accounting. Model `goal({op:"update", objective:"..."})` instead
+calls `updateGoalObjective`, changing only the objective and `updatedAt`. It preserves
+identity, status, budget, and accumulated usage, persists the snapshot, and emits the
+standard event. Its tool result carries the new objective without interrupting other
+work in the tool batch.
+
+`goal.modelObjectiveUpdates` is persisted through the settings registry and appears under
+**Tasks → Modes → Goal Objective Updates**. Changes apply to the existing tool immediately.
+
+| Value | Model behavior |
+| --- | --- |
+| `disabled` (default) | Reject objective edits; ask the user to use `/goal set`. |
+| `confirm` | Require approval of each old/new objective through the host's scrollable `ui.approve` dialog. Hosts exposing only `ui.select` are not supported. Denial, cancellation, or a missing approval dialog leaves the goal unchanged. Global auto-approval does not bypass this check. |
+| `on-request` | Permit an edit without another prompt when the model interprets an explicit natural-language user request. This trusts the model; it does not independently verify intent. |
+
+All modes leave budget editing user-controlled through `/goal budget`. The tool rejects a
+`token_budget` argument on `update`, and cannot edit an inactive goal. Consent is checked
+against the same session, goal identity, old objective, and live permissions at mutation time;
+stale consent is rejected. Automatic continuation is not user authorization.
+
+Ordinary tool-approval requirements and deny policies still apply. In `confirm` mode,
+`always-ask` can therefore show two prompts: the generic tool gate, then the old/new
+objective approval. A cached or session-wide grant can satisfy the generic gate but never
+the objective-specific confirmation.
+See [`settings.ts`](src/goals/settings.ts), [`GoalTool`](src/goals/tools/goal-tool.ts),
+and the static [`goal tool instructions`](src/prompts/tools/goal.md).
+
 ### Configuration, models, providers, auth
 
 - [settings.md](../../docs/settings.md), [config-usage.md](../../docs/config-usage.md)

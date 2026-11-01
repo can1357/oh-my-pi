@@ -1,7 +1,8 @@
+import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { Component } from "../tui";
 import { Text } from "../components/text";
 import type { Theme, ThemeColor } from "../theme/theme";
-import { formatDuration, formatErrorDetail, formatNumber, TRUNCATE_LENGTHS } from "../render/render-utils";
+import { formatDuration, formatErrorDetail, formatNumber, replaceTabs, TRUNCATE_LENGTHS } from "../render/render-utils";
 import { renderStatusLine, truncateToWidth } from "../render/index";
 import { framedToolCard } from "../render/tool-card";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
@@ -26,7 +27,7 @@ export interface Goal {
 
 /** Goal operation outcome displayed in the transcript. */
 export interface GoalToolDetails {
-	op: "create" | "get" | "complete" | "resume" | "drop";
+	op: "create" | "update" | "get" | "complete" | "resume" | "drop";
 	goal?: Goal | null;
 	remainingTokens?: number | null;
 	completionBudgetReport?: string | null;
@@ -35,6 +36,8 @@ function describeOp(op: string | undefined): string {
 	switch (op) {
 		case "create":
 			return "set";
+		case "update":
+			return "update";
 		case "complete":
 			return "complete";
 		case "get":
@@ -68,6 +71,10 @@ interface GoalRenderArgs {
 	token_budget?: number;
 }
 
+function objectiveDisplayText(objective: string): string {
+	return replaceTabs(sanitizeText(objective)).replaceAll("\n", " ").trim();
+}
+
 function describeGoalResult(result: ToolRenderResult<GoalToolDetails>, args?: GoalRenderArgs): NativeToolView {
 	const details = result.details;
 	const description = describeOp(details?.op ?? args?.op);
@@ -92,7 +99,7 @@ function describeGoalResult(result: ToolRenderResult<GoalToolDetails>, args?: Go
 	return {
 		head,
 		body: compact([
-			text([span(`"${goal.objective.trim()}"`, "muted")], { wrap: "word" }),
+			text([span(`"${objectiveDisplayText(goal.objective)}"`, "muted")], { wrap: "word" }),
 			text([span(meta.join(" · "), "dim")], { wrap: "word" }),
 			report ? node("section", { head: [span("Report", "toolTitle")] }, [noteText(report)], "report") : undefined,
 		]),
@@ -106,8 +113,9 @@ export const goalToolRenderer = {
 	renderCall(args: GoalRenderArgs, _options: RenderResultOptions, uiTheme: Theme): Component {
 		const description = describeOp(args.op);
 		const meta: string[] = [];
-		const trimmedObjective = args.objective?.trim();
-		if (args.op === "create" && trimmedObjective) {
+		const trimmedObjective = args.objective ? objectiveDisplayText(args.objective) : undefined;
+
+		if ((args.op === "create" || args.op === "update") && trimmedObjective) {
 			const objective = truncateToWidth(trimmedObjective, TRUNCATE_LENGTHS.TITLE);
 			meta.push(uiTheme.italic(uiTheme.fg("muted", `"${objective}"`)));
 		}
@@ -158,7 +166,7 @@ export const goalToolRenderer = {
 		);
 
 		const lines: string[] = [];
-		const objectiveText = truncateToWidth(goal.objective.trim(), TRUNCATE_LENGTHS.LONG);
+		const objectiveText = truncateToWidth(objectiveDisplayText(goal.objective), TRUNCATE_LENGTHS.LONG);
 		lines.push(uiTheme.italic(uiTheme.fg("muted", `"${objectiveText}"`)));
 
 		const used = formatNumber(goal.tokensUsed);
@@ -188,8 +196,11 @@ export const goalToolRenderer = {
 
 	describeCall(args: GoalRenderArgs): NativeToolView {
 		const head: TspSpan[] = toolHead("Goal", describeOp(args.op));
-		const objective = args.objective?.trim();
-		if (args.op === "create" && objective) head.push(span(" "), span(`"${objective}"`, "muted"));
+		const objective = args.objective ? objectiveDisplayText(args.objective) : undefined;
+
+		if ((args.op === "create" || args.op === "update") && objective) {
+			head.push(span(" "), span(`"${truncateToWidth(objective, TRUNCATE_LENGTHS.TITLE)}"`, "muted"));
+		}
 		if (args.op === "create" && args.token_budget !== undefined) {
 			head.push(span(" "), span(`budget ${formatNumber(args.token_budget)}`, "muted"));
 		}

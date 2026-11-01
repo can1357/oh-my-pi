@@ -8,11 +8,16 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { applyToolProxy } from "@oh-my-pi/pi-coding-agent/extensibility/tool-proxy";
+import { GoalRuntime } from "@oh-my-pi/pi-coding-agent/goals/runtime";
+import { cfgGoalModelObjectiveUpdates } from "@oh-my-pi/pi-coding-agent/goals/settings";
+import type { GoalModeState } from "@oh-my-pi/pi-coding-agent/goals/state";
+import { GoalTool } from "@oh-my-pi/pi-coding-agent/goals/tools/goal-tool";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import * as daemonClient from "@oh-my-pi/pi-coding-agent/launch/client";
 import type { DaemonBrokerClient } from "@oh-my-pi/pi-coding-agent/launch/client";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
@@ -375,5 +380,87 @@ describe("agent-loop wait wake delivery", () => {
 		expect(result.isError).toBe(false);
 		expect(execute).toHaveBeenCalledTimes(1);
 		expect(messages.filter(message => messageText(message).includes(payload))).toHaveLength(1);
+	});
+
+	it("does not interrupt a real wait when an objective edit runs in the same tool batch", async () => {
+		const settings = Settings.isolated({ "launch.enabled": false });
+		cfgGoalModelObjectiveUpdates.set(settings, "on-request");
+		const steering: AgentMessage[] = [];
+		let state: GoalModeState | undefined;
+
+		const runtime = new GoalRuntime({
+			getState: () => state,
+			setState: next => {
+				state = next;
+			},
+			getCurrentUsage: () => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }),
+			emit: () => {},
+			persist: () => {},
+			sendHiddenMessage: async message => {
+				steering.push(userMessage(message.content));
+			},
+		});
+
+		await runtime.createGoal({ objective: "Build the release" });
+
+		const toolSession: ToolSession = {
+			cwd: "/tmp",
+			hasUI: false,
+			settings,
+			getSessionFile: () => null,
+			getSessionSpawns: () => null,
+			getGoalRuntime: () => runtime,
+			getGoalModeState: () => state,
+			asyncJobManager: manager,
+			agentRegistry: AgentRegistry.global(),
+			getAgentId: () => "Main",
+			enableIrc: false,
+		};
+
+		const goal = new GoalTool(toolSession);
+		const wait = new WaitTool(toolSession);
+		const jobId = manager.register("bash", "build artifact", async () => releaseJob.promise, { ownerId: "Main" });
+
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{
+							type: "toolCall",
+							name: "goal",
+							arguments: { op: "update", objective: "Build and audit the release" },
+						},
+						{ type: "toolCall", name: "wait", arguments: {} },
+					],
+				},
+				{ content: ["Build result received"] },
+			],
+		});
+
+		const stream = agentLoop(
+			[userMessage("Update the goal to include auditing, then wait for the build")],
+			{ systemPrompt: ["Test"], messages: [], tools: [goal, wait] },
+			{
+				model: mock.model,
+				convertToLlm,
+				hasSteeringMessages: () => ({ queued: steering.length > 0, source: "agent" }),
+				getSteeringMessages: async () => steering.splice(0),
+			},
+			undefined,
+			mock.stream,
+		);
+
+		for await (const event of stream) {
+			if (event.type === "tool_execution_update" && event.toolName === "wait") {
+				releaseJob.resolve("artifact ready");
+			}
+		}
+
+		const messages = await stream.result();
+		const result = messages.find(message => message.role === "toolResult" && message.toolName === "wait");
+		expect(result).toBeDefined();
+		expect(messageText(result!)).toContain("artifact ready");
+		expect(manager.isJobResultConsumed(jobId)).toBe(true);
+		expect(state?.goal.objective).toBe("Build and audit the release");
 	});
 });

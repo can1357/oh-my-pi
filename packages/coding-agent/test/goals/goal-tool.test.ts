@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "bun:test";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { completionBudgetReport, GoalRuntime } from "@oh-my-pi/pi-coding-agent/goals/runtime";
 import type { Goal } from "@oh-my-pi/pi-tui/tools/goal";
 import type { GoalModeState, GoalTokenUsage } from "@oh-my-pi/pi-coding-agent/goals/state";
@@ -35,7 +36,14 @@ function cloneState(state: GoalModeState | undefined): GoalModeState | undefined
 }
 
 function createToolSession(overrides: Partial<ToolSession>): ToolSession {
-	return overrides as ToolSession;
+	return {
+		cwd: "/tmp/goal-tool",
+		hasUI: false,
+		settings: Settings.isolated(),
+		getSessionFile: () => null,
+		getSessionSpawns: () => "*",
+		...overrides,
+	};
 }
 
 function createRuntimeHarness(initialState?: GoalModeState) {
@@ -321,7 +329,8 @@ describe("GoalTool", () => {
 
 	it("auto-approves every op in write mode; always-ask prompts only for goal changes (#14368)", () => {
 		const tool = new GoalTool(createToolSession({}));
-		for (const op of ["get", "create", "complete", "resume", "drop"]) {
+
+		for (const op of ["get", "create", "update", "complete", "resume", "drop"]) {
 			expect(resolveApproval(tool, { op }, "write").policy).toBe("allow");
 			expect(resolveApproval(tool, { op }, "always-ask").policy).toBe(op === "get" ? "allow" : "prompt");
 		}

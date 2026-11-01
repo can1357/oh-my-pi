@@ -6,6 +6,8 @@ import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream"
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgGoalModelObjectiveUpdates } from "@oh-my-pi/pi-coding-agent/goals/settings";
+import { goalFromModeData } from "@oh-my-pi/pi-coding-agent/goals/state";
 import { GoalTool } from "@oh-my-pi/pi-coding-agent/goals/tools/goal-tool";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
@@ -235,6 +237,57 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(state?.goal.id).not.toBe(originalGoal.id);
 		expect(harness.mode.goalModeEnabled).toBe(true);
 		expect(await toolNamesFor(harness)).toContain("goal");
+	});
+
+	it("persists model objective edits without replacing the goal or its recorded usage", async () => {
+		await harness.mode.handleGoalModeCommand("Ship the release");
+		await harness.mode.handleGoalModeCommand("budget 100");
+		harness.session.goalRuntime.onTurnStart("turn-edit", { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+		await harness.session.goalRuntime.flushUsage("suppressed", { input: 37, output: 2, cacheRead: 0, cacheWrite: 0 });
+		const original = harness.session.getGoalModeState()?.goal;
+
+		if (!original) throw new Error("expected active goal");
+		cfgGoalModelObjectiveUpdates.set(harness.settings, "on-request");
+
+		await new GoalTool(harness.toolSession).execute("edit-objective", {
+			op: "update",
+			objective: "Audit the release before publishing",
+		});
+
+		const context = harness.session.sessionManager.buildSessionContext();
+		const persisted = goalFromModeData(context.modeData);
+		expect(context.mode).toBe("goal");
+		expect(persisted).toMatchObject({
+			...original,
+			objective: "Audit the release before publishing",
+			updatedAt: expect.any(Number),
+		});
+		expect(harness.session.getGoalModeState()?.goal).toEqual(persisted);
+		expect(await toolNamesFor(harness)).toContain("goal");
+
+		await harness.session.sessionManager.ensureOnDisk();
+		await harness.session.sessionManager.flush();
+		const source = harness.session.sessionManager.getSessionFile();
+
+		if (!source) throw new Error("expected persisted session");
+
+		const fork = await SessionManager.forkFrom(
+			source,
+			harness.tempDir.path(),
+			harness.tempDir.join("fork"),
+			undefined,
+			{
+				copyArtifacts: false,
+				suppressBreadcrumb: true,
+			},
+		);
+
+		try {
+			expect(fork.getSessionId()).not.toBe(harness.session.sessionManager.getSessionId());
+			expect(goalFromModeData(fork.buildSessionContext().modeData)).toEqual(persisted);
+		} finally {
+			await fork.close();
+		}
 	});
 
 	it("steers initial goal objective attachments while streaming", async () => {
@@ -497,6 +550,24 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(content).not.toContain("Run focused checks");
 	});
 
+	it("uses an edited objective when an already-armed continuation is admitted", async () => {
+		await harness.mode.handleGoalModeCommand("Ship the release");
+		cfgGoalModelObjectiveUpdates.set(harness.settings, "on-request");
+		vi.useFakeTimers();
+		const waiter = await armInputWaiter(harness.mode);
+
+		await new GoalTool(harness.toolSession).execute("edit-objective", {
+			op: "update",
+			objective: "Audit the importer",
+		});
+		vi.advanceTimersByTime(800);
+		await waiter.inputPromise;
+
+		const input = waiter.getResolvedInput();
+		expect(input?.customType).toBe("goal-continuation");
+		expect(input?.text).toContain("<objective>\nAudit the importer\n</objective>");
+		expect(input?.text).not.toContain("<objective>\nShip the release\n</objective>");
+	});
 	it("drops a goal continuation tick while the agent is streaming", async () => {
 		// Repro for the race the streaming guard on /goal set X exposed: the
 		// 800ms continuation timer armed by getUserInput() can outlive the idle
