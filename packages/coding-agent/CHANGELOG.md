@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Moving a legacy `settings.json` aside after migrating it to `config.yml` no longer replaces an existing `settings.json.bak`: the migrated file goes to the first free name, `settings.json.bak`, then `settings.json.bak.1` and onward
+- Moving a legacy `settings.json` aside after migrating it to `config.yml` no longer replaces an existing `settings.json.bak`: the migrated file goes to the first free name, `settings.json.bak`, then `settings.json.bak.1` and onward ([#17667](https://github.com/can1357/oh-my-pi/pull/17667) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.2] - 2026-10-31
 
