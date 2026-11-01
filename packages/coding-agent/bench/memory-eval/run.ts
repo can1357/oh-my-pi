@@ -12,6 +12,7 @@ import * as path from "node:path";
 import { parseArgs } from "node:util";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { isEnoent, removeWithRetries } from "@oh-my-pi/pi-utils";
+import { sha256File } from "../../src/utils/file-hash";
 import { type CalibrationDump, compareCalibration, corpusSha256, runUpstreamCompat } from "./compat";
 import { loadBeamUpstreamCompat, loadDataset } from "./datasets";
 import type { EngineAdapter, MnemopiRecall, ProtocolName } from "./engine";
@@ -69,7 +70,7 @@ async function cachedDataset(dataset: DatasetName, dataDir: string): Promise<{ r
 		);
 	}
 	// SHA-256 of the prepared file: the revision alone does not prove which bytes a converter produced from it.
-	const sha256 = new Bun.CryptoHasher("sha256").update(await Bun.file(path.join(dataDir, name)).bytes()).digest("hex");
+	const sha256 = await sha256File(path.join(dataDir, name));
 	if (recorded !== sha256) {
 		throw new Error(
 			`${marker}: ${recorded === undefined ? "records no data digest" : "records a digest of other data"}; re-run py/prepare_datasets.py`,
