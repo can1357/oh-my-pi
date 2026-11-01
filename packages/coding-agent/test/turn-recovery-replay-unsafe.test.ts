@@ -625,6 +625,29 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		).toBe(false);
 	});
 
+	it("treats an empty-string block scope as provider-wide, like CredentialBlocks does", () => {
+		// An SDK-supplied resolver whose global scope is "" writes the mark to
+		// the bare provider key — scopedBackoffKey folds "" into the provider
+		// key, which every request of the provider checks — while
+		// credentialBlockScopesForRequest omits the empty value. Falling
+		// through to `includes("")` would label the live outcome stale and
+		// discard a valid sibling rotation / reset-wait signal.
+		const emptyScope = { blockScope: () => "" } as unknown as CredentialRankingStrategy;
+		const resolver = (provider: string) => (provider === "openai-codex" ? emptyScope : undefined);
+		expect(usageLimitBlockCoversModel("openai-codex", "model-a", "openai-codex", "model-b", resolver)).toBe(true);
+		// The reverse direction stays uncovered: an active request scoped ""
+		// checks only the provider key, so a mark written under a real scope
+		// ("scope-a") does not bind it.
+		const mixed = {
+			blockScope: (ctx?: { modelId?: string }) => (ctx?.modelId === "model-a" ? "scope-a" : ""),
+		} as unknown as CredentialRankingStrategy;
+		expect(
+			usageLimitBlockCoversModel("openai-codex", "model-a", "openai-codex", "model-b", provider =>
+				provider === "openai-codex" ? mixed : undefined,
+			),
+		).toBe(false);
+	});
+
 	it("drops an outcome that went stale while the reset-redeem lookup awaited", async () => {
 		const codexSol = getBundledModel("openai-codex", "gpt-6.1-sol");
 		const codexAstra = getBundledModel("openai-codex", "gpt-6-astra");

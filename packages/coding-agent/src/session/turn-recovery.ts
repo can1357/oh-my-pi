@@ -416,8 +416,12 @@ export function usageLimitBlockCoversModel(
 	const attributedContext = { modelId: attributedModelId };
 	const writtenScope = strategy?.blockScope?.(attributedContext);
 	// No primary scope means the mark is provider-wide (unscoped strategies),
-	// which covers every model of the provider.
-	if (writtenScope === undefined) return true;
+	// which covers every model of the provider. An empty string is the same
+	// provider-wide marker: CredentialBlocks folds "" into the bare provider
+	// key (scopedBackoffKey), which every request of the provider checks,
+	// while credentialBlockScopesForRequest omits the empty value — so a
+	// literal includes("") would mislabel the live outcome as stale.
+	if (writtenScope === undefined || writtenScope === "") return true;
 	const activeContext = { modelId: activeModelId };
 	const activeScopes = credentialBlockScopesForRequest(
 		activeProvider,
