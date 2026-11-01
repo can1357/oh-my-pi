@@ -3,6 +3,15 @@ import { logger, withLoopPhase } from "@oh-my-pi/pi-utils";
 import { transaction } from "../../db";
 import { toUtcIso } from "../../util/datetime";
 import { generateId } from "../../util/ids";
+import {
+	redactMemorySecrets,
+	redactMemoryTextFields,
+	sanitizeContent,
+	sanitizeMemoryRow,
+	sanitizeMetadataRecord,
+	sanitizeTextField,
+	sanitizeTimestamp,
+} from "../content-sanitizer";
 import { currentEmbeddingModel, embeddingsDisabled } from "../embeddings";
 import { EpisodicGraph } from "../episodic-graph";
 import { countExtractedFactCategories, extractFactCategoriesSafe } from "../extraction";
@@ -91,7 +100,8 @@ function sqlBinding(value: unknown, fallback: SQLQueryBindings): SQLQueryBinding
 }
 
 function embeddingText(content: string, options: { embedText?: string; embed_text?: string }): string {
-	return options.embedText ?? options.embed_text ?? content;
+	const override = options.embedText ?? options.embed_text;
+	return override !== undefined ? sanitizeTextField(override) : content;
 }
 
 function storedEmbeddingText(content: string, embedText: string): string | null {
@@ -431,10 +441,18 @@ export function reconcileEmbeddingModel(beam: BeamMemoryState): void {
 	rebuild(missing);
 }
 
-export function remember(beam: BeamMemoryState, content: string, options: StoreRememberOptions = {}): string {
+export function remember(beam: BeamMemoryState, rawContent: string, rawOptions: StoreRememberOptions = {}): string {
+	const [content, contentMeta] = sanitizeContent(rawContent);
+	const options = redactMemoryTextFields(rawOptions, true);
+	let metadata = options.metadata ?? null;
+	if (contentMeta && Object.keys(contentMeta).length > 0) {
+		const existingMeta =
+			metadata && typeof metadata === "object" ? (metadata as Record<string, unknown>) : {};
+		metadata = { ...existingMeta, ...contentMeta };
+	}
 	const source = options.source ?? "conversation";
 	const importance = options.importance ?? 0.5;
-	const timestamp = options.timestamp ?? toUtcIso();
+	const timestamp = sanitizeTimestamp(options.timestamp, toUtcIso());
 	const scope = options.scope ?? "session";
 	const veracity = clampVeracity(options.veracity);
 	const trustTier = normalizeTrustTier(options.trustTier, source);
@@ -443,9 +461,7 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 	const authorId = options.authorId ?? options.author_id ?? beam.authorId;
 	const authorType = options.authorType ?? options.author_type ?? beam.authorType;
 	const channelId = options.channelId ?? options.channel_id ?? beam.channelId;
-	const metadata = options.metadata ?? null;
 	const embedText = embeddingText(content, options);
-
 	const existingId = findDuplicate(beam, content);
 	if (existingId !== null) {
 		beam.db.run(
@@ -525,7 +541,8 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 	// `extractText` lets a caller decouple "what gets stored" from "what facts are
 	// mined". coding-agent retains full multi-author transcripts but wants
 	// fact/entity heuristics to read only the user-authored turns (issue #3372).
-	const extractionSource = options.extractText ?? options.extract_text ?? content;
+	const rawExtractionSource = options.extractText ?? options.extract_text;
+	const extractionSource = rawExtractionSource !== undefined ? sanitizeTextField(rawExtractionSource) : content;
 	proactiveLinkIfEnabled(
 		beam,
 		memoryId,
@@ -548,9 +565,23 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 
 export function rememberBatch(
 	beam: BeamMemoryState,
-	items: readonly RememberBatchItem[],
-	options: StoreRememberBatchOptions = {},
+	rawItems: readonly RememberBatchItem[],
+	rawOptions: StoreRememberBatchOptions = {},
 ): string[] {
+	const options = redactMemoryTextFields(rawOptions, true);
+	const items = rawItems.map(rawItem => {
+		const [sanitizedContent, contentMeta] = sanitizeContent(rawItem.content);
+		const scrubbed = redactMemoryTextFields({ ...rawItem, content: sanitizedContent }, true);
+		scrubbed.content = sanitizedContent;
+		if (contentMeta && Object.keys(contentMeta).length > 0) {
+			const existingMeta =
+				scrubbed.metadata && typeof scrubbed.metadata === "object"
+					? (scrubbed.metadata as Record<string, unknown>)
+					: {};
+			scrubbed.metadata = { ...existingMeta, ...contentMeta };
+		}
+		return scrubbed;
+	});
 	const timestamp = toUtcIso();
 	const ids: string[] = [];
 	const forceVeracity = options.forceVeracity ?? options.force_veracity ?? false;
@@ -566,7 +597,7 @@ export function rememberBatch(
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`);
 		for (const item of items) {
-			const itemTimestamp = item.timestamp ?? timestamp;
+			const itemTimestamp = sanitizeTimestamp(item.timestamp, timestamp);
 			const memoryId = generateId(item.content, new Date(itemTimestamp));
 			ids.push(memoryId);
 			const source = item.source ?? "conversation";
@@ -636,7 +667,7 @@ export function getContext(beam: BeamMemoryState, limit = 10): Row[] {
 			timestamp DESC
 		LIMIT ?
 	`);
-	return (statement.all(beam.sessionId, now, limit) as Row[]).map(rowToDict);
+	return (statement.all(beam.sessionId, now, limit) as Row[]).map(row => sanitizeMemoryRow(rowToDict(row)));
 }
 
 export function invalidate(beam: BeamMemoryState, memoryId: string, replacementId: string | null = null): boolean {
@@ -710,17 +741,58 @@ export function getGlobalWorkingStats(beam: BeamMemoryState): BeamStats {
 	return getWorkingStats(beam);
 }
 
+const SANITIZER_OWNED_METADATA_KEYS = [
+	"blob_ref",
+	"extraction_reason",
+	"original_size",
+	"sha256",
+	"mime",
+	"entropy",
+	"stripped_tags",
+	"redacted_secrets",
+] as const;
+
 export function updateWorking(
 	beam: BeamMemoryState,
 	memoryId: string,
-	content: string | null = null,
+	rawContent: string | null = null,
 	importance: number | null = null,
 ): boolean {
+	const existing = beam.db
+		.prepare("SELECT metadata_json FROM working_memory WHERE id = ? AND session_id = ?")
+		.get(memoryId, beam.sessionId) as { metadata_json?: string | null } | null;
+	if (!existing) return false;
+
+	const sanitized = rawContent === null ? null : sanitizeContent(rawContent);
+	const content = sanitized === null ? null : sanitized[0];
 	const assignments: string[] = [];
 	const params: SQLQueryBindings[] = [];
-	if (content !== null) {
-		assignments.push("content = ?", "embed_text = NULL");
-		params.push(content);
+	if (content !== null && sanitized !== null) {
+		const contentMeta = sanitized[1];
+		let baseMeta: Record<string, unknown> = {};
+		const rawExistingMeta = existing.metadata_json;
+		if (typeof rawExistingMeta === "string" && rawExistingMeta.trim().length > 0) {
+			try {
+				const parsed = JSON.parse(rawExistingMeta);
+				if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+					baseMeta = { ...(sanitizeMetadataRecord(parsed as Record<string, unknown>, true) ?? {}) };
+				}
+			} catch {
+				baseMeta = {};
+			}
+		}
+		for (const key of SANITIZER_OWNED_METADATA_KEYS) {
+			delete baseMeta[key];
+		}
+		const mergedMeta = { ...baseMeta, ...contentMeta };
+		const nextMetadataJson =
+			Object.keys(mergedMeta).length > 0
+				? JSON.stringify(mergedMeta)
+				: rawExistingMeta === null || rawExistingMeta === undefined
+					? null
+					: JSON.stringify({});
+		assignments.push("content = ?", "embed_text = NULL", "metadata_json = ?");
+		params.push(content, nextMetadataJson);
 	}
 	if (importance !== null) {
 		assignments.push("importance = ?");
@@ -747,7 +819,8 @@ export function get(beam: BeamMemoryState, memoryId: string): Row | null {
 		WHERE id = ?
 	`);
 	const working = workingStatement.get(memoryId) as Row | null | undefined;
-	if (working != null) return { ...working, metadata: working.metadata_json, memory_store: "working" };
+	if (working != null)
+		return sanitizeMemoryRow({ ...working, metadata: working.metadata_json, memory_store: "working" });
 
 	using episodicStatement = beam.db.prepare(`
 		SELECT id, content, source, timestamp, session_id,
@@ -756,9 +829,11 @@ export function get(beam: BeamMemoryState, memoryId: string): Row | null {
 		WHERE id = ? AND (session_id = ? OR scope = 'global')
 	`);
 	const episodic = episodicStatement.get(memoryId, beam.sessionId) as Row | null | undefined;
-	if (episodic != null) return { ...episodic, metadata: episodic.metadata_json, memory_store: "episodic" };
+	if (episodic != null)
+		return sanitizeMemoryRow({ ...episodic, metadata: episodic.metadata_json, memory_store: "episodic" });
 
-	return getFact(beam, memoryId);
+	const fact = getFact(beam, memoryId);
+	return fact != null ? sanitizeMemoryRow(fact) : null;
 }
 
 /**
@@ -815,7 +890,8 @@ export function forgetWorking(beam: BeamMemoryState, memoryId: string): boolean 
 	return deleted > 0;
 }
 
-export function scratchpadWrite(beam: BeamMemoryState, content: string): string {
+export function scratchpadWrite(beam: BeamMemoryState, rawContent: string): string {
+	const [content] = sanitizeContent(rawContent);
 	const padId = generateId(content);
 	const timestamp = toUtcIso();
 	beam.db.run(
@@ -839,7 +915,7 @@ export function scratchpadRead(beam: BeamMemoryState): Row[] {
 	`);
 	return (
 		statement.all(beam.sessionId, Number.isFinite(SCRATCHPAD_MAX_ITEMS) ? SCRATCHPAD_MAX_ITEMS : 1000) as Row[]
-	).map(rowToDict);
+	).map(row => sanitizeMemoryRow(rowToDict(row)));
 }
 
 export function scratchpadClear(beam: BeamMemoryState): void {
@@ -931,6 +1007,24 @@ export function importFromDict(beam: BeamMemoryState, data: Record<string, unkno
 			} else {
 				stats.working_memory.inserted++;
 			}
+			const cleanSource = item.source != null ? sanitizeContent(redactMemorySecrets(String(item.source)))[0] : null;
+			let cleanMetaJson = "{}";
+			if (item.metadata_json != null || item.metadata != null) {
+				const rawMeta =
+					typeof item.metadata_json === "string"
+						? (() => {
+								try {
+									return JSON.parse(item.metadata_json) as object;
+								} catch {
+									return {};
+								}
+							})()
+						: typeof item.metadata === "object" && item.metadata !== null
+							? (item.metadata as object)
+							: {};
+				cleanMetaJson = JSON.stringify(sanitizeMetadataRecord(rawMeta, true));
+			}
+
 			db.run(
 				`
 				INSERT INTO working_memory
@@ -942,12 +1036,12 @@ export function importFromDict(beam: BeamMemoryState, data: Record<string, unkno
 			`,
 				[
 					id,
-					sqlBinding(item.content, ""),
-					sqlBinding(item.source, null),
+					sanitizeContent(String(sqlBinding(item.content, "") ?? ""))[0],
+					cleanSource,
 					sqlBinding(item.timestamp, null),
 					sqlBinding(item.session_id, "default"),
 					sqlBinding(item.importance, 0.5),
-					sqlBinding(item.metadata_json, "{}"),
+					cleanMetaJson,
 					sqlBinding(item.valid_until, null),
 					sqlBinding(item.superseded_by, null),
 					sqlBinding(item.scope, "session"),
@@ -957,7 +1051,9 @@ export function importFromDict(beam: BeamMemoryState, data: Record<string, unkno
 					clampVeracity(item.veracity),
 					item.consolidated_at == null ? importedAt : sqlBinding(item.consolidated_at, importedAt),
 					sqlBinding(item.memory_type, "unknown"),
-					sqlBinding(item.embed_text, null),
+					typeof item.embed_text === "string"
+						? sanitizeContent(item.embed_text)[0]
+						: sqlBinding(item.embed_text, null),
 					sqlBinding(item.author_id, null),
 					sqlBinding(item.author_type, null),
 					sqlBinding(item.channel_id, null),
@@ -994,6 +1090,24 @@ export function importFromDict(beam: BeamMemoryState, data: Record<string, unkno
 			} else {
 				stats.episodic_memory.inserted++;
 			}
+			const cleanSource = item.source != null ? sanitizeContent(redactMemorySecrets(String(item.source)))[0] : null;
+			let cleanMetaJson = "{}";
+			if (item.metadata_json != null || item.metadata != null) {
+				const rawMeta =
+					typeof item.metadata_json === "string"
+						? (() => {
+								try {
+									return JSON.parse(item.metadata_json) as object;
+								} catch {
+									return {};
+								}
+							})()
+						: typeof item.metadata === "object" && item.metadata !== null
+							? (item.metadata as object)
+							: {};
+				cleanMetaJson = JSON.stringify(sanitizeMetadataRecord(rawMeta, true));
+			}
+
 			db.run(
 				`
 				INSERT INTO episodic_memory
@@ -1005,12 +1119,12 @@ export function importFromDict(beam: BeamMemoryState, data: Record<string, unkno
 			`,
 				[
 					id,
-					sqlBinding(item.content, ""),
-					sqlBinding(item.source, null),
+					sanitizeContent(String(sqlBinding(item.content, "") ?? ""))[0],
+					cleanSource,
 					sqlBinding(item.timestamp, null),
 					sqlBinding(item.session_id, "default"),
 					sqlBinding(item.importance, 0.5),
-					sqlBinding(item.metadata_json, "{}"),
+					cleanMetaJson,
 					sqlBinding(item.summary_of, ""),
 					sqlBinding(item.valid_until, null),
 					sqlBinding(item.superseded_by, null),
@@ -1060,7 +1174,7 @@ export function importFromDict(beam: BeamMemoryState, data: Record<string, unkno
 			const exists = scratchExists.get(id) !== null;
 			if (exists) {
 				db.run("UPDATE scratchpad SET content = ?, session_id = ?, created_at = ?, updated_at = ? WHERE id = ?", [
-					sqlBinding(item.content, ""),
+					sanitizeContent(String(sqlBinding(item.content, "") ?? ""))[0],
 					sqlBinding(item.session_id, "default"),
 					sqlBinding(item.created_at, null),
 					sqlBinding(item.updated_at, null),
@@ -1070,7 +1184,7 @@ export function importFromDict(beam: BeamMemoryState, data: Record<string, unkno
 			} else {
 				db.run("INSERT INTO scratchpad (id, content, session_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)", [
 					id,
-					sqlBinding(item.content, ""),
+					sanitizeContent(String(sqlBinding(item.content, "") ?? ""))[0],
 					sqlBinding(item.session_id, "default"),
 					sqlBinding(item.created_at, null),
 					sqlBinding(item.updated_at, null),

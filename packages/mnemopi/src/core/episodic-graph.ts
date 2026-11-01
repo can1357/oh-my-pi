@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { sanitizeTextField, sanitizeTimestamp } from "./content-sanitizer";
 import { closeQuietly, type DatabasePath, openDatabase, transaction } from "../db";
 
 export interface Gist {
@@ -200,22 +201,22 @@ function parseJsonStringArray(value: string | null): string[] {
 function rowToGist(row: GistRow): Gist {
 	return {
 		id: row.id,
-		text: row.text,
-		timestamp: row.timestamp ?? "",
-		participants: parseJsonStringArray(row.participants_json),
-		location: row.location,
-		emotion: row.emotion,
-		timeScope: row.time_scope,
+		text: sanitizeTextField(row.text),
+		timestamp: sanitizeTimestamp(row.timestamp, ""),
+		participants: parseJsonStringArray(row.participants_json).map(p => sanitizeTextField(p)),
+		location: row.location !== null ? sanitizeTextField(row.location) : null,
+		emotion: row.emotion !== null ? sanitizeTextField(row.emotion) : null,
+		timeScope: row.time_scope !== null ? sanitizeTextField(row.time_scope) : null,
 	};
 }
 
 function rowToFact(row: FactRow): Fact {
 	return {
 		id: row.fact_id,
-		subject: row.subject,
-		predicate: row.predicate,
-		object: row.object,
-		timestamp: row.timestamp ?? "",
+		subject: sanitizeTextField(row.subject),
+		predicate: sanitizeTextField(row.predicate),
+		object: sanitizeTextField(row.object),
+		timestamp: sanitizeTimestamp(row.timestamp, ""),
 		confidence: row.confidence ?? 0.5,
 		temporalQualifier: null,
 		memoryId: row.source_msg_id,
@@ -365,23 +366,27 @@ export class EpisodicGraph {
 	}
 
 	extractGist(content: string, memoryId: string): Gist {
+		const cleanContent = sanitizeTextField(content);
 		return {
 			id: `gist_${memoryId}`,
-			text: this.createSummary(content),
+			text: this.createSummary(cleanContent),
 			timestamp: nowIso(),
-			participants: this.extractParticipants(content),
-			location: this.extractLocation(content),
-			emotion: this.extractEmotion(content),
-			timeScope: this.extractTemporalScope(content),
+			participants: this.extractParticipants(cleanContent),
+			location: this.extractLocation(cleanContent),
+			emotion: this.extractEmotion(cleanContent),
+			timeScope: this.extractTemporalScope(cleanContent),
 		};
 	}
 	extractFacts(content: string, memoryId: string): Fact[] {
+		const sanitized = sanitizeTextField(content);
 		const bounded =
-			content.length > EXTRACT_FACTS_MAX_CONTENT_LEN ? content.slice(0, EXTRACT_FACTS_MAX_CONTENT_LEN) : content;
+			sanitized.length > EXTRACT_FACTS_MAX_CONTENT_LEN
+				? sanitized.slice(0, EXTRACT_FACTS_MAX_CONTENT_LEN)
+				: sanitized;
 		const facts: Fact[] = [];
 		const pushFact = (subject: string, predicate: string, object: string, confidence: number): void => {
-			const cleanSubject = subject.trim();
-			const cleanObject = object.trim();
+			const cleanSubject = sanitizeTextField(subject.trim());
+			const cleanObject = sanitizeTextField(object.trim());
 			if (cleanSubject.length <= 2 || cleanObject.length <= 2 || facts.length >= MAX_FACTS_PER_MEMORY) return;
 			facts.push({
 				id: `fact_${memoryId}_${facts.length}`,
@@ -401,18 +406,24 @@ export class EpisodicGraph {
 		return facts;
 	}
 	storeGist(gist: Gist, memoryId: string): void {
+		const cleanText = sanitizeTextField(gist.text);
+		const cleanParticipants = gist.participants.map(p => sanitizeTextField(p));
+		const cleanLocation = gist.location !== null ? sanitizeTextField(gist.location) : null;
+		const cleanEmotion = gist.emotion !== null ? sanitizeTextField(gist.emotion) : null;
+		const cleanTimeScope = gist.timeScope !== null ? sanitizeTextField(gist.timeScope) : null;
+		const cleanTimestamp = sanitizeTimestamp(gist.timestamp, "");
 		this.db.run(
 			`INSERT OR REPLACE INTO gists
 				(id, text, timestamp, participants_json, location, emotion, time_scope, memory_id)
 				VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 			[
 				gist.id,
-				gist.text,
-				gist.timestamp,
-				JSON.stringify(gist.participants),
-				gist.location,
-				gist.emotion,
-				gist.timeScope,
+				cleanText,
+				cleanTimestamp,
+				JSON.stringify(cleanParticipants),
+				cleanLocation,
+				cleanEmotion,
+				cleanTimeScope,
 				memoryId,
 			],
 		);
@@ -422,11 +433,15 @@ export class EpisodicGraph {
 		return row === null ? null : rowToGist(row);
 	}
 	storeFact(fact: Fact, memoryId: string, sessionId = "default"): void {
+		const cleanSubject = sanitizeTextField(fact.subject);
+		const cleanPredicate = sanitizeTextField(fact.predicate);
+		const cleanObject = sanitizeTextField(fact.object);
+		const cleanTimestamp = sanitizeTimestamp(fact.timestamp, "");
 		this.db.run(
 			`INSERT OR REPLACE INTO facts
 				(fact_id, session_id, subject, predicate, object, timestamp, source_msg_id, confidence)
 				VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			[fact.id, sessionId, fact.subject, fact.predicate, fact.object, fact.timestamp, memoryId, fact.confidence],
+			[fact.id, sessionId, cleanSubject, cleanPredicate, cleanObject, cleanTimestamp, memoryId, fact.confidence],
 		);
 	}
 	getFact(id: string): Fact | null {
@@ -519,9 +534,17 @@ export class EpisodicGraph {
 		return rows.map(edgeFromRow);
 	}
 	findFactsBySubject(subject: string): Fact[] {
-		const rows = this.db
-			.query("SELECT * FROM facts WHERE subject = ? ORDER BY confidence DESC, timestamp DESC")
-			.all(subject) as FactRow[];
+		const cleanSubject = sanitizeTextField(subject);
+		const rows =
+			cleanSubject === subject
+				? (this.db
+						.query("SELECT * FROM facts WHERE subject = ? ORDER BY confidence DESC, timestamp DESC")
+						.all(subject) as FactRow[])
+				: (this.db
+						.query(
+							"SELECT * FROM facts WHERE subject = ? OR subject = ? ORDER BY confidence DESC, timestamp DESC",
+						)
+						.all(subject, cleanSubject) as FactRow[]);
 		return rows.map(rowToFact);
 	}
 	findGistsByParticipant(participant: string): Gist[] {
@@ -540,9 +563,9 @@ export class EpisodicGraph {
 		const linkExisting = options.linkExisting ?? true;
 		const minLinkScore = options.minLinkScore ?? DEFAULT_LINK_THRESHOLD;
 		const extractEntities = options.extractEntities ?? true;
-		const gist = this.extractGist(content, memoryId);
-		const facts = extractEntities ? this.extractFacts(content, memoryId) : [];
-		// One transaction for every gist/fact/edge write: autocommitted, each
+		const sanitizedContent = sanitizeTextField(content);
+		const gist = this.extractGist(sanitizedContent, memoryId);
+		const facts = extractEntities ? this.extractFacts(sanitizedContent, memoryId) : [];
 		// `addEdge` paid its own WAL commit (an fsync), so linking a memory
 		// against a large bank blocked the caller's event loop for seconds (#14998).
 		return transaction(this.db, () => {
