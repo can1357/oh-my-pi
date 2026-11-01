@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -3048,6 +3048,147 @@ describe("GitLab Duo Workflow WebSocket state machine", () => {
 		);
 
 		await streamPromise;
+		const text = output.content.map(block => (block.type === "text" ? block.text : "")).join("");
+		expect(text).toBe("Working");
+	});
+
+	it("does not duplicate an unchanged entry that moves to an earlier turn when a snapshot shrinks", async () => {
+		// The full snapshot shrinks by dropping a request boundary, so the same
+		// unchanged agent text now replays at an EARLIER turn; a later frame then
+		// renames the message id. The per-key lookup misses on the rename, so the
+		// content signature on that turn is the only guard — if the identically
+		// replayed entry signed the new turn with a placeholder hash, the rename
+		// hashes the text, misses, and the full content is appended a second time.
+		const socket: GitLabDuoWorkflowWebSocketLike = {
+			onopen: null,
+			onmessage: null,
+			onerror: null,
+			onclose: null,
+			send() {},
+			close() {},
+		};
+		const output: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: "gitlab-duo-agent",
+			provider: "gitlab-duo-agent",
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		};
+		const streamPromise = runGitLabDuoWorkflowSocket(
+			socket,
+			buildGitLabDuoWorkflowStartRequest("workflow-1", model, context),
+			{ stream: new AssistantMessageEventStream(), output, started: true },
+			{ apiKey: "redacted" },
+		);
+		socket.onopen?.(new Event("open"));
+		const sendSnapshot = (status: string, uiChatLog: unknown[]): void => {
+			socket.onmessage?.(
+				new MessageEvent("message", {
+					data: JSON.stringify({
+						newCheckpoint: {
+							status,
+							checkpoint: JSON.stringify({ channel_values: { ui_chat_log: uiChatLog } }),
+						},
+					}),
+				}),
+			);
+		};
+		// Full snapshot: the agent delta follows a request boundary, so it sits at
+		// turn 1 and signs turn 1 with the real content hash.
+		sendSnapshot("CREATED", [
+			{ message_type: "user", content: "Question" },
+			{ message_type: "request", content: "Read src/index.ts" },
+			{ message_type: "agent", message_id: "agent-a", content: "Working" },
+		]);
+		// Shrunk snapshot: the request boundary is gone, so the same unchanged entry
+		// now replays at turn 0 (identically → empty delta) and must still sign
+		// turn 0 with the real content hash.
+		sendSnapshot("CREATED", [{ message_type: "agent", message_id: "agent-a", content: "Working" }]);
+		// Renamed message id at that same new turn: the per-key lookup misses, so
+		// only the turn-0 signature can suppress the replayed text.
+		sendSnapshot("INPUT_REQUIRED", [{ message_type: "agent", message_id: "agent-z", content: "Working" }]);
+
+		await streamPromise;
+		const text = output.content.map(block => (block.type === "text" ? block.text : "")).join("");
+		expect(text).toBe("Working");
+	});
+
+	it("does not rescan a byte-identical checkpoint entry", async () => {
+		// Every checkpoint is a full snapshot, so an unchanged entry is replayed
+		// byte-identically on each one. The equality test already decides that
+		// case, so the prefix scan must not run again on it: a second walk over
+		// the whole entry per checkpoint is the per-chunk O(n) work the
+		// content-hash cache exists to remove.
+		const socket: GitLabDuoWorkflowWebSocketLike = {
+			onopen: null,
+			onmessage: null,
+			onerror: null,
+			onclose: null,
+			send() {},
+			close() {},
+		};
+		const output: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: "gitlab-duo-agent",
+			provider: "gitlab-duo-agent",
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		};
+		const streamPromise = runGitLabDuoWorkflowSocket(
+			socket,
+			buildGitLabDuoWorkflowStartRequest("workflow-1", model, context),
+			{ stream: new AssistantMessageEventStream(), output, started: true },
+			{ apiKey: "redacted" },
+		);
+		socket.onopen?.(new Event("open"));
+		const sendSnapshot = (status: string, uiChatLog: unknown[]): void => {
+			socket.onmessage?.(
+				new MessageEvent("message", {
+					data: JSON.stringify({
+						newCheckpoint: {
+							status,
+							checkpoint: JSON.stringify({ channel_values: { ui_chat_log: uiChatLog } }),
+						},
+					}),
+				}),
+			);
+		};
+		const content = "Working";
+		const startsWith = vi.spyOn(String.prototype, "startsWith");
+		let scans = -1;
+		try {
+			sendSnapshot("CREATED", [{ message_type: "agent", message_id: "agent-a", content }]);
+			// The same entry, byte-identical, in the next full snapshot.
+			sendSnapshot("INPUT_REQUIRED", [{ message_type: "agent", message_id: "agent-a", content }]);
+			scans = startsWith.mock.calls.filter(args => args[0] === content).length;
+		} finally {
+			startsWith.mockRestore();
+		}
+
+		await streamPromise;
+		// The replayed entry was not prefix-scanned against its own text.
+		expect(scans).toBe(0);
+		// The replay still emits the text exactly once.
 		const text = output.content.map(block => (block.type === "text" ? block.text : "")).join("");
 		expect(text).toBe("Working");
 	});
