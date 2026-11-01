@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Changed
+
+- Stats sync now keeps a warm pool of parse workers across runs instead of starting a fresh worker for every run, and keys each pooled worker on the resolved sessions directory and working directory so a worker is never reused after either moves ([#15331](https://github.com/can1357/oh-my-pi/pull/15331) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.14.2] - 2026-10-31
 
