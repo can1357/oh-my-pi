@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "bun:test";
 import { MAX_TIMER_DELAY_MS } from "@oh-my-pi/pi-utils";
-import { createKernelSessionRegistry, type KernelSession } from "../../src/eval/kernel-session-registry";
+import {
+	createKernelSessionRegistry,
+	type KernelSession,
+	type KernelSessionRegistry,
+} from "../../src/eval/kernel-session-registry";
 
 interface TestOptions {
 	sessionId?: string;
@@ -46,11 +50,13 @@ type ExecuteFakeKernel = (kernel: FakeKernel, code: string, options: TestOptions
 
 type StartFakeKernel = (kernel: FakeKernel, options: TestOptions) => Promise<void>;
 
+type FakeRegistry = KernelSessionRegistry<FakeKernel, TestOptions, TestResult, KernelSession<FakeKernel>>;
+
 function createFakeRegistry(
 	executeWithKernel: ExecuteFakeKernel,
 	onStartKernel?: StartFakeKernel,
 	canShutdownIdle?: (session: KernelSession<FakeKernel>) => Promise<boolean>,
-) {
+): { kernels: FakeKernel[]; registry: FakeRegistry } {
 	const kernels: FakeKernel[] = [];
 	const registry = createKernelSessionRegistry<FakeKernel, TestOptions, TestResult, KernelSession<FakeKernel>>({
 		languageLabel: "Test",
@@ -88,10 +94,7 @@ async function collected(ref: WeakRef<object>, deadlineMs: number): Promise<bool
 }
 
 /** Kept out of the test body so no strong local binding outlives the capture. */
-function weakRefToPresentSession(
-	registry: ReturnType<typeof createFakeRegistry>["registry"],
-	options: TestOptions,
-): WeakRef<object> {
+function weakRefToPresentSession(registry: FakeRegistry, options: TestOptions): WeakRef<object> {
 	const session = registry.getPresentSession("/tmp", options);
 	if (!session) throw new Error("no present session to observe");
 	return new WeakRef(session);
@@ -687,6 +690,61 @@ describe("idle kernel shutdown", () => {
 			finishShutdown.resolve();
 			await late;
 			expect(ran.at(-1)).toEqual({ code: "late", kernel: 1, restarted: true });
+		} finally {
+			finishShutdown.resolve();
+			await registry.disposeAll();
+		}
+	});
+
+	it("lets a caller stop waiting for an idle shutdown without cancelling it", async () => {
+		const shutdownStarted = Promise.withResolvers<void>();
+		const finishShutdown = Promise.withResolvers<void>();
+		const { kernels, registry, ran, cell } = idleRegistry();
+		const rejectionWithin = (promise: Promise<unknown>, ms: number): Promise<unknown> =>
+			Promise.race([
+				promise.then(
+					() => "resolved",
+					(error: unknown) => error,
+				),
+				Bun.sleep(ms).then(() => "still pending"),
+			]);
+		try {
+			await cell("setup");
+			const first = kernels[0]!;
+			first.shutdown = async () => {
+				shutdownStarted.resolve();
+				await finishShutdown.promise;
+				first.alive = false;
+				first.shutdowns += 1;
+				return { confirmed: true };
+			};
+			await shutdownStarted.promise;
+			const controller = new AbortController();
+			const aborted = registry.executeOnSession("aborted", "/tmp", {
+				sessionId: "idle",
+				kernelIdleShutdownMs: IDLE_MS,
+				signal: controller.signal,
+			});
+			controller.abort();
+			const expired = registry.executeOnSession("expired", "/tmp", {
+				sessionId: "idle",
+				kernelIdleShutdownMs: IDLE_MS,
+				deadlineMs: Date.now() + IDLE_MS,
+			});
+			const abortError = await rejectionWithin(aborted, 500);
+			expect(abortError).toBeInstanceOf(TestCancelledError);
+			expect(abortError).toHaveProperty("timedOut", false);
+			const deadlineError = await rejectionWithin(expired, 500);
+			expect(deadlineError).toBeInstanceOf(TestCancelledError);
+			expect(deadlineError).toHaveProperty("timedOut", true);
+			expect(first.shutdowns).toBe(0);
+			finishShutdown.resolve();
+			await waitUntil(() => first.shutdowns === 1);
+			await cell("after");
+			expect(ran).toEqual([
+				{ code: "setup", kernel: 0, restarted: false },
+				{ code: "after", kernel: 1, restarted: true },
+			]);
 		} finally {
 			finishShutdown.resolve();
 			await registry.disposeAll();
