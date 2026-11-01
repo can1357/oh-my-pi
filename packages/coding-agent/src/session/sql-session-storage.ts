@@ -78,8 +78,12 @@ interface DialectQueries {
 	replaceIfSize: string;
 	/** Insert if missing; otherwise append the new chunk to existing content. Used for `writeLine`. */
 	upsertAppend: string;
+	/** Append content and authoritative title metadata in the same statement. */
+	upsertAppendIndexed: string;
 	/** Update indexed title metadata without rewriting the JSONL body. */
 	updateTitle: string;
+	/** Reconcile a legacy title only while the physical body still has the scanned size. */
+	indexTitle: string;
 	/** Delete a single row by path. */
 	delete: string;
 	/** Move a row from one path to another. */
@@ -99,6 +103,7 @@ interface IndexRow {
 	title?: string | null;
 	title_source?: string | null;
 	title_updated_at?: string | null;
+	title_indexed_size?: number | bigint | string | null;
 }
 
 interface ContentRow {
@@ -137,27 +142,32 @@ function buildQueries(adapter: SqlSessionStorageAdapter, table: string): Dialect
 				`mtime_ms BIGINT NOT NULL, ` +
 				`title TEXT NULL, ` +
 				`title_source VARCHAR(16) NULL, ` +
-				`title_updated_at VARCHAR(64) NULL` +
+				`title_updated_at VARCHAR(64) NULL, title_indexed_size BIGINT NULL` +
 				`) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin`,
 			addTitleColumns: [
 				`ALTER TABLE ${table} ADD COLUMN title TEXT NULL`,
 				`ALTER TABLE ${table} ADD COLUMN title_source VARCHAR(16) NULL`,
 				`ALTER TABLE ${table} ADD COLUMN title_updated_at VARCHAR(64) NULL`,
+				`ALTER TABLE ${table} ADD COLUMN title_indexed_size BIGINT NULL`,
 			],
 			upsertReplace:
-				`INSERT INTO ${table} (path, content, mtime_ms, title, title_source, title_updated_at) VALUES (?, ?, ?, ?, ?, ?) ` +
-				`ON DUPLICATE KEY UPDATE content = ?, mtime_ms = ?, title = ?, title_source = ?, title_updated_at = ?`,
-			insertIfMissing: `INSERT IGNORE INTO ${table} (path, content, mtime_ms, title, title_source, title_updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
+				`INSERT INTO ${table} (path, content, mtime_ms, title, title_source, title_updated_at, title_indexed_size) VALUES (?, ?, ?, ?, ?, ?, ?) ` +
+				`ON DUPLICATE KEY UPDATE content = ?, mtime_ms = ?, title = ?, title_source = ?, title_updated_at = ?, title_indexed_size = ?`,
+			insertIfMissing: `INSERT IGNORE INTO ${table} (path, content, mtime_ms, title, title_source, title_updated_at, title_indexed_size) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 			replaceIfSize:
-				`UPDATE ${table} SET content = ?, mtime_ms = ?, title = ?, title_source = ?, title_updated_at = ? ` +
+				`UPDATE ${table} SET content = ?, mtime_ms = ?, title = ?, title_source = ?, title_updated_at = ?, title_indexed_size = ? ` +
 				`WHERE path = ? AND length(content) = ?`,
 			upsertAppend:
 				`INSERT INTO ${table} (path, content, mtime_ms) VALUES (?, ?, ?) ` +
 				`ON DUPLICATE KEY UPDATE content = CONCAT(content, ?), mtime_ms = ?`,
-			updateTitle: `UPDATE ${table} SET title = ?, title_source = ?, title_updated_at = ?, mtime_ms = ? WHERE path = ?`,
+			upsertAppendIndexed:
+				`INSERT INTO ${table} (path, content, mtime_ms, title, title_source, title_updated_at, title_indexed_size) VALUES (?, ?, ?, ?, ?, ?, ?) ` +
+				`ON DUPLICATE KEY UPDATE content = CONCAT(content, ?), mtime_ms = ?, title = ?, title_source = ?, title_updated_at = ?, title_indexed_size = ?`,
+			updateTitle: `UPDATE ${table} SET title = ?, title_source = ?, title_updated_at = ?, mtime_ms = ?, title_indexed_size = NULL WHERE path = ?`,
+			indexTitle: `UPDATE ${table} SET title = ?, title_source = ?, title_updated_at = ?, title_indexed_size = ? WHERE path = ? AND length(content) = ?`,
 			delete: `DELETE FROM ${table} WHERE path = ?`,
 			rename: `UPDATE ${table} SET path = ?, mtime_ms = ? WHERE path = ?`,
-			loadIndex: `SELECT path, mtime_ms, length(content) AS byte_len, title, title_source, title_updated_at FROM ${table}`,
+			loadIndex: `SELECT path, mtime_ms, length(content) AS byte_len, title, title_source, title_updated_at, title_indexed_size FROM ${table}`,
 			readFull: `SELECT content AS content FROM ${table} WHERE path = ?`,
 			readSlices:
 				`SELECT substring(cast(content AS binary), 1, ?) AS head, ` +
@@ -188,33 +198,39 @@ function buildQueries(adapter: SqlSessionStorageAdapter, table: string): Dialect
 			`mtime_ms ${mtimeType} NOT NULL, ` +
 			`title TEXT, ` +
 			`title_source TEXT, ` +
-			`title_updated_at TEXT` +
+			`title_updated_at TEXT, title_indexed_size ${mtimeType}` +
 			`)`,
 		addTitleColumns: [
 			`ALTER TABLE ${table} ADD COLUMN title TEXT`,
 			`ALTER TABLE ${table} ADD COLUMN title_source TEXT`,
 			`ALTER TABLE ${table} ADD COLUMN title_updated_at TEXT`,
+			`ALTER TABLE ${table} ADD COLUMN title_indexed_size ${mtimeType}`,
 		],
 		upsertReplace:
-			`INSERT INTO ${table} (path, content, mtime_ms, title, title_source, title_updated_at) ` +
-			`VALUES (${placeholder(1)}, ${placeholder(2)}, ${placeholder(3)}, ${placeholder(4)}, ${placeholder(5)}, ${placeholder(6)}) ` +
-			`ON CONFLICT (path) DO UPDATE SET content = excluded.content, mtime_ms = excluded.mtime_ms, title = excluded.title, title_source = excluded.title_source, title_updated_at = excluded.title_updated_at`,
+			`INSERT INTO ${table} (path, content, mtime_ms, title, title_source, title_updated_at, title_indexed_size) ` +
+			`VALUES (${placeholder(1)}, ${placeholder(2)}, ${placeholder(3)}, ${placeholder(4)}, ${placeholder(5)}, ${placeholder(6)}, ${placeholder(7)}) ` +
+			`ON CONFLICT (path) DO UPDATE SET content = excluded.content, mtime_ms = excluded.mtime_ms, title = excluded.title, title_source = excluded.title_source, title_updated_at = excluded.title_updated_at, title_indexed_size = excluded.title_indexed_size`,
 		insertIfMissing:
-			`INSERT INTO ${table} (path, content, mtime_ms, title, title_source, title_updated_at) ` +
-			`VALUES (${placeholder(1)}, ${placeholder(2)}, ${placeholder(3)}, ${placeholder(4)}, ${placeholder(5)}, ${placeholder(6)}) ` +
+			`INSERT INTO ${table} (path, content, mtime_ms, title, title_source, title_updated_at, title_indexed_size) ` +
+			`VALUES (${placeholder(1)}, ${placeholder(2)}, ${placeholder(3)}, ${placeholder(4)}, ${placeholder(5)}, ${placeholder(6)}, ${placeholder(7)}) ` +
 			`ON CONFLICT (path) DO NOTHING RETURNING path`,
 		replaceIfSize:
 			`UPDATE ${table} SET content = ${placeholder(1)}, mtime_ms = ${placeholder(2)}, title = ${placeholder(3)}, ` +
-			`title_source = ${placeholder(4)}, title_updated_at = ${placeholder(5)} ` +
-			`WHERE path = ${placeholder(6)} AND ${byteLengthExpr} = ${placeholder(7)} RETURNING path`,
+			`title_source = ${placeholder(4)}, title_updated_at = ${placeholder(5)}, title_indexed_size = ${placeholder(6)} ` +
+			`WHERE path = ${placeholder(7)} AND ${byteLengthExpr} = ${placeholder(8)} RETURNING path`,
 		upsertAppend:
 			`INSERT INTO ${table} (path, content, mtime_ms) ` +
 			`VALUES (${placeholder(1)}, ${placeholder(2)}, ${placeholder(3)}) ` +
 			`ON CONFLICT (path) DO UPDATE SET content = ${tableQualifier} || excluded.content, mtime_ms = excluded.mtime_ms`,
-		updateTitle: `UPDATE ${table} SET title = ${placeholder(1)}, title_source = ${placeholder(2)}, title_updated_at = ${placeholder(3)}, mtime_ms = ${placeholder(4)} WHERE path = ${placeholder(5)}`,
+		upsertAppendIndexed:
+			`INSERT INTO ${table} (path, content, mtime_ms, title, title_source, title_updated_at, title_indexed_size) ` +
+			`VALUES (${placeholder(1)}, ${placeholder(2)}, ${placeholder(3)}, ${placeholder(4)}, ${placeholder(5)}, ${placeholder(6)}, ${placeholder(7)}) ` +
+			`ON CONFLICT (path) DO UPDATE SET content = ${tableQualifier} || excluded.content, mtime_ms = excluded.mtime_ms, title = excluded.title, title_source = excluded.title_source, title_updated_at = excluded.title_updated_at, title_indexed_size = excluded.title_indexed_size`,
+		updateTitle: `UPDATE ${table} SET title = ${placeholder(1)}, title_source = ${placeholder(2)}, title_updated_at = ${placeholder(3)}, mtime_ms = ${placeholder(4)}, title_indexed_size = NULL WHERE path = ${placeholder(5)}`,
+		indexTitle: `UPDATE ${table} SET title = ${placeholder(1)}, title_source = ${placeholder(2)}, title_updated_at = ${placeholder(3)}, title_indexed_size = ${placeholder(4)} WHERE path = ${placeholder(5)} AND ${byteLengthExpr} = ${placeholder(6)} RETURNING path`,
 		delete: `DELETE FROM ${table} WHERE path = ${placeholder(1)}`,
 		rename: `UPDATE ${table} SET path = ${placeholder(1)}, mtime_ms = ${placeholder(2)} WHERE path = ${placeholder(3)} RETURNING path`,
-		loadIndex: `SELECT path, mtime_ms, ${byteLengthExpr} AS byte_len, title, title_source, title_updated_at FROM ${table}`,
+		loadIndex: `SELECT path, mtime_ms, ${byteLengthExpr} AS byte_len, title, title_source, title_updated_at, title_indexed_size FROM ${table}`,
 		readFull: `SELECT content AS content FROM ${table} WHERE path = ${placeholder(1)}`,
 		readSlices,
 	};
@@ -331,6 +347,7 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 			title: row.title ?? undefined,
 			titleSource: rowTitleSource(row.title_source),
 			titleUpdatedAt: row.title_updated_at ?? undefined,
+			titleIndexedSize: row.title_indexed_size == null ? undefined : rowNumber(row.title_indexed_size),
 		}));
 	}
 
@@ -358,7 +375,12 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 		title?: SessionTitleUpdate,
 		expectedSize?: number | null,
 	): Promise<void> {
-		const titleValues = [title?.title ?? null, title?.source ?? null, title?.updatedAt ?? null];
+		const titleValues = [
+			title?.title ?? null,
+			title?.source ?? null,
+			title?.updatedAt ?? null,
+			Buffer.byteLength(content, "utf8"),
+		];
 		if (expectedSize === undefined) {
 			const values = [path, content, mtimeMs, ...titleValues];
 			if (this.#adapter === "mysql") values.push(content, mtimeMs, ...titleValues);
@@ -396,9 +418,34 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 		]);
 	}
 
-	async append(path: string, line: string, mtimeMs: number): Promise<void> {
-		const values = this.#adapter === "mysql" ? [path, line, mtimeMs, line, mtimeMs] : [path, line, mtimeMs];
-		await this.#client.unsafe(this.#q.upsertAppend, values);
+	async append(
+		path: string,
+		line: string,
+		mtimeMs: number,
+		title?: SessionTitleUpdate,
+		titleIndexedSize?: number,
+	): Promise<void> {
+		if (titleIndexedSize !== undefined) {
+			const titleValues = [title?.title ?? null, title?.source ?? null, title?.updatedAt ?? null, titleIndexedSize];
+			const values = [path, line, mtimeMs, ...titleValues];
+			if (this.#adapter === "mysql") values.push(line, mtimeMs, ...titleValues);
+			await this.#client.unsafe(this.#q.upsertAppendIndexed, values);
+		} else {
+			const values = this.#adapter === "mysql" ? [path, line, mtimeMs, line, mtimeMs] : [path, line, mtimeMs];
+			await this.#client.unsafe(this.#q.upsertAppend, values);
+		}
+	}
+
+	async indexTitle(path: string, title: SessionTitleUpdate | undefined, size: number): Promise<boolean> {
+		const result = await this.#client.unsafe(this.#q.indexTitle, [
+			title?.title ?? null,
+			title?.source ?? null,
+			title?.updatedAt ?? null,
+			size,
+			path,
+			size,
+		]);
+		return this.#adapter === "mysql" ? result.affectedRows === 1 : result.length === 1;
 	}
 
 	async truncate(path: string, mtimeMs: number): Promise<void> {

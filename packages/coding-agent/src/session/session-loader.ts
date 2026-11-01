@@ -30,6 +30,7 @@ import { isExternalizableImagePosition, isPersistenceTruncatedString } from "./s
 import { FileSessionStorage, type SessionStorage } from "./session-storage";
 import { enotdir } from "./session-storage-errors";
 import {
+	latestTitleChangeFromContent,
 	parseTitleSlotFromContent,
 	parseTitleSlotLine,
 	type SessionTitleUpdate,
@@ -41,8 +42,6 @@ const LF = new Uint8Array([0x0a]);
 const STREAM_LOAD_THRESHOLD_BYTES = 8 * 1024 * 1024;
 const STREAM_YIELD_BYTES = 1 * 1024 * 1024;
 const STREAM_YIELD_ENTRIES = 8_192;
-/** Initial parse window after a malformed record; see the recovery note in visitEntriesFromFileStream. */
-const RECOVERY_PARSE_WINDOW = 64 * 1024;
 const BLOB_READ_CONCURRENCY = 8;
 
 /**
@@ -119,6 +118,8 @@ export interface VisitEntriesFromFileStreamOptions {
 	 * callers derive the exact snapshot size without re-stating the file.
 	 */
 	onBytesConsumed?: (bytes: number) => void;
+	/** Skip a self-contained physical record before decoding; return false for multiline fragments. */
+	skipRecord?: (bytes: Uint8Array) => boolean;
 }
 
 /** Controls how a missing session file is handled. */
@@ -253,6 +254,93 @@ function sessionHeaderIdFromPrefix(prefix: Uint8Array, final: boolean): string |
 	return isValidSessionHeader(entry) ? entry.id : undefined;
 }
 
+interface SettleSearch {
+	tried: number;
+	found: number[];
+	scanned: number;
+}
+
+/**
+ * Find the first newline that settles one record, trying exponentially spaced
+ * newlines and bisecting the final gap. Keep the search across stream chunks so
+ * multiline records are parsed in linear rather than quadratic work.
+ */
+function firstSettledNewline(view: Uint8Array, start: number, search: SettleSearch, atEnd: boolean): number {
+	const settles = (newline: number): boolean => {
+		const { values, error, done } = Bun.JSONL.parseChunk(view, start, start + newline + 1);
+		return values.length > 0 || Boolean(error) || done;
+	};
+	while (true) {
+		const wanted = Math.max(1, search.tried * 2) - search.tried;
+		while (search.found.length < wanted) {
+			const next = view.indexOf(0x0a, start + search.scanned);
+			if (next < 0) {
+				search.scanned = view.length - start;
+				break;
+			}
+			search.found.push(next - start);
+			search.scanned = next - start + 1;
+		}
+		const gap = search.found;
+		if (gap.length === 0 || (gap.length < wanted && !atEnd)) return -1;
+		if (!settles(gap.at(-1)!)) {
+			search.tried += gap.length;
+			search.found = [];
+			if (gap.length < wanted) return -1;
+			continue;
+		}
+		let low = 0;
+		let high = gap.length - 1;
+		while (low < high) {
+			const middle = (low + high) >>> 1;
+			if (settles(gap[middle]!)) high = middle;
+			else low = middle + 1;
+		}
+		return start + gap[low]!;
+	}
+}
+
+const TITLE_CHANGE_MARKER = Buffer.from('"title_change"');
+
+/**
+ * Reject ordinary single-line records without allocating their text or payload.
+ * A closed nested object is not enough: the outer container must end on this
+ * line. Multiline and malformed fragments stay with the scanner's normal parser.
+ */
+function skipNonTitleRecord(bytes: Uint8Array): boolean {
+	const line = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	if (line.includes(TITLE_CHANGE_MARKER)) return false;
+	let depth = 0;
+	for (let index = 0; index < line.length; index++) {
+		const byte = line[index];
+		if (byte === 0x22) {
+			if (depth === 0) return false;
+			// Jump across string payloads in native code, including multi-MiB tool results.
+			let quote = index;
+			do {
+				quote = line.indexOf(0x22, quote + 1);
+				if (quote < 0) return false;
+				let slash = quote;
+				while (slash > index && line[slash - 1] === 0x5c) slash--;
+				if ((quote - slash) % 2 === 0) break;
+			} while (true);
+			index = quote;
+		} else if (byte === 0x7b || byte === 0x5b) {
+			depth++;
+		} else if (byte === 0x7d || byte === 0x5d) {
+			if (--depth !== 0) continue;
+			for (let rest = index + 1; rest < line.length; rest++) {
+				const trailing = line[rest];
+				if (trailing !== 0x09 && trailing !== 0x0d && trailing !== 0x20) return false;
+			}
+			return true;
+		} else if (depth === 0 && byte !== 0x09 && byte !== 0x0d && byte !== 0x20) {
+			return false;
+		}
+	}
+	return false;
+}
+
 /** Parse session JSONL and visit each entry without retaining prior entries. */
 export async function visitEntriesFromFileStream(
 	filePath: string,
@@ -290,113 +378,111 @@ export async function visitEntriesFromFileStream(
 		await Bun.sleep(0);
 	};
 
-	const hasPayload = (bytes: Uint8Array, start: number, end: number): boolean => {
-		for (let index = start; index < end; index++) {
-			const byte = bytes[index];
-			if (byte !== 0x09 && byte !== 0x0a && byte !== 0x0d && byte !== 0x20) return true;
-		}
-		return false;
-	};
-
-	const drain = async (endOfInput = false): Promise<void> => {
+	// Keep at most one unfinished record, including its newline search, across chunks.
+	let unfinished: SettleSearch | undefined;
+	const drain = async (atEnd = false): Promise<void> => {
 		const view = sink.flush();
 		if (!view) return;
-		// Only newline-terminated bytes may reach the parser: a trailing fragment
-		// in the same call turns an end-of-input `done` into a syntax error at the
-		// preceding newline, which would then be miscounted as a malformed record.
-		const lastNewline = view.lastIndexOf(0x0a);
-		if (lastNewline === -1) return;
-		let buffer: Uint8Array = view.subarray(0, lastNewline + 1);
 		let consumed = 0;
-		const advance = (count: number): void => {
-			consumed += count;
-			buffer = buffer.subarray(count);
+		const emit = async (entry: FileEntry): Promise<void> => {
+			if (!sawFirstEntry) {
+				sawFirstEntry = true;
+				applySessionTitle(entry, titleSlot);
+			}
+			try {
+				stopped = visit(entry) === false;
+			} catch (err) {
+				visitorThrew = true;
+				throw err;
+			}
+			recordsSeen++;
+			entriesSinceYield++;
+			if (recordsSeen >= maxRecords) stopped = true;
+			await yieldToMacrotask();
 		};
-		// parseChunk costs time proportional to its whole input even when it stops at
-		// the first bad line, so recovering line by line over the full buffer is
-		// quadratic. After a malformed record, parse a newline-cut window that grows
-		// while the input keeps parsing and resets on the next error.
-		let window = Number.POSITIVE_INFINITY;
-		while (buffer.length > 0 && !stopped) {
-			if (recordsSeen >= maxRecords) {
+		const skipMalformed = (from: number, to: number): void => {
+			for (let index = from; index < to; index++) {
+				const byte = view[index];
+				if (byte !== 0x09 && byte !== 0x0d && byte !== 0x20) {
+					options.onMalformedRecord?.();
+					break;
+				}
+			}
+			recordsSeen++;
+			if (recordsSeen >= maxRecords) stopped = true;
+		};
+		while (consumed < view.length && !stopped) {
+			if (recordsSeen >= maxRecords || options.shouldContinue?.() === false) {
 				stopped = true;
 				break;
 			}
-			let input = buffer;
-			if (window < buffer.length) {
-				const cut = buffer.indexOf(0x0a, window - 1);
-				if (cut !== -1) input = buffer.subarray(0, cut + 1);
-			}
-			const partial = input.length < buffer.length;
-			const { values, error, read, done } = Bun.JSONL.parseChunk(input);
-			for (const value of values) {
-				if (recordsSeen >= maxRecords) {
-					stopped = true;
-					break;
-				}
-				if (options.shouldContinue && !options.shouldContinue()) {
-					stopped = true;
-					break;
-				}
-				const entry = value as FileEntry;
-				if (!sawFirstEntry) {
-					sawFirstEntry = true;
-					applySessionTitle(entry, titleSlot);
-				}
-				try {
-					if (visit(entry) === false) {
-						stopped = true;
-						break;
-					}
+			const start = consumed;
+			let search = unfinished;
+			unfinished = undefined;
+			let recordEnd: number;
+			if (search) recordEnd = firstSettledNewline(view, start, search, atEnd);
+			else {
+				const firstNewline = view.indexOf(0x0a, consumed);
+				if (firstNewline < 0) break;
+				const lineBytes = view.subarray(start, firstNewline);
+				if (options.skipRecord?.(lineBytes)) {
+					sawFirstLine = true;
+					consumed = firstNewline + 1;
 					recordsSeen++;
-					entriesSinceYield++;
-					if (recordsSeen >= maxRecords) {
-						stopped = true;
-						break;
-					}
-				} catch (err) {
-					visitorThrew = true;
-					throw err;
-				}
-				await yieldToMacrotask();
-			}
-			if (stopped) break;
-			if (error) {
-				// Malformed record: skip past the next newline and continue.
-				const nextNewline = buffer.indexOf(0x0a, read);
-				if (nextNewline === -1) break; // rest of the bad line not yet received
-				if (hasPayload(buffer, read, nextNewline)) options.onMalformedRecord?.();
-				recordsSeen++;
-				advance(nextNewline + 1);
-				window = RECOVERY_PARSE_WINDOW;
-				if (recordsSeen >= maxRecords) {
-					stopped = true;
-					break;
-				}
-				continue;
-			}
-			if (read === 0) {
-				if (partial) {
-					// The record runs past the window, not past the buffered input.
-					window *= 2;
+					if (recordsSeen >= maxRecords) stopped = true;
 					continue;
 				}
-				// Incomplete value awaiting more bytes. Once the input has ended nothing more
-				// is coming, so it is a truncated record (parseJsonlLenient counts it too).
-				if (endOfInput) {
-					if (hasPayload(buffer, 0, buffer.length)) options.onMalformedRecord?.();
-					recordsSeen++;
-					advance(buffer.length);
+				const firstLine = decoder.decode(lineBytes).trim();
+				if (!sawFirstLine) {
+					sawFirstLine = true;
+					const slot = firstLine ? parseTitleSlotLine(firstLine) : undefined;
+					if (slot) {
+						titleSlot = titleUpdateFromSlot(slot);
+						consumed = firstNewline + 1;
+						continue;
+					}
 				}
+				if (!firstLine) {
+					consumed = firstNewline + 1;
+					continue;
+				}
+				let lineEntry: FileEntry | undefined;
+				try {
+					lineEntry = JSON.parse(firstLine) as FileEntry;
+				} catch {}
+				if (lineEntry) {
+					consumed = firstNewline + 1;
+					await emit(lineEntry);
+					continue;
+				}
+				recordEnd = firstNewline;
+			}
+			let settled = false;
+			while (recordEnd >= 0 && !settled) {
+				const { values, error, read, done } = Bun.JSONL.parseChunk(view, start, recordEnd + 1);
+				if (values.length > 0) {
+					consumed = recordEnd + 1;
+					await emit(values[0] as FileEntry);
+					if (error && !stopped) skipMalformed(read, recordEnd);
+					settled = true;
+				} else if (error || done) {
+					const errorStart = Math.max(start, read);
+					const nextNewline = view.indexOf(0x0a, errorStart);
+					consumed = nextNewline + 1;
+					skipMalformed(errorStart, nextNewline);
+					settled = true;
+				} else {
+					search ??= { tried: 0, found: [], scanned: recordEnd - start + 1 };
+					recordEnd = firstSettledNewline(view, start, search, atEnd);
+				}
+			}
+			if (settled) continue;
+			if (!atEnd) {
+				unfinished = search;
 				break;
 			}
-			advance(read);
-			if (done) {
-				// The parser reached the end of its input; whatever trails the last value is whitespace.
-				advance(input.length - read);
-				if (!partial) break;
-			}
-			if (partial) window *= 2;
+			consumed = view.length;
+			skipMalformed(start, view.length);
 		}
 		sink.consume(consumed);
 	};
@@ -429,26 +515,6 @@ export async function visitEntriesFromFileStream(
 				continue;
 			}
 			sink.append(chunk);
-			// The optional fixed-width title slot is a physical first line that is
-			// NOT JSON; peel it before the parser would (correctly) reject it. The
-			// first line ends at a '\n' byte, so it is a complete UTF-8 sequence and
-			// safe to decode. A non-slot first line is a real entry and is left for
-			// the parser; a blank first line is left for the parser to skip.
-			if (!sawFirstLine) {
-				const buffered = sink.flush()!;
-				const newline = buffered.indexOf(0x0a);
-				if (newline !== -1) {
-					sawFirstLine = true;
-					const firstLine = decoder.decode(buffered.subarray(0, newline)).trim();
-					if (firstLine) {
-						const slot = parseTitleSlotLine(firstLine);
-						if (slot) {
-							titleSlot = titleUpdateFromSlot(slot);
-							sink.consume(newline + 1);
-						}
-					}
-				}
-			}
 			// parseChunk can leave a value unfinished even after a newline; the
 			// sink keeps that remainder for the next chunk.
 			await drain();
@@ -515,41 +581,19 @@ export async function readLatestSessionTitle(
 	filePath: string,
 	storage: SessionStorage,
 ): Promise<SessionTitleUpdate | undefined> {
+	if (storage.readLatestTitle) return storage.readLatestTitle(filePath);
 	let latestTitle: SessionTitleUpdate | undefined;
 	if (storage instanceof FileSessionStorage) {
-		await visitEntriesFromFileStream(filePath, entry => {
-			latestTitle = titleUpdateFromEntry(entry) ?? latestTitle;
-		});
+		await visitEntriesFromFileStream(
+			filePath,
+			entry => {
+				latestTitle = titleUpdateFromEntry(entry) ?? latestTitle;
+			},
+			{ skipRecord: skipNonTitleRecord },
+		);
 		return latestTitle;
 	}
-	// Remote storage exposes text, not a stream. Parse bounded string windows
-	// with the same newline recovery as parseJsonlLenient, retaining only title
-	// metadata rather than a full journal array or a second UTF-8 body copy.
-	const content = await storage.readText(filePath);
-	const initialWindow = 64 * 1024;
-	let window = initialWindow;
-	let start = 0;
-	while (start < content.length) {
-		const newline = content.indexOf("\n", start + window);
-		const end = newline === -1 ? content.length : newline + 1;
-		const { values, error, read, done } = Bun.JSONL.parseChunk(content.slice(start, end));
-		for (const entry of values as FileEntry[]) latestTitle = titleUpdateFromEntry(entry) ?? latestTitle;
-		if (error) {
-			const nextNewline = content.indexOf("\n", start + read);
-			if (nextNewline === -1) break;
-			start = nextNewline + 1;
-		} else if (done) {
-			start = end;
-		} else if (read > 0) {
-			start += read;
-		} else {
-			if (end === content.length) break;
-			window *= 2;
-			continue;
-		}
-		window = initialWindow;
-	}
-	return latestTitle;
+	return latestTitleChangeFromContent(await storage.readText(filePath));
 }
 /** Exported for compaction.test.ts */
 export function parseSessionEntries(content: string): FileEntry[] {

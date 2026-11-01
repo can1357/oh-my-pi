@@ -19,6 +19,8 @@ import {
 	RedisSessionStorage,
 	type RedisSessionStorageClient,
 } from "@oh-my-pi/pi-coding-agent/session/redis-session-storage";
+import { listSessions } from "@oh-my-pi/pi-coding-agent/session/session-listing";
+import { readLatestSessionTitle } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 
 interface FakeRedisCall {
@@ -90,12 +92,23 @@ function createFakeRedis(): FakeRedis {
 			if (script.includes("OMP_APPEND")) {
 				checkFailure("append");
 				checkFailure("hset");
-				const [fileKey, metaKey] = keys;
-				const [line, filePath, mtimeMs] = argv;
+				const [fileKey, metaKey, titleKey] = keys;
+				const [line, filePath, mtimeMs, title] = argv;
 				const next = (strings.get(fileKey) ?? "") + line;
 				strings.set(fileKey, next);
 				getHash(metaKey).set(filePath, mtimeMs);
+				if (title) getHash(titleKey).set(filePath, title);
 				return Buffer.byteLength(next, "utf-8");
+			}
+			if (script.includes("OMP_INDEX_TITLE")) {
+				checkFailure("hset");
+				const [fileKey, titleKey] = keys;
+				const [filePath, expectedSize, title] = argv;
+				const current = strings.get(fileKey);
+				const size = current === undefined ? -1 : Buffer.byteLength(current);
+				if (size !== Number(expectedSize)) return [0, size];
+				getHash(titleKey).set(filePath, title);
+				return [1, size];
 			}
 			if (script.includes("OMP_UPDATE_TITLE")) {
 				checkFailure("hset");
@@ -286,6 +299,90 @@ describe("RedisSessionStorage", () => {
 			source: "user",
 			updatedAt: "t2",
 		});
+	});
+
+	it("atomically persists ordinary title appends across reopen without downloading session bodies", async () => {
+		const storage = await RedisSessionStorage.create({ client: redis });
+		const file = "/sessions/p/journal.jsonl";
+		const header = `${JSON.stringify({ type: "session", id: "journal", timestamp: "t1", cwd: "/repo" })}\n`;
+		const assistant = `${JSON.stringify({ type: "message", message: { role: "assistant", content: [] } })}\n`;
+		const title = { title: "Appended journal title", source: "user", updatedAt: "t2" } as const;
+		const content =
+			serializeTitleSlot({ title: "Stale", source: "auto", updatedAt: "t1" }) +
+			header +
+			assistant +
+			"x".repeat(256 * 1024) +
+			"\n";
+		await storage.writeText(file, content);
+		const writer = storage.openWriter(file);
+		await writer.append(
+			`${JSON.stringify({ type: "title_change", id: "rename", parentId: null, timestamp: title.updatedAt, title: title.title, source: title.source })}\n`,
+		);
+		await writer.close();
+		const append = redis.calls.find(
+			call => call.method === "send" && String((call.args[1] as string[])[0]).includes("OMP_APPEND"),
+		);
+		expect((append?.args[1] as string[])[1]).toBe("3");
+		expect(JSON.parse(redis.hashes.get("omp:sessions:title")?.get(file) ?? "null")).toMatchObject(title);
+		expect(redis.strings.get(`omp:sessions:file:${file}`)?.startsWith(content)).toBe(true);
+		redis.calls.length = 0;
+		const reopened = await RedisSessionStorage.create({ client: redis });
+		expect(await readLatestSessionTitle(file, reopened)).toEqual(title);
+		expect((await listSessions("/sessions/p", reopened))[0]?.title).toBe(title.title);
+		expect(redis.calls.some(call => call.method === "get")).toBe(false);
+	});
+
+	it("rolls title metadata and body back together when an ordinary append fails", async () => {
+		const storage = await RedisSessionStorage.create({ client: redis });
+		const file = "/sessions/p/rejected-title.jsonl";
+		const content =
+			serializeTitleSlot({ title: "Durable", source: "auto", updatedAt: "t1" }) +
+			'{"type":"session","id":"durable"}\n';
+		await storage.writeText(file, content);
+		const metadata = redis.hashes.get("omp:sessions:title")?.get(file);
+		redis.failNext("send", new Error("append rejected"));
+		const writer = storage.openWriter(file);
+		await expect(
+			writer.append('{"type":"title_change","title":"Rejected","source":"user","timestamp":"t2"}\n'),
+		).rejects.toThrow("append rejected");
+		await expect(storage.drain()).rejects.toThrow("append rejected");
+		expect(redis.strings.get(`omp:sessions:file:${file}`)).toBe(content);
+		expect(redis.hashes.get("omp:sessions:title")?.get(file)).toBe(metadata);
+		expect(await readLatestSessionTitle(file, storage)).toEqual({
+			title: "Durable",
+			source: "auto",
+			updatedAt: "t1",
+		});
+		await writer.close().catch(() => {});
+	});
+
+	it("lazily migrates legacy title metadata once and persists authority across reopen", async () => {
+		const file = "/sessions/p/legacy-title.jsonl";
+		const content =
+			serializeTitleSlot({ title: "Stale", updatedAt: "t1" }) +
+			'{"type":"session","id":"legacy"}\n' +
+			'{"type":"title_change","title":"Legacy journal","source":"user","timestamp":"t2"}\n';
+		redis.strings.set(`omp:sessions:file:${file}`, content);
+		redis.hashes.set("omp:sessions:meta", new Map([[file, "1"]]));
+		redis.hashes.set("omp:sessions:title", new Map([[file, JSON.stringify({ title: "Stale", updatedAt: "t1" })]]));
+		const storage = await RedisSessionStorage.create({ client: redis });
+		expect(redis.calls.some(call => call.method === "get")).toBe(false);
+		expect(await readLatestSessionTitle(file, storage)).toEqual({
+			title: "Legacy journal",
+			source: "user",
+			updatedAt: "t2",
+		});
+		expect(redis.calls.filter(call => call.method === "get")).toHaveLength(1);
+		redis.calls.length = 0;
+		await storage.refresh();
+		const reopened = await RedisSessionStorage.create({ client: redis });
+		expect(await readLatestSessionTitle(file, reopened)).toEqual({
+			title: "Legacy journal",
+			source: "user",
+			updatedAt: "t2",
+		});
+		expect(redis.calls.some(call => call.method === "get")).toBe(false);
+		expect(redis.strings.get(`omp:sessions:file:${file}`)).toBe(content);
 	});
 
 	it("listFilesSync returns only direct children matching the glob", async () => {

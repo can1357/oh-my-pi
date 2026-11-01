@@ -8,6 +8,10 @@
 - Added `btw.inject` (off by default; `/settings` → Interaction → "/btw Steering Inject"): when you ask `/btw` for a steering prompt, it drafts one in an `<inject>` block shown behind a pink rail, and `Alt+I` (`app.btw.inject`) sends it to the main session (as a steer while the agent runs, else as a new turn) from the inline answer or the BTW history sheet, once per answer from the current run. Once sent, the block turns green with `➤` on each line and "Injected into main session" below it; if the main session drops or refuses the send, the block turns back to pending and the same key retries ([#17618](https://github.com/can1357/oh-my-pi/pull/17618) by [@apullin](https://github.com/apullin))
 - With OTLP metrics export configured (`OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`), composer predictions export content-free `omp.composer.prediction.*` metrics by serving model: requests by outcome (offered, skipped, stale, cancelled, timeout, error) with their duration, predictions shown (counted on the first frame that paints them), shown predictions by whether they were accepted with Tab or Right, and the time from first display to acceptance ([#17739](https://github.com/can1357/oh-my-pi/pull/17739) by [@wolfiesch](https://github.com/wolfiesch))
 
+### Changed
+
+- SQL session stores maintain a nullable `title_indexed_size` freshness column automatically; externally managed schemas using `createTable: false` must provide it alongside the existing title columns.
+
 ### Fixed
 
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
@@ -121,6 +125,9 @@
 - Read-only session open/close keeps malformed, migrated, and replay-sanitized journals untouched and never claims ownership or creates a sibling; caller mutations and pending durable writes still finish at shutdown ([#17431](https://github.com/can1357/oh-my-pi/pull/17431) by [@AdamDureyAtWillship](https://github.com/AdamDureyAtWillship))
 - Pending move and rollback rewrites are marked dirty before yielding, so sealing cannot drop caller changes. Empty explicit sessions remain pending until their header is durably published ([#17431](https://github.com/can1357/oh-my-pi/pull/17431) by [@AdamDureyAtWillship](https://github.com/AdamDureyAtWillship))
 - Title changes use the ordinary ordered journal append path, preserving follow-up turns and overlapping renames without full-file rewrites or late title-slot writes. Resume and listing derive the current title from the journal; deferred-backend rewrites wait for confirmed appends and release retained entries after shutdown ([#17431](https://github.com/can1357/oh-my-pi/pull/17431) by [@AdamDureyAtWillship](https://github.com/AdamDureyAtWillship))
+- Deferred append acknowledgements, failures, writer shutdowns, and title notifications stay attached to their issuing session across branching and rollback, preserving the replacement session's durability and ownership.
+- Persistent remote clones reconcile divergent journals asynchronously, preserving physical title/source/timestamp order and newer local renames while unshared compare-and-swap conflicts still fail closed.
+- Session lists use maintained Redis/SQL title metadata and lazily reconcile legacy metadata once. File title scans skip decoding unrelated complete records; continue and resume inspect only the relevant candidates.
 - Sealed shutdown rewrites recover deleted or externally changed session files, check deferred-backend ownership, and await sibling artifact copies; failed internal copies, forks, and relocations release ownership without publishing orphan journals ([#17431](https://github.com/can1357/oh-my-pi/pull/17431) by [@AdamDureyAtWillship](https://github.com/AdamDureyAtWillship))
 
 ## [18.14.0] - 2026-10-29
