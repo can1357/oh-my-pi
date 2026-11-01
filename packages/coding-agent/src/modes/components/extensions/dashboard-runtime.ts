@@ -1,6 +1,6 @@
 import type { ExtensionDashboardRuntime } from "@oh-my-pi/pi-tui/overlays/extensions/extension-dashboard";
 import { getMCPConfigPath } from "@oh-my-pi/pi-utils";
-import { parseRuleAgents, parseRuleConditionAndScope } from "../../../capability/rule";
+import { parseRuleGlobs, parseRuleConditionAndScope } from "../../../capability/rule";
 import type { Settings } from "../../../config/settings";
 import { getAllProvidersInfo, isForeignUserProvider, isUserSourceEnabled } from "../../../discovery";
 import type { CustomTool } from "../../../extensibility/custom-tools/types";
@@ -74,7 +74,7 @@ export function createExtensionDashboardRuntime(options: {
 		mcpSource: mcpManager,
 		inspectorSource: {
 			readToolHeader: toolFileHeaderDescription,
-			parseRule: raw => ({ ...parseRuleConditionAndScope(raw), agents: parseRuleAgents(raw.agents) }),
+			parseRule: raw => ({ ...parseRuleConditionAndScope(raw), agents: parseRuleGlobs(raw.agents) }),
 		},
 	};
 }

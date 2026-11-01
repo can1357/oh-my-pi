@@ -21,7 +21,7 @@ import type { ExtensionModule } from "../capability/extension-module";
 import { invalidate as invalidateFsCache, readDirEntries, readFile } from "../capability/fs";
 import {
 	MAIN_AGENT_RULE_NAME,
-	parseRuleAgents,
+	parseRuleGlobs,
 	parseRuleConditionAndScope,
 	type Rule,
 	type RuleFrontmatter,
@@ -249,11 +249,11 @@ function buildRule(
 		astCondition,
 		question,
 		scope,
-		agents: parseRuleAgents(frontmatter.agents),
-		models: parseRuleAgents(frontmatter.models),
-		providers: parseRuleAgents(frontmatter.providers),
-		class: parseRuleAgents(frontmatter.class),
-		family: parseRuleAgents(frontmatter.family),
+		agents: parseRuleGlobs(frontmatter.agents),
+		models: parseRuleGlobs(frontmatter.models),
+		providers: parseRuleGlobs(frontmatter.providers),
+		class: parseRuleGlobs(frontmatter.class),
+		family: parseRuleGlobs(frontmatter.family),
 		interruptMode,
 		_source: source,
 	};

@@ -209,10 +209,12 @@ function normalizeScopeField(value: unknown): string[] | undefined {
 }
 
 /**
- * Parse the `agents` frontmatter field into lowercased agent-name glob patterns.
- * Reuses the scope tokenizer for comma-separated spellings; `{a,b}` groups survive.
+ * Parse a list-of-globs frontmatter field (`agents`, `models`, `providers`, `class`,
+ * `family`) into lowercased, deduplicated glob patterns. Accepts a string, a
+ * comma-separated string, or a YAML sequence; `{a,b}` brace groups survive the
+ * comma split. Returns undefined when no pattern remains.
  */
-export function parseRuleAgents(value: unknown): string[] | undefined {
+export function parseRuleGlobs(value: unknown): string[] | undefined {
 	const tokens = normalizeScopeField(value);
 	if (!tokens) {
 		return undefined;
