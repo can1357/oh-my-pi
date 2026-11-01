@@ -6,6 +6,80 @@ mod common;
 use common::{DiskWriter, Workspace};
 use pi_edit::{ApplyRequest, EditError, EditMode, FileOp, UrlResolution, session::PreviewBatch};
 
+#[derive(Default)]
+struct RemoteWriter {
+	requests: parking_lot::Mutex<Vec<pi_edit::WriteRequest>>,
+}
+
+#[async_trait::async_trait]
+impl pi_edit::EditWriter for RemoteWriter {
+	async fn write(
+		&self,
+		request: pi_edit::WriteRequest,
+	) -> pi_edit::EditResult<pi_edit::WriteResponse> {
+		let written = request.content.clone().expect("remote update content");
+		self.requests.lock().push(request);
+		Ok(pi_edit::WriteResponse { written, diagnostics_json: None })
+	}
+}
+
+fn remote_answer(url: &str, content: &str) -> UrlResolution {
+	UrlResolution {
+		absolute:      Some(url.into()),
+		content:       Some(content.into()),
+		deferred:      false,
+		error:         None,
+		plan_writable: false,
+	}
+}
+
+#[tokio::test]
+async fn remote_apply_uses_fresh_host_text_even_when_its_length_is_unchanged() {
+	let url = "ssh://oracle/tmp/edit-repro.txt";
+	let mut ws = Workspace::new(EditMode::Replace);
+	ws.config.policy.url_schemes = vec!["ssh".into()];
+	let mut session = ws.session();
+	session.set_args_json(
+		&serde_json::json!({ "path": url, "old_string": "beta", "new_string": "BETA" }).to_string(),
+	);
+	session.finish();
+	session.provide(url.into(), remote_answer(url, "alpha\nbeta\n"));
+	assert!(session.preview().files[0].diff.is_some());
+	assert_eq!(session.begin_apply_url_targets(), [url]);
+	session.provide(url.into(), remote_answer(url, "delta\nbeta\n"));
+	let writer = RemoteWriter::default();
+	session
+		.apply(ApplyRequest::default(), &writer)
+		.await
+		.expect("remote update");
+	let requests = writer.requests.lock();
+	assert_eq!(requests[0].absolute.to_str(), Some(url));
+	assert_eq!(requests[0].content.as_deref(), Some("delta\nBETA\n"));
+}
+
+#[tokio::test]
+async fn unsupported_remote_delete_prevents_earlier_local_writes_in_a_batch() {
+	let url = "ssh://oracle/tmp/edit-repro.txt";
+	let mut ws = Workspace::new(EditMode::ApplyPatch);
+	ws.config.policy.url_schemes = vec!["ssh".into()];
+	ws.write("local.txt", "old\n");
+	let mut session = ws.session();
+	session.set_args_json(&serde_json::json!({ "input": format!(
+		"*** Begin Patch\n*** Update File: local.txt\n@@\n-old\n+new\n*** Delete File: {url}\n*** End Patch"
+	) }).to_string());
+	session.finish();
+	session.begin_apply_url_targets();
+	session.provide(url.into(), remote_answer(url, "remote\n"));
+	let writer = DiskWriter::default();
+	let error = session
+		.apply(ApplyRequest::default(), &writer)
+		.await
+		.expect_err("unsupported remote delete");
+	assert!(error.to_string().contains("updating existing files only"), "{error}");
+	assert!(writer.requests.lock().is_empty());
+	assert_eq!(ws.read("local.txt").as_deref(), Some("old\n"));
+}
+
 const SOURCE: &str = "fn main() {\n    let x = 1;\n    println!(\"{x}\");\n}\n";
 
 fn sloppy_payload(path: &str) -> String {
@@ -594,6 +668,8 @@ async fn internal_url_targets_wait_for_host_answers() {
 
 	session.provide("local://plan.md".into(), UrlResolution {
 		absolute:      Some(backing.clone()),
+		content:       None,
+		deferred:      false,
 		error:         None,
 		plan_writable: true,
 	});
@@ -612,6 +688,8 @@ async fn internal_url_targets_wait_for_host_answers() {
 	assert_eq!(session.begin_apply_url_targets(), ["local://plan.md"]);
 	session.provide("local://plan.md".into(), UrlResolution {
 		absolute:      Some(backing.clone()),
+		content:       None,
+		deferred:      false,
 		error:         None,
 		plan_writable: true,
 	});
@@ -635,6 +713,8 @@ async fn apply_never_reuses_url_answers_given_to_previews() {
 	std::fs::write(&fresh, "one\n").unwrap();
 	let answer = |absolute: &std::path::Path| UrlResolution {
 		absolute:      Some(absolute.to_owned()),
+		content:       None,
+		deferred:      false,
 		error:         None,
 		plan_writable: false,
 	};
@@ -723,6 +803,8 @@ async fn begin_apply_url_targets_cover_every_url_before_the_first_stage() {
 			let name = url.trim_start_matches("local://");
 			session.provide(url.clone(), UrlResolution {
 				absolute:      Some(sandbox.path().join(name)),
+				content:       None,
+				deferred:      false,
 				error:         None,
 				plan_writable: false,
 			});

@@ -224,10 +224,10 @@ jobs:
               path: MODULE.bazel.lock
 
    # Rust validation (tests, clippy, rustfmt) runs on non-PR events only.
-   # Native-changing PRs are rare enough that they do not warrant PR-side
-   # Rust validation or a PR-side addon build (see native_addons): Rust is
-   # validated post-merge on main (vmon, node Bazel cache) and again at
-   # release. A skipped required check still satisfies branch protection.
+   # Native-changing PRs build the addon pair for TS tests (see native_addons),
+   # while the full Rust workspace is validated post-merge on main (vmon,
+   # node Bazel cache) and again at release. A skipped required check still
+   # satisfies branch protection.
    rust_validate:
       name: Validate Rust workspace (bazel)
       if: github.event_name != 'pull_request'
@@ -267,17 +267,11 @@ jobs:
 
    # Provides the linux-x64 addon pair every downstream TS job installs.
    #
-   # PRs never build. They restore the pair main built for the same native
-   # sources from actions/cache (key = hash of every native build input:
-   # toolchain and build settings plus crates/** and BUILD.bazel). With no
-   # exact entry (the PR changes native inputs, or main has not built this
-   # state yet) they take main's newest entry, and with no entry at all the
-   # latest npm release. The workspace loader skips its version sentinel for
-   # workspace loads, so any of these load under a newer checkout. Testing
-   # against main's build instead of the last release keeps merged-but-
-   # unreleased native fixes from failing every PR that did not touch Rust
-   # (a merged grep fix plus its TS test failed 75 PR runs against the
-   # 18.3.1 addon). Only main saves; see the save step for why.
+   # PRs changing native inputs build this pair from the checked-out merge
+   # commit, so their TS tests exercise the new Rust behavior. Other PRs
+   # restore main's addons for the same native inputs, falling back to main's
+   # newest entry or npm when no exact entry is available. Only main saves;
+   # see the save step for why.
    #
    # Main (vmon, node Bazel cache) builds only the pair here so the TS
    # fan-out starts as soon as it links; native_addons_cross builds every
@@ -292,6 +286,28 @@ jobs:
          actions: write
       steps:
          - uses: actions/checkout@v4
+         - name: Detect native input changes
+           id: native-inputs
+           if: github.event_name == 'pull_request'
+           shell: bash
+           env:
+              PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+           run: |
+              set -euo pipefail
+              # checkout is shallow; fetch the event's exact base, then compare
+              # it with the checked-out PR merge tree (not a moving main ref).
+              git fetch --no-tags --depth=1 origin "$PR_BASE_SHA"
+              # Keep these paths in sync with NATIVE_INPUTS_HASH below.
+              if git diff --quiet "$PR_BASE_SHA" HEAD -- \
+                Cargo.toml Cargo.lock MODULE.bazel MODULE.bazel.lock \
+                rust-toolchain.toml rustfmt.toml .bazelrc .bazelignore .bazelversion \
+                bazel/ crates/ BUILD.bazel; then
+                echo "changed=false" >> "$GITHUB_OUTPUT"
+              else
+                status=$?
+                if [ "$status" -ne 1 ]; then exit "$status"; fi
+                echo "changed=true" >> "$GITHUB_OUTPUT"
+              fi
          - name: Compute native addon cache key
            id: natives-key
            shell: bash
@@ -303,14 +319,14 @@ jobs:
               echo "prefix=natives-linux-x64-v1-" >> "$GITHUB_OUTPUT"
               echo "key=natives-linux-x64-v1-$NATIVE_INPUTS_HASH" >> "$GITHUB_OUTPUT"
 
-         # ---- PR path: main-built addons from actions/cache, else npm ----
+         # ---- PRs without native changes: main-built addons, else npm ----
          # `ci-natives` is a plain workspace-relative path on purpose: the
          # cache version hashes the literal path list, so vmon (save) and
          # hosted (restore) must spell it identically, and upload-artifact
          # skips dot-directories by default.
          - name: Restore main-built native addons
            id: natives-cache
-           if: github.event_name == 'pull_request'
+           if: github.event_name == 'pull_request' && steps.native-inputs.outputs.changed == 'false'
            uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
            with:
               path: ci-natives
@@ -318,7 +334,7 @@ jobs:
               restore-keys: |
                  ${{ steps.natives-key.outputs.prefix }}
          - name: Fetch release native addons (npm)
-           if: github.event_name == 'pull_request' && steps.natives-cache.outputs.cache-matched-key == ''
+           if: github.event_name == 'pull_request' && steps.native-inputs.outputs.changed == 'false' && steps.natives-cache.outputs.cache-matched-key == ''
            shell: bash
            run: |
               set -euo pipefail
@@ -334,23 +350,26 @@ jobs:
            if: github.event_name == 'pull_request'
            shell: bash
            env:
+              CHANGED: ${{ steps.native-inputs.outputs.changed }}
               EXACT: ${{ steps.natives-cache.outputs.cache-hit }}
               MATCHED: ${{ steps.natives-cache.outputs.cache-matched-key }}
            run: |
-              if [ "$EXACT" = true ]; then
+              if [ "$CHANGED" = true ]; then
+                echo "Native inputs differ from the PR base; building addons from this checkout."
+              elif [ "$EXACT" = true ]; then
                 echo "Using main's addons for this exact native source state ($MATCHED)."
               elif [ -n "$MATCHED" ]; then
-                echo "::notice title=Native addons not source-matched::No main build matches this PR's native sources; testing against main's newest addon build ($MATCHED). Native changes are validated post-merge on main and at release."
+                echo "::notice title=Native addons not source-matched::This PR has no native changes, but no exact main build is cached; testing against main's newest addon build ($MATCHED)."
               else
                 echo "::notice title=Native addons from npm::No main-built addon cache entry is available; testing against the latest npm release addons."
               fi
 
-         # ---- main path: bazel build of the linux-x64 pair ----
+         # ---- main and native-changing PRs: build the linux-x64 pair ----
          - id: cache
-           if: github.event_name != 'pull_request'
+           if: github.event_name != 'pull_request' || steps.native-inputs.outputs.changed == 'true'
            uses: ./.github/actions/bazel-cache
          - name: Build linux-x64 native addons
-           if: github.event_name != 'pull_request'
+           if: github.event_name != 'pull_request' || steps.native-inputs.outputs.changed == 'true'
            run: |
               set -eo pipefail
               if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
@@ -373,7 +392,7 @@ jobs:
          # thousands of actions is the failure mode that made CI slow — make
          # it visible in the run summary instead of discovering it weeks in.
          - name: Report bazel cache stats
-           if: github.event_name != 'pull_request'
+           if: github.event_name != 'pull_request' || steps.native-inputs.outputs.changed == 'true'
            shell: bash
            run: |
               # Bazel runs with --color=yes (config=ci); strip ANSI before

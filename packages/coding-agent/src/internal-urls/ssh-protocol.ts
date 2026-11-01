@@ -23,6 +23,7 @@ import { type ShellFsDirEntry, ShellFsFileType } from "@oh-my-pi/pi-natives";
 import { $which } from "@oh-my-pi/pi-utils";
 import * as capability from "../capability";
 import { type SSHHost, sshCapability } from "../capability/ssh";
+import { stripBom } from "../edit/normalize";
 import type { SSHConnectionTarget } from "../ssh/connection-manager";
 import {
 	listRemoteDir,
@@ -249,6 +250,7 @@ export class SshProtocolHandler implements ProtocolHandler {
 	readonly spec: SchemeSpec = {
 		backing: "remote",
 		selectors: "lines",
+		editVia: "content",
 		portAuthority: true,
 		immutable: false,
 		readTier: "exec",
@@ -303,7 +305,7 @@ export class SshProtocolHandler implements ProtocolHandler {
 				`ssh://: ${remotePath} exceeds the 1 MiB limit; ssh:// supports text files up to 1 MiB — use an sshfs mount for larger files`,
 			);
 		}
-		const content = decodeUtf8Text(fileResult.bytes);
+		const content = decodeUtf8Text(fileResult.bytes, { preserveBom: true });
 		if (content === null) {
 			throw new Error(
 				`ssh://: ${remotePath} is a binary or non-UTF-8 file; ssh:// supports UTF-8 text only — use \`bash\` with a remote SSH command or an \`sshfs\` mount`,
@@ -311,9 +313,11 @@ export class SshProtocolHandler implements ProtocolHandler {
 		}
 		// No `sourcePath`: keeps search on the virtual-resource path so the
 		// displayed/searched resource stays `ssh://…` instead of a temp path.
+		const normalized = stripBom(content);
 		return {
 			url: url.href,
-			content,
+			content: normalized.text,
+			bom: normalized.bom !== "",
 			contentType: contentTypeForPath(remotePath),
 			size: fileResult.bytes.length,
 		};
@@ -379,6 +383,9 @@ export class SshProtocolHandler implements ProtocolHandler {
 	async write(url: InternalUrl, content: string, context?: WriteContext): Promise<void> {
 		const target = await resolveTarget(url, context?.cwd);
 		const remotePath = await remotePathFromUrl(url, target, context?.signal);
-		await writeRemoteFile(target, remotePath, new TextEncoder().encode(content), { signal: context?.signal });
+		await writeRemoteFile(target, remotePath, new TextEncoder().encode(content), {
+			signal: context?.signal,
+			...(context?.requireRegularFile ? { requireRegularFile: true } : {}),
+		});
 	}
 }

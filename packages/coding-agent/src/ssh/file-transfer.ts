@@ -67,6 +67,8 @@ export interface RemoteFileReadResult {
 export interface RemoteFileWriteOptions {
 	signal?: AbortSignal;
 	timeoutMs?: number;
+	/** Targeted edits must not create a missing destination or replace a symlink. */
+	requireRegularFile?: boolean;
 }
 
 /** Resolve the remote account's HOME without shell-expanding any caller-supplied path. */
@@ -153,6 +155,10 @@ export async function writeRemoteFile(
 	}
 	const dest = quotePosixArgument(remotePath);
 	const tmp = quotePosixArgument(`${remotePath}.omp-tmp.${crypto.randomUUID()}`);
+	const updateGuard = opts.requireRegularFile
+		? `if [ -L ${dest} ]; then echo 'ssh://: targeted edits require an existing regular file; symlinks are not supported' >&2; exit 1; ` +
+			`elif [ ! -e ${dest} ]; then echo 'ssh://: destination does not exist; targeted edits require an existing regular file' >&2; exit 1; fi; `
+		: "";
 	// Stage stdin into the temp first (so the remote never blocks on an unread
 	// pipe and a dropped connection lands in the temp, never the destination).
 	// An EXIT trap removes the staged temp on every exit path (staging failure,
@@ -167,6 +173,7 @@ export async function writeRemoteFile(
 		`t=${tmp}; trap 'rm -f -- "$t"' 0; ` +
 		`mkdir -p -- "$(dirname "$t")" && ` +
 		`cat > "$t" && { ` +
+		updateGuard +
 		`if [ -d ${dest} ]; then echo 'ssh://: destination is a directory' >&2; exit 1; ` +
 		`elif [ -f ${dest} ] && [ ! -L ${dest} ]; then cat "$t" > ${dest} || exit 1; ` +
 		`elif [ -e ${dest} ] && [ ! -L ${dest} ]; then echo 'ssh://: destination is a special file (not a regular file)' >&2; exit 1; ` +

@@ -267,8 +267,17 @@ fn wrap_file_error(path: &str, error: EditError, multiple_files: bool) -> EditEr
 }
 
 enum VirtualFile {
-	Raw(String),
+	Raw { raw: String, is_notebook: bool },
 	Read(Arc<FileRead>),
+}
+
+impl VirtualFile {
+	fn is_notebook(&self) -> bool {
+		match self {
+			Self::Raw { is_notebook, .. } => *is_notebook,
+			Self::Read(read) => read.is_notebook,
+		}
+	}
 }
 
 /// The ordered envelope's read-through namespace. Disk remains untouched until
@@ -289,9 +298,17 @@ impl VirtualFiles<'_> {
 				.move_to
 				.as_ref()
 				.map_or(&file.absolute, |to| &to.absolute);
+			let key = canonical_key(target);
+			// Retain the read's editable view: remote notebooks use raw JSON.
+			// New targets have no prior view and use the destination's format.
+			let is_notebook = self
+				.state
+				.get(&key)
+				.and_then(Option::as_ref)
+				.map_or_else(|| is_notebook_path(target), VirtualFile::is_notebook);
 			self
 				.state
-				.insert(canonical_key(target), Some(VirtualFile::Raw(raw.clone())));
+				.insert(key, Some(VirtualFile::Raw { raw: raw.clone(), is_notebook }));
 		}
 	}
 }
@@ -328,8 +345,9 @@ impl FileSource for VirtualFiles<'_> {
 
 	fn try_read(&mut self, resolved: &Resolved) -> Result<Option<Arc<FileRead>>, EditError> {
 		let key = canonical_key(&resolved.absolute);
-		let Some(state) = self.state.remove(&key) else {
-			return self.source.try_read(resolved);
+		let state = match self.state.remove(&key) {
+			Some(state) => state,
+			None => self.source.try_read(resolved)?.map(VirtualFile::Read),
 		};
 		let read = match state {
 			None => {
@@ -337,14 +355,13 @@ impl FileSource for VirtualFiles<'_> {
 				return Ok(None);
 			},
 			Some(VirtualFile::Read(read)) => read,
-			Some(VirtualFile::Raw(raw)) => {
+			Some(VirtualFile::Raw { raw, is_notebook }) => {
 				if let Some(message) = self
 					.policy()
 					.auto_generated_message(&resolved.display, &raw.as_bytes()[..raw.len().min(1024)])
 				{
 					return Err(EditError::apply(message));
 				}
-				let is_notebook = is_notebook_path(&resolved.absolute);
 				let (bom, body) = strip_bom(&raw);
 				let ending = if is_notebook {
 					LineEnding::Lf
@@ -599,12 +616,17 @@ impl ModeEngine for ApplyPatchEngine {
 					diff:               file.preview_diff.or(Some(file.diff)),
 					first_changed_line: file.first_changed_line,
 					error:              None,
+					deferred:           false,
 					op:                 Some(file.op),
 					rename:             file.move_to.map(|destination| destination.display),
 				})
 				.collect(),
 			Err(error) => {
-				vec![PreviewFile { error: Some(error.to_string()), ..PreviewFile::default() }]
+				vec![PreviewFile {
+					error: Some(error.to_string()),
+					deferred: error.is_deferred(),
+					..PreviewFile::default()
+				}]
 			},
 		}
 	}

@@ -27,9 +27,15 @@ use crate::{
 /// Host answer for one internal URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UrlResolution {
-	/// Absolute backing file; `None` → the URL has no local file (the edit
-	/// fails with `error` or a generic message).
+	/// Absolute backing file, or opaque resource key when `content` is supplied.
+	/// `None` makes the edit fail with `error` or a generic message.
 	pub absolute:      Option<PathBuf>,
+	/// Full text supplied by the host for a remote file. `absolute` is then
+	/// an opaque resource key, never a local filesystem path.
+	pub content:       Option<String>,
+	/// The host defers resolution until execution approval. Preview passes
+	/// omit this target without presenting it as a failed edit.
+	pub deferred:      bool,
 	/// Model-facing refusal (read-only scheme, immutable, disabled…); wins
 	/// over `absolute`.
 	pub error:         Option<String>,
@@ -91,6 +97,9 @@ impl PathPolicy {
 				let resolution = urls
 					.get(url.as_ref())
 					.ok_or_else(|| EditError::UnresolvedUrl(url.as_ref().to_owned()))?;
+				if resolution.deferred {
+					return Err(EditError::DeferredUrl(url.into_owned()));
+				}
 				if let Some(error) = &resolution.error {
 					return Err(EditError::apply(error.clone()));
 				}
@@ -292,6 +301,9 @@ pub fn unwrap_hashline_header_path(target: &str) -> &str {
 
 /// Snapshot key: realpath, parent realpath plus basename, or input.
 pub fn canonical_key(absolute: &Path) -> PathBuf {
+	if !absolute.is_absolute() && absolute.to_string_lossy().contains("://") {
+		return absolute.to_path_buf();
+	}
 	let resolved = std::fs::canonicalize(absolute)
 		.or_else(|_| {
 			let parent = absolute.parent().ok_or(std::io::ErrorKind::NotFound)?;
@@ -680,7 +692,13 @@ mod tests {
 	}
 
 	fn answer(absolute: Option<PathBuf>, error: Option<&str>, plan_writable: bool) -> UrlResolution {
-		UrlResolution { absolute, error: error.map(str::to_owned), plan_writable }
+		UrlResolution {
+			absolute,
+			content: None,
+			deferred: false,
+			error: error.map(str::to_owned),
+			plan_writable,
+		}
 	}
 
 	#[test]

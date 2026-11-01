@@ -3016,9 +3016,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			return toolResult(details).text(resource.content).sourceInternal(url).done();
 		}
 
+		const snapshotPath = spec.editVia === "content" && !resource.immutable && !resource.isDirectory ? url : undefined;
 		return buildInMemorySelectorResult(this.session, resource.content, parsedSel, {
 			details,
 			sourcePath: resource.sourcePath,
+			snapshotPath,
 			sourceStartLine: resource.sourceStartLine,
 			sourceInternal: url,
 			entityLabel: "resource",

@@ -31,7 +31,7 @@ use crate::{
 	text::{LineEnding, detect_line_ending, normalize_to_lf, restore_line_endings, strip_bom},
 };
 
-/// One target file as read from disk plus its normalized editable form.
+/// One target file from disk or the host plus its normalized editable form.
 #[derive(Debug)]
 pub struct FileRead {
 	pub resolved:    Resolved,
@@ -141,7 +141,7 @@ fn stamp(absolute: &Path) -> Option<Stamp> {
 	})
 }
 
-/// Default [`FileSource`] backed by `std::fs`.
+/// Default [`FileSource`] backed by `std::fs` or host-supplied remote text.
 pub struct FileCache {
 	policy:          PathPolicy,
 	reads:           HashMap<PathBuf, (Stamp, Arc<FileRead>)>,
@@ -221,16 +221,47 @@ impl FileCache {
 		self.recovery_misses.clear();
 	}
 
-	/// Plan-mode write guard, judging URL targets by their host answers.
+	/// Write guard, judging URL targets by their host answers.
 	///
 	/// # Errors
+	/// [`EditError::Apply`] for unsupported remote file operations;
 	/// [`EditError::Plan`] when plan mode refuses the write.
 	pub fn enforce_write(&self, display: &str, op: FileOp, move_to: Option<&str>) -> EditResult<()> {
+		let remote = |target: &str| {
+			self.policy.url_target(target).is_some_and(|url| {
+				self
+					.urls
+					.get(url.as_ref())
+					.is_some_and(|answer| answer.content.is_some())
+			})
+		};
+		if (remote(display) || move_to.is_some_and(remote))
+			&& (!matches!(op, FileOp::Update | FileOp::Noop) || move_to.is_some())
+		{
+			return Err(EditError::apply(
+				"Remote edits support updating existing files only; creation, deletion, and moves are \
+				 not supported.",
+			));
+		}
 		self.policy.enforce_write(display, op, move_to, &self.urls)
 	}
 
 	fn read_resolved(&mut self, resolved: &Resolved) -> EditResult<Option<Arc<FileRead>>> {
-		let Some(current) = stamp(&resolved.absolute) else {
+		let remote_content = self.policy.url_target(&resolved.display).and_then(|url| {
+			self
+				.urls
+				.get(url.as_ref())
+				.and_then(|answer| answer.content.clone())
+		});
+		let is_remote = remote_content.is_some();
+		let current = if let Some(content) = &remote_content {
+			// Length alone is not a content identity: provide() must evict the
+			// target's cached reads, and forget_answers() must clear all reads
+			// before apply, including when new host text has the same length.
+			Stamp { mtime: None, len: content.len() as u64, special_kind: None }
+		} else if let Some(current) = stamp(&resolved.absolute) {
+			current
+		} else {
 			return Ok(None);
 		};
 		if let Some(kind) = current.special_kind {
@@ -245,10 +276,14 @@ impl FileCache {
 		{
 			return Ok(Some(Arc::clone(read)));
 		}
-		let bytes = match std::fs::read(&resolved.absolute) {
-			Ok(bytes) => bytes,
-			Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-			Err(source) => return Err(EditError::Io { path: resolved.absolute.clone(), source }),
+		let bytes = if let Some(content) = remote_content {
+			content.into_bytes()
+		} else {
+			match std::fs::read(&resolved.absolute) {
+				Ok(bytes) => bytes,
+				Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+				Err(source) => return Err(EditError::Io { path: resolved.absolute.clone(), source }),
+			}
 		};
 		if let Some(message) = self
 			.policy
@@ -260,7 +295,9 @@ impl FileCache {
 			display:     resolved.display.clone(),
 			valid_up_to: err.utf8_error().valid_up_to(),
 		})?;
-		let is_notebook = notebook::is_notebook_path(&resolved.absolute);
+		// Remote handlers expose UTF-8 text, including the raw JSON of notebooks.
+		// Keep the editable view identical to the view `read` snapshots.
+		let is_notebook = !is_remote && notebook::is_notebook_path(&resolved.absolute);
 		let (bom, text) = if is_notebook {
 			let editable = notebook::notebook_to_editable_text(&raw, &resolved.display)
 				.map_err(|err| EditError::apply(err.to_string()))?;
@@ -329,6 +366,14 @@ impl FileSource for FileCache {
 	}
 
 	fn exists(&mut self, absolute: &Path) -> bool {
+		if let Some(answer) = self
+			.urls
+			.values()
+			.find(|answer| answer.absolute.as_deref() == Some(absolute))
+			&& answer.content.is_some()
+		{
+			return true;
+		}
 		stamp(absolute).is_some()
 	}
 

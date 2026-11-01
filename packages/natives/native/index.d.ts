@@ -1881,8 +1881,12 @@ export interface EditPreviewBatch {
 
 /** Host answer for one internal URL (`resolveUrl`). */
 export interface EditUrlResolution {
-  /** Absolute backing file; null when no local file backs the URL. */
+  /** Absolute backing file, or opaque URL key when `content` is supplied. */
   path?: string
+  /** Full remote file text; `path` is then its opaque URL key. */
+  content?: string
+  /** Resolve only after execution approval; omit previews for this target. */
+  deferred?: boolean
   /** Model-facing refusal (read-only, disabled…); wins over `path`. */
   error?: string
   /** Writable while plan mode is active (sandbox-scoped scheme). */

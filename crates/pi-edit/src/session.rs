@@ -303,6 +303,10 @@ impl Session {
 		let mut files = self
 			.engine
 			.preview(&snapshot, streaming, &mut self.files, &self.store);
+		// Deferral is host state, independent of any path-qualified engine error.
+		// Never publish it as a preview failure or trigger the host's abort
+		// guard.
+		files.retain(|file| !file.deferred);
 		if streaming {
 			for file in &mut files {
 				if let Some(diff) = file.diff.take() {

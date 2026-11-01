@@ -126,8 +126,12 @@ impl EditPolicy {
 /// Host answer for one internal URL (`resolveUrl`).
 #[napi(object)]
 pub struct EditUrlResolution {
-	/// Absolute backing file; null when no local file backs the URL.
+	/// Absolute backing file, or opaque URL key when `content` is supplied.
 	pub path:          Option<String>,
+	/// Full remote file text; `path` is then its opaque URL key.
+	pub content:       Option<String>,
+	/// Resolve only after execution approval; omit previews for this target.
+	pub deferred:      Option<bool>,
 	/// Model-facing refusal (read-only, disabled…); wins over `path`.
 	pub error:         Option<String>,
 	/// Writable while plan mode is active (sandbox-scoped scheme).
@@ -526,11 +530,15 @@ async fn resolve_one(resolver: &ResolverCallback, url: &str) -> UrlResolution {
 	match answer {
 		Ok(answer) => UrlResolution {
 			absolute:      answer.path.map(PathBuf::from),
+			content:       answer.content,
+			deferred:      answer.deferred.unwrap_or(false),
 			error:         answer.error,
 			plan_writable: answer.plan_writable,
 		},
 		Err(err) => UrlResolution {
 			absolute:      None,
+			content:       None,
+			deferred:      false,
 			error:         Some(err.reason),
 			plan_writable: false,
 		},

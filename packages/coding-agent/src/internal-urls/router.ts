@@ -161,6 +161,9 @@ export class InternalUrlRouter {
 				`${scheme}:// handler has write() but spec.write.via is ${via === undefined ? "absent" : `"${via}"`}`,
 			);
 		}
+		if (spec.editVia === "content" && (via !== "handler" || spec.immutable || spec.write?.payload !== "text")) {
+			throw new Error(`${scheme}:// spec.editVia "content" requires a mutable text handler write`);
+		}
 		if (via === "file") {
 			if (spec.backing !== "file") {
 				throw new Error(`${scheme}:// spec.write.via "file" requires backing "file", not "${spec.backing}"`);

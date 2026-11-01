@@ -351,6 +351,7 @@ interface InspectedArgs {
 interface OpenEditSession {
 	native: EditSession;
 	resolveContext: ResolveContext;
+	resolvePhase: { applying: boolean };
 }
 
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
@@ -540,6 +541,7 @@ export class EditTool implements AgentTool<TInput> {
 			open.native.finish();
 		}
 		const editSession = open.native;
+		open.resolvePhase.applying = true;
 		const batch = getLspBatchRequest(context?.toolCall);
 		let outcome;
 		try {
@@ -586,15 +588,18 @@ export class EditTool implements AgentTool<TInput> {
 			} catch {
 				// Blackbox recording is diagnostic only.
 			}
-			const display = path.relative(this.session.cwd, snapshot.path) || snapshot.path;
+			const contentEdit = InternalUrlRouter.instance().writeTarget(snapshot.path)?.spec.editVia === "content";
+			const display = contentEdit ? snapshot.path : path.relative(this.session.cwd, snapshot.path) || snapshot.path;
 			let repaired: EditAutoRepairOutcome | undefined;
 			try {
-				repaired = await attemptEditAutoRepair({
-					session: this.session,
-					snapshot,
-					writethrough: createEditWritethrough(this.session),
-					signal,
-				});
+				repaired = contentEdit
+					? undefined
+					: await attemptEditAutoRepair({
+							session: this.session,
+							snapshot,
+							writethrough: createEditWritethrough(this.session),
+							signal,
+						});
 				if (repaired) getEditStore(this.session).invalidate(snapshot.path);
 			} catch (error) {
 				logger.warn("Edit auto-repair failed", {
@@ -642,13 +647,14 @@ export class EditTool implements AgentTool<TInput> {
 		onPreview?: (error: Error | null, batch: EditPreviewBatch) => void,
 	): OpenEditSession {
 		const resolveContext = sessionResolveContext(this.session, { signal });
+		const resolvePhase = { applying: onPreview === undefined };
 		const native = new EditSession(
 			getEditStore(this.session),
 			this.#policy(rawInput, resolveContext),
 			onPreview,
-			(_error, url) => this.#resolveUrl(url, resolveContext),
+			(_error, url) => this.#resolveUrl(url, resolveContext, resolvePhase.applying),
 		);
-		return { native, resolveContext };
+		return { native, resolveContext, resolvePhase };
 	}
 
 	#policy(rawInput: boolean, context: ResolveContext): EditPolicy {
@@ -675,18 +681,33 @@ export class EditTool implements AgentTool<TInput> {
 
 	/**
 	 * Host answer for one internal-URL edit target: its backing file, or a model-facing refusal.
-	 * Only file-written mutable schemes ({@link InternalUrlRouter.fileWritable}) are editable;
-	 * handler-owned writes (agent:// messages, proc:// stdin, ...) never patch their backing file.
+	 * File-written mutable schemes ({@link InternalUrlRouter.fileWritable}) use their local backing file;
+	 * Content-editable schemes supply their full text. Other handler-owned writes (agent:// messages, proc:// stdin, ...)
+	 * never patch their backing file.
 	 * A line/partial selector is refused ({@link InternalUrlRouter.peelWriteSelector}): edits
 	 * address whole files.
 	 */
-	async #resolveUrl(url: string, context: ResolveContext): Promise<EditUrlResolution> {
+	async #resolveUrl(url: string, context: ResolveContext, applying: boolean): Promise<EditUrlResolution> {
 		const router = InternalUrlRouter.instance();
 		try {
 			const target = router.peelWriteSelector(url, "edit");
 			const scheme = extractUriScheme(target);
 			const spec = scheme === undefined ? undefined : router.spec(scheme);
 			if (!spec) return { error: `Unknown internal URL: ${url}`, planWritable: false };
+			if (spec.editVia === "content") {
+				// Argument previews run before execution approval; resolving supplied
+				// content may fetch remotely. Only execution may read the resource.
+				if (!applying) return { deferred: true, planWritable: false };
+				const resource = await router.resolve(target, context);
+				if (resource.immutable || resource.isDirectory) {
+					return { error: `Cannot edit ${url}: it is not a mutable remote file`, planWritable: false };
+				}
+				return {
+					path: target,
+					content: resource.bom ? `\uFEFF${resource.content}` : resource.content,
+					planWritable: false,
+				};
+			}
 			if (!router.fileWritable(target)) {
 				const reason = spec.write?.via === "handler" ? "is written through `write`, not edited" : "is read-only";
 				return { error: `${url} ${reason}`, planWritable: false };
@@ -699,6 +720,26 @@ export class EditTool implements AgentTool<TInput> {
 	}
 
 	async #write(request: EditWriteRequest, signal?: AbortSignal): Promise<EditWriteResponse> {
+		if (InternalUrlRouter.instance().writeTarget(request.path)?.spec.editVia === "content") {
+			if (request.op !== "update" || request.content === undefined) {
+				throw new ToolError("Remote edits support updating existing files only", { path: request.path });
+			}
+			await InternalUrlRouter.instance().write(request.path, request.content, {
+				...sessionResolveContext(this.session, { signal }),
+				requireRegularFile: true,
+			});
+			this.session.bumpFileMutationVersion?.(request.path);
+			// A content edit has no local LSP work, but it can finish a batch that
+			// queued formatting/diagnostics for earlier local writes.
+			const diagnostics =
+				request.flushLsp && request.lspBatchId
+					? await flushLspWritethroughBatch(request.lspBatchId, this.session.cwd, signal)
+					: undefined;
+			return {
+				written: request.content,
+				diagnosticsJson: diagnostics ? JSON.stringify(diagnostics) : undefined,
+			};
+		}
 		if (request.op === "delete") {
 			await deleteFileWithFallback(request.path, Bun.file(request.path));
 			if (this.session.enableLsp ?? true) {
