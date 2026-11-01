@@ -13,7 +13,7 @@ import {
 	resolveWireModelId,
 	withoutUnverifiedThinking,
 } from "@oh-my-pi/pi-catalog/model-thinking";
-import { $env, getProviderInFlightRoot, isEnoent, logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { $env, getProviderInFlightRoot, isEnoent, isPidAlive, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { getCustomApi } from "./api-registry";
 import { createAuthRetryKeyState, isApiKeyResolver, resolvedApiKeyBearer, resolveNextAuthRetryKey } from "./auth-retry";
 import type { OAuthRequestIdentity } from "./auth/types";
@@ -165,18 +165,6 @@ function providerInFlightLockDir(provider: string): string {
 	return `${providerInFlightDir(provider)}.lock`;
 }
 
-// `process.kill(pid, 0)` may throw for permission/sandbox reasons even when a
-// process exists. Treat non-ESRCH failures as alive; timestamp expiry still
-// reaps leases whose heartbeat stopped.
-function isProcessAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		return (error as NodeJS.ErrnoException).code !== "ESRCH";
-	}
-}
-
 async function readProviderInFlightInfo(infoPath: string): Promise<ProviderInFlightLeaseInfo | null> {
 	try {
 		const content = await fs.readFile(infoPath, "utf-8");
@@ -208,7 +196,7 @@ async function writeProviderInFlightInfo(dir: string, token: string): Promise<vo
 async function isProviderInFlightDirStale(dir: string, staleMs: number): Promise<boolean> {
 	const info = await readProviderInFlightInfo(path.join(dir, "info.json"));
 	if (info) {
-		if (!isProcessAlive(info.pid)) return true;
+		if (!isPidAlive(info.pid)) return true;
 		return Date.now() - info.timestamp > staleMs;
 	}
 
@@ -231,7 +219,7 @@ async function isProviderInFlightDirStale(dir: string, staleMs: number): Promise
 async function readProviderInFlightStaleLock(lockDir: string): Promise<ProviderInFlightStaleLock | null> {
 	const infoPath = path.join(lockDir, "info.json");
 	const info = await readProviderInFlightInfo(infoPath);
-	if (info) return isProcessAlive(info.pid) ? null : { token: info.token };
+	if (info) return isPidAlive(info.pid) ? null : { token: info.token };
 
 	try {
 		const stat = await fs.stat(lockDir);

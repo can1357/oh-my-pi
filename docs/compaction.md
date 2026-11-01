@@ -76,6 +76,17 @@ Compaction/context maintenance can run in six ways:
 5. **Mid-turn threshold maintenance**: before the next provider request when a tool-loop turn crosses the threshold and `compaction.midTurnEnabled !== false`. Subagent sessions always run this check: `createSubagentSettings` pins `compaction.midTurnEnabled` on for the child because a whole assignment is one turn, so post-turn maintenance would only fire after the run already ended.
 6. **Idle maintenance**: `runIdleCompaction()` can invoke the same auto-maintenance path with reason `"idle"`.
 
+### ACP notifications
+
+ACP sessions forward automatic maintenance as JSON-RPC extension notifications:
+
+| Method | Params |
+| --- | --- |
+| `_omp/compaction/start` | `sessionId`, `reason`, `action` |
+| `_omp/compaction/end` | `sessionId`, `action`, `aborted`, `willRetry`, optional `skipped`, `errorMessage`, `tokensBefore` |
+
+Clients that do not implement them can ignore them.
+
 ### Compaction shape (visual)
 
 ```text
