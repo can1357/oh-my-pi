@@ -655,13 +655,14 @@ describe("createAgentSession deferred model pattern resolution", () => {
 	});
 
 	test("does not silently fallback when explicit modelPattern is unresolved", async () => {
-		const { session, modelFallbackMessage } = await createAgentSession(
+		const { session, modelFallbackMessage, modelPatternResolutionFailed } = await createAgentSession(
 			buildSessionOptions("missing-provider/missing-model"),
 		);
 
 		try {
 			expect(session.model).toBeUndefined();
 			expect(modelFallbackMessage).toBe('Model "missing-provider/missing-model" not found');
+			expect(modelPatternResolutionFailed).toBe(true);
 		} finally {
 			await session.dispose();
 		}
@@ -683,7 +684,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 
 	test("does not resolve a disabled provider through deferred subagent model selection", async () => {
 		const settings = Settings.isolated({ disabledProviders: ["runtime-provider"] });
-		const { session, modelFallbackMessage } = await createAgentSession({
+		const { session, modelFallbackMessage, modelPatternResolutionFailed } = await createAgentSession({
 			...buildSessionOptions("runtime-provider/runtime-model"),
 			settings,
 			modelPatternAuthFallback: "runtime-provider/runtime-fallback-model",
@@ -692,6 +693,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		try {
 			expect(session.model).toBeUndefined();
 			expect(modelFallbackMessage).toBe('Model "runtime-provider/runtime-model" not found');
+			expect(modelPatternResolutionFailed).toBe(true);
 		} finally {
 			await session.dispose();
 		}

@@ -205,6 +205,8 @@ export interface EffectiveSubagentPolicy {
 	agent: AgentDefinition;
 	effectiveAgent: AgentDefinition;
 	modelOverride?: string[];
+	/** False when `modelOverride` was inherited from the parent session rather than named for this spawn. */
+	modelExplicit?: boolean;
 	/** Prepared read-only source fork for the bundled seance agent. */
 	preparedSession?: PreparedSeanceSession;
 	/** Explicit pre-expansion model role alias selected for this run. */
@@ -592,8 +594,12 @@ export async function resolveEffectiveSubagentPolicy(
 	// from different sources: the expansion below discards the alias, and the
 	// child's inherited retry-fallback chain is keyed off the role. A per-call
 	// model is already one exact selector and stays literal, never a role alias.
-	const { patterns: modelOverride, role: modelRole } = perCallModelGrants
-		? { patterns: [(perCallSelector as string).trim()], role: undefined }
+	const {
+		patterns: modelOverride,
+		role: modelRole,
+		explicit: modelExplicit,
+	} = perCallModelGrants
+		? { patterns: [(perCallSelector as string).trim()], role: undefined, explicit: true }
 		: resolveAgentModelSelection(modelResolution);
 	const isolationEnabled = cfgTaskIsolationEnabled.get(request.session.settings);
 	const isIsolated = request.isolation?.requested === true;
@@ -609,6 +615,7 @@ export async function resolveEffectiveSubagentPolicy(
 		agent,
 		effectiveAgent,
 		modelOverride,
+		modelExplicit,
 		preparedSession: preparedSeance?.session,
 		modelRole,
 		serviceTierOverride,
@@ -671,7 +678,7 @@ async function applySpawnHook(
 	if (spawnResult?.model === undefined) return policy;
 	const replacement = resolveConfiguredModelPatterns(spawnResult.model, request.session.settings);
 	if (replacement.length === 0) return policy;
-	return { ...policy, modelOverride: replacement, modelRoute: spawnResult.note };
+	return { ...policy, modelOverride: replacement, modelExplicit: true, modelRoute: spawnResult.note };
 }
 
 /** Reserve a session-global agent id only after preflight has succeeded. */
@@ -766,6 +773,7 @@ function buildExecutorOptions(
 		invokedAt: request.invokedAt,
 		acquiredAt: request.acquiredAt,
 		modelOverride: policy.modelOverride,
+		modelExplicit: policy.modelExplicit,
 		modelRole: policy.modelRole,
 		modelRoute: policy.modelRoute,
 		serviceTierOverride: policy.serviceTierOverride,

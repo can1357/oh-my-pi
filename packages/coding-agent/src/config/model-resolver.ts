@@ -1384,6 +1384,12 @@ export interface AgentModelSelection {
 	patterns: string[];
 	/** Role alias the patterns came from (`@task` -> `task`), when the source named one. */
 	role: string | undefined;
+	/**
+	 * True when a request, settings override or agent profile named the model. False when the patterns
+	 * were inherited from the parent's active/default model, so an unresolvable inherited model may
+	 * still fall back to the role chain instead of failing the spawn.
+	 */
+	explicit: boolean;
 }
 
 /**
@@ -1394,7 +1400,7 @@ export interface AgentModelSelection {
  */
 export function resolveAgentModelSelection(options: AgentModelPatternResolutionOptions): AgentModelSelection {
 	const { source, patterns } = resolveEffectiveAgentModelSelection(options);
-	return { patterns, role: resolveExplicitModelRole(source, options.settings) };
+	return { patterns, role: resolveExplicitModelRole(source, options.settings), explicit: source !== undefined };
 }
 
 /** Effective agent model patterns alone, for callers with no interest in role identity. */
