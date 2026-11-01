@@ -91,14 +91,14 @@ Background response (`async.enabled=true`):
 
 Settled response (`async.enabled=false`, no job manager, every item's agent `blocking: true`, or async job body):
 
-- `content`: summary rendered from `packages/coding-agent/src/prompts/tools/task-summary.md`; output up to 11500 chars is inline whole, longer output shows a 5000-char preview and `agent://<id>` holds the full output. A sync batch concatenates the per-spawn summaries.
+- `content`: summary rendered from `packages/coding-agent/src/prompts/tools/task-summary.md`; output up to 11500 chars is inline whole, longer output shows a 5000-char preview and `agent://<id>` holds the full output. A sync batch concatenates the per-spawn summaries. A structured child that ends without `yield` adds `missing-yield="initial"` or `missing-yield="wake"` to its `<task-result>` header.
 - `details.results`: one `SingleResult` per spawn; `usage`, `outputPaths` populated (aggregated across spawns for a sync batch).
 
 `SingleResult` includes:
 
 - identity: `index`, `id`, `agent`, `agentSource`, `task`, `description`, optional `assignment` (internal payload names; the wire fields are `name`/`agent`/`task`)
 - status: `exitCode`, optional `error`, optional `aborted`, optional `abortReason`, optional `retryFailure`
-- output: `output`, `stderr`, `truncated`, `durationMs`, `tokens`, `requests`, optional `contextTokens`/`contextWindow`, `usage`
+- output: `output`, `stderr`, `truncated`, `durationMs`, `tokens`, `requests`, optional `contextTokens`/`contextWindow`, `usage`, optional `missingYield` (`"initial"` or `"wake"`)
 - model: optional `modelOverride`, `modelRole`, `resolvedModel`, `resolvedModelIdentity`, `resolvedThinkingLevel`, `resolvedModelIsFallback`, `resolvedModelRoute`, `advisor`
 - structured result: optional `structuredOutput` with schema source/mode, validation status, parsed `data`, and validation `error`
 - artifact metadata: `outputPath?`, `isolated?`, `patchPath?`, `hasRootChanges?`, `branchName?`, `branchBaseSha?`, `nestedPatches?`, `nestedPatchPaths?`, `outputMeta?`
@@ -215,7 +215,7 @@ Artifacts and side channels:
 - Job registration failure returns `Failed to start background task job(s): ...`; a batch that schedules only some jobs reports the failed ids in the immediate text and keeps the started ones running.
 - Child failures surface as `SingleResult.exitCode = 1` with `stderr`/`error` populated; the async job is marked failed but the delivery text still carries the output plus a follow-up/transcript hint.
 - Per-call workers also fail if credentials are unavailable or a later main-loop request loses approval or cannot honor the requested-effort cap; they do not drop `model` or use an automatic model fallback. A Factory response served by another model, or carrying a fallback handoff block, fails the worker: the request omits Factory's refusal chain, so a handoff is a violation rather than an answer. Cold revival refuses legacy per-call records without the canonical `perCallModelIdentity` and saved `perCallThinkingLevel`, an unavailable exact saved route, a model no longer granted (a removed/disabled agent or a non-live real parent grants nothing), or an effort floor above the live `task.maxEffort`. Revival waits for a model-registry refresh already in flight before the exact lookup; it does not start one, so a cold registry fails the revival with `Cannot revive subagent "<id>": its per-call model <provider/model-id> is no longer available. A per-call worker revives only on its exact saved model.`
-- If the child omits `yield`, `finalizeSubprocessOutput(...)` injects warnings such as `SYSTEM WARNING: Subagent exited without calling yield tool after 3 reminders.`
+- If a structured child omits `yield`, `finalizeSubprocessOutput(...)` sets `missingYield` and prefixes the output with `SYSTEM WARNING: Subagent exited without calling yield tool after 3 reminders.` (first run) or `SYSTEM WARNING: Structured subagent replied without calling yield.` (a wake turn the parent owns: its message woke the agent, or its steer entered a turn a peer started). A wake delivers only its final report turn under that warning. Without an output schema, nonempty prose keeps exit code 0 and the `completed` status; with one, or with empty output, the run fails. `structured: false` children and valid JSON fallback results get no warning.
 - `agent://<id>` reads report unavailable sessions/artifact directories, missing ids, or invalid JSON for field extraction. `agent://all` is write-only; message targets cannot carry JSON-path suffixes.
 
 ## Notes

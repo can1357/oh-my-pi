@@ -63,6 +63,17 @@ describe("formatTaskResultSummary", () => {
 		expect(summary).not.toContain("<preview");
 		expect(summary).not.toContain("<meta");
 	});
+	it("marks missing-yield provenance on the task envelope", () => {
+		const summary = formatTaskResultSummary(
+			{
+				...settledResult("SYSTEM WARNING: Structured subagent replied without calling yield.\n\nreport"),
+				missingYield: "wake",
+			},
+			{ totalDurationMs: 5 },
+		);
+
+		expect(summary).toContain('missing-yield="wake"');
+	});
 
 	it("inlines a report past the preview size whole, tail included", () => {
 		// Parents re-read most cut reports through agent://<id>; one that fits the
@@ -119,6 +130,25 @@ describe("formatTaskResultSummary", () => {
 		);
 		expect(summary).toContain("<output>\nagent failed\n</output>");
 		expect(summary).not.toContain("<error>");
+	});
+
+	it.each([
+		["", "empty"],
+		["Everything verified; writing the report now.", "schema-bearing prose"],
+	])("states a missing-yield failure once (%p, %s)", prose => {
+		// A failed structured run carries the warning as its error and as the
+		// head of its output (alone when the run was empty); the parent must
+		// read it once, in the output preview the summary uses for failures.
+		const warning = "SYSTEM WARNING: Structured subagent replied without calling yield.";
+		const output = prose ? `${warning}\n\n${prose}` : warning;
+		const summary = formatTaskResultSummary(
+			{ ...settledResult(output), exitCode: 1, stderr: warning, error: warning, missingYield: "wake" },
+			{ totalDurationMs: 5 },
+		);
+		expect(summary).toContain('status="failed (exit 1)"');
+		expect(summary).toContain(`<output>\n${output}\n</output>`);
+		expect(summary).not.toContain("<error>");
+		expect(summary.split(warning).length - 1).toBe(1);
 	});
 
 	it("keeps a subagent's output from forging a harness <system-notice> or parent <irc> block", () => {
