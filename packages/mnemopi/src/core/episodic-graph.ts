@@ -91,6 +91,7 @@ interface FactRow {
 }
 
 interface EdgeRow {
+	readonly id?: number;
 	readonly source: string;
 	readonly target: string;
 	readonly edge_type: string;
@@ -106,6 +107,10 @@ interface MemoryLivenessRow {
 const EXTRACT_FACTS_MAX_CONTENT_LEN = 4096;
 const MAX_FACTS_PER_MEMORY = 5;
 const DEFAULT_LINK_THRESHOLD = 0.35;
+const MAX_SQL_IDS_PER_CHUNK = 900;
+const MAX_TRAVERSAL_EDGES_PER_CHUNK = 10_000;
+const FRONTIER_EDGE_PAGE_SIZE = 2048;
+const LINK_CANDIDATE_BATCH_SIZE = 256;
 const LIVE_MEMORY_SQL = "superseded_by IS NULL AND (valid_until IS NULL OR valid_until > ?)";
 
 /** Clause connector that ends a fact object, so the next clause is never swallowed into it. */
@@ -239,12 +244,17 @@ function clampWeight(weight: number): number {
 	return weight;
 }
 
-function lowerSet(values: readonly (string | null)[]): Set<string> {
+function normalizeEntity(value: string | null | undefined): string | null {
+	if (value == null) return null;
+	const normalized = value.trim().toLocaleLowerCase();
+	return normalized.length > 0 ? normalized : null;
+}
+
+function lowerSet(values: readonly (string | null | undefined)[]): Set<string> {
 	const out = new Set<string>();
 	for (const value of values) {
-		if (value === null) continue;
-		const normalized = value.trim().toLocaleLowerCase();
-		if (normalized.length > 0) out.add(normalized);
+		const norm = normalizeEntity(value);
+		if (norm !== null) out.add(norm);
 	}
 	return out;
 }
@@ -464,33 +474,91 @@ export class EpisodicGraph {
 		const threshold = clampWeight(minWeight);
 
 		for (let hop = 1; hop <= maxDepth; hop++) {
+			if (currentLevel.size === 0) break;
 			const nextLevel = new Set<string>();
-			for (const mem of currentLevel) {
-				const rows =
-					edgeType.length > 0
-						? (this.db
-								.query(
-									`SELECT source, target, edge_type, weight FROM graph_edges
-								 WHERE (source = ? OR target = ?) AND edge_type = ? AND weight >= ?
-								 ORDER BY weight DESC, id`,
-								)
-								.all(mem, mem, edgeType, threshold) as EdgeRow[])
-						: (this.db
-								.query(
-									`SELECT source, target, edge_type, weight FROM graph_edges
-								 WHERE (source = ? OR target = ?) AND weight >= ?
-								 ORDER BY weight DESC, id`,
-								)
-								.all(mem, mem, threshold) as EdgeRow[]);
-				for (const row of rows) {
-					const neighbor = row.source === mem ? row.target : row.source;
+			const frontierIds = [...currentLevel];
+			for (let i = 0; i < frontierIds.length; i += MAX_SQL_IDS_PER_CHUNK) {
+				const chunk = frontierIds.slice(i, i + MAX_SQL_IDS_PER_CHUNK);
+				const placeholders = chunk.map(() => "?").join(", ");
+				const chunkIndex = new Map<string, number>();
+				for (let c = 0; c < chunk.length; c++) {
+					chunkIndex.set(chunk[c]!, c);
+				}
+				const bestByNeighbor = new Map<string, { frontierIdx: number; order: number; edge: GraphEdge }>();
+				let edgeOrder = 0;
+				let lastWeight: number | null = null;
+				let lastId: number | null = null;
+
+				const recordCandidate = (frontierId: string, neighborId: string, row: EdgeRow): void => {
+					const frontierIdx = chunkIndex.get(frontierId);
+					if (frontierIdx === undefined) return;
+					const existing = bestByNeighbor.get(neighborId);
+					if (existing === undefined || frontierIdx < existing.frontierIdx) {
+						bestByNeighbor.set(neighborId, {
+							frontierIdx,
+							order: edgeOrder++,
+							edge: edgeFromRow(row),
+						});
+					}
+				};
+
+				while (bestByNeighbor.size < MAX_TRAVERSAL_EDGES_PER_CHUNK) {
+					const paginationCondition =
+						lastWeight !== null && lastId !== null ? " AND (weight < ? OR (weight = ? AND id > ?))" : "";
+					const querySql =
+						edgeType.length > 0
+							? `SELECT id, source, target, edge_type, weight, timestamp FROM graph_edges
+					 WHERE (source IN (${placeholders}) OR target IN (${placeholders})) AND edge_type = ? AND weight >= ?${paginationCondition}
+					 ORDER BY weight DESC, id LIMIT ?`
+							: `SELECT id, source, target, edge_type, weight, timestamp FROM graph_edges
+					 WHERE (source IN (${placeholders}) OR target IN (${placeholders})) AND weight >= ?${paginationCondition}
+					 ORDER BY weight DESC, id LIMIT ?`;
+
+					const queryParams: (string | number)[] = [...chunk, ...chunk];
+					if (edgeType.length > 0) queryParams.push(edgeType);
+					queryParams.push(threshold);
+					if (lastWeight !== null && lastId !== null) {
+						queryParams.push(lastWeight, lastWeight, lastId);
+					}
+					queryParams.push(FRONTIER_EDGE_PAGE_SIZE);
+
+					const rows = this.db.query(querySql).all(...queryParams) as EdgeRow[];
+					if (rows.length === 0) break;
+
+					for (const row of rows) {
+						lastWeight = row.weight;
+						lastId = row.id ?? 0;
+
+						if (seen.has(row.source) && seen.has(row.target)) {
+							continue;
+						}
+
+						if (!seen.has(row.target)) {
+							recordCandidate(row.source, row.target, row);
+						}
+						if (row.target !== row.source && !seen.has(row.source)) {
+							recordCandidate(row.target, row.source, row);
+						}
+
+						if (bestByNeighbor.size >= MAX_TRAVERSAL_EDGES_PER_CHUNK) {
+							break;
+						}
+					}
+
+					if (rows.length < FRONTIER_EDGE_PAGE_SIZE) break;
+				}
+
+				const chosen = Array.from(bestByNeighbor.entries()).sort(
+					(a, b) => a[1].frontierIdx - b[1].frontierIdx || a[1].order - b[1].order,
+				);
+				for (const [neighbor, { edge }] of chosen) {
 					if (seen.has(neighbor)) continue;
 					seen.add(neighbor);
 					nextLevel.add(neighbor);
 					results.push({
 						memoryId: neighbor,
-						edgeType: row.edge_type,
-						weight: row.weight,
+						edgeType: edge.edgeType,
+						weight: edge.weight,
 						depth: hop,
 					});
 				}
@@ -504,19 +572,77 @@ export class EpisodicGraph {
 	 * Batched frontier expansion for bounded traversals; see {@link findRelatedMemories}
 	 * for the per-node walk.
 	 */
-	findEdgesTouching(nodeIds: readonly string[], edgeType: string, minWeight: number, limit: number): GraphEdge[] {
+	findEdgesTouching(
+		nodeIds: readonly string[],
+		edgeType = "",
+		minWeight = 0,
+		limit = MAX_TRAVERSAL_EDGES_PER_CHUNK,
+	): GraphEdge[] {
 		const max = Math.max(0, Math.trunc(limit));
 		if (nodeIds.length === 0 || max === 0) return [];
-		const placeholders = nodeIds.map(() => "?").join(", ");
-		const rows = this.db
-			.query(
-				`SELECT source, target, edge_type, weight, timestamp FROM graph_edges
-				 WHERE (source IN (${placeholders}) OR target IN (${placeholders})) AND edge_type = ? AND weight >= ?
-				 ORDER BY weight DESC, id
-				 LIMIT ?`,
-			)
-			.all(...nodeIds, ...nodeIds, edgeType, clampWeight(minWeight), max) as EdgeRow[];
-		return rows.map(edgeFromRow);
+		const threshold = clampWeight(minWeight);
+		const hasSqlLimit = Number.isFinite(limit) && max > 0;
+
+		if (nodeIds.length <= MAX_SQL_IDS_PER_CHUNK) {
+			const placeholders = nodeIds.map(() => "?").join(", ");
+			const limitClause = hasSqlLimit ? " LIMIT ?" : "";
+			const rows =
+				edgeType.length > 0
+					? (this.db
+							.query(
+								`SELECT id, source, target, edge_type, weight, timestamp FROM graph_edges
+					 WHERE (source IN (${placeholders}) OR target IN (${placeholders})) AND edge_type = ? AND weight >= ?
+					 ORDER BY weight DESC, id${limitClause}`,
+							)
+							.all(...nodeIds, ...nodeIds, edgeType, threshold, ...(hasSqlLimit ? [max] : [])) as EdgeRow[])
+					: (this.db
+							.query(
+								`SELECT id, source, target, edge_type, weight, timestamp FROM graph_edges
+					 WHERE (source IN (${placeholders}) OR target IN (${placeholders})) AND weight >= ?
+					 ORDER BY weight DESC, id${limitClause}`,
+							)
+							.all(...nodeIds, ...nodeIds, threshold, ...(hasSqlLimit ? [max] : [])) as EdgeRow[]);
+			return rows.map(edgeFromRow);
+		}
+
+		const seenKeys = new Set<string>();
+		const collected: Array<{ id: number; edge: GraphEdge }> = [];
+
+		for (let i = 0; i < nodeIds.length; i += MAX_SQL_IDS_PER_CHUNK) {
+			const chunk = nodeIds.slice(i, i + MAX_SQL_IDS_PER_CHUNK);
+			const placeholders = chunk.map(() => "?").join(", ");
+			const limitClause = hasSqlLimit ? " LIMIT ?" : "";
+			const rows =
+				edgeType.length > 0
+					? (this.db
+							.query(
+								`SELECT id, source, target, edge_type, weight, timestamp FROM graph_edges
+					 WHERE (source IN (${placeholders}) OR target IN (${placeholders})) AND edge_type = ? AND weight >= ?
+					 ORDER BY weight DESC, id${limitClause}`,
+							)
+							.all(...chunk, ...chunk, edgeType, threshold, ...(hasSqlLimit ? [max] : [])) as EdgeRow[])
+					: (this.db
+							.query(
+								`SELECT id, source, target, edge_type, weight, timestamp FROM graph_edges
+					 WHERE (source IN (${placeholders}) OR target IN (${placeholders})) AND weight >= ?
+					 ORDER BY weight DESC, id${limitClause}`,
+							)
+							.all(...chunk, ...chunk, threshold, ...(hasSqlLimit ? [max] : [])) as EdgeRow[]);
+
+			for (const row of rows) {
+				const key = `${row.source}\0${row.target}\0${row.edge_type}`;
+				if (seenKeys.has(key)) continue;
+				seenKeys.add(key);
+				collected.push({ id: row.id ?? 0, edge: edgeFromRow(row) });
+			}
+		}
+
+		collected.sort((a, b) => {
+			if (b.edge.weight !== a.edge.weight) return b.edge.weight - a.edge.weight;
+			return a.id - b.id;
+		});
+		const selected = collected.length > max ? collected.slice(0, max) : collected;
+		return selected.map(item => item.edge);
 	}
 	findFactsBySubject(subject: string): Fact[] {
 		const rows = this.db
@@ -570,53 +696,69 @@ export class EpisodicGraph {
 
 			if (linkExisting) {
 				const sourceTokens = contentTokenSet(content);
-				for (const otherId of previousMemoryIds) {
-					const otherContent = this.memoryContent(otherId, timestamp);
-					const lexicalScore = Math.round(jaccard(sourceTokens, contentTokenSet(otherContent)) * 1000) / 1000;
-					let wroteCtxEdge = false;
-					if (lexicalScore >= minLinkScore) {
-						const edge = {
-							source: memoryId,
-							target: otherId,
-							edgeType: "related_to",
-							weight: lexicalScore,
-							timestamp,
-						};
-						this.addEdge(edge);
-						edges.push(edge);
-						const ctxEdge = {
-							source: memoryId,
-							target: otherId,
-							edgeType: "ctx",
-							weight: lexicalScore,
-							timestamp,
-						};
-						this.addEdge(ctxEdge);
-						edges.push(ctxEdge);
-						wroteCtxEdge = true;
-					}
-					const entityScore = this.entityOverlapScore(memoryId, otherId);
-					if (entityScore > 0) {
-						const edge = {
-							source: memoryId,
-							target: otherId,
-							edgeType: "references",
-							weight: entityScore,
-							timestamp,
-						};
-						this.addEdge(edge);
-						edges.push(edge);
-					}
-					if (!wroteCtxEdge && entityScore >= minLinkScore) {
-						const ctxEdge = {
-							source: memoryId,
-							target: otherId,
-							edgeType: "ctx",
-							weight: entityScore,
-							timestamp,
-						};
-						this.addEdge(ctxEdge);
-						edges.push(ctxEdge);
+				const leftRows = this.db
+					.query("SELECT subject, object FROM facts WHERE source_msg_id = ?")
+					.all(memoryId) as FactRow[];
+				const leftEntities = lowerSet(leftRows.flatMap(row => [row.subject, row.object]));
+
+				for (let i = 0; i < previousMemoryIds.length; i += LINK_CANDIDATE_BATCH_SIZE) {
+					const chunk = previousMemoryIds.slice(i, i + LINK_CANDIDATE_BATCH_SIZE);
+					const otherEntitiesMap = this.#entitySetsForMemories(chunk);
+					const otherContentMap =
+						sourceTokens.size > 0 ? this.#batchMemoryContent(chunk, timestamp) : new Map<string, string>();
+
+					for (const otherId of chunk) {
+						const otherContent = otherContentMap.get(otherId) ?? "";
+						const lexicalScore =
+							sourceTokens.size > 0
+								? Math.round(jaccard(sourceTokens, contentTokenSet(otherContent)) * 1000) / 1000
+								: 0;
+						let wroteCtxEdge = false;
+						if (lexicalScore >= minLinkScore) {
+							const edge = {
+								source: memoryId,
+								target: otherId,
+								edgeType: "related_to",
+								weight: lexicalScore,
+								timestamp,
+							};
+							this.addEdge(edge);
+							edges.push(edge);
+							const ctxEdge = {
+								source: memoryId,
+								target: otherId,
+								edgeType: "ctx",
+								weight: lexicalScore,
+								timestamp,
+							};
+							this.addEdge(ctxEdge);
+							edges.push(ctxEdge);
+							wroteCtxEdge = true;
+						}
+						const rightEntities = otherEntitiesMap.get(otherId) ?? new Set();
+						const entityScore = Math.round(overlapScore(leftEntities, rightEntities) * 1000) / 1000;
+						if (entityScore > 0) {
+							const edge = {
+								source: memoryId,
+								target: otherId,
+								edgeType: "references",
+								weight: entityScore,
+								timestamp,
+							};
+							this.addEdge(edge);
+							edges.push(edge);
+						}
+						if (!wroteCtxEdge && entityScore >= minLinkScore) {
+							const ctxEdge = {
+								source: memoryId,
+								target: otherId,
+								edgeType: "ctx",
+								weight: entityScore,
+								timestamp,
+							};
+							this.addEdge(ctxEdge);
+							edges.push(ctxEdge);
+						}
 					}
 				}
 			}
@@ -722,43 +864,103 @@ export class EpisodicGraph {
 		return [...ids];
 	}
 
-	private memoryContent(memoryId: string, now: string): string {
+	#forEachChunk<T>(
+		items: readonly string[],
+		fn: (chunk: readonly string[], placeholders: string) => T[],
+		chunkSize = 500,
+	): T[] {
+		if (items.length === 0) return [];
+		const result: T[] = [];
+		for (let i = 0; i < items.length; i += chunkSize) {
+			const chunk = items.slice(i, i + chunkSize);
+			const placeholders = chunk.map(() => "?").join(", ");
+			result.push(...fn(chunk, placeholders));
+		}
+		return result;
+	}
+
+	#entitySetsForMemories(memoryIds: readonly string[]): Map<string, Set<string>> {
+		const result = new Map<string, Set<string>>();
+		if (memoryIds.length === 0) return result;
+		for (const id of memoryIds) {
+			result.set(id, new Set());
+		}
+		const rows = this.#forEachChunk(
+			memoryIds,
+			(chunk, placeholders) =>
+				this.db
+					.query(`SELECT source_msg_id, subject, object FROM facts WHERE source_msg_id IN (${placeholders})`)
+					.all(...chunk) as (FactRow & { source_msg_id: string })[],
+		);
+		for (const row of rows) {
+			const set = result.get(row.source_msg_id);
+			if (set) {
+				const s = normalizeEntity(row.subject);
+				if (s !== null) set.add(s);
+				const o = normalizeEntity(row.object);
+				if (o !== null) set.add(o);
+			}
+		}
+		return result;
+	}
+
+	#batchMemoryContent(memoryIds: readonly string[], now: string): Map<string, string> {
+		const contentMap = new Map<string, string>();
+		if (memoryIds.length === 0) return contentMap;
+
+		const remaining = new Set(memoryIds);
+
 		try {
-			const working = this.db
-				.query(`SELECT content FROM working_memory WHERE id = ? AND ${LIVE_MEMORY_SQL}`)
-				.get(memoryId, now) as {
-				content: string;
-			} | null;
-			if (working !== null) return working.content;
+			const rows = this.#forEachChunk(
+				[...remaining],
+				(chunk, placeholders) =>
+					this.db
+						.query(`SELECT id, content FROM working_memory WHERE id IN (${placeholders}) AND ${LIVE_MEMORY_SQL}`)
+						.all(...chunk, now) as { id: string; content: string }[],
+			);
+			for (const row of rows) {
+				contentMap.set(row.id, row.content);
+				remaining.delete(row.id);
+			}
 		} catch {
 			// Standalone EpisodicGraph users may not have Beam tables.
 		}
-		try {
-			const episodic = this.db
-				.query(`SELECT content FROM episodic_memory WHERE id = ? AND ${LIVE_MEMORY_SQL}`)
-				.get(memoryId, now) as {
-				content: string;
-			} | null;
-			if (episodic !== null) return episodic.content;
-		} catch {
-			// Fall through to graph-local gist text.
-		}
-		const gist = this.db.query("SELECT text FROM gists WHERE memory_id = ?").get(memoryId) as {
-			text: string;
-		} | null;
-		return gist?.text ?? "";
-	}
 
-	private entityOverlapScore(sourceMemoryId: string, targetMemoryId: string): number {
-		const leftRows = this.db
-			.query("SELECT subject, object FROM facts WHERE source_msg_id = ?")
-			.all(sourceMemoryId) as FactRow[];
-		const rightRows = this.db
-			.query("SELECT subject, object FROM facts WHERE source_msg_id = ?")
-			.all(targetMemoryId) as FactRow[];
-		const left = lowerSet(leftRows.flatMap(row => [row.subject, row.object]));
-		const right = lowerSet(rightRows.flatMap(row => [row.subject, row.object]));
-		return Math.round(overlapScore(left, right) * 1000) / 1000;
+		if (remaining.size > 0) {
+			try {
+				const rows = this.#forEachChunk(
+					[...remaining],
+					(chunk, placeholders) =>
+						this.db
+							.query(
+								`SELECT id, content FROM episodic_memory WHERE id IN (${placeholders}) AND ${LIVE_MEMORY_SQL}`,
+							)
+							.all(...chunk, now) as { id: string; content: string }[],
+				);
+				for (const row of rows) {
+					contentMap.set(row.id, row.content);
+					remaining.delete(row.id);
+				}
+			} catch {
+				// Fall through to graph-local gist text.
+			}
+		}
+
+		if (remaining.size > 0) {
+			const rows = this.#forEachChunk(
+				[...remaining],
+				(chunk, placeholders) =>
+					this.db
+						.query(`SELECT memory_id, text FROM gists WHERE memory_id IN (${placeholders})`)
+						.all(...chunk) as { memory_id: string; text: string }[],
+			);
+			for (const row of rows) {
+				contentMap.set(row.memory_id, row.text);
+				remaining.delete(row.memory_id);
+			}
+		}
+
+		return contentMap;
 	}
 
 	private memoryFeatures(memoryId: string): Set<string> {

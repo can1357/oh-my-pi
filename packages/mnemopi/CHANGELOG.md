@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Performance
+
+- Batched episodic graph frontier traversal in `findRelatedMemories` (1 query per depth level) and hoisted entity extraction queries in `ingestMemory` to eliminate $O(N)$ redundant queries per ingested memory ([#17570](https://github.com/can1357/oh-my-pi/pull/17570) by [@GTanger](https://github.com/GTanger))
+- Added composite index `idx_cf_spo` on `consolidated_facts(subject, predicate, object)` to accelerate subject/predicate/object lookups during veracity consolidation ([#17570](https://github.com/can1357/oh-my-pi/pull/17570) by [@GTanger](https://github.com/GTanger))
+- Cached parsed embeddings and precomputed norms on `beam.caches` in `vectorSimilarities` using content fingerprints to avoid repeated JSON parsing and norm computation on recall ([#17570](https://github.com/can1357/oh-my-pi/pull/17570) by [@GTanger](https://github.com/GTanger))
+
 ## [18.14.2] - 2026-10-31
 
 ### Fixed
