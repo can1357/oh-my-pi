@@ -6,6 +6,8 @@ import {
 	resolveWorkerSpawnCmd,
 	workerEnvFromParent,
 } from "../../subprocess/worker-client";
+import { ArtifactPinOwner } from "../artifact-readiness";
+import { EVAL_ARTIFACTS_READY_BRIDGE_NAME } from "../artifact-wire";
 import type { ToolSession } from "../../tools";
 import { ToolAbortError } from "../../tools/tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
@@ -88,6 +90,8 @@ interface PendingRun {
 	 */
 	heldResult?: Extract<WorkerOutbound, { type: "result" }>;
 	settled: boolean;
+	/** The artifact answers this run's readers hold; given back when the run ends. */
+	artifactPins: ArtifactPinOwner;
 }
 
 interface JsSession {
@@ -105,6 +109,17 @@ interface JsSession {
 	pendingShadowRuns: Map<string, PromiseWithResolvers<Extract<WorkerOutbound, { type: "shadow-run" }>>>;
 	ownerIds: Set<string>;
 	hasFallbackOwner: boolean;
+	/**
+	 * The tool session of the most recent run, kept for the questions that
+	 * outlive it: work a cell left running still reads this session's
+	 * artifacts, and has to be told about a copy filling them.
+	 */
+	lastToolSession?: ToolSession;
+	/**
+	 * The artifact answers held for readers outside any run — work a finished
+	 * cell left running — given back when this kernel goes.
+	 */
+	artifactPins: ArtifactPinOwner;
 }
 
 interface StartingJsSession extends SessionOwners {
@@ -241,8 +256,11 @@ export async function invokeJsTool(
 		deferDepth: 0,
 		aborted: false,
 		settled: false,
+		artifactPins: new ArtifactPinOwner(),
 	};
 	session.pending.set(runId, pending);
+	// Kept past the run for the artifact readiness question (see `handleToolCall`).
+	session.lastToolSession = pending.toolSession;
 
 	const onAbort = (): void => {
 		if (pending.settled) return;
@@ -263,6 +281,7 @@ export async function invokeJsTool(
 	} finally {
 		options.signal?.removeEventListener("abort", onAbort);
 		session.pending.delete(runId);
+		await pending.artifactPins.end();
 	}
 
 	if (!isUnknownRecord(envelope) || envelope.ok !== true) {
@@ -465,6 +484,7 @@ export async function smokeTestJsEvalWorker(): Promise<void> {
 		pendingShadowRuns: new Map(),
 		ownerIds: new Set(),
 		hasFallbackOwner: false,
+		artifactPins: new ArtifactPinOwner(),
 	};
 	try {
 		await initWorker(session, { cwd: process.cwd(), sessionId: "smoke" }, WORKER_INIT_TIMEOUT_MS);
@@ -514,8 +534,11 @@ async function runOnce(
 		deferDepth: 0,
 		aborted: false,
 		settled: false,
+		artifactPins: new ArtifactPinOwner(),
 	};
 	session.pending.set(runId, pending);
+	// Kept past the run for the artifact readiness question (see `handleToolCall`).
+	session.lastToolSession = pending.toolSession;
 
 	const onAbort = (): void => {
 		const reason = options.runState.signal?.reason;
@@ -586,6 +609,7 @@ async function runOnce(
 	} finally {
 		options.runState.signal?.removeEventListener("abort", onAbort);
 		session.pending.delete(runId);
+		await pending.artifactPins.end();
 	}
 }
 
@@ -635,6 +659,7 @@ async function acquireSession(
 			pendingShadowRuns: new Map(),
 			ownerIds: new Set(),
 			hasFallbackOwner: false,
+			artifactPins: new ArtifactPinOwner(),
 		};
 		// Init headroom is the fixed infrastructure floor; the caller's per-cell timeout
 		// dominates when larger so users can grant more by raising `timeout` on a cell.
@@ -792,6 +817,31 @@ function trackDeferPhase(pending: PendingRun, event: JsStatusEvent): void {
 
 async function handleToolCall(session: JsSession, msg: Extract<WorkerOutbound, { type: "tool-call" }>): Promise<void> {
 	const pending = session.pending.get(msg.runId);
+	// The artifact readiness question belongs to the session, not to a cell:
+	// work a finished cell left running reads artifacts too, and refusing it
+	// because its run has ended answers nothing about the copy it would have
+	// been told to wait for.
+	if (!pending && msg.name === EVAL_ARTIFACTS_READY_BRIDGE_NAME) {
+		const toolSession = session.lastToolSession;
+		if (!toolSession) {
+			safeSend(session, {
+				type: "tool-reply",
+				id: msg.id,
+				reply: { ok: false, error: { message: "No session to resolve artifacts against" } },
+			});
+			return;
+		}
+		try {
+			const value = await callSessionTool(msg.name, msg.args, {
+				session: toolSession,
+				artifactPins: session.artifactPins,
+			});
+			safeSend(session, { type: "tool-reply", id: msg.id, reply: { ok: true, value } });
+		} catch (error) {
+			safeSend(session, { type: "tool-reply", id: msg.id, reply: { ok: false, error: toErrorPayload(error) } });
+		}
+		return;
+	}
 	if (!pending) {
 		safeSend(session, {
 			type: "tool-reply",
@@ -816,6 +866,7 @@ async function handleToolCall(session: JsSession, msg: Extract<WorkerOutbound, {
 			signal: ctrl.signal,
 			identity: msg.identity,
 			shadowCell: pending.shadowCell,
+			artifactPins: pending.artifactPins,
 			onReply: pending.runState.onReply,
 			emitStatus: (event: JsStatusEvent) => {
 				trackDeferPhase(pending, event);
@@ -888,6 +939,8 @@ async function killSession(session: JsSession, error: Error, options: { force: b
 	session.pendingSnapshots.clear();
 	for (const pending of session.pendingShadowRuns.values()) pending.reject(error);
 	session.pendingShadowRuns.clear();
+	// The kernel is going, and the readers outside any run go with it.
+	await session.artifactPins.end();
 	if (options.force) {
 		await session.worker.terminate().catch(() => undefined);
 		return;

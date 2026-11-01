@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import * as path from "node:path";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -9,6 +9,7 @@ import { createAcpConnection } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-mod
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { tryAcquireSessionLease } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import {
 	type Client,
@@ -249,6 +250,161 @@ describe("ACP lazy startup", () => {
 			bashAutoBackground: true,
 			bashAutoBackgroundThresholdMs: 60000,
 		});
+	});
+
+	it("hands back the ownership of a session it resumed but never uses", async () => {
+		const { runRootCommand } = await import("@oh-my-pi/pi-coding-agent/main");
+		using resumeDir = TempDir.createSync("@omp-acp-resume-ownership-");
+		const creator = SessionManager.create(resumeDir.path(), resumeDir.path());
+		creator.appendMessage({ role: "user", content: "saved conversation", timestamp: Date.now() });
+		await creator.ensureOnDisk();
+		await creator.flush();
+		const sessionFile = creator.getSessionFile();
+		const sessionId = creator.getSessionId();
+		if (!sessionFile) throw new Error("Expected a session file");
+		await creator.close();
+
+		const stopMessage = "stop test ACP mode";
+		let leaseFreeInAcpMode: boolean | undefined;
+		// Resuming a session enters its project directory process-wide; this
+		// one goes away with the temp dir, so put the process back afterwards.
+		const launchCwd = process.cwd();
+		try {
+			await runRootCommand(
+				{
+					mode: "acp",
+					messages: [],
+					fileArgs: [],
+					unknownFlags: new Map(),
+					unrecognizedFlags: [],
+					invalidFlagValues: [],
+					noSkills: true,
+					noRules: true,
+					noTools: true,
+					noLsp: true,
+					resume: sessionFile,
+					sessionDir: resumeDir.path(),
+				},
+				[],
+				{
+					discoverAuthStorage: async () => startupAuthStorage,
+					settings: Settings.isolated(),
+					runAcpMode: async () => {
+						// ACP builds a manager per `session/new`; whatever startup
+						// resumed is not one of them, so its ownership must be back
+						// before the server starts answering.
+						const lease = tryAcquireSessionLease(sessionId);
+						leaseFreeInAcpMode = lease !== null;
+						lease?.release();
+						throw new Error(stopMessage);
+					},
+				},
+			);
+		} catch (error) {
+			if (!(error instanceof Error) || error.message !== stopMessage) throw error;
+		} finally {
+			process.chdir(launchCwd);
+		}
+		expect(leaseFreeInAcpMode).toBe(true);
+	});
+
+	it("hands back the ownership of a resumed session when startup fails before the session is built", async () => {
+		const { runRootCommand } = await import("@oh-my-pi/pi-coding-agent/main");
+		using resumeDir = TempDir.createSync("@omp-startup-failure-ownership-");
+		const creator = SessionManager.create(resumeDir.path(), resumeDir.path());
+		creator.appendMessage({ role: "user", content: "saved conversation", timestamp: Date.now() });
+		await creator.ensureOnDisk();
+		await creator.flush();
+		const sessionFile = creator.getSessionFile();
+		const sessionId = creator.getSessionId();
+		if (!sessionFile) throw new Error("Expected a session file");
+		await creator.close();
+
+		// A trusted extension that does not exist: startup fails after the
+		// resume has taken the session, and before any session is built.
+		const launchCwd = process.cwd();
+		try {
+			await expect(
+				runRootCommand(
+					{
+						mode: "rpc",
+						messages: [],
+						fileArgs: [],
+						unknownFlags: new Map(),
+						unrecognizedFlags: [],
+						invalidFlagValues: [],
+						noSkills: true,
+						noRules: true,
+						noTools: true,
+						noLsp: true,
+						resume: sessionFile,
+						sessionDir: resumeDir.path(),
+						trustedExtensions: [path.join(resumeDir.path(), "missing-extension.ts")],
+					},
+					[],
+					{ discoverAuthStorage: async () => startupAuthStorage, settings: Settings.isolated() },
+				),
+			).rejects.toThrow();
+		} finally {
+			process.chdir(launchCwd);
+		}
+
+		// The process is still alive — an embedder's would be too — and must not
+		// be holding a session it never ran.
+		const lease = tryAcquireSessionLease(sessionId);
+		expect(lease).not.toBeNull();
+		lease?.release();
+	});
+
+	it("hands back the ownership of a resumed session when entering its project fails", async () => {
+		const { runRootCommand } = await import("@oh-my-pi/pi-coding-agent/main");
+		using resumeDir = TempDir.createSync("@omp-startup-rescope-ownership-");
+		const creator = SessionManager.create(resumeDir.path(), resumeDir.path());
+		creator.appendMessage({ role: "user", content: "saved conversation", timestamp: Date.now() });
+		await creator.ensureOnDisk();
+		await creator.flush();
+		const sessionFile = creator.getSessionFile();
+		const sessionId = creator.getSessionId();
+		if (!sessionFile) throw new Error("Expected a session file");
+		await creator.close();
+
+		// Rescoping settings into the resumed project fails, and so does the
+		// rollback: this is the earliest failure after the resume took the
+		// session, before extensions or any session are built.
+		const settings = Settings.isolated();
+		const reloadForCwd = spyOn(settings, "reloadForCwd").mockImplementation(() => {
+			throw new Error("settings reload failed");
+		});
+		const launchCwd = process.cwd();
+		try {
+			await expect(
+				runRootCommand(
+					{
+						mode: "rpc",
+						messages: [],
+						fileArgs: [],
+						unknownFlags: new Map(),
+						unrecognizedFlags: [],
+						invalidFlagValues: [],
+						noSkills: true,
+						noRules: true,
+						noTools: true,
+						noLsp: true,
+						resume: sessionFile,
+						sessionDir: resumeDir.path(),
+					},
+					[],
+					{ discoverAuthStorage: async () => startupAuthStorage, settings },
+				),
+			).rejects.toThrow();
+		} finally {
+			reloadForCwd.mockRestore();
+			process.chdir(launchCwd);
+		}
+
+		const lease = tryAcquireSessionLease(sessionId);
+		expect(lease).not.toBeNull();
+		lease?.release();
 	});
 
 	it("honors explicit host-defaulted and todo settings for protocol hosts", async () => {

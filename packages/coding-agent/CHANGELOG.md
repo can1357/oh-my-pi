@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- Extensions and hooks can observe `session_moved` when a session must leave its file and continue under a new id; the next tool call and model request wait up to two seconds for its handlers ([#17421](https://github.com/can1357/oh-my-pi/pull/17421) by [@sjawhar](https://github.com/sjawhar))
+
+### Fixed
+
+- Resuming a session another live omp process holds now continues in a fork under a new id instead of answering to the owner's id, telling the model a tool call the original was still running has an unknown outcome instead of dropping it, and a cancelled or failed `/resume`, a failed startup or `omp --mode acp --resume` no longer holds or gives away the session ([#17421](https://github.com/can1357/oh-my-pi/pull/17421) by [@sjawhar](https://github.com/sjawhar))
+- Resuming a session whose file another session took over stops with an error naming both sessions ([#17421](https://github.com/can1357/oh-my-pi/pull/17421) by [@sjawhar](https://github.com/sjawhar))
+- Forked and moved sessions copy artifacts through a private staging directory without overwriting existing names, keep reserved `artifact://` ids and subagent names, no longer turn an artifact deleted mid-copy into an empty file, and log the copy's size ([#17421](https://github.com/can1357/oh-my-pi/pull/17421) by [@sjawhar](https://github.com/sjawhar))
+- `artifact://`, `agent://`, `history://` and `local://` reads, subagent output names and session exports wait for a fork's artifact copy instead of reading another session's file or a partial copy, and one cancelled reader no longer cancels another's or later allocations ([#17421](https://github.com/can1357/oh-my-pi/pull/17421) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.14.2] - 2026-10-31
 
 ### Added

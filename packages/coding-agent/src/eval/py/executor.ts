@@ -20,7 +20,9 @@ import type { JsStatusEvent } from "../js/shared/types";
 import { getEnabledEvalPreludes } from "../preludes";
 import { updateEvalState } from "../state";
 import type { EvalDisplayOutput, EvalToolDescriptor, EvalToolInvokeResult } from "../types";
+import { resolveEvalUrlRootsHeld } from "../backend";
 import {
+	bridgeSessionIdFor,
 	createKernelSessionRegistry,
 	formatSessionKernelTimeoutAnnotation,
 	formatSessionTimeoutAnnotation,
@@ -39,7 +41,7 @@ import {
 	type PythonPreludeSource,
 } from "./kernel";
 import { resolveExplicitPythonRuntime } from "./runtime";
-import { ensurePyToolBridge, registerPyToolBridge } from "./tool-bridge";
+import { ensurePyToolBridge, registerPyToolBridge, unregisterPyToolBridgeSession } from "./tool-bridge";
 
 export type PythonKernelMode = "session" | "per-call";
 
@@ -350,6 +352,9 @@ async function replaceSessionKernel(
 async function shutdownInvalidatedSession(session: PythonSession): Promise<KernelShutdownResult> {
 	const replacement = session.replacement;
 	if (replacement) await replacement.promise.catch(() => undefined);
+	// The kernel is going, so the threads it left running go with it: the
+	// session's standing bridge entry has nothing left to answer.
+	await unregisterPyToolBridgeSession(bridgeSessionIdFor(session.sessionKey));
 	return await session.kernel.shutdown();
 }
 
@@ -437,6 +442,9 @@ async function executePerCall(code: string, cwd: string, options: PythonExecutor
 	try {
 		return await executeWithKernel(kernel, code, { ...options, cwd });
 	} finally {
+		// The kernel is this call's and goes with it, and so does the standing
+		// authority its cells registered: nothing is left running to ask.
+		if (options.bridgeSessionId) await unregisterPyToolBridgeSession(options.bridgeSessionId);
 		await kernel.shutdown().catch(() => undefined);
 	}
 }
@@ -516,18 +524,36 @@ async function invokePythonToolRequest(
 		signal: options.signal,
 	};
 	await ensureToolBridge(bridgeOptions);
+	// The identity the kernel itself was started with, derived the same way
+	// rather than guessed: a registration under anything else is a call the
+	// kernel's own prelude cannot be answered through, because the id it sends
+	// is the one in its environment.
+	const present = sessionRegistry.getPresentSession(cwd, {
+		cwd,
+		sessionId: options.sessionId,
+		interpreter: options.interpreter,
+		kernelOwnerId: options.kernelOwnerId,
+	});
+	const bridgeSessionId = present ? bridgeSessionIdFor(present.sessionKey) : options.sessionId;
 
+	// The roots the caller has *now*, carried with the request: a tool defined
+	// in an earlier cell is invoked long after the environment its kernel was
+	// started with stopped describing this session, and a tool that reads
+	// `artifact://<n>` must read the caller's artifacts, not its author's.
+	const carried: PythonToolRequest & { env?: Record<string, string> } = options.toolSession
+		? { ...request, env: { PI_EVAL_LOCAL_ROOTS: JSON.stringify(await resolveEvalUrlRootsHeld(options.toolSession)) } }
+		: request;
 	const runId = Snowflake.next();
-	const unregister = registerPyToolBridge(options.sessionId, runId, {
+	const unregister = registerPyToolBridge(bridgeSessionId, runId, {
 		toolSession: options.toolSession,
 		signal: options.signal,
 		emitStatus: undefined,
 	});
 	try {
-		const execution = await kernel.invokeTool(request, { id: runId, signal: options.signal });
+		const execution = await kernel.invokeTool(carried, { id: runId, signal: options.signal });
 		return { execution, envelope: execution.reply };
 	} finally {
-		unregister();
+		await unregister();
 	}
 }
 

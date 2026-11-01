@@ -26,7 +26,7 @@ import {
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { CURRENT_SESSION_VERSION, type SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
-import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { copySessionArtifacts, SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { removeWithRetries, TempDir } from "@oh-my-pi/pi-utils";
@@ -694,6 +694,69 @@ describe("history:// protocol", () => {
 
 			const resource = await InternalUrlRouter.instance().resolve("history://Parent.Child");
 			expect(resource.content).toContain("# Parent.Child (on disk)");
+		});
+	});
+
+	/**
+	 * A fork inherits its parent's subagent transcripts by copy, into the
+	 * fork's own artifacts directory, and `history://` reads them from there.
+	 *
+	 * With the copy held open, two reads: one cancelled at once, which a reader
+	 * that waits for the copy can only report as cancelled — whatever else it
+	 * says, it said from the half-copied directory — and one let run until the
+	 * copy has finished.
+	 */
+	async function readDuringCopy(url: string, dir: string): Promise<{ cancelled: string; settled: string }> {
+		const source = path.join(dir, "source");
+		const sessionFile = path.join(dir, "fork.jsonl");
+		const artifactsDir = sessionFile.slice(0, -6);
+		await fs.mkdir(source, { recursive: true });
+		await Bun.write(path.join(source, "Sub1.jsonl"), sessionFixtureJsonl("inherited hello"));
+		AgentRegistry.global().register({
+			id: "Main",
+			displayName: "main",
+			kind: "main",
+			session: { messages: [], sessionManager: { getArtifactsDir: () => artifactsDir } } as unknown as AgentSession,
+			sessionFile,
+			status: "idle",
+		});
+		const { promise: held, resolve: release } = Promise.withResolvers<void>();
+		const copying = copySessionArtifacts(`${source}.jsonl`, sessionFile, {
+			stillTheSource: async () => {
+				await held;
+				return true;
+			},
+		});
+		const outcome = (signal?: AbortSignal) =>
+			InternalUrlRouter.instance()
+				.resolve(url, { signal })
+				.then(
+					resource => `answered: ${resource.content}`,
+					(error: unknown) => `threw: ${error instanceof Error ? error.message : String(error)}`,
+				);
+		const cancel = new AbortController();
+		const cancelled = outcome(cancel.signal);
+		cancel.abort(new Error("cancelled by the reader"));
+		const settled = outcome();
+		release();
+		await copying;
+		return { cancelled: await cancelled, settled: await settled };
+	}
+
+	it("history://<id> waits for a fork's inherited transcript instead of calling the agent unknown", async () => {
+		await withTempDir(async dir => {
+			const { cancelled, settled } = await readDuringCopy("history://Sub1", dir);
+			expect(cancelled).toBe("threw: cancelled by the reader");
+			expect(settled).toContain("# Sub1 (on disk)");
+			expect(settled).toContain("inherited hello");
+		});
+	});
+
+	it("bare history:// waits for a fork's inherited transcripts before listing agents", async () => {
+		await withTempDir(async dir => {
+			const { cancelled, settled } = await readDuringCopy("history://", dir);
+			expect(cancelled).toBe("threw: cancelled by the reader");
+			expect(settled).toContain("| Sub1 | on disk |");
 		});
 	});
 

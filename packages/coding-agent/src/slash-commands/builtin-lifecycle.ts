@@ -102,35 +102,41 @@ async function relocateHeadlessSession(
 		return usage(`Failed to save pending settings: ${errorMessage(err)}`, runtime);
 	}
 	const previousState = runtime.sessionManager.captureState();
+	// The snapshot holds the session's ownership until the move either keeps it
+	// or rolls back to this state; ending it here covers both.
 	try {
-		await runtime.session.moveSession(resolvedPath);
-	} catch (err) {
-		return usage(`Move failed: ${errorMessage(err)}`, runtime);
-	}
-	try {
-		setProjectDir(resolvedPath);
-	} catch (err) {
 		try {
-			await runtime.sessionManager.rollbackMove(previousState);
-		} catch (rollbackError) {
-			return reportFailedRollback(runtime, rollbackError);
+			await runtime.session.moveSession(resolvedPath);
+		} catch (err) {
+			return usage(`Move failed: ${errorMessage(err)}`, runtime);
 		}
-		return usage(`Move failed: ${errorMessage(err)}`, runtime);
-	}
-	try {
-		await rescopeHeadlessToCwd(runtime, resolvedPath);
-	} catch (err) {
 		try {
-			await runtime.sessionManager.rollbackMove(previousState);
-			await rescopeHeadlessToCwd(runtime, previousState.cwd);
-		} catch (rollbackError) {
-			return reportFailedRollback(runtime, rollbackError);
+			setProjectDir(resolvedPath);
+		} catch (err) {
+			try {
+				await runtime.sessionManager.rollbackMove(previousState);
+			} catch (rollbackError) {
+				return reportFailedRollback(runtime, rollbackError);
+			}
+			return usage(`Move failed: ${errorMessage(err)}`, runtime);
 		}
-		return usage(`Move failed: ${errorMessage(err)}`, runtime);
+		try {
+			await rescopeHeadlessToCwd(runtime, resolvedPath);
+		} catch (err) {
+			try {
+				await runtime.sessionManager.rollbackMove(previousState);
+				await rescopeHeadlessToCwd(runtime, previousState.cwd);
+			} catch (rollbackError) {
+				return reportFailedRollback(runtime, rollbackError);
+			}
+			return usage(`Move failed: ${errorMessage(err)}`, runtime);
+		}
+		await runtime.notifyConfigChanged?.();
+		await runtime.notifyTitleChanged?.();
+		return undefined;
+	} finally {
+		runtime.sessionManager.commitSessionSwitch(previousState);
 	}
-	await runtime.notifyConfigChanged?.();
-	await runtime.notifyTitleChanged?.();
-	return undefined;
 }
 
 export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [

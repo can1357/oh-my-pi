@@ -214,7 +214,7 @@ it("hands the tool bridge the unshielded signal so a deferred phase still cancel
 		.spyOn(pyToolBridge, "registerPyToolBridge")
 		.mockImplementation((_sessionId, _runId, entry) => {
 			bridgeSignal = entry.signal;
-			return () => {};
+			return async () => {};
 		});
 
 	const kernel: GenericKernel<Record<string, string | null>> = {

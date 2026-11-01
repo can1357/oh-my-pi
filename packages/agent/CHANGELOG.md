@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- `Agent.transformContext` can be read and replaced after construction, and every model request uses it as it is then: a replacement or a removal takes effect from the next request, a later one in the same run included ([#17421](https://github.com/can1357/oh-my-pi/pull/17421) by [@sjawhar](https://github.com/sjawhar))
+- `Agent.wrapContextTransform(wrapper, { outermost })` runs a wrapper around the context transform of every model request until its disposer is called, so a host can hold requests (for example, until it is ready) without a later `transformContext` replacement removing that hold; an `outermost` wrapper also runs around every other wrapper, whenever it was added ([#17421](https://github.com/can1357/oh-my-pi/pull/17421) by [@sjawhar](https://github.com/sjawhar))
+
 ### Fixed
 
 - Fixed OpenAI remote compaction (`/responses/compact`) replaying backend-only `internal_chat_message_metadata_passthrough` metadata that Codex rejects as an unknown parameter ([#17590](https://github.com/can1357/oh-my-pi/pull/17590) by [@briankeefe](https://github.com/briankeefe))

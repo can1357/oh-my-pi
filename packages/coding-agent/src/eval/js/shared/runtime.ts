@@ -15,6 +15,7 @@ import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import type { EvalTableColumn } from "@oh-my-pi/pi-tui/tools/eval";
 import { type EvalDisplayOutput, evalImageMetadata } from "../../types";
 import type { EvalPreludeSource } from "../worker-protocol";
+import { type ArtifactRequest, EVAL_ARTIFACTS_READY_BRIDGE_NAME, settledArtifactOf } from "../../artifact-wire";
 import { createHelpers, type HelperBundle } from "./helpers";
 import { awaitMaybePromise, indirectEval } from "./indirect-eval";
 import { LocalModuleLoader } from "./local-module-loader";
@@ -93,6 +94,15 @@ export interface RuntimeOptions {
 	localRoots?: Record<string, string>;
 	/** Selected package directory consulted after the importing file's project. */
 	packageRoot?: string;
+	/**
+	 * Ask the host about `artifact://<id>` once the copies filling this
+	 * session's artifacts directory have finished. Supplied by an embedder
+	 * whose host can be asked at any time, including after the run that
+	 * started a background reader has ended; left out by one where no artifact
+	 * copy can run. Resolves to the bridge's reply as it arrived, which the
+	 * runtime reads the same way whichever way the request went.
+	 */
+	resolveArtifact?(request: ArtifactRequest): Promise<unknown>;
 }
 
 // Strict base64: characters from the standard alphabet plus optional `=` padding, and a
@@ -396,6 +406,29 @@ export class JsRuntime {
 			env: this.#env,
 			localRoots: () => this.#als.getStore()?.localRoots ?? this.#localRoots,
 			emitStatus: event => this.#activeHooks("emitStatus")?.onDisplay({ type: "status", event }),
+			// Only where the embedder said it can answer. A rejection is not a
+			// declaration that no copy is running — the host that rejects a
+			// call from a run that has ended is the same host running the copy
+			// — so a failure here fails the read.
+			...(opts.resolveArtifact
+				? {
+						resolveArtifact: async (request: ArtifactRequest) => {
+							// Through the reader's own run, so the wait belongs
+							// to that cell's timeout and its abort ends it. The
+							// host answers this one name with the session's own
+							// authority when the run has ended, so a reader
+							// that outlived its cell needs no second channel
+							// and no reading of error text to find it. Either
+							// way the request goes whole and the reply is read
+							// here, once.
+							const hooks = this.#activeHooks("tool");
+							const value = hooks
+								? await hooks.callTool(EVAL_ARTIFACTS_READY_BRIDGE_NAME, request)
+								: await opts.resolveArtifact!(request);
+							return settledArtifactOf(value);
+						},
+					}
+				: {}),
 		});
 		this.#initialGlobalKeys = new Set(Object.getOwnPropertyNames(globalThis));
 		this.#install(opts.extraGlobals);

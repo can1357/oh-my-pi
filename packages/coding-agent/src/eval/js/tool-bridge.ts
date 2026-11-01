@@ -17,6 +17,8 @@ import { findEnabledEvalPrelude, invokeEvalPrelude } from "../preludes";
 import { EVAL_AGENT_BRIDGE_NAME, type EvalAgentHandleResult, runEvalAgent } from "../agent-bridge";
 import { EVAL_BUDGET_BRIDGE_NAME, type EvalBudgetResult, runEvalBudget } from "../budget-bridge";
 import { withBridgeTimeoutPause } from "../bridge-timeout";
+import { type ArtifactPinOwner, answerArtifactRequest } from "../artifact-readiness";
+import { artifactRequestOf, EVAL_ARTIFACTS_READY_BRIDGE_NAME } from "../artifact-wire";
 import { EVAL_COMPLETION_BRIDGE_NAME, type EvalCompletionHandleResult, runEvalCompletion } from "../completion-bridge";
 import {
 	EVAL_JUDGMENT_BATCH_BRIDGE_NAME,
@@ -54,6 +56,8 @@ export interface ToolBridgeOptions {
 	emitStatus?: (event: JsStatusEvent) => void;
 	identity?: RuntimeCallIdentity;
 	shadowCell?: EvalShadowCellSession;
+	/** The cell or kernel an artifact reader asking through this bridge is part of; its pins end with it. */
+	artifactPins?: ArtifactPinOwner;
 	/**
 	 * Shows the user what a bridged call sent to a reply URL (`out://`): a `write`'s content, or the
 	 * `details.replies` of a call whose commands wrote there. Throws to refuse a reply. Absent: nothing
@@ -251,6 +255,20 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 			});
 			throw error;
 		}
+	}
+	if (name === EVAL_ARTIFACTS_READY_BRIDGE_NAME) {
+		// The wait belongs to the copy, not to the cell's own runtime budget:
+		// a read that waits for an inheritance to arrive is not a cell that
+		// has gone idle, and charging it the difference is how a one-second
+		// timeout kills a three-second copy's reader.
+		const request = artifactRequestOf(args);
+		if (!request) throw new ToolError("Artifact readiness call is not a request this host answers");
+		const resolved = await withBridgeTimeoutPause(options.emitStatus, () =>
+			answerArtifactRequest(options.session, request, { signal: options.signal, owner: options.artifactPins }),
+		);
+		// The file and what it is: the reader checks the object it opens
+		// against this, because it opens it later than this was answered.
+		return resolved ? { text: resolved.path, details: resolved } : "";
 	}
 	if (name === EVAL_COMPLETION_BRIDGE_NAME) {
 		return await runEvalCompletion(args, options);

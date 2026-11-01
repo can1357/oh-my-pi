@@ -23,8 +23,11 @@ const dependencyStubs: Record<string, string> = {
 	"@oh-my-pi/pi-tui/theme":
 		"export const getResolvedThemeColors = async () => ({}); export const getThemeExportColors = async () => ({});",
 	"../../session/sub-sessions": "export const collectSubSessions = async () => ({});",
-	"../../session/session-manager":
+	"../../session/session-manager": [
 		"export class SessionManager { static async open() { return new SessionManager(); } }",
+		'export const artifactsDirectoryFor = () => { throw new Error("Artifact lookup is outside the template probe"); };',
+		'export const whenArtifactCopiesSettle = () => { throw new Error("Artifact copies are outside the template probe"); };',
+	].join(" "),
 };
 const focusedBundlePlugin: BunPlugin = {
 	name: "html-template-focused-bundle",

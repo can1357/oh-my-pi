@@ -1,4 +1,5 @@
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { type ArtifactRequest, EVAL_ARTIFACTS_READY_BRIDGE_NAME } from "../artifact-wire";
 import { JsRuntime, type RuntimeCallIdentity, type RuntimeHooks, shadowSnapshotDigest } from "./shared/runtime";
 import type {
 	RunErrorPayload,
@@ -311,6 +312,10 @@ export class WorkerCore {
 			initialCwd: snapshot.cwd,
 			sessionId: snapshot.sessionId,
 			localRoots: snapshot.localRoots,
+			// Not bound to a run: the reader may be work a finished cell left
+			// behind, and the copy it has to be told about belongs to the
+			// session rather than to any one cell.
+			resolveArtifact: request => this.#resolveArtifact(request),
 			packageRoot: snapshot.packageRoot,
 		});
 		return this.#runtime;
@@ -450,6 +455,34 @@ export class WorkerCore {
 			const oldest = this.#recentCellFiles.values().next().value;
 			if (oldest !== undefined) this.#recentCellFiles.delete(oldest);
 		}
+	}
+
+	/**
+	 * Ask the host about `artifact://<id>`, outside any run.
+	 *
+	 * A background reader outlives the cell that started it, so a call carrying
+	 * that cell's run would be refused as belonging to a run no longer active —
+	 * which is not an answer about whether a copy is filling the directory.
+	 * The request goes as it is and the reply comes back as it is: the runtime
+	 * reads it, in the one place the answer is read.
+	 */
+	async #resolveArtifact(request: ArtifactRequest): Promise<unknown> {
+		const callId = `tc-artifacts-${crypto.randomUUID()}`;
+		const { promise, resolve, reject } = Promise.withResolvers<unknown>();
+		this.#pendingTools.set(callId, { resolve, reject });
+		try {
+			this.#transport.send({
+				type: "tool-call",
+				id: callId,
+				runId: "",
+				name: EVAL_ARTIFACTS_READY_BRIDGE_NAME,
+				args: request,
+			});
+		} catch (error) {
+			this.#pendingTools.delete(callId);
+			reject(error);
+		}
+		return await promise;
 	}
 
 	async #callTool(active: ActiveRun, name: string, args: unknown, identity?: RuntimeCallIdentity): Promise<unknown> {

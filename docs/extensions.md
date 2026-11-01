@@ -493,6 +493,7 @@ Canonical event unions and payload types are in `types.ts`.
 
 - `session_start`
 - `session_before_switch` / `session_switch`
+- `session_moved`
 - `session_before_branch` / `session_branch`
 - `session_before_compact` / `session.compacting` / `session_compact`
 - `session_before_tree` / `session_tree`
@@ -522,6 +523,8 @@ Cancelable pre-events:
 - `session_before_tree` → `{ cancel?: boolean; summary?: { summary: string; details?: unknown } }`
 
 `session_before_branch` and `session_branch` carry `reason`, which decides what `session_before_branch.entryId` means. For `"branch"` (`branch(entryId)`, `/branch`) it is the user message being rewound: it and everything after it are dropped. For `"fork"` (`AgentSession.fork(entryId)`, RPC `fork` with an `entryId`) and `"btw"` (`/btw` promotion) it is the last entry kept in the new session.
+
+`session_moved` fires when the session had to leave its file and carried on under a new id, which nobody asked for — that is what separates it from `session_switch`, whose `new`/`resume`/`fork` reasons all name a choice. It carries `reason` (`"open-elsewhere"` when another live omp process owns the file, `"replaced"` when the file was taken over by another session, `"contested"` when a write conflict forced a move), `previousSessionId`, `sessionId`, `previousSessionFile`, and `sessionFile`. The conversation, cwd, and context are unchanged; only the identity moved. Handlers observe it — the move has already happened — and anything keyed on a session id should treat `previousSessionId` as possibly still live under `"open-elsewhere"`. Handlers run once `sessionFile` has been written, so they find it on disk; if the session is disposed before that, no handler runs for that move. The session's next tool call and model request wait for the handlers for up to 2 seconds from the move (`SESSION_MOVED_HANDLER_GRACE_MS`), and one wait never lasts longer than that however many moves happen during it — including a move made while the request is being prepared, by a `context` handler or by a context wrapper the host added, and whatever context transform the host has given the agent. At 2 seconds the session stops waiting and logs a warning. Nothing stops a handler's own code: `ExtensionContext` has no signal, so a handler cannot be told to stop. The extension handler timeout (30 seconds) and the session's disposal stop waiting for the handler and cancel its `ctx.ui` dialogs (and a side turn or tool registration it started), and after disposal no further `session_moved` handler starts. A fetch or a write the handler started goes on, and so does a `ctx.setInterval` or `ctx.setTimeout` it calls after disposal — unref'd, so it cannot hold the process open. `session_shutdown` does not wait for these handlers. So rekey state synchronously, and start anything slow — a network call, a large write — detached rather than awaiting it. Handlers run one move after another, so a handler that hangs holds later moves' handlers until the timeout ends the wait for it.
 
 ### Prompt and turn lifecycle
 

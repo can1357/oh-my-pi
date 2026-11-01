@@ -10,8 +10,11 @@
  *
  * Moves are recorded in the transcript as `custom_message` entries of type
  * {@link SESSION_TRANSFER_MESSAGE_TYPE}: the model sees where the session came
- * from, and a copy whose latest marker says it moved away is stale — resuming
- * it forks instead of continuing it ({@link forkIfMovedAway}).
+ * from. {@link adoptResumedSession} is the one gate a startup resume runs: it
+ * takes this process's ownership claim on the session, and forks the loaded
+ * transcript instead when the session is not this process's to continue — a
+ * copy whose latest marker says the conversation moved away, or a session a
+ * live omp process owns.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -33,6 +36,8 @@ import {
 	readArchiveEntries,
 	writeArchive,
 } from "@oh-my-pi/pi-utils/ar";
+import resumeArtifactsMissingTemplate from "../prompts/session/resume-artifacts-missing.md" with { type: "text" };
+import resumeOwnedElsewhereTemplate from "../prompts/session/resume-owned-elsewhere.md" with { type: "text" };
 import transferArrivedTemplate from "../prompts/session/transfer-arrived.md" with { type: "text" };
 import transferDepartedTemplate from "../prompts/session/transfer-departed.md" with { type: "text" };
 import transferStaleForkTemplate from "../prompts/session/transfer-stale-fork.md" with { type: "text" };
@@ -41,7 +46,7 @@ import { BLOB_HASH_RE, BlobStore } from "./blob-store";
 import type { FileEntry, SessionEntry, SessionHeader } from "./session-entries";
 import { findSessionFiles } from "./session-listing";
 import { loadEntriesFromFile, parseSessionContent, readSessionHeaderId } from "./session-loader";
-import { SessionManager } from "./session-manager";
+import { type ResumedSessionFork, SessionManager } from "./session-manager";
 import { FileSessionStorage } from "./session-storage";
 
 /** Archive format version written by {@link packSession} and the only one {@link unpackSession} reads. */
@@ -66,12 +71,27 @@ export interface SessionArchiveManifest {
  * Structured details of a {@link SESSION_TRANSFER_MESSAGE_TYPE} entry:
  * - `arrived` — unpacked here from `fromCwd` on another machine into `cwd`;
  * - `departed` — this copy was handed to `to` and is stale from here on;
- * - `forked` — a stale copy (`source`) was resumed, so it continued as a fork.
+ * - `forked` — a stale copy (`source`) was resumed, so it continued as a fork;
+ * - `owned-elsewhere` — `source` was resumed while another live omp process
+ *   owned session `sessionId`, so this conversation continued as a fork of it;
+ * - `artifacts-missing` — the fork of session `sessionId` could not keep that
+ *   session's artifacts, because `source` stopped holding it while they were
+ *   being copied (`sourceChanged`) or because the copy could not be finished,
+ *   so it was discarded rather than inherited; identifiers up to
+ *   `reservedThroughId` are reserved and will never be handed out again.
  */
 export type SessionTransferDetails =
 	| { kind: "arrived"; fromCwd: string; cwd: string }
 	| { kind: "departed"; to: string }
-	| { kind: "forked"; source: string; to: string };
+	| { kind: "forked"; source: string; to: string }
+	| { kind: "owned-elsewhere"; source: string; sessionId: string }
+	| {
+			kind: "artifacts-missing";
+			source: string;
+			sessionId: string;
+			reservedThroughId: number;
+			sourceChanged: boolean;
+	  };
 
 /** User-facing failure of a pack, unpack, or move marker: missing input, bad archive, live owner. */
 export class SessionTransferError extends Error {
@@ -147,6 +167,22 @@ export function sessionTransferDetails(entry: FileEntry): SessionTransferDetails
 			return typeof details.source === "string" && typeof details.to === "string"
 				? { kind: "forked", source: details.source, to: details.to }
 				: undefined;
+		case "owned-elsewhere":
+			return typeof details.source === "string" && typeof details.sessionId === "string"
+				? { kind: "owned-elsewhere", source: details.source, sessionId: details.sessionId }
+				: undefined;
+		case "artifacts-missing":
+			return typeof details.source === "string" &&
+				typeof details.sessionId === "string" &&
+				typeof details.reservedThroughId === "number"
+				? {
+						kind: "artifacts-missing",
+						source: details.source,
+						sessionId: details.sessionId,
+						reservedThroughId: details.reservedThroughId,
+						sourceChanged: details.sourceChanged === true,
+					}
+				: undefined;
 		default:
 			return undefined;
 	}
@@ -161,7 +197,7 @@ export function lastSessionTransfer(entries: readonly FileEntry[]): SessionTrans
 	return undefined;
 }
 
-function renderTransferNotice(details: SessionTransferDetails): string {
+export function renderTransferNotice(details: SessionTransferDetails): string {
 	switch (details.kind) {
 		case "arrived":
 			return prompt.render(transferArrivedTemplate, { fromCwd: details.fromCwd, cwd: details.cwd }).trim();
@@ -169,13 +205,33 @@ function renderTransferNotice(details: SessionTransferDetails): string {
 			return prompt.render(transferDepartedTemplate, { to: details.to }).trim();
 		case "forked":
 			return prompt.render(transferStaleForkTemplate, { to: details.to, source: details.source }).trim();
+		case "owned-elsewhere":
+			return prompt
+				.render(resumeOwnedElsewhereTemplate, { source: details.source, sessionId: details.sessionId })
+				.trim();
+		case "artifacts-missing":
+			return prompt
+				.render(resumeArtifactsMissingTemplate, {
+					source: details.source,
+					sessionId: details.sessionId,
+					reservedThroughId: details.reservedThroughId,
+					hasIds: details.reservedThroughId >= 0,
+					sourceChanged: details.sourceChanged,
+				})
+				.trim();
 	}
 }
 
-/** Append a visible, model-facing transfer marker and make it durable. */
+/**
+ * Append a visible, model-facing transfer marker and make it durable.
+ *
+ * The entry is made durable, not the fork's artifact copy: `flush()` waits for
+ * that copy as well, and a resume that waited here would hand back the whole
+ * copy time it was restructured to stop paying.
+ */
 async function appendTransferNotice(manager: SessionManager, details: SessionTransferDetails): Promise<void> {
 	manager.appendCustomMessageEntry(SESSION_TRANSFER_MESSAGE_TYPE, renderTransferNotice(details), true, details);
-	await manager.flush();
+	await manager.flushEntries();
 }
 
 async function requireFile(file: string, what: string): Promise<void> {
@@ -669,25 +725,108 @@ export async function markSessionMoved(sessionFile: string, label: string): Prom
 	}
 }
 
+/** The visible notice for a resume that had to fork, whichever disqualified the file. */
+function resumeForkNotice(forkedFrom: ResumedSessionFork, movedTo: string | undefined): SessionTransferDetails {
+	return forkedFrom.reason === "owned-elsewhere"
+		? { kind: "owned-elsewhere", source: forkedFrom.sessionFile, sessionId: forkedFrom.sessionId }
+		: { kind: "forked", source: forkedFrom.sessionFile, to: movedTo ?? "" };
+}
+
 /**
- * Resume guard: when `manager`'s latest transfer marker says the session moved
- * away, close it untouched and return a fork of it (in `sessionDir`, default:
- * the cwd's session directory) carrying a visible `forked` notice. Otherwise
- * return `manager` itself.
+ * Every resume guard, as one gate over the transcript this process loaded.
+ *
+ * It takes this process's ownership claim on the resumed session and keeps it,
+ * so from here on this process is its owner. When the session is not this
+ * process's to continue — another live omp process owns it, or its own latest
+ * transfer marker says the conversation was handed to another machine and this
+ * copy is stale — `manager` carries on as a fork of the transcript it loaded,
+ * under a new id, with a visible notice saying which of the two happened.
+ *
+ * Without the claim the resumed process keeps the loaded session id until its
+ * first write and only then moves to a sibling file (`open-elsewhere`), so for
+ * that window two live processes answer to one id and write one artifacts
+ * directory, and the sibling records the still-live owner as the session it
+ * continues — a lineage anything keyed on the session id (a role registry, a
+ * scheduler, a peer's address book) reads as a hand-over from a session that
+ * is in fact still running. Claiming at the resume keeps the owner's id with
+ * the owner and makes the second process a copy from the start.
+ *
+ * The transcript is never loaded twice: every fork carries the entries this
+ * process already read, so a resume can no longer end up in whatever the path
+ * holds now. The path itself is still read — the ownership claim checks the
+ * journal's header, and the artifact copy resolves and walks the live source —
+ * and the one case where it stops holding the transcript that was loaded, a
+ * different session's journal moved onto it, refuses with
+ * {@link SessionSourceReplacedError} rather than continuing somebody else's
+ * conversation, or its files, under this one's name.
+ *
+ * The fork's artifacts are copied in the background, so a resume is never held
+ * up by a large artifacts directory. That copy cannot refuse the resume any
+ * more — it is already running — but it still takes itself back when its
+ * source stops holding the session it was copied for, and
+ * {@link noteArtifactsNotReproduced} says so in the transcript rather than
+ * leaving a conversation whose `artifact://` references quietly resolve to
+ * nothing. Discarding and refusing are not the same guarantee, and this is the
+ * weaker one.
+ *
+ * The fork lands in `sessionDir`, default: beside the file it came from.
  */
-export async function forkIfMovedAway(manager: SessionManager, sessionDir?: string): Promise<SessionManager> {
+export async function adoptResumedSession(manager: SessionManager, sessionDir?: string): Promise<SessionManager> {
 	const marker = lastSessionTransfer(manager.getEntries());
-	if (marker?.kind !== "departed") return manager;
-	const source = manager.getSessionFile();
-	if (!source) return manager;
-	const cwd = manager.getCwd();
-	await manager.close();
-	const fork = await SessionManager.forkFrom(source, cwd, sessionDir, undefined, { repairInterruptedTail: true });
-	await appendTransferNotice(fork, { kind: "forked", source, to: marker.to });
-	logger.info("Resumed a session that moved away; continuing in a fork", {
-		source,
-		movedTo: marker.to,
-		fork: fork.getSessionFile(),
+	const forkedFrom = await manager.claimResumedSessionOrFork({
+		sessionDir,
+		staleCopy: marker?.kind === "departed",
 	});
-	return fork;
+	if (!forkedFrom) return manager;
+	await appendTransferNotice(
+		manager,
+		resumeForkNotice(forkedFrom, marker?.kind === "departed" ? marker.to : undefined),
+	);
+	void noteArtifactsNotReproduced(manager, forkedFrom);
+	return manager;
+}
+
+/**
+ * Once the fork's artifact copy has finished, tell the agent when it came back
+ * empty because the source stopped being the session it was copied for.
+ * Nothing is appended when the artifacts arrived, which is every ordinary
+ * resume.
+ */
+async function noteArtifactsNotReproduced(manager: SessionManager, forkedFrom: ResumedSessionFork): Promise<void> {
+	try {
+		if (await manager.artifactsReproduced()) return;
+		await appendTransferNotice(manager, artifactsMissingNotice(manager, forkedFrom));
+	} catch (error) {
+		logger.warn("Failed to record that a fork's artifacts were not reproduced", {
+			sessionId: forkedFrom.sessionId,
+			error: String(error),
+		});
+	}
+}
+
+/** What the transcript says when a fork's inherited artifacts never arrived. */
+export function artifactsMissingNotice(
+	manager: SessionManager,
+	forkedFrom: ResumedSessionFork,
+): SessionTransferDetails {
+	return {
+		kind: "artifacts-missing",
+		source: forkedFrom.sessionFile,
+		sessionId: forkedFrom.sessionId,
+		reservedThroughId: manager.reservedArtifactId() ?? -1,
+		sourceChanged: manager.artifactLossReason() === "source-changed",
+	};
+}
+
+/**
+ * Record, in `manager`'s own transcript, that it carries on from a session it
+ * could not continue. The in-session `/resume` path forks inside its existing
+ * manager ({@link SessionManager.setSessionFile}), so it cannot use
+ * {@link adoptResumedSession}, but the agent must be told the same thing.
+ */
+export async function noteResumedSessionFork(manager: SessionManager, forkedFrom: ResumedSessionFork): Promise<void> {
+	await appendTransferNotice(manager, resumeForkNotice(forkedFrom, undefined));
+	// Same follow-up as a startup resume: this caller's fork copies artifacts
+	// in the background too, and loses them the same way.
+	void noteArtifactsNotReproduced(manager, forkedFrom);
 }

@@ -1812,28 +1812,34 @@ export class CommandController {
 		if (resolvedPath === path.resolve(this.ctx.sessionManager.getCwd())) return false;
 
 		const previousState = this.ctx.sessionManager.captureState();
+		// The snapshot holds the session's ownership until the move either keeps
+		// it or rolls back to this state; ending it here covers both.
 		try {
-			await this.ctx.session.moveSession(resolvedPath);
-		} catch (err) {
-			this.ctx.showError(`Move failed: ${err instanceof Error ? err.message : String(err)}`);
-			return false;
-		}
-		let applied = false;
-		try {
-			applied = await this.ctx.applyCwdChange(resolvedPath);
-		} catch (error) {
-			await this.#restoreAfterMoveFailure(previousState, error);
-			return false;
-		}
-		if (!applied) {
-			await this.#restoreAfterMoveFailure(previousState);
-			return false;
-		}
+			try {
+				await this.ctx.session.moveSession(resolvedPath);
+			} catch (err) {
+				this.ctx.showError(`Move failed: ${err instanceof Error ? err.message : String(err)}`);
+				return false;
+			}
+			let applied = false;
+			try {
+				applied = await this.ctx.applyCwdChange(resolvedPath);
+			} catch (error) {
+				await this.#restoreAfterMoveFailure(previousState, error);
+				return false;
+			}
+			if (!applied) {
+				await this.#restoreAfterMoveFailure(previousState);
+				return false;
+			}
 
-		this.ctx.updateEditorBorderColor();
-		await this.ctx.reloadTodos();
-		this.ctx.ui.requestRender();
-		return true;
+			this.ctx.updateEditorBorderColor();
+			await this.ctx.reloadTodos();
+			this.ctx.ui.requestRender();
+			return true;
+		} finally {
+			this.ctx.sessionManager.commitSessionSwitch(previousState);
+		}
 	}
 
 	async handleRenameCommand(title: string): Promise<void> {

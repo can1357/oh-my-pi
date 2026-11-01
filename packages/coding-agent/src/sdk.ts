@@ -1531,6 +1531,9 @@ function createCustomToolsExtension(tools: CustomTool[], sourcePaths?: ReadonlyM
 		api.on("session_switch", async (event, ctx) =>
 			runOnSession({ reason: "switch", previousSessionFile: event.previousSessionFile }, ctx),
 		);
+		api.on("session_moved", async (event, ctx) =>
+			runOnSession({ reason: "moved", previousSessionFile: event.previousSessionFile }, ctx),
+		);
 		api.on("session_branch", async (event, ctx) =>
 			runOnSession({ reason: "branch", previousSessionFile: event.previousSessionFile }, ctx),
 		);
@@ -2646,10 +2649,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 		toolSession.getArtifactsDir = getArtifactsDir;
 		toolSession.localProtocolOptions = localProtocolOptions;
-		toolSession.agentOutputManager = new AgentOutputManager(
-			getArtifactsDir,
-			options.parentTaskPrefix ? { parentPrefix: options.parentTaskPrefix } : undefined,
-		);
+		toolSession.agentOutputManager = new AgentOutputManager(getArtifactsDir, {
+			...(options.parentTaskPrefix ? { parentPrefix: options.parentTaskPrefix } : {}),
+			artifactsSettled: signal => sessionManager.whenArtifactsSettled(signal),
+			reservedNames: () => sessionManager.reservedOutputNames(),
+		});
 
 		// Create built-in tools (already wrapped with meta notice formatting)
 		await logger.time("createAllTools", createTools, toolSession, options.toolNames);

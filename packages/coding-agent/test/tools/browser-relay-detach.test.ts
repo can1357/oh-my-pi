@@ -247,7 +247,9 @@ describe("relay tabs Chrome detaches omp from", () => {
 		if (!CHROMIUM_AVAILABLE) return;
 		const executablePath = await ensureChromiumExecutable();
 		if (!executablePath) throw new Error("Chromium executable missing");
-		chromium = await puppeteer.launch({ executablePath, headless: true, args: ["--no-first-run"] });
+		// Same flags as the `chromiumAvailable()` probe and the product launch: a host that
+		// restricts unprivileged user namespaces (Ubuntu 23.10+ AppArmor) has no usable sandbox.
+		chromium = await puppeteer.launch({ executablePath, headless: true, args: ["--no-sandbox", "--no-first-run"] });
 		site = Bun.serve({
 			hostname: "127.0.0.1",
 			port: 0,

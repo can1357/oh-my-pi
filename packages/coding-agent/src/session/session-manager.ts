@@ -29,6 +29,7 @@ import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { moveFileAcrossDevices } from "../utils/atomic-file";
 import { hasAnnotationDraftsSync } from "../extensibility/custom-commands/bundled/annotate/draft-store";
+import { ARTIFACT_STAGING_MARKER, ARTIFACT_STAGING_SUFFIX } from "./artifact-staging";
 import { ArtifactManager } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore, lazyImageDataSync } from "./blob-store";
 import type { CompactionMethod } from "./compaction-methods";
@@ -122,6 +123,7 @@ import {
 	type SessionStorage,
 	type SessionStorageWriter,
 	SessionWriteConflictError,
+	tryAcquireSessionLease,
 } from "./session-storage";
 import { type SessionTitleUpdate, serializeTitleSlot } from "./session-title-slot";
 import {
@@ -165,18 +167,1430 @@ function fileSafeTimestamp(iso: string): string {
 	return iso.replace(/[:.]/g, "-");
 }
 
-function artifactsDirectoryFor(sessionFile: string | undefined): string | null {
+export function artifactsDirectoryFor(sessionFile: string | undefined): string | null {
 	if (!sessionFile?.endsWith(".jsonl")) return null;
 	return sessionFile.slice(0, -JSONL_SUFFIX_LENGTH);
 }
 
+/** How many of the biggest entries a tally names, so one log line stays one line. */
+const ARTIFACT_COPY_LARGEST = 3;
+
+/**
+ * What one reproduction of a session's artifacts directory cost.
+ *
+ * A session that moves off its file duplicates everything beside it, and the
+ * only account of that was the free space afterwards. `largest` names the
+ * top-level entries that dominated the bytes — a subagent's directory, a tool
+ * log, whatever a later release starts writing there — so the cost is
+ * attributable to a kind rather than only to a number.
+ */
+export interface ArtifactCopyTally {
+	/** Files reproduced, at every depth. */
+	entries: number;
+	/** Their apparent size: what the copy asked of the disk. */
+	bytes: number;
+	/** The biggest top-level entries, a directory counted as its whole subtree, biggest first. */
+	largest: { name: string; bytes: number }[];
+}
+
+/** What one staged copy has produced so far. */
+interface ArtifactCopyProgress {
+	/** Files reproduced, at every depth. */
+	entries: number;
+	/**
+	 * Every object this copy made, by path, with the identity it had when it
+	 * was made. Taking the tree down again consults this: an object at one of
+	 * those paths that is not the object that was made there belongs to
+	 * whoever put it there, and is not this copy's to delete.
+	 */
+	created: Map<string, ObjectIdentity>;
+}
+
+/** How a copy ended, for the caller that has to tell the session about it. */
+export interface ArtifactCopyOutcome {
+	/** What reached the destination; zeroed when nothing was published. */
+	tally: ArtifactCopyTally;
+	/**
+	 * Whether a staged copy was thrown away instead of reaching the
+	 * destination. A source with no artifacts discards nothing: there is a
+	 * difference between a fork that inherited nothing and one that lost what
+	 * it should have inherited, and only the second is worth telling anyone.
+	 */
+	discarded: boolean;
+	/**
+	 * Why it was discarded: because the source stopped being the session it was
+	 * copied for, or because the copy itself could not be finished. They are
+	 * not the same thing to say to anyone — one means the files belong to
+	 * another conversation now, the other means they are still where they were.
+	 */
+	reason: "source-changed" | "copy-failed" | undefined;
+}
+
+/**
+ * Reproduce one entry of an artifacts directory into `into`, a staging
+ * directory this copy created and holds open, and return the bytes it cost.
+ *
+ * Every path here is resolved through that descriptor, the creating calls and
+ * the failing ones alike: a staged file that cannot be finished is taken back
+ * through the same held directory that made it. A handler reaching for the
+ * pathname instead is how a name that changed underneath comes to name
+ * somebody else's file.
+ *
+ * An entry the source lost while the walk ran (its session reaped it, a tool
+ * replaced it) is skipped with a debug line, so one vanished file cannot cost
+ * the destination everything after it — which a single recursive `cp` of a
+ * directory a live session is still writing could.
+ */
+async function reproduceArtifactEntry(
+	entry: fs.Dirent,
+	from: string,
+	into: PinnedDirectory,
+	stagedUnder: string,
+	progress: ArtifactCopyProgress,
+): Promise<number> {
+	const source = path.join(from, entry.name);
+	const destination = `${into.at}/${entry.name}`;
+	const staged = stagedUnder ? `${stagedUnder}/${entry.name}` : entry.name;
+	try {
+		if (entry.isDirectory()) {
+			await fs.promises.mkdir(destination);
+			// What `mkdir` made and what the next step opens are two
+			// resolutions of one name; a mount landing between them is how a
+			// copy comes to write into somebody else's filesystem.
+			const child = await pinVerifiedChild(into, entry.name, "nothing was copied into it");
+			if (!child) return 0;
+			try {
+				progress.created.set(staged, child.identity);
+				return await reproduceArtifactTree(source, child, staged, progress);
+			} finally {
+				await child.close();
+			}
+		}
+		if (entry.isFile()) return await reproduceArtifactFile(source, into, entry.name, staged, progress);
+		if (entry.isSymbolicLink()) {
+			await fs.promises.symlink(await fs.promises.readlink(source), destination);
+			await rememberCreated(destination, staged, progress);
+			return 0;
+		}
+		// Anything else a session's artifacts directory may hold (a fifo, a
+		// socket): `cp` carries it into the staging tree like the rest.
+		await fs.promises.cp(source, destination, { force: false, errorOnExist: true });
+		await rememberCreated(destination, staged, progress);
+		return 0;
+	} catch (error) {
+		if (!isEnoent(error)) throw error;
+		logger.debug("Session artifact vanished while it was being copied", { source, staged });
+		return 0;
+	}
+}
+
+/** Record what this copy just made at `target`, so only that object is ever removed. */
+async function rememberCreated(target: string, staged: string, progress: ArtifactCopyProgress): Promise<void> {
+	try {
+		progress.created.set(staged, identityOf(await fs.promises.lstat(target, { bigint: true })));
+	} catch {
+		// Gone already; nothing this copy may remove.
+	}
+}
+
+/** Reproduce the file `source` as `name` inside the held directory `into`, and return its bytes. */
+async function reproduceArtifactFile(
+	source: string,
+	into: PinnedDirectory,
+	name: string,
+	staged: string,
+	progress: ArtifactCopyProgress,
+): Promise<number> {
+	// The source is read before the destination exists, so an artifact that
+	// vanished leaves nothing behind: an empty staged file would be published
+	// as a real artifact of zero bytes, which reads as evidence that the tool
+	// produced nothing rather than as evidence that is gone.
+	const sourceStat = await fs.promises.stat(source);
+	const destination = `${into.at}/${name}`;
+	const handle = await fs.promises.open(destination, "wx");
+	let created: ObjectIdentity | undefined;
+	try {
+		created = identityOf(await handle.stat({ bigint: true }));
+		await handle.chmod(sourceStat.mode);
+		await handle.writeFile(fs.createReadStream(source) as unknown as string);
+		progress.created.set(staged, identityOf(await handle.stat({ bigint: true })));
+		progress.entries += 1;
+		return sourceStat.size;
+	} catch (error) {
+		// Read from the handle, which is the file itself: the copy's own
+		// `chmod` and partial write have moved its change time since it was
+		// opened, and the stub is still indisputably this copy's.
+		const stub = await handle
+			.stat({ bigint: true })
+			.then(identityOf)
+			.catch(() => created);
+		await handle.close().catch(() => {});
+		// Taken back through the directory that made it, and only while the
+		// name still reaches the file that was made: a failure is not a licence
+		// to delete whatever answers to a pathname by then.
+		await removeHeldEntry(into, name, stub);
+		throw error;
+	} finally {
+		await handle.close().catch(() => {});
+	}
+}
+
+/** Take `name` back out of a held directory, and only while it is still the object `created` records. */
+async function removeHeldEntry(
+	into: PinnedDirectory,
+	name: string,
+	created: ObjectIdentity | undefined,
+): Promise<void> {
+	// The same two steps as any other removal — the name must still reach the
+	// object, and the object is judged where only this copy can name it. A
+	// failure path is not an exception to holding what it deletes.
+	if (created) await removeIfStillOurs(into, name, created, name);
+}
+
+/** Reproduce the directory `from` into the held staging directory `into`. */
+async function reproduceArtifactTree(
+	from: string,
+	into: PinnedDirectory,
+	stagedUnder: string,
+	progress: ArtifactCopyProgress,
+): Promise<number> {
+	const entries = await fs.promises.readdir(from, { withFileTypes: true });
+	let bytes = 0;
+	for (const entry of entries) bytes += await reproduceArtifactEntry(entry, from, into, stagedUnder, progress);
+	return bytes;
+}
+
+/** Identity of one object: what it is, and which object it is. */
+interface ObjectIdentity {
+	device: bigint;
+	inode: bigint;
+	directory: boolean;
+	/**
+	 * Change time at nanosecond resolution. A file rewritten in place keeps its
+	 * inode, so the number alone does not say the bytes are still the ones that
+	 * were copied; a directory's moves whenever anything is written into it,
+	 * including by this copy, so there it says nothing and is not compared.
+	 */
+	changedAt: bigint;
+	/** How many names reach it. Another one appearing moves the change time without making it somebody else's. */
+	links: bigint;
+}
+
+/**
+ * A directory held open, so every operation inside it names the directory this
+ * copy created rather than whatever its pathname reaches now.
+ *
+ * On Linux `/proc/self/fd/<n>` is a path that resolves through the open
+ * descriptor, which is as close as Node comes to the `*at` system calls: a
+ * pathname renamed away, or a directory replaced by a symlink, cannot redirect
+ * work done through it. Elsewhere the pathname is all there is, and the
+ * identity checks below are the whole boundary.
+ */
+interface PinnedDirectory {
+	/** Path that resolves through the descriptor, or the plain path off Linux. */
+	at: string;
+	path: string;
+	identity: ObjectIdentity;
+	close(): Promise<void>;
+}
+
+const CAN_PIN_DIRECTORIES = process.platform === "linux";
+
+/** What the staging root must still be: its own directory, whatever it now holds. */
+function stagingIdentity(staging: ArtifactStaging): ObjectIdentity {
+	return { device: staging.device, inode: staging.inode, directory: true, changedAt: 0n, links: 0n };
+}
+
+function identityOf(stat: fs.BigIntStats): ObjectIdentity {
+	return {
+		device: stat.dev,
+		inode: stat.ino,
+		directory: stat.isDirectory(),
+		changedAt: stat.ctimeNs,
+		links: stat.nlink,
+	};
+}
+
+/** Whether both describe the same object — the same file, not merely the same name. */
+function sameNode(left: ObjectIdentity, right: ObjectIdentity): boolean {
+	return left.device === right.device && left.inode === right.inode && left.directory === right.directory;
+}
+
+/**
+ * Whether the object at a staged name is still the one this copy put there,
+ * and so still this copy's to remove.
+ *
+ * A filesystem hands a freed inode straight back, so the number alone cannot
+ * tell this copy's file from one unlinked and recreated at the same name — the
+ * change time is what separates them. A hard link moves that change time too,
+ * without making the file anybody else's, and shows itself in the link count.
+ */
+function thisCopysToRemove(now: ObjectIdentity, created: ObjectIdentity): boolean {
+	if (!sameNode(now, created)) return false;
+	return now.directory || now.changedAt === created.changedAt || now.links > created.links;
+}
+
+/**
+ * Whether both describe the same object *and* the same state of it.
+ *
+ * Deleting something this copy made only needs to know the name still reaches
+ * that object: a hard link somebody else made to it moves its change time
+ * without making it theirs. Handing it over needs more, because a file
+ * rewritten in place keeps its inode and would be served under this session's
+ * `artifact://` id as if the copy had produced it.
+ */
+function sameObject(left: ObjectIdentity, right: ObjectIdentity): boolean {
+	if (!sameNode(left, right)) return false;
+	return left.directory || left.changedAt === right.changedAt;
+}
+
+/**
+ * Open `target` as a directory without following a symlink at its last
+ * component, and hold it. `expected` refuses anything that is not the very
+ * object the caller means — a directory swapped for another, or shadowed by a
+ * mount, has an inode of its own and does not pass.
+ */
+async function pinDirectory(
+	target: string,
+	expected?: ObjectIdentity,
+	logicalPath?: string,
+): Promise<PinnedDirectory | undefined> {
+	let handle: fs.promises.FileHandle;
+	try {
+		handle = await fs.promises.open(
+			target,
+			fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW,
+		);
+	} catch {
+		return undefined;
+	}
+	const identity = identityOf(await handle.stat({ bigint: true }));
+	if (expected && !sameNode(identity, expected)) {
+		await handle.close();
+		return undefined;
+	}
+	return {
+		at: CAN_PIN_DIRECTORIES ? `/proc/self/fd/${handle.fd}` : target,
+		// Where it is, not how it was reached: a descriptor path answers no
+		// question about mounts, and that is what the mount table is asked.
+		path: logicalPath ?? target,
+		identity,
+		close: () => handle.close(),
+	};
+}
+
+/**
+ * Hold a child of a directory this copy already holds, and refuse anything
+ * that is not a directory of the parent's own.
+ *
+ * A directory is reached through its parent's descriptor, so no pathname above
+ * it can redirect the walk; what the descriptor cannot answer by itself is
+ * whether the thing it reached is a doorway somewhere else. Three things
+ * answer that, and the last is the one that decides:
+ *
+ * - the device, which a mount from another filesystem changes;
+ * - the mount table, read against where the directory is and never against the
+ *   descriptor path, because `/proc/self/fd` answers no question about mounts;
+ * - and the directory's own link to its parent. A descriptor opened while a
+ *   bind mount stood on the name keeps the bound directory after the mount is
+ *   detached — same device, and by then an empty mount table — but it is some
+ *   other directory's child, and `..` says so. Asked last, it also closes the
+ *   order the other way round: a mount that is still there to be detached is
+ *   a mount the table has already reported.
+ */
+async function pinVerifiedChild(
+	parent: PinnedDirectory,
+	name: string,
+	what: string,
+): Promise<PinnedDirectory | undefined> {
+	const where = `${parent.path}/${name}`;
+	const child = await pinDirectory(`${parent.at}/${name}`, undefined, where);
+	if (!child) return undefined;
+	if (child.identity.device !== parent.identity.device) {
+		logger.warn(`A session artifact directory is on another filesystem than its parent; ${what}`, { dir: where });
+		await child.close();
+		return undefined;
+	}
+	const mounts = await mountsUnder(where);
+	if (mounts === undefined || mounts.length > 0) {
+		logger.warn(`A session artifact directory is mounted or unverifiable; ${what}`, {
+			dir: where,
+			mounts: mounts?.slice(0, ARTIFACT_COPY_LARGEST),
+		});
+		await child.close();
+		return undefined;
+	}
+	if (!(await isChildOf(child, parent))) {
+		logger.warn(`A session artifact directory is not a child of the directory that holds its name; ${what}`, {
+			dir: where,
+		});
+		await child.close();
+		return undefined;
+	}
+	return child;
+}
+
+/**
+ * Whether the directory a descriptor holds is a child of the directory another
+ * descriptor holds — asked of the filesystem, through `..`, rather than of a
+ * pathname.
+ */
+async function isChildOf(child: PinnedDirectory, parent: PinnedDirectory): Promise<boolean> {
+	const above = await pinDirectory(`${child.at}/..`);
+	if (!above) return false;
+	try {
+		return sameNode(above.identity, parent.identity);
+	} finally {
+		await above.close();
+	}
+}
+
+/** Where a session leaves the artifact claims its transcript has already spent. */
+export const RESERVED_CLAIMS_FILE = ".omp-reserved";
+
+/** A staging directory this copy created, with the identity it had when it was made. */
+interface ArtifactStaging {
+	path: string;
+	device: bigint;
+	inode: bigint;
+	/** Held while this copy is building in it, so no other process sweeps it. */
+	lease: { release(): void };
+}
+
+/**
+ * Artifact copies in flight in this process, by destination artifacts
+ * directory.
+ *
+ * `ArtifactManager` is not the only thing that reads a session's artifacts:
+ * the public `artifact://` handler, a transcript export and a subagent's
+ * output allocator all go to the filesystem themselves, and most of them hold
+ * no session object to ask. A copy announces itself here, before it does
+ * anything, so any of them can wait for the directory to become what the
+ * session will actually have.
+ */
+const pendingArtifactCopies = new Map<string, Set<Promise<unknown>>>();
+
+/** Rejects when `signal` aborts; never resolves otherwise. */
+export function abortRejection(signal: AbortSignal): Promise<never> {
+	const { promise, reject } = Promise.withResolvers<never>();
+	const fail = () => reject(signal.reason ?? new Error("Aborted"));
+	if (signal.aborted) fail();
+	else signal.addEventListener("abort", fail, { once: true });
+	return promise;
+}
+
+/**
+ * Settles once every artifact copy this process is running into `dir` has
+ * finished; immediately when there are none.
+ *
+ * A caller that can be cancelled passes its signal: a pending answer is not a
+ * missing answer, but neither is it something to make a cancelled read, an
+ * interactive viewer or a deadline sit through. With no `dir` the caller is
+ * saying it does not know which directory will answer it, so it waits for
+ * every copy — the only honest answer when any of them could be the one.
+ */
+export async function whenArtifactCopiesSettle(dir?: string | null, signal?: AbortSignal): Promise<void> {
+	for (;;) {
+		if (signal?.aborted) throw signal.reason ?? new Error("Aborted");
+		const pending = dir
+			? [...(pendingArtifactCopies.get(path.resolve(dir)) ?? [])]
+			: [...pendingArtifactCopies.values()].flatMap(set => [...set]);
+		if (pending.length === 0) return;
+		const settled = Promise.allSettled(pending);
+		if (signal) await Promise.race([settled, abortRejection(signal)]);
+		else await settled;
+	}
+}
+
+/**
+ * How many artifact copies into `dir` this process has announced, ever, and
+ * how many are running now.
+ *
+ * A reader that lists the directory needs both. "Nothing is running" taken
+ * after the listing does not say the listing was current: a copy announced and
+ * finished while it ran leaves the table empty and the listing stale. The
+ * count of announcements is what separates those, because it only goes up.
+ */
+export function artifactCopyActivity(dir: string): { announced: number; pending: number } {
+	const key = path.resolve(dir);
+	return { announced: artifactCopyAnnouncements.get(key) ?? 0, pending: pendingArtifactCopies.get(key)?.size ?? 0 };
+}
+
+/** Announcements per destination, counted for {@link artifactCopyActivity}; never reset. */
+const artifactCopyAnnouncements = new Map<string, number>();
+
+/** Announce a copy into `dir` for the readers of it, until `done` settles. */
+function announceArtifactCopy(dir: string, done: Promise<unknown>): () => void {
+	const key = path.resolve(dir);
+	artifactCopyAnnouncements.set(key, (artifactCopyAnnouncements.get(key) ?? 0) + 1);
+	const set = pendingArtifactCopies.get(key) ?? new Set();
+	set.add(done);
+	pendingArtifactCopies.set(key, set);
+	return () => {
+		set.delete(done);
+		if (set.size === 0) pendingArtifactCopies.delete(key);
+	};
+}
+
+/**
+ * A private directory beside `destinationArtifactsDir` to build the copy in,
+ * and the identity of the directory that was made.
+ *
+ * The lease is taken on the name *before* the directory exists, so there is no
+ * window in which a tree is on disk that another copier can read as abandoned.
+ * Without a lease there is no copy: continuing unprotected is how a live
+ * copier's tree gets swept out from under it.
+ *
+ * The tree carries a marker naming its own identity. That is what a later
+ * sweeper has to go on — the directory at a staging name may be anything by
+ * then, and a sweeper that stats whatever it finds is validating a stranger's
+ * directory against itself.
+ */
+async function createArtifactStaging(destinationArtifactsDir: string): Promise<ArtifactStaging | undefined> {
+	await fs.promises.mkdir(path.dirname(destinationArtifactsDir), { recursive: true });
+	await sweepAbandonedArtifactStaging(destinationArtifactsDir);
+	for (let attempt = 0; attempt < 4; attempt++) {
+		const staging = `${destinationArtifactsDir}.${mintSessionId()}${ARTIFACT_STAGING_SUFFIX}`;
+		const lease = tryAcquireSessionLease(stagingLeaseName(staging));
+		if (!lease) continue;
+		try {
+			await fs.promises.mkdir(staging, { mode: 0o700 });
+		} catch (error) {
+			lease.release();
+			if (isEexist(error)) continue;
+			throw error;
+		}
+		try {
+			const identity = await fs.promises.lstat(staging, { bigint: true });
+			await fs.promises.writeFile(
+				path.join(staging, ARTIFACT_STAGING_MARKER),
+				JSON.stringify({
+					device: String(identity.dev),
+					inode: String(identity.ino),
+					// The lease belongs to the tree, not to the name it is under:
+					// a tree moved to another staging name still has to be read
+					// as the live copier's, and its basename no longer says so.
+					lease: stagingLeaseName(staging),
+				}),
+				{ mode: 0o600 },
+			);
+			return { path: staging, device: identity.dev, inode: identity.ino, lease };
+		} catch (error) {
+			lease.release();
+			throw error;
+		}
+	}
+	return undefined;
+}
+
+/** The lease a copy holds while it is building in `staging`. */
+function stagingLeaseName(staging: string): string {
+	return `artifact-staging:${path.basename(staging)}`;
+}
+
+/**
+ * The staging tree at `leftover`, if it is one and the marker inside it names
+ * the very directory it is in.
+ *
+ * A directory that merely wears the name proves nothing: it may be a stranger's
+ * data that happens to sit there. The marker is written by the copy that made
+ * the tree and records the identity that tree had then, so a directory moved
+ * aside and replaced cannot answer for it.
+ */
+async function identifyArtifactStaging(
+	leftover: string,
+	lease: { release(): void },
+): Promise<ArtifactStaging | undefined> {
+	let identity: fs.BigIntStats;
+	try {
+		identity = await fs.promises.lstat(leftover, { bigint: true });
+	} catch {
+		return undefined;
+	}
+	if (!identity.isDirectory()) return undefined;
+	let marker: { device?: unknown; inode?: unknown; lease?: unknown };
+	try {
+		marker = JSON.parse(await fs.promises.readFile(path.join(leftover, ARTIFACT_STAGING_MARKER), "utf8"));
+	} catch {
+		return undefined;
+	}
+	if (marker?.device !== String(identity.dev) || marker?.inode !== String(identity.ino)) return undefined;
+	// The lease the tree was made under, which a tree moved to another staging
+	// name still carries. Taking the lease of the name it happens to wear says
+	// nothing about whether its copier is still running.
+	const own = typeof marker.lease === "string" ? marker.lease : stagingLeaseName(leftover);
+	if (own !== stagingLeaseName(leftover)) {
+		const ownLease = tryAcquireSessionLease(own);
+		if (!ownLease) return undefined;
+		ownLease.release();
+	}
+	return { path: leftover, device: identity.dev, inode: identity.ino, lease };
+}
+
+/**
+ * Remove staging trees left behind by copies that are no longer running — ones
+ * killed before they could publish or discard.
+ *
+ * Every staging tree in the session directory is considered, not only those
+ * named for this destination: a resume mints a new destination each time, so a
+ * crashed copy's tree is never named for the next one's. A live copy holds a
+ * lease on its own tree, so taking that lease is what says the copy is gone,
+ * and the marker inside is what says the tree was a copy's at all.
+ */
+async function sweepAbandonedArtifactStaging(destinationArtifactsDir: string): Promise<void> {
+	const parent = path.dirname(destinationArtifactsDir);
+	let entries: fs.Dirent[];
+	try {
+		entries = await fs.promises.readdir(parent, { withFileTypes: true });
+	} catch {
+		return;
+	}
+	for (const entry of entries) {
+		if (!entry.isDirectory() || !entry.name.endsWith(ARTIFACT_STAGING_SUFFIX)) continue;
+		const leftover = path.join(parent, entry.name);
+		const lease = tryAcquireSessionLease(stagingLeaseName(leftover));
+		if (!lease) continue; // A copy is still building in it.
+		try {
+			const staging = await identifyArtifactStaging(leftover, lease);
+			if (staging) await removeArtifactStaging(staging);
+		} catch {
+			// It went away on its own, or is not ours to remove.
+		} finally {
+			lease.release();
+		}
+	}
+}
+
+/**
+ * Mount points under `root`, from the kernel's own table, or `undefined` when
+ * the table cannot be read.
+ *
+ * Nothing a `stat` returns tells a bind mount from the directory it shadows —
+ * same device, same inode, and `..` resolves to the mount point's parent — so
+ * the only way to know a copy is about to write into, publish, or delete
+ * somebody else's filesystem is to ask which paths are mounts. An unreadable
+ * table is not "no mounts": it is no answer, and the caller treats it as a
+ * reason not to touch anything.
+ */
+async function mountsUnder(root: string): Promise<string[] | undefined> {
+	if (process.platform !== "linux") return [];
+	let table: string;
+	try {
+		table = await fs.promises.readFile("/proc/self/mountinfo", "utf8");
+	} catch {
+		return undefined;
+	}
+	const within = `${root}${path.sep}`;
+	const found: string[] = [];
+	for (const line of table.split("\n")) {
+		// `<id> <parent> <dev> <root> <mount point> ...`. Every control
+		// character and the backslash itself are octal-escaped, not only the
+		// space, so a path holding a tab is otherwise read as a different path.
+		const point = line
+			.split(" ")[4]
+			?.replace(/\\(\d{3})/g, (_, octal: string) => String.fromCharCode(parseInt(octal, 8)));
+		if (point && (point === root || point.startsWith(within))) found.push(point);
+	}
+	return found;
+}
+
+/**
+ * Remove a staging tree, and only the objects that were created in it.
+ *
+ * The root is held open and every step inside it goes through that descriptor,
+ * so a pathname renamed away, or a directory replaced by a symlink, cannot
+ * redirect the walk: what is reached is what this copy made. Each child is
+ * checked against the identity it was created with — a directory shadowed by a
+ * mount, or a file replaced by somebody else's, is a different object and is
+ * left where it is. A sweeper clearing up after a process that is gone has no
+ * such record, and so removes nothing from inside the tree: it takes the tree
+ * away only when there is nothing in it but the marker.
+ */
+async function removeArtifactStaging(staging: ArtifactStaging, created?: Map<string, ObjectIdentity>): Promise<void> {
+	// The root goes the way every object inside it goes: moved, whole, into a
+	// directory created here, emptied from inside, and taken down there. A
+	// `rmdir` of its own name would take whatever that name reaches at that
+	// instant, and the staging name is derived from the session file, so
+	// anybody can know it and leave an empty directory under it to be removed.
+	const parent = await pinDirectory(path.dirname(staging.path));
+	if (!parent) {
+		logger.warn("Could not hold the directory a session artifact staging tree is in; left alone", {
+			staging: staging.path,
+		});
+		return;
+	}
+	try {
+		await removeDirectoryIfStillOurs(parent, path.basename(staging.path), stagingIdentity(staging), "", created);
+	} finally {
+		await parent.close();
+	}
+}
+
+/** Remove the contents of a directory this copy owns, through the descriptor that holds it. */
+async function emptyPinnedDirectory(
+	dir: PinnedDirectory,
+	stagedUnder: string,
+	created?: Map<string, ObjectIdentity>,
+): Promise<void> {
+	let entries: fs.Dirent[];
+	try {
+		entries = await fs.promises.readdir(dir.at, { withFileTypes: true });
+	} catch (error) {
+		if (!isEnoent(error)) {
+			logger.warn("Could not read a session artifact staging directory", {
+				dir: dir.path,
+				error: toError(error).message,
+			});
+		}
+		return;
+	}
+	for (const entry of entries) {
+		const staged = stagedUnder ? `${stagedUnder}/${entry.name}` : entry.name;
+		const record = created?.get(staged);
+		// The marker stays until the tree it marks is gone. It is what a
+		// sweeper recognises an abandoned tree by, and removing it first opens
+		// a window in which a kill leaves a tree nothing will ever collect —
+		// along with whatever this removal had already moved into a directory
+		// of its own inside it. It leaves with the tree, from inside the
+		// directory the tree is moved into.
+		if (!stagedUnder && entry.name === ARTIFACT_STAGING_MARKER) continue;
+		// Only what this copy recorded creating is this copy's to remove.
+		//
+		// Without that record there is no such thing: a sweeper arriving at an
+		// abandoned tree knows the *tree* was a copy's, which the marker says,
+		// and knows nothing at all about an object it never placed. Reading
+		// the one claim as the other is how a sweep comes to delete a file
+		// somebody else put there — the tree is left whole instead, and said
+		// so.
+		//
+		// What that costs is retention rather than a delay: nothing collects
+		// such a tree later, and it outlives the session it was being copied
+		// for. A record durable enough for the next process to use is possible
+		// — written as the copy goes, read conservatively, anything missing or
+		// not matching meaning keep — and would turn this into recovery. It is
+		// not here, and this is the conservative half of it.
+		if (!created) {
+			logger.warn("An abandoned session artifact staging tree is not this process's to empty; left whole", {
+				dir: dir.path,
+				entries: entries.length,
+			});
+			return;
+		}
+		if (record === undefined) {
+			logger.warn("A session artifact staging entry was not created by this copy; left alone", { path: staged });
+			continue;
+		}
+		if (entry.isDirectory()) {
+			await removeDirectoryIfStillOurs(dir, entry.name, record, staged, created);
+			continue;
+		}
+		await removeIfStillOurs(dir, entry.name, record, staged);
+	}
+}
+
+/**
+ * Remove `name` from a held directory, but only while it is still the object
+ * this copy created there.
+ *
+ * Checking and then unlinking a name leaves a gap: whatever answers to the
+ * name at the moment of the unlink is what is destroyed, and that may be a
+ * file somebody else put there since. So the entry is first moved aside to a
+ * name only this copy knows — one atomic step — and judged there. What turns
+ * out not to be this copy's is put back, and left alone.
+ */
+async function removeIfStillOurs(
+	dir: PinnedDirectory,
+	name: string,
+	record: ObjectIdentity,
+	staged: string,
+): Promise<void> {
+	const at = `${dir.at}/${name}`;
+	// First, that the name still reaches the object this copy created: a file
+	// unlinked and recreated there can wear the same inode, and only the
+	// change time and link count separate it from this copy's own.
+	const before = await fs.promises
+		.lstat(at, { bigint: true })
+		.then(identityOf)
+		.catch(() => undefined);
+	if (!before || !thisCopysToRemove(before, record)) {
+		if (before) {
+			logger.warn("A session artifact staging entry is not the object that was created; left alone", {
+				path: staged,
+			});
+		}
+		return;
+	}
+	// Then, that nothing took its place between that answer and this removal.
+	// The entry is moved into a directory made here — `mkdir` fails rather
+	// than overwrites, so the place it is moved to cannot be anybody else's —
+	// and judged there, where the object is still on disk and its inode
+	// therefore cannot have been recycled by a replacement. Anything that is
+	// not this copy's is left in that directory rather than put back over
+	// whatever now holds the original name.
+	const aside = await makeExclusiveDirectory(dir);
+	if (!aside) return;
+	const asideDir = aside.dir;
+	try {
+		if (!(await moveIntoAside(at, asideDir, false, staged))) return;
+		const moved = await fs.promises
+			.lstat(`${asideDir.at}/${ASIDE_ENTRY}`, { bigint: true })
+			.then(identityOf)
+			.catch(() => undefined);
+		if (moved && sameNode(moved, before)) {
+			await fs.promises.unlink(`${asideDir.at}/${ASIDE_ENTRY}`).catch(() => {});
+			return;
+		}
+		logger.warn("A session artifact staging entry changed as it was being removed; put back", { path: staged });
+		try {
+			// Exclusive again: if something has taken the original name since,
+			// it keeps it, and what was moved stays where nothing serves it.
+			await fs.promises.link(`${asideDir.at}/${ASIDE_ENTRY}`, at);
+			await fs.promises.unlink(`${asideDir.at}/${ASIDE_ENTRY}`).catch(() => {});
+		} catch {
+			logger.warn("Could not put back an object that was not this copy's", {
+				path: staged,
+				kept: asideDir.path,
+			});
+		}
+	} finally {
+		await removeExclusiveDirectory(dir, aside);
+	}
+}
+
+/** The one name an aside directory ever holds. */
+const ASIDE_ENTRY = "entry";
+
+/**
+ * Move `from` to the one name inside an aside directory, having first taken
+ * that name exclusively.
+ *
+ * `rename` replaces whatever the target names, which is safe only while the
+ * target is known to be this copy's. The aside directory was created here, but
+ * it is reached again by its name to be opened, so the thing opened can be
+ * another directory with contents of its own: creating the name first — `mkdir`
+ * for a directory, `open(wx)` for anything else, both of which fail rather than
+ * overwrite — is what proves the move lands on nobody's file.
+ */
+async function moveIntoAside(
+	from: string,
+	aside: PinnedDirectory,
+	directory: boolean,
+	staged: string,
+): Promise<boolean> {
+	const target = `${aside.at}/${ASIDE_ENTRY}`;
+	try {
+		if (directory) await fs.promises.mkdir(target);
+		else await (await fs.promises.open(target, "wx")).close();
+	} catch {
+		logger.warn("A session artifact removal directory is not the one that was created; nothing was moved into it", {
+			path: staged,
+			aside: aside.path,
+		});
+		return false;
+	}
+	try {
+		await fs.promises.rename(from, target);
+		return true;
+	} catch (error) {
+		if (!isEnoent(error)) logger.warn("Could not set a session artifact aside to remove it", { path: staged });
+		await (directory ? fs.promises.rmdir(target) : fs.promises.unlink(target)).catch(() => {});
+		return false;
+	}
+}
+
+/**
+ * Remove a directory from a held directory, but only while it is still the
+ * directory this copy created there.
+ *
+ * A `rmdir` of a name is not a removal of the directory that name reached a
+ * moment ago: an empty directory put there in between is what goes, and an
+ * empty directory is the one thing any process of the same user can make. So a
+ * staged directory is moved, whole, into a directory created here, emptied
+ * from inside through a descriptor held on it, and taken down there, where the
+ * name it has is one nothing else has ever seen.
+ */
+async function removeDirectoryIfStillOurs(
+	parent: PinnedDirectory,
+	name: string,
+	record: ObjectIdentity,
+	staged: string,
+	created: Map<string, ObjectIdentity> | undefined,
+): Promise<void> {
+	const at = `${parent.at}/${name}`;
+	const before = await fs.promises
+		.lstat(at, { bigint: true })
+		.then(identityOf)
+		.catch(() => undefined);
+	if (!before?.directory || !sameNode(before, record)) {
+		if (before) {
+			logger.warn("A session artifact staging entry is not the directory that was created; left alone", {
+				path: staged,
+			});
+		}
+		return;
+	}
+	// Emptied where it stands, so that anything in it which is not this
+	// copy's — a file somebody else put there, which this copy leaves alone —
+	// stays under the name it has rather than being carried off with the
+	// directory around it.
+	const inPlace = await pinVerifiedChild(parent, name, "it was left where it is");
+	if (!inPlace) return;
+	let empty = false;
+	try {
+		if (!sameNode(inPlace.identity, before)) return;
+		await emptyPinnedDirectory(inPlace, staged, created);
+		// The root of a staging tree keeps its marker until the tree itself
+		// goes, so "empty" there means the marker and nothing else.
+		const left = await fs.promises.readdir(inPlace.at).catch(() => ["unreadable"]);
+		empty = left.length === 0 || (staged === "" && left.length === 1 && left[0] === ARTIFACT_STAGING_MARKER);
+	} finally {
+		await inPlace.close();
+	}
+	if (!empty) {
+		logger.debug("A session artifact staging directory still holds something this copy may not remove", {
+			path: staged,
+		});
+		return;
+	}
+	// Only then taken down, and not by its name: a `rmdir` of the name takes
+	// whatever the name reaches at that instant, and an empty directory put
+	// there in between is both indistinguishable and trivial to make. The
+	// empty directory is moved into one created here, checked there, and
+	// removed under a name nothing else has ever seen.
+	await removeEmptyDirectory(parent, name, before, staged);
+}
+
+/**
+ * Remove an empty directory this copy created, from inside a directory created
+ * here rather than by the name it has where it stands.
+ */
+async function removeEmptyDirectory(
+	parent: PinnedDirectory,
+	name: string,
+	expected: ObjectIdentity,
+	staged: string,
+): Promise<void> {
+	const aside = await makeExclusiveDirectory(parent);
+	if (!aside) return;
+	const asideDir = aside.dir;
+	try {
+		if (!(await moveIntoAside(`${parent.at}/${name}`, asideDir, true, staged))) return;
+		// Opened where nothing else names it, and still required to be the
+		// directory that was moved: a bind mount that stood on the old name is
+		// a different inode, detached or not.
+		const inside = await pinVerifiedChild(asideDir, ASIDE_ENTRY, "it was left where it was moved to");
+		// And still holding nothing but what leaves with it. The emptiness was
+		// decided before the move; something put in between is somebody else's
+		// object, and carrying it off — to a directory this process then takes
+		// down — loses it as surely as deleting it would. Judged here, where
+		// the object is on disk and under a name nothing else can reach, and
+		// the whole tree goes back if there is anything to go back for.
+		const held = inside
+			? await fs.promises.readdir(inside.at).catch(() => ["unreadable"])
+			: [ARTIFACT_STAGING_MARKER, "unreadable"];
+		const empty = held.every(entry => entry === ARTIFACT_STAGING_MARKER);
+		const ours = Boolean(inside && sameNode(inside.identity, expected)) && empty;
+		await inside?.close();
+		if (!ours) {
+			logger.warn("A session artifact staging entry changed as it was being removed; put back", {
+				path: staged,
+				held: empty ? undefined : held.slice(0, ARTIFACT_COPY_LARGEST),
+			});
+			await putDirectoryBack(parent, name, asideDir, staged);
+			return;
+		}
+		// The marker goes here, inside a directory created by this process and
+		// named by it: from the kill that lands a moment earlier, a sweeper
+		// still finds a marked tree — this one — and takes both down.
+		await fs.promises.unlink(`${asideDir.at}/${ASIDE_ENTRY}/${ARTIFACT_STAGING_MARKER}`).catch(() => {});
+		await fs.promises.rmdir(`${asideDir.at}/${ASIDE_ENTRY}`).catch(() => {});
+	} finally {
+		await removeExclusiveDirectory(parent, aside);
+	}
+}
+
+/**
+ * Put a directory back under the name it was moved from, and only if that name
+ * is still free.
+ *
+ * `mkdir` is what asks: it fails rather than overwrites, so a name something
+ * else has taken since keeps what it has, and what was moved stays in the
+ * aside directory, where nothing serves it and the next sweep finds it.
+ */
+async function putDirectoryBack(
+	parent: PinnedDirectory,
+	name: string,
+	aside: PinnedDirectory,
+	staged: string,
+): Promise<void> {
+	try {
+		await fs.promises.mkdir(`${parent.at}/${name}`);
+		await fs.promises.rename(`${aside.at}/${ASIDE_ENTRY}`, `${parent.at}/${name}`);
+	} catch {
+		logger.warn("Could not put back a directory that was not this copy's", { path: staged, kept: aside.path });
+	}
+}
+
+/**
+ * Take down an aside directory, and only while its name still reaches the
+ * directory that was created.
+ *
+ * This is the one `rmdir` by name left, and what makes it safe is the name:
+ * minted here, never reused, and never written down anywhere another process
+ * can read it before it exists. An empty directory put in its place would have
+ * to be put there under a name nobody could know. The staging root cannot
+ * claim that — its name comes from the session file it belongs to — which is
+ * why the root is taken down from inside one of these instead.
+ */
+async function removeExclusiveDirectory(parent: PinnedDirectory, aside: AsideDirectory): Promise<void> {
+	const name = path.basename(aside.dir.path);
+	await fs.promises.unlink(`${aside.dir.at}/${ARTIFACT_STAGING_MARKER}`).catch(() => {});
+	await aside.dir.close();
+	const now = await fs.promises
+		.lstat(`${parent.at}/${name}`, { bigint: true })
+		.then(identityOf)
+		.catch(() => undefined);
+	if (now && sameNode(now, aside.dir.identity)) await fs.promises.rmdir(`${parent.at}/${name}`).catch(() => {});
+	aside.lease.release();
+}
+
+/** A directory created here to judge one object in, and the lease that keeps a sweeper out of it. */
+interface AsideDirectory {
+	dir: PinnedDirectory;
+	lease: { release(): void };
+}
+
+/**
+ * A directory created here, under a name nothing else can already hold, that a
+ * sweeper will finish if this process does not.
+ *
+ * It is named and marked as a staging tree of its own, because that is what it
+ * is: a tree of this copy's objects, on disk, that nothing points at. A crash
+ * between the move and the removal would otherwise leave the thing moved into
+ * it where no sweep looks — the leak the old by-name `rmdir` did not have, and
+ * the price of not having it is a marker and a lease, which the sweeper
+ * already understands.
+ */
+async function makeExclusiveDirectory(dir: PinnedDirectory): Promise<AsideDirectory | undefined> {
+	for (let attempt = 0; attempt < 4; attempt++) {
+		const name = `.omp-removing-${mintSessionId()}${ARTIFACT_STAGING_SUFFIX}`;
+		const lease = tryAcquireSessionLease(stagingLeaseName(name));
+		if (!lease) continue;
+		try {
+			await fs.promises.mkdir(`${dir.at}/${name}`, { mode: 0o700 });
+		} catch (error) {
+			lease.release();
+			if (isEexist(error)) continue;
+			return undefined;
+		}
+		const aside = await pinVerifiedChild(dir, name, "nothing was moved into it");
+		if (!aside) {
+			lease.release();
+			return undefined;
+		}
+		try {
+			await fs.promises.writeFile(
+				`${aside.at}/${ARTIFACT_STAGING_MARKER}`,
+				JSON.stringify({
+					device: String(aside.identity.device),
+					inode: String(aside.identity.inode),
+					lease: stagingLeaseName(name),
+				}),
+				{ mode: 0o600 },
+			);
+		} catch {
+			await aside.close();
+			lease.release();
+			return undefined;
+		}
+		return { dir: aside, lease };
+	}
+	return undefined;
+}
+
+/** Remove an unpublished staging tree and give up its lease, whatever happens. */
+async function discardArtifactStaging(staging: ArtifactStaging, created?: Map<string, ObjectIdentity>): Promise<void> {
+	try {
+		await removeArtifactStaging(staging, created);
+	} catch (error) {
+		logger.warn("Failed to remove an abandoned session artifact staging directory", {
+			staging: staging.path,
+			error: toError(error).message,
+		});
+	} finally {
+		staging.lease.release();
+	}
+}
+
+/**
+ * Hand the staged tree to `destination`, and report which names got there.
+ *
+ * Everything is checked **before** the tree can be reached: the staging root
+ * is still the directory that was created, nothing is mounted under it, and
+ * every object in it is still the object the copy wrote. A check after the
+ * handover cannot withhold anything — a reader can already have opened what it
+ * would withdraw — so the rename is the last step rather than the first.
+ *
+ * A destination that does not exist takes the whole tree in one rename. One
+ * that already holds entries of its own — the session wrote an artifact while
+ * the copy ran, or recorded the identifiers it may not reuse — keeps every
+ * name it has, and the rest is moved across through descriptors held on both
+ * directories. Each move creates a name that was free; nothing is overwritten
+ * and nothing is undone, so there is no rollback to aim at somebody else's
+ * file.
+ */
+async function publishArtifactStaging(
+	staging: ArtifactStaging,
+	destination: string,
+	created: Map<string, ObjectIdentity>,
+): Promise<Map<string, number | null> | undefined> {
+	// The directory both names live in, held for the handover: the rename is
+	// then resolved from a descriptor on each side rather than from two
+	// pathnames, so a staging directory substituted at that instant cannot be
+	// what moves.
+	const parent = await pinDirectory(path.dirname(staging.path));
+	if (!parent) return undefined;
+	try {
+		const root = await pinDirectory(
+			`${parent.at}/${path.basename(staging.path)}`,
+			stagingIdentity(staging),
+			staging.path,
+		);
+		if (!root) {
+			logger.warn("Session artifact staging is no longer the directory that was created; nothing was published", {
+				staging: staging.path,
+			});
+			return undefined;
+		}
+		let staged: string[];
+		try {
+			// Every object in the tree, found by walking it rather than by
+			// reading back the record: a file somebody else added to the stage
+			// is not in the record, and a check that only visits what the copy
+			// wrote would publish it as this session's artifact.
+			staged = await fs.promises.readdir(root.at);
+			const unexpected = await firstUnexpectedObject(root, "", created);
+			if (unexpected) {
+				logger.warn("A staged session artifact is not the object that was copied; nothing was published", {
+					staging: staging.path,
+					staged: unexpected,
+				});
+				return undefined;
+			}
+			// Last before the handover; a check made after it cannot withhold
+			// anything, because a reader can already have opened what it would
+			// take back.
+			const mounts = await mountsUnder(staging.path);
+			if (mounts === undefined || mounts.length > 0) {
+				logger.warn("Session artifact staging is mounted or unverifiable; nothing was published from it", {
+					staging: staging.path,
+					mounts: mounts?.slice(0, ARTIFACT_COPY_LARGEST),
+				});
+				return undefined;
+			}
+		} finally {
+			await root.close();
+		}
+		const published = staged.filter(name => name !== ARTIFACT_STAGING_MARKER);
+		try {
+			await fs.promises.rename(
+				`${parent.at}/${path.basename(staging.path)}`,
+				`${parent.at}/${path.basename(destination)}`,
+			);
+			// The marker travels with the tree and is taken out of the
+			// destination afterwards: removing it first would leave a crash
+			// between the two with a staging tree nothing can recognise.
+			//
+			// Through the tree itself, never through the destination name. The
+			// rename keeps the inode, so the directory that was staged is
+			// still identifiable; a symlink put at the destination name points
+			// the unlink at a marker of somebody else's, and that file is as
+			// likely to be their only copy of it.
+			const handed = await pinDirectory(
+				`${parent.at}/${path.basename(destination)}`,
+				stagingIdentity(staging),
+				destination,
+			);
+			if (handed) {
+				try {
+					await fs.promises.unlink(`${handed.at}/${ARTIFACT_STAGING_MARKER}`).catch(() => {});
+				} finally {
+					await handed.close();
+				}
+			} else {
+				logger.warn("A session's published artifacts directory is not the tree that was staged; marker left", {
+					destination,
+				});
+			}
+			// `null` is the whole tree in one rename: every name arrived,
+			// whatever is in it, because the directory itself is what moved.
+			return new Map(published.map(name => [name, null]));
+		} catch (error) {
+			if (!isEnotempty(error) && !isEexist(error) && !isEnotdir(error)) {
+				logger.warn("Could not publish a session's copied artifacts", {
+					staging: staging.path,
+					destination,
+					error: toError(error).message,
+				});
+				return undefined;
+			}
+		}
+		return await mergeIntoDestination(staging, destination, published);
+	} finally {
+		await parent.close();
+	}
+}
+
+/**
+ * The first staged object the copy cannot answer for: one it did not create,
+ * one that is no longer what it was, or one it did create that is no longer
+ * there.
+ *
+ * Both halves matter, and they are not the same question. Walking what is
+ * there finds a file somebody else added; only comparing the record against
+ * what is there finds a file that was taken away. The second is the half that
+ * decides a delivery: a fork whose transcript refers to `artifact://1` and
+ * whose directory has only `0` has not inherited its artifacts, and publishing
+ * it says that it has.
+ */
+async function firstUnexpectedObject(
+	dir: PinnedDirectory,
+	stagedUnder: string,
+	created: Map<string, ObjectIdentity>,
+): Promise<string | undefined> {
+	let entries: fs.Dirent[];
+	try {
+		entries = await fs.promises.readdir(dir.at, { withFileTypes: true });
+	} catch (error) {
+		return `${stagedUnder || "."}: ${toError(error).message}`;
+	}
+	const present = new Set(entries.map(entry => entry.name));
+	const prefix = stagedUnder ? `${stagedUnder}/` : "";
+	for (const staged of created.keys()) {
+		if (!staged.startsWith(prefix)) continue;
+		const rest = staged.slice(prefix.length);
+		if (rest.length === 0 || rest.includes("/")) continue;
+		if (!present.has(rest)) return staged;
+	}
+	for (const entry of entries) {
+		const staged = stagedUnder ? `${stagedUnder}/${entry.name}` : entry.name;
+		if (!stagedUnder && entry.name === ARTIFACT_STAGING_MARKER) continue;
+		const record = created.get(staged);
+		if (!record) return staged;
+		const now = await fs.promises
+			.lstat(`${dir.at}/${entry.name}`, { bigint: true })
+			.then(identityOf)
+			.catch(() => undefined);
+		if (!now || !sameObject(now, record)) return staged;
+		if (!record.directory) continue;
+		const child = await pinDirectory(`${dir.at}/${entry.name}`, record, path.join(dir.path, entry.name));
+		if (!child) return staged;
+		try {
+			const deeper = await firstUnexpectedObject(child, staged, created);
+			if (deeper) return deeper;
+		} finally {
+			await child.close();
+		}
+	}
+	return undefined;
+}
+
+/**
+ * Move the staged entries into a destination that already has contents of its
+ * own, through descriptors held on both directories.
+ *
+ * Both sides are pinned, so neither a staging path nor a destination path that
+ * stops meaning its directory can take a move somewhere else; a name the
+ * destination already has is left to the destination, which is the rule a
+ * colliding artifact has always had.
+ *
+ * Unlike the single rename this falls back from, it is **not atomic**: the
+ * entries appear one at a time, so a reader can see some of the inherited
+ * artifacts and not the rest. Readers in this process do not — they wait on
+ * the copy ({@link whenArtifactCopiesSettle}), which is every consumer the
+ * session has: the `artifact://` handler, a subagent's output allocator and an
+ * export. A reader in another process can, and the condition for it is narrow:
+ * this path runs only when the destination already holds artifacts, which
+ * means the session is writing there itself, and a reader of a directory being
+ * written to sees partial state whoever is writing it.
+ */
+async function mergeIntoDestination(
+	staging: ArtifactStaging,
+	destination: string,
+	staged: readonly string[],
+): Promise<Map<string, number> | undefined> {
+	const from = await pinDirectory(staging.path, stagingIdentity(staging));
+	if (!from) return undefined;
+	try {
+		// Through the directory that holds the destination's name, so the
+		// destination root gets what every directory below it gets: its device
+		// against its parent's, the mount table, and its own link to its
+		// parent. Opening it by its pathname asks none of those, and a bind
+		// mounted over it and then detached is a descriptor on somebody else's
+		// directory that answers to all of this copy's other checks.
+		const above = await pinDirectory(path.dirname(destination));
+		if (!above) {
+			logger.warn("Could not hold the directory a session's artifacts go in; nothing was published", {
+				destination,
+			});
+			return undefined;
+		}
+		try {
+			const into = await pinVerifiedChild(above, path.basename(destination), "nothing was published into it");
+			if (!into) return undefined;
+			try {
+				const published = new Map<string, number>();
+				for (const name of staged) {
+					published.set(name, await moveIntoHeldDirectory(from, into, name, destination));
+				}
+				return published;
+			} finally {
+				await into.close();
+			}
+		} finally {
+			await above.close();
+		}
+	} finally {
+		await from.close();
+	}
+}
+
+/**
+ * Move one staged entry into the held destination, creating only names that
+ * are free, and report whether anything of it arrived.
+ *
+ * Every creation is exclusive — `link` for a file, `mkdir` for a directory —
+ * so a name the destination already has keeps whatever is behind it, and a
+ * name it creates while this runs wins too. A directory the destination
+ * already has is merged into rather than replaced, through descriptors held
+ * on both sides, which is the only way to add to it without overwriting the
+ * entries it has of its own.
+ */
+async function moveIntoHeldDirectory(
+	from: PinnedDirectory,
+	into: PinnedDirectory,
+	name: string,
+	destination: string,
+): Promise<number> {
+	const source = `${from.at}/${name}`;
+	const target = `${into.at}/${name}`;
+	try {
+		const entry = await fs.promises.lstat(source, { bigint: true });
+		if (!entry.isDirectory()) {
+			// `link` refuses an existing name, so nothing is ever overwritten;
+			// the staged name is then dropped, leaving the tree empty for its
+			// own removal.
+			await fs.promises.link(source, target);
+			await fs.promises.unlink(source).catch(() => {});
+			return 1;
+		}
+		try {
+			await fs.promises.mkdir(target);
+		} catch (error) {
+			if (!isEexist(error)) throw error;
+		}
+		// Both sides are opened through the descriptor that holds them and
+		// checked for a mount: the destination's own subdirectory is not this
+		// copy's work and can be anything by the time the merge reaches it,
+		// and the check at the destination root was answered before any of
+		// these names was touched.
+		const sourceDir = await pinVerifiedChild(from, name, "it was left in the staging tree");
+		const targetDir = await pinVerifiedChild(into, name, "nothing was published into it");
+		if (!sourceDir || !targetDir) {
+			await sourceDir?.close();
+			await targetDir?.close();
+			return 0;
+		}
+		try {
+			// What this placed, counted as it places it. A staged name that is
+			// simply gone when the walk reaches it was not delivered by this
+			// copy — somebody removing it is not the same event as it arriving
+			// — and the caller turns this number into "the fork inherited
+			// these files", which is what stops anyone looking for them.
+			let placed = 0;
+			for (const child of await fs.promises.readdir(sourceDir.at)) {
+				placed += await moveIntoHeldDirectory(sourceDir, targetDir, child, destination);
+			}
+			return placed;
+		} finally {
+			await sourceDir.close();
+			await targetDir.close();
+			await fs.promises.rmdir(source).catch(() => {});
+		}
+	} catch (error) {
+		if (isEexist(error) || isEnotempty(error) || isEnotdir(error) || isEnoent(error)) return 0;
+		logger.warn("Could not publish one of a session's copied artifacts", {
+			destination,
+			name,
+			error: toError(error).message,
+		});
+		return 0;
+	}
+}
+
 /**
  * Copy a session's artifact directory to another session, matching interactive
- * `/fork`. Never overwrites: a destination file written while the copy runs
- * (a session that already moved and kept working) wins over the source's copy.
- * Failures are logged, never thrown.
+ * `/fork`. Failures are logged, never thrown.
+ *
+ * The copy is built in a private staging directory and handed over in one
+ * rename, so the destination only ever gains a complete copy. That is what
+ * makes abandoning one safe: a copy whose source stopped being the session it
+ * was copied for (`stillTheSource`), or one that could not be finished, is
+ * removed while it is still unpublished and unreachable by any other name.
+ * Nothing at the destination is overwritten, and nothing anywhere is deleted by
+ * name — the two ways an undo destroys somebody else's file.
+ *
+ * Returns what it cost and logs the same. A session forced off its file
+ * duplicates its artifacts, and a session with large ones duplicates a lot;
+ * until now neither the session nor its log said so, and the first report of
+ * it was the free space. See {@link ArtifactCopyTally}.
  */
-export async function copySessionArtifacts(sourceSessionFile: string, destinationSessionFile: string): Promise<void> {
+export async function copySessionArtifacts(
+	sourceSessionFile: string,
+	destinationSessionFile: string,
+	options?: { stillTheSource?: () => Promise<boolean>; onSettled?: (outcome: ArtifactCopyOutcome) => Promise<void> },
+): Promise<ArtifactCopyOutcome> {
+	const destinationDir = artifactsDirectoryFor(destinationSessionFile);
+	if (!destinationDir) return await copySessionArtifactsOnce(sourceSessionFile, destinationSessionFile, options);
+	// Announced before it does anything, and before it waits for the copies
+	// already going into this directory: a copy that is invisible until its
+	// first continuation lets a reader conclude the directory is settled when
+	// it is not, and a copy that waits before announcing lets a second one slip
+	// past it into the same namespace.
+	const earlier = [...(pendingArtifactCopies.get(path.resolve(destinationDir)) ?? [])];
+	const run = (async () => {
+		await Promise.allSettled(earlier);
+		return await copySessionArtifactsOnce(sourceSessionFile, destinationSessionFile, options);
+	})();
+	const forget = announceArtifactCopy(destinationDir, run);
+	try {
+		return await run;
+	} finally {
+		forget();
+	}
+}
+
+async function copySessionArtifactsOnce(
+	sourceSessionFile: string,
+	destinationSessionFile: string,
+	options?: { stillTheSource?: () => Promise<boolean>; onSettled?: (outcome: ArtifactCopyOutcome) => Promise<void> },
+): Promise<ArtifactCopyOutcome> {
+	// Whatever the caller has to record about this copy is part of the copy:
+	// a reader that waited for the directory to settle has waited for that too,
+	// rather than finishing in the window before it is written.
+	const settle = async (outcome: ArtifactCopyOutcome): Promise<ArtifactCopyOutcome> => {
+		try {
+			await options?.onSettled?.(outcome);
+		} catch (error) {
+			logger.warn("Failed to record what a session artifact copy settled as", { error: toError(error).message });
+		}
+		return outcome;
+	};
+	const empty: ArtifactCopyOutcome = {
+		tally: { entries: 0, bytes: 0, largest: [] },
+		discarded: false,
+		reason: undefined,
+	};
 	// Artifacts sit beside the journal's real name: a session reached through a
 	// symlink keeps them next to the link's target, not next to the link.
 	let realSource = sourceSessionFile;
@@ -185,29 +1599,145 @@ export async function copySessionArtifacts(sourceSessionFile: string, destinatio
 	} catch {}
 	const sourceArtifactsDir = artifactsDirectoryFor(realSource);
 	const destinationArtifactsDir = artifactsDirectoryFor(destinationSessionFile);
-	if (!sourceArtifactsDir || !destinationArtifactsDir) return;
-	if (path.resolve(sourceArtifactsDir) === path.resolve(destinationArtifactsDir)) return;
+	if (!sourceArtifactsDir || !destinationArtifactsDir) return await settle(empty);
+	if (path.resolve(sourceArtifactsDir) === path.resolve(destinationArtifactsDir)) return await settle(empty);
+	let sourceEntries: fs.Dirent[];
 	try {
-		if ((await fs.promises.stat(sourceArtifactsDir)).isDirectory()) {
-			// Create the destination first and merge into it: Bun's `cp` fails with
-			// EEXIST when another writer (the moved session's artifact manager,
-			// `local://`) creates the directory while the copy is starting.
-			await fs.promises.mkdir(destinationArtifactsDir, { recursive: true });
-			await fs.promises.cp(sourceArtifactsDir, destinationArtifactsDir, {
-				recursive: true,
-				force: false,
-				errorOnExist: false,
-			});
-		}
+		if (!(await fs.promises.stat(sourceArtifactsDir)).isDirectory()) return await settle(empty);
+		sourceEntries = await fs.promises.readdir(sourceArtifactsDir, { withFileTypes: true });
 	} catch (error) {
 		if (!isEnoent(error)) {
-			logger.warn("Failed to copy session artifacts", {
-				sourceArtifactsDir,
-				destinationArtifactsDir,
-				error: toError(error).message,
-			});
+			logger.warn("Failed to read a session's artifacts", { sourceArtifactsDir, error: toError(error).message });
+		}
+		return await settle(empty);
+	}
+	const staging = await createArtifactStaging(destinationArtifactsDir);
+	if (!staging) {
+		logger.warn("Could not stage a session's artifacts", { sourceArtifactsDir, destinationArtifactsDir });
+		return await settle(empty);
+	}
+	const progress: ArtifactCopyProgress = { entries: 0, created: new Map() };
+	const perEntry: { name: string; bytes: number; files: number }[] = [];
+	// Held for the whole walk: everything written, and everything taken back
+	// after a failure, is resolved through the directory this copy created
+	// rather than through a name that can stop meaning it.
+	const root = await pinDirectory(staging.path, stagingIdentity(staging));
+	if (!root) {
+		logger.warn("Could not hold a session's artifact staging directory open", { staging: staging.path });
+		await discardArtifactStaging(staging, progress.created);
+		return await settle({ ...empty, discarded: true, reason: "copy-failed" });
+	}
+	try {
+		for (const entry of sourceEntries) {
+			const filesBefore = progress.entries;
+			const bytes = await reproduceArtifactEntry(entry, sourceArtifactsDir, root, "", progress);
+			perEntry.push({ name: entry.name, bytes, files: progress.entries - filesBefore });
+		}
+	} catch (error) {
+		logger.warn("Failed to copy session artifacts", {
+			sourceArtifactsDir,
+			destinationArtifactsDir,
+			error: toError(error).message,
+		});
+		await root.close();
+		await discardArtifactStaging(staging, progress.created);
+		return await settle({ ...empty, discarded: true, reason: "copy-failed" });
+	}
+	await root.close();
+	let stillTheSource = true;
+	try {
+		stillTheSource = options?.stillTheSource ? await options.stillTheSource() : true;
+	} catch (error) {
+		// A check that cannot answer is not an answer: the copy is abandoned,
+		// and abandoning it is what releases the staging tree and its lease.
+		logger.warn("Could not check whether a session's artifacts still belong to it; the copy was discarded", {
+			sourceArtifactsDir,
+			error: toError(error).message,
+		});
+		await discardArtifactStaging(staging, progress.created);
+		return await settle({ ...empty, discarded: true, reason: "copy-failed" });
+	}
+	if (!stillTheSource) {
+		logger.warn("Session artifacts stopped belonging to the session they were copied for; the copy was discarded", {
+			sourceArtifactsDir,
+			destinationArtifactsDir,
+		});
+		await discardArtifactStaging(staging, progress.created);
+		return await settle({ ...empty, discarded: true, reason: "source-changed" });
+	}
+	const published = await publishArtifactStaging(staging, destinationArtifactsDir, progress.created);
+	await discardArtifactStaging(staging, progress.created);
+	if (!published) return await settle({ ...empty, discarded: true, reason: "copy-failed" });
+	// Only what this copy placed. A name the destination already had kept its
+	// own version; an entry that lost part of itself — to such a name, to a
+	// check that refused it, or to somebody removing a staged file before the
+	// move reached it — is not reported as inherited, because this number is
+	// what tells a reader the files are there.
+	const delivered = perEntry.filter(entry => {
+		const placed = published.get(entry.name);
+		return placed === null || placed === entry.files;
+	});
+	if (delivered.length === 0) {
+		const lost = sourceEntries.length > 0;
+		return await settle({ ...empty, discarded: lost, reason: lost ? "copy-failed" : undefined });
+	}
+	const tally: ArtifactCopyTally = {
+		entries: delivered.reduce((total, entry) => total + entry.files, 0),
+		bytes: delivered.reduce((total, entry) => total + entry.bytes, 0),
+		largest: delivered
+			.filter(entry => entry.bytes > 0)
+			.sort((left, right) => right.bytes - left.bytes)
+			.slice(0, ARTIFACT_COPY_LARGEST)
+			.map(entry => ({ name: entry.name, bytes: entry.bytes })),
+	};
+	if (tally.entries > 0) {
+		logger.info("Copied a session's artifacts", {
+			sourceArtifactsDir,
+			destinationArtifactsDir,
+			entries: tally.entries,
+			bytes: tally.bytes,
+			largest: tally.largest,
+		});
+	}
+	return await settle({ tally, discarded: false, reason: undefined });
+}
+
+/**
+ * The highest `artifact://<n>` any of these entries refers to, or -1.
+ *
+ * The transcript is the authority on which identifiers a conversation has
+ * already used: the directory beside it may have lost files, gained files
+ * belonging to someone else, or hold names that are not artifacts at all.
+ */
+export function highestArtifactReference(entries: readonly SessionEntry[]): number {
+	let highest = -1;
+	for (const entry of entries) {
+		for (const match of JSON.stringify(entry).matchAll(/artifact:\/\/(\d{1,16})\b/g)) {
+			const id = Number(match[1]);
+			if (Number.isSafeInteger(id) && id > highest) highest = id;
 		}
 	}
+	return highest;
+}
+
+/**
+ * The subagent output names these entries refer to through `agent://`.
+ *
+ * Numeric artifact identifiers are not the only thing a fork inherits a claim
+ * on: a transcript that cites `agent://Worker` has spent that name, and a
+ * subagent handed it again would answer in the original's place.
+ */
+export function inheritedOutputNames(entries: readonly SessionEntry[]): string[] {
+	const names = new Set<string>();
+	for (const entry of entries) {
+		for (const match of JSON.stringify(entry).matchAll(/agent:\/\/([A-Za-z0-9][\w.-]{0,63})/g)) {
+			// A nested child is addressed `parent.child`; the first segment is
+			// the only one this session's allocator hands out.
+			const first = (match[1] as string).split(".")[0];
+			if (first) names.add(first);
+		}
+	}
+	return [...names].sort();
 }
 
 /** The numeric id an artifact file name (`<id>.<tool>.log`) carries, if any. */
@@ -769,6 +2299,40 @@ interface SessionManagerStateSnapshot {
 	taskSiblingCandidate: string | undefined;
 	header: SessionHeader;
 	entries: SessionEntry[];
+	/**
+	 * A holder of its own on the session's ownership lease, taken when the
+	 * snapshot was made. A rollback adopts it, so the session it names stays
+	 * this process's for the whole switch instead of being released and raced
+	 * for again; a commit releases it.
+	 */
+	sessionClaim: SessionClaim | undefined;
+}
+
+/**
+ * One holder of a session's ownership lease. Releasing is idempotent and
+ * leaves the handle visibly unheld, so a handle whose lease was given up
+ * elsewhere (a {@link SessionManager.close} during a switch) can never be
+ * mistaken for ownership when a rollback adopts it.
+ */
+class SessionClaim {
+	readonly sessionId: string;
+	#release: (() => void) | undefined;
+
+	constructor(sessionId: string, release: (() => void) | undefined) {
+		this.sessionId = sessionId;
+		this.#release = release;
+	}
+
+	/** Whether this handle still holds the lease. */
+	get held(): boolean {
+		return this.#release !== undefined;
+	}
+
+	release(): void {
+		const release = this.#release;
+		this.#release = undefined;
+		release?.();
+	}
 }
 
 interface DiskQueueOptions {
@@ -859,6 +2423,60 @@ export interface SessionPersistenceNotice {
 	from: string;
 	/** The fresh sibling it saves to from now on: same directory, a new session id whose `parentSession` is the old one. */
 	to: string;
+	/** The id this session answered to until now; under `"open-elsewhere"` another live process still does. */
+	previousSessionId: string;
+	/** The id it answers to from now on. */
+	sessionId: string;
+}
+
+/**
+ * Why a session this process just loaded is not its to continue, and what it
+ * left behind. Reported by {@link SessionManager.claimResumedSessionOrFork}
+ * and by {@link SessionManager.setSessionFile}; the resumed session carries on
+ * as a fork of what was loaded either way.
+ */
+export interface ResumedSessionFork {
+	/**
+	 * `"owned-elsewhere"`: another live omp process holds the session's
+	 * ownership lease, so the id and the file stay with it. `"departed"`: the
+	 * transcript says this copy was handed to another machine, so it is stale
+	 * whoever holds its lease.
+	 */
+	reason: "owned-elsewhere" | "departed";
+	/** The id of the session that was loaded, which this process no longer answers to. */
+	sessionId: string;
+	/** The file it was loaded from. */
+	sessionFile: string;
+}
+
+/**
+ * A resume refused because the file it loaded from no longer holds that
+ * session: a different journal is there now.
+ *
+ * Continuing is not offered. The transcript in memory could be written to a
+ * file of its own, but nothing beside that path can still be attributed —
+ * the artifacts directory next to it is whatever the replacement left there,
+ * and a transcript whose `artifact://` references silently resolve to another
+ * conversation's files no longer means what it says. A refusal naming both
+ * sessions leaves that judgement with the person resuming.
+ */
+export class SessionSourceReplacedError extends Error {
+	/** The path that was resumed. */
+	readonly sessionFile: string;
+	/** The session that was loaded from it. */
+	readonly requestedSessionId: string;
+	/** The session whose journal holds that path now. */
+	readonly foundSessionId: string;
+
+	constructor(sessionFile: string, requestedSessionId: string, foundSessionId: string) {
+		super(
+			`Cannot resume session "${requestedSessionId}" from "${sessionFile}": that file now holds session "${foundSessionId}". Nothing was changed; resume the session you want by its own file.`,
+		);
+		this.name = "SessionSourceReplacedError";
+		this.sessionFile = sessionFile;
+		this.requestedSessionId = requestedSessionId;
+		this.foundSessionId = foundSessionId;
+	}
 }
 
 /**
@@ -1018,17 +2636,55 @@ export class SessionManager {
 	/** Every notice raised so far, replayed to each later subscriber. */
 	#persistenceNotices: SessionPersistenceNotice[] = [];
 	/**
-	 * This process's ownership claim on the session it last wrote (file storage
-	 * only), keyed by session id so every path to the journal meets it.
-	 * `release` is unset while another live process holds the session, and
-	 * after {@link close} gave the claim up.
+	 * Moves whose new file no full transcript has been published to yet,
+	 * oldest first. A move is announced inside the write that decides it, and
+	 * the new file is written after that, asynchronously on some paths.
 	 */
-	#sessionClaim: { sessionId: string; release: (() => void) | undefined } | undefined;
+	#movesAwaitingWrite: { notice: SessionPersistenceNotice; written: PromiseWithResolvers<boolean> }[] = [];
+	/** How each move no longer awaiting its write ended: its file published (`true`), or never. */
+	readonly #moveWriteOutcomes = new WeakMap<SessionPersistenceNotice, boolean>();
+	/**
+	 * This process's ownership claim on the session it last wrote (file storage
+	 * only), keyed by session id so every path to the journal meets it. Unheld
+	 * while another live process owns the session, and after {@link close} gave
+	 * the claim up.
+	 */
+	#sessionClaim: SessionClaim | undefined;
+	/**
+	 * One claim per state snapshot that may still be rolled back to, taken in
+	 * {@link captureState} and ended by {@link commitSessionSwitch} or
+	 * {@link restoreState}.
+	 *
+	 * Each is a holder of its own on the same lease, so overlapping switches
+	 * cannot end each other's: a switch keeps the session it came from until it
+	 * knows which one it lives in, and a second switch started inside the first
+	 * adds a holder rather than taking one away. Releasing at the switch and
+	 * claiming again on rollback would leave exactly the window this branch
+	 * exists to close.
+	 */
+	#snapshotClaims = new Set<SessionClaim>();
 	/**
 	 * The background artifact copy a move or branch to `sessionFile` started (see
 	 * {@link #moveOffSessionFile}, {@link createBranchedSession}). Never rejects.
 	 */
-	#pendingArtifactCopy: { sessionFile: string; done: Promise<void> } | undefined;
+	#pendingArtifactCopy: { sessionFile: string; done: Promise<ArtifactCopyOutcome> } | undefined;
+	/**
+	 * Resolves, once the artifact copy a fork started has finished, to whether
+	 * those artifacts reached this session; unset for a session that forked none.
+	 */
+	#artifactsReproduced: Promise<boolean> | undefined;
+	/**
+	 * The highest artifact identifier this session's transcript inherited whose
+	 * file never arrived. The next allocation starts past it, so a reference the
+	 * conversation already carries never comes to name new, unrelated output.
+	 */
+	#reservedArtifactId: number | undefined;
+	/** Why a fork's inherited artifacts never arrived, once its copy has finished. */
+	#artifactLossReason: ArtifactCopyOutcome["reason"];
+	/** The session this one was forked off, for anything that has to name it later. */
+	#forkedFrom: ResumedSessionFork | undefined;
+	/** Subagent output names the inherited transcript refers to, which may not be reused. */
+	#inheritedOutputNames: readonly string[] = [];
 
 	private constructor(cwd: string, sessionDir: string, persist: boolean, storage: SessionStorage) {
 		this.#cwd = cwd;
@@ -1110,22 +2766,40 @@ export class SessionManager {
 
 	/**
 	 * Hold this process's ownership claim on `#sessionId`, moving it off a
-	 * previous session. Only write paths claim, so the first process to write a
-	 * session owns it and inspection (`omp share`, `--export`, `render`) never
-	 * does. A failed claim is retried on the next write, so a writer takes over
-	 * once the owner closed the session or exited.
+	 * previous session. Write paths claim, and so does the resume guard
+	 * ({@link claimResumedSessionOrFork}) for the session this process is about
+	 * to live in, so the first process to resume or write a session owns it and
+	 * inspection (`omp share`, `--export`, `render`) never does. A failed claim
+	 * is retried on the next write, so a writer takes over once the owner
+	 * closed the session or exited.
 	 */
 	#claimSession(): void {
 		const sessionId = this.#sessionId;
 		const sessionFile = this.#sessionFile;
 		if (!this.#persist || !sessionFile || !this.#storage.claimSession) return;
 		const current = this.#sessionClaim;
-		if (current?.sessionId === sessionId && current.release) return;
-		if (current && current.sessionId !== sessionId) current.release?.();
+		if (current?.sessionId === sessionId && current.held) return;
+		if (current && current.sessionId !== sessionId) current.release();
 		// The storage also checks that the path still holds this session: if
 		// another session was moved onto it, the claim fails and the next write
 		// moves this session to a sibling instead of appending into that journal.
-		this.#sessionClaim = { sessionId, release: this.#storage.claimSession(sessionId, sessionFile) ?? undefined };
+		this.#sessionClaim = new SessionClaim(sessionId, this.#storage.claimSession(sessionId, sessionFile) ?? undefined);
+	}
+
+	/**
+	 * A second holder of the current session's lease for a state snapshot, so a
+	 * rollback to it takes the session back without ever letting go of it.
+	 * `undefined` when this manager does not own the session to begin with.
+	 */
+	#retainOwnershipForSnapshot(): SessionClaim | undefined {
+		const claim = this.#sessionClaim;
+		const sessionFile = this.#sessionFile;
+		if (!claim?.held || !this.#persist || !sessionFile || !this.#storage.claimSession) return undefined;
+		const release = this.#storage.claimSession(claim.sessionId, sessionFile);
+		if (!release) return undefined;
+		const retained = new SessionClaim(claim.sessionId, release);
+		this.#snapshotClaims.add(retained);
+		return retained;
 	}
 
 	/**
@@ -1139,7 +2813,7 @@ export class SessionManager {
 		if (this.#released || this.#sessionFileRelocating) return false;
 		this.#claimSession();
 		const claim = this.#sessionClaim;
-		return claim !== undefined && claim.sessionId === this.#sessionId && claim.release === undefined;
+		return claim !== undefined && claim.sessionId === this.#sessionId && !claim.held;
 	}
 
 	/**
@@ -1263,6 +2937,263 @@ export class SessionManager {
 	}
 
 	/**
+	 * Why the session just loaded is not this process's to continue, or
+	 * `undefined` when it is — in which case this process now holds its
+	 * ownership claim and keeps it, so a later resume elsewhere meets an owner
+	 * rather than a free lease.
+	 *
+	 * The lease alone cannot answer this: `claimSession` refuses both a live
+	 * owner and a path that now holds a different session's journal, and it
+	 * re-reads the header itself when it is asked. The journal is read before
+	 * the claim, because a session that is no longer at this path may still be
+	 * running somewhere else under the lease this would otherwise take; and a
+	 * refused claim is read *again* afterwards, because a replacement that
+	 * lands in between is what the storage saw and what makes it refuse —
+	 * reported as a replacement rather than mistaken for a live owner.
+	 */
+	async #resumedSessionContention(staleCopy: boolean): Promise<ResumedSessionFork["reason"] | undefined> {
+		const sessionFile = this.#sessionFile;
+		if (!sessionFile) return undefined;
+		await this.#refuseWhenSourceReplaced(sessionFile);
+		if (staleCopy) return "departed";
+		if (!this.#sessionOwnedElsewhere()) return undefined;
+		await this.#refuseWhenSourceReplaced(sessionFile);
+		return "owned-elsewhere";
+	}
+
+	/** Refuse a resume whose file stopped holding the session that was loaded from it. */
+	async #refuseWhenSourceReplaced(sessionFile: string): Promise<void> {
+		const onDisk = await readSessionHeaderId(sessionFile);
+		if (onDisk !== undefined && onDisk !== this.#sessionId) {
+			throw new SessionSourceReplacedError(sessionFile, this.#sessionId, onDisk);
+		}
+	}
+
+	/**
+	 * Leave the session just loaded where it is — with the live process that
+	 * owns it, or as the stale copy of a conversation that moved away — and
+	 * carry on as a fork of it: a new id in a sibling file whose header points
+	 * back through `parentSession` only. No `continuationOf`, unlike
+	 * {@link #moveOffSessionFile}: the session left behind may still be running
+	 * under its own id, so a later resume of that file must land on it and not
+	 * follow this copy.
+	 *
+	 * The fork carries the transcript that was loaded, never a re-read of the
+	 * file. Its artifacts are copied in the background, as every other fork and
+	 * move copies them: the caller has already proved the journal still holds
+	 * the session being forked, and waiting for the copy instead costs half a
+	 * minute of unusable startup on an ordinary half-gigabyte artifacts
+	 * directory — measured at 33 s for 512 MiB in 8,192 files.
+	 *
+	 * What the wait bought was the ability to *refuse* a resume whose source
+	 * was replaced during the copy. That refusal is given up here, and
+	 * deliberately not called equivalent: the copy still takes itself back when
+	 * its source stops being the session it was copied for, so nothing foreign
+	 * is ever inherited, and {@link artifactsReproduced} lets the caller say so
+	 * in the transcript instead of letting the loss pass unmentioned.
+	 *
+	 * An unfinished tool call at the tip is paired with a result that says the
+	 * outcome is unknown, as an explicit fork does: the session this forked
+	 * from may be running that tool right now, and a dangling call would
+	 * otherwise be stripped from the model's context without a trace.
+	 *
+	 * Called while the transcript is being adopted, before anything has
+	 * published the loaded id, so nothing outside ever sees this process answer
+	 * to the owner's session. Returns what was left behind.
+	 */
+	#adoptLoadedSessionAsFork(reason: ResumedSessionFork["reason"], sessionDir?: string): ResumedSessionFork {
+		const from = this.#sessionFile as string;
+		const previousSessionId = this.#sessionId;
+		const timestamp = nowIso();
+		this.#sessionId = mintSessionId();
+		this.#taskSiblingCandidate = undefined;
+		const to = path.join(
+			sessionDir ?? path.dirname(from),
+			`${fileSafeTimestamp(timestamp)}_${this.#sessionId}.jsonl`,
+		);
+		const {
+			type: _type,
+			id: _id,
+			timestamp: _timestamp,
+			parentSession: _parent,
+			continuationOf: _of,
+			...carried
+		} = this.#header;
+		this.#header = {
+			type: "session",
+			id: this.#sessionId,
+			timestamp,
+			parentSession: previousSessionId,
+			...carried,
+			providerPromptCacheKey: SessionManager.getInheritedProviderPromptCacheKey(this.#header),
+		};
+		SessionManager.#repairForkedInterruptedTail(this.#entries, this.#index.pathTo());
+		this.#index.rebuild(this.#entries);
+		this.#closeWriterEventually();
+		this.#sessionFile = to;
+		this.#expectedDiskSize = null;
+		this.#fileIsCurrent = false;
+		this.#rewriteRequired = true;
+		this.#forceFileCreation = true;
+		this.#artifactManager = null;
+		this.#artifactManagerSessionFile = null;
+		// Read from the transcript this fork carries, not from the directory
+		// being copied: those are the identifiers the conversation actually
+		// refers to, they are all of them even when the source no longer holds
+		// the files, and nothing else in that directory can inflate them.
+		const inherited = highestArtifactReference(this.#entries);
+		const inheritedNames = inheritedOutputNames(this.#entries);
+		const done = copySessionArtifacts(from, to, {
+			stillTheSource: async () => (await readSessionHeaderId(from)) === previousSessionId,
+			// Part of the copy, not a follow-up to it: an allocator that waited
+			// for the directory must not start its scan before the names this
+			// transcript has already spent are recorded beside the files.
+			onSettled: () => this.#recordReservedClaims(to),
+		});
+		this.#pendingArtifactCopy = { sessionFile: to, done };
+		this.#inheritedOutputNames = inheritedNames;
+		// Taken at the fork, not when a copy reports a loss: a copy can arrive
+		// successfully and still be missing a file the transcript refers to —
+		// one the source lost before the walk reached it — and that reference
+		// is just as reusable as one a discard lost. What the copy does bring
+		// is in the directory, where the scan finds it anyway.
+		this.#reserveInheritedArtifacts(inherited, inheritedNames);
+		this.#artifactsReproduced = done.then(outcome => {
+			this.#artifactLossReason = outcome.reason;
+			return !outcome.discarded;
+		});
+		this.#rememberBreadcrumb(this.#cwd, to);
+		this.#claimSession();
+		logger.info(
+			reason === "owned-elsewhere"
+				? "Resumed a session another omp process owns; continuing in a fork"
+				: "Resumed a copy of a session that moved away; continuing in a fork",
+			{ source: from, sessionId: previousSessionId, fork: to },
+		);
+		this.#forkedFrom = { reason, sessionId: previousSessionId, sessionFile: from };
+		return this.#forkedFrom;
+	}
+
+	/**
+	 * Keep the identifiers an inherited transcript refers to out of this
+	 * session's allocator, and record that in the header so a reopen, and
+	 * anything forked from here, keeps the same promise.
+	 */
+	#reserveInheritedArtifacts(throughId: number, names: readonly string[], options?: { rewrite?: boolean }): void {
+		if (throughId < 0 && names.length === 0) return;
+		if (throughId >= 0 && (this.#reservedArtifactId ?? -1) < throughId) {
+			this.#reservedArtifactId = throughId;
+			this.#header.reservedArtifactId = throughId;
+		}
+		if (names.length > 0) {
+			const kept = new Set([...(this.#header.reservedOutputNames ?? []), ...this.#inheritedOutputNames, ...names]);
+			this.#header.reservedOutputNames = [...kept].sort();
+			this.#inheritedOutputNames = this.#header.reservedOutputNames;
+		}
+		// The header carries it from here: every rewrite persists it, a reopen
+		// reads it back, and a fork of this session takes it along. A rewrite
+		// that fails is a disk failure like any other and is reported as one,
+		// rather than leaving a promise that only this process remembers. A
+		// session still being built writes its header itself and needs none.
+		if (options?.rewrite === false || !this.#persist || !this.#sessionFile) return;
+		this.#rewriteRequired = true;
+		void this.#scheduleDiskWork(async () => {
+			await this.#rewriteAtomically();
+		});
+	}
+
+	/**
+	 * Leave the claims this transcript has already spent beside its artifacts,
+	 * where anything holding only the directory can read them.
+	 *
+	 * The header answers for the session manager, but a subagent's output
+	 * allocator and any other reader of that directory have no header to
+	 * consult — and a name whose file never arrived is invisible to a scan of
+	 * what is there.
+	 */
+	async #recordReservedClaims(sessionFile?: string): Promise<void> {
+		const dir = sessionFile ? artifactsDirectoryFor(sessionFile) : this.getArtifactsDir();
+		const throughId = this.#reservedArtifactId ?? -1;
+		const names = this.#inheritedOutputNames;
+		if (!dir || (throughId < 0 && names.length === 0)) return;
+		try {
+			await fs.promises.mkdir(dir, { recursive: true });
+			await fs.promises.writeFile(path.join(dir, RESERVED_CLAIMS_FILE), JSON.stringify({ throughId, names }), {
+				mode: 0o600,
+			});
+		} catch (error) {
+			// A claim nothing can read is a claim that will be broken, so this
+			// is a persistence failure like any other: observers hear it now,
+			// `flush()` raises it for whoever asks later, and a subscriber that
+			// arrives after the fact still finds it.
+			this.#noteDiskFailure(
+				new Error(`Failed to record reserved artifact claims in ${dir}: ${toError(error).message}`),
+			);
+		}
+	}
+
+	/**
+	 * Settles once any artifact copy this session is waiting on has finished,
+	 * one way or the other.
+	 *
+	 * Every reader of the artifacts directory needs this, not just
+	 * {@link ArtifactManager}: the public `artifact://` handler goes to the
+	 * filesystem itself, and a read that lands mid-copy would otherwise see a
+	 * directory that is not yet this session's.
+	 */
+	async whenArtifactsSettled(signal?: AbortSignal): Promise<void> {
+		const pending = this.#pendingArtifactCopy?.done;
+		if (!pending) return;
+		if (signal) await Promise.race([pending, abortRejection(signal)]);
+		else await pending;
+	}
+
+	/**
+	 * Whether the artifacts of the session this one forked from reached it, once
+	 * their copy has finished: `false` when the copy took itself back because
+	 * its source stopped being that session. `true` for a session that forked
+	 * nothing.
+	 */
+	async artifactsReproduced(): Promise<boolean> {
+		return (await this.#artifactsReproduced) ?? true;
+	}
+
+	/**
+	 * The highest artifact identifier this session inherited but never received
+	 * a file for, once {@link artifactsReproduced} has answered `false`. Those
+	 * identifiers are never handed out again, so a reference the transcript
+	 * already carries cannot come to name later, unrelated output.
+	 */
+	reservedArtifactId(): number | undefined {
+		return this.#reservedArtifactId;
+	}
+
+	/**
+	 * Subagent output names this session's transcript already refers to and
+	 * has no file for. A new subagent handed one of these would answer for
+	 * `agent://<name>` references the conversation already made.
+	 */
+	reservedOutputNames(): readonly string[] {
+		return this.#inheritedOutputNames;
+	}
+
+	/**
+	 * Why a fork's inherited artifacts never arrived, once
+	 * {@link artifactsReproduced} has answered `false`. A source that stopped
+	 * being the session it was copied for and a copy that simply could not be
+	 * finished leave the files in very different places, and only the first is
+	 * a reason to say they belong to another conversation now.
+	 */
+	artifactLossReason(): ArtifactCopyOutcome["reason"] {
+		return this.#artifactLossReason;
+	}
+
+	/** The session this one was forked off at its resume, if it was. */
+	forkedFromSession(): ResumedSessionFork | undefined {
+		return this.#forkedFrom;
+	}
+
+	/**
 	 * Leave `#sessionFile` untouched and continue as a fresh session in a
 	 * sibling file. It gets a new session id whose header points back through
 	 * `parentSession` and keeps the provider prompt-cache key, as {@link fork}
@@ -1313,7 +3244,9 @@ export class SessionManager {
 		this.#pendingArtifactCopy = { sessionFile: to, done: copySessionArtifacts(from, to) };
 		this.#rememberBreadcrumb(this.#cwd, to);
 		this.#claimSession();
-		this.#notifyPersistenceNotice({ reason, from, to });
+		const notice: SessionPersistenceNotice = { reason, from, to, previousSessionId, sessionId: this.#sessionId };
+		this.#movesAwaitingWrite.push({ notice, written: Promise.withResolvers<boolean>() });
+		this.#notifyPersistenceNotice(notice);
 		return to;
 	}
 
@@ -1522,7 +3455,7 @@ export class SessionManager {
 				throw this.#latchIndeterminate(operationError, recoveryErrors);
 			}
 		}
-		this.#recordFullRewrite(body.bytes);
+		this.#recordFullRewrite(target, body.bytes);
 	}
 
 	#appendWriter(): SessionStorageWriter {
@@ -1544,8 +3477,44 @@ export class SessionManager {
 		this.#expectedDiskSize = (this.#expectedDiskSize ?? 0) + Buffer.byteLength(line, "utf8");
 	}
 
-	#recordFullRewrite(bytes: number): void {
+	/**
+	 * A full transcript is durable at `target`. That settles every move up to
+	 * the last one to `target`: an earlier move whose file was never written
+	 * because the session moved on again counts as written with it.
+	 */
+	#recordFullRewrite(target: string, bytes: number): void {
 		this.#expectedDiskSize = bytes;
+		const published = path.resolve(target);
+		const last = this.#movesAwaitingWrite.findLastIndex(move => path.resolve(move.notice.to) === published);
+		for (const move of this.#movesAwaitingWrite.splice(0, last + 1)) this.#settleMoveWrite(move, true);
+	}
+
+	#settleMoveWrite(
+		move: { notice: SessionPersistenceNotice; written: PromiseWithResolvers<boolean> },
+		written: boolean,
+	): void {
+		this.#moveWriteOutcomes.set(move.notice, written);
+		move.written.resolve(written);
+	}
+
+	/**
+	 * Whether the move `notice` reports has a durable new file: `true` once a
+	 * full transcript has been published there (or to the file a later move
+	 * went to), `false` when this manager stopped writing first ({@link seal})
+	 * or `notice` is not one of its moves, and `undefined` while that write is
+	 * still to come. A move is announced before it, so a subscriber that must
+	 * not act before the new file exists waits with {@link whenMoveWritten}.
+	 */
+	moveWritten(notice: SessionPersistenceNotice): boolean | undefined {
+		if (this.#movesAwaitingWrite.some(move => move.notice === notice)) return undefined;
+		return this.#moveWriteOutcomes.get(notice) ?? false;
+	}
+
+	/** Settles with {@link moveWritten}'s answer once that is no longer `undefined`. */
+	whenMoveWritten(notice: SessionPersistenceNotice): Promise<boolean> {
+		const pending = this.#movesAwaitingWrite.find(move => move.notice === notice);
+		if (pending) return pending.written.promise;
+		return Promise.resolve(this.#moveWriteOutcomes.get(notice) ?? false);
 	}
 
 	/**
@@ -1689,11 +3658,12 @@ export class SessionManager {
 				// becomes durable state.
 				const generation = ++this.#deferredPublishGen;
 				const { bytes, stamp } = body;
-				this.#confirmDeferredPublish(targetPath, () => {
+				const publishedPath = targetPath;
+				this.#confirmDeferredPublish(publishedPath, () => {
 					// A newer deferred publish owns the durability record now;
 					// this body is no longer on the backend, so record nothing.
 					if (generation !== this.#deferredPublishGen) return;
-					this.#recordFullRewrite(bytes);
+					this.#recordFullRewrite(publishedPath, bytes);
 					const entries = this.#entries;
 					const bodyIsCurrent =
 						stamp.entries === entries &&
@@ -1722,7 +3692,7 @@ export class SessionManager {
 				});
 				return;
 			}
-			this.#recordFullRewrite(body.bytes);
+			this.#recordFullRewrite(targetPath, body.bytes);
 			// Only mark the manager current when writing the active session path.
 			// Mid-move writes update the live relocation path; `#sessionFile` is
 			// still the pre-repoint source until moveTo repoints it.
@@ -1810,7 +3780,7 @@ export class SessionManager {
 					}
 					try {
 						if (textMatchesLines(await this.#storage.readText(sessionFile), body.lines)) {
-							this.#recordFullRewrite(body.bytes);
+							this.#recordFullRewrite(sessionFile, body.bytes);
 						}
 					} catch {
 						// Preserve the publish error when durable state cannot be read back.
@@ -1820,14 +3790,14 @@ export class SessionManager {
 				if (this.#diskEpoch !== epoch) {
 					try {
 						if (textMatchesLines(await this.#storage.readText(sessionFile), body.lines)) {
-							this.#recordFullRewrite(body.bytes);
+							this.#recordFullRewrite(sessionFile, body.bytes);
 						}
 					} catch {
 						// A superseding rewrite owns the durability record when its body cannot be read back.
 					}
 					return false;
 				}
-				this.#recordFullRewrite(body.bytes);
+				this.#recordFullRewrite(sessionFile, body.bytes);
 			} while (this.#atomicRewriteDirty);
 			return true;
 		} finally {
@@ -2035,6 +4005,13 @@ export class SessionManager {
 		this.#titleSource = undefined;
 		this.#titleUpdatedAt = "";
 		this.#hasTitleSlot = true;
+		// A new session inherits no transcript, so it inherits no claim on
+		// identifiers or names, and no loss to report.
+		this.#reservedArtifactId = undefined;
+		this.#inheritedOutputNames = [];
+		this.#artifactLossReason = undefined;
+		this.#artifactsReproduced = undefined;
+		this.#forkedFrom = undefined;
 
 		const timestamp = nowIso();
 		this.#header = {
@@ -2090,6 +4067,9 @@ export class SessionManager {
 		this.#header = header;
 		this.#entries = entries;
 		this.#sessionId = header.id;
+		// Belongs to the transcript, not to the process that lost the files.
+		this.#reservedArtifactId = header.reservedArtifactId;
+		this.#inheritedOutputNames = header.reservedOutputNames ?? [];
 		this.#sessionName = header.title;
 		this.#titleSource = header.titleSource;
 		this.#titleUpdatedAt = header.timestamp;
@@ -2209,6 +4189,7 @@ export class SessionManager {
 			sessionFile.slice(0, -JSONL_SUFFIX_LENGTH),
 			pendingCopy?.sessionFile === sessionFile ? pendingCopy.done : undefined,
 			this.getSeanceSourceArtifactsDir() ?? undefined,
+			() => this.#reservedArtifactId,
 		);
 		this.#artifactManagerSessionFile = sessionFile;
 		return this.#artifactManager;
@@ -2263,7 +4244,23 @@ export class SessionManager {
 			// a rollback observe the move it is undoing.
 			header: structuredClone(this.#header),
 			entries: [...this.#entries],
+			// A holder of its own, so a rollback to this snapshot takes the
+			// session back without this manager ever letting go of it — and so a
+			// switch started inside another cannot end the outer one's claim.
+			sessionClaim: this.#retainOwnershipForSnapshot(),
 		};
+	}
+
+	/**
+	 * The switch `snapshot` was captured for is final: give up the claim it
+	 * retained on the session left behind. Until this is called a rollback
+	 * through {@link restoreState} can still take that session back, so no
+	 * other process may have it. A snapshot that was already rolled back or
+	 * committed is left alone, so a caller may always end its transaction.
+	 */
+	commitSessionSwitch(snapshot: SessionManagerStateSnapshot): void {
+		const retained = snapshot.sessionClaim;
+		if (retained && this.#snapshotClaims.delete(retained)) retained.release();
 	}
 
 	/**
@@ -2276,7 +4273,11 @@ export class SessionManager {
 		const persist = options?.persist ?? this.#persist;
 		const clone = new SessionManager(this.#cwd, this.#sessionDir, persist, this.#storage);
 		clone.#suppressBreadcrumb = true;
-		clone.restoreState(this.captureState());
+		// A clone is a second manager over the same session, not a transfer of
+		// ownership: it takes no claim here and claims on its own first write.
+		const snapshot = this.captureState();
+		this.commitSessionSwitch(snapshot);
+		clone.restoreState({ ...snapshot, sessionClaim: undefined });
 		if (!persist) {
 			clone.#sessionFile = undefined;
 			clone.#expectedDiskSize = null;
@@ -2291,6 +4292,17 @@ export class SessionManager {
 		this.#closeWriterEventually();
 		this.#diskTail = Promise.resolve();
 		this.#clearDiskError();
+		// Ownership rolls back with everything else: the claim taken on the
+		// session being switched to is dropped, and the holder this snapshot
+		// kept on the session this manager is returning to is adopted.
+		// Reacquiring it here instead would leave a window in which another
+		// process could take the session this one still lives in — and a holder
+		// released meanwhile (a `close()` during the switch) is unheld, so it is
+		// never mistaken for ownership.
+		const retained = snapshot.sessionClaim;
+		if (retained) this.#snapshotClaims.delete(retained);
+		if (this.#sessionClaim && this.#sessionClaim !== retained) this.#sessionClaim.release();
+		this.#sessionClaim = retained?.held ? retained : undefined;
 
 		this.#cwd = snapshot.cwd;
 		this.#sessionDir = snapshot.sessionDir;
@@ -2355,22 +4367,36 @@ export class SessionManager {
 			await this.#rewriteAtomically();
 		}
 	}
-	/** Switch to a different session file (resume / branch). */
-	async setSessionFile(sessionFile: string): Promise<void> {
-		await this.#setSessionFile(sessionFile);
+	/**
+	 * Switch to a different session file (resume / branch).
+	 *
+	 * With `forkIfContested`, a file another live omp process owns is left to
+	 * it and this session carries on as a fork of what was loaded, reported in
+	 * the result, instead of answering to the loaded id until the first write.
+	 * A file that no longer holds the session loaded from it refuses with
+	 * {@link SessionSourceReplacedError} and changes nothing.
+	 */
+	async setSessionFile(
+		sessionFile: string,
+		options?: { forkIfContested?: boolean },
+	): Promise<{ forkedFrom?: ResumedSessionFork }> {
+		return await this.#setSessionFile(sessionFile, undefined, options);
 	}
 
 	async #setSessionFile(
 		sessionFile: string,
 		loadedSession?: SessionLoadResult,
-		options?: { throwIfMissing?: boolean; newSession?: NewSessionOptions },
-	): Promise<void> {
+		options?: { throwIfMissing?: boolean; newSession?: NewSessionOptions; forkIfContested?: boolean },
+	): Promise<{ forkedFrom?: ResumedSessionFork }> {
 		await this.#drainAndCloseWriter();
 		this.#clearDiskError();
 		this.#draftOnlySessionCleanupArmed = false;
-		// A switch gives up the previous file. Opening claims nothing: the first
+		// The previous session is not given up here: the snapshot a caller took
+		// before this switch holds a claim of its own on it (see
+		// {@link captureState}), so it stays this process's until that switch
+		// commits or rolls back. Opening claims nothing by itself: the first
 		// write does, so inspecting a session never counts as owning it.
-		this.#sessionClaim?.release?.();
+		this.#sessionClaim?.release();
 		this.#sessionClaim = undefined;
 
 		const resolvedSessionFile = path.resolve(sessionFile);
@@ -2404,7 +4430,7 @@ export class SessionManager {
 			this.#forceFileCreation = true;
 			await this.#rewriteAtomically();
 			this.#fileIsCurrent = true;
-			return;
+			return {};
 		}
 
 		const migrated = migrateToCurrentVersion(fileEntries);
@@ -2448,6 +4474,54 @@ export class SessionManager {
 		this.#artifactManagerSessionFile = null;
 
 		if (this.sanitizeLoadedOpenAIResponsesReplayMetadata()) this.#rewriteRequired = true;
+
+		// Before anything publishes the loaded id: whatever holds the file keeps
+		// it, this session takes an id of its own. Checked last so the fork
+		// carries the whole adopted state, and when nothing contests the file
+		// this is where this process takes its ownership claim.
+		if (options?.forkIfContested && this.#persist) {
+			const reason = await this.#resumedSessionContention(false);
+			if (reason) return { forkedFrom: this.#adoptLoadedSessionAsFork(reason) };
+		}
+		return {};
+	}
+
+	/**
+	 * Startup counterpart of {@link setSessionFile}'s `forkIfContested`, for a
+	 * session this manager was opened on: take this process's ownership claim
+	 * on the loaded session and keep it, or report why it could not and carry
+	 * on as a fork of what was loaded (in `sessionDir`, default: beside the
+	 * file it was loaded from).
+	 *
+	 * `staleCopy` says the transcript itself disqualifies this copy — its last
+	 * transfer marker hands the conversation to another machine — which forks
+	 * whoever holds the lease. That decision belongs to the caller that reads
+	 * transfer markers; everything about ownership belongs here. Both run in
+	 * one gate so the journal is verified once, before anything is forked or
+	 * any artifacts are copied.
+	 *
+	 * The claim is what makes a startup adoption exclusive. Probing the lease
+	 * and dropping it again answers only "nobody had written this yet": two
+	 * processes that both resume before either writes then both carry the same
+	 * session id, allocate artifacts in one directory, and the second one's
+	 * first write moves it off the file under a `continuationOf` naming a
+	 * session that is still running. Holding the claim from the resume onwards
+	 * makes the loser fork here, where it still costs nothing.
+	 *
+	 * Throws {@link SessionSourceReplacedError} when the file no longer holds
+	 * the session that was loaded from it, leaving this manager untouched.
+	 *
+	 * Only the resume guard calls this. Opening a session to read it — `omp
+	 * sessions`, `--export`, `render`, the picker's previews — never does, so
+	 * inspecting a session still never takes it from its owner.
+	 */
+	async claimResumedSessionOrFork(options?: {
+		sessionDir?: string;
+		staleCopy?: boolean;
+	}): Promise<ResumedSessionFork | undefined> {
+		if (!this.#persist || !this.#sessionFile) return undefined;
+		const reason = await this.#resumedSessionContention(options?.staleCopy === true);
+		return reason ? this.#adoptLoadedSessionAsFork(reason, options?.sessionDir) : undefined;
 	}
 
 	/**
@@ -2489,6 +4563,8 @@ export class SessionManager {
 
 		const oldSessionFile = this.#sessionFile;
 		const parentSessionId = this.#sessionId;
+		const previousReservedArtifactId = this.#reservedArtifactId;
+		const previousReservedOutputNames = [...this.#inheritedOutputNames];
 		await this.#drainAndCloseWriter();
 		this.#clearDiskError();
 		this.#reconcileSessionDirForFallback();
@@ -2511,6 +4587,16 @@ export class SessionManager {
 			providerPromptCacheKey: SessionManager.getInheritedProviderPromptCacheKey(this.#header),
 			taskPromptCacheKey: this.#header.taskPromptCacheKey,
 		};
+		// The fork keeps this session's entries, so it keeps what they have
+		// already spent: identifiers and subagent names the transcript refers
+		// to, whether this session recorded them or they are only in the body.
+		this.#reservedArtifactId = undefined;
+		this.#inheritedOutputNames = [];
+		this.#reserveInheritedArtifacts(
+			Math.max(highestArtifactReference(this.#entries), previousReservedArtifactId ?? -1),
+			[...new Set([...inheritedOutputNames(this.#entries), ...previousReservedOutputNames])],
+			{ rewrite: false },
+		);
 		this.#sessionName = this.#header.title;
 		this.#titleSource = this.#header.titleSource;
 		this.#titleUpdatedAt = timestamp;
@@ -2524,6 +4610,9 @@ export class SessionManager {
 		this.#rememberBreadcrumb(this.#cwd, this.#sessionFile);
 
 		await this.#rewriteAtomically();
+		// After the file exists, so the claims record cannot make the new
+		// artifacts directory non-empty before a copy into it is handed over.
+		await this.#recordReservedClaims();
 		return { oldSessionFile, newSessionFile: this.#sessionFile };
 	}
 
@@ -2585,7 +4674,7 @@ export class SessionManager {
 			// even when the path stays the same.
 			await assertSourceIsOurs(this.#sessionFile);
 			this.#claimSession();
-			if (this.#sessionClaim?.release === undefined) {
+			if (!this.#sessionClaim?.held) {
 				throw new SessionMoveRefusedError(
 					`Cannot move session "${this.#sessionFile}": another live omp process writes it. Nothing was moved.`,
 				);
@@ -2863,8 +4952,13 @@ export class SessionManager {
 		});
 	}
 
-	/** Flush pending writes. Call before switching sessions or on shutdown. */
-	async flush(): Promise<void> {
+	/**
+	 * Flush pending entry writes, without waiting for a background artifact
+	 * copy. For a caller that only needs its own append durable — a resume
+	 * notice, say — waiting for a half-gigabyte of artifacts to be reproduced
+	 * first is the whole latency this fork path exists to avoid.
+	 */
+	async flushEntries(): Promise<void> {
 		if (!this.#persist || !this.#sessionFile) return;
 		await this.#scheduleDiskWork(async () => {
 			if (this.#writer?.isOpen()) await this.#writer.flush();
@@ -2875,6 +4969,17 @@ export class SessionManager {
 		await this.#scheduleDiskWork(async () => {
 			await this.#storage.drain();
 		});
+		if (this.#diskFailure) throw this.#diskFailure;
+	}
+
+	/**
+	 * Flush pending writes, including any artifact copy still running. Call
+	 * before switching sessions or on shutdown: both move or reopen the
+	 * artifacts directory a copy may still be publishing into.
+	 */
+	async flush(): Promise<void> {
+		if (!this.#persist || !this.#sessionFile) return;
+		await this.flushEntries();
 		await this.#pendingArtifactCopy?.done;
 		if (this.#diskFailure) throw this.#diskFailure;
 	}
@@ -2953,10 +5058,13 @@ export class SessionManager {
 	/** Flush, then close the append writer. */
 	async close(): Promise<void> {
 		if (!this.#persist) return;
-		// Closing gives up this process's ownership claim; a later write reclaims it.
-		const claim = this.#sessionClaim;
-		claim?.release?.();
-		if (claim) claim.release = undefined;
+		// Closing gives up every ownership claim this manager holds, including
+		// the one a switch snapshot still kept: a rollback after this finds that
+		// holder unheld and reclaims on the next write instead of writing into a
+		// session another process may have taken meanwhile.
+		for (const retained of this.#snapshotClaims) retained.release();
+		this.#snapshotClaims.clear();
+		this.#sessionClaim?.release();
 		// A prior `flushSync` can self-conflict with this manager's own
 		// unconfirmed deferred publish; drain despite the latch so that
 		// publish can still confirm before we give up on the transcript.
@@ -3015,6 +5123,8 @@ export class SessionManager {
 	 *   superseded and an ALREADY-RUNNING fenced/repair rewrite (awaiting the
 	 *   tail, drain, writer close, or the atomic stage) fails its commit guard
 	 *   at the rename fence instead of publishing over a revived file.
+	 * - a move whose new file was never written stays unwritten
+	 *   ({@link whenMoveWritten} settles `false`).
 	 * The final `close()` itself is scheduled after the bump and still runs;
 	 * pre-seal hot-path appends are already in the page cache. Idempotent;
 	 * terminal.
@@ -3023,6 +5133,7 @@ export class SessionManager {
 		if (this.#released) return;
 		this.#released = true;
 		this.#diskEpoch++;
+		for (const move of this.#movesAwaitingWrite.splice(0)) this.#settleMoveWrite(move, false);
 	}
 
 	/**
@@ -4258,6 +6369,16 @@ export class SessionManager {
 		);
 		manager.#header.title = sourceHeader?.title;
 		manager.#header.titleSource = sourceHeader?.titleSource;
+		// The fork carries the source's transcript, so it carries its claims:
+		// identifiers and output names the source could not back are still
+		// spent here, and a fork that forgets them answers for them with new
+		// output. Taken from the entries, so a source header that never
+		// recorded one is still covered.
+		manager.#reserveInheritedArtifacts(
+			Math.max(highestArtifactReference(history), sourceHeader?.reservedArtifactId ?? -1),
+			[...new Set([...inheritedOutputNames(history), ...(sourceHeader?.reservedOutputNames ?? [])])],
+			{ rewrite: false },
+		);
 		manager.#additionalDirectories = options?.seance
 			? []
 			: (sourceHeader?.additionalDirectories ?? []).filter(d => d !== path.resolve(cwd));
@@ -4283,6 +6404,12 @@ export class SessionManager {
 		if (!options?.seance && options?.copyArtifacts !== false) {
 			await copySessionArtifacts(sourcePath, manager.#sessionFile!);
 		}
+		// After the copy, never before it: the claims are a file in the
+		// artifacts directory, and writing one first would make the directory
+		// exist with contents of its own — which is exactly the case the
+		// handover treats as a destination that already holds artifacts, and
+		// the fork would inherit nothing but its own bookkeeping.
+		await manager.#recordReservedClaims();
 		return manager;
 	}
 

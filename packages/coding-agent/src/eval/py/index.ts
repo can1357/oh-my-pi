@@ -4,7 +4,7 @@ import {
 	type ExecutorBackend,
 	type ExecutorBackendExecOptions,
 	type ExecutorBackendResult,
-	resolveEvalUrlRoots,
+	resolveEvalUrlRootsHeld,
 } from "../backend";
 import { namespaceSessionId as sharedNamespace, toExecutorBackendResult } from "../backend-helpers";
 import type { BackendProbeOptions } from "../probe";
@@ -60,7 +60,7 @@ export default {
 			interpreter: identity.interpreter,
 			sessionFile: opts.sessionFile,
 			artifactsDir: opts.session.getArtifactsDir?.() ?? undefined,
-			localRoots: resolveEvalUrlRoots(opts.session),
+			localRoots: await resolveEvalUrlRootsHeld(opts.session),
 			kernelOwnerId: identity.kernelOwnerId,
 			reset: opts.reset,
 			onChunk: opts.onChunk,

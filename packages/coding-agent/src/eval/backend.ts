@@ -1,5 +1,7 @@
 import { buildEvalUrlRoots, LocalProtocolHandler } from "../internal-urls";
 import { contextLocalProtocolOptions } from "../internal-urls/context";
+import { holdArtifactRoot } from "./artifact-readiness";
+import { EVAL_ARTIFACT_ROOT_TOKEN } from "./artifact-wire";
 import type { OutputArtifactError } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import type { ToolSession } from "../tools";
 import type { BackendProbeOptions } from "./probe";
@@ -96,5 +98,32 @@ export function resolveEvalUrlRoots(session: ToolSession): Record<string, string
 	const roots = options ? buildEvalUrlRoots(options) : {};
 	const artifactsDir = protocolOptions?.getArtifactsDir?.();
 	if (artifactsDir) roots.artifact = artifactsDir;
+	return roots;
+}
+
+/** What a cell carries when its artifacts directory was there at assignment and could not be held. */
+const LOST_ARTIFACT_ROOT = "root-lost";
+
+/**
+ * {@link resolveEvalUrlRoots} with the artifacts directory held open for the
+ * cell, and the token that reaches the hold.
+ *
+ * The token comes back with every artifact read the cell makes, so the
+ * directory the read is answered from is the one the cell was given rather
+ * than whatever its pathname reaches by then. No scheme can be named
+ * `__artifactRoot`, so it is invisible to everything that reads these roots as
+ * scheme-to-root.
+ */
+export async function resolveEvalUrlRootsHeld(session: ToolSession): Promise<Record<string, string>> {
+	const roots = resolveEvalUrlRoots(session);
+	if (roots.artifact) {
+		// Three states, decided here and recorded: held, never there, or there
+		// and lost. The last one carries a token that reaches no hold, so this
+		// cell's artifact reads refuse — the cell itself still runs, because a
+		// cell that never reads an artifact has done nothing wrong — while a
+		// cell whose directory simply has not arrived keeps the ordinary path.
+		const token = await holdArtifactRoot(roots.artifact).catch(() => LOST_ARTIFACT_ROOT);
+		if (token) roots[EVAL_ARTIFACT_ROOT_TOKEN] = token;
+	}
 	return roots;
 }

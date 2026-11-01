@@ -130,6 +130,7 @@ import type {
 	SessionCompactingEvent,
 	SessionCompactingResult,
 	SessionEvent,
+	SessionMovedEvent,
 	SessionShutdownEvent,
 	SessionStartEvent,
 	SessionStopEvent,
@@ -1120,6 +1121,7 @@ export type {
 	SessionCompactEvent,
 	SessionCompactingEvent,
 	SessionEvent,
+	SessionMovedEvent,
 	SessionShutdownEvent,
 	SessionStartEvent,
 	SessionSwitchEvent,
@@ -1823,6 +1825,7 @@ export interface ExtensionAPI {
 		handler: ExtensionHandler<SessionBeforeSwitchEvent, SessionBeforeSwitchResult>,
 	): void;
 	on(event: "session_switch", handler: ExtensionHandler<SessionSwitchEvent>): void;
+	on(event: "session_moved", handler: ExtensionHandler<SessionMovedEvent>): void;
 	on(
 		event: "session_before_branch",
 		handler: ExtensionHandler<SessionBeforeBranchEvent, SessionBeforeBranchResult>,

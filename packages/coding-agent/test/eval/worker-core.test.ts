@@ -1,3 +1,5 @@
+import * as nodeFs from "node:fs";
+import * as nodePath from "node:path";
 import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -21,9 +23,31 @@ interface WorkerHarness {
 function createWorkerHarness(): WorkerHarness {
 	const hostListeners = new Set<(message: WorkerOutbound) => void>();
 	const workerListeners = new Set<(message: WorkerInbound) => void>();
+	// Every `artifact://<n>` read asks the host for the file, so that the
+	// waiting for a copy and the listing are one answer. No copy runs here, so
+	// the harness answers from the artifact root the run was started with.
+	const resolveArtifact = (id: unknown, root: unknown): unknown => {
+		if (typeof root !== "string" || typeof id !== "string") return "";
+		const match = nodeFs.readdirSync(root).find(name => name.startsWith(`${id}.`));
+		if (match === undefined) return "";
+		// The file and what it is: the helper opens the path and checks the
+		// object it opened against this.
+		const file = nodePath.join(nodePath.resolve(root), match);
+		const stat = nodeFs.statSync(file, { bigint: true });
+		return { text: file, details: { path: file, device: String(stat.dev), inode: String(stat.ino) } };
+	};
 	const transport: Transport = {
 		send: message => {
 			queueMicrotask(() => {
+				if (message.type === "tool-call" && message.name === "__artifacts_ready__") {
+					const args = message.args as { id?: unknown; root?: unknown } | undefined;
+					const value = resolveArtifact(args?.id, args?.root);
+					queueMicrotask(() => {
+						for (const listener of workerListeners) {
+							listener({ type: "tool-reply", id: message.id, reply: { ok: true, value } });
+						}
+					});
+				}
 				for (const listener of hostListeners) listener(message);
 			});
 		},

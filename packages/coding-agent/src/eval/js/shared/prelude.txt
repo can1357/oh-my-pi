@@ -70,7 +70,13 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 			return readToolText(withReadLineSelector(`${path}:raw`, options));
 		}
 		if (shouldDelegateRead(path)) {
-			const toolPath = withReadLineSelector(path, options);
+			// A selector form goes to the read tool, which resolves
+			// `artifact://<id>` against whatever directory the session reads
+			// when the call lands. The id is this cell's, so it is resolved
+			// here first, the same way a bare one is, and the tool is handed
+			// the file with the selector still on it.
+			const pinned = await callHelper("pinArtifact", path);
+			const toolPath = withReadLineSelector(pinned, options);
 			return toolPath === null ? "" : readToolText(toolPath);
 		}
 		return callHelper("read", path, options);

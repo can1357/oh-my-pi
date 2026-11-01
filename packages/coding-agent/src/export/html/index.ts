@@ -6,7 +6,7 @@ import type { AgentState } from "@oh-my-pi/pi-agent-core";
 import { APP_NAME, isCompiledBinary, isEnoent, VERSION } from "@oh-my-pi/pi-utils";
 import { getResolvedThemeColors, getThemeExportColors } from "@oh-my-pi/pi-tui/theme";
 import type { SessionEntry, SessionHeader } from "../../session/session-entries";
-import { SessionManager } from "../../session/session-manager";
+import { artifactsDirectoryFor, SessionManager, whenArtifactCopiesSettle } from "../../session/session-manager";
 import { collectSubSessions, type SubSession } from "../../session/sub-sessions";
 import type { ExportThemeNames } from "./args";
 import templateHtml from "./template.html.txt" with { type: "text" };
@@ -64,6 +64,12 @@ export interface ExportOptions {
 	themeNames?: ExportThemeNames;
 	/** Embed subagent session transcripts found next to the session file (default true). */
 	includeSubSessions?: boolean;
+	/**
+	 * Gives up the wait for inherited child transcripts still being copied. An
+	 * export is complete or it is cancelled: it does not quietly leave children
+	 * out, so a caller that cannot wait says so here.
+	 */
+	signal?: AbortSignal;
 }
 
 /** Parse a color string to RGB values. */
@@ -234,6 +240,12 @@ export async function exportSessionToHtml(
 
 	const sessionData = buildSessionData(sm, state);
 	if (opts.includeSubSessions !== false) {
+		// A fork's inherited subagent transcripts arrive in the background. An
+		// export taken while that copy runs is not a smaller snapshot of the
+		// session, it is a wrong one: it omits children the transcript refers
+		// to and says nothing about it.
+		await sm.whenArtifactsSettled(opts.signal);
+		await whenArtifactCopiesSettle(sm.getArtifactsDir(), opts.signal);
 		const subSessions = await collectExportSubSessions(sessionFile);
 		if (Object.keys(subSessions).length > 0) sessionData.subSessions = subSessions;
 	}
@@ -268,6 +280,11 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 		leafId: sm.getLeafId(),
 	};
 	if (opts.includeSubSessions !== false) {
+		// This manager is not the one that adopted the session, so it holds no
+		// pending copy of its own: the wait has to be on the directory the
+		// children are arriving in, or a fork exported mid-inheritance is
+		// written without the children its transcript refers to.
+		await whenArtifactCopiesSettle(artifactsDirectoryFor(inputPath), opts.signal);
 		const subSessions = await collectExportSubSessions(inputPath);
 		if (Object.keys(subSessions).length > 0) sessionData.subSessions = subSessions;
 	}

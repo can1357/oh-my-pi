@@ -81,8 +81,9 @@ export class ArtifactManager {
 	readonly #dir: string;
 	#dirCreated = false;
 	#initPromise: Promise<void> | null = null;
-	readonly #ready: Promise<void> | undefined;
+	readonly #ready: Promise<unknown> | undefined;
 	readonly #reservedIdsDir: string | undefined;
+	readonly #reservedThroughId: (() => number | undefined) | undefined;
 
 	/**
 	 * @param dir Directory that will hold artifact files. Created lazily on first save.
@@ -92,11 +93,21 @@ export class ArtifactManager {
 	 * @param reservedIdsDir Read-only directory whose ids stay reserved: a seance
 	 *   fork allocates past its source's ids so `artifact://<n>` from the inherited
 	 *   transcript keeps naming the source artifact.
+	 * @param reservedThroughId The highest id this session must not hand out again
+	 *   even though no file carries it, read after `ready`: a fork whose inherited
+	 *   artifacts never arrived still has a transcript full of `artifact://<n>`,
+	 *   and new output taking one of those numbers would silently answer for it.
 	 */
-	constructor(dir: string, ready?: Promise<void>, reservedIdsDir?: string) {
+	constructor(
+		dir: string,
+		ready?: Promise<unknown>,
+		reservedIdsDir?: string,
+		reservedThroughId?: () => number | undefined,
+	) {
 		this.#dir = dir;
 		this.#ready = ready;
 		this.#reservedIdsDir = reservedIdsDir;
+		this.#reservedThroughId = reservedThroughId;
 	}
 
 	/**
@@ -133,7 +144,8 @@ export class ArtifactManager {
 				// A missing source artifacts dir reserves nothing.
 			}
 		}
-		let maxId = -1;
+		const reserved = this.#reservedThroughId?.();
+		let maxId = reserved !== undefined && Number.isSafeInteger(reserved) ? reserved : -1;
 		for (const file of files) {
 			// Files are named: {id}.{toolType}.log
 			const match = file.match(/^(\d+)\..*\.log$/);
@@ -148,8 +160,15 @@ export class ArtifactManager {
 	/**
 	 * Atomically allocate next artifact ID.
 	 * IDs are sequential within the session.
+	 *
+	 * Refuses past the last identifier that counts exactly: beyond it every
+	 * allocation returns the same number, and two artifacts saved under one id
+	 * means the second silently replaces the first.
 	 */
 	allocateId(): number {
+		if (!Number.isSafeInteger(this.#nextId) || this.#nextId >= Number.MAX_SAFE_INTEGER) {
+			throw new Error(`Artifact identifiers are exhausted for this session (next would be ${this.#nextId})`);
+		}
 		return this.#nextId++;
 	}
 

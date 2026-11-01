@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import * as path from "node:path";
 
 import { logger } from "@oh-my-pi/pi-utils";
@@ -10,6 +11,23 @@ import {
 	type SessionOwners,
 	waitForPromiseWithCancellation,
 } from "./executor-base";
+
+/**
+ * The bridge identity of a kernel.
+ *
+ * The kernel, not the eval session: two kernels can share a session id with
+ * different working directories, and a bridge keyed by the session would have
+ * one kernel's disposal take the other's standing authority with it.
+ *
+ * Hashed rather than rewritten, because this id travels in an environment
+ * variable and the key's separators cannot. Replacing them maps two different
+ * keys onto one id whenever a session id or a directory contains the
+ * replacement, which is one kernel answering for another's artifacts and one
+ * kernel's shutdown retiring another's authority.
+ */
+export function bridgeSessionIdFor(sessionKey: string): string {
+	return `kernel:${createHash("sha256").update(sessionKey).digest("hex").slice(0, 32)}`;
+}
 
 interface KernelSessionRegistryOptions {
 	sessionId?: string;
@@ -427,9 +445,7 @@ export function createKernelSessionRegistry<
 	async function executeOnSession(code: string, cwd: string, options: TOptions): Promise<R> {
 		const sessionId = options.sessionId ?? `session:${cwd}`;
 		const sessionKey = descriptor.buildSessionKey(sessionId, cwd, options.interpreter);
-		if (options.bridge && !options.bridgeSessionId) {
-			options.bridgeSessionId = sessionId;
-		}
+		if (options.bridge && !options.bridgeSessionId) options.bridgeSessionId = bridgeSessionIdFor(sessionKey);
 		if (options.reset) {
 			const inFlight = resettingSessions.get(sessionKey);
 			if (inFlight) await inFlight.catch(() => undefined);
