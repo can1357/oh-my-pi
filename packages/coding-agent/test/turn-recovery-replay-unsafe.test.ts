@@ -12,6 +12,7 @@ import {
 	type RecoveryCompactionResult,
 	TurnRecovery,
 	type TurnRecoveryHost,
+	usageLimitBlockCoversModel,
 } from "@oh-my-pi/pi-coding-agent/session/turn-recovery";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createProviderErrorMessage } from "../../ai/src/providers/error-message";
@@ -499,6 +500,55 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		// cooldown are needed once the outcome's switch is honored.
 		expect(maybeAutoRedeemReset).not.toHaveBeenCalled();
 		expect(noteCooldown).not.toHaveBeenCalled();
+	});
+
+	it("scopes block coverage by quota pool, not by provider", () => {
+		// Codex `spark` and ordinary `chat` meters are disjoint pools: a Spark
+		// block must not be treated as covering an ordinary chat model even
+		// though both share the openai-codex provider.
+		expect(usageLimitBlockCoversModel("openai-codex", "gpt-5.3-codex-spark", "openai-codex", "gpt-6.1-sol")).toBe(
+			false,
+		);
+		expect(usageLimitBlockCoversModel("openai-codex", "gpt-6.1-sol", "openai-codex", "gpt-5.3-codex-spark")).toBe(
+			false,
+		);
+		// Two ordinary Codex models share the chat scope: covered both ways.
+		expect(usageLimitBlockCoversModel("openai-codex", "gpt-6.1-sol", "openai-codex", "gpt-6-astra")).toBe(true);
+		// Anthropic's ordinary models carry no block scope: provider-wide.
+		expect(usageLimitBlockCoversModel("anthropic", "claude-sonnet-4-5", "anthropic", "claude-sonnet-4-5-v2")).toBe(
+			true,
+		);
+		// Cross-provider is never covered.
+		expect(usageLimitBlockCoversModel("openai-codex", "gpt-6.1-sol", "anthropic", "claude-sonnet-4-5")).toBe(false);
+		// Same model is trivially covered.
+		expect(
+			usageLimitBlockCoversModel("openai-codex", "gpt-5.3-codex-spark", "openai-codex", "gpt-5.3-codex-spark"),
+		).toBe(true);
+	});
+
+	it("parses a naive reset stamp with the attributed provider's timezone", async () => {
+		const codex = getBundledModel("openai-codex", "gpt-6.1-sol");
+		if (!codex) throw new Error("Expected bundled openai-codex model gpt-6.1-sol");
+		// A delayed Z.AI-style error settling while the session runs Anthropic:
+		// the naive `reset at` stamp must be read as +08:00 (Z.AI's catalog
+		// policy), not as the active provider's interpretation. Parsing it as
+		// UTC would stretch the stored block by 8 hours.
+		const host = createHost(model, modelRegistry);
+		const recovery = new TurnRecovery(host);
+		const resetAt = new Date(Date.now() + 12 * 3_600_000);
+		const pad = (n: number) => String(n).padStart(2, "0");
+		const naiveStamp = `${resetAt.getUTCFullYear()}-${pad(resetAt.getUTCMonth() + 1)}-${pad(resetAt.getUTCDate())} ${pad(resetAt.getUTCHours())}:${pad(resetAt.getUTCMinutes())}:${pad(resetAt.getUTCSeconds())}`;
+		const message = `429 rate limit exceeded. Your limit will reset at ${naiveStamp}`;
+
+		const asZai = recovery.parseRetryAfterMsFromError(message, "zai");
+		const asActiveAnthropic = recovery.parseRetryAfterMsFromError(message);
+
+		// +08:00 reads the wall clock 8h earlier than UTC: both parse to a
+		// future instant, 8 hours apart, with the Z.AI reading shorter.
+		expect(asZai).toBeDefined();
+		expect(asActiveAnthropic).toBeDefined();
+		expect(asActiveAnthropic! - asZai!).toBeCloseTo(8 * 3_600_000, -4);
+		expect(asZai!).toBeLessThan(12 * 3_600_000);
 	});
 
 	it("allows replay-safe hard fallback and excludes committed text with a configured chain", () => {
