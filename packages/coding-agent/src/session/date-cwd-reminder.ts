@@ -80,11 +80,20 @@ export function createSessionDateCwdReminderJournal(sessionManager: {
 	let session: string | undefined;
 	let leaf: string | null = null;
 	let generation = 0;
-	/** Whether the branch ending at `id` continues the one ending at `ancestor`: a walk of the entries appended since. */
+	/** Placements this journal wrote; any other on the path since the last request came from another writer. */
+	const written = new Set<string>();
+	/**
+	 * Whether the branch ending at `id` continues the one ending at `ancestor` with entries only this
+	 * journal's injector placed reminders in: a walk of the entries appended since. A placement another
+	 * writer appended (a reloaded session another process continued) means turns this injector never sent.
+	 */
 	const continues = (id: string | null, ancestor: string | null): boolean => {
 		if (ancestor === null) return true;
-		for (let cursor = id; cursor !== null; cursor = sessionManager.getEntry(cursor)?.parentId ?? null) {
+		for (let cursor = id; cursor !== null;) {
 			if (cursor === ancestor) return true;
+			const entry = sessionManager.getEntry(cursor);
+			if (entry && placementOfEntry(entry) && !written.has(cursor)) return false;
+			cursor = entry?.parentId ?? null;
 		}
 		return false;
 	};
@@ -96,7 +105,7 @@ export function createSessionDateCwdReminderJournal(sessionManager: {
 			return branch.slice(start).flatMap(entry => placementOfEntry(entry) ?? []);
 		},
 		record: placement => {
-			sessionManager.appendCustomEntry(DATE_CWD_REMINDER_CUSTOM_TYPE, placement);
+			written.add(sessionManager.appendCustomEntry(DATE_CWD_REMINDER_CUSTOM_TYPE, placement));
 		},
 		scope: () => {
 			const id = sessionManager.getSessionId();
