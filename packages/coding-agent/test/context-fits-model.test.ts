@@ -70,6 +70,8 @@ function maintenance(
 		messages: () => agent.state.messages,
 		nonMessageTokenSource: () => ({}),
 		providerSessionState: options.providerSessionState,
+		takeInterruptedTurnResume: () => false,
+		resumeInterruptedTurn: () => {},
 		getContextUsage: ({ contextWindow }: { contextWindow: number }) =>
 			options.usageTokens === undefined
 				? undefined

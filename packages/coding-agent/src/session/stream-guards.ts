@@ -61,6 +61,8 @@ export interface StreamGuardsHost {
 	promptSequence(): number;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
 	schedulePostPromptTask(task: (signal: AbortSignal) => Promise<void>): void;
+	/** Revalidate and prepare recovery only after history replacement, atomically with the continuation claim. */
+	continueAgent(signal: AbortSignal, prepare: () => boolean): Promise<void>;
 	discardAssistantTurn(message: AssistantMessage): void;
 }
 
@@ -170,25 +172,27 @@ export class StreamingEditGuard {
 			if (signal.aborted || this.#host.isDisposed()) return;
 			if (this.#host.promptGeneration() !== generation || this.#host.promptSequence() !== sequence) return;
 			await this.#host.agent.waitForIdle();
-			if (signal.aborted || this.#host.isDisposed()) return;
-			if (this.#host.promptGeneration() !== generation || this.#host.promptSequence() !== sequence) return;
-			const content = prompt.render(streamingEditRecoveryTemplate, { diagnostic });
-			this.#host.agent.appendMessage({
-				role: "custom",
-				customType: STREAMING_EDIT_RECOVERY_TYPE,
-				content,
-				display: false,
-				attribution: "agent",
-				timestamp: Date.now(),
-			});
-			this.#host.sessionManager.appendCustomMessageEntry(STREAMING_EDIT_RECOVERY_TYPE, content, false);
-			this.#host.emitNotice(
-				"info",
-				`Streaming edit preview failed; retrying with the error context (attempt ${attempt}/${STREAMING_EDIT_RECOVERY_LIMIT}).`,
-				STREAMING_EDIT_NOTICE_SOURCE,
-			);
 			try {
-				await this.#host.agent.continue();
+				await this.#host.continueAgent(signal, () => {
+					if (this.#host.promptGeneration() !== generation || this.#host.promptSequence() !== sequence)
+						return false;
+					const content = prompt.render(streamingEditRecoveryTemplate, { diagnostic });
+					this.#host.agent.appendMessage({
+						role: "custom",
+						customType: STREAMING_EDIT_RECOVERY_TYPE,
+						content,
+						display: false,
+						attribution: "agent",
+						timestamp: Date.now(),
+					});
+					this.#host.sessionManager.appendCustomMessageEntry(STREAMING_EDIT_RECOVERY_TYPE, content, false);
+					this.#host.emitNotice(
+						"info",
+						`Streaming edit preview failed; retrying with the error context (attempt ${attempt}/${STREAMING_EDIT_RECOVERY_LIMIT}).`,
+						STREAMING_EDIT_NOTICE_SOURCE,
+					);
+					return true;
+				});
 			} catch (error) {
 				logger.warn("streaming edit recovery continue failed", { error: String(error) });
 			}
@@ -302,32 +306,34 @@ export class LoopGuards {
 		this.#host.schedulePostPromptTask(async signal => {
 			if (signal.aborted || this.#host.isDisposed() || this.#host.promptGeneration() !== generation) return;
 			await this.#host.agent.waitForIdle();
-			if (signal.aborted || this.#host.isDisposed() || this.#host.promptGeneration() !== generation) return;
 			const aborted = this.#host.agent.state.messages.findLast(
 				(message): message is AssistantMessage =>
 					message.role === "assistant" && message.timestamp === targetTimestamp,
 			);
-			if (aborted) this.#host.discardAssistantTurn(aborted);
-			const content = prompt.render(geminiToolReminderTemplate, { count: headerCount });
-			const details = { headers: headerCount };
-			this.#host.agent.appendMessage({
-				role: "custom",
-				customType: GEMINI_TOOL_REMINDER_TYPE,
-				content,
-				display: false,
-				details,
-				attribution: "agent",
-				timestamp: Date.now(),
-			});
-			this.#host.sessionManager.appendCustomMessageEntry(
-				GEMINI_TOOL_REMINDER_TYPE,
-				content,
-				false,
-				details,
-				"agent",
-			);
 			try {
-				await this.#host.agent.continue();
+				await this.#host.continueAgent(signal, () => {
+					if (this.#host.promptGeneration() !== generation) return false;
+					if (aborted) this.#host.discardAssistantTurn(aborted);
+					const content = prompt.render(geminiToolReminderTemplate, { count: headerCount });
+					const details = { headers: headerCount };
+					this.#host.agent.appendMessage({
+						role: "custom",
+						customType: GEMINI_TOOL_REMINDER_TYPE,
+						content,
+						display: false,
+						details,
+						attribution: "agent",
+						timestamp: Date.now(),
+					});
+					this.#host.sessionManager.appendCustomMessageEntry(
+						GEMINI_TOOL_REMINDER_TYPE,
+						content,
+						false,
+						details,
+						"agent",
+					);
+					return true;
+				});
 			} catch (error) {
 				logger.warn("gemini tool-call reminder continue failed", { error: String(error) });
 			}

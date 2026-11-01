@@ -32,6 +32,7 @@ function createGuard(
 		promptSequence: () => 0,
 		emitNotice() {},
 		schedulePostPromptTask() {},
+		continueAgent: async () => {},
 		discardAssistantTurn() {},
 	});
 	return { guard, aborts };

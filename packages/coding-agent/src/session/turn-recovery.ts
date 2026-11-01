@@ -1,6 +1,5 @@
 import {
 	type Agent,
-	AgentBusyError,
 	type AgentMessage,
 	isSyntheticToolResultMessage,
 	type ThinkingLevel,
@@ -14,7 +13,6 @@ import type {
 	Model,
 	ModelUsageHealth,
 	TextContent,
-	ToolChoice,
 	AnthropicFallbackCreditHandle,
 } from "@oh-my-pi/pi-ai";
 import { calculateRateLimitBackoffMs, parseRateLimitReason } from "@oh-my-pi/pi-ai";
@@ -860,17 +858,6 @@ export class TurnRecovery {
 			this.#usageLimitOutcomes.set(message, recorded);
 		}
 		return (await recorded).switchedCredential;
-	}
-
-	/** Prompts after transient overlap with a prior agent run. `onClaimed` fires synchronously
-	 *  right after a successful `agent.prompt` claim (before the run is awaited), letting the
-	 *  caller mark the exact moment its own run went live. */
-	promptAgentWithIdleRetry(
-		messages: AgentMessage[],
-		options?: { toolChoice?: ToolChoice },
-		onClaimed?: () => void,
-	): Promise<void> {
-		return this.#promptAgentWithIdleRetry(messages, options, onClaimed);
 	}
 
 	/** Parses provider retry and rate-limit reset hints into a delay. */
@@ -3303,44 +3290,6 @@ export class TurnRecovery {
 		this.#retryAbortController?.abort();
 		// Note: _retryAttempt is reset in the catch block of _autoRetry
 		this.resolveRetry();
-	}
-
-	async #promptAgentWithIdleRetry(
-		messages: AgentMessage[],
-		options?: { toolChoice?: ToolChoice },
-		onClaimed?: () => void,
-	): Promise<void> {
-		const deadline = Date.now() + 30_000;
-		for (;;) {
-			// A claim whose synchronous prefix throws (busy agent, missing
-			// model) returns an already-rejected promise. Probe for that
-			// before firing `onClaimed`: a busy-retry parked behind an
-			// autonomous run must not report that run's streaming as ours
-			// going live. The rejection handler rethrows, so the error
-			// still surfaces at the await below.
-			let claimFailed = false;
-			try {
-				const claim = this.#host.agent.prompt(messages, options).then(undefined, error => {
-					claimFailed = true;
-					throw error;
-				});
-				// One microtask turn: an already-rejected promise's reaction
-				// job is queued ahead of this await's continuation, so
-				// `claimFailed` is settled by the time we resume.
-				await Promise.resolve();
-				if (!claimFailed) onClaimed?.();
-				await claim;
-				return;
-			} catch (err) {
-				if (!(err instanceof AgentBusyError)) {
-					throw err;
-				}
-				if (Date.now() >= deadline) {
-					throw new Error("Timed out waiting for prior agent run to finish before prompting.");
-				}
-				await this.#host.agent.waitForIdle();
-			}
-		}
 	}
 
 	/** Whether auto-retry is currently in progress */

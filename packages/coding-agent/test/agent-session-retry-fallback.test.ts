@@ -6515,6 +6515,102 @@ describe("AgentSession retry fallback", () => {
 		expect(session.model?.provider).toBe(fallbackModel.provider);
 		expect(session.model?.id).toBe(fallbackModel.id);
 	});
+	it("does not restore a fallback primary when a queued retry expires during idle compaction", async () => {
+		const primary = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallback = getBundledModel("openai", "gpt-4o-mini");
+		if (!primary || !fallback) throw new Error("Expected bundled test models");
+		const entered = Promise.withResolvers<void>();
+		const releaseCompaction = Promise.withResolvers<void>();
+		const retryTick = Promise.withResolvers<void>();
+		const runtime = new ExtensionRuntime();
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.on("session_before_compact", async event => {
+					entered.resolve();
+					await releaseCompaction.promise;
+					return {
+						compaction: {
+							summary: "compacted",
+							firstKeptEntryId: event.preparation.firstKeptEntryId,
+							tokensBefore: event.preparation.tokensBefore,
+							details: {},
+						},
+					};
+				});
+			},
+			tempDir.path(),
+			new EventBus(),
+			runtime,
+			"queued-retry-during-maintenance",
+		);
+		const sessionManager = SessionManager.inMemory(tempDir.path());
+		const previous: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "previous answer" }],
+			api: fallback.api,
+			provider: fallback.provider,
+			model: fallback.id,
+			stopReason: "stop",
+			usage: emptyUsage(),
+			timestamp: Date.now(),
+		};
+		sessionManager.appendMessage({ role: "user", content: "previous task", timestamp: Date.now() });
+		sessionManager.appendMessage(previous);
+		sessionManager.appendMessage({ role: "user", content: "failed request", timestamp: Date.now() });
+		sessionManager.appendMessage({
+			...previous,
+			content: [],
+			stopReason: "error",
+			errorMessage: "deliberate failure",
+		});
+		const mock = createMockModel({ handler: { content: ["unexpected retry"] } });
+		const agent = new Agent({
+			initialState: { model: fallback, systemPrompt: ["Test"], tools: [], messages: [] },
+			getApiKey: () => "test-key",
+			streamFn: mock.stream,
+			convertToLlm,
+		});
+		const settings = Settings.isolated({
+			"compaction.keepRecentTokens": 1,
+			"compaction.autoContinue": false,
+			"compaction.methodOrder": ["soft"],
+			"retry.fallbackRevertPolicy": "cooldown-expiry",
+		});
+		const primarySelector = `${primary.provider}/${primary.id}`;
+		settings.setModelRole("default", primarySelector);
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+			extensionRunner: new ExtensionRunner([extension], runtime, tempDir.path(), sessionManager, modelRegistry),
+			initialRetryFallback: { role: "default", originalSelector: primarySelector, originalThinkingLevel: undefined },
+		});
+		agent.replaceMessages(session.buildDisplaySessionContext().messages);
+		const wait = scheduler.wait.bind(scheduler);
+		vi.spyOn(scheduler, "wait").mockImplementation((delay, options) =>
+			delay === 1 ? retryTick.promise : wait(delay, options),
+		);
+		expect(await session.retry()).toBe(true);
+		const compacted = session.runIdleCompaction();
+		await entered.promise;
+		try {
+			expect(session.model?.id).toBe(fallback.id);
+			retryTick.resolve();
+			await scheduler.yield();
+			// A skipped retry must not mutate the live model before the final raw-start check.
+			expect(session.model?.id).toBe(fallback.id);
+			expect(mock.calls).toHaveLength(0);
+		} finally {
+			retryTick.resolve();
+			releaseCompaction.resolve();
+			await compacted;
+			await session.waitForIdle();
+		}
+		expect(session.model?.id).toBe(fallback.id);
+		expect(mock.calls).toHaveLength(0);
+	});
+
 	it("suppresses cooled selectors and lazily reverts to the role primary after cooldown expiry", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");

@@ -453,6 +453,10 @@ export interface SessionMaintenanceHost {
 		terminalTextAnswer: boolean;
 		suppressContinuation: boolean;
 	}): boolean;
+	/** Transfer a continuation owed by an earlier manual pass to the next pass. */
+	takeInterruptedTurnResume(): boolean;
+	/** Report an interrupted turn that a completed manual pass may now resume. */
+	resumeInterruptedTurn(generation: number): void;
 	persistTurnMessagesForMidRunCompaction(context: AgentTurnEndContext | undefined): Promise<boolean>;
 	findLastAssistantMessage(): AssistantMessage | undefined;
 	disconnectFromAgent(): void;
@@ -553,11 +557,9 @@ export class SessionMaintenance {
 	#handoffCleanup: Promise<void> | undefined;
 	/** Resolves after an idle pass finishes rewriting history; holds new prompt setup outside that pass. */
 	#idleCompactionCleanup: Promise<void> | undefined;
-	/** Dispatches holding an unreleased claim from {@link waitForMaintenanceCleanup}/{@link claimPendingResume}; any one may supersede the interrupted-turn resume. */
-	#promptsAwaitingCleanup = 0;
-	/** Interrupted-turn resume withheld from a compaction `finally` because a claim was open; consumed by `release(false)`, {@link noteTurnStarted}, or the next manual pass. */
-	#deferredResumeGeneration: number | undefined;
 	#autoCompactionAbortController: AbortController | undefined;
+	/** Includes every automatic rewrite, even pre-turn and mid-turn passes that do not own an idle timer. */
+	#automaticCompactionCleanup: Promise<void> | undefined;
 	/**
 	 * Live tool-loop contexts parked after mid-turn maintenance hit a no-progress
 	 * dead end. Membership suppresses the repeated rescue + warning while no cut
@@ -1210,11 +1212,9 @@ export class SessionMaintenance {
 		// in this pass, so an interrupted or inherited turn resumes on them like on
 		// a commit; a hook cancel or summarizer failure does not resume.
 		let rejectedAsNoOp = false;
-		// Set when this manual pass aborted a live turn — or inherited a resume an
-		// earlier pass withheld for a still-parked prompt (see
-		// `waitForManualCompactionCleanup`): the turn is resumed once the summary
-		// lands (see the `finally`). Generation is captured after the abort bump so
-		// a reset/new-session in between skips the resume as stale. This pass's
+		// Set when this pass aborted a live turn or inherited an owed continuation.
+		// Generation is captured after the abort bump so a reset/new-session
+		// in between skips the resume as stale. This pass's
 		// options gate both (a `suppressContinuation` caller owns whatever turn
 		// follows, e.g. plan-mode approve-and-compact); its outcome gates only the
 		// turn it interrupted itself — see the `finally`.
@@ -1235,11 +1235,7 @@ export class SessionMaintenance {
 		if (ownsCompactionController) {
 			this.#compactionAbortController = compactionAbortController;
 			this.#manualCompactionCleanup = manualCompactionCleanup?.promise;
-			// A resume still withheld from an earlier pass belongs to this pass now:
-			// the earlier pass's abort already bumped the generation it captured, so
-			// re-decide with this pass's generation instead of stranding the turn.
-			inheritedResume = this.#deferredResumeGeneration !== undefined;
-			this.#deferredResumeGeneration = undefined;
+			inheritedResume = this.#host.takeInterruptedTurnResume();
 		}
 		// A manual pass supersedes any background speculation; running both would
 		// double-bill the summarizer and race the commit.
@@ -1661,26 +1657,18 @@ export class SessionMaintenance {
 				// (and any steer/follow-up that arrived mid-compaction — async IRC, an
 				// `xd://` mount notice, an SDK/RPC steer) was suppressed while disconnected
 				// (issue #5800). Unlike `/new`/switchSession, compaction preserves the agent
-				// queues, so nothing else resumes them: re-drain now that the listener is back
-				// and `isCompacting` is false, or the queued turn hangs until the next prompt.
-				this.#host.drainStrandedQueuedMessages();
+				// queues, so nothing else resumes them: clear the startup barrier before
+				// re-draining, or this recovered work is itself rejected as superseded.
 				if (this.#manualCompactionCleanup === manualCompactionCleanup?.promise) {
 					this.#manualCompactionCleanup = undefined;
 				}
 				manualCompactionCleanup?.resolve();
+				this.#host.drainStrandedQueuedMessages();
 				// An inherited resume was earned by the pass that committed it; this
 				// pass's own outcome (hook cancel, summarizer failure) only decides the
 				// turn it interrupted itself, so the inherited one stays owed.
 				if ((compactionCommitted || rejectedAsNoOp || inheritedResume) && resumeInterruptedTurn) {
-					if (this.#promptsAwaitingCleanup > 0) {
-						// A prompt parked on the barrier just resolved is the user's next
-						// intent and takes the session instead (its continuation is a
-						// microtask away). It reports back via `release`: a turn drops the
-						// resume, a locally handled command hands it back.
-						this.#deferredResumeGeneration = interruptedTurnGeneration;
-					} else {
-						this.#scheduleInterruptedTurnResume(interruptedTurnGeneration);
-					}
+					this.#host.resumeInterruptedTurn(interruptedTurnGeneration);
 				}
 			}
 		}
@@ -1849,6 +1837,8 @@ export class SessionMaintenance {
 		this.#autoCompactionAbortController?.abort();
 		const controller = new AbortController();
 		this.#autoCompactionAbortController = controller;
+		const cleanup = Promise.withResolvers<void>();
+		this.#automaticCompactionCleanup = cleanup.promise;
 		const generation = this.#host.promptGeneration();
 		const suppressContinuation = options.suppressContinuation === true;
 		const shouldAutoContinue =
@@ -2030,7 +2020,9 @@ export class SessionMaintenance {
 		} finally {
 			if (this.#autoCompactionAbortController === controller) {
 				this.#autoCompactionAbortController = undefined;
+				this.#automaticCompactionCleanup = undefined;
 			}
+			cleanup.resolve();
 		}
 	}
 
@@ -2080,92 +2072,16 @@ export class SessionMaintenance {
 		return manualCompactionCleanup;
 	}
 
-	/**
-	 * Same continuation the context-full path uses: a queued steer/follow-up
-	 * (drained in compact()'s `finally`) drives the resume, otherwise the
-	 * auto-continue nudge does. `terminalTextAnswer` is false by construction —
-	 * the turn was cut mid-run, so there is no finished answer to preserve.
-	 */
-	#scheduleInterruptedTurnResume(generation: number): void {
-		this.#host.scheduleCompactionContinuation({
-			generation,
-			autoContinue: true,
-			terminalTextAnswer: false,
-			suppressContinuation: false,
-		});
-	}
-
-	/**
-	 * Park prompt setup until idle compaction, manual compaction, or manual handoff
-	 * finishes rewriting history. A prompt parked by a manual pass supersedes its
-	 * interrupted-turn resume; local commands and failed dispatches release that
-	 * claim so the interrupted turn is not stranded.
-	 *
-	 * Returns `undefined` when neither maintenance pass nor a resume decision is
-	 * open. Otherwise the caller MUST invoke the returned `release` after dispatch.
-	 */
-	async waitForMaintenanceCleanup(): Promise<((startedTurn: boolean) => void) | undefined> {
-		while (this.#idleCompactionCleanup) await this.#idleCompactionCleanup;
-		const cleanup = this.#manualCompactionCleanup ?? this.#handoffCleanup;
-		// No compaction to wait for, but an earlier parked prompt is still settling:
-		// this prompt competes for the same session, so it takes part in the
-		// resume decision (a turn it starts must not be followed by the stale nudge).
-		if (!cleanup) return this.claimPendingResume();
-		const release = this.#claimResume();
-		await cleanup;
-		return release;
-	}
-
-	/**
-	 * The active idle or manual compaction's history-replacement barrier, if any.
-	 * Idle turn starters wait for it before reading the agent's messages; the
-	 * common path adds no await. Manual compaction resolves it after reconnecting
-	 * the persistence subscription.
-	 */
-	waitForContextReplacement(): Promise<void> | undefined {
-		return this.#manualCompactionCleanup ?? this.#idleCompactionCleanup;
-	}
-
-	/**
-	 * Register a dispatch that may start a turn while an interrupted-turn resume
-	 * decision is open (a prompt parked by {@link waitForMaintenanceCleanup}
-	 * has not released yet). `undefined` when no decision is open.
-	 *
-	 * The caller MUST invoke the returned `release` once the dispatch settles.
-	 * `startedTurn: true` (dispatched or queued) drops the deferred resume for
-	 * good; `false` (an extension/custom command handled locally, a pre-dispatch
-	 * throw) hands it back so the interrupted work is not stranded, once no other
-	 * participant can still claim the session.
-	 */
-	claimPendingResume(): ((startedTurn: boolean) => void) | undefined {
-		return this.#promptsAwaitingCleanup > 0 ? this.#claimResume() : undefined;
-	}
-
-	#claimResume(): (startedTurn: boolean) => void {
-		this.#promptsAwaitingCleanup++;
-		let released = false;
-		return (startedTurn: boolean): void => {
-			if (released) return;
-			released = true;
-			this.#promptsAwaitingCleanup--;
-			if (startedTurn) {
-				this.#deferredResumeGeneration = undefined;
-				return;
-			}
-			if (this.#promptsAwaitingCleanup > 0 || this.#deferredResumeGeneration === undefined) return;
-			const generation = this.#deferredResumeGeneration;
-			this.#deferredResumeGeneration = undefined;
-			this.#scheduleInterruptedTurnResume(generation);
-		};
-	}
-
-	/**
-	 * A turn started, by whatever path (a released prompt, an extension's
-	 * `sendMessage({ triggerTurn })`, the queued-message drain). It owns the
-	 * session now, so a resume still withheld for a parked prompt is moot.
-	 */
-	noteTurnStarted(): void {
-		this.#deferredResumeGeneration = undefined;
+	/** History is being replaced; resolves only after its subscription and context are ready for a new run. */
+	get historyReplacement(): Promise<void> | undefined {
+		// Mid-turn automatic maintenance rewrites the current loop in place. Its queued
+		// deliveries must remain usable by that loop, rather than wait on their owner.
+		return (
+			this.#idleCompactionCleanup ??
+			this.#manualCompactionCleanup ??
+			this.#handoffCleanup ??
+			(this.#host.agent.state.isStreaming ? undefined : this.#automaticCompactionCleanup)
+		);
 	}
 
 	/** Cancel only automatic maintenance while preserving a manual compaction. */
@@ -5204,6 +5120,8 @@ export class SessionMaintenance {
 		const autoCompactionAbortController = new AbortController();
 		this.#autoCompactionAbortController = autoCompactionAbortController;
 		const autoCompactionSignal = autoCompactionAbortController.signal;
+		const cleanup = Promise.withResolvers<void>();
+		this.#automaticCompactionCleanup = cleanup.promise;
 
 		let compactionCommitted = false;
 		try {
@@ -6104,7 +6022,9 @@ export class SessionMaintenance {
 		} finally {
 			if (this.#autoCompactionAbortController === autoCompactionAbortController) {
 				this.#autoCompactionAbortController = undefined;
+				this.#automaticCompactionCleanup = undefined;
 			}
+			cleanup.resolve();
 		}
 		return COMPACTION_CHECK_NONE;
 	}
@@ -6337,6 +6257,8 @@ export class SessionMaintenance {
 		const controller = new AbortController();
 		this.#autoCompactionAbortController = controller;
 		const signal = controller.signal;
+		const cleanup = Promise.withResolvers<void>();
+		this.#automaticCompactionCleanup = cleanup.promise;
 		try {
 			await this.#emitLifecycleEvent({ type: "auto_compaction_start", reason, action }, false);
 			const result = await this.#host.shake("elide", { config: DEFAULT_SHAKE_CONFIG, signal });
@@ -6490,7 +6412,9 @@ export class SessionMaintenance {
 		} finally {
 			if (this.#autoCompactionAbortController === controller) {
 				this.#autoCompactionAbortController = undefined;
+				this.#automaticCompactionCleanup = undefined;
 			}
+			cleanup.resolve();
 		}
 	}
 

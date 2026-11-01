@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
+import { scheduler } from "node:timers/promises";
 import { Agent, type AgentMessage, type StreamFn } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, Model, ToolCall } from "@oh-my-pi/pi-ai";
@@ -17,7 +18,6 @@ import { SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { SessionMaintenance } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
@@ -176,19 +176,7 @@ describe("AgentSession handoff", () => {
 		const mock = createMockModel({ responses: [{ content: ["post-handoff answer"] }] });
 		session.agent.streamFn = mock.stream;
 		session.agent.getApiKey = () => "test-key";
-		const enteredAdmission = Promise.withResolvers<void>();
-		let admissionSettled = false;
-		const waitForCleanup = SessionMaintenance.prototype.waitForMaintenanceCleanup;
-		vi.spyOn(SessionMaintenance.prototype, "waitForMaintenanceCleanup").mockImplementation(
-			function (this: SessionMaintenance) {
-				const waiting = waitForCleanup.call(this);
-				enteredAdmission.resolve();
-				void waiting.then(() => {
-					admissionSettled = true;
-				});
-				return waiting;
-			},
-		);
+		let promptSettled = false;
 		vi.spyOn(compactionModule, "generateHandoffFromContext").mockImplementation(() => {
 			started.resolve();
 			return finish.promise;
@@ -197,11 +185,13 @@ describe("AgentSession handoff", () => {
 		const handoff = session.handoff();
 		expect(session.isCompacting).toBe(true);
 		await started.promise;
-		const prompt = session.prompt("next task");
-		await enteredAdmission.promise;
-		await Promise.resolve();
-		await Promise.resolve();
-		expect(admissionSettled).toBe(false);
+		const prompt = session.prompt("next task").then(result => {
+			promptSettled = true;
+			return result;
+		});
+		expect(session.hasAdmittedSubmission).toBe(true);
+		await scheduler.yield();
+		expect(promptSettled).toBe(false);
 		expect(session.isStreaming).toBe(false);
 		expect(mock.calls).toHaveLength(0);
 
