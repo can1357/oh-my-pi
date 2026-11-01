@@ -3,7 +3,11 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { SessionManager, SessionMoveRefusedError } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { writeTerminalBreadcrumb } from "@oh-my-pi/pi-coding-agent/session/session-paths";
-import { FileSessionStorage, type WriteTextAtomicOptions } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import {
+	FileSessionStorage,
+	tryAcquireSessionLease,
+	type WriteTextAtomicOptions,
+} from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { TempDir, getConfigRootDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import { makeAssistantMessage } from "./helpers";
 
@@ -222,4 +226,108 @@ describe("unreturned session manager cleanup", () => {
 			}
 		});
 	}
+});
+
+describe("aborted internal managers never publish during disposal", () => {
+	for (const operation of ["persistCopy", "forkFrom", "forkFrom-stat"] as const) {
+		it(`does not materialize an orphan after ${operation} fails`, async () => {
+			const { manager: source, file } = seed();
+			await source.close();
+			const destination = tempDir();
+			class AbortStorage extends TrackingStorage {
+				sourceStats = 0;
+				override statSync(target: string) {
+					if (operation === "forkFrom-stat" && target === file && ++this.sourceStats > 1)
+						throw Object.assign(new Error("ENOENT: source disappeared"), { code: "ENOENT" });
+					return super.statSync(target);
+				}
+				override async writeLinesAtomic(): Promise<void> {
+					throw Object.assign(new Error("EIO: atomic stage failed"), { code: "EIO" });
+				}
+			}
+			const storage = new AbortStorage();
+			const failure =
+				operation === "persistCopy"
+					? source.persistCopy({ sessionDir: destination, suppressBreadcrumb: true }, storage)
+					: SessionManager.forkFrom(file, source.getCwd(), destination, storage, {
+							copyArtifacts: false,
+							suppressBreadcrumb: true,
+						});
+			await expect(failure).rejects.toThrow(operation === "forkFrom-stat" ? "ENOENT" : "EIO");
+			expect(storage.held.size).toBe(0);
+			expect(fs.readdirSync(destination).filter(name => name.endsWith(".jsonl"))).toEqual([]);
+			source.releaseRetainedEntries();
+		});
+	}
+
+	it("leaves a malformed live source untouched when openRelocated is refused", async () => {
+		const { manager: source, file } = seed();
+		const id = source.getSessionId();
+		const cwd = source.getCwd();
+		await source.close();
+		source.releaseRetainedEntries();
+		fs.appendFileSync(file, '{"type":"message","torn":');
+		const before = fs.readFileSync(file, "utf8");
+		const filesBefore = fs.readdirSync(path.dirname(file)).sort();
+		const owner = tryAcquireSessionLease(id);
+		if (!owner) throw new Error("Expected external ownership lease");
+		try {
+			await expect(SessionManager.openRelocated(file, cwd, tempDir(), tempDir())).rejects.toBeInstanceOf(
+				SessionMoveRefusedError,
+			);
+			expect(fs.readFileSync(file, "utf8")).toBe(before);
+			expect(fs.readdirSync(path.dirname(file)).sort()).toEqual(filesBefore);
+		} finally {
+			owner.release();
+		}
+	});
+
+	it("waits for artifacts copied by a deferred sealed close sibling move", async () => {
+		class DeferredStorage extends TrackingStorage {
+			readonly defersSyncPublish = true;
+		}
+		const storage = new DeferredStorage();
+		const { manager: original, file } = seed(storage);
+		await original.flush();
+		const artifacts = original.getArtifactsDir()!;
+		fs.mkdirSync(artifacts, { recursive: true });
+		fs.writeFileSync(path.join(artifacts, "probe.txt"), "durable artifact");
+		await original.close();
+		original.releaseRetainedEntries();
+		const manager = await SessionManager.open(file, undefined, storage);
+		storage.deniedId = manager.getSessionId();
+		const naming = manager.setTaskPromptCacheKey("copy-at-close");
+		manager.seal();
+		await naming;
+		const started = Promise.withResolvers<void>();
+		const gate = Promise.withResolvers<void>();
+		const copy = fs.promises.cp;
+		const blockedCopy = spyOn(fs.promises, "cp").mockImplementation(
+			async (...args: Parameters<typeof fs.promises.cp>) => {
+				started.resolve();
+				await gate.promise;
+				await copy(...args);
+			},
+		);
+		let closed = false;
+		const closing = manager.close().then(() => {
+			closed = true;
+		});
+		try {
+			await started.promise;
+			// Let every close continuation runnable before the artifact gate settle.
+			const turn = Promise.withResolvers<void>();
+			setImmediate(turn.resolve);
+			await turn.promise;
+			expect(closed).toBe(false);
+			gate.resolve();
+			await closing;
+			expect(fs.readFileSync(path.join(manager.getArtifactsDir()!, "probe.txt"), "utf8")).toBe("durable artifact");
+		} finally {
+			gate.resolve();
+			blockedCopy.mockRestore();
+			await closing;
+			manager.releaseRetainedEntries();
+		}
+	});
 });

@@ -804,6 +804,7 @@ interface SessionManagerStateSnapshot {
 	hasTitleSlot: boolean;
 	onDisk: boolean;
 	needsRewrite: boolean;
+	tailRewritePending: boolean;
 	draftOnlySessionCleanupArmed: boolean;
 	fallbackRuntimeOnly: boolean;
 	/** Stashed sibling family candidate; moveTo drops it, so a rollback must restore it. */
@@ -1062,6 +1063,8 @@ export class SessionManager {
 	 * when the disk, and so swap, has none to spare.
 	 */
 	#unappendedTail: SessionEntry[] = [];
+	/** A refused append still needs a durable full rewrite after leaving plain-tail mode. */
+	#tailRewritePending = false;
 	/** The latest title slot update a queued title change still owes the file, applied once the queue lands. */
 	#pendingTitleUpdate: SessionTitleUpdate | undefined;
 	/** FIFO reservation for atomic batches and authoritative recovery. */
@@ -1471,6 +1474,7 @@ export class SessionManager {
 		this.#pendingTitleUpdate = undefined;
 		this.#fileIsCurrent = false;
 		this.#rewriteRequired = true;
+		this.#tailRewritePending = true;
 	}
 
 	/** An append the volume refused for space; the file writer has already rolled its partial bytes back. */
@@ -1536,8 +1540,12 @@ export class SessionManager {
 		if (this.#entriesReleased) return;
 		if (this.#unappendedTail.length > 0 || this.#pendingTitleUpdate) {
 			if (!this.#appendUnappendedTail(syncTitle, allowSealed)) throw this.#diskFailure;
-		} else if (!allowSealed || this.#storage.defersSyncPublish) return;
-		if (this.#rewriteRequired || (allowSealed && !this.#fileIsCurrent && this.#shouldHaveSessionFile())) {
+		} else if (this.#storage.defersSyncPublish || (!allowSealed && !this.#tailRewritePending)) return;
+		if (
+			this.#tailRewritePending ||
+			this.#rewriteRequired ||
+			(allowSealed && !this.#fileIsCurrent && this.#shouldHaveSessionFile())
+		) {
 			this.#rewriteSynchronously(allowSealed);
 			if (this.#diskFailure) throw this.#diskFailure;
 		}
@@ -1780,6 +1788,7 @@ export class SessionManager {
 
 	#recordFullRewrite({ bytes, stamp }: Pick<SessionFileBody, "bytes" | "stamp">): void {
 		this.#expectedDiskSize = bytes;
+		if (!this.#storage.defersSyncPublish) this.#tailRewritePending = false;
 		if (stamp.entries === this.#entries && stamp.entryCount === this.#entries.length) {
 			this.#prospectiveDiskSize = bytes;
 		} else {
@@ -1960,6 +1969,7 @@ export class SessionManager {
 						this.#rewriteSynchronously();
 						return;
 					}
+					this.#tailRewritePending = false;
 					this.#clearDiskError();
 					if (!this.#sessionFileRelocating || targetPath === this.#sessionFile) {
 						this.#fileIsCurrent = true;
@@ -2361,6 +2371,7 @@ export class SessionManager {
 		this.#index.clear();
 		this.#fileIsCurrent = false;
 		this.#rewriteRequired = false;
+		this.#tailRewritePending = false;
 		this.#loadedMalformedRecords = 0;
 		this.#forceFileCreation = false;
 		this.#draftOnlySessionCleanupArmed = false;
@@ -2563,6 +2574,8 @@ export class SessionManager {
 			onDisk: this.#fileIsCurrent && this.#unappendedTail.length === 0 && !this.#pendingTitleUpdate,
 			needsRewrite:
 				this.#rewriteRequired || this.#unappendedTail.length > 0 || this.#pendingTitleUpdate !== undefined,
+			tailRewritePending:
+				this.#tailRewritePending || this.#unappendedTail.length > 0 || this.#pendingTitleUpdate !== undefined,
 			draftOnlySessionCleanupArmed: this.#draftOnlySessionCleanupArmed,
 			fallbackRuntimeOnly: this.#fallbackRuntimeOnly,
 			taskSiblingCandidate: this.#taskSiblingCandidate,
@@ -2586,11 +2599,13 @@ export class SessionManager {
 		const clone = new SessionManager(this.#cwd, this.#sessionDir, persist, this.#storage);
 		clone.#suppressBreadcrumb = true;
 		clone.restoreState(this.captureState());
-		if (persist && (this.#unappendedTail.length > 0 || this.#pendingTitleUpdate)) {
+		if (persist && (this.#unappendedTail.length > 0 || this.#pendingTitleUpdate || this.#tailRewritePending)) {
 			// Both managers can publish this tail now. Reconcile through size-checked rewrites,
 			// never append lines a persistent clone may already have written.
 			this.#fileIsCurrent = false;
 			this.#rewriteRequired = true;
+			this.#tailRewritePending = true;
+			clone.#tailRewritePending = true;
 		}
 		if (persist && !this.#persist) clone.#prospectiveDiskSize = this.#estimateBodyBytes();
 		if (!persist) {
@@ -2598,6 +2613,7 @@ export class SessionManager {
 			clone.#expectedDiskSize = null;
 			clone.#fileIsCurrent = false;
 			clone.#rewriteRequired = false;
+			clone.#tailRewritePending = false;
 			clone.#forceFileCreation = false;
 		}
 		return clone;
@@ -2621,6 +2637,7 @@ export class SessionManager {
 		this.#prospectiveDiskSize = snapshot.prospectiveDiskSize;
 		this.#fileIsCurrent = snapshot.onDisk;
 		this.#rewriteRequired = snapshot.needsRewrite;
+		this.#tailRewritePending = this.#persist && snapshot.tailRewritePending;
 		this.#forceFileCreation = snapshot.onDisk;
 		this.#draftOnlySessionCleanupArmed = snapshot.draftOnlySessionCleanupArmed;
 		this.#fallbackRuntimeOnly = snapshot.fallbackRuntimeOnly;
@@ -2767,6 +2784,7 @@ export class SessionManager {
 		this.#hasTitleSlot = titleSlot !== undefined;
 		this.#fileIsCurrent = true;
 		this.#rewriteRequired = migrated || loaded.malformedRecords > 0;
+		this.#tailRewritePending = false;
 		this.#loadedMalformedRecords = loaded.malformedRecords;
 		this.#forceFileCreation = true;
 		this.#artifactManager = null;
@@ -3350,6 +3368,7 @@ export class SessionManager {
 				{ ignorePriorError: true },
 			).catch(() => undefined);
 		}
+		await this.#pendingArtifactCopy?.done;
 		if (this.#closeFailure === this.#diskFailure && !this.#rewriteRequired) this.#clearDiskError();
 		if (this.#diskFailure) throw this.#diskFailure;
 		// A failed close retains ownership so the same manager can retry safely.
@@ -3360,10 +3379,19 @@ export class SessionManager {
 
 	/** Dispose an internal manager that cannot be returned or retried after a failed operation. */
 	async #disposeAfterFailure(): Promise<void> {
+		this.seal();
+		this.#entries = [];
+		this.#unappendedTail = [];
+		this.#pendingTitleUpdate = undefined;
+		this.#rewriteRequired = false;
+		this.#tailRewritePending = false;
+		this.#forceFileCreation = false;
+		this.#entriesReleased = true;
 		try {
-			await this.close();
-		} catch {
-			// The caller reports the original failure, not cleanup's secondary write failure.
+			await this.#diskTail.catch(() => undefined);
+			await this.#closeWriterHandle().catch(() => undefined);
+			await this.#pendingArtifactCopy?.done;
+			await this.#storage.drain().catch(() => undefined);
 		} finally {
 			this.#sessionClaim?.release?.();
 			this.#sessionClaim = undefined;
@@ -3409,12 +3437,14 @@ export class SessionManager {
 	 */
 	releaseRetainedEntries(): void {
 		this.seal();
-		if (this.#diskFailure || this.#unappendedTail.length > 0 || this.#pendingTitleUpdate) return;
+		if (this.#diskFailure || this.#tailRewritePending || this.#unappendedTail.length > 0 || this.#pendingTitleUpdate)
+			return;
 		this.#entries = [];
 		this.#index.clear();
 		this.#inMemoryArtifacts = null;
 		this.#closeWriterEventually();
 		this.#unappendedTail = [];
+		this.#tailRewritePending = false;
 		this.#pendingTitleUpdate = undefined;
 		this.#entriesReleased = true;
 	}
@@ -4117,6 +4147,8 @@ export class SessionManager {
 		this.#fileIsCurrent = false;
 		this.#rewriteRequired = true;
 		if (!this.#persist || !this.#sessionFile) return;
+		this.#drainUnappendedTail();
+		if (this.#fileIsCurrent && !this.#rewriteRequired) return;
 		await this.#rewriteAtomically();
 	}
 
@@ -4535,6 +4567,7 @@ export class SessionManager {
 
 		this.#header = header;
 		this.#entries = keptEntries;
+		this.#tailRewritePending = false;
 		this.#prospectiveDiskSize = branchSize;
 		this.#sessionId = newSessionId;
 		this.#taskSiblingCandidate = undefined;

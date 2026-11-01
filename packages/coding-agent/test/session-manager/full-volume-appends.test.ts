@@ -223,6 +223,140 @@ describe("session persistence on a full volume", () => {
 		});
 	}
 
+	for (const finish of [
+		"flush",
+		"flushSync",
+		"newSession",
+		"setSessionFile",
+		"fork",
+		"createBranchedSession",
+	] as const) {
+		it(`drains a shared queued tail before a clone ${finish} without another append`, async () => {
+			const { manager, sessionFile } = newSession("@pi-full-volume-clone-drain-");
+			const leaf = manager.appendMessage(userMessage("before"));
+			appendWhileFull(manager, "queued");
+			const clone = manager.cloneCurrentSession({ persist: true });
+			try {
+				switch (finish) {
+					case "flush":
+						await clone.flush();
+						break;
+					case "flushSync":
+						clone.flushSync();
+						break;
+					case "newSession":
+						await clone.newSession();
+						break;
+					case "setSessionFile":
+						await clone.setSessionFile(sessionFile);
+						break;
+					case "fork":
+						await clone.fork();
+						break;
+					case "createBranchedSession":
+						clone.createBranchedSession(leaf);
+						break;
+				}
+				expect(usersOnDisk(sessionFile)).toEqual(["before", "queued"]);
+			} finally {
+				await clone.close();
+				await manager.close();
+			}
+		});
+	}
+
+	it("preserves a tail rewrite obligation through another persistent clone", async () => {
+		const { manager, sessionFile } = newSession("@pi-full-volume-clone-snapshot-");
+		appendWhileFull(manager, "queued");
+		const clone = manager.cloneCurrentSession({ persist: true });
+		const next = clone.cloneCurrentSession({ persist: true });
+		try {
+			await next.flush();
+			expect(usersOnDisk(sessionFile)).toEqual(["queued"]);
+			await manager.flush();
+			await clone.flush();
+			expect(usersOnDisk(sessionFile)).toEqual(["queued"]);
+		} finally {
+			await next.close();
+			await clone.close();
+			await manager.close();
+		}
+	});
+
+	for (const finish of [
+		"flush",
+		"flushSync",
+		"rewriteEntries",
+		"newSession",
+		"setSessionFile",
+		"fork",
+		"createBranchedSession",
+	] as const) {
+		it(`retries an abandoned queued tail before ${finish} after a failed full-volume drain`, async () => {
+			const { manager, sessionFile } = newSession("@pi-full-volume-abandoned-retry-");
+			const id = manager.appendCustomEntry("mutable", { value: "old" });
+			appendWhileFull(manager, "queued");
+			const leaf = manager.getLeafId();
+			const entry = manager.getEntry(id);
+			if (entry?.type !== "custom" || !leaf) throw new Error("Expected mutable entry and leaf");
+			entry.data = { value: "edited" };
+			const rewrites = spyOnWholeFileRewrites();
+			for (const rewrite of rewrites)
+				rewrite.mockImplementation(() => {
+					throw fsError("ENOSPC");
+				});
+			try {
+				await expect(manager.rewriteEntries()).rejects.toThrow("ENOSPC");
+				await expect(manager.flush()).rejects.toThrow("ENOSPC");
+				for (const rewrite of rewrites) rewrite.mockRestore();
+				switch (finish) {
+					case "flush":
+						await manager.flush();
+						break;
+					case "flushSync":
+						manager.flushSync();
+						break;
+					case "rewriteEntries":
+						await manager.rewriteEntries();
+						break;
+					case "newSession":
+						await manager.newSession();
+						break;
+					case "setSessionFile":
+						await manager.setSessionFile(sessionFile);
+						break;
+					case "fork":
+						await manager.fork();
+						break;
+					case "createBranchedSession":
+						manager.createBranchedSession(leaf);
+						break;
+				}
+				expect(fs.readFileSync(sessionFile, "utf8")).toContain('"value":"edited"');
+				expect(usersOnDisk(sessionFile)).toEqual(["queued"]);
+			} finally {
+				for (const rewrite of rewrites) rewrite.mockRestore();
+				await manager.close();
+			}
+		});
+	}
+
+	it("does not turn a lazy malformed-tail repair into an eager flush rewrite", async () => {
+		const { manager, sessionFile } = newSession("@pi-full-volume-lazy-repair-");
+		await manager.close();
+		manager.releaseRetainedEntries();
+		fs.appendFileSync(sessionFile, '{"type":"message","torn":');
+		const before = fs.readFileSync(sessionFile, "utf8");
+		const reopened = await SessionManager.open(sessionFile);
+		try {
+			await reopened.flush();
+			expect(fs.readFileSync(sessionFile, "utf8")).toBe(before);
+		} finally {
+			await reopened.close();
+			reopened.releaseRetainedEntries();
+		}
+	});
+
 	for (const finish of ["flush", "close"] as const) {
 		it(`retains an in-place rewrite after a queued append until ${finish} recovers`, async () => {
 			const { manager, sessionFile } = newSession("@pi-full-volume-rewrite-intent-");
@@ -231,7 +365,16 @@ describe("session persistence on a full volume", () => {
 			const entry = manager.getEntry(id);
 			if (entry?.type !== "custom") throw new Error("Expected a custom entry");
 			entry.data = { value: "edited" };
-			await expect(manager.rewriteEntries()).rejects.toThrow("ENOSPC");
+			const rewrites = spyOnWholeFileRewrites();
+			for (const rewrite of rewrites)
+				rewrite.mockImplementation(() => {
+					throw fsError("ENOSPC");
+				});
+			try {
+				await expect(manager.rewriteEntries()).rejects.toThrow("ENOSPC");
+			} finally {
+				for (const rewrite of rewrites) rewrite.mockRestore();
+			}
 			await manager[finish]();
 			expect(fs.readFileSync(sessionFile, "utf8")).toContain('"value":"edited"');
 			expect(usersOnDisk(sessionFile)).toEqual(["queued"]);

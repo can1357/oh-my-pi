@@ -460,7 +460,8 @@
 - Factory Droid requests size images against what each route actually sends: Gemini models count their expanded tool schemas and no longer drop images for another model's reasoning, and only Claude models count withdrawn tool definitions ([#17492](https://github.com/can1357/oh-my-pi/pull/17492))
 - A long session on a full disk no longer rebuilds its whole transcript in memory to rewrite the file: lines the disk refused wait and are appended in order once there is room, and a whole-file rewrite the volume cannot hold is refused before it is built.
 - A long session on a full disk no longer rebuilds its whole transcript in memory to rewrite the file: lines the disk refused wait and are appended in order once there is room, and a whole-file rewrite the volume cannot hold is refused before it is built. ([#17431](https://github.com/can1357/oh-my-pi/pull/17431) by [@AdamDureyAtWillship](https://github.com/AdamDureyAtWillship))
-- Sealed shutdown rewrites recover deleted or externally changed session files and check deferred-backend ownership; failed internal copies, forks, and relocations release their ownership ([#17431](https://github.com/can1357/oh-my-pi/pull/17431) by [@AdamDureyAtWillship](https://github.com/AdamDureyAtWillship))
+- Shared queued tails remain a required durable rewrite through persistent clones, failed full-volume drains, retries, and session switches, without making lazy resume repairs eager ([#17431](https://github.com/can1357/oh-my-pi/pull/17431) by [@AdamDureyAtWillship](https://github.com/AdamDureyAtWillship))
+- Sealed shutdown rewrites recover deleted or externally changed session files, check deferred-backend ownership, and await sibling artifact copies; failed internal copies, forks, and relocations release ownership without publishing orphan journals ([#17431](https://github.com/can1357/oh-my-pi/pull/17431) by [@AdamDureyAtWillship](https://github.com/AdamDureyAtWillship))
 
 ## [18.14.0] - 2026-10-29
 
