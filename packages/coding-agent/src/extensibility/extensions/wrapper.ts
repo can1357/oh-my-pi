@@ -10,7 +10,7 @@ import {
 	type ToolLoadMode,
 } from "@oh-my-pi/pi-agent-core";
 import type { ComputerSafetyCheck, ImageContent, Static, TextContent, TSchema } from "@oh-my-pi/pi-ai";
-import { prompt, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
+import { prompt, sanitizeText, untilAborted, toError } from "@oh-my-pi/pi-utils";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import nativeDelegationTemplate from "../../prompts/tools/native-delegation.md" with { type: "text" };
 import {
@@ -274,6 +274,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			userPolicies,
 			approvalGrants,
 			restrictions,
+			context,
 		);
 		if (preResolved.policy === "deny") {
 			throw denyError(preResolved, this.tool.name);
@@ -353,6 +354,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			userPolicies,
 			approvalGrants,
 			restrictions,
+			context,
 		);
 		context?.xdevTierResolved?.(resolved.tier);
 		if (resolved.policy === "deny") {
@@ -508,7 +510,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				),
 			);
 		} catch (err) {
-			executionError = err instanceof Error ? err : new Error(String(err));
+			executionError = toError(err);
 			result = {
 				content: [{ type: "text", text: executionError.message }],
 				details: undefined as TDetails,

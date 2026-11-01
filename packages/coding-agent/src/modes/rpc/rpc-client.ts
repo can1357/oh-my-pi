@@ -8,7 +8,7 @@ import { isPromise } from "node:util/types";
 import type { AgentEvent, AgentMessage, AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
-import { isRecord, ptree, readJsonl } from "@oh-my-pi/pi-utils";
+import { isRecord, ptree, readJsonl, toError } from "@oh-my-pi/pi-utils";
 import type { LogoutAccount } from "@oh-my-pi/pi-tui/overlays/logout-account-selector";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import type { FileSink } from "bun";
@@ -493,7 +493,7 @@ export class RpcClient {
 							});
 			await reapAfterOutputFailure(error);
 		})().catch(async (cause: unknown) => {
-			const error = cause instanceof Error ? cause : new Error(String(cause));
+			const error = toError(cause);
 			if (!readySettled) {
 				readySettled = true;
 				readyReject(error);
@@ -545,7 +545,7 @@ export class RpcClient {
 		} catch (cause) {
 			// Startup failed after spawning the child. Reap it before returning
 			// so a retry cannot inherit a live worker or its session lock.
-			const error = cause instanceof Error ? cause : new Error(String(cause));
+			const error = toError(cause);
 			await reapAfterOutputFailure(error);
 			throw cause;
 		} finally {
@@ -1710,7 +1710,7 @@ export class RpcClient {
 		try {
 			this.#writeFrame(fullCommand, fail);
 		} catch (err) {
-			fail(err instanceof Error ? err : new Error(String(err)));
+			fail(toError(err));
 		}
 		return promise;
 	}
@@ -1783,7 +1783,7 @@ export class RpcClient {
 		const line = `${JSON.stringify(frame)}\n`;
 		// A broken stdin pipe is terminal: fail this frame's request, then stop so start() can relaunch.
 		const failed = (err: unknown) => {
-			onError?.(err instanceof Error ? err : new Error(String(err)));
+			onError?.(toError(err));
 			if (this.#process === child) void this.stop();
 		};
 		try {

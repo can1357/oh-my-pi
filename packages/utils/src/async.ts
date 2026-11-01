@@ -45,6 +45,19 @@ export async function sleepLong(delayMs: number, signal?: AbortSignal, options?:
 }
 
 /**
+ * Wait for a wall-clock deadline, including time spent suspended. Some platforms
+ * exclude suspend from relative timers, so recheck at least once per second.
+ */
+export async function sleepUntil(deadlineMs: number, signal?: AbortSignal): Promise<void> {
+	while (true) {
+		signal?.throwIfAborted();
+		const remaining = deadlineMs - Date.now();
+		if (!(remaining > 0)) return;
+		await timers.scheduler.wait(Math.min(remaining, 1_000), { signal });
+	}
+}
+
+/**
  * Wrap a promise with a timeout and optional abort signal.
  * Rejects with the given error or a new error containing the given message if
  * the timeout fires first. Cleans up all listeners on settlement.
