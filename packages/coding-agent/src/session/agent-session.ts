@@ -609,11 +609,12 @@ const cfgWorkspacePromptInputs = combine({
 const PLAN_MODE_REMINDER_MAX = 3;
 const POST_PROMPT_DRAIN_TIMEOUT_MS = 5_000;
 /**
- * How long the next tool call or model request after a move gives the
- * `session_moved` handlers before it goes ahead without them. A handler that
- * takes longer is not waited for: the session carries on under the new id
- * while it runs. So this is what a handler that never returns costs a user —
- * one wait of this length after each move — and all it costs.
+ * How long the next tool call or model request after a move waits for the
+ * `session_moved` handlers, and the longest any one such wait lasts. At this
+ * point the session stops waiting and goes on under the new id; the handlers
+ * are not cancelled — only the extension runner's handler timeout or this
+ * session's disposal stops them. So this is what a handler that never
+ * returns costs a user: at most one wait of this length per request.
  *
  * Measured: with omp's own heaviest handler (autoresearch's rehydrate; the
  * SDK bridge and the Warp emitter do less) and without it, 200 moves let the
@@ -1014,6 +1015,8 @@ export class AgentSession implements SettingsScope {
 	 * latest was announced, whichever comes first. `undefined` once it has opened.
 	 */
 	#movesGate: Promise<void> | undefined;
+	/** Aborted once `session_shutdown` has run: no `session_moved` handler starts after it. */
+	readonly #movesAbort = new AbortController();
 	/** Agent message count when {@link #disconnectFromAgent} unsubscribed; messages past it reached no persisting handler. */
 	#disconnectedMessageCount?: number;
 	#cancelExitRecorder?: () => void;
@@ -2212,10 +2215,11 @@ export class AgentSession implements SettingsScope {
 			if (!runner || !liveForMoves) return;
 			// The move happens inside a synchronous write, so its handlers cannot
 			// be awaited here. They run after the previous move's, so moves are
-			// handled in order, and the next tool call or model request gives
-			// them `SESSION_MOVED_HANDLER_GRACE_MS` from now to rekey state to the
-			// new id. A handler that takes longer is not waited for: an unbounded
-			// wait would let any extension that never returns hold the session.
+			// handled in order, and the session's next tool call or model request
+			// waits for them for up to `SESSION_MOVED_HANDLER_GRACE_MS` from now.
+			// At that point the session stops waiting and says so; the handlers
+			// keep running, and nothing cancels them before the runner's own
+			// handler timeout or this session's disposal.
 			const event = {
 				type: "session_moved",
 				reason: notice.reason,
@@ -2224,9 +2228,7 @@ export class AgentSession implements SettingsScope {
 				previousSessionFile: notice.from,
 				sessionFile: notice.to,
 			} as const;
-			const emit = async () => {
-				await runner.emit(event);
-			};
+			const emit = () => runner.emitSessionMoved(event, this.#movesAbort.signal);
 			const handled = (this.#movesPending === 0 ? emit() : this.#movesHandled.then(emit))
 				.catch(error => logger.warn("session_moved handlers failed", { error: toError(error).message }))
 				.finally(() => {
@@ -2235,7 +2237,16 @@ export class AgentSession implements SettingsScope {
 			this.#movesPending++;
 			this.#movesHandled = handled;
 			const grace = Promise.withResolvers<void>();
-			const timer = setTimeout(grace.resolve, SESSION_MOVED_HANDLER_GRACE_MS);
+			// Runs only when the handlers have not finished: the gate clears it as
+			// soon as they do, before any timer can fire.
+			const timer = setTimeout(() => {
+				logger.warn("session_moved handlers still running; the session goes on without waiting for them", {
+					previousSessionId: event.previousSessionId,
+					sessionId: event.sessionId,
+					waitedMs: SESSION_MOVED_HANDLER_GRACE_MS,
+				});
+				grace.resolve();
+			}, SESSION_MOVED_HANDLER_GRACE_MS);
 			timer.unref?.();
 			const gate = Promise.race([handled, grace.promise]).finally(() => {
 				clearTimeout(timer);
@@ -2604,6 +2615,13 @@ export class AgentSession implements SettingsScope {
 			cancel: toolCallId => this.#ttsr.cancelBridgedToolCall(toolCallId),
 		});
 		this.agent.setOnBeforeYield(() => this.#ttsr.settleJudgments());
+		// The main loop's model request runs the agent's own context transform,
+		// not the side-request one below: both wait for the move handlers.
+		const agentTransformContext = this.agent.transformContext;
+		this.agent.transformContext = async (messages, signal) => {
+			await this.#afterMovesAnnounced(signal);
+			return agentTransformContext ? await agentTransformContext(messages, signal) : messages;
+		};
 		this.agent.setOnModelCallSystemPrompt(prompt => {
 			this.#tools.recordPrimaryModelCall(prompt);
 			this.#recordModelCallSystemPrompt(prompt);
@@ -5731,17 +5749,29 @@ export class AgentSession implements SettingsScope {
 		return this.#ttsr.afterToolCall(ctx);
 	}
 	/**
-	 * Once the handlers of every `session_moved` announcement so far have
-	 * finished, or {@link SESSION_MOVED_HANDLER_GRACE_MS} after the latest
-	 * announcement, whichever comes first — and then the same for a move
-	 * announced while it waited. Work that runs under the id a move gave this
-	 * session — a tool call, a model request — gives the handlers that long to
-	 * rekey state to it, and no longer; a cancelled caller stops waiting at once.
+	 * Once the handlers of every `session_moved` announcement so far — and of
+	 * any made while this waits — have finished, or once this has waited
+	 * {@link SESSION_MOVED_HANDLER_GRACE_MS} in all, whichever comes first; a
+	 * move's own gate opens sooner, that long after the move. One deadline for
+	 * the whole wait: moves announced while it waits add their handlers to what
+	 * it waits for, never more time. A cancelled caller stops waiting at once.
 	 */
 	async #afterMovesAnnounced(signal: AbortSignal | undefined): Promise<void> {
-		// A gate clears itself as it opens, so what is here after one opens is a later move's.
-		for (let gate = this.#movesGate; gate; gate = this.#movesGate) {
-			await (signal ? Promise.race([gate, abortRejection(signal)]) : gate);
+		if (!this.#movesGate) return;
+		let expired = false;
+		const deadline = Promise.withResolvers<void>();
+		const timer = setTimeout(() => {
+			expired = true;
+			deadline.resolve();
+		}, SESSION_MOVED_HANDLER_GRACE_MS);
+		try {
+			// A gate clears itself as it opens, so what is here after one opens is a later move's.
+			for (let gate = this.#movesGate; gate && !expired; gate = this.#movesGate) {
+				const waits = [gate, deadline.promise];
+				await (signal ? Promise.race([...waits, abortRejection(signal)]) : Promise.race(waits));
+			}
+		} finally {
+			clearTimeout(timer);
 		}
 	}
 
@@ -6521,6 +6551,10 @@ export class AgentSession implements SettingsScope {
 		} catch (error) {
 			logger.warn("Failed to emit session_shutdown event", { error: String(error) });
 		}
+		// After `session_shutdown`, so the exit record's move reached its
+		// handlers: from here no `session_moved` handler starts — not the next
+		// in a slow move, nor a queued move's — and the running one is told.
+		this.#movesAbort.abort(new Error("the session was disposed"));
 
 		// Stop fallback extension timers before aborting deferred work they could enqueue.
 		this.#fallbackExtensionTimers?.clearAll();

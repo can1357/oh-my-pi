@@ -492,6 +492,15 @@ describe("an artifact request at the host", () => {
 		expect(artifactRequestOf(sent)).toEqual({ op: "take", file: "file-1" });
 		expect(reads).toBe(1);
 	});
+
+	it("refuses a field that is present and not a string, instead of reading it as absent", () => {
+		// A token read as absent sends the reader to whatever directory is at
+		// the name now: refusing it is the only answer that cannot be foreign.
+		const lookup = { op: "answer", id: "0", root: "/artifacts" };
+		for (const token of [null, 3, {}]) expect(artifactRequestOf({ ...lookup, token })).toBeNull();
+		expect(artifactRequestOf(lookup)).toEqual(lookup);
+		expect(artifactRequestOf({ ...lookup, token: undefined })).toEqual(lookup);
+	});
 });
 
 /** The bridge value a host gives for `request`, as the JavaScript host sends it. */

@@ -39,7 +39,7 @@ import { MAIN_AGENT_ID } from "../../registry/agent-registry";
 import type { SessionManager } from "../../session/session-manager";
 import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-write-fallback";
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
-import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shared-events";
+import { accumulateToolCallResult, buildAggregatedToolCallResult, type SessionMovedEvent } from "../shared-events";
 import { ManagedTimers } from "./managed-timers";
 import { createExtensionModelQuery } from "./model-api";
 import { trackUserWaits, type UserWaitTracker } from "./user-wait";
@@ -1827,6 +1827,35 @@ export class ExtensionRunner {
 		// reached by the live iteration, one added later gets the replay.
 		if (event.type === "session_start") this.#sessionStartEvent = event;
 		return result;
+	}
+
+	/**
+	 * Emit `session_moved`, as {@link emit} does, until `signal` aborts: from
+	 * then no further handler starts, and the one running is told through its
+	 * own signal and no longer waited for. The session aborts it when it is
+	 * disposed, so a move's handlers start no work after its teardown.
+	 */
+	async emitSessionMoved(event: SessionMovedEvent, signal: AbortSignal): Promise<void> {
+		let ctx: ExtensionContext | undefined;
+		for (const ext of this.extensions) {
+			const handlers = ext.handlers.get(event.type);
+			if (!handlers || handlers.length === 0) continue;
+			ctx ??= this.createContext();
+			for (const handler of handlers) {
+				if (signal.aborted) return;
+				await this.#runHandlerWithTimeout(
+					handler,
+					event,
+					ctx,
+					ext,
+					handlerTimeoutForEvent(event.type),
+					undefined,
+					signal,
+				);
+			}
+		}
+		// As `#emitTo` does for every event that changes the session's identity.
+		if (ctx !== undefined && this.agent.kind === "main") refreshShellConfigCache();
 	}
 
 	async #emitTo<TEvent extends RunnerEmitEvent>(

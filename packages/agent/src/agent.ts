@@ -418,6 +418,15 @@ export class Agent {
 	#abortController?: AbortController;
 	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	#transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
+	/** The transform applied to the context before each model request; a host may wrap it after construction. */
+	get transformContext(): ((messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>) | undefined {
+		return this.#transformContext;
+	}
+	set transformContext(
+		transform: ((messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>) | undefined,
+	) {
+		this.#transformContext = transform;
+	}
 	#transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
 	#sentToolDefinitions = new SentToolDefinitions();
 	#steeringQueue: AgentMessage[] = [];

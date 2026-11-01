@@ -167,7 +167,7 @@ const edits = {
 		expected: { op: "take", file: "file-1", receipt: "receipt-1" },
 	},
 	"a request shape whose op is a pattern": {
-		refusal: "a request op is a literal string",
+		refusal: "a request op is a literal string other than __proto__",
 		changes: [
 			[
 				/\| \{ op: "take"; file: string \}/,
@@ -177,6 +177,35 @@ const edits = {
 		sends: { op: "take-now", file: "file-1" },
 		parse: request,
 		expected: { op: "take-now", file: "file-1" },
+	},
+	"a request shape whose op is __proto__, with a parser entry": {
+		refusal: "a request op is a literal string other than __proto__",
+		changes: [
+			[
+				/\| \{ op: "release"; file: string \};/,
+				'| { op: "release"; file: string }\n\t| { op: "__proto__"; file: string };',
+			],
+			[
+				/(\trelease: value => [^\n]*\n)/,
+				'$1\t__proto__: value => shapeOf<RequestOf<"__proto__">>({ op: "required", file: "required" }, value),\n',
+			],
+		],
+		// As a reader's JSON carries it.
+		sends: JSON.parse('{"op":"__proto__","file":"file-1"}'),
+		parse: request,
+		expected: JSON.parse('{"op":"__proto__","file":"file-1"}'),
+	},
+	"a required symbol-keyed field on the take request, listed in its row": {
+		refusal: "receipt",
+		changes: [
+			[/^/, 'const receipt: unique symbol = Symbol.for("receipt");\n'],
+			[/\| \{ op: "take"; file: string \}/, '| { op: "take"; file: string; [receipt]: string }'],
+			[/(take:[^\n]*\{ op: "required", file: "required") \}/, '$1, [receipt]: "required" }'],
+		],
+		sends: { op: "take", file: "file-1", [Symbol.for("receipt")]: "receipt-1" },
+		// What arrives with the symbol-keyed field, which no serialization keeps.
+		parse: (wire, sent) => Object.getOwnPropertySymbols(wire.artifactRequestOf(sent) ?? {}).length,
+		expected: 1,
 	},
 	"a required field typed any on the take request, listed in its row": {
 		refusal: "a wire field is never typed any",

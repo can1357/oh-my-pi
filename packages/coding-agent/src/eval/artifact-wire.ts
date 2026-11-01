@@ -101,15 +101,14 @@ type Presence<T> = { readonly [K in keyof T]-?: {} extends Pick<T, K> ? "optiona
  * - a required field is a string, never a type that admits `undefined`,
  *   which the parser would refuse; an optional one is a string when present;
  * - every field has a key a table can name: an index signature, plain or a
- *   pattern, has fields a table never lists;
+ *   pattern, has fields a table never lists, and a symbol key is one
+ *   `Object.keys` never visits — and one JSON and `postMessage` drop, so a
+ *   typed sender's field would be lost on the way;
  * - no field is named `__proto__`: written into a table it sets the table's
  *   prototype rather than naming a key, and the parser would never read it.
- *
- * A field keyed by a symbol passes, and the parser never visits it; no
- * bridge can carry one, since JSON and `postMessage` both drop them.
  */
 type WireFields<T> = {
-	[K in keyof T]: K extends "__proto__"
+	[K in keyof T]: K extends "__proto__" | symbol
 		? never
 		: {} extends Record<K, unknown>
 			? never
@@ -214,7 +213,7 @@ const SETTLED_ARTIFACT_FIELDS: Presence<SettledArtifact> = {
  */
 const REQUEST_PARSERS: [UnlistedOp<ArtifactRequest["op"]>] extends [never]
 	? { readonly [Op in ArtifactRequest["op"]]: (value: object) => OneShape<RequestOf<Op>, Op> | null }
-	: "a request op is a literal string" = {
+	: "a request op is a literal string other than __proto__" = {
 	answer: value =>
 		shapeOf<RequestOf<"answer">>({ op: "required", id: "required", root: "required", token: "optional" }, value),
 	locate: value =>
@@ -223,12 +222,26 @@ const REQUEST_PARSERS: [UnlistedOp<ArtifactRequest["op"]>] extends [never]
 	release: value => shapeOf<RequestOf<"release">>({ op: "required", file: "required" }, value),
 };
 
-/** The members of `Op` no table key can name one by one: `string`, or a pattern. */
-type UnlistedOp<Op> = Op extends string ? ({} extends Record<Op, unknown> ? Op : never) : never;
+/**
+ * The members of `Op` no table key can name one by one — `string`, or a
+ * pattern — and `__proto__`, which written as a key sets the table's
+ * prototype instead of adding an entry.
+ */
+type UnlistedOp<Op> = Op extends string
+	? Op extends "__proto__"
+		? Op
+		: {} extends Record<Op, unknown>
+			? Op
+			: never
+	: never;
 
 /**
  * Every field `fields` names, copied whole from `value`; `null` when a
- * required one is missing or is not a string.
+ * required one is missing, or when any it names is present and not a string.
+ * A malformed value is refused rather than read as absent: an optional token
+ * sent as `null` or a number, read as absent, would send the reader to a
+ * directory it never asked about. `undefined` is absent, as `postMessage`
+ * carries an unset field.
  *
  * There is no per-field code to forget a field in: the table is the list,
  * and the table is checked against the type — against one shape of it, so
@@ -243,7 +256,7 @@ function shapeOf<T extends WireFields<T>>(fields: Presence<T> & WholeTable<T>, v
 	for (const field of Object.keys(fields) as (keyof T & string)[]) {
 		const item: unknown = Reflect.get(value, field);
 		if (typeof item === "string") shaped[field] = item;
-		else if (fields[field] === "required") return null;
+		else if (item !== undefined || fields[field] === "required") return null;
 	}
 	// Every required field of `T` is here, and every field of `T` is a string.
 	const settled = shaped as T;

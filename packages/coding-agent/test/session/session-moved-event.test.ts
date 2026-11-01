@@ -7,9 +7,12 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
-import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import {
+	ExtensionRunner,
+	testSetExtensionHandlerTimeoutMs,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type { SessionEvent } from "@oh-my-pi/pi-coding-agent/extensibility/shared-events";
-import { AgentSession, SESSION_MOVED_HANDLER_GRACE_MS } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -32,6 +35,13 @@ class StorageWithForeignOwner extends FileSessionStorage {
 
 	override claimSession(sessionId: string, sessionPath: string): (() => void) | null {
 		return sessionId === this.#ownedElsewhere ? null : super.claimSession(sessionId, sessionPath);
+	}
+}
+
+/** File storage on which this process can claim no session id, so every write moves the session. */
+class StorageOwnedByNobody extends FileSessionStorage {
+	override claimSession(): (() => void) | null {
+		return null;
 	}
 }
 
@@ -110,7 +120,8 @@ describe("a session that had to leave its file", () => {
 	/**
 	 * A session over a file another process owns, so its first write moves it,
 	 * with `register` as its extension. `seed` writes to the file first, as the
-	 * owner, before this process opens it.
+	 * owner, before this process opens it; `storage` decides which ids this
+	 * process may claim — by default every id but the owner's.
 	 */
 	async function sessionOverOwnedFile(
 		tempDir: TempDir,
@@ -118,6 +129,7 @@ describe("a session that had to leave its file", () => {
 		tools: AgentTool[] = [],
 		responses: Parameters<typeof createMockModel>[0] = {},
 		seed: (owner: SessionManager) => void = () => {},
+		storage: (ownerId: string) => FileSessionStorage = ownerId => new StorageWithForeignOwner(ownerId),
 	) {
 		const sessionDir = path.join(tempDir.path(), "sessions");
 		const owner = SessionManager.create(tempDir.path(), sessionDir, new FileSessionStorage());
@@ -128,14 +140,9 @@ describe("a session that had to leave its file", () => {
 		const sessionId = owner.getSessionId();
 		if (!sessionFile) throw new Error("Expected a persisted session");
 		await owner.close();
-		const sessionManager = await SessionManager.open(
-			sessionFile,
-			sessionDir,
-			new StorageWithForeignOwner(sessionId),
-			{
-				suppressBreadcrumb: true,
-			},
-		);
+		const sessionManager = await SessionManager.open(sessionFile, sessionDir, storage(sessionId), {
+			suppressBreadcrumb: true,
+		});
 		const runtime = new ExtensionRuntime();
 		const extension = await loadExtensionFromFactory(register, tempDir.path(), new EventBus(), runtime, "moves");
 		const authStorage = await AuthStorage.create(":memory:");
@@ -268,10 +275,18 @@ describe("a session that had to leave its file", () => {
 			await sessionManager.flush();
 			const started = await handlerStarted.promise;
 
-			// Without a cancellation: the hook gives the handler its grace, then
-			// goes ahead with the handler still running.
-			expect(await within(SESSION_MOVED_HANDLER_GRACE_MS + 5_000, toolGate(session, probe))).toBe("went ahead");
-			expect(performance.now() - started).toBeGreaterThanOrEqual(SESSION_MOVED_HANDLER_GRACE_MS - 50);
+			// Without a cancellation: the tool-call hook and the main loop's model
+			// request each wait two seconds — the figure the documentation gives —
+			// then go ahead with the handler still running.
+			let modelAt = 0;
+			const model = Promise.resolve(session.agent.transformContext?.([], undefined)).then(() => {
+				modelAt = performance.now();
+				return "went ahead";
+			});
+			const [tool, request] = await Promise.all([within(7_000, toolGate(session, probe)), within(7_000, model)]);
+			expect(modelAt - started).toBeGreaterThanOrEqual(1_950);
+			expect([tool, request]).toEqual(["went ahead", "went ahead"]);
+			expect(performance.now() - started).toBeGreaterThanOrEqual(1_950);
 			// Teardown does not wait for the handler at all.
 			expect(
 				await within(
@@ -283,6 +298,78 @@ describe("a session that had to leave its file", () => {
 		} finally {
 			handlerMayFinish.resolve();
 			await session.dispose();
+		}
+	}, 30_000);
+
+	it("bounds one wait at two seconds in all, however many moves happen while it waits", async () => {
+		using tempDir = TempDir.createSync("@omp-session-moved-");
+		const probe = probeTool([]);
+		const handlerMayFinish = Promise.withResolvers<void>();
+		const { session, sessionManager } = await sessionOverOwnedFile(
+			tempDir,
+			pi => {
+				pi.on("session_moved", async () => {
+					await handlerMayFinish.promise;
+				});
+			},
+			[probe],
+			{},
+			() => {},
+			// Nobody may claim any id, so every write moves the session again.
+			() => new StorageOwnedByNobody(),
+		);
+		let waiting = true;
+		try {
+			sessionManager.appendMessage({ role: "user", content: "move 0", timestamp: Date.now() });
+			await sessionManager.flush();
+			const started = performance.now();
+			const gate = toolGate(session, probe).finally(() => {
+				waiting = false;
+			});
+			// A move every 300 ms, each with a grace of its own, for up to 7 s.
+			for (let n = 1; waiting && performance.now() - started < 7_000; n++) {
+				await Bun.sleep(300);
+				sessionManager.appendMessage({ role: "user", content: `move ${n}`, timestamp: Date.now() });
+				await sessionManager.flush();
+			}
+			expect(waiting).toBe(false);
+			expect(await gate).toBe("went ahead");
+			expect(performance.now() - started).toBeLessThan(3_000);
+		} finally {
+			waiting = false;
+			handlerMayFinish.resolve();
+			await session.dispose();
+		}
+	}, 30_000);
+
+	it("starts no session_moved handler once the session is disposed", async () => {
+		using tempDir = TempDir.createSync("@omp-session-moved-");
+		const order: string[] = [];
+		const firstStarted = Promise.withResolvers<void>();
+		const firstMayFinish = Promise.withResolvers<void>();
+		const { session, sessionManager } = await sessionOverOwnedFile(tempDir, pi => {
+			pi.on("session_moved", async () => {
+				firstStarted.resolve();
+				await firstMayFinish.promise;
+			});
+			pi.on("session_moved", async () => {
+				order.push("second handler started");
+			});
+		});
+		// The runner gives up on the first handler after 300 ms, as it would
+		// after 30 s, and would then start the second.
+		testSetExtensionHandlerTimeoutMs(300);
+		try {
+			sessionManager.appendMessage({ role: "user", content: "a turn worth saving", timestamp: Date.now() });
+			await sessionManager.flush();
+			await firstStarted.promise;
+			await session.dispose();
+			order.push("disposed");
+			await Bun.sleep(1_000);
+			expect(order).toEqual(["disposed"]);
+		} finally {
+			testSetExtensionHandlerTimeoutMs(30_000);
+			firstMayFinish.resolve();
 		}
 	}, 30_000);
 

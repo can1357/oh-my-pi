@@ -129,11 +129,15 @@ if "__omp_prelude_loaded__" not in globals():
             "op": "locate" if locate else "answer",
             "id": path[11:],
             "root": os.path.abspath(root),
-            # The hold this cell was given on that directory, or the one its
-            # first answer bound: the host answers from that directory, not
-            # from whatever its pathname reaches when the read lands.
-            "token": assigned or _OMP_BOUND_ROOTS.get(_bind_key),
         }
+        # The hold this cell was given on that directory, or the one its
+        # first answer bound: the host answers from that directory, not from
+        # whatever its pathname reaches when the read lands. Left out, never
+        # sent as null, when there is none: the host refuses a field that is
+        # present and not a string.
+        token = assigned or _OMP_BOUND_ROOTS.get(_bind_key)
+        if token:
+            request["token"] = token
         details = _artifact_details(request)
         if details is None:
             return None
