@@ -951,6 +951,8 @@ export class Editor implements Component, Focusable {
 	 *  the rest without submitting. Must be a single line. Re-evaluated on every render, so hosts can
 	 *  derive it from live state. */
 	prediction?: () => string | undefined;
+	/** Called after Tab or Right inserts the rest of the shown {@link prediction}. */
+	onPredictionAccepted?: () => void;
 
 	// Custom top border (for status line integration). Either an eager `content`
 	// (set once, reused every frame) or a `provider` that recomputes lazily just
@@ -5127,6 +5129,7 @@ export class Editor implements Component, Focusable {
 		const suffix = this.#getPredictionSuffix();
 		if (!suffix) return false;
 		this.#insertTextAtCursor(suffix);
+		this.onPredictionAccepted?.();
 		return true;
 	}
 

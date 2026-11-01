@@ -5,6 +5,11 @@ import composerPredictionPrompt from "../../prompts/system/composer-prediction-u
 import type { AgentSession } from "../../session/agent-session";
 import { cfgComposerPredictions } from "../settings";
 import type { InteractiveModeContext } from "../types";
+import {
+	type PredictionOutcome,
+	recordPredictionRequest,
+	recordPredictionResolved,
+} from "./composer-prediction-telemetry";
 
 /** Reply the prediction prompt asks for when the model has no confident guess. */
 const SKIP_REPLY = "NO_PREDICTION";
@@ -31,6 +36,16 @@ interface PredictionSource {
 	/** Session file and entry the request branched from; its usage is recorded there. */
 	sessionId: string;
 	leafId: string | null;
+	/** `provider/model` serving the request, for metrics. */
+	model: string;
+}
+
+interface Prediction {
+	text: string;
+	source: PredictionSource;
+	/** `performance.now()` when the prediction was offered. */
+	offeredAt: number;
+	accepted: boolean;
 }
 
 type PredictionContext = Pick<InteractiveModeContext, "settings" | "viewSession" | "focusedAgentId" | "editor" | "ui">;
@@ -57,7 +72,7 @@ export class ComposerPredictionController {
 	readonly #ctx: PredictionContext;
 	readonly #deadlineMs: number;
 	#abort: AbortController | undefined;
-	#prediction: { text: string; source: PredictionSource } | undefined;
+	#prediction: Prediction | undefined;
 
 	constructor(ctx: PredictionContext, options: { deadlineMs?: number } = {}) {
 		this.#ctx = ctx;
@@ -81,7 +96,8 @@ export class ComposerPredictionController {
 		// Any draft, even whitespace, keeps the ghost hidden (it shows only over a prefix of the
 		// prediction), and a compaction would rewrite the history the prediction reads: skip the
 		// billed request either way.
-		if (!session.model || session.isStreaming || session.isCompacting || this.#ctx.editor.getText()) return;
+		const model = session.model;
+		if (!model || session.isStreaming || session.isCompacting || this.#ctx.editor.getText()) return;
 		const abort = new AbortController();
 		this.#abort = abort;
 		const source: PredictionSource = {
@@ -91,39 +107,65 @@ export class ComposerPredictionController {
 			// provider-facing id, which the usage ledger rejects.
 			sessionId: session.sessionManager.getSessionId(),
 			leafId: session.sessionManager.getLeafId(),
+			model: `${model.provider}/${model.id}`,
 		};
 		void this.#run(source, abort);
+	}
+
+	/** The user inserted the offered prediction (Tab or Right). */
+	accepted(): void {
+		const prediction = this.#prediction;
+		if (!prediction || prediction.accepted || !this.#isCurrent(prediction.source)) return;
+		prediction.accepted = true;
+		recordPredictionResolved("accepted", prediction.source.model, performance.now() - prediction.offeredAt);
 	}
 
 	/** Abort an in-flight prediction and clear the shown one. */
 	cancel(): void {
 		this.#abort?.abort();
 		this.#abort = undefined;
-		if (!this.#prediction) return;
+		const prediction = this.#prediction;
+		if (!prediction) return;
+		if (!prediction.accepted) {
+			recordPredictionResolved("ignored", prediction.source.model, performance.now() - prediction.offeredAt);
+		}
 		this.#prediction = undefined;
 		this.#ctx.ui.requestRender();
 	}
 
 	async #run(source: PredictionSource, abort: AbortController): Promise<void> {
+		const startedAt = performance.now();
+		const deadline = AbortSignal.timeout(this.#deadlineMs);
+		let outcome: PredictionOutcome;
 		try {
 			const { replyText, assistantMessage } = await source.session.runEphemeralTurn({
 				promptText: prompt.render(composerPredictionPrompt, { skip: SKIP_REPLY }),
 				maxTokens: source.session.ephemeralMaxTokensPreservesRequest() ? PREDICTION_MAX_TOKENS : undefined,
 				minimizeEffort: true,
-				signal: AbortSignal.any([abort.signal, AbortSignal.timeout(this.#deadlineMs)]),
+				signal: AbortSignal.any([abort.signal, deadline]),
 			});
 			// Paid for even when the reply arrives too late to show.
 			this.#recordUsage(source, assistantMessage);
-			if (this.#abort !== abort || !this.#isCurrent(source)) return;
-			const text = parseComposerPrediction(replyText);
-			if (!text) return;
-			this.#prediction = { text, source };
-			this.#ctx.ui.requestRender();
+			outcome = this.#offer(source, abort, replyText);
 		} catch (error) {
-			if (!abort.signal.aborted) logger.debug("Composer prediction failed", { error: String(error) });
+			outcome = abort.signal.aborted ? "cancelled" : deadline.aborted ? "timeout" : "error";
+			if (outcome === "error") logger.debug("Composer prediction failed", { error: String(error) });
 		} finally {
 			if (this.#abort === abort) this.#abort = undefined;
 		}
+		recordPredictionRequest(outcome, source.model, performance.now() - startedAt);
+	}
+
+	/** Offer a settled reply as the composer prediction when it is still wanted; returns how it settled. */
+	#offer(source: PredictionSource, abort: AbortController, replyText: string): PredictionOutcome {
+		if (this.#abort !== abort) return "cancelled";
+		if (!this.#isCurrent(source)) return "stale";
+		const text = parseComposerPrediction(replyText);
+		if (!text) return "skipped";
+		this.#prediction = { text, source, offeredAt: performance.now(), accepted: false };
+		this.#ctx.ui.requestRender();
+		// The ghost paints only while the draft is a prefix of the prediction.
+		return text.startsWith(this.#ctx.editor.getText()) ? "shown" : "hidden";
 	}
 
 	#recordUsage(source: PredictionSource, message: AssistantMessage): void {

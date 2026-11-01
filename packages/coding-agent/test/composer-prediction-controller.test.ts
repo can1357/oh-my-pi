@@ -1,6 +1,13 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { Message, Model } from "@oh-my-pi/pi-ai";
+import { metrics } from "@opentelemetry/api";
+import {
+	AggregationTemporality,
+	InMemoryMetricExporter,
+	MeterProvider,
+	PeriodicExportingMetricReader,
+} from "@opentelemetry/sdk-metrics";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	ComposerPredictionController,
@@ -28,6 +35,7 @@ describe("parseComposerPrediction", () => {
 interface PendingTurn {
 	options: EphemeralTurnOptions;
 	resolve: (result: EphemeralTurnResult) => void;
+	reject: (error: unknown) => void;
 	/** Settles after the controller's own continuation, which awaited it first. */
 	promise: Promise<EphemeralTurnResult>;
 }
@@ -63,17 +71,18 @@ function harness(options: HarnessOptions = {}) {
 		sessionManager,
 		ephemeralMaxTokensPreservesRequest: () => options.capPreservesRequest ?? true,
 		runEphemeralTurn(turnOptions: EphemeralTurnOptions): Promise<EphemeralTurnResult> {
-			const { promise, resolve } = Promise.withResolvers<EphemeralTurnResult>();
-			turns.push({ options: turnOptions, resolve, promise });
+			const { promise, resolve, reject } = Promise.withResolvers<EphemeralTurnResult>();
+			turns.push({ options: turnOptions, resolve, reject, promise });
 			return promise;
 		},
 	};
 	let renders = 0;
+	let draft = options.draft ?? "";
 	const ctx = {
 		settings: Settings.isolated({ "composer.predictions": options.enabled ?? true }),
 		viewSession: session,
 		focusedAgentId: options.focusedAgentId,
-		editor: { getText: () => options.draft ?? "" },
+		editor: { getText: () => draft },
 		ui: { requestRender: () => renders++ },
 	} as unknown as ConstructorParameters<typeof ComposerPredictionController>[0];
 	const reply = async (index: number, replyText: string) => {
@@ -88,12 +97,23 @@ function harness(options: HarnessOptions = {}) {
 		turn.resolve({ replyText, assistantMessage });
 		await turn.promise;
 	};
+	/** The side turn rejects, as `runEphemeralTurn` does once its signal aborts. */
+	const fail = async (index: number, error: unknown) => {
+		const turn = turns[index]!;
+		turn.reject(error);
+		await turn.promise.catch(() => {});
+	};
 	return {
 		controller: new ComposerPredictionController(ctx, { deadlineMs: options.deadlineMs }),
 		turns,
 		messages,
 		firstLeafId,
 		reply,
+		fail,
+		/** The user edits the composer. */
+		type: (text: string) => {
+			draft = text;
+		},
 		renders: () => renders,
 		usageEntries: () => sessionManager.getEntries().filter(entry => entry.type === "model_usage"),
 		/** A new message lands on the journal and in the live history. */
@@ -195,5 +215,112 @@ describe("ComposerPredictionController", () => {
 		expect(controller.text).toBeUndefined();
 		await reply(2, "latest prediction");
 		expect(controller.text).toBe("latest prediction");
+	});
+});
+
+describe("ComposerPredictionController metrics", () => {
+	let exporter: InMemoryMetricExporter;
+	let reader: PeriodicExportingMetricReader;
+
+	beforeEach(() => {
+		exporter = new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE);
+		reader = new PeriodicExportingMetricReader({ exporter, exportIntervalMillis: 3_600_000 });
+		metrics.setGlobalMeterProvider(new MeterProvider({ readers: [reader] }));
+	});
+
+	afterEach(async () => {
+		await reader.shutdown();
+		metrics.disable();
+	});
+
+	/** `{attribute value: count}` for one counter, keyed by `attribute`. */
+	async function counts(name: string, attribute: string): Promise<Record<string, number>> {
+		await reader.forceFlush();
+		const points = exporter
+			.getMetrics()
+			.at(-1)
+			?.scopeMetrics.flatMap(scope => scope.metrics)
+			.find(metric => metric.descriptor.name === name)?.dataPoints;
+		return Object.fromEntries(
+			(points ?? []).map(point => [
+				String(point.attributes[attribute]),
+				typeof point.value === "number" ? point.value : NaN,
+			]),
+		);
+	}
+
+	it("counts each request by how it settled", async () => {
+		const shown = harness();
+		shown.controller.request();
+		await shown.reply(0, "now run the tests");
+
+		const hidden = harness();
+		hidden.controller.request();
+		hidden.type("deploy");
+		await hidden.reply(0, "now run the tests");
+
+		const skipped = harness();
+		skipped.controller.request();
+		await skipped.reply(0, "NO_PREDICTION");
+
+		const stale = harness();
+		stale.controller.request();
+		stale.advance("something else");
+		await stale.reply(0, "too late");
+
+		const superseded = harness();
+		superseded.controller.request();
+		superseded.controller.request();
+		await superseded.fail(0, new DOMException("aborted", "AbortError"));
+
+		const timedOut = harness({ deadlineMs: 5 });
+		timedOut.controller.request();
+		const signal = timedOut.turns[0]!.options.signal!;
+		const { promise: deadline, resolve: reachDeadline } = Promise.withResolvers<void>();
+		signal.addEventListener("abort", () => reachDeadline(), { once: true });
+		await deadline;
+		await timedOut.fail(0, signal.reason);
+
+		const failed = harness();
+		failed.controller.request();
+		await failed.fail(0, new Error("overloaded"));
+
+		expect(await counts("omp.composer.prediction.requests", "omp.composer.prediction.outcome")).toEqual({
+			shown: 1,
+			hidden: 1,
+			skipped: 1,
+			stale: 1,
+			cancelled: 1,
+			timeout: 1,
+			error: 1,
+		});
+	});
+
+	it("resolves each offered prediction once, as accepted or ignored", async () => {
+		const accepted = harness();
+		accepted.controller.request();
+		await accepted.reply(0, "now run the tests");
+		accepted.controller.accepted();
+		accepted.controller.accepted();
+		// The submitted message ends the turn; the next request retires the accepted prediction.
+		accepted.controller.request();
+
+		const ignored = harness();
+		ignored.controller.request();
+		await ignored.reply(0, "now run the tests");
+		ignored.controller.request();
+
+		const outdated = harness();
+		outdated.controller.request();
+		await outdated.reply(0, "now run the tests");
+		outdated.advance("something else");
+		// No longer offered, so there is nothing to accept.
+		outdated.controller.accepted();
+		outdated.controller.cancel();
+
+		expect(await counts("omp.composer.prediction.resolved", "omp.composer.prediction.result")).toEqual({
+			accepted: 1,
+			ignored: 2,
+		});
 	});
 });
