@@ -352,13 +352,19 @@ export class ChatTranscriptBuilder {
 			}
 			case "bashExecution": {
 				const component = new BashExecutionComponent(message.command, this.#deps.ui, message.excludeFromContext);
-				if (message.output) component.appendOutput(message.output);
+				// Same as the live transcript: seed the persisted output as the
+				// completed snapshot. appendOutput() applies the live streaming cap
+				// and would leave the replayed tail truncated for good.
 				component.setComplete(message.exitCode, message.cancelled, {
+					output: message.output,
 					truncation: message.meta?.truncation,
 					artifactError: message.meta?.artifactError,
 					images: message.images,
 					showImages: displayPreferences.showImages,
 				});
+				// Tracked so a transcript-wide toggle (rewind, copy, agent
+				// transcripts) expands the replayed block too.
+				this.#trackExpandable(component);
 				this.container.addChild(component);
 				break;
 			}

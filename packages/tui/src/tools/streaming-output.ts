@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import type { AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import { formatBytes, materializeString, sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatBytes, logger, materializeString, sanitizeText } from "@oh-my-pi/pi-utils";
 import { sanitizeWithOptionalSixelPassthrough } from "../render/sixel";
 
 // =============================================================================
@@ -95,7 +95,13 @@ export interface OutputSinkOptions {
 	 * writes still respect the budget. Default 0 = no per-line cap.
 	 */
 	maxColumns?: number;
-	onChunk?: (chunk: string) => void;
+	/**
+	 * Subscriber notified about each (throttled) chunk. A subscriber may return
+	 * a promise — the kernel-backed executors do — so the sink tracks the
+	 * in-flight call: its rejection must not become an unhandled rejection, and
+	 * disposal must be able to await it before the artifact is closed.
+	 */
+	onChunk?: (chunk: string) => void | Promise<void>;
 	/** Minimum ms between onChunk calls. 0 = every chunk (default). */
 	chunkThrottleMs?: number;
 	/**
@@ -973,7 +979,16 @@ export class OutputSink {
 	readonly #artifactId?: string;
 	readonly #spillThreshold: number;
 	readonly #headLimit: number;
-	readonly #onChunk?: (chunk: string) => void;
+	readonly #onChunk?: (chunk: string) => void | Promise<void>;
+	/**
+	 * The in-flight subscriber calls, when the subscriber is async. Their
+	 * rejections are handled here so they never surface as an unhandled
+	 * rejection, and disposal awaits them so the flushed tail is delivered
+	 * before the artifact is closed. Every call is tracked: two can overlap
+	 * when the subscriber is slower than the next chunk, and disposal must
+	 * wait for the newest one, not whichever a stale handler cleared.
+	 */
+	readonly #onChunkCalls = new Set<Promise<void>>();
 	readonly #chunkThrottleMs: number;
 	readonly #maxColumns: number;
 
@@ -1076,8 +1091,9 @@ export class OutputSink {
 		this.#store(chunk, inlineChunk, substituted);
 
 		// Throttled onChunk: coalesce chunks arriving inside the throttle window.
-		// A timer flushes quiet tails at the throttle boundary; dump() catches a
-		// final pending chunk when the process exits before that timer fires.
+		// A timer flushes quiet tails at the throttle boundary; dump() and the
+		// error path's dispose() catch a final pending chunk when the process
+		// exits before that timer fires.
 		// Live preview gets the inline (pre-cap) chunk so the TUI never lags behind
 		// what reached the in-memory sink — the column cap is for the persisted LLM view.
 		if (this.#onChunk && options?.emitInline !== false && inlineChunk.length > 0) {
@@ -1517,7 +1533,22 @@ export class OutputSink {
 		this.#lastChunkTime = now;
 		const merged = this.#pendingChunk + chunk;
 		this.#pendingChunk = "";
-		this.#onChunk?.(merged);
+		const result = this.#onChunk?.(merged) as Promise<void> | undefined;
+		// A subscriber may be async (the kernel-backed executors are). Its
+		// rejection must not become an unhandled rejection: the live path has no
+		// caller to hand it to, and during disposal it would replace the
+		// command's own error. Keep the failure here — disposal awaits the call
+		// and reports it — instead of letting it escape.
+		if (result !== undefined && typeof result.then === "function") {
+			const call = result.then(
+				() => {},
+				(error: unknown) => {
+					logger.warn("Output chunk subscriber rejected", { error: String(error) });
+				},
+			);
+			this.#onChunkCalls.add(call);
+			void call.then(() => this.#onChunkCalls.delete(call));
+		}
 	}
 
 	#flushPendingChunk(): void {
@@ -1725,10 +1756,35 @@ export class OutputSink {
 	 * `finally`: if {@link dump} already ran this is a no-op, otherwise it
 	 * flushes the capped tail and closes the sink so the descriptor is not
 	 * leaked until a later unrelated read hits `EMFILE` (issue #6463).
+	 * A chunk the throttle still holds back is delivered first: the error path
+	 * never reaches {@link dump}'s flush, and without this the subscriber's
+	 * retained tail silently ends one chunk early with no skipped count.
+	 *
+	 * Disposal never throws. It runs while a command is already unwinding a
+	 * backend failure, and a subscriber that rejects the flushed tail would
+	 * replace that failure and skip the executor's own cleanup — the session
+	 * key stays marked busy for later commands. The subscriber's error is the
+	 * caller's to handle; the artifact is closed either way. An async
+	 * subscriber's in-flight call is awaited here, so the flushed tail is
+	 * delivered before the artifact closes and its rejection cannot escape as
+	 * an unhandled rejection.
 	 */
 	async dispose(): Promise<void> {
-		this.#clearPendingChunkTimer();
-		await this.#finalizeFile();
+		try {
+			try {
+				this.#flushPendingChunk();
+			} catch {
+				// A throwing subscriber must not turn a cleanup call into a failure —
+				// and it must not skip the tracked calls below, which may still be
+				// in flight from an earlier chunk.
+			}
+			// Every in-flight async subscriber call is awaited here: the flushed
+			// tail must be delivered before the artifact is closed, and a
+			// rejection must not replace the command's own error.
+			await Promise.all(this.#onChunkCalls);
+		} finally {
+			await this.#finalizeFile();
+		}
 	}
 }
 
