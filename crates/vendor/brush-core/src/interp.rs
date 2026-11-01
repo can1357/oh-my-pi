@@ -970,7 +970,7 @@ async fn spawn_pipeline_processes(
 	}
 
 	for (current_pipeline_index, command) in pipeline.seq.iter().enumerate() {
-		ensure_not_cancelled(params)?;
+		loop_checkpoint(params).await?;
 		//
 		// We run a command directly in the current shell if either of the following is
 		// true:
@@ -1172,9 +1172,7 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::Command {
 						let mut params = params;
 						Ok(ExecutionSpawnResult::StartedTask(tokio::spawn(async move {
 							if let Some(redirects) = &redirects {
-								for redirect in &redirects.0 {
-									setup_redirect(&mut shell, &mut params, redirect).await?;
-								}
+								setup_redirects(&mut shell, &mut params, redirects).await?;
 							}
 							compound.execute(&mut shell, &params).await
 						})))
@@ -1182,9 +1180,7 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::Command {
 					mut shell => {
 						// Set up any additional redirects.
 						if let Some(redirects) = redirects {
-							for redirect in &redirects.0 {
-								setup_redirect(&mut shell, &mut params, redirect).await?;
-							}
+							setup_redirects(&mut shell, &mut params, redirects).await?;
 						}
 
 						Ok(compound.execute(&mut shell, &params).await?.into())
@@ -1201,9 +1197,7 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::Command {
 			Self::ExtendedTest(e, redirects) => {
 				// Set up any additional redirects.
 				if let Some(redirects) = redirects {
-					for redirect in &redirects.0 {
-						setup_redirect(&mut pipeline_context.shell, &mut params, redirect).await?;
-					}
+					setup_redirects(&mut pipeline_context.shell, &mut params, redirects).await?;
 				}
 
 				// Evaluate the extended test expression.
@@ -1390,6 +1384,7 @@ impl Execute for ast::ForClauseCommand {
 		let mut expanded_values = vec![];
 		if let Some(unexpanded_values) = &self.values {
 			for value in unexpanded_values {
+				loop_checkpoint(params).await?;
 				let mut expanded = expansion::full_expand_and_split_word(shell, params, value).await?;
 				expanded_values.append(&mut expanded);
 			}
@@ -1468,12 +1463,13 @@ impl Execute for ast::CaseClauseCommand {
 		let mut force_execute_next_case = false;
 
 		for case in &self.cases {
-			ensure_not_cancelled(params)?;
+			loop_checkpoint(params).await?;
 			if force_execute_next_case {
 				force_execute_next_case = false;
 			} else {
 				let mut matches = false;
 				for pattern in &case.patterns {
+					loop_checkpoint(params).await?;
 					let expanded_pattern = expansion::basic_expand_pattern(shell, params, pattern)
 						.await?
 						.set_extended_globbing(shell.options().extended_globbing)
@@ -1761,7 +1757,7 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 		let status_change_count_before_expansion = context.shell.last_exit_status_change_count();
 
 		for item in prefix_iter.chain(cmd_name_items.iter()).chain(suffix_iter) {
-			ensure_not_cancelled(&params)?;
+			loop_checkpoint(&params).await?;
 			match item {
 				CommandPrefixOrSuffixItem::IoRedirect(redirect) => {
 					if let Err(e) = setup_redirect(&mut context.shell, &mut params, redirect).await {
@@ -1892,6 +1888,7 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 		} else {
 			// No command to run; assignments must be applied to this shell.
 			for assignment in assignments {
+				loop_checkpoint(&params).await?;
 				// Apply the assignment. Don't mark as fatal - let errors be handled
 				// at the program level so multiple complete_commands can execute independently.
 				apply_assignment(
@@ -1938,6 +1935,7 @@ async fn execute_command(
 	let mut guard = crate::env::ScopeGuard::new(&mut context.shell, EnvironmentScope::Command);
 
 	for assignment in &assignments {
+		loop_checkpoint(&params).await?;
 		// Ensure it's tagged as exported and created in the command scope.
 		apply_assignment(
 			assignment,
@@ -2021,6 +2019,7 @@ async fn expand_assignment_value(
 		ast::AssignmentValue::Array(arr) => {
 			let mut expanded_values = vec![];
 			for (key, value) in arr {
+				loop_checkpoint(params).await?;
 				if let Some(k) = key {
 					let expanded_key = expansion::basic_expand_assignment_word(shell, params, k)
 						.await?
@@ -2080,6 +2079,7 @@ async fn apply_assignment(
 		ast::AssignmentValue::Array(unexpanded_values) => {
 			let mut elements = vec![];
 			for (unexpanded_key, unexpanded_value) in unexpanded_values {
+				loop_checkpoint(params).await?;
 				let key = match unexpanded_key {
 					Some(unexpanded_key) => Some(
 						expansion::basic_expand_assignment_word(shell, params, unexpanded_key).await?,
@@ -2196,6 +2196,20 @@ async fn apply_assignment(
 	}
 
 	shell.env_mut().add(variable_name, new_var, creation_scope)
+}
+
+/// Sets up a compound command's redirections in order. A command can carry
+/// any number of them, so each passes a loop checkpoint first.
+async fn setup_redirects(
+	shell: &mut Shell<impl extensions::ShellExtensions>,
+	params: &mut ExecutionParameters,
+	redirects: &ast::RedirectList,
+) -> Result<(), error::Error> {
+	for redirect in &redirects.0 {
+		loop_checkpoint(params).await?;
+		setup_redirect(shell, params, redirect).await?;
+	}
+	Ok(())
 }
 
 #[expect(clippy::too_many_lines)]
