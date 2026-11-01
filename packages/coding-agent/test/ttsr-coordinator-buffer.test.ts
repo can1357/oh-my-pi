@@ -3,7 +3,7 @@ import type { Agent, AgentEvent, AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, AssistantMessageEvent } from "@oh-my-pi/pi-ai";
 import type { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
-import { TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
+import { ruleRecordKey, TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session-events";
 import { TtsrCoordinator, type TtsrCoordinatorHost } from "@oh-my-pi/pi-coding-agent/session/ttsr-coordinator";
 import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -33,6 +33,7 @@ interface CoordinatorHostBundle {
 	followUp: Mock<(message: AgentMessage) => void>;
 	hasQueuedMessages: Mock<() => boolean>;
 	scheduleAgentContinue: Mock<(options: Parameters<TtsrCoordinatorHost["scheduleAgentContinue"]>[0]) => void>;
+	appendTtsrInjection: Mock<(recordKeys: string[]) => void>;
 }
 
 function makeHost(): CoordinatorHostBundle {
@@ -42,6 +43,7 @@ function makeHost(): CoordinatorHostBundle {
 	const scheduleAgentContinue = vi.fn(
 		(_options: Parameters<TtsrCoordinatorHost["scheduleAgentContinue"]>[0]) => undefined,
 	);
+	const appendTtsrInjection = vi.fn((_recordKeys: string[]) => undefined);
 	const host = {
 		agent: {
 			state: { messages: [], tools: [] },
@@ -49,14 +51,14 @@ function makeHost(): CoordinatorHostBundle {
 			followUp,
 			hasQueuedMessages,
 		} as unknown as Agent,
-		sessionManager: { getCwd: () => "/tmp", appendTtsrInjection: vi.fn() } as unknown as SessionManager,
+		sessionManager: { getCwd: () => "/tmp", appendTtsrInjection } as unknown as SessionManager,
 		settings: {} as Settings,
 		emitSessionEvent,
 		schedulePostPromptTask: vi.fn(),
 		scheduleAgentContinue,
 		promptGeneration: () => 0,
 	} as unknown as TtsrCoordinatorHost;
-	return { host, emitSessionEvent, followUp, hasQueuedMessages, scheduleAgentContinue };
+	return { host, emitSessionEvent, followUp, hasQueuedMessages, scheduleAgentContinue, appendTtsrInjection };
 }
 
 function assistantMessage(content: unknown[] = []): AgentMessage {
@@ -358,6 +360,90 @@ describe("TTSR stream buffers", () => {
 
 		const isTrigger = (event: AgentSessionEvent): boolean => event.type === "ttsr_triggered";
 		expect(emitSessionEvent.mock.calls.filter(([event]) => isTrigger(event))).toHaveLength(1);
+	});
+});
+
+describe("TTSR variant records across a model switch before delivery", () => {
+	// Same-named variants: the session registers the one its current model admits.
+	function variants(scope: string): { opus: Rule; sonnet: Rule } {
+		const base = { ...makeRule(scope), name: "guard", interruptMode: "never" as const };
+		return { opus: { ...base, family: ["opus"] }, sonnet: { ...base, family: ["sonnet"] } };
+	}
+
+	function setup(scope: string) {
+		const bundle = makeHost();
+		const manager = new TtsrManager({
+			enabled: true,
+			contextMode: "keep",
+			interruptMode: "never",
+			repeatMode: "once",
+		});
+		const rules = variants(scope);
+		const retain = new Set(["guard"]);
+		manager.replaceRules([rules.opus], retain);
+		const switchToSonnet = () => manager.replaceRules([rules.sonnet], retain);
+		return { ...bundle, coordinator: new TtsrCoordinator(bundle.host, manager), manager, rules, switchToSonnet };
+	}
+
+	function toolMessage(id: string): AgentMessage {
+		return assistantMessage([{ type: "toolCall", id, name: "bash", arguments: {} }]);
+	}
+
+	function deliverToolReminder(coordinator: TtsrCoordinator, id: string): string | undefined {
+		const result = coordinator.afterToolCall({ toolCall: { id } } as Parameters<TtsrCoordinator["afterToolCall"]>[0]);
+		return result?.additionalContext;
+	}
+
+	it("persists the matched variant for a per-tool reminder delivered after the switch", async () => {
+		const { coordinator, rules, switchToSonnet, appendTtsrInjection } = setup("tool:bash");
+		coordinator.onAssistantMessageStart();
+		await coordinator.checkMessageUpdate(toolDelta(toolMessage("call-1"), CONDITION));
+		switchToSonnet();
+		expect(deliverToolReminder(coordinator, "call-1")).toBeDefined();
+		expect(appendTtsrInjection.mock.calls).toEqual([[[ruleRecordKey(rules.opus)]]]);
+
+		coordinator.onAssistantMessageStart();
+		await coordinator.checkMessageUpdate(toolDelta(toolMessage("call-2"), CONDITION));
+		expect(deliverToolReminder(coordinator, "call-2")).toBeDefined();
+		expect(appendTtsrInjection.mock.calls.at(-1)).toEqual([[ruleRecordKey(rules.sonnet)]]);
+	});
+
+	it("persists the matched variant for a deferred injection delivered after the switch", async () => {
+		const { coordinator, rules, switchToSonnet, appendTtsrInjection, followUp } = setup("text");
+		const queueMatch = async () => {
+			const message = assistantMessage();
+			coordinator.onAssistantMessageStart();
+			await coordinator.checkMessageUpdate(textDelta(message, CONDITION));
+			coordinator.onAssistantMessageEnd({ ...message, stopReason: "stop" } as AssistantMessage);
+		};
+		await queueMatch();
+		switchToSonnet();
+		const delivery = followUp.mock.calls[0]?.[0];
+		if (delivery?.role !== "custom") throw new Error("Expected a custom TTSR delivery");
+		coordinator.markInjectedFromDetails(delivery.details);
+		expect(appendTtsrInjection.mock.calls).toEqual([[[ruleRecordKey(rules.opus)]]]);
+
+		await queueMatch();
+		expect(followUp).toHaveBeenCalledTimes(2);
+	});
+
+	it("falls back to the registered variant, else the bare name, for a delivery it no longer tracks", async () => {
+		const { coordinator, rules, switchToSonnet, appendTtsrInjection, followUp, manager } = setup("text");
+		const message = assistantMessage();
+		coordinator.onAssistantMessageStart();
+		await coordinator.checkMessageUpdate(textDelta(message, CONDITION));
+		coordinator.onAssistantMessageEnd({ ...message, stopReason: "stop" } as AssistantMessage);
+		const delivery = followUp.mock.calls[0]?.[0];
+		if (delivery?.role !== "custom") throw new Error("Expected a custom TTSR delivery");
+		coordinator.releaseDeferredReservationFromDetails(delivery.details);
+		switchToSonnet();
+
+		coordinator.markInjectedFromDetails(delivery.details);
+		expect(appendTtsrInjection.mock.calls.at(-1)).toEqual([[ruleRecordKey(rules.sonnet)]]);
+
+		manager.replaceRules([], new Set(["guard"]));
+		coordinator.markInjectedFromDetails({ rules: ["guard"], deliveryId: 999 });
+		expect(appendTtsrInjection.mock.calls.at(-1)).toEqual([["guard"]]);
 	});
 });
 

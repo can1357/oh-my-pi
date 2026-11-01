@@ -193,7 +193,7 @@ Within a matching batch, each rule is attached to exactly one sibling tool call:
 
 `TtsrManager` tracks `#messageCount` and per-rule `lastInjectedAt`.
 
-Records are keyed per variant: an unscoped rule's key is its name, and a model-scoped rule's key is `<name>::scope:<hex hash of its model scope>`, so same-named variants keep separate repeat state. A record keyed by the bare name of a scoped rule (legacy persisted state, or a name marked while unregistered) applies to every variant of that name.
+Records are keyed per variant: an unscoped rule's key is its name, and a model-scoped rule's key is `<name>::scope:<first 16 hex digits of the SHA-256 of its model scope>`, so same-named variants keep separate repeat state. A delivery marks the variant that matched, even when a model change registered another variant before the reminder was delivered. A record keyed by the bare name of a scoped rule (legacy persisted state, or a name marked while unregistered) applies to every variant of that name.
 
 ### `repeatMode: "once"`
 

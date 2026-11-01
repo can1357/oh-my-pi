@@ -560,12 +560,15 @@ const SCOPED_RECORD_KEY = /^(.*)::scope:([0-9a-f]+)$/;
 
 /**
  * Injection-record key for a rule: its name when unscoped, otherwise
- * `<name>::scope:<hex hash of the model scope>`, so same-named model variants
- * keep separate repeat state. Persisted in `ttsr_injection` entries.
+ * `<name>::scope:<first 16 hex digits of the SHA-256 of the model scope>`, so
+ * same-named model variants keep separate repeat state. Persisted in
+ * `ttsr_injection` entries, so the hash must stay stable across runtimes.
  */
 export function ruleRecordKey(rule: Pick<Rule, "name" | "models" | "providers" | "class" | "family">): string {
 	const scopeKey = ruleModelScopeKey(rule);
-	return scopeKey ? `${rule.name}::scope:${Bun.hash(scopeKey).toString(16)}` : rule.name;
+	if (!scopeKey) return rule.name;
+	const scopeHash = new Bun.CryptoHasher("sha256").update(scopeKey).digest("hex").slice(0, 16);
+	return `${rule.name}::scope:${scopeHash}`;
 }
 
 /**
@@ -837,14 +840,18 @@ export class TtsrManager {
 		if (!entry) {
 			return false;
 		}
-		this.#rules.set(rule.name, entry);
+		this.#register(entry);
+		return true;
+	}
+
+	#register(entry: TtsrEntry): void {
+		this.#rules.set(entry.rule.name, entry);
 		if (entry.question) {
 			this.#hasJudgedRules = true;
 		} else {
 			if (entry.scope.allowText) this.#canMatchText = true;
 			if (entry.scope.allowThinking) this.#canMatchThinking = true;
 		}
-		return true;
 	}
 
 	/**
@@ -1234,13 +1241,20 @@ export class TtsrManager {
 	 * rejected conditional rules through its normal fallback path.
 	 */
 	replaceRules(rules: readonly Rule[], retainNames?: ReadonlySet<string>): Set<string> {
+		// Compile every entry before touching the registered set, so a throw leaves it intact.
+		const entries = new Map<string, TtsrEntry>();
+		if (this.#settings.enabled) {
+			for (const rule of rules) {
+				if (entries.has(rule.name)) continue;
+				const entry = this.#entryFor(rule);
+				if (entry) entries.set(rule.name, entry);
+			}
+		}
 		this.#rules.clear();
 		this.#canMatchText = false;
 		this.#canMatchThinking = false;
 		this.#hasJudgedRules = false;
-		for (const rule of rules) {
-			this.addRule(rule);
-		}
+		for (const entry of entries.values()) this.#register(entry);
 		const registered = new Set(this.#rules.keys());
 		this.resetBuffer();
 

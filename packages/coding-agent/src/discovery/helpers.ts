@@ -21,8 +21,8 @@ import type { ExtensionModule } from "../capability/extension-module";
 import { invalidate as invalidateFsCache, readDirEntries, readFile } from "../capability/fs";
 import {
 	MAIN_AGENT_RULE_NAME,
-	parseRuleGlobs,
 	parseRuleConditionAndScope,
+	parseRuleGlobs,
 	type Rule,
 	type RuleFrontmatter,
 	SUB_AGENT_RULE_NAME,

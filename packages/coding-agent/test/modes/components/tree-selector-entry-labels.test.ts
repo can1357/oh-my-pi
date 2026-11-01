@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
 import * as themeModule from "@oh-my-pi/pi-tui/theme";
+import { ruleRecordKey } from "@oh-my-pi/pi-coding-agent/export/ttsr";
 import type { SessionEntry, SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 
 const ALT_A = "\x1ba";
@@ -127,7 +128,10 @@ describe("tree selector entry labels", () => {
 			{
 				...base("ttsr", "u1"),
 				type: "ttsr_injection",
-				injectedRules: ["guard::scope:1a2b", "guard::scope:3c4d"],
+				injectedRules: [
+					ruleRecordKey({ name: "guard", family: ["opus"] }),
+					ruleRecordKey({ name: "guard", family: ["sonnet"] }),
+				],
 			},
 		] as SessionEntry[];
 		const search = (query: string): string => {

@@ -19,6 +19,7 @@ import { BUILTIN_DEFAULTS_PROVIDER_ID, type Rule } from "../capability/rule";
 import type { Settings } from "../config/settings";
 import {
 	judgeRules,
+	ruleRecordKey,
 	type TtsrCheckOptions,
 	type TtsrManager,
 	type TtsrMatchContext,
@@ -80,6 +81,8 @@ export class TtsrCoordinator {
 	#pendingExcerpts: Record<string, string> = {};
 	#perToolInjections = new Map<string, Rule[]>();
 	#deferredReservations = new Map<string, number>();
+	/** Matched rule variants per queued delivery, so delivery marks what matched, not what is registered then. */
+	#deferredDeliveries = new Map<number, Rule[]>();
 	#nextDeferredDeliveryId = 0;
 	#abortPending = false;
 	#retryToken = 0;
@@ -238,7 +241,7 @@ export class TtsrCoordinator {
 				}),
 			)
 			.join("\n\n");
-		this.#markInjected(matches.map(rule => rule.name));
+		this.#markInjected(matches);
 		return { block: true, reason: this.#formatAbortReason(matches) + "\n" + reminder };
 	}
 
@@ -271,8 +274,13 @@ export class TtsrCoordinator {
 		if (!details || typeof details !== "object" || Array.isArray(details)) return;
 		const rules = "rules" in details ? details.rules : undefined;
 		if (!Array.isArray(rules)) return;
-		const ruleNames = rules.filter((ruleName): ruleName is string => typeof ruleName === "string");
-		this.#markInjected(ruleNames);
+		const deliveryId = "deliveryId" in details ? details.deliveryId : undefined;
+		const delivered = typeof deliveryId === "number" ? this.#deferredDeliveries.get(deliveryId) : undefined;
+		if (delivered) {
+			this.#markInjected(delivered);
+		} else {
+			this.#markInjectedByNames(rules.filter((ruleName): ruleName is string => typeof ruleName === "string"));
+		}
 		this.releaseDeferredReservationFromDetails(details);
 	}
 
@@ -329,8 +337,7 @@ export class TtsrCoordinator {
 				}),
 			)
 			.join("\n\n");
-		const ruleNames = rules.map(rule => rule.name.trim()).filter(name => name.length > 0);
-		if (ruleNames.length > 0) this.#markInjected(ruleNames);
+		this.#markInjected(rules);
 		return reminder;
 	}
 
@@ -411,10 +418,12 @@ export class TtsrCoordinator {
 	#reserveDeferredInjection(rules: Rule[]): number {
 		const deliveryId = ++this.#nextDeferredDeliveryId;
 		for (const rule of rules) this.#deferredReservations.set(rule.name, deliveryId);
+		this.#deferredDeliveries.set(deliveryId, rules);
 		return deliveryId;
 	}
 
 	#releaseDeferredReservation(deliveryId: number, ruleNames: string[]): void {
+		this.#deferredDeliveries.delete(deliveryId);
 		for (const ruleName of ruleNames) {
 			if (this.#deferredReservations.get(ruleName) === deliveryId) this.#deferredReservations.delete(ruleName);
 		}
@@ -440,25 +449,33 @@ export class TtsrCoordinator {
 			if (otherId === toolCallId) continue;
 			for (const rule of otherBucket) claimedElsewhere.add(rule.name);
 		}
-		const newlyAdded: string[] = [];
+		const newlyAdded: Rule[] = [];
 		for (const rule of rules) {
 			if (seen.has(rule.name) || claimedElsewhere.has(rule.name)) continue;
 			bucket.push(rule);
 			seen.add(rule.name);
-			newlyAdded.push(rule.name);
+			newlyAdded.push(rule);
 		}
 		if (bucket.length === 0) return;
 		this.#perToolInjections.set(toolCallId, bucket);
-		if (markInjected && newlyAdded.length > 0) this.#manager?.markInjectedByNames(newlyAdded);
+		if (markInjected && newlyAdded.length > 0) this.#manager?.markInjected(newlyAdded);
 	}
 
-	#markInjected(ruleNames: string[]): void {
+	/** Marks and persists the variants that matched; `details.rules` and replay keep plain names. */
+	#markInjected(rules: readonly Rule[]): void {
+		const marked = rules.filter(rule => rule.name.trim().length > 0);
+		if (marked.length === 0) return;
+		this.#manager?.markInjected(marked);
+		this.#host.sessionManager.appendTtsrInjection(Array.from(new Set(marked.map(ruleRecordKey))));
+	}
+
+	/** Name-only fallback for a delivery whose matched variants are unknown; marks the registered variants. */
+	#markInjectedByNames(ruleNames: string[]): void {
 		const uniqueRuleNames = Array.from(
 			new Set(ruleNames.map(ruleName => ruleName.trim()).filter(ruleName => ruleName.length > 0)),
 		);
 		if (uniqueRuleNames.length === 0) return;
 		this.#manager?.markInjectedByNames(uniqueRuleNames);
-		// Persist variant record keys; `details.rules` and replay keep plain names.
 		this.#host.sessionManager.appendTtsrInjection(this.#manager?.recordKeysFor(uniqueRuleNames) ?? uniqueRuleNames);
 	}
 
@@ -742,7 +759,7 @@ export class TtsrCoordinator {
 						details,
 						"agent",
 					);
-					this.#markInjected(details.rules);
+					this.#markInjected(injection.rules);
 				}
 				this.#host.scheduleAgentContinue({
 					source: "ttsr-interrupt",

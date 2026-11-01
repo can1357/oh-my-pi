@@ -91,6 +91,26 @@ describe("bucketRules", () => {
 		expect(mgr.checkDelta("NEW", { source: "text" })).toEqual([]);
 	});
 
+	it("keeps the registered rules and injection state when compiling a replacement throws", () => {
+		const mgr = new TtsrManager();
+		const original = makeRule({ name: "guard", condition: ["OLD"] });
+		bucketRules([original], mgr);
+		mgr.markInjected([original]);
+
+		const glob = vi.spyOn(Bun, "Glob").mockImplementation((() => {
+			throw new Error("glob compile failed");
+		}) as never);
+		const replacement = makeRule({ name: "other", condition: ["NEW"], globs: ["src/**"] });
+		try {
+			expect(() => bucketRules([replacement], mgr, { replaceTtsrRules: true })).toThrow("glob compile failed");
+		} finally {
+			glob.mockRestore();
+		}
+
+		expect(mgr.getRules()).toEqual([original]);
+		expect(mgr.getInjectedRuleNames()).toEqual(["guard"]);
+	});
+
 	it("registers an ast-only rule as TTSR and excludes it from rulebook/always buckets", () => {
 		const mgr = new TtsrManager();
 		const ttsr = makeRule({ name: "no-console", astCondition: ["console.log($A)"], description: "blocks console" });

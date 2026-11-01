@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, onTestFinished, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -13,6 +13,7 @@ import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
 
 const OPUS_MARKER = "OPUS_ONLY_RULE_BODY_7f3a";
 const SONNET_MARKER = "SONNET_ONLY_RULE_BODY_2c9e";
@@ -56,6 +57,7 @@ describe("model-scoped rules in a live session", () => {
 
 	afterEach(() => {
 		resetActiveRulesForTests();
+		vi.restoreAllMocks();
 	});
 
 	afterAll(async () => {
@@ -205,11 +207,22 @@ describe("model-scoped rules in a live session", () => {
 		expect(getActiveRules().map(r => r.name)).toContain("sonnet-guard");
 	});
 
-	it("refreshes a live advisor's scoped rules after /clear rediscovers them", async () => {
+	it("refreshes a live advisor's scoped rules after /clear and /new rediscover them", async () => {
 		const project = path.join(dir, `advisor-refresh-${Snowflake.next()}`);
 		const ruleFile = path.join(project, ".omp", "rules", "style.md");
 		const writeRule = (body: string) => Bun.write(ruleFile, `---\nalwaysApply: true\nfamily: sonnet\n---\n${body}\n`);
 		await fs.mkdir(path.join(project, ".git"), { recursive: true });
+		// Discovery reads user-level config from `os.homedir()` and the process-global agent dir;
+		// point both at a temp home. A rule under that home proves discovery read it.
+		const home = path.join(project, "home");
+		await Bun.write(
+			path.join(home, ".agents", "rules", "home-marker.md"),
+			"---\nalwaysApply: true\nfamily: sonnet\n---\nTEMP_HOME_RULE_5a90\n",
+		);
+		vi.spyOn(os, "homedir").mockReturnValue(home);
+		const originalAgentDir = getAgentDir();
+		setAgentDir(path.join(home, ".omp", "agent"));
+		onTestFinished(() => setAgentDir(originalAgentDir));
 		await writeRule("ORIGINAL_ADVISOR_RULE_4e1f");
 		const settings = Settings.isolated();
 		settings.setModelRole("advisor", sonnetSelector);
@@ -222,15 +235,26 @@ describe("model-scoped rules in a live session", () => {
 		session.setAdvisorEnabled(true);
 		const advisorPrompt = () => session.getAdvisorAgent()?.state.systemPrompt.join("\n") ?? "";
 		expect(advisorPrompt()).toContain("ORIGINAL_ADVISOR_RULE_4e1f");
+		expect(advisorPrompt()).toContain("TEMP_HOME_RULE_5a90");
+
+		// An unchanged rules block keeps the advisor's prompt, and its prompt cache, as is.
+		const setSystemPrompt = vi.spyOn(session.getAdvisorAgent()!, "setSystemPrompt");
+		await session.resetSessionContext();
+		expect(setSystemPrompt).not.toHaveBeenCalled();
 
 		await writeRule("UPDATED_ADVISOR_RULE_8b2c");
 		await session.resetSessionContext();
 		expect(advisorPrompt()).toContain("UPDATED_ADVISOR_RULE_8b2c");
 		expect(advisorPrompt()).not.toContain("ORIGINAL_ADVISOR_RULE_4e1f");
 
+		await writeRule("NEW_SESSION_ADVISOR_RULE_c71d");
+		await session.newSession();
+		expect(advisorPrompt()).toContain("NEW_SESSION_ADVISOR_RULE_c71d");
+		expect(advisorPrompt()).not.toContain("UPDATED_ADVISOR_RULE_8b2c");
+
 		await fs.rm(ruleFile);
 		await session.resetSessionContext();
-		expect(advisorPrompt()).not.toContain("UPDATED_ADVISOR_RULE_8b2c");
+		expect(advisorPrompt()).not.toContain("NEW_SESSION_ADVISOR_RULE_c71d");
 	});
 
 	it("gives advisors only the always-apply rules scoped to their own model", async () => {
