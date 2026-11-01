@@ -211,6 +211,9 @@ export function streamProxy(model: Model, context: Context, options: ProxyStream
 						repetitionPenalty: options.repetitionPenalty,
 						maxTokens: options.maxTokens,
 						reasoning: options.reasoning,
+						// The server runs the provider and every retry sleep: these bound them.
+						maxRetryDelayMs: options.maxRetryDelayMs,
+						providerRetryWaitCeilingMs: options.providerRetryWaitCeilingMs,
 					},
 				}),
 				signal: options.signal,

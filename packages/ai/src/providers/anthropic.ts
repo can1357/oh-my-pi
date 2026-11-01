@@ -24,7 +24,7 @@ import { NO_AUTH_SENTINEL } from "../auth-retry";
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
-import { DEFAULT_MAX_RETRY_DELAY_MS, waitForRetry } from "../utils/retry-wait";
+import { DEFAULT_MAX_RETRY_DELAY_MS, providerRetryPolicy, sleepBeforeRetry, waitForRetry } from "../utils/retry-wait";
 import { getEnvApiKey } from "../env-api-key";
 import { OUTPUT_FALLBACK_BUFFER } from "../stream";
 import { wrapFetchForRequestCompression } from "../utils/request-compression";
@@ -3274,7 +3274,7 @@ const streamAnthropicOnce = (
 										attempt: fallbackCreditTransientRetries,
 									},
 								);
-								await waitForRetry(options?.providerRetryWait, 500, options?.signal);
+								await sleepBeforeRetry(options, 500, options?.signal);
 								resetStreamOutputState();
 								continue;
 							}
@@ -3584,7 +3584,14 @@ const streamAnthropicOnce = (
 								attempt: slowWaitAttempts,
 							});
 							if (slowRetry.delayMs > 0) {
-								await waitForRetry(options?.providerRetryWait, slowRetry.delayMs, options?.signal);
+								// The slow lane the caller opted into waits for a slot on the
+								// server's own schedule, inside its stated max-wait budget: a
+								// shorter sleep only resends into a busy slot, so it is not bounded.
+								await waitForRetry(
+									providerRetryPolicy(options).providerRetryWait,
+									slowRetry.delayMs,
+									options?.signal,
+								);
 							}
 							resetStreamOutputState();
 							continue;
@@ -3650,17 +3657,10 @@ const streamAnthropicOnce = (
 					const statedWaitMs = providerFailureWaitMs(sourceModel.provider, streamFailure, {
 						streamResponseHeaders,
 					});
-					const retryBounds = retryWaitBounds(
-						options?.maxRetryDelayMs,
-						DEFAULT_MAX_RETRY_DELAY_MS,
-						options?.providerRetryWaitCeilingMs,
-					);
-					if (retryBounds.declines(statedWaitMs, streamFailure)) throw streamFailure;
-					await waitForRetry(
-						options?.providerRetryWait,
-						Math.max(statedWaitMs ?? 0, backoffDelayMs),
-						options?.signal,
-					);
+					if (retryWaitBounds(options, DEFAULT_MAX_RETRY_DELAY_MS).declines(statedWaitMs, streamFailure)) {
+						throw streamFailure;
+					}
+					await sleepBeforeRetry(options, Math.max(statedWaitMs ?? 0, backoffDelayMs), options?.signal);
 					output.content.length = 0;
 					output.model = sourceModel.id;
 					output.responseId = undefined;

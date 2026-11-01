@@ -370,3 +370,32 @@ describe("streamProxy — every outcome field on the terminal frame", () => {
 		expect(message.timestamp).not.toBe(1);
 	});
 });
+
+describe("streamProxy — the caller's retry bounds", () => {
+	it("sends maxRetryDelayMs and providerRetryWaitCeilingMs, so the server's provider retries keep to them", async () => {
+		// The server runs the provider, and so every retry sleep: without the
+		// bounds on the wire it slept up to its own default, silently.
+		const sent: unknown[] = [];
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			async fetch(req) {
+				sent.push(await req.json());
+				return sse([{ type: "start" }, { type: "done", reason: "stop", usage }]);
+			},
+		});
+		try {
+			await streamProxy(model, context, {
+				authToken: "proxy-token",
+				proxyUrl: `http://127.0.0.1:${server.port}`,
+				maxRetryDelayMs: 300_000,
+				providerRetryWaitCeilingMs: 10_000,
+			}).result();
+		} finally {
+			server.stop(true);
+		}
+
+		expect(sent).toHaveLength(1);
+		expect(sent[0]).toMatchObject({ options: { maxRetryDelayMs: 300_000, providerRetryWaitCeilingMs: 10_000 } });
+	});
+});

@@ -173,7 +173,7 @@ describe("wire restatement guards", () => {
 	});
 
 	it("keeps the transport default when the cap is NaN", () => {
-		expect(retryWaitBounds(Number.NaN, 60_000).maxDelayMs).toBe(60_000);
+		expect(retryWaitBounds({ maxRetryDelayMs: Number.NaN }, 60_000).maxDelayMs).toBe(60_000);
 	});
 });
 

@@ -468,6 +468,14 @@ export interface FetchWithRetryOptions extends RequestInit {
 	 * `"Request was aborted"`.
 	 */
 	retryWait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
+	/**
+	 * Called with the wait a retryable response states (a header or its body,
+	 * as {@link extractRetryHint} reads it) when that wait is longer than
+	 * `maxDelayMs`, just before the response is returned unretried, so the
+	 * caller can say the wait was refused. Not called for a response returned
+	 * for any other reason.
+	 */
+	onRefusedWait?: (waitMs: number) => void;
 }
 
 const DEFAULT_MAX_DELAY_MS = 60_000;
@@ -495,6 +503,7 @@ export async function fetchWithRetry(
 		fetch: fetchImpl = fetch,
 		timeout = false,
 		retryWait,
+		onRefusedWait,
 		...baseInit
 	} = options;
 	const signal = baseInit.signal as AbortSignal | undefined;
@@ -533,7 +542,10 @@ export async function fetchWithRetry(
 		if (shouldRetryResponse && !(await shouldRetryResponse(response, retryBody, attempt))) return response;
 
 		const hint = extractRetryHint(response, retryBody);
-		if (hint !== undefined && hint > maxDelayMs) return response;
+		if (hint !== undefined && hint > maxDelayMs) {
+			onRefusedWait?.(hint);
+			return response;
+		}
 
 		const delayMs = Math.min(hint ?? resolveDefaultDelay(defaultDelayMs, attempt, maxDelayMs), maxDelayMs);
 		// The retried response is discarded; release its unread tee branch.

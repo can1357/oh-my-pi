@@ -24,7 +24,7 @@ import {
 	hasRefusedRetryWaitNote,
 	refusedRetryWaitNote,
 	retryWaitRefusal,
-	waitForRetry,
+	sleepBeforeRetry,
 } from "./retry-wait";
 import { withWireCount } from "./wire-attempts";
 
@@ -220,17 +220,13 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 			const delayMs = retryEmpty
 				? EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** emptyRetries
 				: retryProviderError &&
-					  !retryWaitBounds(
-							options?.maxRetryDelayMs,
-							DEFAULT_MAX_RETRY_DELAY_MS,
-							options?.providerRetryWaitCeilingMs,
-					  ).declines(statedWaitMs, failedMessage)
+					  !retryWaitBounds(options, DEFAULT_MAX_RETRY_DELAY_MS).declines(statedWaitMs, failedMessage)
 					? Math.max(statedWaitMs ?? 0, EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** providerErrorRetries)
 					: undefined;
 
 			if (delayMs !== undefined && !signal?.aborted) {
 				try {
-					await waitForRetry(options?.providerRetryWait, delayMs, signal);
+					await sleepBeforeRetry(options, delayMs, signal);
 				} catch (waitError) {
 					flush();
 					if (signal?.aborted) {

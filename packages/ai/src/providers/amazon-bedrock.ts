@@ -47,6 +47,8 @@ import {
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import { armPreResponseTimeout, getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs } from "../utils/idle-iterator";
+import { type TransportRetry, transportRetry } from "../utils/retry-after";
+import { DEFAULT_MAX_RETRY_DELAY_MS } from "../utils/retry-wait";
 import { toolWireSchema } from "../utils/schema/wire";
 import { invalidateAwsCredentialCache, resolveAwsCredentials } from "./aws-credentials";
 import { decodeEventStream } from "./aws-eventstream";
@@ -193,7 +195,8 @@ function resolveBedrockRequestUrl(
 /**
  * Sign and send one Bedrock Runtime request. A non-OK InvokeModel response's
  * body is read under the same pre-response deadline, so a stalled error body
- * cannot hang the caller.
+ * cannot hang the caller. `markRefusal` records on the error a non-OK response
+ * becomes the wait the transport refused under the caller's retry bounds.
  */
 async function sendBedrockRequest(
 	model: Model<"bedrock-converse-stream">,
@@ -203,7 +206,7 @@ async function sendBedrockRequest(
 	input: unknown,
 	endpoint: BedrockRequestEndpoint,
 	signal: AbortSignal | undefined = options.signal,
-): Promise<{ response: Response; responseBody?: string }> {
+): Promise<{ response: Response; responseBody?: string; markRefusal: TransportRetry["markRefusal"] }> {
 	const host = base.host;
 	const { urlPath, url } = resolveBedrockRequestUrl(model, base, endpoint);
 	const query = base.search.slice(1) || undefined;
@@ -299,6 +302,7 @@ async function sendBedrockRequest(
 					options.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs(model.compat.streamIdleTimeoutMs),
 				));
 	const watchdog = armPreResponseTimeout(signal, firstEventTimeoutMs);
+	const retry = transportRetry(options, DEFAULT_MAX_RETRY_DELAY_MS);
 	let response: Response;
 	let responseBody: string | undefined;
 	try {
@@ -307,6 +311,7 @@ async function sendBedrockRequest(
 			headers: requestHeaders,
 			body,
 			signal: watchdog.signal,
+			...retry.fetchOptions,
 			fetch: options.fetch,
 			timeout: false,
 		});
@@ -318,7 +323,7 @@ async function sendBedrockRequest(
 		// liveness belongs to the event iterator's idle watchdog.
 		watchdog.clear();
 	}
-	return { response, responseBody };
+	return { response, responseBody, markRefusal: retry.markRefusal };
 }
 
 function inferRegionFromBedrockArn(modelId: string): string | undefined {
@@ -730,11 +735,13 @@ function createBedrockAnthropicCompactionClient(
 							) {
 								invalidateAwsCredentialCache({ profile: options.profile, region });
 							}
-							throw new AIError.BedrockApiError(
+							const error = new AIError.BedrockApiError(
 								`Bedrock HTTP ${sent.response.status}: ${(sent.responseBody ?? "").slice(0, 1000)}`,
 								sent.response.status,
 								{ headers: sent.response.headers },
 							);
+							sent.markRefusal(error);
+							throw error;
 						}
 						if (!sent.response.body) {
 							throw new AIError.BedrockApiError("Bedrock response has no body", sent.response.status);
@@ -905,7 +912,8 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 					url: resolveBedrockRequestUrl(model, base, "converse-stream").url,
 					body: commandInput,
 				};
-				({ response } = await sendBedrockRequest(model, options, region, base, commandInput, "converse-stream"));
+				const sent = await sendBedrockRequest(model, options, region, base, commandInput, "converse-stream");
+				response = sent.response;
 				if (response.ok) {
 					streamResponseHeaders = response.headers;
 					break;
@@ -934,9 +942,11 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 					};
 					continue;
 				}
-				throw new AIError.BedrockApiError(errorMessage, response.status, {
+				const error = new AIError.BedrockApiError(errorMessage, response.status, {
 					headers: response.headers,
 				});
+				sent.markRefusal(error);
+				throw error;
 			}
 			if (!response.body) throw new AIError.BedrockApiError("Bedrock response has no body", response.status);
 

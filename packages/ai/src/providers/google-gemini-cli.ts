@@ -38,6 +38,7 @@ import { armPreResponseTimeout, getStreamFirstEventTimeoutMs, iterateWithIdleTim
 // Refresh is the sole responsibility of AuthStorage (broker-aware, single-flighted);
 // the stream provider trusts the access token threaded through `options.apiKey`.
 import { normalizeSchemaForCCA } from "../utils/schema";
+import { transportRetry } from "../utils/retry-after";
 import { StreamMarkupHealing, type StreamMarkupHealingEvent } from "../utils/stream-markup-healing";
 import { prepareAnthropicImageContext } from "./anthropic-images";
 import forcedToolDirective from "./google-antigravity-forced-tool.md" with { type: "text" };
@@ -969,6 +970,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					// headers arrive so it never aborts the actively streaming body —
 					// an absolute `AbortSignal.timeout` would (issue #2422).
 					const watchdog = armPreResponseTimeout(callerSignal, firstEventTimeoutMs);
+					const retry = transportRetry(options, RATE_LIMIT_BUDGET_MS);
 					let response: Response;
 					try {
 						response = await fetchWithRetry(() => `${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
@@ -978,7 +980,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 							signal: watchdog.signal,
 							maxAttempts: isLastEndpoint ? MAX_RETRIES + 1 : 1,
 							defaultDelayMs: attempt => BASE_DELAY_MS * 2 ** attempt,
-							maxDelayMs: options?.maxRetryDelayMs ?? RATE_LIMIT_BUDGET_MS,
+							...retry.fetchOptions,
 							fetch: options?.fetch,
 							timeout: false,
 						});
@@ -1001,11 +1003,13 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 									parsedCredentials.email,
 								)
 							: errorText;
-						throw new AIError.GeminiCliApiError(
+						const error = new AIError.GeminiCliApiError(
 							`Cloud Code Assist API error (${response.status}): ${errorMessage}`,
 							response.status,
 							{ headers: response.headers },
 						);
+						retry.markRefusal(error);
+						throw error;
 					}
 
 					streamResponseHeaders = response.headers;

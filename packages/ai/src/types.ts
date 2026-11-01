@@ -718,14 +718,22 @@ export interface StreamOptions {
 	 */
 	providerRetryWait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
 	/**
-	 * Ceiling on the server-stated wait a provider's own retry sleeps: each
-	 * pre-output retry loop, and the transport's retry of a 429 or 5xx. A longer
-	 * stated wait surfaces the failure at once. Its message ends with a note
-	 * that the server asked for that wait and the caller's ceiling refused it;
-	 * `errorRetryAfterMs` and the error's classification are unchanged. For a
-	 * caller that recovers on its own (waits visibly, rotates credentials, falls
-	 * back) instead of letting a provider sleep silently. When `maxRetryDelayMs`
-	 * is also positive, the smaller of the two bounds the wait.
+	 * Ceiling on a server-stated wait a provider sleeps before retrying on its
+	 * own: in the pre-output retry loops that read the stated wait, and in the
+	 * transport's retry of a 429 or 5xx. Retries of transport errors with no
+	 * stated wait (Codex's WebSocket and whitespace-loop retries) and
+	 * Anthropic's opted-in slow lane are not bounded by it. A server-stated
+	 * wait longer than it, wherever the response states it (a header,
+	 * `x-ratelimit-reset-after`, the body's `Please retry in 15s`), surfaces
+	 * the failure at once; the provider's own longer backoff is shortened to
+	 * it. The surfaced message ends with a note that the server asked for that
+	 * wait and the caller's ceiling refused it; `errorRetryAfterMs` and the
+	 * error's classification are unchanged. For a caller that recovers on its
+	 * own (waits visibly, rotates credentials, falls back) instead of letting a
+	 * provider sleep silently. When `maxRetryDelayMs` is also positive, the
+	 * smaller of the two bounds the sleep. A provider a wrapper calls with
+	 * rebuilt options keeps to the bound of the request that `stream` or
+	 * `streamSimple` started.
 	 *
 	 * Unset or non-positive (the default): a provider sleeps a stated wait up to
 	 * `maxRetryDelayMs`, as before. `providerRetryWait` plays no part in it.

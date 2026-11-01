@@ -22,8 +22,8 @@ export { OpenAIHttpError };
 
 import type { FetchImpl } from "../types";
 import type { CapturedHttpErrorResponse } from "./http-inspector";
-import { retryWaitBounds } from "./retry-after";
-import { markRetryWaitRefused, type RetryWaitHook } from "./retry-wait";
+import { transportRetry } from "./retry-after";
+import { DEFAULT_MAX_RETRY_DELAY_MS, type ProviderRetryPolicy } from "./retry-wait";
 
 /**
  * Total attempts (initial + retries). Parity with the removed SDK clients'
@@ -33,9 +33,6 @@ import { markRetryWaitRefused, type RetryWaitHook } from "./retry-wait";
  * transient 408/429/5xx retries can never extend the caller's deadline.
  */
 const DEFAULT_MAX_ATTEMPTS = 6;
-
-/** The longest server-stated wait a transport retry sleeps when the caller sets no cap (`StreamOptions.maxRetryDelayMs`'s default). */
-const DEFAULT_MAX_RETRY_DELAY_MS = 60_000;
 
 /** Bound the `Error.message` allocation for proxy HTML error pages and the like. */
 const MAX_DETAIL_CHARS = 4096;
@@ -76,21 +73,13 @@ export interface OpenAIStreamRequestInit {
 	/** Override the default transport attempt budget for this request. */
 	maxAttempts?: number;
 	/**
-	 * The caller's `StreamOptions.maxRetryDelayMs`: a 429/5xx whose headers name a
-	 * longer wait is surfaced at once instead of retried, and no retry sleeps
-	 * longer ({@link retryWaitBounds}). Non-positive disables the bound.
+	 * The caller's `StreamOptions` retry policy (`maxRetryDelayMs`,
+	 * `providerRetryWaitCeilingMs`, `providerRetryWait`): no transport retry
+	 * sleeps past its bound, a 429/5xx stating a longer wait (in a header or its
+	 * body) is surfaced at once instead, and every sleep goes through its hook
+	 * ({@link transportRetry}).
 	 */
-	maxRetryDelayMs?: number;
-	/**
-	 * The caller's `StreamOptions.providerRetryWaitCeilingMs`: when set, a
-	 * 429/5xx whose headers name a longer wait is surfaced at once too.
-	 */
-	providerRetryWaitCeilingMs?: number;
-	/**
-	 * The caller's `StreamOptions.providerRetryWait`: every transport retry sleeps
-	 * through it, as every provider retry above the transport does.
-	 */
-	retryWait?: RetryWaitHook;
+	retryPolicy?: ProviderRetryPolicy;
 	/** Optional caller-specific gate composed with shared transport retry exclusions. */
 	shouldRetryResponse?: (response: Response, bodyText: string) => boolean | Promise<boolean>;
 	/**
@@ -119,11 +108,7 @@ export interface OpenAIStreamHandle<TEvent> {
  * watchdog timers and abort-reason bookkeeping.
  */
 export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): Promise<OpenAIStreamHandle<TEvent>> {
-	const retryBounds = retryWaitBounds(
-		init.maxRetryDelayMs,
-		DEFAULT_MAX_RETRY_DELAY_MS,
-		init.providerRetryWaitCeilingMs,
-	);
+	const retry = transportRetry(init.retryPolicy, DEFAULT_MAX_RETRY_DELAY_MS);
 	let response: Response;
 	try {
 		response = await fetchWithRetry(init.url, {
@@ -133,15 +118,12 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
 			signal: init.signal,
 			fetch: init.fetch,
 			maxAttempts: init.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
-			maxDelayMs: retryBounds.maxDelayMs,
-			retryWait: init.retryWait,
+			...retry.fetchOptions,
 			// A proxy concurrency-admission 429 (`rate_limit_type: max_parallel_requests`)
 			// surfaces immediately instead of being slept-and-retried here; session
-			// recovery owns its backoff/fallback (issue #8854). So does a refusal whose
-			// headers name a longer wait than the caller's cap or ceiling.
+			// recovery owns its backoff/fallback (issue #8854).
 			shouldRetryResponse: async (response, bodyText) =>
 				!isConcurrencyAdmissionRejection(response, bodyText) &&
-				!retryBounds.declines(response.headers) &&
 				(init.shouldRetryResponse === undefined || (await init.shouldRetryResponse(response, bodyText))),
 			// Bun's native fetch enforces a hard ~300s pre-response timeout (issue #2422).
 			// Cold large-context streams legitimately exceed it; the caller's
@@ -156,8 +138,7 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
 	if (!response.ok) {
 		const error = await captureOpenAIHttpError(response);
 		// A refusal the caller's bounds kept from a retry says so in the failed message.
-		const refused = AIError.isTransientStatus(response.status) ? retryBounds.refusal(response.headers) : undefined;
-		if (refused !== undefined) markRetryWaitRefused(error, refused);
+		retry.markRefusal(error);
 		throw error;
 	}
 	if (!response.body) {

@@ -5,7 +5,7 @@
 ### Added
 
 - Added `longestRetryHint`, the longest wait a response names across every retry header and every hint in its body ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
-- Added `retryWait` to `fetchWithRetry`'s options: every retry delay sleeps through it, with the request's signal, in place of the built-in timer, so a caller's own retry-wait hook schedules transport retries too ([#17569](https://github.com/can1357/oh-my-pi/pull/17569) by [@sjawhar](https://github.com/sjawhar))
+- Added `retryWait` and `onRefusedWait` to `fetchWithRetry`'s options: every retry delay sleeps through `retryWait`, with the request's signal, in place of the built-in timer, and `onRefusedWait` names the stated wait it refused for exceeding `maxDelayMs` ([#17569](https://github.com/can1357/oh-my-pi/pull/17569) by [@sjawhar](https://github.com/sjawhar))
 - Added `parseRetryAfterHeaderMs`, the wait one `retry-after-ms` or `Retry-After` header value states, as every retry-hint reader now reads it ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
 - Added `getRetryAfterMsFromHeaders`, the one reader of a response's retry headers that `fetchWithRetry`, `longestRetryHint` and pi-ai's failed-message wait share ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
 

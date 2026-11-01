@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { scheduler } from "node:timers/promises";
 import type { StreamOptions } from "../types";
 
@@ -7,8 +8,38 @@ export type RetryWaitHook = (delayMs: number, signal?: AbortSignal) => Promise<v
 /** Default cap on a server-stated retry wait: `StreamOptions.maxRetryDelayMs`. */
 export const DEFAULT_MAX_RETRY_DELAY_MS = 60_000;
 
-/** The stream options that bound a server-stated wait a provider's own retry sleeps. */
-export type StatedWaitPolicy = Pick<StreamOptions, "maxRetryDelayMs" | "providerRetryWaitCeilingMs">;
+/** The stream options that bound and schedule a provider's retry sleep after a server-stated wait. */
+export type ProviderRetryPolicy = Pick<
+	StreamOptions,
+	"maxRetryDelayMs" | "providerRetryWaitCeilingMs" | "providerRetryWait"
+>;
+
+const requestRetryPolicy = new AsyncLocalStorage<ProviderRetryPolicy>();
+
+/**
+ * `policy` with every field it leaves unset taken from the request it runs
+ * under ({@link withProviderRetryPolicy}). A provider that a wrapper calls
+ * with options it rebuilt (the OpenAI-or-Anthropic shim behind Kimi Code and
+ * Synthetic, GitLab Duo's routes) still sleeps under the caller's cap, ceiling
+ * and retry-wait hook, whichever of them the rebuilt options dropped.
+ */
+export function providerRetryPolicy(policy: ProviderRetryPolicy | undefined): ProviderRetryPolicy {
+	const request = requestRetryPolicy.getStore();
+	return {
+		maxRetryDelayMs: policy?.maxRetryDelayMs ?? request?.maxRetryDelayMs,
+		providerRetryWaitCeilingMs: policy?.providerRetryWaitCeilingMs ?? request?.providerRetryWaitCeilingMs,
+		providerRetryWait: policy?.providerRetryWait ?? request?.providerRetryWait,
+	};
+}
+
+/**
+ * Runs `start`, a request entering pi-ai (`stream`, `streamSimple`), with its
+ * options' retry policy as the one each provider retry sleep under it falls
+ * back to ({@link providerRetryPolicy}).
+ */
+export function withProviderRetryPolicy<T>(options: ProviderRetryPolicy | undefined, start: () => T): T {
+	return requestRetryPolicy.run(providerRetryPolicy(options), start);
+}
 
 /** The longest server-stated wait a provider's own retry sleeps, and the option that sets it. */
 export interface StatedWaitLimit {
@@ -25,7 +56,7 @@ export interface StatedWaitLimit {
  * caller set a positive one and it is the smaller.
  */
 export function statedRetryWaitLimit(
-	policy: StatedWaitPolicy | undefined,
+	policy: ProviderRetryPolicy | undefined,
 	defaultMaxRetryDelayMs = DEFAULT_MAX_RETRY_DELAY_MS,
 ): StatedWaitLimit {
 	const cap =
@@ -96,4 +127,22 @@ export async function waitForRetry(
 ): Promise<void> {
 	if (retryWait) await retryWait(delayMs, signal);
 	else await scheduler.wait(delayMs, { signal });
+}
+
+/**
+ * Where a provider retry loop that reads a server-stated wait turns a wait
+ * into a sleep; every transport's `fetchWithRetry` sleeps under the same bound
+ * (`retryWaitBounds`'s `maxDelayMs`). The sleep goes through the retry-wait
+ * hook of {@link providerRetryPolicy} and never lasts longer than
+ * {@link statedRetryWaitLimit}: a server's longer stated wait is refused
+ * before this is reached, and the loop's own longer backoff is shortened to
+ * the bound, so no server-stated wait is slept past it silently.
+ */
+export async function sleepBeforeRetry(
+	policy: ProviderRetryPolicy | undefined,
+	delayMs: number,
+	signal?: AbortSignal,
+): Promise<void> {
+	const effective = providerRetryPolicy(policy);
+	await waitForRetry(effective.providerRetryWait, Math.min(delayMs, statedRetryWaitLimit(effective).limitMs), signal);
 }

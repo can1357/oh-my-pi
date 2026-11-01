@@ -73,6 +73,7 @@ import { AssistantMessageEventStream } from "./utils/event-stream";
 import { applyGlyphCodec } from "./utils/glyph-codec";
 import { wrapLeakedThinkingStream } from "./utils/leaked-thinking-stream";
 import { retryWaitHeaders } from "./utils/retry-after";
+import { withProviderRetryPolicy } from "./utils/retry-wait";
 import { withThinkingLoopGuard } from "./utils/thinking-loop";
 import { withRequestTransport } from "./utils/transport-fetch";
 import { inheritWireAttempts, uncountedFetchOf } from "./utils/wire-attempts";
@@ -836,7 +837,21 @@ function withResolvedModelHeaders<TApi extends Api>(
 	return outer;
 }
 
+/**
+ * A provider's retry sleep after a server-stated wait under the request keeps
+ * to its retry policy (`maxRetryDelayMs`, `providerRetryWaitCeilingMs`,
+ * `providerRetryWait`), including inside a provider a wrapper calls with
+ * options it rebuilt.
+ */
 export function stream<TApi extends Api>(
+	model: Model<TApi>,
+	context: Context,
+	options?: OptionsForApi<TApi>,
+): AssistantMessageEventStream {
+	return withProviderRetryPolicy(options, () => streamUnderRetryPolicy(model, context, options));
+}
+
+function streamUnderRetryPolicy<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
 	options?: OptionsForApi<TApi>,
@@ -1185,7 +1200,16 @@ function withSupportedSamplingParams<T extends SamplingOptions>(model: Model<Api
 	return supported;
 }
 
+/** As {@link stream}: a provider's retry sleep after a server-stated wait keeps to the request's retry policy. */
 export function streamSimple<TApi extends Api>(
+	model: Model<TApi>,
+	context: Context,
+	options?: SimpleStreamOptions,
+): AssistantMessageEventStream {
+	return withProviderRetryPolicy(options, () => streamSimpleUnderRetryPolicy(model, context, options));
+}
+
+function streamSimpleUnderRetryPolicy<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
 	options?: SimpleStreamOptions,

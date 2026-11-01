@@ -229,7 +229,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import { connectProxiedSocket, getProxyForUrl, wrapFetchForProxy } from "../utils/proxy";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
 import { providerFailureWaitMs, retryWaitBounds } from "../utils/retry-after";
-import { DEFAULT_MAX_RETRY_DELAY_MS, waitForRetry } from "../utils/retry-wait";
+import { DEFAULT_MAX_RETRY_DELAY_MS, sleepBeforeRetry } from "../utils/retry-wait";
 import { sanitizeSchemaForCursor, toolWireSchema } from "../utils/schema";
 import { createWireAttempts, providerReplaysFrom, type WireAttempts, wireAttemptsOf } from "../utils/wire-attempts";
 import { formatConnectEndStreamError, hasRetryableCursorErrorDetail } from "./connect-error-detail";
@@ -2243,11 +2243,7 @@ function streamCursorWithWireMode(
 				: undefined;
 			const retryDelayMs =
 				canRetryFromCheckpoint &&
-				!retryWaitBounds(
-					options?.maxRetryDelayMs,
-					DEFAULT_MAX_RETRY_DELAY_MS,
-					options?.providerRetryWaitCeilingMs,
-				).declines(statedWaitMs, error)
+				!retryWaitBounds(options, DEFAULT_MAX_RETRY_DELAY_MS).declines(statedWaitMs, error)
 					? Math.max(statedWaitMs ?? 0, backoffDelayMs)
 					: undefined;
 			if (
@@ -2279,7 +2275,7 @@ function streamCursorWithWireMode(
 				});
 				let retryDelayCompleted = false;
 				try {
-					await waitForRetry(options?.providerRetryWait, retryDelayMs, options?.signal);
+					await sleepBeforeRetry(options, retryDelayMs, options?.signal);
 					retryDelayCompleted = !options?.signal?.aborted;
 				} catch (waitError) {
 					error = waitError;

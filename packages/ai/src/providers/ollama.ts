@@ -26,6 +26,8 @@ import {
 	getOpenAIStreamFirstEventTimeoutMs,
 	getOpenAIStreamIdleTimeoutMs,
 } from "../utils/idle-iterator";
+import { transportRetry } from "../utils/retry-after";
+import { DEFAULT_MAX_RETRY_DELAY_MS } from "../utils/retry-wait";
 import { sanitizeSchemaForOllama, toolWireSchema } from "../utils/schema";
 import {
 	getStreamMarkupHealingPattern,
@@ -600,6 +602,7 @@ const streamOllamaOnce = (
 			// never aborts the actively streaming body — an absolute
 			// `AbortSignal.timeout` would (issue #2422).
 			const watchdog = armPreResponseTimeout(options.signal, firstEventTimeoutMs);
+			const retry = transportRetry(options, DEFAULT_MAX_RETRY_DELAY_MS);
 			let response: Response;
 			try {
 				response = await fetchWithRetry(`${baseUrl}/api/chat`, {
@@ -613,6 +616,7 @@ const streamOllamaOnce = (
 					body: JSON.stringify(body),
 					signal: watchdog.signal,
 					defaultDelayMs: OLLAMA_RETRY_DELAYS_MS,
+					...retry.fetchOptions,
 					shouldRetryResponse: shouldRetryOllamaResponse,
 					fetch: options.fetch,
 					timeout: false,
@@ -622,9 +626,15 @@ const streamOllamaOnce = (
 			}
 			if (!response.ok) {
 				capturedErrorResponse = await captureHttpErrorResponse(response);
-				throw new AIError.OllamaApiError(`HTTP ${response.status} from ${baseUrl}/api/chat`, response.status, {
-					headers: response.headers,
-				});
+				const error = new AIError.OllamaApiError(
+					`HTTP ${response.status} from ${baseUrl}/api/chat`,
+					response.status,
+					{
+						headers: response.headers,
+					},
+				);
+				retry.markRefusal(error);
+				throw error;
 			}
 			streamResponseHeaders = response.headers;
 			if (!response.body) {

@@ -41,7 +41,7 @@ import { OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
 import { notifyProviderResponse } from "../utils/provider-response";
 import { wrapFetchForRequestCompression } from "../utils/request-compression";
 import { providerFailureWaitMs, retryWaitBounds } from "../utils/retry-after";
-import { DEFAULT_MAX_RETRY_DELAY_MS, waitForRetry } from "../utils/retry-wait";
+import { DEFAULT_MAX_RETRY_DELAY_MS, providerRetryPolicy, sleepBeforeRetry, waitForRetry } from "../utils/retry-wait";
 import {
 	adaptSchemaForStrict,
 	findStrictToolSchemaViolation,
@@ -828,9 +828,7 @@ const streamOpenAIResponsesOnce = (
 						headers: headersWithTimeout,
 						body: requestParams,
 						signal: requestSignal,
-						maxRetryDelayMs: options?.maxRetryDelayMs,
-						providerRetryWaitCeilingMs: options?.providerRetryWaitCeilingMs,
-						retryWait: options?.providerRetryWait,
+						retryPolicy: options,
 						fetch: wrapFetchForCopilotFallback(
 							wrapFetchForRequestCompression(options?.fetch ?? fetch, model),
 							model.provider === "github-copilot",
@@ -1137,7 +1135,7 @@ const streamOpenAIResponsesOnce = (
 							headers,
 							responseId: resumeId,
 							signal: options?.signal,
-							wait: options?.providerRetryWait,
+							wait: providerRetryPolicy(options).providerRetryWait,
 						});
 						if (resumedResponse !== undefined) {
 							const deadContent = [...output.content];
@@ -1232,11 +1230,7 @@ const streamOpenAIResponsesOnce = (
 						: undefined;
 					const retryDelayMs =
 						canRetry &&
-						!retryWaitBounds(
-							options?.maxRetryDelayMs,
-							DEFAULT_MAX_RETRY_DELAY_MS,
-							options?.providerRetryWaitCeilingMs,
-						).declines(statedWaitMs, streamFailure)
+						!retryWaitBounds(options, DEFAULT_MAX_RETRY_DELAY_MS).declines(statedWaitMs, streamFailure)
 							? Math.max(statedWaitMs ?? 0, OPENAI_RESPONSES_TRANSIENT_STREAM_RETRY_DELAY_MS)
 							: undefined;
 					if (retryDelayMs === undefined) {
@@ -1268,7 +1262,7 @@ const streamOpenAIResponsesOnce = (
 					firstTokenTime = undefined;
 					nativeOutputItems.length = 0;
 
-					await waitForRetry(options?.providerRetryWait, retryDelayMs, options?.signal);
+					await sleepBeforeRetry(options, retryDelayMs, options?.signal);
 					if (abortTracker.wasCallerAbort()) throw new AIError.AbortError();
 					openaiStream = await openResponsesStreamWithFallbacks();
 				}

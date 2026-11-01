@@ -905,7 +905,7 @@ describe("Codex structured protocol headers keep precedence over the HTTP respon
 
 describe("retryWaitBounds", () => {
 	it("bounds every sleep by the caller's cap and declines a longer stated wait, given headers or a wait", () => {
-		const bounds = retryWaitBounds(1_000, 60_000);
+		const bounds = retryWaitBounds({ maxRetryDelayMs: 1_000 }, 60_000);
 
 		expect(bounds.maxDelayMs).toBe(1_000);
 		expect(bounds.declines(new Headers({ "retry-after": "9" }))).toBe(true);
@@ -920,7 +920,9 @@ describe("retryWaitBounds", () => {
 
 	it("reads the longest header wait, as the failed message's field does", () => {
 		expect(
-			retryWaitBounds(1_000, 60_000).declines(new Headers({ "retry-after-ms": "100", "retry-after": "9" })),
+			retryWaitBounds({ maxRetryDelayMs: 1_000 }, 60_000).declines(
+				new Headers({ "retry-after-ms": "100", "retry-after": "9" }),
+			),
 		).toBe(true);
 	});
 
@@ -934,7 +936,7 @@ describe("retryWaitBounds", () => {
 
 	it("bounds nothing when the caller's cap is not positive", () => {
 		for (const cap of [0, -1]) {
-			const bounds = retryWaitBounds(cap, 60_000);
+			const bounds = retryWaitBounds({ maxRetryDelayMs: cap }, 60_000);
 
 			expect(bounds.maxDelayMs).toBe(Number.POSITIVE_INFINITY);
 			expect(bounds.declines(new Headers({ "retry-after": "3600" }))).toBe(false);

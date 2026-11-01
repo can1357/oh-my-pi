@@ -5,6 +5,7 @@
 ### Fixed
 
 - `streamProxy` now keeps every outcome field a terminal `done` / `error` frame carries (`ProxyTerminalFields`): `errorStatus`, `errorId`, `providerReplays`, `errorRetryAfterMs` and any other `AssistantMessage` field except the client's own, where before it kept only the error text, usage and content. A replay count, a status and the header retry wait therefore reach recovery through a proxy; a non-2xx proxy response's own `Retry-After` / `retry-after-ms` headers set the wait too, and the error a failed compaction step throws carries it, so the compaction retry waits for it ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- `streamProxy` now sends the caller's `maxRetryDelayMs` and `providerRetryWaitCeilingMs`, so the server's provider retries keep to them ([#17569](https://github.com/can1357/oh-my-pi/pull/17569) by [@sjawhar](https://github.com/sjawhar))
 - Fixed OpenAI remote compaction (`/responses/compact`) replaying backend-only `internal_chat_message_metadata_passthrough` metadata that Codex rejects as an unknown parameter ([#17590](https://github.com/can1357/oh-my-pi/pull/17590) by [@briankeefe](https://github.com/briankeefe))
 
 ## [18.14.2] - 2026-10-31

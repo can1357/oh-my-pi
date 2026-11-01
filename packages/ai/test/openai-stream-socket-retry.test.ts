@@ -617,5 +617,58 @@ describe("OpenAI-family transport retries and the providerRetryWaitCeilingMs opt
 			expect(result.errorClassificationMessage).not.toContain("server asked");
 			expect(result.errorMessage).toBe(`${result.errorClassificationMessage} ${REFUSAL_NOTE}`);
 		});
+
+		it.each([
+			[
+				"its body alone says Please retry in 15s",
+				() =>
+					new Response(
+						JSON.stringify({
+							error: { type: "rate_limit_error", code: "rate_limit_exceeded", message: "Please retry in 15s" },
+						}),
+						{ status: 429, headers: { "content-type": "application/json" } },
+					),
+				15_000,
+			],
+			[
+				"its x-ratelimit-reset-after says 90 s",
+				() =>
+					new Response(
+						JSON.stringify({
+							error: { type: "rate_limit_error", code: "rate_limit_exceeded", message: "Too many requests" },
+						}),
+						{ status: 429, headers: { "content-type": "application/json", "x-ratelimit-reset-after": "90" } },
+					),
+				90_000,
+			],
+		] as [string, () => Response, number][])(
+			`${route.name}: set to 10 s, a 429 whose %s is not slept, the transport's own sleep included`,
+			async (_label, refusal, statedMs) => {
+				// The transport read these waits from places the refusal check did
+				// not: it slept 15 s and 90 s under a 10 s ceiling, with no countdown.
+				let requests = 0;
+				const fetchMock: FetchImpl = vi.fn(async () => {
+					requests++;
+					return requests === 1 ? refusal() : route.success();
+				});
+				const providerRetryWait = vi.fn(async (_delayMs: number, _signal?: AbortSignal) => {});
+
+				const result = await route
+					.run({
+						fetch: fetchMock,
+						maxRetryDelayMs: FIVE_MINUTES_MS,
+						providerRetryWaitCeilingMs: 10_000,
+						providerRetryWait,
+					})
+					.result();
+
+				expect(requests).toBe(1);
+				expect(providerRetryWait).not.toHaveBeenCalled();
+				expect(result.stopReason).toBe("error");
+				expect(result.errorStatus).toBe(429);
+				expect(result.errorMessage).toContain(`server asked to wait ${statedMs / 1_000} s`);
+				expect(result.errorMessage?.endsWith("so the provider did not retry)")).toBe(true);
+			},
+		);
 	}
 });

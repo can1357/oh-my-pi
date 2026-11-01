@@ -498,6 +498,27 @@ describe("withReplaySafeStreamRetry", () => {
 				"429 Too many requests (server asked to wait 15 s before retrying; the 10 s maxRetryDelayMs refused it, so the provider did not retry)",
 			);
 		});
+
+		it("set to 600 ms: its own 1 s backoff sleeps 600 ms, so the loop's sleep stays inside the ceiling", async () => {
+			// The ceiling bounds the sleep, not one source of it: the loop's own
+			// backoff is shortened to it, where a server's longer wait is refused.
+			let attempts = 0;
+			const waits: number[] = [];
+			const stream = withReplaySafeStreamRetry(
+				{},
+				CTX,
+				{ providerRetryWaitCeilingMs: 600, providerRetryWait: async (ms: number) => void waits.push(ms) },
+				() => {
+					attempts++;
+					return attempts <= MAX_EMPTY_COMPLETION_RETRIES ? emptyAttempt() : contentAttempt();
+				},
+				{ retryEmptyCompletion: true },
+			);
+			await stream.result();
+
+			expect(attempts).toBe(MAX_EMPTY_COMPLETION_RETRIES + 1);
+			expect(waits).toEqual([500, 600]);
+		});
 	});
 
 	interface CountedAttemptOptions {
