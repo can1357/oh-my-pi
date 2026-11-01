@@ -199,6 +199,10 @@
 - Fixed native remote compaction for supported Bedrock Claude models without changing ordinary Converse turns; a custom non-AWS `baseUrl` needs `remoteCompaction.enabled: true` ([#16343](https://github.com/can1357/oh-my-pi/pull/16343) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
 - Fixed Anthropic compaction blocks dropping their signed `tool_changes`, which made the replayed block fail its signature ([#16343](https://github.com/can1357/oh-my-pi/pull/16343) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
 
+### Fixed
+
+- Fixed Anthropic responses through a custom `baseUrl` (a gateway in front of Anthropic) losing their server-side fallback marker and redacted thinking from the saved turn, so the next request replays that turn's reasoning instead of being refused and retried without it ([#12352](https://github.com/can1357/oh-my-pi/pull/12352) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.12.3] - 2026-10-19
 
 ### Added

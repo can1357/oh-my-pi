@@ -523,6 +523,75 @@ describe("wrapLeakedThinkingStream", () => {
 		expect(result.content.slice(1, 3)).toEqual(serverBlocks);
 	});
 
+	it("preserves a server-side fallback marker and redacted thinking at their source positions", async () => {
+		// A `server-side-fallback` handoff mid-stream: the primary's partial
+		// thinking, the `fallback` boundary block, then the fallback model's own
+		// thinking, text, and tool call. Neither the marker nor a redacted block
+		// emits a stream event, so the projector only sees them in the terminal
+		// message. Dropping either changes the persisted turn: Anthropic then
+		// rejects its replay with "thinking blocks in the latest assistant
+		// message cannot be modified".
+		const primaryThinking: ThinkingContent = {
+			type: "thinking",
+			thinking: "start",
+			thinkingSignature: "sig-primary",
+		};
+		const marker: AssistantMessage["content"][number] = {
+			type: "fallback",
+			from: { model: "claude-fable-5" },
+			to: { model: "claude-opus-5" },
+		};
+		const redacted: AssistantMessage["content"][number] = { type: "redactedThinking", data: "opaque" };
+		const fallbackThinking: ThinkingContent = {
+			type: "thinking",
+			thinking: "continue",
+			thinkingSignature: "sig-fallback",
+		};
+		const text: TextContent = { type: "text", text: "Reading the file." };
+		const call: ToolCall = { type: "toolCall", id: "toolu_cat", name: "bash", arguments: { command: "cat a.txt" } };
+		const content: AssistantMessage["content"] = [primaryThinking, marker, redacted, fallbackThinking, text, call];
+
+		const { result } = await runWrapper(inner => {
+			inner.push({ type: "start", partial: msg() });
+			inner.push({
+				type: "thinking_delta",
+				contentIndex: 0,
+				delta: "start",
+				partial: msg({ content: [primaryThinking] }),
+			});
+			inner.push({
+				type: "thinking_end",
+				contentIndex: 0,
+				content: "start",
+				partial: msg({ content: [primaryThinking] }),
+			});
+			inner.push({
+				type: "thinking_delta",
+				contentIndex: 3,
+				delta: "continue",
+				partial: msg({ content: content.slice(0, 4) }),
+			});
+			inner.push({
+				type: "thinking_end",
+				contentIndex: 3,
+				content: "continue",
+				partial: msg({ content: content.slice(0, 4) }),
+			});
+			inner.push({
+				type: "text_delta",
+				contentIndex: 4,
+				delta: text.text,
+				partial: msg({ content: content.slice(0, 5) }),
+			});
+			const terminal = msg({ content, stopReason: "toolUse" });
+			inner.push({ type: "toolcall_start", contentIndex: 5, partial: terminal });
+			inner.push({ type: "toolcall_end", contentIndex: 5, toolCall: call, partial: terminal });
+			inner.push({ type: "done", reason: "toolUse", message: terminal });
+		});
+
+		expect(result.content).toEqual(content);
+	});
+
 	it("preserves complete Anthropic tool-search history through the custom-endpoint projector", async () => {
 		const firstThinking: ThinkingContent = {
 			type: "thinking",
