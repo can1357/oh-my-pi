@@ -31,7 +31,7 @@ import {
 	UrlContainmentError,
 	validateRelativePath,
 } from "./filesystem-resource";
-import { readMcpResource } from "./mcp-protocol";
+import { MCP_RESOURCE_DISCOVERY_WAIT_MS, readMcpResource } from "./mcp-protocol";
 import type {
 	InternalResource,
 	InternalUrl,
@@ -47,11 +47,13 @@ import type {
 class UnknownSkillError extends Error {}
 
 /**
- * Most an unknown `skill://` name waits for MCP (deferred startup included) to advertise it: long
- * enough for a healthy handshake, short enough that a hung server or its reconnect ladder cannot
- * hold a read of a typo'd or disabled skill name for the rest of the turn.
+ * Most an unknown `skill://` name waits for MCP (deferred startup included) to advertise it, shared
+ * with exact MCP resource discovery ({@link MCP_RESOURCE_DISCOVERY_WAIT_MS}): long enough for a
+ * healthy handshake, short enough that a hung server or its reconnect ladder cannot hold a read of
+ * a typo'd or disabled skill name for the rest of the turn. Referenced at call time only — this
+ * module and mcp-protocol import each other's managers, so a module-level alias would read the
+ * binding before initialization.
  */
-const UNKNOWN_SKILL_MCP_WAIT_MS = 5_000;
 
 /** A skill:// URL's target path and the loaded skill that owns it. */
 interface SkillTarget {
@@ -292,12 +294,12 @@ export class SkillProtocolHandler implements ProtocolHandler {
 			// A deferred MCP startup that fails cannot change the diagnosis: the skill is still unknown.
 			// Most such names are not MCP resources at all, so one budget caps deferred startup (which
 			// never returns while a handshake hangs and the startup window is 0) plus the catalog wait.
-			const deadline = Date.now() + UNKNOWN_SKILL_MCP_WAIT_MS;
+			const deadline = Date.now() + MCP_RESOURCE_DISCOVERY_WAIT_MS;
 			let mcpManager: MCPManager | undefined;
 			try {
 				mcpManager = await withTimeout(
 					MCPManager.load(),
-					UNKNOWN_SKILL_MCP_WAIT_MS,
+					MCP_RESOURCE_DISCOVERY_WAIT_MS,
 					"MCP startup outlasted the unknown-skill wait",
 					context?.signal,
 				);

@@ -8,12 +8,14 @@ import { loadSkillsFromDir } from "@oh-my-pi/pi-coding-agent/extensibility/skill
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { readMcpResource } from "@oh-my-pi/pi-coding-agent/internal-urls/mcp-protocol";
 import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
+import * as mcpClient from "@oh-my-pi/pi-coding-agent/mcp/client";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { MCPResource, MCPResourceReadResult, MCPResourceTemplate } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
 import { withTimeout } from "@oh-my-pi/pi-utils";
+import { hasExactMcpResource, MCP_RESOURCE_DISCOVERY_WAIT_MS } from "../../src/internal-urls/mcp-protocol";
 
 function createMockManager(opts: {
 	servers?: string[];
@@ -52,6 +54,7 @@ describe("McpProtocolHandler", () => {
 	});
 
 	afterEach(() => {
+		vi.restoreAllMocks();
 		MCPManager.resetForTests();
 		InternalUrlRouter.resetForTests();
 	});
@@ -114,6 +117,177 @@ describe("McpProtocolHandler", () => {
 		const resource = await router.resolve("mcp://test://doc");
 		expect(resource.content).toBe("hello world");
 		expect(resource.notes).toEqual(["MCP server: my-server"]);
+	});
+
+	it("checks connected catalogs before unrelated pending connections for exact URI detection", async () => {
+		const uri = "skill://demo/a;literal";
+		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
+		const manager = createMockManager({
+			servers: ["ready"],
+			resources,
+			ensureResources: async name => {
+				resources.set(name, { resources: [{ uri, name: "literal" }], templates: [] });
+			},
+			waitForPendingConnections: () => Promise.withResolvers<void>().promise,
+			readResult: { contents: [{ uri, text: "connected resource" }] },
+		});
+		expect(await withTimeout(hasExactMcpResource(manager, parseInternalUrl(uri)), 500, "exact lookup blocked")).toBe(
+			true,
+		);
+		expect((await readMcpResource(manager, parseInternalUrl(uri)))?.content).toBe("connected resource");
+	});
+
+	it("finds an exact URI before an unrelated connected catalog settles", async () => {
+		const uri = "skill://demo/a;literal";
+		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
+		const ready = Promise.withResolvers<void>();
+		const stalled = Promise.withResolvers<void>();
+		const manager = createMockManager({
+			servers: ["ready", "stalled"],
+			resources,
+			ensureResources: async name => {
+				if (name === "stalled") return stalled.promise;
+				await ready.promise;
+				resources.set(name, { resources: [{ uri, name: "literal" }], templates: [] });
+			},
+		});
+		const discovering = hasExactMcpResource(manager, parseInternalUrl(uri), undefined, 100);
+		ready.resolve();
+		try {
+			expect(await withTimeout(discovering, 500, "exact lookup blocked by another catalog")).toBe(true);
+		} finally {
+			stalled.resolve();
+			await discovering.catch(() => {});
+		}
+	});
+
+	it("bounds exact catalog discovery without reporting an uncertain URI absent", async () => {
+		const manager = createMockManager({
+			servers: [],
+			waitForPendingConnections: () => Promise.withResolvers<void>().promise,
+		});
+		await expect(
+			withTimeout(
+				hasExactMcpResource(manager, parseInternalUrl("skill://demo;/tmp/x"), undefined, 20),
+				500,
+				"unbounded exact check",
+			),
+		).rejects.toThrow("cannot safely split");
+	});
+
+	it("treats a rejected catalog load as unknown rather than URI absence", async () => {
+		const manager = createMockManager({
+			servers: ["broken"],
+			ensureResources: async () => {
+				throw new Error("resources/list failed");
+			},
+			waitForPendingConnections: async () => {},
+		});
+		await expect(hasExactMcpResource(manager, parseInternalUrl("skill://figma/foo;/tmp/x"))).rejects.toThrow(
+			"cannot safely split",
+		);
+	});
+
+	it("reports URI absence after a transient catalog failure recovers on retry", async () => {
+		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
+		let attempts = 0;
+		let connectionsSettled = false;
+		const manager = createMockManager({
+			servers: ["recovering"],
+			resources,
+			ensureResources: async name => {
+				attempts += 1;
+				if (attempts === 1) throw new Error("temporary resources/list failure");
+				expect(connectionsSettled).toBe(true);
+				resources.set(name, { resources: [{ uri: "skill://other", name: "other" }], templates: [] });
+			},
+			waitForPendingConnections: async () => {
+				connectionsSettled = true;
+			},
+		});
+
+		expect(await hasExactMcpResource(manager, parseInternalUrl("skill://demo;/tmp/x"))).toBe(false);
+		expect(attempts).toBe(2);
+	});
+
+	it("treats a failed MCP handshake as unknown discovery rather than URI absence", async () => {
+		const manager = createMockManager({
+			servers: [],
+			waitForPendingConnections: async () => {},
+		});
+		// A known server whose handshake rejected leaves no connected catalog; that is
+		// unknown, not proof the exact semicolon URI is absent.
+		manager.getAllServerNames = () => ["figma"];
+		await expect(hasExactMcpResource(manager, parseInternalUrl("skill://figma/foo;/tmp/x"))).rejects.toThrow(
+			"cannot safely split",
+		);
+	});
+
+	it("treats a server registered during the wait whose handshake failed as unknown discovery", async () => {
+		let registered = false;
+		const manager = createMockManager({
+			servers: [],
+			waitForPendingConnections: async () => {
+				registered = true;
+			},
+		});
+		// The server enters the inventory only after the wait begins, then never
+		// connects: the inventory snapshot taken before the wait must not clear it.
+		manager.getAllServerNames = () => (registered ? ["late"] : []);
+		await expect(hasExactMcpResource(manager, parseInternalUrl("skill://demo;/tmp/x"))).rejects.toThrow(
+			"cannot safely split",
+		);
+	});
+
+	it("lets a late server's exact URI win over an already-loaded matching template", async () => {
+		const uri = "custom://host/doc?q=x";
+		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
+		resources.set("broad", {
+			resources: [],
+			templates: [{ uriTemplate: "custom://host/{path}", name: "broad" }],
+		});
+		let settled = false;
+		const manager = createMockManager({
+			resources,
+			waitForPendingConnections: async () => {
+				settled = true;
+				resources.set("late", { resources: [{ uri, name: "exact" }], templates: [] });
+			},
+		});
+		const readServers: string[] = [];
+		manager.getConnectedServers = () => (settled ? ["broad", "late"] : ["broad"]);
+		manager.readServerResource = async (name: string, requested: string) => {
+			readServers.push(name);
+			return { contents: [{ uri: requested, text: "routed resource" }] };
+		};
+		const resource = await readMcpResource(manager, parseInternalUrl(uri));
+		// A template match on a connected catalog must not end discovery before a
+		// still-handshaking server can advertise the exact URI.
+		expect(resource?.notes).toEqual(["MCP server: late"]);
+		expect(readServers).toEqual(["late"]);
+	});
+
+	it("keeps a source-less failed handshake unknown during exact URI discovery", async () => {
+		const manager = new MCPManager(process.cwd());
+		vi.spyOn(mcpClient, "connectToServer").mockRejectedValue(new Error("handshake refused"));
+		try {
+			const result = await manager.connectServers({ runtime: { type: "stdio", command: "fake-mcp-server" } }, {});
+			expect(result.errors.get("runtime")).toBe("handshake refused");
+			await expect(hasExactMcpResource(manager, parseInternalUrl("skill://demo;/tmp/x"))).rejects.toThrow(
+				"cannot safely split",
+			);
+		} finally {
+			await manager.disconnectAll();
+		}
+	});
+
+	it("preserves the speculative read wait budget for a connection that never settles", async () => {
+		const manager = createMockManager({
+			servers: [],
+			waitForPendingConnections: () => Promise.withResolvers<void>().promise,
+		});
+		const reading = readMcpResource(manager, parseInternalUrl("skill://missing"), { exact: true, waitMs: 20 });
+		expect(await withTimeout(reading, 500, "read wait budget ignored")).toBeUndefined();
 	});
 
 	it("cancels a resource read the server never answers", async () => {
@@ -768,7 +942,8 @@ describe("skill:// falls back to an MCP resource with the same URI", () => {
 					(error: unknown) => (error instanceof Error ? error.message : String(error)),
 				);
 			await started.promise;
-			vi.advanceTimersByTime(5_000);
+			// The unknown-skill consumer spends exactly the shared MCP discovery budget.
+			vi.advanceTimersByTime(MCP_RESOURCE_DISCOVERY_WAIT_MS);
 			expect(await outcome).toContain("Unknown skill: nope");
 		} finally {
 			vi.useRealTimers();

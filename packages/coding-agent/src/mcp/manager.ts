@@ -1345,11 +1345,18 @@ export class MCPManager {
 	}
 
 	/**
-	 * Get all known server names (connected, connecting, or discovered).
+	 * Get all known server names (connected, connecting, configured, or discovered).
+	 * Includes preserved `#serverConfigs` entries so source-less runtime/extension
+	 * servers that failed handshake remain visible after pending work settles.
 	 */
 	getAllServerNames(): string[] {
 		return Array.from(
-			new Set([...this.#sources.keys(), ...this.#connections.keys(), ...this.#pendingConnections.keys()]),
+			new Set([
+				...this.#sources.keys(),
+				...this.#connections.keys(),
+				...this.#pendingConnections.keys(),
+				...this.#serverConfigs.keys(),
+			]),
 		);
 	}
 

@@ -213,7 +213,10 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			const effectivePaths = scopedPaths.length > 0 ? scopedPaths : ["."];
 			const rawPatternInputs = this.#customOps
 				? effectivePaths
-				: await expandDelimitedPathEntries(effectivePaths, this.session.cwd, { splitter: parseFindPattern });
+				: await expandDelimitedPathEntries(effectivePaths, this.session.cwd, {
+						splitter: parseFindPattern,
+						context: sessionResolveContext(this.session, { signal }),
+					});
 			const rawPatterns = rawPatternInputs.map(input => normalizePathLikeInput(input).replace(/\\/g, "/"));
 			const aliasResolvedPatterns = this.#rootPathAlias
 				? rawPatterns.map(pattern => (/^\/+$/.test(pattern) ? "." : pattern))

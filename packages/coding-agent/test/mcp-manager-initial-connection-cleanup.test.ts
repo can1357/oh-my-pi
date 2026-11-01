@@ -78,6 +78,24 @@ afterEach(() => {
 });
 
 describe("MCPManager initial connection ownership", () => {
+	it("retains source-less configured server names after a failed handshake", async () => {
+		const manager = new MCPManager(process.cwd());
+		vi.spyOn(mcpClient, "connectToServer").mockRejectedValue(new Error("handshake refused"));
+		try {
+			const result = await manager.connectServers({ runtime: CONFIG }, {});
+			await manager.waitForPendingConnections();
+			expect(result.errors.get("runtime")).toBe("handshake refused");
+			expect(manager.getSource("runtime")).toBeUndefined();
+			expect(manager.getConnectedServers()).toEqual([]);
+			expect(manager.getAllServerNames()).toContain("runtime");
+
+			await manager.disconnectServer("runtime");
+			expect(manager.getAllServerNames()).not.toContain("runtime");
+		} finally {
+			await manager.disconnectAll();
+		}
+	});
+
 	it("closes a connection that resolves after disconnectAll", async () => {
 		const manager = new MCPManager(process.cwd());
 		const deferred = Promise.withResolvers<MCPServerConnection>();
