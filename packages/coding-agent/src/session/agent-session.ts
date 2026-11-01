@@ -8549,8 +8549,6 @@ export class AgentSession implements SettingsScope {
 		// Same barrier/claim protocol as prompt(): skill invocations, collab peer
 		// prompts and the CLI initial message must not start during idle/manual
 		// compaction or before a handoff commits its history.
-		// A held `subagent_stop` pass: a user skill prompt cancels it, any other waits it out.
-		await this.#waitOutStopPasses(message.attribution === "user");
 		const release = await this.#maintenance.waitForMaintenanceCleanup();
 		const outcome: PromptDispatchOutcome = { sessionClaimed: false };
 		if (!release) return this.#dispatchCustomPrompt(message, options, outcome);
@@ -8640,6 +8638,11 @@ export class AgentSession implements SettingsScope {
 			outcome.sessionClaimed = false;
 			return true;
 		}
+
+		// A held `subagent_stop` pass: a user skill prompt cancels it, any other waits
+		// it out. Checked after preprocessing and the abort check above, with no await
+		// between here and dispatch, so a hold taken meanwhile is honored too.
+		await this.#waitOutStopPasses(message.attribution === "user");
 
 		// Image normalization and the vision-description call suspend after the
 		// isStreaming check above, so a concurrent submission can start a turn in

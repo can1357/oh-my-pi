@@ -3551,14 +3551,15 @@ function extractIrcRecordText(content: string | ReadonlyArray<{ type: string; te
  * The observer took `hold` when the turn closed, so no other turn starts on
  * the session until the result is published: the monitor stays attached and
  * observes the continuations it prompts through the hold, plus any
- * async-result turn between them. Each continuation settles the session's
- * owner async work before the next pass, so a candidate is only judged once
- * that work quiesced; a result the settle delivers un-latches the yield and
- * the turn fails closed as an unanswered refusal.
+ * async-result turn between them. Every pass, the first included, waits until
+ * the session's owner async work has quiesced, so a candidate is only judged
+ * once that work settled; a result the settle delivers un-latches the yield,
+ * and after a refusal the turn then fails closed as an unanswered refusal.
  *
- * `allowed`: the last candidate judged stands. `refused`: a refusal no judged
- * candidate answered. `cancelled`: the run or an explicit user prompt
- * cancelled a pass before its verdict, and the candidate was dropped.
+ * `allowed`: the last candidate judged stands, or async results superseded the
+ * first one before any verdict. `refused`: a refusal no judged candidate
+ * answered. `cancelled`: the run or an explicit user prompt cancelled a pass
+ * before its verdict, or it failed before one, and the candidate was dropped.
  */
 async function runWakeStopPasses(
 	session: AgentSession,
@@ -3574,23 +3575,37 @@ async function runWakeStopPasses(
 		continueWith: async text => {
 			await hold.prompt(text, { attribution: "agent", synthetic: true, runCommands: false, throwOnDrop: true });
 			await untilAborted(signal, () => session.waitForIdle());
-			// A delivered async result un-latches the yield. Each settle covers one
-			// generation; a delivery turn may start more owner work, so settle until
-			// none is left before the next pass judges the candidate.
-			do {
-				await untilAborted(signal, () => session.settleAsyncWork());
-			} while (session.hasPendingAsyncWork());
-			await untilAborted(signal, () => monitor.waitForYieldTurnStop());
 		},
 	};
+	let refused = false;
 	try {
-		while (hasCandidate()) {
+		for (;;) {
+			// Judge only once owner async work quiesced, the first candidate included. A
+			// delivered result un-latches the yield; each settle covers one generation,
+			// and a delivery turn may start more owner work, so settle until none is left.
+			while (session.hasPendingAsyncWork()) {
+				await untilAborted(signal, () => session.settleAsyncWork());
+			}
+			await untilAborted(signal, () => monitor.waitForYieldTurnStop());
+			// Async results superseded the candidate before any verdict: nothing was
+			// judged or refused, and finalization reports the stale result.
+			if (!hasCandidate()) {
+				if (!refused) return "allowed";
+				break;
+			}
 			const verdict = await runSubagentStopPass(session, monitor, stopHook, io);
 			if (verdict !== "continued") return verdict;
+			refused = true;
 		}
 	} catch (error) {
-		if (signal.aborted) {
-			// Cancelled mid-continuation: whatever the turn holds now was never judged.
+		if (signal.aborted || !refused) {
+			// Cancelled, or failed before any verdict: whatever the turn holds now was
+			// never judged, and no handler refused anything.
+			if (!signal.aborted) {
+				logger.warn("IRC wake-turn subagent_stop pass failed before a verdict", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
 			monitor.rejectCandidate("cancelled");
 			return "cancelled";
 		}
@@ -3823,7 +3838,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 				} finally {
 					unsubscribeTurn();
 				}
-				if (stopVerdict === "cancelled" && !turnMonitor.abortSignal.aborted) {
+				if (stopVerdict === "cancelled" && hold.signal.aborted && !turnMonitor.abortSignal.aborted) {
 					cancelReason = SUBAGENT_STOP_PASS_CANCELLED;
 				}
 			}
