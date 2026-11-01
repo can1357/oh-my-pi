@@ -4662,7 +4662,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// namespace/project discovery on the original repo's git remote. Re-read it
 			// per turn from the SessionManager.
 			cwdResolver: () => sessionManager.getCwd(),
-			convertToLlm: convertToLlmFinal,
+			convertToLlm: messages => convertToLlmFinal(session?.prepareToolHistoryForProvider(messages) ?? messages),
 			onPayload,
 			onResponse,
 			sessionId: providerSessionId,
