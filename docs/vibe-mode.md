@@ -15,8 +15,14 @@ Toggle it with the `/vibe` slash command:
 - Entering activates a parent-session worker scope, installs the vibe tools, reduces the active toolset to `read`, optional parent-owned `todo`, and the vibe tools, and injects the director instructions.
 - An inline prompt (`/vibe <prompt>`) enters the mode and submits that prompt as the first directive.
 - Exiting aborts any running director turn, suppresses queued-message replay during teardown, restores the prior toolset, cancels in-flight worker turns, and persists terminal lifecycle records for every worker in the scope.
-- Vibe mode is mutually exclusive with both active **and paused** plan/goal modes; exit those modes first.
-- Starting, deleting, forking, moving (including `/wt`), or handing off the session is rejected while vibe mode is active. Reset-style `/loop` actions are also blocked.
+- Vibe mode is mutually exclusive with goal mode, including a paused goal; exit the goal first.
+- `/plan` does not require exiting Vibe by hand: entering plan mode parks the Vibe scope in place, cancels running worker turns, drops queued worker directives without terminating the conversations, and restores the pre-vibe toolset. The plan entry records the parking. Vibe and plan never run at the same time.
+   - Leaving plan mode completely revives the same worker conversations, including live in-memory workers started with `--no-session`.
+   - A paused plan session still owns the mode slot, so Vibe stays parked until `/plan` fully exits.
+   - Approving a plan restores Vibe before either queued input from compaction or approved execution can start. Cancelling or failing compaction preserves the parked worker conversations too.
+   - For plans entered from Vibe, approval with fresh context and “Save and quit” reset only the director's context in place, preserving the parent session identity and worker transcripts. Other plans keep their normal new-session behavior.
+   - Interrupted worker turns and queued worker directives are not replayed automatically. For persisted sessions, pending Vibe restoration survives reopening and can be retried after a failure.
+- Starting, deleting, forking, branching, moving (including `/wt`), or handing off the session is rejected while Vibe is active or parked for plan mode. Reset-style `/loop` actions are also blocked.
 - The status line shows a `Vibe` indicator while the mode is on; its token-rate display aggregates generating workers even while the director is idle.
 
 `/vibe` is an interactive-TUI command. The mode and worker lifecycle events are persisted with the parent session. Resuming a session whose current mode is `vibe` rehydrates completed workers as idle/parked sessions with their child transcripts; a turn interrupted by process restart is not resumed automatically. Explicitly killed or mode-exit workers stay terminal.
@@ -25,7 +31,7 @@ Switching to a saved session suspends the source scope: running worker turns are
 
 ## The two worker tiers
 
-Every worker is a real, keep-alive task-executor subagent with the normal coding tool surface and its own persisted child transcript. Choose a tier when spawning:
+Every worker is a real, keep-alive task-executor subagent with the normal coding tool surface and its own conversation, persisted as a child transcript when session storage is enabled. Choose a tier when spawning:
 
 | Tier   | Bundled agent | Default role | Use for                                             |
 | ------ | ------------- | ------------ | --------------------------------------------------- |

@@ -62,6 +62,7 @@ import { buildToolsMarkdown } from "@oh-my-pi/pi-tui/prompt/tools-markdown";
 import type { AsyncJobSnapshotItem } from "../../session/agent-session";
 import { buildJobTree, jobTreeGuide, jobTreeIndent } from "@oh-my-pi/pi-tui/overlays/job-tree";
 import type { AuthStorage, OAuthAccountIdentity } from "../../session/auth-storage";
+import type { ResetSessionContextResult } from "../../session/agent-session-types";
 import type { CompactMode } from "../../session/compact-modes";
 import {
 	currentRuntimeIdentity,
@@ -1382,7 +1383,7 @@ export class CommandController {
 		this.ctx.showStatus(`Fresh provider session started (${result.closedProviderSessions} ${stateLabel} pruned).`);
 	}
 
-	async handleResetContextCommand(): Promise<void> {
+	async handleResetContextCommand(): Promise<ResetSessionContextResult | undefined> {
 		if (this.ctx.session.isCompacting) {
 			this.ctx.session.abortCompaction();
 			while (this.ctx.session.isCompacting) {
@@ -1392,7 +1393,7 @@ export class CommandController {
 		const result = await this.ctx.session.resetSessionContext();
 		if (!result) {
 			this.ctx.showWarning("Wait for the current response to finish or abort it before resetting the context.");
-			return;
+			return undefined;
 		}
 		// Drop the rendered transcript so the UI matches the now-empty model
 		// context (mirrors #runNewSessionFlow's teardown, minus the new session —
@@ -1411,6 +1412,7 @@ export class CommandController {
 			),
 		]);
 		this.ctx.ui.requestRender(true, { clearScrollback: true });
+		return result;
 	}
 
 	async handleDeleteCommand(): Promise<void> {

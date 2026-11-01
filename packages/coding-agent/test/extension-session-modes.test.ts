@@ -162,19 +162,29 @@ describe("ctx.sessionModes in the interactive TUI", () => {
 		]);
 	});
 
-	it("keeps the slash commands' conflicts, reports repeats as unchanged, and emits nothing for them", async () => {
+	it("keeps mode conflicts, treats repeats as unchanged, and parks vibe for plan instead of refusing", async () => {
 		const { session, modes, events } = await tui();
 		const tools = session.getEnabledToolNames();
 		expect(changed(await modes.set({ mode: "vibe", action: "enter" }))).toBe(true);
+		const afterEnter = events.length;
 		expect(changed(await modes.set({ mode: "vibe", action: "enter" }))).toBe(false);
-		expect(refusal(await modes.set({ mode: "plan", action: "enter" }))).toBe("conflict");
+		expect(events).toHaveLength(afterEnter);
+		// Plan mode owns the toolset and the persisted mode slot while it runs:
+		// entering it parks vibe rather than refusing the transition.
+		expect(changed(await modes.set({ mode: "plan", action: "enter" }))).toBe(true);
+		expect(modes.getState().plan.status).toBe("active");
+		expect(modes.getState().vibe.status).toBe("inactive");
 		expect(refusal(await modes.set({ mode: "goal", action: "enter", objective: "ship" }))).toBe("conflict");
-		expect(events).toHaveLength(1);
+		// A full plan exit revives the parked vibe mode and its toolset.
+		expect(changed(await modes.set({ mode: "plan", action: "exit" }))).toBe(true);
+		expect(modes.getState().plan).toEqual({ status: "inactive" });
+		expect(modes.getState().vibe.status).toBe("active");
 		expect(changed(await modes.set({ mode: "vibe", action: "exit" }))).toBe(true);
 		expect(session.getVibeModeState()).toBeUndefined();
 		expect(session.getEnabledToolNames()).toEqual(tools);
+		const afterExit = events.length;
 		expect(changed(await modes.set({ mode: "vibe", action: "exit" }))).toBe(false);
-		expect(events).toHaveLength(2);
+		expect(events).toHaveLength(afterExit);
 	});
 
 	it("refuses a transition during a turn without touching it, then applies once idle", async () => {
@@ -325,6 +335,26 @@ describe("ctx.sessionModes in the interactive TUI", () => {
 		expect(
 			events.some(event => event.previous.plan.status === "inactive" && event.state.plan.status === "active"),
 		).toBe(true);
+	});
+
+	it("does not expose an empty mode slot while /plan parks Vibe", async () => {
+		const attempts: SessionModeResult[] = [];
+		const { session, mode, modes } = await tui(pi => {
+			pi.on("mode_changed", async (event, ctx) => {
+				if (event.state.plan.status === "active" || event.state.vibe.status === "active") return;
+				attempts.push(await ctx.sessionModes!.set({ mode: "goal", action: "enter", objective: "Sneak in" }));
+			});
+		});
+		changed(await modes.set({ mode: "vibe", action: "enter" }));
+
+		await mode.handlePlanModeCommand();
+
+		// Parking Vibe is not "no mode": the slot must stay closed to an extension
+		// handler until plan mode owns it.
+		expect(attempts.filter(attempt => attempt.ok).map(attempt => attempt)).toEqual([]);
+		expect(mode.planModeEnabled).toBe(true);
+		expect(mode.vibeModeEnabled).toBe(false);
+		expect(session.getGoalModeState()).toBeUndefined();
 	});
 
 	it("refuses a nested call from the transition's own goal_updated handler instead of deadlocking", async () => {

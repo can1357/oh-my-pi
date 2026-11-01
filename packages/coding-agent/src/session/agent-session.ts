@@ -7607,9 +7607,23 @@ export class AgentSession implements SettingsScope {
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 	}
 
+	/**
+	 * Refuses transitions that replace the session id/file while Vibe workers are
+	 * live or parked. Vibe owner scopes key on the parent session id and file, so
+	 * minting a new session (or moving the file) would strand workers no record
+	 * could revive. A plan-mode suspension keeps the workers parked under the
+	 * same scope, so it refuses too — until both plan mode and the parked Vibe
+	 * mode are left, which is what restores them.
+	 */
 	#assertVibeSessionTransitionAllowed(action: string): void {
-		if (this.#vibeModeState?.enabled) {
+		const state = this.#vibeModeState;
+		if (state?.enabled) {
 			throw new Error(`Cannot ${action} while vibe mode is active. Exit vibe mode first.`);
+		}
+		if (state?.suspendedForPlan) {
+			throw new Error(
+				`Cannot ${action} while vibe mode is suspended for plan mode. Exit plan mode fully, then exit vibe mode first.`,
+			);
 		}
 	}
 
@@ -12017,11 +12031,16 @@ export class AgentSession implements SettingsScope {
 	 * compaction entry on the current session (the document becomes the summary;
 	 * recent history is kept).
 	 *
+	 * Refused while Vibe workers are live or parked: the commit rewrites the
+	 * branch, and the `vibe-session-lifecycle` spawn records that revival reads
+	 * can fall outside the kept window, stranding the workers.
+	 *
 	 * @param customInstructions Optional focus for the handoff document
 	 * @param options Handoff execution options
 	 * @returns The handoff document text, or undefined if cancelled/failed
 	 */
-	handoff(customInstructions?: string, options?: SessionHandoffOptions): Promise<HandoffResult | undefined> {
+	async handoff(customInstructions?: string, options?: SessionHandoffOptions): Promise<HandoffResult | undefined> {
+		this.#assertVibeSessionTransitionAllowed("generate a handoff");
 		return this.#inLogContext(() => this.#maintenance.handoff(customInstructions, options));
 	}
 
@@ -13495,6 +13514,9 @@ export class AgentSession implements SettingsScope {
 		cancelled: boolean;
 	}> {
 		using _transition = this.#beginSessionTransition();
+		// Branching mints a new session id and file, exactly like fork(): the parked
+		// workers are keyed to the old one, so refuse before touching the manager.
+		this.#assertVibeSessionTransitionAllowed("branch the session");
 		const selectedEntry = this.sessionManager.getEntry(entryId);
 
 		if (selectedEntry?.type !== "message" || selectedEntry.message.role !== "user") {
@@ -13633,6 +13655,9 @@ export class AgentSession implements SettingsScope {
 		images?: ImageContent[],
 	): Promise<{ cancelled: boolean; sessionFile: string | undefined }> {
 		using _transition = this.#beginSessionTransition();
+		// The promoted /btw answer branches into a new session file; a parked Vibe
+		// scope cannot follow it.
+		this.#assertVibeSessionTransitionAllowed("branch from /btw");
 		const previousSessionFile = this.sessionFile;
 		if (!this.sessionManager.getSessionFile()) {
 			throw new Error("Cannot branch /btw: session is not persisted");

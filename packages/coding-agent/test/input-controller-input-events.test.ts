@@ -652,6 +652,7 @@ describe("interactive native input ingress", () => {
 			const runCommand = async () => {
 				commandEntered.resolve();
 				await releaseCommand.promise;
+				return undefined;
 			};
 			h.ctx.handleResetContextCommand = runCommand;
 			h.ctx.handleExportCommand = runCommand;

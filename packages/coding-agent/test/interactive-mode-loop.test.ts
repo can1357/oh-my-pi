@@ -64,6 +64,7 @@ describe("InteractiveMode loop auto-submit", () => {
 		await pendingInput;
 		pendingInput = undefined;
 		mode.vibeModeEnabled = false;
+		session.setVibeModeState(undefined);
 		Reflect.deleteProperty(session, "isCompacting");
 		Reflect.deleteProperty(session, "isStreaming");
 		Reflect.deleteProperty(session, "hasPostPromptWork");
@@ -161,13 +162,13 @@ describe("InteractiveMode loop auto-submit", () => {
 		expect(resolved[0].text).toBe("deliver this");
 	});
 
-	it("disables reset loops when vibe blocks the session transition", async () => {
+	it.each(["active", "parked"] as const)("disables reset loops while Vibe is %s", async state => {
 		vi.useFakeTimers();
 		cfgLoopMode.set(settings, "reset");
-		mode.vibeModeEnabled = true;
+		mode.vibeModeEnabled = state === "active";
+		session.setVibeModeState(state === "parked" ? { enabled: false, suspendedForPlan: true } : { enabled: true });
 		mode.loopModeEnabled = true;
 		mode.loopPrompt = "do not resubmit";
-		const showStatus = vi.spyOn(mode, "showStatus");
 		const resolved: SubmittedUserInput[] = [];
 		pendingInput = mode.getUserInput();
 		void pendingInput.then(input => resolved.push(input));
@@ -178,7 +179,6 @@ describe("InteractiveMode loop auto-submit", () => {
 		expect(resolved).toHaveLength(0);
 		expect(mode.loopModeEnabled).toBe(false);
 		expect(mode.loopPrompt).toBeUndefined();
-		expect(showStatus).toHaveBeenCalledWith("Exit vibe mode before using reset loops. Loop mode disabled.");
 	});
 
 	it("reports waiting, running, paused, resumed, and disabled loop states", async () => {
@@ -364,42 +364,38 @@ describe("InteractiveMode loop auto-submit", () => {
 			expect(captured?.aborted).toBe(true);
 		});
 
-		// /vibe enabled while the gate is awaiting must kill a reset loop: the
-		// pre-gate guard is stale by then, and handleClearCommand would only
-		// warn while the iteration still submitted without resetting. Goes
-		// through the real /vibe command so the vibeModeEnabled transition is
-		// exercised instead of assigned directly.
-		it("disables a reset loop when vibe is enabled while the condition is in flight", async () => {
-			vi.useFakeTimers();
-			cfgLoopMode.set(settings, "reset");
-			idleSession();
-			const pending = Promise.withResolvers<LoopConditionVerdict>();
-			vi.spyOn(loopCondition, "evaluateLoopCondition").mockImplementation(async () => await pending.promise);
-			const clear = vi.spyOn(mode, "handleClearCommand");
-			const showStatus = vi.spyOn(mode, "showStatus");
-			vi.spyOn(session, "activateVibeTools").mockResolvedValue();
-			mode.loopCondition = { command: "sleep 30", until: false };
+		it.each(["active", "parked"] as const)(
+			"disables a reset loop when Vibe becomes %s during its condition",
+			async state => {
+				vi.useFakeTimers();
+				cfgLoopMode.set(settings, "reset");
+				idleSession();
+				const pending = Promise.withResolvers<LoopConditionVerdict>();
+				vi.spyOn(loopCondition, "evaluateLoopCondition").mockImplementation(async () => await pending.promise);
+				const clear = vi.spyOn(mode, "handleClearCommand");
+				vi.spyOn(session, "activateVibeTools").mockResolvedValue();
+				mode.loopCondition = { command: "sleep 30", until: false };
 
-			const resolved = armLoop("reset me");
-			vi.advanceTimersByTime(800);
-			await flushMicrotasks();
+				const resolved = armLoop("reset me");
+				vi.advanceTimersByTime(800);
+				await flushMicrotasks();
 
-			await mode.handleVibeModeCommand();
-			expect(mode.vibeModeEnabled).toBe(true);
-			pending.resolve({ kind: "continue" });
-			await flushMicrotasks();
+				if (state === "active") {
+					await mode.handleVibeModeCommand();
+					expect(mode.vibeModeEnabled).toBe(true);
+				} else {
+					session.setVibeModeState({ enabled: false, suspendedForPlan: true });
+				}
+				pending.resolve({ kind: "continue" });
+				await flushMicrotasks();
 
-			expect(clear).not.toHaveBeenCalled();
-			expect(resolved).toHaveLength(0);
-			expect(mode.loopModeEnabled).toBe(false);
-			expect(mode.loopPrompt).toBeUndefined();
-			expect(showStatus).toHaveBeenCalledWith("Exit vibe mode before using reset loops. Loop mode disabled.");
-		});
+				expect(clear).not.toHaveBeenCalled();
+				expect(resolved).toHaveLength(0);
+				expect(mode.loopModeEnabled).toBe(false);
+				expect(mode.loopPrompt).toBeUndefined();
+			},
+		);
 
-		// The condition can resolve while /vibe tool activation is still in
-		// flight: vibeModeEnabled is still false, but the reset must not run
-		// concurrently with the toolset switch. The loop must disable on the
-		// entering transition, not just the settled flag.
 		it("disables a reset loop when the condition resolves during vibe activation", async () => {
 			vi.useFakeTimers();
 			cfgLoopMode.set(settings, "reset");
@@ -407,7 +403,6 @@ describe("InteractiveMode loop auto-submit", () => {
 			const pending = Promise.withResolvers<LoopConditionVerdict>();
 			vi.spyOn(loopCondition, "evaluateLoopCondition").mockImplementation(async () => await pending.promise);
 			const clear = vi.spyOn(mode, "handleClearCommand");
-			const showStatus = vi.spyOn(mode, "showStatus");
 			const vibeGate = Promise.withResolvers<void>();
 			vi.spyOn(session, "activateVibeTools").mockImplementation(() => vibeGate.promise);
 			mode.loopCondition = { command: "sleep 30", until: false };
@@ -427,7 +422,6 @@ describe("InteractiveMode loop auto-submit", () => {
 			expect(resolved).toHaveLength(0);
 			expect(mode.loopModeEnabled).toBe(false);
 			expect(mode.loopPrompt).toBeUndefined();
-			expect(showStatus).toHaveBeenCalledWith("Exit vibe mode before using reset loops. Loop mode disabled.");
 
 			vibeGate.resolve();
 			await vibeEnter;
