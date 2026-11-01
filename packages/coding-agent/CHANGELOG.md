@@ -540,6 +540,7 @@
 
 ### Fixed
 
+- MCP project discovery now loads the nearest ancestor configuration up to the repository root, so launches from nested directories find the project servers without merging stacked ancestor files. ([#11393](https://github.com/can1357/oh-my-pi/pull/11393) by [@PeterPonyu](https://github.com/PeterPonyu)).
 - Fixed subagents whose role has an explicitly empty fallback chain falling back through the `default` chain when the default role uses the same model, including after a retry fallback, prewalk or context promotion briefly switched models or the subagent was revived ([#16548](https://github.com/can1357/oh-my-pi/pull/16548) by [@eggpeat](https://github.com/eggpeat))
 - Fixed `/usage` and `omp usage --json` listing identity-less OAuth accounts such as Devin as missing usage beside their working reports ([#16549](https://github.com/can1357/oh-my-pi/pull/16549) by [@eggpeat](https://github.com/eggpeat))
 - Fixed releasing or reaping a browser tab returning while Chromium still listed the page; the close now waits until Chromium reports the tab destroyed ([#16680](https://github.com/can1357/oh-my-pi/pull/16680) by [@H4vC](https://github.com/H4vC))
