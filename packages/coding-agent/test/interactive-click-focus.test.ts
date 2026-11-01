@@ -281,7 +281,7 @@ describe("inline click-to-focus geometry", () => {
 	 */
 	function installDemoLinkExtension(
 		schemes: string[] = ["demo"],
-		deferred = false,
+		{ deferred = false }: { deferred?: boolean } = {},
 	): {
 		activated: string[];
 		firstActivation: Promise<void>;
@@ -378,7 +378,7 @@ describe("inline click-to-focus geometry", () => {
 
 	it("claims the link scheme of a startup-deferred extension once it binds, redrawing the transcript", async () => {
 		cfgExtensionAssistantTextRenderers.set(mode.settings, true);
-		const { runner } = installDemoLinkExtension(["demo"], true);
+		const { runner } = installDemoLinkExtension(["demo"], { deferred: true });
 		await mode.init({ suppressWelcomeIntro: true });
 		void mode.getUserInput();
 		await term.waitForRender();
