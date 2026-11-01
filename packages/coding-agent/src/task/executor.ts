@@ -2841,7 +2841,7 @@ async function driveSessionToResult(
 			if (!recoverableStop || abortSignal.aborted || endsRun(err)) throw err;
 		} finally {
 			// The brief's admission lifetime ends with its first turn, however that turn ends.
-			const ref = AgentRegistry.global().get(session.getAgentId() ?? "");
+			const ref = AgentRegistry.global().get(session.getAgentId?.() ?? "");
 			if (ref?.session === session) ref.initialPromptPending = false;
 		}
 	};
