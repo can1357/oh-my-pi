@@ -11,8 +11,9 @@
  * drives a real CollabGuestLink over the in-memory relay so every guest→host
  * frame is observable.
  */
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fsp from "node:fs/promises";
+import { setImmediate as tick } from "node:timers/promises";
 import { generateRoomKey, importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
 import { CollabGuestLink } from "@oh-my-pi/pi-coding-agent/collab/guest";
 import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
@@ -70,6 +71,8 @@ interface GuestUiHarness {
 	uiResponses: UiResponseRecord[];
 	nextDialog(): Promise<DialogStub>;
 	nextUiResponse(): Promise<UiResponseRecord>;
+	/** Every hello the guest sent, in order. */
+	hellos: Extract<CollabFrame, { t: "hello" }>[];
 	/**
 	 * Deterministic apply-chain barrier: send a sentinel `error` frame and
 	 * resolve once the guest surfaces it. Frames apply strictly in arrival
@@ -91,12 +94,15 @@ function makeState(): CollabSessionState {
 	};
 }
 
-async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarness> {
-	const roomId = "ui-request-room";
-	const roomKey = generateRoomKey();
-	const cryptoKey = await importRoomKey(roomKey);
-	const link = formatCollabLink("ws://localhost:8788", roomId, roomKey);
+/** A real CollabGuestLink joined to a room; its hook dialogs are stubs that stay open until a test settles them. */
+interface GuestLinkHarness {
+	guest: CollabGuestLink;
+	/** Every presentation the guest ever made, in order. */
+	dialogLog: DialogStub[];
+	nextDialog(): Promise<DialogStub>;
+}
 
+async function joinGuestLink(link: string, onError: (message: string) => void = () => {}): Promise<GuestLinkHarness> {
 	const dialogLog: DialogStub[] = [];
 	const dialogQueue: DialogStub[] = [];
 	const dialogWaiters: ((stub: DialogStub) => void)[] = [];
@@ -144,54 +150,6 @@ async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarnes
 		return promise;
 	};
 
-	const uiResponses: UiResponseRecord[] = [];
-	const responseQueue: UiResponseRecord[] = [];
-	const responseWaiters: ((record: UiResponseRecord) => void)[] = [];
-	const nextUiResponse = (): Promise<UiResponseRecord> => {
-		const queued = responseQueue.shift();
-		if (queued) return Promise.resolve(queued);
-		const { promise, resolve } = Promise.withResolvers<UiResponseRecord>();
-		responseWaiters.push(resolve);
-		return promise;
-	};
-
-	let barrierSeq = 0;
-	const errorWaiters = new Map<string, () => void>();
-	const barrier = (): Promise<void> => {
-		const sentinel = `__barrier_${++barrierSeq}__`;
-		const { promise, resolve } = Promise.withResolvers<void>();
-		errorWaiters.set(sentinel, resolve);
-		hostSocket.send({ t: "error", message: sentinel });
-		return promise;
-	};
-
-	const hostSocket = new CollabSocket({ wsUrl: `ws://localhost:8788/r/${roomId}`, role: "host", key: cryptoKey });
-	const hostOpen = Promise.withResolvers<void>();
-	const sendWelcome = (): void => {
-		hostSocket.send({
-			t: "welcome",
-			proto: COLLAB_PROTO,
-			header: { type: "session", id: "remote-session", timestamp: "2026-06-30T00:00:00Z", cwd: "/tmp" },
-			state: makeState(),
-			agents: [],
-			entryCount: 0,
-			readOnly: opts?.readOnly ? true : undefined,
-		});
-	};
-	hostSocket.onOpen = () => hostOpen.resolve();
-	hostSocket.onFrame = frame => {
-		if (frame.t === "hello") sendWelcome();
-		if (frame.t === "ui-response") {
-			const record: UiResponseRecord = { reqId: frame.reqId, value: frame.value };
-			uiResponses.push(record);
-			const waiter = responseWaiters.shift();
-			if (waiter) waiter(record);
-			else responseQueue.push(record);
-		}
-	};
-	hostSocket.connect();
-	await hostOpen.promise;
-
 	const ctx = {
 		collabGuest: undefined as CollabGuestLink | undefined,
 		settings: Settings.isolated(),
@@ -233,17 +191,7 @@ async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarnes
 		renderInitialMessages: () => {},
 		reloadTodos: () => Promise.resolve(),
 		showStatus: () => {},
-		showError: (message: string) => {
-			// The guest prefixes host error frames ("Collab host: <message>");
-			// match the embedded sentinel.
-			for (const [sentinel, waiter] of errorWaiters) {
-				if (message.includes(sentinel)) {
-					errorWaiters.delete(sentinel);
-					waiter();
-					return;
-				}
-			}
-		},
+		showError: onError,
 		updateEditorTopBorder: () => {},
 		updateEditorBorderColor: () => {},
 		eventController: {
@@ -266,12 +214,85 @@ async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarnes
 
 	const guest = new CollabGuestLink(ctx);
 	await guest.join(link);
+	return { guest, dialogLog, nextDialog };
+}
+
+async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarness> {
+	const roomId = "ui-request-room";
+	const roomKey = generateRoomKey();
+	const cryptoKey = await importRoomKey(roomKey);
+	const link = formatCollabLink("ws://localhost:8788", roomId, roomKey);
+
+	const uiResponses: UiResponseRecord[] = [];
+	const responseQueue: UiResponseRecord[] = [];
+	const responseWaiters: ((record: UiResponseRecord) => void)[] = [];
+	const nextUiResponse = (): Promise<UiResponseRecord> => {
+		const queued = responseQueue.shift();
+		if (queued) return Promise.resolve(queued);
+		const { promise, resolve } = Promise.withResolvers<UiResponseRecord>();
+		responseWaiters.push(resolve);
+		return promise;
+	};
+
+	let barrierSeq = 0;
+	const errorWaiters = new Map<string, () => void>();
+	const barrier = (): Promise<void> => {
+		const sentinel = `__barrier_${++barrierSeq}__`;
+		const { promise, resolve } = Promise.withResolvers<void>();
+		errorWaiters.set(sentinel, resolve);
+		hostSocket.send({ t: "error", message: sentinel });
+		return promise;
+	};
+	const hellos: Extract<CollabFrame, { t: "hello" }>[] = [];
+
+	const hostSocket = new CollabSocket({ wsUrl: `ws://localhost:8788/r/${roomId}`, role: "host", key: cryptoKey });
+	const hostOpen = Promise.withResolvers<void>();
+	const sendWelcome = (): void => {
+		hostSocket.send({
+			t: "welcome",
+			proto: COLLAB_PROTO,
+			header: { type: "session", id: "remote-session", timestamp: "2026-06-30T00:00:00Z", cwd: "/tmp" },
+			state: makeState(),
+			agents: [],
+			entryCount: 0,
+			readOnly: opts?.readOnly ? true : undefined,
+		});
+	};
+	hostSocket.onOpen = () => hostOpen.resolve();
+	hostSocket.onFrame = frame => {
+		if (frame.t === "hello") {
+			hellos.push(frame);
+			sendWelcome();
+		}
+		if (frame.t === "ui-response") {
+			const record: UiResponseRecord = { reqId: frame.reqId, value: frame.value };
+			uiResponses.push(record);
+			const waiter = responseWaiters.shift();
+			if (waiter) waiter(record);
+			else responseQueue.push(record);
+		}
+	};
+	hostSocket.connect();
+	await hostOpen.promise;
+
+	const { guest, dialogLog, nextDialog } = await joinGuestLink(link, message => {
+		// The guest prefixes host error frames ("Collab host: <message>");
+		// match the embedded sentinel.
+		for (const [sentinel, waiter] of errorWaiters) {
+			if (message.includes(sentinel)) {
+				errorWaiters.delete(sentinel);
+				waiter();
+				return;
+			}
+		}
+	});
 
 	return {
 		guest,
 		hostSocket,
 		dialogLog,
 		uiResponses,
+		hellos,
 		nextDialog,
 		nextUiResponse,
 		barrier,
@@ -442,6 +463,21 @@ describe("collab TUI guest ui-request handling (#4049)", () => {
 		await h.barrier(); // frames apply in order: the ui-request has fully applied
 		expect(h.dialogLog).toHaveLength(0);
 		expect(h.uiResponses).toEqual([]);
+	});
+
+	it("tells the host it replies to withdrawals, and replies without a value to one it had not answered", async () => {
+		const h = await openHarness();
+		expect(h.hellos.at(-1)).toMatchObject({ cancelReplies: true });
+		h.hostSocket.send({
+			t: "ui-request",
+			request: { reqId: 12, kind: "select", title: "Deploy?", options: ["Yes", "No"] },
+		});
+		const dialog = await h.nextDialog();
+
+		// A person's message on the host withdrew the question before this guest answered it.
+		h.hostSocket.send({ t: "ui-request-end", reqId: 12, withdrawn: true });
+		await dialog.whenAborted;
+		expect(await h.nextUiResponse()).toEqual({ reqId: 12, value: undefined });
 	});
 });
 
@@ -1214,6 +1250,51 @@ describe("guest ask closed by the host person's message", () => {
 				],
 			});
 			guest.socket.close();
+		} finally {
+			superseded.abort();
+			await host.stop("test done");
+		}
+	});
+
+	it("releases the ask within one round trip when an idle guest is shown the question", async () => {
+		const ctx = makeAskHostContext();
+		const host = new CollabHost(ctx);
+		await host.start("ws://localhost:8787");
+		ctx.collabHost = host;
+		const controller = new ExtensionUiController(ctx);
+		const superseded = new AbortController();
+		try {
+			// A real TUI guest; nobody answers the question it shows.
+			const guest = await joinGuestLink(host.link);
+			harnessCleanups.push(() => guest.guest.leave("test cleanup").catch(() => {}));
+			const result = controller.showAskDialog(
+				[{ id: "deploy", question: "Deploy?", options: [{ label: "Yes" }, { label: "No" }] }],
+				{ signal: superseded.signal },
+			);
+			const dialog = await guest.nextDialog();
+			let released = false;
+			void result.then(() => {
+				released = true;
+			});
+
+			// On a fake clock the two-second window for guests that send no acknowledgement never ends: only the
+			// acknowledgement this guest sends by itself when it reads the withdrawal can release the ask.
+			vi.useFakeTimers();
+			try {
+				superseded.abort(new DialogSupersededError());
+				for (let turn = 0; turn < 5_000 && !released; turn++) await tick();
+			} finally {
+				vi.useRealTimers();
+			}
+
+			expect(released).toBe(true);
+			expect(dialog.aborted).toBe(true);
+			expect(host.inputRequired).toBe(false);
+			expect(await result).toMatchObject({
+				kind: "submit",
+				interrupted: true,
+				results: [{ id: "deploy", selectedOptions: [], unanswered: true }],
+			});
 		} finally {
 			superseded.abort();
 			await host.stop("test done");

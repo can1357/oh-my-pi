@@ -27,6 +27,7 @@ import * as registry from "@oh-my-pi/pi-coding-agent/collab/registry";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { DialogSupersededError } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -364,6 +365,68 @@ describe("collab host registry lifecycle (#6099)", () => {
 			}
 		});
 	}
+
+	it("ends a withdrawn dialog whose writers all replied while one's answer awaited a transition that dropped it", async () => {
+		const { ctx, state } = makeHostContext();
+		const originalConnect = CollabSocket.prototype.connect;
+		let transport: CollabSocket | undefined;
+		const capture = spyOn(CollabSocket.prototype, "connect").mockImplementation(function (this: CollabSocket) {
+			transport = this;
+			return originalConnect.call(this);
+		});
+		host = new CollabHost(ctx);
+		try {
+			await host.start(RELAY_URL, WEB_URL);
+		} finally {
+			capture.mockRestore();
+		}
+		if (!transport) throw new Error("host transport missing");
+		const parsed = parseCollabLink(host.link);
+		if ("error" in parsed || !parsed.writeToken) throw new Error("writable link missing");
+		const writeToken = Buffer.from(parsed.writeToken).toString("base64url");
+		for (const peer of [1, 2]) {
+			transport.onFrame!(
+				{ t: "hello", proto: COLLAB_PROTO, name: `writer ${peer}`, writeToken, cancelReplies: true },
+				peer,
+			);
+		}
+		const superseded = new AbortController();
+		const answer = host.requestGuestUi(
+			{ kind: "select", title: "Pending", options: ["Yes", "No"] },
+			superseded.signal,
+		);
+		if (!answer) throw new Error("host did not send the dialog");
+		let outcome: CollabGuestUiResult | undefined;
+		void answer.then(result => {
+			outcome = result;
+		});
+		// A message from the host's person withdraws the dialog: both writers owe the host a reply.
+		superseded.abort(new DialogSupersededError());
+		const original = state.sessionId;
+		const transition = Promise.withResolvers<void>();
+		state.transition = transition.promise;
+		state.sessionId = "provisional";
+		try {
+			// Writer 1's answer, sent before it read the withdrawal, waits for the transition; then each
+			// writer replies to the withdrawal.
+			transport.onFrame!({ t: "ui-response", reqId: 1, value: "No" }, 1);
+			transport.onFrame!({ t: "ui-response", reqId: 1 }, 1);
+			transport.onFrame!({ t: "ui-response", reqId: 1 }, 2);
+			await setImmediate();
+			expect(outcome).toBeUndefined();
+			// Writer 1 leaves before the switch rolls back, so its answer is not applied. Every writer has
+			// replied or left: the dialog ends with no further input from anyone.
+			transport.onControl?.({ t: "peer-left", peer: 1 });
+			state.sessionId = original;
+			state.transition = undefined;
+			transition.resolve();
+			await setImmediate();
+			expect(outcome).toEqual({ kind: "unavailable" });
+		} finally {
+			state.transition = undefined;
+			transition.resolve();
+		}
+	});
 
 	it("ends an old-room dialog even while its session is provisionally suspended", async () => {
 		const { ctx, state } = makeHostContext();

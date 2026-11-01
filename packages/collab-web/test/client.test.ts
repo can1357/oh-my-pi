@@ -455,6 +455,44 @@ describe("GuestClient frame apply", () => {
 		expect(client.getSnapshot().uiRequest).toBeNull();
 	});
 
+	it("tells the host it replies to withdrawals, and replies without a value when the host withdraws a request", () => {
+		const sent: GuestFrame[] = [];
+		const sendSpy = vi.spyOn(CollabSocket.prototype, "send").mockImplementation((frame: GuestFrame) => {
+			sent.push(frame);
+		});
+		const connectSpy = vi.spyOn(CollabSocket.prototype, "connect").mockImplementation(function (this: CollabSocket) {
+			this.onOpen?.();
+		});
+		const client = new GuestClient(LINK, "tester");
+		try {
+			client.connect();
+			// Without the promise the host gives this guest a two-second window instead of waiting for its reply.
+			expect(sent).toEqual([expect.objectContaining({ t: "hello", cancelReplies: true })]);
+			sent.length = 0;
+			client.applyFrameForTest(welcomeFrame(0));
+			client.applyFrameForTest({
+				t: "ui-request",
+				request: { reqId: 11, kind: "select", title: "Deploy?", options: ["Yes", "No"] },
+			});
+			// A plain end settles the request elsewhere and wants no reply.
+			client.applyFrameForTest({ t: "ui-request-end", reqId: 11 });
+			expect(sent).toEqual([]);
+
+			client.applyFrameForTest({
+				t: "ui-request",
+				request: { reqId: 12, kind: "select", title: "Deploy?", options: ["Yes", "No"] },
+			});
+			// The host's person sent a message: the host waits for this guest's reply.
+			client.applyFrameForTest({ t: "ui-request-end", reqId: 12, withdrawn: true });
+			expect(sent).toEqual([{ t: "ui-response", reqId: 12 }]);
+			expect(client.getSnapshot().uiRequest).toBeNull();
+		} finally {
+			client.close();
+			connectSpy.mockRestore();
+			sendSpy.mockRestore();
+		}
+	});
+
 	it("queues overlapping host UI requests until the active one resolves", () => {
 		const client = liveClient();
 		const first = { reqId: 9, kind: "select" as const, title: "First?", options: ["A"] };

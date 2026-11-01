@@ -850,7 +850,8 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 			this.session.superviseUserSteering?.(loopSteeringSignal, "pending") ??
 			superviseUserSteering(loopSteeringSignal);
 		// The dialog's `signal` for that message: the host withdraws the dialog and settles it with what the
-		// person had submitted; a remote client's answer counts if it arrives within WITHDRAWN_DIALOG_REPLY_MS.
+		// person had submitted; a remote client's answer counts if it arrives within WITHDRAWN_DIALOG_REPLY_MS,
+		// or, from a collab guest that acknowledges withdrawals, ahead of that acknowledgement.
 		using superseded = supersedeOnMessage(userSteering.signal);
 		const abortError = (): ToolAbortError =>
 			new ToolAbortError(userSteering.signal.aborted ? "Ask interrupted by message" : "Ask input was cancelled");

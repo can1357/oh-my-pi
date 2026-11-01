@@ -95,7 +95,8 @@ export type CollabFrame =
 	/** Full agent-registry snapshot (debounced on registry change). */
 	| { t: "agents"; agents: AgentSnapshot[] }
 	| { t: "ui-request"; request: CollabUiRequest }
-	| { t: "ui-request-end"; reqId: number }
+	/** `withdrawn`: a message from the host's person closed the request; see the wire grammar's `HostFrame`. */
+	| { t: "ui-request-end"; reqId: number; withdrawn?: boolean }
 	/** Targeted reply to fetch-transcript; `error` marks a terminal read failure that guests must surface without hot retrying. */
 	| { t: "transcript"; reqId: number; text: string; newSize: number; error?: string }
 	| { t: "bye"; reason: string }

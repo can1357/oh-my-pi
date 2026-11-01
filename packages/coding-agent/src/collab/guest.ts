@@ -368,6 +368,8 @@ export class CollabGuestLink {
 				proto: COLLAB_PROTO,
 				name: collabDisplayName(this.#ctx),
 				writeToken: this.#writeToken,
+				// Every withdrawn ui-request gets a reply (`#endUiRequest`), so the host waits for it.
+				cancelReplies: true,
 			});
 		};
 		socket.onFrame = frame => {
@@ -683,7 +685,7 @@ export class CollabGuestLink {
 				this.#presentUiRequest(frame.request);
 				break;
 			case "ui-request-end":
-				this.#endUiRequest(frame.reqId);
+				this.#endUiRequest(frame.reqId, frame.withdrawn === true);
 				break;
 			case "transcript": {
 				const resolve = this.#pendingTranscripts.get(frame.reqId);
@@ -906,12 +908,19 @@ export class CollabGuestLink {
 			});
 	}
 
-	/** Host settled the request (answered elsewhere or aborted): dismiss without responding. */
-	#endUiRequest(reqId: number): void {
+	/**
+	 * Host settled the request (answered elsewhere or aborted): dismiss without responding. When a
+	 * message from the host's person withdrew it (`withdrawn`), reply without a value: the host waits for
+	 * that reply. An answer this guest already sent went out before this frame was read, so it reaches
+	 * the host first and counts; this reply then only says the guest has nothing more for the request.
+	 */
+	#endUiRequest(reqId: number, withdrawn: boolean): void {
 		const abort = this.#pendingUiRequests.get(reqId);
-		if (!abort) return;
-		this.#pendingUiRequests.delete(reqId);
-		abort.abort();
+		if (abort) {
+			this.#pendingUiRequests.delete(reqId);
+			abort.abort();
+		}
+		if (withdrawn && !this.#readOnly) this.#socket?.send({ t: "ui-response", reqId });
 	}
 
 	/**

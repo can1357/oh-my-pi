@@ -261,7 +261,14 @@ export class GuestClient {
 	}
 
 	#handleOpen(): void {
-		this.#socket.send({ t: "hello", proto: COLLAB_PROTO, name: this.#name, writeToken: this.#writeToken });
+		// Every withdrawn ui-request gets a reply (see `ui-request-end`), so the host waits for it.
+		this.#socket.send({
+			t: "hello",
+			proto: COLLAB_PROTO,
+			name: this.#name,
+			writeToken: this.#writeToken,
+			cancelReplies: true,
+		});
 		this.#phase = this.#everConnected ? "reconnecting" : "waiting";
 		this.#everConnected = true;
 		this.#commit();
@@ -445,6 +452,9 @@ export class GuestClient {
 			case "ui-request-end":
 				if (this.#uiRequest?.reqId === frame.reqId) this.#showNextUiRequest();
 				else this.#uiRequestQueue = this.#uiRequestQueue.filter(request => request.reqId !== frame.reqId);
+				// A message from the host's person closed it. An answer sent before this frame was read is
+				// already ahead on the wire and counts; this reply says there is nothing more for it.
+				if (frame.withdrawn) this.#socket.send({ t: "ui-response", reqId: frame.reqId });
 				break;
 			case "transcript": {
 				const pending = this.#pendingTranscripts.get(frame.reqId);

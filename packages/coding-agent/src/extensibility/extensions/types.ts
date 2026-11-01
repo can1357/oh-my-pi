@@ -218,12 +218,15 @@ export function isDialogSuperseded(signal: AbortSignal | undefined): boolean {
 }
 
 /**
- * After a person's message withdraws a dialog a remote client shows (an RPC host, an ACP client), how long omp
- * keeps reading the client's reply to it: an answer, or an acknowledgement (RPC `cancelled: true`, ACP `-32800`).
- * Either ends the wait at once. An answer received within this window is used. Neither protocol carries when an
- * answer was submitted, so an answer received later cannot be told apart from none: the dialog is reported
- * unanswered when the window ends, and a later answer is ignored, even one submitted before the withdrawal.
- * Waiting longer would hold back the person's message that long on every client that sends no reply.
+ * After a person's message withdraws a dialog a remote client shows (an RPC host, an ACP client, a collab guest),
+ * how long omp keeps reading the reply of a client that has not promised one: an answer, or an acknowledgement
+ * (RPC `cancelled: true`, ACP `-32800`, a collab `ui-response` with no value). Either ends the wait at once. An answer
+ * received within this window is used. Such a client does not say when an answer was submitted, so an answer
+ * received later cannot be told apart from none: the dialog is reported unanswered when the window ends, and a later
+ * answer is ignored, even one submitted before the withdrawal. Waiting longer would hold back the person's message
+ * that long on every client that sends no reply. A collab guest that said `hello.cancelReplies` acknowledges every
+ * withdrawal as soon as it reads it, behind any answer it already sent, so omp waits for that acknowledgement
+ * instead of this window.
  */
 export const WITHDRAWN_DIALOG_REPLY_MS = 2_000;
 

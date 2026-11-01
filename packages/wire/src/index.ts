@@ -336,8 +336,18 @@ export type GuestFrame =
 			 * read-only and rejects their mutating frames.
 			 */
 			writeToken?: string;
+			/**
+			 * The guest replies to every `ui-request-end` that carries `withdrawn` with a `ui-response` without a
+			 * value. Any answer it sent for the request went out before it read the withdrawal, so the answer
+			 * reaches the host first and counts; the reply says the guest has nothing more for the request. The
+			 * host then waits for that reply instead of a two-second window, so an answer the guest sent before
+			 * the withdrawal reached it counts however late the relay delivers it. Hosts that predate the field
+			 * ignore it.
+			 */
+			cancelReplies?: boolean;
 	  }
 	| { t: "prompt"; text: string; images?: ImageContent[] }
+	/** Answers a `ui-request`; no `value` is a cancel, or the guest's reply to a withdrawal. */
 	| { t: "ui-response"; reqId: number; value?: CollabUiResponseValue }
 	| { t: "abort" }
 	| { t: "agent-cmd"; cmd: "chat" | "kill" | "revive"; agentId: string; text?: string }
@@ -377,7 +387,12 @@ export type HostFrame =
 	| { t: "bus"; channel: BusChannel; data: unknown }
 	| { t: "agents"; agents: AgentSnapshot[] }
 	| { t: "ui-request"; request: CollabUiRequest }
-	| { t: "ui-request-end"; reqId: number }
+	/**
+	 * Dismisses a `ui-request`. `withdrawn`: a message from the host's person closed it while it was open; an
+	 * answer a guest sent before it read this still counts, and a guest that said `hello.cancelReplies` replies.
+	 * Without `withdrawn` the request is settled and no reply is wanted. Guests that predate the field ignore it.
+	 */
+	| { t: "ui-request-end"; reqId: number; withdrawn?: boolean }
 	/** Targeted reply to fetch-transcript; `text` is decoded JSONL from `fromByte`, `newSize` the next offset base. */
 	| { t: "transcript"; reqId: number; text: string; newSize: number; error?: string }
 	| { t: "bye"; reason: string }

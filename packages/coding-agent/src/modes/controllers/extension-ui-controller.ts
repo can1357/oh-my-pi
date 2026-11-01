@@ -829,20 +829,26 @@ export class ExtensionUiController {
 			// The guest's finished answers, by question index. They live here, not in the guest loop,
 			// so they outlive it when a person's message closes the local dialog first.
 			const guestAnswers: ExtensionAskDialogResultItem[] = [];
-			const remoteWinner: Promise<CollabAskDialogWinner> = this.#runGuestAskDialog(
-				host,
-				normalized,
-				remoteAbort.signal,
-				guestAnswers,
-			).then(result => (result === "unavailable" ? localWinner : { source: "remote", value: result }));
+			const guestLeg = this.#runGuestAskDialog(host, normalized, remoteAbort.signal, guestAnswers);
+			const remoteWinner: Promise<CollabAskDialogWinner> = guestLeg.then(result =>
+				result === "unavailable" ? localWinner : { source: "remote", value: result },
+			);
 			const winner = await Promise.race([localWinner, remoteWinner]);
-			if (winner.source === "remote") localAbort.abort();
-			// Known limit: this withdraws the guest's open request at once (`CollabHost.requestGuestUi`
-			// settles it unavailable), so a guest answer still in transit is acknowledged and dropped.
-			else remoteAbort.abort();
 			const value = winner.value;
-			if (winner.source !== "local" || !isDialogSuperseded(parentSignal)) return value;
-			if (value?.kind === "chat" || (value?.kind === "submit" && !value.interrupted)) return value;
+			if (winner.source === "remote") {
+				localAbort.abort();
+				return value;
+			}
+			const settledLocally = value?.kind === "chat" || (value?.kind === "submit" && !value.interrupted);
+			if (!isDialogSuperseded(parentSignal) || settledLocally) {
+				remoteAbort.abort();
+				return value;
+			}
+			// A person's message closed the local dialog. Withdraw the guest's open request rather than
+			// drop it: an answer the guest sent before it saw the withdrawal still completes its question,
+			// however late the relay delivers it (`CollabHost.requestGuestUi`). No further question is asked.
+			remoteAbort.abort(parentSignal?.reason);
+			await guestLeg;
 			// The local dialog is interrupted, or never showed; with no guest answer there is nothing to add.
 			if (value === undefined && guestAnswers.length === 0) return value;
 			// A finished answer outranks no answer, whoever gave it: each question keeps the host's

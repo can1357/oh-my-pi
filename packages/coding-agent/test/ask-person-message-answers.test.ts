@@ -10,7 +10,7 @@
  * and guest socket over the in-memory relay; a real ACP connection pair; the real RPC request
  * resolver. Only the model is scripted.
  */
-import { afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { setImmediate as tick } from "node:timers/promises";
 import {
 	Agent,
@@ -35,6 +35,7 @@ import { COLLAB_PROTO, type CollabFrame, parseCollabLink } from "../src/collab/p
 import { CollabSocket } from "../src/collab/relay-client";
 import { Settings } from "../src/config/settings";
 import type { ExtensionUIContext } from "../src/extensibility/extensions";
+import { WITHDRAWN_DIALOG_REPLY_MS } from "../src/extensibility/extensions/types";
 import { createAcpExtensionUiContext } from "../src/modes/acp/acp-agent";
 import { ExtensionUiController } from "../src/modes/controllers/extension-ui-controller";
 import {
@@ -473,5 +474,211 @@ describe("ask on a remote client keeps an answer received within the reply windo
 		await run;
 
 		expect(resultText(h)).toContain("Ask interrupted by message");
+	});
+});
+
+describe("a collab guest that acknowledges withdrawals keeps its answer past the reply window", () => {
+	/**
+	 * The person's message, then the reply window an old client gets, on a fake clock: the message
+	 * arms the window, and nothing a test does afterwards can land inside it by accident.
+	 */
+	async function sendPersonMessagePastReplyWindow(session: AgentSession, text: string): Promise<void> {
+		vi.useFakeTimers();
+		try {
+			await sendPersonMessage(session, text);
+			vi.advanceTimersByTime(WITHDRAWN_DIALOG_REPLY_MS * 2);
+		} finally {
+			vi.useRealTimers();
+		}
+		await settle();
+	}
+
+	interface RawGuest {
+		socket: CollabSocket;
+		nextFrame(kind: CollabFrame["t"]): Promise<CollabFrame>;
+		/** Holds this guest's frames in the relay, in order, until {@link release}; resolves once `count` are held. */
+		hold(count: number): Promise<void>;
+		/** Delivers the held frames to the host in the order the guest sent them, and stops holding. */
+		release(): void;
+	}
+
+	/** A collab guest over the in-memory relay that speaks raw frames, so a test controls each reply. */
+	async function joinGuest(h: Harness, cancelReplies: boolean): Promise<RawGuest> {
+		const relay = installInMemoryRelay();
+		let held: Array<() => void> | undefined;
+		let heldWaiter: { count: number; resolve(): void } | undefined;
+		const forward = relay.forward.bind(relay);
+		relay.forward = (from, bytes) => {
+			if (!held || from.role !== "guest") return forward(from, bytes);
+			held.push(() => forward(from, bytes));
+			if (heldWaiter && held.length >= heldWaiter.count) heldWaiter.resolve();
+		};
+		const host = new CollabHost(h.ctx);
+		await host.start("ws://localhost:8787");
+		h.ctx.collabHost = host;
+		const parsed = parseCollabLink(host.link);
+		if ("error" in parsed) throw new Error(parsed.error);
+		const socket = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key: await importRoomKey(parsed.key) });
+		const frames: CollabFrame[] = [];
+		const waiting: Array<() => void> = [];
+		socket.onFrame = frame => {
+			frames.push(frame);
+			waiting.shift()?.();
+		};
+		const nextFrame = async (kind: CollabFrame["t"]): Promise<CollabFrame> => {
+			for (;;) {
+				const index = frames.findIndex(frame => frame.t === kind);
+				if (index >= 0) return frames.splice(index, 1)[0]!;
+				const { promise, resolve } = Promise.withResolvers<void>();
+				waiting.push(resolve);
+				await promise;
+			}
+		};
+		socket.onOpen = () =>
+			socket.send({
+				t: "hello",
+				proto: COLLAB_PROTO,
+				name: "guest",
+				writeToken: parsed.writeToken ? Buffer.from(parsed.writeToken).toString("base64url") : undefined,
+				...(cancelReplies ? { cancelReplies } : {}),
+			});
+		socket.connect();
+		cleanups.push(async () => {
+			socket.close();
+			await host.stop("test done");
+			uninstallInMemoryRelay();
+		});
+		await nextFrame("welcome");
+		return {
+			socket,
+			nextFrame,
+			hold(count) {
+				held ??= [];
+				if (held.length >= count) return Promise.resolve();
+				const { promise, resolve } = Promise.withResolvers<void>();
+				heldWaiter = { count, resolve };
+				return promise;
+			},
+			release() {
+				const queued = held ?? [];
+				held = undefined;
+				for (const deliver of queued) deliver();
+			},
+		};
+	}
+
+	async function guestRequest(guest: RawGuest): Promise<number> {
+		const frame = await guest.nextFrame("ui-request");
+		if (frame.t !== "ui-request") throw new Error("expected a guest ui-request");
+		return frame.request.reqId;
+	}
+
+	it("returns a collab guest's answer that the relay delivers after the reply window", async () => {
+		const h = createHarness([question("deploy", "Deploy production?")]);
+		const guest = await joinGuest(h, true);
+		const run = h.session.prompt("start");
+		await h.opened;
+		const reqId = await guestRequest(guest);
+
+		// The guest picks "No" before the host's person sends a message; the relay holds it.
+		const answerHeld = guest.hold(1);
+		guest.socket.send({ t: "ui-response", reqId, value: "No" });
+		await answerHeld;
+		await sendPersonMessagePastReplyWindow(h.session, "status update only");
+		// The guest reads the withdrawal after answering, and replies to it behind its answer.
+		const end = await guest.nextFrame("ui-request-end");
+		if (end.t === "ui-request-end" && end.withdrawn) {
+			const replyHeld = guest.hold(2);
+			guest.socket.send({ t: "ui-response", reqId });
+			await replyHeld;
+		}
+		guest.release();
+		await finish(h, run);
+
+		expect(h.results[0]?.details).toMatchObject({ results: [{ id: "deploy", selectedOptions: ["No"] }] });
+	});
+
+	it("returns the answer of a guest that predates cancel replies when it lands within the reply window", async () => {
+		const h = createHarness([question("deploy", "Deploy production?")]);
+		const guest = await joinGuest(h, false);
+		const run = h.session.prompt("start");
+		await h.opened;
+		const reqId = await guestRequest(guest);
+
+		// A fake clock keeps the delivery inside the window however slowly the test runs.
+		vi.useFakeTimers();
+		try {
+			await sendPersonMessage(h.session, "status update only");
+			guest.socket.send({ t: "ui-response", reqId, value: "No" });
+			await settle();
+		} finally {
+			// Runs the timers the turn set on the fake clock; the reply window stays open.
+			vi.advanceTimersByTime(WITHDRAWN_DIALOG_REPLY_MS - 1);
+			vi.useRealTimers();
+		}
+		await finish(h, run);
+
+		expect(h.results[0]?.details).toMatchObject({ results: [{ id: "deploy", selectedOptions: ["No"] }] });
+	});
+
+	it("treats a guest that predates cancel replies as unanswered once the reply window has passed", async () => {
+		const h = createHarness([question("deploy", "Deploy production?")]);
+		const guest = await joinGuest(h, false);
+		const run = h.session.prompt("start");
+		await h.opened;
+		await guestRequest(guest);
+
+		await sendPersonMessagePastReplyWindow(h.session, "status update only");
+		await finish(h, run);
+
+		expect(resultText(h)).toContain("Ask interrupted by message");
+	});
+
+	it("closes the ask without the reply window when a guest that replies to withdrawals had not answered", async () => {
+		const h = createHarness([question("deploy", "Deploy production?")]);
+		const guest = await joinGuest(h, true);
+		const run = h.session.prompt("start");
+		await h.opened;
+		const reqId = await guestRequest(guest);
+
+		// On a fake clock the reply window never ends, so only the guest's reply can close the ask.
+		vi.useFakeTimers();
+		try {
+			await sendPersonMessage(h.session, "status update only");
+			const end = await guest.nextFrame("ui-request-end");
+			if (end.t === "ui-request-end" && end.reqId === reqId && end.withdrawn)
+				guest.socket.send({ t: "ui-response", reqId });
+			// The reply crosses the relay's encryption; yield until the ask returns, never to a clock.
+			for (let turn = 0; turn < 5_000 && h.results.length === 0; turn++) await tick();
+			expect(resultText(h)).toContain("Ask interrupted by message");
+		} finally {
+			// Runs the timers the turn set on the fake clock; the reply window stays open.
+			vi.advanceTimersByTime(WITHDRAWN_DIALOG_REPLY_MS - 1);
+			vi.useRealTimers();
+		}
+		await finish(h, run);
+	});
+
+	it("closes the ask without the reply window when a guest that replies to withdrawals leaves instead", async () => {
+		const h = createHarness([question("deploy", "Deploy production?")]);
+		const guest = await joinGuest(h, true);
+		const run = h.session.prompt("start");
+		await h.opened;
+		await guestRequest(guest);
+
+		// On a fake clock the reply window never ends, so only the guest leaving can close the ask.
+		vi.useFakeTimers();
+		try {
+			await sendPersonMessage(h.session, "status update only");
+			await guest.nextFrame("ui-request-end");
+			guest.socket.close();
+			for (let turn = 0; turn < 5_000 && h.results.length === 0; turn++) await tick();
+			expect(resultText(h)).toContain("Ask interrupted by message");
+		} finally {
+			// Runs the timers the turn set on the fake clock; the reply window stays open.
+			vi.advanceTimersByTime(WITHDRAWN_DIALOG_REPLY_MS - 1);
+			vi.useRealTimers();
+		}
+		await finish(h, run);
 	});
 });
