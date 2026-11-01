@@ -9,7 +9,7 @@ import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { logger, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
-import { YAML } from "bun";
+import { loadHandWrittenConfig } from "../helpers/approval-config-file";
 
 const BASE_SETTINGS = {
 	"async.enabled": false,
@@ -308,32 +308,18 @@ describe("tools.approvalMode setting", () => {
 		).rejects.toThrow(/pending provider safety checks but no interactive UI/);
 	});
 
-	describe("a hand-edited tools.approval entry under the default yolo", () => {
+	describe("a hand-edited tools.approval under the default yolo", () => {
 		afterEach(() => {
 			vi.restoreAllMocks();
 		});
-
-		/** Settings read from a global `config.yml` holding `tools.approval: <approval>`, as a user writes it. */
-		async function handEdited(approval: Record<string, unknown>): Promise<Settings> {
-			const agentDir = path.join(tempDir, `hand-edited-${Snowflake.next()}`);
-			await Bun.write(path.join(agentDir, "config.yml"), YAML.stringify({ tools: { approval } }));
-			// The constructor reads PI_CONFIG_FILES as the load starts, so it is back before any await.
-			const ambient = process.env.PI_CONFIG_FILES;
-			delete process.env.PI_CONFIG_FILES;
-			let loading: Promise<Settings>;
-			try {
-				loading = Settings.loadReadOnly({ agentDir, cwd: path.join(tempDir, "cwd"), overrides: BASE_SETTINGS });
-			} finally {
-				if (ambient !== undefined) process.env.PI_CONFIG_FILES = ambient;
-			}
-			return await loading;
-		}
 
 		// The spellings measured on main: the first five kept their meaning there, the rest were read as
 		// no policy, so under the default yolo the command ran without asking.
 		const UNRECOGNISED = (written: string) =>
 			`requires approval but no interactive UI available.\nReason: tools.approval.bash is ${written}, not allow, deny or prompt`;
-		const spellings: Array<[label: string, approval: Record<string, unknown>, refusal: string, warns: boolean]> = [
+		const NOT_A_RECORD = (written: string) =>
+			`requires approval but no interactive UI available.\nReason: tools.approval is ${written}, not a record of tool policies`;
+		const spellings: Array<[label: string, approval: unknown, refusal: string, warns: boolean]> = [
 			["exact deny", { bash: "deny" }, 'Tool "bash" is blocked by user policy', false],
 			["capitalised Deny", { bash: "Deny" }, 'Tool "bash" is blocked by user policy', false],
 			["DENY", { bash: "DENY" }, 'Tool "bash" is blocked by user policy', false],
@@ -353,11 +339,14 @@ describe("tools.approvalMode setting", () => {
 			],
 			["typo prmopt", { bash: "prmopt" }, UNRECOGNISED('"prmopt"'), true],
 			["ask", { bash: "ask" }, UNRECOGNISED('"ask"'), true],
+			// A whole value that is not a record: no policy at all would let every call run.
+			["the whole value a string", "deny-bash", NOT_A_RECORD('"deny-bash"'), true],
+			["the whole value a list", ["bash"], NOT_A_RECORD('["bash"]'), true],
 		];
 		for (const [label, approval, refusal, warns] of spellings) {
 			it(`does not run the command for ${label}`, async () => {
 				const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
-				const settings = await handEdited(approval);
+				const settings = await loadHandWrittenConfig(tempDir, { tools: { approval } }, BASE_SETTINGS);
 				await expect(
 					bashTool().execute(`hand-edited-${label}`, { command: "echo ran" }, undefined, undefined, {
 						settings,

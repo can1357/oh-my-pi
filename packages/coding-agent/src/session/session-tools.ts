@@ -33,6 +33,7 @@ import {
 	approvalRestrictions,
 	denyError,
 	resolveApproval,
+	readUserApprovalPolicies,
 	resolveApprovalFromContext,
 	restrictedFolderReason,
 	userApprovalPolicy,
@@ -72,7 +73,6 @@ import { cfgDisabledExtensions, cfgSkills, type SkillsSettings } from "../extens
 import { cfgExternalThinking, cfgIncludeModelInPrompt, cfgInlineToolDescriptors, cfgSkillful } from "./settings";
 import { cfgStartupQuiet } from "../modes/settings";
 import {
-	cfgToolsApproval,
 	cfgToolsApprovalMode,
 	cfgToolsXdevDocs,
 	cfgToolsXdevInlineDevices,
@@ -1035,9 +1035,9 @@ export class SessionTools {
 		// Default-config ACP sessions still ask for executable calls even though
 		// the schema defaults to yolo; explicit yolo is an intentional opt-in.
 		if (tool.name !== "bash" && this.#isExplicitAutoApproveMode()) {
-			// Read the entry as `resolveApproval` does: an unrecognised one (`false`, a typo) keeps the gate.
-			const policy = userApprovalPolicy(cfgToolsApproval.get(this.#host.settings), tool.name);
-			if (policy === undefined || policy === "allow") return tool;
+			// Read the entry as `resolveApproval` does: an unreadable one (`false`, a typo) keeps the gate.
+			const userPolicy = userApprovalPolicy(readUserApprovalPolicies(this.#host.settings), tool.name);
+			if (userPolicy === undefined || userPolicy.policy === "allow") return tool;
 		}
 		return new Proxy(tool, {
 			get: (target, prop) => {
@@ -1086,9 +1086,25 @@ export class SessionTools {
 						target.name === "bash" && args && typeof args === "object" && !Array.isArray(args)
 							? stringProperty(args, "command")
 							: undefined;
-					const commandContent = command
-						? [{ type: "content" as const, content: { type: "text" as const, text: `$ ${command}` } }]
-						: undefined;
+					// An unreadable `tools.approval` entry that keeps this gate says so, so the person
+					// answering can find what to fix.
+					const policyReason = userApprovalPolicy(
+						readUserApprovalPolicies(this.#host.settings),
+						target.name,
+					)?.reason;
+					const commandContent = [
+						...(command
+							? [{ type: "content" as const, content: { type: "text" as const, text: `$ ${command}` } }]
+							: []),
+						...(policyReason
+							? [
+									{
+										type: "content" as const,
+										content: { type: "text" as const, text: `Reason: ${policyReason}` },
+									},
+								]
+							: []),
+					];
 					// Short-circuit on persisted decisions.
 					const persisted = cacheable ? this.#acpPermissionDecisions.get(permissionIntent.cacheKey) : undefined;
 					if (persisted === "allow_always") {
@@ -1206,7 +1222,7 @@ export class SessionTools {
 									...(target.name === "bash" ? { kind: "execute" } : {}),
 									status: "pending",
 									rawInput: args,
-									...(commandContent ? { content: commandContent } : {}),
+									...(commandContent.length > 0 ? { content: commandContent } : {}),
 									locations: extractPermissionLocations(
 										args,
 										this.#host.sessionManager.getCwd(),

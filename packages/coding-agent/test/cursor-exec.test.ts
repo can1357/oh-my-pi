@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -43,7 +43,8 @@ import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { TodoTool } from "@oh-my-pi/pi-coding-agent/tools/todo";
 import type { TruncationMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { logger, removeWithRetries } from "@oh-my-pi/pi-utils";
+import { loadHandWrittenConfig } from "./helpers/approval-config-file";
 import { AdviseTool } from "../src/advisor/advise-tool";
 
 function yoloToolContext(): AgentToolContext {
@@ -1865,6 +1866,32 @@ describe("CursorExecHandlers native delete gating (issue #5680)", () => {
 
 		expect(result.isError).toBe(true);
 		expect(await Bun.file(target).exists()).toBe(true);
+	});
+
+	it("refuses a native delete under an unreadable policy entry, naming it", async () => {
+		const target = path.join(cwd, "unreadable.txt");
+		await Bun.write(target, "keep me\n");
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			// Only a config file can hold such an entry: every write refuses it. Main read it as no policy.
+			const settings = await loadHandWrittenConfig(cwd, { tools: { approval: { delete: false } } });
+			const handlers = new CursorExecHandlers({
+				cwd,
+				tools: new Map(),
+				allowDirectFileMutation: true,
+				getToolContext: () => ({ settings }) as AgentToolContext,
+			});
+
+			const result = await handlers.delete(
+				create(DeleteArgsSchema, { toolCallId: "call-unreadable", path: "unreadable.txt" }),
+			);
+
+			expect(result.isError).toBe(true);
+			expect(JSON.stringify(result)).toContain("Reason: tools.approval.delete is false, not allow, deny or prompt");
+			expect(await Bun.file(target).exists()).toBe(true);
+		} finally {
+			warn.mockRestore();
+		}
 	});
 
 	it("refuses a native delete in always-ask mode, which has no prompt channel", async () => {

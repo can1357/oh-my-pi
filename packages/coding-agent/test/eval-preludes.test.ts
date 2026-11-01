@@ -4,6 +4,8 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { EvalPreludeDefinition } from "@oh-my-pi/pi-coding-agent/eval";
 import { getEnabledEvalPreludes, invokeEvalPrelude } from "@oh-my-pi/pi-coding-agent/eval";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { logger, TempDir } from "@oh-my-pi/pi-utils";
+import { loadHandWrittenConfig } from "./helpers/approval-config-file";
 
 function makeSession(getEvalPreludes: () => EvalPreludeDefinition[]): ToolSession {
 	return {
@@ -130,5 +132,33 @@ describe("eval prelude host invocation", () => {
 			/blocked by tool policy/,
 		);
 		expect(invoke).not.toHaveBeenCalled();
+	});
+
+	it("refuses a prelude under an unreadable policy entry without a UI, naming it", async () => {
+		const invoke = vi.fn(async (): Promise<AgentToolResult<unknown>> => ({
+			content: [{ type: "text", text: "must not run" }],
+		}));
+		const definition: EvalPreludeDefinition = {
+			name: "guarded",
+			documentation: "Guarded",
+			javascript: "globalThis.guarded = {};",
+			python: "guarded = object()",
+			exports: ["guarded"],
+			approval: "read",
+			invoke,
+		};
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		using dir = TempDir.createSync("@pi-eval-prelude-entry-");
+		try {
+			// Only a config file can hold such an entry; main read it as no policy and ran the prelude.
+			const settings = await loadHandWrittenConfig(dir.path(), { tools: { approval: { guarded: "block" } } });
+			const session = { ...makeSession(() => [definition]), settings };
+			await expect(invokeEvalPrelude("guarded", {}, { session, toolCallId: "unreadable" })).rejects.toThrow(
+				'requires approval but no interactive UI is available.\nReason: tools.approval.guarded is "block", not allow, deny or prompt',
+			);
+			expect(invoke).not.toHaveBeenCalled();
+		} finally {
+			warn.mockRestore();
+		}
 	});
 });

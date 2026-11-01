@@ -12,7 +12,8 @@ import {
 	truncateForPrompt,
 } from "@oh-my-pi/pi-coding-agent/tools/approval";
 import { cfgToolsApproval } from "@oh-my-pi/pi-coding-agent/tools/settings";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, TempDir } from "@oh-my-pi/pi-utils";
+import { loadHandWrittenConfig } from "../helpers/approval-config-file";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { DeferredMCPTool, MCPTool } from "../../src/mcp/tool-bridge";
@@ -229,13 +230,38 @@ describe("tools.approval entries as a user writes them by hand", () => {
 		});
 	});
 
-	it("carries an unrecognised legacy-name entry over as prompt", () => {
+	it("carries an unrecognised legacy-name entry over as prompt, and keeps a legacy deny under one", () => {
 		vi.spyOn(logger, "warn").mockImplementation(() => {});
 		const renamed = { ...tool("mcp__context7_query_docs", "write"), legacyName: "mcp__context_query_docs" };
 		expect(resolveApproval(renamed, {}, "yolo", { mcp__context_query_docs: "nope" })).toMatchObject({
 			policy: "prompt",
 			policyKey: "mcp__context_query_docs",
 		});
+		// Main ignored the unreadable current entry and so applied the legacy deny; reading it as
+		// `prompt` must not relax that deny.
+		expect(
+			resolveApproval(renamed, {}, "yolo", { mcp__context_query_docs: "deny", mcp__context7_query_docs: "block" }),
+		).toMatchObject({ policy: "deny", policyKey: "mcp__context_query_docs" });
+		expect(
+			resolveApproval(renamed, {}, "yolo", { mcp__context_query_docs: "allow", mcp__context7_query_docs: "block" }),
+		).toMatchObject({ policy: "prompt", policyKey: "mcp__context7_query_docs" });
+	});
+
+	it("asks before every tool call, read tools included, when the whole value is not a record", async () => {
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		using dir = TempDir.createSync("@pi-approval-not-a-record-");
+		const settings = await loadHandWrittenConfig(dir.path(), { tools: { approval: "deny-bash" } });
+		const { approvalMode, userPolicies } = resolveApprovalFromContext({ settings });
+		expect(approvalMode).toBe("yolo");
+		for (const subject of [tool("read", "read"), tool("bash", "exec")]) {
+			expect(resolveApproval(subject, {}, approvalMode, userPolicies)).toMatchObject({
+				policy: "prompt",
+				source: "user",
+				reason: 'tools.approval is "deny-bash", not a record of tool policies such as {bash: deny}',
+			});
+		}
+		resolveApprovalFromContext({ settings });
+		expect(warn.mock.calls.filter(([message]) => String(message).startsWith("Approval:"))).toHaveLength(1);
 	});
 
 	it("refuses to write an entry no policy names", () => {
@@ -244,8 +270,10 @@ describe("tools.approval entries as a user writes them by hand", () => {
 			'tools.approval entries must be allow, deny or prompt; got bash: "block"',
 		);
 		expect(() => Settings.isolated({ "tools.approval": { bash: null } })).toThrow("got bash: null");
+		// A policy in another case is still a policy, and the write keeps it.
 		cfgToolsApproval.override(settings, { bash: "Deny" });
-		expect(resolveApprovalFromContext({ settings }).userPolicies).toEqual({ bash: "Deny" });
+		const { userPolicies } = resolveApprovalFromContext({ settings });
+		expect(resolveApproval(bash, {}, "yolo", userPolicies).policy).toBe("deny");
 	});
 });
 

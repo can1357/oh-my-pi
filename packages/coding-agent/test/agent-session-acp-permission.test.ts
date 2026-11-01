@@ -6,7 +6,6 @@
  * behavior they have in the TUI.
  */
 import { afterAll, afterEach, beforeAll, expect, it, spyOn } from "bun:test";
-import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockModelOptions } from "@oh-my-pi/pi-ai/providers/mock";
@@ -31,8 +30,8 @@ import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
 import { computerTurnInFlight, registerComputerController } from "@oh-my-pi/pi-coding-agent/tools/computer/supervisor";
 import { dispatchXdevTool, resolveMountedXdevExecutable, type XdevState } from "@oh-my-pi/pi-coding-agent/tools/xdev";
-import { logger, Snowflake, TempDir, withTimeout } from "@oh-my-pi/pi-utils";
-import { YAML } from "bun";
+import { logger, TempDir, withTimeout } from "@oh-my-pi/pi-utils";
+import { loadHandWrittenConfig } from "./helpers/approval-config-file";
 
 // ---------------------------------------------------------------------------
 // Shared setup
@@ -336,34 +335,47 @@ it("explicit yolo still gates tools whose per-tool policy requires a prompt", as
 	expect(bashTool.executeCalls).toBe(1);
 });
 
-it("explicit yolo still gates a destructive tool whose hand-edited policy is not a policy", async () => {
+it("explicit yolo still gates a destructive tool whose hand-edited policy is not a policy, saying why", async () => {
 	const deleteTool = makeFakeTool("delete");
-	const bridge = makeBridge({ outcome: "selected", optionId: "allow_once", kind: "allow_once" });
-	const permissionSpy = spyOn(bridge, "requestPermission");
-	// Only a config file can hold such an entry: every write refuses it.
-	const agentDir = tempDir.join(`hand-edited-${Snowflake.next()}`);
-	await Bun.write(
-		path.join(agentDir, "config.yml"),
-		YAML.stringify({ compaction: { enabled: false }, tools: { approvalMode: "yolo", approval: { delete: false } } }),
-	);
-	const ambient = process.env.PI_CONFIG_FILES;
-	delete process.env.PI_CONFIG_FILES;
-	let loading: Promise<Settings>;
-	try {
-		loading = Settings.loadReadOnly({ agentDir, cwd: tempDir.path() });
-	} finally {
-		if (ambient !== undefined) process.env.PI_CONFIG_FILES = ambient;
-	}
+	const requests: ClientBridgePermissionToolCall[] = [];
+	const bridge: ClientBridge = {
+		capabilities: { requestPermission: true },
+		async requestPermission(toolCall) {
+			requests.push(toolCall);
+			return { outcome: "selected", optionId: "allow_once", kind: "allow_once" };
+		},
+	};
 	const logWarn = spyOn(logger, "warn").mockImplementation(() => {});
-	session = await createSession([deleteTool], bridge, {}, { settings: await loading });
+	try {
+		// Only a config file can hold such an entry: every write refuses it.
+		const settings = await loadHandWrittenConfig(tempDir.path(), {
+			compaction: { enabled: false },
+			tools: { approvalMode: "yolo", approval: { delete: false } },
+		});
+		session = await createSession([deleteTool], bridge, {}, { settings });
 
-	await session.setActiveToolsByName(["delete"]);
-	const wrappedDelete = session.agent.state.tools.find(t => t.name === "delete");
-	await wrappedDelete!.execute("call-1", { path: "/tmp/gone.ts" }, undefined, undefined as never, undefined as never);
+		await session.setActiveToolsByName(["delete"]);
+		const wrappedDelete = session.agent.state.tools.find(t => t.name === "delete");
+		await wrappedDelete!.execute(
+			"call-1",
+			{ path: "/tmp/gone.ts" },
+			undefined,
+			undefined as never,
+			undefined as never,
+		);
 
-	expect(permissionSpy).toHaveBeenCalledTimes(1);
-	expect(deleteTool.executeCalls).toBe(1);
-	logWarn.mockRestore();
+		expect(requests.map(request => request.content)).toEqual([
+			[
+				{
+					type: "content",
+					content: { type: "text", text: "Reason: tools.approval.delete is false, not allow, deny or prompt" },
+				},
+			],
+		]);
+		expect(deleteTool.executeCalls).toBe(1);
+	} finally {
+		logWarn.mockRestore();
+	}
 });
 
 /**

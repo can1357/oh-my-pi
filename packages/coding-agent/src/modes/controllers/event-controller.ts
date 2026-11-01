@@ -53,6 +53,7 @@ import {
 import {
 	approvalRestrictions,
 	formatApprovalPrompt,
+	readUserApprovalPolicies,
 	resolveApproval,
 	sessionApprovalScope,
 } from "../../tools/approval";
@@ -92,7 +93,7 @@ import {
 	cfgTerminalShowImages,
 	cfgTerminalShowProgress,
 } from "../settings";
-import { cfgReadToolResultPreview, cfgToolsApproval, cfgToolsApprovalMode } from "../../tools/settings";
+import { cfgReadToolResultPreview, cfgToolsApprovalMode } from "../../tools/settings";
 import { cfgSpeechEnabled, cfgSpeechMode } from "../../tts/settings";
 
 type AgentSessionEventKind = AgentSessionEvent["type"];
@@ -2071,7 +2072,7 @@ export class EventController {
 		const tool = session.getToolByName(toolName);
 		if (!tool) return undefined;
 		const mode = cfgToolsApprovalMode.get(settings);
-		const userPolicies: Record<string, unknown> = cfgToolsApproval.get(settings);
+		const userPolicies = readUserApprovalPolicies(settings);
 		const grants =
 			mode === "always-ask-cached"
 				? getApprovalGrants(settings.getAgentDir(), this.ctx.sessionManager.getSessionId())

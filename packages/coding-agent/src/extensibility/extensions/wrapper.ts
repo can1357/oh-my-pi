@@ -22,6 +22,7 @@ import {
 	resolveApprovalFromContext,
 	sessionApprovalScope,
 	truncateForPrompt,
+	userPolicyReasonLine,
 } from "../../tools/approval";
 import { getApprovalGrants } from "../../tools/approval-cache";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
@@ -367,8 +368,11 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// place. Denies were enforced above, and provider safety checks remain
 		// independently required.
 		const policyKey = resolved.policyKey ?? this.tool.name;
+		// A key that names the device only by case (`MCP__X`) is the policy the outer gate already
+		// asked about under the device's own name, so compare ignoring case.
 		const explicitPrompt =
-			resolved.override || (Object.hasOwn(userPolicies, policyKey) && policyKey !== context?.xdevPolicyKey);
+			resolved.override ||
+			(Object.hasOwn(userPolicies, policyKey) && policyKey.toLowerCase() !== context?.xdevPolicyKey?.toLowerCase());
 		const xdevBypass = context?.xdevPolicyKey !== undefined && effectiveParams === params;
 		const acpBypass =
 			context !== undefined &&
@@ -447,13 +451,12 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 							`A restricted folder (tools.restrictedFolders) asks in every approval mode.`,
 					);
 				}
-				// A `tools.approval` entry that reads as `prompt` (unrecognised, or matched by case alone)
-				// says so: the fix is the entry, not the approval mode.
+				// An unreadable `tools.approval` entry or value made the call ask: the fix is in the config
+				// file, not the approval mode.
 				if (resolved.source === "user" && resolved.reason) {
 					throw new Error(
-						`Tool "${this.tool.name}" requires approval but no interactive UI available.\n` +
-							`Reason: ${resolved.reason}\n` +
-							`Set tools.approval.${resolved.policyKey ?? this.tool.name} to allow, deny or prompt.`,
+						`Tool "${this.tool.name}" requires approval but no interactive UI available.${userPolicyReasonLine(resolved)}\n` +
+							`Correct it in the config file, or approve the call from an interactive UI.`,
 					);
 				}
 				throw new Error(

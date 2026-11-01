@@ -86,6 +86,40 @@ function asPolicyMap(value: unknown): Record<string, unknown> {
 }
 
 /**
+ * Marks a `tools.approval` value that is not a record at all (`"deny-bash"`, a list). Everywhere
+ * else a malformed value counting as unset falls back to a safe default; here unset is permissive,
+ * since under `yolo` no policy means the call runs. So, like an unreadable entry for its own tool,
+ * such a value reads as `prompt` for every tool instead of as "no policies".
+ */
+const UNREADABLE_RECORD: unique symbol = Symbol("tools.approval is not a record");
+
+/** A `tools.approval` record as approval resolution reads it: entries by tool, or {@link UNREADABLE_RECORD}. */
+type UserPolicies = Record<string, unknown> & { [UNREADABLE_RECORD]?: unknown };
+
+/** The marker record last built per settings instance, so its warning is logged once per value. */
+const unreadableRecords = new WeakMap<Settings, { value: unknown; policies: UserPolicies }>();
+
+/**
+ * The `tools.approval` record every approval check reads: the configured record, or, when the
+ * configured value is not a record, one that asks before every tool call (see
+ * {@link UNREADABLE_RECORD}), warned about once per settings instance and value.
+ */
+export function readUserApprovalPolicies(settings: Settings): Record<string, unknown> {
+	// What the handle itself reads; the handle turns a non-record into its `{}` default.
+	const value = settings.rawValue(cfgToolsApproval);
+	if (value === undefined || value === null || isRecord(value)) return asPolicyMap(cfgToolsApproval.get(settings));
+	const cached = unreadableRecords.get(settings);
+	if (cached && Bun.deepEquals(cached.value, value)) return cached.policies;
+	logger.warn("Approval: tools.approval is not a record of tool policies; asking before every tool call", {
+		value,
+		expected: "a record of tool policies, such as {bash: deny}",
+	});
+	const policies: UserPolicies = { [UNREADABLE_RECORD]: value };
+	unreadableRecords.set(settings, { value, policies });
+	return policies;
+}
+
+/**
  * Resolve approval mode and per-tool user policies from the execute-time
  * `AgentToolContext`.
  *
@@ -104,7 +138,7 @@ export function resolveApprovalFromContext(context?: ApprovalContextSource | nul
 	if (context?.autoApprove === true) {
 		return {
 			approvalMode: "yolo",
-			userPolicies: context.settings ? asPolicyMap(cfgToolsApproval.get(context.settings)) : {},
+			userPolicies: context.settings ? readUserApprovalPolicies(context.settings) : {},
 		};
 	}
 	const settings = context?.settings;
@@ -114,7 +148,7 @@ export function resolveApprovalFromContext(context?: ApprovalContextSource | nul
 	const configured: unknown = cfgToolsApprovalMode.get(settings);
 	return {
 		approvalMode: isApprovalMode(configured) ? configured : "yolo",
-		userPolicies: asPolicyMap(cfgToolsApproval.get(settings)),
+		userPolicies: readUserApprovalPolicies(settings),
 	};
 }
 
@@ -268,11 +302,14 @@ export function recordApprovalGrant(
 const DEFAULT_PROMPT_TRUNCATE_CHARS = 2000;
 
 /** The user policy one tool call gets: the `tools.approval` entry it came from, and why it differs from that entry's value. */
-interface UserPolicy {
+export interface UserPolicy {
 	policy: ApprovalPolicy;
-	/** The `tools.approval` key holding the entry. */
+	/** The `tools.approval` key holding the entry (the tool's own name when the whole value is unreadable). */
 	key: string;
-	/** Shown in the prompt when the entry is not simply its value: unrecognised, or matched by case alone. */
+	/**
+	 * Shown wherever the call asks or is refused when the entry is not simply its value: unrecognised,
+	 * matched by case alone, or part of a `tools.approval` value that is not a record.
+	 */
 	reason?: string;
 }
 
@@ -298,12 +335,12 @@ function warnEntryOnce(
 	logger.warn(message, context);
 }
 
-/** `tools.approval.<key> is <value>`, as the prompt shows it. */
-function describeEntry(key: string, value: unknown): string {
-	return sanitizeText(`tools.approval.${key} is ${truncateForPrompt(JSON.stringify(value) ?? String(value), 80)}`);
+/** `<what> is <value>`, as the prompt shows it. */
+function describeValue(what: string, value: unknown): string {
+	return sanitizeText(`${what} is ${truncateForPrompt(JSON.stringify(value) ?? String(value), 80)}`);
 }
 
-/** The entry at `key`, read for the tool `name`; see {@link userPolicyFor}. */
+/** The entry at `key`, read for the tool `name`; see {@link userApprovalPolicy}. */
 function readUserEntry(userConfig: Record<string, unknown>, key: string, name: string): UserPolicy | undefined {
 	const value = userConfig[key];
 	const policy = parseApprovalPolicy(value);
@@ -313,7 +350,11 @@ function readUserEntry(userConfig: Record<string, unknown>, key: string, name: s
 			tool: key,
 			value,
 		});
-		return { policy: "prompt", key, reason: `${describeEntry(key, value)}, not allow, deny or prompt` };
+		return {
+			policy: "prompt",
+			key,
+			reason: `${describeValue(`tools.approval.${key}`, value)}, not allow, deny or prompt`,
+		};
 	}
 	warnEntryOnce(userConfig, key, "Approval: tools.approval key matches a tool only by case", {
 		key,
@@ -322,18 +363,28 @@ function readUserEntry(userConfig: Record<string, unknown>, key: string, name: s
 		applied: policy === "allow" ? "nothing" : (policy ?? "prompt"),
 	});
 	if (policy === "allow") return undefined;
-	return { policy: policy ?? "prompt", key, reason: `${describeEntry(key, value)}, which names ${name} only by case` };
+	return {
+		policy: policy ?? "prompt",
+		key,
+		reason: `${describeValue(`tools.approval.${key}`, value)}, which names ${name} only by case`,
+	};
 }
 
 /**
- * The user's policy for the tool (or policy key) `name`, or `undefined` when `tools.approval` sets
- * none. Whoever writes an entry means to restrain that tool, so a typo never grants it: an entry
+ * The user's `tools.approval` policy for the tool (or policy key) `name`, or `undefined` when none
+ * applies. Whoever writes an entry means to restrain that tool, so a typo never grants it: an entry
  * that is not `allow`, `deny` or `prompt` (any case, surrounding whitespace ignored) reads as
  * `prompt`, and without an entry under `name` itself, one whose key differs only in case (`Bash`)
  * applies its `deny` or `prompt` — never its `allow` — the strictest such entry winning. Each such
- * entry warns once per record, naming the tool and the value.
+ * entry warns once per record, naming the tool and the value. A `tools.approval` value that is not
+ * a record reads as `prompt` for every tool (see {@link UNREADABLE_RECORD}). Either way the result
+ * carries a `reason` naming what to fix.
  */
-function userPolicyFor(userConfig: Record<string, unknown>, name: string): UserPolicy | undefined {
+export function userApprovalPolicy(userConfig: UserPolicies, name: string): UserPolicy | undefined {
+	if (Object.hasOwn(userConfig, UNREADABLE_RECORD)) {
+		const value = describeValue("tools.approval", userConfig[UNREADABLE_RECORD]);
+		return { policy: "prompt", key: name, reason: `${value}, not a record of tool policies such as {bash: deny}` };
+	}
 	if (Object.hasOwn(userConfig, name)) return readUserEntry(userConfig, name, name);
 	let lowered: string | undefined;
 	let found: UserPolicy | undefined;
@@ -351,11 +402,11 @@ function stricterUserPolicy(a: UserPolicy | undefined, b: UserPolicy | undefined
 }
 
 /**
- * The policy the user's `tools.approval` entry for `toolName` gives it, read as {@link resolveApproval}
- * reads it (an unrecognised value is `prompt`); `undefined` when no entry applies.
+ * The `Reason:` line a refusal without an interactive UI adds when an unreadable `tools.approval`
+ * entry or value made the call ask, so the person meeting it can find what to fix; `""` otherwise.
  */
-export function userApprovalPolicy(userConfig: Record<string, unknown>, toolName: string): ApprovalPolicy | undefined {
-	return userPolicyFor(userConfig, toolName)?.policy;
+export function userPolicyReasonLine(resolved: ResolvedApproval): string {
+	return resolved.source === "user" && resolved.reason ? `\nReason: ${resolved.reason}` : "";
 }
 
 function isToolTier(value: unknown): value is ToolTier {
@@ -486,12 +537,12 @@ function resolvePolicy(
 ): ResolvedApproval {
 	const decision = getToolDecision(tool, args);
 	const policyKey = decision.policyKey ?? tool.name;
-	const keyed = userPolicyFor(userConfig, policyKey);
+	const keyed = userApprovalPolicy(userConfig, policyKey);
 	// The invoking tool's own policy applies when the keyed sub-tool has no entry of its own, and
 	// still applies, if stricter, when the keyed entry only reads as `prompt` (a `reason` says so).
 	const fallback =
 		policyKey !== tool.name && (keyed === undefined || keyed.reason !== undefined)
-			? userPolicyFor(userConfig, tool.name)
+			? userApprovalPolicy(userConfig, tool.name)
 			: undefined;
 	const own = stricterUserPolicy(keyed, fallback);
 
@@ -499,11 +550,14 @@ function resolvePolicy(
 	// Fail-closed: only `deny`/`prompt` carry over from the old key, so a
 	// forgotten restrictive policy keeps protecting the renamed tool, while a
 	// stale `allow` cannot mask a `deny` another user sets under the new name.
+	// Under a current entry that only reads as `prompt`, a legacy `deny` still denies.
 	const legacy =
-		own === undefined && typeof tool.legacyName === "string" && tool.legacyName !== tool.name
-			? userPolicyFor(userConfig, tool.legacyName)
+		(own === undefined || own.reason !== undefined) &&
+		typeof tool.legacyName === "string" &&
+		tool.legacyName !== tool.name
+			? userApprovalPolicy(userConfig, tool.legacyName)
 			: undefined;
-	const user = own ?? (legacy?.policy === "allow" ? undefined : legacy);
+	const user = stricterUserPolicy(own, legacy?.policy === "allow" ? undefined : legacy);
 	const userFields = user ? { policyKey: user.key, ...(user.reason ? { reason: user.reason } : {}) } : {};
 
 	if (decision.policy === "deny") {
