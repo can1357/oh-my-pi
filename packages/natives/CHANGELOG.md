@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed the bash tool silently skipping the rest of a command when one pipeline stage hit an expansion error (`${VAR:?}`, an unset variable under `set -u`, `$((1/0))`) or ran `exit`, `return`, `break` or `continue`; that stage now ends alone with its own status, as in Bash
+- Fixed the bash tool silently skipping the rest of a command when one pipeline stage hit an expansion error (`${VAR:?}`, an unset variable under `set -u`, `$((1/0))`) or ran `exit`, `return`, `break` or `continue`; that stage now ends alone with its own status, as in Bash ([#17714](https://github.com/can1357/oh-my-pi/pull/17714) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 
