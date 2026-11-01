@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Pull requests now fail CI, and `scripts/merge-pr.ts` stops before committing, when a merge would put entries into an already-released changelog section; the report names the file, section and lines to move under `## [Unreleased]`
+
 ## [18.14.2] - 2026-10-31
 
 ### Added

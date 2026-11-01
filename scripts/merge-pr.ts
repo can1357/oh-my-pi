@@ -8,6 +8,11 @@
  * first (oldest) conventional-compliant commit in `HEAD..<branch>`; if none
  * exists the command fails rather than emit a noncompliant message.
  *
+ * The merge is committed only after scripts/check-released-changelogs.ts finds
+ * every released changelog section of HEAD unchanged. A branch that predates a
+ * release otherwise lands its `[Unreleased]` entries in the new release section
+ * with no conflict; on failure the merge stays uncommitted for the fix.
+ *
  * Usage:
  *   bun scripts/merge-pr.ts <branch>              # resolve PR from branch head
  *   bun scripts/merge-pr.ts <branch> --pr 6386    # explicit PR number
@@ -18,6 +23,11 @@
  *   git mpr feature-branch
  */
 import { $ } from "bun";
+import {
+	checkReleasedChangelogs,
+	formatReleasedChangelogReport,
+	UnreadableBaseError,
+} from "./check-released-changelogs";
 
 interface PrMeta {
 	number: number;
@@ -135,6 +145,30 @@ if (import.meta.main) {
 		process.exit(0);
 	}
 
-	const merge = await $`git merge --no-ff -m ${message} ${mergeRef}`.nothrow();
-	process.exit(merge.exitCode);
+	const merge = await $`git merge --no-ff --no-commit -m ${message} ${mergeRef}`.nothrow();
+	if (merge.exitCode !== 0) {
+		console.error(
+			"note: after resolving, run `bun scripts/check-released-changelogs.ts --base HEAD` before `git commit`.",
+		);
+		process.exit(merge.exitCode);
+	}
+
+	// HEAD is still the target branch tip, which owns every released section.
+	let report: string;
+	try {
+		const check = await checkReleasedChangelogs({ base: "HEAD" });
+		if (check.changes.length === 0) {
+			const commit = await $`git commit --no-edit`.nothrow();
+			process.exit(commit.exitCode);
+		}
+		report = formatReleasedChangelogReport(check, "HEAD");
+	} catch (error) {
+		if (!(error instanceof UnreadableBaseError)) throw error;
+		report = `error: ${error.message}`;
+	}
+	console.error(report);
+	console.error(
+		"\nThe merge is not committed. Fix the changelog, `git add` it, then `git commit --no-edit` keeps the merge message.",
+	);
+	process.exit(1);
 }

@@ -108,7 +108,7 @@ function isReleaseHeading(line: string): boolean {
 	return /^## \[[^\]]+\]/.test(line);
 }
 
-function isSubsectionHeading(line: string): boolean {
+export function isSubsectionHeading(line: string): boolean {
 	return /^###\s+\S/.test(line);
 }
 
@@ -117,7 +117,7 @@ function parseReleaseTitle(heading: string): string {
 	return match?.[1] ?? heading.replace(/^##\s+/, "").trim();
 }
 
-function parseSubsectionTitle(heading: string): string {
+export function parseSubsectionTitle(heading: string): string {
 	return heading.replace(/^###\s+/, "").trim();
 }
 
@@ -141,11 +141,19 @@ function createNumberedLine(text: string, lineNumber: number): NumberedLine {
 	return { text, lineNumber };
 }
 
-export function parseChangelog(content: string): ChangelogDocument {
+/** One `## [title]` heading and every line up to the next one, kept verbatim. */
+export interface ReleaseBlock {
+	heading: NumberedLine;
+	title: string;
+	bodyLines: NumberedLine[];
+}
+
+/** Splits a changelog at its `## [title]` headings; lines keep their text (only CRLF becomes LF). */
+export function splitReleaseBlocks(content: string): { prefixLines: NumberedLine[]; blocks: ReleaseBlock[] } {
 	const lines = splitContentLines(content);
 	const numberedLines = lines.map((text, index) => createNumberedLine(text, index + 1));
 	const prefixLines: NumberedLine[] = [];
-	const sections: ReleaseSection[] = [];
+	const blocks: ReleaseBlock[] = [];
 	let index = 0;
 
 	while (index < numberedLines.length && !isReleaseHeading(numberedLines[index]?.text ?? "")) {
@@ -166,10 +174,18 @@ export function parseChangelog(content: string): ChangelogDocument {
 			index++;
 		}
 
-		sections.push(parseReleaseSection(headingLine.text, bodyLines));
+		blocks.push({ heading: headingLine, title: parseReleaseTitle(headingLine.text), bodyLines });
 	}
 
-	return { prefixLines, sections };
+	return { prefixLines, blocks };
+}
+
+export function parseChangelog(content: string): ChangelogDocument {
+	const { prefixLines, blocks } = splitReleaseBlocks(content);
+	return {
+		prefixLines,
+		sections: blocks.map(block => parseReleaseSection(block.heading.text, block.bodyLines)),
+	};
 }
 
 function parseReleaseSection(heading: string, bodyLines: readonly NumberedLine[]): ReleaseSection {

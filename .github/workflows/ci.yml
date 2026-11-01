@@ -223,6 +223,41 @@ jobs:
               name: MODULE.bazel.lock
               path: MODULE.bazel.lock
 
+   # Released changelog sections are immutable, yet merging a branch that
+   # predates a release puts its `## [Unreleased]` entries under the new
+   # release heading with no conflict. The pull request's merge commit must
+   # keep every released section of its first parent, the main tip where
+   # releases are cut.
+   #
+   # A push to main is not checked: that is how a release arrives, and
+   # `bun run release` rewrites released sections on purpose. It cannot carry
+   # the defect either, since scripts/merge-pr.ts runs the same check before
+   # it commits a maintainer merge. A pull request into `omp2` is not checked
+   # because its released sections are its own, and merging main into it
+   # replaces them legitimately.
+   changelog_released_sections:
+      name: Check released changelog sections
+      if: github.event_name == 'pull_request' && github.base_ref == 'main'
+      runs-on: ubuntu-22.04
+      steps:
+         # Depth 2 holds the merge commit's first parent, which is the base.
+         - uses: actions/checkout@v4
+           with:
+              fetch-depth: 2
+         - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+           with:
+              bun-version: 1.4.4
+         - name: Compare released sections with the base branch
+           run: |
+              # The base is the merge commit's first parent, never a two-dot
+              # diff against the moving `origin/main`. A base this job cannot
+              # read fails it: an unknown base never passes.
+              git rev-parse --verify --quiet --end-of-options 'HEAD^2' >/dev/null || {
+                echo "::error::HEAD is not the pull request merge commit; the base branch tip is unknown."
+                exit 1
+              }
+              bun scripts/check-released-changelogs.ts --base HEAD^1
+
    # Rust validation (tests, clippy, rustfmt) runs on non-PR events only.
    # Native-changing PRs are rare enough that they do not warrant PR-side
    # Rust validation or a PR-side addon build (see native_addons): Rust is
