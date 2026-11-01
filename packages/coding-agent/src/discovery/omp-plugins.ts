@@ -35,6 +35,7 @@ import {
 	expandEnvVarsDeep,
 	loadFilesFromDir,
 	parseRequestIdFormat,
+	readPluginProvenance,
 	scanSkillsFromDir,
 } from "./helpers";
 import { listOmpExtensionRoots, type OmpExtensionRoot } from "./omp-extension-roots";
@@ -65,13 +66,14 @@ async function allowedRoots(ctx: LoadContext, surface: "skills" | "mcp" | "other
 async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 	const roots = await allowedRoots(ctx, "skills");
 	const results = await Promise.all(
-		roots.map(root =>
+		roots.map(async root =>
 			scanSkillsFromDir(ctx, {
 				dir: path.join(root.path, "skills"),
 				providerId: PROVIDER_ID,
 				level: root.level,
 				requireDescription: true,
 				pluginName: root.name,
+				provenance: await readPluginProvenance(root.path),
 			}),
 		),
 	);

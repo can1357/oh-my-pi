@@ -18,6 +18,7 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import type { BashResult } from "../../exec/bash-executor";
 import type { ContextUsage } from "../../extensibility/extensions/types";
+import type { SkillDiagnosticsSnapshot } from "../../extensibility/skill-diagnostics";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
 import type { SessionLeaseReport } from "../../session/session-storage";
 import type { RestoredQueuedMessage } from "../../session/agent-session-types";
@@ -34,6 +35,13 @@ import type { RpcMessagesPage } from "./rpc-messages";
 import type { GoalModeState } from "../../goals/state";
 import type { RpcGoalOp, RpcGoalResult } from "./rpc-goal";
 import type { BtwHistoryRecord } from "../../session/btw-history";
+
+export type {
+	SkillDiagnosticDuplicate,
+	SkillDiagnosticEntry,
+	SkillDiagnosticsSnapshot,
+	SkillResolutionDiagnostic,
+} from "../../extensibility/skill-diagnostics";
 
 // ============================================================================
 // RPC Commands (stdin)
@@ -63,6 +71,8 @@ export type RpcCommand =
 
 	// State
 	| { id?: string; type: "get_state" }
+	| { id?: string; type: "get_skill_diagnostics" }
+	| { id?: string; type: "set_skill_startup_diagnostics"; enabled: boolean }
 	| { id?: string; type: "set_fast_mode"; enabled: boolean }
 	| { id?: string; type: "set_slow_mode"; enabled: boolean }
 	| {
@@ -216,6 +226,8 @@ export interface RpcSessionState {
 	contextUsage?: ContextUsage;
 	/** Current goal-mode state; `null` when the session has no goal. */
 	goal: GoalModeState | null;
+	/** Current skill-resolution details; absent when connected to an older server. */
+	skillDiagnostics?: SkillDiagnosticsSnapshot;
 }
 
 export interface RpcAvailableSlashCommand {
@@ -230,6 +242,11 @@ export interface RpcAvailableSlashCommand {
 export interface RpcAvailableCommandsUpdateFrame {
 	type: "available_commands_update";
 	commands: RpcAvailableSlashCommand[];
+}
+
+export interface RpcSkillDiagnosticsUpdateFrame {
+	type: "skill_diagnostics_update";
+	data: SkillDiagnosticsSnapshot;
 }
 
 /** How a prompt's work ended, as reported by its {@link RpcPromptResultFrame}. */
@@ -461,6 +478,14 @@ export type RpcResponse =
 
 	// State
 	| { id?: string; type: "response"; command: "get_state"; success: true; data: RpcSessionState }
+	| { id?: string; type: "response"; command: "get_skill_diagnostics"; success: true; data: SkillDiagnosticsSnapshot }
+	| {
+			id?: string;
+			type: "response";
+			command: "set_skill_startup_diagnostics";
+			success: true;
+			data: SkillDiagnosticsSnapshot;
+	  }
 	| {
 			id?: string;
 			type: "response";
