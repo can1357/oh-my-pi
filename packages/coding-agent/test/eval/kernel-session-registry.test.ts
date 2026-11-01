@@ -799,11 +799,13 @@ describe("idle kernel shutdown", () => {
 			await registry.executeOnSession("setup", "/tmp", options);
 			const sessionRef = weakRefToPresentSession(registry, options);
 			await registry.disposeByOwner("owner");
-			expect(await collected(sessionRef, 2_000)).toBe(true);
+			// Conservative GC roots can pin the startup record for a few seconds; the bound only has to
+			// stay well under the 60s idle timer that would otherwise keep the session reachable.
+			expect(await collected(sessionRef, 15_000)).toBe(true);
 		} finally {
 			await registry.disposeAll();
 		}
-	});
+	}, 20_000);
 
 	it("keeps a kernel through an idle window longer than the native timer limit", async () => {
 		const idleMs = 30 * 24 * 60 * 60 * 1000;
