@@ -1,113 +1,122 @@
 /**
  * The contract `docs/extensions.md` states for a `ctx` call that meets the end
- * of its session: omp observes only the promise it hands back, so dropping that
- * one ends nothing but the call, while every promise the extension derives from
- * it — `then`, `finally`, `Promise.all`, an async function awaiting it — is the
- * extension's to observe, and a dropped rejection ends the process. A call made
- * after the end refuses by throwing, before any promise exists for a `.catch()`
- * to attach to.
+ * of its session, row by row: each entry below is one row of the table in "A
+ * `ctx` call across the end of its session", named in its "Gate shape" column,
+ * and the table has no row this gate does not run.
  *
- * Only a separate process shows that: an unhandled rejection is fatal through
- * the postmortem handler, which no in-process assertion can observe. Each shape
- * runs in its own child (`fixtures/ctx-after-session-probe.ts`).
+ * Only a separate process shows it: an unhandled rejection or an uncaught
+ * exception is fatal through the postmortem handler, which no in-process
+ * assertion can observe. Each shape runs in its own child
+ * (`fixtures/ctx-after-session-probe.ts`). A fatal row is checked for its cause
+ * as well as its exit — the report names the refusal and how it escaped — and a
+ * survived row for what the extension saw.
  */
 import { describe, expect, test } from "bun:test";
 import * as path from "node:path";
 
 const PROBE_PATH = path.join(import.meta.dir, "fixtures", "ctx-after-session-probe.ts");
 const REPO_ROOT = path.resolve(import.meta.dir, "../../..");
+/** What every refusal says (`ExtensionRuntime`'s retired-session error). */
+const REFUSAL = "Extension session retired";
 
-interface ProbeRun {
-	readonly exitCode: number;
-	readonly observations: Array<{ what: string; detail?: unknown; hostCalls: number }>;
+interface Observation {
+	what: string;
+	detail: unknown;
+	hostCalls: number;
 }
 
-async function runShape(shape: string): Promise<ProbeRun> {
+/** One shape's process: its exit, how a fatal ending was reported, and what the extension saw. */
+interface ShapeRun {
+	exit: number;
+	fatal: { kind: string; refused: boolean } | null;
+	observations: Observation[];
+}
+
+async function runShape(shape: string): Promise<ShapeRun> {
 	const proc = Bun.spawn([process.execPath, PROBE_PATH, shape], {
 		cwd: REPO_ROOT,
 		stdin: "ignore",
 		stdout: "pipe",
 		stderr: "pipe",
 	});
-	const [exitCode, stdout] = await Promise.all([
+	const [exit, stdout, stderr] = await Promise.all([
 		proc.exited,
 		new Response(proc.stdout).text(),
 		new Response(proc.stderr).text(),
 	]);
-	return { exitCode, observations: Bun.JSONL.parse(stdout) as ProbeRun["observations"] };
+	// postmortem's report: `[Unhandled Rejection] Error: …` or `[Uncaught Exception] Error: …`.
+	const report = stderr.split("\n").find(line => /^\[(Unhandled Rejection|Uncaught Exception)\]/.test(line));
+	const observations = (Bun.JSONL.parse(stdout) as Observation[]).map(({ what, detail, hostCalls }) => ({
+		what,
+		detail,
+		hostCalls,
+	}));
+	return {
+		exit,
+		fatal:
+			report === undefined
+				? null
+				: { kind: report.slice(1, report.indexOf("]")), refused: report.includes(REFUSAL) },
+		observations,
+	};
 }
 
+const refusal = expect.stringContaining(REFUSAL);
+const fatal = (kind: "Unhandled Rejection" | "Uncaught Exception") => ({ kind, refused: true });
+const survived = (hostCalls = 1): Observation => ({ what: "survived", detail: undefined, hostCalls });
+const caught = (hostCalls = 1): Observation => ({ what: "caught", detail: refusal, hostCalls });
+
+/** Each documented row: the exit, the fatal report (`null` when the process survives), and what the
+ *  extension saw, in order. */
+const ROWS: Record<string, ShapeRun> = {
+	// At the call: refused before any promise exists.
+	"after-end-await-try": {
+		exit: 0,
+		fatal: null,
+		observations: [{ what: "caught", detail: { returned: false, error: refusal }, hostCalls: 0 }, survived(0)],
+	},
+	"after-end-drop": { exit: 1, fatal: fatal("Uncaught Exception"), observations: [] },
+	"after-end-catch": { exit: 1, fatal: fatal("Uncaught Exception"), observations: [] },
+	// On the way back: the promise handed back is observed, and it rejects only if the session ended
+	// before it settled.
+	"dropped-original": {
+		exit: 0,
+		fatal: null,
+		observations: [{ what: "original", detail: { status: "rejected", reason: refusal }, hostCalls: 1 }, survived()],
+	},
+	"stored-pending": { exit: 0, fatal: null, observations: [caught(), survived()] },
+	"stored-fulfilled": {
+		exit: 0,
+		fatal: null,
+		observations: [{ what: "fulfilled", detail: undefined, hostCalls: 1 }, survived()],
+	},
+	// Derived: each promise made from it is the extension's to observe.
+	"derived-then": { exit: 1, fatal: fatal("Unhandled Rejection"), observations: [] },
+	"derived-then-catch": { exit: 0, fatal: null, observations: [caught(), survived()] },
+	"derived-then-handler": { exit: 0, fatal: null, observations: [caught(), survived()] },
+	"derived-finally": {
+		exit: 1,
+		fatal: fatal("Unhandled Rejection"),
+		observations: [{ what: "finally", detail: undefined, hostCalls: 1 }],
+	},
+	"derived-try-finally": {
+		exit: 1,
+		fatal: fatal("Unhandled Rejection"),
+		observations: [{ what: "finally", detail: undefined, hostCalls: 1 }],
+	},
+	"derived-try-catch": { exit: 1, fatal: fatal("Unhandled Rejection"), observations: [] },
+	"derived-all-awaited": { exit: 0, fatal: null, observations: [caught(), survived()] },
+	"derived-all": { exit: 1, fatal: fatal("Unhandled Rejection"), observations: [] },
+	"derived-async-all": { exit: 1, fatal: fatal("Unhandled Rejection"), observations: [] },
+	"derived-async": { exit: 1, fatal: fatal("Unhandled Rejection"), observations: [] },
+	"derived-async-try": { exit: 0, fatal: null, observations: [caught(), survived()] },
+};
+
 describe("a ctx call that meets the end of its session", () => {
-	test("ends the process only for a promise the extension derived and dropped", async () => {
-		const shapes = [
-			"dropped-original",
-			"derived-then",
-			"derived-then-handler",
-			"derived-finally",
-			"derived-all",
-			"derived-async",
-			"derived-async-try",
-		] as const;
+	test("ends the process exactly where docs/extensions.md says, and for the refusal it names", async () => {
+		const shapes = Object.keys(ROWS);
 		const runs = await Promise.all(shapes.map(shape => runShape(shape)));
-		const exits = Object.fromEntries(shapes.map((shape, index) => [shape, runs[index]?.exitCode]));
-		const handled = Object.fromEntries(
-			shapes.map((shape, index) => [shape, runs[index]?.observations.map(entry => entry.what)]),
-		);
 
-		expect({ exits, handled }).toEqual({
-			exits: {
-				// omp observes the promise it handed back: dropping it ends only that call.
-				"dropped-original": 0,
-				// Derived and unobserved: the rejection ends the process.
-				"derived-then": 1,
-				"derived-finally": 1,
-				"derived-all": 1,
-				"derived-async": 1,
-				// Derived and observed.
-				"derived-then-handler": 0,
-				"derived-async-try": 0,
-			},
-			handled: {
-				"dropped-original": ["survived"],
-				// The fatal shapes die before the probe's last line; `finally` still runs.
-				"derived-then": [],
-				"derived-finally": ["finally"],
-				"derived-all": [],
-				"derived-async": [],
-				"derived-then-handler": ["caught", "survived"],
-				"derived-async-try": ["caught", "survived"],
-			},
-		});
-	}, 180_000);
-
-	test("refuses a call made after the end by throwing, which only a try around the call catches", async () => {
-		const [awaited, caught] = await Promise.all([runShape("after-end-await-try"), runShape("after-end-catch")]);
-
-		expect({
-			// The member throws: no promise is returned, and the host is never called.
-			awaited: {
-				exit: awaited.exitCode,
-				observations: awaited.observations.map(entry => ({
-					what: entry.what,
-					detail: entry.detail,
-					hostCalls: entry.hostCalls,
-				})),
-			},
-			// `.catch()` has nothing to attach to, so the exception reaches the process.
-			caught: { exit: caught.exitCode, observations: caught.observations.map(entry => entry.what) },
-		}).toEqual({
-			awaited: {
-				exit: 0,
-				observations: [
-					{
-						what: "caught",
-						detail: { returned: false, error: expect.stringContaining("retired") },
-						hostCalls: 0,
-					},
-					{ what: "survived", detail: undefined, hostCalls: 0 },
-				],
-			},
-			caught: { exit: 1, observations: [] },
-		});
-	}, 180_000);
+		expect(Object.fromEntries(shapes.map((shape, index) => [shape, runs[index]]))).toEqual(ROWS);
+	}, 300_000);
 });

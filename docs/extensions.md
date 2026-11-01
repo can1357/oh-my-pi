@@ -115,7 +115,11 @@ What you register, and when, decides how long it lasts:
   title, a widget, an editor, a suspension of the TUI (`stop`) — is taken back when the session
   ends, unless another session has set it since. You need not clear it yourself, and a `ctx` kept
   past the end cannot: a `custom()` dialog's `done` does nothing once the session that opened it has
-  ended (the host closes the dialog itself), and neither does the TUI's `start`.
+  ended (the host closes the dialog itself), and neither does the TUI's `start`. Taking it back is
+  the host clearing the slot, once: if the host's clear fails, the value stays. A setting whose host
+  call throws does not take the slot from the live session that held it. A `ctx.ui` setter called
+  while the host is still applying another session's setting of the same slot throws, since only
+  the host knows which of the two values lands last; set it once that setting has returned.
 - Drawing is the one thing that works for whoever holds it, whenever: the theme (`ctx.ui.theme`,
   and the one a renderer or a `ctx.ui` factory is handed) and the TUI's drawing members, its frame
   facts, `terminal.rows`/`columns` and image budget still reach the host's renderer after your
@@ -164,27 +168,30 @@ try {
 If you must not wait for it, make that the body of an `async` function and drop the function's
 promise: the `try` inside handles every rejection, so the function's own promise never rejects.
 
-Each row below is a process omp's test suite runs
-(`packages/coding-agent/test/ctx-after-session.test.ts`), with omp's handler for uncaught errors
-loaded. Exit 1 is omp ending.
+The table below is the gate: each row is one process omp's test suite runs
+(`packages/coding-agent/test/ctx-after-session.test.ts`, the shape named in the last column), with
+omp's handler for uncaught errors loaded. Exit 1 is omp ending; for every exit 1 the suite also
+checks that the report names the refusal and how it escaped.
 
-| Where it refuses | What the extension does | Exit | What happens |
-| --- | --- | ---: | --- |
-| At the call | Session ends, then `try { await ctx.compact() } catch {…}` | 0 | The throw is caught; the host is not called |
-| At the call | Session ends, then `ctx.compact()` in a callback, result dropped | 1 | Uncaught exception: no promise was returned |
-| At the call | Session ends, then `ctx.compact().catch(handler)` | 1 | Uncaught exception before `.catch` attaches |
-| On the way back | `ctx.compact()` made while live and dropped; session ends before the answer | 0 | Refused, quietly |
-| On the way back | Promise stored while pending; it is refused; awaited later inside `try`/`catch` | 0 | Nothing fatal meanwhile; the later `await` gets the refusal |
-| On the way back | Promise stored; it fulfills while live; session ends; awaited later | 0 | It fulfills: nothing is checked again |
-| Derived | `ctx.compact().then(onFulfilled)` dropped | 1 | Unhandled rejection |
-| Derived | `ctx.compact().then(onFulfilled).catch(handler)` | 0 | `handler` gets the refusal |
-| Derived | `ctx.compact().then(onFulfilled, onRejected)`, no `.catch` | 0 | `onRejected` gets the refusal |
-| Derived | `ctx.compact().finally(callback)` dropped | 1 | `callback` runs, then unhandled rejection |
-| Derived | `try { ctx.compact().then(onFulfilled) } finally {…}` | 1 | `finally` runs, then unhandled rejection |
-| Derived | `try { ctx.compact().then(onFulfilled) } catch {…}` | 1 | `catch` never runs; unhandled rejection |
-| Derived | `await Promise.all([ctx.compact()])` inside `try`/`catch` | 0 | The aggregate rejects and is caught |
-| Derived | `Promise.all([ctx.compact()])` dropped | 1 | Unhandled rejection of the aggregate |
-| Derived | A dropped `async` function that runs `await Promise.all([ctx.compact()])` | 1 | The function's promise rejects, unhandled |
+| Where it refuses | What the extension does | Exit | What happens | Gate shape |
+| --- | --- | ---: | --- | --- |
+| At the call | Session ends, then `try { await ctx.compact() } catch {…}` | 0 | The throw is caught; no promise was returned and the host is not called | `after-end-await-try` |
+| At the call | Session ends, then `ctx.compact()` in a callback, result dropped | 1 | Uncaught exception: no promise was returned | `after-end-drop` |
+| At the call | Session ends, then `ctx.compact().catch(handler)` in a callback | 1 | Uncaught exception before `.catch` attaches | `after-end-catch` |
+| On the way back | `ctx.compact()` made while live and dropped; session ends before the answer | 0 | The promise rejects with the refusal, quietly | `dropped-original` |
+| On the way back | Promise stored while pending; it is refused; awaited later inside `try`/`catch` | 0 | Nothing fatal meanwhile; the later `await` gets the refusal | `stored-pending` |
+| On the way back | Promise stored; it fulfills while live; session ends; awaited later | 0 | It fulfills: nothing is checked again | `stored-fulfilled` |
+| Derived | `ctx.compact().then(onFulfilled)` dropped | 1 | Unhandled rejection | `derived-then` |
+| Derived | `ctx.compact().then(onFulfilled).catch(handler)` | 0 | `handler` gets the refusal | `derived-then-catch` |
+| Derived | `ctx.compact().then(onFulfilled, onRejected)`, no `.catch` | 0 | `onRejected` gets the refusal | `derived-then-handler` |
+| Derived | `ctx.compact().finally(callback)` dropped | 1 | `callback` runs, then unhandled rejection | `derived-finally` |
+| Derived | `try { ctx.compact().then(onFulfilled) } finally {…}` | 1 | `finally` runs, then unhandled rejection | `derived-try-finally` |
+| Derived | `try { ctx.compact().then(onFulfilled) } catch {…}` | 1 | `catch` never runs; unhandled rejection | `derived-try-catch` |
+| Derived | `await Promise.all([ctx.compact()])` inside `try`/`catch` | 0 | The aggregate rejects and is caught | `derived-all-awaited` |
+| Derived | `Promise.all([ctx.compact()])` dropped | 1 | Unhandled rejection of the aggregate | `derived-all` |
+| Derived | A dropped `async` function that runs `await Promise.all([ctx.compact()])` | 1 | The function's promise rejects, unhandled | `derived-async-all` |
+| Derived | A dropped `async` function that runs `await ctx.compact()` | 1 | The function's promise rejects, unhandled | `derived-async` |
+| Derived | A dropped `async` function that runs `try { await ctx.compact() } catch {…}` | 0 | The `catch` gets the refusal; the function's promise fulfills | `derived-async-try` |
 
 ## Quick start
 

@@ -39,7 +39,7 @@ import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { Container, TUI } from "@oh-my-pi/pi-tui";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { ToolRendererScope } from "@oh-my-pi/pi-tui/tools/renderer-scope";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { logger, TempDir } from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 
 const cleanups: (() => void | Promise<void>)[] = [];
@@ -1682,6 +1682,126 @@ describe("what a session set on the host's UI", () => {
 			endedMidSet: "B",
 			threw: true,
 			afterItEnds: undefined,
+		});
+	});
+
+	test("goes back to the live session that held it when a replacing setter throws, so that session's end still takes it back", () => {
+		// One host for both sessions: B's setter refuses before it writes, so the host still shows A.
+		let shown: string | undefined;
+		const host = {
+			setStatus: (_key: string, value?: string) => {
+				if (value === "B") throw new Error("rejected before writing");
+				shown = value;
+			},
+		};
+		const a = withUI(host);
+		const b = withUI(host);
+		a.ui.setStatus("same", "A");
+		let refused = "";
+		try {
+			b.ui.setStatus("same", "B");
+		} catch (error) {
+			refused = String(error);
+		}
+		a.end();
+
+		expect({ refused, afterAEnds: shown }).toEqual({
+			refused: expect.stringContaining("rejected before writing"),
+			afterAEnds: undefined,
+		});
+	});
+
+	test("is taken back once its own setter returns when the session ended inside that setter", () => {
+		// The host's setter ends the session before it writes: the withdrawal runs first, then the write.
+		let shown: string | undefined;
+		const ending: { a?: () => void } = {};
+		const host = {
+			setStatus: (_key: string, value?: string) => {
+				if (value === "A") ending.a?.();
+				shown = value;
+			},
+		};
+		const a = withUI(host);
+		const b = withUI(host);
+		ending.a = a.end;
+		a.ui.setStatus("same", "A");
+		const afterSetter = shown;
+		a.end();
+		const afterRepeatedEnd = shown;
+		b.end();
+
+		expect({ afterSetter, afterRepeatedEnd }).toEqual({ afterSetter: undefined, afterRepeatedEnd: undefined });
+	});
+
+	test("refuses another session's setting of the slot from inside the host's setter, whichever order the host writes in", () => {
+		/** A's host setter calls B's `setStatus` for the same slot, before or after its own write. */
+		const nested = (writeFirst: boolean) => {
+			let shown: string | undefined;
+			const inner: { set?: () => void } = {};
+			const host = {
+				setStatus: (_key: string, value?: string) => {
+					if (writeFirst) shown = value;
+					if (value === "A") inner.set?.();
+					if (!writeFirst) shown = value;
+				},
+			};
+			const a = withUI(host);
+			const b = withUI(host);
+			let refused = "";
+			inner.set = () => {
+				try {
+					b.ui.setStatus("same", "B");
+				} catch (error) {
+					refused = String(error);
+				}
+			};
+			a.ui.setStatus("same", "A");
+			const whileLive = shown;
+			a.end();
+			return { refused: refused.includes("still applying"), whileLive, afterAEnds: shown };
+		};
+
+		expect({ writeLast: nested(false), writeFirst: nested(true) }).toEqual({
+			writeLast: { refused: true, whileLive: "A", afterAEnds: undefined },
+			writeFirst: { refused: true, whileLive: "A", afterAEnds: undefined },
+		});
+	});
+
+	test("warns, once, when a session's end clears a slot another live session holds through a different UI object", () => {
+		const warn = spyOn(logger, "warn").mockImplementation(() => {});
+		cleanups.push(() => warn.mockRestore());
+		let shown: string | undefined;
+		const recorder = {
+			setStatus: (_key: string, value?: string) => {
+				shown = value;
+			},
+		};
+		// Each agent handed its own copy of one UI: two objects that front one UI, which omp cannot see.
+		const copies = [0, 1, 2].map(() => withUI({ setStatus: recorder.setStatus.bind(recorder) }));
+		copies[0]?.ui.setStatus("copied-ui", "A");
+		copies[1]?.ui.setStatus("copied-ui", "B");
+		copies[2]?.ui.setStatus("copied-ui", "C");
+		copies[0]?.end();
+		copies[1]?.end();
+		const afterCopiesEnd = shown;
+		// The supported shape: one object, so the slot stays with the live session and nothing is said.
+		const a = withUI(recorder);
+		const b = withUI(recorder);
+		a.ui.setStatus("shared-ui", "A");
+		b.ui.setStatus("shared-ui", "B");
+		a.end();
+
+		expect({
+			afterCopiesEnd,
+			afterSharedEnd: shown,
+			warned: warn.mock.calls.map(([message, context]) => ({
+				sdk: String(message).includes("docs/sdk.md"),
+				context,
+			})),
+		}).toEqual({
+			afterCopiesEnd: undefined,
+			afterSharedEnd: "B",
+			warned: [{ sdk: true, context: { slot: "status:copied-ui" } }],
 		});
 	});
 });
