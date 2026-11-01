@@ -28,6 +28,13 @@ export function fileHref(filePath: string | undefined): string | undefined {
 	return filePath && path.isAbsolute(filePath) ? tryFileUri(filePath) : undefined;
 }
 
+/** Link for a head target that is a web URL (`www.` gains `https://`), else undefined. */
+export function urlHref(target: string | undefined): string | undefined {
+	if (!target) return undefined;
+	const candidate = /^www\./i.test(target) ? `https://${target}` : target;
+	return /^https?:\/\/\S+$/i.test(candidate) ? candidate : undefined;
+}
+
 /** Diff stats as one head `meta` string, `+8 −1` (U+2212 minus), or undefined when nothing changed. */
 export function diffStatsMeta(added: number, removed: number): string | undefined {
 	const parts: string[] = [];

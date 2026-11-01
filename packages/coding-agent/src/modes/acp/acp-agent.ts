@@ -352,6 +352,11 @@ function steeringQueueFromMeta(meta: unknown): "steering" | "followUp" {
 	return "steering";
 }
 
+type AcpCompactionNotification = {
+	method: "_omp/compaction/start" | "_omp/compaction/end";
+	params: Record<string, unknown>;
+};
+
 type ManagedSessionRecord = {
 	/** Stable ACP handle, independent of the underlying durable session. */
 	readonly protocolSessionId: string;
@@ -379,9 +384,12 @@ type ManagedSessionRecord = {
 	liveMessageProgress: { textEmitted: boolean; thoughtEmitted: boolean } | undefined;
 	toolArgsById: Map<string, unknown>;
 	extensionsConfigured: boolean;
-	// Installed inside `#scheduleBootstrapUpdates` (post-race-guard); released
-	// in `#disposeSessionRecord`. Lives independent of any prompt turn.
+	// Capture at registration, independently of prompt turns. Delivery opens
+	// after the bootstrap guard or a client prompt proves the session is known.
 	lifetimeUnsubscribe: (() => void) | undefined;
+	commandMetadataUnsubscribe: (() => void) | undefined;
+	lifetimeUpdatesReady: boolean;
+	pendingCompactionNotifications: AcpCompactionNotification[] | undefined;
 	closedError: RequestError | undefined;
 	promptEventHandlers: Set<Promise<void>>;
 	extensionUserMessageTasks: Set<Promise<void>>;
@@ -1028,16 +1036,11 @@ export class AcpAgent implements Agent {
 			});
 		}
 
-		// For `model`/`thinking`, `#setModelById`/`#setThinkingLevelById` change
-		// the session model/thinking level through AgentSession, which now emits
-		// a lifetime event (`model_changed`/`thinking_level_changed`) that
-		// `#handleLifetimeEvent` turns into a push once the subscription is
-		// installed. Only push here when that subscription is not yet
-		// installed, so pre-bootstrap callers still see the change without a
-		// post-bootstrap duplicate.
+		// Before lifetime delivery is ready, explicit client requests still
+		// receive their config update here. Once ready, the model/thinking
+		// event supplies that update without a duplicate push.
 		const handledBySubscription =
-			(params.configId === THINKING_CONFIG_ID || params.configId === MODEL_CONFIG_ID) &&
-			record.lifetimeUnsubscribe !== undefined;
+			(params.configId === THINKING_CONFIG_ID || params.configId === MODEL_CONFIG_ID) && record.lifetimeUpdatesReady;
 		if (!handledBySubscription) {
 			await this.#pushConfigOptionUpdate(record);
 		}
@@ -1046,6 +1049,7 @@ export class AcpAgent implements Agent {
 
 	async prompt(params: PromptRequest): Promise<PromptResponse> {
 		const record = this.#getSessionRecord(params.sessionId);
+		this.#activateLifetimeUpdates(record);
 		const activeTurn = record.promptTurn;
 		// A `_session/steering` refusal (`promptRequired`) now only ever
 		// happens while no client prompt owns the turn (idle, or an
@@ -1281,12 +1285,9 @@ export class AcpAgent implements Agent {
 				});
 			},
 			notifyConfigChanged: async options => {
-				// Mirrors `setSessionConfigOption`: once the session-lifetime
-				// subscription is installed, `model_changed`/`thinking_level_changed`
-				// already reach `#handleLifetimeEvent`, which pushes the
-				// `config_option_update`. Pushing again here would make clients
-				// redraw their config UI twice for a single change.
-				if (options?.handledBySessionEvent && record.lifetimeUnsubscribe !== undefined) {
+				// Once lifetime delivery is ready, model/thinking events already
+				// push the config update. Keep the pre-bootstrap explicit path.
+				if (options?.handledBySessionEvent && record.lifetimeUpdatesReady) {
 					await this.#waitForPromptEventHandlers(record);
 					return;
 				}
@@ -1768,9 +1769,11 @@ export class AcpAgent implements Agent {
 		// own (ACP sessions run with `enableMCP: false`); read it live so every
 		// reconfiguration's `refreshMCPTools` rebuild renders its instructions.
 		session.setMcpServerInstructionsSource(() => record.mcpManager?.getServerInstructions());
-		// `record.lifetimeUnsubscribe` is installed in `#scheduleBootstrapUpdates`
-		// so it shares the bootstrap race guard — see that comment for why.
 		try {
+			const unsubscribeEvents = session.subscribe(event => {
+				this.#handleLifetimeEvent(record, event);
+			});
+			record.lifetimeUnsubscribe = unsubscribeEvents;
 			await this.#configureExtensions(record);
 			await this.#configureMcpServers(record, mcpServers);
 			this.#sessions.set(record.protocolSessionId, record);
@@ -1804,28 +1807,79 @@ export class AcpAgent implements Agent {
 			pendingPromptDispatches: [],
 			extensionUserMessageTasks: new Set(),
 			lifetimeUnsubscribe: undefined,
+			commandMetadataUnsubscribe: undefined,
+			lifetimeUpdatesReady: false,
+			pendingCompactionNotifications: undefined,
 		};
 	}
 
-	async #handleLifetimeEvent(record: ManagedSessionRecord, event: AgentSessionEvent): Promise<void> {
-		if (event.type !== "thinking_level_changed" && event.type !== "model_changed") {
+	#handleLifetimeEvent(record: ManagedSessionRecord, event: AgentSessionEvent): void {
+		const sessionId = record.protocolSessionId;
+		let notification: AcpCompactionNotification;
+		if (event.type === "auto_compaction_start") {
+			notification = {
+				method: "_omp/compaction/start",
+				params: { sessionId, reason: event.reason, action: event.action },
+			};
+		} else if (event.type === "auto_compaction_end") {
+			// Undefined members drop out of the JSON-RPC payload.
+			notification = {
+				method: "_omp/compaction/end",
+				params: {
+					sessionId,
+					action: event.action,
+					aborted: event.aborted,
+					willRetry: event.willRetry,
+					skipped: event.skipped,
+					errorMessage: event.errorMessage,
+					tokensBefore: event.result?.tokensBefore,
+				},
+			};
+		} else {
+			if (
+				record.lifetimeUpdatesReady &&
+				(event.type === "thinking_level_changed" || event.type === "model_changed")
+			) {
+				this.#trackLifetimeDelivery(record, event.type, this.#pushConfigOptionUpdate(record));
+			}
 			return;
 		}
-		// Config delivery is part of command completion, even though the
-		// subscription lives beyond an individual prompt turn.
-		const delivery = this.#pushConfigOptionUpdate(record);
+		// Compaction transitions cannot be rebuilt from a snapshot, so buffer them until delivery opens.
+		if (record.lifetimeUpdatesReady) this.#deliverCompactionNotification(record, notification);
+		else (record.pendingCompactionNotifications ??= []).push(notification);
+	}
+
+	#deliverCompactionNotification(record: ManagedSessionRecord, notification: AcpCompactionNotification): void {
+		this.#trackLifetimeDelivery(
+			record,
+			notification.method,
+			this.#connection.extNotification(notification.method, notification.params),
+		);
+	}
+
+	#activateLifetimeUpdates(record: ManagedSessionRecord): void {
+		if (record.lifetimeUpdatesReady) return;
+		record.lifetimeUpdatesReady = true;
+		const pending = record.pendingCompactionNotifications;
+		record.pendingCompactionNotifications = undefined;
+		for (const notification of pending ?? []) this.#deliverCompactionNotification(record, notification);
+	}
+
+	#trackLifetimeDelivery(record: ManagedSessionRecord, eventType: string, delivery: Promise<void>): void {
 		record.promptEventHandlers.add(delivery);
-		try {
-			await delivery;
-		} catch (error) {
-			logger.warn("Failed to push config_option_update after a lifetime event", {
-				acpSessionId: record.protocolSessionId,
-				eventType: event.type,
-				error,
-			});
-		} finally {
-			record.promptEventHandlers.delete(delivery);
-		}
+		void delivery.then(
+			() => {
+				record.promptEventHandlers.delete(delivery);
+			},
+			error => {
+				record.promptEventHandlers.delete(delivery);
+				logger.warn("Failed to deliver ACP lifetime update", {
+					acpSessionId: record.protocolSessionId,
+					eventType,
+					error,
+				});
+			},
+		);
 	}
 
 	#getSessionRecord(sessionId: string): ManagedSessionRecord {
@@ -2545,13 +2599,10 @@ export class AcpAgent implements Agent {
 		// enough that the response future has scheduled before our timer fires
 		// on stdio-only transports.
 		//
-		// The session-lifetime subscription is installed inside the same timer
-		// so it shares this guard — without it, an extension's `session_start`
-		// handler (or any async work it schedules) calling `setThinkingLevel`
-		// would push a `config_option_update` for a session id the client
-		// hasn't been told about yet. The pre-bootstrap thinking level is
-		// reported in the response's `configOptions`, so deferring the
-		// notification loses no state.
+		// Lifetime events are captured at registration. Config changes before
+		// this guard are represented in the response's snapshot; compaction
+		// transitions are buffered because no snapshot can reconstruct them.
+		// A prompt can open delivery sooner: it proves the client knows the id.
 		setTimeout(() => {
 			if (this.#connection.signal.aborted) {
 				return;
@@ -2560,21 +2611,13 @@ export class AcpAgent implements Agent {
 			if (!record) {
 				return;
 			}
-			if (!record.lifetimeUnsubscribe) {
-				const unsubscribeEvents = record.session.subscribe(event => {
-					void this.#handleLifetimeEvent(record, event);
-				});
-				// Skills/commands rediscovery (live `skills.*`/`commands.*` edits, MCP
-				// prompts, manage_skill) re-advertises the palette.
-				const unsubscribeCommands = record.session.subscribeCommandMetadataChanged(() => {
+			this.#activateLifetimeUpdates(record);
+			if (!record.commandMetadataUnsubscribe) {
+				record.commandMetadataUnsubscribe = record.session.subscribeCommandMetadataChanged(() => {
 					void this.#emitAvailableCommandsUpdate(record).catch(error => {
 						logger.warn("Failed to emit ACP available commands update", { error: String(error) });
 					});
 				});
-				record.lifetimeUnsubscribe = () => {
-					unsubscribeEvents();
-					unsubscribeCommands();
-				};
 			}
 			void this.#emitBootstrapUpdates(sessionId, record);
 		}, ACP_BOOTSTRAP_RACE_GUARD_MS);
@@ -3263,6 +3306,8 @@ export class AcpAgent implements Agent {
 
 	async #disposeSessionRecord(record: ManagedSessionRecord, reason?: postmortem.Reason): Promise<void> {
 		record.lifetimeUnsubscribe?.();
+		record.commandMetadataUnsubscribe?.();
+		record.pendingCompactionNotifications = undefined;
 		if (record.mcpManager) {
 			try {
 				await record.mcpManager.disconnectAll();

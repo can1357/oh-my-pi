@@ -3,10 +3,10 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import {
 	type CompactionPreparation,
 	compact,
-	createFileOps,
 	DEFAULT_COMPACTION_SETTINGS,
 	generateHandoff,
 } from "@oh-my-pi/pi-agent-core/compaction";
+import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
@@ -106,7 +106,7 @@ function makePreparation(overrides: Partial<CompactionPreparation> = {}): Compac
 		recentMessages: [makeUserMessage("recent msg")],
 		isSplitTurn: true,
 		tokensBefore: 12_345,
-		fileOps: createFileOps(),
+		fileOps: snapcompact.createFileOps(),
 		settings: { ...DEFAULT_COMPACTION_SETTINGS, remoteEnabled: false },
 		...overrides,
 	};

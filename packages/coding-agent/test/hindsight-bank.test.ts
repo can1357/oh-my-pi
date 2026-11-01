@@ -45,6 +45,7 @@ const baseConfig = (overrides: Partial<HindsightConfig> = {}): HindsightConfig =
 	bankId: null,
 	bankIdPrefix: "",
 	scoping: "global",
+	globalScope: false,
 	bankMission: "",
 	retainMission: null,
 	autoRecall: true,
