@@ -71,11 +71,13 @@ function downloadErrorSummary(error: string | undefined): string | undefined {
 
 export function resolveModels(model: string | undefined, mlx = tinyWorkerUsesMlx()): TinyLocalModelKey[] {
 	if (!model) return [DEFAULT_TINY_TITLE_LOCAL_MODEL_KEY];
-	// `all` is a prefetch convenience: skip models the active backend refuses before
-	// load, so the bulk download stays green when every *usable* model succeeds.
+	// `all` is a prefetch convenience: skip models the active backend cannot load,
+	// so the bulk download stays green when every *usable* model succeeds.
 	if (model === "all")
-		return TINY_LOCAL_MODELS.filter(
-			spec => mlx || !("onnxUnsupportedReason" in spec) || !spec.onnxUnsupportedReason,
+		return TINY_LOCAL_MODELS.filter(spec =>
+			mlx
+				? !("mlxUnsupportedReason" in spec) || !spec.mlxUnsupportedReason
+				: !("onnxUnsupportedReason" in spec) || !spec.onnxUnsupportedReason,
 		).map(spec => spec.key);
 	if (!isTinyLocalModelKey(model)) {
 		const values = TINY_LOCAL_MODELS.map(spec => spec.key).join(", ");

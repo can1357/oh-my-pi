@@ -179,7 +179,8 @@ recognized text fields; it no longer coerces arbitrary objects to strings.
 - **LFM2-1.2B** — solid and fastest to load. Weaknesses: `Label: value` noise, small-talk + buried
   leaks, a fluffy single-memory summary.
 - **LFM3-1.7B** — newest LFM-family option; the worker supplies the `logits_to_keep` feed its graph
-  requires, so it runs on Windows and Linux CPU. Not yet benchmarked on the 16-fixture set.
+  requires, so it runs on Windows and Linux CPU. `mlx-lm` has no `lfm3` architecture, so the MLX
+  backend skips this entry and ONNX CPU is the only path. Not yet benchmarked on the 16-fixture set.
 
 ### Recommendation and current availability
 

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import { resolveModels, runTinyModelsCommand } from "@oh-my-pi/pi-coding-agent/cli/tiny-models-cli";
 import { TINY_LOCAL_MODELS } from "@oh-my-pi/pi-coding-agent/tiny/models";
-import { tinyTitleClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
+import { mlxLaunch, tinyTitleClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
 
 afterEach(() => {
 	vi.restoreAllMocks();
@@ -24,8 +24,21 @@ describe("tiny-models download model resolution", () => {
 		for (const key of usable) expect(all).toContain(key);
 	});
 
-	it("includes ONNX-blocked models in `all` when the MLX backend is active", () => {
-		expect(resolveModels("all", true)).toEqual(TINY_LOCAL_MODELS.map(spec => spec.key));
+	it("excludes MLX-blocked models from `all` when the MLX backend is active", () => {
+		const mlxBlocked = TINY_LOCAL_MODELS.filter(
+			spec => "mlxUnsupportedReason" in spec && spec.mlxUnsupportedReason,
+		).map(spec => spec.key);
+		// Guard: keep this regression meaningful — at least one registry entry must be MLX-blocked.
+		expect(mlxBlocked.length).toBeGreaterThan(0);
+
+		const all = resolveModels("all", true);
+		for (const key of mlxBlocked) expect(all).not.toContain(key);
+
+		// ONNX-blocked models are the ones MLX exists for, so they stay in the MLX prefetch.
+		const onnxBlocked = TINY_LOCAL_MODELS.filter(
+			spec => "onnxUnsupportedReason" in spec && spec.onnxUnsupportedReason,
+		).map(spec => spec.key);
+		for (const key of onnxBlocked) expect(all).toContain(key);
 	});
 
 	it("still resolves an explicitly requested unsupported model (only `all` is filtered)", () => {
@@ -114,5 +127,15 @@ describe("tiny-models download model resolution", () => {
 		expect(text).toContain("PI_TINY_DEVICE=cuda");
 		expect(text).toContain("libcudnn.so.9");
 		expect(text).toContain("tiny-title-runtime");
+	});
+});
+
+describe("mlx backend model gate", () => {
+	it("refuses a model the pinned mlx-lm cannot load", () => {
+		expect(() => mlxLaunch("lfm3-1.7b", () => {})).toThrow(/unavailable on MLX/);
+	});
+
+	it("builds a launch for a model mlx-lm can load", () => {
+		expect(mlxLaunch("lfm2-1.2b", () => {}).backend).toBe("mlx");
 	});
 });

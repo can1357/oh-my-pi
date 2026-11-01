@@ -194,12 +194,18 @@ export function onnxLaunch(modelKey: TinyLocalModelKey, modelEnv: Record<string,
 	};
 }
 
-function mlxLaunch(
+/** How to start the MLX worker for `modelKey`. @internal */
+export function mlxLaunch(
 	modelKey: TinyLocalModelKey,
 	emitProgress: (event: TinyTitleProgressEvent) => void,
 ): TinyWorkerLaunch {
 	const spec = getTinyLocalModelSpec(modelKey);
 	if (!spec) throw new Error(`Unknown tiny local model: ${modelKey}`);
+	// Callers gate on this before choosing the backend; keep a loud failure here so a
+	// future caller that skips the gate cannot download weights mlx-lm cannot load.
+	if ("mlxUnsupportedReason" in spec && spec.mlxUnsupportedReason) {
+		throw new Error(`${modelKey} is unavailable on MLX: ${spec.mlxUnsupportedReason}`);
+	}
 	const tag = `mlx|${MLX_LM_VERSION}|${Bun.hash.crc32(MLX_SERVER_SCRIPT).toString(16)}`;
 	return {
 		label: `tiny mlx worker for ${modelKey}`,
@@ -308,17 +314,28 @@ export class TinyTitleClient {
 
 	async #connectDefault(modelKey: TinyLocalModelKey): Promise<WorkerHandle> {
 		if (tinyWorkerUsesMlx()) {
-			try {
-				return await connectTinyWorker(
-					mlxLaunch(modelKey, event => this.#emitProgress(event)),
-					modelKey,
-				);
-			} catch (error) {
-				mlxUnavailable = true;
-				const message = error instanceof Error ? error.message : String(error);
-				logger.warn("tiny-title: MLX worker unavailable; falling back to ONNX CPU", { modelKey, error: message });
-				// Ends a visible `mlx-lm` install row; the ONNX fallback tracks its own load.
-				this.#downloads.observe({ modelKey, status: "error" }, `MLX unavailable: ${message}`);
+			// Per-model, not process-wide: a model the pinned mlx-lm cannot load falls back
+			// to ONNX without demoting every other model in this process.
+			const spec = getTinyLocalModelSpec(modelKey);
+			const reason = spec && "mlxUnsupportedReason" in spec ? spec.mlxUnsupportedReason : undefined;
+			if (reason) {
+				logger.debug("tiny-title: MLX backend cannot load this model; using ONNX CPU", { modelKey, reason });
+			} else {
+				try {
+					return await connectTinyWorker(
+						mlxLaunch(modelKey, event => this.#emitProgress(event)),
+						modelKey,
+					);
+				} catch (error) {
+					mlxUnavailable = true;
+					const message = error instanceof Error ? error.message : String(error);
+					logger.warn("tiny-title: MLX worker unavailable; falling back to ONNX CPU", {
+						modelKey,
+						error: message,
+					});
+					// Ends a visible `mlx-lm` install row; the ONNX fallback tracks its own load.
+					this.#downloads.observe({ modelKey, status: "error" }, `MLX unavailable: ${message}`);
+				}
 			}
 		}
 		return connectTinyWorker(onnxLaunch(modelKey, tinyModelEnv()), modelKey);

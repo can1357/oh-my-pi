@@ -15,6 +15,8 @@ export interface TinyTitleLocalModelSpec {
 	reasoning?: boolean;
 	/** Reason the ONNX backend refuses this model before loading the runtime; the MLX backend ignores it. */
 	onnxUnsupportedReason?: string;
+	/** Reason the MLX backend cannot load this model; the ONNX backend ignores it. */
+	mlxUnsupportedReason?: string;
 }
 
 export const TINY_TITLE_LOCAL_MODELS = [
@@ -127,6 +129,8 @@ export const TINY_MEMORY_LOCAL_MODELS = [
 		label: "LFM3 1.7B",
 		description: "Successor to LFM2 1.2B; ONNX q4 runs on Windows and Linux CPU, about 1.7 GB cached.",
 		contextNote: "Use when a newer LFM-family memory model is preferred over the fastest-loading LFM2.",
+		mlxUnsupportedReason:
+			"mlx-lm has no lfm3 architecture, so LiquidAI/LFM3-1.7B-MLX-4bit cannot load; use the ONNX CPU backend",
 	},
 ] as const satisfies readonly TinyTitleLocalModelSpec[];
 
