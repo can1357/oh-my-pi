@@ -653,6 +653,39 @@
 						},
 						{
 							"type": "array",
+							"items": {
+								"type": "string",
+								"enum": [
+									"pi",
+									"status",
+									"model",
+									"mode",
+									"path",
+									"git",
+									"pr",
+									"subagents",
+									"token_in",
+									"token_out",
+									"token_total",
+									"token_rate",
+									"cost",
+									"context_pct",
+									"context_total",
+									"time_spent",
+									"time",
+									"session",
+									"hostname",
+									"cache_read",
+									"cache_write",
+									"cache_hit",
+									"session_name",
+									"usage",
+									"collab",
+									"stream",
+									"vim",
+									"plan_mode"
+								]
+							},
 							"contains": {
 								"type": "string",
 								"enum": [
@@ -710,6 +743,39 @@
 						},
 						{
 							"type": "array",
+							"items": {
+								"type": "string",
+								"enum": [
+									"pi",
+									"status",
+									"model",
+									"mode",
+									"path",
+									"git",
+									"pr",
+									"subagents",
+									"token_in",
+									"token_out",
+									"token_total",
+									"token_rate",
+									"cost",
+									"context_pct",
+									"context_total",
+									"time_spent",
+									"time",
+									"session",
+									"hostname",
+									"cache_read",
+									"cache_write",
+									"cache_hit",
+									"session_name",
+									"usage",
+									"collab",
+									"stream",
+									"vim",
+									"plan_mode"
+								]
+							},
 							"contains": {
 								"type": "string",
 								"enum": [
@@ -4940,6 +5006,50 @@
 				}
 			},
 			"additionalProperties": false
+		},
+		"queueMode": {
+			"description": "Deprecated: migrated to `steeringMode` on load.",
+			"deprecated": true
+		},
+		"lastChangelogVersion": {
+			"description": "Deprecated: migrated to `<agentDir>/last-changelog-version` on load.",
+			"deprecated": true
+		},
+		"collapseChangelog": {
+			"description": "Deprecated: migrated to `startup.changelogMode` on load.",
+			"deprecated": true
+		},
+		"inspect_image": {
+			"description": "Deprecated: migrated to `images.questionTimeoutMs` on load.",
+			"deprecated": true
+		},
+		"mnemosyne": {
+			"description": "Deprecated: migrated to `mnemopi` on load.",
+			"deprecated": true
+		},
+		"search": {
+			"description": "Deprecated: migrated to `grep` on load.",
+			"deprecated": true
+		},
+		"readHashLines": {
+			"description": "Deprecated: ignored on load.",
+			"deprecated": true
+		},
+		"serviceTier": {
+			"description": "Deprecated: migrated to `tier` on load.",
+			"deprecated": true
+		},
+		"serviceTierSubagent": {
+			"description": "Deprecated: migrated to `tier.subagent` on load.",
+			"deprecated": true
+		},
+		"serviceTierAdvisor": {
+			"description": "Deprecated: migrated to `tier.advisor` on load.",
+			"deprecated": true
+		},
+		"fastModeScope": {
+			"description": "Deprecated: ignored on load.",
+			"deprecated": true
 		}
 	},
 	"additionalProperties": true

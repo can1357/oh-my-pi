@@ -332,6 +332,17 @@ const LEGACY_SAMPLES: Record<string, unknown> = {
 	"exa.enableResearcher": true,
 	"exa.enableWebsets": false,
 	"computer.backend": "native",
+	queueMode: "all",
+	lastChangelogVersion: "18.0.0",
+	collapseChangelog: true,
+	inspect_image: { timeoutMs: 30000 },
+	mnemosyne: {},
+	search: { enabled: true },
+	readHashLines: true,
+	serviceTier: "priority",
+	serviceTierSubagent: "openai-only",
+	serviceTierAdvisor: "default",
+	fastModeScope: "all",
 };
 
 /** Every keyword the builder emits; each is either validated by the in-tree validator or an annotation. */
@@ -373,7 +384,8 @@ function expectValid(schema: TJsonSchema, value: unknown, label = ""): void {
 
 describe("settings JSON schema under the in-tree validator", () => {
 	const schema: TJsonSchema = committedSchema;
-	const currentShapes = withoutDeprecated(schema);
+	// The current shapes with a closed top level, so a retired top-level key is rejected too.
+	const currentShapes: TJsonSchema = { ...withoutDeprecated(schema), additionalProperties: false };
 
 	it("uses only the keywords the builder is known to emit", () => {
 		expect([...new Set(keywordsOf(schema))].filter(keyword => !EMITTED_KEYWORDS.has(keyword))).toEqual([]);
@@ -422,6 +434,14 @@ describe("settings JSON schema under the in-tree validator", () => {
 			expectValid(schema, doc, key);
 			expect(isJsonSchemaValueValid(currentShapes, doc), key).toBe(false);
 		}
+	});
+
+	it("accepts a retired status-line segment only beside known segments", () => {
+		const segments = (leftSegments: string[]) => ({ statusLine: { leftSegments } });
+
+		expect(isJsonSchemaValueValid(schema, segments(["plan_mode", "modle"]))).toBe(false);
+		expectValid(schema, segments(["plan_mode", "mode"]));
+		expect(isJsonSchemaValueValid(currentShapes, segments(["plan_mode", "mode"]))).toBe(false);
 	});
 
 	it("loads the legacy shapes into a config the current shapes accept", async () => {

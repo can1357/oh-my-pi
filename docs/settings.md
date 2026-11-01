@@ -48,7 +48,7 @@ $schema: https://github.com/can1357/oh-my-pi/releases/latest/download/omp-config
 
 Older YAML language servers and JetBrains IDEs read a comment instead, `# yaml-language-server: $schema=<url>` or `# $schema: <url>` on the first line, but omp drops comments whenever it writes `config.yml` (`omp config set`, `/settings`). The association that always lasts is editor-side: VS Code `yaml.schemas` (for example `{ "<url>": ["**/.omp/**/config.yml"] }`) or a JetBrains JSON Schema mapping (Settings → Languages & Frameworks → Schemas and DTDs → JSON Schema Mappings). To match an older install, pin the release: `https://github.com/can1357/oh-my-pi/releases/download/vX.Y.Z/omp-config.schema.json`.
 
-The schema checks types, enum values, and known array entries, and rejects unknown keys inside a settings group (nested form only, such as `compaction: { enabled: false }`). Unknown top-level keys are allowed. Older shapes that omp still migrates on load validate but are marked deprecated. Map-valued settings such as `modelRoles` accept any object; their values are not validated.
+The schema checks types, enum values, and known array entries, and rejects unknown keys inside a settings group (nested form only, such as `compaction: { enabled: false }`). Unknown top-level keys are allowed. Older shapes and retired keys that omp still migrates or drops on load validate but are marked deprecated. Map-valued settings such as `modelRoles` accept any object; their values are not validated.
 
 ## Reading and writing settings
 

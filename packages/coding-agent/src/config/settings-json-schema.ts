@@ -23,8 +23,9 @@ const PATH_SCOPE_KEYS = ["path", "paths", "pathPrefix", "pathPrefixes"] as const
  * Pre-migration shapes `config/settings.ts` still rewrites on load (`#migrateRawSettings` and
  * `migrateNestedLeafRename`), keyed by dotted path. Keep in sync with those migrations: each shape is
  * accepted beside the current one and marked deprecated, so a not-yet-migrated file shows no errors.
+ * A function derives the shape from the setting registered at the path.
  */
-const LEGACY_SHAPES: Record<string, TJsonSchema> = {
+const LEGACY_SHAPES: Record<string, TJsonSchema | ((setting: AnySetting) => TJsonSchema)> = {
 	doubleEscapeAction: { type: "string", enum: ["branch"] },
 	theme: { type: "string" },
 	"task.eager": { type: "boolean" },
@@ -36,8 +37,8 @@ const LEGACY_SHAPES: Record<string, TJsonSchema> = {
 	inlineToolDescriptors: { type: "boolean" },
 	"find.enabled": { type: "boolean" },
 	"spelling.autocomplete": { type: "boolean" },
-	"statusLine.leftSegments": { type: "array", contains: { type: "string", enum: ["plan_mode"] } },
-	"statusLine.rightSegments": { type: "array", contains: { type: "string", enum: ["plan_mode"] } },
+	"statusLine.leftSegments": withRetiredItems(["plan_mode"]),
+	"statusLine.rightSegments": withRetiredItems(["plan_mode"]),
 	"codexResets.autoRedeem": { type: "boolean" },
 	"memory.backend": { type: "string", enum: ["mnemosyne"] },
 	"dev.autoqa": { type: "object" },
@@ -45,10 +46,22 @@ const LEGACY_SHAPES: Record<string, TJsonSchema> = {
 };
 
 /**
- * Keys inside known groups that the same migrations drop, mapped to the setting that takes over
- * their value (`null`: ignored). Listed so a not-yet-migrated file shows no errors.
+ * Keys, top-level or inside known groups, that the same migrations drop, mapped to the setting that
+ * takes over their value (`null`: ignored). Listed so a not-yet-migrated file shows no errors and
+ * editors flag them as deprecated.
  */
 const REMOVED_KEYS: Record<string, string | null> = {
+	queueMode: "steeringMode",
+	lastChangelogVersion: "<agentDir>/last-changelog-version",
+	collapseChangelog: "startup.changelogMode",
+	inspect_image: "images.questionTimeoutMs",
+	mnemosyne: "mnemopi",
+	search: "grep",
+	readHashLines: null,
+	serviceTier: "tier",
+	serviceTierSubagent: "tier.subagent",
+	serviceTierAdvisor: "tier.advisor",
+	fastModeScope: null,
 	"task.simple": null,
 	"task.isolation.mode": "task.isolation.enabled",
 	"task.completionProbeMs": "task.completionProbe",
@@ -86,6 +99,19 @@ const REMOVED_KEYS: Record<string, string | null> = {
 	"exa.enableWebsets": null,
 	"computer.backend": null,
 };
+
+/** An array of the setting's item vocabulary plus `retired`, holding at least one retired value. */
+function withRetiredItems(retired: readonly string[]): (setting: AnySetting) => TJsonSchema {
+	return setting => {
+		const { definition } = setting;
+		const values = definition.type === "array" && definition.items ? definition.items.values : [];
+		return {
+			type: "array",
+			items: { type: "string", enum: [...values, ...retired] },
+			contains: { type: "string", enum: retired },
+		};
+	};
+}
 
 /** One dotted-path segment: its path, the setting declared at it, and the settings nested below it. */
 interface SettingsNode {
@@ -145,24 +171,24 @@ export function renderSettingsJsonSchema(settings?: readonly AnySetting[]): stri
 function childSchemas(node: SettingsNode): Record<string, TJsonSchema> {
 	const properties: Record<string, TJsonSchema> = {};
 	for (const [segment, child] of node.children) properties[segment] = nodeSchema(child);
-	if (node.path) {
-		for (const [path, replacement] of Object.entries(REMOVED_KEYS)) {
-			const segment = path.slice(node.path.length + 1);
-			if (!path.startsWith(`${node.path}.`) || segment.includes(".") || segment in properties) continue;
-			properties[segment] = {
-				description: replacement
-					? `Deprecated: migrated to \`${replacement}\` on load.`
-					: "Deprecated: ignored on load.",
-				deprecated: true,
-			};
-		}
+	const prefix = node.path ? `${node.path}.` : "";
+	for (const [path, replacement] of Object.entries(REMOVED_KEYS)) {
+		const segment = path.slice(prefix.length);
+		if (!path.startsWith(prefix) || segment.includes(".") || segment in properties) continue;
+		properties[segment] = {
+			description: replacement
+				? `Deprecated: migrated to \`${replacement}\` on load.`
+				: "Deprecated: ignored on load.",
+			deprecated: true,
+		};
 	}
 	return properties;
 }
 
 function nodeSchema(node: SettingsNode): TJsonSchema {
 	const branches = currentShapes(node);
-	const legacy = LEGACY_SHAPES[node.path];
+	const entry = LEGACY_SHAPES[node.path];
+	const legacy = typeof entry === "function" ? node.setting && entry(node.setting) : entry;
 	const deprecated = legacy ? [{ ...legacy, deprecated: true }] : [];
 	if (branches.length > 1) return { anyOf: [...branches, ...deprecated] };
 	if (!legacy) return branches[0];
