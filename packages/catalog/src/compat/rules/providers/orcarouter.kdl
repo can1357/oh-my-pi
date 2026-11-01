@@ -1,0 +1,18 @@
+// Provider-wire compat for "orcarouter". OrcaRouter serves an OpenAI-compatible
+// Responses API at https://api.orcarouter.ai/v1. Models are discovered dynamically
+// from /v1/models. The default model is the auto-router "orcarouter/auto".
+
+provider "orcarouter" {
+	default-model "orcarouter/auto"
+	env "ORCA_KEY"
+	discovery label="OrcaRouter"
+
+	// Replaces the strict-mode provider whitelist entry.
+	supports-strict-mode #true
+	wire-model-id-mode "raw"
+	thinking-mode "effort"
+
+	class "unknown" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+}

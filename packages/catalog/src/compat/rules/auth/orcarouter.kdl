@@ -1,0 +1,9 @@
+auth "orcarouter" {
+	name "OrcaRouter"
+	login "api-key" {
+		auth-url "https://orcarouter.ai/settings/api-keys"
+		instructions "Copy your API key from the OrcaRouter dashboard"
+		prompt "Paste your OrcaRouter API key" placeholder="sk-orca-..."
+		validate "models-endpoint" label="OrcaRouter" url="https://api.orcarouter.ai/v1/models"
+	}
+}
