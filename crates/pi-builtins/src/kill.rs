@@ -3,7 +3,11 @@
 use std::io::Write;
 
 use brush_core::{
-	ExecutionExitCode, ExecutionResult, builtins, sys, traps::TrapSignal, ExecutionContext,
+	ExecutionExitCode, ExecutionResult, builtins,
+	jobs::{self, Job},
+	sys,
+	traps::TrapSignal,
+	ExecutionContext,
 };
 use clap::Parser;
 
@@ -171,25 +175,15 @@ impl builtins::Command for KillCommand {
 				};
 				// A job running inside the shell has no process to deliver the signal
 				// to; a signal that would end a process ends the job instead.
-				if job.has_internal_tasks() {
-					let unwound = match signal {
-						KillSignal::Probe => None,
-						KillSignal::Signal(signal) if ends_process(signal) => Some(job.take_internal_tasks()),
-						KillSignal::Signal(_) => {
-							writeln!(
-								context.stderr(),
-								"{}: {}: failed to send signal",
-								context.command_name,
-								operand
-							)?;
-							had_failure = true;
-							continue;
-						},
-					};
-					// Like a killed process that is reaped, the job has let go of what it
-					// held (a FIFO open it waited in) before the next command runs.
-					if let Some(unwound) = unwound {
-						unwound.await;
+				if job.in_process_pid().is_some() {
+					if !signal_own_in_process_job(job, signal).await? {
+						writeln!(
+							context.stderr(),
+							"{}: {}: failed to send signal",
+							context.command_name,
+							operand
+						)?;
+						had_failure = true;
 					}
 					continue;
 				}
@@ -334,6 +328,25 @@ impl builtins::Command for KillCommand {
 					continue;
 				},
 			};
+			// An in-process job's pid names no operating-system process. The job
+			// may belong to this shell, or to another shell in the process (the
+			// parent of a subshell, a sibling background job).
+			if jobs::is_in_process_pid(pid) {
+				let signalled = match context.shell.jobs_mut().resolve_process_id(pid) {
+					Some(job) => signal_own_in_process_job(job, signal).await?,
+					None => signal_in_process_pid(pid, signal),
+				};
+				if !signalled {
+					writeln!(
+						context.stderr(),
+						"{}: {}: failed to send signal",
+						context.command_name,
+						operand
+					)?;
+					had_failure = true;
+				}
+				continue;
+			}
 			if blocks(pid) {
 				writeln!(
 					context.stderr(),
@@ -678,6 +691,50 @@ fn ends_process(signal: TrapSignal) -> bool {
 	#[cfg(not(unix))]
 	{
 		matches!(signal, TrapSignal::Signal(_))
+	}
+}
+
+/// The number of `signal` when it ends the process it is sent to.
+fn ending_signal_number(signal: TrapSignal) -> Option<u8> {
+	if !ends_process(signal) {
+		return None;
+	}
+	i32::try_from(signal)
+		.ok()
+		.and_then(|number| u8::try_from(number).ok())
+}
+
+/// Signals a job of this shell that runs inside the shell process, and returns
+/// whether the signal reached the running job. An ending signal returns once
+/// the job has let go of what it held (a FIFO open it waited in), as a killed
+/// process is gone once it is reaped.
+async fn signal_own_in_process_job(
+	job: &mut Job,
+	signal: KillSignal,
+) -> std::result::Result<bool, brush_core::Error> {
+	// A task that already finished keeps its own status.
+	job.refresh()?;
+	match signal {
+		KillSignal::Probe => Ok(job.has_internal_tasks()),
+		KillSignal::Signal(signal) => {
+			let Some(unwound) = ending_signal_number(signal).and_then(|number| job.end_in_process(number))
+			else {
+				return Ok(false);
+			};
+			unwound.await;
+			Ok(true)
+		},
+	}
+}
+
+/// Signals a job that runs inside the shell process and belongs to another
+/// shell in the process, and returns whether the signal reached it.
+fn signal_in_process_pid(pid: i32, signal: KillSignal) -> bool {
+	match signal {
+		KillSignal::Probe => jobs::in_process_job_is_running(pid),
+		KillSignal::Signal(signal) => {
+			ending_signal_number(signal).is_some_and(|number| jobs::end_in_process_job(pid, number))
+		},
 	}
 }
 

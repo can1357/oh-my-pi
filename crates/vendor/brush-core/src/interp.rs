@@ -8,7 +8,7 @@ use std::{
 use brush_parser::ast::{self, CommandPrefixOrSuffixItem};
 use itertools::Itertools;
 
-use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
 	ShellFd,
@@ -763,18 +763,13 @@ fn spawn_async_ao_list_in_task<SE: extensions::ShellExtensions>(
 		.map_or_else(CancellationToken::new, |token| token.child_token());
 	cloned_params.set_cancel_token(cancellation.clone());
 
-	let join_handle = tokio::spawn(async move {
+	let task = async move {
 		cloned_ao_list
 			.execute(&mut cloned_shell, &cloned_params)
 			.await
-	});
+	};
 
-	jobs::Job::new(
-		[jobs::JobTask::Internal(AbortOnDropHandle::new(join_handle))],
-		ao_list.to_string(),
-		jobs::JobState::Running,
-	)
-	.with_cancellation(cancellation)
+	jobs::Job::spawn_in_process(task, ao_list.to_string(), cancellation)
 }
 
 #[async_trait::async_trait]
@@ -1325,7 +1320,7 @@ impl Execute for ast::CoprocessCommand {
 			.as_ref()
 			.map_or_else(CancellationToken::new, CancellationToken::child_token);
 		child_params.set_cancel_token(cancellation.clone());
-		let join_handle = tokio::spawn(async move {
+		let task = async move {
 			let pipeline_context = PipelineExecutionContext {
 				shell:            commands::ShellForCommand::ParentShell(&mut child_shell),
 				process_group_id: None,
@@ -1335,20 +1330,18 @@ impl Execute for ast::CoprocessCommand {
 				.execute_in_pipeline(pipeline_context, child_params)
 				.await?;
 			match spawn_result.wait_with_cancel(cancel_token).await? {
-				ExecutionWaitResult::Completed(result) => Ok(result),
+				ExecutionWaitResult::Completed(result) => Ok::<_, error::Error>(result),
 				ExecutionWaitResult::Stopped(_) => Ok(ExecutionResult::stopped()),
 			}
-		});
+		};
 
-		let job = shell.jobs_mut().add_as_current(
-			jobs::Job::new(
-				[jobs::JobTask::Internal(AbortOnDropHandle::new(join_handle))],
-				format!("coproc {name}"),
-				jobs::JobState::Running,
-			)
-			.with_cancellation(cancellation),
-		);
-		let job_id = job.id;
+		let job = shell.jobs_mut().add_as_current(jobs::Job::spawn_in_process(
+			task,
+			format!("coproc {name}"),
+			cancellation,
+		));
+		let pid = job.last_pid();
+		shell.set_last_background_pid(pid);
 
 		// Fill out the fd variable.
 		let arr_value = ShellValue::from(vec![stdout_fd.to_string(), stdin_fd.to_string()]);
@@ -1356,11 +1349,13 @@ impl Execute for ast::CoprocessCommand {
 			.env_mut()
 			.set_global(name.clone(), ShellVariable::new(arr_value))?;
 
-		// Set the job ID for the coprocess in a separate variable with the _PID suffix.
+		// The coprocess's pid, which `$!` also holds, goes in a separate variable
+		// with the _PID suffix.
 		let pid_name = format!("{name}_PID");
+		let pid = pid.map_or_else(String::new, |pid| pid.to_string());
 		shell
 			.env_mut()
-			.set_global(pid_name, ShellVariable::new(job_id.to_string()))?;
+			.set_global(pid_name, ShellVariable::new(pid))?;
 
 		Ok(ExecutionResult::success())
 	}
