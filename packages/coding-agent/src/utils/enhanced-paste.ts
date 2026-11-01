@@ -39,6 +39,12 @@ export interface EnhancedPasteHandlers {
 	pasteText(text: string): void;
 	pasteImage(image: ImageContent): void | Promise<void>;
 	showStatus(message: string): void;
+	/**
+	 * Paste from the system clipboard directly when the terminal's listing offers no supported
+	 * MIME type (e.g. macOS TIFF-only screenshots, `text/uri-list` Finder copies). Returns false
+	 * when the system clipboard is unreachable (remote session), so the unsupported status shows.
+	 */
+	pasteNative(): boolean;
 }
 
 export function isOsc5522Packet(data: string): boolean {
@@ -203,7 +209,9 @@ export class EnhancedPasteController {
 		const selected = choosePasteMime(state.mimes);
 		if (!selected) {
 			this.#state = undefined;
-			this.#handlers.showStatus("Clipboard paste has no supported text or image data");
+			if (!this.#handlers.pasteNative()) {
+				this.#handlers.showStatus("Clipboard paste has no supported text or image data");
+			}
 			return;
 		}
 

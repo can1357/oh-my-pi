@@ -1171,6 +1171,41 @@ describe("InputController image paste into an image-accepting prompt", () => {
 		expect(context.editor.pendingImages).toHaveLength(0);
 	});
 
+	it("pastes a TIFF-only enhanced (OSC 5522) listing through the native clipboard reader (#17696)", async () => {
+		const context = await createPromptContext();
+		const submittedOnce = Promise.withResolvers<void>();
+		const onSubmit = vi.fn<(text: string, images?: ImageContent[]) => void>(() => submittedOnce.resolve());
+		const prompt = new HookEditorComponent(context.ctx.ui, "Answer", undefined, onSubmit, vi.fn(), {
+			promptStyle: true,
+			acceptImages: true,
+		});
+		context.setFocused(prompt);
+		const readImage = vi.fn(async () => ({ data: Buffer.from(TINY_PNG, "base64"), mimeType: "image/png" }));
+		new InputController(context.ctx, {
+			readImage,
+			readText: async () => "",
+			readMacFileUrls: async () => [],
+		}).setupKeyHandlers();
+		const listeners = registeredInputListeners(context.spies.addInputListener);
+		context.spies.addStartListener.mock.calls[0]?.[0]();
+
+		// macOS `⌃⌘⇧4` screenshots reach the pasteboard as TIFF only.
+		const tiffMime = Buffer.from("image/tiff").toString("base64");
+		for (const input of [
+			"\x1b]5522;type=read:status=OK:pw=secret\x1b\\",
+			`\x1b]5522;type=read:status=DATA:mime=${tiffMime}\x1b\\`,
+			"\x1b]5522;type=read:status=DONE\x1b\\",
+		]) {
+			dispatchInput(listeners, input);
+		}
+		prompt.handleInput("\r");
+		await submittedOnce.promise;
+
+		expect(readImage).toHaveBeenCalledTimes(1);
+		expect(submittedImage(onSubmit).source).toMatch(/^local:\/\/pasted-image-[0-9a-f]+\.png$/);
+		expect(context.ctx.showStatus).not.toHaveBeenCalledWith("Clipboard paste has no supported text or image data");
+	});
+
 	it("prefers a Finder file URL over the co-advertised icon bitmap (#8769)", async () => {
 		const imagePath = await writePng("finder.png");
 		const context = await createPromptContext();

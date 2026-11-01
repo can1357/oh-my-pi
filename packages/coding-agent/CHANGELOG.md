@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- ⌘V in terminals with kitty enhanced paste (OSC 5522, e.g. Ghostty 1.4) now attaches macOS TIFF screenshots and Finder-copied image files instead of reporting "Clipboard paste has no supported text or image data" ([#17696](https://github.com/can1357/oh-my-pi/issues/17696))
+
 ## [18.15.0] - 2026-11-01
 
 ### Added
