@@ -499,10 +499,7 @@ describe("check-released-changelogs", () => {
 `;
 			// The proposed head fits through the fake release. The genuine 1.0.0
 			// section does not, so the real fixer removes it instead.
-			const placeholderFooter = fixerFooter("a".repeat(40));
-			const padding = "x".repeat(
-				MAX_CHANGELOG_BYTES - 1 - Buffer.byteLength(`${beforeOldest}${fakeOldRelease}${placeholderFooter}\n`),
-			);
+			const padding = "x".repeat(MAX_CHANGELOG_BYTES - Buffer.byteLength(THREE_RELEASES) + 1);
 			const base = THREE_RELEASES.replace("- Fixed an old bug", `- Fixed an old bug ${padding}`);
 			const repo = await repoWith(base);
 			const baseline = (await repo.git("rev-parse", "HEAD")).output.trim();
