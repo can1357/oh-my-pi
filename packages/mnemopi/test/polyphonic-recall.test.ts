@@ -1399,4 +1399,120 @@ describe("PolyphonicRecallEngine", () => {
 			closeQuietly(beam.db);
 		}
 	});
+
+	it("ranks backend deployment above newer frontend deployment for unspaced query 最新後端部署 at topK = 1", () => {
+		const beam = makeBeam();
+		try {
+			beam.db.run(
+				`INSERT INTO memoria_timelines (session_id, event_id, date, description, source_memory_id)
+					VALUES (?, 1, '2026-10-25', '完成了後端部署', 'tl-backend')`,
+				[beam.sessionId],
+			);
+			beam.db.run(
+				`INSERT INTO memoria_timelines (session_id, event_id, date, description, source_memory_id)
+					VALUES (?, 2, '2026-10-31', '完成了前端部署', 'tl-frontend')`,
+				[beam.sessionId],
+			);
+			const result = memoriaRetrieve(beam, "最新後端部署", "TR", 1);
+			expect(result.ability).toBe("TR");
+			expect(result.results.length).toBe(1);
+			expect((result.results as Array<{ event_id?: number; description?: string }>)[0]?.event_id).toBe(1);
+			expect((result.results as Array<{ description?: string }>)[0]?.description).toContain("後端部署");
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
+
+	it("routes Japanese いつもの設定は何ですか to IE and retrieves いつもの設定 fact", () => {
+		const beam = makeBeam();
+		try {
+			beam.db.run(
+				`INSERT INTO memoria_facts (session_id, message_idx, fact_type, key, value, context_snippet, importance, source_memory_id)
+					VALUES (?, 0, 'entity', 'いつもの設定', 'デフォルト構成値', 'いつもの設定', 0.8, 'mf-usual')`,
+				[beam.sessionId],
+			);
+			beam.db.run(
+				`INSERT INTO memoria_timelines (session_id, event_id, date, description, source_memory_id)
+					VALUES (?, 1, '2026-10-30', 'いつかの設定変更履歴', 'tl-usual')`,
+				[beam.sessionId],
+			);
+			const result = memoriaRetrieve(beam, "いつもの設定は何ですか");
+			expect(result.ability).toBe("IE");
+			expect(result.results.length).toBeGreaterThan(0);
+			expect((result.results as Array<{ key?: string }>)[0]?.key).toBe("いつもの設定");
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
+
+	it("matches consolidated fact with key Москва Проект for query what is москва проект above higher-importance partial fact", () => {
+		const beam = makeBeam();
+		try {
+			beam.db.run(
+				`INSERT INTO memoria_facts (session_id, message_idx, fact_type, key, value, context_snippet, importance, source_memory_id)
+					VALUES (?, 0, 'entity', 'Москва Проект', 'Главный инженерный проект', 'Москва Проект', 0.5, 'mf-moscow-full')`,
+				[beam.sessionId],
+			);
+			beam.db.run(
+				`INSERT INTO memoria_facts (session_id, message_idx, fact_type, key, value, context_snippet, importance, source_memory_id)
+					VALUES (?, 1, 'entity', 'Москва', 'Столица', 'Москва', 0.9, 'mf-moscow-partial')`,
+				[beam.sessionId],
+			);
+			const result = memoriaRetrieve(beam, "what is москва проект", "IE", 1);
+			expect(result.ability).toBe("IE");
+			expect(result.results.length).toBe(1);
+			expect((result.results as Array<{ key?: string }>)[0]?.key).toBe("Москва Проект");
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
+
+	it("preserves 甲型 and 乙型 CJK memories in diversityRerank without near-duplicate collapsing", () => {
+		const beam = makeBeam();
+		try {
+			const engine = seedPolyphonicFixture(beam);
+			const timestamp = new Date().toISOString();
+			insertWorking(beam, "wm-type-a", "甲型資料庫連線設定與備份策略", 0.9, timestamp);
+			insertWorking(beam, "wm-type-b", "乙型資料庫連線設定與備份策略", 0.88, timestamp);
+			const candidates = new Map([
+				[
+					"wm-type-a",
+					{
+						memoryId: "wm-type-a",
+						combinedScore: 0.1,
+						voiceScores: { hybrid: 0.1 },
+						metadata: {},
+					},
+				],
+				[
+					"wm-type-b",
+					{
+						memoryId: "wm-type-b",
+						combinedScore: 0.09,
+						voiceScores: { hybrid: 0.09 },
+						metadata: {},
+					},
+				],
+			]);
+			const reranked = engine.diversityRerank(candidates, 10, candidate => {
+				const row = beam.db
+					.query("SELECT id, content FROM working_memory WHERE id = ?")
+					.get(candidate.memoryId) as { id: string; content: string } | null;
+				if (!row) return null;
+				return {
+					id: row.id,
+					content: row.content,
+					score: candidate.combinedScore,
+					combined_score: candidate.combinedScore,
+					voice_scores: candidate.voiceScores,
+					metadata: candidate.metadata,
+					tier: "working",
+					tier_label: "working",
+				};
+			});
+			expect(reranked.map(r => r.id)).toEqual(["wm-type-a", "wm-type-b"]);
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
 });

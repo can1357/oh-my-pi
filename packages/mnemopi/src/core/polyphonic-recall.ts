@@ -10,6 +10,7 @@ import { VeracityConsolidator } from "./veracity-consolidation";
 import {
 	CJK_CLAUSE_PARTICLE_RE,
 	CJK_PARTICLE_SPLIT_RE,
+	CJK_RUN_RE,
 	CJK_STOP_SEGMENTS,
 	CJK_TEMPORAL_QUERY_RE,
 	cjkCodePointShingles,
@@ -350,6 +351,9 @@ function contentTokens(text: string): Set<string> {
 	}
 	return out;
 }
+const CJK_VARIANT_DESIGNATOR_RE =
+	/[甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉戌亥一二三四五六七八九十百千萬零〇壹貳參肆伍陸柒捌玖拾]+[型號号級级類类期版區区組组部篇卷章節节階段步課课條条項项款]/gu;
+
 function latinIdentifierTokens(text: string): Set<string> {
 	const out = new Set<string>();
 	for (const match of text.matchAll(/[a-z0-9][a-z0-9_.:/#+-]*/gi)) {
@@ -357,6 +361,26 @@ function latinIdentifierTokens(text: string): Set<string> {
 		if (lower.length > 0 && !STOP_WORDS.has(lower) && !/^\d+$/.test(lower)) {
 			out.add(lower);
 		}
+	}
+	for (const match of text.matchAll(/[\p{L}\p{N}][\p{L}\p{N}_.#+-]*/gu)) {
+		const token = match[0].replace(/[.:/-]+$/, "").toLowerCase();
+		if (token.length > 0 && !hasCjk(token) && !STOP_WORDS.has(token) && !/^\d+$/.test(token)) {
+			out.add(token);
+		}
+	}
+	return out;
+}
+
+function cjkVariantIdentifierTokens(text: string): Set<string> {
+	const out = new Set<string>();
+	for (const match of text.matchAll(CJK_VARIANT_DESIGNATOR_RE)) {
+		const matched = match[0];
+		if (matched) out.add(matched);
+	}
+	const firstCjkRun = text.match(CJK_RUN_RE)?.[0];
+	if (firstCjkRun && codePointLength(firstCjkRun) >= 2) {
+		const firstBigram = Array.from(firstCjkRun).slice(0, 2).join("");
+		out.add(firstBigram);
 	}
 	return out;
 }
@@ -731,7 +755,7 @@ export class PolyphonicRecallEngine {
 			(a, b) => b.combinedScore - a.combinedScore || a.memoryId.localeCompare(b.memoryId),
 		);
 		const selected: PolyphonicMemoryResult[] = [];
-		const selectedTokens: { tokens: Set<string>; latinIds: Set<string> }[] = [];
+		const selectedTokens: { tokens: Set<string>; latinIds: Set<string>; cjkVariantIds: Set<string> }[] = [];
 		const limit = Math.max(0, Math.trunc(topK));
 		for (const candidate of sorted) {
 			if (selected.length >= limit) break;
@@ -739,6 +763,7 @@ export class PolyphonicRecallEngine {
 			if (hydrated === null) continue;
 			const tokens = contentTokens(hydrated.content);
 			const latinIds = latinIdentifierTokens(hydrated.content);
+			const cjkVariantIds = cjkVariantIdentifierTokens(hydrated.content);
 			const isNearDuplicate = selectedTokens.some(prior => {
 				if (tokenJaccard(tokens, prior.tokens) <= NEAR_DUPLICATE_JACCARD) return false;
 				if (latinIds.size > 0 && prior.latinIds.size > 0) {
@@ -746,11 +771,16 @@ export class PolyphonicRecallEngine {
 						return false;
 					}
 				}
+				if (cjkVariantIds.size > 0 && prior.cjkVariantIds.size > 0) {
+					if (tokenJaccard(cjkVariantIds, prior.cjkVariantIds) < NEAR_DUPLICATE_JACCARD) {
+						return false;
+					}
+				}
 				return true;
 			});
 			if (isNearDuplicate) continue;
 			selected.push(hydrated);
-			selectedTokens.push({ tokens, latinIds });
+			selectedTokens.push({ tokens, latinIds, cjkVariantIds });
 		}
 		return selected;
 	}

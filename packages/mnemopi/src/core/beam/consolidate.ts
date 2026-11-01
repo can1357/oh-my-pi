@@ -14,6 +14,7 @@ import {
 	RECALL_RAW_TOKEN_RE,
 	splitMixedScriptToken,
 	stripCjkQuestionAffixes,
+	stripCjkTemporalAffixes,
 	unicodeCaseVariants,
 } from "../../util/regex";
 import { STOP_WORDS } from "../synonyms";
@@ -286,6 +287,15 @@ function makeQuestionTokenGroups(query: string): {
 					if (codePointLength(clause) >= 2 && !CJK_STOP_SEGMENTS.has(clause)) {
 						pushUnique(primary, clause);
 					}
+					const temporalStripped = stripCjkTemporalAffixes(clause);
+					if (temporalStripped !== clause) {
+						pushUnique(primary, temporalStripped);
+						if (codePointLength(temporalStripped) >= 4) {
+							for (const shingle of cjkCodePointShingles(temporalStripped, [2])) {
+								pushUnique(primary, shingle);
+							}
+						}
+					}
 				}
 				if (!CJK_CLAUSE_PARTICLE_RE.test(token)) {
 					pushUnique(primary, token);
@@ -319,6 +329,15 @@ function makeQuestionTokenGroups(query: string): {
 								pushUnique(primary, sub);
 							}
 							pushUnique(shingles, clause);
+						}
+						const temporalStripped = stripCjkTemporalAffixes(clause);
+						if (temporalStripped !== clause) {
+							pushUnique(primary, temporalStripped);
+							if (codePointLength(temporalStripped) >= 4) {
+								for (const shingle of cjkCodePointShingles(temporalStripped, [2])) {
+									pushUnique(primary, shingle);
+								}
+							}
 						}
 						if (clauseLen >= 3) {
 							for (const shingle of cjkCodePointShingles(clause, [2, 3, 4])) pushUnique(shingles, shingle);
