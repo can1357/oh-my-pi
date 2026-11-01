@@ -1,8 +1,4 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
-import * as url from "node:url";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as natives from "@oh-my-pi/pi-natives";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
@@ -12,13 +8,10 @@ import { resolveMermaidDiagram } from "@oh-my-pi/pi-tui/chat/mermaid-figure";
 import { setSvgFigureRendering, svgFigureRendering } from "@oh-my-pi/pi-tui/chat/svg-figure";
 import { hasMermaidFence, splitFigureFences } from "@oh-my-pi/pi-tui/chat/svg-source";
 import { setTableCharts, tableChartMode } from "@oh-my-pi/pi-tui/chat/table-chart";
-import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
-import { ImageBudget } from "@oh-my-pi/pi-tui/components/image";
+import { Image, ImageBudget, renderForScrollback } from "@oh-my-pi/pi-tui/components/image";
 import { Markdown } from "@oh-my-pi/pi-tui/components/markdown";
 import { getKittyGraphics, setKittyGraphics } from "@oh-my-pi/pi-tui/kitty-graphics";
 import { isNativeRendering, setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
-import { extractCodeBlocks } from "@oh-my-pi/pi-tui/overlays/copy-targets";
-import { DiagramReader } from "@oh-my-pi/pi-tui/overlays/diagram-reader";
 import { setImageBlobWriter } from "@oh-my-pi/pi-tui/prompt/image-references";
 import { applyHyperlinkSetting } from "@oh-my-pi/pi-tui/render/hyperlink";
 import {
@@ -49,7 +42,7 @@ const originalCharts = tableChartMode();
 let originalMermaid = true;
 const mounted = new Set<{ dispose(): void }>();
 
-type Consumer = FigureMarkdown | AssistantMessageComponent | DiagramReader;
+type Consumer = FigureMarkdown | AssistantMessageComponent;
 
 class Changes {
 	#version = 0;
@@ -131,6 +124,13 @@ async function settle(component: Consumer, changes: Changes, width = 80): Promis
 const plain = (rows: readonly string[]): string => Bun.stripANSI(rows.join("\n"));
 const hasImage = (rows: readonly string[]): boolean => rows.some(row => TERMINAL.isImageLine(row));
 
+function expectNormalAscii(rows: readonly string[]): void {
+	const text = plain(rows);
+	for (const label of ["Start", "Review", "Ship"]) expect(text).toContain(label);
+	expect(text).not.toContain("-->");
+	expect(text).not.toContain("```mermaid");
+}
+
 /** Count the image's complete reserved footprint, not just its protocol-bearing last row. */
 function reservedImageRows(rows: readonly string[]): number {
 	const image = rows.find(row => TERMINAL.isImageLine(row));
@@ -155,6 +155,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	vi.restoreAllMocks();
 	for (const component of mounted) component.dispose();
 	mounted.clear();
 	setTerminalImageProtocol(originalProtocol);
@@ -258,7 +259,6 @@ describe("graphical Mermaid presentation", () => {
 		expect(plain(rows)).toContain("Earlier content block.");
 		expect(plain(rows)).toContain("Later content block.");
 		expect(JSON.stringify(original)).toBe(persisted);
-		expect(extractCodeBlocks(body)).toEqual([{ lang: "mermaid", code: NORMAL.trimEnd() }]);
 		const native = component.describe();
 		expect(
 			native.c?.filter(child => "k" in child && child.k === "md").map(child => ("p" in child ? child.p : undefined)),
@@ -269,55 +269,18 @@ describe("graphical Mermaid presentation", () => {
 		["LF", "\n"],
 		["CRLF", "\r\n"],
 		["CR", "\r"],
-	])(
-		"expands a previewed %s fence without repeating layout or stripping authored blank lines",
-		async (name, ending) => {
-			const source = `flowchart LR${ending}  Cache${name}[Preview ${name}] --> End[Expanded]${ending}${ending}`;
-			const body = `~~~mermaid${ending}${source}~~~`;
-			const changes = new Changes();
-			const component = assistant(message(body), changes);
-			const parse = spyOn(pele, "parse");
-			const render = spyOn(pele, "render");
-			try {
-				expect(hasImage(await settle(component, changes))).toBe(true);
-				expect(parse).toHaveBeenCalledTimes(1);
-				expect(render).toHaveBeenCalledTimes(1);
-				const copied = extractCodeBlocks(body)[0]!;
-				expect(copied.code).toBe(`flowchart LR${ending}  Cache${name}[Preview ${name}] --> End[Expanded]${ending}`);
-				const reader = new DiagramReader({
-					source: copied.code,
-					getHeight: () => 24,
-					requestRender: changes.notify,
-					onClose: () => {},
-				});
-				mounted.add(reader);
-				expect(hasImage(await settle(reader, changes))).toBe(true);
-				expect(parse).toHaveBeenCalledTimes(1);
-				expect(render).toHaveBeenCalledTimes(1);
-			} finally {
-				parse.mockRestore();
-				render.mockRestore();
-			}
-		},
-	);
-
-	it("renders each image only once per FigureMarkdown and assistant frame", async () => {
-		for (const kind of ["markdown", "assistant"] as const) {
-			const changes = new Changes();
-			const budget = new ImageBudget();
-			const source = `Before.\n\n${fence(TINY)}\n\nAfter.`;
-			const component =
-				kind === "markdown" ? figure(source, changes, budget) : assistant(message(source), changes, budget);
-			await settle(component, changes);
-			const observe = spyOn(budget, "observe");
-			try {
-				budget.beginPass();
-				component.render(80);
-				expect(observe).toHaveBeenCalledTimes(1);
-			} finally {
-				observe.mockRestore();
-			}
-		}
+	])("previews %s fences without changing authored line endings or trailing blank lines", async (name, ending) => {
+		const source = `flowchart LR${ending}  Source${name}[Preview ${name}] --> End[Preserved]${ending}${ending}`;
+		const body = `~~~mermaid${ending}${source}~~~`;
+		const changes = new Changes();
+		const original = message(body);
+		const persisted = JSON.stringify(original);
+		const component = assistant(original, changes);
+		expect(hasImage(await settle(component, changes))).toBe(true);
+		expect(JSON.stringify(original)).toBe(persisted);
+		expect(splitFigureFences(body, { svg: false, mermaid: true })).toEqual([
+			{ kind: "mermaid", source, closed: true },
+		]);
 	});
 
 	it("holds a preview pending until its raster lands", async () => {
@@ -330,75 +293,115 @@ describe("graphical Mermaid presentation", () => {
 		expect(hasImage(await settle(component, changes))).toBe(true);
 	});
 
-	it("does not retire an assistant diagram before its full-size file links exist", async () => {
-		const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-mermaid-settlement-"));
-		const disposeWriter = setImageBlobWriter((data, options) => {
-			const file = path.join(directory, `complete.${options?.extension}`);
-			fs.writeFileSync(file, data);
-			return { displayPath: file };
-		});
-		applyHyperlinkSetting("always");
-		const previewReady = Promise.withResolvers<void>();
-		const exportGate = Promise.withResolvers<void>();
-		const rasterize = natives.rasterizeSvg;
-		const jobs: Promise<Uint8Array>[] = [];
-		const raster = spyOn(natives, "rasterizeSvg").mockImplementation((...args) => {
-			const index = jobs.length;
-			const job = (async () => {
-				const png = await rasterize(...args);
-				if (index === 0) previewReady.resolve();
-				else if (index === 1) await exportGate.promise;
-				return png;
-			})();
-			jobs.push(job);
-			return job;
-		});
+	it("draws completed Mermaid fences with SIXEL", async () => {
+		setTerminalImageProtocol(ImageProtocol.Sixel);
 		const changes = new Changes();
-		const component = assistant(undefined, changes);
-		const transcript = new TranscriptContainer();
-		transcript.addChild(component);
-		try {
-			component.updateContent(message(fence("flowchart LR\n LateExport[First] --> ReadyExport[Last]\n")), {
-				transient: true,
-			});
-			component.markTranscriptBlockFinalized();
-			await Promise.resolve();
-			const beforePreview = changes.version;
-			component.render(80);
-			await previewReady.promise;
-			await changes.after(beforePreview);
-			expect(transcript.peekFinalizedBatch(80, 0)).toBeUndefined();
-			const beforeExport = changes.version;
-			exportGate.resolve();
-			await changes.after(beforeExport);
-			const batch = transcript.peekFinalizedBatch(80, 0);
-			expect(batch?.rows.join("\n")).toContain(url.pathToFileURL(path.join(directory, "complete.png")).href);
-			expect(batch?.rows.join("\n")).toContain(url.pathToFileURL(path.join(directory, "complete.svg")).href);
-		} finally {
-			component.dispose();
-			exportGate.resolve();
-			await Promise.all(jobs);
-			raster.mockRestore();
-			disposeWriter();
-			applyHyperlinkSetting("auto");
-			await fs.promises.rm(directory, { recursive: true, force: true });
-		}
+		const component = figure(fence(NORMAL), changes);
+		await settle(component, changes);
+		const rows = renderForScrollback(() => component.render(80));
+		expect(hasImage(rows)).toBe(true);
+		expect(component.pending).toBe(false);
 	});
 
-	it("demotes older Mermaid previews within the existing image budget", async () => {
+	it.each(["markdown", "assistant"] as const)(
+		"shows %s previews without writing files or adding links",
+		async kind => {
+			const writer = vi.fn(() => ({ displayPath: "/unexpected-mermaid-preview.png" }));
+			const disposeWriter = setImageBlobWriter(writer);
+			applyHyperlinkSetting("always");
+			const changes = new Changes();
+			const text = fence(NORMAL);
+			const component = kind === "markdown" ? figure(text, changes) : assistant(message(text), changes);
+			try {
+				const rows = await settle(component, changes);
+				expect(hasImage(rows)).toBe(true);
+				component.invalidate();
+				const repainted = await settle(component, changes);
+				expect(hasImage(repainted)).toBe(true);
+				expect(repainted.join("\n")).not.toContain("\x1b]8;");
+				expect(writer).not.toHaveBeenCalled();
+			} finally {
+				disposeWriter();
+				applyHyperlinkSetting("auto");
+			}
+		},
+	);
+
+	it.each(["layout", "raster"] as const)("uses existing Markdown ASCII when %s rendering fails", async failure => {
+		const source = `%% ${failure}-fallback fixture\n${NORMAL}`;
+		if (failure === "layout") {
+			vi.spyOn(pele, "render").mockImplementation(() => {
+				throw new Error("layout unavailable");
+			});
+		} else {
+			vi.spyOn(natives, "rasterizeSvg").mockRejectedValue(new Error("raster unavailable"));
+		}
+		const changes = new Changes();
+		const component = figure(fence(source), changes);
+		const rows = await settle(component, changes);
+		expect(rows).toEqual(new Markdown(fence(source), 1, 0, getMarkdownTheme()).render(80));
+		expect(hasImage(rows)).toBe(false);
+		expectNormalAscii(rows);
+		expect(component.pending).toBe(false);
+	});
+
+	it("replaces evicted Mermaid previews with ASCII without writing files", async () => {
+		const writer = vi.fn(() => ({ displayPath: "/unexpected-mermaid-fallback.png" }));
+		const disposeWriter = setImageBlobWriter(writer);
+		applyHyperlinkSetting("always");
 		const changes = new Changes();
 		const budget = new ImageBudget(1);
 		const component = figure(`${fence(NORMAL)}\n\nBetween diagrams.\n\n${fence(TINY)}`, changes, budget);
-		await settle(component, changes);
+		try {
+			await settle(component, changes);
+			budget.beginPass();
+			component.render(80);
+			expect(budget.endPass()).toBe(true);
+			budget.beginPass();
+			const demoted = component.render(80);
+			expect(budget.endPass()).toBe(false);
+			expect(demoted.filter(row => TERMINAL.isImageLine(row))).toHaveLength(1);
+			expect(plain(demoted)).toContain("Between diagrams.");
+			expectNormalAscii(demoted);
+			expect(demoted.join("\n")).not.toContain("\x1b]8;");
+			expect(writer).not.toHaveBeenCalled();
+			expect(component.pending).toBe(false);
+		} finally {
+			disposeWriter();
+			applyHyperlinkSetting("auto");
+		}
+	});
+
+	it("releases a replaced Mermaid raster instead of evicting an older scrollback image", async () => {
+		const changes = new Changes();
+		const budget = new ImageBudget(2);
+		const png = await natives.rasterizeSvg(new TextEncoder().encode(SVG), 160, 40, 1);
+		const archived = new Image(
+			Buffer.from(png).toString("base64"),
+			"image/png",
+			{ fallbackColor: text => text },
+			{ budget, imageKey: "archived-before-mermaid" },
+			{ widthPx: 160, heightPx: 40 },
+		);
+		const component = figure(fence(NORMAL), changes, budget);
 		budget.beginPass();
-		component.render(80);
-		expect(budget.endPass()).toBe(true);
-		budget.beginPass();
-		const demoted = component.render(80);
+		const archivedRows = archived.render(80);
+		const oldRows = await settle(component, changes);
 		expect(budget.endPass()).toBe(false);
-		expect(demoted.filter(row => TERMINAL.isImageLine(row))).toHaveLength(1);
-		expect(plain(demoted)).toContain("Between diagrams.");
-		expect(component.pending).toBe(false);
+		budget.takeTransmits();
+		budget.limitResidentImages();
+		const archivedId = Number(/,i=(\d+)/.exec(archivedRows.join(""))?.[1]);
+		const oldId = Number(/,i=(\d+)/.exec(oldRows.join(""))?.[1]);
+		expect(budget.takePurgeIds()).toEqual([]);
+
+		component.setText(fence(TINY));
+		budget.beginPass();
+		expect(hasImage(await settle(component, changes))).toBe(true);
+		expect(budget.endPass()).toBe(false);
+		budget.takeTransmits();
+		budget.limitResidentImages();
+		expect(budget.takePurgeIds()).toEqual([oldId]);
+		expect(budget.shouldTransmit(archivedId)).toBe(false);
 	});
 
 	it("does not couple Mermaid graphics to renderSvg and removes figures when Mermaid rendering is disabled", async () => {
@@ -426,9 +429,26 @@ describe("graphical Mermaid presentation", () => {
 		expect(plain(rows)).toContain("```mermaid");
 	});
 
-	it("keeps no-graphics, hidden-image and native paths original-source/ASCII", async () => {
-		for (const mode of ["no-graphics", "hidden-images", "native"] as const) {
-			setTerminalImageProtocol(mode === "no-graphics" ? null : ImageProtocol.Kitty);
+	it.each([
+		["no graphics", null],
+		["iTerm2", ImageProtocol.Iterm2],
+	] as const)("uses existing Markdown ASCII for FigureMarkdown with %s", async (_name, protocol) => {
+		setTerminalImageProtocol(protocol);
+		const changes = new Changes();
+		const text = fence(NORMAL);
+		const component = figure(text, changes);
+		const rows = await settle(component, changes);
+		expect(rows).toEqual(new Markdown(text, 1, 0, getMarkdownTheme()).render(80));
+		expect(hasImage(rows)).toBe(false);
+		expectNormalAscii(rows);
+		expect(component.pending).toBe(false);
+	});
+
+	it("keeps unsupported-graphics, hidden-image and native assistant paths original-source/ASCII", async () => {
+		for (const mode of ["no-graphics", "iTerm2", "hidden-images", "native"] as const) {
+			setTerminalImageProtocol(
+				mode === "no-graphics" ? null : mode === "iTerm2" ? ImageProtocol.Iterm2 : ImageProtocol.Kitty,
+			);
 			setNativeRendering(mode === "native");
 			const changes = new Changes();
 			const text = fence(NORMAL);
@@ -439,6 +459,7 @@ describe("graphical Mermaid presentation", () => {
 			await Promise.resolve();
 			expect(hasImage(rows)).toBe(false);
 			expect(component.isTranscriptBlockPending()).toBe(false);
+			expectNormalAscii(rows);
 			expect(component.describe().c).toContainEqual(expect.objectContaining({ k: "md", p: { text } }));
 			expect(original.content).toEqual([{ type: "text", text }]);
 			component.dispose();
@@ -489,7 +510,6 @@ describe("graphical Mermaid presentation", () => {
 	it("keeps SVG and table figures in their authored order alongside prose", async () => {
 		setTableCharts("always");
 		const changes = new Changes();
-		// Reuse the established TIMINGS fixture: a total plus two data rows is intentionally chartless.
 		const table = `| Section | Time |
 |---|---|
 | generate_analysis | **10879 ms (98.6%)** |

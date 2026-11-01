@@ -3,7 +3,7 @@ import type { ImageBudget } from "../components/image";
 import { type Markdown, streamingMarkdownSource } from "../components/markdown";
 import { Spacer } from "../components/spacer";
 import { isNativeRendering } from "../native/state";
-import { TERMINAL } from "../terminal-capabilities";
+import { ImageProtocol, TERMINAL } from "../terminal-capabilities";
 import { getMarkdownTheme } from "../theme";
 import { Container } from "../tui";
 import { SvgFigure, svgFigureRendering } from "./svg-figure";
@@ -171,7 +171,7 @@ export class FigureMarkdown extends Container {
 		const fences = splitFigureFences(this.#text, {
 			svg: svgFigureRendering(),
 			mermaid:
-				TERMINAL.imageProtocol !== null &&
+				(TERMINAL.imageProtocol === ImageProtocol.Kitty || TERMINAL.imageProtocol === ImageProtocol.Sixel) &&
 				!isNativeRendering() &&
 				getMarkdownTheme().resolveMermaidAscii !== undefined,
 		});

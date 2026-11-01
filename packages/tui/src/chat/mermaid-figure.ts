@@ -1,18 +1,12 @@
-/** Source-preserving Mermaid layout shared by bounded transcript figures and the diagram reader. */
-import { rasterizeSvg } from "@oh-my-pi/pi-natives";
-import { logger } from "@oh-my-pi/pi-utils";
+/** Bounded inline Mermaid previews with the existing Markdown/ASCII fallback. */
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import * as pele from "pele";
 import { fencedCode, type Markdown } from "../components/markdown";
 import type { Component } from "../tui";
-import { MAX_SVG_RASTER_EDGE, SvgFigure, type SvgFigureOptions } from "./svg-figure";
+import { SvgFigure, type SvgFigureOptions } from "./svg-figure";
 import { mermaidFigurePalette } from "./mermaid-theme";
 import mermaidStyles from "./mermaid.css" with { type: "text" };
-import { getImageBlobWriterEpoch, imageLinksEnabled, transcriptImageLink } from "../prompt/image-references";
-import { fileHyperlink } from "../render/hyperlink";
-import { getThemeEpoch, theme } from "../theme";
-import { truncateToWidth } from "../utils";
-import { fencedSourceContent, prepareSvg } from "./svg-source";
+import { fencedSourceContent } from "./svg-source";
 
 export interface MermaidDiagram {
 	readonly id: string;
@@ -31,7 +25,7 @@ const CACHE_ENTRIES = 64;
 const CACHE_BYTES = 4 * 1024 * 1024;
 
 interface CachedDiagram {
-	readonly source: string;
+	readonly sourceLength: number;
 	readonly diagram: MermaidDiagram | null;
 }
 
@@ -39,7 +33,7 @@ interface CachedDiagram {
 const diagrams = new LRUCache<string, CachedDiagram>({
 	max: CACHE_ENTRIES,
 	maxSize: CACHE_BYTES,
-	sizeCalculation: (entry, id) => 256 + 2 * (id.length + entry.source.length + (entry.diagram?.svg.length ?? 0)),
+	sizeCalculation: (entry, id) => 256 + 2 * (id.length + entry.sourceLength + (entry.diagram?.svg.length ?? 0)),
 });
 
 /** Pele's public colors expressed through the same late-bound tokens as authored SVG figures. */
@@ -268,7 +262,7 @@ function railroadRelationshipCount(model: pele.RailroadModel): number {
 
 /**
  * Resolve once at natural size after checking source and relationship limits.
- * First layout is synchronous; ordinary paints, theme changes and reader pans reuse it.
+ * First layout is synchronous; ordinary paints and theme changes reuse it.
  */
 export function resolveMermaidDiagram(source: string): MermaidDiagram | null {
 	// Reject oversized input before hashing, retaining or asking Pele to parse it.
@@ -311,76 +305,33 @@ export function resolveMermaidDiagram(source: string): MermaidDiagram | null {
 		// Unsupported, invalid or over-limit source remains original Mermaid Markdown.
 		// Do not surface parser messages: they may embed arbitrary authored source.
 	}
-	diagrams.set(id, { source, diagram });
+	diagrams.set(id, { sourceLength: source.length, diagram });
 	return diagram;
 }
 
-interface DiagramFiles {
-	svg?: string;
-	png?: string;
-}
+type MermaidFigureOptions = Pick<SvgFigureOptions, "markdown" | "budget" | "onChange">;
 
-interface LinkedPreviewRows {
-	imageRows: readonly string[];
-	width: number;
-	epoch: number;
-	linked: boolean;
-	files: DiagramFiles | undefined;
-	rows: readonly string[];
-}
-
-/** Derived files share the parsed diagram's lifetime; no PNG bytes stay in this cache. */
-const diagramFiles = new WeakMap<MermaidDiagram, { epoch: number; writer: number; promise: Promise<DiagramFiles> }>();
-
-async function writeDiagramFiles(diagram: MermaidDiagram, writer: number): Promise<DiagramFiles> {
-	const bytes = Buffer.from(prepareSvg(diagram.svg, mermaidFigurePalette()));
-	const svg = transcriptImageLink({ data: bytes, mimeType: "image/svg+xml" });
-	if (!svg) return {};
-	const width = Math.ceil(diagram.width);
-	const height = Math.ceil(diagram.height);
-	// Do not fit a huge drawing into a small export. SVG retains the whole
-	// vector diagram when a readable natural-size PNG exceeds the native limit.
-	if (Math.max(width, height) > MAX_SVG_RASTER_EDGE) return { svg };
-	const scale = Math.min(2, Math.floor(MAX_SVG_RASTER_EDGE / Math.max(width, height)));
-	try {
-		const bytesPng = await rasterizeSvg(bytes, width * scale, height * scale, scale, { widthPx: 1, heightPx: 1 });
-		if (writer !== getImageBlobWriterEpoch()) return {};
-		const png = transcriptImageLink({ data: bytesPng, mimeType: "image/png" });
-		return { svg, png };
-	} catch (error) {
-		logger.debug("Mermaid PNG export unavailable; retaining SVG", { error: String(error) });
-		return { svg };
-	}
-}
-
-/** A completed Mermaid fence with a bounded, themed SVG preview and its original fallback. */
+/** A completed Mermaid fence with a bounded, themed image and its original ASCII fallback. */
 export class MermaidFigure implements Component {
-	readonly #options: SvgFigureOptions;
+	readonly #options: MermaidFigureOptions;
 	#source = "";
 	#closed = false;
 	#resolvedSource: string | undefined;
 	#svg: SvgFigure | undefined;
 	#fallback: Markdown | undefined;
-	#diagram: MermaidDiagram | undefined;
-	#files: { epoch: number; writer: number; pending: boolean; links?: DiagramFiles } | undefined;
-	#rendered: LinkedPreviewRows | undefined;
 	#queued = false;
 	#disposed = false;
 
-	constructor(options: SvgFigureOptions) {
+	constructor(options: MermaidFigureOptions) {
 		this.#options = options;
 	}
 
 	update(source: string, closed: boolean): void {
 		if (this.#disposed || (source === this.#source && closed === this.#closed)) return;
-		// Do not let a raster from a prior source land into the new figure.
-		this.#svg?.dispose();
+		this.#svg?.dispose(true);
 		this.#svg = undefined;
 		this.#resolvedSource = undefined;
 		this.#fallback = undefined;
-		this.#diagram = undefined;
-		this.#files = undefined;
-		this.#rendered = undefined;
 		this.#source = source;
 		this.#closed = closed;
 		if (!closed || this.#queued) return;
@@ -391,18 +342,11 @@ export class MermaidFigure implements Component {
 			const diagram = resolveMermaidDiagram(fencedSourceContent(this.#source, 0, this.#source.length));
 			this.#resolvedSource = this.#source;
 			if (diagram) {
-				this.#diagram = diagram;
 				this.#svg = new SvgFigure({
 					...this.#options,
 					palette: mermaidFigurePalette,
-					label: this.#options.label ?? "Mermaid",
-					sourceFallback: this.#options.sourceFallback ?? (() => ({ language: "mermaid", source: this.#source })),
-					onChange: () => {
-						// Queue exports before notifying the transcript that its raster
-						// landed: retirement must never observe a settled linkless frame.
-						if (this.#svg?.hasRaster) this.#exportLinks();
-						this.#options.onChange();
-					},
+					label: "Mermaid",
+					fallback: width => this.#fallbackRows(width),
 				});
 				this.#svg.update(diagram.svg, true);
 			}
@@ -411,86 +355,23 @@ export class MermaidFigure implements Component {
 	}
 
 	get pending(): boolean {
-		return (
-			!this.#disposed &&
-			this.#closed &&
-			(this.#resolvedSource !== this.#source ||
-				this.#svg?.pending === true ||
-				(this.#svg?.hasRaster === true &&
-					imageLinksEnabled() &&
-					(this.#files?.epoch !== getThemeEpoch() ||
-						this.#files.writer !== getImageBlobWriterEpoch() ||
-						this.#files.pending)))
-		);
+		return !this.#disposed && this.#closed && (this.#resolvedSource !== this.#source || this.#svg?.pending === true);
 	}
 
 	render(width: number): readonly string[] {
 		if (this.#disposed) return [];
-		if (this.#svg) {
-			const rows = this.#svg.render(width);
-			const cached = this.#rendered;
-			if (!this.#svg.hasRaster) {
-				this.#rendered = undefined;
-				return rows;
-			}
-			const links = this.#exportLinks();
-			const linked = imageLinksEnabled();
-			const epoch = getThemeEpoch();
-			if (
-				cached?.imageRows === rows &&
-				cached.width === width &&
-				cached.epoch === epoch &&
-				cached.linked === linked &&
-				cached.files === links
-			) {
-				return cached.rows;
-			}
-			const parts: string[] = [];
-			if (linked) {
-				if (links?.png) parts.push(fileHyperlink(links.png, "Open image"));
-				if (links?.svg) parts.push(fileHyperlink(links.svg, "Open SVG"));
-			}
-			parts.push("/copy: o expand diagram");
-			const rendered = [...rows, truncateToWidth(theme.fg("accent", parts.join(" · ")), width)];
-			this.#rendered = { imageRows: rows, width, epoch, linked, files: links, rows: rendered };
-			return rendered;
-		}
+		return this.#svg?.render(width) ?? this.#fallbackRows(width);
+	}
+
+	#fallbackRows(width: number): readonly string[] {
 		if (!this.#options.markdown) return [];
 		this.#fallback ??= this.#options.markdown(fencedCode("mermaid", this.#source));
 		return this.#fallback.render(width);
 	}
 
-	#exportLinks(): DiagramFiles | undefined {
-		const diagram = this.#diagram;
-		if (!diagram || !imageLinksEnabled()) return undefined;
-		const epoch = getThemeEpoch();
-		const writer = getImageBlobWriterEpoch();
-		if (this.#files?.epoch !== epoch || this.#files.writer !== writer) {
-			let shared = diagramFiles.get(diagram);
-			if (shared?.epoch !== epoch || shared.writer !== writer) {
-				const promise = writeDiagramFiles(diagram, writer).catch(error => {
-					logger.debug("Mermaid file export unavailable", { error: String(error) });
-					return {};
-				});
-				shared = { epoch, writer, promise };
-				diagramFiles.set(diagram, shared);
-			}
-			const state = { epoch, writer, pending: true, links: undefined as DiagramFiles | undefined };
-			this.#files = state;
-			void shared.promise.then(links => {
-				if (this.#disposed || this.#files !== state) return;
-				state.links = links;
-				state.pending = false;
-				this.#options.onChange();
-			});
-		}
-		return this.#files?.links;
-	}
-
 	invalidate(): void {
 		this.#svg?.invalidate();
 		this.#fallback = undefined;
-		this.#rendered = undefined;
 	}
 
 	dispose(): void {
@@ -498,9 +379,6 @@ export class MermaidFigure implements Component {
 		this.#svg?.dispose();
 		this.#svg = undefined;
 		this.#fallback = undefined;
-		this.#diagram = undefined;
-		this.#files = undefined;
-		this.#rendered = undefined;
 		this.#source = "";
 		this.#resolvedSource = undefined;
 	}

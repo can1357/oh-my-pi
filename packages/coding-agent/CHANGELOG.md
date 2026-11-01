@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added Mermaid expansion with `o` directly on a selected reply in `/copy`, block selection for multiple diagrams, and pan/zoom/source access. Previews include full-image/SVG file links; copying and saved messages retain authored Mermaid. New flowcharts favor left-to-right unless another direction is specified ([#16977](https://github.com/can1357/oh-my-pi/pull/16977) by [@kiendle](https://github.com/kiendle))
+- Added inline graphical Mermaid previews in assistant replies on supported Kitty and SIXEL terminals, with ASCII/source fallback on iTerm2 and when graphics are unavailable. Copying and saved messages retain authored Mermaid ([#16977](https://github.com/can1357/oh-my-pi/pull/16977) by [@kiendle](https://github.com/kiendle))
 - Anthropic web search and Files API uploads follow `PI_ANTHROPIC_API_VERSION=2026-10-21`; web search omits `temperature` under that version ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
 - llama.cpp auto-discovery now also finds local servers on llama-server's new default port 9931 when nothing answers on 8080 ([#16675](https://github.com/can1357/oh-my-pi/pull/16675) by [@bartbroere](https://github.com/bartbroere))
 

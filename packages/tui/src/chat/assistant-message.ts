@@ -1381,8 +1381,8 @@ export class AssistantMessageComponent extends Container {
 	 * Whether `text` holds an enabled graphical figure fence, or a table it
 	 * draws a chart under. Native (TSP) terminals receive the original fence
 	 * verbatim in the `md` node and draw it themselves, and get charts as image
-	 * nodes from {@link describe}; image-less terminals keep fences as code and
-	 * tables as tables.
+	 * nodes from {@link describe}; image-less terminals retain Mermaid ASCII
+	 * rendering and leave other fences and tables as text.
 	 */
 	#liftsFigures(text: string): boolean {
 		return (
@@ -1390,7 +1390,9 @@ export class AssistantMessageComponent extends Container {
 			TERMINAL.imageProtocol !== null &&
 			!isNativeRendering() &&
 			((svgFigureRendering() && hasSvgFence(text)) ||
-				(getMarkdownTheme().resolveMermaidAscii !== undefined && hasMermaidFence(text)) ||
+				((TERMINAL.imageProtocol === ImageProtocol.Kitty || TERMINAL.imageProtocol === ImageProtocol.Sixel) &&
+					getMarkdownTheme().resolveMermaidAscii !== undefined &&
+					hasMermaidFence(text)) ||
 				(this.#showTableCharts && hasChartTable(text)))
 		);
 	}

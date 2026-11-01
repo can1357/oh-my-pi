@@ -135,39 +135,18 @@ Then use `isKeyRelease()` / `isKeyRepeat()` if needed.
 
 The coding-agent integration also mounts built-in full-screen surfaces outside `ctx.ui.custom(...)`. [Agent Hub](./agent-hub.md) is the live roster and control surface for subagents. Its file-backed transcript viewer borrows the alternate screen while it is open, then restores the Hub beneath it on close.
 
-### Mermaid figures and inspection
+### Inline Mermaid previews
 
-With `tui.renderMermaid` enabled, completed top-level Mermaid fences in assistant replies can become static, bounded figures in the interactive row-rendered transcript. This uses the existing SVG/image pipeline and image budget when images are enabled and a terminal image protocol is available; it does not require `tui.renderSvg`. A large preview shows overall structure, not necessarily readable labels. Detailed inspection uses the full diagram derived from the original Mermaid, not an enlarged preview PNG. Tool file/fence previews retain their existing ASCII Mermaid behavior.
+With `tui.renderMermaid` enabled, completed top-level Mermaid fences in assistant replies can become static, bounded images in the interactive row-rendered transcript. Previews use the existing SVG/image pipeline and image budget when images are enabled on a supported Kitty or SIXEL terminal; they do not require `tui.renderSvg`. Tool file/fence previews retain their existing ASCII Mermaid behavior.
 
-Figures use one built-in theme derived from OMP's active light/dark palette, with distinct group and node surfaces and restrained flowchart shape accents. Explicit Mermaid `classDef` and `style` paint overrides the defaults. Styling changes colors only: fonts, node geometry, source, and layout are preserved. Theme changes repaint the cached diagram rather than laying it out again. The same styling applies in chat and inspection; authored SVGs and numeric table charts keep their existing appearance. There is no separate Mermaid theme picker or custom-CSS setting.
-
-The default assistant instructions favor horizontal Mermaid layouts where supported, using `flowchart LR` for flowcharts unless another direction is specified. This is an authoring preference: rendering preserves the direction in the original source and does not rotate existing diagrams.
-
-When file hyperlinks are enabled and the host's blob store is available, previews include **Open image** and **Open SVG** caption links. OMP creates the files for these captions from the full themed diagram, not the fitted preview; the agent does not author file paths or links. Natural-size or 2× PNG exports stay within the existing 4096-pixel raster edge limit. A larger diagram keeps its complete SVG caption link instead of receiving a reduced or cropped PNG export. Files open through the terminal's configured file handler, which may be an image viewer, editor, or browser; nothing launches automatically. The files live on the machine running OMP, so SSH/container users may need a transfer or shared mount. The same-terminal reader does not depend on external file access.
-
-File captions keep their reserved rows and links when the image budget hides a preview. As with other images, a generic `[Image: …]` placeholder can separately link to the fitted preview; use **Open image**/**Open SVG** for full exports or `/copy` for source-backed inspection. A completed reply is not retired into terminal history until its current caption-file exports have settled, so scrollback keeps the same full-file access as the live transcript.
-
-The existing `/copy` reader provides same-terminal, read-only graphical inspection:
-
-1. Select a reply and press **o** to expand its only Mermaid diagram directly. If it contains several diagrams, **o** enters the existing block selector with the first Mermaid block selected; choose a diagram and press **o** again. **Right** still enters blocks manually. **Enter** keeps copying the selected whole reply or block, including the original Mermaid source.
-
-   Inspection and block copying recognize the same backtick and tilde fences, including longer delimiters, up to three leading spaces, and LF, CRLF, or CR separators. The preview and reader share one layout; copying still preserves the authored body, including its internal separators and blank lines.
-
-2. In the diagram view, use **arrows** or **h/j/k/l** to pan, **+/-** to zoom, **0** to fit the whole diagram, **1** for natural size, and **s** to toggle the original source.
-3. **Esc** returns to the prior reply or block selection. Closing `/copy` restores chat and the composer draft. Rewind has no diagram inspection action.
-
-Annotation message pickers use the same inspection controls through their shared reader.
-
-Same-terminal Mermaid inspection is keyboard-only: the diagram image has no click targets, hover bands, or wheel controls. The separate file links use terminal-native hyperlink activation and do not enable normal-chat mouse capture. Keep the existing default `tui.mouse: false` for ordinary terminal history scrolling. Use `/copy` to inspect older diagrams, including ones whose preview pixels have been demoted by the image budget. Existing OMP mouse controls for other components are unchanged.
-
-The reader crops a bounded viewport of the full diagram at the chosen scale. It does not split the transcript into image bands, raise the image budget, launch a browser, or turn model-authored diagram nodes into controls. Source remains canonical for copying, persistence, replay, search, and export. Rasterized labels are not terminal-selectable or searchable; use the source view for text access.
+Previews use one built-in theme derived from OMP's active light/dark palette. Explicit Mermaid `classDef` and `style` colors override the defaults. Rendering preserves the authored layout and source; authored SVGs and numeric table charts keep their existing appearance. A fitted preview shows overall structure, not necessarily readable labels. Source remains canonical for copying, saved messages, replay, and search; rasterized labels are not terminal-selectable or searchable.
 
 Compatibility and fallbacks:
 
-- `tui.renderMermaid` off keeps the source fence. With it on, unavailable/disabled graphics or unsupported, invalid, or over-limit diagrams use the existing ASCII rendering where possible, otherwise the original source. Source remains accessible if graphical inspection cannot render.
-- Graphical limits use encoded UTF-8 bytes: 64 KiB for Mermaid source and 1 MiB for the resolved SVG. Over-limit diagrams keep the fallback and original source instead of bypassing the limits with multibyte labels.
-- iTerm2, Kitty, and SIXEL use the existing capability detection and image transport. tmux, SSH, and containers still depend on those capabilities and passthrough; no protocol is forced and no local file opener is required.
-- Native Tern/TSP retains its Mermaid/source description path; graphical inspection is a row-mode surface. Print, headless, RPC, SDK, and existing export paths retain source rather than acquiring an interactive viewer.
+- `tui.renderMermaid` off keeps the source fence. With it on, unavailable/disabled graphics or unsupported, invalid, or over-limit diagrams use the existing ASCII rendering where possible, otherwise the original source.
+- iTerm2 keeps ASCII rendering. Kitty and SIXEL use existing capability detection and image transport. tmux, SSH, and containers still depend on those capabilities and passthrough; no protocol is forced.
+- Graphical limits use encoded UTF-8 bytes: 64 KiB for Mermaid source and 1 MiB for the resolved SVG. Over-limit diagrams keep the fallback and original source.
+- Native Tern/TSP retains its Mermaid/source description path; graphical previews are a row-mode surface. Print, headless, RPC, and SDK paths retain source.
 
 ## Mount points and return contracts
 

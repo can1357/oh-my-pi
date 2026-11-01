@@ -32,12 +32,6 @@ export function setCachedImageDimensions(image: ImageContent, dims: { width: num
 type ImageBlobWriter = (data: Buffer, options?: { extension?: string }) => Promise<ImageBlobResult>;
 type ImageBlobWriterSync = (data: Buffer, options?: { extension?: string }) => ImageBlobResult;
 
-/** Base64 provider images or already-encoded generated image bytes. */
-interface ImageLinkContent {
-	data: string | Uint8Array;
-	mimeType: string;
-}
-
 export function imageReferenceHyperlink(
 	label: string,
 	index: number,
@@ -70,16 +64,12 @@ async function materializeImageReferenceLinkAsync(
 }
 
 function materializeImageReferenceLink(
-	image: ImageLinkContent,
+	image: ImageContent,
 	index: number,
 	putBlob: ImageBlobWriterSync,
 ): string | undefined {
 	try {
-		const data =
-			typeof image.data === "string"
-				? Buffer.from(image.data, "base64")
-				: Buffer.from(image.data.buffer, image.data.byteOffset, image.data.byteLength);
-		const result = putBlob(data, {
+		const result = putBlob(Buffer.from(image.data, "base64"), {
 			extension: blobExtensionForImageMimeType(image.mimeType),
 		});
 		return result.displayPath;
@@ -114,7 +104,6 @@ export function materializeImageReferenceLinksSync(
 }
 
 let hostBlobWriter: ImageBlobWriterSync | undefined;
-let blobWriterEpoch = 0;
 /** Blob paths already written for an image payload, keyed by mime type and content hash. */
 const blobLinks = new Map<string, string>();
 const BLOB_LINK_CACHE_LIMIT = 256;
@@ -125,19 +114,12 @@ const BLOB_LINK_CACHE_LIMIT = 256;
  */
 export function setImageBlobWriter(next: ImageBlobWriterSync): () => void {
 	hostBlobWriter = next;
-	blobWriterEpoch++;
 	blobLinks.clear();
 	return () => {
 		if (hostBlobWriter !== next) return;
 		hostBlobWriter = undefined;
-		blobWriterEpoch++;
 		blobLinks.clear();
 	};
-}
-
-/** Changes when the host backing generated-image links is replaced or disposed. */
-export function getImageBlobWriterEpoch(): number {
-	return blobWriterEpoch;
 }
 
 /**
@@ -154,14 +136,17 @@ export function imageLinksEnabled(): boolean {
  * blob copy of its bytes written through the host. Undefined when links are disabled
  * or no file exists, so a disabled policy never writes blobs.
  */
-export function transcriptImageLink(image: ImageLinkContent, sourcePath?: string): string | undefined {
+export function transcriptImageLink(
+	image: Pick<ImageContent, "data" | "mimeType">,
+	sourcePath?: string,
+): string | undefined {
 	if (!imageLinksEnabled()) return undefined;
 	if (sourcePath) return sourcePath;
 	if (!hostBlobWriter || !image.data) return undefined;
 	const key = `${image.mimeType}:${Bun.hash(image.data)}`;
 	const cached = blobLinks.get(key);
 	if (cached) return cached;
-	const link = materializeImageReferenceLink(image, 1, hostBlobWriter);
+	const link = materializeImageReferenceLink({ type: "image", ...image }, 1, hostBlobWriter);
 	if (!link) return undefined;
 	if (blobLinks.size >= BLOB_LINK_CACHE_LIMIT) {
 		const oldest = blobLinks.keys().next();

@@ -28,10 +28,9 @@ export function hasMermaidFence(markdown: string): boolean {
 	return MERMAID_FENCE.test(markdown);
 }
 
-/** Original-source coordinates shared by figure lifting and clipboard block extraction. */
-export interface FencedSourceRange {
+/** Original-source coordinates used while splitting figure fences. */
+interface FencedSourceRange {
 	readonly marker: string;
-	readonly info: string;
 	readonly language: string;
 	readonly start: number;
 	readonly body: number;
@@ -42,7 +41,7 @@ export interface FencedSourceRange {
 }
 
 /** Scan CommonMark fence markers without normalizing authored code or line endings. */
-export function* fencedSourceRanges(markdown: string): Generator<FencedSourceRange, void, undefined> {
+function* fencedSourceRanges(markdown: string): Generator<FencedSourceRange, void, undefined> {
 	let fence: Omit<FencedSourceRange, "end" | "after" | "closed"> | undefined;
 	let lineStart = 0;
 	let lineNumber = 0;
@@ -66,7 +65,6 @@ export function* fencedSourceRanges(markdown: string): Generator<FencedSourceRan
 				const info = open[2]!.trim();
 				fence = {
 					marker: open[1]!,
-					info,
 					language: info.split(/[ \t]/, 1)[0]!.toLowerCase(),
 					start: lineStart,
 					body: Math.min(next, markdown.length),
@@ -99,7 +97,6 @@ export function splitFigureFences(
 	enabled: { readonly svg: boolean; readonly mermaid: boolean },
 ): FigureSegment[] {
 	const closedFences: FencedSourceRange[] = [];
-	let lastMermaid: FencedSourceRange | undefined;
 	let partialSvg: FencedSourceRange | undefined;
 	for (const fence of fencedSourceRanges(markdown)) {
 		if (fence.language === "svg" && enabled.svg) {
@@ -107,20 +104,16 @@ export function splitFigureFences(
 			else partialSvg = fence;
 		} else if (fence.language === "mermaid" && enabled.mermaid && fence.closed) {
 			closedFences.push(fence);
-			lastMermaid = fence;
 		}
 	}
-	// Bodies remain source slices. Only the last completed Mermaid opener's
-	// prefix needs lexing; unrelated streaming prose and incomplete fences do not.
-	const mermaidFenceLines = lastMermaid
-		? topLevelFenceLines(markdown.slice(0, lastMermaid.body), lastMermaid.line + 1)
-		: undefined;
 	const segments: FigureSegment[] = [];
 	let proseStart = 0;
 	for (const closed of closedFences) {
 		const kind = closed.language;
 		if (kind !== "svg" && kind !== "mermaid") continue;
-		if (kind === "mermaid" && !mermaidFenceLines?.has(closed.line)) continue;
+		// Later math/HTML closers must not reinterpret an already-visible fence.
+		if (kind === "mermaid" && !topLevelFenceLines(markdown.slice(0, closed.body), closed.line + 1).has(closed.line))
+			continue;
 		const prose = markdown.slice(proseStart, closed.start);
 		if (prose.trim()) segments.push({ kind: "markdown", text: prose });
 		segments.push({ kind, source: markdown.slice(closed.body, closed.end), closed: true });

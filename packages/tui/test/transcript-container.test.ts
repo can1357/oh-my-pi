@@ -7,8 +7,6 @@ import {
 	type TranscriptStableRow,
 	trimBlankEdges,
 } from "@oh-my-pi/pi-tui/chrome/transcript-container";
-import { Image } from "@oh-my-pi/pi-tui/components/image";
-import { getCellDimensions, setCellDimensions } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { type Component, ImageProtocol, setTerminalImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
 
@@ -275,60 +273,6 @@ describe("TranscriptContainer row split", () => {
 			expect(rest.some(row => TERMINAL.isImageLine(row))).toBe(false);
 			expect(rest).toContain("below 1");
 		} finally {
-			setTerminalImageProtocol(previous);
-		}
-	});
-
-	it("keeps a prose-separated figure archived across repaint, append, and resized partial retirement", () => {
-		const previous = TERMINAL.imageProtocol;
-		const cell = getCellDimensions();
-		setTerminalImageProtocol(ImageProtocol.Iterm2);
-		setCellDimensions({ widthPx: 10, heightPx: 10 });
-		try {
-			const image = new Image(
-				"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNgAAAAAgABSK+kcQAAAABJRU5ErkJggg==",
-				"image/png",
-				{ fallbackColor: text => text },
-				{ maxWidthCells: 4, maxHeightCells: 4 },
-				{ widthPx: 40, heightPx: 40 },
-			);
-			// FigureMarkdown separates its prose and graphic with a plain blank row.
-			const figure: Component = {
-				render: width => ["above 1", "above 2", "", ...image.render(width), "below 1", "below 2"],
-			};
-			const tailRows = ["live tail"];
-			const transcript = new TranscriptContainer();
-			transcript.addChild(figure);
-			transcript.addChild(new Block(tailRows, false));
-			const whole = figure.render(40);
-			const first = transcript.peekFinalizedBatch(40, 7)!;
-			expect(first.rows).toEqual(whole.slice(0, 7));
-			const live = ["below 1", "below 2", "", ...tailRows];
-			// The unacknowledged offer already owns the image, not the viewport.
-			expect(transcript.renderViewport(40, 7, frame)).toEqual(live);
-			transcript.acknowledgeFinalizedBatch(first.id);
-			expect(transcript.renderViewport(40, 7, frame)).toEqual(live);
-			// A width change must cross the known separator and reserved image rows,
-			// not put the archived image back in the mutable viewport.
-			expect(transcript.renderViewport(50, 7, frame)).toEqual(live);
-			expect(transcript.renderViewport(50, 7, frame)).toEqual(live);
-			tailRows.push("appended tail");
-			expect(transcript.renderViewport(50, 7, frame)).toEqual(["below 1", "below 2", "", ...tailRows]);
-
-			const second = transcript.peekFinalizedBatch(50, 4)!;
-			expect(second.rows).toEqual(["below 1"]);
-			expect(transcript.renderViewport(50, 4, frame)).toEqual(["below 2", "", ...tailRows]);
-			transcript.acknowledgeFinalizedBatch(second.id);
-			expect(transcript.renderViewport(60, 7, frame)).toEqual(["below 2", "", ...tailRows]);
-
-			const rest = transcript.peekFlushBatch(60)!;
-			const history = [...first.rows, ...second.rows, ...rest.rows];
-			expect(history).toEqual([...whole, ""]);
-			expect(history.filter(row => TERMINAL.isImageLine(row))).toHaveLength(1);
-			transcript.acknowledgeFinalizedBatch(rest.id);
-			expect(transcript.renderViewport(60, 7, frame)).toEqual(tailRows);
-		} finally {
-			setCellDimensions(cell);
 			setTerminalImageProtocol(previous);
 		}
 	});

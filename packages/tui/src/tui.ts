@@ -3292,25 +3292,21 @@ export class TUI extends Container {
 
 	/**
 	 * Clip direct placements to the visible source slice: Kitty tracks a live
-	 * placement owner and SIXEL crops the encoded raster. iTerm2 cannot crop,
-	 * so a partial block is dropped without touching rows above its viewport.
-	 * SIXEL and iTerm2 have no delete command and composite over existing
-	 * pixels, so erase the visible rows above `screenRow` before repainting.
+	 * placement owner, while SIXEL crops the encoded raster (iTerm2 images are
+	 * not cropped). SIXEL and iTerm2 have no delete command and composite over
+	 * existing pixels, so erase the visible rows they paint above `screenRow`
+	 * before repainting.
 	 */
 	#imageLineSequence(
 		line: string,
 		screenRow: number,
 		placements: Map<number, LiveImagePlacement> | undefined,
 		placementRow: number,
-		availableRows = screenRow + 1,
 	): string {
 		if (screenRow < 0) return line;
 		const parsed = parseKittyDirectPlacementLine(line);
 		if (!parsed) {
 			const requestedLift = directPlacementLift(line);
-			if (line.includes(ImageProtocol.Iterm2) && requestedLift >= Math.min(availableRows, screenRow + 1)) {
-				return "";
-			}
 			const lift = Math.min(requestedLift, screenRow);
 			if (requestedLift > lift) {
 				const cellHeight = getCellDimensions().heightPx;
@@ -3670,15 +3666,8 @@ export class TUI extends Container {
 		buffer += this.#retireImagePlacements(this.#screenImagePlacements, prepared.lines, newTop, !diffable);
 		for (const sequence of this.#imageBudget.takeTransmits()) append(sequence);
 		if (diffable) {
-			const imageRewrites = this.#imageRewriteRows(
-				this.#providerWindow,
-				this.#providerPreparedRows,
-				prepared.lines,
-				prepared.rows,
-			);
 			for (let index = 0; index < rows; index++) {
 				if (
-					!imageRewrites?.has(index) &&
 					!this.#rowNeedsRewrite(
 						this.#providerWindow,
 						this.#providerPreparedRows,
@@ -3695,10 +3684,7 @@ export class TUI extends Container {
 					width,
 					newTop + index,
 					this.#osc66SpacerGlyphWidth(prepared.lines, index),
-					{
-						imagePlacements: index < replayViewportRows ? undefined : this.#screenImagePlacements,
-						imageAvailableRows: index < replayViewportRows ? undefined : index - replayViewportRows + 1,
-					},
+					{ imagePlacements: this.#screenImagePlacements },
 				)}`;
 			}
 			if (this.#providerWindow.length > rows && newTop + rows < height) {
@@ -3741,7 +3727,6 @@ export class TUI extends Container {
 							blankRow: compactReplay,
 							imagePlacements: index < replayViewportRows ? undefined : this.#screenImagePlacements,
 							imageRow: newTop + index,
-							imageAvailableRows: index < replayViewportRows ? undefined : index - replayViewportRows + 1,
 						},
 					),
 				);
@@ -4359,64 +4344,12 @@ export class TUI extends Container {
 		);
 	}
 
-	/**
-	 * Direct iTerm2 images paint upward over otherwise identical reserved rows.
-	 * Expand placement-row rewrites through overlapping old/new footprints:
-	 * skipping an old reserved row leaves a strip behind. Indices stay
-	 * viewport-relative to spare history; unrelated prose edits stay local.
-	 */
-	#imageRewriteRows(
-		previousLines: readonly string[],
-		previousRows: readonly PreparedLine[],
-		lines: readonly string[],
-		rows: readonly PreparedLine[],
-	): ReadonlySet<number> | undefined {
-		if (TERMINAL.imageProtocol !== ImageProtocol.Iterm2) return undefined;
-		let ends: number[] | undefined;
-		for (let pass = 0; pass < 2; pass++) {
-			const source = pass === 0 ? previousRows : rows;
-			for (let index = 0; index < source.length; index++) {
-				const row = source[index]!;
-				if (!row.isImage) continue;
-				const lift = directPlacementLift(row.line);
-				if (lift === 0) continue;
-				const top = Math.max(0, index - lift);
-				ends ??= [];
-				ends[top] = Math.max(ends[top] ?? index, index);
-			}
-		}
-		if (ends === undefined) return undefined;
-		let rewrites: Set<number> | undefined;
-		for (let first = 0; first < ends.length; first++) {
-			let last = ends[first];
-			if (last === undefined) continue;
-			let changed = false;
-			for (let index = first; index <= last; index++) {
-				last = Math.max(last, ends[index] ?? last);
-				changed ||=
-					(previousRows[index]?.isImage === true || rows[index]?.isImage === true) &&
-					(index >= rows.length || this.#rowNeedsRewrite(previousLines, previousRows, lines, rows, index));
-			}
-			if (changed) {
-				rewrites ??= new Set();
-				for (let index = first; index <= last && index < rows.length; index++) rewrites.add(index);
-			}
-			first = last;
-		}
-		return rewrites;
-	}
-
 	#lineRewriteSequence(
 		line: PreparedLine,
 		width: number,
 		screenRow = -1,
 		spacerGlyphWidth = -1,
-		options?: {
-			blankRow?: boolean;
-			imagePlacements?: Map<number, LiveImagePlacement>;
-			imageRow?: number;
-			imageAvailableRows?: number;
-		},
+		options?: { blankRow?: boolean; imagePlacements?: Map<number, LiveImagePlacement>; imageRow?: number },
 	): string {
 		// End every rewrite at column zero. ConPTY can materialize a pending
 		// wrap before a following cursor-addressing sequence even while DECAWM is
@@ -4435,13 +4368,7 @@ export class TUI extends Container {
 		} else if (line.isImage) {
 			rewrite =
 				ERASE_LINE +
-				this.#imageLineSequence(
-					line.line,
-					screenRow,
-					options?.imagePlacements,
-					options?.imageRow ?? screenRow,
-					options?.imageAvailableRows,
-				);
+				this.#imageLineSequence(line.line, screenRow, options?.imagePlacements, options?.imageRow ?? screenRow);
 		} else {
 			const terminalLine = this.#terminalLine(line);
 			if (options?.blankRow) {
@@ -4590,15 +4517,11 @@ export class TUI extends Container {
 					this.#rowNeedsRewrite(this.#altPreviousLines, this.#altPreparedRows, prepared.lines, prepared.rows, r),
 				));
 		prelude += this.#retireImagePlacements(this.#altImagePlacements, prepared.lines, 0, full);
-		const imageRewrites = full
-			? undefined
-			: this.#imageRewriteRows(this.#altPreviousLines, this.#altPreparedRows, prepared.lines, prepared.rows);
 		let rowsBuffer = "";
 		for (let r = 0; r < height; r++) {
 			if (full) {
 				if (r > 0) rowsBuffer += "\n";
 			} else if (
-				imageRewrites?.has(r) ||
 				this.#rowNeedsRewrite(this.#altPreviousLines, this.#altPreparedRows, prepared.lines, prepared.rows, r)
 			) {
 				rowsBuffer += `\x1b[${r + 1};1H`;

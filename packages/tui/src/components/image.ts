@@ -41,6 +41,8 @@ export interface ImageOptions {
 	 * or the image's reserved rows stay blank until an unrelated repaint.
 	 */
 	requestRender?: () => void;
+	/** Generated images can retain their original text instead of a linked image placeholder. */
+	fallback?: (width: number) => readonly string[];
 }
 
 interface SixelEncode {
@@ -901,11 +903,11 @@ export class Image implements Component {
 				const placement = moveUp + (result.sequence ?? "");
 				lines.push(cursorRows > 0 ? SAVE_CURSOR + placement + RESTORE_CURSOR : placement);
 			} else {
-				lines = this.#fallbackLines();
+				lines = this.#fallbackLines(width);
 			}
 			this.#renderedGraphicRows = Math.max(this.#renderedGraphicRows, lines.length);
 		} else {
-			lines = this.#fallbackLines();
+			lines = this.#fallbackLines(width);
 		}
 
 		this.#cachedLines = lines;
@@ -929,7 +931,12 @@ export class Image implements Component {
 	 * (stale band + recommit). Reserved rows stay non-plain so blank-edge
 	 * trimming cannot collapse the block either.
 	 */
-	#fallbackLines(): string[] {
+	#fallbackLines(width: number): string[] {
+		if (this.#options.fallback) {
+			const lines = [...this.#options.fallback(width)];
+			while (lines.length < this.#renderedGraphicRows) lines.push(RESERVED_IMAGE_ROW);
+			return lines;
+		}
 		const fallback = this.#theme.fallbackColor(
 			linkedImageText(
 				imageFallback(this.#mimeType, this.#dimensions, this.#options.filename),

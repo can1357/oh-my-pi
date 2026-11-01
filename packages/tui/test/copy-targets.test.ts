@@ -27,12 +27,6 @@ describe("extractCodeBlocks", () => {
 		expect(blocks.map(b => b.lang)).toEqual(["", "py"]);
 		expect(blocks.map(b => b.code)).toEqual(["plain", "print(1)"]);
 	});
-
-	it("keeps shorter fence markers and quote-like lines inside longer fences with original separators", () => {
-		const text = "````ts title\r\n> inside\r\n```\r\nvalue\r\n````\r\n> outside\r> next\r";
-		expect(extractCodeBlocks(text)).toEqual([{ lang: "ts title", code: "> inside\r\n```\r\nvalue" }]);
-		expect(extractQuoteBlocks(text)).toEqual([{ text: "outside\rnext" }]);
-	});
 });
 
 describe("extractQuoteBlocks", () => {

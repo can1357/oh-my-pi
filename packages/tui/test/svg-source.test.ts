@@ -110,6 +110,15 @@ describe("splitFigureFences", () => {
 			{ kind: "mermaid", source, closed: true },
 			{ kind: "markdown", text: tail },
 		]);
+		const nextSource = "flowchart LR\nC --> D\n";
+		expect(
+			splitFigureFences(`${markdown}\n\n\`\`\`mermaid\n${nextSource}\`\`\`\n`, { svg: false, mermaid: true }),
+		).toEqual([
+			{ kind: "markdown", text: prefix },
+			{ kind: "mermaid", source, closed: true },
+			{ kind: "markdown", text: `${tail}\n\n` },
+			{ kind: "mermaid", source: nextSource, closed: true },
+		]);
 	});
 
 	it("keeps SVG streaming and surrounding prose unchanged when nested Mermaid fences are rejected", () => {
