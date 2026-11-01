@@ -7,11 +7,12 @@
  * Arguments mirror logger-contract-probe.ts.
  */
 import * as logger from "../../src/logger";
-import { exitProcess } from "../../src/postmortem";
+import { exitProcess, installProcessHandlers } from "../../src/postmortem";
 
 const scenario = process.argv[2];
 const primaryDir = process.argv[3];
 if (!primaryDir) throw new Error("expected primary directory");
+installProcessHandlers();
 
 logger.setTransports({ console: false, file: primaryDir });
 switch (scenario) {

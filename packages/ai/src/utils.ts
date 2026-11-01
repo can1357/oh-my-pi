@@ -111,6 +111,17 @@ export function stripOpenAIResponsesOutputOnlyStatusesForReplay<TItem extends { 
 	return sanitized ?? items;
 }
 
+/** Remove Codex-rejected backend metadata; preserve clean-item identity by default, or copy while keeping/dropping id. */
+export function stripOpenAIResponsesInternalMetadataForReplay<
+	TItem extends { id?: unknown; internal_chat_message_metadata_passthrough?: unknown },
+>(item: TItem, mode: "preserve" | "copy" | "drop-id" = "preserve"): TItem {
+	if (mode === "preserve" && !Object.hasOwn(item, "internal_chat_message_metadata_passthrough")) return item;
+	const sanitized = { ...item };
+	delete sanitized.internal_chat_message_metadata_passthrough;
+	if (mode === "drop-id") delete sanitized.id;
+	return sanitized;
+}
+
 /**
  * Clamp `detail: "original"` only where Responses input_image parts live —
  * top-level items and `message.content[]`. Avoids a deep tree walk/clone of
@@ -614,8 +625,10 @@ function sanitizeOpenAIResponsesHistoryItemForReplay(
 	if (item.type === "reasoning") {
 		return sanitizeOpenAIResponsesReasoningItemForReplay(item, preserveReasoningItemIds);
 	}
-	const { id: _id, ...sanitizedItem } = item;
-	if (item.type === "computer_call" && typeof item.id === "string") sanitizedItem.id = item.id;
+	const sanitizedItem = stripOpenAIResponsesInternalMetadataForReplay(
+		item,
+		item.type === "computer_call" && typeof item.id === "string" ? "copy" : "drop-id",
+	);
 	if (item.type === "function_call") sanitizedItem.arguments = replayFunctionCallArguments(item);
 
 	return clampReplayItemImageDetail(
