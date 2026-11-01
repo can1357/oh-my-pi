@@ -197,19 +197,41 @@ describe("check-released-changelogs", () => {
 	);
 
 	test(
-		"passes a release commit, which turns [Unreleased] into a released section, and still fails an edit after it",
+		"rejects a fabricated released section by default and permits a release transition only in release mode",
+		async () => {
+			const repo = await repoWith(BASE_CHANGELOG);
+			await repo.write(
+				`${BASE_CHANGELOG}\n## [2.0.0] - 2026-02-01\n\n### Added\n\n- Fabricated as already shipped\n`,
+			);
+
+			const fabricated = await check(repo, "--base", "HEAD");
+			expect(fabricated.exitCode).toBe(1);
+			expect(fabricated.output).toContain("This released section is not at the base.");
+
+			const releaseMode = await check(repo, "--base", "HEAD", "--release");
+			expect(releaseMode.exitCode).toBe(0);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"requires release mode for a real release transition and still rejects an edited released section",
 		async () => {
 			const repo = await repoWith(BASE_CHANGELOG);
 			const beforeRelease = (await repo.git("rev-parse", "HEAD")).output.trim();
 			await cutRelease(repo, "1.1.0");
 			expect(await repo.read()).toMatch(/^# Changelog\n\n## \[Unreleased\]\n\n## \[1\.1\.0\] - /);
 
-			const released = await check(repo, "--base", beforeRelease);
+			const defaultMode = await check(repo, "--base", beforeRelease);
+			expect(defaultMode.exitCode).toBe(1);
+			expect(defaultMode.output).toContain("This released section is not at the base.");
+
+			const released = await check(repo, "--base", beforeRelease, "--release");
 			expect(released.output).toContain("Released changelog sections match");
 			expect(released.exitCode).toBe(0);
 
 			await repo.write((await repo.read()).replace("- Fixed an old bug\n", "- Fixed an old bug, reworded\n"));
-			const edited = await check(repo, "--base", beforeRelease);
+			const edited = await check(repo, "--base", beforeRelease, "--release");
 			expect(edited.exitCode).toBe(1);
 			expect(edited.output).toContain("Removed; put back:\n    - Fixed an old bug\n");
 		},
@@ -282,6 +304,55 @@ describe("check-released-changelogs", () => {
 			const added = await check(repo, "--base", "HEAD");
 			expect(added.exitCode).toBe(1);
 			expect(added.output).toContain(`${CHANGELOG}: ## [1.1.0] - 2026-02-01\n  Added under \`### Fixed\``);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	/** A base just under the limit, and the fixer's archive of it after eight new [Unreleased] entries. */
+	async function fixerArchived(): Promise<{ repo: Repo; baseline: string; archived: string }> {
+		let content =
+			"# Changelog\n\n## [Unreleased]\n\n## [1.1.0] - 2026-02-01\n\n### Fixed\n\n- Fixed a recent bug\n\n## [1.0.0] - 2026-01-01\n\n### Fixed\n\n";
+		for (let index = 0; ; index++) {
+			const line = `- Fixed historical rendering regression ${index} in the terminal screen.\n`;
+			if (Buffer.byteLength(content + line) > MAX_CHANGELOG_BYTES - 128) break;
+			content += line;
+		}
+		const repo = await repoWith(content);
+		const baseline = (await repo.git("rev-parse", "HEAD")).output.trim();
+		const entries = Array.from({ length: 8 }, (_, index) => `- Added a new terminal feature ${index}\n`).join("");
+		await repo.write(content.replace("## [Unreleased]\n", `## [Unreleased]\n\n### Added\n\n${entries}`));
+		expect((await fixChangelogs(repo)).changedFiles.map(file => file.collapsedReleases)).toEqual([1]);
+		return { repo, baseline, archived: await repo.read() };
+	}
+
+	test(
+		"rejects the fixer's archive when the commit its footer names cannot be read",
+		async () => {
+			const { repo, baseline, archived } = await fixerArchived();
+			const unknown = "1".repeat(40);
+			await repo.write(
+				archived.replaceAll(baseline, unknown).replace(`@${baseline.slice(0, 12)}]`, `@${unknown.slice(0, 12)}]`),
+			);
+
+			const result = await check(repo, "--base", "HEAD");
+			expect(result.exitCode).toBe(1);
+			expect(result.output).toContain(
+				`${CHANGELOG}: ## [1.0.0] - 2026-01-01\n  Missing here, and the commit the new archive footer names does not hold it`,
+			);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"rejects removing an archive footer the base has",
+		async () => {
+			const { repo, archived } = await fixerArchived();
+			await repo.git("commit", "-qam", "chore: archived");
+			await repo.write(archived.replace(/\nOlder entries are archived in .*\n$/, ""));
+
+			const result = await check(repo, "--base", "HEAD");
+			expect(result.exitCode).toBe(1);
+			expect(result.output).toContain("Archive footer differs from the base.");
 		},
 		TEST_TIMEOUT_MS,
 	);
@@ -511,7 +582,9 @@ describe("check-released-changelogs", () => {
 			await repo.write(`${beforeOldest}${fakeOldRelease}${fixerFooter(baseline)}\n`);
 			const result = await check(repo, "--base", "HEAD");
 			expect(result.exitCode).toBe(1);
-			expect(result.output).toContain(`${CHANGELOG}: ## [1.0.0] - 2026-01-01\n  Missing here.`);
+			expect(result.output).toContain(
+				`${CHANGELOG}: ## [0.0.1] - 2025-12-01\n  This released section is not at the base.`,
+			);
 		},
 		TEST_TIMEOUT_MS,
 	);
@@ -611,12 +684,12 @@ describe("check-released-changelogs", () => {
 			const released = await repo.read();
 			expect(released).not.toContain("## [0.9.0]");
 
-			const emptyGone = await check(repo, "--base", beforeRelease);
+			const emptyGone = await check(repo, "--base", beforeRelease, "--release");
 			expect(emptyGone.output).toContain("Released changelog sections match");
 			expect(emptyGone.exitCode).toBe(0);
 
 			await repo.write(released.slice(0, released.indexOf("## [1.0.0]")));
-			const entriesGone = await check(repo, "--base", beforeRelease);
+			const entriesGone = await check(repo, "--base", beforeRelease, "--release");
 			expect(entriesGone.exitCode).toBe(1);
 			expect(entriesGone.output).toContain(`${CHANGELOG}: ## [1.0.0] - 2026-01-01\n  Missing here.`);
 			expect(entriesGone.output).not.toContain("## [0.9.0]");
@@ -712,29 +785,71 @@ describe("check-released-changelogs", () => {
 	);
 
 	test(
-		"fails a deleted changelog while its package manifest remains, but accepts deleting the package too",
+		"fails a missing changelog while any tracked package file remains, but accepts deleting the whole package",
 		async () => {
-			// Another package's changelog stays, so the deleted one is the only difference.
 			const repo = await repoWith(BASE_CHANGELOG);
 			const packageManifest = path.join(repo.dir, "packages/tui/package.json");
+			const packageSource = path.join(repo.dir, "packages/tui/src/index.ts");
 			await Bun.write(packageManifest, "{}\n");
+			await Bun.write(packageSource, "export {};\n");
 			await Bun.write(path.join(repo.dir, "packages/ai/CHANGELOG.md"), BASE_CHANGELOG);
 			await repo.git("add", "-A");
-			await repo.git("commit", "-qm", "chore: package manifest");
+			await repo.git("commit", "-qm", "chore: package files");
 
 			await fs.rm(path.join(repo.dir, CHANGELOG));
 			const missingChangelog = await check(repo, "--base", "HEAD", "--github-annotations");
 			expect(missingChangelog.exitCode).toBe(1);
 			expect(missingChangelog.output).toContain(`${CHANGELOG}: CHANGELOG.md is missing`);
-			expect(missingChangelog.output).toContain("The package manifest remains, so this is not a package removal.");
+			expect(missingChangelog.output).toContain(
+				"The package still has tracked files, so this is not a package removal.",
+			);
 			expect(missingChangelog.output).toContain(
 				"::error file=packages/tui/CHANGELOG.md,title=Released changelog section changed::CHANGELOG.md is missing: changelog missing while package remains.",
 			);
 
 			await fs.rm(packageManifest);
+			const manifestDeleted = await check(repo, "--base", "HEAD");
+			expect(manifestDeleted.exitCode).toBe(1);
+
+			await fs.rm(packageSource);
 			const packageRemoved = await check(repo, "--base", "HEAD");
 			expect(packageRemoved.exitCode).toBe(0);
 			expect(packageRemoved.output).toContain("1 sections in 1 changelogs");
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"fails a changelog turned into a symbolic link, and one that is already a symbolic link at the base",
+		async () => {
+			const repo = await repoWith(BASE_CHANGELOG);
+			await Bun.write(path.join(repo.dir, "stored.md"), BASE_CHANGELOG);
+			await fs.rm(path.join(repo.dir, CHANGELOG));
+			await fs.symlink("../../stored.md", path.join(repo.dir, CHANGELOG));
+			const converted = await check(repo, "--base", "HEAD");
+			expect(converted.exitCode).toBe(1);
+			expect(converted.output).toContain(`${CHANGELOG}: CHANGELOG.md is a symbolic link here`);
+
+			await repo.git("add", "-A");
+			await repo.git("commit", "-qm", "chore: symlinked changelog");
+			const linkedBase = await check(repo, "--base", "HEAD");
+			expect(linkedBase.exitCode).toBe(1);
+			expect(linkedBase.output).toContain(`${CHANGELOG}: CHANGELOG.md is a symbolic link at the base`);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"compares a release heading that follows a byte order mark",
+		async () => {
+			const released = BASE_CHANGELOG.slice(BASE_CHANGELOG.indexOf("## [1.0.0]"));
+			const repo = await repoWith(`\uFEFF${released}`);
+			await repo.write(`\uFEFF${released.replace("- Fixed an old bug\n", "")}`);
+
+			const result = await check(repo, "--base", "HEAD");
+			expect(result.exitCode).toBe(1);
+			// The section's only bullet goes, so normalization drops its empty `### Fixed` too.
+			expect(result.output).toContain("Removed; put back:\n    ### Fixed\n    - Fixed an old bug\n");
 		},
 		TEST_TIMEOUT_MS,
 	);

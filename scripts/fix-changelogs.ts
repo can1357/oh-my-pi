@@ -2,6 +2,7 @@
 
 import * as path from "node:path";
 import { $, Glob } from "bun";
+import { compareVersions } from "../packages/utils/src/version.ts";
 
 const CHANGELOG_GLOB = "packages/*/CHANGELOG.md";
 const ORDERED_SECTION_TITLES = ["Breaking Changes", "Added", "Changed", "Fixed", "Removed"] as const;
@@ -130,7 +131,10 @@ function normalizeItemText(text: string): string {
 }
 
 function splitContentLines(content: string): string[] {
-	const normalized = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+	const normalized = content
+		.replace(/^\uFEFF/, "")
+		.replace(/\r\n/g, "\n")
+		.replace(/\r/g, "\n");
 	if (normalized.endsWith("\n")) {
 		return normalized.slice(0, -1).split("\n");
 	}
@@ -459,22 +463,11 @@ function sectionHasContent(section: ReleaseSection): boolean {
 	return section.subsections.some(subsection => trimBlankLines(numberedText(subsection.lines)).length > 0);
 }
 
-export function compareVersionTitlesDesc(left: string, right: string): number {
-	const leftParts = left.split(".").map(part => Number.parseInt(part, 10));
-	const rightParts = right.split(".").map(part => Number.parseInt(part, 10));
-	const limit = Math.max(leftParts.length, rightParts.length);
-	for (let index = 0; index < limit; index++) {
-		const difference = (rightParts[index] ?? 0) - (leftParts[index] ?? 0);
-		if (difference !== 0) return difference;
-	}
-	return 0;
-}
-
 export function sortReleaseSections(document: ChangelogDocument): void {
 	const unreleasedSections = document.sections.filter(section => section.title === "Unreleased");
 	const releasedSections = document.sections
 		.filter(section => section.title !== "Unreleased")
-		.sort((left, right) => compareVersionTitlesDesc(left.title, right.title));
+		.sort((left, right) => compareVersions(right.title, left.title));
 	document.sections = [...unreleasedSections, ...releasedSections];
 }
 

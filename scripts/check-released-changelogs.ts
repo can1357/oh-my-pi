@@ -13,9 +13,11 @@
  * same order, as many times as at the base. Both sides are first normalized
  * the way `bun run fix:changelogs` normalizes a section, and blank lines are
  * not compared, so nothing the repository's own fixer does to a released
- * section counts as a change.
+ * section counts as a change. The working tree may not add a released section
+ * either, and its archive footer must stay the base's. A changelog must be a
+ * regular file at the base and in the working tree.
  *
- *   bun scripts/check-released-changelogs.ts --base <commit> [--github-annotations]
+ *   bun scripts/check-released-changelogs.ts --base <commit> [--release] [--github-annotations]
  *
  * `--base` is the tip of the branch the changes merge into: `origin/main`
  * after merging main into a branch, `HEAD` during an uncommitted merge
@@ -30,31 +32,29 @@
  *
  * Not checked, on purpose:
  * - `[Unreleased]`: placement inside it is normalized by `bun run release`.
- * - Sections the base does not have: only a release adds one. One does stop
- *   an archive from matching, below.
  * - The order of the sections, blank lines, `###` heading spacing, duplicate
  *   `###` headings and empty `###` headings: `bun run fix:changelogs` rewrites
  *   all of them inside released sections.
- * - An oldest section that is gone behind a new archive footer, when the
- *   working tree's released sections and footer are, byte for byte, what
- *   `bun run fix:changelogs` leaves. The check runs the fixer's own per-file
- *   pipeline (`fixChangelogFile`) on the base's released sections, verbatim,
- *   with the working tree's `[Unreleased]` sections and the base's footer,
- *   and compares. Two inputs of a real run come from the author's checkout
- *   and are not reproduced: items added to a released section since the
- *   release tag (none are assumed, as on a correct base), and the commit the
- *   footer names (read from the working tree's footer, not verified). A
- *   working tree that adds a released section the base lacks never matches.
- *   Whatever the fixer leaves, the base's newest release, first in the
- *   fixer's own version order, never counts as archived.
  * - A released section with no entries, gone: `bun run release` removes those.
- * - A package whose manifest and changelog are both gone. Deleting a changelog
- *   while its package manifest remains is a failure.
+ * - A package whose tracked files are all gone with its changelog.
+ * - With `--release` only, released sections the base does not have: that is
+ *   how a release commit differs from the commit before it. A merge never adds
+ *   one, so CI and scripts/merge-pr.ts do not pass `--release`.
+ * - An oldest section gone behind a new archive footer, when three things
+ *   hold. The working tree's released sections and footer are, byte for byte,
+ *   what the fixer's own per-file pipeline (`fixChangelogFile`) leaves of the
+ *   base's released sections, verbatim, with the working tree's `[Unreleased]`
+ *   sections and the base's footer. The base's newest release is not among
+ *   them. And the commit the new footer names holds every archived section
+ *   and the base's footer; a shallow clone fetches that commit from `origin`.
+ *   One input of a real run is not reproduced: items added to a released
+ *   section since the release tag. None are assumed, as on a correct base.
  *
  * There is no override. A change that repairs a released section which is
  * already wrong at the base fails here too; it has to reach the base branch
  * another way, as a direct push.
  */
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { $ } from "bun";
 import {
@@ -74,6 +74,8 @@ import {
 } from "./fix-changelogs";
 
 const UNRELEASED_TITLE = "Unreleased";
+const CHANGELOG_PATH = /^packages\/[^/]+\/CHANGELOG\.md$/;
+const SYMLINK_MODE = "120000";
 /** The repository command that moves lines added to a released section back under `[Unreleased]`. */
 export const FIX_COMMAND = "bun run fix:changelogs";
 
@@ -82,6 +84,21 @@ export interface ChangedLine {
 	subsection: string | undefined;
 	text: string;
 }
+
+/** Why a change is reported, when its lines alone do not say. */
+export type ChangeProblem =
+	/** The changelog is absent while tracked files of its package remain. */
+	| "missing-changelog"
+	/** The changelog is a symbolic link or another non-regular file, at the base or here. */
+	| "not-regular"
+	/** A released section the base does not have. */
+	| "not-at-base"
+	/** Missing behind a new footer, and nothing else listed explains why this is not the fixer's output. */
+	| "archive-mismatch"
+	/** Missing behind a new footer whose commit cannot be read or does not hold the section. */
+	| "archive-unverified"
+	/** The archive footer differs from the base's, and no archive the check certifies explains it. */
+	| "archive-footer";
 
 export interface ReleasedSectionChange {
 	path: string;
@@ -96,13 +113,9 @@ export interface ReleasedSectionChange {
 	/** Lines the base section has, here more times than at the base. */
 	repeated: ChangedLine[];
 	removed: string[];
-	/** The changelog itself is absent while its package manifest remains. */
-	missingChangelog?: boolean;
-	/**
-	 * Missing behind a new archive footer, and nothing else listed explains why
-	 * the released sections are not what `bun run fix:changelogs` leaves.
-	 */
-	archiveMismatch?: boolean;
+	problem?: ChangeProblem;
+	/** Lines the report prints for the problem, such as the two footers. */
+	detail?: string[];
 }
 
 export interface ReleasedChangelogCheck {
@@ -112,6 +125,13 @@ export interface ReleasedChangelogCheck {
 	/** Base sections moved behind a new archive footer by the size limit. */
 	archived: number;
 	changes: ReleasedSectionChange[];
+}
+
+export interface FindReleasedSectionChangesOptions {
+	/** Accept released sections the base does not have: the base is the commit before a release. */
+	release: boolean;
+	/** This changelog's text at `commit`, or undefined when it cannot be read. */
+	readArchive: (commit: string) => Promise<string | undefined>;
 }
 
 /** The base, or a changelog in it, could not be read; nothing was compared. */
@@ -271,6 +291,7 @@ export async function findReleasedSectionChanges(
 	changelogPath: string,
 	baseContent: string,
 	headContent: string,
+	options: FindReleasedSectionChangesOptions,
 ): Promise<{ sections: number; archived: number; changes: ReleasedSectionChange[] }> {
 	const base = parseReleased(baseContent);
 	const head = parseReleased(headContent);
@@ -282,48 +303,126 @@ export async function findReleasedSectionChanges(
 				!head.sections.has(title) && (base.sections.get(title) ?? []).some(section => section.lines.length > 1),
 		),
 	);
+	const footerChanged = head.archiveLink !== base.archiveLink;
 
 	// A released section with entries may go only behind a new archive footer
-	// that the fixer itself writes: run the fixer and compare what it leaves.
-	// The fixer promises to keep the newest release; hold it to that here, so a
-	// fault in its collapse cannot certify losing that release.
+	// that the fixer itself writes, naming a commit that still holds it: run the
+	// fixer, compare what it leaves, then read that commit. The fixer promises to
+	// keep the newest release; hold it to that here, so a fault in its collapse
+	// cannot certify losing that release.
 	const sorted = parseChangelog(splitArchiveFooter(baseContent).body);
 	sortReleaseSections(sorted);
 	const newest = sorted.sections.find(section => section.title !== UNRELEASED_TITLE)?.title;
-	let archivedByFixer = new Set<string>();
-	const archiveCommit =
-		head.archiveLink === base.archiveLink ? undefined : head.archiveLink?.match(/\/blob\/([0-9a-f]{40})\//)?.[1];
+	const archiveCommit = footerChanged ? head.archiveLink?.match(/\/blob\/([0-9a-f]{40})\//)?.[1] : undefined;
+	let explained = new Set<string>();
+	let unverified = false;
 	if (missing.size > 0 && archiveCommit !== undefined && (newest === undefined || !missing.has(newest))) {
 		const archive = await fixerArchive(changelogPath, baseContent, headContent, archiveCommit);
-		if (archive.matches) return { sections: titles.length, archived: archive.collapsedReleases, changes: [] };
-		archivedByFixer = archive.archivedTitles;
+		explained = archive.archivedTitles;
+		if (archive.matches) {
+			const linked = await options.readArchive(archiveCommit);
+			const held = linked === undefined ? undefined : parseReleased(linked);
+			const holds =
+				held !== undefined &&
+				held.archiveLink === base.archiveLink &&
+				[...archive.archivedTitles].every(
+					title =>
+						compareSection(changelogPath, base.sections.get(title) ?? [], held.sections.get(title) ?? []) ===
+						undefined,
+				);
+			if (holds) return { sections: titles.length, archived: archive.collapsedReleases, changes: [] };
+			unverified = true;
+		}
 	}
 
 	const changes: ReleasedSectionChange[] = [];
 	for (const title of titles) {
-		if (!head.sections.has(title) && (!missing.has(title) || archivedByFixer.has(title))) continue;
+		if (!head.sections.has(title) && (!missing.has(title) || explained.has(title))) continue;
 		const change = compareSection(changelogPath, base.sections.get(title) ?? [], head.sections.get(title) ?? []);
 		if (change) changes.push(change);
 	}
-	// Nothing listed explains why this is not the fixer's output, so the
-	// sections it would archive are the difference.
-	if (changes.length === 0) {
-		for (const title of missing) {
-			const change = compareSection(changelogPath, base.sections.get(title) ?? [], []);
-			if (change) changes.push({ ...change, archiveMismatch: true });
+	if (!options.release) {
+		for (const [title, copies] of head.sections) {
+			if (base.sections.has(title)) continue;
+			changes.push({
+				path: changelogPath,
+				heading: copies[0]?.heading ?? title,
+				headLine: copies[0]?.headLine,
+				baseCopies: 0,
+				headCopies: copies.length,
+				added: [],
+				repeated: [],
+				removed: [],
+				problem: "not-at-base",
+			});
 		}
+	}
+	// The fixer would archive these, but the archive is not certified: either
+	// its commit does not hold them, or nothing above explains why the released
+	// sections are not the fixer's output.
+	if (unverified || changes.length === 0) {
+		for (const title of missing) {
+			if (!explained.has(title)) continue;
+			const change = compareSection(changelogPath, base.sections.get(title) ?? [], []);
+			if (change) changes.push({ ...change, problem: unverified ? "archive-unverified" : "archive-mismatch" });
+		}
+	}
+	if (footerChanged && changes.length === 0) {
+		changes.push({
+			path: changelogPath,
+			heading: "Archive footer",
+			headLine: undefined,
+			baseCopies: 1,
+			headCopies: 1,
+			added: [],
+			repeated: [],
+			removed: [],
+			problem: "archive-footer",
+			detail: [`Base: ${base.archiveLink ?? "(none)"}`, `Here: ${head.archiveLink ?? "(none)"}`],
+		});
 	}
 	return { sections: titles.length, archived: 0, changes };
 }
 
 async function git(args: readonly string[], cwd: string): Promise<{ ok: boolean; stdout: string; stderr: string }> {
-	const result = await $`git ${args}`.cwd(cwd).quiet().nothrow();
+	const result = await $`git ${args}`
+		.cwd(cwd)
+		.env({ ...process.env, GIT_TERMINAL_PROMPT: "0" })
+		.quiet()
+		.nothrow();
 	return { ok: result.exitCode === 0, stdout: result.stdout.toString(), stderr: result.stderr.toString().trim() };
+}
+
+/** The file's type in the working tree, or undefined when it does not exist. */
+async function lstatOrUndefined(filePath: string): Promise<fs.Stats | undefined> {
+	try {
+		return await fs.lstat(filePath);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		throw error;
+	}
+}
+
+/** A whole-changelog failure with no section lines, such as a missing or linked changelog. */
+function fileChange(changelogPath: string, heading: string, problem: ChangeProblem): ReleasedSectionChange {
+	return {
+		path: changelogPath,
+		heading,
+		headLine: undefined,
+		baseCopies: 1,
+		headCopies: 0,
+		added: [],
+		repeated: [],
+		removed: [],
+		problem,
+	};
 }
 
 export async function checkReleasedChangelogs(options: {
 	base: string;
 	repoRoot?: string;
+	/** Accept released sections the base does not have: the base is the commit before a release. */
+	release?: boolean;
 }): Promise<ReleasedChangelogCheck> {
 	const repoRoot = await resolveRepoRoot(options.repoRoot);
 	const resolved = await git(
@@ -338,47 +437,135 @@ export async function checkReleasedChangelogs(options: {
 	}
 	const baseCommit = resolved.stdout.trim();
 
-	const listed = await git(["ls-tree", "-r", "-z", "--name-only", baseCommit, "--", "packages"], repoRoot);
+	const listed = await git(["ls-tree", "-r", "-z", baseCommit, "--", "packages"], repoRoot);
 	if (!listed.ok) throw new UnreadableBaseError(`cannot list the changelogs at ${baseCommit}: ${listed.stderr}`);
-	const basePaths = listed.stdout.split("\0").filter(pathName => /^packages\/[^/]+\/CHANGELOG\.md$/.test(pathName));
-	if (basePaths.length === 0) {
+	// `<mode> <type> <object>\t<path>` per entry.
+	const tracked = listed.stdout
+		.split("\0")
+		.filter(entry => entry.length > 0)
+		.map(entry => ({ mode: entry.slice(0, entry.indexOf(" ")), path: entry.slice(entry.indexOf("\t") + 1) }));
+	const baseChangelogs = tracked.filter(entry => CHANGELOG_PATH.test(entry.path));
+	if (baseChangelogs.length === 0) {
 		throw new UnreadableBaseError(`no packages/*/CHANGELOG.md exists at ${baseCommit}; nothing to compare.`);
 	}
+	const shallow = (await git(["rev-parse", "--is-shallow-repository"], repoRoot)).stdout.trim() === "true";
 
 	let changelogs = 0;
 	let sections = 0;
 	let archived = 0;
 	const changes: ReleasedSectionChange[] = [];
-	for (const changelogPath of basePaths) {
+	for (const { mode, path: changelogPath } of baseChangelogs) {
+		if (mode === SYMLINK_MODE) {
+			changes.push(fileChange(changelogPath, "CHANGELOG.md is a symbolic link at the base", "not-regular"));
+			continue;
+		}
 		const absolutePath = path.join(repoRoot, changelogPath);
-		if (!(await Bun.file(absolutePath).exists())) {
-			const packageManifest = path.join(path.dirname(absolutePath), "package.json");
-			if (await Bun.file(packageManifest).exists()) {
-				changes.push({
-					path: changelogPath,
-					heading: "CHANGELOG.md is missing",
-					headLine: undefined,
-					baseCopies: 1,
-					headCopies: 0,
-					added: [],
-					repeated: [],
-					removed: [],
-					missingChangelog: true,
-				});
+		const stat = await lstatOrUndefined(absolutePath);
+		if (stat === undefined) {
+			// Deleting a package deletes every file it tracks; any one left means the changelog alone went.
+			const packageDir = `${path.posix.dirname(changelogPath)}/`;
+			for (const entry of tracked) {
+				if (!entry.path.startsWith(packageDir) || entry.path === changelogPath) continue;
+				if ((await lstatOrUndefined(path.join(repoRoot, entry.path))) === undefined) continue;
+				changes.push(fileChange(changelogPath, "CHANGELOG.md is missing", "missing-changelog"));
+				break;
 			}
+			continue;
+		}
+		if (stat.isSymbolicLink()) {
+			changes.push(fileChange(changelogPath, "CHANGELOG.md is a symbolic link here", "not-regular"));
+			continue;
+		}
+		if (!stat.isFile()) {
+			changes.push(fileChange(changelogPath, "CHANGELOG.md is not a regular file here", "not-regular"));
 			continue;
 		}
 
 		const base = await git(["cat-file", "blob", `${baseCommit}:${changelogPath}`], repoRoot);
 		if (!base.ok) throw new UnreadableBaseError(`cannot read ${changelogPath} at ${baseCommit}: ${base.stderr}`);
 		const head = await Bun.file(absolutePath).text();
-		const result = await findReleasedSectionChanges(changelogPath, base.stdout, head);
+		const result = await findReleasedSectionChanges(changelogPath, base.stdout, head, {
+			release: options.release ?? false,
+			readArchive: async commit => {
+				const spec = `${commit}:${changelogPath}`;
+				const local = await git(["cat-file", "blob", spec], repoRoot);
+				if (local.ok) return local.stdout;
+				// A CI checkout is shallow, and the footer's commit is usually below its depth.
+				const fetch = ["fetch", "--quiet", "--no-tags", ...(shallow ? ["--depth=1"] : []), "origin", commit];
+				if (!(await git(fetch, repoRoot)).ok) return undefined;
+				const fetched = await git(["cat-file", "blob", spec], repoRoot);
+				return fetched.ok ? fetched.stdout : undefined;
+			},
+		});
 		changelogs++;
 		sections += result.sections;
 		archived += result.archived;
 		changes.push(...result.changes);
 	}
 	return { baseCommit, changelogs, sections, archived, changes };
+}
+
+/** The report's explanation of a problem, then the short remedy its GitHub annotation gives. */
+function describeProblem(
+	problem: ChangeProblem,
+	base: string,
+	changelogPath: string,
+): { report: string[]; annotation: string; remedy: string } {
+	switch (problem) {
+		case "missing-changelog":
+			return {
+				report: ["The package still has tracked files, so this is not a package removal. Restore the changelog."],
+				annotation: "changelog missing while package remains",
+				remedy: "Restore the changelog; files of its package are still present.",
+			};
+		case "not-regular":
+			return {
+				report: [
+					"Released sections are compared only in a regular file. Replace the link or other entry with the",
+					`changelog file itself, from \`git show ${base}:${changelogPath}\` where the base has the file.`,
+				],
+				annotation: "not a regular file",
+				remedy: "Make the changelog a regular file.",
+			};
+		case "not-at-base":
+			return {
+				report: [
+					"This released section is not at the base. Only a release adds one, and a merge is not a release:",
+					"move its entries under `## [Unreleased]` and delete the heading.",
+				],
+				annotation: "released section not at the base",
+				remedy: "Move its entries under ## [Unreleased] and delete the heading.",
+			};
+		case "archive-mismatch":
+			return {
+				report: [
+					"Missing here, and the new archive footer does not account for it: the released sections here are not",
+					`exactly what \`${FIX_COMMAND}\` leaves of the base's. Put the base's released sections back from`,
+					`\`git show ${base}:${changelogPath}\`, then run \`${FIX_COMMAND}\`.`,
+				],
+				annotation: "missing behind an archive the fixer does not write",
+				remedy: `Put the base's released sections back, then run \`${FIX_COMMAND}\`.`,
+			};
+		case "archive-unverified":
+			return {
+				report: [
+					"Missing here, and the commit the new archive footer names does not hold it, or cannot be read.",
+					`Put the base's released sections back from \`git show ${base}:${changelogPath}\`, commit them, then run`,
+					`\`${FIX_COMMAND}\`: its footer names that commit.`,
+				],
+				annotation: "missing behind an archive footer whose commit does not hold it",
+				remedy: `Put the base's released sections back, commit them, then run \`${FIX_COMMAND}\`.`,
+			};
+		case "archive-footer":
+			return {
+				report: [
+					`Archive footer differs from the base. Only \`${FIX_COMMAND}\` changes it, when it archives sections.`,
+					"Restore the base's footer:",
+				],
+				annotation: "archive footer changed",
+				remedy: "Restore the base's archive footer.",
+			};
+	}
 }
 
 /**
@@ -395,17 +582,9 @@ export function formatReleasedChangelogReport(check: ReleasedChangelogCheck, rec
 	const out = [`A released changelog section differs from the base (${base}).`, ""];
 	for (const change of check.changes) {
 		out.push(`${change.path}: ${change.heading}`);
-		if (change.missingChangelog) {
-			out.push("  The package manifest remains, so this is not a package removal. Restore the changelog.", "");
-			continue;
-		}
-		if (change.archiveMismatch) {
-			out.push(
-				"  Missing here, and the new archive footer does not account for it: the released sections here are not",
-				`  exactly what \`${FIX_COMMAND}\` leaves of the base's. Put the base's released sections back from`,
-				`  \`git show ${base}:${change.path}\`, then run \`${FIX_COMMAND}\`.`,
-				"",
-			);
+		if (change.problem) {
+			const { report } = describeProblem(change.problem, base, change.path);
+			out.push(...report.map(line => `  ${line}`), ...(change.detail ?? []).map(line => `    ${line}`), "");
 			continue;
 		}
 		if (change.headCopies === 0) {
@@ -476,24 +655,24 @@ function escapeAnnotationProperty(text: string): string {
 
 /** One `::error` workflow command per changed section, so GitHub marks the file in the pull request. */
 export function formatGithubAnnotations(check: ReleasedChangelogCheck): string[] {
+	const base = check.baseCommit.slice(0, 12);
 	return check.changes.map(change => {
 		const properties = [`file=${escapeAnnotationProperty(change.path)}`];
 		if (change.headLine !== undefined) properties.push(`line=${change.headLine}`);
 		properties.push(`title=${escapeAnnotationProperty("Released changelog section changed")}`);
+		const described = change.problem ? describeProblem(change.problem, base, change.path) : undefined;
 		const counts = [
-			change.missingChangelog ? "changelog missing while package remains" : undefined,
-			!change.missingChangelog && change.headCopies === 0 ? "missing" : undefined,
+			described?.annotation,
+			!described && change.headCopies === 0 ? "missing" : undefined,
 			change.added.length > 0 ? `${change.added.length} line(s) added` : undefined,
 			change.repeated.length > 0 ? `${change.repeated.length} repeated` : undefined,
 			change.removed.length > 0 ? `${change.removed.length} removed` : undefined,
 		].filter(Boolean);
-		const remedy = change.missingChangelog
-			? "Restore the changelog; its package manifest is still present."
-			: change.archiveMismatch
-				? `Put the base's released sections back, then run \`${FIX_COMMAND}\`.`
-				: change.added.length > 0
-					? `Run \`${FIX_COMMAND}\` to move added lines back under ## [Unreleased].`
-					: "Make it match the base; the job log lists the lines.";
+		const remedy =
+			described?.remedy ??
+			(change.added.length > 0
+				? `Run \`${FIX_COMMAND}\` to move added lines back under ## [Unreleased].`
+				: "Make it match the base; the job log lists the lines.");
 		const what = counts.length > 0 ? counts.join(", ") : "lines reordered";
 		return `::error ${properties.join(",")}::${escapeAnnotationData(`${change.heading}: ${what}. ${remedy}`)}`;
 	});
@@ -501,10 +680,12 @@ export function formatGithubAnnotations(check: ReleasedChangelogCheck): string[]
 
 function usage(): string {
 	return [
-		"Usage: bun scripts/check-released-changelogs.ts --base <commit> [--repo-root <dir>] [--github-annotations]",
+		"Usage: bun scripts/check-released-changelogs.ts --base <commit> [--repo-root <dir>] [--release] [--github-annotations]",
 		"",
 		"Fails when a released section of a packages/*/CHANGELOG.md in the working tree differs",
-		"from the same section at <commit>, the tip of the branch the changes merge into.",
+		"from the same section at <commit>, the tip of the branch the changes merge into, or when",
+		"the working tree adds a released section. --release accepts added released sections, for",
+		"checking a release commit against the commit before it.",
 		"--github-annotations also prints GitHub workflow commands that mark each failing file.",
 		"",
 		"Exit 0: unchanged. Exit 1: a released section changed. Exit 2: the base could not be read.",
@@ -516,6 +697,7 @@ async function main(): Promise<number> {
 	let base: string | undefined;
 	let repoRoot: string | undefined;
 	let annotate = false;
+	let release = false;
 	for (let index = 0; index < args.length; index++) {
 		const arg = args[index];
 		if (arg === "-h" || arg === "--help") {
@@ -524,6 +706,10 @@ async function main(): Promise<number> {
 		}
 		if (arg === "--github-annotations") {
 			annotate = true;
+			continue;
+		}
+		if (arg === "--release") {
+			release = true;
 			continue;
 		}
 		const value = args[index + 1];
@@ -542,7 +728,7 @@ async function main(): Promise<number> {
 	}
 
 	try {
-		const check = await checkReleasedChangelogs({ base, repoRoot });
+		const check = await checkReleasedChangelogs({ base, repoRoot, release });
 		const report = formatReleasedChangelogReport(check, "<base branch, such as origin/main>");
 		if (check.changes.length === 0) {
 			console.log(report);

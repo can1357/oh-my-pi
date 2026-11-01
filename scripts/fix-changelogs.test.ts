@@ -325,6 +325,21 @@ describe("collapseChangelogTail", () => {
 		expect(result.content).toBe(`${twoUnreleased.slice(0, twoUnreleased.indexOf("\n\n## [1.1.0]"))}\n`);
 	});
 
+	it("sorts a stable release ahead of its prerelease before collapsing", () => {
+		const prereleaseFirst = FOUR_SECTIONS.replace("## [1.2.0] - 2026-03-01", "## [2.0.0-rc.9] - 2026-02-01").replace(
+			"## [1.1.0] - 2026-02-01",
+			"## [2.0.0] - 2026-02-01",
+		);
+
+		const normalized = fixChangelogContent(prereleaseFirst, new Set()).content;
+		expect(normalized.indexOf("## [2.0.0] - ")).toBeLessThan(normalized.indexOf("## [2.0.0-rc.9]"));
+
+		const result = collapseChangelogTail(normalized, ARCHIVE_LINK, 16);
+		expect(result.collapsedReleases).toBe(2);
+		expect(result.content).toContain("## [2.0.0] - ");
+		expect(result.content).not.toContain("## [2.0.0-rc.9]");
+	});
+
 	it("leaves content under the budget untouched", () => {
 		const result = collapseChangelogTail(FOUR_SECTIONS, ARCHIVE_LINK, 1024 * 1024);
 
