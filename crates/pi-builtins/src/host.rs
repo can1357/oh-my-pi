@@ -1308,10 +1308,11 @@ async fn run_in<SE: ShellExtensions>(
 /// locals could need the stack.
 ///
 /// Built a step at a time: the visible variables are found and copied one
-/// step each, and the map is sized before it is filled, since growing it
-/// rehashes all of it in one step. A variable a clearing change (`env -i`)
-/// removes is never copied: changes up to the last clear can only remove
-/// what it would remove anyway, or a variable it keeps.
+/// step each, every name is hashed a stride at a time as it goes in
+/// ([`brush_core::env::ShellVariableMap::set_divided`]), and the map is sized
+/// before it is filled, so it never grows. A variable a clearing change
+/// (`env -i`) removes is never copied: changes up to the last clear can only
+/// remove what it would remove anyway, or a variable it keeps.
 async fn changed_env(
 	env: &brush_core::env::ShellEnvironment,
 	changes: &[EnvChange],
@@ -1323,20 +1324,21 @@ async fn changed_env(
 		None => (&changes[..0], changes),
 	};
 	let visible = env.visible_divided(params).await?;
-	let mut vars: HashMap<String, brush_core::ShellVariable> = HashMap::with_capacity(visible.len());
+	let mut vars = brush_core::env::ShellVariableMap::with_capacity(visible.len());
 	let mut budget = brush_core::ElementBudget::new();
 	for (name, var) in visible {
 		if last_clear.is_some() && var.is_exported() {
 			continue;
 		}
 		let name = brush_core::clone_charged(params, &mut budget, name).await?;
-		vars.insert(name, var.clone_divided(params, &mut budget).await?);
+		let var = var.clone_divided(params, &mut budget).await?;
+		vars.set_divided(params, &mut budget, name, var).await?;
 	}
 	// Before the last clear, a removal removes the name, and so does a set:
 	// it makes the name an exported variable, which the clear then removes.
 	for change in before {
 		if let EnvChange::Remove(name) | EnvChange::Set(name, _) = change {
-			vars.remove(name);
+			vars.unset(name);
 		}
 	}
 	for change in after {
@@ -1344,7 +1346,7 @@ async fn changed_env(
 			// None follows the last clear.
 			EnvChange::Clear => {},
 			EnvChange::Remove(name) => {
-				vars.remove(name);
+				vars.unset(name);
 			},
 			EnvChange::Set(name, value) => {
 				// A replacement value can be any length: `env A="$big" cmd`
@@ -1353,7 +1355,7 @@ async fn changed_env(
 				let name = brush_core::clone_charged(params, &mut budget, name).await?;
 				let mut var = brush_core::ShellVariable::new(brush_core::ShellValue::String(value));
 				var.export();
-				vars.insert(name, var);
+				vars.set_divided(params, &mut budget, name, var).await?;
 			},
 		}
 	}

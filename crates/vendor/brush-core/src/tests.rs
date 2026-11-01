@@ -1800,6 +1800,23 @@ mod regression {
 			}
 		}
 
+		/// **A copy of the shell reads no name to hash it.** Every subshell
+		/// copies every variable, and the copy hashed each name in one call
+		/// as it inserted it into a new map, so an exported variable whose
+		/// name is 64 MiB long held the worker for that hash on each
+		/// subshell, pipeline stage and command substitution. Each variable
+		/// is now placed by the hash it was stored with.
+		#[test]
+		fn copying_the_shell_yields_throughout() {
+			for command in [
+				"o=$open; ( : ); closed=$close",
+				"o=$open; : | :; closed=$close",
+				"o=$open; x=$(:); closed=$close",
+			] {
+				assert_yields_throughout(command, one_huge_exported_name);
+			}
+		}
+
 		/// The longest single poll `future` takes, outside the allocator
 		/// calls [`TimesLargeCalls`] times.
 		async fn longest_poll<F: Future>(future: F) -> (F::Output, Duration) {

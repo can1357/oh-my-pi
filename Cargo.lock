@@ -813,6 +813,7 @@ dependencies = [
  "fancy-regex 0.17.0",
  "futures",
  "getrandom 0.4.3",
+ "hashbrown 0.17.1",
  "hostname",
  "inherent",
  "itertools 0.14.0",

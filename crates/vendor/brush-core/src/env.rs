@@ -304,11 +304,11 @@ impl ShellEnvironment {
 
 	/// An environment holding `variables` in its one, global scope, for a
 	/// caller that built them a step at a time: the map is taken as it is,
-	/// not grown, and rehashed, a variable at a time.
-	pub fn with_globals(variables: HashMap<String, ShellVariable>) -> Self {
-		let entry_count = variables.len();
+	/// not copied or rehashed.
+	pub fn with_globals(variables: ShellVariableMap) -> Self {
+		let entry_count = variables.variables.len();
 		Self {
-			scopes: vec![(EnvironmentScope::Global, ShellVariableMap { variables })],
+			scopes: vec![(EnvironmentScope::Global, variables)],
 			export_variables_on_modification: false,
 			entry_count,
 		}
@@ -815,42 +815,87 @@ impl ShellEnvironment {
 }
 
 /// Represents a map from names to shell variables.
+///
+/// **Each variable is kept with the hash of its name**, so that nothing
+/// after the insertion that computed it reads the name to hash it again: a
+/// copy ([`Self::clone_divided`]) places every variable by the hash it
+/// already has, and so does the table when it grows. A copy that inserted
+/// each name into a new `HashMap` hashed every name in one call: an exported
+/// variable whose name is 64 MiB long held the worker 11.4 ms on
+/// `env -i /usr/bin/true`, and as long on every pipeline stage, subshell and
+/// command substitution, 40 ms at 256 MiB. A copy keeps the original's keys,
+/// as `HashMap::clone` keeps its hasher, so the hashes stay valid in it.
 #[derive(Clone, Debug, Default)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ShellVariableMap {
-	variables: HashMap<String, ShellVariable>,
+	/// The keys every name in this map is hashed with.
+	state:     std::hash::RandomState,
+	/// The variables, each beside its name and that name's hash.
+	variables: hashbrown::HashTable<Slot>,
+}
+
+/// One variable of a [`ShellVariableMap`].
+#[derive(Clone, Debug)]
+struct Slot {
+	/// The hash of `name` under the map's keys.
+	hash:     u64,
+	name:     String,
+	variable: ShellVariable,
+}
+
+impl Slot {
+	/// Whether this is the slot of `name`, whose hash is `hash`. The hash is
+	/// compared first: two names of one length differ in their hashes far
+	/// more cheaply than in their bytes.
+	fn holds(&self, hash: u64, name: &str) -> bool {
+		self.hash == hash && self.name == name
+	}
 }
 
 impl ShellVariableMap {
+	/// An empty map with room for `capacity` variables, for a caller that
+	/// knows how many it will add: the table never grows while they go in.
+	pub fn with_capacity(capacity: usize) -> Self {
+		Self {
+			state:     std::hash::RandomState::new(),
+			variables: hashbrown::HashTable::with_capacity(capacity),
+		}
+	}
+
 	//
 	// Iterators/Getters
 	//
 
 	/// Returns an iterator over all the variables in the map.
 	pub fn iter(&self) -> impl Iterator<Item = (&String, &ShellVariable)> {
-		self.variables.iter()
+		self.variables.iter().map(|slot| (&slot.name, &slot.variable))
 	}
 
 	/// How many allocations freeing this scope frees: each variable's name,
 	/// and each element of its value.
 	fn element_count(&self) -> usize {
-		self.variables.values().map(|variable| 1 + variable.value().element_count()).sum()
+		self.variables.iter().map(|slot| 1 + slot.variable.value().element_count()).sum()
 	}
 
-	/// [`ShellEnvironment::clone_divided`] for one scope. The copy takes the
-	/// original's hasher, as `HashMap::clone` does.
+	/// The hash of `name` under this map's keys, in one step: the name of a
+	/// lookup or a plain assignment, which the shell has just read in full.
+	fn hash(&self, name: &str) -> u64 {
+		crate::interp::hash_in_one_step(&self.state, name)
+	}
+
+	/// [`ShellEnvironment::clone_divided`] for one scope. Each variable is
+	/// placed by the hash it was stored with; no name is hashed.
 	async fn clone_divided(
 		&self,
 		params: &crate::ExecutionParameters,
 		budget: &mut crate::interp::ElementBudget,
 	) -> Result<Self, error::Error> {
-		let mut variables =
-			HashMap::with_capacity_and_hasher(self.variables.len(), self.variables.hasher().clone());
-		for (name, variable) in &self.variables {
-			let name = crate::variables::clone_charged(params, budget, name).await?;
-			variables.insert(name, variable.clone_divided(params, budget).await?);
+		let mut variables = hashbrown::HashTable::with_capacity(self.variables.len());
+		for slot in self.variables.iter() {
+			let name = crate::variables::clone_charged(params, budget, &slot.name).await?;
+			let variable = slot.variable.clone_divided(params, budget).await?;
+			variables.insert_unique(slot.hash, Slot { hash: slot.hash, name, variable }, |slot| slot.hash);
 		}
-		Ok(Self { variables })
+		Ok(Self { state: self.state.clone(), variables })
 	}
 
 	/// Tries to retrieve an immutable reference to the variable with the given
@@ -860,7 +905,8 @@ impl ShellVariableMap {
 	///
 	/// * `name` - The name of the variable to retrieve.
 	pub fn get(&self, name: &str) -> Option<&ShellVariable> {
-		self.variables.get(name)
+		let hash = self.hash(name);
+		self.variables.find(hash, |slot| slot.holds(hash, name)).map(|slot| &slot.variable)
 	}
 
 	/// Tries to retrieve a mutable reference to the variable with the given
@@ -870,7 +916,8 @@ impl ShellVariableMap {
 	///
 	/// * `name` - The name of the variable to retrieve.
 	pub fn get_mut(&mut self, name: &str) -> Option<&mut ShellVariable> {
-		self.variables.get_mut(name)
+		let hash = self.hash(name);
+		self.variables.find_mut(hash, |slot| slot.holds(hash, name)).map(|slot| &mut slot.variable)
 	}
 
 	//
@@ -884,7 +931,9 @@ impl ShellVariableMap {
 	///
 	/// * `name` - The name of the variable to unset.
 	pub fn unset(&mut self, name: &str) -> Option<ShellVariable> {
-		self.variables.remove(name)
+		let hash = self.hash(name);
+		let slot = self.variables.find_entry(hash, |slot| slot.holds(hash, name)).ok()?;
+		Some(slot.remove().0.variable)
 	}
 
 	/// Sets a variable in the map.
@@ -894,7 +943,82 @@ impl ShellVariableMap {
 	/// * `name` - The name of the variable to set.
 	/// * `var` - The variable to set.
 	pub fn set<N: Into<String>>(&mut self, name: N, var: ShellVariable) -> Option<ShellVariable> {
-		self.variables.insert(name.into(), var)
+		let name = name.into();
+		let hash = self.hash(&name);
+		self.set_hashed(hash, name, var)
+	}
+
+	/// [`Self::set`] for a caller with a run, whose name can be any length:
+	/// the name is hashed a stride at a time, each stride a step of `budget`
+	/// ([`crate::interp::hash_in_strides`]).
+	///
+	/// # Errors
+	///
+	/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part
+	/// way, leaving the map as it was.
+	pub async fn set_divided(
+		&mut self,
+		params: &crate::ExecutionParameters,
+		budget: &mut crate::interp::ElementBudget,
+		name: String,
+		var: ShellVariable,
+	) -> Result<Option<ShellVariable>, error::Error> {
+		let hash = crate::interp::hash_in_strides(params, budget, &self.state, &name).await?;
+		Ok(self.set_hashed(hash, name, var))
+	}
+
+	/// Sets `name`, whose hash is `hash`, to `var`. A variable already there
+	/// keeps its name and gives up its value, as `HashMap::insert` does.
+	fn set_hashed(&mut self, hash: u64, name: String, var: ShellVariable) -> Option<ShellVariable> {
+		match self.variables.entry(hash, |slot| slot.holds(hash, &name), |slot| slot.hash) {
+			hashbrown::hash_table::Entry::Occupied(mut slot) => {
+				Some(std::mem::replace(&mut slot.get_mut().variable, var))
+			},
+			hashbrown::hash_table::Entry::Vacant(slot) => {
+				slot.insert(Slot { hash, name, variable: var });
+				None
+			},
+		}
+	}
+}
+
+/// Written as the map of names to variables it holds, in the shape the
+/// derived implementation gave the `HashMap` this map used to be.
+#[cfg(feature = "serde")]
+impl serde::Serialize for ShellVariableMap {
+	fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		struct Variables<'a>(&'a ShellVariableMap);
+
+		impl serde::Serialize for Variables<'_> {
+			fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+				serializer.collect_map(self.0.iter())
+			}
+		}
+
+		use serde::ser::SerializeStruct as _;
+		let mut map = serializer.serialize_struct("ShellVariableMap", 1)?;
+		map.serialize_field("variables", &Variables(self))?;
+		map.end()
+	}
+}
+
+/// Read from the shape [`ShellVariableMap`]'s `Serialize` writes, every name
+/// hashed under new keys.
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for ShellVariableMap {
+	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		#[derive(serde::Deserialize)]
+		#[serde(rename = "ShellVariableMap")]
+		struct Written {
+			variables: HashMap<String, ShellVariable>,
+		}
+
+		let written = Written::deserialize(deserializer)?;
+		let mut map = Self::with_capacity(written.variables.len());
+		for (name, variable) in written.variables {
+			map.set(name, variable);
+		}
+		Ok(map)
 	}
 }
 
