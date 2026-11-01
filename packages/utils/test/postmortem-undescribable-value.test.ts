@@ -1,10 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import { postmortem } from "@oh-my-pi/pi-utils";
 
-// The global fatal handlers turn what they caught into an Error before anything
-// else. A value whose conversion to text throws must not make that step throw:
-// the handler would then reject on its own, and the interceptors would see the
-// conversion's TypeError instead of the value a caller registered to consume.
+// The global fatal handlers the CLI installs turn what they caught into an Error
+// before anything else. A value whose conversion to text throws must not make
+// that step throw: the handler would then reject on its own, and the interceptors
+// would see the conversion's TypeError instead of the value a caller registered
+// to consume.
 
 const rejectFlag = "--undescribable-reject-child";
 const throwFlag = "--undescribable-throw-child";
@@ -29,6 +30,9 @@ function undescribable(kind: string): unknown {
 }
 
 const childKind = process.argv[process.argv.length - 1] ?? "";
+
+// Each child is a CLI-owned process, so it installs the handlers the CLI installs.
+if (process.argv.includes(rejectFlag) || process.argv.includes(throwFlag)) postmortem.installProcessHandlers();
 
 if (process.argv.includes(rejectFlag)) {
 	const value = undescribable(childKind);
