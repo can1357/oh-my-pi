@@ -1,11 +1,12 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import {
 	BUILTIN_DEFAULTS_PROVIDER_ID,
 	type Rule,
 	type RuleScopeModel,
 } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import { bucketRules } from "@oh-my-pi/pi-coding-agent/capability/rule-buckets";
-import { TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
+import { parseRecordKey, ruleRecordKey, TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
+import { logger } from "@oh-my-pi/pi-utils";
 
 function source(provider: string): Rule["_source"] {
 	return { provider, providerName: provider, path: "/tmp/rule.md", level: "user" };
@@ -368,5 +369,148 @@ describe("bucketRules model scoping", () => {
 
 		expect(pick(opus)).toEqual(["opus"]);
 		expect(pick(routedSonnet)).toEqual(["anthropic"]);
+	});
+});
+
+describe("TTSR injection records across model scopes", () => {
+	const opus: RuleScopeModel = {
+		provider: "anthropic",
+		id: "claude-opus-5",
+		identity: { class: "anthropic", family: "opus" },
+	};
+	const sonnet: RuleScopeModel = {
+		provider: "anthropic",
+		id: "claude-sonnet-5",
+		identity: { class: "anthropic", family: "sonnet" },
+	};
+	const gpt: RuleScopeModel = { provider: "openai", id: "gpt-5", identity: { class: "openai", family: "gpt" } };
+	const opusGuard = makeRule({ name: "guard", condition: ["FORBIDDEN"], family: ["opus"] });
+	const sonnetGuard = makeRule({ name: "guard", condition: ["FORBIDDEN"], family: ["sonnet"] });
+	const variants = [opusGuard, sonnetGuard];
+
+	function onceManager(): TtsrManager {
+		return new TtsrManager({ enabled: true, contextMode: "discard", interruptMode: "always", repeatMode: "once" });
+	}
+
+	function scopeTo(
+		mgr: TtsrManager,
+		rules: Rule[],
+		model: RuleScopeModel,
+		options: { disabledRules?: string[] } = {},
+	) {
+		bucketRules(rules, mgr, { model, replaceTtsrRules: true, agentName: "main", ...options });
+		mgr.resetBuffer();
+	}
+
+	function fires(mgr: TtsrManager): Rule[] {
+		const matches = mgr.checkDelta("contains FORBIDDEN token", { source: "text" });
+		mgr.resetBuffer();
+		return matches;
+	}
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("keeps a once-mode record across a round trip to a model outside the rule's scope", () => {
+		const mgr = onceManager();
+		scopeTo(mgr, [opusGuard], opus);
+		mgr.markInjected(fires(mgr));
+		scopeTo(mgr, [opusGuard], gpt);
+		scopeTo(mgr, [opusGuard], opus);
+		expect(fires(mgr)).toEqual([]);
+	});
+
+	it("fires each same-named variant once across switches", () => {
+		const mgr = onceManager();
+		scopeTo(mgr, variants, opus);
+		const opusHit = fires(mgr);
+		expect(opusHit).toEqual([opusGuard]);
+		mgr.markInjected(opusHit);
+
+		scopeTo(mgr, variants, sonnet);
+		const sonnetHit = fires(mgr);
+		expect(sonnetHit).toEqual([sonnetGuard]);
+		mgr.markInjected(sonnetHit);
+
+		scopeTo(mgr, variants, opus);
+		expect(fires(mgr)).toEqual([]);
+		scopeTo(mgr, variants, sonnet);
+		expect(fires(mgr)).toEqual([]);
+	});
+
+	it("prunes every variant's record when the name is deleted, disabled, or agent-excluded", () => {
+		const injectedOnBoth = (): TtsrManager => {
+			const mgr = onceManager();
+			scopeTo(mgr, variants, opus);
+			mgr.markInjected(fires(mgr));
+			scopeTo(mgr, variants, sonnet);
+			mgr.markInjected(fires(mgr));
+			expect(mgr.getInjectedRuleNames()).toHaveLength(2);
+			return mgr;
+		};
+
+		const deleted = injectedOnBoth();
+		scopeTo(deleted, [], opus);
+		expect(deleted.getInjectedRuleNames()).toEqual([]);
+
+		const disabled = injectedOnBoth();
+		scopeTo(disabled, variants, opus, { disabledRules: ["guard"] });
+		expect(disabled.getInjectedRuleNames()).toEqual([]);
+
+		const excluded = injectedOnBoth();
+		scopeTo(
+			excluded,
+			variants.map(rule => ({ ...rule, agents: ["scout"] })),
+			opus,
+		);
+		expect(excluded.getInjectedRuleNames()).toEqual([]);
+	});
+
+	it("restores a persisted variant key without suppressing the other variant", () => {
+		const before = onceManager();
+		scopeTo(before, variants, opus);
+		const persisted = before.recordKeysFor(["guard"]);
+		expect(persisted).toEqual([ruleRecordKey(opusGuard)]);
+
+		const resumed = onceManager();
+		resumed.restoreInjected(persisted);
+		scopeTo(resumed, variants, opus);
+		expect(fires(resumed)).toEqual([]);
+		scopeTo(resumed, variants, sonnet);
+		expect(fires(resumed)).toEqual([sonnetGuard]);
+	});
+
+	it("treats a legacy bare-name record as covering every variant", () => {
+		const mgr = onceManager();
+		mgr.restoreInjected(["guard"]);
+		scopeTo(mgr, variants, opus);
+		expect(fires(mgr)).toEqual([]);
+		scopeTo(mgr, variants, sonnet);
+		expect(fires(mgr)).toEqual([]);
+	});
+
+	it("warns about an invalid regex once per discovered rule object", () => {
+		const warn = vi.spyOn(logger, "warn");
+		const invalidWarnings = () =>
+			warn.mock.calls.filter(([message]) => String(message).includes("invalid regex")).length;
+		const broken = makeRule({ name: "broken", condition: ["(", "FORBIDDEN"] });
+		const mgr = onceManager();
+		for (const model of [opus, sonnet, gpt, opus]) scopeTo(mgr, [broken], model);
+		expect(invalidWarnings()).toBe(1);
+
+		// Rediscovery yields a new rule object, which is compiled (and warned about) again.
+		scopeTo(mgr, [{ ...broken }], opus);
+		expect(invalidWarnings()).toBe(2);
+	});
+
+	it("round-trips record keys, including names that contain `::`", () => {
+		const scoped = makeRule({ name: "a::b", condition: ["X"], family: ["opus"] });
+		const key = ruleRecordKey(scoped);
+		expect(key).toMatch(/^a::b::scope:[0-9a-f]+$/);
+		expect(parseRecordKey(key)).toEqual({ name: "a::b", scopeHash: key.slice("a::b::scope:".length) });
+		expect(ruleRecordKey(makeRule({ name: "a::b" }))).toBe("a::b");
+		expect(parseRecordKey("a::b")).toEqual({ name: "a::b" });
+		expect(parseRecordKey("a::scope:not-hex")).toEqual({ name: "a::scope:not-hex" });
 	});
 });

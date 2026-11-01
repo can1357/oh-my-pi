@@ -69,10 +69,13 @@ export function bucketRules(
 
 	const includedRules: Rule[] = [];
 	const includedNames = new Set<string>();
+	// Names this session could load on some model: TTSR injection records survive re-scoping for these.
+	const snapshotNames = new Set<string>();
 	for (const rule of rules) {
 		if (disabled.has(rule.name)) continue;
 		if (!includeBuiltin && rule._source?.provider === BUILTIN_DEFAULTS_PROVIDER_ID) continue;
 		if (!ruleAppliesToAgent(rule, options.agentName)) continue;
+		snapshotNames.add(rule.name);
 		if (!ruleAppliesToModel(rule, options.model)) continue;
 		// Discovery keeps same-named rules with different model scopes; downstream state is keyed by name.
 		if (includedNames.has(rule.name)) continue;
@@ -80,7 +83,9 @@ export function bucketRules(
 		includedRules.push(rule);
 	}
 
-	const replacedTtsrNames = options.replaceTtsrRules ? ttsrManager.replaceRules(includedRules) : undefined;
+	const replacedTtsrNames = options.replaceTtsrRules
+		? ttsrManager.replaceRules(includedRules, snapshotNames)
+		: undefined;
 	const rulebookRules: Rule[] = [];
 	const alwaysApplyRules: Rule[] = [];
 

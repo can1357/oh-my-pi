@@ -13,7 +13,7 @@ import * as path from "node:path";
 import type { Judge, JudgeOptions, NoulQuestion } from "@oh-my-pi/pi-ai";
 import { AstMatchStrictness, astMatch, countTokens, Encoding } from "@oh-my-pi/pi-natives";
 import { logger } from "@oh-my-pi/pi-utils";
-import { compileRuleCondition, type Rule } from "../capability/rule";
+import { compileRuleCondition, type Rule, ruleModelScopeKey } from "../capability/rule";
 import { ensureGrammar } from "../utils/grammars";
 import type { TtsrSettings } from "./ttsr-settings";
 
@@ -556,10 +556,35 @@ class StreamBuffer {
 	}
 }
 
+const SCOPED_RECORD_KEY = /^(.*)::scope:([0-9a-f]+)$/;
+
+/**
+ * Injection-record key for a rule: its name when unscoped, otherwise
+ * `<name>::scope:<hex hash of the model scope>`, so same-named model variants
+ * keep separate repeat state. Persisted in `ttsr_injection` entries.
+ */
+export function ruleRecordKey(rule: Pick<Rule, "name" | "models" | "providers" | "class" | "family">): string {
+	const scopeKey = ruleModelScopeKey(rule);
+	return scopeKey ? `${rule.name}::scope:${Bun.hash(scopeKey).toString(16)}` : rule.name;
+}
+
+/**
+ * Split an injection-record key into the rule name and, for a scoped variant,
+ * its scope hash. Any string that is not a scoped key is a bare rule name,
+ * which suppresses every variant of that name.
+ */
+export function parseRecordKey(key: string): { name: string; scopeHash?: string } {
+	const match = SCOPED_RECORD_KEY.exec(key);
+	return match ? { name: match[1], scopeHash: match[2] } : { name: key };
+}
+
 export class TtsrManager {
 	readonly #settingsSource: () => TtsrSettings;
 	readonly #rules = new Map<string, TtsrEntry>();
+	/** Keyed by {@link ruleRecordKey}; a bare-name key covers every variant of that name. */
 	readonly #injectionRecords = new Map<string, InjectionRecord>();
+	/** Compiled entries per discovered rule object; `null` marks a rule TTSR rejects. */
+	readonly #entryCache = new WeakMap<Rule, TtsrEntry | null>();
 	readonly #buffers = new Map<string, StreamBuffer>();
 	/** Last snapshot evaluated for AST conditions, keyed by stream key, to dedupe matcher runs. */
 	readonly #lastAstSnapshots = new Map<string, string>();
@@ -583,8 +608,10 @@ export class TtsrManager {
 	}
 
 	/** Check if a rule can be triggered based on repeat settings. */
-	#canTrigger(ruleName: string): boolean {
-		const record = this.#injectionRecords.get(ruleName);
+	#canTrigger(rule: Rule): boolean {
+		const key = ruleRecordKey(rule);
+		const record =
+			this.#injectionRecords.get(key) ?? (key === rule.name ? undefined : this.#injectionRecords.get(rule.name));
 		if (!record) {
 			return true;
 		}
@@ -806,12 +833,38 @@ export class TtsrManager {
 		if (this.#rules.has(rule.name)) {
 			return false;
 		}
+		const entry = this.#entryFor(rule);
+		if (!entry) {
+			return false;
+		}
+		this.#rules.set(rule.name, entry);
+		if (entry.question) {
+			this.#hasJudgedRules = true;
+		} else {
+			if (entry.scope.allowText) this.#canMatchText = true;
+			if (entry.scope.allowThinking) this.#canMatchThinking = true;
+		}
+		return true;
+	}
 
+	/**
+	 * Compiled entry for a rule, built once per rule object: re-scoping the same
+	 * discovered rules reuses it, so compile warnings are logged once per discovery.
+	 */
+	#entryFor(rule: Rule): TtsrEntry | undefined {
+		const cached = this.#entryCache.get(rule);
+		if (cached !== undefined) return cached ?? undefined;
+		const entry = this.#buildEntry(rule);
+		this.#entryCache.set(rule, entry ?? null);
+		return entry;
+	}
+
+	#buildEntry(rule: Rule): TtsrEntry | undefined {
 		const conditions = this.#compileConditions(rule);
 		const astConditions = (rule.astCondition ?? []).map(pattern => pattern.trim()).filter(p => p.length > 0);
 		const question = rule.question?.trim() || undefined;
 		if (conditions.length === 0 && astConditions.length === 0 && !question) {
-			return false;
+			return undefined;
 		}
 
 		const scope = this.#buildScope(rule);
@@ -820,26 +873,17 @@ export class TtsrManager {
 				ruleName: rule.name,
 				scope: rule.scope,
 			});
-			return false;
+			return undefined;
 		}
-		const globalPathGlobs = this.#compileGlobalPathGlobs(rule.globs);
-		this.#rules.set(rule.name, {
+		return {
 			rule,
 			conditions,
 			conditionTraits: conditions.map(analyzeCondition),
 			astConditions,
 			question,
 			scope,
-			globalPathGlobs,
-		});
-		if (question) {
-			this.#hasJudgedRules = true;
-		} else {
-			if (scope.allowText) this.#canMatchText = true;
-			if (scope.allowThinking) this.#canMatchThinking = true;
-		}
-
-		return true;
+			globalPathGlobs: this.#compileGlobalPathGlobs(rule.globs),
+		};
 	}
 
 	/**
@@ -920,12 +964,12 @@ export class TtsrManager {
 		}
 
 		const candidates: TtsrEntry[] = [];
-		for (const [name, entry] of this.#rules) {
+		for (const entry of this.#rules.values()) {
 			if (entry.astConditions.length === 0 || entry.question) {
 				continue;
 			}
 			if (
-				!this.#canTrigger(name) ||
+				!this.#canTrigger(entry.rule) ||
 				!this.#matchesScope(entry, context) ||
 				!this.#matchesGlobalPaths(entry, context)
 			) {
@@ -1008,10 +1052,10 @@ export class TtsrManager {
 			return [];
 		}
 		const candidates: JudgedCandidate[] = [];
-		for (const [name, entry] of this.#rules) {
+		for (const entry of this.#rules.values()) {
 			if (
 				!entry.question ||
-				!this.#canTrigger(name) ||
+				!this.#canTrigger(entry.rule) ||
 				!this.#matchesScope(entry, context) ||
 				!this.#matchesGlobalPaths(entry, context) ||
 				!(await this.#passesPrefilter(entry, content, context))
@@ -1042,7 +1086,7 @@ export class TtsrManager {
 	 * concurrent judgments cannot deliver them twice.
 	 */
 	claim(rules: readonly Rule[]): Rule[] {
-		const claimed = rules.filter(rule => this.#canTrigger(rule.name));
+		const claimed = rules.filter(rule => this.#canTrigger(rule));
 		this.markInjected(claimed);
 		return claimed;
 	}
@@ -1053,7 +1097,7 @@ export class TtsrManager {
 		}
 		const matches: Rule[] = [];
 		for (const [name, entry] of this.#rules) {
-			if (entry.question || !this.#canTrigger(name)) {
+			if (entry.question || !this.#canTrigger(entry.rule)) {
 				continue;
 			}
 			if (!this.#matchesScope(entry, context)) {
@@ -1096,36 +1140,51 @@ export class TtsrManager {
 
 	/** Mark rules as injected (won't trigger again until conditions allow). */
 	markInjected(rulesToMark: Rule[]): void {
-		this.markInjectedByNames(rulesToMark.map(rule => rule.name));
+		this.#markRecordKeys(rulesToMark.map(ruleRecordKey));
 	}
 
-	/** Mark rule names as injected (won't trigger again until conditions allow). */
+	/**
+	 * Mark rule names as injected. A registered name marks that variant's record
+	 * key; an unregistered name marks the bare name, which covers every variant.
+	 */
 	markInjectedByNames(ruleNames: string[]): void {
+		this.#markRecordKeys(this.recordKeysFor(ruleNames));
+	}
+
+	/** Record keys {@link markInjectedByNames} writes for `ruleNames`, in order; blank names are dropped. */
+	recordKeysFor(ruleNames: readonly string[]): string[] {
+		const keys: string[] = [];
 		for (const rawName of ruleNames) {
 			const ruleName = rawName.trim();
-			if (ruleName.length === 0) {
-				continue;
-			}
-			const record = this.#injectionRecords.get(ruleName);
+			if (ruleName.length === 0) continue;
+			const entry = this.#rules.get(ruleName);
+			keys.push(entry ? ruleRecordKey(entry.rule) : ruleName);
+		}
+		return keys;
+	}
+
+	#markRecordKeys(keys: readonly string[]): void {
+		for (const key of keys) {
+			const record = this.#injectionRecords.get(key);
 			if (!record) {
-				this.#injectionRecords.set(ruleName, { lastInjectedAt: this.#messageCount });
+				this.#injectionRecords.set(key, { lastInjectedAt: this.#messageCount });
 			} else {
 				record.lastInjectedAt = this.#messageCount;
 			}
 			logger.debug("TTSR rule marked as injected", {
-				ruleName,
+				recordKey: key,
 				messageCount: this.#messageCount,
 				repeatMode: this.#settings.repeatMode,
 			});
 		}
 	}
 
-	/** Get names of all injected rules (for persistence). */
+	/** Injection-record keys (see {@link ruleRecordKey}) of every injected rule, for persistence. */
 	getInjectedRuleNames(): string[] {
 		return Array.from(this.#injectionRecords.keys());
 	}
 
-	/** Restore injected state from a list of rule names. */
+	/** Restore injected state from persisted record keys; bare names and scoped keys are stored as given. */
 	restoreInjected(ruleNames: string[]): void {
 		for (const name of ruleNames) {
 			this.#injectionRecords.set(name, { lastInjectedAt: 0 });
@@ -1165,32 +1224,30 @@ export class TtsrManager {
 	}
 
 	/**
-	 * Atomically replace monitored rules while retaining injection state for names
-	 * that remain registered. While TTSR is disabled nothing registers, so injection
-	 * state is kept intact for when it is re-enabled.
+	 * Atomically replace monitored rules. Injection records are kept for every
+	 * rule name in `retainNames` (default: the names registered now), whatever
+	 * variant they belong to, so they survive a model change that re-scopes the
+	 * registered set; records for other names are dropped. While TTSR is disabled
+	 * nothing registers, so injection state is kept intact for when it is re-enabled.
 	 *
 	 * Returns the names accepted for TTSR monitoring so the caller can bucket
 	 * rejected conditional rules through its normal fallback path.
 	 */
-	replaceRules(rules: readonly Rule[]): Set<string> {
-		const replacement = new TtsrManager(this.#settingsSource);
-		for (const rule of rules) {
-			replacement.addRule(rule);
-		}
-
-		const registered = new Set(replacement.#rules.keys());
+	replaceRules(rules: readonly Rule[], retainNames?: ReadonlySet<string>): Set<string> {
 		this.#rules.clear();
-		for (const [name, entry] of replacement.#rules) {
-			this.#rules.set(name, entry);
+		this.#canMatchText = false;
+		this.#canMatchThinking = false;
+		this.#hasJudgedRules = false;
+		for (const rule of rules) {
+			this.addRule(rule);
 		}
-		this.#canMatchText = replacement.#canMatchText;
-		this.#canMatchThinking = replacement.#canMatchThinking;
-		this.#hasJudgedRules = replacement.#hasJudgedRules;
+		const registered = new Set(this.#rules.keys());
 		this.resetBuffer();
 
 		if (!this.#settings.enabled) return registered;
-		for (const name of this.#injectionRecords.keys()) {
-			if (!registered.has(name)) this.#injectionRecords.delete(name);
+		const retained = retainNames ?? registered;
+		for (const key of this.#injectionRecords.keys()) {
+			if (!retained.has(parseRecordKey(key).name)) this.#injectionRecords.delete(key);
 		}
 		return registered;
 	}

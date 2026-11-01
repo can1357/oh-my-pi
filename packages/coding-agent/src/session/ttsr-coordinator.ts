@@ -458,7 +458,8 @@ export class TtsrCoordinator {
 		);
 		if (uniqueRuleNames.length === 0) return;
 		this.#manager?.markInjectedByNames(uniqueRuleNames);
-		this.#host.sessionManager.appendTtsrInjection(uniqueRuleNames);
+		// Persist variant record keys; `details.rules` and replay keep plain names.
+		this.#host.sessionManager.appendTtsrInjection(this.#manager?.recordKeysFor(uniqueRuleNames) ?? uniqueRuleNames);
 	}
 
 	/**

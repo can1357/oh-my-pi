@@ -121,6 +121,25 @@ describe("tree selector entry labels", () => {
 		}
 	});
 
+	it("searches a TTSR injection by plain rule name, not by a scoped record key", () => {
+		const entries = [
+			userEntry,
+			{
+				...base("ttsr", "u1"),
+				type: "ttsr_injection",
+				injectedRules: ["guard::scope:1a2b", "guard::scope:3c4d"],
+			},
+		] as SessionEntry[];
+		const search = (query: string): string => {
+			const selector = selectorFor(entries);
+			selector.handleInput(ALT_A);
+			selector.handleInput(query);
+			return visibleRows(selector).join("\n");
+		};
+		expect(search("guard")).toContain("[ttsr injection]");
+		expect(search("scope")).not.toContain("[ttsr injection]");
+	});
+
 	it("hides bookkeeping entries in the default view", () => {
 		const selector = selectorFor([userEntry, ...bookkeeping]);
 		const rows = visibleRows(selector).join("\n");

@@ -681,7 +681,7 @@ class TreeList implements Component {
 				parts.push("credential pin", entry.provider);
 				break;
 			case "ttsr_injection":
-				parts.push("ttsr injection", ...entry.injectedRules);
+				parts.push("ttsr injection", ...ttsrRuleNames(entry.injectedRules));
 				break;
 			case "reset_boundary":
 				parts.push("reset boundary");
@@ -1504,6 +1504,14 @@ class LabelInput implements Component {
 			this.#input.handleInput(keyData);
 		}
 	}
+}
+
+/** Suffix the coding agent appends to a model-scoped rule's persisted injection-record key. */
+const TTSR_SCOPE_SUFFIX = /::scope:[0-9a-f]+$/;
+
+/** Plain, deduplicated rule names of a `ttsr_injection` entry's record keys. */
+function ttsrRuleNames(recordKeys: readonly string[]): string[] {
+	return Array.from(new Set(recordKeys.map(key => key.replace(TTSR_SCOPE_SUFFIX, ""))));
 }
 
 /**

@@ -371,7 +371,7 @@ Implications:
 
 ### Rule refresh
 
-Session-scoped prompt rebuilds re-discover rules for the current cwd, re-bucket them with live `ttsr.*` filters and the current model, and update prompt, URL-resolution, and subagent-inheritance snapshots. The subagent-inheritance snapshot stays unfiltered. A model change re-buckets the same snapshot without disk discovery. Explicitly supplied rule sets are re-bucketed without disk discovery. `/clear` and `/new` clear capability caches so edits are observed at those boundaries. TTSR registrations are replaced atomically; injection records survive for names still registered, while removed names lose their records. Rebuilding while TTSR is disabled preserves injection records for later re-enablement.
+Session-scoped prompt rebuilds re-discover rules for the current cwd, re-bucket them with live `ttsr.*` filters and the current model, and update prompt, URL-resolution, and subagent-inheritance snapshots. The subagent-inheritance snapshot stays unfiltered. A model change re-buckets the same snapshot without disk discovery. Explicitly supplied rule sets are re-bucketed without disk discovery. `/clear` and `/new` clear capability caches so edits are observed at those boundaries. TTSR registrations are replaced atomically; injection records are kept per variant and survive model changes, and a name loses its records only when it leaves discovery (see `ttsr-injection-lifecycle.md`). Rebuilding while TTSR is disabled preserves injection records for later re-enablement.
 
 ## 9. Known partial / non-enforced semantics
 

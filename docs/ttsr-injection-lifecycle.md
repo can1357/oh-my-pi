@@ -42,7 +42,7 @@ const { rulebookRules, alwaysApplyRules } = bucketRules(rulesResult.items, ttsrM
 
 `bucketRules(...)` drops names listed in `ttsr.disabledRules`, drops embedded builtin-defaults rules when `ttsr.builtinRules === false`, drops rules whose `agents` globs do not match this session's agent, drops rules whose model scope (`models`, `providers`, `class`, `family`) does not admit the session model, registers accepted TTSR rules, and then routes the remaining rules to always-apply/rulebook buckets. This first pass is provisional: the first prompt build re-buckets for the final startup model (after session restore and fallback resolution).
 
-Session-scoped prompt rebuilds re-discover and re-bucket rules (explicit rule sets are only re-bucketed). Every model change, including a retry fallback, re-buckets the current rule snapshot for the new model and replaces the registrations, so judged rules are scoped by the session model whose output is judged, not by the judge model. `replaceRules()` replaces registrations and clears stream buffers, preserving injection records for names still registered. Removed names lose their records; when TTSR is disabled, records are retained for re-enablement. The session-local and top-level active-rule URL snapshots are refreshed too.
+Session-scoped prompt rebuilds re-discover and re-bucket rules (explicit rule sets are only re-bucketed). Every model change, including a retry fallback, re-buckets the current rule snapshot for the new model and replaces the registrations, so judged rules are scoped by the session model whose output is judged, not by the judge model. `replaceRules()` replaces registrations and clears stream buffers. It keeps the injection records of every name in the rule snapshot that passes the disabled, builtin and `agents` filters, before model scoping, so records survive model changes even while a variant is out of scope. A record is dropped only when its name leaves discovery (deleted, renamed, disabled or agent-excluded); when TTSR is disabled, records are retained for re-enablement. Each discovered rule object is compiled once per manager, so regex and scope warnings are logged once per discovery, not on every re-scope. The session-local and top-level active-rule URL snapshots are refreshed too.
 
 ### Pre-registration dedupe behavior
 
@@ -193,6 +193,8 @@ Within a matching batch, each rule is attached to exactly one sibling tool call:
 
 `TtsrManager` tracks `#messageCount` and per-rule `lastInjectedAt`.
 
+Records are keyed per variant: an unscoped rule's key is its name, and a model-scoped rule's key is `<name>::scope:<hex hash of its model scope>`, so same-named variants keep separate repeat state. A record keyed by the bare name of a scoped rule (legacy persisted state, or a name marked while unregistered) applies to every variant of that name.
+
 ### `repeatMode: "once"`
 
 A rule can trigger only once after it has an injection record.
@@ -250,7 +252,9 @@ Current runtime wiring:
 - non-interrupting tool-source matches are marked in memory when bucketed, then persisted from `afterToolCall` (or the bridged-call postflight) only when the matched tool's result is produced
 - `createAgentSession()` restores `existingSession.injectedTtsrRules` into the manager
 
-Injected-rule suppression is therefore restored from the current branch path. Persistence stores names, not the original turn age: `restoreInjected()` records each restored rule at message count zero. In `repeatMode: "after-gap"`, a resumed rule becomes eligible after `repeatGap` newly completed turns, regardless of how many turns elapsed before reload.
+`ttsr_injection.injectedRules` stores record keys: the bare name for an unscoped rule, `<name>::scope:<hash>` for a model-scoped variant. The `ttsr-injection` custom message's `details.rules` keeps plain names. Older sessions that stored bare names keep working: a bare name restores as a record that suppresses every variant of that name.
+
+Injected-rule suppression is therefore restored from the current branch path. Persistence stores record keys, not the original turn age: `restoreInjected()` records each restored rule at message count zero. In `repeatMode: "after-gap"`, a resumed rule becomes eligible after `repeatGap` newly completed turns, regardless of how many turns elapsed before reload.
 
 ## 8. Race boundaries and ordering guarantees
 

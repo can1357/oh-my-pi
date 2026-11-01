@@ -22,7 +22,7 @@ import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
+import { parseRecordKey, ruleRecordKey, TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
@@ -993,6 +993,55 @@ describe("AgentSession TTSR resume gate", () => {
 		expect(continuationCompleted).toBe(true);
 		expect(streamCallCount).toBeGreaterThanOrEqual(2);
 		expect(session.isStreaming).toBe(false);
+	});
+
+	it("persists a scoped rule's variant record key while the injection message keeps the plain name", async () => {
+		collapseSchedulerSettleDelays();
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const scopedRule: Rule = { ...testRule, family: ["sonnet"] };
+		const ttsrManager = new TtsrManager({
+			enabled: true,
+			contextMode: "discard",
+			interruptMode: "always",
+			repeatMode: "once",
+			repeatGap: 10,
+		});
+		ttsrManager.addRule(scopedRule);
+		let requests = 0;
+		const sessionManager = SessionManager.inMemory();
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: (_model, _context, options) => {
+				requests++;
+				const stream = new AssistantMessageEventStream();
+				if (requests === 1) pushAbortableTtsrStream(stream, options?.signal);
+				else pushContinuationStream(stream, () => {});
+				return stream;
+			},
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated(),
+			modelRegistry: sharedModelRegistry,
+			ttsrManager,
+		});
+
+		await session.prompt("Write some Rust code");
+
+		const injectedRules = sessionManager
+			.getEntries()
+			.flatMap(entry => (entry.type === "ttsr_injection" ? entry.injectedRules : []));
+		expect(injectedRules).toEqual([ruleRecordKey(scopedRule)]);
+		expect(parseRecordKey(injectedRules[0])).toEqual({ name: "no-unwrap", scopeHash: expect.any(String) });
+		const injection = sessionManager
+			.getEntries()
+			.find(entry => entry.type === "custom_message" && entry.customType === "ttsr-injection");
+		expect(injection?.type === "custom_message" ? injection.details : undefined).toMatchObject({
+			rules: ["no-unwrap"],
+		});
 	});
 
 	it("retries a TTSR continuation when the interrupted run is still busy", async () => {
