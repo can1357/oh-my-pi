@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed an extension receiving `tool_execution_end` before `tool_execution_start` for the same call (or any later event before an earlier one) when an extension loaded before it handles the earlier event slowly; each extension now gets events in emission order ([#17680](https://github.com/can1357/oh-my-pi/issues/17680))
+
 ## [18.14.2] - 2026-10-31
 
 ### Added
