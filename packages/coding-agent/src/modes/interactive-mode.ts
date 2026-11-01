@@ -246,9 +246,9 @@ import {
 	reportTernSession,
 	setSessionTerminalTitle,
 	setTerminalSessionSource,
+	setTerminalTitleLayout,
 	setTerminalTitlePullRequest,
 	setTerminalTitleSpinnerStyle,
-	setTerminalTitleStateEnabled,
 } from "../utils/title-generator";
 import {
 	aggregateVibeWorkerTokensPerSecond,
@@ -417,6 +417,7 @@ import {
 	cfgTuiCompleteScrollback,
 	cfgTuiTextSizing,
 	cfgTuiTight,
+	cfgTuiTitleBrand,
 	cfgTuiTitleSpinner,
 	cfgTuiTitleState,
 	cfgTuiVimMode,
@@ -491,6 +492,7 @@ const cfgLiveUiSettings = combine({
 	"tui.tight": cfgTuiTight,
 	"tui.hyperlinks": cfgTuiHyperlinks,
 	"tui.titleState": cfgTuiTitleState,
+	"tui.titleBrand": cfgTuiTitleBrand,
 	"tui.titleSpinner": cfgTuiTitleSpinner,
 	"statusLine.preset": cfgStatusLinePreset,
 	"statusLine.leftSegments": cfgStatusLineLeftSegments,
@@ -2617,7 +2619,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// that releases the teardown latch, so a late async `setSessionTerminalTitle`
 		// after shutdown can never write into the parent shell's tab.
 		initTerminalTitleState();
-		setTerminalTitleStateEnabled(cfgTuiTitleState.get(this.settings));
+		setTerminalTitleLayout(cfgTuiTitleState.get(this.settings), cfgTuiTitleBrand.get(this.settings));
 		setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
 		initProgramStatus();
 		setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));
@@ -4275,7 +4277,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.ui.invalidate();
 			this.ui.requestRender();
 		}
-		if (any("tui.titleState")) setTerminalTitleStateEnabled(cfgTuiTitleState.get(this.settings));
+		if (any("tui.titleState", "tui.titleBrand")) {
+			setTerminalTitleLayout(cfgTuiTitleState.get(this.settings), cfgTuiTitleBrand.get(this.settings));
+		}
 		if (any("tui.titleSpinner")) setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
 		if (any("terminal.programStatus")) setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));
 

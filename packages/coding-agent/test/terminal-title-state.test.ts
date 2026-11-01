@@ -8,8 +8,10 @@ import {
 	popTerminalTitle,
 	setSessionTerminalTitle,
 	setTerminalSessionSource,
+	setTerminalTitleLayout,
 	setTerminalTitleSpinnerStyle,
 	setTerminalTitleState,
+	type TerminalTitleState,
 } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
 import { mockWindowsConsoleTitle, type WindowsConsoleTitleMock } from "./terminal-title-test-utils";
@@ -61,6 +63,18 @@ describe("buildTerminalTitleWithState", () => {
 		expect(buildTerminalTitleWithState(LABEL, "idle", 0, false)).toBe(`${BRAND}: ${LABEL}`);
 		expect(buildTerminalTitleWithState(LABEL, "attention", 0, false)).toBe(`${BRAND}: ${LABEL}`);
 		expect(buildTerminalTitleWithState(undefined, "idle", 0, false)).toBe(BRAND);
+	});
+
+	it("drops the brand when it is turned off, down to the bare label without run state", () => {
+		const unbranded = (label: string | undefined, state: TerminalTitleState, enabled: boolean) =>
+			buildTerminalTitleWithState(label, state, 0, enabled, "linux", "braille", {}, false, false);
+		expect(unbranded(LABEL, "idle", true)).toBe(`> ${LABEL}`);
+		expect(unbranded(LABEL, "working", true)).toBe(`⠋ ${LABEL}`);
+		expect(unbranded(LABEL, "attention", true)).toBe(`! ${LABEL}`);
+		expect(unbranded(LABEL, "working", false)).toBe(LABEL);
+		// With neither brand nor label the title still names the program instead of going blank.
+		expect(unbranded(undefined, "idle", true)).toBe("> omp");
+		expect(unbranded(undefined, "idle", false)).toBe("omp");
 	});
 
 	it("cycles the dots and line glyph sets while working", () => {
@@ -158,6 +172,7 @@ describe("disposeTerminalTitleState", () => {
 		// test's teardown latched it off), a fresh session base, run state idle.
 		initTerminalTitleState();
 		setTerminalTitleSpinnerStyle("braille");
+		setTerminalTitleLayout(true, true);
 		setSessionTerminalTitle("my-project");
 		setTerminalTitleState("idle");
 		resetObserved(writes, windowsTitleMock);
@@ -336,6 +351,16 @@ describe("disposeTerminalTitleState", () => {
 			expect(title).toContain("my-project");
 			expect(title).toMatch(/^π [○◔◑◕●] my-project$/);
 		}
+	});
+
+	it("turns the brand and run state off in one write, with no intermediate title", () => {
+		setTerminalTitleState("working");
+		resetObserved(writes, windowsTitleMock);
+
+		setTerminalTitleLayout(false, false);
+
+		expect(observedTitles(writes, windowsTitleMock)).toEqual(["my-project"]);
+		expect(vi.getTimerCount()).toBe(0);
 	});
 
 	it("releases the latch and re-arms a live spinner when the terminal is claimed again", () => {
