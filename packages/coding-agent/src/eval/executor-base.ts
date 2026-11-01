@@ -1,4 +1,4 @@
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, toError } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
 import { type OutputArtifactError, OutputSink } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { statusEventKey } from "@oh-my-pi/pi-tui/tools/eval";
@@ -79,6 +79,8 @@ export interface KernelExecutorBaseOptions {
 	bridgeSessionId?: string;
 	artifactId?: string;
 	artifactPath?: string;
+	/** Set by the kernel session registry; true when this cell is the first on a replacement for a dead kernel. */
+	claimKernelRestartNotice?: () => boolean;
 }
 
 /** Normalised execution result produced by {@link executeWithKernelBase}. */
@@ -97,6 +99,11 @@ export interface KernelExecutionResult {
 	outputBytes: number;
 	displayOutputs: EvalDisplayOutput[];
 	stdinRequested: boolean;
+}
+
+/** Mirrors the `eval-state-context` reminder wording so agents recognise it. */
+export function formatKernelRestartNotice(runtimeLabel: string): string {
+	return `Kernel restarted: the previous ${runtimeLabel} is dead; state is unavailable. Re-run needed setup: variables, imports and definitions from earlier cells are gone.`;
 }
 
 /** Minimal kernel surface the base executor drives, satisfied by every backend kernel. */
@@ -591,7 +598,11 @@ export async function executeWithKernelBase<
 				})
 			: null;
 
+	const restartNotice = options?.claimKernelRestartNotice?.()
+		? formatKernelRestartNotice(`${errorLogLabel} kernel`)
+		: undefined;
 	try {
+		if (restartNotice) sink.push(`${restartNotice}\n`);
 		if (remainingMs !== undefined && remainingMs <= 0) {
 			throw new cancelledErrorClass(true);
 		}
@@ -689,8 +700,10 @@ export async function executeWithKernelBase<
 				stdinRequested: false,
 			};
 		}
-		const error = err instanceof Error ? err : new Error(String(err));
+		const error = toError(err);
 		logger.error(`${errorLogLabel} execution failed`, { error: error.message });
+		// The notice was claimed for this cell; a thrown error drops streamed output, so carry it here.
+		if (restartNotice) error.message = `${restartNotice}\n${error.message}`;
 		throw error;
 	} finally {
 		await sink.dispose();
