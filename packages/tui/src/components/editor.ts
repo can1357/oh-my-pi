@@ -27,9 +27,11 @@ import {
 	type NativeUiEvent,
 	resolveTextEdit,
 } from "../native/node";
+import type { SgrMouseEvent } from "../mouse";
 import type { SymbolTheme } from "../symbols";
 import { type Component, CURSOR_MARKER, type Focusable } from "../tui";
 import {
+	colToCodeUnitIndex,
 	getSegmenter,
 	getWidthConfigEpoch,
 	getWordNavKind,
@@ -408,19 +410,6 @@ function visualColAtOffset(text: string, offset: number): number {
 		col += visibleWidth(seg.segment);
 	}
 	return col;
-}
-
-/** Code-unit offset of visual cell `col` within `text`, snapped to a grapheme
- *  boundary so the result never splits a surrogate pair or cluster. */
-function offsetAtVisualCol(text: string, col: number): number {
-	if (col <= 0) return 0;
-	let current = 0;
-	for (const seg of segmenter.segment(text)) {
-		const width = visibleWidth(seg.segment);
-		if (current + width > col) return seg.index;
-		current += width;
-	}
-	return text.length;
 }
 
 /** Highest visual column the cursor may occupy on a wrap segment: the full width
@@ -815,6 +804,12 @@ export class Editor implements Component, Focusable {
 	 * on the first and last logical line.
 	 */
 	#caretRowWidth: number = 80;
+	// Terminal width the last render() was invoked with; undefined before the
+	// first render. Pointer-to-caret mapping replays the layout at this width.
+	#lastRenderWidth: number | undefined;
+	// Decoration rows the last render emitted before the first text row
+	// (top border/chrome), so pointer positions can be mapped back to layout rows.
+	#textRowOffset: number = 0;
 	// Line measurement + word-wrap cache shared by #layoutText,
 	// #buildVisualLineMap, and key handlers within a frame. Line text is a
 	// sound key (strings are immutable); cleared on layout-width or
@@ -1537,6 +1532,7 @@ export class Editor implements Component, Focusable {
 	}
 
 	render(width: number): readonly string[] {
+		this.#lastRenderWidth = width;
 		const style = this.#effectiveStyle();
 		const paddingX = this.#getEditorPaddingX();
 		const isSideBordered = style.sideBorders;
@@ -1587,6 +1583,7 @@ export class Editor implements Component, Focusable {
 		};
 
 		const topRow = style.renderTop(chromeCtx);
+		this.#textRowOffset = topRow !== undefined ? 1 : 0;
 		if (topRow !== undefined) result.push(topRow);
 
 		// Render each layout line
@@ -3352,6 +3349,55 @@ export class Editor implements Component, Focusable {
 		return { line: this.#state.cursorLine, col: this.#state.cursorCol };
 	}
 
+	/**
+	 * Position the caret from a pointer click on a rendered output row of the
+	 * most recent render. `renderedRow` indexes the render() output (chrome,
+	 * scrollbar and autocomplete rows included in the numbering, but only text
+	 * rows map); `col` is the 0-based column of the full row, gutter and side
+	 * chrome included. Uses the layout width recorded by that render, so the
+	 * mapping always matches what is on screen. Width-changing decorations
+	 * (paste-marker expansion) are not reversible — the mapping clamps to the
+	 * underlying layout text, so a click on decorated output lands on the
+	 * nearest caret position. Returns true when the click mapped into editor
+	 * text.
+	 */
+	moveCursorToRenderedPosition(renderedRow: number, col: number): boolean {
+		if (renderedRow < 0 || col < 0 || !Number.isFinite(renderedRow) || !Number.isFinite(col)) return false;
+		const renderWidth = this.#lastRenderWidth;
+		if (renderWidth === undefined) return false; // never rendered; nothing on screen to click
+		const paddingX = this.#getEditorPaddingX();
+		const layoutWidth = this.#getLayoutWidth(renderWidth, paddingX);
+		const promptGutter = this.#getPromptGutter(renderWidth, paddingX);
+		const chrome = this.#getHorizontalChromeWidth(paddingX);
+		const layoutLines = this.#layoutText(layoutWidth);
+		const visibleHeight = this.#getVisibleContentHeight(layoutLines.length);
+		const textRow = renderedRow - this.#textRowOffset;
+		if (textRow < 0 || textRow >= visibleHeight) return false; // chrome row, or past the text rows
+		const layout = layoutLines[this.#scrollOffset + textRow];
+		if (!layout) return false;
+		const gutterText =
+			promptGutter === undefined ? "" : textRow === 0 ? promptGutter.firstLine : promptGutter.continuation;
+		const textStartCol = chrome + visibleWidth(gutterText);
+		const textCol = col - textStartCol;
+		if (textCol < 0) return false; // clicked the gutter or side chrome
+		// Invert the column-width mapping (see colToCodeUnitIndex for the
+		// wide-glyph and zero-width semantics).
+		const idx = colToCodeUnitIndex(layout.text, textCol);
+		this.#state.cursorLine = layout.sourceLine;
+		this.#setCursorCol(layout.sourceStartCol + idx);
+		this.#updateScrollOffset(layoutWidth, layoutLines, visibleHeight);
+		this.invalidate();
+		return true;
+	}
+
+	/**
+	 * MouseRoutable host contract: translate a routed left-click on this
+	 * editor's rendered output into a caret move. Non-click events are ignored.
+	 */
+	routeMouse(event: SgrMouseEvent, line: number, col: number): void {
+		if (event.leftClick) this.moveCursorToRenderedPosition(line, col);
+	}
+
 	moveToLineStart(): void {
 		this.#moveToLineStart();
 	}
@@ -4176,7 +4222,7 @@ export class Editor implements Component, Focusable {
 
 			// Set cursor position, snapping to a grapheme boundary in the target text
 			this.#state.cursorLine = targetVL.logicalLine;
-			const targetCol = targetVL.startCol + offsetAtVisualCol(targetText, moveToVisualCol);
+			const targetCol = targetVL.startCol + colToCodeUnitIndex(targetText, moveToVisualCol);
 			this.#state.cursorCol = Math.min(targetCol, targetLine.length);
 		}
 	}

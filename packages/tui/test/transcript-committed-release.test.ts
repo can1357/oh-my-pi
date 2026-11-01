@@ -12,7 +12,14 @@ import { Stack } from "@oh-my-pi/pi-tui/components/layout/stack";
 import { clearRenderCache, Markdown } from "@oh-my-pi/pi-tui/components/markdown";
 import { Section } from "@oh-my-pi/pi-tui/components/section";
 import { TranscriptContainer, trimBlankEdges } from "@oh-my-pi/pi-tui/chrome/transcript-container";
-import { getMarkdownTheme, getThemeByName, initTheme, type Theme } from "@oh-my-pi/pi-tui/theme";
+import {
+	getMarkdownTheme,
+	getThemeByName,
+	initTheme,
+	setTheme,
+	getCurrentThemeName,
+	type Theme,
+} from "@oh-my-pi/pi-tui/theme";
 import * as renderUtils from "@oh-my-pi/pi-tui/render/render-utils";
 import { OutputPane } from "@oh-my-pi/pi-tui/render/output-pane";
 import { editToolRenderer } from "@oh-my-pi/pi-tui/tools/edit";
@@ -216,6 +223,68 @@ describe("committed transcript blocks release render caches", () => {
 		liveTools.length = 0;
 		vi.restoreAllMocks();
 		setMcpRenderMarkdownResults(false);
+	});
+
+	it("reuses finalized assistant layouts but refreshes changed content and width", () => {
+		const transcript = new TranscriptContainer();
+		const block = streamedAssistant();
+		transcript.addChild(block);
+		const render = spyOn(block, "render");
+		const first = transcript.renderDocument(80);
+		expect(first.join("\n")).toContain("Result");
+		expect(transcript.renderDocument(80)).toEqual(first);
+		expect(render).toHaveBeenCalledTimes(1);
+
+		block.updateContent(assistantMessage("Replacement message with enough words to wrap at a narrow width."));
+		const changed = transcript.renderDocument(80);
+		expect(changed.join("\n")).toContain("Replacement message");
+		expect(changed.join("\n")).not.toContain("## Result");
+		expect(render).toHaveBeenCalledTimes(2);
+		expect(transcript.renderDocument(24)).not.toEqual(changed);
+		expect(render).toHaveBeenCalledTimes(3);
+
+		transcript.invalidate();
+		expect(transcript.renderDocument(80)).toEqual(changed);
+		expect(render).toHaveBeenCalledTimes(4);
+	});
+
+	it("refreshes cached tool output when tool activity visibility changes", () => {
+		const transcript = new TranscriptContainer();
+		const block = streamedWrite();
+		transcript.addChild(block);
+		const visible = transcript.renderDocument(80);
+		expect(visible.join("\n")).toContain("value0");
+		block.setToolActivityVisible(false);
+		expect(transcript.renderDocument(80)).toEqual([]);
+		block.setToolActivityVisible(true);
+		expect(transcript.renderDocument(80)).toEqual(visible);
+	});
+
+	it("recolors cached fullscreen history after a theme change", async () => {
+		const previousTheme = getCurrentThemeName() ?? "dark";
+		try {
+			await setTheme("dark");
+			const transcript = new TranscriptContainer();
+			transcript.addChild(streamedAssistant());
+			const dark = transcript.renderDocument(80);
+			await setTheme("light");
+			const light = transcript.renderDocument(80);
+			expect(light).not.toEqual(dark);
+			expect(light.map(Bun.stripANSI)).toEqual(dark.map(Bun.stripANSI));
+		} finally {
+			await setTheme(previousTheme);
+		}
+	});
+
+	it("does not freeze streaming assistant output in document snapshots", () => {
+		const transcript = new TranscriptContainer();
+		const block = new AssistantMessageComponent();
+		transcript.addChild(block);
+		block.updateContent(assistantMessage("First streamed fragment"), { transient: true });
+		expect(transcript.renderDocument(80).join("\n")).toContain("First streamed fragment");
+		block.updateContent(assistantMessage("Second streamed fragment"), { transient: true });
+		expect(transcript.renderDocument(80).join("\n")).toContain("Second streamed fragment");
+		block.markTranscriptBlockFinalized();
 	});
 
 	it("releases a block once when it commits and after every replay render, never while it is live", () => {

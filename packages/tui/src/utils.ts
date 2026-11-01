@@ -436,9 +436,9 @@ export function stripTerminalSequences(str: string): string {
 	let result = "";
 	let i = 0;
 	while (i < str.length) {
-		const ansi = extractAnsiCode(str, i);
-		if (ansi) {
-			i += ansi.length;
+		const end = endOfTerminalSequence(str, i);
+		if (end > i) {
+			i = end;
 			continue;
 		}
 		result += str[i];
@@ -447,51 +447,25 @@ export function stripTerminalSequences(str: string): string {
 	return result;
 }
 
-/**
- * Extract ANSI escape sequences from a string at the given position.
- * Copied verbatim from pi-mono `packages/tui/src/utils.ts` alongside
- * `stripTerminalSequences` so both behave identically to upstream pi. Kept
- * module-private: it was removed from the public API in 9.6.2 and this port
- * does not reintroduce that export.
- */
-function extractAnsiCode(str: string, pos: number): { code: string; length: number } | null {
-	if (pos >= str.length || str[pos] !== "\x1b") return null;
-
+/** Exclusive end of the terminal sequence at `pos`, or `pos` when none starts there. */
+export function endOfTerminalSequence(str: string, pos: number): number {
+	if (pos >= str.length || str[pos] !== "\x1b") return pos;
 	const next = str[pos + 1];
-
-	// CSI sequence: ESC [ ... m/G/K/H/J
+	if (next === undefined) return pos;
 	if (next === "[") {
-		let j = pos + 2;
-		while (j < str.length && !/[mGKHJ]/.test(str[j]!)) j++;
-		if (j < str.length) return { code: str.substring(pos, j + 1), length: j + 1 - pos };
-		return null;
-	}
-
-	// OSC sequence: ESC ] ... BEL or ESC ] ... ST (ESC \)
-	// Used for hyperlinks (OSC 8), window titles, etc.
-	if (next === "]") {
-		let j = pos + 2;
-		while (j < str.length) {
-			if (str[j] === "\x07") return { code: str.substring(pos, j + 1), length: j + 1 - pos };
-			if (str[j] === "\x1b" && str[j + 1] === "\\") return { code: str.substring(pos, j + 2), length: j + 2 - pos };
-			j++;
+		for (let i = pos + 2; i < str.length; i++) {
+			if (/[\x40-\x7e]/.test(str[i]!)) return i + 1;
 		}
-		return null;
+		return pos;
 	}
-
-	// APC sequence: ESC _ ... BEL or ESC _ ... ST (ESC \)
-	// Used for cursor marker and application-specific commands
-	if (next === "_") {
-		let j = pos + 2;
-		while (j < str.length) {
-			if (str[j] === "\x07") return { code: str.substring(pos, j + 1), length: j + 1 - pos };
-			if (str[j] === "\x1b" && str[j + 1] === "\\") return { code: str.substring(pos, j + 2), length: j + 2 - pos };
-			j++;
+	if (next === "]" || next === "P" || next === "_" || next === "^" || next === "X") {
+		for (let i = pos + 2; i < str.length; i++) {
+			if (str[i] === "\x07") return i + 1;
+			if (str[i] === "\x1b" && str[i + 1] === "\\") return i + 2;
 		}
-		return null;
+		return pos;
 	}
-
-	return null;
+	return pos + 2;
 }
 
 /**
@@ -775,4 +749,23 @@ export function isTuiTight(): boolean {
 
 export function getPaddingX(basePadding: number): number {
 	return globalTight ? Math.max(0, basePadding - 1) : basePadding;
+}
+
+/**
+ * Maps a visible column to a UTF-16 code-unit index in `text`, walking by
+ * grapheme and accumulating cell widths (zero-width glyphs contribute none).
+ * A click on either cell of a wide glyph stops before the glyph — deliberate:
+ * stopping after its left half could be misread as a caret inside a visually
+ * split cell, and every caret consumer treats text as UTF-16 slices.
+ */
+export function colToCodeUnitIndex(text: string, visibleCol: number): number {
+	let acc = 0;
+	let idx = 0;
+	for (const { segment } of getSegmenter().segment(text)) {
+		const w = visibleWidth(segment);
+		if (acc + w > visibleCol) break;
+		acc += w;
+		idx += segment.length;
+	}
+	return idx;
 }

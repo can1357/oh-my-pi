@@ -212,6 +212,42 @@ describe("TUI overlay focus", () => {
 		}
 	});
 
+	it("keeps a fullscreen base surface behind ordinary overlays", () => {
+		const terminal = new MinimalTerminal();
+		const tui = new TUI(terminal);
+		const editor = new FocusRecorder("editor");
+		const fullscreenSurface = new OwningOverlay("fullscreen-surface");
+		const dialog = new FocusRecorder("dialog");
+
+		tui.addChild(editor);
+		tui.setFocus(editor);
+
+		try {
+			tui.start();
+			fullscreenSurface.focusTarget = editor;
+			const surfaceHandle = tui.showOverlay(fullscreenSurface, { fullscreen: true, base: true });
+			tui.setFocus(editor);
+
+			expect(tui.getFocused()).toBe(editor);
+			expect(tui.hasOverlay()).toBe(false);
+			terminal.sendInput("draft");
+			expect(editor.inputs).toEqual(["draft"]);
+
+			const dialogHandle = tui.showOverlay(dialog);
+			expect(tui.getFocused()).toBe(dialog);
+			expect(tui.hasOverlay()).toBe(true);
+			terminal.sendInput("confirm");
+			expect(dialog.inputs).toEqual(["confirm"]);
+
+			dialogHandle.hide();
+			expect(tui.getFocused()).toBe(editor);
+			expect(tui.hasOverlay()).toBe(false);
+			surfaceHandle.hide();
+		} finally {
+			tui.stop();
+		}
+	});
+
 	it("keeps keyboard focus on the visible overlay when a hidden surface requests focus", () => {
 		const terminal = new MinimalTerminal();
 		const tui = new TUI(terminal);

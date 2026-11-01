@@ -494,13 +494,19 @@ export interface OverlayOptions {
 	// === Fullscreen ===
 	/**
 	 * Borrow the terminal's alternate screen buffer for this overlay's lifetime
-	 * (vim/less idiom). While the topmost visible overlay sets this, the engine
+	 * (vim/less idiom). While the topmost visible overlay or a visible base sets this, the engine
 	 * paints only the modal on the alt screen and emits no ED3 / scrollback
 	 * bytes, so the transcript on the normal screen stays untouched and is not
 	 * scrollable behind the modal. Defaults off — all other overlays are
 	 * unchanged and still draw over the transcript on the normal screen.
 	 */
 	fullscreen?: boolean;
+	/**
+	 * Keep this overlay below ordinary dialogs and menus. Used by persistent
+	 * application surfaces that own the alternate screen without behaving like a
+	 * modal; normal overlays continue to receive focus and input above it.
+	 */
+	base?: boolean;
 	/**
 	 * Enable terminal mouse reporting while fullscreen. Defaults on; disable it
 	 * when native terminal text selection takes precedence over pointer events.
@@ -1051,6 +1057,7 @@ export class TUI extends Container {
 	// normal screen. #altPreviousLines is the last alt frame, diffed row by row
 	// against the next one.
 	#altActive = false;
+	#altBaseActive = false;
 	#mouseTracking: MouseTrackingState = "off";
 	/** Product-owned probe for opt-in normal-buffer click capture (`tui.mouse`). Read every frame. */
 	#inlineMouseProvider: (() => boolean) | undefined;
@@ -1282,6 +1289,7 @@ export class TUI extends Container {
 	getFocused(): Component | null {
 		return this.#focusedComponent;
 	}
+
 	/** Last viewport successfully written by the renderer, for debug inspection. */
 	getDebugPaint():
 		| {
@@ -1311,9 +1319,10 @@ export class TUI extends Container {
 	showOverlay(component: Component, options?: OverlayOptions): OverlayHandle {
 		component.setIgnoreTight?.(true);
 		const entry = { component, options, preFocus: this.#focusedComponent, hidden: false, released: false };
-		this.overlayStack.push(entry);
+		if (options?.base) this.overlayStack.unshift(entry);
+		else this.overlayStack.push(entry);
 		// Only focus if overlay is actually visible
-		if (this.#isOverlayVisible(entry)) {
+		if (this.#isOverlayVisible(entry) && this.#getTopmostVisibleOverlay() === entry) {
 			this.setFocus(component);
 		}
 		this.terminal.hideCursor();
@@ -1328,7 +1337,7 @@ export class TUI extends Container {
 					this.overlayStack.splice(index, 1);
 					// Restore focus if this overlay or one of its owned targets had focus
 					if (isOverlayFocusTarget(component, this.#focusedComponent)) {
-						this.setFocus(this.#getKeyHolderOverlay()?.component ?? entry.preFocus);
+						this.#restoreOverlayFocus(entry);
 					}
 					if (this.overlayStack.length === 0) {
 						this.terminal.hideCursor();
@@ -1344,7 +1353,7 @@ export class TUI extends Container {
 				if (hidden) {
 					// If this overlay or one of its owned targets had focus, move focus to the next one holding keys or preFocus
 					if (isOverlayFocusTarget(component, this.#focusedComponent)) {
-						this.setFocus(this.#getKeyHolderOverlay()?.component ?? entry.preFocus);
+						this.#restoreOverlayFocus(entry);
 					}
 				} else {
 					// Restore focus to this overlay when showing (if it's actually visible)
@@ -1362,8 +1371,8 @@ export class TUI extends Container {
 	hideOverlay(): void {
 		const overlay = this.overlayStack.pop();
 		if (!overlay) return;
-		// Find the topmost visible overlay holding keys, or fall back to preFocus
-		this.setFocus(this.#getKeyHolderOverlay()?.component ?? overlay.preFocus);
+		// Find topmost visible overlay, or fall back to preFocus
+		this.#restoreOverlayFocus(overlay);
 		if (this.overlayStack.length === 0) {
 			this.terminal.hideCursor();
 			this.#recordHardwareCursorHidden();
@@ -1373,7 +1382,14 @@ export class TUI extends Container {
 
 	/** Check if there are any visible overlays */
 	hasOverlay(): boolean {
-		return this.overlayStack.some(o => this.#isOverlayVisible(o));
+		return this.overlayStack.some(o => this.#isOverlayVisible(o) && o.options?.base !== true);
+	}
+
+	/** Whether a visible base overlay still owns the terminal surface beneath modal overlays. */
+	hasFullscreenBaseOverlay(): boolean {
+		return this.overlayStack.some(
+			o => this.#isOverlayVisible(o) && o.options?.base === true && o.options.fullscreen === true,
+		);
 	}
 
 	/**
@@ -1495,6 +1511,16 @@ export class TUI extends Container {
 		if (!field || field === this.#focusedComponent || !visible.every(entry => sheet(entry.component))) return;
 		for (const entry of visible) entry.released = true;
 		this.setFocus(field);
+	}
+
+	/** Restore focus after a modal leaves without stealing an owned base surface's editor. */
+	#restoreOverlayFocus(entry: (typeof this.overlayStack)[number]): void {
+		const topVisible = this.#getKeyHolderOverlay();
+		if (topVisible?.options?.base && isOverlayFocusTarget(topVisible.component, entry.preFocus)) {
+			this.setFocus(entry.preFocus);
+			return;
+		}
+		this.setFocus(topVisible?.component ?? entry.preFocus);
 	}
 
 	override invalidate(): void {
@@ -2672,6 +2698,7 @@ export class TUI extends Container {
 		this.#resizeInPlaceActive = false;
 		this.#altToggleEchoPending = false;
 		this.#cancelResizeProbe();
+		const fullscreenBase = this.hasFullscreenBaseOverlay() || (this.#altActive && this.#altBaseActive);
 		if (this.#resizeAltActive) {
 			this.#resizeAltActive = false;
 			this.terminal.write(`${this.#takePendingAltEnter()}${this.#altScreenExit()}`);
@@ -2707,8 +2734,9 @@ export class TUI extends Container {
 		// erase native history and re-stream the whole transcript at quit; drop
 		// the latch so the flush below writes only un-retired rows.
 		this.#clearScrollbackOnNextRender = false;
-		// The surface already holds the transcript; there's no row history to retire.
-		if (!nativeWasLive) this.#flushHistoryBeforeStop();
+		// Native surfaces and persistent fullscreen sessions must not dump their
+		// transcript into the restored shell buffer. Transient dialogs keep normal flushing.
+		if (!nativeWasLive && !fullscreenBase) this.#flushHistoryBeforeStop();
 		// Deliberately leave transmitted images in the terminal's graphics store:
 		// placeholder cells committed to native scrollback render only while their
 		// image data lives, so a delete-by-id here blanks every transcript image
@@ -3900,11 +3928,12 @@ export class TUI extends Container {
 			return;
 		}
 
-		// Fullscreen alt-screen short-circuit. While the topmost visible overlay
-		// requests it, borrow the terminal's alternate buffer and paint only the
-		// modal there; the normal screen and all accounting stay untouched.
+		// Fullscreen alt-screen short-circuit. While the top overlay or a visible
+		// fullscreen base requests it, borrow the terminal's alternate buffer and paint only the visible
+		// overlay stack there; the normal screen and all accounting stay untouched.
 		const topOverlay = this.#getTopmostVisibleOverlay();
-		const wantAlt = topOverlay?.options?.fullscreen === true;
+		this.#altBaseActive = this.hasFullscreenBaseOverlay();
+		const wantAlt = topOverlay?.options?.fullscreen === true || this.#altBaseActive;
 		const wantMouse: MouseTrackingState =
 			topOverlay === undefined
 				? this.#inlineMouseProvider?.() === true

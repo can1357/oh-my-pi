@@ -386,8 +386,8 @@ export class InputController {
 			this.#btwBranchListenerInstalled = true;
 			this.ctx.ui.addInputListener(data => {
 				if (!matchesKey(data, "b")) return undefined;
-				if (!this.ctx.handlesBtwBranchKey()) return undefined;
 				if (this.ctx.ui.getFocused() !== this.ctx.editor) return undefined;
+				if (!this.ctx.handlesBtwBranchKey()) return undefined;
 				if (this.ctx.editor.getText().trim()) return undefined;
 				void this.ctx.handleBtwBranchKey();
 				return { consume: true };
@@ -518,7 +518,7 @@ export class InputController {
 			this.#inlineMouseListenerInstalled = true;
 			// Inline click-to-focus (`tui.mouse`): SGR reports only arrive while
 			// the setting has tracking enabled, so this stays inert otherwise.
-			// Defers to fullscreen overlays, which own mouse handling on the
+			// Defers to fullscreen surfaces, which own mouse handling on the
 			// alternate screen.
 			this.ctx.ui.addInputListener(data => this.#handleInlineMouse(data));
 		}
@@ -853,7 +853,7 @@ export class InputController {
 	#handleInlineMouse(data: string): { consume?: boolean; data?: string } | undefined {
 		if (!data.startsWith("\x1b[<")) return undefined;
 		if (!cfgTuiMouse.get(this.ctx.settings)) return undefined;
-		if (this.ctx.ui.hasOverlay()) return undefined;
+		if (this.ctx.ui.hasOverlay() || this.ctx.ui.hasFullscreenBaseOverlay()) return undefined;
 		const event = parseSgrMouse(data);
 		if (!event) return undefined;
 		if (event.motion) this.#updateHoverHighlight(event.row);

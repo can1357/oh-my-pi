@@ -578,6 +578,19 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	}
 
 	/**
+	 * Render rows already laid out for a fullscreen viewport through the same extension-link pipeline
+	 * as renderFrame, so link counts, picks, and tags reflect what the alternate screen displays.
+	 */
+	renderFullscreenViewport(rows: readonly string[], width: number): readonly string[] {
+		if (!this.#started || this.#stopped) return rows;
+		this.#lastClickSpans = [];
+		this.#lastViewportRows = rows;
+		this.#lastViewportWidth = width;
+		this.#syncLinkHints(rows, width);
+		return this.#paintLinkHints([...rows], width);
+	}
+
+	/**
 	 * Keep link-hint tags on what `rows` show. The first frame after `startLinkHints` tags its
 	 * labels; later frames keep the tags while the tagged labels are still drawn first, in the same
 	 * order and columns (rows may scroll, links may be added below), and otherwise end the mode, so a
@@ -1261,6 +1274,11 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	#disposeStartupStatus(): void {
 		this.#startupStatus?.dispose();
 		this.#startupStatus = undefined;
+	}
+
+	/** Roots currently laid out below the transcript, including the status host; read by fullscreen framing. */
+	get runtimeChildren(): readonly Component[] {
+		return [...this.#runtimeChildren, this.#statusHost];
 	}
 
 	/** Mount or replace session-aware root children while preserving the header and status hosts. */

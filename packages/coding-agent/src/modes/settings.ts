@@ -453,6 +453,23 @@ export const cfgTuiRenderMermaid = register({
 	},
 });
 
+export const cfgTuiMode = register({
+	id: "tui.mode",
+	type: "enum",
+	values: ["regular", "fullscreen"] as const,
+	default: "regular",
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Interface Mode",
+		description: "Switch the conversation layout immediately and save it for future sessions",
+		options: [
+			{ value: "regular", label: "Regular", description: "Use the terminal's native scrollback" },
+			{ value: "fullscreen", label: "Fullscreen", description: "Scroll inside the app with a fixed input area" },
+		],
+	},
+});
+
 export const cfgTuiRenderSvg = register({
 	id: "tui.renderSvg",
 	type: "boolean",
