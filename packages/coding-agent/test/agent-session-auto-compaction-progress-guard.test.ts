@@ -455,6 +455,28 @@ describe("AgentSession auto-compaction progress guard", () => {
 		expect(compactEvents[0]?.compactionEntry).toMatchObject({ summary: "compacted", fromExtension: true });
 	});
 
+	it("auto-continues after compaction of a status reply the context budget asked for", async () => {
+		// A budgeted Cursor turn ends with a text-only status because the
+		// provider told it to stop for compaction; the work is not done.
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		vi.spyOn(session.agent, "continue").mockResolvedValue();
+		vi.spyOn(session, "getContextUsage").mockReturnValue({ tokens: 1000, contextWindow: 200000, percent: 0.5 });
+
+		const { promise: compactionDone, resolve: onCompactionDone } = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "auto_compaction_end") onCompactionDone();
+		});
+
+		const assistantMsg = { ...highUsageAssistant(), contextBudgetWrapUp: true };
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+		await compactionDone;
+		await session.waitForIdle();
+
+		expect(promptSpy).toHaveBeenCalledTimes(1);
+	});
+
 	it("auto-continues after compaction while an active goal still needs work", async () => {
 		activateOngoingGoal("headroom");
 		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
@@ -1218,6 +1240,56 @@ describe("AgentSession auto-compaction progress guard", () => {
 			}),
 		);
 		await reloaded.close();
+	});
+
+	it("budgets a Cursor turn opening past the threshold only while a speculative summary runs", async () => {
+		const cursor = getBundledModel("cursor", "composer-2.5");
+		cfgCompactionMethodOrder.set(session.settings, ["handoff"]);
+		cfgCompactionEnabled.set(session.settings, true);
+		cfgCompactionAsyncEnabled.set(session.settings, true);
+		cfgCompactionThresholdTokens.set(session.settings, 150_000);
+		cfgCompactionKeepRecentTokens.set(session.settings, 1);
+		cfgContextPromotionEnabled.set(session.settings, false);
+		compactHookEnabled = false;
+		vi.spyOn(session.agent, "continue").mockResolvedValue();
+		const handoffStarted = Promise.withResolvers<void>();
+		const handoffResult = Promise.withResolvers<string>();
+		vi.spyOn(compactionModule, "generateHandoffFromContext").mockImplementation(async () => {
+			handoffStarted.resolve();
+			return handoffResult.promise;
+		});
+
+		const trigger = {
+			role: "assistant" as const,
+			content: [{ type: "text" as const, text: "working" }],
+			api: "anthropic-messages" as const,
+			provider: "anthropic" as const,
+			model: "claude-sonnet-4-5",
+			stopReason: "stop" as const,
+			usage: {
+				input: 143_000,
+				output: 1_000,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 144_000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		};
+		sessionManager.appendMessage(trigger);
+		session.agent.emitExternalEvent({ type: "message_end", message: trigger });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [trigger] });
+		await handoffStarted.promise;
+		// The context now sits past the threshold, as after a deferred threshold pass.
+		cfgCompactionThresholdTokens.set(session.settings, 140_000);
+
+		expect(session.compactionSpeculation).toBe("running");
+		expect(session.cursorContextBudgetTokens(cursor)).toBe(140_000);
+
+		handoffResult.resolve("summary");
+		while (session.compactionSpeculation === "running") await scheduler.yield();
+
+		expect(session.cursorContextBudgetTokens(cursor)).toBeUndefined();
 	});
 
 	it("settles an overlapping successful stop but resumes a thinking-only length stop", async () => {

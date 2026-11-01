@@ -4842,6 +4842,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					...streamOptions,
 					promptCacheKey: streamOptions?.promptCacheKey ?? session?.getPromptCacheKeyForModel(streamModel),
 					forceReasoningOff: externalThinking || streamOptions?.forceReasoningOff,
+					cursorContextBudgetTokens: session?.cursorContextBudgetTokens(streamModel),
 				};
 				const stream = primaryStreamFn(streamModel, context, {
 					...merged,

@@ -224,6 +224,31 @@ function hasUsableCompactionMethod(
 }
 
 /**
+ * Where a Cursor turn is asked to wrap up so compaction can run. Cursor runs the
+ * tool loop server-side, which leaves mid-turn compaction no boundary inside the
+ * turn. Undefined when the post-turn threshold check would not compact and
+ * continue, so stopping the turn would only stall the work. Notes-backed rollover
+ * runs ahead of method selection, so it counts without a usable method when the
+ * session carries the tools it needs.
+ */
+export function resolveCursorContextBudgetTokens(
+	settings: Settings,
+	model: Model,
+	hasRolloverTools: boolean,
+): number | undefined {
+	const contextWindow = model.contextWindow ?? 0;
+	if (model.api !== "cursor-agent" || contextWindow <= 0) return undefined;
+	const compaction = resolveModelCompactionSettings(settings, model);
+	const rollsOver = compaction.experimentalContextManagement === true && hasRolloverTools;
+	const compactsAndContinues =
+		compaction.enabled &&
+		compaction.midTurnEnabled !== false &&
+		compaction.autoContinue !== false &&
+		(rollsOver || hasUsableCompactionMethod("threshold", model, compaction));
+	return compactsAndContinues ? resolveThresholdTokens(contextWindow, compaction) : undefined;
+}
+
+/**
  * Concrete media-limit wording in a payload-rejection error (e.g.
  * `request_too_large: too many images`, `image count exceeds the limit of
  * 20`). `ambiguousPayloadRejection` (dual `ContextOverflow` + `PayloadRejected`)
@@ -3536,11 +3561,17 @@ export class SessionMaintenance {
 			contextPromotionEnabled: cfgContextPromotionEnabled.get(this.#host.settings) === true,
 		});
 		if (shouldThresholdCompact) {
+			// A budgeted Cursor turn that was asked to stop here so the host could
+			// compact. Its tool loop ran server-side, so no later boundary in this run
+			// picks the work back up: it must neither wait for a speculative summary
+			// nor end on a promotion, and its status-only reply is not a final answer.
+			const cursorWrapUp = sameModel === true && assistantMessage.contextBudgetWrapUp === true;
+			const terminalTextAnswer = !cursorWrapUp && isTerminalTextAssistantAnswer(assistantMessage);
 			// Grace band: a live (or just-started) background speculation absorbs
 			// the blocking summarization; the session stays responsive and the
 			// armed result lands at the next boundary. Deferral delays promotion
 			// by at most the band — the eventual real pass still promotes first.
-			if (this.deferThresholdCompactionToSpeculation(postMaintenanceContextTokens, contextWindow)) {
+			if (!cursorWrapUp && this.deferThresholdCompactionToSpeculation(postMaintenanceContextTokens, contextWindow)) {
 				logger.debug("Post-turn threshold deferred to speculative compaction", {
 					postMaintenanceContextTokens,
 					contextWindow,
@@ -3554,7 +3585,7 @@ export class SessionMaintenance {
 					autoContinue,
 					triggerContextTokens: postMaintenanceContextTokens,
 					phase: "pre_turn",
-					terminalTextAnswer: isTerminalTextAssistantAnswer(assistantMessage),
+					terminalTextAnswer,
 				});
 			}
 			logger.debug("Auto-compaction threshold satisfied but context promotion took over", {
@@ -3562,6 +3593,17 @@ export class SessionMaintenance {
 				contextWindow,
 				model: `${assistantMessage.provider}/${assistantMessage.model}`,
 			});
+			if (
+				cursorWrapUp &&
+				this.#host.scheduleCompactionContinuation({
+					generation,
+					autoContinue,
+					terminalTextAnswer,
+					suppressContinuation: false,
+				})
+			) {
+				return COMPACTION_CHECK_CONTINUATION;
+			}
 		} else {
 			this.maybeStartSpeculativeCompaction(contextTokens, contextWindow);
 		}

@@ -827,6 +827,12 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	/** The caller's client runs every tool: Cursor offers them all as MCP tools and hands each call off to it. */
 	cursorExternalToolExecutor?: boolean;
 	/**
+	 * Conversation size at which a Cursor turn is asked to wrap up. Cursor runs
+	 * its tool loop server-side, so the host's compaction threshold only takes
+	 * effect between turns; omit to let a turn run until it ends on its own.
+	 */
+	cursorContextBudgetTokens?: number;
+	/**
 	 * Amazon Bedrock Guardrail settings forwarded through transports that do not
 	 * dispatch directly to the Bedrock provider. Model-level values take
 	 * precedence when both are present.
@@ -1361,6 +1367,11 @@ export interface AssistantMessage {
 	requestControls?: AnthropicRequestControls;
 	/** Provider-specific opaque payload used to reconstruct transport-native history. */
 	providerPayload?: ProviderPayload;
+	/**
+	 * The provider asked this response to end at `contextBudgetTokens` so the host
+	 * can compact between turns (Cursor). Set only when the notice reached the model.
+	 */
+	contextBudgetWrapUp?: boolean;
 	/** In-memory fallback credit handle attached when a refusal response carries a fallback credit token. */
 	fallbackCreditHandle?: AnthropicFallbackCreditHandle;
 	timestamp: number; // Unix timestamp in milliseconds
