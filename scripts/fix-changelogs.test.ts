@@ -10,6 +10,7 @@ import {
 	runChangelogFixer,
 	splitArchiveFooter,
 } from "./fix-changelogs";
+const TEST_TIMEOUT_MS = 60_000;
 
 describe("collectPromotableAddedItemLines", () => {
 	it("keeps new changelog item additions while ignoring moves and edits", () => {
@@ -315,6 +316,15 @@ describe("collapseChangelogTail", () => {
 		expect(result.content).not.toContain("## [1.0.0]");
 	});
 
+	it("keeps every [Unreleased] section and the newest release when a merge left two [Unreleased] headings", () => {
+		const twoUnreleased = FOUR_SECTIONS.replace("## [1.2.0]", "## [Unreleased]\n\n## [1.2.0]");
+
+		const result = collapseChangelogTail(twoUnreleased, ARCHIVE_LINK, 16);
+
+		expect(result.collapsedReleases).toBe(2);
+		expect(result.content).toBe(`${twoUnreleased.slice(0, twoUnreleased.indexOf("\n\n## [1.1.0]"))}\n`);
+	});
+
 	it("leaves content under the budget untouched", () => {
 		const result = collapseChangelogTail(FOUR_SECTIONS, ARCHIVE_LINK, 1024 * 1024);
 
@@ -365,53 +375,57 @@ const RELEASED_PLUS_RECOVERED = `# Changelog
 `;
 
 describe("runChangelogFixer baseline pin", () => {
-	it("uses the clog baseline ref as the diff floor so a recovered released bullet is not re-promoted", async () => {
-		const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "clog-fix-"));
-		const git = (...args: string[]) =>
-			$`git ${args}`
-				.cwd(repoRoot)
-				.quiet()
-				.env({
-					...process.env,
-					GIT_CONFIG_GLOBAL: "/dev/null",
-					GIT_CONFIG_SYSTEM: "/dev/null",
-					GIT_AUTHOR_NAME: "t",
-					GIT_AUTHOR_EMAIL: "t@t",
-					GIT_COMMITTER_NAME: "t",
-					GIT_COMMITTER_EMAIL: "t@t",
-				});
-		try {
-			const changelogPath = path.join(repoRoot, "packages/foo/CHANGELOG.md");
-			await git("init", "-b", "main");
-			await Bun.write(changelogPath, RELEASED_ONLY);
-			await git("add", "-A");
-			await git("commit", "-m", "release 1.0.0");
-			await git("tag", "v1.0.0");
+	it(
+		"uses the clog baseline ref as the diff floor so a recovered released bullet is not re-promoted",
+		async () => {
+			const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "clog-fix-"));
+			const git = (...args: string[]) =>
+				$`git ${args}`
+					.cwd(repoRoot)
+					.quiet()
+					.env({
+						...process.env,
+						GIT_CONFIG_GLOBAL: "/dev/null",
+						GIT_CONFIG_SYSTEM: "/dev/null",
+						GIT_AUTHOR_NAME: "t",
+						GIT_AUTHOR_EMAIL: "t@t",
+						GIT_COMMITTER_NAME: "t",
+						GIT_COMMITTER_EMAIL: "t@t",
+					});
+			try {
+				const changelogPath = path.join(repoRoot, "packages/foo/CHANGELOG.md");
+				await git("init", "-b", "main");
+				await Bun.write(changelogPath, RELEASED_ONLY);
+				await git("add", "-A");
+				await git("commit", "-m", "release 1.0.0");
+				await git("tag", "v1.0.0");
 
-			// Simulate a `--recover` restoring a historically released bullet that the
-			// v1.0.0 snapshot no longer carries.
-			await Bun.write(changelogPath, RELEASED_PLUS_RECOVERED);
-			await git("add", "-A");
-			await git("commit", "-m", "recover dropped bullet");
+				// Simulate a `--recover` restoring a historically released bullet that the
+				// v1.0.0 snapshot no longer carries.
+				await Bun.write(changelogPath, RELEASED_PLUS_RECOVERED);
+				await git("add", "-A");
+				await git("commit", "-m", "recover dropped bullet");
 
-			// No baseline tag: the floor is the latest version tag, which predates the
-			// recovery, so the restored released bullet reads as added-in-a-released
-			// section and is wrongly promoted back into [Unreleased].
-			const withoutPin = await runChangelogFixer({ repoRoot, write: false });
-			expect(withoutPin.since).toBe("v1.0.0");
-			const promoted = withoutPin.changedFiles.find(file => file.path === "packages/foo/CHANGELOG.md");
-			expect(promoted?.promotedItems).toBe(1);
+				// No baseline tag: the floor is the latest version tag, which predates the
+				// recovery, so the restored released bullet reads as added-in-a-released
+				// section and is wrongly promoted back into [Unreleased].
+				const withoutPin = await runChangelogFixer({ repoRoot, write: false });
+				expect(withoutPin.since).toBe("v1.0.0");
+				const promoted = withoutPin.changedFiles.find(file => file.path === "packages/foo/CHANGELOG.md");
+				expect(promoted?.promotedItems).toBe(1);
 
-			// Pin `clog` (a custom ref, not a tag — see resolveSince) to the recovery
-			// commit: the plain run now diffs against it and leaves the bullet untouched.
-			await git("update-ref", "refs/clog", "HEAD");
-			const withPin = await runChangelogFixer({ repoRoot, write: false });
-			expect(withPin.since).toBe("refs/clog");
-			expect(withPin.changedFiles).toHaveLength(0);
-		} finally {
-			await fs.rm(repoRoot, { recursive: true, force: true });
-		}
-	});
+				// Pin `clog` (a custom ref, not a tag — see resolveSince) to the recovery
+				// commit: the plain run now diffs against it and leaves the bullet untouched.
+				await git("update-ref", "refs/clog", "HEAD");
+				const withPin = await runChangelogFixer({ repoRoot, write: false });
+				expect(withPin.since).toBe("refs/clog");
+				expect(withPin.changedFiles).toHaveLength(0);
+			} finally {
+				await fs.rm(repoRoot, { recursive: true, force: true });
+			}
+		},
+		TEST_TIMEOUT_MS,
+	);
 });
 describe("runChangelogFixer size limit", () => {
 	it("collapses oversized changelogs behind a link to the last commit containing them, idempotently", async () => {

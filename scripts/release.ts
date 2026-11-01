@@ -12,6 +12,7 @@
  *
  * Example: bun scripts/release.ts minor
  */
+import * as path from "node:path";
 import { $, Glob } from "bun";
 import { compareVersions } from "../packages/utils/src/version.ts";
 import { runChangelogFixer } from "./fix-changelogs";
@@ -179,11 +180,12 @@ function removeEmptyVersionEntries(content: string): string {
 	return content.replace(/## \[\d+\.\d+\.\d+\] - \d{4}-\d{2}-\d{2}\s*\n(?=## \[|\s*$)/g, "");
 }
 
-async function updateChangelogsForRelease(version: string): Promise<void> {
+export async function updateChangelogsForRelease(version: string, repoRoot = "."): Promise<void> {
 	const date = new Date().toISOString().split("T")[0];
 
-	for await (const changelog of changelogGlob.scan(".")) {
-		let content = await Bun.file(changelog).text();
+	for await (const changelog of changelogGlob.scan(repoRoot)) {
+		const changelogPath = path.join(repoRoot, changelog);
+		let content = await Bun.file(changelogPath).text();
 
 		if (!content.includes("## [Unreleased]")) {
 			console.log(`  Skipping ${changelog}: no [Unreleased] section`);
@@ -199,7 +201,7 @@ async function updateChangelogsForRelease(version: string): Promise<void> {
 		// Clean up any existing empty version entries
 		content = removeEmptyVersionEntries(content);
 
-		await Bun.write(changelog, content);
+		await Bun.write(changelogPath, content);
 		console.log(`  Updated ${changelog}`);
 	}
 }

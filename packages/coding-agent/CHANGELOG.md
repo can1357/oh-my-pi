@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Pull requests now fail CI, and `scripts/merge-pr.ts` stops before committing, when a merge would put entries into an already-released changelog section; the report names the file, section and lines to move under `## [Unreleased]` ([#17632](https://github.com/can1357/oh-my-pi/pull/17632) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.14.2] - 2026-10-31
 
 ### Added
