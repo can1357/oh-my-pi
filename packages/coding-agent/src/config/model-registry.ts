@@ -1,6 +1,11 @@
 import * as path from "node:path";
 import type { ApiKeyResolver, FetchImpl, ResolvedApiKey, UsageProvider } from "@oh-my-pi/pi-ai";
-import { type AuthApiKeyOptions, type AuthPeekOptions, oauthAccountKey } from "@oh-my-pi/pi-ai/auth-storage";
+import {
+	type AuthApiKeyOptions,
+	type AuthPeekOptions,
+	type AuthStorageData,
+	oauthAccountKey,
+} from "@oh-my-pi/pi-ai/auth-storage";
 import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { registerOAuthProvider, unregisterOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
@@ -214,6 +219,7 @@ interface VersionedBuiltInDiscoveryResult extends BuiltInDiscoveryResult {
 
 interface BuiltInProviderDiscovery {
 	options: ModelManagerOptions<Api>;
+	providerVersion: number;
 	runtime: boolean;
 	result: VersionedBuiltInDiscoveryResult;
 }
@@ -392,6 +398,10 @@ export class ModelRegistry {
 	> = new Map();
 	#builtInDiscoveryInFlight = new Map<string, Map<ModelRefreshStrategy, Promise<VersionedBuiltInDiscoveryResult>>>();
 	#staticModelGeneration = 0;
+	#providerDiscoveryVersions = new Map<string, number>();
+	#providerRegistrationVersions = new Map<string, number>();
+	#discoveryCredentialGeneration = 0;
+	#discoveryCredentials: AuthStorageData = {};
 	// Version each provider result when it settles, before a batch can wait on
 	// unrelated providers. Only a newer published result supersedes it.
 	#discoveryRefreshVersion = 0;
@@ -582,6 +592,8 @@ export class ModelRegistry {
 		this.#cacheDbPath =
 			options?.cacheDbPath ?? (modelsPath ? path.join(path.dirname(modelsPath), "models.db") : undefined);
 		this.authStorage.keys.setResolver(resolveConfigValue);
+		this.#discoveryCredentialGeneration = this.authStorage.credentials.generation;
+		this.#discoveryCredentials = this.authStorage.credentials.all();
 		// Load config and cache-backed layers synchronously in the constructor.
 		this.#loadModels();
 	}
@@ -941,6 +953,7 @@ export class ModelRegistry {
 			// Models config unchanged since last load; reloading would be redundant.
 			return;
 		}
+		const changedCredentialProviders = this.#refreshDiscoveryCredentials();
 		// With no models file, reloads still detect changes to implicit endpoints
 		// and authentication. Keep the generation only if that effective
 		// configuration is unchanged after rebuilding it.
@@ -1056,6 +1069,8 @@ export class ModelRegistry {
 				}
 			}
 		}
+		// A static config match cannot authorize the previous account's roster.
+		for (const providerId of changedCredentialProviders ?? []) preservedProviderIds.delete(providerId);
 		this.#runtimeDiscoveredModels = preservedRuntimeState.models.filter(model =>
 			preservedProviderIds.has(model.provider),
 		);
@@ -1438,6 +1453,9 @@ export class ModelRegistry {
 		const authoritativeFreshProviders = new Set<string>();
 		using _cacheConnection = retainModelCacheConnection(this.#cacheDbPath);
 		for (const providerId of providerIds) {
+			// Runtime overrides need a resolved key to select their scoped cache.
+			// The asynchronous manager hydrates it; never read the old endpoint here.
+			if (this.#runtimeProviderOverrides.has(providerId) || this.#runtimeProviderApiKeys.has(providerId)) continue;
 			const cacheProviderId = this.#resolveStartupModelCacheProviderId(providerId);
 			const cache = readModelCache<Api>(cacheProviderId, 24 * 60 * 60 * 1000, Date.now, this.#cacheDbPath);
 			const sharedCatalogProvider = MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP[providerId] === true;
@@ -1995,9 +2013,9 @@ export class ModelRegistry {
 				currentDiscoverableProviders.has(result.provider) && canPublish(result.provider.provider, result.version),
 		);
 		const acceptedBuiltInDiscoveries = builtInDiscovery.discoveries.filter(
-			({ options, runtime, result }) =>
+			({ options, providerVersion, runtime, result }) =>
 				canPublish(options.providerId, result.version) &&
-				this.#isCurrentBuiltInDiscovery(options, builtInDiscovery.staticGeneration, runtime),
+				this.#isCurrentBuiltInDiscovery(options, builtInDiscovery.staticGeneration, runtime, providerVersion),
 		);
 		const builtInModels = acceptedBuiltInDiscoveries.flatMap(discovery => discovery.result.models);
 		const builtInAuthoritativeProviders = new Set(
@@ -2110,22 +2128,77 @@ export class ModelRegistry {
 		return merged;
 	}
 
+	#invalidateBuiltInDiscovery(providerId: string): void {
+		this.#providerDiscoveryVersions.set(providerId, (this.#providerDiscoveryVersions.get(providerId) ?? 0) + 1);
+		this.#latestBuiltInIdentities.delete(providerId);
+	}
+
+	#invalidateBuiltInRegistration(providerId: string): void {
+		this.#providerRegistrationVersions.set(providerId, (this.#providerRegistrationVersions.get(providerId) ?? 0) + 1);
+		this.#invalidateBuiltInDiscovery(providerId);
+	}
+
+	#discardProviderDiscoveries(providers: ReadonlySet<string>): void {
+		this.#runtimeDiscoveredModels = this.#runtimeDiscoveredModels.filter(model => !providers.has(model.provider));
+		this.#cachedDiscoverableModels = this.#cachedDiscoverableModels.filter(model => !providers.has(model.provider));
+		for (const providerId of providers) {
+			this.#runtimeAuthoritativeProviders.delete(providerId);
+			this.#providerDiscoveryStates.delete(providerId);
+			this.#cachedStandardModelsByProvider.delete(providerId);
+			this.#pendingStandardCacheProviders.delete(providerId);
+			this.#cachedAuthoritativeProviders.delete(providerId);
+			this.#invalidateProviderModelCache(providerId);
+		}
+		this.#hasFullSnapshot = false;
+		this.#models = [];
+		this.#baseModels = [];
+		this.#unprojectedModels = [];
+	}
+
+	#refreshDiscoveryCredentials(): ReadonlySet<string> | undefined {
+		const generation = this.authStorage.credentials.generation;
+		if (generation === this.#discoveryCredentialGeneration) return undefined;
+		const credentials = this.authStorage.credentials.all();
+		const providers = new Set([...Object.keys(this.#discoveryCredentials), ...Object.keys(credentials)]);
+		let changed: Set<string> | undefined;
+		for (const providerId of providers) {
+			// Extension managers own their key preflight and registration identity.
+			if (this.#runtimeModelManagers.has(providerId)) continue;
+			if (Bun.deepEquals(this.#discoveryCredentials[providerId], credentials[providerId])) continue;
+			changed ??= new Set();
+			changed.add(providerId);
+			this.#invalidateBuiltInDiscovery(providerId);
+		}
+		this.#discoveryCredentialGeneration = generation;
+		this.#discoveryCredentials = credentials;
+		return changed;
+	}
+
 	#builtInDiscoveryIdentity(
 		options: ModelManagerOptions<Api>,
 		staticGeneration: number,
 		runtime: boolean,
+		providerVersion: number,
 	): string | ModelManagerOptions<Api> {
-		return runtime ? options : `${staticGeneration}\0${options.cacheProviderId ?? options.providerId}`;
+		return runtime
+			? options
+			: `${staticGeneration}\0${providerVersion}\0${options.cacheProviderId ?? options.providerId}`;
 	}
 
-	#isCurrentBuiltInDiscovery(options: ModelManagerOptions<Api>, staticGeneration: number, runtime: boolean): boolean {
+	#isCurrentBuiltInDiscovery(
+		options: ModelManagerOptions<Api>,
+		staticGeneration: number,
+		runtime: boolean,
+		providerVersion: number,
+	): boolean {
 		if (staticGeneration !== this.#staticModelGeneration) return false;
+		if (providerVersion !== (this.#providerDiscoveryVersions.get(options.providerId) ?? 0)) return false;
 		if (this.#discoverableProviders.some(provider => provider.provider === options.providerId)) return false;
 		const currentRuntime = this.#runtimeModelManagers.get(options.providerId)?.options;
 		if (runtime ? currentRuntime !== options : currentRuntime !== undefined) return false;
 		return (
 			this.#latestBuiltInIdentities.get(options.providerId)?.identity ===
-			this.#builtInDiscoveryIdentity(options, staticGeneration, runtime)
+			this.#builtInDiscoveryIdentity(options, staticGeneration, runtime, providerVersion)
 		);
 	}
 
@@ -2391,29 +2464,46 @@ export class ModelRegistry {
 		// Skip providers already handled by configured discovery (e.g. user-configured ollama with discovery.type)
 		const configuredDiscoveryProviders = new Set(this.#discoverableProviders.map(p => p.provider));
 		const staticGeneration = this.#staticModelGeneration;
+		// Key resolution can await OAuth while extensions register their overrides.
+		const providerVersions = new Map(this.#providerDiscoveryVersions);
 		const managerOptions = await this.#collectBuiltInModelManagerOptions(
 			strategy,
 			providerFilter,
 			configuredDiscoveryProviders,
+			providerVersions,
 		);
 		if (managerOptions.length === 0 || staticGeneration !== this.#staticModelGeneration) {
 			return { staticGeneration, discoveries: [] };
 		}
 		const writesBefore = getModelCacheWriteStats();
 		const discoveries = await Promise.all(
-			managerOptions.map(async options => {
-				const runtime = this.#runtimeModelManagers.get(options.providerId)?.options === options;
-				const identity = this.#builtInDiscoveryIdentity(options, staticGeneration, runtime);
-				const previousIdentity = this.#latestBuiltInIdentities.get(options.providerId);
-				if (!previousIdentity || previousIdentity.version <= version) {
-					this.#latestBuiltInIdentities.set(options.providerId, { version, identity });
-				}
-				return {
-					options,
-					runtime,
-					result: await this.#discoverWithModelManagerCoalesced(options, strategy, staticGeneration, runtime),
-				};
-			}),
+			managerOptions
+				.filter(
+					options =>
+						(providerVersions.get(options.providerId) ?? 0) ===
+						(this.#providerDiscoveryVersions.get(options.providerId) ?? 0),
+				)
+				.map(async options => {
+					const providerVersion = providerVersions.get(options.providerId) ?? 0;
+					const runtime = this.#runtimeModelManagers.get(options.providerId)?.options === options;
+					const identity = this.#builtInDiscoveryIdentity(options, staticGeneration, runtime, providerVersion);
+					const previousIdentity = this.#latestBuiltInIdentities.get(options.providerId);
+					if (!previousIdentity || previousIdentity.version <= version) {
+						this.#latestBuiltInIdentities.set(options.providerId, { version, identity });
+					}
+					return {
+						options,
+						providerVersion,
+						runtime,
+						result: await this.#discoverWithModelManagerCoalesced(
+							options,
+							strategy,
+							staticGeneration,
+							runtime,
+							providerVersion,
+						),
+					};
+				}),
 		);
 		const writesAfter = getModelCacheWriteStats();
 		const rewrittenRows = writesAfter.payloadWrites - writesBefore.payloadWrites;
@@ -2505,11 +2595,54 @@ export class ModelRegistry {
 		return projectId ? projectId : undefined;
 	}
 
+	#scopeRuntimeBuiltInManagerOptions(options: ModelManagerOptions<Api>, apiKey?: string): ModelManagerOptions<Api> {
+		// These factories already scope their cache by resolved account and endpoint.
+		if (isCredentialScopedModelCacheProvider(options.providerId)) return options;
+		const override = this.#runtimeProviderOverrides.get(options.providerId);
+		if (!override && !this.#runtimeProviderApiKeys.has(options.providerId)) return options;
+		// An old request can still write its cache after registration changes.
+		// Keep transport/credential overrides out of that previous namespace.
+		const scope = Bun.hash(
+			JSON.stringify([
+				override?.baseUrl ?? this.#providerOverrides.get(options.providerId)?.baseUrl,
+				apiKey,
+				override?.headers,
+				override?.authHeader,
+			]),
+		).toString(36);
+		return {
+			...options,
+			cacheProviderId: `${options.cacheProviderId ?? options.providerId}:runtime:${scope}`,
+		};
+	}
+
 	async #collectBuiltInModelManagerOptions(
 		strategy: ModelRefreshStrategy,
 		providerFilter: ReadonlySet<string> | undefined,
 		configuredDiscoveryProviders: ReadonlySet<string>,
+		providerVersions: Map<string, number>,
 	): Promise<ModelManagerOptions<Api>[]> {
+		const registrationVersions = new Map(this.#providerRegistrationVersions);
+		const resolveKey = async (providerId: string, cacheProviderId: string | undefined, authoritative: boolean) => {
+			const registrationVersion = registrationVersions.get(providerId) ?? 0;
+			// OAuth refresh can replace a credential during the first key read.
+			// Re-read that key locally, never repeat a catalog request for it.
+			for (let attempt = 0; attempt < 2; attempt++) {
+				const before = this.#refreshDiscoveryCredentials();
+				if (before) this.#discardProviderDiscoveries(before);
+				const providerVersion = this.#providerDiscoveryVersions.get(providerId) ?? 0;
+				const key = await this.#resolveBuiltInDiscoveryApiKey(providerId, strategy, cacheProviderId, authoritative);
+				const after = this.#refreshDiscoveryCredentials();
+				if (after) this.#discardProviderDiscoveries(after);
+				if (registrationVersion !== (this.#providerRegistrationVersions.get(providerId) ?? 0)) break;
+				if (providerVersion !== (this.#providerDiscoveryVersions.get(providerId) ?? 0)) continue;
+				providerVersions.set(providerId, providerVersion);
+				return key;
+			}
+			// A negative captured version rejects a preflight that never stabilized.
+			providerVersions.set(providerId, -1);
+			return undefined;
+		};
 		const specialProviderDescriptors: Array<{
 			providerId: string;
 			resolveKey: (value: string | undefined) => string | undefined;
@@ -2598,19 +2731,13 @@ export class ModelRegistry {
 				const cacheProviderId = isCredentialScopedModelCacheProvider(descriptor.providerId)
 					? undefined
 					: this.#resolveStartupModelCacheProviderId(descriptor.providerId);
-				return this.#resolveBuiltInDiscoveryApiKey(
-					descriptor.providerId,
-					strategy,
-					cacheProviderId,
-					descriptor.dynamicModelsAuthoritative ?? false,
-				);
+				return resolveKey(descriptor.providerId, cacheProviderId, descriptor.dynamicModelsAuthoritative ?? false);
 			}),
 		);
 		const specialKeys = await Promise.all(
 			enabledSpecialProviderDescriptors.map(descriptor =>
-				this.#resolveBuiltInDiscoveryApiKey(
+				resolveKey(
 					descriptor.providerId,
-					strategy,
 					descriptor.providerId,
 					AUTHORITATIVE_RUNTIME_CATALOG_PROVIDERS.has(descriptor.providerId),
 				),
@@ -2653,7 +2780,12 @@ export class ModelRegistry {
 				const modelsDev = managerOptions.modelsDev
 					? { ...managerOptions.modelsDev, additiveOnly: true }
 					: modelsDevCatalogFallback(descriptor.providerId, this.#fetch);
-				options.push(modelsDev ? { ...managerOptions, modelsDev } : managerOptions);
+				options.push(
+					this.#scopeRuntimeBuiltInManagerOptions(
+						modelsDev ? { ...managerOptions, modelsDev } : managerOptions,
+						apiKey,
+					),
+				);
 			}
 		}
 
@@ -2663,7 +2795,9 @@ export class ModelRegistry {
 			if (!isAuthenticated(key)) {
 				continue;
 			}
-			options.push(descriptor.createOptions(key, specialKeys[i]));
+			options.push(
+				this.#scopeRuntimeBuiltInManagerOptions(descriptor.createOptions(key, specialKeys[i]), specialKeys[i]),
+			);
 		}
 
 		// Catalog-only providers have no endpoint manager. Give their bundled
@@ -2705,18 +2839,26 @@ export class ModelRegistry {
 		strategy: ModelRefreshStrategy,
 		staticGeneration: number,
 		runtime: boolean,
+		providerVersion: number,
 	): Promise<VersionedBuiltInDiscoveryResult> {
 		// Extension registrations can replace their fetcher without changing the
 		// cache namespace; never share work across those registration identities.
-		if (runtime) return this.#discoverWithModelManager(options, strategy, staticGeneration, runtime);
-		// A config reload can change an unscoped provider's endpoint or key.
-		const discoveryKey = `${staticGeneration}\0${options.cacheProviderId ?? options.providerId}`;
+		const discoveryKey = this.#builtInDiscoveryIdentity(options, staticGeneration, runtime, providerVersion);
+		if (typeof discoveryKey !== "string") {
+			return this.#discoverWithModelManager(options, strategy, staticGeneration, runtime, providerVersion);
+		}
 		let providerInFlight = this.#builtInDiscoveryInFlight.get(discoveryKey);
 		const inFlight = providerInFlight?.get(strategy);
 		if (inFlight) return inFlight;
 
 		providerInFlight ??= new Map();
-		const discovery = this.#discoverWithModelManager(options, strategy, staticGeneration, runtime).finally(() => {
+		const discovery = this.#discoverWithModelManager(
+			options,
+			strategy,
+			staticGeneration,
+			runtime,
+			providerVersion,
+		).finally(() => {
 			if (providerInFlight.get(strategy) === discovery) {
 				providerInFlight.delete(strategy);
 				if (providerInFlight.size === 0) this.#builtInDiscoveryInFlight.delete(discoveryKey);
@@ -2732,6 +2874,7 @@ export class ModelRegistry {
 		strategy: ModelRefreshStrategy,
 		staticGeneration: number,
 		runtime: boolean,
+		providerVersion: number,
 	): Promise<VersionedBuiltInDiscoveryResult> {
 		try {
 			const manager = createModelManager({ ...options, cacheDbPath: this.#cacheDbPath });
@@ -2752,7 +2895,7 @@ export class ModelRegistry {
 							: result.models.length > 0
 								? "ok"
 								: "empty";
-			if (this.#isCurrentBuiltInDiscovery(options, staticGeneration, runtime)) {
+			if (this.#isCurrentBuiltInDiscovery(options, staticGeneration, runtime, providerVersion)) {
 				this.#providerDiscoveryStates.set(options.providerId, {
 					provider: options.providerId,
 					status,
@@ -2780,7 +2923,7 @@ export class ModelRegistry {
 			// 401/403 with nothing to serve is a credential problem, not an
 			// outage (issue #12281).
 			const authRejected = (previous?.models.length ?? 0) === 0 && isDiscoveryAuthRejection(error);
-			if (this.#isCurrentBuiltInDiscovery(options, staticGeneration, runtime)) {
+			if (this.#isCurrentBuiltInDiscovery(options, staticGeneration, runtime, providerVersion)) {
 				this.#providerDiscoveryStates.set(options.providerId, {
 					provider: options.providerId,
 					status: authRejected ? "unauthenticated" : "unavailable",
@@ -3638,12 +3781,12 @@ export class ModelRegistry {
 	}
 
 	#clearRuntimeProviderState(providerName: string): void {
+		this.#invalidateBuiltInRegistration(providerName);
 		this.#runtimeProviderApiKeys.delete(providerName);
 		this.#runtimeProviderOverrides.delete(providerName);
 		this.#runtimeCommandConfigsByProvider.delete(providerName);
 		this.#runtimeModelOverlays = this.#runtimeModelOverlays.filter(overlay => overlay.provider !== providerName);
 		this.#runtimeModelManagers.delete(providerName);
-		this.#latestBuiltInIdentities.delete(providerName);
 		this.#runtimeModelModifiers.delete(providerName);
 		this.#lastModelModifierWarnings.delete(providerName);
 		// A credential-scoped built-in provider (e.g. opencode-go) populates its
@@ -3750,6 +3893,7 @@ export class ModelRegistry {
 			},
 			"runtime-register",
 		);
+		this.#invalidateBuiltInRegistration(providerName);
 
 		if (config.streamSimple && config.api) {
 			const streamSimple = config.streamSimple;

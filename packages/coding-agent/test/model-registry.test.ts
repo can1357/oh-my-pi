@@ -2423,7 +2423,215 @@ describe("ModelRegistry", () => {
 		});
 	});
 
-	describe("github-copilot oauth endpoint alignment", () => {
+	describe("account-scoped OAuth discovery and Copilot endpoint alignment", () => {
+		async function waitForDiscoveryStart(
+			started: Promise<void>,
+			refresh: Promise<void>,
+			requested: string[],
+			provider: string,
+		): Promise<void> {
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const missing = () => new Error(`${provider} discovery did not start; requests: ${requested.join(", ")}`);
+			try {
+				await Promise.race([
+					started,
+					refresh.then(() => {
+						throw missing();
+					}),
+					new Promise<never>((_, reject) => {
+						timer = setTimeout(() => reject(missing()), 2_000);
+					}),
+				]);
+			} finally {
+				clearTimeout(timer);
+			}
+		}
+
+		test.each(["logout", "credential replacement"])("drops Kimi account rows after %s", async change => {
+			const provider = "kimi-code";
+			const oldModelId = "kimi-old-account-model";
+			const newModelId = "kimi-new-account-model";
+			const url = "https://api.kimi.com/coding/v1/models";
+			const previousEnvKey = Bun.env.KIMI_API_KEY;
+			Bun.env.KIMI_API_KEY = "";
+			try {
+				await authStorage.credentials.set(provider, {
+					type: "oauth",
+					access: "old-kimi-token",
+					refresh: "old-kimi-refresh",
+					expires: Date.now() + 60_000,
+				});
+				const replacementStarted = Promise.withResolvers<void>();
+				const releaseReplacement = Promise.withResolvers<void>();
+				const requested: string[] = [];
+				const fetchMock: FetchImpl = async (input, init) => {
+					const requestUrl = input instanceof Request ? input.url : String(input);
+					requested.push(requestUrl);
+					if (requestUrl !== url) throw new Error(`Unexpected URL: ${requestUrl}`);
+					const headers = input instanceof Request ? input.headers : new Headers(init?.headers);
+					if (headers.get("Authorization") === "Bearer new-kimi-token") {
+						replacementStarted.resolve();
+						await releaseReplacement.promise;
+						return Response.json({ data: [{ id: newModelId }] });
+					}
+					expect(headers.get("Authorization")).toBe("Bearer old-kimi-token");
+					return Response.json({ data: [{ id: oldModelId }] });
+				};
+				const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+				expect(fs.existsSync(modelsJsonPath)).toBe(false);
+				await registry.refreshProvider(provider, "online");
+				expect(registry.getAll().some(model => model.provider === provider && model.id === oldModelId)).toBe(true);
+				expect(registry.getProviderDiscoveryState(provider)?.models).toContain(oldModelId);
+
+				if (change === "logout") {
+					await authStorage.credentials.remove(provider);
+					await registry.refreshProvider(provider, "online");
+				} else {
+					await authStorage.credentials.set(provider, {
+						type: "oauth",
+						access: "new-kimi-token",
+						refresh: "new-kimi-refresh",
+						expires: Date.now() + 60_000,
+					});
+					const replacement = registry.refreshProvider(provider, "online");
+					try {
+						await waitForDiscoveryStart(replacementStarted.promise, replacement, requested, "replacement Kimi");
+						expect(registry.getAll().some(model => model.provider === provider && model.id === oldModelId)).toBe(
+							false,
+						);
+						expect(registry.getProviderDiscoveryState(provider)?.models ?? []).not.toContain(oldModelId);
+					} finally {
+						releaseReplacement.resolve();
+						await replacement;
+					}
+				}
+
+				expect(registry.getAll().some(model => model.provider === provider && model.id === oldModelId)).toBe(false);
+				expect(registry.getProviderDiscoveryState(provider)?.models ?? []).not.toContain(oldModelId);
+			} finally {
+				if (previousEnvKey === undefined) delete Bun.env.KIMI_API_KEY;
+				else Bun.env.KIMI_API_KEY = previousEnvKey;
+			}
+		});
+
+		test("rejects late logged-out Kimi discovery without rejecting unrelated pending discovery", async () => {
+			const provider = "kimi-code";
+			const oldModelId = "kimi-late-logged-out-account";
+			const otherProvider = "github-copilot";
+			const otherModelId = "gpt-99-unrelated-pending";
+			const copilotBaseUrl = "https://api.business.githubcopilot.com";
+			const previousEnvKey = Bun.env.KIMI_API_KEY;
+			Bun.env.KIMI_API_KEY = "";
+			try {
+				await authStorage.credentials.set(provider, {
+					type: "oauth",
+					access: "late-logged-out-account-token",
+					refresh: "late-logged-out-account-refresh",
+					expires: Date.now() + 60_000,
+				});
+				authStorage.keys.setRuntime(
+					otherProvider,
+					JSON.stringify({ token: "unrelated-provider-key", apiEndpoint: copilotBaseUrl }),
+				);
+				const oldStarted = Promise.withResolvers<void>();
+				const otherStarted = Promise.withResolvers<void>();
+				const release = Promise.withResolvers<void>();
+				const requested: string[] = [];
+				const fetchMock: FetchImpl = async input => {
+					const url = input instanceof Request ? input.url : String(input);
+					requested.push(url);
+					if (url === "https://api.kimi.com/coding/v1/models") {
+						oldStarted.resolve();
+						await release.promise;
+						return Response.json({ data: [{ id: oldModelId }] });
+					}
+					if (url === `${copilotBaseUrl}/models`) {
+						otherStarted.resolve();
+						await release.promise;
+						return Response.json({ data: [{ id: otherModelId }] });
+					}
+					throw new Error(`Unexpected URL: ${url}`);
+				};
+				const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+				const oldRefresh = registry.refreshDiscoverableProviders([provider], "online");
+				const otherRefresh = registry.refreshDiscoverableProviders([otherProvider], "online");
+				try {
+					await Promise.all([
+						waitForDiscoveryStart(oldStarted.promise, oldRefresh, requested, "Kimi"),
+						waitForDiscoveryStart(otherStarted.promise, otherRefresh, requested, "Copilot"),
+					]);
+					await authStorage.credentials.remove(provider);
+					await registry.refreshProvider(provider, "online");
+					expect(registry.getAll().some(model => model.provider === provider && model.id === oldModelId)).toBe(
+						false,
+					);
+					expect(registry.getProviderDiscoveryState(provider)?.models ?? []).not.toContain(oldModelId);
+				} finally {
+					release.resolve();
+					await Promise.all([oldRefresh, otherRefresh]);
+				}
+
+				expect(registry.getAll().some(model => model.provider === provider && model.id === oldModelId)).toBe(false);
+				expect(registry.getProviderDiscoveryState(provider)?.models ?? []).not.toContain(oldModelId);
+				expect(registry.getAll().some(model => model.provider === otherProvider && model.id === otherModelId)).toBe(
+					true,
+				);
+				expect(registry.getProviderDiscoveryState(otherProvider)?.models).toContain(otherModelId);
+			} finally {
+				if (previousEnvKey === undefined) delete Bun.env.KIMI_API_KEY;
+				else Bun.env.KIMI_API_KEY = previousEnvKey;
+			}
+		});
+
+		test("keeps discovery using an internally refreshed OAuth credential across unrelated refreshes", async () => {
+			const provider = "kimi-code";
+			const modelId = "kimi-refreshed-account-model";
+			const refreshedAuth = await AuthStorage.create(":memory:", {
+				refreshOAuthCredential: async (_provider, _credentialId, credential) => ({
+					...credential,
+					access: "fresh-kimi-token",
+					expires: Date.now() + 60_000,
+				}),
+			});
+			try {
+				await refreshedAuth.credentials.set(provider, {
+					type: "oauth",
+					access: "expired-kimi-token",
+					refresh: "kimi-refresh-token",
+					expires: Date.now() - 1,
+				});
+				const started = Promise.withResolvers<void>();
+				const release = Promise.withResolvers<void>();
+				const requested: string[] = [];
+				const fetchMock: FetchImpl = async (input, init) => {
+					const url = input instanceof Request ? input.url : String(input);
+					requested.push(url);
+					if (url !== "https://api.kimi.com/coding/v1/models") throw new Error(`Unexpected URL: ${url}`);
+					const headers = input instanceof Request ? input.headers : new Headers(init?.headers);
+					expect(headers.get("Authorization")).toBe("Bearer fresh-kimi-token");
+					started.resolve();
+					await release.promise;
+					return Response.json({ data: [{ id: modelId }] });
+				};
+				const registry = new ModelRegistry(refreshedAuth, modelsJsonPath, { fetch: fetchMock });
+				const discovery = registry.refreshDiscoverableProviders([provider], "online");
+				try {
+					await waitForDiscoveryStart(started.promise, discovery, requested, "refreshed Kimi");
+					await registry.refreshProvider("anthropic", "offline");
+				} finally {
+					release.resolve();
+					await discovery;
+				}
+				expect(registry.find(provider, modelId)?.id).toBe(modelId);
+				expect(registry.getProviderDiscoveryState(provider)?.models).toContain(modelId);
+				await registry.refreshProvider("anthropic", "offline");
+				expect(registry.find(provider, modelId)?.id).toBe(modelId);
+				expect(registry.getProviderDiscoveryState(provider)?.models).toContain(modelId);
+			} finally {
+				refreshedAuth.close();
+			}
+		});
+
 		test("keeps a scoped online catalog when an older full refresh finishes later", async () => {
 			const provider = "github-copilot";
 			const baseUrl = "https://api.business.githubcopilot.com";

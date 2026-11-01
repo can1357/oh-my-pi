@@ -481,6 +481,102 @@ describe("ModelRegistry runtime provider registration", () => {
 		expect(changingRegistry.getProviderDiscoveryState("anthropic")?.models).toContain("new-endpoint-model");
 	});
 
+	test("saved-model discovery uses a transport-only extension override while the built-in request is pending", async () => {
+		const provider = "anthropic";
+		const oldUrl = "https://api.anthropic.com/v1/models";
+		const newBaseUrl = "https://extension-proxy.example.com";
+		const newUrl = `${newBaseUrl}/v1/models`;
+		const oldKey = "sk-ant-api03-original-test-key";
+		const newKey = "sk-ant-api03-extension-test-key";
+		const oldStarted = Promise.withResolvers<void>();
+		const releaseOld = Promise.withResolvers<void>();
+		const requests: { url: string; apiKey: string | null }[] = [];
+		await authStorage.credentials.set(provider, { type: "api_key", key: oldKey, source: "login" });
+
+		const fetch: FetchImpl = async (input, init) => {
+			const url = input instanceof Request ? input.url : String(input);
+			if (url === "https://catalog.stencil.so/models.json.zstd") return Response.json({});
+			if (url === oldUrl || url === newUrl) {
+				const headers = new Headers(input instanceof Request ? input.headers : init?.headers);
+				requests.push({ url, apiKey: headers.get("x-api-key") });
+				if (url === oldUrl) {
+					oldStarted.resolve();
+					await releaseOld.promise;
+					return Response.json({ data: [{ id: "old-endpoint-only-model" }] });
+				}
+				return Response.json({ data: [{ id: "extension-endpoint-only-model" }] });
+			}
+			return new Response("not found", { status: 404 });
+		};
+		const overrideRegistry = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch,
+			cacheDbPath: path.join(tempDir, "extension-override-models.db"),
+		});
+		const oldRefresh = overrideRegistry.refreshProvider(provider, "online-if-uncached");
+		let savedModelRefresh: Promise<void> | undefined;
+		try {
+			await oldStarted.promise;
+			overrideRegistry.registerProvider(provider, { baseUrl: newBaseUrl, apiKey: newKey }, "ext://runtime");
+			const discoveryProvider = overrideRegistry.getDiscoveryProviderId(provider, { includeBuiltIn: true });
+			expect(discoveryProvider).toBe(provider);
+			savedModelRefresh = overrideRegistry.refreshDiscoverableProviders([discoveryProvider!], "online-if-uncached");
+			await drainMicrotasksUntil(
+				() => requests.some(request => request.url === newUrl),
+				"extension endpoint discovery did not start while the old request was pending",
+			);
+			await savedModelRefresh;
+			expect(overrideRegistry.find(provider, "extension-endpoint-only-model")?.baseUrl).toBe(newBaseUrl);
+			expect(overrideRegistry.find(provider, "old-endpoint-only-model")).toBeUndefined();
+		} finally {
+			releaseOld.resolve();
+			await Promise.all([oldRefresh, savedModelRefresh]);
+		}
+
+		expect(requests).toEqual([
+			{ url: oldUrl, apiKey: oldKey },
+			{ url: newUrl, apiKey: newKey },
+		]);
+		expect(
+			overrideRegistry
+				.getAvailableForProviders(new Set([provider]))
+				.some(model => model.id === "extension-endpoint-only-model"),
+		).toBe(true);
+		expect(overrideRegistry.find(provider, "extension-endpoint-only-model")?.baseUrl).toBe(newBaseUrl);
+		expect(overrideRegistry.find(provider, "old-endpoint-only-model")).toBeUndefined();
+		expect(overrideRegistry.getProviderDiscoveryState(provider)?.models).toContain("extension-endpoint-only-model");
+		expect(overrideRegistry.getProviderDiscoveryState(provider)?.models).not.toContain("old-endpoint-only-model");
+		await overrideRegistry.refreshDiscoverableProviders([provider], "online-if-uncached");
+		expect(overrideRegistry.find(provider, "extension-endpoint-only-model")?.baseUrl).toBe(newBaseUrl);
+		expect(overrideRegistry.find(provider, "old-endpoint-only-model")).toBeUndefined();
+	});
+
+	test("keeps key-only runtime discovery cached across catalog materialization and offline reload", async () => {
+		const provider = "anthropic";
+		const modelId = "key-only-extension-model";
+		const fetch: FetchImpl = async input => {
+			const url = input instanceof Request ? input.url : String(input);
+			if (url === "https://catalog.stencil.so/models.json.zstd") return Response.json({});
+			if (url === "https://api.anthropic.com/v1/models") {
+				return Response.json({ data: [{ id: modelId }] });
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const keyedRegistry = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch,
+			cacheDbPath: path.join(tempDir, "key-only-models.db"),
+		});
+		keyedRegistry.registerProvider(provider, { apiKey: "sk-ant-api03-key-only-test" }, "ext://key-only");
+		keyedRegistry.getAll();
+		await keyedRegistry.refreshDiscoverableProviders([provider], "online");
+		expect(keyedRegistry.find(provider, modelId)?.id).toBe(modelId);
+		await keyedRegistry.refreshProvider(provider, "offline");
+		expect(keyedRegistry.find(provider, modelId)?.id).toBe(modelId);
+		expect(keyedRegistry.getAvailableForProviders(new Set([provider])).some(model => model.id === modelId)).toBe(
+			true,
+		);
+		expect(keyedRegistry.getProviderDiscoveryState(provider)?.models).toContain(modelId);
+	});
+
 	test("configured discovery suppresses extension fetchDynamicModels for the same provider", async () => {
 		const providerName = "runtime-configured-provider";
 		fs.writeFileSync(
