@@ -2981,13 +2981,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return false;
 			};
 			if (!restoreSessionModel()) {
-				// The saved candidates weren't in the static+cached catalog. If any
-				// belongs to a discovery-backed provider that hasn't been fetched
-				// yet (models.yml `discovery:` or extension `fetchDynamicModels`),
-				// trigger a cache-aware, provider-scoped discovery pass and retry
-				// before resume silently downgrades to the default role. The
-				// registry coalesces this with any matching request already running
-				// in the SDK's startup background refresh.
+				// Include built-in providers, and share the cache-aware pass with any
+				// startup discovery already running. A cached catalog alone cannot
+				// establish that a saved model is no longer served.
 				const candidateProviders = sessionModelDiscoveryProviders(
 					modelRegistry,
 					sessionModelStrings.slice(0, sessionRetryLimit),
@@ -3000,7 +2996,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					await logger.time("restoreSessionModelDiscoveryFallback", () =>
 						modelRegistry.refreshDiscoverableProviders(candidateProviders, "online-if-uncached"),
 					);
-					restoreSessionModel();
+					if (!restoreSessionModel()) {
+						// Even a fresh snapshot may predate the saved model's availability.
+						// Revalidate these providers once before fallback or refusal.
+						await logger.time("restoreSessionModelOnlineRevalidation", () =>
+							modelRegistry.refreshDiscoverableProviders(candidateProviders, "online"),
+						);
+						restoreSessionModel();
+					}
 				}
 			}
 		}

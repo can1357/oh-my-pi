@@ -379,6 +379,8 @@ export class ModelRegistry {
 		DiscoveryProviderConfig,
 		Map<ModelRefreshStrategy, Promise<ConfiguredModelDiscoveryResult>>
 	> = new Map();
+	#builtInDiscoveryInFlight = new Map<string, Map<ModelRefreshStrategy, Promise<BuiltInDiscoveryResult>>>();
+	#staticModelGeneration = 0;
 	#policyReapply?: Promise<void>;
 	// Window tiers of models whose extended window is larger: per row as the
 	// hardcoded policies produced it (custom overlays replacing that row never
@@ -1028,6 +1030,7 @@ export class ModelRegistry {
 	}
 
 	#loadModels() {
+		this.#staticModelGeneration++;
 		this.#resetStaticComposition();
 		// Load custom config first (to know which providers to override).
 		const {
@@ -2270,6 +2273,7 @@ export class ModelRegistry {
 	): Promise<BuiltInDiscoveryResult> {
 		// Skip providers already handled by configured discovery (e.g. user-configured ollama with discovery.type)
 		const configuredDiscoveryProviders = new Set(this.#discoverableProviders.map(p => p.provider));
+		const staticGeneration = this.#staticModelGeneration;
 		const managerOptions = await this.#collectBuiltInModelManagerOptions(
 			strategy,
 			providerFilter,
@@ -2280,7 +2284,7 @@ export class ModelRegistry {
 		}
 		const writesBefore = getModelCacheWriteStats();
 		const discoveries = await Promise.all(
-			managerOptions.map(options => this.#discoverWithModelManager(options, strategy)),
+			managerOptions.map(options => this.#discoverWithModelManagerCoalesced(options, strategy, staticGeneration)),
 		);
 		const writesAfter = getModelCacheWriteStats();
 		const rewrittenRows = writesAfter.payloadWrites - writesBefore.payloadWrites;
@@ -2576,6 +2580,33 @@ export class ModelRegistry {
 			}
 		}
 		return options;
+	}
+
+	/** Share matching built-in requests across startup and saved-model discovery. */
+	#discoverWithModelManagerCoalesced(
+		options: ModelManagerOptions<Api>,
+		strategy: ModelRefreshStrategy,
+		staticGeneration: number,
+	): Promise<BuiltInDiscoveryResult> {
+		// Extension registrations can replace their fetcher without changing the
+		// cache namespace; never share work across those registration identities.
+		if (this.#runtimeModelManagers.has(options.providerId)) return this.#discoverWithModelManager(options, strategy);
+		// A config reload can change an unscoped provider's endpoint or key.
+		const discoveryKey = `${staticGeneration}\0${options.cacheProviderId ?? options.providerId}`;
+		let providerInFlight = this.#builtInDiscoveryInFlight.get(discoveryKey);
+		const inFlight = providerInFlight?.get(strategy);
+		if (inFlight) return inFlight;
+
+		providerInFlight ??= new Map();
+		const discovery = this.#discoverWithModelManager(options, strategy).finally(() => {
+			if (providerInFlight.get(strategy) === discovery) {
+				providerInFlight.delete(strategy);
+				if (providerInFlight.size === 0) this.#builtInDiscoveryInFlight.delete(discoveryKey);
+			}
+		});
+		providerInFlight.set(strategy, discovery);
+		this.#builtInDiscoveryInFlight.set(discoveryKey, providerInFlight);
+		return discovery;
 	}
 
 	async #discoverWithModelManager(
@@ -3227,14 +3258,20 @@ export class ModelRegistry {
 			.map(provider => provider.provider);
 	}
 
-	/** Canonical id of a configured or extension-backed discovery provider. */
-	getDiscoveryProviderId(requestedId: string): string | undefined {
+	/** Canonical discovery provider id; saved-model restoration can opt into built-ins. */
+	getDiscoveryProviderId(requestedId: string, options?: { includeBuiltIn?: boolean }): string | undefined {
 		const normalized = requestedId.toLowerCase();
 		for (const { provider } of this.#discoverableProviders) {
 			if (provider.toLowerCase() === normalized) return provider;
 		}
 		for (const provider of this.#runtimeModelManagers.keys()) {
 			if (provider.toLowerCase() === normalized) return provider;
+		}
+		if (
+			options?.includeBuiltIn &&
+			(BUILT_IN_MODEL_MANAGER_PROVIDER_IDS[normalized] || MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP[normalized])
+		) {
+			return normalized;
 		}
 		return undefined;
 	}

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed saved sessions failing to restore discovery-backed models such as Copilot's long-context variants after a model-cache invalidation or when a fresh catalog omits the saved model. Startup now includes built-in providers in the scoped restore check and revalidates unresolved saved models online before permitting fallback or refusing resume.
+
 ## [18.14.2] - 2026-10-31
 
 ### Added

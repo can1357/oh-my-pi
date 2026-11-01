@@ -1768,8 +1768,8 @@ export function resolveSessionModelSelector(
 }
 
 /**
- * Discovery-backed providers (models.yml `discovery:` or extension
- * `fetchDynamicModels`) that could still supply one of the saved selectors
+ * Built-in, models.yml `discovery:`, or extension `fetchDynamicModels`
+ * providers that could still supply one of the saved selectors
  * after a provider-scoped refresh. Disabled providers are skipped.
  */
 export function sessionModelDiscoveryProviders(
@@ -1780,7 +1780,7 @@ export function sessionModelDiscoveryProviders(
 	const providers = new Set<string>();
 	for (const selector of selectors) {
 		const parsed = parseSessionModelSelector(modelRegistry, selector);
-		const provider = parsed && modelRegistry.getDiscoveryProviderId(parsed.provider);
+		const provider = parsed && modelRegistry.getDiscoveryProviderId(parsed.provider, { includeBuiltIn: true });
 		if (provider && !disabledProviders.has(provider)) providers.add(provider);
 	}
 	return providers;

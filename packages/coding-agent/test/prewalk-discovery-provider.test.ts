@@ -169,6 +169,21 @@ describe("issue #11820 prewalk into a models.yml discovery provider target", () 
 		expect(requestedUrls).toContain(`${unrelatedBaseUrl}/models`);
 	});
 
+	test("defers an unresolved built-in provider target until extensions can register it", async () => {
+		const target = "anthropic/extension-only-walker";
+		const options = await buildSessionOptions(
+			parseArgs(["--prewalk-into", target]),
+			[],
+			SessionManager.inMemory(),
+			registry(),
+			Settings.isolated(),
+		);
+
+		expect(options.prewalk).toBeUndefined();
+		expect(options.deferredPrewalk).toEqual({ target, patterns: [target] });
+		expect(requestedUrls).toEqual([]);
+	});
+
 	test("does not probe discovery providers for an unqualified missing target", async () => {
 		const modelRegistry = registry();
 		const settings = Settings.isolated();
