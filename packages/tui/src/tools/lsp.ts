@@ -19,6 +19,7 @@ import {
 	formatExpandHint,
 	formatMoreItems,
 	formatStatusIcon,
+	formatStyledPath,
 	PREVIEW_LIMITS,
 	type ParsedDiagnostic,
 	parseDiagnosticMessage,
@@ -205,7 +206,7 @@ export function renderResult(
 	const request = args ?? result.details?.request;
 	const requestLines: string[] = [];
 	if (request?.file) {
-		requestLines.push(theme.fg("toolOutput", request.file));
+		requestLines.push(formatStyledPath(request.file, theme));
 	}
 	if (request?.line !== undefined) {
 		requestLines.push(theme.fg("dim", `line ${request.line}`));
@@ -386,10 +387,16 @@ function renderHover(
 // Diagnostics Rendering
 // =============================================================================
 
+/** A diagnostic's location: the muted file-type icon, the styled path and the muted `:line:col`. */
 function formatDiagnosticLocation(file: string, line: number, col: number, theme: Theme): string {
 	const lang = getLanguageFromPath(file);
 	const icon = theme.fg("muted", theme.getLangIcon(lang));
-	return `${icon} ${file}:${line}:${col}`;
+	return `${icon} ${formatStyledPath(file, theme)}${theme.fg("muted", `:${line}:${col}`)}`;
+}
+
+/** The `[severity]` tag in its severity's color: the path no longer carries it. */
+function formatSeverityTag(severity: ParsedDiagnostic["severity"], theme: Theme): string {
+	return theme.fg(severityToColor(severity), `[${severity}]`);
 }
 
 /**
@@ -443,12 +450,8 @@ function renderDiagnostics(
 				output += `\n ${theme.fg("dim", branch)} ${theme.fg("muted", item.raw)}`;
 				continue;
 			}
-			const severityColor = severityToColor(item.severity);
 			const location = formatDiagnosticLocation(item.filePath, item.line, item.col, theme);
-			output += `\n ${theme.fg("dim", branch)} ${theme.fg(severityColor, location)} ${theme.fg(
-				"dim",
-				`[${item.severity}]`,
-			)}`;
+			output += `\n ${theme.fg("dim", branch)} ${location} ${formatSeverityTag(item.severity, theme)}`;
 			const message = formatDiagnosticMessage(item);
 			if (message) {
 				output += `\n ${theme.fg("dim", detailPrefix)}${theme.fg("muted", message)}`;
@@ -473,13 +476,12 @@ function renderDiagnostics(
 			output += `\n ${theme.fg("dim", branch)} ${theme.fg("muted", item.raw)}`;
 			continue;
 		}
-		const severityColor = severityToColor(item.severity);
 		const location = formatDiagnosticLocation(item.filePath, item.line, item.col, theme);
 		const diagnosticMessage = formatDiagnosticMessage(item);
 		const message = diagnosticMessage
 			? ` ${theme.fg("muted", truncateToWidth(diagnosticMessage, TRUNCATE_LENGTHS.CONTENT))}`
 			: "";
-		output += `\n ${theme.fg("dim", branch)} ${theme.fg(severityColor, location)}${message}`;
+		output += `\n ${theme.fg("dim", branch)} ${location} ${formatSeverityTag(item.severity, theme)}${message}`;
 	}
 	if (remaining > 0) {
 		output += `\n ${theme.fg("dim", theme.tree.last)} ${theme.fg("muted", `… ${remaining} more`)}`;
@@ -529,7 +531,7 @@ function renderReferences(refMatch: RegExpMatchArray, lines: string[], expanded:
 			const fileCont = isLastFile ? "   " : `${theme.tree.vertical}  `;
 
 			const fileMeta = `${locs.length} reference${locs.length !== 1 ? "s" : ""}`;
-			output += `\n ${theme.fg("dim", fileBranch)} ${theme.fg("accent", file)} ${theme.fg("dim", fileMeta)}`;
+			output += `\n ${theme.fg("dim", fileBranch)} ${formatStyledPath(file, theme)} ${theme.fg("dim", fileMeta)}`;
 
 			if (maxLocsPerFile > 0) {
 				const locsToShow = locs.slice(0, maxLocsPerFile);
@@ -543,10 +545,8 @@ function renderReferences(refMatch: RegExpMatchArray, lines: string[], expanded:
 						`line ${line}, col ${col}`,
 					)}`;
 					if (expanded) {
-						output += `\n ${theme.fg("dim", fileCont)}${theme.fg("dim", locCont)}${theme.fg(
-							"muted",
-							`at ${file}:${line}:${col}`,
-						)}`;
+						const at = `${theme.fg("muted", "at ")}${formatStyledPath(file, theme)}${theme.fg("muted", `:${line}:${col}`)}`;
+						output += `\n ${theme.fg("dim", fileCont)}${theme.fg("dim", locCont)}${at}`;
 					}
 				}
 				if (locs.length > maxLocsPerFile) {
@@ -645,7 +645,7 @@ function renderLocations(parsed: LspLocations, expanded: boolean, theme: Theme):
 		const branch = isLast ? theme.tree.last : theme.tree.branch;
 		const rail = isLast ? "   " : `${theme.tree.vertical}  `;
 		const position = theme.fg("muted", `:${location.line}:${location.col}`);
-		const file = theme.fg("accent", replaceTabs(shortenPath(location.file)));
+		const file = formatStyledPath(replaceTabs(shortenPath(location.file)), theme);
 		rows.push(` ${theme.fg("dim", branch)} ${file}${position}`);
 
 		const numberWidth = location.context.reduce((width, line) => Math.max(width, String(line.n).length), 0);
