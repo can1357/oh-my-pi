@@ -353,6 +353,8 @@ function contentTokens(text: string): Set<string> {
 }
 const CJK_VARIANT_DESIGNATOR_RE =
 	/[甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉戌亥一二三四五六七八九十百千萬零〇壹貳參肆伍陸柒捌玖拾]+[型號号級级類类期版區区組组部篇卷章節节階段步課课條条項项款]/gu;
+const CJK_CLASSIFIER_SUFFIX_RE =
+	/(?:[\p{Script=Han}\p{Script=Katakana}\u30FC]{2,3})(?:區域|区域|地區|地区|分區|分区|環境|环境|節點|节点|機房|机房|叢集|集群|中心|分部|支部|支店|拠点)/gu;
 
 function latinIdentifierTokens(text: string): Set<string> {
 	const out = new Set<string>();
@@ -377,12 +379,50 @@ function cjkVariantIdentifierTokens(text: string): Set<string> {
 		const matched = match[0];
 		if (matched) out.add(matched);
 	}
+	for (const match of text.matchAll(CJK_CLASSIFIER_SUFFIX_RE)) {
+		const matched = match[0];
+		if (matched) out.add(matched);
+	}
 	const firstCjkRun = text.match(CJK_RUN_RE)?.[0];
 	if (firstCjkRun && codePointLength(firstCjkRun) >= 2) {
 		const firstBigram = Array.from(firstCjkRun).slice(0, 2).join("");
 		out.add(firstBigram);
 	}
 	return out;
+}
+
+export function hasDistinctInternalCjkSubstitution(leftText: string, rightText: string): boolean {
+	const a = Array.from(leftText.normalize("NFKC"));
+	const b = Array.from(rightText.normalize("NFKC"));
+
+	let prefixLen = 0;
+	while (prefixLen < a.length && prefixLen < b.length && a[prefixLen] === b[prefixLen]) {
+		prefixLen++;
+	}
+
+	let suffixLen = 0;
+	while (
+		suffixLen < (a.length - prefixLen) &&
+		suffixLen < (b.length - prefixLen) &&
+		a[a.length - 1 - suffixLen] === b[b.length - 1 - suffixLen]
+	) {
+		suffixLen++;
+	}
+
+	if (prefixLen < 2 || suffixLen < 2) {
+		return false;
+	}
+
+	const midA = a.slice(prefixLen, a.length - suffixLen).join("");
+	const midB = b.slice(prefixLen, b.length - suffixLen).join("");
+
+	const midALen = codePointLength(midA);
+	const midBLen = codePointLength(midB);
+	if (midALen < 1 || midALen > 8 || midBLen < 1 || midBLen > 8) {
+		return false;
+	}
+
+	return hasCjk(midA) && hasCjk(midB);
 }
 
 function tokenJaccard(left: ReadonlySet<string>, right: ReadonlySet<string>): number {
@@ -755,7 +795,7 @@ export class PolyphonicRecallEngine {
 			(a, b) => b.combinedScore - a.combinedScore || a.memoryId.localeCompare(b.memoryId),
 		);
 		const selected: PolyphonicMemoryResult[] = [];
-		const selectedTokens: { tokens: Set<string>; latinIds: Set<string>; cjkVariantIds: Set<string> }[] = [];
+		const selectedTokens: { content: string; tokens: Set<string>; latinIds: Set<string>; cjkVariantIds: Set<string> }[] = [];
 		const limit = Math.max(0, Math.trunc(topK));
 		for (const candidate of sorted) {
 			if (selected.length >= limit) break;
@@ -765,6 +805,9 @@ export class PolyphonicRecallEngine {
 			const latinIds = latinIdentifierTokens(hydrated.content);
 			const cjkVariantIds = cjkVariantIdentifierTokens(hydrated.content);
 			const isNearDuplicate = selectedTokens.some(prior => {
+				if (hasDistinctInternalCjkSubstitution(hydrated.content, prior.content)) {
+					return false;
+				}
 				if (tokenJaccard(tokens, prior.tokens) <= NEAR_DUPLICATE_JACCARD) return false;
 				if (latinIds.size > 0 && prior.latinIds.size > 0) {
 					if (tokenJaccard(latinIds, prior.latinIds) < NEAR_DUPLICATE_JACCARD) {
@@ -780,7 +823,7 @@ export class PolyphonicRecallEngine {
 			});
 			if (isNearDuplicate) continue;
 			selected.push(hydrated);
-			selectedTokens.push({ tokens, latinIds, cjkVariantIds });
+			selectedTokens.push({ content: hydrated.content, tokens, latinIds, cjkVariantIds });
 		}
 		return selected;
 	}

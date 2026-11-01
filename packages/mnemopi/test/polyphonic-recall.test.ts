@@ -1515,4 +1515,138 @@ describe("PolyphonicRecallEngine", () => {
 			closeQuietly(beam.db);
 		}
 	});
+
+	it("routes Korean 타임라인 to TR and avoids routing 언제나 to TR", () => {
+		const beam = makeBeam();
+		try {
+			beam.db.run(
+				`INSERT INTO memoria_timelines (session_id, event_id, date, description, source_memory_id)
+					VALUES (?, 1, '2026-10-31', '프로젝트 타임라인 설정 완료', 'tl-kr')`,
+				[beam.sessionId],
+			);
+			beam.db.run(
+				`INSERT INTO memoria_facts (session_id, message_idx, fact_type, key, value, context_snippet, importance, source_memory_id)
+					VALUES (?, 0, 'entity', '언제나 사용하는 설정', '기본 환경 설정값', '언제나 사용하는 설정', 0.8, 'mf-kr-setting')`,
+				[beam.sessionId],
+			);
+			const timelineRes = memoriaRetrieve(beam, "프로젝트 타임라인을 알려줘");
+			expect(timelineRes.ability).toBe("TR");
+			expect((timelineRes.results as Array<{ description?: string }>)[0]?.description).toContain("타임라인");
+
+			const alwaysRes = memoriaRetrieve(beam, "언제나 사용하는 설정은 무엇인가");
+			expect(alwaysRes.ability).toBe("IE");
+			expect((alwaysRes.results as Array<{ key?: string }>)[0]?.key).toBe("언제나 사용하는 설정");
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
+
+	it("matches mid-clause temporal query 後端最新部署 to consolidated fact 後端部署 over higher-importance distraction", () => {
+		const beam = makeBeam();
+		try {
+			beam.db.run(
+				`INSERT INTO memoria_facts (session_id, message_idx, fact_type, key, value, context_snippet, importance, source_memory_id)
+					VALUES (?, 0, 'entity', '後端部署', '生產環境成功部署', '後端部署完成', 0.6, 'mf-target')`,
+				[beam.sessionId],
+			);
+			beam.db.run(
+				`INSERT INTO memoria_facts (session_id, message_idx, fact_type, key, value, context_snippet, importance, source_memory_id)
+					VALUES (?, 1, 'entity', '最新新聞', '發布最新產業動態', '最新消息', 0.95, 'mf-distract')`,
+				[beam.sessionId],
+			);
+
+			const res = memoriaRetrieve(beam, "後端最新部署", "IE", 1);
+			expect(res.ability).toBe("IE");
+			expect(res.results.length).toBe(1);
+			expect((res.results as Array<{ key?: string }>)[0]?.key).toBe("後端部署");
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
+
+	it("ranks multi-の query 木の葉の意味は何ですか memory above higher-importance distraction memory containing only 意味", () => {
+		const beam = makeBeam();
+		try {
+			const old = new Date(Date.now() - 10000).toISOString();
+			insertWorking(beam, "wm-leaf", "木の葉の意味は木から落ちる葉のことです", 0.6, old);
+			insertWorking(beam, "wm-meaning", "言葉の意味を深く考察することが重要です", 0.95, old);
+
+			beam.db.run(
+				`INSERT INTO memoria_facts (session_id, message_idx, fact_type, key, value, context_snippet, importance, source_memory_id)
+					VALUES (?, 0, 'entity', '木の葉', '木から落ちる葉のことです', '木の葉の意味は木から落ちる葉のことです', 0.6, 'wm-leaf')`,
+				[beam.sessionId],
+			);
+			beam.db.run(
+				`INSERT INTO memoria_facts (session_id, message_idx, fact_type, key, value, context_snippet, importance, source_memory_id)
+					VALUES (?, 1, 'entity', '意味', '言葉の意味を深く考察することが重要です', '言葉の意味を深く考察することが重要です', 0.95, 'wm-meaning')`,
+				[beam.sessionId],
+			);
+
+			const memoriaRes = memoriaRetrieve(beam, "木の葉の意味は何ですか", "IE", 1);
+			expect(memoriaRes.ability).toBe("IE");
+			expect(memoriaRes.results.length).toBe(1);
+			expect((memoriaRes.results as Array<{ key?: string }>)[0]?.key).toBe("木の葉");
+
+			const engine = new PolyphonicRecallEngine({ db: beam.db, sessionId: beam.sessionId, channelId: beam.channelId });
+			const baseline = [
+				{ id: "wm-leaf", score: 0.8, content: "木の葉の意味は木から落ちる葉のことです", tier_label: "working" as const },
+				{ id: "wm-meaning", score: 0.4, content: "言葉の意味を深く考察することが重要です", tier_label: "working" as const },
+			];
+			const results = engine.recall("木の葉の意味は何ですか", null, 2, 4000, { baseline });
+			expect(results.length).toBeGreaterThan(0);
+			expect(results[0]?.id).toBe("wm-leaf");
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
+
+	it("preserves long CJK memories with distinct internal region substitutions in diversityRerank while collapsing trailing paraphrases", () => {
+		const beam = makeBeam();
+		try {
+			const engine = new PolyphonicRecallEngine({ db: beam.db, sessionId: beam.sessionId, channelId: beam.channelId });
+			const timestamp = new Date().toISOString();
+			insertWorking(beam, "wm-tokyo", "資料庫連線設定東京區域自動備份與災難復原及持續監控告警通知輪替演練策略", 0.9, timestamp);
+			insertWorking(beam, "wm-osaka", "資料庫連線設定大阪區域自動備份與災難復原及持續監控告警通知輪替演練策略", 0.85, timestamp);
+
+			const candidates = new Map([
+				[
+					"wm-tokyo",
+					{
+						memoryId: "wm-tokyo",
+						combinedScore: 0.1,
+						voiceScores: { hybrid: 0.1 },
+						metadata: {},
+					},
+				],
+				[
+					"wm-osaka",
+					{
+						memoryId: "wm-osaka",
+						combinedScore: 0.09,
+						voiceScores: { hybrid: 0.09 },
+						metadata: {},
+					},
+				],
+			]);
+			const reranked = engine.diversityRerank(candidates, 10, candidate => {
+				const row = beam.db
+					.query("SELECT id, content FROM working_memory WHERE id = ?")
+					.get(candidate.memoryId) as { id: string; content: string } | null;
+				if (!row) return null;
+				return {
+					id: row.id,
+					content: row.content,
+					score: candidate.combinedScore,
+					combined_score: candidate.combinedScore,
+					voice_scores: candidate.voiceScores,
+					metadata: candidate.metadata,
+					tier: "working",
+					tier_label: "working",
+				};
+			});
+			expect(reranked.map(r => r.id)).toEqual(["wm-tokyo", "wm-osaka"]);
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
 });

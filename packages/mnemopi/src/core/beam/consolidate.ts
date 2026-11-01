@@ -14,6 +14,8 @@ import {
 	RECALL_RAW_TOKEN_RE,
 	splitMixedScriptToken,
 	stripCjkQuestionAffixes,
+	extractCjkNonTemporalSegments,
+	splitCjkClausesPreservingPossessiveCompounds,
 	stripCjkTemporalAffixes,
 	unicodeCaseVariants,
 } from "../../util/regex";
@@ -282,16 +284,15 @@ function makeQuestionTokenGroups(query: string): {
 			const hasAnyCjk = CJK_CHAR_RE.test(token);
 			if (nonCjk.length > 0 && hasAnyCjk) {
 				const strippedToken = stripCjkQuestionAffixes(token);
-				for (const clauseRaw of strippedToken.split(CJK_CLAUSE_PARTICLE_RE)) {
+				for (const clauseRaw of splitCjkClausesPreservingPossessiveCompounds(strippedToken)) {
 					const clause = stripCjkQuestionAffixes(clauseRaw);
 					if (codePointLength(clause) >= 2 && !CJK_STOP_SEGMENTS.has(clause)) {
 						pushUnique(primary, clause);
 					}
-					const temporalStripped = stripCjkTemporalAffixes(clause);
-					if (temporalStripped !== clause) {
-						pushUnique(primary, temporalStripped);
-						if (codePointLength(temporalStripped) >= 4) {
-							for (const shingle of cjkCodePointShingles(temporalStripped, [2])) {
+					for (const seg of extractCjkNonTemporalSegments(clause)) {
+						pushUnique(primary, seg);
+						if (codePointLength(seg) >= 4) {
+							for (const shingle of cjkCodePointShingles(seg, [2])) {
 								pushUnique(primary, shingle);
 							}
 						}
@@ -310,7 +311,7 @@ function makeQuestionTokenGroups(query: string): {
 					const runLen = codePointLength(run);
 					if (runLen < 2) continue;
 					const strippedRun = stripCjkQuestionAffixes(run);
-					for (const clauseRaw of strippedRun.split(CJK_CLAUSE_PARTICLE_RE)) {
+					for (const clauseRaw of splitCjkClausesPreservingPossessiveCompounds(strippedRun)) {
 						const clause = stripCjkQuestionAffixes(clauseRaw);
 						const clauseLen = codePointLength(clause);
 						if (clauseLen < 2 || CJK_STOP_SEGMENTS.has(clause)) continue;
@@ -330,11 +331,10 @@ function makeQuestionTokenGroups(query: string): {
 							}
 							pushUnique(shingles, clause);
 						}
-						const temporalStripped = stripCjkTemporalAffixes(clause);
-						if (temporalStripped !== clause) {
-							pushUnique(primary, temporalStripped);
-							if (codePointLength(temporalStripped) >= 4) {
-								for (const shingle of cjkCodePointShingles(temporalStripped, [2])) {
+						for (const seg of extractCjkNonTemporalSegments(clause)) {
+							pushUnique(primary, seg);
+							if (codePointLength(seg) >= 4) {
+								for (const shingle of cjkCodePointShingles(seg, [2])) {
 									pushUnique(primary, shingle);
 								}
 							}
