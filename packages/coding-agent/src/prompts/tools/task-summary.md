@@ -1,5 +1,8 @@
 <task-result id="{{id}}" agent="{{agentName}}" status="{{status}}" duration="{{duration}}">
 {{#if truncated}}{{#if meta}}<meta lines="{{meta.lineCount}}" size="{{meta.charSize}}" />{{/if}}{{/if}}
+{{#if modelFallback}}
+<model served="{{modelFallback.served}}"{{#if modelFallback.requested}} requested="{{modelFallback.requested}}"{{/if}} fallback="true"{{#if modelFallback.reason}}>{{modelFallback.reason}}</model>{{else}} />{{/if}}
+{{/if}}
 {{#if abortReason}}
 <abort-reason>{{abortReason}}{{#if resumable}} — the agent is still live with its full context; message it via `write agent://{{id}}` to resume instead of redoing the work.{{/if}}</abort-reason>
 {{/if}}

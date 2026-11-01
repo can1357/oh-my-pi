@@ -7,7 +7,7 @@ import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oaut
 import { setCodexAttestationProvider } from "@oh-my-pi/pi-ai/providers/openai-codex-attestation";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/env-api-key";
-import { OAuthRefreshUnavailableError } from "@oh-my-pi/pi-ai/error";
+import { MissingApiKeyError, OAuthRefreshUnavailableError } from "@oh-my-pi/pi-ai/error";
 import type {
 	Api,
 	Context,
@@ -294,6 +294,39 @@ export type ResolvedRequestAuth =
 			env?: Record<string, string>;
 	  }
 	| { ok: false; error: string };
+
+/**
+ * Resolve a model's credential for an *availability* check, where an
+ * unavailable credential is an answer rather than a failure.
+ *
+ * A session restricted to an OAuth account pool (`task.agentAccountPools`)
+ * rejects with {@link MissingApiKeyError} — instead of resolving `undefined` —
+ * for a provider that no account the session may use can serve. Every probe
+ * that only asks "can this model serve?" must read that as "no credential" and
+ * move on to its next candidate, exactly as it does for an absent key.
+ */
+export async function probeModelApiKey(
+	registry: Pick<ModelRegistry, "getApiKey">,
+	model: Model<Api>,
+	sessionId?: string,
+	options?: { signal?: AbortSignal },
+): Promise<string | undefined> {
+	try {
+		return await registry.getApiKey(model, sessionId, options);
+	} catch (error) {
+		if (!(error instanceof MissingApiKeyError)) throw error;
+		// The pool's own message names why (no permitted account, or a models.yml
+		// apiKey a pooled session may not send); the caller only reports that the
+		// model has no working credentials.
+		logger.debug("Model unavailable inside the session's account pool", {
+			provider: model.provider,
+			model: model.id,
+			sessionId,
+			error: error.message,
+		});
+		return undefined;
+	}
+}
 
 /**
  * Model registry - loads and manages models, resolves API keys via AuthStorage.

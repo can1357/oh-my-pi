@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed subagents whose declared model has no working credentials silently running on the parent session's model: that model's own `retry.fallbackChains` key (`provider/id` or `provider/*`) now decides, as it also does for a declared model missing from the catalog (an empty chain refuses the spawn with an error naming the agent and model, a non-empty chain is walked), and any replacement is marked as a fallback in the session and task result ([#16028](https://github.com/can1357/oh-my-pi/pull/16028) by [@sjawhar](https://github.com/sjawhar))
+- Fixed task results not saying which fallback model answered for a subagent: the `<task-result>` now carries a `<model served=… requested=… fallback="true">` line, with the reason when the model was replaced at spawn ([#16028](https://github.com/can1357/oh-my-pi/pull/16028) by [@sjawhar](https://github.com/sjawhar))
+- Fixed a subagent with a `task.agentAccountPools` entry failing with a raw "restricted to its OAuth account pool" error when no account it may use can serve its declared model: that model's own `retry.fallbackChains` key now decides at spawn, as it does for any other model that cannot serve ([#16028](https://github.com/can1357/oh-my-pi/pull/16028) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.14.2] - 2026-10-31
 
 ### Added

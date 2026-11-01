@@ -8,7 +8,7 @@ import type { MnemopiLlmCompleteOptions } from "@oh-my-pi/pi-mnemopi/core/runtim
 import type * as MnemopiDiagnoseNs from "@oh-my-pi/pi-mnemopi/diagnose";
 import type { DiagnosticSummary } from "@oh-my-pi/pi-mnemopi/diagnose";
 import { logger, prompt, withLoopPhase } from "@oh-my-pi/pi-utils";
-import type { ModelRegistry } from "../config/model-registry";
+import { type ModelRegistry, probeModelApiKey } from "../config/model-registry";
 import { roleCandidatePool } from "../config/model-roles";
 import { resolveRoleChain } from "../config/model-resolver";
 import { type JudgmentUsageLedger, journalJudgmentUsage } from "../judgment";
@@ -621,7 +621,7 @@ async function resolveMnemopiProviderOptions(
 						continue;
 					}
 
-					const hasApiKey = await modelRegistry.getApiKey(model, sessionId);
+					const hasApiKey = await probeModelApiKey(modelRegistry, model, sessionId);
 					if (!hasApiKey) {
 						logger.warn("Mnemopi: memory completion model has no current API key; trying the next fallback.", {
 							provider: model.provider,
