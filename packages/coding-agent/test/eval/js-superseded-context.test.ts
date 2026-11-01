@@ -11,6 +11,7 @@ import {
 	setJsEvalWorkerFactoriesForTests,
 } from "../../src/eval/js/context-manager";
 import type { WorkerInbound, WorkerOutbound } from "../../src/eval/js/worker-protocol";
+import { formatKernelReclaimNotice } from "../../src/eval/executor-base";
 import { executeJs } from "../../src/eval/js/executor";
 import { setSupersededKernelGraceMs } from "../../src/eval/superseded-reclaim";
 import { AgentOutputManager } from "../../src/task/output-manager";
@@ -83,6 +84,8 @@ interface WorkerObservation {
 	readonly workers: readonly ObservedWorker[];
 	/** Resolves once the first thread exists. */
 	readonly firstSpawned: Promise<void>;
+	/** Resolves once teardown has asked the first thread to close. */
+	readonly firstCloseRequested: Promise<void>;
 	/** Put the previous worker factories back. */
 	restore(): void;
 	/** End every thread still running, so a failed test cannot leave one behind. */
@@ -99,15 +102,18 @@ interface WorkerObservation {
  * The handle's teardown is the production one: a `close` request the worker
  * acknowledges before it exits, bounded, then `terminate()`.
  *
- * `holdFirstReady`, when given, holds back the first worker's `ready` until it
- * resolves. A cold start that finishes after a later key's cell cannot be
+ * `holds.firstReady`, when given, holds back the first worker's `ready` until
+ * it resolves. A cold start that finishes after a later key's cell cannot be
  * produced any other way: the delay is in worker startup, which the public
- * surface does not expose.
+ * surface does not expose. `holds.firstClose` likewise holds the first
+ * worker's close request, which is the only way to keep a reclaimed worker
+ * provably up while a cell lands.
  */
-function observeWorkers(holdFirstReady?: Promise<void>): WorkerObservation {
+function observeWorkers(holds: { firstReady?: Promise<void>; firstClose?: Promise<void> } = {}): WorkerObservation {
 	const workers: ObservedWorker[] = [];
 	const threads: Worker[] = [];
 	const firstSpawned = Promise.withResolvers<void>();
+	const firstCloseRequested = Promise.withResolvers<void>();
 	const spawn = (): JsEvalWorkerHandle => {
 		const worker = new Worker(new URL("../../src/eval/js/worker-entry.ts", import.meta.url).href, {
 			type: "module",
@@ -118,7 +124,8 @@ function observeWorkers(holdFirstReady?: Promise<void>): WorkerObservation {
 			observed.hasExited = true;
 			exited.resolve();
 		});
-		const held = workers.length === 0 ? holdFirstReady : undefined;
+		const isFirst = workers.length === 0;
+		const held = isFirst ? holds.firstReady : undefined;
 		workers.push(observed);
 		threads.push(worker);
 		firstSpawned.resolve();
@@ -145,6 +152,10 @@ function observeWorkers(holdFirstReady?: Promise<void>): WorkerObservation {
 				};
 			},
 			async close() {
+				if (isFirst) {
+					firstCloseRequested.resolve();
+					await holds.firstClose;
+				}
 				const acknowledged = Promise.withResolvers<void>();
 				const onMessage = (event: MessageEvent): void => {
 					const message: WorkerOutbound = event.data;
@@ -171,6 +182,7 @@ function observeWorkers(holdFirstReady?: Promise<void>): WorkerObservation {
 	return {
 		workers,
 		firstSpawned: firstSpawned.promise,
+		firstCloseRequested: firstCloseRequested.promise,
 		restore,
 		terminateAll() {
 			for (const thread of threads) thread.terminate();
@@ -338,7 +350,7 @@ describe("superseded JavaScript contexts", () => {
 		const firstKey = `js:cwd:${firstDir.path()}`;
 		const gate = Promise.withResolvers<void>();
 		observation.restore();
-		observation = observeWorkers(gate.promise);
+		observation = observeWorkers({ firstReady: gate.promise });
 		try {
 			const older = contextId(firstDir.path(), firstKey, owner);
 			// The older key is registered as starting, and its worker will not
@@ -390,5 +402,48 @@ describe("superseded JavaScript contexts", () => {
 		// arrives to arm the first key's grace.
 		expect(await endsWithin(spawned(0), EXIT_BUDGET_MS)).toBe(true);
 		expect(await contextId(firstDir.path(), firstKey, owner)).not.toBe(first);
+	}, 60_000);
+
+	it("tells the first cell that returns while the worker it left is still closing, and not the cell after", async () => {
+		setSupersededKernelGraceMs(TEST_GRACE_MS);
+		using firstDir = TempDir.createSync("@js-close-race-a-");
+		using secondDir = TempDir.createSync("@js-close-race-b-");
+		const owner = "agent-session:js-close-race";
+		const firstKey = `js:cwd:${firstDir.path()}`;
+		const closing = Promise.withResolvers<void>();
+		observation.restore();
+		observation = observeWorkers({ firstClose: closing.promise });
+		const run = async (code: string): Promise<string> => {
+			const result = await executeJs(code, {
+				cwd: firstDir.path(),
+				sessionId: firstKey,
+				kernelOwnerId: owner,
+				session: makeSession(firstDir.path(), path.join(firstDir.path(), "session.jsonl")),
+				timeoutMs: 30_000,
+			});
+			if (result.exitCode !== 0) throw new Error(`cell failed: ${result.output}`);
+			return result.output;
+		};
+		try {
+			await run("globalThis.__kept = 'kept'; return 'set';");
+			await contextId(secondDir.path(), `js:cwd:${secondDir.path()}`, owner);
+			// The reclaim has taken the context and asked its worker to close;
+			// the thread is held up, so this is the window, not a guess at one.
+			await observation.firstCloseRequested;
+			expect(spawned(0).hasExited).toBe(false);
+
+			const notice = formatKernelReclaimNotice("JS worker", firstDir.path(), "worker");
+			const back = await run("return typeof globalThis.__kept;");
+			// This cell runs in a fresh worker, so it is the one that must say so.
+			expect(back).toContain(notice);
+			expect(back).toContain("undefined");
+
+			closing.resolve();
+			expect(await endsWithin(spawned(0), EXIT_BUDGET_MS)).toBe(true);
+			// The old worker finishing afterwards is old news, and says nothing.
+			expect(await run("return 'again';")).not.toContain(notice);
+		} finally {
+			closing.resolve();
+		}
 	}, 60_000);
 });

@@ -106,14 +106,35 @@ export interface KernelExecutionResult {
 }
 
 /**
+ * What a reclaim takes besides the namespace, by how the runtime is torn
+ * down. A kernel process's shutdown ends in a `SIGKILL` to the runner's
+ * process group, even after a clean exit, so its threads and subprocesses
+ * go. A JavaScript worker is terminated, so its timers and pending callbacks
+ * never run; only the worker itself is killed, not a process group, so
+ * nothing is claimed about a subprocess a cell spawned.
+ */
+const RECLAIM_LOSS = {
+	"process-group":
+		"Threads and subprocesses its cells started were killed with it, and file writes not yet flushed were lost.",
+	worker:
+		"Timers and callbacks its cells left pending were dropped with it, and file writes not yet flushed were lost.",
+} as const;
+
+/**
  * First line of a cell that runs on a kernel which replaced one this session
  * left behind and the registry reclaimed. Reclaiming frees the memory a
  * forgotten runtime holds, and the cost lands on the user as a namespace that
  * is suddenly empty, so the cell that meets it says so instead of failing with
- * an unexplained `NameError`.
+ * an unexplained `NameError`. It names `directory`, the working directory of
+ * the kernel that went, because an agent working in two directories cannot
+ * otherwise tell which namespace it lost, and says what else went with it.
  */
-export function formatKernelReclaimNotice(runtimeLabel: string): string {
-	return `Kernel restarted: the previous ${runtimeLabel} was shut down after this session moved away and left it idle; state is unavailable. Re-run needed setup: variables, imports and definitions from earlier cells are gone.`;
+export function formatKernelReclaimNotice(
+	runtimeLabel: string,
+	directory: string,
+	teardown: keyof typeof RECLAIM_LOSS,
+): string {
+	return `Kernel restarted: the previous ${runtimeLabel} for ${directory} was shut down after this session moved away from it; state is unavailable. ${RECLAIM_LOSS[teardown]} Re-run needed setup: variables, imports and definitions from earlier cells are gone.`;
 }
 
 /** Minimal kernel surface the base executor drives, satisfied by every backend kernel. */

@@ -2,7 +2,8 @@
  * Settings declared by this domain (see `config/registry.ts`). Declaration order is the
  * settings-panel order; `config/all-settings.ts` registers every domain.
  */
-import { register } from "../config/registry";
+import { effect, register } from "../config/registry";
+import { SUPERSEDED_KERNEL_GRACE_MS, setSupersededKernelGraceMs } from "./superseded-reclaim";
 
 // Eval (per-backend toggles; add more as new backends ship, e.g. eval.ts)
 export const cfgEvalPy = register({
@@ -87,6 +88,38 @@ export const cfgEvalAutoBackgroundThresholdMs = register({
 	type: "number",
 	default: 60_000,
 });
+
+/**
+ * How long a retained Python kernel or JavaScript worker outlives the moment
+ * every session using it has run its latest cell somewhere else. Process-wide:
+ * the kernel registries are, and a kernel can be shared by several sessions.
+ */
+export const cfgEvalKernelReclaimGraceMs = register({
+	id: "eval.kernelReclaimGraceMs",
+	type: "number",
+	default: SUPERSEDED_KERNEL_GRACE_MS,
+	validate: raw => {
+		if (raw === undefined || raw === null) return;
+		if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 0) {
+			throw new Error("eval.kernelReclaimGraceMs must be a non-negative number of milliseconds (0 never reclaims)");
+		}
+	},
+	ui: {
+		tab: "shell",
+		group: "Eval & Runtimes",
+		label: "Left-Behind Kernel Grace",
+		description:
+			"How long a Python kernel or JavaScript worker is kept after every session using it has run its latest cell in another directory, session file or interpreter. Then it is shut down and its variables, imports and definitions are lost, with the work its cells left running (Python threads and subprocesses, JavaScript timers) and file writes not yet flushed. The next cell there says so. Set to 0 to keep it until the session ends.",
+		options: [
+			{ value: "0", label: "Never", description: "Keep every kernel until its session ends" },
+			{ value: "30000", label: "30 seconds" },
+			{ value: "120000", label: "2 minutes", description: "Default" },
+			{ value: "600000", label: "10 minutes" },
+			{ value: "1800000", label: "30 minutes" },
+		],
+	},
+});
+effect(cfgEvalKernelReclaimGraceMs, setSupersededKernelGraceMs);
 
 // Runtime knobs (consumed by eval backends and the /python slash command)
 export const cfgPythonKernelMode = register({

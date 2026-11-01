@@ -10,15 +10,18 @@
  * left stops holding its heap minutes later rather than for the life of the
  * host process.
  *
- * Two minutes is the shape of the round trip this protects: long enough for an
- * agent to run a handful of cells elsewhere and come back, short enough that a
- * long-lived host is not carrying a kernel nobody has touched. The clock starts
- * when the session is superseded, not when the kernel falls idle, so a cell
- * still running when its owner walks away is measured from the same moment; a
- * kernel still busy at the far end of the grace is re-armed, not killed and not
- * forgotten. The grace only ever delays the shutdown; it never delays a
- * disposal, because a session ending or the process exiting cancels the timer
- * and shuts the kernel down through the ordinary path.
+ * Two minutes is the default shape of the round trip this protects: long
+ * enough for an agent to run a handful of cells elsewhere and come back, short
+ * enough that a long-lived host is not carrying a kernel nobody has touched.
+ * It is the `eval.kernelReclaimGraceMs` setting, because it is also how long a
+ * person's variables outlive their attention, and `0` there turns reclaiming
+ * off. The clock starts when the session is superseded, not when the kernel
+ * falls idle, so a cell still running when its owner walks away is measured
+ * from the same moment; a kernel still busy at the far end of the grace is
+ * re-armed, not killed and not forgotten. The grace only ever delays the
+ * shutdown; it never delays a disposal, because a session ending or the
+ * process exiting cancels the timer and shuts the kernel down through the
+ * ordinary path.
  */
 export const SUPERSEDED_KERNEL_GRACE_MS = 120_000;
 
@@ -32,8 +35,10 @@ let graceMs = SUPERSEDED_KERNEL_GRACE_MS;
 export type SupersededReclaimOutcome = "settled" | "deferred";
 
 /**
- * Shorten (or restore) the grace so a test can watch a real reclaim instead of
- * waiting two minutes. Test-only; not part of the runtime surface.
+ * Set the grace; `0` stops arming it, so a kernel left behind lives until its
+ * session ends. Driven by the `eval.kernelReclaimGraceMs` setting, and called
+ * directly by tests to watch a real reclaim in milliseconds; no argument
+ * restores the default. A change applies to graces armed after it.
  */
 export function setSupersededKernelGraceMs(ms?: number): void {
 	graceMs = ms ?? SUPERSEDED_KERNEL_GRACE_MS;
@@ -52,15 +57,16 @@ export function setSupersededKernelGraceMs(ms?: number): void {
  */
 export class SupersededKernelReaper<TSession extends object> {
 	readonly #timers = new Map<TSession, Timer>();
-	readonly #inFlight = new Set<Promise<void>>();
+	/** At most one per session: a timer fires once and re-arms only after its reclaim settles. */
+	readonly #inFlight = new Map<TSession, Promise<void>>();
 	/** Bumped per session by {@link cancel}, so a reclaim in flight cannot re-arm one that was just reacquired. */
 	readonly #cancellations = new WeakMap<TSession, number>();
 	/** Bumped by {@link cancelAll}, so nothing re-arms after a dispose took the sessions over. */
 	#generation = 0;
 
-	/** Arm the grace for `session`, unless it is already armed. */
+	/** Arm the grace for `session`, unless it is already armed or reclaiming is off. */
 	schedule(session: TSession, reclaim: () => Promise<SupersededReclaimOutcome>): void {
-		if (this.#timers.has(session)) return;
+		if (graceMs <= 0 || this.#timers.has(session)) return;
 		this.#arm(session, reclaim, this.#generation, this.#cancellations.get(session) ?? 0);
 	}
 
@@ -72,11 +78,13 @@ export class SupersededKernelReaper<TSession extends object> {
 	): void {
 		const timer = setTimeout(() => {
 			this.#timers.delete(session);
+			// Reclaiming was turned off after this grace was armed.
+			if (graceMs <= 0) return;
 			// A failed reclaim is logged by the caller, never thrown at whoever
 			// happens to be disposing.
 			const running = reclaim().then(
 				outcome => {
-					if (outcome !== "deferred") return;
+					if (outcome !== "deferred" || graceMs <= 0) return;
 					// Nothing re-arms behind a dispose or a reacquisition that
 					// landed while this attempt was running.
 					if (this.#generation !== generation) return;
@@ -86,8 +94,10 @@ export class SupersededKernelReaper<TSession extends object> {
 				},
 				() => {},
 			);
-			this.#inFlight.add(running);
-			void running.finally(() => this.#inFlight.delete(running));
+			this.#inFlight.set(session, running);
+			void running.finally(() => {
+				if (this.#inFlight.get(session) === running) this.#inFlight.delete(session);
+			});
 		}, graceMs);
 		// Never hold the host open for a kernel it is about to throw away.
 		timer.unref?.();
@@ -110,8 +120,26 @@ export class SupersededKernelReaper<TSession extends object> {
 		this.#timers.clear();
 	}
 
-	/** Settle reclaims already running, so a dispose cannot return with a runner still up. */
-	async settle(): Promise<void> {
-		await Promise.all(this.#inFlight);
+	/** Sessions whose reclaim is running now: removed from their registry, their shutdown not yet settled. */
+	running(): TSession[] {
+		return [...this.#inFlight.keys()];
+	}
+
+	/**
+	 * Settle the reclaims running now — every one, or only those of `sessions` —
+	 * so a dispose cannot return with a runner still up. The set is taken when
+	 * this is called; a reclaim that starts later is not waited for.
+	 */
+	async settle(sessions?: Iterable<TSession>): Promise<void> {
+		if (sessions === undefined) {
+			await Promise.all(this.#inFlight.values());
+			return;
+		}
+		const running: Promise<void>[] = [];
+		for (const session of sessions) {
+			const reclaim = this.#inFlight.get(session);
+			if (reclaim !== undefined) running.push(reclaim);
+		}
+		await Promise.all(running);
 	}
 }
