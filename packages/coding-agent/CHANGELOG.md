@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed an endless shell loop in one bash command taking the shell from every later command in the session; such a command is now cancelled by its own deadline, and `kill %N` reaches it
+- Fixed an endless shell loop in one bash command taking the shell from every later command in the session; such a command is now cancelled by its own deadline, and `kill %N` reaches it ([#17662](https://github.com/can1357/oh-my-pi/pull/17662) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.2] - 2026-10-31
 

@@ -431,22 +431,9 @@ fn ensure_not_cancelled(params: &ExecutionParameters) -> Result<(), error::Error
 	Ok(())
 }
 
-/// Cooperates with Tokio's scheduler at an interpreter loop boundary.
-///
-/// `mapfile` uses a 64 KiB byte budget; this checkpoint spends Tokio's
-/// cooperative task budget instead. They share only the yield-then-check
-/// cancellation shape.
-///
-/// The cancellation check alone is not enough. Every sub-future of a loop of
-/// synchronous builtins (`while :; do :; done`, a `for` over expanded words,
-/// the writer of a process substitution) is already ready, so the future never
-/// returns `Pending` and the worker polling it never returns to the scheduler.
-/// Nothing outside can then take that worker back: the run's own timer, the
-/// job's cancel token (set through an `async fn` that needs a worker of its
-/// own) and `JoinHandle::abort` (which drops a future at its next yield point)
-/// all wait for a yield that never comes. One task per worker is therefore
-/// enough to take the whole runtime, with no way back short of ending the
-/// process. Spending the cooperative budget restores all three.
+/// Spends Tokio's cooperative budget, then checks for cancellation, so a loop
+/// of builtins returns `Pending` and the run's timer, `JoinHandle::abort` and
+/// the job's cancel token can reach it.
 async fn loop_checkpoint(params: &ExecutionParameters) -> Result<(), error::Error> {
 	tokio::task::coop::consume_budget().await;
 	// After the cooperative yield, so a cancellation raised while this task was
@@ -2844,4 +2831,72 @@ fn setup_open_file_with_contents(contents: &str) -> Result<OpenFile, error::Erro
 	}
 
 	Ok(reader.into())
+}
+
+#[cfg(test)]
+mod tests {
+	use std::{
+		sync::{
+			Arc,
+			atomic::{AtomicBool, Ordering},
+			mpsc,
+		},
+		time::Duration,
+	};
+
+	use tokio::sync::oneshot;
+	use tokio_util::sync::CancellationToken;
+
+	#[test]
+	fn endless_builtin_loop_yields_to_a_cancellation_task() {
+		let (result_tx, result_rx) = mpsc::sync_channel(1);
+
+		std::thread::spawn(move || {
+			let runtime = tokio::runtime::Builder::new_multi_thread()
+				.worker_threads(1)
+				.enable_all()
+				.build()
+				.expect("runtime");
+			let result = runtime.block_on(async {
+				let cancellation = CancellationToken::new();
+				let cancellation_task_ran = Arc::new(AtomicBool::new(false));
+				let (loop_started_tx, loop_started_rx) = oneshot::channel();
+
+				let loop_cancellation = cancellation.clone();
+				let loop_task = tokio::spawn(async move {
+					let mut shell = crate::Shell::builder().build().await.expect("shell");
+					let mut params = shell.default_exec_params();
+					params.set_cancel_token(loop_cancellation);
+					loop_started_tx.send(()).expect("cancellation task waits for loop");
+					shell
+						.run_string(
+							"while ((1)); do ((1)); done",
+							&crate::SourceInfo::default(),
+							&params,
+						)
+						.await
+						.expect("loop parses")
+						.is_success()
+				});
+
+				let cancellation_task_ran_in_task = cancellation_task_ran.clone();
+				let cancellation_task = tokio::spawn(async move {
+					loop_started_rx.await.expect("loop starts");
+					cancellation_task_ran_in_task.store(true, Ordering::Release);
+					cancellation.cancel();
+				});
+
+				let loop_succeeded = loop_task.await.expect("loop task");
+				cancellation_task.await.expect("cancellation task");
+				(!loop_succeeded, cancellation_task_ran.load(Ordering::Acquire))
+			});
+			result_tx.send(result).expect("test waits for runtime");
+		});
+
+		let (interrupted, cancellation_task_ran) = result_rx
+			.recv_timeout(Duration::from_secs(2))
+			.expect("interpreter did not yield to the cancellation task");
+		assert!(cancellation_task_ran, "cancellation task ran on the interpreter runtime");
+		assert!(interrupted, "the cancelled loop stopped");
+	}
 }
