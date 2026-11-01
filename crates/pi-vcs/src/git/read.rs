@@ -1,7 +1,7 @@
 //! Read-side operations on [`GitRepo`](super::GitRepo).
 
 use std::{
-	collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
+	collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
 	path::{Path, PathBuf},
 };
 
@@ -259,6 +259,12 @@ impl GitRepo {
 	/// refuses under its `safe.directory` ownership check, which gitoxide opens
 	/// with `Trust::Full` regardless — fall back to the in-process walk (never
 	/// for reftable repos, which are unreadable in-process).
+	///
+	/// git runs lock-free (`--no-optional-locks`), so a status line can poll
+	/// this without making the user's own `git add`, `commit` or jj writes
+	/// fail on `index.lock`. A whole-worktree call that finds the index stat
+	/// cache stale runs one separate, lock-taking refresh after its lock-free
+	/// status read.
 	pub fn status_porcelain(&self, options: &StatusOptions) -> Result<String> {
 		self.status_porcelain_capped(options, super::cli::OUTPUT_LIMIT_BYTES)
 	}
@@ -266,6 +272,11 @@ impl GitRepo {
 	/// [`Self::status_porcelain`] with an explicit retention cap for the
 	/// subprocess capture. The in-process fallback ignores the cap: it builds
 	/// the rendering itself and has nothing to drain.
+	///
+	/// git status itself always runs lock-free, as for every other read. A
+	/// whole-worktree call with stale stat data then runs the separate refresh
+	/// selected by [`Self::stat_cache_repair_due`]. A status with pathspecs
+	/// refreshes only the entries they match, so it is never that call.
 	fn status_porcelain_capped(&self, options: &StatusOptions, limit: usize) -> Result<String> {
 		let mut args = vec!["status".to_owned(), "--porcelain".to_owned()];
 		args.push(match options.untracked {
@@ -280,12 +291,122 @@ impl GitRepo {
 			args.push("--".to_owned());
 			args.extend(options.pathspecs.iter().cloned());
 		}
-		match cli_text_owned_capped(self.root(), &args, super::cli::COMMAND_TIMEOUT, limit) {
+		let repair = if options.pathspecs.is_empty() {
+			self.stat_cache_repair_due()
+		} else {
+			None
+		};
+		let timeout = super::cli::COMMAND_TIMEOUT;
+		let result = cli_text_owned_capped(self.root(), &args, timeout, limit);
+		if let Some(repair) = repair {
+			if result.is_ok() && refresh_index_stat_cache(self.root(), timeout).is_ok() {
+				self.settle_stat_cache_repair(repair);
+			} else {
+				Self::abandon_stat_cache_repair(&repair);
+			}
+		}
+		match result {
 			Err(err) if !self.is_reftable() && super::cli::prefers_in_process(&err) => {
 				self.status_porcelain_gix(options)
 			},
 			result => result,
 		}
+	}
+
+	/// Whether this whole-worktree status should repair the index stat cache.
+	///
+	/// The status read stays lock-free. When it finds stale stat data, the
+	/// caller follows it with `git update-index -q --ignore-missing
+	/// --ignore-submodules --unmerged --refresh`. Unlike status's optional
+	/// write, that command either owns `index.lock` while it updates the stat
+	/// cache or fails. Its exit status therefore tells the caller whether it
+	/// may settle the repair claim without racing another writer's lock.
+	/// So only an index that needs the repair gets it:
+	///
+	/// - An index file unchanged since this process last looked at it costs one
+	///   `stat`, and the status runs lock-free.
+	/// - A changed one is decoded and its stat-less entries counted. It is
+	///   repaired only when it has more of them than the last repair left
+	///   behind. Entries no refresh fills in (files that are modified, deleted
+	///   or intent-to-add, unmerged paths, submodules) stay stat-less after a
+	///   repair and must not make every later status repair again.
+	/// - The version is recorded before the repair runs, so a concurrent status
+	///   of the same checkout does not repair it a second time.
+	fn stat_cache_repair_due(&self) -> Option<StatCacheRepair> {
+		let path = self.info().git_dir.join("index");
+		let version = IndexVersion::read(&path)?;
+		let previous = stat_cache_checks().get(&path).copied();
+		let left_by_repair = match previous {
+			Some(check) if check.version == version => return None,
+			Some(check) => check.left_by_repair,
+			None => 0,
+		};
+		let stat_less = self.stat_less_entries().ok()?;
+		// An index with fewer stat-less entries than the last repair left
+		// lowers the bar, so entries that turn stat-less later are repaired.
+		stat_cache_checks().insert(path.clone(), StatCacheCheck {
+			version,
+			left_by_repair: left_by_repair.min(stat_less),
+		});
+		(stat_less > left_by_repair).then_some(StatCacheRepair { path, version, stat_less })
+	}
+
+	/// Record what a completed index refresh left on disk.
+	///
+	/// - Fewer stat-less entries: git wrote its refresh back, and the entries
+	///   left are ones no refresh fills in. Later versions of the index are
+	///   repaired only when they have more.
+	/// - The same index file, untouched: the lock-taking refresh completed and
+	///   had no stat data it could fill in, so its entries become the bar.
+	/// - Another index with no fewer stat-less entries: a different writer
+	///   replaced the index while the call ran, so the index on disk is that
+	///   writer's. The next status examines it afresh.
+	fn settle_stat_cache_repair(&self, repair: StatCacheRepair) {
+		let Some(version) = IndexVersion::read(&repair.path) else {
+			return;
+		};
+		let Ok(left) = self.stat_less_entries() else {
+			return;
+		};
+		let left_by_repair = if left < repair.stat_less {
+			left
+		} else if version == repair.version {
+			repair.stat_less
+		} else {
+			return;
+		};
+		stat_cache_checks().insert(repair.path, StatCacheCheck { version, left_by_repair });
+	}
+
+	/// Forget a claimed repair whose status read or index refresh failed.
+	///
+	/// A non-zero result is the only trustworthy evidence of contention or an
+	/// otherwise uncertain refresh outcome. Leaving the claim would make an
+	/// identical stat-less index look like the residue of a successful repair,
+	/// so no later poll would retry.
+	fn abandon_stat_cache_repair(repair: &StatCacheRepair) {
+		let mut checks = stat_cache_checks();
+		if checks
+			.get(&repair.path)
+			.is_some_and(|check| check.version == repair.version)
+		{
+			checks.remove(&repair.path);
+		}
+	}
+
+	/// Index entries carrying no stat data at all, which git and gitoxide can
+	/// compare against the worktree only by re-hashing the file.
+	fn stat_less_entries(&self) -> Result<usize> {
+		let index = self
+			.gix()?
+			.open_index()
+			.map_err(|err| Error::backend("git status", err))?;
+		let none = gix::index::entry::Stat::default();
+		Ok(index
+			.entries()
+			.iter()
+			.filter(|entry| entry.stat == none)
+			.count())
 	}
 
 	/// In-process porcelain rendering via gitoxide; fallback for hosts
@@ -299,7 +420,7 @@ impl GitRepo {
 			UntrackedMode::All => gix::status::UntrackedFiles::Files,
 		};
 		let platform = status_with_fresh_index(&repo, "git status")?.untracked_files(untracked);
-		let iter = platform
+		let mut iter = platform
 			.into_iter(options.pathspecs.iter().map(|path| path.as_bytes().into()))
 			.map_err(|err| Error::backend("git status", err))?;
 		let mut states: BTreeMap<String, (char, char, Option<String>)> = BTreeMap::new();
@@ -307,7 +428,7 @@ impl GitRepo {
 		// sorted by path — not one merged sort.
 		let mut untracked_paths: std::collections::BTreeSet<String> =
 			std::collections::BTreeSet::new();
-		for item in iter {
+		for item in &mut iter {
 			let item = item.map_err(|err| Error::backend("git status", err))?;
 			use gix::status::{Item, index_worktree};
 			match item {
@@ -384,6 +505,7 @@ impl GitRepo {
 				},
 			}
 		}
+		persist_stat_refresh(iter.into_outcome());
 		let separator = if options.nul_terminated { '\0' } else { '\n' };
 		let mut out = String::new();
 		for (path, (x, y, old)) in states.into_iter().chain(
@@ -836,7 +958,7 @@ impl GitRepo {
 				opts.emit_ignored(Some(gix::dir::walk::EmissionMode::Matching))
 			});
 		}
-		let iter = platform
+		let mut iter = platform
 			.into_index_worktree_iter(
 				paths
 					.iter()
@@ -844,7 +966,7 @@ impl GitRepo {
 			)
 			.map_err(|e| Error::backend("git ls-files", e))?;
 		let mut out = Vec::new();
-		for item in iter {
+		for item in &mut iter {
 			if let gix::status::index_worktree::Item::DirectoryContents { entry, .. } =
 				item.map_err(|e| Error::backend("git ls-files", e))?
 			{
@@ -856,6 +978,7 @@ impl GitRepo {
 				}
 			}
 		}
+		persist_stat_refresh(iter.into_outcome());
 		out.sort();
 		Ok(out)
 	}
@@ -1141,6 +1264,26 @@ fn cli_text_owned_capped(
 		.stdout)
 }
 
+/// Run the lock-taking stat-cache refresh after a successful lock-free status.
+///
+/// `update-index --refresh` modifies only cached stat data. `-q`,
+/// `--ignore-missing`, `--ignore-submodules`, and `--unmerged` make entries
+/// that cannot receive stat data a successful no-op, so the caller can settle
+/// their repair floor instead of retrying every poll.
+fn refresh_index_stat_cache(cwd: &Path, timeout: std::time::Duration) -> Result<()> {
+	let args = vec![
+		"update-index".to_owned(),
+		"-q".to_owned(),
+		"--ignore-missing".to_owned(),
+		"--ignore-submodules".to_owned(),
+		"--unmerged".to_owned(),
+		"--refresh".to_owned(),
+	];
+	super::cli::run_sync_writable_capped(cwd, &args, timeout, super::cli::OUTPUT_LIMIT_BYTES)?
+		.into_checked(&args)?;
+	Ok(())
+}
+
 /// Retention cap for path-list captures.
 ///
 /// A thread-local in test builds: the walk runs on the calling thread, so a
@@ -1342,9 +1485,159 @@ fn cap_bytes(mut bytes: Vec<u8>, max: Option<usize>) -> ShowResult {
 	ShowResult { bytes, truncated }
 }
 
+/// Persist the stat refresh a completed status iteration collected.
+///
+/// gitoxide compares an index entry's cached stat data (ctime/mtime/size/ino)
+/// against the worktree before reading content. When that data is absent or
+/// stale it hashes the file, and an unchanged hash yields
+/// `EntryStatus::NeedsUpdate(new_stat)`, which `gix::status::Iter` records
+/// internally (`maybe_keep_index_change`) rather than surfacing to the
+/// consumer. Nothing writes it back, so an index carrying no stat data
+/// re-hashes the entire worktree on *every* status call — measured at 2.2s
+/// wall and 47s of CPU per call on a 94k-entry, 9GB checkout, forever, because
+/// the cheap size comparison can never short-circuit. Every workspace
+/// `jj workspace add` creates starts in exactly that state, and `git status`
+/// was the only thing that repaired it.
+///
+/// Writing the refresh back makes the first call self-healing: it pays the full
+/// hash once and every later call takes the stat fast path, which is what the
+/// git CLI has always done. It also removes nearly all `git-lfs
+/// filter-process` spawns, since `FastEq` only streams content (invoking
+/// filters) for entries whose stat comparison fails.
+///
+/// Best-effort by design, and never at the cost of a concurrent writer's
+/// content. `gix::status::Outcome::write_changes()` clones the index
+/// snapshot that was read *before* the (potentially long) status walk, and
+/// `gix_index::File::write()` then replaces the whole on-disk file with that
+/// clone: `index.lock` only makes the write itself atomic, it does not
+/// protect the read-to-write gap. If `git add` (or jj) stages something in
+/// that gap, writing the stale snapshot back would silently discard it. So
+/// this re-checks the on-disk index's checksum immediately before writing
+/// and skips the persist if it no longer matches what the walk started
+/// from — losing the write still costs only speed (the next call retries
+/// the refresh); it must never destroy someone else's write.
+///
+/// For the same reason it never drops index state gitoxide cannot write.
+/// `gix_index::File::write()` serializes only the cache tree and the
+/// sparse-index marker, so an index that carries an untracked cache, fsmonitor
+/// state or resolve-undo records is left as git wrote it. git refreshes such
+/// an index's stat data itself. A fresh `jj workspace add` index, the case
+/// this write-back exists for, carries none of them.
+fn persist_stat_refresh(outcome: Option<gix::status::Outcome>) {
+	// Populated only for a fully drained iteration; an early exit or a worker
+	// error leaves nothing to persist.
+	let Some(mut outcome) = outcome else { return };
+	if !outcome.has_changes() {
+		return;
+	}
+	let writable = match &outcome.worktree_index {
+		gix::worktree::IndexPersistedOrInMemory::Persisted(index) => can_persist(index),
+		gix::worktree::IndexPersistedOrInMemory::InMemory(index) => can_persist(index),
+	};
+	if writable {
+		let _ = outcome.write_changes();
+	}
+}
+
+/// Whether writing `index` back loses nothing: it carries no extension
+/// `gix_index::File::write()` would drop, and no other writer has replaced the
+/// on-disk index since it was read.
+fn can_persist(index: &gix::index::File) -> bool {
+	index.untracked().is_none()
+		&& index.fs_monitor().is_none()
+		&& index.resolve_undo().is_none()
+		&& on_disk_index_unchanged(index)
+}
+
+/// Whether the on-disk index at `index.path()` still matches the checksum
+/// `index` was read with, i.e. nothing has rewritten it since.
+///
+/// The index file format ends with a checksum of everything before it, so
+/// comparing just those trailing bytes is cheap and needs no decode. `None`
+/// means `index` was never read from or written to disk (a synthesized empty
+/// index); that snapshot is safe to persist only if disk still has no index
+/// file either.
+fn on_disk_index_unchanged(index: &gix::index::File) -> bool {
+	use std::io::{Read, Seek, SeekFrom};
+	let Some(expected) = index.checksum() else {
+		return !index.path().exists();
+	};
+	let hash_len = expected.as_bytes().len();
+	let Ok(mut file) = std::fs::File::open(index.path()) else {
+		return false;
+	};
+	let Ok(len) = file.metadata().map(|meta| meta.len()) else {
+		return false;
+	};
+	if len < hash_len as u64 {
+		return false;
+	}
+	if file.seek(SeekFrom::End(-(hash_len as i64))).is_err() {
+		return false;
+	}
+	let mut actual = vec![0u8; hash_len];
+	if file.read_exact(&mut actual).is_err() {
+		return false;
+	}
+	actual == expected.as_bytes()
+}
+
+/// One on-disk version of an index file. git, jj and gitoxide all replace the
+/// index by renaming a lock file over it, so every rewrite is a new file: on
+/// Unix a new inode, and in practice a new mtime.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct IndexVersion {
+	len:      u64,
+	modified: std::time::SystemTime,
+	#[cfg(unix)]
+	inode:    (u64, u64),
+}
+
+impl IndexVersion {
+	fn read(path: &Path) -> Option<Self> {
+		let meta = std::fs::metadata(path).ok()?;
+		Some(Self {
+			len:                meta.len(),
+			modified:           meta.modified().ok()?,
+			#[cfg(unix)]
+			inode:              {
+				use std::os::unix::fs::MetadataExt;
+				(meta.dev(), meta.ino())
+			},
+		})
+	}
+}
+
+/// What status calls last learned about one index file's stat cache.
+#[derive(Clone, Copy)]
+struct StatCacheCheck {
+	/// The index version it was learned from.
+	version:        IndexVersion,
+	/// Stat-less entries the last repair could not fill in.
+	left_by_repair: usize,
+}
+
+/// A stat-cache repair about to run: the index version it runs against, and
+/// that version's stat-less entry count.
+struct StatCacheRepair {
+	path:      PathBuf,
+	version:   IndexVersion,
+	stat_less: usize,
+}
+
+/// [`StatCacheCheck`]s by index path, shared by every [`GitRepo`] in the
+/// process: one entry per index file it has run a whole-worktree status on.
+fn stat_cache_checks() -> std::sync::MutexGuard<'static, HashMap<PathBuf, StatCacheCheck>> {
+	static CHECKS: std::sync::LazyLock<std::sync::Mutex<HashMap<PathBuf, StatCacheCheck>>> =
+		std::sync::LazyLock::new(Default::default);
+	CHECKS
+		.lock()
+		.unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[cfg(test)]
 mod tests {
-	use std::{fs, process::Command};
+	use std::{env, fs, process::Command};
 
 	use tempfile::TempDir;
 
@@ -1765,6 +2058,618 @@ mod tests {
 		// resolved locations rather than spellings.
 		assert_eq!(worktrees[1].path.canonicalize()?, linked.canonicalize()?);
 		assert_eq!(worktrees[1].branch.as_deref(), Some("refs/heads/linked-branch"));
+		Ok(())
+	}
+
+	/// Zero every entry's cached stat data, exactly as the index a fresh
+	/// `jj workspace add` writes looks on disk.
+	fn clear_index_stat(root: &Path) -> TestResult {
+		let repo = gix::open(root)?;
+		let mut index = repo.open_index()?;
+		for entry in index.entries_mut() {
+			entry.stat = gix::index::entry::Stat::default();
+		}
+		index.write(gix::index::write::Options::default())?;
+		Ok(())
+	}
+
+	fn entries_missing_stat(root: &Path) -> std::result::Result<usize, Box<dyn std::error::Error>> {
+		let repo = gix::open(root)?;
+		let index = repo.open_index()?;
+		let zero = gix::index::entry::Stat::default();
+		Ok(index.entries().iter().filter(|e| e.stat == zero).count())
+	}
+
+	#[test]
+	fn gix_status_persists_index_stat_refresh() -> TestResult {
+		let (dir, repo) = repo()?;
+		let root = dir.path();
+		for name in ["a", "b", "c"] {
+			fs::write(root.join(name), format!("{name}\n"))?;
+		}
+		git(root, &["add", "-A"])?;
+		git(root, &["commit", "-m", "seed"])?;
+
+		// A stat-less index cannot answer "unchanged" from stat alone, so every
+		// entry gets re-hashed. Without write-back that repeats on every call
+		// forever: the pathology that burned 47s of CPU per status call on a
+		// 94k-entry checkout.
+		clear_index_stat(root)?;
+		assert_eq!(entries_missing_stat(root)?, 3, "fixture must start stat-less");
+
+		// A clean worktree drains the whole iteration, so the refresh is
+		// collected and must be persisted.
+		assert!(!repo.is_dirty()?);
+		assert_eq!(
+			entries_missing_stat(root)?,
+			0,
+			"is_dirty must write the refreshed stat cache back to .git/index",
+		);
+
+		// The refresh must not fabricate changes: the repo is still clean.
+		assert!(!repo.is_dirty()?);
+		assert_eq!(repo.status_porcelain(&StatusOptions::default())?, "");
+
+		// A real modification still reports dirty against the refreshed cache —
+		// a stale-stat write-back would mask it as unchanged.
+		fs::write(root.join("a"), "modified\n")?;
+		assert!(repo.is_dirty()?);
+		Ok(())
+	}
+
+	#[test]
+	fn gix_ls_files_others_persists_index_stat_refresh() -> TestResult {
+		let (dir, repo) = repo()?;
+		let root = dir.path();
+		for name in ["tracked-one", "tracked-two"] {
+			fs::write(root.join(name), format!("{name}\n"))?;
+		}
+		git(root, &["add", "-A"])?;
+		git(root, &["commit", "-m", "seed"])?;
+		fs::write(root.join("untracked"), "untracked\n")?;
+
+		clear_index_stat(root)?;
+		assert_eq!(entries_missing_stat(root)?, 2, "fixture must start stat-less");
+
+		// ls_files(others) runs the subprocess first and falls back to the
+		// in-process index-vs-worktree walk when the capture truncates; a cap
+		// below one path forces that walk, which is the only path here that
+		// re-stats index entries and so the only one that can repair them.
+		assert_eq!(with_capture_limit(1, || repo.ls_files(true, true))?, vec![
+			"untracked".to_owned()
+		]);
+		assert_eq!(
+			entries_missing_stat(root)?,
+			0,
+			"the in-process ls_files walk must write the refreshed stat cache back to .git/index",
+		);
+		assert_eq!(repo.ls_files(true, true)?, vec!["untracked".to_owned()]);
+		Ok(())
+	}
+
+	#[test]
+	fn cli_status_porcelain_persists_index_stat_refresh() -> TestResult {
+		let (dir, repo) = repo()?;
+		let root = dir.path();
+		for name in ["one", "two", "three"] {
+			fs::write(root.join(name), format!("{name}\n"))?;
+		}
+		git(root, &["add", "-A"])?;
+		git(root, &["commit", "-m", "seed"])?;
+
+		clear_index_stat(root)?;
+		assert_eq!(entries_missing_stat(root)?, 3, "fixture must start stat-less");
+
+		// status_porcelain prefers the git CLI and runs it lock-free
+		// (`--no-optional-locks`), which forbids the stat write-back and would
+		// make every later status re-hash the whole tree. Finding the index
+		// stat-less, it lets this one call write the refresh back.
+		assert_eq!(repo.status_porcelain(&StatusOptions::default())?, "");
+		assert_eq!(
+			entries_missing_stat(root)?,
+			0,
+			"status_porcelain must let git persist the refreshed stat cache",
+		);
+
+		// The refresh must not swallow real changes.
+		fs::write(root.join("one"), "changed\n")?;
+		assert_eq!(repo.status_porcelain(&StatusOptions::default())?, " M one\n");
+		Ok(())
+	}
+
+	/// Counts `index.lock` creations in a git dir, through inotify. A status
+	/// that takes the optional lock and then has nothing to write leaves the
+	/// index untouched, so the lock file's creation is the only trace that it
+	/// took the lock at all. The lock's removal and rename are watched too:
+	/// inotify merges an event into an identical one still queued, so
+	/// back-to-back creations would otherwise count once.
+	#[cfg(target_os = "linux")]
+	struct IndexLockWatch(fs::File);
+
+	#[cfg(target_os = "linux")]
+	impl IndexLockWatch {
+		fn new(git_dir: &Path) -> std::io::Result<Self> {
+			use std::os::{fd::FromRawFd, unix::ffi::OsStrExt};
+			// SAFETY: `inotify_init1` takes no pointers.
+			let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+			if fd < 0 {
+				return Err(std::io::Error::last_os_error());
+			}
+			// SAFETY: `inotify_init1` just returned `fd`, and nothing else owns
+			// it.
+			let file = unsafe { fs::File::from_raw_fd(fd) };
+			let dir = std::ffi::CString::new(git_dir.as_os_str().as_bytes())?;
+			let mask = libc::IN_CREATE | libc::IN_DELETE | libc::IN_MOVED_FROM;
+			// SAFETY: `dir` is a NUL-terminated path that outlives the call.
+			if unsafe { libc::inotify_add_watch(fd, dir.as_ptr(), mask) } < 0 {
+				return Err(std::io::Error::last_os_error());
+			}
+			Ok(Self(file))
+		}
+
+		/// `index.lock` creations since the previous call.
+		fn take(&self) -> std::io::Result<usize> {
+			use std::io::Read;
+			// `struct inotify_event`: four 4-byte fields, the last the length
+			// of the NUL-padded name that follows.
+			const HEADER: usize = std::mem::size_of::<libc::inotify_event>();
+			let mut buf = [0u8; 4096];
+			let mut created = 0;
+			loop {
+				let len = match (&self.0).read(&mut buf) {
+					Ok(0) => return Ok(created),
+					Ok(len) => len,
+					Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => return Ok(created),
+					Err(err) => return Err(err),
+				};
+				let mut events = &buf[..len];
+				while events.len() >= HEADER {
+					let mask = u32::from_ne_bytes([events[4], events[5], events[6], events[7]]);
+					let name_len =
+						u32::from_ne_bytes([events[12], events[13], events[14], events[15]]) as usize;
+					let name = &events[HEADER..HEADER + name_len];
+					if mask & libc::IN_CREATE != 0
+						&& name.split(|&byte| byte == 0).next() == Some(b"index.lock".as_slice())
+					{
+						created += 1;
+					}
+					events = &events[HEADER + name_len..];
+				}
+			}
+		}
+	}
+
+	/// The two whole-worktree status reads, `times` over: what a status line
+	/// polling the checkout runs.
+	#[cfg(target_os = "linux")]
+	fn poll(repo: &GitRepo, times: usize) -> TestResult {
+		for _ in 0..times {
+			repo.status_summary()?;
+			repo.is_dirty()?;
+		}
+		Ok(())
+	}
+
+	/// Write `name` and age its mtime an hour back. An entry whose cached mtime
+	/// is not older than the index file is racily clean, and git rewrites such
+	/// an index on any status allowed to write, so a fixture that needs a
+	/// repair with nothing to write must not have one.
+	#[cfg(target_os = "linux")]
+	fn write_aged(root: &Path, name: &str) -> TestResult {
+		let path = root.join(name);
+		fs::write(&path, format!("{name}\n"))?;
+		let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+		fs::File::options()
+			.write(true)
+			.open(&path)?
+			.set_modified(hour_ago)?;
+		Ok(())
+	}
+
+	/// The status poll must not take `index.lock` over an index whose stat
+	/// cache is intact: while a status holds it, a concurrent `git add`,
+	/// `commit` or `checkout` fails at once and jj gives up after a second. A
+	/// stale stat cache is the one case that justifies the lock, for one call.
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn status_poll_takes_index_lock_only_to_repair_a_stale_stat_cache() -> TestResult {
+		let (dir, repo) = repo()?;
+		let root = dir.path();
+		for name in ["one", "two", "three"] {
+			fs::write(root.join(name), format!("{name}\n"))?;
+		}
+		git(root, &["add", "-A"])?;
+		git(root, &["commit", "-m", "seed"])?;
+		fs::write(root.join("untracked"), "untracked\n")?;
+		let locks = IndexLockWatch::new(&root.join(".git"))?;
+
+		poll(&repo, 3)?;
+		assert_eq!(locks.take()?, 0, "polling an intact stat cache must not take index.lock");
+
+		clear_index_stat(root)?;
+		locks.take()?;
+		assert_eq!(repo.status_summary()?, StatusSummary {
+			staged:    0,
+			unstaged:  0,
+			untracked: 1,
+		});
+		assert_eq!(locks.take()?, 1, "one call must repair the stale stat cache");
+
+		poll(&repo, 3)?;
+		assert_eq!(locks.take()?, 0, "once repaired, polling must be lock-free again");
+		Ok(())
+	}
+
+	/// A refresh fills in no entry whose file is modified, deleted or
+	/// intent-to-add, so those stay stat-less after a repair. They must not
+	/// make every later poll repair again, through index rewrites that keep
+	/// them; only an index with more stat-less entries is repaired.
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn status_poll_does_not_repair_again_for_entries_no_refresh_fills() -> TestResult {
+		let (dir, repo) = repo()?;
+		let root = dir.path();
+		for name in ["changed", "deleted", "kept-one", "kept-two"] {
+			write_aged(root, name)?;
+		}
+		git(root, &["add", "-A"])?;
+		git(root, &["commit", "-m", "seed"])?;
+		clear_index_stat(root)?;
+		fs::write(root.join("changed"), "modified\n")?;
+		fs::remove_file(root.join("deleted"))?;
+		let locks = IndexLockWatch::new(&root.join(".git"))?;
+
+		assert_eq!(repo.status_summary()?, StatusSummary {
+			staged:    0,
+			unstaged:  2,
+			untracked: 0,
+		});
+		assert_eq!(locks.take()?, 1, "the stale index must be repaired");
+		assert_eq!(
+			entries_missing_stat(root)?,
+			2,
+			"only the modified and deleted files' entries stay stat-less",
+		);
+		poll(&repo, 3)?;
+		assert_eq!(locks.take()?, 0, "entries no refresh fills in must not make every poll repair");
+
+		// Another writer rewrites the index, keeping the same entries stat-less.
+		write_aged(root, "staged")?;
+		git(root, &["add", "staged"])?;
+		locks.take()?;
+		poll(&repo, 3)?;
+		assert_eq!(locks.take()?, 0, "an index with no new stat-less entry needs no repair");
+
+		// A new stat-less entry that no refresh fills in either gets one
+		// repair, which writes nothing. Neither the polls after it nor a later
+		// rewrite that keeps the entry repair again.
+		write_aged(root, "intended")?;
+		git(root, &["add", "-N", "intended"])?;
+		locks.take()?;
+		poll(&repo, 3)?;
+		assert_eq!(
+			locks.take()?,
+			1,
+			"a repair with nothing to fill in must run once, not every poll"
+		);
+		write_aged(root, "staged-too")?;
+		git(root, &["add", "staged-too"])?;
+		locks.take()?;
+		poll(&repo, 3)?;
+		assert_eq!(
+			locks.take()?,
+			0,
+			"a rewrite that keeps that entry stat-less must not repair it again"
+		);
+
+		// A rewrite that leaves more entries stat-less is repaired again.
+		clear_index_stat(root)?;
+		locks.take()?;
+		poll(&repo, 3)?;
+		assert_eq!(locks.take()?, 1, "a newly stale index must be repaired");
+		assert_eq!(entries_missing_stat(root)?, 3, "changed, deleted and intended stay stat-less");
+		Ok(())
+	}
+	/// Environment variables used only by the re-executed child in
+	/// [`status_poll_retries_after_an_optional_lock_skip`]. The parent creates
+	/// a real repository and puts a wrapper in the child's `PATH`, so the test
+	/// can control an otherwise unobservable optional-lock interleaving without
+	/// mutating the test process's environment.
+	const ENV_LOCK_SKIP_REPO: &str = "PI_VCS_TEST_LOCK_SKIP_REPO";
+	const ENV_LOCK_SKIP_INDEX_LOCK: &str = "PI_VCS_TEST_LOCK_SKIP_INDEX_LOCK";
+	const ENV_LOCK_SKIP_MARKER: &str = "PI_VCS_TEST_LOCK_SKIP_MARKER";
+
+	/// A `git` wrapper for the re-executed child. The first status runs while
+	/// the fixture's lock exists, then releases it before the CLI runner can
+	/// inspect the filesystem. The first index refresh recreates that lock just
+	/// for the refresh command, which makes a non-optional refresh report
+	/// contention by failing. Later invocations delegate directly to real git.
+	const LOCK_SKIP_GIT_WRAPPER: &str = r#"#!/bin/sh
+case "$1" in
+	--no-optional-locks) command="$2" ;;
+	*) command="$1" ;;
+esac
+run_git() {
+	PATH="${PATH#*:}" command git "$@"
+}
+case "$command" in
+	status)
+		run_git "$@"
+		status=$?
+		rm -f "$PI_VCS_TEST_LOCK_SKIP_INDEX_LOCK"
+		exit "$status"
+		;;
+	update-index)
+		if [ ! -e "$PI_VCS_TEST_LOCK_SKIP_MARKER" ]; then
+			: > "$PI_VCS_TEST_LOCK_SKIP_MARKER"
+			: > "$PI_VCS_TEST_LOCK_SKIP_INDEX_LOCK"
+			run_git "$@"
+			status=$?
+			rm -f "$PI_VCS_TEST_LOCK_SKIP_INDEX_LOCK"
+			exit "$status"
+		fi
+		;;
+esac
+PATH="${PATH#*:}" exec git "$@"
+"#;
+
+	/// A status that cannot write because another writer owns `index.lock`
+	/// must leave its repair claim unsettled. The next poll of the *same*
+	/// stat-less index then takes one lock and persists the refreshed stats.
+	///
+	/// A re-executed child gives the wrapper a private `PATH`: no other test
+	/// can observe a changed process environment. The wrapper releases the
+	/// fixture lock after `git status` has skipped its optional write but before
+	/// the parent runner can probe it. The old post-exit probe therefore
+	/// settles the unchanged index and this test's second poll takes no lock.
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn status_poll_retries_after_an_optional_lock_skip() -> TestResult {
+		use std::os::unix::fs::PermissionsExt;
+
+		if let Some(root) = env::var_os(ENV_LOCK_SKIP_REPO) {
+			let root = PathBuf::from(root);
+			let repo = GitRepo::require(&root)?;
+			let git_dir = root.join(".git");
+			let index = git_dir.join("index");
+			let version = IndexVersion::read(&index).ok_or("fixture index must exist")?;
+			let locks = IndexLockWatch::new(&git_dir)?;
+
+			assert_eq!(repo.status_summary()?, StatusSummary::default());
+			assert_eq!(
+				entries_missing_stat(&root)?,
+				3,
+				"the contended refresh must leave the stat cache untouched",
+			);
+			assert!(
+				IndexVersion::read(&index).is_some_and(|after| after == version),
+				"the skipped refresh must leave the same index version on disk",
+			);
+			locks.take()?;
+
+			assert_eq!(repo.status_summary()?, StatusSummary::default());
+			assert_eq!(
+				locks.take()?,
+				1,
+				"the next poll of that same index must perform exactly one deferred repair",
+			);
+			assert_eq!(
+				entries_missing_stat(&root)?,
+				0,
+				"the deferred repair must write refreshed stat data back",
+			);
+			return Ok(());
+		}
+
+		let (dir, _repo) = repo()?;
+		let root = dir.path();
+		for name in ["one", "two", "three"] {
+			fs::write(root.join(name), format!("{name}\n"))?;
+		}
+		git(root, &["add", "-A"])?;
+		git(root, &["commit", "-m", "seed"])?;
+		clear_index_stat(root)?;
+		assert_eq!(entries_missing_stat(root)?, 3, "fixture must start stat-less");
+
+		let git_dir = root.join(".git");
+		let index_lock = git_dir.join("index.lock");
+		fs::File::create(&index_lock)?;
+		let marker = git_dir.join("refresh-contended");
+		let bin = git_dir.join("test-bin");
+		fs::create_dir(&bin)?;
+		let wrapper = bin.join("git");
+		fs::write(&wrapper, LOCK_SKIP_GIT_WRAPPER)?;
+		fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755))?;
+		let mut path = vec![bin];
+		path.extend(env::split_paths(&env::var_os("PATH").ok_or("PATH must be set")?));
+		let path = env::join_paths(path)?;
+		let name = format!(
+			"{}::status_poll_retries_after_an_optional_lock_skip",
+			module_path!()
+				.split_once("::")
+				.expect("crate-qualified module path")
+				.1
+		);
+		let child = Command::new(env::current_exe()?)
+			.args(["--exact", &name, "--nocapture", "--test-threads=1"])
+			.env(ENV_LOCK_SKIP_REPO, root)
+			.env(ENV_LOCK_SKIP_INDEX_LOCK, &index_lock)
+			.env(ENV_LOCK_SKIP_MARKER, marker)
+			.env("PATH", path)
+			.output()?;
+		assert!(
+			child.status.success(),
+			"contention regression child failed:\n{}{}",
+			String::from_utf8_lossy(&child.stdout),
+			String::from_utf8_lossy(&child.stderr),
+		);
+		Ok(())
+	}
+
+	/// A repair that another writer overtakes (the `git add` that held
+	/// `index.lock` when the repairing status went to take it, then replaced
+	/// the index) must be retried against that writer's index. Recording it as
+	/// done would leave the index stat-less, and every later poll re-hashing the
+	/// whole worktree.
+	#[test]
+	fn stat_cache_repair_overtaken_by_another_writer_is_retried() -> TestResult {
+		let (dir, repo) = repo()?;
+		let root = dir.path();
+		for name in ["one", "two"] {
+			fs::write(root.join(name), format!("{name}\n"))?;
+		}
+		git(root, &["add", "-A"])?;
+		git(root, &["commit", "-m", "seed"])?;
+		clear_index_stat(root)?;
+
+		let repair = repo
+			.stat_cache_repair_due()
+			.ok_or("a stat-less index must be due a repair")?;
+		// While the repairing status runs, the other writer stages a file and
+		// leaves every entry it did not touch stat-less.
+		fs::write(root.join("staged"), "staged\n")?;
+		git(root, &["add", "staged"])?;
+		repo.settle_stat_cache_repair(repair);
+
+		assert!(
+			repo.stat_cache_repair_due().is_some(),
+			"the other writer's index is as stale and must get its own repair",
+		);
+		Ok(())
+	}
+
+	/// A repository whose index carries what the user's own `git status`
+	/// builds with the untracked cache and an fsmonitor hook configured: the
+	/// untracked-cache (`UNTR`) and fsmonitor (`FSMN`) extensions. One file is
+	/// tracked and one untracked.
+	#[cfg(unix)]
+	fn repo_with_index_cache_extensions()
+	-> std::result::Result<(TempDir, GitRepo), Box<dyn std::error::Error>> {
+		use std::os::unix::fs::PermissionsExt;
+		let (dir, repo) = repo()?;
+		let root = dir.path();
+		commit(root, "tracked", "tracked\n", "seed")?;
+		fs::write(root.join("untracked"), "untracked\n")?;
+		// A version-2 fsmonitor hook that reports every path as possibly changed.
+		let hook = root.join(".git").join("fsmonitor-all.sh");
+		fs::write(&hook, "#!/bin/sh\nprintf 'token\\0/\\0'\n")?;
+		fs::set_permissions(&hook, fs::Permissions::from_mode(0o755))?;
+		git(root, &["config", "core.untrackedCache", "true"])?;
+		git(root, &["config", "core.fsmonitor", &hook.display().to_string()])?;
+		git(root, &["config", "core.fsmonitorHookVersion", "2"])?;
+		git(root, &["status", "--porcelain"])?;
+		assert_eq!(
+			index_cache_extensions(root)?,
+			[true, true],
+			"the user's own git status builds both caches"
+		);
+		Ok((dir, repo))
+	}
+
+	/// Whether the on-disk index carries the `UNTR` and `FSMN` extensions.
+	#[cfg(unix)]
+	fn index_cache_extensions(
+		root: &Path,
+	) -> std::result::Result<[bool; 2], Box<dyn std::error::Error>> {
+		let index = fs::read(root.join(".git").join("index"))?;
+		let has = |tag: &[u8]| index.windows(tag.len()).any(|window| window == tag);
+		Ok([has(b"UNTR"), has(b"FSMN")])
+	}
+
+	/// The status that repairs a stale stat cache must leave the repository's
+	/// own index caches in place. With the index write allowed, a
+	/// `core.untrackedCache=false` or `core.fsmonitor=false` pin is not inert:
+	/// git drops the untracked-cache (`UNTR`) and fsmonitor (`FSMN`) extensions
+	/// to honour it and writes the removal back, so every repair would undo
+	/// what the user's own `git status` built.
+	#[cfg(unix)]
+	#[test]
+	fn cli_status_porcelain_keeps_index_cache_extensions() -> TestResult {
+		let (dir, repo) = repo_with_index_cache_extensions()?;
+		let root = dir.path();
+		// `update-index --cacheinfo` leaves the entry stat-less and keeps both
+		// extensions, so the next status is the one that repairs and writes.
+		let blob = git(root, &["rev-parse", ":tracked"])?;
+		git(root, &["update-index", "--cacheinfo", &format!("100644,{},tracked", blob.trim())])?;
+		assert_eq!(entries_missing_stat(root)?, 1, "fixture must start stat-less");
+		assert_eq!(repo.status_porcelain(&StatusOptions::default())?, "?? untracked\n");
+		assert_eq!(entries_missing_stat(root)?, 0, "the status must repair the stat cache");
+		assert_eq!(
+			index_cache_extensions(root)?,
+			[true, true],
+			"status_porcelain must keep the untracked-cache and fsmonitor extensions",
+		);
+		Ok(())
+	}
+
+	/// The in-process stat write-back must not drop index extensions gitoxide
+	/// cannot serialize. `gix_index::File::write()` writes only the cache tree
+	/// and the sparse-index marker, so persisting a refresh over an index the
+	/// user's own git built with an untracked cache or fsmonitor state would
+	/// erase both.
+	#[cfg(unix)]
+	#[test]
+	fn gix_stat_refresh_keeps_index_extensions_it_cannot_write() -> TestResult {
+		let (dir, repo) = repo_with_index_cache_extensions()?;
+		let root = dir.path();
+		// Age the tracked file's mtime, content unchanged, so the walk hashes it
+		// and collects a stat refresh worth writing back.
+		fs::File::options()
+			.write(true)
+			.open(root.join("tracked"))?
+			.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000))?;
+		// A cap below one path forces the in-process walk, as in
+		// `gix_ls_files_others_persists_index_stat_refresh`.
+		assert_eq!(with_capture_limit(1, || repo.ls_files(true, true))?, vec![
+			"untracked".to_owned()
+		]);
+		assert_eq!(
+			index_cache_extensions(root)?,
+			[true, true],
+			"the gitoxide stat write-back must keep the untracked-cache and fsmonitor extensions",
+		);
+		Ok(())
+	}
+
+	#[test]
+	fn concurrent_stage_survives_stale_stat_refresh_writeback() -> TestResult {
+		let (dir, repo) = repo()?;
+		let root = dir.path();
+		fs::write(root.join("tracked"), "tracked\n")?;
+		git(root, &["add", "-A"])?;
+		git(root, &["commit", "-m", "seed"])?;
+
+		// A stat-less index (as a fresh `jj workspace add` produces) forces
+		// the status walk below to collect a stat refresh worth writing back.
+		clear_index_stat(root)?;
+		assert_eq!(entries_missing_stat(root)?, 1, "fixture must start stat-less");
+
+		// Begin a status computation over that stale snapshot...
+		let gix_repo = repo.gix()?;
+		let platform = status_with_fresh_index(&gix_repo, "test")?;
+		let mut iter = platform.into_iter(Vec::<gix::bstr::BString>::new())?;
+
+		// ...then, before the walk finishes and writes its refresh back, a
+		// concurrent process (`git add` / jj) stages a brand-new file. This is
+		// the race the review flagged: `write_changes()` clones the index
+		// snapshot read before the walk started, so persisting it
+		// unconditionally would discard this addition.
+		fs::write(root.join("staged-concurrently"), "new\n")?;
+		git(root, &["add", "staged-concurrently"])?;
+
+		for item in &mut iter {
+			item?;
+		}
+		persist_stat_refresh(iter.into_outcome());
+
+		let after = gix::open(root)?.open_index()?;
+		assert!(
+			after
+				.entries()
+				.iter()
+				.any(|e| bytes_to_path(e.path(&after)) == "staged-concurrently"),
+			"stat-refresh write-back must not discard a concurrently staged file",
+		);
 		Ok(())
 	}
 }
