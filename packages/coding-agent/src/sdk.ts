@@ -80,8 +80,8 @@ import {
 	resolveConfiguredModelPatterns,
 	resolveModelRoleValue,
 	resolveSessionModelSelector,
-	sessionModelDiscoveryProviders,
 } from "./config/model-resolver";
+import { restoreSessionModels } from "./config/session-model-restore";
 import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
 import { buildServiceTierByFamily } from "./config/service-tier";
@@ -2961,47 +2961,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// honors the last active role in either case.
 		const sessionRetryLimit = restoredSessionModelIndex >= 0 ? restoredSessionModelIndex : sessionModelStrings.length;
 		if (!hasExplicitModel && sessionRetryLimit > 0) {
-			const restoreSessionModel = (): boolean => {
-				for (let i = 0; i < sessionRetryLimit; i++) {
-					const restored = resolveSessionModelSelector(modelRegistry, sessionModelStrings[i]);
-					if (restored) {
-						const restoredModel = restored.model;
-						model = restoredModel;
-						modelFallbackMessage = undefined;
-						restoredSessionModelIndex = i;
-						restoredSessionThinkingLevel = restored.thinkingLevel;
-						// Recompute thinking-level from scratch against the reclaimed
-						// model: any value derived from the earlier fallback model's
-						// `thinking.defaultLevel` must not become sticky.
-						adoptThinkingForModel(restoredModel);
-						void prewarmModelConnection(restoredModel);
-						return true;
-					}
-				}
-				return false;
-			};
-			if (!restoreSessionModel()) {
-				// The saved candidates weren't in the static+cached catalog. If any
-				// belongs to a discovery-backed provider that hasn't been fetched
-				// yet (models.yml `discovery:` or extension `fetchDynamicModels`),
-				// trigger a cache-aware, provider-scoped discovery pass and retry
-				// before resume silently downgrades to the default role. The
-				// registry coalesces this with any matching request already running
-				// in the SDK's startup background refresh.
-				const candidateProviders = sessionModelDiscoveryProviders(
-					modelRegistry,
-					sessionModelStrings.slice(0, sessionRetryLimit),
-					disabledProviderIds(settings),
-				);
-				if (candidateProviders.size > 0) {
-					// This skips the static reload and all-other-runtime restore
-					// performed by `refreshProvider`, so unrelated runtime providers
-					// continue independently.
-					await logger.time("restoreSessionModelDiscoveryFallback", () =>
-						modelRegistry.refreshDiscoverableProviders(candidateProviders, "online-if-uncached"),
-					);
-					restoreSessionModel();
-				}
+			const restored = await restoreSessionModels(modelRegistry, sessionModelStrings.slice(0, sessionRetryLimit), {
+				disabledProviders: disabledProviderIds(settings),
+				// A later persisted candidate already restored successfully; keep
+				// its cached fallback rather than adding a forced network request.
+				allowOnlineRevalidation: restoredSessionModelIndex < 0,
+			});
+			if (restored) {
+				model = restored.model;
+				modelFallbackMessage = undefined;
+				restoredSessionModelIndex = restored.index;
+				restoredSessionThinkingLevel = restored.thinkingLevel;
+				// Recompute against the reclaimed model, not the earlier fallback.
+				adoptThinkingForModel(restored.model);
+				void prewarmModelConnection(restored.model);
 			}
 		}
 		// Exhaust persisted candidates (including configured and extension discovery)

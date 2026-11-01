@@ -130,9 +130,9 @@ import {
 	type ResolvedModelRoleValue,
 	resolveCliModel,
 	resolveSessionModelSelector,
-	sessionModelDiscoveryProviders,
 } from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
+import { restoreSessionModels } from "../config/session-model-restore";
 import { buildServiceTierByFamily, isServiceTierForFamily, serviceTierSettingToTier } from "../config/service-tier";
 import { combine, type SettingsScope } from "../config/registry";
 import { type Settings, withActiveSettings } from "../config/settings";
@@ -13454,29 +13454,11 @@ export class AgentSession implements SettingsScope {
 		}
 	}
 
-	/**
-	 * First restorable saved session model, resolved like startup resume: when
-	 * none is in the catalog, refresh the discovery-backed providers among them
-	 * once and retry.
-	 */
 	async #resolveSessionModel(selectors: readonly string[]): Promise<Model | undefined> {
-		const resolve = (): Model | undefined => {
-			for (const selector of selectors) {
-				const restored = resolveSessionModelSelector(this.#modelRegistry, selector);
-				if (restored) return restored.model;
-			}
-			return undefined;
-		};
-		const restored = resolve();
-		if (restored) return restored;
-		const providers = sessionModelDiscoveryProviders(
-			this.#modelRegistry,
-			selectors,
-			disabledProviderIds(this.settings),
-		);
-		if (providers.size === 0) return undefined;
-		await this.#modelRegistry.refreshDiscoverableProviders(providers, "online-if-uncached");
-		return resolve();
+		const restored = await restoreSessionModels(this.#modelRegistry, selectors, {
+			disabledProviders: disabledProviderIds(this.settings),
+		});
+		return restored?.model;
 	}
 
 	/**

@@ -1,9 +1,20 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { Database } from "bun:sqlite";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as path from "node:path";
 import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { type Api, type AssistantMessage, type Context, Effort, type ImageContent, type Model } from "@oh-my-pi/pi-ai";
+import {
+	type Api,
+	type AssistantMessage,
+	type Context,
+	Effort,
+	type FetchImpl,
+	type ImageContent,
+	type Model,
+} from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { type CreateAgentSessionResult, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
@@ -16,7 +27,7 @@ import { encodeRawPng } from "@oh-my-pi/pi-coding-agent/utils/png-encode";
 import { AUTO_THINKING, resolveProvisionalAutoLevel } from "@oh-my-pi/pi-tui/thinking";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
-import { createAssistantMessage } from "./helpers/agent-session-setup";
+import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 describe("AgentSession model persistence", () => {
 	let tempDir: TempDir;
@@ -102,8 +113,10 @@ describe("AgentSession model persistence", () => {
 		selectInitialModel?: (availableModels: Model<Api>[]) => Model<Api>;
 		modelRoles?: Record<string, string>;
 		persist?: boolean;
+		modelRegistry?: ModelRegistry;
+		allowSessionModelFallback?: boolean;
 	}): Promise<{ modelRegistry: ModelRegistry; settings: Settings; session: AgentSession }> {
-		const modelRegistry = sharedModelRegistry;
+		const modelRegistry = options?.modelRegistry ?? sharedModelRegistry;
 		const model =
 			options?.initialModel ??
 			options?.selectInitialModel?.(modelRegistry.getAvailable()) ??
@@ -135,6 +148,7 @@ describe("AgentSession model persistence", () => {
 				: SessionManager.inMemory(),
 			settings: sessionSettings,
 			modelRegistry,
+			allowSessionModelFallback: options?.allowSessionModelFallback,
 		});
 
 		return { modelRegistry, settings: sessionSettings, session };
@@ -309,6 +323,137 @@ describe("AgentSession model persistence", () => {
 
 		await expect(created.session.switchSession(targetSessionFile)).resolves.toBe(true);
 		expect(created.session.model?.id).toBe(smolModel.id);
+	});
+
+	it("revalidates a fresh cached Copilot catalog when switching to a newly served saved model", async () => {
+		const provider = "github-copilot";
+		const modelId = "gpt-99-restore-only-1m";
+		const baseUrl = "https://api.business.githubcopilot.com";
+		const apiKey = JSON.stringify({ token: "copilot-switch-test-key", apiEndpoint: baseUrl });
+		const authStorage = createInMemoryAuthStorage();
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		authStorage.keys.setRuntime(provider, apiKey);
+		let fetches = 0;
+		let copilotFetches = 0;
+		let serveSavedModel = false;
+		const fetchMock: FetchImpl = async input => {
+			const url = input instanceof Request ? input.url : String(input);
+			fetches++;
+			if (url !== `${baseUrl}/models`) throw new Error(`Unexpected URL: ${url}`);
+			copilotFetches++;
+			return Response.json({
+				data: [
+					{
+						id: serveSavedModel ? "gpt-99-restore-only" : "gpt-99-previous-catalog",
+						name: serveSavedModel ? "Saved Copilot model" : "Previous Copilot model",
+						capabilities: {
+							type: "chat",
+							limits: { max_context_window_tokens: 1_000_000, max_output_tokens: 64_000 },
+							supports: { vision: true },
+						},
+						billing: {
+							token_prices: {
+								default: { context_max: 200_000, input_price: 500, output_price: 2500, cache_price: 50 },
+								long_context: { context_max: 936_000, input_price: 500, output_price: 2500, cache_price: 50 },
+							},
+						},
+					},
+				],
+			});
+		};
+		const registry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"), { fetch: fetchMock });
+		try {
+			await registry.refreshDiscoverableProviders([provider], "online");
+			expect(copilotFetches).toBe(1);
+			// The shared catalog feed is unavailable in this fixture, so the real
+			// discovery writes a partial snapshot. Preserve its production fingerprint
+			// and header provenance while simulating a complete authoritative one.
+			const cacheProviderId = resolveModelCacheProviderId(provider, { apiKey, baseUrl });
+			const cacheDb = new Database(path.join(tempDir.path(), "models.db"));
+			try {
+				const updated = cacheDb.run("UPDATE model_cache SET authoritative = 1 WHERE provider_id = ?", [
+					cacheProviderId,
+				]);
+				expect(updated.changes).toBe(1);
+				cacheDb.run("DELETE FROM model_cache_refresh WHERE provider_id = ?", [cacheProviderId]);
+			} finally {
+				cacheDb.close();
+			}
+			serveSavedModel = true;
+			fetches = 0;
+			copilotFetches = 0;
+			await registry.refreshDiscoverableProviders([provider], "online-if-uncached");
+			expect(fetches).toBe(0);
+			expect(registry.getProviderDiscoveryState(provider)).toMatchObject({
+				status: "cached",
+				source: "cache",
+				stale: false,
+			});
+			expect(registry.find(provider, modelId)).toBeUndefined();
+
+			const target = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "target"));
+			target.appendModelChange(`${provider}/${modelId}`);
+			const userMessage = { role: "user" as const, content: "Preserve the saved evidence discussion", timestamp: 1 };
+			const assistantMessage = createAssistantMessage("Evidence preserved");
+			target.appendMessage(userMessage);
+			target.appendMessage(assistantMessage);
+			await target.flush();
+			const targetFile = target.getSessionFile();
+			if (!targetFile) throw new Error("Expected target session file");
+			const branch = target.getBranch();
+			const created = await createSession({
+				modelRegistry: registry,
+				persist: true,
+				allowSessionModelFallback: true,
+			});
+			const warnings: string[] = [];
+
+			await expect(
+				created.session.switchSession(targetFile, { onModelFallback: warning => warnings.push(warning) }),
+			).resolves.toBe(true);
+
+			expect(created.session.model?.provider).toBe(provider);
+			expect(created.session.model?.id).toBe(modelId);
+			expect(created.session.model?.contextWindow).toBe(1_000_000);
+			expect(created.session.messages).toEqual([userMessage, assistantMessage]);
+			expect(created.session.sessionManager.getBranch()).toEqual(branch);
+			expect(warnings).toEqual([]);
+			expect(copilotFetches).toBe(1);
+		} finally {
+			await session?.dispose();
+			session = undefined;
+			authStorage.close();
+			closeModelCache();
+		}
+	});
+
+	it("does not discover a known saved model when its provider has no configured auth", async () => {
+		const copilotModel = getBundledModel("github-copilot", "grok-4.6");
+		if (!copilotModel) throw new Error("Expected bundled Copilot model");
+		const authStorage = createInMemoryAuthStorage();
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const registry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+		const authSpy = spyOn(registry, "hasConfiguredAuth").mockReturnValue(false);
+		const refreshSpy = spyOn(registry, "refreshDiscoverableProviders");
+		try {
+			const targetFile = await writeRoleModelSession(modelValue(copilotModel), modelValue(copilotModel));
+			const created = await createSession({ modelRegistry: registry, persist: true });
+			const previousFile = created.session.sessionManager.getSessionFile();
+
+			await expect(created.session.switchSession(targetFile)).rejects.toThrow(
+				`Could not restore model ${modelValue(copilotModel)}`,
+			);
+			expect(refreshSpy).not.toHaveBeenCalled();
+			expect(created.session.sessionManager.getSessionFile()).toBe(previousFile);
+			expect(created.session.model?.provider).toBe("anthropic");
+		} finally {
+			authSpy.mockRestore();
+			refreshSpy.mockRestore();
+			await session?.dispose();
+			session = undefined;
+			authStorage.close();
+			closeModelCache();
+		}
 	});
 
 	it("restores the last active role model during startup resume", async () => {

@@ -387,6 +387,100 @@ describe("ModelRegistry runtime provider registration", () => {
 		expect(registry.find(providerName, "fallback-model")).toBeDefined();
 	});
 
+	test("does not share a pending catalog with a replacement runtime registration", async () => {
+		const provider = "replaced-runtime-provider";
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<readonly NonNullable<ProviderConfigInput["models"]>[number][]>();
+		registry.registerProvider(
+			provider,
+			{
+				baseUrl: "https://runtime.example.com/v1",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				fetchDynamicModels: () => {
+					started.resolve();
+					return release.promise;
+				},
+			},
+			"ext://runtime",
+		);
+		const first = registry.refreshRuntimeProviders("online");
+		await started.promise;
+		let replacementFetches = 0;
+		registry.registerProvider(
+			provider,
+			{
+				baseUrl: "https://runtime.example.com/v1",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				fetchDynamicModels: async () => {
+					replacementFetches++;
+					return [{ ...baseModel, id: "replacement-model" }];
+				},
+			},
+			"ext://runtime",
+		);
+		const second = registry.refreshRuntimeProviders("online");
+		try {
+			await drainMicrotasksUntil(() => replacementFetches === 1, "replacement catalog did not start");
+			await second;
+			expect(registry.find(provider, "replacement-model")?.id).toBe("replacement-model");
+			expect(registry.find(provider, "previous-model")).toBeUndefined();
+		} finally {
+			release.resolve([{ ...baseModel, id: "previous-model" }]);
+			await Promise.all([first, second]);
+		}
+		expect(registry.find(provider, "replacement-model")?.id).toBe("replacement-model");
+		expect(registry.find(provider, "previous-model")).toBeUndefined();
+		expect(registry.getProviderDiscoveryState(provider)?.models).toContain("replacement-model");
+	});
+
+	test("refreshes a new built-in endpoint while the previous configuration is pending", async () => {
+		const firstEndpoint = "https://first.example.com";
+		const nextEndpoint = "https://next.example.com";
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const writeEndpoint = (baseUrl: string) =>
+			fs.writeFileSync(
+				modelsJsonPath,
+				JSON.stringify({
+					providers: { anthropic: { baseUrl, apiKey: "test-key" } },
+				}),
+			);
+		writeEndpoint(firstEndpoint);
+		let nextFetches = 0;
+		const fetch: FetchImpl = async input => {
+			const url = String(input);
+			if (url === `${firstEndpoint}/v1/models`) {
+				started.resolve();
+				await release.promise;
+				return Response.json({ data: [{ id: "previous-endpoint-model" }] });
+			}
+			if (url === `${nextEndpoint}/v1/models`) {
+				nextFetches++;
+				return Response.json({ data: [{ id: "new-endpoint-model" }] });
+			}
+			return new Response("not found", { status: 404 });
+		};
+		const changingRegistry = new ModelRegistry(authStorage, modelsJsonPath, { fetch });
+		const first = changingRegistry.refreshProvider("anthropic", "online");
+		await started.promise;
+		writeEndpoint(nextEndpoint);
+		fs.utimesSync(modelsJsonPath, new Date(), new Date(Date.now() + 1_000));
+		const second = changingRegistry.refreshProvider("anthropic", "online");
+		try {
+			await drainMicrotasksUntil(() => nextFetches === 1, "new endpoint catalog did not start");
+			await second;
+			expect(changingRegistry.find("anthropic", "new-endpoint-model")?.baseUrl).toBe(nextEndpoint);
+		} finally {
+			release.resolve();
+			await Promise.all([first, second]);
+		}
+		expect(changingRegistry.find("anthropic", "new-endpoint-model")?.baseUrl).toBe(nextEndpoint);
+		expect(changingRegistry.find("anthropic", "previous-endpoint-model")).toBeUndefined();
+		expect(changingRegistry.getProviderDiscoveryState("anthropic")?.models).toContain("new-endpoint-model");
+	});
+
 	test("configured discovery suppresses extension fetchDynamicModels for the same provider", async () => {
 		const providerName = "runtime-configured-provider";
 		fs.writeFileSync(

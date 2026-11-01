@@ -205,6 +205,17 @@ interface CustomModelsResult {
 interface ConfiguredModelDiscoveryResult {
 	models: Model<Api>[];
 	replaceRuntimeModels: boolean;
+	version: number;
+}
+
+interface VersionedBuiltInDiscoveryResult extends BuiltInDiscoveryResult {
+	version: number;
+}
+
+interface BuiltInProviderDiscovery {
+	options: ModelManagerOptions<Api>;
+	runtime: boolean;
+	result: VersionedBuiltInDiscoveryResult;
 }
 
 /**
@@ -379,6 +390,14 @@ export class ModelRegistry {
 		DiscoveryProviderConfig,
 		Map<ModelRefreshStrategy, Promise<ConfiguredModelDiscoveryResult>>
 	> = new Map();
+	#builtInDiscoveryInFlight = new Map<string, Map<ModelRefreshStrategy, Promise<VersionedBuiltInDiscoveryResult>>>();
+	#staticModelGeneration = 0;
+	// Version each provider result when it settles, before a batch can wait on
+	// unrelated providers. Only a newer published result supersedes it.
+	#discoveryRefreshVersion = 0;
+	#discoveryResultVersion = 0;
+	#publishedDiscoveryVersions = new Map<string, number>();
+	#latestBuiltInIdentities = new Map<string, { version: number; identity: string | ModelManagerOptions<Api> }>();
 	#policyReapply?: Promise<void>;
 	// Window tiers of models whose extended window is larger: per row as the
 	// hardcoded policies produced it (custom overlays replacing that row never
@@ -922,6 +941,24 @@ export class ModelRegistry {
 			// Models config unchanged since last load; reloading would be redundant.
 			return;
 		}
+		// With no models file, reloads still detect changes to implicit endpoints
+		// and authentication. Keep the generation only if that effective
+		// configuration is unchanged after rebuilding it.
+		const previousMissingConfig =
+			!options?.force && currentMtime === null && staticConfigUnchanged
+				? {
+						generation: this.#staticModelGeneration,
+						discoverableProviders: this.#discoverableProviders,
+						keylessProviders: new Set(this.#keylessProviders),
+						customProviderApiKeys: new Map(this.#customProviderApiKeys),
+						customModelOverlays: this.#customModelOverlays,
+						providerOverrides: new Map(this.#providerOverrides),
+						modelOverrides: new Map(this.#modelOverrides),
+						implicitLocalProviders: new Set(this.#implicitLocalProviders),
+						implicitProviderEndpointEnv: new Map(this.#implicitProviderEndpointEnv),
+						configError: this.#configError,
+					}
+				: undefined;
 		let preservedRuntimeState:
 			| {
 					models: Model<Api>[];
@@ -934,7 +971,7 @@ export class ModelRegistry {
 					keylessProviders: Set<string>;
 			  }
 			| undefined;
-		if (options?.preserveRuntimeDiscovery) {
+		if (options?.preserveRuntimeDiscovery || previousMissingConfig) {
 			preservedRuntimeState = {
 				models: this.#runtimeDiscoveredModels,
 				authoritativeProviders: new Set(this.#runtimeAuthoritativeProviders),
@@ -964,6 +1001,27 @@ export class ModelRegistry {
 		this.#configError = undefined;
 		this.#providerDiscoveryStates.clear();
 		this.#loadModels();
+		if (previousMissingConfig) {
+			const unchanged =
+				this.#lastStaticLoadMtime === null &&
+				Bun.deepEquals(previousMissingConfig.discoverableProviders, this.#discoverableProviders) &&
+				Bun.deepEquals(previousMissingConfig.keylessProviders, this.#keylessProviders) &&
+				Bun.deepEquals(previousMissingConfig.customProviderApiKeys, this.#customProviderApiKeys) &&
+				Bun.deepEquals(previousMissingConfig.customModelOverlays, this.#customModelOverlays) &&
+				Bun.deepEquals(previousMissingConfig.providerOverrides, this.#providerOverrides) &&
+				Bun.deepEquals(previousMissingConfig.modelOverrides, this.#modelOverrides) &&
+				Bun.deepEquals(previousMissingConfig.implicitLocalProviders, this.#implicitLocalProviders) &&
+				Bun.deepEquals(previousMissingConfig.implicitProviderEndpointEnv, this.#implicitProviderEndpointEnv) &&
+				Bun.deepEquals(previousMissingConfig.configError, this.#configError);
+			if (unchanged) {
+				this.#staticModelGeneration = previousMissingConfig.generation;
+				// Coalescing and publication also key configured discovery by object
+				// identity, so retain the equivalent provider objects.
+				this.#discoverableProviders = previousMissingConfig.discoverableProviders;
+			} else if (!options?.preserveRuntimeDiscovery) {
+				preservedRuntimeState = undefined;
+			}
+		}
 		if (!preservedRuntimeState) return;
 
 		const preservedProviderIds = preservedRuntimeState.runtimeProviderIds;
@@ -1028,6 +1086,7 @@ export class ModelRegistry {
 	}
 
 	#loadModels() {
+		this.#staticModelGeneration++;
 		this.#resetStaticComposition();
 		// Load custom config first (to know which providers to override).
 		const {
@@ -1599,6 +1658,7 @@ export class ModelRegistry {
 					configStale ||
 					hasUnrestoredHeaders,
 				fetchedAt: cache.updatedAt,
+				source: "cache",
 				models: models.map(model => model.id),
 			});
 		}
@@ -1904,6 +1964,7 @@ export class ModelRegistry {
 		strategy: ModelRefreshStrategy,
 		providerFilter?: ReadonlySet<string>,
 	): Promise<void> {
+		const version = ++this.#discoveryRefreshVersion;
 		// One cache connection for the whole pass: every provider manager reads
 		// (and may write) its row, which would otherwise reopen the database each time.
 		using _cacheConnection = retainModelCacheConnection(this.#cacheDbPath);
@@ -1924,30 +1985,58 @@ export class ModelRegistry {
 					);
 		const [configuredDiscoveryResults, builtInDiscovery] = await Promise.all([
 			configuredDiscoveriesPromise,
-			this.#discoverBuiltInProviderModels(strategy, providerFilter),
+			this.#discoverBuiltInProviderModels(strategy, providerFilter, version),
 		]);
-		this.#captureCatalogMetrics(builtInDiscovery.models, providerFilter === undefined);
+		const canPublish = (provider: string, resultVersion: number) =>
+			(this.#publishedDiscoveryVersions.get(provider) ?? 0) <= resultVersion;
 		const currentDiscoverableProviders = new Set(this.#discoverableProviders);
-		const currentConfiguredDiscoveryResults = configuredDiscoveryResults.filter(result =>
-			currentDiscoverableProviders.has(result.provider),
+		const currentConfiguredDiscoveryResults = configuredDiscoveryResults.filter(
+			result =>
+				currentDiscoverableProviders.has(result.provider) && canPublish(result.provider.provider, result.version),
+		);
+		const acceptedBuiltInDiscoveries = builtInDiscovery.discoveries.filter(
+			({ options, runtime, result }) =>
+				canPublish(options.providerId, result.version) &&
+				this.#isCurrentBuiltInDiscovery(options, builtInDiscovery.staticGeneration, runtime),
+		);
+		const builtInModels = acceptedBuiltInDiscoveries.flatMap(discovery => discovery.result.models);
+		const builtInAuthoritativeProviders = new Set(
+			acceptedBuiltInDiscoveries.flatMap(discovery => [...discovery.result.authoritativeProviders]),
+		);
+		const builtInReplaceRuntimeProviders = new Set(
+			acceptedBuiltInDiscoveries.flatMap(discovery => [...discovery.result.replaceRuntimeProviders]),
+		);
+		this.#captureCatalogMetrics(
+			builtInModels,
+			providerFilter === undefined && acceptedBuiltInDiscoveries.length === builtInDiscovery.discoveries.length,
 		);
 		const configuredDiscovered = currentConfiguredDiscoveryResults.flatMap(result => result.models);
 		const replacedConfiguredProviders = currentConfiguredDiscoveryResults.flatMap(result =>
 			result.replaceRuntimeModels ? [result.provider.provider] : [],
 		);
-		const discovered = [...configuredDiscovered, ...builtInDiscovery.models];
+		const discovered = [...configuredDiscovered, ...builtInModels];
 		if (
 			discovered.length === 0 &&
-			builtInDiscovery.authoritativeProviders.size === 0 &&
-			builtInDiscovery.replaceRuntimeProviders.size === 0 &&
+			builtInAuthoritativeProviders.size === 0 &&
+			builtInReplaceRuntimeProviders.size === 0 &&
 			replacedConfiguredProviders.length === 0
 		) {
 			return;
 		}
 		const touchedProviders = new Set(discovered.map(model => model.provider));
 		for (const provider of replacedConfiguredProviders) touchedProviders.add(provider);
-		for (const provider of builtInDiscovery.replaceRuntimeProviders) touchedProviders.add(provider);
-		for (const provider of builtInDiscovery.authoritativeProviders) touchedProviders.add(provider);
+		for (const provider of builtInReplaceRuntimeProviders) touchedProviders.add(provider);
+		for (const provider of builtInAuthoritativeProviders) touchedProviders.add(provider);
+		for (const result of currentConfiguredDiscoveryResults) {
+			if (touchedProviders.has(result.provider.provider)) {
+				this.#publishedDiscoveryVersions.set(result.provider.provider, result.version);
+			}
+		}
+		for (const { options, result } of acceptedBuiltInDiscoveries) {
+			if (touchedProviders.has(options.providerId)) {
+				this.#publishedDiscoveryVersions.set(options.providerId, result.version);
+			}
+		}
 		const referenceModels = this.#composeDiscoveryReferenceModels(touchedProviders);
 		const discoveredModels = this.#applyHardcodedModelPolicies(
 			discovered.map(model =>
@@ -1959,12 +2048,12 @@ export class ModelRegistry {
 			),
 		);
 		const authoritativeProviders = providersWithAuthoritativeProjectCatalog(discoveredModels);
-		for (const provider of builtInDiscovery.authoritativeProviders) {
+		for (const provider of builtInAuthoritativeProviders) {
 			authoritativeProviders.add(provider);
 		}
 
 		const replacedProviderSet = new Set(replacedConfiguredProviders);
-		for (const provider of builtInDiscovery.replaceRuntimeProviders) {
+		for (const provider of builtInReplaceRuntimeProviders) {
 			replacedProviderSet.add(provider);
 			this.#cachedStandardModelsByProvider.delete(provider);
 			this.#pendingStandardCacheProviders.delete(provider);
@@ -2019,6 +2108,25 @@ export class ModelRegistry {
 		const validUntil = nextBuildPriceChange(model.cost, now);
 		this.#discoveredMergeMemo.set(model, { reference, override, merged, validUntil });
 		return merged;
+	}
+
+	#builtInDiscoveryIdentity(
+		options: ModelManagerOptions<Api>,
+		staticGeneration: number,
+		runtime: boolean,
+	): string | ModelManagerOptions<Api> {
+		return runtime ? options : `${staticGeneration}\0${options.cacheProviderId ?? options.providerId}`;
+	}
+
+	#isCurrentBuiltInDiscovery(options: ModelManagerOptions<Api>, staticGeneration: number, runtime: boolean): boolean {
+		if (staticGeneration !== this.#staticModelGeneration) return false;
+		if (this.#discoverableProviders.some(provider => provider.provider === options.providerId)) return false;
+		const currentRuntime = this.#runtimeModelManagers.get(options.providerId)?.options;
+		if (runtime ? currentRuntime !== options : currentRuntime !== undefined) return false;
+		return (
+			this.#latestBuiltInIdentities.get(options.providerId)?.identity ===
+			this.#builtInDiscoveryIdentity(options, staticGeneration, runtime)
+		);
 	}
 
 	/**
@@ -2124,16 +2232,21 @@ export class ModelRegistry {
 		if (requiresAuth && willFetch) {
 			const apiKey = await this.#peekApiKeyForProvider(providerConfig.provider);
 			if (!isAuthenticated(apiKey)) {
-				this.#providerDiscoveryStates.set(providerConfig.provider, {
-					provider: providerConfig.provider,
-					status: "unauthenticated",
-					optional: providerConfig.optional ?? false,
-					stale: cached !== null,
-					fetchedAt: cached?.updatedAt,
-					models: cached?.models.map(model => model.id) ?? [],
-				});
+				const version = ++this.#discoveryResultVersion;
+				if (this.#discoverableProviders.includes(providerConfig)) {
+					this.#providerDiscoveryStates.set(providerConfig.provider, {
+						provider: providerConfig.provider,
+						status: "unauthenticated",
+						optional: providerConfig.optional ?? false,
+						stale: cached !== null,
+						fetchedAt: cached?.updatedAt,
+						...(cached ? { source: "cache" as const } : {}),
+						models: cached?.models.map(model => model.id) ?? [],
+					});
+				}
 				this.#lastDiscoveryWarnings.delete(providerConfig.provider);
 				return {
+					version,
 					models: cached ? this.#normalizeDiscoverableModels(providerConfig, cached.models) : [],
 					replaceRuntimeModels: false,
 				};
@@ -2181,6 +2294,7 @@ export class ModelRegistry {
 			fetchDynamicModels,
 		});
 		const result = await manager.refresh(effectiveStrategy);
+		const version = ++this.#discoveryResultVersion;
 		const status = discoveryError
 			? result.models.length > 0
 				? "cached"
@@ -2194,19 +2308,24 @@ export class ModelRegistry {
 				: result.models.length > 0
 					? "ok"
 					: "empty";
-		this.#providerDiscoveryStates.set(providerId, {
-			provider: providerId,
-			status,
-			optional: providerConfig.optional ?? false,
-			stale: result.stale || status === "cached" || ((cacheOlderThanConfig || bypassFreshCache) && status !== "ok"),
-			fetchedAt: discoveryError ? cached?.updatedAt : Date.now(),
-			models: result.models.map(model => model.id),
-			error: discoveryError,
-		});
+		if (this.#discoverableProviders.includes(providerConfig)) {
+			this.#providerDiscoveryStates.set(providerId, {
+				provider: providerId,
+				status,
+				optional: providerConfig.optional ?? false,
+				stale:
+					result.stale || status === "cached" || ((cacheOlderThanConfig || bypassFreshCache) && status !== "ok"),
+				fetchedAt: discoveryError ? cached?.updatedAt : Date.now(),
+				source: result.source,
+				models: result.models.map(model => model.id),
+				error: discoveryError,
+			});
+		}
 		if (discoveryError) {
 			this.#warnProviderDiscoveryFailure(providerConfig, discoveryError);
 		}
 		return {
+			version,
 			models: this.#applyProviderModelOverrides(
 				providerId,
 				this.#normalizeDiscoverableModels(
@@ -2266,21 +2385,35 @@ export class ModelRegistry {
 
 	async #discoverBuiltInProviderModels(
 		strategy: ModelRefreshStrategy,
-		providerFilter?: ReadonlySet<string>,
-	): Promise<BuiltInDiscoveryResult> {
+		providerFilter: ReadonlySet<string> | undefined,
+		version: number,
+	): Promise<{ staticGeneration: number; discoveries: BuiltInProviderDiscovery[] }> {
 		// Skip providers already handled by configured discovery (e.g. user-configured ollama with discovery.type)
 		const configuredDiscoveryProviders = new Set(this.#discoverableProviders.map(p => p.provider));
+		const staticGeneration = this.#staticModelGeneration;
 		const managerOptions = await this.#collectBuiltInModelManagerOptions(
 			strategy,
 			providerFilter,
 			configuredDiscoveryProviders,
 		);
-		if (managerOptions.length === 0) {
-			return { models: [], authoritativeProviders: new Set(), replaceRuntimeProviders: new Set() };
+		if (managerOptions.length === 0 || staticGeneration !== this.#staticModelGeneration) {
+			return { staticGeneration, discoveries: [] };
 		}
 		const writesBefore = getModelCacheWriteStats();
 		const discoveries = await Promise.all(
-			managerOptions.map(options => this.#discoverWithModelManager(options, strategy)),
+			managerOptions.map(async options => {
+				const runtime = this.#runtimeModelManagers.get(options.providerId)?.options === options;
+				const identity = this.#builtInDiscoveryIdentity(options, staticGeneration, runtime);
+				const previousIdentity = this.#latestBuiltInIdentities.get(options.providerId);
+				if (!previousIdentity || previousIdentity.version <= version) {
+					this.#latestBuiltInIdentities.set(options.providerId, { version, identity });
+				}
+				return {
+					options,
+					runtime,
+					result: await this.#discoverWithModelManagerCoalesced(options, strategy, staticGeneration, runtime),
+				};
+			}),
 		);
 		const writesAfter = getModelCacheWriteStats();
 		const rewrittenRows = writesAfter.payloadWrites - writesBefore.payloadWrites;
@@ -2295,19 +2428,7 @@ export class ModelRegistry {
 				strategy,
 			});
 		}
-		const authoritativeProviders = new Set<string>();
-		const replaceRuntimeProviders = new Set<string>();
-		const models: Model<Api>[] = [];
-		for (const discovery of discoveries) {
-			models.push(...discovery.models);
-			for (const provider of discovery.authoritativeProviders) {
-				authoritativeProviders.add(provider);
-			}
-			for (const provider of discovery.replaceRuntimeProviders) {
-				replaceRuntimeProviders.add(provider);
-			}
-		}
-		return { models, authoritativeProviders, replaceRuntimeProviders };
+		return { staticGeneration, discoveries };
 	}
 
 	/**
@@ -2578,15 +2699,46 @@ export class ModelRegistry {
 		return options;
 	}
 
+	/** Share matching built-in requests across startup and saved-model discovery. */
+	#discoverWithModelManagerCoalesced(
+		options: ModelManagerOptions<Api>,
+		strategy: ModelRefreshStrategy,
+		staticGeneration: number,
+		runtime: boolean,
+	): Promise<VersionedBuiltInDiscoveryResult> {
+		// Extension registrations can replace their fetcher without changing the
+		// cache namespace; never share work across those registration identities.
+		if (runtime) return this.#discoverWithModelManager(options, strategy, staticGeneration, runtime);
+		// A config reload can change an unscoped provider's endpoint or key.
+		const discoveryKey = `${staticGeneration}\0${options.cacheProviderId ?? options.providerId}`;
+		let providerInFlight = this.#builtInDiscoveryInFlight.get(discoveryKey);
+		const inFlight = providerInFlight?.get(strategy);
+		if (inFlight) return inFlight;
+
+		providerInFlight ??= new Map();
+		const discovery = this.#discoverWithModelManager(options, strategy, staticGeneration, runtime).finally(() => {
+			if (providerInFlight.get(strategy) === discovery) {
+				providerInFlight.delete(strategy);
+				if (providerInFlight.size === 0) this.#builtInDiscoveryInFlight.delete(discoveryKey);
+			}
+		});
+		providerInFlight.set(strategy, discovery);
+		this.#builtInDiscoveryInFlight.set(discoveryKey, providerInFlight);
+		return discovery;
+	}
+
 	async #discoverWithModelManager(
 		options: ModelManagerOptions<Api>,
 		strategy: ModelRefreshStrategy,
-	): Promise<BuiltInDiscoveryResult> {
+		staticGeneration: number,
+		runtime: boolean,
+	): Promise<VersionedBuiltInDiscoveryResult> {
 		try {
 			const manager = createModelManager({ ...options, cacheDbPath: this.#cacheDbPath });
 			const result = await withModelDiscoveryTimeout(RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS, () =>
 				manager.refresh(strategy),
 			);
+			const version = ++this.#discoveryResultVersion;
 			const models = result.models.map(model =>
 				model.provider === options.providerId ? model : { ...model, provider: options.providerId },
 			);
@@ -2600,15 +2752,17 @@ export class ModelRegistry {
 							: result.models.length > 0
 								? "ok"
 								: "empty";
-			this.#providerDiscoveryStates.set(options.providerId, {
-				provider: options.providerId,
-				status,
-				optional: false,
-				stale: result.stale,
-				fetchedAt: result.updatedAt,
-				source: result.source,
-				models: models.map(model => model.id),
-			});
+			if (this.#isCurrentBuiltInDiscovery(options, staticGeneration, runtime)) {
+				this.#providerDiscoveryStates.set(options.providerId, {
+					provider: options.providerId,
+					status,
+					optional: false,
+					stale: result.stale,
+					fetchedAt: result.updatedAt,
+					source: result.source,
+					models: models.map(model => model.id),
+				});
+			}
 			const authoritativeProviders = new Set<string>();
 			if (options.dynamicModelsAuthoritative && !result.stale) {
 				authoritativeProviders.add(options.providerId);
@@ -2617,29 +2771,32 @@ export class ModelRegistry {
 			if (result.source === "provider") {
 				replaceRuntimeProviders.add(options.providerId);
 			}
-			return { models, authoritativeProviders, replaceRuntimeProviders };
+			return { version, models, authoritativeProviders, replaceRuntimeProviders };
 		} catch (error) {
+			const version = ++this.#discoveryResultVersion;
 			const message = error instanceof Error ? error.message : String(error);
 			const previous = this.#providerDiscoveryStates.get(options.providerId);
 			// Same auth-rejection surfacing as the configured-discovery path: a
 			// 401/403 with nothing to serve is a credential problem, not an
 			// outage (issue #12281).
 			const authRejected = (previous?.models.length ?? 0) === 0 && isDiscoveryAuthRejection(error);
-			this.#providerDiscoveryStates.set(options.providerId, {
-				provider: options.providerId,
-				status: authRejected ? "unauthenticated" : "unavailable",
-				optional: previous?.optional ?? false,
-				stale: true,
-				...(previous?.fetchedAt !== undefined ? { fetchedAt: previous.fetchedAt } : {}),
-				...(previous?.source !== undefined ? { source: previous.source } : {}),
-				models: previous?.models ?? [],
-				error: message,
-			});
+			if (this.#isCurrentBuiltInDiscovery(options, staticGeneration, runtime)) {
+				this.#providerDiscoveryStates.set(options.providerId, {
+					provider: options.providerId,
+					status: authRejected ? "unauthenticated" : "unavailable",
+					optional: previous?.optional ?? false,
+					stale: true,
+					...(previous?.fetchedAt !== undefined ? { fetchedAt: previous.fetchedAt } : {}),
+					...(previous?.source !== undefined ? { source: previous.source } : {}),
+					models: previous?.models ?? [],
+					error: message,
+				});
+			}
 			logger.warn("model discovery failed for provider", {
 				provider: options.providerId,
 				error: message,
 			});
-			return { models: [], authoritativeProviders: new Set(), replaceRuntimeProviders: new Set() };
+			return { version, models: [], authoritativeProviders: new Set(), replaceRuntimeProviders: new Set() };
 		}
 	}
 
@@ -3227,14 +3384,20 @@ export class ModelRegistry {
 			.map(provider => provider.provider);
 	}
 
-	/** Canonical id of a configured or extension-backed discovery provider. */
-	getDiscoveryProviderId(requestedId: string): string | undefined {
+	/** Canonical discovery provider id; saved-model restoration can opt into built-ins. */
+	getDiscoveryProviderId(requestedId: string, options?: { includeBuiltIn?: boolean }): string | undefined {
 		const normalized = requestedId.toLowerCase();
 		for (const { provider } of this.#discoverableProviders) {
 			if (provider.toLowerCase() === normalized) return provider;
 		}
 		for (const provider of this.#runtimeModelManagers.keys()) {
 			if (provider.toLowerCase() === normalized) return provider;
+		}
+		if (
+			options?.includeBuiltIn &&
+			(BUILT_IN_MODEL_MANAGER_PROVIDER_IDS[normalized] || MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP[normalized])
+		) {
+			return normalized;
 		}
 		return undefined;
 	}
@@ -3480,6 +3643,7 @@ export class ModelRegistry {
 		this.#runtimeCommandConfigsByProvider.delete(providerName);
 		this.#runtimeModelOverlays = this.#runtimeModelOverlays.filter(overlay => overlay.provider !== providerName);
 		this.#runtimeModelManagers.delete(providerName);
+		this.#latestBuiltInIdentities.delete(providerName);
 		this.#runtimeModelModifiers.delete(providerName);
 		this.#lastModelModifierWarnings.delete(providerName);
 		// A credential-scoped built-in provider (e.g. opencode-go) populates its
