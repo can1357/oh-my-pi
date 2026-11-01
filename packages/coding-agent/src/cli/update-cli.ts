@@ -50,6 +50,20 @@ const RELEASE_METADATA_TIMEOUT_MS = 30_000;
 const BINARY_DOWNLOAD_TIMEOUT_MS = 15 * 60_000;
 
 /**
+ * Release binaries are fetched as concurrent byte ranges from this size up.
+ * A single stream is rate-limited per connection on many links (throttled
+ * international routes in particular), and only extra streams add bandwidth
+ * there; servers that answer `206` already advertise `Accept-Ranges: bytes`.
+ */
+const RANGE_DOWNLOAD_MIN_BYTES = 8 * 1024 * 1024;
+/** Upper bound on concurrent range requests; more streams stop paying off. */
+const RANGE_DOWNLOAD_MAX_PARTS = 8;
+/** Parts smaller than this are not worth a connection, so keep one stream. */
+const RANGE_DOWNLOAD_MIN_PART_BYTES = 4 * 1024 * 1024;
+/** Attempts per part; a retry resumes at the offset already written to disk. */
+const RANGE_DOWNLOAD_ATTEMPTS = 4;
+
+/**
  * Core native addon package. Bumped in lock-step with {@link PACKAGE} so the
  * version sentinel the loader looks up at runtime matches the `.node` on
  * disk; see {@link buildBunInstallArgs} for why this must be installed
@@ -189,28 +203,145 @@ export interface VerifiedBinaryDownloadOptions {
 	fetchImpl?: Fetch;
 }
 
-/**
- * Download a file and verify its build-service-reported size and SHA-256
- * digest (`sha256:<hex>`), leaving it executable. Nothing is left at
- * `targetPath` when the download fails or does not match.
- */
-export async function downloadVerifiedBinary(options: VerifiedBinaryDownloadOptions): Promise<void> {
-	const fetchImpl = options.fetchImpl ?? fetch;
-	await unlinkIfExists(options.targetPath);
+/** Inclusive byte range of a ranged download. */
+interface ByteSpan {
+	start: number;
+	end: number;
+}
 
+/** Raised when a ranged request is answered with the whole file instead of `206`. */
+class RangeUnsupportedError extends Error {}
+
+/** Split `size` bytes into the parts worth a connection, at most {@link RANGE_DOWNLOAD_MAX_PARTS}. */
+function planByteSpans(size: number): ByteSpan[] {
+	const parts = Math.min(RANGE_DOWNLOAD_MAX_PARTS, Math.max(1, Math.ceil(size / RANGE_DOWNLOAD_MIN_PART_BYTES)));
+	const spanSize = Math.ceil(size / parts);
+	const spans: ByteSpan[] = [];
+	for (let start = 0; start < size; start += spanSize) {
+		spans.push({ start, end: Math.min(size, start + spanSize) - 1 });
+	}
+	return spans;
+}
+
+/** Total length reported by a `206` answer's `Content-Range`, when it parses. */
+function parseContentRangeTotal(header: string | null): number | undefined {
+	const match = header?.trim().match(/^bytes\s+\d+-\d+\/(\d+)$/i);
+	if (!match) return undefined;
+	const total = Number(match[1]);
+	return Number.isSafeInteger(total) ? total : undefined;
+}
+
+/**
+ * The spans to download in parallel, or undefined to keep the whole file on one
+ * stream: the file is small, the server answers the probe with anything but a
+ * matching `206`, or the probe itself fails (the single stream then reports the
+ * real error).
+ */
+async function probeByteSpans(
+	options: VerifiedBinaryDownloadOptions,
+	fetchImpl: Fetch,
+): Promise<ByteSpan[] | undefined> {
+	if (options.expectedSize < RANGE_DOWNLOAD_MIN_BYTES) return undefined;
+	const spans = planByteSpans(options.expectedSize);
+	if (spans.length < 2) return undefined;
 	let response: Response;
 	try {
 		response = await fetchImpl(options.url, {
 			redirect: "follow",
-			signal: withTimeoutSignal(BINARY_DOWNLOAD_TIMEOUT_MS),
+			headers: { Range: "bytes=0-0" },
+			signal: withTimeoutSignal(RELEASE_METADATA_TIMEOUT_MS),
 		});
-	} catch (err) {
-		if (isTimeoutError(err)) {
-			throw new Error("Timed out downloading release binary after 15 minutes", { cause: err });
-		}
-		if (isUnsupportedProxyError(err)) throw new Error(unsupportedProxyMessage(), { cause: err });
-		throw err;
+	} catch {
+		return undefined;
 	}
+	const total = parseContentRangeTotal(response.headers.get("content-range"));
+	await response.body?.cancel().catch(() => {});
+	return response.status === 206 && total === options.expectedSize ? spans : undefined;
+}
+
+/** Stream one span into `file` at its own offset, resuming from `written` after a failed attempt. */
+async function downloadByteSpan(
+	options: VerifiedBinaryDownloadOptions,
+	span: ByteSpan,
+	file: fs.promises.FileHandle,
+	fetchImpl: Fetch,
+	abort: AbortSignal,
+): Promise<void> {
+	const expected = span.end - span.start + 1;
+	let written = 0;
+	for (let attempt = 1; written < expected; attempt++) {
+		try {
+			const response = await fetchImpl(options.url, {
+				redirect: "follow",
+				headers: { Range: `bytes=${span.start + written}-${span.end}` },
+				signal: withTimeoutSignal(BINARY_DOWNLOAD_TIMEOUT_MS, abort),
+			});
+			if (response.status !== 206 || !response.body) {
+				await response.body?.cancel().catch(() => {});
+				if (response.ok) {
+					throw new RangeUnsupportedError(
+						`Range request for bytes ${span.start}-${span.end} was answered with ${response.status}`,
+					);
+				}
+				throw new Error(`Download failed: ${response.statusText}`);
+			}
+			const reader = response.body.getReader();
+			for (;;) {
+				const { done, value } = await reader.read();
+				if (done) break;
+				if (value.byteLength === 0) continue;
+				const remaining = expected - written;
+				if (value.byteLength > remaining) {
+					await reader.cancel().catch(() => {});
+					throw new Error(
+						`Downloaded binary size mismatch: expected ${options.expectedSize} bytes, received at least ${options.expectedSize + value.byteLength - remaining}`,
+					);
+				}
+				await file.write(value, 0, value.byteLength, span.start + written);
+				written += value.byteLength;
+			}
+		} catch (err) {
+			if (abort.aborted || err instanceof RangeUnsupportedError) throw err;
+			// A timeout already spent the whole per-attempt budget; retrying it would multiply it.
+			if (isTimeoutError(err) || attempt >= RANGE_DOWNLOAD_ATTEMPTS) throw err;
+			await Bun.sleep(250 * attempt);
+		}
+	}
+}
+
+/**
+ * Download every span concurrently into `targetPath`. Returns false, leaving no
+ * file behind, when the server does not honour byte ranges; the caller then
+ * falls back to one stream.
+ */
+async function downloadByteSpans(
+	options: VerifiedBinaryDownloadOptions,
+	spans: ByteSpan[],
+	fetchImpl: Fetch,
+): Promise<boolean> {
+	const file = await fs.promises.open(options.targetPath, "w", 0o600);
+	const abort = new AbortController();
+	let rangesUsable = true;
+	try {
+		await Promise.all(spans.map(span => downloadByteSpan(options, span, file, fetchImpl, abort.signal)));
+	} catch (err) {
+		// Stop the parts still streaming before the handle below goes away.
+		abort.abort();
+		if (!(err instanceof RangeUnsupportedError)) throw err;
+		rangesUsable = false;
+	} finally {
+		await file.close();
+	}
+	if (!rangesUsable) await unlinkIfExists(options.targetPath);
+	return rangesUsable;
+}
+
+/** Fetch the whole file on one stream, verifying size and digest as bytes arrive. */
+async function downloadSingleStream(options: VerifiedBinaryDownloadOptions, fetchImpl: Fetch): Promise<void> {
+	const response = await fetchImpl(options.url, {
+		redirect: "follow",
+		signal: withTimeoutSignal(BINARY_DOWNLOAD_TIMEOUT_MS),
+	});
 	if (!response.ok || !response.body) {
 		throw new Error(`Download failed: ${response.statusText}`);
 	}
@@ -233,14 +364,43 @@ export async function downloadVerifiedBinary(options: VerifiedBinaryDownloadOpti
 		},
 	});
 
+	await pipeline(response.body, verifier, fs.createWriteStream(options.targetPath, { mode: 0o600 }));
+	const digest = `sha256:${hash.digest("hex")}`;
+	if (size !== options.expectedSize) {
+		throw new Error(`Downloaded binary size mismatch: expected ${options.expectedSize} bytes, received ${size}`);
+	}
+	if (digest !== options.expectedDigest) {
+		throw new Error(`Downloaded binary digest mismatch: expected ${options.expectedDigest}, received ${digest}`);
+	}
+}
+
+/**
+ * Download a file and verify its build-service-reported size and SHA-256
+ * digest (`sha256:<hex>`), leaving it executable. Files at least
+ * {@link RANGE_DOWNLOAD_MIN_BYTES} large come down as parallel byte ranges when
+ * the server supports them; everything else streams as one request. Nothing is
+ * left at `targetPath` when the download fails or does not match.
+ */
+export async function downloadVerifiedBinary(options: VerifiedBinaryDownloadOptions): Promise<void> {
+	const fetchImpl = options.fetchImpl ?? fetch;
+	await unlinkIfExists(options.targetPath);
 	try {
-		await pipeline(response.body, verifier, fs.createWriteStream(options.targetPath, { mode: 0o600 }));
-		const digest = `sha256:${hash.digest("hex")}`;
-		if (size !== options.expectedSize) {
-			throw new Error(`Downloaded binary size mismatch: expected ${options.expectedSize} bytes, received ${size}`);
-		}
-		if (digest !== options.expectedDigest) {
-			throw new Error(`Downloaded binary digest mismatch: expected ${options.expectedDigest}, received ${digest}`);
+		const spans = await probeByteSpans(options, fetchImpl);
+		if (!spans || !(await downloadByteSpans(options, spans, fetchImpl))) {
+			await downloadSingleStream(options, fetchImpl);
+		} else {
+			const { size, sha256 } = await fileDigest(options.targetPath);
+			if (size !== options.expectedSize) {
+				throw new Error(
+					`Downloaded binary size mismatch: expected ${options.expectedSize} bytes, received ${size}`,
+				);
+			}
+			const digest = `sha256:${sha256}`;
+			if (digest !== options.expectedDigest) {
+				throw new Error(
+					`Downloaded binary digest mismatch: expected ${options.expectedDigest}, received ${digest}`,
+				);
+			}
 		}
 		await fs.promises.chmod(options.targetPath, 0o755);
 	} catch (err) {

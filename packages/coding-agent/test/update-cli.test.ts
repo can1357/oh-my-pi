@@ -1193,6 +1193,157 @@ describe("update-cli release binary integrity", () => {
 		const newResidue = (await fs.readdir(dir)).filter(name => name.endsWith(".new"));
 		expect(newResidue).toEqual([]);
 	});
+
+	describe("parallel byte ranges", () => {
+		// Above RANGE_DOWNLOAD_MIN_BYTES (8 MiB) so the download plans more than one range.
+		const payload = new Uint8Array(10 * 1024 * 1024).map((_, index) => (index * 31) % 251);
+		const payloadDigest = `sha256:${Bun.SHA256.hash(payload, "hex")}`;
+
+		function rangeOf(init?: RequestInit): { start: number; end: number } {
+			const header = new Headers(init?.headers).get("range");
+			const match = header?.match(/^bytes=(\d+)-(\d+)$/);
+			if (!match) throw new Error(`Expected a byte range, received ${header}`);
+			return { start: Number(match[1]), end: Math.min(Number(match[2]), payload.byteLength - 1) };
+		}
+
+		/** `206` answer for one range of the payload. */
+		function partial(start: number, end: number): Response {
+			return new Response(payload.slice(start, end + 1), {
+				status: 206,
+				headers: { "content-range": `bytes ${start}-${end}/${payload.byteLength}` },
+			});
+		}
+
+		it("downloads a large file as concurrent byte ranges", async () => {
+			const dir = await makeTempDir();
+			const targetPath = path.join(dir, binaryName);
+			const events: ("issued" | "consumed")[] = [];
+			const ranges: { start: number; end: number }[] = [];
+			const fetchImpl: Fetch = async (_input, init) => {
+				const range = rangeOf(init);
+				ranges.push(range);
+				events.push("issued");
+				const slice = payload.slice(range.start, range.end + 1);
+				let offset = 0;
+				const body = new ReadableStream<Uint8Array>({
+					pull(controller) {
+						if (offset >= slice.byteLength) {
+							controller.close();
+							events.push("consumed");
+							return;
+						}
+						const next = Math.min(offset + 65536, slice.byteLength);
+						controller.enqueue(slice.subarray(offset, next));
+						offset = next;
+					},
+				});
+				return new Response(body, {
+					status: 206,
+					headers: { "content-range": `bytes ${range.start}-${range.end}/${payload.byteLength}` },
+				});
+			};
+
+			await downloadVerifiedBinary({
+				url,
+				targetPath,
+				expectedSize: payload.byteLength,
+				expectedDigest: payloadDigest,
+				fetchImpl,
+			});
+
+			const spans = ranges.filter(range => range.end > range.start);
+			expect(spans.length).toBeGreaterThan(1);
+			// Every span is requested before any of them finishes: that is what makes them parallel.
+			expect(events.lastIndexOf("issued")).toBeLessThan(events.indexOf("consumed"));
+			expect(new Uint8Array(await Bun.file(targetPath).arrayBuffer())).toEqual(payload);
+			if (process.platform !== "win32") expect((await fs.stat(targetPath)).mode & 0o777).toBe(0o755);
+		});
+
+		it("keeps one stream when the server ignores byte ranges", async () => {
+			const dir = await makeTempDir();
+			const targetPath = path.join(dir, binaryName);
+			let requests = 0;
+			const fetchImpl: Fetch = async () => {
+				requests++;
+				return new Response(payload.slice());
+			};
+
+			await downloadVerifiedBinary({
+				url,
+				targetPath,
+				expectedSize: payload.byteLength,
+				expectedDigest: payloadDigest,
+				fetchImpl,
+			});
+
+			expect(requests).toBe(2);
+			expect(new Uint8Array(await Bun.file(targetPath).arrayBuffer())).toEqual(payload);
+		});
+
+		it("resumes a broken range from the bytes already on disk", async () => {
+			const dir = await makeTempDir();
+			const targetPath = path.join(dir, binaryName);
+			const requests: { start: number; end: number }[] = [];
+			let broken = false;
+			const fetchImpl: Fetch = async (_input, init) => {
+				const range = rangeOf(init);
+				requests.push(range);
+				if (!broken && range.start === 0 && range.end > 0) {
+					broken = true;
+					const slice = payload.slice(range.start, range.end + 1);
+					let pulled = false;
+					const body = new ReadableStream<Uint8Array>({
+						pull(controller) {
+							if (!pulled) {
+								pulled = true;
+								controller.enqueue(slice.subarray(0, 4096));
+								return;
+							}
+							controller.error(new Error("The socket connection was closed unexpectedly"));
+						},
+					});
+					return new Response(body, {
+						status: 206,
+						headers: { "content-range": `bytes ${range.start}-${range.end}/${payload.byteLength}` },
+					});
+				}
+				return partial(range.start, range.end);
+			};
+
+			await downloadVerifiedBinary({
+				url,
+				targetPath,
+				expectedSize: payload.byteLength,
+				expectedDigest: payloadDigest,
+				fetchImpl,
+			});
+
+			const firstSpan = requests.find(range => range.start === 0 && range.end > 0);
+			if (!firstSpan) throw new Error("expected the first span to be requested");
+			expect(requests).toContainEqual({ start: 4096, end: firstSpan.end });
+			expect(new Uint8Array(await Bun.file(targetPath).arrayBuffer())).toEqual(payload);
+		});
+
+		it("removes a ranged download whose digest does not match", async () => {
+			const dir = await makeTempDir();
+			const targetPath = path.join(dir, binaryName);
+			const fetchImpl: Fetch = async (_input, init) => {
+				const range = rangeOf(init);
+				return partial(range.start, range.end);
+			};
+
+			await expect(
+				downloadVerifiedBinary({
+					url,
+					targetPath,
+					expectedSize: payload.byteLength,
+					expectedDigest: `sha256:${Bun.SHA256.hash("different binary", "hex")}`,
+					fetchImpl,
+				}),
+			).rejects.toThrow("digest mismatch");
+			expect(await Bun.file(targetPath).exists()).toBe(false);
+		});
+	});
 });
 
 describe("update-cli build patches", () => {
