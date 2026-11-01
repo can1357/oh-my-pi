@@ -22,6 +22,8 @@ export { OpenAIHttpError };
 
 import type { FetchImpl } from "../types";
 import type { CapturedHttpErrorResponse } from "./http-inspector";
+import { transportRetry } from "./retry-after";
+import { DEFAULT_MAX_RETRY_DELAY_MS, type ProviderRetryPolicy } from "./retry-wait";
 
 /**
  * Total attempts (initial + retries). Parity with the removed SDK clients'
@@ -70,6 +72,14 @@ export interface OpenAIStreamRequestInit {
 	fetch?: FetchImpl;
 	/** Override the default transport attempt budget for this request. */
 	maxAttempts?: number;
+	/**
+	 * The caller's `StreamOptions` retry policy (`maxRetryDelayMs`,
+	 * `providerRetryWaitCeilingMs`, `providerRetryWait`): no transport retry
+	 * sleeps past its bound, a 429/5xx stating a longer wait (in a header or its
+	 * body) is surfaced at once instead, and every sleep goes through its hook
+	 * ({@link transportRetry}).
+	 */
+	retryPolicy?: ProviderRetryPolicy;
 	/** Optional caller-specific gate composed with shared transport retry exclusions. */
 	shouldRetryResponse?: (response: Response, bodyText: string) => boolean | Promise<boolean>;
 	/**
@@ -98,6 +108,7 @@ export interface OpenAIStreamHandle<TEvent> {
  * watchdog timers and abort-reason bookkeeping.
  */
 export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): Promise<OpenAIStreamHandle<TEvent>> {
+	const retry = transportRetry(init.retryPolicy, DEFAULT_MAX_RETRY_DELAY_MS);
 	let response: Response;
 	try {
 		response = await fetchWithRetry(init.url, {
@@ -107,6 +118,7 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
 			signal: init.signal,
 			fetch: init.fetch,
 			maxAttempts: init.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
+			...retry.fetchOptions,
 			// A proxy concurrency-admission 429 (`rate_limit_type: max_parallel_requests`)
 			// surfaces immediately instead of being slept-and-retried here; session
 			// recovery owns its backoff/fallback (issue #8854).
@@ -124,7 +136,10 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
 		throw AIError.networkFailureError(error, init.url);
 	}
 	if (!response.ok) {
-		throw await captureOpenAIHttpError(response);
+		const error = await captureOpenAIHttpError(response);
+		// A refusal the caller's bounds kept from a retry says so in the failed message.
+		retry.markRefusal(error);
+		throw error;
 	}
 	if (!response.body) {
 		throw new AIError.ProviderResponseError(`OpenAI stream response has no body (status ${response.status})`, {

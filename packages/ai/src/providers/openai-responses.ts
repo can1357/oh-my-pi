@@ -40,7 +40,8 @@ import {
 import { OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
 import { notifyProviderResponse } from "../utils/provider-response";
 import { wrapFetchForRequestCompression } from "../utils/request-compression";
-import { waitForRetry } from "../utils/retry-wait";
+import { providerFailureWaitMs, retryWaitBounds } from "../utils/retry-after";
+import { DEFAULT_MAX_RETRY_DELAY_MS, providerRetryPolicy, sleepBeforeRetry, waitForRetry } from "../utils/retry-wait";
 import {
 	adaptSchemaForStrict,
 	findStrictToolSchemaViolation,
@@ -693,6 +694,11 @@ const streamOpenAIResponsesOnce = (
 					onSseEvent({ event: event.event, data: event.data, raw: [...event.raw] }, model);
 				}
 			: undefined;
+		// The current attempt's accepted (2xx) response headers, for `finalize`:
+		// an in-band error or a cut stream keeps the response's `Retry-After`.
+		// Cleared when an attempt starts, so a retry or fallback that fails before
+		// its response never reads an earlier response's headers.
+		let streamResponseHeaders: Headers | undefined;
 
 		try {
 			// Keep request routing on `sessionId` while allowing callers to pin a
@@ -797,6 +803,7 @@ const streamOpenAIResponsesOnce = (
 			const openResponsesStream = async (
 				requestParams: OpenAIResponsesSamplingParams,
 			): Promise<AsyncIterable<ResponseStreamEvent>> => {
+				streamResponseHeaders = undefined;
 				activeReasoningEffortFallbackKey = createOpenAIReasoningEffortFallbackKey(
 					"responses",
 					resolvedBaseUrl,
@@ -821,6 +828,7 @@ const streamOpenAIResponsesOnce = (
 						headers: headersWithTimeout,
 						body: requestParams,
 						signal: requestSignal,
+						retryPolicy: options,
 						fetch: wrapFetchForCopilotFallback(
 							wrapFetchForRequestCompression(options?.fetch ?? fetch, model),
 							model.provider === "github-copilot",
@@ -836,6 +844,7 @@ const streamOpenAIResponsesOnce = (
 						// so retries cannot extend the caller's deadline.
 						onSseEvent: rawSseObserver,
 					});
+					streamResponseHeaders = response.headers;
 					// Disarm the first-event watchdog as soon as headers arrive — a slow
 					// onResponse callback must not abort an already-connected stream.
 					clearTimeout(requestTimeout);
@@ -1126,7 +1135,7 @@ const streamOpenAIResponsesOnce = (
 							headers,
 							responseId: resumeId,
 							signal: options?.signal,
-							wait: options?.providerRetryWait,
+							wait: providerRetryPolicy(options).providerRetryWait,
 						});
 						if (resumedResponse !== undefined) {
 							const deadContent = [...output.content];
@@ -1214,7 +1223,17 @@ const streamOpenAIResponsesOnce = (
 						!abortTracker.wasCallerAbort() &&
 						transientStreamRetryAttempt < OPENAI_RESPONSES_MAX_TRANSIENT_STREAM_RETRIES &&
 						isRetryableOpenAIResponsesStreamFailure(streamFailure);
-					if (!canRetry) {
+					// The wait this attempt stated, its accepted response's headers
+					// included; a wait past the caller's bounds surfaces the failure instead.
+					const statedWaitMs = canRetry
+						? providerFailureWaitMs(model.provider, streamFailure, { streamResponseHeaders })
+						: undefined;
+					const retryDelayMs =
+						canRetry &&
+						!retryWaitBounds(options, DEFAULT_MAX_RETRY_DELAY_MS).declines(statedWaitMs, streamFailure)
+							? Math.max(statedWaitMs ?? 0, OPENAI_RESPONSES_TRANSIENT_STREAM_RETRY_DELAY_MS)
+							: undefined;
+					if (retryDelayMs === undefined) {
 						forwardAttemptEvents();
 						throw streamFailure;
 					}
@@ -1243,11 +1262,7 @@ const streamOpenAIResponsesOnce = (
 					firstTokenTime = undefined;
 					nativeOutputItems.length = 0;
 
-					await waitForRetry(
-						options?.providerRetryWait,
-						OPENAI_RESPONSES_TRANSIENT_STREAM_RETRY_DELAY_MS,
-						options?.signal,
-					);
+					await sleepBeforeRetry(options, retryDelayMs, options?.signal);
 					if (abortTracker.wasCallerAbort()) throw new AIError.AbortError();
 					openaiStream = await openResponsesStreamWithFallbacks();
 				}
@@ -1322,11 +1337,16 @@ const streamOpenAIResponsesOnce = (
 				abortTracker,
 				rawRequestDump,
 				capturedErrorResponse,
+				streamResponseHeaders,
 			});
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = result.message;
+			output.errorRetryAfterMs = result.retryAfterMs;
+			output.errorRetryWaitRefusal = result.retryWaitRefusal;
+			if (result.classificationMessage !== undefined)
+				output.errorClassificationMessage = result.classificationMessage;
 			if (AIError.isRequestBodyReadTimeout(result.status, result.message) && lastSubmittedRequestWasFullReplay) {
 				output.requestBodyReadTimeoutFullReplay = true;
 			}

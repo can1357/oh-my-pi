@@ -38,6 +38,7 @@ import { armPreResponseTimeout, getStreamFirstEventTimeoutMs, iterateWithIdleTim
 // Refresh is the sole responsibility of AuthStorage (broker-aware, single-flighted);
 // the stream provider trusts the access token threaded through `options.apiKey`.
 import { normalizeSchemaForCCA } from "../utils/schema";
+import { transportRetry } from "../utils/retry-after";
 import { StreamMarkupHealing, type StreamMarkupHealingEvent } from "../utils/stream-markup-healing";
 import { prepareAnthropicImageContext } from "./anthropic-images";
 import forcedToolDirective from "./google-antigravity-forced-tool.md" with { type: "text" };
@@ -513,6 +514,12 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			timestamp: Date.now(),
 		};
 		let rawRequestDump: RawHttpRequestDump | undefined;
+		// The current attempt's accepted (2xx) response headers, for `finalize`:
+		// an in-band stream error or a cut stream keeps the response's
+		// `Retry-After`. Cleared when an attempt starts (each endpoint, each
+		// empty-stream refetch), so a later attempt that fails before its response
+		// never reads an earlier response's headers.
+		let streamResponseHeaders: Headers | undefined;
 
 		try {
 			const apiKeyRaw = options?.apiKey;
@@ -956,12 +963,14 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 				const isLastEndpoint = i === endpoints.length - 1;
 				try {
 					started = false;
+					streamResponseHeaders = undefined;
 					resetOutput();
 
 					// Per attempt: arm a pre-response (TTFT) timer, cleared the instant
 					// headers arrive so it never aborts the actively streaming body —
 					// an absolute `AbortSignal.timeout` would (issue #2422).
 					const watchdog = armPreResponseTimeout(callerSignal, firstEventTimeoutMs);
+					const retry = transportRetry(options, RATE_LIMIT_BUDGET_MS);
 					let response: Response;
 					try {
 						response = await fetchWithRetry(() => `${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
@@ -971,7 +980,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 							signal: watchdog.signal,
 							maxAttempts: isLastEndpoint ? MAX_RETRIES + 1 : 1,
 							defaultDelayMs: attempt => BASE_DELAY_MS * 2 ** attempt,
-							maxDelayMs: options?.maxRetryDelayMs ?? RATE_LIMIT_BUDGET_MS,
+							...retry.fetchOptions,
 							fetch: options?.fetch,
 							timeout: false,
 						});
@@ -994,13 +1003,16 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 									parsedCredentials.email,
 								)
 							: errorText;
-						throw new AIError.GeminiCliApiError(
+						const error = new AIError.GeminiCliApiError(
 							`Cloud Code Assist API error (${response.status}): ${errorMessage}`,
 							response.status,
 							{ headers: response.headers },
 						);
+						retry.markRefusal(error);
+						throw error;
 					}
 
+					streamResponseHeaders = response.headers;
 					const requestUrl = response.url;
 					let currentResponse = response;
 
@@ -1021,6 +1033,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 								throw new AIError.ConfigurationError("Missing request URL");
 							}
 
+							streamResponseHeaders = undefined;
 							currentResponse = await (options?.fetch ?? fetch)(requestUrl, {
 								method: "POST",
 								headers: requestHeaders,
@@ -1036,6 +1049,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 									{ headers: currentResponse.headers },
 								);
 							}
+							streamResponseHeaders = currentResponse.headers;
 						}
 
 						const streamed = await streamResponse(currentResponse);
@@ -1137,11 +1151,18 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
 		} catch (error) {
-			const result = await AIError.finalize(error, { api: model.api, signal: options?.signal, rawRequestDump });
+			const result = await AIError.finalize(error, {
+				api: model.api,
+				signal: options?.signal,
+				rawRequestDump,
+				streamResponseHeaders,
+			});
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = result.message;
+			output.errorRetryAfterMs = result.retryAfterMs;
+			output.errorRetryWaitRefusal = result.retryWaitRefusal;
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: output.stopReason, error: output });

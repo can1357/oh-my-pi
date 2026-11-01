@@ -26,6 +26,8 @@ import {
 	getOpenAIStreamFirstEventTimeoutMs,
 	getOpenAIStreamIdleTimeoutMs,
 } from "../utils/idle-iterator";
+import { transportRetry } from "../utils/retry-after";
+import { DEFAULT_MAX_RETRY_DELAY_MS } from "../utils/retry-wait";
 import { sanitizeSchemaForOllama, toolWireSchema } from "../utils/schema";
 import {
 	getStreamMarkupHealingPattern,
@@ -469,6 +471,9 @@ const streamOllamaOnce = (
 		const output = createEmptyOutput(model);
 		let rawRequestDump: RawHttpRequestDump | undefined;
 		let capturedErrorResponse: CapturedHttpErrorResponse | undefined;
+		// The chat response's headers once it is accepted (2xx), for `finalize`:
+		// an NDJSON error record or a cut stream keeps the response's `Retry-After`.
+		let streamResponseHeaders: Headers | undefined;
 		let activeThinkingIndex: number | undefined;
 		let activeTextIndex: number | undefined;
 		const activeToolIndices = new Set<number>();
@@ -597,6 +602,7 @@ const streamOllamaOnce = (
 			// never aborts the actively streaming body — an absolute
 			// `AbortSignal.timeout` would (issue #2422).
 			const watchdog = armPreResponseTimeout(options.signal, firstEventTimeoutMs);
+			const retry = transportRetry(options, DEFAULT_MAX_RETRY_DELAY_MS);
 			let response: Response;
 			try {
 				response = await fetchWithRetry(`${baseUrl}/api/chat`, {
@@ -610,6 +616,7 @@ const streamOllamaOnce = (
 					body: JSON.stringify(body),
 					signal: watchdog.signal,
 					defaultDelayMs: OLLAMA_RETRY_DELAYS_MS,
+					...retry.fetchOptions,
 					shouldRetryResponse: shouldRetryOllamaResponse,
 					fetch: options.fetch,
 					timeout: false,
@@ -619,14 +626,19 @@ const streamOllamaOnce = (
 			}
 			if (!response.ok) {
 				capturedErrorResponse = await captureHttpErrorResponse(response);
-				throw new AIError.OllamaApiError(`HTTP ${response.status} from ${baseUrl}/api/chat`, response.status, {
-					headers: response.headers,
-				});
+				const error = new AIError.OllamaApiError(
+					`HTTP ${response.status} from ${baseUrl}/api/chat`,
+					response.status,
+					{
+						headers: response.headers,
+					},
+				);
+				retry.markRefusal(error);
+				throw error;
 			}
+			streamResponseHeaders = response.headers;
 			if (!response.body) {
-				throw new AIError.OllamaApiError("Ollama returned an empty response body", response.status, {
-					headers: response.headers,
-				});
+				throw new AIError.OllamaApiError("Ollama returned an empty response body", response.status);
 			}
 			stream.push({ type: "start", partial: output });
 			for await (const chunk of readJsonl<OllamaChatChunk>(response.body)) {
@@ -784,11 +796,14 @@ const streamOllamaOnce = (
 				signal: options.signal,
 				rawRequestDump,
 				capturedErrorResponse,
+				streamResponseHeaders,
 			});
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = result.message;
+			output.errorRetryAfterMs = result.retryAfterMs;
+			output.errorRetryWaitRefusal = result.retryWaitRefusal;
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) {
 				output.ttft = firstTokenTime - startTime;

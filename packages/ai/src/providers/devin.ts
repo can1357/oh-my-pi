@@ -236,6 +236,9 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 				partial: output,
 			});
 		};
+		// The chat response's headers once it is accepted (2xx), for `finalize`:
+		// a Connect trailer error or a cut stream keeps the response's `Retry-After`.
+		let streamResponseHeaders: Headers | undefined;
 
 		try {
 			const fetchImpl = options?.fetch ?? fetch;
@@ -304,6 +307,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 				const payload = new Uint8Array(await response.arrayBuffer());
 				throw createDevinHttpError("API", response, payload);
 			}
+			streamResponseHeaders = response.headers;
 			if (!response.body) {
 				throw new AIError.ProviderResponseError("Devin API error: response body is empty", {
 					provider: model.provider,
@@ -539,11 +543,17 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			stream.end();
 		} catch (error) {
 			logger.error("devin: stream failed", { error: String(error) });
-			const result = await AIError.finalize(error, { api: model.api, signal: options?.signal });
+			const result = await AIError.finalize(error, {
+				api: model.api,
+				signal: options?.signal,
+				streamResponseHeaders,
+			});
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = result.message;
+			output.errorRetryAfterMs = result.retryAfterMs;
+			output.errorRetryWaitRefusal = result.retryWaitRefusal;
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: result.stopReason, error: output });

@@ -12,6 +12,31 @@ import type { AuthCredential, BlocksApi, StoredCredentialBlock } from "./types";
 /** Default block when no provider reset time is known; used by selectors and rate limits. */
 export const DEFAULT_BLOCK_MS = 60_000;
 
+/**
+ * Longest any credential block lasts from when it is written, whoever states
+ * the deadline: a message's or header's retry wait, or a usage report's reset.
+ * A usage report is a parsed response body too — a provider's usage API, or a
+ * proxy or gateway that relays one, can state any reset, as a message can state
+ * any wait. Seven days is the longest rolling usage window a provider here
+ * publishes (the weekly limits). Being short costs one request when the block
+ * lapses early, a monthly quota's for one: it fails and re-blocks. An unbounded
+ * deadline has no such ceiling: a number a body quotes or a header or report
+ * misstates (`retry-after-ms=999…`, a far epoch, a reset a century out) would
+ * take the credential out of rotation for good.
+ */
+export const MAX_HINTED_BLOCK_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * `blockedUntilMs` within {@link MAX_HINTED_BLOCK_MS} of `nowMs`. A deadline
+ * that is not a number becomes the default block instead: `Math.min(NaN, …)`
+ * is NaN, and a NaN deadline compares false against every clock reading, so
+ * the block would never hold.
+ */
+export function boundedBlockDeadline(blockedUntilMs: number, nowMs: number): number {
+	if (Number.isNaN(blockedUntilMs)) return nowMs + DEFAULT_BLOCK_MS;
+	return Math.min(blockedUntilMs, nowMs + MAX_HINTED_BLOCK_MS);
+}
+
 /** Composite key for round-robin tracking: "<provider>:oauth" or "<provider>:api_key". */
 export function providerTypeKey(provider: string, type: AuthCredential["type"]): string {
 	return `${provider}:${type}`;
@@ -391,12 +416,13 @@ export class CredentialBlocks implements BlocksApi {
 		provider: string,
 		providerKey: string,
 		credentialIndex: number,
-		blockedUntilMs: number,
+		requestedBlockedUntilMs: number,
 		blockScope: string | undefined = undefined,
 		providerTimed = false,
 	): void {
 		const credentialId = this.#deps.pool.entries(provider)[credentialIndex]?.id;
 		if (credentialId === undefined) return;
+		const blockedUntilMs = boundedBlockDeadline(requestedBlockedUntilMs, Date.now());
 		const backoffKey = scopedBackoffKey(providerKey, blockScope);
 		// Adopt externally deleted rows before longest-wins merging a new failure.
 		this.#getCredentialBlockedUntilForKey(backoffKey, credentialId, Date.now());
@@ -653,7 +679,7 @@ export class CredentialBlocks implements BlocksApi {
 		const upsertCredentialBlock = this.#deps.store.upsertCredentialBlock?.bind(this.#deps.store);
 		if (!upsertCredentialBlock) return;
 		try {
-			upsertCredentialBlock(block);
+			upsertCredentialBlock({ ...block, blockedUntilMs: boundedBlockDeadline(block.blockedUntilMs, Date.now()) });
 		} catch (err) {
 			if (this.#deps.health.handle(err)) this.#deps.health.assertWritable();
 			throw err;

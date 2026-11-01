@@ -842,6 +842,8 @@ describe("openai-codex streaming", () => {
 				transport === "sse" ? (await runCodexSseEvents([failure])).result : await runCodexWebSocketEvent(failure);
 			expect(result.stopReason).toBe("error");
 			expect(extractProviderRetryHint("openai-codex", result.errorMessage)).toBe(expectedDelay);
+			// The same wait, carried structured: consumers read this, never the text.
+			expect(result.errorRetryAfterMs).toBe(expectedDelay);
 		});
 	});
 
@@ -2656,6 +2658,198 @@ describe("openai-codex streaming", () => {
 		expect(result.content.find(block => block.type === "text")?.text).toBe("Hello after retry");
 	});
 
+	describe("provider-error retry honors the server-stated wait", () => {
+		const successSse = `${[
+			`data: ${JSON.stringify({ type: "response.output_item.added", item: { type: "message", id: "msg_retry", role: "assistant", status: "in_progress", content: [] } })}`,
+			`data: ${JSON.stringify({ type: "response.content_part.added", part: { type: "output_text", text: "" } })}`,
+			`data: ${JSON.stringify({ type: "response.output_text.delta", delta: "Hello after wait" })}`,
+			`data: ${JSON.stringify({ type: "response.output_item.done", item: { type: "message", id: "msg_retry", role: "assistant", status: "completed", content: [{ type: "output_text", text: "Hello after wait" }] } })}`,
+			`data: ${JSON.stringify({ type: "response.completed", response: { status: "completed", usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8, input_tokens_details: { cached_tokens: 0 } } } })}`,
+		].join("\n\n")}\n\n`;
+
+		/** First request: an HTTP 200 whose stream carries `failure`, with `responseHeaders`; the next one succeeds. */
+		function failThenSucceed(failure: Record<string, unknown>, responseHeaders: Record<string, string> = {}) {
+			let requestCount = 0;
+			return vi.fn(async () => {
+				requestCount += 1;
+				const first = requestCount === 1;
+				return new Response(first ? `data: ${JSON.stringify(failure)}\n\n` : successSse, {
+					status: 200,
+					headers: { "content-type": "text/event-stream", ...(first ? responseHeaders : {}) },
+				});
+			});
+		}
+
+		/** First request fails with a retryable `server_error` event whose headers state the wait. */
+		function statedWaitFetch(retryAfter: string) {
+			return failThenSucceed({
+				type: "error",
+				status: 503,
+				error: { code: "server_error", message: "Upstream overloaded" },
+				headers: { "retry-after": retryAfter },
+			});
+		}
+
+		/** First request: a retryable `response.failed` that names no wait; only the HTTP 200's headers state it. */
+		function headerWaitFetch(retryAfterMs: string) {
+			return failThenSucceed(
+				{
+					type: "response.failed",
+					response: {
+						status: "failed",
+						error: { code: "server_error", message: "Service temporarily unavailable" },
+					},
+				},
+				{ "retry-after-ms": retryAfterMs },
+			);
+		}
+
+		async function runWithCap(fetchMock: FetchImpl, maxRetryDelayMs: number, extra: { ceilingMs?: number } = {}) {
+			const tempDir = TempDir.createSync("@pi-codex-stream-");
+			setAgentDir(tempDir.path());
+			const providerRetryWait = vi.fn(async (_delayMs: number, _signal?: AbortSignal) => {});
+			const model = { ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false };
+			const result = await streamOpenAICodexResponses(model, createCodexTestContext(), {
+				apiKey: createCodexTestToken(),
+				fetch: fetchMock,
+				maxRetryDelayMs,
+				providerRetryWaitCeilingMs: extra.ceilingMs,
+				providerRetryWait,
+			}).result();
+			return { result, providerRetryWait };
+		}
+
+		it("surfaces a failure whose Retry-After exceeds maxRetryDelayMs after one request", async () => {
+			const tempDir = TempDir.createSync("@pi-codex-stream-");
+			setAgentDir(tempDir.path());
+			// Before the fix this loop slept on `scheduler.wait` for its whole retry budget; keep that instant.
+			vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+			const fetchMock = statedWaitFetch("9");
+			const providerRetryWait = vi.fn(async (_delayMs: number, _signal?: AbortSignal) => {});
+			const model = { ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false };
+
+			const result = await streamOpenAICodexResponses(model, createCodexTestContext(), {
+				apiKey: createCodexTestToken(),
+				fetch: fetchMock,
+				maxRetryDelayMs: 1,
+				providerRetryWait,
+			}).result();
+
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+			expect(providerRetryWait).not.toHaveBeenCalled();
+			expect(result.stopReason).toBe("error");
+			expect(result.errorRetryAfterMs).toBe(9_000);
+		});
+
+		it("waits the stated Retry-After through providerRetryWait when it fits maxRetryDelayMs", async () => {
+			const tempDir = TempDir.createSync("@pi-codex-stream-");
+			setAgentDir(tempDir.path());
+			vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+			const fetchMock = statedWaitFetch("0.8");
+			const providerRetryWait = vi.fn(async (_delayMs: number, _signal?: AbortSignal) => {});
+			const model = { ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false };
+
+			const result = await streamOpenAICodexResponses(model, createCodexTestContext(), {
+				apiKey: createCodexTestToken(),
+				fetch: fetchMock,
+				maxRetryDelayMs: 1_000,
+				providerRetryWait,
+			}).result();
+
+			expect(fetchMock).toHaveBeenCalledTimes(2);
+			expect(providerRetryWait).toHaveBeenCalledTimes(1);
+			expect(providerRetryWait.mock.calls[0]?.[0]).toBe(800);
+			expect(result.stopReason).toBe("stop");
+			expect(result.content.find(block => block.type === "text")?.text).toBe("Hello after wait");
+		});
+
+		it("surfaces an in-band failure whose wait only the HTTP 200's headers state when it exceeds maxRetryDelayMs", async () => {
+			const fetchMock = headerWaitFetch("750");
+
+			const { result, providerRetryWait } = await runWithCap(fetchMock, 10);
+
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+			expect(providerRetryWait).not.toHaveBeenCalled();
+			expect(result.stopReason).toBe("error");
+			expect(result.errorRetryAfterMs).toBe(750);
+		});
+
+		it("waits the HTTP 200's header wait for an in-band failure when it fits maxRetryDelayMs", async () => {
+			const fetchMock = headerWaitFetch("750");
+
+			const { result, providerRetryWait } = await runWithCap(fetchMock, 1_000);
+
+			expect(fetchMock).toHaveBeenCalledTimes(2);
+			expect(providerRetryWait).toHaveBeenCalledTimes(1);
+			expect(providerRetryWait.mock.calls[0]?.[0]).toBe(750);
+			expect(result.stopReason).toBe("stop");
+		});
+
+		it("keeps a 750 ms header wait over a zone-less reset date eight hours out, and retries within a 1 s cap", async () => {
+			// A wall clock with no zone: read as UTC it is eight hours ahead, and only a
+			// fallback when nothing relative is stated. The header states 750 ms.
+			const resetAt = new Date(Date.now() + 8 * 3_600_000).toISOString().slice(0, 19).replace("T", " ");
+			const fetchMock = failThenSucceed({
+				type: "response.failed",
+				response: {
+					status: "failed",
+					error: {
+						code: "server_error",
+						message: `Service temporarily unavailable; reset at ${resetAt}`,
+						headers: { "retry-after-ms": "750" },
+					},
+				},
+			});
+
+			const { result, providerRetryWait } = await runWithCap(fetchMock, 1_000);
+
+			expect(fetchMock).toHaveBeenCalledTimes(2);
+			expect(providerRetryWait).toHaveBeenCalledTimes(1);
+			expect(providerRetryWait.mock.calls[0]?.[0]).toBe(750);
+			expect(result.stopReason).toBe("stop");
+			expect(result.content.find(block => block.type === "text")?.text).toBe("Hello after wait");
+		});
+
+		describe("the providerRetryWaitCeilingMs opt-in", () => {
+			const FIVE_MINUTES_MS = 5 * 60 * 1_000;
+			const REFUSAL_NOTE =
+				"(server asked to wait 15 s before retrying; the caller's 10 s providerRetryWaitCeilingMs refused it, so the provider did not retry)";
+
+			it("unset: sleeps a stated 15 s, as before", async () => {
+				const fetchMock = headerWaitFetch("15000");
+
+				const { result, providerRetryWait } = await runWithCap(fetchMock, FIVE_MINUTES_MS);
+
+				expect(fetchMock).toHaveBeenCalledTimes(2);
+				expect(providerRetryWait.mock.calls.map(call => call[0])).toEqual([15_000]);
+				expect(result.stopReason).toBe("stop");
+			});
+
+			it("set to 20 s and not exceeded: sleeps a stated 15 s", async () => {
+				const fetchMock = headerWaitFetch("15000");
+
+				const { providerRetryWait } = await runWithCap(fetchMock, FIVE_MINUTES_MS, { ceilingMs: 20_000 });
+
+				expect(fetchMock).toHaveBeenCalledTimes(2);
+				expect(providerRetryWait.mock.calls.map(call => call[0])).toEqual([15_000]);
+			});
+
+			it("set to 10 s and exceeded: surfaces a stated 15 s after one request, saying so, with its wait and classification kept", async () => {
+				const fetchMock = headerWaitFetch("15000");
+
+				const { result, providerRetryWait } = await runWithCap(fetchMock, FIVE_MINUTES_MS, { ceilingMs: 10_000 });
+
+				expect(fetchMock).toHaveBeenCalledTimes(1);
+				expect(providerRetryWait).not.toHaveBeenCalled();
+				expect(result.stopReason).toBe("error");
+				expect(result.errorClassificationMessage).toBeDefined();
+				expect(result.errorClassificationMessage).not.toContain("server asked");
+				expect(result.errorMessage).toBe(`${result.errorClassificationMessage} ${REFUSAL_NOTE}`);
+				expect(result.errorRetryAfterMs).toBe(15_000);
+			});
+		});
+	});
+
 	it("stops reading SSE responses after a terminal response event", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");
 		setAgentDir(tempDir.path());
@@ -2761,6 +2955,70 @@ describe("openai-codex streaming", () => {
 		expect(result.stopReason).toBe("error");
 		expect((result.errorMessage ?? "").toLowerCase()).toContain("rate limit");
 		expect(result.errorMessage).not.toContain("Body already used");
+	});
+
+	it("reports the replays it spent on a failure that opened only an empty reasoning block", async () => {
+		// This loop measures commitment by streamed block length, so a leading
+		// `output_item.added` for an empty reasoning item does not stop it: the
+		// request goes out six times. Recovery above reads `providerReplays` to
+		// tell that apart from one request that happened to open a block, which
+		// the content left on the message cannot say.
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+
+		const payload = Buffer.from(
+			JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "acc_test" } }),
+			"utf8",
+		).toBase64();
+		const token = `aaa.${payload}.bbb`;
+		let requestCount = 0;
+
+		// The runtime's `fetch` is the wire; a caller-supplied one would make the
+		// count unknown.
+		const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((async (input: string | URL) => {
+			const url = typeof input === "string" ? input : input.toString();
+			if (url !== "https://chatgpt.com/backend-api/codex/responses") {
+				return new Response("not found", { status: 404 });
+			}
+			requestCount += 1;
+			const sse = `${[
+				`data: ${JSON.stringify({ type: "response.created", response: { id: `resp_${requestCount}` } })}`,
+				`data: ${JSON.stringify({ type: "response.output_item.added", output_index: 0, item: { type: "reasoning", id: `rs_${requestCount}`, summary: [] } })}`,
+				`data: ${JSON.stringify({ type: "error", error: { code: "model_error", message: "upstream closed the connection" } })}`,
+			].join("\n\n")}\n\n`;
+			return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
+		}) as typeof fetch);
+
+		const model: Model<"openai-codex-responses"> = buildModel({
+			id: "gpt-5.1-codex",
+			name: "GPT-5.1 Codex",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			preferWebsockets: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+		});
+
+		const context: Context = {
+			systemPrompt: ["You are a helpful assistant."],
+			messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }],
+		};
+
+		const result = await streamOpenAICodexResponses(model, context, {
+			apiKey: token,
+			preferWebsockets: false,
+		}).result();
+
+		expect(fetchMock).toHaveBeenCalledTimes(6);
+		expect(result.stopReason).toBe("error");
+		expect(result.providerReplays).toBe(5);
+		// The block the stand-in used to read as "nothing replayed" is still there.
+		expect(result.content.some(block => block.type === "thinking")).toBe(true);
 	});
 
 	it.each([

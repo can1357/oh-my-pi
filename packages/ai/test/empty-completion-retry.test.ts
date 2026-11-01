@@ -4,9 +4,10 @@
  * so output is never duplicated.
  */
 import { describe, expect, it } from "bun:test";
-import type { AssistantMessage, AssistantMessageEvent, Context, Usage } from "@oh-my-pi/pi-ai/types";
+import type { AssistantMessage, AssistantMessageEvent, Context, FetchImpl, Usage } from "@oh-my-pi/pi-ai/types";
 import { MAX_EMPTY_COMPLETION_RETRIES, withReplaySafeStreamRetry } from "@oh-my-pi/pi-ai/utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { providerReplaysFrom, wireAttemptsOf } from "@oh-my-pi/pi-ai/utils/wire-attempts";
 
 const CTX = {} as Context;
 
@@ -69,6 +70,23 @@ function contentAttempt(): AssistantMessageEventStream {
 		{ type: "text_end", contentIndex: 0, content: "hello", partial: message },
 		{ type: "done", reason: "stop", message },
 	] as unknown as AssistantMessageEvent[]);
+}
+
+/**
+ * A pre-output 429 whose response headers stated a wait: `AIError.finalize`
+ * sets it as `errorRetryAfterMs`. The message text names no wait, so the loop
+ * must read the structured field, not a hint appended to the text.
+ */
+function statedWaitErrorAttempt(retryAfterMs: number): AssistantMessageEventStream {
+	const message = assistant();
+	message.stopReason = "error";
+	message.errorStatus = 429;
+	message.errorMessage = "429 Too many requests";
+	message.errorRetryAfterMs = retryAfterMs;
+	return streamFromEvents([
+		{ type: "start", partial: message },
+		{ type: "error", reason: "error", error: message },
+	]);
 }
 
 async function drain(stream: AssistantMessageEventStream): Promise<AssistantMessageEvent[]> {
@@ -370,6 +388,315 @@ describe("withReplaySafeStreamRetry", () => {
 		expect(attempts).toBe(2);
 		expect(events.filter(event => event.type === "start")).toHaveLength(1);
 		expect(result.content).toEqual([{ type: "text", text: "hello" }]);
+	});
+
+	it("surfaces a provider error whose stated wait exceeds maxRetryDelayMs without retrying", async () => {
+		let attempts = 0;
+		const waits: number[] = [];
+		const stream = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			{ maxRetryDelayMs: 1, providerRetryWait: async (ms: number) => void waits.push(ms) },
+			() => {
+				attempts++;
+				return attempts > 1 ? contentAttempt() : statedWaitErrorAttempt(9_000);
+			},
+			{ retryProviderErrors: true, maxProviderErrorRetries: 1 },
+		);
+
+		const events = await drain(stream);
+		const result = await stream.result();
+
+		expect(attempts).toBe(1);
+		expect(waits).toEqual([]);
+		expect(events.at(-1)?.type).toBe("error");
+		expect(result.stopReason).toBe("error");
+		expect(result.errorRetryAfterMs).toBe(9_000);
+	});
+
+	it("waits a provider error's stated wait when it outlasts the backoff within maxRetryDelayMs", async () => {
+		let attempts = 0;
+		const waits: number[] = [];
+		const stream = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			{ maxRetryDelayMs: 1_000, providerRetryWait: async (ms: number) => void waits.push(ms) },
+			() => {
+				attempts++;
+				return attempts > 1 ? contentAttempt() : statedWaitErrorAttempt(800);
+			},
+			{ retryProviderErrors: true, maxProviderErrorRetries: 1 },
+		);
+
+		const result = await stream.result();
+
+		expect(attempts).toBe(2);
+		expect(waits).toEqual([800]);
+		expect(result.content).toEqual([{ type: "text", text: "hello" }]);
+	});
+
+	describe("the providerRetryWaitCeilingMs opt-in", () => {
+		const FIVE_MINUTES_MS = 5 * 60 * 1_000;
+		const REFUSAL_NOTE =
+			"(server asked to wait 15 s before retrying; the caller's 10 s providerRetryWaitCeilingMs refused it, so the provider did not retry)";
+
+		/** One failed attempt stating 15 s under `capMs` (5 minutes by default), then content. */
+		async function run(ceilingMs: number | undefined, capMs = FIVE_MINUTES_MS) {
+			let attempts = 0;
+			const waits: number[] = [];
+			const stream = withReplaySafeStreamRetry(
+				{},
+				CTX,
+				{
+					maxRetryDelayMs: capMs,
+					providerRetryWaitCeilingMs: ceilingMs,
+					providerRetryWait: async (ms: number) => void waits.push(ms),
+				},
+				() => {
+					attempts++;
+					return attempts > 1 ? contentAttempt() : statedWaitErrorAttempt(15_000);
+				},
+				{ retryProviderErrors: true, maxProviderErrorRetries: 1 },
+			);
+			const result = await stream.result();
+			return { attempts, waits, result };
+		}
+
+		it("unset: sleeps a stated 15 s, as before", async () => {
+			const { attempts, waits, result } = await run(undefined);
+
+			expect(attempts).toBe(2);
+			expect(waits).toEqual([15_000]);
+			expect(result.content).toEqual([{ type: "text", text: "hello" }]);
+		});
+
+		it("set to 20 s and not exceeded: sleeps a stated 15 s", async () => {
+			const { attempts, waits } = await run(20_000);
+
+			expect(attempts).toBe(2);
+			expect(waits).toEqual([15_000]);
+		});
+
+		it("set to 10 s and exceeded: surfaces a stated 15 s after one attempt, saying so, with its wait and classification kept", async () => {
+			const { attempts, waits, result } = await run(10_000);
+
+			expect(attempts).toBe(1);
+			expect(waits).toEqual([]);
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toBe(`429 Too many requests ${REFUSAL_NOTE}`);
+			expect(result.errorClassificationMessage).toBe("429 Too many requests");
+			expect(result.errorRetryAfterMs).toBe(15_000);
+			expect(result.errorStatus).toBe(429);
+		});
+
+		it("set to 20 s above a 10 s maxRetryDelayMs: the smaller cap still refuses a stated 15 s, and the note names it", async () => {
+			const { attempts, waits, result } = await run(20_000, 10_000);
+
+			expect(attempts).toBe(1);
+			expect(waits).toEqual([]);
+			expect(result.errorMessage).toBe(
+				"429 Too many requests (server asked to wait 15 s before retrying; the 10 s maxRetryDelayMs refused it, so the provider did not retry)",
+			);
+		});
+
+		it("set to 600 ms: its own 1 s backoff sleeps 600 ms, so the loop's sleep stays inside the ceiling", async () => {
+			// The ceiling bounds the sleep, not one source of it: the loop's own
+			// backoff is shortened to it, where a server's longer wait is refused.
+			let attempts = 0;
+			const waits: number[] = [];
+			const stream = withReplaySafeStreamRetry(
+				{},
+				CTX,
+				{ providerRetryWaitCeilingMs: 600, providerRetryWait: async (ms: number) => void waits.push(ms) },
+				() => {
+					attempts++;
+					return attempts <= MAX_EMPTY_COMPLETION_RETRIES ? emptyAttempt() : contentAttempt();
+				},
+				{ retryEmptyCompletion: true },
+			);
+			await stream.result();
+
+			expect(attempts).toBe(MAX_EMPTY_COMPLETION_RETRIES + 1);
+			expect(waits).toEqual([500, 600]);
+		});
+	});
+
+	interface CountedAttemptOptions {
+		fetch?: FetchImpl;
+		signal?: AbortSignal;
+		providerRetryWait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
+	}
+
+	/**
+	 * An attempt that spends `requests` on the wire through the request's
+	 * counter, as every reporting provider does, and fails before output with
+	 * the count that counter now holds.
+	 */
+	const countedFailure =
+		(requestsPerAttempt: ReadonlyArray<number>, onAttempt: () => void = () => {}) =>
+		(_model: unknown, _context: Context, options?: CountedAttemptOptions) => {
+			onAttempt();
+			const counter = wireAttemptsOf(options?.fetch);
+			if (!counter) throw new Error("the attempt was not handed the request's counter");
+			counter.count += requestsPerAttempt[Math.min(attemptIndex++, requestsPerAttempt.length - 1)];
+			const message = assistant();
+			message.stopReason = "error";
+			message.errorMessage = "The socket connection was closed unexpectedly";
+			message.providerReplays = providerReplaysFrom(counter);
+			return streamFromEvents([
+				{ type: "start", partial: message },
+				{ type: "error", reason: "error", error: message },
+			]);
+		};
+	let attemptIndex = 0;
+
+	it("hands every attempt one counter, so the surfaced count holds the discarded attempts' requests", async () => {
+		// The attempt it surfaces reports the request's whole count — including
+		// the six requests the attempt it threw away had already spent — because
+		// both counted into one counter. Nothing is added here, so nothing can be
+		// counted twice.
+		const run = async (requests: ReadonlyArray<number>): Promise<AssistantMessage> => {
+			attemptIndex = 0;
+			const stream = withReplaySafeStreamRetry(
+				{},
+				CTX,
+				{ providerRetryWait: async () => {} },
+				countedFailure(requests),
+				{
+					retryProviderErrors: true,
+					maxProviderErrorRetries: 1,
+				},
+			);
+			await drain(stream);
+			return await stream.result();
+		};
+
+		// Six requests, then one: seven in all.
+		expect((await run([6, 1])).providerReplays).toBe(6);
+		// Six and six: twelve.
+		expect((await run([6, 6])).providerReplays).toBe(11);
+	});
+
+	it("reports unknown, not a lower number, when the layer below counted only its own call", async () => {
+		// A count over one counter never falls. An attempt that reports five and a
+		// retry that reports zero cannot both be the request's count: the zero
+		// is the retry's own call, and forwarding it would claim the request went
+		// out once after it went out six times.
+		const failing = (counts: ReadonlyArray<number | undefined>) => {
+			let index = 0;
+			return () => {
+				const message = assistant();
+				message.stopReason = "error";
+				message.errorMessage = "The socket connection was closed unexpectedly";
+				message.providerReplays = counts[Math.min(index++, counts.length - 1)];
+				return streamFromEvents([
+					{ type: "start", partial: message },
+					{ type: "error", reason: "error", error: message },
+				]);
+			};
+		};
+		const run = async (counts: ReadonlyArray<number | undefined>): Promise<AssistantMessage> => {
+			const stream = withReplaySafeStreamRetry({}, CTX, { providerRetryWait: async () => {} }, failing(counts), {
+				retryProviderErrors: true,
+				maxProviderErrorRetries: 1,
+			});
+			await drain(stream);
+			return await stream.result();
+		};
+
+		expect((await run([5, 0])).providerReplays).toBeUndefined();
+		// A number after an attempt that reported none is not the request's count either.
+		expect((await run([undefined, 0])).providerReplays).toBeUndefined();
+		// Nothing below reports: unknown, whatever this wrapper itself retried.
+		expect((await run([undefined])).providerReplays).toBeUndefined();
+	});
+
+	it("does not write a count into a terminal message the layer below may reuse", async () => {
+		const shared = assistant();
+		shared.stopReason = "error";
+		shared.errorMessage = "The socket connection was closed unexpectedly";
+		shared.providerReplays = 3;
+		const surfaced: Array<number | undefined> = [];
+		let call = 0;
+		for (let run = 0; run < 2; run++) {
+			const stream = withReplaySafeStreamRetry(
+				{},
+				CTX,
+				{ providerRetryWait: async () => {} },
+				() => {
+					// The first attempt of each run reports more than the shared message
+					// does, so the wrapper must drop the count from what it forwards.
+					const message = call++ % 2 === 0 ? { ...shared, providerReplays: 7 } : shared;
+					return streamFromEvents([{ type: "error", reason: "error", error: message }]);
+				},
+				{ retryProviderErrors: true, maxProviderErrorRetries: 1 },
+			);
+			await drain(stream);
+			surfaced.push((await stream.result()).providerReplays);
+		}
+		expect(surfaced).toEqual([undefined, undefined]);
+		expect(shared.providerReplays).toBe(3);
+	});
+
+	it("reports what the counter holds when an abort ends the retry, before or during its wait", async () => {
+		// Aborted during the first attempt: one attempt of six requests.
+		const beforeWait = new AbortController();
+		attemptIndex = 0;
+		const abortedEarly = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			{ signal: beforeWait.signal, providerRetryWait: async () => {} },
+			countedFailure([6], () => beforeWait.abort()),
+			{ retryProviderErrors: true, maxProviderErrorRetries: 1 },
+		);
+		await drain(abortedEarly);
+		expect((await abortedEarly.result()).providerReplays).toBe(5);
+
+		// Aborted during the second retry wait: two attempts of six requests.
+		const duringWait = new AbortController();
+		attemptIndex = 0;
+		let attempts = 0;
+		let waits = 0;
+		const abortedLate = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			{
+				signal: duringWait.signal,
+				providerRetryWait: async () => {
+					if (++waits === 2) {
+						duringWait.abort();
+						throw new Error("cancelled");
+					}
+				},
+			},
+			countedFailure([6], () => {
+				attempts++;
+			}),
+			{ retryProviderErrors: true, maxProviderErrorRetries: 2 },
+		);
+		await drain(abortedLate);
+		expect(attempts).toBe(2);
+		expect((await abortedLate.result()).providerReplays).toBe(11);
+	});
+
+	it("leaves the replay count absent when neither it nor the loop below replayed", async () => {
+		const message = assistant();
+		message.stopReason = "error";
+		message.errorMessage = "Invalid tool schema";
+		const stream = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			{ providerRetryWait: async () => {} },
+			() =>
+				streamFromEvents([
+					{ type: "start", partial: message },
+					{ type: "error", reason: "error", error: message },
+				]),
+			{ retryProviderErrors: true, maxProviderErrorRetries: 1 },
+		);
+
+		await drain(stream);
+		expect((await stream.result()).providerReplays).toBeUndefined();
 	});
 
 	it("does not retry a transient provider error after output commits", async () => {

@@ -38,6 +38,7 @@ import { normalizeSystemPrompts, normalizeToolCallId, resolveCacheRetention } fr
 import { createAbortSourceTracker } from "../utils/abort";
 import { isDemotedThinking, kStreamingLastParseLen } from "../utils/block-symbols";
 import { hasVisibleAssistantContent, withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
+import { withErrorEventHeaders } from "../utils/error-event-headers";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import {
@@ -883,6 +884,13 @@ const streamOpenAICompletionsOnce = (
 		// the catch handler uses it to close open blocks before emitting the
 		// terminal error so both exit paths obey the same block lifecycle.
 		let finishOpenBlocksOnError: () => void = () => {};
+		// The current attempt's accepted (2xx) response headers: droid CLI parity
+		// reads cache-read details from `fireworks-cached-prompt-tokens` when the
+		// SSE body omits `cached_tokens`, and the catch hands them to `finalize`
+		// so an in-band error or a cut stream keeps the response's `Retry-After`.
+		// Cleared when an attempt starts: a fallback request that fails before
+		// its response must not read an earlier response's headers.
+		let responseHeaders: Headers | undefined;
 
 		try {
 			const policy = resolveOpenAICompatForRequest(model, options, Boolean(context.tools?.length));
@@ -933,6 +941,7 @@ const streamOpenAICompletionsOnce = (
 				? `${trimmedBaseUrl}/chat/completions?${new URLSearchParams(query)}`
 				: `${trimmedBaseUrl}/chat/completions`;
 			const createCompletionsStream = async (toolStrictModeOverride?: ToolStrictModeOverride) => {
+				responseHeaders = undefined;
 				const effectiveToolStrictModeOverride = disableStrictTools ? "none" : toolStrictModeOverride;
 				const builtParams = buildParams(model, context, options, effectiveToolStrictModeOverride);
 				appliedStrictTools = builtParams.strictToolsApplied;
@@ -982,6 +991,7 @@ const streamOpenAICompletionsOnce = (
 						body: params,
 						signal: requestSignal,
 						maxAttempts: options?.maxHttpAttempts,
+						retryPolicy: options,
 						fetch: wrapFetchForCopilotFallback(
 							wrapFetchForRequestCompression(options?.fetch ?? fetch, model),
 							model.provider === "github-copilot",
@@ -1010,10 +1020,6 @@ const streamOpenAICompletionsOnce = (
 					clearTimeout(requestTimeout);
 				}
 			};
-			// droid CLI parity: cache-read details can arrive on the
-			// `fireworks-cached-prompt-tokens` response header when the SSE body
-			// omits `cached_tokens`; captured here for the usage parser.
-			let responseHeaders: Headers | undefined;
 			let openaiStream: AsyncIterable<ChatCompletionChunk>;
 			try {
 				openaiStream = await createCompletionsStream();
@@ -1420,10 +1426,12 @@ const streamOpenAICompletionsOnce = (
 				// synthesized message is never opaque, so an unreadable body cannot burn
 				// a credential. Envelopes that are not a recognised throttle return
 				// `undefined` and keep their pre-existing handling.
-				const inBand = AIError.createInBandProviderError(chunk);
-				if (inBand) throw inBand;
-				const streamError = createOpenAICompletionsStreamError(chunk, model.provider);
-				if (streamError) throw streamError;
+				// A relay that already committed its 200 (the omp auth gateway)
+				// states the upstream's retry wait as the error object's structured
+				// `headers`; the thrown error carries them for `finalize`.
+				const inBand =
+					AIError.createInBandProviderError(chunk) ?? createOpenAICompletionsStreamError(chunk, model.provider);
+				if (inBand) throw withErrorEventHeaders(inBand, Reflect.get(chunk, "error"));
 
 				// OpenAI documents ChatCompletionChunk.id as the unique chat completion identifier,
 				// and each chunk in a streamed completion carries the same id.
@@ -1881,11 +1889,16 @@ const streamOpenAICompletionsOnce = (
 				abortTracker,
 				rawRequestDump,
 				capturedErrorResponse,
+				streamResponseHeaders: responseHeaders,
 			});
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = result.message;
+			output.errorRetryAfterMs = result.retryAfterMs;
+			output.errorRetryWaitRefusal = result.retryWaitRefusal;
+			if (result.classificationMessage !== undefined)
+				output.errorClassificationMessage = result.classificationMessage;
 			// Some providers via OpenRouter include extra details here.
 			const rawMetadata = readOpenRouterRawMetadata(capturedErrorResponse);
 			if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;

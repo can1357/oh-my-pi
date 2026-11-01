@@ -61,6 +61,7 @@ import type {
 	Usage,
 } from "../types";
 import { AssistantMessageEventStream } from "../utils/event-stream";
+import type { RefusedRetryWait } from "../utils/retry-wait";
 
 /** The API string this provider serves. */
 export const MOCK_API = "mock" as const;
@@ -92,6 +93,15 @@ export interface MockResponse {
 	fallbackCreditHandle?: AnthropicFallbackCreditHandle;
 	/** Error text paired with an explicit `"error"` stop reason. */
 	errorMessage?: string;
+	/** Replays a provider loop reports having spent before this failure surfaced. */
+	providerReplays?: number;
+	/**
+	 * The failed response's header retry wait, as a real provider sets it from
+	 * the response object (`AssistantMessage.errorRetryAfterMs`).
+	 */
+	errorRetryAfterMs?: number;
+	/** Structured refusal of a server-stated retry wait, as a real provider finalizer sets it. */
+	errorRetryWaitRefusal?: RefusedRetryWait;
 	/** Usage stats. Missing fields default to 0; missing `cost.total` is recomputed from components. */
 	usage?: Partial<Omit<Usage, "cost">> & { cost?: Partial<Usage["cost"]> };
 	/** Service tier the mock reports serving the turn, as a real provider's response echo would. */
@@ -411,6 +421,9 @@ async function runMock(
 	partial.stopDetails = response.stopDetails;
 	partial.fallbackCreditHandle = response.fallbackCreditHandle;
 	partial.errorMessage = response.errorMessage;
+	partial.providerReplays = response.providerReplays;
+	partial.errorRetryAfterMs = response.errorRetryAfterMs;
+	partial.errorRetryWaitRefusal = response.errorRetryWaitRefusal;
 	partial.usage = mergeUsage(response.usage);
 	partial.serviceTier = response.serviceTier;
 	partial.duration = performance.now() - perfStart;

@@ -11,7 +11,13 @@ import {
 	recordGatewayUsage,
 	resolveGatewayApiKey,
 } from "../dispatch";
-import { gatewayResponseHeaders, json, resolveClientIdentity } from "../http";
+import {
+	gatewayResponseHeaders,
+	json,
+	resolveClientIdentity,
+	thrownRetryAfterMs,
+	withRetryAfterHeaders,
+} from "../http";
 
 /** OpenRouter-compatible `POST /v1/rerank` gateway handler. */
 export async function handleRerank(bootOpts: AuthGatewayRouteOptions, req: Request, peer: string): Promise<Response> {
@@ -76,6 +82,9 @@ export async function handleRerank(bootOpts: AuthGatewayRouteOptions, req: Reque
 		if (controller.signal.aborted) return aborted();
 		const classified = classifyGatewayError(error);
 		logger.warn("auth-gateway rerank failed", { format: "rerank", error: classified.message, peer });
-		return rerankWire.formatError(classified.status, classified.type, classified.message);
+		return withRetryAfterHeaders(
+			rerankWire.formatError(classified.status, classified.type, classified.message),
+			thrownRetryAfterMs(error),
+		);
 	}
 }

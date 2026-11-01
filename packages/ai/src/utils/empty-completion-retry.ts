@@ -11,12 +11,22 @@
  *
  * Empty-completion retries remain opt-in because a normal empty stop can be a
  * valid provider result. Transient-error retries use the shared provider error
- * classifier and are separately bounded by the caller's policy.
+ * classifier, are separately bounded by the caller's policy, and wait at least
+ * as long as the provider stated (a stated wait past `maxRetryDelayMs`, or a
+ * set `providerRetryWaitCeilingMs`, surfaces the failure instead).
  */
 import * as AIError from "../error";
-import type { AssistantMessage, AssistantMessageEvent, Context } from "../types";
+import type { AssistantMessage, AssistantMessageEvent, Context, FetchImpl } from "../types";
 import { AssistantMessageEventStream } from "./event-stream";
-import { waitForRetry } from "./retry-wait";
+import { providerRetryWaitMs, retryWaitBounds } from "./retry-after";
+import {
+	DEFAULT_MAX_RETRY_DELAY_MS,
+	hasRefusedRetryWaitNote,
+	refusedRetryWaitNote,
+	retryWaitRefusal,
+	sleepBeforeRetry,
+} from "./retry-wait";
+import { withWireCount } from "./wire-attempts";
 
 export const MAX_EMPTY_COMPLETION_RETRIES = 2;
 export const EMPTY_COMPLETION_BASE_DELAY_MS = 500;
@@ -61,6 +71,9 @@ interface StreamRetryOptions {
 	signal?: AbortSignal;
 	providerRetryWait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
 	acceptEmptyResponse?: boolean;
+	fetch?: FetchImpl;
+	maxRetryDelayMs?: number;
+	providerRetryWaitCeilingMs?: number;
 }
 
 /** Controls which replay-safe provider results may issue a fresh request. */
@@ -87,6 +100,18 @@ class FinalizedProviderStreamError extends Error {
  * Re-issues a fresh provider request only while the current attempt remains
  * replay-safe. Buffered pre-output events from discarded attempts never reach
  * consumers.
+ *
+ * Every attempt goes out under the same request counter (`withWireCount`), so
+ * a provider that reports `providerReplays` reports every request this
+ * wrapper's attempts made, the discarded ones included, and the terminal event
+ * is forwarded as reported: nothing here adds to a count, so nothing here can
+ * count a request twice or forget one.
+ *
+ * One check stays: a count over one counter never falls. A report below one an
+ * earlier attempt already made, or a number after an attempt that reported
+ * none, cannot be this request's count — the layer below counted only its own
+ * call — and is forwarded as unknown rather than as a zero the request has
+ * already disproved.
  */
 export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 	model: M,
@@ -97,9 +122,29 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 ): AssistantMessageEventStream {
 	const outer = new AssistantMessageEventStream();
 	const signal = options?.signal;
+	const attemptOptions = withWireCount(options);
 	void (async () => {
 		let emptyRetries = 0;
 		let providerErrorRetries = 0;
+		/** The least count the request can report now: the highest an earlier attempt reported. */
+		let replayFloor = 0;
+		let unreportedAttempt = false;
+		const forwardTerminal = (event: AssistantMessageEvent): void => {
+			const reported = terminalReplays(event);
+			if (reported === undefined || (!unreportedAttempt && reported >= replayFloor)) {
+				outer.push(event);
+				return;
+			}
+			// A copy, not a write: the message belongs to the layer below and may be
+			// the same object on its next call.
+			if (event.type === "error") {
+				const { providerReplays: _discarded, ...error } = event.error;
+				outer.push({ ...event, error });
+			} else if (event.type === "done") {
+				const { providerReplays: _discarded, ...message } = event.message;
+				outer.push({ ...event, message });
+			}
+		};
 		while (true) {
 			const buffered: AssistantMessageEvent[] = [];
 			let committed = options?.acceptEmptyResponse === true;
@@ -113,7 +158,7 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 				// The attempt factory can throw synchronously (e.g. a config error
 				// raised before it creates its stream); surface it on the outer stream
 				// rather than leaking an unhandled rejection that never settles.
-				inner = attempt(model, context, options);
+				inner = attempt(model, context, attemptOptions);
 				for await (const event of inner) {
 					if (event.type === "done" || event.type === "error") {
 						terminal = event;
@@ -153,38 +198,56 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 				!committed &&
 				failedMessage?.stopReason === "error" &&
 				failedMessage.errorMessage !== undefined &&
+				failedMessage.errorRetryWaitRefusal === undefined &&
 				providerErrorRetries < (policy.maxProviderErrorRetries ?? 0) &&
 				AIError.isProviderRetryableError(
-					new FinalizedProviderStreamError(failedMessage.errorMessage, failedMessage.errorStatus),
+					new FinalizedProviderStreamError(
+						failedMessage.errorClassificationMessage ?? failedMessage.errorMessage,
+						failedMessage.errorStatus,
+					),
 				);
 
-			let delayMs: number | undefined;
-			if (retryEmpty) {
-				delayMs = EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** emptyRetries;
-				emptyRetries++;
-			} else if (retryProviderError) {
-				delayMs = EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** providerErrorRetries;
-				providerErrorRetries++;
-			}
+			// A provider error waits at least the wait its failed attempt stated, read
+			// as session retry reads it: the response headers' wait
+			// (`errorRetryAfterMs`) with the message's relative waits beside it, else
+			// the message's text. A wait past the caller's bounds surfaces the failure.
+			const statedWaitMs = retryProviderError
+				? providerRetryWaitMs(
+						failedMessage?.provider,
+						failedMessage?.errorMessage,
+						failedMessage?.errorRetryAfterMs,
+					)
+				: undefined;
+			const delayMs = retryEmpty
+				? EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** emptyRetries
+				: retryProviderError &&
+					  !retryWaitBounds(options, DEFAULT_MAX_RETRY_DELAY_MS).declines(statedWaitMs, failedMessage)
+					? Math.max(statedWaitMs ?? 0, EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** providerErrorRetries)
+					: undefined;
 
 			if (delayMs !== undefined && !signal?.aborted) {
 				try {
-					await waitForRetry(options?.providerRetryWait, delayMs, signal);
+					await sleepBeforeRetry(options, delayMs, signal);
 				} catch (waitError) {
 					flush();
 					if (signal?.aborted) {
-						if (terminal) outer.push(terminal);
+						if (terminal) forwardTerminal(terminal);
 					} else {
 						outer.fail(waitError);
 					}
 					return;
 				}
+				if (retryEmpty) emptyRetries++;
+				else providerErrorRetries++;
+				const discarded = terminal ? terminalReplays(terminal) : undefined;
+				if (discarded === undefined) unreportedAttempt = true;
+				else replayFloor = Math.max(replayFloor, discarded);
 				continue;
 			}
 
 			flush();
 			if (terminal) {
-				outer.push(terminal);
+				forwardTerminal(retryProviderError && delayMs === undefined ? withRefusalNote(terminal) : terminal);
 			} else if (!outer.done) {
 				try {
 					outer.end(await inner.result());
@@ -196,4 +259,34 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 		}
 	})();
 	return outer;
+}
+
+/**
+ * `event`, when this wrapper refused the wait its failed message states
+ * (`RetryWaitBounds.declines`), with the message saying so, unless the layer
+ * below already did. The note's text is kept out of the classification
+ * (`errorClassificationMessage`). A copy: the message belongs to the layer below.
+ */
+function withRefusalNote(event: AssistantMessageEvent): AssistantMessageEvent {
+	if (event.type !== "error") return event;
+	const refused = retryWaitRefusal(event.error);
+	const message = event.error.errorMessage;
+	if (refused === undefined || message === undefined) return event;
+	const noted = hasRefusedRetryWaitNote(message);
+	const note = noted ? message : `${message} ${refusedRetryWaitNote(refused)}`;
+	return {
+		...event,
+		error: {
+			...event.error,
+			errorRetryWaitRefusal: refused,
+			errorMessage: note,
+			errorClassificationMessage: event.error.errorClassificationMessage ?? message,
+		},
+	};
+}
+
+function terminalReplays(event: AssistantMessageEvent): number | undefined {
+	if (event.type === "error") return event.error.providerReplays;
+	if (event.type === "done") return event.message.providerReplays;
+	return undefined;
 }

@@ -23,6 +23,13 @@ const HOUR_MS = 60 * 60 * 1000;
 
 const FIVE_HOUR_MS = 5 * HOUR_MS;
 const STALE_BLOCK_GUARD_MS = 5 * 60_000 + 1;
+/**
+ * A live block deadline for rows the tests then age by
+ * {@link STALE_BLOCK_GUARD_MS}. The store reads every row as ending no later
+ * than `MAX_HINTED_BLOCK_MS` (a week) after it was written, so a deadline a
+ * full week out on an aged row would read a few minutes short.
+ */
+const AGED_BLOCK_MS = 6 * 24 * HOUR_MS;
 
 function ageCredentialBlockRows(db: Database): void {
 	db.prepare("UPDATE auth_credential_blocks SET updated_at = ?").run(
@@ -2294,7 +2301,7 @@ describe("AuthStorage codex oauth ranking", () => {
 				return entry.credential.type === "oauth" && entry.credential.accountId === "acct-broker-legacy";
 			});
 			if (!credential) throw new Error("expected broker credential");
-			const blockedUntilMs = Date.now() + WEEK_MS;
+			const blockedUntilMs = Date.now() + AGED_BLOCK_MS;
 			usageByAccount.set(
 				"acct-broker-legacy",
 				addSparkUsage(
@@ -3627,7 +3634,7 @@ describe("AuthStorage codex oauth ranking", () => {
 			]);
 			const [row] = store.listAuthCredentials("openai-codex");
 			if (!row) throw new Error("expected credential row");
-			const blockedUntilMs = Date.now() + WEEK_MS;
+			const blockedUntilMs = Date.now() + AGED_BLOCK_MS;
 			insertLegacyCodexSharedBlock(
 				db,
 				row.id,
@@ -3687,7 +3694,7 @@ describe("AuthStorage codex oauth ranking", () => {
 		]);
 		const row = store.listAuthCredentials("openai-codex")[0];
 		if (!row) throw new Error("expected credential row");
-		const blockedUntilMs = Date.now() + WEEK_MS;
+		const blockedUntilMs = Date.now() + AGED_BLOCK_MS;
 		store.upsertCredentialBlock({
 			credentialId: row.id,
 			providerKey: "openai-codex:oauth",
@@ -3734,7 +3741,7 @@ describe("AuthStorage codex oauth ranking", () => {
 		]);
 		const row = store.listAuthCredentials("openai-codex")[0];
 		if (!row) throw new Error("expected credential row");
-		const blockedUntilMs = Date.now() + WEEK_MS;
+		const blockedUntilMs = Date.now() + AGED_BLOCK_MS;
 		store.upsertCredentialBlock({
 			credentialId: row.id,
 			providerKey: "openai-codex:oauth",
@@ -3766,7 +3773,7 @@ describe("AuthStorage codex oauth ranking", () => {
 		]);
 		const row = store.listAuthCredentials("openai-codex")[0];
 		if (!row) throw new Error("expected credential row");
-		const blockedUntilMs = Date.now() + WEEK_MS;
+		const blockedUntilMs = Date.now() + AGED_BLOCK_MS;
 		for (const blockScope of ["chat", "spark"]) {
 			store.upsertCredentialBlock({
 				credentialId: row.id,
@@ -3886,8 +3893,12 @@ describe("AuthStorage codex oauth ranking", () => {
 		expect(await authStorage.keys.get("openai-codex", sessionId)).toBe("api-acct-credits");
 		expect(readCodexBlock(db, creditRow.id, "chat")).toBeUndefined();
 
-		// The genuinely drained sibling still gets blocked until its plan resets.
-		expect(readCodexBlock(db, dryRow.id, "chat")).toBe(2_000_500_000_000);
+		// The genuinely drained sibling still gets blocked toward its plan reset,
+		// which the report states years out; no block outlives the seven-day
+		// ceiling (`MAX_HINTED_BLOCK_MS`), so it ends there.
+		const dryBlock = readCodexBlock(db, dryRow.id, "chat");
+		expect(dryBlock).toBeGreaterThan(Date.now() + WEEK_MS - 60_000);
+		expect(dryBlock).toBeLessThanOrEqual(Date.now() + WEEK_MS);
 	});
 
 	test("heals a stale block on a credit-funded account whose plan window is spent", async () => {
@@ -3906,7 +3917,7 @@ describe("AuthStorage codex oauth ranking", () => {
 		// Written straight into SQLite: a block persisted by the process that hit
 		// the plan limit carries no in-memory probe deadline here, and ageing the
 		// row past the usage-report TTL clears the persisted probe guard.
-		insertLegacyCodexSharedBlock(db, creditRow.id, Date.now() + WEEK_MS);
+		insertLegacyCodexSharedBlock(db, creditRow.id, Date.now() + AGED_BLOCK_MS);
 		ageCredentialBlockRows(db);
 
 		const counts = await countApiKeySelections(authStorage, "openai-codex", "codex-credit-overage-heal");

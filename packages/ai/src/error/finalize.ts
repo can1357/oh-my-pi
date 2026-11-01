@@ -4,6 +4,8 @@ import type { AbortSourceTracker } from "../utils/abort";
 import type { CapturedHttpErrorResponse, RawHttpRequestDump } from "../utils/http-inspector";
 import { classify, classifyMessage, status } from "./flags";
 import { formatMessage } from "./format";
+import { getFailureRetryAfterMs, type HeadersLike } from "../utils/retry-after";
+import { refusedRetryWaitNote, retryWaitRefusal, type RefusedRetryWait } from "../utils/retry-wait";
 
 /** Context a provider catch block hands to {@link finalize}. */
 export interface FinalizeOptions {
@@ -21,6 +23,17 @@ export interface FinalizeOptions {
 	rawRequestDump?: RawHttpRequestDump;
 	/** Captured non-2xx response body, used for status fallback and message detail. */
 	capturedErrorResponse?: CapturedHttpErrorResponse;
+	/**
+	 * Headers of the accepted (2xx) response whose body this failure arrived in:
+	 * an in-band error event, or a stream cut after the response arrived. Record
+	 * them when the attempt's response arrives and clear them when the next
+	 * attempt starts, so a failure before a later attempt's response never reads
+	 * an earlier attempt's. Only their explicit wait instructions count
+	 * (`retry-after-ms`, `Retry-After`; see {@link getFailureRetryAfterMs}), and
+	 * only when the error's own headers name none. They never set `status`: the
+	 * failure keeps the classification of a failure with no HTTP status.
+	 */
+	streamResponseHeaders?: HeadersLike;
 }
 
 /** The full bundle a provider assigns onto its `AssistantMessage` error fields. */
@@ -33,6 +46,28 @@ export interface FinalizeResult {
 	stopReason: "aborted" | "error";
 	/** User-facing message: a local abort reason, else the caller's abort reason, else from {@link formatMessage}. */
 	message: string;
+	/**
+	 * The failed attempt's response-header retry wait ({@link getFailureRetryAfterMs}):
+	 * the error's own headers or the captured response's, else the explicit wait
+	 * the accepted response's headers name. Assign it to
+	 * `AssistantMessage.errorRetryAfterMs`. Read from headers only, so a body
+	 * cannot forge it.
+	 */
+	retryAfterMs: number | undefined;
+	/**
+	 * Set when a provider's own retry refused the wait the server stated
+	 * (`markRetryWaitRefused`): the note, naming the wait and the bound that
+	 * refused it, that ends {@link message}.
+	 */
+	refusalNote?: string;
+	/**
+	 * With {@link refusalNote}: {@link message} without the note, for
+	 * `AssistantMessage.errorClassificationMessage`, so the note never changes how
+	 * the failure is classified. `id` was classified from it.
+	 */
+	classificationMessage?: string;
+	/** Structured refusal for outer retry layers; unlike {@link refusalNote}, it is machine-readable. */
+	retryWaitRefusal?: RefusedRetryWait;
 }
 
 /**
@@ -76,10 +111,20 @@ export async function finalize(error: unknown, opts: FinalizeOptions = {}): Prom
 		errorStatus: currentStatus,
 	});
 
+	// A provider's own retry that refused the stated wait says so. The id above
+	// was classified from the message without the note.
+	const refused = aborted ? undefined : retryWaitRefusal(error);
+	const refusalNote = refused === undefined ? undefined : refusedRetryWaitNote(refused);
+
 	return {
 		id,
 		status: currentStatus,
 		stopReason: aborted ? "aborted" : "error",
-		message,
+		message: refusalNote === undefined ? message : `${message} ${refusalNote}`,
+		retryAfterMs: getFailureRetryAfterMs(error, {
+			errorResponseHeaders: opts.capturedErrorResponse?.headers,
+			streamResponseHeaders: opts.streamResponseHeaders,
+		}),
+		...(refused === undefined ? {} : { refusalNote, classificationMessage: message, retryWaitRefusal: refused }),
 	};
 }

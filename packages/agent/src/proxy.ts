@@ -20,6 +20,8 @@ import {
 	type StreamingPartialJsonCarrier,
 	setStreamingPartialJson,
 } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { getFailureRetryAfterMs, isRetryWaitMs } from "@oh-my-pi/pi-ai/utils/retry-after";
+import { isRefusedRetryWait } from "@oh-my-pi/pi-ai/utils/retry-wait";
 import { parseToolCallArguments } from "@oh-my-pi/pi-ai/utils/tool-call-arguments";
 import { parseStreamingJsonThrottled, readSseJson } from "@oh-my-pi/pi-utils";
 
@@ -37,8 +39,62 @@ export class ProxyMessageEventStream extends EventStream<AssistantMessageEvent, 
 	}
 }
 
+/** The message fields the client sets itself, never from a frame. */
+const CLIENT_OWNED_FIELDS = [
+	"role",
+	"api",
+	"provider",
+	"model",
+	"timestamp",
+	"content",
+	"usage",
+	"stopReason",
+] as const;
+
+/**
+ * The outcome fields a terminal `done` / `error` frame may carry: every
+ * `AssistantMessage` field except the ones the client owns (`role`, `api`,
+ * `provider`, `model`, `timestamp`), the ones the frame states on its own
+ * (`content`, `usage`, and `stopReason` as `reason`), and the in-memory
+ * `fallbackCreditHandle`. A proxy server should send every one the upstream
+ * message has: the client copies each one present, so recovery reads
+ * `errorStatus`, `errorId`, `providerReplays` and `errorRetryAfterMs` as the
+ * upstream set them, and a field added to `AssistantMessage` later crosses the
+ * proxy without a change here. A value of the wrong shape for a field recovery
+ * decides on is dropped ({@link TERMINAL_FIELD_CHECKS}).
+ */
+export type ProxyTerminalFields = Partial<
+	Omit<AssistantMessage, (typeof CLIENT_OWNED_FIELDS)[number] | "fallbackCreditHandle">
+>;
+
+/**
+ * Keys a terminal frame's own fields never copy: the client's own fields, the
+ * frame's protocol keys, the in-memory handle, and the keys that would reach an
+ * object's prototype (`JSON.parse` keeps `__proto__` as an own key).
+ */
+const UNCOPIED_FRAME_KEYS = new Set<string>([
+	...CLIENT_OWNED_FIELDS,
+	"type",
+	"reason",
+	"fallbackCreditHandle",
+	"__proto__",
+	"constructor",
+	"prototype",
+]);
+
+/** The shape each field recovery decides on must have; any other value is dropped. */
+const TERMINAL_FIELD_CHECKS: Record<string, (value: unknown) => boolean> = {
+	errorStatus: value => Number.isInteger(value) && (value as number) >= 100 && (value as number) <= 599,
+	errorId: value => Number.isSafeInteger(value),
+	providerReplays: value => Number.isSafeInteger(value) && (value as number) >= 0,
+	errorRetryAfterMs: isRetryWaitMs,
+	errorMessage: value => typeof value === "string",
+	errorRetryWaitRefusal: isRefusedRetryWait,
+};
+
 /**
  * Proxy event types - server sends these with partial field stripped to reduce bandwidth.
+ * The terminal frames carry the message's outcome fields ({@link ProxyTerminalFields}).
  */
 export type ProxyAssistantMessageEvent =
 	| { type: "start" }
@@ -52,19 +108,18 @@ export type ProxyAssistantMessageEvent =
 	| { type: "toolcall_start"; contentIndex: number; id: string; toolName: string }
 	| { type: "toolcall_delta"; contentIndex: number; delta: string }
 	| { type: "toolcall_end"; contentIndex: number }
-	| {
+	| (ProxyTerminalFields & {
 			type: "done";
 			reason: Extract<StopReason, "stop" | "length" | "toolUse">;
 			usage: AssistantMessage["usage"];
 			content?: AssistantMessage["content"];
-	  }
-	| {
+	  })
+	| (ProxyTerminalFields & {
 			type: "error";
 			reason: Extract<StopReason, "aborted" | "error">;
-			errorMessage?: string;
 			usage: AssistantMessage["usage"];
 			content?: AssistantMessage["content"];
-	  };
+	  });
 
 export interface ProxyStreamOptions extends SimpleStreamOptions {
 	/** Auth token for the proxy server */
@@ -79,6 +134,13 @@ export interface ProxyStreamOptions extends SimpleStreamOptions {
  * Stream function that proxies through a server instead of calling LLM providers directly.
  * The server strips the partial field from delta events to reduce bandwidth.
  * We reconstruct the partial message client-side.
+ *
+ * A failure's retry wait (`errorRetryAfterMs`) comes from the terminal `error`
+ * frame's `errorRetryAfterMs`; when the proxy answers non-2xx, from that
+ * response's own `retry-after-ms` / `Retry-After` / `x-ratelimit-reset*`
+ * headers; and when an accepted (2xx) stream is cut before a terminal frame,
+ * from that response's explicit wait only (`retry-after-ms` / `Retry-After`,
+ * never `x-ratelimit-reset*`), the rule every provider applies to its own cuts.
  *
  * Use this as the `streamFn` option when creating an Agent that needs to go through a proxy.
  *
@@ -151,6 +213,9 @@ export function streamProxy(model: Model, context: Context, options: ProxyStream
 						repetitionPenalty: options.repetitionPenalty,
 						maxTokens: options.maxTokens,
 						reasoning: options.reasoning,
+						// The server runs the provider and every retry sleep: these bound them.
+						maxRetryDelayMs: options.maxRetryDelayMs,
+						providerRetryWaitCeilingMs: options.providerRetryWaitCeilingMs,
 					},
 				}),
 				signal: options.signal,
@@ -166,6 +231,7 @@ export function streamProxy(model: Model, context: Context, options: ProxyStream
 				} catch {
 					// Couldn't parse error response
 				}
+				// The catch below reads this refusal's own headers.
 				throw new Error(errorMessage);
 			}
 
@@ -197,6 +263,17 @@ export function streamProxy(model: Model, context: Context, options: ProxyStream
 			const reason = options.signal?.aborted ? "aborted" : "error";
 			partial.stopReason = reason;
 			partial.errorMessage = errorMessage;
+			// A refusal's headers name its wait in full; an accepted stream's only
+			// the explicit instructions (see `getFailureRetryAfterMs`).
+			const retryAfterMs = getFailureRetryAfterMs(
+				error,
+				response === null
+					? {}
+					: response.ok
+						? { streamResponseHeaders: response.headers }
+						: { errorResponseHeaders: response.headers },
+			);
+			if (retryAfterMs !== undefined) partial.errorRetryAfterMs = retryAfterMs;
 			// Disconnect/abort path: no terminal event ran, so trailing
 			// throttled deltas never reached content.arguments. Finalize
 			// them here so the persisted/retried transcript is complete.
@@ -256,9 +333,12 @@ function processProxyEvent(
 				totalTokens: 0,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			};
-			partial.errorMessage = undefined;
-			partial.errorId = undefined;
-			partial.duration = undefined;
+			// A new turn starts with none of the last one's outcome fields.
+			for (const key of Object.keys(partial)) {
+				if (!(CLIENT_OWNED_FIELDS as readonly string[]).includes(key)) {
+					delete (partial as unknown as Record<string, unknown>)[key];
+				}
+			}
 			(partial as { stopReason?: string }).stopReason = undefined;
 			return { type: "start", partial };
 
@@ -394,6 +474,7 @@ function processProxyEvent(
 		}
 
 		case "done":
+			copyTerminalFields(proxyEvent, partial);
 			partial.stopReason = proxyEvent.reason;
 			partial.usage = proxyEvent.usage;
 			if (proxyEvent.content !== undefined) partial.content = proxyEvent.content;
@@ -404,8 +485,8 @@ function processProxyEvent(
 			return { type: "done", reason: proxyEvent.reason, message: partial };
 
 		case "error":
+			copyTerminalFields(proxyEvent, partial);
 			partial.stopReason = proxyEvent.reason;
-			partial.errorMessage = proxyEvent.errorMessage;
 			partial.usage = proxyEvent.usage;
 			if (proxyEvent.content !== undefined) partial.content = proxyEvent.content;
 			else finalizeBufferedArguments(partial, partialJsonByIndex);
@@ -413,6 +494,23 @@ function processProxyEvent(
 			partialJsonByIndex.clear();
 			parsedLenByIndex.clear();
 			return { type: "error", reason: proxyEvent.reason, error: partial };
+	}
+}
+
+/**
+ * Copy every outcome field a terminal frame carries onto the message
+ * ({@link ProxyTerminalFields}), without naming them: whatever the upstream
+ * message had crosses the proxy. The client's own fields and the frame's
+ * protocol keys are never copied, and a field recovery decides on is copied
+ * only in its own shape ({@link TERMINAL_FIELD_CHECKS}).
+ */
+function copyTerminalFields(frame: object, partial: AssistantMessage): void {
+	const target = partial as unknown as Record<string, unknown>;
+	for (const [key, value] of Object.entries(frame)) {
+		if (value === undefined || UNCOPIED_FRAME_KEYS.has(key)) continue;
+		const check = Object.hasOwn(TERMINAL_FIELD_CHECKS, key) ? TERMINAL_FIELD_CHECKS[key] : undefined;
+		if (check && !check(value)) continue;
+		target[key] = value;
 	}
 }
 

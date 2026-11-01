@@ -72,8 +72,11 @@ import { getHeaderCaseInsensitive, resolveCacheRetention } from "./utils";
 import { AssistantMessageEventStream } from "./utils/event-stream";
 import { applyGlyphCodec } from "./utils/glyph-codec";
 import { wrapLeakedThinkingStream } from "./utils/leaked-thinking-stream";
+import { retryWaitHeaders } from "./utils/retry-after";
+import { withProviderRetryPolicy } from "./utils/retry-wait";
 import { withThinkingLoopGuard } from "./utils/thinking-loop";
-import { withTransportFetch } from "./utils/transport-fetch";
+import { withRequestTransport } from "./utils/transport-fetch";
+import { inheritWireAttempts, uncountedFetchOf } from "./utils/wire-attempts";
 
 function isGoogleVertexAuthenticatedModel(model: Model<Api>): boolean {
 	return (
@@ -719,8 +722,12 @@ function withProviderInFlightLimit<TOptions extends Pick<StreamOptions, "signal"
 
 function createVertexAuthenticatedFetch(options: StreamOptions | undefined): FetchImpl {
 	const baseFetch = options?.fetch ?? fetch;
+	// The OAuth token is the route's own request, not an attempt at the model
+	// request: it takes the uncounted sibling of the counted transport, so a
+	// call that mints a token still reports the one model request it made.
+	const tokenFetch = uncountedFetchOf(baseFetch);
 	const vertexFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-		const token = await getVertexAccessToken({ signal: options?.signal, fetch: baseFetch });
+		const token = await getVertexAccessToken({ signal: options?.signal, fetch: tokenFetch });
 		const headers = new Headers(init?.headers);
 		headers.set("Authorization", `Bearer ${token}`);
 		const rewritten = resolveVertexRequest(input);
@@ -737,7 +744,12 @@ function createVertexAuthenticatedFetch(options: StreamOptions | undefined): Fet
 		}
 		return baseFetch(rewritten, { ...init, headers });
 	};
-	return Object.assign(vertexFetch, baseFetch.preconnect ? { preconnect: baseFetch.preconnect } : {});
+	// Model requests go through `baseFetch`, which counts them; expose that
+	// counter so the provider reads the request's attempts.
+	return inheritWireAttempts(
+		Object.assign(vertexFetch, baseFetch.preconnect ? { preconnect: baseFetch.preconnect } : {}),
+		baseFetch,
+	);
 }
 
 async function readVertexRequestBody(input: string | URL | Request, init: RequestInit | undefined): Promise<string> {
@@ -825,7 +837,21 @@ function withResolvedModelHeaders<TApi extends Api>(
 	return outer;
 }
 
+/**
+ * A provider's retry sleep after a server-stated wait under the request keeps
+ * to its retry policy (`maxRetryDelayMs`, `providerRetryWaitCeilingMs`,
+ * `providerRetryWait`), including inside a provider a wrapper calls with
+ * options it rebuilt.
+ */
 export function stream<TApi extends Api>(
+	model: Model<TApi>,
+	context: Context,
+	options?: OptionsForApi<TApi>,
+): AssistantMessageEventStream {
+	return withProviderRetryPolicy(options, () => streamUnderRetryPolicy(model, context, options));
+}
+
+function streamUnderRetryPolicy<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
 	options?: OptionsForApi<TApi>,
@@ -857,7 +883,7 @@ function streamDispatch<TApi extends Api>(
 ): AssistantMessageEventStream {
 	const requestOptions = withSupportedSamplingParams(
 		model,
-		withTransportFetch(model, (options || {}) as StreamOptions),
+		withRequestTransport(model, (options || {}) as StreamOptions),
 	) as OptionsForApi<TApi>;
 	assertExplicitOpenAIResponsesPromptCacheSupport(model, requestOptions);
 
@@ -1098,13 +1124,21 @@ function isRetryableUpstreamError(
 	return isUsageLimitOutcome(status, message);
 }
 
+/**
+ * The Error the `ApiKeyResolver` receives for a rotatable failed message. The
+ * credential layers behind the resolver (`limits.rotate`, the auth gateway's
+ * usage mark) read the failure's header retry wait from the Error's headers,
+ * so the message's structured `errorRetryAfterMs` travels on as a
+ * `retry-after-ms` header; the text never stands in for it.
+ */
 function createAssistantAuthError(message: AssistantMessage): Error {
 	const text = message.errorMessage ?? "Provider authentication failed";
 	const status = extractStatusFromAssistantError(message);
+	const headers = retryWaitHeaders(message.errorRetryAfterMs);
 	const error =
 		status === undefined
-			? new AIError.ProviderResponseError(text, { kind: "runtime" })
-			: new ProviderHttpError(text, status);
+			? Object.assign(new AIError.ProviderResponseError(text, { kind: "runtime" }), { headers })
+			: new ProviderHttpError(text, status, { headers });
 	return typeof message.errorId === "number" ? AIError.attach(error, message.errorId) : error;
 }
 
@@ -1166,7 +1200,16 @@ function withSupportedSamplingParams<T extends SamplingOptions>(model: Model<Api
 	return supported;
 }
 
+/** As {@link stream}: a provider's retry sleep after a server-stated wait keeps to the request's retry policy. */
 export function streamSimple<TApi extends Api>(
+	model: Model<TApi>,
+	context: Context,
+	options?: SimpleStreamOptions,
+): AssistantMessageEventStream {
+	return withProviderRetryPolicy(options, () => streamSimpleUnderRetryPolicy(model, context, options));
+}
+
+function streamSimpleUnderRetryPolicy<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
 	options?: SimpleStreamOptions,
@@ -1221,7 +1264,7 @@ function streamSimpleRequest<TApi extends Api>(
 ): AssistantMessageEventStream {
 	const requestOptions = withSupportedSamplingParams(
 		model,
-		withTransportFetch(model, (options || {}) as SimpleStreamOptions),
+		withRequestTransport(model, (options || {}) as SimpleStreamOptions),
 	);
 
 	const apiKeyResolver = isApiKeyResolver(requestOptions?.apiKey) ? requestOptions.apiKey : undefined;
@@ -1803,6 +1846,8 @@ function mapOptionsForApi<TApi extends Api>(
 		headers: options?.headers,
 		initiatorOverride: options?.initiatorOverride,
 		maxRetryDelayMs: options?.maxRetryDelayMs,
+		providerRetryWaitCeilingMs: options?.providerRetryWaitCeilingMs,
+		providerRetryWait: options?.providerRetryWait,
 		metadata: options?.metadata,
 		loopGuard: options?.loopGuard,
 		taskBudget: options?.taskBudget,

@@ -26,7 +26,13 @@ import {
 	recordGatewayUsage,
 	resolveGatewayApiKey,
 } from "../dispatch";
-import { gatewayResponseHeaders, json, resolveClientIdentity } from "../http";
+import {
+	gatewayResponseHeaders,
+	json,
+	resolveClientIdentity,
+	thrownRetryAfterMs,
+	withRetryAfterHeaders,
+} from "../http";
 
 export async function handleSystemOne(
 	bootOpts: AuthGatewayRouteOptions,
@@ -129,6 +135,9 @@ export async function handleSystemOne(
 				? { status: 422, type: "invalid_request_error", message }
 				: classifyGatewayError(error);
 		logger.warn("auth-gateway judgment failed", { format: "systemone", error: classified.message, peer });
-		return systemOne.formatError(classified.status, classified.type, classified.message);
+		return withRetryAfterHeaders(
+			systemOne.formatError(classified.status, classified.type, classified.message),
+			thrownRetryAfterMs(error),
+		);
 	}
 }

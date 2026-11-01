@@ -38,6 +38,26 @@ import {
 	validateProviderMaxInFlightRequests,
 } from "./settings";
 
+/**
+ * The longest server-stated wait omp lets a provider's own retry sleep
+ * (`StreamOptions.providerRetryWaitCeilingMs`). A longer stated wait surfaces
+ * as the failure, and the session's retry (`TurnRecovery`, bounded by
+ * `retry.maxDelayMs`) waits it instead.
+ *
+ * Why 10 seconds: about 10 s is the limit for keeping a person's attention on
+ * a wait; past it they need to see how long it will take and how to interrupt
+ * it (J. Nielsen, "Response Times: The 3 Important Limits", 1993, after
+ * R. B. Miller, 1968). A provider sleeping inside a request shows neither: the
+ * session sees only a request in flight. The session's retry shows a countdown
+ * and the interrupt key, and can rotate credentials or fall back. A shorter
+ * wait stays inside the provider, because surfacing it would spend one of
+ * `retry.maxRetries` and show a retry notice for a pause too short to act on.
+ *
+ * Without this ceiling the bound inside a provider is `retry.maxDelayMs`
+ * (`maxRetryDelayMs`), 5 minutes by default.
+ */
+export const PROVIDER_RETRY_WAIT_CEILING_MS = 10_000;
+
 /** Map `providers.openaiWebsockets` to the provider `preferWebsockets` hint (`auto` → model default). */
 export function resolveOpenAIWebsocketPreference(settings: Settings): boolean | undefined {
 	const setting = cfgProvidersOpenaiWebsockets.get(settings);
@@ -168,6 +188,7 @@ export function createSettingsAwareStreamFn(
 			streamFirstEventTimeoutMs: streamOptions?.streamFirstEventTimeoutMs ?? streamFirstEventTimeoutMs,
 			streamIdleTimeoutMs: streamOptions?.streamIdleTimeoutMs ?? streamIdleTimeoutMs,
 			maxRetryDelayMs: streamOptions?.maxRetryDelayMs ?? cfgRetryMaxDelayMs.get(settings),
+			providerRetryWaitCeilingMs: streamOptions?.providerRetryWaitCeilingMs ?? PROVIDER_RETRY_WAIT_CEILING_MS,
 			maxInFlightRequests,
 			loopGuard: {
 				enabled: cfgModelLoopGuardEnabled.get(settings),

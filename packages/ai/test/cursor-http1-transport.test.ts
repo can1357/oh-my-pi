@@ -245,3 +245,169 @@ it(
 	},
 	SETTLE_TIMEOUT_MS,
 );
+
+interface Refusal {
+	/** Which RPC of the first run refuses it. */
+	rpc: "RunSSE" | "BidiAppend";
+	status: number;
+	body: Record<string, unknown>;
+}
+
+/**
+ * Serves Cursor's HTTP/1 transport where the first run is refused, with a
+ * 750 ms `retry-after-ms`, by its RunSSE or by its run request's BidiAppend;
+ * every later run streams "after wait" and ends the turn. Runs are matched to
+ * their appends by request id, whichever arrives first; a run RunSSE refused
+ * has no stream.
+ */
+function startRefusingServer(refusal: Refusal) {
+	const counts = { runs: 0, appends: 0 };
+	const runs = new Map<string, PromiseWithResolvers<ReadableStreamDefaultController<Uint8Array> | undefined>>();
+	const runFor = (requestId: string) => {
+		let run = runs.get(requestId);
+		if (!run) {
+			run = Promise.withResolvers();
+			runs.set(requestId, run);
+		}
+		return run;
+	};
+	const refuse = () =>
+		new Response(JSON.stringify(refusal.body), {
+			status: refusal.status,
+			headers: { "content-type": "application/json", "retry-after-ms": "750" },
+		});
+	const server = Bun.serve({
+		port: 0,
+		async fetch(request) {
+			const url = new URL(request.url);
+			const body = new Uint8Array(await request.arrayBuffer());
+			if (url.pathname === "/agent.v1.AgentService/RunSSE") {
+				counts.runs++;
+				const run = runFor(fromBinary(BidiRequestIdSchema, readConnectMessage(body)).requestId);
+				if (refusal.rpc === "RunSSE" && counts.runs === 1) {
+					run.resolve(undefined);
+					return refuse();
+				}
+				return new Response(new ReadableStream<Uint8Array>({ start: controller => run.resolve(controller) }), {
+					headers: { "content-type": "application/connect+proto" },
+				});
+			}
+			if (url.pathname === "/aiserver.v1.BidiService/BidiAppend") {
+				counts.appends++;
+				if (refusal.rpc === "BidiAppend" && counts.appends === 1) return refuse();
+				const append = fromBinary(BidiAppendRequestSchema, body);
+				if (fromBinary(AgentClientMessageSchema, append.dataBinary).message.case === "runRequest") {
+					const controller = await runFor(append.requestId?.requestId ?? "").promise;
+					controller?.enqueue(Buffer.concat([textDeltaFrame("after wait"), turnEndedFrame()]));
+					controller?.close();
+				}
+				return new Response(null, { headers: { "content-type": "application/proto" } });
+			}
+			return new Response(null, { status: 404 });
+		},
+	});
+	return { server, counts };
+}
+
+async function runRefused(refusal: Refusal, maxRetryDelayMs: number) {
+	const { server, counts } = startRefusingServer(refusal);
+	const delays: number[] = [];
+	try {
+		const response = streamCursor(makeModel(server.url.toString()), context, {
+			apiKey: "test-token",
+			transport: "http1",
+			maxRetryDelayMs,
+			providerRetryWait: async delayMs => {
+				delays.push(delayMs);
+			},
+		});
+		const { result, terminalEvents } = await drain(response);
+		return { result, terminalEvents, delays, runs: counts.runs };
+	} finally {
+		server.stop(true);
+	}
+}
+
+it(
+	"surfaces a RunSSE 429 whose header wait exceeds the cap after one run, with its status and wait",
+	async () => {
+		const { result, terminalEvents, delays, runs } = await runRefused(
+			{ rpc: "RunSSE", status: 429, body: { message: "Too many requests" } },
+			10,
+		);
+
+		expect(runs).toBe(1);
+		expect(delays).toEqual([]);
+		expect(terminalEvents).toEqual(["error"]);
+		expect(result.errorStatus).toBe(429);
+		expect(result.errorRetryAfterMs).toBe(750);
+	},
+	SETTLE_TIMEOUT_MS,
+);
+
+it(
+	"retries a RunSSE 429 after its header wait when it fits the cap",
+	async () => {
+		const { result, delays, runs } = await runRefused(
+			{ rpc: "RunSSE", status: 429, body: { message: "Too many requests" } },
+			1_000,
+		);
+
+		expect(runs).toBe(2);
+		expect(delays).toEqual([750]);
+		expect(result.stopReason).toBe("stop");
+		expect(result.content).toEqual([expect.objectContaining({ type: "text", text: "after wait" })]);
+	},
+	SETTLE_TIMEOUT_MS,
+);
+
+it(
+	"keeps a BidiAppend 429's status and wait when its Connect error has no details",
+	async () => {
+		const { result, terminalEvents, delays, runs } = await runRefused(
+			{ rpc: "BidiAppend", status: 429, body: { code: "resource_exhausted", message: "busy" } },
+			10,
+		);
+
+		expect(runs).toBe(1);
+		expect(delays).toEqual([]);
+		expect(terminalEvents).toEqual(["error"]);
+		expect(result.errorStatus).toBe(429);
+		expect(result.errorRetryAfterMs).toBe(750);
+		expect(result.errorMessage).toContain("resource_exhausted");
+	},
+	SETTLE_TIMEOUT_MS,
+);
+
+it(
+	"surfaces a BidiAppend 503 whose wait exceeds the cap after one run, with its status",
+	async () => {
+		const { result, delays, runs } = await runRefused(
+			{ rpc: "BidiAppend", status: 503, body: { code: "unavailable", message: "busy" } },
+			10,
+		);
+
+		expect(runs).toBe(1);
+		expect(delays).toEqual([]);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(503);
+		expect(result.errorRetryAfterMs).toBe(750);
+	},
+	SETTLE_TIMEOUT_MS,
+);
+
+it(
+	"retries a BidiAppend 503 whose Connect error has no details after its wait",
+	async () => {
+		const { result, delays, runs } = await runRefused(
+			{ rpc: "BidiAppend", status: 503, body: { code: "unavailable", message: "busy" } },
+			1_000,
+		);
+
+		expect(runs).toBe(2);
+		expect(delays).toEqual([750]);
+		expect(result.stopReason).toBe("stop");
+		expect(result.content).toEqual([expect.objectContaining({ type: "text", text: "after wait" })]);
+	},
+	SETTLE_TIMEOUT_MS,
+);

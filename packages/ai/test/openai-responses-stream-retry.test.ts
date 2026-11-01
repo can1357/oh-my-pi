@@ -252,6 +252,36 @@ function parseBody(init: RequestInit | undefined): Record<string, unknown> {
 	return JSON.parse(String(init?.body)) as Record<string, unknown>;
 }
 
+/** An HTTP-200 stream that fails in-band with a rate limit whose message states the wait. */
+function createInBandRateLimitResponse(wait: string): Response {
+	return createSseResponse([
+		{ type: "response.created", response: { id: "resp_rate_limited", status: "in_progress" } },
+		{
+			type: "error",
+			error: { code: "rate_limit_exceeded", message: `Rate limit exceeded. Please try again in ${wait}.` },
+		},
+	]);
+}
+
+/** An HTTP-200 stream that fails in-band before output; only its response headers state the wait. */
+function createHeaderWaitFailureResponse(retryAfterMs: string): Response {
+	const events = [
+		{ type: "response.created", response: { id: "resp_header_wait", status: "in_progress" } },
+		{
+			type: "response.failed",
+			response: {
+				id: "resp_header_wait",
+				status: "failed",
+				error: { code: "server_error", message: "Service temporarily unavailable" },
+			},
+		},
+	];
+	return new Response(`${events.map(event => `data: ${JSON.stringify(event)}`).join("\n\n")}\n\n`, {
+		status: 200,
+		headers: { "content-type": "text/event-stream", "retry-after-ms": retryAfterMs },
+	});
+}
+
 async function collectEvents(stream: AssistantMessageEventStream): Promise<AssistantMessageEvent[]> {
 	const events: AssistantMessageEvent[] = [];
 	for await (const event of stream) events.push(event);
@@ -536,6 +566,153 @@ describe("OpenAI Responses transient stream retry", () => {
 
 		expect(fetchMock).toHaveBeenCalledTimes(2);
 		expect(result.stopReason).toBe("error");
+	});
+
+	it("surfaces a stream failure whose stated wait exceeds maxRetryDelayMs after one request", async () => {
+		let attempts = 0;
+		const fetchMock = vi.fn(async () => {
+			attempts++;
+			return attempts === 1
+				? createInBandRateLimitResponse("9s")
+				: createCompletedTextResponse("must not be requested", "resp_unreached");
+		}) as FetchImpl;
+		const providerRetryWait = vi.fn(async (_delayMs: number, _signal?: AbortSignal) => {});
+
+		const result = await streamOpenAIResponses(model, context, {
+			apiKey: "test-key",
+			fetch: fetchMock,
+			maxRetryDelayMs: 1,
+			providerRetryWait,
+		}).result();
+
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(providerRetryWait).not.toHaveBeenCalled();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("Please try again in 9s");
+	});
+
+	it("waits a stream failure's stated wait when it outlasts the backoff within maxRetryDelayMs", async () => {
+		let attempts = 0;
+		const fetchMock = vi.fn(async () => {
+			attempts++;
+			return attempts === 1
+				? createInBandRateLimitResponse("0.8s")
+				: createCompletedTextResponse("Recovered", "resp_recovered");
+		}) as FetchImpl;
+		const providerRetryWait = vi.fn(async (_delayMs: number, _signal?: AbortSignal) => {});
+
+		const result = await streamOpenAIResponses(model, context, {
+			apiKey: "test-key",
+			fetch: fetchMock,
+			maxRetryDelayMs: 1_000,
+			providerRetryWait,
+		}).result();
+
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		expect(providerRetryWait).toHaveBeenCalledTimes(1);
+		expect(providerRetryWait.mock.calls[0]?.[0]).toBe(800);
+		expect(result.stopReason).toBe("stop");
+		expect(result.content).toMatchObject([{ type: "text", text: "Recovered" }]);
+	});
+
+	it("surfaces an in-band failure whose wait only the HTTP 200's headers state when it exceeds maxRetryDelayMs", async () => {
+		let attempts = 0;
+		const fetchMock = vi.fn(async () => {
+			attempts++;
+			return attempts === 1
+				? createHeaderWaitFailureResponse("750")
+				: createCompletedTextResponse("must not be requested", "resp_unreached");
+		}) as FetchImpl;
+		const providerRetryWait = vi.fn(async (_delayMs: number, _signal?: AbortSignal) => {});
+
+		const result = await streamOpenAIResponses(model, context, {
+			apiKey: "test-key",
+			fetch: fetchMock,
+			maxRetryDelayMs: 10,
+			providerRetryWait,
+		}).result();
+
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(providerRetryWait).not.toHaveBeenCalled();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorRetryAfterMs).toBe(750);
+	});
+
+	it("waits the HTTP 200's header wait for an in-band failure when it fits maxRetryDelayMs", async () => {
+		let attempts = 0;
+		const fetchMock = vi.fn(async () => {
+			attempts++;
+			return attempts === 1
+				? createHeaderWaitFailureResponse("750")
+				: createCompletedTextResponse("Recovered", "resp_recovered");
+		}) as FetchImpl;
+		const providerRetryWait = vi.fn(async (_delayMs: number, _signal?: AbortSignal) => {});
+
+		const result = await streamOpenAIResponses(model, context, {
+			apiKey: "test-key",
+			fetch: fetchMock,
+			maxRetryDelayMs: 1_000,
+			providerRetryWait,
+		}).result();
+
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		expect(providerRetryWait).toHaveBeenCalledTimes(1);
+		expect(providerRetryWait.mock.calls[0]?.[0]).toBe(750);
+		expect(result.stopReason).toBe("stop");
+		expect(result.content).toMatchObject([{ type: "text", text: "Recovered" }]);
+	});
+
+	describe("the providerRetryWaitCeilingMs opt-in on the transient stream retry", () => {
+		const FIVE_MINUTES_MS = 5 * 60 * 1_000;
+		const REFUSAL_NOTE =
+			"(server asked to wait 15 s before retrying; the caller's 10 s providerRetryWaitCeilingMs refused it, so the provider did not retry)";
+
+		/** One in-band failure whose HTTP 200 states 15 s under a 5-minute cap, then a completion. */
+		async function run(ceilingMs: number | undefined) {
+			let attempts = 0;
+			const fetchMock = vi.fn(async () => {
+				attempts++;
+				return attempts === 1
+					? createHeaderWaitFailureResponse("15000")
+					: createCompletedTextResponse("Recovered", "resp_recovered");
+			}) as FetchImpl;
+			const providerRetryWait = vi.fn(async (_delayMs: number, _signal?: AbortSignal) => {});
+			const result = await streamOpenAIResponses(model, context, {
+				apiKey: "test-key",
+				fetch: fetchMock,
+				maxRetryDelayMs: FIVE_MINUTES_MS,
+				providerRetryWaitCeilingMs: ceilingMs,
+				providerRetryWait,
+			}).result();
+			return { requests: attempts, providerRetryWait, result };
+		}
+
+		it("unset: sleeps a stated 15 s, as before", async () => {
+			const { requests, providerRetryWait, result } = await run(undefined);
+
+			expect(requests).toBe(2);
+			expect(providerRetryWait.mock.calls.map(call => call[0])).toEqual([15_000]);
+			expect(result.stopReason).toBe("stop");
+		});
+
+		it("set to 20 s and not exceeded: sleeps a stated 15 s", async () => {
+			const { requests, providerRetryWait } = await run(20_000);
+
+			expect(requests).toBe(2);
+			expect(providerRetryWait.mock.calls.map(call => call[0])).toEqual([15_000]);
+		});
+
+		it("set to 10 s and exceeded: surfaces a stated 15 s after one request, saying so, with its wait and classification kept", async () => {
+			const { requests, providerRetryWait, result } = await run(10_000);
+
+			expect(requests).toBe(1);
+			expect(providerRetryWait).not.toHaveBeenCalled();
+			expect(result.stopReason).toBe("error");
+			expect(result.errorClassificationMessage).toBeDefined();
+			expect(result.errorClassificationMessage).not.toContain("server asked");
+			expect(result.errorMessage).toBe(`${result.errorClassificationMessage} ${REFUSAL_NOTE}`);
+			expect(result.errorRetryAfterMs).toBe(15_000);
+		});
 	});
 
 	it("honors caller abort during the retry wait", async () => {

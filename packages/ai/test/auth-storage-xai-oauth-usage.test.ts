@@ -1,4 +1,5 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
+import { MAX_HINTED_BLOCK_MS } from "@oh-my-pi/pi-ai/auth/blocks";
 import { type AuthCredentialStore, AuthStorage, type StoredAuthCredential } from "@oh-my-pi/pi-ai/auth-storage";
 import type { UsageFetchParams, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import { defaultRankingStrategy } from "../src/usage/registry";
@@ -284,8 +285,9 @@ describe("xAI OAuth environment usage", () => {
 		expect(windows.secondary?.id).toBe("xai-oauth:included:1mo");
 	});
 
-	it("extends a 429 block to the billing-period end only once on-demand headroom is gone", async () => {
+	it("extends a 429 block toward the billing-period end, capped at seven days, only once on-demand headroom is gone", async () => {
 		const now = Date.now();
+		const dateNow = vi.spyOn(Date, "now").mockReturnValue(now);
 		const periodEnd = now + 20 * 24 * 60 * 60 * 1000;
 		const reportWithOnDemand = (onDemandUsed: number): UsageReport => ({
 			provider: "xai-oauth",
@@ -327,12 +329,18 @@ describe("xAI OAuth environment usage", () => {
 			return storage.limits.markReached("xai-oauth", "session", { retryAfterMs: 60_000 });
 		};
 
-		const servingOnDemand = await markReachedFor(reportWithOnDemand(10));
-		expect(servingOnDemand.reportResetAtMs).toBeUndefined();
-		expect(servingOnDemand.blockedUntilMs).toBeLessThan(now + 2 * 60_000);
+		try {
+			const servingOnDemand = await markReachedFor(reportWithOnDemand(10));
+			expect(servingOnDemand.reportResetAtMs).toBeUndefined();
+			expect(servingOnDemand.blockedUntilMs).toBeLessThan(now + 2 * 60_000);
 
-		const onDemandSpent = await markReachedFor(reportWithOnDemand(50));
-		expect(onDemandSpent.reportResetAtMs).toBe(periodEnd);
-		expect(onDemandSpent.blockedUntilMs).toBe(periodEnd);
+			// The report states a reset 20 days out; a report is a parsed body, so it
+			// gets the ceiling a header or message gets (`MAX_HINTED_BLOCK_MS`).
+			const onDemandSpent = await markReachedFor(reportWithOnDemand(50));
+			expect(onDemandSpent.reportResetAtMs).toBe(now + MAX_HINTED_BLOCK_MS);
+			expect(onDemandSpent.blockedUntilMs).toBe(now + MAX_HINTED_BLOCK_MS);
+		} finally {
+			dateNow.mockRestore();
+		}
 	});
 });
