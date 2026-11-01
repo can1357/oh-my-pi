@@ -117,6 +117,8 @@ interface ManagedDaemon {
 	persistedSpec?: string;
 	/** Serialized metadata last written (or recovered); a write is skipped while unchanged. */
 	persistedMeta?: string;
+	/** Completes after a terminal generation's log, metadata, and completion notification are published. */
+	terminalSettled?: Promise<void>;
 }
 
 interface BrokerLease {
@@ -787,6 +789,7 @@ class DaemonBroker {
 		record.generation++;
 		const generation = record.generation;
 		record.stopRequested = false;
+		record.terminalSettled = undefined;
 		record.snapshot.state = record.spec.ready ? "starting" : "running";
 		record.snapshot.persist = record.spec.persist;
 		record.snapshot.detached = record.spec.detached;
@@ -1104,6 +1107,11 @@ class DaemonBroker {
 			return;
 		}
 		record.snapshot.state = failed && !record.stopRequested ? "failed" : "exited";
+		record.terminalSettled = this.#publishTerminal(record);
+		await record.terminalSettled;
+	}
+
+	async #publishTerminal(record: ManagedDaemon): Promise<void> {
 		const completion =
 			record.snapshot.owner !== undefined &&
 			!record.stopRequested &&
@@ -1236,6 +1244,8 @@ class DaemonBroker {
 		// readiness is still "not ready" — surface it as timed out so callers and the
 		// renderer don't chain work against a dead process.
 		const timedOut = operation.for === "ready" && !pattern ? !readyObserved() : !woke;
+		// The terminal state is visible before its log, metadata, and owner completion are published.
+		if (terminalState(record.snapshot.state)) await record.terminalSettled;
 		return { op: "wait", daemon: record.snapshot, matched, timedOut };
 	}
 

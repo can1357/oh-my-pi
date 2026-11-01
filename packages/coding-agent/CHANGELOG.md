@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Waiting for a supervised service to exit now returns after its log, metadata, and session-owner completion are published ([#17687](https://github.com/can1357/oh-my-pi/issues/17687)).
+
 ## [18.14.2] - 2026-10-31
 
 ### Added
