@@ -194,7 +194,7 @@ export class LocalBlobBackend implements BlobBackend {
 	async ensureBlob(key: string, mimeType: string, getBytes: () => Uint8Array): Promise<BlobPublication | null> {
 		if (this.#dead) return null;
 		if (this.#upload) {
-			const existing = this.#store.lookup(key);
+			const existing = await this.#store.lookup(key);
 			if (
 				existing?.publication &&
 				(existing.publication.expiresAt === undefined || existing.publication.expiresAt > Date.now())
@@ -208,31 +208,35 @@ export class LocalBlobBackend implements BlobBackend {
 				mimeType,
 				extension: EXT_BY_MIME[mimeType] ?? "bin",
 			});
-			if (publication) this.#store.recordPublication(key, mimeType, publication);
+			if (publication) await this.#store.recordPublication(key, mimeType, publication);
 			return publication;
 		}
 		const baseUrl = await this.ensureStarted();
 		if (!baseUrl || this.#dead) return null;
-		const existing = this.#store.lookup(key);
-		if (existing) return this.#publish(key, baseUrl, existing);
+		const existing = await this.#store.lookup(key);
+		// The lookup awaits the (asynchronous) index load, so the backend can be
+		// stopped while it is pending: re-check liveness before publishing a URL
+		// whose server is already gone.
+		if (this.#dead) return null;
+		if (existing) return await this.#publish(key, baseUrl, existing);
 		const bytes = getBytes();
 		if (bytes.byteLength === 0) return null;
-		return this.#publish(key, baseUrl, await this.#store.registerBytes(key, mimeType, bytes));
+		return await this.#publish(key, baseUrl, await this.#store.registerBytes(key, mimeType, bytes));
 	}
 
 	/** Probe for an existing (persisted or live) registration without bytes. */
 	async lookupBlob(key: string): Promise<BlobPublication | null> {
 		if (this.#dead) return null;
 		if (this.#upload) {
-			const publication = this.#store.lookup(key)?.publication;
+			const publication = (await this.#store.lookup(key))?.publication;
 			return publication && (publication.expiresAt === undefined || publication.expiresAt > Date.now())
 				? publication
 				: null;
 		}
 		const baseUrl = await this.ensureStarted();
 		if (!baseUrl || this.#dead) return null;
-		const existing = this.#store.lookup(key);
-		return existing ? this.#publish(key, baseUrl, existing) : null;
+		const existing = await this.#store.lookup(key);
+		return existing ? await this.#publish(key, baseUrl, existing) : null;
 	}
 
 	/** Ensure a lazy producer has a stable publication. */
@@ -240,10 +244,10 @@ export class LocalBlobBackend implements BlobBackend {
 		if (this.#dead || this.#upload) return null;
 		const baseUrl = await this.ensureStarted();
 		if (!baseUrl || this.#dead) return null;
-		return this.#publish(key, baseUrl, this.#store.registerLazy(key, mimeType, fetcher));
+		return this.#publish(key, baseUrl, await this.#store.registerLazy(key, mimeType, fetcher));
 	}
 
-	#publish(key: string, baseUrl: string, entry: BlobRegistryEntry): BlobPublication {
+	async #publish(key: string, baseUrl: string, entry: BlobRegistryEntry): Promise<BlobPublication> {
 		const ttlMs = this.#config.persist?.ttlMs ?? 0;
 		const url = `${baseUrl}/${entry.path}`;
 		const now = Date.now();
@@ -268,12 +272,12 @@ export class LocalBlobBackend implements BlobBackend {
 			bytes: entry.bytes,
 			...(ttlMs > 0 ? { expiresAt: now + ttlMs } : {}),
 		};
-		this.#store.setPublication(key, publication);
+		await this.#store.setPublication(key, publication);
 		return publication;
 	}
 
 	/** Return current serving-store counters and fetch attribution. */
-	storeStatus(): BlobStoreStatus {
+	async storeStatus(): Promise<BlobStoreStatus> {
 		return this.#store.status();
 	}
 
@@ -375,7 +379,7 @@ export class LocalBlobBackend implements BlobBackend {
 	 * delete request, then removes local-only and successfully deleted entries.
 	 */
 	async purge(request: BlobBrokerPurgeRequest): Promise<BlobBrokerPurgeResponse> {
-		const plan = this.#store.purge({ ...request, apply: false });
+		const plan = await this.#store.purge({ ...request, apply: false });
 		if (request.apply !== true) return plan;
 		const succeeded = new Set<RemoteDeleteAction>();
 		const errors: string[] = [];
@@ -404,7 +408,7 @@ export class LocalBlobBackend implements BlobBackend {
 				errors.push(`remote delete ${attempted} request failed`);
 			}
 		}
-		const applied = this.#store.purge(
+		const applied = await this.#store.purge(
 			{ ...request, apply: true },
 			publication => publication?.delete === undefined || succeeded.has(publication.delete),
 		);
@@ -426,7 +430,7 @@ export class LocalBlobBackend implements BlobBackend {
 	/** Stop serving and flush persistent registry state. */
 	stop(): void {
 		this.#dead = true;
-		this.#store.flush();
+		this.#store.stop();
 		this.#exposure?.stop();
 		this.#server?.stop(true);
 	}
