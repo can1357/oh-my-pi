@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed changes to the Go, Rust and Python RPC client SDKs (`sdk/`) merging without any CI build or test: pull requests that touch them now compile, lint and test all three and run the Go and Rust real-server smokes, which no longer need provider credentials
+- Fixed changes to the Go, Rust and Python RPC client SDKs (`sdk/`) merging without any CI build or test: pull requests that touch them now compile, lint and test all three and run the Go and Rust real-server smokes, which no longer need provider credentials ([#17626](https://github.com/can1357/oh-my-pi/pull/17626) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.2] - 2026-10-31
 
