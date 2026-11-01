@@ -104,10 +104,10 @@ interface Run {
 	stderr: string;
 }
 
-/** Run `script` as a module in the project directory; "hung" if it does not finish in time. */
-async function runChild(script: string, env: Record<string, string>): Promise<Run> {
+/** Run `script` as a module in `cwd` (the project directory by default); "hung" if it does not finish in time. */
+async function runChild(script: string, env: Record<string, string>, cwd: string = projectDir): Promise<Run> {
 	const child = Bun.spawn([process.execPath, "--no-env-file", "-e", `${script}\nprocess.exit(0);`], {
-		cwd: projectDir,
+		cwd,
 		stdout: "pipe",
 		stderr: "pipe",
 		env: childEnv(env),
@@ -844,6 +844,83 @@ describe.skipIf(process.platform === "win32")("a .env re-read while omp runs nev
 				expect(run.exit).toBe(0);
 				expect(run.stdout).toContain("redactor=true");
 				expect(run.stdout).toContain("child=absent");
+				expect(saysNothingAboutFiles(run.stderr)).toBe(true);
+			} finally {
+				writer.kill();
+			}
+		},
+		TEST_TIMEOUT_MS,
+	);
+});
+
+// A worker thread re-enters the CLI entry and loads omp's environment again, in
+// an isolate of its own. The `.env` reads at startup happen once per process: a
+// worker takes what the thread that started it read.
+describe.skipIf(process.platform === "win32")("a .env read at startup is read once per process", () => {
+	it(
+		"a worker thread that re-enters the CLI entry neither opens nor waits on a .env pipe startup read",
+		async () => {
+			const at = path.join(home, ".env");
+			mkfifo(at);
+			const loaded = path.join(tempDir.path(), "startup-loaded");
+			const reopened = path.join(tempDir.path(), "pipe-reopened");
+			// Answers the first reader, as a 1Password mount does. Once startup has loaded,
+			// it waits for any second reader, marks that one came, and holds the pipe open
+			// without writing, so a second reader would wait out the bound.
+			const writer = Bun.spawn(
+				[
+					"sh",
+					"-c",
+					'printf %s "$1" > "$0"; while [ ! -e "$2" ]; do sleep 0.05; done; exec 3>"$0"; : > "$3"; exec sleep 60',
+					at,
+					`${VARIABLE}=loaded\n`,
+					loaded,
+					reopened,
+				],
+				{ stdout: "ignore", stderr: "ignore" },
+			);
+			try {
+				const run = await runChild(
+					`import * as fs from "node:fs";
+				import ${mod("utils", "index.ts")};
+				console.log("${VARIABLE}=" + (process.env.${VARIABLE} ?? "unset"));
+				fs.writeFileSync(${JSON.stringify(loaded)}, "");
+				// As production starts a worker: the CLI entry, with a worker selector.
+				const worker = new Worker(${mod("coding-agent", "cli.ts")}, {
+					type: "module",
+					argv: ["__omp_worker_terminal_output"],
+				});
+				const reply = Promise.withResolvers();
+				worker.addEventListener("message", event => reply.resolve(event.data));
+				worker.addEventListener("error", event => reply.reject(event.error ?? new Error(event.message)));
+				worker.postMessage({ output: "ready", options: { head: false, maxRows: 10 } });
+				console.log("reply=" + (await reply.promise).ok);
+				worker.terminate();`,
+					{},
+				);
+
+				expect(run.exit).toBe(0);
+				expect(run.stdout).toContain(`${VARIABLE}=loaded`);
+				expect(run.stdout).toContain("reply=true");
+				expect(fs.existsSync(reopened)).toBe(false);
+				expect(saysNothingAboutFiles(run.stderr)).toBe(true);
+			} finally {
+				writer.kill();
+			}
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"run from the home directory, the one .env pipe that is both ~/.env and the project's is read once",
+		async () => {
+			// The writer answers once, as at startup; a second read would find no writer.
+			const writer = answeringWriter(path.join(home, ".env"), `${VARIABLE}=loaded\n`);
+			try {
+				const run = await runChild(loadEnvAndPrint(), {}, home);
+
+				expect(run.exit).toBe(0);
+				expect(run.stdout).toContain(`${VARIABLE}=loaded`);
 				expect(saysNothingAboutFiles(run.stderr)).toBe(true);
 			} finally {
 				writer.kill();

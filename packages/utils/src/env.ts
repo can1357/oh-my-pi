@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { isatty } from "node:tty";
 import { parseEnv } from "node:util";
+import { getEnvironmentData, setEnvironmentData } from "node:worker_threads";
 import { getAgentDir, getConfigRootDir, getProjectDir, refreshDirsFromEnv } from "./dirs";
 import {
 	NotARegularFile,
@@ -295,14 +296,18 @@ const ENV_PIPE_MAX_BYTES = 1024 * 1024;
 const ENV_PIPE_NOTICE_AFTER_MS = 500;
 
 /**
- * The text each `.env` read at startup held, by canonical filesystem path. A
- * child shell's environment and the stream redactor read the project's `.env`
- * files again; when one is a named pipe, they take what startup read from it
- * instead of waiting on it again. 1Password's mounts are not built for
- * repeated or concurrent reads, and the values startup loaded are the ones
- * those readers need.
+ * What each `.env` read at startup gave, by canonical filesystem path: its
+ * text, or `undefined` when it gave none (no file, a file refused by kind, a
+ * pipe that did not answer in time, or a read that failed). Startup reads each
+ * path once per process: a second startup read of the same file, from this
+ * thread or from a worker thread, takes this result instead of reading or
+ * waiting again. A child shell's environment and the stream redactor read the
+ * project's `.env` files again; when one is a named pipe, they take what
+ * startup read from it. 1Password's mounts are not built for repeated or
+ * concurrent reads, and the values startup loaded are the ones those readers
+ * need.
  */
-const startupEnvText = new Map<string, string>();
+const startupEnvReads = new Map<string, string | undefined>();
 
 /**
  * The filesystem path for a `.env` cache entry. A project may be reached
@@ -318,22 +323,30 @@ function envFileKey(filePath: string): string {
 	}
 }
 
-/** `.env` pipes that did not answer at startup: this process does not wait on them again. */
-const unansweredEnvPipes = new Set<string>();
-
 /**
- * A `.env` read before any command runs: a named pipe is read until its writer
- * closes it, within a bound. A writer that dies part way through the file also
- * closes it, and what it wrote by then is parsed as the whole file: no bound or
- * check here can tell the two apart.
+ * A `.env` read before any command runs, once per process for each file (see
+ * {@link startupEnvReads}): a named pipe is read until its writer closes it,
+ * within a bound. A writer that dies part way through the file also closes it,
+ * and what it wrote by then is parsed as the whole file: no bound or check here
+ * can tell the two apart.
  */
 function startupEnvFileText(filePath: string): string | undefined {
 	const key = envFileKey(filePath);
-	if (unansweredEnvPipes.has(key)) return undefined;
+	if (startupEnvReads.has(key)) return startupEnvReads.get(key);
+	let text: string | undefined;
+	try {
+		text = readStartupEnvFile(filePath);
+	} finally {
+		startupEnvReads.set(key, text);
+	}
+	return text;
+}
+
+function readStartupEnvFile(filePath: string): string | undefined {
 	const deadlineMs = isatty(0) && isatty(2) ? ENV_PIPE_TERMINAL_DEADLINE_MS : ENV_PIPE_DEADLINE_MS;
 	const bound = `${deadlineMs / 1000} s`;
 	try {
-		const text = readRegularFileOrPipeTextSync(filePath, {
+		return readRegularFileOrPipeTextSync(filePath, {
 			deadlineMs,
 			maxBytes: ENV_PIPE_MAX_BYTES,
 			noticeAfterMs: ENV_PIPE_NOTICE_AFTER_MS,
@@ -345,15 +358,12 @@ function startupEnvFileText(filePath: string): string | undefined {
 						(stoppable ? "Ctrl-C stops omp." : "Ctrl-C takes effect when the wait ends."),
 				),
 		});
-		if (text !== undefined) startupEnvText.set(key, text);
-		return text;
 	} catch (error) {
 		if (error instanceof NotARegularFile) {
 			reportSkippedFile(error);
 			return undefined;
 		}
 		if (!(error instanceof PipeNotAnswered)) throw error;
-		unansweredEnvPipes.add(key);
 		const cause =
 			error.reason === "silent"
 				? `nothing wrote to it within ${bound}`
@@ -381,7 +391,7 @@ function runtimeEnvFileText(filePath: string): string | undefined {
 		return readRegularFileTextSync(filePath);
 	} catch (error) {
 		if (!(error instanceof NotARegularFile)) throw error;
-		const loaded = error.kind === "a FIFO" ? startupEnvText.get(envFileKey(filePath)) : undefined;
+		const loaded = error.kind === "a FIFO" ? startupEnvReads.get(envFileKey(filePath)) : undefined;
 		if (loaded !== undefined) return loaded;
 		reportSkippedFile(error);
 		return undefined;
@@ -428,8 +438,43 @@ export function parseEnvFile(filePath: string): Record<string, string> {
 	return parseEnvText(() => runtimeEnvFileText(filePath));
 }
 
+/**
+ * The worker environment-data key under which a thread hands its startup `.env`
+ * reads, and the project `.env` names it loaded, to the worker threads it
+ * starts.
+ */
+const STARTUP_ENV_SHARE_KEY = "@oh-my-pi/pi-utils/env:startup";
+
+interface StartupEnvShare {
+	reads: [string, string | undefined][];
+	projectNames: string[];
+}
+
+function isStartupEnvShare(value: unknown): value is StartupEnvShare {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		"reads" in value &&
+		Array.isArray(value.reads) &&
+		"projectNames" in value &&
+		Array.isArray(value.projectNames)
+	);
+}
+
+// A worker thread re-enters the CLI entry and gets its own copy of this module,
+// so on its own it would read these files again, and wait again on a pipe the
+// thread that started it already waited on. It takes that thread's reads
+// instead, through worker environment data: never through `process.env`, which
+// every child process inherits.
+const inheritedStartupEnv = getEnvironmentData(STARTUP_ENV_SHARE_KEY);
+if (isStartupEnvShare(inheritedStartupEnv)) {
+	for (const [key, text] of inheritedStartupEnv.reads) startupEnvReads.set(key, text);
+	for (const name of inheritedStartupEnv.projectNames) projectEnvNamesLoadedByOmp.add(name);
+}
+
 // Eagerly parse the user's $HOME/.env and the current project's .env (from cwd).
-// Only these reads, before any command runs, wait on a named pipe.
+// Only these reads, before any command runs, wait on a named pipe, and only
+// once in a process.
 const homeEnv = parseEnvText(() => startupEnvFileText(path.join(os.homedir(), ".env")));
 const piEnv = parseEnvText(() => startupEnvFileText(path.join(getConfigRootDir(), ".env")));
 const agentEnv = parseEnvText(() => startupEnvFileText(path.join(getAgentDir(), ".env")));
@@ -450,6 +495,11 @@ for (const file of [projectEnv, agentEnv, piEnv, homeEnv]) {
 		}
 	}
 }
+
+setEnvironmentData(STARTUP_ENV_SHARE_KEY, {
+	reads: [...startupEnvReads],
+	projectNames: [...projectEnvNamesLoadedByOmp],
+} satisfies StartupEnvShare);
 
 // Directory-affecting keys (XDG_*_HOME, and in default mode PI_CODING_AGENT_DIR)
 // may have just arrived from the profile/agent `.env` applied above. The dirs
