@@ -776,12 +776,13 @@ async function registerPersistedSubagentsFromDir(
 		.map(file => path.basename(file))
 		.filter(name => !name.includes(".bak"))
 		.sort();
-	if (names.length === 0) return;
-	const childDirectories = new Set(storage.listDirsSync(dir));
-	// Nested-repo patches are local artifacts whatever the session storage, so
-	// they are read from the directory beside the transcripts.
+	// The local directory holds the sidecars (nested-repo patches) whatever the
+	// storage. It is read even when the listing is empty: a file storage lists
+	// an unreadable directory (EACCES, EMFILE, EIO) as empty, and this read
+	// surfaces that fault so the roster latch drops and the next call retries.
 	const localEntries = await localDirEntries(dir);
-	if (!shouldContinue()) return;
+	if (!shouldContinue() || names.length === 0) return;
+	const childDirectories = new Set(storage.listDirsSync(dir));
 	let entriesSinceYield = 0;
 	for (const name of names) {
 		if (!shouldContinue()) return;

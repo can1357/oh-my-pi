@@ -456,6 +456,36 @@ describe("persisted roster latch semantics", () => {
 		expect(countScans(scans, scanDir(rootFile))).toBe(2);
 	}, 10_000);
 
+	// chmod does not restrict root, and Windows has no POSIX mode bits.
+	it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+		"re-scans a root whose transcript directory could not be read",
+		async () => {
+			using tempDir = TempDir.createSync("@omp-roster-unreadable-");
+			const dir = tempDir.path();
+			const rootFile = path.join(dir, "main.jsonl");
+			const childFile = path.join(dir, "main", "Worker.jsonl");
+			await Bun.write(rootFile, `${sessionHeader("main")}\n`);
+			await Bun.write(childFile, `${sessionHeader("worker")}\n${sessionInitRecord()}\n`);
+			const scans: string[] = [];
+			recordScans(scans);
+			const registry = new AgentRegistry();
+			// The storage listing reads an unreadable directory as empty. The scan
+			// must still fail, so the latch drops instead of settling an empty
+			// roster that a later call would reuse.
+			await fs.promises.chmod(scanDir(rootFile), 0o000);
+			try {
+				expect(await ensurePersistedRoster(registry, rootFile)).toBe(rootFile);
+				expect(registry.get("Worker")).toBeUndefined();
+			} finally {
+				await fs.promises.chmod(scanDir(rootFile), 0o755);
+			}
+			await ensurePersistedRoster(registry, rootFile);
+			expect(registry.get("Worker")?.sessionFile).toBe(childFile);
+			expect(countScans(scans, scanDir(rootFile))).toBe(2);
+		},
+		10_000,
+	);
+
 	it("keeps a settled latch valid for a tombstoned transcript", async () => {
 		using tempDir = TempDir.createSync("@omp-roster-tombstone-");
 		const dir = tempDir.path();
