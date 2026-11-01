@@ -240,6 +240,30 @@ describe("resize on Warp, which SIGWINCHes on alt-buffer toggle", () => {
 			tui.stop();
 		}
 	});
+	it("places the shell prompt below the content when stopping mid-resize", async () => {
+		Bun.env.TERM_PROGRAM = "WarpTerminal";
+		const term = new VirtualTerminal(40, 12);
+		const scheduler = new VirtualRenderScheduler();
+		const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+		tui.addChild(new LineComponent("row-", 8));
+		try {
+			tui.start();
+			await scheduler.settle(term);
+
+			// Quit inside the settle window: the drag left the hardware cursor
+			// behind while tracking still describes the pre-resize row, so the
+			// shell handoff cannot move relative to the tracked row.
+			term.resize(40, 20);
+			// Warp's drag moves the real cursor without the TUI knowing.
+			term.write("\x1b[3;5H");
+			tui.stop();
+			await term.flush();
+			// The eight content rows were painted from the top row.
+			expect(term.getCursor()).toEqual({ row: 8, col: 0 });
+		} finally {
+			tui.stop();
+		}
+	});
 });
 
 describe("Warp in-place resize with a frame provider in rebuild mode", () => {
