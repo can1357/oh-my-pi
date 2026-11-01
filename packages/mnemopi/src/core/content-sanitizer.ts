@@ -64,7 +64,7 @@ export function parseDataUri(content: string): [mimeType: string, raw: Buffer] |
 }
 
 export function isValidBase64(payload: string): boolean {
-	const cleaned = payload.replace(/\s+/g, "");
+	const cleaned = payload.replace(/\s+/g, "").replace(/-/g, "+").replace(/_/g, "/");
 	if (cleaned.length < 2 || cleaned.length % 4 === 1 || !/^[A-Za-z0-9+/]+={0,2}$/.test(cleaned)) {
 		return false;
 	}
@@ -88,7 +88,7 @@ function decodeBase64Payload(rawPayload: string): Buffer | null {
 				}
 			})()
 		: rawPayload;
-	const cleaned = candidate.replace(/\s+/g, "");
+	const cleaned = candidate.replace(/\s+/g, "").replace(/-/g, "+").replace(/_/g, "/");
 	if (cleaned.length >= 2 && cleaned.length % 4 !== 1 && /^[A-Za-z0-9+/]+={0,2}$/.test(cleaned)) {
 		const padded = cleaned.length % 4 === 0 ? cleaned : cleaned + "=".repeat(4 - (cleaned.length % 4));
 		if (BASE64_RE.test(padded)) {
@@ -101,6 +101,7 @@ function decodeBase64Payload(rawPayload: string): Buffer | null {
 	}
 	return null;
 }
+
 function decodePercentEncoded(raw: string): Buffer {
 	try {
 		return Buffer.from(decodeURIComponent(raw), "utf-8");
@@ -113,7 +114,10 @@ function decodePercentEncoded(raw: string): Buffer {
 function extractCharset(params: string | undefined): string | null {
 	if (!params) return null;
 	const match = /(?:^|;)\s*charset=([^;,]+)/i.exec(params);
-	return match?.[1]?.trim().toLowerCase() ?? null;
+	if (!match?.[1]) return null;
+	const decoded = decodePercentEncoded(match[1]).toString("utf8").trim();
+	const unquoted = decoded.replace(/^\\?["']+|\\?["']+$/g, "").replace(/^["']+|["']+$/g, "");
+	return unquoted.trim().toLowerCase() || null;
 }
 
 const SUPPORTED_SYMMETRIC_CHARSETS = new Set([
@@ -1139,6 +1143,25 @@ function sanitizeAuxiliaryString(input: string): string {
 	return sanitizeTextField(input);
 }
 
+const CREDENTIAL_METADATA_KEY_RE =
+	/(?:^|[_.\s-])(?:password|passwd|pwd|secret|api[_.\s-]?key|apikey|access[_.\s-]?key|secret[_.\s-]?key|private[_.\s-]?key|client[_.\s-]?secret|auth[_.\s-]?token|access[_.\s-]?token|refresh[_.\s-]?token|bearer[_.\s-]?token|session[_.\s-]?token|id[_.\s-]?token|webhook[_.\s-]?secret|signing[_.\s-]?secret|credentials?)(?:$|[_.\s-])/i;
+
+const CREDENTIAL_METADATA_KEY_EXCLUSION_RE =
+	/(?:^|[_.\s-])(?:max[_.\s-]?tokens|token[_.\s-]?(?:count|limit|budget|expiry|ttl|type|url|endpoint)|secret[_.\s-]?(?:name|id|ref|arn|path)|password[_.\s-]?(?:policy|reset|hash|length|required))(?:$|[_.\s-])/i;
+
+function isCredentialMetadataKey(key: string): boolean {
+	if (/^token$/i.test(key)) return true;
+	if (CREDENTIAL_METADATA_KEY_EXCLUSION_RE.test(key)) return false;
+	return CREDENTIAL_METADATA_KEY_RE.test(key);
+}
+
+function redactCredentialMetadataValue(val: unknown, stripTags = false): unknown {
+	if (typeof val === "string") return val.length > 0 ? "[REDACTED]" : val;
+	if (Array.isArray(val)) return val.map(v => redactCredentialMetadataValue(v, stripTags));
+	if (val && typeof val === "object") return redactNested(val, stripTags);
+	return val;
+}
+
 function redactNested(value: unknown, stripTags = false): unknown {
 	if (typeof value === "string") return stripTags ? sanitizeAuxiliaryString(value) : redactMemorySecrets(value);
 	if (Array.isArray(value)) {
@@ -1162,7 +1185,8 @@ function redactNested(value: unknown, stripTags = false): unknown {
 		while (Object.hasOwn(out, safeKey)) {
 			safeKey = `${baseKey}_${suffix++}`;
 		}
-		const nextItem = redactNested(item, stripTags);
+		const isCredKey = isCredentialMetadataKey(key) || isCredentialMetadataKey(safeKey);
+		const nextItem = isCredKey ? redactCredentialMetadataValue(item, stripTags) : redactNested(item, stripTags);
 		if (safeKey !== key || nextItem !== item) changed = true;
 		Object.defineProperty(out, safeKey, {
 			value: nextItem,

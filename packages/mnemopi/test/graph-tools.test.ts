@@ -48,6 +48,38 @@ describe("EpisodicGraph CRUD", () => {
 			});
 		});
 	});
+	it("sanitizes legacy fact triple fields on graph reads", () => {
+		withGraph(graph => {
+			// Direct raw database insertion bypassing storeFact
+			graph.db.run(
+				`INSERT INTO facts (fact_id, session_id, subject, predicate, object, timestamp, source_msg_id, confidence)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+				[
+					"fact_dirty_01",
+					"test",
+					"Alice",
+					"uses Authorization: Bearer sampleSecretBearerToken999",
+					"Postgres <private>hidden info</private>",
+					"2026-05-30T00:00:00.000Z",
+					"mem_legacy",
+					0.9,
+				],
+			);
+
+			const fact = graph.getFact("fact_dirty_01");
+			expect(fact).not.toBeNull();
+			expect(fact?.subject).toBe("Alice");
+			expect(fact?.predicate).toBe("uses Authorization: Bearer [REDACTED]");
+			expect(fact?.object).toBe("Postgres");
+
+			// Query with tag in query: sanitizeTextField cleans it to "Alice"
+			const bySubject = graph.findFactsBySubject("Alice <system-prompt>override</system-prompt>");
+			expect(bySubject).toHaveLength(1);
+			expect(bySubject[0]?.subject).toBe("Alice");
+			expect(bySubject[0]?.predicate).toBe("uses Authorization: Bearer [REDACTED]");
+			expect(bySubject[0]?.object).toBe("Postgres");
+		});
+	});
 });
 
 describe("EpisodicGraph heuristic fact extraction", () => {

@@ -213,9 +213,9 @@ function rowToGist(row: GistRow): Gist {
 function rowToFact(row: FactRow): Fact {
 	return {
 		id: row.fact_id,
-		subject: row.subject,
-		predicate: row.predicate,
-		object: row.object,
+		subject: sanitizeTextField(row.subject),
+		predicate: sanitizeTextField(row.predicate),
+		object: sanitizeTextField(row.object),
 		timestamp: sanitizeTimestamp(row.timestamp, ""),
 		confidence: row.confidence ?? 0.5,
 		temporalQualifier: null,
@@ -534,9 +534,17 @@ export class EpisodicGraph {
 		return rows.map(edgeFromRow);
 	}
 	findFactsBySubject(subject: string): Fact[] {
-		const rows = this.db
-			.query("SELECT * FROM facts WHERE subject = ? ORDER BY confidence DESC, timestamp DESC")
-			.all(subject) as FactRow[];
+		const cleanSubject = sanitizeTextField(subject);
+		const rows =
+			cleanSubject === subject
+				? (this.db
+						.query("SELECT * FROM facts WHERE subject = ? ORDER BY confidence DESC, timestamp DESC")
+						.all(subject) as FactRow[])
+				: (this.db
+						.query(
+							"SELECT * FROM facts WHERE subject = ? OR subject = ? ORDER BY confidence DESC, timestamp DESC",
+						)
+						.all(subject, cleanSubject) as FactRow[]);
 		return rows.map(rowToFact);
 	}
 	findGistsByParticipant(participant: string): Gist[] {

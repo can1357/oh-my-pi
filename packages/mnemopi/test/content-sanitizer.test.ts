@@ -1233,4 +1233,126 @@ Tail content
 		const sourcesJson = JSON.parse(row.sources_json) as Record<string, string>;
 		expect(sourcesJson.src).toBe("srctail");
 	});
+	it("normalizes base64url payload with - and _ and redacts secrets", () => {
+		const blobRoot = useTempBlobDir();
+		const payloadText = "Authorization: Bearer mySecretToken12345678";
+		const stdB64 = Buffer.from(payloadText, "utf8").toString("base64");
+		const urlSafeB64 = stdB64.replace(/\+/g, "-").replace(/\//g, "_");
+		const uri = `data:text/plain;base64,${urlSafeB64}`;
+		const [cleaned, meta] = sanitizeContent(uri);
+		expect(meta.extraction_reason).toBe("data_uri");
+		expect(meta.redacted_secrets).toContain("auth_bearer_basic");
+		expect(cleaned).toContain("Binary content extracted: text/plain");
+
+		const sha = (meta.blob_ref ?? "").replace("blob://sha256/", "");
+		const stored = readFileSync(join(blobRoot, sha.slice(0, 2), sha.slice(0, 4), sha), "utf8");
+		expect(stored).toBe("Authorization: Bearer [REDACTED]");
+	});
+
+	it("normalizes quoted and percent-encoded charset parameter values", () => {
+		const blobRoot = useTempBlobDir();
+		const uriQuoted = 'data:text/plain;charset="utf-8",hello';
+		const [cleanedQuoted, metaQuoted] = sanitizeContent(uriQuoted);
+		expect(cleanedQuoted).toContain("Binary content extracted: text/plain");
+		const shaQuoted = (metaQuoted.blob_ref ?? "").replace("blob://sha256/", "");
+		const storedQuoted = readFileSync(
+			join(blobRoot, shaQuoted.slice(0, 2), shaQuoted.slice(0, 4), shaQuoted),
+			"utf8",
+		);
+		expect(storedQuoted).toBe("hello");
+
+		const uriPercentQuoted = "data:text/plain;charset=%22utf-8%22,hello";
+		const [cleanedPct, metaPct] = sanitizeContent(uriPercentQuoted);
+		expect(cleanedPct).toContain("Binary content extracted: text/plain");
+		const shaPct = (metaPct.blob_ref ?? "").replace("blob://sha256/", "");
+		const storedPct = readFileSync(join(blobRoot, shaPct.slice(0, 2), shaPct.slice(0, 4), shaPct), "utf8");
+		expect(storedPct).toBe("hello");
+	});
+
+	it("redacts values under credential-named metadata keys", () => {
+		const rawMetadata = {
+			password: "hunter2",
+			aws_secret_access_key: "myRawAwsSecretValue",
+			apiKey: "key12345",
+			client_secret: "secret-xyz",
+			nested: {
+				token: "bearer-token-abc",
+				tokens_list: ["tok1", "tok2"],
+			},
+			max_tokens: 4096,
+			token_count: 100,
+			secret_name: "my-secret-config",
+			password_policy: "strict",
+		};
+
+		const sanitized = sanitizeMetadataRecord(rawMetadata);
+		expect(sanitized.password).toBe("[REDACTED]");
+		expect(sanitized.aws_secret_access_key).toBe("[REDACTED]");
+		expect(sanitized.apiKey).toBe("[REDACTED]");
+		expect(sanitized.client_secret).toBe("[REDACTED]");
+		expect(sanitized.nested.token).toBe("[REDACTED]");
+		expect(sanitized.max_tokens).toBe(4096);
+		expect(sanitized.token_count).toBe(100);
+		expect(sanitized.secret_name).toBe("my-secret-config");
+		expect(sanitized.password_policy).toBe("strict");
+
+		// Verify in BeamMemory.remember and rememberBatch
+		const beam = new BeamMemory({ dbPath: ":memory:", sessionId: "cred-meta-test" });
+		try {
+			const id = beam.remember("User session notes", {
+				metadata: { password: "hunter2", aws_secret_access_key: "myRawAwsSecretValue" },
+			});
+			const row = beam.get(id) as { metadata?: string | null } | null;
+			const meta = JSON.parse(row?.metadata ?? "{}");
+			expect(meta.password).toBe("[REDACTED]");
+			expect(meta.aws_secret_access_key).toBe("[REDACTED]");
+
+			const [batchId] = beam.rememberBatch([
+				{
+					content: "Batch session notes",
+					metadata: { password: "hunter2", api_key: "api-sec-123" },
+				},
+			]);
+			const batchRow = beam.get(batchId!) as { metadata?: string | null } | null;
+			const batchMeta = JSON.parse(batchRow?.metadata ?? "{}");
+			expect(batchMeta.password).toBe("[REDACTED]");
+			expect(batchMeta.api_key).toBe("[REDACTED]");
+		} finally {
+			beam.close();
+		}
+	});
+
+	it("preserves data URI blob extraction and contentMeta in rememberBatch", () => {
+		const blobRoot = useTempBlobDir();
+		const beam = new BeamMemory({ dbPath: ":memory:", sessionId: "batch-blob-test" });
+		try {
+			const secretPayload = "Authorization: Bearer secretBearerBatch123456789";
+			const b64 = Buffer.from(secretPayload, "utf8").toString("base64");
+			const uri = `data:text/plain;base64,${b64}`;
+
+			const [id] = beam.rememberBatch([
+				{
+					content: uri,
+					metadata: { batch_note: "test data uri extraction" },
+				},
+			]);
+
+			const row = beam.get(id!) as { content: string; metadata?: string | null } | null;
+			expect(row?.content).toContain("Binary content extracted: text/plain");
+			expect(row?.content).toContain("blob://sha256/");
+			expect(row?.content).not.toContain("secretBearerBatch123456789");
+
+			const meta = JSON.parse(row?.metadata ?? "{}");
+			expect(meta.blob_ref).toMatch(/^blob:\/\/sha256\/[a-f0-9]{64}$/);
+			expect(meta.extraction_reason).toBe("data_uri");
+			expect(meta.batch_note).toBe("test data uri extraction");
+
+			const blobRef = meta.blob_ref as string;
+			const sha = blobRef.replace("blob://sha256/", "");
+			const stored = readFileSync(join(blobRoot, sha.slice(0, 2), sha.slice(0, 4), sha), "utf8");
+			expect(stored).toBe("Authorization: Bearer [REDACTED]");
+		} finally {
+			beam.close();
+		}
+	});
 });

@@ -442,8 +442,13 @@ export function reconcileEmbeddingModel(beam: BeamMemoryState): void {
 }
 
 export function remember(beam: BeamMemoryState, rawContent: string, rawOptions: StoreRememberOptions = {}): string {
-	const [content] = sanitizeContent(rawContent);
+	const [content, contentMeta] = sanitizeContent(rawContent);
 	const options = redactMemoryTextFields(rawOptions, true);
+	if (contentMeta && Object.keys(contentMeta).length > 0) {
+		const existingMeta =
+			options.metadata && typeof options.metadata === "object" ? (options.metadata as Record<string, unknown>) : {};
+		options.metadata = { ...existingMeta, ...contentMeta };
+	}
 	const source = options.source ?? "conversation";
 	const importance = options.importance ?? 0.5;
 	const timestamp = sanitizeTimestamp(options.timestamp, toUtcIso());
@@ -565,9 +570,17 @@ export function rememberBatch(
 ): string[] {
 	const options = redactMemoryTextFields(rawOptions, true);
 	const items = rawItems.map(rawItem => {
-		const scrubbed = redactMemoryTextFields(rawItem, true);
-		const [sanitizedContent] = sanitizeContent(scrubbed.content);
-		return sanitizedContent === scrubbed.content ? scrubbed : { ...scrubbed, content: sanitizedContent };
+		const [sanitizedContent, contentMeta] = sanitizeContent(rawItem.content);
+		const scrubbed = redactMemoryTextFields({ ...rawItem, content: sanitizedContent }, true);
+		scrubbed.content = sanitizedContent;
+		if (contentMeta && Object.keys(contentMeta).length > 0) {
+			const existingMeta =
+				scrubbed.metadata && typeof scrubbed.metadata === "object"
+					? (scrubbed.metadata as Record<string, unknown>)
+					: {};
+			scrubbed.metadata = { ...existingMeta, ...contentMeta };
+		}
+		return scrubbed;
 	});
 	const timestamp = toUtcIso();
 	const ids: string[] = [];
