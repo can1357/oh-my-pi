@@ -227,7 +227,6 @@ import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
 import { cfgSecretsEnabled } from "../secrets/settings";
 import { releaseSharpshooterSession } from "../sharpshooter/backend";
 import { flushSharpshooterExtraction } from "../sharpshooter/extract";
-import { toolReadsSkillUris } from "../system-prompt";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -2469,6 +2468,7 @@ export class AgentSession implements SettingsScope {
 			setActiveToolNames: config.setActiveToolNames,
 			baseSystemPrompt: this.agent.state.systemPrompt,
 			skills: config.skills,
+			skillDescriptions: this.#skillDescriptions,
 			skillWarnings: config.skillWarnings,
 			skillsSettings: config.skillsSettings,
 			skillsReloadable: config.skillsReloadable,
@@ -5522,11 +5522,13 @@ export class AgentSession implements SettingsScope {
 
 	#scheduleAutoContinuePrompt(generation: number): boolean {
 		const continuePrompt = async () => {
-			// Compaction summarizes away the first-message eager preludes, so re-assert the
-			// delegate-via-tasks / phased-todo reminders on this auto-resumed turn. This runs
-			// at invocation (past the abort check below), so an aborted continuation queues
+			// Compaction summarizes away the first-message eager preludes and any delivered
+			// skill-delta notice, so re-assert both on this auto-resumed turn. This runs at
+			// invocation (past the abort check below), so an aborted continuation queues
 			// nothing; scoped to this request via prependMessages, never the shared queue.
+			const skillDeltaNotice = this.#tools.takeSkillDeltaNotice();
 			const eagerNudges = this.#todo.buildPostCompactionEagerNudges();
+			const prependMessages = skillDeltaNotice ? [skillDeltaNotice, ...eagerNudges] : eagerNudges;
 			await this.#promptWithMessage(
 				{
 					role: "developer",
@@ -5541,7 +5543,7 @@ export class AgentSession implements SettingsScope {
 				autoContinuePrompt,
 				{
 					skipPostPromptRecoveryWait: true,
-					prependMessages: eagerNudges.length > 0 ? eagerNudges : undefined,
+					prependMessages: prependMessages.length > 0 ? prependMessages : undefined,
 				},
 			);
 		};
@@ -7134,9 +7136,9 @@ export class AgentSession implements SettingsScope {
 		return this.#tools.getSelectedMCPToolNames();
 	}
 
-	/** Rediscovers reloadable skills and refreshes prompt metadata. */
-	refreshSkills(): Promise<void> {
-		return this.#tools.refreshSkills();
+	/** Rediscovers skills; agent-driven calls defer the cached catalog and announce the delta instead. */
+	refreshSkills(options?: { deferSystemPrompt?: boolean; changedSkillName?: string }): Promise<void> {
+		return this.#tools.refreshSkills(options);
 	}
 
 	/**
@@ -7151,7 +7153,7 @@ export class AgentSession implements SettingsScope {
 			skills: this.skills,
 			refreshSkills: reloadable
 				? async () => {
-						await this.refreshSkills();
+						await this.refreshSkills({ deferSystemPrompt: true });
 						return this.skills;
 					}
 				: undefined,
@@ -9030,7 +9032,8 @@ export class AgentSession implements SettingsScope {
 				: undefined;
 			const evalPreludeNotice = isUserQueuedMessage(message) ? this.#tools.takeEvalPreludeNotice() : undefined;
 			const sessionAgentNotice = isUserQueuedMessage(message) ? this.#tools.takeSessionAgentNotice() : undefined;
-			if (xdevMountNotice || toolRosterNotice || evalPreludeNotice || sessionAgentNotice) {
+			const skillDeltaNotice = isUserQueuedMessage(message) ? this.#tools.takeSkillDeltaNotice() : undefined;
+			if (xdevMountNotice || toolRosterNotice || evalPreludeNotice || sessionAgentNotice || skillDeltaNotice) {
 				messages.splice(
 					xdevMountNoticeIndex,
 					0,
@@ -9038,6 +9041,7 @@ export class AgentSession implements SettingsScope {
 					...(toolRosterNotice ? [toolRosterNotice] : []),
 					...(evalPreludeNotice ? [evalPreludeNotice] : []),
 					...(sessionAgentNotice ? [sessionAgentNotice] : []),
+					...(skillDeltaNotice ? [skillDeltaNotice] : []),
 				);
 			}
 
@@ -11957,10 +11961,8 @@ export class AgentSession implements SettingsScope {
 		} else if (enabled) {
 			// Enabled covers top-level and xd://-mounted tools: every path through
 			// which the model can still reach a reader.
-			const hasSkillReader = this.getEnabledToolNames().some(name => toolReadsSkillUris(this.getToolByName(name)));
-			const renderedSkills = this.#skillDescriptions.render(
-				hasSkillReader ? this.skills.filter(skill => skill.hide !== true) : [],
-			);
+			const hasSkillReader = this.#tools.canReadSkillUris();
+			const renderedSkills = this.#tools.renderVisibleSkillCatalog();
 			// Hidden-only sessions have no catalog rows, but the notice template
 			// still carries the `skill://<name>` syntax the model needs: hidden
 			// skills stay reachable by URI even though they are never listed.

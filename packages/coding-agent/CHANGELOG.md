@@ -103,6 +103,7 @@
 ### Fixed
 
 - Fixed account-policy recovery repeatedly rotating through denied credentials instead of surfacing the error or using the configured model fallback, including unnecessary sibling-unblock waits after the account allowance is spent ([#17439](https://github.com/can1357/oh-my-pi/pull/17439) by [@wolfiesch](https://github.com/wolfiesch))
+- Skills written mid-session with `manage_skill` or `learn` are announced via hidden notices instead of rebuilding the system prompt, preserving its prompt-cache prefix ([#14488](https://github.com/can1357/oh-my-pi/issues/14488), [#17453](https://github.com/can1357/oh-my-pi/pull/17453) by [@wolfiesch](https://github.com/wolfiesch))
 - Startup prewalk now arms a later fallback candidate of the role named by prewalk.into when its first candidate is unavailable, matching /prewalk and /new ([#17373](https://github.com/can1357/oh-my-pi/pull/17373)).
 - Fixed `omp install git:github.com/user/repo` treating `git` as the host instead of installing the GitHub plugin ([#17436](https://github.com/can1357/oh-my-pi/issues/17436)).
 - Fixed `read` showing a zip, tar, asar or ISO archive's old contents after a same-size rewrite within milliseconds of its previous write, on filesystems with coarse timestamps such as Linux ext4 ([#17389](https://github.com/can1357/oh-my-pi/pull/17389) by [@will-bogusz](https://github.com/will-bogusz))

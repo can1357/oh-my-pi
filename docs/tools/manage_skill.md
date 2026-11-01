@@ -40,7 +40,7 @@
 3. `delete` calls `deleteManagedSkill(name)`, then refreshes active skills when the callback exists.
 4. `create` normalizes the name and checks whether an active authored skill already owns it; if yes, it returns an error result without writing.
 5. `create` / `update` call `writeManagedSkill(...)`, which normalizes/validates the name, sanitizes generated frontmatter, serializes same-name in-process writes, and writes `SKILL.md` under the managed-skills root.
-6. After a successful create/update, the tool refreshes active skills when the callback exists, so an interactive session can discover the change immediately.
+6. After a successful create/update, the tool refreshes runtime skills and command metadata when the callback exists. `skill://` can resolve the change immediately; a hidden notice on the next user request announces additions, updates, and removals without rewriting the cached system-prompt listing. That listing catches up at the next unrelated base rebuild or session start/resume, not compaction.
    A refresh failure propagates after the filesystem mutation; it does not roll the skill back.
 
 ## Modes / Variants

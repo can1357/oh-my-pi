@@ -3,6 +3,7 @@ import type { Agent, AgentMessage, AgentTool, AgentToolContext } from "@oh-my-pi
 import type { Model } from "@oh-my-pi/pi-ai";
 import { resolveDelegationBias } from "@oh-my-pi/pi-catalog/compat/delegation";
 import { isRecord, logger, prompt, stringProperty, structuredCloneJSON, untilAborted } from "@oh-my-pi/pi-utils";
+import { MANAGED_SKILLS_PROVIDER_ID } from "../autolearn/managed-skills";
 import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { shouldInlineToolDescriptors } from "../config/inline-tool-descriptors-mode";
@@ -15,6 +16,7 @@ import type { ExtensionRunner, SourceInfo, ToolInfo } from "../extensibility/ext
 import { type EvalPreludeDefinition, evalPreludeSummary } from "../eval/preludes";
 import { isEvalBridgeToolCallable } from "../eval/tool-bridge-policy";
 import { ExtensionToolWrapper } from "../extensibility/extensions/wrapper";
+import { SkillDescriptionCatalog } from "../extensibility/skill-descriptions";
 import { loadSkills, type Skill, type SkillWarning, setActiveSkills } from "../extensibility/skills";
 import { type LocalProtocolOptions } from "../internal-urls";
 import { stripXdUrlPrefix, XD_URL_PREFIX } from "@oh-my-pi/pi-tui/tools/xd-url";
@@ -26,6 +28,7 @@ import type { MemoryBackendStartOptions, MemoryPromptPreparation } from "../memo
 import type { AgentDefinition } from "../task/types";
 import evalPreludeNoticePrompt from "../prompts/system/eval-prelude-notice.md" with { type: "text" };
 import sessionAgentNoticePrompt from "../prompts/system/session-agent-notice.md" with { type: "text" };
+import skillDeltaNoticePrompt from "../prompts/system/skill-delta-notice.md" with { type: "text" };
 import toolRosterNoticePrompt from "../prompts/system/tool-roster-notice.md" with { type: "text" };
 import xdevMountNoticePrompt from "../prompts/system/xdev-mount-notice.md" with { type: "text" };
 import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
@@ -179,6 +182,7 @@ interface SessionToolsOptions {
 	setActiveToolNames?: (names: Iterable<string>) => void;
 	baseSystemPrompt: string[];
 	skills?: Skill[];
+	skillDescriptions?: SkillDescriptionCatalog;
 	skillWarnings?: SkillWarning[];
 	skillsSettings?: SkillsSettings;
 	skillsReloadable?: boolean;
@@ -268,6 +272,7 @@ export function projectMountedMCPXdevGuidance(routes: Iterable<MountedMCPToolRou
 const TOOL_ROSTER_NOTICE_MESSAGE_TYPE = "tool-roster-notice";
 const XDEV_MOUNT_NOTICE_MESSAGE_TYPE = "xdev-mount-notice";
 const EVAL_PRELUDE_NOTICE_MESSAGE_TYPE = "eval-prelude-notice";
+const SKILL_DELTA_NOTICE_MESSAGE_TYPE = "skill-delta-notice";
 
 /** Custom entry holding the digest of the base prompt the branch's primary model calls are built from. */
 const SYSTEM_PROMPT_DIGEST_CUSTOM_TYPE = "system-prompt-digest";
@@ -314,6 +319,18 @@ interface SessionAgentNoticeDetails {
 	removed: string[];
 }
 
+interface SkillNoticeEntry {
+	name: string;
+	description: string;
+	key: string;
+}
+
+interface SkillDeltaNoticeDetails {
+	catalogId: string;
+	added: SkillNoticeEntry[];
+	removed: string[];
+}
+
 /**
  * Prompt-affecting state frozen at each base rebuild. Tools render their
  * provider-visible text from this snapshot instead of live settings, so
@@ -323,6 +340,9 @@ interface SessionAgentNoticeDetails {
 interface PromptSurface {
 	/** Skill-URI hints in `bash`/`read` (mid-session `/skillful` toggles). */
 	skillHintVisible: boolean;
+	/** Visible skill catalog, frozen until an unrelated base rebuild. */
+	skills: readonly SkillNoticeEntry[];
+	skillCatalogId: string;
 	/** Eval preludes in the system prompt and eval description. */
 	evalPreludes: readonly EvalPreludeDefinition[];
 	/** User-tagged model agents listed in the task description. */
@@ -468,6 +488,10 @@ export class SessionTools {
 	#skillWarnings: SkillWarning[];
 	#skillsSettings: SkillsSettings | undefined;
 	#skillsReloadable: boolean;
+	readonly #skillDescriptions: SkillDescriptionCatalog;
+	readonly #skillRevisions = new Map<string, number>();
+	/** Only agent-driven rediscovery defers the catalog; skillful toggles keep their own notice contract. */
+	#skillCatalogDeferred = false;
 	/** The skill rediscovery in flight, shared by concurrent misses (see {@link shareSkillRediscovery}). */
 	#skillsRediscovery: Promise<readonly Skill[]> | undefined;
 	/**
@@ -527,6 +551,7 @@ export class SessionTools {
 		this.#skillWarnings = options.skillWarnings ?? [];
 		this.#skillsSettings = options.skillsSettings;
 		this.#skillsReloadable = options.skillsReloadable ?? true;
+		this.#skillDescriptions = options.skillDescriptions ?? new SkillDescriptionCatalog();
 		this.#promptSurface = this.#derivePromptSurface();
 		// Seed from the construction slate (top-level tools plus xd:// mounts).
 		// Left empty, getEnabledToolNames() falls back to live agent.state.tools,
@@ -660,6 +685,8 @@ export class SessionTools {
 	#derivePromptSurface(): PromptSurface {
 		return {
 			skillHintVisible: cfgSkillful.get(this.#host.settings) === true && (this.#skills?.length ?? 0) > 0,
+			skills: this.#snapshotSkillCatalog(),
+			skillCatalogId: crypto.randomUUID(),
 			evalPreludes: this.#host.evalPreludes(),
 			sessionAgents: this.#host.sessionAgents(),
 		};
@@ -1409,12 +1436,12 @@ export class SessionTools {
 					this.#promptSurfaceScope.run(surface, () =>
 						this.#computeAppliedToolSignature(validToolNames, tools, mountedSignatureTools),
 					);
-				// Eval-prelude and model-mention changes alone never trigger a
-				// rebuild: they ride their hidden notices. The trigger keeps the
-				// committed sets; a rebuild caused by anything else absorbs the live
-				// ones.
+				// Skill-catalog, eval-prelude and model-mention changes alone never
+				// trigger a rebuild: they ride hidden notices. A rebuild caused by
+				// anything else absorbs the live snapshots.
 				const triggerSignature = computeSignature({
 					...candidate,
+					skillHintVisible: this.#promptSurface.skillHintVisible,
 					evalPreludes: this.#promptSurface.evalPreludes,
 					sessionAgents: this.#promptSurface.sessionAgents,
 				});
@@ -1500,6 +1527,7 @@ export class SessionTools {
 				// Publish the exact surface the prompt rendered with — never
 				// re-derive from live settings, which could diverge mid-flight.
 				this.#promptSurface = candidateSurface ?? this.#promptSurface;
+				this.#skillCatalogDeferred = false;
 			} else if (frozenSignature) {
 				this.#notifyToolRosterDelta(previousActiveToolNames, validToolNames);
 				this.#lastAppliedToolSignature = frozenSignature;
@@ -1808,6 +1836,74 @@ export class SessionTools {
 	}
 
 	/**
+	 * Reconciles the base catalog plus notices still in context with the live skills.
+	 * No state is consumed until the notice enters history: cancelled dispatches retry,
+	 * create/delete pairs cancel, and compaction dropping a notice re-announces its delta.
+	 */
+	takeSkillDeltaNotice(): CustomMessage<SkillDeltaNoticeDetails> | undefined {
+		if (!this.#skillsReloadable || !this.#skillCatalogDeferred) return undefined;
+		const known = new Map(this.#promptSurface.skills.map(skill => [skill.name, skill]));
+		for (const message of this.#host.agent.state.messages) {
+			if (message.role !== "custom" || message.customType !== SKILL_DELTA_NOTICE_MESSAGE_TYPE) continue;
+			const details = message.details;
+			if (
+				!isRecord(details) ||
+				details.catalogId !== this.#promptSurface.skillCatalogId ||
+				!Array.isArray(details.added) ||
+				!Array.isArray(details.removed)
+			)
+				continue;
+			for (const skill of details.added) {
+				if (
+					isRecord(skill) &&
+					typeof skill.name === "string" &&
+					typeof skill.description === "string" &&
+					typeof skill.key === "string"
+				)
+					known.set(skill.name, { name: skill.name, description: skill.description, key: skill.key });
+			}
+			for (const name of details.removed) if (typeof name === "string") known.delete(name);
+		}
+		const live = this.#snapshotSkillCatalog(
+			this.#promptSurface.skillHintVisible || cfgSkillful.get(this.#host.settings),
+		);
+		const liveNames = new Set(live.map(skill => skill.name));
+		const added = live.filter(skill => known.get(skill.name)?.key !== skill.key);
+		const removed = [...known.keys()].filter(name => !liveNames.has(name));
+		if (added.length === 0 && removed.length === 0) return undefined;
+		return {
+			role: "custom",
+			customType: SKILL_DELTA_NOTICE_MESSAGE_TYPE,
+			content: prompt.render(skillDeltaNoticePrompt, { added, removed }),
+			details: { added, removed, catalogId: this.#promptSurface.skillCatalogId },
+			attribution: "agent",
+			display: false,
+			timestamp: Date.now(),
+		};
+	}
+
+	/** Whether an enabled tool, top-level or xd://-mounted, can read `skill://` URIs. */
+	canReadSkillUris(): boolean {
+		return this.getEnabledToolNames().some(name => toolReadsSkillUris(this.getToolByName(name)));
+	}
+
+	/** The `<skills>` catalog rows: visible skills with rendered descriptions, or none without a skill reader. */
+	renderVisibleSkillCatalog(): Array<Skill & { description: string }> {
+		if (!this.canReadSkillUris()) return [];
+		return this.#skillDescriptions.render(this.#skills.filter(skill => skill.hide !== true));
+	}
+
+	#snapshotSkillCatalog(enabled = cfgSkillful.get(this.#host.settings)): SkillNoticeEntry[] {
+		if (!enabled) return [];
+		const descriptions = new Map(this.#skills.map(skill => [skill.name, skill.description]));
+		return this.renderVisibleSkillCatalog().map(skill => ({
+			name: skill.name,
+			description: skill.description,
+			key: JSON.stringify([skill.filePath, descriptions.get(skill.name), this.#skillRevisions.get(skill.name) ?? 0]),
+		}));
+	}
+
+	/**
 	 * Builds the hidden notice reconciling the eval preludes the model knows with
 	 * the live set. Delivered with the next user prompt instead of rebuilding the
 	 * system prompt, so a mid-session toggle (`/computer on`) keeps the provider
@@ -2033,8 +2129,8 @@ export class SessionTools {
 		};
 	}
 
-	/** Rediscovers reloadable skills and refreshes prompt metadata. */
-	refreshSkills(): Promise<void> {
+	/** Rediscovers skills immediately; agent-driven refreshes defer the cached catalog to a notice. */
+	refreshSkills(options?: { deferSystemPrompt?: boolean; changedSkillName?: string }): Promise<void> {
 		return this.runToolRegistryMutation(async () => {
 			resetCapabilities();
 			if (this.#skillsReloadable) {
@@ -2048,12 +2144,18 @@ export class SessionTools {
 				this.#skills = discovered.skills;
 				this.#skillWarnings = discovered.warnings;
 				this.#skillsSettings = skillsSettings;
+				const changedSkill = this.#skills.find(skill => skill.name === options?.changedSkillName);
+				if (changedSkill?._source?.provider === MANAGED_SKILLS_PROVIDER_ID) {
+					const name = changedSkill.name;
+					this.#skillRevisions.set(name, (this.#skillRevisions.get(name) ?? 0) + 1);
+				}
 
 				if (this.#host.agentKind() === "main") {
 					setActiveSkills(this.#skills);
 				}
 			}
-			await this.refreshBaseSystemPrompt();
+			if (!options?.deferSystemPrompt || !this.#skillsReloadable) await this.refreshBaseSystemPrompt();
+			else this.#skillCatalogDeferred = true;
 			this.#host.notifyCommandMetadataChanged();
 		});
 	}
@@ -2312,6 +2414,7 @@ export class SessionTools {
 				if (this.#baseSystemPrompt !== previousBaseSystemPrompt) return true;
 				this.#baseSystemPrompt = built.systemPrompt;
 				this.#promptSurface = candidate;
+				this.#skillCatalogDeferred = false;
 				this.#setBasePromptXdevNames(built.xdevCatalogNames);
 				this.#host.clearMemoryPromotionSnapshot();
 				if (
