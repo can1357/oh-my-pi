@@ -1062,11 +1062,11 @@ fn decode_binary_block(
 	}
 	let inflate_size = block.size;
 	let mut inflated = vec![0; inflate_size];
-	let mut decoder = gix::features::zlib::Inflate::default();
+	let mut decoder = gix::zlib::Inflate::default();
 	let (status, consumed, written) = decoder
 		.once(&compressed, &mut inflated)
 		.map_err(|err| ApplyFailure::Invalid(format!("invalid zlib stream: {err}")))?;
-	if status != gix::features::zlib::Status::StreamEnd || consumed != compressed.len() {
+	if status != gix::zlib::Status::StreamEnd || consumed != compressed.len() {
 		return Err(ApplyFailure::Invalid("incomplete zlib stream".into()));
 	}
 	inflated.truncate(written);
@@ -2548,11 +2548,13 @@ mod tests {
 
 	#[test]
 	fn patch_three_way_check_merges_drift_and_rejects_conflict() {
-		let temp = init(&[("file.txt", b"one\ntwo\nthree\n")]);
-		fs::write(temp.path().join("file.txt"), b"one\nTWO\nthree\n").expect("patch edit");
+		// The drift and the patch touch lines two apart: adjacent edits conflict
+		// in git's 3-way merge.
+		let temp = init(&[("file.txt", b"one\ntwo\nthree\nfour\n")]);
+		fs::write(temp.path().join("file.txt"), b"one\ntwo\nthree\nFOUR\n").expect("patch edit");
 		let patch = git(temp.path(), &["diff", "--no-ext-diff", "--full-index"]);
 		reset(temp.path());
-		fs::write(temp.path().join("file.txt"), b"ONE\ntwo\nthree\n").expect("drift");
+		fs::write(temp.path().join("file.txt"), b"ONE\ntwo\nthree\nfour\n").expect("drift");
 		let repository = repo(temp.path());
 		assert!(
 			!repository
@@ -2571,11 +2573,11 @@ mod tests {
 			.expect("three-way apply");
 		assert_eq!(
 			fs::read(temp.path().join("file.txt")).expect("merged file"),
-			b"ONE\nTWO\nthree\n"
+			b"ONE\ntwo\nthree\nFOUR\n"
 		);
 
 		reset(temp.path());
-		fs::write(temp.path().join("file.txt"), b"one\nOTHER\nthree\n").expect("conflict");
+		fs::write(temp.path().join("file.txt"), b"one\ntwo\nthree\nOTHER\n").expect("conflict");
 		assert!(
 			!repository
 				.can_apply_patch(&patch, &three_way)

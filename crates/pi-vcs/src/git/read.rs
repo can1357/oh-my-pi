@@ -150,7 +150,7 @@ impl GitRepo {
 			let id = reference
 				.peel_to_id()
 				.map_err(|err| Error::backend("git tags", err))?;
-			if id.to_string() == target
+			if id == target
 				&& let Some(name) = reference
 					.name()
 					.as_bstr()
@@ -645,11 +645,13 @@ impl GitRepo {
 			.rev_parse_single(b)
 			.map_err(|err| Error::backend("git merge-base", err))?
 			.detach();
-		match repo.merge_base(a_id, b_id) {
-			Ok(id) => Ok(Some(id.detach().to_string())),
-			Err(gix::repository::merge_base::Error::NotFound { .. }) => Ok(None),
-			Err(err) => Err(Error::backend("git merge-base", err)),
-		}
+		// `merge_base` reports "no merge base" only as an untyped error; the
+		// many-bases form returns it as an empty list. Its first entry is the
+		// best base, which is what `merge_base` returns.
+		let bases = repo
+			.merge_bases_many(a_id, &[b_id])
+			.map_err(|err| Error::backend("git merge-base", err))?;
+		Ok(bases.first().map(|id| id.detach().to_string()))
 	}
 
 	/// List commits touching `file`, newest first.
@@ -1266,9 +1268,7 @@ fn parse_worktree_cli(raw: &str) -> Vec<WorktreeEntry> {
 	}
 	out
 }
-fn commit_subject(
-	commit: &gix::Commit<'_>,
-) -> std::result::Result<String, gix::object::commit::Error> {
+fn commit_subject(commit: &gix::Commit<'_>) -> gix::ExnMessageResult<String> {
 	Ok(commit
 		.message()?
 		.title
