@@ -1299,8 +1299,9 @@ export class UiHelpers {
 			{
 				label: "Steering",
 				messages: steeringMessages,
-				// The chips list only your messages; one delivery in five goes to agent steering first.
-				note: queuedMessages.agentSteeringNext ? "an agent message goes first" : undefined,
+				// The chips list only your messages. After four of them went ahead of a waiting agent
+				// message, that message is read first and yours one delivery later; say both.
+				note: queuedMessages.agentSteeringNext ? "an agent message goes first, yours next" : undefined,
 			},
 			{ label: "After yield", messages: followUpMessages },
 		].filter(group => group.messages.length > 0);

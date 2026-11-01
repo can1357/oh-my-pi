@@ -2383,6 +2383,11 @@ export class Agent {
 						break;
 
 					case "agent_end":
+						// The run records nothing after this, so give back what it took and did not record
+						// before it stops streaming: a subscriber may start the next run from this event, and
+						// that run must not dequeue around messages still to be requeued, nor select by
+						// allowance places they still hold.
+						this.#restoreUndeliveredQueuedMessages(loopAbortController);
 						this.#state.isStreaming = false;
 						this.#state.streamMessage = null;
 						break;

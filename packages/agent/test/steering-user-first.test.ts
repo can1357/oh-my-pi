@@ -561,6 +561,59 @@ describe("one-at-a-time steering: a person's message before agent steering", () 
 		expect(transcriptTexts(agent)).toEqual(["start", ...sent, "P11", "P12"]);
 	});
 
+	it("gives an aborted run's unrecorded places back before an agent_end subscriber can start the next run", async () => {
+		let aborting = true;
+		const mock = createMockModel({
+			// The first response waits until the abort cancels it; later ones answer at once.
+			handler: () => ({ content: ["ack"], delayMs: aborting ? 60_000 : 0 }),
+		});
+		const agent: Agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			convertToLlm,
+			steeringMode: "one-at-a-time",
+			streamFn: async (model, context, options) => {
+				if (aborting && options?.liveSteering) {
+					agent.steer(card(1));
+					agent.steer(person("P1"));
+					// Live steering claims P1-P4 for the streaming response, so card 1 is due next; P5
+					// arrives behind it. Then the run aborts, so none of the four is recorded.
+					let sent = 0;
+					const enough = Promise.withResolvers<void>();
+					const pump = new CodexSteerPump(
+						options.liveSteering,
+						{
+							steer: async () => {
+								sent++;
+								agent.steer(person(`P${sent + 1}`));
+								if (sent === 4) enough.resolve();
+								return { accepted: true, id: `steer-${sent}` };
+							},
+						},
+						messages => messages.map(message => ({ role: "user", content: message.content })),
+					);
+					pump.start("response-1");
+					await enough.promise;
+					await pump.finish();
+					agent.abort();
+				}
+				return mock.stream(model, context, options);
+			},
+		});
+		let continued: Promise<void> | undefined;
+		agent.subscribe(event => {
+			if (event.type !== "agent_end" || continued) return;
+			aborting = false;
+			continued = agent.continue();
+		});
+
+		await agent.prompt("start");
+		await continued;
+
+		// The four aborted claims gave their places back before the next run took anything, so they
+		// go first again and card 1 waits for them.
+		expect(transcriptTexts(agent)).toEqual(["start", "P1", "P2", "P3", "P4", "card 1", "P5"]);
+	});
+
 	it("lets a due agent steer whose preparation fails go next once it is put back", async () => {
 		const mock = createMockModel({ handler: () => ({ content: ["ack"] }) });
 		const agent = new Agent({
@@ -633,10 +686,11 @@ describe("one-at-a-time steering: a person's message before agent steering", () 
 		expect(transcriptTexts(agent)).toEqual(["U1", "U2", "U3", "U4", "URGENT", "card 1"]);
 	});
 
-	it("names the next steering delivery, agent steering once the allowance is spent", async () => {
-		const queued = [card(1), ...["U1", "U2", "U3", "U4", "U5"].map(person)];
+	it("names the next steering delivery, which is the unit the next delivery records", async () => {
+		const names = ["card 1", "U1", "U2", "U3", "U4", "U5"];
+		const queued = [card(1), ...names.slice(1).map(person)];
 		const seen: number[][] = [];
-		await runWithQueued(queued, {
+		const { agent } = await runWithQueued(queued, {
 			arrivals: (call, target) => {
 				if (call <= 5) seen.push(target.peekNextSteering().map(message => queued.indexOf(message)));
 			},
@@ -644,5 +698,7 @@ describe("one-at-a-time steering: a person's message before agent steering", () 
 
 		// Indexes into `queued`: U2, U3, U4, then card 1 once four user units were taken, then U5.
 		expect(seen).toEqual([[2], [3], [4], [0], [5]]);
+		// Each call's peek is the unit the following call took: transcript entries after "start" and U1.
+		expect(transcriptTexts(agent).slice(2)).toEqual(seen.map(([index]) => names[index]));
 	});
 });
