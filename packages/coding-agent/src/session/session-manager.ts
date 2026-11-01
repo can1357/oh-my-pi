@@ -764,6 +764,7 @@ interface SessionManagerStateSnapshot {
 	titleUpdatedAt: string;
 	hasTitleSlot: boolean;
 	onDisk: boolean;
+	forceFileCreation: boolean;
 	needsRewrite: boolean;
 	tailRewritePending: boolean;
 	draftOnlySessionCleanupArmed: boolean;
@@ -1502,11 +1503,7 @@ export class SessionManager {
 		if (this.#unappendedTail.length > 0 || this.#pendingTitleUpdate) {
 			if (!this.#appendUnappendedTail(syncTitle, allowSealed)) throw this.#diskFailure;
 		} else if (this.#storage.defersSyncPublish || (!allowSealed && !this.#tailRewritePending)) return;
-		if (
-			this.#tailRewritePending ||
-			this.#rewriteRequired ||
-			(allowSealed && !this.#fileIsCurrent && this.#shouldHaveSessionFile())
-		) {
+		if (this.#tailRewritePending || (allowSealed && !this.#fileIsCurrent && this.#shouldHaveSessionFile())) {
 			this.#rewriteSynchronously(allowSealed);
 			if (this.#diskFailure) throw this.#diskFailure;
 		}
@@ -2533,6 +2530,7 @@ export class SessionManager {
 			expectedDiskSize: this.#expectedDiskSize,
 			prospectiveDiskSize: this.#prospectiveDiskSize,
 			onDisk: this.#fileIsCurrent && this.#unappendedTail.length === 0 && !this.#pendingTitleUpdate,
+			forceFileCreation: this.#forceFileCreation,
 			needsRewrite:
 				this.#rewriteRequired || this.#unappendedTail.length > 0 || this.#pendingTitleUpdate !== undefined,
 			tailRewritePending:
@@ -2599,7 +2597,7 @@ export class SessionManager {
 		this.#fileIsCurrent = snapshot.onDisk;
 		this.#rewriteRequired = snapshot.needsRewrite;
 		this.#tailRewritePending = this.#persist && snapshot.tailRewritePending;
-		this.#forceFileCreation = snapshot.onDisk;
+		this.#forceFileCreation = snapshot.forceFileCreation;
 		this.#draftOnlySessionCleanupArmed = snapshot.draftOnlySessionCleanupArmed;
 		this.#fallbackRuntimeOnly = snapshot.fallbackRuntimeOnly;
 		// A completed moveTo drops the stash, so a rollback restores it here.
@@ -2743,7 +2741,6 @@ export class SessionManager {
 		this.#additionalDirectories = header.additionalDirectories ?? [];
 		this.#titleUpdatedAt = titleSlot?.updatedAt ?? header.timestamp;
 		this.#hasTitleSlot = titleSlot !== undefined;
-		this.#fileIsCurrent = true;
 		this.#rewriteRequired = migrated || loaded.malformedRecords > 0;
 		this.#tailRewritePending = false;
 		this.#loadedMalformedRecords = loaded.malformedRecords;
@@ -2752,6 +2749,8 @@ export class SessionManager {
 		this.#artifactManagerSessionFile = null;
 
 		if (this.sanitizeLoadedOpenAIResponsesReplayMetadata()) this.#rewriteRequired = true;
+		// Loading normalizes memory only; an untouched reader must not claim or publish on close.
+		this.#fileIsCurrent = true;
 	}
 
 	/**
@@ -2826,6 +2825,7 @@ export class SessionManager {
 		this.#hasTitleSlot = true;
 		this.#fileIsCurrent = false;
 		this.#rewriteRequired = false;
+		this.#tailRewritePending = false;
 		this.#forceFileCreation = true;
 		this.#draftOnlySessionCleanupArmed = false;
 		this.#artifactManager = null;
@@ -3286,7 +3286,10 @@ export class SessionManager {
 					if (!this.#diskFailure) this.#closeFailure = closeError;
 					throw closeError;
 				}
-				if (hadWriter || (this.#sessionFile && this.#storage.existsSync(this.#sessionFile)))
+				if (
+					!this.#rewriteRequired &&
+					(hadWriter || (this.#sessionFile && this.#storage.existsSync(this.#sessionFile)))
+				)
 					this.#fileIsCurrent = true;
 			},
 			{ ignorePriorError: true },
@@ -3309,7 +3312,7 @@ export class SessionManager {
 			{ ignorePriorError: true },
 		);
 		if (
-			(this.#diskFailure || this.#rewriteRequired) &&
+			(this.#diskFailure || this.#tailRewritePending || !this.#fileIsCurrent) &&
 			this.#sessionFile &&
 			this.#storage.defersSyncPublish &&
 			!this.#entriesReleased &&
@@ -3467,6 +3470,7 @@ export class SessionManager {
 	 */
 	async #persistWorkspaceDirectoriesChange(): Promise<void> {
 		if (!this.#persist || !this.#sessionFile || !this.#shouldHaveSessionFile()) return;
+		this.#fileIsCurrent = false;
 		this.#rewriteRequired = true;
 		await this.#rewriteAtomically();
 	}
@@ -4335,6 +4339,7 @@ export class SessionManager {
 		this.#header.taskPromptCacheKey = key;
 		this.#header.providerPromptCacheKey = undefined;
 		if (!this.#persist || !this.#sessionFile || !this.#shouldHaveSessionFile()) return;
+		this.#fileIsCurrent = false;
 		this.#rewriteRequired = true;
 		await this.#rewriteAtomically();
 	}
