@@ -24,21 +24,27 @@ describe("tiny-models download model resolution", () => {
 		for (const key of usable) expect(all).toContain(key);
 	});
 
-	it("excludes MLX-blocked models from `all` when the MLX backend is active", () => {
+	it("keeps every loadable model in `all` when the MLX backend is active", () => {
 		const mlxBlocked = TINY_LOCAL_MODELS.filter(
 			spec => "mlxUnsupportedReason" in spec && spec.mlxUnsupportedReason,
 		).map(spec => spec.key);
-		// Guard: keep this regression meaningful — at least one registry entry must be MLX-blocked.
-		expect(mlxBlocked.length).toBeGreaterThan(0);
-
-		const all = resolveModels("all", true);
-		for (const key of mlxBlocked) expect(all).not.toContain(key);
-
-		// ONNX-blocked models are the ones MLX exists for, so they stay in the MLX prefetch.
 		const onnxBlocked = TINY_LOCAL_MODELS.filter(
 			spec => "onnxUnsupportedReason" in spec && spec.onnxUnsupportedReason,
 		).map(spec => spec.key);
+		// Guard: keep this regression meaningful — the registry must exercise both directions.
+		expect(mlxBlocked.length).toBeGreaterThan(0);
+		expect(onnxBlocked.length).toBeGreaterThan(0);
+
+		const all = resolveModels("all", true);
+		// MLX-blocked models still run on ONNX CPU, so they are prefetched.
+		for (const key of mlxBlocked) expect(all).toContain(key);
+		// ONNX-blocked models are the ones MLX exists for.
 		for (const key of onnxBlocked) expect(all).toContain(key);
+		// Only a model no backend can load is skipped.
+		for (const key of [...mlxBlocked, ...onnxBlocked]) {
+			if (!(mlxBlocked.includes(key) && onnxBlocked.includes(key))) continue;
+			expect(all).not.toContain(key);
+		}
 	});
 
 	it("still resolves an explicitly requested unsupported model (only `all` is filtered)", () => {

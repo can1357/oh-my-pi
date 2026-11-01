@@ -71,14 +71,15 @@ function downloadErrorSummary(error: string | undefined): string | undefined {
 
 export function resolveModels(model: string | undefined, mlx = tinyWorkerUsesMlx()): TinyLocalModelKey[] {
 	if (!model) return [DEFAULT_TINY_TITLE_LOCAL_MODEL_KEY];
-	// `all` is a prefetch convenience: skip models the active backend cannot load,
-	// so the bulk download stays green when every *usable* model succeeds.
+	// `all` is a prefetch convenience: skip only models no active backend can load, so the
+	// bulk download stays green when every *usable* model succeeds. A model the MLX backend
+	// cannot load still runs on ONNX CPU, so under MLX only "refused by both" is skipped.
 	if (model === "all")
-		return TINY_LOCAL_MODELS.filter(spec =>
-			mlx
-				? !("mlxUnsupportedReason" in spec) || !spec.mlxUnsupportedReason
-				: !("onnxUnsupportedReason" in spec) || !spec.onnxUnsupportedReason,
-		).map(spec => spec.key);
+		return TINY_LOCAL_MODELS.filter(spec => {
+			const onnxBlocked = "onnxUnsupportedReason" in spec && Boolean(spec.onnxUnsupportedReason);
+			const mlxBlocked = "mlxUnsupportedReason" in spec && Boolean(spec.mlxUnsupportedReason);
+			return !(mlx ? mlxBlocked && onnxBlocked : onnxBlocked);
+		}).map(spec => spec.key);
 	if (!isTinyLocalModelKey(model)) {
 		const values = TINY_LOCAL_MODELS.map(spec => spec.key).join(", ");
 		throw new Error(`Unknown tiny local model: ${model}. Expected one of: ${values}, ${SMOLLM_KEY}, all`);
