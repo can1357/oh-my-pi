@@ -1016,9 +1016,15 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				ownerId: this.session.getAgentId?.() ?? undefined,
 				foreground: options.foreground,
 				process: { command: options.command, cwd: options.commandCwd, pids: () => pids(), streams },
+				intent: options.intent,
 				widgetInputs: {
 					sources: () => [outputTap, ...pipeSources.list()],
-					brief: () => ({ kind: "bash", command: options.command, intent: options.intent }),
+					brief: () => ({
+						kind: "bash",
+						command: options.command,
+						timeoutSec: options.timeoutSec,
+						intent: options.intent,
+					}),
 				},
 			},
 		);

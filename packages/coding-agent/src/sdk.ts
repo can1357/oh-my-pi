@@ -296,7 +296,15 @@ import {
 	xdevEntries,
 } from "./tools";
 import { resolveYieldReportText } from "./tools/yield";
-import { createModelJobWidgetAuthor, type JobWidgetAuthor, JobWidgets, resolveToolCallIntent } from "./job-widgets";
+import {
+	createModelJobCaptionWriter,
+	createModelJobWidgetAuthor,
+	type JobCaptionWriter,
+	type JobWidgetAuthor,
+	JobWidgets,
+	type ModelJobWidgetAuthorOptions,
+	resolveToolCallIntent,
+} from "./job-widgets";
 import { createBrowserPrelude } from "./tools/browser";
 import { isMCPToolName, normalizeToolNames } from "./tools/builtin-names";
 import { createComputerPrelude } from "./tools/computer";
@@ -875,6 +883,12 @@ export interface CreateAgentSessionOptions {
 	 * which share their root's widgets.
 	 */
 	jobWidgetAuthor?: JobWidgetAuthor;
+	/**
+	 * Writes the captions of the root session's long command jobs. Defaults
+	 * to the `widget` model role; ignored for child sessions, like
+	 * {@link jobWidgetAuthor}.
+	 */
+	jobCaptionWriter?: JobCaptionWriter;
 	/**
 	 * Registry id of the spawning agent, recorded as this subagent's parent in
 	 * the agent registry. Distinct from `parentTaskPrefix`, which is this agent's
@@ -2343,32 +2357,38 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			})
 		: undefined;
 	if (asyncJobManager) {
+		const usagePurpose =
+			(purpose: string): ModelJobWidgetAuthorOptions["onUsage"] =>
+			message => {
+				if (!message.usage) return;
+				sessionManager.appendModelUsage(
+					{
+						purpose,
+						api: message.api,
+						provider: message.provider,
+						model: message.model,
+						usage: message.usage,
+						stopReason: message.stopReason,
+					},
+					{ sessionId: sessionManager.getSessionId(), parentId: sessionManager.getLeafId() },
+				);
+			};
+		const cheapModelOptions: Omit<ModelJobWidgetAuthorOptions, "onUsage"> = {
+			settings,
+			modelRegistry,
+			sessionId: () => sessionManager.getSessionId(),
+			costGate: currentCostGate,
+			telemetry: () => agent?.telemetry,
+			obfuscate: () => (obfuscator?.hasSecrets() ? text => obfuscator?.obfuscate(text) ?? text : undefined),
+		};
 		asyncJobManager.widgets = new JobWidgets({
 			enabled: () => cfgAsyncWidgets.get(settings),
 			author:
 				options.jobWidgetAuthor ??
-				createModelJobWidgetAuthor({
-					settings,
-					modelRegistry,
-					sessionId: () => sessionManager.getSessionId(),
-					costGate: currentCostGate,
-					telemetry: () => agent?.telemetry,
-					obfuscate: () => (obfuscator?.hasSecrets() ? text => obfuscator?.obfuscate(text) ?? text : undefined),
-					onUsage: message => {
-						if (!message.usage) return;
-						sessionManager.appendModelUsage(
-							{
-								purpose: "job-widget",
-								api: message.api,
-								provider: message.provider,
-								model: message.model,
-								usage: message.usage,
-								stopReason: message.stopReason,
-							},
-							{ sessionId: sessionManager.getSessionId(), parentId: sessionManager.getLeafId() },
-						);
-					},
-				}),
+				createModelJobWidgetAuthor({ ...cheapModelOptions, onUsage: usagePurpose("job-widget") }),
+			captioner:
+				options.jobCaptionWriter ??
+				createModelJobCaptionWriter({ ...cheapModelOptions, onUsage: usagePurpose("job-caption") }),
 		});
 	}
 	const scopedAsyncJobManager = asyncJobManager ?? options.asyncJobManager;
