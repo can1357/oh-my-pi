@@ -1362,20 +1362,6 @@ function editorFactoriesOf(owner: ExtensionCallbackOwner): WeakMap<object, Edito
  *  whichever wrapper its runner holds the UI through. */
 const uiSlotsHeld = new WeakMap<object, Map<string, ExtensionCallbackOwner>>();
 
-/** A session's last setting of a slot, as {@link latestSettings} keeps it: who set it, and how to
- *  set it again on the host UI it was set through. */
-interface SlotSetting {
-	readonly owner: ExtensionCallbackOwner;
-	readonly again: () => void;
-}
-
-/**
- * The latest setting of each slot, through whichever host UI: a session's end, taking a slot back,
- * sets this one again when another session made it ({@link hostUIKey} says why). Gone once the
- * slot is cleared or the session that set it ends.
- */
-const latestSettings = new Map<string, SlotSetting>();
-
 /** Where a host UI carries the key its slots are held under ({@link hostUIKey}). */
 const HOST_UI_KEY = Symbol("omp.extension.hostUIKey");
 
@@ -1400,12 +1386,17 @@ const HOST_UI_KEY = Symbol("omp.extension.hostUIKey");
  * or a Proxy over a host that cannot take a key (a frozen one), one per runner. Nothing on such a
  * wrapper names the host behind it — a bound function's target and a Proxy's target are not
  * observable — and the members it shares with the host are shared just as much by unrelated UIs
- * made from the same base, which must stay apart (the `Object.create(parent)` case above). So two
- * runners over such wrappers hold separate slots, and taking a session's slot back clears it
- * through its own wrapper, which may be the UI another session has written to since. The slot is
- * then set again as that session last set it ({@link latestSettings}): whether the two wrappers
- * front one UI or two, the later setting is what stays. Over two UIs that is the other UI's own
- * setting made again, the same text or the same factory.
+ * made from the same base, which must stay apart (the `Object.create(parent)` case above). Such a
+ * wrapper is a host UI of its own here, and a session's end clears what it set through it. That is
+ * the embedder's contract (docs/sdk.md): two runners writing to one UI are handed the same object,
+ * or a transparent Proxy over an object that can take a key.
+ *
+ * Nothing else can be right for such a wrapper. Session A set a slot through one wrapper, session
+ * B set it later through another, and A ends: over one host A must not clear, over two it must.
+ * The only writes that satisfy both — clear through A's wrapper, then set B's again — make B's
+ * host do B's setting twice, and a setter is not an assignment: the host's widget slot disposes
+ * the component B's factory made and makes a new one, losing what it held. So a session's end
+ * writes nothing but its own withdrawal, and only where it still holds the slot.
  */
 function hostUIKey(ui: ExtensionUIContext): object {
 	const own: unknown = Reflect.getOwnPropertyDescriptor(ui, HOST_UI_KEY)?.value;
@@ -1503,32 +1494,29 @@ export function handUIContext(
 	/** The slots this facade takes back when its session ends: one withdrawal each. */
 	const withdrawing = new Set<string>();
 	/** The session sets `slot` on the host's UI with `set`, or clears it: a slot it set is taken
-	 *  back with `clear` when it ends, unless a session has set the slot since through this UI. A
-	 *  slot another session set later through another UI is then set again as that session last set
-	 *  it ({@link latestSettings}), so taking this one back cannot erase it. */
+	 *  back with `clear` when it ends, unless a session has set the slot since through this UI.
+	 *
+	 *  Who holds the slot, and the withdrawal, are recorded before the host's setter runs: a setter
+	 *  can end a session synchronously, or write and then throw. A session ended while another's
+	 *  setting is under way finds the slot already that other's, and leaves it; a setting whose
+	 *  setter throws is taken back like any other, since the host may have shown it. */
 	const holds = (slot: string, clearing: boolean, set: () => void, clear: () => void): void => {
-		set();
 		if (clearing) {
 			if (held.get(slot) === owner) held.delete(slot);
-			latestSettings.delete(slot);
+			set();
 			return;
 		}
 		held.set(slot, owner);
-		latestSettings.set(slot, { owner, again: set });
-		if (withdrawing.has(slot)) return;
-		withdrawing.add(slot);
-		owner.whenSessionEnds?.(() => {
-			withdrawing.delete(slot);
-			const latest = latestSettings.get(slot);
-			if (latest?.owner === owner) latestSettings.delete(slot);
-			if (held.get(slot) !== owner) return;
-			held.delete(slot);
-			try {
+		if (!withdrawing.has(slot)) {
+			withdrawing.add(slot);
+			owner.whenSessionEnds?.(() => {
+				withdrawing.delete(slot);
+				if (held.get(slot) !== owner) return;
+				held.delete(slot);
 				clear();
-			} finally {
-				if (latest && latest.owner !== owner && !latest.owner.isRetired) latest.again();
-			}
-		});
+			});
+		}
+		set();
 	};
 	const handed: Decided<ExtensionUIContext> = {
 		get timeoutStartsOnPresentation() {

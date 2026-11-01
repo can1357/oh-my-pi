@@ -1146,10 +1146,14 @@ export class AgentSession implements SettingsScope {
 		| undefined;
 	/** Active {@link holdIrcWakes} holds. */
 	#ircWakeHolds = 0;
-	/** IRC wakes waiting out a running idle compaction (see {@link #wakeForIrc}). */
-	#ircWakesAwaitingIdleCompaction = 0;
-	/** Sends parked on a running session transition (see {@link #deliverAfterSessionTransition}). */
-	#deliveriesAwaitingSessionTransition = 0;
+	/** Records that live only in a carrier's closure, in no queue: an IRC wake waiting out a
+	 *  running idle compaction ({@link #wakeForIrc}), and a send a running session transition took
+	 *  over ({@link #deliverAfterSessionTransition}). Nothing else can see that the session still
+	 *  owes their delivery, so each of them asks here: {@link ircWakesPending} keeps the lifecycle
+	 *  from parking the session on top of one, {@link #settleOwedAgentEnd} keeps a turn's promised
+	 *  continuation open, and {@link waitForIdle} does not call the session idle while one is in
+	 *  flight — its sender was told the record was accepted, and placing it may still start a turn. */
+	#carriedRecords = new Set<Promise<void>>();
 	/** The observation whose monitor is attached; at most one at a time. */
 	#openTurnObservation: TurnObservation | undefined;
 	// Agent identity (registry id) used for IRC routing and job ownership.
@@ -1663,51 +1667,43 @@ export class AgentSession implements SettingsScope {
 		}
 		// Idle compaction rewrites history without owning a turn. Wait it out without claiming
 		// the session (an in-flight wake would make input typed meanwhile find it busy), then
-		// decide afresh. Meanwhile the records live only in this closure, so they are counted
-		// for `ircWakesPending`.
+		// decide afresh. Meanwhile the records live only in this closure, so it carries them
+		// ({@link #carriedRecords}).
 		const idleCompaction = this.#maintenance.waitForIdleCompaction();
 		if (idleCompaction) {
 			const promptGeneration = this.#promptGeneration;
 			const sessionGeneration = this.#sessionGeneration;
-			this.#ircWakesAwaitingIdleCompaction++;
-			void idleCompaction
-				.then(async () => {
-					// A transition (/new, /clear, a switch) aborts long before it replaces the transcript, so
-					// let it settle first: only then does the session generation say which transcript is live.
-					if (this.isSessionTransitioning) await this.waitForSessionTransition();
-					// The transcript these records were sent to was replaced (/new, /clear, a switch): drop them with it.
-					if (
-						this.#sessionGeneration !== sessionGeneration &&
-						(await this.#sessionGenerationChanged(sessionGeneration))
-					) {
-						return;
-					}
-					if (this.#isDisposed) return;
-					if (this.hasAdmittedSubmission) {
-						// Input admitted during the compaction goes first. Prompt setup folds pending IRC
-						// into its turn; whatever is still pending once it settles wakes as usual.
-						this.#irc.queueAside(wakeRecords);
-						await this.waitForAdmittedSubmissions();
-						this.#resumeStrandedIrcAsides();
-						return;
-					}
-					if (this.#promptGeneration !== promptGeneration) {
-						// An abort during the wait never saw this wake start, so it does not cancel it: the records
-						// take the stranded-aside path, which wakes for IRC messages as a delivery right after the
-						// abort would, and folds other asides while the user's interrupt holds.
-						this.#irc.queueAside(wakeRecords);
-						this.#resumeStrandedIrcAsides();
-						return;
-					}
-					this.#wakeForIrc(wakeRecords);
-				})
-				.catch(error => logger.warn("IRC wake after idle compaction failed", { error: String(error) }))
-				.finally(() => {
-					this.#ircWakesAwaitingIdleCompaction--;
-					// This closure was the last owner of its records, and any settlement attempt made
-					// while it held them was refused. Ask again now that the account is clear.
-					this.#settleOwedAgentEnd();
-				});
+			this.#carryRecords("IRC wake after idle compaction failed", async () => {
+				await idleCompaction;
+				// A transition (/new, /clear, a switch) aborts long before it replaces the transcript, so
+				// let it settle first: only then does the session generation say which transcript is live.
+				if (this.isSessionTransitioning) await this.waitForSessionTransition();
+				// The transcript these records were sent to was replaced (/new, /clear, a switch): drop them with it.
+				if (
+					this.#sessionGeneration !== sessionGeneration &&
+					(await this.#sessionGenerationChanged(sessionGeneration))
+				) {
+					return;
+				}
+				if (this.#isDisposed) return;
+				if (this.hasAdmittedSubmission) {
+					// Input admitted during the compaction goes first. Prompt setup folds pending IRC
+					// into its turn; whatever is still pending once it settles wakes as usual.
+					this.#irc.queueAside(wakeRecords);
+					await this.waitForAdmittedSubmissions();
+					this.#resumeStrandedIrcAsides();
+					return;
+				}
+				if (this.#promptGeneration !== promptGeneration) {
+					// An abort during the wait never saw this wake start, so it does not cancel it: the records
+					// take the stranded-aside path, which wakes for IRC messages as a delivery right after the
+					// abort would, and folds other asides while the user's interrupt holds.
+					this.#irc.queueAside(wakeRecords);
+					this.#resumeStrandedIrcAsides();
+					return;
+				}
+				this.#wakeForIrc(wakeRecords);
+			});
 			return;
 		}
 		// While a driven run holds wakes, its monitor would take this turn's answer
@@ -1996,6 +1992,22 @@ export class AgentSession implements SettingsScope {
 		return queuedContinuation || ircContinuation;
 	}
 
+	/** Runs `carry`, a closure that is the only owner of the records it holds, counted in
+	 *  {@link #carriedRecords} until it has placed or dropped them. A failure is this session's
+	 *  own: the sender was told its record was accepted and is long gone, so there is nobody to
+	 *  reject to and the carrier logs under `failure` instead. */
+	#carryRecords(failure: string, carry: () => Promise<void>): void {
+		const carried = carry()
+			.catch(error => logger.warn(failure, { error: String(error) }))
+			.finally(() => {
+				this.#carriedRecords.delete(carried);
+				// This closure was the last owner of its records, and any settlement attempt made
+				// while it held them was refused. Ask again now that the account is clear.
+				this.#settleOwedAgentEnd();
+			});
+		this.#carriedRecords.add(carried);
+	}
+
 	/** Publishes the terminal `agent_end` that a downgraded one withheld, once the tail work it
 	 *  promised a continuation for is gone. Called by every path that consumes that work without
 	 *  starting a turn — the stranded-aside folds, a prompt that folded it and then bailed,
@@ -2013,15 +2025,14 @@ export class AgentSession implements SettingsScope {
 		// compaction (#wakeForIrc) or a session transition (#deliverAfterSessionTransition), or
 		// inside a fold batch that is still emitting (#recordWithoutTurn). None of those are visible
 		// to `#irc.hasPending()`, and in each the promised continuation has not finished. These
-		// counters, not {@link ircWakesPending}: that getter also reports a {@link holdIrcWakes}
+		// owners, not {@link ircWakesPending}: that getter also reports a {@link holdIrcWakes}
 		// hold, and a hold is a restriction on when wakes may run, not evidence that a record is
 		// waiting — `task/executor.ts` holds one across a whole driven run with nothing queued.
 		if (
 			!options?.final &&
 			(this.isStreaming ||
 				this.#hasTailContinuationWork() ||
-				this.#ircWakesAwaitingIdleCompaction > 0 ||
-				this.#deliveriesAwaitingSessionTransition > 0 ||
+				this.#carriedRecords.size > 0 ||
 				this.#foldingIrcRecords > 0)
 		) {
 			return;
@@ -7244,8 +7255,10 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * Wait until streaming, event persistence, and deferred recovery work are fully settled.
-	 * Call outside callbacks whose completion the session awaits to avoid waiting on yourself.
+	 * Wait until streaming, event persistence, deferred recovery work and every record this
+	 * session accepted are fully settled. Call outside callbacks whose completion the session
+	 * awaits to avoid waiting on yourself — an extension's `ctx.waitForIdle()` is the agent's own
+	 * wait for that reason, and a session transition's hooks must not call this one.
 	 */
 	async waitForIdle(): Promise<void> {
 		while (true) {
@@ -7258,17 +7271,24 @@ export class AgentSession implements SettingsScope {
 			// rewriting entries before it publishes auto_retry_end.
 			await this.#drainInFlightEventHandlers();
 			await this.#waitForPostPromptRecovery();
+			// A record a carrier holds is in no queue, and placing it can start a turn: a send the
+			// session accepted while a transition or an idle compaction ran is still in flight, so
+			// the session is not idle yet ({@link #carriedRecords}). Queued records are not this
+			// wait's business — an aside behind a pooled yield contract waits for the next prompt.
+			await Promise.all(this.#carriedRecords);
 			// An abort can finish (and schedule its drain) after the waits above returned.
 			if (
 				!this.agent.state.isStreaming &&
 				this.#inFlightEventHandlers.size === 0 &&
 				this.#abortUnwinds.size === 0 &&
-				this.#postPromptTasks.size === 0
+				this.#postPromptTasks.size === 0 &&
+				this.#carriedRecords.size === 0
 			) {
 				return;
 			}
 		}
 	}
+
 	/** Stop todo reminders from starting extra turns in a single-shot print run. */
 	disableStopTimeTodoReminders(): void {
 		this.#stopTimeTodoRemindersEnabled = false;
@@ -10609,6 +10629,14 @@ export class AgentSession implements SettingsScope {
 	 * delivery over (it is dispatched once the transition settles). Callers that
 	 * must mirror the resulting `agent_end` use this to avoid acting on a turn
 	 * that never ran.
+	 *
+	 * The answer is about this call, not about the record. A delivery a transition
+	 * took over keeps its `triggerTurn`, so it can start a turn once the transition
+	 * settles — one this call cannot report, since awaiting that settle would park a
+	 * sender whose own `session_switch` hook the transition is waiting for. From the
+	 * hand-over on, the record is the session's work: {@link waitForIdle} waits for
+	 * it and the turn it starts, and {@link ircWakesPending} keeps the lifecycle from
+	 * parking the session on top of it.
 	 */
 	async sendCustomMessage<T = unknown>(
 		message: CustomMessagePayload<T>,
@@ -10868,16 +10896,16 @@ export class AgentSession implements SettingsScope {
 	 *  inside it, so an extension sending from one (`pi.sendMessage` in a `session_switch` handler)
 	 *  would wait for the handler it is running in. The record is kept, not dropped — only the
 	 *  transcript it was sent to can still claim it, so a committed session change discards it the
-	 *  same way the inline path did. Counted in {@link ircWakesPending} for the same reason
-	 *  #wakeForIrc counts its own compaction wait: while the record lives only in this closure,
-	 *  the lifecycle must not park the session out from under it.
+	 *  same way the inline path did. Carried in {@link #carriedRecords} for the same reason
+	 *  #wakeForIrc carries its own compaction wait: while the record lives only in this closure,
+	 *  the lifecycle must not park the session out from under it, and the session is not idle.
 	 *
 	 *  The sender already has its answer (`false`, accepted without a turn), so a failure here has
 	 *  nobody left to reject to — `runtime-init.ts`'s reportSendError is long gone. This closure
 	 *  therefore owns the record ({@link CustomMessageDelivery}) until the dispatch places it,
 	 *  drops it with its transcript, or hands it to a further carrier, and only then releases:
-	 *  anything still owed goes back on the IRC queue instead of vanishing. The counter is held
-	 *  across that recovery too, so {@link ircWakesPending} never reads empty while the record is
+	 *  anything still owed goes back on the IRC queue instead of vanishing. The record is carried
+	 *  across that recovery too, so nothing reads this session as settled while the record is
 	 *  still in flight between owners. */
 	#deliverAfterSessionTransition<T>(
 		message: CustomMessagePayload<T>,
@@ -10885,40 +10913,31 @@ export class AgentSession implements SettingsScope {
 		sessionGeneration: number,
 		promptGeneration: number,
 	): void {
-		this.#deliveriesAwaitingSessionTransition++;
 		const delivery: CustomMessageDelivery = { owed: true };
-		void this.waitForSessionTransition()
-			.then(async () => {
+		this.#carryRecords("Requeueing an undelivered custom message failed", async () => {
+			await this.waitForSessionTransition();
+			try {
 				if (this.#isDisposed) {
 					delivery.owed = false;
-					return;
-				}
-				if (
+				} else if (
 					this.#sessionGeneration !== sessionGeneration &&
 					(await this.#sessionGenerationChanged(sessionGeneration))
 				) {
 					delivery.owed = false;
-					return;
+				} else {
+					// An abort supersedes only the turn, exactly as on the inline path: the message stays
+					// in this session's transcript and is delivered like one that triggers none.
+					const dispatchOptions =
+						this.#promptGeneration !== promptGeneration
+							? { ...options, triggerTurn: false, deliverAs: undefined }
+							: options;
+					await this.#dispatchCustomMessage(message, dispatchOptions, { sessionClaimed: false }, delivery);
 				}
-				// An abort supersedes only the turn, exactly as on the inline path: the message stays in
-				// this session's transcript and is delivered like one that triggers none.
-				const dispatchOptions =
-					this.#promptGeneration !== promptGeneration
-						? { ...options, triggerTurn: false, deliverAs: undefined }
-						: options;
-				await this.#dispatchCustomMessage(message, dispatchOptions, { sessionClaimed: false }, delivery);
-			})
-			.catch(error =>
-				logger.warn("Custom message delivery after a session transition failed", { error: String(error) }),
-			)
-			.then(() => (delivery.owed ? this.#requeueUndeliveredDelivery(message, sessionGeneration) : undefined))
-			.catch(error => logger.warn("Requeueing an undelivered custom message failed", { error: String(error) }))
-			.finally(() => {
-				this.#deliveriesAwaitingSessionTransition--;
-				// Same as #wakeForIrc's compaction carrier: a settlement refused while this closure
-				// held the record has to be re-asked once it no longer does.
-				this.#settleOwedAgentEnd();
-			});
+			} catch (error) {
+				logger.warn("Custom message delivery after a session transition failed", { error: String(error) });
+			}
+			if (delivery.owed) await this.#requeueUndeliveredDelivery(message, sessionGeneration);
+		});
 	}
 
 	/** Hands a record this session accepted but could not deliver back to the IRC aside queue,
@@ -13370,8 +13389,7 @@ export class AgentSession implements SettingsScope {
 	get ircWakesPending(): boolean {
 		return (
 			this.#ircWakeHolds > 0 ||
-			this.#ircWakesAwaitingIdleCompaction > 0 ||
-			this.#deliveriesAwaitingSessionTransition > 0 ||
+			this.#carriedRecords.size > 0 ||
 			this.#irc.hasPending()
 		);
 	}

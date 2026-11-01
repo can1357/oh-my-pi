@@ -188,6 +188,39 @@ describe("AgentSession settles what it promised", () => {
 		}
 	}, 45_000);
 
+	it("is not idle while a deferred delivery it accepted is still in flight", async () => {
+		// The sender was told `false` — accepted, no turn started by that call — so the only way a
+		// host can wait for the record it accepted is the session's own quiescence.
+		const normalizing = Promise.withResolvers<void>();
+		const releaseNormalization = Promise.withResolvers<void>();
+		const normalizeSpy = gateNormalizationOf("IDLE_WINDOW_ASIDE", async () => {
+			normalizing.resolve();
+			await releaseNormalization.promise;
+		});
+		try {
+			await sendAsideFromSessionSwitchHook("IDLE_WINDOW_ASIDE");
+			await withTimeout(normalizing.promise, 5_000, "deferred delivery never reached normalization");
+			let idle = false;
+			const waiting = session?.waitForIdle().then(() => {
+				idle = true;
+			});
+			await setImmediate();
+			await setImmediate();
+			await setImmediate();
+			const idleInWindow = idle;
+			releaseNormalization.resolve();
+			await withTimeout(waiting ?? Promise.resolve(), 20_000, "waitForIdle never returned");
+
+			expect({
+				idleInWindow,
+				delivered: JSON.stringify(session?.agent.state.messages).includes("IDLE_WINDOW_ASIDE"),
+			}).toEqual({ idleInWindow: false, delivered: true });
+		} finally {
+			releaseNormalization.resolve();
+			normalizeSpy.mockRestore();
+		}
+	}, 45_000);
+
 	it("keeps a message whose deferred delivery failed, which its sender was already told was accepted", async () => {
 		const failed = Promise.withResolvers<void>();
 		let thrown = false;

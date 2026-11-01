@@ -98,15 +98,9 @@ What you register, and when, decides how long it lasts:
   `ctx.modelRegistry.resolver()` makes, a model's `resolveHeaders`, the disposer
   `ui.onTerminalInput()` returns, a `localProtocolOptions` member — is your session's call and
   refuses once it has ended, wherever you call it from; anything else it answers with is a copy or
-  an object of your own. An answer that arrives later is checked again when it is delivered: a call
-  your session made while it was live — `getApiKeyForProvider()`, a dialog, `compact()` — rejects,
-  saying the session has ended, if the session has ended by the time the answer would reach you,
-  rather than handing you what the host worked out afterwards. What is checked is delivery, not
-  the moment the host settled: an answer the host had already settled is refused too if the session
-  ends before it reaches you. A call whose promise you drop is refused the same way, and its
-  rejection ends only that call. A call you chain on without awaiting — `ctx.compact().then(…)` —
-  needs a `.catch()`: the promise `then` makes rejects too, and an unhandled rejection ends omp,
-  your session with it. Await a call, or catch it, to learn how it ended. A live
+  an object of your own. A call refuses at one of two moments — when you make it, or when its
+  answer would reach you — and each needs its own handling: see
+  [A `ctx` call across the end of its session](#a-ctx-call-across-the-end-of-its-session). A live
   call is never left running with its handle refused: still starting when its session ends, or
   settled just before the end, the host ends it. A host answer whose promise names its own
   constructor is refused rather than followed, since following it would run that constructor.
@@ -129,6 +123,68 @@ What you register, and when, decides how long it lasts:
   does a live call's `stop()`, so a call your session started can always be ended. Their failures
   reach you as copies too. Starting the renderer is not drawing, and finishing a dialog is not
   either: both act on the host, so both stop with the session.
+
+### A `ctx` call across the end of its session
+
+**Only the promise the boundary hands you is already observed; any promise you derive from it —
+`then`, `finally`, `Promise.all`, an async function that awaits it — is yours to observe.**
+
+A `ctx` call meets the end of its session in one of three places. Each fails in its own way, and
+the handling that is enough for one is not enough for another.
+
+1. **At the call.** A member called after its session has ended refuses when you call it.
+   `ctx.compact()` refuses by throwing before it returns a promise, so there is no promise for a
+   `.catch()` to attach to: `ctx.compact().catch(handler)` lets the exception escape, and omp
+   exits. Only a `try` around the call catches it.
+2. **On the way back.** A call your session made while it was live — `compact()`,
+   `getApiKeyForProvider()`, a dialog — rejects, saying the session has ended, if the session has
+   ended by the time its answer would reach you, rather than handing you what the host worked out
+   afterwards. What is checked is when the promise omp handed you settles, not when the host
+   finished and not when you await it. An answer the host had already settled is refused too if
+   the session ends before the promise you hold settles. A promise that fulfilled while the session
+   was live stays fulfilled: awaiting it after the end checks nothing again. The promise omp handed
+   you is observed, so if you drop it, its rejection ends only that call.
+3. **In a promise you make from it.** Only the exact promise omp handed you is observed. Every
+   promise you derive from it rejects when it does, and an unhandled rejection ends omp, your
+   session with it: `.then(onFulfilled)` with no rejection handler, `.finally(…)`,
+   `Promise.all([…])`, and an `async` function that awaits the call. `.catch(handler)` and
+   `.then(onFulfilled, onRejected)` handle the rejection. A `try` around code that does not await
+   the call catches nothing that happens later.
+
+One shape handles all three: await the call inside `try`.
+
+```ts
+try {
+	await ctx.compact();
+} catch (error) {
+	// Refused at the call, or rejected on the way back.
+}
+```
+
+If you must not wait for it, make that the body of an `async` function and drop the function's
+promise: the `try` inside handles every rejection, so the function's own promise never rejects.
+
+Each row below is a process omp's test suite runs
+(`packages/coding-agent/test/ctx-after-session.test.ts`), with omp's handler for uncaught errors
+loaded. Exit 1 is omp ending.
+
+| Where it refuses | What the extension does | Exit | What happens |
+| --- | --- | ---: | --- |
+| At the call | Session ends, then `try { await ctx.compact() } catch {…}` | 0 | The throw is caught; the host is not called |
+| At the call | Session ends, then `ctx.compact()` in a callback, result dropped | 1 | Uncaught exception: no promise was returned |
+| At the call | Session ends, then `ctx.compact().catch(handler)` | 1 | Uncaught exception before `.catch` attaches |
+| On the way back | `ctx.compact()` made while live and dropped; session ends before the answer | 0 | Refused, quietly |
+| On the way back | Promise stored while pending; it is refused; awaited later inside `try`/`catch` | 0 | Nothing fatal meanwhile; the later `await` gets the refusal |
+| On the way back | Promise stored; it fulfills while live; session ends; awaited later | 0 | It fulfills: nothing is checked again |
+| Derived | `ctx.compact().then(onFulfilled)` dropped | 1 | Unhandled rejection |
+| Derived | `ctx.compact().then(onFulfilled).catch(handler)` | 0 | `handler` gets the refusal |
+| Derived | `ctx.compact().then(onFulfilled, onRejected)`, no `.catch` | 0 | `onRejected` gets the refusal |
+| Derived | `ctx.compact().finally(callback)` dropped | 1 | `callback` runs, then unhandled rejection |
+| Derived | `try { ctx.compact().then(onFulfilled) } finally {…}` | 1 | `finally` runs, then unhandled rejection |
+| Derived | `try { ctx.compact().then(onFulfilled) } catch {…}` | 1 | `catch` never runs; unhandled rejection |
+| Derived | `await Promise.all([ctx.compact()])` inside `try`/`catch` | 0 | The aggregate rejects and is caught |
+| Derived | `Promise.all([ctx.compact()])` dropped | 1 | Unhandled rejection of the aggregate |
+| Derived | A dropped `async` function that runs `await Promise.all([ctx.compact()])` | 1 | The function's promise rejects, unhandled |
 
 ## Quick start
 

@@ -78,10 +78,14 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 				const sendTask = session.sendCustomMessage(message, sendOptions);
 				trackExtensionSend?.(sendTask);
 				if (sendOptions?.triggerTurn || sendOptions?.deliverAs === "aside") {
-					// sendCustomMessage resolves `false` for outcomes that provably start no turn
-					// (streaming queue, idle plan-mode fold, deferred ACP turn) — only a `true`
-					// result should mark this send as agent-invoking, so downstream trackers (RPC's
-					// hasAgentMessageTask) don't wait on agent events that will never arrive.
+					// sendCustomMessage answers for the call, not for the record: `false` means this
+					// call started no turn (streaming queue, idle plan-mode fold, deferred ACP turn,
+					// or a running session transition that took the delivery over). Only a `true`
+					// result marks this send as agent-invoking, so downstream trackers (RPC's
+					// hasAgentMessageTask) don't wait on agent events that will never arrive. A
+					// delivery a transition took over can still start a turn once it settles: it is
+					// the session's own work from then on, and `session.waitForIdle()` — not this
+					// send's answer — is what waits for it.
 					const invokingTask = sendTask.then(started => {
 						if (!started) throw new Error("send did not invoke the agent");
 					});

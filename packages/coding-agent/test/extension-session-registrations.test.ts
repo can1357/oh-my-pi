@@ -31,11 +31,16 @@ import type {
 	ExtensionUIContext,
 	SessionStopEvent,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
+import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { Container, TUI } from "@oh-my-pi/pi-tui";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { ToolRendererScope } from "@oh-my-pi/pi-tui/tools/renderer-scope";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 
 const cleanups: (() => void | Promise<void>)[] = [];
 afterEach(async () => {
@@ -1438,6 +1443,22 @@ describe("what a session set on the host's UI", () => {
 		};
 	}
 
+	/** `ui` as one session's `ctx.ui` hands it, that session on a runtime of its own: answers the
+	 *  facade and the session's end. */
+	function withUI(ui: object) {
+		const owner = new ExtensionRuntime();
+		const end = owner.beginSession();
+		cleanups.push(end);
+		const session = owner.forSession();
+		const scope = {
+			get live() {
+				return !session.isRetired;
+			},
+			run: <T>(call: () => T): T => call(),
+		} satisfies ToolRendererScope;
+		return { end, ui: handUIContext(ui as ExtensionUIContext, session, scope) };
+	}
+
 	test("is taken back when the session ends", async () => {
 		const h = await reusedRuntime(pi => {
 			pi.on("session_start", (_event, ctx) => {
@@ -1483,9 +1504,8 @@ describe("what a session set on the host's UI", () => {
 	test("is left alone when another session set the slot since, whatever wrapper each runner holds the host's UI through", async () => {
 		/** Two runners over one host UI, as the SDK builds them: each sets a user-wait tracker before
 		 *  `initialize` (`sdk.ts`), so each holds the UI through a wrapper of its own (`trackUserWaits`).
-		 *  Also each through an embedder's own transparent Proxy, each through an embedder's own copy
-		 *  that forwards with bound methods (tracked too), and both through the same object. */
-		const shippedShape = async (shape: "tracked" | "proxied" | "forwarded" | "bare") => {
+		 *  Also each through an embedder's own transparent Proxy, and both through the same object. */
+		const shippedShape = async (shape: "tracked" | "proxied" | "bare") => {
 			const state: Record<string, unknown> = {};
 			const runtimes = await Promise.all(
 				["A", "B"].map(name =>
@@ -1500,16 +1520,10 @@ describe("what a session set on the host's UI", () => {
 			const [a, b] = runtimes;
 			if (!a || !b) throw new Error("two runtimes were not made");
 			const ui = recordingUI(a.runner.getUIContext(), state);
-			const heldThrough = (): ExtensionUIContext => {
-				if (shape === "proxied") return new Proxy(ui, {});
-				if (shape === "forwarded")
-					return { ...ui, setStatus: ui.setStatus.bind(ui), setFooter: ui.setFooter.bind(ui) };
-				return ui;
-			};
 			for (const { runner } of runtimes) {
-				if (shape === "tracked" || shape === "forwarded") runner.setUserWaitTracker(dialog => dialog());
+				if (shape === "tracked") runner.setUserWaitTracker(dialog => dialog());
 				const [host, context] = actions();
-				runner.initialize(host, context, undefined, heldThrough(), "tui");
+				runner.initialize(host, context, undefined, shape === "proxied" ? new Proxy(ui, {}) : ui, "tui");
 			}
 			const endA = a.session();
 			await a.runner.emit({ type: "session_start" });
@@ -1528,29 +1542,15 @@ describe("what a session set on the host's UI", () => {
 		expect({
 			tracked: await shippedShape("tracked"),
 			proxied: await shippedShape("proxied"),
-			forwarded: await shippedShape("forwarded"),
 			bare: await shippedShape("bare"),
 		}).toEqual({
 			tracked: { wrappersDiffer: true, status: "B's status", footer: "B's" },
 			proxied: { wrappersDiffer: true, status: "B's status", footer: "B's" },
-			forwarded: { wrappersDiffer: true, status: "B's status", footer: "B's" },
 			bare: { wrappersDiffer: false, status: "B's status", footer: "B's" },
 		});
 	});
 
 	test("is each host UI's own: two UIs that inherit from one prototype keep separate slots", () => {
-		const withUI = (ui: object) => {
-			const owner = new ExtensionRuntime();
-			const end = owner.beginSession();
-			const session = owner.forSession();
-			const scope = {
-				get live() {
-					return !session.isRetired;
-				},
-				run: <T>(call: () => T): T => call(),
-			} satisfies ToolRendererScope;
-			return { end, ui: handUIContext(ui as ExtensionUIContext, session, scope) };
-		};
 		const parent = {
 			setStatus(this: { status?: string }, _key: string, value: string | undefined) {
 				this.status = value;
@@ -1570,6 +1570,115 @@ describe("what a session set on the host's UI", () => {
 		keyedFirst.end();
 
 		expect(afterA).toEqual({ first: undefined, second: "B" });
+	});
+
+	test("is never set again when another session ends: a live widget keeps the component its factory made", async () => {
+		await initTheme();
+		const tui = new TUI(new VirtualTerminal());
+		cleanups.push(() => tui.stop());
+		const above = new Container();
+		// Setting a widget reads only the controller's TUI and its two widget containers.
+		const controller = new ExtensionUiController({
+			ui: tui,
+			hookWidgetContainerAbove: above,
+			hookWidgetContainerBelow: new Container(),
+		} as unknown as InteractiveModeContext);
+		let mounts = 0;
+		let disposals = 0;
+		let count = 0;
+		const runtimes = await Promise.all(
+			["A", "B"].map(name =>
+				reusedRuntime(pi => {
+					pi.on("session_start", (_event, ctx) => {
+						ctx.ui.setWidget("counter", () => {
+							if (name === "A") return { render: () => ["A"], invalidate() {} };
+							mounts++;
+							count = 0;
+							return { render: () => [`counter=${count}`], invalidate() {}, dispose: () => void disposals++ };
+						});
+					});
+				}),
+			),
+		);
+		const [a, b] = runtimes;
+		if (!a || !b) throw new Error("two runtimes were not made");
+		// A runs as a subagent does, on a runner given no UI; B on the TUI's widget slot.
+		const [hostA, contextA] = actions();
+		a.runner.initialize(hostA, contextA, undefined, undefined, "rpc");
+		const [hostB, contextB] = actions();
+		const uiB = { ...b.runner.getUIContext(), setWidget: controller.setHookWidget.bind(controller) };
+		b.runner.initialize(hostB, contextB, undefined, uiB, "tui");
+		const endA = a.session();
+		await a.runner.emit({ type: "session_start" });
+		b.session();
+		await b.runner.emit({ type: "session_start" });
+		count = 7;
+		const before = Bun.stripANSI(above.render(40).join("\n"));
+		endA();
+
+		expect({
+			counted: before.includes("counter=7"),
+			after: Bun.stripANSI(above.render(40).join("\n")),
+			mounts,
+			disposals,
+		}).toEqual({ counted: true, after: before, mounts: 1, disposals: 0 });
+	});
+
+	test("is taken back on its own UI alone: what another session writes meanwhile stays, and nothing is set again", () => {
+		const writes = { first: [] as (string | undefined)[], second: [] as (string | undefined)[] };
+		let duringClear: (() => void) | undefined;
+		const a = withUI({
+			setStatus: (_key: string, value?: string) => {
+				writes.first.push(value);
+				if (value === undefined) duringClear?.();
+			},
+		});
+		const b = withUI({ setStatus: (_key: string, value?: string) => void writes.second.push(value) });
+		a.ui.setStatus("same", "A");
+		b.ui.setStatus("same", "B1");
+		// A's host, taking A's status back, has B change its own.
+		duringClear = () => {
+			duringClear = undefined;
+			b.ui.setStatus("same", "B2");
+		};
+		a.end();
+
+		expect(writes).toEqual({ first: ["A", undefined], second: ["B1", "B2"] });
+	});
+
+	test("is the setting session's before the host's setter runs: a setter that ends a session, or writes and throws", () => {
+		// One host for both sessions: B's setting ends A from inside the host's setter.
+		let status: string | undefined;
+		let endA: (() => void) | undefined;
+		const host = {
+			setStatus: (_key: string, value?: string) => {
+				status = value;
+				if (value === "B") endA?.();
+			},
+		};
+		const a = withUI(host);
+		const b = withUI(host);
+		a.ui.setStatus("same", "A");
+		endA = a.end;
+		b.ui.setStatus("same", "B");
+		const endedMidSet = status;
+
+		let shown: string | undefined;
+		const throwing = withUI({
+			setStatus: (_key: string, value?: string) => {
+				shown = value;
+				if (value !== undefined) throw new Error("render failed");
+			},
+		});
+		let threw = false;
+		try {
+			throwing.ui.setStatus("same", "C");
+		} catch {
+			threw = true;
+		}
+		throwing.end();
+
+		expect({ endedMidSet, threw, afterItEnds: shown }).toEqual({ endedMidSet: "B", threw: true, afterItEnds: undefined });
 	});
 });
 

@@ -414,6 +414,8 @@ type CreateAgentSessionResult = {
 
 Use `setToolUIContext(...)` only if your embedder provides UI capabilities that tools/extensions should call into.
 
+omp tells UIs apart by object. What an extension sets on a UI — a footer, a status, a widget — is taken back when its session ends, unless another session has set that slot on the same UI since. Two coding agents that share one UI must therefore be handed the same object, or each a transparent `Proxy` over one object that is not frozen. A copy made per agent (`{ ...ui, setStatus: ui.setStatus.bind(ui) }`) is a separate UI to omp, so one agent's session ending clears what it set through its copy, even when the other agent has set that slot since through its own.
+
 `subagentEventBus` carries `task:subagent:*` observability frames across the session tree. UI hosts can call `startBackgroundModelDiscovery()` after their first paint to start cache-aware online model discovery.
 
 ## Startup performance
