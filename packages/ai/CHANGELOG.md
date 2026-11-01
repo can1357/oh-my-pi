@@ -12,7 +12,7 @@
 
 ### Fixed
 
-- DeepSeek tool-call markup left in tool-call arguments — canonical DSML closers, template tokens, and re-spelled closers such as `parameter_name` — is now stripped before the call reaches the harness, so a degraded turn cannot write markup into a file or replay it as an argument
+- DeepSeek tool-call markup left in tool-call arguments — canonical DSML closers, template tokens, and re-spelled closers such as `parameter_name` — is now stripped before the call reaches the harness, so a degraded turn cannot write markup into a file or replay it as an argument ([#17735](https://github.com/can1357/oh-my-pi/pull/17735) by [@carterlasalle](https://github.com/carterlasalle))
 
 ## [18.15.0] - 2026-11-01
 
