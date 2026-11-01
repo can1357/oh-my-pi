@@ -180,6 +180,66 @@ function appendSegmentDuplicateSuffix(segment: string, suffix: string, maxLength
 
 type PendingToolResultRewrite = { replacementId: string } | undefined;
 
+type DedupToolCallBlock = Extract<AssistantMessage["content"][number], { type: "toolCall" }>;
+
+/**
+ * Drop any pending result-rewrites carried over from a prior assistant turn for
+ * `blockKey` on its first appearance this turn. When a later turn re-emits the
+ * same id, the older duplicate call's expected result never landed in time —
+ * the second pass synthesizes "No result provided" for it, and the upcoming
+ * real result(id) must route to one of THIS turn's calls. Without this guard
+ * the older `_dup` id would steal the next result.
+ *
+ * Split out of {@link deduplicateToolCallIds}'s per-turn loop so the loop body
+ * stays allocation-free in the common no-duplicate case: no per-turn closures
+ * are created when nothing diverges.
+ */
+function touchDedupBlockKey(
+	idsTouchedInTurn: Set<string> | undefined,
+	blockKey: string,
+	pendingToolResultRewrites: Map<string, PendingToolResultRewrite[]>,
+): Set<string> | undefined {
+	if (!idsTouchedInTurn?.has(blockKey)) {
+		(idsTouchedInTurn ??= new Set()).add(blockKey);
+		pendingToolResultRewrites.delete(blockKey);
+	}
+	return idsTouchedInTurn;
+}
+
+/**
+ * Mint the `_dup` replacement for a repeated tool-call id and enqueue the
+ * result rewrite for it. Pure bookkeeping plus the replacement block; the
+ * caller owns the lazy content copy.
+ */
+function rewriteDedupDuplicate(
+	block: DedupToolCallBlock,
+	blockKey: string,
+	previousCount: number,
+	seenToolCallIds: Map<string, number>,
+	originScope: ToolCallOriginScope,
+	maxToolCallIdLength: number,
+	duplicateSuffixPrefix: string,
+	enqueueToolResultRewrite: (id: string, rewrite: PendingToolResultRewrite) => void,
+): DedupToolCallBlock {
+	let duplicateIndex = previousCount;
+	let replacementId = appendDuplicateSuffix(
+		block.id,
+		`${duplicateSuffixPrefix}${duplicateIndex}`,
+		maxToolCallIdLength,
+	);
+	while (seenToolCallIds.has(toolCallPairingKey(replacementId, originScope))) {
+		duplicateIndex += 1;
+		replacementId = appendDuplicateSuffix(
+			block.id,
+			`${duplicateSuffixPrefix}${duplicateIndex}`,
+			maxToolCallIdLength,
+		);
+	}
+	seenToolCallIds.set(blockKey, duplicateIndex + 1);
+	seenToolCallIds.set(toolCallPairingKey(replacementId, originScope), 1);
+	enqueueToolResultRewrite(blockKey, { replacementId });
+	return { ...block, id: replacementId };
+}
 /** A real (non-synthetic) tool result filed at its position in the transformed transcript. */
 interface IndexedToolResult {
 	index: number;
@@ -279,68 +339,60 @@ function deduplicateToolCallIds(
 		// rewrites" step to an id's FIRST occurrence per turn, so multiple blocks
 		// of the same id within one turn still accumulate as duplicates. Empty
 		// sets always miss `.has`, so turns with no tool call allocate nothing.
+		//
+		// Scan-then-copy: the common case is no duplicate id, so the loop below
+		// does only the bookkeeping (which never reads the content array) and
+		// the content array is copied lazily on the first rewrite. The surviving
+		// `tool_use` pairing keys are identical either way — a rewrite changes
+		// the id, and the keys are read off the emitted content below.
 		let idsTouchedInTurn: Set<string> | undefined;
-		let contentChanged = false;
-		const content = msg.content.map(block => {
-			if (block.type !== "toolCall") return block;
-
+		let content: AssistantMessage["content"] | undefined;
+		const blocks = msg.content;
+		for (let blockIndex = 0; blockIndex < blocks.length; blockIndex++) {
+			const block = blocks[blockIndex]!;
+			if (block.type !== "toolCall") {
+				content?.push(block);
+				continue;
+			}
 			// Route all dedup bookkeeping by the call_ component so a plain
 			// assistant id and a composite result id (`call_X` / `call_X|fc_Y`)
 			// share one counter + rewrite queue. The `_dup` SUFFIX still lands on
 			// the full wire id via `appendDuplicateSuffix` (below) — only the
 			// KEYING is canonical, so emitted ids are unchanged.
 			const blockKey = toolCallPairingKey(block.id, originScope);
-
-			// Drop any pending rewrites carried over from a prior assistant turn
-			// for this id on its first appearance this turn. When a later turn
-			// re-emits the same id, the older duplicate call's expected result
-			// never landed in time — the second pass synthesizes
-			// "No result provided" for it, and the upcoming real result(id) must
-			// route to one of THIS turn's calls. Without this guard the older
-			// `_dup` id would steal the next result.
-			if (!idsTouchedInTurn?.has(blockKey)) {
-				(idsTouchedInTurn ??= new Set()).add(blockKey);
-				pendingToolResultRewrites.delete(blockKey);
-			}
-
+			idsTouchedInTurn = touchDedupBlockKey(idsTouchedInTurn, blockKey, pendingToolResultRewrites);
 			const previousCount = seenToolCallIds.get(blockKey) ?? 0;
 			if (previousCount === 0) {
 				seenToolCallIds.set(blockKey, 1);
 				enqueueToolResultRewrite(blockKey, undefined);
-				return block;
+				content?.push(block);
+				continue;
 			}
-
-			let duplicateIndex = previousCount;
-			let replacementId = appendDuplicateSuffix(
-				block.id,
-				`${duplicateSuffixPrefix}${duplicateIndex}`,
-				maxToolCallIdLength,
-			);
-			while (seenToolCallIds.has(toolCallPairingKey(replacementId, originScope))) {
-				duplicateIndex += 1;
-				replacementId = appendDuplicateSuffix(
-					block.id,
-					`${duplicateSuffixPrefix}${duplicateIndex}`,
+			content ??= blocks.slice(0, blockIndex) as AssistantMessage["content"];
+			content.push(
+				rewriteDedupDuplicate(
+					block,
+					blockKey,
+					previousCount,
+					seenToolCallIds,
+					originScope,
 					maxToolCallIdLength,
-				);
-			}
-			seenToolCallIds.set(blockKey, duplicateIndex + 1);
-			seenToolCallIds.set(toolCallPairingKey(replacementId, originScope), 1);
-			enqueueToolResultRewrite(blockKey, { replacementId });
-			contentChanged = true;
-			return { ...block, id: replacementId };
-		});
+					duplicateSuffixPrefix,
+					enqueueToolResultRewrite,
+				),
+			);
+		}
 
 		// Surviving `tool_use` pairing keys, read off the SAME post-dedup content the
 		// pass emits — a rewrite changes the id, so the keys must come from here and
-		// not from the input message. Recorded before the early-out because
-		// `!contentChanged` still returns element-identical content.
-		for (const block of content) {
+		// not from the input message. Recorded before the early-out because the
+		// unchanged path still returns element-identical content.
+		for (const block of content ?? blocks) {
 			if (block.type !== "toolCall") continue;
 			validToolUseIds.add(toolCallPairingKey(block.id, originScope));
 		}
 
-		if (!contentChanged) return msg;
+		if (content === undefined) return msg;
 		return { ...msg, content };
 	});
 
