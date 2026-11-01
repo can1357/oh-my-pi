@@ -359,22 +359,41 @@ const ASIDE_ATTEMPTS = 8;
  * a writer that appends by the name after the last look and before the
  * `unlink` loses what it wrote, and a review did exactly that to a reclaim,
  * which, like the restore after it, exited 0 without the turn. So the file
- * is first given a second name — `.<name>.<16 hex digits>.leaving`, in the
- * same directory, made with `link`, which never replaces a name already
- * taken — and then its own name is unlinked. From then on a write by the
- * name creates a new file of the writer's own, which is never touched, and
- * a write before it is in what is judged, through a descriptor opened on
- * the private name now. What passes is unlinked there; anything else is put
- * back under its name with `link`, which replaces nothing; if something has
- * taken the name meanwhile, it stays at the private name, which the note
- * gives. Anything the rule's first look does not match is not touched.
+ * is moved to a private name — `.<name>.<16 random hex digits>.leaving`, in
+ * the same directory — in two steps. The private name is first taken with an
+ * empty placeholder created with `O_EXCL`, so nothing already standing at it
+ * — planted, left over, or a collision — is ever replaced: a name that is
+ * taken is given up for a fresh one. Then the file is renamed onto the
+ * placeholder, in one atomic step that moves exactly what had the name at
+ * that instant and leaves no moment at which the name can be changed under
+ * it. From then on a write by the name — an append, or a save that renames
+ * a new file onto it — makes a file of the writer's own there, which is
+ * never touched, and a write before it is in what is judged, through a
+ * descriptor opened on the private name now. What passes is unlinked there;
+ * anything else is put back under its name with `link`, which replaces
+ * nothing; if something has taken the name meanwhile, it stays at the
+ * private name, which the note gives. Anything the rule's first look does
+ * not match is not touched.
  *
- * Two writers stay outside this, neither of them one that loses its own
- * work to an ordinary write: one that renames a file onto the name in the
- * one system call between the `link` and the `unlink` of the name — POSIX
- * has no unlink-if-this-inode — and one that held the file open from before
- * and writes through that descriptor after the judgment, which no removal
- * by any program can see.
+ * Not `link` to the private name and then `unlink` of the name: a save that
+ * renames a new file onto the name between those two calls — one an
+ * `inotify` watcher sees coming, from the private name's appearance — is
+ * what the `unlink` would then remove. What is left is at the private name
+ * only, which no writer has any reason to write to: a process that watches
+ * for it and renames a file of its own onto it — the placeholder before the
+ * rename, or what moved before the `unlink` there — has that file removed.
+ *
+ * The placeholder is created by this run with `O_EXCL` and held, its
+ * descriptor kept until the rename is done, and a rename that fails takes it
+ * away by {@link removeFileNoOneElseWrites}, as this run's own file. Eight
+ * private names taken in a row refuse the removal, naming the file, and
+ * nothing moves. A run killed between the two steps leaves an empty file at
+ * a `.leaving` name, and nothing removes it: no later run can tell it from an
+ * empty file somebody keeps, so it stays, zero bytes, until someone removes it.
+ *
+ * And one writer stays outside any removal: one that held the file open
+ * from before and writes through that descriptor after the judgment, which
+ * no removal by any program can see.
  */
 export async function removeFileOthersMayWrite(file: string, rule: OthersMayWriteRule): Promise<OthersMayWriteRemoval> {
 	const kept = (why: string): OthersMayWriteRemoval => ({ outcome: "kept", note: `${why}, so it was left as it is` });
@@ -387,41 +406,39 @@ export async function removeFileOthersMayWrite(file: string, rule: OthersMayWrit
 	}
 	if (!rule.matches(standing)) return kept(rule.mismatch);
 	let aside: string | undefined;
+	let placeholder: HeldFile | undefined;
 	for (let attempt = 0; attempt < ASIDE_ATTEMPTS && aside === undefined; attempt++) {
 		const candidate = path.join(
 			path.dirname(file),
 			`.${path.basename(file)}.${randomBytes(8).toString("hex")}.leaving`,
 		);
 		try {
-			await fs.link(file, candidate);
+			const handle = await createExclusive(candidate, 0o600);
+			const { dev, ino } = await handle.stat().catch(async (error: unknown) => {
+				await handle.close().catch(() => undefined);
+				throw error;
+			});
+			placeholder = { handle, dev, ino };
 			aside = candidate;
 		} catch (error) {
-			if (isEnoent(error)) return { outcome: "absent" };
 			if (!isEexist(error)) return kept(`${file} could not be moved aside to be checked (${errorText(error)})`);
 		}
 	}
-	if (aside === undefined) {
+	if (aside === undefined || placeholder === undefined) {
 		return kept(
 			`${file} could not be moved aside to be checked: ${ASIDE_ATTEMPTS} private names in a row were taken`,
 		);
 	}
 	try {
-		await fs.unlink(file);
+		await fs.rename(file, aside);
 	} catch (error) {
-		// Gone from its name since the `link`: the private name is now the only
-		// one, and what it holds is judged like anything moved.
-		if (!isEnoent(error)) {
-			// The name stays, so the second one goes again: nothing was moved.
-			const left = await fs
-				.unlink(aside)
-				.then(() => "")
-				.catch(
-					(unlinkError: unknown) =>
-						`, and its second name ${aside} could not be removed (${errorText(unlinkError)})`,
-				);
-			return kept(`${file} could not be moved aside to be checked (${errorText(error)})${left}`);
-		}
+		// Nothing moved: the placeholder, still this run's, goes again.
+		const left = await removeFileNoOneElseWrites(aside, [placeholder], "the placeholder this run made");
+		await placeholder.handle.close().catch(() => undefined);
+		if (isEnoent(error) && !left) return { outcome: "absent" };
+		return kept(`${file} could not be moved aside to be checked (${errorText(error)})${left ? `; ${left}` : ""}`);
 	}
+	await placeholder.handle.close().catch(() => undefined);
 	let why: string | undefined;
 	try {
 		const moved = await fs.lstat(aside);

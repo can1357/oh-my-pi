@@ -6263,12 +6263,17 @@ test("a failed archive copy's rollback keeps a file put where its copy was, and 
 // Round 36. A writer without a lease that writes by name between the last
 // proof and the removal: an `unlink` of the name took the late write with
 // it, and the reclaim and the restore after it both exited 0 without it.
-// Given a second name first and proved there, the file keeps what such a
-// writer wrote: written before its name went, it fails the proof and goes
-// back; written after, it is a new file of the writer's own.
+// Moved to a private name first and proved there, the file keeps what such a
+// writer wrote: written before the move, it fails the proof and goes back;
+// written after — appended, or saved by renaming a new file onto the name —
+// it is a new file of the writer's own.
 for (const which of ["transcript", "artifact"] as const) {
-	for (const when of ["before its name goes", "after its name went"] as const) {
-		test(`a reclaim keeps what a writer without a lease writes by the ${which}'s name ${when}`, async () => {
+	for (const when of [
+		"appends before it is moved aside",
+		"appends after it was moved aside",
+		"saves over it after it was moved aside",
+	] as const) {
+		test(`a reclaim keeps what a writer without a lease ${when}, by the ${which}'s name`, async () => {
 			const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
 			await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
 			await archiveEverything();
@@ -6278,15 +6283,28 @@ for (const which of ["transcript", "artifact"] as const) {
 				which === "transcript"
 					? `${JSON.stringify({ type: "message", id: "late", parentId: "m2", message: { role: "user", content: "ONLY LATE TURN" } })}\n`
 					: "ONLY LATE TURN\n";
-			let appended = false;
+			const realRename = fs.rename;
 			const realUnlink = fs.unlink;
-			// A real append by name at a real removal: the `unlink` of the name
-			// itself, or the one of the second name after the name went.
-			const unlink = spyOn(fs, "unlink").mockImplementation(async file => {
-				const at = when === "before its name goes" ? String(file) === target : isMovedAside(String(file), target);
-				if (!appended && at) {
-					appended = true;
+			let wrote = false;
+			const write = async (): Promise<void> => {
+				wrote = true;
+				if (when === "saves over it after it was moved aside") {
+					const temp = path.join(path.dirname(target), "editor-save.tmp");
+					await Bun.write(temp, late);
+					await realRename(temp, target);
+				} else {
 					await fs.appendFile(target, late);
+				}
+			};
+			// A real write by name at a real step of the removal: the move to the
+			// private name, or the `unlink` there once the name went.
+			const rename = spyOn(fs, "rename").mockImplementation(async (from, to) => {
+				if (!wrote && when === "appends before it is moved aside" && String(from) === target) await write();
+				return await realRename(from, to);
+			});
+			const unlink = spyOn(fs, "unlink").mockImplementation(async file => {
+				if (!wrote && when !== "appends before it is moved aside" && isMovedAside(String(file), target)) {
+					await write();
 				}
 				return await realUnlink(file);
 			});
@@ -6296,14 +6314,15 @@ for (const which of ["transcript", "artifact"] as const) {
 					flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
 				});
 			} finally {
+				rename.mockRestore();
 				unlink.mockRestore();
 			}
 
-			expect(appended).toBe(true);
+			expect(wrote).toBe(true);
 			expect(result.reclaim?.reclaimed).toBe(0);
 			expect(await Bun.file(target).text()).toContain("ONLY LATE TURN");
 			const said = collectGcErrors(result).join("\n");
-			if (when === "before its name goes") {
+			if (when === "appends before it is moved aside") {
 				// In the file when it is proved, so the proof fails and the file goes back.
 				expect(said).toContain(`${target} holds what`);
 				expect(result.reclaim?.partiallyRemoved ?? []).toEqual(which === "transcript" ? [] : [sessionFile]);
@@ -6316,6 +6335,43 @@ for (const which of ["transcript", "artifact"] as const) {
 		});
 	}
 }
+
+// The private name a removal moves a file to is taken first with a
+// placeholder created `O_EXCL`, so a file already standing at that name —
+// planted, left over, or a collision — is never replaced by the move: the
+// name is given up for a fresh one.
+test("a file already at the private name a removal picks is kept, and another name is used", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const artifact = path.join(liveArtifacts, "a.log");
+	await Bun.write(artifact, "FIRST");
+	await archiveEverything();
+	await restoreArchivedSession(archiveFile, root);
+	let planted: string | undefined;
+	const realOpen = fs.open;
+	// A real file at the first private name, just before the run creates it.
+	const open = spyOn(fs, "open").mockImplementation((async (target: string, ...rest: unknown[]) => {
+		if (planted === undefined && isMovedAside(String(target), artifact)) {
+			planted = String(target);
+			await Bun.write(planted, "SOMEBODY ELSE'S ONLY COPY");
+		}
+		return await (realOpen as (...args: unknown[]) => Promise<fs.FileHandle>)(target, ...rest);
+	}) as typeof fs.open);
+	let result: GcResult;
+	try {
+		result = await runGcCommand({
+			flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+		});
+	} finally {
+		open.mockRestore();
+	}
+
+	expect(planted).toBeDefined();
+	expect(await Bun.file(planted!).text()).toBe("SOMEBODY ELSE'S ONLY COPY");
+	// The artifact went by another private name; the planted file keeps its directory, which is named.
+	expect(result.reclaim?.partiallyRemoved).toContain(artifact);
+	expect(await fs.readdir(liveArtifacts)).toEqual([path.basename(planted!)]);
+	expect(collectGcErrors(result).join("\n")).toContain(liveArtifacts);
+});
 
 // Round 36. A preview named a directory it would make as brought home while
 // a step inside it refused; applying then made the directory and nothing
