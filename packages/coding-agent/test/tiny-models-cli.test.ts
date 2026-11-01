@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import { resolveModels, runTinyModelsCommand } from "@oh-my-pi/pi-coding-agent/cli/tiny-models-cli";
+import { tinyModelSupportsBackend } from "@oh-my-pi/pi-coding-agent/tiny/backend-policy";
 import { TINY_LOCAL_MODELS } from "@oh-my-pi/pi-coding-agent/tiny/models";
 import { mlxLaunch, tinyTitleClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
 
@@ -9,28 +10,26 @@ afterEach(() => {
 
 describe("tiny-models download model resolution", () => {
 	it("excludes ONNX-blocked models from `all` so the bulk prefetch stays green", () => {
-		const unsupported = TINY_LOCAL_MODELS.filter(
-			spec => "onnxUnsupportedReason" in spec && spec.onnxUnsupportedReason,
-		).map(spec => spec.key);
+		const unsupported = TINY_LOCAL_MODELS.filter(spec => !tinyModelSupportsBackend(spec.key, "onnx")).map(
+			spec => spec.key,
+		);
 		// Guard: keep this regression meaningful — at least one registry entry must be load-blocked.
 		expect(unsupported.length).toBeGreaterThan(0);
 
 		const all = resolveModels("all", false);
 		for (const key of unsupported) expect(all).not.toContain(key);
 
-		const usable = TINY_LOCAL_MODELS.filter(
-			spec => !("onnxUnsupportedReason" in spec) || !spec.onnxUnsupportedReason,
-		).map(spec => spec.key);
+		const usable = TINY_LOCAL_MODELS.filter(spec => tinyModelSupportsBackend(spec.key, "onnx")).map(spec => spec.key);
 		for (const key of usable) expect(all).toContain(key);
 	});
 
 	it("keeps every loadable model in `all` when the MLX backend is active", () => {
-		const mlxBlocked = TINY_LOCAL_MODELS.filter(
-			spec => "mlxUnsupportedReason" in spec && spec.mlxUnsupportedReason,
-		).map(spec => spec.key);
-		const onnxBlocked = TINY_LOCAL_MODELS.filter(
-			spec => "onnxUnsupportedReason" in spec && spec.onnxUnsupportedReason,
-		).map(spec => spec.key);
+		const mlxBlocked = TINY_LOCAL_MODELS.filter(spec => !tinyModelSupportsBackend(spec.key, "mlx")).map(
+			spec => spec.key,
+		);
+		const onnxBlocked = TINY_LOCAL_MODELS.filter(spec => !tinyModelSupportsBackend(spec.key, "onnx")).map(
+			spec => spec.key,
+		);
 		// Guard: keep this regression meaningful — the registry must exercise both directions.
 		expect(mlxBlocked.length).toBeGreaterThan(0);
 		expect(onnxBlocked.length).toBeGreaterThan(0);
@@ -48,7 +47,7 @@ describe("tiny-models download model resolution", () => {
 	});
 
 	it("still resolves an explicitly requested unsupported model (only `all` is filtered)", () => {
-		const blocked = TINY_LOCAL_MODELS.find(spec => "onnxUnsupportedReason" in spec && spec.onnxUnsupportedReason);
+		const blocked = TINY_LOCAL_MODELS.find(spec => !tinyModelSupportsBackend(spec.key, "onnx"));
 		expect(blocked).toBeDefined();
 		if (!blocked) return;
 		expect(resolveModels(blocked.key, false)).toEqual([blocked.key]);

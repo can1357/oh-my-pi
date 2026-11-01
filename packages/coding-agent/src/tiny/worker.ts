@@ -25,6 +25,7 @@ import {
 	type TransformersRuntimeMetadata,
 } from "../subprocess/worker-runtime";
 import { renderTextChatTemplate } from "./completion-prompt";
+import { tinyModelBackendRefusal } from "./backend-policy";
 import {
 	resolveTinyModelDevicePreference,
 	type TinyModelDevicePreference,
@@ -232,8 +233,9 @@ class OnnxModel {
 	/** Resident pipeline, loading (with progress for `requestId`) on first use. */
 	pipeline(reply: ReplyTransport, requestId: string): Promise<TextGenerationPipeline> {
 		if (this.#pipeline) return this.#pipeline;
-		if (this.#spec.onnxUnsupportedReason) {
-			return Promise.reject(new Error(`${this.#modelKey} is unavailable: ${this.#spec.onnxUnsupportedReason}`));
+		const onnxRefusal = tinyModelBackendRefusal(this.#modelKey, "onnx");
+		if (onnxRefusal) {
+			return Promise.reject(new Error(`${this.#modelKey} is unavailable: ${onnxRefusal}`));
 		}
 		const startedAt = performance.now();
 		const loaded = this.#loadRuntime(reply, requestId)

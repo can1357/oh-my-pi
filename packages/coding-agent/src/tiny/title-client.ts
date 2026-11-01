@@ -30,6 +30,7 @@ import {
 	resolveWorkerSpawnCmd,
 	SMOKE_TEST_TIMEOUT_MS,
 } from "../subprocess/worker-client";
+import { tinyModelBackendRefusal } from "./backend-policy";
 import { MLX_DEVICE, resolveTinyModelDevicePreference, tinyMlxSupported, tinyModelDeviceSettingToEnv } from "./device";
 import { tinyModelDtypeSettingToEnv } from "./dtype";
 import { formatTitleUserMessage } from "./message-preproc";
@@ -203,9 +204,8 @@ export function mlxLaunch(
 	if (!spec) throw new Error(`Unknown tiny local model: ${modelKey}`);
 	// Callers gate on this before choosing the backend; keep a loud failure here so a
 	// future caller that skips the gate cannot download weights mlx-lm cannot load.
-	if ("mlxUnsupportedReason" in spec && spec.mlxUnsupportedReason) {
-		throw new Error(`${modelKey} is unavailable on MLX: ${spec.mlxUnsupportedReason}`);
-	}
+	const mlxRefusal = tinyModelBackendRefusal(modelKey, "mlx");
+	if (mlxRefusal) throw new Error(`${modelKey} is unavailable on MLX: ${mlxRefusal}`);
 	const tag = `mlx|${MLX_LM_VERSION}|${Bun.hash.crc32(MLX_SERVER_SCRIPT).toString(16)}`;
 	return {
 		label: `tiny mlx worker for ${modelKey}`,
@@ -316,8 +316,7 @@ export class TinyTitleClient {
 		if (tinyWorkerUsesMlx()) {
 			// Per-model, not process-wide: a model the pinned mlx-lm cannot load falls back
 			// to ONNX without demoting every other model in this process.
-			const spec = getTinyLocalModelSpec(modelKey);
-			const reason = spec && "mlxUnsupportedReason" in spec ? spec.mlxUnsupportedReason : undefined;
+			const reason = tinyModelBackendRefusal(modelKey, "mlx");
 			if (reason) {
 				logger.debug("tiny-title: MLX backend cannot load this model; using ONNX CPU", { modelKey, reason });
 			} else {

@@ -1,5 +1,6 @@
 import { formatBytes } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import { tinyModelSupportsBackend } from "../tiny/backend-policy";
 import {
 	DEFAULT_TINY_TITLE_LOCAL_MODEL_KEY,
 	getTinyLocalModelSpec,
@@ -76,8 +77,8 @@ export function resolveModels(model: string | undefined, mlx = tinyWorkerUsesMlx
 	// cannot load still runs on ONNX CPU, so under MLX only "refused by both" is skipped.
 	if (model === "all")
 		return TINY_LOCAL_MODELS.filter(spec => {
-			const onnxBlocked = "onnxUnsupportedReason" in spec && Boolean(spec.onnxUnsupportedReason);
-			const mlxBlocked = "mlxUnsupportedReason" in spec && Boolean(spec.mlxUnsupportedReason);
+			const onnxBlocked = !tinyModelSupportsBackend(spec.key, "onnx");
+			const mlxBlocked = !tinyModelSupportsBackend(spec.key, "mlx");
 			return !(mlx ? mlxBlocked && onnxBlocked : onnxBlocked);
 		}).map(spec => spec.key);
 	if (!isTinyLocalModelKey(model)) {
