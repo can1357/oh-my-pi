@@ -14,6 +14,16 @@ export class SentToolDefinitions {
 	}
 
 	/**
+	 * A detached copy: an Agent that replays another's request history declares the same withdrawn tools. `keep`
+	 * leaves out a definition the copy must never declare.
+	 */
+	copy(keep: (name: string) => boolean = () => true): SentToolDefinitions {
+		const copy = new SentToolDefinitions();
+		copy.record([...this.#byName.values()].filter(tool => keep(tool.name)));
+		return copy;
+	}
+
+	/**
 	 * `context` with {@link Context.inactiveTools} set to the definitions for names the latest
 	 * `requestControls.tools.declared` in its messages holds that are not in its `tools`; cleared when
 	 * there are none or the request declares no tools. Names never sent by this Agent are skipped: the

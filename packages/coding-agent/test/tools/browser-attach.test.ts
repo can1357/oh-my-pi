@@ -525,6 +525,13 @@ describe("pickElectronTarget", () => {
 			const ownedName = `owned-${crypto.randomUUID()}`;
 			try {
 				await waitForCdp(`http://127.0.0.1:${port}`, 15_000);
+				const existing = await acquireBrowser(
+					{ kind: "spawned", path: exe, args: [...flags, `--user-data-dir=${borrowedProfile}`] },
+					{ cwd: session.cwd },
+				);
+				if (!("browser" in existing)) throw new Error("Expected Chromium browser");
+				const original = await existing.browser.newPage();
+				await original.goto("data:text/html,<title>Original user tab</title>");
 				await invoke({
 					action: "open",
 					name: borrowedName,
@@ -547,6 +554,7 @@ describe("pickElectronTarget", () => {
 				expect(ownedTab.browser.subprocess).toBeDefined();
 				const ownedTitle = await invoke({ action: "run", name: ownedName, code: "return await tab.title();" });
 				expect(ownedTitle.details).toMatchObject({ value: "Owned" });
+				expect(await original.title()).toBe("Original user tab");
 				const title = await invoke({ action: "run", name: borrowedName, code: "return await tab.title();" });
 				expect(title.details).toMatchObject({ value: "Borrowed" });
 				await invoke({ action: "close", name: borrowedName, kill: true });
@@ -556,6 +564,52 @@ describe("pickElectronTarget", () => {
 				await invoke({ action: "close", name: borrowedName, kill: true }).catch(() => {});
 				child.kill();
 				await child.exited;
+				await fs.rm(root, { recursive: true, force: true });
+			}
+		},
+		30_000,
+	);
+
+	test.skipIf(!CHROMIUM_AVAILABLE)(
+		"opens and owns a page in an empty custom Chrome profile",
+		async () => {
+			const exe = await ensureChromiumExecutable();
+			if (!exe) throw new Error("Expected a Chromium executable");
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-browser-empty-profile-"));
+			const profile = path.join(root, "fresh");
+			const flags = [
+				"--headless=new",
+				"--no-sandbox",
+				"--no-startup-window",
+				"--no-first-run",
+				"--use-mock-keychain",
+				"--password-store=basic",
+				`--user-data-dir=${profile}`,
+			];
+			const session = makeSession();
+			const prelude = createBrowserPrelude(session);
+			const invoke = (parameters: unknown) => prelude.invoke(parameters, { session, toolCallId: "empty-profile" });
+			const name = `empty-profile-${crypto.randomUUID()}`;
+			try {
+				const handle = await acquireBrowser({ kind: "spawned", path: exe, args: flags }, { cwd: session.cwd });
+				if (!("browser" in handle)) throw new Error("Expected Chromium browser");
+				for (const page of await handle.browser.pages()) await page.close();
+				expect(handle.browser.targets().filter(target => String(target.type()) === "page")).toEqual([]);
+				await invoke({
+					action: "open",
+					name,
+					app: { path: exe, args: flags },
+					url: "data:text/html,<title>Fresh profile</title>",
+				});
+				const tab = getTab(name);
+				if (tab?.backend !== "worker") throw new Error("Expected Chromium worker tab");
+				expect(tab.ownsPage).toBe(true);
+				expect(tab.browser).toBe(handle);
+				expect((await invoke({ action: "run", name, code: "return await tab.title();" })).details).toMatchObject({
+					value: "Fresh profile",
+				});
+			} finally {
+				await invoke({ action: "close", name, kill: true }).catch(() => {});
 				await fs.rm(root, { recursive: true, force: true });
 			}
 		},

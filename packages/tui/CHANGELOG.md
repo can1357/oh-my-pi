@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.15.0] - 2026-11-01
+
 ### Breaking Changes
 
 - `GroupedLineContext.isUrl` is replaced by `url`, the internal URL a header names or a body row belongs to ([#17608](https://github.com/can1357/oh-my-pi/pull/17608) by [@JustasMasiulis](https://github.com/JustasMasiulis))
@@ -9,9 +11,11 @@
 ### Added
 
 - Added `FILE_NAME_COLOR`, `formatStyledPath` and `pathNameStart` to `render/render-utils` for paths in tool bodies and Tern file rows; `createGroupedRowStyler`, `groupedLinkTargets`, `fitGroupsToBudget`, `groupsByFile` and `isMatchRow` to `tools/grouped-file-output`; `splitReadQuery` to `tools/read`; and `HASHLINE_TAG_SUFFIX_RE` to `tools/hashline-format`. `classifyGroupedLines` reports each file header's full `displayPath` and `suffix`, and a `TranscriptStatusPart` without `color` keeps its already-styled text ([#17608](https://github.com/can1357/oh-my-pi/pull/17608) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- `JobsPanelJob.caption`: the jobs sheet's detail pane shows it, muted, between the job's purpose and its command (`omp.jobs.caption`) ([#17649](https://github.com/can1357/oh-my-pi/pull/17649) by [@wolfiesch](https://github.com/wolfiesch))
 
 ### Changed
 
+- The Background jobs sheet names each job by what it is for when the model said so, shows that above the full command in the detail pane, and no longer repeats the command in an empty widget box for jobs that print nothing ([#17649](https://github.com/can1357/oh-my-pi/pull/17649) by [@wolfiesch](https://github.com/wolfiesch))
 - File paths in tool output share one style: a dim directory and the file name in the custom-message label color (bronze in titanium), with line locations and selectors (`:1-175`, `:42:14`, `?q=`) muted. This covers Grep, AST Grep, AST Edit, Glob, Find, LSP, diagnostics, grouped Reads and file mentions; Glob's folder icon is muted like the file-type icons, and paths in tool headers keep their color ([#17608](https://github.com/can1357/oh-my-pi/pull/17608) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Grep, AST Grep and AST Edit results label each file with its full path instead of the model-facing `# dir/` and `## file#tag` headers, and each file gets its own tree branch. Their collapsed previews fit the same row budget the same way, cutting the last file short rather than overflowing, and end with `… N more matches` (`… N more files` for AST Edit) ([#17608](https://github.com/can1357/oh-my-pi/pull/17608) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - AST Grep match rows link to their line, as Grep's do ([#17608](https://github.com/can1357/oh-my-pi/pull/17608) by [@JustasMasiulis](https://github.com/JustasMasiulis))
@@ -19,9 +23,12 @@
 
 ### Fixed
 
+- Rex sessions now render Kitty graphics without forcing the protocol, including when only `TERM=xterm-rex` identifies the client ([#17651](https://github.com/can1357/oh-my-pi/issues/17651)).
 - Fixed collapsed AST Grep showing no matches when its first file or folder was taller than the preview, and its `… N more` row counting hidden folders instead of hidden matches ([#17608](https://github.com/can1357/oh-my-pi/pull/17608) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Fixed collapsed AST Edit overflowing its preview when the first file's diff was long ([#17608](https://github.com/can1357/oh-my-pi/pull/17608) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Fixed search and diagnostic file paths in Tern dropping the leading `/` of absolute paths and a folder's own `(…)` ending, and AST Edit diffs in Tern losing highlighting to the file's `#tag`; a file name ending in lowercase or other-length `#…` text keeps it ([#17608](https://github.com/can1357/oh-my-pi/pull/17608) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- Fixed a read of a URL drawing as dead text in the folded read row: its target is not a file path, so no link was built for it, and clicking the URL did nothing. The row (and each row of a grouped read) now links to the URL itself, gaining an `https://` scheme for a bare `www.` host ([#17598](https://github.com/can1357/oh-my-pi/pull/17598) by [@iacore](https://github.com/iacore))
+- Fixed replayed transcripts ignoring a registered `async-result` message renderer, so a replayed conversation rendered differently from the live one ([#17372](https://github.com/can1357/oh-my-pi/pull/17372) by [@AlexBrd999](https://github.com/AlexBrd999), from [#14484](https://github.com/can1357/oh-my-pi/pull/14484) by [@F0Rextasy](https://github.com/F0Rextasy); [#14131](https://github.com/can1357/oh-my-pi/issues/14131))
 
 ## [18.14.2] - 2026-10-31
 
@@ -2499,36 +2506,4 @@
 
 - Fixed the OSC 11 appearance poll re-querying every 2s forever on terminals that support Mode 2031 but never change theme, whose repeated OSC 11/DA1 writes cleared the user's active text selection (breaking copy every 2 seconds). The poll now stops as soon as DECRQM confirms Mode 2031 support, since push notifications make polling redundant.
 
-## [15.9.0] - 2026-06-04
-
-### Added
-
-- Added Kitty `CSI 22 J` screen-to-scrollback clears for non-destructive full paints, while keeping ED3 for destructive history/session rebuilds.
-- Added Kitty OSC 99 rich notification formatting and startup capability probing.
-- Added Kitty OSC 66 text-sized Markdown H1 headings (2x scale) plus native text-width support for OSC 66 spans. Off by default and gated to Kitty (the only terminal implementing OSC 66) via the `TERMINAL.textSizing` capability; hosts enable it through `setTextSizing`.
-- Added Kitty Unicode placeholder image rendering (`U=1` + U+10EEEE with explicit row/column diacritics): inline images are drawn as real text cells that carry the image id in their foreground color, so they survive horizontal slicing, reflow, and overlapping draws instead of relying on cursor-positioned `a=p` placements. Enabled by default on Kitty-family terminals; opt out with `PI_NO_KITTY_PLACEHOLDERS=1`, and falls back to direct placement when a grid exceeds the diacritic table's addressable range.
-- Added Kitty temp-file image transmission (`t=t`): on local sessions, decoded PNG bytes are written to a `tty-graphics-protocol` temp file and the path is sent instead of in-band base64, gated behind a startup `a=q,t=t` support probe. Controlled by `PI_KITTY_IMAGE_TRANSMISSION=direct|temp-file|auto`; disabled over SSH unless explicitly forced.
-- Added DECRQM capability detection for DEC private modes 2026 (synchronized output) and 2048 (in-band resize). Synchronized-output paint wrappers are dropped when the terminal reports 2026 unsupported (preserving the `PI_NO_SYNC_OUTPUT` override), and DEC 2048 in-band resize is enabled when supported — reported geometry and cell pixel size are updated from `CSI 48 ; rows ; cols ; yPx ; xPx t` reports, with SIGWINCH and `CSI 16 t` kept as fallbacks.
-- Added an injectable render scheduler for TUI tests, allowing deterministic render drains without patching global clocks or event-loop timing.
-- Added `ImageBudget`, an inline-image cap that keeps only the most recent N images as live terminal graphics and demotes older ones to their text fallback. Once a new image pushes the count past the cap, the renderer hides the oldest via a full redraw plus an explicit Kitty graphics purge (`a=d,d=I`) — text-clear escapes (`CSI 2 J`/`CSI 3 J`) do not remove Kitty images. Configure the cap via `TUI#setMaxInlineImages` (`0` disables it).
-- Changed Kitty inline images to a transmit-once + placement scheme: the base64 data is sent a single time (`a=t`) keyed by a stable image id, then every repaint emits only the tiny placement (`a=p,i=…,p=…`). Repaints — including full redraws — no longer re-send image data or stack duplicate placements, and the diff/line buffers and render caches hold short placement strings instead of multi-KB base64. The `ImageBudget` doubles as the transmit store (it tracks which ids are loaded and re-transmits after a purge frees the data). iTerm2/Sixel, which have no addressable image store, keep sending inline data as before.
-- Added a renderer-level DECCARA rectangular-SGR optimizer that paints solid background panels/rows (Box/Text/Markdown fills, status bars, any full-width `theme.bg` row) as a single coalesced rectangle escape (`CSI 2*x` / `CSI Pt;Pl;Pb;Pr;<sgr>$r` / `CSI *x`) instead of emitting a full-width run of background-styled spaces on every visible row. It operates at emit time on the final ANSI strings — components are unchanged — and strips only trailing padding it can prove sits under a single non-default background span, coalescing vertically adjacent identical fills into one rectangle and falling back to the original bytes whenever the rectangle would not save bytes. Enabled only on Kitty, which implements the SGR-background extension (`docs/deccara.rst`); **Ghostty is intentionally excluded** because its `CSI $r` is unimplemented (ghostty-org/ghostty#632) and would drop the background entirely. Scrollback-bound rows and the append/scroll paths always keep the padded representation so native history preserves colored cells, and the `PI_NO_DECCARA` kill switch (plus tmux/screen/zellij detection) forces the fallback.
-- Added `CMUX_SURFACE_ID` environment variable support to `getTerminalId()`, so cmux terminal surfaces get a stable identifier alongside kitty, tmux, macOS Terminal.app, and Windows Terminal — enabling per-surface session breadcrumbs for `omp -c` in cmux.
-
-### Changed
-
-- Changed TUI tests to use Ghostty's VT engine (`ghostty-web`) instead of `@xterm/headless`.
-- Changed the default inline-image live graphics budget from 3 to 8 images.
-
-### Fixed
-
-- Fixed the DECCARA background-fill optimizer rejecting or repainting the wrong cells when a trailing fill crossed from default-background spaces into colored spaces.
-- Fixed DEC private-mode reports with DECRPM status 3/4 being treated as unsupported, so permanent 2026/2048 reports stay recognized.
-- Fixed OSC 66 text-sizing width and slicing edge cases, including ZWJ emoji payloads and partial slices through scaled spans.
-- Fixed focused `Input` components following `TUI#setShowHardwareCursor`, so single-line prompts render either the terminal cursor or software cursor consistently with the editor.
-- Fixed the DECCARA background-fill optimizer painting fills on the wrong rows ("split into unaligned halves") in the differential repaint path. When a diff grew the transcript past the viewport, writing the rewritten rows scrolled the terminal, but the absolute DECCARA rectangle coordinates were derived from the pre-scroll viewport top, so every fill landed `scrollAmount` rows too low while the relatively-positioned text settled correctly; rows scrolled into history were also shortened, dropping their background padding from native scrollback. Rectangles now target the post-scroll rows and only rows remaining in the final viewport are optimized.
-- Fixed native scrollback desynchronization after terminal width or height changes reflowed overflowing content while the viewport was not at the bottom
-- Fixed a notification chip (or any injected block) rendering on top of an actively streaming tool render on ED3-risk terminals (Ghostty/kitty/Alacritty/iTerm2). While a foreground tool streams, its header's elapsed-time counter ticks every frame; once output scrolls the header above the viewport top, each tick is an offscreen edit that — because the eager scrollback-rebuild opt-in is gated off on these terminals — repaints the viewport in place and advances the rendered line count without committing the new overflow to native history. `#scrollbackHighWater` then lagged the logical viewport top, so a later content shrink whose changes landed in the visible region slipped past the shrink-across-boundary guard and reached the differential emitter, which is anchored to `#maxLinesRendered - height`: it rewrote only the suffix, dropped the newly exposed top row, and left a blank at the bottom, drifting every row below the edit one line up so it painted over the rows above. Such shrinks now re-anchor the bottom of the viewport with a non-destructive repaint, and the foreground-streaming shrink-across-boundary case repaints the live tail instead of padding and pinning the pre-shrink viewport.
-- Fixed a terminal resize during foreground-tool streaming on an unknown-viewport / ED3-risk host (Ghostty/kitty/Alacritty/iTerm2/WSL) leaving native scrollback permanently out of sync, so scrolling back after the turn showed missing rows. A pure geometry resize (no content change) takes the in-place viewport-repaint path, which — unlike a content-bearing resize that rebuilds via the geometry branch — never flagged native history. Because the prompt-submit checkpoint (`refreshNativeScrollbackIfDirty`) only rebuilds when scrollback is marked dirty on these hosts, the discrepancy was never reconciled. Overflowing geometry repaints whose viewport is not known to be at the bottom now mark scrollback dirty so the next checkpoint rebuilds an exact copy of the transcript.
-
-Older entries are archived in [packages/tui/CHANGELOG.md@6693ddbfd58c](https://github.com/can1357/oh-my-pi/blob/6693ddbfd58ce9edcdc0dc3fe98a8882c9bae834/packages/tui/CHANGELOG.md).
+Older entries are archived in [packages/tui/CHANGELOG.md@6b354a56a890](https://github.com/can1357/oh-my-pi/blob/6b354a56a890b69b6bc9503c16c510be33675b5a/packages/tui/CHANGELOG.md).
