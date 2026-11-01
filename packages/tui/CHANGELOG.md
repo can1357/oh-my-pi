@@ -175,6 +175,7 @@
 
 ### Fixed
 
+- Fixed DEC 2048 in-band resize reports typing `48;rows;cols;…` into the composer on iTerm2 ([#16695](https://github.com/can1357/oh-my-pi/pull/16695) by [@demon-i386](https://github.com/demon-i386))
 - Fixed the `/agents` and `/models` hubs in Tern squeezing the left sidebar as long lines (such as a streaming new-agent draft) widen the body pane
 
 ## [18.12.4] - 2026-10-20
