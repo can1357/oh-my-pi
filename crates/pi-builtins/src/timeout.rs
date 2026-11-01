@@ -202,7 +202,12 @@ impl builtins::Command for TimeoutCommand {
 			None => TrapSignal::try_from("TERM").expect("SIGTERM must be a known signal"),
 		};
 
-		let child_cancel = CancellationToken::new();
+		// A child of the caller's token: cancelling the run reaches the command
+		// even while this builtin cannot act on `outer_cancelled` below.
+		let outer_cancel = context.cancel_token();
+		let child_cancel = outer_cancel
+			.as_ref()
+			.map_or_else(CancellationToken::new, CancellationToken::child_token);
 		let spawns = Arc::new(SpawnRecorder::default());
 		let mut params = context.params.clone();
 		// GNU runs the command in its own process group and signals the whole
@@ -230,11 +235,12 @@ impl builtins::Command for TimeoutCommand {
 		// Grab an owned stderr handle up front: `run_future` below holds the
 		// shell mutably, so `context.stderr()` is unavailable once it exists.
 		let mut stderr = context.stderr();
-		let outer_cancel = context.cancel_token();
 		let source_info = SourceInfo::from("pi-natives:timeout");
 		let run_future = context.shell.run_string(command_line, &source_info, &params);
 		tokio::pin!(run_future);
 
+		let outer_cancel_requested =
+			|| outer_cancel.as_ref().is_some_and(CancellationToken::is_cancelled);
 		let outer_cancelled = async {
 			match &outer_cancel {
 				Some(token) => token.cancelled().await,
@@ -253,8 +259,18 @@ impl builtins::Command for TimeoutCommand {
 		};
 		tokio::pin!(deadline);
 
+		// `child_cancel` is cancelled together with `outer_cancel`, so an
+		// in-process command can finish in the same poll that `outer_cancelled`
+		// becomes ready; `select!` then picks either branch. Report the
+		// interruption either way, not the command's own result.
 		tokio::select! {
-			result = &mut run_future => return result,
+			result = &mut run_future => {
+				return if outer_cancel_requested() {
+					Ok(ExecutionExitCode::Interrupted.into())
+				} else {
+					result
+				};
+			},
 			() = &mut outer_cancelled => {
 				child_cancel.cancel();
 				return Ok(ExecutionExitCode::Interrupted.into());
@@ -302,7 +318,12 @@ impl builtins::Command for TimeoutCommand {
 		tokio::pin!(kill_deadline);
 
 		let child_result = tokio::select! {
-			result = &mut run_future => reap(result)?,
+			result = &mut run_future => {
+				if outer_cancel_requested() {
+					return Ok(ExecutionExitCode::Interrupted.into());
+				}
+				reap(result)?
+			},
 			() = &mut outer_cancelled => {
 				child_cancel.cancel();
 				return Ok(ExecutionExitCode::Interrupted.into());
@@ -321,7 +342,16 @@ impl builtins::Command for TimeoutCommand {
 				child_cancel.cancel();
 				// SIGKILL can't be resisted; bound the reaping wait anyway so
 				// a wedged in-process operand can't hang the builtin forever.
-				match time::timeout(Duration::from_secs(2), &mut run_future).await {
+				let reaped = time::timeout(Duration::from_secs(2), &mut run_future);
+				tokio::pin!(reaped);
+				let reaped = tokio::select! {
+					result = &mut reaped => result,
+					() = &mut outer_cancelled => return Ok(ExecutionExitCode::Interrupted.into()),
+				};
+				if outer_cancel_requested() {
+					return Ok(ExecutionExitCode::Interrupted.into());
+				}
+				match reaped {
 					Ok(result) => reap(result)?,
 					Err(_) => None,
 				}
@@ -357,8 +387,14 @@ impl builtins::Command for TimeoutCommand {
 #[cfg(test)]
 mod tests {
 	use std::{
+		cell::RefCell,
 		io::{Read, Seek, SeekFrom},
-		time::Duration,
+		sync::{
+			Arc,
+			atomic::{AtomicBool, Ordering},
+			mpsc,
+		},
+		time::{Duration, Instant},
 	};
 
 	use brush_core::{
@@ -367,6 +403,7 @@ mod tests {
 		openfiles::OpenFiles,
 	};
 	use clap::Parser;
+	use tokio_util::sync::CancellationToken;
 
 	use super::{TimeoutArgs, TimeoutCommand, parse_signal, signal_display};
 
@@ -423,6 +460,54 @@ mod tests {
 		}
 	}
 
+	/// Lets a test watch and stop the [`SpinCommand`] it runs on another
+	/// thread: the command sets `started` before it spins, and setting
+	/// `released` stops it whether or not cancellation reached it.
+	#[derive(Default)]
+	struct SpinGate {
+		started: AtomicBool,
+		released: AtomicBool,
+	}
+
+	/// Sets `released` when dropped, so a test that fails while the command
+	/// spins does not leave a core busy for the tests that run after it.
+	struct ReleaseOnDrop(Arc<SpinGate>);
+
+	impl Drop for ReleaseOnDrop {
+		fn drop(&mut self) {
+			self.0.released.store(true, Ordering::SeqCst);
+		}
+	}
+
+	thread_local! {
+		/// The gate of the [`SpinCommand`] that runs on this thread. Each run
+		/// gets its own, so no state carries over from one test to the next.
+		static SPIN_GATE: RefCell<Option<Arc<SpinGate>>> = const { RefCell::new(None) };
+	}
+
+	/// An in-process operand that never awaits: it spins until its
+	/// cancellation token is cancelled, so nothing else on its task runs.
+	#[derive(Parser)]
+	struct SpinCommand;
+
+	impl builtins::Command for SpinCommand {
+		type Error = brush_core::Error;
+
+		async fn execute<SE: brush_core::ShellExtensions>(
+			&self,
+			context: ExecutionContext<'_, SE>,
+		) -> Result<ExecutionResult, Self::Error> {
+			let gate = SPIN_GATE
+				.with_borrow(Clone::clone)
+				.expect("spin-test runs on a thread that holds a SpinGate");
+			gate.started.store(true, Ordering::SeqCst);
+			while !context.is_cancelled() && !gate.released.load(Ordering::SeqCst) {
+				std::hint::spin_loop();
+			}
+			Ok(ExecutionResult::new(99))
+		}
+	}
+
 	async fn test_shell() -> Shell<DefaultShellExtensions> {
 		Shell::builder()
 			.builtin(
@@ -443,12 +528,21 @@ mod tests {
 	}
 
 	async fn run_with_deadline(command: &str) -> ExecutionResult {
+		run_with_deadline_under(command, None).await
+	}
+
+	/// [`run_with_deadline`], with `caller` as the run's cancellation token
+	/// when given.
+	async fn run_with_deadline_under(command: &str, caller: Option<CancellationToken>) -> ExecutionResult {
 		let mut shell = test_shell().await;
 		let mut params = shell.default_exec_params();
 		// Cancelling the operand makes the shell report an interrupted command;
 		// without this the diagnostic lands on the test runner's terminal.
 		for fd in [OpenFiles::STDIN_FD, OpenFiles::STDOUT_FD, OpenFiles::STDERR_FD] {
 			params.set_fd(fd, brush_core::openfiles::null().expect("null device"));
+		}
+		if let Some(token) = caller {
+			params.set_cancel_token(token);
 		}
 		tokio::time::timeout(
 			Duration::from_secs(1),
@@ -882,6 +976,49 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn caller_cancellation_during_kill_after_reap_is_interrupted() {
+		// Failure mode: after `-k` fires, timeout bounded its wait for a
+		// cancellation-ignoring operand without polling the caller's token.
+		// Cancelling the run during that wait then returned 137 instead of 130.
+		let caller = CancellationToken::new();
+		let canceller = tokio::spawn({
+			let caller = caller.clone();
+			async move {
+				// The 10 ms limit and 75 ms kill-after have both expired before
+				// this cancellation, while stubborn-test still has 50 ms left.
+				tokio::time::sleep(Duration::from_millis(250)).await;
+				caller.cancel();
+			}
+		});
+		let mut shell = test_shell().await;
+		shell
+			.register_builtin(
+				"stubborn-test",
+				builtins::builtin::<StubbornCommand, DefaultShellExtensions>(),
+			);
+		let mut params = shell.default_exec_params();
+		for fd in [OpenFiles::STDIN_FD, OpenFiles::STDOUT_FD, OpenFiles::STDERR_FD] {
+			params.set_fd(fd, brush_core::openfiles::null().expect("null device"));
+		}
+		params.set_cancel_token(caller);
+		let timeout = <TimeoutCommand as builtins::Command>::new(
+			["timeout", "-k", "0.075", "0.010", "stubborn-test"].map(String::from),
+		)
+		.expect("timeout argv");
+		let context = ExecutionContext { shell: &mut shell, command_name: "timeout".into(), params };
+		let result = tokio::time::timeout(
+			Duration::from_secs(1),
+			builtins::Command::execute(&timeout, context),
+		)
+		.await
+		.expect("cancellation during reap exceeded its safety deadline")
+		.expect("execute timeout");
+		canceller.await.expect("canceller task");
+
+		assert_eq!(u8::from(result.exit_code), 130, "caller cancellation must override kill-after");
+	}
+
+	#[tokio::test]
 	async fn clap_parse_failure_exits_125_not_2() {
 		// GNU usage errors exit 125; brush's generic clap path would exit 2.
 		let result = run_with_deadline("timeout").await;
@@ -944,5 +1081,153 @@ mod tests {
 		let result =
 			run_with_deadline("timeout --preserve-status 0.050 sleep 5").await;
 		assert_eq!(u8::from(result.exit_code), 143, "SIGTERM death is 128+15");
+	}
+
+	/// The in-process fallback cancels only its command's token, a child of
+	/// the caller's. If it cancelled the caller's token, these limits would
+	/// end the caller's whole run with the shell's error status 1.
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn in_process_limit_keeps_the_callers_token() {
+		let caller = CancellationToken::new();
+		for (command, status) in [
+			("timeout 0.010 slow-test", 124),
+			("timeout -s KILL 0.010 slow-test", 137),
+		] {
+			let result = run_with_deadline_under(command, Some(caller.clone())).await;
+			assert_eq!(u8::from(result.exit_code), status, "{command}");
+			assert!(!caller.is_cancelled(), "`{command}` cancelled the caller's token");
+		}
+	}
+
+	/// A caller token does not change the status of a completed command or an
+	/// externally signalled child. These rows exercise the signal path, not
+	/// the in-process cancellation fallback.
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn caller_token_preserves_completed_and_external_timeout_statuses() {
+		let caller = CancellationToken::new();
+		for (command, status) in [
+			("timeout 0.250 status-test", 7),
+			("timeout -s TERM 0.050 sleep 5", 124),
+			("timeout --preserve-status 0.050 sleep 5", 143),
+		] {
+			let result = run_with_deadline_under(command, Some(caller.clone())).await;
+			assert_eq!(u8::from(result.exit_code), status, "{command}");
+			assert!(!caller.is_cancelled(), "`{command}` cancelled the caller's token");
+		}
+	}
+
+	#[test]
+	fn caller_cancel_stops_an_operand_that_never_awaits() {
+		// Failure mode: cancelling a run hangs in `timeout 30 <in-process
+		// command that never awaits>`. The command keeps the task, so timeout's
+		// own select never sees the caller's cancellation; only a token derived
+		// from the caller's reaches the command. Once the command stops, the
+		// run must read as interrupted, not as the command's own status.
+		let caller = CancellationToken::new();
+		let token = caller.clone();
+		let gate = Arc::new(SpinGate::default());
+		let _release = ReleaseOnDrop(Arc::clone(&gate));
+		let run_gate = Arc::clone(&gate);
+		let (done_tx, done_rx) = mpsc::channel();
+		// A spinning operand holds its runtime's only thread, so the runtime
+		// runs on a thread of its own, which `_release` frees if the test fails.
+		std::thread::spawn(move || {
+			SPIN_GATE.set(Some(run_gate));
+			let runtime = tokio::runtime::Builder::new_current_thread()
+				.enable_all()
+				.build()
+				.expect("runtime");
+			let result = runtime.block_on(async move {
+				let mut shell = test_shell().await;
+				shell.register_builtin(
+					"spin-test",
+					builtins::builtin::<SpinCommand, DefaultShellExtensions>(),
+				);
+				let mut params = shell.default_exec_params();
+				for fd in [OpenFiles::STDIN_FD, OpenFiles::STDOUT_FD, OpenFiles::STDERR_FD] {
+					params.set_fd(fd, brush_core::openfiles::null().expect("null device"));
+				}
+				params.set_cancel_token(token);
+				// The builtin is called directly: once the caller's token is
+				// cancelled, the shell reports status 1 for the run whatever
+				// `timeout` returns, so only here does that status show.
+				let timeout = <TimeoutCommand as builtins::Command>::new(
+					["timeout", "30", "spin-test"].map(String::from),
+				)
+				.expect("timeout argv");
+				let context =
+					ExecutionContext { shell: &mut shell, command_name: "timeout".into(), params };
+				builtins::Command::execute(&timeout, context).await
+			});
+			let _ = done_tx.send(result.map(|result| u8::from(result.exit_code)));
+		});
+
+		let started = Instant::now();
+		while !gate.started.load(Ordering::SeqCst) {
+			assert!(started.elapsed() < Duration::from_secs(5), "spin-test never started");
+			std::thread::sleep(Duration::from_millis(1));
+		}
+		caller.cancel();
+		let status = done_rx
+			.recv_timeout(Duration::from_secs(5))
+			.expect("the operand still spins 5 s after the caller's token was cancelled")
+			.expect("timeout returned an error");
+		assert_eq!(status, 130, "a cancelled run must read as interrupted");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn caller_cancellation_stops_timeout_in_a_function_pipeline() {
+		// Failure mode: a caller cancellation reaches timeout but not an
+		// in-process operand below its function and pipeline frames, so the
+		// bash-tool run never returns.
+		let caller = CancellationToken::new();
+		let token = caller.clone();
+		let gate = Arc::new(SpinGate::default());
+		let _release = ReleaseOnDrop(Arc::clone(&gate));
+		let run_gate = Arc::clone(&gate);
+		let (done_tx, done_rx) = mpsc::channel();
+		std::thread::spawn(move || {
+			SPIN_GATE.set(Some(run_gate));
+			let runtime = tokio::runtime::Builder::new_current_thread()
+				.enable_all()
+				.build()
+				.expect("runtime");
+			let result = runtime.block_on(async move {
+				let dir = tempfile::tempdir().expect("create scratch dir");
+				let mut shell = full_shell(dir.path()).await;
+				shell.register_builtin(
+					"spin-test",
+					builtins::builtin::<SpinCommand, DefaultShellExtensions>(),
+				);
+				let mut params = shell.default_exec_params();
+				for fd in [OpenFiles::STDIN_FD, OpenFiles::STDOUT_FD, OpenFiles::STDERR_FD] {
+					params.set_fd(fd, brush_core::openfiles::null().expect("null device"));
+				}
+				params.set_cancel_token(token);
+				shell
+					.run_string(
+						"run() { timeout 30 spin-test; }; run | cat",
+						&SourceInfo::default(),
+						&params,
+					)
+					.await
+			});
+			let _ = done_tx.send(result.map(|result| u8::from(result.exit_code)));
+		});
+
+		let started = Instant::now();
+		while !gate.started.load(Ordering::SeqCst) {
+			assert!(started.elapsed() < Duration::from_secs(5), "spin-test never started");
+			std::thread::sleep(Duration::from_millis(1));
+		}
+		caller.cancel();
+		let status = done_rx
+			.recv_timeout(Duration::from_secs(5))
+			.expect("function-pipeline operand still spins after caller cancellation")
+			.expect("execute function pipeline");
+		assert_eq!(status, 1, "the shell normalizes a cancelled run to status 1");
 	}
 }

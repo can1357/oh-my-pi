@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed cancelling a bash tool call leaving a shell loop or builtin under `timeout` running ([#17665](https://github.com/can1357/oh-my-pi/pull/17665) by [@sjawhar](https://github.com/sjawhar)).
+
 ## [18.14.2] - 2026-10-31
 
 ### Added
