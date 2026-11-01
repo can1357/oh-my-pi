@@ -1,4 +1,5 @@
 import { type } from "@oh-my-pi/omptype";
+import type { WatchedFiles } from "./watched-files";
 import { TOOL_TIMEOUTS } from "../tools/tool-timeouts";
 
 // =============================================================================
@@ -456,6 +457,8 @@ export interface LspClient {
 	buildStatusSeq?: number;
 	/** Dynamic capability registrations keyed by the server-provided registration ID. */
 	dynamicCapabilityRegistrations?: Map<string, string>;
+	/** Server-registered filesystem watches, closed with this LSP client. */
+	watchedFiles?: WatchedFiles;
 	openFiles: Map<string, OpenFile>;
 	/**
 	 * Documents OMP closed and will reopen (for idleness, or mid diagnostics reopen),
