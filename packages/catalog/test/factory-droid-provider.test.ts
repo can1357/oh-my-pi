@@ -334,6 +334,25 @@ describe("Factory Droid registry consistency", () => {
 });
 
 describe("Factory Droid discovery gates", () => {
+	it.each<{ label: string; flags: Record<string, boolean>; allowed: boolean; visible: boolean }>([
+		{
+			label: "appears with its native feature flag and org approval",
+			flags: { minimax_m3_1_flash: true },
+			allowed: true,
+			visible: true,
+		},
+		{ label: "stays hidden without its feature flag", flags: {}, allowed: true, visible: false },
+		{
+			label: "stays hidden when the org denies access",
+			flags: { minimax_m3_1_flash: true },
+			allowed: false,
+			visible: false,
+		},
+	])("MiniMax M3.1 Flash $label", async ({ flags, allowed, visible }) => {
+		const models = await discover({ flags, modelPolicy: { allowAllFactoryModels: allowed } }, { region: "global" });
+		expect(models?.some(model => model.id === "minimax-m3.1-flash")).toBe(visible);
+	});
+
 	it.each([
 		{
 			label: "a live feature gate is required even when the org allowlists the model",
