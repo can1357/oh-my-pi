@@ -98,8 +98,9 @@ def publish(out: Path, text: str, revision: str) -> None:
 	names the digest of the data its writer published, so `run` refuses that pair instead of trusting it.
 	"""
 	marker(out).unlink(missing_ok=True)
+	# newline="\n": text mode would otherwise write CRLF on Windows, giving the same corpus another digest there.
 	with tempfile.NamedTemporaryFile(
-		"w", encoding="utf-8", dir=out.parent, prefix=f".{out.name}.", delete=False
+		"w", encoding="utf-8", newline="\n", dir=out.parent, prefix=f".{out.name}.", delete=False
 	) as staging:
 		staging.write(text)
 	written = hashlib.sha256(Path(staging.name).read_bytes()).hexdigest()

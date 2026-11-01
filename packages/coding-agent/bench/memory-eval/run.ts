@@ -32,11 +32,17 @@ const REVISIONS = {
 const REPO_ROOT = path.resolve(import.meta.dir, "../../../..");
 const UPSTREAM_COMPAT_CONVERSATIONS = 3;
 
-/** Hash of every `.ts` and `.py` file of the harness, read before the run so later edits cannot change it. */
-async function harnessHash(): Promise<string> {
-	const files = (await Array.fromAsync(new Bun.Glob("**/*.{ts,py}").scan(import.meta.dir))).sort();
+/**
+ * Hash of every `.ts` and `.py` file of the harness, read before the run so later edits cannot change it. Line endings
+ * are normalized first, so an LF and a CRLF (native Windows) checkout of the same revision fingerprint alike.
+ */
+export async function harnessHash(dir: string = import.meta.dir): Promise<string> {
+	const files = (await Array.fromAsync(new Bun.Glob("**/*.{ts,py}").scan(dir))).sort();
 	const parts = await Promise.all(
-		files.map(async file => `${file}\0${await Bun.file(path.join(import.meta.dir, file)).text()}`),
+		files.map(
+			async file =>
+				`${file.replaceAll("\\", "/")}\0${(await Bun.file(path.join(dir, file)).text()).replaceAll("\r\n", "\n")}`,
+		),
 	);
 	return Bun.hash(parts.join("\0")).toString(16);
 }
