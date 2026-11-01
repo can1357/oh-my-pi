@@ -1,9 +1,6 @@
 # Changelog
 
 ## [Unreleased]
-### Fixed
-
-- Fixed WSL startup hanging indefinitely when the Windows interop pipe wedged; the startup probes now give up after 500 ms and fall back to the Linux paths ([#8402](https://github.com/can1357/oh-my-pi/issues/8402), [#15337](https://github.com/can1357/oh-my-pi/pull/15337) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
 
@@ -11,6 +8,7 @@
 - Added `btw.inject` (off by default; `/settings` → Interaction → "/btw Steering Inject"): when you ask `/btw` for a steering prompt, it drafts one in an `<inject>` block shown behind a pink rail, and `Alt+I` (`app.btw.inject`) sends it to the main session (as a steer while the agent runs, else as a new turn) from the inline answer or the BTW history sheet, once per answer from the current run. Once sent, the block turns green with `➤` on each line and "Injected into main session" below it; if the main session drops or refuses the send, the block turns back to pending and the same key retries ([#17618](https://github.com/can1357/oh-my-pi/pull/17618) by [@apullin](https://github.com/apullin))
 
 ### Fixed
+- Fixed WSL startup hanging indefinitely when the Windows interop pipe wedged; the startup probes now give up after 500 ms and fall back to the Linux paths ([#8402](https://github.com/can1357/oh-my-pi/issues/8402), [#15337](https://github.com/can1357/oh-my-pi/pull/15337) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
 
