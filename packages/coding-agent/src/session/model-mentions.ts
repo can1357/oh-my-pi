@@ -34,7 +34,9 @@ export function readModelMentions(entries: readonly SessionEntry[]): ModelMentio
 			typeof selector !== "string" ||
 			typeof name !== "string" ||
 			(thinkingLevel !== undefined &&
-				(typeof thinkingLevel !== "string" || parseEffort(thinkingLevel) !== thinkingLevel))
+				(typeof thinkingLevel !== "string" ||
+					parseEffort(thinkingLevel) !== thinkingLevel ||
+					!selector.endsWith(`:${thinkingLevel}`)))
 		)
 			continue;
 		if (agents.has(agent) || selectors.has(selector)) continue;

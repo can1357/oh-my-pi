@@ -354,7 +354,7 @@ describe("model mentions", () => {
 		expect(readModelMentions(session.getBranch())).toEqual([{ agent: "m1", selector: "d/r:max", name: "R Max" }]);
 	});
 
-	test("replays tagged levels and skips entries whose level is not canonical", () => {
+	test("replays tagged levels and skips entries whose level is not canonical or not the selector's", () => {
 		session.appendCustomEntry(MODEL_MENTION_ENTRY_TYPE, {
 			agent: "m1",
 			selector: "d/r:high",
@@ -366,6 +366,12 @@ describe("model mentions", () => {
 			selector: "d/r:low",
 			name: "R One · low",
 			thinkingLevel: "lo",
+		});
+		session.appendCustomEntry(MODEL_MENTION_ENTRY_TYPE, {
+			agent: "m3",
+			selector: "d/r:max",
+			name: "R One · max",
+			thinkingLevel: "high",
 		});
 		mentions.syncFromBranch();
 		expect(mentions.mentions.map(mention => [mention.agent, mention.thinkingLevel])).toEqual([["m1", Effort.High]]);
