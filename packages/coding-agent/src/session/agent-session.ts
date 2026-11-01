@@ -6689,6 +6689,7 @@ export class AgentSession implements SettingsScope {
 
 		resetCapabilities();
 		await this.refreshBaseSystemPrompt();
+		await this.#extensionRunner?.emit({ type: "session_clear" });
 
 		return { droppedCount };
 	}

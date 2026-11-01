@@ -273,6 +273,10 @@ command aborts it and waits for it to stop before resetting.
   session retains the marker in memory. The collapsed live transcript and
   rebuilt model context begin after the latest boundary, while persisted JSONL
   and full-transcript export retain the pre-reset history.
+- After the reset and system-prompt refresh succeed, awaits the `session_clear`
+  notification to hooks/extensions so they can invalidate context-dependent
+  caches. Empty successful clears also notify; busy/rejected resets do not.
+  This does not emit `session_switch` or allow handlers to cancel the clear.
 
 The TUI clears its rendered transcript after a successful clear. This differs
 from `/fresh`, which rotates provider stream state without clearing the
