@@ -484,3 +484,51 @@ Without an interactive UI, `code-review` delegates to `/review` instead of openi
 Estimate rules: Overview category and per-tool rows split the reported Used total by each row's estimated share, while entry headers show their own unscaled estimates, so the entries in a category need not add up to its Overview row; the Overview notes this under its legend. Skills is its own estimate-only row (the skill listing in the system prompt) and is subtracted from the System Prompt weight to avoid double counting. Multiple thinking blocks in one message share a total shown on a group heading, and grouped entries show `—`; empty interrupted thinking without usage shows `N/A · Interrupted`, not zero. Retained Anthropic web-search and tool-search calls and results appear in Tool Calls and Tool Output as JSON; opaque provider data (thinking signatures, `encrypted_content`, `encrypted_index`) is shown only as its size, such as `signature · 1,024 chars`, while still counted.
 
 Navigation uses the `tui.select.*` bindings: up/down select and scroll, confirm opens an entry, cancel goes back or closes, and page up/down scroll full-content view (see [keybindings](./keybindings.md)). In Tern, click selects, double-click opens, and the mouse wheel scrolls. Categories without entries cannot be opened. Opening the viewer does not submit the composer draft or interrupt a background turn.
+
+## 15) Bundled command note: `/review`
+
+`/review` does not run a reviewer itself. It builds a prompt and returns it to the main session, which then calls the `task` tool with `agent: "reviewer"`. The reviewer is an ordinary task agent, so discovery, model routing, and spawn limits follow [Task agent discovery](./task-agent-discovery.md).
+
+**Target.** `/review [ref] [instructions]` takes a GitHub PR URL, `pr://owner/repo/N`, a GitLab MR URL, or a fully qualified `mr://host/group/project/iid`. The first argument that parses as a ref is the target and the remaining words become extra instructions. Without a ref, an interactive session opens a Review Mode menu: up to three PRs or MRs mentioned in the conversation, a base branch, uncommitted changes, a specific commit, a specific open PR or MR, and custom instructions (the last only when no extra instructions were given). Without a UI and without a ref, the prompt asks for one reviewer task over recent code changes.
+
+**Fan-out.** The prompt asks for one reviewer task when the diff has fewer than 100 changed lines or at most two files. Larger diffs ask for more reviewers, up to 16 once a diff reaches 5000 changed lines, grouped by locality. A diff over 50,000 characters or 20 files is not inlined. The prompt then carries a short preview per file and tells each reviewer to read its own diff.
+
+**Result.** The bundled `reviewer` declares this `output` schema in its frontmatter:
+
+| Field | Type | Meaning |
+| ----- | ---- | ------- |
+| `overall_correctness` | `correct` or `incorrect` | Whether the change has bugs or blockers |
+| `explanation` | string | Verdict summary, 1 to 3 sentences |
+| `confidence` | number, 0.0 to 1.0 | Confidence in the verdict |
+| `findings` (optional) | list | One entry per issue: `title`, `body`, `priority` (0 blocks release to 3 nice to have), `confidence`, `file_path`, `line_start`, `line_end` |
+
+The schema applies only to structured runs: `task.structured` on, or `structured: true` in the agent definition. The bundled `reviewer` does not set `structured`, so with the default `task.structured: false` the task result is the reviewer's final message as text. The `/review` request also asks reviewers to report through incremental `yield` sections, and the `yield` tool exists only on structured runs. See [model and structured-output precedence](./task-agent-discovery.md#model-and-structured-output-precedence).
+
+**Replacing the reviewer.** `/review` looks the agent up by name, so any task agent whose frontmatter has `name: reviewer` replaces the bundled one. The first match wins in this order:
+
+1. nearest project `.omp/agents/*.md`
+2. user `~/.omp/agent/agents/*.md`
+3. `agents/` of enabled OMP extension packages
+4. Claude marketplace plugin agents
+5. the bundled `reviewer`
+
+Item 4 applies only with the `claude-plugins` provider enabled. User-scope roots from the foreign `~/.claude/plugins` tree also need the `claude` or `claude-plugins` user source. Claude-dialect plugin agents (foreign Claude roots and packages whose manifest declares the Claude format) drop their frontmatter `model`. OMP-native and Agent-Plugins-standard packages keep it. For a Claude-dialect `reviewer`, set `task.agentModelOverrides.reviewer` instead.
+
+The name comes from the frontmatter, not the file name. The replacement is the whole definition. Nothing merges with the bundled file, so restate `tools`, `spawns`, `model`, and `output` if the replacement needs them. To change only the model, set `task.agentModelOverrides.reviewer` instead. See [filesystem and plugin discovery](./task-agent-discovery.md#filesystem-and-plugin-discovery) and [merge and collision rules](./task-agent-discovery.md#merge-and-collision-rules).
+
+```md
+---
+name: reviewer
+description: Review a change against the team rubric.
+tools: read, grep, find, bash
+model: "@slow"
+autoloadSkills: [team-review-rubric]
+---
+
+Apply the rubric from the loaded skill. Report only issues introduced by the patch.
+```
+
+**`autoloadSkills` and `spawns`.** The bundled `reviewer` sets no `autoloadSkills` and sets `spawns: scout`.
+
+- `autoloadSkills` names skills from the parent session. Each one is injected as a hidden message before the reviewer's first prompt, like `/skill:<name>`. A name the parent does not know is ignored.
+- `spawns` limits which agents the reviewer may start with `task`. `scout` allows only an agent named `scout`, `*` allows any agent, and omitting it (with no `task` in `tools`) gives no spawning. When `tools` is declared and `spawns` is set, `task` is added to the tool list. At the maximum recursion depth `task` is removed and spawning is off.

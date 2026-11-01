@@ -2,9 +2,19 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Codex conversation replay failing with an unknown `internal_chat_message_metadata_passthrough.content_token_count` parameter by omitting backend-internal response metadata from replayed input ([#17590](https://github.com/can1357/oh-my-pi/pull/17590), [#17597](https://github.com/can1357/oh-my-pi/pull/17597) by [@briankeefe](https://github.com/briankeefe)).
+
+## [18.14.2] - 2026-10-31
+
 ### Breaking Changes
 
 - Replaced `isLoopGuardedModel` with `loopGuardLevel`, which returns `"off"`, `"exact"`, or `"semantic"` from the model's `thinking-loop-guard` catalog rule
+
+### Added
+
+- Added `disableServerSideFallback` to `FactoryDroidOptions` and `SimpleStreamOptions`: a Factory Droid request leaves out the server-side refusal fallback chain and fails, before any of its content is streamed, if another model answers it ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix))
 
 ### Changed
 
@@ -12,6 +22,7 @@
 
 ### Fixed
 
+- Fixed `service_tier: "ultrafast"` being dropped for OpenAI-family models on custom providers even when the model's `serviceTiers` lists it ([#17577](https://github.com/can1357/oh-my-pi/pull/17577) by [@jakehemmerle](https://github.com/jakehemmerle))
 - Fixed Claude turns failing with "Thinking loop detected" when summarized thinking repeated a progress line such as "Still writing the parser..."; Claude models no longer run the loop guard
 - Fixed the loop guard discarding turns from other models whose reasoning summary repeats one status line a few times; whole-line repetition now has to cover about 1 KB before it counts as a loop
 - Fixed per-request OpenAI-compatible headers being combined with differently cased model headers instead of overriding them ([#17513](https://github.com/can1357/oh-my-pi/pull/17513) by [@jchanghong023](https://github.com/jchanghong023))
@@ -35,12 +46,14 @@
 - Cursor runs served through `omp auth-gateway` are limited to the client's own tools, all advertised as MCP; Cursor's built-in tools (file, shell, edit, todo, web fetch, SCM) are no longer offered on that path ([#17382](https://github.com/can1357/oh-my-pi/pull/17382) by [@eggpeat](https://github.com/eggpeat))
 
 ### Fixed
+- Fixed Google Vertex requests with Workforce Identity Federation ADC failing token refresh against the wrong endpoint ([#17447](https://github.com/can1357/oh-my-pi/issues/17447)).
 
 - Fixed native judgment requests (TypeSafe, OpenRouter Decisions, OpenAI Decisions, Workers AI) sending credentials in their state unredacted while credential redaction was on ([#17443](https://github.com/can1357/oh-my-pi/pull/17443))
 - Fixed every new Codex session, including each subagent, losing a response and retrying when the native turn lane refuses live steering; once refused, later sessions on the same account, endpoint, and model queue follow-ups for four hours ([#14158](https://github.com/can1357/oh-my-pi/issues/14158), [#17438](https://github.com/can1357/oh-my-pi/pull/17438) by [@wolfiesch](https://github.com/wolfiesch))
 - Fixed Cursor models served through `omp auth-gateway` being told their file and shell tools were unavailable while the client ran the calls anyway, in Cursor's own argument shape (edits failed validation); each call now reaches the client as one of its own tools and the turn stops with `toolUse` until the result comes back ([#17382](https://github.com/can1357/oh-my-pi/pull/17382) by [@eggpeat](https://github.com/eggpeat))
 - Fixed Cursor models served through `omp auth-gateway` being told each tool call was handed off, which left Composer issuing calls blind and answering their results with empty stops; the gateway now keeps the Cursor run open while the client runs a step's calls and answers them in-band with the client's results on its next request (up to 30 minutes; otherwise the turn is rebuilt from history as before) ([#17382](https://github.com/can1357/oh-my-pi/pull/17382) by [@eggpeat](https://github.com/eggpeat))
 - Fixed Anthropic-compatible endpoints behind a relay opening a new connection for every turn: the response body is now drained for up to 2.5 s after `message_stop` instead of being cancelled, so the kept-alive connection is reused ([#17432](https://github.com/can1357/oh-my-pi/pull/17432) by [@flosrn](https://github.com/flosrn))
+- Fixed Anthropic (and other rotating-token) OAuth accounts being signed out automatically when a background usage poll's token refresh got `invalid_grant`, including refreshes a client delegates to an auth broker; usage polling no longer disables credentials, so only a real request's refresh can do that ([#17468](https://github.com/can1357/oh-my-pi/issues/17468))
 
 ## [18.14.0] - 2026-10-29
 
@@ -2281,63 +2294,4 @@
 - Fixed an issue where malformed tool-call JSON from local Ollama or llama.cpp models was incorrectly retried as generic 500 errors, now surfacing a clear recovery message.
 - Fixed a race condition in OAuth callback flows where abort signals triggered before the callback listener was registered were ignored.
 
-## [16.2.7] - 2026-06-30
-
-### Added
-
-- Added service tier support for Google Gemini and Vertex AI, including model-specific service tier configurations via ServiceTierByFamily.
-- Added Google Vertex AI Interactions API support for Gemini 3+ models by default, with automatic fallback to :streamGenerateContent and a useInteractionsApi: false option to force standard generation.
-- Added support for explicit Vertex bearer access tokens via GOOGLE_CLOUD_ACCESS_TOKEN or CLOUDSDK_AUTH_ACCESS_TOKEN environment variables.
-
-### Changed
-
-- Updated service tier logic to use per-provider configurations instead of global scopes.
-- Refactored priority request billing and accounting to better align with specific provider capabilities.
-- Updated API key resolution precedence so explicit environment variables (e.g., GEMINI_API_KEY) override stored or broker-migrated static API keys, while deliberate OAuth logins still take highest precedence.
-
-### Fixed
-
-- Improved Vertex AI reliability by automatically falling back to global endpoints on 404 errors.
-- Fixed safety setting application for Google Vertex AI models.
-- Fixed Kimi Code's Anthropic-compatible request path to keep thinking enabled and downgrade forced tool choice for Kimi K2.7 Code title generation.
-- Fixed leaked reasoning fences (such as ```thinking or <think>) across all providers by splitting them into structured thinking blocks during streaming.
-- Fixed Codex requests failing with unsupported all_turns errors on older models (gpt-5.1 and gpt-5.3) by gating the reasoning.context: "all_turns" default to gpt-5.4+ models.
-
-## [16.2.6] - 2026-06-29
-
-### Fixed
-
-- Fixed Antigravity usage reporting to correctly infer daily and weekly quota windows from unlabeled reset-only rows, preventing Cloud Code Assist payloads from collapsing these counters into the default category.
-
-## [16.2.5] - 2026-06-28
-
-### Fixed
-
-- Fixed Google and Cloud Code Assist streams that end without a finish reason (dropped connections or truncated responses) being treated as fatal; they are now classified as transient so the coding agent automatically retries.
-
-## [16.2.4] - 2026-06-28
-
-### Added
-
-- Enabled freeform tool patch support for Azure OpenAI and Codex models
-
-### Fixed
-
-- Fixed usage reporting for Antigravity and Z.AI to correctly surface and preserve distinct quota windows (daily, weekly, monthly) instead of collapsing or duplicating them
-- Fixed an issue where `/usage show` returned "No usage data available" when using a custom proxy base URL for Codex
-- Fixed OpenAI stream read errors being incorrectly classified as non-transient, enabling the coding agent to automatically retry after recoverable stream failures
-
-## [16.2.3] - 2026-06-28
-
-### Changed
-
-- Enabled automatic removal of leaked reasoning tags for all models
-- Prevented reasoning text duplication when models emit both structured and inline thinking
-- Defaulted reasoning context to all turns for all Codex requests.
-
-### Fixed
-
-- Enabled freeform tool patch support for Azure OpenAI and Codex models.
-- Fixed an issue where the `/usage show` command returned "No usage data available" when using a custom proxy base URL for Codex.
-
-Older entries are archived in [packages/ai/CHANGELOG.md@cef4a452836c](https://github.com/can1357/oh-my-pi/blob/cef4a452836c7a8d547dd14470c34c9ed2dbb5f8/packages/ai/CHANGELOG.md).
+Older entries are archived in [packages/ai/CHANGELOG.md@7dc0d0325754](https://github.com/can1357/oh-my-pi/blob/7dc0d0325754955b01c15b64b220b2cf27e670db/packages/ai/CHANGELOG.md).

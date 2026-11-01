@@ -43,15 +43,7 @@ import {
 	type TokenCost,
 	runnerApiKind,
 } from "../types";
-import {
-	discoveryFetch,
-	isAnthropicOAuthToken,
-	isRecord,
-	toBoolean,
-	toNumber,
-	toPositiveNumber,
-	toPositiveNumberOrNull,
-} from "../utils";
+import { discoveryFetch, isAnthropicOAuthToken, isRecord, toBoolean, toNumber, toPositiveNumber } from "../utils";
 import { ALIBABA_TOKEN_PLAN_BASE_URL, parseAlibabaTokenPlanCredential } from "../wire/alibaba-token-plan";
 import { normalizeCharmHyperBaseUrl } from "../wire/charm-hyper";
 import { CLINEPASS_API_BASE_URL, clinePassClientHeaders } from "../wire/cline-pass";
@@ -545,6 +537,8 @@ function mapWithBundledReference<TApi extends Api>(
 		return {
 			...defaults,
 			name,
+			contextWindow: toPositiveNumber(entry.context_length, defaults.contextWindow),
+			maxTokens: toPositiveNumber(entry.max_completion_tokens, defaults.maxTokens),
 		};
 	}
 	// Generic `/models` rows describe the chat roster. Do not make a bundled
@@ -4814,8 +4808,6 @@ export function basetenModelManagerOptions(
 				cacheWrite: 0,
 			};
 
-			const contextWindow = toPositiveNumber(raw.context_length, reference?.contextWindow ?? defaults.contextWindow);
-			const maxTokens = toPositiveNumber(raw.max_completion_tokens, reference?.maxTokens ?? defaults.maxTokens);
 			const baseModel = mapWithBundledReference(entry, defaults, reference);
 
 			return {
@@ -4823,8 +4815,6 @@ export function basetenModelManagerOptions(
 				reasoning,
 				input: vision ? ["text", "image"] : ["text"],
 				cost,
-				contextWindow,
-				maxTokens,
 				...(supportsTools === false ? { supportsTools } : {}),
 			};
 		},
@@ -6588,13 +6578,7 @@ export function nanoGptModelManagerOptions(
 						const maxOutputTokens = entry.max_output_tokens ?? entry.max_completion_tokens;
 						const mapped = mapWithBundledReference(
 							{ ...entry, max_completion_tokens: maxOutputTokens },
-							reference
-								? defaults
-								: {
-										...defaults,
-										contextWindow: toPositiveNumberOrNull(entry.context_length),
-										maxTokens: toPositiveNumberOrNull(maxOutputTokens),
-									},
+							defaults,
 							reference,
 						);
 						return {
@@ -7838,6 +7822,8 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_SPECIALIZED: readonly ModelsDevProviderDes
 			return { api: "openai-completions" as const, baseUrl: ZENMUX_OPENAI_BASE_URL };
 		},
 	}),
+	// --- Modular ---
+	openAiCompletionsDescriptor("modular", "modular", "https://api.modular.com/v1"),
 ];
 /** All provider descriptors for models.dev data mapping in generate-models.ts. */
 export const MODELS_DEV_PROVIDER_DESCRIPTORS: readonly ModelsDevProviderDescriptor[] = [

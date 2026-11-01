@@ -2,8 +2,38 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- `GroupedLineContext.isUrl` is replaced by `url`, the internal URL a header names or a body row belongs to ([#17608](https://github.com/can1357/oh-my-pi/pull/17608) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+
 ### Added
 
+- Added `FILE_NAME_COLOR`, `formatStyledPath` and `pathNameStart` to `render/render-utils` for paths in tool bodies and Tern file rows; `createGroupedRowStyler`, `groupedLinkTargets`, `fitGroupsToBudget`, `groupsByFile` and `isMatchRow` to `tools/grouped-file-output`; `splitReadQuery` to `tools/read`; and `HASHLINE_TAG_SUFFIX_RE` to `tools/hashline-format`. `classifyGroupedLines` reports each file header's full `displayPath` and `suffix`, and a `TranscriptStatusPart` without `color` keeps its already-styled text ([#17608](https://github.com/can1357/oh-my-pi/pull/17608) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- `JobsPanelJob.caption`: the jobs sheet's detail pane shows it, muted, between the job's purpose and its command (`omp.jobs.caption`) ([#17649](https://github.com/can1357/oh-my-pi/pull/17649) by [@wolfiesch](https://github.com/wolfiesch))
+
+### Changed
+
+- The Background jobs sheet names each job by what it is for when the model said so, shows that above the full command in the detail pane, and no longer repeats the command in an empty widget box for jobs that print nothing ([#17649](https://github.com/can1357/oh-my-pi/pull/17649) by [@wolfiesch](https://github.com/wolfiesch))
+- File paths in tool output share one style: a dim directory and the file name in the custom-message label color (bronze in titanium), with line locations and selectors (`:1-175`, `:42:14`, `?q=`) muted. This covers Grep, AST Grep, AST Edit, Glob, Find, LSP, diagnostics, grouped Reads and file mentions; Glob's folder icon is muted like the file-type icons, and paths in tool headers keep their color ([#17608](https://github.com/can1357/oh-my-pi/pull/17608) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- Grep, AST Grep and AST Edit results label each file with its full path instead of the model-facing `# dir/` and `## file#tag` headers, and each file gets its own tree branch. Their collapsed previews fit the same row budget the same way, cutting the last file short rather than overflowing, and end with `… N more matches` (`… N more files` for AST Edit) ([#17608](https://github.com/can1357/oh-my-pi/pull/17608) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- AST Grep match rows link to their line, as Grep's do ([#17608](https://github.com/can1357/oh-my-pi/pull/17608) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- LSP diagnostics carry their severity color on the `[error]`/`[warning]` tag instead of the location, and collapsed diagnostic rows now show that tag ([#17608](https://github.com/can1357/oh-my-pi/pull/17608) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+
+### Fixed
+
+- Rex sessions now render Kitty graphics without forcing the protocol, including when only `TERM=xterm-rex` identifies the client ([#17651](https://github.com/can1357/oh-my-pi/issues/17651)).
+- Fixed collapsed AST Grep showing no matches when its first file or folder was taller than the preview, and its `… N more` row counting hidden folders instead of hidden matches ([#17608](https://github.com/can1357/oh-my-pi/pull/17608) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- Fixed collapsed AST Edit overflowing its preview when the first file's diff was long ([#17608](https://github.com/can1357/oh-my-pi/pull/17608) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- Fixed search and diagnostic file paths in Tern dropping the leading `/` of absolute paths and a folder's own `(…)` ending, and AST Edit diffs in Tern losing highlighting to the file's `#tag`; a file name ending in lowercase or other-length `#…` text keeps it ([#17608](https://github.com/can1357/oh-my-pi/pull/17608) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+### Fixed
+
+- Fixed a read of a URL drawing as dead text in the folded read row: its target is not a file path, so no link was built for it, and clicking the URL did nothing. The row (and each row of a grouped read) now links to the URL itself, gaining an `https://` scheme for a bare `www.` host ([#17598](https://github.com/can1357/oh-my-pi/pull/17598) by [@iacore](https://github.com/iacore))
+
+## [18.14.2] - 2026-10-31
+
+### Added
+
+- Added `assertModelSupportsEffortCeiling()`, which throws when a model has no supported thinking effort at or below a `task.maxEffort` ceiling ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix))
 - Added `iconButton()`, `quietButton()` and `segmentedTabs()` to `native/overlay`, and `disabled`, `busy` and `icon` options to `actionButton()`
 - Added `nativeTail` to `Composer.setRuntimeChildren` options: containers whose children continue the native surface's `main` after the transcript instead of riding in the dock
 - Added `isHighlightLanguage` and `createCodeFrameStyler` for renderers that highlight source lines in their file's language ([#17550](https://github.com/can1357/oh-my-pi/pull/17550) by [@JustasMasiulis](https://github.com/JustasMasiulis))
@@ -21,6 +51,7 @@
 - Fixed text after a nested color losing the outer color, such as the rest of the `/mcp` and `/ssh` hints after the highlighted command (`Run /mcp list to see all configured servers.`) falling back to the default text color instead of staying muted ([#17521](https://github.com/can1357/oh-my-pi/pull/17521) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Fixed LSP definition, type definition and implementation results showing the raw `Found 1 definition(s):` text; the response now counts them (`1 definition`) and shows each location over its source lines, its own line marked like a grep match ([#17549](https://github.com/can1357/oh-my-pi/pull/17549) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Fixed an LSP definition, type definition or implementation location whose path starts with whitespace being dropped, with its source lines shown under the previous location
+- Fixed session tree user and assistant turns looking identical in themes whose `accent` and `success` colors match or nearly match (`dark-terminal`, `dark-poimandres`, `light-poimandres`): user rows are now bold, the `assistant:` label switches to the path color, and custom and advisor messages are muted ([#17520](https://github.com/can1357/oh-my-pi/pull/17520) by [@wolfiesch](https://github.com/wolfiesch))
 
 ## [18.14.1] - 2026-10-31
 
@@ -33,7 +64,9 @@
 - Fixed IME composition text in the BTW history `Follow up:` input appearing at the left edge instead of at the caret when the hardware cursor is enabled ([#17427](https://github.com/can1357/oh-my-pi/issues/17427))
 - Fixed session tree rows overlapping when messages, tool arguments, or labels contain carriage returns or Unicode line/paragraph separators (`U+2028`, `U+2029`), while keeping multiline formatting in the selected entry preview ([#17430](https://github.com/can1357/oh-my-pi/pull/17430) by [@lincicomb](https://github.com/lincicomb)).
 - Fixed the Background jobs sheet dropping a finished job and its output while you were reading it; the selected job now stays until you select another ([#17506](https://github.com/can1357/oh-my-pi/pull/17506) by [@H4vC](https://github.com/H4vC))
-- Fixed session tree user and assistant turns looking identical in themes whose `accent` and `success` colors match or nearly match (`dark-terminal`, `dark-poimandres`, `light-poimandres`): user rows are now bold, the `assistant:` label switches to the path color, and custom and advisor messages are muted ([#17520](https://github.com/can1357/oh-my-pi/pull/17520) by [@wolfiesch](https://github.com/wolfiesch))
+### Fixed
+
+- Fixed replayed transcripts ignoring a registered `async-result` message renderer, so a replayed conversation rendered differently from the live one ([#17372](https://github.com/can1357/oh-my-pi/pull/17372) by [@AlexBrd999](https://github.com/AlexBrd999), from [#14484](https://github.com/can1357/oh-my-pi/pull/14484) by [@F0Rextasy](https://github.com/F0Rextasy); [#14131](https://github.com/can1357/oh-my-pi/issues/14131))
 
 ## [18.14.0] - 2026-10-29
 

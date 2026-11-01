@@ -37,7 +37,7 @@ import { theme } from "../theme";
 import {
 	assistantHasVisibleContent,
 	assistantUsageIsBilled,
-	buildAsyncResultBlock,
+	buildAsyncResultComponent,
 	buildFileMentionBlock,
 	buildIrcMessageCard,
 	buildLaunchCompletionBlock,
@@ -599,7 +599,9 @@ export class ChatTranscriptBuilder {
 	#appendCustomMessage(message: Extract<AgentMessage, { role: "custom" | "hookMessage" }>): void {
 		if (!message.display) return;
 		if (message.customType === "async-result") {
-			const component = buildAsyncResultBlock(message);
+			const renderer = this.#deps.getMessageRenderer?.(message.customType);
+			const component = buildAsyncResultComponent(message, renderer);
+			this.#trackExpandable(component);
 			this.container.addChild(component);
 			return;
 		}

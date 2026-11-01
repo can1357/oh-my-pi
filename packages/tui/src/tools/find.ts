@@ -10,10 +10,12 @@ import { Text } from "../components/text";
 import { fileHyperlink, getTreeBranch, renderStatusLine, renderTreeList, uriHyperlink } from "../render";
 import {
 	createCachedComponent,
+	FILE_NAME_COLOR,
 	fitHeaderedRows,
 	formatCount,
 	formatEmptyMessage,
 	formatErrorMessage,
+	formatStyledPath,
 	PREVIEW_LIMITS,
 	replaceTabs,
 } from "../render/render-utils";
@@ -168,9 +170,10 @@ function renderHit(hit: FindHit, rangeLimit: number, cwd: string | undefined, ra
 		return absPath === undefined ? text : fileHyperlink(absPath, text, { line });
 	};
 	const coverage = hit.truncated ? `${hit.linesSeen} lines judged, partial` : `${hit.linesSeen} lines judged`;
-	const lines = [
-		`${gauge(hit.contentScore, theme)} ${theme.fg(scoreColor(hit.contentScore), hit.contentScore.toFixed(2))} ${link(theme.fg("accent", hit.rel))} ${theme.fg("dim", coverage)}`,
-	];
+	// URL hits show whole in the file-name color; file hits get the dim directory.
+	const label = isUrlHit ? theme.fg(FILE_NAME_COLOR, hit.rel) : formatStyledPath(hit.rel, theme);
+	const score = theme.fg(scoreColor(hit.contentScore), hit.contentScore.toFixed(2));
+	const lines = [`${gauge(hit.contentScore, theme)} ${score} ${link(label)} ${theme.fg("dim", coverage)}`];
 	const ranges = [...hit.ranges].sort((a, b) => b.p - a.p || a.start - b.start).slice(0, rangeLimit);
 	const lang = getLanguageFromPath(hit.rel);
 	ranges.forEach((range, index) => {
