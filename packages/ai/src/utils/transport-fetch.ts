@@ -2,7 +2,7 @@ import { resolveExtraCa, withExtraCaInit } from "@oh-my-pi/pi-utils";
 import { coworkFetch } from "../providers/cowork-fetch";
 import { withInferenceUserAgent } from "../providers/inference-headers";
 import type { Api, FetchImpl, Model } from "../types";
-import { getProxyForProvider, withProxyInit } from "./proxy";
+import { getProxyForProvider, hasNativeProxyEnv, withProxyInit } from "./proxy";
 import { createFetchRequestDebugSession, isRequestDebugEnabled } from "./request-debug";
 
 /** Stamped on a fetch already built by {@link transportFetch}. */
@@ -36,7 +36,10 @@ export function transportFetch(model: Model<Api>, fetchImpl: FetchImpl | undefin
 		init = withInferenceUserAgent(input, init);
 		const extraCa = resolveExtraCa();
 		if (extraCa) init = withExtraCaInit(init, extraCa);
-		if (proxyUrl) init = withProxyInit(input, init, proxyUrl);
+		// Bun's fetch applies `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` on its own,
+		// so a LAN host has to opt out of that native proxy explicitly — bypassing
+		// `PI_PROXY` alone would still send the request through the egress.
+		if (proxyUrl || hasNativeProxyEnv()) init = withProxyInit(input, init, proxyUrl);
 		if (!isRequestDebugEnabled()) return base(input, init);
 		const session = await createFetchRequestDebugSession(input, init);
 		return session.wrapResponse(await base(input, init));

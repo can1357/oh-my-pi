@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Fixed `.local` LAN hosts being tunnelled through `PI_PROXY`; they now bypass the egress proxy like the other local hosts, and a `NO_PROXY` exemption written with a trailing DNS root label matches the dotted host too ([#13591](https://github.com/can1357/oh-my-pi/issues/13591), [#16457](https://github.com/can1357/oh-my-pi/pull/16457) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Changed
 
