@@ -54,3 +54,27 @@ export interface EvalOutputConsumerFailure {
 	callback: "onChunk" | "onDisplay";
 	message: string;
 }
+
+/**
+ * Records `thrown` as `callback`'s failure, and never throws. A consumer may
+ * throw or reject with any value, including one whose conversion to text
+ * throws: a null-prototype object, an error with a throwing `message` getter,
+ * a `Proxy` whose traps throw. A failure to describe it must not escape, or the
+ * report would itself end the Python reader or the host process.
+ */
+export function outputConsumerFailure(
+	callback: EvalOutputConsumerFailure["callback"],
+	thrown: unknown,
+): EvalOutputConsumerFailure {
+	try {
+		return { callback, message: thrown instanceof Error ? String(thrown.message) : String(thrown) };
+	} catch {
+		// Its own conversion threw; this one calls no `toString` or `valueOf` the value defines.
+	}
+	try {
+		return { callback, message: Object.prototype.toString.call(thrown) };
+	} catch {
+		// A Proxy throws even here.
+	}
+	return { callback, message: `a thrown ${typeof thrown} that cannot be converted to text` };
+}

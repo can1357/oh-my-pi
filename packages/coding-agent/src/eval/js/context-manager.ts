@@ -18,7 +18,13 @@ import { updateEvalState } from "../state";
 import type { EvalShadowCellSession } from "../speculation/cell-session";
 import { getActiveEvalShadowCell } from "../speculation/runtime-context";
 import type { ShadowPlan } from "../speculation/types";
-import type { EvalDisplayOutput, EvalOutputConsumerFailure, EvalToolDescriptor, EvalToolInvokeResult } from "../types";
+import {
+	type EvalDisplayOutput,
+	type EvalOutputConsumerFailure,
+	type EvalToolDescriptor,
+	type EvalToolInvokeResult,
+	outputConsumerFailure,
+} from "../types";
 import { type ShadowSnapshot, shadowSnapshotDigest } from "./shared/runtime";
 import { projectJavaScriptShadowPlan } from "./speculation";
 import { callSessionTool, type JsStatusEvent } from "./tool-bridge";
@@ -753,9 +759,8 @@ function deliverRunOutput(
 ): void {
 	const record = (err: unknown): void => {
 		if (runState.consumerFailure) return;
-		const message = err instanceof Error ? err.message : String(err);
-		runState.consumerFailure = { callback, message };
-		logger.warn("JS eval output callback failed", { callback, error: message });
+		runState.consumerFailure = outputConsumerFailure(callback, err);
+		logger.warn("JS eval output callback failed", { callback, error: runState.consumerFailure.message });
 	};
 	try {
 		const returned = deliver();

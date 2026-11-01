@@ -2,7 +2,12 @@ import type { EvalStatusEvent, EvalView } from "@oh-my-pi/pi-tui/tools/eval";
 import { isRecord, logger, readLines, Snowflake } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
 import type { ShadowBarrier, ShadowControlNode, ShadowOperation } from "./speculation/types";
-import { type EvalDisplayOutput, type EvalOutputConsumerFailure, evalImageMetadata } from "./types";
+import {
+	type EvalDisplayOutput,
+	type EvalOutputConsumerFailure,
+	evalImageMetadata,
+	outputConsumerFailure,
+} from "./types";
 
 const STARTUP_CONTROL_TIMEOUT_MS = 5_000;
 
@@ -642,12 +647,11 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 			await deliver();
 		} catch (err) {
 			if (pending.consumerFailure) return;
-			const message = err instanceof Error ? err.message : String(err);
-			pending.consumerFailure = { callback, message };
+			pending.consumerFailure = outputConsumerFailure(callback, err);
 			logger.warn(`${this.#options.languageName} execution output callback failed`, {
 				kernelId: this.id,
 				callback,
-				error: message,
+				error: pending.consumerFailure.message,
 			});
 		}
 	}

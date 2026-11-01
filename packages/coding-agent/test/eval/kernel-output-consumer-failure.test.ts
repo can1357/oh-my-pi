@@ -43,7 +43,7 @@ interface Consumers {
 	onStatus?: (event: JsStatusEvent) => unknown;
 	artifactPath?: string;
 	artifactId?: string;
-	timeoutMs?: number;
+	signal?: AbortSignal;
 }
 
 /** Runs one cell in the session's retained runtime with caller-supplied output consumers. */
@@ -59,7 +59,8 @@ async function run(session: ToolSession, language: Language, code: string, consu
 		onStatus,
 		artifactPath: consumers.artifactPath,
 		artifactId: consumers.artifactId,
-		timeoutMs: consumers.timeoutMs ?? 20_000,
+		timeoutMs: 20_000,
+		signal: consumers.signal,
 	};
 	const result =
 		language === "py"
@@ -83,6 +84,15 @@ function pidOf(cell: Cell): string {
 	const match = /pid (\d+)/.exec(cell.output);
 	if (!match) throw new Error(`no pid in cell output: ${cell.output}`);
 	return match[1]!;
+}
+
+/**
+ * Whether `chunk` holds `line` as a whole printed line. A substring test would
+ * also match the notices the executor itself streams: the JavaScript timeout
+ * notice ends "variables from earlier cells are gone", which contains "one".
+ */
+function printsLine(chunk: string, line: string): boolean {
+	return chunk.split("\n").includes(line);
 }
 
 /**
@@ -151,6 +161,72 @@ function expectConsumerFailure(cell: Cell, consumer: "stream" | "display", messa
 	// The rest of the sentence depends on how the cell ended, and nothing parses it.
 }
 
+/** An error whose `message` getter throws, so even reading the message fails. */
+function errorWithThrowingMessage(): Error {
+	const error = new Error("unused");
+	Object.defineProperty(error, "message", {
+		get() {
+			throw new Error("the message getter failed");
+		},
+	});
+	return error;
+}
+
+/** An error whose `message` is an object that cannot be converted to text. */
+function errorWithObjectMessage(): Error {
+	const error = new Error("unused");
+	Object.defineProperty(error, "message", { value: Object.create(null) });
+	return error;
+}
+
+/** An object that refers to itself, which a JSON serializer cannot write. */
+function circularObject(): object {
+	const value: { self?: unknown } = {};
+	value.self = value;
+	return value;
+}
+
+/** A Proxy whose every trap throws: converting it, reading it, even testing `instanceof` on it fails. */
+function hostileProxy(): object {
+	const refuse = (): never => {
+		throw new Error("the proxy refuses every operation");
+	};
+	return new Proxy({}, new Proxy({}, { get: () => refuse }));
+}
+
+/**
+ * Values a consumer may throw or reject with whose description is itself a
+ * hazard: converting them to text or reading their message throws, or a
+ * serializer cannot write them. `described` is how the cell's result names each.
+ */
+const THROWN_VALUES: ReadonlyArray<{ label: string; make: () => unknown; described: string }> = [
+	{ label: "a null-prototype object", make: () => Object.create(null), described: "[object Object]" },
+	{ label: "a symbol", make: () => Symbol("refused"), described: "Symbol(refused)" },
+	{ label: "an error whose message getter throws", make: errorWithThrowingMessage, described: "[object Error]" },
+	{ label: "an error whose message is not text", make: errorWithObjectMessage, described: "[object Error]" },
+	{ label: "a circular object", make: circularObject, described: "[object Object]" },
+	{
+		label: "a proxy that refuses every operation",
+		make: hostileProxy,
+		described: "a thrown object that cannot be converted to text",
+	},
+];
+
+type FailureMode = "throws" | "rejects with";
+
+/** A consumer that throws `make()`, or rejects with it after an await, on the printed line "one". */
+function refusingLineOne(mode: FailureMode, make: () => unknown): (chunk: string) => unknown {
+	if (mode === "throws") {
+		return chunk => {
+			if (printsLine(chunk, "one")) throw make();
+		};
+	}
+	return async chunk => {
+		await Promise.resolve();
+		if (printsLine(chunk, "one")) throw make();
+	};
+}
+
 describe("eval output consumer failure", () => {
 	afterEach(async () => {
 		await Promise.all([disposeAllKernelSessions(), disposeAllVmContexts()]);
@@ -164,7 +240,7 @@ describe("eval output consumer failure", () => {
 			const delivered: string[] = [];
 			const failed = await run(session, language, TWO_LINES[language], {
 				onChunk: chunk => {
-					if (chunk.includes("one")) throw new Error("consumer refused a chunk");
+					if (printsLine(chunk, "one")) throw new Error("consumer refused a chunk");
 					delivered.push(chunk);
 				},
 			});
@@ -194,7 +270,7 @@ describe("eval output consumer failure", () => {
 			const failed = await run(session, language, TWO_LINES[language], {
 				onChunk: async chunk => {
 					await Promise.resolve();
-					if (chunk.includes("one")) throw new Error("async consumer refused a chunk");
+					if (printsLine(chunk, "one")) throw new Error("async consumer refused a chunk");
 				},
 			});
 			const after = await run(session, language, `${PID_CELL[language]}\n${READ_KEPT[language]}`);
@@ -315,19 +391,26 @@ describe("eval output consumer failure", () => {
 			expect(delivered.join("")).toBe("one\ntwo\n");
 		}, 120_000);
 
-		it(`${language}: a cell that times out after its consumer threw reports the failure without claiming the cell ran on`, async () => {
+		it(`${language}: a cell that times out after its consumer refused a printed line reports the failure without claiming the cell ran on`, async () => {
 			const session = makeSession(`consumer-timeout-${language}-${crypto.randomUUID()}`);
-			// The timeout budget starts before kernel acquisition, so warm the
-			// retained runtime before testing the cell's own timeout behaviour.
-			await run(session, language, PID_CELL[language]);
+			const timeout = new AbortController();
+			let refusedLine = false;
 			const cell = await run(session, language, OUTLIVES_TIMEOUT[language], {
 				onChunk: chunk => {
-					if (chunk.includes("one")) throw new Error("consumer refused a chunk");
+					// The timeout notice the executor streams must not count as the cell's line.
+					if (!printsLine(chunk, "one")) return;
+					refusedLine = true;
+					// The cell times out only after its consumer failed on the line, whatever the scheduling.
+					queueMicrotask(() => timeout.abort(new DOMException("The cell timed out", "TimeoutError")));
+					throw new Error("consumer refused a chunk");
 				},
-				timeoutMs: 2_000,
+				signal: timeout.signal,
 			});
 
+			expect(refusedLine).toBe(true);
 			expect(cell.cancelled).toBe(true);
+			// The executor took its timeout path, not a plain cancellation.
+			expect(cell.output).toContain("timed out");
 			expectConsumerFailure(cell, "stream", "consumer refused a chunk");
 			expect(cell.output).not.toContain("kept running");
 			expect(cell.output).not.toContain("holds all of its output");
@@ -348,7 +431,7 @@ describe("runtime output callback failure", () => {
 				onChunk: async text => {
 					chunks.push(text);
 					await Promise.resolve();
-					if (text.includes("one")) throw new Error("callback rejected");
+					if (printsLine(text, "one")) throw new Error("callback rejected");
 				},
 			});
 
@@ -395,7 +478,7 @@ describe("runtime output callback failure", () => {
 			onText: (async (text: string) => {
 				chunks.push(text);
 				await Promise.resolve();
-				if (text.includes("one")) throw new Error("callback rejected");
+				if (printsLine(text, "one")) throw new Error("callback rejected");
 			}) as (text: string) => void,
 		};
 
@@ -413,4 +496,91 @@ describe("runtime output callback failure", () => {
 		expect(chunks.join("")).toBe("one\ntwo\n");
 		expect(runState.consumerFailure).toEqual({ callback: "onChunk", message: "callback rejected" });
 	}, 120_000);
+});
+
+describe("output consumer failure with an arbitrary thrown value", () => {
+	afterEach(async () => {
+		await Promise.all([disposeAllKernelSessions(), disposeAllVmContexts()]);
+	});
+
+	for (const thrown of THROWN_VALUES) {
+		for (const language of LANGUAGES) {
+			for (const mode of ["throws", "rejects with"] as const) {
+				it(`${language}: a consumer that ${mode} ${thrown.label} leaves the cell, the runtime and its variables intact, and is reported`, async () => {
+					const session = makeSession(`consumer-thrown-${language}-${crypto.randomUUID()}`);
+					const before = await run(session, language, PID_CELL[language]);
+
+					const failed = await run(session, language, TWO_LINES[language], {
+						onChunk: refusingLineOne(mode, thrown.make),
+					});
+					const after = await run(session, language, `${PID_CELL[language]}\n${READ_KEPT[language]}`);
+
+					expect(failed.cancelled).toBe(false);
+					expect(failed.exitCode).toBe(0);
+					expect(failed.output).toContain("one\n");
+					expect(failed.output).toContain("two\n");
+					expectConsumerFailure(failed, "stream", thrown.described);
+					// Reported as the consumer's failure, not as a delivery failure that may have lost output.
+					expect(failed.output).toContain("this result holds all of its output");
+					expect(pidOf(after)).toBe(pidOf(before));
+					expect(after.output).toContain("kept 42");
+				}, 120_000);
+			}
+		}
+	}
+});
+
+describe("runtime output callback failure with an arbitrary thrown value", () => {
+	afterEach(async () => {
+		await disposeAllVmContexts();
+	});
+
+	for (const thrown of THROWN_VALUES) {
+		it(`py: the kernel reports an output callback that rejects with ${thrown.label}, and keeps serving`, async () => {
+			const kernel = await PythonKernel.start({ cwd: process.cwd() });
+			try {
+				const result = await kernel.execute(TWO_LINES.py, {
+					onChunk: refusingLineOne("rejects with", thrown.make) as (text: string) => Promise<void>,
+					// Bounds the red case, where the failed report ends the reader and the execution never settles.
+					timeoutMs: 20_000,
+				});
+				const chunks: string[] = [];
+				await kernel.execute(READ_KEPT.py, { onChunk: text => void chunks.push(text) });
+
+				expect(result.cancelled).toBe(false);
+				expect(result.status).toBe("ok");
+				expect(result.consumerFailure).toEqual({ callback: "onChunk", message: thrown.described });
+				expect(kernel.isAlive()).toBe(true);
+				expect(chunks.join("")).toBe("kept 42\n");
+			} finally {
+				await kernel.shutdown();
+			}
+		}, 120_000);
+
+		for (const mode of ["throws", "rejects with"] as const) {
+			it(`js: the context manager reports an output callback that ${mode} ${thrown.label}, and finishes the run`, async () => {
+				const session = makeSession(`runtime-thrown-js-${crypto.randomUUID()}`);
+				const sessionId = session.getEvalSessionId?.() ?? "missing";
+				const execute = (code: string, runState: VmRunState) =>
+					executeInVmContext({
+						sessionKey: sessionId,
+						sessionId,
+						cwd: session.cwd,
+						session,
+						code,
+						filename: "runtime-thrown.js",
+						timeoutMs: 20_000,
+						runState,
+					});
+				// The run state's callback type returns void; a callback that returns a promise must be accepted all the same.
+				const runState: VmRunState = { onText: refusingLineOne(mode, thrown.make) as (text: string) => void };
+				await execute(TWO_LINES.js, runState);
+				const chunks: string[] = [];
+				await execute(READ_KEPT.js, { onText: text => void chunks.push(text) });
+
+				expect(runState.consumerFailure).toEqual({ callback: "onChunk", message: thrown.described });
+				expect(chunks.join("")).toBe("kept 42\n");
+			}, 120_000);
+		}
+	}
 });

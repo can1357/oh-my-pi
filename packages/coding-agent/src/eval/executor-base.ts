@@ -13,7 +13,7 @@ import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP, isEvalTimeoutControlEven
 import type { JsStatusEvent } from "./js/shared/types";
 import { registerPyToolBridge } from "./py/tool-bridge";
 import { getActiveEvalShadowCell } from "./speculation/runtime-context";
-import type { EvalDisplayOutput, EvalOutputConsumerFailure } from "./types";
+import { type EvalDisplayOutput, type EvalOutputConsumerFailure, outputConsumerFailure } from "./types";
 
 /**
  * Constructor for a language executor's cancellation error. Each backend
@@ -145,9 +145,8 @@ export class OutputConsumerGuard {
 		if (!consumer) return undefined;
 		const record = (err: unknown): void => {
 			if (this.#failure) return;
-			const message = err instanceof Error ? err.message : String(err);
-			this.#failure = { callback, message };
-			logger.warn(`${this.languageLabel} eval output consumer failed`, { callback, error: message });
+			this.#failure = outputConsumerFailure(callback, err);
+			logger.warn(`${this.languageLabel} eval output consumer failed`, { callback, error: this.#failure.message });
 		};
 		return value => {
 			try {
