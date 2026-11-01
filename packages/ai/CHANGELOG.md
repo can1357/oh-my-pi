@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Fixed OpenAI image edits with two or more input images failing with `400 Duplicate parameter: 'image'` ([#17701](https://github.com/can1357/oh-my-pi/issues/17701))
+- Fixed OpenAI image edits with two or more input images failing with `400 Duplicate parameter: 'image'` ([#17701](https://github.com/can1357/oh-my-pi/issues/17701), [#17703](https://github.com/can1357/oh-my-pi/pull/17703) by [@Lynricsy](https://github.com/Lynricsy))
 
 ## [18.15.0] - 2026-11-01
 
