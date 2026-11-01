@@ -14,7 +14,9 @@ INTERACTIVE_EXTENSION_UI_METHODS: Final[frozenset[str]] = frozenset(
 )
 """Dialog methods the host must answer (or cancel)."""
 
-VALUE_EXTENSION_UI_METHODS: Final[frozenset[str]] = frozenset({"select", "input", "editor"})
+VALUE_EXTENSION_UI_METHODS: Final[frozenset[str]] = frozenset(
+    {"select", "input", "editor"}
+)
 """Dialogs answered with `send_ui_value`."""
 
 

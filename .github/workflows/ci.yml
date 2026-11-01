@@ -724,7 +724,7 @@ jobs:
            id: decide
            shell: bash
            run: |
-              inputs=(sdk rust-toolchain.toml rustfmt.toml .cargo scripts/ci-changed-paths.sh
+              inputs=(sdk rust-toolchain.toml rustfmt.toml .cargo scripts/ci-changed-paths.sh package.json
                  packages/coding-agent/test/rpc-wire/fake-openai-server.ts .github/workflows/ci.yml)
               if changed=$(scripts/ci-changed-paths.sh "${inputs[@]}" 2>"$RUNNER_TEMP/why"); then
                  cat "$RUNNER_TEMP/why"
@@ -812,6 +812,10 @@ jobs:
            with:
               # The floor in requires-python.
               python-version: "3.11"
+         # Runs package.json scripts only; nothing to install.
+         - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+           with:
+              bun-version: 1.4.4
          - name: Build and install the package
            run: python -m pip install ./sdk/python/omp-rpc pytest==9.2.0 ruff==0.17.3
          # The tests import from src/; this imports the installed wheel, so a
@@ -819,14 +823,12 @@ jobs:
          - name: Import the installed package
            working-directory: ${{ runner.temp }}
            run: python -c "import omp_rpc, omp_rpc._wire"
-         # Undefined names, unused imports and syntax errors only: Python's
-         # nearest thing to a compile. Style is not gated: sdk/python has no
-         # ruff configuration, and ruff's default format would rewrite most of
-         # the generated _wire.py.
-         - name: ruff (errors)
-           run: ruff check --select E4,E7,E9,F sdk/python
-         - name: pytest
-           run: python -m pytest sdk/python/omp-rpc/tests
+         # The SDK halves of `lint:py` and `test:py`; the rules live in
+         # sdk/python/omp-rpc/pyproject.toml.
+         - name: Lint
+           run: bun run lint:py:sdk
+         - name: Test
+           run: bun run test:py:sdk
 
    # The ignored Rust smokes and the OMP_RPC_SMOKE Go smokes spawn this
    # checkout's `omp --mode rpc` from source against the scripted local model

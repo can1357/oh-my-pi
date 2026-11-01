@@ -35,3 +35,14 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 omp_rpc = ["py.typed"]
+
+# `bun run lint:py:sdk` (part of `lint:py`, and what CI runs) reads this.
+[tool.ruff.lint]
+# Named rather than ruff's default, which differs by version: ruff 0.17.3
+# enables more rules by default than ruff 0.15.0.
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.format]
+# _wire.py is written by `bun run gen:rpc`, and generated.test.ts pins its
+# bytes. Markdown: ruff 0.17.3 formats README code blocks, ruff 0.15.0 does not.
+exclude = ["src/omp_rpc/_wire.py", "*.md"]
