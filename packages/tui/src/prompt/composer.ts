@@ -124,6 +124,17 @@ export interface RuntimeChildrenOptions {
 	 * here are transient and need not also appear in `transientChrome`.
 	 */
 	readonly selfClearingChrome?: readonly Component[];
+	/**
+	 * Roots whose rows are billed at their current height on every frame and
+	 * never folded into the floor: the working row, whose height changes with
+	 * each run. Their rows always count toward retirement, so finished transcript
+	 * rows reach native history as soon as they leave the screen instead of being
+	 * clipped above it while the root is taller than the floor. When a root
+	 * shrinks, the editor moves up into the rows it gave up. A root listed here
+	 * is billed even if it also appears in `transientChrome` or
+	 * `selfClearingChrome`.
+	 */
+	readonly billedChrome?: readonly Component[];
 }
 
 /** Controls the first terminal paint for a composer that does not already own the terminal. */
@@ -336,6 +347,11 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	// Settled idle chrome has retired rows; contraction must preserve native history.
 	#chromeFloorPromoted = false;
 	#runActive = false;
+	// Billed-chrome rows the last composition counted toward retirement; see renderFrame.
+	#billedChromeRows = 0;
+	// Billed chrome shrank and no emitted paint has moved the editor up yet.
+	#billedChromeContracted = false;
+	#billedChrome: ReadonlySet<Component> = new Set();
 	#transientChrome: ReadonlySet<Component> = new Set();
 	#selfClearingChrome: ReadonlySet<Component> = new Set();
 	// Fewest rows the user-driven transient roots have painted since mount; only rows above it are excluded from the floor.
@@ -474,22 +490,37 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		const ends: { root: Component; end: number }[] = [];
 		let transientRows = 0;
 		let selfClearingRows = 0;
+		let billedRows = 0;
 		for (const root of afterRoots) {
 			const start = after.length;
 			this.#renderBelowRoot(root, width, after, afterSpans);
-			if (this.#selfClearingChrome.has(root)) selfClearingRows += after.length - start;
+			if (this.#billedChrome.has(root)) billedRows += after.length - start;
+			else if (this.#selfClearingChrome.has(root)) selfClearingRows += after.length - start;
 			else if (this.#transientChrome.has(root)) transientRows += after.length - start;
 			ends.push({ root, end: after.length });
 		}
 		this.#rowsBelow = new Map(ends.map(({ root, end }) => [root, after.length - end]));
 		const transientFloor = this.#syncTransientFloor(transientRows);
-		// Eligible chrome excludes user-driven transient rows above their resting height and every
-		// self-clearing row; contraction, floor and rebaseline all use it.
-		const eligibleChrome = after.length - (transientRows - transientFloor) - selfClearingRows;
+		// Eligible chrome excludes user-driven transient rows above their resting height, every
+		// self-clearing row and every billed row; contraction, floor and rebaseline all use it.
+		const eligibleChrome = after.length - (transientRows - transientFloor) - selfClearingRows - billedRows;
 		const promotedChromeContracted = this.#chromeFloorPromoted && eligibleChrome < (this.#chromeFloor ?? 0);
 		this.#chromeFloor = Math.min(this.#chromeFloor ?? eligibleChrome, eligibleChrome);
 		this.#rebaselineChromeFloor(this.#runActive || transcript.hasActiveBlock(), eligibleChrome);
-		const belowFloor = this.#preferences.completeScrollback ? after.length : this.#chromeFloor;
+		// The working row grows and shrinks with every run, so a floor (its
+		// smallest height) undercounts it whenever it is taller: retirement would
+		// clip that many finished rows off the top of the viewport before they
+		// reach native history, a scrolled-back terminal would watch that seam
+		// shift on every commit, and the rows would reappear, moving the whole
+		// screen, when it shrank. Bill its current rows on every frame instead;
+		// when it shrinks, the editor moves up into the rows it gave up, because
+		// committed rows cannot come back down. With `completeScrollback` all
+		// chrome counts at its current height, the working row included, and a
+		// shrink leaves its documented blank rows above the editor instead.
+		const completeScrollback = this.#preferences.completeScrollback;
+		if (!completeScrollback && billedRows < this.#billedChromeRows) this.#billedChromeContracted = true;
+		this.#billedChromeRows = billedRows;
+		const belowFloor = completeScrollback ? after.length : this.#chromeFloor + billedRows;
 		// Offer history under capacity pressure only: blocks stay live (and keep
 		// reflowing to the current width) while the screen has room. A batch
 		// leaves the mutable viewport in the same frame it is appended, so its
@@ -535,10 +566,16 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		// rows back out of native scrollback. Let the editor move up instead of
 		// inserting a seam band; subsequent frames retain that natural anchor
 		// until new output fills the screen again. Shell history stays untouched.
-		const slack =
-			filledHistoryRows === undefined || promotedChromeContracted
+		const fillSlack =
+			filledHistoryRows === undefined
 				? 0
 				: Math.max(0, rows - Math.min(rows, filledHistoryRows + (history?.rows.length ?? 0)) - mutable.length);
+		// The TUI can discard a composition (an image-budget retry, a deferred
+		// first image paint), so a billed contraction holds until a paint lands
+		// where the screen has no slack to fill: the editor moved up, or output
+		// filled the rows back in.
+		if (fillSlack === 0) this.#billedChromeContracted = false;
+		const slack = promotedChromeContracted || this.#billedChromeContracted ? 0 : fillSlack;
 		// Park the slack below the live rows rather than above them. Above, it
 		// splits the on-screen history from the live tail and reads as a hole
 		// punched into whatever was streaming — a table's rows included — and
@@ -1273,6 +1310,9 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		this.#nativeTail = options.nativeTail ?? [];
 		this.#transientChrome = new Set(options.transientChrome);
 		this.#selfClearingChrome = new Set(options.selfClearingChrome);
+		this.#billedChrome = new Set(options.billedChrome);
+		this.#billedChromeRows = 0;
+		this.#billedChromeContracted = false;
 		this.#transientFloor = undefined;
 		this.ui.removeChild(this.#statusHost);
 		if (this.#runtimeMounted) {

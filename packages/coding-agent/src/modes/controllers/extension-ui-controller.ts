@@ -447,29 +447,20 @@ export class ExtensionUiController {
 	}
 
 	#rebuildHookWidgets(): void {
-		this.#renderHookWidgetContainer(this.ctx.hookWidgetContainerAbove, this.#hookWidgetsAbove, true, true);
-		this.#renderHookWidgetContainer(this.ctx.hookWidgetContainerBelow, this.#hookWidgetsBelow, false, false);
+		// The margin above the editor is the top gap, or a plain spacer over hook
+		// widgets; either way it stays in the one billed root, so installing a
+		// widget never moves that row out of the retirement baseline.
+		this.ctx.editorTopGapContainer.clear();
+		this.ctx.editorTopGapContainer.addChild(
+			this.#hookWidgetsAbove.size === 0 ? new EditorTopGap(() => this.ctx.statusRowOccupied) : new Spacer(1),
+		);
+		this.#renderHookWidgetContainer(this.ctx.hookWidgetContainerAbove, this.#hookWidgetsAbove);
+		this.#renderHookWidgetContainer(this.ctx.hookWidgetContainerBelow, this.#hookWidgetsBelow);
 		this.ctx.ui.requestRender();
 	}
 
-	#renderHookWidgetContainer(
-		container: Container,
-		widgets: Map<string, ExtensionUiComponent>,
-		spacerWhenEmpty: boolean,
-		leadingSpacer: boolean,
-	): void {
+	#renderHookWidgetContainer(container: Container, widgets: Map<string, ExtensionUiComponent>): void {
 		container.clear();
-
-		if (widgets.size === 0) {
-			if (spacerWhenEmpty) {
-				container.addChild(new EditorTopGap(() => this.ctx.statusRowOccupied));
-			}
-			return;
-		}
-
-		if (leadingSpacer) {
-			container.addChild(new Spacer(1));
-		}
 		for (const widget of widgets.values()) {
 			container.addChild(widget);
 		}
