@@ -621,14 +621,14 @@ class AgentStartPolicyChangedError extends Error {
 }
 
 /**
- * Rejection from {@link AgentSession.prompt} with `throwOnDrop: true` when the
- * prompt was dropped before reaching the agent (an abort, session transition,
- * or usage preflight denial won the race with turn setup). The prompt was not
- * persisted, so resubmitting it is safe. Headless drivers use this to retry.
+ * A user prompt was dropped before reaching the agent or session file.
+ *
+ * `message` names a refusal when available; resubmitting after the refusal is
+ * cleared is safe. Callers of {@link AgentSession.prompt} opt in with `throwOnDrop`.
  */
 export class PromptDroppedError extends Error {
-	constructor() {
-		super("Prompt dropped before provider dispatch.");
+	constructor(reason?: string) {
+		super(reason ?? "Prompt dropped before provider dispatch.");
 		this.name = "PromptDroppedError";
 	}
 }
@@ -8272,6 +8272,7 @@ export class AgentSession implements SettingsScope {
 			if (!queued && this.#promptGeneration !== queueGeneration && !options?.synthetic) {
 				this.#promptDropped?.({ text: typedText, images: options?.images });
 			}
+			if (!queued && options?.throwOnDrop) throw new PromptDroppedError();
 			return true;
 		}
 
@@ -8318,6 +8319,7 @@ export class AgentSession implements SettingsScope {
 			if (!options?.synthetic) {
 				this.#promptDropped?.({ text: typedText, images: options?.images });
 			}
+			if (options?.throwOnDrop) throw new PromptDroppedError();
 			return true;
 		}
 
@@ -8335,7 +8337,7 @@ export class AgentSession implements SettingsScope {
 				outcome.sessionClaimed = this.agent.state.isStreaming;
 				throw new AgentBusyError();
 			}
-			await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, {
+			const queued = await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, {
 				timestamp: submittedAt,
 				attribution: promptAttribution,
 				prependMessages: prependNotices,
@@ -8347,7 +8349,8 @@ export class AgentSession implements SettingsScope {
 				onPromptAdmitted: options?.onPromptAdmitted,
 				onPromptQueued: options?.onPromptQueued,
 			});
-			outcome.sessionClaimed = true;
+			outcome.sessionClaimed = queued;
+			if (!queued && options?.throwOnDrop) throw new PromptDroppedError();
 			return true;
 		}
 
@@ -8425,15 +8428,15 @@ export class AgentSession implements SettingsScope {
 			void this.#finishTurnObservation(observation, turnError);
 		}
 		outcome.sessionClaimed = dispatched;
+		const refusal = this.#costCapRefusal !== refusalBeforeDispatch ? this.#costCapRefusal : undefined;
 		if (!dispatched && message.role === "user") {
 			// An abort (Esc), preflight denial or the cost cap raced turn setup: the
 			// prompt never reached the agent or the session file. Hand it back to the
 			// host so the user can edit/resubmit instead of losing it (tree/branch
 			// can't offer a message that was never persisted).
-			const refusal = this.#costCapRefusal !== refusalBeforeDispatch ? this.#costCapRefusal : undefined;
 			this.#promptDropped?.({ text: typedText, images: options?.images, reason: refusal?.message });
 		}
-		if (!dispatched && options?.throwOnDrop) throw new PromptDroppedError();
+		if (!dispatched && options?.throwOnDrop) throw new PromptDroppedError(refusal?.message);
 		return true;
 	}
 
@@ -10305,17 +10308,23 @@ export class AgentSession implements SettingsScope {
 		let deliveredAsAside = false;
 		if (options?.deliverAs === "aside") {
 			if (this.isStreaming) {
-				await this.#queueUserMessage(text, images, "aside", { attribution: options.attribution });
+				if (!(await this.#queueUserMessage(text, images, "aside", { attribution: options.attribution }))) {
+					throw new PromptDroppedError();
+				}
 				return;
 			}
 			// Idle: fall through to the prompt flow below (starts a turn, like an omitted
 			// deliverAs) — there is no live run to inject an aside into.
 			deliveredAsAside = true;
 		} else if (options?.deliverAs === "followUp") {
-			await this.#queueUserMessage(text, images, "followUp", { attribution: options.attribution });
+			if (!(await this.#queueUserMessage(text, images, "followUp", { attribution: options.attribution }))) {
+				throw new PromptDroppedError();
+			}
 			return;
 		} else if (options?.deliverAs === "steer") {
-			await this.#queueUserMessage(text, images, "steer", { attribution: options.attribution });
+			if (!(await this.#queueUserMessage(text, images, "steer", { attribution: options.attribution }))) {
+				throw new PromptDroppedError();
+			}
 			return;
 		}
 
@@ -10331,6 +10340,7 @@ export class AgentSession implements SettingsScope {
 			expandPromptTemplates: false,
 			images,
 			streamingBehavior: deliveredAsAside ? "aside" : "steer",
+			throwOnDrop: true,
 		});
 	}
 

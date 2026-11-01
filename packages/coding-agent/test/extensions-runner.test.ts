@@ -126,7 +126,7 @@ describe("ExtensionRunner", () => {
 		);
 		const actions = {
 			sendMessage: () => {},
-			sendUserMessage: () => {},
+			sendUserMessage: async () => {},
 			appendEntry: () => {},
 			setLabel: () => {},
 			getActiveTools: () => [],
@@ -177,7 +177,7 @@ describe("ExtensionRunner", () => {
 		runner.initialize(
 			{
 				sendMessage: () => {},
-				sendUserMessage: () => {},
+				sendUserMessage: async () => {},
 				appendEntry: () => {},
 				setLabel: () => {},
 				getActiveTools: () => [],
@@ -1018,7 +1018,7 @@ describe("ExtensionRunner", () => {
 			runner.initialize(
 				{
 					sendMessage: () => {},
-					sendUserMessage: () => {},
+					sendUserMessage: async () => {},
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],
@@ -1233,7 +1233,7 @@ describe("ExtensionRunner", () => {
 			runner.initialize(
 				{
 					sendMessage: () => {},
-					sendUserMessage: () => {},
+					sendUserMessage: async () => {},
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],
@@ -1488,7 +1488,7 @@ describe("ExtensionRunner", () => {
 			runner.initialize(
 				{
 					sendMessage: () => {},
-					sendUserMessage: () => {},
+					sendUserMessage: async () => {},
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],
@@ -1818,7 +1818,7 @@ describe("ExtensionRunner", () => {
 			runner.initialize(
 				{
 					sendMessage: () => {},
-					sendUserMessage: () => {},
+					sendUserMessage: async () => {},
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],
@@ -2490,7 +2490,7 @@ describe("ExtensionRunner", () => {
 			runner.initialize(
 				{
 					sendMessage: () => {},
-					sendUserMessage: () => {},
+					sendUserMessage: async () => {},
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],
@@ -2565,7 +2565,7 @@ describe("ExtensionRunner", () => {
 			runner.initialize(
 				{
 					sendMessage: () => {},
-					sendUserMessage: () => {},
+					sendUserMessage: async () => {},
 					appendEntry: (_customType, data) => {
 						snapshots.push(data);
 					},
@@ -2636,7 +2636,7 @@ describe("ExtensionRunner", () => {
 			runner.initialize(
 				{
 					sendMessage: () => {},
-					sendUserMessage: () => {},
+					sendUserMessage: async () => {},
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],
@@ -2694,7 +2694,7 @@ describe("ExtensionRunner", () => {
 			runner.initialize(
 				{
 					sendMessage: () => {},
-					sendUserMessage: () => {},
+					sendUserMessage: async () => {},
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],
@@ -4345,7 +4345,7 @@ describe("ExtensionRunner", () => {
 			runner.initialize(
 				{
 					sendMessage: () => {},
-					sendUserMessage: () => {},
+					sendUserMessage: async () => {},
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],
@@ -4417,7 +4417,7 @@ describe("ExtensionRunner", () => {
 			runner.initialize(
 				{
 					sendMessage: () => {},
-					sendUserMessage: () => {},
+					sendUserMessage: async () => {},
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],
@@ -4507,7 +4507,7 @@ describe("ExtensionRunner", () => {
 			runner.initialize(
 				{
 					sendMessage: () => {},
-					sendUserMessage: () => {},
+					sendUserMessage: async () => {},
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],

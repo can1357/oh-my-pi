@@ -1493,10 +1493,16 @@ export class ExtensionUiController {
 
 	/** Every `sendUserMessage` form prompts or queues a user turn (see `AgentSession.sendUserMessage`). */
 	#sendExtensionUserMessage: SendUserMessageHandler = (content, options) => {
-		if (this.#rejectGuestExtensionTurn()) return;
-		this.ctx.session.sendUserMessage(content, options).catch((err: unknown) => {
+		if (this.#rejectGuestExtensionTurn()) {
+			const denied = Promise.reject(new Error("Extension-initiated turns are host-only during a collab session"));
+			denied.catch(() => {});
+			return denied;
+		}
+		const task = this.ctx.session.sendUserMessage(content, options);
+		task.catch((err: unknown) => {
 			this.ctx.showError(`Extension sendUserMessage failed: ${err instanceof Error ? err.message : String(err)}`);
 		});
+		return task;
 	};
 
 	/**

@@ -1594,8 +1594,9 @@ export class ExtensionRunner {
 		const getModel = model ? () => model : this.#getModel;
 		const runEphemeralTurn = this.#runEphemeralTurnFn;
 		const createAnnotations = this.#createAnnotations;
-		const sendUserMessage = (text: string, options?: SendUserMessageOptions): void =>
-			this.runtime.sendUserMessage(text, options);
+		const sendUserMessage = (text: string, options?: SendUserMessageOptions): void => {
+			void this.runtime.sendUserMessage(text, options);
+		};
 		const getSessionModes = () => this.#sessionModes;
 		return {
 			ui: this.#uiContext,
