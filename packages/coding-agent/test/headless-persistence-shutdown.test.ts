@@ -196,6 +196,7 @@ describe("headless persistence-failure shutdown path", () => {
 		});
 
 		let escaped: unknown;
+		let fileExistedAtShutdown: boolean | undefined;
 		try {
 			await runRootCommand(harness.parsed, harness.rawArgs, harness.deps);
 		} catch (error) {
@@ -205,6 +206,9 @@ describe("headless persistence-failure shutdown path", () => {
 			escaped = error;
 			process.stderr.write(`${Bun.inspect(error, { colors: false })}\n`);
 		} finally {
+			// Teardown restores writes and retries close, which can now recover the journal.
+			// Check the failed shutdown boundary before that successful cleanup retry.
+			fileExistedAtShutdown = fs.existsSync(String(harness.manager.getSessionFile()));
 			await teardown(harness, stderr, quitSpy);
 		}
 
@@ -223,6 +227,6 @@ describe("headless persistence-failure shutdown path", () => {
 		expect(harness.latchedBeforeRun[0]?.message).toContain("ENOSPC");
 		const sessionFile = harness.manager.getSessionFile();
 		expect(sessionFile).toBeString();
-		expect(fs.existsSync(String(sessionFile))).toBe(false);
+		expect(fileExistedAtShutdown).toBe(false);
 	}, 15_000);
 });
