@@ -25,7 +25,7 @@ import { gatewayRoutableModels } from "./auth-gateway-cli";
 /** Names the caller in the gateway's logs. */
 const STDIO_PEER = "stdio";
 
-type RegistryView = Pick<ModelRegistry, "getAll" | "getAvailable">;
+type RegistryView = Pick<ModelRegistry, "getAll" | "getAvailable"> & Partial<Pick<ModelRegistry, "hasProvider">>;
 
 function viewCandidates(selector: string, settings: Settings, registry: RegistryView): Model<Api>[] {
 	const available = registry.getAvailable();
@@ -62,6 +62,8 @@ export function selectorCandidates(selector: string, settings: Settings, registr
 			const candidates = viewCandidates(pattern, settings, {
 				getAll: () => registry.getAll(kind),
 				getAvailable: () => registry.getAvailable(kind),
+				// Keeps `provider/id` selectors for a known provider from fuzzy-matching another provider's ids.
+				hasProvider: registry.hasProvider ? provider => registry.hasProvider?.(provider) ?? false : undefined,
 			});
 			// A runner's fallback chain may name chat models (`retry.fallbackChains.default`) or on-device runners; its route cannot serve them.
 			const [first] = candidates;
