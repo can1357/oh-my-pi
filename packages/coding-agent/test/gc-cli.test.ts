@@ -1295,16 +1295,22 @@ describe("runGcCommand lock handling", () => {
 		expect(await Bun.file(lockPath).exists()).toBe(true);
 	});
 
-	test("breaks stale gc locks before running", async () => {
+	test("a preview goes past a stale gc lock and leaves it as it is; applying breaks it", async () => {
 		const lockPath = path.join(root, "gc.lock");
 		// What a gc run killed while it held the lock leaves, random value and all.
 		await leaveDeadGcLock(root);
+		const left = await fs.readFile(lockPath);
 		const blob = await writeBlob(root, hashFor("orphan"), "orphan");
 		await agePath(blob);
 
-		const result = await runGcCommand({ flags: { agentDir: root, blobs: true } });
+		const preview = await runGcCommand({ flags: { agentDir: root, blobs: true } });
 
-		expect(result.blobs?.wouldDelete).toBe(1);
+		expect(preview.blobs?.wouldDelete).toBe(1);
+		expect(await fs.readFile(lockPath)).toEqual(left);
+
+		const applied = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+		expect(applied.blobs?.deleted).toBe(1);
 		expect(await Bun.file(lockPath).exists()).toBe(false);
 	});
 

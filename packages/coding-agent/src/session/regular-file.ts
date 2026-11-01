@@ -20,8 +20,7 @@
 import { randomBytes } from "node:crypto";
 import * as fs from "node:fs/promises";
 import { constants as fsConstants, type Stats } from "node:fs";
-import * as path from "node:path";
-import { isEnoent } from "@oh-my-pi/pi-utils";
+import { hasFsCode, isEnoent } from "@oh-my-pi/pi-utils";
 
 /** What a name stands for when it is not a regular file, in a reader's words: "a FIFO", "a socket", "a device". */
 export function kindOf(stat: Stats): string {
@@ -105,6 +104,27 @@ export async function createExclusive(file: string, mode: number, readable = fal
 }
 
 /**
+ * Set the mode of the directory at `dir` through a descriptor opened on the
+ * name itself: `chmod` by name follows a link put at the name since the
+ * directory was made and changes the mode of whatever the link leads to. A
+ * link at the name, or anything else but a directory, is refused with
+ * nothing changed. Windows has no such links to follow, and no descriptor on
+ * a directory to set a mode through.
+ */
+export async function chmodDirectory(dir: string, mode: number): Promise<void> {
+	if (process.platform === "win32") return await fs.chmod(dir, mode);
+	const handle = await fs.open(
+		dir,
+		fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
+	);
+	try {
+		await handle.chmod(mode);
+	} finally {
+		await handle.close().catch(() => undefined);
+	}
+}
+
+/**
  * A file this run holds: the descriptor it was created or read through,
  * still open; the identity that descriptor reports; and, where this run
  * knows them, the bytes the file holds — what this run wrote into it, a
@@ -151,20 +171,22 @@ export async function writeExclusive(file: string, text: string, mode: number): 
 	}
 }
 
-/** Whether the file open at `handle` is one of `own`, by its identity and, where known, its bytes. */
-async function isOneOf(handle: fs.FileHandle, own: readonly HeldFile[]): Promise<boolean> {
+/** The one of `own` the file open at `handle` is, by its identity and, where known, its bytes. */
+async function heldAs(handle: fs.FileHandle, own: readonly HeldFile[]): Promise<HeldFile | undefined> {
 	const { dev, ino } = await handle.stat();
 	const same = own.find(held => held.dev === dev && held.ino === ino);
-	if (!same) return false;
-	if (same.bytes === undefined) return true;
-	return (await handle.readFile()).equals(same.bytes);
+	if (!same) return undefined;
+	if (same.bytes !== undefined && !(await handle.readFile()).equals(same.bytes)) return undefined;
+	return same;
 }
 
+/** What {@link unlinkOwnFile} found at the name: its own file, gone; nothing; or something else, kept. */
+export type OwnFileRemoval = "removed" | "absent" | "kept";
+
 /**
- * Remove `file` only while the name holds one of `own`, files this run holds
- * — and say why not, otherwise. Returns undefined once nothing of this run's
- * is left at the name, or a sentence for the command to print, `what`
- * naming this run's file ("the record this run wrote").
+ * Unlink `file` only while the name holds one of `own`, files this run
+ * holds. Throws what a look or the `unlink` threw, for the caller to report;
+ * {@link removeOwnFile} reports it for most.
  *
  * A name is not provenance, and neither is an inode number: the kernel hands
  * a freed number to the next file created, so a file someone put at the name
@@ -178,58 +200,73 @@ async function isOneOf(handle: fs.FileHandle, own: readonly HeldFile[]): Promise
  *   its last open descriptor are gone, so while this run holds one, no other
  *   file can be given its number;
  * - the device and inode that descriptor reports;
- * - the bytes, compared through a descriptor on what is removed: for a file
+ * - the bytes, read through a descriptor opened on the name now: for a file
  *   this run wrote, they carry a random value from {@link newNonce}, which a
  *   writer who did not read the file cannot repeat.
  *
- * And what is checked is what is removed: the name is first renamed to one
- * only this call knows, which moves exactly what has the name at that
- * moment, and the check and the `unlink` both act on that. Anything else is
- * put back under its name with `link`, which replaces nothing; if something
- * has taken the name meanwhile, it stays at the private name, which the
- * message gives. Anything that is not a regular file is not touched at all.
+ * The name is looked at once more, the instant before the `unlink`, and has
+ * to name the file just checked. Nothing is moved or linked on the way:
+ * there is no second name for anything to stand at, and a run killed at any
+ * point leaves its file at its own name or nothing. Anything at the name
+ * that is not a regular file is left as it is, and nothing is read from it.
  *
- * A writer that can write in this directory and puts a file at the private
- * name between the rename and the `unlink` is outside this: the name has 64
- * random bits, and no system call removes a file by its descriptor.
+ * One gap is left, and it is named rather than narrowed further: the
+ * `unlink` removes whatever has the name at that instant, so a file renamed
+ * onto it between that last look and the `unlink` — one system call later —
+ * is removed. POSIX has no unlink-if-this-inode, and no portable call closes
+ * it. Only a writer that can change this directory can reach it, and no gc
+ * writer renames onto a name: each creates with `O_EXCL` or `link`, which
+ * refuse a name already taken.
  */
-export async function removeOwnFile(file: string, own: readonly HeldFile[], what: string): Promise<string | undefined> {
-	const kept = `${file} is not ${what}, so it was left as it is`;
-	try {
-		const standing = await fs.lstat(file).catch((error: unknown) => {
+export async function unlinkOwnFile(file: string, own: readonly HeldFile[]): Promise<OwnFileRemoval> {
+	const lookAgain = async (): Promise<Stats | undefined> =>
+		await fs.lstat(file).catch((error: unknown) => {
 			if (isEnoent(error)) return undefined;
 			throw error;
 		});
-		if (!standing) return undefined;
-		if (!standing.isFile() || !own.some(held => held.dev === standing.dev && held.ino === standing.ino)) return kept;
-		const aside = path.join(path.dirname(file), `.${path.basename(file)}.${randomBytes(8).toString("hex")}.leaving`);
-		try {
-			await fs.rename(file, aside);
-		} catch (error) {
-			if (isEnoent(error)) return undefined;
-			throw error;
-		}
-		const moved = await openRegularFile(aside, { noFollow: true }).catch(notRegularAsAbsent);
-		let ours = false;
-		try {
-			ours = moved !== undefined && (await isOneOf(moved, own));
-		} finally {
-			await moved?.close().catch(() => undefined);
-		}
-		if (ours) {
-			await fs.unlink(aside);
-			return undefined;
-		}
-		try {
-			await fs.link(aside, file);
-		} catch (error) {
-			if ((error as { code?: string }).code === "EEXIST") {
-				return `${file} is not ${what}, and something else took its name meanwhile, so it was left at ${aside}`;
-			}
-			throw error;
-		}
-		await fs.unlink(aside);
-		return kept;
+	const first = await lookAgain();
+	if (!first) return "absent";
+	if (!first.isFile() || !own.some(held => held.dev === first.dev && held.ino === first.ino)) return "kept";
+	let handle: fs.FileHandle | undefined;
+	try {
+		handle = await openRegularFile(file, { noFollow: true });
+	} catch (error) {
+		// Something else took the name since the look: a link, which `noFollow`
+		// refuses, or a FIFO, a socket or a device.
+		if (error instanceof NotARegularFile || hasFsCode(error, "ELOOP")) return "kept";
+		throw error;
+	}
+	if (!handle) return "absent";
+	let ours: HeldFile | undefined;
+	try {
+		ours = await heldAs(handle, own);
+	} finally {
+		await handle.close().catch(() => undefined);
+	}
+	if (!ours) return "kept";
+	const last = await lookAgain();
+	if (!last) return "absent";
+	if (last.dev !== ours.dev || last.ino !== ours.ino) return "kept";
+	try {
+		await fs.unlink(file);
+	} catch (error) {
+		if (isEnoent(error)) return "absent";
+		throw error;
+	}
+	return "removed";
+}
+
+/**
+ * Remove `file` only while the name holds one of `own` — see
+ * {@link unlinkOwnFile} — and say why not, otherwise. Returns undefined once
+ * nothing of this run's is left at the name, or a sentence for the command
+ * to print, `what` naming this run's file ("the record this run wrote").
+ */
+export async function removeOwnFile(file: string, own: readonly HeldFile[], what: string): Promise<string | undefined> {
+	try {
+		return (await unlinkOwnFile(file, own)) === "kept"
+			? `${file} is not ${what}, so it was left as it is`
+			: undefined;
 	} catch (error) {
 		return `${file} could not be checked or removed, so it was left as it is: ${error instanceof Error ? error.message : String(error)}`;
 	}

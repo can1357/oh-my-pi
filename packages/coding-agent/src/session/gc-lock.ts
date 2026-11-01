@@ -1,10 +1,12 @@
 /**
  * The agent directory's maintenance lock (`<agentDir>/gc.lock`).
  *
- * `omp gc` holds it for a whole run, and anything else that moves a session
- * between the sessions tree and the archive takes it too — a resume that
- * restores an archived session must not land in the middle of the archive
- * phase, which moves the transcript and its artifact tree in two steps.
+ * `omp gc --apply` holds it for a whole run, and anything else that moves a
+ * session between the sessions tree and the archive takes it too — a resume
+ * that restores an archived session must not land in the middle of the
+ * archive phase, which moves the transcript and its artifact tree in two
+ * steps. A preview takes nothing: it reads the lock and answers as taking it
+ * would — see {@link withoutGcLock}.
  *
  * The lock is an exclusively created file holding the owner's pid, its start
  * time and 32 random bytes the owner generated, one per line, each parsed
@@ -132,38 +134,55 @@ async function readHeldLock(lockPath: string): Promise<{ text: string; mtimeMs: 
 }
 
 /**
- * Remove a lock whose holder is gone, when it holds exactly what gc writes.
- * A live pid is never overridden on age: a long run is still a run, and a
- * clock step or a suspended laptop would otherwise let a second process into
- * the middle of a session move. A lock whose pid was reused by an unrelated
- * process therefore blocks until someone removes the file, which is what the
- * waiter's message says to do. Anything else at the name is never removed:
- * once it stands in the way, the command stops and names it.
+ * What the lock read at `lockPath` means for a run that wants the lock: a
+ * holder still there, or one that is gone, whose lock gc breaks. A live pid
+ * is never overridden on age: a long run is still a run, and a clock step or
+ * a suspended laptop would otherwise let a second process into the middle of
+ * a session move. A lock whose pid was reused by an unrelated process
+ * therefore blocks until someone removes the file, which is what the
+ * waiter's message says to do. Anything else at the name gc never breaks:
+ * once it stands in the way, this throws, naming it.
  */
+function judgeLock(lockPath: string, found: { text: string; mtimeMs: number }): "held" | "stale" {
+	const reading = readLockText(found.text);
+	if (reading.kind === "foreign") {
+		throw new Error(
+			`${lockPath} holds something gc does not write, so it was not taken for a gc lock left by a run that is ` +
+				`gone, and nothing was done; look at it and move it aside, then run gc again`,
+		);
+	}
+	const gone = reading.kind === "empty" ? Date.now() - found.mtimeMs > GC_LOCK_STALE_MS : !processExists(reading.pid);
+	if (!gone) return "held";
+	if (reading.kind === "earlier") {
+		throw new Error(
+			`${lockPath} looks like a lock an earlier version of gc took, and the process it names is gone, but it ` +
+				`carries no random value, so it cannot be told from a file somebody else wrote; it was not removed and ` +
+				`nothing was done; look at it, move it aside, then run gc again`,
+		);
+	}
+	return "stale";
+}
+
+/** Remove a lock whose holder is gone, when it holds exactly what gc writes — see {@link judgeLock}. */
 async function removeStaleGcLock(lockPath: string): Promise<boolean> {
 	const found = await readHeldLock(lockPath);
 	if (!found) return false;
 	try {
-		const reading = readLockText(found.text);
-		if (reading.kind === "foreign") {
-			throw new Error(
-				`${lockPath} holds something gc does not write, so it was not taken for a gc lock left by a run that is ` +
-					`gone, and nothing was done; look at it and move it aside, then run gc again`,
-			);
-		}
-		const gone =
-			reading.kind === "empty" ? Date.now() - found.mtimeMs > GC_LOCK_STALE_MS : !processExists(reading.pid);
-		if (!gone) return false;
-		if (reading.kind === "earlier") {
-			throw new Error(
-				`${lockPath} looks like a lock an earlier version of gc took, and the process it names is gone, but it ` +
-					`carries no random value, so it cannot be told from a file somebody else wrote; it was not removed and ` +
-					`nothing was done; look at it, move it aside, then run gc again`,
-			);
-		}
+		if (judgeLock(lockPath, found) === "held") return false;
 		// Removed only while it is still the very file read above — the
 		// descriptor is held, and the bytes must match.
 		return (await removeOwnFile(lockPath, [found.held], "the stale lock this run read")) === undefined;
+	} finally {
+		await found.held.handle.close().catch(() => undefined);
+	}
+}
+
+/** What stands at `lockPath`, read and judged as {@link removeStaleGcLock} judges it, and nothing removed. */
+async function lookAtGcLock(lockPath: string): Promise<"none" | "held" | "stale"> {
+	const found = await readHeldLock(lockPath);
+	if (!found) return "none";
+	try {
+		return judgeLock(lockPath, found);
 	} finally {
 		await found.held.handle.close().catch(() => undefined);
 	}
@@ -262,4 +281,35 @@ export async function withGcLock<T>(
 		// only this run's own lock goes — see {@link releaseGcLockFile}.
 		await releaseGcLockFile(lockPath, held);
 	}
+}
+
+/**
+ * Run `fn` the way a preview must: holding no lock, and having written
+ * nothing to find out whether it could take one. Taking the lock creates
+ * `gc.lock` and removes it again — and breaks a stale one — and a preview
+ * writes, links, unlinks and renames nothing. So the lock is read, the way
+ * a run that cannot create it reads it, and the same answer comes back:
+ * "GC already running" while a live process holds it or the breaker lock,
+ * and the same refusal, naming the file, for anything gc would not break.
+ * A lock whose holder is gone is one applying would break; the preview goes
+ * on and breaks nothing.
+ *
+ * Holding no lock, a preview can be reading while a gc run that started
+ * after this look moves a session; what it reports may then be out of date.
+ * Nothing is written either way.
+ */
+export async function withoutGcLock<T>(agentDir: string, fn: (lockPath: string) => Promise<T>): Promise<T> {
+	const lockPath = path.join(agentDir, "gc.lock");
+	const found = await readHeldLock(lockPath);
+	if (found) {
+		try {
+			// In the order applying meets them: the breaker lock first, which
+			// it takes before it judges a lock it could not create.
+			if ((await lookAtGcLock(`${lockPath}${GC_LOCK_BREAKER_SUFFIX}`)) === "held") throw new GcLockHeld(lockPath);
+			if (judgeLock(lockPath, found) === "held") throw new GcLockHeld(lockPath);
+		} finally {
+			await found.held.handle.close().catch(() => undefined);
+		}
+	}
+	return await fn(lockPath);
 }

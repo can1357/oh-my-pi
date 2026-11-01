@@ -18,7 +18,6 @@
  * then artifact tree), the reverse of what the archive phase does, so both
  * hold `<agentDir>/gc.lock` while they do it.
  */
-import { randomBytes } from "node:crypto";
 import * as fs from "./gc-fs";
 import { CryptoHasher, constants as fsConstants, Glob, type Stats } from "./gc-fs";
 import * as path from "node:path";
@@ -29,6 +28,7 @@ import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { codeOf, statIfPresent, withGcLock } from "./gc-lock";
 import {
 	absentFile,
+	chmodDirectory,
 	createExclusive,
 	type HeldFile,
 	kindOf,
@@ -36,7 +36,9 @@ import {
 	NotARegularFile,
 	notRegularAsAbsent,
 	openRegularFile,
+	type OwnFileRemoval,
 	removeOwnFile,
+	unlinkOwnFile,
 	writeExclusive,
 } from "./regular-file";
 import { SESSION_TITLE_SLOT_BYTES } from "./session-entries";
@@ -229,65 +231,32 @@ async function rewriteOwnRestoreRecord(own: OwnRestoreRecord, text: string): Pro
 }
 
 /**
- * Take this run's record down, or say why what has its name was left. The
- * name is first renamed to one only this run knows, which moves exactly what
- * has the name at that moment; that is removed only when it is the file this
- * run created, by the identity taken at creation. The comparison runs while
- * this run still holds the descriptor it created the record through, so that
- * inode cannot have been handed out again to a file someone put at the name:
- * an inode is freed only once its last link and its last open descriptor are
- * gone. Anything else is put back under its name with `link`, which replaces
- * nothing, or, where that cannot be done, left where the rename put it and
- * named. A directory that refuses the change is named, with what to do.
- *
- * The rename and the `unlink` still name paths — no system call removes a
- * file by its inode — so a writer with access to this directory is outside
- * what this guards: a file it puts at the aside name just before the rename
- * is replaced, and one it puts there between the comparison and the
- * `unlink` is removed. The aside name carries 64 random bits and the
- * `unlink` follows the comparison at once, which narrows that window and
- * does not close it. Linux's `renameat2` with `RENAME_NOREPLACE` would
- * refuse the first case, keeping both files; Node has no binding for it,
- * and it would leave the second.
+ * Take this run's record down, or say why what has its name was left. It is
+ * removed only while the name holds the file this run created, by the
+ * identity taken at creation and while this run still holds the descriptor
+ * it created the record through, so that inode cannot have been handed out
+ * again to a file someone put at the name — see {@link unlinkOwnFile}, which
+ * also names the one gap left: a file renamed onto the name between the last
+ * look and the `unlink`. A directory that refuses the change is named, with
+ * what to do.
  */
 async function dropOwnRestoreRecord(own: OwnRestoreRecord): Promise<string | undefined> {
-	const aside = `${own.path}.${randomBytes(8).toString("hex")}.leaving`;
+	let removal: OwnFileRemoval;
 	try {
-		await fs.rename(own.path, aside);
+		removal = await unlinkOwnFile(own.path, [own]);
 	} catch (error) {
-		// Gone already: nothing has the name, which is what a finished
-		// restore leaves.
-		if (isEnoent(error)) return undefined;
-		if (isPermissionError(error)) {
-			return (
-				`${recordDirectoryNotWritable(own.path, error)}, so this restore could not take down its record ${own.path}, ` +
-				`though everything else came home. While it is there the session is treated as unfinished and does not open: ` +
-				`make the directory writable with \`chmod u+w\`, then look at the record and move it aside`
-			);
-		}
-		throw error;
+		if (!isPermissionError(error)) throw error;
+		return (
+			`${recordDirectoryNotWritable(own.path, error)}, so this restore could not take down its record ${own.path}, ` +
+			`though everything else came home. While it is there the session is treated as unfinished and does not open: ` +
+			`make the directory writable with \`chmod u+w\`, then look at the record and move it aside`
+		);
 	}
-	const moved = await fs.lstat(aside);
-	if (moved.dev === own.dev && moved.ino === own.ino) {
-		try {
-			await fs.unlink(aside);
-		} catch (error) {
-			if (!isPermissionError(error)) throw error;
-			return (
-				`${recordDirectoryNotWritable(aside, error)}, so this restore's own record, already moved out of the way to ` +
-				`${aside}, could not be removed: make the directory writable with \`chmod u+w\` and move that file aside`
-			);
-		}
-		return undefined;
-	}
-	const replaced = `${own.path} held something other than the record this restore wrote`;
-	try {
-		await fs.link(aside, own.path);
-	} catch {
-		return `${replaced}; it is now at ${aside}, and nothing was removed: look at it and put it back if it is wanted`;
-	}
-	await fs.unlink(aside);
-	return `${replaced}, so it was left: look at it, and once the session holds everything, move it aside`;
+	if (removal !== "kept") return undefined;
+	return (
+		`${own.path} held something other than the record this restore wrote, so it was left: look at it, and once the ` +
+		`session holds everything, move it aside`
+	);
 }
 
 /**
@@ -1199,7 +1168,7 @@ async function copyEntryDereferenced(
 		// otherwise come back readable to more than it was. A directory the live
 		// tree already holds keeps its own permissions — merging an archive into
 		// a private `0700` directory must not widen it to the archive's mode.
-		if (!existing) await fs.chmod(destination, stat.mode & 0o7777);
+		if (!existing) await chmodDirectory(destination, stat.mode & 0o7777);
 		// Sorted, so a restore that stops part-way is reproducible from its report.
 		for (const entry of (await fs.readdir(source)).sort()) {
 			await copyEntryDereferenced(
@@ -2613,8 +2582,34 @@ async function quarantineHoldingRecord(
 		);
 	}
 	if (directoryPresent) {
+		const into = path.join(destination, moved);
+		// Both names once more, the instant before the move. `link` cannot
+		// move a directory, and `rename` of one replaces an empty directory
+		// standing at the new name — no bytes, but not this run's — and fails
+		// on anything else; so that name is looked at last, one system call
+		// before. The directory itself has to be the one the run minted, when
+		// the record says which that is.
+		const absent = (error: unknown): undefined => {
+			if (isEnoent(error)) return undefined;
+			throw error;
+		};
 		try {
-			await fs.rename(entry.dir, path.join(destination, moved));
+			const moving = await fs.lstat(entry.dir);
+			const minted = entry.dirIdentity;
+			if (!moving.isDirectory() || (minted && (moving.dev !== minted.dev || moving.ino !== minted.ino))) {
+				return refuse(
+					`${entry.dir} is no longer the directory a run staged in, so it was not moved; its record is copied into ` +
+						`${destination} and still in ${ledger}: look at both, then run the same command again`,
+				);
+			}
+			if (await fs.lstat(into).catch(absent)) {
+				return refuse(
+					`${into} appeared while this quarantine ran, and it was not this quarantine's, so ${entry.dir} was not ` +
+						`moved; its record is copied into ${destination} and still in ${ledger}: look at both, then run the same ` +
+						`command again`,
+				);
+			}
+			await fs.rename(entry.dir, into);
 		} catch (error) {
 			const across = codeOf(error) === "EXDEV" ? ", because they are on different filesystems" : "";
 			return refuse(

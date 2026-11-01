@@ -27,3 +27,44 @@ await withGcLock(process.env.GC_LOCK_FIXTURE_DIR, async () => {
 	}
 	if (!(await Bun.file(path.join(agentDir, "gc.lock")).exists())) throw new Error("the killed holder left no gc.lock");
 }
+
+/**
+ * Run `omp gc` with `flags` in a real process and kill it with SIGKILL the
+ * moment it unlinks `target`: just before the `unlink` reaches the kernel,
+ * or just after it returns. Nothing of the killed run cleans up, as with a
+ * kill from outside. Returns how the process ended, for the caller to check
+ * that the kill landed.
+ */
+export async function runGcKilledAtUnlink(
+	flags: Record<string, unknown>,
+	target: string,
+	when: "before" | "after",
+): Promise<{ signal: string | null; exit: number; stderr: string }> {
+	const cliModule = path.join(import.meta.dir, "..", "..", "src", "cli", "gc-cli.ts");
+	const child = Bun.spawn(
+		[
+			process.execPath,
+			"-e",
+			`const { spyOn } = await import("bun:test");
+const fs = await import("node:fs/promises");
+const { runGcCommand } = await import(${JSON.stringify(cliModule)});
+const target = process.env.GC_KILL_AT;
+const before = process.env.GC_KILL_WHEN === "before";
+const unlink = fs.unlink;
+spyOn(fs, "unlink").mockImplementation(async file => {
+	const hit = String(file) === target;
+	if (hit && before) process.kill(process.pid, "SIGKILL");
+	await unlink(file);
+	if (hit) process.kill(process.pid, "SIGKILL");
+});
+await runGcCommand({ flags: JSON.parse(process.env.GC_FLAGS) });`,
+		],
+		{
+			env: { ...process.env, GC_KILL_AT: target, GC_KILL_WHEN: when, GC_FLAGS: JSON.stringify(flags) },
+			stdout: "ignore",
+			stderr: "pipe",
+		},
+	);
+	const exit = await child.exited;
+	return { signal: child.signalCode, exit, stderr: await new Response(child.stderr).text() };
+}

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test";
 import { randomBytes } from "node:crypto";
-import { existsSync, constants as fsConstants, readFileSync, type Stats } from "node:fs";
+import { existsSync, constants as fsConstants, readFileSync, type Stats, watch } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -38,7 +38,7 @@ import {
 import { serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 import { type FileLockHandle, getAgentDir, getSessionsDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
-import { leaveDeadGcLock } from "./helpers/gc-lock-fixture";
+import { leaveDeadGcLock, runGcKilledAtUnlink } from "./helpers/gc-lock-fixture";
 
 // A session's lease is an abstract socket named by its id, and on Linux that
 // name is shared by the whole machine. Every id here starts with a part made
@@ -5602,19 +5602,19 @@ test("a restore that cannot take its own record down says which directory to mak
 	await archiveEverything();
 	const record = restoreRecordPath(archiveFile);
 	// The review's mid-run case: the archive bucket made read-only while the
-	// restore runs, so the rename that takes the record down is refused.
-	const realRename = fs.rename;
-	const rename = spyOn(fs, "rename").mockImplementation(async (from, to) => {
-		if (String(from) === record && String(to).endsWith(".leaving")) {
-			throw Object.assign(new Error(`EACCES: permission denied, rename '${record}'`), { code: "EACCES" });
+	// restore runs, so the unlink that takes the record down is refused.
+	const realUnlink = fs.unlink;
+	const unlink = spyOn(fs, "unlink").mockImplementation(async target => {
+		if (String(target) === record) {
+			throw Object.assign(new Error(`EACCES: permission denied, unlink '${record}'`), { code: "EACCES" });
 		}
-		return await realRename(from, to);
+		return await realUnlink(target);
 	});
 	let applied: GcResult;
 	try {
 		applied = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
 	} finally {
-		rename.mockRestore();
+		unlink.mockRestore();
 	}
 
 	const told = applied.restore?.errors.join("\n") ?? "";
@@ -5653,27 +5653,35 @@ test("a restore leaves what has its record's name by the time it ends, when that
 	await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
 	await archiveEverything();
 	const record = restoreRecordPath(archiveFile);
-	// The review's late plant: something put over the record, just before
-	// the restore takes its record down, by a writer that can change the name.
-	const realRename = fs.rename;
-	const rename = spyOn(fs, "rename").mockImplementation(async (from, to) => {
-		if (String(from) === record && String(to).endsWith(".leaving")) {
-			const planted = path.join(root, "planted");
-			await Bun.write(planted, "ONLY COPY OF A LATE WRITER'S DATA");
-			await realRename(planted, record);
+	// The review's late plant: something put over the record, by a writer
+	// that can change the name, just as the restore looks at it to take it
+	// down.
+	const realOpen = fs.open;
+	let planted = false;
+	const open = spyOn(fs, "open").mockImplementation((async (target: string, ...rest: unknown[]) => {
+		const flags = rest[0];
+		if (!planted && String(target) === record && typeof flags === "number" && flags & fsConstants.O_NOFOLLOW) {
+			planted = true;
+			const plant = path.join(root, "planted");
+			await Bun.write(plant, "ONLY COPY OF A LATE WRITER'S DATA");
+			await fs.rename(plant, record);
 		}
-		return await realRename(from, to);
-	});
+		return await (realOpen as (...args: unknown[]) => Promise<fs.FileHandle>)(target, ...rest);
+	}) as typeof fs.open);
 	let applied: GcResult;
 	try {
 		applied = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
 	} finally {
-		rename.mockRestore();
+		open.mockRestore();
 	}
 
+	expect(planted).toBe(true);
 	expect(applied.restore?.errors.join("\n")).toContain("held something other than the record this restore wrote");
 	expect(await Bun.file(record).text()).toBe("ONLY COPY OF A LATE WRITER'S DATA");
-	expect((await fs.readdir(path.dirname(record))).filter(name => name.endsWith(".leaving"))).toEqual([]);
+	// Nothing of the record's is anywhere else either: no second name was made on the way.
+	expect((await fs.readdir(path.dirname(record))).filter(name => name.startsWith(path.basename(record)))).toEqual([
+		path.basename(record),
+	]);
 });
 
 test("a restore that finds its record's name taken as it makes it leaves what took it", async () => {
@@ -6050,27 +6058,23 @@ test("a quarantine retry that finds no record anywhere says where the directory 
 /**
  * The ledger on one filesystem and the quarantine on another, as the review
  * measured them: the record cannot go across by name, by `rename` or by
- * `link`, and has to be copied. `beforeRename`, while set, sees every rename
- * first — one spy on `rename`, so a test that stops a rename does not stack
- * a second.
+ * `link`, and has to be copied.
  */
-function recordAcrossFilesystems(record: string): { restore(): void; beforeRename?: (from: string) => void } {
-	const handle: { restore(): void; beforeRename?: (from: string) => void } = {
-		restore() {
-			for (const spy of spies) spy.mockRestore();
-		},
-	};
+function recordAcrossFilesystems(record: string): { restore(): void } {
 	const spies = (["rename", "link"] as const).map(name => {
 		const real = fs[name];
 		return spyOn(fs, name).mockImplementation(async (from, to) => {
-			if (name === "rename") handle.beforeRename?.(String(from));
 			if (String(from) === record && String(to).includes(`${path.sep}gc-quarantine${path.sep}`)) {
 				throw Object.assign(new Error("EXDEV: cross-device link not permitted"), { code: "EXDEV" });
 			}
 			return await real(from, to);
 		});
 	});
-	return handle;
+	return {
+		restore() {
+			for (const spy of spies) spy.mockRestore();
+		},
+	};
 }
 
 for (const filesystems of ["across filesystems", "on one filesystem"] as const) {
@@ -6081,28 +6085,22 @@ for (const filesystems of ["across filesystems", "on one filesystem"] as const) 
 		const across = filesystems === "across filesystems" ? recordAcrossFilesystems(ground.record) : undefined;
 		try {
 			// The review's kill point: the record is whole in the destination
-			// and its ledger entry not yet removed — a removal that starts by
-			// moving the record to a private name.
+			// and its ledger entry not yet removed — just before the `unlink`
+			// that removes it.
 			let killed = false;
-			const killAtRemoval = (from: string): void => {
-				if (killed || from !== ground.record) return;
-				killed = true;
-				throw Object.assign(new Error("killed before the ledger entry went"), { code: "EINTR" });
-			};
-			const realRename = fs.rename;
-			const rename = across
-				? undefined
-				: spyOn(fs, "rename").mockImplementation(async (from, to) => {
-						killAtRemoval(String(from));
-						return await realRename(from, to);
-					});
-			if (across) across.beforeRename = killAtRemoval;
+			const realUnlink = fs.unlink;
+			const unlink = spyOn(fs, "unlink").mockImplementation(async target => {
+				if (!killed && String(target) === ground.record) {
+					killed = true;
+					throw Object.assign(new Error("killed before the ledger entry went"), { code: "EINTR" });
+				}
+				return await realUnlink(target);
+			});
 			let first: GcResult;
 			try {
 				first = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
 			} finally {
-				rename?.mockRestore();
-				if (across) across.beforeRename = undefined;
+				unlink.mockRestore();
 			}
 			expect(killed).toBe(true);
 			expect(first.quarantine?.moved).toBe(false);
@@ -6276,8 +6274,7 @@ for (const at of ["before", "created", "half"] as const) {
  * Run a quarantine that stops, as a kill would, at the step this names: once
  * the record is whole in the destination and before the directory moves,
  * once the directory has moved and before the ledger entry goes, or at the
- * removal of the ledger entry itself, whose first step moves it to a
- * private name.
+ * removal of the ledger entry itself, just before its `unlink`.
  */
 async function quarantineStopped(
 	ground: StagingGround,
@@ -6286,17 +6283,22 @@ async function quarantineStopped(
 ): Promise<void> {
 	const stop = () => Object.assign(new Error("stopped as a kill would"), { code: "EINTR" });
 	const realRename = fs.rename;
+	const realUnlink = fs.unlink;
 	const rename = spyOn(fs, "rename").mockImplementation(async (from, to) => {
-		if (at === "before the ledger entry goes" && String(from) === ground.record) throw stop();
 		if (String(from) !== ground.dir) return await realRename(from, to);
 		if (at === "before the directory moves") throw stop();
 		await realRename(from, to);
 		if (at === "after the directory moves") throw stop();
 	});
+	const unlink = spyOn(fs, "unlink").mockImplementation(async target => {
+		if (at === "before the ledger entry goes" && String(target) === ground.record) throw stop();
+		return await realUnlink(target);
+	});
 	try {
 		await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
 	} finally {
 		rename.mockRestore();
+		unlink.mockRestore();
 	}
 }
 
@@ -7459,3 +7461,244 @@ test("an archive run lists a staging record whose directory is gone, and the qua
 	expect(await Bun.file(ground.record).exists()).toBe(false);
 	expect((await archiveOnly()).archive?.stagingRecordsWithoutDirectory).toBeUndefined();
 });
+
+/**
+ * Every entry under `dir`, not following links: what it is, its identity,
+ * mode, link count, size, times to the nanosecond, and what it holds — so a
+ * file made and removed again still shows, in its directory's times.
+ */
+async function snapshotTree(dir: string): Promise<Map<string, string>> {
+	const seen = new Map<string, string>();
+	const visit = async (at: string): Promise<void> => {
+		const stat = await fs.lstat(at, { bigint: true });
+		const kind = stat.isDirectory() ? "dir" : stat.isSymbolicLink() ? "link" : stat.isFile() ? "file" : "other";
+		const holds =
+			kind === "file"
+				? new Bun.CryptoHasher("sha256").update(await fs.readFile(at)).digest("hex")
+				: kind === "link"
+					? await fs.readlink(at)
+					: "";
+		const fields = [kind, stat.dev, stat.ino, stat.mode, stat.nlink, stat.size, stat.mtimeNs, stat.ctimeNs, holds];
+		seen.set(path.relative(dir, at) || ".", fields.map(String).join(" "));
+		if (kind === "dir") for (const name of await fs.readdir(at)) await visit(path.join(at, name));
+	};
+	await visit(dir);
+	return seen;
+}
+
+// A preview writes, links, unlinks and renames nothing, the lock included.
+// The review's reclaim preview removed a file of somebody's without `--apply`:
+// it took the lock, and moved it onto that file on the way out.
+test("every gc preview leaves the agent directory exactly as it found it, a lock a killed run left included", async () => {
+	// A session archived and given up, with a killed run's stage and record;
+	// one archived with its live copy kept; one cold and not yet archived.
+	const { record } = await archivedWithKilledStage();
+	const kept = await writeSession("2026-01-02T00-00-00-000Z", sessionId("0000000000b2"));
+	await archiveOnly();
+	const cold = await writeSession("2026-01-03T00-00-00-000Z", sessionId("0000000000c3"));
+	const old = new Date(Date.now() - 30 * 86_400_000);
+	await fs.utimes(cold, old, old);
+	// What applying would break first, and a preview must leave alone.
+	await leaveDeadGcLock(root);
+	const lock = await fs.readFile(path.join(root, "gc.lock"));
+	const before = await snapshotTree(root);
+	const changes: string[] = [];
+	const sentinel = "zz-watch-sentinel";
+	const sentinelSeen = Promise.withResolvers<void>();
+	const watcher = watch(root, { recursive: true }, (event, name) => {
+		if (name === sentinel) sentinelSeen.resolve();
+		else changes.push(`${event} ${name}`);
+	});
+	let previews: GcResult[];
+	let after: Map<string, string>;
+	try {
+		// A real wait, on purpose: the kernel stamps times from a coarse clock,
+		// and a change made within the tick the snapshot was taken in could
+		// leave every time as it was. No fake clock reaches the kernel's.
+		await Bun.sleep(50);
+		previews = [
+			await runGcCommand({ flags: { agentDir: root, quarantine: record, json: true } }),
+			await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, json: true } }),
+			await runGcCommand({
+				flags: { agentDir: root, reclaim: archivePathFor(kept), forwardOnly: true, json: true },
+			}),
+			await runGcCommand({
+				flags: {
+					agentDir: root,
+					archive: true,
+					json: true,
+					coldArchiveAfterDays: 0,
+					retainNewestGlobal: 0,
+					retainNewestPerCwd: 0,
+				},
+			}),
+			await runGcCommand({ flags: { agentDir: root, json: true } }),
+		];
+		after = await snapshotTree(root);
+		// The watcher delivers in order, so once this file's event arrives,
+		// every event the previews caused has arrived before it.
+		await Bun.write(path.join(root, sentinel), "");
+		await sentinelSeen.promise;
+	} finally {
+		watcher.close();
+	}
+
+	// Each preview found what applying would act on, so none of this is a run
+	// that looked at nothing.
+	const [quarantine, restore, reclaim, archive, sweep] = previews;
+	expect(quarantine.quarantine?.errors).toEqual([]);
+	expect(quarantine.quarantine?.directory).toBeDefined();
+	expect(restore.restore?.archivePath).toBe(archiveFile);
+	expect(reclaim.reclaim?.wouldReclaim).toBe(1);
+	expect(archive.archive?.wouldArchive).toBeGreaterThan(0);
+	expect(sweep.apply).toBe(false);
+	expect(changes).toEqual([]);
+	expect(after).toEqual(before);
+	expect(await fs.readFile(path.join(root, "gc.lock"))).toEqual(lock);
+});
+
+/**
+ * The review's collision, at every name a run links or moves a file to: just
+ * before each `link` and `rename`, a file of somebody's is created
+ * exclusively at the destination, when nothing stands there yet. The review
+ * planted one at the private name gc moved its lock to on the way out, and
+ * every command removed it and exited 0.
+ */
+function plantAtEveryDestination(): { planted: Map<string, string>; stop: () => void } {
+	const planted = new Map<string, string>();
+	const plant = async (to: string): Promise<void> => {
+		const bytes = `ONLY COPY OF SOMEBODY'S FILE AT ${path.basename(to)}\n`;
+		try {
+			await fs.writeFile(to, bytes, { flag: "wx", mode: 0o600 });
+			planted.set(to, bytes);
+		} catch {
+			// Something already stands there, or its directory does not: there
+			// is nothing to put a file at.
+		}
+	};
+	const realRename = fs.rename;
+	const realLink = fs.link;
+	const rename = spyOn(fs, "rename").mockImplementation(async (from, to) => {
+		await plant(String(to));
+		return await realRename(from, to);
+	});
+	const link = spyOn(fs, "link").mockImplementation(async (from, to) => {
+		await plant(String(to));
+		return await realLink(from, to);
+	});
+	return {
+		planted,
+		stop: () => {
+			rename.mockRestore();
+			link.mockRestore();
+		},
+	};
+}
+
+const plantedCommands: [string, () => Promise<() => Promise<GcResult>>][] = [
+	["archive --apply", async () => () => archiveOnly()],
+	[
+		"restore --apply",
+		async () => {
+			await archiveEverything();
+			return () => runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
+		},
+	],
+	[
+		"quarantine --apply",
+		async () => {
+			const { record } = await archivedWithKilledStage();
+			return () => runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
+		},
+	],
+];
+for (const [command, prepare] of plantedCommands) {
+	test(`${command} keeps, byte for byte, a file put at any name it links or moves a file to`, async () => {
+		await Bun.write(path.join(sessionFile.slice(0, -".jsonl".length), "a.log"), "HELLO");
+		const run = await prepare();
+		const plants = plantAtEveryDestination();
+		try {
+			await run().catch(() => undefined);
+		} finally {
+			plants.stop();
+		}
+
+		expect(plants.planted.size).toBeGreaterThan(0);
+		for (const [at, bytes] of plants.planted) expect(await Bun.file(at).text()).toBe(bytes);
+	});
+}
+
+// A run killed at its one removal of a file it made, on either side of the
+// `unlink`. No second name is made on the way, so there is nothing for the
+// next run to clear: the file is at its own name, or gone.
+for (const when of ["before", "after"] as const) {
+	test(`a quarantine killed ${when} it unlinks the ledger record leaves the stage and a whole copy in the quarantine, and nothing else`, async () => {
+		const { ground, record } = await archivedWithKilledStage();
+		const recordBytes = await fs.readFile(ground.record);
+		const destination = path.join(root, "archive", "gc-quarantine", path.basename(record, ".json"));
+		const rootBefore = (await fs.readdir(root)).sort();
+
+		const killed = await runGcKilledAtUnlink(
+			{ agentDir: root, quarantine: record, apply: true, json: true },
+			ground.record,
+			when,
+		);
+
+		expect(killed.signal).toBe("SIGKILL");
+		expect(await Bun.file(path.join(destination, path.basename(ground.dir), "b.log")).text()).toBe("PARTIAL STAGE");
+		expect(await fs.readFile(path.join(destination, record))).toEqual(recordBytes);
+		expect((await fs.readdir(destination)).sort()).toEqual([path.basename(ground.dir), record].sort());
+		// The record is in the ledger, as it was, only when the kill came first.
+		expect(await fs.readdir(stagingLedgerDir(root))).toEqual(when === "before" ? [record] : []);
+		if (when === "before") expect(await fs.readFile(ground.record)).toEqual(recordBytes);
+		// The lock the killed run held, and no other new name.
+		expect((await fs.readdir(root)).sort()).toEqual([...rootBefore, "gc.lock"].sort());
+
+		// Run again, the kill before the unlink finishes; the kill after it had
+		// finished the quarantine already, so running it again refuses, as any
+		// finished quarantine run again does. Either way the restore it was for
+		// runs clean, past the killed run's lock.
+		const again = await runGcCommand({ flags: { agentDir: root, quarantine: record, apply: true, json: true } });
+		const restored = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
+		expect(again.quarantine?.moved).toBe(when === "before");
+		if (when === "before") expect(again.quarantine?.errors).toEqual([]);
+		else expect(again.quarantine?.errors.length).toBeGreaterThan(0);
+		expect(restored.restore?.errors).toEqual([]);
+		expect(await fs.readdir(stagingLedgerDir(root))).toEqual([]);
+		expect(await fs.lstat(path.join(root, "gc.lock")).catch(() => undefined)).toBeUndefined();
+	});
+
+	test(`an archive run killed ${when} it unlinks gc.lock leaves the archive whole and no other name, and the next run goes ahead`, async () => {
+		const old = new Date(Date.now() - 30 * 86_400_000);
+		await fs.utimes(sessionFile, old, old);
+		const lock = path.join(root, "gc.lock");
+
+		const killed = await runGcKilledAtUnlink(
+			{
+				agentDir: root,
+				archive: true,
+				apply: true,
+				json: true,
+				coldArchiveAfterDays: 0,
+				retainNewestGlobal: 0,
+				retainNewestPerCwd: 0,
+			},
+			lock,
+			when,
+		);
+
+		expect(killed.signal).toBe("SIGKILL");
+		expect(Buffer.from(Bun.gunzipSync(await fs.readFile(archiveFile))).equals(await fs.readFile(sessionFile))).toBe(
+			true,
+		);
+		// The killed run's lock is still there only when the kill came first.
+		expect((await fs.readdir(root)).sort()).toEqual(
+			when === "before" ? ["archive", "gc-staging", "gc.lock", "sessions"] : ["archive", "gc-staging", "sessions"],
+		);
+		expect(await fs.readdir(stagingLedgerDir(root))).toEqual([]);
+
+		const again = await archiveOnly();
+		expect(again.archive?.errors).toEqual([]);
+		expect(await fs.lstat(lock).catch(() => undefined)).toBeUndefined();
+	});
+}
