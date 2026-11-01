@@ -1,9 +1,9 @@
 import { retryResetTimezoneOffsetFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import {
 	extractRetryHint,
+	getExplicitRetryAfterMsFromHeaders as getExplicitRetryAfterMsFromSharedHeaders,
 	getRetryAfterMsFromHeaders as getRetryAfterMsFromSharedHeaders,
 	longestRetryHint,
-	parseRetryAfterHeaderMs,
 } from "@oh-my-pi/pi-utils";
 
 export type HeadersLike = Headers | Record<string, string | undefined> | undefined | null;
@@ -251,22 +251,13 @@ export function getRetryAfterMsFromHeaders(headers: HeadersLike): number | undef
 	return waitMs === undefined ? undefined : Math.ceil(waitMs);
 }
 
-/** `retry-after-ms` and `Retry-After`: the headers that tell the client to wait, rounded up to whole milliseconds. */
+/**
+ * `retry-after-ms`, else `Retry-After`: the headers that tell the client to
+ * wait, read by the same pi-utils reader, rounded up to whole milliseconds.
+ */
 function getExplicitRetryAfterMsFromHeaders(headers: HeadersLike): number | undefined {
-	if (!headers) return undefined;
-	const longest = longestWait(
-		parseRetryAfterHeaderMs(getHeaderValue(headers, "retry-after-ms"), "ms"),
-		parseRetryAfterHeaderMs(getHeaderValue(headers, "retry-after"), "s"),
-	);
-	return longest === undefined ? undefined : Math.ceil(longest);
-}
-
-function longestWait(...waits: (number | undefined)[]): number | undefined {
-	let longest: number | undefined;
-	for (const wait of waits) {
-		if (wait !== undefined && (longest === undefined || wait > longest)) longest = wait;
-	}
-	return longest;
+	const waitMs = getExplicitRetryAfterMsFromSharedHeaders(headers);
+	return waitMs === undefined ? undefined : Math.ceil(waitMs);
 }
 
 export function getHeadersFromError(error: unknown): HeadersLike {
@@ -282,20 +273,5 @@ function extractHeaders(value: unknown): HeadersLike {
 	if (!value) return undefined;
 	if (value instanceof Headers) return value;
 	if (typeof value === "object") return value as Record<string, string | undefined>;
-	return undefined;
-}
-
-function getHeaderValue(headers: Headers | Record<string, string | undefined>, name: string): string | undefined {
-	if (headers instanceof Headers) {
-		const value = headers.get(name);
-		return value ?? undefined;
-	}
-
-	const target = name.toLowerCase();
-	for (const [key, value] of Object.entries(headers)) {
-		if (key.toLowerCase() === target && typeof value === "string") {
-			return value;
-		}
-	}
 	return undefined;
 }

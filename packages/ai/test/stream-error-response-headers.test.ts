@@ -862,6 +862,19 @@ describe("transport retries of a refusal keep to the caller's maxRetryDelayMs", 
 			expect(message.errorStatus).toBe(429);
 			expect(message.errorRetryAfterMs).toBe(7_200_000);
 		}, 30_000);
+
+		it(`${name}: a 429 whose retry-after-ms holds two joined lines is read at the longer, past the cap, after one request`, async () => {
+			// `100, 9000` is two header lines joined by a comma. Read whole, it
+			// stated no wait and the transport retried on its own backoff.
+			const { message, streamRequests } = await runAgainst(
+				provider(name),
+				[rateLimited({ "retry-after-ms": "100, 9000" })],
+				{ maxRetryDelayMs: 1_000 },
+			);
+
+			expect(streamRequests).toBe(1);
+			expect(message.errorRetryAfterMs).toBe(HEADER_WAIT_MS);
+		}, 30_000);
 	}
 });
 
@@ -903,10 +916,12 @@ describe("retryWaitBounds", () => {
 		expect(bounds.declines(undefined)).toBe(false);
 	});
 
-	it("reads the longest header wait, as the failed message's field does", () => {
-		expect(
-			retryWaitBounds(1_000, 60_000).declines(new Headers({ "retry-after-ms": "100", "retry-after": "9" })),
-		).toBe(true);
+	it("reads retry-after-ms before the coarser Retry-After, as the failed message's field does", () => {
+		// The auth gateway writes both for one wait: the exact milliseconds and
+		// the same wait rounded up to whole seconds. 200 ms is within a 500 ms cap.
+		expect(retryWaitBounds(500, 60_000).declines(new Headers({ "retry-after-ms": "200", "retry-after": "1" }))).toBe(
+			false,
+		);
 	});
 
 	it("keeps the transport's own ceiling when the caller sets no cap", () => {

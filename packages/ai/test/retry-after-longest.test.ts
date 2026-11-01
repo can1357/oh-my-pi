@@ -11,6 +11,7 @@
  *   held-retry check uses it, where it can only decline a hold.
  */
 import { describe, expect, it, vi } from "bun:test";
+import { withRetryAfterHeaders } from "@oh-my-pi/pi-ai/auth-gateway/http";
 import { extractRetryHint, longestRetryHint } from "@oh-my-pi/pi-utils";
 import {
 	extractProviderRetryHint,
@@ -255,19 +256,41 @@ describe("an explicit zero wait beside a window reset", () => {
 		expect(retryWaitBounds(undefined, 60_000).declines(headers)).toBe(false);
 	});
 
-	it.each(["0x0", "-1", "-0", "+0", "0e0", " "])(
-		"is not stated by %j, which is no delay-seconds, so the window reset stands",
-		value => {
-			// RFC 9110 §10.2.3: delay-seconds is digits. Anything else states no
-			// wait; read as zero it would hide a one-hour reset behind "retry now".
-			expect(threeReaders({ "retry-after": value, "x-ratelimit-reset": "3600" })).toEqual([
-				3_600_000, 3_600_000, 3_600_000,
-			]);
-			expect(threeReaders({ "retry-after-ms": value, "x-ratelimit-reset": "3600" })).toEqual([
-				3_600_000, 3_600_000, 3_600_000,
-			]);
-		},
-	);
+	it.each([
+		["a radix prefix", "0x0"],
+		["a sign", "-0"],
+		["an exponent", "0e0"],
+		["a blank value", " "],
+		["a trailing empty part", "0,"],
+		["two numbers and a slash", "0/1"],
+	])("is not stated by %s (%j), so the window reset stands", (_label, value) => {
+		// RFC 9110 §10.2.3: delay-seconds is digits, and a date is an HTTP-date
+		// or an ISO date-time. Each row breaks one of those rules a reader once
+		// let through: `Number()` reads the first three as zero, and the date
+		// parser read `0,` and `0/1` as 1 Jan 2000, an elapsed date. Either way
+		// the value read as "retry now" and hid a one-hour reset.
+		for (const name of ["retry-after", "retry-after-ms"]) {
+			const headers = { [name]: value, "x-ratelimit-reset": "3600" };
+			expect(threeReaders(headers)).toEqual([3_600_000, 3_600_000, 3_600_000]);
+			expect(retryWaitBounds(undefined, 60_000).declines(headers)).toBe(true);
+		}
+	});
+});
+
+describe("retry-after-ms beside Retry-After", () => {
+	it("reads the auth gateway's exact retry-after-ms, not its Retry-After rounded up to whole seconds", () => {
+		// The gateway restates a 200 ms wait as `retry-after-ms: 200` and
+		// `Retry-After: 1`. The two state one wait; the longer of them is 1 s.
+		const headers = Object.fromEntries(withRetryAfterHeaders(new Response(null, { status: 429 }), 200).headers);
+		expect(threeReaders(headers)).toEqual([200, 200, 200]);
+		expect(getFailureRetryAfterMs(new Error("socket closed"), { streamResponseHeaders: headers })).toBe(200);
+	});
+
+	it("reads Retry-After when retry-after-ms states no wait", () => {
+		const headers = { "retry-after-ms": "0x0", "retry-after": "9" };
+		expect(threeReaders(headers)).toEqual([9_000, 9_000, 9_000]);
+		expect(getFailureRetryAfterMs(new Error("socket closed"), { streamResponseHeaders: headers })).toBe(9_000);
+	});
 });
 
 describe("Retry-After comma values", () => {
@@ -287,18 +310,22 @@ describe("Retry-After comma values", () => {
 	});
 
 	it.each([
-		["two joined delay-seconds", "9, 120", 120_000],
-		["a decimal delay-seconds part", "9.125, 9", 9_125],
-		[
-			"out of scope: a bare epoch with a decimal comma has all-digit parts and is still read upstream as a duration",
-			"1761038820, 900",
-			1_761_038_820_000,
-		],
-	] as [string, string, number][])("%s reads the longest bare delay-seconds part", (_label, value, expected) => {
-		// Two joined header lines contradict each other; conservatively wait for
-		// the longer one. The bare-epoch row documents the known out-of-scope
-		// ambiguity: numeric Retry-After is already a duration, never an epoch.
-		expect(threeReaders({ "retry-after": value })).toEqual([expected, expected, expected]);
+		["two joined delay-seconds", "retry-after", "9, 120", 120_000],
+		["a decimal delay-seconds part", "retry-after", "9.125, 9", 9_125],
+		["two joined retry-after-ms values", "retry-after-ms", "100, 9000", 9_000],
+	] as [string, string, string, number][])("%s reads the longest part", (_label, name, value, expected) => {
+		// Two joined header lines contradict each other; conservatively wait for the longer one.
+		expect(threeReaders({ [name]: value })).toEqual([expected, expected, expected]);
+	});
+
+	it.each([
+		["Retry-After", "1761038820, 900"],
+		["retry-after-ms", "1761038820000, 900"],
+	])("does not split %s %j, whose epoch-sized part is no delay, and reads no wait", (name, value) => {
+		// A bare epoch with a decimal comma has all-digit parts. Split, it read
+		// as 55.8 years, which `errorRetryAfterMs` carried into a seven-day
+		// credential block. Main reads it as no wait, and so does this reader.
+		expect(threeReaders({ [name]: value })).toEqual([undefined, undefined, undefined]);
 	});
 
 	it("does not partly split a comma value when one part is not delay-seconds", () => {

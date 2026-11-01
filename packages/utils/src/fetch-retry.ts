@@ -41,24 +41,53 @@ const RESET_BODY_PATTERN = /x-ratelimit-reset\s*[:=]\s*(\d+)/i;
 // computed is no wait, so a zone-less body date is rejected and the caller
 // falls back to its own backoff — unless the provider's catalog declares the
 // zone its stamps use (`naiveResetTimezoneOffset`), which makes it explicit.
+//
+// Only a value in a date grammar reaches `Date.parse`. It reads almost
+// anything as some date — `0,`, `0/1` and `0-1Z` all as 1 Jan 2000 — and a
+// date that has passed is an explicit "retry now", so a malformed value hid
+// the window reset beside it.
 
-/** A zone at the end of a date: `GMT`, `UTC`, `UT`, `Z`, a numeric offset, or a US zone name. */
-const DATE_ZONE_PATTERN = /(?:\b(?:GMT|UTC|UT|[ECMP][SD]T)|Z|[+-]\d{2}:?\d{2})\s*$/i;
-/** An ISO-style date-time: `2099-09-01T09:44:51` or `2099-09-01 09:44:51`. */
-const ISO_DATE_TIME_PATTERN = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/;
+const WEEKDAY = "(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)";
+const WEEKDAY_LONG = "(?:Mon|Tues|Wednes|Thurs|Fri|Satur|Sun)day";
+const MONTH = "(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)";
+const TIME_OF_DAY = "\\d{2}:\\d{2}:\\d{2}";
+/** A date's zone: `GMT`, `UTC`, `UT`, `Z`, a US zone name, or a numeric offset. */
+const ZONE = "(?:GMT|UTC|UT|[ECMP][SD]T|Z|[+-]\\d{2}:?\\d{2})";
+/**
+ * An HTTP-date (RFC 9110 §5.6.7): IMF-fixdate (`Sun, 06 Nov 1994 08:49:37 GMT`),
+ * the obsolete RFC 850 form (`Sunday, 06-Nov-94 08:49:37 GMT`) or asctime
+ * (`Sun Nov  6 08:49:37 1994`). Group 1 is its zone, when it names one.
+ */
+const HTTP_DATE_PATTERN = new RegExp(
+	`^(?:${WEEKDAY},\\s+\\d{1,2}\\s+${MONTH}\\s+\\d{4}\\s+${TIME_OF_DAY}` +
+		`|${WEEKDAY_LONG},\\s+\\d{1,2}-${MONTH}-\\d{2}\\s+${TIME_OF_DAY}` +
+		`|${WEEKDAY}\\s+${MONTH}\\s+\\d{1,2}\\s+${TIME_OF_DAY}\\s+\\d{4})(?:\\s+(${ZONE}))?$`,
+	"i",
+);
+/**
+ * An ISO 8601 date-time: `2099-09-01T09:44:51` or `2099-09-01 09:44:51`,
+ * seconds and a fraction optional, the fraction after a point or a comma (RFC
+ * 3339 allows either). Group 1 is its zone, when it names one.
+ */
+const ISO_DATE_TIME_PATTERN = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:[.,]\d+)?)?(Z|[+-]\d{2}:?\d{2})?$/i;
 
 /**
- * Epoch ms of `value` read as a date in its stated zone. A date with no zone
- * is read as GMT when `zoneless` is `"gmt"` (an HTTP header's date) and is
- * `undefined` when it is `"reject"` (a date out of a message body). Not
- * `Date.parse` alone: that reads a zone-less date in this machine's zone.
+ * Epoch ms of `value` read as an HTTP-date or an ISO date-time in its stated
+ * zone; `undefined` for anything else. A date with no zone is read as GMT when
+ * `zoneless` is `"gmt"` (an HTTP header's date) and is `undefined` when it is
+ * `"reject"` (a date out of a message body). Not `Date.parse` alone: that reads
+ * a zone-less date in this machine's zone, and a malformed value as some date.
  */
 export function parseRetryDateMs(value: string, zoneless: "gmt" | "reject"): number | undefined {
 	const trimmed = value.trim();
-	let ms: number;
-	if (DATE_ZONE_PATTERN.test(trimmed)) ms = Date.parse(trimmed);
-	else if (zoneless === "reject") return undefined;
-	else ms = Date.parse(ISO_DATE_TIME_PATTERN.test(trimmed) ? `${trimmed.replace(" ", "T")}Z` : `${trimmed} GMT`);
+	const iso = ISO_DATE_TIME_PATTERN.exec(trimmed);
+	const match = iso ?? HTTP_DATE_PATTERN.exec(trimmed);
+	if (!match) return undefined;
+	const zoned = match[1] !== undefined;
+	if (!zoned && zoneless === "reject") return undefined;
+	const ms = Date.parse(
+		iso ? `${trimmed.replace(" ", "T").replace(",", ".")}${zoned ? "" : "Z"}` : zoned ? trimmed : `${trimmed} GMT`,
+	);
 	return Number.isNaN(ms) ? undefined : ms;
 }
 
@@ -77,7 +106,8 @@ export interface RetryHintOptions {
 /**
  * Server-suggested retry delay extraction. Merges the patterns historically used
  *
- * Header sources ({@link getRetryAfterMsFromHeaders}; an explicit wait wins over a reset):
+ * Header sources ({@link getRetryAfterMsFromHeaders}; an explicit wait wins over a reset,
+ * and `retry-after-ms` over `Retry-After`):
  *  - `retry-after-ms` (milliseconds)
  *  - `Retry-After` (delay-seconds, or HTTP date)
  *  - `x-ratelimit-reset-ms` (delta ms, or Unix epoch ms/s for large values)
@@ -93,6 +123,11 @@ export interface RetryHintOptions {
  *  - `Your limit will reset at 2026-09-01 09:44:51+08:00` / `将在 2026-09-01 09:44:51 重置`
  *    (with no zone, only in the provider's declared offset; otherwise no wait)
  *
+ * Beside a header's wait, a relative wait the body names still counts, the
+ * longer winning, as pi-ai's `providerRetryWaitMs` reads a failure; a date in
+ * the body does not. So a layer that reads the response and one that reads the
+ * failed message decide on one wait.
+ *
  * Returns `undefined` if no signal is found, or `0` when the provider
  * explicitly asks for an immediate retry (`retry-after…=0`, or an absolute
  * reset timestamp that has already elapsed).
@@ -104,21 +139,21 @@ export function extractRetryHint(
 ): number | undefined {
 	const headers = source instanceof Headers ? source : (source?.headers ?? undefined);
 	const headerHint = getRetryAfterMsFromHeaders(headers);
-	if (headerHint !== undefined) return headerHint;
-
-	if (!body) return undefined;
-	return bodyRetryHint(body, options, false);
+	if (!body) return headerHint;
+	if (headerHint === undefined) return bodyRetryHint(body, options, false);
+	return longestWait([headerHint, bodyRetryHint(body, { ...options, excludeDates: true }, false)]);
 }
 
 /**
- * The longest wait a response names, across every retry header it carries and
- * every occurrence of every phrase in `body`. A malformed or shorter hint never
- * hides a longer valid one, and duplicate header lines joined by a comma are
- * each read. `0` when the only signals ask for an immediate retry; `undefined`
- * when nothing names a wait.
+ * The longest wait a response names, across its retry headers and every
+ * occurrence of every phrase in `body`. The headers give the explicit wait
+ * ({@link getExplicitRetryAfterMsFromHeaders}) and every reset counter. A
+ * malformed or shorter hint never hides a longer valid one, and duplicate
+ * header lines joined by a comma are each read. `0` when the only signals ask
+ * for an immediate retry; `undefined` when nothing names a wait.
  *
- * {@link extractRetryHint} stops at the first recognized header and the first
- * occurrence of each phrase, which is what the retry loop has always slept on.
+ * {@link extractRetryHint} reads only the first occurrence of each phrase,
+ * which is what the retry loop has always slept on.
  * A caller that bounds its retries by a budget needs this reading instead: a
  * retry sent inside a window the server said is closed is a guaranteed failure.
  */
@@ -145,24 +180,45 @@ export function getRetryAfterMsFromHeaders(
 }
 
 /**
+ * The wait a response's explicit retry headers state: `retry-after-ms`, or
+ * `Retry-After` when `retry-after-ms` states none. The two state one wait, the
+ * first exactly and the second in whole seconds (the auth gateway writes both,
+ * the second rounded up), so the exact one is read, never the longer.
+ */
+export function getExplicitRetryAfterMsFromHeaders(
+	headers: Pick<Headers, "get"> | Record<string, string | undefined> | null | undefined,
+): number | undefined {
+	return (
+		parseRetryAfterHeaderMs(headerValue(headers, "retry-after-ms"), "ms") ??
+		parseRetryAfterHeaderMs(headerValue(headers, "retry-after"), "s")
+	);
+}
+
+/** A wait past 10^12 ms (31.7 years) is an epoch timestamp, as {@link resetCounterMs} reads one, not a delay. */
+const EPOCH_SIZED_MS = 1e12;
+
+/**
  * The wait a `retry-after-ms` (`unit` `"ms"`) or `Retry-After` (`unit` `"s"`:
  * delta seconds, or an HTTP-date) header value states.
  *
  * A value is split on commas only when every comma-separated part is a bare
- * delay (digits with at most one decimal point). Two joined header lines then
- * contradict each other, and the conservative read is the longer wait. One
- * part failing that test leaves the whole value unsplit: an HTTP-date keeps its
- * own comma, and an ISO date-time's decimal comma is read as a decimal point.
- * A delay must be digits (RFC 9110 §10.2.3), so `0x0`, `-1` and `-0` state no
- * wait, while a literal `0` still means retry now.
+ * delay (digits with at most one decimal point) of at most 31.7 years. Two
+ * joined header lines then contradict each other, and the conservative read is
+ * the longer wait. One part failing that test leaves the whole value unsplit:
+ * an HTTP-date keeps its own comma, an ISO date-time's decimal comma is read
+ * as a decimal point, and a bare epoch with a decimal comma
+ * (`1761038820, 900`) is no delay and no date. A delay must be digits (RFC
+ * 9110 §10.2.3), so `0x0`, `-1` and `-0` state no wait, while a literal `0`
+ * still means retry now.
  */
-export function parseRetryAfterHeaderMs(raw: string | null | undefined, unit: "ms" | "s"): number | undefined {
+function parseRetryAfterHeaderMs(raw: string | null | undefined, unit: "ms" | "s"): number | undefined {
 	if (!raw) return undefined;
 	const whole = raw.trim();
+	const unitMs = unit === "ms" ? 1 : 1000;
 	const parts = whole.split(",").map(part => part.trim());
-	const values = parts.length > 1 && parts.every(isBareDelay) ? parts : [whole];
+	const joined = parts.length > 1 && parts.every(part => isBareDelay(part) && Number(part) * unitMs <= EPOCH_SIZED_MS);
 	return longestWait(
-		values.map(value =>
+		(joined ? parts : [whole]).map(value =>
 			unit === "ms" ? (isBareDelay(value) ? Number(value) : undefined) : retryAfterValueMs(value),
 		),
 	);
@@ -173,12 +229,10 @@ function isBareDelay(value: string): boolean {
 	return /^\d+(?:\.\d+)?$/.test(value);
 }
 
-/** One `Retry-After` value: a bare delay in seconds, or an HTTP-date read as GMT when it names no zone. */
+/** One `Retry-After` value: a bare delay in seconds, or an HTTP-date or ISO date-time, read as GMT when it names no zone. */
 function retryAfterValueMs(value: string): number | undefined {
 	if (isBareDelay(value)) return Number(value) * 1000;
-	// A signed, hex or exponent number is no delay-seconds and no date.
-	if (value === "" || Number.isFinite(Number(value))) return undefined;
-	const dateMs = parseRetryDateMs(value.replace(/(:\d{2}),(\d+)(?=(?:Z|[+-]\d{2}:?\d{2})?$)/i, "$1.$2"), "gmt");
+	const dateMs = parseRetryDateMs(value, "gmt");
 	return dateMs === undefined ? undefined : Math.max(0, dateMs - Date.now());
 }
 
@@ -212,40 +266,40 @@ function hasHeaderGetter(
 	return typeof headers.get === "function";
 }
 
+/** `name`'s value in `headers`, read through `get` or, on a plain object, by a case-insensitive key. */
+function headerValue(
+	headers: Pick<Headers, "get"> | Record<string, string | undefined> | null | undefined,
+	name: string,
+): string | undefined {
+	if (!headers) return undefined;
+	if (hasHeaderGetter(headers)) return headers.get(name) ?? undefined;
+	const target = name.toLowerCase();
+	for (const [key, value] of Object.entries(headers)) {
+		if (key.toLowerCase() === target && typeof value === "string") return value;
+	}
+	return undefined;
+}
+
 /** The common header reading that keeps extract, longest-hint, and pi-ai in the same units. */
 function readRetryHeaderHints(headers: Pick<Headers, "get"> | Record<string, string | undefined> | null | undefined): {
 	explicit: number | undefined;
 	reset: number | undefined;
 } {
-	const read = (name: string): string | undefined => {
-		if (!headers) return undefined;
-		if (hasHeaderGetter(headers)) return headers.get(name) ?? undefined;
-		const target = name.toLowerCase();
-		for (const [key, value] of Object.entries(headers)) {
-			if (key.toLowerCase() === target && typeof value === "string") return value;
-		}
-		return undefined;
-	};
-
-	const explicit = longestWait([
-		parseRetryAfterHeaderMs(read("retry-after-ms"), "ms"),
-		parseRetryAfterHeaderMs(read("retry-after"), "s"),
-	]);
 	const reset = longestWait([
-		longestHeaderWait(read("x-ratelimit-reset-ms"), value => resetCounterMs(Number(value), 1)),
-		longestHeaderWait(read("x-ratelimit-reset"), value => resetCounterMs(Number(value), 1000)),
-		longestHeaderWait(read("x-ratelimit-reset-after"), value => {
+		longestHeaderWait(headerValue(headers, "x-ratelimit-reset-ms"), value => resetCounterMs(Number(value), 1)),
+		longestHeaderWait(headerValue(headers, "x-ratelimit-reset"), value => resetCounterMs(Number(value), 1000)),
+		longestHeaderWait(headerValue(headers, "x-ratelimit-reset-after"), value => {
 			const seconds = Number(value);
 			return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : undefined;
 		}),
 	]);
-	return { explicit, reset };
+	return { explicit: getExplicitRetryAfterMsFromHeaders(headers), reset };
 }
 
 /** A reset counter: a Unix epoch in ms (> 1e12) or s (> 1e9), otherwise a delta in `unitMs`. */
 function resetCounterMs(value: number, unitMs: number): number | undefined {
 	if (!Number.isFinite(value) || value <= 0) return undefined;
-	const targetMs = value > 1e12 ? value : value > 1e9 ? value * 1000 : undefined;
+	const targetMs = value > EPOCH_SIZED_MS ? value : value > EPOCH_SIZED_MS / 1000 ? value * 1000 : undefined;
 	if (targetMs === undefined) return value * unitMs;
 	const delta = targetMs - Date.now();
 	return delta > 0 ? delta : undefined;
