@@ -2556,7 +2556,7 @@ async function driveSessionToResult(
 			const recoverableStop = monitor.budgetStopRequested() || monitor.yieldTurnStopRequested();
 			if (!recoverableStop || abortSignal.aborted || err instanceof PromptDispatchError) throw err;
 		} finally {
-			const ref = AgentRegistry.global().get(session.getAgentId() ?? "");
+			const ref = AgentRegistry.global().get(session.getAgentId?.() ?? "");
 			if (ref?.session === session) ref.initialPromptPending = false;
 		}
 
