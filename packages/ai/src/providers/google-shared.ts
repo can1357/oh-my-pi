@@ -1044,6 +1044,12 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 			timestamp: Date.now(),
 		};
 		let rawRequestDump: RawHttpRequestDump | undefined;
+		// The current attempt's accepted (2xx) response headers, for `finalize`:
+		// an in-band chunk error or a cut stream keeps the response's
+		// `Retry-After`. Cleared when an attempt starts (the global-endpoint
+		// fallback, each empty-response retry), so a later attempt that fails
+		// before its response never reads an earlier response's headers.
+		let streamResponseHeaders: Headers | undefined;
 
 		try {
 			const plan = await prepare();
@@ -1073,6 +1079,7 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 				options?.streamFirstEventTimeoutMs ??
 				getStreamFirstEventTimeoutMs(options?.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs());
 			const openStreamAt = async (requestUrl: string): Promise<ReadableStream<Uint8Array>> => {
+				streamResponseHeaders = undefined;
 				const watchdog = armPreResponseTimeout(options?.signal, firstEventTimeoutMs);
 				// `timeout` is a Bun fetch extension absent from the DOM `RequestInit`.
 				const init: RequestInit & { timeout: false } = {
@@ -1099,6 +1106,7 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 					// liveness belongs to the event iterator's idle watchdog.
 					watchdog.clear();
 				}
+				streamResponseHeaders = response.headers;
 				if (!response.body) {
 					throw new AIError.ProviderResponseError("Google API returned an empty response body", {
 						provider: model.provider,
@@ -1174,11 +1182,17 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 			stream.push({ type: "done", reason: output.stopReason as "length" | "stop" | "toolUse", message: output });
 			stream.end();
 		} catch (error) {
-			const result = await AIError.finalize(error, { api: model.api, signal: options?.signal, rawRequestDump });
+			const result = await AIError.finalize(error, {
+				api: model.api,
+				signal: options?.signal,
+				rawRequestDump,
+				streamResponseHeaders,
+			});
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = result.message;
+			output.errorRetryAfterMs = result.retryAfterMs;
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: output.stopReason, error: output });

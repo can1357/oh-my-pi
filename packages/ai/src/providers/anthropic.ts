@@ -87,6 +87,7 @@ import {
 	kStreamingPartialJson,
 } from "../utils/block-symbols";
 import { withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
+import { withErrorEventHeaders } from "../utils/error-event-headers";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
 import {
@@ -101,12 +102,13 @@ import {
 	parseAnthropicSlowModeHeaders,
 } from "./anthropic-slow-mode";
 import { notifyProviderResponse } from "../utils/provider-response";
-import { getHeadersFromError, getRetryAfterMsFromHeaders } from "../utils/retry-after";
+import { getFailureRetryAfterMs, getHeadersFromError } from "../utils/retry-after";
 import { COMBINATOR_KEYS, NO_STRICT, toolWireSchema } from "../utils/schema";
 import { spillToDescription } from "../utils/schema/spill";
 import { createSdkStreamRequestOptions } from "../utils/sdk-stream-timeout";
 import { notifyRawSseEvent } from "../utils/sse-debug";
 import { isForcedToolChoice } from "../utils/tool-choice";
+import { providerReplaysFrom, wireCountedFetch } from "../utils/wire-attempts";
 import {
 	AnthropicConnectionTimeoutError,
 	type AnthropicFetchOptions,
@@ -991,14 +993,19 @@ function createAnthropicSseStreamError(data: string, midMessage: boolean): Error
 			: data,
 		{ provider: "anthropic", kind: "output" },
 	);
+	// A relay that already committed its 200 (the omp auth gateway) states the
+	// upstream's retry wait as the error object's structured `headers`.
 	if (!midMessage || !AIError.isProviderRetryableError(rejection)) {
-		return rejection;
+		return withErrorEventHeaders(rejection, parsed?.error);
 	}
 	const fields = [errorType ? `type=${errorType}` : undefined, errorCode ? `code=${errorCode}` : undefined]
 		.filter(field => field !== undefined)
 		.join(" ");
-	return new AIError.AnthropicStreamEnvelopeError(
-		`error frame received before message_stop${fields ? ` (${fields})` : ""}: ${message ?? data}`,
+	return withErrorEventHeaders(
+		new AIError.AnthropicStreamEnvelopeError(
+			`error frame received before message_stop${fields ? ` (${fields})` : ""}: ${message ?? data}`,
+		),
+		parsed?.error,
 	);
 }
 
@@ -1842,8 +1849,31 @@ const streamAnthropicOnce = (
 			timestamp: Date.now(),
 		};
 		let rawRequestDump: RawHttpRequestDump | undefined;
+		// The current attempt's accepted (2xx) response headers: set when its
+		// response arrives, cleared when the next attempt starts, so an in-band
+		// error or a cut stream reads this attempt's `Retry-After` and a later
+		// attempt that fails before its response never reads an earlier one's.
+		let streamResponseHeaders: Headers | undefined;
 		let transportPayload: unknown;
 		let activeAbortTracker = createAbortSourceTracker(options?.signal);
+		// Request attempts, counted on the `fetch` the client issues them through
+		// (`wireCountedFetch`): the request's own counter — `withRequestTransport`
+		// on the `stream()` path, `withWireCount` at `streamAnthropic` otherwise —
+		// shared by every call that sends this request again with the same
+		// options (an authentication retry, an empty-completion retry). Every
+		// wrapper `buildAnthropicClientOptions` adds sits above it — compression
+		// and its uncompressed resend, the cch rewriter, the Copilot identity
+		// resend — so their requests are counted too.
+		const wire = wireCountedFetch(options?.fetch);
+		/**
+		 * Every attempt after the first the request has made, or `undefined`
+		 * when the requests went through a transport this module does not own —
+		 * a caller-supplied client, or a transport that builds its own — or
+		 * through a caller-supplied `fetch`. Each knows how often it replayed and
+		 * this module does not.
+		 */
+		const reportedProviderReplays = (): number | undefined =>
+			transport || options?.client ? undefined : providerReplaysFrom(wire.attempts);
 
 		const onSseEvent = options?.onSseEvent;
 		const rawSseObserver = onSseEvent ? (event: RawSseEvent) => onSseEvent(event, sourceModel) : undefined;
@@ -2191,7 +2221,7 @@ const streamAnthropicOnce = (
 						context.tools?.some(tool => ANTHROPIC_BUFFERED_INPUT_TOOLS.has(tool.name)) ?? false,
 					thinkingEnabled: options?.thinkingEnabled,
 					thinkingDisplay: options?.thinkingDisplay,
-					fetch: options?.fetch,
+					fetch: wire.fetch,
 					maxRetryDelayMs: options?.maxRetryDelayMs,
 					copilotCacheKey,
 					copilotCacheSnapshot: copilotCached ?? null,
@@ -2476,6 +2506,7 @@ const streamAnthropicOnce = (
 			let sentSlow = false;
 			while (true) {
 				activeAbortTracker = createAbortSourceTracker(options?.signal);
+				streamResponseHeaders = undefined;
 				const { requestSignal } = activeAbortTracker;
 				// The provider loop owns retries: pin the client's internal retry loop
 				// to zero even when no watchdog timeout is configured (the helper only
@@ -2641,6 +2672,7 @@ const streamAnthropicOnce = (
 					} finally {
 						if (requestTimeout !== undefined) clearTimeout(requestTimeout);
 					}
+					streamResponseHeaders = response.headers;
 					await notifyProviderResponse(options, response, sourceModel, requestId);
 					if (slowMode) {
 						const slowSignal = parseAnthropicSlowModeHeaders(response.headers);
@@ -3607,9 +3639,12 @@ const streamAnthropicOnce = (
 					providerRetryAttempt++;
 					const backoffDelayMs = calculateAnthropicRetryDelayMs(providerRetryAttempt - 1);
 					// Honor the server's retry hint (`retry-after-ms`/`retry-after`) on
-					// 429/529-style failures: retrying sooner than the server asked is a
-					// guaranteed failure that just burns the retry budget.
-					const headerDelayMs = getRetryAfterMsFromHeaders(getHeadersFromError(streamFailure));
+					// 429/529-style failures and on an accepted stream that failed after
+					// naming one: retrying sooner than the server asked is a guaranteed
+					// failure that just burns the retry budget. The same reader as the
+					// failed message's `errorRetryAfterMs`, so this cap and every layer
+					// above judge one wait.
+					const headerDelayMs = getFailureRetryAfterMs(streamFailure, { streamResponseHeaders });
 					// Bound the server-directed wait so a multi-hour `retry-after` cannot
 					// park the provider stream before higher-level recovery runs. A non-positive cap
 					// disables the bound; an over-cap hint surfaces the original error immediately.
@@ -3640,6 +3675,10 @@ const streamAnthropicOnce = (
 				output.content.unshift(...prefix);
 				if (retained !== output.content) retained.unshift(...prefix);
 			}
+			// A success carries the count too: the layer above may discard this
+			// response (an empty completion it retries) and the requests already
+			// spent on it are still requests the model saw.
+			output.providerReplays = reportedProviderReplays();
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			if (dropFastMode && model.compat.firstPartyProvider && options?.serviceTier === "priority") {
@@ -3692,11 +3731,14 @@ const streamAnthropicOnce = (
 				provider: sourceModel.provider,
 				abortTracker: activeAbortTracker,
 				rawRequestDump,
+				streamResponseHeaders,
 			});
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = transport ? result.message : maybeAddReplayUnsignedThinkingHint(model, result.message);
+			output.errorRetryAfterMs = result.retryAfterMs;
+			output.providerReplays = reportedProviderReplays();
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({

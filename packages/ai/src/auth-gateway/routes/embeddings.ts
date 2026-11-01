@@ -11,7 +11,13 @@ import {
 	recordGatewayUsage,
 	resolveGatewayApiKey,
 } from "../dispatch";
-import { gatewayResponseHeaders, json, resolveClientIdentity } from "../http";
+import {
+	gatewayResponseHeaders,
+	json,
+	resolveClientIdentity,
+	thrownRetryAfterMs,
+	withRetryAfterHeaders,
+} from "../http";
 
 /** OpenAI-compatible `POST /v1/embeddings` gateway handler. */
 export async function handleEmbeddings(
@@ -87,6 +93,9 @@ export async function handleEmbeddings(
 			error: classified.message,
 			peer,
 		});
-		return embeddings.formatError(classified.status, classified.type, classified.message);
+		return withRetryAfterHeaders(
+			embeddings.formatError(classified.status, classified.type, classified.message),
+			thrownRetryAfterMs(error),
+		);
 	}
 }

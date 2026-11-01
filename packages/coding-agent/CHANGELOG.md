@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A cut stream on a request the provider reports it sent once (`anthropic`, `openai-codex-responses`, `cursor`) now gets up to two more tries on the same model before `retry.fallbackChains` moves on ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- Cancelling a retry (`abortRetry()`, Esc, RPC `abort_retry`) now stops it at any moment, not only during the backoff ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.14.2] - 2026-10-31
 
 ### Added

@@ -1,5 +1,11 @@
-import { describe, expect, it } from "bun:test";
-import { extractRetryHint, fetchWithRetry, isUnexpectedSocketCloseMessage } from "@oh-my-pi/pi-utils/fetch-retry";
+import { afterEach, describe, expect, it, vi } from "bun:test";
+import { scheduler } from "node:timers/promises";
+import {
+	extractRetryHint,
+	fetchWithRetry,
+	isUnexpectedSocketCloseMessage,
+	longestRetryHint,
+} from "@oh-my-pi/pi-utils/fetch-retry";
 
 /** Await a rejection and narrow it to `Error` without asserting a shape. */
 async function rejectionOf(promise: Promise<unknown>): Promise<Error> {
@@ -25,6 +31,10 @@ describe("isUnexpectedSocketCloseMessage", () => {
 });
 
 describe("fetchWithRetry", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
 	it("routes requests through the `fetch` override when provided", async () => {
 		const calls: Array<{ input: string | URL | Request; init: RequestInit | undefined }> = [];
 		const customFetch = async (input: string | URL | Request, init?: RequestInit) => {
@@ -163,6 +173,122 @@ describe("fetchWithRetry", () => {
 
 		expect(error.message).toBe("Network error: getaddrinfo ENOTFOUND api.openai.com");
 	});
+
+	/** `waitMs` from now as an ISO date-time in UTC+02:00 with a decimal comma before its fraction. */
+	const isoCommaPlus2 = (waitMs: number) =>
+		`${new Date(Date.now() + waitMs + 2 * 3_600_000).toISOString().slice(0, 19)},900+02:00`;
+
+	it("retries a 429 whose Retry-After is an ISO date-time with a decimal comma 1 s out, instead of reading the zone offset as the wait", async () => {
+		let calls = 0;
+		const response = await fetchWithRetry("https://example.invalid/iso-comma", {
+			fetch: async () => {
+				calls++;
+				return calls === 1
+					? new Response("rate limited", { status: 429, headers: { "retry-after": isoCommaPlus2(1_000) } })
+					: new Response("ok");
+			},
+			maxAttempts: 3,
+		});
+
+		// Treating the decimal comma as a list separator read the timestamp's
+		// UTC+02:00 offset as a two-hour wait, so the default cap suppressed the retry.
+		expect(calls).toBe(2);
+		expect(response.status).toBe(200);
+	});
+
+	it("retries a 429 whose epoch-millisecond x-ratelimit-reset is 1 s out", async () => {
+		let calls = 0;
+		const response = await fetchWithRetry("https://example.invalid/epoch-ms-reset", {
+			fetch: async () => {
+				calls++;
+				return calls === 1
+					? new Response("rate limited", {
+							status: 429,
+							headers: { "x-ratelimit-reset": String(Date.now() + 1_000) },
+						})
+					: new Response("ok");
+			},
+			maxAttempts: 3,
+		});
+
+		// Read as epoch seconds, the value was 1.8e15 ms out and the 429 came back.
+		expect(calls).toBe(2);
+		expect(response.status).toBe(200);
+	});
+
+	it.each([
+		["0x0", "a number that is no delay-seconds"],
+		["0,", "a value no date grammar allows, which the date parser read as 1 Jan 2000"],
+	])("returns a 429 at once when Retry-After: %s (%s) sits beside a one-hour window reset", async value => {
+		let calls = 0;
+		const response = await fetchWithRetry("https://example.invalid/no-wait-stated", {
+			fetch: async () => {
+				calls++;
+				return new Response("rate limited", {
+					status: 429,
+					headers: { "retry-after": value, "x-ratelimit-reset": "3600" },
+				});
+			},
+			maxAttempts: 3,
+		});
+
+		// The value states no wait, so the one-hour reset is the wait: past the cap.
+		// Read as an elapsed date, `0,` was "retry now": 3 requests in 5 ms.
+		expect(calls).toBe(1);
+		expect(response.status).toBe(429);
+	});
+
+	it("sleeps the exact retry-after-ms, not the Retry-After beside it rounded up to whole seconds", async () => {
+		// The auth gateway states a wait both ways: `retry-after-ms: 200` and
+		// `Retry-After: 1`. Taking the longer of the two slept 1 s for 200 ms.
+		const wait = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		let calls = 0;
+		const response = await fetchWithRetry("https://example.invalid/gateway-wait", {
+			fetch: async () => {
+				calls++;
+				return calls === 1
+					? new Response("rate limited", { status: 429, headers: { "retry-after-ms": "200", "retry-after": "1" } })
+					: new Response("ok");
+			},
+			maxAttempts: 3,
+		});
+
+		expect(response.status).toBe(200);
+		expect(wait.mock.calls.map(([delayMs]) => delayMs)).toEqual([200]);
+	});
+
+	it.each([
+		["a shorter header beside a longer relative body wait", "1", "busy. Please retry in 15s", 15_000],
+		["a header retry-now beside a longer relative body wait", "0", "busy. Please retry in 15s", 15_000],
+		["a longer header beside a shorter relative body wait", "15", "busy. Please retry in 1s", 15_000],
+		[
+			"a header beside a later body date",
+			"1",
+			`busy. Your limit will reset at ${new Date(Date.now() + 3_600_000).toISOString()}`,
+			1_000,
+		],
+	] as [string, string, string, number][])(
+		"sleeps the wait it reads from %s",
+		async (_label, retryAfter, body, expected) => {
+			// pi-ai's failed-message reader takes the longer of the header's wait and
+			// the body's relative waits, never a body date beside a header. The
+			// transport took the header alone: `Retry-After: 1` beside `retry in 15s`
+			// slept 1 s where the failure read 15 s and a 10 s cap refused it.
+			const wait = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+			let calls = 0;
+			await fetchWithRetry("https://example.invalid/header-and-body", {
+				fetch: async () => {
+					calls++;
+					return calls === 1
+						? new Response(body, { status: 503, headers: { "retry-after": retryAfter } })
+						: new Response("ok");
+				},
+				maxAttempts: 3,
+			});
+
+			expect(wait.mock.calls.map(([delayMs]) => delayMs)).toEqual([expected]);
+		},
+	);
 });
 
 describe("extractRetryHint", () => {
@@ -253,15 +379,38 @@ describe("extractRetryHint", () => {
 		);
 	});
 
-	it.each([
-		["space-separated UTC", "2099-09-01 09:44:51", Date.UTC(2099, 8, 1, 9, 44, 51)],
-		["ISO-separated UTC", "2099-09-01T09:44:51", Date.UTC(2099, 8, 1, 9, 44, 51)],
-		["explicit offset", "2099-09-01 09:44:51+08:00", Date.parse("2099-09-01T09:44:51+08:00")],
-	])("parses %s absolute reset timestamp", (_label, timestamp, targetMs) => {
-		const expected = targetMs - Date.now();
-		const hint = extractRetryHint(undefined, `Your limit will reset at ${timestamp}`);
+	it("parses an offset-bearing absolute reset timestamp", () => {
+		const expected = Date.parse("2099-09-01T09:44:51+08:00") - Date.now();
+		const hint = extractRetryHint(undefined, "Your limit will reset at 2099-09-01 09:44:51+08:00");
 		expect(hint).toBeDefined();
 		expect(Math.abs(hint! - expected)).toBeLessThan(100);
+	});
+
+	// A date with no zone in a body is the server's wall clock in a zone
+	// nothing names; read as UTC it once gave eight hours where the server's
+	// header said 750 ms. A wait that cannot be computed is no wait at all.
+	it.each([
+		["a space-separated reset stamp", "Your limit will reset at 2099-09-01 09:44:51"],
+		["an ISO-separated reset stamp", "Your limit will reset at 2099-09-01T09:44:51"],
+		["a Chinese reset stamp", "已达到使用上限。您的限额将在 2099-09-01 09:44:51 重置。"],
+		["a legacy retry-after ISO date", "rate limited; retry-after: 2099-09-01T09:44:51"],
+	])("reads no wait from %s with no zone and no provider offset", (_label, body) => {
+		expect(extractRetryHint(undefined, body)).toBeUndefined();
+		expect(longestRetryHint(undefined, body)).toBeUndefined();
+	});
+
+	it("reads a legacy retry-after date in a body in its stated zone", () => {
+		const expected = Date.parse("2099-09-01T09:44:51Z") - Date.now();
+		const hint = extractRetryHint(undefined, "rate limited; retry-after: 2099-09-01T09:44:51Z");
+		expect(Math.abs(hint! - expected)).toBeLessThan(100);
+	});
+
+	it("reads no wait from a legacy retry-after in a body that is no date", () => {
+		// `Date.parse("0-1Z")` is 1 Jan 2000, an elapsed date: the body read as
+		// "retry now", which a caller takes over its own heuristic wait.
+		const body = "rate limited; retry-after: 0-1Z";
+		expect(extractRetryHint(undefined, body)).toBeUndefined();
+		expect(longestRetryHint(undefined, body)).toBeUndefined();
 	});
 
 	it("prefers an absolute account reset over retry-after-ms", () => {
@@ -280,12 +429,10 @@ describe("extractRetryHint", () => {
 		expect(extractRetryHint(undefined, `Your limit will reset at ${naiveWall} retry-after-ms=5000`)).toBe(5000);
 	});
 
-	it("reads a naive Chinese reset stamp as UTC without a provider offset", () => {
-		const targetMs = Date.parse("2099-09-01T09:44:51Z");
-		const expected = targetMs - Date.now();
-		const hint = extractRetryHint(undefined, "已达到使用上限。您的限额将在 2099-09-01 09:44:51 重置。");
-		expect(hint).toBeDefined();
-		expect(Math.abs(hint! - expected)).toBeLessThan(100);
+	it("still reads the relative hint beside a zone-less stamp", () => {
+		expect(
+			extractRetryHint(undefined, "已达到使用上限。您的限额将在 2099-09-01 09:44:51 重置。 retry-after-ms=5000"),
+		).toBe(5000);
 	});
 
 	it("applies naiveResetTimezoneOffset to a naive Chinese reset stamp", () => {
@@ -332,5 +479,71 @@ describe("extractRetryHint", () => {
 	it("still returns undefined when only elapsed account resets are present", () => {
 		const past = new Date(Date.now() - 60_000).toISOString();
 		expect(extractRetryHint(undefined, `Your limit will reset at ${past}`)).toBeUndefined();
+	});
+
+	describe("a zone-less date in a Retry-After header", () => {
+		// An HTTP-date is GMT by definition (RFC 9110 §5.6.7), so a header date
+		// without a zone is read as GMT, never in this machine's zone.
+		const originalTz = process.env.TZ;
+		afterEach(() => {
+			process.env.TZ = originalTz;
+		});
+		it.each([
+			["an IMF-fixdate without GMT", "Tue, 01 Sep 2099 09:44:51"],
+			["an asctime date", "Tue Sep  1 09:44:51 2099"],
+			["an ISO date-time without a zone", "2099-09-01T09:44:51"],
+		])("reads %s as GMT", (_label, value) => {
+			process.env.TZ = "America/Los_Angeles";
+			const expected = Date.UTC(2099, 8, 1, 9, 44, 51) - Date.now();
+
+			for (const hint of [
+				extractRetryHint(new Headers({ "retry-after": value })),
+				longestRetryHint(new Headers({ "retry-after": value })),
+			]) {
+				expect(hint).toBeDefined();
+				expect(Math.abs(hint! - expected)).toBeLessThan(1000);
+			}
+		});
+		it.each([
+			["an IMF-fixdate in GMT", "Tue, 01 Sep 2099 09:44:51 GMT", Date.UTC(2099, 8, 1, 9, 44, 51)],
+			["an IMF-fixdate at a numeric offset", "Tue, 01 Sep 2099 11:44:51 +0200", Date.UTC(2099, 8, 1, 9, 44, 51)],
+			["an RFC 850 date", "Tuesday, 01-Sep-43 09:44:51 GMT", Date.UTC(2043, 8, 1, 9, 44, 51)],
+		] as [string, string, number][])("reads %s in its zone", (_label, value, instant) => {
+			process.env.TZ = "America/Los_Angeles";
+			const hint = extractRetryHint(new Headers({ "retry-after": value }));
+			expect(Math.abs(hint! - (instant - Date.now()))).toBeLessThan(1000);
+		});
+	});
+	describe("malformed Retry-After dates", () => {
+		it.each([
+			["a one-digit IMF-fixdate day", "Sun, 6 Nov 1994 08:49:37 GMT"],
+			["a one-digit RFC 850 day", "Sunday, 6-Nov-94 08:49:37 GMT"],
+			["an impossible numeric offset", "Sun, 06 Nov 1994 08:49:37 +2500"],
+			["an impossible ISO calendar date", "1994-02-30T00:00:00Z"],
+			["an impossible HTTP calendar date", "Sun, 31 Feb 2099 08:49:37 GMT"],
+			["an HTTP hour past 23", "Sun, 06 Nov 1994 24:00:00 GMT"],
+			["a weekday the date does not fall on", "Mon, 06 Nov 1994 08:49:37 GMT"],
+		])("%s does not hide an adjacent window reset", (_label, retryAfter) => {
+			const headers = new Headers({ "retry-after": retryAfter, "x-ratelimit-reset": "3600" });
+			expect(extractRetryHint(headers)).toBe(3_600_000);
+			expect(longestRetryHint(headers)).toBe(3_600_000);
+		});
+	});
+
+	it.each([
+		["+002099-09-01T09:44:51Z", Date.UTC(2099, 8, 1, 9, 44, 51)],
+		["+002099-09-01T11:44:51+02:00", Date.UTC(2099, 8, 1, 9, 44, 51)],
+	])("reads the supported expanded ISO year %s", (retryAfter, instant) => {
+		const hint = extractRetryHint(new Headers({ "retry-after": retryAfter }));
+		expect(Math.abs(hint! - (instant - Date.now()))).toBeLessThan(1000);
+	});
+
+	it.each([
+		["two joined delay-seconds", "9, 120", 120_000],
+		["a decimal delay-seconds part", "9.125, 9", 9_125],
+	] as [string, string, number][])("reads Retry-After %s at its longest delay", (_label, value, expected) => {
+		const headers = new Headers({ "retry-after": value });
+		expect(extractRetryHint(headers)).toBe(expected);
+		expect(longestRetryHint(headers)).toBe(expected);
 	});
 });

@@ -825,6 +825,11 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 		const blocks = output.content as Block[];
 		const contentIndexByBlockIndex = new Map<number, number>();
 		let rawRequestDump: RawHttpRequestDump | undefined;
+		// The accepted (2xx) response's headers, for `finalize`: an in-band
+		// exception frame or a cut stream keeps the response's `Retry-After`.
+		// Cleared when an attempt starts, so a retry refused before its response
+		// never reads an earlier response's headers.
+		let streamResponseHeaders: Headers | undefined;
 		const region = resolveBedrockRegion(model.id, options);
 
 		try {
@@ -891,6 +896,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 			let prefixBindingRetryAttempted = false;
 			let response: Response;
 			while (true) {
+				streamResponseHeaders = undefined;
 				rawRequestDump = {
 					provider: model.provider,
 					api: output.api,
@@ -900,7 +906,10 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 					body: commandInput,
 				};
 				({ response } = await sendBedrockRequest(model, options, region, base, commandInput, "converse-stream"));
-				if (response.ok) break;
+				if (response.ok) {
+					streamResponseHeaders = response.headers;
+					break;
+				}
 				if (!bearerToken && (response.status === 401 || response.status === 403)) {
 					// Stale cached credentials (e.g. rotated session keys in ~/.aws/credentials) —
 					// drop the cache entry so the next attempt re-resolves from scratch.
@@ -1091,11 +1100,17 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 					diagnostics = `\n[thinking-diag] ${JSON.stringify(thinkingBlocks)}`;
 				}
 			}
-			const result = await AIError.finalize(error, { api: model.api, signal: options.signal, rawRequestDump });
+			const result = await AIError.finalize(error, {
+				api: model.api,
+				signal: options.signal,
+				rawRequestDump,
+				streamResponseHeaders,
+			});
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = result.message + diagnostics;
+			output.errorRetryAfterMs = result.retryAfterMs;
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: output.stopReason, error: output });

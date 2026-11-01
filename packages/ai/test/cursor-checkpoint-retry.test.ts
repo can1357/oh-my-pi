@@ -167,6 +167,85 @@ it("resumes from the latest replay-safe checkpoint after an incomplete stream", 
 	}
 });
 
+/** A terminal Connect error frame (END_STREAM), as the gateway sends one. */
+function connectErrorFrame(code: string, message: string): Buffer {
+	const body = Buffer.from(JSON.stringify({ error: { code, message } }));
+	const frame = Buffer.alloc(5 + body.length);
+	frame[0] = 2;
+	frame.writeUInt32BE(body.length, 1);
+	frame.set(body, 5);
+	return frame;
+}
+
+it("reports the wire-model replay it spent before a later wire failure", async () => {
+	// The rejected wire model is replayed on the discovered one, so the stream
+	// that finally dies is the second request. Its own retry context is empty —
+	// the replay happened on another stream — so a per-stream counter reads this
+	// as a first and only request and recovery above replays it again.
+	const sessions = new Set<http2.Http2Session>();
+	let requestCount = 0;
+	const server = http2.createServer();
+	server.on("session", session => {
+		sessions.add(session);
+		session.on("close", () => sessions.delete(session));
+	});
+	server.on("stream", (providerStream: http2.ServerHttp2Stream) => {
+		requestCount++;
+		const attempt = requestCount;
+		let handled = false;
+		providerStream.on("data", () => {
+			if (handled) return;
+			handled = true;
+			providerStream.respond({ ":status": 200, "content-type": "application/connect+proto" });
+			if (attempt === 1) {
+				providerStream.end(connectErrorFrame("not_found", "Error"));
+				return;
+			}
+			providerStream.end(Buffer.concat([textDeltaFrame("after"), connectErrorFrame("unknown", "read ECONNRESET")]));
+		});
+	});
+	const listening = Promise.withResolvers<void>();
+	server.once("error", listening.reject);
+	server.listen(0, "127.0.0.1", listening.resolve);
+	await listening.promise;
+	const address = server.address();
+	if (!address || typeof address === "string") throw new Error("expected HTTP/2 fixture server address");
+
+	try {
+		// A reasoning model whose normalized effort route differs from the
+		// discovered one is what arms the replay this test measures.
+		const model = buildModel({
+			id: "gpt-5.6-sol",
+			requestModelId: "gpt-5.6-sol-none",
+			name: "Cursor wire fallback fixture",
+			api: "cursor-agent",
+			provider: "cursor",
+			baseUrl: `http://127.0.0.1:${address.port}`,
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1_000_000,
+			maxTokens: 64_000,
+		}) as Model<"cursor-agent">;
+		const response = streamCursor(model, context, {
+			apiKey: "test-token",
+			wireModelId: "gpt-5.6-sol-medium",
+			providerRetryWait: async () => {},
+		});
+		for await (const _event of response) {
+			// drain to completion
+		}
+		const result = await response.result();
+
+		expect(requestCount).toBe(2);
+		expect(result.stopReason).toBe("error");
+		expect(result.providerReplays).toBe(1);
+	} finally {
+		for (const session of sessions) session.destroy();
+		server.close();
+	}
+});
+
 function execReadFrame(): Buffer {
 	return frameConnectMessage(
 		toBinary(

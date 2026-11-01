@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- `streamProxy` now carries a failure's status, replay count and stated retry wait, so retries and compaction behind a proxy wait as the server asked ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
 - Fixed OpenAI remote compaction (`/responses/compact`) replaying backend-only `internal_chat_message_metadata_passthrough` metadata that Codex rejects as an unknown parameter ([#17590](https://github.com/can1357/oh-my-pi/pull/17590) by [@briankeefe](https://github.com/briankeefe))
 
 ## [18.14.2] - 2026-10-31

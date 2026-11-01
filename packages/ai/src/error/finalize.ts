@@ -4,6 +4,7 @@ import type { AbortSourceTracker } from "../utils/abort";
 import type { CapturedHttpErrorResponse, RawHttpRequestDump } from "../utils/http-inspector";
 import { classify, classifyMessage, status } from "./flags";
 import { formatMessage } from "./format";
+import { getFailureRetryAfterMs, type HeadersLike } from "../utils/retry-after";
 
 /** Context a provider catch block hands to {@link finalize}. */
 export interface FinalizeOptions {
@@ -21,6 +22,17 @@ export interface FinalizeOptions {
 	rawRequestDump?: RawHttpRequestDump;
 	/** Captured non-2xx response body, used for status fallback and message detail. */
 	capturedErrorResponse?: CapturedHttpErrorResponse;
+	/**
+	 * Headers of the accepted (2xx) response whose body this failure arrived in:
+	 * an in-band error event, or a stream cut after the response arrived. Record
+	 * them when the attempt's response arrives and clear them when the next
+	 * attempt starts, so a failure before a later attempt's response never reads
+	 * an earlier attempt's. Only their explicit wait instructions count
+	 * (`retry-after-ms`, `Retry-After`; see {@link getFailureRetryAfterMs}), and
+	 * only when the error's own headers name none. They never set `status`: the
+	 * failure keeps the classification of a failure with no HTTP status.
+	 */
+	streamResponseHeaders?: HeadersLike;
 }
 
 /** The full bundle a provider assigns onto its `AssistantMessage` error fields. */
@@ -33,6 +45,14 @@ export interface FinalizeResult {
 	stopReason: "aborted" | "error";
 	/** User-facing message: a local abort reason, else the caller's abort reason, else from {@link formatMessage}. */
 	message: string;
+	/**
+	 * The failed attempt's response-header retry wait ({@link getFailureRetryAfterMs}):
+	 * the error's own headers or the captured response's, else the explicit wait
+	 * the accepted response's headers name. Assign it to
+	 * `AssistantMessage.errorRetryAfterMs`. Read from headers only, so a body
+	 * cannot forge it.
+	 */
+	retryAfterMs: number | undefined;
 }
 
 /**
@@ -81,5 +101,9 @@ export async function finalize(error: unknown, opts: FinalizeOptions = {}): Prom
 		status: currentStatus,
 		stopReason: aborted ? "aborted" : "error",
 		message,
+		retryAfterMs: getFailureRetryAfterMs(error, {
+			errorResponseHeaders: opts.capturedErrorResponse?.headers,
+			streamResponseHeaders: opts.streamResponseHeaders,
+		}),
 	};
 }

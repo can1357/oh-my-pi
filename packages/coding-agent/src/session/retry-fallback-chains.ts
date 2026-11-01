@@ -89,11 +89,34 @@ export interface ServingModel {
 const RETRY_BACKOFF_MAX_DELAY_MS = 8_000;
 const RETRY_BACKOFF_JITTER_RATIO = 0.25;
 
+/**
+ * Exponential backoff for `attempt`, capped at 8 s; the jitter policies below
+ * shape it. Also the window a full-jitter wait falls in, which is what a held
+ * retry's added sleep is bounded by.
+ */
+export function cappedRetryBackoffMs(baseDelayMs: number, attempt: number): number {
+	return Math.min(Math.max(0, baseDelayMs) * 2 ** Math.max(0, attempt - 1), RETRY_BACKOFF_MAX_DELAY_MS);
+}
+
 /** Calculates capped exponential retry delay with downward jitter. */
 export function calculateRetryBackoffDelayMs(baseDelayMs: number, attempt: number): number {
-	const cappedDelayMs = Math.min(Math.max(0, baseDelayMs) * 2 ** Math.max(0, attempt - 1), RETRY_BACKOFF_MAX_DELAY_MS);
-	const jitter = 1 - Math.random() * RETRY_BACKOFF_JITTER_RATIO;
-	return cappedDelayMs * jitter;
+	return cappedRetryBackoffMs(baseDelayMs, attempt) * (1 - Math.random() * RETRY_BACKOFF_JITTER_RATIO);
+}
+
+/**
+ * Capped exponential retry delay with **full** jitter: uniform over
+ * `[0, cap)` rather than the narrow `[0.75, 1]` band
+ * {@link calculateRetryBackoffDelayMs} uses.
+ *
+ * For a retry every session of a fleet reaches at the same instant — a shared
+ * gateway restarting drops every open stream in the same millisecond — the
+ * narrow band concentrates the replay into a window a quarter of the delay
+ * wide, which is a wall for the host coming back up. Full jitter spreads the
+ * same requests across the whole window. Only right where the delay is a
+ * plain backoff with no provider-stated timing to honour.
+ */
+export function calculateFullJitterRetryDelayMs(baseDelayMs: number, attempt: number): number {
+	return cappedRetryBackoffMs(baseDelayMs, attempt) * Math.random();
 }
 
 /** Parses a configured retry fallback selector. */

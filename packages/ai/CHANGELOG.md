@@ -2,8 +2,20 @@
 
 ## [Unreleased]
 
+### Added
+
+- `AIError.Flag.Connection` marks a failure that died on the wire with no HTTP status or capacity signal ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- `AssistantMessage.providerReplays` reports how often `anthropic`, `openai-codex-responses` and `cursor` resent a request ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- Added `longestProviderRetryHint`, `providerFailureWaitMs` and `RotateCredentialOptions.retryAfterMs` for reading the wait an error states ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+
 ### Fixed
 
+- A connection failure reported only as an errno (`ECONNRESET`, `EPIPE`, `UND_ERR_SOCKET`) is now retried ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- A 4xx rejection other than 408 or 429 anywhere in an error's cause chain now stops the retry ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- A duration, host, port or id in an error message is no longer read as an HTTP status ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- Retries, credential blocks and usage-limit marks now wait as long as the response headers ask, not a shorter wait quoted in the error text ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- No credential block lasts more than seven days, including one an older version stored ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- OpenAI Completions, OpenAI Responses, Azure and Codex return a 429 at once when its stated wait exceeds `maxRetryDelayMs`, instead of retrying it sooner ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
 - Fixed Codex conversation replay failing with an unknown `internal_chat_message_metadata_passthrough.content_token_count` parameter by omitting backend-internal response metadata from replayed input ([#17590](https://github.com/can1357/oh-my-pi/pull/17590) by [@briankeefe](https://github.com/briankeefe)).
 
 ## [18.14.2] - 2026-10-31
