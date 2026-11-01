@@ -91,6 +91,21 @@ describe("UsageDashboardComponent.describe", () => {
 		]);
 	});
 
+	it("labels the meter percentage with the same quota the meter fills", () => {
+		// Regression: the meter filled by quota used while the number beside it
+		// printed the remaining quota, so the two moved in opposite directions.
+		const root = dashboard([
+			report("anthropic", "a@test", [limit("anthropic", "5h", "Claude 5h", 0.25, "ok")]),
+		]).describe(cx);
+		const meter = findAll(root, n => n.k === "meter")[0];
+		const pct = findAll(root, n => n.p?.role === "omp.usage.pct")[0];
+		expect(meter?.k === "meter" ? meter.p?.value : undefined).toBe(0.25);
+		expect(pct?.k === "text" ? pct.p?.spans : undefined).toEqual([
+			{ t: "25%", s: "mono" },
+			{ t: " used", s: "dim" },
+		]);
+	});
+
 	it("switches to the per-account detail table when the Details tab is selected", () => {
 		const component = dashboard([
 			report("anthropic", "a@test", [limit("anthropic", "5h", "Claude 5h", 0.25, "ok")]),
@@ -104,17 +119,67 @@ describe("UsageDashboardComponent.describe", () => {
 		expect(tabs?.p).toEqual(expect.objectContaining({ active: "detail" }));
 		// One row per account in the detail table, not the bucket mean.
 		const table = findAll(detail, n => n.k === "table")[0];
-		const left = table?.k === "table" ? table.p?.rows.map(row => row.cells.left) : undefined;
-		expect(left).toEqual([
+		const quota = table?.k === "table" ? table.p?.rows.map(row => row.cells.quota) : undefined;
+		expect(quota).toEqual([
 			[
-				{ t: "75%", s: "mono" },
-				{ t: " left", s: "dim" },
+				{ t: "25%", s: "mono" },
+				{ t: " used", s: "dim" },
 			],
 			[
-				{ t: "25%", s: "mono warning" },
-				{ t: " left", s: "dim" },
+				{ t: "75%", s: "mono warning" },
+				{ t: " used", s: "dim" },
 			],
 		]);
+		// Every row counts quota used, so the column may say so.
+		expect(table?.k === "table" ? table.p?.cols.find(col => col.id === "quota")?.head : undefined).toBe("Used");
+	});
+
+	it("heads the detail table's quota column with the direction its rows carry", () => {
+		// Regression: the column was renamed "Used" while a prepaid-balance
+		// row still printed a remaining balance ("100 credits left") under it.
+		const balance = {
+			id: "charm-hyper:credits",
+			label: "Credit balance",
+			scope: { provider: "charm-hyper" as const, windowId: "balance", shared: true },
+			amount: { remaining: 100, unit: "credits" as const },
+		};
+		// Spend-to-date with no allowance: the other one-sided shape, whose
+		// cell reads "used" and so must not be headed "Left" either.
+		const spend = {
+			id: "charm-hyper:spend",
+			label: "Credits spent",
+			scope: { provider: "charm-hyper" as const, windowId: "spend" },
+			amount: { used: 250, unit: "credits" as const },
+		};
+		const detailTable = (component: UsageDashboardComponent): NativeNode | undefined => {
+			component.handleNativeEvent({ type: "select", key: "head/tabs", item: "detail" });
+			return findAll(component.describe(cx), n => n.k === "table")[0];
+		};
+		const headOf = (component: UsageDashboardComponent): unknown => {
+			const table = detailTable(component);
+			return table?.k === "table" ? table.p?.cols.find(col => col.id === "quota")?.head : undefined;
+		};
+		const cellsOf = (component: UsageDashboardComponent): unknown => {
+			const table = detailTable(component);
+			return table?.k === "table" ? table.p?.rows.map(row => row.cells.quota) : undefined;
+		};
+
+		const balanceOnly = dashboard([report("charm-hyper", "a@x.test", [balance])]);
+		expect(headOf(balanceOnly)).toBe("Left");
+		expect(cellsOf(balanceOnly)).toEqual([[{ t: "100 credits left", s: "muted" }]]);
+
+		// A spend-to-date row is the mirror image: the cell reads "used", so
+		// the heading must say so rather than "Left".
+		const spendOnly = dashboard([report("charm-hyper", "a@x.test", [spend])]);
+		expect(headOf(spendOnly)).toBe("Used");
+		expect(cellsOf(spendOnly)).toEqual([[{ t: "250 credits used", s: "muted" }]]);
+
+		// A table holding both directions cannot pick one, so it stays neutral.
+		const mixed = dashboard([
+			report("charm-hyper", "a@x.test", [balance]),
+			report("charm-hyper", "b@x.test", [limit("charm-hyper", "5h", "Claude 5h", 0.25, "ok")]),
+		]);
+		expect(headOf(mixed)).toBe("Quota");
 	});
 
 	it("leads with the tightest quota and the activity's headline figures", () => {
@@ -143,7 +208,7 @@ describe("UsageDashboardComponent.describe", () => {
 			findAll(tile, n => n.k === "text").map(plain),
 		);
 		expect(tiles).toEqual([
-			["Tightest quota", "10% left", "Claude Weekly · Anthropic"],
+			["Tightest quota", "90% used", "Claude Weekly · Anthropic"],
 			["Past year", "$247", "740 requests"],
 			["Last 30 days", "$46.50", "140 requests"],
 			["Busiest day", "$200", expect.stringMatching(/ · 600 requests$/)],
