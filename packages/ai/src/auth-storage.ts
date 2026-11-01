@@ -117,6 +117,17 @@ export class AuthStorage {
 	get rankingStrategyResolver(): (provider: Provider) => CredentialRankingStrategy | undefined {
 		return this.#options.rankingStrategyResolver ?? defaultRankingStrategy;
 	}
+	/**
+	 * Monotonic epoch of the backing credential store; advances on every
+	 * `replaceStore` (live `auth.broker.url` change). Credential row ids belong to
+	 * one store generation, and the replacement store can reuse a numeric id for
+	 * a different account, so consumers pinning a request's `credentialId` for
+	 * later use (delayed usage-limit attribution) must compare the epoch captured
+	 * alongside the id against this value and drop the pin on mismatch.
+	 */
+	get credentialStoreEpoch(): number {
+		return this.#modules.pool.storeEpoch;
+	}
 	/** Provider auth cascade and key overrides. */
 	get keys(): KeysApi {
 		return this.#modules.keys;

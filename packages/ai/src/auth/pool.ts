@@ -103,6 +103,12 @@ export class CredentialPool implements CredentialsApi {
 	 */
 	#pendingDisabledEvents: CredentialDisabledEvent[] = [];
 	#generation = 1;
+	/**
+	 * Monotonic epoch of the backing credential store. Advanced once per
+	 * `AuthStorage.replaceStore` (adopted by the replacement pool), so row ids
+	 * captured before a swap can be told apart from ids minted after it.
+	 */
+	#storeEpoch = 0;
 	#generationListeners: Set<(generation: number) => void> = new Set();
 	#closed = false;
 
@@ -206,10 +212,18 @@ export class CredentialPool implements CredentialsApi {
 		}
 	}
 
+	/** Current store epoch; see {@link CredentialPool.#storeEpoch}. */
+	get storeEpoch(): number {
+		return this.#storeEpoch;
+	}
+
 	/**
 	 * Take over the subscribers, buffered disable events, and generation counter of
 	 * the pool this one replaces (store swap). Listener sets are shared, so
-	 * unsubscribe functions handed out by `previous` keep working.
+	 * unsubscribe functions handed out by `previous` keep working. Also advances
+	 * the store epoch: row ids pinned before the swap belong to the retired
+	 * store, and the replacement store may reuse the same numeric id for a
+	 * different credential.
 	 */
 	adoptSubscribers(previous: CredentialPool): void {
 		this.#credentialDisabledListeners = previous.#credentialDisabledListeners;
@@ -217,6 +231,7 @@ export class CredentialPool implements CredentialsApi {
 		this.#pendingDisabledEvents = previous.#pendingDisabledEvents;
 		previous.#pendingDisabledEvents = [];
 		this.#generation = previous.#generation;
+		this.#storeEpoch = previous.#storeEpoch + 1;
 	}
 
 	onGeneration(listener: (generation: number) => void): () => void {

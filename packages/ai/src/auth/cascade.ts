@@ -342,6 +342,9 @@ export class KeyCascade implements KeysApi {
 		return {
 			apiKey,
 			credentialId,
+			// Attest the store generation the row id belongs to, so a delayed
+			// consumer can detect that a store swap invalidated the id.
+			...(credentialId !== undefined ? { credentialStoreEpoch: this.#deps.pool.storeEpoch } : {}),
 			...(oauthAccess ? { oauthAccess } : {}),
 			...(oauthIdentity ? { oauthIdentity } : {}),
 		};

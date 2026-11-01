@@ -22,7 +22,7 @@ import { calculateRateLimitBackoffMs, parseRateLimitReason } from "@oh-my-pi/pi-
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { shouldDropTruncatedThinkingOnlyAssistant } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
-import { defaultRankingStrategy } from "@oh-my-pi/pi-ai/usage/registry";
+import { credentialBlockScopesForRequest, defaultRankingStrategy } from "@oh-my-pi/pi-ai/usage/registry";
 import { fallbackCreditTargets } from "@oh-my-pi/pi-catalog/compat/fallback-credit";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
@@ -393,11 +393,16 @@ type UsageLimitOutcome = {
  * mark itself used, so the comparison cannot drift from how blocks are scoped:
  * an unscoped provider (e.g. ordinary Anthropic models) blocks provider-wide, while
  * scoped providers (Codex `spark` vs `chat`, Claude tier lines) only cover models in
- * the same block scope. The strategy is resolved through the ACTIVE AuthStorage's
- * resolver (default: the bundled strategies) — an embedder overriding
- * `rankingStrategyResolver` marks scopes through that resolver, and a coverage
- * decision made against the static default could disagree with what the mark wrote.
- * Exposed for tests.
+ * the same block scope. The mark writes the attributed request's primary block
+ * scope, while a request CHECKS every scope `credentialBlockScopesForRequest`
+ * expands (the strategy's `blockScopes` entries plus the model-policy scope), so
+ * coverage is "the written scope is among the active request's checked scopes" —
+ * a strategy whose requests check a compat/shared scope still sees blocks written
+ * under that scope even when the primaries differ. The strategy is resolved through
+ * the ACTIVE AuthStorage's resolver (default: the bundled strategies) — an embedder
+ * overriding `rankingStrategyResolver` marks scopes through that resolver, and a
+ * coverage decision made against the static default could disagree with what the
+ * mark wrote. Exposed for tests.
  */
 export function usageLimitBlockCoversModel(
 	attributedProvider: string,
@@ -408,9 +413,19 @@ export function usageLimitBlockCoversModel(
 ): boolean {
 	if (attributedProvider !== activeProvider) return false;
 	const strategy = resolveStrategy(attributedProvider);
-	const attributedScope = strategy?.blockScope?.({ modelId: attributedModelId });
-	if (attributedScope === undefined) return true;
-	return attributedScope === strategy?.blockScope?.({ modelId: activeModelId });
+	const attributedContext = { modelId: attributedModelId };
+	const writtenScope = strategy?.blockScope?.(attributedContext);
+	// No primary scope means the mark is provider-wide (unscoped strategies),
+	// which covers every model of the provider.
+	if (writtenScope === undefined) return true;
+	const activeContext = { modelId: activeModelId };
+	const activeScopes = credentialBlockScopesForRequest(
+		activeProvider,
+		strategy,
+		activeContext,
+		strategy?.blockScope?.(activeContext),
+	);
+	return activeScopes.includes(writtenScope);
 }
 
 /** Owns terminal-stop recovery, automatic retries, and fallback routing. */
@@ -895,7 +910,18 @@ export class TurnRecovery {
 						// rotation that already moved the provider's session
 						// affinity, and the affinity-resolved target would block a
 						// healthy credential for the failing account's window.
-						credentialId: message.credentialId,
+						// Fence the id to the store that issued it: a live
+						// auth.broker.url change (AuthStorage.replaceStore) retires
+						// the old store's row ids, and the replacement store can
+						// reuse the same numeric id for a different account, so an
+						// epoch mismatch drops the pin and falls back to affinity
+						// resolution. Messages without an epoch (older sessions,
+						// resolvers that cannot attest one) keep the pin.
+						credentialId:
+							message.credentialStoreEpoch === undefined ||
+							message.credentialStoreEpoch === this.#host.modelRegistry.authStorage.credentialStoreEpoch
+								? message.credentialId
+								: undefined,
 					},
 				);
 				return {

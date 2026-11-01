@@ -417,6 +417,49 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		});
 	});
 
+	it("drops the pinned credential id when its store generation was replaced", async () => {
+		const codex = getBundledModel("openai-codex", "gpt-6.1-sol");
+		if (!codex) throw new Error("Expected bundled openai-codex model gpt-6.1-sol");
+		const host = createHost(model, modelRegistry);
+		const recovery = new TurnRecovery(host);
+		const markReached = vi.spyOn(authStorage.limits, "markReached").mockResolvedValue({ switched: false });
+		const base = {
+			...makeMessage([], codex),
+			errorMessage: "429 usage_limit_reached: You've reached your ChatGPT plan limit. Try again in ~9701 min.",
+		} as AssistantMessage;
+		// The pin was minted by a previous store generation: replaceStore
+		// retires the old store's row ids, and the current store may reuse id 42
+		// for a different account, so the mark must fall back to affinity
+		// resolution instead of pinning an unrelated healthy credential.
+		const staleStorePin: AssistantMessage = {
+			...base,
+			credentialId: 42,
+			credentialStoreEpoch: authStorage.credentialStoreEpoch + 1,
+		};
+		await recovery.recordUsageLimitOutcome(staleStorePin);
+		expect(markReached).toHaveBeenLastCalledWith("openai-codex", "test-session", {
+			retryAfterMs: expect.any(Number),
+			providerTimed: true,
+			baseUrl: codex.baseUrl,
+			modelId: codex.id,
+			credentialId: undefined,
+		});
+		// A pin from the current store generation keeps targeting the row.
+		const currentStorePin: AssistantMessage = {
+			...base,
+			credentialId: 42,
+			credentialStoreEpoch: authStorage.credentialStoreEpoch,
+		};
+		await recovery.recordUsageLimitOutcome(currentStorePin);
+		expect(markReached).toHaveBeenLastCalledWith("openai-codex", "test-session", {
+			retryAfterMs: expect.any(Number),
+			providerTimed: true,
+			baseUrl: codex.baseUrl,
+			modelId: codex.id,
+			credentialId: 42,
+		});
+	});
+
 	it("keeps a delayed foreign-provider usage limit out of the active model's retry policy", async () => {
 		const codex = getBundledModel("openai-codex", "gpt-6.1-sol");
 		if (!codex) throw new Error("Expected bundled openai-codex model gpt-6.1-sol");
@@ -524,6 +567,38 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		expect(
 			usageLimitBlockCoversModel("openai-codex", "gpt-5.3-codex-spark", "openai-codex", "gpt-5.3-codex-spark"),
 		).toBe(true);
+	});
+
+	it("honors every scope the active request checks, not just the primary block scope", () => {
+		// A resolver whose requests check a compat scope of another tier: the
+		// mark is written under the attributed request's primary scope, but the
+		// active request still checks that scope, so the block genuinely binds
+		// it and the outcome is NOT stale — comparing only the two primaries
+		// would wrongly drop live rotation/reset/wait signals.
+		const compatTiered = {
+			blockScope: (ctx?: { modelId?: string }) => `scope-${ctx?.modelId === "model-b" ? "b" : "a"}`,
+			blockScopes: (ctx?: { modelId?: string }) =>
+				ctx?.modelId === "model-b" ? ["scope-b", "scope-a"] : ["scope-a"],
+		} as unknown as CredentialRankingStrategy;
+		const resolver = (provider: string) => (provider === "openai-codex" ? compatTiered : undefined);
+		expect(usageLimitBlockCoversModel("openai-codex", "model-a", "openai-codex", "model-b", resolver)).toBe(true);
+		// Without the shared checked scope the pools are disjoint: stale.
+		const disjoint = {
+			blockScope: (ctx?: { modelId?: string }) => `scope-${ctx?.modelId}`,
+			blockScopes: (ctx?: { modelId?: string }) => [`scope-${ctx?.modelId}`],
+		} as unknown as CredentialRankingStrategy;
+		expect(
+			usageLimitBlockCoversModel("openai-codex", "model-a", "openai-codex", "model-b", provider =>
+				provider === "openai-codex" ? disjoint : undefined,
+			),
+		).toBe(false);
+		// The bundled Codex strategy's legacy "shared" read scope must NOT make
+		// a spark mark cover chat: usage-limit marks are written under the
+		// attributed request's primary scope only, and no request's primary is
+		// "shared".
+		expect(usageLimitBlockCoversModel("openai-codex", "gpt-5.3-codex-spark", "openai-codex", "gpt-6.1-sol")).toBe(
+			false,
+		);
 	});
 
 	it("resolves block coverage through the supplied strategy resolver, not just the bundled default", () => {
