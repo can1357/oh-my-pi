@@ -65,15 +65,17 @@ export interface SessionSwitchEvent {
  * Handlers run after the previous move's, so moves are handled in order. The
  * session's next tool call and model request wait for them for up to 2
  * seconds from the move (`SESSION_MOVED_HANDLER_GRACE_MS`), and one wait
- * never lasts longer than that however many moves happen during it. At 2
- * seconds the session stops waiting, logs a warning and goes on under the
- * new id. The handler is not told: it keeps running, and nothing cancels it
- * until the extension handler timeout (which aborts its signal) or the
- * session's disposal, after which no further handler for this event starts.
- * `session_shutdown` does not wait for these handlers. So rekey state to
- * `sessionId` synchronously, and start slow work detached rather than
- * awaiting it. Work already running when the move happened — a tool call in
- * flight, a cell it started — is not held back either.
+ * never lasts longer than that however many moves happen during it, a move
+ * that a `context` handler makes while the request is being prepared
+ * included. At 2 seconds the session stops waiting, logs a warning and goes
+ * on under the new id. A handler's own code is never stopped: it gets no
+ * signal, so the session cannot tell it to stop. The extension runner's
+ * 30-second handler timeout and the session's disposal stop waiting for it
+ * and cancel its `ctx.ui` dialogs, and after disposal no further handler for
+ * this event starts. `session_shutdown` does not wait for these handlers.
+ * So rekey state to `sessionId` synchronously, and start slow work detached
+ * rather than awaiting it. Work already running when the move happened — a
+ * tool call in flight, a cell it started — is not held back either.
  */
 export interface SessionMovedEvent {
 	type: "session_moved";

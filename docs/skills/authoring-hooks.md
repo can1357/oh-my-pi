@@ -61,6 +61,8 @@ export default function myExtension(pi: ExtensionAPI): void {
 | `session_tree`           | After tree navigation              | —                                                                                 |
 | `session_shutdown`       | On session shutdown                | —                                                                                 |
 
+`session_moved` handlers delay the session's next tool call and model request by up to 2 seconds in all; after that the session goes on with a warning in the log. Handlers for successive moves run one after another, so one that hangs holds the next move's handlers until the 30-second extension handler timeout, and nothing stops a handler's own code, then or when the session is disposed. Rekey state to the new `sessionId` synchronously and start slow work detached. See `docs/extensions.md` (session lifecycle).
+
 ### Agent/turn lifecycle
 
 | Event                   | Fires                                                                                                                                                                         | Can return                                                              |

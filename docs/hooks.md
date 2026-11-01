@@ -129,6 +129,8 @@ Hook events are strongly typed in `types.ts`.
 
 `session_moved` fires when the session had to leave its file and carried on under a new id, which nobody chose — unlike `session_switch`, whose reasons (`new`, `resume`, `fork`) all name a deliberate transition. It carries `reason` (`"open-elsewhere"`, `"replaced"`, `"contested"`), `previousSessionId`, `sessionId`, `previousSessionFile`, and `sessionFile`. The conversation and cwd are unchanged; only the identity moved, and under `"open-elsewhere"` the previous id belongs to another live omp process that still uses it.
 
+A discovered hook factory binds through the extension runner, so its `session_moved` handlers follow the extension contract in [Extensions](./extensions.md#session-lifecycle): the session's next tool call and model request wait for them for up to 2 seconds in all, then go on with a warning in the log; handlers for successive moves run one after another, so a handler that hangs holds the next move's handlers until the 30-second extension handler timeout; and nothing stops a handler's own code, at that timeout or when the session is disposed. Rekey state to `sessionId` synchronously and start slow work detached.
+
 ### Agent/context events
 
 - `context` → can return `{ messages?: Message[] }`

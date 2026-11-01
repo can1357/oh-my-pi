@@ -1831,9 +1831,12 @@ export class ExtensionRunner {
 
 	/**
 	 * Emit `session_moved`, as {@link emit} does, until `signal` aborts: from
-	 * then no further handler starts, and the one running is told through its
-	 * own signal and no longer waited for. The session aborts it when it is
-	 * disposed, so a move's handlers start no work after its teardown.
+	 * then no further handler starts, the one running is no longer waited for,
+	 * and its handler signal aborts — which cancels its `ctx.ui` dialogs and
+	 * anything else that took that signal (a side turn or tool registration it
+	 * started). Its own code is not stopped: `ExtensionContext` gives a handler
+	 * no signal. The session aborts `signal` when it is disposed, so a move
+	 * starts no handler after its teardown.
 	 */
 	async emitSessionMoved(event: SessionMovedEvent, signal: AbortSignal): Promise<void> {
 		let ctx: ExtensionContext | undefined;

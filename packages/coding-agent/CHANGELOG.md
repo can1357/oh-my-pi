@@ -4,7 +4,7 @@
 
 ### Added
 
-- Extensions and hooks can observe `session_moved`: this session had to leave its file and carries on under a new id, with the old id, the new one and the reason — an identity change nobody chose, which `session_switch` never reported. The session's next tool call and model request wait up to two seconds from the move for the handlers, then go on under the new id with a warning in the log; a handler still running keeps running, uncancelled, until the extension handler timeout or the session ends, so rekey state synchronously and start slow work detached ([#17421](https://github.com/can1357/oh-my-pi/pull/17421) by [@sjawhar](https://github.com/sjawhar))
+- Extensions and hooks can observe `session_moved`: this session had to leave its file and carries on under a new id, with the old id, the new one and the reason — an identity change nobody chose, which `session_switch` never reported. The session's next tool call and model request wait up to two seconds for the handlers, whatever context transform the host has set and even when a `context` hook causes the move, then go on under the new id with a warning in the log. Nothing stops a handler's own code — the extension handler timeout and the session's end only stop waiting for it and cancel its dialogs — so rekey state synchronously and start slow work detached ([#17421](https://github.com/can1357/oh-my-pi/pull/17421) by [@sjawhar](https://github.com/sjawhar))
 
 ### Fixed
 

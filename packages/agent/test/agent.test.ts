@@ -562,6 +562,51 @@ describe("Agent", () => {
 		expect(mock.calls).toHaveLength(0);
 	});
 
+	for (const change of ["replaced", "removed"] as const) {
+		it(`runs a context transform a tool ${change} for the run's next model request`, async () => {
+			const ran: string[] = [];
+			const parameters = type({});
+			const agentRef = {} as { current: Agent };
+			const tool: AgentTool<typeof parameters> = {
+				name: "change_transform",
+				label: "Change transform",
+				description: "Changes the context transform",
+				parameters,
+				async execute() {
+					agentRef.current.transformContext =
+						change === "removed"
+							? undefined
+							: async messages => {
+									ran.push("new");
+									return messages;
+								};
+					return { content: [{ type: "text", text: "changed" }], details: {} };
+				},
+			};
+			const mock = createMockModel({
+				responses: [
+					{ content: [{ type: "toolCall", id: "change-1", name: "change_transform", arguments: {} }] },
+					{ content: ["done"] },
+				],
+			});
+			const agent = new Agent({
+				initialState: { model: mock.model, systemPrompt: ["Test"], tools: [tool], messages: [] },
+				streamFn: mock.stream,
+				transformContext: async messages => {
+					ran.push("old");
+					return messages;
+				},
+			});
+			agentRef.current = agent;
+
+			await agent.prompt("go");
+
+			// The getter already reports the change; the second request must run what it reports.
+			expect(agent.transformContext === undefined).toBe(change === "removed");
+			expect(ran).toEqual(change === "removed" ? ["old"] : ["old", "new"]);
+		});
+	}
+
 	it("continue() should process queued follow-up messages after an assistant turn", async () => {
 		const mock = createMockModel({ responses: [{ content: ["Processed"] }] });
 		const agent = new Agent({ streamFn: mock.stream });
