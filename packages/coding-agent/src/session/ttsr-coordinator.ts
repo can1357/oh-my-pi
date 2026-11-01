@@ -66,8 +66,12 @@ export interface TtsrCoordinatorHost {
 	promptGeneration(): number;
 	/** Judge for `question` rules, or `undefined` while judged rules are off (`ttsr.judge`). */
 	ruleJudge(): Judge | undefined;
-	/** Delivers a judged-rule warning without interrupting the run. */
-	deliverRuleWarning(content: string, ruleNames: string[]): Promise<void>;
+	/**
+	 * Delivers a judged-rule warning without interrupting the run. The delivered
+	 * message's `details` must carry `rules` and `deliveryId` so its persistence
+	 * marks the judged variants.
+	 */
+	deliverRuleWarning(content: string, ruleNames: string[], deliveryId: number): Promise<void>;
 	/** Changes when the session is replaced; verdicts from an older generation are dropped. */
 	sessionGeneration(): number;
 }
@@ -81,7 +85,7 @@ export class TtsrCoordinator {
 	#pendingExcerpts: Record<string, string> = {};
 	#perToolInjections = new Map<string, Rule[]>();
 	#deferredReservations = new Map<string, number>();
-	/** Matched rule variants per queued delivery, so delivery marks what matched, not what is registered then. */
+	/** Matched rule variants per tracked delivery, so delivery marks what matched, not what is registered then. */
 	#deferredDeliveries = new Map<number, Rule[]>();
 	#nextDeferredDeliveryId = 0;
 	#abortPending = false;
@@ -416,8 +420,13 @@ export class TtsrCoordinator {
 	}
 
 	#reserveDeferredInjection(rules: Rule[]): number {
-		const deliveryId = ++this.#nextDeferredDeliveryId;
+		const deliveryId = this.#trackDelivery(rules);
 		for (const rule of rules) this.#deferredReservations.set(rule.name, deliveryId);
+		return deliveryId;
+	}
+
+	#trackDelivery(rules: Rule[]): number {
+		const deliveryId = ++this.#nextDeferredDeliveryId;
 		this.#deferredDeliveries.set(deliveryId, rules);
 		return deliveryId;
 	}
@@ -624,10 +633,17 @@ export class TtsrCoordinator {
 				}),
 			)
 			.join("\n\n");
-		await this.#host.deliverRuleWarning(
-			warning,
-			rules.map(rule => rule.name),
-		);
+		const deliveryId = this.#trackDelivery(rules);
+		try {
+			await this.#host.deliverRuleWarning(
+				warning,
+				rules.map(rule => rule.name),
+				deliveryId,
+			);
+		} catch (error) {
+			this.#deferredDeliveries.delete(deliveryId);
+			throw error;
+		}
 	}
 
 	#getStreamingToolCallBlock(message: AgentMessage, contentIndex: number): ToolCall | undefined {

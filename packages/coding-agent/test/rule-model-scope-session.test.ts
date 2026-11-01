@@ -3,12 +3,13 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import { AuthStorage } from "@oh-my-pi/pi-ai";
+import { AuthStorage, type Judge, type JudgmentRequest, type NoulAnswer } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { getActiveRules, resetActiveRulesForTests, type Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { ruleRecordKey } from "@oh-my-pi/pi-coding-agent/export/ttsr";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -205,6 +206,43 @@ describe("model-scoped rules in a live session", () => {
 		expect(session.ttsrManager?.getRules().map(r => r.name)).toEqual(["sonnet-guard"]);
 		expect(getActiveRules().map(r => r.name)).not.toContain("opus-guard");
 		expect(getActiveRules().map(r => r.name)).toContain("sonnet-guard");
+	});
+
+	it("persists the judged variant when the model changes while the judge decides", async () => {
+		const question = "Does the reply claim tests pass without having run them?";
+		const opusRule = rule("honest-tests", { question, scope: ["text"], family: ["opus"] });
+		const sonnetRule = rule("honest-tests", { question, scope: ["text"], family: ["sonnet"] });
+		const session = await startSession({
+			model: opus,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			rules: [opusRule, sonnetRule],
+		});
+		let judgments = 0;
+		// Flags only the first output, and switches the model before answering it.
+		const judge = {
+			label: "fake",
+			judge: async (request: JudgmentRequest) => {
+				const flag = judgments++ === 0;
+				if (flag) await session.setModel(sonnet);
+				const answers: Record<string, NoulAnswer> = {};
+				for (const id in request.questions) answers[id] = { type: "noul", noul: flag ? 1 : 0 };
+				return { api: "fake", provider: "fake", model: "fake", answers, usage: {} };
+			},
+		} as unknown as Judge;
+		vi.spyOn(session, "ruleJudge").mockReturnValue(judge);
+		const mock = createMockModel();
+		session.agent.streamFn = (model, context, options) => {
+			mock.push({ content: ["All tests pass."] });
+			return mock.stream(model, context, options);
+		};
+
+		await session.prompt("Report the test status");
+		await session.waitForIdle();
+
+		const persisted = session.sessionManager
+			.getEntries()
+			.flatMap(entry => (entry.type === "ttsr_injection" ? entry.injectedRules : []));
+		expect(persisted).toEqual([ruleRecordKey(opusRule)]);
 	});
 
 	it("refreshes a live advisor's scoped rules after /clear and /new rediscover them", async () => {

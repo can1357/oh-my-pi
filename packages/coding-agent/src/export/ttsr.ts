@@ -1059,7 +1059,8 @@ export class TtsrManager {
 			return [];
 		}
 		const candidates: JudgedCandidate[] = [];
-		for (const entry of this.#rules.values()) {
+		// Snapshot: the prefilter awaits, and a model change may replace the registered set meanwhile.
+		for (const entry of Array.from(this.#rules.values())) {
 			if (
 				!entry.question ||
 				!this.#canTrigger(entry.rule) ||

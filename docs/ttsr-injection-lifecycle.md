@@ -296,14 +296,14 @@ A rule with `question` is judged: its natural-language question goes to the `jud
 
 - `ttsr.judge`: `auto` (default) judges only when the judge role resolves to a native System One model (TypeSafe jev); `on` judges with whatever the role resolves to, including the session's chat model; `off` never judges. Question rules still register either way.
 - On `message_end` of an assistant message whose `stopReason` is neither `aborted` nor `error`, `TtsrCoordinator` splits the message into outputs: all text blocks as one `text` output, all thinking blocks as one `thinking` output, and each tool call as a `tool` output. Tools exposing `matcherEntries` yield one output per file, with the `{ path, digest }` digest as content; otherwise the `matcherDigest` or the raw JSON arguments.
-- For each output, `TtsrManager.judgedCandidates()` selects question rules that pass scope, `globs`, the repeat policy, and — when the rule also declares `condition`/`astCondition` — that prefilter against the completed content. No candidates → no request.
+- For each output, `TtsrManager.judgedCandidates()` selects, from the rules registered when the judgment starts, question rules that pass scope, `globs`, the repeat policy, and — when the rule also declares `condition`/`astCondition` — that prefilter against the completed content. No candidates → no request.
 - One judge request per output carries every candidate's question as a `noul` question over a shared state `{ output, content }` (content cut to its longest prefix within 32,000 Jev tokens, counted locally with `Encoding.Jev`, so each branch stays under Jev's ~33k-token limit). Jev bills the state once per request, so rules sharing an output share its cost. Usage is journaled as `model_usage` with purpose `ttsr`.
 
 ### Delivery
 
 - A yes-probability ≥ 0.7 flags the rule. Flagged rules pass through `TtsrManager.claim()`, which drops rules another verdict already claimed or that the repeat policy blocks, and marks the rest injected in memory; one rule flagged by several outputs is therefore delivered once.
 - Verdicts arriving after a session replacement (`/new`, session switch) are dropped.
-- Survivors emit `ttsr_triggered` and are rendered with `ttsr-warning.md` into a hidden `ttsr-injection` custom message (`details.rules`), sent with `deliverAs: "aside"`: mid-run it joins the next step without interrupting (a running interruptible `wait` ends); on an idle session it starts a turn. Its `message_end` persists the `ttsr_injection` entry.
+- Survivors emit `ttsr_triggered` and are rendered with `ttsr-warning.md` into a hidden `ttsr-injection` custom message (`details.rules` with plain names, plus a `details.deliveryId`), sent with `deliverAs: "aside"`: mid-run it joins the next step without interrupting (a running interruptible `wait` ends); on an idle session it starts a turn. Its `message_end` persists the `ttsr_injection` entry with the record keys of the judged variants, even when a model change registered other variants while the judgment ran.
 - The session's `onBeforeYield` hook awaits in-flight judgments (up to 5s) before the agent loop drains asides and stops, so a warning about the final reply or last tool call lands in the same run. Later verdicts still arrive as asides.
 - Judge failures (no credentials, timeouts, parse errors) are logged and deliver nothing.
 

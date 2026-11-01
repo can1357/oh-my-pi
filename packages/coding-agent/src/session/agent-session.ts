@@ -2485,7 +2485,8 @@ export class AgentSession implements SettingsScope {
 			scheduleAgentContinue: options => this.#scheduleAgentContinue(options),
 			promptGeneration: () => this.#promptGeneration,
 			ruleJudge: () => this.ruleJudge(),
-			deliverRuleWarning: (content, ruleNames) => this.#deliverRuleWarning(content, ruleNames),
+			deliverRuleWarning: (content, ruleNames, deliveryId) =>
+				this.#deliverRuleWarning(content, ruleNames, deliveryId),
 			sessionGeneration: () => this.#sessionGeneration,
 		};
 		this.#ttsr = new TtsrCoordinator(ttsrHost, config.ttsrManager);
@@ -3688,10 +3689,16 @@ export class AgentSession implements SettingsScope {
 	 * session starts a turn so the agent can act on it. Persisting the message
 	 * records the rules as injected (see #persistMessageEnd).
 	 */
-	async #deliverRuleWarning(content: string, ruleNames: string[]): Promise<void> {
+	async #deliverRuleWarning(content: string, ruleNames: string[], deliveryId: number): Promise<void> {
 		if (this.#isDisposed) return;
 		await this.sendCustomMessage(
-			{ customType: "ttsr-injection", content, display: false, details: { rules: ruleNames }, attribution: "agent" },
+			{
+				customType: "ttsr-injection",
+				content,
+				display: false,
+				details: { rules: ruleNames, deliveryId },
+				attribution: "agent",
+			},
 			{ deliverAs: "aside" },
 		);
 	}

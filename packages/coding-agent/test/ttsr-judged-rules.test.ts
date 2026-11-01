@@ -3,7 +3,7 @@ import type { Agent, AgentEvent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Judge, JudgmentRequest, NoulAnswer } from "@oh-my-pi/pi-ai";
 import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import type { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { JUDGED_CONTENT_MAX_TOKENS, TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
+import { JUDGED_CONTENT_MAX_TOKENS, ruleRecordKey, TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
 import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TtsrCoordinator, type TtsrCoordinatorHost } from "@oh-my-pi/pi-coding-agent/session/ttsr-coordinator";
 import { countTokens, Encoding } from "@oh-my-pi/pi-natives";
@@ -57,25 +57,29 @@ function setup(rules: Rule[], judge: Judge) {
 	for (const rule of rules) expect(manager.addRule(rule)).toBe(true);
 	let generation = 0;
 	const abort = vi.fn();
-	const warnings: { content: string; rules: string[] }[] = [];
+	const warnings: { content: string; rules: string[]; details: { rules: string[]; deliveryId: number } }[] = [];
+	const appendTtsrInjection = vi.fn((_recordKeys: string[]) => "entry");
 	const host = {
 		agent: { state: { messages: [], tools: [] }, abort } as unknown as Agent,
-		sessionManager: { getCwd: () => "/work", appendTtsrInjection: vi.fn() } as unknown as SessionManager,
+		sessionManager: { getCwd: () => "/work", appendTtsrInjection } as unknown as SessionManager,
 		settings: {} as Settings,
 		emitSessionEvent: async () => {},
 		schedulePostPromptTask: vi.fn(),
 		scheduleAgentContinue: vi.fn(),
 		promptGeneration: () => 0,
 		ruleJudge: () => judge,
-		deliverRuleWarning: async (content: string, ruleNames: string[]) => {
-			warnings.push({ content, rules: ruleNames });
+		// The session persists `details` with the warning; persisting it marks the rules injected.
+		deliverRuleWarning: async (content: string, ruleNames: string[], deliveryId: number) => {
+			warnings.push({ content, rules: ruleNames, details: { rules: ruleNames, deliveryId } });
 		},
 		sessionGeneration: () => generation,
 	} satisfies TtsrCoordinatorHost;
 	return {
 		coordinator: new TtsrCoordinator(host, manager),
+		manager,
 		abort,
 		warnings,
+		appendTtsrInjection,
 		replaceSession: () => generation++,
 	};
 }
@@ -138,6 +142,30 @@ describe("TTSR judged rules", () => {
 		await coordinator.settleJudgments();
 		expect(requests).toHaveLength(1);
 		expect(warnings).toHaveLength(0);
+	});
+
+	it("persists the judged variant when a model change re-scopes the rule before the verdict", async () => {
+		const gate = Promise.withResolvers<void>();
+		const { judge } = fakeJudge({ [PROMISES_TESTS]: 1 }, gate.promise);
+		const opus = judgedRule("honest-tests", { question: PROMISES_TESTS, scope: ["text"], family: ["opus"] });
+		const sonnet = { ...opus, family: ["sonnet"] };
+		const { coordinator, manager, warnings, appendTtsrInjection } = setup([opus], judge);
+		const deliverVerdict = async () => {
+			coordinator.onAssistantMessageEnd(assistant([{ type: "text", text: "All tests pass." }]));
+			await coordinator.settleJudgments();
+			const warning = warnings.at(-1);
+			if (warning) coordinator.markInjectedFromDetails(warning.details);
+		};
+
+		const judging = deliverVerdict();
+		manager.replaceRules([sonnet], new Set(["honest-tests"]));
+		gate.resolve();
+		await judging;
+		expect(appendTtsrInjection.mock.calls).toEqual([[[ruleRecordKey(opus)]]]);
+
+		await deliverVerdict();
+		expect(warnings).toHaveLength(2);
+		expect(appendTtsrInjection.mock.calls.at(-1)).toEqual([[ruleRecordKey(sonnet)]]);
 	});
 
 	it("drops verdicts for aborted messages and for sessions replaced mid-judgment", async () => {
