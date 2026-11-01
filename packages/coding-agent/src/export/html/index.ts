@@ -264,20 +264,24 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 		throw err;
 	}
 
+	// Opening an archived (`.jsonl.gz`) session restores it, so the artifact
+	// tree — and the subagent transcripts in it — is at the live path, not
+	// beside the file the caller named.
+	const sessionFile = sm.getSessionFile() ?? inputPath;
 	const sessionData: SessionData = {
 		header: sessionHeaderForExport(sm.getHeader()),
 		entries: sm.getEntries(),
 		leafId: sm.getLeafId(),
 	};
 	if (opts.includeSubSessions !== false) {
-		const subSessions = await collectExportSubSessions(inputPath);
+		const subSessions = await collectExportSubSessions(sessionFile);
 		if (Object.keys(subSessions).length > 0) sessionData.subSessions = subSessions;
 	}
 	sessionData.trace = buildSessionTraceFromSnapshots(sessionData, sessionData.subSessions);
 
 	const palette = opts.palette ?? (opts.themeName ? "theme" : "web");
 	const html = await generateHtml(sessionData, palette, opts.themeNames, opts.themeName);
-	const outputPath = opts.outputPath || `${APP_NAME}-session-${path.basename(inputPath, ".jsonl")}.html`;
+	const outputPath = opts.outputPath || `${APP_NAME}-session-${path.basename(sessionFile, ".jsonl")}.html`;
 
 	await Bun.write(outputPath, html);
 	return outputPath;

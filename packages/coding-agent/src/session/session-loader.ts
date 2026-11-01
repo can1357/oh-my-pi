@@ -14,6 +14,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { Semaphore } from "../task/parallel";
+import { isArchivedSessionPath } from "./session-archive";
 import {
 	BlobStore,
 	isBlobRef,
@@ -213,6 +214,22 @@ export async function readSessionHeaderId(filePath: string): Promise<string | un
 }
 
 /**
+ * {@link readSessionHeaderId} through a descriptor the caller opened, for a
+ * caller that has to decide how the file is opened — non-blocking, say, so a
+ * FIFO at a session's name is not waited on.
+ */
+export async function readSessionHeaderIdFromHandle(handle: fs.FileHandle): Promise<string | undefined> {
+	const first = Buffer.allocUnsafe(SESSION_HEADER_FIRST_READ);
+	const head = await handle.read(first, 0, first.byteLength, 0);
+	const id = sessionHeaderIdFromPrefix(first.subarray(0, head.bytesRead), head.bytesRead < SESSION_HEADER_FIRST_READ);
+	if (id !== HEADER_INCOMPLETE) return id;
+	const window = Buffer.allocUnsafe(SESSION_HEADER_READ_LIMIT);
+	const full = await handle.read(window, 0, window.byteLength, 0);
+	const whole = sessionHeaderIdFromPrefix(window.subarray(0, full.bytesRead), true);
+	return whole === HEADER_INCOMPLETE ? undefined : whole;
+}
+
+/**
  * The header id from a file's leading bytes, past the optional title slot
  * line. Parses only the first record, which may span lines (a pretty-printed
  * header). {@link HEADER_INCOMPLETE} when that record runs past `prefix` and
@@ -241,6 +258,17 @@ function sessionHeaderIdFromPrefix(prefix: Uint8Array, final: boolean): string |
 	if (end === -1) return final ? undefined : HEADER_INCOMPLETE;
 	const entry = tryParseJson<FileEntry>(text.slice(0, end)) ?? undefined;
 	return isValidSessionHeader(entry) ? entry.id : undefined;
+}
+
+/**
+ * The session id in a transcript's leading bytes, for callers that already
+ * hold them — an archived transcript inflated into memory, say. The same
+ * reader {@link readSessionHeaderId} uses on a file, so the two agree on
+ * what a header is.
+ */
+export function sessionHeaderIdFromBytes(prefix: Uint8Array): string | undefined {
+	const id = sessionHeaderIdFromPrefix(prefix, true);
+	return id === HEADER_INCOMPLETE ? undefined : id;
 }
 
 /** Parse session JSONL and visit each entry without retaining prior entries. */
@@ -499,8 +527,14 @@ export async function loadEntriesFromFileStream(
 export function parseSessionEntries(content: string): FileEntry[] {
 	return parseSessionContent(content).entries;
 }
-function shouldStreamEntries(storage: SessionStorage, size: number): boolean {
-	return storage instanceof FileSessionStorage && size >= STREAM_LOAD_THRESHOLD_BYTES;
+/**
+ * The streaming path reads raw bytes straight off the file, so an archived
+ * (gzipped) transcript always takes the whole-text path, which inflates it.
+ */
+function shouldStreamEntries(storage: SessionStorage, filePath: string, size: number): boolean {
+	return (
+		storage instanceof FileSessionStorage && size >= STREAM_LOAD_THRESHOLD_BYTES && !isArchivedSessionPath(filePath)
+	);
 }
 
 async function loadWithKnownSize(
@@ -509,7 +543,7 @@ async function loadWithKnownSize(
 	size: number,
 	options?: { throwIfMissing?: boolean },
 ): Promise<{ loaded: SessionLoadResult; sourceSize: number }> {
-	if (shouldStreamEntries(storage, size)) {
+	if (shouldStreamEntries(storage, filePath, size)) {
 		const loaded = await loadEntriesFromFileStream(filePath, { throwIfMissing: options?.throwIfMissing });
 		const sourceSize = loaded.sourceSize ?? 0;
 		return { loaded: loaded.invalidHeader ? { ...loaded, entries: [] } : loaded, sourceSize };
@@ -601,7 +635,7 @@ export async function visitEntriesFromFile(
 	storage: SessionStorage = new FileSessionStorage(),
 ): Promise<void> {
 	const size = storage.statSync(filePath).size;
-	if (shouldStreamEntries(storage, size)) {
+	if (shouldStreamEntries(storage, filePath, size)) {
 		let sawFirstEntry = false;
 		await visitEntriesFromFileStream(filePath, entry => {
 			if (!sawFirstEntry) {

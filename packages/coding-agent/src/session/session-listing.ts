@@ -10,6 +10,7 @@ import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { parseJsonlLenient } from "@oh-my-pi/pi-utils/stream";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
 import { EVAL_STATE_CONTEXT_TYPE } from "../eval/state";
+import { findArchivedSessionFiles, liveSessionPathForArchive } from "./session-archive";
 import { visitEntriesFromFile } from "./session-loader";
 import { computeDefaultSessionDir } from "./session-paths";
 import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
@@ -59,7 +60,8 @@ export interface SessionInfo {
 
 export interface ResolvedSessionMatch {
 	session: SessionInfo;
-	scope: "local" | "global";
+	/** `archive`: the match is a `gc --archive` copy and is restored when opened. */
+	scope: "local" | "global" | "archive";
 }
 
 /** Lightweight metadata for a recent session, used in welcome/picker UI. */
@@ -896,8 +898,14 @@ export async function findSessionContinuation(
 	options: FindSessionContinuationOptions = {},
 ): Promise<SessionContinuation | undefined> {
 	const target = path.resolve(sessionPath);
+	// An archived transcript is read where it lies, but it is named for — and
+	// continued in — the live bucket `gc --archive` copied it out of. Searching
+	// beside the archive finds no continuation at all: the archive bucket holds
+	// no `.jsonl` sibling. Resuming the id would then open the cold copy while
+	// the conversation went on in another file.
+	const bucketPath = liveSessionPathForArchive(target) ?? target;
 	const start = await scanSessionFile(target, storage, false);
-	const named = parseSessionFileName(target);
+	const named = parseSessionFileName(bucketPath);
 	const replaced =
 		named !== undefined &&
 		(start ? options.matchedByFileName === true && start.id !== named.id : storage.existsSync(target));
@@ -912,14 +920,14 @@ export async function findSessionContinuation(
 	} else {
 		return undefined;
 	}
-	const continuations = await continuationsAfter(target, since, storage);
+	const continuations = await continuationsAfter(bucketPath, since, storage);
 	const children = continuations.get(rootId);
 	if (!children) return undefined;
 	const activityOf = activityReader(storage);
 	// A replaced file holds no turn of the session its name records, so every
 	// copy that continues that session counts; otherwise the file is the first copy.
 	const copies = replaced || !start ? [...children] : [start];
-	const seen = new Set([target, ...copies.map(copy => copy.path)]);
+	const seen = new Set([target, bucketPath, ...copies.map(copy => copy.path)]);
 	for (let i = 0; i < copies.length; i++) {
 		const next = continuations.get(copies[i].id);
 		if (!next) continue;
@@ -1298,9 +1306,15 @@ async function newestSessionFiles(
 	return stated.sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
 }
 
-/** Header-level {@link SessionInfo} with status for one session file; undefined when unreadable or not a session. */
-export function readSessionInfo(file: string): Promise<SessionInfo | undefined> {
-	return scanSessionFile(file, new FileSessionStorage(), true);
+/**
+ * Header-level {@link SessionInfo} with status for one session file; undefined when unreadable or not a session.
+ * `storage` reads the file; `omp gc` passes one that opens only regular files.
+ */
+export function readSessionInfo(
+	file: string,
+	storage: SessionStorage = new FileSessionStorage(),
+): Promise<SessionInfo | undefined> {
+	return scanSessionFile(file, storage, true);
 }
 
 /** Selects which session files {@link listRecentSessions} considers. */
@@ -1482,9 +1496,29 @@ export async function resolveResumableSession(
 
 	const globalSessions = await listAllSessions(storage);
 	const globalMatch = globalSessions.find(session => sessionMatchesResumeArg(session, sessionArg));
-	if (!globalMatch) {
-		return undefined;
+	if (globalMatch) {
+		return { session: globalMatch, scope: "global" };
 	}
 
-	return { session: globalMatch, scope: "global" };
+	// A session given up with `gc --reclaim` exists only in the archive. It
+	// stays resumable: the match is restored to its original path when opened.
+	const [archiveFile] = await findArchivedSessionFiles(sessionArg);
+	if (!archiveFile) return undefined;
+	const [archived] = await collectSessionsFromFiles([archiveFile], storage, true);
+	// A damaged archive must not read as "no such session": the file is right
+	// there under the id the caller named. Hand back what its name says and
+	// let opening it report why it cannot be read.
+	const stem = path.basename(archiveFile, ".jsonl.gz");
+	const session = archived ?? {
+		path: archiveFile,
+		id: stem.slice(stem.lastIndexOf("_") + 1) || sessionArg,
+		cwd: "",
+		created: new Date(0),
+		modified: new Date(0),
+		messageCount: 0,
+		size: 0,
+		firstMessage: "",
+		allMessagesText: "",
+	};
+	return { session, scope: "archive" };
 }

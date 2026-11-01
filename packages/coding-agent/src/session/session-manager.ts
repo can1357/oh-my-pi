@@ -83,6 +83,7 @@ import {
 	type UsageStatistics,
 } from "./session-entries";
 import { currentRuntimeIdentity, type RuntimeIdentity } from "./runtime-identity";
+import { isArchivedSessionPath, materializeSessionFile, type RestoreProgress } from "./session-archive";
 import {
 	filterSessionsForPicker,
 	findMostRecentNonEmptySession,
@@ -2355,15 +2356,18 @@ export class SessionManager {
 			await this.#rewriteAtomically();
 		}
 	}
-	/** Switch to a different session file (resume / branch). */
-	async setSessionFile(sessionFile: string): Promise<void> {
-		await this.#setSessionFile(sessionFile);
+	/**
+	 * Switch to a different session file (resume / branch). `onArchiveRestore`
+	 * receives what to show while a session comes out of the archive.
+	 */
+	async setSessionFile(sessionFile: string, options?: { onArchiveRestore?: RestoreProgress }): Promise<void> {
+		await this.#setSessionFile(sessionFile, undefined, options);
 	}
 
 	async #setSessionFile(
 		sessionFile: string,
 		loadedSession?: SessionLoadResult,
-		options?: { throwIfMissing?: boolean; newSession?: NewSessionOptions },
+		options?: { throwIfMissing?: boolean; newSession?: NewSessionOptions; onArchiveRestore?: RestoreProgress },
 	): Promise<void> {
 		await this.#drainAndCloseWriter();
 		this.#clearDiskError();
@@ -2373,8 +2377,33 @@ export class SessionManager {
 		this.#sessionClaim?.release?.();
 		this.#sessionClaim = undefined;
 
-		const resolvedSessionFile = path.resolve(sessionFile);
-		const loaded = loadedSession ?? (await loadSessionFile(resolvedSessionFile, this.#storage));
+		// `gc --archive` keeps cold transcripts gzipped outside the sessions
+		// tree. Bring one back to its own path before anything reads or appends
+		// to it: the writer appends raw JSONL, so a `.jsonl.gz` must never
+		// become this manager's session file.
+		//
+		// Asked for every session, not only a `.gz`. A run killed between a
+		// restore publishing the transcript and carrying its artifact tree home
+		// leaves a live `.jsonl` with its archive still beside it, and that is
+		// the path resume-by-id resolves to; opening it as if it were whole
+		// gives a session whose subagent transcripts and tool output are
+		// missing with nothing said. `materializeSessionFile` returns the path
+		// unchanged when there is no archive to finish, so this costs one
+		// `stat` on the ordinary route.
+		const requestedFile = path.resolve(sessionFile);
+		const fromArchive = isArchivedSessionPath(requestedFile);
+		const resolvedSessionFile = await materializeSessionFile(requestedFile, undefined, options?.onArchiveRestore);
+		if (fromArchive && this.#sessionDir === path.dirname(requestedFile)) {
+			// `SessionManager.open` derived the session dir from the archive path.
+			// Follow the transcript home, or /new and /branch would write there.
+			this.#sessionDir = path.dirname(resolvedSessionFile);
+		}
+		// A caller's snapshot of an archive was read before the restore took the
+		// gc lock. Another process may have restored that archive and appended a
+		// turn while this one waited, so the live file — not the snapshot — is
+		// what this manager opens and appends to.
+		const loaded =
+			fromArchive || !loadedSession ? await loadSessionFile(resolvedSessionFile, this.#storage) : loadedSession;
 		const sourceSize =
 			loaded.sourceSize !== undefined
 				? loaded.sourceSize
@@ -4231,6 +4260,8 @@ export class SessionManager {
 			resetInheritedCost?: boolean;
 			repairInterruptedTail?: boolean;
 			seance?: boolean;
+			/** Receives what to show while the source session comes out of the archive. */
+			onArchiveRestore?: RestoreProgress;
 		},
 	): Promise<SessionManager> {
 		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
@@ -4239,9 +4270,15 @@ export class SessionManager {
 
 		// A missing source must fail instead of forking an empty parentless session:
 		// the loader swallows ENOENT by default for fresh-session opens, so fork opts out.
+		// A cold session forks like any other: bring it back from the archive
+		// first, so the transcript and the artifact tree beside it (subagent
+		// transcripts, tool output) are both where the fork's artifact copy
+		// below looks for them.
 		let sourceEntries: FileEntry[];
+		let sourceFile = sourcePath;
 		try {
-			sourceEntries = await loadEntriesFromFile(sourcePath, storage, { throwIfMissing: true });
+			sourceFile = await materializeSessionFile(sourcePath, undefined, options?.onArchiveRestore);
+			sourceEntries = await loadEntriesFromFile(sourceFile, storage, { throwIfMissing: true });
 		} catch (err) {
 			if (isEnoent(err) || isEnotdir(err)) throw new ForkSourceNotFoundError(sourcePath);
 			throw err;
@@ -4269,7 +4306,7 @@ export class SessionManager {
 		manager.#header.additionalDirectories =
 			manager.#additionalDirectories.length > 0 ? manager.#additionalDirectories : undefined;
 		if (options?.seance) {
-			manager.#header.seanceSource = path.resolve(sourcePath);
+			manager.#header.seanceSource = path.resolve(sourceFile);
 			SessionManager.#neutralizeSessionInits(history);
 		}
 		manager.#sessionName = manager.#header.title;
@@ -4286,7 +4323,7 @@ export class SessionManager {
 		manager.#forceFileCreation = true;
 		await manager.#rewriteAtomically();
 		if (!options?.seance && options?.copyArtifacts !== false) {
-			await copySessionArtifacts(sourcePath, manager.#sessionFile!);
+			await copySessionArtifacts(sourceFile, manager.#sessionFile!);
 		}
 		return manager;
 	}
@@ -4371,12 +4408,19 @@ export class SessionManager {
 	 * @param options.initialCwd Cwd to use when the file is empty or missing.
 	 * @param options.throwIfMissing Propagate ENOENT instead of creating a new session at a missing path.
 	 * @param options.parentSession Parent session file recorded when the file is empty or missing.
+	 * @param options.onArchiveRestore Receives what to show while the session comes out of the archive.
 	 */
 	static async open(
 		filePath: string,
 		sessionDir?: string,
 		storage: SessionStorage = new FileSessionStorage(),
-		options?: { initialCwd?: string; parentSession?: string; suppressBreadcrumb?: boolean; throwIfMissing?: boolean },
+		options?: {
+			initialCwd?: string;
+			parentSession?: string;
+			suppressBreadcrumb?: boolean;
+			throwIfMissing?: boolean;
+			onArchiveRestore?: RestoreProgress;
+		},
 	): Promise<SessionManager> {
 		const probed = await loadSessionFile(filePath, storage, { throwIfMissing: options?.throwIfMissing });
 		const header = probed.entries.find(entry => entry.type === "session") as SessionHeader | undefined;
@@ -4407,6 +4451,7 @@ export class SessionManager {
 		await manager.#setSessionFile(filePath, loaded, {
 			throwIfMissing: options?.throwIfMissing,
 			newSession: { parentSession: options?.parentSession },
+			onArchiveRestore: options?.onArchiveRestore,
 		});
 		return manager;
 	}
