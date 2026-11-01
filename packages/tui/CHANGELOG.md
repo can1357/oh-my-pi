@@ -64,6 +64,8 @@
 ### Added
 
 - Added a `maxRows` callback to `FigureMarkdown`, `SvgFigure` and `TableChartFigure` so surfaces shorter than the screen can fit their figures; zero hides a figure without delaying transcript completion ([#15661](https://github.com/can1357/oh-my-pi/issues/15661), [#15853](https://github.com/can1357/oh-my-pi/pull/15853) by [@KunoLu](https://github.com/KunoLu))
+- Added a custom OpenAI-compatible endpoint option to the setup provider list ([#12997](https://github.com/can1357/oh-my-pi/pull/12997) by [@DrB0rk](https://github.com/DrB0rk)).
+- Added a provider editor to the `/models` hub for adding, editing, and deleting custom OpenAI-compatible providers (`+ Add provider…`, `Ctrl+N` / `Ctrl+E` / `Ctrl+D`); saves keep `models.yml` comments ([#13874](https://github.com/can1357/oh-my-pi/pull/13874) by [@andrebrait](https://github.com/andrebrait)).
 
 ### Fixed
 
