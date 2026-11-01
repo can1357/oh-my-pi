@@ -120,6 +120,7 @@ Unknown magic names raise `NameError: UsageError: ...` inside the cell.
    - Foreground calls through the tool use exclusive scheduling; background cells and kernel-defined tool requests are separate.
    - A dead retained subprocess is replaced before execution.
    - If the subprocess dies during execution, the cell is not replayed because completion is uncertain. The next call starts a fresh kernel.
+   - `python.kernelIdleShutdownSeconds` > 0 shuts a kernel down after that many idle seconds. The next call starts a fresh kernel and reports the restart. A kernel holding `@tool` tools, or whose owning agent has a running subagent, stays alive.
 - `per-call`
    - Spawns a fresh subprocess for each call.
    - Shuts the subprocess down after the call.

@@ -8,6 +8,7 @@ interface TestOptions {
 	reset?: boolean;
 	signal?: AbortSignal;
 	deadlineMs?: number;
+	kernelIdleShutdownMs?: number;
 	claimKernelRestartNotice?: () => boolean;
 }
 
@@ -44,7 +45,11 @@ type ExecuteFakeKernel = (kernel: FakeKernel, code: string, options: TestOptions
 
 type StartFakeKernel = (kernel: FakeKernel, options: TestOptions) => Promise<void>;
 
-function createFakeRegistry(executeWithKernel: ExecuteFakeKernel, onStartKernel?: StartFakeKernel) {
+function createFakeRegistry(
+	executeWithKernel: ExecuteFakeKernel,
+	onStartKernel?: StartFakeKernel,
+	canShutdownIdle?: (session: KernelSession<FakeKernel>) => Promise<boolean>,
+) {
 	const kernels: FakeKernel[] = [];
 	const registry = createKernelSessionRegistry<FakeKernel, TestOptions, TestResult, KernelSession<FakeKernel>>({
 		languageLabel: "Test",
@@ -58,8 +63,17 @@ function createFakeRegistry(executeWithKernel: ExecuteFakeKernel, onStartKernel?
 			return kernel;
 		},
 		executeWithKernel,
+		canShutdownIdle,
 	});
 	return { kernels, registry };
+}
+
+async function waitUntil(condition: () => boolean, timeoutMs = 2_000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (!condition()) {
+		if (Date.now() > deadline) throw new Error("condition not reached before timeout");
+		await Bun.sleep(5);
+	}
 }
 
 describe("kernel session recovery", () => {
@@ -572,4 +586,106 @@ describe("kernel restart notice claim", () => {
 			}
 		});
 	}
+});
+
+describe("idle kernel shutdown", () => {
+	const IDLE_MS = 20;
+
+	function idleRegistry(canShutdownIdle?: (session: KernelSession<FakeKernel>) => Promise<boolean>) {
+		const ran: Array<{ code: string; kernel: number; restarted: boolean }> = [];
+		const gates = new Map<string, Promise<void>>();
+		const { kernels, registry } = createFakeRegistry(
+			async (kernel, code, runOptions) => {
+				await gates.get(code);
+				const restarted = runOptions.claimKernelRestartNotice?.() ?? false;
+				ran.push({ code, kernel: kernel.index, restarted });
+				return { cancelled: false, value: code };
+			},
+			undefined,
+			canShutdownIdle,
+		);
+		const cell = (code: string) =>
+			registry.executeOnSession(code, "/tmp", { sessionId: "idle", kernelIdleShutdownMs: IDLE_MS });
+		return { kernels, registry, ran, gates, cell };
+	}
+
+	it("shuts an idle kernel down and gives the next cell a fresh kernel with the restart notice", async () => {
+		const { kernels, registry, ran, cell } = idleRegistry();
+		try {
+			await cell("setup");
+			await waitUntil(() => kernels[0]?.alive === false);
+			await cell("after idle");
+			expect(ran).toEqual([
+				{ code: "setup", kernel: 0, restarted: false },
+				{ code: "after idle", kernel: 1, restarted: true },
+			]);
+		} finally {
+			await registry.disposeAll();
+		}
+	});
+
+	it("keeps the kernel while a cell runs past the idle window or a hold is open", async () => {
+		const { kernels, registry, gates, cell } = idleRegistry();
+		const slow = Promise.withResolvers<void>();
+		gates.set("slow", slow.promise);
+		try {
+			const running = cell("slow");
+			await Bun.sleep(IDLE_MS * 4);
+			expect(kernels[0]?.alive).toBe(true);
+			slow.resolve();
+			await running;
+			const release = await registry.holdSession("/tmp", { sessionId: "idle" });
+			await Bun.sleep(IDLE_MS * 4);
+			expect(kernels[0]?.alive).toBe(true);
+			release();
+			await waitUntil(() => kernels[0]?.alive === false);
+		} finally {
+			slow.resolve();
+			await registry.disposeAll();
+		}
+	});
+
+	it("makes a cell that arrives during the idle shutdown wait for it instead of running on the dying kernel", async () => {
+		const shutdownStarted = Promise.withResolvers<void>();
+		const finishShutdown = Promise.withResolvers<void>();
+		const { kernels, registry, ran, cell } = idleRegistry();
+		try {
+			await cell("setup");
+			const first = kernels[0]!;
+			first.shutdown = async () => {
+				shutdownStarted.resolve();
+				await finishShutdown.promise;
+				first.alive = false;
+				first.shutdowns += 1;
+				return { confirmed: true };
+			};
+			await shutdownStarted.promise;
+			const late = cell("late");
+			await Bun.sleep(IDLE_MS);
+			expect(ran.map(entry => entry.code)).toEqual(["setup"]);
+			finishShutdown.resolve();
+			await late;
+			expect(ran.at(-1)).toEqual({ code: "late", kernel: 1, restarted: true });
+		} finally {
+			finishShutdown.resolve();
+			await registry.disposeAll();
+		}
+	});
+
+	it("keeps a vetoed kernel and retries after another idle window", async () => {
+		let vetoes = 0;
+		const { kernels, registry, cell } = idleRegistry(async () => {
+			vetoes += 1;
+			return vetoes > 1;
+		});
+		try {
+			await cell("setup");
+			await waitUntil(() => vetoes === 1);
+			expect(kernels[0]?.alive).toBe(true);
+			await waitUntil(() => kernels[0]?.alive === false);
+			expect(vetoes).toBe(2);
+		} finally {
+			await registry.disposeAll();
+		}
+	});
 });

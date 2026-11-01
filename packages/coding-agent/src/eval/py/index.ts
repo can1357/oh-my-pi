@@ -11,7 +11,7 @@ import type { BackendProbeOptions } from "../probe";
 import { defaultEvalSessionId } from "../session-id";
 import { executePython, type PythonExecutorOptions } from "./executor";
 import { checkPythonKernelAvailability } from "./kernel";
-import { cfgPythonInterpreter, cfgPythonKernelMode } from "../settings";
+import { cfgPythonInterpreter, cfgPythonKernelIdleShutdownSeconds, cfgPythonKernelMode } from "../settings";
 
 const PYTHON_SESSION_PREFIX = "python:";
 
@@ -57,6 +57,7 @@ export default {
 			signal: opts.signal,
 			sessionId: identity.sessionId,
 			kernelMode,
+			kernelIdleShutdownMs: cfgPythonKernelIdleShutdownSeconds.get(opts.session) * 1000,
 			interpreter: identity.interpreter,
 			sessionFile: opts.sessionFile,
 			artifactsDir: opts.session.getArtifactsDir?.() ?? undefined,
