@@ -2552,7 +2552,7 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/zhip
 ### Catalog model handling
 
 - **Provider entry (`local`)**: `packages/catalog/src/compat/rules/providers/local.kdl` declares default model `lfm2.5-230m`. Model management permits unauthenticated access.
-- **Authored seeds**: `kokoro`, `parakeet-tdt-0.6b-v3`, `whisper-base`, `whisper-small`, `whisper-large-v3-turbo`, `lfm2.5-230m`, `lfm2.5-350m`, `falcon-h1-90m`, `qwen3-1.7b`, `llama3.2:3b`, `gemma-3-1b`, `qwen2.5-1.5b`, `lfm2-1.2b`; bundle policy `always`. Limits, capabilities, and prices are authored alongside these rows.
+- **Authored seeds**: `kokoro`, `parakeet-tdt-0.6b-v3`, `whisper-base`, `whisper-small`, `whisper-large-v3-turbo`, `lfm2.5-230m`, `lfm2.5-350m`, `falcon-h1-90m`, `qwen3-1.7b`, `llama3.2:3b`, `gemma-3-1b`, `qwen2.5-1.5b`, `lfm2-1.2b`, `lfm3-1.7b`; bundle policy `always`. Limits, capabilities, and prices are authored alongside these rows.
 - Runtime manager: `localModelManagerOptions` in `packages/catalog/src/provider-models/special.ts`.
 
 ## Muse Code (Subscription) (`muse-code`)

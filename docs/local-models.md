@@ -178,6 +178,8 @@ recognized text fields; it no longer coerces arbitrary objects to strings.
   small talk and translated German.
 - **LFM2-1.2B** — solid and fastest to load. Weaknesses: `Label: value` noise, small-talk + buried
   leaks, a fluffy single-memory summary.
+- **LFM3-1.7B** — newest LFM-family option; the worker supplies the `logits_to_keep` feed its graph
+  requires, so it runs on Windows and Linux CPU. Not yet benchmarked on the 16-fixture set.
 
 ### Recommendation and current availability
 
@@ -191,7 +193,7 @@ Of the runnable options, `lfm2-1.2b` loads fastest and is a solid all-rounder; n
 `gemma-3-1b` favors consolidation quality, while `qwen2.5-1.5b` favors fine-grained extraction.
 
 **Configured local options**: `llama3.2:3b`, `qwen3-1.7b` (ONNX-disabled as described above),
-`gemma-3-1b`, `qwen2.5-1.5b`, `lfm2-1.2b`.
+`gemma-3-1b`, `qwen2.5-1.5b`, `lfm2-1.2b`, `lfm3-1.7b`.
 When `modelRoles.memory` is unset, it resolves through the effective `tiny` role and then the built-in smol priority list; no local weights are downloaded automatically.
 
 ### Mnemopi parser behavior
