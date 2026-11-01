@@ -10,6 +10,7 @@ import type {
 	AssistantRetryRecovery,
 	AssistantRetryRecoveryKind,
 	CodexCompactionContext,
+	CredentialRankingStrategy,
 	Effort,
 	Model,
 	ModelUsageHealth,
@@ -388,20 +389,25 @@ type UsageLimitOutcome = {
 
 /**
  * Whether a usage-limit block recorded against the attributed model still covers the
- * active model's credential pool. Uses the same per-provider ranking strategies the
+ * active model's credential pool. Uses the same per-provider ranking strategy the
  * mark itself used, so the comparison cannot drift from how blocks are scoped:
  * an unscoped provider (e.g. ordinary Anthropic models) blocks provider-wide, while
  * scoped providers (Codex `spark` vs `chat`, Claude tier lines) only cover models in
- * the same block scope. Exposed for tests.
+ * the same block scope. The strategy is resolved through the ACTIVE AuthStorage's
+ * resolver (default: the bundled strategies) — an embedder overriding
+ * `rankingStrategyResolver` marks scopes through that resolver, and a coverage
+ * decision made against the static default could disagree with what the mark wrote.
+ * Exposed for tests.
  */
 export function usageLimitBlockCoversModel(
 	attributedProvider: string,
 	attributedModelId: string,
 	activeProvider: string,
 	activeModelId: string,
+	resolveStrategy: (provider: string) => CredentialRankingStrategy | undefined = defaultRankingStrategy,
 ): boolean {
 	if (attributedProvider !== activeProvider) return false;
-	const strategy = defaultRankingStrategy(attributedProvider as never);
+	const strategy = resolveStrategy(attributedProvider);
 	const attributedScope = strategy?.blockScope?.({ modelId: attributedModelId });
 	if (attributedScope === undefined) return true;
 	return attributedScope === strategy?.blockScope?.({ modelId: activeModelId });
@@ -2761,15 +2767,20 @@ export class TurnRecovery {
 		// Scoped mismatches (Codex `spark` vs ordinary `chat`, distinct Claude
 		// tiers) are stale exactly like cross-provider ones.
 		const retryPolicyModel = this.#host.model();
-		const staleUsageLimitOutcome =
+		const strategyResolver = this.#host.modelRegistry.authStorage.rankingStrategyResolver;
+		// Read through the closure so the revalidation below sees the latest
+		// state after a stale outcome has been dropped.
+		const outcomeIsStaleFor = (model: Model | undefined): boolean =>
 			recordedUsageLimitOutcome !== undefined &&
-			retryPolicyModel !== undefined &&
+			model !== undefined &&
 			!usageLimitBlockCoversModel(
 				recordedUsageLimitOutcome.attributedProvider,
 				recordedUsageLimitOutcome.attributedModelId,
-				retryPolicyModel.provider,
-				retryPolicyModel.id,
+				model.provider,
+				model.id,
+				strategyResolver,
 			);
+		let staleUsageLimitOutcome = outcomeIsStaleFor(retryPolicyModel);
 		if (staleUsageLimitOutcome) {
 			recordedUsageLimitOutcome = undefined;
 			parsedRetryAfterMs = undefined;
@@ -2803,7 +2814,7 @@ export class TurnRecovery {
 		// Set when a usage-limit error pinned the wait to credential
 		// availability — suppresses the generic retry-after bump below.
 		let usageLimitWaitMs: number | undefined;
-		const siblingAvailabilityWaitMs =
+		let siblingAvailabilityWaitMs =
 			recordedUsageLimitOutcome?.retryAtMs === undefined
 				? undefined
 				: Math.max(0, recordedUsageLimitOutcome.retryAtMs - Date.now()) + SIBLING_UNBLOCK_BUFFER_MS;
@@ -2922,6 +2933,28 @@ export class TurnRecovery {
 
 		const allowModelFallback = options?.allowModelFallback !== false;
 		const currentModel = this.#host.model();
+		// #17571 (review): the reset-redeem lookup above awaited network work, and
+		// the user may have switched models across that await. An outcome that
+		// covered the pre-await model can be out of pool for the post-await one —
+		// keeping it would set the new model's wait/fail-fast deadline or fallback
+		// cooldown from a block that belongs to a different pool. Revalidate
+		// against the post-await model and drop stale signals wholesale, exactly
+		// like the pre-await check above did.
+		if (recordedUsageLimitOutcome !== undefined && outcomeIsStaleFor(currentModel)) {
+			staleUsageLimitOutcome = true;
+			recordedUsageLimitOutcome = undefined;
+			parsedRetryAfterMs = undefined;
+			// Every wait derived from the outcome is as stale as the outcome
+			// itself — the sibling-availability deadline included, or the
+			// dropped block's window still fail-fasts the healthy model. The
+			// redeem branch already raised delayMs to that window, so restore
+			// the plain backoff the pre-await code started from.
+			usageLimitWaitMs = undefined;
+			siblingAvailabilityWaitMs = undefined;
+			delayMs = staleOpenAIResponsesReplayError
+				? 0
+				: calculateRetryBackoffDelayMs(retrySettings.baseDelayMs, this.#retryAttempt);
+		}
 		const currentSelector = currentModel
 			? formatRetryFallbackSelector(currentModel, this.#host.thinkingLevel())
 			: undefined;

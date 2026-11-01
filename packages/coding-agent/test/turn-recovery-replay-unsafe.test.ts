@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { AgentMessage, SyntheticToolResultDetails } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, CredentialRankingStrategy, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -524,6 +524,74 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		expect(
 			usageLimitBlockCoversModel("openai-codex", "gpt-5.3-codex-spark", "openai-codex", "gpt-5.3-codex-spark"),
 		).toBe(true);
+	});
+
+	it("resolves block coverage through the supplied strategy resolver, not just the bundled default", () => {
+		// An embedder overriding AuthStorage's `rankingStrategyResolver` marks
+		// scopes through that resolver; a coverage check consulting only the
+		// bundled default could disagree with what the mark actually wrote.
+		const codexPool = { blockScope: () => "codex-unified" } as unknown as CredentialRankingStrategy;
+		const resolver = (provider: string) => (provider === "openai-codex" ? codexPool : undefined);
+		// Under the bundled default these are disjoint pools (spark vs chat).
+		expect(usageLimitBlockCoversModel("openai-codex", "gpt-5.3-codex-spark", "openai-codex", "gpt-6.1-sol")).toBe(
+			false,
+		);
+		// Under the embedder's unified scope the same pair is covered.
+		expect(
+			usageLimitBlockCoversModel("openai-codex", "gpt-5.3-codex-spark", "openai-codex", "gpt-6.1-sol", resolver),
+		).toBe(true);
+		// A resolver that scopes only the attributed provider still applies to it.
+		expect(usageLimitBlockCoversModel("openai-codex", "gpt-6.1-sol", "openai-codex", "gpt-6.1-sol", resolver)).toBe(
+			true,
+		);
+		// Cross-provider stays uncovered regardless of the resolver.
+		expect(
+			usageLimitBlockCoversModel("openai-codex", "gpt-6.1-sol", "anthropic", "claude-sonnet-4-5", resolver),
+		).toBe(false);
+	});
+
+	it("drops an outcome that went stale while the reset-redeem lookup awaited", async () => {
+		const codexSol = getBundledModel("openai-codex", "gpt-6.1-sol");
+		const codexAstra = getBundledModel("openai-codex", "gpt-6-astra");
+		const claude = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!codexSol || !codexAstra || !claude) throw new Error("Expected bundled codex/anthropic models");
+		// #17571 (review): the outcome is attributed to astra while sol serves
+		// the session — same chat pool, NOT stale, so the redeem branch runs.
+		// The user then switches to Claude while the redeem lookup awaits: the
+		// still-recorded outcome must be revalidated against the post-await
+		// model and dropped, instead of setting Claude's retry deadline or
+		// cooldown from a Codex block.
+		const host = createHost(codexSol, modelRegistry);
+		const maybeAutoRedeemReset = vi.spyOn(host, "maybeAutoRedeemReset").mockImplementation(async () => {
+			vi.spyOn(host, "model").mockReturnValue(claude);
+			return { restored: false };
+		});
+		const events: { type: string; delayMs?: number }[] = [];
+		host.emitSessionEvent = async event => {
+			events.push(
+				event.type === "auto_retry_start" ? { type: event.type, delayMs: event.delayMs } : { type: event.type },
+			);
+		};
+		const recovery = new TurnRecovery(host);
+		const noteCooldown = vi.spyOn(recovery, "noteRetryFallbackCooldown").mockImplementation(() => {});
+		vi.spyOn(authStorage.limits, "markReached").mockResolvedValue({ switched: false });
+		const failed: AssistantMessage = {
+			...makeMessage([], codexAstra),
+			errorMessage: "429 usage_limit_reached: You've reached your ChatGPT plan limit. Try again in ~9701 min.",
+		};
+		await recovery.recordUsageLimitOutcome(failed);
+
+		const retried = await recovery.handleRetryableError(failed);
+
+		// The outcome was live for the pre-await model, so the redeem lookup ran…
+		expect(maybeAutoRedeemReset).toHaveBeenCalled();
+		expect(retried).toBe(true);
+		const retryStart = events.find(event => event.type === "auto_retry_start");
+		expect(retryStart).toBeDefined();
+		// …but the model switched across the await, so the ~9701-minute Codex
+		// window must not hold back the Claude retry: generic backoff only.
+		expect(retryStart?.delayMs ?? Number.POSITIVE_INFINITY).toBeLessThan(60_000);
+		expect(noteCooldown).not.toHaveBeenCalled();
 	});
 
 	it("parses a naive reset stamp with the attributed provider's timezone", async () => {

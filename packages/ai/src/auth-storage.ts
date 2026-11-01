@@ -19,6 +19,8 @@
  * const apiKey = await auth.keys.get("anthropic", sessionId, { modelId });
  */
 import { logger } from "@oh-my-pi/pi-utils";
+import type { CredentialRankingStrategy } from "./usage";
+import type { Provider } from "./types";
 import { SessionAffinity, type SessionRestrictions } from "./auth/affinity";
 import { BlockStoreHealth, CredentialBlocks } from "./auth/blocks";
 import { KeyCascade, KeyOverrides } from "./auth/cascade";
@@ -103,6 +105,17 @@ export class AuthStorage {
 	/** Stored credential rows, change/disable events, broker snapshot. */
 	get credentials(): CredentialsApi {
 		return this.#modules.pool;
+	}
+	/**
+	 * The resolver block scopes are read and written through (`markReached`, usage windows,
+	 * rotation). Consumers deciding whether one model's block covers another model — e.g. a retry
+	 * saga dropping a stale out-of-pool outcome — must resolve scopes through THIS resolver, not
+	 * the static bundled default: an embedder that overrides `rankingStrategyResolver` marks
+	 * scopes with that resolver, and a coverage check made against the default can disagree with
+	 * what the mark actually wrote.
+	 */
+	get rankingStrategyResolver(): (provider: Provider) => CredentialRankingStrategy | undefined {
+		return this.#options.rankingStrategyResolver ?? defaultRankingStrategy;
 	}
 	/** Provider auth cascade and key overrides. */
 	get keys(): KeysApi {
