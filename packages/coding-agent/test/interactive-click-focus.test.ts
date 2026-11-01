@@ -276,9 +276,13 @@ describe("inline click-to-focus geometry", () => {
 
 	/**
 	 * Install a runner whose one extension claims `schemes` (`demo:` by default) and records each
-	 * `link_activate` URL.
+	 * `link_activate` URL. With `deferred`, the extension binds only when the session's startup-deferred
+	 * load runs, as for an extension whose previous launch recorded it as deferrable.
 	 */
-	function installDemoLinkExtension(schemes: string[] = ["demo"]): {
+	function installDemoLinkExtension(
+		schemes: string[] = ["demo"],
+		deferred = false,
+	): {
 		activated: string[];
 		firstActivation: Promise<void>;
 		extension: Extension;
@@ -313,7 +317,7 @@ describe("inline click-to-focus geometry", () => {
 			shortcuts: new Map(),
 		};
 		const runner = new ExtensionRunner(
-			[extension],
+			deferred ? [] : [extension],
 			new ExtensionRuntime(),
 			tempDir.path(),
 			session.sessionManager,
@@ -322,6 +326,7 @@ describe("inline click-to-focus geometry", () => {
 			mode.settings,
 		);
 		Object.defineProperty(session, "extensionRunner", { configurable: true, get: () => runner });
+		if (deferred) session.setDeferredExtensionLoader(() => runner.addExtensions([extension]));
 		return { activated, firstActivation: first.promise, extension, runner };
 	}
 
@@ -369,6 +374,24 @@ describe("inline click-to-focus geometry", () => {
 		const chat = plainRows(mode.chatContainer.render(120)).join("\n");
 		expect(chat.split("Open the details now.").length - 1).toBe(1);
 		expect(chat.split("early notice").length - 1).toBe(1);
+	});
+
+	it("claims the link scheme of a startup-deferred extension once it binds, redrawing the transcript", async () => {
+		cfgExtensionAssistantTextRenderers.set(mode.settings, true);
+		const { runner } = installDemoLinkExtension(["demo"], true);
+		await mode.init({ suppressWelcomeIntro: true });
+		void mode.getUserInput();
+		await term.waitForRender();
+		const chat = () => plainRows(mode.chatContainer.render(120)).join("\n");
+		await showReply("Open [the details](demo:open/7) now.", "the details");
+		// Before the late bind nothing claims `demo:`: the link draws with its URL and cannot be picked.
+		expect(chat()).toContain("Open the details (demo:open/7) now.");
+		expect(runner.getUIContext()?.getLinkClicksAvailable()).toBe(false);
+
+		await session.loadDeferredExtensions();
+		await Promise.resolve();
+		expect(chat()).toContain("Open the details now.");
+		expect(runner.getUIContext()?.getLinkClicksAvailable()).toBe(true);
 	});
 
 	it("hands a click on an extension-owned link to its extension with tui.mouse on, other links unchanged", async () => {

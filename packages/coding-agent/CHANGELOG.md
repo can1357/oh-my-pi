@@ -10,6 +10,7 @@
 ### Fixed
 
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
+- An extension that registers a link scheme but loads after startup now has its links claimed: they no longer show a trailing `(scheme:…)` URL, `Alt+O` offers their hint tags, and `link_activate` fires ([#17728](https://github.com/can1357/oh-my-pi/pull/17728) by [@rierek](https://github.com/rierek))
 
 ## [18.15.0] - 2026-11-01
 
