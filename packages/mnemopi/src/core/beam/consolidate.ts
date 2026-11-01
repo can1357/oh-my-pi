@@ -351,6 +351,104 @@ function makeQuestionTokens(query: string): string[] {
 	return makeQuestionTokenGroups(query).all;
 }
 
+export const TR_ROUTING_PHRASES = [
+	"how many days",
+	"how many weeks",
+	"how many months",
+	"how long",
+	"what date",
+	"what day",
+	"when did",
+	"when does",
+	"deadline",
+	"timeline",
+	"how far apart",
+	"多久",
+	"幾天",
+	"几天",
+	"幾週",
+	"几周",
+	"幾個月",
+	"几个月",
+	"什麼時候",
+	"什么时候",
+	"何時",
+	"何时",
+	"哪一天",
+	"幾號",
+	"几号",
+	"哪天",
+	"時間線",
+	"时间线",
+	"時程",
+] as const;
+
+export const EO_ROUTING_PHRASES = [
+	"list the order",
+	"walk me through",
+	"chronological",
+	"in what order",
+	"sequence of events",
+	"先後順序",
+	"先后顺序",
+	"時間順序",
+	"时间顺序",
+	"事件順序",
+	"事件顺序",
+	"發生順序",
+	"发生顺序",
+	"先後",
+	"先后",
+	"歷程",
+	"历程",
+] as const;
+
+const EXTRA_GENERIC_TIMELINE_WORDS = [
+	"timelines",
+	"chronology",
+	"chronologically",
+	"history",
+	"historical",
+	"before",
+	"after",
+	"first",
+	"latest",
+	"recent",
+	"recently",
+	"last",
+	"newest",
+	"時序",
+	"时序",
+	"順序",
+	"顺序",
+	"最近",
+	"近期",
+	"最新",
+	"いつ",
+	"언제",
+	"タイムライン",
+	"時系列",
+	"타임라인",
+	"연표",
+] as const;
+
+export const GENERIC_TIMELINE_WORDS: ReadonlySet<string> = (() => {
+	const set = new Set<string>();
+	for (const phrase of [...TR_ROUTING_PHRASES, ...EO_ROUTING_PHRASES]) {
+		for (const token of makeQuestionTokens(phrase)) {
+			set.add(token.toLowerCase());
+		}
+		for (const part of phrase.toLowerCase().split(/\s+/g)) {
+			const trimmed = part.trim();
+			if (trimmed.length > 0) set.add(trimmed);
+		}
+	}
+	for (const word of EXTRA_GENERIC_TIMELINE_WORDS) {
+		set.add(word.toLowerCase());
+	}
+	return set;
+})();
+
 function emitEvent(
 	beam: BeamMemoryState,
 	type: string,
@@ -868,63 +966,8 @@ export function extractAndStoreFacts(
 function classifyAbility(query: string): string {
 	const normalized = query.normalize("NFC");
 	const q = normalized.toLowerCase();
-	if (
-		CJK_TEMPORAL_QUERY_RE.test(normalized) ||
-		[
-			"how many days",
-			"how many weeks",
-			"how many months",
-			"how long",
-			"what date",
-			"what day",
-			"when did",
-			"when does",
-			"deadline",
-			"timeline",
-			"how far apart",
-			"多久",
-			"幾天",
-			"几天",
-			"幾週",
-			"几周",
-			"幾個月",
-			"几个月",
-			"什麼時候",
-			"什么时候",
-			"何時",
-			"何时",
-			"哪一天",
-			"幾號",
-			"几号",
-			"哪天",
-			"時間線",
-			"时间线",
-			"時程",
-		].some(w => q.includes(w))
-	)
-		return "TR";
-	if (
-		[
-			"list the order",
-			"walk me through",
-			"chronological",
-			"in what order",
-			"sequence of events",
-			"先後順序",
-			"先后顺序",
-			"時間順序",
-			"时间顺序",
-			"事件順序",
-			"事件顺序",
-			"發生順序",
-			"发生顺序",
-			"先後",
-			"先后",
-			"歷程",
-			"历程",
-		].some(w => q.includes(w))
-	)
-		return "EO";
+	if (CJK_TEMPORAL_QUERY_RE.test(normalized) || TR_ROUTING_PHRASES.some(w => q.includes(w))) return "TR";
+	if (EO_ROUTING_PHRASES.some(w => q.includes(w))) return "EO";
 	if (
 		[
 			"have i",
@@ -1002,7 +1045,7 @@ function factRetrieve(beam: BeamMemoryState, query: string, topK: number): Memor
 		const likePairs = variants.flatMap(() => ["key LIKE ? ESCAPE '\\'", "value LIKE ? ESCAPE '\\'"]).join(" OR ");
 		const contextLikes = variants.map(() => "context_snippet LIKE ? ESCAPE '\\'").join(" OR ");
 		scoreExprs.push(
-			`(CASE WHEN key IN (${inPlaceholders}) OR value IN (${inPlaceholders}) THEN ${w * 8 + exactBonus} WHEN ${likePairs} THEN ${w * 4 + exactBonus} WHEN ${contextLikes} THEN ${w} ELSE 0 END)`,
+			`(CASE WHEN lower(key) IN (${inPlaceholders}) OR lower(value) IN (${inPlaceholders}) THEN ${w * 8 + exactBonus} WHEN ${likePairs} THEN ${w * 4 + exactBonus} WHEN ${contextLikes} THEN ${w} ELSE 0 END)`,
 		);
 		orderParams.push(
 			...variants,
@@ -1053,46 +1096,10 @@ function timelineRetrieve(
 		);
 		orderParams.push(trimmedLike, trimmedLike);
 	}
-	const genericTimelineWords = new Set([
-		"timeline",
-		"timelines",
-		"chronology",
-		"chronological",
-		"chronologically",
-		"history",
-		"historical",
-		"sequence",
-		"events",
-		"order",
-		"before",
-		"after",
-		"first",
-		"when",
-		"時間線",
-		"时間線",
-		"时间线",
-		"時序",
-		"时序",
-		"歷程",
-		"历程",
-		"順序",
-		"顺序",
-		"先後",
-		"先后",
-		"最近",
-		"近期",
-		"最新",
-		"いつ",
-		"언제",
-		"タイムライン",
-		"時系列",
-		"타임라인",
-		"연표",
-	]);
 	const exactPrimarySet = new Set(exactPrimary);
 	for (const p of primary) {
 		const lowerP = p.toLowerCase();
-		const isGeneric = genericTimelineWords.has(lowerP);
+		const isGeneric = GENERIC_TIMELINE_WORDS.has(lowerP) || CJK_TEMPORAL_QUERY_RE.test(lowerP);
 		const w = isGeneric ? 1 : codePointLength(p);
 		const exactBonus = exactPrimarySet.has(p) && !isGeneric ? w * 2 : 0;
 		const variants = /^[\x00-\x7f]*$/.test(p) ? [p] : unicodeCaseVariants(p);
@@ -1150,7 +1157,7 @@ function kgRetrieve(beam: BeamMemoryState, query: string, topK: number): Memoria
 			.flatMap(() => ["subject LIKE ? ESCAPE '\\'", "predicate LIKE ? ESCAPE '\\'", "object LIKE ? ESCAPE '\\'"])
 			.join(" OR ");
 		scoreExprs.push(
-			`(CASE WHEN subject IN (${inPlaceholders}) OR object IN (${inPlaceholders}) THEN ${w * 8 + exactBonus} WHEN ${likeParts} THEN ${w * 4 + exactBonus} ELSE 0 END)`,
+			`(CASE WHEN lower(subject) IN (${inPlaceholders}) OR lower(object) IN (${inPlaceholders}) THEN ${w * 8 + exactBonus} WHEN ${likeParts} THEN ${w * 4 + exactBonus} ELSE 0 END)`,
 		);
 		orderParams.push(
 			...variants,

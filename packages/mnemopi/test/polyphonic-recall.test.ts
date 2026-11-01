@@ -1310,4 +1310,93 @@ describe("PolyphonicRecallEngine", () => {
 			closeQuietly(beam.db);
 		}
 	});
+
+	it("ranks exact ASCII key PostgreSQL above higher-importance PostgreSQL backup in what is postgresql", () => {
+		const beam = makeBeam();
+		try {
+			beam.db.run(
+				`INSERT INTO memoria_facts
+					(session_id, message_idx, fact_type, key, value, context_snippet, importance, source_memory_id)
+					VALUES
+					(?, 0, 'entity', 'PostgreSQL', 'relational database management system', 'database overview', 0.8, 'wm-pg-exact'),
+					(?, 1, 'entity', 'PostgreSQL backup', 'backup policy and snapshots', 'backup strategy', 0.95, 'wm-pg-backup')`,
+				[beam.sessionId, beam.sessionId],
+			);
+			const result = memoriaRetrieve(beam, "what is postgresql", null, 2);
+			expect(result.ability).toBe("IE");
+			expect(result.results.length).toBe(2);
+			expect((result.results as Array<{ key?: string }>)[0]?.key).toBe("PostgreSQL");
+			expect((result.results as Array<{ key?: string }>)[1]?.key).toBe("PostgreSQL backup");
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
+
+	it("ranks specific Go timeline event above an unrelated deadline event in Go deadline query at topK = 1", () => {
+		const beam = makeBeam();
+		try {
+			beam.db.run(
+				`INSERT INTO memoria_timelines (session_id, event_id, date, description, source_memory_id)
+					VALUES
+					(?, 1, '2026-11-01', 'General project deadline and review checklist', 'tl-deadline'),
+					(?, 2, '2026-11-05', 'Go language backend migration milestone', 'tl-go')`,
+				[beam.sessionId, beam.sessionId],
+			);
+			const result = memoriaRetrieve(beam, "Go deadline", "TR", 1);
+			expect(result.ability).toBe("TR");
+			expect(result.results.length).toBe(1);
+			expect((result.results as Array<{ event_id?: number }>)[0]?.event_id).toBe(2);
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
+
+	it("preserves one-letter Latin identifiers C and R in diversityRerank without near-duplicate collapsing", () => {
+		const beam = makeBeam();
+		try {
+			const engine = seedPolyphonicFixture(beam);
+			const timestamp = new Date().toISOString();
+			insertWorking(beam, "wm-c-db", "C語言資料庫連線設定與備份策略", 0.9, timestamp);
+			insertWorking(beam, "wm-r-db", "R語言資料庫連線設定與備份策略", 0.88, timestamp);
+			const candidates = new Map([
+				[
+					"wm-c-db",
+					{
+						memoryId: "wm-c-db",
+						combinedScore: 0.1,
+						voiceScores: { hybrid: 0.1 },
+						metadata: {},
+					},
+				],
+				[
+					"wm-r-db",
+					{
+						memoryId: "wm-r-db",
+						combinedScore: 0.09,
+						voiceScores: { hybrid: 0.09 },
+						metadata: {},
+					},
+				],
+			]);
+			const reranked = engine.diversityRerank(candidates, 10, candidate => {
+				const row = beam.db
+					.query("SELECT id, content FROM working_memory WHERE id = ?")
+					.get(candidate.memoryId) as { id: string; content: string } | null;
+				if (!row) return null;
+				return {
+					id: row.id,
+					content: row.content,
+					score: candidate.combinedScore,
+					combined_score: candidate.combinedScore,
+					voice_scores: candidate.voiceScores,
+					metadata: candidate.metadata,
+					tier: "working",
+					tier_label: "working",
+				};
+			});
+			expect(reranked.map(r => r.id)).toEqual(["wm-c-db", "wm-r-db"]);
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
 });
