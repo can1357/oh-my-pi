@@ -289,8 +289,8 @@ import { stopSharedSpinnerTicker, type ToolExecutionHandle } from "@oh-my-pi/pi-
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { Composer, type ComposerPreferences, type ComposerStatusCache } from "@oh-my-pi/pi-tui/prompt/composer";
 import { PINNED_HUD_TOGGLE_ID } from "../task/output-manager";
-import type { TranscriptEntryLike } from "@oh-my-pi/pi-tui/chat/transcript-entry";
-import { LinkBrowserComponent } from "@oh-my-pi/pi-tui/overlays/link-browser";
+import { isUserRequestEntry, type TranscriptEntryLike } from "@oh-my-pi/pi-tui/chat/transcript-entry";
+import { LinkBrowserComponent, type LinkBrowserDeps } from "@oh-my-pi/pi-tui/overlays/link-browser";
 import { getAssistantMessageLinkTargets } from "@oh-my-pi/pi-tui/prompt/interactive-context-helpers";
 import { setMagicKeywords } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
 import { MAGIC_KEYWORDS } from "./magic-keywords";
@@ -1987,10 +1987,20 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** The fullscreen extension link browser while it is shown. */
 	#linkBrowser: { component: LinkBrowserComponent; handle: OverlayHandle } | undefined;
 	/**
-	 * What the link browser last found no extension link in: pressing the key again skips the full
-	 * replay until the transcript, its renderers, the link schemes or the width change.
+	 * The start of the viewed branch the link browser last found no extension link in: its first
+	 * `checked` entries, the last of them `lastId`. They end where a user turn starts, so no later
+	 * entry changes how they draw (as a tool result does its call's card). The next check replays
+	 * only the entries after them, until the link schemes, the width or the renderers change.
 	 */
-	#linkBrowserMiss: { view: AgentSession; key: string; renderers: readonly AssistantTextRenderer[] } | undefined;
+	#linkBrowserMiss:
+		| {
+				view: AgentSession;
+				key: string;
+				renderers: readonly AssistantTextRenderer[];
+				checked: number;
+				lastId: string | undefined;
+		  }
+		| undefined;
 	/** A rebuild of the transcript's terminal scrollback held back until the link browser closes. */
 	#scrollbackRebuildPending = false;
 	#observerUiSyncTimer?: NodeJS.Timeout;
@@ -4414,7 +4424,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (!extensionLinksRouted()) return false;
 		if (this.composer.viewportLinkCount() === 0) {
 			// Links may still be drawn in terminal scrollback, out of the tags' reach: browse for them.
-			if (!this.openLinkBrowser()) this.showStatus("No extension links on screen");
+			if (!this.openLinkBrowser()) this.showStatus("No extension links in the transcript");
 			return true;
 		}
 		this.composer.startLinkHints(reason => {
@@ -4449,13 +4459,18 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.#linkBrowser || !extensionLinksRouted()) return false;
 		const view = this.viewSession;
 		const renderers = view.extensionRunner?.getAssistantTextRenderers() ?? [];
-		// A streaming reply grows, so a check that saw it never holds.
-		const missKey = `${view.sessionManager.getLeafId()}\0${extensionLinksVersion()}\0${this.ui.terminal.columns}`;
-		const miss = this.#linkBrowserMiss;
-		if (!view.isStreaming && miss?.view === view && miss.key === missKey && sameItems(miss.renderers, renderers)) {
-			return false;
-		}
+		const columns = this.ui.terminal.columns;
+		const key = `${extensionLinksVersion()}\0${columns}`;
 		const entries: TranscriptEntryLike[] = view.sessionManager.getBranch().filter(isTranscriptEntry);
+		const committed = entries.length;
+		const miss = this.#linkBrowserMiss;
+		const checked =
+			miss?.view === view &&
+			miss.key === key &&
+			sameItems(miss.renderers, renderers) &&
+			entries[miss.checked - 1]?.id === miss.lastId
+				? miss.checked
+				: 0;
 		// A reply still streaming is drawn as far as it has come; the browser keeps that snapshot.
 		const streaming = view.isStreaming ? this.streamingMessage : undefined;
 		if (streaming) {
@@ -4467,7 +4482,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				message: streaming,
 			});
 		}
-		const component = new LinkBrowserComponent(entries, {
+		const deps: LinkBrowserDeps = {
 			ui: this.ui,
 			getTool: name => view.getToolByName(name),
 			isBuiltInTool: name => view.hasBuiltInTool(name),
@@ -4482,11 +4497,22 @@ export class InteractiveMode implements InteractiveModeContext {
 			// The runner whose transcript the browser draws, even if the view changes while it is open.
 			onActivate: url => this.#activateLink(url, view.extensionRunner),
 			onClose: () => this.closeLinkBrowser(),
-		});
-		if (!component.hasLinks(this.ui.terminal.columns)) {
+		};
+		let component = new LinkBrowserComponent(entries.slice(checked), deps);
+		if (!component.hasLinks(columns)) {
 			component.dispose();
-			this.#linkBrowserMiss = view.isStreaming ? undefined : { view, key: missKey, renderers };
+			// Cache up to the last user turn start; the turn from there may still change.
+			let settled = committed - 1;
+			while (settled > checked && !isUserRequestEntry(entries[settled]!)) settled--;
+			if (settled > checked) {
+				this.#linkBrowserMiss = { view, key, renderers, checked: settled, lastId: entries[settled - 1]!.id };
+			}
 			return false;
+		}
+		if (checked > 0) {
+			// The link is in the entries after the cached part: open on the whole branch.
+			component.dispose();
+			component = new LinkBrowserComponent(entries, deps);
 		}
 		const handle = this.ui.showOverlay(component, {
 			anchor: "bottom-center",

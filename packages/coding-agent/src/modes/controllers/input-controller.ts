@@ -889,7 +889,7 @@ export class InputController {
 		}
 		if (this.ctx.keybindings.matches(data, "app.links.hint") || matchesKey(data, "pageUp")) {
 			// Leaves link-hint mode whether or not the browser opens.
-			this.ctx.openLinkBrowser();
+			if (!this.ctx.openLinkBrowser()) this.ctx.showStatus("No extension links in the transcript");
 			return { consume: true };
 		}
 		const key = parseKey(data);
