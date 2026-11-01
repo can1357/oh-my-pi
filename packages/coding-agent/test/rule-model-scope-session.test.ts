@@ -71,15 +71,18 @@ describe("model-scoped rules in a live session", () => {
 		sessionManager?: SessionManager;
 		taskDepth?: number;
 		toolNames?: string[];
+		/** Discover rules from this directory's `.omp/rules` instead of passing them in. */
+		discoverRulesIn?: string;
 	}): Promise<AgentSession> {
+		const cwd = options.discoverRulesIn ?? dir;
 		const { session } = await createAgentSession({
-			cwd: dir,
-			agentDir: dir,
+			cwd,
+			agentDir: cwd,
 			modelRegistry,
 			sessionManager: options.sessionManager ?? SessionManager.inMemory(),
 			settings: options.settings ?? Settings.isolated(),
 			model: options.model,
-			rules: options.rules ?? variantRules,
+			rules: options.discoverRulesIn ? undefined : (options.rules ?? variantRules),
 			taskDepth: options.taskDepth,
 			disableExtensionDiscovery: true,
 			skills: [],
@@ -200,6 +203,34 @@ describe("model-scoped rules in a live session", () => {
 		expect(session.ttsrManager?.getRules().map(r => r.name)).toEqual(["sonnet-guard"]);
 		expect(getActiveRules().map(r => r.name)).not.toContain("opus-guard");
 		expect(getActiveRules().map(r => r.name)).toContain("sonnet-guard");
+	});
+
+	it("refreshes a live advisor's scoped rules after /clear rediscovers them", async () => {
+		const project = path.join(dir, `advisor-refresh-${Snowflake.next()}`);
+		const ruleFile = path.join(project, ".omp", "rules", "style.md");
+		const writeRule = (body: string) => Bun.write(ruleFile, `---\nalwaysApply: true\nfamily: sonnet\n---\n${body}\n`);
+		await fs.mkdir(path.join(project, ".git"), { recursive: true });
+		await writeRule("ORIGINAL_ADVISOR_RULE_4e1f");
+		const settings = Settings.isolated();
+		settings.setModelRole("advisor", sonnetSelector);
+		const session = await startSession({
+			model: opus,
+			settings,
+			discoverRulesIn: project,
+			sessionManager: SessionManager.inMemory(project),
+		});
+		session.setAdvisorEnabled(true);
+		const advisorPrompt = () => session.getAdvisorAgent()?.state.systemPrompt.join("\n") ?? "";
+		expect(advisorPrompt()).toContain("ORIGINAL_ADVISOR_RULE_4e1f");
+
+		await writeRule("UPDATED_ADVISOR_RULE_8b2c");
+		await session.resetSessionContext();
+		expect(advisorPrompt()).toContain("UPDATED_ADVISOR_RULE_8b2c");
+		expect(advisorPrompt()).not.toContain("ORIGINAL_ADVISOR_RULE_4e1f");
+
+		await fs.rm(ruleFile);
+		await session.resetSessionContext();
+		expect(advisorPrompt()).not.toContain("UPDATED_ADVISOR_RULE_8b2c");
 	});
 
 	it("gives advisors only the always-apply rules scoped to their own model", async () => {

@@ -1976,6 +1976,24 @@ export class SessionAdvisors {
 		});
 	}
 
+	/** Re-render the advisor's system prompt for `model`; leaves an identical prompt untouched for the prompt cache. */
+	#applyAdvisorSystemPrompt(advisor: ActiveAdvisor, model: Model): void {
+		const systemPrompt = advisor.systemPromptFor(model);
+		const currentPrompt = advisor.agent.state.systemPrompt;
+		if (systemPrompt.length !== currentPrompt.length || systemPrompt.some((part, i) => part !== currentPrompt[i])) {
+			advisor.agent.setSystemPrompt(systemPrompt);
+		}
+	}
+
+	/**
+	 * Re-render every live advisor's model-scoped rules block after rules were
+	 * rediscovered (`/clear`, `/new`). Advisors whose block is unchanged keep
+	 * their prompt as is.
+	 */
+	refreshModelRules(): void {
+		for (const advisor of this.#advisors) this.#applyAdvisorSystemPrompt(advisor, advisor.model);
+	}
+
 	/** Switch one advisor model while preserving its context and effort invariants. */
 	#setAdvisorModel(
 		advisor: ActiveAdvisor,
@@ -1985,11 +2003,7 @@ export class SessionAdvisors {
 		const resolvedThinkingLevel = resolveThinkingLevelForModel(model, requestedThinkingLevel);
 		const nextThinkingLevel = resolvedThinkingLevel ?? ThinkingLevel.Inherit;
 		advisor.agent.setModel(model);
-		const systemPrompt = advisor.systemPromptFor(model);
-		const currentPrompt = advisor.agent.state.systemPrompt;
-		if (systemPrompt.length !== currentPrompt.length || systemPrompt.some((part, i) => part !== currentPrompt[i])) {
-			advisor.agent.setSystemPrompt(systemPrompt);
-		}
+		this.#applyAdvisorSystemPrompt(advisor, model);
 		advisor.agent.setThinkingLevel(toReasoningEffort(nextThinkingLevel));
 		advisor.agent.setDisableReasoning(shouldDisableReasoning(nextThinkingLevel));
 		advisor.agent.appendOnlyContext?.invalidateForModelChange();

@@ -4267,6 +4267,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// so leaving the construction-time arrays would advertise a new `rule://<name>`
 				// the read tool rejects and hand children the stale set.
 				toolSession.rules = ruleItems;
+				session.refreshAdvisorModelRules();
 			}
 			// Every build, including the first, scopes rules to the model the prompt is built for.
 			rescopeRules(agent?.state.model ?? model);

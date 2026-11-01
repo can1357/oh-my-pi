@@ -15281,6 +15281,11 @@ export class AgentSession implements SettingsScope {
 		this.#advisors.setContextPrompt(contextPrompt);
 	}
 
+	/** Re-render live advisors' model-scoped rules after rule rediscovery; unchanged prompts stay as they are. */
+	refreshAdvisorModelRules(): void {
+		this.#advisors.refreshModelRules();
+	}
+
 	/**
 	 * Refresh the memory backend instructions advisor sessions run against.
 	 * Store-only: live advisors pick the new value up at their next runtime
