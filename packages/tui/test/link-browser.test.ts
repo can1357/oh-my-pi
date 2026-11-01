@@ -322,4 +322,35 @@ describe("extension link browser", () => {
 		expect(browser.hasLinks(WIDTH)).toBe(true);
 		browser.dispose();
 	});
+
+	it("keeps a label's tag across a resize that rewraps only the older history loaded above it", () => {
+		const branch = longBranch("Nothing to pick here.");
+		// The old reply wraps onto fewer rows once the terminal widens; the recent rows do not.
+		branch[1] = reply(`Old ${"wrapping words ".repeat(20)}here.`, 1);
+		branch.push(
+			...linkReplies(["apple", "avocado"], 1).map((entry, index) => ({ ...entry, id: `link${index}` })),
+			...Array.from({ length: 10 }, (_, index) => reply(`More filler ${index}.`, 9000 + index)),
+		);
+		const { browser, activated, view, tags } = browse(branch);
+		const scrollUntil = (key: string, done: () => boolean) => {
+			for (let step = 0; step < 100 && !done(); step++) browser.handleInput(key);
+			expect(done()).toBe(true);
+		};
+		view();
+		// Replay the older history, then scroll up from the bottom to the links.
+		browser.handleInput(HOME);
+		browser.handleInput(END);
+		// A tag is drawn over the letter it is, so match the rest of each label.
+		scrollUntil(UP, () => view().some(row => row.includes("pple here.")));
+		// `avocado` came into view first and took `a`; `apple` fell back to its next letter.
+		expect(tags()).toEqual(["p", "a"]);
+		// With `avocado` scrolled out, `a` is free: a label tagged afresh would take it.
+		scrollUntil(UP, () => !view().some(row => row.includes("vocado here.")));
+		expect(tags()).toEqual(["p"]);
+		const wider = browser.render(WIDTH + 20).map(row => Bun.stripANSI(row));
+		expect(wider.some(row => row.includes("See ppple here."))).toBe(true);
+		browser.handleInput("p");
+		expect(activated).toEqual(["demo:apple"]);
+		browser.dispose();
+	});
 });
