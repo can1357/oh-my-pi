@@ -6,13 +6,19 @@ function mockMonotonicScheduler(elapsedForWait: (delayMs: number) => number = de
 	const startedAt = 10_000;
 	let now = startedAt;
 	vi.spyOn(performance, "now").mockImplementation(() => now);
-	const wait = vi.spyOn(timers, "setTimeout").mockImplementation(async (delayMs, _value, options) => {
-		options?.signal?.throwIfAborted();
-		now += elapsedForWait(delayMs ?? 0);
-		options?.signal?.throwIfAborted();
+	const advance = (delayMs: number, signal: AbortSignal | undefined) => {
+		signal?.throwIfAborted();
+		now += elapsedForWait(delayMs);
+		signal?.throwIfAborted();
+	};
+	const wait = vi.spyOn(timers.scheduler, "wait").mockImplementation(async (delayMs, options) => {
+		advance(delayMs, options?.signal);
+	});
+	const unrefWait = vi.spyOn(timers, "setTimeout").mockImplementation(async (delayMs, _value, options) => {
+		advance(delayMs ?? 0, options?.signal);
 		return undefined as never;
 	});
-	return { elapsed: () => now - startedAt, wait };
+	return { elapsed: () => now - startedAt, wait, unrefWait };
 }
 
 afterEach(() => {
@@ -65,6 +71,16 @@ describe("sleepLong", () => {
 
 		await expect(sleepLong(0, controller.signal)).rejects.toThrow("The operation was aborted");
 		expect(clock.wait).not.toHaveBeenCalled();
+		expect(clock.unrefWait).not.toHaveBeenCalled();
+	});
+
+	it("keeps a referenced sleep on scheduler.wait, the timer a caller's clock mock replaces", async () => {
+		const clock = mockMonotonicScheduler();
+
+		await sleepLong(MAX_TIMER_DELAY_MS + 1_000);
+
+		expect(clock.wait).toHaveBeenCalledTimes(2);
+		expect(clock.unrefWait).not.toHaveBeenCalled();
 	});
 
 	it("arms every chunk unreferenced when ref is false", async () => {
@@ -72,7 +88,8 @@ describe("sleepLong", () => {
 
 		await sleepLong(MAX_TIMER_DELAY_MS + 1_000, undefined, { ref: false });
 
-		expect(clock.wait.mock.calls.map(([, , options]) => options?.ref)).toEqual([false, false]);
+		expect(clock.unrefWait.mock.calls.map(([, , options]) => options?.ref)).toEqual([false, false]);
+		expect(clock.wait).not.toHaveBeenCalled();
 	});
 
 	it("lets a process exit while an unreferenced long sleep is pending", async () => {
