@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import { resolveModels, runTinyModelsCommand } from "@oh-my-pi/pi-coding-agent/cli/tiny-models-cli";
+import { tinyModelBackendRefusal, tinyModelSupportsBackend } from "@oh-my-pi/pi-coding-agent/tiny/backend-policy";
 import { TINY_LOCAL_MODELS } from "@oh-my-pi/pi-coding-agent/tiny/models";
-import { tinyTitleClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
+import { mlxLaunch, tinyTitleClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
 
 afterEach(() => {
 	vi.restoreAllMocks();
@@ -9,27 +10,44 @@ afterEach(() => {
 
 describe("tiny-models download model resolution", () => {
 	it("excludes ONNX-blocked models from `all` so the bulk prefetch stays green", () => {
-		const unsupported = TINY_LOCAL_MODELS.filter(
-			spec => "onnxUnsupportedReason" in spec && spec.onnxUnsupportedReason,
-		).map(spec => spec.key);
+		const unsupported = TINY_LOCAL_MODELS.filter(spec => !tinyModelSupportsBackend(spec.key, "onnx")).map(
+			spec => spec.key,
+		);
 		// Guard: keep this regression meaningful — at least one registry entry must be load-blocked.
 		expect(unsupported.length).toBeGreaterThan(0);
 
 		const all = resolveModels("all", false);
 		for (const key of unsupported) expect(all).not.toContain(key);
 
-		const usable = TINY_LOCAL_MODELS.filter(
-			spec => !("onnxUnsupportedReason" in spec) || !spec.onnxUnsupportedReason,
-		).map(spec => spec.key);
+		const usable = TINY_LOCAL_MODELS.filter(spec => tinyModelSupportsBackend(spec.key, "onnx")).map(spec => spec.key);
 		for (const key of usable) expect(all).toContain(key);
 	});
 
-	it("includes ONNX-blocked models in `all` when the MLX backend is active", () => {
-		expect(resolveModels("all", true)).toEqual(TINY_LOCAL_MODELS.map(spec => spec.key));
+	it("keeps every loadable model in `all` when the MLX backend is active", () => {
+		const mlxBlocked = TINY_LOCAL_MODELS.filter(spec => !tinyModelSupportsBackend(spec.key, "mlx")).map(
+			spec => spec.key,
+		);
+		const onnxBlocked = TINY_LOCAL_MODELS.filter(spec => !tinyModelSupportsBackend(spec.key, "onnx")).map(
+			spec => spec.key,
+		);
+		// Guard: keep this regression meaningful — the registry must exercise both directions.
+		expect(mlxBlocked.length).toBeGreaterThan(0);
+		expect(onnxBlocked.length).toBeGreaterThan(0);
+
+		const all = resolveModels("all", true);
+		// MLX-blocked models still run on ONNX CPU, so they are prefetched.
+		for (const key of mlxBlocked) expect(all).toContain(key);
+		// ONNX-blocked models are the ones MLX exists for.
+		for (const key of onnxBlocked) expect(all).toContain(key);
+		// Only a model no backend can load is skipped.
+		for (const key of [...mlxBlocked, ...onnxBlocked]) {
+			if (!(mlxBlocked.includes(key) && onnxBlocked.includes(key))) continue;
+			expect(all).not.toContain(key);
+		}
 	});
 
 	it("still resolves an explicitly requested unsupported model (only `all` is filtered)", () => {
-		const blocked = TINY_LOCAL_MODELS.find(spec => "onnxUnsupportedReason" in spec && spec.onnxUnsupportedReason);
+		const blocked = TINY_LOCAL_MODELS.find(spec => !tinyModelSupportsBackend(spec.key, "onnx"));
 		expect(blocked).toBeDefined();
 		if (!blocked) return;
 		expect(resolveModels(blocked.key, false)).toEqual([blocked.key]);
@@ -114,5 +132,29 @@ describe("tiny-models download model resolution", () => {
 		expect(text).toContain("PI_TINY_DEVICE=cuda");
 		expect(text).toContain("libcudnn.so.9");
 		expect(text).toContain("tiny-title-runtime");
+	});
+});
+
+describe("mlx backend model gate", () => {
+	it("refuses a model the pinned mlx-lm cannot load", () => {
+		expect(() => mlxLaunch("lfm3-1.7b", () => {})).toThrow(/unavailable on MLX/);
+	});
+
+	it("builds a launch for a model mlx-lm can load", () => {
+		expect(mlxLaunch("lfm2-1.2b", () => {}).backend).toBe("mlx");
+	});
+});
+
+describe("tiny backend policy", () => {
+	it("pins the reviewed refusals for the restricted models", () => {
+		// qwen3-1.7b: ONNX cannot run its RotaryEmbedding cache updates, MLX can.
+		expect(tinyModelBackendRefusal("qwen3-1.7b", "onnx")).toMatch(/RotaryEmbedding/);
+		expect(tinyModelBackendRefusal("qwen3-1.7b", "mlx")).toBeUndefined();
+		// lfm3-1.7b: the pinned mlx-lm has no lfm3 architecture, ONNX runs it.
+		expect(tinyModelBackendRefusal("lfm3-1.7b", "mlx")).toMatch(/lfm3/);
+		expect(tinyModelBackendRefusal("lfm3-1.7b", "onnx")).toBeUndefined();
+		// An unrestricted model is loadable by both backends.
+		expect(tinyModelBackendRefusal("lfm2-1.2b", "onnx")).toBeUndefined();
+		expect(tinyModelBackendRefusal("lfm2-1.2b", "mlx")).toBeUndefined();
 	});
 });

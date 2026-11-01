@@ -617,6 +617,18 @@ export interface CompiledProviderDiscovery {
 	allowUnauthenticated?: boolean;
 }
 
+/** Inference backend a local model can be served by. */
+export type SeedBackend = "onnx" | "mlx";
+
+/**
+ * One reviewed backend refusal: the backend that cannot load a seed row, and why.
+ * Absence of a refusal means the backend can load the row.
+ */
+export interface CompiledSeedBackendRefusal {
+	backend: SeedBackend;
+	reason: string;
+}
+
 /**
  * One authored seed row: the intrinsic `ModelSpec` fields plus optional
  * explicit `thinking` / `compat` overrides compiled from the axis vocabulary
@@ -634,6 +646,8 @@ export interface CompiledSeedModel {
 	/** Wire model id sent upstream when it differs from the row id (`request-model-id`). */
 	requestModelId?: string;
 	supportsTools?: boolean;
+	/** Backends that cannot load this row (`unsupported` nodes); absent means all can. */
+	unsupportedBackends?: CompiledSeedBackendRefusal[];
 	cost: TokenCost;
 	contextWindow: number | null;
 	maxTokens: number | null;

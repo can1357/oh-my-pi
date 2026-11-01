@@ -14,7 +14,7 @@
 			"@babel/parser": "^7.29.7",
 			"@babel/traverse": "^7.29.7",
 			"@babel/types": "^7.29.7",
-			"@huggingface/transformers": "^4.2.0",
+			"@huggingface/transformers": "^4.3.2",
 			"@napi-rs/cli": "3.7.2",
 			"@oh-my-pi/omp-stats": "18.14.2",
 			"@oh-my-pi/omptype": "18.14.2",

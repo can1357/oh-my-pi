@@ -533,6 +533,28 @@ describe("provider catalog grammar", () => {
 		).toThrow(/directive `kind-apis` has a malformed value/);
 	});
 
+	test("seed unsupported nodes record backend refusals; unknown and duplicate backends are rejected", () => {
+		const seeded = (axes: string) =>
+			compileProviders(
+				src(
+					provider("p", ['\tdefault-model "m"', seed('api="local-inference" base-url="local://inference"', axes)]),
+				),
+			);
+		expect(seeded('\t\t\tunsupported "mlx" reason="pinned runtime has no driver"').p.seed?.models[0]).toMatchObject({
+			id: "m",
+			unsupportedBackends: [{ backend: "mlx", reason: "pinned runtime has no driver" }],
+		});
+		// Absence means every backend can load the row.
+		expect(seeded("").p.seed?.models[0]).not.toHaveProperty("unsupportedBackends");
+		expect(() => seeded('\t\t\tunsupported "cuda" reason="x"')).toThrow(
+			/directive `unsupported` has a malformed value/,
+		);
+		expect(() => seeded('\t\t\tunsupported "onnx"')).toThrow(/directive `unsupported` has a malformed value/);
+		expect(() => seeded('\t\t\tunsupported "onnx" reason="a"\n\t\t\tunsupported "onnx" reason="b"')).toThrow(
+			/directive `unsupported` has a malformed value/,
+		);
+	});
+
 	test("seed request-model-id becomes the row's requestModelId; duplicates and non-strings are rejected", () => {
 		const seeded = (axes: string) =>
 			compileProviders(
