@@ -3668,9 +3668,7 @@ export class AgentSession implements SettingsScope {
 		if (turn.messages === undefined && (this.isCompacting || this.#maintenance.historyReplacement)) return false;
 		while (this.#maintenance.historyReplacement) {
 			try {
-				await (signal
-					? untilAborted(signal, this.#maintenance.historyReplacement)
-					: this.#maintenance.historyReplacement);
+				await this.#waitForHistoryReplacement(signal);
 			} catch {
 				return false;
 			}

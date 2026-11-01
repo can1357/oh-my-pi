@@ -297,6 +297,7 @@ export interface TurnRecoveryHost {
 		delayMs?: number;
 		generation?: number;
 		shouldContinue?: () => boolean;
+		onSkip?: () => void;
 		onError?: (error: unknown) => void;
 	}): void;
 	waitForSessionMessagePersistence(message: AssistantMessage): Promise<void>;
@@ -399,6 +400,8 @@ export class TurnRecovery {
 	#requestBodyReadTimeoutRecoveryPromptSequence: number | undefined;
 	#retryPromise: Promise<void> | undefined;
 	#retryResolve: (() => void) | undefined;
+	/** Identifies the latest saga even after agent_end resolves its promise. */
+	#retrySagaGeneration = 0;
 	#activeRetryFallback: ActiveRetryFallbackState | undefined;
 	#activeFallbackCreditRedemption?: {
 		targetSelector: string;
@@ -899,6 +902,7 @@ export class TurnRecovery {
 		end: RetrySagaEnd,
 		record: { terminalTurn?: AssistantMessage; retryErrors?: RetryErrorCompletion },
 	): Promise<void> {
+		const retrySagaGeneration = this.#retrySagaGeneration;
 		let retryErrors: RetryErrorUpdate[] | undefined;
 		try {
 			if (record.terminalTurn) await this.persistTerminalEmptyErrorTurn(record.terminalTurn);
@@ -911,9 +915,11 @@ export class TurnRecovery {
 					...(retryErrors ? { retryErrors } : {}),
 				});
 			} finally {
-				this.#clearPendingRetryErrors();
-				this.#retryAttempt = 0;
-				this.resolveRetry();
+				if (this.#retrySagaGeneration === retrySagaGeneration) {
+					this.#clearPendingRetryErrors();
+					this.#retryAttempt = 0;
+					this.resolveRetry();
+				}
 			}
 		}
 	}
@@ -2664,6 +2670,7 @@ export class TurnRecovery {
 		// Create retry promise on first attempt so waitForRetry() can await it
 		// Ensure only one promise exists (avoid orphaned promises from concurrent calls)
 		if (!this.#retryPromise) {
+			this.#retrySagaGeneration++;
 			const { promise, resolve } = Promise.withResolvers<void>();
 			this.#retryPromise = promise;
 			this.#retryResolve = resolve;
@@ -3162,11 +3169,20 @@ export class TurnRecovery {
 		// continuation that still fails locally must close the retry saga —
 		// otherwise auto_retry_end never fires, retryPromise stays pending, and
 		// the in-flight prompt() (and the TUI retry indicator) hang forever.
+		const retryPromise = this.#retryPromise;
 		this.#host.scheduleAgentContinue({
 			source: "automatic-retry",
 			delayMs: 1,
 			generation,
 			shouldContinue: () => this.#retryAttempt > 0,
+			onSkip: () => {
+				if (!retryPromise || this.#retryPromise !== retryPromise) return;
+				void this.#endCancelledRetry().catch(error =>
+					logger.error("Closing a retry saga after a skipped continuation threw", {
+						error: error instanceof Error ? error.message : String(error),
+					}),
+				);
+			},
 			onError: error =>
 				void this.#failRetryAfterLocalContinueError(message, error).catch(failure =>
 					logger.error("Closing a retry saga after a failed local continuation threw", {
@@ -3178,19 +3194,12 @@ export class TurnRecovery {
 		return true;
 	}
 
-	/** Closes a retry saga whose credential wait or backoff sleep was aborted. */
+	/** Closes a retry saga whose wait or scheduled continuation was cancelled. */
 	async #endCancelledRetry(): Promise<false> {
 		const attempt = this.#retryAttempt;
 		this.#retryAttempt = 0;
 		this.#retryAbortController = undefined;
-		await this.#host.emitSessionEvent({
-			type: "auto_retry_end",
-			success: false,
-			attempt,
-			finalError: "Retry cancelled",
-		});
-		this.#clearPendingRetryErrors();
-		this.resolveRetry();
+		await this.#closeRetrySaga({ success: false, attempt, finalError: "Retry cancelled" }, {});
 		return false;
 	}
 

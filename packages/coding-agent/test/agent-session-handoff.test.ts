@@ -18,8 +18,9 @@ import { SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { cfgRetryBaseDelayMs, cfgRetryUsageAwareFallback } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 
 import {
@@ -224,6 +225,227 @@ describe("AgentSession handoff", () => {
 		expect(sessionManager.getBranch().some(entry => entry.type === "compaction")).toBe(false);
 		expect(mock.calls).toHaveLength(1);
 	});
+
+	it("settles a retry skipped by handoff during usage preflight so prompt and waitForIdle complete", async () => {
+		cfgCompactionEnabled.set(session.settings, false);
+		cfgRetryUsageAwareFallback.set(session.settings, true);
+		cfgRetryBaseDelayMs.set(session.settings, 1);
+		const preflightStarted = Promise.withResolvers<void>();
+		const releasePreflight = Promise.withResolvers<void>();
+		const handoffStarted = Promise.withResolvers<void>();
+		const releaseHandoff = Promise.withResolvers<string>();
+		let retryPreflight = false;
+		session.subscribe(event => {
+			if (event.type === "auto_retry_start") retryPreflight = true;
+		});
+		vi.spyOn(authStorage.health, "model").mockImplementation(async () => {
+			if (retryPreflight) {
+				retryPreflight = false;
+				preflightStarted.resolve();
+				await releasePreflight.promise;
+			}
+			return { state: "unknown", accounts: [] };
+		});
+		vi.spyOn(compactionModule, "generateHandoffFromContext").mockImplementation(() => {
+			handoffStarted.resolve();
+			return releaseHandoff.promise;
+		});
+		const mock = createMockModel({
+			responses: [{ throw: new Error("503 Service Unavailable") }, { content: ["post-handoff answer"] }],
+		});
+		session.agent.streamFn = mock.stream;
+		session.agent.getApiKey = () => "test-key";
+		const prompt = session.prompt("retry this request");
+		try {
+			await withTimeout(preflightStarted.promise, 1_000, "Retry did not enter usage preflight");
+			const handoff = session.handoff();
+			await handoffStarted.promise;
+			releasePreflight.resolve();
+			await scheduler.yield();
+			releaseHandoff.resolve("## Goal\nResume after skipped retry");
+			await handoff;
+			await withTimeout(
+				Promise.all([prompt, session.waitForIdle()]),
+				1_000,
+				"Skipped retry left prompt or waitForIdle pending",
+			);
+			expect(session.isRetrying).toBe(false);
+			expect(events.filter(event => event.type === "auto_retry_end")).toMatchObject([{ success: false }]);
+			expect(mock.calls).toHaveLength(1);
+			await session.prompt("next task");
+			expect(mock.calls).toHaveLength(2);
+			expect(JSON.stringify(mock.calls[1]?.context.messages)).toContain("Resume after skipped retry");
+		} finally {
+			releasePreflight.resolve();
+			releaseHandoff.resolve("## Goal\nResume after skipped retry");
+		}
+	});
+
+	it.each(["preflight", "message-end"] as const)(
+		"preserves later retry ownership and budgets when earlier end extensions finish (%s)",
+		async releaseAt => {
+			await session.dispose();
+			sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+			const firstPreflight = Promise.withResolvers<void>();
+			const releaseFirstPreflight = Promise.withResolvers<void>();
+			const nextPreflight = Promise.withResolvers<void>();
+			const releaseNextPreflight = Promise.withResolvers<void>();
+			const handoffStarted = Promise.withResolvers<void>();
+			const releaseHandoff = Promise.withResolvers<string>();
+			const endStarted = Promise.withResolvers<void>();
+			const releaseEnd = Promise.withResolvers<void>();
+			const endFinished = Promise.withResolvers<void>();
+			const successStarted = Promise.withResolvers<void>();
+			const releaseSuccess = Promise.withResolvers<void>();
+			const messageStarted = Promise.withResolvers<void>();
+			const releaseMessage = Promise.withResolvers<void>();
+			const extensions = await loadExtensions([], tempDir.path());
+			const extension = await loadExtensionFromFactory(
+				pi => {
+					pi.on("auto_retry_end", async event => {
+						if (event.success) {
+							successStarted.resolve();
+							await releaseSuccess.promise;
+						} else if (event.finalError === "Retry cancelled") {
+							endStarted.resolve();
+							await releaseEnd.promise;
+							endFinished.resolve();
+						}
+					});
+					pi.on("message_end", async event => {
+						const message = event.message;
+						if (
+							releaseAt !== "message-end" ||
+							message.role !== "assistant" ||
+							!message.content.some(block => block.type === "text" && block.text === "new retry completed")
+						)
+							return;
+						messageStarted.resolve();
+						await releaseMessage.promise;
+					});
+				},
+				tempDir.path(),
+				new EventBus(),
+				extensions.runtime,
+				"hold-retry-end",
+			);
+			const extensionRunner = new ExtensionRunner(
+				[extension],
+				extensions.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const mock = createMockModel({
+				responses: [
+					{ content: ["seed response"] },
+					{ throw: new Error("503 Service Unavailable") },
+					{ throw: new Error("503 Service Unavailable") },
+					{ content: ["new retry completed"] },
+					{ throw: new Error("503 Service Unavailable") },
+					{ content: ["following retry completed"] },
+				],
+			});
+			const agent = new Agent({
+				initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+				getApiKey: () => "test-key",
+				streamFn: mock.stream,
+				convertToLlm: compactionModule.defaultConvertToLlm,
+			});
+			session = new AgentSession({
+				agent,
+				sessionManager,
+				modelRegistry,
+				extensionRunner,
+				settings: Settings.isolated({
+					"compaction.enabled": false,
+					"compaction.keepRecentTokens": 1,
+					"retry.baseDelayMs": 1,
+					"retry.maxRetries": 1,
+					"retry.usageAwareFallback": true,
+				}),
+			});
+			let retryPreflight: "first" | "next" | undefined;
+			let retries = 0;
+			session.subscribe(event => {
+				events.push(event);
+				if (event.type === "auto_retry_start") retryPreflight = ++retries === 1 ? "first" : "next";
+			});
+			vi.spyOn(authStorage.health, "model").mockImplementation(async () => {
+				const pending = retryPreflight;
+				retryPreflight = undefined;
+				if (pending === "first") {
+					firstPreflight.resolve();
+					await releaseFirstPreflight.promise;
+				} else if (pending === "next") {
+					nextPreflight.resolve();
+					await releaseNextPreflight.promise;
+				}
+				return { state: "unknown", accounts: [] };
+			});
+			vi.spyOn(compactionModule, "generateHandoffFromContext").mockImplementation(() => {
+				handoffStarted.resolve();
+				return releaseHandoff.promise;
+			});
+			await session.prompt("seed task");
+			const firstPrompt = session.prompt("old task");
+			try {
+				await withTimeout(firstPreflight.promise, 1_000, "First retry did not enter preflight");
+				const handoff = session.handoff();
+				await handoffStarted.promise;
+				releaseFirstPreflight.resolve();
+				await withTimeout(endStarted.promise, 1_000, "Skipped retry did not enter its end extension");
+				releaseHandoff.resolve("## Goal\nNew task after handoff");
+				await handoff;
+				await session.abort();
+				await firstPrompt;
+				const nextPrompt = session.prompt("new task");
+				await withTimeout(nextPreflight.promise, 1_000, "New retry did not enter preflight");
+				if (releaseAt === "preflight") {
+					releaseEnd.resolve();
+					await endFinished.promise;
+					await scheduler.yield();
+					expect(session.isRetrying).toBe(true);
+				}
+				releaseNextPreflight.resolve();
+				if (releaseAt === "message-end") {
+					await withTimeout(messageStarted.promise, 1_000, "Successful retry did not enter message_end");
+					await session.agent.waitForIdle();
+					await scheduler.yield();
+					expect(session.isRetrying).toBe(false);
+					releaseEnd.resolve();
+					await endFinished.promise;
+					await scheduler.yield();
+					releaseMessage.resolve();
+				}
+				await withTimeout(successStarted.promise, 1_000, "Successful retry did not enter its end extension");
+				await session.agent.waitForIdle();
+				await scheduler.yield();
+				releaseSuccess.resolve();
+				await withTimeout(Promise.all([nextPrompt, session.waitForIdle()]), 1_000, "New retry did not finish");
+				expect(mock.calls).toHaveLength(4);
+				expect(events.filter(event => event.type === "auto_retry_end").at(-1)).toMatchObject({ success: true });
+				expect(session.messages.at(-1)).toMatchObject({
+					role: "assistant",
+					content: [{ type: "text", text: "new retry completed" }],
+				});
+				await session.prompt("following task");
+				await session.waitForIdle();
+				expect(mock.calls).toHaveLength(6);
+				expect(session.messages.at(-1)).toMatchObject({
+					role: "assistant",
+					content: [{ type: "text", text: "following retry completed" }],
+				});
+			} finally {
+				releaseFirstPreflight.resolve();
+				releaseNextPreflight.resolve();
+				releaseEnd.resolve();
+				releaseSuccess.resolve();
+				releaseMessage.resolve();
+				releaseHandoff.resolve("## Goal\nNew task after handoff");
+			}
+		},
+	);
 
 	it("runs handoff generation through the configured side stream function", async () => {
 		const handoffText = "## Goal\nContinue via side stream";
