@@ -2641,6 +2641,18 @@ export class Settings {
 
 	/** Apply schema migrations to raw settings */
 	#migrateRawSettings(raw: RawSettings, captureLegacyChangelogVersion = true): RawSettings {
+		// The fullscreen prototype used a boolean; explicit mode choices win.
+		const tui = isRecord(raw.tui) ? raw.tui : undefined;
+		const fullscreen = tui?.fullscreen ?? raw["tui.fullscreen"];
+		const tuiMode =
+			tui?.mode ??
+			raw["tui.mode"] ??
+			(typeof fullscreen === "boolean" ? (fullscreen ? "fullscreen" : "regular") : undefined);
+		if (tuiMode !== undefined) raw.tui = { ...tui, mode: tuiMode };
+		if (isRecord(raw.tui)) delete raw.tui.fullscreen;
+		delete raw["tui.fullscreen"];
+		delete raw["tui.mode"];
+
 		// queueMode -> steeringMode
 		if ("queueMode" in raw && !("steeringMode" in raw)) {
 			raw.steeringMode = raw.queueMode;

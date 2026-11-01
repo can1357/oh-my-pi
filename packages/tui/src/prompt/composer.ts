@@ -1263,6 +1263,11 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		this.#startupStatus = undefined;
 	}
 
+	/** Roots currently laid out below the transcript, including the status host; read by fullscreen framing. */
+	get runtimeChildren(): readonly Component[] {
+		return [...this.#runtimeChildren, this.#statusHost];
+	}
+
 	/** Mount or replace session-aware root children while preserving the header and status hosts. */
 	setRuntimeChildren(children: readonly Component[], options: RuntimeChildrenOptions = {}): void {
 		if (this.#stopped) return;

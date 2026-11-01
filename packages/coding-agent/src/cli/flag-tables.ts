@@ -179,6 +179,16 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--max-cost": (result, value) => {
 		result.maxCost = parseCostUsd("--max-cost", value);
 	},
+	"--tui-mode": (result, value) => {
+		if (value === "regular" || value === "fullscreen") {
+			result.tuiMode = value;
+			return;
+		}
+		if (value.startsWith("-")) {
+			throw new CliUsageError("--tui-mode requires regular or fullscreen");
+		}
+		throw new CliUsageError(`Invalid TUI mode ${JSON.stringify(value)}. Valid values: regular, fullscreen`);
+	},
 	"--service-tier": (result, value) => {
 		if (!isServiceTierOpenAISettingValue(value)) {
 			throw new CliUsageError(

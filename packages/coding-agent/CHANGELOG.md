@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an optional fullscreen conversation layout with a fixed input area, transcript search and selection, available through `/settings` → Appearance → Display → Interface Mode or `--tui-mode`; regular mode remains the default.
+
 ## [18.14.2] - 2026-10-31
 
 ### Added

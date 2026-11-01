@@ -766,3 +766,22 @@ export function isTuiTight(): boolean {
 export function getPaddingX(basePadding: number): number {
 	return globalTight ? Math.max(0, basePadding - 1) : basePadding;
 }
+
+/**
+ * Maps a visible column to a UTF-16 code-unit index in `text`, walking by
+ * grapheme and accumulating cell widths (zero-width glyphs contribute none).
+ * A click on either cell of a wide glyph stops before the glyph — deliberate:
+ * stopping after its left half could be misread as a caret inside a visually
+ * split cell, and every caret consumer treats text as UTF-16 slices.
+ */
+export function colToCodeUnitIndex(text: string, visibleCol: number): number {
+	let acc = 0;
+	let idx = 0;
+	for (const { segment } of getSegmenter().segment(text)) {
+		const w = visibleWidth(segment);
+		if (acc + w > visibleCol) break;
+		acc += w;
+		idx += segment.length;
+	}
+	return idx;
+}

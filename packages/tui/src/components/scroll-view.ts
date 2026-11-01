@@ -17,6 +17,7 @@ import {
 const DEFAULT_TRACK = "│";
 const DEFAULT_THUMB = "█";
 const EMPTY_LINES: readonly string[] = [];
+const SGR_RESET = "\x1b[0m";
 
 type ScrollbarMode = "auto" | "always" | "never";
 export type ScrollAnchor = "start" | "end";
@@ -504,7 +505,12 @@ export class ScrollView implements Component {
 				continue;
 			}
 			const content = `${truncated}${padding(Math.max(0, contentWidth - visibleWidth(truncated)))}`;
-			lines.push(`${content}${thumb && row >= thumb.start && row < thumb.end ? thumbSample : trackSample}`);
+			// Source lines may end mid-SGR (e.g. an italic thinking block left
+			// unterminated); reset before and after the bar so the glyph keeps its
+			// own shape instead of inheriting italic/slant from the row content
+			// (an italicized "│" renders as a diagonal on mobile terminals).
+			const bar = thumb && row >= thumb.start && row < thumb.end ? thumbSample : trackSample;
+			lines.push(`${content}${SGR_RESET}${bar}${SGR_RESET}`);
 		}
 
 		this.#cache = {

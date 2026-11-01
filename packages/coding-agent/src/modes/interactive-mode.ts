@@ -290,6 +290,7 @@ import { PINNED_HUD_TOGGLE_ID } from "../task/output-manager";
 import { setMagicKeywords } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
 import { MAGIC_KEYWORDS } from "./magic-keywords";
 import { sharedComposerCache } from "@oh-my-pi/pi-tui/prompt/composer-cache";
+import { FullscreenChatView } from "./components/fullscreen-chat-view";
 import { BtwController } from "./controllers/btw-controller";
 import { CleanseCommandController } from "./controllers/cleanse-command-controller";
 import { CommandController } from "./controllers/command-controller";
@@ -406,6 +407,7 @@ import {
 	cfgSymbolPreset,
 	cfgTerminalProgramStatus,
 	cfgTerminalShowImages,
+	cfgTuiMode,
 	cfgTuiHyperlinks,
 	cfgTuiImeSafeCursor,
 	cfgTuiMaxInlineImages,
@@ -484,6 +486,7 @@ const cfgLiveUiSettings = combine({
 	"display.showTokenUsage": cfgDisplayShowTokenUsage,
 	"display.showTurnTime": cfgDisplayShowTurnTime,
 	"tui.renderMermaid": cfgTuiRenderMermaid,
+	"tui.mode": cfgTuiMode,
 	"tui.renderSvg": cfgTuiRenderSvg,
 	"extensionRenderers.assistantText": cfgExtensionAssistantTextRenderers,
 	"tui.autoGraph": cfgTuiAutoGraph,
@@ -1796,6 +1799,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	#planReviewAnnotationState = new Map<string, PlanReviewAnnotationState>();
 	/** Annotation state held until the associated queued refinement actually starts. */
 	#planReviewAnnotationStateBySubmission = new WeakMap<SubmittedUserInput, string>();
+	#fullscreenChatView: FullscreenChatView | undefined;
+	#fullscreenChatOverlay: OverlayHandle | undefined;
+	#fullscreenChatInputUnsubscribe: (() => void) | undefined;
 	readonly lspServers: LspStartupServerInfo[] | undefined = undefined;
 	mcpManager?: MCPManager;
 	readonly #toolUiContextSetter: (uiContext: ExtensionUIContext, hasUI: boolean) => void;
@@ -2604,6 +2610,14 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#eventBusUnsubscribers.push(startMacOSAppearanceReprobeFallback(this.ui.terminal));
 		}
 
+		// Start listeners run before TUI's first paint. Enter the alternate screen
+		// there so resuming a long session never replays its transcript into the
+		// normal Windows console buffer before fullscreen takes over.
+		this.#eventBusUnsubscribers.push(
+			this.ui.addStartListener(() => {
+				if (cfgTuiMode.get(this.settings) === "fullscreen") this.setFullscreenTui(true);
+			}),
+		);
 		// A prepaint Composer may already own raw mode and the render loop.
 		if (!this.#ownsStartedUi) {
 			this.composer.start({
@@ -2611,6 +2625,10 @@ export class InteractiveMode implements InteractiveModeContext {
 				playWelcomeIntro: !options.suppressWelcomeIntro,
 			});
 			this.#ownsStartedUi = true;
+		} else if (cfgTuiMode.get(this.settings) === "fullscreen") {
+			// Prepaint already started the TUI, so the start listener above will
+			// never fire for this launch: enter fullscreen now instead.
+			this.setFullscreenTui(true);
 		}
 		pushTerminalTitle();
 		// Claim the terminal title before any session update: this is the one path
@@ -4237,6 +4255,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (any("tui.renderMermaid")) {
 			setMarkdownMermaidRendering(cfgTuiRenderMermaid.get(this.settings));
 			rebuildChat = true;
+		}
+		if (any("tui.mode")) {
+			this.setFullscreenTui(cfgTuiMode.get(this.settings) === "fullscreen");
 		}
 		if (any("tui.renderSvg")) {
 			setSvgFigureRendering(cfgTuiRenderSvg.get(this.settings));
@@ -7871,6 +7892,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#extensionUiController.clearExtensionTerminalInputListeners();
 		this.#extensionUiController.clearHookWidgets();
 		this.#extensionUiController.disposeComposerShapes();
+		// TUI keeps overlay entries across stop/start cycles. Tear the base view
+		// down through its normal path so a later UI restart cannot re-enter the
+		// alternate screen with an orphaned fullscreen surface.
+		this.setFullscreenTui(false);
 		for (const unsubscribe of this.#eventBusUnsubscribers) {
 			unsubscribe();
 		}
@@ -8193,7 +8218,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			? factory(this.ui, getEditorTheme(), this.keybindings)
 			: new CustomEditor(getEditorTheme());
 		this.#editorComponentFactory = factory;
-		nextEditor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
+		nextEditor.setUseTerminalCursor(this.#fullscreenChatOverlay ? false : this.ui.getShowHardwareCursor());
 		nextEditor.setImeSafeCursorLayout(cfgTuiImeSafeCursor.get(this.settings));
 		this.#applyVimMode(nextEditor);
 		nextEditor.setAutocompleteMaxVisible(cfgAutocompleteMaxVisible.get(this.settings));
@@ -8254,6 +8279,59 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	getEditorComponent(): ((tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => CustomEditor) | undefined {
 		return this.#editorComponentFactory;
+	}
+
+	/** Enable or disable the persistent alternate-screen chat layout. */
+	setFullscreenTui(enabled: boolean): void {
+		if (enabled) {
+			if (this.#fullscreenChatOverlay) return;
+			const rootChildren = this.composer.runtimeChildren;
+			const dockStart = rootChildren.indexOf(this.pendingMessagesContainer);
+			if (dockStart === -1) return;
+			this.#fullscreenChatView = new FullscreenChatView({
+				transcript: rootChildren.slice(0, dockStart),
+				dock: rootChildren.slice(dockStart),
+				editorContainer: this.editorContainer,
+				terminalRows: () => this.ui.terminal.rows,
+				editor: () => this.editor,
+				write: data => this.ui.terminal.write(data),
+				requestRender: () => this.ui.requestRender(),
+			});
+			this.#fullscreenChatInputUnsubscribe = this.ui.addInputListener(data => {
+				const focused = this.ui.getFocused();
+				if (focused !== this.editor) {
+					this.#fullscreenChatView?.cancelInput();
+					return undefined;
+				}
+				if (!this.#fullscreenChatView?.handleViewportInput(data)) return undefined;
+				this.ui.requestRender();
+				return { consume: true };
+			});
+			this.editor.setUseTerminalCursor(false);
+			this.#fullscreenChatOverlay = this.ui.showOverlay(this.#fullscreenChatView, {
+				width: "100%",
+				maxHeight: "100%",
+				anchor: "top-left",
+				margin: 0,
+				fullscreen: true,
+				mouseTracking: true,
+				base: true,
+			});
+			if (!this.ui.hasOverlay()) this.ui.setFocus(this.editorContainer.children[0] ?? this.editor);
+			this.ui.requestRender(true);
+			return;
+		}
+
+		if (!this.#fullscreenChatOverlay) return;
+		this.#fullscreenChatInputUnsubscribe?.();
+		this.#fullscreenChatInputUnsubscribe = undefined;
+		this.#fullscreenChatView?.dispose();
+		this.#fullscreenChatOverlay.hide();
+		this.#fullscreenChatOverlay = undefined;
+		this.#fullscreenChatView = undefined;
+		this.editor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
+		if (!this.ui.hasOverlay()) this.ui.setFocus(this.editorContainer.children[0] ?? this.editor);
+		this.ui.requestRender(true);
 	}
 
 	// UI helpers

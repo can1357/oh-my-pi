@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added base overlays for persistent fullscreen surfaces that keep dialogs and their keyboard focus above the application layout.
+- Added pointer-to-caret positioning for editors and shared wheel scrolling and text-column helpers.
+
+### Fixed
+
+- Fixed unterminated text styling bleeding into ScrollView scrollbars.
+
 ## [18.14.2] - 2026-10-31
 
 ### Added

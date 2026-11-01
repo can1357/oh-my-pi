@@ -36,6 +36,8 @@ The most capable agent surface that ships. Continuously tuned by real-world use 
 > while we evaluate how open contributions go. Depending on the results, the
 > vouch system may return.
 
+For a fixed input area and in-app transcript scrolling, choose **Fullscreen** in `/settings` → Appearance → Display → **Interface Mode**. See [interface modes](docs/settings.md#appearance-and-terminal) for controls and terminal limitations.
+
 ## Install
 
 **macOS · Linux**
