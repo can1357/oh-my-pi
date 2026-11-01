@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed every in-flight subagent being killed mid-request by an Anthropic "Your credit balance is too low" outage that clears in minutes: the session now shows the wait and retries every 30 seconds for up to 5 minutes before it returns the original error ([#17656](https://github.com/can1357/oh-my-pi/pull/17656) by [@sjawhar](https://github.com/sjawhar))
+- Fixed an Anthropic "Your credit balance is too low" rejection ending every in-flight turn and subagent at once: the session now retries it about every 30 seconds (with jitter) for at least 5 minutes of backoff before it returns the original error, and `omp -p` prints each wait on stderr ([#17656](https://github.com/can1357/oh-my-pi/pull/17656) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.2] - 2026-10-31
 

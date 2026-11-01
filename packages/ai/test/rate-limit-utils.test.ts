@@ -5,6 +5,7 @@ import {
 	calculateRateLimitBackoffMs,
 	is402BillingCapBody,
 	isConcurrencyCapExclusion,
+	isCreditBalanceTooLow,
 	isOpaqueStatusBody,
 	isUsageLimitOutcome,
 	isUsageLimitStatus,
@@ -1094,6 +1095,27 @@ describe("calculateRateLimitBackoffMs", () => {
 
 	it("returns a short backoff for CONCURRENT_LIMIT", () => {
 		expect(calculateRateLimitBackoffMs("CONCURRENT_LIMIT")).toBe(5_000);
+	});
+});
+
+describe("isCreditBalanceTooLow", () => {
+	const message = "Your credit balance is too low to access the Anthropic API.";
+	const envelope = JSON.stringify({ type: "error", error: { type: "invalid_request_error", message } });
+
+	it("requires the whole 400 body to be the Anthropic error envelope", () => {
+		expect(isCreditBalanceTooLow(400, envelope)).toBe(true);
+		expect(
+			isCreditBalanceTooLow(undefined, `400 ${envelope} retry-after-ms=5000\nraw-http-request=/tmp/request.json`),
+		).toBe(true);
+		expect(isCreditBalanceTooLow(400, `Invalid tool schema. Offending schema: ${envelope}`)).toBe(false);
+		expect(isCreditBalanceTooLow(400, JSON.stringify({ error: { type: "invalid_request_error", message } }))).toBe(
+			false,
+		);
+		expect(isCreditBalanceTooLow(400, message)).toBe(false);
+	});
+
+	it("keeps an explicit status authoritative over a conflicting message prefix", () => {
+		expect(isCreditBalanceTooLow(403, `400 ${envelope}`)).toBe(false);
 	});
 });
 

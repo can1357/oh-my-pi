@@ -5,6 +5,7 @@ import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { runPrintMode } from "@oh-my-pi/pi-coding-agent/modes/print-mode";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -18,12 +19,22 @@ const CREDIT_BALANCE_MESSAGE =
 	"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.";
 // The HTTP 400 body Anthropic returned, byte for byte, while the balance sat at zero.
 const CREDIT_BALANCE_BODY = `{"type":"error","error":{"type":"invalid_request_error","message":"${CREDIT_BALANCE_MESSAGE}"},"request_id":"req_011CgbLuqzvWZWRDTHtaVVMj"}`;
-// The session spaces credit-balance retries 30 s apart; ten retries (the
-// default `retry.maxRetries`) wait 5 minutes in all.
-const CREDIT_BALANCE_RETRY_DELAY_MS = 30_000;
+const CREDIT_BALANCE_EMBEDDED_DIAGNOSTIC = `Invalid tool schema. Offending schema: {"error":{"type":"invalid_request_error","message":"${CREDIT_BALANCE_MESSAGE}"}}`;
+const CREDIT_BALANCE_NON_ENVELOPE_BODY = `{"error":{"type":"invalid_request_error","message":"${CREDIT_BALANCE_MESSAGE}"}}`;
+// The session waits at least five minutes across the default ten retries and
+// jitters each wait above that floor so sessions do not retry in lockstep.
+const CREDIT_BALANCE_MIN_RETRY_DELAY_MS = 30_000;
+const CREDIT_BALANCE_MAX_RETRY_DELAY_MS = 37_500;
 
-function jsonResponse(status: number, body: string): Response {
-	return new Response(body, { status, headers: { "content-type": "application/json" } });
+function jsonResponse(status: number, body: string, headers: Record<string, string> = {}): Response {
+	return new Response(body, {
+		status,
+		headers: { "content-type": "application/json", ...headers },
+	});
+}
+
+function textResponse(status: number, body: string): Response {
+	return new Response(body, { status, headers: { "content-type": "text/plain" } });
 }
 
 function anthropicError(status: number, type: string, message: string): Response {
@@ -118,7 +129,7 @@ afterEach(async () => {
 	vi.restoreAllMocks();
 });
 
-async function runTurn(respond: (requestNumber: number) => Response): Promise<Harness> {
+async function createHarness(respond: (requestNumber: number) => Response, maxDelayMs?: number): Promise<Harness> {
 	const harness = { requests: 0, retryStarts: [], retryEnds: [] } as unknown as Harness;
 	const server = Bun.serve({
 		port: 0,
@@ -143,7 +154,10 @@ async function runTurn(respond: (requestNumber: number) => Response): Promise<Ha
 	});
 	// Retry settings stay at their defaults: the bound under test is the one a
 	// user gets without configuring anything.
-	const settings = Settings.isolated({ "compaction.enabled": false });
+	const settings = Settings.isolated({
+		"compaction.enabled": false,
+		...(maxDelayMs === undefined ? {} : { "retry.maxDelayMs": maxDelayMs }),
+	});
 	const session = new AgentSession({
 		agent,
 		sessionManager: SessionManager.inMemory(),
@@ -161,11 +175,15 @@ async function runTurn(respond: (requestNumber: number) => Response): Promise<Ha
 		if (event.type === "auto_retry_start") harness.retryStarts.push(event);
 		if (event.type === "auto_retry_end") harness.retryEnds.push(event);
 	});
+	return harness;
+}
+
+async function runTurn(respond: (requestNumber: number) => Response): Promise<Harness> {
+	const harness = await createHarness(respond);
 	// Advance the monotonic clock with each backoff instead of sleeping it.
 	mockSchedulerWaitWithClock();
-
-	await session.prompt("Summarize the repository");
-	await session.waitForIdle();
+	await harness.session.prompt("Summarize the repository");
+	await harness.session.waitForIdle();
 	return harness;
 }
 
@@ -175,14 +193,19 @@ function lastAssistant(session: AgentSession): AssistantMessage {
 	return message as AssistantMessage;
 }
 
+function expectCreditBalanceRetryDelay(delayMs: number): void {
+	expect(delayMs).toBeGreaterThanOrEqual(CREDIT_BALANCE_MIN_RETRY_DELAY_MS);
+	expect(delayMs).toBeLessThanOrEqual(CREDIT_BALANCE_MAX_RETRY_DELAY_MS);
+}
+
 describe("Anthropic credit-balance rejection", () => {
 	it("waits out a credit-balance 400 and finishes the turn once credit is back", async () => {
 		const harness = await runTurn(n => (n === 1 ? jsonResponse(400, CREDIT_BALANCE_BODY) : recoveredResponse()));
 
 		expect(harness.requests).toBe(2);
 		expect(harness.retryStarts).toHaveLength(1);
-		expect(harness.retryStarts[0]).toMatchObject({ attempt: 1, delayMs: CREDIT_BALANCE_RETRY_DELAY_MS });
-		expect(harness.retryStarts[0]!.errorMessage).toContain(CREDIT_BALANCE_MESSAGE);
+		expect(harness.retryStarts[0]).toMatchObject({ attempt: 1 });
+		expectCreditBalanceRetryDelay(harness.retryStarts[0]!.delayMs);
 		const final = lastAssistant(harness.session);
 		expect(final.stopReason).toBe("stop");
 		expect(final.content).toContainEqual({ type: "text", text: "Recovered" });
@@ -193,11 +216,81 @@ describe("Anthropic credit-balance rejection", () => {
 
 		expect(harness.requests).toBe(2);
 		expect(harness.retryStarts).toHaveLength(1);
-		expect(harness.retryStarts[0]).toMatchObject({ attempt: 1, delayMs: CREDIT_BALANCE_RETRY_DELAY_MS });
-		expect(harness.retryStarts[0]!.errorMessage).toContain(CREDIT_BALANCE_MESSAGE);
+		expect(harness.retryStarts[0]).toMatchObject({ attempt: 1 });
+		expectCreditBalanceRetryDelay(harness.retryStarts[0]!.delayMs);
 		const final = lastAssistant(harness.session);
 		expect(final.stopReason).toBe("stop");
 		expect(final.content).toContainEqual({ type: "text", text: "Recovered" });
+	});
+
+	it("jitters the wait above the 30-second floor so sessions do not retry in lockstep", async () => {
+		const harness = await createHarness(n =>
+			n === 1 ? jsonResponse(400, CREDIT_BALANCE_BODY) : recoveredResponse(),
+		);
+		mockSchedulerWaitWithClock();
+		vi.spyOn(Math, "random").mockReturnValue(0.5);
+		await harness.session.prompt("Summarize the repository");
+		await harness.session.waitForIdle();
+
+		expect(harness.requests).toBe(2);
+		expect(harness.retryStarts).toHaveLength(1);
+		expect(harness.retryStarts[0]).toMatchObject({ attempt: 1, delayMs: 33_750 });
+	});
+
+	it("keeps the credit retry within a max delay equal to its 30-second floor", async () => {
+		const harness = await createHarness(
+			n => (n === 1 ? jsonResponse(400, CREDIT_BALANCE_BODY) : recoveredResponse()),
+			30_000,
+		);
+		mockSchedulerWaitWithClock();
+		vi.spyOn(Math, "random").mockReturnValue(0.5);
+		await harness.session.prompt("Summarize the repository");
+		await harness.session.waitForIdle();
+
+		expect(harness.requests).toBe(2);
+		expect(harness.retryStarts).toHaveLength(1);
+		expect(harness.retryStarts[0]).toMatchObject({ attempt: 1, delayMs: 30_000 });
+	});
+
+	it("adds jitter after a provider hint without retrying before it", async () => {
+		const harness = await createHarness(
+			n => (n === 1 ? jsonResponse(400, CREDIT_BALANCE_BODY, { "retry-after-ms": "60000" }) : recoveredResponse()),
+			100_000,
+		);
+		mockSchedulerWaitWithClock();
+		vi.spyOn(Math, "random").mockReturnValue(0.5);
+		await harness.session.prompt("Summarize the repository");
+		await harness.session.waitForIdle();
+
+		expect(harness.requests).toBe(2);
+		expect(harness.retryStarts).toHaveLength(1);
+		expect(harness.retryStarts[0]).toMatchObject({ attempt: 1, delayMs: 63_750 });
+	});
+
+	it("prints the terminal-style wait notice on stderr without adding it to stdout", async () => {
+		const harness = await createHarness(n =>
+			n === 1 ? jsonResponse(400, CREDIT_BALANCE_BODY) : recoveredResponse(),
+		);
+		mockSchedulerWaitWithClock();
+		const stdout: string[] = [];
+		const stderr: string[] = [];
+		vi.spyOn(process.stdout, "write").mockImplementation((...args: unknown[]) => {
+			stdout.push(String(args[0]));
+			const callback = args.at(-1);
+			if (typeof callback === "function") (callback as (error?: Error | null) => void)(null);
+			return true;
+		});
+		vi.spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
+			stderr.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
+			return true;
+		});
+
+		expect(await runPrintMode(harness.session, { mode: "text", initialMessage: "Summarize the repository" })).toBe(0);
+
+		expect(stderr.join("")).toContain("Retrying (1/10) in ");
+		expect(stderr.join("")).toContain(`400 ${CREDIT_BALANCE_MESSAGE}`);
+		expect(stdout.join("")).toContain("Recovered");
+		expect(stdout.join("")).not.toContain("Retrying");
 	});
 
 	it("gives up after five minutes of retries and surfaces the provider's rejection", async () => {
@@ -205,8 +298,11 @@ describe("Anthropic credit-balance rejection", () => {
 
 		// One request, then the ten retries the default budget allows.
 		expect(harness.requests).toBe(11);
-		expect(harness.retryStarts.map(event => event.delayMs)).toEqual(Array(10).fill(CREDIT_BALANCE_RETRY_DELAY_MS));
-		expect(harness.retryStarts.reduce((total, event) => total + event.delayMs, 0)).toBe(5 * 60_000);
+		expect(harness.retryStarts).toHaveLength(10);
+		for (const event of harness.retryStarts) expectCreditBalanceRetryDelay(event.delayMs);
+		const totalDelayMs = harness.retryStarts.reduce((total, event) => total + event.delayMs, 0);
+		expect(totalDelayMs).toBeGreaterThanOrEqual(5 * 60_000);
+		expect(totalDelayMs).toBeLessThanOrEqual(6.25 * 60_000);
 		expect(harness.retryEnds).toHaveLength(1);
 		expect(harness.retryEnds[0]).toMatchObject({ success: false, attempt: 10 });
 		expect(harness.retryEnds[0]!.finalError).toBe(`400 ${CREDIT_BALANCE_BODY}`);
@@ -217,22 +313,49 @@ describe("Anthropic credit-balance rejection", () => {
 
 	it.each([
 		// A 400 of another type carrying the same sentence.
-		["another error type", "billing_error", CREDIT_BALANCE_MESSAGE],
+		[
+			"another error type",
+			() => anthropicError(400, "billing_error", CREDIT_BALANCE_MESSAGE),
+			CREDIT_BALANCE_MESSAGE,
+		],
 		// A malformed request: the same type, another message.
-		["another message", "invalid_request_error", "messages: text content blocks must be non-empty"],
+		[
+			"another message",
+			() => anthropicError(400, "invalid_request_error", "messages: text content blocks must be non-empty"),
+			"messages: text content blocks must be non-empty",
+		],
 		// The sentence quoted inside another rejection rather than leading it.
 		[
 			"the sentence quoted mid-message",
-			"invalid_request_error",
-			`messages.0.content.0.text: unexpected value: ${CREDIT_BALANCE_MESSAGE}`,
+			() =>
+				anthropicError(
+					400,
+					"invalid_request_error",
+					`messages.0.content.0.text: unexpected value: ${CREDIT_BALANCE_MESSAGE}`,
+				),
+			CREDIT_BALANCE_MESSAGE,
 		],
-	])("fails at once on a 400 with %s", async (_label, type, message) => {
-		const harness = await runTurn(() => anthropicError(400, type, message));
+		// Plaintext diagnostics can quote a JSON example but are not provider envelopes.
+		[
+			"a plaintext diagnostic that embeds an envelope",
+			() => textResponse(400, CREDIT_BALANCE_EMBEDDED_DIAGNOSTIC),
+			CREDIT_BALANCE_EMBEDDED_DIAGNOSTIC,
+		],
+		// JSON without the provider envelope wrapper is not an Anthropic error response.
+		[
+			"a JSON body that is not an envelope",
+			() => jsonResponse(400, CREDIT_BALANCE_NON_ENVELOPE_BODY),
+			CREDIT_BALANCE_NON_ENVELOPE_BODY,
+		],
+		// A non-JSON body that begins with the sentence has no structured envelope.
+		["a plaintext credit sentence", () => textResponse(400, CREDIT_BALANCE_MESSAGE), CREDIT_BALANCE_MESSAGE],
+	])("fails at once on a 400 with %s", async (_label, response, expectedMessage) => {
+		const harness = await runTurn(() => response());
 
 		expect(harness.requests).toBe(1);
 		expect(harness.retryStarts).toEqual([]);
 		const final = lastAssistant(harness.session);
 		expect(final.stopReason).toBe("error");
-		expect(final.errorMessage).toContain(message);
+		expect(final.errorMessage).toContain(expectedMessage);
 	});
 });

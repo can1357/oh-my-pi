@@ -892,6 +892,36 @@ describe("task progress rendering", () => {
 
 		expect(row).toContain("auto-retry gave up after 10 attempts: 400 Your credit balance is too low");
 	});
+
+	it("names the provider reason after a subagent's retries run out", async () => {
+		const theme = (await getThemeByName("dark"))!;
+		const text = Bun.stripANSI(
+			taskToolRenderer
+				.renderResult(
+					{
+						content: [],
+						details: {
+							projectAgentsDir: null,
+							totalDurationMs: 0,
+							results: [
+								finishedResult({
+									exitCode: 1,
+									error: creditBalanceError,
+									retryFailure: { attempt: 10, errorMessage: creditBalanceError },
+								}),
+							],
+						},
+					},
+					{ expanded: false, isPartial: false },
+					theme,
+				)
+				.render(120)
+				.join("\n"),
+		);
+
+		expect(text).toContain("auto-retry gave up after 10 attempts: 400 Your credit balance is too low");
+		expect(text).not.toContain("invalid_request_error");
+	});
 });
 
 describe("task result detail-less state", () => {

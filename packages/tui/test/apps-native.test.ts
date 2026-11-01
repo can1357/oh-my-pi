@@ -10,6 +10,7 @@ import { type PsTopHost, PsTopComponent } from "../src/apps/ps-top";
 import type { DescribeContext, NativeChild, NativeNode } from "../src/native/node";
 import { TSP_KINDS, type TspKind } from "@oh-my-pi/pi-wire";
 import type { DaemonSnapshot, DaemonSpec } from "../src/tools/daemon";
+import type { AgentProgress } from "../src/tools/task";
 import { VirtualTerminal } from "./virtual-terminal";
 
 function nodes(children: readonly NativeChild[] | undefined): NativeNode[] {
@@ -403,5 +404,42 @@ describe("cleanse board native", () => {
 		expect(described.find(n => n.k === "meter")?.p).toMatchObject({ value: 0.5 });
 		const lanes = described.filter(n => n.k === "agent");
 		expect(lanes.map(n => n.p)).toMatchObject([{ name: "B", status: "running", task: [{ t: "b.ts +1" }] }]);
+	});
+
+	it("names the provider reason on both native and terminal retry rows", () => {
+		const message = "Your credit balance is too low to access the Anthropic API.";
+		const error = `400 {"type":"error","error":{"type":"invalid_request_error","message":"${message}"}}`;
+		const progress: AgentProgress = {
+			index: 0,
+			id: "CleanseA",
+			agent: "task",
+			agentSource: "bundled",
+			status: "running",
+			task: "repair",
+			recentTools: [],
+			recentOutput: [],
+			toolCount: 0,
+			requests: 0,
+			tokens: 0,
+			cost: 0,
+			durationMs: 0,
+			retryState: {
+				attempt: 3,
+				maxAttempts: 10,
+				delayMs: 30_000,
+				errorMessage: error,
+				startedAtMs: 1000,
+			},
+		};
+		const model = new CleanseBoardModel();
+		model.agentStarted("CleanseA", assignment);
+		model.agentProgress("CleanseA", progress);
+
+		const terminal = JSON.stringify(model.describeLive(context([])));
+		expect(terminal).toContain("retrying · 3/10: 400 Your credit balance is too low");
+		expect(terminal).not.toContain("invalid_request_error");
+
+		const native = nodes([model.describeLive(context(["agent", "meter"]))!]).find(node => node.k === "agent");
+		expect(native?.p).toMatchObject({ retry: { error: `400 ${message}` } });
 	});
 });
