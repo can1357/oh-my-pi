@@ -684,13 +684,16 @@ The desktop protocol handler must route the host to the remote machine, percent-
 
 ---
 
-## 10) Commit generation controls
+## 10) Commit controls
 
 | Variable                  | Behavior                                                            |
 | ------------------------- | ------------------------------------------------------------------- |
 | `PI_COMMIT_TEST_FALLBACK` | If `true` (case-insensitive), force commit fallback generation path |
 | `PI_COMMIT_NO_FALLBACK`   | If `true`, disables fallback when agent returns no proposal         |
+| `PI_COMMIT_TRAILERS`      | Trailers, one `Key: value` per line, appended to every commit OMP writes itself |
 | `DEBUG`                   | If set, commit agent error stack traces are printed                 |
+
+`PI_COMMIT_TRAILERS` covers the commits OMP creates through its own VCS layer — autoresearch `init_experiment` and `log_experiment`, `omp commit`, isolated task merges and branch commits, and the git TUI. None of them runs the `git` binary, so a wrapper that passes `git commit --trailer` and a `prepare-commit-msg` hook both miss them. A line of any other shape is ignored. Each trailer joins the message's trailing trailer block, by git's own rule, or opens a new paragraph, and one already present is not repeated.
 
 ---
 

@@ -20,6 +20,7 @@ import type {
 	NumericMetricMap,
 } from "@oh-my-pi/pi-tui/tools/autoresearch";
 import type { AutoresearchToolFactoryOptions } from "../types";
+import { withCommitTrailers } from "../../utils/commit-trailers";
 
 const EXPERIMENT_TOOL_NAMES = ["init_experiment", "run_experiment", "log_experiment", "update_notes"];
 
@@ -304,7 +305,7 @@ async function commitKeptExperiment(
 	}
 	const commitMessage = `${description}\n\nResult: ${JSON.stringify(payload)}`;
 	try {
-		const commitSha = await repository.commitCreate(commitMessage, { files });
+		const commitSha = await repository.commitCreate(withCommitTrailers(commitMessage), { files });
 		return { note: `committed ${commitSha.slice(0, 12)}` };
 	} catch (err) {
 		return { error: `git commit failed: ${err instanceof Error ? err.message : String(err)}` };

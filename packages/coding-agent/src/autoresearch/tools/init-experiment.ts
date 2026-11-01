@@ -15,6 +15,7 @@ import { dedupeStrings, normalizePathSpec } from "../helpers";
 import { buildExperimentState } from "../state";
 import { openAutoresearchStorage, type SessionRow } from "../storage";
 import type { AutoresearchToolFactoryOptions } from "../types";
+import { withCommitTrailers } from "../../utils/commit-trailers";
 
 const HARNESS_COMMIT_TITLE = "autoresearch: harness setup";
 
@@ -88,7 +89,7 @@ export function createInitExperimentTool(
 					try {
 						await repository.stageFiles([]);
 						const message = buildHarnessCommitMessage(goal, params.name);
-						await repository.commitCreate(message, {});
+						await repository.commitCreate(withCommitTrailers(message), {});
 						harnessCommitted = true;
 					} catch (err) {
 						commitWarning = `Failed to auto-commit harness changes: ${err instanceof Error ? err.message : String(err)}. Recording baseline at current HEAD; discard may not preserve uncommitted harness files.`;

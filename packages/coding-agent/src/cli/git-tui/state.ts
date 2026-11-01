@@ -11,6 +11,7 @@ import { DiffSide, DiffStream, type DiffStreamProgress, rasterizeSvg } from "@oh
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { BINARY_SNIFF_BYTES, isEnoent, isProbablyBinaryHeader } from "@oh-my-pi/pi-utils";
 import type { NumstatEntry } from "../../commit/types";
+import { withCommitTrailers } from "../../utils/commit-trailers";
 import {
 	DIFF_CONTEXT_LINES,
 	type ChangeKind,
@@ -733,7 +734,7 @@ export class GitModel {
 
 	/** Create (or amend) a commit from the staged changes. */
 	async commit(message: string, options: { amend?: boolean } = {}): Promise<void> {
-		await this.#repo.commitCreate(message, { amend: options.amend });
+		await this.#repo.commitCreate(withCommitTrailers(message), { amend: options.amend });
 	}
 	/** Apply a patch to the index (`cached`) and/or worktree; `reverse` undoes it. */
 	async applyPatch(patchText: string, options: { cached?: boolean; reverse?: boolean } = {}): Promise<void> {

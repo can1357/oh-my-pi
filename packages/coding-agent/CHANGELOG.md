@@ -155,6 +155,7 @@
 - Added `display.advisorCollapsedLines` (Settings → Appearance → Display) to cap how many note lines a collapsed advisor card shows; the default keeps the full preview ([#17228](https://github.com/can1357/oh-my-pi/pull/17228) by [@bluecapone](https://github.com/bluecapone))
 - `omp config list --scope global|project` lists only the keys that layer sets, with the values as written: path-scoped `enabledModels`, `enabledProviders` and `disabledProviders` entries (`{ path, … }`) stay unresolved, so a host can edit the global value without dropping them ([#17246](https://github.com/can1357/oh-my-pi/pull/17246) by [@Quelaan1](https://github.com/Quelaan1))
 - `tools.xdevNotices: false` hides the `xd://: mounted …` notices shown as MCP servers connect, without turning on `startup.quiet` ([#17263](https://github.com/can1357/oh-my-pi/pull/17263) by [@MaisonnatM](https://github.com/MaisonnatM))
+- Added `PI_COMMIT_TRAILERS`: trailers (one `Key: value` per line) that omp appends to the commits it writes itself, such as autoresearch, `omp commit`, isolated task merges and the git TUI ([#17055](https://github.com/can1357/oh-my-pi/pull/17055) by [@sjawhar](https://github.com/sjawhar))
 
 ### Changed
 
