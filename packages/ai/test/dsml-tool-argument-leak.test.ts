@@ -61,7 +61,7 @@ describe("removeDsmlToolMarkupLeak on tool-call arguments", () => {
 		]);
 		expect(removeDsmlToolMarkupLeak(message)).toBe(true);
 		expect(callAt(message, 0).arguments).toEqual({ cwd: "></cwd></targetboops" });
-		expect(callAt(message, 1).arguments).toEqual({ content: "ok" });
+		expect(callAt(message, 1).arguments).toEqual({ content: "ok\n\nbash" });
 	});
 
 	it("sanitizes nested objects and arrays without touching non-strings", () => {
@@ -76,6 +76,13 @@ describe("removeDsmlToolMarkupLeak on tool-call arguments", () => {
 			options: { body: "ok", retries: 3 },
 			list: ["a", true, null],
 		});
+	});
+
+	it("keeps payload lines before a canonical closer", () => {
+		const parameterClose = `</${FULLWIDTH}DSML${FULLWIDTH}parameter>`;
+		const message = assistant([toolCall({ content: `first\nlast\n${parameterClose}` })]);
+		expect(removeDsmlToolMarkupLeak(message)).toBe(true);
+		expect(callAt(message, 0).arguments).toEqual({ content: "first\nlast" });
 	});
 
 	it("leaves literal XML and chat-template closers in payloads untouched", () => {

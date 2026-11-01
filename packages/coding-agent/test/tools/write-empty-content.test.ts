@@ -50,6 +50,17 @@ describe("write empty content", () => {
 		expect(result.content[0]).toMatchObject({ type: "text", text: expect.stringContaining("0 bytes") });
 	});
 
+	it.skipIf(process.platform === "win32")(
+		"rejects a FIFO reached through a SQLite selector before reading it",
+		async () => {
+			const fifo = path.join(testDir, "db.sqlite");
+			expect(Bun.spawnSync(["mkfifo", fifo]).exitCode).toBe(0);
+			await expect(
+				new WriteTool(createSession(testDir)).execute("fifo", { path: `${fifo}:users:1`, content: "" }),
+			).rejects.toThrow(/not a regular file/);
+		},
+	);
+
 	it("still writes non-empty content without the opt-in", async () => {
 		const target = path.join(testDir, "kept.txt");
 		await new WriteTool(createSession(testDir)).execute("nonempty", { path: target, content: "kept\n" });

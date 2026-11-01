@@ -76,16 +76,18 @@ function findMarkupTags(text: string): MarkupTag[] {
  * the end. When the closers never arrived, the dangling argument value runs to
  * the next blank line (or the end of the stretch); prose after that survives.
  */
-function stripUnquoted(text: string): string {
+function stripUnquoted(text: string, prose: boolean): string {
 	const tags = findMarkupTags(text);
 	if (tags.length === 0) return text;
 	const first = tags[0]!;
 	const last = tags[tags.length - 1]!;
 	let start = first.index;
-	const nameLine = TRAILING_TOOL_NAME_LINE.exec(text.slice(0, start));
-	if (nameLine) start = nameLine.index + nameLine[1]!.length;
+	if (prose) {
+		const nameLine = TRAILING_TOOL_NAME_LINE.exec(text.slice(0, start));
+		if (nameLine) start = nameLine.index + nameLine[1]!.length;
+	}
 	let end = last.end;
-	if (!last.closing) {
+	if (!last.closing && prose) {
 		const blankLine = text.slice(last.end).search(BLANK_LINE_PATTERN);
 		end = blankLine === -1 ? text.length : last.end + blankLine;
 	}
@@ -113,15 +115,16 @@ export function isDsmlLeakRecoveryTarget(model: Model): boolean {
  * `text`, leaving quoted code intact. Returns `undefined` when `text` carries
  * no such markup.
  */
-export function stripDsmlToolMarkup(text: string): string | undefined {
+export function stripDsmlToolMarkup(text: string, options: { prose?: boolean } = {}): string | undefined {
 	// Every DSML tag names `DSML`; every template token spelling carries a fullwidth bar.
 	if (!text.includes("DSML") && !text.includes("｜")) return undefined;
+	const prose = options.prose ?? true;
 	let out = "";
 	let cursor = 0;
 	let changed = false;
 	const flush = (end: number): void => {
 		const segment = text.slice(cursor, end);
-		const stripped = stripUnquoted(segment);
+		const stripped = stripUnquoted(segment, prose);
 		if (stripped !== segment) changed = true;
 		out += stripped;
 	};
@@ -142,7 +145,7 @@ export function stripDsmlToolMarkup(text: string): string | undefined {
  * the value carried no markup.
  */
 function stripDsmlToolArgumentMarkup(value: string): string | undefined {
-	const canonical = stripDsmlToolMarkup(value);
+	const canonical = stripDsmlToolMarkup(value, { prose: false });
 	let out = canonical ?? value;
 	const orphanStripped = out.replace(TOOL_ARGUMENT_MARKUP_PATTERN, "");
 	if (orphanStripped !== out) out = orphanStripped;

@@ -213,24 +213,6 @@ async function assertNotReadSelectorMisfire(target: string, content: string, cwd
 	throwReadSelectorMisfire(target, sel);
 }
 
-/**
- * Whether `writePath` addresses a row in an existing SQLite database. Row writes
- * use empty content as the delete signal, so they opt out of the empty-payload
- * guard rather than being mistaken for a degraded call.
- */
-async function isSqliteWriteTarget(writePath: string, session: ToolSession, signal?: AbortSignal): Promise<boolean> {
-	const candidates = parseSqlitePathCandidates(writePath).filter(candidate => candidate.sqlitePath !== writePath);
-	for (const candidate of candidates) {
-		try {
-			const absolutePath = await resolvePlanPath(session, candidate.sqlitePath, signal);
-			if (await isSqliteFile(absolutePath)) return true;
-		} catch {
-			// Unresolvable candidates are not SQLite writes; the normal path reports them.
-		}
-	}
-	return false;
-}
-
 const writeSchema = type({
 	path: "string",
 	"content?": "string",
@@ -961,29 +943,8 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			policy?.scope === "coordination" ||
 			policy?.scope === "reply" ||
 			(target !== undefined && policy?.cancels?.(target.url) === true);
-		// A degraded model emits empty tool arguments (or a placeholder path) and the
-		// write silently truncates the target to zero bytes; the failure only surfaces
-		// on the next read. Require the explicit opt-in for an empty payload, except
-		// where the target scheme already declares content optional (coordination,
-		// replies, device dispatches, proc kill), the write touches no files, or the
-		// target is a SQLite row where empty content means delete or a device
-		// transport that validates its own payload.
-		const sqliteTarget = content.length === 0 ? await isSqliteWriteTarget(path, this.session, signal) : false;
-		if (
-			content.length === 0 &&
-			allowEmpty !== true &&
-			!touchesNoFiles &&
-			!sqliteTarget &&
-			target?.spec.backing !== "device" &&
-			!(target && policy?.contentOptional?.(target.url))
-		) {
-			// A selector-shaped target is a more specific failure than an empty
-			// payload; let the read-selector guard name it before the generic refusal.
-			await assertNotReadSelectorMisfire(path, content, this.session.cwd);
-			throw new ToolError(
-				`content is empty for ${path}. Pass the file contents, or set allowEmpty to true to deliberately create or truncate an empty file.`,
-			);
-		}
+		// Hoisted so the empty-payload guard and the row write share one resolution.
+		let resolvedSqlitePath: ResolvedSqliteWritePath | null | undefined;
 		// A device-only session grants `write` purely as the device transport (see
 		// createTools): device dispatches, file-free writes, and the session's
 		// local:// sandbox proceed; every other target is rejected before any
@@ -1010,6 +971,31 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			);
 		}
 		return untilAborted(signal, async () => {
+			if (content.length === 0) {
+				// A degraded model emits empty tool arguments (or a placeholder path) and the
+				// write silently truncates the target to zero bytes; the failure only surfaces
+				// on the next read. Require the explicit opt-in for an empty payload, except
+				// where the target scheme already declares content optional (coordination,
+				// replies, device dispatches, proc kill), the write touches no files, or the
+				// target is a SQLite row (empty content deletes) or device transport. Reuse
+				// the guarded resolver so a FIFO/symlink target fails its stat/special-file
+				// checks before any header read, and cancellation reaches the probe.
+				resolvedSqlitePath = await this.#resolveSqliteWritePath(path, signal);
+				if (
+					allowEmpty !== true &&
+					!touchesNoFiles &&
+					!resolvedSqlitePath &&
+					target?.spec.backing !== "device" &&
+					!(target && policy?.contentOptional?.(target.url))
+				) {
+					// A selector-shaped target is a more specific failure than an empty
+					// payload; let the read-selector guard name it before the generic refusal.
+					await assertNotReadSelectorMisfire(path, content, this.session.cwd);
+					throw new ToolError(
+						`content is empty for ${path}. Pass the file contents, or set allowEmpty to true to deliberately create or truncate an empty file.`,
+					);
+				}
+			}
 			// Text payloads get hashline display prefixes ([PATH#HASH] + LINE:) stripped if the model
 			// copied them from read output. Verbatim payloads (messages, process stdin, setting
 			// values, conflict directives) reach their handler exactly as the model wrote them.
@@ -1101,7 +1087,9 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				return archiveResult;
 			}
 
-			const resolvedSqlitePath = await this.#resolveSqliteWritePath(path, signal);
+			if (resolvedSqlitePath === undefined) {
+				resolvedSqlitePath = await this.#resolveSqliteWritePath(path, signal);
+			}
 			if (resolvedSqlitePath) {
 				await enforcePlanModeWrite(this.session, resolvedSqlitePath.sqlitePath, { op: "update", signal });
 
