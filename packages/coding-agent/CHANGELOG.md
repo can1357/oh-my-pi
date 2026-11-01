@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed a subagent's retained eval kernel or isolation workspace being released while the child was still using it, and being held for the life of the host when a spawn ended before the child existed ([#17640](https://github.com/can1357/oh-my-pi/pull/17640) by [@sjawhar](https://github.com/sjawhar))
+- Fixed an isolated task's cleanup deleting untracked files its capture could not read, such as a file without read permission, one in a directory git could not open, or one in a directory whose name git could not report in full; the capture now fails and the workspace is kept ([#17641](https://github.com/can1357/oh-my-pi/pull/17641) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.2] - 2026-10-31
 
