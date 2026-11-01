@@ -83,7 +83,7 @@ import {
 	type UsageStatistics,
 } from "./session-entries";
 import { currentRuntimeIdentity, type RuntimeIdentity } from "./runtime-identity";
-import { isArchivedSessionPath, materializeSessionFile } from "./session-archive";
+import { isArchivedSessionPath, materializeSessionFile, type RestoreProgress } from "./session-archive";
 import {
 	filterSessionsForPicker,
 	findMostRecentNonEmptySession,
@@ -2356,15 +2356,18 @@ export class SessionManager {
 			await this.#rewriteAtomically();
 		}
 	}
-	/** Switch to a different session file (resume / branch). */
-	async setSessionFile(sessionFile: string): Promise<void> {
-		await this.#setSessionFile(sessionFile);
+	/**
+	 * Switch to a different session file (resume / branch). `onArchiveRestore`
+	 * receives what to show while a session comes out of the archive.
+	 */
+	async setSessionFile(sessionFile: string, options?: { onArchiveRestore?: RestoreProgress }): Promise<void> {
+		await this.#setSessionFile(sessionFile, undefined, options);
 	}
 
 	async #setSessionFile(
 		sessionFile: string,
 		loadedSession?: SessionLoadResult,
-		options?: { throwIfMissing?: boolean; newSession?: NewSessionOptions },
+		options?: { throwIfMissing?: boolean; newSession?: NewSessionOptions; onArchiveRestore?: RestoreProgress },
 	): Promise<void> {
 		await this.#drainAndCloseWriter();
 		this.#clearDiskError();
@@ -2389,7 +2392,7 @@ export class SessionManager {
 		// `stat` on the ordinary route.
 		const requestedFile = path.resolve(sessionFile);
 		const fromArchive = isArchivedSessionPath(requestedFile);
-		const resolvedSessionFile = await materializeSessionFile(requestedFile);
+		const resolvedSessionFile = await materializeSessionFile(requestedFile, undefined, options?.onArchiveRestore);
 		if (fromArchive && this.#sessionDir === path.dirname(requestedFile)) {
 			// `SessionManager.open` derived the session dir from the archive path.
 			// Follow the transcript home, or /new and /branch would write there.
@@ -4252,6 +4255,8 @@ export class SessionManager {
 			resetInheritedCost?: boolean;
 			repairInterruptedTail?: boolean;
 			seance?: boolean;
+			/** Receives what to show while the source session comes out of the archive. */
+			onArchiveRestore?: RestoreProgress;
 		},
 	): Promise<SessionManager> {
 		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
@@ -4267,7 +4272,7 @@ export class SessionManager {
 		let sourceEntries: FileEntry[];
 		let sourceFile = sourcePath;
 		try {
-			sourceFile = await materializeSessionFile(sourcePath);
+			sourceFile = await materializeSessionFile(sourcePath, undefined, options?.onArchiveRestore);
 			sourceEntries = await loadEntriesFromFile(sourceFile, storage, { throwIfMissing: true });
 		} catch (err) {
 			if (isEnoent(err) || isEnotdir(err)) throw new ForkSourceNotFoundError(sourcePath);
@@ -4398,12 +4403,19 @@ export class SessionManager {
 	 * @param options.initialCwd Cwd to use when the file is empty or missing.
 	 * @param options.throwIfMissing Propagate ENOENT instead of creating a new session at a missing path.
 	 * @param options.parentSession Parent session file recorded when the file is empty or missing.
+	 * @param options.onArchiveRestore Receives what to show while the session comes out of the archive.
 	 */
 	static async open(
 		filePath: string,
 		sessionDir?: string,
 		storage: SessionStorage = new FileSessionStorage(),
-		options?: { initialCwd?: string; parentSession?: string; suppressBreadcrumb?: boolean; throwIfMissing?: boolean },
+		options?: {
+			initialCwd?: string;
+			parentSession?: string;
+			suppressBreadcrumb?: boolean;
+			throwIfMissing?: boolean;
+			onArchiveRestore?: RestoreProgress;
+		},
 	): Promise<SessionManager> {
 		const probed = await loadSessionFile(filePath, storage, { throwIfMissing: options?.throwIfMissing });
 		const header = probed.entries.find(entry => entry.type === "session") as SessionHeader | undefined;
@@ -4434,6 +4446,7 @@ export class SessionManager {
 		await manager.#setSessionFile(filePath, loaded, {
 			throwIfMissing: options?.throwIfMissing,
 			newSession: { parentSession: options?.parentSession },
+			onArchiveRestore: options?.onArchiveRestore,
 		});
 		return manager;
 	}

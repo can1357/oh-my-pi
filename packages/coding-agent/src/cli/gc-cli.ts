@@ -61,7 +61,7 @@ import {
 	stagingResidueUnder,
 	type StagingGround,
 } from "../session/session-archive";
-import { codeOf, statIfPresent, withGcLock } from "../session/gc-lock";
+import { codeOf, statIfPresent, withGcLock, withoutGcLock } from "../session/gc-lock";
 import { RegularFileSessionStorage, readRegularSessionInfo } from "../session/gc-session-storage";
 import {
 	absentFile,
@@ -71,8 +71,7 @@ import {
 	NotARegularFile,
 	notRegularAsAbsent,
 	openRegularFile,
-	removeOwnFile,
-	takeAway,
+	removeFileOthersMayWrite,
 } from "../session/regular-file";
 import { readSessionHeaderIdFromHandle } from "../session/session-loader";
 import { tryAcquireSessionLease } from "../session/session-storage";
@@ -1101,7 +1100,8 @@ function inflatesTo(expected: { hash: string; bytes: number }): (published: fs.F
  * Take back the name this run linked onto its stage, when that is all taking
  * it back removes. Returns what was left and why, for the command to print.
  *
- * It goes the way every file gc removes goes — see {@link takeAway} — and is
+ * The name is in the archive, where any process of this user can name it,
+ * so it goes by {@link removeFileOthersMayWrite} and is
  * judged on what the move took: this run's staged file, held open since it
  * was created, or whatever the stage's name holds now, which a `link` from a
  * rebound stage gave this second name and which keeps another name after
@@ -1115,7 +1115,7 @@ async function withdrawLinkedPublication(destination: string, ground: StagingGro
 		(entry.dev === ground.held.dev && entry.ino === ground.held.ino) ||
 		(staged !== undefined && entry.dev === staged.dev && entry.ino === staged.ino);
 	const notOurs = `${destination} is not what this run published there`;
-	const result = await takeAway(destination, {
+	const result = await removeFileOthersMayWrite(destination, {
 		matches: linkedHere,
 		mismatch: notOurs,
 		judge: async moved => (linkedHere(moved) && moved.nlink > 1 ? undefined : notOurs),
@@ -1197,12 +1197,13 @@ async function gzipSessionFile(
 				if (standing.dev !== supersedes.dev || standing.ino !== supersedes.ino) {
 					throw new Error(`${changed}; run \`omp gc --archive\` again`);
 				}
-				// The shorter copy goes the way every file gc removes goes —
+				// The shorter copy, a name any process of this user can write,
+				// goes by `removeFileOthersMayWrite` —
 				// moved to a private name and judged there to be the very file
 				// proved above — and the longer one is linked in at its name
 				// before it goes. A rename onto the name instead replaced
 				// whatever stood there by the time it ran.
-				const replaced = await takeAway(destination, {
+				const replaced = await removeFileOthersMayWrite(destination, {
 					matches: named => named.isFile() && named.dev === standing.dev && named.ino === standing.ino,
 					mismatch: changed,
 					judge: async (_moved, handle) => {
@@ -1271,11 +1272,10 @@ async function gzipSessionFile(
 /**
  * One entry this copy created, held: the descriptor it was created through
  * stays open until the copy has finished or been undone, so no other entry
- * can be given its inode number meanwhile — see {@link removeOwnFile}. A
- * review copied an archived file elsewhere, removed it, and created a file
- * of its own at the name; the kernel gave the new file the freed number, and
- * a rollback that knew the entry by its number alone deleted that file, its
- * only copy.
+ * can be given its inode number meanwhile. A review copied an archived file
+ * elsewhere, removed it, and created a file of its own at the name; the
+ * kernel gave the new file the freed number, and a rollback that knew the
+ * entry by its number alone deleted that file, its only copy.
  */
 interface ArchiveCreation {
 	path: string;
@@ -1335,8 +1335,8 @@ async function survivesSourceRemoval(destination: string, sourceRoot: string): P
  * inode is still readable through a descriptor. It goes back the way
  * everything else is written here — a stage of this run's own, digested as
  * it is copied, published, and read back by {@link publishedIsStaged} — and
- * what this run published there goes the way every file gc removes goes:
- * see {@link takeAway}. Anything else at the name is left as it is.
+ * what this run published there, a name any process of this user can write,
+ * goes by {@link removeFileOthersMayWrite}. Anything else at the name is left as it is.
  */
 async function putArchivedCopyBack(
 	archived: fs.FileHandle,
@@ -1351,7 +1351,7 @@ async function putArchivedCopyBack(
 		const written = await copyHandleWithDigest(archived, ground.handle);
 		await ground.handle.chmod(mode & 0o7777);
 		const notOurs = `${destination} is not the copy this run published there`;
-		const replaced = await takeAway(destination, {
+		const replaced = await removeFileOthersMayWrite(destination, {
 			matches: named => named.isFile() && named.dev === replacing.dev && named.ino === replacing.ino,
 			mismatch: notOurs,
 			judge: async (_moved, handle) => {
@@ -1461,7 +1461,7 @@ async function publishArtifactIntoArchive(
 		// The proof was about a descriptor; the publication is about a name.
 		// `link` replaces nothing, and a shorter copy is replaced only once it
 		// has been moved to a private name and judged there — see
-		// {@link takeAway} — so neither writes over a file somebody put at the
+		// {@link removeFileOthersMayWrite} — so neither writes over a file somebody put at the
 		// name. What the publication left at the name is read back — see
 		// {@link publishedIsStaged} for each step and what it rules out — since
 		// a process that can write the destination's directory can still
@@ -1533,13 +1533,13 @@ async function publishArtifactIntoArchive(
 			// copied bytes begin. Anything else is a different file wearing
 			// the name.
 			if (archivedBytes.size > copied.size || !(await handleBeginsWith(ground.handle, archived))) throw conflict();
-			// The shorter copy goes the way every file gc removes goes — moved
-			// to a private name and judged there to be the very file read
+			// The shorter copy, a name any process of this user can write, goes by
+			// `removeFileOthersMayWrite` — moved to a private name and judged there to be the very file read
 			// above, held open since — and the longer one is linked in at its
 			// name before it goes. A rename onto the name instead replaced
 			// whatever stood there by the time it ran.
 			const changed = `${destination} changed while it was being archived`;
-			const replaced = await takeAway(destination, {
+			const replaced = await removeFileOthersMayWrite(destination, {
 				matches: named => named.isFile() && named.dev === verified.dev && named.ino === verified.ino,
 				mismatch: changed,
 				judge: async (_moved, handle) => {
@@ -1670,8 +1670,8 @@ async function copyArtifactEntryIntoArchive(
  * copy did once create must not be removed because the name is familiar.
  * Neither is an inode number, which the kernel hands to the next file once
  * the last name and descriptor of the old one are gone — so every entry this
- * copy made has been held open since it was made. A file goes the way every
- * file gc removes goes — see {@link removeOwnFile} — and a directory goes
+ * copy made has been held open since it was made. A file, at a name any
+ * process of this user can write, goes by {@link removeFileOthersMayWrite}; a directory goes
  * with `rmdir`, which removes nothing but an empty directory, only while the
  * name holds the very directory held. Deepest first, so a directory is empty
  * when its turn comes.
@@ -1688,7 +1688,19 @@ async function copyArtifactEntryIntoArchive(
 async function removeTreeAdditions(created: readonly ArchiveCreation[], notes: string[]): Promise<void> {
 	for (const made of [...created].reverse()) {
 		if (!made.directory) {
-			const note = await removeOwnFile(made.path, [made.held], "the copy this run put in the archive");
+			// An archived name any process of this user can write: what it holds
+			// goes only once moved aside and judged to be the copy held since it
+			// was published.
+			const notOurs = `${made.path} is not the copy this run put in the archive`;
+			const removal = await removeFileOthersMayWrite(made.path, {
+				matches: standing => standing.isFile() && standing.dev === made.held.dev && standing.ino === made.held.ino,
+				mismatch: notOurs,
+				judge: async (_moved, handle) => {
+					const now = await handle?.stat();
+					return now?.dev === made.held.dev && now.ino === made.held.ino ? undefined : notOurs;
+				},
+			});
+			const note = removal.outcome === "kept" ? removal.note : undefined;
 			if (note) notes.push(note);
 			continue;
 		}
@@ -1805,7 +1817,7 @@ interface ProvenEntry extends EntryIdentity {
 /**
  * Give up one live file the reclaim proved, the way every file gc removes
  * goes: moved to a private name, judged there through a descriptor on what
- * was moved, and only then unlinked — see {@link takeAway}. The judgment is
+ * was moved, and only then unlinked — see {@link removeFileOthersMayWrite}. The judgment is
  * the proof again, on what was moved: still the very entry the walk proved,
  * and holding what the archive holds (`holds`). Throws why it was kept, and
  * where it is.
@@ -1829,7 +1841,7 @@ async function giveUpProvedFile(
 	holds: (moved: fs.FileHandle, now: Stats) => Promise<string | undefined>,
 ): Promise<void> {
 	const changed = `${file} is no longer the file this run proved`;
-	const result = await takeAway(file, {
+	const result = await removeFileOthersMayWrite(file, {
 		matches: standing => standing.isFile() && sameIdentity(identityFrom(standing), proved),
 		mismatch: changed,
 		judge: async (_moved, handle) => {
@@ -3244,7 +3256,9 @@ export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 			throw new Error(`--${flag} runs alone; drop ${options.explicitPhases.map(name => `--${name}`).join(" ")}`);
 		}
 	}
-	const result = await withGcLock(options.agentDir, async lockPath => {
+	// A preview writes nothing, the lock included: it reads the lock instead
+	// of taking it — see {@link withoutGcLock}.
+	const run = async (lockPath: string): Promise<GcResult> => {
 		const next: GcResult = { agentDir: options.agentDir, apply: options.apply, lockPath };
 		// A restore runs alone: no sweep may race a session coming back.
 		if (options.restoreTarget !== undefined) {
@@ -3264,7 +3278,8 @@ export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 		if (options.runCompress) next.compress = await runCompressGc(options, archiveRoot);
 		if (options.runWal) next.wal = await runWalGc(options);
 		return next;
-	});
+	};
+	const result = options.apply ? await withGcLock(options.agentDir, run) : await withoutGcLock(options.agentDir, run);
 
 	const output = options.json ? `${JSON.stringify(result, null, 2)}\n` : renderText(result);
 	process.stdout.write(output);

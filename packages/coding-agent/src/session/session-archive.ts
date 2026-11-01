@@ -18,7 +18,6 @@
  * then artifact tree), the reverse of what the archive phase does, so both
  * hold `<agentDir>/gc.lock` while they do it.
  */
-import { randomBytes } from "node:crypto";
 import * as fs from "node:fs/promises";
 import { constants as fsConstants, type Stats } from "node:fs";
 import * as path from "node:path";
@@ -36,7 +35,9 @@ import {
 	NotARegularFile,
 	notRegularAsAbsent,
 	openRegularFile,
-	removeOwnFile,
+	type OwnFileRemoval,
+	removeFileNoOneElseWrites,
+	unlinkFileNoOneElseWrites,
 	writeExclusive,
 } from "./regular-file";
 import { SESSION_TITLE_SLOT_BYTES } from "./session-entries";
@@ -231,34 +232,20 @@ async function rewriteOwnRestoreRecord(own: OwnRestoreRecord, text: string): Pro
 
 /**
  * Take this run's record down, or say why what has its name was left. The
- * name is first renamed to one only this run knows, which moves exactly what
- * has the name at that moment; that is removed only when it is the file this
- * run created, by the identity taken at creation. The comparison runs while
- * this run still holds the descriptor it created the record through, so that
- * inode cannot have been handed out again to a file someone put at the name:
- * an inode is freed only once its last link and its last open descriptor are
- * gone. Anything else is put back under its name with `link`, which replaces
- * nothing, or, where that cannot be done, left where the rename put it and
- * named. A directory that refuses the change is named, with what to do.
- *
- * The rename and the `unlink` still name paths — no system call removes a
- * file by its inode — so a writer with access to this directory is outside
- * what this guards: a file it puts at the aside name just before the rename
- * is replaced, and one it puts there between the comparison and the
- * `unlink` is removed. The aside name carries 64 random bits and the
- * `unlink` follows the comparison at once, which narrows that window and
- * does not close it. Linux's `renameat2` with `RENAME_NOREPLACE` would
- * refuse the first case, keeping both files; Node has no binding for it,
- * and it would leave the second.
+ * record is a file only gc names and writes — created here with `O_EXCL` and
+ * written only through its own descriptor — so it goes by
+ * {@link unlinkFileNoOneElseWrites}: removed only while the name holds the
+ * very inode this run created, which no other file can have been given while
+ * this run holds its descriptor, looked at again the instant before the
+ * `unlink`. Nothing is moved aside, so a run killed here leaves its record at
+ * its own name or nothing. A directory that refuses the change is named,
+ * with what to do.
  */
 async function dropOwnRestoreRecord(own: OwnRestoreRecord): Promise<string | undefined> {
-	const aside = `${own.path}.${randomBytes(8).toString("hex")}.leaving`;
+	let removal: OwnFileRemoval;
 	try {
-		await fs.rename(own.path, aside);
+		removal = await unlinkFileNoOneElseWrites(own.path, [{ handle: own.handle, dev: own.dev, ino: own.ino }]);
 	} catch (error) {
-		// Gone already: nothing has the name, which is what a finished
-		// restore leaves.
-		if (isEnoent(error)) return undefined;
 		if (isPermissionError(error)) {
 			return (
 				`${recordDirectoryNotWritable(own.path, error)}, so this restore could not take down its record ${own.path}, ` +
@@ -268,27 +255,8 @@ async function dropOwnRestoreRecord(own: OwnRestoreRecord): Promise<string | und
 		}
 		throw error;
 	}
-	const moved = await fs.lstat(aside);
-	if (moved.dev === own.dev && moved.ino === own.ino) {
-		try {
-			await fs.unlink(aside);
-		} catch (error) {
-			if (!isPermissionError(error)) throw error;
-			return (
-				`${recordDirectoryNotWritable(aside, error)}, so this restore's own record, already moved out of the way to ` +
-				`${aside}, could not be removed: make the directory writable with \`chmod u+w\` and move that file aside`
-			);
-		}
-		return undefined;
-	}
-	const replaced = `${own.path} held something other than the record this restore wrote`;
-	try {
-		await fs.link(aside, own.path);
-	} catch {
-		return `${replaced}; it is now at ${aside}, and nothing was removed: look at it and put it back if it is wanted`;
-	}
-	await fs.unlink(aside);
-	return `${replaced}, so it was left: look at it, and once the session holds everything, move it aside`;
+	if (removal !== "kept") return undefined;
+	return `${own.path} held something other than the record this restore wrote, so it was left: look at it, and once the session holds everything, move it aside`;
 }
 
 /**
@@ -385,6 +353,14 @@ export async function findArchivedSessionFiles(sessionArg: string, agentDir?: st
 	}
 	return matches;
 }
+
+/**
+ * Receives a line to show while a session comes out of the archive, so
+ * whoever opened it sees it is being brought back rather than a program that
+ * has stopped: a session with thousands of artifacts takes seconds, and once
+ * took twenty with nothing printed.
+ */
+export type RestoreProgress = (line: string) => void;
 
 export interface RestoredSession {
 	/** Live path the transcript now occupies. */
@@ -1179,6 +1155,8 @@ async function copyEntryDereferenced(
 	notes: string[],
 	isResidue: (entry: string) => boolean,
 	plan?: RestorePlan,
+	/** Called once per archived file the live tree holds once this returns. */
+	onFile?: () => void,
 ): Promise<void> {
 	const stat = await fs.stat(source).catch(error => {
 		// A link whose target is gone: nothing to carry, nothing to lose.
@@ -1249,6 +1227,7 @@ async function copyEntryDereferenced(
 					notes,
 					isResidue,
 					plan,
+					onFile,
 				);
 			}
 			if (plan && !existing) plan.noteDirectory(destination, promisedFrom);
@@ -1283,7 +1262,10 @@ async function copyEntryDereferenced(
 							`the archive is kept — give the live tree a file of its own and restore again`,
 					);
 				}
-				if (await sourceIsPrefixOfDestination(bytesOfRegularFile(source), live, false)) return;
+				if (await sourceIsPrefixOfDestination(bytesOfRegularFile(source), live, false)) {
+					onFile?.();
+					return;
+				}
 			}
 		} finally {
 			await live?.close();
@@ -1343,6 +1325,7 @@ async function copyEntryDereferenced(
 		if (!(await publishedIsStaged(destination, ground.created, holdsCopied(written)))) {
 			throw new Error(`${destination} is not the copy of ${source} this restore wrote, so it was left as it is`);
 		}
+		onFile?.();
 	} finally {
 		try {
 			const note = await removeStagingGround(ground);
@@ -1370,6 +1353,7 @@ async function copyTreeDereferenced(
 	agentDir: string,
 	notes: string[],
 	plan?: RestorePlan,
+	onFile?: () => void,
 ): Promise<Array<[string, string]>> {
 	if (plan) await planWritableDirectory(path.dirname(destination), plan, source);
 	else await fs.mkdir(path.dirname(destination), { recursive: true });
@@ -1385,7 +1369,7 @@ async function copyTreeDereferenced(
 		return true;
 	};
 	const ledger = stagingLedgerDir(agentDir);
-	await copyEntryDereferenced(source, destination, archiveRoot, ledger, notes, isResidue, plan);
+	await copyEntryDereferenced(source, destination, archiveRoot, ledger, notes, isResidue, plan, onFile);
 	if (!plan) await assertLiveTreeHoldsArchive(source, destination, archiveRoot, isResidue);
 	return [...leftOut];
 }
@@ -1537,7 +1521,7 @@ export interface StagingGround {
 	/**
 	 * The staged file held: {@link handle} and {@link created}'s identity, by
 	 * which this run removes the file — at the stage, or at any name it was
-	 * linked to — and nothing put at those names since. See {@link removeOwnFile}.
+	 * linked to — and nothing put at those names since. See {@link removeFileNoOneElseWrites}.
 	 */
 	held: HeldFile;
 	/** This directory's record in {@link stagingLedgerDir}. */
@@ -1546,7 +1530,7 @@ export interface StagingGround {
 	 * The record, held: the descriptor that wrote it, open until
 	 * {@link removeStagingGround} has removed it or given it up, and the
 	 * bytes it wrote, a random value among them. What this run removes the
-	 * record by — see {@link removeOwnFile} — since neither its name nor its
+	 * record by — see {@link removeFileNoOneElseWrites} — since neither its name nor its
 	 * inode number is proof the file there is still the one this run wrote.
 	 */
 	recordHeld: HeldFile;
@@ -1597,7 +1581,7 @@ async function assertPrivateLedger(ledger: string): Promise<void> {
  * between the two leaves both records, naming the same directory. Nothing
  * here writes over a name: every record is created afresh or linked in,
  * where a name already taken fails with `EEXIST`, and only the files this
- * attempt wrote are removed — see {@link removeOwnFile}. A `rename` onto the
+ * attempt wrote are removed — see {@link removeFileNoOneElseWrites}. A `rename` onto the
  * record's name would replace whatever stood there by then. Nothing here is
  * synced, so after a power loss the directory can outlive its record; it is
  * then indistinguishable from an artifact and is treated as one.
@@ -1648,7 +1632,7 @@ export async function mintStagingGround(target: string, ledger: string, mode = 0
 		const unrecord = async (): Promise<string[]> => {
 			const notes: string[] = [];
 			for (const at of names) {
-				const note = await removeOwnFile(at, written, "a record this run wrote");
+				const note = await removeFileNoOneElseWrites(at, written, "a record this run wrote");
 				if (note) notes.push(note);
 			}
 			return notes;
@@ -1663,7 +1647,7 @@ export async function mintStagingGround(target: string, ledger: string, mode = 0
 		try {
 			await fs.link(part, record);
 			// The part name goes; the record keeps the file under its own name.
-			const left = await removeOwnFile(part, written, "a record this run wrote");
+			const left = await removeFileNoOneElseWrites(part, written, "a record this run wrote");
 			if (left) throw new Error(left);
 		} catch (error) {
 			const notes = await unrecord();
@@ -1702,7 +1686,7 @@ export async function mintStagingGround(target: string, ledger: string, mode = 0
 			written.push(recordHeld);
 			await fs.link(completePart, complete);
 			for (const at of [completePart, record]) {
-				const left = await removeOwnFile(at, written, "a record this run wrote");
+				const left = await removeFileNoOneElseWrites(at, written, "a record this run wrote");
 				if (left) throw new Error(left);
 			}
 			// Only the second record's descriptor goes on with the ground.
@@ -1748,7 +1732,7 @@ export async function mintStagingGround(target: string, ledger: string, mode = 0
 /**
  * Take away a staging directory this run made, with the one file this run
  * staged in it — while that file is still the one this run holds open, by
- * the rule every removal here follows ({@link removeOwnFile}) — and nothing
+ * the rule every removal here follows ({@link removeFileNoOneElseWrites}) — and nothing
  * else. `staged` undefined means this run never created the file, so nothing
  * inside is its to remove.
  *
@@ -1784,7 +1768,7 @@ async function clearStagingGround(
 		const what = `what ${stager} staged there`;
 		const note =
 			staged !== undefined && at === file
-				? await removeOwnFile(at, [staged], what)
+				? await removeFileNoOneElseWrites(at, [staged], what)
 				: `${at} is not ${what}, so it was left as it is`;
 		if (note) notes.push(note);
 	}
@@ -1808,7 +1792,7 @@ export async function removeStagingGround(ground: StagingGround): Promise<string
 	try {
 		const note = await clearStagingGround(ground.dir, ground.file, ground.held, "this run");
 		if (note !== undefined) return note;
-		return await removeOwnFile(ground.record, [ground.recordHeld], "the record this run wrote");
+		return await removeFileNoOneElseWrites(ground.record, [ground.recordHeld], "the record this run wrote");
 	} finally {
 		await ground.recordHeld.handle.close().catch(() => undefined);
 	}
@@ -2642,6 +2626,7 @@ export async function restoreArchivedSessionLocked(
 	archiveFile: string,
 	agentDir?: string,
 	plan?: RestorePlan,
+	progress?: RestoreProgress,
 ): Promise<RestoredSession> {
 	const sessionPath = liveSessionPathForArchive(archiveFile, agentDir);
 	if (!sessionPath) {
@@ -2678,6 +2663,10 @@ export async function restoreArchivedSessionLocked(
 	const target = stem.slice(stem.lastIndexOf("_") + 1) || stem;
 	const agentDirSuffix = agentDirFlag(agentDir ?? agentDirOfArchivedPath(archiveFile) ?? getAgentDir());
 	const restoreCommand = `omp gc --restore ${shellQuote(target)} --apply${agentDirSuffix}`;
+	// Said before anything else is done: finding the session's owners alone
+	// reads every transcript in both trees, and a session with thousands of
+	// artifacts took twenty seconds with nothing on the screen.
+	if (!plan) progress?.(`Bringing session ${target} back from the archive…`);
 	const acquired = await tryAcquireRestoreLeases(owners, plan !== undefined);
 	if (acquired && "unprobed" in acquired) {
 		throw new Error(
@@ -2766,7 +2755,31 @@ export async function restoreArchivedSessionLocked(
 		const leasedOwners = await ownerSignature(owners);
 		if (hasArtifacts) {
 			try {
-				const leftOut = await copyTreeDereferenced(archiveArtifacts, liveArtifacts, stagingAgentDir, notes, plan);
+				// A count once a second, and the last one, while the tree comes home.
+				let onFile: (() => void) | undefined;
+				if (progress && !plan) {
+					const total = (await treeFiles(archiveArtifacts)).length;
+					let done = 0;
+					let saidAt = Date.now();
+					const say = (): void =>
+						progress(`Bringing session ${target} back from the archive: ${done} of ${total} artifact files`);
+					say();
+					onFile = () => {
+						done += 1;
+						if (done === total || Date.now() - saidAt >= 1000) {
+							saidAt = Date.now();
+							say();
+						}
+					};
+				}
+				const leftOut = await copyTreeDereferenced(
+					archiveArtifacts,
+					liveArtifacts,
+					stagingAgentDir,
+					notes,
+					plan,
+					onFile,
+				);
 				if (!(await leases.refresh())) throw noOwners();
 				if ((await ownerSignature(owners)) !== leasedOwners) {
 					throw new Error(
@@ -2826,10 +2839,16 @@ export async function restoreArchivedSessionLocked(
  * Queues behind a maintenance run rather than failing: the caller here is
  * someone opening a session, who never asked to compete with `omp gc`.
  */
-export async function restoreArchivedSession(archiveFile: string, agentDir?: string): Promise<RestoredSession> {
+export async function restoreArchivedSession(
+	archiveFile: string,
+	agentDir?: string,
+	progress?: RestoreProgress,
+): Promise<RestoredSession> {
 	const dir = agentDir ?? getAgentDir();
 	try {
-		return await withGcLock(dir, () => restoreArchivedSessionLocked(archiveFile, dir), { waitMs: 30_000 });
+		return await withGcLock(dir, () => restoreArchivedSessionLocked(archiveFile, dir, undefined, progress), {
+			waitMs: 30_000,
+		});
 	} catch (error) {
 		if (error instanceof Error && error.message.startsWith("GC already running")) {
 			throw new Error(
@@ -2888,7 +2907,11 @@ async function liveSessionIsComplete(sessionFile: string, archiveFile: string): 
  * the live transcript wins every later id lookup, so an unreported half
  * restore is one nothing would retry.
  */
-export async function materializeSessionFile(sessionFile: string, agentDir?: string): Promise<string> {
+export async function materializeSessionFile(
+	sessionFile: string,
+	agentDir?: string,
+	progress?: RestoreProgress,
+): Promise<string> {
 	let archived: string | undefined;
 	if (isArchivedSessionPath(sessionFile)) {
 		archived = sessionFile;
@@ -2905,7 +2928,7 @@ export async function materializeSessionFile(sessionFile: string, agentDir?: str
 		// session" once an archive existed beside it.
 		return sessionFile;
 	}
-	const restored = await restoreArchivedSession(archived, agentDir);
+	const restored = await restoreArchivedSession(archived, agentDir, progress);
 	if (restored.notRestored.length > 0) {
 		const stem = path.basename(restored.sessionPath, SESSION_SUFFIX);
 		const retry = `omp gc --restore ${shellQuote(stem.slice(stem.lastIndexOf("_") + 1) || stem)} --apply${agentDirFlag(agentDir ?? agentDirOfArchivedPath(archived) ?? getAgentDir())}`;
