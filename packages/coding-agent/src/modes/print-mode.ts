@@ -613,16 +613,18 @@ async function runPrintModeCore(
 	// an OMP-owned Chromium cannot survive the exit (issue #5643).
 	//
 	// A latched store failure rethrows from `dispose()`; report it as lost
-	// durability rather than letting it escape as a raw fatal dump.
+	// durability rather than letting it escape as a raw fatal dump. The latch
+	// holds the latest failure, which may not be the one the observer first heard.
 	let durabilityFailure = false;
 	try {
 		await session.dispose({ mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS });
 	} catch (error) {
-		if (!persistenceFailure || error !== persistenceFailure) throw error;
+		const latched = persistenceFailure && session.sessionManager.getPersistenceFailure();
+		if (!latched || error !== latched) throw error;
 		durabilityFailure = true;
 		// The store is still failing at teardown, so this is the moment the
 		// transcript stops being retryable and becomes lost.
-		writeStderrLine(formatPersistenceDurabilityFailure(persistenceFailure.message));
+		writeStderrLine(formatPersistenceDurabilityFailure(latched.message));
 		await stderrTail;
 	}
 

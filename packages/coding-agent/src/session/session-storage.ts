@@ -188,7 +188,7 @@ export interface SessionStorage {
 	 * materializing it as one string. Optional; callers on backends without
 	 * it join the lines and call {@link writeTextSync}.
 	 */
-	writeLinesSync?(path: string, lines: readonly string[], options?: SessionStorageWriteOptions): void;
+	writeLinesSync?(path: string, lines: Iterable<string>, options?: SessionStorageWriteOptions): void;
 	/**
 	 * Update the current session title through the storage backend.
 	 *
@@ -208,6 +208,13 @@ export interface SessionStorage {
 	 * them, and reports the conflict instead on backends without it.
 	 */
 	readTextSync?(path: string): string;
+	/**
+	 * Synchronously read the UTF-8 bytes `[start, end)` of the file, or fewer
+	 * when it ends sooner. Optional: `SessionManager` reads back only what
+	 * another writer appended past the bytes it accounts for, and republishes
+	 * instead on backends without it.
+	 */
+	readTextRangeSync?(path: string, start: number, end: number): string;
 	/** Read the requested UTF-8 byte windows from the head and tail of the file. */
 	readTextSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]>;
 	/**
@@ -221,7 +228,7 @@ export interface SessionStorage {
 	writeText(path: string, content: string): Promise<void>;
 	writeTextAtomic(path: string, content: string, options?: WriteTextAtomicOptions): Promise<void>;
 	/** Streaming {@link writeTextAtomic}, optional on the same terms as {@link writeLinesSync}. */
-	writeLinesAtomic?(path: string, lines: readonly string[], options?: WriteTextAtomicOptions): Promise<void>;
+	writeLinesAtomic?(path: string, lines: Iterable<string>, options?: WriteTextAtomicOptions): Promise<void>;
 	rename(path: string, nextPath: string): Promise<void>;
 	unlink(path: string): Promise<void>;
 	deleteSessionWithArtifacts(sessionPath: string): Promise<void>;
@@ -576,8 +583,25 @@ function sessionOwnersDir(): string {
 	return testSessionOwnersDir() ?? getSessionOwnersDir();
 }
 
-/** Bytes read to find a header at claim time: the title slot plus a header line fit well inside. */
-const SESSION_HEADER_PREFIX_BYTES = 64 * 1024;
+/** Bytes read to find a header: the title slot plus a header line fit well inside. */
+export const SESSION_HEADER_PREFIX_BYTES = 64 * 1024;
+
+/**
+ * The session id in the header at the start of `prefix` (past the title
+ * slot), or `undefined` when the prefix holds no complete session header.
+ */
+export function sessionHeaderIdInPrefix(prefix: string): string | undefined {
+	if (parseTitleSlotFromContent(prefix)) prefix = prefix.slice(prefix.indexOf("\n") + 1);
+	const end = prefix.indexOf("\n");
+	if (end === -1) return undefined;
+	try {
+		const entry: unknown = JSON.parse(prefix.slice(0, end));
+		if (entry && typeof entry === "object" && "type" in entry && entry.type === "session" && "id" in entry) {
+			return typeof entry.id === "string" ? entry.id : undefined;
+		}
+	} catch {}
+	return undefined;
+}
 
 /**
  * The session id in the header of the file at `sessionPath`, read
@@ -597,16 +621,7 @@ function readSessionHeaderIdSync(sessionPath: string): string | undefined {
 	} catch {
 		return undefined;
 	}
-	if (parseTitleSlotFromContent(prefix)) prefix = prefix.slice(prefix.indexOf("\n") + 1);
-	const end = prefix.indexOf("\n");
-	if (end === -1) return undefined;
-	try {
-		const entry: unknown = JSON.parse(prefix.slice(0, end));
-		if (entry && typeof entry === "object" && "type" in entry && entry.type === "session" && "id" in entry) {
-			return typeof entry.id === "string" ? entry.id : undefined;
-		}
-	} catch {}
-	return undefined;
+	return sessionHeaderIdInPrefix(prefix);
 }
 
 /**
@@ -687,11 +702,17 @@ export function probeSessionLeases(sessionIds: readonly string[]): SessionLeaseR
 const LINE_STREAM_CHUNK = 1 << 20;
 
 /** Write `lines` to a new file at `target` in bounded chunks, never holding their full concatenation. */
-function writeLinesToFileSync(target: string, lines: readonly string[]): void {
+function writeLinesToFileSync(target: string, lines: Iterable<string>): void {
 	const fd = fs.openSync(target, "w");
 	try {
 		let chunk = "";
 		for (const line of lines) {
+			if (line.length >= LINE_STREAM_CHUNK) {
+				if (chunk.length > 0) fs.writeFileSync(fd, chunk);
+				chunk = "";
+				fs.writeFileSync(fd, line);
+				continue;
+			}
 			chunk += line;
 			if (chunk.length < LINE_STREAM_CHUNK) continue;
 			fs.writeFileSync(fd, chunk);
@@ -707,7 +728,7 @@ function writeLinesToFileSync(target: string, lines: readonly string[]): void {
  * Async {@link writeLinesToFileSync} through a buffered Bun file sink.
  * `target` must be a fresh path: a sink does not truncate an existing file.
  */
-async function writeLinesToFile(target: string, lines: readonly string[]): Promise<void> {
+async function writeLinesToFile(target: string, lines: Iterable<string>): Promise<void> {
 	const sink = Bun.file(target).writer({ highWaterMark: LINE_STREAM_CHUNK });
 	try {
 		for (const line of lines) {
@@ -1011,9 +1032,9 @@ export class FileSessionStorage implements SessionStorage {
 	 * spy that intercepts {@link writeTextSync} still sees every full rewrite:
 	 * the lines are then joined and routed through it.
 	 */
-	writeLinesSync(fpath: string, lines: readonly string[], options?: SessionStorageWriteOptions): void {
+	writeLinesSync(fpath: string, lines: Iterable<string>, options?: SessionStorageWriteOptions): void {
 		if (this.writeTextSync !== FileSessionStorage.prototype.writeTextSync) {
-			this.writeTextSync(fpath, lines.join(""), options);
+			this.writeTextSync(fpath, Array.from(lines).join(""), options);
 			return;
 		}
 		this.#publishSync(fpath, tempPath => writeLinesToFileSync(tempPath, lines), options);
@@ -1112,6 +1133,22 @@ export class FileSessionStorage implements SessionStorage {
 		return fs.readFileSync(path, "utf8");
 	}
 
+	readTextRangeSync(path: string, start: number, end: number): string {
+		const fd = fs.openSync(path, "r");
+		try {
+			const buffer = Buffer.allocUnsafe(Math.max(0, end - start));
+			let read = 0;
+			while (read < buffer.length) {
+				const n = fs.readSync(fd, buffer, read, buffer.length - read, start + read);
+				if (n === 0) break;
+				read += n;
+			}
+			return buffer.toString("utf8", 0, read);
+		} finally {
+			fs.closeSync(fd);
+		}
+	}
+
 	async readTextSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]> {
 		return peekFileEnds(path, prefixBytes, suffixBytes, (head, tail) => [
 			utf8Decoder.decode(head),
@@ -1144,9 +1181,9 @@ export class FileSessionStorage implements SessionStorage {
 	 * subclass or spy that intercepts {@link writeTextAtomic} still sees every
 	 * full rewrite: the lines are then joined and routed through it.
 	 */
-	async writeLinesAtomic(fpath: string, lines: readonly string[], options?: WriteTextAtomicOptions): Promise<void> {
+	async writeLinesAtomic(fpath: string, lines: Iterable<string>, options?: WriteTextAtomicOptions): Promise<void> {
 		if (this.writeTextAtomic !== FileSessionStorage.prototype.writeTextAtomic) {
-			return this.writeTextAtomic(fpath, lines.join(""), options);
+			return this.writeTextAtomic(fpath, Array.from(lines).join(""), options);
 		}
 		await this.#publishAtomic(fpath, tempPath => writeLinesToFile(tempPath, lines), options);
 	}
@@ -1736,6 +1773,26 @@ export class MemorySessionStorage implements SessionStorage {
 		const entry = this.#files.get(path);
 		if (!entry) throw memoryFileNotFound(path);
 		return materializeMemoryEntry(entry);
+	}
+
+	readTextRangeSync(path: string, start: number, end: number): string {
+		const entry = this.#files.get(path);
+		if (!entry) throw memoryFileNotFound(path);
+		const from = Math.max(0, Math.min(start, entry.size));
+		const to = Math.max(from, Math.min(end, entry.size));
+		let text = "";
+		for (let i = upperBound(entry.cumulativeBytes, from); i < entry.chunks.length; i++) {
+			const chunkStart = i === 0 ? 0 : entry.cumulativeBytes[i - 1];
+			if (chunkStart >= to) break;
+			const chunkEnd = entry.cumulativeBytes[i];
+			text += decodeChunkByteRange(
+				entry.chunks[i],
+				Math.max(from, chunkStart) - chunkStart,
+				Math.min(to, chunkEnd) - chunkStart,
+				chunkEnd - chunkStart,
+			);
+		}
+		return text;
 	}
 
 	readTextSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]> {

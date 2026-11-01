@@ -6,7 +6,11 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { listSessions } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { loadEntriesFromFile } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import {
+	FileSessionStorage,
+	MemorySessionStorage,
+	type WriteTextAtomicOptions,
+} from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 
 class CountingMemorySessionStorage extends MemorySessionStorage {
@@ -15,6 +19,113 @@ class CountingMemorySessionStorage extends MemorySessionStorage {
 	override writeTextSync(filePath: string, content: string): void {
 		this.writeTextSyncCalls++;
 		super.writeTextSync(filePath, content);
+	}
+}
+
+function matchingCrc32Suffix(prefix: Uint8Array, targetCrc: number): Uint8Array {
+	const prefixCrc = Bun.hash.crc32(prefix);
+	const zeroSuffix = new Uint8Array(4);
+	const zeroCrc = Bun.hash.crc32(zeroSuffix, prefixCrc) >>> 0;
+	const targetDelta = (targetCrc ^ zeroCrc) >>> 0;
+	const rows = Array.from({ length: 32 }, (_, outputBit) => {
+		let coefficients = 0;
+		for (let inputBit = 0; inputBit < 32; inputBit++) {
+			const probe = new Uint8Array(4);
+			probe[inputBit >>> 3] = 1 << (inputBit & 7);
+			const effect = (Bun.hash.crc32(probe, prefixCrc) ^ zeroCrc) >>> 0;
+			coefficients |= ((effect >>> outputBit) & 1) << inputBit;
+		}
+		return { coefficients: coefficients >>> 0, result: (targetDelta >>> outputBit) & 1 };
+	});
+
+	for (let column = 0; column < 32; column++) {
+		const pivot = rows.findIndex((row, rowIndex) => rowIndex >= column && ((row.coefficients >>> column) & 1) === 1);
+		if (pivot === -1) throw new Error("Expected CRC32 suffix matrix to be invertible");
+		[rows[column], rows[pivot]] = [rows[pivot]!, rows[column]!];
+		for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
+			if (rowIndex === column || ((rows[rowIndex]!.coefficients >>> column) & 1) === 0) continue;
+			rows[rowIndex]!.coefficients = (rows[rowIndex]!.coefficients ^ rows[column]!.coefficients) >>> 0;
+			rows[rowIndex]!.result ^= rows[column]!.result;
+		}
+	}
+
+	const suffix = new Uint8Array(4);
+	for (let bit = 0; bit < 32; bit++) {
+		if (rows[bit]!.result === 1) suffix[bit >>> 3] |= 1 << (bit & 7);
+	}
+	return suffix;
+}
+
+function sameLengthCrc32Collision(body: Uint8Array): Uint8Array {
+	if (body.byteLength < 5) throw new Error("Expected enough bytes for a distinct CRC32 collision");
+	const collision = Uint8Array.from(body);
+	collision[0] ^= 1;
+	collision.set(matchingCrc32Suffix(collision.subarray(0, -4), Bun.hash.crc32(body)), collision.byteLength - 4);
+	if (
+		collision.byteLength !== body.byteLength ||
+		Bun.hash.crc32(collision) !== Bun.hash.crc32(body) ||
+		collision.every((byte, index) => byte === body[index])
+	) {
+		throw new Error("Expected a different body with the same length and CRC32");
+	}
+	return collision;
+}
+
+const UTF8_BOM = Buffer.from([0xef, 0xbb, 0xbf]);
+
+class AcknowledgementLossStorage extends FileSessionStorage {
+	failNextPublish = false;
+	corruptNextPublishedBody = false;
+	prefixNextPublishedBodyWithBom = false;
+	publishedCrcCollision = false;
+	publishedBomPrefixedBody = false;
+	readTextCalls = 0;
+
+	override async writeLinesAtomic(
+		path: string,
+		lines: Iterable<string>,
+		options?: WriteTextAtomicOptions,
+	): Promise<void> {
+		await super.writeLinesAtomic(path, lines, options);
+		if (!this.failNextPublish) return;
+		if (this.corruptNextPublishedBody) {
+			const published = await fsp.readFile(path);
+			const collision = sameLengthCrc32Collision(published);
+			this.publishedCrcCollision =
+				collision.byteLength === published.byteLength &&
+				Bun.hash.crc32(collision) === Bun.hash.crc32(published) &&
+				!collision.every((byte, index) => byte === published[index]);
+			await fsp.writeFile(path, collision);
+		}
+		if (this.prefixNextPublishedBodyWithBom) {
+			const published = await fsp.readFile(path);
+			await fsp.writeFile(path, Buffer.concat([UTF8_BOM, published]));
+			const persisted = await fsp.readFile(path);
+			this.publishedBomPrefixedBody =
+				persisted.subarray(0, UTF8_BOM.byteLength).equals(UTF8_BOM) &&
+				persisted.subarray(UTF8_BOM.byteLength).equals(published);
+		}
+		throw new Error("simulated acknowledgement loss");
+	}
+
+	override async readText(path: string): Promise<string> {
+		this.readTextCalls++;
+		if (this.failNextPublish) throw new Error("full read would materialize the session");
+		return super.readText(path);
+	}
+}
+
+class UnreadableAfterFailedPublishStorage extends MemorySessionStorage {
+	failNextPublish = false;
+
+	override async writeTextAtomic(path: string, content: string, options?: WriteTextAtomicOptions): Promise<void> {
+		if (!this.failNextPublish) return super.writeTextAtomic(path, content, options);
+		throw new Error("simulated publish failure");
+	}
+
+	override readText(path: string): Promise<string> {
+		if (this.failNextPublish) return Promise.reject(new Error("simulated readback failure"));
+		return super.readText(path);
 	}
 }
 
@@ -58,6 +169,65 @@ describe("large session memory guards", () => {
 		session.flushSync();
 
 		expect(storage.writeTextSyncCalls).toBe(0);
+	});
+
+	it("keeps a published rewrite durable when its acknowledgment is lost without materializing the session", async () => {
+		const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "pi-rewrite-ack-loss-"));
+		tempDirs.push(dir);
+		const storage = new AcknowledgementLossStorage();
+		const session = SessionManager.create(dir, path.join(dir, "sessions"), storage);
+		await session.ensureOnDisk();
+		// 1- to 4-byte UTF-8 code points spanning many 64 KiB comparison windows and stream chunks.
+		session.appendMessage(makeAssistantMessage(`a${"aé中😀".repeat(20_000)}`));
+
+		storage.failNextPublish = true;
+		await expect(session.rewriteEntries()).resolves.toBeUndefined();
+
+		expect(storage.readTextCalls).toBe(0);
+		expect(session.captureState().onDisk).toBe(true);
+		await session.close();
+	});
+
+	it("rejects a same-length CRC32 collision after an acknowledgement loss", async () => {
+		const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "pi-rewrite-ack-collision-"));
+		tempDirs.push(dir);
+		const storage = new AcknowledgementLossStorage();
+		const session = SessionManager.create(dir, path.join(dir, "sessions"), storage);
+		await session.ensureOnDisk();
+		session.appendMessage(makeAssistantMessage("persisted before acknowledgement loss"));
+
+		storage.failNextPublish = true;
+		storage.corruptNextPublishedBody = true;
+		await expect(session.rewriteEntries()).rejects.toThrow("simulated acknowledgement loss");
+
+		expect(storage.publishedCrcCollision).toBe(true);
+		expect(storage.readTextCalls).toBe(0);
+	});
+
+	it("rejects a byte-order-mark-prefixed body after an acknowledgement loss", async () => {
+		const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "pi-rewrite-ack-bom-"));
+		tempDirs.push(dir);
+		const storage = new AcknowledgementLossStorage();
+		const session = SessionManager.create(dir, path.join(dir, "sessions"), storage);
+		await session.ensureOnDisk();
+		session.appendMessage(makeAssistantMessage("persisted before acknowledgement loss"));
+
+		storage.failNextPublish = true;
+		storage.prefixNextPublishedBodyWithBom = true;
+		await expect(session.rewriteEntries()).rejects.toThrow("simulated acknowledgement loss");
+
+		expect(storage.publishedBomPrefixedBody).toBe(true);
+		expect(storage.readTextCalls).toBe(0);
+	});
+
+	it("reports the publish error when a failed acknowledgement cannot be read back", async () => {
+		const storage = new UnreadableAfterFailedPublishStorage();
+		const session = SessionManager.create("/work", "/sessions", storage);
+		await session.ensureOnDisk();
+		session.appendMessage(makeAssistantMessage("persisted before the failed publish"));
+
+		storage.failNextPublish = true;
+		await expect(session.rewriteEntries()).rejects.toThrow("simulated publish failure");
 	});
 
 	it("elides superseded compactions only in the forward transcript", async () => {

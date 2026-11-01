@@ -211,6 +211,7 @@ import planModeReferencePrompt from "../prompts/system/plan-mode-reference.md" w
 import planModeToolDecisionReminderPrompt from "../prompts/system/plan-mode-tool-decision-reminder.md" with { type: "text" };
 import rewindReportTemplate from "../prompts/system/rewind-report.md" with { type: "text" };
 import sessionStopBlockedPrompt from "../prompts/system/session-stop-blocked.md" with { type: "text" };
+import sessionPersistenceErrorPrompt from "../prompts/system/session-persistence-error.md" with { type: "text" };
 import sideChannelNoToolsReminder from "../prompts/system/side-channel-no-tools.md" with { type: "text" };
 import titleCardPrompt from "../prompts/system/title-card.md" with { type: "text" };
 import titleForkPrompt from "../prompts/system/title-fork.md" with { type: "text" };
@@ -2870,6 +2871,7 @@ export class AgentSession implements SettingsScope {
 		// (session persistence, hooks, auto-compaction, retry logic)
 		this.#unsubscribeAgent = this.agent.subscribe(this.#handleAgentEvent);
 		this.#unsubscribeQueueChange = this.agent.onQueueChange(() => this.#emitQueueUpdateIfChanged());
+		this.addDisposer(this.sessionManager.onPersistenceError(() => this.#queuePersistenceFailureMessage()));
 		// Re-evaluate append-only context mode when the setting changes at runtime.
 		cfgProviderAppendOnlyContext.listen(this, () => this.#syncAppendOnlyContext(this.model));
 		cfgModelRoles.listen(this, () => this.#advisors.reconcileModelRoles());
@@ -6686,6 +6688,10 @@ export class AgentSession implements SettingsScope {
 		// on-disk record and the plain `transcript:true` export path keep the full
 		// pre-reset history.
 		this.sessionManager.appendResetBoundary();
+		// The manager reports a latched persistence failure once. A clear removes
+		// its previous hidden warning with the old context. Check only after the
+		// boundary append, whose full rewrite may already have recovered.
+		if (this.sessionManager.getPersistenceFailure()) this.#queuePersistenceFailureMessage();
 
 		resetCapabilities();
 		await this.refreshBaseSystemPrompt();
@@ -8925,8 +8931,10 @@ export class AgentSession implements SettingsScope {
 			// it subsumes, avoiding a contradictory materialized notice.
 			const xdevMountNoticeIndex = messages.length;
 			messages.push(message);
-			// Inject any pending "nextTurn" messages as context alongside the user message
+			// Inject pending "nextTurn" messages as context alongside the user message.
 			for (const msg of this.#pendingNextTurnMessages) {
+				if (msg.customType === "session-persistence-error" && !this.sessionManager.getPersistenceFailure())
+					continue;
 				messages.push(msg);
 			}
 			this.#pendingNextTurnMessages = [];
@@ -9863,6 +9871,22 @@ export class AgentSession implements SettingsScope {
 		this.#queueHiddenNextTurnMessage(message, true);
 	}
 
+	#queuePersistenceFailureMessage(): void {
+		// The failure observer and the post-/clear check can both report one
+		// failure (a reset boundary whose own append is the first to fail).
+		if (this.#pendingNextTurnMessages.some(message => message.customType === "session-persistence-error")) return;
+		this.#queueHiddenNextTurnMessage(
+			{
+				role: "custom",
+				customType: "session-persistence-error",
+				content: prompt.render(sessionPersistenceErrorPrompt),
+				display: false,
+				attribution: "agent",
+				timestamp: Date.now(),
+			},
+			false,
+		);
+	}
 	queueLaunchCompletion(notification: DaemonCompletionNotification): Promise<void> {
 		if (this.#isDisposed) return Promise.reject(new Error("Session disposed before launch completion delivery"));
 		const delivered = this.yieldQueue.enqueueWithReceipt<LaunchCompletionEntry>(
