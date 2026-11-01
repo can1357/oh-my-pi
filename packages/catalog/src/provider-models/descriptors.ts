@@ -149,6 +149,7 @@ const MODEL_MANAGER_FACTORIES: Readonly<Partial<Record<KnownProvider, ModelManag
 	openrouter: config => openrouterModelManagerOptions(config),
 	orcarouter: config => orcaRouterModelManagerOptions(config),
 	qianfan: config => qianfanModelManagerOptions(config),
+	"qwen-portal": config => qwenPortalModelManagerOptions(config),
 	sakana: config => sakanaModelManagerOptions(config),
 	sambanova: config => sambanovaModelManagerOptions(config),
 	siliconflow: config => siliconflowModelManagerOptions(config),
@@ -168,7 +169,6 @@ const MODEL_MANAGER_FACTORIES: Readonly<Partial<Record<KnownProvider, ModelManag
 	coreweave: config => coreWeaveModelManagerOptions(config),
 	xai: config => xaiModelManagerOptions(config),
 	"xai-oauth": config => xaiOAuthModelManagerOptions(config),
-	xiaomi: config => xiaomiModelManagerOptions(config),
 	"xiaomi-token-plan-ams": config =>
 		xiaomiModelManagerOptions({ ...config, providerId: "xiaomi-token-plan-ams", tokenPlanRegion: "ams" }),
 	"xiaomi-token-plan-cn": config =>
