@@ -359,9 +359,13 @@ describe("a session that had to leave its file", () => {
 		const within = (ms: number, waited: Promise<string>) =>
 			Promise.race([waited, Bun.sleep(ms).then(() => "still waiting")]);
 		try {
+			// The grace runs from the move, which happens inside this write. The
+			// handler starts only after the write has finished, which under load
+			// can be tens of milliseconds later, so the bounds count from here.
+			const moving = performance.now();
 			sessionManager.appendMessage({ role: "user", content: "a turn worth saving", timestamp: Date.now() });
 			await sessionManager.flush();
-			const started = await handlerStarted.promise;
+			await handlerStarted.promise;
 
 			// Without a cancellation: the tool-call hook and a real prompt's model
 			// request each wait two seconds — the figure the documentation gives —
@@ -380,8 +384,8 @@ describe("a session that had to leave its file", () => {
 				),
 			]);
 			expect([tool, request]).toEqual(["went ahead", "went ahead"]);
-			expect(modelAt - started).toBeGreaterThanOrEqual(1_950);
-			expect(performance.now() - started).toBeGreaterThanOrEqual(1_950);
+			expect(modelAt - moving).toBeGreaterThanOrEqual(1_950);
+			expect(performance.now() - moving).toBeGreaterThanOrEqual(1_950);
 			// Teardown does not wait for the handler at all.
 			expect(
 				await within(
@@ -654,6 +658,80 @@ describe("a session that had to leave its file", () => {
 		} finally {
 			handlerMayFinish.resolve();
 			await session.dispose();
+		}
+	}, 30_000);
+
+	it("warns when a request goes on past a move whose handlers still run because its deadline passed while the context was prepared", async () => {
+		using tempDir = TempDir.createSync("@omp-session-moved-");
+		using timers = holdGraceTimers();
+		const warn = spyOn(logger, "warn");
+		const order: string[] = [];
+		const firstStarted = Promise.withResolvers<void>();
+		const firstMayFinish = Promise.withResolvers<void>();
+		const secondMayFinish = Promise.withResolvers<void>();
+		const contextEntered = Promise.withResolvers<void>();
+		const contextMayFinish = Promise.withResolvers<void>();
+		const writer: { manager?: SessionManager } = {};
+		let moves = 0;
+		const { session, sessionManager } = await sessionOverOwnedFile(
+			tempDir,
+			pi => {
+				pi.on("session_moved", async () => {
+					const move = ++moves;
+					order.push(`move ${move} started`);
+					if (move === 1) {
+						firstStarted.resolve();
+						await firstMayFinish.promise;
+					} else {
+						await secondMayFinish.promise;
+					}
+					order.push(`move ${move} finished`);
+				});
+				pi.on("context", async () => {
+					if (order.includes("context")) return;
+					order.push("context");
+					contextEntered.resolve();
+					await contextMayFinish.promise;
+					// This write moves the session again, with the request's deadline already passed.
+					writer.manager?.appendCustomEntry("context-state", {});
+					await writer.manager?.flush();
+				});
+			},
+			[],
+			{},
+			() => {},
+			() => new StorageRefusingFirstTwoIds(),
+		);
+		writer.manager = sessionManager;
+		const stream = session.agent.streamFn;
+		session.agent.streamFn = (...args) => {
+			order.push("model request");
+			return stream(...args);
+		};
+		try {
+			sessionManager.appendCustomEntry("first write", {});
+			await sessionManager.flush();
+			await firstStarted.promise;
+			const turn = session.prompt("go");
+			// The move's gate starts one grace timer, the request's wait for it the second.
+			await timers.untilStarted(2);
+			// The first handler finishes: the wait before the context is prepared ends normally.
+			firstMayFinish.resolve();
+			await contextEntered.promise;
+			// The request's two seconds pass while the context is still being prepared.
+			timers.fire();
+			contextMayFinish.resolve();
+			await turn;
+			expect(order.slice(0, 3)).toEqual(["move 1 started", "move 1 finished", "context"]);
+			expect(order).toContain("move 2 started");
+			expect(order).toContain("model request");
+			expect(order).not.toContain("move 2 finished");
+			expect(goneOnWarnings(warn)).toBe(1);
+		} finally {
+			firstMayFinish.resolve();
+			contextMayFinish.resolve();
+			secondMayFinish.resolve();
+			await session.dispose().catch(() => {});
 		}
 	}, 30_000);
 

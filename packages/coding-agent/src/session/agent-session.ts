@@ -635,6 +635,8 @@ class MoveWaitDeadline {
 	#timer: Timer | undefined;
 	#expired = false;
 	readonly #passed = Promise.withResolvers<void>();
+	/** Whether this wait has already said it went on with handlers still running. */
+	warned = false;
 
 	get expired(): boolean {
 		return this.#expired;
@@ -5813,7 +5815,12 @@ export class AgentSession implements SettingsScope {
 		return prepared;
 	}
 
-	/** Waits on the move gates until none is left or `deadline` has passed, and says so when it goes on with handlers still running. */
+	/**
+	 * Waits on the move gates until none is left or `deadline` has passed. Says
+	 * so, once per wait, when it goes on with handlers still running: after
+	 * pausing for them, or straight past an open gate because the deadline
+	 * passed earlier in the same wait — while the context was being prepared.
+	 */
 	async #waitForMoves(deadline: MoveWaitDeadline, signal: AbortSignal | undefined): Promise<void> {
 		let waited = false;
 		// A gate clears itself as it opens, so what is here after one opens is a later move's.
@@ -5822,7 +5829,9 @@ export class AgentSession implements SettingsScope {
 			const waits = [gate, deadline.reached()];
 			await (signal ? Promise.race([...waits, abortRejection(signal)]) : Promise.race(waits));
 		}
-		if (waited && this.#movesPending > 0) {
+		const pastOpenGate = deadline.expired && this.#peekMovesGate() !== undefined;
+		if ((waited || pastOpenGate) && this.#movesPending > 0 && !deadline.warned) {
+			deadline.warned = true;
 			logger.warn("session_moved handlers still running; the session goes on without waiting for them", {
 				sessionId: this.sessionManager.getSessionId(),
 				movesWithHandlersRunning: this.#movesPending,
