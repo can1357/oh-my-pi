@@ -181,6 +181,7 @@ describe("eval output consumer failure", () => {
 			// The failure reaches the caller when the cell is done, naming the consumer and the risk.
 			expectConsumerFailure(failed, "stream", "consumer refused a chunk");
 			expect(failed.output).toContain("this result holds all of its output");
+			expect(failed.output).toContain("output shown while it ran may be incomplete");
 			// Same process, state intact.
 			expect(pidOf(after)).toBe(pidOf(before));
 			expect(after.output).toContain("kept 42");
@@ -316,6 +317,9 @@ describe("eval output consumer failure", () => {
 
 		it(`${language}: a cell that times out after its consumer threw reports the failure without claiming the cell ran on`, async () => {
 			const session = makeSession(`consumer-timeout-${language}-${crypto.randomUUID()}`);
+			// The timeout budget starts before kernel acquisition, so warm the
+			// retained runtime before testing the cell's own timeout behaviour.
+			await run(session, language, PID_CELL[language]);
 			const cell = await run(session, language, OUTLIVES_TIMEOUT[language], {
 				onChunk: chunk => {
 					if (chunk.includes("one")) throw new Error("consumer refused a chunk");

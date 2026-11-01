@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed an eval cell whose output consumer throws, or returns a promise that rejects, while the cell runs: a JavaScript cell no longer exits omp, a Python cell no longer hangs until its timeout and loses the kernel with every variable, and a Python tool call no longer fails because a status consumer threw. The cell finishes, the runtime keeps its state, and the result says which consumer failed and that output shown while it ran may be incomplete ([#17629](https://github.com/can1357/oh-my-pi/pull/17629) by [@sjawhar](https://github.com/sjawhar))
+- Fixed eval cells so one thrown output chunk no longer exits omp with code 1 or lets a 25-second Python timeout kill its kernel and lose every variable ([#17629](https://github.com/can1357/oh-my-pi/pull/17629) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.2] - 2026-10-31
 
