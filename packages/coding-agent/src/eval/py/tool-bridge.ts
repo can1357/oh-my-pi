@@ -7,7 +7,7 @@
  * current execution and forwards to the same `callSessionTool` implementation
  * the JavaScript bridge uses.
  */
-import { logger, postmortem } from "@oh-my-pi/pi-utils";
+import { describeThrown, logger, postmortem } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../../tools";
 import type { RuntimeCallIdentity } from "../js/shared/runtime";
 import { bridgeValueFromToolResult, callSessionTool, type JsStatusEvent } from "../js/tool-bridge";
@@ -210,7 +210,8 @@ async function startServer(): Promise<BridgeServer> {
 			} catch (err) {
 				return Response.json({
 					ok: false,
-					error: err instanceof Error ? err.message : String(err),
+					// A tool can throw any value; the reply must still describe it rather than fail the request.
+					error: describeThrown(err),
 				});
 			}
 		},

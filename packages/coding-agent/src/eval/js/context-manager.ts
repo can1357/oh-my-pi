@@ -9,7 +9,7 @@ import {
 import type { ToolSession } from "../../tools";
 import { ToolAbortError } from "../../tools/tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { safeSend as safeSendIpc } from "../../utils/ipc";
+import { isThenable, safeSend as safeSendIpc } from "../../utils/ipc";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../bridge-timeout";
 import { getEnabledEvalPreludes } from "../preludes";
 import {
@@ -23,19 +23,26 @@ import { updateEvalState } from "../state";
 import type { EvalShadowCellSession } from "../speculation/cell-session";
 import { getActiveEvalShadowCell } from "../speculation/runtime-context";
 import type { ShadowPlan } from "../speculation/types";
-import type { EvalDisplayOutput, EvalToolDescriptor, EvalToolInvokeResult } from "../types";
+import {
+	type EvalDisplayOutput,
+	type EvalOutputConsumerFailure,
+	type EvalToolDescriptor,
+	type EvalToolInvokeResult,
+	outputConsumerFailure,
+} from "../types";
 import { type ShadowSnapshot, shadowSnapshotDigest } from "./shared/runtime";
 import { projectJavaScriptShadowPlan } from "./speculation";
 import { callSessionTool, type JsStatusEvent } from "./tool-bridge";
 // Coding-agent binary/bundle workers route through the CLI entrypoint with a
 // hidden argv mode, so compiled/npm builds only need one JavaScript entry.
-import type {
-	EvalPreludeSource,
-	JsToolRequest,
-	RunErrorPayload,
-	SessionSnapshot,
-	WorkerInbound,
-	WorkerOutbound,
+import {
+	type EvalPreludeSource,
+	type JsToolRequest,
+	type RunErrorPayload,
+	runErrorPayload,
+	type SessionSnapshot,
+	type WorkerInbound,
+	type WorkerOutbound,
 } from "./worker-protocol";
 
 export { rewriteImports, wrapCode } from "./shared/rewrite-imports";
@@ -46,6 +53,12 @@ export interface VmRunState {
 	onDisplay?: (output: EvalDisplayOutput) => void;
 	/** Shows the user `out://` replies of the run's bridged tool calls; absent, those calls are refused. */
 	onReply?: (text: string) => void;
+	/**
+	 * Set by the context manager when `onText` or `onDisplay` threw, or returned
+	 * a promise that rejected: the first such error. The run kept going and its
+	 * later output still reached them.
+	 */
+	consumerFailure?: EvalOutputConsumerFailure;
 }
 
 /** Isolated runtime transport used by the context manager and startup regression fixtures. */
@@ -745,16 +758,41 @@ async function initWorker(session: JsSession, snapshot: SessionSnapshot, timeout
 	}
 }
 
+/**
+ * Hands worker output to the run's callback. A callback that throws, or returns
+ * a promise that rejects, must not escape into the worker's message handler,
+ * where it surfaces as a process-fatal uncaught exception or unhandled
+ * rejection: the first error stays on the run state for the cell's result, and
+ * the run's later output is still delivered.
+ */
+function deliverRunOutput(
+	runState: VmRunState,
+	callback: EvalOutputConsumerFailure["callback"],
+	deliver: () => unknown,
+): void {
+	const record = (err: unknown): void => {
+		if (runState.consumerFailure) return;
+		runState.consumerFailure = outputConsumerFailure(callback, err);
+		logger.warn("JS eval output callback failed", { callback, error: runState.consumerFailure.message });
+	};
+	try {
+		const returned = deliver();
+		if (isThenable(returned)) returned.then(undefined, record);
+	} catch (err) {
+		record(err);
+	}
+}
+
 function handleSessionMessage(session: JsSession, msg: WorkerOutbound): void {
 	switch (msg.type) {
 		case "text": {
-			const pending = session.pending.get(msg.runId);
-			pending?.runState.onText?.(msg.chunk);
+			const runState = session.pending.get(msg.runId)?.runState;
+			if (runState) deliverRunOutput(runState, "onChunk", () => runState.onText?.(msg.chunk));
 			return;
 		}
 		case "display": {
-			const pending = session.pending.get(msg.runId);
-			pending?.runState.onDisplay?.(msg.output);
+			const runState = session.pending.get(msg.runId)?.runState;
+			if (runState) deliverRunOutput(runState, "onDisplay", () => runState.onDisplay?.(msg.output));
 			return;
 		}
 		case "tool-call":
@@ -831,12 +869,15 @@ async function handleToolCall(session: JsSession, msg: Extract<WorkerOutbound, {
 			onReply: pending.runState.onReply,
 			emitStatus: (event: JsStatusEvent) => {
 				trackDeferPhase(pending, event);
-				pending.runState.onDisplay?.({ type: "status", event });
+				deliverRunOutput(pending.runState, "onDisplay", () =>
+					pending.runState.onDisplay?.({ type: "status", event }),
+				);
 			},
 		});
 		safeSend(session, { type: "tool-reply", id: msg.id, reply: { ok: true, value } });
 	} catch (error) {
-		safeSend(session, { type: "tool-reply", id: msg.id, reply: { ok: false, error: toErrorPayload(error) } });
+		// A tool can throw any value, including one whose description throws; the reply must still go out.
+		safeSend(session, { type: "tool-reply", id: msg.id, reply: { ok: false, error: runErrorPayload(error) } });
 	} finally {
 		pending.toolCalls.delete(msg.id);
 		// Last call of a run whose worker result was withheld: settle it now.
@@ -947,19 +988,6 @@ function errorFromPayload(payload: RunErrorPayload): Error {
 	if (payload.name) error.name = payload.name;
 	if (payload.stack) error.stack = payload.stack;
 	return error;
-}
-
-function toErrorPayload(error: unknown): RunErrorPayload {
-	if (error instanceof Error) {
-		return {
-			name: error.name,
-			message: error.message,
-			stack: error.stack,
-			isAbort: error.name === "AbortError" || error.name === "ToolAbortError",
-			isToolError: error instanceof ToolError || error.name === "ToolError",
-		};
-	}
-	return { message: String(error) };
 }
 
 function logWorkerMessage(msg: Extract<WorkerOutbound, { type: "log" }>): void {

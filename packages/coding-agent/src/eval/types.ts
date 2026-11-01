@@ -1,6 +1,6 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { EvalLanguage, EvalStatusEvent, EvalView } from "@oh-my-pi/pi-tui/tools/eval";
-import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
+import { describeThrown, isRecord } from "@oh-my-pi/pi-utils/type-guards";
 
 /** Kernel-defined tool metadata exposed to task subagents. */
 export interface EvalToolDescriptor {
@@ -44,3 +44,27 @@ export type EvalDisplayOutput =
 	| ImageContent
 	| { type: "view"; text: string; view: EvalView }
 	| { type: "status"; event: EvalStatusEvent };
+
+/**
+ * The first error a cell's output consumer threw, from either backend. The
+ * cell kept running and its later output still went to the consumer.
+ */
+export interface EvalOutputConsumerFailure {
+	/** `onChunk` for streamed text and tracebacks; `onDisplay` for views, images and status events. */
+	callback: "onChunk" | "onDisplay";
+	message: string;
+}
+
+/**
+ * Records `thrown` as `callback`'s failure, and never throws. A consumer may
+ * throw or reject with any value, including one whose conversion to text
+ * throws: a null-prototype object, an error with a throwing `message` getter,
+ * a `Proxy` whose traps throw. A failure to describe it must not escape, or the
+ * report would itself end the Python reader or the host process.
+ */
+export function outputConsumerFailure(
+	callback: EvalOutputConsumerFailure["callback"],
+	thrown: unknown,
+): EvalOutputConsumerFailure {
+	return { callback, message: describeThrown(thrown) };
+}

@@ -9,6 +9,10 @@
 
 - Added `isPidAlive` (signal-0 liveness probe) and `asStrictBytes` (a `Uint8Array` narrowed to its own `ArrayBuffer` for WebCrypto)
 
+### Fixed
+
+- Fixed `toError()` and the fatal error handlers throwing on a value whose conversion to text throws, such as `Object.create(null)` or a revoked `Proxy`; the new `describeThrown()` describes any thrown value without throwing ([#17629](https://github.com/can1357/oh-my-pi/pull/17629) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.15.0] - 2026-11-01
 
 ### Added

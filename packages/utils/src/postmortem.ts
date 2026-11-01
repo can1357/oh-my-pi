@@ -537,9 +537,13 @@ export function markExpectedCleanupError<T extends object>(reason: T): T {
 
 function hasExpectedCleanupMarker(reason: unknown): boolean {
 	let current: unknown = reason;
-	for (let depth = 0; depth < 8 && current !== null && typeof current === "object"; depth++) {
-		if (Reflect.get(current, EXPECTED_CLEANUP) === true) return true;
-		current = Reflect.get(current, "cause");
+	try {
+		for (let depth = 0; depth < 8 && current !== null && typeof current === "object"; depth++) {
+			if (Reflect.get(current, EXPECTED_CLEANUP) === true) return true;
+			current = Reflect.get(current, "cause");
+		}
+	} catch {
+		// A Proxy's `get` trap threw: nothing marked it as expected cleanup.
 	}
 	return false;
 }
@@ -787,6 +791,7 @@ export function installProcessHandlers(): void {
 			);
 		})
 		.on("unhandledRejection", async reason => {
+			// `toError` never throws: a reason whose conversion throws must still reach the interceptors.
 			const err = toError(reason);
 			if (handleWorkerSendEpipe(err)) return;
 			if (isExpectedCleanupError(reason)) {

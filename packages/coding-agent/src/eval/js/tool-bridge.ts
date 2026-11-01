@@ -5,7 +5,7 @@ import {
 	validateAgentToolArguments,
 } from "@oh-my-pi/pi-agent-core";
 import { type ImageContent, toolWireSchema } from "@oh-my-pi/pi-ai";
-import { isRecord } from "@oh-my-pi/pi-utils";
+import { describeThrown, isRecord } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type { ToolSession } from "../../tools";
 import { committedTodoPhases } from "../../tools/todo";
@@ -247,7 +247,7 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 		} catch (error) {
 			options.emitStatus?.({
 				op: request.name,
-				error: error instanceof Error ? error.message : String(error),
+				error: describeThrown(error),
 			});
 			throw error;
 		}
@@ -306,7 +306,7 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 	} catch (error) {
 		options.emitStatus?.({
 			op: name,
-			error: error instanceof Error ? error.message : String(error),
+			error: describeThrown(error),
 		});
 		throw error;
 	}
@@ -372,7 +372,8 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 	} catch (error) {
 		options.emitStatus?.({
 			op: name,
-			error: error instanceof Error ? error.message : String(error),
+			// A tool can throw any value; describing it must not replace the tool's own failure.
+			error: describeThrown(error),
 		});
 		throw error;
 	}

@@ -557,7 +557,13 @@ export class JsRuntime {
 					// The engine's own compile SyntaxError has no usable cell position; surface Babel's.
 					// Sync cells run inside indirectEval, so a SyntaxError may also be a runtime one
 					// (e.g. JSON.parse); only diagnose when the source itself fails to compile as a script.
-					if (error instanceof SyntaxError && !compiles(wrapped.source)) {
+					let syntaxError = false;
+					try {
+						syntaxError = error instanceof SyntaxError;
+					} catch {
+						// The cell threw a Proxy whose `getPrototypeOf` trap throws: its own value, not a SyntaxError.
+					}
+					if (syntaxError && !compiles(wrapped.source)) {
 						throw (await diagnoseCellSyntaxError(code)) ?? error;
 					}
 					throw error;

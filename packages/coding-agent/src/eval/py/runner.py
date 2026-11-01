@@ -2812,10 +2812,20 @@ def _emit_error(rid: str, exc: BaseException, source_filename: str = "<cell>") -
             "type": "error",
             "id": rid,
             "ename": type(exc).__name__,
-            "evalue": str(exc),
+            "evalue": _exception_text(exc),
             "traceback": [line.rstrip("\n") for line in tb_lines],
         }
     )
+
+
+def _exception_text(exc: BaseException) -> str:
+    """``str(exc)``, or the placeholder ``traceback`` itself prints when the
+    exception's own ``__str__`` raises. A raise here would leave the request
+    without its ``done`` frame, so the cell would wait for its timeout."""
+    try:
+        return str(exc)
+    except Exception:  # noqa: BLE001 - a user exception's __str__ may raise anything
+        return "<exception str() failed>"
 
 
 def _admit_shadow_run(req: dict) -> bool:

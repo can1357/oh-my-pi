@@ -3,6 +3,7 @@ import { Settings } from "../config/settings";
 import { type OutputArtifactError, OutputSink } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { statusEventKey } from "@oh-my-pi/pi-tui/tools/eval";
 import type { ToolSession } from "../tools";
+import { isThenable } from "../utils/ipc";
 import {
 	resolveOutputMaxColumns,
 	resolveOutputSinkArtifactMaxBytes,
@@ -12,7 +13,7 @@ import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP, isEvalTimeoutControlEven
 import type { JsStatusEvent } from "./js/shared/types";
 import { registerPyToolBridge } from "./py/tool-bridge";
 import { getActiveEvalShadowCell } from "./speculation/runtime-context";
-import type { EvalDisplayOutput } from "./types";
+import { type EvalDisplayOutput, type EvalOutputConsumerFailure, outputConsumerFailure } from "./types";
 
 /**
  * Constructor for a language executor's cancellation error. Each backend
@@ -124,7 +125,83 @@ export interface GenericKernel<TEnv> {
 		timedOut: boolean;
 		kernelKilled?: boolean;
 		stdinRequested?: boolean;
+		consumerFailure?: EvalOutputConsumerFailure;
 	}>;
+}
+
+/**
+ * Guards a cell's output consumers where they enter an executor: `onChunk`, which
+ * the output sink calls after storing each chunk (without awaiting it, and again
+ * from its final flush), and the status consumers, which the tool bridge calls
+ * from inside a tool call. A guard inside the runtime cannot see those calls. A
+ * consumer that throws, or returns a promise that rejects, is recorded here
+ * instead of reaching the runtime, the tool call or the host's fatal handlers;
+ * it still receives later output, and the first failure is reported with the
+ * cell's result.
+ */
+export class OutputConsumerGuard {
+	#failure: EvalOutputConsumerFailure | undefined;
+
+	constructor(readonly languageLabel: string) {}
+
+	/** Wraps `consumer` so it never throws and never leaves a rejection unhandled. */
+	wrap<T>(
+		callback: EvalOutputConsumerFailure["callback"],
+		consumer: ((value: T) => unknown) | undefined,
+	): ((value: T) => void) | undefined {
+		if (!consumer) return undefined;
+		const record = (err: unknown): void => {
+			if (this.#failure) return;
+			this.#failure = outputConsumerFailure(callback, err);
+			logger.warn(`${this.languageLabel} eval output consumer failed`, { callback, error: this.#failure.message });
+		};
+		return value => {
+			try {
+				const returned = consumer(value);
+				if (isThenable(returned)) returned.then(undefined, record);
+			} catch (err) {
+				record(err);
+			}
+		};
+	}
+
+	/**
+	 * Ends a cell's result with the first consumer failure, saying what the
+	 * result still holds. Only a cell that ran to its end (`completed`) kept
+	 * running after the failure; a truncated result holds what truncation kept.
+	 * A failure the runtime caught (`runtimeFailure`) came from the output path
+	 * itself rather than from the consumer, so its output may be missing. A
+	 * rejection that settles after the result is assembled is only logged. The
+	 * note follows the output, so whatever the output opens with, such as a
+	 * notice that the kernel restarted, stays the first thing in the result.
+	 */
+	annotate(
+		summary: { output: string; truncated: boolean; artifactId?: string | null },
+		completed: boolean,
+		runtimeFailure?: EvalOutputConsumerFailure,
+	): string {
+		const failure = this.#failure;
+		const runtimeNote =
+			runtimeFailure &&
+			`Delivering the cell's output failed: ${runtimeFailure.message}. This result may be missing output.`;
+		let note = runtimeNote;
+		if (failure) {
+			const consumer = failure.callback === "onChunk" ? "stream output" : "display output";
+			const head = `The ${consumer} consumer failed: ${failure.message}.`;
+			const tail =
+				!completed || runtimeNote
+					? "Output shown while the cell ran may be incomplete."
+					: !summary.truncated
+						? "The cell kept running and this result holds all of its output; output shown while it ran may be incomplete."
+						: summary.artifactId
+							? `The cell kept running; this result is truncated as usual and the saved output is in artifact://${summary.artifactId}; output shown while it ran may be incomplete.`
+							: "The cell kept running; this result keeps its output up to the usual truncation and no full copy was saved; output shown while it ran may be incomplete.";
+			note = runtimeNote ? `${head} ${tail} ${runtimeNote}` : `${head} ${tail}`;
+		}
+		if (!note) return summary.output;
+		const separator = summary.output === "" || summary.output.endsWith("\n") ? "" : "\n";
+		return `${summary.output}${separator}[${note}]`;
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -452,8 +529,10 @@ export async function executeWithKernelBase<
 	} = params;
 
 	const settings = await Settings.init();
+	const consumers = new OutputConsumerGuard(errorLogLabel);
+	const onStatus = consumers.wrap("onDisplay", options?.onStatus);
 	const sink = new OutputSink({
-		onChunk: options?.onChunk,
+		onChunk: consumers.wrap("onChunk", options?.onChunk),
 		artifactPath: options?.artifactPath,
 		artifactId: options?.artifactId,
 		headBytes: resolveOutputSinkHeadBytes(settings),
@@ -486,14 +565,14 @@ export async function executeWithKernelBase<
 	const collectDisplay = (output: EvalDisplayOutput): void => {
 		if (output.type === "status") {
 			abortShield.handleStatus?.(output.event);
-			options?.onStatus?.(output.event);
+			onStatus?.(output.event);
 			if (isEvalTimeoutControlEvent(output.event)) return;
 		}
 		display.push(output);
 	};
 
 	const emitStatus: (event: JsStatusEvent) => void =
-		options?.emitStatus ?? (event => collectDisplay({ type: "status", event }));
+		consumers.wrap("onDisplay", options?.emitStatus) ?? (event => collectDisplay({ type: "status", event }));
 	const runId = `${runIdPrefix}-${crypto.randomUUID()}`;
 	// Two aborts cross the bridge, and conflating them is what let a cancelled
 	// turn keep working. Delegated work (above all the subagents `agent()`
@@ -550,7 +629,7 @@ export async function executeWithKernelBase<
 				exitCode: undefined,
 				cancelled: true,
 				truncated: dumped.truncated,
-				output: dumped.output,
+				output: consumers.annotate(dumped, false, result.consumerFailure),
 				artifactId: dumped.artifactId ?? undefined,
 				artifactElidedBytes: dumped.artifactElidedBytes,
 				artifactError: dumped.artifactError,
@@ -569,7 +648,7 @@ export async function executeWithKernelBase<
 				exitCode: 1,
 				cancelled: false,
 				truncated: dumped.truncated,
-				output: dumped.output,
+				output: consumers.annotate(dumped, false, result.consumerFailure),
 				artifactId: dumped.artifactId ?? undefined,
 				artifactElidedBytes: dumped.artifactElidedBytes,
 				artifactError: dumped.artifactError,
@@ -588,7 +667,7 @@ export async function executeWithKernelBase<
 			exitCode,
 			cancelled: false,
 			truncated: dumped.truncated,
-			output: dumped.output,
+			output: consumers.annotate(dumped, true, result.consumerFailure),
 			artifactId: dumped.artifactId ?? undefined,
 			artifactElidedBytes: dumped.artifactElidedBytes,
 			artifactError: dumped.artifactError,
@@ -609,7 +688,7 @@ export async function executeWithKernelBase<
 				exitCode: undefined,
 				cancelled: true,
 				truncated: dumped.truncated,
-				output: dumped.output,
+				output: consumers.annotate(dumped, false),
 				artifactId: dumped.artifactId ?? undefined,
 				artifactElidedBytes: dumped.artifactElidedBytes,
 				artifactError: dumped.artifactError,
