@@ -121,7 +121,19 @@ async function launchRelayFixture(
 		// A service worker is transient: it may start and stop before Puppeteer observes its target.
 		// An extension page can wake it via runtime messaging and remains available for tab queries.
 		const page = await browser.newPage();
-		await page.goto(`chrome-extension://${extensionId}/options.html`);
+		// Chrome registers an unpacked extension asynchronously after `Extensions.loadUnpacked`
+		// returns; until then its pages fail with ERR_BLOCKED_BY_CLIENT. No CDP event marks
+		// registration (the service worker target is transient), so poll the real browser.
+		const deadline = Date.now() + 10_000;
+		for (;;) {
+			try {
+				await page.goto(`chrome-extension://${extensionId}/options.html`);
+				break;
+			} catch (error) {
+				if (!String(error).includes("ERR_BLOCKED_BY_CLIENT") || Date.now() > deadline) throw error;
+				await Bun.sleep(50);
+			}
+		}
 		// Puppeteer's `page.evaluate` lands in a context without the extension APIs; the page's
 		// default context, which `Runtime.evaluate` targets, has them.
 		const cdp = await page.createCDPSession();

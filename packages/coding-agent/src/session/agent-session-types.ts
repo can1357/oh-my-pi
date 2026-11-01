@@ -229,6 +229,12 @@ export interface AgentSessionConfig {
 	prewalk?: Prewalk;
 	/** Keep `prewalk.auto` away from this session until `/new` (`--no-prewalk`). */
 	suppressAutoPrewalk?: boolean;
+	/**
+	 * Created to run an assignment its owner prompts once setup finishes (task executor spawns).
+	 * Until the first prompt, IRC messages never wake a turn the assignment would miss; see
+	 * `AgentSession.#wakeForIrc`.
+	 */
+	awaitingAssignment?: boolean;
 	/** Force read-only plan mode at start, auto-approve, then switch to the target. */
 	planYolo?: PlanYolo;
 	/** Initial per-family service tiers for the live session. */

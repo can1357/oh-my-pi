@@ -1,4 +1,5 @@
 import { type } from "@oh-my-pi/omptype";
+import { ptree } from "@oh-my-pi/pi-utils";
 import * as AIError from "../../error";
 import type { AfterExchangeHook, ExchangeContext } from "../hooks/types";
 import type { FetchImpl } from "../../types";
@@ -46,11 +47,6 @@ export interface MuseCodeKeyRequestOptions {
 	onboard?: boolean;
 }
 
-function requestSignal(signal?: AbortSignal): AbortSignal {
-	const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
-	return signal ? AbortSignal.any([signal, timeout]) : timeout;
-}
-
 export function parseMuseCodeCredential(value: string): MuseCodeCredential {
 	let payload: unknown;
 	try {
@@ -83,7 +79,7 @@ export async function requestMuseCodeKey(
 		},
 		body: JSON.stringify(options.onboard ? { onboard: true } : {}),
 		redirect: "error",
-		signal: requestSignal(options.signal),
+		signal: ptree.combineSignals(options.signal, REQUEST_TIMEOUT_MS),
 	});
 	const text = await response.text();
 	if (!response.ok) {
