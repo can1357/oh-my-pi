@@ -195,6 +195,8 @@ export interface InteractiveModeContext {
 	sessionManager: SessionManager;
 	/** Re-resolve the CLI/settings model scope after a successful OAuth login. */
 	refreshScopedModelsAfterLogin?: () => Promise<void>;
+	/** Explicit session storage override from --session-dir or PI_CODING_AGENT_SESSION_DIR. */
+	readonly sessionDirOverride?: string;
 	/** The current session display name / title. */
 	readonly sessionName: string | undefined;
 	/** Session the transcript/editor/status are attached to: the focused agent's, else `session`. */

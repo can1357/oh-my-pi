@@ -12,6 +12,7 @@ import { toError } from "@oh-my-pi/pi-utils/type-guards";
 import { EVAL_STATE_CONTEXT_TYPE } from "../eval/state";
 import { visitEntriesFromFile } from "./session-loader";
 import { computeDefaultSessionDir } from "./session-paths";
+import type { SessionRepository } from "./session-entries";
 import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
 import { lookupSessionTitle, recordSessionTitle } from "./session-index";
 
@@ -36,6 +37,7 @@ export interface SessionInfo {
 	id: string;
 	/** Working directory where the session was started. Empty string for old sessions. */
 	cwd: string;
+	repository?: SessionRepository;
 	title?: string;
 	/** Path to the parent session (if this session was forked). */
 	parentSessionPath?: string;
@@ -324,11 +326,41 @@ interface SessionListHeader {
 	parentSession?: string;
 	continuationOf?: string;
 	timestamp?: string;
+	repository?: SessionRepository;
 }
 
 function normalizeTitleOverride(title: string | undefined): string | null | undefined {
 	if (title === undefined) return undefined;
 	return title.trim() ? title : null;
+}
+
+function parseSessionRepository(value: unknown): SessionRepository | undefined {
+	if (typeof value !== "object" || value === null) return undefined;
+	const record = value as Record<string, unknown>;
+	if (
+		typeof record.sessionWorktreeRoot !== "string" ||
+		!record.sessionWorktreeRoot ||
+		!path.isAbsolute(record.sessionWorktreeRoot) ||
+		typeof record.primaryWorktreeRoot !== "string" ||
+		!record.primaryWorktreeRoot ||
+		!path.isAbsolute(record.primaryWorktreeRoot)
+	) {
+		return undefined;
+	}
+	return {
+		sessionWorktreeRoot: record.sessionWorktreeRoot,
+		primaryWorktreeRoot: record.primaryWorktreeRoot,
+	};
+}
+
+function parseSessionRepositoryLine(line: string): SessionRepository | undefined {
+	try {
+		const parsed: unknown = JSON.parse(line);
+		if (typeof parsed !== "object" || parsed === null) return undefined;
+		return parseSessionRepository((parsed as Record<string, unknown>).repository);
+	} catch {
+		return undefined;
+	}
 }
 
 function sessionListHeaderFromRecord(
@@ -347,6 +379,7 @@ function sessionListHeaderFromRecord(
 		parentSession: typeof record.parentSession === "string" ? record.parentSession : undefined,
 		continuationOf: typeof record.continuationOf === "string" ? record.continuationOf : undefined,
 		timestamp: typeof record.timestamp === "string" ? record.timestamp : undefined,
+		repository: parseSessionRepository(record.repository),
 	};
 }
 
@@ -362,6 +395,7 @@ function parseSessionListHeaderLine(line: string, titleOverride?: string | null)
 		parentSession: extractStringProperty(line, "parentSession"),
 		continuationOf: extractStringProperty(line, "continuationOf"),
 		timestamp: extractStringProperty(line, "timestamp"),
+		repository: parseSessionRepositoryLine(line),
 	};
 }
 
@@ -391,6 +425,24 @@ function parseSessionListHeader(
 	return undefined;
 }
 
+function hasCompleteSessionHeader(content: string): boolean {
+	let nonEmptyLines = 0;
+	let lineStart = 0;
+	while (lineStart < content.length) {
+		const newlineIndex = content.indexOf("\n", lineStart);
+		if (newlineIndex === -1) return false;
+		const line = content.slice(lineStart, newlineIndex).trim();
+		lineStart = newlineIndex + 1;
+		if (!line) continue;
+		if (nonEmptyLines === 0 && extractStringProperty(line, "type") === "title") {
+			nonEmptyLines = 1;
+			continue;
+		}
+		return true;
+	}
+	return false;
+}
+
 function getSessionListWorkerCount(fileCount: number): number {
 	if (fileCount <= SESSION_LIST_PARALLEL_THRESHOLD) return 1;
 	return Math.min(
@@ -401,8 +453,9 @@ function getSessionListWorkerCount(fileCount: number): number {
 }
 
 /**
- * Scan a single session file into a {@link SessionInfo}. Always reads the 4 KB
- * header/first-message prefix; only reads the 32 KB tail window (and derives
+ * Scan a single session file into a {@link SessionInfo}. Starts with a 4 KB
+ * header/first-message prefix and expands it until the complete first JSONL
+ * header is available; only reads the 32 KB tail window (and derives
  * {@link SessionStatus}) when `withStatus` is set — the recent/most-recent
  * lookups skip it.
  */
@@ -428,11 +481,18 @@ async function scanSessionFile(
 		return cached.info ? { ...cached.info } : undefined;
 	}
 	try {
-		const [content, suffix] = await storage.readTextSlices(
-			file,
-			SESSION_LIST_PREFIX_BYTES,
-			withStatus ? SESSION_LIST_SUFFIX_BYTES : 0,
-		);
+		let prefixBytes = Math.min(SESSION_LIST_PREFIX_BYTES, stat.size);
+		let content = "";
+		let suffix = "";
+		while (true) {
+			[content, suffix] = await storage.readTextSlices(
+				file,
+				prefixBytes,
+				withStatus ? SESSION_LIST_SUFFIX_BYTES : 0,
+			);
+			if (hasCompleteSessionHeader(content) || prefixBytes >= stat.size) break;
+			prefixBytes = Math.min(stat.size, prefixBytes * 2);
+		}
 		const { size, mtime } = stat;
 		const entries = parseJsonlLenient<Record<string, unknown>>(content);
 		const header = parseSessionListHeader(content, entries);
@@ -492,6 +552,7 @@ async function scanSessionFile(
 			path: file,
 			id: header.id,
 			cwd: header.cwd ?? "",
+			repository: header.repository,
 			title: header.title ?? shortSummary,
 			parentSessionPath: header.parentSession,
 			continuationOf: header.continuationOf,

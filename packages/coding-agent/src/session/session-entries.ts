@@ -39,6 +39,16 @@ export const EPHEMERAL_MODEL_CHANGE_ROLE = "fallback";
 /** A prewalk or plan-yolo handoff: restored on resume, passed over when looking up the assigned role. */
 export const PREWALK_MODEL_CHANGE_ROLE = "prewalk";
 
+/**
+ * Git worktree roots recorded for the session's project: the worktree the
+ * session ran in, and that repository's primary checkout. Resume recovery
+ * uses them to reopen a session whose recorded directory was removed.
+ */
+export interface SessionRepository {
+	sessionWorktreeRoot: string;
+	primaryWorktreeRoot: string;
+}
+
 export interface SessionHeader {
 	type: "session";
 	version?: number; // v1 sessions don't have this
@@ -72,6 +82,7 @@ export interface SessionHeader {
 	 * source: `history://`, `artifact://`, and `agent://` read them from there.
 	 */
 	seanceSource?: string;
+	repository?: SessionRepository;
 }
 
 export interface NewSessionOptions {

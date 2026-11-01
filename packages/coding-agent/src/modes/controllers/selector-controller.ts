@@ -70,7 +70,8 @@ import { isTranscriptEntry, type TranscriptEntry } from "../../session/session-c
 import { isUserRequestEntry } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import type { SessionEntry, SessionTreeNode } from "../../session/session-entries";
 import { findSessionContinuation, readSessionInfo, type SessionInfo } from "../../session/session-listing";
-import { SessionManager } from "../../session/session-manager";
+import { resolveSessionRecovery, type SessionRecoveryDecision } from "../../session/session-recovery";
+import { SessionManager, type SessionManagerStateSnapshot } from "../../session/session-manager";
 import { loadPinnedSessionIds, setSessionPinned } from "../../session/session-pins";
 import { FileSessionStorage } from "../../session/session-storage";
 import { listLogoutAccounts, logoutCredential } from "../../slash-commands/helpers/logout";
@@ -124,6 +125,8 @@ import { type ResetUsageAccount, ResetUsageSelectorComponent } from "@oh-my-pi/p
 import { type BranchVariantPath, RewindSelectorComponent } from "@oh-my-pi/pi-tui/overlays/rewind-selector";
 import { SessionAccountSelectorComponent } from "@oh-my-pi/pi-tui/overlays/session-account-selector";
 import { SessionSelectorComponent, type SessionSelectorOptions } from "@oh-my-pi/pi-tui/overlays/session-selector";
+import { MoveOverlay, type MoveOverlayResult } from "@oh-my-pi/pi-tui/overlays/move-overlay";
+import { moveDirectorySource, resolveExistingDirectory } from "../move-directory-source";
 import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
 import { TranscriptBlock } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
@@ -188,6 +191,17 @@ interface OpenMenu {
 	mount?: () => OverlayHandle;
 }
 
+interface SessionRecoveryRelocation {
+	manager: SessionManager;
+	snapshot: SessionManagerStateSnapshot;
+}
+
+interface SessionRecoveryTarget {
+	sessionPath: string;
+	movedFrom?: string;
+	relocation?: SessionRecoveryRelocation;
+}
+
 export class SelectorController {
 	/**
 	 * Each single-instance menu from the moment it is requested until it closes,
@@ -196,6 +210,9 @@ export class SelectorController {
 	 * focuses it instead of stacking another menu on top.
 	 */
 	#openMenus = new Map<MenuKind, OpenMenu>();
+
+	/** The resume picker owns recovery errors while its fullscreen overlay is active. */
+	#activeSessionSelector: SessionSelectorComponent<SessionInfo> | undefined;
 
 	constructor(private ctx: InteractiveModeContext) {}
 	/**
@@ -1762,6 +1779,15 @@ export class SelectorController {
 		return result;
 	}
 
+	#showResumeError(message: string): void {
+		const selector = this.#activeSessionSelector;
+		if (selector) {
+			selector.showError(message);
+			return;
+		}
+		this.ctx.showError(message);
+	}
+
 	async showSessionSelector(source?: ForeignSessionSource, onSelect?: SessionPickHandler): Promise<void> {
 		let sessions: SessionInfo[];
 		let onSelectSession: (session: SessionInfo) => Promise<boolean>;
@@ -1789,7 +1815,7 @@ export class SelectorController {
 				try {
 					await this.ctx.settings.flush();
 				} catch (error) {
-					this.ctx.showError(
+					this.#showResumeError(
 						`Failed to save pending settings: ${error instanceof Error ? error.message : String(error)}`,
 					);
 					return false;
@@ -1897,6 +1923,7 @@ export class SelectorController {
 		// Keep the fullscreen picker on the alternate buffer while a selected
 		// session is loaded and its transcript is rebuilt.
 		const done = () => {
+			this.#activeSessionSelector = undefined;
 			overlayHandle?.hide();
 			this.focusActiveEditorArea();
 			this.ctx.ui.requestRender();
@@ -1925,7 +1952,10 @@ export class SelectorController {
 						this.ctx.ui.requestRender();
 					}
 				} catch (error) {
-					this.ctx.showError(error instanceof Error ? error.message : String(error));
+					keepOpen = true;
+					selector.showError(error instanceof Error ? error.message : String(error));
+					selector.unlockInput();
+					this.ctx.ui.requestRender();
 				} finally {
 					if (!keepOpen) done();
 				}
@@ -1943,6 +1973,8 @@ export class SelectorController {
 				fillHeight: true,
 			},
 		);
+
+		this.#activeSessionSelector = selector;
 		selector.setOnRequestRender(() => this.ctx.ui.requestRender());
 		const overlayHandle = this.ctx.ui.showOverlay(selector, {
 			anchor: "top-left",
@@ -2001,7 +2033,9 @@ export class SelectorController {
 			try {
 				await this.ctx.settings.flush();
 			} catch (err) {
-				this.ctx.showError(`Failed to save pending settings: ${err instanceof Error ? err.message : String(err)}`);
+				this.#showResumeError(
+					`Failed to save pending settings: ${err instanceof Error ? err.message : String(err)}`,
+				);
 				return false;
 			}
 		}
@@ -2009,26 +2043,52 @@ export class SelectorController {
 		const continuation =
 			options?.continuation ??
 			(options?.followContinuation ? await findSessionContinuation(sessionPath) : undefined);
-		const target = await this.#relocateFromRemovedWorktree(continuation?.session.path ?? sessionPath);
+		const target = await this.#resolveSessionRecovery(continuation?.session.path ?? sessionPath);
 		if (!target) return false;
-		await this.ctx.prepareSessionSwitch();
-		this.ctx.resetObserverRegistry();
-		// AgentSession owns the transaction. It restores the complete source state
-		// if applying the target project's cwd fails, including in-memory sessions.
 		let modelFallbackWarning: string | undefined;
-		if (
-			(await this.ctx.session.switchSession(target.sessionPath, {
-				onCwdChange: async (newCwd, sourceCwd) => {
-					if (normalizePathForComparison(newCwd) === normalizePathForComparison(sourceCwd)) return true;
-					return this.ctx.applyCwdChange(newCwd);
-				},
-				onModelFallback: warning => {
-					modelFallbackWarning = warning;
-				},
-			})) === false
-		) {
+		let switched: boolean;
+		try {
+			await this.ctx.prepareSessionSwitch();
+			this.ctx.resetObserverRegistry();
+			// AgentSession owns the runtime transaction. Keep the relocation manager
+			// open until that transaction commits so a failed switch can move the
+			// transcript and artifacts back while retaining their writer lease.
+			switched =
+				(await this.ctx.session.switchSession(target.sessionPath, {
+					onCwdChange: async (newCwd, sourceCwd) => {
+						if (normalizePathForComparison(newCwd) === normalizePathForComparison(sourceCwd)) return true;
+						return this.ctx.applyCwdChange(newCwd);
+					},
+					onModelFallback: warning => {
+						modelFallbackWarning = warning;
+					},
+				})) === true;
+		} catch (error) {
+			try {
+				await this.#rollbackSessionRecovery(target);
+			} catch (rollbackError) {
+				const message = `Session switch failed and rollback failed: ${
+					error instanceof Error ? error.message : String(error)
+				}; ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`;
+				this.#showResumeError(message);
+				throw new Error(message, { cause: rollbackError });
+			}
+			throw error;
+		}
+		if (!switched) {
+			try {
+				await this.#rollbackSessionRecovery(target);
+			} catch (rollbackError) {
+				const message = `Could not roll back resumed session: ${
+					rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
+				}`;
+				this.#showResumeError(message);
+				return false;
+			}
+			this.#showResumeError("Failed to switch to resumed session.");
 			return false;
 		}
+		await target.relocation?.manager.close();
 		this.ctx.clearTransientSessionUi();
 		const newCwd = this.ctx.sessionManager.getCwd();
 		const movedProject = normalizePathForComparison(newCwd) !== normalizePathForComparison(previousCwd);
@@ -2040,7 +2100,7 @@ export class SelectorController {
 		await this.ctx.reloadTodos();
 		this.ctx.showStatus(
 			target.movedFrom
-				? `Resumed session, moved here from removed worktree ${shortenPath(target.movedFrom)}`
+				? `Resumed session, moved here from removed worktree ${shortenPath(target.movedFrom)} to ${shortenPath(newCwd)}`
 				: movedProject
 					? `Resumed session in ${shortenPath(newCwd)}`
 					: "Resumed session",
@@ -2049,30 +2109,130 @@ export class SelectorController {
 		if (modelFallbackWarning) this.ctx.showWarning(modelFallbackWarning);
 		return true;
 	}
+	async #rollbackSessionRecovery(target: SessionRecoveryTarget): Promise<void> {
+		const relocation = target.relocation;
+		if (!relocation) return;
+
+		let failure: unknown;
+		try {
+			await relocation.manager.rollbackMove(relocation.snapshot);
+		} catch (error) {
+			failure = error;
+		}
+		try {
+			await relocation.manager.close();
+		} catch (error) {
+			failure ??= error;
+		}
+		if (failure) throw failure;
+	}
 
 	/**
-	 * Move a session recorded in a removed worktree of this repository into the
-	 * current folder before resuming it: its own directory cannot be entered.
-	 * Returns the session file to switch to, or undefined after reporting a failed move.
+	 * Resolve a missing session cwd before switching. Directory selection stays
+	 * inside the existing hook overlay so invalid input can be retried without
+	 * closing the session picker.
 	 */
-	async #relocateFromRemovedWorktree(
-		sessionPath: string,
-	): Promise<{ sessionPath: string; movedFrom?: string } | undefined> {
+	async #resolveSessionRecovery(sessionPath: string): Promise<SessionRecoveryTarget | undefined> {
 		const sessionManager = this.ctx.sessionManager;
-		// Never move the live session out from under its own writer.
 		if (sessionManager.getSessionFile() === sessionPath) return { sessionPath };
-		const cwd = sessionManager.getCwd();
-		const sessionDir = sessionManager.getSessionDir();
-		const info = await readSessionInfo(sessionPath);
-		if (!info || !(await SessionManager.isFromRemovedWorktree(info, cwd, sessionDir))) return { sessionPath };
+
+		const currentCwd = sessionManager.getCwd();
+		const sessionDir = this.ctx.sessionDirOverride;
+		let info: SessionInfo | undefined;
 		try {
-			const relocated = await SessionManager.openRelocated(sessionPath, info.cwd, cwd, sessionDir);
-			const movedPath = relocated.getSessionFile() ?? sessionPath;
-			await relocated.close();
-			return { sessionPath: movedPath, movedFrom: info.cwd };
+			info = await readSessionInfo(sessionPath);
 		} catch (error) {
-			this.ctx.showError(
-				`Could not move the session out of removed worktree ${shortenPath(info.cwd)}: ${error instanceof Error ? error.message : String(error)}`,
+			this.#showResumeError(
+				`Could not inspect session ${shortenPath(sessionPath)}: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			return undefined;
+		}
+		if (!info) {
+			this.#showResumeError(`Could not find session ${shortenPath(sessionPath)}; refusing to create a replacement.`);
+			return undefined;
+		}
+
+		let decision: SessionRecoveryDecision;
+		try {
+			decision = await resolveSessionRecovery(info, currentCwd, sessionDir);
+		} catch (error) {
+			this.#showResumeError(
+				`Could not determine a recovery directory for ${shortenPath(info.cwd)}: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			return undefined;
+		}
+
+		let directory: string;
+		if (decision.kind === "unchanged") return { sessionPath };
+		if (decision.kind === "relocate") {
+			directory = decision.directory;
+		} else {
+			while (true) {
+				let selection: MoveOverlayResult | undefined;
+				try {
+					selection = await this.ctx.showHookCustom<MoveOverlayResult | undefined>(
+						(_tui, _theme, _keybindings, done) => new MoveOverlay(currentCwd, done, moveDirectorySource),
+						{ overlay: true },
+					);
+				} catch (error) {
+					this.#showResumeError(
+						`Could not choose a recovery directory: ${error instanceof Error ? error.message : String(error)}`,
+					);
+					return undefined;
+				}
+				if (!selection) return undefined;
+				const resolved = resolveExistingDirectory(selection.directory, currentCwd);
+				if (!resolved) {
+					this.#showResumeError(
+						`Cannot resume session in "${selection.directory}": choose an existing directory.`,
+					);
+					// Return to the fullscreen picker so the inline error stays visible;
+					// retrying the selected session opens a fresh directory overlay.
+					return undefined;
+				}
+				directory = resolved;
+				break;
+			}
+		}
+
+		let relocated: SessionManager | undefined;
+		let snapshot: SessionRecoveryRelocation["snapshot"] | undefined;
+		try {
+			relocated = sessionDir
+				? await SessionManager.open(sessionPath, sessionDir, undefined, {
+						initialCwd: info.cwd,
+						throwIfMissing: true,
+					})
+				: await SessionManager.open(sessionPath, undefined, undefined, {
+						initialCwd: info.cwd,
+						throwIfMissing: true,
+					});
+			snapshot = relocated.captureState();
+			await relocated.moveTo(directory, sessionDir);
+			const movedPath = relocated.getSessionFile();
+			if (!movedPath) throw new Error("Relocated session has no session file");
+			return {
+				sessionPath: movedPath,
+				movedFrom: info.cwd,
+				relocation: { manager: relocated, snapshot },
+			};
+		} catch (error) {
+			if (relocated) {
+				if (snapshot) {
+					try {
+						await relocated.rollbackMove(snapshot);
+					} catch {
+						// The original relocation error is the actionable one here.
+					}
+				}
+				try {
+					await relocated.close();
+				} catch {
+					// Preserve the relocation error for the picker.
+				}
+			}
+			this.#showResumeError(
+				`Could not move session from ${shortenPath(info.cwd)} to ${shortenPath(directory)}: ${error instanceof Error ? error.message : String(error)}`,
 			);
 			return undefined;
 		}

@@ -108,6 +108,7 @@ import {
 import { generateId, migrateToCurrentVersion } from "./session-migrations";
 import {
 	computeDefaultSessionDir,
+	getSessionRepository,
 	hasPositiveMovedProjectEvidence,
 	readTerminalBreadcrumbEntry,
 	resolveManagedSessionRoot,
@@ -751,7 +752,7 @@ export type ReadonlySessionManager = Pick<
 	| "putBlobSync"
 >;
 
-interface SessionManagerStateSnapshot {
+export interface SessionManagerStateSnapshot {
 	cwd: string;
 	sessionDir: string;
 	sessionId: string;
@@ -1302,6 +1303,7 @@ export class SessionManager {
 			continuationOf: previousSessionId,
 			...carried,
 			providerPromptCacheKey: SessionManager.getInheritedProviderPromptCacheKey(this.#header),
+			repository: getSessionRepository(this.#cwd),
 		};
 		this.#closeWriterEventually();
 		this.#sessionFile = to;
@@ -2046,6 +2048,7 @@ export class SessionManager {
 			parentSession: options?.parentSession,
 			providerPromptCacheKey: options?.providerPromptCacheKey,
 			taskPromptCacheKey: options?.taskPromptCacheKey,
+			repository: getSessionRepository(this.#cwd),
 		};
 		const workspace = normalizeSessionWorkspace({
 			cwd: this.#cwd,
@@ -2510,6 +2513,7 @@ export class SessionManager {
 			parentSession: parentSessionId,
 			providerPromptCacheKey: SessionManager.getInheritedProviderPromptCacheKey(this.#header),
 			taskPromptCacheKey: this.#header.taskPromptCacheKey,
+			repository: getSessionRepository(this.#cwd),
 		};
 		this.#sessionName = this.#header.title;
 		this.#titleSource = this.#header.titleSource;
@@ -4110,6 +4114,7 @@ export class SessionManager {
 			titleSource: this.#titleSource,
 			parentSession: this.#persist ? sourceSessionFile : undefined,
 			additionalDirectories: this.#additionalDirectories.length > 0 ? [...this.#additionalDirectories] : undefined,
+			repository: getSessionRepository(this.#cwd),
 		};
 
 		const labels: LabelEntry[] = [];
@@ -4198,6 +4203,7 @@ export class SessionManager {
 			id,
 			timestamp,
 			cwd: path.resolve(cwd),
+			repository: getSessionRepository(cwd),
 		};
 		const file = path.join(sessionDir, `${fileSafeTimestamp(timestamp)}_${id}.jsonl`);
 		storage.writeTextSync(file, `${serializeTitleSlot({ updatedAt: timestamp })}${JSON.stringify(header)}\n`);
@@ -4444,7 +4450,10 @@ export class SessionManager {
 		// launch cwd, which would make the `moveTo` below a no-op whenever the move
 		// target equals it. moveTo never chdirs, so the stale cwd is only the
 		// relocation source, not a directory we enter.
-		const manager = await SessionManager.open(sessionPath, sessionDir, undefined, { initialCwd: recordedCwd });
+		const manager = await SessionManager.open(sessionPath, sessionDir, undefined, {
+			initialCwd: recordedCwd,
+			throwIfMissing: true,
+		});
 		try {
 			await manager.moveTo(cwd, sessionDir);
 		} catch (error) {

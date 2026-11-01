@@ -11,12 +11,14 @@
  * onCancel that just closes the overlay.
  */
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { clearOmpExtensionCliRoots } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
 import { runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 class ProcessExitSignal extends Error {
@@ -25,6 +27,9 @@ class ProcessExitSignal extends Error {
 		this.name = "ProcessExitSignal";
 	}
 }
+type StartupRecoveryDependencies = NonNullable<Parameters<typeof runRootCommand>[2]> & {
+	selectDirectory?: (cwd: string) => Promise<string | undefined>;
+};
 
 // `runRootCommand` registers the CLI's extension roots (`--no-extensions` → explicit-only) process-wide.
 afterEach(() => {
@@ -101,4 +106,88 @@ describe("runRootCommand — startup --resume picker cancellation", () => {
 		// falling through to session creation or returning into a hang.
 		expect(exitCodes).toEqual([0]);
 	}, 15_000);
+	it("exits cleanly when fallback directory selection is cancelled without creating a session", async () => {
+		using tempDir = TempDir.createSync("@omp-resume-recovery-cancel-");
+		const sessionDir = tempDir.path();
+		const missingCwd = path.join(sessionDir, "deleted-worktree");
+		const sessionPath = path.join(sessionDir, "existing.jsonl");
+		const selected: SessionInfo = {
+			path: sessionPath,
+			id: "existing-session",
+			cwd: missingCwd,
+			title: "existing",
+			created: new Date(0),
+			modified: new Date(0),
+			messageCount: 1,
+			size: 0,
+			firstMessage: "prior work",
+			allMessagesText: "prior work",
+		};
+		await Bun.write(
+			sessionPath,
+			[
+				JSON.stringify({
+					type: "session",
+					id: selected.id,
+					cwd: selected.cwd,
+					timestamp: new Date(0).toISOString(),
+				}),
+				JSON.stringify({
+					type: "message",
+					id: "e1",
+					parentId: null,
+					timestamp: new Date(0).toISOString(),
+					message: { role: "assistant", content: "prior work" },
+				}),
+				"",
+			].join("\n"),
+		);
+
+		const authStorage = await AuthStorage.create(path.join(sessionDir, "auth.db"));
+		const settings = Settings.isolated({ "marketplace.autoUpdate": "off" });
+		const parsed = parseArgs(["--resume"]);
+		parsed.noExtensions = true;
+		parsed.noSkills = true;
+		parsed.noRules = true;
+		parsed.noTools = true;
+		parsed.noLsp = true;
+		parsed.sessionDir = sessionDir;
+		const exitCodes: number[] = [];
+		const originalIsTTY = process.stdin.isTTY;
+		Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
+		vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+			exitCodes.push(code ?? 0);
+			throw new ProcessExitSignal(code ?? 0);
+		}) as typeof process.exit);
+		let directoryPickerCalled = false;
+		let createAgentSessionCalled = false;
+		let thrown: unknown;
+		try {
+			await runRootCommand(parsed, ["--resume"], {
+				discoverAuthStorage: async () => authStorage,
+				settings,
+				selectSession: async () => selected,
+				selectDirectory: async () => {
+					directoryPickerCalled = true;
+					return undefined;
+				},
+				createAgentSession: async () => {
+					createAgentSessionCalled = true;
+					throw new Error("startup must exit before creating a replacement session");
+				},
+			} as StartupRecoveryDependencies);
+		} catch (error) {
+			thrown = error;
+		} finally {
+			Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
+			vi.restoreAllMocks();
+			authStorage.close();
+		}
+
+		expect(directoryPickerCalled).toBe(true);
+		expect(thrown).toBeInstanceOf(ProcessExitSignal);
+		expect(exitCodes).toEqual([0]);
+		expect(createAgentSessionCalled).toBe(false);
+		await expect(fsp.stat(sessionPath)).resolves.toBeTruthy();
+	});
 });

@@ -1680,6 +1680,12 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 	setOnRequestRender(callback: () => void): void {
 		this.#onRequestRender = callback;
 	}
+
+	/** Show an operation error inside the picker while keeping it available for retry. */
+	showError(message: string): void {
+		this.#showError(message);
+		this.#onRequestRender?.();
+	}
 	/** Ignore input after selection while the host resumes the session. */
 	lockInput(): void {
 		this.#inputLocked = true;
@@ -1706,10 +1712,11 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 	}
 
 	#showError(message: string): void {
+		const safeMessage = plainText(message);
 		this.#messageContainer.clear();
-		this.#message = { kind: "error", text: `Error: ${plainText(message)}` };
+		this.#message = { kind: "error", text: `Error: ${safeMessage}` };
 		this.#pickerErrorOpen = true;
-		this.#messageContainer.addChild(new Text(theme.fg("error", `Error: ${replaceTabs(message)}`), 0, 0));
+		this.#messageContainer.addChild(new Text(theme.fg("error", `Error: ${replaceTabs(safeMessage)}`), 0, 0));
 		this.#messageContainer.addChild(new Spacer(1));
 	}
 
