@@ -297,7 +297,6 @@ import {
 	type AgentSessionEventListener,
 	type ToolCallRunMark,
 	UNNAMED_USER_WAIT_PROMPT,
-	type UserWaitFrame,
 } from "./agent-session-events";
 import type {
 	AgentSessionConfig,
