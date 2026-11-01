@@ -187,11 +187,11 @@ function rankZaiRequestLimits(report: UsageReport): UsageLimit[] {
 	// Mixed-meter payloads (tokens + credits on the same plan) can repeat a
 	// window; keep the most-binding limit per window so a second 5h row never
 	// displaces the weekly window when primary/secondary are picked positionally.
-	const byWindow = new Map<number, UsageLimit>();
+	const byWindow = new Map<string, UsageLimit>();
 	for (const limit of limits) {
-		const durationMs = limit.window?.durationMs ?? Number.POSITIVE_INFINITY;
-		const current = byWindow.get(durationMs);
-		if (!current || zaiLimitPressure(limit) > zaiLimitPressure(current)) byWindow.set(durationMs, limit);
+		const windowKey = limit.window?.id ?? limit.scope.windowId ?? limit.id;
+		const current = byWindow.get(windowKey);
+		if (!current || zaiLimitPressure(limit) > zaiLimitPressure(current)) byWindow.set(windowKey, limit);
 	}
 	const ranked = [...byWindow.values()];
 	ranked.sort((left, right) => {
@@ -306,15 +306,19 @@ async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): 
 			// GLM Coding Plan windows (e.g. 12k credits / 5h + 60k credits / week):
 			// `usage` is the plan's credit allotment, `currentValue` the spend.
 			// `percentage` is a server-rounded integer (11 for 1438/12000 ≈ 11.98%),
-			// so prefer the exact ratio and fall back to it only without absolutes.
+			// so prefer the exact ratio and fall back to `percentage` whenever none
+			// exists, including rows that carry only `remaining`. The unit is `percent`
+			// only when the row has no absolute fields at all.
 			const window = buildZaiWindow(parsed);
-			const hasAbsoluteMeter = parsed.currentValue !== undefined && parsed.usage !== undefined && parsed.usage > 0;
+			const hasExactRatio = parsed.currentValue !== undefined && parsed.usage !== undefined && parsed.usage > 0;
+			const percentOnly =
+				parsed.currentValue === undefined && parsed.usage === undefined && parsed.remaining === undefined;
 			const amount = buildUsageAmount({
 				used: parsed.currentValue,
 				limit: parsed.usage,
 				remaining: parsed.remaining,
-				usedFraction: hasAbsoluteMeter ? undefined : percentageFraction(parsed.percentage),
-				unit: "credits",
+				usedFraction: hasExactRatio ? undefined : percentageFraction(parsed.percentage),
+				unit: percentOnly && parsed.percentage !== undefined ? "percent" : "credits",
 			});
 			limits.push({
 				id: `zai:credits:${window.id}`,

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Z.AI quota ranking when usage responses contain multiple meters or omit absolute credit values ([#9979](https://github.com/can1357/oh-my-pi/pull/9979) by [@aleister1102](https://github.com/aleister1102))
+
 ## [18.17.0] - 2026-11-06
 
 ### Added
