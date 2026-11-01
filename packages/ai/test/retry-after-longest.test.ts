@@ -10,7 +10,8 @@
  * - `longestProviderRetryHint` reads every occurrence, and only turn recovery's
  *   held-retry check uses it, where it can only decline a hold.
  */
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
+import { extractRetryHint, longestRetryHint } from "@oh-my-pi/pi-utils";
 import {
 	extractProviderRetryHint,
 	appendRetryAfterHint,
@@ -223,30 +224,106 @@ describe("providerFailureWaitMs", () => {
 	});
 });
 
+/** What each of the three header readers takes from `headers`: `fetchWithRetry`'s, the held-retry check's, and the failed message's. */
+function threeReaders(headers: Record<string, string>): (number | undefined)[] {
+	return [
+		extractRetryHint(new Headers(headers)),
+		longestRetryHint(new Headers(headers)),
+		getRetryAfterMsFromHeaders(headers),
+	];
+}
+
+const DECIMAL_COMMA_ISO = "2026-10-21T09:27:00,900+02:00";
+
+function withFixedNow<T>(now: string, read: () => T): T {
+	const clock = vi.spyOn(Date, "now").mockReturnValue(Date.parse(now));
+	try {
+		return read();
+	} finally {
+		clock.mockRestore();
+	}
+}
+
 describe("an explicit zero wait beside a window reset", () => {
 	it("is read as retry now, not as the window's end", () => {
 		// `fetchWithRetry` reads `Retry-After: 0` as an immediate retry; the
 		// failed message and the transport's decline must read the same.
 		const headers = { "retry-after": "0", "x-ratelimit-reset": "7200" };
 		expect(getRetryAfterMsFromHeaders(headers)).toBe(0);
+		expect(extractRetryHint(new Headers(headers))).toBe(0);
 		expect(getRetryAfterMsFromHeaders({ "retry-after-ms": "0", "x-ratelimit-reset-ms": "7200000" })).toBe(0);
 		expect(retryWaitBounds(undefined, 60_000).declines(headers)).toBe(false);
 	});
+
+	it.each(["0x0", "-1", "-0", "+0", "0e0", " "])(
+		"is not stated by %j, which is no delay-seconds, so the window reset stands",
+		value => {
+			// RFC 9110 §10.2.3: delay-seconds is digits. Anything else states no
+			// wait; read as zero it would hide a one-hour reset behind "retry now".
+			expect(threeReaders({ "retry-after": value, "x-ratelimit-reset": "3600" })).toEqual([
+				3_600_000, 3_600_000, 3_600_000,
+			]);
+			expect(threeReaders({ "retry-after-ms": value, "x-ratelimit-reset": "3600" })).toEqual([
+				3_600_000, 3_600_000, 3_600_000,
+			]);
+		},
+	);
 });
 
-describe("a Retry-After joined from duplicate header lines", () => {
-	it.each([
-		["retry-after", "9, 120", 120_000],
-		["retry-after", "120, 9", 120_000],
-		["retry-after-ms", "100, 9000", 9_000],
-	] as [string, string, number][])("%s: %s reads the longest part", (name, value, expected) => {
-		expect(getRetryAfterMsFromHeaders({ [name]: value })).toBe(expected);
+describe("Retry-After comma values", () => {
+	it("reads an ISO date-time's decimal comma as its 900 ms fraction in all three readers", () => {
+		// An ISO date-time is not a joined delay list. Its decimal comma is read
+		// as a decimal point: 900 ms, not the UTC+02:00 offset (two hours).
+		const waits = withFixedNow("2026-10-21T07:27:00.000Z", () => threeReaders({ "retry-after": DECIMAL_COMMA_ISO }));
+		expect(waits).toEqual([900, 900, 900]);
 	});
 
-	it("still reads an HTTP-date, whose own comma is not a separator", () => {
-		const date = new Date(Date.now() + 90_000).toUTCString();
-		const waitMs = getRetryAfterMsFromHeaders({ "retry-after": date });
-		expect(waitMs).toBeGreaterThan(85_000);
-		expect(waitMs).toBeLessThanOrEqual(90_000);
+	it("reads an HTTP-date, which holds a comma of its own, in all three readers", () => {
+		const date = new Date(Math.ceil((Date.now() + 60_000) / 1_000) * 1_000).toUTCString();
+		for (const ms of threeReaders({ "retry-after": date })) {
+			expect(ms).toBeGreaterThan(55_000);
+			expect(ms).toBeLessThanOrEqual(61_000);
+		}
+	});
+
+	it.each([
+		["two joined delay-seconds", "9, 120", 120_000],
+		["a decimal delay-seconds part", "9.125, 9", 9_125],
+		[
+			"out of scope: a bare epoch with a decimal comma has all-digit parts and is still read upstream as a duration",
+			"1761038820, 900",
+			1_761_038_820_000,
+		],
+	] as [string, string, number][])("%s reads the longest bare delay-seconds part", (_label, value, expected) => {
+		// Two joined header lines contradict each other; conservatively wait for
+		// the longer one. The bare-epoch row documents the known out-of-scope
+		// ambiguity: numeric Retry-After is already a duration, never an epoch.
+		expect(threeReaders({ "retry-after": value })).toEqual([expected, expected, expected]);
+	});
+
+	it("does not partly split a comma value when one part is not delay-seconds", () => {
+		expect(threeReaders({ "retry-after": "9, 120ms" })).toEqual([undefined, undefined, undefined]);
+	});
+});
+
+describe("a window reset is read in one unit by all three readers", () => {
+	it("reads x-ratelimit-reset: 9 as 9 s", () => {
+		expect(threeReaders({ "x-ratelimit-reset": "9" })).toEqual([9_000, 9_000, 9_000]);
+	});
+
+	it("reads an epoch-millisecond x-ratelimit-reset nine seconds out as about 9 s", () => {
+		const epochMs = String(Date.now() + 9_000);
+		for (const ms of threeReaders({ "x-ratelimit-reset": epochMs })) {
+			expect(ms).toBeGreaterThan(8_000);
+			expect(ms).toBeLessThanOrEqual(9_000);
+		}
+	});
+
+	it("reads an epoch-second x-ratelimit-reset as the time left to it", () => {
+		const epochSeconds = String(Math.ceil((Date.now() + 9_000) / 1_000));
+		for (const ms of threeReaders({ "x-ratelimit-reset": epochSeconds })) {
+			expect(ms).toBeGreaterThan(7_000);
+			expect(ms).toBeLessThanOrEqual(10_000);
+		}
 	});
 });

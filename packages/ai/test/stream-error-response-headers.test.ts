@@ -837,16 +837,30 @@ describe("transport retries of a refusal keep to the caller's maxRetryDelayMs", 
 			expect(message.errorRetryAfterMs).toBe(0);
 		}, 30_000);
 
-		it(`${name}: a 429 whose duplicate Retry-After lines arrive joined ("9, 120") is read as 120 s and surfaced under a 60 s cap`, async () => {
+		it(`${name}: a 429 whose Retry-After is an ISO date-time with a decimal comma 1 s out is retried under a 60 s cap`, async () => {
+			// Split on the comma, `…T09:27:00` read as GMT was the zone offset, two hours, and the 429 surfaced.
+			const isoComma = `${new Date(Date.now() + 1_000 + 2 * 3_600_000).toISOString().slice(0, 19)},900+02:00`;
 			const { message, streamRequests } = await runAgainst(
 				provider(name),
-				[rateLimited({ "retry-after": "9, 120" })],
+				[rateLimited({ "retry-after": isoComma })],
+				{ maxRetryDelayMs: 60_000 },
+			);
+
+			expect(streamRequests).toBeGreaterThan(1);
+			expect(message.errorRetryAfterMs ?? 0).toBeLessThanOrEqual(2_000);
+		}, 30_000);
+
+		it(`${name}: a 429 saying Retry-After: 0x0 beside a two-hour window reset surfaces after one request under a 60 s cap`, async () => {
+			// `0x0` is no delay-seconds: the reset is the wait, and the transport and the field agree on it.
+			const { message, streamRequests } = await runAgainst(
+				provider(name),
+				[rateLimited({ "retry-after": "0x0", "x-ratelimit-reset": "7200" })],
 				{ maxRetryDelayMs: 60_000 },
 			);
 
 			expect(streamRequests).toBe(1);
 			expect(message.errorStatus).toBe(429);
-			expect(message.errorRetryAfterMs).toBe(120_000);
+			expect(message.errorRetryAfterMs).toBe(7_200_000);
 		}, 30_000);
 	}
 });
