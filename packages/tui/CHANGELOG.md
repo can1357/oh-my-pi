@@ -4,10 +4,12 @@
 
 ### Breaking Changes
 
+- Enter now sends the composer draft as typed while an autocomplete popup is open: a completion is chosen with Tab (or a right arrow at end of line), so a popup can no longer swallow a send, complete a slash command behind it, or run a row the user never selected ([#17648](https://github.com/can1357/oh-my-pi/pull/17648) by [@iacore](https://github.com/iacore))
 - `GroupedLineContext.isUrl` is replaced by `url`, the internal URL a header names or a body row belongs to ([#17608](https://github.com/can1357/oh-my-pi/pull/17608) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 
 ### Added
 
+- Added Tab path glob expansion to the editor: a token naming exactly one path (`/cd ~/computing/*/pixivfe`) is replaced whole by that path, relative patterns and `~` resolving against the directory the host supplies through `pathGlobBaseDir`. A glob with no match or several matches is left alone so Tab keeps its completion role; `expandPathGlobAt` and `pathGlobTokenStart` are exported from `path-glob` ([#17648](https://github.com/can1357/oh-my-pi/pull/17648) by [@iacore](https://github.com/iacore))
 - Added `FILE_NAME_COLOR`, `formatStyledPath` and `pathNameStart` to `render/render-utils` for paths in tool bodies and Tern file rows; `createGroupedRowStyler`, `groupedLinkTargets`, `fitGroupsToBudget`, `groupsByFile` and `isMatchRow` to `tools/grouped-file-output`; `splitReadQuery` to `tools/read`; and `HASHLINE_TAG_SUFFIX_RE` to `tools/hashline-format`. `classifyGroupedLines` reports each file header's full `displayPath` and `suffix`, and a `TranscriptStatusPart` without `color` keeps its already-styled text ([#17608](https://github.com/can1357/oh-my-pi/pull/17608) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 
 ### Changed

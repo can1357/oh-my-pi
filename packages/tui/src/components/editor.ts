@@ -9,10 +9,10 @@ import {
 	findTrailingSlashCommandStart,
 	isDirectoryCompletionValue,
 	midPromptSkillTokenMatches,
-	SKILL_NAMESPACE,
 } from "../autocomplete";
 import { BracketedPasteHandler, decodeReencodedPasteControls } from "../bracketed-paste";
 import { canonicalKeyId, getKeybindings, type KeybindingsManager } from "../keybindings";
+import { expandPathGlobAt } from "../path-glob";
 import { extractPrintableText, matchesKey, parseKey } from "../keys";
 import { KillRing } from "../kill-ring";
 import type { TspEditorDecoration, TspEditorProps, TspText, TspTone } from "@oh-my-pi/pi-wire";
@@ -869,8 +869,6 @@ export class Editor implements Component, Focusable {
 		| { line: number; startCol: number; endCol: number; original: string; cursorOffset: number }
 		| undefined;
 	#autocompletePrefix: string = "";
-	/** False while the popup's untouched top row is a description-only slash hit ({@link AutocompleteItem.descriptionMatch}): Enter then submits the typed text. */
-	#enterAcceptsSelection = true;
 	#autocompleteRequestId: number = 0;
 	#autocompletePendingRequest: AutocompleteRequest | undefined;
 	#autocompleteRequestRunning = false;
@@ -949,8 +947,14 @@ export class Editor implements Component, Focusable {
 	 *  the single-line buffer is a strict prefix of it, the cursor sits at its end, and no
 	 *  autocomplete is open. A shown prediction replaces the {@link placeholder}; Tab or Right inserts
 	 *  the rest without submitting. Must be a single line. Re-evaluated on every render, so hosts can
-	 *  derive it from live state. */
+	 * derive it from live state. */
 	prediction?: () => string | undefined;
+	/**
+	 * Working directory a Tab path glob expands against: the token under the cursor
+	 * becomes the path it names, relative patterns and `~` resolving from here. Unset:
+	 * Tab never expands a glob.
+	 */
+	pathGlobBaseDir?: () => string;
 
 	// Custom top border (for status line integration). Either an eager `content`
 	// (set once, reused every frame) or a `provider` that recomputes lazily just
@@ -2123,14 +2127,19 @@ export class Editor implements Component, Focusable {
 			const rightArrowAccepts =
 				kb.matchesCanonical(canonical, "tui.editor.cursorRight") &&
 				this.#state.cursorCol >= (this.#state.lines[this.#state.cursorLine] ?? "").length;
-			if (
-				this.#autocompleteState === "assist" &&
-				(kb.matchesCanonical(canonical, "tui.input.submit") ||
-					data === "\n" ||
-					kb.matchesCanonical(canonical, "tui.input.tab") ||
-					rightArrowAccepts)
-			) {
-				this.#applySpellingSuggestion();
+			const submitKey = kb.matchesCanonical(canonical, "tui.input.submit") || data === "\n";
+			if (submitKey) {
+				// Enter keeps the submit key's own meaning while a popup is open: a row is
+				// chosen with Tab (or Right at end of line), never by sending. The popup is
+				// dropped first so it cannot swallow the keypress, and the draft goes out as
+				// typed — a completion the user never asked to accept can never be sent.
+				this.#cancelAutocomplete();
+				this.onAutocompleteUpdate?.();
+			}
+			// Tab expands a path glob in place before it means "accept this row".
+			else if (kb.matchesCanonical(canonical, "tui.input.tab") && this.#expandPathGlobAtCursor()) {
+				this.#cancelAutocomplete();
+				this.onAutocompleteUpdate?.();
 				return;
 			}
 			// Let the autocomplete list handle navigation and selection
@@ -2138,153 +2147,45 @@ export class Editor implements Component, Focusable {
 				kb.matchesCanonical(canonical, "tui.select.up") ||
 				kb.matchesCanonical(canonical, "tui.select.down") ||
 				kb.matchesCanonical(canonical, "tui.select.pageUp") ||
-				kb.matchesCanonical(canonical, "tui.select.pageDown") ||
-				kb.matchesCanonical(canonical, "tui.input.submit") ||
-				data === "\n" ||
-				kb.matchesCanonical(canonical, "tui.input.tab") ||
-				rightArrowAccepts
+				kb.matchesCanonical(canonical, "tui.select.pageDown")
 			) {
-				// Only pass navigation keys to the list, not Enter/Tab (we handle those directly)
-				if (
-					kb.matchesCanonical(canonical, "tui.select.up") ||
-					kb.matchesCanonical(canonical, "tui.select.down") ||
-					kb.matchesCanonical(canonical, "tui.select.pageUp") ||
-					kb.matchesCanonical(canonical, "tui.select.pageDown")
-				) {
-					// An `@` popup whose narrowing filter matched nothing holds no candidate;
-					// let the key fall through instead of swallowing it.
-					if (!this.#autocompleteList.getSelectedItem()) {
-						this.#cancelAutocomplete();
-						this.onAutocompleteUpdate?.();
-					} else {
-						this.#autocompleteList.handleInput(data);
-						this.#enterAcceptsSelection = true;
-						this.onAutocompleteUpdate?.();
-						return;
-					}
+				// An `@` popup whose narrowing filter matched nothing holds no candidate;
+				// let the key fall through instead of swallowing it.
+				if (!this.#autocompleteList.getSelectedItem()) {
+					this.#cancelAutocomplete();
+					this.onAutocompleteUpdate?.();
+				} else {
+					this.#autocompleteList.handleInput(data);
+					this.onAutocompleteUpdate?.();
+					return;
 				}
-
-				// If Tab was pressed, always apply the selection
-				if (kb.matchesCanonical(canonical, "tui.input.tab") || rightArrowAccepts) {
-					const selected = this.#autocompleteList.getSelectedItem();
-					// Check for stale autocomplete state due to buffer edits since last refresh
-					// (destructive keys or paste can outrun the async refresh).
-					const currentLine = this.#state.lines[this.#state.cursorLine] ?? "";
-					const currentTextBeforeCursor = currentLine.slice(0, this.#state.cursorCol);
-					if (!this.#autocompletePrefixMatchesCursorText(currentTextBeforeCursor, selected)) {
-						// Autocomplete is stale - silently cancel; Tab has no fallback action here.
-						this.#cancelAutocomplete();
-						return;
-					}
-					if (!selected) {
-						// An `@` popup whose narrowing filter matched nothing stays open with no
-						// candidate (see #refreshAutocomplete). Nothing to accept: cancel the
-						// popup and fall through so Tab keeps its normal completion role and a right
-						// arrow at end of line moves the cursor.
-						this.#cancelAutocomplete();
-						this.onAutocompleteUpdate?.();
-					} else {
-						this.#acceptAutocompleteSelection(selected);
-					}
-					// Only an accepted candidate consumes the key; an empty list falls through.
-					if (selected) return;
+			} else if (kb.matchesCanonical(canonical, "tui.input.tab") || rightArrowAccepts) {
+				if (this.#autocompleteState === "assist") {
+					this.#applySpellingSuggestion();
+					return;
 				}
-
-				// If Enter was pressed on a submitted slash command (not an absolute-path
-				// completion sharing the leading-slash prefix), apply and submit.
-				if (
-					(kb.matchesCanonical(canonical, "tui.input.submit") || data === "\n") &&
-					findLeadingSlashCommandStart(this.#autocompletePrefix) !== null &&
-					this.#isInSubmittedSlashCommandContext() &&
-					!this.#selectedCompletionIsPath() &&
-					!this.#selectedCompletionIsSkillNamespace()
-				) {
-					const selected = this.#autocompleteList.getSelectedItem();
-					// Check for stale autocomplete state while an async refresh is pending
-					const currentLine = this.#state.lines[this.#state.cursorLine] ?? "";
-					const currentTextBeforeCursor = currentLine.slice(0, this.#state.cursorCol);
-					if (
-						!this.#autocompletePrefixMatchesCursorText(currentTextBeforeCursor, selected) ||
-						!this.#enterAcceptsSelection
-					) {
-						// Stale, or a description-only hit the user never selected: submit the typed text.
-						this.#cancelAutocomplete();
-					} else {
-						if (selected && this.#autocompleteProvider) {
-							const result = this.#autocompleteProvider.applyCompletion(
-								this.#state.lines,
-								this.#state.cursorLine,
-								this.#state.cursorCol,
-								selected,
-								this.#autocompletePrefix,
-							);
-
-							this.#state.lines = result.lines;
-							this.#state.cursorLine = result.cursorLine;
-							this.#setCursorCol(result.cursorCol);
-							result.onApplied?.();
-						}
-						this.#cancelAutocomplete();
-					}
-					// Don't return - fall through to submission logic
+				const selected = this.#autocompleteList.getSelectedItem();
+				// Check for stale autocomplete state due to buffer edits since last refresh
+				// (destructive keys or paste can outrun the async refresh).
+				const currentLine = this.#state.lines[this.#state.cursorLine] ?? "";
+				const currentTextBeforeCursor = currentLine.slice(0, this.#state.cursorCol);
+				if (!this.#autocompletePrefixMatchesCursorText(currentTextBeforeCursor, selected)) {
+					// Autocomplete is stale - silently cancel; Tab has no fallback action here.
+					this.#cancelAutocomplete();
+					return;
 				}
-				// Otherwise, apply the completion without submitting the surrounding draft.
-				else if (kb.matchesCanonical(canonical, "tui.input.submit") || data === "\n") {
-					const selected = this.#autocompleteList.getSelectedItem();
-					// Check for stale autocomplete state due to buffer edits since last refresh.
-					const currentLine = this.#state.lines[this.#state.cursorLine] ?? "";
-					const currentTextBeforeCursor = currentLine.slice(0, this.#state.cursorCol);
-					// A narrowed `@` list can be empty while its refresh is pending; Enter
-					// then submits instead of waiting on the search.
-					if (
-						!selected ||
-						!this.#autocompletePrefixMatchesCursorText(currentTextBeforeCursor, selected) ||
-						this.#selectedSlashArgumentIsAlreadyTyped(selected) ||
-						!this.#enterAcceptsSelection
-					) {
-						// Stale, accepting would only append whitespace to an already fully
-						// typed slash-command argument (`/mcp list` + Enter), or the row is a
-						// description-only hit the user never selected: cancel and fall
-						// through to normal submission instead of swallowing the keypress.
-						this.#cancelAutocomplete();
-					} else {
-						if (selected && this.#autocompleteProvider) {
-							const shouldChainSlashCommandAutocomplete = this.#isSlashCommandNameAutocompleteSelection();
-							// Directory chaining exists so an @ mention can be browsed deeper
-							// without retyping the path. It must not apply to a slash
-							// command's directory argument: there the accepted value is the
-							// whole argument, so chaining reopens the popup on the directory's
-							// children, the command never submits, and every further Enter
-							// descends another level (#12107).
-							const shouldChainDirectoryCompletion =
-								this.#autocompletePrefix.startsWith("@") && isDirectoryCompletionValue(selected.value);
-							const result = this.#autocompleteProvider.applyCompletion(
-								this.#state.lines,
-								this.#state.cursorLine,
-								this.#state.cursorCol,
-								selected,
-								this.#autocompletePrefix,
-							);
-
-							this.#state.lines = result.lines;
-							this.#state.cursorLine = result.cursorLine;
-							this.#setCursorCol(result.cursorCol);
-
-							this.#cancelAutocomplete();
-							this.onAutocompleteUpdate?.();
-
-							this.#notifyChange();
-
-							result.onApplied?.();
-							if (shouldChainDirectoryCompletion) {
-								queueMicrotask(() => void this.#tryTriggerAutocomplete());
-							} else if (shouldChainSlashCommandAutocomplete && this.#isCompletedSlashCommandAtCursor()) {
-								void this.#tryTriggerAutocomplete();
-							}
-						}
-						return;
-					}
+				if (!selected) {
+					// An `@` popup whose narrowing filter matched nothing stays open with no
+					// candidate (see #refreshAutocomplete). Nothing to accept: cancel the
+					// popup and fall through so Tab keeps its normal completion role and a right
+					// arrow at end of line moves the cursor.
+					this.#cancelAutocomplete();
+					this.onAutocompleteUpdate?.();
+				} else {
+					this.#acceptAutocompleteSelection(selected);
 				}
+				// Only an accepted candidate consumes the key; an empty list falls through.
+				if (selected) return;
 			}
 			// For other keys (like regular typing), DON'T return here
 			// Let them fall through to normal character handling
@@ -2372,42 +2273,6 @@ export class Editor implements Component, Focusable {
 			// If submit is disabled, do nothing
 			if (this.disableSubmit) {
 				return;
-			}
-
-			// Synchronous slash command completion for the race condition where
-			// async autocomplete hasn't resolved yet (user types /q quickly + Enter).
-			// Match the existing selected-item behavior when autocomplete IS showing.
-			if (!this.#autocompleteState) {
-				const currentLine = this.#state.lines[this.#state.cursorLine] ?? "";
-				const textBeforeCursor = currentLine.slice(0, this.#state.cursorCol);
-				if (
-					findLeadingSlashCommandStart(textBeforeCursor) !== null &&
-					textBeforeCursor.trim() !== "/" &&
-					this.#isInSubmittedSlashCommandContext() &&
-					this.#autocompleteProvider?.trySyncSlashCompletion
-				) {
-					const syncResult = this.#autocompleteProvider.trySyncSlashCompletion(textBeforeCursor);
-					// The collapsed `/skill:` namespace row is not a runnable command; Enter submits
-					// immediately after applying, so only a real command may be completed here, and
-					// only one whose name matches: a description-only hit would run an unrelated command.
-					const selected = syncResult?.items.find(item => item.value !== SKILL_NAMESPACE);
-					if (syncResult && selected && !selected.descriptionMatch) {
-						// Invalidate any pending async autocomplete so its stale results are discarded
-						this.#autocompleteRequestId += 1;
-						// Apply the best match and submit the completed command
-						const result = this.#autocompleteProvider.applyCompletion(
-							this.#state.lines,
-							this.#state.cursorLine,
-							this.#state.cursorCol,
-							selected,
-							syncResult.prefix,
-						);
-						this.#state.lines = result.lines;
-						this.#state.cursorLine = result.cursorLine;
-						this.#setCursorCol(result.cursorCol);
-						result.onApplied?.();
-					}
-				}
 			}
 
 			this.#submitValue();
@@ -4955,33 +4820,6 @@ export class Editor implements Component, Focusable {
 		if (!selected) return false;
 		return selected.value.startsWith("/") || selected.value.startsWith('"');
 	}
-	/**
-	 * Whether the current popup selection is the collapsed `/skill:` namespace
-	 * row. Accepting it expands the namespace (insert `/skill:`, reopen the
-	 * popup) instead of submitting, since the bare namespace is not a command.
-	 */
-	#selectedCompletionIsSkillNamespace(): boolean {
-		return this.#autocompleteList?.getSelectedItem()?.value === SKILL_NAMESPACE;
-	}
-
-	/**
-	 * Whether the selected completion for a submitted slash command's argument
-	 * only restates what the user already typed (e.g. `list ` for `/mcp list`).
-	 * Accepting it would change nothing visible, so Enter should submit.
-	 *
-	 * A selection whose usage hint still names a required `<arg>` outside any
-	 * optional `[...]` group (e.g. `test` with `<name>`) keeps Enter's accept
-	 * role, so the user continues into the argument instead of submitting a
-	 * command the handler can only reject.
-	 */
-	#selectedSlashArgumentIsAlreadyTyped(selected: AutocompleteItem): boolean {
-		if (!this.#isInSubmittedSlashCommandContext()) return false;
-		const currentLine = this.#state.lines[this.#state.cursorLine] ?? "";
-		if (this.#state.cursorCol !== currentLine.length) return false;
-		if (selected.hint?.replace(/\[[^\]]*\]/g, "").includes("<")) return false;
-		const typed = this.#autocompletePrefix.trimEnd();
-		return typed.length > 0 && selected.value.trimEnd() === typed;
-	}
 
 	#isSlashCommandNameAutocompleteSelection(): boolean {
 		if (this.#autocompleteState !== "regular") {
@@ -4992,19 +4830,6 @@ export class Editor implements Component, Focusable {
 		const textBeforeCursor = currentLine.slice(0, this.#state.cursorCol).trimStart();
 		return (
 			this.#isInSubmittedSlashCommandContext() && textBeforeCursor.startsWith("/") && !textBeforeCursor.includes(" ")
-		);
-	}
-
-	#isCompletedSlashCommandAtCursor(): boolean {
-		const currentLine = this.#state.lines[this.#state.cursorLine] || "";
-		if (this.#state.cursorCol !== currentLine.length) {
-			return false;
-		}
-
-		const textBeforeCursor = currentLine.slice(0, this.#state.cursorCol).trimStart();
-		return (
-			this.#isInSubmittedSlashCommandContext() &&
-			(/^\/\S+ $/.test(textBeforeCursor) || textBeforeCursor === `/${SKILL_NAMESPACE}`)
 		);
 	}
 
@@ -5038,8 +4863,14 @@ export class Editor implements Component, Focusable {
 	/** Apply `selected` the way Tab does: complete it in place and chain into directories/commands. */
 	#acceptAutocompleteSelection(selected: SelectItem): void {
 		if (!this.#autocompleteProvider) return;
+		// Directory chaining exists so an `@` mention can be browsed deeper without retyping
+		// the path. It must not apply to a slash command's directory argument: there the
+		// accepted value is the whole argument, so chaining reopens the popup on the
+		// directory's children, the command never gets sent, and every further accept
+		// descends another level (#12107).
 		const shouldChainAutocomplete =
-			this.#isSlashCommandNameAutocompleteSelection() || isDirectoryCompletionValue(selected.value);
+			this.#isSlashCommandNameAutocompleteSelection() ||
+			(this.#autocompletePrefix.startsWith("@") && isDirectoryCompletionValue(selected.value));
 		const result = this.#autocompleteProvider.applyCompletion(
 			this.#state.lines,
 			this.#state.cursorLine,
@@ -5083,7 +4914,29 @@ export class Editor implements Component, Focusable {
 		return list;
 	}
 
+	/**
+	 * Expand the path glob ending at the cursor in place. Returns false when the token
+	 * is not a glob, names nothing, or changes no text, so Tab keeps its completion role.
+	 */
+	#expandPathGlobAtCursor(): boolean {
+		const baseDir = this.pathGlobBaseDir?.();
+		if (!baseDir) return false;
+		const line = this.#state.lines[this.#state.cursorLine] ?? "";
+		const expansion = expandPathGlobAt(line, this.#state.cursorCol, baseDir);
+		if (!expansion) return false;
+		this.#recordUndoState();
+		this.#state.lines[this.#state.cursorLine] =
+			line.slice(0, expansion.start) + expansion.replacement + line.slice(this.#state.cursorCol);
+		this.#setCursorCol(expansion.start + expansion.replacement.length);
+		this.#lastAction = null;
+		this.#notifyChange();
+		return true;
+	}
+
 	async #handleTabCompletion(): Promise<void> {
+		// A path glob is expanded in place before Tab completes anything: the expansion is
+		// what the typed pattern names, not one candidate of many.
+		if (this.#expandPathGlobAtCursor()) return;
 		if (this.#acceptPrediction()) return;
 		if (this.#acceptWordCompletion({ space: true })) return;
 		if (!this.#autocompleteProvider) return;
@@ -5331,7 +5184,6 @@ export class Editor implements Component, Focusable {
 	): void {
 		this.#autocompletePrefix = suggestions.prefix;
 		this.#autocompleteList = this.#createAutocompleteList(suggestions.prefix, suggestions.items);
-		this.#enterAcceptsSelection = !suggestions.items[0]?.descriptionMatch;
 		this.#autocompleteState = state;
 		this.onAutocompleteUpdate?.();
 	}
