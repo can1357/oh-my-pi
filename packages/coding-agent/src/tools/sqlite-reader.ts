@@ -688,9 +688,18 @@ function loadRowEstimates(db: Database): Map<string, number> {
  * while reading at most `cap + 1` rows. Returns an exact count when the result
  * set holds `cap` rows or fewer, otherwise a lower bound of `cap`. Bounds the
  * worst-case scan so a stale or missing estimate (or a paged read) can never
- * trigger a full-table scan on the JS thread.
+ * trigger a full-table scan on the JS thread. A filtered probe additionally
+ * requires the table itself to fit under `cap`: its `LIMIT` caps *matched*
+ * rows, not *visited* rows, so on a larger table a selective unindexed filter
+ * would still visit every row. When that gate skips the probe it reports
+ * `atLeast 0`; `queryRows` combines that with the page's lookahead fact.
  */
 function probeRowCount(db: Database, table: string, cap: number, whereClause = ""): TableRowCount {
+	if (whereClause) {
+		const estimate = loadRowEstimates(db).get(table);
+		if (estimate !== undefined && estimate > cap) return { kind: "atLeast", rows: 0 };
+		if (probeRowCount(db, table, cap).kind !== "exact") return { kind: "atLeast", rows: 0 };
+	}
 	const sql = `SELECT COUNT(*) AS count FROM (SELECT 1 FROM ${quoteSqliteIdentifier(table)}${whereClause} LIMIT ${cap + 1})`;
 	const counted = db.query<SqliteCountRow, []>(sql).get()?.count ?? 0;
 	return counted > cap ? { kind: "atLeast", rows: cap } : { kind: "exact", rows: counted };

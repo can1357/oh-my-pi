@@ -850,3 +850,70 @@ describe("SQLite read of a large table (#17535)", () => {
 		expect(text).toContain("[49995+ more rows; append :events?limit=20&offset=5 to the database path to continue]");
 	});
 });
+
+describe("SQLite filtered count probe bounds (#17535)", () => {
+	// A filtered probe's LIMIT caps *matched* rows, not *visited* rows: with a
+	// selective unindexed filter on a table larger than the cap, SQLite must
+	// visit every table row to prove the count — the same synchronous
+	// full-table scan the bounded probe exists to prevent. The probe must be
+	// skipped unless the table itself provably fits under the cap.
+	it("skips the filtered probe when the table exceeds the cap", () => {
+		const db = new Database(":memory:");
+		try {
+			db.run("CREATE TABLE wide (id INTEGER PRIMARY KEY, flag INTEGER NOT NULL)");
+			db.run(
+				"WITH RECURSIVE seq(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM seq WHERE i < 2000) INSERT INTO wide SELECT i, CASE WHEN i <= 40 THEN 1 ELSE 0 END FROM seq",
+			);
+			const page = queryRows(db, "wide", { limit: 5, offset: 0, probeCap: 50, where: "flag = 1" });
+			// An exact 40 would prove the probe ran (and visited all 2000 rows
+			// to find only 40 matches); the lookahead row is the honest bound.
+			expect(page.totalCount).toEqual({ kind: "atLeast", rows: 6 });
+		} finally {
+			db.close();
+		}
+	});
+
+	it("keeps the exact filtered count when the table fits under the cap", () => {
+		const db = new Database(":memory:");
+		try {
+			db.run("CREATE TABLE small (id INTEGER PRIMARY KEY, flag INTEGER NOT NULL)");
+			db.run(
+				"WITH RECURSIVE seq(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM seq WHERE i < 100) INSERT INTO small SELECT i, CASE WHEN i <= 40 THEN 1 ELSE 0 END FROM seq",
+			);
+			const page = queryRows(db, "small", { limit: 5, offset: 0, probeCap: 200, where: "flag = 1" });
+			expect(page.totalCount).toEqual({ kind: "exact", rows: 40 });
+		} finally {
+			db.close();
+		}
+	});
+
+	it("trusts a planner estimate above the cap to skip the filtered probe", () => {
+		const db = new Database(":memory:");
+		try {
+			db.run("CREATE TABLE analyzed (id INTEGER PRIMARY KEY, flag INTEGER NOT NULL)");
+			db.run(
+				"WITH RECURSIVE seq(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM seq WHERE i < 2000) INSERT INTO analyzed SELECT i, CASE WHEN i <= 40 THEN 1 ELSE 0 END FROM seq",
+			);
+			db.run("ANALYZE");
+			const page = queryRows(db, "analyzed", { limit: 5, offset: 0, probeCap: 50, where: "flag = 1" });
+			expect(page.totalCount).toEqual({ kind: "atLeast", rows: 6 });
+		} finally {
+			db.close();
+		}
+	});
+
+	it("reports no count for a past-the-end filtered page on a table above the cap", () => {
+		const db = new Database(":memory:");
+		try {
+			db.run("CREATE TABLE past_end (id INTEGER PRIMARY KEY, flag INTEGER NOT NULL)");
+			db.run(
+				"WITH RECURSIVE seq(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM seq WHERE i < 2000) INSERT INTO past_end SELECT i, CASE WHEN i <= 40 THEN 1 ELSE 0 END FROM seq",
+			);
+			const page = queryRows(db, "past_end", { limit: 5, offset: 100, probeCap: 50, where: "flag = 1" });
+			expect(page.rows.length).toBe(0);
+			expect(page.totalCount).toEqual({ kind: "atLeast", rows: 0 });
+		} finally {
+			db.close();
+		}
+	});
+});
