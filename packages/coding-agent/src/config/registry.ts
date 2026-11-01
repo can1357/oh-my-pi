@@ -668,10 +668,15 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 
 	/**
 	 * Registry plumbing: logs that `raw` (found in the config file `source`, when known) is a value this
-	 * setting rejects, naming the setting, the value and what was expected. Callers decide how often.
+	 * setting rejects, naming the setting, the value and what was expected. A credential's value never
+	 * reaches the log, however malformed: the warning says `redacted` instead. Callers decide how often.
 	 */
 	warnRejected(raw: unknown, source: string | undefined): void {
-		const context = { setting: this.id, value: raw, expected: this.expected };
+		const context = {
+			setting: this.id,
+			...(this.isCredential ? { redacted: true } : { value: raw }),
+			expected: this.expected,
+		};
 		logger.warn("Settings: ignoring invalid value", source === undefined ? context : { ...context, source });
 	}
 

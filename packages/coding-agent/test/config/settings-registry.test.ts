@@ -104,12 +104,36 @@ describe("settings registry", () => {
 				expected: "a string",
 				source,
 			});
+			// `searxng.basicPassword` is a credential: the warning names it but never logs the value.
 			expect(warn).toHaveBeenCalledWith("Settings: ignoring invalid value", {
 				setting: "searxng.basicPassword",
-				value: 42,
+				redacted: true,
 				expected: "a string",
 				source,
 			});
+		} finally {
+			warn.mockRestore();
+			dir.removeSync();
+		}
+	});
+
+	it("never logs a credential's value when a project file's malformed credential is dropped", async () => {
+		const dir = TempDir.createSync("@pi-settings-rejected-credential-");
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const secret = "settings-registry-credential-leak-9f2c";
+		try {
+			// A list where a record is expected, under a valid `--config` record that hides it from every read.
+			await loadHandEditedSettings(dir, {
+				project: { images: { urls: { credentials: [{ token: secret }] } } },
+				overlays: [{ images: { urls: { credentials: {} } } }],
+			});
+			expect(warn).toHaveBeenCalledWith("Settings: ignoring invalid value", {
+				setting: "images.urls.credentials",
+				redacted: true,
+				expected: "a record",
+				source: expect.stringMatching(/\.omp[\\/]config\.yml$/),
+			});
+			expect(Bun.inspect(warn.mock.calls)).not.toContain(secret);
 		} finally {
 			warn.mockRestore();
 			dir.removeSync();
