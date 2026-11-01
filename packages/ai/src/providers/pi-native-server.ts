@@ -34,6 +34,7 @@ import type { AuthGatewayStreamControl } from "../auth-gateway/types";
 import * as AIError from "../error";
 import type { AssistantMessageEventStream, Context, SimpleStreamOptions } from "../types";
 import { getHeadersFromError, getRetryAfterMsFromHeaders } from "../utils/retry-after";
+import { retryWaitRefusal } from "../utils/retry-wait";
 
 export interface PiNativeParsedRequest {
 	modelId: string;
@@ -248,15 +249,16 @@ export function encodeStream(
 					// instead of hanging on the dropped connection. Shape matches the
 					// canonical `error` event minus the `error: AssistantMessage`
 					// payload (we don't have a usable one here); `streamPiNative`
-					// rebuilds that payload from its own model. The thrown error's
 					// own response headers supply the wait the rebuilt message
-					// carries as `errorRetryAfterMs`; its text never does.
-					// `JSON.stringify` drops the field when there is no wait.
+					// carries as `errorRetryAfterMs`; a refused transport wait keeps
+					// its separate structured decision. Neither is inferred from text.
+					// `JSON.stringify` drops either field when there is no value.
 					const frame = {
 						type: "error",
 						reason: "error",
 						errorMessage: err instanceof Error ? err.message : String(err),
 						errorRetryAfterMs: getRetryAfterMsFromHeaders(getHeadersFromError(err)),
+						errorRetryWaitRefusal: retryWaitRefusal(err),
 					};
 					controller.enqueue(SSE_ENCODER.encode(`data: ${JSON.stringify(frame)}\n\n`));
 					controller.enqueue(SSE_DONE);

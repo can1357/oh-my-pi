@@ -91,6 +91,22 @@ export function retryWaitRefusal(failure: unknown): RefusedRetryWait | undefined
 	return failure !== null && typeof failure === "object" ? refusedRetryWaits.get(failure) : undefined;
 }
 
+/** Whether untrusted relay data is a complete, internally consistent refused retry wait. */
+export function isRefusedRetryWait(value: unknown): value is RefusedRetryWait {
+	if (value === null || typeof value !== "object") return false;
+	const record = value as { waitMs?: unknown; limitMs?: unknown; option?: unknown };
+	return (
+		typeof record.waitMs === "number" &&
+		Number.isFinite(record.waitMs) &&
+		record.waitMs >= 0 &&
+		typeof record.limitMs === "number" &&
+		Number.isFinite(record.limitMs) &&
+		record.limitMs > 0 &&
+		record.waitMs > record.limitMs &&
+		(record.option === "maxRetryDelayMs" || record.option === "providerRetryWaitCeilingMs")
+	);
+}
+
 const REFUSAL_NOTE_END = "so the provider did not retry)";
 
 /**

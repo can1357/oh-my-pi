@@ -82,11 +82,18 @@ function sse(frames: readonly unknown[]): Response {
 	});
 }
 
-/** The proxy server's terminal frame for an upstream failure, its wait given as `errorRetryAfterMs`. */
-function failedTurn(errorRetryAfterMs: unknown): Response {
+/** The proxy server's terminal frame for an upstream failure and its structured retry outcome fields. */
+function failedTurn(errorRetryAfterMs: unknown, errorRetryWaitRefusal?: unknown): Response {
 	return sse([
 		{ type: "start" },
-		{ type: "error", reason: "error", errorMessage: BODY_TEXT, errorRetryAfterMs, usage },
+		{
+			type: "error",
+			reason: "error",
+			errorMessage: BODY_TEXT,
+			errorRetryAfterMs,
+			errorRetryWaitRefusal,
+			usage,
+		},
 	]);
 }
 
@@ -114,6 +121,21 @@ describe("streamProxy — the failed attempt's header retry wait", () => {
 		expect(message.errorMessage).toBe(BODY_TEXT);
 		expect(message.errorRetryAfterMs).toBe(9000);
 		expect(providerRetryWaitMs("anthropic", message.errorMessage, message.errorRetryAfterMs)).toBe(9000);
+	});
+
+	it("carries a complete refused retry wait and drops malformed relay data", async () => {
+		const refusal = {
+			waitMs: 15_000,
+			limitMs: 10_000,
+			option: "providerRetryWaitCeilingMs",
+		} as const;
+		const valid = await runProxy(startProxy(() => failedTurn(undefined, refusal)));
+		const malformed = await runProxy(
+			startProxy(() => failedTurn(undefined, { ...refusal, waitMs: refusal.limitMs })),
+		);
+
+		expect(valid.errorRetryWaitRefusal).toEqual(refusal);
+		expect(malformed.errorRetryWaitRefusal).toBeUndefined();
 	});
 
 	it("lets a one-shot retry capped below the proxied wait refuse to retry", async () => {

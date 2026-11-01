@@ -11,7 +11,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { clearGitLabDuoDirectAccessCache, getGitLabDuoModels } from "@oh-my-pi/pi-ai/providers/gitlab-duo";
 import * as kimiOauth from "@oh-my-pi/pi-ai/registry/oauth/kimi";
-import { streamSimple } from "@oh-my-pi/pi-ai/stream";
+import { stream, streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Api, Context, FetchImpl, Model, ModelSpec, SimpleStreamOptions } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { anthropicChunks, captureFetch, completionsChunks, responsesChunks } from "./helpers/factory-droid";
@@ -176,6 +176,50 @@ async function runTurn(route: Route, retryAfter: string, bounds: SimpleStreamOpt
 	}).result();
 	return { requests: () => requests, providerRetryWait, message };
 }
+/**
+ * A transport may reject an over-bound `google.rpc.RetryInfo` delay before the
+ * provider finalizes its error. The public stream must retain that refusal, not
+ * rebuild a new 500 ms replay from the formatted message.
+ */
+async function runStructuredRetryInfoTurn(route: Route) {
+	let requests = 0;
+	const providerRetryWait = vi.fn(async (_delayMs: number, _signal?: AbortSignal) => {});
+	const fetch: FetchImpl = async (input, init) => {
+		const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+		if (url.includes("/direct_access")) {
+			return new Response(JSON.stringify({ token: "direct-access-token", headers: {} }), {
+				headers: { "content-type": "application/json" },
+			});
+		}
+		requests++;
+		return requests === 1
+			? new Response(
+					JSON.stringify({
+						error: {
+							type: "server_error",
+							message: "busy",
+							details: [
+								{
+									"@type": "type.googleapis.com/google.rpc.RetryInfo",
+									retryDelay: "15s",
+								},
+							],
+						},
+					}),
+					{ status: 503, headers: { "content-type": "application/json" } },
+				)
+			: route.success(input, init);
+	};
+	const message = await stream(route.model, context, {
+		...route.options,
+		apiKey: route.apiKey,
+		fetch,
+		maxRetryDelayMs: 5 * 60_000,
+		providerRetryWaitCeilingMs: 10_000,
+		providerRetryWait,
+	}).result();
+	return { requests: () => requests, providerRetryWait, message };
+}
 
 beforeEach(() => {
 	vi.spyOn(kimiOauth, "getKimiCommonHeaders").mockReturnValue(
@@ -205,6 +249,20 @@ describe("a provider behind a wrapper sleeps under the caller's retry policy", (
 			expect(providerRetryWait).toHaveBeenCalledTimes(1);
 			expect(providerRetryWait.mock.calls[0]?.[0]).toBeGreaterThanOrEqual(50);
 			expect(message.stopReason).toBe("stop");
+		});
+	}
+	for (const route of ROUTES) {
+		it(`${route.name}: a refused structured RetryInfo wait does not fall back to an outer replay`, async () => {
+			const { requests, providerRetryWait, message } = await runStructuredRetryInfoTurn(route);
+
+			expect(requests()).toBe(1);
+			expect(providerRetryWait).not.toHaveBeenCalled();
+			expect(message.stopReason).toBe("error");
+			expect(message.errorRetryWaitRefusal).toEqual({
+				waitMs: 15_000,
+				limitMs: 10_000,
+				option: "providerRetryWaitCeilingMs",
+			});
 		});
 	}
 

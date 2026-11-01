@@ -56,7 +56,7 @@ import type { OpenAICompletionsOptions } from "./providers/openai-completions";
 import type { OpenAIResponsesOptions } from "./providers/openai-responses";
 import type { kStreamingPartialJson } from "./utils/block-symbols";
 import type { AssistantMessageEventStream } from "./utils/event-stream";
-
+import type { RefusedRetryWait } from "./utils/retry-wait";
 export type { StopDetails } from "./providers/anthropic-wire";
 export type { AssistantMessageEventStream } from "./utils/event-stream";
 
@@ -1386,6 +1386,13 @@ export interface AssistantMessage {
 	 * the reader; no consumer trusts the text for it.
 	 */
 	errorRetryAfterMs?: number;
+	/**
+	 * A lower retry layer rejected the server-stated wait under the recorded
+	 * bound. Outer retry layers must surface this failure instead of rebuilding
+	 * a backoff from `errorMessage`; this structured value is never inferred
+	 * from the message text.
+	 */
+	errorRetryWaitRefusal?: RefusedRetryWait;
 	/**
 	 * Request attempts a layer below the caller made beyond the first, before
 	 * this message was produced; `0` when the request went out exactly once.

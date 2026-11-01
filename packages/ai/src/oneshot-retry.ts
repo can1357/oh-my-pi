@@ -185,6 +185,11 @@ export async function retryTransientCompletion(
 			if (thrown !== undefined) throw thrown;
 			return message as AssistantMessage;
 		}
+
+		// A provider below this layer already rejected the server's stated wait.
+		// Its structured refusal is authoritative: retrying here would replace it
+		// with this loop's local backoff.
+		if (message && message.errorRetryWaitRefusal !== undefined) return message;
 		const errorMessage =
 			thrown !== undefined
 				? thrown instanceof Error

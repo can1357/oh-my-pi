@@ -2187,6 +2187,7 @@ async function handleCodexStreamFailure(context: CodexStreamFailureContext, erro
 	output.errorId = result.id;
 	output.errorMessage = result.message;
 	output.errorRetryAfterMs = result.retryAfterMs;
+	output.errorRetryWaitRefusal = result.retryWaitRefusal;
 	if (result.classificationMessage !== undefined) output.errorClassificationMessage = result.classificationMessage;
 	// A number, 0 included, whenever every attempt went through a transport
 	// this module owns: recovery above reads the absence of this field as "no

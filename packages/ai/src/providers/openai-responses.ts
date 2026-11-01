@@ -1344,6 +1344,7 @@ const streamOpenAIResponsesOnce = (
 			output.errorId = result.id;
 			output.errorMessage = result.message;
 			output.errorRetryAfterMs = result.retryAfterMs;
+			output.errorRetryWaitRefusal = result.retryWaitRefusal;
 			if (result.classificationMessage !== undefined)
 				output.errorClassificationMessage = result.classificationMessage;
 			if (AIError.isRequestBodyReadTimeout(result.status, result.message) && lastSubmittedRequestWasFullReplay) {

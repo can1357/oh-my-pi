@@ -553,6 +553,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			output.errorId = result.id;
 			output.errorMessage = result.message;
 			output.errorRetryAfterMs = result.retryAfterMs;
+			output.errorRetryWaitRefusal = result.retryWaitRefusal;
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: result.stopReason, error: output });

@@ -2392,6 +2392,7 @@ function streamCursorWithWireMode(
 				}
 			}
 			output.errorRetryAfterMs = result.retryAfterMs;
+			output.errorRetryWaitRefusal = result.retryWaitRefusal;
 			// Every request this turn sent beyond the first — a checkpoint resume, a
 			// drop to HTTP/1, a replay on the discovered wire model. Cursor resumes
 			// from a fresh checkpoint even after visible progress, so the content

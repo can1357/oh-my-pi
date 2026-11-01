@@ -1193,6 +1193,7 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 			output.errorId = result.id;
 			output.errorMessage = result.message;
 			output.errorRetryAfterMs = result.retryAfterMs;
+			output.errorRetryWaitRefusal = result.retryWaitRefusal;
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: output.stopReason, error: output });

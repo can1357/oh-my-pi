@@ -183,3 +183,77 @@ describe("bedrock in-stream failure classification", () => {
 		expect(failed.errorId === undefined || !retriable(failed.errorId)).toBe(true);
 	}, 10_000);
 });
+
+interface TransportRetryResult {
+	requests: number;
+	waits: number[];
+	result: AssistantMessage;
+}
+
+async function runBedrockTransportRetry(
+	firstResponse: () => Response,
+	bounds: { maxRetryDelayMs: number; providerRetryWaitCeilingMs?: number },
+): Promise<TransportRetryResult> {
+	let requests = 0;
+	const waits: number[] = [];
+	const fetch = vi.fn(async () => {
+		requests += 1;
+		return requests === 1 ? firstResponse() : new Response('{"error":{"message":"terminal"}}', { status: 400 });
+	});
+	const result = await streamBedrock(model(), context, {
+		bearerToken: "fixture-bedrock-token",
+		...bounds,
+		providerRetryWait: async delayMs => void waits.push(delayMs),
+		fetch,
+	}).result();
+	return { requests, waits, result };
+}
+
+describe("Bedrock transport retry policy", () => {
+	it.each([
+		[
+			"uses the public retry hook for a short Retry-After",
+			() => new Response('{"error":{"message":"busy"}}', { status: 503, headers: { "retry-after": "0.05" } }),
+			{ maxRetryDelayMs: 5 * 60_000 },
+			{ requests: 2, waits: [50] },
+		],
+		[
+			"refuses a Retry-After over maxRetryDelayMs",
+			() => new Response('{"error":{"message":"busy"}}', { status: 503, headers: { "retry-after": "2" } }),
+			{ maxRetryDelayMs: 1_000 },
+			{ requests: 1, waits: [] },
+		],
+		[
+			"refuses a Retry-After over providerRetryWaitCeilingMs",
+			() => new Response('{"error":{"message":"busy"}}', { status: 503, headers: { "retry-after": "2" } }),
+			{ maxRetryDelayMs: 5 * 60_000, providerRetryWaitCeilingMs: 1_000 },
+			{ requests: 1, waits: [] },
+		],
+		[
+			"refuses a body-only retry wait",
+			() =>
+				new Response('{"error":{"message":"Please retry in 15s"}}', {
+					status: 503,
+					headers: { "content-type": "application/json" },
+				}),
+			{ maxRetryDelayMs: 5 * 60_000, providerRetryWaitCeilingMs: 10_000 },
+			{ requests: 1, waits: [] },
+		],
+		[
+			"refuses x-ratelimit-reset-after over providerRetryWaitCeilingMs",
+			() =>
+				new Response('{"error":{"message":"busy"}}', {
+					status: 503,
+					headers: { "x-ratelimit-reset-after": "90" },
+				}),
+			{ maxRetryDelayMs: 5 * 60_000, providerRetryWaitCeilingMs: 10_000 },
+			{ requests: 1, waits: [] },
+		],
+	] as const)("%s", async (_label, firstResponse, bounds, expected) => {
+		const { requests, waits, result } = await runBedrockTransportRetry(firstResponse, bounds);
+
+		expect(requests).toBe(expected.requests);
+		expect(waits).toEqual([...expected.waits]);
+		expect(result.stopReason).toBe("error");
+	});
+});

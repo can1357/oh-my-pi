@@ -1896,6 +1896,7 @@ const streamOpenAICompletionsOnce = (
 			output.errorId = result.id;
 			output.errorMessage = result.message;
 			output.errorRetryAfterMs = result.retryAfterMs;
+			output.errorRetryWaitRefusal = result.retryWaitRefusal;
 			if (result.classificationMessage !== undefined)
 				output.errorClassificationMessage = result.classificationMessage;
 			// Some providers via OpenRouter include extra details here.

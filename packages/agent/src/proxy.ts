@@ -21,6 +21,7 @@ import {
 	setStreamingPartialJson,
 } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { getFailureRetryAfterMs, isRetryWaitMs } from "@oh-my-pi/pi-ai/utils/retry-after";
+import { isRefusedRetryWait } from "@oh-my-pi/pi-ai/utils/retry-wait";
 import { parseToolCallArguments } from "@oh-my-pi/pi-ai/utils/tool-call-arguments";
 import { parseStreamingJsonThrottled, readSseJson } from "@oh-my-pi/pi-utils";
 
@@ -88,6 +89,7 @@ const TERMINAL_FIELD_CHECKS: Record<string, (value: unknown) => boolean> = {
 	providerReplays: value => Number.isSafeInteger(value) && (value as number) >= 0,
 	errorRetryAfterMs: isRetryWaitMs,
 	errorMessage: value => typeof value === "string",
+	errorRetryWaitRefusal: isRefusedRetryWait,
 };
 
 /**

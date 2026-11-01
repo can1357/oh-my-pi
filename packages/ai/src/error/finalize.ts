@@ -5,7 +5,7 @@ import type { CapturedHttpErrorResponse, RawHttpRequestDump } from "../utils/htt
 import { classify, classifyMessage, status } from "./flags";
 import { formatMessage } from "./format";
 import { getFailureRetryAfterMs, type HeadersLike } from "../utils/retry-after";
-import { refusedRetryWaitNote, retryWaitRefusal } from "../utils/retry-wait";
+import { refusedRetryWaitNote, retryWaitRefusal, type RefusedRetryWait } from "../utils/retry-wait";
 
 /** Context a provider catch block hands to {@link finalize}. */
 export interface FinalizeOptions {
@@ -66,6 +66,8 @@ export interface FinalizeResult {
 	 * the failure is classified. `id` was classified from it.
 	 */
 	classificationMessage?: string;
+	/** Structured refusal for outer retry layers; unlike {@link refusalNote}, it is machine-readable. */
+	retryWaitRefusal?: RefusedRetryWait;
 }
 
 /**
@@ -123,6 +125,6 @@ export async function finalize(error: unknown, opts: FinalizeOptions = {}): Prom
 			errorResponseHeaders: opts.capturedErrorResponse?.headers,
 			streamResponseHeaders: opts.streamResponseHeaders,
 		}),
-		...(refusalNote === undefined ? {} : { refusalNote, classificationMessage: message }),
+		...(refused === undefined ? {} : { refusalNote, classificationMessage: message, retryWaitRefusal: refused }),
 	};
 }

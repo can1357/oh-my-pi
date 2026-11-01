@@ -198,6 +198,7 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 				!committed &&
 				failedMessage?.stopReason === "error" &&
 				failedMessage.errorMessage !== undefined &&
+				failedMessage.errorRetryWaitRefusal === undefined &&
 				providerErrorRetries < (policy.maxProviderErrorRetries ?? 0) &&
 				AIError.isProviderRetryableError(
 					new FinalizedProviderStreamError(
@@ -271,13 +272,14 @@ function withRefusalNote(event: AssistantMessageEvent): AssistantMessageEvent {
 	const refused = retryWaitRefusal(event.error);
 	const message = event.error.errorMessage;
 	if (refused === undefined || message === undefined) return event;
-	if (hasRefusedRetryWaitNote(message)) return event;
-	const note = refusedRetryWaitNote(refused);
+	const noted = hasRefusedRetryWaitNote(message);
+	const note = noted ? message : `${message} ${refusedRetryWaitNote(refused)}`;
 	return {
 		...event,
 		error: {
 			...event.error,
-			errorMessage: `${message} ${note}`,
+			errorRetryWaitRefusal: refused,
+			errorMessage: note,
 			errorClassificationMessage: event.error.errorClassificationMessage ?? message,
 		},
 	};
