@@ -120,6 +120,49 @@ async function runChild(script: string, env: Record<string, string>): Promise<Ru
 	return { exit: settled ? exitCode : "hung", stdout, stderr };
 }
 
+/** {@link runChild}, started now: `saw` waits for a text on its standard error while it runs, `finish` for its end. */
+function startChild(script: string): {
+	child: Bun.Subprocess;
+	saw(text: string): Promise<boolean>;
+	finish(): Promise<Run>;
+} {
+	const child = Bun.spawn([process.execPath, "--no-env-file", "-e", `${script}\nprocess.exit(0);`], {
+		cwd: projectDir,
+		stdout: "pipe",
+		stderr: "pipe",
+		env: childEnv({}),
+	});
+	let stderr = "";
+	const drained = (async () => {
+		const decoder = new TextDecoder();
+		for await (const chunk of child.stderr as ReadableStream<Uint8Array>) {
+			stderr += decoder.decode(chunk, { stream: true });
+		}
+	})();
+	return {
+		child,
+		async saw(text) {
+			// A real timer: the child is another process, and no fake clock reaches it.
+			for (const started = Date.now(); Date.now() - started < CHILD_DEADLINE_MS; await Bun.sleep(20)) {
+				if (stderr.includes(text)) return true;
+				if (child.exitCode !== null || child.signalCode !== null) break;
+			}
+			return stderr.includes(text);
+		},
+		async finish() {
+			const settled = await Promise.race([
+				child.exited.then(() => true),
+				Bun.sleep(CHILD_DEADLINE_MS).then(() => false),
+			]);
+			if (!settled) child.kill("SIGKILL");
+			const exitCode = await child.exited;
+			await drained;
+			const stdout = await new Response(child.stdout as ReadableStream<Uint8Array>).text();
+			return { exit: settled ? exitCode : "hung", stdout, stderr };
+		},
+	};
+}
+
 function timesNamed(text: string, file: string): number {
 	return text.split(`omp did not read ${file}: it is a FIFO`).length - 1;
 }
@@ -400,9 +443,11 @@ describe.skipIf(process.platform === "win32")("a FIFO at a startup path is neith
 
 // A `.env` is the one file a tool serves through a named pipe on purpose:
 // 1Password mounts `.env` files that way, and writes the file when a reader
-// opens it. So at startup a pipe at a `.env` path is read, but only to its end
-// within a bound, and never in part; with nothing writing it, the command goes
-// on without it after the bound and says that its variables are unset. The
+// opens it. So at startup a pipe at a `.env` path is read until its writer
+// closes it, within a bound; with nothing writing it, the command goes on
+// without it after the bound and says that its variables are unset. A writer
+// that dies part way through also closes the pipe, and what it wrote by then is
+// parsed as the whole file: nothing a reader sees tells the two apart. The
 // children here have no terminal, so the bound is ENV_PIPE_DEADLINE_MS.
 const ENV_PATHS = {
 	"~/.env": () => path.join(home, ".env"),
@@ -429,7 +474,7 @@ function saysNothingAboutFiles(stderr: string): boolean {
 	return !stderr.includes("omp is waiting") && !stderr.includes("omp did not");
 }
 
-describe.skipIf(process.platform === "win32")("a named pipe at a .env path is read to its end, within a bound", () => {
+describe.skipIf(process.platform === "win32")("a .env pipe is read until its writer closes it, within a bound", () => {
 	for (const [name, at] of Object.entries(ENV_PATHS)) {
 		it(
 			`${name}, answered by a writer, sets its variables`,
@@ -473,7 +518,7 @@ describe.skipIf(process.platform === "win32")("a named pipe at a .env path is re
 	}
 
 	it(
-		"a writer that stops before the end of the file sets none of its variables",
+		"a writer that has not closed the pipe by the bound sets none of its variables",
 		async () => {
 			const at = path.join(home, ".env");
 			// The first line is whole; the writer holds the pipe open and never finishes the second.
@@ -586,6 +631,105 @@ describe.skipIf(process.platform === "win32")("a named pipe at a .env path is re
 			expect(ended).toBe(true);
 			expect(afterPress).toBeLessThan(10_000);
 			expect(seen).not.toContain(`${VARIABLE}=`);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"a writer that closes the pipe only after the bound sets none of its variables",
+		async () => {
+			const at = path.join(home, ".env");
+			mkfifo(at);
+			// The whole file at once, the pipe held open by this test.
+			const fd = fs.openSync(at, fs.constants.O_RDWR | fs.constants.O_NONBLOCK);
+			fs.writeSync(fd, `${VARIABLE}=loaded\n`);
+			let closed = false;
+			const started = startChild(loadEnvAndPrint());
+			try {
+				const waiting = await started.saw(`${at}: it is a named pipe, and what is writing it has not finished`);
+				// Stopped inside the bound, the child reads again only after this test has
+				// closed the pipe, past the bound: its next read finds the end of the file late.
+				// A real timer, because the bound is the child's real clock.
+				started.child.kill("SIGSTOP");
+				await Bun.sleep(envBounds.ENV_PIPE_DEADLINE_MS + 1_000);
+				fs.closeSync(fd);
+				closed = true;
+				started.child.kill("SIGCONT");
+				const run = await started.finish();
+
+				expect(waiting).toBe(true);
+				expect(run.exit).toBe(0);
+				expect(run.stdout).toContain(`${VARIABLE}=unset`);
+				expect(run.stderr).toContain(
+					`omp did not load ${at}: it is a named pipe, and what was writing it did not finish within ${BOUND}`,
+				);
+			} finally {
+				if (!closed) fs.closeSync(fd);
+				started.child.kill("SIGKILL");
+			}
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"a stop listener added with process.once still runs once after the wait, and the note says Ctrl-C waits",
+		async () => {
+			const at = path.join(home, ".env");
+			mkfifo(at);
+			// Opens the pipe at once and answers a second later, after omp has said it is waiting.
+			const writer = Bun.spawn(
+				["sh", "-c", 'exec 3>"$0"; sleep 1; printf %s "$1" >&3', at, `${VARIABLE}=loaded\n`],
+				{ stdout: "ignore", stderr: "ignore" },
+			);
+			// Added before omp's environment loads, as an embedding program's own listener is.
+			const listener = path.join(tempDir.path(), "once-listener.ts");
+			fs.writeFileSync(listener, 'export let calls = 0;\nprocess.once("SIGTERM", () => {\n\tcalls++;\n});\n');
+			try {
+				const run = await runChild(
+					`import * as once from ${JSON.stringify(listener)};
+				import ${mod("utils", "env.ts")};
+				process.emit("SIGTERM");
+				process.emit("SIGTERM");
+				console.log("calls=" + once.calls + " listeners=" + process.listenerCount("SIGTERM"));
+				console.log("${VARIABLE}=" + (process.env.${VARIABLE} ?? "unset"));`,
+					{},
+				);
+
+				expect(run.exit).toBe(0);
+				expect(run.stdout).toContain("calls=1 listeners=0");
+				expect(run.stdout).toContain(`${VARIABLE}=loaded`);
+				expect(run.stderr).toContain("Ctrl-C takes effect when the wait ends.");
+			} finally {
+				writer.kill();
+			}
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"a stop signal ends the wait at once when every stop listener was added through onStopSignal",
+		async () => {
+			mkfifo(path.join(home, ".env"));
+			// Added before omp's environment loads, as omp's own crash handler is.
+			const listener = path.join(tempDir.path(), "stop-listener.ts");
+			fs.writeFileSync(
+				listener,
+				`import { onStopSignal } from ${mod("utils", "regular-file.ts")};\n` +
+					'onStopSignal("SIGTERM", () => {\n\tconsole.log("LISTENER RAN");\n});\n',
+			);
+			const started = startChild(`import ${JSON.stringify(listener)};\n${loadEnvAndPrint()}`);
+			try {
+				const waiting = await started.saw("Ctrl-C stops omp.");
+				started.child.kill("SIGTERM");
+				const run = await started.finish();
+
+				expect(waiting).toBe(true);
+				expect(started.child.signalCode).toBe("SIGTERM");
+				expect(run.stdout).not.toContain("LISTENER RAN");
+				expect(run.stdout).not.toContain(`${VARIABLE}=`);
+			} finally {
+				started.child.kill("SIGKILL");
+			}
 		},
 		TEST_TIMEOUT_MS,
 	);

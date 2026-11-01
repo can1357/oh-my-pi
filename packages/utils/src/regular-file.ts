@@ -17,7 +17,9 @@
  *
  * The one exception is a file that a tool serves through a pipe on purpose:
  * 1Password mounts `.env` files that way. {@link readRegularFileOrPipeTextSync}
- * reads such a pipe, but only to its end within a bound.
+ * reads such a pipe until its writer closes it, within a bound. A pipe does
+ * not say why its writer closed it: a writer that dies part way through the
+ * file closes it too, so what was read up to then can be part of the file.
  *
  * `env.ts` imports this module at the very start of every command, before the
  * logger exists, so it depends on nothing but `fs-error`.
@@ -169,10 +171,9 @@ export function readOptionalFileTextSync(file: string): string | undefined {
 }
 
 /**
- * A named pipe that was not written to its end within the bounds allowed, and
- * why: nothing wrote to it, what was writing it did not finish in time, or it
- * sent more bytes than allowed. What it sent is not used, because part of a
- * file is not the file.
+ * A named pipe whose writer did not close it within the bounds allowed, and
+ * why: nothing wrote to it, what was writing it did not close it before the
+ * deadline, or it sent more bytes than allowed. What it sent is not used.
  */
 export class PipeNotAnswered extends Error {
 	constructor(
@@ -198,41 +199,74 @@ const PIPE_POLL_MS = 10;
 /** Signals a person or a supervisor sends to stop a process. */
 const STOP_SIGNALS = ["SIGINT", "SIGTERM"] as const;
 
+/** Set on a listener that {@link onStopSignal} added; global, so every copy of this module sees it. */
+const PERSISTENT_STOP_LISTENER = Symbol.for("omp.persistentStopListener");
+
+/**
+ * Add `listener` for `signal` with `process.on`, marked so that a pipe wait
+ * ({@link readRegularFileOrPipeTextSync}) may take it off for its length and
+ * put it back. Bun does not say whether a listener was added with
+ * `process.once`, and one put back with `process.on` would run for every later
+ * signal and never go; so a wait takes off only listeners added here.
+ */
+export function onStopSignal(signal: (typeof STOP_SIGNALS)[number], listener: NodeJS.SignalsListener): void {
+	Object.defineProperty(listener, PERSISTENT_STOP_LISTENER, { value: true });
+	process.on(signal, listener);
+}
+
 /**
  * Take the stop-signal listeners off for a synchronous wait, and return what
- * puts them back. No listener can run while the wait blocks the event loop, so a
- * signal that has one only queues until the wait ends; with none, the signal's
- * own action ends the process at once. So Ctrl-C stops the wait when it is pressed.
+ * puts them back; undefined when they stay. No listener can run while the wait
+ * blocks the event loop, so a signal that has one only queues until the wait
+ * ends; with none, the signal's own action ends the process at once. Every
+ * listener stays when any one was not added through {@link onStopSignal}: it
+ * could not be put back as it was added.
  */
-function detachStopListeners(): () => void {
-	const taken = STOP_SIGNALS.map(signal => ({ signal, listeners: process.rawListeners(signal) }));
+function detachStopListeners(): (() => void) | undefined {
+	const taken = STOP_SIGNALS.map(signal => ({
+		signal,
+		listeners: process.rawListeners(signal) as NodeJS.SignalsListener[],
+	}));
+	if (taken.some(({ listeners }) => listeners.some(listener => !(PERSISTENT_STOP_LISTENER in listener)))) {
+		return undefined;
+	}
 	for (const { signal, listeners } of taken) {
-		for (const listener of listeners) process.removeListener(signal, listener as NodeJS.SignalsListener);
+		for (const listener of listeners) process.removeListener(signal, listener);
 	}
 	return () => {
 		for (const { signal, listeners } of taken) {
-			for (const listener of listeners) process.on(signal, listener as NodeJS.SignalsListener);
+			for (const listener of listeners) process.on(signal, listener);
 		}
 	};
 }
 
 /**
  * The text of `file` when it is a regular file, or when it is a named pipe
- * that a writer fills to its end within `pipe.deadlineMs` of the open and
- * within `pipe.maxBytes` — for a file that a tool serves through a pipe on
- * purpose (1Password mounts `.env` files that way). `pipe.onWait` runs once
- * when the pipe has not reached its end after `pipe.noticeAfterMs`, told
- * whether any of it has come. Undefined when nothing is at the name;
- * {@link NotARegularFile} for a socket, device or directory;
- * {@link PipeNotAnswered} when the pipe does not reach its end within the bounds.
+ * whose writer closes it within `pipe.deadlineMs` of the open and within
+ * `pipe.maxBytes` — for a file that a tool serves through a pipe on purpose
+ * (1Password mounts `.env` files that way). A writer that dies part way
+ * through also closes the pipe, so the text can be part of the file it meant
+ * to write; nothing here can tell. `pipe.onWait` runs once when the pipe is
+ * still open after `pipe.noticeAfterMs`, told whether any of it has come and
+ * whether a stop signal ends the wait at once. Undefined when nothing is at
+ * the name; {@link NotARegularFile} for a socket, device or directory;
+ * {@link PipeNotAnswered} when the pipe is not closed within the bounds,
+ * including when it closes only after the deadline.
  *
  * The wait polls with `Bun.sleepSync`, so nothing else on the event loop runs
  * during it, timers and signal listeners included. For the wait, SIGINT and
- * SIGTERM listeners are taken off, so either signal ends the process at once.
+ * SIGTERM listeners added through {@link onStopSignal} are taken off, so either
+ * signal ends the process at once. Any other listener keeps them all on, and a
+ * signal then takes effect when the wait ends.
  */
 export function readRegularFileOrPipeTextSync(
 	file: string,
-	pipe: { deadlineMs: number; maxBytes: number; noticeAfterMs: number; onWait(started: boolean): void },
+	pipe: {
+		deadlineMs: number;
+		maxBytes: number;
+		noticeAfterMs: number;
+		onWait(started: boolean, stoppable: boolean): void;
+	},
 ): string | undefined {
 	let fd: number;
 	try {
@@ -241,7 +275,7 @@ export function readRegularFileOrPipeTextSync(
 		if (isEnoent(error)) return undefined;
 		refusedOpen(file, error);
 	}
-	let reattachStopListeners: (() => void) | undefined;
+	let stopListeners: { reattach: (() => void) | undefined } | undefined;
 	try {
 		const stat = fstatSync(fd);
 		if (stat.isFile()) return readFileSync(fd, "utf8");
@@ -265,23 +299,24 @@ export function readRegularFileOrPipeTextSync(
 				if (received > pipe.maxBytes) throw new PipeNotAnswered(file, "oversized");
 				chunks.push(Buffer.from(buffer.subarray(0, n)));
 			}
-			// End of file after the writer's bytes: the whole file. End of file
-			// before any byte is a writer that has not come yet.
-			if (n === 0 && received > 0) return Buffer.concat(chunks).toString("utf8");
-			// Checked after every read, data or not: a writer that never pauses
-			// is held to the same deadline as one that never comes.
+			// Checked after every read, before an end of file is taken: a writer
+			// that never pauses, and one that closes the pipe only after the
+			// deadline, are held to the same deadline as one that never comes.
 			const waited = Date.now() - opened;
 			if (waited >= pipe.deadlineMs) throw new PipeNotAnswered(file, received > 0 ? "unfinished" : "silent");
+			// End of file after the writer's bytes: the writer closed the pipe.
+			// End of file before any byte is a writer that has not come yet.
+			if (n === 0 && received > 0) return Buffer.concat(chunks).toString("utf8");
 			if (n > 0) continue;
+			stopListeners ??= { reattach: detachStopListeners() };
 			if (!noticed && waited >= pipe.noticeAfterMs) {
 				noticed = true;
-				pipe.onWait(received > 0);
+				pipe.onWait(received > 0, stopListeners.reattach !== undefined);
 			}
-			reattachStopListeners ??= detachStopListeners();
 			Bun.sleepSync(PIPE_POLL_MS);
 		}
 	} finally {
-		reattachStopListeners?.();
+		stopListeners?.reattach?.();
 		closeSync(fd);
 	}
 }

@@ -9,6 +9,7 @@
 import * as fs from "node:fs";
 import { APP_NAME } from "./dirs";
 import * as logger from "./logger";
+import { onStopSignal } from "./regular-file";
 import { restoreTerminalStderr } from "./stderr-guard";
 
 // Cleanup reasons, in order of priority/meaning.
@@ -686,11 +687,22 @@ export async function fatal(error: unknown): Promise<never> {
 }
 
 if (Bun.isMainThread) {
+	// Through onStopSignal, so a `.env` pipe wait at startup may take these off
+	// and Ctrl-C or SIGTERM ends it at once (see readRegularFileOrPipeTextSync).
+	onStopSignal("SIGINT", async () => {
+		await runCleanup(Reason.SIGINT);
+		exitProcess(130); // 128 + SIGINT (2)
+	});
+	onStopSignal("SIGTERM", async () => {
+		// A stopped session otherwise leaves its last frame above the shell prompt,
+		// which reads as a crash. A repeated SIGTERM joins the same cleanup and the
+		// hints still print once.
+		const hintProviders = [...fatalRecoveryHintProviders];
+		await runCleanup(Reason.SIGTERM);
+		writeRecoveryHints(hintProviders, "\n[Stopped by SIGTERM]");
+		exitProcess(143); // 128 + SIGTERM (15)
+	});
 	process
-		.on("SIGINT", async () => {
-			await runCleanup(Reason.SIGINT);
-			exitProcess(130); // 128 + SIGINT (2)
-		})
 		.on("SIGUSR1", async () => {
 			if (inspectorOpened) return;
 			inspectorOpened = true;
@@ -763,15 +775,6 @@ if (Bun.isMainThread) {
 		})
 		.on("exit", async () => {
 			void runCleanup(Reason.EXIT); // fire and forget (exit imminent)
-		})
-		.on("SIGTERM", async () => {
-			// A stopped session otherwise leaves its last frame above the shell prompt,
-			// which reads as a crash. A repeated SIGTERM joins the same cleanup and the
-			// hints still print once.
-			const hintProviders = [...fatalRecoveryHintProviders];
-			await runCleanup(Reason.SIGTERM);
-			writeRecoveryHints(hintProviders, "\n[Stopped by SIGTERM]");
-			exitProcess(143); // 128 + SIGTERM (15)
 		})
 		.on("SIGHUP", async () => {
 			await runCleanup(Reason.SIGHUP);

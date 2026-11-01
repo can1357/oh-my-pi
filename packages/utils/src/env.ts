@@ -269,8 +269,8 @@ export function getDotenvEnvValues(
 }
 
 /**
- * How long a `.env` that is a named pipe gets at startup, from the open, to be
- * written to its end, when no one is at a terminal. 1Password mounts `.env`
+ * How long a `.env` that is a named pipe gets at startup, from the open, for
+ * its writer to close it, when no one is at a terminal. 1Password mounts `.env`
  * files as named pipes on purpose and writes the file when a reader opens it.
  * An unlocked 1Password needs no person to answer; a locked one shows an
  * authorization prompt, and with no terminal there is usually no one to approve
@@ -307,7 +307,12 @@ const startupEnvText = new Map<string, string>();
 /** `.env` pipes that did not answer at startup: this process does not wait on them again. */
 const unansweredEnvPipes = new Set<string>();
 
-/** A `.env` read before any command runs: a named pipe is read to its end within a bound, never in part. */
+/**
+ * A `.env` read before any command runs: a named pipe is read until its writer
+ * closes it, within a bound. A writer that dies part way through the file also
+ * closes it, and what it wrote by then is parsed as the whole file: no bound or
+ * check here can tell the two apart.
+ */
 function startupEnvFileText(filePath: string): string | undefined {
 	const key = path.resolve(filePath);
 	if (unansweredEnvPipes.has(key)) return undefined;
@@ -318,11 +323,12 @@ function startupEnvFileText(filePath: string): string | undefined {
 			deadlineMs,
 			maxBytes: ENV_PIPE_MAX_BYTES,
 			noticeAfterMs: ENV_PIPE_NOTICE_AFTER_MS,
-			onWait: started =>
+			onWait: (started, stoppable) =>
 				reportFileWait(
 					`omp is waiting up to ${bound} for ${filePath}: it is a named pipe, and ` +
 						`${started ? "what is writing it has not finished" : "nothing has written it yet"}. ` +
-						`If 1Password serves it, approve its authorization prompt. Ctrl-C stops omp.`,
+						`If 1Password serves it, approve its authorization prompt. ` +
+						(stoppable ? "Ctrl-C stops omp." : "Ctrl-C takes effect when the wait ends."),
 				),
 		});
 		if (text !== undefined) startupEnvText.set(key, text);
@@ -369,7 +375,7 @@ function runtimeEnvFileText(filePath: string): string | undefined {
 }
 
 /**
- * Parses complete .env text with the runtime's dotenv grammar, then retains
+ * Parses .env text with the runtime's dotenv grammar, then retains
  * only shell-identifier names and spawn-safe values before mirroring valid
  * `OMP_` variables to their `PI_` aliases.
  */
