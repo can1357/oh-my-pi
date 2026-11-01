@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed startup and in-process session restores failing to resolve built-in discovery models such as Copilot's long-context variants after model-cache invalidation. An unresolved account-scoped model can now trigger one online catalog check when a fresh cache omitted it; already-fetched, failed, stale, and missing-credential lookups are not forced to fetch again, and an already-restored fallback does not add a forced startup request. The saved model and chat history are preserved.
+- Fixed saved Copilot and other discovery-backed models failing to restore after catalog invalidation when reopening or switching chats.
 
 ## [18.14.2] - 2026-10-31
 
