@@ -477,20 +477,21 @@ describe("performance optimizations: batched graph and recall cache", () => {
 			timestamp: now,
 		});
 
-		// Track calls to findEdgesTouching to ensure incremental chunking
-		let findEdgesCalls = 0;
-		const origFindEdgesTouching = graph.findEdgesTouching.bind(graph);
-		spyOn(graph, "findEdgesTouching").mockImplementation((nodeIds, edgeType, minWeight, limit) => {
-			findEdgesCalls++;
-			return origFindEdgesTouching(nodeIds, edgeType, minWeight, limit);
+		let queryCount = 0;
+		const origQuery = db.query.bind(db);
+		spyOn(db, "query").mockImplementation((sql: string) => {
+			if (typeof sql === "string" && sql.includes("FROM graph_edges")) {
+				queryCount++;
+			}
+			return origQuery(sql);
 		});
 
 		const related = graph.findRelatedMemories("root", 2, "ctx", 0.5);
 
-		// Depth 1: 1 call for [root]
-		// Depth 2: 1000 frontier nodes chunked into slices of 900 -> 2 calls
-		// Total findEdgesTouching calls = 3
-		expect(findEdgesCalls).toBe(3);
+		// Depth 1: 1 query for [root]
+		// Depth 2: 1000 frontier nodes chunked into slices of 900 -> 2 chunk queries
+		// Total edge queries = 3
+		expect(queryCount).toBe(3);
 
 		const shared = related.find(r => r.memoryId === "shared_leaf");
 		expect(shared).toBeDefined();
@@ -503,6 +504,59 @@ describe("performance optimizations: batched graph and recall cache", () => {
 		expect(leaf950).toBeDefined();
 		expect(leaf950?.depth).toBe(2);
 		expect(leaf950?.weight).toBe(0.6);
+
+		graph.close();
+	});
+
+	it("findRelatedMemories paginates past seen-only edges to discover lower-weight unseen edges", () => {
+		const db = new Database(":memory:");
+		const graph = new EpisodicGraph({ db });
+		const now = new Date().toISOString();
+
+		// Root connects to seen_1 and seen_2 at depth 1 with weight 0.9
+		graph.addEdge({
+			source: "root",
+			target: "seen_1",
+			edgeType: "ctx",
+			weight: 0.9,
+			timestamp: now,
+		});
+		graph.addEdge({
+			source: "root",
+			target: "seen_2",
+			edgeType: "ctx",
+			weight: 0.9,
+			timestamp: now,
+		});
+
+		// Add 2500 high-weight (weight: 0.8) edges between seen_1 and seen_2
+		// (exceeding FRONTIER_EDGE_PAGE_SIZE = 2048)
+		for (let i = 0; i < 2500; i++) {
+			graph.addEdge({
+				source: "seen_1",
+				target: "seen_2",
+				edgeType: `seen_link_${i}`,
+				weight: 0.8,
+				timestamp: now,
+			});
+		}
+
+		// Add a lower-weight edge (weight: 0.5) from seen_1 to unseen_target
+		graph.addEdge({
+			source: "seen_1",
+			target: "unseen_target",
+			edgeType: "ctx",
+			weight: 0.5,
+			timestamp: now,
+		});
+
+		const related = graph.findRelatedMemories("root", 2, "", 0.4);
+
+		// unseen_target should be discovered at depth 2 despite 2500 higher-weight seen-only edges
+		const unseen = related.find(r => r.memoryId === "unseen_target");
+		expect(unseen).toBeDefined();
+		expect(unseen?.depth).toBe(2);
+		expect(unseen?.weight).toBe(0.5);
 
 		graph.close();
 	});

@@ -109,6 +109,7 @@ const MAX_FACTS_PER_MEMORY = 5;
 const DEFAULT_LINK_THRESHOLD = 0.35;
 const MAX_SQL_IDS_PER_CHUNK = 900;
 const MAX_TRAVERSAL_EDGES_PER_CHUNK = 10_000;
+const FRONTIER_EDGE_PAGE_SIZE = 2048;
 const LINK_CANDIDATE_BATCH_SIZE = 256;
 const LIVE_MEMORY_SQL = "superseded_by IS NULL AND (valid_until IS NULL OR valid_until > ?)";
 
@@ -478,13 +479,59 @@ export class EpisodicGraph {
 			const frontierIds = [...currentLevel];
 			for (let i = 0; i < frontierIds.length; i += MAX_SQL_IDS_PER_CHUNK) {
 				const chunk = frontierIds.slice(i, i + MAX_SQL_IDS_PER_CHUNK);
-				const edges = this.findEdgesTouching(chunk, edgeType, threshold, MAX_TRAVERSAL_EDGES_PER_CHUNK);
+				const placeholders = chunk.map(() => "?").join(", ");
 				const edgesByNode = new Map<string, GraphEdge[]>();
 				for (const mem of chunk) edgesByNode.set(mem, []);
-				for (const edge of edges) {
-					edgesByNode.get(edge.source)?.push(edge);
-					if (edge.target !== edge.source) edgesByNode.get(edge.target)?.push(edge);
+
+				let unseenCandidateEdges = 0;
+				let lastWeight: number | null = null;
+				let lastId: number | null = null;
+
+				while (unseenCandidateEdges < MAX_TRAVERSAL_EDGES_PER_CHUNK) {
+					const paginationCondition =
+						lastWeight !== null && lastId !== null ? " AND (weight < ? OR (weight = ? AND id > ?))" : "";
+					const querySql =
+						edgeType.length > 0
+							? `SELECT id, source, target, edge_type, weight, timestamp FROM graph_edges
+					 WHERE (source IN (${placeholders}) OR target IN (${placeholders})) AND edge_type = ? AND weight >= ?${paginationCondition}
+					 ORDER BY weight DESC, id LIMIT ?`
+							: `SELECT id, source, target, edge_type, weight, timestamp FROM graph_edges
+					 WHERE (source IN (${placeholders}) OR target IN (${placeholders})) AND weight >= ?${paginationCondition}
+					 ORDER BY weight DESC, id LIMIT ?`;
+
+					const queryParams: (string | number)[] = [...chunk, ...chunk];
+					if (edgeType.length > 0) queryParams.push(edgeType);
+					queryParams.push(threshold);
+					if (lastWeight !== null && lastId !== null) {
+						queryParams.push(lastWeight, lastWeight, lastId);
+					}
+					queryParams.push(FRONTIER_EDGE_PAGE_SIZE);
+
+					const rows = this.db.query(querySql).all(...queryParams) as EdgeRow[];
+					if (rows.length === 0) break;
+
+					for (const row of rows) {
+						lastWeight = row.weight;
+						lastId = row.id ?? 0;
+
+						if (seen.has(row.source) && seen.has(row.target)) {
+							continue;
+						}
+
+						const edge = edgeFromRow(row);
+						edgesByNode.get(edge.source)?.push(edge);
+						if (edge.target !== edge.source) {
+							edgesByNode.get(edge.target)?.push(edge);
+						}
+						unseenCandidateEdges++;
+						if (unseenCandidateEdges >= MAX_TRAVERSAL_EDGES_PER_CHUNK) {
+							break;
+						}
+					}
+
+					if (rows.length < FRONTIER_EDGE_PAGE_SIZE) break;
 				}
+
 				for (const mem of chunk) {
 					for (const edge of edgesByNode.get(mem) ?? []) {
 						const neighbor = edge.source === mem ? edge.target : edge.source;
