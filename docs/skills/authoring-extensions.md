@@ -136,6 +136,25 @@ Multiple entry points are supported:
 
 Installed-plugin manifest entries may be `.ts`, `.js`, `.mjs`, or `.cjs`; a manifest entry naming a directory resolves `index.ts`, `index.js`, `index.mjs`, or `index.cjs`. Automatic scanning of native/configured extension directories remains limited to `.ts` and `.js`.
 
+An installed plugin that ships commands for the agent's shell declares their directory with `bin` instead of adding itself to `PATH`:
+
+```json
+{
+  "omp": {
+    "extensions": ["./dist/main.js"],
+    "bin": ["./bin"]
+  }
+}
+```
+
+Before omp imports an extension or tool module that lies under an enabled installed plugin's installed path, whichever route chose it (ambient discovery, a `--no-extensions` session's manifest tools, a module file passed with `--extension` or `--trusted-extension`, or an SDK caller's preload lists), and when it validates a plugin at install, it puts that plugin's `bin` directories at the front of `PATH` under the installed path. Listing modules (`getAllPluginExtensionPaths()`, `getAllPluginToolPaths()`, or discovery that imports nothing) changes nothing. A normal session also adds every enabled plugin's directories when it loads its ambient selection, so a plugin that ships only commands has them. A `--no-extensions` session loads only the tools installed plugins name in their manifest's `tools`, and adds the directories only of those plugins: it does not scan installed plugins' conventional `tools/` directories, so a plugin of yours whose tools live only in `tools/`, or that ships no tool, has none of its tools or commands in such a session. An SDK caller that passes its own preload lists, and so runs no ambient selection, gets the directories only of the plugins whose modules it loads. A `bin` directory whose path holds the `PATH` separator (`:`, or `;` on Windows), in the manifest entry or in the plugins root, cannot be one `PATH` entry: install refuses the plugin and says why, and a session skips that directory with a warning in the log. A shell a session starts after the directories are added has them, even when an earlier session in the same process started its shell before. Entries stay on `PATH` for the life of the process, so in a process that runs several sessions (an SDK host), a later session has the directories an earlier one added, whatever its own selection. Disabling or uninstalling a plugin does not take its directories off `PATH` in a running process: its commands keep working while their files exist, fail once the files are removed, and work again if files reappear at that path.
+
+A module that runs one of these commands with `Bun.spawn()` or `Bun.spawnSync()` passes `env: process.env`: given no `env`, Bun 1.4 starts the child with the environment the process started with, which lacks the directories omp added. `Bun.$` and `node:child_process` use the current `process.env`, and so does the session's own shell.
+
+Because the directories go ahead of everything already on `PATH`, a plugin's command outranks any command of the same name the user has: a plugin's `bin/fmt` runs instead of the user's own `~/bin/fmt`, or of one in a virtualenv activated before omp started. Name plugin commands so they cannot collide. A user who wants their own command to win lists the plugin's installed `bin` path on `PATH` themselves, behind their own directory and with no other path to that directory ahead of it; omp then adds nothing. Any spelling of the installed path counts: absolute, relative to omp's working directory, with a trailing separator, or with `.` segments.
+
+Do not build a `PATH` entry from `import.meta.url` or `__dirname`: a module's location is its realpath, and when a symlinked plugins root (a dotfiles link, a marketplace upgrade) is re-pointed and the old target removed, a running session loses every command on a realpath entry, even with a valid entry later on `PATH`: a shell keeps the path it found for a command it already ran.
+
 ## Registering commands
 
 ```ts

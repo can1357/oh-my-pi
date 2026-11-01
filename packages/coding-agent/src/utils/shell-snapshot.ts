@@ -20,7 +20,7 @@ interface SnapshotFailure {
 	retryAt: number;
 }
 
-/** Snapshot path per shell; re-checked for existence on every hit. */
+/** Snapshot path per shell and `PATH`; re-checked for existence on every hit. */
 const cachedSnapshots = new Map<string, string>();
 const inflightSnapshots = new Map<string, Promise<string | null>>();
 const failedSnapshots = new Map<string, SnapshotFailure>();
@@ -258,7 +258,11 @@ export async function getOrCreateSnapshot(
 		return null;
 	}
 
-	const cacheKey = shell;
+	// The snapshot ends by exporting the `PATH` the rc file computed from the `PATH` it ran with,
+	// so a snapshot made under one `PATH` would put that `PATH` back in a shell started under
+	// another: after an installed plugin's `bin` directory goes on `PATH`, a shell sourcing an older
+	// snapshot would lose the plugin's commands.
+	const cacheKey = `${shell}\0${env.PATH ?? ""}`;
 	const cached = cachedSnapshots.get(cacheKey);
 	if (cached) {
 		// A cleaned-up snapshot must be recreated, never handed to the shell.

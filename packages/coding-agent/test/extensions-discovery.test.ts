@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as fsPromises from "node:fs/promises";
 import * as path from "node:path";
 import { type ExtensionModule, extensionModuleCapability } from "@oh-my-pi/pi-coding-agent/capability/extension-module";
-import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { getCapability, initializeWithSettings } from "@oh-my-pi/pi-coding-agent/discovery";
 import {
 	discoverAndLoadExtensions,
@@ -12,20 +12,25 @@ import {
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { discoverSessionExtensionPaths } from "@oh-my-pi/pi-coding-agent/sdk";
 import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 import { filterUserScoped } from "./utils/filter-user-extensions";
 
 describe("extensions discovery", () => {
 	let tempDir: TempDir;
 	let extensionsDir: string;
+	// Loading installed plugins puts their `bin` directories on PATH; the shared
+	// helper gives every later test the environment this one started with.
+	let settingsState: SettingsTestState | undefined;
 
 	beforeEach(() => {
+		settingsState = beginSettingsTest();
 		tempDir = TempDir.createSync("@pi-ext-test-");
 		extensionsDir = path.join(getProjectAgentDir(tempDir.path()), "extensions");
 		fs.mkdirSync(extensionsDir, { recursive: true });
-		resetSettingsForTest();
 	});
 	afterEach(() => {
-		resetSettingsForTest();
+		restoreSettingsTestState(settingsState);
+		settingsState = undefined;
 		tempDir.removeSync();
 	});
 

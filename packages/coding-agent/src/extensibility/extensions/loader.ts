@@ -35,7 +35,11 @@ import { EventBus } from "../../utils/event-bus";
 import * as TypeBox from "../legacy-typebox";
 import { resolveExtensionDirectory } from "./directory-resolution";
 import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/legacy-pi-compat";
-import { getAllPluginExtensionPaths } from "../plugins/loader";
+import {
+	getAllPluginExtensionPaths,
+	prependBinDirsOfOwningPlugins,
+	prependEnabledPluginBinDirs,
+} from "../plugins/loader";
 
 import { resolvePath, withHostGuard } from "../utils";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
@@ -526,6 +530,9 @@ export async function loadExtensionFromFactory(
 /**
  * Load extensions from paths.
  *
+ * The `bin` directories of the enabled plugins that own any of `paths` go on PATH first, so a
+ * plugin's module finds its commands when it evaluates.
+ *
  * Module import (the dominant cold-start cost — file I/O plus module
  * evaluation) runs concurrently across extensions; factory binding then runs
  * sequentially in the original path order, so registration semantics
@@ -537,6 +544,10 @@ export async function loadExtensions(
 	eventBus?: EventBus,
 	runtime?: IExtensionRuntime,
 ): Promise<LoadExtensionsResult> {
+	await prependBinDirsOfOwningPlugins(
+		cwd,
+		paths.map(extPath => resolvePath(extPath, cwd)),
+	);
 	const preparedExtensions = await Promise.all(paths.map(extPath => importExtensionModule(extPath, cwd)));
 	return bindPreparedExtensions(preparedExtensions, cwd, eventBus, runtime);
 }
@@ -614,7 +625,8 @@ async function discoverHooksInPackageRoot(root: string): Promise<string[]> {
  * Discover absolute paths of extensions to load, without importing or
  * binding factories. Hot path on session startup — the scan walks native
  * `.omp`/`.pi` extension capabilities, JS/TS hook factories, the
- * installed-plugin tree, and any configured paths.
+ * installed-plugin tree, and any configured paths. Discovery changes nothing:
+ * plugins' `bin` directories go on PATH when a session loads what it found.
  *
  * The root session imports these paths once and forwards prepared factories to
  * subagents. Each child rebinds fresh Extension instances to its OWN
@@ -695,7 +707,7 @@ export async function discoverExtensionPaths(
 		}
 	}
 
-	// 3. Discover extension entry points from installed plugins.
+	// 3. Discover extension entry points from installed plugins. An explicit-only session skips it.
 	if (ambient) {
 		await addPaths(await getAllPluginExtensionPaths(cwd));
 	}
@@ -725,7 +737,8 @@ export async function discoverExtensionPaths(
 /**
  * Discover and load extensions from standard locations. Composed of
  * {@link discoverExtensionPaths} (FS scan) + {@link loadExtensions}
- * (per-session binding).
+ * (per-session binding). An ambient load first puts every enabled plugin's
+ * `bin` directories on PATH, so a plugin that ships only commands has them.
  */
 export async function discoverAndLoadExtensions(
 	configuredPaths: string[],
@@ -735,5 +748,6 @@ export async function discoverAndLoadExtensions(
 	options: DiscoverExtensionPathOptions = {},
 ): Promise<LoadExtensionsResult> {
 	const paths = await discoverExtensionPaths(configuredPaths, cwd, disabledExtensionIds, options);
+	if (options.ambient !== false) await prependEnabledPluginBinDirs(cwd);
 	return loadExtensions(paths, cwd, eventBus);
 }
