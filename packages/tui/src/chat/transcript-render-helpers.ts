@@ -15,9 +15,11 @@ import { type CustomMessage, type FileMentionMessage, resolveAbortLabel, shouldR
 import { createIrcMessageCard } from "../tools/wait";
 import { formatArtifactErrorNotice, type OutputMeta } from "../tools/output-meta";
 import type { OutputArtifactError } from "../tools/streaming-output";
-import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../render/render-utils";
+import { formatStyledPath, replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../render/render-utils";
 import { canonicalizeMessage } from "./thinking-display";
 import { ToolActivityContainer } from "../chrome/tool-activity";
+import { CustomMessageComponent } from "./custom-message";
+import type { MessageRenderer } from "./extension-types";
 import { type TranscriptBlock } from "../chrome/transcript-container";
 import { TranscriptStatusBlock, type TranscriptStatusRow } from "../chrome/transcript-status";
 import { theme } from "../theme";
@@ -79,6 +81,38 @@ export function buildAsyncResultBlock(message: CustomOrHookMessage): ToolActivit
 	}
 	if (details?.meta?.artifactError) rows.push(artifactErrorRow(details.meta.artifactError));
 	return new ToolActivityContainer(new TranscriptStatusBlock(rows));
+}
+
+/** Hosts an extension renderer; relays `display.hideToolActivity` to the nested built-in fallback block. */
+class AsyncResultCard extends CustomMessageComponent {
+	readonly #block: ToolActivityContainer;
+
+	constructor(message: CustomOrHookMessage, renderer: MessageRenderer, block: ToolActivityContainer) {
+		super(message as CustomMessage<unknown>, (delegate, options, rendererTheme) => {
+			try {
+				return renderer(delegate, options, rendererTheme) ?? block;
+			} catch {
+				return block;
+			}
+		});
+		this.#block = block;
+	}
+
+	setToolActivityVisible(visible: boolean): void {
+		this.#block.setToolActivityVisible(visible);
+	}
+}
+
+/**
+ * The `async-result` card for both transcript surfaces: a registered renderer owns it (#14131);
+ * the built-in block covers no renderer, a declining renderer, and a throwing one.
+ */
+export function buildAsyncResultComponent(
+	message: CustomOrHookMessage,
+	renderer: MessageRenderer | undefined,
+): Component & { setExpanded(expanded: boolean): void } {
+	const block = buildAsyncResultBlock(message);
+	return renderer ? new AsyncResultCard(message, renderer, block) : block;
 }
 
 /** The warning row under a background job whose output artifact could not be saved. */
@@ -203,7 +237,7 @@ export function buildFileMentionBlock(files: FileMentionMessage["files"], indent
 			parts: [
 				{ text: theme.tree.last, color: "dim" },
 				{ text: "Read", color: "muted" },
-				{ text: file.path, color: "accent" },
+				{ text: formatStyledPath(file.path, theme) },
 				{ text: `(${detail})`, color: "dim" },
 			],
 			indent,

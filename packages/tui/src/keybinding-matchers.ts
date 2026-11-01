@@ -120,3 +120,16 @@ export function appApproveKeys(): readonly KeyId[] {
 export function matchesAppApprove(data: string): boolean {
 	return matchesEffectiveKeys(data, appApproveKeys());
 }
+
+/**
+ * Effective /btw inject key (Alt+I by default). No fallback: it sends text into the main
+ * session, so a user who unbinds it gets no key at all.
+ */
+export function appBtwInjectKey(): KeyId | undefined {
+	return getKeybindings().getKeys("app.btw.inject")[0];
+}
+
+/** Match the key that sends a /btw answer's steering prompt to the main session. */
+export function matchesAppBtwInject(data: string): boolean {
+	return getKeybindings().matches(data, "app.btw.inject");
+}
