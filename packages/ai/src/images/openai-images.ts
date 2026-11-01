@@ -88,9 +88,16 @@ export async function generateOpenAIImage(
 				form.set("n", String(count));
 				if (!isGptImage) form.set("response_format", "b64_json");
 				if (size) form.set("size", size);
+				// A repeated scalar `image` field is rejected as `duplicate_parameter`; lists
+				// use the `image[]` array syntax the official SDKs emit. A single reference
+				// keeps the scalar field for compatible endpoints that only accept `image`.
+				const imageField = inputImages.length === 1 ? "image" : "image[]";
 				for (const image of inputImages) {
 					validateImageInput(image);
-					form.append("image", new File([Buffer.from(image.data, "base64")], "image", { type: image.mimeType }));
+					form.append(
+						imageField,
+						new File([Buffer.from(image.data, "base64")], "image", { type: image.mimeType }),
+					);
 				}
 				response = await postMultipart({
 					model,
