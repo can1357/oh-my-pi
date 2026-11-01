@@ -33,6 +33,7 @@ import { withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import {
+	armPreResponseTimeout,
 	getOpenAIStreamFirstEventTimeoutMs,
 	getOpenAIStreamIdleTimeoutMs,
 	iterateWithIdleTimeout,
@@ -245,8 +246,11 @@ interface OpenAIResponsesPolledResult {
  * mismatched id, or a failed/cancelled run ends the poll immediately. The
  * whole recovery is bounded by one wall-clock deadline: each request's timeout
  * is clamped to the time left, and no sleep may cross the deadline, so a
- * stalled host cannot hold an already-failed turn past it. Returns the
- * terminal object, or undefined on give-up/abort.
+ * stalled host cannot hold an already-failed turn past it. Time a poll spends
+ * parked on the caller's dispatch hold is charged to neither: each request's
+ * timeout is a stop-the-clock guard, and the held time it reports pushes the
+ * deadline back by as much. Returns the terminal object, or undefined on
+ * give-up/abort.
  *
  * @internal Exported for tests.
  */
@@ -259,11 +263,22 @@ export async function pollOpenAIResponsesResultForCompletion(args: {
 	/** Sleep between polls; defaults to a real wait honoring `signal`. */
 	wait?: (ms: number, signal?: AbortSignal) => Promise<void>;
 }): Promise<Record<string, unknown> | undefined> {
+	let heldMs = 0;
+	const heldTime = {
+		async trackLocalWork<T>(work: Promise<T>): Promise<T> {
+			const heldAt = Date.now();
+			try {
+				return await work;
+			} finally {
+				heldMs += Date.now() - heldAt;
+			}
+		},
+	};
 	const deadline = Date.now() + OPENAI_RESPONSES_RESUME_DEADLINE_MS;
 	for (let attempt = 0; attempt < OPENAI_RESPONSES_RESUME_MAX_POLLS; attempt++) {
 		if (args.signal?.aborted) return undefined;
 		if (attempt > 0) {
-			if (Date.now() + OPENAI_RESPONSES_RESUME_POLL_INTERVAL_MS >= deadline) return undefined;
+			if (Date.now() + OPENAI_RESPONSES_RESUME_POLL_INTERVAL_MS >= deadline + heldMs) return undefined;
 			try {
 				await waitForRetry(args.wait, OPENAI_RESPONSES_RESUME_POLL_INTERVAL_MS, args.signal);
 			} catch {
@@ -271,17 +286,19 @@ export async function pollOpenAIResponsesResultForCompletion(args: {
 			}
 			if (args.signal?.aborted) return undefined;
 		}
-		const remainingMs = deadline - Date.now();
+		const remainingMs = deadline + heldMs - Date.now();
 		if (remainingMs <= 0) return undefined;
-		const attemptTimeout = AbortSignal.timeout(
+		const attemptGuard = armPreResponseTimeout(
+			args.signal,
 			Math.min(OPENAI_RESPONSES_RESUME_POLL_ATTEMPT_TIMEOUT_MS, remainingMs),
+			heldTime,
 		);
 		let status: number | undefined;
 		let body: OpenAIResponsesPolledResult | undefined;
 		try {
 			const response = await args.fetchImpl(args.url, {
 				headers: args.headers,
-				signal: args.signal ? AbortSignal.any([args.signal, attemptTimeout]) : attemptTimeout,
+				signal: attemptGuard.signal,
 			});
 			status = response.status;
 			if (status === 200) {
@@ -292,6 +309,8 @@ export async function pollOpenAIResponsesResultForCompletion(args: {
 			}
 		} catch {
 			body = undefined;
+		} finally {
+			attemptGuard.clear();
 		}
 		if (status === 200) {
 			if (body?.id !== args.responseId) return undefined;
@@ -794,6 +813,10 @@ const streamOpenAIResponsesOnce = (
 				body: chained.params,
 			};
 			rawRequestDump = activeRawRequestDump;
+			// One first-event budget runs from the wire to the first event: each
+			// request's guard spends the part before headers, and the event
+			// iterator below waits on what that guard left, not on a fresh budget.
+			let firstEventBudgetLeftMs = firstEventTimeoutMs;
 			const openResponsesStream = async (
 				requestParams: OpenAIResponsesSamplingParams,
 			): Promise<AsyncIterable<ResponseStreamEvent>> => {
@@ -804,13 +827,19 @@ const streamOpenAIResponsesOnce = (
 				);
 				activeRequestParams = requestParams;
 				lastSubmittedRequestWasFullReplay = requestParams.previous_response_id === undefined;
-				let requestTimeout: NodeJS.Timeout | undefined;
-				if (requestTimeoutMs !== undefined) {
-					requestTimeout = setTimeout(
-						() => abortTracker.abortLocally(firstEventTimeoutAbortError),
-						requestTimeoutMs,
-					);
-				}
+				// A guard rather than a plain timer: it rides on the request signal,
+				// so the transport stops its clock while the request is prepared and
+				// parked on a dispatch hold, and `stream` (which a stream watchdog
+				// may observe) reports that time as ours rather than the provider's.
+				const requestGuard = armPreResponseTimeout(requestSignal, requestTimeoutMs, stream);
+				const guardedRequestSignal = requestGuard.signal ?? requestSignal;
+				guardedRequestSignal.addEventListener(
+					"abort",
+					() => {
+						if (!requestSignal.aborted) abortTracker.abortLocally(firstEventTimeoutAbortError);
+					},
+					{ once: true },
+				);
 				try {
 					const headersWithTimeout = { ...headers };
 					if (requestTimeoutMs !== undefined) {
@@ -820,7 +849,7 @@ const streamOpenAIResponsesOnce = (
 						url: requestUrl,
 						headers: headersWithTimeout,
 						body: requestParams,
-						signal: requestSignal,
+						signal: guardedRequestSignal,
 						fetch: wrapFetchForCopilotFallback(
 							wrapFetchForRequestCompression(options?.fetch ?? fetch, model),
 							model.provider === "github-copilot",
@@ -832,17 +861,19 @@ const streamOpenAIResponsesOnce = (
 							!AIError.isRequestBodyReadTimeout(response.status, bodyText) ||
 							lastSubmittedRequestWasFullReplay !== true,
 						// Transient 408/429/5xx get Retry-After-aware transport
-						// retries; the first-event watchdog aborts `requestSignal`,
-						// so retries cannot extend the caller's deadline.
+						// retries; the guard above covers every attempt and backoff
+						// sleep with one budget, so retries cannot extend the deadline.
 						onSseEvent: rawSseObserver,
 					});
-					// Disarm the first-event watchdog as soon as headers arrive — a slow
-					// onResponse callback must not abort an already-connected stream.
-					clearTimeout(requestTimeout);
+					// Disarm the guard as soon as headers arrive, so it can never
+					// abort the connected body, and a slow onResponse callback is not
+					// charged to the provider.
+					requestGuard.clear();
+					firstEventBudgetLeftMs = requestGuard.remaining() ?? firstEventTimeoutMs;
 					await notifyProviderResponse(options, response, model, requestId);
 					return events;
 				} finally {
-					clearTimeout(requestTimeout);
+					requestGuard.clear();
 				}
 			};
 			let strictRetryAvailable = true;
@@ -1008,7 +1039,7 @@ const streamOpenAIResponsesOnce = (
 				nativeOutputItems.length = 0;
 				const timedOpenaiStream = iterateWithIdleTimeout(openaiStream, {
 					idleTimeoutMs,
-					firstItemTimeoutMs: firstEventTimeoutMs,
+					firstItemTimeoutMs: firstEventBudgetLeftMs,
 					firstItemErrorMessage: OPENAI_RESPONSES_FIRST_EVENT_TIMEOUT_MESSAGE,
 					errorMessage: "OpenAI responses stream stalled while waiting for the next event",
 					onFirstItemTimeout: () => abortTracker.abortLocally(firstEventTimeoutAbortError),

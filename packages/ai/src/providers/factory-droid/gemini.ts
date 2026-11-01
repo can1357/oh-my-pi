@@ -7,6 +7,7 @@ import type { AssistantMessage, Context, Message, Model, StreamOptions, Tool, To
 import { createAbortSourceTracker } from "../../utils/abort";
 import { AssistantMessageEventStream } from "../../utils/event-stream";
 import {
+	armPreResponseTimeout,
 	getStreamFirstEventTimeoutMs,
 	getStreamIdleTimeoutMs,
 	iterateWithIdleTimeout,
@@ -308,7 +309,7 @@ export function streamFactoryDroidGemini(
 		// still wins when both fire.
 		const tracker = createAbortSourceTracker(options.signal);
 		const stalled = new AIError.StreamTimeoutError("Factory Gemini stream stalled");
-		let firstEventTimer: NodeJS.Timeout | undefined;
+		let clearFirstEventGuard: (() => void) | undefined;
 
 		try {
 			const { contents, systemInstruction } = toGeminiContents(model, context);
@@ -340,16 +341,25 @@ export function streamFactoryDroidGemini(
 			if (replacement !== undefined) body = replacement as Record<string, unknown>;
 
 			// Caller wins, then env, then the idle-floored default — same
-			// precedence as the anthropic transport. The first-event deadline is
+			// precedence as the anthropic transport. The first-event budget is
 			// end to end: it covers the fetch, a non-2xx body read, and the wait
-			// for the first SSE chunk, which inherits only the remaining budget.
+			// for the first SSE chunk. A stop-the-clock guard rather than a timer:
+			// it rides on the request signal, so the transport stops its clock
+			// while the request is prepared and parked on a dispatch hold, and
+			// `stream` reports that time to its watchdog as ours. It stays armed
+			// past the headers and is cleared by the first chunk.
 			const idleTimeoutMs = getStreamIdleTimeoutMs(options.streamIdleTimeoutMs);
 			const firstEventTimeoutMs = options.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(idleTimeoutMs);
-			const firstEventDeadline = firstEventTimeoutMs === undefined ? undefined : Date.now() + firstEventTimeoutMs;
-			if (firstEventTimeoutMs !== undefined) {
-				firstEventTimer = setTimeout(() => tracker.abortLocally(stalled), firstEventTimeoutMs);
-				firstEventTimer.unref?.();
-			}
+			const firstEventGuard = armPreResponseTimeout(tracker.requestSignal, firstEventTimeoutMs, stream);
+			clearFirstEventGuard = firstEventGuard.clear;
+			const requestSignal = firstEventGuard.signal ?? tracker.requestSignal;
+			requestSignal.addEventListener(
+				"abort",
+				() => {
+					if (!tracker.requestSignal.aborted) tracker.abortLocally(stalled);
+				},
+				{ once: true },
+			);
 
 			const response = await (options.fetch ?? fetch)(`${options.baseUrl}/generate`, {
 				method: "POST",
@@ -360,7 +370,7 @@ export function streamFactoryDroidGemini(
 					...options.headers,
 				},
 				body: JSON.stringify(body),
-				signal: tracker.requestSignal,
+				signal: requestSignal,
 			});
 			if (!response.ok) {
 				const bodyText = await response.text().catch(() => "");
@@ -381,22 +391,24 @@ export function streamFactoryDroidGemini(
 			let blockReason: string | undefined;
 			const toolCallIndices: number[] = [];
 
-			clearTimeout(firstEventTimer);
 			const chunks = iterateWithIdleTimeout(
 				readSseJson<GenerateContentResponse>(response.body, tracker.requestSignal, event =>
 					options.onSseEvent?.({ event: event.event, data: event.data, raw: [...event.raw] }, model),
 				),
 				{
 					idleTimeoutMs,
-					firstItemTimeoutMs:
-						firstEventDeadline === undefined ? undefined : Math.max(1, firstEventDeadline - Date.now()),
+					// The guard above owns the wait for the first chunk.
+					firstItemTimeoutMs: firstEventTimeoutMs === undefined ? undefined : 0,
 					errorMessage: stalled.message,
 					onIdle: () => tracker.abortLocally(stalled),
-					onFirstItemTimeout: () => tracker.abortLocally(stalled),
 					abortSignal: options.signal,
 				},
 			);
 			for await (const chunk of chunks) {
+				if (clearFirstEventGuard) {
+					clearFirstEventGuard();
+					clearFirstEventGuard = undefined;
+				}
 				// A server-declared error keeps its status and the same classification
 				// as the Google provider; only a stream that just stops is a premature close.
 				if (chunk.error) throw googleStreamChunkError(chunk.error, model.provider);
@@ -502,7 +514,7 @@ export function streamFactoryDroidGemini(
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
 		} finally {
-			clearTimeout(firstEventTimer);
+			clearFirstEventGuard?.();
 		}
 	})();
 

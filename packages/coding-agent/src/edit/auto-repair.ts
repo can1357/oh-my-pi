@@ -13,6 +13,7 @@
  * 94% under 150 lines; smol fixed 99% with one feedback retry, with ~12% of
  * raw candidates being reverts — hence the explicit revert rejection.
  */
+import { agentPauseGate } from "@oh-my-pi/pi-agent-core";
 import { completeSimple, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { diffLineRuns, editDiffString, parseCodeStatus } from "@oh-my-pi/pi-natives";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
@@ -353,6 +354,15 @@ export async function attemptEditAutoRepair(options: {
 	const apiKey = await registry.getApiKey(model, sessionId);
 	if (!apiKey) return undefined;
 
+	// An edit that started before `/pause` runs to completion, repair included,
+	// but the repair is a new request. Wait the pause out before reading the
+	// file — it may change while held — and before arming the repair budget,
+	// which bounds the model, not the human who paused it.
+	if (agentPauseGate.paused) {
+		await agentPauseGate.waitUntilResumed(options.signal);
+		if (options.signal?.aborted) return undefined;
+	}
+
 	// Repair against the bytes on disk, not the snapshot: a later operation in
 	// the same call or a format-on-write pass may have moved the file since the
 	// observation — and may even have restored the parse.
@@ -383,6 +393,11 @@ export async function attemptEditAutoRepair(options: {
 						maxTokens: COMPLETION_MAX_TOKENS,
 						disableReasoning: true,
 						signal,
+						// Each attempt holds at the provider boundary too: a pause
+						// engaged once the budget runs still sends nothing, and a
+						// pause that outlasts the budget skips the repair, leaving
+						// the edit with its parse warning, as any slow repair does.
+						beforeDispatch: agentPauseGate.dispatchHold(signal),
 					},
 				),
 			{ signal, provider: model.provider },

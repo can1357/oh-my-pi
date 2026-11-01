@@ -16,6 +16,7 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { agentPauseGate } from "@oh-my-pi/pi-agent-core";
 import {
 	type Api,
 	AuthStorage,
@@ -782,6 +783,10 @@ async function probeOneModel(
 			oauthIdentity,
 			maxTokens: 32,
 			signal: attemptSignal,
+			// Only `omp auth-gateway check --strict` sends this, and that process
+			// never engages `/pause`, so the hold is always open. It is here so no
+			// completion omp issues outside an agent loop goes out unheld.
+			beforeDispatch: agentPauseGate.dispatchHold(attemptSignal),
 		},
 	);
 	const latencyMs = Date.now() - start;

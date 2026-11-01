@@ -526,29 +526,35 @@ describe("AgentSession eager todo enforcement", () => {
 	it("does not refresh todo-init titles for headless subagent sessions", async () => {
 		// Issue #5910: a subagent (agentKind "sub") in a non-interactive host has no
 		// operator-visible title, so a todo-init replan refresh only wastes a
-		// tiny-model LLM call. isInteractiveHost() defaults false under bun test.
-		await recreateSession({ "title.refreshOnReplan": true }, { agentKind: "sub" });
-		await session.setSessionName("Old auto title", "auto");
-		const priorUser: AgentMessage = {
-			role: "user",
-			content: "rework parser diagnostics",
-			timestamp: Date.now() - 1,
-		};
-		session.agent.appendMessage(priorUser);
-		session.sessionManager.appendMessage(priorUser);
-		const completeSimpleMock = vi.spyOn(ai, "completeSimple");
-		scriptedResponses = [
-			createToolCallAssistantMessage("todo", {
-				op: "init",
-				list: [{ phase: "Parser", items: ["Replan parser diagnostics"] }],
-			}),
-			createAssistantMessage("todo initialized"),
-		];
+		// tiny-model LLM call. The host flag is process-wide and another file in the
+		// same process may have left it set, so the case pins the headless host itself.
+		const previousInteractiveHost = setInteractiveHost(false);
+		try {
+			await recreateSession({ "title.refreshOnReplan": true }, { agentKind: "sub" });
+			await session.setSessionName("Old auto title", "auto");
+			const priorUser: AgentMessage = {
+				role: "user",
+				content: "rework parser diagnostics",
+				timestamp: Date.now() - 1,
+			};
+			session.agent.appendMessage(priorUser);
+			session.sessionManager.appendMessage(priorUser);
+			const completeSimpleMock = vi.spyOn(ai, "completeSimple");
+			scriptedResponses = [
+				createToolCallAssistantMessage("todo", {
+					op: "init",
+					list: [{ phase: "Parser", items: ["Replan parser diagnostics"] }],
+				}),
+				createAssistantMessage("todo initialized"),
+			];
 
-		await session.prompt("replan parser diagnostics");
+			await session.prompt("replan parser diagnostics");
 
-		expect(completeSimpleMock).not.toHaveBeenCalled();
-		expect(session.sessionManager.getSessionName()).toBe("Old auto title");
+			expect(completeSimpleMock).not.toHaveBeenCalled();
+			expect(session.sessionManager.getSessionName()).toBe("Old auto title");
+		} finally {
+			setInteractiveHost(previousInteractiveHost);
+		}
 	});
 
 	it("refreshes and cards todo-init titles for a subagent focusable in an interactive host", async () => {

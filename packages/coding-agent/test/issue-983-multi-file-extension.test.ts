@@ -1,16 +1,29 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { discoverAndLoadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
 const TOOL_NAME = "legacy-multi-file-tool";
 
 describe("issue #983: multi-file legacy Pi extensions", () => {
 	const tempDirs: string[] = [];
+	let settingsState: SettingsTestState | undefined;
+
+	beforeEach(async () => {
+		// Discovery also loads `<agentDir>/extensions`, so the developer's own user
+		// extensions would be loaded beside the fixture and their errors counted.
+		settingsState = beginSettingsTest();
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-issue-983-agent-"));
+		tempDirs.push(agentDir);
+		setAgentDir(agentDir);
+	});
 
 	afterEach(async () => {
+		restoreSettingsTestState(settingsState);
+		settingsState = undefined;
 		await Promise.all(tempDirs.splice(0).map(dir => removeWithRetries(dir)));
 	});
 

@@ -418,6 +418,12 @@ describe.skipIf(!hasPtyHarness)("interactive startup changelog PTY smoke", () =>
 							// headless: it paints nothing and exits once startup drains. Clear it so
 							// CI runs the same painting interactive startup as a local `bun test`.
 							PI_TEST_RUNTIME: undefined,
+							// Running as production, the CLI would use the auth broker the developer's
+							// shell names, with their token, and export its telemetry to the collector
+							// their `OTEL_*` names; HOME below already hides their config.
+							OMP_AUTH_BROKER_URL: undefined,
+							OMP_AUTH_BROKER_TOKEN: undefined,
+							OTEL_SDK_DISABLED: "true",
 							HOME: root,
 							XDG_CONFIG_HOME: path.join(root, "xdg-config"),
 							XDG_STATE_HOME: path.join(root, "xdg-state"),

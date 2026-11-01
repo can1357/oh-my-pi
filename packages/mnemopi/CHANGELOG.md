@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `MnemopiOptions.beforeDispatch`, awaited before every remote completion and embedding attempt and handed to a custom completion function, and `RecallOptions.signal`, which cancels a recall's query embedding ([#17399](https://github.com/can1357/oh-my-pi/pull/17399) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.14.2] - 2026-10-31
 
 ### Fixed

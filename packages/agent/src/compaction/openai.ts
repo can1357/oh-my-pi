@@ -35,6 +35,7 @@ import { transformMessages } from "@oh-my-pi/pi-ai/providers/transform-messages"
 import type {
 	AssistantMessage,
 	CodexCompactionContext,
+	DispatchHold,
 	FetchImpl,
 	Message,
 	Model,
@@ -48,7 +49,10 @@ import {
 	stripOpenAIResponsesOutputOnlyStatusesForReplay,
 	truncateResponseItemId,
 } from "@oh-my-pi/pi-ai/utils";
+import { dispatchWhenOpen } from "@oh-my-pi/pi-ai/utils/dispatch-hold";
+import { armPreResponseTimeout } from "@oh-my-pi/pi-ai/utils/idle-iterator";
 import { captureOpenAIHttpError } from "@oh-my-pi/pi-ai/utils/openai-http";
+import { transportFetch } from "@oh-my-pi/pi-ai/utils/transport-fetch";
 import { isBedrockOpenAIUrl } from "@oh-my-pi/pi-catalog/hosts";
 import {
 	applyCodexResidencyHeader,
@@ -58,7 +62,7 @@ import {
 	OPENAI_HEADER_VALUES,
 	OPENAI_HEADERS,
 } from "@oh-my-pi/pi-catalog/wire/codex";
-import { $env, isRecord, logger, prompt, ptree, stringifyJson, structuredCloneJSON } from "@oh-my-pi/pi-utils";
+import { $env, isRecord, logger, prompt, stringifyJson, structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import { dataUrlImageSize } from "../image-tokens";
 import { Tokenizer } from "../tokenizer";
 import { appendAzureApiVersion, resolveAzureOpenAiBaseUrl } from "./azure-openai-endpoint";
@@ -876,11 +880,17 @@ export async function requestOpenAiRemoteCompaction(
 		codexCompaction?: CodexCompactionContext;
 		/** Forwarded to {@link trimRemoteCompactionInputToContextWindow}. */
 		rewriteOutputs?: boolean;
+		/** Awaited immediately before the request goes out; see `SummaryOptions.beforeDispatch`. */
+		beforeDispatch?: DispatchHold;
 	},
 ): Promise<OpenAiRemoteCompactionResponse> {
 	let fetchImpl: FetchImpl = opts?.fetch ?? fetch;
 	if (isBedrockOpenAIUrl(model.baseUrl)) {
-		({ model, apiKey, fetch: fetchImpl } = await prepareBedrockCompactionRequest(model, apiKey, opts?.fetch, signal));
+		// Bedrock's fetch signs the request on its way to the wire, so the send
+		// below is not one synchronous call: the hold rides into the transport
+		// too, which reads it again where the signed request leaves.
+		const heldFetch = transportFetch(model, opts?.fetch, opts?.beforeDispatch);
+		({ model, apiKey, fetch: fetchImpl } = await prepareBedrockCompactionRequest(model, apiKey, heldFetch, signal));
 	}
 	const endpoint = resolveOpenAiCompactEndpoint(model);
 	const requestModel = resolveOpenAiCompactModel(model);
@@ -951,19 +961,16 @@ export async function requestOpenAiRemoteCompaction(
 	applySessionHeader(headers, model.compat, opts?.sessionId);
 
 	// Codex endpoints require additional auth headers
+	let codexAccountId: string | undefined;
 	if (isCodexResponses) {
 		// Keep transport loading on the actual Codex request path, not compaction policy inspection.
 		const { createOpenAICodexCompatibilityMetadata } =
 			await import("@oh-my-pi/pi-ai/providers/openai-codex-responses");
-		const accountId = getCodexAccountId(apiKey);
-		if (accountId) {
-			headers[OPENAI_HEADERS.ACCOUNT_ID] = accountId;
+		codexAccountId = getCodexAccountId(apiKey);
+		if (codexAccountId) {
+			headers[OPENAI_HEADERS.ACCOUNT_ID] = codexAccountId;
 		}
 		applyCodexResidencyHeader(headers, apiKey);
-		const attestation = await getCodexAttestationHeader(accountId);
-		if (attestation) {
-			headers[OPENAI_HEADERS.ATTESTATION] = attestation;
-		}
 		headers[OPENAI_HEADERS.BETA] = OPENAI_HEADER_VALUES.BETA_RESPONSES;
 		headers[OPENAI_HEADERS.ORIGINATOR] = OPENAI_HEADER_VALUES.ORIGINATOR_CODEX;
 		// This compaction request sends no `service_tier`, so the hint is model-only.
@@ -995,12 +1002,39 @@ export async function requestOpenAiRemoteCompaction(
 		}
 	}
 
-	const response = await fetchImpl(endpoint, {
-		method: "POST",
-		headers,
-		body: stringifyJson(request),
-		signal: ptree.combineSignals(signal, opts?.timeoutMs ?? REMOTE_COMPACTION_TIMEOUT_MS),
-	});
+	// The hold is the last step before the wire — the metadata and Bedrock
+	// signing above both await — and it ends on the caller's signal. The fetch
+	// starts in the same synchronous step as the last read of the hold's probe,
+	// so a gate that closed after the hold answered still holds it.
+	//
+	// The timeout bounds the provider, not a `/pause`: armed before the hold, a
+	// pause would fail a held compaction instead of sending it on resume. It is
+	// armed at the send, and as a pre-response guard, because a transport that
+	// holds the request again — Bedrock's, which signs it on the way out —
+	// stops that clock while it holds and starts it again when the request
+	// leaves.
+	//
+	// Codex's DeviceCheck attestation is ephemeral, so it is minted after the
+	// hold answers, and again on every round a closed gate sends the request
+	// back to wait.
+	let wireHeaders = headers;
+	const response = await dispatchWhenOpen(
+		opts?.beforeDispatch,
+		signal,
+		() =>
+			fetchImpl(endpoint, {
+				method: "POST",
+				headers: wireHeaders,
+				body: stringifyJson(request),
+				signal: armPreResponseTimeout(signal, opts?.timeoutMs ?? REMOTE_COMPACTION_TIMEOUT_MS).signal,
+			}),
+		isCodexResponses
+			? async () => {
+					const attestation = await getCodexAttestationHeader(codexAccountId);
+					wireHeaders = attestation ? { ...headers, [OPENAI_HEADERS.ATTESTATION]: attestation } : headers;
+				}
+			: undefined,
+	);
 
 	if (!response.ok) {
 		const cause = await captureOpenAIHttpError(response);
@@ -1067,7 +1101,7 @@ export async function requestRemoteCompaction(
 	endpoint: string,
 	request: RemoteCompactionRequest,
 	signal?: AbortSignal,
-	opts?: { fetch?: FetchImpl; timeoutMs?: number; model?: Model; apiKey?: string },
+	opts?: { fetch?: FetchImpl; timeoutMs?: number; model?: Model; apiKey?: string; beforeDispatch?: DispatchHold },
 ): Promise<RemoteCompactionResponse> {
 	let endpointPath = endpoint;
 	try {
@@ -1094,12 +1128,17 @@ export async function requestRemoteCompaction(
 			}
 		: { systemPrompt: request.systemPrompt, prompt: request.prompt, maxTokens: request.maxTokens };
 
-	const response = await (opts?.fetch ?? fetch)(endpoint, {
-		method: "POST",
-		headers,
-		body: stringifyJson(body),
-		signal: ptree.combineSignals(signal, opts?.timeoutMs ?? REMOTE_COMPACTION_TIMEOUT_MS),
-	});
+	// Held before the timeout is armed, sent in the same synchronous step as the
+	// last read of the hold's probe, and timed by a pre-response guard a
+	// holding transport stops, like the Responses request above.
+	const response = await dispatchWhenOpen(opts?.beforeDispatch, signal, () =>
+		(opts?.fetch ?? fetch)(endpoint, {
+			method: "POST",
+			headers,
+			body: stringifyJson(body),
+			signal: armPreResponseTimeout(signal, opts?.timeoutMs ?? REMOTE_COMPACTION_TIMEOUT_MS).signal,
+		}),
+	);
 
 	if (!response.ok) {
 		const errorText = await response.text().catch(() => "");

@@ -1,6 +1,6 @@
 import { isCatalogEndpointUrl } from "@oh-my-pi/pi-catalog/compat/catalog-endpoint";
 import { logger } from "@oh-my-pi/pi-utils";
-import type { Api, FetchImpl, Model } from "../types";
+import type { Api, DispatchHold, FetchImpl, Model } from "../types";
 import { lastDispatchOrigin, transportFetch } from "../utils/transport-fetch";
 import { resolveAnthropicPrewarmTarget } from "./anthropic-http-options";
 
@@ -36,6 +36,17 @@ function resolvePrewarmTarget(model: Model<Api>): { origin: string; init: Reques
 	return { origin, init: {} };
 }
 
+export interface ConnectionPrewarmOptions {
+	fetch?: FetchImpl;
+	/**
+	 * Asked at the last step before the `HEAD` reaches the wire, after the
+	 * transport has prepared it; `true` abandons the warm-up there. A warm-up is
+	 * skipped rather than held: one that waited the condition out would wake up
+	 * racing the request it exists to speed up, for the same socket.
+	 */
+	skipIf?: () => boolean;
+}
+
 /**
  * Opens, or keeps alive, a pooled connection to {@link model}'s API host so
  * the next turn skips DNS + TCP + TLS. Sends a credential-less `HEAD` (nothing
@@ -45,8 +56,26 @@ function resolvePrewarmTarget(model: Model<Api>): { origin: string; init: Reques
  * `fetch.preconnect`, which also throws on Windows) is never reused.
  * Throttled per origin; best effort, never throws.
  */
-export async function prewarmModelConnection(model: Model<Api>, options?: { fetch?: FetchImpl }): Promise<void> {
+export async function prewarmModelConnection(model: Model<Api>, options?: ConnectionPrewarmOptions): Promise<void> {
 	let origin: string | undefined;
+	let startedAt: number | undefined;
+	let skipped = false;
+	const skipIf = options?.skipIf;
+	// The transport runs a dispatch hold after all of its own preparation and
+	// right before the wire, so that is where the skip check belongs. Throwing
+	// ends the attempt before any connection is opened, and the probe puts the
+	// same question in the synchronous step the transport dispatches from, so a
+	// condition that turns true after the hold was asked still abandons it.
+	const skipHold: DispatchHold | undefined =
+		skipIf &&
+		Object.assign(
+			(): void => {
+				if (!skipIf()) return;
+				skipped = true;
+				throw new Error("Connection prewarm skipped");
+			},
+			{ isClosed: skipIf },
+		);
 	try {
 		// Inside the boundary: resolving Anthropic's TLS options throws on an
 		// unusable CA or client-certificate setup, which the real request reports.
@@ -57,7 +86,12 @@ export async function prewarmModelConnection(model: Model<Api>, options?: { fetc
 		const last = prewarmedAt.get(origin);
 		if (last !== undefined && now - last < PREWARM_INTERVAL_MS) return;
 		prewarmedAt.set(origin, now);
-		const response = await transportFetch(model, options?.fetch)(origin, {
+		startedAt = now;
+		const response = await transportFetch(
+			model,
+			options?.fetch,
+			skipHold,
+		)(origin, {
 			...target.init,
 			method: "HEAD",
 			headers: {},
@@ -65,6 +99,12 @@ export async function prewarmModelConnection(model: Model<Api>, options?: { fetc
 		});
 		await response.body?.cancel();
 	} catch (error) {
+		if (skipped) {
+			// Nothing reached the host, so the throttle must not count this
+			// warm-up: the next one, asked once the condition has cleared, goes out.
+			if (origin !== undefined && prewarmedAt.get(origin) === startedAt) prewarmedAt.delete(origin);
+			return;
+		}
 		logger.debug("Model connection prewarm failed", {
 			origin,
 			error: error instanceof Error ? error.message : String(error),

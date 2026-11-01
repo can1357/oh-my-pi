@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { agentPauseGate } from "@oh-my-pi/pi-agent-core";
 import type { Api, AssistantMessage, completeSimple, Model } from "@oh-my-pi/pi-ai";
 import type { ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -90,6 +91,7 @@ describe("describeAttachedImagesForTextModel", () => {
 	});
 
 	afterEach(async () => {
+		agentPauseGate.resume();
 		await removeWithRetries(testDir);
 	});
 
@@ -237,5 +239,65 @@ describe("describeAttachedImagesForTextModel", () => {
 		expect(stub.calls).toHaveLength(0);
 		expect(blocks).toHaveLength(1);
 		expect(blocks[0]!.text).toContain("No vision-capable model");
+	});
+
+	it("holds the paid description at the gate when a pause lands while the api key resolves", async () => {
+		// The caller holds before this helper runs, so a `/pause` entered while
+		// the key resolves or the image is written must stop the vision call.
+		const stub = makeCompleteStub("A man holding a red balloon.");
+		const deps: DescribeAttachedImagesDeps = {
+			...makeDeps(testDir, [textModel, visionModel], stub.fn),
+			modelRegistry: {
+				getAvailable: () => [textModel, visionModel],
+				getApiKey: async () => {
+					agentPauseGate.pause(); // the user pauses while this await runs
+					return "test-key";
+				},
+				resolver: () => async () => "test-key",
+			} as unknown as DescribeAttachedImagesDeps["modelRegistry"],
+		};
+
+		const run = describeAttachedImagesForTextModel(
+			[{ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" }],
+			deps,
+		);
+		// The saved file proves the work reached the step before the call.
+		const deadline = Date.now() + 2_000;
+		while ((await fs.readdir(path.join(testDir, "local")).catch(() => [])).length === 0) {
+			if (Date.now() > deadline) throw new Error("the image was never saved");
+			await Bun.sleep(1);
+		}
+		await Bun.sleep(5); // room for a call the gate should have stopped
+		expect(stub.calls).toHaveLength(0);
+
+		agentPauseGate.resume();
+		const blocks = await run;
+		expect(stub.calls).toHaveLength(1);
+		expect(blocks[0]!.text).toContain("red balloon");
+	});
+
+	it("holds a provider-made redispatch of the description at the gate", async () => {
+		// The retries `completeSimple` makes itself never re-enter this module,
+		// so the request carries a hook each of them goes through.
+		const stub = makeCompleteStub("A man holding a red balloon.");
+		await describeAttachedImagesForTextModel(
+			[{ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" }],
+			makeDeps(testDir, [textModel, visionModel], stub.fn),
+		);
+		const options = stub.calls[0]?.[2] as { beforeDispatch?: () => Promise<void> } | undefined;
+		const beforeDispatch = options?.beforeDispatch;
+		if (!beforeDispatch) throw new Error("the vision request carries no dispatch hold");
+
+		agentPauseGate.pause();
+		let released = false;
+		const held = beforeDispatch().then(() => {
+			released = true;
+		});
+		await Bun.sleep(5);
+		expect(released).toBe(false);
+
+		agentPauseGate.resume();
+		await held;
+		expect(released).toBe(true);
 	});
 });

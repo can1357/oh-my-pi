@@ -197,6 +197,9 @@ function registerMnemopiState(
 				options.listeners?.add(listener);
 				return () => options.listeners?.delete(listener);
 			},
+			// A state the backend installs binds its `/pause` holds to the session's disposal.
+			isDisposed: false,
+			addDisposer: () => {},
 		} as never,
 	});
 	setMnemopiSessionState(registeredMnemopiState.session as never, registeredMnemopiState);
@@ -943,6 +946,8 @@ describe("Mnemopi backend lifecycle", () => {
 			emitNotice: () => {},
 			getHindsightSessionState: () => undefined,
 			subscribe: () => () => {},
+			isDisposed: false,
+			addDisposer: () => {},
 		} as never;
 		await mnemopiBackend.start({
 			session,

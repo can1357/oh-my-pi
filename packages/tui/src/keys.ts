@@ -306,7 +306,7 @@ const KITTY_MOD_CTRL = 4;
 const KITTY_MOD_SUPER = 8;
 const KITTY_MOD_NUM_LOCK = 128;
 const KITTY_LOCK_MASK = 64 + KITTY_MOD_NUM_LOCK; // Caps Lock + Num Lock
-const MODIFY_OTHER_KEYS_PATTERN = /^\x1b\[27;(\d+);(\d+)~$/;
+const MODIFY_OTHER_KEYS_PATTERN = /^\x1b\[27;(\d+);(\d+)~?$/;
 const KITTY_KEYPAD_OPERATOR_TEXT: Record<number, string> = {
 	57410: "/",
 	57411: "*",
@@ -467,13 +467,18 @@ interface ParsedModifyOtherKeysSequence {
 /**
  * Parse an xterm `modifyOtherKeys` format sequence: `CSI 27 ; modifiers ; keycode ~`.
  * Modifier values are 1-indexed in the wire format; we normalize to a 0-based bitmask.
+ *
+ * The trailing `~` is optional and a `0` modifier is rejected, both because the
+ * native parser (`crates/pi-natives/src/keys.rs`, `parse_modify_other_keys`)
+ * does the same: implementations that omit the `~` are named by `parseKey`, so
+ * `matchesKey` has to answer for the same bytes.
  */
 function parseModifyOtherKeysSequence(data: string): ParsedModifyOtherKeysSequence | null {
 	const match = data.match(MODIFY_OTHER_KEYS_PATTERN);
 	if (!match) return null;
 	const modValue = Number.parseInt(match[1] ?? "", 10);
 	const codepoint = Number.parseInt(match[2] ?? "", 10);
-	if (!Number.isFinite(modValue) || !Number.isFinite(codepoint)) return null;
+	if (!Number.isFinite(modValue) || !Number.isFinite(codepoint) || modValue < 1) return null;
 	return { codepoint, modifier: modValue - 1 };
 }
 
@@ -531,6 +536,21 @@ function matchesKeypadKey(data: string, keyId: KeyId): boolean | undefined {
 }
 
 /**
+ * Re-encode an xterm `modifyOtherKeys` sequence as the Kitty CSI-u sequence for
+ * the same key and modifiers.
+ *
+ * tmux uses the `modifyOtherKeys` form for modified keys, which the native
+ * matcher already accepts. The native matcher did not accept the unmodified
+ * `CSI 27;1;code~` form, although {@link parseKey} decodes it; before this
+ * conversion, `matchesKey` rejected it, so the two disagreed on the same bytes.
+ */
+function toKittyEquivalent(data: string): string | undefined {
+	const parsed = parseModifyOtherKeysSequence(data);
+	if (!parsed) return undefined;
+	return `\x1b[${parsed.codepoint};${parsed.modifier + 1}u`;
+}
+
+/**
  * Match input data against a key identifier string.
  *
  * Supported key identifiers:
@@ -548,7 +568,11 @@ function matchesKeypadKey(data: string, keyId: KeyId): boolean | undefined {
  */
 export function matchesKey(data: string, keyId: KeyId): boolean {
 	if (matchesRawBackspace(data, 4)) return keyId === "ctrl+backspace";
-	return matchesKeypadKey(data, keyId) ?? matchesKeyNative(data, keyId, kittyProtocolActive);
+	const keypad = matchesKeypadKey(data, keyId);
+	if (keypad !== undefined) return keypad;
+	if (matchesKeyNative(data, keyId, kittyProtocolActive)) return true;
+	const kittyEquivalent = toKittyEquivalent(data);
+	return kittyEquivalent !== undefined && matchesKeyNative(kittyEquivalent, keyId, kittyProtocolActive);
 }
 
 /**

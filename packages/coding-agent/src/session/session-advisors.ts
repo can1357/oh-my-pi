@@ -1,6 +1,7 @@
 import { scheduler } from "node:timers/promises";
 import {
 	Agent,
+	agentPauseGate,
 	type AgentMessage,
 	type AgentTool,
 	type AgentToolContext,
@@ -2602,6 +2603,9 @@ export class SessionAdvisors {
 						preferWebsockets: this.#host.preferWebsockets(),
 						codexAccessPrograms: cfgProvidersOpenaiCodexDaybreak.get(this.#host.settings),
 						codexCompaction,
+						// The advisor's loop holds its own turns at `/pause`, but this
+						// one-shot bypasses it: hold every request the pass sends.
+						beforeDispatch: agentPauseGate.dispatchHold(signal),
 					},
 				);
 				break;

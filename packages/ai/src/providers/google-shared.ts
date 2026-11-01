@@ -1073,7 +1073,10 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 				options?.streamFirstEventTimeoutMs ??
 				getStreamFirstEventTimeoutMs(options?.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs());
 			const openStreamAt = async (requestUrl: string): Promise<ReadableStream<Uint8Array>> => {
-				const watchdog = armPreResponseTimeout(options?.signal, firstEventTimeoutMs);
+				// `stream` rides along so the stream watchdog `register-builtins`
+				// installs skips the same held time the guard does instead of
+				// failing a request parked on a dispatch hold.
+				const watchdog = armPreResponseTimeout(options?.signal, firstEventTimeoutMs, stream);
 				// `timeout` is a Bun fetch extension absent from the DOM `RequestInit`.
 				const init: RequestInit & { timeout: false } = {
 					method: "POST",
@@ -1095,8 +1098,11 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 					}
 				} finally {
 					// Cleared once headers (or a finite error body) arrive: an absolute
-					// deadline would keep aborting an actively streaming body. Stream
-					// liveness belongs to the event iterator's idle watchdog.
+					// deadline would keep aborting an actively streaming body. Headers do
+					// not renew the first-event budget: the wait for the first event
+					// stays on the first-item deadline of the stream watchdog
+					// `register-builtins` installs, which runs from the wire on the same
+					// budget, and later stalls belong to its idle watchdog.
 					watchdog.clear();
 				}
 				if (!response.body) {

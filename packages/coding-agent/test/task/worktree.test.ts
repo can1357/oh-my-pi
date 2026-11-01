@@ -44,11 +44,14 @@ async function runGit(repo: string, args: string[]): Promise<string> {
 /**
  * `git init` pinned to verbatim line endings: assertions compare exact LF
  * bytes, and Git for Windows' system `core.autocrlf=true` would check files
- * out (and cherry-pick/restore them) as CRLF.
+ * out (and cherry-pick/restore them) as CRLF. Signing is off as well: a
+ * developer's global `commit.gpgsign` would otherwise sign every fixture and
+ * product commit, which fails without a key and is slow with one.
  */
 async function initRepo(dir: string, branch = "main"): Promise<void> {
 	await runGit(dir, ["init", "-q", "-b", branch]);
 	await runGit(dir, ["config", "core.autocrlf", "false"]);
+	await runGit(dir, ["config", "commit.gpgsign", "false"]);
 }
 
 async function createGitRepo(): Promise<string> {
@@ -376,6 +379,8 @@ describe("worktree isolation helpers", () => {
 				await runGit(isoRoot, ["clone", "-q", repo, iso]);
 				await runGit(iso, ["config", "user.email", "test@example.com"]);
 				await runGit(iso, ["config", "user.name", "Test User"]);
+				// A clone does not copy initRepo's local config.
+				await runGit(iso, ["config", "commit.gpgsign", "false"]);
 				const isolatedLines = parentDirtyLines.map((line, index) => (index === 4 ? "LINE5-AGENT-EDIT" : line));
 				await fs.writeFile(path.join(iso, fixtureName), `${isolatedLines.join("\n")}\n`);
 
@@ -774,6 +779,7 @@ describe("detachGitDir", () => {
 		await runGit(clone, ["config", "user.email", "src@example.com"]);
 		await runGit(clone, ["config", "user.name", "Source User"]);
 		await runGit(clone, ["config", "core.fileMode", "false"]);
+		await runGit(clone, ["config", "commit.gpgsign", "false"]);
 		// Git's fsmonitor/split-index interaction can crash during fixture setup.
 		await runGit(clone, ["config", "core.fsmonitor", "false"]);
 		await runGit(clone, ["config", "core.splitIndex", "true"]);
@@ -885,6 +891,7 @@ describe("detachGitDir", () => {
 				for (const dir of [module, nested]) {
 					await runGit(dir, ["config", "user.email", "src@example.com"]);
 					await runGit(dir, ["config", "user.name", "Source User"]);
+					await runGit(dir, ["config", "commit.gpgsign", "false"]);
 				}
 				await fs.writeFile(path.join(nested, "leaf.txt"), "isolated\n");
 				expect(await runGit(nested, ["diff", "--", "leaf.txt"])).toContain("+isolated");
@@ -955,6 +962,7 @@ describe("detachGitDir", () => {
 			// Submodule clones don't inherit the superproject's identity; CI has no global one.
 			await runGit(added, ["config", "user.email", "src@example.com"]);
 			await runGit(added, ["config", "user.name", "Source User"]);
+			await runGit(added, ["config", "commit.gpgsign", "false"]);
 			await fs.writeFile(path.join(added, "leaf.txt"), "isolated\n");
 			await runGit(added, ["commit", "-q", "-am", "isolated leaf"]);
 			const addedCommit = await runGit(added, ["rev-parse", "HEAD"]);

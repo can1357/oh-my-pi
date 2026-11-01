@@ -29,6 +29,7 @@ import {
 	type AuthBrokerClientConfig,
 	type DiscoverAuthStorageOptions,
 	discoverAuthStorage as discoverAuthStorageShared,
+	getAuthBrokerDeclarationGeneration,
 	getAuthBrokerTokenFilePath,
 	openAuthCredentialStore,
 	resolveAuthBrokerConfig as resolveAuthBrokerConfigShared,
@@ -91,7 +92,9 @@ export async function loadEffectiveAuthAccountPolicyConfig(
  * inputs (plus agent dir, which decides which config.yml is read) so tests
  * that flip `OMP_AUTH_BROKER_*` between cases still observe the change, while
  * repeated resolution within one CLI invocation (startup, subagent sessions)
- * skips the config.yml read and any `!command` token resolution.
+ * skips the config.yml read and any `!command` token resolution. Under the test
+ * runtime the key also carries the broker declaration generation, so a result
+ * never outlives the declarations it was resolved under.
  */
 let cachedConfigKey: string | null = null;
 let cachedConfigPromise: Promise<AuthBrokerClientConfig | null> | null = null;
@@ -107,7 +110,7 @@ let cachedConfigPromise: Promise<AuthBrokerClientConfig | null> | null = null;
  * retried. Concurrent callers share one in-flight resolution.
  */
 export function resolveAuthBrokerConfig(): Promise<AuthBrokerClientConfig | null> {
-	const key = `${process.env.OMP_AUTH_BROKER_URL ?? ""}\u0000${process.env.OMP_AUTH_BROKER_TOKEN ?? ""}\u0000${getAgentDir()}`;
+	const key = `${process.env.OMP_AUTH_BROKER_URL ?? ""}\u0000${process.env.OMP_AUTH_BROKER_TOKEN ?? ""}\u0000${getAgentDir()}\u0000${getAuthBrokerDeclarationGeneration()}`;
 	if (cachedConfigPromise && cachedConfigKey === key) return cachedConfigPromise;
 	const promise = resolveAuthBrokerConfigShared({
 		agentDir: getAgentDir(),

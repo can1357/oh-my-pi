@@ -34,6 +34,7 @@ import {
 	type AgentToolContext,
 	type AgentToolResult,
 	type AgentTurnEndContext,
+	agentPauseGate,
 	AppendOnlyContextManager,
 	type AsideMessage,
 	type BeforeToolCallContext,
@@ -83,7 +84,6 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { type Effort, serviceTierFamily, streamSimple } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import { prewarmModelConnection } from "@oh-my-pi/pi-ai/providers/connection-prewarm";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-state";
 import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
@@ -448,6 +448,7 @@ import {
 import type { SessionContext, TranscriptSessionContextOptions } from "./session-context";
 import { buildSessionContext, getRestorableSessionModels, isTranscriptEntry } from "./session-context";
 import type { CacheWarmer, CacheWarmingMode, CacheWarmingStatus, PromptCacheEntry } from "./cache-warmer";
+import { prewarmUnlessPaused } from "./connection-prewarm";
 import { isUserRequestEntry, transcriptEntryMessage, userTurnDraft } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import { anonymizeSessionTranscripts } from "./session-anonymizer";
 import {
@@ -1121,6 +1122,12 @@ export class AgentSession implements SettingsScope {
 	#autolearnCaptureAbortController: AbortController | undefined;
 	#autolearnCaptureTask: Promise<void> | undefined;
 	#isDisposed = false;
+	/**
+	 * Aborted by {@link beginDispose}: the lifetime every wait this session owns
+	 * is combined with, so work parked on something no caller's signal covers
+	 * (a `/pause` hold on a side turn) unwinds when the session goes away.
+	 */
+	#disposeAbortController = new AbortController();
 	#modelDiscoveryAbortController = new AbortController();
 	/** Process-wide by default (double-spend safety across sessions); injectable for tests. */
 	#resetCoordinator: CodexAutoRedeemCoordinator;
@@ -2249,7 +2256,24 @@ export class AgentSession implements SettingsScope {
 		this.#titleSystemPrompt = config.titleSystemPrompt;
 		this.#autoTitle = config.autoTitle === true;
 		this.#transformContext = config.transformContext ?? (messages => messages);
-		this.#sideStreamFn = config.sideStreamFn ?? streamSimple;
+		const sideStreamFn = config.sideStreamFn ?? streamSimple;
+		// Compaction summaries, handoff documents, branch summaries and side
+		// turns all reach a provider through this one function, outside any
+		// agent loop, so `/pause` holds each of their requests here. The
+		// request's own signal or this session's disposal ends the whole wait,
+		// the request's own hold included, and fails the request with that
+		// reason: a human releases `/pause`, and a disposed session must not pay
+		// for its held requests on resume. The request's own hold runs after the
+		// wait, and again after any pause engaged while it ran, so a caller's
+		// check of what changed under the pause sees the state after it.
+		this.#sideStreamFn = (model, context, options) => {
+			const disposed = this.#disposeAbortController.signal;
+			const lifetime = options?.signal ? AbortSignal.any([options.signal, disposed]) : disposed;
+			return sideStreamFn(model, context, {
+				...options,
+				beforeDispatch: agentPauseGate.dispatchHold(lifetime, options?.beforeDispatch),
+			});
+		};
 		this.#onPayload = config.onPayload;
 		this.rawSseDebugBuffer = config.rawSseDebugBuffer ?? new RawSseDebugBuffer();
 		// Avoid wrapping in an `async` closure when no user callback is configured: the
@@ -6183,6 +6207,7 @@ export class AgentSession implements SettingsScope {
 	 */
 	beginDispose(): void {
 		this.#isDisposed = true;
+		this.#disposeAbortController.abort(new Error("Session disposed"));
 		for (const dispose of this.#disposers.splice(0)) dispose();
 		this.#modelDiscoveryAbortController.abort();
 		this.#queuedMessageDrainBlocked = false;
@@ -6843,12 +6868,13 @@ export class AgentSession implements SettingsScope {
 	/**
 	 * Warms the active model's API connection while idle, so the next turn
 	 * skips connection setup. Throttled and best effort; no-op mid-turn, where
-	 * the pooled socket is busy and a warm-up would open a redundant one.
+	 * the pooled socket is busy and a warm-up would open a redundant one, and
+	 * while `/pause` holds (see `./connection-prewarm`).
 	 */
 	prewarmModelConnection(): void {
 		const model = this.model;
 		if (!model || this.#isDisposed || this.isStreaming) return;
-		void prewarmModelConnection(model);
+		prewarmUnlessPaused(model);
 	}
 
 	get isAborting(): boolean {
@@ -12719,16 +12745,43 @@ export class AgentSession implements SettingsScope {
 	 * the snapshot + stream pipeline. The snapshot includes any in-flight
 	 * streaming assistant text so the model sees the half-finished response
 	 * rather than missing context.
+	 *
+	 * A side turn runs outside `agentLoop`, so `/pause` — which every agent loop
+	 * polls before a model call — would not otherwise stop it, and a paused
+	 * session kept paying for automatic titles, composer predictions and idle
+	 * recaps. The turn waits for the resume at entry and again at each call that
+	 * spends, because the preparation between them awaits; the gate is tested
+	 * before awaiting so a running session pays no microtask for it.
 	 */
 	async runEphemeralTurn(args: EphemeralTurnOptions): Promise<EphemeralTurnResult> {
+		// Snapshotted before the entry hold, not after: a `/new` during the hold
+		// replaces the session this turn was asked for, and the readiness check
+		// below is what catches it.
+		const sessionGeneration = this.#sessionGeneration;
+		// Every hold of this turn ends on either of two lifetimes: the caller's
+		// signal and this session's. `/pause` is released by a human, so without
+		// the session's own lifetime a disposed session kept a side turn parked
+		// and then paid for it on resume.
+		const holdSignal = args.signal
+			? AbortSignal.any([args.signal, this.#disposeAbortController.signal])
+			: this.#disposeAbortController.signal;
+		// Entry is not enough: the preparation below awaits image normalization,
+		// history conversion and the side-context hooks, and `/pause` engaged
+		// during any of them would otherwise still reach a provider. Hold again
+		// at each call that spends — the vision request and the side stream.
+		// Each site tests the gate before awaiting, so a running session pays no
+		// microtask for a pause nobody engaged.
+		if (agentPauseGate.paused) await agentPauseGate.waitUntilResumed(holdSignal);
 		const model = this.model;
 		if (!model) {
 			throw new Error("No active model on session");
 		}
 		const modelDescription = `${model.provider}/${model.id} (${model.api})`;
-		const sessionGeneration = this.#sessionGeneration;
 		const assertEphemeralTurnReady = () => {
 			args.signal?.throwIfAborted();
+			// A hold ends on disposal as well as on the caller's signal, and the
+			// session is gone by the time it does: nothing of this turn may run on.
+			if (this.#isDisposed) throw new Error("Session disposed during ephemeral turn.");
 			// The side request must use the exact model snapshot captured above.
 			// `modelsAreEqual` intentionally compares only provider/id, while a
 			// replacement with that same identity can still change routing and wire
@@ -12738,6 +12791,8 @@ export class AgentSession implements SettingsScope {
 				throw new Error("Active session changed during ephemeral turn; retry.");
 			}
 		};
+		// The entry hold is a hold like any other: what changed under it counts.
+		assertEphemeralTurnReady();
 		for (const field of ["maxTokens", "maxContextBytes"] as const) {
 			const cap = args[field];
 			if (cap !== undefined && (!Number.isSafeInteger(cap) || cap <= 0)) {
@@ -12761,8 +12816,14 @@ export class AgentSession implements SettingsScope {
 		// Images, those of earlier side turns too, get a prompt's handling: normalized
 		// for the model, and described by a vision model for a text-only one.
 		const promptImages = await this.#normalizeImagesForModel(args.promptImages);
+		// `#normalizeImagesForModel` above already awaited, so the gate can have
+		// closed since the entry test; the description is itself a paid request.
+		if (promptImages?.length && agentPauseGate.paused) {
+			await agentPauseGate.waitUntilResumed(holdSignal);
+			assertEphemeralTurnReady();
+		}
 		const imageDescriptionNotice = promptImages?.length
-			? await this.#buildImageDescriptionNotice(promptImages, args.signal)
+			? await this.#buildImageDescriptionNotice(promptImages, holdSignal)
 			: undefined;
 		const history = args.history && (await this.#prepareSideHistory(args.history, args.signal));
 		assertEphemeralTurnReady();
@@ -12833,6 +12894,13 @@ export class AgentSession implements SettingsScope {
 				hideThinkingSummary: this.agent.hideThinkingSummary,
 				serviceTier: this.#models.effectiveServiceTier(model),
 				maxTokens: args.maxTokens,
+				// The check below is this turn's last synchronous one, but the
+				// stream still resolves the credential, any command-backed
+				// headers and an in-flight slot before the transport, and it
+				// re-dispatches on its own after a rotation. The side stream
+				// parks each of those dispatches at the gate first, so what
+				// changed under the pause is checked here, after the wait.
+				beforeDispatch: assertEphemeralTurnReady,
 				signal: args.signal ? AbortSignal.any([args.signal, streamAbort.signal]) : streamAbort.signal,
 			},
 			model.provider,
@@ -12843,6 +12911,10 @@ export class AgentSession implements SettingsScope {
 		let providerReplyText = "";
 		let emittedReplyText = "";
 		let assistantMessage: AssistantMessage | undefined;
+		// The provider boundary: every await above could have spanned a `/pause`,
+		// and `assertEphemeralTurnReady` after the hold rejects a model or
+		// session that changed while the gate held this turn.
+		if (agentPauseGate.paused) await agentPauseGate.waitUntilResumed(holdSignal);
 		assertEphemeralTurnReady();
 		try {
 			const stream = await this.#sideStreamFn(model, context, options);

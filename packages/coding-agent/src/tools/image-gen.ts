@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import { type AgentToolResult, agentPauseGate } from "@oh-my-pi/pi-agent-core";
 import {
 	type GeneratedImage,
 	generateImage,
@@ -23,6 +23,7 @@ import type { CustomTool } from "../extensibility/custom-tools/types";
 import imageGenDescription from "../prompts/tools/image-gen.md" with { type: "text" };
 import { resolveConfiguredModelTarget } from "../session/role-models";
 import { resolveReadPath, specialFileKind } from "./path-utils";
+import { pauseHeldFetch } from "./pause-held-fetch";
 
 const IMAGE_TIMEOUT = 3 * 60 * 1000;
 const MAX_IMAGE_SIZE = 35 * 1024 * 1024;
@@ -243,6 +244,11 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 	async execute(_toolCallId, params, _onUpdate, ctx, signal) {
 		return untilAborted(signal, async () => {
 			const sessionId = ctx.sessionManager.getSessionId();
+			// The generation budget bounds the provider, not a human's `/pause`:
+			// wait a pause out before arming it. One engaged once it runs is held at
+			// the fetch below and can still expire it, failing the tool call with a
+			// timeout, as a slow provider does.
+			await agentPauseGate.dispatchHold(signal)();
 			const requestSignal = ptree.combineSignals(signal, IMAGE_TIMEOUT);
 			const effectiveSettings = ctx.settings ?? settings;
 			const pool = roleCandidatePool("image", effectiveSettings, ctx.modelRegistry);
@@ -324,7 +330,9 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 				try {
 					const result = await generateImage(resolvedModel, request, {
 						apiKey,
-						fetch: ctx.fetch ?? fetch,
+						// A tool already running when `/pause` lands finishes, but its
+						// generation request waits for the resume.
+						fetch: pauseHeldFetch(ctx.fetch ?? fetch),
 						signal: requestSignal,
 						carrier: resolvedCarrier,
 						sessionId,

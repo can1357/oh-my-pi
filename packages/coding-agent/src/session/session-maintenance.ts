@@ -5,6 +5,7 @@ import {
 	type Agent,
 	type AgentMessage,
 	type AgentTurnEndContext,
+	agentPauseGate,
 	type MessageCountOptions,
 	resolveTelemetry,
 	type StreamFn,
@@ -3720,6 +3721,10 @@ export class SessionMaintenance {
 						providerSessionState: this.#host.providerSessionState,
 						preferWebsockets: this.#host.preferWebsockets(),
 						codexAccessPrograms: cfgProvidersOpenaiCodexDaybreak.get(this.#host.settings),
+						// The remote and provider-native requests fetch on their own
+						// and never reach `completeImpl`, so `/pause` holds every
+						// request this compaction sends here.
+						beforeDispatch: agentPauseGate.dispatchHold(signal),
 						// Route every summarization HTTP request through the
 						// session's side-stream transport so the provider
 						// concurrency cap (e.g. providers.ollama-cloud.maxConcurrency)
@@ -5633,6 +5638,9 @@ export class SessionMaintenance {
 									preferWebsockets: this.#host.preferWebsockets(),
 									codexAccessPrograms: cfgProvidersOpenaiCodexDaybreak.get(this.#host.settings),
 									codexCompaction,
+									// See the manual callsite: every request this pass sends,
+									// remote and provider-native included, waits out `/pause`.
+									beforeDispatch: agentPauseGate.dispatchHold(autoCompactionSignal),
 									// This loop already retries the whole compaction attempt on
 									// transient errors, so the summarization oneshots must not
 									// retry too — the budgets would multiply and each outer

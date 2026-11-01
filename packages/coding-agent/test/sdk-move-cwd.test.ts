@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -14,6 +14,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
 import { getProjectAgentDir, getProjectDir, setProjectDir, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { restoreEnvValue } from "./helpers/settings-test-state";
 
 function textContent(result: { content?: Array<{ type: string; text?: string }> }): string {
 	return (
@@ -28,6 +29,14 @@ function textContent(result: { content?: Array<{ type: string; text?: string }> 
 
 describe("createAgentSession cwd after /move", () => {
 	const tempDirs: string[] = [];
+	let ambientConfigFiles: string | undefined;
+
+	beforeEach(() => {
+		// `PI_CONFIG_FILES` overlays outrank a project's config.yml, so an overlay in the shell
+		// running the suite would replace the memory backend these cases configure per project.
+		ambientConfigFiles = process.env.PI_CONFIG_FILES;
+		delete process.env.PI_CONFIG_FILES;
+	});
 
 	afterEach(() => {
 		// `Settings.loadIsolated` opened `<agentDir>/agent.db`; Windows cannot delete it while open.
@@ -35,6 +44,7 @@ describe("createAgentSession cwd after /move", () => {
 		for (const tempDir of tempDirs.splice(0)) {
 			removeSyncWithRetries(tempDir);
 		}
+		restoreEnvValue("PI_CONFIG_FILES", ambientConfigFiles);
 	});
 
 	it.each(["disabled", "empty", "failed"] as const)(

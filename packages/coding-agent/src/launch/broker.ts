@@ -1,3 +1,4 @@
+import type { Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 // node:net only serves the TCP readiness probe for user daemons (`connectPort`).
 import * as net from "node:net";
@@ -429,6 +430,8 @@ class DaemonBroker {
 	readonly #idleGraceMs: number;
 	readonly #restartBackoffBaseMs: number;
 	readonly #endpointCheckMs: number;
+	/** The runtime dir as it was before startup acquired anything in it; unset where no endpoint file is watched. */
+	readonly #runtimeDirIdentity: Stats | undefined;
 	#endpointTimer: NodeJS.Timeout | undefined;
 	readonly #records = new Map<string, ManagedDaemon>();
 	/**
@@ -449,6 +452,8 @@ class DaemonBroker {
 	/** Abortable `wait`/follow-`logs` requests, keyed by wire request id, so a client can cancel its own poll. */
 	readonly #inFlight = new Map<string, { socket: IpcConnection; controller: AbortController }>();
 	#server: IpcServer | undefined;
+	/** Startup's record recovery, which shutdown() waits for so it can retire what recovery adopted. */
+	#recovery: Promise<void> | undefined;
 	#idleTimer: NodeJS.Timeout | undefined;
 	#shuttingDown = false;
 
@@ -459,6 +464,7 @@ class DaemonBroker {
 		idleGraceMs: number,
 		restartBackoffBaseMs: number,
 		endpointCheckMs: number,
+		runtimeDirIdentity: Stats | undefined,
 	) {
 		this.#projectDir = projectDir;
 		this.#runtimeDir = runtimeDir;
@@ -467,48 +473,117 @@ class DaemonBroker {
 		this.#idleGraceMs = idleGraceMs;
 		this.#restartBackoffBaseMs = restartBackoffBaseMs;
 		this.#endpointCheckMs = endpointCheckMs;
+		this.#runtimeDirIdentity = runtimeDirIdentity;
 	}
 
 	async run(onListening?: () => void): Promise<void> {
-		await this.#recoverRecords();
-		this.#server = await IpcServer.listen(
+		try {
+			this.#recovery = this.#recoverRecords();
+			await this.#recovery;
+			await this.#listen(onListening);
+		} catch (error) {
+			// The caller releases the scope lease once this rejects, so whatever startup opened
+			// closes first: a bound server would go on accepting clients for a broker that no
+			// longer owns the scope, and recovered detached daemons would go on being polled.
+			try {
+				await this.shutdown();
+			} catch (cleanupError) {
+				throw new AggregateError([error, cleanupError], "Daemon broker startup failed, and so did its cleanup");
+			}
+			throw error;
+		}
+		await this.#finished.promise;
+	}
+
+	/**
+	 * Bind the endpoint and start serving, unless a shutdown has been requested.
+	 *
+	 * shutdown() closes only the server it can see. One requested while the bind is pending (from
+	 * a signal through the postmortem callback, or from a client the native listener accepted
+	 * before the bind returned here) finds none and settles without it. So startup does not bind
+	 * once a shutdown was requested, and closes a server whose bind returns after one instead of
+	 * installing it. run() returns through the lease release only after this does, so the lease is
+	 * never released while that server still listens.
+	 */
+	async #listen(onListening?: () => void): Promise<void> {
+		if (this.#shuttingDown) return;
+		const server = await IpcServer.listen(
 			this.#endpoint,
 			{ framing: "lines", maxFrameBytes: MAX_REQUEST_BYTES },
 			socket => this.#accept(socket),
 		);
-		if (process.platform !== "win32") this.#watchEndpoint();
+		if (this.#shuttingDown) {
+			await server.close();
+			return;
+		}
+		this.#server = server;
+		if (this.#runtimeDirIdentity) this.#watchEndpoint(this.#runtimeDirIdentity);
 		this.#scheduleIdleShutdown();
 		onListening?.();
-		await this.#finished.promise;
 	}
 
 	async shutdown(): Promise<void> {
 		if (this.#shuttingDown) return this.#finished.promise;
 		this.#shuttingDown = true;
+		// Recovery adopts no further record once this is set, but the one it is adopting lands in
+		// `#records` after the loop below would have passed it: its readiness poller would keep
+		// running and its reaped state would go unwritten. Waiting lets the loop retire it like the
+		// rest. A pending bind needs no wait: the one server it can produce, #listen closes itself.
+		// A recovery failure is run()'s to report.
+		await this.#recovery?.catch(() => undefined);
 		clearTimeout(this.#idleTimer);
 		this.#idleTimer = undefined;
 		clearInterval(this.#endpointTimer);
 		this.#endpointTimer = undefined;
+		// Defence, not the repair of an observed failure: stopping a record does native process
+		// and file work (terminating it, reading a detached daemon's log, closing its log) that
+		// can reject. One record's failure must not leave the other records running, the server
+		// bound, or `#finished` pending, which would strand run() and the lease release behind
+		// it. The failure still rejects `#finished`, so run() and every caller here report it.
+		const failures: unknown[] = [];
 		for (const record of this.#records.values()) {
 			const detached = record.spec.detached && !record.stopRequested && record.snapshot.pid !== undefined;
-			if (!detached && !terminalState(record.snapshot.state)) await this.#stopRecord(record, 2_000);
+			try {
+				if (!detached && !terminalState(record.snapshot.state)) await this.#stopRecord(record, 2_000);
+			} catch (error) {
+				failures.push(error);
+			}
 			// The detached daemon outlives this broker and the next one recovers it from
 			// metadata. Retire this broker's generation so a late exit or readiness
 			// callback cannot settle the stale record over the new owner's metadata.
 			if (detached) record.generation++;
 			clearTimeout(record.restartTimer);
-			await record.log?.close();
+			try {
+				await record.log?.close();
+			} catch (error) {
+				failures.push(error);
+			}
 			await record.persistQueue;
 		}
 		this.#ownerSockets.clear();
 		for (const socket of this.#sockets) socket.destroy();
 		this.#sockets.clear();
 		this.#clients.clear();
-		await this.#server?.close();
-		this.#finished.resolve();
+		try {
+			await this.#server?.close();
+		} catch (error) {
+			failures.push(error);
+		}
+		if (failures.length === 0) this.#finished.resolve();
+		else if (failures.length === 1) this.#finished.reject(failures[0]);
+		else this.#finished.reject(new AggregateError(failures, "Daemon broker shutdown failed"));
+		return this.#finished.promise;
 	}
 
 	#accept(socket: IpcConnection): void {
+		// A broker that is shutting down serves no new client. shutdown() destroys the connections
+		// it holds and then closes the server, and closing leaves accepted connections open. One
+		// accepted after that point, while the close is pending or before a bind that was pending
+		// at shutdown returns, would stay open and be served after the scope lease is released.
+		if (this.#shuttingDown) {
+			socket.destroy();
+			return;
+		}
 		this.#sockets.add(socket);
 		let authenticated = false;
 		// Oversized requests (> MAX_REQUEST_BYTES) close the connection natively.
@@ -633,7 +708,17 @@ class DaemonBroker {
 				if (controller && this.#inFlight.get(id)?.controller === controller) this.#inFlight.delete(id);
 			}
 			socket.send(JSON.stringify({ id, ok: true, result }));
-			if (request.operation.op === "shutdown") setTimeout(() => void this.shutdown(), 10);
+			if (request.operation.op === "shutdown") {
+				// run() rejects with the same failure; logging here keeps this trigger from
+				// becoming an unhandled rejection.
+				setTimeout(() => {
+					this.shutdown().catch(error => {
+						logger.warn("Daemon broker shutdown on request failed", {
+							error: error instanceof Error ? error.message : String(error),
+						});
+					});
+				}, 10);
+			}
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			socket.send(JSON.stringify({ id, ok: false, error: message }));
@@ -1427,6 +1512,10 @@ class DaemonBroker {
 			throw error;
 		});
 		for (const entry of entries) {
+			// A broker that is shutting down takes over no more of the scope. Records not yet read stay
+			// as the previous broker left them, for the next broker to recover; shutdown() waits for the
+			// one in flight and retires it.
+			if (this.#shuttingDown) return;
 			if (!entry.isDirectory()) continue;
 			const dir = path.join(root, entry.name);
 			try {
@@ -1553,7 +1642,11 @@ class DaemonBroker {
 					return;
 				}
 				if (this.#clients.size === 0) await this.shutdown();
-			})();
+			})().catch(error => {
+				logger.warn("Daemon broker idle shutdown failed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			});
 		}, this.#idleGraceMs);
 	}
 
@@ -1563,19 +1656,23 @@ class DaemonBroker {
 	 * while every new broker exits on the held lease and every new client fails
 	 * with `connect ENOENT`. Shutting down releases the lease, and the next client
 	 * spawns a broker that rebuilds the scope.
+	 *
+	 * The runtime dir is checked too. A socket path too long for `sun_path` is
+	 * bound under `/tmp/omp-<euid>/` instead, so deleting the dir leaves that
+	 * socket in place; and a client recreates the dir, so its identity is compared
+	 * with the one this broker started in rather than its mere existence.
 	 */
-	#watchEndpoint(): void {
+	#watchEndpoint(runtimeDir: Stats): void {
 		this.#endpointTimer = setInterval(() => {
-			void fs
-				.stat(this.#endpoint)
-				.then(
-					() => undefined,
-					error => {
-						if (!isEnoent(error) || this.#shuttingDown) return;
-						logger.warn("Daemon broker socket was deleted; releasing the scope", { endpoint: this.#endpoint });
-						return this.shutdown();
-					},
-				)
+			void this.#scopeLoss(runtimeDir)
+				.then(loss => {
+					if (!loss || this.#shuttingDown) return;
+					logger.warn(`Daemon broker ${loss}; releasing the scope`, {
+						endpoint: this.#endpoint,
+						runtimeDir: this.#runtimeDir,
+					});
+					return this.shutdown();
+				})
 				.catch(error => {
 					logger.warn("Daemon broker shutdown after socket loss failed", {
 						error: error instanceof Error ? error.message : String(error),
@@ -1584,12 +1681,31 @@ class DaemonBroker {
 		}, this.#endpointCheckMs);
 		this.#endpointTimer.unref();
 	}
+
+	/** Why this broker no longer owns a reachable scope, or `undefined` while it does. */
+	async #scopeLoss(runtimeDir: Stats): Promise<string | undefined> {
+		try {
+			await fs.stat(this.#endpoint);
+		} catch (error) {
+			if (isEnoent(error)) return "socket was deleted";
+			throw error;
+		}
+		try {
+			const current = await fs.stat(this.#runtimeDir);
+			return current.dev === runtimeDir.dev && current.ino === runtimeDir.ino
+				? undefined
+				: "runtime dir was replaced";
+		} catch (error) {
+			if (isEnoent(error)) return "runtime dir was deleted";
+			throw error;
+		}
+	}
 }
 
 export interface DaemonBrokerStartOptions {
 	/** Base of the exponential child-restart backoff. */
 	restartBackoffBaseMs?: number;
-	/** How often the broker checks that its socket file still exists. */
+	/** How often the broker checks that its socket file and runtime dir are still the ones it started with. */
 	endpointCheckMs?: number;
 	/**
 	 * Called once the broker accepts connections. An embedding host connects its
@@ -1616,41 +1732,53 @@ export async function startDaemonBrokerFromEnvironment(options: DaemonBrokerStar
 			? requestedRestartBackoffBaseMs
 			: RESTART_BACKOFF_BASE_MS;
 	await fs.mkdir(runtimeDir, { recursive: true, mode: 0o700 });
+	// Take the dir's identity before acquiring anything in it, so losing the dir here needs no
+	// cleanup. Taken after the lease, a dir replaced in between would be recorded as this
+	// broker's own while its lease sat in the deleted one; taken first, any replacement from
+	// here on reads as scope loss to the endpoint watcher, which then gives the scope up.
+	const runtimeDirIdentity = process.platform === "win32" ? undefined : await fs.stat(runtimeDir);
 	const endpoint = daemonBrokerEndpoint(runtimeDir);
 	// Hold the lease for the whole broker lifetime: it is a native lock the OS
 	// releases on exit, so keeping `lease` referenced keeps the scope owned.
 	const lease = await acquireBrokerLease(runtimeDir, endpoint);
 	if (!lease) return;
-	setProcessName("omp daemon broker");
-	// Record the scope's project dir so `omp ps` can map this hash-keyed runtime
-	// dir back to its project offline.
-	void writeDaemonScopeMeta(runtimeDir, projectDir).catch(error => {
-		logger.warn("Failed to record daemon scope metadata", {
-			error: error instanceof Error ? error.message : String(error),
-		});
-	});
-	// Reclaim sibling daemon scopes left behind by dead brokers (issue #8674).
-	// Detached and non-throwing so it never delays clients connecting to us.
-	void pruneDeadDaemonRuntimeDirs(runtimeDir).catch(error => {
-		logger.warn("Daemon runtime prune failed", {
-			error: error instanceof Error ? error.message : String(error),
-		});
-	});
-	const token = (await Bun.file(path.join(runtimeDir, TOKEN_FILE)).text()).trim();
-	if (!token) throw new Error("Daemon broker token is empty");
-	const broker = new DaemonBroker(
-		projectDir,
-		runtimeDir,
-		token,
-		idleGraceMs,
-		restartBackoffBaseMs,
-		options.endpointCheckMs ?? ENDPOINT_CHECK_MS,
-	);
-	const cancelCleanup = postmortem.register("daemon-broker", () => broker.shutdown());
 	try {
-		await broker.run(options.onListening);
+		setProcessName("omp daemon broker");
+		// Record the scope's project dir so `omp ps` can map this hash-keyed runtime
+		// dir back to its project offline.
+		void writeDaemonScopeMeta(runtimeDir, projectDir).catch(error => {
+			logger.warn("Failed to record daemon scope metadata", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		});
+		// Reclaim sibling daemon scopes left behind by dead brokers (issue #8674).
+		// Detached and non-throwing so it never delays clients connecting to us.
+		void pruneDeadDaemonRuntimeDirs(runtimeDir).catch(error => {
+			logger.warn("Daemon runtime prune failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		});
+		const token = (await Bun.file(path.join(runtimeDir, TOKEN_FILE)).text()).trim();
+		if (!token) throw new Error("Daemon broker token is empty");
+		const broker = new DaemonBroker(
+			projectDir,
+			runtimeDir,
+			token,
+			idleGraceMs,
+			restartBackoffBaseMs,
+			options.endpointCheckMs ?? ENDPOINT_CHECK_MS,
+			runtimeDirIdentity,
+		);
+		const cancelCleanup = postmortem.register("daemon-broker", () => broker.shutdown());
+		try {
+			await broker.run(options.onListening);
+		} finally {
+			cancelCleanup();
+		}
 	} finally {
-		cancelCleanup();
+		// A failed startup releases the scope too, or every later broker for it exits on the
+		// held lease. run() settles only once the broker has closed what it opened, so no
+		// successor can take the lease while this one still answers on the endpoint.
 		await releaseBrokerLease(lease);
 	}
 }

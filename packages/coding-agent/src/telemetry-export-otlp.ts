@@ -41,7 +41,7 @@ import { BatchLogRecordProcessor, LoggerProvider } from "@opentelemetry/sdk-logs
 import { MeterProvider, PeriodicExportingMetricReader } from "@opentelemetry/sdk-metrics";
 import { BatchSpanProcessor } from "@opentelemetry/sdk-trace-base";
 import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
-import type { TelemetryModelPricingResolver, TelemetrySignalConfig } from "./telemetry-export";
+import type { TelemetryDestinations, TelemetryModelPricingResolver } from "./telemetry-export";
 
 /**
  * Periodic flush interval. A long-lived `omp` process (the ACP server is
@@ -146,8 +146,12 @@ export function createTelemetryExportConfig(
 	};
 }
 
-/** Register global trace/log/meter providers for the enabled signals. */
-export async function registerProviders(signalConfig: TelemetrySignalConfig): Promise<void> {
+/**
+ * Register global trace/log/meter providers, each exporting to its signal's
+ * destination. Synchronous, so the bootstrap's last check of those destinations
+ * and the exporters built from them happen in one step.
+ */
+export function registerProviders(destinations: TelemetryDestinations): void {
 	// `envDetector` parses OTEL_RESOURCE_ATTRIBUTES (percent-decoded, per spec) and
 	// OTEL_SERVICE_NAME; merged last so both take precedence over the fallback
 	// service.name — with OTEL_SERVICE_NAME still winning service.name inside the
@@ -156,8 +160,10 @@ export async function registerProviders(signalConfig: TelemetrySignalConfig): Pr
 		detectResources({ detectors: [envDetector] }),
 	);
 
-	if (signalConfig.trace) {
-		const exporter = new OTLPTraceExporter();
+	// Each exporter gets its URL explicitly. Left to itself it reads `OTEL_*` again, and
+	// that may name a collector other than the one the bootstrap resolved and checked.
+	if (destinations.trace) {
+		const exporter = new OTLPTraceExporter({ url: destinations.trace });
 		traceProvider = new NodeTracerProvider({
 			resource,
 			spanProcessors: [new BatchSpanProcessor(exporter)],
@@ -165,8 +171,8 @@ export async function registerProviders(signalConfig: TelemetrySignalConfig): Pr
 		traceProvider.register({ contextManager: new AsyncLocalStorageContextManager().enable() });
 	}
 
-	if (signalConfig.metric) {
-		const exporter = new OTLPMetricExporter();
+	if (destinations.metric) {
+		const exporter = new OTLPMetricExporter({ url: destinations.metric });
 		meterProvider = new MeterProvider({
 			resource,
 			readers: [new PeriodicExportingMetricReader({ exporter })],
@@ -175,8 +181,8 @@ export async function registerProviders(signalConfig: TelemetrySignalConfig): Pr
 		metricRecorder = new AgentMetricRecorder(metrics.getMeter("@oh-my-pi/pi-coding-agent"));
 	}
 
-	if (signalConfig.log) {
-		const exporter = new OTLPLogExporter();
+	if (destinations.log) {
+		const exporter = new OTLPLogExporter({ url: destinations.log });
 		logProvider = new LoggerProvider({
 			resource,
 			processors: [new BatchLogRecordProcessor({ exporter })],

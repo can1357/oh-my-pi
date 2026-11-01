@@ -96,6 +96,48 @@ describe("matchesKey", () => {
 		setKittyProtocolActive(false);
 	});
 
+	it("matches xterm modifyOtherKeys sequences, as parseKey already named them", () => {
+		// Regression: `parseKey` decoded the unmodified `CSI 27;1;code~` form,
+		// but `matchesKey` rejected it. These assertions keep the two in agreement
+		// on the same bytes while preserving modifier distinctions.
+		try {
+			for (const kitty of [false, true]) {
+				setKittyProtocolActive(kitty);
+				expect(matchesKey("\x1b[27;1;32~", "space")).toBe(true);
+				expect(matchesKey("\x1b[27;1;13~", "enter")).toBe(true);
+				expect(matchesKey("\x1b[27;1;13~", "return")).toBe(true);
+				expect(matchesKey("\x1b[27;1;27~", "escape")).toBe(true);
+				expect(matchesKey("\x1b[27;5;99~", "ctrl+c")).toBe(true);
+				// Modifiers are still honoured: shift+space is not space.
+				expect(matchesKey("\x1b[27;2;32~", "space")).toBe(false);
+				expect(matchesKey("\x1b[27;1;32~", "enter")).toBe(false);
+			}
+		} finally {
+			// A failed assertion must not leave the process-global mode on for
+			// the files after this one.
+			setKittyProtocolActive(false);
+		}
+	});
+
+	it("matches the modifyOtherKeys form implementations send without the trailing tilde", () => {
+		// The native parser accepts `CSI 27;mod;code` with no `~`, so `parseKey`
+		// names those bytes; `matchesKey` has to answer for the same ones.
+		try {
+			for (const kitty of [false, true]) {
+				setKittyProtocolActive(kitty);
+				expect(parseKey("\x1b[27;1;32")).toBe("space");
+				expect(matchesKey("\x1b[27;1;32", "space")).toBe(true);
+				expect(matchesKey("\x1b[27;1;13", "enter")).toBe(true);
+				expect(matchesKey("\x1b[27;5;99", "ctrl+c")).toBe(true);
+				expect(matchesKey("\x1b[27;2;32", "space")).toBe(false);
+				// A zero modifier is not a wire value either matcher accepts.
+				expect(matchesKey("\x1b[27;0;32", "space")).toBe(false);
+			}
+		} finally {
+			setKittyProtocolActive(false);
+		}
+	});
+
 	it("matches keypad operators as their printable symbols", () => {
 		setKittyProtocolActive(true);
 		expect(matchesKey("\x1b[57410u", "/")).toBe(true);

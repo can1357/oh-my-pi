@@ -25,6 +25,7 @@ import { WriteTool } from "../../src/tools/write";
 import { sharedBrowserDaemonName } from "../../src/tools/browser/shared-daemon";
 import type { ToolSession } from "../../src/tools";
 import type { DaemonSnapshot } from "@oh-my-pi/pi-tui/tools/daemon";
+import { withoutAmbientShellPrefix } from "../helpers/ambient-shell-prefix";
 
 function startBroker(projectDir: string, runtimeDir: string): Promise<void> {
 	const previous = [
@@ -46,6 +47,10 @@ function startBroker(projectDir: string, runtimeDir: string): Promise<void> {
 // Services really spawn the configured shell with POSIX command lines. Windows
 // has no `/bin/sh`, so use the product's own Git Bash discovery there.
 const SERVICE_SHELL = process.platform === "win32" ? procmgr.resolveWindowsShell() : "/bin/sh";
+
+// A service runs `<prefix> <command>` under that shell, and a bash-only prefix such as
+// `set +o pipefail;` stops `/bin/sh` before the service prints its readiness line.
+withoutAmbientShellPrefix();
 
 /**
  * Settles a broker-backed call with a plain `await`. On Windows, Bun's

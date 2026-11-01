@@ -1,5 +1,6 @@
 import { dirname } from "node:path";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, agentPauseGate } from "@oh-my-pi/pi-agent-core";
+import type { DispatchHold } from "@oh-my-pi/pi-ai";
 import type * as MnemopiNs from "@oh-my-pi/pi-mnemopi";
 import type { Mnemopi, RecallResult } from "@oh-my-pi/pi-mnemopi";
 import type * as MnemopiCoreNs from "@oh-my-pi/pi-mnemopi/core";
@@ -249,6 +250,12 @@ export interface MnemopiSessionStateOptions {
 	aliasOf?: MnemopiSessionState;
 	lastRetainedTurn?: number;
 	hasRecalledForFirstTurn?: boolean;
+	/**
+	 * Ends the requests this state's memories hold for `/pause`: the owning
+	 * session's disposal. Closing the memories ends them too. An alias shares
+	 * its parent's memories, and their lifetime with them.
+	 */
+	lifetime?: AbortSignal;
 }
 
 export class MnemopiSessionState {
@@ -265,6 +272,8 @@ export class MnemopiSessionState {
 	unsubscribe?: () => void;
 	#retentionCursorLoaded = false;
 	#recallGeneration = 0;
+	/** Aborted as the memories this state owns close, so what they still hold for `/pause` fails instead of sending on resume. */
+	readonly #closing = new AbortController();
 
 	constructor(options: MnemopiSessionStateOptions) {
 		this.sessionId = options.sessionId;
@@ -273,7 +282,14 @@ export class MnemopiSessionState {
 		this.aliasOf = options.aliasOf;
 		this.lastRetainedTurn = options.lastRetainedTurn ?? 0;
 		this.hasRecalledForFirstTurn = options.hasRecalledForFirstTurn ?? false;
-		this.scoped = options.aliasOf?.scoped ?? createScopedResources(options.config);
+		if (options.aliasOf) {
+			this.scoped = options.aliasOf.scoped;
+		} else {
+			const lifetime = options.lifetime
+				? AbortSignal.any([this.#closing.signal, options.lifetime])
+				: this.#closing.signal;
+			this.scoped = createScopedResources(options.config, agentPauseGate.dispatchHold(lifetime));
+		}
 		this.memory = this.scoped.retain.memory;
 		this.globalMemory = this.scoped.global?.memory;
 	}
@@ -432,7 +448,8 @@ export class MnemopiSessionState {
 		});
 	}
 
-	async collectScopedRecallResults(query: string): Promise<RecallResult[]> {
+	/** `signal` ends each recall's query-embedding request, including a wait at the memories' `/pause` hold. */
+	async collectScopedRecallResults(query: string, signal?: AbortSignal): Promise<RecallResult[]> {
 		const merged: RecallResult[] = [];
 		const byId = new Map<string, number>();
 		const byContent = new Map<string, number>();
@@ -452,6 +469,7 @@ export class MnemopiSessionState {
 					const results = await target.memory.recallEnhanced(recallQuery, this.config.recallLimit, {
 						includeFacts: true,
 						channelId: target.bank,
+						signal,
 					});
 					targetSucceeded = true;
 					withLoopPhase("mnemopi.recall", () => {
@@ -537,7 +555,7 @@ export class MnemopiSessionState {
 
 	/** Recalls `query` into a prompt block plus the memories it holds; undefined when aborted. */
 	async #recallBlock(query: string, signal?: AbortSignal): Promise<RecallBlock | undefined> {
-		const results = await this.collectScopedRecallResults(query);
+		const results = await this.collectScopedRecallResults(query, signal);
 		if (signal?.aborted) return undefined;
 		if (results.length === 0) return { text: "", memories: [] };
 		const { text, offsets } = formatRecallBlock(results);
@@ -956,6 +974,7 @@ export class MnemopiSessionState {
 		this.unsubscribe = undefined;
 		if (this.aliasOf) return;
 		const closeOwned = (): void => {
+			this.#closing.abort(new Error("Mnemopi memory closed"));
 			for (const memory of this.scoped.owned) memory.close();
 		};
 		if (options.consolidate === false) {
@@ -1001,7 +1020,7 @@ export class MnemopiSessionState {
 
 // `per-project-tagged` is implemented by opening both the project bank and the
 // shared bank, then merging recall results while keeping writes project-local by default.
-function createScopedResources(config: MnemopiBackendConfig): MnemopiScopedResources {
+function createScopedResources(config: MnemopiBackendConfig, beforeDispatch: DispatchHold): MnemopiScopedResources {
 	// Recall feature flags are per memory instance (see `createMemory`) so concurrent
 	// sessions with different settings cannot clobber each other through process-wide
 	// defaults. MNEMOPI_POLYPHONIC_RECALL / MNEMOPI_ENHANCED_RECALL still override them.
@@ -1010,7 +1029,7 @@ function createScopedResources(config: MnemopiBackendConfig): MnemopiScopedResou
 	const open = (bank: string): MnemopiScopedMemory => {
 		const existing = memories.get(bank);
 		if (existing) return existing;
-		const scoped = { bank, memory: createMemory(config, bank) };
+		const scoped = { bank, memory: createMemory(config, bank, beforeDispatch) };
 		memories.set(bank, scoped);
 		return scoped;
 	};
@@ -1123,7 +1142,8 @@ function normalizeRecallQuery(query: string): string {
 function escapeRegExp(text: string): string {
 	return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
-function createMemory(config: MnemopiBackendConfig, bank: string): Mnemopi {
+/** `beforeDispatch` holds every remote completion and embedding the memory makes for `/pause`. */
+function createMemory(config: MnemopiBackendConfig, bank: string, beforeDispatch: DispatchHold): Mnemopi {
 	const providerOptions = config.providerOptions as Record<string, unknown>;
 	const { Mnemopi } = requireMnemopi();
 	return new Mnemopi({
@@ -1134,6 +1154,7 @@ function createMemory(config: MnemopiBackendConfig, bank: string): Mnemopi {
 		authorType: "agent",
 		channelId: bank,
 		...providerOptions,
+		beforeDispatch,
 		proactiveLinking: config.proactiveLinking,
 		polyphonicRecall: config.polyphonicRecall,
 		enhancedRecall: config.enhancedRecall,

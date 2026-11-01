@@ -16,6 +16,7 @@ import { withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import {
+	armPreResponseTimeout,
 	getOpenAIStreamFirstEventTimeoutMs,
 	getOpenAIStreamIdleTimeoutMs,
 	iterateWithIdleTimeout,
@@ -152,14 +153,24 @@ const streamAzureOpenAIResponsesOnce = (
 			);
 			const attemptedReasoningEffortFallbacks = new Set<string>();
 			let openaiStream: AsyncIterable<ResponseStreamEvent>;
+			// One first-event budget runs from the wire to the first event: the
+			// request guard spends the part before headers, and the event iterator
+			// below waits on what it left, not on a fresh budget.
+			let firstEventBudgetLeftMs = firstEventTimeoutMs;
 			while (true) {
-				let requestTimeout: NodeJS.Timeout | undefined;
-				if (requestTimeoutMs !== undefined) {
-					requestTimeout = setTimeout(
-						() => abortTracker.abortLocally(firstEventTimeoutAbortError),
-						requestTimeoutMs,
-					);
-				}
+				// A guard rather than a plain timer: it rides on the request signal,
+				// so the transport stops its clock while the request is prepared and
+				// parked on a dispatch hold, and `stream` (which a stream watchdog
+				// may observe) reports that time as ours rather than the provider's.
+				const requestGuard = armPreResponseTimeout(requestSignal, requestTimeoutMs, stream);
+				const guardedRequestSignal = requestGuard.signal ?? requestSignal;
+				guardedRequestSignal.addEventListener(
+					"abort",
+					() => {
+						if (!requestSignal.aborted) abortTracker.abortLocally(firstEventTimeoutAbortError);
+					},
+					{ once: true },
+				);
 				try {
 					const headersWithTimeout = { ...headers };
 					if (requestTimeoutMs !== undefined) {
@@ -169,14 +180,16 @@ const streamAzureOpenAIResponsesOnce = (
 						url,
 						headers: headersWithTimeout,
 						body: params,
-						signal: requestSignal,
+						signal: guardedRequestSignal,
 						fetch: options?.fetch,
 						// Transient 408/429/5xx get Retry-After-aware transport retries;
-						// the first-event watchdog aborts `requestSignal`, so retries
-						// cannot extend the caller's deadline.
+						// the guard above covers every attempt and backoff sleep with one
+						// budget, so retries cannot extend the caller's deadline.
 						onSseEvent: rawSseObserver,
 					});
 					openaiStream = handle.events;
+					requestGuard.clear();
+					firstEventBudgetLeftMs = requestGuard.remaining() ?? firstEventTimeoutMs;
 					break;
 				} catch (error) {
 					const capturedErrorResponse = error instanceof OpenAIHttpError ? error.captured : undefined;
@@ -190,14 +203,14 @@ const streamAzureOpenAIResponsesOnce = (
 					applyOpenAIReasoningEffortFallback(params, reasoningEffortFallback);
 					rawRequestDump.body = params;
 				} finally {
-					if (requestTimeout !== undefined) clearTimeout(requestTimeout);
+					requestGuard.clear();
 				}
 			}
 			stream.push({ type: "start", partial: output });
 
 			const timedOpenaiStream = iterateWithIdleTimeout(openaiStream, {
 				idleTimeoutMs,
-				firstItemTimeoutMs: firstEventTimeoutMs,
+				firstItemTimeoutMs: firstEventBudgetLeftMs,
 				firstItemErrorMessage: AZURE_OPENAI_RESPONSES_FIRST_EVENT_TIMEOUT_MESSAGE,
 				errorMessage: "Azure OpenAI responses stream stalled while waiting for the next event",
 				onIdle: () => requestAbortController.abort(),

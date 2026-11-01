@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
-import { Agent, type StreamFn, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { Context, FetchImpl, Message, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
+import { Agent, agentPauseGate, type StreamFn, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { AssistantMessage, Context, FetchImpl, Message, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -61,6 +62,7 @@ describe("one-shot side request state", () => {
 	const sessions: AgentSession[] = [];
 
 	afterEach(async () => {
+		agentPauseGate.resume();
 		for (const session of sessions.splice(0)) await session.dispose();
 	});
 
@@ -333,5 +335,106 @@ describe("one-shot side request state", () => {
 		});
 		await expect(session.runEphemeralTurn({ promptText: "Question" })).rejects.toThrow("Factory failed");
 		expect(retained.size).toBe(0);
+	});
+
+	// The gate check before the stream is this turn's last synchronous one: the
+	// stream itself still resolves the credential and can re-dispatch after a
+	// rotation, so the request carries a hold for its own dispatches.
+	it("carries a pause-gate hold the side request's own dispatch runs through", async () => {
+		let hold: (() => Promise<void> | void) | undefined;
+		const session = createSession((_model, _context, options) => {
+			hold = (options as { beforeDispatch?: () => Promise<void> | void } | undefined)?.beforeDispatch;
+			const stream = new AssistantMessageEventStream();
+			const message: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: "Answer" }],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				timestamp: 1,
+				stopReason: "stop",
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+			};
+			queueMicrotask(() => {
+				stream.push({ type: "start", partial: message });
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		});
+
+		const turn = await session.runEphemeralTurn({ promptText: "Side question" });
+		expect(turn.assistantMessage.content).toEqual([{ type: "text", text: "Answer" }]);
+		if (!hold) throw new Error("the side request carries no dispatch hold");
+
+		agentPauseGate.pause();
+		let released = false;
+		const waiting = Promise.resolve(hold()).then(() => {
+			released = true;
+		});
+		await Bun.sleep(5);
+		expect(released).toBe(false);
+
+		agentPauseGate.resume();
+		await waiting;
+		expect(released).toBe(true);
+	});
+
+	// `/pause` is released by a human, not by a signal the turn carries, so a
+	// side turn held at entry outlived the session that asked for it: disposal
+	// left it parked, and a resume afterwards still paid for its request.
+	it("cancels a side turn held at entry when the session is disposed", async () => {
+		let dispatches = 0;
+		const session = createSession(() => {
+			dispatches += 1;
+			const stream = new AssistantMessageEventStream();
+			const message: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: "Answer" }],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				timestamp: 1,
+				stopReason: "stop",
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+			};
+			queueMicrotask(() => {
+				stream.push({ type: "start", partial: message });
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		});
+
+		agentPauseGate.pause();
+		const pending = session.runEphemeralTurn({ promptText: "Side question" });
+		await session.dispose();
+
+		const outcome = await Promise.race([
+			pending.then(
+				() => "answered",
+				(error: unknown) => (error instanceof Error ? error.message : String(error)),
+			),
+			Bun.sleep(1_000).then(() => "still held"),
+		]);
+		expect(outcome).toBe("Session disposed during ephemeral turn.");
+		expect(dispatches).toBe(0);
+
+		// And the resume the human eventually gives pays for nothing.
+		agentPauseGate.resume();
+		await Bun.sleep(5);
+		expect(dispatches).toBe(0);
 	});
 });

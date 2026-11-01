@@ -20,6 +20,7 @@ import * as piNatives from "@oh-my-pi/pi-natives";
 import { $which, removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
 import { cfgBashDirenvLoadTimeoutMs, cfgShellPath } from "@oh-my-pi/pi-coding-agent/exec/settings";
+import { withoutAmbientShellPrefix } from "./helpers/ambient-shell-prefix";
 
 // Matches the schema default for `tools.artifactHeadBytes` (20 KB) used by
 // OutputSink when bash-executor pulls settings via resolveOutputSinkHeadBytes.
@@ -86,6 +87,9 @@ async function expectMarkerNeverWritten(marker: string, release: string): Promis
 	await Bun.sleep(KILL_REACT_MS);
 	expect(fs.existsSync(marker)).toBe(false);
 }
+
+// Several cases route the native `Shell.run` by the exact command it receives, which a prefix rewrites.
+withoutAmbientShellPrefix();
 
 describe("executeBash", () => {
 	let tempDir: string;

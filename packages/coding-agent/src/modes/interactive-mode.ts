@@ -63,6 +63,7 @@ import {
 	formatNumber,
 	getActiveProfile,
 	getProjectDir,
+	isBunTestRuntime,
 	isEnoent,
 	logger,
 	postmortem,
@@ -2169,7 +2170,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#syncEditorMaxHeight();
 		};
 		process.stdout.on("resize", this.#resizeHandler);
-		setWordPredictionHost(textPredictionBackend);
+		// The backend is the machine-global text-predict daemon. A test process that
+		// types prose into a real editor would start the developer's broker and daemon
+		// and leave them running, so tests get no host and editors show no ghost text.
+		if (!isBunTestRuntime()) setWordPredictionHost(textPredictionBackend);
 		try {
 			this.historyStorage = HistoryStorage.open();
 			this.editor.setHistoryStorage(this.historyStorage);
@@ -2665,7 +2669,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.isInitialized = true;
 		// The startup composer is already visible. Commit the complete runtime
 		// tree before session_start hooks/reconciliation continue; renderNow keeps
-		// TUI's multiplexer, output-backlog, and image safety gates.
+		// TUI's multiplexer and image safety gates. It paints through #doRender
+		// rather than #executeRender, so the output-backlog deferral does not
+		// apply and the frame is written even when the terminal is behind.
 		this.ui.renderNow();
 
 		const streamCwd = this.sessionManager.getCwd();

@@ -80,6 +80,7 @@ export function chatTextBackend(model: Model<Api>, options: ChatTextBackendOptio
 							disableReasoning: true,
 							toolChoice: prompt.retry ? { type: "function", name: SUBMIT_JUDGMENT.name } : undefined,
 							signal: judge.signal,
+							beforeDispatch: judge.beforeDispatch,
 							onAttempt: options.onAttempt,
 						},
 					),

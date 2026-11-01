@@ -27,6 +27,7 @@ import { AnthropicApiError, AnthropicConnectionError, AnthropicConnectionTimeout
 export { AnthropicApiError, AnthropicConnectionError, AnthropicConnectionTimeoutError };
 
 import type { FetchImpl } from "../types";
+import { armPreResponseTimeout } from "../utils/idle-iterator";
 import type { MessageCreateParams } from "./anthropic-wire";
 
 /** Default pre-response timeout, matching the SDK's 10-minute default. */
@@ -310,28 +311,24 @@ export class AnthropicHttpClient {
 		timeoutMs: number,
 		callerSignal: AbortSignal | undefined,
 	): Promise<Response> {
-		const controller = new AbortController();
-		let timedOut = false;
-		const timer = setTimeout(() => {
-			timedOut = true;
-			controller.abort();
-		}, timeoutMs);
-		const onAbort = () => controller.abort();
-		callerSignal?.addEventListener("abort", onAbort, { once: true });
+		// A stop-the-clock guard rather than a plain timer: the fetch is the
+		// caller's transport, which parks on its dispatch hold and stops this
+		// clock (and any guard already on `callerSignal`) until the request
+		// leaves, so a `/pause` a human releases never reads as a timeout.
+		const watchdog = armPreResponseTimeout(callerSignal, timeoutMs);
 		try {
 			return await fetchFn(url, {
 				...this.#options.fetchOptions,
 				method,
 				headers,
 				body,
-				signal: controller.signal,
+				signal: watchdog.signal,
 			});
 		} catch (error) {
-			if (timedOut && !callerSignal?.aborted) throw new AIError.AnthropicConnectionTimeoutError();
+			if (watchdog.signal?.aborted && !callerSignal?.aborted) throw new AIError.AnthropicConnectionTimeoutError();
 			throw error;
 		} finally {
-			clearTimeout(timer);
-			callerSignal?.removeEventListener("abort", onAbort);
+			watchdog.clear();
 		}
 	}
 

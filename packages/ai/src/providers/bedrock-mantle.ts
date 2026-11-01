@@ -2,6 +2,7 @@ import { NO_AUTH_SENTINEL } from "../auth-retry";
 import { type AwsBedrockProviderOptions, resolveAwsBearerToken } from "../registry/aws";
 import type { FetchImpl, Model } from "../types";
 import { resolveAwsRegion } from "../utils/aws-profile";
+import { fetchAuthorizedAtWire, withoutDispatchHold } from "../utils/transport-fetch";
 import { invalidateAwsCredentialCache, resolveAwsCredentials } from "./aws-credentials";
 import { signRequest } from "./aws-sigv4";
 import type { OpenAIResponsesOptions } from "./openai-responses";
@@ -32,29 +33,42 @@ function createSignedFetch(options: BedrockMantleOptions, region: string): Fetch
 		for (const [name, value] of new Headers(init?.headers)) headers.set(name, value);
 		headers.delete("authorization");
 		const body = await requestBody(input, init);
-		const credentials = await resolveAwsCredentials({
-			profile: options.providerOptions?.profile,
-			region,
-			signal: options.signal,
-			fetch: baseFetch,
-		});
-		const signed = await signRequest({
-			method,
-			host: url.host,
-			path: url.pathname,
-			query: url.search.slice(1),
-			body,
-			region,
-			service: "bedrock-mantle",
-			credentials,
-			headers: { "content-type": headers.get("content-type") ?? "application/json" },
-		});
-		for (const [name, value] of Object.entries(signed)) {
-			if (value !== undefined && name !== "host") headers.set(name, value);
-		}
-		const response = await baseFetch(
+		// A SigV4 signature carries the time it was made, and AWS rejects one more
+		// than five minutes old. A dispatch hold that a human releases outlasts
+		// that, so the request is signed where it leaves: after the transport's
+		// holds open, on every attempt. Credentials are looked up there too, since
+		// temporary ones can expire during the same wait.
+		const authorize = async (wireInit: RequestInit): Promise<RequestInit> => {
+			// A credential lookup is this request's prerequisite, not inference
+			// traffic: it goes out unheld under its own timeouts.
+			const credentials = await resolveAwsCredentials({
+				profile: options.providerOptions?.profile,
+				region,
+				signal: options.signal,
+				fetch: withoutDispatchHold(baseFetch),
+			});
+			const signed = await signRequest({
+				method,
+				host: url.host,
+				path: url.pathname,
+				query: url.search.slice(1),
+				body,
+				region,
+				service: "bedrock-mantle",
+				credentials,
+				headers: { "content-type": headers.get("content-type") ?? "application/json" },
+			});
+			const wireHeaders = new Headers(wireInit.headers);
+			for (const [name, value] of Object.entries(signed)) {
+				if (value !== undefined && name !== "host") wireHeaders.set(name, value);
+			}
+			return { ...wireInit, headers: wireHeaders };
+		};
+		const response = await fetchAuthorizedAtWire(
+			baseFetch,
 			url,
 			method === "GET" || method === "HEAD" ? { ...init, method, headers } : { ...init, method, headers, body },
+			authorize,
 		);
 		if (response.status === 401 || response.status === 403) {
 			invalidateAwsCredentialCache({ profile: options.providerOptions?.profile, region });

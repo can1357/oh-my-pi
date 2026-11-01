@@ -1,10 +1,16 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
-import { Agent, agentLoop, agentPauseGate } from "@oh-my-pi/pi-agent-core";
+import { Agent, AgentPauseGate, agentLoop, agentPauseGate } from "@oh-my-pi/pi-agent-core";
 import type { AgentContext, AgentLoopConfig, AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core/types";
-import type { Message } from "@oh-my-pi/pi-ai";
+import type { Api, DispatchHold, FetchImpl, Message, Model } from "@oh-my-pi/pi-ai";
+import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { createMockModel, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { transportFetch } from "@oh-my-pi/pi-ai/utils/transport-fetch";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { createUserMessage } from "./helpers";
+
+const SOURCE_ID = "pause-gate-test";
 
 function identityConverter(messages: AgentMessage[]): Message[] {
 	return messages.filter(m => m.role === "user" || m.role === "assistant" || m.role === "toolResult") as Message[];
@@ -351,5 +357,266 @@ describe("agentPauseGate", () => {
 		} finally {
 			gateWait.restore();
 		}
+	});
+
+	// The loop polls the gate before a model call, then resolves the credential,
+	// the metadata and the provider-bound context. A pause engaged during any of
+	// them used to reach the provider: the main turn installed no dispatch hold.
+	it("holds the model call when the pause engages while the credential resolves", async () => {
+		const dispatchedWhilePaused: boolean[] = [];
+		const api = "pause-gate-main-dispatch" as Api;
+		const model = buildModel({
+			id: "pause-gate-main",
+			name: "Pause Gate Main",
+			api,
+			provider: "pause-gate-test",
+			baseUrl: "https://example.invalid",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1_000,
+			maxTokens: 100,
+		});
+		registerCustomApi(
+			api,
+			() => {
+				dispatchedWhilePaused.push(agentPauseGate.paused);
+				const events = new AssistantMessageEventStream();
+				queueMicrotask(() =>
+					events.push({
+						type: "done",
+						reason: "stop",
+						message: {
+							role: "assistant",
+							content: [{ type: "text", text: "ok" }],
+							api,
+							provider: model.provider,
+							model: model.id,
+							timestamp: 0,
+							stopReason: "stop",
+							usage: {
+								input: 0,
+								output: 0,
+								cacheRead: 0,
+								cacheWrite: 0,
+								totalTokens: 0,
+								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+							},
+						},
+					}),
+				);
+				return events;
+			},
+			SOURCE_ID,
+		);
+		const gateWait = observeGateWait();
+		try {
+			const run = agentLoop(
+				[createUserMessage("hi")],
+				{ systemPrompt: ["Test"], messages: [], tools: [] },
+				{
+					model,
+					convertToLlm: identityConverter,
+					// The gate closes in the window between the loop's poll and the wire.
+					getApiKey: async () => {
+						agentPauseGate.pause();
+						return "pause-gate-key";
+					},
+				},
+			).result();
+
+			const reached = await Promise.race([
+				gateWait.parked.then(() => "parked"),
+				run.then(
+					() => "dispatched",
+					() => "dispatched",
+				),
+			]);
+			expect(reached).toBe("parked");
+			expect(dispatchedWhilePaused).toEqual([]);
+
+			agentPauseGate.resume();
+			await run;
+			expect(dispatchedWhilePaused).toEqual([false]);
+		} finally {
+			gateWait.restore();
+			unregisterCustomApis(SOURCE_ID);
+		}
+	});
+});
+
+/**
+ * `AgentPauseGate.dispatchHold` composed with a caller's own hold, at the
+ * transport that sends the request. Each test builds its own gate, so none of
+ * them touches the process-wide one.
+ */
+describe("AgentPauseGate.dispatchHold at the wire", () => {
+	const endpoint = "https://example.invalid/v1/messages";
+	const model = {
+		id: "pause-gate-wire",
+		name: "Pause Gate Wire",
+		api: "pause-gate-wire" as Api,
+		provider: "pause-gate-wire",
+		contextWindow: 1000,
+		maxTokens: 100,
+	} as Model<Api>;
+
+	function loopTurn(): Promise<void> {
+		const { promise, resolve } = Promise.withResolvers<void>();
+		setImmediate(resolve);
+		return promise;
+	}
+
+	/** Whether `pending` was still unsettled after one turn of the event loop. */
+	async function heldForATurn(pending: Promise<unknown>): Promise<boolean> {
+		const outcome = await Promise.race([
+			pending.then(
+				() => "settled",
+				() => "settled",
+			),
+			loopTurn().then(() => "held"),
+		]);
+		return outcome === "held";
+	}
+
+	// The gate was checked once, before the caller's hold ran. A pause engaged
+	// while that hold waited a whole event-loop turn did not stop the request.
+	it("parks a request again when the gate closes while the caller's hold waits", async () => {
+		const gate = new AgentPauseGate();
+		const entered = Promise.withResolvers<void>(),
+			release = Promise.withResolvers<void>();
+		let asked = 0;
+		const sentWhilePaused: boolean[] = [];
+		const base = (async () => {
+			sentWhilePaused.push(gate.paused);
+			return new Response("ok");
+		}) satisfies FetchImpl;
+		const fetch = transportFetch(
+			model,
+			base,
+			gate.dispatchHold(undefined, () => {
+				asked += 1;
+				entered.resolve();
+				return release.promise;
+			}),
+		);
+
+		const sent = fetch(endpoint, { method: "POST" });
+		await entered.promise;
+		gate.pause();
+		await loopTurn();
+		release.resolve();
+		expect(await heldForATurn(sent)).toBe(true);
+		expect(sentWhilePaused).toEqual([]);
+
+		gate.resume();
+		await sent;
+		expect(sentWhilePaused).toEqual([false]);
+		// The caller's check runs again after the pause it did not see.
+		expect(asked).toBe(2);
+	});
+
+	// With two wrapped layers, a later hold that answered asynchronously was
+	// confirmed by one more pass, and a pause engaged during that confirming
+	// answer still sent: nothing read the gate again before the wire.
+	it("reads the gate at the wire, whichever answer of a later hold the pause lands in", async () => {
+		const sentWhilePaused: number[] = [];
+		const heldAt: number[] = [];
+		for (const pauseOnCall of [1, 2, 3]) {
+			const gate = new AgentPauseGate();
+			let calls = 0;
+			const base = (async () => {
+				if (gate.paused) sentWhilePaused.push(pauseOnCall);
+				return new Response("ok");
+			}) satisfies FetchImpl;
+			const first = transportFetch(model, base, gate.dispatchHold(), inner => inner);
+			const fetch = transportFetch(
+				model,
+				first,
+				async () => {
+					calls += 1;
+					await Promise.resolve();
+					if (calls === pauseOnCall) gate.pause();
+				},
+				inner => inner,
+			);
+
+			const sent = fetch(endpoint, { method: "POST" });
+			if (await heldForATurn(sent)) {
+				heldAt.push(pauseOnCall);
+				gate.resume();
+			}
+			await sent;
+		}
+
+		expect(sentWhilePaused).toEqual([]);
+		expect(heldAt).toContain(1);
+	});
+
+	// The lifetime given to the hold (a session's disposal) ended only the wait
+	// on the gate. Cancelled while the caller's hold waited, the request stayed
+	// parked and was sent when that hold resolved.
+	it("ends the whole wait on its lifetime, the caller's hold included", async () => {
+		const gate = new AgentPauseGate();
+		const lifetime = new AbortController();
+		const entered = Promise.withResolvers<void>(),
+			shared = Promise.withResolvers<void>();
+		const next = () => {
+			entered.resolve();
+			return shared.promise;
+		};
+		let wires = 0;
+		const base = (async () => {
+			wires += 1;
+			return new Response("ok");
+		}) satisfies FetchImpl;
+		const owned = transportFetch(
+			model,
+			base,
+			gate.dispatchHold(lifetime.signal, next),
+		)(endpoint, {
+			method: "POST",
+		}).then(
+			() => "sent",
+			(error: unknown) => error,
+		);
+		// A sibling waiting on the same caller's hold under no lifetime.
+		const sibling = transportFetch(model, base, gate.dispatchHold(undefined, next))(endpoint, { method: "POST" });
+
+		await entered.promise;
+		const reason = new Error("session disposed");
+		lifetime.abort(reason);
+		expect(await Promise.race([owned, loopTurn().then(() => "still parked")])).toBe(reason);
+		expect(wires).toBe(0);
+
+		shared.resolve();
+		await sibling;
+		expect(wires).toBe(1);
+	});
+
+	it("reads the gate, its lifetime and the caller's probe in its own probe", async () => {
+		const gate = new AgentPauseGate();
+		const lifetime = new AbortController();
+		let callerClosed = false;
+		const reopened = Promise.withResolvers<void>();
+		const next: DispatchHold = () => (callerClosed ? reopened.promise : undefined);
+		next.isClosed = () => callerClosed;
+		const hold = gate.dispatchHold(lifetime.signal, next);
+
+		expect(hold.isClosed?.()).toBe(false);
+		gate.pause();
+		expect(hold.isClosed?.()).toBe(true);
+		gate.resume();
+		callerClosed = true;
+		expect(hold.isClosed?.()).toBe(true);
+		callerClosed = false;
+		expect(hold.isClosed?.()).toBe(false);
+
+		// Once its lifetime has ended the hold is closed for good, and asking
+		// it fails with that reason rather than answering open.
+		const reason = new Error("owner gone");
+		lifetime.abort(reason);
+		expect(hold.isClosed?.()).toBe(true);
+		await expect(Promise.resolve(hold())).rejects.toBe(reason);
 	});
 });

@@ -25,6 +25,7 @@ import { tinyModelClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
 import { resetMemoryForTests } from "@oh-my-pi/pi-mnemopi";
 import { getProjectAgentDir, getProjectDir, setProjectDir, TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { restoreEnvValue } from "./helpers/settings-test-state";
 
 import { cfgAutolearnEnabled } from "@oh-my-pi/pi-coding-agent/autolearn/settings";
 import { cfgHindsightApiUrl, cfgHindsightMentalModelsEnabled } from "@oh-my-pi/pi-coding-agent/hindsight/settings";
@@ -48,8 +49,13 @@ describe("AgentSession memory backend lifecycle", () => {
 	let session: AgentSession | undefined;
 	let settings: Settings;
 	let tempDir: TempDir;
+	let ambientConfigFiles: string | undefined;
 
 	beforeEach(() => {
+		// `PI_CONFIG_FILES` overlays outrank a project's config.yml, so an overlay in the shell
+		// running the suite would replace the backend, scoping and retention these cases write there.
+		ambientConfigFiles = process.env.PI_CONFIG_FILES;
+		delete process.env.PI_CONFIG_FILES;
 		tempDir = TempDir.createSync("@memory-backend-lifecycle-");
 		authStorage = createInMemoryAuthStorage();
 		settings = Settings.isolated({
@@ -69,6 +75,7 @@ describe("AgentSession memory backend lifecycle", () => {
 		// `Settings.loadIsolated` opens agent.db under tempDir; close it before the directory goes away.
 		AgentStorage.close();
 		tempDir.removeSync();
+		restoreEnvValue("PI_CONFIG_FILES", ambientConfigFiles);
 	});
 
 	function createSession(createMemoryTools: () => Promise<AgentTool[]>): AgentSession {

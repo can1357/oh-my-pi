@@ -114,8 +114,13 @@ const DEFAULT_SCHEDULER: RenderScheduler = {
 
 /** Frames kept for the debug `tsp` op. */
 const RECENT_FRAMES = 64;
-/** An unanswered frame older than this no longer holds rendering back. */
-const STALLED_ACK_MS = 5000;
+/**
+ * An unanswered frame older than this no longer holds rendering back. Also
+ * the ceiling on waiting for a terminal to take a frame
+ * ({@link NativeBackend.acknowledged}, `TUI.renderNowAccepted`): past it the
+ * terminal is one this backend already renders to without credits.
+ */
+export const STALLED_ACK_MS = 5000;
 /** Role of the session's surfaces; a screen page may name its own. */
 const SESSION_ROLE = "omp.session";
 /** A `blobs` query unanswered this long counts its ids as missing: they go inline. */
@@ -127,6 +132,14 @@ const MAX_BLOB_QUERIES = 16;
 interface BlobQuery {
 	readonly ids: readonly string[];
 	timer: RenderTimer | undefined;
+}
+
+/** One pending {@link NativeBackend.acknowledged} wait: the frame each surface owes it, and its stall-span ceiling. */
+interface AckWait {
+	readonly resolve: () => void;
+	timer: RenderTimer | undefined;
+	/** Per surface, the sequence number whose acknowledgement ends this wait. */
+	readonly marks: ReadonlyMap<Surface, number>;
 }
 
 /**
@@ -315,6 +328,8 @@ export class NativeBackend {
 	#askHeld = true;
 	/** Bumped when the connection resets or stops, so blob cache writes finishing later are dropped. */
 	#blobEpoch = 0;
+	/** Callers waiting for the terminal to take what has been described (see {@link NativeBackend.acknowledged}). */
+	#ackWaits: AckWait[] = [];
 
 	constructor(host: NativeHost, hello: TspHello, options: NativeBackendOptions = {}) {
 		this.#host = host;
@@ -384,6 +399,8 @@ export class NativeBackend {
 		setNativeButtons(false);
 		this.#useNerdSymbols(false);
 		this.#clearStallTimer();
+		// The surfaces are closed: no ack can arrive, so no caller may keep waiting for one.
+		for (const wait of this.#ackWaits.slice()) this.#endWait(wait);
 		// Replies no longer reach the backend: forget the queries outright.
 		this.#resetBlobs();
 		this.#blobQueries = [];
@@ -508,9 +525,76 @@ export class NativeBackend {
 		if (this.#stats) {
 			logger.debug("TSP frame", { sf: surface.id, ops: ops.length, rows: surface.reconciler.fallbackCount });
 		}
-		if (ops.length === 0) return;
-		this.#uploadBlobs(ops);
-		this.#sendFrame(surface, ops);
+		if (ops.length > 0) {
+			this.#uploadBlobs(ops);
+			this.#sendFrame(surface, ops);
+		}
+		this.#settleAcks();
+	}
+
+	/**
+	 * Resolve once the terminal has acknowledged what is described right now:
+	 * per surface, the frame carrying it (the one deferred by flow control, or
+	 * the last one sent). Frames the session queues afterwards are somebody
+	 * else's wait and never hold this one back.
+	 *
+	 * For a caller whose next step must not run behind a stale frame — the
+	 * `/pause` screen opens the agent gate only once the terminal has dropped
+	 * the PAUSED sheet. The wait ends after {@link STALLED_ACK_MS} whatever
+	 * the terminal does, the same span after which a surface renders without
+	 * credits, so a terminal that answers nothing delays such a caller by that
+	 * much at most instead of parking it.
+	 */
+	async acknowledged(): Promise<void> {
+		if (!this.#live) return;
+		const marks = new Map<Surface, number>();
+		for (const surface of this.#surfaces()) marks.set(surface, surface.seq + (surface.dirty ? 1 : 0));
+		const { promise, resolve } = Promise.withResolvers<void>();
+		const wait: AckWait = { resolve, timer: undefined, marks };
+		if (this.#answered(wait)) return;
+		wait.timer = this.#scheduler.scheduleRender(() => {
+			logger.warn("TSP: terminal did not take a frame within the stall span; continuing", {
+				sf: this.#inline.id,
+				s: this.#inline.seq,
+				acked: this.#inline.acked,
+			});
+			this.#endWait(wait);
+		}, STALLED_ACK_MS);
+		this.#ackWaits.push(wait);
+		await promise;
+	}
+
+	/** The surfaces frames can still reach. */
+	#surfaces(): readonly Surface[] {
+		return this.#screen ? [this.#inline, this.#screen] : [this.#inline];
+	}
+
+	/** Whether every surface `wait` marked has answered for the frame it waits on. */
+	#answered(wait: AckWait): boolean {
+		const live = this.#surfaces();
+		for (const [surface, mark] of wait.marks) {
+			// A closed surface answers nothing more.
+			if (!live.includes(surface)) continue;
+			if (surface.acked >= mark) continue;
+			// The frame the mark counted on carried nothing in the end.
+			if (!surface.dirty && surface.unacked.length === 0) continue;
+			return false;
+		}
+		return true;
+	}
+
+	/** Drop `wait` from the list and resolve its caller. */
+	#endWait(wait: AckWait): void {
+		const index = this.#ackWaits.indexOf(wait);
+		if (index !== -1) this.#ackWaits.splice(index, 1);
+		wait.timer?.cancel();
+		wait.timer = undefined;
+		wait.resolve();
+	}
+
+	/** End every wait of {@link NativeBackend.acknowledged} the terminal has answered. */
+	#settleAcks(): void {
+		for (const wait of this.#ackWaits.slice()) if (this.#answered(wait)) this.#endWait(wait);
 	}
 
 	/**
@@ -767,6 +851,7 @@ export class NativeBackend {
 				}
 				this.#clearStallTimer();
 				if (surface.dirty) this.#host.requestRender();
+				this.#settleAcks();
 				return;
 			}
 			case "resize": {

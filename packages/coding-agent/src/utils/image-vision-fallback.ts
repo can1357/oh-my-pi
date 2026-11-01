@@ -13,6 +13,7 @@
  */
 import * as path from "node:path";
 import {
+	agentPauseGate,
 	type AgentTelemetry,
 	type AgentTelemetryConfig,
 	instrumentedCompleteSimple,
@@ -158,8 +159,14 @@ async function describeImage(
 	telemetry: AgentTelemetry | undefined,
 	signal: AbortSignal | undefined,
 ): Promise<string | null> {
-	if (deps.costGate?.check()) return null;
 	try {
+		// The caller holds before this helper, but reaching here crosses the
+		// api-key resolution and the image's save — awaits long enough for a
+		// `/pause` to land (an OAuth refresh, a slow disk). This call is paid,
+		// so it holds at the gate itself rather than following an older test.
+		if (agentPauseGate.paused) await agentPauseGate.waitUntilResumed(signal);
+		signal?.throwIfAborted();
+		if (deps.costGate?.check()) return null;
 		const response = await instrumentedCompleteSimple(
 			visionModel,
 			{
@@ -175,7 +182,14 @@ async function describeImage(
 					},
 				],
 			},
-			{ apiKey: deps.modelRegistry.resolver(visionModel, deps.sessionId), signal },
+			{
+				apiKey: deps.modelRegistry.resolver(visionModel, deps.sessionId),
+				signal,
+				// Every request the completion layer puts on the wire holds here,
+				// immediately before the transport: this one, a thinking-loop
+				// re-sample, and each attempt with a rotated credential.
+				beforeDispatch: agentPauseGate.dispatchHold(signal),
+			},
 			{ telemetry, oneshotKind: ONESHOT_KIND, completeImpl: deps.completeImpl },
 		);
 		deps.costGate?.record(response.usage.cost.total);
