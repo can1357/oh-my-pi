@@ -1288,9 +1288,8 @@ class DaemonBroker {
 			record.restartTimer = undefined;
 			record.snapshot.state = "exited";
 			record.snapshot.exitedAt = Date.now();
-			this.#persist(record);
-			await record.log?.close();
-			record.log = undefined;
+			record.terminalSettled = this.#publishTerminal(record);
+			await record.terminalSettled;
 			return;
 		}
 		record.snapshot.state = "stopping";
