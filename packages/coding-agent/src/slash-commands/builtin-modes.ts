@@ -513,7 +513,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		acpInputHint: "[on|ultra|off|status]",
 		subcommands: [
 			{ name: "on", description: "Enable fast mode (priority tier)" },
-			{ name: "ultra", description: "Enable Ultrafast (OpenAI API, or Codex models that offer it)" },
+			{ name: "ultra", description: "Enable Ultrafast (OpenAI API, or Codex and relay models that offer it)" },
 			{ name: "off", description: "Disable fast mode" },
 			{ name: "status", description: "Show fast mode status" },
 		],

@@ -3258,6 +3258,44 @@ describe("ModelRegistry runtime discovery", () => {
 		expect((await sendThroughStreamSimple(optional, {})).reasoning_effort).toBeUndefined();
 	});
 
+	test("openai-models-list discovery reads relay rows' advertised service tiers", async () => {
+		writeRawModelsJson({
+			"codex-relay": {
+				baseUrl: "http://127.0.0.1:9994",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "openai-models-list" },
+			},
+		});
+		// Relays republish the Codex catalog's tiers as bare ids, or (codex-lb)
+		// as codex-rs `{ id }` objects nested under `metadata`.
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:9994/v1/models") {
+				return new Response(
+					JSON.stringify({
+						data: [
+							{ id: "gpt-6.1-sol", object: "model", service_tiers: ["priority", "ultrafast"] },
+							{ id: "gpt-6-sol", object: "model", service_tiers: ["priority"] },
+							{
+								id: "gpt-6-astra",
+								object: "model",
+								metadata: { service_tiers: [{ id: "ultrafast", name: "Ultrafast" }] },
+							},
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+		expect(registry.find("codex-relay", "gpt-6.1-sol")?.serviceTiers).toEqual(["priority", "ultrafast"]);
+		expect(registry.find("codex-relay", "gpt-6-astra")?.serviceTiers).toEqual(["ultrafast"]);
+		expect(registry.find("codex-relay", "gpt-6-sol")?.serviceTiers).toEqual(["priority"]);
+	});
+
 	test("openai-models-list discovery reads server-advertised input modalities for ids absent from the catalog", async () => {
 		writeRawModelsJson({
 			"openai-test": {

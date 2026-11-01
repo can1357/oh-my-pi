@@ -1760,8 +1760,9 @@ export interface Model<TApi extends Api = Api> {
 	useResponsesLite?: boolean;
 	/**
 	 * Service-tier ids the provider advertises for this model (Codex discovery
-	 * `service_tiers[].id`, e.g. `priority`, `ultrafast`). Absent when the
-	 * provider publishes no per-model tier list.
+	 * `service_tiers[].id`, or an OpenAI-compatible `/v1/models` row's
+	 * `service_tiers`, e.g. `priority`, `ultrafast`). Absent when the provider
+	 * publishes no per-model tier list.
 	 */
 	serviceTiers?: readonly string[];
 	/** Preferred model to switch to when context promotion is triggered (model id or provider/id). */

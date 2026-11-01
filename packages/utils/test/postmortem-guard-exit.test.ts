@@ -46,6 +46,7 @@ if (process.argv.includes(directFlag)) {
 	postmortem.exitProcess(130);
 	process.stderr.write("REACHED-END\n");
 } else if (process.argv.includes(fatalFlag)) {
+	postmortem.installProcessHandlers();
 	// Raw guard throw reaching the global fatal handler, whose exitProcess(1) must
 	// terminate cleanly rather than re-throwing into an unhandled-rejection loop.
 	poisonExitChain();

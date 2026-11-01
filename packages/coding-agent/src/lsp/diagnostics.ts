@@ -1,7 +1,7 @@
 import { type FileDiagnosticsResult } from "@oh-my-pi/pi-tui/tools/lsp";
 import * as fs from "node:fs";
 import path from "node:path";
-import { isRecord, logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, untilAborted, toError } from "@oh-my-pi/pi-utils";
 import { formatPathRelativeToCwd } from "../tools/path-utils";
 import { throwIfAborted } from "../tools/tool-errors";
 import {
@@ -431,7 +431,7 @@ export async function waitForDiagnostics(
 		// A pull the server failed leaves the file's state unknown; never let it
 		// collapse into a clean empty result the caller renders as "OK".
 		if (pullFailure !== undefined) {
-			throw pullFailure instanceof Error ? pullFailure : new Error(String(pullFailure));
+			throw toError(pullFailure);
 		}
 		return undefined;
 	}
