@@ -129,6 +129,7 @@
 
 ### Added
 
+- Added a usage-report freshness cutoff to model health queries, so callers can require quota evidence newer than a failure ([#15257](https://github.com/can1357/oh-my-pi/pull/15257) by [@joshuaswarren](https://github.com/joshuaswarren)).
 - Added `PI_ANTHROPIC_API_VERSION=2026-10-21` to send Anthropic API version 2026-10-21 to the official Anthropic API; sampling parameters are omitted under that version, which rejects them ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
 - OpenCode Go requests on lanes that opt into shared prompt caching send an explicit prompt-cache key as `x-opencode-session`, so Task siblings, forks and their parent reuse one gateway cache; custom providers declaring `providerType: "opencode-go"` get the same OpenCode headers ([#16988](https://github.com/can1357/oh-my-pi/pull/16988) by [@rafalopilowski1](https://github.com/rafalopilowski1))
 

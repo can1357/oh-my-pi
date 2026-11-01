@@ -88,6 +88,48 @@ describe("AuthStorage transient OAuth refresh failure", () => {
 		expect((await auth.keys.getWithCredential("anthropic", "session"))?.apiKey).toBe("sk-fallback");
 	});
 
+	it("does not block a credential when the caller aborts the refresh", async () => {
+		const auth = await open();
+		await auth.credentials.set("anthropic", [expiredOAuth()]);
+		const controller = new AbortController();
+		// Keep the refresh pending and reject only when the caller's signal fires,
+		// mirroring the real abort rejection refreshStored produces (refresh.ts
+		// rejects with AIError.AbortError on caller abort); the abort must flow
+		// through that signal, not a pre-thrown error.
+		const refreshSignals: Array<AbortSignal | undefined> = [];
+		const refreshStarted = Promise.withResolvers<void>();
+		const refresh = vi.spyOn(oauthUtils, "refreshOAuthToken").mockImplementation((_provider, _credential, signal) => {
+			refreshSignals.push(signal);
+			refreshStarted.resolve();
+			const { promise: refreshPending, reject: rejectRefresh } = Promise.withResolvers<never>();
+			signal?.addEventListener(
+				"abort",
+				() => rejectRefresh(new AIError.AbortError("OAuth token refresh aborted by caller")),
+				{ once: true },
+			);
+			return refreshPending;
+		});
+
+		const pending = auth.keys.get("anthropic", "session", { signal: controller.signal });
+		await refreshStarted.promise;
+		controller.abort();
+		await Promise.resolve();
+		// The caller's abort must propagate into the refresh call's signal.
+		expect(refreshSignals[0]?.aborted).toBe(true);
+		// The aborted resolve must surface as "no key" without writing the
+		// transient-failure auth block for the credential.
+		expect(await pending).toBeUndefined();
+		expect(refresh).toHaveBeenCalledTimes(1);
+
+		// A follow-up non-aborted resolve is not parked behind the 5-minute block.
+		refresh.mockResolvedValue({
+			access: "fresh-access",
+			refresh: "refresh-2",
+			expires: Date.now() + 3_600_000,
+		});
+		expect((await auth.keys.getWithCredential("anthropic", "session"))?.apiKey).toBe("fresh-access");
+	});
+
 	it("reports no key after a definitive refresh failure disables the only credential", async () => {
 		const auth = await open();
 		await auth.credentials.set("anthropic", [expiredOAuth()]);
