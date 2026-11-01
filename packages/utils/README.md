@@ -23,6 +23,23 @@ Shared utilities for [omp](https://github.com/can1357/oh-my-pi) packages. Zero c
 
 Import from the root barrel or per-module subpaths (`@oh-my-pi/pi-utils/<module>`).
 
+### Pure translation core
+
+Import `createTranslator` from `@oh-my-pi/pi-utils/i18n-core` and pass an object
+mapping English source messages to translated strings. The module performs no
+I/O, reads no environment variables, and installs no global translator.
+
+Missing entries fall back to English. A `\u0004` suffix distinguishes semantic
+contexts (for example, `"Open\u0004action.open-file"`); fallback output excludes
+that suffix. Contexts should describe meaning, never file paths.
+
+Numeric placeholders such as `{0}` may be reordered, repeated, or omitted.
+Translation indexes must be safe integers from zero through the largest English
+source index; this permits dense arguments when English omits a language-specific
+value. Missing arguments remain literal placeholders, and argument text is never
+interpreted as another template. Malformed packs throw during explicit creation,
+so applications can handle errors before choosing a translator.
+
 ## Install
 
 ```sh
