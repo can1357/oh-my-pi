@@ -26,6 +26,7 @@ import {
 	describeExecutionTool,
 	type ExecutionColorKey,
 	type ExecutionStatus,
+	executionStatusLabel,
 	PREVIEW_LINES,
 	resolveExecutionStatus,
 } from "./execution-shared";
@@ -34,6 +35,7 @@ import { type DescribeContext, type NativeNode, type NativeUiEvent, rootToggleEx
 import { NativeImageCache } from "../native/blobs";
 import { imageLinksEnabled, linkedImageSpan, linkedImageText } from "../prompt/image-references";
 import { Memo } from "../native/memo";
+import type { DynamicBorder } from "../chrome/dynamic-border";
 
 const STREAMING_LINE_CAP = PREVIEW_LINES * 5;
 // Minimum interval between processing incoming chunks for display (ms).
@@ -59,6 +61,7 @@ export class BashExecutionComponent extends Container {
 	#status: ExecutionStatus = "running";
 	#exitCode: number | undefined = undefined;
 	#loader: Loader;
+	readonly #bottomBorder: DynamicBorder;
 	#truncation?: TruncationMeta;
 	#artifactError?: OutputArtifactError;
 	#expanded = false;
@@ -103,9 +106,10 @@ export class BashExecutionComponent extends Container {
 		// Use dim border for excluded-from-context commands (!! prefix)
 		const colorKey = excludeFromContext ? "dim" : "bashMode";
 		this.#colorKey = colorKey;
-		const { contentContainer, loader } = buildExecutionFrame(this, ui, colorKey);
+		const { contentContainer, loader, bottomBorder } = buildExecutionFrame(this, ui, colorKey);
 		this.#contentContainer = contentContainer;
 		this.#loader = loader;
+		this.#bottomBorder = bottomBorder;
 		this.#outputPane = new OutputPane(theme, {
 			expanded: false,
 			collapsedMaxLines: PREVIEW_LINES,
@@ -121,7 +125,6 @@ export class BashExecutionComponent extends Container {
 		// Command header
 		this.#headerText = new Text(theme.fg(colorKey, theme.bold(`$ ${command}`)), 1, 0);
 		this.#contentContainer.addChild(this.#headerText);
-		this.#contentContainer.addChild(this.#loader);
 	}
 
 	/**
@@ -383,6 +386,12 @@ export class BashExecutionComponent extends Container {
 		this.#updateDisplay();
 	}
 
+	/** The loader animates the bottom border from outside the child tree, so teardown stops it here. */
+	override dispose(): void {
+		this.#loader.dispose();
+		super.dispose();
+	}
+
 	override render(width: number): readonly string[] {
 		if (this.#displayDirty) {
 			this.#displayDirty = false;
@@ -440,13 +449,10 @@ export class BashExecutionComponent extends Container {
 			}
 		}
 
-		// Loader or status
-		if (this.#status === "running") {
-			this.#contentContainer.addChild(this.#loader);
-		} else {
+		// The bottom border keeps the live loader until the run settles, then its exit/cancel marker.
+		if (this.#status !== "running") {
+			this.#bottomBorder.setLabel(executionStatusLabel(this.#status, this.#exitCode));
 			const footer = buildStatusFooter({
-				status: this.#status,
-				exitCode: this.#exitCode,
 				truncation: this.#truncation,
 				artifactError: this.#artifactError,
 				hiddenLineCount,

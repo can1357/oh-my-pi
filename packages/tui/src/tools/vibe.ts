@@ -129,7 +129,7 @@ function stateToIcon(state: VibeSessionState): ToolUIStatus {
 		case "starting":
 			return "pending";
 		case "idle":
-			return "done";
+			return "success";
 		case "dead":
 			return "aborted";
 	}
@@ -534,7 +534,7 @@ export function createVibeToolRenderer(op: VibeOp) {
 			if (!details || result.isError) {
 				const fallback = result.content.find(part => part.type === "text")?.text ?? "";
 				const header = renderStatusLine(
-					{ icon: result.isError ? "error" : "done", title: `vibe ${describeCall(op, args)}` },
+					{ icon: result.isError ? "error" : "success", title: `vibe ${describeCall(op, args)}` },
 					uiTheme,
 				);
 				const body = fallback
@@ -573,7 +573,7 @@ export function createVibeToolRenderer(op: VibeOp) {
 				const killedNote = details.killed?.cancelledTurn ? " (in-flight turn cancelled)" : "";
 				const header = renderStatusLine(
 					{
-						icon: "done",
+						icon: "success",
 						title: `vibe kill ${frameText(details.killed?.id ?? args?.session ?? "?", 40)}${killedNote}`,
 					},
 					uiTheme,
@@ -621,7 +621,7 @@ export function createVibeToolRenderer(op: VibeOp) {
 						: `vibe sessions (${screens.length})`;
 				const header = renderStatusLine(
 					{
-						icon: details.wait?.timedOut ? "warning" : running > 0 ? "info" : "done",
+						icon: details.wait?.timedOut ? "warning" : running > 0 ? "info" : "success",
 						spinnerFrame: running > 0 ? wallOptions.spinnerFrame : undefined,
 						title,
 						meta,

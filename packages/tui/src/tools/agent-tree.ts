@@ -76,16 +76,13 @@ export function renderAgentTreeRow(
 	const failed = status === "failed" || status === "aborted";
 	const iconColor = status === "completed" ? "success" : failed ? "error" : "accent";
 	const nameColor = task && live && options.frozen ? "dim" : task && status === "completed" ? "text" : "accent";
-	const iconStatus = status === "failed" ? "error" : status === "completed" ? "done" : status;
+	const iconStatus = status === "failed" ? "error" : status === "completed" ? "success" : status;
+	// Task rows draw a static glyph, so their bytes hold across spinner frames; eval rows animate.
+	const spinnerFrame = !task && status === "running" ? options.spinnerFrame : undefined;
 	const icon =
-		task && !failed
-			? theme.styledSymbol("status.done", nameColor)
-			: !task && status === "completed"
-				? theme.styledSymbol("tool.eval", "accent")
-				: theme.fg(
-						iconColor,
-						formatStatusIcon(iconStatus, theme, status === "running" ? options.spinnerFrame : undefined),
-					);
+		!task && status === "completed"
+			? theme.styledSymbol("tool.eval", "accent")
+			: theme.fg(iconColor, formatStatusIcon(iconStatus, theme, spinnerFrame));
 	const lead = `${options.prefix}${options.prefix || !task ? " " : ""}${icon} `;
 	const statusBadge = options.statusBadge ?? (failed ? ` ${formatBadge(status, iconColor, theme)}` : "");
 	const id = Number.isFinite(width)

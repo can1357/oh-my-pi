@@ -930,7 +930,7 @@ interface LspDiagnosticsParse {
 
 const DIAGNOSTIC_AT_RE = /^\d+:\d+\s+\[/;
 const DIAGNOSTICS_SUMMARY_RE = /^\d+ \w+\(s\)(?:, \d+ \w+\(s\))*:?$/;
-/** A per-file status line's leading status glyph (`✘`, `⚠`, a Nerd Font glyph, ASCII `[!!]`). */
+/** A per-file status line's leading status glyph (`✘`, `⚠`, a Nerd Font glyph, ASCII `[-]`). */
 const STATUS_GLYPH_RE = /^(?:\[[^\]\s]*\]|[^\p{L}\p{N}\s./~\\]+)\s+/u;
 /** Per-file summaries (`✗ a.ts: 2 error(s)`, `✓ a.ts: no issues`) repeat what the rows and head count. */
 const FILE_SUMMARY_RE = /: (?:no issues|\d+ \w+\(s\)(?:, \d+ \w+\(s\))*)$/;

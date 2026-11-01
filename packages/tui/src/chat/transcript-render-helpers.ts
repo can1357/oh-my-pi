@@ -67,7 +67,7 @@ export function buildAsyncResultBlock(message: CustomOrHookMessage): ToolActivit
 		const duration = typeof job.durationMs === "number" ? formatDuration(job.durationMs) : undefined;
 		rows.push({
 			parts: [
-				{ text: `${theme.status.done} Background job completed`, color: "success" },
+				{ text: `${theme.status.success} Background job completed`, color: "muted" },
 				{ text: `[${type}]`, color: "dim" },
 				{ text: jobId, color: "accent" },
 				duration ? { text: `(${duration})`, color: "dim" } : undefined,
@@ -140,7 +140,7 @@ export function buildLaunchCompletionBlock(message: CustomOrHookMessage): ToolAc
 	const daemons = details?.daemons ?? [];
 	if (daemons.length === 0 && typeof message.content === "string") {
 		rows.push({
-			parts: [{ text: `${theme.status.done} ${message.content}`, color: "dim" }],
+			parts: [{ text: `${theme.status.success} ${message.content}`, color: "dim" }],
 			native: { tone: "success", message: [span(message.content)] },
 		});
 	}
@@ -156,7 +156,7 @@ export function buildLaunchCompletionBlock(message: CustomOrHookMessage): ToolAc
 			parts: [
 				failed
 					? { text: `${theme.status.error} ${label}`, color: "error" }
-					: { text: `${theme.status.done} ${label}`, color: "success" },
+					: { text: `${theme.status.success} ${label}`, color: "muted" },
 				{ text: daemon.name, color: "accent" },
 				exit ? { text: `(${exit})`, color: "dim" } : undefined,
 				duration ? { text: `(${duration})`, color: "dim" } : undefined,
