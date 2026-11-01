@@ -1206,7 +1206,7 @@ export class SessionManager {
 	 * publishes also report as before: there a conflict can be this manager
 	 * racing its own unconfirmed publish, not another writer.
 	 */
-	#conflictedSessionFile(error: unknown): string | undefined {
+	#conflictedSessionFile(error: unknown, allowSealed = false): string | undefined {
 		const sessionFile = this.#sessionFile;
 		if (
 			!(error instanceof SessionWriteConflictError) ||
@@ -1214,7 +1214,7 @@ export class SessionManager {
 			!sessionFile ||
 			path.resolve(error.path) !== path.resolve(sessionFile) ||
 			!this.#persist ||
-			this.#released ||
+			(this.#released && !allowSealed) ||
 			this.#sessionFileRelocating ||
 			this.#storage.defersSyncPublish
 		) {
@@ -1273,8 +1273,8 @@ export class SessionManager {
 	 *
 	 * Returns the path to retry, or `undefined` to report the conflict as before.
 	 */
-	#recoverFromWriteConflictSync(error: unknown, recoveries: number): string | undefined {
-		const contested = this.#conflictedSessionFile(error);
+	#recoverFromWriteConflictSync(error: unknown, recoveries: number, allowSealed = false): string | undefined {
+		const contested = this.#conflictedSessionFile(error, allowSealed);
 		if (!contested) return undefined;
 		if (recoveries >= MAX_WRITE_CONFLICT_RECOVERIES) return this.#moveOffSessionFile("contested");
 		if (!this.#storage.readTextSync) return undefined;
@@ -1294,8 +1294,12 @@ export class SessionManager {
 	}
 
 	/** Asynchronous {@link #recoverFromWriteConflictSync}. */
-	async #recoverFromWriteConflict(error: unknown, recoveries: number): Promise<string | undefined> {
-		const contested = this.#conflictedSessionFile(error);
+	async #recoverFromWriteConflict(
+		error: unknown,
+		recoveries: number,
+		allowSealed = false,
+	): Promise<string | undefined> {
+		const contested = this.#conflictedSessionFile(error, allowSealed);
 		if (!contested) return undefined;
 		if (recoveries >= MAX_WRITE_CONFLICT_RECOVERIES) return this.#moveOffSessionFile("contested");
 		const epoch = this.#diskEpoch;
@@ -1665,9 +1669,10 @@ export class SessionManager {
 		operationError: Error,
 		commitGuard?: () => boolean,
 		recoveries = 0,
+		allowSealed = false,
 	): Promise<void> {
 		const target =
-			sessionFile === this.#sessionFile && this.#sessionOwnedElsewhere()
+			sessionFile === this.#sessionFile && this.#sessionOwnedElsewhere(allowSealed)
 				? this.#moveOffSessionFile("open-elsewhere")
 				: sessionFile;
 		this.#assertRoomForRewrite(target);
@@ -1678,8 +1683,9 @@ export class SessionManager {
 				? this.#storage.writeLinesAtomic(target, body.lines, options)
 				: this.#storage.writeTextAtomic(target, body.lines.join(""), options));
 		} catch (error) {
-			const retryPath = await this.#recoverFromWriteConflict(error, recoveries);
-			if (retryPath) return this.#publishAuthoritativeBody(retryPath, operationError, commitGuard, recoveries + 1);
+			const retryPath = await this.#recoverFromWriteConflict(error, recoveries, allowSealed);
+			if (retryPath)
+				return this.#publishAuthoritativeBody(retryPath, operationError, commitGuard, recoveries + 1, allowSealed);
 			const recoveryErrors = [toError(error)];
 			try {
 				await this.#storage.drain();
@@ -1871,7 +1877,7 @@ export class SessionManager {
 					else this.#storage.writeTextSync(targetPath, body.lines.join(""), options);
 					break;
 				} catch (err) {
-					const retryPath = this.#recoverFromWriteConflictSync(err, recoveries);
+					const retryPath = this.#recoverFromWriteConflictSync(err, recoveries, allowSealed);
 					if (!retryPath) throw err;
 					targetPath = retryPath;
 					body = this.#serializeBody();
@@ -3047,22 +3053,27 @@ export class SessionManager {
 	): Promise<SessionManager> {
 		const sessionDir = options?.sessionDir ?? SessionManager.getDefaultSessionDir(this.#cwd, undefined, storage);
 		const manager = new SessionManager(this.#cwd, sessionDir, true, storage);
-		manager.#suppressBreadcrumb = options?.suppressBreadcrumb === true;
-		manager.#resetToNewSession({ taskPromptCacheKey: this.#header.taskPromptCacheKey });
-		manager.#sessionName = this.#sessionName;
-		manager.#titleSource = this.#titleSource;
-		manager.#titleUpdatedAt = this.#titleUpdatedAt;
-		manager.#header.title = this.#sessionName;
-		manager.#header.titleSource = this.#titleSource;
-		manager.#additionalDirectories = [...this.#additionalDirectories];
-		manager.#header.additionalDirectories =
-			manager.#additionalDirectories.length > 0 ? [...manager.#additionalDirectories] : undefined;
-		manager.#entries = structuredClone(this.#entries);
-		manager.#prospectiveDiskSize = this.#persist ? this.#prospectiveDiskSize : this.#estimateBodyBytes();
-		manager.#index.rebuild(manager.#entries);
-		manager.#forceFileCreation = true;
-		await manager.#rewriteAtomically();
-		return manager;
+		try {
+			manager.#suppressBreadcrumb = options?.suppressBreadcrumb === true;
+			manager.#resetToNewSession({ taskPromptCacheKey: this.#header.taskPromptCacheKey });
+			manager.#sessionName = this.#sessionName;
+			manager.#titleSource = this.#titleSource;
+			manager.#titleUpdatedAt = this.#titleUpdatedAt;
+			manager.#header.title = this.#sessionName;
+			manager.#header.titleSource = this.#titleSource;
+			manager.#additionalDirectories = [...this.#additionalDirectories];
+			manager.#header.additionalDirectories =
+				manager.#additionalDirectories.length > 0 ? [...manager.#additionalDirectories] : undefined;
+			manager.#entries = structuredClone(this.#entries);
+			manager.#prospectiveDiskSize = this.#persist ? this.#prospectiveDiskSize : this.#estimateBodyBytes();
+			manager.#index.rebuild(manager.#entries);
+			manager.#forceFileCreation = true;
+			await manager.#rewriteAtomically();
+			return manager;
+		} catch (error) {
+			await manager.#disposeAfterFailure();
+			throw error;
+		}
 	}
 
 	/**
@@ -3291,7 +3302,7 @@ export class SessionManager {
 			const sessionFile = this.#sessionFile;
 			await this.#scheduleDiskWork(
 				async () => {
-					await this.#publishAuthoritativeBody(sessionFile, operationError);
+					await this.#publishAuthoritativeBody(sessionFile, operationError, undefined, 0, true);
 					this.#fileIsCurrent = true;
 					this.#rewriteRequired = false;
 					this.#hasTitleSlot = true;
@@ -3306,6 +3317,19 @@ export class SessionManager {
 		const claim = this.#sessionClaim;
 		claim?.release?.();
 		if (claim) claim.release = undefined;
+	}
+
+	/** Dispose an internal manager that cannot be returned or retried after a failed operation. */
+	async #disposeAfterFailure(): Promise<void> {
+		try {
+			await this.close();
+		} catch {
+			// The caller reports the original failure, not cleanup's secondary write failure.
+		} finally {
+			this.#sessionClaim?.release?.();
+			this.#sessionClaim = undefined;
+			this.#index.clear();
+		}
 	}
 
 	/**
@@ -4553,61 +4577,66 @@ export class SessionManager {
 	): Promise<SessionManager> {
 		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
 		const manager = new SessionManager(cwd, dir, true, storage);
-		manager.#suppressBreadcrumb = options?.suppressBreadcrumb === true;
-
-		// A missing source must fail instead of forking an empty parentless session:
-		// the loader swallows ENOENT by default for fresh-session opens, so fork opts out.
-		let sourceEntries: FileEntry[];
 		try {
-			sourceEntries = await loadEntriesFromFile(sourcePath, storage, { throwIfMissing: true });
-		} catch (err) {
-			if (isEnoent(err) || isEnotdir(err)) throw new ForkSourceNotFoundError(sourcePath);
-			throw err;
-		}
-		migrateToCurrentVersion(sourceEntries);
-		await resolveBlobRefsInEntries(sourceEntries, manager.#blobs);
+			manager.#suppressBreadcrumb = options?.suppressBreadcrumb === true;
 
-		const sourceHeader = sourceEntries.find(entry => entry.type === "session") as SessionHeader | undefined;
-		const history = sourceEntries.filter(entry => entry.type !== "session") as SessionEntry[];
-		normalizeLoadedUsage(history);
-		if (options?.resetInheritedCost) SessionManager.#resetInheritedUsageCost(history);
-		manager.#resetToNewSession(
-			{
-				parentSession: sourceHeader?.id,
-				providerPromptCacheKey: SessionManager.getInheritedProviderPromptCacheKey(sourceHeader),
-				taskPromptCacheKey: sourceHeader?.taskPromptCacheKey,
-			},
-			options?.sessionFile,
-		);
-		manager.#header.title = sourceHeader?.title;
-		manager.#header.titleSource = sourceHeader?.titleSource;
-		manager.#additionalDirectories = options?.seance
-			? []
-			: (sourceHeader?.additionalDirectories ?? []).filter(d => d !== path.resolve(cwd));
-		manager.#header.additionalDirectories =
-			manager.#additionalDirectories.length > 0 ? manager.#additionalDirectories : undefined;
-		if (options?.seance) {
-			manager.#header.seanceSource = path.resolve(sourcePath);
-			SessionManager.#neutralizeSessionInits(history);
-		}
-		manager.#sessionName = manager.#header.title;
-		manager.#titleSource = manager.#header.titleSource;
-		manager.#titleUpdatedAt = nowIso();
-		manager.#hasTitleSlot = true;
-		manager.#entries = history;
-		manager.#prospectiveDiskSize = storage.statSync(sourcePath).size;
-		manager.#index.rebuild(history);
-		manager.sanitizeLoadedOpenAIResponsesReplayMetadata();
-		if (options?.repairInterruptedTail) {
-			SessionManager.#repairForkedInterruptedTail(history, manager.#index.pathTo());
+			// A missing source must fail instead of forking an empty parentless session:
+			// the loader swallows ENOENT by default for fresh-session opens, so fork opts out.
+			let sourceEntries: FileEntry[];
+			try {
+				sourceEntries = await loadEntriesFromFile(sourcePath, storage, { throwIfMissing: true });
+			} catch (err) {
+				if (isEnoent(err) || isEnotdir(err)) throw new ForkSourceNotFoundError(sourcePath);
+				throw err;
+			}
+			migrateToCurrentVersion(sourceEntries);
+			await resolveBlobRefsInEntries(sourceEntries, manager.#blobs);
+
+			const sourceHeader = sourceEntries.find(entry => entry.type === "session") as SessionHeader | undefined;
+			const history = sourceEntries.filter(entry => entry.type !== "session") as SessionEntry[];
+			normalizeLoadedUsage(history);
+			if (options?.resetInheritedCost) SessionManager.#resetInheritedUsageCost(history);
+			manager.#resetToNewSession(
+				{
+					parentSession: sourceHeader?.id,
+					providerPromptCacheKey: SessionManager.getInheritedProviderPromptCacheKey(sourceHeader),
+					taskPromptCacheKey: sourceHeader?.taskPromptCacheKey,
+				},
+				options?.sessionFile,
+			);
+			manager.#header.title = sourceHeader?.title;
+			manager.#header.titleSource = sourceHeader?.titleSource;
+			manager.#additionalDirectories = options?.seance
+				? []
+				: (sourceHeader?.additionalDirectories ?? []).filter(d => d !== path.resolve(cwd));
+			manager.#header.additionalDirectories =
+				manager.#additionalDirectories.length > 0 ? manager.#additionalDirectories : undefined;
+			if (options?.seance) {
+				manager.#header.seanceSource = path.resolve(sourcePath);
+				SessionManager.#neutralizeSessionInits(history);
+			}
+			manager.#sessionName = manager.#header.title;
+			manager.#titleSource = manager.#header.titleSource;
+			manager.#titleUpdatedAt = nowIso();
+			manager.#hasTitleSlot = true;
+			manager.#entries = history;
+			manager.#prospectiveDiskSize = storage.statSync(sourcePath).size;
 			manager.#index.rebuild(history);
+			manager.sanitizeLoadedOpenAIResponsesReplayMetadata();
+			if (options?.repairInterruptedTail) {
+				SessionManager.#repairForkedInterruptedTail(history, manager.#index.pathTo());
+				manager.#index.rebuild(history);
+			}
+			manager.#forceFileCreation = true;
+			await manager.#rewriteAtomically();
+			if (!options?.seance && options?.copyArtifacts !== false) {
+				await copySessionArtifacts(sourcePath, manager.#sessionFile!);
+			}
+			return manager;
+		} catch (error) {
+			await manager.#disposeAfterFailure();
+			throw error;
 		}
-		manager.#forceFileCreation = true;
-		await manager.#rewriteAtomically();
-		if (!options?.seance && options?.copyArtifacts !== false) {
-			await copySessionArtifacts(sourcePath, manager.#sessionFile!);
-		}
-		return manager;
 	}
 
 	/** Replace inherited `session_init` entries, in place, with inert custom entries keeping the same tree position. */
@@ -4767,14 +4796,7 @@ export class SessionManager {
 		try {
 			await manager.moveTo(cwd, sessionDir);
 		} catch (error) {
-			try {
-				await manager.close();
-			} catch {
-				// Preserve the relocation error; this internal manager cannot be retried.
-			} finally {
-				manager.#sessionClaim?.release?.();
-				manager.#sessionClaim = undefined;
-			}
+			await manager.#disposeAfterFailure();
 			throw error;
 		}
 		return manager;
@@ -4922,6 +4944,7 @@ export class SessionManager {
 						if (continuation) options.onSessionContinuation?.(continuation);
 						return manager;
 					} catch (err) {
+						await manager.#disposeAfterFailure();
 						if (!(err instanceof SessionMoveRefusedError)) throw err;
 						// Another live omp process still writes the session (the
 						// project was renamed under it): leave it there and continue
@@ -4930,7 +4953,6 @@ export class SessionManager {
 							from: breadcrumbCwd,
 							to: resolvedCwd,
 						});
-						await manager.close();
 					}
 				} else if (candidateForMove) {
 					logger.warn(
