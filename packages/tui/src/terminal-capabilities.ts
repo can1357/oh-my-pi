@@ -984,6 +984,14 @@ export interface ParsedKittyPlacementLine {
 	rows: number;
 }
 
+/** `line` with each tmux DCS passthrough replaced by the sequence it wraps. */
+function unwrapTmuxPassthrough(line: string): string {
+	if (!line.includes("\x1bPtmux;")) return line;
+	return line.replace(/\x1bPtmux;((?:[^\x1b]|\x1b\x1b)*)\x1b\\/g, (_match, payload: string) =>
+		payload.replaceAll("\x1b\x1b", "\x1b"),
+	);
+}
+
 /**
  * Parse a frame line that consists solely of a Kitty direct placement (the
  * last line of an {@link Image} block). Returns null for anything else —
@@ -991,11 +999,7 @@ export interface ParsedKittyPlacementLine {
  * callers fall back to writing the line verbatim.
  */
 export function parseKittyDirectPlacementLine(line: string): ParsedKittyPlacementLine | null {
-	if (line.includes("\x1bPtmux;")) {
-		line = line.replace(/\x1bPtmux;((?:[^\x1b]|\x1b\x1b)*)\x1b\\/g, (_match, payload: string) =>
-			payload.replaceAll("\x1b\x1b", "\x1b"),
-		);
-	}
+	line = unwrapTmuxPassthrough(line);
 	const m = KITTY_DIRECT_PLACEMENT_LINE.exec(line);
 	if (!m) return null;
 	const columns = m[4] !== undefined ? Number(m[4]) : 0;
@@ -1124,17 +1128,51 @@ export function encodeITerm2(
 	return `\x1b]1337;File=${params.join(";")}:${base64Data}\x07`;
 }
 
+/** Data chunks of a Kitty graphics command (`ESC _ G <control> ; <data> ESC \`). */
+const KITTY_APC_DATA = /\x1b_G[^;\x1b]*;([^\x1b]*)\x1b\\/g;
+
+/**
+ * Image id of a Kitty direct placement ({@link encodeKittyPlacement} or
+ * {@link encodeKittyPlacementLine}), whatever size or clip parameters follow
+ * it. Unicode-placeholder placements (`a=p,U=1`) are not direct placements.
+ */
+const KITTY_DIRECT_PLACEMENT_ID = /\x1b_Ga=p,q=2,C=1,i=(\d+)[,\x1b]/;
+
+/**
+ * The image an image line draws, without the size parameters a rewrap
+ * changes: the encoded data `encodeITerm2` wrote, the image id a Kitty
+ * direct placement shows (its data was transmitted under that id; any
+ * `c=`/`r=` size or `y=`/`h=` clip is ignored), or the data a self-contained
+ * Kitty `a=T` image carries. Any other image line identifies itself.
+ */
+export function imagePayload(line: string): string {
+	const start = line.indexOf(ImageProtocol.Iterm2);
+	if (start !== -1) {
+		const colon = line.indexOf(":", start + ImageProtocol.Iterm2.length);
+		if (colon !== -1) {
+			const end = line.indexOf("\x07", colon + 1);
+			return line.slice(colon + 1, end === -1 ? undefined : end);
+		}
+	}
+	const kitty = unwrapTmuxPassthrough(line);
+	const placement = KITTY_DIRECT_PLACEMENT_ID.exec(kitty);
+	if (placement) return `kitty:${placement[1]}`;
+	let data = "";
+	for (const chunk of kitty.matchAll(KITTY_APC_DATA)) data += chunk[1];
+	return data === "" ? line : data;
+}
+
 /**
  * The encoded image `encodeITerm2` wrote into `line`, without the size
  * parameters a rewrap changes; undefined for a line without one.
+ * @deprecated Use {@link imagePayload}, which also identifies Kitty images.
+ * Kept for consumers of the published package, which re-exports this module.
  */
 export function iterm2ImagePayload(line: string): string | undefined {
-	const start = line.indexOf(ImageProtocol.Iterm2);
-	if (start === -1) return undefined;
-	const colon = line.indexOf(":", start + ImageProtocol.Iterm2.length);
-	if (colon === -1) return undefined;
-	const end = line.indexOf("\x07", colon + 1);
-	return line.slice(colon + 1, end === -1 ? undefined : end);
+	if (!line.includes(ImageProtocol.Iterm2)) return undefined;
+	const payload = imagePayload(line);
+	// A line that names iTerm2 but carries no data identifies itself.
+	return payload === line ? undefined : payload;
 }
 
 export function calculateImageRows(

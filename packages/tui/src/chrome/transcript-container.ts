@@ -7,7 +7,7 @@ import type { NativeNode } from "../native/node";
 import { isNativeSettled, settleNative } from "../native/settle";
 import { isUsageRowBlock } from "../overlays/usage-row";
 import { isToolActivityComponent } from "./tool-activity";
-import { directPlacementLift, ImageProtocol, iterm2ImagePayload, TERMINAL } from "../terminal-capabilities";
+import { directPlacementLift, ImageProtocol, imagePayload, TERMINAL } from "../terminal-capabilities";
 
 /** Shared animation time supplied by the constrained transcript root. */
 export interface AnimationFrame {
@@ -199,7 +199,7 @@ function rowSplit(scrollback: readonly string[], rows: number, width: number): R
 	const images: { payload: string; offset: number }[] = [];
 	let text = "";
 	for (const row of committed) {
-		if (TERMINAL.isImageLine(row)) images.push({ payload: iterm2ImagePayload(row) ?? row, offset: text.length });
+		if (TERMINAL.isImageLine(row)) images.push({ payload: imagePayload(row), offset: text.length });
 		text += contentOf([row]);
 	}
 	return { rows, width, hash: Bun.hash(committed.join("\n")), text, images };
@@ -207,14 +207,16 @@ function rowSplit(scrollback: readonly string[], rows: number, width: number): R
 
 /**
  * `cut` moved to just below an image it would split, on terminals that cannot
- * draw part of an image (iTerm2's inline images). There the image row draws
- * the whole picture upward over its reserved rows; once some of those rows are
- * in scrollback, the picture has nowhere to go and is dropped, so the image
- * must reach scrollback whole. Kitty and SIXEL draw the visible part instead.
+ * put part of an image into scrollback: iTerm2's inline images and Kitty
+ * placements. The image row draws the picture upward over its reserved rows;
+ * once some of those rows are in scrollback, the cursor cannot reach them, so
+ * iTerm2 drops the picture and Kitty's scrollback copy keeps only the rows
+ * still on screen, leaving the rest blank. The image must reach scrollback
+ * whole. SIXEL crops its raster to the rows that stay instead.
  */
 function cutBelowWholeImage(rows: readonly string[], cut: number): number {
 	const protocol = TERMINAL.imageProtocol;
-	if (protocol === null || protocol === ImageProtocol.Kitty || protocol === ImageProtocol.Sixel) return cut;
+	if (protocol === null || protocol === ImageProtocol.Sixel) return cut;
 	// Only reserved rows sit between a cut inside an image and its image row,
 	// so the first image row at or below the cut decides.
 	for (let index = Math.max(0, cut); index < rows.length; index++) {
@@ -881,10 +883,10 @@ export class TranscriptContainer extends Container {
 		// screen; the rest stays live, so a later shrink of the chrome or the
 		// tail refills the screen from live rows instead of opening a band no
 		// frame can fill (rows still on screen cannot return from scrollback).
-		// One exception: on a terminal that cannot draw part of an image, a cut
-		// inside an image moves below it (cutBelowWholeImage), so up to that
-		// image's height of on-screen rows commits early. A later shrink can then
-		// open a band that tall, which beats losing the image.
+		// One exception: on a terminal that cannot put part of an image into
+		// scrollback, a cut inside an image moves below it (cutBelowWholeImage), so
+		// up to that image's height of on-screen rows commits early. A later shrink
+		// can then open a band that tall, which beats losing the image.
 		let split: { index: number; rows: readonly string[]; split: RowSplit } | undefined;
 		if (policy === "pressure" && keep > 0 && limit === this.#frontier + keep) {
 			const boundary = live[keep - 1]!;
@@ -1197,7 +1199,7 @@ export class TranscriptContainer extends Container {
 				if (
 					imageRow === undefined ||
 					!TERMINAL.isImageLine(imageRow) ||
-					(iterm2ImagePayload(imageRow) ?? imageRow) !== split.images[image]?.payload ||
+					imagePayload(imageRow) !== split.images[image]?.payload ||
 					consumed !== split.images[image]?.offset ||
 					index - count !== directPlacementLift(imageRow)
 				) {
