@@ -187,9 +187,9 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 	async function attachAcpClient(session: AgentSession, form: boolean): Promise<string[]> {
 		const elicitations: string[] = [];
 		const connection = {
-			unstable_createElicitation: async (request: CreateElicitationRequest) => {
+			unstable_createElicitationWithCancel: (request: CreateElicitationRequest) => {
 				elicitations.push(request.message);
-				return { action: "decline" };
+				return { promise: Promise.resolve({ action: "decline" }), cancel: () => {} };
 			},
 		} as unknown as AgentSideConnection;
 		await initializeExtensions(session, {

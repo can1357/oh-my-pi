@@ -3,6 +3,10 @@ import * as path from "node:path";
 import { isRecord, readJsonl, TempDir } from "@oh-my-pi/pi-utils";
 import type { ExtensionAskDialogQuestion } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import {
+	DialogSupersededError,
+	WITHDRAWN_DIALOG_REPLY_MS,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import {
 	type PendingExtensionRequest,
 	type RpcExtensionUIResponse,
 	requestRpcAskDialog,
@@ -352,6 +356,50 @@ await runRpcMode(session);
 			targetId: request.id,
 		});
 		expect(pendingRequests.size).toBe(0);
+	});
+
+	it("keeps an ask answer received within the reply window after a person message withdraws the dialog", async () => {
+		const pendingRequests = new Map<string, PendingExtensionRequest>();
+		const output = vi.fn<(frame: object) => void>();
+		const superseded = new AbortController();
+		const result = requestRpcAskDialog(pendingRequests, output, [dbQuestion], { signal: superseded.signal });
+		const request = requireRequest(output.mock.calls[0]?.[0]);
+
+		// The host sent this answer before it received the `cancel`; omp reads it after the person
+		// message withdrew the dialog, inside WITHDRAWN_DIALOG_REPLY_MS.
+		const response = { answers: [{ id: "db", selectedOptions: ["Postgres"] }] };
+		superseded.abort(new DialogSupersededError());
+		respond(pendingRequests, request.id, response);
+
+		expect(await result).toMatchObject({
+			kind: "submit",
+			results: [{ id: "db", selectedOptions: ["Postgres"] }],
+		});
+		expect(output).toHaveBeenLastCalledWith(
+			expect.objectContaining({ type: "extension_ui_request", method: "cancel", targetId: request.id }),
+		);
+	});
+
+	// Pins a known limit, not an ordering guarantee: RPC carries no submission time, so after the
+	// reply window omp reports the dialog unanswered and drops any answer that arrives later.
+	it("reports a withdrawn dialog unanswered once the reply window ends without a host reply", async () => {
+		vi.useFakeTimers();
+		try {
+			const pendingRequests = new Map<string, PendingExtensionRequest>();
+			const output = vi.fn<(frame: object) => void>();
+			const superseded = new AbortController();
+			const result = requestRpcAskDialog(pendingRequests, output, [dbQuestion], { signal: superseded.signal });
+
+			superseded.abort(new DialogSupersededError());
+			vi.advanceTimersByTime(WITHDRAWN_DIALOG_REPLY_MS - 1);
+			expect(pendingRequests.size).toBe(1);
+			vi.advanceTimersByTime(1);
+
+			expect(await result).toBeUndefined();
+			expect(pendingRequests.size).toBe(0);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("emits secret in extension_ui_request when dialogOptions.secret is provided", async () => {

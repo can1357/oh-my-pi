@@ -5750,7 +5750,7 @@ func (v AskUiRequest) MarshalJSON() ([]byte, error) {
 	return encodeObject(plain(v), `"type":"extension_ui_request","method":"ask"`, nil)
 }
 
-// Close the dialog opened by request `targetId`; a later answer to it is ignored.
+// Close the dialog opened by request `targetId`. When a person's message withdrew it, an answer to it that omp receives within two seconds still counts, and a host closing it unanswered replies `cancelled: true`; an answer received later is ignored.
 type CancelUiRequest struct {
 	ID       string `json:"id"`
 	TargetID string `json:"targetId"`
@@ -6113,7 +6113,7 @@ func (v ConfirmUiResponse) MarshalJSON() ([]byte, error) {
 	return encodeObject(plain(v), `"type":"extension_ui_response"`, nil)
 }
 
-// Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` then takes its recommended answers).
+// Dismisses a dialog, or acknowledges a `cancel` for one the host had not answered; `timedOut` reports the host's own deadline (an `ask` then takes its recommended answers).
 type CancelUiResponse struct {
 	ID       string `json:"id"`
 	TimedOut *bool  `json:"timedOut,omitempty"`

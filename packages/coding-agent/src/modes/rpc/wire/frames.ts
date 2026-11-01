@@ -195,7 +195,7 @@ export const frameDefs = {
 	),
 	CancelUiRequest: doc(
 		{ type: UI, id: "string", method: "'cancel'", targetId: "string" },
-		"Close the dialog opened by request `targetId`; a later answer to it is ignored.",
+		"Close the dialog opened by request `targetId`. When a person's message withdrew it, an answer to it that omp receives within two seconds still counts, and a host closing it unanswered replies `cancelled: true`; an answer received later is ignored.",
 	),
 	NotifyUiRequest: {
 		type: UI,
@@ -247,7 +247,7 @@ export const frameDefs = {
 	),
 	CancelUiResponse: doc(
 		{ type: "'extension_ui_response'", id: "string", cancelled: "true", "timedOut?": "boolean" },
-		"Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` then takes its recommended answers).",
+		"Dismisses a dialog, or acknowledges a `cancel` for one the host had not answered; `timedOut` reports the host's own deadline (an `ask` then takes its recommended answers).",
 	),
 	AnswersUiResponse: doc(
 		{ type: "'extension_ui_response'", id: "string", answers: "AskAnswer[]" },

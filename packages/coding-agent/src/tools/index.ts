@@ -36,6 +36,7 @@ import type { CustomMessage } from "../session/messages";
 import type { UsageStatistics } from "../session/session-entries";
 import type { SessionManager } from "../session/session-manager";
 import type { ToolChoiceQueue } from "../session/tool-choice-queue";
+import type { UserSteeringSupersede, UserSteeringSupersedeMode } from "../session/user-steering-supersede";
 import { TaskTool } from "../task";
 import type { AgentOutputManager } from "../task/output-manager";
 import { type AgentDefinition, canSpawnAtDepth } from "../task/types";
@@ -456,6 +457,14 @@ export interface ToolSession {
 	localProtocolOptions?: LocalProtocolOptions;
 	/** Settings instance for passing to subagents */
 	settings: Settings;
+	/**
+	 * Watch for a person's steer while a dialog waits on them (see `superviseUserSteering`).
+	 * Absent without a session queue; callers then fall back to the loop signal alone.
+	 */
+	superviseUserSteering?: (
+		loopSteeringSignal: AbortSignal | undefined,
+		mode?: UserSteeringSupersedeMode,
+	) => UserSteeringSupersede | undefined;
 	/** Plan mode state (if active) */
 	getPlanModeState?: () => PlanModeState | undefined;
 	/** Path of the session's active plan reference (e.g. `local://<title>.md`); defaults to `local://PLAN.md`. */

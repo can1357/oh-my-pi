@@ -5285,7 +5285,7 @@
 				"method",
 				"targetId"
 			],
-			"description": "Close the dialog opened by request `targetId`; a later answer to it is ignored."
+			"description": "Close the dialog opened by request `targetId`. When a person's message withdrew it, an answer to it that omp receives within two seconds still counts, and a host closing it unanswered replies `cancelled: true`; an answer received later is ignored."
 		},
 		"NotifyUiRequest": {
 			"type": "object",
@@ -5571,7 +5571,7 @@
 				"id",
 				"cancelled"
 			],
-			"description": "Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` then takes its recommended answers)."
+			"description": "Dismisses a dialog, or acknowledges a `cancel` for one the host had not answered; `timedOut` reports the host's own deadline (an `ask` then takes its recommended answers)."
 		},
 		"AnswersUiResponse": {
 			"type": "object",

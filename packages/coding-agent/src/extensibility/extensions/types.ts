@@ -202,9 +202,43 @@ export function timedOutAskDialogResult(questions: ExtensionAskDialogQuestion[])
 }
 
 /**
+ * `signal.reason` when a message from the person superseded a dialog: they moved on without
+ * answering it. See {@link ExtensionUIDialogOptions.signal}.
+ */
+export class DialogSupersededError extends Error {
+	constructor() {
+		super("A message from the person superseded the dialog");
+		this.name = "DialogSupersededError";
+	}
+}
+
+/** True when `signal` closed a dialog because a message from the person superseded it. */
+export function isDialogSuperseded(signal: AbortSignal | undefined): boolean {
+	return signal?.aborted === true && signal.reason instanceof DialogSupersededError;
+}
+
+/**
+ * After a person's message withdraws a dialog a remote client shows (an RPC host, an ACP client), how long omp
+ * keeps reading the client's reply to it: an answer, or an acknowledgement (RPC `cancelled: true`, ACP `-32800`).
+ * Either ends the wait at once. An answer received within this window is used. Neither protocol carries when an
+ * answer was submitted, so an answer received later cannot be told apart from none: the dialog is reported
+ * unanswered when the window ends, and a later answer is ignored, even one submitted before the withdrawal.
+ * Waiting longer would hold back the person's message that long on every client that sends no reply.
+ */
+export const WITHDRAWN_DIALOG_REPLY_MS = 2_000;
+
+/**
  * UI dialog options for extensions.
  */
 export interface ExtensionUIDialogOptions {
+	/**
+	 * Closes the dialog. A {@link DialogSupersededError} reason means a message from the person
+	 * superseded it, and the host hands back what the person had submitted, never text they had
+	 * not submitted: the interactive TUI's `askDialog` resolves a submit result with
+	 * `interrupted: true`, and a remote host (RPC, ACP) withdraws the dialog and resolves with an
+	 * answer its client sends within {@link WITHDRAWN_DIALOG_REPLY_MS}, else unanswered. Any other
+	 * reason: the answer no longer matters, and the dialog resolves its cancelled value.
+	 */
 	signal?: AbortSignal;
 	timeout?: number;
 	/** Invoked when the UI times out while waiting for a selection/input */
