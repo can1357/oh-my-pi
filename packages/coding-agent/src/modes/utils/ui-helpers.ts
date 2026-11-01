@@ -93,7 +93,7 @@ import {
 import {
 	assistantHasVisibleContent,
 	assistantUsageIsBilled,
-	buildAsyncResultBlock,
+	buildAsyncResultComponent,
 	buildFileMentionBlock,
 	buildIrcMessageCard,
 	buildLaunchCompletionBlock,
@@ -315,7 +315,9 @@ export class UiHelpers {
 			case "custom": {
 				if (message.display) {
 					if (message.customType === "async-result") {
-						const component = buildAsyncResultBlock(message);
+						const renderer = this.ctx.viewSession.extensionRunner?.getMessageRenderer(message.customType);
+						const component = buildAsyncResultComponent(message, renderer);
+						component.setExpanded(this.ctx.toolOutputExpanded);
 						this.ctx.chatContainer.addChild(component);
 						break;
 					}

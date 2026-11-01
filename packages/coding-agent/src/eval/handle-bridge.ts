@@ -1,3 +1,4 @@
+import { isRecord } from "@oh-my-pi/pi-utils";
 import type { AsyncJob, AsyncJobManager } from "../async";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { ToolSession } from "../tools";
@@ -41,12 +42,8 @@ type ResolvedHandle =
 	| { ref: EvalHandleRef; job: AsyncJob; manager: AsyncJobManager }
 	| { ref: EvalHandleRef; completion: CompletionHandleEntry };
 
-function isUnknownRecord(value: unknown): value is Record<string, unknown> {
-	return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
 function parseRef(value: unknown): EvalHandleRef {
-	if (!isUnknownRecord(value)) throw new ToolError("handle must be an object with kind and id");
+	if (!isRecord(value)) throw new ToolError("handle must be an object with kind and id");
 	const { kind, id } = value;
 	if ((kind !== "agent" && kind !== "completion") || typeof id !== "string" || id.length === 0) {
 		throw new ToolError("handle must contain kind agent|completion and a non-empty id");
@@ -55,7 +52,7 @@ function parseRef(value: unknown): EvalHandleRef {
 }
 
 function parseRefs(args: unknown): { items: EvalHandleRef[]; timeoutMs?: number } {
-	if (!isUnknownRecord(args) || !Array.isArray(args.items)) {
+	if (!isRecord(args) || !Array.isArray(args.items)) {
 		throw new ToolError("wait() requires an items array");
 	}
 	const items = args.items.map(parseRef);
@@ -67,7 +64,7 @@ function parseRefs(args: unknown): { items: EvalHandleRef[]; timeoutMs?: number 
 }
 
 function parseSingleRef(args: unknown): EvalHandleRef {
-	if (!isUnknownRecord(args)) throw new ToolError("handle request requires an item");
+	if (!isRecord(args)) throw new ToolError("handle request requires an item");
 	return parseRef(args.item);
 }
 
@@ -99,7 +96,7 @@ function agentSnapshot(ref: EvalHandleRef, job: AsyncJob): EvalHandleSnapshot {
 
 	const snapshot: EvalHandleSnapshot = { ...ref, status: "completed", text: job.resultText ?? "" };
 	const evalResult = job.latestDetails?.evalResult;
-	if (isUnknownRecord(evalResult)) {
+	if (isRecord(evalResult)) {
 		if (typeof evalResult.text === "string") snapshot.text = evalResult.text;
 		if (Object.hasOwn(evalResult, "data")) snapshot.data = evalResult.data;
 	}
@@ -143,7 +140,7 @@ function emitProgress(
 	if (!emitStatus || !("job" in resolved)) return previousProgress;
 	const progress = resolved.job.latestDetails?.progress;
 	const first = Array.isArray(progress) ? progress[0] : undefined;
-	if (!isUnknownRecord(first) || first === previousProgress) return previousProgress;
+	if (!isRecord(first) || first === previousProgress) return previousProgress;
 	const task = typeof first.assignment === "string" ? first.assignment : first.task;
 	const taskPreview = typeof task === "string" ? task.split("\n")[0]?.slice(0, 120) : undefined;
 	emitStatus({

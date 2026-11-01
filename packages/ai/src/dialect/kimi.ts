@@ -2,7 +2,13 @@ import type { Message, ToolCall } from "../types";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import { asRecord, normalizeKimiFunctionName, partialSuffixOverlapAny } from "./coercion";
 import dialectPrompt from "./kimi.md" with { type: "text" };
-import { assistantTranscriptParts, collectToolResultRun, messageContentText, stringifyJson } from "./rendering";
+import {
+	assistantTranscriptParts,
+	collectToolResultRun,
+	kimiCallId,
+	messageContentText,
+	stringifyJson,
+} from "./rendering";
 import { TerminatorWait } from "./terminator-wait";
 import type {
 	DialectDefinition,
@@ -317,11 +323,6 @@ function renderTranscript(messages: readonly Message[], _options?: DialectRender
 		i++;
 	}
 	return out;
-}
-
-function kimiCallId(name: string, id: string, index: number): string {
-	const trimmed = id.trim();
-	return trimmed.startsWith("functions.") ? trimmed : `functions.${name}:${index}`;
 }
 
 function kimiTurn(role: "assistant" | "system" | "user", name: string, body: string): string {
