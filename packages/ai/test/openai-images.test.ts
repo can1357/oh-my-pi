@@ -89,6 +89,36 @@ describe("OpenAI-compatible image response_format", () => {
 		expect(result.images[0]?.data).toBe(IMAGE_DATA);
 	});
 
+	test("OpenAI multipart edits submit multiple images as an array", async () => {
+		const model = imageModel("openai", "gpt-image-1");
+		const second = { data: Buffer.from("second image").toString("base64"), mimeType: "image/jpeg" };
+		const fetch: FetchImpl = async (_input, init) => {
+			if (!(init?.body instanceof FormData)) throw new Error("Expected multipart image edit");
+			const form = init.body;
+			const images = form.getAll("image[]");
+			if (form.has("image") || images.length !== 2) {
+				return new Response(JSON.stringify({ error: { message: "Duplicate parameter: 'image'" } }), {
+					status: 400,
+				});
+			}
+			const data = await Promise.all(
+				images.map(async image => {
+					if (!(image instanceof File)) throw new Error("Expected image file");
+					return Buffer.from(await image.arrayBuffer()).toString();
+				}),
+			);
+			expect(data).toEqual(["image bytes", "second image"]);
+			return imageResponse();
+		};
+
+		const result = await generateOpenAIImage(
+			model,
+			{ prompt: "combine these", inputImages: [INPUT_IMAGE, second] },
+			{ apiKey: "test", fetch },
+		);
+		expect(result.images[0]?.data).toBe(IMAGE_DATA);
+	});
+
 	test("non-GPT image generation and JSON edits retain response_format", async () => {
 		const model = imageModel("gateway", "flux-1");
 		const bodies: Array<Record<string, unknown>> = [];

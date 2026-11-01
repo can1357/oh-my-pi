@@ -229,11 +229,16 @@ describe("imageGenTool catalog routing", () => {
 		expect(result.details?.model).toBe("second-image");
 
 		const failingFetch: FetchImpl = async () =>
-			new Response(JSON.stringify({ error: { message: "failed" } }), { status: 503 });
+			new Response(JSON.stringify({ error: { message: "Duplicate parameter: 'image'" } }), { status: 400 });
 		const failingContext = createContext({ models: [first, second], settings, fetch: failingFetch });
-		await expect(
-			imageGenTool.execute("aggregate", { subject: "fails" }, undefined, failingContext),
-		).rejects.toBeInstanceOf(AggregateError);
+		try {
+			await imageGenTool.execute("aggregate", { subject: "fails" }, undefined, failingContext);
+			throw new Error("Expected image chain to fail");
+		} catch (error) {
+			if (!(error instanceof AggregateError)) throw error;
+			expect(error.message).toContain("Image generation exhausted the resolved image chain");
+			expect(error.message).toContain("Duplicate parameter: 'image'");
+		}
 	});
 
 	it("propagates transport I/O failures without trying the next model", async () => {
