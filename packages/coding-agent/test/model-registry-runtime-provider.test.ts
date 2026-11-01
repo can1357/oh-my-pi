@@ -387,6 +387,247 @@ describe("ModelRegistry runtime provider registration", () => {
 		expect(registry.find(providerName, "fallback-model")).toBeDefined();
 	});
 
+	test("awaitBackgroundRefresh waits for in-flight runtime provider discovery", async () => {
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		registry.registerProvider(
+			"pending-runtime-provider",
+			{
+				baseUrl: "https://runtime.example.com/v1",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				fetchDynamicModels: async () => {
+					started.resolve();
+					await release.promise;
+					return [baseModel];
+				},
+			},
+			"ext://runtime",
+		);
+		const refresh = registry.refreshRuntimeProviders("online");
+		await started.promise;
+		let settled = false;
+		const waiting = registry.awaitBackgroundRefresh().then(() => {
+			settled = true;
+		});
+		try {
+			await Promise.resolve();
+			expect(settled).toBe(false);
+			release.resolve();
+			await waiting;
+			expect(registry.find("pending-runtime-provider", baseModel.id)).toBeDefined();
+		} finally {
+			release.resolve();
+			await refresh;
+		}
+	});
+
+	test("awaitBackgroundRefresh snapshots discovery without waiting for later work", async () => {
+		const firstStarted = Promise.withResolvers<void>();
+		const secondStarted = Promise.withResolvers<void>();
+		const releaseFirst = Promise.withResolvers<void>();
+		const releaseSecond = Promise.withResolvers<void>();
+		for (const [name, started, release] of [
+			["first-runtime-provider", firstStarted, releaseFirst],
+			["second-runtime-provider", secondStarted, releaseSecond],
+		] as const) {
+			registry.registerProvider(
+				name,
+				{
+					baseUrl: "https://runtime.example.com/v1",
+					apiKey: "RUNTIME_KEY",
+					api: "openai-completions",
+					fetchDynamicModels: async () => {
+						started.resolve();
+						await release.promise;
+						return [baseModel];
+					},
+				},
+				"ext://runtime",
+			);
+		}
+		const first = registry.refreshDiscoverableProviders(["first-runtime-provider"], "online");
+		await firstStarted.promise;
+		const waiting = registry.awaitBackgroundRefresh();
+		let secondSettled = false;
+		const second = registry.refreshDiscoverableProviders(["second-runtime-provider"], "online").then(() => {
+			secondSettled = true;
+		});
+		try {
+			await secondStarted.promise;
+			releaseFirst.resolve();
+			await waiting;
+			expect(secondSettled).toBe(false);
+			expect(registry.find("first-runtime-provider", baseModel.id)).toBeDefined();
+			expect(registry.find("second-runtime-provider", baseModel.id)).toBeUndefined();
+		} finally {
+			releaseFirst.resolve();
+			releaseSecond.resolve();
+			await Promise.all([first, second]);
+		}
+	});
+
+	test("awaitBackgroundRefresh includes offline runtime cache hydration from its entry", async () => {
+		const config: ProviderConfigInput = {
+			baseUrl: "https://runtime.example.com/v1",
+			apiKey: "RUNTIME_KEY",
+			api: "openai-completions",
+			fetchDynamicModels: vi.fn(async () => [baseModel]),
+		};
+		registry.registerProvider("cached-runtime-provider", config, "ext://runtime");
+		await registry.refreshRuntimeProviders("online");
+		registry.clearSourceRegistrations("ext://runtime");
+		registry.registerProvider("cached-runtime-provider", config, "ext://runtime");
+		expect(registry.find("cached-runtime-provider", baseModel.id)).toBeUndefined();
+		const hydration = registry.refreshRuntimeProviders("offline");
+		try {
+			await registry.awaitBackgroundRefresh();
+			expect(registry.find("cached-runtime-provider", baseModel.id)).toBeDefined();
+			expect(config.fetchDynamicModels).toHaveBeenCalledTimes(1);
+		} finally {
+			await hydration;
+		}
+	});
+
+	test("source replacement preserves rebound catalogs but removes omitted providers and inactive sources", async () => {
+		const config: ProviderConfigInput = {
+			baseUrl: "https://runtime.example.com/v1",
+			apiKey: "RUNTIME_KEY",
+			api: "openai-completions",
+			fetchDynamicModels: vi.fn(async () => [baseModel]),
+		};
+		registry.registerProvider("kept-runtime-provider", config, "ext://runtime");
+		registry.registerProvider("removed-runtime-provider", config, "ext://runtime");
+		await registry.refreshRuntimeProviders("online");
+		const replacement = registry.replaceSourceRegistrations(
+			["ext://runtime"],
+			[{ name: "kept-runtime-provider", config, sourceId: "ext://runtime" }],
+		);
+		expect(registry.find("kept-runtime-provider", baseModel.id)).toBeDefined();
+		try {
+			await registry.awaitBackgroundRefresh();
+			expect(registry.find("kept-runtime-provider", baseModel.id)).toBeDefined();
+			expect(registry.find("removed-runtime-provider", baseModel.id)).toBeUndefined();
+			expect(config.fetchDynamicModels).toHaveBeenCalledTimes(2);
+		} finally {
+			await replacement;
+		}
+		await registry.replaceSourceRegistrations([], []);
+		expect(registry.find("kept-runtime-provider", baseModel.id)).toBeUndefined();
+	});
+
+	test("a removed source cannot be restored by its old in-flight discovery", async () => {
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		registry.registerProvider(
+			"removed-pending-provider",
+			{
+				baseUrl: "https://runtime.example.com/v1",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				fetchDynamicModels: async () => {
+					started.resolve();
+					await release.promise;
+					return [baseModel];
+				},
+			},
+			"ext://runtime",
+		);
+		const refresh = registry.refreshRuntimeProviders("online");
+		await started.promise;
+		try {
+			await registry.replaceSourceRegistrations([], []);
+		} finally {
+			release.resolve();
+			await refresh;
+		}
+		expect(registry.find("removed-pending-provider", baseModel.id)).toBeUndefined();
+		expect(registry.getProviderDiscoveryState("removed-pending-provider")).toBeUndefined();
+	});
+
+	test("a rebound source keeps the rows its in-flight discovery returns", async () => {
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const config: ProviderConfigInput = {
+			baseUrl: "https://runtime.example.com/v1",
+			apiKey: "RUNTIME_KEY",
+			api: "openai-completions",
+			fetchDynamicModels: async () => {
+				started.resolve();
+				await release.promise;
+				return [baseModel];
+			},
+		};
+		registry.registerProvider("rebound-pending-provider", config, "ext://runtime");
+		const refresh = registry.refreshRuntimeProviders("online");
+		await started.promise;
+		try {
+			await registry.replaceSourceRegistrations(
+				["ext://runtime"],
+				[{ name: "rebound-pending-provider", config, sourceId: "ext://runtime" }],
+			);
+		} finally {
+			release.resolve();
+			await refresh;
+		}
+		expect(registry.find("rebound-pending-provider", baseModel.id)).toBeDefined();
+	});
+
+	test("a provider handed to another source drops its old owner's in-flight discovery", async () => {
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const runtime = {
+			baseUrl: "https://runtime.example.com/v1",
+			apiKey: "RUNTIME_KEY",
+			api: "openai-completions",
+		} satisfies ProviderConfigInput;
+		registry.registerProvider(
+			"handoff-pending-provider",
+			{
+				...runtime,
+				fetchDynamicModels: async () => {
+					started.resolve();
+					await release.promise;
+					return [baseModel];
+				},
+			},
+			"ext://old-owner",
+		);
+		const refresh = registry.refreshRuntimeProviders("online");
+		await started.promise;
+		try {
+			registry.registerProvider(
+				"handoff-pending-provider",
+				{ ...runtime, fetchDynamicModels: async () => [] },
+				"ext://new-owner",
+			);
+		} finally {
+			release.resolve();
+			await refresh;
+		}
+		expect(registry.find("handoff-pending-provider", baseModel.id)).toBeUndefined();
+	});
+
+	test("failed source preparation rejects its caller without rejecting catalog waiters", async () => {
+		registry.registerProvider(
+			"valid-runtime-provider",
+			{
+				baseUrl: "https://runtime.example.com/v1",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				models: [baseModel],
+			},
+			"ext://runtime",
+		);
+		const replacement = registry.replaceSourceRegistrations(
+			["ext://runtime"],
+			[{ name: "invalid-runtime-provider", config: { streamSimple }, sourceId: "ext://runtime" }],
+		);
+		await expect(registry.awaitBackgroundRefresh()).resolves.toBeUndefined();
+		await expect(replacement).rejects.toThrow('"api" is required when registering streamSimple');
+		expect(registry.find("valid-runtime-provider", baseModel.id)).toBeDefined();
+	});
+
 	test("configured discovery suppresses extension fetchDynamicModels for the same provider", async () => {
 		const providerName = "runtime-configured-provider";
 		fs.writeFileSync(

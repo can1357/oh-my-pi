@@ -3054,23 +3054,25 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Process provider registrations queued during extension loading.
 		// This must happen before the runner is created so that models registered by
 		// extensions are available for model selection on session resume / fallback.
+		const providerRegistrations = extensionsResult.runtime.pendingProviderRegistrations;
+		extensionsResult.runtime.pendingProviderRegistrations = [];
+		// Both branches hydrate cached runtime (extension) provider catalogs before
+		// model resolution: dynamic-only providers have no synchronous registration
+		// side effect, so a cold --model/provider resume must see the same SQLite
+		// cache `omp models find` uses before the online refresh continues. The
+		// replacement keeps the shared registry's previous rows readable meanwhile.
 		if (!restrictToolNames) {
-			const activeExtensionSources = extensionsResult.extensions.map(extension => extension.path);
-			modelRegistry.syncExtensionSources(activeExtensionSources);
-			modelRegistry.clearSourceRegistrations(new Set(activeExtensionSources));
-		}
-		if (extensionsResult.runtime.pendingProviderRegistrations.length > 0) {
-			for (const { name, config, sourceId } of extensionsResult.runtime.pendingProviderRegistrations) {
+			await modelRegistry.replaceSourceRegistrations(
+				extensionsResult.extensions.map(extension => extension.path),
+				providerRegistrations,
+			);
+		} else {
+			for (const { name, config, sourceId } of providerRegistrations) {
 				modelRegistry.registerProvider(name, config, sourceId);
 			}
-			extensionsResult.runtime.pendingProviderRegistrations = [];
+			// Restricted children do not replace their parent's provider sources.
+			await modelRegistry.refreshRuntimeProviders("offline");
 		}
-		// Hydrate cached runtime (extension) provider catalogs before model
-		// resolution. Dynamic-only providers have no synchronous registration side
-		// effect, so a cold --model/provider resume must see the same fresh SQLite
-		// cache that `omp models find` uses before the online refresh continues in
-		// the background.
-		await modelRegistry.refreshRuntimeProviders("offline");
 		// Online runtime discovery must not steal the event loop from the first UI
 		// frame. Explicit deferred model selectors still start it immediately
 		// because they await it below; normal UI startup receives a one-shot
