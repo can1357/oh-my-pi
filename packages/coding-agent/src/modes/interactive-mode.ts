@@ -2827,6 +2827,8 @@ export class InteractiveMode implements InteractiveModeContext {
 				// `/move`, manage_skill, MCP prompts) lands here; rebuild the picker from session state.
 				this.#pendingSlashCommands = this.#buildPendingSlashCommands();
 				this.#rebuildSlashCommandAutocomplete(this.sessionManager.getCwd());
+				// A startup-deferred extension binds late through this same notification; claim its link schemes.
+				this.syncExtensionLinks();
 				this.ui.requestRender();
 			}),
 		);
