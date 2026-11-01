@@ -10,6 +10,7 @@ import {
 } from "@oh-my-pi/pi-mnemopi/core/runtime-options";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getFastembedCacheDir } from "@oh-my-pi/pi-utils";
+import { sha256File } from "../../../src/utils/file-hash";
 import type { EngineAdapter, MnemopiRecall, ProtocolName, RecallHit } from "../engine";
 import { envName, PythonProcess } from "./python-process";
 import { enginePython, resolveCacheRoot } from "../paths";
@@ -83,7 +84,7 @@ export async function modelDirDigest(modelDir: string): Promise<string> {
 	for (const name of (await fs.readdir(modelDir)).filter(isLoaded).sort()) {
 		const file = path.join(modelDir, name);
 		if (!(await fs.stat(file)).isFile()) continue;
-		const inner = new Bun.CryptoHasher("sha256").update(await Bun.file(file).bytes()).digest("hex");
+		const inner = await sha256File(file);
 		outer.update(`${name}\0${inner}\n`);
 	}
 	return outer.digest("hex");
