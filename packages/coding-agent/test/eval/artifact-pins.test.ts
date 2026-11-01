@@ -498,8 +498,8 @@ describe("an artifact request at the host", () => {
 		// the name now: refusing it is the only answer that cannot be foreign.
 		const lookup = { op: "answer", id: "0", root: "/artifacts" };
 		for (const token of [null, 3, {}]) expect(artifactRequestOf({ ...lookup, token })).toBeNull();
-		expect(artifactRequestOf(lookup)).toEqual(lookup);
-		expect(artifactRequestOf({ ...lookup, token: undefined })).toEqual(lookup);
+		expect(artifactRequestOf(lookup) as unknown).toEqual(lookup);
+		expect(artifactRequestOf({ ...lookup, token: undefined }) as unknown).toEqual(lookup);
 	});
 });
 
