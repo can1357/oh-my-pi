@@ -36,8 +36,17 @@ export interface ViewportLinkTarget extends ViewportLink {
 interface LinkHint {
 	readonly tag: string;
 	readonly link: ViewportLinkTarget;
-	/** What tells the label apart across repaints, one per shown row part; see {@link LinkHints.update}. */
-	readonly keys: readonly string[];
+	/**
+	 * The row each shown row part of the label is on in the whole content (shown row plus origin):
+	 * with the part's first cell, marker id and URL, what tells the label apart across repaints;
+	 * see {@link LinkHints.update}.
+	 */
+	readonly rows: readonly number[];
+}
+
+/** What tells one row part of a label apart across repaints. */
+function partKey(row: number, start: number, link: ViewportLinkTarget): string {
+	return `${row}\0${start}\0${link.id}\0${link.url}`;
 }
 
 /**
@@ -146,7 +155,7 @@ export class LinkHints {
 			this.#hints = [];
 			return false;
 		}
-		this.#hints = hints.map(({ tag, keys }, index) => ({ tag, keys, link: targets[index]! }));
+		this.#hints = hints.map(({ tag, rows: partRows }, index) => ({ tag, rows: partRows, link: targets[index]! }));
 		return true;
 	}
 
@@ -164,11 +173,19 @@ export class LinkHints {
 	 */
 	update(rows: readonly string[], origin = 0): void {
 		const kept = new Map<string, string>();
-		for (const { keys, tag } of this.#hints ?? []) for (const key of keys) kept.set(key, tag);
-		const targets = viewportLinkTargets(rows).map(link => ({
-			link,
-			keys: link.parts.map(part => `${part.row + origin}\0${part.start}\0${link.id}\0${link.url}`),
-		}));
+		for (const { link, rows: partRows, tag } of this.#hints ?? []) {
+			for (const [index, part] of link.parts.slice(0, partRows.length).entries()) {
+				kept.set(partKey(partRows[index]!, part.start, link), tag);
+			}
+		}
+		const targets = viewportLinkTargets(rows).map(link => {
+			const partRows = link.parts.map(part => part.row + origin);
+			return {
+				link,
+				rows: partRows,
+				keys: link.parts.map((part, index) => partKey(partRows[index]!, part.start, link)),
+			};
+		});
 		const used = new Set<string>();
 		const tags = targets.map(({ keys }) => {
 			const tag = keys.map(key => kept.get(key)).find(found => found !== undefined && !used.has(found));
@@ -177,7 +194,7 @@ export class LinkHints {
 		});
 		let hints: LinkHint[] = [];
 		let exhausted = false;
-		for (const [index, { link, keys }] of targets.entries()) {
+		for (const [index, { link, rows: partRows }] of targets.entries()) {
 			let tag = tags[index];
 			if (tag === undefined) {
 				// Past the cap a label stays untagged.
@@ -189,21 +206,30 @@ export class LinkHints {
 				}
 				used.add(tag);
 			}
-			hints.push({ tag, link, keys });
+			hints.push({ tag, link, rows: partRows });
 		}
 		if (exhausted) {
 			hints = [];
 			used.clear();
-			for (const { link, keys } of targets.slice(0, MAX_TAGS)) {
+			for (const { link, rows: partRows } of targets.slice(0, MAX_TAGS)) {
 				// Two letters each leave 676 prefix-free tags, so one is always left.
 				const tag = pickTag(link.text, used, true)!;
 				used.add(tag);
-				hints.push({ tag, link, keys });
+				hints.push({ tag, link, rows: partRows });
 			}
 			this.#typed = "";
 		}
 		this.#hints = hints;
 		if (!hints.some(({ tag }) => tag.startsWith(this.#typed))) this.#typed = "";
+	}
+
+	/**
+	 * The content moved under the tags, as when a reply above some labels is redrawn taller or
+	 * shorter: `move` maps the row a label was last drawn on in the whole content to the row it is
+	 * on now, so the next {@link update} finds it there with its tag.
+	 */
+	moveRows(move: (row: number) => number): void {
+		if (this.#hints) this.#hints = this.#hints.map(hint => ({ ...hint, rows: hint.rows.map(move) }));
 	}
 
 	/** Whether some row holds more tag cells than `width`, so its tags could not all be read side by side. */

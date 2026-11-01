@@ -187,6 +187,32 @@ describe("extension link browser", () => {
 		browser.dispose();
 	});
 
+	it("keeps a label's tag when a reply above it is rerendered taller, pushing it down", () => {
+		let expanded = false;
+		const longer: AssistantTextRenderer = ({ text, message }) =>
+			expanded && message.timestamp === 100 ? `${text}\n\nExtra one.\n\nExtra two.` : undefined;
+		const { browser, activated, view, tags } = browse(
+			[
+				...linkReplies(["apple", "avocado"], 1),
+				...Array.from({ length: 10 }, (_, index) => reply(`More filler ${index}.`, 500 + index)),
+			],
+			[longer],
+		);
+		view();
+		browser.handleInput(HOME);
+		expect(tags()).toEqual(["a", "v"]);
+		// With `apple` scrolled out, `a` is free: a label tagged afresh would take it.
+		while (view().some(row => row.includes("apple"))) browser.handleInput(DOWN);
+		const before = view().findIndex(row => row.includes("vocado"));
+		expanded = true;
+		expect(browser.rerenderMessage(100)).toBe(true);
+		expect(view().findIndex(row => row.includes("vocado"))).toBeGreaterThan(before);
+		expect(tags()).toEqual(["v"]);
+		browser.handleInput("v");
+		expect(activated).toEqual(["demo:avocado"]);
+		browser.dispose();
+	});
+
 	it("tags a label scrolling into view without taking or changing the tags already drawn", () => {
 		// Opened at the bottom, `sun` is in view and `sky` one row above it.
 		const { browser, activated, view, tags } = browse([

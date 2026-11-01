@@ -101,18 +101,37 @@ export class LinkBrowserComponent implements Component {
 
 	/**
 	 * Redraw the browser's copy of the reply sent at `timestamp`, re-running the text renderers;
-	 * returns whether it holds one. The rows above it stay where they are on screen.
+	 * returns whether it holds one. The rows above it stay where they are on screen, and the links
+	 * below it keep their tags on the rows they move to.
 	 */
 	rerenderMessage(timestamp: number): boolean {
+		const children = this.#builder.container.children;
+		const contentWidth = Math.max(1, this.#width - 1);
+		const heights = () => this.#browser.renderOutlineRows(children, contentWidth).map(rows => rows.length);
+		const before = this.#width > 0 ? heights() : undefined;
 		let redrawn = false;
-		for (const child of this.#builder.container.children) {
+		for (const child of children) {
 			if (child instanceof AssistantMessageComponent && child.rerenderMessage(timestamp)) redrawn = true;
 		}
-		if (redrawn) {
-			this.#rowFloor = this.#browser.visibleEnd;
-			this.#deps.requestRender();
+		if (!redrawn) return false;
+		if (before) {
+			// The body row each resized reply ended on, and how far the rows from there on moved.
+			const moves: { end: number; by: number }[] = [];
+			let end = 0;
+			let by = 0;
+			for (const [index, height] of heights().entries()) {
+				end += before[index]!;
+				if (height === before[index]) continue;
+				by += height - before[index]!;
+				moves.push({ end, by });
+			}
+			// Tags key a label by its body row less the rows history loaded above.
+			const prepended = this.#prependedRows;
+			this.#hints.moveRows(row => row + (moves.findLast(move => row + prepended >= move.end)?.by ?? 0));
 		}
-		return redrawn;
+		this.#rowFloor = this.#browser.visibleEnd;
+		this.#deps.requestRender();
+		return true;
 	}
 
 	invalidate(): void {
