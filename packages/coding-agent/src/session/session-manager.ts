@@ -3233,6 +3233,14 @@ export class SessionManager {
 	}
 
 	/**
+	 * Whether a disk failure is latched: the session file stopped being written,
+	 * and the failed entry and any later ones live only in memory.
+	 */
+	hasPersistenceFailure(): boolean {
+		return this.#diskFailure !== undefined;
+	}
+
+	/**
 	 * {@link isSessionOnDisk}, counting only what the backing store has
 	 * confirmed. Remote storage publishes asynchronously, so a hint printed
 	 * just before the process exits must not count a write still in flight:

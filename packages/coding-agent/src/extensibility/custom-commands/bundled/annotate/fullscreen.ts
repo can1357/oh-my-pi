@@ -34,7 +34,7 @@ function requireEditor(): string {
 
 async function editAnnotationDraft(tui: TUI, draft: string, commit: (text: string | null) => void): Promise<void> {
 	const editor = requireEditor();
-	tui.stop();
+	tui.stop({ resuming: true });
 	try {
 		commit(await openInEditor(editor, draft, { extension: ".md" }));
 	} finally {
@@ -58,7 +58,7 @@ async function editTextSource(
 ): Promise<void> {
 	const editor = requireEditor();
 	const current = overlay.textSourceText() ?? "";
-	tui.stop();
+	tui.stop({ resuming: true });
 	let next: string | null;
 	let exitCode = 0;
 	try {
@@ -95,7 +95,7 @@ async function editReviewedFile(tui: TUI, ctx: AnnotationOverlayContext, overlay
 	if (!(await Bun.file(absolute).exists())) {
 		throw new Error(`${relative} is not on disk. The review still uses the frozen diff.`);
 	}
-	tui.stop();
+	tui.stop({ resuming: true });
 	let exitCode: number;
 	try {
 		exitCode = await openEditorOnPath(editor, absolute);
