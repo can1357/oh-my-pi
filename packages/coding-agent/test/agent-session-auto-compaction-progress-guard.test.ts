@@ -274,7 +274,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 
 		const assistantMsg = highUsageAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await compactionDone;
 		await session.waitForIdle();
@@ -311,7 +311,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 
 		const assistantMsg = highUsageAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await compactionDone;
 		await session.waitForIdle();
@@ -347,7 +347,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 
 		const assistantMsg = highUsageAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await compactionDone;
 		await session.waitForIdle();
@@ -377,7 +377,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 
 		const assistantMsg = highUsageAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await compactionDone;
 		await session.waitForIdle();
@@ -413,7 +413,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 
 		const assistantMsg = highUsageAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await compactionDone;
 		await session.waitForIdle();
@@ -441,7 +441,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 
 		const assistantMsg = highUsageAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await compactionDone;
 		await session.waitForIdle();
@@ -469,7 +469,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 
 		const assistantMsg = highUsageAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await compactionDone;
 		await session.waitForIdle();
@@ -529,7 +529,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 		// the rewritten context (summary only) is tiny.
 		const assistantMsg = highUsageAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 		// Wait for the headroom verdict while the prompt is still gated —
 		// releasing the gate earlier would clear the snapshot and mask the
 		// regression. Fixed behavior schedules the auto-continue (second prompt
@@ -579,7 +579,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 		// Mid-run compaction fires and rebases the pending snapshot to the summary.
 		const trigger = highUsageAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: trigger });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [trigger] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [trigger] });
 		await compactionDone;
 
 		const rebasedTokens = session.getContextBreakdown()?.usedTokens ?? 0;
@@ -668,7 +668,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 
 		const assistantMsg = overflowAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await compactionDone;
 		await session.waitForIdle();
@@ -691,7 +691,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 
 		const assistantMsg = overflowAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await compactionDone;
 		await session.waitForIdle();
@@ -721,7 +721,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 
 		const assistantMsg = overflowAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await session.waitForIdle();
 
@@ -760,7 +760,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 
 		const assistantMsg = contentfulOverflowAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await compactionDone;
 		await session.waitForIdle();
@@ -792,7 +792,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 
 		const assistantMsg = overflowAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await compactionDone;
 		await session.waitForIdle();
@@ -827,7 +827,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 
 		const assistantMsg = contentfulOverflowAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await compactionDone;
 		await session.waitForIdle();
@@ -885,7 +885,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 
 		const assistantMsg = contentfulOverflowAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await compactionDone;
 		await session.waitForIdle();
@@ -959,7 +959,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 		};
 		sessionManager.appendMessage(assistantMsg);
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await compactionDone;
 		await session.waitForIdle();
@@ -1009,7 +1009,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 		async function endTurn(message: AssistantMessage): Promise<void> {
 			sessionManager.appendMessage(message);
 			session.agent.emitExternalEvent({ type: "message_end", message });
-			session.agent.emitExternalEvent({ type: "agent_end", messages: [message] });
+			session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [message] });
 			await session.waitForIdle();
 		}
 
@@ -1178,7 +1178,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 			const msg = emptyLengthStop(i);
 			sessionManager.appendMessage(msg);
 			session.agent.emitExternalEvent({ type: "message_end", message: msg });
-			session.agent.emitExternalEvent({ type: "agent_end", messages: [msg] });
+			session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [msg] });
 			await session.waitForIdle();
 			attempts++;
 			if (continueSpy.mock.calls.length === before) break;
@@ -1255,7 +1255,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 		};
 		sessionManager.appendMessage(speculativeTrigger);
 		session.agent.emitExternalEvent({ type: "message_end", message: speculativeTrigger });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [speculativeTrigger] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [speculativeTrigger] });
 		await handoffStarted.promise;
 		expect(session.compactionSpeculation).toBe("running");
 
@@ -1284,7 +1284,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 		sessionManager.appendMessage(ordinaryStop);
 		session.agent.emitExternalEvent({ type: "message_end", message: ordinaryStop });
 		await scheduler.yield();
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [ordinaryStop] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [ordinaryStop] });
 		await ordinaryAgentEnd.promise;
 		expect(session.compactionSpeculation).toBe("running");
 
@@ -1308,7 +1308,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 		sessionManager.appendMessage(lengthStop);
 		session.agent.emitExternalEvent({ type: "message_end", message: lengthStop });
 		await scheduler.yield();
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [lengthStop] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [lengthStop] });
 		await scheduler.yield();
 
 		handoffResult.resolve("speculative handoff");
@@ -1371,7 +1371,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 		};
 		sessionManager.appendMessage(speculativeTrigger);
 		session.agent.emitExternalEvent({ type: "message_end", message: speculativeTrigger });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [speculativeTrigger] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [speculativeTrigger] });
 		await handoffStarted.promise;
 		expect(session.compactionSpeculation).toBe("running");
 		await session.waitForIdle();
@@ -1399,7 +1399,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 		releaseFailedHandoff.resolve();
 		await scheduler.yield();
 		expect(session.compactionSpeculation).toBe("idle");
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [lengthStop] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [lengthStop] });
 		await session.waitForIdle();
 
 		expect(continueSpy).toHaveBeenCalledTimes(1);
@@ -1453,7 +1453,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 
 		const assistantMsg = overflowAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await compactionDone;
 		await session.waitForIdle();
@@ -1511,7 +1511,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 
 		const assistantMsg = overflowAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await compactionDone;
 		await session.waitForIdle();
@@ -1543,7 +1543,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 
 		const assistantMsg = overflowAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await compactionDone;
 		await session.waitForIdle();
@@ -1575,7 +1575,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 
 		const assistantMsg = overflowAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await compactionDone;
 		await session.waitForIdle();
@@ -1705,7 +1705,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 			timestamp: now,
 		};
 		session.agent.emitExternalEvent({ type: "message_end", message: finalAssistant });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [finalAssistant] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [finalAssistant] });
 
 		await compactionDone;
 		await session.waitForIdle();
@@ -1734,7 +1734,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 
 		const assistantMsg = overflowAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await compactionDone;
 		await session.waitForIdle();
@@ -1763,7 +1763,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 
 		const assistantMsg = overflowAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await compactionDone;
 		await session.waitForIdle();
@@ -1803,7 +1803,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 
 		const assistantMsg = highUsageAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await compactionDone;
 		await session.waitForIdle();
@@ -1838,7 +1838,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 
 		const assistantMsg = highUsageAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await compactionDone;
 		await session.waitForIdle();
@@ -1894,7 +1894,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 
 		const assistantMsg = highUsageAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await compactionDone;
 		await session.waitForIdle();
@@ -1963,7 +1963,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 
 		const assistantMsg = highUsageAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await compactionDone;
 		await session.waitForIdle();
@@ -1998,7 +1998,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 
 		const assistantMsg = highUsageAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await compactionDone;
 		await session.waitForIdle();

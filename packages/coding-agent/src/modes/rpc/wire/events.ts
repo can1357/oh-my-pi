@@ -37,6 +37,10 @@ export const eventDefs = {
 		"awaitingAsyncWork?": doc("boolean", "Non-terminal end whose only possible resume is a background-job result."),
 		"telemetry?": JSON_OBJECT,
 		"coverage?": JSON_OBJECT,
+		"source?": doc(
+			"string",
+			"Another producer that forwarded this end into the session; absent for the session's own run.",
+		),
 	},
 	TurnStartEvent: { type: "'turn_start'" },
 	TurnEndEvent: { type: "'turn_end'", message: "AgentMessage", toolResults: "ToolResultMessage[]" },

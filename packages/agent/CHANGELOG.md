@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- `Agent.emitExternalEvent` no longer accepts `agent_end` and throws if given one: only the run that owns a lifecycle reports its untagged end. Forward another producer's end with the new `Agent.emitExternalAgentEnd(event, source)`, which tags it with `source` ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
+
 ### Added
 
 - `isUserSteeringMessage`, `steeringRangeState`, `Agent.setSteeringPriority(predicate)` and `Agent.peekNextSteering()`: the rule for which queued steering is a person's, a copy-free range classifier, a host's own rule for which steering goes first, and what the next steering delivery takes ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))

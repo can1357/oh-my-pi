@@ -1792,7 +1792,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 				details: { status: "success" },
 			},
 		});
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await session.waitForIdle();
 
@@ -1872,7 +1872,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 			},
 		});
 		session.agent.emitExternalEvent({ type: "message_end", message: trailingEmptyStop });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [yieldMsg, trailingEmptyStop] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [yieldMsg, trailingEmptyStop] });
 
 		await session.waitForIdle();
 
@@ -2025,7 +2025,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		};
 
 		session.agent.emitExternalEvent({ type: "message_end", message: finalAssistant });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [finalAssistant] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [finalAssistant] });
 
 		await session.waitForIdle();
 
@@ -2085,7 +2085,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		};
 
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await session.waitForIdle();
 
@@ -2157,7 +2157,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 			timestamp: now - 1,
 		};
 		session.agent.emitExternalEvent({ type: "message_end", message: retryableError });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [retryableError] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [retryableError] });
 
 		await withTimeout(retryStarted, 1000, "Retry start timed out");
 		expect(session.isRetrying).toBe(true);
@@ -2186,7 +2186,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		await scheduler.yield();
 		expect(session.isRetrying).toBe(false);
 
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [recoveredOverThreshold] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [recoveredOverThreshold] });
 
 		await withTimeout(compactionDone, 1000, "Compaction end timed out");
 		await session.waitForIdle();
@@ -2247,7 +2247,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 			timestamp: now,
 		};
 		session.agent.emitExternalEvent({ type: "message_end", message: orphanToolUse });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [orphanToolUse] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [orphanToolUse] });
 
 		await session.waitForIdle();
 
@@ -2315,7 +2315,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		};
 
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await compactionDone;
 
@@ -2358,7 +2358,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		};
 
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await withTimeout(reminderDone, 1000, "Todo reminder timed out");
 		// The extension notification and the resume it precedes settle behind the

@@ -3597,6 +3597,8 @@ type AgentEndEvent struct {
 	AwaitingAsyncWork *bool                      `json:"awaitingAsyncWork,omitempty"`
 	Telemetry         map[string]json.RawMessage `json:"telemetry,omitempty"`
 	Coverage          map[string]json.RawMessage `json:"coverage,omitempty"`
+	// Another producer that forwarded this end into the session; absent for the session's own run.
+	Source *string `json:"source,omitempty"`
 }
 
 func (v *AgentEndEvent) UnmarshalJSON(data []byte) error {
@@ -3614,6 +3616,7 @@ func (v *AgentEndEvent) decodeFrom(raw map[string]json.RawMessage) error {
 	d.optional("awaitingAsyncWork", &out.AwaitingAsyncWork)
 	d.optional("telemetry", &out.Telemetry)
 	d.optional("coverage", &out.Coverage)
+	d.optional("source", &out.Source)
 	if d.err != nil {
 		return d.err
 	}

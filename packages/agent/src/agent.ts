@@ -54,6 +54,7 @@ import type {
 	AgentBeforeModelCall,
 	AgentContext,
 	AgentEvent,
+	AgentExternalEvent,
 	AgentLoopConfig,
 	AgentMessage,
 	AgentState,
@@ -483,6 +484,9 @@ export class Agent {
 	#tokenizer = new Tokenizer(this.#state.model);
 	#listeners = new Set<(e: AgentEvent) => void>();
 	#queueListeners = new Set<() => void>();
+	/** Queue changes made while ending a run publish only after subscribers receive the settled end. */
+	#queueChangeDeferrals = 0;
+	#queueChangePending = false;
 	#abortController?: AbortController;
 	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	#transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
@@ -1365,7 +1369,13 @@ export class Agent {
 		this.#asideMessageProvider = fn;
 	}
 
-	emitExternalEvent(event: AgentEvent) {
+	emitExternalEvent(event: AgentExternalEvent): void;
+	emitExternalEvent(event: AgentEvent): void {
+		if (event.type === "agent_end") {
+			throw new TypeError(
+				"Agent.emitExternalEvent cannot emit agent_end; use emitExternalAgentEnd with a source tag for a foreign lifecycle end",
+			);
+		}
 		switch (event.type) {
 			case "message_start":
 			case "message_update":
@@ -1383,8 +1393,15 @@ export class Agent {
 				break;
 		}
 
-		// An injected `agent_end` reports a run this Agent did not run, so it has nothing to give back first.
 		this.#dispatch(event);
+	}
+
+	/**
+	 * Forward a lifecycle end another producer owns. The emitted event receives
+	 * `source`, so it cannot impersonate this Agent's own untagged run end.
+	 */
+	emitExternalAgentEnd(event: AgentEndEvent, source: string = "external"): void {
+		this.#dispatch({ ...event, source });
 	}
 
 	// State mutators
@@ -1462,6 +1479,14 @@ export class Agent {
 	 *  change without emits scattered across every call site. */
 	#emitQueueChanged(): void {
 		this.#settleSteeringWait();
+		if (this.#queueChangeDeferrals > 0) {
+			this.#queueChangePending = true;
+			return;
+		}
+		this.#notifyQueueListeners();
+	}
+
+	#notifyQueueListeners(): void {
 		for (const listener of this.#queueListeners) {
 			try {
 				listener();
@@ -1563,24 +1588,41 @@ export class Agent {
 	 * occurrence) ahead of the rest, keeping both groups' relative order, so
 	 * one-at-a-time delivery takes them first: ahead of user-authored steering and
 	 * the agent-steering allowance ({@link MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING})
-	 * too, and again if a failed preparation puts them back, until the transcript
-	 * records each occurrence moved. Messages no longer pending, including a claimed
-	 * batch already being delivered, are ignored.
+	 * too, and again if a failed preparation puts them back. A message stays
+	 * promoted until the transcript records every occurrence of it outstanding when
+	 * it was promoted: queued, or already taken (being prepared or delivered) and
+	 * not yet recorded, since that one is recorded first. Only queued occurrences
+	 * move; a message with none is ignored.
 	 */
 	prioritizeSteering(messages: readonly AgentMessage[]): void {
 		const wanted = new Set(messages);
 		const front = this.#steeringQueue.filter(message => wanted.has(message));
-		const occurrences = new Map<AgentMessage, number>();
-		for (const message of front) occurrences.set(message, (occurrences.get(message) ?? 0) + 1);
+		const outstanding = new Map<AgentMessage, number>();
+		for (const message of front) outstanding.set(message, (outstanding.get(message) ?? 0) + 1);
+		for (const message of outstanding.keys()) {
+			outstanding.set(message, outstanding.get(message)! + this.#takenUnrecordedSteeringCount(message));
+		}
 		let marked = false;
-		for (const [message, queued] of occurrences) {
-			if ((this.#prioritizedSteering.get(message) ?? 0) >= queued) continue;
-			this.#prioritizedSteering.set(message, queued);
+		for (const [message, count] of outstanding) {
+			if ((this.#prioritizedSteering.get(message) ?? 0) >= count) continue;
+			this.#prioritizedSteering.set(message, count);
 			marked = true;
 		}
 		if (!marked && front.every((message, index) => this.#steeringQueue[index] === message)) return;
 		this.#steeringQueue = [...front, ...this.#steeringQueue.filter(message => !wanted.has(message))];
 		this.#emitQueueChanged();
+	}
+
+	/** Occurrences of `message` steering took (claimed, delivered or live-steered) that the transcript has not recorded. */
+	#takenUnrecordedSteeringCount(message: AgentMessage): number {
+		let count = 0;
+		for (const claimed of this.#queuedMessageClaims.steering?.messages ?? []) if (claimed === message) count++;
+		for (const delivery of this.#queuedMessageDeliveries) {
+			if (delivery.queue !== "steering") continue;
+			for (let i = delivery.next; i < delivery.messages.length; i++) if (delivery.messages[i] === message) count++;
+		}
+		for (const entry of this.#liveSteered) if (entry.message === message) count++;
+		return count;
 	}
 
 	/**
@@ -1714,7 +1756,12 @@ export class Agent {
 			((message: AgentMessage): boolean => {
 				const priority: unknown = predicate(message);
 				if (typeof priority !== "boolean") {
-					throw new TypeError(`Agent.setSteeringPriority: the rule returned ${typeof priority}, not a boolean`);
+					// An async rule's Promise may reject; observe it so a bad rule fails this delivery
+					// with the TypeError below instead of also surfacing as an unhandled rejection.
+					if (isPromise(priority)) priority.catch(() => undefined);
+					throw new TypeError(
+						"Agent.setSteeringPriority rule must synchronously return true or false; remove async/await and return a boolean",
+					);
 				}
 				return priority;
 			});
@@ -2601,13 +2648,23 @@ export class Agent {
 	 * does not take it), so a normal, failed or aborted run reaches subscribers in the same state. A
 	 * subscriber may start the next run from this event, so the run first gives back the steering it took
 	 * and did not record, which that run must not dequeue around nor lose its allowance places to, and
-	 * stops streaming. The run's `finally` releases the rest of its state.
+	 * stops streaming. Its queue notification is coalesced until after the settled end reaches listeners;
+	 * the run's `finally` releases the rest of its state.
 	 */
 	#emitAgentEnd(event: AgentEndEvent, controller: AbortController): void {
-		this.#restoreUndeliveredQueuedMessages(controller);
-		this.#state.isStreaming = false;
-		this.#state.streamMessage = null;
-		this.#dispatch(event);
+		this.#queueChangeDeferrals++;
+		try {
+			this.#restoreUndeliveredQueuedMessages(controller);
+			this.#state.isStreaming = false;
+			this.#state.streamMessage = null;
+			this.#dispatch(event);
+		} finally {
+			this.#queueChangeDeferrals--;
+			if (this.#queueChangeDeferrals === 0 && this.#queueChangePending) {
+				this.#queueChangePending = false;
+				this.#notifyQueueListeners();
+			}
+		}
 	}
 
 	/** Every event of a run but its end, which {@link #emitAgentEnd} reports. */

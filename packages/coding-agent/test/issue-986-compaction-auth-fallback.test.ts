@@ -192,7 +192,7 @@ describe("issue #986 compaction auth fallback", () => {
 				},
 			};
 			session.agent.emitExternalEvent({ type: "message_end", message: assistant });
-			session.agent.emitExternalEvent({ type: "agent_end", messages: [assistant] });
+			session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistant] });
 			await promise;
 			await session.waitForIdle();
 		};

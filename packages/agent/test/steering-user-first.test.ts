@@ -779,11 +779,165 @@ describe("one-at-a-time steering: a person's message before agent steering", () 
 			(error: unknown) => String(error),
 		);
 
-		expect(outcome).toContain("TypeError");
-		expect(outcome).toContain("setSteeringPriority");
+		expect(outcome).toContain(
+			"Agent.setSteeringPriority rule must synchronously return true or false; remove async/await and return a boolean",
+		);
 		expect(mock.calls).toHaveLength(0);
 		expect(agent.state.isStreaming).toBe(false);
 		expect(agent.peekSteeringQueue().map(messageText)).toEqual(["card 1", "typed"]);
+	});
+
+	it("observes a rejected async priority rule so a bad host rule cannot end the process", async () => {
+		const mock = createMockModel({ handler: () => ({ content: ["ack"] }) });
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+			convertToLlm,
+			steeringMode: "one-at-a-time",
+		});
+		const unhandled: unknown[] = [];
+		const onUnhandled = (reason: unknown) => unhandled.push(reason);
+		process.on("unhandledRejection", onUnhandled);
+		try {
+			const rejectingRule = (async () => {
+				throw new Error("async priority failed");
+			}) as unknown as (message: AgentMessage) => boolean;
+			agent.setSteeringPriority(rejectingRule);
+			agent.steer(person("typed"));
+
+			const outcome = await agent.continue().then(
+				() => "delivered",
+				(error: unknown) => String(error),
+			);
+			// The runtime reports an unhandled rejection at a macrotask boundary, not on any signal the
+			// Agent exposes, so yield one macrotask (no duration) before reading what it reported.
+			const macrotask = Promise.withResolvers<void>();
+			setImmediate(macrotask.resolve);
+			await macrotask.promise;
+
+			expect(outcome).toContain("remove async/await and return a boolean");
+			expect(unhandled).toEqual([]);
+			expect(agent.state.isStreaming).toBe(false);
+			expect(agent.peekSteeringQueue().map(messageText)).toEqual(["typed"]);
+		} finally {
+			process.off("unhandledRejection", onUnhandled);
+		}
+	});
+
+	it("rejects an external agent_end while a run still holds live-steered input", async () => {
+		const claimed = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const mock = createMockModel({ handler: () => ({ content: ["ack"], delayMs: 60_000 }) });
+		let initial = true;
+		const agent: Agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			convertToLlm,
+			steeringMode: "one-at-a-time",
+			streamFn: async (model, context, options) => {
+				if (initial && options?.liveSteering) {
+					initial = false;
+					agent.steer(person("P1"));
+					const pump = new CodexSteerPump(
+						options.liveSteering,
+						{
+							steer: async () => {
+								claimed.resolve();
+								return { accepted: true, id: "steer-1" };
+							},
+						},
+						messages => messages.map(message => ({ role: "user", content: message.content })),
+					);
+					pump.start("response-1");
+					await claimed.promise;
+					await pump.finish();
+					await release.promise;
+				}
+				return mock.stream(model, context, options);
+			},
+		});
+		let agentEnds = 0;
+		agent.subscribe(event => {
+			if (event.type === "agent_end") agentEnds++;
+		});
+		const running = agent.prompt("start");
+		await claimed.promise;
+		expect(agent.peekUndeliveredQueuedMessages().map(messageText)).toEqual(["P1"]);
+
+		const unsafe = agent as unknown as { emitExternalEvent(event: AgentEvent): void };
+		expect(() => unsafe.emitExternalEvent({ type: "agent_end", messages: [] })).toThrow(
+			"Agent.emitExternalEvent cannot emit agent_end",
+		);
+		expect(agentEnds).toBe(0);
+
+		agent.abort();
+		release.resolve();
+		await running;
+		expect(agentEnds).toBe(1);
+
+		let foreignSource: string | undefined;
+		agent.subscribe(event => {
+			if (event.type === "agent_end") foreignSource = event.source;
+		});
+		agent.emitExternalAgentEnd({ type: "agent_end", messages: [] }, "test");
+		expect(foreignSource).toBe("test");
+	});
+
+	it("emits a restored queue update only after agent_end reports an idle agent", async () => {
+		const claimed = Promise.withResolvers<void>();
+		const mock = createMockModel({ handler: () => ({ content: ["ack"] }) });
+		let initial = true;
+		let checkingEnd = false;
+		const observed: Array<{ type: "agent_end" | "queue_update"; isStreaming: boolean; steering: string[] }> = [];
+		const agent: Agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			convertToLlm,
+			steeringMode: "one-at-a-time",
+			streamFn: async (model, context, options) => {
+				if (initial && options?.liveSteering) {
+					initial = false;
+					agent.steer(person("P1"));
+					const pump = new CodexSteerPump(
+						options.liveSteering,
+						{
+							steer: async () => {
+								claimed.resolve();
+								return { accepted: true, id: "steer-1" };
+							},
+						},
+						messages => messages.map(message => ({ role: "user", content: message.content })),
+					);
+					pump.start("response-1");
+					await claimed.promise;
+					await pump.finish();
+					checkingEnd = true;
+					throw new Error("provider failed");
+				}
+				return mock.stream(model, context, options);
+			},
+		});
+		agent.subscribe(event => {
+			if (!checkingEnd || event.type !== "agent_end") return;
+			observed.push({
+				type: "agent_end",
+				isStreaming: agent.state.isStreaming,
+				steering: agent.peekSteeringQueue().map(messageText),
+			});
+		});
+		agent.onQueueChange(() => {
+			if (!checkingEnd || !agent.peekSteeringQueue().some(message => messageText(message) === "P1")) return;
+			observed.push({
+				type: "queue_update",
+				isStreaming: agent.state.isStreaming,
+				steering: agent.peekSteeringQueue().map(messageText),
+			});
+		});
+
+		await agent.prompt("start");
+
+		expect(observed).toEqual([
+			{ type: "agent_end", isStreaming: false, steering: ["P1"] },
+			{ type: "queue_update", isStreaming: false, steering: ["P1"] },
+		]);
 	});
 
 	it("keeps each queued occurrence of a promoted message ahead until the transcript records it", async () => {
@@ -803,6 +957,35 @@ describe("one-at-a-time steering: a person's message before agent steering", () 
 		await agent.continue();
 
 		expect(transcriptTexts(agent)).toEqual(["card 1", "card 1", "U1"]);
+	});
+
+	it("keeps an occurrence queued and promoted while an earlier one is being prepared ahead of a person's steer", async () => {
+		const mock = createMockModel({ handler: () => ({ content: ["ack"] }) });
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+			convertToLlm,
+			steeringMode: "one-at-a-time",
+		});
+		const repeated = card(1);
+		agent.steer(repeated);
+		agent.steer(repeated);
+		agent.steer(person("U1"));
+		agent.prioritizeSteering([repeated]);
+		let promotedAgain = false;
+		agent.prepareQueuedMessages = messages => {
+			if (promotedAgain || !messages.includes(repeated)) return undefined;
+			// The first occurrence is claimed and being prepared; a third arrives and is promoted too.
+			promotedAgain = true;
+			agent.steer(repeated);
+			agent.prioritizeSteering([repeated]);
+			return undefined;
+		};
+
+		await agent.continue();
+
+		expect(promotedAgain).toBe(true);
+		expect(transcriptTexts(agent)).toEqual(["card 1", "card 1", "card 1", "U1"]);
 	});
 
 	for (const [setter, change, next] of [

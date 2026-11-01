@@ -59,7 +59,7 @@ describe("AgentSession todo reminder self-continuation suppression", () => {
 	function emitTextOnlyStop(text?: string): void {
 		const msg = textOnlyAssistantMessage(text);
 		session.agent.emitExternalEvent({ type: "message_end", message: msg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [msg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [msg] });
 	}
 
 	function emitToolResult(toolName: string, details: Record<string, unknown> = {}): void {

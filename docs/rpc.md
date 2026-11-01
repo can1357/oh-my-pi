@@ -940,6 +940,7 @@ Each command replaces the whole filter state: omitting `messageUpdates` resets i
   isTerminal?: boolean;
   yielded?: boolean;
   awaitingAsyncWork?: boolean;
+  source?: string;
 }
 ```
 
@@ -952,6 +953,9 @@ no follow-up run occurs. The optional fields keep older frames terminal-compatib
 when `isTerminal` is absent. Use `yielded` for a prompt's yield and
 `session_settled` for quiescence, rather than assuming every non-terminal end
 guarantees another turn.
+
+`source` is set only when another producer forwarded the end into the session
+(`Agent.emitExternalAgentEnd`); the session's own runs never set it.
 
 ### Progress events
 

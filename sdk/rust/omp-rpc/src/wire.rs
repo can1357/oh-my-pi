@@ -3649,6 +3649,9 @@ pub struct AgentEndEvent {
 	pub telemetry: Option<Map<String, Value>>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub coverage: Option<Map<String, Value>>,
+	/// Another producer that forwarded this end into the session; absent for the session's own run.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

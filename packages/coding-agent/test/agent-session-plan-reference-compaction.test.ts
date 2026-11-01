@@ -106,7 +106,7 @@ function emitHighUsageTurn(session: AgentSession): void {
 		timestamp: Date.now(),
 	};
 	session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-	session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+	session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 }
 
 describe("AgentSession approved-plan reference re-injection after compaction (issue #1246)", () => {

@@ -273,7 +273,7 @@ describe("AgentSession snapcompact no-reduction guard", () => {
 			});
 
 			customSession.agent.emitExternalEvent({ type: "message_end", message: triggerAssistant });
-			customSession.agent.emitExternalEvent({ type: "agent_end", messages: [triggerAssistant] });
+			customSession.agent.emitExternalAgentEnd({ type: "agent_end", messages: [triggerAssistant] });
 
 			const endEvent = await compactionEndPromise;
 			expect(endEvent.result).toBeUndefined();
@@ -353,7 +353,7 @@ describe("AgentSession snapcompact no-reduction guard", () => {
 				};
 				customSession.agent.emitExternalEvent({ type: "message_end", message: userMsg });
 				customSession.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-				customSession.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+				customSession.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 				await customSession.waitForIdle();
 
 				if (idx < 2) {

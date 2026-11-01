@@ -3690,6 +3690,10 @@
 					"type": "object",
 					"properties": {},
 					"additionalProperties": {}
+				},
+				"source": {
+					"type": "string",
+					"description": "Another producer that forwarded this end into the session; absent for the session's own run."
 				}
 			},
 			"required": [

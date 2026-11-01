@@ -984,6 +984,8 @@ class AgentEndEvent:
     """Non-terminal end whose only possible resume is a background-job result."""
     telemetry: JsonObject | None = None
     coverage: JsonObject | None = None
+    source: str | None = None
+    """Another producer that forwarded this end into the session; absent for the session's own run."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -2377,6 +2379,7 @@ def parse_agent_end_event(value: object, path: str = "AgentEndEvent") -> AgentEn
         awaiting_async_work=optional(payload, "awaitingAsyncWork", decode_bool, path),
         telemetry=optional(payload, "telemetry", decode_json_object, path),
         coverage=optional(payload, "coverage", decode_json_object, path),
+        source=optional(payload, "source", decode_str, path),
     )
 
 

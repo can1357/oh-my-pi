@@ -807,6 +807,8 @@ export interface AgentEndEvent {
 	awaitingAsyncWork?: boolean;
 	telemetry?: Record<string, unknown>;
 	coverage?: Record<string, unknown>;
+	/** Another producer that forwarded this end into the session; absent for the session's own run. */
+	source?: string;
 }
 
 export interface TurnStartEvent {

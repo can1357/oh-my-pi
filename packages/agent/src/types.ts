@@ -1298,6 +1298,8 @@ export type AgentEvent =
 	| {
 			type: "agent_end";
 			messages: AgentMessage[];
+			/** `emitExternalAgentEnd` requires this tag; a run's own end leaves it undefined. */
+			source?: string;
 			/** Present iff `AgentTelemetryConfig` was supplied on this run. */
 			telemetry?: AgentRunSummary;
 			coverage?: AgentRunCoverage;
@@ -1315,3 +1317,6 @@ export type AgentEvent =
 	| { type: "tool_execution_update"; toolCallId: string; toolName: string; args: any; partialResult: any }
 	| { type: "tool_stream_update"; toolCallId: string; toolName: string; update: unknown }
 	| { type: "tool_execution_end"; toolCallId: string; toolName: string; result: any; isError?: boolean };
+
+/** Events external code may forward into this Agent; only this Agent may emit an untagged `agent_end`. */
+export type AgentExternalEvent = Exclude<AgentEvent, { type: "agent_end" }>;

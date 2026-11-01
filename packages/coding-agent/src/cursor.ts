@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
-	type AgentEvent,
+	type AgentExternalEvent,
 	type AgentTool,
 	type AgentToolContext,
 	type AgentToolResult,
@@ -95,7 +95,7 @@ interface CursorExecBridgeOptions {
 	 */
 	getEditReplaceTool?: () => CursorBridgeTool | undefined;
 	getToolContext?: () => AgentToolContext | undefined;
-	emitEvent?: (event: AgentEvent) => void;
+	emitEvent?: (event: AgentExternalEvent) => void;
 	/**
 	 * Whether frames that mutate the filesystem WITHOUT running a registry tool
 	 * may do so: the native `delete` frame, and a `read_mcp_resource` carrying
