@@ -12,7 +12,7 @@
 import * as path from "node:path";
 import type { Judge, JudgeOptions, NoulQuestion } from "@oh-my-pi/pi-ai";
 import { AstMatchStrictness, astMatch, countTokens, Encoding } from "@oh-my-pi/pi-natives";
-import { logger } from "@oh-my-pi/pi-utils";
+import { formatTtsrRecordKey, logger, parseTtsrRecordKey } from "@oh-my-pi/pi-utils";
 import { compileRuleCondition, type Rule, ruleModelScopeKey } from "../capability/rule";
 import { ensureGrammar } from "../utils/grammars";
 import type { TtsrSettings } from "./ttsr-settings";
@@ -556,8 +556,6 @@ class StreamBuffer {
 	}
 }
 
-const SCOPED_RECORD_KEY = /^(.*)::scope:([0-9a-f]+)$/;
-
 /**
  * Injection-record key for a rule: its name when unscoped, otherwise
  * `<name>::scope:<first 16 hex digits of the SHA-256 of the model scope>`, so
@@ -568,17 +566,7 @@ export function ruleRecordKey(rule: Pick<Rule, "name" | "models" | "providers" |
 	const scopeKey = ruleModelScopeKey(rule);
 	if (!scopeKey) return rule.name;
 	const scopeHash = new Bun.CryptoHasher("sha256").update(scopeKey).digest("hex").slice(0, 16);
-	return `${rule.name}::scope:${scopeHash}`;
-}
-
-/**
- * Split an injection-record key into the rule name and, for a scoped variant,
- * its scope hash. Any string that is not a scoped key is a bare rule name,
- * which suppresses every variant of that name.
- */
-export function parseRecordKey(key: string): { name: string; scopeHash?: string } {
-	const match = SCOPED_RECORD_KEY.exec(key);
-	return match ? { name: match[1], scopeHash: match[2] } : { name: key };
+	return formatTtsrRecordKey(rule.name, scopeHash);
 }
 
 export class TtsrManager {
@@ -1237,11 +1225,17 @@ export class TtsrManager {
 	 * variant they belong to, so they survive a model change that re-scopes the
 	 * registered set; records for other names are dropped. While TTSR is disabled
 	 * nothing registers, so injection state is kept intact for when it is re-enabled.
+	 * Stream buffers are cleared unless `keepBuffers` is set, which lets a rule added
+	 * while a response streams leave the in-flight matching state intact.
 	 *
 	 * Returns the names accepted for TTSR monitoring so the caller can bucket
 	 * rejected conditional rules through its normal fallback path.
 	 */
-	replaceRules(rules: readonly Rule[], retainNames?: ReadonlySet<string>): Set<string> {
+	replaceRules(
+		rules: readonly Rule[],
+		retainNames?: ReadonlySet<string>,
+		{ keepBuffers = false }: { keepBuffers?: boolean } = {},
+	): Set<string> {
 		// Compile every entry before touching the registered set, so a throw leaves it intact.
 		const entries = new Map<string, TtsrEntry>();
 		if (this.#settings.enabled) {
@@ -1257,12 +1251,12 @@ export class TtsrManager {
 		this.#hasJudgedRules = false;
 		for (const entry of entries.values()) this.#register(entry);
 		const registered = new Set(this.#rules.keys());
-		this.resetBuffer();
+		if (!keepBuffers) this.resetBuffer();
 
 		if (!this.#settings.enabled) return registered;
 		const retained = retainNames ?? registered;
 		for (const key of this.#injectionRecords.keys()) {
-			if (!retained.has(parseRecordKey(key).name)) this.#injectionRecords.delete(key);
+			if (!retained.has(parseTtsrRecordKey(key).name)) this.#injectionRecords.delete(key);
 		}
 		return registered;
 	}

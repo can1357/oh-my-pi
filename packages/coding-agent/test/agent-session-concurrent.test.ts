@@ -22,7 +22,7 @@ import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { parseRecordKey, ruleRecordKey, TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
+import { ruleRecordKey, TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
@@ -36,7 +36,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
-import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { parseTtsrRecordKey, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 // Mock stream that mimics AssistantMessageEventStream
 
@@ -1035,7 +1035,7 @@ describe("AgentSession TTSR resume gate", () => {
 			.getEntries()
 			.flatMap(entry => (entry.type === "ttsr_injection" ? entry.injectedRules : []));
 		expect(injectedRules).toEqual([ruleRecordKey(scopedRule)]);
-		expect(parseRecordKey(injectedRules[0])).toEqual({ name: "no-unwrap", scopeHash: expect.any(String) });
+		expect(parseTtsrRecordKey(injectedRules[0])).toEqual({ name: "no-unwrap", scopeHash: expect.any(String) });
 		const injection = sessionManager
 			.getEntries()
 			.find(entry => entry.type === "custom_message" && entry.customType === "ttsr-injection");

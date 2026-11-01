@@ -36,7 +36,7 @@ interface RunEphemeralTurnResult {
 }
 
 type RunEphemeralTurn = (args: RunEphemeralTurnArgs) => Promise<RunEphemeralTurnResult>;
-type AddRule = (rule: Rule) => boolean;
+type AddRule = (rule: Rule) => Promise<void>;
 type ShowHookSelector = (title: string, options: string[]) => Promise<string | undefined>;
 type ShowHookConfirm = (title: string, message: string) => Promise<boolean>;
 type ShowHookInput = (title: string, placeholder?: string) => Promise<string | undefined>;
@@ -56,7 +56,7 @@ interface Harness {
 	container: Container;
 	projectDir: string;
 	agentDir: string;
-	ttsrAddRule: Mock<AddRule>;
+	addRule: Mock<AddRule>;
 	showHookSelector: Mock<ShowHookSelector>;
 	showHookConfirm: Mock<ShowHookConfirm>;
 	showHookInput: Mock<ShowHookInput>;
@@ -98,7 +98,7 @@ async function createHarness(options: HarnessOptions): Promise<Harness> {
 	await fs.mkdir(projectDir, { recursive: true });
 	await fs.mkdir(agentDir, { recursive: true });
 
-	const ttsrAddRule = vi.fn<AddRule>(() => true);
+	const addRule = vi.fn<AddRule>(async () => {});
 	const selectorChoices = [...(options.selectorChoices ?? [options.selectorChoice ?? PROJECT_OPTION])];
 	const showHookSelector = vi.fn<ShowHookSelector>(async () => selectorChoices.shift());
 	const showHookConfirm = vi.fn<ShowHookConfirm>(async () => options.confirmResult ?? true);
@@ -109,7 +109,7 @@ async function createHarness(options: HarnessOptions): Promise<Harness> {
 		messages: options.messages ?? [],
 		agent: { state: { tools: [] } },
 		ruleJudge: () => undefined,
-		ttsrManager: { addRule: ttsrAddRule },
+		addRule,
 	} as unknown as InteractiveModeContext["session"];
 	const container = new Container();
 	const ctx = {
@@ -124,7 +124,7 @@ async function createHarness(options: HarnessOptions): Promise<Harness> {
 		showHookSelector,
 		showHookConfirm,
 	} as unknown as InteractiveModeContext;
-	return { ctx, container, projectDir, agentDir, ttsrAddRule, showHookSelector, showHookConfirm, showHookInput };
+	return { ctx, container, projectDir, agentDir, addRule, showHookSelector, showHookConfirm, showHookInput };
 }
 
 beforeAll(async () => {
@@ -201,12 +201,11 @@ describe("OmfgController", () => {
 		// state the mid-session rule rediscovery would read on the next prompt rebuild.
 		expect(await readDirEntries(rulesDir)).toHaveLength(0);
 
-		// #registerLive() calls ttsrManager.addRule right after the write + cache
+		// #registerLive() calls session.addRule right after the write + cache
 		// invalidation, so resolving on it awaits the real save signal (no timers).
 		const registered = Promise.withResolvers<void>();
-		harness.ttsrAddRule.mockImplementation(() => {
+		harness.addRule.mockImplementation(async () => {
 			registered.resolve();
-			return true;
 		});
 
 		await new OmfgController(harness.ctx).start("stop using any");
@@ -214,7 +213,7 @@ describe("OmfgController", () => {
 
 		const savedRuleFile = path.join(rulesDir, "ts-no-any.md");
 		expect(await Bun.file(savedRuleFile).exists()).toBe(true);
-		expect(harness.ttsrAddRule).toHaveBeenCalled();
+		expect(harness.addRule).toHaveBeenCalled();
 		// Without the post-write invalidation the cache would still serve the empty
 		// snapshot, and `replaceTtsrRules` would evict the freshly registered rule.
 		expect((await readDirEntries(rulesDir)).map(entry => entry.name)).toContain("ts-no-any.md");

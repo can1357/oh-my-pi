@@ -122,6 +122,7 @@ import type { JobWidgetRegistry } from "../job-widgets/types";
 import { classifyAutoPrewalk } from "../auto-prewalk/classifier";
 import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
+import type { Rule } from "../capability/rule";
 import type { SessionAccountPoolScope } from "../config/account-pools";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
 import type { ModelRegistry } from "../config/model-registry";
@@ -913,6 +914,7 @@ export class AgentSession implements SettingsScope {
 	#costCapRefusal: CostCapRefusal | undefined;
 	/** Entries of tools mounted under `xd://`; empty when virtual devices are unmounted. */
 	getXdevToolEntries: () => Array<{ name: string; summary: string }>;
+	readonly #addRule: ((rule: Rule) => Promise<void>) | undefined;
 	readonly yieldQueue: YieldQueue;
 	editStore?: EditStore;
 
@@ -2420,6 +2422,7 @@ export class AgentSession implements SettingsScope {
 		});
 		this.#convertToLlm = config.convertToLlm ?? convertToLlm;
 		this.getXdevToolEntries = config.getXdevToolEntries ?? (() => []);
+		this.#addRule = config.addRule;
 		const sessionToolsHost: SessionToolsHost = {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
@@ -3280,6 +3283,16 @@ export class AgentSession implements SettingsScope {
 	/** TTSR manager for time-traveling stream rules */
 	get ttsrManager(): TtsrManager | undefined {
 		return this.#ttsr.manager;
+	}
+
+	/**
+	 * Adds a rule created mid-session (`/omfg`) to the session's rule snapshot and
+	 * re-scopes it to the current model, so a later re-scope keeps it. A session
+	 * built without a rule snapshot registers it with the TTSR manager only.
+	 */
+	async addRule(rule: Rule): Promise<void> {
+		if (this.#addRule) await this.#addRule(rule);
+		else this.#ttsr.manager?.addRule(rule);
 	}
 
 	/** Secret obfuscator, when secrets are configured; /share redaction reuses it. */

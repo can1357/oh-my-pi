@@ -5,9 +5,11 @@
 ### Changed
 
 - `acp` runtime validators (`zNewSessionResponse`, `zSessionNotification`, …) now report each failing field's path and reason in `error.issues` instead of a single `Invalid <label>`; `ValidationError` issue paths are typed `PropertyKey[]` ([#17699](https://github.com/can1357/oh-my-pi/pull/17699))
+
 ### Added
 
 - Added `isPidAlive` (signal-0 liveness probe) and `asStrictBytes` (a `Uint8Array` narrowed to its own `ArrayBuffer` for WebCrypto)
+- Added `formatTtsrRecordKey` and `parseTtsrRecordKey`, the codec for the TTSR injection-record keys persisted in session `ttsr_injection` entries ([#17731](https://github.com/can1357/oh-my-pi/pull/17731) by [@TheAifam5](https://github.com/TheAifam5))
 
 ## [18.15.0] - 2026-11-01
 

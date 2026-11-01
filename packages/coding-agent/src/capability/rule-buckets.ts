@@ -48,6 +48,8 @@ export interface BucketRulesOptions {
 	model?: RuleScopeModel;
 	/** Replace existing TTSR registrations before bucketing this complete rule snapshot. */
 	replaceTtsrRules?: boolean;
+	/** With `replaceTtsrRules`, keep the in-flight TTSR stream buffers (see `TtsrManager.replaceRules`). */
+	keepTtsrBuffers?: boolean;
 }
 
 /**
@@ -84,7 +86,7 @@ export function bucketRules(
 	}
 
 	const replacedTtsrNames = options.replaceTtsrRules
-		? ttsrManager.replaceRules(includedRules, snapshotNames)
+		? ttsrManager.replaceRules(includedRules, snapshotNames, { keepBuffers: options.keepTtsrBuffers })
 		: undefined;
 	const rulebookRules: Rule[] = [];
 	const alwaysApplyRules: Rule[] = [];

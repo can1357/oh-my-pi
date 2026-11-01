@@ -4191,7 +4191,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// receives the prompt, and republishes the TTSR registrations and `rule://`
 		// snapshot. `toolSession.rules` stays unfiltered so subagents re-scope it
 		// under their own model.
-		const rescopeRules = (scopeModel: Model | undefined): void => {
+		const rescopeRules = (scopeModel: Model | undefined, { keepTtsrBuffers = false } = {}): void => {
 			const ttsrSettings = cfgTtsr.get(settings);
 			const buckets = bucketRules(toolSession.rules ?? allRules, ttsrManager, {
 				builtinRules: ttsrSettings.builtinRules,
@@ -4199,6 +4199,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				agentName: resolvedAgentName,
 				model: scopeModel,
 				replaceTtsrRules: true,
+				keepTtsrBuffers,
 			});
 			rulebookRules = buckets.rulebookRules;
 			alwaysApplyRules = buckets.alwaysApplyRules;
@@ -4207,6 +4208,30 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (!options.parentTaskPrefix) {
 				setActiveRules(nextActiveRules);
 			}
+		};
+		/** Rules on disk for `cwd`, deduplicated by precedence; `undefined` for a session handed an explicit rule set. */
+		const rediscoverRules = (cwd: string): Promise<Rule[]> | undefined =>
+			options.rules
+				? undefined
+				: logger
+						.time("rediscoverRules", () => loadCapability<Rule>(ruleCapability.id, { cwd, agentDir }))
+						.then(result => result.items);
+		/**
+		 * Adds a rule saved mid-session (`/omfg`) to the unfiltered snapshot and re-scopes.
+		 * A discovering session re-reads its rules, so the saved file replaces its older
+		 * copy and takes its provider's precedence; an explicit rule set swaps the entry
+		 * from the same file or appends the rule.
+		 */
+		const addRule = async (rule: Rule): Promise<void> => {
+			const rediscovered = rediscoverRules(sessionManager.getCwd());
+			toolSession.rules = rediscovered
+				? await rediscovered
+				: [
+						...(toolSession.rules ?? allRules).filter(existing => existing._source.path !== rule._source.path),
+						rule,
+					];
+			// A live add can land mid-stream; the model is unchanged, so in-flight matching state stays valid.
+			rescopeRules(agent?.state.model ?? model, { keepTtsrBuffers: true });
 		};
 		/** Identity of the rules the prompt renders (always-apply and rulebook), including each variant's model scope. */
 		const promptRulesKey = (): string =>
@@ -4249,12 +4274,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 								...cfgDisabledExtensions.get(settings),
 							])
 						: undefined,
-					options.rules ??
-						logger
-							.time("rediscoverRules", () =>
-								loadCapability<Rule>(ruleCapability.id, { cwd: promptCwd, agentDir }),
-							)
-							.then(result => result.items),
+					rediscoverRules(promptCwd) ?? options.rules,
 				]);
 				activeRepoContext = repoContext;
 				if (refreshedContextFiles !== undefined) {
@@ -5155,6 +5175,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			convertToLlm: convertToLlmFinal,
 			rebuildSystemPrompt,
 			rescopeRules,
+			addRule,
 			promptRulesKey,
 			getXdevToolEntries: () => (toolSession.xdev ? xdevEntries(toolSession.xdev) : []),
 			xdev: toolSession.xdev,

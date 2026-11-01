@@ -10,7 +10,7 @@ import {
 	TruncatedText,
 	truncateToWidth,
 } from "../index";
-import { isRecord, oklabDistance, sanitizeText } from "@oh-my-pi/pi-utils";
+import { isRecord, oklabDistance, parseTtsrRecordKey, sanitizeText } from "@oh-my-pi/pi-utils";
 /** Available session-tree display filters. */
 export const TREE_FILTER_MODES = ["default", "no-tools", "user-only", "labeled-only", "all"] as const;
 /** Session-tree display filter. */
@@ -1506,12 +1506,9 @@ class LabelInput implements Component {
 	}
 }
 
-/** Suffix the coding agent appends to a model-scoped rule's persisted injection-record key. */
-const TTSR_SCOPE_SUFFIX = /::scope:[0-9a-f]+$/;
-
 /** Plain, deduplicated rule names of a `ttsr_injection` entry's record keys. */
 function ttsrRuleNames(recordKeys: readonly string[]): string[] {
-	return Array.from(new Set(recordKeys.map(key => key.replace(TTSR_SCOPE_SUFFIX, ""))));
+	return Array.from(new Set(recordKeys.map(key => parseTtsrRecordKey(key).name)));
 }
 
 /**

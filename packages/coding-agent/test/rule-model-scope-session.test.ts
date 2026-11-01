@@ -6,10 +6,11 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import { AuthStorage, type Judge, type JudgmentRequest, type NoulAnswer } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { invalidate as invalidateCapabilityCache } from "@oh-my-pi/pi-coding-agent/capability";
 import { getActiveRules, resetActiveRulesForTests, type Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ruleRecordKey } from "@oh-my-pi/pi-coding-agent/export/ttsr";
+import { ruleRecordKey, TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -29,6 +30,14 @@ function rule(name: string, partial: Partial<Rule>): Rule {
 		_source: { provider: "native", providerName: "native", path: `/rules/${name}.md`, level: "user" },
 		...partial,
 	};
+}
+
+/** Points discovery's `os.homedir()` and the process-global agent dir at `home` for the running test. */
+function isolateHome(home: string): void {
+	vi.spyOn(os, "homedir").mockReturnValue(home);
+	const originalAgentDir = getAgentDir();
+	setAgentDir(path.join(home, ".omp", "agent"));
+	onTestFinished(() => setAgentDir(originalAgentDir));
 }
 
 // Same-named variants: the session renders whichever one admits its current model.
@@ -208,6 +217,102 @@ describe("model-scoped rules in a live session", () => {
 		expect(getActiveRules().map(r => r.name)).toContain("sonnet-guard");
 	});
 
+	it("lets a rule saved mid-session (/omfg) shadow and then replace a same-named rule at once", async () => {
+		const project = path.join(dir, `add-rule-${Snowflake.next()}`);
+		await fs.mkdir(path.join(project, ".git"), { recursive: true });
+		isolateHome(path.join(project, "home"));
+		// `discoverRulesIn` uses the project as agent dir too, so `<project>/rules` holds user rules.
+		const userDir = path.join(project, "rules");
+		const projectDir = path.join(project, ".omp", "rules");
+		const writeRules = (dir: string, body: string) =>
+			Promise.all([
+				Bun.write(path.join(dir, "guard.md"), `---\ncondition: GUARD_TOKEN\n---\n${body}\n`),
+				Bun.write(path.join(dir, "notes.md"), `---\ndescription: notes\n---\n${body}\n`),
+			]);
+		await writeRules(userDir, "USER");
+		const session = await startSession({
+			model: opus,
+			discoverRulesIn: project,
+			sessionManager: SessionManager.inMemory(project),
+		});
+		// [TTSR guard, rule:// guard, rule:// notes]; notes lands in the rulebook bucket.
+		const bodies = () => {
+			const content = (rules: readonly Rule[] | undefined, name: string) =>
+				rules?.find(r => r.name === name)?.content.trim();
+			return [
+				content(session.ttsrManager?.getRules(), "guard"),
+				content(getActiveRules(), "guard"),
+				content(getActiveRules(), "notes"),
+			];
+		};
+		const save = async (body: string) => {
+			await writeRules(projectDir, body);
+			// As `/omfg` does after saving: drop the cached file and directory snapshots.
+			for (const file of ["guard.md", "notes.md"]) invalidateCapabilityCache(path.join(projectDir, file));
+			invalidateCapabilityCache(projectDir);
+			await session.addRule(rule("guard", { path: path.join(projectDir, "guard.md") }));
+		};
+		expect(bodies()).toEqual(["USER", "USER", "USER"]);
+
+		await save("FIRST");
+		expect(bodies()).toEqual(["FIRST", "FIRST", "FIRST"]);
+		await save("SECOND");
+		expect(bodies()).toEqual(["SECOND", "SECOND", "SECOND"]);
+	});
+
+	it("keeps the in-flight stream buffer when a rule is added mid-stream", async () => {
+		const session = await startSession({
+			model: opus,
+			rules: [rule("spanning-guard", { condition: ["SPANNING_TOKEN"] })],
+		});
+		const ttsr = session.ttsrManager!;
+		expect(ttsr.checkDelta("before SPANNING_", { source: "text" })).toEqual([]);
+		await session.addRule(rule("live-guard", { condition: ["LIVE_TOKEN"] }));
+		expect(ttsr.checkDelta("TOKEN after", { source: "text" }).map(r => r.name)).toEqual(["spanning-guard"]);
+	});
+
+	it("registers a live-added rule with TTSR when the session has no sdk rule snapshot", async () => {
+		const ttsrManager = new TtsrManager();
+		const session = new AgentSession({
+			agent: new Agent({ initialState: { model: opus, systemPrompt: ["Test"], tools: [], messages: [] } }),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry,
+			ttsrManager,
+		});
+		sessions.push(session);
+		await session.addRule(rule("live-guard", { condition: ["LIVE_TOKEN"] }));
+		expect(ttsrManager.getRules().map(r => r.name)).toEqual(["live-guard"]);
+	});
+
+	it("keeps a rule added mid-session (/omfg) registered across a retry-fallback re-scope", async () => {
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.fallbackChains": { default: [sonnetSelector] },
+		});
+		settings.setModelRole("default", opusSelector);
+		const session = await startSession({ model: opus, settings, rules: [] });
+		await session.addRule(rule("omfg-guard", { condition: ["OMFG_FORBIDDEN"] }));
+		expect(session.ttsrManager?.getRules().map(r => r.name)).toEqual(["omfg-guard"]);
+
+		const mock = createMockModel();
+		session.agent.streamFn = (model, context, options) => {
+			mock.push(
+				model.id === opus.id
+					? { throw: "overloaded_error: provider returned error 503" }
+					: { content: ["Recovered on the fallback"] },
+			);
+			return mock.stream(model, context, options);
+		};
+		await session.prompt("Force a fallback off opus");
+		await session.waitForIdle();
+
+		expect(session.model?.id).toBe(sonnet.id);
+		expect(session.ttsrManager?.getRules().map(r => r.name)).toEqual(["omfg-guard"]);
+		expect(getActiveRules().map(r => r.name)).toContain("omfg-guard");
+	});
+
 	it("persists the judged variant when the model changes while the judge decides", async () => {
 		const question = "Does the reply claim tests pass without having run them?";
 		const opusRule = rule("honest-tests", { question, scope: ["text"], family: ["opus"] });
@@ -257,10 +362,7 @@ describe("model-scoped rules in a live session", () => {
 			path.join(home, ".agents", "rules", "home-marker.md"),
 			"---\nalwaysApply: true\nfamily: sonnet\n---\nTEMP_HOME_RULE_5a90\n",
 		);
-		vi.spyOn(os, "homedir").mockReturnValue(home);
-		const originalAgentDir = getAgentDir();
-		setAgentDir(path.join(home, ".omp", "agent"));
-		onTestFinished(() => setAgentDir(originalAgentDir));
+		isolateHome(home);
 		await writeRule("ORIGINAL_ADVISOR_RULE_4e1f");
 		const settings = Settings.isolated();
 		settings.setModelRole("advisor", sonnetSelector);

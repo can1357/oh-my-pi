@@ -5,8 +5,8 @@ import {
 	type RuleScopeModel,
 } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import { bucketRules } from "@oh-my-pi/pi-coding-agent/capability/rule-buckets";
-import { parseRecordKey, ruleRecordKey, TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
-import { logger } from "@oh-my-pi/pi-utils";
+import { ruleRecordKey, TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
+import { logger, parseTtsrRecordKey } from "@oh-my-pi/pi-utils";
 
 function source(provider: string): Rule["_source"] {
 	return { provider, providerName: provider, path: "/tmp/rule.md", level: "user" };
@@ -524,13 +524,12 @@ describe("TTSR injection records across model scopes", () => {
 		expect(invalidWarnings()).toBe(2);
 	});
 
-	it("round-trips record keys, including names that contain `::`", () => {
+	it("keys an unscoped rule by its name and a scoped variant by a 16-hex-digit scope hash", () => {
 		const scoped = makeRule({ name: "a::b", condition: ["X"], family: ["opus"] });
-		const key = ruleRecordKey(scoped);
-		expect(key).toMatch(/^a::b::scope:[0-9a-f]+$/);
-		expect(parseRecordKey(key)).toEqual({ name: "a::b", scopeHash: key.slice("a::b::scope:".length) });
+		expect(parseTtsrRecordKey(ruleRecordKey(scoped))).toEqual({
+			name: "a::b",
+			scopeHash: expect.stringMatching(/^[0-9a-f]{16}$/),
+		});
 		expect(ruleRecordKey(makeRule({ name: "a::b" }))).toBe("a::b");
-		expect(parseRecordKey("a::b")).toEqual({ name: "a::b" });
-		expect(parseRecordKey("a::scope:not-hex")).toEqual({ name: "a::scope:not-hex" });
 	});
 });

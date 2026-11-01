@@ -272,7 +272,7 @@ export class OmfgController {
 				target.filePath,
 				target.level,
 			);
-			this.#registerLive(savedRule);
+			await this.#registerLive(savedRule);
 			request.component.markSaved(shortenPath(target.filePath));
 			return { kind: "saved" };
 		}
@@ -291,8 +291,8 @@ export class OmfgController {
 		};
 	}
 
-	#registerLive(rule: Rule): void {
-		this.ctx.session.ttsrManager?.addRule(rule);
+	#registerLive(rule: Rule): Promise<void> {
+		return this.ctx.session.addRule(rule);
 	}
 
 	#closeActiveRequest(options: { abort: boolean }): void {

@@ -32,6 +32,7 @@ import type { SkillsSettings } from "../extensibility/settings";
 import type { CursorMcpResourceAdapter } from "../cursor";
 import type { RawSseDebugBuffer } from "@oh-my-pi/pi-tui/apps/debug/raw-sse-buffer";
 import type { EvalPreludeDefinition } from "../eval/preludes";
+import type { Rule } from "../capability/rule";
 import type { TtsrManager } from "../export/ttsr";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
 import type { CustomTool } from "../extensibility/custom-tools/types";
@@ -352,6 +353,8 @@ export interface AgentSessionConfig {
 	) => Promise<{ systemPrompt: string[]; xdevCatalogNames?: readonly string[] }>;
 	/** Re-scopes rules (prompt buckets, TTSR registrations, `rule://`) to the model that receives the prompt. */
 	rescopeRules?: (model: Model | undefined) => void;
+	/** Adds a rule created mid-session to the unfiltered rule snapshot and re-scopes, so later re-scopes keep it. */
+	addRule?: (rule: Rule) => Promise<void>;
 	/** Identity of the rules the prompt builder currently renders; changes when re-scoping changes them. */
 	promptRulesKey?: () => string;
 	/** Tools mounted under `xd://`, for `/tools` display. */
