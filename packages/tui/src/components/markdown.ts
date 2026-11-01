@@ -9,6 +9,7 @@ import {
 	type TokensList,
 } from "@oh-my-pi/pi-utils/marked";
 import {
+	MathBlockScan,
 	type MathBlockOpener,
 	type MathOpener,
 	mathBlockCloserIndex,
@@ -59,6 +60,11 @@ const OSC8_ST_PREFIX_REGEX = /(\x1b\]8;[^\x07\x1b]*)\x1b\\/g;
 
 function normalizeOsc8Terminators(text: string): string {
 	return text.replace(OSC8_ST_PREFIX_REGEX, "$1\x07");
+}
+
+/** `text` with tabs expanded: the render's first normalization step, which renderMarkdownHead repeats. */
+function expandTabs(text: string): string {
+	return text.includes("\t") ? replaceTabs(text) : text;
 }
 
 /**
@@ -1535,6 +1541,138 @@ export function fencedCode(lang: string, source: string, options?: { open?: bool
 	const longest = source.match(/`+/g)?.reduce((max, run) => Math.max(max, run.length), 2) ?? 2;
 	const fence = "`".repeat(longest + 1);
 	return options?.open ? `${fence}${lang}\n${source}` : `${fence}${lang}\n${source.trimEnd()}\n${fence}`;
+}
+
+/** @internal exported for tests — the size of renderMarkdownHead's first probe window. */
+export const PROBE_WINDOW_BYTES = 2 * 1024;
+
+/**
+ * Size of the first probe window: `PROBE_WINDOW_BYTES`, or up to one character
+ * past the first blank line when that lies further. A boundary is a token
+ * whose raw ends in `"\n\n"` and that ends inside its window, so no smaller
+ * window can cut. With no blank line, it is the whole text.
+ */
+function firstProbeSize(text: string): number {
+	const nextBlank = text.indexOf("\n\n");
+	return nextBlank === -1 ? text.length : Math.max(PROBE_WINDOW_BYTES, nextBlank + 3);
+}
+
+/**
+ * Size of the next probe window after the one of `size` gave no usable cut
+ * (no boundary, or a prefix with too few rows): at least double, and one
+ * character past the first blank line that reaches the window's edge, or
+ * `blockEnd` when the probe stopped at a display-math block ending there,
+ * since only such a blank line can end a later boundary. Doubling toward a
+ * far closer would re-lex the block once per window. With no blank line left,
+ * it is the whole text.
+ */
+function nextProbeSize(text: string, size: number, blockEnd: number): number {
+	const nextBlank = text.indexOf("\n\n", Math.max(size, blockEnd) - 2);
+	return nextBlank === -1 ? text.length : Math.max(2 * size, nextBlank + 3);
+}
+
+/**
+ * The last stable block boundary ({@link stableBlockBoundary}) in the window
+ * `text.slice(0, size)`, from a throwaway block-only lex of the window, and
+ * the `blockEnd` {@link nextProbeSize} reaches past. `mathBlocks` holds the
+ * display-math blocks of all of `text`. The scan stops in front of the first
+ * window token the one-pass lex of `text` may lex differently:
+ *  - The last one: it runs to the window's end, and an unclosed fence, HTML
+ *    block or comment runs to the end of its input, so it can be cut short.
+ *  - One that opens a display-math block the window cut short: a token other
+ *    than `math` where `mathBlocks` finds a block. The one-pass lex makes that
+ *    block one `math` token across its blank lines; `blockEnd` is its end, or
+ *    0. An opener with no closer, or with a whitespace-only body, is no block
+ *    in either lex, so it leaves later boundaries alone.
+ * The tokens must tile their source: the lexer can leave text after a bare
+ * math environment's closing delimiter out of every token.
+ */
+function probeBoundary(text: string, size: number, mathBlocks: MathBlockScan): { end: number; blockEnd: number } {
+	const probe = new Lexer(markdownParser.defaults);
+	const tokens = probe.blockTokens(text.slice(0, size), probe.tokens);
+	const base = tokens.length > 0 && !text.startsWith(tokens[0].raw) ? 1 : 0;
+	let endIndex = tokens.length - 1;
+	let blockEnd = 0;
+	for (let i = 0, pos = base; i < tokens.length; pos += tokens[i].raw.length, i++) {
+		if (!text.startsWith(tokens[i].raw, pos)) {
+			endIndex = Math.min(endIndex, i);
+			break;
+		}
+		if (tokens[i].type === "math") continue;
+		const block = mathBlocks.at(pos);
+		if (block !== undefined) {
+			blockEnd = pos + block.raw.length;
+			endIndex = Math.min(endIndex, i);
+			break;
+		}
+	}
+	return { end: stableBlockBoundary(text, base, tokens, { endIndex }).end, blockEnd };
+}
+
+/**
+ * Whether some line of `text` holds a `[` before a `]:`, for renderMarkdownHead
+ * only. A reference definition registers for the whole document, so a prefix
+ * rendered alone could leave a reference above the cut unresolved. marked
+ * registers one from a single line that opens with `[label]:`, at any nesting
+ * depth (a quote or list item lexes a suffix of each of its source lines), so
+ * every definition passes, including a nested one the line-anchored
+ * HAS_REF_DEF misses. Over-matching prose like `[a] b]:` only costs the cut.
+ */
+function hasRefDefAnywhere(text: string): boolean {
+	if (!text.includes("]:")) return false;
+	let bracketOpen = false;
+	for (let i = 0; i < text.length; i++) {
+		const c = text.charCodeAt(i);
+		if (c === 0x0a) bracketOpen = false;
+		else if (c === 0x5b) bracketOpen = true;
+		else if (c === 0x5d && bracketOpen && text.charCodeAt(i + 1) === 0x3a) return true;
+	}
+	return false;
+}
+
+/** The leading rendered rows of a Markdown document. */
+export interface MarkdownHead {
+	/** Leading rows; each equals the same row of a full render. */
+	lines: readonly string[];
+	/** Whether the document was cut: the source past the cut went unrendered, so a full render may have more rows. */
+	truncated: boolean;
+}
+
+/**
+ * Render the leading rows of a Markdown document: more than `minRows` rows,
+ * or the whole document when it is shorter. The document is cut only at a
+ * stable top-level block boundary, so every returned row equals the same row
+ * of a full render. It renders whole, not `truncated`, in three cases:
+ * - It is under two probe windows: the first probe alone lexes half of it or
+ *   more, which leaves a cut little to save.
+ * - It can't be cut: a line could hold a reference definition
+ *   ({@link hasRefDefAnywhere}), or a CR shifts the token offsets.
+ * - No cut works: the orphan-fence repair would pair a fence in front of the
+ *   cut with one past it, or no boundary short of the end leaves more than
+ *   `minRows` rows.
+ */
+export function renderMarkdownHead(text: string, width: number, theme: MarkdownTheme, minRows: number): MarkdownHead {
+	// The text a final-mode `Markdown` lexes: the constructor normalizes OSC 8
+	// terminators, then render expands tabs and repairs an orphan closing fence.
+	const normalized = repairOrphanClosingFence(expandTabs(normalizeOsc8Terminators(text)));
+	if (normalized.length >= 2 * PROBE_WINDOW_BYTES && !normalized.includes("\r") && !hasRefDefAnywhere(normalized)) {
+		const mathBlocks = new MathBlockScan(normalized);
+		for (let size = firstProbeSize(normalized); size < normalized.length;) {
+			const boundary = probeBoundary(normalized, size, mathBlocks);
+			if (boundary.end > 0) {
+				const head = normalized.slice(0, boundary.end);
+				// Rendering `head` repairs it again on its own. That fires only when the
+				// repair's line scan pairs a fence the lexer doesn't see (one inside an
+				// HTML block, say) with a partner past the cut; then only a whole render
+				// matches.
+				if (repairOrphanClosingFence(head) !== head) break;
+				const lines = new Markdown(head, 0, 0, theme).render(width);
+				if (lines.length > minRows) return { lines, truncated: true };
+			}
+			size = nextProbeSize(normalized, size, boundary.blockEnd);
+		}
+	}
+	return { lines: new Markdown(text, 0, 0, theme).render(width), truncated: false };
 }
 
 /** A hyperlink as the renderer sees it: inline `[text](href)`, `<autolink>`, bare GFM URL, or reference link. */
@@ -3164,7 +3302,8 @@ export class Markdown implements Component {
 		// returns without ever reading these, so streaming frames skip the
 		// whole-document tab scan/copy (the delta-only replaceTabs inside the
 		// branch is the only tab work a streamed frame pays).
-		const tabbed = this.#text.includes("\t") ? replaceTabs(this.#text) : this.#text;
+		const tabbed = expandTabs(this.#text);
+		// renderMarkdownHead probes and cuts this same final-mode text.
 		const normalizedText = this.transientRenderCache ? tabbed : repairOrphanClosingFence(tabbed);
 		if (!this.transientRenderCache && normalizedText.length < tabbed.length) {
 			// repairOrphanClosingFence deleted bytes this frame (orphan fence
