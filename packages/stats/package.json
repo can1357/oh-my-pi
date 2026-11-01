@@ -86,10 +86,6 @@
       "types": "./src/client/*.ts",
       "import": "./src/client/*.ts"
     },
-    "./client/components/*": {
-      "types": "./src/client/components/*.ts",
-      "import": "./src/client/components/*.ts"
-    },
     "./*.js": "./src/*.ts"
   }
 }

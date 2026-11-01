@@ -21,6 +21,7 @@ const CLIENT_TERMINAL_TIMEOUT_MS = 2_000;
 const CLIENT_TERMNAME_PROGRAMS: ReadonlyArray<readonly [RegExp, string]> = [
 	[/^xterm-kitty$/u, "kitty"],
 	[/^xterm-ghostty$/u, "ghostty"],
+	[/^xterm-rex$/u, "rex"],
 	[/^wezterm$/u, "wezterm"],
 ];
 let cachedClientTerminalNames: readonly string[] | undefined;

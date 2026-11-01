@@ -156,10 +156,6 @@
 			"types": "./src/commit/git/*.ts",
 			"import": "./src/commit/git/*.ts"
 		},
-		"./commit/utils/*": {
-			"types": "./src/commit/utils/*.ts",
-			"import": "./src/commit/utils/*.ts"
-		},
 		"./config/*": {
 			"types": "./src/config/*.ts",
 			"import": "./src/config/*.ts"

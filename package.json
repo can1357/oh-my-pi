@@ -107,7 +107,7 @@
 		"fix:changelogs": "bun scripts/fix-changelogs.ts",
 		"fix:rs": "bun scripts/run-rs-task.ts fix:rs",
 		"ci:check:full": "bun run check:ts",
-		"ci:test:full": "bun run ci:test:ts && bun run test:rs",
+		"ci:test:full": "bun run ci:test:ts && OMP_FORCE_RUST_TASKS=1 bun run test:rs",
 		"ci:test:ts": "bun scripts/ci-test-ts.ts all",
 		"ci:test:ts:workspace": "bun scripts/ci-test-ts.ts workspace",
 		"ci:test:ts:native": "bun scripts/ci-test-ts.ts native",
