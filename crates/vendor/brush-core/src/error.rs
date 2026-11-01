@@ -337,6 +337,11 @@ pub enum ErrorKind {
 	#[error("too many open files")]
 	TooManyOpenFiles,
 
+	/// Every id for a background job that runs inside the shell process has
+	/// been handed out.
+	#[error("cannot start background job: out of job ids")]
+	OutOfJobIds,
+
 	/// The function name shadows a special built-in command.
 	#[error("function name '{}' shadows a special built-in command", .name)]
 	FunctionNameShadowsSpecialBuiltin {

@@ -991,6 +991,12 @@ pub(crate) async fn execute_external_command(
 				tracing::warn!("could not retrieve pid for child process");
 			}
 
+			// A status `wait` kept for a finished child under this pid names a
+			// different process now.
+			if let Some(pid) = pid {
+				context.shell.jobs_mut().forget_reported(pid);
+			}
+
 			// Report the spawned child for scoped teardown. Skipped for reparented
 			// launches (`detach_reparent`, e.g. `nohup cmd &`): those double-fork
 			// out of the descendant tree and must survive the host's cancellation

@@ -328,10 +328,9 @@ impl builtins::Command for KillCommand {
 					continue;
 				},
 			};
-			// An in-process job's pid names no operating-system process. The job
-			// may belong to this shell, or to another shell in the process (the
-			// parent of a subshell, a sibling background job).
-			if jobs::is_in_process_pid(pid) {
+			// Consult the live in-process registry, not a numeric range: a real
+			// operating-system process can have a high signed PID on Windows.
+			if jobs::has_in_process_job(pid) {
 				let signalled = match context.shell.jobs_mut().resolve_process_id(pid) {
 					Some(job) => signal_own_in_process_job(job, signal).await?,
 					None => signal_in_process_pid(pid, signal),
@@ -717,6 +716,9 @@ async fn signal_own_in_process_job(
 	match signal {
 		KillSignal::Probe => Ok(job.has_internal_tasks()),
 		KillSignal::Signal(signal) => {
+			if job.deliver_trapped_signal(signal) {
+				return Ok(true);
+			}
 			let Some(unwound) = ending_signal_number(signal).and_then(|number| job.end_in_process(number))
 			else {
 				return Ok(false);
@@ -733,6 +735,9 @@ fn signal_in_process_pid(pid: i32, signal: KillSignal) -> bool {
 	match signal {
 		KillSignal::Probe => jobs::in_process_job_is_running(pid),
 		KillSignal::Signal(signal) => {
+			if jobs::deliver_trapped_in_process_signal(pid, signal) {
+				return true;
+			}
 			ending_signal_number(signal).is_some_and(|number| jobs::end_in_process_job(pid, number))
 		},
 	}

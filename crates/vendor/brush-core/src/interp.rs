@@ -21,6 +21,7 @@ use crate::{
 	results::{ExecutionExitCode, ExecutionResult, ExecutionSpawnResult, ExecutionWaitResult},
 	shell::Shell,
 	sys, timing,
+	traps::JobSignals,
 	variables::{ArrayLiteral, ShellValue, ShellValueLiteral, ShellValueUnsetType, ShellVariable},
 };
 
@@ -530,6 +531,15 @@ impl Execute for ast::CompoundList {
 
 				// Update status
 				shell.set_last_exit_status(result.exit_code.into());
+
+				// A trapped signal `kill` sent to this background job runs its
+				// trap now that the command has returned; an `exit` in the trap
+				// ends the job.
+				if let Some(trap_result) = shell.run_pending_job_trap(params).await?
+					&& !trap_result.is_normal_flow()
+				{
+					result = trap_result;
+				}
 			}
 
 			if !result.is_normal_flow() {
@@ -568,10 +578,10 @@ async fn spawn_async_ao_list_as_job<'a, SE: extensions::ShellExtensions>(
 		direct_params.defer_fifo_redirects = true;
 		match try_spawn_pipeline_as_job(&pipeline, ao_list.to_string(), shell, &direct_params).await? {
 			Some(job) => job,
-			None => spawn_async_ao_list_in_task(ao_list, shell, &async_params),
+			None => spawn_async_ao_list_in_task(ao_list, shell, &async_params)?,
 		}
 	} else {
-		spawn_async_ao_list_in_task(ao_list, shell, &async_params)
+		spawn_async_ao_list_in_task(ao_list, shell, &async_params)?
 	};
 
 	shell.set_last_background_pid(job.last_pid());
@@ -742,7 +752,7 @@ fn spawn_async_ao_list_in_task<SE: extensions::ShellExtensions>(
 	ao_list: &ast::AndOrList,
 	shell: &Shell<SE>,
 	params: &ExecutionParameters,
-) -> jobs::Job {
+) -> Result<jobs::Job, error::Error> {
 	// Clone the inputs.
 	let mut cloned_shell = shell.clone();
 	let mut cloned_params = params.clone();
@@ -763,13 +773,19 @@ fn spawn_async_ao_list_in_task<SE: extensions::ShellExtensions>(
 		.map_or_else(CancellationToken::new, |token| token.child_token());
 	cloned_params.set_cancel_token(cancellation.clone());
 
+	// Traps the job sets decide what `kill` does to it.
+	let job_signals = Arc::new(JobSignals::default());
+	cloned_shell
+		.traps_mut()
+		.attach_job_signals(Arc::clone(&job_signals));
+
 	let task = async move {
 		cloned_ao_list
 			.execute(&mut cloned_shell, &cloned_params)
 			.await
 	};
 
-	jobs::Job::spawn_in_process(task, ao_list.to_string(), cancellation)
+	jobs::Job::spawn_in_process(task, ao_list.to_string(), cancellation, job_signals)
 }
 
 #[async_trait::async_trait]
@@ -1320,6 +1336,11 @@ impl Execute for ast::CoprocessCommand {
 			.as_ref()
 			.map_or_else(CancellationToken::new, CancellationToken::child_token);
 		child_params.set_cancel_token(cancellation.clone());
+		// Traps the coprocess sets decide what `kill` does to it.
+		let job_signals = Arc::new(JobSignals::default());
+		child_shell
+			.traps_mut()
+			.attach_job_signals(Arc::clone(&job_signals));
 		let task = async move {
 			let pipeline_context = PipelineExecutionContext {
 				shell:            commands::ShellForCommand::ParentShell(&mut child_shell),
@@ -1339,7 +1360,8 @@ impl Execute for ast::CoprocessCommand {
 			task,
 			format!("coproc {name}"),
 			cancellation,
-		));
+			job_signals,
+		)?);
 		let pid = job.last_pid();
 		shell.set_last_background_pid(pid);
 

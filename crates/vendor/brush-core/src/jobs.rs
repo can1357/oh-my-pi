@@ -18,7 +18,10 @@ use tokio::task::AbortHandle;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 
-use crate::{ExecutionResult, error, processes, sys, trace_categories, traps};
+use crate::{
+	ExecutionResult, error, processes, sys, trace_categories,
+	traps::{self, JobSignals},
+};
 
 /// Handle to a shell-internal job task. Dropping it aborts the task, as
 /// dropping a [`processes::ChildProcess`] kills its process: a job that leaves
@@ -32,16 +35,18 @@ const WAIT_NEXT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// How long `kill %N` waits for an aborted in-shell task to unwind.
 const INTERNAL_TASK_UNWIND_LIMIT: Duration = Duration::from_millis(500);
 
-/// Process ids of jobs that run inside the shell process (a function, a
-/// subshell, a compound command), for which no operating-system process
-/// exists for `$!`, `wait`, `kill` and `jobs` to name. They start at 2^30:
-/// Linux caps process ids at 2^22 (`PID_MAX_LIMIT`) and macOS and the BSDs
-/// at 99,999, so no live process shares one, and `kill` never sends a pid in
-/// this range to the operating system.
+/// Ids of jobs that run inside the shell process (a function, a subshell, a
+/// compound command), for which no operating-system process exists for `$!`,
+/// `wait`, `kill` and `jobs` to name. They start at 2^30, above Linux's
+/// `PID_MAX_LIMIT` of 2^22, so on Linux no process shares one. Whether `kill`
+/// treats a number as a shell job id depends on [`IN_PROCESS_JOBS`], not on
+/// this range: an id no live job holds goes to the operating system, where a
+/// platform with larger process ids (Windows) can have a process with it.
 const FIRST_IN_PROCESS_PID: sys::process::ProcessId = 1 << 30;
 
-/// The next in-process job pid. One counter serves every shell in the
-/// process, so a subshell's job never takes a pid its parent's `$!` holds.
+/// The next in-process job id. One counter serves every shell in the process
+/// and never wraps: after the last id it refuses new jobs, so an id names one
+/// job for the life of the process.
 static NEXT_IN_PROCESS_PID: AtomicI32 = AtomicI32::new(FIRST_IN_PROCESS_PID);
 
 /// Every in-process job that exists, by pid. `kill` finds a job here from any
@@ -56,13 +61,22 @@ static IN_PROCESS_JOBS: LazyLock<Mutex<HashMap<sys::process::ProcessId, Arc<InPr
 /// many jobs from growing.
 const REPORTED_STATUS_LIMIT: usize = 1024;
 
-fn allocate_in_process_pid() -> sys::process::ProcessId {
-	let mut pid = NEXT_IN_PROCESS_PID.load(Ordering::Relaxed);
+fn allocate_in_process_pid() -> Result<sys::process::ProcessId, error::Error> {
+	allocate_in_process_pid_from(&NEXT_IN_PROCESS_PID)
+}
+
+fn allocate_in_process_pid_from(
+	counter: &AtomicI32,
+) -> Result<sys::process::ProcessId, error::Error> {
+	let mut pid = counter.load(Ordering::Relaxed);
 	loop {
-		let next = pid.checked_add(1).unwrap_or(FIRST_IN_PROCESS_PID);
-		match NEXT_IN_PROCESS_PID.compare_exchange_weak(pid, next, Ordering::Relaxed, Ordering::Relaxed)
-		{
-			Ok(_) => return pid,
+		if pid < FIRST_IN_PROCESS_PID {
+			return Err(error::ErrorKind::OutOfJobIds.into());
+		}
+		// -1 marks exhaustion. It cannot be a shell job id.
+		let next = pid.checked_add(1).unwrap_or(-1);
+		match counter.compare_exchange_weak(pid, next, Ordering::Relaxed, Ordering::Relaxed) {
+			Ok(_) => return Ok(pid),
 			Err(current) => pid = current,
 		}
 	}
@@ -73,10 +87,11 @@ fn in_process_jobs()
 	IN_PROCESS_JOBS.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Whether `pid` is in the range in-process jobs take their pids from. `kill`
-/// handles such a pid itself and never sends it to the operating system.
-pub const fn is_in_process_pid(pid: sys::process::ProcessId) -> bool {
-	pid >= FIRST_IN_PROCESS_PID
+/// Whether `pid` identifies a live in-process job. Numeric range is not a
+/// discriminator: an operating-system process can use any signed id that the
+/// platform exposes, notably on Windows.
+pub fn has_in_process_job(pid: sys::process::ProcessId) -> bool {
+	in_process_jobs().contains_key(&pid)
 }
 
 /// Whether the in-process job `pid` names is still running, as `kill -0` asks
@@ -93,6 +108,13 @@ pub fn in_process_job_is_running(pid: sys::process::ProcessId) -> bool {
 pub fn end_in_process_job(pid: sys::process::ProcessId, signal_number: u8) -> bool {
 	let target = in_process_jobs().get(&pid).cloned();
 	target.is_some_and(|target| target.end(signal_number))
+}
+
+/// Leaves `signal` pending when the in-process job `pid` trapped it. The job
+/// invokes that trap at its next interpreter check instead of being aborted.
+pub fn deliver_trapped_in_process_signal(pid: sys::process::ProcessId, signal: traps::TrapSignal) -> bool {
+	let target = in_process_jobs().get(&pid).cloned();
+	target.is_some_and(|target| target.deliver_trapped_signal(signal))
 }
 
 /// [`InProcessTarget::state`] while the task runs.
@@ -112,12 +134,24 @@ struct InProcessTarget {
 	/// ended the task. The task and `kill` each claim it from
 	/// [`TASK_RUNNING`], so whichever comes first decides the job's status.
 	state: Arc<AtomicU8>,
+
+	/// Traps the job itself installed and signals awaiting their handler.
+	signals: Arc<JobSignals>,
 }
 
 impl InProcessTarget {
 	fn is_running(&self) -> bool {
 		!self.abort.is_finished()
 	}
+	/// Leaves a trapped signal pending for the task to handle between commands.
+	fn deliver_trapped_signal(&self, signal: traps::TrapSignal) -> bool {
+		if !self.is_running() || !self.signals.is_trapped(signal) {
+			return false;
+		}
+		self.signals.deliver(signal);
+		true
+	}
+
 	/// Ends the task as signal `signal_number` ends a process. Returns `false`
 	/// when the task had already finished.
 	fn end(&self, signal_number: u8) -> bool {
@@ -156,7 +190,10 @@ impl Drop for InProcess {
 		// a subshell dropping) must stop: the abort its dropped handle requests
 		// lands only where the task yields.
 		self.target.cancellation.cancel();
-		in_process_jobs().remove(&self.pid);
+		let mut jobs = in_process_jobs();
+		if jobs.get(&self.pid).is_some_and(|target| Arc::ptr_eq(target, &self.target)) {
+			jobs.remove(&self.pid);
+		}
 	}
 }
 
@@ -283,14 +320,16 @@ impl JobManager {
 			.any(|job| job.external_process_count() > 0)
 	}
 
-	/// How many jobs, `disown`ed ones included, still hold an external child
-	/// that dropping the shell would kill.
-	pub fn live_external_job_count(&self) -> usize {
+	/// How many jobs, disowned ones included, still hold a task the shell
+	/// would stop on drop. The persistent host retains the shell while this is
+	/// nonzero: a background function must survive the command that started it
+	/// as an external background process does.
+	pub fn live_job_count(&self) -> usize {
 		self
 			.jobs
 			.iter()
 			.chain(&self.disowned)
-			.filter(|job| job.external_process_count() > 0)
+			.filter(|job| !job.tasks.is_empty())
 			.count()
 	}
 
@@ -321,6 +360,11 @@ impl JobManager {
 		let id = self.jobs.iter().map(|j| j.id).max().unwrap_or(0) + 1;
 		job.id = id;
 		job.annotation = JobAnnotation::Current;
+		// A pid this job's processes now hold no longer names the job that
+		// reported under it.
+		for pid in job.process_ids().chain(job.in_process_pid()) {
+			self.forget_reported(pid);
+		}
 		self.jobs.push(job);
 
 		#[allow(clippy::unwrap_used, reason = "we just pushed an element")]
@@ -662,6 +706,13 @@ impl JobManager {
 		self.reported.push_back((pid, status));
 	}
 
+	/// Forgets the status kept for `pid`, because this shell just started a
+	/// new child that holds it: `wait PID` then waits for the new child, or
+	/// reports `pid` as not a child, as Bash does.
+	pub fn forget_reported(&mut self, pid: sys::process::ProcessId) {
+		self.reported.retain(|&(reported, _)| reported != pid);
+	}
+
 	fn reported_status(&self, pid: sys::process::ProcessId) -> Option<u8> {
 		self
 			.reported
@@ -812,18 +863,23 @@ impl Job {
 		}
 	}
 
-	/// Returns a job that runs `body` inside the shell process. It takes a pid
-	/// of its own, which `$!`, `jobs`, `wait` and `kill` name it by and which
-	/// `kill` reaches from any shell in the process; `cancellation` ends the
-	/// task at its next interpreter check.
+	/// Returns a job that runs `body` inside the shell process. It takes a
+	/// shell-only id, which `$!`, `jobs`, `wait` and `kill` name it by and
+	/// which `kill` reaches from any shell in the process; `cancellation` ends
+	/// the task at its next interpreter check.
+	///
+	/// Returns [`error::ErrorKind::OutOfJobIds`] after the final id is handed
+	/// out rather than reusing an id that names a live or reported job.
 	pub(crate) fn spawn_in_process<F>(
 		body: F,
 		command_line: String,
 		cancellation: CancellationToken,
-	) -> Self
+		signals: Arc<JobSignals>,
+	) -> Result<Self, error::Error>
 	where
 		F: Future<Output = Result<ExecutionResult, error::Error>> + Send + 'static,
 	{
+		let pid = allocate_in_process_pid()?;
 		let state = Arc::new(AtomicU8::new(TASK_RUNNING));
 		let finished = Arc::clone(&state);
 		let handle = AbortOnDropHandle::new(tokio::spawn(async move {
@@ -837,15 +893,18 @@ impl Job {
 			);
 			result
 		}));
-		let pid = allocate_in_process_pid();
-		let target =
-			Arc::new(InProcessTarget { abort: handle.abort_handle(), cancellation, state });
+		let target = Arc::new(InProcessTarget {
+			abort: handle.abort_handle(),
+			cancellation,
+			state,
+			signals,
+		});
 		in_process_jobs().insert(pid, Arc::clone(&target));
 		let mut job = Self::new([JobTask::Internal(handle)], command_line, JobState::Running);
 		job.representative_process_id = Some(pid);
 		job.last_process_id = Some(pid);
 		job.in_process = Some(InProcess { pid, target });
-		job
+		Ok(job)
 	}
 
 	/// Returns a pid-style string for the job.
@@ -1118,6 +1177,14 @@ impl Job {
 		self.in_process.as_ref().map(|in_process| in_process.pid)
 	}
 
+	/// Leaves `signal` pending when this running job trapped it.
+	pub fn deliver_trapped_signal(&self, signal: traps::TrapSignal) -> bool {
+		self
+			.in_process
+			.as_ref()
+			.is_some_and(|in_process| in_process.target.deliver_trapped_signal(signal))
+	}
+
 	/// Ends the job's in-process task as signal `signal_number` ends a
 	/// process; `wait` then reports 128 plus `signal_number`. Returns a future
 	/// that resolves once the task has unwound (see
@@ -1209,14 +1276,17 @@ impl Job {
 
 #[cfg(all(test, unix))]
 mod tests {
-	use std::time::Duration;
+	use std::{
+		sync::{Arc, atomic::AtomicI32},
+		time::Duration,
+	};
 
 	use anyhow::Result;
 	use tokio_util::sync::CancellationToken;
 
-	use crate::ExecutionResult;
+	use crate::{ExecutionResult, traps::JobSignals};
 
-	use super::{Job, JobSelector};
+	use super::{Job, JobSelector, allocate_in_process_pid_from};
 
 	#[tokio::test]
 	async fn reaped_job_remains_waitable_by_original_pid_and_status() -> Result<()> {
@@ -1316,19 +1386,120 @@ mod tests {
 		assert_eq!(u8::from(waited.expect("pipeline still waitable").result.exit_code), 7);
 		Ok(())
 	}
-	/// Dropping an in-process job must cancel its interpreter token. A task
-	/// that only runs synchronous builtins cannot observe an abort until it
-	/// next checks this token.
+
+	/// A status kept for a reported pid must not survive this shell starting a
+	/// new child under that pid: `wait PID` then means the new child, as in
+	/// Bash. The test keeps a status for every pid Linux is likely to hand out
+	/// next, starts a foreground and a background child, and checks that
+	/// neither child's pid still reports the old status.
+	#[cfg(target_os = "linux")]
 	#[tokio::test]
-	async fn dropping_in_process_job_cancels_its_token() {
-		let cancellation = CancellationToken::new();
+	async fn a_new_child_under_a_reported_pid_drops_its_old_status() -> Result<()> {
+		let mut shell = crate::Shell::builder().build().await?;
+		let dir = tempfile::tempdir()?;
+		let last: i32 = std::fs::read_to_string("/proc/sys/kernel/ns_last_pid")?.trim().parse()?;
+		for pid in last + 1..last + 4001 {
+			shell.jobs_mut().reported.push_back((pid, 7));
+		}
+		let foreground = dir.path().join("fg");
+		let background = dir.path().join("bg");
+		let script = format!(
+			"/bin/sh -c 'echo $$ > {}'; /bin/sh -c 'echo $$ > {}' &",
+			foreground.display(),
+			background.display()
+		);
+		shell
+			.run_string(&script, &crate::SourceInfo::default(), &shell.default_exec_params())
+			.await?;
+		// No `wait`: a `wait` would itself replace or clear the kept status.
+		tokio::time::timeout(Duration::from_secs(5), async {
+			while std::fs::read_to_string(&background).map_or(true, |text| text.trim().is_empty()) {
+				tokio::time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await?;
+		for path in [&foreground, &background] {
+			let pid: i32 = std::fs::read_to_string(path)?.trim().parse()?;
+			assert!((last + 1..last + 4001).contains(&pid), "pid {pid} outside the seeded range");
+			assert_ne!(shell.jobs().reported_status(pid), Some(7), "pid {pid} kept the old status");
+		}
+		Ok(())
+	}
+
+	/// The last synthetic id is handed out once; no later job can wrap and
+	/// reuse it while the first job can still be signalled or waited on.
+	#[test]
+	fn in_process_id_exhaustion_never_wraps() {
+		let counter = AtomicI32::new(i32::MAX);
+		assert_eq!(allocate_in_process_pid_from(&counter).expect("last id"), i32::MAX);
+		let err = allocate_in_process_pid_from(&counter).expect_err("must not wrap");
+		assert!(matches!(err.kind(), crate::error::ErrorKind::OutOfJobIds));
+	}
+
+	/// A live job at the final id keeps its own registry target: exhausting
+	/// the counter refuses the next job rather than reusing that id and
+	/// overwriting the first job's target.
+	#[tokio::test]
+	async fn a_live_final_id_never_aliases_another_job() {
+		let original = super::NEXT_IN_PROCESS_PID.swap(i32::MAX, std::sync::atomic::Ordering::SeqCst);
+		let first = Job::spawn_in_process(
+			std::future::pending::<Result<ExecutionResult, crate::error::Error>>(),
+			"first".into(),
+			CancellationToken::new(),
+			Arc::new(JobSignals::default()),
+		)
+		.expect("final id");
+		let pid = first.in_process_pid().expect("in-process id");
+		assert_eq!(pid, i32::MAX);
+		assert!(super::has_in_process_job(pid));
+
+		let second = Job::spawn_in_process(
+			std::future::pending::<Result<ExecutionResult, crate::error::Error>>(),
+			"second".into(),
+			CancellationToken::new(),
+			Arc::new(JobSignals::default()),
+		);
+		let Err(err) = second else {
+			panic!("job id wrapped and aliased {pid}");
+		};
+		assert!(matches!(err.kind(), crate::error::ErrorKind::OutOfJobIds));
+		assert!(super::has_in_process_job(pid));
+
+		drop(first);
+		super::NEXT_IN_PROCESS_PID.store(original, std::sync::atomic::Ordering::SeqCst);
+	}
+}
+
+/// Runs on every platform: whether `kill` treats a number as a shell job id
+/// depends on the live registry, not on its range. On Windows a real process
+/// can have an id at or above 2^30; it must still reach the operating system.
+#[cfg(test)]
+mod registry_tests {
+	use std::sync::Arc;
+
+	use tokio_util::sync::CancellationToken;
+
+	use super::{FIRST_IN_PROCESS_PID, Job, has_in_process_job};
+	use crate::{ExecutionResult, traps::JobSignals};
+
+	#[tokio::test]
+	async fn only_a_live_registered_job_id_is_in_process() {
+		// An id in the synthetic range that no job holds is an operating-system
+		// id, as a Windows process id there would be.
+		assert!(!has_in_process_job(i32::MAX - 7));
+		assert!(!has_in_process_job(FIRST_IN_PROCESS_PID - 1));
+
 		let job = Job::spawn_in_process(
 			std::future::pending::<Result<ExecutionResult, crate::error::Error>>(),
-			"while :; do :; done".into(),
-			cancellation.clone(),
-		);
+			"job".into(),
+			CancellationToken::new(),
+			Arc::new(JobSignals::default()),
+		)
+		.expect("job id");
+		let pid = job.in_process_pid().expect("in-process id");
+		assert!(has_in_process_job(pid));
 		drop(job);
-		assert!(cancellation.is_cancelled());
+		assert!(!has_in_process_job(pid));
 	}
 }
 

@@ -281,11 +281,11 @@ impl Shell {
 		registry.map_or_default(|registry| registry.live_pids())
 	}
 
-	/// Number of live external background jobs tracked by the persistent
-	/// session, `disown`ed ones included. The host retains a per-call shell
-	/// while this is nonzero, since dropping it would kill its children. Reaps
-	/// exited children without discarding their status, so a later `wait`
-	/// still sees the exit code.
+	/// Number of unfinished background jobs tracked by the persistent session,
+	/// including jobs the shell runs itself and jobs `disown` took out of job
+	/// control. The host retains a per-call shell while this is nonzero, since
+	/// dropping it would stop those jobs. A job can retain the shell until it
+	/// exits or the omp process exits and drops every retained shell.
 	pub async fn live_background_job_count(&self) -> u32 {
 		let mut guard = self.session.lock().await;
 		let Some(core) = guard.as_mut() else {
@@ -297,7 +297,7 @@ impl Shell {
 		if jobs.poll_preserving_completed().is_err() {
 			return 0;
 		}
-		u32::try_from(jobs.live_external_job_count()).unwrap_or(u32::MAX)
+		u32::try_from(jobs.live_job_count()).unwrap_or(u32::MAX)
 	}
 }
 

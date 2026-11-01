@@ -314,3 +314,108 @@ async fn a_disowned_external_job_keeps_the_session_alive() {
 	assert_eq!(shell.live_background_job_count().await, 1);
 	shell.abort().await;
 }
+
+/// A job the shell runs itself keeps the session alive while it runs, plain
+/// or `disown`ed, and stops counting once it ends. The count was 0, so the
+/// host could drop the shell and stop the job mid-run.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_in_process_job_keeps_the_session_alive_until_it_ends() {
+	for command in ["f(){ sleep 0.4; }; f &", "f(){ sleep 0.4; }; f & disown"] {
+		let shell = Shell::new(None);
+		shell
+			.run(
+				ShellRunOptions { command: command.into(), ..Default::default() },
+				None,
+				CancelToken::default(),
+			)
+			.await
+			.expect("run");
+		assert_eq!(shell.live_background_job_count().await, 1, "`{command}` while running");
+		let ended = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+			while shell.live_background_job_count().await != 0 {
+				tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+			}
+		})
+		.await;
+		assert!(ended.is_ok(), "`{command}` was still counted 5 s after it ended");
+	}
+}
+
+/// A signal the job trapped runs the job's trap once its foreground command
+/// returns, and the job goes on to its own status; `exit` in the trap sets
+/// it. A trap inherited from the shell that started the job does not count,
+/// as an asynchronous subshell resets traps. `kill` used to end a trapping
+/// job with 143 and never run the trap.
+#[tokio::test(flavor = "multi_thread")]
+async fn kill_runs_a_trap_the_job_set() {
+	assert_bash_outputs(&[
+		(
+			r#"f(){ trap 'echo got-term' TERM; sleep 0.5; }; f & sleep 0.1; kill %1; wait %1; echo "status=$?""#,
+			"got-term\nstatus=0\n",
+		),
+		(
+			r#"f(){ trap 'echo got-term' TERM; sleep 0.5; }; f & p=$!; sleep 0.1; kill "$p"; wait "$p"; echo "status=$?""#,
+			"got-term\nstatus=0\n",
+		),
+		(
+			r#"f(){ trap 'echo got-term; exit 3' TERM; sleep 0.5; echo after; }; f & sleep 0.1; kill %1; wait %1; echo "status=$?""#,
+			"got-term\nstatus=3\n",
+		),
+		(
+			r#"trap 'echo parent' TERM; f(){ sleep 5; }; f & sleep 0.1; kill %1; wait %1; echo "status=$?""#,
+			"status=143\n",
+		),
+	])
+	.await;
+}
+
+/// Whether something appends to `path` within 300 ms.
+fn still_written(path: &std::path::Path) -> bool {
+	let before = std::fs::metadata(path).map_or(0, |meta| meta.len());
+	std::thread::sleep(std::time::Duration::from_millis(300));
+	std::fs::metadata(path).map_or(0, |meta| meta.len()) > before
+}
+
+/// Dropping the shell stops a background loop of builtins within a bound,
+/// plain or `disown`ed. Such a loop never yields, so the abort a dropped task
+/// handle requests never lands; on main the loop kept running after its
+/// shell was gone. The shell runs on its own runtime, shut down without
+/// waiting, so a loop that does not stop fails this test instead of hanging
+/// it.
+#[test]
+fn dropping_the_shell_stops_its_background_loops() {
+	for suffix in ["", " disown"] {
+		let dir = tempfile::tempdir().expect("temporary directory");
+		let output = dir.path().join("out");
+		let script = format!("(while :; do echo x >> '{}'; done) &{suffix}", output.display());
+		let runtime = tokio::runtime::Builder::new_multi_thread()
+			.worker_threads(2)
+			.enable_all()
+			.build()
+			.expect("runtime");
+		let shell = runtime.block_on(async {
+			let shell = Shell::new(None);
+			shell
+				.run(
+					ShellRunOptions { command: script, ..Default::default() },
+					None,
+					CancelToken::default(),
+				)
+				.await
+				.expect("run");
+			shell
+		});
+		assert!(still_written(&output), "`{suffix}`: the loop never started");
+		runtime.block_on(async move { drop(shell) });
+		let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+		let mut stopped = false;
+		while std::time::Instant::now() < deadline {
+			if !still_written(&output) {
+				stopped = true;
+				break;
+			}
+		}
+		runtime.shutdown_background();
+		assert!(stopped, "`{suffix}`: the loop kept running 5 s after its shell was dropped");
+	}
+}
