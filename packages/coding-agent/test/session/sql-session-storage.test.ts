@@ -7,6 +7,8 @@
  */
 
 import { describe, expect, it } from "bun:test";
+import { listSessions } from "@oh-my-pi/pi-coding-agent/session/session-listing";
+import { readLatestSessionTitle } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 import { SqlSessionStorage, type SqlSessionStorageClient } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
 import { SQL } from "bun";
@@ -39,7 +41,7 @@ describe("SqlSessionStorage (SQLite backend)", () => {
 	it("create() warms the metadata index without selecting full content", async () => {
 		const client = new SQL("sqlite::memory:");
 		await client.unsafe(
-			`CREATE TABLE omp_session_files (path TEXT PRIMARY KEY, content TEXT NOT NULL, mtime_ms INTEGER NOT NULL, title TEXT, title_source TEXT, title_updated_at TEXT)`,
+			`CREATE TABLE omp_session_files (path TEXT PRIMARY KEY, content TEXT NOT NULL, mtime_ms INTEGER NOT NULL, title TEXT, title_source TEXT, title_updated_at TEXT, title_indexed_size INTEGER)`,
 		);
 		await client.unsafe(`INSERT INTO omp_session_files (path, content, mtime_ms) VALUES (?, ?, ?)`, [
 			"/sessions/p/huge.jsonl",
@@ -332,6 +334,135 @@ describe("SqlSessionStorage (SQLite backend)", () => {
 		await client.end();
 	});
 
+	it("atomically indexes journal appends across reopen without full-content selects", async () => {
+		const client = new SQL("sqlite::memory:");
+		try {
+			const storage = await SqlSessionStorage.create({ client });
+			const file = "/sessions/p/journal.jsonl";
+			const content =
+				serializeTitleSlot({ title: "Stale", source: "auto", updatedAt: "t1" }) +
+				'{"type":"session","id":"journal","timestamp":"t1","cwd":"/repo"}\n' +
+				'{"type":"message","message":{"role":"assistant","content":[]}}\n' +
+				`${JSON.stringify({ type: "custom", data: "x".repeat(256 * 1024) })}\n`;
+			await storage.writeText(file, content);
+			const writer = storage.openWriter(file);
+			await writer.append('{"type":"title_change","title":"Current journal","source":"user","timestamp":"t2"}\n');
+			await writer.close();
+			const rows = await client.unsafe(
+				"SELECT title, title_source, title_updated_at FROM omp_session_files WHERE path = ?",
+				[file],
+			);
+			expect(rows[0]).toMatchObject({ title: "Current journal", title_source: "user", title_updated_at: "t2" });
+			const queries: string[] = [];
+			const wrapped: SqlSessionStorageClient = {
+				options: { adapter: "sqlite" },
+				unsafe(query, values) {
+					queries.push(query);
+					return client.unsafe(query, values);
+				},
+				transaction(callback) {
+					return client.transaction(async transaction => callback(transaction));
+				},
+			};
+			const reopened = await SqlSessionStorage.create({ client: wrapped });
+			expect(await readLatestSessionTitle(file, reopened)).toEqual({
+				title: "Current journal",
+				source: "user",
+				updatedAt: "t2",
+			});
+			expect((await listSessions("/sessions/p", reopened))[0]?.title).toBe("Current journal");
+			expect(queries.some(query => /SELECT\s+content\s+AS\s+content/i.test(query))).toBe(false);
+		} finally {
+			await client.end();
+		}
+	});
+
+	it("rejects title append content and metadata in the same SQLite statement", async () => {
+		const client = new SQL("sqlite::memory:");
+		try {
+			const storage = await SqlSessionStorage.create({ client });
+			const file = "/sessions/p/rejected-title.jsonl";
+			const content =
+				serializeTitleSlot({ title: "Durable", source: "auto", updatedAt: "t1" }) +
+				'{"type":"session","id":"durable"}\n';
+			await storage.writeText(file, content);
+			await client.unsafe(
+				"CREATE TRIGGER reject_title_append BEFORE UPDATE OF content ON omp_session_files BEGIN SELECT RAISE(ABORT, 'append rejected'); END",
+			);
+			const writer = storage.openWriter(file);
+			await expect(
+				writer.append('{"type":"title_change","title":"Rejected","source":"user","timestamp":"t2"}\n'),
+			).rejects.toThrow("append rejected");
+			await expect(storage.drain()).rejects.toThrow("append rejected");
+			const rows = await client.unsafe(
+				"SELECT content, title, title_source, title_updated_at FROM omp_session_files WHERE path = ?",
+				[file],
+			);
+			expect(rows[0]).toMatchObject({ content, title: "Durable", title_source: "auto", title_updated_at: "t1" });
+			expect(await readLatestSessionTitle(file, storage)).toEqual({
+				title: "Durable",
+				source: "auto",
+				updatedAt: "t1",
+			});
+			await writer.close().catch(() => {});
+		} finally {
+			await client.end();
+		}
+	});
+
+	it("migrates legacy title authority lazily and keeps it across refresh and reopen", async () => {
+		const client = new SQL("sqlite::memory:");
+		try {
+			await client.unsafe(
+				"CREATE TABLE omp_session_files (path TEXT PRIMARY KEY, content TEXT NOT NULL, mtime_ms INTEGER NOT NULL, title TEXT, title_source TEXT, title_updated_at TEXT)",
+			);
+			const file = "/sessions/p/legacy-title.jsonl";
+			const content =
+				serializeTitleSlot({ title: "Stale", updatedAt: "t1" }) +
+				'{"type":"session","id":"legacy"}\n' +
+				'{"type":"title_change","title":"Legacy journal","source":"user","timestamp":"t2"}\n';
+			await client.unsafe("INSERT INTO omp_session_files VALUES (?, ?, ?, ?, ?, ?)", [
+				file,
+				content,
+				1,
+				"Stale",
+				null,
+				"t1",
+			]);
+			let fullReads = 0;
+			const wrapped: SqlSessionStorageClient = {
+				options: { adapter: "sqlite" },
+				unsafe(query, values) {
+					if (/SELECT\s+content\s+AS\s+content/i.test(query)) fullReads++;
+					return client.unsafe(query, values);
+				},
+				transaction(callback) {
+					return client.transaction(async transaction => callback(transaction));
+				},
+			};
+			const storage = await SqlSessionStorage.create({ client: wrapped });
+			expect(fullReads).toBe(0);
+			expect(await readLatestSessionTitle(file, storage)).toEqual({
+				title: "Legacy journal",
+				source: "user",
+				updatedAt: "t2",
+			});
+			expect(fullReads).toBe(1);
+			await storage.refresh();
+			const reopened = await SqlSessionStorage.create({ client: wrapped });
+			expect(await readLatestSessionTitle(file, reopened)).toEqual({
+				title: "Legacy journal",
+				source: "user",
+				updatedAt: "t2",
+			});
+			expect(fullReads).toBe(1);
+			const rows = await client.unsafe("SELECT content FROM omp_session_files WHERE path = ?", [file]);
+			expect(rows[0]?.content).toBe(content);
+		} finally {
+			await client.end();
+		}
+	});
+
 	it("readTextSlices uses bounded SQL byte substrings instead of a full content select", async () => {
 		const client = new SQL("sqlite::memory:");
 		const queries: string[] = [];
@@ -403,7 +534,7 @@ describe("SqlSessionStorage (SQLite backend)", () => {
 		const client = new SQL("sqlite::memory:");
 		// Pre-create the table with the expected schema.
 		await client.unsafe(
-			`CREATE TABLE omp_session_files (path TEXT PRIMARY KEY, content TEXT NOT NULL, mtime_ms INTEGER NOT NULL, title TEXT, title_source TEXT, title_updated_at TEXT)`,
+			`CREATE TABLE omp_session_files (path TEXT PRIMARY KEY, content TEXT NOT NULL, mtime_ms INTEGER NOT NULL, title TEXT, title_source TEXT, title_updated_at TEXT, title_indexed_size INTEGER)`,
 		);
 		const storage = await SqlSessionStorage.create({ client, createTable: false });
 		await storage.writeText("/s/x.jsonl", "ok");
@@ -490,7 +621,7 @@ describe("SqlSessionStorage (dialect-specific SQL)", () => {
 		expect(upserts).toHaveLength(2);
 		expect(upserts.every(query => !/VALUES\(\w+\)/i.test(query.sql))).toBe(true);
 
-		const replace = upserts.find(q => q.sql.includes("title_updated_at"));
+		const replace = upserts.find(q => !q.sql.includes("CONCAT"));
 		expect(replace?.values?.slice(0, 6)).toEqual([
 			"/s/replace.jsonl",
 			"body\n",
@@ -499,12 +630,23 @@ describe("SqlSessionStorage (dialect-specific SQL)", () => {
 			null,
 			null,
 		]);
-		expect(replace?.values?.slice(6)).toEqual(["body\n", expect.any(Number), null, null, null]);
+		expect(replace?.values?.slice(6)).toEqual([5, "body\n", expect.any(Number), null, null, null, 5]);
 
 		const append = upserts.find(q => q.sql.includes("CONCAT"));
 		expect(append?.sql).toContain("CONCAT(content, ?)");
 		expect(append?.values?.slice(0, 3)).toEqual(["/s/m.jsonl", "chunk\n", expect.any(Number)]);
-		expect(append?.values?.slice(3)).toEqual(["chunk\n", expect.any(Number)]);
+		expect(append?.values?.slice(3)).toEqual([
+			null,
+			null,
+			null,
+			6,
+			"chunk\n",
+			expect.any(Number),
+			null,
+			null,
+			null,
+			6,
+		]);
 		expect(append?.sql).not.toContain("$1");
 
 		expect(storage.adapter).toBe("mysql");

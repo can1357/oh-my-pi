@@ -3,6 +3,7 @@ import {
 	SESSION_TITLE_SLOT_ENTRY_TYPE,
 	type SessionTitleSlotEntry,
 	type SessionTitleSource,
+	type TitleChangeEntry,
 } from "./session-entries";
 
 const utf8Encoder = new TextEncoder();
@@ -106,6 +107,43 @@ export function titleUpdateFromSlot(slot: SessionTitleSlotEntry | undefined): Se
 		source: slot.source,
 		updatedAt: slot.updatedAt,
 	};
+}
+
+/**
+ * Latest physical journal title, independent of timestamps and branch ancestry.
+ * Parse bounded windows with the same malformed-line recovery as the loader.
+ */
+export function latestTitleChangeFromContent(content: string): SessionTitleUpdate | undefined {
+	if (!content.includes('"title_change"')) return undefined;
+	let latest: SessionTitleUpdate | undefined;
+	const initialWindow = 64 * 1024;
+	let window = initialWindow;
+	let start = 0;
+	while (start < content.length) {
+		const newline = content.indexOf("\n", start + window);
+		const end = newline === -1 ? content.length : newline + 1;
+		const { values, error, read, done } = Bun.JSONL.parseChunk(content.slice(start, end));
+		for (const entry of values as TitleChangeEntry[]) {
+			if (entry?.type === "title_change") {
+				latest = { title: entry.title, source: entry.source, updatedAt: entry.timestamp };
+			}
+		}
+		if (error) {
+			const nextNewline = content.indexOf("\n", start + read);
+			if (nextNewline === -1) break;
+			start = nextNewline + 1;
+		} else if (done) {
+			start = end;
+		} else if (read > 0) {
+			start += read;
+		} else {
+			if (end === content.length) break;
+			window *= 2;
+			continue;
+		}
+		window = initialWindow;
+	}
+	return latest;
 }
 
 /** Serialize the fixed-width first-line title slot, exactly 256 UTF-8 bytes including newline. */

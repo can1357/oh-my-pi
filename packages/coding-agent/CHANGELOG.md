@@ -329,6 +329,10 @@
 - With `symbolPreset: ascii`, status glyphs are three columns wide (`[+]`, `[-]`, `[#]`, `[ ]`) and status spinners animate as `[|] [/] [-] [\]` ([#17732](https://github.com/can1357/oh-my-pi/pull/17732) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - The subagent HUD marks each running agent with the running status glyph instead of a dot ([#17732](https://github.com/can1357/oh-my-pi/pull/17732) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 
+### Changed
+
+- SQL session stores maintain a nullable `title_indexed_size` freshness column automatically; externally managed schemas using `createTable: false` must provide it alongside the existing title columns.
+
 ### Fixed
 
 - Browser: `browser.close({ all: true })` from a subagent no longer closes its parent's tabs; it releases only the calling agent's tabs. Tabs now belong to the agent that opened them rather than its conversation id, so after `/new`, `/resume`, fork, or branch they are still frozen, idle-closed, released by close-all, and closed when the session ends instead of leaking ([#15975](https://github.com/can1357/oh-my-pi/issues/15975), [#16133](https://github.com/can1357/oh-my-pi/pull/16133) by [@harshaygadekar](https://github.com/harshaygadekar))
@@ -464,6 +468,9 @@
 - Read-only session open/close keeps malformed, migrated, and replay-sanitized journals untouched and never claims ownership or creates a sibling; caller mutations and pending durable writes still finish at shutdown ([#17431](https://github.com/can1357/oh-my-pi/pull/17431) by [@AdamDureyAtWillship](https://github.com/AdamDureyAtWillship))
 - Pending move and rollback rewrites are marked dirty before yielding, so sealing cannot drop caller changes. Empty explicit sessions remain pending until their header is durably published ([#17431](https://github.com/can1357/oh-my-pi/pull/17431) by [@AdamDureyAtWillship](https://github.com/AdamDureyAtWillship))
 - Title changes use the ordinary ordered journal append path, preserving follow-up turns and overlapping renames without full-file rewrites or late title-slot writes. Resume and listing derive the current title from the journal; deferred-backend rewrites wait for confirmed appends and release retained entries after shutdown ([#17431](https://github.com/can1357/oh-my-pi/pull/17431) by [@AdamDureyAtWillship](https://github.com/AdamDureyAtWillship))
+- Deferred append acknowledgements, failures, writer shutdowns, and title notifications stay attached to their issuing session across branching and rollback, preserving the replacement session's durability and ownership.
+- Persistent remote clones reconcile divergent journals asynchronously, preserving physical title/source/timestamp order and newer local renames while unshared compare-and-swap conflicts still fail closed.
+- Session lists use maintained Redis/SQL title metadata and lazily reconcile legacy metadata once. File title scans skip decoding unrelated complete records; continue and resume inspect only the relevant candidates.
 - Sealed shutdown rewrites recover deleted or externally changed session files, check deferred-backend ownership, and await sibling artifact copies; failed internal copies, forks, and relocations release ownership without publishing orphan journals ([#17431](https://github.com/can1357/oh-my-pi/pull/17431) by [@AdamDureyAtWillship](https://github.com/AdamDureyAtWillship))
 
 ## [18.14.0] - 2026-10-29

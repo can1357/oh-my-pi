@@ -70,6 +70,9 @@ return {1, string.len(ARGV[1])}`;
 const APPEND_SCRIPT = `-- OMP_APPEND
 local size = redis.call("APPEND", KEYS[1], ARGV[1])
 redis.call("HSET", KEYS[2], ARGV[2], ARGV[3])
+if ARGV[4] ~= "" then
+	redis.call("HSET", KEYS[3], ARGV[2], ARGV[4])
+end
 return size`;
 
 const UPDATE_TITLE_SCRIPT = `-- OMP_UPDATE_TITLE
@@ -77,22 +80,47 @@ redis.call("HSET", KEYS[1], ARGV[1], ARGV[2])
 redis.call("HSET", KEYS[2], ARGV[1], ARGV[3])
 return 1`;
 
-function encodeTitleMeta(title: SessionTitleUpdate): string {
-	return JSON.stringify(title);
+const INDEX_TITLE_SCRIPT = `-- OMP_INDEX_TITLE
+local actual = -1
+if redis.call("EXISTS", KEYS[1]) == 1 then
+	actual = redis.call("STRLEN", KEYS[1])
+end
+if actual ~= tonumber(ARGV[2]) then
+	return {0, actual}
+end
+redis.call("HSET", KEYS[2], ARGV[1], ARGV[3])
+return {1, actual}`;
+
+function encodeTitleMeta(title: SessionTitleUpdate | undefined, titleIndexedSize?: number): string {
+	return JSON.stringify({ ...title, titleIndexedSize });
 }
 
-function decodeTitleMeta(raw: string | undefined): SessionTitleUpdate | undefined {
+interface TitleMetadata {
+	title?: string;
+	source?: SessionTitleUpdate["source"];
+	updatedAt?: string;
+	titleIndexedSize?: number;
+}
+
+function decodeTitleMeta(raw: string | undefined): TitleMetadata | undefined {
 	if (!raw) return undefined;
 	try {
 		const parsed = JSON.parse(raw) as unknown;
 		if (typeof parsed !== "object" || parsed === null) return undefined;
 		const record = parsed as Record<string, unknown>;
-		if (typeof record.updatedAt !== "string") return undefined;
+		const titleIndexedSize =
+			typeof record.titleIndexedSize === "number" &&
+			Number.isSafeInteger(record.titleIndexedSize) &&
+			record.titleIndexedSize >= 0
+				? record.titleIndexedSize
+				: undefined;
+		if (typeof record.updatedAt !== "string" && titleIndexedSize === undefined) return undefined;
 		const source = record.source === "auto" || record.source === "user" ? record.source : undefined;
 		return {
 			title: typeof record.title === "string" ? record.title : undefined,
 			source,
-			updatedAt: record.updatedAt,
+			updatedAt: typeof record.updatedAt === "string" ? record.updatedAt : undefined,
+			titleIndexedSize,
 		};
 	} catch {
 		return undefined;
@@ -170,6 +198,7 @@ class RedisSessionStorageBackend implements SessionStorageBackend {
 					title: title?.title,
 					titleSource: title?.source,
 					titleUpdatedAt: title?.updatedAt,
+					titleIndexedSize: title?.titleIndexedSize,
 				};
 			}),
 		);
@@ -202,8 +231,8 @@ class RedisSessionStorageBackend implements SessionStorageBackend {
 			content,
 			path,
 			String(mtimeMs),
-			title ? "1" : "0",
-			title ? encodeTitleMeta(title) : "",
+			"1",
+			encodeTitleMeta(title, Buffer.byteLength(content, "utf8")),
 			expectedSize === undefined ? "" : String(expectedSize ?? -1),
 		]);
 		if (expectedSize === undefined) return;
@@ -214,16 +243,37 @@ class RedisSessionStorageBackend implements SessionStorageBackend {
 		throw new SessionWriteConflictError(path, expectedSize, actualSize);
 	}
 
-	async append(path: string, line: string, mtimeMs: number): Promise<void> {
+	async append(
+		path: string,
+		line: string,
+		mtimeMs: number,
+		title?: SessionTitleUpdate,
+		titleIndexedSize?: number,
+	): Promise<void> {
 		await this.#client.send("EVAL", [
 			APPEND_SCRIPT,
-			"2",
+			"3",
 			this.#fileKey(path),
 			this.#metaKey(),
+			this.#titleMetaKey(),
 			line,
 			path,
 			String(mtimeMs),
+			titleIndexedSize === undefined ? "" : encodeTitleMeta(title, titleIndexedSize),
 		]);
+	}
+
+	async indexTitle(path: string, title: SessionTitleUpdate | undefined, size: number): Promise<boolean> {
+		const result = await this.#client.send("EVAL", [
+			INDEX_TITLE_SCRIPT,
+			"2",
+			this.#fileKey(path),
+			this.#titleMetaKey(),
+			path,
+			String(size),
+			encodeTitleMeta(title, size),
+		]);
+		return Array.isArray(result) && Number(result[0]) === 1;
 	}
 
 	async updateSessionTitle(path: string, title: SessionTitleUpdate, mtimeMs: number): Promise<void> {

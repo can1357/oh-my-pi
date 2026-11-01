@@ -530,7 +530,7 @@ async function scanSessionFile(
 			path: file,
 			id: header.id,
 			cwd: header.cwd ?? "",
-			title: latestTitle?.title ?? header.title ?? shortSummary,
+			title: latestTitle ? latestTitle.title : (header.title ?? shortSummary),
 			parentSessionPath: header.parentSession,
 			continuationOf: header.continuationOf,
 			created: new Date(header.timestamp ?? ""),
@@ -890,8 +890,16 @@ export async function findMostRecentNonEmptySession(
 	// Status on: answered-ness comes from the tail lifecycle, not the 4 KB
 	// prefix, so a transcript whose first assistant record starts past the
 	// prefix is never skipped.
-	const sessions = await scanSessionDir(sessionDir, storage, true);
-	return sessions.find(session => !isEmptySession(session))?.path ?? null;
+	try {
+		await recoverOrphanedBackups(sessionDir, storage);
+	} catch {
+		return null;
+	}
+	for (const { file, stat } of await newestSessionFiles(sessionDir, "*.jsonl", storage)) {
+		const session = await scanSessionFile(file, storage, true, stat);
+		if (session && !isEmptySession(session)) return file;
+	}
+	return null;
 }
 
 /** Exported for testing */
@@ -1629,7 +1637,7 @@ export async function getRecentSessions(
 	return recent;
 }
 
-function sessionMatchesResumeArg(session: SessionInfo, sessionArg: string): boolean {
+function sessionMatchesResumeArg(session: Pick<SessionInfo, "id" | "path">, sessionArg: string): boolean {
 	const normalizedArg = sessionArg.toLowerCase();
 	const normalizedId = session.id.toLowerCase();
 	if (normalizedId.startsWith(normalizedArg)) {
@@ -1648,6 +1656,30 @@ function sessionMatchesResumeArg(session: SessionInfo, sessionArg: string): bool
 
 	const fileSessionId = fileName.slice(separator + 1);
 	return fileSessionId.startsWith(normalizedArg);
+}
+
+/** Match bounded identity evidence first; unrelated journals need no title/status scan. */
+async function findResumableSession(
+	files: readonly StatedSessionFile[],
+	storage: SessionStorage,
+	sessionArg: string,
+): Promise<SessionInfo | undefined> {
+	const candidates: string[] = [];
+	for (const { file } of files) {
+		if (sessionMatchesResumeArg({ id: "", path: file }, sessionArg)) {
+			candidates.push(file);
+			continue;
+		}
+		try {
+			const [prefix] = await storage.readTextSlices(file, SESSION_LIST_PREFIX_BYTES, 0);
+			const header = parseSessionListHeader(prefix, parseJsonlLenient<Record<string, unknown>>(prefix));
+			if (header && sessionMatchesResumeArg({ id: header.id, path: file }, sessionArg)) candidates.push(file);
+		} catch {
+			// Missing, unreadable and non-directory paths are not resumable candidates.
+		}
+	}
+	// Keep the listing's mtime, header timestamp and path tie-break precedence.
+	return (await collectSessionsFromFiles(candidates, storage, true))[0];
 }
 
 /** Controls cross-directory fallback for resumable session lookup. */
@@ -1670,8 +1702,12 @@ export async function resolveResumableSession(
 	const storage = isSessionStorage(storageOrOptions) ? storageOrOptions : new FileSessionStorage();
 	const resolvedOptions = isSessionStorage(storageOrOptions) ? options : storageOrOptions;
 	const localSessionDir = sessionDir ?? computeDefaultSessionDir(cwd, storage);
-	const localSessions = await listSessions(localSessionDir, storage);
-	const localMatch = localSessions.find(session => sessionMatchesResumeArg(session, sessionArg));
+	await recoverOrphanedBackups(localSessionDir, storage).catch(() => {});
+	const localMatch = await findResumableSession(
+		await newestSessionFiles(localSessionDir, "*.jsonl", storage),
+		storage,
+		sessionArg,
+	);
 	if (localMatch) {
 		return { session: localMatch, scope: "local" };
 	}
@@ -1680,8 +1716,11 @@ export async function resolveResumableSession(
 		return undefined;
 	}
 
-	const globalSessions = await listAllSessions(storage);
-	const globalMatch = globalSessions.find(session => sessionMatchesResumeArg(session, sessionArg));
+	const globalMatch = await findResumableSession(
+		await newestSessionFiles(getSessionsDir(), "*/*.jsonl", storage),
+		storage,
+		sessionArg,
+	);
 	if (!globalMatch) {
 		return undefined;
 	}

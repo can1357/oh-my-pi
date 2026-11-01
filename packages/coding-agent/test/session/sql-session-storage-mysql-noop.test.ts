@@ -23,10 +23,15 @@ import {
 	type SqlSessionStorageResult,
 } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
 import { SessionWriteConflictError } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { readLatestSessionTitle } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 
 interface FakeRow {
 	content: string;
 	mtimeMs: number;
+	title?: string | null;
+	source?: string | null;
+	updatedAt?: string | null;
+	titleIndexedSize?: number | null;
 }
 
 function mysqlResult(affectedRows: number, rows: unknown[] = []): SqlSessionStorageResult {
@@ -47,9 +52,10 @@ function mysqlFake(): { client: SqlSessionStorageClient; rows: Map<string, FakeR
 						path,
 						mtime_ms: row.mtimeMs,
 						byte_len: Buffer.byteLength(row.content, "utf8"),
-						title: null,
-						title_source: null,
-						title_updated_at: null,
+						title: row.title ?? null,
+						title_source: row.source ?? null,
+						title_updated_at: row.updatedAt ?? null,
+						title_indexed_size: row.titleIndexedSize ?? null,
 					})),
 				);
 			}
@@ -67,21 +73,38 @@ function mysqlFake(): { client: SqlSessionStorageClient; rows: Map<string, FakeR
 				if (sql.includes("CONCAT(content, ?)")) {
 					const existing = rows.get(path);
 					rows.set(path, {
-						content: (existing?.content ?? "") + (values[3] as string),
-						mtimeMs: values[4] as number,
+						...existing,
+						content: (existing?.content ?? "") + content,
+						mtimeMs,
+						...(values.length > 5
+							? {
+									title: values[3] as string | null,
+									source: values[4] as string | null,
+									updatedAt: values[5] as string | null,
+									titleIndexedSize: values[6] as number,
+								}
+							: {}),
 					});
 					return mysqlResult(existing ? 2 : 1);
 				}
-				rows.set(path, { content: values[6] as string, mtimeMs: values[7] as number });
+				rows.set(path, {
+					content,
+					mtimeMs,
+					title: values[3] as string | null,
+					source: values[4] as string | null,
+					updatedAt: values[5] as string | null,
+					titleIndexedSize: values[6] as number,
+				});
 				return mysqlResult(1);
 			}
 			if (sql.startsWith("UPDATE")) {
-				const [content, mtimeMs, , , , path, expectedSize] = values as [
+				const [content, mtimeMs, title, source, updatedAt, titleIndexedSize, path, expectedSize] = values as [
 					string,
 					number,
-					unknown,
-					unknown,
-					unknown,
+					string | null,
+					string | null,
+					string | null,
+					number,
 					string,
 					number,
 				];
@@ -94,7 +117,7 @@ function mysqlFake(): { client: SqlSessionStorageClient; rows: Map<string, FakeR
 					// affectedRows 0 here (unless CLIENT_FOUND_ROWS is set).
 					return mysqlResult(0);
 				}
-				rows.set(path, { content, mtimeMs });
+				rows.set(path, { content, mtimeMs, title, source, updatedAt, titleIndexedSize });
 				return mysqlResult(1);
 			}
 			throw new Error(`mysqlFake: unhandled statement: ${sql.slice(0, 60)}`);
@@ -159,5 +182,30 @@ describe("SqlSessionStorage (MySQL no-op replace)", () => {
 		await expect(storage.writeTextAtomic("/s/gone.jsonl", BODY, { expectedSize: 42 })).rejects.toBeInstanceOf(
 			SessionWriteConflictError,
 		);
+	});
+
+	it("persists title append metadata through the real MySQL adapter branch across reopen", async () => {
+		const { client, rows } = mysqlFake();
+		const storage = await SqlSessionStorage.create({ client });
+		const file = "/s/title.jsonl";
+		const body = '{"type":"session","id":"mysql-title"}\n';
+		await storage.writeText(file, body);
+		const writer = storage.openWriter(file);
+		const line = '{"type":"title_change","title":"MySQL journal","source":"user","timestamp":"t2"}\n';
+		await writer.append(line);
+		await writer.close();
+		expect(rows.get(file)).toMatchObject({
+			content: body + line,
+			title: "MySQL journal",
+			source: "user",
+			updatedAt: "t2",
+			titleIndexedSize: Buffer.byteLength(body + line),
+		});
+		const reopened = await SqlSessionStorage.create({ client });
+		expect(await readLatestSessionTitle(file, reopened)).toEqual({
+			title: "MySQL journal",
+			source: "user",
+			updatedAt: "t2",
+		});
 	});
 });

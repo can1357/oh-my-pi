@@ -525,6 +525,23 @@ function orderedByTimestamp(a: SessionTreeNode, b: SessionTreeNode): number {
 	return new Date(a.entry.timestamp).getTime() - new Date(b.entry.timestamp).getTime();
 }
 
+function reverseEntries<T>(entries: T[], first: number, last: number): void {
+	while (first < last) {
+		const entry = entries[first]!;
+		entries[first++] = entries[last]!;
+		entries[last--] = entry;
+	}
+}
+
+/** Rotate an adopted suffix before unpublished local entries without copying their payloads. */
+function moveAppendedEntriesBefore<T>(entries: T[], first: number, appendedCount: number): void {
+	const boundary = entries.length - appendedCount;
+	if (first < 0 || first >= boundary || appendedCount === 0) return;
+	reverseEntries(entries, first, boundary - 1);
+	reverseEntries(entries, boundary, entries.length - 1);
+	reverseEntries(entries, first, entries.length - 1);
+}
+
 /**
  * The most recent model role on `branch`, or undefined when no model change
  * was recorded. `skipEphemeral` passes over temporary switches (retry fallback
@@ -639,6 +656,34 @@ export class SessionEntryIndex {
 		if (usage && entry.type === "message" && entry.message.role === "toolResult") {
 			this.#usage.subagentCost += usage.cost.total;
 		}
+	}
+
+	/** Keep adjacency and labels in the order of an adopted suffix before unpublished local entries. */
+	moveForeignBefore(entries: readonly SessionEntry[], firstLocalId: string, appendedCount: number): void {
+		const first = entries.findIndex(entry => entry.id === firstLocalId);
+		const boundary = entries.length - appendedCount;
+		if (first < 0 || first >= boundary || appendedCount === 0) return;
+		const localIds = new Set<string>();
+		for (let i = first; i < boundary; i++) {
+			const entry = entries[i]!;
+			localIds.add(entry.id);
+			if (entry.type !== "label") continue;
+			if (entry.label) this.#labels.set(entry.targetId, entry.label);
+			else this.#labels.delete(entry.targetId);
+		}
+		const foreignParents = new Map<string | null, number>();
+		for (let i = boundary; i < entries.length; i++) {
+			const parent = entries[i]!.parentId;
+			foreignParents.set(parent, (foreignParents.get(parent) ?? 0) + 1);
+		}
+		for (const [parent, count] of foreignParents) {
+			const siblings = this.#children.get(parent)!;
+			let before = 0;
+			while (before < siblings.length && !localIds.has(siblings[before]!.id)) before++;
+			moveAppendedEntriesBefore(siblings, before, count);
+		}
+		this.#generation++;
+		this.#branchCache = undefined;
 	}
 
 	has(id: string): boolean {
@@ -1067,8 +1112,12 @@ export class SessionManager {
 	#unappendedTail: SessionEntry[] = [];
 	/** A refused append still needs a durable full rewrite after leaving plain-tail mode. */
 	#tailRewritePending = false;
+	/** Logical writer identity; unlike diskEpoch, sealing does not invalidate append acknowledgements. */
+	#writerStateGen = 0;
 	/** Ordinary writer appends not yet confirmed by a deferred backend. */
 	#pendingDeferredAppends = 0;
+	/** Only superseded in-flight writer paths are omitted from this manager's otherwise-global drains. */
+	#retiredWriterFiles: Set<string> | undefined;
 	/** Only explicitly shared clones may merge deferred CAS conflicts; remote peers fail closed. */
 	#sharedDeferredSnapshot = false;
 	/** FIFO reservation for atomic batches and authoritative recovery. */
@@ -1268,17 +1317,27 @@ export class SessionManager {
 		return sessionFile;
 	}
 
+	#latestTitleChange(): TitleChangeEntry | undefined {
+		for (let i = this.#entries.length - 1; i >= 0; i--) {
+			const entry = this.#entries[i]!;
+			if (entry.type === TITLE_CHANGE_ENTRY_TYPE) return entry;
+		}
+		return undefined;
+	}
+
 	/** The entries `content` holds that this manager does not, or `undefined` when it is not this session's journal. */
-	#foreignEntriesIn(content: string): SessionEntry[] | undefined {
+	#foreignEntriesIn(content: string): { entries: SessionEntry[]; beforeTitleId?: string } | undefined {
 		const { entries, invalidHeader } = parseSessionContent(content);
 		const header = entries[0];
 		if (invalidHeader || header?.type !== "session" || header.id !== this.#sessionId) return undefined;
 		const foreign: SessionEntry[] = [];
+		let beforeTitleId = this.#latestTitleChange()?.id;
 		for (let i = 1; i < entries.length; i++) {
 			const entry = entries[i] as SessionEntry;
+			if (entry.id === beforeTitleId) beforeTitleId = undefined;
 			if (!this.#index.has(entry.id)) foreign.push(entry);
 		}
-		return foreign;
+		return { entries: foreign, beforeTitleId };
 	}
 
 	/**
@@ -1287,7 +1346,7 @@ export class SessionManager {
 	 * parents are entries both writers loaded), the active leaf stays this
 	 * session's, and the retried rewrite republishes them with the rest.
 	 */
-	#adoptForeignEntries(foreign: readonly SessionEntry[], diskSize: number): void {
+	#adoptForeignEntries(foreign: readonly SessionEntry[], diskSize: number, beforeTitleId?: string): void {
 		const leaf = this.#index.leafId();
 		let adopted = 0;
 		for (const entry of foreign) {
@@ -1296,6 +1355,22 @@ export class SessionManager {
 			this.#entries.push(entry);
 			this.#index.insert(entry);
 			adopted++;
+		}
+		if (beforeTitleId && adopted > 0) {
+			this.#index.moveForeignBefore(this.#entries, beforeTitleId, adopted);
+			moveAppendedEntriesBefore(
+				this.#entries,
+				this.#entries.findIndex(entry => entry.id === beforeTitleId),
+				adopted,
+			);
+		}
+		const title = this.#latestTitleChange();
+		if (title) {
+			this.#sessionName = title.title;
+			this.#titleSource = title.source;
+			this.#titleUpdatedAt = title.timestamp;
+			this.#header.title = title.title;
+			this.#header.titleSource = title.source;
 		}
 		this.#index.setLeaf(leaf);
 		this.#expectedDiskSize = diskSize;
@@ -1333,8 +1408,8 @@ export class SessionManager {
 		}
 		const foreign = this.#foreignEntriesIn(content);
 		if (!foreign) return this.#moveOffSessionFile("replaced");
-		resolveBlobRefsInEntriesSync(foreign, this.#blobs);
-		this.#adoptForeignEntries(foreign, Buffer.byteLength(content, "utf8"));
+		resolveBlobRefsInEntriesSync(foreign.entries, this.#blobs);
+		this.#adoptForeignEntries(foreign.entries, Buffer.byteLength(content, "utf8"), foreign.beforeTitleId);
 		return contested;
 	}
 
@@ -1346,33 +1421,62 @@ export class SessionManager {
 	): Promise<string | undefined> {
 		const contested = this.#conflictedSessionFile(error, allowSealed);
 		if (!contested) return undefined;
+		const writerStateGen = this.#writerStateGen;
 		if (this.#storage.defersSyncPublish) {
 			// A deferred CAS can race our own writer; merge only after it quiesces.
 			try {
-				await this.#storage.drain();
+				await this.#storage.drain(contested);
 			} catch {
 				return undefined;
 			}
 		}
+		if (!this.#isCurrentWriterState(writerStateGen, contested)) return undefined;
 		if (recoveries >= MAX_WRITE_CONFLICT_RECOVERIES) return this.#moveOffSessionFile("contested");
 		const epoch = this.#diskEpoch;
 		let content: string;
 		try {
 			content = await this.#storage.readText(contested);
 		} catch (readError) {
+			if (!this.#isCurrentWriterState(writerStateGen, contested)) return undefined;
 			// A synchronous rewrite during the read already recovered; retry against its result.
 			if (this.#diskEpoch !== epoch || this.#sessionFile !== contested) return this.#sessionFile;
 			if (!isEnoent(readError)) return this.#moveOffSessionFile("replaced");
 			this.#expectedDiskSize = null;
 			return contested;
 		}
+		if (!this.#isCurrentWriterState(writerStateGen, contested)) return undefined;
 		if (this.#diskEpoch !== epoch || this.#sessionFile !== contested) return this.#sessionFile;
 		const foreign = this.#foreignEntriesIn(content);
 		if (!foreign) return this.#moveOffSessionFile("replaced");
-		await resolveBlobRefsInEntries(foreign, this.#blobs);
+		await resolveBlobRefsInEntries(foreign.entries, this.#blobs);
+		if (!this.#isCurrentWriterState(writerStateGen, contested)) return undefined;
 		if (this.#diskEpoch !== epoch || this.#sessionFile !== contested) return this.#sessionFile;
-		this.#adoptForeignEntries(foreign, Buffer.byteLength(content, "utf8"));
+		this.#adoptForeignEntries(foreign.entries, Buffer.byteLength(content, "utf8"), foreign.beforeTitleId);
 		return contested;
+	}
+
+	#drainStorageWrites(): Promise<void> {
+		if (this.#sessionFile) this.#retiredWriterFiles?.delete(this.#sessionFile);
+		return this.#storage.drain(undefined, this.#retiredWriterFiles);
+	}
+
+	#resetWriterState(preserveAtomicFence = false): void {
+		if (
+			this.#storage.defersSyncPublish &&
+			this.#sessionFile &&
+			(this.#pendingDeferredAppends > 0 || this.#atomicRewriteFenceEpoch !== null || !this.#fileIsCurrent)
+		)
+			(this.#retiredWriterFiles ??= new Set()).add(this.#sessionFile);
+		this.#writerStateGen++;
+		this.#pendingDeferredAppends = 0;
+		if (!preserveAtomicFence) {
+			this.#atomicRewriteFenceEpoch = null;
+			this.#atomicRewriteDirty = false;
+		}
+	}
+
+	#isCurrentWriterState(generation: number, sessionFile: string | undefined): boolean {
+		return generation === this.#writerStateGen && sessionFile === this.#sessionFile;
 	}
 
 	/**
@@ -1394,6 +1498,7 @@ export class SessionManager {
 		const from = this.#sessionFile as string;
 		const previousSessionId = this.#sessionId;
 		const timestamp = nowIso();
+		this.#resetWriterState(true);
 		this.#sessionId = mintSessionId();
 		this.#taskSiblingCandidate = undefined;
 		const to = path.join(path.dirname(from), `${fileSafeTimestamp(timestamp)}_${this.#sessionId}.jsonl`);
@@ -1433,15 +1538,18 @@ export class SessionManager {
 
 	#scheduleDiskWork(work: () => Promise<void>, options: DiskQueueOptions = {}): Promise<void> {
 		const epoch = options.epoch ?? this.#diskEpoch;
+		const writerStateGen = this.#writerStateGen;
 		const scheduled = this.#diskTail
 			.catch(() => undefined)
 			.then(async () => {
+				if (writerStateGen !== this.#writerStateGen) return;
 				if (!options.ignoreEpoch && epoch !== this.#diskEpoch) return;
 				if (this.#diskFailure && !options.ignorePriorError) throw this.#diskFailure;
 				await work();
 			});
 
 		const reported = scheduled.catch(err => {
+			if (writerStateGen !== this.#writerStateGen) throw err;
 			throw this.#noteDiskFailure(err);
 		});
 		this.#diskTail = reported.catch(() => undefined);
@@ -1593,11 +1701,15 @@ export class SessionManager {
 	async #closeWriterHandle(): Promise<void> {
 		const writer = this.#writer;
 		if (!writer) return;
+		const writerStateGen = this.#writerStateGen;
+		const sessionFile = this.#sessionFile;
 		this.#writer = undefined;
 		try {
 			await writer.close();
 		} catch (err) {
-			if (!this.#writer && writer.isOpen()) this.#writer = writer;
+			if (!this.#isCurrentWriterState(writerStateGen, sessionFile)) {
+				if (writer.isOpen()) void writer.close().catch(() => undefined);
+			} else if (!this.#writer && writer.isOpen()) this.#writer = writer;
 			throw err;
 		}
 	}
@@ -1644,6 +1756,7 @@ export class SessionManager {
 		const writer = this.#writer;
 		this.#diskEpoch++;
 		const epoch = this.#diskEpoch;
+		let writerStateGen = this.#writerStateGen;
 		this.#writer = undefined;
 		this.#diskTail = Promise.resolve();
 		this.#forceFileCreation = true;
@@ -1653,6 +1766,7 @@ export class SessionManager {
 		if (!this.#diskFailure) this.#diskFailure = operationError;
 		try {
 			await previousDiskTail.catch(() => undefined);
+			if (writerStateGen !== this.#writerStateGen) throw operationError;
 			let closeError: Error | undefined;
 			if (writer) {
 				try {
@@ -1661,12 +1775,14 @@ export class SessionManager {
 					closeError = toError(error);
 				}
 			}
+			if (writerStateGen !== this.#writerStateGen) throw operationError;
 			let drainError: Error | undefined;
 			try {
-				await this.#storage.drain();
+				await this.#drainStorageWrites();
 			} catch (error) {
 				drainError = toError(error);
 			}
+			if (writerStateGen !== this.#writerStateGen) throw operationError;
 			if (writer?.isOpen()) {
 				throw this.#latchIndeterminate(operationError, [
 					closeError ?? new Error("Failed to close session writer before authoritative repair."),
@@ -1682,11 +1798,13 @@ export class SessionManager {
 						new Error("Session file disappeared during authoritative repair."),
 					]);
 				}
-				await this.#publishAuthoritativeBody(
+				const completedGeneration = await this.#publishAuthoritativeBody(
 					sessionFile,
 					operationError,
 					() => !this.#released && this.#diskEpoch === epoch,
 				);
+				if (completedGeneration === undefined || completedGeneration !== this.#writerStateGen) throw operationError;
+				writerStateGen = completedGeneration;
 				if (this.#diskEpoch !== epoch) {
 					throw this.#latchIndeterminate(operationError, [
 						new Error("Authoritative session repair was superseded before verification."),
@@ -1700,10 +1818,12 @@ export class SessionManager {
 			this.#hasTitleSlot = true;
 			this.#clearDiskError();
 		} catch (error) {
+			if (writerStateGen !== this.#writerStateGen) throw error;
 			if (error instanceof SessionPersistenceIndeterminateError) throw error;
 			throw this.#latchIndeterminate(operationError, [toError(error)]);
 		} finally {
-			if (this.#atomicRewriteFenceEpoch === epoch) this.#atomicRewriteFenceEpoch = null;
+			if (writerStateGen === this.#writerStateGen && this.#atomicRewriteFenceEpoch === epoch)
+				this.#atomicRewriteFenceEpoch = null;
 		}
 	}
 
@@ -1714,6 +1834,7 @@ export class SessionManager {
 	 * durable. Callers own serialization (the disk queue) and any
 	 * `#released`/epoch guard; this only writes and repairs
 	 * `#expectedDiskSize` bookkeeping via {@link #recordFullRewrite}.
+	 * Returns the confirmed writer generation, or undefined after a state transition.
 	 */
 	async #publishAuthoritativeBody(
 		sessionFile: string,
@@ -1721,41 +1842,53 @@ export class SessionManager {
 		commitGuard?: () => boolean,
 		recoveries = 0,
 		allowSealed = false,
-	): Promise<void> {
+	): Promise<number | undefined> {
 		const target =
 			sessionFile === this.#sessionFile && this.#sessionOwnedElsewhere(allowSealed)
 				? this.#moveOffSessionFile("open-elsewhere")
 				: sessionFile;
+		const writerStateGen = this.#writerStateGen;
 		this.#assertRoomForRewrite(target);
 		const body = this.#serializeBody();
-		const options = { expectedSize: this.#expectedDiskSize, commitGuard };
+		const options = {
+			expectedSize: this.#expectedDiskSize,
+			commitGuard: () => this.#isCurrentWriterState(writerStateGen, target) && (commitGuard?.() ?? true),
+		};
 		try {
 			await (this.#storage.writeLinesAtomic
 				? this.#storage.writeLinesAtomic(target, body.lines, options)
 				: this.#storage.writeTextAtomic(target, body.lines.join(""), options));
 		} catch (error) {
+			if (!this.#isCurrentWriterState(writerStateGen, target)) throw error;
 			const retryPath = await this.#recoverFromWriteConflict(error, recoveries, allowSealed);
+			const recoveredGeneration = writerStateGen + (retryPath && retryPath !== target ? 1 : 0);
+			if (!this.#isCurrentWriterState(recoveredGeneration, retryPath ?? target)) throw error;
 			if (retryPath)
 				return this.#publishAuthoritativeBody(retryPath, operationError, commitGuard, recoveries + 1, allowSealed);
 			const recoveryErrors = [toError(error)];
 			try {
-				await this.#storage.drain();
+				await this.#storage.drain(target);
 			} catch (drainFailure) {
 				recoveryErrors.push(toError(drainFailure));
 			}
+			if (!this.#isCurrentWriterState(writerStateGen, target)) throw error;
 			let actual: string;
 			try {
 				actual = await this.#storage.readText(target);
 			} catch (readFailure) {
+				if (!this.#isCurrentWriterState(writerStateGen, target)) throw error;
 				recoveryErrors.push(toError(readFailure));
 				throw this.#latchIndeterminate(operationError, recoveryErrors);
 			}
+			if (!this.#isCurrentWriterState(writerStateGen, target)) throw error;
 			if (!textMatchesLines(actual, body.lines)) {
 				recoveryErrors.push(new Error("Authoritative session repair did not match durable storage."));
 				throw this.#latchIndeterminate(operationError, recoveryErrors);
 			}
 		}
+		if (!this.#isCurrentWriterState(writerStateGen, target)) return undefined;
 		this.#recordFullRewrite(body);
+		return writerStateGen;
 	}
 
 	#appendWriter(): SessionStorageWriter {
@@ -1763,9 +1896,13 @@ export class SessionManager {
 
 		if (this.#writer?.isOpen()) return this.#writer;
 
+		const writerStateGen = this.#writerStateGen;
+		const sessionFile = this.#sessionFile;
 		this.#writer = this.#storage.openWriter(this.#sessionFile, {
 			flags: "a",
-			onError: err => this.#noteDiskFailure(err),
+			onError: err => {
+				if (this.#isCurrentWriterState(writerStateGen, sessionFile)) this.#noteDiskFailure(err);
+			},
 		});
 		return this.#writer;
 	}
@@ -1825,13 +1962,16 @@ export class SessionManager {
 	 * publish can queue behind the unconfirmed one.
 	 */
 	#confirmDeferredPublish(sessionFile: string, onConfirm?: () => void): void {
+		const writerStateGen = this.#writerStateGen;
 		const confirmed = this.#storage.confirmWrites?.(sessionFile);
 		if (!confirmed) return;
 		void confirmed
 			.then(() => {
+				if (!this.#isCurrentWriterState(writerStateGen, sessionFile)) return;
 				onConfirm?.();
 			})
 			.catch(err => {
+				if (!this.#isCurrentWriterState(writerStateGen, sessionFile)) return;
 				this.#fileIsCurrent = false;
 				this.#rewriteRequired = true;
 				try {
@@ -1899,6 +2039,32 @@ export class SessionManager {
 		return relocating.dest;
 	}
 
+	#queueDeferredRewrite(): void {
+		const writerStateGen = this.#writerStateGen;
+		const sessionFile = this.#sessionFile;
+		this.#fileIsCurrent = false;
+		this.#rewriteRequired = true;
+		this.#tailRewritePending = true;
+		void this.#rewriteAtomically().catch(error => {
+			if (this.#isCurrentWriterState(writerStateGen, sessionFile)) this.#noteDiskFailure(error);
+		});
+	}
+
+	#sharedDeferredStateDrifted(): boolean {
+		if (!this.#storage.defersSyncPublish || !this.#sharedDeferredSnapshot || this.#pendingDeferredAppends > 0)
+			return false;
+		const sessionFile = this.#sessionFile;
+		if (!sessionFile) return false;
+		try {
+			return (
+				(this.#storage.existsSync(sessionFile) ? this.#storage.statSync(sessionFile).size : null) !==
+				this.#expectedDiskSize
+			);
+		} catch {
+			return true;
+		}
+	}
+
 	/**
 	 * Synchronously rewrite the whole file (header + entries) and keep no open
 	 * writer; the next append re-opens one. `writeTextSync` returns with the
@@ -1911,13 +2077,15 @@ export class SessionManager {
 	#rewriteSynchronously(allowSealed = false): void {
 		if (this.#entriesReleased || (this.#released && !allowSealed)) return;
 		if (!this.#persist || !this.#shouldHaveSessionFile()) return;
-		if (this.#storage.defersSyncPublish && this.#pendingDeferredAppends > 0) {
-			// Sync callers cannot wait for remote appends. The existing disk tail
-			// closes that writer before replacing its now-confirmed body.
-			this.#fileIsCurrent = false;
-			this.#rewriteRequired = true;
-			this.#tailRewritePending = true;
-			void this.#rewriteAtomically().catch(error => this.#noteDiskFailure(error));
+		if (
+			this.#storage.defersSyncPublish &&
+			(this.#pendingDeferredAppends > 0 ||
+				(this.#sharedDeferredSnapshot &&
+					!this.#storage.readTextSync &&
+					(!this.#fileIsCurrent || this.#rewriteRequired || this.#tailRewritePending)))
+		) {
+			// Shared remote snapshots cannot synchronously reconcile the optimistic index.
+			this.#queueDeferredRewrite();
 			return;
 		}
 		let targetPath = this.#liveRelocationWritePath() ?? this.#sessionFile;
@@ -1937,6 +2105,14 @@ export class SessionManager {
 					else this.#storage.writeTextSync(targetPath, body.lines.join(""), options);
 					break;
 				} catch (err) {
+					if (
+						this.#storage.defersSyncPublish &&
+						!this.#storage.readTextSync &&
+						this.#conflictedSessionFile(err, allowSealed)
+					) {
+						this.#queueDeferredRewrite();
+						return;
+					}
 					const retryPath = this.#recoverFromWriteConflictSync(err, recoveries, allowSealed);
 					if (!retryPath) throw err;
 					targetPath = retryPath;
@@ -2032,7 +2208,9 @@ export class SessionManager {
 		await this.#scheduleDiskWork(
 			async () => {
 				if (this.#fileIsCurrent && !this.#rewriteRequired && !this.#tailRewritePending) return;
-				if (await this.#runFencedAtomicRewrite(startEpoch)) {
+				const completedGeneration = await this.#runFencedAtomicRewrite(startEpoch);
+				if (completedGeneration !== undefined && completedGeneration === this.#writerStateGen) {
+					this.#clearDiskError();
 					this.#fileIsCurrent = true;
 					this.#materializeBreadcrumb();
 					this.#rewriteRequired = false;
@@ -2048,41 +2226,56 @@ export class SessionManager {
 	 * Fenced atomic-rewrite loop. Holds the fence across the writer close and
 	 * the full-file replace, and loops on
 	 * `#atomicRewriteDirty` so any fenced append that lands during the rewrite
-	 * is captured before the task resolves. Returns `false` when the disk epoch
-	 * moved so callers skip current-marking updates; a body that landed before
-	 * that change still advances the durable byte record after readback.
+	 * is captured before the task resolves. Returns the writer-state generation
+	 * whose body was confirmed, or undefined after supersession. A same-identity
+	 * seal still records bytes that landed before its disk epoch changed.
 	 */
-	async #runFencedAtomicRewrite(epoch: number): Promise<boolean> {
-		if (this.#released) return false;
+	async #runFencedAtomicRewrite(epoch: number): Promise<number | undefined> {
+		if (this.#released) return undefined;
 		this.#atomicRewriteFenceEpoch = epoch;
 		let recoveries = 0;
+		let writerStateGen = this.#writerStateGen;
 		try {
 			do {
 				this.#atomicRewriteDirty = false;
 				await this.#closeWriterHandle();
-				if (this.#sessionOwnedElsewhere()) this.#moveOffSessionFile("open-elsewhere");
+				if (writerStateGen !== this.#writerStateGen) return undefined;
+				if (this.#sessionOwnedElsewhere()) {
+					this.#moveOffSessionFile("open-elsewhere");
+					writerStateGen = this.#writerStateGen;
+				}
 				const sessionFile = this.#sessionFile;
-				if (!sessionFile) return false;
-				if (this.#diskEpoch !== epoch) return false;
+				if (!sessionFile || this.#diskEpoch !== epoch) return undefined;
 				this.#assertRoomForRewrite(sessionFile);
 				const body = this.#serializeBody();
 				const options = {
 					expectedSize: this.#expectedDiskSize,
-					commitGuard: () => !this.#released && this.#diskEpoch === epoch,
+					commitGuard: () =>
+						!this.#released &&
+						this.#diskEpoch === epoch &&
+						this.#isCurrentWriterState(writerStateGen, sessionFile),
 				};
 				try {
 					await (this.#storage.writeLinesAtomic
 						? this.#storage.writeLinesAtomic(sessionFile, body.lines, options)
 						: this.#storage.writeTextAtomic(sessionFile, body.lines.join(""), options));
 				} catch (error) {
-					if (await this.#recoverFromWriteConflict(error, recoveries)) {
+					if (!this.#isCurrentWriterState(writerStateGen, sessionFile)) throw error;
+					const retryPath = await this.#recoverFromWriteConflict(error, recoveries);
+					const recoveredGeneration = writerStateGen + (retryPath && retryPath !== sessionFile ? 1 : 0);
+					if (!this.#isCurrentWriterState(recoveredGeneration, retryPath ?? sessionFile)) throw error;
+					if (retryPath) {
+						writerStateGen = recoveredGeneration;
 						recoveries++;
 						// Publish the whole transcript against what the recovery found on the next pass.
 						this.#atomicRewriteDirty = true;
 						continue;
 					}
 					try {
-						if (textMatchesLines(await this.#storage.readText(sessionFile), body.lines)) {
+						if (
+							textMatchesLines(await this.#storage.readText(sessionFile), body.lines) &&
+							this.#isCurrentWriterState(writerStateGen, sessionFile)
+						) {
 							this.#recordFullRewrite(body);
 						}
 					} catch {
@@ -2090,15 +2283,19 @@ export class SessionManager {
 					}
 					throw error;
 				}
+				if (!this.#isCurrentWriterState(writerStateGen, sessionFile)) return undefined;
 				if (this.#diskEpoch !== epoch) {
 					try {
-						if (textMatchesLines(await this.#storage.readText(sessionFile), body.lines)) {
+						if (
+							textMatchesLines(await this.#storage.readText(sessionFile), body.lines) &&
+							this.#isCurrentWriterState(writerStateGen, sessionFile)
+						) {
 							this.#recordFullRewrite(body);
 						}
 					} catch {
 						// A superseding rewrite owns the durability record when its body cannot be read back.
 					}
-					return false;
+					return undefined;
 				}
 				if (
 					body.stamp.entryCount !== this.#entries.length ||
@@ -2108,7 +2305,7 @@ export class SessionManager {
 					this.#atomicRewriteDirty = true;
 				this.#recordFullRewrite(body);
 			} while (this.#atomicRewriteDirty);
-			return true;
+			return writerStateGen;
 		} finally {
 			// Only relinquish the fence if we still own it. A superseding
 			// synchronous rewrite (`flushSync` → `#rewriteSynchronously`) may
@@ -2116,7 +2313,8 @@ export class SessionManager {
 			// epoch, and that task may have taken ownership of the fence while
 			// this stale rewrite was still awaiting storage. Clearing it here
 			// unconditionally would strand appends during the newer publish.
-			if (this.#atomicRewriteFenceEpoch === epoch) this.#atomicRewriteFenceEpoch = null;
+			if (writerStateGen === this.#writerStateGen && this.#atomicRewriteFenceEpoch === epoch)
+				this.#atomicRewriteFenceEpoch = null;
 		}
 	}
 
@@ -2196,6 +2394,10 @@ export class SessionManager {
 		// Cold/divergent: not on disk yet, in-memory entries diverged from the
 		// file, or another live process owns it → rewrite the whole file
 		// synchronously (to a sibling in the last case) and keep going.
+		if (this.#sharedDeferredStateDrifted()) {
+			this.#fileIsCurrent = false;
+			this.#rewriteRequired = true;
+		}
 		if (!this.#fileIsCurrent || this.#rewriteRequired || this.#sessionOwnedElsewhere()) {
 			this.#prospectiveDiskSize += estimateJsonBytes(entry) + 1;
 			this.#rewriteSynchronously();
@@ -2211,6 +2413,8 @@ export class SessionManager {
 		// to the OS page cache before return.
 		// A mid-close writer leaves `#writer` undefined, so `#appendWriter` simply
 		// opens a fresh append handle and the entry still lands.
+		const writerStateGen = this.#writerStateGen;
+		const sessionFile = this.#sessionFile;
 		let serialized = false;
 		let pendingDeferredAppend = false;
 		try {
@@ -2234,6 +2438,7 @@ export class SessionManager {
 				const confirmed = writer.appendSync ? writer.flush() : writer.append(line);
 				void confirmed
 					.then(() => {
+						if (!this.#isCurrentWriterState(writerStateGen, sessionFile)) return;
 						if (pendingDeferredAppend) {
 							pendingDeferredAppend = false;
 							this.#pendingDeferredAppends--;
@@ -2241,6 +2446,7 @@ export class SessionManager {
 						this.#recordDurableAppend(line);
 					})
 					.catch(err => {
+						if (!this.#isCurrentWriterState(writerStateGen, sessionFile)) return;
 						if (pendingDeferredAppend) {
 							pendingDeferredAppend = false;
 							this.#pendingDeferredAppends--;
@@ -2251,6 +2457,7 @@ export class SessionManager {
 					});
 			}
 		} catch (err) {
+			if (!this.#isCurrentWriterState(writerStateGen, sessionFile)) return;
 			if (pendingDeferredAppend) this.#pendingDeferredAppends--;
 			if (!serialized) this.#prospectiveDiskSize += estimateJsonBytes(entry) + 1;
 			if (this.#isFullVolumeAppendFailure(err)) {
@@ -2278,6 +2485,7 @@ export class SessionManager {
 	}
 
 	#resetToNewSession(options?: NewSessionOptions, forcedSessionFile?: string): string | undefined {
+		this.#resetWriterState();
 		this.#diskTail = Promise.resolve();
 		this.#sharedDeferredSnapshot = false;
 
@@ -2580,6 +2788,7 @@ export class SessionManager {
 
 	restoreState(snapshot: SessionManagerStateSnapshot): void {
 		this.#closeWriterEventually();
+		this.#resetWriterState();
 		this.#diskTail = Promise.resolve();
 		this.#unappendedTail = [];
 
@@ -2668,6 +2877,7 @@ export class SessionManager {
 	): Promise<void> {
 		this.#drainUnappendedTail();
 		await this.#drainAndCloseWriter();
+		this.#resetWriterState();
 		this.#sharedDeferredSnapshot = false;
 
 		this.#clearDiskError();
@@ -2806,6 +3016,7 @@ export class SessionManager {
 		const sessionFile = path.join(this.#sessionDir, `${fileSafeTimestamp(timestamp)}_${sessionId}.jsonl`);
 		this.#assertRoomForRewrite(sessionFile);
 
+		this.#resetWriterState();
 		this.#sessionId = sessionId;
 		this.#taskSiblingCandidate = undefined;
 		this.#sessionFile = sessionFile;
@@ -3191,16 +3402,24 @@ export class SessionManager {
 	/** Flush pending writes. Call before switching sessions or on shutdown. */
 	async flush(): Promise<void> {
 		if (!this.#persist || !this.#sessionFile) return;
+		const writerStateGen = this.#writerStateGen;
+		const sessionFile = this.#sessionFile;
 		this.#drainUnappendedTail();
 		await this.#scheduleDiskWork(async () => {
 			if (this.#writer?.isOpen()) await this.#writer.flush();
 		});
+		if (!this.#isCurrentWriterState(writerStateGen, sessionFile)) return;
 		// Drain any fire-and-forget backing writes (e.g. `writeTextSync` queued
 		// on IndexedSessionStorage during `flushSync`) so callers relying on
 		// flush() see the write durably visible to readers.
 		await this.#scheduleDiskWork(async () => {
-			await this.#storage.drain();
+			await this.#drainStorageWrites();
 		});
+		if (!this.#isCurrentWriterState(writerStateGen, sessionFile)) return;
+		if (this.#sharedDeferredStateDrifted()) {
+			this.#fileIsCurrent = false;
+			this.#rewriteRequired = true;
+		}
 		if (
 			this.#storage.defersSyncPublish &&
 			(!this.#fileIsCurrent || this.#rewriteRequired || this.#tailRewritePending) &&
@@ -3208,6 +3427,7 @@ export class SessionManager {
 		)
 			await this.#rewriteAtomically();
 		await this.#pendingArtifactCopy?.done;
+		if (!this.#isCurrentWriterState(writerStateGen, sessionFile)) return;
 		if (this.#diskFailure) throw this.#diskFailure;
 	}
 
@@ -3238,6 +3458,7 @@ export class SessionManager {
 	 */
 	async #dropIfEmptyAndNoDraft(): Promise<void> {
 		if (!this.#draftOnlySessionCleanupArmed) return;
+		const writerStateGen = this.#writerStateGen;
 		const sessionFile = this.#sessionFile;
 		if (!sessionFile || !this.#storage.existsSync(sessionFile)) {
 			this.#draftOnlySessionCleanupArmed = false;
@@ -3247,6 +3468,7 @@ export class SessionManager {
 		if (draftPath && this.#storage.existsSync(draftPath)) return;
 		if (!this.#entries.every(isDraftOnlyMetadataEntry)) {
 			await this.#clearDraftOnlySessionMarker();
+			if (!this.#isCurrentWriterState(writerStateGen, sessionFile)) return;
 			this.#draftOnlySessionCleanupArmed = false;
 			return;
 		}
@@ -3258,6 +3480,7 @@ export class SessionManager {
 		try {
 			const artifactsDir = this.getArtifactsDir();
 			const deleted = await this.#storage.deleteSessionWithArtifactsIf(sessionFile, content => {
+				if (!this.#isCurrentWriterState(writerStateGen, sessionFile)) return false;
 				// An `/annotate` draft is work in progress the session must keep.
 				if (artifactsDir && hasAnnotationDraftsSync(artifactsDir, this.#header.id)) return false;
 				const onDisk = parseSessionContent(content);
@@ -3267,8 +3490,10 @@ export class SessionManager {
 					(onDisk.entries.slice(1) as SessionEntry[]).every(isDraftOnlyMetadataEntry)
 				);
 			});
+			if (!this.#isCurrentWriterState(writerStateGen, sessionFile)) return;
 			if (!deleted) {
 				await this.#clearDraftOnlySessionMarker();
+				if (!this.#isCurrentWriterState(writerStateGen, sessionFile)) return;
 				this.#draftOnlySessionCleanupArmed = false;
 				return;
 			}
@@ -3286,20 +3511,24 @@ export class SessionManager {
 	/** Flush, then close the append writer. */
 	async close(): Promise<void> {
 		if (!this.#persist) return;
+		let writerStateGen = this.#writerStateGen;
 		// A prior `flushSync` can self-conflict with this manager's own
 		// unconfirmed deferred publish; drain despite the latch so that
 		// publish can still confirm before we give up on the transcript.
 		await this.#scheduleDiskWork(
 			async () => {
 				this.#drainUnappendedTail(true);
+				writerStateGen = this.#writerStateGen;
 				const hadWriter = this.#writer !== undefined;
 				try {
 					await this.#closeWriterHandle();
 				} catch (err) {
+					if (writerStateGen !== this.#writerStateGen) throw err;
 					const closeError = toError(err);
 					if (!this.#diskFailure) this.#closeFailure = closeError;
 					throw closeError;
 				}
+				if (writerStateGen !== this.#writerStateGen) return;
 				if (
 					!this.#rewriteRequired &&
 					(hadWriter || (this.#sessionFile && this.#storage.existsSync(this.#sessionFile)))
@@ -3308,16 +3537,20 @@ export class SessionManager {
 			},
 			{ ignorePriorError: true },
 		);
+		if (writerStateGen !== this.#writerStateGen) return;
 		await this.#pendingArtifactCopy?.done;
+		if (writerStateGen !== this.#writerStateGen) return;
 		await this.#dropIfEmptyAndNoDraft();
+		if (writerStateGen !== this.#writerStateGen) return;
 		// Wait for any queued backing writes (IndexedSessionStorage per-path
 		// tail) to become durable so a graceful shutdown does not exit while
 		// a fire-and-forget publish is still on the wire.
 		await this.#scheduleDiskWork(
 			async () => {
 				try {
-					await this.#storage.drain();
+					await this.#drainStorageWrites();
 				} catch (err) {
+					if (writerStateGen !== this.#writerStateGen) throw err;
 					const closeError = toError(err);
 					if (!this.#diskFailure) this.#closeFailure = closeError;
 					throw closeError;
@@ -3325,6 +3558,7 @@ export class SessionManager {
 			},
 			{ ignorePriorError: true },
 		);
+		if (writerStateGen !== this.#writerStateGen) return;
 		if (
 			(this.#diskFailure || this.#tailRewritePending || !this.#fileIsCurrent) &&
 			this.#sessionFile &&
@@ -3337,7 +3571,15 @@ export class SessionManager {
 			const sessionFile = this.#sessionFile;
 			await this.#scheduleDiskWork(
 				async () => {
-					await this.#publishAuthoritativeBody(sessionFile, operationError, undefined, 0, true);
+					const completedGeneration = await this.#publishAuthoritativeBody(
+						sessionFile,
+						operationError,
+						undefined,
+						0,
+						true,
+					);
+					if (completedGeneration === undefined || completedGeneration !== this.#writerStateGen) return;
+					writerStateGen = completedGeneration;
 					this.#fileIsCurrent = true;
 					this.#rewriteRequired = false;
 					this.#tailRewritePending = false;
@@ -3348,6 +3590,7 @@ export class SessionManager {
 			).catch(() => undefined);
 		}
 		await this.#pendingArtifactCopy?.done;
+		if (writerStateGen !== this.#writerStateGen) return;
 		if (this.#closeFailure === this.#diskFailure && !this.#rewriteRequired) this.#clearDiskError();
 		if (this.#diskFailure) throw this.#diskFailure;
 		// A failed close retains ownership so the same manager can retry safely.
@@ -3359,6 +3602,7 @@ export class SessionManager {
 	/** Dispose an internal manager that cannot be returned or retried after a failed operation. */
 	async #disposeAfterFailure(): Promise<void> {
 		this.seal();
+		this.#resetWriterState();
 		this.#entries = [];
 		this.#unappendedTail = [];
 
@@ -3370,7 +3614,7 @@ export class SessionManager {
 			await this.#diskTail.catch(() => undefined);
 			await this.#closeWriterHandle().catch(() => undefined);
 			await this.#pendingArtifactCopy?.done;
-			await this.#storage.drain().catch(() => undefined);
+			await this.#storage.drain(this.#sessionFile).catch(() => undefined);
 		} finally {
 			this.#sessionClaim?.release?.();
 			this.#sessionClaim = undefined;
@@ -3423,6 +3667,7 @@ export class SessionManager {
 			this.#pendingDeferredAppends
 		)
 			return;
+		this.#resetWriterState();
 		this.#entries = [];
 		this.#index.clear();
 		this.#inMemoryArtifacts = null;
@@ -3810,6 +4055,7 @@ export class SessionManager {
 		const title = SessionManager.#cleanTitle(name);
 		if (!title) return false;
 
+		const sessionId = this.#sessionId;
 		const previousTitle = this.#sessionName;
 		const timestamp = nowIso();
 		this.#sessionName = title;
@@ -3834,10 +4080,10 @@ export class SessionManager {
 		// Keep the recent-sessions title index current so welcome-screen lookups
 		// never have to content-scan this session's file.
 		if (this.#persist && this.#storage instanceof FileSessionStorage) {
-			recordSessionTitle(this.#sessionId, this.#sessionName ?? title);
+			recordSessionTitle(sessionId, title);
 		}
 
-		this.#notifySessionNameListeners();
+		if (this.#sessionId === sessionId) this.#notifySessionNameListeners();
 		return true;
 	}
 
@@ -4550,6 +4796,7 @@ export class SessionManager {
 		const branchSize = this.#estimateBodyBytes(header, keptEntries);
 		if (this.#persist) this.#assertRoomForRewrite(newSessionFile, branchSize);
 
+		this.#resetWriterState();
 		this.#header = header;
 		this.#entries = keptEntries;
 		this.#tailRewritePending = false;

@@ -211,6 +211,12 @@ export interface SessionStorage {
 	/** Read the requested UTF-8 byte windows from the head and tail of the file. */
 	readTextSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]>;
 	/**
+	 * Authoritative indexed title metadata, after pending writes for this path.
+	 * `undefined` means no indexed title; callers may use bounded header fallback.
+	 * Legacy metadata may be reconciled lazily on first lookup. Missing paths reject.
+	 */
+	readLatestTitle?(path: string): Promise<SessionTitleUpdate | undefined>;
+	/**
 	 * Feed each line of the file to `visit`, in order, until it returns true or
 	 * the file ends. Lets callers find records that fall between the bounded
 	 * {@link readTextSlices} windows. Optional: backends without cheap full scans
@@ -255,8 +261,11 @@ export interface SessionStorage {
 	 * {@link IndexedSessionStorage}) await their per-path queues so a caller
 	 * driving a graceful shutdown does not exit while a fire-and-forget
 	 * `writeTextSync` publish is still on the wire.
+	 * When `path` is supplied, wait for and consume failures from that path only.
+	 * Without it, wait for all paths and consume every outstanding failure, except
+	 * explicitly excluded retired writer paths. Unrelated failures remain visible.
 	 */
-	drain(): Promise<void>;
+	drain(path?: string, excludedPaths?: ReadonlySet<string>): Promise<void>;
 }
 
 // FinalizationRegistry to clean up leaked file descriptors
