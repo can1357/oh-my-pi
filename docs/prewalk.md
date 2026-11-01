@@ -59,7 +59,7 @@ OMP switches at the completed assistant-turn boundary containing the first eligi
 
 Calls to other tools do not trigger the handoff. A read-only `xd://` device request routed through `write`, such as LSP navigation, also does not count; only device operations classified as workspace writes or execution count.
 
-The switch is one-shot: after the handoff, prewalk disarms itself, removes the planning nudge, and steers the target with an implementation checklist. It changes the session's active model and optional thinking level without rewriting model-role assignments. A same-model handoff can still change thinking; when the model, pinned upstream route, and effective thinking configuration already match, prewalk disarms without switching.
+The switch is one-shot: after the handoff, prewalk disarms itself, removes the planning nudge, and steers the target with an implementation checklist. It changes the session's active model and optional thinking level without rewriting model-role assignments. A same-model handoff can still change thinking; when the model, pinned upstream route, and effective thinking configuration already match, prewalk disarms without switching. A route-only handoff preserves the configured thinking level unless the target explicitly specifies an effort.
 
 Pinned upstream routes are saved with model selections, including the initial startup model and explicit selections made while opening another session, and preserved when resuming a session or reviving a parked subagent. A switch that changes only the route notifies subscribers like any other model change, including when reloading the current session.
 

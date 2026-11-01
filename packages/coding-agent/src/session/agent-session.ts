@@ -128,6 +128,7 @@ import {
 	disabledProviderIds,
 	formatModelStringWithRouting,
 	getModelMatchPreferences,
+	getSingleUpstreamRoute,
 	type ResolvedModelRoleValue,
 	resolveCliModel,
 	resolveSessionModelSelector,
@@ -12417,15 +12418,19 @@ export class AgentSession implements SettingsScope {
 		// `openai-completions` sessions are keyed `openai-completions:<provider>:<resolvedBaseUrl>:<modelId>`
 		// and cache backend-specific decisions (strict-tools disable scopes, reasoning-effort
 		// fallbacks). The resolved request base URL can differ from the catalog `model.baseUrl`
-		// (Moonshot env override, Alibaba Coding Plan enterprise URL, Azure deployment URL),
-		// so evict by provider prefix when the user moves away from that completions backend.
+		// (Moonshot env override, Alibaba Coding Plan enterprise URL, Azure deployment URL).
+		// OpenRouter's chat fallback owns the same cache; both transports negotiate per upstream.
+		// Evict by provider prefix when the user moves away from that completions backend.
 		let completionsPrefixToEvict: string | undefined;
-		if (currentModel.api === "openai-completions") {
+		if (currentModel.api === "openai-completions" || currentModel.api === "openrouter") {
 			const currentScope = `${currentModel.provider}:${currentModel.baseUrl ?? ""}`;
 			const nextScope =
-				nextModel.api === "openai-completions" ? `${nextModel.provider}:${nextModel.baseUrl ?? ""}` : undefined;
-			if (currentScope !== nextScope) {
+				nextModel.api === currentModel.api ? `${nextModel.provider}:${nextModel.baseUrl ?? ""}` : undefined;
+			if (currentScope !== nextScope || getSingleUpstreamRoute(currentModel) !== getSingleUpstreamRoute(nextModel)) {
 				completionsPrefixToEvict = `openai-completions:${currentModel.provider}:`;
+				if (currentModel.api === "openrouter") {
+					providerKeys.add(`openai-responses:${currentModel.provider}`);
+				}
 			}
 		}
 

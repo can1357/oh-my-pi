@@ -195,7 +195,7 @@ function getSingleRoutingOnly(routing: unknown): string | undefined {
 	return typeof upstream === "string" && upstream ? upstream : undefined;
 }
 
-function getSingleUpstreamRoute(model: Model<Api>): string | undefined {
+export function getSingleUpstreamRoute(model: Model<Api>): string | undefined {
 	const compat = model.compat;
 	if (!compat || typeof compat !== "object") return undefined;
 	if (modelMatchesHost(model, "vercelAIGateway") && "vercelGatewayRouting" in compat) {

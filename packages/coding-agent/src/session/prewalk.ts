@@ -7,6 +7,7 @@ import {
 } from "@oh-my-pi/pi-agent-core";
 import { invalidateMessageCache } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Model, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { AutoPrewalkDecision } from "../auto-prewalk/classifier";
 import { formatModelStringWithRouting, prewalkWouldBeNoopWithRouting } from "../config/model-resolver";
@@ -397,7 +398,10 @@ export class PrewalkCoordinator {
 		const source = this.#host.model();
 		const sourceThinkingLevel = this.#host.configuredThinkingLevel();
 		const auto = this.#autoArm === prewalk;
-		const switched = await this.#host.setModelTemporary(target, prewalk.thinkingLevel);
+		const thinkingLevel =
+			prewalk.thinkingLevel ??
+			(modelsAreEqual(source, target) ? (sourceThinkingLevel ?? ThinkingLevel.Inherit) : undefined);
+		const switched = await this.#host.setModelTemporary(target, thinkingLevel);
 		// An explicit selection (it drops an auto arm) or a newer arm owns the session now.
 		if (this.#prewalk !== prewalk) return;
 		this.#clearPrewalkState();
