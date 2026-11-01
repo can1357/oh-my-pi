@@ -22,6 +22,7 @@ import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import type { CompactionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import type { Message } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -393,6 +394,8 @@ describe("AgentSession snapcompact no-reduction guard on a resumed session that 
 		authStorage?.close();
 		vi.restoreAllMocks();
 		setAgentDir(originalAgentDir);
+		// The model registry opened `<agentDir>/models.db`; Windows cannot delete an open database.
+		closeModelCache();
 		await tempDir?.remove();
 	});
 

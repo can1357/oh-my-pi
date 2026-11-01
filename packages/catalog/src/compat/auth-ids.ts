@@ -145,6 +145,7 @@ export type LoginProviderId =
 	| "meta"
 	| "minimax-code"
 	| "minimax-code-cn"
+	| "mistral"
 	| "modular"
 	| "moonshot"
 	| "muse-code"

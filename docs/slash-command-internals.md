@@ -352,6 +352,33 @@ than a byte-for-byte native provider transcript.
 - Completed, cancelled, and failed panels close with `Esc`; their history stays
   saved. There is no hide-and-continue action or separate `x` cancellation key.
 - `c` copies the completed inline answer, or the selected topic's latest nonempty answer.
+- With `btw.inject` on (`/settings` → Interaction → "/btw Steering Inject"), a side
+  question that asks for a steering, correction, or instruction prompt for the main session
+  gets one in a single `<inject>…</inject>` block (the prompt shows the exact form). The
+  answer shows the block apart from its prose, behind a `btw.rail` (`▎`, pink while pending)
+  with "Inject into main session" on the row below; in Tern, which wraps rows itself, the
+  block is a toned card. `app.btw.inject` (`Alt+I` by default; see
+  [keybindings](keybindings.md)) sends its text as shown (trimmed, control sequences
+  stripped, tabs expanded) to the main session as a user message: a steer while the main
+  agent is running, else a new turn. It is never run as a slash command or expanded as a
+  prompt template; `^model` mentions and magic keywords apply as if typed.
+- The send counts once the main session admits it; sending turns the rail green, fills a
+  reserved column on every line with the send arrow (`nav.selected`, `➤` by default) and
+  relabels the row below "Injected into main session", without moving rows or the text
+  column. If the session drops it before dispatch (an Esc race, a usage preflight denial,
+  the cost cap) or refuses it before it reaches the transcript (no model or API key), the
+  block turns back to pending with the reason or a "not sent" status, and the key is the
+  one way to retry: the text does not also land in the editor. A failure after the message
+  reached the transcript or the steer queue keeps the block sent; Esc while the steer still
+  waits in the queue hands it back to the editor like any queued message. The key does
+  nothing while a send is in flight or a branch or session move is running.
+- A block splits out only while the answer streams or once its tag is closed: an unclosed
+  block in a finished answer stays plain text. The last opener that has a closing tag,
+  paired with the first close after it, is the block. Only answers from the current run
+  that were asked with `btw.inject` on can be sent, once each: in history, the latest
+  turn's block shows pending, sent turns keep their marks, and blocks from earlier turns or
+  runs read as plain text. Side answers about a focused subagent, and collab guests, get
+  neither the instruction nor the block.
 - After an inline BTW answer completes, `f` opens that topic's follow-up input
   directly, without requiring `/btw` first. The main editor must be empty and focused.
 - In history, `f` or `Enter` opens a native follow-up input for the selected topic.
