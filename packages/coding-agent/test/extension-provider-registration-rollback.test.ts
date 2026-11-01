@@ -155,7 +155,7 @@ describe("extension provider registration rollback", () => {
 			runner.initialize(
 				{
 					sendMessage: () => {},
-					sendUserMessage: () => {},
+					sendUserMessage: async () => {},
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],

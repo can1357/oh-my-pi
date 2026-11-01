@@ -115,6 +115,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 				sendTask.catch(e => {
 					reportSendError("extension_send_user", e instanceof Error ? e : new Error(String(e)));
 				});
+				return sendTask;
 			},
 			appendEntry: (customType, data) => {
 				session.sessionManager.appendCustomEntry(customType, data);
