@@ -43,12 +43,13 @@ export interface DateCwdReminderPlacement {
 
 /** Where an injector records the reminders it places, and reads back those an earlier injector placed. */
 export interface DateCwdReminderJournal {
-	/** Placements recorded on the session's current branch, oldest first. */
+	/** Placements recorded on the session's current branch since its last `/clear`, oldest first. */
 	load(): readonly DateCwdReminderPlacement[];
 	record(placement: DateCwdReminderPlacement): void;
 	/**
-	 * The transcript the journal reads and writes. A change (a switched-in session) makes the
-	 * injector forget what it sent: the new transcript's turns were sent with its own reminders.
+	 * Names the history the journal reads and writes; it changes when that history is replaced
+	 * rather than continued (a switched-in session, a move to another branch of the tree). The
+	 * injector then forgets what it sent: that history's turns were sent with its own reminders.
 	 */
 	scope?(): string | undefined;
 }
@@ -73,13 +74,38 @@ export function createSessionDateCwdReminderJournal(sessionManager: {
 	getBranchView(): readonly SessionEntry[];
 	appendCustomEntry(customType: string, data?: unknown): string;
 	getSessionId(): string;
+	getLeafId(): string | null;
+	getEntry(id: string): SessionEntry | undefined;
 }): DateCwdReminderJournal {
+	let session: string | undefined;
+	let leaf: string | null = null;
+	let generation = 0;
+	/** Whether the branch ending at `id` continues the one ending at `ancestor`: a walk of the entries appended since. */
+	const continues = (id: string | null, ancestor: string | null): boolean => {
+		if (ancestor === null) return true;
+		for (let cursor = id; cursor !== null; cursor = sessionManager.getEntry(cursor)?.parentId ?? null) {
+			if (cursor === ancestor) return true;
+		}
+		return false;
+	};
 	return {
-		load: () => sessionManager.getBranchView().flatMap(entry => placementOfEntry(entry) ?? []),
+		load: () => {
+			// The model's history starts after the latest `/clear`; earlier placements belong to a history it no longer sees.
+			const branch = sessionManager.getBranchView();
+			const start = branch.findLastIndex(entry => entry.type === "reset_boundary") + 1;
+			return branch.slice(start).flatMap(entry => placementOfEntry(entry) ?? []);
+		},
 		record: placement => {
 			sessionManager.appendCustomEntry(DATE_CWD_REMINDER_CUSTOM_TYPE, placement);
 		},
-		scope: () => sessionManager.getSessionId(),
+		scope: () => {
+			const id = sessionManager.getSessionId();
+			const current = sessionManager.getLeafId();
+			if (id !== session || !continues(current, leaf)) generation++;
+			session = id;
+			leaf = current;
+			return `${id}#${generation}`;
+		},
 	};
 }
 
