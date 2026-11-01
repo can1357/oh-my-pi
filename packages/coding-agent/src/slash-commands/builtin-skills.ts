@@ -13,6 +13,7 @@ import {
 } from "../skillshare/installer";
 import { clearSubmittedText } from "./helpers/draft";
 import { errorMessage, parseSubcommand } from "./helpers/parse";
+import { runSkillDiagnosticsPanel } from "./skill-diagnostics-panel";
 import type { SlashCommandSpec } from "./types";
 
 const USAGE = [
@@ -20,6 +21,7 @@ const USAGE = [
 	"  /skills search <query>                        Search the registry",
 	"  /skills install <@scope/name[@range]>… [-g]   Install into this project (-g: user-global)",
 	"  /skills installed                             List installed registry skills",
+	"  /skills diagnostics                           Browse skill issues; Enter on a skill requests AI analysis",
 	"  /skills update [@scope/name…] [-g]            Update within the ranges in skills.json",
 ].join("\n");
 
@@ -65,11 +67,15 @@ export const BUILTIN_SKILLS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "skills",
 		icon: "skill",
-		description: "Search, install, and update skills from the skills.omp.sh registry",
+		description: "Manage registry skills and inspect discovery diagnostics",
 		subcommands: [
 			{ name: "search", description: "Search the skill registry", usage: "<query>" },
 			{ name: "install", description: "Install registry skills", usage: "<@scope/name[@range]>… [--global]" },
 			{ name: "installed", description: "List installed registry skills" },
+			{
+				name: "diagnostics",
+				description: "Browse skill issues and request AI analysis of a selected skill",
+			},
 			{
 				name: "update",
 				description: "Update registry skills within their ranges",
@@ -84,6 +90,16 @@ export const BUILTIN_SKILLS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			const cwd = ctx.sessionManager.getCwd();
 			try {
 				switch (verb) {
+					case "diagnostics": {
+						if (rest) {
+							ctx.showError(
+								"Usage: /skills diagnostics (no arguments; select a skill in the panel and press Enter)",
+							);
+							return;
+						}
+						await runSkillDiagnosticsPanel(ctx);
+						return;
+					}
 					case "search": {
 						if (!rest) {
 							ctx.showError("Usage: /skills search <query>");

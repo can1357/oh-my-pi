@@ -14,9 +14,18 @@ import {
 } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
 import { SkillProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/skill-protocol";
+import {
+	getSkillStorePath,
+	STORE_INTEGRITY_FILE,
+	writeSkillsLock,
+} from "@oh-my-pi/pi-coding-agent/skillshare/manifest";
 import { CombinedAutocompleteProvider } from "@oh-my-pi/pi-tui/autocomplete";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { restoreEnvValue } from "./helpers/settings-test-state";
+import { Settings } from "../src/config/settings";
+import { snapshotResource } from "../src/extensibility/resource-snapshot";
+import { excludeReviewedResources } from "../src/extensibility/resource-decisions";
+import { cfgUserResourceExclusions } from "../src/extensibility/resource-settings";
 const fixturesDir = path.resolve(import.meta.dirname, "fixtures/skills");
 const collisionFixturesDir = path.resolve(import.meta.dirname, "fixtures/skills-collision");
 
@@ -534,6 +543,46 @@ describe("collision handling", () => {
 	const second = path.join(collisionFixturesDir, "second");
 	const mirror = path.join(collisionFixturesDir, "mirror");
 
+	it("loads the confirmed preferred file and restores a hidden copy when its supporting code changes", async () => {
+		const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "skills-confirmed-choice-")));
+		try {
+			const roots = [path.join(root, "first"), path.join(root, "second")];
+			for (let index = 0; index < roots.length; index++) {
+				await Bun.write(
+					path.join(roots[index], "calendar", "SKILL.md"),
+					`---\nname: calendar\ndescription: Calendar helpers\n---\nWorkflow ${index}\n`,
+				);
+			}
+			const snapshots = await Promise.all(
+				roots.map((directory, index) =>
+					snapshotResource({
+						id: `${index}`,
+						label: "calendar",
+						kind: "skill",
+						root: path.join(directory, "calendar"),
+						entrypoint: path.join(directory, "calendar", "SKILL.md"),
+					}),
+				),
+			);
+			const settings = Settings.isolated({});
+			await excludeReviewedResources(snapshots, "1", settings);
+			const options = {
+				...DISABLE_ALL_BUILTIN_SKILLS,
+				customDirectories: roots,
+				resourceExclusions: cfgUserResourceExclusions.get(settings),
+			};
+			const selected = await loadSkills(options);
+			expect(selected.skills.map(skill => skill.filePath)).toEqual([path.join(roots[1], "calendar", "SKILL.md")]);
+			await Bun.write(path.join(roots[0], "calendar", "scripts", "check.py"), "print('new behavior')\n");
+			const reconsidered = await loadSkills(options);
+			expect(reconsidered.skills.map(skill => skill.filePath).sort()).toEqual(
+				roots.map(directory => path.join(directory, "calendar", "SKILL.md")).sort(),
+			);
+		} finally {
+			await removeWithRetries(root);
+		}
+	});
+
 	it("keeps the first-admitted skill on its bare name and namespaces the later collision", async () => {
 		const { skills, warnings } = await loadSkills({
 			...DISABLE_ALL_BUILTIN_SKILLS,
@@ -873,6 +922,486 @@ describe("collision handling", () => {
 		} finally {
 			await removeWithRetries(project);
 		}
+	});
+
+	describe("diagnostics", () => {
+		const firstFile = path.join(first, "calendar", "SKILL.md");
+		const secondFile = path.join(second, "calendar", "SKILL.md");
+		const mirrorFile = path.join(mirror, "calendar", "SKILL.md");
+		const customOptions = { ...DISABLE_ALL_BUILTIN_SKILLS, customDirectories: [first, second] };
+
+		it("reports the winner and every active variant of a differing collision", async () => {
+			const { diagnostics } = await loadSkills(customOptions);
+			expect(diagnostics).toHaveLength(1);
+			const [diagnostic] = diagnostics;
+			expect(diagnostic.name).toBe("calendar");
+			expect(diagnostic.reason).toBe("source-order");
+			expect(diagnostic.duplicates).toEqual([]);
+			expect(diagnostic.skills.map(skill => [skill.name, skill.filePath])).toEqual([
+				["calendar", firstFile],
+				["second/calendar", secondFile],
+			]);
+		});
+
+		it("reports nothing when no raw name has competing variants", async () => {
+			const unique = await loadSkills({ ...DISABLE_ALL_BUILTIN_SKILLS, customDirectories: [fixturesDir] });
+			expect(unique.skills.map(skill => skill.name)).toContain("valid-skill");
+			expect(unique.diagnostics).toEqual([]);
+		});
+
+		it("reports a byte-identical copy as redundant with the skill that is kept", async () => {
+			const { skills, diagnostics } = await loadSkills({
+				...DISABLE_ALL_BUILTIN_SKILLS,
+				customDirectories: [first, mirror],
+			});
+			expect(skills.map(skill => skill.filePath)).toEqual([firstFile]);
+			expect(diagnostics).toHaveLength(1);
+			const [diagnostic] = diagnostics;
+			expect(diagnostic.reason).toBe("source-order");
+			expect(diagnostic.skills.map(skill => skill.filePath)).toEqual([firstFile]);
+			expect(diagnostic.duplicates).toHaveLength(1);
+			expect(diagnostic.duplicates[0].skill.filePath).toBe(mirrorFile);
+			expect(diagnostic.duplicates[0].retained.filePath).toBe(firstFile);
+		});
+
+		it.each([
+			["ignored", { ignoredSkills: ["mirror/*"] }],
+			["disabled", { disabledExtensions: ["skill:mirror/calendar"] }],
+		])("does not notify about an identical copy whose namespace is %s", async (_label, filter) => {
+			const { skills, diagnostics, warnings } = await loadSkills({
+				...DISABLE_ALL_BUILTIN_SKILLS,
+				customDirectories: [first, mirror],
+				...filter,
+			});
+			expect(skills.map(skill => skill.filePath)).toEqual([firstFile]);
+			expect(diagnostics).toEqual([]);
+			expect(warnings).toEqual([]);
+		});
+
+		it("honors an excluded suffixed alias without hiding the preceding active variant", async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "skills-duplicate-slot-"));
+			try {
+				const variantRoot = path.join(root, "one", "mirror");
+				const duplicateRoot = path.join(root, "two", "mirror");
+				await Bun.write(path.join(variantRoot, "calendar", "SKILL.md"), await Bun.file(secondFile).text());
+				await Bun.write(path.join(duplicateRoot, "calendar", "SKILL.md"), await Bun.file(firstFile).text());
+				const { skills, diagnostics } = await loadSkills({
+					...DISABLE_ALL_BUILTIN_SKILLS,
+					customDirectories: [first, variantRoot, duplicateRoot],
+					disabledExtensions: ["skill:mirror/calendar~2"],
+				});
+				expect(skills.map(skill => skill.name)).toEqual(["calendar", "mirror/calendar"]);
+				expect(diagnostics).toHaveLength(1);
+				expect(diagnostics[0].duplicates).toEqual([]);
+			} finally {
+				await removeWithRetries(root);
+			}
+		});
+
+		it.each([
+			["ignored", { ignoredSkills: ["claude/*"] }],
+			["disabled", { disabledExtensions: ["skill:claude/calendar"] }],
+		])("does not notify about a provider copy whose displaced namespace is %s", async (_label, filter) => {
+			const { project } = await projectWithProviderCopies(firstFile, undefined);
+			try {
+				const { skills, diagnostics } = await loadSkills({
+					...providerOptions,
+					cwd: project,
+					customDirectories: [mirror],
+					...filter,
+				});
+				expect(skills.map(skill => skill.filePath)).toEqual([mirrorFile]);
+				expect(diagnostics).toEqual([]);
+			} finally {
+				await removeWithRetries(project);
+			}
+		});
+
+		it("never counts a symlink to a loaded file and lists a redundant file once", async () => {
+			if (process.platform === "win32") return;
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "skills-aliases-"));
+			try {
+				const firstAlias = path.join(root, "first-alias");
+				const mirrorAlias = path.join(root, "mirror-alias");
+				await fs.symlink(first, firstAlias);
+				await fs.symlink(mirror, mirrorAlias);
+
+				const aliased = await loadSkills({
+					...DISABLE_ALL_BUILTIN_SKILLS,
+					customDirectories: [first, firstAlias],
+				});
+				expect(aliased.skills.map(skill => skill.filePath)).toEqual([firstFile]);
+				expect(aliased.diagnostics).toEqual([]);
+
+				// The distinct copy is redundant; reaching it again through a symlink adds no second entry.
+				const { diagnostics } = await loadSkills({
+					...DISABLE_ALL_BUILTIN_SKILLS,
+					customDirectories: [first, mirror, mirrorAlias],
+				});
+				expect(diagnostics).toHaveLength(1);
+				expect(diagnostics[0].duplicates.map(duplicate => duplicate.skill.filePath)).toEqual([mirrorFile]);
+			} finally {
+				await removeWithRetries(root);
+			}
+		});
+
+		it.each([
+			["includes only the bare name", { includeSkills: ["calendar"] }],
+			["includes only the namespaced name", { includeSkills: ["second/*"] }],
+			["ignores the namespaced name", { ignoredSkills: ["second/*"] }],
+			["disables the namespaced name", { disabledExtensions: ["skill:second/calendar"] }],
+		])("omits a collision that leaves one active variant when it %s", async (_label, filter) => {
+			const { skills, diagnostics } = await loadSkills({ ...customOptions, ...filter });
+			expect(skills).toHaveLength(1);
+			expect(diagnostics).toEqual([]);
+		});
+
+		it("omits a provider variant that an override displaced into an ignored alias", async () => {
+			const { project } = await projectWithProviderCopies(firstFile, undefined);
+			try {
+				const { skills, diagnostics } = await loadSkills({
+					...providerOptions,
+					cwd: project,
+					customDirectories: [second],
+					ignoredSkills: ["claude/*"],
+				});
+				expect(skills.map(skill => skill.filePath)).toEqual([secondFile]);
+				expect(diagnostics).toEqual([]);
+			} finally {
+				await removeWithRetries(project);
+			}
+		});
+
+		it("drops a redundancy whose retained skill is filtered out", async () => {
+			const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-skills-third-"));
+			try {
+				const third = path.join(tempDir, "third");
+				const thirdFile = path.join(third, "calendar", "SKILL.md");
+				await fs.mkdir(path.dirname(thirdFile), { recursive: true });
+				await fs.copyFile(secondFile, thirdFile);
+				const options = { ...customOptions, customDirectories: [first, second, third] };
+
+				const all = await loadSkills(options);
+				expect(all.diagnostics).toHaveLength(1);
+				const [diagnostic] = all.diagnostics;
+				expect(diagnostic.skills.map(skill => skill.name)).toEqual(["calendar", "second/calendar"]);
+				expect(diagnostic.duplicates).toHaveLength(1);
+				expect(diagnostic.duplicates[0].skill.filePath).toBe(thirdFile);
+				expect(diagnostic.duplicates[0].retained.filePath).toBe(secondFile);
+
+				const filtered = await loadSkills({ ...options, includeSkills: ["calendar"] });
+				expect(filtered.skills.map(skill => skill.name)).toEqual(["calendar"]);
+				expect(filtered.diagnostics).toEqual([]);
+			} finally {
+				await removeWithRetries(tempDir);
+			}
+		});
+
+		it("re-points redundant copies at the override that replaces their retained skill", async () => {
+			// .claude and .agents hold identical copies; the identical custom skill takes the bare name
+			// from .claude, which also makes the .agents copy redundant with the override.
+			const { project, claudeFile, agentsFile } = await projectWithProviderCopies(firstFile, firstFile);
+			try {
+				const { skills, diagnostics } = await loadSkills({
+					...providerOptions,
+					cwd: project,
+					customDirectories: [mirror],
+				});
+				expect(skills.map(skill => skill.filePath)).toEqual([mirrorFile]);
+				expect(diagnostics).toHaveLength(1);
+				const [diagnostic] = diagnostics;
+				expect(diagnostic.reason).toBe("custom-directory");
+				expect(diagnostic.skills.map(skill => skill.filePath)).toEqual([mirrorFile]);
+				expect(diagnostic.duplicates.map(duplicate => duplicate.skill.filePath).sort()).toEqual(
+					[agentsFile!, claudeFile].sort(),
+				);
+				expect(diagnostic.duplicates.map(duplicate => duplicate.retained.filePath)).toEqual([
+					mirrorFile,
+					mirrorFile,
+				]);
+			} finally {
+				await removeWithRetries(project);
+			}
+		});
+
+		it("reports an override, the variant it displaced, and a dropped duplicate of the override", async () => {
+			const { project, claudeFile, agentsFile } = await projectWithProviderCopies(firstFile, secondFile);
+			try {
+				const { diagnostics } = await loadSkills({
+					...providerOptions,
+					cwd: project,
+					customDirectories: [second],
+				});
+				expect(diagnostics).toHaveLength(1);
+				const [diagnostic] = diagnostics;
+				expect(diagnostic.reason).toBe("custom-directory");
+				expect(diagnostic.skills.map(skill => [skill.name, skill.filePath])).toEqual([
+					["calendar", secondFile],
+					["claude/calendar", claudeFile],
+				]);
+				expect(diagnostic.duplicates).toHaveLength(1);
+				expect(diagnostic.duplicates[0].skill.filePath).toBe(agentsFile!);
+				expect(diagnostic.duplicates[0].retained.filePath).toBe(secondFile);
+				expect(diagnostic.duplicates[0].skill.name).toBe("calendar");
+			} finally {
+				await removeWithRetries(project);
+			}
+		});
+
+		it("does not count a redundant provider file again when its symlink becomes the custom override", async () => {
+			const { project, claudeFile, agentsFile } = await projectWithProviderCopies(firstFile, firstFile);
+			try {
+				const customRoot = path.join(project, "override");
+				const aliasDir = path.join(customRoot, "calendar");
+				await fs.mkdir(customRoot, { recursive: true });
+				await fs.symlink(path.dirname(agentsFile!), aliasDir, process.platform === "win32" ? "junction" : "dir");
+				const { diagnostics } = await loadSkills({
+					...providerOptions,
+					cwd: project,
+					customDirectories: [customRoot],
+				});
+				expect(diagnostics).toHaveLength(1);
+				const diagnostic = diagnostics[0];
+				expect(diagnostic.skills.map(skill => skill.filePath)).toEqual([path.join(aliasDir, "SKILL.md")]);
+				expect(diagnostic.duplicates.map(duplicate => duplicate.skill.filePath)).toEqual([claudeFile]);
+				expect(diagnostic.duplicates[0].retained.filePath).toBe(path.join(aliasDir, "SKILL.md"));
+			} finally {
+				await removeWithRetries(project);
+			}
+		});
+
+		const installedText = "---\nname: pdf-tools\ndescription: PDF helpers\n---\n# pdf-tools\n";
+		/**
+		 * Project holding a registry-installed `pdf-tools` (skillshare lock + unpacked store) and an authored
+		 * copy under `<project>/<authoredRoot>/skills/pdf-tools`. The store sits next to the agent dir, so this
+		 * points the agent dir at the temp root for the duration of `run`.
+		 */
+		async function withInstalledPdfTools(
+			authoredRoot: ".omp" | ".claude",
+			authoredText: string,
+			run: (paths: { project: string; installedFile: string; authoredFile: string }) => Promise<void>,
+		) {
+			const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "skills-installed-")));
+			const project = path.join(root, "proj");
+			const authoredFile = path.join(project, authoredRoot, "skills", "pdf-tools", "SKILL.md");
+			setAgentDir(path.join(root, ".omp", "agent"));
+			try {
+				await fs.mkdir(path.join(project, ".git"), { recursive: true });
+				await fs.mkdir(path.dirname(authoredFile), { recursive: true });
+				await Bun.write(authoredFile, authoredText);
+				const integrity = "sha512-alice-pdf-tools-1.0.0";
+				await writeSkillsLock(path.join(project, ".omp", "skills.lock.json"), {
+					version: 1,
+					skills: {
+						"@alice/pdf-tools": {
+							version: "1.0.0",
+							integrity,
+							resolved: "/api/v1/skills/@alice/pdf-tools/versions/1.0.0/tarball",
+						},
+					},
+				});
+				const storeDir = getSkillStorePath("alice", "pdf-tools", "1.0.0");
+				await fs.mkdir(storeDir, { recursive: true });
+				await Bun.write(path.join(storeDir, "SKILL.md"), installedText);
+				await Bun.write(path.join(storeDir, STORE_INTEGRITY_FILE), `${integrity}\n`);
+				await run({ project, installedFile: path.join(storeDir, "SKILL.md"), authoredFile });
+			} finally {
+				setAgentDir(path.join(isolatedHome, ".omp", "agent"));
+				await removeWithRetries(root);
+			}
+		}
+
+		it("reports an installed skill that a differing authored skill outranks", async () => {
+			const authoredText = "---\nname: pdf-tools\ndescription: Local PDF helpers\n---\n# local\n";
+			await withInstalledPdfTools(".omp", authoredText, async ({ project, installedFile, authoredFile }) => {
+				const { skills, diagnostics } = await loadSkills({
+					...DISABLE_ALL_BUILTIN_SKILLS,
+					enablePiProject: true,
+					cwd: project,
+				});
+				expect(skills.map(skill => skill.filePath)).toEqual([authoredFile, installedFile]);
+				expect(diagnostics).toHaveLength(1);
+				const [diagnostic] = diagnostics;
+				expect(diagnostic.name).toBe("pdf-tools");
+				expect(diagnostic.reason).toBe("authored-over-installed");
+				expect(diagnostic.skills.map(skill => skill.filePath)).toEqual([authoredFile, installedFile]);
+				expect(diagnostic.skills[0].name).toBe("pdf-tools");
+				expect(diagnostic.duplicates).toEqual([]);
+			});
+		});
+
+		it("reports an installed skill as redundant with an identical authored skill admitted after it", async () => {
+			// skillshare (95) is admitted before .claude (80), so the authored copy takes the bare name back.
+			await withInstalledPdfTools(".claude", installedText, async ({ project, installedFile, authoredFile }) => {
+				const { skills, diagnostics } = await loadSkills({
+					...DISABLE_ALL_BUILTIN_SKILLS,
+					enableClaudeProject: true,
+					cwd: project,
+				});
+				expect(skills.map(skill => skill.filePath)).toEqual([authoredFile]);
+				expect(diagnostics).toHaveLength(1);
+				const [diagnostic] = diagnostics;
+				expect(diagnostic.reason).toBe("authored-over-installed");
+				expect(diagnostic.skills.map(skill => skill.filePath)).toEqual([authoredFile]);
+				expect(diagnostic.duplicates).toHaveLength(1);
+				expect(diagnostic.duplicates[0].skill.filePath).toBe(installedFile);
+				expect(diagnostic.duplicates[0].retained.filePath).toBe(authoredFile);
+			});
+		});
+
+		it("does not let an identical installed copy change the reason for an authored conflict", async () => {
+			await withInstalledPdfTools(".omp", installedText, async ({ project, installedFile, authoredFile }) => {
+				const variantFile = path.join(project, ".claude", "skills", "pdf-tools", "SKILL.md");
+				await Bun.write(variantFile, "---\nname: pdf-tools\ndescription: Different instructions\n---\n# variant\n");
+				const { diagnostics } = await loadSkills({
+					...DISABLE_ALL_BUILTIN_SKILLS,
+					enablePiProject: true,
+					enableClaudeProject: true,
+					cwd: project,
+				});
+				expect(diagnostics).toHaveLength(1);
+				expect(diagnostics[0].reason).toBe("source-order");
+				expect(diagnostics[0].skills.find(skill => skill.name === "pdf-tools")?.filePath).toBe(authoredFile);
+				expect(diagnostics[0].duplicates.map(duplicate => duplicate.skill.filePath)).toEqual([installedFile]);
+			});
+		});
+	});
+
+	describe("same-origin variants", () => {
+		const calendar = (heading: string) => `---\nname: calendar\ndescription: Calendar helpers\n---\n# ${heading}\n`;
+
+		/** Writes omp plugin packages (`package.json` + `skills/calendar/SKILL.md`) and loads only them. */
+		async function withPlugins(
+			packages: { name: string; repository?: unknown; version?: string; text: string }[],
+			run: (load: (dedupeSameOrigin?: boolean) => Promise<LoadSkillsResult>, files: string[]) => Promise<void>,
+		) {
+			const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "skills-same-origin-")));
+			try {
+				const roots = packages.map(pkg => path.join(root, pkg.name));
+				const files = roots.map(dir => path.join(dir, "skills", "calendar", "SKILL.md"));
+				await Promise.all(
+					packages.map(async (pkg, i) => {
+						await Bun.write(files[i], pkg.text);
+						await Bun.write(
+							path.join(roots[i], "package.json"),
+							JSON.stringify({ name: pkg.name, version: pkg.version, repository: pkg.repository }),
+						);
+					}),
+				);
+				const load = (dedupeSameOrigin?: boolean) =>
+					loadSkills({
+						...DISABLE_ALL_BUILTIN_SKILLS,
+						...(dedupeSameOrigin !== undefined && { dedupeSameOrigin }),
+						extensionRoots: { explicit: roots, mode: "explicit-only", configured: [], configuredLevel: "user" },
+					});
+				await run(load, files);
+			} finally {
+				await removeWithRetries(root);
+			}
+		}
+
+		const sameRepository = [
+			{
+				name: "upstream",
+				repository: "git+https://github.com:443/Acme/Tools.git",
+				version: "1.9.0",
+				text: calendar("older, admitted first"),
+			},
+			{
+				name: "fork",
+				repository: { type: "git", url: "ssh://git@github.com:22/acme/tools.git" },
+				version: "2.0.0",
+				text: calendar("newer, admitted second"),
+			},
+		];
+
+		it("keeps every differing variant by default and reports their shared origin", async () => {
+			await withPlugins(sameRepository, async (load, [upstreamFile, forkFile]) => {
+				const { skills, diagnostics } = await load();
+				expect(skills.map(skill => [skill.name, skill.filePath])).toEqual([
+					["calendar", upstreamFile],
+					["fork/calendar", forkFile],
+				]);
+				expect(diagnostics).toHaveLength(1);
+				expect(diagnostics[0].duplicates).toEqual([]);
+				expect(diagnostics[0].skills.map(skill => skill._source?.provenance)).toEqual([
+					{ repository: "github.com/acme/tools", version: "1.9.0" },
+					{ repository: "github.com/acme/tools", version: "2.0.0" },
+				]);
+			});
+		});
+
+		it("hides a later same-origin variant behind the first-admitted one when opted in", async () => {
+			await withPlugins(sameRepository, async (load, [upstreamFile, forkFile]) => {
+				const { skills, diagnostics, warnings } = await load(true);
+				expect(skills.map(skill => [skill.name, skill.filePath, skill._source?.provenance?.version])).toEqual([
+					["calendar", upstreamFile, "1.9.0"],
+				]);
+				expect(warnings.filter(warning => warning.message.includes("collision"))).toEqual([]);
+				expect(diagnostics).toHaveLength(1);
+				expect(diagnostics[0].duplicates.map(d => [d.skill.filePath, d.retained.filePath, d.match])).toEqual([
+					[forkFile, upstreamFile, "origin"],
+				]);
+			});
+		});
+
+		it.each([
+			["another repository", "github:acme/other"],
+			["another monorepo directory", { url: "https://github.com/acme/tools", directory: "packages/b" }],
+			["no repository", undefined],
+		])("keeps a variant from %s even when opted in", async (_label, repository) => {
+			const packages = [sameRepository[0], { ...sameRepository[1], repository }];
+			await withPlugins(packages, async (load, [upstreamFile, forkFile]) => {
+				const { skills } = await load(true);
+				expect(skills.map(skill => [skill.name, skill.filePath])).toEqual([
+					["calendar", upstreamFile],
+					["fork/calendar", forkFile],
+				]);
+			});
+		});
+
+		it("preserves case-sensitive repository.directory identities", async () => {
+			const packages = [
+				{ ...sameRepository[0], repository: { url: "github:acme/tools", directory: "packages/Upper" } },
+				{ ...sameRepository[1], repository: { url: "github:acme/tools", directory: "packages/upper" } },
+			];
+			await withPlugins(packages, async load => {
+				const { skills } = await load(true);
+				expect(skills.map(skill => skill.name)).toEqual(["calendar", "fork/calendar"]);
+			});
+		});
+
+		it("rejects unsafe repository.directory aliases instead of collapsing them", async () => {
+			const packages = [
+				{ ...sameRepository[0], repository: { url: "github:acme/tools", directory: "../packages/a" } },
+				{ ...sameRepository[1], repository: { url: "github:acme/tools", directory: "packages/a" } },
+			];
+			await withPlugins(packages, async load => {
+				const { skills } = await load(true);
+				expect(skills.map(skill => skill.name)).toEqual(["calendar", "fork/calendar"]);
+			});
+		});
+
+		it("preserves case-sensitive paths on private repository hosts", async () => {
+			const packages = [
+				{ ...sameRepository[0], repository: "https://git.example.com/Acme/Tools" },
+				{ ...sameRepository[1], repository: "https://git.example.com/acme/tools" },
+			];
+			await withPlugins(packages, async load => {
+				const { skills } = await load(true);
+				expect(skills.map(skill => skill.name)).toEqual(["calendar", "fork/calendar"]);
+			});
+		});
+
+		it("still labels an identical same-origin copy as a content match", async () => {
+			const packages = [sameRepository[0], { ...sameRepository[1], text: sameRepository[0].text }];
+			await withPlugins(packages, async (load, [upstreamFile, forkFile]) => {
+				const { diagnostics } = await load(true);
+				expect(diagnostics[0].duplicates.map(d => [d.skill.filePath, d.retained.filePath, d.match])).toEqual([
+					[forkFile, upstreamFile, "content"],
+				]);
+			});
+		});
 	});
 });
 

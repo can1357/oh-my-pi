@@ -106,6 +106,34 @@ with RpcClient(model="openrouter/anthropic/claude-sonnet-4.6", no_session=True) 
 `set_todos()` accepts either a flat list of todo strings/items or explicit
 phases, and `get_state().todo_phases` returns the typed current todo state.
 
+`get_skill_diagnostics()` and `get_state().skill_diagnostics` expose typed
+`SkillDiagnosticsSnapshot` objects with resolved variants, redundant copies,
+paths, sources, declared repository/version provenance, duplicate match type,
+and selection reasons. `on_skill_diagnostics_update(callback)` subscribes to
+startup and changed snapshots. `set_skill_startup_diagnostics(False)` persists
+the native notification preference and returns the effective snapshot; manual
+queries still work when notices are off. Older runtimes may leave the state
+field unset or reject the commands.
+
+`SkillDiagnosticsSnapshot.items` (`None` from older runtimes) lists every loaded
+skill with its `issues`, `can_analyze` / `unavailable_reason`, the current
+`analysis` and the last finished `last_analysis`. The same workflow the
+interactive `/skills diagnostics` panel drives is available through four
+calls: `prepare_skill_diagnostic_analysis(name, model=None)` snapshots the
+variants and returns a `SkillDiagnosticAnalysisRecord` whose `model`,
+`candidates`, `bytes` and `disclosure` are what to show before asking;
+`analyze_skill_diagnostics(analysis_id, consent)` starts it once consent is
+`True` and returns at once with `status == "running"`, so progress and the
+typed `ResourceAnalysis` `result` arrive through `on_skill_diagnostics_update`;
+`cancel_skill_diagnostic_analysis(analysis_id)` aborts it; and
+`apply_skill_diagnostic_analysis(analysis_id, confirmed)` saves a complete
+`prefer` recommendation after a separate confirmation. Ids are issued by the
+server; no paths or results are ever sent back, and repeating a start or an
+apply replays the stored record instead of billing or changing anything twice.
+These types and helpers are generated from the canonical wire schema. As with
+other optional SDK fields, null `pluginName`, `repository`, and `version` decode
+as absent; required fields, arrays, literals, and non-null values are validated.
+
 By default the client runs:
 
 ```bash

@@ -168,11 +168,13 @@ import { createExtensionModelQuery } from "../extensibility/extensions/model-api
 import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
 import type { CustomCommandContext } from "../extensibility/custom-commands/types";
 import { SkillDescriptionCatalog } from "../extensibility/skill-descriptions";
+import { SkillDiagnosticController } from "../extensibility/skill-diagnostic-controller";
 import {
 	type BuiltSkillPromptMessage,
 	loadSkillPrompt,
 	renderSkillPromptMessage,
 	type Skill,
+	type SkillDiagnostic,
 	type SkillPromptInput,
 	type SkillRediscoveryHost,
 	type SkillWarning,
@@ -555,6 +557,7 @@ import { cfgSteeringMode } from "../modes/settings";
 import { cfgDisabledProviders, cfgModelRoles } from "../config/model-settings";
 import { cfgEvalJs, cfgEvalPy, cfgEvalToolsEnabled, cfgEvalWorkpoolFreshAgents } from "../eval/settings";
 import { cfgExtensions, type SkillsSettings } from "../extensibility/settings";
+import { cfgUserResourceExclusions } from "../extensibility/resource-settings";
 import {
 	cfgImagesAutoResize,
 	cfgMagicKeyword,
@@ -1137,6 +1140,7 @@ export class AgentSession implements SettingsScope {
 	#reconcileBrowserMcpFilter: AgentSessionConfig["reconcileBrowserMcpFilter"];
 	#setMcpServerInstructionsSource: AgentSessionConfig["setMcpServerInstructionsSource"];
 	#skillDescriptions: SkillDescriptionCatalog;
+	#skillDiagnosticController: SkillDiagnosticController | undefined;
 	#promptSkillsSource: readonly Skill[] | undefined;
 	#promptSkills: readonly Skill[] = [];
 	/**
@@ -1978,6 +1982,7 @@ export class AgentSession implements SettingsScope {
 				mode: config.disableExtensionDiscovery ? "explicit-only" : "merge",
 				configured: cfgExtensions.get(this.settings),
 				configuredLevel: this.settings.extensionsSourceLevel(),
+				resourceExclusions: cfgUserResourceExclusions.get(this.settings),
 			}));
 		this.#preparedExtensions = config.preparedExtensions;
 		this.#extensionPaths = config.extensionPaths;
@@ -2470,6 +2475,7 @@ export class AgentSession implements SettingsScope {
 			baseSystemPrompt: this.agent.state.systemPrompt,
 			skills: config.skills,
 			skillWarnings: config.skillWarnings,
+			skillDiagnostics: config.skillDiagnostics,
 			skillsSettings: config.skillsSettings,
 			skillsReloadable: config.skillsReloadable,
 		});
@@ -10682,6 +10688,16 @@ export class AgentSession implements SettingsScope {
 	/** Skill loading warnings captured by SDK */
 	get skillWarnings(): readonly SkillWarning[] {
 		return this.#tools.skillWarnings;
+	}
+
+	/** Skill resolution diagnostics captured by SDK */
+	get skillDiagnostics(): readonly SkillDiagnostic[] {
+		return this.#tools.skillDiagnostics;
+	}
+
+	/** Session-owned consent plans and retained results shared by TUI and RPC clients. */
+	get skillDiagnosticController(): SkillDiagnosticController {
+		return (this.#skillDiagnosticController ??= new SkillDiagnosticController(this));
 	}
 
 	/** Session-local general-purpose agents pinned to user-tagged models. */
