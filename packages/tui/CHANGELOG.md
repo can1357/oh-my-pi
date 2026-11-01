@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Fixed the `/usage` dashboard printing the remaining percentage next to bars filled by quota used; it now reads `N% used`, and the details table heads its quota column `Used`, `Left` or `Quota` to match the rows it holds ([#13971](https://github.com/can1357/oh-my-pi/issues/13971), [#16415](https://github.com/can1357/oh-my-pi/pull/16415) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
 
@@ -27,7 +30,6 @@
 - LSP diagnostics carry their severity color on the `[error]`/`[warning]` tag instead of the location, and collapsed diagnostic rows now show that tag ([#17608](https://github.com/can1357/oh-my-pi/pull/17608) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 
 ### Fixed
-- Fixed the `/usage` dashboard printing the remaining percentage next to bars filled by quota used; it now reads `N% used`, and the details table heads its quota column `Used`, `Left` or `Quota` to match the rows it holds ([#13971](https://github.com/can1357/oh-my-pi/issues/13971), [#16415](https://github.com/can1357/oh-my-pi/pull/16415) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Rex sessions now render Kitty graphics without forcing the protocol, including when only `TERM=xterm-rex` identifies the client ([#17651](https://github.com/can1357/oh-my-pi/issues/17651)).
 - Fixed collapsed AST Grep showing no matches when its first file or folder was taller than the preview, and its `… N more` row counting hidden folders instead of hidden matches ([#17608](https://github.com/can1357/oh-my-pi/pull/17608) by [@JustasMasiulis](https://github.com/JustasMasiulis))
