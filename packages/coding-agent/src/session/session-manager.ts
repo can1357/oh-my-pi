@@ -8,6 +8,7 @@ import type {
 	TextContent,
 	Usage,
 } from "@oh-my-pi/pi-ai";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import {
 	directoryIsEnterable,
 	directoryIsMissing,
@@ -163,6 +164,28 @@ function nowIso(): string {
 
 function fileSafeTimestamp(iso: string): string {
 	return iso.replace(/[:.]/g, "-");
+}
+
+/**
+ * Branch of `cwd`'s checkout, resolved synchronously through the native VCS
+ * layer — never a `git` subprocess, so it is safe on the synchronous header
+ * construction paths.
+ *
+ * `undefined` outside a checkout, on a detached HEAD, and in a pure-jj
+ * workspace; the header then omits the field exactly as it omits any other
+ * absent metadata.
+ */
+function resolveGitBranch(cwd: string): string | undefined {
+	try {
+		// `vcs.git` walks upward, so a pure-jj workspace nested inside a git
+		// checkout would otherwise be stamped with the *parent* repository's
+		// branch — a branch the session never runs on.
+		if (vcs.isPureJj(cwd)) return undefined;
+		const head = vcs.git(cwd)?.headSync();
+		return head?.kind === "ref" ? (head.branch ?? undefined) : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 function artifactsDirectoryFor(sessionFile: string | undefined): string | null {
@@ -2043,6 +2066,7 @@ export class SessionManager {
 			id: this.#sessionId,
 			timestamp,
 			cwd: this.#cwd,
+			gitBranch: resolveGitBranch(this.#cwd),
 			parentSession: options?.parentSession,
 			providerPromptCacheKey: options?.providerPromptCacheKey,
 			taskPromptCacheKey: options?.taskPromptCacheKey,
@@ -2506,6 +2530,7 @@ export class SessionManager {
 			titleSource: this.#header.titleSource ?? this.#titleSource,
 			timestamp,
 			cwd: this.#cwd,
+			gitBranch: resolveGitBranch(this.#cwd),
 			additionalDirectories: this.#additionalDirectories.length > 0 ? [...this.#additionalDirectories] : undefined,
 			parentSession: parentSessionId,
 			providerPromptCacheKey: SessionManager.getInheritedProviderPromptCacheKey(this.#header),
@@ -2707,6 +2732,9 @@ export class SessionManager {
 			this.#cwd = resolvedCwd;
 			this.#sessionDir = nextSessionDir;
 			this.#header.cwd = resolvedCwd;
+			// The new cwd may live in a different checkout (or none): a stale branch
+			// would attribute the rest of the session to a repository it left.
+			this.#header.gitBranch = resolveGitBranch(resolvedCwd);
 			// The stash is scoped to the conversation's pre-move state: a completed
 			// move must not let a later opted-in request promote it. Refusals and
 			// the internal rollback rethrow above, and the no-op early return never
@@ -4106,6 +4134,7 @@ export class SessionManager {
 			id: newSessionId,
 			timestamp,
 			cwd: this.#cwd,
+			gitBranch: resolveGitBranch(this.#cwd),
 			title: this.#sessionName,
 			titleSource: this.#titleSource,
 			parentSession: this.#persist ? sourceSessionFile : undefined,
@@ -4192,12 +4221,14 @@ export class SessionManager {
 		const sessionDir = SessionManager.getDefaultSessionDir(cwd, undefined, storage);
 		const id = mintSessionId();
 		const timestamp = nowIso();
+		const resolvedCwd = path.resolve(cwd);
 		const header: SessionHeader = {
 			type: "session",
 			version: CURRENT_SESSION_VERSION,
 			id,
 			timestamp,
-			cwd: path.resolve(cwd),
+			cwd: resolvedCwd,
+			gitBranch: resolveGitBranch(resolvedCwd),
 		};
 		const file = path.join(sessionDir, `${fileSafeTimestamp(timestamp)}_${id}.jsonl`);
 		storage.writeTextSync(file, `${serializeTitleSlot({ updatedAt: timestamp })}${JSON.stringify(header)}\n`);

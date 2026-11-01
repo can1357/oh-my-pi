@@ -99,6 +99,7 @@
 - Added opt-in `title.refreshAfterPrompts`: every N operator prompts, the judge model checks whether a generated session title still fits the conversation and regenerates it when it does not; user-set titles are never replaced ([#17443](https://github.com/can1357/oh-my-pi/pull/17443) by [@wolfiesch](https://github.com/wolfiesch))
 - Gateway rows discovered from `/v1/models` now keep the `reasoning_effort_map` and `reasoning_required` facts they advertise: a route that serves only low/high/max routes `medium` to `high` instead of the nearest lower tier, and a thinking-off request still sends a tier the route accepts ([#17395](https://github.com/can1357/oh-my-pi/pull/17395) by [@Maziar123](https://github.com/Maziar123))
 - Computer-use scripts can wait for a window opened by an action and read it in the same call with a window filter's optional `wait` ([#17391](https://github.com/can1357/oh-my-pi/pull/17391) by [@will-bogusz](https://github.com/will-bogusz))
+- Added `gitBranch` to session headers: the Git branch of the session working directory, recorded for new, forked, and branched session files and re-resolved when a session moves. It is omitted outside a Git checkout, on a detached `HEAD`, and in pure Jujutsu workspaces, and is redacted in shared exports ([#12225](https://github.com/can1357/oh-my-pi/pull/12225) by [@Xytronix](https://github.com/Xytronix))
 
 ### Changed
 
