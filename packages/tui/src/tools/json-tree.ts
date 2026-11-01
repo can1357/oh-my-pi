@@ -2,7 +2,7 @@
  * JSON tree rendering utilities shared across tool renderers.
  */
 import { INTENT_FIELD, type TspSpan, type TspTreeNode } from "@oh-my-pi/pi-wire";
-import { sanitizeText, sanitizeTextDeep } from "@oh-my-pi/pi-utils";
+import { isRecord, sanitizeText, sanitizeTextDeep } from "@oh-my-pi/pi-utils";
 import { TreeView, treeRowPrefix } from "../components/tree-view";
 import { truncateToWidth } from "../render/render-utils";
 import type { Theme, ThemeColor } from "../theme/theme";
@@ -34,10 +34,6 @@ const ARGS_INLINE_MORE = "…";
 const ARGS_INLINE_MORE_WIDTH = Bun.stringWidth(ARGS_INLINE_MORE);
 /** Minimal value footprint (quotes + a couple chars) reserved for each not-yet-rendered key. */
 const ARGS_INLINE_TAIL_VALUE_RESERVE = 4;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return !!value && typeof value === "object" && !Array.isArray(value);
-}
 
 /** Sanitization, string summary, and budgeting policy for inline JSON. */
 export interface InlineFormatOptions {

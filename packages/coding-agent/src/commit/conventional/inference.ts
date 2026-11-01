@@ -1,6 +1,7 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, ApiKey, AuthStorage, Model } from "@oh-my-pi/pi-ai";
 import { completeSimple } from "@oh-my-pi/pi-ai";
+import { toError } from "@oh-my-pi/pi-utils";
 import { toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
 import type { ResolvedCommitModel } from "../model-selection";
 import { extractTextContent } from "../utils";
@@ -153,7 +154,7 @@ export class OmpCommitInference implements CommitInference {
 				return parsed;
 			} catch (error) {
 				this.#signal?.throwIfAborted();
-				lastError = error instanceof Error ? error : new Error(String(error));
+				lastError = toError(error);
 				this.#cache?.putFailure({
 					key,
 					model: modelKey,
