@@ -77,6 +77,9 @@ function createControllerContext() {
 		editorContainer,
 		ui,
 		hookEditor: undefined,
+		closeLinkBrowser: () => {},
+		rerenderInLinkBrowser: () => {},
+		rebuildTranscriptScrollback: () => {},
 	} as unknown as TestContext;
 
 	return { ctx, editor, editorContainer, ui };
