@@ -431,6 +431,30 @@ fn ensure_not_cancelled(params: &ExecutionParameters) -> Result<(), error::Error
 	Ok(())
 }
 
+/// Ends a subshell (a pipeline stage, process substitution, background job or
+/// coprocess) whose command was abandoned; see
+/// [`error::Error::abandons_command`]. In Bash each of these is a separate
+/// process, so the refusal stops at its top: it becomes the subshell's status,
+/// and the command that started the subshell carries on. A refusal is reported
+/// where it happens; one that reaches here unreported (an `eval` run as a
+/// pipeline stage's own command) is reported on the subshell's stderr. Any
+/// other result passes through.
+async fn end_abandoned_subshell(
+	shell: &Shell<impl extensions::ShellExtensions>,
+	params: &ExecutionParameters,
+	result: Result<ExecutionResult, error::Error>,
+) -> Result<ExecutionResult, error::Error> {
+	match result {
+		Err(err) if err.abandons_command() => {
+			if params.reports_errors() {
+				let _ = shell.display_error(&mut params.stderr(shell), &err).await;
+			}
+			Ok(ExecutionResult::from(err.into_result(shell).exit_code))
+		},
+		result => result,
+	}
+}
+
 
 #[derive(Clone, Debug, Default)]
 /// Policy for how to manage spawned external processes.
@@ -800,9 +824,10 @@ fn spawn_async_ao_list_in_task<SE: extensions::ShellExtensions>(
 	cloned_params.set_cancel_token(cancellation.clone());
 
 	let join_handle = tokio::spawn(async move {
-		cloned_ao_list
+		let result = cloned_ao_list
 			.execute(&mut cloned_shell, &cloned_params)
-			.await
+			.await;
+		end_abandoned_subshell(&cloned_shell, &cloned_params, result).await
 	});
 
 	jobs::Job::new(
@@ -1101,9 +1126,17 @@ async fn wait_for_pipeline_processes_and_update_status(
 	while let Some(child) = process_spawn_results.pop_front() {
 		ensure_not_cancelled(params)?;
 		let wait_result = if !stopped_children.is_empty() {
-			child.poll().await?
+			child.poll().await
 		} else {
-			child.wait_with_cancel(params.cancel_token()).await?
+			child.wait_with_cancel(params.cancel_token()).await
+		};
+		// A command can be abandoned here only in a stage that ran in a
+		// subshell, as a task: the refusal ends that stage alone.
+		let wait_result = match wait_result {
+			Ok(wait_result) => wait_result,
+			Err(err) => {
+				ExecutionWaitResult::Completed(end_abandoned_subshell(shell, params, Err(err)).await?)
+			},
 		};
 
 		match wait_result {
@@ -1361,19 +1394,29 @@ impl Execute for ast::CoprocessCommand {
 			.as_ref()
 			.map_or_else(CancellationToken::new, CancellationToken::child_token);
 		child_params.set_cancel_token(cancellation.clone());
+		// What the coprocess needs to report a refusal that abandons its command
+		// once the body has consumed its parameters. It holds none of the
+		// coprocess's pipe ends, so they still close when the body is done.
+		let mut report_params = child_params.clone();
+		report_params.open_files.remove_fd(OpenFiles::STDIN_FD);
+		report_params.open_files.remove_fd(OpenFiles::STDOUT_FD);
 		let join_handle = tokio::spawn(async move {
-			let pipeline_context = PipelineExecutionContext {
-				shell:            commands::ShellForCommand::ParentShell(&mut child_shell),
-				process_group_id: None,
-				in_pipeline:       false,
-			};
-			let spawn_result = body
-				.execute_in_pipeline(pipeline_context, child_params)
-				.await?;
-			match spawn_result.wait_with_cancel(cancel_token).await? {
-				ExecutionWaitResult::Completed(result) => Ok(result),
-				ExecutionWaitResult::Stopped(_) => Ok(ExecutionResult::stopped()),
+			let result = async {
+				let pipeline_context = PipelineExecutionContext {
+					shell:            commands::ShellForCommand::ParentShell(&mut child_shell),
+					process_group_id: None,
+					in_pipeline:       false,
+				};
+				let spawn_result = body
+					.execute_in_pipeline(pipeline_context, child_params)
+					.await?;
+				match spawn_result.wait_with_cancel(cancel_token).await? {
+					ExecutionWaitResult::Completed(result) => Ok(result),
+					ExecutionWaitResult::Stopped(_) => Ok(ExecutionResult::stopped()),
+				}
 			}
+			.await;
+			end_abandoned_subshell(&child_shell, &report_params, result).await
 		});
 
 		let job = shell.jobs_mut().add_as_current(
@@ -1907,9 +1950,13 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 
 			match execute_command(context, params, cmd_name, assignments, args).await {
 				Ok(result) => Ok(result),
-				// Leave this one to the enclosing top-level command (or eval or
-				// sourced file), which reports it once and moves on, as Bash does.
-				Err(err) if err.abandons_command() => Err(err),
+				// Report a refusal here, where its standard error is in effect,
+				// and leave the rest to the enclosing top-level command (or
+				// eval, sourced file or subshell), which moves on as Bash does.
+				Err(err) if err.abandons_command() => {
+					let report = !quiet_token.as_ref().is_some_and(CancellationToken::is_cancelled);
+					Err(parent_shell.report_abandonment(&mut stderr, report, err).await)
+				},
 				Err(err) => {
 					if !quiet_token.as_ref().is_some_and(CancellationToken::is_cancelled) {
 						let _ = parent_shell.display_error(&mut stderr, &err).await;
@@ -2782,14 +2829,15 @@ fn setup_process_substitution(
 	};
 
 	// Asynchronously spawn off the subshell; we intentionally don't block on its
-	// completion.
+	// completion. Its status is discarded, as in Bash, but a refusal that ends
+	// it is still reported.
 	let subshell_cmd = subshell_cmd.to_owned();
 	tokio::spawn(async move {
-		// Intentionally ignore the result of the subshell command.
-		let _ = subshell_cmd
+		let result = subshell_cmd
 			.list
 			.execute(&mut subshell, &child_params)
 			.await;
+		let _ = end_abandoned_subshell(&subshell, &child_params, result).await;
 	});
 
 

@@ -1098,6 +1098,10 @@ pub(crate) async fn invoke_shell_function(
 ) -> Result<ExecutionSpawnResult, error::Error> {
 	let ast::FunctionBody(body, redirects) = &function.definition().body;
 
+	// A refusal to nest deeper goes to the caller's standard error: as in
+	// Bash, the function's own redirections apply only once it runs.
+	let caller_stderr = redirects.as_ref().map(|_| context.params.stderr(context.shell));
+
 	// Apply any redirects specified at function definition-time.
 	if let Some(redirects) = redirects {
 		for redirect in &redirects.0 {
@@ -1112,12 +1116,16 @@ pub(crate) async fn invoke_shell_function(
 
 	// Note that we're going deeper. Once we do this, we need to make sure we don't
 	// bail early before "exiting" the function.
-	context.shell.enter_function(
+	if let Err(err) = context.shell.enter_function(
 		context.command_name.as_str(),
 		&function,
 		positional_args,
 		&context.params,
-	)?;
+	) {
+		let mut stderr = caller_stderr.unwrap_or_else(|| context.params.stderr(context.shell));
+		let report = context.params.reports_errors();
+		return Err(context.shell.report_abandonment(&mut stderr, report, err).await);
+	}
 
 	// Invoke the function.
 	let result = body.execute(context.shell, &params).await;

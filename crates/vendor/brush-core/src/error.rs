@@ -265,6 +265,14 @@ pub enum ErrorKind {
 	#[error("maximum eval nesting level exceeded ({0})")]
 	MaxEvalNestingExceeded(usize),
 
+	/// The rest of a command is abandoned because a function or `eval` would
+	/// have nested too deep. The refusal was already reported where it
+	/// happened, to the standard error in effect there; this carries the
+	/// abandonment on to the enclosing top-level command, `eval`, sourced file
+	/// or subshell, which reports nothing more.
+	#[error("command abandoned after a nesting refusal")]
+	CommandAbandoned,
+
 	/// System time error.
 	#[error("system time error: {0}")]
 	TimeError(#[from] std::time::SystemTimeError),
@@ -478,11 +486,13 @@ impl Error {
 
 	/// Returns whether this error abandons the whole command it occurred in,
 	/// as Bash does when a function or `eval` would nest too deep: the callers
-	/// up to the enclosing top-level command (or `eval` or sourced file) stop
-	/// too, instead of carrying on as if one command had failed.
+	/// up to the enclosing top-level command (or `eval`, sourced file or
+	/// subshell) stop too, instead of carrying on as if one command had failed.
 	pub fn abandons_command(&self) -> bool {
 		match &self.kind {
-			ErrorKind::MaxFunctionNestingExceeded(..) | ErrorKind::MaxEvalNestingExceeded(..) => true,
+			ErrorKind::MaxFunctionNestingExceeded(..)
+			| ErrorKind::MaxEvalNestingExceeded(..)
+			| ErrorKind::CommandAbandoned => true,
 			ErrorKind::BuiltinError(inner, _) => inner.abandons_command(),
 			_ => false,
 		}
