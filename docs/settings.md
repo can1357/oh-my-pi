@@ -871,8 +871,7 @@ Choose **Interface Mode** under `/settings` → **Appearance** → **Display**:
 Changing the mode applies immediately, preserves the conversation and input draft, and saves the
 choice to the global config. `omp --tui-mode regular|fullscreen` overrides the saved mode for one
 launch; a later mode choice in `/settings` replaces that launch override. Other configuration layers
-still follow the normal [settings precedence](#precedence). The prototype's
-`tui.fullscreen: true|false` is read as `tui.mode: fullscreen|regular`; an explicit `tui.mode` wins.
+still follow the normal [settings precedence](#precedence).
 
 In fullscreen mode, use PageUp/PageDown, Ctrl+Home/Ctrl+End, or the mouse wheel to scroll.
 Ctrl+F searches the transcript, Enter moves to the next match, Shift+Enter to the previous match,

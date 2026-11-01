@@ -8294,7 +8294,6 @@ export class InteractiveMode implements InteractiveModeContext {
 				editorContainer: this.editorContainer,
 				terminalRows: () => this.ui.terminal.rows,
 				editor: () => this.editor,
-				write: data => this.ui.terminal.write(data),
 				requestRender: () => this.ui.requestRender(),
 			});
 			this.#fullscreenChatInputUnsubscribe = this.ui.addInputListener(data => {

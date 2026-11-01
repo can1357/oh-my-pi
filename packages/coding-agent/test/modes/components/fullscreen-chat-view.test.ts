@@ -1,12 +1,17 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
+import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
 
-function decodeOsc52(osc: string): string {
-	const marker = "\x1b]52;c;";
-	const start = osc.indexOf(marker);
-	if (start === -1) return "";
-	return Buffer.from(osc.slice(start + marker.length).replace(/\x07$/, ""), "base64").toString("utf8");
-}
+const copies: string[] = [];
+beforeEach(() => {
+	copies.length = 0;
+	vi.spyOn(clipboard, "copyToClipboard").mockImplementation(async text => {
+		copies.push(text);
+	});
+});
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 import {
 	FullscreenChatView,
@@ -40,9 +45,12 @@ class GrowableComponent implements Component {
 }
 
 class WrappingComponent implements Component {
+	renderCount = 0;
+
 	constructor(private readonly text: string) {}
 
 	render(width: number): readonly string[] {
+		this.renderCount++;
 		const lineWidth = Math.max(1, width);
 		const lines: string[] = [];
 		for (let index = 0; index < this.text.length; index += lineWidth) {
@@ -67,6 +75,12 @@ describe("transcript search helpers", () => {
 		expect(findTranscriptMatches(["İBETA"], "beta")).toEqual([{ line: 0, start: 1, end: 5 }]);
 		expect(findTranscriptMatches(["a.b aXb"], "a.b")).toEqual([{ line: 0, start: 0, end: 3 }]);
 	});
+
+	it("ignores Kitty graphics APC payloads", () => {
+		const line = "\x1b_Ga=p,q=1,m=1\x1b\\visible picture";
+		expect(findTranscriptMatches([line], "q=1")).toEqual([]);
+		expect(findTranscriptMatches([line], "picture")).toEqual([{ line: 0, start: 8, end: 15 }]);
+	});
 });
 
 describe("highlightTranscriptRanges", () => {
@@ -81,6 +95,12 @@ describe("highlightTranscriptRanges", () => {
 		expect(highlightTranscriptRanges(line, [{ start: 0, end: 4 }])).toBe(
 			"\x1b]8;;https://example.com\x1b\\\x1b[7mclic\x1b[27mkable\x1b]8;;\x1b\\ tail",
 		);
+	});
+
+	it("keeps Kitty graphics APC payloads byte-identical while highlighting visible text", () => {
+		const apc = "\x1b_Ga=p,q=1\x1b\\";
+		const highlighted = highlightTranscriptRanges(`${apc}visible`, [{ start: 0, end: 7 }]);
+		expect(highlighted.startsWith(`${apc}\x1b[7mvisible`)).toBe(true);
 	});
 
 	it("merges adjacent ranges and ignores empty input", () => {
@@ -107,7 +127,6 @@ describe("FullscreenChatView", () => {
 			editorContainer: editorContainer,
 			terminalRows: () => 6,
 			editor: () => editor,
-			write: () => {},
 		});
 
 		const initial = view.render(12);
@@ -143,11 +162,15 @@ describe("FullscreenChatView", () => {
 			editorContainer: editorContainer,
 			terminalRows: () => 6,
 			editor: () => editor,
-			write: () => {},
 		});
 
 		const rendered = view.render(12);
 		expect(rendered.slice(0, 4).some(line => line.includes("…"))).toBe(false);
+		// The overflow transition renders full-width once, then reflows for the
+		// scrollbar; later frames reuse that narrower width without a second pass.
+		expect(transcript.renderCount).toBe(2);
+		view.render(12);
+		expect(transcript.renderCount).toBe(3);
 	});
 
 	it("leaves Home/End to the editor and scrolls the viewport on Ctrl+Home/End", () => {
@@ -162,7 +185,6 @@ describe("FullscreenChatView", () => {
 			editorContainer: editorContainer,
 			terminalRows: () => 6,
 			editor: () => editor,
-			write: () => {},
 		});
 
 		view.render(12);
@@ -192,7 +214,6 @@ describe("FullscreenChatView", () => {
 			editorContainer: editorContainer,
 			terminalRows: () => 6,
 			editor: () => editor,
-			write: () => {},
 		});
 
 		view.render(12);
@@ -214,7 +235,6 @@ describe("FullscreenChatView", () => {
 			editorContainer: editorContainer,
 			terminalRows: () => 6,
 			editor: () => editor,
-			write: () => {},
 		});
 
 		// Following the tail: no indicator, the last viewport row is content.
@@ -258,7 +278,6 @@ describe("FullscreenChatView", () => {
 			editorContainer: editorContainer,
 			terminalRows: () => 8,
 			editor: () => editor,
-			write: () => {},
 		});
 
 		view.render(80);
@@ -294,7 +313,6 @@ describe("FullscreenChatView", () => {
 			editorContainer: editorContainer,
 			terminalRows: () => 8,
 			editor: () => editor,
-			write: () => {},
 		});
 
 		view.render(12);
@@ -327,7 +345,6 @@ describe("FullscreenChatView", () => {
 			editorContainer: editorContainer,
 			terminalRows: () => 6,
 			editor: () => editor,
-			write: () => {},
 		});
 
 		const rendered = view.render(12);
@@ -365,7 +382,6 @@ describe("FullscreenChatView", () => {
 			editorContainer: editorContainer,
 			terminalRows: () => 1,
 			editor: () => editor,
-			write: () => {},
 		});
 
 		view.render(12);
@@ -375,19 +391,17 @@ describe("FullscreenChatView", () => {
 		expect(editor.routed).toBe(0);
 	});
 
-	it("selects transcript lines on drag and pushes them via OSC 52 on release", () => {
+	it("selects transcript lines on drag and copies them through the shared clipboard helper", () => {
 		const transcript = new LinesComponent(["\x1b[1mmsg-one\x1b[0m", "msg-two", "msg-three", "msg-four"]);
 		const editor = new LinesComponent(["editor"]);
 		const editorContainer = new Container();
 		editorContainer.addChild(editor);
-		const writes: string[] = [];
 		const view = new FullscreenChatView({
 			transcript: [transcript],
 			dock: [editorContainer],
 			editorContainer: editorContainer,
 			terminalRows: () => 6,
 			editor: () => editor,
-			write: data => writes.push(data),
 		});
 
 		// viewport = 6 - 1 dock row = 5 rows; content 4 lines fits, scrollOffset 0.
@@ -403,13 +417,9 @@ describe("FullscreenChatView", () => {
 		expect(mid[0]).toContain("\x1b[7m"); // selection highlight on the first line
 		expect(view.handleViewportInput("\x1b[<0;2;3m")).toBe(true);
 
-		expect(writes.length).toBe(1);
-		const osc = writes[0] ?? "";
-		expect(osc.startsWith("\x1b]52;c;")).toBe(true);
-		const b64 = osc.slice("\x1b]52;c;".length).replace(/\x07$/, "");
-		const decoded = Buffer.from(b64, "base64").toString("utf8");
+		expect(copies.length).toBe(1);
 		// SGR stripped, trailing padding trimmed, three lines joined.
-		expect(decoded).toBe("msg-one\nmsg-two\nmsg-three");
+		expect(copies[0]).toBe("msg-one\nmsg-two\nmsg-three");
 
 		// The highlight clears on release right after the copy fires.
 		const after = view.render(12);
@@ -421,14 +431,12 @@ describe("FullscreenChatView", () => {
 		const editor = new LinesComponent(["editor"]);
 		const editorContainer = new Container();
 		editorContainer.addChild(editor);
-		const writes: string[] = [];
 		const view = new FullscreenChatView({
 			transcript: [transcript],
 			dock: [editorContainer],
 			editorContainer: editorContainer,
 			terminalRows: () => 3,
 			editor: () => editor,
-			write: data => writes.push(data),
 		});
 		view.render(20);
 
@@ -439,15 +447,15 @@ describe("FullscreenChatView", () => {
 		const word = view.render(20);
 		expect(word[0]).toContain("\x1b[7m/path/to/file\x1b[27m");
 		expect(view.handleViewportInput("\x1b[<0;7;1m")).toBe(true);
-		expect(decodeOsc52(writes[0] ?? "")).toBe("/path/to/file");
+		expect(copies[0]).toBe("/path/to/file");
 
 		// A third press upgrades the selection to the entire line.
-		writes.length = 0;
+		copies.length = 0;
 		expect(view.handleViewportInput("\x1b[<0;7;1M")).toBe(true);
 		expect(view.handleViewportInput("\x1b[<0;7;1M")).toBe(true);
 		expect(view.handleViewportInput("\x1b[<0;7;1M")).toBe(true);
 		expect(view.handleViewportInput("\x1b[<0;7;1m")).toBe(true);
-		expect(decodeOsc52(writes[0] ?? "")).toBe("see /path/to/file now");
+		expect(copies[0]).toBe("see /path/to/file now");
 	});
 
 	it("copies a mid-line character range, not whole lines", () => {
@@ -455,14 +463,12 @@ describe("FullscreenChatView", () => {
 		const editor = new LinesComponent(["editor"]);
 		const editorContainer = new Container();
 		editorContainer.addChild(editor);
-		const writes: string[] = [];
 		const view = new FullscreenChatView({
 			transcript: [transcript],
 			dock: [editorContainer],
 			editorContainer: editorContainer,
 			terminalRows: () => 4,
 			editor: () => editor,
-			write: data => writes.push(data),
 		});
 		view.render(20);
 
@@ -470,7 +476,7 @@ describe("FullscreenChatView", () => {
 		expect(view.handleViewportInput("\x1b[<0;5;1M")).toBe(true);
 		expect(view.handleViewportInput("\x1b[<32;16;1M")).toBe(true);
 		expect(view.handleViewportInput("\x1b[<0;6;1m")).toBe(true);
-		expect(decodeOsc52(writes[0] ?? "")).toBe("quick brown");
+		expect(copies[0]).toBe("quick brown");
 	});
 
 	it("shows a copy confirmation below the transcript after release", () => {
@@ -484,7 +490,6 @@ describe("FullscreenChatView", () => {
 			editorContainer: editorContainer,
 			terminalRows: () => 4,
 			editor: () => editor,
-			write: () => {},
 		});
 		view.render(80);
 		expect(view.handleViewportInput("\x1b[<0;3;1M")).toBe(true);
@@ -505,7 +510,6 @@ describe("FullscreenChatView", () => {
 			editorContainer,
 			terminalRows: () => 4,
 			editor: () => editor,
-			write: () => {},
 		});
 		view.render(12);
 		expect(view.handleViewportInput("\x1b[<0;3;3M")).toBe(true);
@@ -527,21 +531,19 @@ describe("FullscreenChatView", () => {
 		const editor = new LinesComponent(["editor"]);
 		const editorContainer = new Container();
 		editorContainer.addChild(editor);
-		const writes: string[] = [];
 		const view = new FullscreenChatView({
 			transcript: [transcript],
 			dock: [editorContainer],
 			editorContainer: editorContainer,
 			terminalRows: () => 3,
 			editor: () => editor,
-			write: data => writes.push(data),
 		});
 
 		const rendered = view.render(12);
 		const editorRow = rendered.findIndex(line => line.includes("editor"));
 		expect(view.handleViewportInput(`\x1b[<0;2;${editorRow + 1}M`)).toBe(true);
 		expect(view.handleViewportInput(`\x1b[<0;2;${editorRow + 1}m`)).toBe(true);
-		expect(writes.length).toBe(0);
+		expect(copies.length).toBe(0);
 	});
 
 	it("consumes mouse releases that do not end a scrollbar drag", () => {
@@ -555,7 +557,6 @@ describe("FullscreenChatView", () => {
 			editorContainer: editorContainer,
 			terminalRows: () => 6,
 			editor: () => editor,
-			write: () => {},
 		});
 
 		view.render(12);
@@ -578,7 +579,6 @@ describe("fullscreen streaming and lifecycle regressions", () => {
 		const editor = new LinesComponent(["editor"]);
 		const editorContainer = new Container();
 		editorContainer.addChild(editor);
-		const writes: string[] = [];
 		const requestRender = vi.fn();
 		const view = new FullscreenChatView({
 			transcript: [transcript],
@@ -586,47 +586,46 @@ describe("fullscreen streaming and lifecycle regressions", () => {
 			editorContainer,
 			terminalRows: () => rows,
 			editor: () => editor,
-			write: data => writes.push(data),
 			requestRender,
 		});
 		views.push(view);
-		return { view, transcript, writes, requestRender };
+		return { view, transcript, copies, requestRender };
 	}
 
 	it("copies the selected text, not the next row, after streaming appends", () => {
-		const { view, transcript, writes } = setup();
+		const { view, transcript, copies } = setup();
 		view.render(80);
 		view.handleViewportInput("\x1b[<0;1;1M");
 		view.handleViewportInput("\x1b[<32;4;1M");
 		transcript.lines.push("delta");
 		expect(view.render(80)[0]).toContain("\x1b[7malp\x1b[27m");
 		view.handleViewportInput("\x1b[<0;4;1m");
-		expect(decodeOsc52(writes[0] ?? "")).toBe("alp");
+		expect(copies[0]).toBe("alp");
 	});
 
 	it("copies upward selections in reading order", () => {
-		const { view, writes } = setup();
+		const { view, copies } = setup();
 		view.render(80);
 		view.handleViewportInput("\x1b[<0;4;2M");
 		view.handleViewportInput("\x1b[<32;3;1M");
 		view.handleViewportInput("\x1b[<0;3;1m");
-		expect(decodeOsc52(writes[0] ?? "")).toBe("pha\nbra");
+		expect(copies[0]).toBe("pha\nbra");
 	});
 
 	it("does not copy unrelated text when the selected layout is replaced or resized", () => {
-		const { view, transcript, writes } = setup();
+		const { view, transcript, copies } = setup();
 		view.render(80);
 		view.handleViewportInput("\x1b[<0;1;1M");
 		view.handleViewportInput("\x1b[<32;4;1M");
 		transcript.lines.unshift("replacement");
 		view.render(80);
 		view.handleViewportInput("\x1b[<0;4;1m");
-		expect(writes).toEqual([]);
+		expect(copies).toEqual([]);
 		view.handleViewportInput("\x1b[<0;1;2M");
 		view.handleViewportInput("\x1b[<32;4;2M");
 		view.render(40);
 		view.handleViewportInput("\x1b[<0;4;2m");
-		expect(writes).toEqual([]);
+		expect(copies).toEqual([]);
 	});
 
 	it("keeps search and status rows within narrow terminal widths", () => {
@@ -702,25 +701,25 @@ describe("fullscreen streaming and lifecycle regressions", () => {
 	});
 
 	it("does not select hidden transcript text when clicking the search bar", () => {
-		const { view, writes } = setup();
+		const { view, copies } = setup();
 		view.render(80);
 		view.handleViewportInput("\x06");
 		view.render(80);
 		view.handleViewportInput("\x1b[<0;1;1M");
 		view.handleViewportInput("\x1b[<32;5;1M");
 		view.handleViewportInput("\x1b[<0;5;1m");
-		expect(writes).toEqual([]);
+		expect(copies).toEqual([]);
 		expect(view.render(80)[0]).toContain("find:");
 	});
 
 	it("keeps a selection when transcript rows exactly fill the available height", () => {
-		const { view, writes } = setup(["alpha", "bravo", "charlie"], 4);
+		const { view, copies } = setup(["alpha", "bravo", "charlie"], 4);
 		view.render(80);
 		view.handleViewportInput("\x1b[<0;1;1M");
 		view.render(80);
 		view.handleViewportInput("\x1b[<32;4;1M");
 		view.render(80);
 		view.handleViewportInput("\x1b[<0;4;1m");
-		expect(decodeOsc52(writes[0] ?? "")).toBe("alp");
+		expect(copies[0]).toBe("alp");
 	});
 });

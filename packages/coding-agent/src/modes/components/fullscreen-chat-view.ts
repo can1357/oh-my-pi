@@ -1,4 +1,6 @@
-import { stripVTControlCharacters } from "node:util";
+import { ensureThemeSync, theme } from "@oh-my-pi/pi-tui/theme";
+import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
+import { copyToClipboard } from "../../utils/clipboard";
 import {
 	ALT_WHEEL_SCROLL_MULTIPLIER,
 	type Component,
@@ -15,17 +17,11 @@ import {
 	parseSgrMouse,
 	ScrollView,
 	type SgrMouseEvent,
+	stripTerminalSequences,
+	endOfTerminalSequence,
 	visibleWidth,
 	WheelScrollAccelerator,
 } from "@oh-my-pi/pi-tui";
-
-/**
- * Muted chip colors for overlay rows (search bar, jump indicator, copy
- * flash). Reverse video would swap to a white slab on dark terminals; a dim
- * gray background with light gray text stays quiet on dark and light themes.
- */
-const CHIP_BG = "\x1b[48;5;236m";
-const CHIP_FG = "\x1b[38;5;250m";
 
 export interface FullscreenChatViewOptions {
 	/** Transcript components: the history that scrolls independently of the dock. */
@@ -42,8 +38,6 @@ export interface FullscreenChatViewOptions {
 	 * instance would silently route clicks into an unmounted instance.
 	 */
 	editor: () => Component & MouseRoutable;
-	/** Raw terminal write for one-shot sequences that must not race a frame (OSC 52 clipboard push). */
-	write: (data: string) => void;
 	/** Asks the host for a re-render; drives drag auto-scroll and copy-flash timers. */
 	requestRender?: () => void;
 }
@@ -93,13 +87,26 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 	/** True once content grew while the user was scrolled away from the tail. */
 	#hasNewActivity = false;
 	/** Active transcript search: typed query plus its literal matches and cursor. */
-	#search: { input: Input; matches: TranscriptMatch[]; current: number; reveal: boolean } | undefined;
+	#search:
+		| {
+				input: Input;
+				matches: TranscriptMatch[];
+				current: number;
+				reveal: boolean;
+				matchQuery: string;
+		  }
+		| undefined;
 
 	constructor(private readonly options: FullscreenChatViewOptions) {}
 
 	/** Lets the normal editor slot keep keyboard focus while this overlay owns the screen. */
 	ownsOverlayFocusTarget(component: Component): boolean {
 		return this.options.editorContainer.children.includes(component);
+	}
+
+	/** Keeps enhanced clipboard paste in the transient search field, not the parked chat editor. */
+	getOverlayPasteTarget(): Component | undefined {
+		return this.options.editorContainer.children.includes(this.options.editor()) ? this.#search?.input : undefined;
 	}
 
 	/** True when the fullscreen surface consumed the input: navigation keys, the search bar, selection gestures, or composer-click routing. */
@@ -133,7 +140,7 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 			this.#search = undefined;
 		};
 		input.onSubmit = () => this.#stepSearch(1);
-		return { input, matches: [] as TranscriptMatch[], current: 0, reveal: false };
+		return { input, matches: [] as TranscriptMatch[], current: 0, reveal: false, matchQuery: "" };
 	}
 
 	#handleSearchKey(data: string): void {
@@ -145,23 +152,27 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 			this.#syncFollowTail();
 		} else {
 			const search = this.#search!;
-			const previous = search.input.getValue();
 			search.input.handleInput(data);
-			if (this.#search === search && search.input.getValue() !== previous) {
-				search.matches = findTranscriptMatches(this.#transcriptLines, search.input.getValue());
-				// Start at the first visible hit, wrapping to the beginning.
-				const firstVisible = this.#scrollView.getScrollOffset();
-				search.current = Math.max(
-					0,
-					search.matches.findIndex(match => match.line >= firstVisible),
-				);
-				this.#jumpToCurrentMatch();
-			}
+			if (this.#search === search) this.#refreshSearchQuery();
 		}
+	}
+
+	#refreshSearchQuery(): void {
+		const search = this.#search;
+		if (!search || search.matchQuery === search.input.getValue()) return;
+		search.matchQuery = search.input.getValue();
+		search.matches = findTranscriptMatches(this.#transcriptLines, search.matchQuery);
+		const firstVisible = this.#scrollView.getScrollOffset();
+		search.current = Math.max(
+			0,
+			search.matches.findIndex(match => match.line >= firstVisible),
+		);
+		this.#jumpToCurrentMatch();
 	}
 
 	#stepSearch(delta: number): void {
 		const search = this.#search!;
+		this.#refreshSearchQuery();
 		if (search.matches.length === 0) return;
 		search.current = (search.current + delta + search.matches.length) % search.matches.length;
 		this.#jumpToCurrentMatch();
@@ -183,6 +194,9 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 
 	dispose(): void {
 		this.cancelInput();
+		for (const component of this.options.transcript) {
+			if (component instanceof TranscriptContainer) component.releaseDocumentCaches();
+		}
 		clearTimeout(this.#flashTimer);
 		this.#flashTimer = undefined;
 		this.#flash = undefined;
@@ -214,16 +228,18 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 		this.#viewportHeight = availableRows - this.#viewportTop - Number(showStatus);
 		this.#statusRow = showStatus ? this.#viewportTop + this.#viewportHeight : undefined;
 		this.#dockTop = availableRows;
-		const fullWidthTranscript = this.#renderComponents(this.options.transcript, this.#width);
-		// The scrollbar consumes the last terminal column. Re-render the
-		// transcript at its remaining width so each component wraps its own
-		// content instead of ScrollView cutting a rendered line short.
-		const transcriptWidth =
-			fullWidthTranscript.length > this.#viewportHeight ? Math.max(1, this.#width - 1) : this.#width;
-		const transcriptLines =
-			transcriptWidth === this.#width
-				? fullWidthTranscript
-				: this.#renderComponents(this.options.transcript, transcriptWidth);
+		// Reserve the scrollbar from the previous frame once content overflows.
+		// The transition frame may re-render once; every later frame uses one width.
+		const scrollbarReserved = this.#lastContentLength > this.#viewportHeight;
+		let transcriptWidth = scrollbarReserved ? Math.max(1, this.#width - 1) : this.#width;
+		let transcriptLines = this.#renderComponents(this.options.transcript, transcriptWidth);
+		// The scrollbar consumes the last terminal column. Re-render newly overflowing
+		// content so each component wraps itself instead of ScrollView cutting it short.
+		if (!scrollbarReserved && transcriptLines.length > this.#viewportHeight) {
+			transcriptWidth = Math.max(1, this.#width - 1);
+			transcriptLines = this.#renderComponents(this.options.transcript, transcriptWidth);
+		}
+		const transcriptChanged = !this.#sameTranscriptLines(transcriptLines);
 		if (this.#selection) {
 			const last = Math.max(this.#selection.anchor.line, this.#selection.head.line);
 			// A reflow or replacement before the selection invalidates its row coordinates.
@@ -236,10 +252,15 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 		this.#transcriptLines = transcriptLines;
 		this.#transcriptWidth = transcriptWidth;
 		const rangesByLine = new Map<number, { start: number; end: number }[]>();
+		this.#refreshSearchQuery();
 		if (this.#search) {
 			const search = this.#search;
 			const current = search.matches[search.current];
-			search.matches = findTranscriptMatches(transcriptLines, search.input.getValue());
+			const query = search.input.getValue();
+			if (transcriptChanged || search.matchQuery !== query) {
+				search.matches = findTranscriptMatches(transcriptLines, query);
+				search.matchQuery = query;
+			}
 			const retained = search.matches.findIndex(
 				match => match.line === current?.line && match.start === current.start,
 			);
@@ -253,7 +274,7 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 			const [first, last] = this.#normalizedSelection();
 			for (let line = first.line; line <= last.line; line++) {
 				const start = line === first.line ? first.unit : 0;
-				const end = line === last.line ? last.unit : stripVTControlCharacters(transcriptLines[line] ?? "").length;
+				const end = line === last.line ? last.unit : stripTerminalSequences(transcriptLines[line] ?? "").length;
 				if (end > start) rangesByLine.set(line, [{ start, end }]);
 			}
 		}
@@ -294,7 +315,9 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 		text = truncateToWidth(text, this.#width);
 		const padding = Math.max(0, this.#width - visibleWidth(text));
 		const left = center ? Math.floor(padding / 2) : 0;
-		return `${" ".repeat(left)}${CHIP_BG}${CHIP_FG}${text}\x1b[0m${" ".repeat(padding - left)}`;
+		ensureThemeSync();
+		const styled = theme.bgFill("userMessageBg", theme.fgOnBg("userMessageText", "userMessageBg", text));
+		return `${" ".repeat(left)}${styled}${" ".repeat(padding - left)}`;
 	}
 
 	#renderSearchBar(): string {
@@ -317,8 +340,19 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 
 	#renderComponents(components: readonly Component[], width: number): string[] {
 		const lines: string[] = [];
-		for (const component of components) lines.push(...component.render(width));
+		for (const component of components) {
+			lines.push(
+				...(component instanceof TranscriptContainer ? component.renderDocument(width) : component.render(width)),
+			);
+		}
 		return lines;
+	}
+
+	#sameTranscriptLines(lines: readonly string[]): boolean {
+		return (
+			this.#transcriptLines.length === lines.length &&
+			this.#transcriptLines.every((line, index) => line === lines[index])
+		);
 	}
 
 	#renderDock(width: number, terminalRows: number): string[] {
@@ -515,7 +549,7 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 		head: SelectionPoint;
 	} {
 		const styled = this.#transcriptLines[line] ?? "";
-		const text = stripVTControlCharacters(styled);
+		const text = stripTerminalSequences(styled);
 		if (clicks >= 3) {
 			return { anchor: { line, unit: 0 }, head: { line, unit: text.length } };
 		}
@@ -531,7 +565,7 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 		const [first, last] = this.#normalizedSelection();
 		const lines: string[] = [];
 		for (let line = first.line; line <= last.line; line++) {
-			const text = stripVTControlCharacters(this.#transcriptLines[line] ?? "");
+			const text = stripTerminalSequences(this.#transcriptLines[line] ?? "");
 			lines.push(text.slice(line === first.line ? first.unit : 0, line === last.line ? last.unit : text.length));
 		}
 		// An anchor sitting at a line boundary contributes no text of its own.
@@ -539,9 +573,7 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 		while (lines.length > 1 && lines[lines.length - 1]!.trim().length === 0) lines.pop();
 		const text = lines.map(line => line.trimEnd()).join("\n");
 		if (text.length === 0) return;
-		// OSC 52 payloads are base64; terminals cap them (tmux defaults to 256 KiB),
-		// which covers multi-screen selections comfortably.
-		this.options.write(`\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`);
+		void copyToClipboard(text);
 		this.#showFlash(`Copied ${lines.length} line${lines.length === 1 ? "" : "s"}`);
 	}
 
@@ -598,30 +630,11 @@ export function findTranscriptMatches(lines: readonly string[], query: string): 
 	const pattern = new RegExp(RegExp.escape(query), "giu");
 	const matches: TranscriptMatch[] = [];
 	for (let line = 0; line < lines.length; line++) {
-		for (const match of stripVTControlCharacters(lines[line]!).matchAll(pattern)) {
+		for (const match of stripTerminalSequences(lines[line]!).matchAll(pattern)) {
 			matches.push({ line, start: match.index, end: match.index + match[0].length });
 		}
 	}
 	return matches;
-}
-
-/** End index (exclusive) of the CSI/OSC escape sequence starting at `from` in `line`. */
-function endOfEscapeSequence(line: string, from: number): number {
-	const kind = line[from + 1];
-	if (kind === "[") {
-		let i = from + 2;
-		while (i < line.length && !/[A-Za-z]/.test(line[i]!)) i++;
-		return Math.min(line.length, i + 1);
-	}
-	if (kind === "]") {
-		// OSC terminates on BEL or ST (ESC \); OSC 8 link payloads ride inside.
-		for (let i = from + 2; i < line.length; i++) {
-			if (line[i] === "\x07") return i + 1;
-			if (line[i] === "\x1b" && line[i + 1] === "\\") return i + 2;
-		}
-		return line.length;
-	}
-	return Math.min(line.length, from + 2);
 }
 
 /**
@@ -644,11 +657,10 @@ export function highlightTranscriptRanges(line: string, ranges: readonly { start
 	let highlighted = false;
 	let i = 0;
 	while (i < line.length) {
-		if (line[i] === "\x1b") {
-			const end = endOfEscapeSequence(line, i);
+		const end = endOfTerminalSequence(line, i);
+		if (end > i) {
 			out += line.slice(i, end);
-			// An in-range SGR (a reset in particular) drops the highlight; re-open it.
-			if (highlighted) out += "\x1b[7m";
+			if (highlighted && line[i + 1] === "[" && line[end - 1] === "m") out += "\x1b[7m";
 			i = end;
 			continue;
 		}
@@ -675,7 +687,7 @@ type SelectionPoint = { line: number; unit: number };
 
 /** Maps a visible column to a code-unit index in the SGR-stripped text of a styled line. */
 function pickCodeUnit(line: string, visibleCol: number): number {
-	return colToCodeUnitIndex(stripVTControlCharacters(line), visibleCol);
+	return colToCodeUnitIndex(stripTerminalSequences(line), visibleCol);
 }
 
 /** Word range [start, end) around idx: whitespace-delimited, / and - stay joined (terminal double-click). */

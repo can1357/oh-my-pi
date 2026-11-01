@@ -8,7 +8,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { createSettingsHost } from "@oh-my-pi/pi-coding-agent/config/settings-ui";
-import { cfgTuiMode } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { cfgTuiMode, cfgTuiMouse } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import * as themeModule from "@oh-my-pi/pi-tui/theme";
 import { Input, TUI, isKittyProtocolActive, setKittyProtocolActive } from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -20,6 +20,14 @@ describe("InteractiveMode fullscreen", () => {
 	let session: AgentSession;
 	let tempDir: TempDir;
 	let terminal: VirtualTerminal;
+
+	class StaticLines {
+		constructor(private readonly lines: readonly string[]) {}
+
+		render(): readonly string[] {
+			return this.lines;
+		}
+	}
 
 	beforeEach(async () => {
 		resetSettingsForTest();
@@ -119,6 +127,51 @@ describe("InteractiveMode fullscreen", () => {
 		} finally {
 			setKittyProtocolActive(kitty);
 		}
+	});
+
+	it("routes an enhanced clipboard paste into the open search field", async () => {
+		mode.editor.setText("draft");
+		mode.present(new StaticLines(["kitty search target", ...Array.from({ length: 60 }, (_, i) => `line-${i}`)]));
+		cfgTuiMode.set(Settings.instance, "fullscreen");
+		await terminal.waitForRender();
+		mode.ui.injectDebugInput("\x06");
+		await terminal.waitForRender();
+
+		const osc = "\x1b]5522;";
+		const st = "\x1b\\";
+		const textMime = Buffer.from("text/plain", "utf8").toString("base64");
+		const packet = (metadata: string, payload?: string) =>
+			`${osc}${metadata}${payload === undefined ? "" : `;${payload}`}${st}`;
+		for (const data of [
+			packet("type=read:status=OK"),
+			packet(`type=read:status=DATA:mime=${textMime}`),
+			packet("type=read:status=DONE"),
+			packet("type=read:status=OK"),
+			packet(`type=read:status=DATA:mime=${textMime}`, Buffer.from("kitty", "utf8").toString("base64")),
+			packet("type=read:status=DONE"),
+		]) {
+			mode.ui.injectDebugInput(data);
+		}
+		await terminal.waitForRender();
+
+		expect(mode.editor.getText()).toBe("draft");
+		expect(terminal.getViewport()[0]).toContain("find: kitty");
+		expect(terminal.getViewport().join("\n")).toContain("kitty search target");
+	});
+
+	it("keeps fullscreen wheel scrolling alive when inline mouse tracking is enabled", async () => {
+		cfgTuiMouse.set(mode.settings, true);
+		mode.present(new StaticLines(Array.from({ length: 60 }, (_, index) => `scroll-row-${index + 1}`)));
+		await terminal.waitForRender();
+		cfgTuiMode.set(Settings.instance, "fullscreen");
+		await terminal.waitForRender();
+
+		const before = terminal.getViewport()[0] ?? "";
+		mode.ui.injectDebugInput("\x1b[<64;1;1M");
+		await terminal.waitForRender(() => (terminal.getViewport()[0] ?? "") !== before);
+
+		expect(Bun.stripANSI(terminal.getViewport()[0] ?? "")).toMatch(/^scroll-row-/);
+		expect(mode.editor.getText()).toBe("");
 	});
 
 	it("hands search input back to a replacement prompt and then to the chat editor", async () => {

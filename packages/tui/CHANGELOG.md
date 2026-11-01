@@ -9,7 +9,7 @@
 
 ### Fixed
 
-- Fixed unterminated text styling bleeding into ScrollView scrollbars.
+- Fixed unterminated text styling bleeding into ScrollView scrollbars. ([#17695](https://github.com/can1357/oh-my-pi/pull/17695) by [@Err0rCM](https://github.com/Err0rCM))
 ### Breaking Changes
 
 - `GroupedLineContext.isUrl` is replaced by `url`, the internal URL a header names or a body row belongs to ([#17608](https://github.com/can1357/oh-my-pi/pull/17608) by [@JustasMasiulis](https://github.com/JustasMasiulis))
