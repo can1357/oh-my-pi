@@ -1387,6 +1387,50 @@ export function sambanovaModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 3.6 TokenRhythm
+// ---------------------------------------------------------------------------
+
+/** TokenRhythm discovery inputs: `apiKey` enables the live roster; `baseUrl` defaults to TokenRhythm. */
+export interface TokenRhythmModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/**
+ * TokenRhythm's model manager. `/v1/models` requires a key and lists chat
+ * models with `context_length` and `max_completion_tokens`. Its prices are
+ * CNY, so rows stay unpriced rather than being read as a USD card; reasoning
+ * and wire format come from `providers/tokenrhythm.kdl`.
+ */
+export function tokenrhythmModelManagerOptions(
+	config?: TokenRhythmModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("tokenrhythm")!;
+	return {
+		providerId: "tokenrhythm",
+		cacheProviderId: resolveModelCacheProviderId("tokenrhythm", { apiKey, baseUrl }),
+		dynamicModelsAuthoritative: true,
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "tokenrhythm",
+					baseUrl,
+					apiKey,
+					mapModel: (entry, defaults) => ({
+						...defaults,
+						contextWindow: toPositiveNumber(entry.context_length, defaults.contextWindow),
+						maxTokens: toPositiveNumber(entry.max_completion_tokens, defaults.maxTokens),
+					}),
+					fetch: config?.fetch,
+				}),
+		}),
+	};
+}
+
+// ---------------------------------------------------------------------------
 // 4. Hugging Face
 // ---------------------------------------------------------------------------
 

@@ -1,0 +1,10 @@
+auth "tokenrhythm" {
+	name "TokenRhythm"
+	login "api-key" {
+		auth-url "https://tokenrhythm.studio/account/keys"
+		instructions "Create or copy your API key from the TokenRhythm dashboard"
+		prompt "Paste your TokenRhythm API key" placeholder="sk_..."
+		// `/v1/models` requires a key (401 without one), so it validates.
+		validate "models-endpoint" label="TokenRhythm" url="https://tokenrhythm.studio/v1/models"
+	}
+}

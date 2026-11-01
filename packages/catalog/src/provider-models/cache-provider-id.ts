@@ -29,6 +29,10 @@ const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = 
 	// Kimi Code's roster is plan-gated and discovery is authoritative, so a
 	// shared namespace would serve one plan's ids to another plan's credential.
 	"kimi-code": true,
+	// `/v1/models` requires a key, so the roster can differ per account; a key
+	// or endpoint switch must re-run discovery instead of serving the previous
+	// credential's authoritative rows for the full TTL.
+	tokenrhythm: true,
 };
 
 /** Whether a provider's model-cache namespace requires its resolved credential. */
@@ -55,6 +59,8 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 			return "https://opencode.ai/zen/v1";
 		case "vllm":
 			return "http://127.0.0.1:8000/v1";
+		case "tokenrhythm":
+			return "https://tokenrhythm.studio/v1";
 		default:
 			return undefined;
 	}
@@ -147,6 +153,14 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			const apiKey = options.apiKey ?? "";
 			const scope = `${jwtCredentialSubject(apiKey) ?? apiKey}\u0000${baseUrl}`;
 			return `kimi-code:models-v1:${Bun.hash(scope).toString(36)}`;
+		}
+		case "tokenrhythm": {
+			// The roster follows both the account and the endpoint. Discovery
+			// passes the `/v1`-suffixed default while the registry passes the raw
+			// configured value, so strip trailing slashes before hashing.
+			const baseUrl = (options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!).trim().replace(/\/+$/, "");
+			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
+			return `tokenrhythm:models-v1:${Bun.hash(scope).toString(36)}`;
 		}
 		case "muse-code": {
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
