@@ -119,6 +119,15 @@ export const TINY_MEMORY_LOCAL_MODELS = [
 		description: "Fastest load; solid all-rounder, slightly noisier extraction labels.",
 		contextNote: "Use when local startup cost is the priority.",
 	},
+	{
+		key: "lfm3-1.7b",
+		repo: "LiquidAI/LFM3-1.7B-ONNX",
+		dtype: "q4",
+		mlxRepo: "LiquidAI/LFM3-1.7B-MLX-4bit",
+		label: "LFM3 1.7B",
+		description: "Successor to LFM2 1.2B; ONNX q4 runs on Windows and Linux CPU, about 1.7 GB cached.",
+		contextNote: "Use when a newer LFM-family memory model is preferred over the fastest-loading LFM2.",
+	},
 ] as const satisfies readonly TinyTitleLocalModelSpec[];
 
 export type TinyMemoryLocalModelKey = (typeof TINY_MEMORY_LOCAL_MODELS)[number]["key"];

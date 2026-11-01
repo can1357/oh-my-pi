@@ -51,6 +51,42 @@ import { TinyWorkerServer } from "./worker-server";
 
 const STOP_DECODE_WINDOW_TOKENS = 32;
 
+/** ONNX session surface read by the logits-feed shim. */
+interface LogitsFeedSession {
+	readonly inputNames: string[];
+}
+
+/** The loaded model surface the logits-feed shim reads and wraps. */
+interface LogitsFeedModel {
+	forward(modelInputs: Record<string, unknown>): Promise<Record<string, unknown>>;
+	sessions?: Record<string, LogitsFeedSession | undefined>;
+}
+
+/** Whether any loaded ONNX session takes a `logits_to_keep` input (LiquidAI LFM3)
+ *  instead of `num_logits_to_keep`, which transformers.js fills in itself. */
+export function needsLogitsToKeepFeed(model: TextGenerationPipeline["model"]): boolean {
+	const sessions = Object.values((model as unknown as LogitsFeedModel).sessions ?? {});
+	return sessions.some(session => session?.inputNames.includes("logits_to_keep") === true);
+}
+
+/** Feed `logits_to_keep` (last token only) to graphs that require a logits input
+ *  transformers.js does not fill in. Returns false, leaving the model untouched,
+ *  when no session declares that input. */
+export function ensureLogitsToKeepFeed(
+	transformers: TransformersRuntime,
+	model: TextGenerationPipeline["model"],
+): boolean {
+	if (!needsLogitsToKeepFeed(model)) return false;
+	const target = model as unknown as LogitsFeedModel;
+	// One tensor for the model's lifetime: generation needs last-token logits only,
+	// and dropping the other rows keeps the logits tensor small. LFM3's export
+	// declares this input as int64 shape [1], so the dims are rank-1, not scalar.
+	const keepLast = new transformers.Tensor("int64", [1n], [1]);
+	const forward = target.forward.bind(target);
+	target.forward = modelInputs => forward({ logits_to_keep: keepLast, ...modelInputs });
+	return true;
+}
+
 export interface TransformersRuntime extends TransformersRuntimeMetadata {
 	env: {
 		cacheDir?: string;
@@ -61,6 +97,7 @@ export interface TransformersRuntime extends TransformersRuntimeMetadata {
 		ERROR: unknown;
 	};
 	StoppingCriteria: new () => TransformersStoppingCriteria;
+	Tensor: new (type: "int64", data: readonly bigint[], dims: readonly number[]) => unknown;
 	pipeline: (
 		task: "text-generation",
 		model: string,
@@ -153,7 +190,7 @@ class OnnxModel {
 		transformers: TransformersRuntime,
 		reply: ReplyTransport,
 		requestId: string,
-	): Promise<{ generator: TextGenerationPipeline; device: TinyOnnxDevice }> {
+	): Promise<{ generator: TextGenerationPipeline; device: TinyOnnxDevice; transformers: TransformersRuntime }> {
 		const devices = tinyModelDeviceLoadOrder(this.#devicePreference);
 		if (devices[0] !== this.#devicePreference.device) {
 			logger.warn("tiny-model: requested device is not an ONNX provider usable in the worker; using CPU", {
@@ -171,7 +208,7 @@ class OnnxModel {
 					dtype: this.#dtypeOverride ?? this.#spec.dtype,
 					progress_callback: info => sendProgress(reply, requestId, this.#modelKey, info),
 				});
-				return { generator, device };
+				return { generator, device, transformers };
 			} catch (error) {
 				const deviceDiagnostics = await formatOnnxRuntimeCudaDiagnostics(transformers, device, error);
 				if (deviceDiagnostics) cudaDiagnostics = deviceDiagnostics;
@@ -202,7 +239,7 @@ class OnnxModel {
 		const loaded = this.#loadRuntime(reply, requestId)
 			.then(transformers => this.#loadPipelineWithDeviceFallback(transformers, reply, requestId))
 			.then(
-				({ generator, device }) => {
+				({ generator, device, transformers }) => {
 					logger.debug("tiny-model: local model loaded", {
 						modelKey: this.#modelKey,
 						repo: this.#spec.repo,
@@ -211,6 +248,12 @@ class OnnxModel {
 						dtype: this.#dtypeOverride ?? this.#spec.dtype,
 						elapsedMs: Math.round(performance.now() - startedAt),
 					});
+					if (ensureLogitsToKeepFeed(transformers, generator.model)) {
+						logger.debug("tiny-model: supplying logits_to_keep feed for ONNX graph", {
+							modelKey: this.#modelKey,
+							device,
+						});
+					}
 					return generator;
 				},
 				error => {
