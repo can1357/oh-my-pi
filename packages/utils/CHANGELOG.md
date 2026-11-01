@@ -7,11 +7,13 @@
 - Added `longestRetryHint`, the longest wait a response names across every retry header and every hint in its body ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
 - Added `retryWait` to `fetchWithRetry`'s options: every retry delay sleeps through it, with the request's signal, in place of the built-in timer, so a caller's own retry-wait hook schedules transport retries too ([#17569](https://github.com/can1357/oh-my-pi/pull/17569) by [@sjawhar](https://github.com/sjawhar))
 - Added `parseRetryAfterHeaderMs`, the wait one `retry-after-ms` or `Retry-After` header value states, as every retry-hint reader now reads it ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- Added `getRetryAfterMsFromHeaders`, the one reader of a response's retry headers that `fetchWithRetry`, `longestRetryHint` and pi-ai's failed-message wait share ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
 
 ### Fixed
 
 - `extractRetryHint` and `longestRetryHint` read a `Retry-After` date with no zone as GMT, as an HTTP-date is, instead of in this machine's zone, and read no wait from a date with no zone in a message body (`reset at 2026-11-01 01:40:17`, `将在 … 重置`, `retry-after: 2026-11-01T01:40:17`) unless the provider declares the zone its stamps use; read as UTC, such a date once gave eight hours where the server's header said 750 ms. The new `excludeDates` option reads only a body's relative waits, for a caller that already has the header's wait ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
-- `fetchWithRetry` and `extractRetryHint` read a `Retry-After` or `retry-after-ms` header sent twice (`9, 120`) at its longest value; before, it read as no wait and the request was retried after 500 ms ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- `fetchWithRetry` and `extractRetryHint` read a `Retry-After` or `retry-after-ms` header sent twice (`9, 120`) at its longest value when every part is a bare delay; before, it read as no wait and the request was retried after 500 ms ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- `fetchWithRetry` reads a `Retry-After` ISO date with a decimal comma (`…T09:27:00,900+02:00`) at its fraction, reads `0x0`, `-1` or `-0` as no wait instead of retry now, and reads `x-ratelimit-reset: 9` as 9 s and an epoch-millisecond reset as the time left to it, as every other reader does ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.2] - 2026-10-31
 

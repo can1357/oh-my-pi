@@ -1,5 +1,10 @@
 import { retryResetTimezoneOffsetFor } from "@oh-my-pi/pi-catalog/compat/behavior";
-import { extractRetryHint, longestRetryHint, parseRetryAfterHeaderMs } from "@oh-my-pi/pi-utils";
+import {
+	extractRetryHint,
+	getRetryAfterMsFromHeaders as getRetryAfterMsFromSharedHeaders,
+	longestRetryHint,
+	parseRetryAfterHeaderMs,
+} from "@oh-my-pi/pi-utils";
 import { markRetryWaitRefused, type RefusedRetryWait, statedRetryWaitLimit } from "./retry-wait";
 
 export type HeadersLike = Headers | Record<string, string | undefined> | undefined | null;
@@ -251,24 +256,14 @@ export function retryWaitBounds(
 }
 
 /**
- * The wait a response's headers state. `retry-after-ms` and `Retry-After` are
- * the server telling the client how long to wait, and when either is present
- * it is the answer, `0` (retry now) included. `x-ratelimit-reset[-ms]` says
- * when a rate window ends — a bound on when capacity returns, not an
- * instruction — and is read only when no explicit wait is stated: a "retry in
- * 1 second" beside a window that ends in an hour is one second, and a
- * `Retry-After: 0` beside it is an immediate retry. Each value is read as
- * `fetchWithRetry` reads it ({@link parseRetryAfterHeaderMs}).
+ * The wait a response's headers state, read by the same pi-utils reader that
+ * `fetchWithRetry` and `longestRetryHint` use, rounded up to whole
+ * milliseconds. An explicit retry instruction, including a literal `0`, wins
+ * over a rate-window reset.
  */
 export function getRetryAfterMsFromHeaders(headers: HeadersLike): number | undefined {
-	if (!headers) return undefined;
-	return (
-		getExplicitRetryAfterMsFromHeaders(headers) ??
-		longestWait(
-			parseResetHeader(getHeaderValue(headers, "x-ratelimit-reset-ms"), "ms"),
-			parseResetHeader(getHeaderValue(headers, "x-ratelimit-reset"), "s"),
-		)
-	);
+	const waitMs = getRetryAfterMsFromSharedHeaders(headers);
+	return waitMs === undefined ? undefined : Math.ceil(waitMs);
 }
 
 /** `retry-after-ms` and `Retry-After`: the headers that tell the client to wait, rounded up to whole milliseconds. */
@@ -318,34 +313,4 @@ function getHeaderValue(headers: Headers | Record<string, string | undefined>, n
 		}
 	}
 	return undefined;
-}
-
-function parseResetHeader(value: string | undefined, unit: "ms" | "s"): number | undefined {
-	if (!value) return undefined;
-	const numeric = Number(value);
-	if (!Number.isFinite(numeric) || numeric <= 0) return undefined;
-
-	const nowMs = Date.now();
-	let targetMs: number | undefined;
-
-	if (unit === "ms") {
-		if (numeric > 1e12) {
-			targetMs = numeric;
-		} else if (numeric > 1e9) {
-			targetMs = numeric * 1000;
-		} else {
-			return Math.ceil(numeric);
-		}
-	} else {
-		if (numeric > 1e12) {
-			targetMs = numeric;
-		} else if (numeric > 1e9) {
-			targetMs = numeric * 1000;
-		} else {
-			return Math.ceil(numeric * 1000);
-		}
-	}
-
-	if (targetMs <= nowMs) return undefined;
-	return Math.ceil(targetMs - nowMs);
 }

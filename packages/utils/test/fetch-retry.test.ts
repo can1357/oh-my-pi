@@ -209,18 +209,62 @@ describe("fetchWithRetry", () => {
 		expect(error.message).toBe("Network error: getaddrinfo ENOTFOUND api.openai.com");
 	});
 
-	it("returns a 429 at once when its duplicate Retry-After lines, arriving joined, name a wait past maxDelayMs", async () => {
+	/** `waitMs` from now as an ISO date-time in UTC+02:00 with a decimal comma before its fraction. */
+	const isoCommaPlus2 = (waitMs: number) =>
+		`${new Date(Date.now() + waitMs + 2 * 3_600_000).toISOString().slice(0, 19)},900+02:00`;
+
+	it("retries a 429 whose Retry-After is an ISO date-time with a decimal comma 1 s out, instead of reading the zone offset as the wait", async () => {
 		let calls = 0;
-		const response = await fetchWithRetry("https://example.invalid/joined-retry-after", {
+		const response = await fetchWithRetry("https://example.invalid/iso-comma", {
 			fetch: async () => {
 				calls++;
-				return new Response("rate limited", { status: 429, headers: { "retry-after": "9, 120" } });
+				return calls === 1
+					? new Response("rate limited", { status: 429, headers: { "retry-after": isoCommaPlus2(1_000) } })
+					: new Response("ok");
 			},
 			maxAttempts: 3,
 		});
 
-		// 120 s is past the default 60 s cap: the caller fails fast instead of
-		// retrying on a 500 ms backoff the server's 120 s forbids.
+		// Treating the decimal comma as a list separator read the timestamp's
+		// UTC+02:00 offset as a two-hour wait, so the default cap suppressed the retry.
+		expect(calls).toBe(2);
+		expect(response.status).toBe(200);
+	});
+
+	it("retries a 429 whose epoch-millisecond x-ratelimit-reset is 1 s out", async () => {
+		let calls = 0;
+		const response = await fetchWithRetry("https://example.invalid/epoch-ms-reset", {
+			fetch: async () => {
+				calls++;
+				return calls === 1
+					? new Response("rate limited", {
+							status: 429,
+							headers: { "x-ratelimit-reset": String(Date.now() + 1_000) },
+						})
+					: new Response("ok");
+			},
+			maxAttempts: 3,
+		});
+
+		// Read as epoch seconds, the value was 1.8e15 ms out and the 429 came back.
+		expect(calls).toBe(2);
+		expect(response.status).toBe(200);
+	});
+
+	it("returns a 429 at once when Retry-After: 0x0 sits beside a one-hour window reset", async () => {
+		let calls = 0;
+		const response = await fetchWithRetry("https://example.invalid/hex-zero", {
+			fetch: async () => {
+				calls++;
+				return new Response("rate limited", {
+					status: 429,
+					headers: { "retry-after": "0x0", "x-ratelimit-reset": "3600" },
+				});
+			},
+			maxAttempts: 3,
+		});
+
+		// `0x0` is no delay-seconds, so the one-hour reset is the wait: past the cap.
 		expect(calls).toBe(1);
 		expect(response.status).toBe(429);
 	});
@@ -439,14 +483,11 @@ describe("extractRetryHint", () => {
 	});
 
 	it.each([
-		["retry-after", "9, 120", 120_000],
-		["retry-after-ms", "100, 9000", 9_000],
-	] as [string, string, number][])(
-		"reads the longest part of a joined %s header (%s), as longestRetryHint does",
-		(name, value, expected) => {
-			const headers = new Headers({ [name]: value });
-			expect(extractRetryHint(headers)).toBe(expected);
-			expect(longestRetryHint(headers)).toBe(expected);
-		},
-	);
+		["two joined delay-seconds", "9, 120", 120_000],
+		["a decimal delay-seconds part", "9.125, 9", 9_125],
+	] as [string, string, number][])("reads Retry-After %s at its longest delay", (_label, value, expected) => {
+		const headers = new Headers({ "retry-after": value });
+		expect(extractRetryHint(headers)).toBe(expected);
+		expect(longestRetryHint(headers)).toBe(expected);
+	});
 });
