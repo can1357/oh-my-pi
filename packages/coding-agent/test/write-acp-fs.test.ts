@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -11,6 +11,10 @@ import type { ClientBridge } from "@oh-my-pi/pi-coding-agent/session/client-brid
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 const FILE_CONTENT = "bridge write content\n";
 
@@ -68,20 +72,16 @@ describe("write tool ACP fs routing", () => {
 		const bridgeSpy = spyOn(bridge, "writeTextFile");
 		const bunWriteSpy = spyOn(Bun, "write");
 
-		try {
-			const session = createSession(tmpDir, { bridge });
-			const tool = new WriteTool(session);
+		const session = createSession(tmpDir, { bridge });
+		const tool = new WriteTool(session);
 
-			await tool.execute("call-1", { path: filePath, content: FILE_CONTENT });
+		await tool.execute("call-1", { path: filePath, content: FILE_CONTENT });
 
-			// Bridge was called with the exact path and content
-			expect(bridgeSpy).toHaveBeenCalledTimes(1);
-			expect(bridgeSpy).toHaveBeenCalledWith({ path: filePath, content: FILE_CONTENT });
-			// Disk write must not have been called — bridge is the destination
-			expect(bunWriteSpy).not.toHaveBeenCalled();
-		} finally {
-			bunWriteSpy.mockRestore();
-		}
+		// Bridge was called with the exact path and content
+		expect(bridgeSpy).toHaveBeenCalledTimes(1);
+		expect(bridgeSpy).toHaveBeenCalledWith({ path: filePath, content: FILE_CONTENT });
+		// Disk write must not have been called — bridge is the destination
+		expect(bunWriteSpy).not.toHaveBeenCalled();
 	});
 
 	it("keys the returned snapshot header on bridge-transformed disk content", async () => {

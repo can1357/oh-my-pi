@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Agent, AppendOnlyContextManager } from "@oh-my-pi/pi-agent-core";
@@ -14,6 +14,10 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { assistantMsg } from "./utilities";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 const cleanup: Array<() => Promise<void>> = [];
 let sharedDir: TempDir;
@@ -366,7 +370,7 @@ describe("AgentSession.newSession boundary", () => {
 		const originalId = sessionManager.getSessionId();
 		const refreshReached = Promise.withResolvers<void>();
 		const refreshRelease = Promise.withResolvers<void>();
-		const refresh = spyOn(session, "refreshBaseSystemPrompt").mockImplementation(async () => {
+		spyOn(session, "refreshBaseSystemPrompt").mockImplementation(async () => {
 			refreshReached.resolve();
 			await refreshRelease.promise;
 		});
@@ -389,7 +393,6 @@ describe("AgentSession.newSession boundary", () => {
 		} finally {
 			refreshRelease.resolve();
 			await operation;
-			refresh.mockRestore();
 		}
 	});
 

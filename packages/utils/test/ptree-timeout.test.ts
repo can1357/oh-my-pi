@@ -1,9 +1,13 @@
-import { describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import { createLinuxSubreaperScript, exec, NonZeroExitError, spawn, TimeoutError } from "@oh-my-pi/pi-utils/ptree";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 async function supportsLinuxMountNamespaces(): Promise<boolean> {
 	if (process.platform !== "linux") return false;
@@ -132,23 +136,19 @@ sleep 30
 					terminate: () => Promise.resolve(killOnly(subreaper.pid) > 0),
 				} as unknown as Process;
 				const nativeFromPid = Process.fromPid.bind(Process);
-				const fromPid = spyOn(Process, "fromPid").mockImplementation(pid =>
+				spyOn(Process, "fromPid").mockImplementation(pid =>
 					pid === child.pid ? controlledSubreaper : nativeFromPid(pid),
 				);
 
-				try {
-					child.kill(new TimeoutError(1, ""), -1);
-					controller.abort("concurrent abort");
+				child.kill(new TimeoutError(1, ""), -1);
+				controller.abort("concurrent abort");
 
-					const result = await child.wait({ allowAbort: true });
-					expect(result.exitError).toBeInstanceOf(TimeoutError);
-					expect(observedAdoption, "the worker must reparent to the live subreaper during cleanup").toBe(true);
-					expect(worker.status(), `adopted descendant ${worker.pid} survived cleanup`).not.toBe(
-						ProcessStatus.Running,
-					);
-				} finally {
-					fromPid.mockRestore();
-				}
+				const result = await child.wait({ allowAbort: true });
+				expect(result.exitError).toBeInstanceOf(TimeoutError);
+				expect(observedAdoption, "the worker must reparent to the live subreaper during cleanup").toBe(true);
+				expect(worker.status(), `adopted descendant ${worker.pid} survived cleanup`).not.toBe(
+					ProcessStatus.Running,
+				);
 			} finally {
 				for (const processHandle of cleanupProcesses) processHandle.killTree(9);
 				await fs.rm(testRoot, { recursive: true, force: true });

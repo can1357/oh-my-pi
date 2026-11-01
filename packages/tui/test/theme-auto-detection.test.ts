@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import * as themeModule from "@oh-my-pi/pi-tui/theme";
 import * as nativesModule from "@oh-my-pi/pi-natives";
 import { type MacAppearanceObserver, MacOSAppearance } from "@oh-my-pi/pi-natives";
@@ -16,6 +16,14 @@ type ThemeTestGlobals = {
 };
 
 const withThemeTestGlobals = (globals: ThemeTestGlobals = {}) => {
+	const restorePlatform = () => {
+		Object.defineProperty(process, "platform", {
+			value: originalPlatform,
+			configurable: true,
+			writable: true,
+		});
+	};
+	onTestFinished(restorePlatform);
 	Object.defineProperty(process, "platform", {
 		value: globals.platform ?? "darwin",
 		configurable: true,
@@ -31,16 +39,10 @@ const withThemeTestGlobals = (globals: ThemeTestGlobals = {}) => {
 	return {
 		[Symbol.dispose]() {
 			themeModule.stopThemeWatcher();
-			Object.defineProperty(process, "platform", {
-				value: originalPlatform,
-				configurable: true,
-				writable: true,
-			});
 			if (originalColorfgbg === undefined) delete Bun.env.COLORFGBG;
 			else Bun.env.COLORFGBG = originalColorfgbg;
 			if (originalZellij === undefined) delete Bun.env.ZELLIJ;
 			else Bun.env.ZELLIJ = originalZellij;
-			vi.restoreAllMocks();
 		},
 	};
 };

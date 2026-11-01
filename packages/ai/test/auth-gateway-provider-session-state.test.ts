@@ -9,7 +9,7 @@
  * server-side owner, every containerized / robomp turn re-pays the rejected
  * upstream round-trip that already taught the lesson.
  */
-import { describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -27,6 +27,10 @@ import type { Api, Context, Model, ProviderSessionState } from "@oh-my-pi/pi-ai/
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { withOfficialAnthropicEndpoint } from "./helpers";
 import { captureFetch, type CapturedRequest, completionsChunks, kimiK3 } from "./helpers/factory-droid";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 function makeAnthropicModel(baseUrl: string): Model<"anthropic-messages"> {
 	return buildModel({
@@ -230,7 +234,7 @@ it.each(["/v1/pi/stream", "/v1/chat/completions"])(
 		});
 		const getWithCredential = storage.keys.getWithCredential.bind(storage.keys);
 		let replaceToken = false;
-		const bearerSpy = spyOn(storage.keys, "getWithCredential").mockImplementation(async (...args) => {
+		spyOn(storage.keys, "getWithCredential").mockImplementation(async (...args) => {
 			const selected = await getWithCredential(...args);
 			if (replaceToken) {
 				await storage.credentials.set("factory-droid", {
@@ -277,7 +281,6 @@ it.each(["/v1/pi/stream", "/v1/chat/completions"])(
 				["https://api.eu.factory.ai/api/llm/o/v1/chat/completions", "org-eu", "Bearer eu-selected-token"],
 			]);
 		} finally {
-			bearerSpy.mockRestore();
 			await gateway.close();
 			storage.close();
 		}

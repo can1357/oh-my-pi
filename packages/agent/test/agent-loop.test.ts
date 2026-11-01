@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import {
@@ -29,6 +29,10 @@ import type { HarmonyDetection } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import * as harmonyLeak from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { createAssistantMessage, createHarmonyMitigationModel, createUserMessage } from "./helpers";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 declare module "@oh-my-pi/pi-agent-core/types" {
 	interface CustomAgentMessages {
@@ -2184,48 +2188,42 @@ describe("agentLoop with AgentMessage", () => {
 		};
 		const detectOnce = harmonyLeak.detectHarmonyLeakInAssistantMessage;
 		let firstDetection = true;
-		const detectSpy = vi
-			.spyOn(harmonyLeak, "detectHarmonyLeakInAssistantMessage")
-			.mockImplementation((message, toolArgParseEnd) => {
-				if (firstDetection) {
-					firstDetection = false;
-					return detection;
-				}
-				return detectOnce(message, toolArgParseEnd);
-			});
+		vi.spyOn(harmonyLeak, "detectHarmonyLeakInAssistantMessage").mockImplementation((message, toolArgParseEnd) => {
+			if (firstDetection) {
+				firstDetection = false;
+				return detection;
+			}
+			return detectOnce(message, toolArgParseEnd);
+		});
 
-		try {
-			const events: AgentEvent[] = [];
-			const stream = agentLoop([createUserMessage("edit a fixture")], context, config, undefined, mock.stream);
-			for await (const event of stream) events.push(event);
-			const messages = await stream.result();
+		const events: AgentEvent[] = [];
+		const stream = agentLoop([createUserMessage("edit a fixture")], context, config, undefined, mock.stream);
+		for await (const event of stream) events.push(event);
+		const messages = await stream.result();
 
-			const results = messages.filter((m): m is ToolResultMessage => m.role === "toolResult");
-			expect(results).toHaveLength(1);
-			const resultId = results[0]!.toolCallId;
-			expect(resultId.trim().length).toBeGreaterThan(0);
-			// The persisted state agrees on one identity for the call and its result.
-			const assistant = messages.find((m): m is AssistantMessage => m.role === "assistant");
-			const stateCallId = assistant?.content.find(block => block.type === "toolCall")?.id;
-			expect(stateCallId).toBe(resultId);
-			// The committed `message_end` snapshots are the copies persistence
-			// appends (agent.ts); they must already carry the minted id, not a
-			// pre-mint `""` that later in-place repair cannot reach. The discarded
-			// pre-recovery attempt is excluded: its error-stamped turn is meant to
-			// stay malformed so the replay sanitizer drops the orphaned attempt.
-			const snapshotIds = events
-				.filter(
-					(e): e is Extract<AgentEvent, { type: "message_end" }> =>
-						e.type === "message_end" && e.message.role === "assistant" && e.message.stopReason !== "error",
-				)
-				.flatMap(e => (e.message.role === "assistant" ? e.message.content : []))
-				.filter(block => block.type === "toolCall")
-				.map(block => block.id);
-			expect(snapshotIds.length).toBeGreaterThan(0);
-			expect(snapshotIds.filter(id => id !== resultId)).toEqual([]);
-		} finally {
-			detectSpy.mockRestore();
-		}
+		const results = messages.filter((m): m is ToolResultMessage => m.role === "toolResult");
+		expect(results).toHaveLength(1);
+		const resultId = results[0]!.toolCallId;
+		expect(resultId.trim().length).toBeGreaterThan(0);
+		// The persisted state agrees on one identity for the call and its result.
+		const assistant = messages.find((m): m is AssistantMessage => m.role === "assistant");
+		const stateCallId = assistant?.content.find(block => block.type === "toolCall")?.id;
+		expect(stateCallId).toBe(resultId);
+		// The committed `message_end` snapshots are the copies persistence
+		// appends (agent.ts); they must already carry the minted id, not a
+		// pre-mint `""` that later in-place repair cannot reach. The discarded
+		// pre-recovery attempt is excluded: its error-stamped turn is meant to
+		// stay malformed so the replay sanitizer drops the orphaned attempt.
+		const snapshotIds = events
+			.filter(
+				(e): e is Extract<AgentEvent, { type: "message_end" }> =>
+					e.type === "message_end" && e.message.role === "assistant" && e.message.stopReason !== "error",
+			)
+			.flatMap(e => (e.message.role === "assistant" ? e.message.content : []))
+			.filter(block => block.type === "toolCall")
+			.map(block => block.id);
+		expect(snapshotIds.length).toBeGreaterThan(0);
+		expect(snapshotIds.filter(id => id !== resultId)).toEqual([]);
 	});
 
 	it("mints never-materialized tool-call ids uniquely across assistant turns of one run", async () => {
@@ -4214,65 +4212,61 @@ describe("agentLoop with AgentMessage", () => {
 
 	it("discards a drained aside when the deadline expires before insertion", async () => {
 		let now = 100;
-		const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
-		try {
-			const toolSchema = type({ value: "string" });
-			let executed = false;
-			const tool: AgentTool<typeof toolSchema, { value: string }> = {
-				name: "echo",
-				label: "Echo",
-				description: "Echo tool",
-				parameters: toolSchema,
-				async execute(_toolCallId, params) {
-					executed = true;
-					return { content: [{ type: "text", text: "done" }], details: { value: params.value } };
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const toolSchema = type({ value: "string" });
+		let executed = false;
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				executed = true;
+				return { content: [{ type: "text", text: "done" }], details: { value: params.value } };
+			},
+		};
+		const aside = createUserMessage("completion");
+		let committed = false;
+		let discarded: Error | undefined;
+		Object.defineProperties(aside, {
+			[ASIDE_MESSAGE_COMMIT]: { value: () => (committed = true) },
+			[ASIDE_MESSAGE_DISCARD]: { value: (error: Error) => (discarded = error) },
+		});
+		let delivered = false;
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "first" } }] },
+				{ content: ["unused"] },
+			],
+		});
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const stream = agentLoop(
+			[createUserMessage("start")],
+			context,
+			{
+				model: mock.model,
+				convertToLlm: identityConverter,
+				deadline: 200,
+				getAsideMessages: async () => {
+					if (!delivered && executed) {
+						delivered = true;
+						now = 200;
+						return [aside];
+					}
+					return [];
 				},
-			};
-			const aside = createUserMessage("completion");
-			let committed = false;
-			let discarded: Error | undefined;
-			Object.defineProperties(aside, {
-				[ASIDE_MESSAGE_COMMIT]: { value: () => (committed = true) },
-				[ASIDE_MESSAGE_DISCARD]: { value: (error: Error) => (discarded = error) },
-			});
-			let delivered = false;
-			const mock = createMockModel({
-				responses: [
-					{ content: [{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "first" } }] },
-					{ content: ["unused"] },
-				],
-			});
-			const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
-			const stream = agentLoop(
-				[createUserMessage("start")],
-				context,
-				{
-					model: mock.model,
-					convertToLlm: identityConverter,
-					deadline: 200,
-					getAsideMessages: async () => {
-						if (!delivered && executed) {
-							delivered = true;
-							now = 200;
-							return [aside];
-						}
-						return [];
-					},
-				},
-				undefined,
-				mock.stream,
-			);
+			},
+			undefined,
+			mock.stream,
+		);
 
-			for await (const _event of stream) {
-				// Drain the loop.
-			}
-
-			expect(committed).toBe(false);
-			expect(discarded?.message).toContain("not committed");
-			expect(context.messages).not.toContain(aside);
-		} finally {
-			nowSpy.mockRestore();
+		for await (const _event of stream) {
+			// Drain the loop.
 		}
+
+		expect(committed).toBe(false);
+		expect(discarded?.message).toContain("not committed");
+		expect(context.messages).not.toContain(aside);
 	});
 
 	it("isolates discard hooks when a later aside thunk fails", async () => {

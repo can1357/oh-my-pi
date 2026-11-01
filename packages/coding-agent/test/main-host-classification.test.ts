@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from "bun:test";
+import { afterEach, expect, it, onTestFinished } from "bun:test";
 import { discoverAuthStorage } from "@oh-my-pi/pi-coding-agent/sdk";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -19,6 +19,9 @@ it("classifies an interactive host before opening auth storage", async () => {
 	parsed.noExtensions = true;
 	// An interactive launch needs a terminal on stdin; without one it exits 2.
 	const originalIsTTY = process.stdin.isTTY;
+	onTestFinished(() => {
+		Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
+	});
 	Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
 
 	try {

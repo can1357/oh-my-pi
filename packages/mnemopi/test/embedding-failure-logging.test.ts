@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import {
 	embed,
 	resetEmbeddingProviderForTests,
@@ -47,6 +47,7 @@ async function withLocalModelEnv<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 afterEach(() => {
+	vi.restoreAllMocks();
 	resetEmbeddingProviderForTests();
 });
 
@@ -54,55 +55,39 @@ describe("embedding failure logging (#2322)", () => {
 	it("logs local model load failures at debug level with model context", async () => {
 		const debugSpy = spyOn(logger, "debug").mockImplementation(() => {});
 		const warnSpy = spyOn(logger, "warn").mockImplementation(() => {});
-		try {
-			await withLocalModelEnv(async () => {
-				setLocalModelInitializerForTests(async () => {
-					throw new Error("onnx init blew up");
-				});
-
-				expect(await embed(["hello"])).toBeNull();
-
-				expect(debugSpy).toHaveBeenCalledWith(
-					"mnemopi: local embedding model failed to load",
-					expect.objectContaining({
-						model: expect.any(String),
-						error: expect.stringContaining("onnx init blew up"),
-					}),
-				);
-				expect(warnSpy).not.toHaveBeenCalledWith(
-					"mnemopi: local embedding model failed to load",
-					expect.anything(),
-				);
+		await withLocalModelEnv(async () => {
+			setLocalModelInitializerForTests(async () => {
+				throw new Error("onnx init blew up");
 			});
-		} finally {
-			debugSpy.mockRestore();
-			warnSpy.mockRestore();
-		}
+
+			expect(await embed(["hello"])).toBeNull();
+
+			expect(debugSpy).toHaveBeenCalledWith(
+				"mnemopi: local embedding model failed to load",
+				expect.objectContaining({
+					model: expect.any(String),
+					error: expect.stringContaining("onnx init blew up"),
+				}),
+			);
+			expect(warnSpy).not.toHaveBeenCalledWith("mnemopi: local embedding model failed to load", expect.anything());
+		});
 	});
 
 	it("escalates the same failure to warn when runtime debug is enabled", async () => {
 		const debugSpy = spyOn(logger, "debug").mockImplementation(() => {});
 		const warnSpy = spyOn(logger, "warn").mockImplementation(() => {});
-		try {
-			await withLocalModelEnv(async () => {
-				setLocalModelInitializerForTests(async () => {
-					throw new Error("onnx init blew up again");
-				});
-
-				expect(await withMnemopiRuntimeOptions({ debug: true }, () => embed(["hello"]))).toBeNull();
-
-				expect(warnSpy).toHaveBeenCalledWith(
-					"mnemopi: local embedding model failed to load",
-					expect.objectContaining({ error: expect.stringContaining("onnx init blew up again") }),
-				);
-				expect(debugSpy).not.toHaveBeenCalledWith(
-					"mnemopi: local embedding model failed to load",
-					expect.anything(),
-				);
+		await withLocalModelEnv(async () => {
+			setLocalModelInitializerForTests(async () => {
+				throw new Error("onnx init blew up again");
 			});
-		} finally {
-			debugSpy.mockRestore();
-			warnSpy.mockRestore();
-		}
+
+			expect(await withMnemopiRuntimeOptions({ debug: true }, () => embed(["hello"]))).toBeNull();
+
+			expect(warnSpy).toHaveBeenCalledWith(
+				"mnemopi: local embedding model failed to load",
+				expect.objectContaining({ error: expect.stringContaining("onnx init blew up again") }),
+			);
+			expect(debugSpy).not.toHaveBeenCalledWith("mnemopi: local embedding model failed to load", expect.anything());
+		});
 	});
 });

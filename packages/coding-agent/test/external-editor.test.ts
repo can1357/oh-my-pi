@@ -1,8 +1,12 @@
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { getEditorCommand, getEditorName, openInEditor, resolveEditorSpawnCommand } from "../src/utils/external-editor";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 interface MutableProcess {
 	platform: NodeJS.Platform;
@@ -88,21 +92,17 @@ describe("openInEditor", () => {
 		const spawn = spyOn(Bun, "spawn").mockReturnValue({
 			exited: Promise.resolve(1),
 		} as never);
-		try {
-			await openInEditor("editor", "original", {
-				extension: ".md",
-				stdio: [0, 1, 2],
-			} as never);
+		await openInEditor("editor", "original", {
+			extension: ".md",
+			stdio: [0, 1, 2],
+		} as never);
 
-			expect(spawn).toHaveBeenCalledTimes(1);
-			expect(spawn.mock.calls[0]?.[1]).toMatchObject({
-				stdin: "inherit",
-				stdout: "inherit",
-				stderr: "inherit",
-			});
-		} finally {
-			spawn.mockRestore();
-		}
+		expect(spawn).toHaveBeenCalledTimes(1);
+		expect(spawn.mock.calls[0]?.[1]).toMatchObject({
+			stdin: "inherit",
+			stdout: "inherit",
+			stderr: "inherit",
+		});
 	});
 
 	it("passes the cmd.exe command line verbatim on Windows", () => {

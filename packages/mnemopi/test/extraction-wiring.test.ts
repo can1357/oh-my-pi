@@ -1,10 +1,11 @@
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import { Mnemopi } from "@oh-my-pi/pi-mnemopi/core/memory";
 import type { MnemopiLlmCompletion } from "@oh-my-pi/pi-mnemopi/core/runtime-options";
 
 const instances: Mnemopi[] = [];
 
 afterEach(async () => {
+	vi.restoreAllMocks();
 	for (const memory of instances) {
 		await memory.flushExtractions();
 		memory.close();
@@ -152,7 +153,6 @@ describe("remember(extract) wires the LLM fact extractor", () => {
 				memory.beam.factRecall("runtime config", 5).some(fact => fact.content === "Remote runtime config fact"),
 			).toBe(true);
 		} finally {
-			fetchSpy.mockRestore();
 			if (previousEnabled === undefined) delete process.env.MNEMOPI_LLM_ENABLED;
 			else process.env.MNEMOPI_LLM_ENABLED = previousEnabled;
 			if (previousBaseUrl === undefined) delete process.env.MNEMOPI_LLM_BASE_URL;

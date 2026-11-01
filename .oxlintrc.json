@@ -1,9 +1,12 @@
 {
 	"$schema": "./node_modules/oxlint/configuration_schema.json",
+	"jsPlugins": ["./scripts/oxlint/test-isolation.ts"],
 	"categories": {
 		"correctness": "warn"
 	},
 	"rules": {
+		"omp-test/restore-mocks-in-hooks": "error",
+		"omp-test/put-back-on-test-finished": "error",
 		"eslint/prefer-const": "error",
 		"eslint/no-unused-vars": [
 			"warn",

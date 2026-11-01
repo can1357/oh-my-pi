@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, onTestFinished } from "bun:test";
 import {
 	JsRuntime,
 	type RuntimeCallIdentity,
@@ -155,6 +155,9 @@ describe("JsRuntime global disposal", () => {
 	it("changes the snapshot digest when Object.prototype.toString is replaced", async () => {
 		const runtime = new JsRuntime({ initialCwd: process.cwd(), sessionId: "shadow-tostring" });
 		const genuineToString = Object.prototype.toString;
+		onTestFinished(() => {
+			Object.prototype.toString = genuineToString;
+		});
 		try {
 			const before = shadowSnapshotDigest(runtime.snapshotUserGlobals());
 			Object.prototype.toString = function toString() {
@@ -164,7 +167,6 @@ describe("JsRuntime global disposal", () => {
 			expect(after.initialGlobals).toMatchObject({ "Object.prototype.toString": false });
 			expect(shadowSnapshotDigest(after)).not.toBe(before);
 		} finally {
-			Object.prototype.toString = genuineToString;
 			runtime.dispose();
 		}
 	});

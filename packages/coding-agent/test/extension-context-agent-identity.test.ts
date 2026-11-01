@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -16,6 +16,10 @@ import * as sessionAdvisors from "@oh-my-pi/pi-coding-agent/session/session-advi
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { Snowflake } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 // Extensions need to know which agent they run in: the same factory is rebound to every
 // subagent, and hooks such as a Claude-style SubagentStart must act only there.

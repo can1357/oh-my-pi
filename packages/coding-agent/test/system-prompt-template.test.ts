@@ -1,4 +1,4 @@
-import { describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
 import { __resetDirsFromEnvForTests, CONFIG_DIR_NAME, getConfigAgentDirName, TempDir } from "@oh-my-pi/pi-utils";
@@ -13,6 +13,10 @@ import eagerTasksTemplate from "./fixtures/system-prompt-template/eager-tasks.md
 import literalDataTemplate from "./fixtures/system-prompt-template/literal-data.md" with { type: "text" };
 import liveDataTemplate from "./fixtures/system-prompt-template/live-data.md" with { type: "text" };
 import { restoreEnvValue } from "./helpers/settings-test-state";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 const EMPTY_TREE = {
 	rootPath: "",

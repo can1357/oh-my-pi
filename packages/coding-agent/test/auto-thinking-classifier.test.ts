@@ -301,7 +301,7 @@ describe("auto thinking classifier helpers", () => {
 		const optedIn = createOnlineFixture(buildLadderModel("mock-max", MAX_LADDER), "max", "max");
 		expect(await classifyDifficulty({ request: "untangle this cross-service race" }, optedIn.deps)).toBe(Effort.Max);
 
-		vi.restoreAllMocks();
+		optedIn.completeSimpleMock.mockRestore();
 
 		// A `max` the question never offered is not an answer: the classification
 		// fails (the caller keeps its provisional level) rather than crossing the
@@ -348,7 +348,7 @@ describe("auto thinking classifier helpers", () => {
 		expect(await classifyDifficulty({ request: "cut over the storage layer" }, keyless)).toBeUndefined();
 		expect(defaulted.completeSimpleMock).not.toHaveBeenCalled();
 
-		vi.restoreAllMocks();
+		defaulted.completeSimpleMock.mockRestore();
 
 		const optedIn = createOnlineFixture(buildLadderModel("mock-max-only", [Effort.Max]), "max", "max");
 		expect(await classifyDifficulty({ request: "cut over the storage layer" }, optedIn.deps)).toBe(Effort.Max);

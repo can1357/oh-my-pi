@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
@@ -1541,7 +1541,6 @@ describe("lsp regressions", () => {
 			expect(events).toContain("open");
 			expect(events).not.toContain("status");
 		} finally {
-			vi.restoreAllMocks();
 			await lspClient.shutdownAll();
 			tempDir.removeSync();
 		}
@@ -2635,7 +2634,6 @@ describe("lsp regressions", () => {
 
 			expect(output).toBe("OK");
 		} finally {
-			vi.restoreAllMocks();
 			tempDir.removeSync();
 		}
 	});
@@ -2675,7 +2673,6 @@ describe("lsp regressions", () => {
 			expect(output).toContain("all language servers failed");
 			expect(output).toContain("broken");
 		} finally {
-			vi.restoreAllMocks();
 			tempDir.removeSync();
 		}
 	});
@@ -2706,7 +2703,6 @@ describe("lsp regressions", () => {
 			expect(output).toContain("second");
 			expect(output).not.toContain('No symbols matching "Target"');
 		} finally {
-			vi.restoreAllMocks();
 			tempDir.removeSync();
 		}
 	});
@@ -2732,7 +2728,6 @@ describe("lsp regressions", () => {
 			expect(result.details?.serverName).toBe("empty");
 			expect(textResult(result)).toBe('No symbols matching "Missing"');
 		} finally {
-			vi.restoreAllMocks();
 			tempDir.removeSync();
 		}
 	});
@@ -2777,7 +2772,6 @@ describe("lsp regressions", () => {
 			expect(output).toContain("Server failures:");
 			expect(output).toContain("broken: server exited with code 7");
 		} finally {
-			vi.restoreAllMocks();
 			tempDir.removeSync();
 		}
 	});
@@ -2881,7 +2875,6 @@ describe("lsp regressions", () => {
 			expect(config.servers["typescript-language-server"]?.resolvedCommand).toBe(localTsServer);
 			expect(whichSpy).not.toHaveBeenCalledWith("typescript-language-server");
 		} finally {
-			vi.restoreAllMocks();
 			tempDir.removeSync();
 		}
 	});
@@ -2919,7 +2912,6 @@ describe("lsp regressions", () => {
 				);
 				expect(config.servers["typescript-native"]?.args).toEqual(["--lsp", "--stdio"]);
 			} finally {
-				vi.restoreAllMocks();
 				tempDir.removeSync();
 			}
 		});
@@ -2932,7 +2924,6 @@ describe("lsp regressions", () => {
 				const config = loadConfig(tempDir.path());
 				expect(Object.keys(config.servers)).toEqual(["typescript-language-server"]);
 			} finally {
-				vi.restoreAllMocks();
 				tempDir.removeSync();
 			}
 		});
@@ -2949,7 +2940,6 @@ describe("lsp regressions", () => {
 				const config = loadConfig(tempDir.path());
 				expect(Object.keys(config.servers)).toEqual(["typescript-language-server"]);
 			} finally {
-				vi.restoreAllMocks();
 				tempDir.removeSync();
 			}
 		});
@@ -2962,6 +2952,9 @@ describe("lsp regressions", () => {
 		const tempDir = TempDir.createSync("@omp-lsp-win32-ruff-");
 		const whichSpy = vi.spyOn(Bun, "which").mockReturnValue(null);
 
+		onTestFinished(() => {
+			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true, writable: true });
+		});
 		try {
 			await Bun.write(path.join(tempDir.path(), "pyproject.toml"), '[project]\nname = "demo"\n');
 			const scriptsDir = path.join(tempDir.path(), ".venv", "Scripts");
@@ -2973,8 +2966,6 @@ describe("lsp regressions", () => {
 			expect(config.servers.ruff?.resolvedCommand).toBe(localRuff);
 			expect(whichSpy).not.toHaveBeenCalledWith("ruff");
 		} finally {
-			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true, writable: true });
-			vi.restoreAllMocks();
 			tempDir.removeSync();
 		}
 	});
@@ -2984,27 +2975,25 @@ describe("lsp regressions", () => {
 		Object.defineProperty(process, "platform", { value: "win32", configurable: true, writable: true });
 		const whichSpy = vi.spyOn(Bun, "which").mockReturnValue(null);
 
-		try {
-			for (const marker of ["ruff.toml", ".ruff.toml"] as const) {
-				const tempDir = TempDir.createSync("@omp-lsp-win32-ruff-marker-");
-				try {
-					await Bun.write(path.join(tempDir.path(), marker), "");
-					const scriptsDir = path.join(tempDir.path(), ".venv", "Scripts");
-					await fs.promises.mkdir(scriptsDir, { recursive: true });
-					const localRuff = path.join(scriptsDir, "ruff.exe");
-					await Bun.write(localRuff, "");
-
-					const config = loadConfig(tempDir.path());
-					expect(config.servers.ruff?.resolvedCommand).toBe(localRuff);
-				} finally {
-					tempDir.removeSync();
-				}
-			}
-			expect(whichSpy).not.toHaveBeenCalledWith("ruff");
-		} finally {
+		onTestFinished(() => {
 			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true, writable: true });
-			vi.restoreAllMocks();
+		});
+		for (const marker of ["ruff.toml", ".ruff.toml"] as const) {
+			const tempDir = TempDir.createSync("@omp-lsp-win32-ruff-marker-");
+			try {
+				await Bun.write(path.join(tempDir.path(), marker), "");
+				const scriptsDir = path.join(tempDir.path(), ".venv", "Scripts");
+				await fs.promises.mkdir(scriptsDir, { recursive: true });
+				const localRuff = path.join(scriptsDir, "ruff.exe");
+				await Bun.write(localRuff, "");
+
+				const config = loadConfig(tempDir.path());
+				expect(config.servers.ruff?.resolvedCommand).toBe(localRuff);
+			} finally {
+				tempDir.removeSync();
+			}
 		}
+		expect(whichSpy).not.toHaveBeenCalledWith("ruff");
 	});
 
 	it("detects pyright and pylsp in Windows virtualenv Scripts for Python-only roots", async () => {
@@ -3012,32 +3001,30 @@ describe("lsp regressions", () => {
 		Object.defineProperty(process, "platform", { value: "win32", configurable: true, writable: true });
 		const whichSpy = vi.spyOn(Bun, "which").mockReturnValue(null);
 
-		try {
-			const cases: Array<{ marker: string; server: string; binary: string }> = [
-				{ marker: "pyrightconfig.json", server: "pyright", binary: "pyright-langserver.exe" },
-				{ marker: "setup.cfg", server: "pylsp", binary: "pylsp.exe" },
-			];
-			for (const { marker, server, binary } of cases) {
-				const tempDir = TempDir.createSync("@omp-lsp-win32-py-marker-");
-				try {
-					await Bun.write(path.join(tempDir.path(), marker), "");
-					const scriptsDir = path.join(tempDir.path(), ".venv", "Scripts");
-					await fs.promises.mkdir(scriptsDir, { recursive: true });
-					const localBin = path.join(scriptsDir, binary);
-					await Bun.write(localBin, "");
-
-					const config = loadConfig(tempDir.path());
-					expect(config.servers[server]?.resolvedCommand).toBe(localBin);
-				} finally {
-					tempDir.removeSync();
-				}
-			}
-			expect(whichSpy).not.toHaveBeenCalledWith("pyright-langserver");
-			expect(whichSpy).not.toHaveBeenCalledWith("pylsp");
-		} finally {
+		onTestFinished(() => {
 			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true, writable: true });
-			vi.restoreAllMocks();
+		});
+		const cases: Array<{ marker: string; server: string; binary: string }> = [
+			{ marker: "pyrightconfig.json", server: "pyright", binary: "pyright-langserver.exe" },
+			{ marker: "setup.cfg", server: "pylsp", binary: "pylsp.exe" },
+		];
+		for (const { marker, server, binary } of cases) {
+			const tempDir = TempDir.createSync("@omp-lsp-win32-py-marker-");
+			try {
+				await Bun.write(path.join(tempDir.path(), marker), "");
+				const scriptsDir = path.join(tempDir.path(), ".venv", "Scripts");
+				await fs.promises.mkdir(scriptsDir, { recursive: true });
+				const localBin = path.join(scriptsDir, binary);
+				await Bun.write(localBin, "");
+
+				const config = loadConfig(tempDir.path());
+				expect(config.servers[server]?.resolvedCommand).toBe(localBin);
+			} finally {
+				tempDir.removeSync();
+			}
 		}
+		expect(whichSpy).not.toHaveBeenCalledWith("pyright-langserver");
+		expect(whichSpy).not.toHaveBeenCalledWith("pylsp");
 	});
 
 	it("detects tlaplus files for LSP startup and language ids", async () => {
@@ -3267,7 +3254,6 @@ describe("lsp regressions", () => {
 				.join("\n");
 			expect(output).toContain("Renamed");
 		} finally {
-			vi.restoreAllMocks();
 			tempDir.removeSync();
 		}
 	});
@@ -3356,7 +3342,6 @@ describe("lsp regressions", () => {
 			expect(fs.existsSync(sourceFile)).toBe(true);
 			expect(fs.existsSync(destFile)).toBe(false);
 		} finally {
-			vi.restoreAllMocks();
 			tempDir.removeSync();
 		}
 	});
@@ -3428,7 +3413,6 @@ describe("lsp regressions", () => {
 			expect(output).toContain("aborted rename");
 			expect(output).toContain("index not ready");
 		} finally {
-			vi.restoreAllMocks();
 			tempDir.removeSync();
 		}
 	});
@@ -3488,7 +3472,6 @@ describe("lsp regressions", () => {
 			expect(fs.existsSync(destFile)).toBe(true);
 			expect(result.details).toMatchObject({ action: "rename_file", success: true });
 		} finally {
-			vi.restoreAllMocks();
 			tempDir.removeSync();
 		}
 	});
@@ -3545,7 +3528,6 @@ describe("lsp regressions", () => {
 			expect(fs.existsSync(destFile)).toBe(false);
 			expect(notifySpy).not.toHaveBeenCalledWith(expect.anything(), "workspace/didRenameFiles", expect.anything());
 		} finally {
-			vi.restoreAllMocks();
 			tempDir.removeSync();
 		}
 	});
@@ -3618,7 +3600,6 @@ describe("lsp regressions", () => {
 			expect(fs.existsSync(path.join(dstDir, "a.ts"))).toBe(true);
 			expect(fs.existsSync(path.join(dstDir, "nested", "b.ts"))).toBe(true);
 		} finally {
-			vi.restoreAllMocks();
 			tempDir.removeSync();
 		}
 	});
@@ -3690,7 +3671,6 @@ describe("lsp regressions", () => {
 			expect(output).toContain('"expansion"');
 			expect(output).toContain("macro_rules!");
 		} finally {
-			vi.restoreAllMocks();
 			tempDir.removeSync();
 		}
 	});
@@ -3747,7 +3727,6 @@ describe("lsp regressions", () => {
 				arguments: ["a.ts"],
 			});
 		} finally {
-			vi.restoreAllMocks();
 			tempDir.removeSync();
 		}
 	});
@@ -3804,7 +3783,6 @@ describe("lsp regressions", () => {
 			expect(output).toContain("_typescript.organizeImports");
 			expect(output).toContain("rust-analyzer/expandMacro");
 		} finally {
-			vi.restoreAllMocks();
 			tempDir.removeSync();
 		}
 	});
@@ -5569,7 +5547,6 @@ describe("lsp regressions", () => {
 			expect(fs.readdirSync(tempDir.path()).sort()).toEqual(["new.ts", "old.ts"]);
 			expect(executed).toEqual([]);
 		} finally {
-			vi.restoreAllMocks();
 			tempDir.removeSync();
 		}
 	});
@@ -5688,7 +5665,6 @@ describe("lsp regressions", () => {
 				.join("\n");
 			expect(output).toContain("Renamed");
 		} finally {
-			vi.restoreAllMocks();
 			tempDir.removeSync();
 		}
 	});
@@ -5728,7 +5704,6 @@ describe("lsp regressions", () => {
 			expect(output).not.toContain("does not exist");
 			expect(result.details).toMatchObject({ action: "rename_file", success: false });
 		} finally {
-			vi.restoreAllMocks();
 			tempDir.removeSync();
 		}
 	});
@@ -5769,7 +5744,6 @@ describe("lsp regressions", () => {
 			expect(result.details).toMatchObject({ action: "rename_file", success: false });
 			expect(fs.existsSync(sourceFile)).toBe(true);
 		} finally {
-			vi.restoreAllMocks();
 			tempDir.removeSync();
 		}
 	});
@@ -5799,7 +5773,6 @@ describe("lsp regressions", () => {
 			expect(fs.existsSync(sourceFile)).toBe(true);
 			expect(fs.existsSync(destFile)).toBe(false);
 		} finally {
-			vi.restoreAllMocks();
 			tempDir.removeSync();
 		}
 	});
@@ -6061,7 +6034,6 @@ describe("lsp regressions", () => {
 			expect(omittedOutput).toContain("Reloaded test-lsp");
 			expect(lspClient.getOrCreateClient).toHaveBeenCalledWith(server, tempDir.path(), undefined, expect.anything());
 		} finally {
-			vi.restoreAllMocks();
 			tempDir.removeSync();
 		}
 	});
@@ -6232,7 +6204,6 @@ describe("lsp regressions", () => {
 				expect(textResult(result)).toContain("Reloaded fake-lsp");
 				expect(await waitForDiagnostics(client, sourceUri, { timeoutMs: 1_000, settleMs: 0 })).toEqual([]);
 			} finally {
-				vi.restoreAllMocks();
 				await lspClient.shutdownAll();
 				tempDir.removeSync();
 			}
@@ -6266,7 +6237,6 @@ describe("lsp regressions", () => {
 				// the process, and returned "Restarted".
 				await expect(pending).rejects.toBeInstanceOf(ToolAbortError);
 			} finally {
-				vi.restoreAllMocks();
 				await lspClient.shutdownAll();
 				tempDir.removeSync();
 			}
@@ -6297,7 +6267,6 @@ describe("lsp regressions", () => {
 
 				await expect(pending).rejects.toBeInstanceOf(ToolAbortError);
 			} finally {
-				vi.restoreAllMocks();
 				await lspClient.shutdownAll();
 				tempDir.removeSync();
 			}
@@ -6327,7 +6296,6 @@ describe("lsp regressions", () => {
 				expect(textResult(result)).toContain("Reloaded fake");
 				expect(server.killed).toBe(false);
 			} finally {
-				vi.restoreAllMocks();
 				await lspClient.shutdownAll();
 				tempDir.removeSync();
 			}
@@ -6358,7 +6326,6 @@ describe("lsp regressions", () => {
 				expect(textResult(result)).toContain("Reloaded fake");
 				expect(server.killed).toBe(false);
 			} finally {
-				vi.restoreAllMocks();
 				await lspClient.shutdownAll();
 				tempDir.removeSync();
 			}
@@ -6405,7 +6372,6 @@ describe("lsp regressions", () => {
 				expect(configurationMessages.at(-1)?.params).toEqual({ settings });
 				expect(server.killed).toBe(false);
 			} finally {
-				vi.restoreAllMocks();
 				await lspClient.shutdownAll();
 				tempDir.removeSync();
 			}
@@ -6431,7 +6397,6 @@ describe("lsp regressions", () => {
 				expect(exited).toBe(true);
 				expect(lspClient.getActiveClients().some(s => s.name === config.command)).toBe(false);
 			} finally {
-				vi.restoreAllMocks();
 				await lspClient.shutdownAll();
 				tempDir.removeSync();
 			}

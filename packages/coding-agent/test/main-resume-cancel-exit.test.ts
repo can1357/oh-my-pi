@@ -28,6 +28,7 @@ class ProcessExitSignal extends Error {
 
 // `runRootCommand` registers the CLI's extension roots (`--no-extensions` → explicit-only) process-wide.
 afterEach(() => {
+	vi.restoreAllMocks();
 	clearOmpExtensionCliRoots();
 });
 
@@ -91,7 +92,6 @@ describe("runRootCommand — startup --resume picker cancellation", () => {
 		} catch (err) {
 			thrown = err;
 		} finally {
-			vi.restoreAllMocks();
 			authStorage.close();
 		}
 

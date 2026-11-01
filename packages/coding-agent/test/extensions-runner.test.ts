@@ -36,6 +36,10 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
+afterEach(() => {
+	vi.restoreAllMocks();
+});
+
 describe("ExtensionRunner", () => {
 	let tempDir: TempDir;
 	let extensionsDir: string;
@@ -233,8 +237,6 @@ describe("ExtensionRunner", () => {
 
 			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("conflicts with built-in"), expect.any(Object));
 			expect(shortcuts.has("ctrl+c")).toBe(false);
-
-			warnSpy.mockRestore();
 		});
 
 		it("rejects ctrl+q so it cannot shadow the app.message.followUp default (#1903)", async () => {
@@ -266,8 +268,6 @@ describe("ExtensionRunner", () => {
 			// overwrites it in the editor's custom-key map.
 			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("conflicts with built-in"), expect.any(Object));
 			expect(shortcuts.has("ctrl+q")).toBe(false);
-
-			warnSpy.mockRestore();
 		});
 
 		it("rejects Alt+M so it cannot shadow the app.model.select default", async () => {
@@ -295,8 +295,6 @@ describe("ExtensionRunner", () => {
 
 			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("conflicts with built-in"), expect.any(Object));
 			expect(shortcuts.has("alt+m")).toBe(false);
-
-			warnSpy.mockRestore();
 		});
 
 		it("warns when two extensions register same shortcut", async () => {
@@ -335,8 +333,6 @@ describe("ExtensionRunner", () => {
 			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("shortcut conflict"), expect.any(Object));
 			// Last one wins
 			expect(shortcuts.has("ctrl+shift+x")).toBe(true);
-
-			warnSpy.mockRestore();
 		});
 	});
 
@@ -1907,8 +1903,6 @@ describe("ExtensionRunner", () => {
 					error: "handler timed out after 10ms",
 				},
 			]);
-
-			warnSpy.mockRestore();
 		});
 
 		it("keeps a stalled registration inside the session_shutdown deadline", async () => {
@@ -2024,8 +2018,6 @@ describe("ExtensionRunner", () => {
 					error: "handler timed out after 10ms",
 				},
 			]);
-
-			warnSpy.mockRestore();
 		});
 
 		it("falls back to the default tool_call timeout for invalid configured values", async () => {
@@ -2267,7 +2259,7 @@ describe("ExtensionRunner", () => {
 			initializeRunner(runner, uiContext);
 			vi.useFakeTimers();
 			let now = 0;
-			const performanceNow = vi.spyOn(performance, "now").mockImplementation(() => now);
+			vi.spyOn(performance, "now").mockImplementation(() => now);
 			try {
 				testSetExtensionHandlerTimeoutMs(25);
 
@@ -2314,7 +2306,6 @@ describe("ExtensionRunner", () => {
 				vi.advanceTimersByTime(0);
 				await expect(execution).rejects.toThrow(`Extension ${extensionPath} timed out after 25ms`);
 			} finally {
-				performanceNow.mockRestore();
 				vi.useRealTimers();
 			}
 		});

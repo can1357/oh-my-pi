@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, onTestFinished, test } from "bun:test";
 import { type RpcAgentProcess, RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
 
 interface Request {
@@ -48,6 +48,9 @@ function fakeAgent() {
 // Only scale timers while issuing a request; restore the global before awaiting anything.
 function withScaledDeadline<T>(send: () => T): T {
 	const original = globalThis.setTimeout;
+	onTestFinished(() => {
+		globalThis.setTimeout = original;
+	});
 	globalThis.setTimeout = ((callback: () => void, delay?: number) =>
 		original(callback, (delay ?? 0) / 300)) as typeof setTimeout;
 	try {

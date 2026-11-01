@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { convertOpenAICodexResponsesTools } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { isJsonSchemaValueValid } from "@oh-my-pi/pi-ai/utils/schema";
@@ -18,6 +18,10 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 import { cfgCompactionExperimentalContextManagement } from "@oh-my-pi/pi-coding-agent/session/context-settings";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 const NOW = "2026-09-04T00:00:00.000Z";
 
@@ -195,17 +199,13 @@ describe("experimental context notes", () => {
 		const tool = ContextNotesTool.createIf(toolSession(settings, sessionManager));
 		if (!tool) throw new Error("expected context notes tool");
 		const pendingEnsure = Promise.withResolvers<void>();
-		const ensureSpy = vi.spyOn(sessionManager, "ensureOnDisk").mockImplementation(() => pendingEnsure.promise);
-		try {
-			const pendingWrite = tool.execute("stale-branch", { text: "must not persist" });
-			await Promise.resolve();
-			sessionManager.appendCustomEntry("test_branch_change");
-			pendingEnsure.resolve();
-			await expect(pendingWrite).rejects.toThrow("session branch changed");
-			expect(getContextNotes(sessionManager.getBranch())).toBeUndefined();
-		} finally {
-			ensureSpy.mockRestore();
-		}
+		vi.spyOn(sessionManager, "ensureOnDisk").mockImplementation(() => pendingEnsure.promise);
+		const pendingWrite = tool.execute("stale-branch", { text: "must not persist" });
+		await Promise.resolve();
+		sessionManager.appendCustomEntry("test_branch_change");
+		pendingEnsure.resolve();
+		await expect(pendingWrite).rejects.toThrow("session branch changed");
+		expect(getContextNotes(sessionManager.getBranch())).toBeUndefined();
 	});
 
 	it("does not append notes when experimental context management is disabled while preparing disk", async () => {
@@ -214,16 +214,12 @@ describe("experimental context notes", () => {
 		const tool = ContextNotesTool.createIf(toolSession(settings, sessionManager));
 		if (!tool) throw new Error("expected context notes tool");
 		const pendingEnsure = Promise.withResolvers<void>();
-		const ensureSpy = vi.spyOn(sessionManager, "ensureOnDisk").mockImplementation(() => pendingEnsure.promise);
-		try {
-			const pendingWrite = tool.execute("disabled-mid-write", { text: "must not persist" });
-			await Promise.resolve();
-			cfgCompactionExperimentalContextManagement.override(settings, false);
-			pendingEnsure.resolve();
-			await expect(pendingWrite).rejects.toThrow("Experimental context management is disabled.");
-			expect(getContextNotes(sessionManager.getBranch())).toBeUndefined();
-		} finally {
-			ensureSpy.mockRestore();
-		}
+		vi.spyOn(sessionManager, "ensureOnDisk").mockImplementation(() => pendingEnsure.promise);
+		const pendingWrite = tool.execute("disabled-mid-write", { text: "must not persist" });
+		await Promise.resolve();
+		cfgCompactionExperimentalContextManagement.override(settings, false);
+		pendingEnsure.resolve();
+		await expect(pendingWrite).rejects.toThrow("Experimental context management is disabled.");
+		expect(getContextNotes(sessionManager.getBranch())).toBeUndefined();
 	});
 });

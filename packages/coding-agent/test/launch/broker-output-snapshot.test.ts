@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { setProcessName, TempDir } from "@oh-my-pi/pi-utils";
@@ -11,6 +11,10 @@ import {
 	type DaemonOperation,
 } from "../../src/launch/protocol";
 import * as terminalOutput from "../../src/launch/terminal-output";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 function restoreEnv(name: string, value: string | undefined): void {
 	if (value === undefined) delete process.env[name];
@@ -126,7 +130,6 @@ process.stdin.on("data", () => process.stdout.write("AFTER-SNAPSHOT\\n"));
 			client.close();
 			await broker;
 			setProcessName(previousTitle);
-			vi.restoreAllMocks();
 		}
 	}, 20_000);
 

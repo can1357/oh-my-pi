@@ -40,6 +40,10 @@ import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 function observeAsyncResultEnqueue(session: AgentSession): Promise<void> {
 	const queued = Promise.withResolvers<void>();
 	const enqueue = session.yieldQueue.enqueueWithReceipt.bind(session.yieldQueue);
@@ -264,45 +268,41 @@ describe("AgentSession owner-routed async delivery", () => {
 			agentId: "CaptureOwner",
 			asyncJobManager: manager,
 		});
-		try {
-			manager.register(
-				"bash",
-				"failed capture",
-				async ({ reportProgress }) => {
-					const meta = { artifactError: "write" } as const;
-					const text = "preview-only ".repeat(2000) + formatOutputNotice(meta);
-					await reportProgress(text, { meta });
-					return text;
-				},
-				{ id: "capture-job", ownerId: "CaptureOwner" },
-			);
-			await session.settleAsyncWork();
-			const delivered = mock.calls
-				.flatMap(call => call.context.messages)
-				.map(message =>
-					typeof message.content === "string"
-						? message.content
-						: message.content.map(block => (block.type === "text" ? block.text : "")).join("\n"),
-				)
-				.find(text => text.includes("preview-only"));
-			expect(delivered?.match(/not saved completely/g)).toHaveLength(1);
-			expect(delivered).not.toContain("Full output: artifact://");
-			expect(allocate).not.toHaveBeenCalled();
-			const custom = agent.state.messages.find(
-				message => message.role === "custom" && message.customType === "async-result",
-			);
-			if (!custom || custom.role !== "custom") throw new Error("Expected async delivery message");
-			await initTheme(false, undefined, undefined, "dark", "light");
-			const persisted = JSON.parse(JSON.stringify(custom)) as typeof custom;
-			for (const message of [custom, persisted]) {
-				const rendered = buildAsyncResultBlock(message)
-					.render(100)
-					.map(line => Bun.stripANSI(line))
-					.join("\n");
-				expect(rendered).toContain("not saved completely");
-			}
-		} finally {
-			allocate.mockRestore();
+		manager.register(
+			"bash",
+			"failed capture",
+			async ({ reportProgress }) => {
+				const meta = { artifactError: "write" } as const;
+				const text = "preview-only ".repeat(2000) + formatOutputNotice(meta);
+				await reportProgress(text, { meta });
+				return text;
+			},
+			{ id: "capture-job", ownerId: "CaptureOwner" },
+		);
+		await session.settleAsyncWork();
+		const delivered = mock.calls
+			.flatMap(call => call.context.messages)
+			.map(message =>
+				typeof message.content === "string"
+					? message.content
+					: message.content.map(block => (block.type === "text" ? block.text : "")).join("\n"),
+			)
+			.find(text => text.includes("preview-only"));
+		expect(delivered?.match(/not saved completely/g)).toHaveLength(1);
+		expect(delivered).not.toContain("Full output: artifact://");
+		expect(allocate).not.toHaveBeenCalled();
+		const custom = agent.state.messages.find(
+			message => message.role === "custom" && message.customType === "async-result",
+		);
+		if (!custom || custom.role !== "custom") throw new Error("Expected async delivery message");
+		await initTheme(false, undefined, undefined, "dark", "light");
+		const persisted = JSON.parse(JSON.stringify(custom)) as typeof custom;
+		for (const message of [custom, persisted]) {
+			const rendered = buildAsyncResultBlock(message)
+				.render(100)
+				.map(line => Bun.stripANSI(line))
+				.join("\n");
+			expect(rendered).toContain("not saved completely");
 		}
 	});
 

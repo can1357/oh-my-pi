@@ -52,6 +52,7 @@ async function makeSessionFile(cwd: string, id: string): Promise<string> {
 
 // `runRootCommand` registers the CLI's extension roots (`--no-extensions` → explicit-only) process-wide.
 afterEach(() => {
+	vi.restoreAllMocks();
 	clearOmpExtensionCliRoots();
 });
 
@@ -92,7 +93,6 @@ describe("--resume <path> — missing path (#13928)", () => {
 		} catch (err) {
 			thrown = err;
 		} finally {
-			vi.restoreAllMocks();
 			authStorage.close();
 		}
 

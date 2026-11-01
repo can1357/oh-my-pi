@@ -1,10 +1,14 @@
-import { afterAll, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AuthStorage, FetchImpl } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resolveFirecrawlUrl } from "@oh-my-pi/pi-coding-agent/web/firecrawl";
 import { FirecrawlProvider, searchFirecrawl } from "@oh-my-pi/pi-coding-agent/web/search/providers/firecrawl";
 import { SearchProviderError } from "@oh-my-pi/pi-coding-agent/web/search/types";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 const TEST_KEY = "test-firecrawl-key";
 
@@ -21,19 +25,19 @@ const providerFixture = createFirecrawlFixture(providerAuthStorage);
 
 const keylessAuthStorage = createInMemoryAuthStorage();
 const keylessFixture = createFirecrawlFixture(keylessAuthStorage);
-const keylessResolverSpy = vi.spyOn(keylessAuthStorage.keys, "resolver").mockImplementation((provider, options) => {
-	expect(provider).toBe("firecrawl");
-	expect(options?.sessionId).toBe("session-firecrawl-test");
-	return async () => undefined;
-});
-const keylessSourceSpy = vi.spyOn(keylessAuthStorage.keys, "source").mockImplementation(provider => {
-	expect(provider).toBe("firecrawl");
-	return undefined;
+beforeEach(() => {
+	vi.spyOn(keylessAuthStorage.keys, "resolver").mockImplementation((provider, options) => {
+		expect(provider).toBe("firecrawl");
+		expect(options?.sessionId).toBe("session-firecrawl-test");
+		return async () => undefined;
+	});
+	vi.spyOn(keylessAuthStorage.keys, "source").mockImplementation(provider => {
+		expect(provider).toBe("firecrawl");
+		return undefined;
+	});
 });
 
 afterAll(() => {
-	keylessResolverSpy.mockRestore();
-	keylessSourceSpy.mockRestore();
 	providerAuthStorage.close();
 	keylessAuthStorage.close();
 });
@@ -183,7 +187,7 @@ describe("Firecrawl web search provider", () => {
 	it("uses the initially resolved credential for the first authenticated request", async () => {
 		let resolutionCount = 0;
 		const authStorage = createInMemoryAuthStorage();
-		const resolverSpy = vi.spyOn(authStorage.keys, "resolver").mockImplementation((provider, options) => {
+		vi.spyOn(authStorage.keys, "resolver").mockImplementation((provider, options) => {
 			expect(provider).toBe("firecrawl");
 			expect(options?.sessionId).toBe("session-firecrawl-test");
 			return async () => {
@@ -208,7 +212,6 @@ describe("Firecrawl web search provider", () => {
 			expect(response.authMode).toBe("api_key");
 			expect(resolutionCount).toBe(1);
 		} finally {
-			resolverSpy.mockRestore();
 			authStorage.close();
 		}
 	});
@@ -217,7 +220,7 @@ describe("Firecrawl web search provider", () => {
 		const resolvedKeys = ["initial-firecrawl-key", "rotated-firecrawl-key"] as const;
 		let resolutionCount = 0;
 		const authStorage = createInMemoryAuthStorage();
-		const resolverSpy = vi.spyOn(authStorage.keys, "resolver").mockImplementation((provider, options) => {
+		vi.spyOn(authStorage.keys, "resolver").mockImplementation((provider, options) => {
 			expect(provider).toBe("firecrawl");
 			expect(options?.sessionId).toBe("session-firecrawl-test");
 			return async () => resolvedKeys[resolutionCount++];
@@ -250,7 +253,6 @@ describe("Firecrawl web search provider", () => {
 				authMode: "api_key",
 			});
 		} finally {
-			resolverSpy.mockRestore();
 			authStorage.close();
 		}
 	});

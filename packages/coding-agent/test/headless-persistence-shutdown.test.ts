@@ -9,7 +9,7 @@
  * isolation; this file drives the externally observable shutdown path the three
  * review threads (3979594811, 3979644907, 3983906393) asked for.
  */
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
 import { parseArgs, type Args } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -33,6 +33,7 @@ const RAW_FATAL_DUMP_RE = /(?:^|\n)\s+at [^\n]*:\d+:\d+/;
 const tempDirs: TempDir[] = [];
 
 afterEach(async () => {
+	vi.restoreAllMocks();
 	// `runRootCommand` registers the CLI's extension roots (`--no-extensions` → explicit-only) process-wide.
 	clearOmpExtensionCliRoots();
 

@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
 import * as os from "node:os";
 import { stripVTControlCharacters } from "node:util";
 import { PluginManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins";
@@ -17,6 +17,10 @@ import {
 	PluginSettingsComponent,
 } from "@oh-my-pi/pi-tui/overlays/plugin-settings";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 beforeAll(async () => {
 	await initTheme();
@@ -145,75 +149,62 @@ describe("PluginSettingsComponent", () => {
 		const plugin = marketplace("toggle@mkt");
 		const order: string[] = [];
 		const reloaded = Promise.withResolvers<void>();
-		const npmListSpy = spyOn(PluginManager.prototype, "list").mockResolvedValue([]);
-		const listInstalledSpy = spyOn(MarketplaceManager.prototype, "listInstalledPlugins").mockResolvedValue([plugin]);
+		spyOn(PluginManager.prototype, "list").mockResolvedValue([]);
+		spyOn(MarketplaceManager.prototype, "listInstalledPlugins").mockResolvedValue([plugin]);
 		const setEnabledSpy = spyOn(MarketplaceManager.prototype, "setPluginEnabled").mockImplementation(
 			async (pluginId, enabled, scope) => {
 				order.push(`set:${pluginId}:${enabled}:${scope}`);
 			},
 		);
 
-		try {
-			const component = new PluginSettingsComponent(createPluginSettingsHost(process.cwd()), {
-				onClose: () => {},
-				onPluginChanged: async () => {
-					order.push("reload");
-					reloaded.resolve();
-				},
-			});
+		const component = new PluginSettingsComponent(createPluginSettingsHost(process.cwd()), {
+			onClose: () => {},
+			onPluginChanged: async () => {
+				order.push("reload");
+				reloaded.resolve();
+			},
+		});
 
-			for (let i = 0; i < 20; i++) {
-				if (stripVTControlCharacters(component.render(120).join("\n")).includes("toggle@mkt")) break;
-				await Bun.sleep(1);
-			}
-			expect(stripVTControlCharacters(component.render(120).join("\n"))).toContain("toggle@mkt");
-			component.handleInput("\n");
-			component.handleInput(" ");
-			await reloaded.promise;
-
-			expect(setEnabledSpy).toHaveBeenCalledWith("toggle@mkt", false, "user");
-			expect(order).toEqual(["set:toggle@mkt:false:user", "reload"]);
-		} finally {
-			npmListSpy.mockRestore();
-			listInstalledSpy.mockRestore();
-			setEnabledSpy.mockRestore();
+		for (let i = 0; i < 20; i++) {
+			if (stripVTControlCharacters(component.render(120).join("\n")).includes("toggle@mkt")) break;
+			await Bun.sleep(1);
 		}
+		expect(stripVTControlCharacters(component.render(120).join("\n"))).toContain("toggle@mkt");
+		component.handleInput("\n");
+		component.handleInput(" ");
+		await reloaded.promise;
+
+		expect(setEnabledSpy).toHaveBeenCalledWith("toggle@mkt", false, "user");
+		expect(order).toEqual(["set:toggle@mkt:false:user", "reload"]);
 	});
 
 	it("schedules a render frame once the async plugin list mounts", async () => {
-		const npmListSpy = spyOn(PluginManager.prototype, "list").mockResolvedValue([]);
-		const listInstalledSpy = spyOn(MarketplaceManager.prototype, "listInstalledPlugins").mockResolvedValue([
-			marketplace("late@mkt"),
-		]);
+		spyOn(PluginManager.prototype, "list").mockResolvedValue([]);
+		spyOn(MarketplaceManager.prototype, "listInstalledPlugins").mockResolvedValue([marketplace("late@mkt")]);
 
-		try {
-			const mounted = Promise.withResolvers<void>();
-			let renders = 0;
-			const component = new PluginSettingsComponent(createPluginSettingsHost(process.cwd()), {
-				onClose: () => {},
-				onPluginChanged: () => {},
-				requestRender: () => {
-					renders++;
-					mounted.resolve();
-				},
-			});
+		const mounted = Promise.withResolvers<void>();
+		let renders = 0;
+		const component = new PluginSettingsComponent(createPluginSettingsHost(process.cwd()), {
+			onClose: () => {},
+			onPluginChanged: () => {},
+			requestRender: () => {
+				renders++;
+				mounted.resolve();
+			},
+		});
 
-			// No manual render() poll: the real TUI only repaints when the
-			// component asks for a frame. Without requestRender the list stays
-			// blank until an unrelated event forces a redraw (reopening /settings).
-			await mounted.promise;
-			expect(renders).toBeGreaterThanOrEqual(1);
-			expect(stripVTControlCharacters(component.render(120).join("\n"))).toContain("late@mkt");
-		} finally {
-			npmListSpy.mockRestore();
-			listInstalledSpy.mockRestore();
-		}
+		// No manual render() poll: the real TUI only repaints when the
+		// component asks for a frame. Without requestRender the list stays
+		// blank until an unrelated event forces a redraw (reopening /settings).
+		await mounted.promise;
+		expect(renders).toBeGreaterThanOrEqual(1);
+		expect(stripVTControlCharacters(component.render(120).join("\n"))).toContain("late@mkt");
 	});
 
 	it("closes on Escape while the plugin list is still loading", async () => {
 		const pending = Promise.withResolvers<InstalledPlugin[]>();
-		const npmListSpy = spyOn(PluginManager.prototype, "list").mockReturnValue(pending.promise);
-		const listInstalledSpy = spyOn(MarketplaceManager.prototype, "listInstalledPlugins").mockResolvedValue([]);
+		spyOn(PluginManager.prototype, "list").mockReturnValue(pending.promise);
+		spyOn(MarketplaceManager.prototype, "listInstalledPlugins").mockResolvedValue([]);
 
 		try {
 			let closed = 0;
@@ -233,39 +224,30 @@ describe("PluginSettingsComponent", () => {
 			expect(closed).toBe(1);
 		} finally {
 			pending.resolve([]);
-			npmListSpy.mockRestore();
-			listInstalledSpy.mockRestore();
 		}
 	});
 
 	it("still mounts the list when the npm plugin listing rejects", async () => {
-		const npmListSpy = spyOn(PluginManager.prototype, "list").mockRejectedValue(new Error("corrupt registry"));
-		const listInstalledSpy = spyOn(MarketplaceManager.prototype, "listInstalledPlugins").mockResolvedValue([
-			marketplace("survivor@mkt"),
-		]);
+		spyOn(PluginManager.prototype, "list").mockRejectedValue(new Error("corrupt registry"));
+		spyOn(MarketplaceManager.prototype, "listInstalledPlugins").mockResolvedValue([marketplace("survivor@mkt")]);
 
-		try {
-			let closed = 0;
-			const component = new PluginSettingsComponent(createPluginSettingsHost(process.cwd()), {
-				onClose: () => {
-					closed++;
-				},
-				onPluginChanged: () => {},
-			});
+		let closed = 0;
+		const component = new PluginSettingsComponent(createPluginSettingsHost(process.cwd()), {
+			onClose: () => {
+				closed++;
+			},
+			onPluginChanged: () => {},
+		});
 
-			for (let i = 0; i < 20; i++) {
-				if (stripVTControlCharacters(component.render(120).join("\n")).includes("survivor@mkt")) break;
-				await Bun.sleep(1);
-			}
-			expect(stripVTControlCharacters(component.render(120).join("\n"))).toContain("survivor@mkt");
-
-			// Once mounted, Escape routes through the list view's cancel path.
-			component.handleInput("\x1b");
-			expect(closed).toBe(1);
-		} finally {
-			npmListSpy.mockRestore();
-			listInstalledSpy.mockRestore();
+		for (let i = 0; i < 20; i++) {
+			if (stripVTControlCharacters(component.render(120).join("\n")).includes("survivor@mkt")) break;
+			await Bun.sleep(1);
 		}
+		expect(stripVTControlCharacters(component.render(120).join("\n"))).toContain("survivor@mkt");
+
+		// Once mounted, Escape routes through the list view's cancel path.
+		component.handleInput("\x1b");
+		expect(closed).toBe(1);
 	});
 });
 

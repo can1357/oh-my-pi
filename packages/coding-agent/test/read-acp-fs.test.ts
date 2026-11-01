@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -9,6 +9,10 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 const BRIDGE_CONTENT = "// content from editor buffer\nexport function greet() { return 'bridge'; }\n";
 
@@ -57,7 +61,7 @@ describe("read tool ACP fs routing", () => {
 		// Wrap Bun.file() to detect any .text() calls
 		let textCallCount = 0;
 		const origBunFile = Bun.file.bind(Bun);
-		const bunFileSpy = spyOn(Bun, "file").mockImplementation(
+		spyOn(Bun, "file").mockImplementation(
 			(arg: string | URL | Uint8Array | ArrayBufferLike | number, opts?: BlobPropertyBag) => {
 				const bunFile = origBunFile(arg as string, opts);
 				const origText = bunFile.text.bind(bunFile);
@@ -69,22 +73,18 @@ describe("read tool ACP fs routing", () => {
 			},
 		);
 
-		try {
-			const session = createSession(tmpDir, bridge);
-			const tool = new ReadTool(session);
+		const session = createSession(tmpDir, bridge);
+		const tool = new ReadTool(session);
 
-			const result = await tool.execute("call-1", { path: filePath });
-			const text = textOutput(result);
+		const result = await tool.execute("call-1", { path: filePath });
+		const text = textOutput(result);
 
-			// Bridge content should appear in output
-			expect(text).toContain("content from editor buffer");
-			// Bridge readTextFile was invoked
-			expect(bridgeSpy).toHaveBeenCalled();
-			// Bun.file().text() must not have been called — bridge is source of truth
-			expect(textCallCount).toBe(0);
-		} finally {
-			bunFileSpy.mockRestore();
-		}
+		// Bridge content should appear in output
+		expect(text).toContain("content from editor buffer");
+		// Bridge readTextFile was invoked
+		expect(bridgeSpy).toHaveBeenCalled();
+		// Bun.file().text() must not have been called — bridge is source of truth
+		expect(textCallCount).toBe(0);
 	});
 
 	it("applies requested line ranges to bridge content exactly once", async () => {

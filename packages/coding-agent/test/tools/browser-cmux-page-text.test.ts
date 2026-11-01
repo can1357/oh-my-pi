@@ -1,8 +1,12 @@
-import { describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import { CmuxTab } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/cmux-tab";
 import { CmuxSocketClient } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/socket-client";
 import { acquireBrowser, releaseBrowser } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
 import { chromiumAvailable } from "./chromium-probe";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
 
@@ -12,7 +16,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("cmux page reads", () => {
 		if (!("browser" in browserHandle)) throw new Error("Expected a Puppeteer browser");
 		const page = await browserHandle.browser.newPage();
 		// cmux evaluates its scripts in the page; Chromium stands in for the surface.
-		const request = spyOn(CmuxSocketClient.prototype, "request").mockImplementation(
+		spyOn(CmuxSocketClient.prototype, "request").mockImplementation(
 			async (_method: string, params?: Record<string, unknown>) => ({
 				value: await page.evaluate(String(params?.script)),
 			}),
@@ -29,7 +33,6 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("cmux page reads", () => {
 			await page.setContent('<script>var source = "inline";</script><div hidden>secret</div>');
 			expect(await tab.text()).toBe("");
 		} finally {
-			request.mockRestore();
 			await page.close().catch(() => undefined);
 			if (browserHandle.browser.connected) await releaseBrowser(browserHandle, { kill: true });
 		}

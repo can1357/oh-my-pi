@@ -1,8 +1,12 @@
-import { describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { buildLeafManifest, generateNpmPackages } from "../scripts/gen-npm-packages";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 describe("generated native npm leaf packages", () => {
 	it("builds an x64 leaf manifest that exposes all addon files without package exports", () => {
@@ -120,7 +124,7 @@ describe("generated native npm leaf packages", () => {
 
 	it("reports missing leaves during dry runs without writing generated packages", async () => {
 		const packageDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-natives-npm-dry-"));
-		const logSpy = spyOn(console, "log").mockImplementation(() => {});
+		spyOn(console, "log").mockImplementation(() => {});
 		try {
 			await fs.mkdir(path.join(packageDir, "native"));
 			await Bun.write(path.join(packageDir, "package.json"), JSON.stringify({ version: "15.5.15" }));
@@ -136,7 +140,6 @@ describe("generated native npm leaf packages", () => {
 			]);
 			expect(await Bun.file(path.join(packageDir, "npm/darwin-arm64/package.json")).exists()).toBe(false);
 		} finally {
-			logSpy.mockRestore();
 			await fs.rm(packageDir, { recursive: true, force: true });
 		}
 	});

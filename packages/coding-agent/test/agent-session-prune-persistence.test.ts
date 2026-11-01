@@ -14,6 +14,10 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { logger, TempDir } from "@oh-my-pi/pi-utils";
 
+afterEach(() => {
+	vi.restoreAllMocks();
+});
+
 /**
  * Regression: the per-turn supersede/useless prune pass rewrote the LIVE agent
  * context but never persisted the rewrite, so the session file kept the
@@ -240,7 +244,6 @@ describe("AgentSession per-turn prune persistence", () => {
 		} finally {
 			unsubscribe();
 			unsubscribeRunState();
-			rewriteEntries.mockRestore();
 		}
 	});
 

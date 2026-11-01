@@ -23,6 +23,10 @@ import { ManualScheduler, TspHarness, TspTestTerminal } from "./native/tsp-harne
 import { VirtualRenderScheduler } from "./virtual-render-scheduler";
 import { VirtualTerminal } from "./virtual-terminal";
 
+afterEach(() => {
+	vi.restoreAllMocks();
+});
+
 withoutTerminalMultiplexer();
 
 class AppearanceTerminal extends VirtualTerminal {
@@ -150,7 +154,7 @@ describe("terminal background SIXEL repaint", () => {
 	it("repaints when a new owner reports the previous owner's RGB after resetting it at startup", async () => {
 		const terminal = new AppearanceTerminal(40, 5);
 		const start = terminal.start.bind(terminal);
-		const startSpy = vi.spyOn(terminal, "start").mockImplementation((onInput, onResize) => {
+		vi.spyOn(terminal, "start").mockImplementation((onInput, onResize) => {
 			setTerminalBackgroundColor(undefined);
 			start(onInput, onResize);
 		});
@@ -173,7 +177,6 @@ describe("terminal background SIXEL repaint", () => {
 			expect(terminal.writes.join("")).toContain("\x1b[3J");
 		} finally {
 			tui.stop();
-			startSpy.mockRestore();
 		}
 	});
 

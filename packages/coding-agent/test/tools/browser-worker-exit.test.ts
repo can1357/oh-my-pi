@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, it, spyOn } from "bun:test";
+import { afterAll, afterEach, describe, expect, it, onTestFinished, spyOn, vi } from "bun:test";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
@@ -15,6 +15,10 @@ import type { WorkerInbound } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { rejectionOf } from "../helpers/rejection";
 import { chromiumAvailable } from "./chromium-probe";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
 const session: ToolSession = {
@@ -161,6 +165,9 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab worker exit", () => {
 		const name = "worker-exit-stale-cause";
 		// Capture the tab's Bun worker to raise a `messageerror` on it, which leaves the worker running.
 		const RealWorker = globalThis.Worker;
+		onTestFinished(() => {
+			globalThis.Worker = RealWorker;
+		});
 		let spawned: Worker | undefined;
 		globalThis.Worker = class extends RealWorker {
 			constructor(...args: ConstructorParameters<typeof Worker>) {
@@ -186,7 +193,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab worker exit", () => {
 		const name = "worker-exit-tool-call";
 		await open(name, "alive");
 		const signals: AbortSignal[] = [];
-		const callTool = spyOn(toolBridge, "callSessionTool").mockImplementation(async (_name, _args, options) => {
+		spyOn(toolBridge, "callSessionTool").mockImplementation(async (_name, _args, options) => {
 			const { signal } = options;
 			if (!signal) throw new Error("expected the tool call's abort signal");
 			signals.push(signal);
@@ -195,15 +202,11 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab worker exit", () => {
 			await aborted.promise;
 			throw signal.reason;
 		});
-		try {
-			// The tool call is posted before the rejection ends the worker, so the host registers it first.
-			const code = `void __omp_call_tool__("probe", {}); ${UNOWNED_REJECTION}`;
-			expect(await messageOf(run(name, code))).toContain("the tab is being reattached");
-			expect(await messageOf(run(name, code))).toContain("again right after being replaced");
-			expect(signals.map(signal => signal.aborted)).toEqual([true, true]);
-		} finally {
-			callTool.mockRestore();
-		}
+		// The tool call is posted before the rejection ends the worker, so the host registers it first.
+		const code = `void __omp_call_tool__("probe", {}); ${UNOWNED_REJECTION}`;
+		expect(await messageOf(run(name, code))).toContain("the tab is being reattached");
+		expect(await messageOf(run(name, code))).toContain("again right after being replaced");
+		expect(signals.map(signal => signal.aborted)).toEqual([true, true]);
 	}, 30_000);
 
 	it("closes the tab when the new worker exits again right away", async () => {

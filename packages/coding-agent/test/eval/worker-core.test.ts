@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, onTestFinished } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -150,6 +150,7 @@ describe("WorkerCore", () => {
 			entered: () => entered.resolve(),
 			wait: gate.promise,
 		};
+		onTestFinished(() => Reflect.deleteProperty(globalThis, "__omp_worker_core_gate"));
 
 		const { fatal, uninstall } = installFatalCapture();
 		try {
@@ -195,8 +196,6 @@ describe("WorkerCore", () => {
 		} finally {
 			uninstall();
 			gate.resolve();
-			delete (globalThis as { __omp_worker_core_gate?: { entered(): void; wait: Promise<void> } })
-				.__omp_worker_core_gate;
 			first.send({ type: "close" });
 			second.send({ type: "close" });
 		}
@@ -217,6 +216,7 @@ describe("WorkerCore", () => {
 			entered: () => entered.resolve(),
 			wait: gate.promise,
 		};
+		onTestFinished(() => Reflect.deleteProperty(globalThis, "__omp_worker_core_gate"));
 
 		const { fatal, uninstall } = installFatalCapture();
 		try {
@@ -282,8 +282,6 @@ describe("WorkerCore", () => {
 		} finally {
 			uninstall();
 			gate.resolve();
-			delete (globalThis as { __omp_worker_core_gate?: { entered(): void; wait: Promise<void> } })
-				.__omp_worker_core_gate;
 			first.send({ type: "close" });
 			second.send({ type: "close" });
 			third.send({ type: "close" });
@@ -302,6 +300,7 @@ describe("WorkerCore", () => {
 			entered: () => entered.resolve(),
 			wait: gate.promise,
 		};
+		onTestFinished(() => Reflect.deleteProperty(globalThis, "__omp_worker_core_gate"));
 
 		const { fatal, uninstall } = installFatalCapture();
 		try {
@@ -350,8 +349,6 @@ describe("WorkerCore", () => {
 		} finally {
 			uninstall();
 			gate.resolve();
-			delete (globalThis as { __omp_worker_core_gate?: { entered(): void; wait: Promise<void> } })
-				.__omp_worker_core_gate;
 			first.send({ type: "close" });
 			second.send({ type: "close" });
 		}
@@ -394,6 +391,7 @@ describe("WorkerCore", () => {
 			entered: () => entered.resolve(),
 			wait: gate.promise,
 		};
+		onTestFinished(() => Reflect.deleteProperty(globalThis, "__omp_worker_cwd_gate"));
 		try {
 			await initializeWorker(harness, { cwd: dirA, sessionId: "cwd-race", localRoots: {} });
 			expect(chdirs).toEqual([dirA]);
@@ -451,8 +449,6 @@ describe("WorkerCore", () => {
 			expect(chdirs.at(-1)).toBe(dirB);
 		} finally {
 			gate.resolve();
-			delete (globalThis as { __omp_worker_cwd_gate?: { entered(): void; wait: Promise<void> } })
-				.__omp_worker_cwd_gate;
 			harness.send({ type: "close" });
 			await fs.rm(dirA, { recursive: true, force: true });
 			await fs.rm(dirB, { recursive: true, force: true });

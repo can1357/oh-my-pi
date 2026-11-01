@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-ai";
 import { extractFacts } from "@oh-my-pi/pi-mnemopi/core/extraction";
 import { type ChatMessage, ExtractionClient } from "@oh-my-pi/pi-mnemopi/core/extraction/client";
@@ -106,6 +106,9 @@ describe("extraction integration", () => {
 
 	it("uses millisecond-scale rate-limit and fallback backoff delays", async () => {
 		const originalSetTimeout = globalThis.setTimeout;
+		onTestFinished(() => {
+			globalThis.setTimeout = originalSetTimeout;
+		});
 		const delays: number[] = [];
 		globalThis.setTimeout = ((handler: Parameters<typeof setTimeout>[0], timeout?: number, ...args: unknown[]) => {
 			delays.push(Number(timeout ?? 0));

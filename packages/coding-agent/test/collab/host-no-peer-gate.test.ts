@@ -92,6 +92,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+	vi.restoreAllMocks();
 	vi.useRealTimers();
 	if (host) await host.stop("test cleanup").catch(() => {});
 	uninstallInMemoryRelay();

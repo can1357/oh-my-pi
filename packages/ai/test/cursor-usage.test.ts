@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -18,6 +18,10 @@ import {
 	parseCursorUsage,
 } from "../src/usage/cursor";
 import { defaultRankingStrategy } from "../src/usage/registry";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 function createCursorAccessToken(sub: string): string {
 	const payload = btoa(JSON.stringify({ sub })).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
@@ -546,7 +550,6 @@ describe("cursor usage provider", () => {
 				// Account A's Cursor Models pool is nearly unused, so Grok still prefers it.
 				expect(await storage.keys.get("cursor", "session-grok", { modelId: "grok-4.7-xhigh" })).toBe("api-acct-a");
 			} finally {
-				vi.restoreAllMocks();
 				storage.close();
 				store.close();
 				await fs.rm(tempDir, { recursive: true, force: true });
@@ -646,7 +649,6 @@ describe("cursor usage provider", () => {
 				expect(blocks[0]?.blockScope).toBe("pool:api");
 				expect(blocks[0]?.blockedUntilMs).toBeLessThanOrEqual(Date.now() + 65_000);
 			} finally {
-				vi.restoreAllMocks();
 				storage.close();
 				store.close();
 				await fs.rm(tempDir, { recursive: true, force: true });

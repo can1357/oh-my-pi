@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test, vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
 import { clearCustomApis, registerCustomApi } from "@oh-my-pi/pi-ai/api-registry";
 import * as AIError from "@oh-my-pi/pi-ai/error";
@@ -19,6 +19,10 @@ import {
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import { isRetryableError } from "@oh-my-pi/pi-utils";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 function context(): Context {
 	return { systemPrompt: [], messages: [{ role: "user", content: "go", timestamp: 0 }] };
@@ -1151,7 +1155,7 @@ describe("thinking-loop retry budget (result path)", () => {
 
 	test("completeSimple fails closed after three guarded attempts", async () => {
 		registerMockApi();
-		const waitSpy = spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		spyOn(scheduler, "wait").mockResolvedValue(undefined);
 		try {
 			const mock = createMockModel({ provider: "openrouter", id: "google/gemini-3.5-flash" });
 			for (let i = 0; i < 4; i++) mock.push(loopResponse());
@@ -1166,14 +1170,13 @@ describe("thinking-loop retry budget (result path)", () => {
 			expect(result.errorMessage).toContain(THINKING_LOOP_ERROR_MARKER);
 			expect(mock.calls.every(call => call.options?.loopGuard?.enabled !== false)).toBe(true);
 		} finally {
-			waitSpy.mockRestore();
 			clearCustomApis();
 		}
 	});
 
 	test("complete (non-simple) also fails closed after three guarded attempts", async () => {
 		registerMockApi();
-		const waitSpy = spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		spyOn(scheduler, "wait").mockResolvedValue(undefined);
 		try {
 			const mock = createMockModel({ provider: "openrouter", id: "google/gemini-3.5-flash" });
 			for (let i = 0; i < 4; i++) mock.push(loopResponse());
@@ -1186,7 +1189,6 @@ describe("thinking-loop retry budget (result path)", () => {
 			expect(result.errorMessage).toContain(THINKING_LOOP_ERROR_MARKER);
 			expect(mock.calls.every(call => call.options?.loopGuard?.enabled !== false)).toBe(true);
 		} finally {
-			waitSpy.mockRestore();
 			clearCustomApis();
 		}
 	});
@@ -1194,7 +1196,7 @@ describe("thinking-loop retry budget (result path)", () => {
 	test("a caller abort during backoff rejects instead of returning the stall", async () => {
 		registerMockApi();
 		const controller = new AbortController();
-		const waitSpy = spyOn(scheduler, "wait").mockImplementation(async (_delay, opts) => {
+		spyOn(scheduler, "wait").mockImplementation(async (_delay, opts) => {
 			controller.abort(new Error("user cancelled"));
 			opts?.signal?.throwIfAborted();
 		});
@@ -1208,7 +1210,6 @@ describe("thinking-loop retry budget (result path)", () => {
 			// Only the first guarded attempt ran; the abort pre-empted re-sampling.
 			expect(mock.calls).toHaveLength(1);
 		} finally {
-			waitSpy.mockRestore();
 			clearCustomApis();
 		}
 	});
@@ -1216,7 +1217,7 @@ describe("thinking-loop retry budget (result path)", () => {
 	test("a caller abort after the third guarded result supersedes the loop error", async () => {
 		registerMockApi();
 		const controller = new AbortController();
-		const waitSpy = spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		spyOn(scheduler, "wait").mockResolvedValue(undefined);
 		try {
 			let attempts = 0;
 			const mock = createMockModel({
@@ -1233,7 +1234,6 @@ describe("thinking-loop retry budget (result path)", () => {
 			);
 			expect(mock.calls).toHaveLength(3);
 		} finally {
-			waitSpy.mockRestore();
 			clearCustomApis();
 		}
 	});
@@ -1278,7 +1278,7 @@ describe("thinking-loop retry budget (result path)", () => {
 			inner.push({ type: "error", reason: "error", error });
 			return inner;
 		});
-		const waitSpy = spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		spyOn(scheduler, "wait").mockResolvedValue(undefined);
 		try {
 			const result = await completeSimple(model, context());
 
@@ -1287,7 +1287,6 @@ describe("thinking-loop retry budget (result path)", () => {
 			expect(result.content).toHaveLength(1);
 			expect(AIError.is(result.errorId, AIError.Flag.ThinkingLoop)).toBe(true);
 		} finally {
-			waitSpy.mockRestore();
 			clearCustomApis();
 		}
 	});

@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -11,6 +11,10 @@ import * as pdfRead from "@oh-my-pi/pi-coding-agent/tools/read-pdf";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
 import { cfgImagesAutoResize } from "@oh-my-pi/pi-coding-agent/modes/settings";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 const TINY_PNG_BASE64 =
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
@@ -229,16 +233,12 @@ describe("read image questions", () => {
 			width: 1,
 			height: 1,
 		});
-		try {
-			const stub = createCompleteSimpleSuccessStub("PDF page two");
-			const result = await new ReadTool(createSession(testDir, visionModel), stub.fn).execute("pdf-question", {
-				path: `${pdfPath}:page2.png?q=Describe the page`,
-			});
-			expect(result.content).toEqual([{ type: "text", text: "PDF page two" }]);
-			expect(render).toHaveBeenCalledWith(expect.anything(), pdfPath, 2, undefined);
-		} finally {
-			render.mockRestore();
-		}
+		const stub = createCompleteSimpleSuccessStub("PDF page two");
+		const result = await new ReadTool(createSession(testDir, visionModel), stub.fn).execute("pdf-question", {
+			path: `${pdfPath}:page2.png?q=Describe the page`,
+		});
+		expect(result.content).toEqual([{ type: "text", text: "PDF page two" }]);
+		expect(render).toHaveBeenCalledWith(expect.anything(), pdfPath, 2, undefined);
 	});
 
 	it("rasterizes selected SVGs before asking the vision model", async () => {

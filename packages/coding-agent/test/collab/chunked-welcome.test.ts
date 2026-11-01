@@ -10,7 +10,7 @@
  * forwarding contract exactly; only the TUI context and the network transport
  * are stubbed.
  */
-import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, onTestFinished, spyOn, vi } from "bun:test";
 import { importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
 import { CollabGuestLink } from "@oh-my-pi/pi-coding-agent/collab/guest";
 import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
@@ -204,6 +204,7 @@ afterAll(async () => {
 
 const guestCleanups: (() => void)[] = [];
 afterEach(() => {
+	vi.restoreAllMocks();
 	for (const cleanup of guestCleanups.splice(0).reverse()) cleanup();
 });
 
@@ -218,11 +219,13 @@ describe("collab chunked welcome (#3144)", () => {
 		} as unknown as typeof WebSocket;
 		const ctx = makeCancelledSwitchGuestContext(async () => true, []);
 		const guest = new CollabGuestLink(ctx);
+		onTestFinished(() => {
+			globalThis.WebSocket = original;
+		});
 		try {
 			await expect(guest.join(host.link)).rejects.toBe(failure);
 			expect(ctx.collabGuest).toBeUndefined();
 		} finally {
-			globalThis.WebSocket = original;
 			await guest.leave("test cleanup").catch(() => {});
 		}
 	});
@@ -284,7 +287,7 @@ describe("collab chunked welcome (#3144)", () => {
 
 	it("rejects the pending join when snapshot resume fails", async () => {
 		const failure = new Error("replica write failed during snapshot resume");
-		const writeSpy = spyOn(Bun, "write").mockRejectedValue(failure);
+		spyOn(Bun, "write").mockRejectedValue(failure);
 		const guest = new CollabGuestLink(makeFailingGuestContext(failure));
 		const joinAttempt = guest.join(host.link);
 		try {
@@ -297,7 +300,6 @@ describe("collab chunked welcome (#3144)", () => {
 				]),
 			).rejects.toThrow("replica write failed during snapshot resume");
 		} finally {
-			writeSpy.mockRestore();
 			await guest.leave("test cleanup").catch(() => {});
 		}
 	});

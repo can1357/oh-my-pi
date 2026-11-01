@@ -1,4 +1,4 @@
-import { describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -32,6 +32,10 @@ import {
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 import { cfgToolsXdev, cfgToolsXdevDocs } from "@oh-my-pi/pi-coding-agent/tools/settings";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 /**
  * Mirrors `ToolExecutionComponent#buildRenderContext`: the host state's own
@@ -894,7 +898,7 @@ describe("device-only write transport for explicit lists omitting write", () => 
 	// home-relative form, not the user's home directory.
 	it("names the local:// root home-relative when it sits under the home directory", async () => {
 		const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "write-xdev-home-"));
-		const homedirSpy = spyOn(os, "homedir").mockReturnValue(homeDir);
+		spyOn(os, "homedir").mockReturnValue(homeDir);
 		const tempDir = path.join(homeDir, "work");
 		try {
 			await fs.mkdir(tempDir, { recursive: true });
@@ -916,7 +920,6 @@ describe("device-only write transport for explicit lists omitting write", () => 
 			expect(message).toContain("~/.omp/artifacts/local/<name>");
 			expect(message).not.toContain(homeDir);
 		} finally {
-			homedirSpy.mockRestore();
 			await removeWithRetries(homeDir);
 		}
 	});

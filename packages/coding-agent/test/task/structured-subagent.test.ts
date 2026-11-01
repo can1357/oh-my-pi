@@ -127,8 +127,8 @@ function result(): SingleResult {
 	};
 }
 
-function mockDiscovery(agent: AgentDefinition = AGENT): void {
-	vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
+function mockDiscovery(agent: AgentDefinition = AGENT) {
+	return vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
 }
 
 afterEach(() => {
@@ -341,7 +341,7 @@ describe("structured subagent primitive", () => {
 	});
 
 	it("attenuates plan-mode agents and rejects mutable isolation controls before discovery", async () => {
-		mockDiscovery();
+		const discoveryMock = mockDiscovery();
 		const policy = await resolveEffectiveSubagentPolicy(
 			request({ session: session({ planMode: true }), enableLsp: true, enableIrc: true }),
 		);
@@ -350,7 +350,7 @@ describe("structured subagent primitive", () => {
 		expect(policy.enableLsp).toBe(false);
 		expect(policy.enableIrc).toBe(false);
 
-		vi.restoreAllMocks();
+		discoveryMock.mockRestore();
 		const discover = vi.spyOn(discoveryModule, "discoverAgents");
 		await expect(
 			resolveEffectiveSubagentPolicy(

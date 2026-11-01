@@ -1,5 +1,5 @@
 import { Database, type Statement } from "bun:sqlite";
-import { afterEach, beforeEach, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -167,6 +167,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+	vi.restoreAllMocks();
 	checking = false;
 	try {
 		await state?.dispose();

@@ -15,6 +15,10 @@ import {
 import type { RelayToExtMessage, TabSnapshot } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/protocol";
 import { type RelayServer, startRelayServer } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/server";
 
+afterEach(() => {
+	vi.restoreAllMocks();
+});
+
 const OLD = "18.6.1";
 const EXTENSION_ID = "abcdefghijklmnopabcdefghijklmnop";
 

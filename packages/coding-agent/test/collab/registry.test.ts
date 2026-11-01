@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished, spyOn, vi } from "bun:test";
 import * as crypto from "node:crypto";
 import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
@@ -20,6 +20,7 @@ const openPublications: CollabHostPublication[] = [];
 const openServers: { server: IpcServer; connections: Set<IpcConnection> }[] = [];
 
 afterEach(async () => {
+	vi.restoreAllMocks();
 	for (const pub of openPublications.splice(0)) {
 		try {
 			await pub.close();
@@ -664,17 +665,16 @@ describe("collab registry", () => {
 		await fs.symlink(target, link, process.platform === "win32" ? "junction" : "dir");
 		const descriptor = Object.getOwnPropertyDescriptor(process, "platform");
 		if (!descriptor) throw new Error("Missing process.platform descriptor");
-		try {
-			// Exercise the Windows branch on Unix CI too; native Windows uses a junction.
-			for (const platform of new Set([process.platform, "win32"])) {
-				Object.defineProperty(process, "platform", { configurable: true, value: platform });
-				await expect(listCollabHosts({ dir: link })).rejects.toThrow();
-				expect(await Bun.file(bystander).text()).toBe("{not registry metadata");
-				await expect(publishCollabHost(sourceFor(makeFixture()), { dir: link })).rejects.toThrow(/symlink/);
-				expect(await fs.readdir(target)).toEqual(["important.json"]);
-			}
-		} finally {
+		onTestFinished(() => {
 			Object.defineProperty(process, "platform", descriptor);
+		});
+		// Exercise the Windows branch on Unix CI too; native Windows uses a junction.
+		for (const platform of new Set([process.platform, "win32"])) {
+			Object.defineProperty(process, "platform", { configurable: true, value: platform });
+			await expect(listCollabHosts({ dir: link })).rejects.toThrow();
+			expect(await Bun.file(bystander).text()).toBe("{not registry metadata");
+			await expect(publishCollabHost(sourceFor(makeFixture()), { dir: link })).rejects.toThrow(/symlink/);
+			expect(await fs.readdir(target)).toEqual(["important.json"]);
 		}
 	});
 

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, onTestFinished, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -253,6 +253,9 @@ describe("auth-broker import (broker-routed)", () => {
 		);
 
 		const ORIGINAL_STDOUT = process.stdout.write.bind(process.stdout);
+		onTestFinished(() => {
+			process.stdout.write = ORIGINAL_STDOUT;
+		});
 		let captured = "";
 		process.stdout.write = ((chunk: string | Uint8Array): boolean => {
 			captured += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
@@ -298,6 +301,9 @@ describe("auth-broker import (broker-routed)", () => {
 		);
 
 		const ORIGINAL_STDOUT = process.stdout.write.bind(process.stdout);
+		onTestFinished(() => {
+			process.stdout.write = ORIGINAL_STDOUT;
+		});
 		process.stdout.write = (() => true) as typeof process.stdout.write;
 		try {
 			await runAuthBrokerCommand({

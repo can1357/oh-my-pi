@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, onTestFinished, spyOn, vi } from "bun:test";
 import { type ChildProcess, execSync, spawn } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -14,6 +14,10 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { $which } from "@oh-my-pi/pi-utils";
 import { removeWithRetries } from "../../utils/src/temp";
 import { e2eApiKey, resolveApiKey } from "./oauth";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 // Resolve OAuth tokens at module level (async, runs before tests)
 const oauthTokens = await Promise.all([
@@ -448,6 +452,9 @@ describe("Generate E2E Tests", () => {
 				debugMessages.push(args.map(String).join(" "));
 			};
 
+			onTestFinished(() => {
+				console.debug = origDebug;
+			});
 			try {
 				Bun.env.GOOGLE_CLOUD_PROJECT = "test-project";
 				Bun.env.GOOGLE_CLOUD_LOCATION = "us-central1";
@@ -465,7 +472,6 @@ describe("Generate E2E Tests", () => {
 				const hasWarning = debugMessages.some(m => m.includes("API key will take precedence"));
 				expect(hasWarning).toBe(false);
 			} finally {
-				console.debug = origDebug;
 				if (originalProject === undefined) delete Bun.env.GOOGLE_CLOUD_PROJECT;
 				else Bun.env.GOOGLE_CLOUD_PROJECT = originalProject;
 				if (originalLocation === undefined) delete Bun.env.GOOGLE_CLOUD_LOCATION;
@@ -567,7 +573,7 @@ describe("Generate E2E Tests", () => {
 			// Without this the test reads the user ADC (~/.config/gcloud or %APPDATA%\gcloud)
 			// when present and hangs on the OAuth exchange (form body, not JSON).
 			const absentAdcHome = path.join(os.tmpdir(), `vertex-adc-absent-${location}-${Date.now()}`);
-			const homedirSpy = spyOn(os, "homedir").mockReturnValue(absentAdcHome);
+			spyOn(os, "homedir").mockReturnValue(absentAdcHome);
 			const model: Model<"anthropic-messages"> = buildModel({
 				id: "claude-sonnet-4@20250514",
 				name: "Claude Sonnet 4",
@@ -651,7 +657,6 @@ describe("Generate E2E Tests", () => {
 				expect(request.betaHeader ?? "").not.toContain("context-management-2025-06-27");
 			} finally {
 				__resetVertexTokenCache();
-				homedirSpy.mockRestore();
 				if (originalProject === undefined) delete Bun.env.GOOGLE_CLOUD_PROJECT;
 				else Bun.env.GOOGLE_CLOUD_PROJECT = originalProject;
 				if (originalGcpProject === undefined) delete Bun.env.GCP_PROJECT;

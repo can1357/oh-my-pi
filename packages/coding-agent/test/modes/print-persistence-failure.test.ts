@@ -3,7 +3,7 @@
  * print mode reports it on stderr and returns a nonzero code, RPC mode emits a
  * `notice` — instead of escaping as a raw fatal dump or going unreported.
  */
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -28,6 +28,7 @@ function makeSessionManager(): SessionManager {
 }
 
 afterEach(async () => {
+	vi.restoreAllMocks();
 	await Promise.all(tempDirs.splice(0).map(dir => dir.remove()));
 });
 

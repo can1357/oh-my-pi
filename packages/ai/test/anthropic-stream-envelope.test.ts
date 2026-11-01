@@ -1657,7 +1657,7 @@ describe("anthropic stream envelope handling", () => {
 			const frames = createOpenMessageSseFrames("Here is the first half");
 			frames.push(sseFrame("error", { type: "error", error }));
 			let created = 0;
-			vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(() => {
+			const createSpy = vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(() => {
 				created += 1;
 				return createRawSseRequest(frames) as never;
 			});
@@ -1682,7 +1682,7 @@ describe("anthropic stream envelope handling", () => {
 			// stays continuable instead of ending on an unclassified provider error.
 			expect(AIError.retriable(AIError.classifyMessage(result))).toBe(true);
 			expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "Here is the first half" }]);
-			vi.restoreAllMocks();
+			createSpy.mockRestore();
 		}
 	});
 
@@ -1702,7 +1702,7 @@ describe("anthropic stream envelope handling", () => {
 			const frames = [sseFrame("message_start", createTextSuccessEvents("unused")[0])];
 			frames.push(sseFrame("error", { type: "error", error: { type, message } }));
 			let created = 0;
-			vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(() => {
+			const createSpy = vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(() => {
 				created += 1;
 				return createRawSseRequest(frames) as never;
 			});
@@ -1722,7 +1722,7 @@ describe("anthropic stream envelope handling", () => {
 			expect(AIError.isStreamEnvelopeErrorText(result.errorMessage ?? "")).toBe(false);
 			expect(AIError.isStreamEnvelopeTruncationText(result.errorMessage ?? "")).toBe(false);
 			expect(AIError.retriable(AIError.classifyMessage(result))).toBe(false);
-			vi.restoreAllMocks();
+			createSpy.mockRestore();
 		}
 	});
 

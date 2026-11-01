@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, onTestFinished } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -88,6 +88,9 @@ describe("broker list", () => {
 		const previousTitle = process.title;
 		const broker = startBroker(projectDir, runtimeDir);
 		const activeName = "active-server";
+		onTestFinished(() => {
+			process.title = previousTitle;
+		});
 		try {
 			const started = await client.request({
 				op: "start",
@@ -110,7 +113,6 @@ describe("broker list", () => {
 			expect(listed.daemons.at(-1)?.exitedAt).toBe(51);
 		} finally {
 			await shutdown(client, broker, activeName);
-			process.title = previousTitle;
 		}
 	}, 20_000);
 });

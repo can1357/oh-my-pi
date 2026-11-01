@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -15,6 +15,10 @@ import { wrapStreamFnWithBlobUrlFallback } from "../src/blob-broker/stream-fallb
 import { createCommandUploader, extractUploadUrl, splitCommandTemplate } from "../src/blob-broker/uploaders";
 import { BlobStore as SessionBlobStore } from "../src/session/blob-store";
 import { writeFakeExecutable } from "./helpers/fake-executable";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 const PNG_B64 = Buffer.from("blob-broker-test-bytes-1").toString("base64");
 const OTHER_B64 = Buffer.from("blob-broker-test-bytes-2").toString("base64");
@@ -406,7 +410,7 @@ if (fs.statSync(file, { throwIfNoEntry: false })?.size) {
 	it("rejects command uploads when the project directory becomes inaccessible", async () => {
 		const projectDir = getProjectDir();
 		const accessSync = fs.accessSync;
-		const access = vi.spyOn(fs, "accessSync").mockImplementation((target, mode) => {
+		vi.spyOn(fs, "accessSync").mockImplementation((target, mode) => {
 			if (target === projectDir) {
 				throw Object.assign(new Error("operation not permitted"), { code: "EACCES" });
 			}
@@ -415,17 +419,13 @@ if (fs.statSync(file, { throwIfNoEntry: false })?.size) {
 		const uploader = createCommandUploader(
 			`${process.execPath} -e "console.log('https://files.example/' + process.cwd())" {file}`,
 		);
-		try {
-			await expect(
-				uploader.upload({
-					bytes: new Uint8Array(Buffer.from("payload")),
-					mimeType: "image/png",
-					extension: "png",
-				}),
-			).rejects.toThrow(`Project directory is not accessible: ${projectDir}`);
-		} finally {
-			access.mockRestore();
-		}
+		await expect(
+			uploader.upload({
+				bytes: new Uint8Array(Buffer.from("payload")),
+				mimeType: "image/png",
+				extension: "png",
+			}),
+		).rejects.toThrow(`Project directory is not accessible: ${projectDir}`);
 	});
 });
 

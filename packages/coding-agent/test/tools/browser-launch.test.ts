@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, onTestFinished } from "bun:test";
 
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -178,6 +178,9 @@ describe("browser executable selection", () => {
 				fs.chmodSync(fakeChrome, 0o755);
 
 				const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+				onTestFinished(() => {
+					if (platformDescriptor) Object.defineProperty(process, "platform", platformDescriptor);
+				});
 				Object.defineProperty(process, "platform", { value: platform, configurable: true });
 				try {
 					await expect(chromiumExecutableProbeForTest(fakeChrome)).resolves.toBe(true);

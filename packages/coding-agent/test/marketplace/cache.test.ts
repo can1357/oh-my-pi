@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
@@ -12,6 +12,10 @@ import {
 	removeCachedPlugin,
 } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace";
 import { isEnoent, removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 

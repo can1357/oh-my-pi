@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -256,17 +256,16 @@ describe("Collab CLI", () => {
 		});
 		const previousExitCode = process.exitCode;
 		const out = collector();
-		try {
-			await runCommand(["link", testCase.selector, "--json"], dir, out);
-			expect(process.exitCode).toBe(1);
-			expect(errors.join("")).toBe(`error: ${error.message}\n`);
-			expect(out.calls).toEqual([]);
-			for (const fixture of [ALPHA, BRAVO]) {
-				expect(errors.join("")).not.toContain(fixture.controlUrl);
-				expect(errors.join("")).not.toContain(fixture.viewUrl);
-			}
-		} finally {
+		onTestFinished(() => {
 			process.exitCode = previousExitCode ?? 0;
+		});
+		await runCommand(["link", testCase.selector, "--json"], dir, out);
+		expect(process.exitCode).toBe(1);
+		expect(errors.join("")).toBe(`error: ${error.message}\n`);
+		expect(out.calls).toEqual([]);
+		for (const fixture of [ALPHA, BRAVO]) {
+			expect(errors.join("")).not.toContain(fixture.controlUrl);
+			expect(errors.join("")).not.toContain(fixture.viewUrl);
 		}
 	});
 

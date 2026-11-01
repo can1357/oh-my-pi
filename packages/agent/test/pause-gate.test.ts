@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, agentLoop, agentPauseGate } from "@oh-my-pi/pi-agent-core";
 import type { AgentContext, AgentLoopConfig, AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core/types";
@@ -97,14 +97,13 @@ describe("agentPauseGate", () => {
 		await parked.promise;
 		expect(mock.calls.length).toBe(0); // parked before the first provider call
 
-		try {
-			expect(agentPauseGate.resume()).toBeGreaterThanOrEqual(0);
-			const messages = await result;
-			expect(mock.calls.length).toBe(1);
-			expect(messages[messages.length - 1].role).toBe("assistant");
-		} finally {
+		onTestFinished(() => {
 			agentPauseGate.waitUntilResumed = originalWait;
-		}
+		});
+		expect(agentPauseGate.resume()).toBeGreaterThanOrEqual(0);
+		const messages = await result;
+		expect(mock.calls.length).toBe(1);
+		expect(messages[messages.length - 1].role).toBe("assistant");
 	});
 
 	it("holds tool execution at the tool boundary when paused mid-turn", async () => {
@@ -133,19 +132,18 @@ describe("agentPauseGate", () => {
 		const context: AgentContext = { systemPrompt: ["Test"], messages: [], tools: [makeEchoTool(executed)] };
 		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
 
-		try {
-			const result = agentLoop([createUserMessage("run echo")], context, config, undefined, mock.stream).result();
-			await toolBoundary.promise;
-			expect(executed).toEqual([]); // tool parked, not started
-			expect(mock.calls.length).toBe(1); // and no follow-up model call either
-
-			agentPauseGate.resume();
-			await result;
-			expect(executed).toEqual(["frozen"]);
-			expect(mock.calls.length).toBe(2);
-		} finally {
+		onTestFinished(() => {
 			agentPauseGate.waitUntilResumed = originalWait;
-		}
+		});
+		const result = agentLoop([createUserMessage("run echo")], context, config, undefined, mock.stream).result();
+		await toolBoundary.promise;
+		expect(executed).toEqual([]); // tool parked, not started
+		expect(mock.calls.length).toBe(1); // and no follow-up model call either
+
+		agentPauseGate.resume();
+		await result;
+		expect(executed).toEqual(["frozen"]);
+		expect(mock.calls.length).toBe(2);
 	});
 
 	it("lets an external abort unwind a parked run without releasing the gate", async () => {
@@ -174,17 +172,16 @@ describe("agentPauseGate", () => {
 		// The run must terminate as aborted promptly (not stay parked until
 		// resume). The provider request itself carries the aborted signal, so
 		// whether the transport is entered at all is an implementation detail.
-		try {
-			const messages = await result;
-			const last = messages[messages.length - 1];
-			expect(last.role).toBe("assistant");
-			if (last.role === "assistant") {
-				expect(last.stopReason).toBe("aborted");
-			}
-			expect(agentPauseGate.paused).toBe(true); // aborting one run never resumes the process
-		} finally {
+		onTestFinished(() => {
 			agentPauseGate.waitUntilResumed = originalWait;
+		});
+		const messages = await result;
+		const last = messages[messages.length - 1];
+		expect(last.role).toBe("assistant");
+		if (last.role === "assistant") {
+			expect(last.stopReason).toBe("aborted");
 		}
+		expect(agentPauseGate.paused).toBe(true); // aborting one run never resumes the process
 	});
 
 	it("re-parks a waiter when the gate is re-engaged in the same tick as resume", async () => {

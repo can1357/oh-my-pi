@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
@@ -14,6 +14,10 @@ import { getConfigRootDir, setAgentDir } from "@oh-my-pi/pi-utils";
 // -- helpers ----------------------------------------------------------------
 
 import { makeAssistantMessage } from "./helpers";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 function getHeader(entries: unknown[]): SessionHeader | undefined {
 	return entries.find(
@@ -304,30 +308,26 @@ describe("SessionManager.moveTo", () => {
 			})}\n`,
 		);
 		const realAccess = fs.promises.access.bind(fs.promises);
-		const access = spyOn(fs.promises, "access").mockImplementation(async (target, mode) => {
+		spyOn(fs.promises, "access").mockImplementation(async (target, mode) => {
 			if (path.resolve(String(target)) === path.resolve(deniedDir)) {
 				throw Object.assign(new Error("permission denied"), { code: "EACCES" });
 			}
 			return realAccess(target, mode);
 		});
+		const session = await SessionManager.open(deniedFile, undefined, undefined, { initialCwd: cwdA });
 		try {
-			const session = await SessionManager.open(deniedFile, undefined, undefined, { initialCwd: cwdA });
-			try {
-				const snapshot = session.captureState();
-				await session.moveTo(cwdA);
-				const movedFile = session.getSessionFile()!;
-				expect(movedFile).not.toBe(deniedFile);
+			const snapshot = session.captureState();
+			await session.moveTo(cwdA);
+			const movedFile = session.getSessionFile()!;
+			expect(movedFile).not.toBe(deniedFile);
 
-				await session.rollbackMove(snapshot);
+			await session.rollbackMove(snapshot);
 
-				expect(fs.existsSync(deniedFile)).toBe(true);
-				expect(fs.existsSync(movedFile)).toBe(false);
-				expect(session.getSessionFile()).toBe(deniedFile);
-			} finally {
-				await session.close();
-			}
+			expect(fs.existsSync(deniedFile)).toBe(true);
+			expect(fs.existsSync(movedFile)).toBe(false);
+			expect(session.getSessionFile()).toBe(deniedFile);
 		} finally {
-			access.mockRestore();
+			await session.close();
 		}
 	});
 

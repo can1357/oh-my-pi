@@ -1,5 +1,9 @@
-import { describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished, spyOn, vi } from "bun:test";
 import { Args, Command, type CommandEntry, Flags, run } from "../src/cli";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 class GoodCommand extends Command {
 	static description = "prints good things";
@@ -133,6 +137,9 @@ describe("run() usage errors", () => {
 			return true;
 		});
 		const prevExitCode = process.exitCode;
+		onTestFinished(() => {
+			process.exitCode = prevExitCode ?? 0;
+		});
 		try {
 			await expect(run({ bin: "omp", version: "0.0.0", argv: ["bench"], commands })).resolves.toBeUndefined();
 		} finally {
@@ -172,6 +179,9 @@ describe("run() usage errors", () => {
 			return true;
 		});
 		const prevExitCode = process.exitCode;
+		onTestFinished(() => {
+			process.exitCode = prevExitCode ?? 0;
+		});
 		try {
 			await expect(
 				run({ bin: "omp", version: "0.0.0", argv: ["bench", "--unknown"], commands }),

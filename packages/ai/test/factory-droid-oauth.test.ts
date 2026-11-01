@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import { mergeRefreshedCredential } from "../src/auth/refresh";
 import { mergeRefreshedUsageCredential } from "../src/auth/usage";
 import { buildUsageCredential } from "../src/auth/usage-cache";
@@ -6,6 +6,10 @@ import { getProviderDefinition } from "../src/registry/registry";
 import type { OAuthController, OAuthCredentials } from "../src/registry/oauth/types";
 import { attachFactoryDroidRegion } from "../src/registry/oauth/factory-droid";
 import type { FetchImpl } from "../src/types";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 async function loginViaRegistry(ctrl: OAuthController): Promise<OAuthCredentials> {
 	const result = await getProviderDefinition("factory-droid")?.login?.(ctrl);

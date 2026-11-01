@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, onTestFinished, test, vi } from "bun:test";
 import { ThinkingLevel, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import {
 	type CompactionPreparation,
@@ -1915,6 +1915,7 @@ describe("Responses Lite remote compaction", () => {
 				for (const event of events) socket.emit(event);
 			},
 		});
+		onTestFinished(webSocket.restore);
 		try {
 			const model = makeCodexLiteModel({ preferWebsockets: true });
 			const sessionId = "codex-websocket-compaction";
@@ -1981,7 +1982,6 @@ describe("Responses Lite remote compaction", () => {
 		} finally {
 			for (const state of providerSessionState.values()) state.close();
 			providerSessionState.clear();
-			webSocket.restore();
 		}
 	});
 
@@ -1997,6 +1997,7 @@ describe("Responses Lite remote compaction", () => {
 				queueMicrotask(() => socket.fail());
 			},
 		});
+		onTestFinished(webSocket.restore);
 		try {
 			const model = makeCodexLiteModel({ preferWebsockets: true });
 			const request = buildCompactionV2Request(
@@ -2029,7 +2030,6 @@ describe("Responses Lite remote compaction", () => {
 		} finally {
 			for (const state of providerSessionState.values()) state.close();
 			providerSessionState.clear();
-			webSocket.restore();
 		}
 	});
 
@@ -2046,6 +2046,7 @@ describe("Responses Lite remote compaction", () => {
 				for (const event of compactionV2Events(`enc-metadata-${responseCount}`)) socket.emit(event);
 			},
 		});
+		onTestFinished(webSocket.restore);
 		try {
 			const model = makeCodexLiteModel({ preferWebsockets: true });
 			const sessionId = "codex-websocket-turn-state";
@@ -2076,7 +2077,6 @@ describe("Responses Lite remote compaction", () => {
 		} finally {
 			for (const state of providerSessionState.values()) state.close();
 			providerSessionState.clear();
-			webSocket.restore();
 		}
 	});
 
@@ -2257,6 +2257,7 @@ describe("Responses Lite remote compaction", () => {
 				for (const event of events) socket.emit(event);
 			},
 		});
+		onTestFinished(webSocket.restore);
 
 		const providerSessionState = new Map<string, ProviderSessionState>();
 		try {
@@ -2317,7 +2318,6 @@ describe("Responses Lite remote compaction", () => {
 		} finally {
 			for (const state of providerSessionState.values()) state.close();
 			providerSessionState.clear();
-			webSocket.restore();
 		}
 	});
 });

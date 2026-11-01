@@ -11,6 +11,10 @@ import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } f
 import { cfgCompactionEnabled } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { cfgEnabledModels, cfgModelRoleStorage } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 
+afterEach(() => {
+	vi.restoreAllMocks();
+});
+
 it("applies project role mutations over active runtime overrides", () => {
 	const settings = Settings.isolated({});
 	settings.overrideModelRoles({ smol: "anthropic/runtime" });

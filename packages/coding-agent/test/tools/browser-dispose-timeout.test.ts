@@ -11,9 +11,13 @@
  * on timeout so cleanup always completes.
  */
 
-import { describe, expect, it, spyOn, vi } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as attach from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
 import { type BrowserHandle, releaseBrowser } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 /** Build a headless handle whose `browser.close()` never resolves. */
 function makeHangingHeadlessHandle(pid: number | undefined): {
@@ -56,7 +60,6 @@ describe("browser dispose — headless close must not hang forever (issue #5260)
 			expect(killSpy).toHaveBeenCalledTimes(1);
 			expect(killSpy.mock.calls[0]?.[0]).toBe(4242);
 		} finally {
-			killSpy.mockRestore();
 			vi.useRealTimers();
 		}
 	});
@@ -71,7 +74,6 @@ describe("browser dispose — headless close must not hang forever (issue #5260)
 			await released;
 			expect(killSpy).not.toHaveBeenCalled();
 		} finally {
-			killSpy.mockRestore();
 			vi.useRealTimers();
 		}
 	});

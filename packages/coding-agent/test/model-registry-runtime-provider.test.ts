@@ -17,6 +17,10 @@ import { ModelRegistry, type ProviderConfigInput } from "@oh-my-pi/pi-coding-age
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { logger, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
+afterEach(() => {
+	vi.restoreAllMocks();
+});
+
 describe("ModelRegistry runtime provider registration", () => {
 	let tempDir: string;
 	let modelsJsonPath: string;
@@ -469,7 +473,7 @@ describe("ModelRegistry runtime provider registration", () => {
 		// harnesses) gives the anthropic manager a fetchDynamicModels hook whose
 		// endpoint fetch starts only after the catalog abort — its deadline timer
 		// arms after the last advanceTimersByTime and the refresh hangs forever.
-		const peekSpy = vi.spyOn(authStorage.keys, "peek").mockResolvedValue(undefined);
+		vi.spyOn(authStorage.keys, "peek").mockResolvedValue(undefined);
 		let catalogFetches = 0;
 		let abortedFetches = 0;
 		const stalledFetch: FetchImpl = (_input, init) => {
@@ -508,7 +512,6 @@ describe("ModelRegistry runtime provider registration", () => {
 		await secondRefresh;
 		expect(abortedFetches).toBe(2);
 		expect(catalogFetches).toBe(2);
-		peekSpy.mockRestore();
 	});
 
 	test("refreshRuntimeProviders times out extension fetchDynamicModels that never resolves", async () => {
@@ -1110,38 +1113,34 @@ describe("ModelRegistry runtime provider registration", () => {
 		});
 		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
 
-		try {
-			registry.registerProvider(
-				"noisy-provider",
-				{
-					api: "custom-noisy-api",
-					baseUrl: "https://example.invalid/",
-					streamSimple,
-					models: [baseModel],
-					oauth: {
-						name: "Noisy OAuth",
-						login: async () => ({ access: "a", refresh: "r", expires: Date.now() + 60_000 }),
-						refreshToken: async credentials => credentials,
-						getApiKey: credentials => credentials.access,
-						modifyModels: () => {
-							throw new Error("boom");
-						},
+		registry.registerProvider(
+			"noisy-provider",
+			{
+				api: "custom-noisy-api",
+				baseUrl: "https://example.invalid/",
+				streamSimple,
+				models: [baseModel],
+				oauth: {
+					name: "Noisy OAuth",
+					login: async () => ({ access: "a", refresh: "r", expires: Date.now() + 60_000 }),
+					refreshToken: async credentials => credentials,
+					getApiKey: credentials => credentials.access,
+					modifyModels: () => {
+						throw new Error("boom");
 					},
 				},
-				"ext://oauth",
-			);
+			},
+			"ext://oauth",
+		);
 
-			const modifierWarnings = () =>
-				warn.mock.calls.filter(([message]) => String(message).includes("extension model projection failed"));
-			expect(modifierWarnings()).toHaveLength(1);
-			expect(modifierWarnings()[0]?.[1]).toMatchObject({ provider: "noisy-provider", error: "boom" });
+		const modifierWarnings = () =>
+			warn.mock.calls.filter(([message]) => String(message).includes("extension model projection failed"));
+		expect(modifierWarnings()).toHaveLength(1);
+		expect(modifierWarnings()[0]?.[1]).toMatchObject({ provider: "noisy-provider", error: "boom" });
 
-			// Same failure on every later recomposition must not spam the log.
-			await registry.refresh("offline");
-			expect(modifierWarnings()).toHaveLength(1);
-		} finally {
-			warn.mockRestore();
-		}
+		// Same failure on every later recomposition must not spam the log.
+		await registry.refresh("offline");
+		expect(modifierWarnings()).toHaveLength(1);
 	});
 
 	test("a non-idempotent modifyModels does not compound across refreshes", async () => {
@@ -1446,51 +1445,47 @@ describe("ModelRegistry runtime provider registration", () => {
 			refresh: "refresh-token",
 			expires: Date.now() + 60_000,
 		});
-		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		vi.spyOn(logger, "warn").mockImplementation(() => {});
 
-		try {
-			const targetBefore = registry.getAll()[0];
-			const targetSnapshot = structuredClone(targetBefore!);
-			const anthropicBefore = registry.getAll().filter(model => model.provider === "anthropic").length;
-			expect(anthropicBefore).toBeGreaterThan(0);
+		const targetBefore = registry.getAll()[0];
+		const targetSnapshot = structuredClone(targetBefore!);
+		const anthropicBefore = registry.getAll().filter(model => model.provider === "anthropic").length;
+		expect(anthropicBefore).toBeGreaterThan(0);
 
-			registry.registerProvider(
-				"mutating-provider",
-				{
-					api: "custom-mutating-api",
-					baseUrl: "https://example.invalid/",
-					streamSimple,
-					models: [baseModel],
-					oauth: {
-						name: "Mutating OAuth",
-						login: async () => ({ access: "a", refresh: "r", expires: Date.now() + 60_000 }),
-						refreshToken: async credentials => credentials,
-						getApiKey: credentials => credentials.access,
-						// Corrupts a model record and its nested cost, wipes the array,
-						// then fails. None of those mutations may reach the canonical
-						// unprojected catalog used for fallback or later refreshes.
-						modifyModels: models => {
-							models[0]!.name = "Corrupted by failing hook";
-							models[0]!.cost.input = -1;
-							models.length = 0;
-							throw new Error("mutated then failed");
-						},
+		registry.registerProvider(
+			"mutating-provider",
+			{
+				api: "custom-mutating-api",
+				baseUrl: "https://example.invalid/",
+				streamSimple,
+				models: [baseModel],
+				oauth: {
+					name: "Mutating OAuth",
+					login: async () => ({ access: "a", refresh: "r", expires: Date.now() + 60_000 }),
+					refreshToken: async credentials => credentials,
+					getApiKey: credentials => credentials.access,
+					// Corrupts a model record and its nested cost, wipes the array,
+					// then fails. None of those mutations may reach the canonical
+					// unprojected catalog used for fallback or later refreshes.
+					modifyModels: models => {
+						models[0]!.name = "Corrupted by failing hook";
+						models[0]!.cost.input = -1;
+						models.length = 0;
+						throw new Error("mutated then failed");
 					},
 				},
-				"ext://oauth",
-			);
+			},
+			"ext://oauth",
+		);
 
-			expect(registry.find(targetBefore!.provider, targetBefore!.id)).toEqual(targetSnapshot);
-			expect(registry.getAll().filter(model => model.provider === "anthropic")).toHaveLength(anthropicBefore);
-			expect(getProviderModels(registry, "mutating-provider").map(model => model.id)).toEqual(["runtime-model"]);
+		expect(registry.find(targetBefore!.provider, targetBefore!.id)).toEqual(targetSnapshot);
+		expect(registry.getAll().filter(model => model.provider === "anthropic")).toHaveLength(anthropicBefore);
+		expect(getProviderModels(registry, "mutating-provider").map(model => model.id)).toEqual(["runtime-model"]);
 
-			await registry.refresh("offline");
-			expect(registry.find(targetBefore!.provider, targetBefore!.id)).toEqual(targetSnapshot);
-			expect(registry.getAll().filter(model => model.provider === "anthropic")).toHaveLength(anthropicBefore);
-			expect(getProviderModels(registry, "mutating-provider").map(model => model.id)).toEqual(["runtime-model"]);
-		} finally {
-			warn.mockRestore();
-		}
+		await registry.refresh("offline");
+		expect(registry.find(targetBefore!.provider, targetBefore!.id)).toEqual(targetSnapshot);
+		expect(registry.getAll().filter(model => model.provider === "anthropic")).toHaveLength(anthropicBefore);
+		expect(getProviderModels(registry, "mutating-provider").map(model => model.id)).toEqual(["runtime-model"]);
 	});
 
 	test("resolves a configured provider base URL before any model is discovered", () => {

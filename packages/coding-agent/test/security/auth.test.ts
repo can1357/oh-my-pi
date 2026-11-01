@@ -1,4 +1,4 @@
-import { describe, expect, test, vi } from "bun:test";
+import { afterEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -11,6 +11,10 @@ import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { createBrokerAuthStorage } from "../../src/cli/auth-broker-cli";
 import { createExactSecurityOAuthResolver, createSecurityAuthResolver, selectSecurityAuth } from "../../src/security";
 import { AuthStorage, SqliteAuthCredentialStore } from "../../src/session/auth-storage";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 function model() {
 	const value = getBundledModel("openai-codex", "gpt-5.6-sol");
@@ -191,12 +195,10 @@ describe("exact security OAuth resolver", () => {
 		});
 		// The broker's refresh handler exchanges tokens through the provider registry.
 		let mints = 0;
-		const exchange = vi
-			.spyOn(oauthRegistry, "refreshOAuthToken")
-			.mockImplementation(async (_provider, credential) => {
-				mints += 1;
-				return { ...credential, access: `access-${mints}`, expires: Date.now() + 3_600_000 };
-			});
+		vi.spyOn(oauthRegistry, "refreshOAuthToken").mockImplementation(async (_provider, credential) => {
+			mints += 1;
+			return { ...credential, access: `access-${mints}`, expires: Date.now() + 3_600_000 };
+		});
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "security-broker-recovery-"));
 		const store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
 		await store.saveOAuth(provider, {
@@ -246,7 +248,6 @@ describe("exact security OAuth resolver", () => {
 			await handle.close();
 			brokerStorage.close();
 			store.close();
-			exchange.mockRestore();
 			unregisterOAuthProviders(sourceId);
 			await removeWithRetries(tempDir);
 		}

@@ -140,6 +140,8 @@ const fakeJjRepository = {
 	label: (signal?: AbortSignal) => jjControls.label(signal),
 } as unknown as VcsRepo;
 
+let vcsSetupMocks: { mockRestore(): void }[] = [];
+
 beforeEach(() => {
 	gitControls.defaultBranch.mockReset().mockResolvedValue(null);
 	gitControls.head.mockReset().mockResolvedValue(fakeRefHead);
@@ -147,19 +149,20 @@ beforeEach(() => {
 	gitControls.statusSummary.mockReset().mockResolvedValue({ staged: 0, unstaged: 0, untracked: 0 });
 	jjControls.statusSummary.mockReset().mockResolvedValue({ staged: 0, unstaged: 0, untracked: 0 });
 	jjControls.label.mockReset().mockResolvedValue(null);
-	vi.spyOn(vcs, "gitInfo").mockReturnValue(fakeRepoInfo);
-	vi.spyOn(vcs, "git").mockReturnValue(fakeRepository);
-	vi.spyOn(vcs, "repo").mockReturnValue(fakeVcsRepository);
+	const gitInfoSpy = vi.spyOn(vcs, "gitInfo").mockReturnValue(fakeRepoInfo);
+	const gitSpy = vi.spyOn(vcs, "git").mockReturnValue(fakeRepository);
+	const repoSpy = vi.spyOn(vcs, "repo").mockReturnValue(fakeVcsRepository);
 	// Presentation now resolves a second handle: forward to the operational
 	// double's current implementation without recording an extra `repo` call,
 	// so these scenarios keep display == operational (pure git / pure jj)
 	// while call-count assertions on the operational detector keep meaning.
-	const operational = vi.spyOn(vcs, "repo") as unknown as {
+	const operational = repoSpy as unknown as {
 		getMockImplementation(): ((dir: string) => VcsRepo | null) | undefined;
 	};
-	vi.spyOn(vcs, "repoForDisplay").mockImplementation(
-		(dir: string) => operational.getMockImplementation()?.(dir) ?? null,
-	);
+	const repoForDisplaySpy = vi
+		.spyOn(vcs, "repoForDisplay")
+		.mockImplementation((dir: string) => operational.getMockImplementation()?.(dir) ?? null);
+	vcsSetupMocks = [gitInfoSpy, gitSpy, repoSpy, repoForDisplaySpy];
 });
 
 function useReftable(info: Partial<VcsGitRepoInfo> = {}): void {
@@ -783,7 +786,7 @@ describe("StatusLineComponent git watcher survives atomic HEAD renames", () => {
 	// (oven-sh/bun#24875). `vcs.watch` stat-polls the HEAD path, which
 	// survives the inode swap on every platform.
 	it("keeps firing #onBranchChange across consecutive branch switches", async () => {
-		vi.restoreAllMocks();
+		for (const mock of vcsSetupMocks) mock.mockRestore();
 		gitControls.defaultBranch.mockReturnValue(Promise.withResolvers<string | null>().promise);
 		gitControls.statusSummary.mockReturnValue(Promise.withResolvers<GitStatus | null>().promise);
 		const watchFileSpy = vi.spyOn(nodeFs, "watchFile");

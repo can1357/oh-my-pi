@@ -1,4 +1,4 @@
-import { describe, expect, test, vi } from "bun:test";
+import { afterEach, describe, expect, test, vi } from "bun:test";
 import { AuthStorage } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -10,6 +10,10 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 
 import { cfgAstGrepEnabled, cfgToolsXdev } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import { cfgCompactionExperimentalContextManagement } from "@oh-my-pi/pi-coding-agent/session/context-settings";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 function createSession(enabled: boolean, restricted = false): ToolSession {
 	const settings = Settings.isolated();
@@ -60,9 +64,7 @@ describe("experimental context tool registration", () => {
 	test("SDK preserves the recovery-capable notes pair in an explicit runtime tool set", async () => {
 		using tempDir = TempDir.createSync("@omp-context-tools-sdk-");
 		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
-		const fetchSpy = vi
-			.spyOn(globalThis, "fetch")
-			.mockRejectedValue(new Error("network disabled in registration test"));
+		vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("network disabled in registration test"));
 		try {
 			const sessionManager = SessionManager.inMemory(tempDir.path());
 			const { session } = await createAgentSession({
@@ -100,7 +102,6 @@ describe("experimental context tool registration", () => {
 				await session.dispose();
 			}
 		} finally {
-			fetchSpy.mockRestore();
 			authStorage.close();
 		}
 	});

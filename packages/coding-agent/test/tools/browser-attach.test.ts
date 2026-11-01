@@ -7,7 +7,7 @@
  * - mainFrame readiness is polled past the frameTree race.
  */
 
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, test, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, onTestFinished, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -43,6 +43,10 @@ import {
 } from "puppeteer-core";
 import { rejectionOf } from "../helpers/rejection";
 import { chromiumAvailable } from "./chromium-probe";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
 let sharedHeadless: BrowserHandle | undefined;
@@ -993,6 +997,9 @@ describe("pickElectronTarget relay path", () => {
 		const nameDescriptor = Object.getOwnPropertyDescriptor(TimeoutError, "name")!;
 		// Release builds minify class names, so Puppeteer names its timeout like this there.
 		Object.defineProperty(TimeoutError, "name", { ...nameDescriptor, value: "Og" });
+		onTestFinished(() => {
+			Object.defineProperty(TimeoutError, "name", nameDescriptor);
+		});
 		try {
 			const browser = Object.assign(makeBrowser([]), {
 				waitForTarget: (predicate: (target: Target) => boolean) =>
@@ -1003,7 +1010,6 @@ describe("pickElectronTarget relay path", () => {
 
 			expect((error as Error).message).toMatch(/^Selected tab did not become available.*retry, or reopen it/);
 		} finally {
-			Object.defineProperty(TimeoutError, "name", nameDescriptor);
 			await puppeteerBrowser.disconnect();
 		}
 	});

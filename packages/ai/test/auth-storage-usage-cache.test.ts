@@ -24,6 +24,10 @@ import { alibabaTokenPlanUsageProvider } from "@oh-my-pi/pi-ai/usage/alibaba-tok
 import * as claudeUsage from "@oh-my-pi/pi-ai/usage/claude";
 import { serializeAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
 
+afterEach(() => {
+	vi.restoreAllMocks();
+});
+
 function anthropicReports(reports: UsageReport[] | null): UsageReport[] {
 	return (reports ?? []).filter(r => r.provider === "anthropic");
 }
@@ -962,7 +966,6 @@ describe("AuthStorage usage cache: jitter", () => {
 			}
 		} finally {
 			storage.close();
-			vi.restoreAllMocks();
 		}
 	});
 });
@@ -1328,7 +1331,6 @@ describe("AuthStorage usage cache: terminal refresh failure", () => {
 			expect(fetchSpy.mock.calls[0]?.[0].credential.accessToken).toBe("oat-1");
 		} finally {
 			storage.close();
-			vi.restoreAllMocks();
 		}
 	});
 
@@ -1358,7 +1360,6 @@ describe("AuthStorage usage cache: terminal refresh failure", () => {
 			expect(cached.value).toBeNull();
 		} finally {
 			storage.close();
-			vi.restoreAllMocks();
 		}
 	});
 
@@ -1423,7 +1424,6 @@ describe("AuthStorage usage cache: terminal refresh failure", () => {
 			expect(rows[0].disabledCause).toBeNull();
 		} finally {
 			storage.close();
-			vi.restoreAllMocks();
 		}
 	});
 });
@@ -1476,7 +1476,6 @@ describe("AuthStorage usage cache: org-only identity stability", () => {
 			}
 		} finally {
 			storage.close();
-			vi.restoreAllMocks();
 		}
 	});
 });

@@ -3,7 +3,7 @@
 // `setTimeout` in #settle that resurrects a stopped daemon. Fake timers cannot control the OS
 // process-exit promise or the unix-socket RPC the broker relies on. The embedded broker uses a
 // shorter real backoff here; proving the absence of resurrection still requires crossing it.
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, onTestFinished } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Process } from "@oh-my-pi/pi-natives";
@@ -73,6 +73,9 @@ describe("daemon broker restart settling", () => {
 			restartBackoffBaseMs: RESTART_BACKOFF_BASE_MS,
 		});
 		const name = "crash-loop";
+		onTestFinished(() => {
+			process.title = previousTitle;
+		});
 		try {
 			const started = await client.request({
 				op: "start",
@@ -119,7 +122,6 @@ describe("daemon broker restart settling", () => {
 			await client.request({ op: "shutdown" }).catch(() => undefined);
 			client.close();
 			await broker;
-			process.title = previousTitle;
 		}
 	}, 20_000);
 
@@ -161,6 +163,9 @@ describe("daemon broker restart settling", () => {
 
 		const secondClient = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
 		const secondBroker = startBroker(projectDir, runtimeDir);
+		onTestFinished(() => {
+			process.title = previousTitle;
+		});
 		try {
 			const recovered = await snapshotOf(secondClient, name);
 			expect(recovered.state).toBe("running");
@@ -191,7 +196,6 @@ describe("daemon broker restart settling", () => {
 			if (processRef?.status() === "running") {
 				await processRef.terminate({ group: true, gracefulMs: 0, timeoutMs: 2_000 });
 			}
-			process.title = previousTitle;
 		}
 	}, 20_000);
 });

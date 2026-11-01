@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Process } from "@oh-my-pi/pi-natives";
@@ -15,6 +15,10 @@ import {
 import { listServices, sendService, startService, waitForOwnedServiceCompletion } from "../../src/launch/services";
 import type { ToolSession } from "../../src/tools";
 import { BashTool } from "../../src/tools/bash";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 interface EmbeddedBroker {
 	/** Settles once this in-process broker has shut down and flushed its metadata. */
@@ -76,6 +80,9 @@ describe("session-owned supervised services", () => {
 		});
 		const first = makeSession("first-session", firstCompletions);
 		const second = makeSession("second-session", secondCompletions);
+		onTestFinished(() => {
+			process.title = previousTitle;
+		});
 		try {
 			vi.spyOn(brokerClients, "daemonClientForProject").mockResolvedValue(client);
 			const started = await startService(first, {
@@ -95,11 +102,9 @@ describe("session-owned supervised services", () => {
 			expect(secondCompletions).toEqual([]);
 			expect(started.daemon.owner).toBe("first-session");
 		} finally {
-			vi.restoreAllMocks();
 			await client.request({ op: "shutdown" }).catch(() => undefined);
 			client.close();
 			await broker.finished;
-			process.title = previousTitle;
 		}
 	}, 15_000);
 
@@ -134,6 +139,9 @@ describe("session-owned supervised services", () => {
 			sessionId = nextSessionId;
 			for (const callback of callbacks) callback();
 		};
+		onTestFinished(() => {
+			process.title = previousTitle;
+		});
 		try {
 			vi.spyOn(brokerClients, "daemonClientForProject").mockResolvedValue(client);
 			await startService(session, {
@@ -162,11 +170,9 @@ describe("session-owned supervised services", () => {
 			};
 			expect(metadata.pendingCompletions).toEqual([]);
 		} finally {
-			vi.restoreAllMocks();
 			await client.request({ op: "shutdown" }).catch(() => undefined);
 			client.close();
 			await broker.finished;
-			process.title = previousTitle;
 		}
 	}, 15_000);
 
@@ -201,6 +207,9 @@ describe("session-owned supervised services", () => {
 				if (completions === resumedCompletions) resumedDelivery.resolve(notification);
 				return Promise.resolve();
 			},
+		});
+		onTestFinished(() => {
+			process.title = previousTitle;
 		});
 		try {
 			vi.spyOn(brokerClients, "daemonClientForProject").mockImplementation(async () => client);
@@ -256,7 +265,6 @@ describe("session-owned supervised services", () => {
 			};
 			expect(metadata.pendingCompletions).toEqual([]);
 		} finally {
-			vi.restoreAllMocks();
 			await client.request({ op: "shutdown" }).catch(() => undefined);
 			client.close();
 			await broker.finished;
@@ -266,7 +274,6 @@ describe("session-owned supervised services", () => {
 					await processRef.terminate({ group: true, gracefulMs: 0, timeoutMs: 2_000 });
 				}
 			}
-			process.title = previousTitle;
 		}
 	}, 20_000);
 
@@ -288,6 +295,9 @@ describe("session-owned supervised services", () => {
 			getAgentId: () => "Main",
 			getSessionId: () => "session-svc",
 		};
+		onTestFinished(() => {
+			process.title = previousTitle;
+		});
 		try {
 			vi.spyOn(brokerClients, "daemonClientForProject").mockResolvedValue(client);
 			const result = await new BashTool(session).execute("svc-env", {
@@ -301,11 +311,9 @@ describe("session-owned supervised services", () => {
 			});
 			expect(result.details?.service).toMatchObject({ name: "env-service", ready: true, timedOut: false });
 		} finally {
-			vi.restoreAllMocks();
 			await client.request({ op: "shutdown" }).catch(() => undefined);
 			client.close();
 			await broker.finished;
-			process.title = previousTitle;
 		}
 	}, 15_000);
 });

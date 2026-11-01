@@ -1,10 +1,14 @@
 import { Database } from "bun:sqlite";
-import { describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as fsPromises from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { removeSyncWithRetries, removeWithRetries } from "@oh-my-pi/pi-utils/temp";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 // Retries are Windows-only by design (`shouldRetryRemove` gates on
 // `process.platform === "win32"`), so the locked-removal path only exists there.
@@ -32,7 +36,7 @@ describe.skipIf(process.platform !== "win32")("locked temp directory removal", (
 	it("removeWithRetries forces a major GC before the first retry", async () => {
 		const target = fs.mkdtempSync(path.join(os.tmpdir(), "pi-temp-remove-"));
 		let attempts = 0;
-		const rm = spyOn(fsPromises, "rm").mockImplementation(async () => {
+		spyOn(fsPromises, "rm").mockImplementation(async () => {
 			attempts++;
 			if (attempts === 1) {
 				const err = new Error("resource busy or locked") as NodeJS.ErrnoException;
@@ -47,8 +51,6 @@ describe.skipIf(process.platform !== "win32")("locked temp directory removal", (
 			expect(attempts).toBe(2);
 			expect(gc).toHaveBeenCalledTimes(1);
 		} finally {
-			rm.mockRestore();
-			gc.mockRestore();
 			fs.rmSync(target, { recursive: true, force: true });
 		}
 	});

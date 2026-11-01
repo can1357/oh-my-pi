@@ -8,6 +8,7 @@ import { installStatsTestIsolation } from "./helpers/temp-agent";
 installStatsTestIsolation("@pi-stats-live-external-");
 
 afterEach(() => {
+	vi.restoreAllMocks();
 	vi.useRealTimers();
 });
 
@@ -53,7 +54,6 @@ describe("StatsLive external writes", () => {
 			expect(await syncAndFlush(live)).toBe(baseline + 1);
 		} finally {
 			live.stop();
-			vi.restoreAllMocks();
 		}
 	});
 });

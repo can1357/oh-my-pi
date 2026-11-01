@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, type Mock, spyOn, vi } from "bun:test";
+import { afterEach, describe, expect, it, type Mock, onTestFinished, spyOn, vi } from "bun:test";
 import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -91,6 +91,9 @@ function withPlatform<T>(platform: NodeJS.Platform, fn: () => T): T {
 async function withPlatformAsync<T>(platform: NodeJS.Platform, fn: () => Promise<T>): Promise<T> {
 	const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
 	if (!platformDescriptor) throw new Error("process.platform descriptor missing");
+	onTestFinished(() => {
+		Object.defineProperty(process, "platform", platformDescriptor);
+	});
 	Object.defineProperty(process, "platform", { ...platformDescriptor, value: platform });
 	try {
 		return await fn();
@@ -883,14 +886,13 @@ describe("migrateRenamedInstall transaction", () => {
 		const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
 		if (!platformDescriptor) throw new Error("process.platform descriptor missing");
 		Object.defineProperty(process, "platform", { ...platformDescriptor, value: "win32" });
-		try {
-			const { steps } = scriptedSteps({ install: [0, 0], verify: [false, false] });
-			const promise = migrateRenamedInstall(release, steps);
-			await expect(promise).rejects.toThrow("irm https://omp.sh/install.ps1");
-			await expect(promise).rejects.not.toThrow("| sh");
-		} finally {
+		onTestFinished(() => {
 			Object.defineProperty(process, "platform", platformDescriptor);
-		}
+		});
+		const { steps } = scriptedSteps({ install: [0, 0], verify: [false, false] });
+		const promise = migrateRenamedInstall(release, steps);
+		await expect(promise).rejects.toThrow("irm https://omp.sh/install.ps1");
+		await expect(promise).rejects.not.toThrow("| sh");
 	});
 });
 

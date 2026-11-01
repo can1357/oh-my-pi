@@ -2,7 +2,7 @@ import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterAll, describe, expect, it, spyOn } from "bun:test";
+import { afterAll, afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
@@ -21,6 +21,10 @@ import { CLAUDE_TRACE_DEBUG_CERT, CLAUDE_TRACE_DEBUG_KEY } from "@oh-my-pi/pi-co
 import type { Browser, Page } from "puppeteer-core";
 import { rejectionOf } from "../helpers/rejection";
 import { chromiumAvailable } from "./chromium-probe";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
 const tempDirs: string[] = [];

@@ -1,9 +1,13 @@
-import { describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { searchAnthropic } from "@oh-my-pi/pi-coding-agent/web/search/providers/anthropic";
 import { createInMemoryAuthStorage } from "../../helpers/agent-session-setup";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 const SELECTED_BASE_URL = "https://anthropic-grounding.example.test/v1";
 
@@ -134,7 +138,6 @@ describe("Anthropic search request body", () => {
 			expect(userId.account_uuid).toBe(accountUuid);
 			expect(userId.device_id).toMatch(/^[0-9a-f]{64}$/);
 		} finally {
-			vi.restoreAllMocks();
 			fixture.authStorage.close();
 		}
 	});

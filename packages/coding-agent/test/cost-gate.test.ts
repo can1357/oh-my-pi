@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import * as path from "node:path";
 import type { StreamFn } from "@oh-my-pi/pi-agent-core";
 import * as ai from "@oh-my-pi/pi-ai";
@@ -78,6 +78,7 @@ function streamOf(message: AssistantMessage): AssistantMessageEventStream {
 
 // `runRootCommand` registers the CLI's extension roots (`--no-extensions` → explicit-only) process-wide.
 afterEach(() => {
+	vi.restoreAllMocks();
 	clearOmpExtensionCliRoots();
 });
 
@@ -231,6 +232,9 @@ describe("--warn-cost / --max-cost", () => {
 
 	it("report an invalid amount as a usage error", async () => {
 		const previousExitCode = process.exitCode;
+		onTestFinished(() => {
+			process.exitCode = previousExitCode ?? 0;
+		});
 		let observedExitCode: string | number | null | undefined;
 		const captured: string[] = [];
 		vi.spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
@@ -241,7 +245,6 @@ describe("--warn-cost / --max-cost", () => {
 			await runCli(["--warn-cost", "abc", "--print", "hello"]);
 			observedExitCode = process.exitCode;
 		} finally {
-			vi.restoreAllMocks();
 			process.exitCode = previousExitCode ?? 0;
 		}
 		expect(observedExitCode).toBe(2);

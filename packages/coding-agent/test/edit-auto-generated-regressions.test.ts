@@ -187,6 +187,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+	vi.restoreAllMocks();
 	if (tempDir) removeSyncWithRetries(tempDir);
 });
 
@@ -216,7 +217,6 @@ it("auto-generated edit rejection stays scoped to the tool call", async () => {
 		const lastAssistant = lastAssistantMessage(session.state.messages);
 		expect(lastAssistant?.stopReason).toBe("stop");
 	} finally {
-		abortSpy.mockRestore();
 		try {
 			await session.dispose();
 		} finally {

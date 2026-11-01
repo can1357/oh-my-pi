@@ -13,7 +13,7 @@
  * actions) must keep getting the pre-#5642 plain leaf move instead of
  * silently reporting a successful no-op navigation (review on #5895).
  */
-import { describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import { Agent, AgentBusyError, type AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -22,6 +22,10 @@ import { SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets/obfuscator";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 const TEST_MODEL = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 
@@ -621,7 +625,6 @@ describe("AgentSession tree navigation onto an ask toolResult", () => {
 			expect(continueSpy).toHaveBeenCalledTimes(1);
 		} finally {
 			releaseContinue.resolve();
-			continueSpy.mockRestore();
 			await ctx.cleanup();
 		}
 	});
@@ -634,7 +637,7 @@ describe("AgentSession tree navigation onto an ask toolResult", () => {
 		const ctx = await createTestSession({ inMemory: true });
 		const { session } = ctx;
 		let calls = 0;
-		const continueSpy = vi.spyOn(session.agent, "continue").mockImplementation(async () => {
+		vi.spyOn(session.agent, "continue").mockImplementation(async () => {
 			calls++;
 			if (calls === 1) {
 				// The turn ended with a steer stranded past its final queue poll.
@@ -656,7 +659,6 @@ describe("AgentSession tree navigation onto an ask toolResult", () => {
 			expect(calls).toBe(2);
 			expect(session.agent.hasQueuedMessages()).toBe(false);
 		} finally {
-			continueSpy.mockRestore();
 			await ctx.cleanup();
 		}
 	});

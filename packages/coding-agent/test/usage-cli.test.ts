@@ -1780,7 +1780,6 @@ describe("omp usage accounts", () => {
 			for (const account of listed.accounts) expect(text).toContain(account.identityKey);
 			expect(text).not.toMatch(/access-|refresh-|sk-stored/);
 		} finally {
-			vi.restoreAllMocks();
 			authStorage.close();
 		}
 	});

@@ -1,9 +1,13 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { StreamRedactor } from "@oh-my-pi/pi-coding-agent/stream/redactor";
 import { logger } from "@oh-my-pi/pi-utils";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 let redactor: StreamRedactor;
 let cwd: string;
@@ -55,13 +59,9 @@ describe("StreamRedactor", () => {
 
 	it("skips an invalid user pattern while applying the remaining patterns", async () => {
 		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
-		try {
-			const customRedactor = await StreamRedactor.load(cwd, ["(", "custom-secret"]);
-			expect(customRedactor.redactRow("found custom-secret here")).toBe("found •••••• here");
-			expect(warn).toHaveBeenCalledTimes(1);
-		} finally {
-			warn.mockRestore();
-		}
+		const customRedactor = await StreamRedactor.load(cwd, ["(", "custom-secret"]);
+		expect(customRedactor.redactRow("found custom-secret here")).toBe("found •••••• here");
+		expect(warn).toHaveBeenCalledTimes(1);
 	});
 
 	it("redacts a connection URL password without hiding the username or host", () => {

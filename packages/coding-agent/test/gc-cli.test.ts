@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -56,6 +56,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+	vi.restoreAllMocks();
 	stdoutSpy?.mockRestore();
 	stdoutSpy = undefined;
 	stderrSpy?.mockRestore();

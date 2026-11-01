@@ -16,7 +16,7 @@
  *   *directory* alone does NOT block it (verified empirically) — only a
  *   locked *file* does.
  */
-import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -34,6 +34,10 @@ import { type CreateAgentSessionOptions, createAgentSession, discoverAuthStorage
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { FileWriteFallbackRequest } from "@oh-my-pi/pi-coding-agent/tools/file-write-fallback";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 /**
  * Drives `ExtensionRunner.initialize` with no-op stubs, mirroring what a mode
@@ -512,7 +516,7 @@ describe("registerFileWriteFallback end-to-end (real extension, real session)", 
 		// what `ExtensionRunner.cwd` reads.
 		const moved = path.join(tempDir, "moved-workspace");
 		fs.mkdirSync(moved, { recursive: true });
-		const cwdSpy = spyOn(session.sessionManager, "getCwd").mockReturnValue(moved);
+		spyOn(session.sessionManager, "getCwd").mockReturnValue(moved);
 
 		try {
 			const writeTool = session.getToolByName("write") as AgentTool | undefined;
@@ -524,7 +528,6 @@ describe("registerFileWriteFallback end-to-end (real extension, real session)", 
 			expect(writeResult.isError).not.toBe(true);
 			expect(seenCwds).toEqual([moved]);
 		} finally {
-			cwdSpy.mockRestore();
 			fs.chmodSync(lockedDir, 0o700);
 			await session.dispose();
 		}

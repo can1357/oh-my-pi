@@ -298,8 +298,6 @@ describe("ProcessTerminal DA1 SIXEL detection", () => {
 					expect(received).toEqual(["x"]);
 					expect(TERMINAL.imageProtocol).toBe(expected);
 				} finally {
-					harness?.dispose();
-					harness = undefined;
 					restoreEnv("PATH", previousPath);
 				}
 			});

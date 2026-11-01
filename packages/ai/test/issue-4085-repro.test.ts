@@ -1,7 +1,11 @@
-import { describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { POLL_MAX_ATTEMPTS, pollOperation } from "@oh-my-pi/pi-ai/registry/oauth/google-gemini-cli";
 import { oauthFetch } from "@oh-my-pi/pi-ai/registry/oauth/google-oauth-shared";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 /**
  * A loopback server whose handler never resolves — models a stalled Cloud Code
@@ -59,33 +63,24 @@ describe("issue #4085 — Google OAuth provisioning honors cancel/timeout", () =
 	});
 
 	it("pollOperation is bounded: a never-done operation fails after POLL_MAX_ATTEMPTS", async () => {
-		const sleepSpy = spyOn(Bun, "sleep").mockImplementation((() => Promise.resolve()) as typeof Bun.sleep);
+		spyOn(Bun, "sleep").mockImplementation((() => Promise.resolve()) as typeof Bun.sleep);
 		const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
 			(async () =>
 				new Response(JSON.stringify({ done: false }), { status: 200 })) as unknown as typeof globalThis.fetch,
 		);
-		try {
-			const err = await pollOperation("operations/abc", {}, undefined).catch((e: unknown) => e);
-			expect(err).toBeInstanceOf(AIError.OAuthError);
-			expect((err as AIError.OAuthError).kind).toBe("timeout");
-			expect(fetchSpy).toHaveBeenCalledTimes(POLL_MAX_ATTEMPTS);
-		} finally {
-			fetchSpy.mockRestore();
-			sleepSpy.mockRestore();
-		}
+		const err = await pollOperation("operations/abc", {}, undefined).catch((e: unknown) => e);
+		expect(err).toBeInstanceOf(AIError.OAuthError);
+		expect((err as AIError.OAuthError).kind).toBe("timeout");
+		expect(fetchSpy).toHaveBeenCalledTimes(POLL_MAX_ATTEMPTS);
 	});
 
 	it("pollOperation aborts before polling when the signal is already cancelled", async () => {
 		const fetchSpy = spyOn(globalThis, "fetch");
-		try {
-			const ctrl = new AbortController();
-			ctrl.abort(new Error("cancelled"));
-			await expect(pollOperation("operations/abc", {}, ctrl.signal)).rejects.toBeInstanceOf(
-				AIError.LoginCancelledError,
-			);
-			expect(fetchSpy).not.toHaveBeenCalled();
-		} finally {
-			fetchSpy.mockRestore();
-		}
+		const ctrl = new AbortController();
+		ctrl.abort(new Error("cancelled"));
+		await expect(pollOperation("operations/abc", {}, ctrl.signal)).rejects.toBeInstanceOf(
+			AIError.LoginCancelledError,
+		);
+		expect(fetchSpy).not.toHaveBeenCalled();
 	});
 });

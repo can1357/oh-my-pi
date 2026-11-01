@@ -1,7 +1,7 @@
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { calculateUsageCost } from "@oh-my-pi/pi-catalog/models";
 import { USER_AGENT } from "@oh-my-pi/pi-utils";
-import { describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import {
 	type ApiKeyResolveContext,
 	chatTextBackend,
@@ -22,6 +22,10 @@ import type { ImageContent } from "@oh-my-pi/pi-ai/types";
 import { ConfigurationError, ValidationError } from "@oh-my-pi/pi-ai/error";
 import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { withEnv } from "./helpers";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 const LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
 
@@ -1812,35 +1816,28 @@ describe("chat judgment backend images", () => {
 			{ status: 200, headers: { "content-type": "text/event-stream" } },
 		);
 		let sends = 0;
-		const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (
-			_input: string | URL | Request,
-			init?: RequestInit,
-		) => {
+		spyOn(globalThis, "fetch").mockImplementation((async (_input: string | URL | Request, init?: RequestInit) => {
 			sends++;
 			requests.push(JSON.parse(String(init?.body)));
 			return completionStream;
 		}) as typeof fetch);
 
-		try {
-			const backend = chatTextBackend(chatModel, { apiKey: "test-key" });
-			await backend.complete({ system: "Judge.", user: "Inspect these.", images: IMAGE_REFS }, {});
+		const backend = chatTextBackend(chatModel, { apiKey: "test-key" });
+		await backend.complete({ system: "Judge.", user: "Inspect these.", images: IMAGE_REFS }, {});
 
-			const userMessage = requests[0].messages.find(message => message.role === "user");
-			expect(userMessage?.content).toEqual([
-				{ type: "text", text: "Inspect these." },
-				{ type: "image_url", image_url: { url: "data:image/png;base64,AQID" } },
-				{ type: "image_url", image_url: { url: "data:image/jpeg;base64,BAUG" } },
-			]);
+		const userMessage = requests[0].messages.find(message => message.role === "user");
+		expect(userMessage?.content).toEqual([
+			{ type: "text", text: "Inspect these." },
+			{ type: "image_url", image_url: { url: "data:image/png;base64,AQID" } },
+			{ type: "image_url", image_url: { url: "data:image/jpeg;base64,BAUG" } },
+		]);
 
-			const guarded = chatTextBackend(guardedModel, { apiKey: "test-key" });
-			const error = await guarded
-				.complete({ system: "Judge.", user: "Inspect these.", images: IMAGE_REFS }, {})
-				.catch((caught: unknown) => caught);
-			expect(error).toBeInstanceOf(ValidationError);
-			expect(String(error)).toMatch(/does not support image inputs$/);
-			expect(sends).toBe(1);
-		} finally {
-			fetchSpy.mockRestore();
-		}
+		const guarded = chatTextBackend(guardedModel, { apiKey: "test-key" });
+		const error = await guarded
+			.complete({ system: "Judge.", user: "Inspect these.", images: IMAGE_REFS }, {})
+			.catch((caught: unknown) => caught);
+		expect(error).toBeInstanceOf(ValidationError);
+		expect(String(error)).toMatch(/does not support image inputs$/);
+		expect(sends).toBe(1);
 	});
 });

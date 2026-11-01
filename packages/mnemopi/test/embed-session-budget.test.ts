@@ -5,12 +5,16 @@
 // 3.85 CPU-seconds for one short query on 32 cores). The patched factory is
 // onnxruntime-common's exported class, which an unrelated consumer can share,
 // so the budget must stay confined to our model files and our scope.
-import { describe, expect, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test, vi } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
 import type * as Ort from "onnxruntime-node";
 import { defaultLocalModelInitializer, type LocalEmbeddingModel } from "../src/core/embeddings";
 import * as runtime from "../src/core/fastembed-runtime";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 const { applyEmbedSessionBudget, embedSessionOptions, withEmbedSessionBudget } = runtime;
 
 type OrtSessionOptions = Ort.InferenceSession.SessionOptions;
@@ -190,11 +194,9 @@ describe("defaultLocalModelInitializer", () => {
 		const { calls, ort, original } = recordingOrt();
 		const model = { embed: async () => [] } as unknown as LocalEmbeddingModel;
 		const realWithBudget = runtime.withEmbedSessionBudget;
-		const budgetSpy = spyOn(runtime, "withEmbedSessionBudget").mockImplementation(((
-			cacheRoot: string,
-			work: () => Promise<unknown>,
-		) => realWithBudget(cacheRoot, work, () => ort)) as typeof realWithBudget);
-		const loadSpy = spyOn(runtime, "loadFastembed").mockResolvedValue({
+		spyOn(runtime, "withEmbedSessionBudget").mockImplementation(((cacheRoot: string, work: () => Promise<unknown>) =>
+			realWithBudget(cacheRoot, work, () => ort)) as typeof realWithBudget);
+		spyOn(runtime, "loadFastembed").mockResolvedValue({
 			FlagEmbedding: {
 				init: async ({ cacheDir }: { cacheDir: string }) => {
 					await ort.InferenceSession.create(path.join(cacheDir, "Qdrant_bge-base-en-v1.5-onnx-Q", "model.onnx"));
@@ -202,19 +204,14 @@ describe("defaultLocalModelInitializer", () => {
 				},
 			},
 		} as never);
-		try {
-			const loaded = await defaultLocalModelInitializer({
-				model: "fast-bge-base-en-v1.5" as never,
-				cacheDir: CACHE,
-			});
+		const loaded = await defaultLocalModelInitializer({
+			model: "fast-bge-base-en-v1.5" as never,
+			cacheDir: CACHE,
+		});
 
-			expect(loaded).toBe(model);
-			expect(intraOpThreads(calls[0])).toBe(Math.max(1, Math.min(4, os.availableParallelism())));
-			expect(ort.InferenceSession.create).toBe(original);
-		} finally {
-			budgetSpy.mockRestore();
-			loadSpy.mockRestore();
-		}
+		expect(loaded).toBe(model);
+		expect(intraOpThreads(calls[0])).toBe(Math.max(1, Math.min(4, os.availableParallelism())));
+		expect(ort.InferenceSession.create).toBe(original);
 	});
 });
 

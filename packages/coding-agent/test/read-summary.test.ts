@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -10,6 +10,10 @@ import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import * as readSummary from "@oh-my-pi/pi-coding-agent/tools/read-summary";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 let artifactCounter = 0;
 
@@ -89,7 +93,7 @@ describe("read summary", () => {
 		const source = "export function alpha() {\n\tconst one = 1;\n\treturn one;\n}\n";
 		await fs.writeFile(fixture, source);
 		// The summarizer is a native addon; its output shape is all this contract needs.
-		const summarize = spyOn(readSummary, "trySummarize").mockResolvedValue({
+		spyOn(readSummary, "trySummarize").mockResolvedValue({
 			language: "typescript",
 			parsed: true,
 			elided: true,
@@ -100,22 +104,18 @@ describe("read summary", () => {
 				{ kind: "kept", startLine: 4, endLine: 4, text: "}" },
 			],
 		});
-		try {
-			const rowPrefixes = async (overrides: Record<string, unknown>) => {
-				const result = await new ReadTool(createSession(tmpDir, overrides)).execute("read-summary-prefixes", {
-					path: fixture,
-				});
-				expect(result.details?.summary?.elidedSpans).toBe(1);
-				return result.details?.rowPrefixes;
-			};
+		const rowPrefixes = async (overrides: Record<string, unknown>) => {
+			const result = await new ReadTool(createSession(tmpDir, overrides)).execute("read-summary-prefixes", {
+				path: fixture,
+			});
+			expect(result.details?.summary?.elidedSpans).toBe(1);
+			return result.details?.rowPrefixes;
+		};
 
-			expect(await rowPrefixes({})).toBe(true);
-			expect(await rowPrefixes({ "edit.mode": "replace", readLineNumbers: true })).toBe(true);
-			// No hashlines, no line numbers: a leading `N:` in the text would be file content.
-			expect(await rowPrefixes({ "edit.mode": "replace", readLineNumbers: false })).toBe(false);
-		} finally {
-			summarize.mockRestore();
-		}
+		expect(await rowPrefixes({})).toBe(true);
+		expect(await rowPrefixes({ "edit.mode": "replace", readLineNumbers: true })).toBe(true);
+		// No hashlines, no line numbers: a leading `N:` in the text would be file content.
+		expect(await rowPrefixes({ "edit.mode": "replace", readLineNumbers: false })).toBe(false);
 	});
 
 	it("uses the resolved path in elision recovery selectors after suffix matching", async () => {

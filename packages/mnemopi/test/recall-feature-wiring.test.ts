@@ -3,7 +3,7 @@
  * (the surface hosts such as the coding-agent call), per memory instance.
  */
 import type { Database } from "bun:sqlite";
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -44,6 +44,7 @@ function contents(results: readonly { content: string }[]): string[] {
 }
 
 afterEach(() => {
+	vi.restoreAllMocks();
 	for (const instance of open.splice(0)) instance.close();
 	for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
@@ -144,21 +145,16 @@ describe("polyphonic recall wiring", () => {
 		writer.beam.extractAndStoreFacts("PostgreSQL runs the billing ledger", 0, id);
 		const reader = memory(dbPath, { polyphonicRecall: true });
 		const warn = spyOn(logger, "warn").mockImplementation(() => {});
-		const busy = spyOn(VeracityConsolidator.prototype, "serializedWrite").mockImplementationOnce(() => {
+		spyOn(VeracityConsolidator.prototype, "serializedWrite").mockImplementationOnce(() => {
 			throw Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
 		});
-		try {
-			const failed = await reader.recallEnhanced("PostgreSQL", 10);
-			expect(failed.find(result => result.id === id)?.voice_scores?.fact).toBeUndefined();
-			expect(warn).toHaveBeenCalledTimes(1);
+		const failed = await reader.recallEnhanced("PostgreSQL", 10);
+		expect(failed.find(result => result.id === id)?.voice_scores?.fact).toBeUndefined();
+		expect(warn).toHaveBeenCalledTimes(1);
 
-			const retried = await reader.recallEnhanced("PostgreSQL", 10);
-			expect(retried.find(result => result.id === id)?.voice_scores?.fact).toBeGreaterThan(0);
-			expect(warn).toHaveBeenCalledTimes(1);
-		} finally {
-			busy.mockRestore();
-			warn.mockRestore();
-		}
+		const retried = await reader.recallEnhanced("PostgreSQL", 10);
+		expect(retried.find(result => result.id === id)?.voice_scores?.fact).toBeGreaterThan(0);
+		expect(warn).toHaveBeenCalledTimes(1);
 	});
 
 	it("returns topK rows when enough candidates exist", async () => {

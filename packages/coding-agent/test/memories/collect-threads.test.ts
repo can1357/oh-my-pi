@@ -1,9 +1,13 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { collectThreads } from "@oh-my-pi/pi-coding-agent/memories";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 function makeFakeSession(sessionDir: string): AgentSession {
 	return {
@@ -85,7 +89,7 @@ describe("collectThreads", () => {
 
 		let fullTextReads = 0;
 		const originalFile = Bun.file.bind(Bun);
-		const fileSpy = spyOn(Bun, "file").mockImplementation(
+		spyOn(Bun, "file").mockImplementation(
 			(arg: string | URL | Uint8Array | ArrayBufferLike | number, options?: BlobPropertyBag) => {
 				const file = originalFile(arg as string, options);
 				if (arg === filePath) {
@@ -98,14 +102,10 @@ describe("collectThreads", () => {
 			},
 		);
 
-		try {
-			const threads = await collectThreads(makeFakeSession(tempDir));
-			expect(fullTextReads).toBe(0);
-			expect(threads.length).toBe(1);
-			expect(threads[0]?.id).toBe("big-id");
-			expect(threads[0]?.cwd).toBe("/big/project");
-		} finally {
-			fileSpy.mockRestore();
-		}
+		const threads = await collectThreads(makeFakeSession(tempDir));
+		expect(fullTextReads).toBe(0);
+		expect(threads.length).toBe(1);
+		expect(threads[0]?.id).toBe("big-id");
+		expect(threads[0]?.cwd).toBe("/big/project");
 	});
 });

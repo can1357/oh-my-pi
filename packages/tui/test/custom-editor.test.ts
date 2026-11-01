@@ -26,6 +26,10 @@ import {
 } from "@oh-my-pi/pi-tui/space-hold";
 import { getEditorTheme, initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 
+afterEach(() => {
+	vi.restoreAllMocks();
+});
+
 function makeEditor(holdEnabled = true) {
 	const editor = new CustomEditor(getEditorTheme());
 	const events: string[] = [];
@@ -289,17 +293,13 @@ describe("CustomEditor bracketed path paste", () => {
 	it("tracks chips drawn with a theme's overridden chip glyph", async () => {
 		await initTheme();
 		const symbol = theme.symbol.bind(theme);
-		const spy = vi.spyOn(theme, "symbol").mockImplementation(key => (key === "chip.paste" ? "📎" : symbol(key)));
-		try {
-			const { editor } = makeEditor();
-			for (let n = 1; n <= 10; n++) editor.insertTextAttachment(`blob ${n}`);
-			editor.setText(`see ${chipLabel("paste", 10)}`);
+		vi.spyOn(theme, "symbol").mockImplementation(key => (key === "chip.paste" ? "📎" : symbol(key)));
+		const { editor } = makeEditor();
+		for (let n = 1; n <= 10; n++) editor.insertTextAttachment(`blob ${n}`);
+		editor.setText(`see ${chipLabel("paste", 10)}`);
 
-			expect(editor.getText()).toBe("see 📎 #10");
-			expect(editor.composerChips().map(chip => `${chip.kind}#${chip.n}`)).toEqual(["paste#10"]);
-		} finally {
-			spy.mockRestore();
-		}
+		expect(editor.getText()).toBe("see 📎 #10");
+		expect(editor.composerChips().map(chip => `${chip.kind}#${chip.n}`)).toEqual(["paste#10"]);
 	});
 
 	it("keeps recorded paste and image chips after their theme glyph changes", async () => {
@@ -333,18 +333,14 @@ describe("CustomEditor bracketed path paste", () => {
 		const { editor } = makeEditor();
 		const symbol = theme.symbol.bind(theme);
 		const spy = vi.spyOn(theme, "symbol").mockImplementation(key => (key === "chip.paste" ? "📎" : symbol(key)));
-		try {
-			editor.insertTextAttachment("deleted paste");
-			editor.setText("");
-			spy.mockImplementation(key => (key === "chip.image" ? "📎" : symbol(key)));
-			editor.pendingImages.push({ type: "image", data: "aW1hZ2U=", mimeType: "image/png" });
-			editor.insertAtom(chipLabel("image", 1), "[Image #1]");
+		editor.insertTextAttachment("deleted paste");
+		editor.setText("");
+		spy.mockImplementation(key => (key === "chip.image" ? "📎" : symbol(key)));
+		editor.pendingImages.push({ type: "image", data: "aW1hZ2U=", mimeType: "image/png" });
+		editor.insertAtom(chipLabel("image", 1), "[Image #1]");
 
-			expect(editor.composerChips().map(chip => `${chip.kind}#${chip.n}`)).toEqual(["image#1"]);
-			expect(editor.getExpandedText().trimEnd()).toBe("[Image #1]");
-		} finally {
-			spy.mockRestore();
-		}
+		expect(editor.composerChips().map(chip => `${chip.kind}#${chip.n}`)).toEqual(["image#1"]);
+		expect(editor.getExpandedText().trimEnd()).toBe("[Image #1]");
 	});
 
 	describe("skill chips", () => {

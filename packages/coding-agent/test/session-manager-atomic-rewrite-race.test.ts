@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import * as fs from "node:fs/promises";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -20,6 +20,10 @@ import {
 import { TempDir } from "@oh-my-pi/pi-utils";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import type { SessionTitleUpdate } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 interface DetachableWriter extends SessionStorageWriter {
 	detach(): void;

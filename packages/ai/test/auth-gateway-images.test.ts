@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -9,6 +9,10 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { Api, FetchImpl, Model } from "@oh-my-pi/pi-catalog/types";
 import { toDataUrl } from "../src/images/shared";
 import { factoryModel } from "./helpers/factory-droid";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 const IMAGE_DATA = Buffer.from("gateway-image").toString("base64");
 

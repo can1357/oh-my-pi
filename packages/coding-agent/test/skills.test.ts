@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, onTestFinished, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -17,6 +17,10 @@ import { SkillProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/sk
 import { CombinedAutocompleteProvider } from "@oh-my-pi/pi-tui/autocomplete";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { restoreEnvValue } from "./helpers/settings-test-state";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 const fixturesDir = path.resolve(import.meta.dirname, "fixtures/skills");
 const collisionFixturesDir = path.resolve(import.meta.dirname, "fixtures/skills-collision");
 
@@ -210,7 +214,7 @@ describe("skills", () => {
 				path.join(skillDir, "SKILL.md"),
 				["---", "description: Loaded from ~/.agents/skills", "---", "", "# user-agents-skill"].join("\n"),
 			);
-			const homedirSpy = spyOn(os, "homedir").mockReturnValue(tempHome);
+			spyOn(os, "homedir").mockReturnValue(tempHome);
 			try {
 				const { skills } = await loadSkills({
 					enableCodexUser: false,
@@ -223,7 +227,6 @@ describe("skills", () => {
 				});
 				expect(skills.some(s => s.name === "user-agents-skill" && s.source === "agents:user")).toBe(true);
 			} finally {
-				homedirSpy.mockRestore();
 				await removeWithRetries(tempHome);
 				await removeWithRetries(tempCwd);
 			}
@@ -250,6 +253,9 @@ describe("skills", () => {
 				process.env.WSL_DISTRO_NAME = "Ubuntu";
 				delete process.env.WSL_INTEROP;
 				process.env.USERPROFILE = tempHostHome;
+				onTestFinished(() => {
+					Object.defineProperty(process, "platform", { value: previousPlatform });
+				});
 				try {
 					const { skills } = await loadSkills({
 						enableCodexUser: false,
@@ -269,7 +275,6 @@ describe("skills", () => {
 					else process.env.WSL_INTEROP = previousWslInterop;
 					if (previousUserProfile === undefined) delete process.env.USERPROFILE;
 					else process.env.USERPROFILE = previousUserProfile;
-					Object.defineProperty(process, "platform", { value: previousPlatform });
 					await removeWithRetries(tempHostHome);
 					await removeWithRetries(tempCwd);
 				}
@@ -324,7 +329,7 @@ describe("skills", () => {
 				path.join(skillDir, "SKILL.md"),
 				["---", "description: Should be filtered out", "---", "", "# opted-out"].join("\n"),
 			);
-			const homedirSpy = spyOn(os, "homedir").mockReturnValue(tempHome);
+			spyOn(os, "homedir").mockReturnValue(tempHome);
 			try {
 				const { skills } = await loadSkills({
 					...DISABLE_ALL_BUILTIN_SKILLS,
@@ -333,7 +338,6 @@ describe("skills", () => {
 				});
 				expect(skills.some(s => s.name === "opted-out")).toBe(false);
 			} finally {
-				homedirSpy.mockRestore();
 				await removeWithRetries(tempHome);
 				await removeWithRetries(tempCwd);
 			}
@@ -354,7 +358,7 @@ describe("skills", () => {
 				path.join(opencodeSkillDir, "SKILL.md"),
 				["---", "description: Should be filtered by third-party gate", "---", "", "# leaked-opencode"].join("\n"),
 			);
-			const homedirSpy = spyOn(os, "homedir").mockReturnValue(tempHome);
+			spyOn(os, "homedir").mockReturnValue(tempHome);
 			try {
 				const { skills } = await loadSkills({
 					enableCodexUser: false,
@@ -367,7 +371,6 @@ describe("skills", () => {
 				});
 				expect(skills.some(s => s.name === "leaked-opencode")).toBe(false);
 			} finally {
-				homedirSpy.mockRestore();
 				await removeWithRetries(tempHome);
 				await removeWithRetries(tempCwd);
 			}
@@ -447,7 +450,7 @@ enabled: false
 
 	it("should expand ~ in customDirectories", async () => {
 		const fakeHome = await fs.mkdtemp(path.join(os.tmpdir(), "pi-skills-home-"));
-		const homedirSpy = spyOn(os, "homedir").mockReturnValue(fakeHome);
+		spyOn(os, "homedir").mockReturnValue(fakeHome);
 		const tempHomeSkillsDir = await fs.mkdtemp(path.join(fakeHome, ".pi-skills-test-"));
 		const relativeToHome = path.relative(fakeHome, tempHomeSkillsDir);
 		const tildeDir = `~/${relativeToHome.split(path.sep).join("/")}`;
@@ -477,7 +480,6 @@ description: Skill loaded from a tilde-expanded custom directory.
 			expect(withTilde.length).toBe(withoutTilde.length);
 			expect(withTilde.some(skill => skill.name === "tilde-skill")).toBe(true);
 		} finally {
-			homedirSpy.mockRestore();
 			await removeWithRetries(fakeHome);
 		}
 	});

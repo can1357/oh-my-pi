@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -51,12 +51,11 @@ describe("readPipedInput", () => {
 		const readText = vi.spyOn(Bun.stdin, "text").mockResolvedValue("piped prompt\n");
 		Object.defineProperty(process.stdin, "isTTY", { value: undefined, configurable: true });
 
-		try {
-			expect(await readPipedInput()).toBe("piped prompt\n");
-			expect(readText).toHaveBeenCalledTimes(1);
-		} finally {
+		onTestFinished(() => {
 			Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
-		}
+		});
+		expect(await readPipedInput()).toBe("piped prompt\n");
+		expect(readText).toHaveBeenCalledTimes(1);
 	});
 });
 

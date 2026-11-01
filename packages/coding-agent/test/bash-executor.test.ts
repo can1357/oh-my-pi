@@ -97,8 +97,8 @@ describe("executeBash", () => {
 	});
 
 	afterEach(() => {
-		resetSettingsForTest();
 		vi.restoreAllMocks();
+		resetSettingsForTest();
 		if (fs.existsSync(tempDir)) {
 			removeSyncWithRetries(tempDir);
 		}
@@ -782,12 +782,12 @@ exit 64
 
 		const nativeResult = Promise.withResolvers<{ exitCode: undefined; cancelled: true; timedOut: false }>();
 		const dispatched = Promise.withResolvers<void>();
-		vi.spyOn(piNatives.Shell.prototype, "run").mockImplementation((_options, onChunk) => {
+		const runSpy = vi.spyOn(piNatives.Shell.prototype, "run").mockImplementation((_options, onChunk) => {
 			onChunk?.(null, "started\n");
 			dispatched.resolve();
 			return nativeResult.promise;
 		});
-		vi.spyOn(piNatives.Shell.prototype, "abort").mockResolvedValue();
+		const abortSpy = vi.spyOn(piNatives.Shell.prototype, "abort").mockResolvedValue();
 
 		const controller = new AbortController();
 		const promise = executeBash("sleep 10", {
@@ -802,7 +802,8 @@ exit 64
 
 		nativeResult.resolve({ exitCode: undefined, cancelled: true, timedOut: false });
 		await Bun.sleep(0);
-		vi.restoreAllMocks();
+		runSpy.mockRestore();
+		abortSpy.mockRestore();
 
 		await executeBash("export PI_AFTER_ABORT=still_persistent", {
 			cwd: tempDir,

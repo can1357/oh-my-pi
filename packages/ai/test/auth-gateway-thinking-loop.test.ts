@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -23,6 +23,7 @@ function loopThinking(): string {
 }
 
 afterEach(() => {
+	vi.restoreAllMocks();
 	clearCustomApis();
 });
 
@@ -36,7 +37,7 @@ describe("auth-gateway non-streaming thinking-loop retries", () => {
 		for (let i = 0; i < 4; i++) {
 			mock.push({ content: [{ type: "thinking", thinking: loopThinking() }, "Unreachable cooked answer."] });
 		}
-		const waitSpy = spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		spyOn(scheduler, "wait").mockResolvedValue(undefined);
 		const handle = startAuthGateway({
 			bind: "127.0.0.1:0",
 			bearerTokens: ["gw-test-token"],
@@ -61,7 +62,6 @@ describe("auth-gateway non-streaming thinking-loop retries", () => {
 			expect(mock.calls).toHaveLength(3);
 			expect(mock.calls.every(call => call.options?.loopGuard?.enabled !== false)).toBe(true);
 		} finally {
-			waitSpy.mockRestore();
 			await handle.close();
 			storage.close();
 			await fs.rm(dir, { recursive: true, force: true });
@@ -173,8 +173,6 @@ describe("auth-gateway auth retry", () => {
 			expect(store.listAuthCredentials("mock")).toHaveLength(2);
 			expect(await storage.keys.get("mock", "gw-quota-rotation")).toBe(retriedKey);
 		} finally {
-			markUsageLimitSpy.mockRestore();
-			invalidateSpy.mockRestore();
 			await handle.close();
 			storage.close();
 			await fs.rm(dir, { recursive: true, force: true });

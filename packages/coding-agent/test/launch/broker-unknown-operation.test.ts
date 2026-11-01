@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, onTestFinished } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -40,6 +40,9 @@ describe("broker unknown operations", () => {
 		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
 		const previousTitle = process.title;
 		const broker = startBroker(projectDir, runtimeDir);
+		onTestFinished(() => {
+			process.title = previousTitle;
+		});
 		try {
 			// After `omp update`, a newer client can reach a broker that predates one of its operations.
 			// A rejection without the request id leaves the call pending until the connection closes
@@ -58,7 +61,6 @@ describe("broker unknown operations", () => {
 			await client.request({ op: "shutdown" }).catch(() => undefined);
 			client.close();
 			await broker;
-			process.title = previousTitle;
 		}
 	}, 10_000);
 });

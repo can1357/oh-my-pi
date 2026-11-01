@@ -1,4 +1,4 @@
-import { describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as path from "node:path";
 import { BlobStore } from "@oh-my-pi/pi-coding-agent/session/blob-store";
 import type {
@@ -13,6 +13,10 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 const timestamp = new Date(0).toISOString();
 const header = { type: "session", version: 3, id: "session", timestamp, cwd: "/tmp" };
@@ -54,23 +58,19 @@ describe("read-only session blob hydration", () => {
 		await Bun.write(file, [header, ...entries].map(value => JSON.stringify(value)).join("\n"));
 		const get = store.get.bind(store);
 		const reads: string[] = [];
-		const readSpy = spyOn(BlobStore.prototype, "get").mockImplementation(async hash => {
+		spyOn(BlobStore.prototype, "get").mockImplementation(async hash => {
 			reads.push(hash);
 			return get(hash);
 		});
-		try {
-			const messages = await loadSessionMessagesReadOnly(file);
-			expect(reads).not.toContain(discarded.hash);
-			expect(reads.toSorted()).toEqual([retained.hash, url.hash, "0".repeat(64)].toSorted());
-			expect(messages).toHaveLength(2);
-			expect(messages[0]).toMatchObject({
-				content: [{ type: "image", data: Buffer.from("retained").toString("base64") }],
-				providerPayload: { items: [{ content: [{ image_url: dataUrl }] }] },
-			});
-			expect(messages[1]).toMatchObject({ content: [{ type: "image", data: missing }] });
-		} finally {
-			readSpy.mockRestore();
-		}
+		const messages = await loadSessionMessagesReadOnly(file);
+		expect(reads).not.toContain(discarded.hash);
+		expect(reads.toSorted()).toEqual([retained.hash, url.hash, "0".repeat(64)].toSorted());
+		expect(messages).toHaveLength(2);
+		expect(messages[0]).toMatchObject({
+			content: [{ type: "image", data: Buffer.from("retained").toString("base64") }],
+			providerPayload: { items: [{ content: [{ image_url: dataUrl }] }] },
+		});
+		expect(messages[1]).toMatchObject({ content: [{ type: "image", data: missing }] });
 	});
 
 	it("does not read compacted-away images or archived frames in a collapsed transcript", async () => {
@@ -114,19 +114,15 @@ describe("read-only session blob hydration", () => {
 		);
 		const get = store.get.bind(store);
 		const reads: string[] = [];
-		const readSpy = spyOn(BlobStore.prototype, "get").mockImplementation(async hash => {
+		spyOn(BlobStore.prototype, "get").mockImplementation(async hash => {
 			reads.push(hash);
 			return get(hash);
 		});
-		try {
-			const messages = await loadSessionMessagesReadOnly(file);
-			expect(reads).toEqual([]);
-			expect(messages).toHaveLength(2);
-			expect(messages[0]).toMatchObject({ role: "user", content: "keep" });
-			expect(messages[1]).toMatchObject({ role: "compactionSummary", summary: "summary" });
-		} finally {
-			readSpy.mockRestore();
-		}
+		const messages = await loadSessionMessagesReadOnly(file);
+		expect(reads).toEqual([]);
+		expect(messages).toHaveLength(2);
+		expect(messages[0]).toMatchObject({ role: "user", content: "keep" });
+		expect(messages[1]).toMatchObject({ role: "compactionSummary", summary: "summary" });
 	});
 
 	it("does not read images hidden in a remote-compaction replacement history", async () => {
@@ -171,18 +167,14 @@ describe("read-only session blob hydration", () => {
 		);
 		const get = store.get.bind(store);
 		const reads: string[] = [];
-		const readSpy = spyOn(BlobStore.prototype, "get").mockImplementation(async hash => {
+		spyOn(BlobStore.prototype, "get").mockImplementation(async hash => {
 			reads.push(hash);
 			return get(hash);
 		});
-		try {
-			const messages = await loadSessionMessagesReadOnly(file);
-			expect(reads).toEqual([]);
-			expect(messages.map(message => message.role)).toEqual(["user", "compactionSummary"]);
-			expect(formatSessionHistoryMarkdown(messages)).toContain("[compaction] remote summary");
-		} finally {
-			readSpy.mockRestore();
-		}
+		const messages = await loadSessionMessagesReadOnly(file);
+		expect(reads).toEqual([]);
+		expect(messages.map(message => message.role)).toEqual(["user", "compactionSummary"]);
+		expect(formatSessionHistoryMarkdown(messages)).toContain("[compaction] remote summary");
 	});
 
 	it("bounds simultaneous blob reads inside one large message", async () => {
@@ -204,7 +196,7 @@ describe("read-only session blob hydration", () => {
 		const get = store.get.bind(store);
 		let active = 0;
 		let peak = 0;
-		const readSpy = spyOn(store, "get").mockImplementation(async hash => {
+		spyOn(store, "get").mockImplementation(async hash => {
 			active++;
 			peak = Math.max(peak, active);
 			try {
@@ -214,12 +206,8 @@ describe("read-only session blob hydration", () => {
 				active--;
 			}
 		});
-		try {
-			await resolveBlobRefsInEntries([entry], store);
-			expect(peak).toBeLessThanOrEqual(8);
-			expect(images.map(image => image.data)).toEqual(Array(48).fill(Buffer.from("image").toString("base64")));
-		} finally {
-			readSpy.mockRestore();
-		}
+		await resolveBlobRefsInEntries([entry], store);
+		expect(peak).toBeLessThanOrEqual(8);
+		expect(images.map(image => image.data)).toEqual(Array(48).fill(Buffer.from("image").toString("base64")));
 	});
 });

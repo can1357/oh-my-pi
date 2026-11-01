@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished, spyOn, vi } from "bun:test";
 import { resolveModels, runTinyModelsCommand } from "@oh-my-pi/pi-coding-agent/cli/tiny-models-cli";
 import { TINY_LOCAL_MODELS } from "@oh-my-pi/pi-coding-agent/tiny/models";
 import { tinyTitleClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
@@ -58,6 +58,11 @@ describe("tiny-models download model resolution", () => {
 	it("includes worker error details in text failures", async () => {
 		const output: string[] = [];
 		const isTtyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+		const restoreIsTTY = () => {
+			if (isTtyDescriptor) Object.defineProperty(process.stdout, "isTTY", isTtyDescriptor);
+			else Reflect.deleteProperty(process.stdout, "isTTY");
+		};
+		onTestFinished(restoreIsTTY);
 		Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: false });
 		spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
 			output.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
@@ -73,8 +78,7 @@ describe("tiny-models download model resolution", () => {
 				"One or more tiny title models failed to download",
 			);
 		} finally {
-			if (isTtyDescriptor) Object.defineProperty(process.stdout, "isTTY", isTtyDescriptor);
-			else Reflect.deleteProperty(process.stdout, "isTTY");
+			restoreIsTTY();
 		}
 
 		expect(output.join("")).toContain("Failed to download LFM2.5 350M: runtime install failed.");
@@ -83,6 +87,11 @@ describe("tiny-models download model resolution", () => {
 	it("prints actionable CUDA provider diagnostics from worker errors", async () => {
 		const output: string[] = [];
 		const isTtyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+		const restoreIsTTY = () => {
+			if (isTtyDescriptor) Object.defineProperty(process.stdout, "isTTY", isTtyDescriptor);
+			else Reflect.deleteProperty(process.stdout, "isTTY");
+		};
+		onTestFinished(restoreIsTTY);
 		const diagnostic = [
 			"Error: Failed to load ONNX Runtime CUDA execution provider",
 			"ONNX Runtime CUDA diagnostics:",
@@ -105,8 +114,7 @@ describe("tiny-models download model resolution", () => {
 				"One or more tiny title models failed to download",
 			);
 		} finally {
-			if (isTtyDescriptor) Object.defineProperty(process.stdout, "isTTY", isTtyDescriptor);
-			else Reflect.deleteProperty(process.stdout, "isTTY");
+			restoreIsTTY();
 		}
 
 		const text = output.join("");

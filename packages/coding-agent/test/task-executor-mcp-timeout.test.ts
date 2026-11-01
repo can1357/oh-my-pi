@@ -1,4 +1,4 @@
-import { expect, test, vi } from "bun:test";
+import { afterEach, expect, test, vi } from "bun:test";
 import type { CustomToolContext } from "../src/extensibility/custom-tools/types";
 import { MCPManager } from "../src/mcp/manager";
 import { MCPTool } from "../src/mcp/tool-bridge";
@@ -6,6 +6,10 @@ import { HttpTransport } from "../src/mcp/transports/http";
 import type { MCPRequestOptions, MCPServerConnection, MCPToolDefinition, MCPTransport } from "../src/mcp/types";
 import { createMCPProxyTools } from "../src/task/executor";
 import { ToolAbortError } from "../src/tools/tool-errors";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 function createFakeConnection() {
 	let capturedSignal: AbortSignal | undefined;
@@ -145,6 +149,5 @@ test.each([180_000, 0])("MCP proxy honors a transport deadline of %i beyond 60s"
 		release.resolve();
 		await transport.close();
 		server.stop(true);
-		vi.restoreAllMocks();
 	}
 });

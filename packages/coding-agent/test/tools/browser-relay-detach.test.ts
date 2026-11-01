@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as rewriteImports from "@oh-my-pi/pi-coding-agent/eval/js/shared/rewrite-imports";
 import * as toolBridge from "@oh-my-pi/pi-coding-agent/eval/js/tool-bridge";
@@ -13,6 +13,10 @@ import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import puppeteer, { type Browser, type Page } from "puppeteer-core";
 import { chromiumAvailable } from "./chromium-probe";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
 const TAB_ID = 1;
@@ -373,7 +377,7 @@ describe("relay tabs Chrome detaches omp from", () => {
 		async () => {
 			const ext = await openRelayTab();
 			const started = Promise.withResolvers<AbortSignal>();
-			const callTool = spyOn(toolBridge, "callSessionTool").mockImplementation(async (_name, _args, options) => {
+			spyOn(toolBridge, "callSessionTool").mockImplementation(async (_name, _args, options) => {
 				const signal = options.signal!;
 				started.resolve(signal);
 				const aborted = Promise.withResolvers<void>();
@@ -381,20 +385,14 @@ describe("relay tabs Chrome detaches omp from", () => {
 				await aborted.promise;
 				throw signal.reason;
 			});
-			try {
-				const evaluating = ext.hanging();
-				const code = `void __omp_call_tool__("probe", {}); ${HANG.code}`;
-				const stalled = invoke({ action: "run", code, timeout: HANG.timeout }).catch((error: unknown) => error);
-				const signal = await started.promise;
-				await evaluating;
-				await ext.chromeDetach("target_closed");
-				expect(String(await stalled)).toContain(
-					"Chrome detached omp from this tab (target_closed) during this call",
-				);
-				expect(signal.aborted).toBe(true);
-			} finally {
-				callTool.mockRestore();
-			}
+			const evaluating = ext.hanging();
+			const code = `void __omp_call_tool__("probe", {}); ${HANG.code}`;
+			const stalled = invoke({ action: "run", code, timeout: HANG.timeout }).catch((error: unknown) => error);
+			const signal = await started.promise;
+			await evaluating;
+			await ext.chromeDetach("target_closed");
+			expect(String(await stalled)).toContain("Chrome detached omp from this tab (target_closed) during this call");
+			expect(signal.aborted).toBe(true);
 		},
 		60_000,
 	);
@@ -464,7 +462,6 @@ describe("relay tabs Chrome detaches omp from", () => {
 				expect(process.env[probe]).toBeUndefined();
 			} finally {
 				compiled.resolve();
-				held.mockRestore();
 				delete process.env[probe];
 			}
 		},
@@ -558,7 +555,7 @@ describe("relay tabs Chrome detaches omp from", () => {
 			const terminate = tab.worker.terminate.bind(tab.worker);
 			const readopting = Promise.withResolvers<void>();
 			const resume = Promise.withResolvers<void>();
-			const held = spyOn(tab.worker, "terminate").mockImplementation(async () => {
+			spyOn(tab.worker, "terminate").mockImplementation(async () => {
 				await terminate();
 				readopting.resolve();
 				await resume.promise;
@@ -581,7 +578,6 @@ describe("relay tabs Chrome detaches omp from", () => {
 				expect((await invoke(readMark)).value).toBe("kept");
 			} finally {
 				resume.resolve();
-				held.mockRestore();
 			}
 		},
 		60_000,

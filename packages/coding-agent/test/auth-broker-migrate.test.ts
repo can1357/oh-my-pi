@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, onTestFinished, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -11,6 +11,9 @@ const TEAM_ORG = "org-team-1111";
 
 async function runMigrateCapturingStdout(): Promise<string> {
 	const originalWrite = process.stdout.write.bind(process.stdout);
+	onTestFinished(() => {
+		process.stdout.write = originalWrite;
+	});
 	let captured = "";
 	process.stdout.write = ((chunk: string | Uint8Array): boolean => {
 		captured += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);

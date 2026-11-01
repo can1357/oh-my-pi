@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -10,6 +10,10 @@ import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } f
 import { cfgEditModelVariants } from "@oh-my-pi/pi-coding-agent/edit/settings";
 import { cfgCompactionEnabled } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { cfgProvidersMaxInFlightRequests, cfgTemperature } from "@oh-my-pi/pi-coding-agent/session/settings";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 describe("Settings layer refresh", () => {
 	let state: SettingsTestState | undefined;
@@ -121,22 +125,18 @@ describe("Settings layer refresh", () => {
 		await writeConfig({ temperature: 0.1 });
 		const settings = await Settings.init({ cwd: startProject, agentDir });
 		const warn = spyOn(logger, "warn");
-		try {
-			const lock = await acquireFileLock(configPath());
-			cfgTemperature.set(settings, 0.5);
-			const saving = settings.flush();
-			cfgTemperature.set(settings, 0.7);
-			lock.release();
-			await saving;
-			expect(cfgTemperature.get(settings)).toBe(0.7);
+		const lock = await acquireFileLock(configPath());
+		cfgTemperature.set(settings, 0.5);
+		const saving = settings.flush();
+		cfgTemperature.set(settings, 0.7);
+		lock.release();
+		await saving;
+		expect(cfgTemperature.get(settings)).toBe(0.7);
 
-			await settings.flush();
-			expect(warn).not.toHaveBeenCalled();
-			expect(cfgTemperature.get(settings)).toBe(0.7);
-			expect(YAML.parse(await Bun.file(configPath()).text())).toEqual({ temperature: 0.7 });
-		} finally {
-			warn.mockRestore();
-		}
+		await settings.flush();
+		expect(warn).not.toHaveBeenCalled();
+		expect(cfgTemperature.get(settings)).toBe(0.7);
+		expect(YAML.parse(await Bun.file(configPath()).text())).toEqual({ temperature: 0.7 });
 	});
 
 	// Root ignores directory permissions and Windows ignores POSIX modes, so the save could not fail.

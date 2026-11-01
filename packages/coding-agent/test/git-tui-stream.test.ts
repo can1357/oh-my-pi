@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeAll, describe, expect, spyOn, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -16,6 +16,10 @@ import type { ChangedFile } from "@oh-my-pi/pi-tui/apps/git/state";
 import { GitModel } from "../src/cli/git-tui/state";
 import { ImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 const RED_PNG = Buffer.from(
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
@@ -290,7 +294,6 @@ describe("git TUI asset previews", () => {
 			// never show the one that landed.
 			expect(encodeSixel).toHaveBeenCalledTimes(1);
 		} finally {
-			encodeSixel.mockRestore();
 			terminal.imageProtocol = originalProtocol;
 		}
 	});

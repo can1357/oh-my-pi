@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -20,6 +20,7 @@ import { removeWithRetries } from "@oh-my-pi/pi-utils";
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
+	vi.restoreAllMocks();
 	await Promise.all(temporaryDirectories.splice(0).map(directory => removeWithRetries(directory)));
 });
 
@@ -283,25 +284,21 @@ describe("CodingAgentSpeculativeExecutionHost", () => {
 		// gate): authorization must resolve without opening the file, so a call
 		// that `beforeToolCall` later blocks never triggers content I/O.
 		const spy = spyOn(fs, "readFile");
-		try {
-			const host = new CodingAgentSpeculativeExecutionHost(session.settings, session, {
-				hasHandlers: () => false,
-			});
-			await expect(
-				host.authorize({
-					candidateId: "no-content-read",
-					source: "direct",
-					dependencies: [],
-					tool,
-					toolCall: { type: "toolCall", id: "no-content-read", name: "read", arguments: { path: "note.txt" } },
-					args: { path: "note.txt" },
-					effect: assessment.effect,
-				}),
-			).resolves.toEqual({ allowed: true, deferBeforeToolCall: true });
-			expect(spy).toHaveBeenCalledTimes(0);
-		} finally {
-			spy.mockRestore();
-		}
+		const host = new CodingAgentSpeculativeExecutionHost(session.settings, session, {
+			hasHandlers: () => false,
+		});
+		await expect(
+			host.authorize({
+				candidateId: "no-content-read",
+				source: "direct",
+				dependencies: [],
+				tool,
+				toolCall: { type: "toolCall", id: "no-content-read", name: "read", arguments: { path: "note.txt" } },
+				args: { path: "note.txt" },
+				effect: assessment.effect,
+			}),
+		).resolves.toEqual({ allowed: true, deferBeforeToolCall: true });
+		expect(spy).toHaveBeenCalledTimes(0);
 	});
 
 	it("starts no speculative read before the beforeToolCall gate releases it", async () => {

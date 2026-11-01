@@ -2,7 +2,7 @@
  * Tests for secrets regex parsing, compilation, and obfuscation.
  */
 
-import { describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -49,6 +49,10 @@ import {
 } from "@oh-my-pi/pi-coding-agent/secrets/placeholder";
 import { compileSecretRegex } from "@oh-my-pi/pi-coding-agent/secrets/regex";
 import { getActiveProfile, getAgentDir, setProfile } from "@oh-my-pi/pi-utils/dirs";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 describe("compileSecretRegex", () => {
 	it("adds global flag when not provided", () => {
