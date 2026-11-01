@@ -19,7 +19,15 @@ import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { PipeStreams } from "@oh-my-pi/pi-natives";
 import { isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
 import { isPosixShell } from "@oh-my-pi/pi-utils/procmgr";
-import { raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
+import {
+	AsyncJobRunError,
+	type AsyncJobProgressDelivery,
+	formatJobLabel,
+	raceJobSettlement,
+	resolveAutoBackgroundWaitMs,
+} from "../async";
+import { ProgressLines } from "../async/progress-lines";
+import { PROGRESS_LIMITS } from "../async/progress-limits";
 import type { Settings } from "../config/settings";
 import { applyDirenvPreflight, type BashResult, executeBash } from "../exec/bash-executor";
 import { InternalUrlRouter } from "../internal-urls";
@@ -43,7 +51,8 @@ import { rewriteGitWorktreeAdd } from "./bash-worktree-rewrite";
 import { canUseInteractiveBashPty } from "./bash-pty-selection";
 import { resolveEvalBackends } from "./eval-backends";
 import { invalidateGithubCacheForBashCommand, invalidateGithubCacheForBashResult } from "./gh-cache-invalidation";
-import { serviceLogs, startService, type ServiceReady } from "../launch/services";
+import { type ServiceProgress, type ServiceReady, serviceLogs, startService } from "../launch/services";
+import { displayExitReason } from "../launch/exit-reason";
 import { isFindEnabled } from "./jfind";
 import { formatArtifactErrorNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
@@ -59,6 +68,7 @@ import {
 	cfgAstEditEnabled,
 	cfgAstGrepEnabled,
 	cfgAsyncEnabled,
+	cfgBashAsyncAutoInlineGraceMs,
 	cfgGlobEnabled,
 	cfgGrepEnabled,
 	cfgLaunchEnabled,
@@ -78,6 +88,15 @@ import {
 import { cfgSkillful } from "../session/settings";
 import { cfgWorktreeClone } from "../task/settings";
 
+/**
+ * Upper bound on draining pre-promotion chunk deliveries before an
+ * `async: "auto"` job promotes anyway. Five progress batch windows: a
+ * healthy mirror flush or throttle settles far sooner, so anything slower
+ * is a stalled delivery that must not hold the foreground turn.
+ */
+const PROMOTION_DRAIN_TIMEOUT_MS = PROGRESS_LIMITS.BATCH_INTERVAL_MS * 5;
+const AUTO_AT_CAPACITY_NOTICE =
+	"Background job limit reached; ran inline to completion instead of promoting to a background job.";
 const BASH_APPROVAL_SHELL_CONTROL_CHARS: Record<string, true> = {
 	"\n": true,
 	"\r": true,
@@ -342,7 +361,12 @@ const bashSchemaWithAsync = type({
 	"timeout?": type("number").describe(BASH_TIMEOUT_DESCRIPTION),
 	"cwd?": "string",
 	"pty?": "boolean",
-	"async?": "boolean",
+	"async?": type("boolean | 'auto'").describe(
+		"auto runs inline for a brief grace period and promotes the same process to a background job if still running; true starts in the background immediately",
+	),
+	"progress?": type("'ambient' | 'wake'").describe(
+		"deliver complete output lines to the agent while the background job runs; wake starts a follow-up turn while idle",
+	),
 });
 
 const bashSchemaWithService = type({
@@ -357,6 +381,9 @@ const bashSchemaWithService = type({
 		"host?": "string",
 		"timeout?": "number",
 	}),
+	"progress?": type("'wake' | 'ambient' | 'off'").describe(
+		"service live output: wake starts a turn when idle; ambient rides active turns; off (default) none",
+	),
 });
 
 const bashSchemaWithAsyncAndService = type({
@@ -364,7 +391,9 @@ const bashSchemaWithAsyncAndService = type({
 	"timeout?": type("number").describe(BASH_TIMEOUT_DESCRIPTION),
 	"cwd?": "string",
 	"pty?": "boolean",
-	"async?": "boolean",
+	"async?": type("boolean | 'auto'").describe(
+		"auto runs inline for a brief grace period and promotes the same process to a background job if still running; true starts in the background immediately",
+	),
 	"name?": "string <= 48",
 	"ready?": type({
 		"log?": "string",
@@ -372,6 +401,9 @@ const bashSchemaWithAsyncAndService = type({
 		"host?": "string",
 		"timeout?": "number",
 	}),
+	"progress?": type("'wake' | 'ambient' | 'off'").describe(
+		"live output for async jobs or named services; wake starts a turn when idle, ambient rides active turns; off is service-only",
+	),
 });
 
 type BashToolSchema =
@@ -386,7 +418,8 @@ export interface BashToolInput {
 	cwd?: string;
 	name?: string;
 	ready?: ServiceReady;
-	async?: boolean;
+	progress?: ServiceProgress;
+	async?: boolean | "auto";
 	pty?: boolean;
 }
 
@@ -430,16 +463,31 @@ type ManagedBashJobCompletion =
 			error: unknown;
 	  };
 
+type ManagedBashJobPromotion =
+	| {
+			kind: "promoted";
+			foregroundPreview: string;
+	  }
+	| { kind: "aborted" }
+	| ManagedBashJobCompletion;
+
 interface ManagedBashJobHandle {
 	jobId: string;
+	/** One-line label the job was registered under; echoed in notices and headers. */
+	label: string;
 	completion: Promise<ManagedBashJobCompletion>;
 	getLatestText: () => string;
 	/** Notices for this call's results, including one added once the run starts (temporary shell). */
 	notices: readonly string[];
-	/** Hand the call's card to the job: later frames carry `details.async` and the last one settles it. */
-	background: () => void;
 	/** Text the run wrote to `out://` while the call was in the foreground, oldest first. */
 	replies: readonly string[];
+	/**
+	 * Drain pre-promotion chunks, hand the call's card to the job (later frames
+	 * carry `details.async` and the last one settles it), and activate progress
+	 * delivery. `signal` is the tool's abort signal: a cancel that lands during
+	 * the bounded drain yields `aborted` instead of a promoted, still-live job.
+	 */
+	promote: (delivery?: AsyncJobProgressDelivery, signal?: AbortSignal) => Promise<ManagedBashJobPromotion>;
 }
 
 interface BashProgressDetails extends BashToolDetails {
@@ -642,12 +690,14 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			defaultTimeoutSec: clampTimeout("bash", undefined, cfgToolsMaxTimeout.get(this.session.settings)),
 			autoBackgroundEnabled: cfgBashAutoBackgroundEnabled.get(this.session.settings),
 			autoBackgroundSeconds: cfgBashAutoBackgroundThresholdMs.get(this.session.settings) / 1000,
+			asyncAutoInlineGraceMs: Math.max(0, Math.floor(cfgBashAsyncAutoInlineGraceMs.get(this.session.settings))),
 			hasAstGrep: isToolActive("ast_grep", cfgAstGrepEnabled.get(this.session.settings)),
 			hasAstEdit: isToolActive("ast_edit", cfgAstEditEnabled.get(this.session.settings)),
 			hasGrep: isToolActive("grep", cfgGrepEnabled.get(this.session.settings)),
 			hasGlob: isToolActive("glob", cfgGlobEnabled.get(this.session.settings)),
 			hasFind: this.session.isToolActive?.("find") ?? isFindEnabled(this.session),
 			hasRead: isToolActive("read", true),
+			hasWrite: isToolActive("write", true),
 			// Frozen at the last prompt rebuild (managed sessions). SDK consumers
 			// building a bare ToolSession lack the rebuild lifecycle, so fall back
 			// to the derived form (skillful && skills) instead of dropping the hint.
@@ -655,6 +705,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				(this.session.skillHintVisible ??
 					(cfgSkillful.get(this.session.settings) && (this.session.skills?.length ?? 0) > 0)) === true,
 			hasLaunch: this.#launchEnabled,
+			hasProcessProgress: this.session.processProgressMode === "session",
 			hasEval: isToolActive("eval", evalBackends.python || evalBackends.js),
 			hasShellBuiltins: !shellBuiltinsDisabled(this.session.settings),
 			isWindows: process.platform === "win32",
@@ -852,11 +903,12 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	}
 
 	#buildBackgroundStartResult(
-		jobId: string,
+		job: Pick<ManagedBashJobHandle, "jobId" | "label">,
 		previewText: string,
 		timeoutSec: number | undefined,
 		options: { requestedTimeoutSec?: number; notices?: readonly string[]; replies?: readonly string[] } = {},
 	): AgentToolResult<BashToolDetails> {
+		const { jobId, label } = job;
 		const details: BashToolDetails = {
 			async: { state: "running", jobId, type: "bash" },
 		};
@@ -877,7 +929,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		if (options.notices?.length) {
 			lines.push(...options.notices, "");
 		}
-		lines.push(formatBackgroundNotice(jobId, timeoutSec));
+		lines.push(formatBackgroundNotice(jobId, timeoutSec, label));
 		return {
 			content: [{ type: "text", text: lines.join("\n") }],
 			details,
@@ -907,13 +959,15 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		sessionEnv: Record<string, string>;
 		/** The model's `i` intent on the call, for the job's widget author. */
 		intent?: string;
+		progressDelivery?: AsyncJobProgressDelivery;
+		deferredProgressDelivery?: AsyncJobProgressDelivery;
 	}): ManagedBashJobHandle {
 		const manager = this.session.asyncJobManager;
 		if (!manager) {
 			throw new ToolError("Background job manager unavailable for this session.");
 		}
 
-		const label = options.command.length > 120 ? `${options.command.slice(0, 117)}...` : options.command;
+		const label = formatJobLabel(options.command);
 		// Holds the run's Shell only while it runs: a retained reference would
 		// keep a finished `:async:` Shell (and its background children) alive.
 		let pids: () => readonly number[] = NO_PIDS;
@@ -923,8 +977,29 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const outputTap = new TextTap("out", "the command's own stdout+stderr");
 		const pipeSources = new PipeTextSources(streams);
 		let latestText = "";
+		let emissionPreview = "";
+		let promotionPreview: string | undefined;
+		let promotionDeliveryGate: PromiseWithResolvers<void> | undefined;
 		let latestProgressDetails: BashProgressDetails | undefined;
 		let backgrounded = !options.foreground;
+		let progressSampler: ProgressLines | undefined;
+		let promotionRequested = false;
+		let trackPromotionDeliveries = options.foreground;
+		const pendingChunkDeliveries: PromiseWithResolvers<void>[] = [];
+		let nextChunkDelivery = 0;
+		let chunkDeliveryBarrier = Promise.resolve();
+		const trackChunkDelivery = (): number => {
+			const stamp = (progressSampler?.epoch ?? 0) + (promotionRequested ? 1 : 0);
+			if (!trackPromotionDeliveries) return stamp;
+			const delivery = Promise.withResolvers<void>();
+			pendingChunkDeliveries.push(delivery);
+			chunkDeliveryBarrier = chunkDeliveryBarrier.then(() => delivery.promise);
+			return stamp;
+		};
+		const finishChunkDelivery = (): void => {
+			pendingChunkDeliveries[nextChunkDelivery]?.resolve();
+			nextChunkDelivery++;
+		};
 		const completion = Promise.withResolvers<ManagedBashJobCompletion>();
 		const notices = [...(options.notices ?? [])];
 		const replies: string[] = [];
@@ -943,11 +1018,16 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				details: withReplies(latestProgressDetails ?? {}),
 			});
 		};
+		let settledCompletion: ManagedBashJobCompletion | undefined;
+		const settleCompletion = (outcome: ManagedBashJobCompletion): void => {
+			settledCompletion ??= outcome;
+			completion.resolve(outcome);
+		};
 
 		const jobId = manager.register(
 			"bash",
 			label,
-			async ({ jobId, signal: runSignal, reportProgress }) => {
+			async ({ jobId, signal: runSignal, reportProgress, reportAgentProgress }) => {
 				// Records the job's progress and shows it on the call's card: plain output
 				// while the call still waits on it, the job frame (`details.async`) once
 				// backgrounded, so the card keeps filling and settles with the job.
@@ -962,41 +1042,88 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					});
 					await reported;
 				};
-				const { path: artifactPath, id: artifactId } = (await this.session.allocateOutputArtifact?.("bash")) ?? {};
-				const wallTimeStart = performance.now();
+				let confirmedProgressArtifactId: string | undefined;
+				let exitCode: number | undefined;
+				let timedOut = false;
 				try {
-					const result = await executeBash(options.command, {
-						cwd: options.commandCwd,
-						env: options.sessionEnv,
-						// A call that starts in the foreground runs in the session's
-						// persistent shell, like the direct path, so its variables,
-						// functions, and options reach the next call even after it is
-						// backgrounded. A job that starts in the background gets its own
-						// shell, so it never holds the session's.
-						sessionKey: options.foreground ? options.sessionId : `${options.sessionId ?? ""}:async:${jobId}`,
-						isSessionCurrent: () => (this.session.getSessionId?.() ?? undefined) === options.sessionId,
-						timeout: options.timeoutMs ?? 0,
-						signal: runSignal,
-						gitGuard: cfgBashGitGuard.get(this.session.settings),
-						// Bound to the job's own signal: the job outlives the call that started it.
-						filesystem: this.#urlFilesystem(runSignal, options.approvalTier, onReply).shellFilesystem(),
-						artifactPath,
-						artifactId,
-						onChunk: chunk => outputTap.append(chunk),
-						onPreview: text => {
-							void report(text, { output: text, async: { state: "running", jobId, type: "bash" } });
-						},
-						onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
-						streams,
-						onStart: probe => {
-							pids = probe;
-						},
-						onSessionShellBusy: () => notices.push(SESSION_SHELL_BUSY_NOTICE),
-					}).finally(() => {
-						pids = NO_PIDS;
-						outputTap.close();
-					});
+					const { path: artifactPath, id: artifactId } =
+						(await this.session.allocateOutputArtifact?.("bash")) ?? {};
+					const progressLines =
+						options.progressDelivery || options.deferredProgressDelivery
+							? new ProgressLines(line =>
+									reportAgentProgress(line.text, {
+										artifactId: confirmedProgressArtifactId,
+										truncated: line.truncated,
+										streamProvenance: line.streamProvenance,
+									}),
+								)
+							: undefined;
+					progressSampler = progressLines;
+					const wallTimeStart = performance.now();
+					let result: BashResult;
+					try {
+						result = await executeBash(options.command, {
+							cwd: options.commandCwd,
+							env: options.sessionEnv,
+							// A call that starts in the foreground runs in the session's
+							// persistent shell, like the direct path, so its variables,
+							// functions, and options reach the next call even after it is
+							// backgrounded. A job that starts in the background gets its own
+							// shell, so it never holds the session's.
+							sessionKey: options.foreground ? options.sessionId : `${options.sessionId ?? ""}:async:${jobId}`,
+							isSessionCurrent: () => (this.session.getSessionId?.() ?? undefined) === options.sessionId,
+							timeout: options.timeoutMs ?? 0,
+							signal: runSignal,
+							gitGuard: cfgBashGitGuard.get(this.session.settings),
+							// Bound to the job's own signal: the job outlives the call that started it.
+							filesystem: this.#urlFilesystem(runSignal, options.approvalTier, onReply).shellFilesystem(),
+							artifactPath,
+							artifactId,
+							artifactWriteMode: progressLines ? "mirror" : "spill",
+							// The stamp is captured when a chunk enters the sink; mirror
+							// mode and chunk throttling can deliver it after the promotion
+							// boundary, in which case append() drops the stale chunk from
+							// progress. The matching barrier token lets promotion first
+							// drain every chunk that already crossed that boundary into
+							// the foreground preview.
+							chunkStamp: trackChunkDelivery,
+							// Future-stamped raw deliveries cannot feed the sampler until
+							// promotion resets its epoch. They own no pre-boundary token.
+							chunkReady: stamp =>
+								promotionRequested && stamp !== (progressSampler?.epoch ?? 0)
+									? promotionDeliveryGate?.promise
+									: undefined,
+							onChunk: (chunk, stamp, artifactId) => {
+								outputTap.append(chunk);
+								confirmedProgressArtifactId = artifactId;
+								progressLines?.append(chunk, stamp);
+								const text =
+									promotionRequested && stamp === (progressSampler?.epoch ?? 0)
+										? (promotionPreview ?? emissionPreview)
+										: emissionPreview;
+								void report(text, { output: text, async: { state: "running", jobId, type: "bash" } });
+							},
+							onPreview: (text, stamp) => {
+								emissionPreview = text;
+								if (promotionRequested && stamp === (progressSampler?.epoch ?? 0)) promotionPreview = text;
+							},
+							onChunkSettled: finishChunkDelivery,
+							onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
+							streams,
+							onStart: probe => {
+								pids = probe;
+							},
+							onSessionShellBusy: () => notices.push(SESSION_SHELL_BUSY_NOTICE),
+						}).finally(() => {
+							pids = NO_PIDS;
+							outputTap.close();
+						});
+						confirmedProgressArtifactId = result.artifactId;
+					} finally {
+						progressLines?.finish();
+					}
 					if (result.artifactError) latestProgressDetails = { meta: { artifactError: result.artifactError } };
+					exitCode = result.exitCode;
 					const wallTimeMs = performance.now() - wallTimeStart;
 					const finalResult = await this.#buildCompletedResult(result, options.timeoutSec, {
 						command: options.command,
@@ -1006,6 +1133,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						wallTimeMs,
 						replies: backgrounded ? undefined : replies,
 					});
+					timedOut = finalResult.details?.timedOut === true;
 					const finalText = this.#extractTextResult(finalResult);
 					latestText = finalText;
 					const images = finalResult.content.filter((block): block is ImageContent => block.type === "image");
@@ -1016,27 +1144,41 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					// Hand the detailed result to the foreground auto-background
 					// waiter (which renders it, footer included) before deciding
 					// the job's terminal state.
-					completion.resolve({ kind: "completed", result: finalResult });
+					settleCompletion({ kind: "completed", result: finalResult });
 					if (finalResult.isError === true) {
-						// A non-zero exit is a completed command that failed. Re-enter
-						// the failure path so the job manager records it as failed and
-						// delivers the error text, matching prior throw-based behavior.
-						throw new ToolError(finalText);
+						// Re-enter the failure path so the job manager records a
+						// completed Bash error result as failed while retaining the
+						// raw stream provenance for progress deduplication.
+						const failureDetails = { ...latestProgressDetails };
+						throw new AsyncJobRunError(finalText, failureDetails, undefined, result.output);
 					}
 					await report(finalText, {
 						...latestProgressDetails,
+						...(exitCode === undefined ? {} : { exitCode }),
 						async: { state: "completed", jobId, type: "bash" },
+						...(timedOut ? { timedOut: true } : {}),
 					});
-					return finalText;
+					return {
+						text: finalText,
+						// Compare progress against the executor's output, before
+						// completion-only wall-time/notices are appended. A minimizer,
+						// inline cap, or other transformation changes this source and
+						// therefore keeps the successful terminal result visible.
+						terminalTextSource: result.output,
+					};
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);
-					completion.resolve({ kind: "failed", error });
+					settleCompletion({ kind: "failed", error });
 					// Only a cancel aborts the job's own signal (deadlines end in a timed-out result).
 					await report(message, {
 						...latestProgressDetails,
+						...(exitCode === undefined ? {} : { exitCode }),
+						...(timedOut ? { timedOut: true } : {}),
 						async: { state: runSignal.aborted ? "cancelled" : "failed", jobId, type: "bash" },
 					});
 					throw error;
+				} finally {
+					manager.setProgressArtifact(jobId, confirmedProgressArtifactId);
 				}
 			},
 			{
@@ -1053,16 +1195,76 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						intent: options.intent,
 					}),
 				},
+				progressDelivery: options.progressDelivery,
 			},
 		);
 
 		return {
 			jobId,
+			label,
 			completion: completion.promise,
 			getLatestText: () => latestText,
 			notices,
-			background: () => {
-				backgrounded = true;
+			promote: async (delivery, signal) => {
+				if (signal?.aborted) return { kind: "aborted" };
+				// Mark the boundary before yielding. Chunks entering from this
+				// point receive the next sampler epoch, while a throttle-merged
+				// delivery keeps the stamp of its earliest pre-boundary byte.
+				promotionPreview = emissionPreview;
+				promotionDeliveryGate = Promise.withResolvers<void>();
+				promotionRequested = true;
+				trackPromotionDeliveries = false;
+				const prePromotionDeliveries = chunkDeliveryBarrier;
+				const drainGuard = Promise.withResolvers<"stalled">();
+				const drainTimer = setTimeout(() => drainGuard.resolve("stalled"), PROMOTION_DRAIN_TIMEOUT_MS);
+				const abortGuard = Promise.withResolvers<"aborted">();
+				const onAbort = (): void => abortGuard.resolve("aborted");
+				signal?.addEventListener("abort", onAbort, { once: true });
+				try {
+					// Drain only pre-boundary raw deliveries for provenance before
+					// freezing their emission preview and activating progress. Future
+					// deliveries wait behind the gate, never inside this barrier.
+					// OutputSink settles each token even if artifact persistence fails;
+					// a delivery that still
+					// stalls past the guard cannot hold the turn: promote without it,
+					// and mark coverage gapped so completion keeps the terminal text
+					// that the preview never showed. A cancel that lands inside the
+					// drain window aborts instead of promoting a live job.
+					const drain = await Promise.race([
+						prePromotionDeliveries.then(() => "drained" as const),
+						completion.promise.then(() => "settled" as const),
+						drainGuard.promise,
+						abortGuard.promise,
+					]);
+					const foregroundPreview = latestText;
+					const previewComplete = drain !== "stalled";
+					pendingChunkDeliveries.length = 0;
+					nextChunkDelivery = 0;
+					if (settledCompletion) return settledCompletion;
+					if (drain === "aborted") return { kind: "aborted" };
+					// Lift the foreground gate and hand the card to the job before
+					// activating progress, without yielding between them and dropping
+					// post-boundary chunks.
+					backgrounded = true;
+					manager.backgroundJob(jobId);
+					if (delivery) {
+						const foregroundStreamProvenance = progressSampler?.resetDisplayAndCaptureProvenance();
+						manager.activateProgressDelivery(
+							jobId,
+							delivery,
+							previewComplete ? foregroundStreamProvenance : undefined,
+							previewComplete ? "continuous" : "gapped",
+						);
+					}
+					return { kind: "promoted", foregroundPreview };
+				} finally {
+					signal?.removeEventListener("abort", onAbort);
+					clearTimeout(drainTimer);
+					promotionRequested = false;
+					promotionDeliveryGate?.resolve();
+					promotionDeliveryGate = undefined;
+					promotionPreview = undefined;
+				}
 			},
 			replies,
 		};
@@ -1076,6 +1278,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			cwd,
 			name: rawName,
 			ready: rawReady,
+			progress,
 			async: rawAsync,
 			pty,
 		}: BashToolInput,
@@ -1102,30 +1305,41 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				command = cd.rest;
 			}
 		}
-		// Mode selection runs on normalized fields: a caller that materializes
-		// every optional argument with empty or placeholder values still asked
-		// for a plain command. Only `async: true` is an async request, a blank
-		// `name` is no service name, and service-only fields with nothing in
-		// them are not a service request.
+		// Normalize optional fields before choosing service or command mode: empty
+		// placeholders must not turn a plain command into a service request.
 		const name = blankToUndefined(rawName);
 		const ready = normalizeReady(rawReady);
-		const asyncRequested = rawAsync === true;
+		const executionMode = rawAsync === true ? "background" : rawAsync === "auto" ? "auto" : "foreground";
 		const pendingNotices: string[] = [];
 		if (name !== undefined) {
 			if (!this.#launchEnabled) throw new ToolError("Service launch is disabled in this session.");
 			if (rawTimeout !== undefined)
 				pendingNotices.push("Ignored timeout: service-only; readiness follows ready.timeout.");
-			if (asyncRequested)
+			if (executionMode !== "foreground")
 				pendingNotices.push("Ignored async: service-only; a service start is asynchronous already.");
-		} else if (ready !== undefined && (ready.log !== undefined || ready.port !== undefined)) {
-			// Host/timeout only configure a readiness condition; neither requests one.
-			// Keep service validation unchanged, but only warn when a condition was
-			// actually ignored.
-			pendingNotices.push("Ignored ready: service-only, and no service name was given.");
+		} else {
+			if (ready !== undefined && (ready.log !== undefined || ready.port !== undefined)) {
+				// Host/timeout only configure a readiness condition; neither requests one.
+				// Keep service validation unchanged, but only warn when a condition was
+				// actually ignored.
+				pendingNotices.push("Ignored ready: service-only, and no service name was given.");
+			}
+			if (progress === "off") {
+				throw new ToolError('progress: "off" requires a service name; omit progress for unmonitored jobs.');
+			}
+			if (progress && executionMode === "foreground") {
+				throw new ToolError(
+					'progress requires `async: true` or `async: "auto"`; foreground commands return their output directly.',
+				);
+			}
+			if (pty && executionMode === "auto") {
+				throw new ToolError('`pty: true` cannot be combined with `async: "auto"`.');
+			}
 		}
-		if (name === undefined && asyncRequested && !cfgAsyncEnabled.get(this.session.settings)) {
+		if (name === undefined && executionMode !== "foreground" && !cfgAsyncEnabled.get(this.session.settings)) {
 			throw new ToolError("Async bash execution is disabled. Enable async.enabled to use async mode.");
 		}
+		const jobProgress = progress === "wake" || progress === "ambient" ? progress : undefined;
 
 		const interception = this.#interception(rawCommand, command, name, ctx?.toolNames ?? []);
 		if (interception) throw new ToolError(interception);
@@ -1186,6 +1400,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		if (name !== undefined) {
 			// Only a readiness wait can outlast a steer; without `ready` the start
 			// returns once the process spawns.
+			const launchEpoch = this.session.captureLaunchProgressEpoch?.() ?? 0;
 			const service = await startService(
 				this.session,
 				{
@@ -1195,11 +1410,13 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					pty: pty ?? true,
 					ready,
 					env: sessionEnv,
+					progress,
 				},
 				signal,
 				ready === undefined ? undefined : ctx?.toolCall?.steeringSignal,
 			);
 			const daemon = service.daemon;
+			const monitored = !service.monitorStopped ? jobProgress : undefined;
 			if (service.readyInterrupted) {
 				// A queued message arrived mid-wait: return so it injects promptly.
 				// The broker keeps starting the service, inspectable via proc://.
@@ -1210,7 +1427,16 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 							text: `${name}: starting${daemon.pid === undefined ? "" : ` pid=${daemon.pid}`}\nReadiness wait interrupted early to handle an incoming message; the service is still starting and keeps running. Read proc://${name} for status.`,
 						},
 					],
-					details: { service: { name, state: daemon.state, ready: false, timedOut: false, pid: daemon.pid } },
+					details: {
+						service: {
+							name,
+							state: daemon.state,
+							ready: false,
+							timedOut: false,
+							pid: daemon.pid,
+							...(monitored ? { progress: monitored } : {}),
+						},
+					},
 				};
 			}
 			const lines = [
@@ -1220,9 +1446,19 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				lines.push(
 					`NOT ready — readiness timed out after ${ready?.timeout ?? 30}s; process state: ${daemon.state}.`,
 				);
-			if (daemon.exitReason) lines.push(`Reason: ${daemon.exitReason}`);
+			const exitReason = displayExitReason(daemon.exitReason);
+			if (exitReason) lines.push(`Reason: ${exitReason}`);
 			lines.push(...pendingNotices);
-			const log = await serviceLogs(this.session, name, signal);
+			if (monitored)
+				lines.push(
+					`Live progress: ${monitored}; retune or detach with write proc://${daemon.name}/progress (wake, ambient, off).`,
+				);
+			if (service.monitorStopped) lines.push(`Live progress stopped: ${service.monitorStopped}`);
+			// A session context change while the start settled leaves no caller for the old service's logs.
+			const log =
+				(this.session.captureLaunchProgressEpoch?.() ?? 0) === launchEpoch && !this.session.isDisposed?.()
+					? await serviceLogs(this.session, name, signal)
+					: "";
 			if (log) lines.push(log);
 			return {
 				content: [{ type: "text", text: lines.join("\n") }],
@@ -1233,6 +1469,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						ready: daemon.readyAt !== undefined || daemon.state === "running",
 						timedOut: service.readyTimedOut,
 						pid: daemon.pid,
+						...(exitReason ? { exitReason } : {}),
+						...(monitored ? { progress: monitored } : {}),
+						...(service.monitorStopped ? { monitorStopped: service.monitorStopped } : {}),
 					},
 				},
 			};
@@ -1250,9 +1489,14 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			if (timeoutClampNotice) pendingNotices.push(timeoutClampNotice);
 		}
 
-		if (asyncRequested) {
+		if (executionMode === "background") {
 			if (!this.session.asyncJobManager) {
 				throw new ToolError("Async job manager unavailable for this session.");
+			}
+			// Explicit background at the cap is an error the caller asked for;
+			// `async: "auto"` below degrades to inline with a notice instead.
+			if (this.session.asyncJobManager.atCapacity) {
+				throw new ToolError("Background job limit reached. Wait for a running job to finish or cancel one.");
 			}
 			const job = this.#startManagedBashJob({
 				command,
@@ -1267,8 +1511,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				sessionId,
 				sessionEnv,
 				intent: this.session.getToolCallIntent?.(toolCallId),
+				progressDelivery: jobProgress,
 			});
-			return this.#buildBackgroundStartResult(job.jobId, "", timeoutSec, {
+			return this.#buildBackgroundStartResult(job, "", timeoutSec, {
 				requestedTimeoutSec,
 				notices: pendingNotices,
 			});
@@ -1283,19 +1528,35 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		);
 
 		const autoBgManager = this.session.asyncJobManager;
-		// At the running-job cap, fall through to direct foreground execution
-		// instead of failing every bash call until a slot frees up.
-		if (
-			cfgBashAutoBackgroundEnabled.get(this.session.settings) &&
-			!pty &&
-			!bridgeTerminalAvailable &&
+		const autoRequested = executionMode === "auto";
+		if (autoRequested && !autoBgManager) {
+			throw new ToolError("Background job manager unavailable for this session.");
+		}
+		// Explicit `async: "auto"` reads the deadline as wall-clock: a timeout
+		// that cannot outlive the grace runs inline instead of dying as a job.
+		// Settings-driven auto-backgrounding keeps its clamp contract: a
+		// deadline shorter than the threshold backgrounds at once so the
+		// timeout is reported as a job outcome rather than blocking the turn.
+		const autoBackgroundWaitMs = resolveAutoBackgroundWaitMs(
+			autoRequested
+				? Math.max(0, Math.floor(cfgBashAsyncAutoInlineGraceMs.get(this.session.settings)))
+				: Math.max(0, Math.floor(cfgBashAutoBackgroundThresholdMs.get(this.session.settings))),
+			timeoutMs,
+			autoRequested ? "wall-clock" : "runtime",
+		);
+		if (autoRequested && autoBgManager?.atCapacity) {
+			// One shape at the running-job cap: auto runs inline to completion
+			// and says so; implicit auto-background silently falls through.
+			pendingNotices.push(AUTO_AT_CAPACITY_NOTICE);
+		} else if (
+			(autoRequested ||
+				(cfgBashAutoBackgroundEnabled.get(this.session.settings) && !pty && !bridgeTerminalAvailable)) &&
 			autoBgManager &&
-			!autoBgManager.atCapacity
+			!autoBgManager.atCapacity &&
+			// A deadline that cannot outlive the grace never promotes: the
+			// command resolves (or expires) inline instead of dying as a job.
+			autoBackgroundWaitMs !== undefined
 		) {
-			const autoBackgroundWaitMs = resolveAutoBackgroundWaitMs(
-				Math.floor(cfgBashAutoBackgroundThresholdMs.get(this.session.settings)),
-				timeoutMs,
-			);
 			const startBackgrounded = autoBackgroundWaitMs === 0;
 			const job = this.#startManagedBashJob({
 				command,
@@ -1310,9 +1571,11 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				sessionId,
 				sessionEnv,
 				intent: this.session.getToolCallIntent?.(toolCallId),
+				progressDelivery: startBackgrounded ? jobProgress : undefined,
+				deferredProgressDelivery: startBackgrounded ? undefined : jobProgress,
 			});
 			if (startBackgrounded) {
-				return this.#buildBackgroundStartResult(job.jobId, "", timeoutSec, {
+				return this.#buildBackgroundStartResult(job, "", timeoutSec, {
 					requestedTimeoutSec,
 					notices: pendingNotices,
 				});
@@ -1339,8 +1602,22 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				autoBgManager.releaseForegroundJob(job.jobId);
 				throw new ToolAbortError(job.getLatestText() || "Command aborted");
 			}
-			job.background();
-			autoBgManager.backgroundJob(job.jobId);
+			const promotion = await job.promote(jobProgress, signal);
+			if (promotion.kind === "completed") {
+				autoBgManager.releaseForegroundJob(job.jobId);
+				return promotion.result;
+			}
+			if (promotion.kind === "failed") {
+				autoBgManager.releaseForegroundJob(job.jobId);
+				throw promotion.error;
+			}
+			if (promotion.kind === "aborted") {
+				// Same outcome as an abort before the drain: the job never
+				// becomes a background result the model would later poll.
+				autoBgManager.cancel(job.jobId);
+				autoBgManager.releaseForegroundJob(job.jobId);
+				throw new ToolAbortError(job.getLatestText() || "Command aborted");
+			}
 			// "steer": a queued user/peer message arrived mid-wait — background
 			// the command (it keeps running) so the message injects promptly.
 			// `job.notices` also carries the temporary-shell notice once the run started.
@@ -1348,7 +1625,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				waitResult.kind === "steer"
 					? [...job.notices, "Backgrounded early to handle an incoming message; the command keeps running."]
 					: job.notices;
-			return this.#buildBackgroundStartResult(job.jobId, job.getLatestText(), timeoutSec, {
+			return this.#buildBackgroundStartResult(job, promotion.foregroundPreview, timeoutSec, {
 				requestedTimeoutSec,
 				notices,
 				replies: job.replies,
