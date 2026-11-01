@@ -8231,9 +8231,8 @@ export function orcaRouterModelManagerOptions(
 		defaultBaseUrl: ORCAROUTER_BASE_URL,
 		config,
 		requireApiKey: true,
-		filterModel: (entry) =>
-			Array.isArray(entry.supported_endpoint_types) &&
-			entry.supported_endpoint_types.includes("openai-response"),
+		filterModel: entry =>
+			Array.isArray(entry.supported_endpoint_types) && entry.supported_endpoint_types.includes("openai-response"),
 		mapModel: mapWithBundledReference,
 	});
 }
