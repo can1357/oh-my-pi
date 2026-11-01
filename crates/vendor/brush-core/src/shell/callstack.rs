@@ -85,8 +85,20 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 		self.call_stack.release_trap_delivery_block();
 	}
 
+	/// Refuses a call to the function `name` when function calls already nest
+	/// as deep as the shell allows, with Bash's `maximum function nesting
+	/// level exceeded` error.
+	pub(crate) fn check_function_nesting(&self, name: &str) -> Result<(), error::Error> {
+		let limit = self.function_nesting_limit();
+		if self.call_stack.function_call_depth() >= limit {
+			return Err(error::ErrorKind::MaxFunctionNestingExceeded(name.to_owned(), limit).into());
+		}
+		Ok(())
+	}
+
 	/// Updates the shell's internal tracking state to reflect that a new shell
-	/// function is being entered.
+	/// function is being entered. The caller has already checked the call
+	/// with [`Self::check_function_nesting`].
 	///
 	/// # Arguments
 	///
@@ -100,13 +112,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 		function: &functions::Registration,
 		args: impl IntoIterator<Item = String>,
 		_params: &ExecutionParameters,
-	) -> Result<(), error::Error> {
-		if let Some(max_call_depth) = self.options.max_function_call_depth
-			&& self.call_stack.function_call_depth() >= max_call_depth
-		{
-			return Err(error::ErrorKind::MaxFunctionCallDepthExceeded.into());
-		}
-
+	) {
 		if tracing::enabled!(target: trace_categories::FUNCTIONS, tracing::Level::DEBUG) {
 			let depth = self.call_stack.function_call_depth();
 			let prefix = repeated_char_str(' ', depth);
@@ -115,8 +121,17 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 
 		self.call_stack.push_function(name, function, args);
 		self.env.push_scope(env::EnvironmentScope::Local);
+	}
 
-		Ok(())
+	/// Returns how deep function calls may nest: the value of `FUNCNEST` when
+	/// it is a positive number, as in Bash, and otherwise
+	/// [`callstack::DEFAULT_NESTING_LIMIT`]. Bash puts no limit on an unset
+	/// `FUNCNEST`; here every level costs native stack, so there is always one.
+	fn function_nesting_limit(&self) -> usize {
+		self.env_str("FUNCNEST")
+			.and_then(|value| value.trim().parse::<usize>().ok())
+			.filter(|limit| *limit > 0)
+			.unwrap_or(callstack::DEFAULT_NESTING_LIMIT)
 	}
 
 	/// Updates the shell's internal tracking state to reflect that the shell

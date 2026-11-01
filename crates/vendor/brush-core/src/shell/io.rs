@@ -82,9 +82,42 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 		err: &error::Error,
 	) -> Result<(), error::Error> {
 		use crate::extensions::ErrorFormatter as _;
+
+		// The refusal that abandoned the command was reported where it
+		// happened; there is nothing more to show.
+		if matches!(err.kind(), error::ErrorKind::CommandAbandoned) {
+			return Ok(());
+		}
+
 		let str = self.error_formatter.format_error(err, self);
 		file.write_all_async(str.as_bytes()).await?;
 
 		Ok(())
+	}
+
+	/// Reports a refusal that abandons the command it occurred in (see
+	/// [`error::Error::abandons_command`]) on `stderr`, the standard error in
+	/// effect where it happened, as Bash does, unless `report` is false or it
+	/// was already reported. Returns the error that carries the abandonment on
+	/// to the enclosing command without being reported again. A report that
+	/// fails because descriptors ran out (deep nesting can exhaust a low
+	/// descriptor limit) instead returns the refusal itself, for an enclosing
+	/// command to report; any other failure, such as a closed or full standard
+	/// error, leaves the refusal unreported, as in Bash.
+	pub(crate) async fn report_abandonment(
+		&self,
+		stderr: &mut openfiles::OpenFile,
+		report: bool,
+		err: error::Error,
+	) -> error::Error {
+		if report
+			&& let Err(write_err) = self.display_error(stderr, &err).await
+			&& write_err
+				.as_io_error()
+				.is_some_and(ioutils::is_descriptor_exhaustion)
+		{
+			return err;
+		}
+		error::ErrorKind::CommandAbandoned.into()
 	}
 }

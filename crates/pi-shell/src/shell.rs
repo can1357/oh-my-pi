@@ -4221,9 +4221,24 @@ mod tests {
 		assert_eq!(output, "9\nKILL\n");
 	}
 
+	/// Runs the test named `test_name` again in a child test process, with
+	/// `marker` set so that the child runs the test body. A test name that no
+	/// longer matches would select no test, and libtest passes an empty run,
+	/// so the name must first select exactly that one test.
 	async fn run_isolated_kill_test(test_name: &str, marker: &str, own_process_group: bool) {
-		let mut command =
-			tokio::process::Command::new(std::env::current_exe().expect("current test executable"));
+		let exe = std::env::current_exe().expect("current test executable");
+		let listed = tokio::process::Command::new(&exe)
+			.args(["--exact", test_name, "--list", "--format", "terse"])
+			.output()
+			.await
+			.expect("list isolated test");
+		assert_eq!(
+			String::from_utf8_lossy(&listed.stdout).trim_end(),
+			format!("{test_name}: test"),
+			"isolated test must select exactly itself"
+		);
+
+		let mut command = tokio::process::Command::new(exe);
 		command.args(["--exact", test_name]).env(marker, "1");
 		#[cfg(unix)]
 		if own_process_group {
@@ -7103,6 +7118,389 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 		assert_eq!(exit_code("exit 3").await, Some(3));
 		assert_eq!(exit_code(state_intact).await, Some(0), "state lost after exit");
 		assert_eq!(exit_code("false; exit 0").await, Some(1), "errexit option lost");
+	}
+
+	/// Runs `command` in the persistent `shell` and returns its exit code and
+	/// everything it wrote.
+	async fn run_captured_in(shell: &Shell, command: &str) -> (Option<i32>, String) {
+		let (tx, rx) = flume::unbounded();
+		let result = shell
+			.run(
+				ShellRunOptions { command: command.into(), ..Default::default() },
+				Some(tx),
+				CancelToken::default(),
+			)
+			.await
+			.expect("run");
+		(result.exit_code, rx.try_iter().collect())
+	}
+
+	/// A function recursion as deep as the nesting limit runs to the end. Each
+	/// level holds tens of KiB of native stack, so before nested execution
+	/// moved to stack segments this ran off the 2 MiB stack of the Tokio worker
+	/// running the shell at about 28 levels, and the host process died with
+	/// SIGSEGV.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn function_recursion_as_deep_as_the_nesting_limit_completes() {
+		let (result, output) = execute_captured(
+			"walk() { local n=$1 d; if (( n > 1 )); then for d in a; do walk $(( n - 1 )); done; fi; \
+			 }\nwalk 500\necho \"walked=$?\""
+				.into(),
+		)
+		.await;
+		assert_eq!((result.exit_code, output.as_str()), (Some(0), "walked=0\n"));
+	}
+
+	/// A function that never stops recursing is refused at the nesting limit
+	/// with Bash's message, the rest of that command is skipped with status 1,
+	/// and the session keeps working. Before, it killed the host process.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn runaway_function_recursion_is_refused_and_the_session_survives() {
+		let _guard = shell_test_lock().lock().await;
+		let shell = Shell::new(None);
+		let (code, output) =
+			run_captured_in(&shell, "f() { f; }\nf; echo skipped\necho \"after=$?\"").await;
+		assert_eq!(code, Some(0), "{output}");
+		let lines: Vec<&str> = output.lines().collect();
+		assert_eq!(lines.len(), 2, "{output}");
+		assert!(lines[0].ends_with("f: maximum function nesting level exceeded (500)"), "{output}");
+		assert_eq!(lines[1], "after=1");
+
+		let (code, output) = run_captured_in(&shell, "f() { echo alive; }; f").await;
+		assert_eq!((code, output.as_str()), (Some(0), "alive\n"));
+	}
+
+	/// A refusal 500 levels deep behaves the same under a 1,024 soft
+	/// descriptor limit and a raised one. Each nesting level holds duplicated
+	/// descriptors (a separate defect), so at 1,024 the refusal cannot be
+	/// written where it happens and an enclosing command reports it, once. A
+	/// refusal whose standard error is closed or full stays silent at both
+	/// limits, as in Bash, instead of falling back to an outer standard error,
+	/// wherever that standard error is set: on the call, on an enclosing group,
+	/// on both, on a function definition, or on a pipeline stage.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn deep_function_nesting_refusal_respects_standard_error_at_any_descriptor_limit() {
+		if rerun_in_open_file_limit_child(
+			"shell::tests::deep_function_nesting_refusal_respects_standard_error_at_any_descriptor_limit",
+		)
+		.await
+		{
+			return;
+		}
+
+		// Every case runs before the test fails, so a failure lists each
+		// limit and placement that went wrong, not only the first.
+		let mut wrong = Vec::new();
+		for soft in [1024, 65_536] {
+			set_open_file_limit(soft);
+			let (_, output) = execute_captured("f() { f; }\nf\necho \"after=$?\"".into()).await;
+			let lines: Vec<&str> = output.lines().collect();
+			if !(lines.len() == 2
+				&& lines[0].ends_with("f: maximum function nesting level exceeded (500)")
+				&& lines[1] == "after=1")
+			{
+				wrong.push(format!("limit {soft}: f: {output:?}"));
+			}
+
+			for stderr in ["2>&-", "2>/dev/full"] {
+				for (call, expected) in [
+					("f {r}", "after=1\n"),
+					("{ f; } {r}", "after=1\n"),
+					("{ f {r}; } {r}", "after=1\n"),
+					("g() { f; } {r}; g", "after=1\n"),
+					("f {r} | cat", "after=0\n"),
+				] {
+					let call = call.replace("{r}", stderr);
+					let (_, output) =
+						execute_captured(format!("f() {{ f; }}\n{call}\necho \"after=$?\"")).await;
+					if output != expected {
+						wrong.push(format!("limit {soft}: {call}: {output:?}"));
+					}
+				}
+			}
+		}
+		assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+	}
+
+	/// A call is refused before its function's own definition-time
+	/// redirections apply, as in Bash: a `>` there does not truncate its file,
+	/// and a `<` there that cannot open is not reported instead of the refusal.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn function_nesting_is_checked_before_definition_redirections() {
+		let dir = tempfile::tempdir().expect("temp dir");
+		let sentinel = dir.path().join("sentinel");
+		std::fs::write(&sentinel, "keep\n").expect("write sentinel");
+		let missing = dir.path().join("missing-input");
+		for (case, redirect) in [
+			("unopenable input", format!("<{}", quote_arg(&missing.to_string_lossy()))),
+			("truncating output", format!(">{}", quote_arg(&sentinel.to_string_lossy()))),
+		] {
+			let (result, output) = execute_captured(format!(
+				"FUNCNEST=1; outer() {{ inner; }}; inner() {{ :; }} {redirect}; outer; printf \
+				 'after=%s\\n' \"$?\""
+			))
+			.await;
+			assert_eq!(result.exit_code, Some(1), "{case}: {output:?}");
+			let lines: Vec<&str> = output.lines().collect();
+			assert_eq!(lines.len(), 1, "{case}: {output:?}");
+			assert!(
+				lines[0].ends_with("inner: maximum function nesting level exceeded (1)"),
+				"{case}: {output:?}"
+			);
+			assert_eq!(
+				std::fs::read_to_string(&sentinel).expect("read sentinel"),
+				"keep\n",
+				"{case}: the refused call's redirection ran"
+			);
+		}
+	}
+
+	/// `FUNCNEST` sets the function nesting limit as it does in Bash: a lower
+	/// value refuses sooner with the same message, and a higher one lets a
+	/// script recurse past the default.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn funcnest_sets_the_function_nesting_limit() {
+		let (_, output) = execute_captured(
+			"FUNCNEST=3\nf() { echo \"in $1\"; f $(( $1 + 1 )); }\nf 0\necho \"after=$?\"".into(),
+		)
+		.await;
+		let lines: Vec<&str> = output.lines().collect();
+		assert_eq!(lines.len(), 5, "{output}");
+		assert_eq!(lines[..3], ["in 0", "in 1", "in 2"]);
+		assert!(lines[3].ends_with("f: maximum function nesting level exceeded (3)"), "{output}");
+		assert_eq!(lines[4], "after=1");
+
+		let (_, output) = execute_captured(
+			"FUNCNEST=600\nr() { if (( $1 > 1 )); then r $(( $1 - 1 )); fi; }\nr 600\necho \
+			 \"deep=$?\""
+				.into(),
+		)
+		.await;
+		assert_eq!(output, "deep=0\n");
+	}
+
+	/// Asserts that `output` is the `FUNCNEST=3` refusal of `f` followed by
+	/// `rest`: the refusal is reported exactly once, before what follows it.
+	fn assert_refused_then(output: &str, rest: &[&str], case: &str) {
+		let lines: Vec<&str> = output.lines().collect();
+		assert_eq!(lines.len(), 1 + rest.len(), "{case}: {output:?}");
+		assert!(
+			lines[0].ends_with("f: maximum function nesting level exceeded (3)"),
+			"{case}: {output:?}"
+		);
+		assert_eq!(lines[1..], *rest, "{case}: {output:?}");
+	}
+
+	/// A pipeline stage runs in a subshell, so a function nesting refusal in
+	/// any stage ends only that stage, as in Bash: the refusal is reported, the
+	/// stage fails with status 1 (which `pipefail` shows), and the command that
+	/// ran the pipeline carries on. Before, the refusal abandoned the whole
+	/// command, so `PARENT` never printed. With `lastpipe` the last stage runs
+	/// in the shell itself, and there, as in Bash, the refusal abandons the
+	/// command.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn function_nesting_refusal_in_a_pipeline_stage_ends_only_that_stage() {
+		for (case, command, rest) in [
+			("first stage", "f | cat; printf 'PARENT\\n'", "PARENT"),
+			("middle stage", "printf input | f | cat; printf 'PARENT\\n'", "PARENT"),
+			("last stage", "printf input | f; printf 'PARENT\\n'", "PARENT"),
+			("group stage", "{ f; } | cat; printf 'PARENT\\n'", "PARENT"),
+			(
+				"pipefail",
+				"set -o pipefail; f | cat; printf 'PARENT status=%s\\n' \"$?\"",
+				"PARENT status=1",
+			),
+		] {
+			let (result, output) =
+				execute_captured(format!("FUNCNEST=3; f() {{ f; }}; {command}")).await;
+			assert_eq!(result.exit_code, Some(0), "{case}: {output:?}");
+			assert_refused_then(&output, &[rest], case);
+		}
+
+		let (result, output) = execute_captured(
+			"FUNCNEST=3; f() { f; }; shopt -s lastpipe; printf input | f; printf 'PARENT\\n'".into(),
+		)
+		.await;
+		assert_eq!(result.exit_code, Some(1), "lastpipe: {output:?}");
+		assert_refused_then(&output, &[], "lastpipe");
+	}
+
+	/// A function nesting refusal inside a process substitution is reported,
+	/// and the command reading the substitution carries on, as in Bash. Before,
+	/// the substitution's result was dropped, and the refusal printed nothing.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn function_nesting_refusal_in_a_process_substitution_is_reported() {
+		let (result, output) =
+			execute_captured("FUNCNEST=3; f() { f; }; cat <(f); printf 'PARENT\\n'".into()).await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert_refused_then(&output, &["PARENT"], "process substitution");
+	}
+
+	/// A function nesting refusal in a background job or coprocess is reported
+	/// and becomes that job's status, as in Bash; `wait` collects it and the
+	/// session keeps running. Before, the job ended with an error instead of a
+	/// status, and the session's next poll of the job panicked with
+	/// `JoinHandle polled after completion`, failing the run.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn function_nesting_refusal_in_a_background_job_is_reported() {
+		let _guard = shell_test_lock().lock().await;
+		let shell = Shell::new(None);
+		for (case, start) in [("background job", "f &"), ("coprocess", "coproc f;")] {
+			let (code, output) = run_captured_in(
+				&shell,
+				&format!("FUNCNEST=3; f() {{ f; }}; {start} wait; printf 'PARENT\\n'"),
+			)
+			.await;
+			assert_eq!(code, Some(0), "{case}: {output:?}");
+			assert_refused_then(&output, &["PARENT"], case);
+		}
+
+		let (code, output) = run_captured_in(&shell, "printf 'STILL ALIVE\\n'").await;
+		assert_eq!((code, output.as_str()), (Some(0), "STILL ALIVE\n"));
+	}
+
+	/// A function nesting refusal is reported where it happens, on the standard
+	/// error in effect there, as in Bash: after `f 2>/dev/null` nothing is
+	/// printed, and `f 2>file` writes the refusal into the file. Before, the
+	/// enclosing top-level command reported it, past the redirection.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn function_nesting_refusal_goes_to_the_standard_error_in_effect_where_it_happens() {
+		let dir = tempfile::tempdir().expect("temp dir");
+		let log = dir.path().join("refusal.log");
+		let (result, output) = execute_captured(format!(
+			"FUNCNEST=3; f() {{ f; }}; LOG={}\nf 2>/dev/null; printf 'skipped\\n'\nf 2>\"$LOG\" | \
+			 cat; printf 'PARENT\\n'",
+			quote_arg(&log.to_string_lossy())
+		))
+		.await;
+		assert_eq!((result.exit_code, output.as_str()), (Some(0), "PARENT\n"), "redirected refusal");
+		let logged = std::fs::read_to_string(&log).expect("refusal log");
+		assert!(
+			logged
+				.trim_end()
+				.ends_with("f: maximum function nesting level exceeded (3)"),
+			"redirected refusal log: {logged:?}"
+		);
+	}
+
+	/// Asserts that a `FUNCNEST=3` refusal sent to the standard error that
+	/// `redirect` leaves (closed or full) prints nothing, as in Bash, however
+	/// that standard error reaches the refused call: on the call itself, on an
+	/// enclosing group, on both, on a function definition, or on a pipeline
+	/// stage. Before, the refusal fell back to an outer standard error.
+	#[cfg(unix)]
+	async fn assert_refusal_stays_silent_with(redirect: &str) {
+		for (call, code, expected) in [
+			("f {r}; printf 'PARENT\\n'", 1, ""),
+			("{ f; } {r}; printf 'PARENT\\n'", 1, ""),
+			("{ f {r}; } {r}; printf 'PARENT\\n'", 1, ""),
+			("g() { f; } {r}; g; printf 'PARENT\\n'", 1, ""),
+			("f {r} | cat; printf 'PARENT=%s\\n' \"$?\"", 0, "PARENT=0\n"),
+		] {
+			let call = call.replace("{r}", redirect);
+			let (result, output) = execute_captured(format!("FUNCNEST=3; f() {{ f; }}; {call}")).await;
+			assert_eq!((result.exit_code, output.as_str()), (Some(code), expected), "{call}");
+		}
+	}
+
+	/// A nesting refusal sent to a closed standard error stays silent.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn function_nesting_refusal_does_not_escape_closed_standard_error() {
+		assert_refusal_stays_silent_with("2>&-").await;
+	}
+
+	/// A nesting refusal sent to a full standard error stays silent.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn function_nesting_refusal_does_not_escape_full_standard_error() {
+		assert_refusal_stays_silent_with("2>/dev/full").await;
+	}
+
+	/// Marks a test process started to run one test under a descriptor limit
+	/// of its own; see [`rerun_in_open_file_limit_child`].
+	#[cfg(unix)]
+	const OPEN_FILE_LIMIT_CHILD: &str = "PI_SHELL_TEST_OPEN_FILE_LIMIT_CHILD";
+
+	/// Runs the test named `test` again in a child test process, where it may
+	/// change the process-wide descriptor limit without affecting any other
+	/// test. Returns `true` in the parent, once the child has passed, and
+	/// `false` in the child, which then runs the test body.
+	#[cfg(unix)]
+	async fn rerun_in_open_file_limit_child(test: &str) -> bool {
+		if std::env::var_os(OPEN_FILE_LIMIT_CHILD).is_some() {
+			return false;
+		}
+		run_isolated_kill_test(test, OPEN_FILE_LIMIT_CHILD, false).await;
+		true
+	}
+
+	/// Sets this test process's soft descriptor limit to `soft`, or to the
+	/// hard limit if that is lower. Only a child started by
+	/// [`rerun_in_open_file_limit_child`] may call it. Bun raises omp's soft
+	/// limit to the hard limit at startup; each nesting level holds about 25
+	/// duplicated descriptors, so 500 levels need far more than 1,024.
+	#[cfg(unix)]
+	fn set_open_file_limit(soft: libc::rlim_t) {
+		assert!(
+			std::env::var_os(OPEN_FILE_LIMIT_CHILD).is_some(),
+			"only a child test process may change the descriptor limit"
+		);
+		let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+		// SAFETY: `limit` is a valid, writable `rlimit` for the duration of the
+		// call.
+		assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) }, 0);
+		limit.rlim_cur = limit.rlim_max.min(soft);
+		// SAFETY: `limit` is a valid `rlimit`; moving the soft limit up to the
+		// hard limit needs no privilege.
+		let set = unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit) };
+		assert_eq!(set, 0, "set RLIMIT_NOFILE to {}", limit.rlim_cur);
+	}
+
+	/// An `eval` that evaluates itself forever is refused at the nesting limit
+	/// with Bash's message and status 1. Before, it killed the host process at
+	/// about 31 levels.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn runaway_eval_recursion_is_refused() {
+		if rerun_in_open_file_limit_child("shell::tests::runaway_eval_recursion_is_refused").await {
+			return;
+		}
+		set_open_file_limit(65_536);
+		let (_, output) =
+			execute_captured("e='eval \"$e\"'\neval \"$e\"\necho \"after=$?\"".into()).await;
+		let lines: Vec<&str> = output.lines().collect();
+		assert_eq!(lines.len(), 2, "{output}");
+		assert!(lines[0].ends_with("eval: maximum eval nesting level exceeded (500)"), "{output}");
+		assert_eq!(lines[1], "after=1");
+	}
+
+	/// A file that sources itself forever is refused at the nesting limit with
+	/// Bash's message and status 1. Before, it killed the host process at about
+	/// 30 levels.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn runaway_source_recursion_is_refused() {
+		if rerun_in_open_file_limit_child("shell::tests::runaway_source_recursion_is_refused").await {
+			return;
+		}
+		set_open_file_limit(65_536);
+		let dir = tempfile::tempdir().expect("temp dir");
+		let script = dir.path().join("again.sh");
+		std::fs::write(&script, ". \"$AGAIN\"\n").expect("write script");
+		let (_, output) = execute_captured(format!(
+			"AGAIN={}\n. \"$AGAIN\"\necho \"after=$?\"",
+			quote_arg(&script.to_string_lossy())
+		))
+		.await;
+		let lines: Vec<&str> = output.lines().collect();
+		assert_eq!(lines.len(), 2, "{output}");
+		assert!(
+			lines[0].ends_with("again.sh: maximum source nesting level exceeded (500)"),
+			"{output}"
+		);
+		assert_eq!(lines[1], "after=1");
 	}
 
 	/// `Shell::pids` reports the in-flight run's live external children without

@@ -97,10 +97,10 @@ pub fn null() -> Result<OpenFile, error::Error> {
 impl Clone for OpenFile {
 	fn clone(&self) -> Self {
 		// If we fail to clone the open file for any reason, we return a special file
-		// that discards all I/O. This allows us to avoid fatally erroring out.
-		self.try_clone().unwrap_or_else(|_err| {
-			ioutils::FailingReaderWriter::new("failed to duplicate open file").into()
-		})
+		// that fails all I/O, keeping whether the clone ran out of descriptors.
+		// This allows us to avoid fatally erroring out.
+		self.try_clone()
+			.unwrap_or_else(|err| ioutils::FailingReaderWriter::duplicate_failed(&err).into())
 	}
 }
 

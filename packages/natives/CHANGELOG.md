@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the embedded shell killing omp with a segmentation fault and no message when a function, `source` or `eval` nested a few dozen levels deep: nesting now goes up to 500 levels, past which the shell stops with Bash's `maximum function nesting level exceeded` (or `source`/`eval`) error and status 1, and a positive `FUNCNEST` sets the function limit ([#17646](https://github.com/can1357/oh-my-pi/pull/17646) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.14.2] - 2026-10-31
 
 ### Added
