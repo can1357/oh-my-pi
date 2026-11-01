@@ -85,6 +85,34 @@ describe("mnemopi python embedder", () => {
 	});
 });
 
+it.skipIf(!pythonPath)(
+	"refuses a standard run whose query got no usable vector instead of scoring a text-only ranking",
+	async () => {
+		// Documents embed normally; the query ("gamma") gets an empty vector, which Mnemopi would silently skip.
+		const embedScript = tmp.join("query_less_embed_server.py");
+		await Bun.write(
+			embedScript,
+			`import json, sys
+for line in sys.stdin:
+    req = json.loads(line)
+    if req["op"] != "embed":
+        print(json.dumps({"id": req["id"], "result": "model-digest" if req["op"] == "model_digest" else {}}), flush=True)
+        continue
+    texts = req["params"]["texts"]
+    print(json.dumps({"id": req["id"], "result": [[] if t == "gamma" else [0.1] * 384 for t in texts]}), flush=True)
+`,
+		);
+		const engine = mnemopiEngine({ embedder: "python", embedPython: python(), embedScript });
+		try {
+			await expect(runCases(engine, [twoMessageCase], "standard", 10, tmp.join("query-less-run"))).rejects.toThrow(
+				'query embedding unavailable for "gamma"',
+			);
+		} finally {
+			await engine.dispose();
+		}
+	},
+);
+
 it.skipIf(!pythonPath)("refuses to describe a run whose model files changed after warmup loaded them", async () => {
 	// Each model_digest call reports the next digest, as if another process replaced a file mid-run.
 	const script = tmp.join("changing_model_server.py");
