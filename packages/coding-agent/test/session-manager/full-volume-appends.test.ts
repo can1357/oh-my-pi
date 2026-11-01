@@ -197,6 +197,121 @@ describe("session persistence on a full volume", () => {
 		expect(users[2]?.parentId).toBe(users[1]?.id);
 	});
 
+	for (const firstWriter of ["clone", "source"] as const) {
+		it(`persists a shared queued tail once when the ${firstWriter} recovers first`, async () => {
+			const { manager, sessionFile } = newSession("@pi-full-volume-clone-recovery-");
+			manager.appendMessage(userMessage("before"));
+			appendWhileFull(manager, "queued");
+			const clone = manager.cloneCurrentSession({ persist: true });
+			try {
+				const first = firstWriter === "clone" ? clone : manager;
+				const second = firstWriter === "clone" ? manager : clone;
+				first.appendMessage(userMessage("first"));
+				await first.flush();
+				second.appendMessage(userMessage("second"));
+				await second.flush();
+				expect(usersOnDisk(sessionFile).sort()).toEqual(["before", "first", "queued", "second"]);
+				const ids = userEntriesOnDisk(sessionFile).map(entry => entry.id);
+				expect(new Set(ids).size).toBe(ids.length);
+				expect(second.captureState().expectedDiskSize).toBe(fs.statSync(sessionFile).size);
+				await second.rewriteEntries();
+				expect(usersOnDisk(sessionFile).sort()).toEqual(["before", "first", "queued", "second"]);
+			} finally {
+				await clone.close();
+				await manager.close();
+			}
+		});
+	}
+
+	for (const finish of ["flush", "close"] as const) {
+		it(`retains an in-place rewrite after a queued append until ${finish} recovers`, async () => {
+			const { manager, sessionFile } = newSession("@pi-full-volume-rewrite-intent-");
+			const id = manager.appendCustomEntry("mutable", { value: "old" });
+			appendWhileFull(manager, "queued");
+			const entry = manager.getEntry(id);
+			if (entry?.type !== "custom") throw new Error("Expected a custom entry");
+			entry.data = { value: "edited" };
+			await expect(manager.rewriteEntries()).rejects.toThrow("ENOSPC");
+			await manager[finish]();
+			expect(fs.readFileSync(sessionFile, "utf8")).toContain('"value":"edited"');
+			expect(usersOnDisk(sessionFile)).toEqual(["queued"]);
+			await manager.close();
+		});
+	}
+
+	it("releases an existing move destination's lease when the source tail cannot drain", async () => {
+		const { manager, sessionFile } = newSession("@pi-full-volume-move-destination-lease-");
+		const { manager: target, sessionFile: targetFile } = newSession("@pi-full-volume-move-target-");
+		const targetId = target.getSessionId();
+		await target.close();
+		const destination = path.join(path.dirname(targetFile), path.basename(sessionFile));
+		fs.renameSync(targetFile, destination);
+		appendWhileFull(manager, "queued");
+		const diskFull = spyOn(fs, "writeSync").mockImplementation(() => {
+			throw fsError("ENOSPC");
+		});
+		try {
+			for (let attempt = 0; attempt < 2; attempt++) {
+				await expect(manager.moveTo(target.getCwd(), path.dirname(destination))).rejects.toThrow("ENOSPC");
+				const lease = tryAcquireSessionLease(targetId);
+				try {
+					expect(lease).not.toBeNull();
+				} finally {
+					lease?.release();
+				}
+			}
+			expect(manager.getSessionFile()).toBe(sessionFile);
+			expect(usersOnDisk(destination)).toEqual([]);
+		} finally {
+			diskFull.mockRestore();
+			await manager.close();
+		}
+	});
+
+	it("sizes a small retained branch independently of a large off-branch source", async () => {
+		const { manager, sessionFile } = newSession("@pi-full-volume-branch-size-");
+		const leafId = manager.appendMessage(userMessage("retained"));
+		manager.appendCustomEntry("off-branch", Array(16).fill("x".repeat(400 * 1024)));
+		expect(fs.statSync(sessionFile).size).toBeGreaterThan(6 * 1024 * 1024);
+		const volumeFull = spyOn(fs, "statfsSync").mockReturnValue(nearlyFullVolume);
+		try {
+			const branchedFile = manager.createBranchedSession(leafId);
+			expect(branchedFile).toBeDefined();
+			manager.flushSync();
+			expect(branchedFile).not.toBe(sessionFile);
+			expect(fs.statSync(branchedFile!).size).toBeLessThan(4096);
+			expect(usersOnDisk(branchedFile!)).toEqual(["retained"]);
+			expect(fs.readFileSync(branchedFile!, "utf8")).not.toContain("off-branch");
+		} finally {
+			volumeFull.mockRestore();
+			await manager.close();
+		}
+	});
+
+	it("still guards a large retained branch before serialization without changing the source", async () => {
+		const { manager, sessionFile } = newSession("@pi-full-volume-large-branch-size-");
+		let serializationReads = 0;
+		const leafId = manager.appendCustomEntry("retained-large", {
+			chunks: Array(16).fill("x".repeat(400 * 1024)),
+			get marker() {
+				serializationReads++;
+				return true;
+			},
+		});
+		serializationReads = 0;
+		const sessionId = manager.getSessionId();
+		const volumeFull = spyOn(fs, "statfsSync").mockReturnValue(nearlyFullVolume);
+		try {
+			expect(() => manager.createBranchedSession(leafId)).toThrow("ENOSPC");
+			expect(serializationReads).toBe(0);
+			expect(manager.getSessionId()).toBe(sessionId);
+			expect(manager.getSessionFile()).toBe(sessionFile);
+		} finally {
+			volumeFull.mockRestore();
+			await manager.close();
+		}
+	});
+
 	it("queues a title change made while the disk is full and lands it, title slot included, without a rewrite", async () => {
 		const { manager, sessionFile } = newSession("@pi-full-volume-title-");
 		manager.appendMessage(userMessage("before"));
