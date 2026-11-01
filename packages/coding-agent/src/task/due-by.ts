@@ -51,9 +51,11 @@ const MAX_TIMER_MS = 2 ** 31 - 1;
  * A registry id, the lifetime token of the ref that held it at dispatch, and
  * the conversation that ref's session held then. An id is a name, not an
  * identity: a ref registered later under the same id carries a different
- * identity token and is refused. A session that replaced its conversation
- * since (`/new`, a switch to another transcript) carries a different
- * conversation token and is refused too. A revival or a fork keeps both.
+ * identity token and is refused. A session that holds another conversation
+ * (`/new`, a switch to another transcript, a tree branch) carries a different
+ * conversation token and is refused too, as is a session in the middle of a
+ * transition. Returning to the original transcript, a revival, and a full fork
+ * keep both tokens.
  */
 export interface DispatchIdentity {
 	id: string;
@@ -228,8 +230,11 @@ export class SubagentDueClock {
 	 */
 	#session(identity: DispatchIdentity): AgentSession | undefined {
 		const ref = this.#registry.get(identity.id);
-		if (!ref || ref.identityToken !== identity.identityToken) return undefined;
-		return ref.conversationToken === identity.conversationToken ? (ref.session ?? undefined) : undefined;
+		const session = ref?.session;
+		if (!ref || !session || session.isSessionTransitioning || ref.identityToken !== identity.identityToken) {
+			return undefined;
+		}
+		return ref.conversationToken === identity.conversationToken ? session : undefined;
 	}
 
 	/** Queue `text` for `session`, the live session of `identity`, dropped once it goes stale. */

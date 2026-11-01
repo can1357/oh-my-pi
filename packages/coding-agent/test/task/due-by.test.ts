@@ -829,4 +829,146 @@ describe("subagent due-by", () => {
 		},
 		TEST_TIMEOUT_MS,
 	);
+
+	it(
+		"restores the original conversation's escalation identity after switching away and back",
+		async () => {
+			const boss = await agent({ id: "Boss", kind: "main", persist: true });
+			await boss.session.prompt("ORIGINAL_CONVERSATION");
+			const originalFile = boss.session.sessionManager.getSessionFile()!;
+			const other = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "other"));
+			other.appendMessage({ role: "user", content: "UNRELATED_CONVERSATION", timestamp: Date.now() });
+			const otherFile = other.getSessionFile()!;
+			await other.ensureOnDisk();
+			await other.close();
+			const lead = await agent({
+				id: "Lead",
+				kind: "sub",
+				parentId: "Boss",
+				dispatch: dispatch("gate", "Gate", SLACK_DUE_MINUTES),
+			});
+			const run = lead.session.prompt("dispatch");
+			await childStarted.promise;
+			expect(await boss.session.switchSession(otherFile)).toBe(true);
+			expect(await boss.session.switchSession(originalFile, { keepModel: true })).toBe(true);
+
+			const recipient = await Promise.race([
+				boss.seen(ESCALATION).then(() => "Boss's restored original conversation"),
+				lead.warned(ESCALATION).then(() => "the person"),
+			]);
+			expect(recipient).toBe("Boss's restored original conversation");
+			child.resolve(childResult("Gate", "gate"));
+			await run;
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"does not warn the main session's target transcript while its switch is in progress",
+		async () => {
+			const main = await agent({ id: "Main", kind: "main", persist: true });
+			await main.session.prompt("ORIGINAL_CONVERSATION");
+			const other = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "other"));
+			other.appendMessage({ role: "user", content: "UNRELATED_CONVERSATION", timestamp: Date.now() });
+			const otherFile = other.getSessionFile()!;
+			await other.ensureOnDisk();
+			await other.close();
+			// A parked recorded ancestor with no parent makes the escalation fall back to the main session.
+			AgentRegistry.global().register({
+				id: "Mid",
+				displayName: "Mid",
+				kind: "sub",
+				status: "parked",
+				session: null,
+			});
+			const lead = await agent({ id: "Lead", kind: "sub", parentId: "Mid", dispatch: dispatch("gate", "Gate") });
+			const enteredRefresh = Promise.withResolvers<void>();
+			const releaseRefresh = Promise.withResolvers<void>();
+			const refresh = main.session.refreshBaseSystemPrompt.bind(main.session);
+			vi.spyOn(main.session, "refreshBaseSystemPrompt").mockImplementation(async () => {
+				enteredRefresh.resolve();
+				await releaseRefresh.promise;
+				return refresh();
+			});
+			const run = lead.session.prompt("dispatch");
+			await childStarted.promise;
+			const switching = main.session.switchSession(otherFile);
+			await enteredRefresh.promise;
+
+			// The timer fires while Main already holds the target transcript but has not committed it.
+			const recipient = await Promise.race([
+				main.warned(ESCALATION).then(() => "Main's target transcript"),
+				lead.warned(ESCALATION).then(() => "Lead's own session"),
+			]);
+			expect(recipient).toBe("Lead's own session");
+			expect(main.notices.filter(notice => notice.message.includes(ESCALATION))).toEqual([]);
+			releaseRefresh.resolve();
+			expect(await switching).toBe(true);
+			child.resolve(childResult("Gate", "gate"));
+			await run;
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"does not escalate to a transcript branch that excludes the dispatch",
+		async () => {
+			const boss = await agent({ id: "Boss", kind: "main", persist: true });
+			await boss.session.prompt("BRANCH_POINT");
+			const branchPoint = boss.session.sessionManager
+				.getEntries()
+				.find(entry => entry.type === "message" && entry.message.role === "user")?.id;
+			if (!branchPoint) throw new Error("Expected a branch point");
+			const lead = await agent({
+				id: "Lead",
+				kind: "sub",
+				parentId: "Boss",
+				dispatch: dispatch("gate", "Gate", SLACK_DUE_MINUTES),
+			});
+			const run = lead.session.prompt("dispatch");
+			await childStarted.promise;
+			expect((await boss.session.branch(branchPoint)).cancelled).toBe(false);
+
+			const recipient = await Promise.race([
+				boss.seen(ESCALATION).then(() => "the branched conversation"),
+				lead.warned(ESCALATION).then(() => "the person"),
+			]);
+			expect(recipient).toBe("the person");
+			child.resolve(childResult("Gate", "gate"));
+			await run;
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"drops an escalation queued before a transcript branch replaces the conversation",
+		async () => {
+			const boss = await agent({ id: "Boss", kind: "main", persist: true });
+			await boss.session.prompt("BRANCH_POINT");
+			const branchPoint = boss.session.sessionManager
+				.getEntries()
+				.find(entry => entry.type === "message" && entry.message.role === "user")?.id;
+			if (!branchPoint) throw new Error("Expected a branch point");
+			const lead = await agent({ id: "Lead", kind: "sub", parentId: "Boss", dispatch: dispatch("gate", "Gate") });
+			const deliver = boss.session.notifySubagentOverdue.bind(boss.session);
+			const branched = Promise.withResolvers<void>();
+			vi.spyOn(boss.session, "notifySubagentOverdue").mockImplementation(entry => {
+				void boss.session.branch(branchPoint).then(() => {
+					deliver(entry);
+					branched.resolve();
+				});
+			});
+			const run = lead.session.prompt("dispatch");
+			await childStarted.promise;
+			await branched.promise;
+			await boss.session.prompt("FIRST_OF_THE_BRANCH", { streamingBehavior: "steer" });
+			await boss.session.waitForIdle();
+
+			expect(boss.saw("FIRST_OF_THE_BRANCH")).toBe(true);
+			expect(boss.saw(ESCALATION)).toBe(false);
+			child.resolve(childResult("Gate", "gate"));
+			await run;
+		},
+		TEST_TIMEOUT_MS,
+	);
 });

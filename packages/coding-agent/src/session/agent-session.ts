@@ -1114,6 +1114,8 @@ export class AgentSession implements SettingsScope {
 	#agentId: string | undefined;
 	/** Registry holding this session's agent ref; the process-global one unless the host gave its own. */
 	#agentRegistry: AgentRegistry | undefined;
+	/** Session id that owns the ref's current conversation token. */
+	#conversationSessionId: string | undefined;
 	#agentKind: "main" | "sub" = "main";
 	#scoutAllowedBySpawnPolicy = true;
 	#providerSessionId: string | undefined;
@@ -1951,6 +1953,7 @@ export class AgentSession implements SettingsScope {
 				isHiddenUserCompanion(previous) && (isHiddenUserCompanion(next) || isUserQueuedMessage(next)),
 		);
 		this.sessionManager = config.sessionManager;
+		this.#conversationSessionId = this.sessionManager.getSessionId();
 		this.settings = config.settings;
 		this.#ownsCostGate = config.costGate === undefined;
 		this.#costGate = config.costGate ?? this.#createCostGate();
@@ -3120,12 +3123,23 @@ export class AgentSession implements SettingsScope {
 		return this.#agentId;
 	}
 
-	/**
-	 * This session replaced its conversation: give its agent ref a new
-	 * conversation identity, so notices addressed to the old one stop matching.
-	 */
-	#renewConversation(): void {
-		if (this.#agentId) (this.#agentRegistry ?? AgentRegistry.global()).renewConversation(this.#agentId, this);
+	/** Renew or recover the identity of the conversation this session now holds. */
+	#renewConversation(reset = false): void {
+		if (this.#agentId) {
+			(this.#agentRegistry ?? AgentRegistry.global()).transitionConversation(
+				this.#agentId,
+				this,
+				this.#conversationSessionId,
+				reset,
+			);
+		}
+		this.#conversationSessionId = this.sessionManager.getSessionId();
+	}
+
+	/** A full fork preserves every dispatched message, so its new session id retains this conversation identity. */
+	#retainConversation(): void {
+		if (this.#agentId) (this.#agentRegistry ?? AgentRegistry.global()).rememberConversation(this.#agentId, this);
+		this.#conversationSessionId = this.sessionManager.getSessionId();
 	}
 
 	/** Dequeue the next HARD forced tool choice for the upcoming LLM call, dropping
@@ -6641,7 +6655,7 @@ export class AgentSession implements SettingsScope {
 		// The cleared context is a new transcript: an aside or held message captured for the old one drops
 		// its record instead of landing here (mirrors newSession()).
 		this.#sessionGeneration++;
-		this.#renewConversation();
+		this.#renewConversation(true);
 		this.#pendingNextTurnMessages = [];
 		this.#experimentalContextNotesReminder = undefined;
 		this.#scheduledHiddenNextTurnGeneration = undefined;
@@ -11600,6 +11614,7 @@ export class AgentSession implements SettingsScope {
 			this.#freshProviderSessionId = undefined;
 			this.#adoptInheritedProviderPromptCacheKey();
 			this.#syncAgentSessionId();
+			this.#retainConversation();
 			this.#memory.rekeyForCurrentSessionId();
 			this.#advisors.reattachRecorderFeeds();
 			advisorRecordersDetached = false;
@@ -13626,6 +13641,8 @@ export class AgentSession implements SettingsScope {
 			this.#freshProviderSessionId = undefined;
 			this.#clearInheritedProviderPromptCacheKey();
 			this.#syncAgentSessionId();
+			// A tree branch can omit the dispatch that created a due-by, unlike a full fork.
+			this.#renewConversation(true);
 			this.#memory.rekeyForCurrentSessionId();
 			await this.#memory.resetContextForNewTranscript();
 
@@ -13756,6 +13773,8 @@ export class AgentSession implements SettingsScope {
 			this.#modelMentions.syncFromBranch();
 			this.#freshProviderSessionId = undefined;
 			this.#syncAgentSessionId();
+			// A promoted /btw branch replaces the active conversation history.
+			this.#renewConversation(true);
 			this.#memory.rekeyForCurrentSessionId();
 			await this.#memory.resetContextForNewTranscript();
 
@@ -14082,6 +14101,8 @@ export class AgentSession implements SettingsScope {
 		});
 		const displayContext = this.#withEvalStateContext(deobfuscateSessionContext(stateContext, this.#obfuscator));
 		this.agent.replaceMessages(displayContext.messages);
+		// Navigation replaces the active transcript branch. Do not let its old dispatches address this one.
+		this.#renewConversation(true);
 		this.#rehydrateCheckpointRewindState();
 		this.#advisors.resetSessionState({ preserveCost: true });
 		this.#todo.syncFromBranch();
