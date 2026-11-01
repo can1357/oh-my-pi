@@ -90,7 +90,10 @@ export async function generateOpenAIImage(
 				if (size) form.set("size", size);
 				for (const image of inputImages) {
 					validateImageInput(image);
-					form.append("image", new File([Buffer.from(image.data, "base64")], "image", { type: image.mimeType }));
+					form.append(
+						inputImages.length === 1 ? "image" : "image[]",
+						new File([Buffer.from(image.data, "base64")], "image", { type: image.mimeType }),
+					);
 				}
 				response = await postMultipart({
 					model,
