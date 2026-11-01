@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { BlobStore } from "@oh-my-pi/pi-coding-agent/session/blob-store";
+import { getRecentSessions } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import {
 	FileSessionStorage,
@@ -73,6 +74,16 @@ function userEntriesOnDisk(sessionFile: string): DiskEntry[] {
 /** User message texts on disk, in file order. */
 function usersOnDisk(sessionFile: string): unknown[] {
 	return userEntriesOnDisk(sessionFile).map(entry => entry.message?.content);
+}
+
+async function titleOnDisk(sessionFile: string): Promise<string | undefined> {
+	const reader = await SessionManager.open(sessionFile);
+	try {
+		return reader.getSessionName();
+	} finally {
+		await reader.close();
+		reader.releaseRetainedEntries();
+	}
 }
 
 /** Append one user message while the volume refuses every write. */
@@ -460,8 +471,9 @@ describe("session persistence on a full volume", () => {
 		}
 	});
 
-	it("queues a title change made while the disk is full and lands it, title slot included, without a rewrite", async () => {
+	it("queues a title change on a full disk and exposes its journaled name without a rewrite", async () => {
 		const { manager, sessionFile } = newSession("@pi-full-volume-title-");
+		await manager.setSessionName("Previous topic", "user");
 		manager.appendMessage(userMessage("before"));
 		appendWhileFull(manager, "queued");
 
@@ -482,9 +494,11 @@ describe("session persistence on a full volume", () => {
 		}
 
 		expect(usersOnDisk(sessionFile)).toEqual(["before", "queued", "after"]);
-		const reopened = await SessionManager.open(sessionFile);
-		expect(reopened.getSessionName()).toBe("Full disk topic");
-		expect(fs.readFileSync(sessionFile, "utf8").split("\n", 1)[0]).toContain("Full disk topic");
+		expect(await titleOnDisk(sessionFile)).toBe("Full disk topic");
+		expect((await SessionManager.list(manager.getCwd(), path.dirname(sessionFile)))[0]?.title).toBe(
+			"Full disk topic",
+		);
+		expect((await getRecentSessions(path.dirname(sessionFile), 1))[0]?.name).toBe("Full disk topic");
 	});
 
 	it("keeps an older session file without a title slot readable and titled when its title changes on a full disk", async () => {
@@ -650,7 +664,7 @@ describe("session persistence on a full volume", () => {
 		});
 	}
 
-	it("updates a queued title slot before flushSync returns", async () => {
+	it("lands the queued title entry before flushSync returns", async () => {
 		const { manager, sessionFile } = newSession("@pi-full-volume-title-sync-");
 		const diskFull = spyOn(fs, "writeSync").mockImplementation(() => {
 			throw fsError("ENOSPC");
@@ -661,7 +675,7 @@ describe("session persistence on a full volume", () => {
 			diskFull.mockRestore();
 		}
 		manager.flushSync();
-		expect(fs.readFileSync(sessionFile, "utf8").split("\n", 1)[0]).toContain("Synchronous title");
+		expect(await titleOnDisk(sessionFile)).toBe("Synchronous title");
 		await manager.close();
 	});
 
@@ -737,7 +751,7 @@ describe("session persistence on a full volume", () => {
 		}
 	});
 
-	it("retries only the pending title slot after the queued title line landed", async () => {
+	it("recovers a queued title once without writing a quota-blocked live title slot", async () => {
 		const { manager, sessionFile } = newSession("@pi-full-volume-title-slot-retry-");
 		const diskFull = spyOn(fs, "writeSync").mockImplementation(() => {
 			throw fsError("ENOSPC");
@@ -755,11 +769,11 @@ describe("session persistence on a full volume", () => {
 		const rewrites = spyOnWholeFileRewrites();
 		try {
 			manager.appendMessage(userMessage("after-title"));
-			await expect(manager.flush()).rejects.toThrow();
+			await manager.flush();
 			slotFull.mockRestore();
 			await manager.flush();
 			for (const rewrite of rewrites) expect(rewrite).not.toHaveBeenCalled();
-			expect(fs.readFileSync(sessionFile, "utf8").split("\n", 1)[0]).toContain("Retry slot directly");
+			expect(await titleOnDisk(sessionFile)).toBe("Retry slot directly");
 			expect(usersOnDisk(sessionFile)).toEqual(["after-title"]);
 			expect(
 				fs
@@ -828,7 +842,7 @@ describe("session persistence on a full volume", () => {
 		await manager.close();
 		const reopened = await SessionManager.open(sessionFile);
 		expect(reopened.getSessionName()).toBe("Scheduled before full");
-		expect(fs.readFileSync(sessionFile, "utf8").split("\n", 1)[0]).toContain("Scheduled before full");
+		expect(reopened.getLeafEntry()?.type).toBe("message");
 		expect(usersOnDisk(sessionFile)).toEqual(["fills-disk"]);
 		await reopened.close();
 	});
@@ -987,17 +1001,18 @@ describe("session persistence on a full volume", () => {
 		}
 	});
 
-	it("recreates the complete session when a pending title slot write returns ENOENT", async () => {
+	it("keeps title and following turns readable without an available live title-slot API", async () => {
 		const { manager, sessionFile } = newSession("@pi-full-volume-slot-enoent-");
 		const missingSlot = spyOn(FileSessionStorage.prototype, "updateSessionTitleSync").mockImplementation(() => {
 			throw fsError("ENOENT");
 		});
 		try {
-			await expect(manager.setSessionName("Recreated title", "user")).rejects.toThrow("ENOENT");
+			await expect(manager.setSessionName("Recreated title", "user")).resolves.toBe(true);
 			manager.appendMessage(userMessage("after-slot-error"));
 			manager.flushSync();
 			expect(usersOnDisk(sessionFile)).toEqual(["after-slot-error"]);
-			expect(fs.readFileSync(sessionFile, "utf8").split("\n", 1)[0]).toContain("Recreated title");
+			expect(await titleOnDisk(sessionFile)).toBe("Recreated title");
+			expect(missingSlot).not.toHaveBeenCalled();
 		} finally {
 			missingSlot.mockRestore();
 			await manager.close();

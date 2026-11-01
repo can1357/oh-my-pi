@@ -115,6 +115,10 @@ describe("sealed close conflict recovery", () => {
 	it("checks ownership before a sealed deferred close publishes", async () => {
 		class DeferredStorage extends TrackingStorage {
 			readonly defersSyncPublish = true;
+			confirmWrites(): Promise<void> {
+				// Inherited File writes have already reached the page cache.
+				return this.drain();
+			}
 		}
 		const storage = new DeferredStorage();
 		const { manager: original, file } = seed(storage);
@@ -285,6 +289,9 @@ describe("aborted internal managers never publish during disposal", () => {
 	it("waits for artifacts copied by a deferred sealed close sibling move", async () => {
 		class DeferredStorage extends TrackingStorage {
 			readonly defersSyncPublish = true;
+			confirmWrites(): Promise<void> {
+				return this.drain();
+			}
 		}
 		const storage = new DeferredStorage();
 		const { manager: original, file } = seed(storage);
