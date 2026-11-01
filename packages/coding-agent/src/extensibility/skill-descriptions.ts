@@ -3,7 +3,6 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { type AgentTelemetry, instrumentedCompleteSimple } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
-import { roleDefaultModels } from "@oh-my-pi/pi-catalog/compat/behavior";
 import {
 	getAgentDir,
 	getSkillDescriptionsDbPath,
@@ -14,13 +13,20 @@ import {
 	prompt,
 } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
-import { getModelMatchPreferences, parseModelPattern, resolveRoleSelection } from "../config/model-resolver";
+import {
+	resolveConfiguredModelPatterns,
+	resolveProviderModelReference,
+	resolveRoleChain,
+	resolveRoleSelection,
+} from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import compressDescriptionPrompt from "../prompts/skills/compress-description.md" with { type: "text" };
 import { Semaphore } from "../task/parallel";
 import type { Skill } from "./skills";
 
 const MAX_PREVIEW_CHARS = 100;
+// A sentence or word cut shorter than this discards too much; cut at the budget instead.
+const MIN_PREVIEW_CUT = 40;
 const MAX_COMPRESSED_CHARS = 160;
 const MAX_COMPRESSED_WORDS = 12;
 // Leave ample room for other cleanup under postmortem's 10-second deadline.
@@ -40,8 +46,10 @@ export interface SkillDescriptionCompressor {
 class SkillDescriptionLengthError extends Error {}
 
 /**
- * Resolve the configured fast role for each background request, without using the foreground model.
- * `getTelemetry` supplies the telemetry handle for each request's chat span.
+ * Resolve the fast role for each background request the way `/models` shows it — configured `smol`,
+ * the inherited `default` when `smol` is unset, then the built-in chain — before a configured `tiny`.
+ * Never uses the session's foreground model. `getTelemetry` supplies the telemetry handle for each
+ * request's chat span.
  */
 export function createSkillDescriptionCompressor(
 	registry: ModelRegistry,
@@ -50,15 +58,31 @@ export function createSkillDescriptionCompressor(
 	getTelemetry?: () => AgentTelemetry | undefined,
 ): SkillDescriptionCompressor {
 	const select = (): Model<Api> | undefined => {
-		const available = registry.getAvailable();
-		const configured = resolveRoleSelection(["smol"], settings, available);
-		if (configured) return configured.model;
-		const preferences = getModelMatchPreferences(settings);
-		for (const pattern of roleDefaultModels().smol) {
-			const preferred = parseModelPattern(pattern, available, preferences).model;
-			if (preferred) return preferred;
+		// The first exact provider/id match wins before every other matching phase.
+		// Resolve only that provider when possible: rendering uncached skill hints
+		// must not expand unrelated account catalogs for every background request.
+		// On a miss, use the complete pool below. A slash can instead belong to a
+		// raw aggregator id, and suffixes, aliases and fallbacks still need the
+		// ordinary resolver's full precedence rules.
+		const firstPattern = resolveConfiguredModelPatterns(
+			settings.getModelRole("smol")?.trim() || "@smol",
+			settings,
+		)[0];
+		const slash = firstPattern?.indexOf("/") ?? -1;
+		if (firstPattern && slash > 0) {
+			const provider = firstPattern.slice(0, slash).trim();
+			const id = firstPattern.slice(slash + 1).trim();
+			if (provider && id) {
+				const scoped = registry.getAvailableForProviders(new Set([provider]));
+				const exact = resolveProviderModelReference(provider, id, scoped);
+				if (exact) return exact;
+			}
 		}
-		return resolveRoleSelection(["tiny"], settings, available)?.model;
+		const available = registry.getAvailable();
+		return (
+			resolveRoleChain("smol", settings, available)[0]?.model ??
+			resolveRoleSelection(["tiny"], settings, available)?.model
+		);
 	};
 	return {
 		modelKey() {
@@ -115,9 +139,11 @@ export function previewSkillDescription(description: string): string {
 	if (text.length <= MAX_PREVIEW_CHARS) return text;
 	const boundary = text.slice(0, MAX_PREVIEW_CHARS - 1);
 	const sentence = boundary.match(/^.*?[.!?](?=\s|$)/)?.[0];
-	if (sentence && sentence.length >= 40) return sentence;
-	const word = boundary.slice(0, boundary.lastIndexOf(" ")).trimEnd();
-	return `${word || boundary}…`;
+	if (sentence && sentence.length >= MIN_PREVIEW_CUT) return sentence;
+	// Space-free scripts (CJK) may hold only an early space before a Latin term.
+	const space = boundary.lastIndexOf(" ");
+	const cut = space >= MIN_PREVIEW_CUT ? boundary.slice(0, space).trimEnd() : boundary;
+	return `${cut}…`;
 }
 
 function validCompression(text: string): string | null {

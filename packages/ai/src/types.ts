@@ -240,8 +240,10 @@ export function resolveModelServiceTier(
  * `service_tier_for_request`); an empty or missing list counts as "not
  * reported" — accounts whose `/models` lists no tiers keep `/fast` — so the
  * provider-level answer stands. `flex` and `default` are never gated.
- * First-party OpenAI takes `ultrafast` as-is. A bare provider string cannot
- * carry the list, so it answers for the provider alone.
+ * First-party OpenAI takes `ultrafast` as-is. An OpenAI-family relay on the
+ * Responses/Completions APIs gets `ultrafast` only when its discovered
+ * `service_tiers` lists it. A bare provider string cannot carry the list, so
+ * it answers for the provider alone.
  */
 export function shouldSendServiceTier(
 	serviceTier: ServiceTier | null | undefined,
@@ -260,7 +262,11 @@ export function shouldSendServiceTier(
 		if (advertised !== undefined && advertised.length > 0) return advertised.includes(serviceTier);
 	}
 	if (serviceTier === "ultrafast") {
-		return provider === "openai" || (typeof target === "string" && provider === "openai-codex");
+		if (typeof target === "string") return provider === "openai" || provider === "openai-codex";
+		if (provider === "openai") return true;
+		return (
+			target !== undefined && isOpenAIServiceTierModel(target) && target.serviceTiers?.includes(serviceTier) === true
+		);
 	}
 	if (provider === "openai" || provider === "openai-codex") return true;
 	if (provider === "openrouter") {
@@ -603,6 +609,13 @@ export interface StreamOptions {
 	 */
 	storeResponses?: boolean;
 	/**
+	 * Request the Daybreak Blue cyber access program on Codex when the account
+	 * is eligible (see `openai-codex/access-programs.ts`). `false` omits
+	 * `access_programs`. Unset falls back to the host's
+	 * `configureCodexAccessPrograms` default, else on. Ignored elsewhere.
+	 */
+	codexAccessPrograms?: boolean;
+	/**
 	 * Disable native reasoning when the caller supplies an external scratchpad.
 	 * OpenAI Responses emits `reasoning: { effort: "none" }`; Anthropic and
 	 * Google transports use their native thinking-off controls.
@@ -811,7 +824,7 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	 * A rejecting transformer is swallowed and the reserved payload stands in.
 	 */
 	cursorOnToolResult?: CursorToolResultHandler;
-	/** Cursor hands unhandled MCP calls to an external executor instead of reporting them as missing. */
+	/** The caller's client runs every tool: Cursor offers them all as MCP tools and hands each call off to it. */
 	cursorExternalToolExecutor?: boolean;
 	/**
 	 * Amazon Bedrock Guardrail settings forwarded through transports that do not
@@ -863,6 +876,8 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	 * provider. Non-Anthropic providers ignore the field.
 	 */
 	fallbacks?: FallbackParam[];
+	/** Factory Droid only: omit refusal fallbacks and reject responses served by another model. */
+	disableServerSideFallback?: boolean;
 }
 
 // Generic StreamFunction with typed options

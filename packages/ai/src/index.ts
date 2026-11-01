@@ -18,6 +18,8 @@ export * from "./provider-details";
 export * from "./provider-session-state";
 // Provider-specific runtime APIs are imported from their providers/* subpaths.
 export type * from "./providers/anthropic";
+export type * from "./providers/anthropic-headers";
+export type * from "./providers/anthropic-http-options";
 export * from "./providers/anthropic-identity";
 export * from "./providers/anthropic-state";
 export type * from "./providers/anthropic-client";
@@ -35,6 +37,7 @@ export type * from "./providers/kimi";
 export type * from "./providers/mock";
 export type * from "./providers/ollama";
 export type * from "./providers/openai-codex-responses";
+export type * from "./providers/openai-codex-state";
 export type * from "./providers/openai-completions";
 export type * from "./providers/openai-responses";
 export type * from "./providers/synthetic";

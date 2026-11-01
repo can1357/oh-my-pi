@@ -16,7 +16,15 @@
  * finishes, so without it the estimate stalls near 0% for minutes.
  */
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
-import { formatDuration, isInteractiveHost, isRecord, logger, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
+import {
+	formatDuration,
+	isInteractiveHost,
+	isRecord,
+	jsonContainerEnd,
+	logger,
+	prompt,
+	sanitizeText,
+} from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import completionProbePrompt from "../prompts/system/subagent-completion-probe.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
@@ -101,27 +109,11 @@ function replyPercent(value: unknown): number | undefined {
  */
 function jsonObjectSpans(text: string): string[] {
 	const spans: string[] = [];
-	let depth = 0;
-	let start = -1;
-	let inString = false;
-	let escaped = false;
-	for (let index = 0; index < text.length; index++) {
-		const char = text[index];
-		if (inString) {
-			if (escaped) escaped = false;
-			else if (char === "\\") escaped = true;
-			else if (char === '"') inString = false;
-			continue;
-		}
-		if (char === '"') {
-			if (depth > 0) inString = true;
-		} else if (char === "{") {
-			if (depth === 0) start = index;
-			depth++;
-		} else if (char === "}" && depth > 0) {
-			depth--;
-			if (depth === 0) spans.push(text.slice(start, index + 1));
-		}
+	for (let start = text.indexOf("{"); start !== -1;) {
+		const end = jsonContainerEnd(text, start);
+		if (end === -1) break;
+		spans.push(text.slice(start, end));
+		start = text.indexOf("{", end);
 	}
 	return spans;
 }

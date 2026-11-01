@@ -15,7 +15,10 @@ afterEach(() => {
 });
 
 function baseUrlFor(provider: string, baseUrl?: string, apiKey = "xai-test"): string | undefined {
-	return resolveOpenAIRequestSetup({ provider, id: "grok-4.6", baseUrl }, { apiKey, messages: [] }).baseUrl;
+	return resolveOpenAIRequestSetup(
+		{ provider, id: "grok-4.6", api: "openai-responses", reasoning: true, baseUrl },
+		{ apiKey, messages: [] },
+	).baseUrl;
 }
 
 const OAUTH_ACCESS_TOKEN = `e30.${Buffer.from(JSON.stringify({ sub: "xai-user" })).toString("base64url")}.sig`;

@@ -13,7 +13,7 @@ import {
 import { resolveAnthropicApiVersion } from "../compat/anthropic";
 import { xaiResponsesReasoningEffortMap } from "../compat/openai";
 import { hasModelScopedEffortLadder, resolveModelPolicy } from "../compat/resolve";
-import { compareRevision, parseRevision } from "../compat/revision";
+import { compareRevision, parseRevision, revisionAtLeast } from "../compat/revision";
 import { providerEntries, seedModels } from "../compat/providers";
 import { billingVariantPlain, classifyModel, discoveryVocabulary } from "../compat/taxonomy";
 import {
@@ -21,6 +21,7 @@ import {
 	fetchOpenAICompatibleModels,
 	type OpenAICompatibleModelMapperContext,
 	type OpenAICompatibleModelRecord,
+	withOpenAICompatibleDiscoveryTimeout,
 } from "../discovery/openai-compatible";
 import { Effort, THINKING_EFFORTS } from "../effort";
 import { FIREWORKS_FAST_SUFFIX, toFireworksPublicModelId } from "../fireworks-model-id";
@@ -41,16 +42,9 @@ import {
 	type Provider,
 	type ThinkingConfig,
 	type TokenCost,
+	runnerApiKind,
 } from "../types";
-import {
-	discoveryFetch,
-	isAnthropicOAuthToken,
-	isRecord,
-	toBoolean,
-	toNumber,
-	toPositiveNumber,
-	toPositiveNumberOrNull,
-} from "../utils";
+import { discoveryFetch, isAnthropicOAuthToken, isRecord, toBoolean, toNumber, toPositiveNumber } from "../utils";
 import { ALIBABA_TOKEN_PLAN_BASE_URL, parseAlibabaTokenPlanCredential } from "../wire/alibaba-token-plan";
 import { normalizeCharmHyperBaseUrl } from "../wire/charm-hyper";
 import { CLINEPASS_API_BASE_URL, clinePassClientHeaders } from "../wire/cline-pass";
@@ -70,20 +64,12 @@ import {
 	SINGULARITYAPI_TECH_API_BASE_URL,
 	normalizeSingularityApiBaseUrl,
 } from "../wire/singularityapi";
+import { isXiaomiTokenPlanKey } from "../wire/xiaomi-token-plan";
 import { createBundledReferenceMap, createReferenceResolver, toModelSpec } from "./bundled-references";
 import { getDefaultModelDiscoveryBaseUrl, resolveModelCacheProviderId } from "./cache-provider-id";
 import { getClinePassModelMetadata } from "./cline-pass";
 import type { ModelManagerConfig } from "./descriptor-types";
 import { filterModelsDevCatalogRows } from "./models-dev-policies";
-
-function revisionAtLeast(revision: string | undefined, floor: string): boolean {
-	if (revision === undefined) return false;
-	const parsedRevision = parseRevision(revision);
-	const parsedFloor = parseRevision(floor);
-	return (
-		parsedRevision !== undefined && parsedFloor !== undefined && compareRevision(parsedRevision, parsedFloor) >= 0
-	);
-}
 
 function isGlmReasoningIdentity(provider: string, modelId: string, floor: string): boolean {
 	const identity = classifyModel(provider, modelId, { lenient: true });
@@ -96,24 +82,6 @@ const MODELS_DEV_URL = "https://catalog.stencil.so/models.json.zstd";
 
 /** Little-endian magic number opening every zstd frame (RFC 8878). */
 const ZSTD_MAGIC = 0xfd2fb528;
-
-/**
- * Uses a cancellable timer rather than the native abort-timeout helper so
- * successful fast discovery requests do not leave armed timeout signals for
- * concurrent GC to trip over later.
- */
-async function withCatalogDiscoveryTimeout<T>(timeoutMs: number, run: (signal: AbortSignal) => Promise<T>): Promise<T> {
-	const controller = new AbortController();
-	const timer = setTimeout(
-		() => controller.abort(new DOMException("The operation timed out.", "TimeoutError")),
-		timeoutMs,
-	);
-	try {
-		return await run(controller.signal);
-	} finally {
-		clearTimeout(timer);
-	}
-}
 
 const ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1";
 const ANTHROPIC_OAUTH_BETA =
@@ -224,8 +192,9 @@ export function fetchWellKnownModels(fetchImpl?: FetchImpl, signal?: AbortSignal
 function fetchRevalidatedWellKnownModels(fetchImpl?: FetchImpl, signal?: AbortSignal): Promise<unknown> {
 	const session = getCatalogSession(fetchImpl);
 	if (!session.inflight) {
-		session.inflight = withCatalogDiscoveryTimeout(DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS, transportSignal =>
-			fetchCatalogPayload(fetchImpl ?? discoveryFetch(), session, transportSignal),
+		session.inflight = withOpenAICompatibleDiscoveryTimeout(
+			DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS,
+			transportSignal => fetchCatalogPayload(fetchImpl ?? discoveryFetch(), session, transportSignal),
 		).finally(() => {
 			session.inflight = null;
 		});
@@ -237,7 +206,7 @@ function fetchRevalidatedWellKnownModelsWithTimeout(
 	fetchImpl?: FetchImpl,
 	timeoutMs = DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS,
 ): Promise<unknown> {
-	return withCatalogDiscoveryTimeout(timeoutMs, signal => fetchRevalidatedWellKnownModels(fetchImpl, signal));
+	return withOpenAICompatibleDiscoveryTimeout(timeoutMs, signal => fetchRevalidatedWellKnownModels(fetchImpl, signal));
 }
 
 async function fetchCatalogPayload(
@@ -543,6 +512,8 @@ function mapWithBundledReference<TApi extends Api>(
 		return {
 			...defaults,
 			name,
+			contextWindow: toPositiveNumber(entry.context_length, defaults.contextWindow),
+			maxTokens: toPositiveNumber(entry.max_completion_tokens, defaults.maxTokens),
 		};
 	}
 	// Generic `/models` rows describe the chat roster. Do not make a bundled
@@ -1723,8 +1694,9 @@ async function fetchDeepinfraModels(options: {
 	const fetchImpl = discoveryFetch(options.fetch);
 	let payload: unknown;
 	try {
-		const response = await withCatalogDiscoveryTimeout(DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS, signal =>
-			fetchImpl(`${options.baseUrl}/models${DEEPINFRA_MODELS_QUERY}`, { method: "GET", headers, signal }),
+		const response = await withOpenAICompatibleDiscoveryTimeout(
+			DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS,
+			signal => fetchImpl(`${options.baseUrl}/models${DEEPINFRA_MODELS_QUERY}`, { method: "GET", headers, signal }),
 		);
 		if (!response.ok) {
 			return null;
@@ -2282,7 +2254,7 @@ async function loadSiliconFlowModelsDevReferences(
 	try {
 		// Bounded: this enrichment is optional, so a stalled models.dev must not
 		// hold back the authoritative endpoint request that runs after it.
-		const payload = await withCatalogDiscoveryTimeout(SILICONFLOW_MODELS_DEV_REFERENCE_TIMEOUT_MS, signal =>
+		const payload = await withOpenAICompatibleDiscoveryTimeout(SILICONFLOW_MODELS_DEV_REFERENCE_TIMEOUT_MS, signal =>
 			fetchWellKnownModels(fetchImpl, signal),
 		);
 		return createModelsDevReferenceMap<"openai-completions">(
@@ -2826,7 +2798,7 @@ const CLINE_PASS_LIVE_CATALOG_URL = "https://openrouter.ai/api/v1/models";
 /** Enrichment tier, never authoritative: any failure degrades to the bundled path. */
 async function fetchClinePassLiveCatalog(fetchImpl: FetchImpl): Promise<ClinePassLiveCatalog | undefined> {
 	try {
-		const response = await withCatalogDiscoveryTimeout(5_000, signal =>
+		const response = await withOpenAICompatibleDiscoveryTimeout(5_000, signal =>
 			fetchImpl(CLINE_PASS_LIVE_CATALOG_URL, { signal }),
 		);
 		if (!response.ok) return undefined;
@@ -3005,7 +2977,7 @@ async function fetchClinePassModels(
 	// The roster is authoritative for ids; the live reference catalog is a pure
 	// enrichment tier fetched alongside and tolerated away (offline → bundle).
 	const [response, liveCatalog] = await Promise.all([
-		withCatalogDiscoveryTimeout(5_000, signal =>
+		withOpenAICompatibleDiscoveryTimeout(5_000, signal =>
 			fetchImpl(CLINEPASS_MODELS_URL, { signal, headers: clinePassClientHeaders() }),
 		),
 		fetchClinePassLiveCatalog(fetchImpl),
@@ -4219,9 +4191,11 @@ export function kimiCodeModelManagerOptions(
 	config?: KimiCodeModelManagerConfig,
 ): ModelManagerOptions<"openai-completions"> {
 	const apiKey = config?.apiKey;
-	const baseUrl = config?.baseUrl ?? "https://api.kimi.com/coding/v1";
+	const baseUrl = config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("kimi-code")!;
 	return {
 		providerId: "kimi-code",
+		cacheProviderId: resolveModelCacheProviderId("kimi-code", { apiKey, baseUrl }),
+		dynamicModelsAuthoritative: true,
 		...(apiKey && {
 			fetchDynamicModels: () =>
 				fetchOpenAICompatibleModels({
@@ -4269,10 +4243,15 @@ export function kimiCodeModelManagerOptions(
 // 12.5. LM Studio
 // ---------------------------------------------------------------------------
 
-/** Native LM Studio metadata keyed by model id from `/api/v0/models`. */
+/** Native LM Studio metadata keyed by model id from `/api/v0/models` and `/api/v1/models`. */
 export interface LmStudioNativeModelMetadata {
 	input: ("text" | "image")[];
 	contextWindow?: number;
+	/**
+	 * LM Studio reports a decision model (`type: "decision"`): it answers typed
+	 * questions on `/v1/decisions` and rejects chat completions.
+	 */
+	decision?: true;
 }
 
 /** Options for LM Studio's optional native metadata probe. */
@@ -4296,11 +4275,54 @@ function getLmStudioCapabilityNames(value: unknown): string[] {
 	return value.flatMap(item => (typeof item === "string" ? [item.toLowerCase()] : []));
 }
 
+function getLmStudioModelType(entry: Record<string, unknown>): string {
+	return typeof entry.type === "string" ? entry.type.toLowerCase() : "";
+}
+
 function getLmStudioNativeInput(entry: Record<string, unknown>): ("text" | "image")[] {
-	const modelType = typeof entry.type === "string" ? entry.type.toLowerCase() : "";
+	const modelType = getLmStudioModelType(entry);
+	// A decision model stays `type: "decision"` when it reads images; LM Studio
+	// says so through `has_vision_adapter` instead.
+	if (modelType === "decision") {
+		return entry.has_vision_adapter === true ? ["text", "image"] : ["text"];
+	}
 	const capabilities = getLmStudioCapabilityNames(entry.capabilities);
 	const supportsImage = modelType === "vlm" || capabilities.includes("vision") || capabilities.includes("image");
 	return supportsImage ? ["text", "image"] : ["text"];
+}
+
+/**
+ * Decision models from LM Studio's v1 listing (`GET /api/v1/models`), keyed by
+ * model key and by every loaded instance id. The v0 listing predates decision
+ * models, so this is where `type: "decision"` is reported.
+ */
+function getLmStudioV1DecisionModels(payload: unknown): Map<string, LmStudioNativeModelMetadata> {
+	const metadata = new Map<string, LmStudioNativeModelMetadata>();
+	if (!isRecord(payload) || !Array.isArray(payload.models)) {
+		return metadata;
+	}
+	for (const entry of payload.models) {
+		if (!isRecord(entry) || getLmStudioModelType(entry) !== "decision") {
+			continue;
+		}
+		const instances = Array.isArray(entry.loaded_instances) ? entry.loaded_instances.filter(isRecord) : [];
+		const loadedContextWindow = instances
+			.map(instance => (isRecord(instance.config) ? toPositiveNumber(instance.config.context_length, null) : null))
+			.find(window => window !== null);
+		const contextWindow = loadedContextWindow ?? toPositiveNumber(entry.max_context_length, null) ?? undefined;
+		const model: LmStudioNativeModelMetadata = {
+			input: getLmStudioNativeInput(entry),
+			...(contextWindow === undefined ? {} : { contextWindow }),
+			decision: true,
+		};
+		const ids = [entry.key, ...instances.map(instance => instance.id)];
+		for (const id of ids) {
+			if (typeof id === "string" && id.length > 0) {
+				metadata.set(id, model);
+			}
+		}
+	}
+	return metadata;
 }
 
 function getLmStudioNativeContextWindow(entry: Record<string, unknown>): number | undefined {
@@ -4321,47 +4343,56 @@ function getLmStudioNativeContextWindow(entry: Record<string, unknown>): number 
 	);
 }
 
-/** Fetches LM Studio native model metadata used to mark VLM models as image-capable. */
+/**
+ * Fetches LM Studio native model metadata used to mark VLM models as
+ * image-capable and decision models as judges.
+ */
 export async function fetchLmStudioNativeModelMetadata(
 	baseUrl: string,
 	fetchImpl: FetchImpl = fetch,
 	options?: LmStudioNativeModelMetadataOptions,
 ): Promise<Map<string, LmStudioNativeModelMetadata> | null> {
 	const nativeBaseUrl = toLmStudioNativeBaseUrl(baseUrl);
-	const fetchMetadata = async (signal?: AbortSignal): Promise<Map<string, LmStudioNativeModelMetadata> | null> => {
+	const fetchJson = async (path: string, signal?: AbortSignal): Promise<unknown> => {
 		try {
-			const response = await fetchImpl(`${nativeBaseUrl}/api/v0/models`, {
+			const response = await fetchImpl(`${nativeBaseUrl}${path}`, {
 				method: "GET",
 				headers: { Accept: "application/json", ...options?.headers },
 				signal,
 			});
-			if (!response.ok) {
-				return null;
-			}
-			const payload = await response.json();
-			if (!isRecord(payload) || !Array.isArray(payload.data)) {
-				return null;
-			}
-			const metadata = new Map<string, LmStudioNativeModelMetadata>();
-			for (const entry of payload.data) {
-				if (!isRecord(entry) || typeof entry.id !== "string" || entry.id.length === 0) {
-					continue;
-				}
-				const contextWindow = getLmStudioNativeContextWindow(entry);
-				metadata.set(entry.id, {
-					input: getLmStudioNativeInput(entry),
-					...(contextWindow === undefined ? {} : { contextWindow }),
-				});
-			}
-			return metadata;
+			return response.ok ? await response.json() : null;
 		} catch {
 			return null;
 		}
 	};
+	const fetchMetadata = async (signal?: AbortSignal): Promise<Map<string, LmStudioNativeModelMetadata> | null> => {
+		// Builds without the v1 listing answer 404 there and keep v0 metadata alone.
+		const [v0, v1] = await Promise.all([fetchJson("/api/v0/models", signal), fetchJson("/api/v1/models", signal)]);
+		const decisions = getLmStudioV1DecisionModels(v1);
+		if ((!isRecord(v0) || !Array.isArray(v0.data)) && decisions.size === 0) {
+			return null;
+		}
+		const metadata = new Map<string, LmStudioNativeModelMetadata>();
+		for (const entry of isRecord(v0) && Array.isArray(v0.data) ? v0.data : []) {
+			if (!isRecord(entry) || typeof entry.id !== "string" || entry.id.length === 0) {
+				continue;
+			}
+			const contextWindow = getLmStudioNativeContextWindow(entry);
+			metadata.set(entry.id, {
+				input: getLmStudioNativeInput(entry),
+				...(contextWindow === undefined ? {} : { contextWindow }),
+				...(getLmStudioModelType(entry) === "decision" ? { decision: true as const } : {}),
+			});
+		}
+		for (const [id, model] of decisions) {
+			metadata.set(id, model);
+		}
+		return metadata;
+	};
 	if (options?.signal !== undefined) {
 		return fetchMetadata(options.signal);
 	}
-	return withCatalogDiscoveryTimeout(LM_STUDIO_NATIVE_METADATA_TIMEOUT_MS, fetchMetadata);
+	return withOpenAICompatibleDiscoveryTimeout(LM_STUDIO_NATIVE_METADATA_TIMEOUT_MS, fetchMetadata);
 }
 
 export interface LmStudioModelManagerConfig {
@@ -4370,9 +4401,7 @@ export interface LmStudioModelManagerConfig {
 	fetch?: FetchImpl;
 }
 
-export function lmStudioModelManagerOptions(
-	config?: LmStudioModelManagerConfig,
-): ModelManagerOptions<"openai-completions"> {
+export function lmStudioModelManagerOptions(config?: LmStudioModelManagerConfig): ModelManagerOptions<Api> {
 	const apiKey = config?.apiKey;
 	const baseUrl = config?.baseUrl ?? Bun.env.LM_STUDIO_BASE_URL ?? "http://127.0.0.1:1234/v1";
 	const references = createBundledReferenceMap<"openai-completions">("lm-studio" as any);
@@ -4400,13 +4429,17 @@ export function lmStudioModelManagerOptions(
 			if (!nativeMetadata) {
 				return models;
 			}
-			return models.map(model => {
+			return models.map((model): ModelSpec<Api> => {
 				const metadata = nativeMetadata.get(model.id);
 				if (!metadata) {
 					return model;
 				}
 				return {
 					...model,
+					// Decision models answer only on `/v1/decisions` (OpenAI's Decisions API).
+					...(metadata.decision
+						? { api: "openai-decisions", kind: "judge", reasoning: false, supportsTools: false }
+						: {}),
 					input: metadata.input,
 					contextWindow: metadata.contextWindow ?? model.contextWindow,
 				};
@@ -4707,8 +4740,6 @@ export function basetenModelManagerOptions(
 				cacheWrite: 0,
 			};
 
-			const contextWindow = toPositiveNumber(raw.context_length, reference?.contextWindow ?? defaults.contextWindow);
-			const maxTokens = toPositiveNumber(raw.max_completion_tokens, reference?.maxTokens ?? defaults.maxTokens);
 			const baseModel = mapWithBundledReference(entry, defaults, reference);
 
 			return {
@@ -4716,8 +4747,6 @@ export function basetenModelManagerOptions(
 				reasoning,
 				input: vision ? ["text", "image"] : ["text"],
 				cost,
-				contextWindow,
-				maxTokens,
 				...(supportsTools === false ? { supportsTools } : {}),
 			};
 		},
@@ -5532,7 +5561,7 @@ export function xiaomiModelManagerOptions(
 		: XIAOMI_TOKEN_PLAN_FALLBACK_BASE_URLS;
 	const XIAOMI_STANDARD_BASE_URL = "https://api.xiaomimimo.com/v1";
 	const isTokenPlanProvider = config?.tokenPlanRegion !== undefined || providerId.startsWith("xiaomi-token-plan-");
-	const isTokenPlanKey = isTokenPlanProvider || apiKey?.startsWith("tp-");
+	const isTokenPlanKey = isTokenPlanProvider || (apiKey !== undefined && isXiaomiTokenPlanKey(apiKey));
 	// Token-plan keys always use a TP cluster; config?.baseUrl (from catalog)
 	// would incorrectly pin to the standard endpoint (api.xiaomimimo.com).
 	const baseUrl = isTokenPlanKey ? tokenPlanBaseUrls[0] : (config?.baseUrl ?? XIAOMI_STANDARD_BASE_URL);
@@ -5611,11 +5640,13 @@ type LiteLLMRichEndpointModel<TApi extends Api> = {
 	hasToolMetadata: boolean;
 	hasSupportedOpenAIParams: boolean;
 	hasCost: boolean;
+	/** Whether an endpoint reported a string `mode`, the only signal that selects a runner api. */
+	hasMode: boolean;
 	reportedCost: Partial<ModelSpec<Api>["cost"]>;
 };
 type LiteLLMRichEndpointFailure = {
 	endpoint: string;
-	reason: "http-status" | "invalid-json" | "network-error";
+	reason: "http-status" | "invalid-json" | "invalid-pagination" | "network-error";
 	status?: number;
 	error?: unknown;
 };
@@ -5628,6 +5659,8 @@ type LiteLLMRichEndpointResult<TApi extends Api> =
 	| { failure: LiteLLMRichEndpointFailure };
 
 const LITELLM_RICH_ENDPOINTS = ["/model_group/info", "/v2/model/info", "/model/info", "/v1/model/info"] as const;
+// Bound paginated management responses before trusting their advertised page count.
+const LITELLM_MAX_RICH_PAGES = 100;
 export const OPENAI_COMPAT_DISCOVERY_DEFAULT_CONTEXT_WINDOW = 128_000;
 export const OPENAI_COMPAT_DISCOVERY_DEFAULT_MAX_TOKENS = 32_768;
 const UNKNOWN_PROXY_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const;
@@ -5703,9 +5736,11 @@ function mapLiteLLMOpenAICompatibleModel(
 		return null;
 	}
 	const model = mapWithBundledReference(entry, defaults, reference);
+	const api = resolveLiteLLMApi(entry, model.id);
 	return {
 		...model,
-		api: resolveLiteLLMApi(undefined, model.id),
+		api,
+		...liteLLMRunnerKind(api),
 		name: stripLiteLLMResellerUsageSuffix(model.name),
 	};
 }
@@ -5839,12 +5874,26 @@ function classifyLiteLLMApiRoute(entry: LiteLLMRichModelEntry | undefined, id: s
 	return isLikelyOpenAIResponsesModelId(modelId) ? "openai" : "unknown";
 }
 
+/**
+ * Transport for a LiteLLM model group: `mode: "decisions"` answers only on the
+ * proxy's `/v1/decisions` route, OpenAI-backed groups use Responses, and every
+ * other group uses `fallbackApi`.
+ */
 export function resolveLiteLLMApi(
 	entry: Record<string, unknown> | undefined,
 	id: string,
 	fallbackApi: Api = "openai-completions",
 ): Api {
+	if (entry && getLiteLLMMetadataValue(entry, "mode") === "decisions") {
+		return "openai-decisions";
+	}
 	return classifyLiteLLMApiRoute(entry, id) === "openai" ? "openai-responses" : fallbackApi;
+}
+
+/** `kind` a LiteLLM row takes on `api`: runner apis (Decisions → judge) leave the chat roster; chat transports add nothing. */
+function liteLLMRunnerKind(api: Api): { kind?: ModelKind } {
+	const kind = runnerApiKind(api);
+	return kind ? { kind } : {};
 }
 
 function isLiteLLMUnusableSentinelPlaceholder(entry: LiteLLMRichModelEntry): boolean {
@@ -5969,10 +6018,12 @@ function mapLiteLLMRichEntry<TApi extends Api>(
 		// compat merge (issue #11982).
 		...(supportsVision === true ? { stripImageInput: false } : {}),
 	};
+	const api = options.resolveApi?.(entry, id) ?? options.api;
 	return {
 		id,
 		name: toLiteLLMDisplayName(modelName, reference?.name, id),
-		api: options.resolveApi?.(entry, id) ?? options.api,
+		api,
+		...liteLLMRunnerKind(api),
 		provider: options.provider,
 		baseUrl: runtimeBaseUrl,
 		contextWindow,
@@ -6038,10 +6089,14 @@ function mergeLiteLLMRichEndpointModels<TApi extends Api>(
 			: existing.apiRoute === "openai" || next.apiRoute === "openai"
 				? "openai"
 				: "unknown";
-	const api = next.apiRoute === apiRoute ? next.model.api : existing.model.api;
+	// Only a group's `mode` selects a runner api, and an endpoint omitting the
+	// mode carries no news for it, so a runner api reported by either side wins.
+	const runnerApi = [next.model.api, existing.model.api].find(api => runnerApiKind(api) !== undefined);
+	const api = runnerApi ?? (next.apiRoute === apiRoute ? next.model.api : existing.model.api);
 	const model: ModelSpec<TApi> = {
 		...existing.model,
 		api,
+		...liteLLMRunnerKind(api),
 		name: next.model.name === next.model.id ? existing.model.name : next.model.name,
 		contextWindow: next.hasContextWindow ? next.model.contextWindow : existing.model.contextWindow,
 		maxTokens: next.hasMaxTokens ? next.model.maxTokens : existing.model.maxTokens,
@@ -6066,6 +6121,7 @@ function mergeLiteLLMRichEndpointModels<TApi extends Api>(
 		hasToolMetadata: existing.hasToolMetadata || next.hasToolMetadata,
 		hasSupportedOpenAIParams: existing.hasSupportedOpenAIParams || next.hasSupportedOpenAIParams,
 		hasCost: existing.hasCost || next.hasCost,
+		hasMode: existing.hasMode || next.hasMode,
 	};
 }
 
@@ -6084,28 +6140,82 @@ async function fetchLiteLLMRichEndpoint<TApi extends Api>(
 	if (options.apiKey) {
 		requestHeaders.Authorization = `Bearer ${options.apiKey}`;
 	}
-	let response: Response;
-	try {
-		response = await fetchImpl(`${managementBaseUrl}${endpoint}`, {
-			method: "GET",
-			headers: requestHeaders,
-			signal,
-		});
-	} catch (error) {
-		return { failure: { endpoint, reason: "network-error", error } };
+	const fetchPage = async (
+		page?: number,
+	): Promise<{ payload: unknown; status: number } | { failure: LiteLLMRichEndpointFailure } | null> => {
+		let response: Response;
+		try {
+			response = await fetchImpl(`${managementBaseUrl}${endpoint}${page === undefined ? "" : `?page=${page}`}`, {
+				method: "GET",
+				headers: requestHeaders,
+				signal,
+			});
+		} catch (error) {
+			return { failure: { endpoint, reason: "network-error", error } };
+		}
+		if (!response.ok) {
+			return response.status === 404 && page === undefined
+				? null
+				: { failure: { endpoint, reason: "http-status", status: response.status } };
+		}
+		try {
+			return { payload: await response.json(), status: response.status };
+		} catch (error) {
+			return { failure: { endpoint, reason: "invalid-json", status: response.status, error } };
+		}
+	};
+	const firstPage = await fetchPage();
+	if (!firstPage || "failure" in firstPage) {
+		return firstPage;
 	}
-	if (!response.ok) {
-		return response.status === 404 ? null : { failure: { endpoint, reason: "http-status", status: response.status } };
-	}
-	let payload: unknown;
-	try {
-		payload = await response.json();
-	} catch (error) {
-		return { failure: { endpoint, reason: "invalid-json", status: response.status, error } };
-	}
-	const entries = extractLiteLLMRichEntries(payload);
+	const entries = extractLiteLLMRichEntries(firstPage.payload);
 	if (!entries || entries.length === 0) {
 		return null;
+	}
+	// /v2/model/info returns {current_page, total_pages, data}; older
+	// endpoints and unpaginated /v2 proxies must keep their existing behavior.
+	if (
+		endpoint === "/v2/model/info" &&
+		isRecord(firstPage.payload) &&
+		("current_page" in firstPage.payload || "total_pages" in firstPage.payload)
+	) {
+		const { current_page: currentPage, total_pages: totalPages, total_count: totalCount } = firstPage.payload;
+		const invalidPage = (status: number): LiteLLMRichEndpointResult<TApi> => ({
+			failure: { endpoint, reason: "invalid-pagination", status },
+		});
+		if (
+			currentPage !== 1 ||
+			typeof totalPages !== "number" ||
+			!Number.isSafeInteger(totalPages) ||
+			totalPages < 1 ||
+			totalPages > LITELLM_MAX_RICH_PAGES ||
+			(totalCount !== undefined &&
+				(typeof totalCount !== "number" || !Number.isSafeInteger(totalCount) || totalCount < entries.length))
+		) {
+			return invalidPage(firstPage.status);
+		}
+		const remainingPages = await Promise.all(
+			Array.from({ length: totalPages - 1 }, (_, index) => fetchPage(index + 2)),
+		);
+		for (const [index, nextPage] of remainingPages.entries()) {
+			if (!nextPage || "failure" in nextPage) {
+				return nextPage ?? invalidPage(firstPage.status);
+			}
+			const nextEntries = extractLiteLLMRichEntries(nextPage.payload);
+			if (
+				!isRecord(nextPage.payload) ||
+				nextPage.payload.current_page !== index + 2 ||
+				nextPage.payload.total_pages !== totalPages ||
+				(totalCount !== undefined && nextPage.payload.total_count !== totalCount) ||
+				!nextEntries?.length
+			) {
+				return invalidPage(nextPage.status);
+			}
+			entries.push(...nextEntries);
+		}
+		if (totalCount !== undefined && entries.length !== totalCount) {
+			return invalidPage(firstPage.status);
+		}
 	}
 	const deduped = new Map<string, LiteLLMRichEndpointModel<TApi>>();
 	const excludedModelIds = new Set<string>();
@@ -6143,6 +6253,7 @@ async function fetchLiteLLMRichEndpoint<TApi extends Api>(
 					supportedOpenAIParams !== undefined,
 				hasSupportedOpenAIParams: supportedOpenAIParams !== undefined,
 				hasCost: getLiteLLMCost(entry) !== undefined,
+				hasMode: typeof getLiteLLMMetadataValue(entry, "mode") === "string",
 				reportedCost: getLiteLLMReportedCost(entry),
 			};
 			const existing = deduped.get(model.id);
@@ -6217,7 +6328,7 @@ async function fetchLiteLLMRichModelsInternal<TApi extends Api>(
 			for (const entry of deduped.values()) {
 				if (
 					(entry.supportsVision !== true && entry.supportsVision !== false) ||
-					(options.resolveApi !== undefined && entry.apiRoute === "unknown") ||
+					(options.resolveApi !== undefined && (entry.apiRoute === "unknown" || !entry.hasMode)) ||
 					(Object.keys(entry.reportedCost).length > 0 &&
 						(entry.reportedCost.input === undefined ||
 							entry.reportedCost.output === undefined ||
@@ -6248,7 +6359,9 @@ async function fetchLiteLLMRichModelsInternal<TApi extends Api>(
 	if (options.signal !== undefined) {
 		return fetchModels(options.signal);
 	}
-	return options.timeoutMs !== undefined ? withCatalogDiscoveryTimeout(options.timeoutMs, fetchModels) : fetchModels();
+	return options.timeoutMs !== undefined
+		? withOpenAICompatibleDiscoveryTimeout(options.timeoutMs, fetchModels)
+		: fetchModels();
 }
 
 export async function fetchLiteLLMRichModels<TApi extends Api>(
@@ -6262,6 +6375,9 @@ export function litellmModelManagerOptions(config?: LiteLLMModelManagerConfig): 
 	const baseUrl = config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("litellm")!;
 	return {
 		providerId: "litellm",
+		// rich-v14 fetches all /v2/model/info pages so cached proxy rosters
+		// include models beyond page one. rich-v13 routes `mode: decisions`
+		// groups to the Decisions runner as judge rows.
 		// rich-v12 invalidates namespaced proxy ids that missed bare catalog
 		// references. rich-v11 excluded ClinePass gateway metadata (issue #10932).
 		// rich-v10 filtered known non-conversational LiteLLM modes, keyed the
@@ -6396,13 +6512,7 @@ export function nanoGptModelManagerOptions(
 						const maxOutputTokens = entry.max_output_tokens ?? entry.max_completion_tokens;
 						const mapped = mapWithBundledReference(
 							{ ...entry, max_completion_tokens: maxOutputTokens },
-							reference
-								? defaults
-								: {
-										...defaults,
-										contextWindow: toPositiveNumberOrNull(entry.context_length),
-										maxTokens: toPositiveNumberOrNull(maxOutputTokens),
-									},
+							defaults,
 							reference,
 						);
 						return {
@@ -6635,7 +6745,7 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 			fetchDynamicModels: async () => {
 				const fetchImpl = discoveryFetch(config?.fetch);
 				const requestBaseUrl = isPersonalGitHubCopilotBaseUrl(baseUrl)
-					? ((await withCatalogDiscoveryTimeout(DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS, signal =>
+					? ((await withOpenAICompatibleDiscoveryTimeout(DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS, signal =>
 							discoverGitHubCopilotApiEndpoint(apiKey, fetchImpl, signal),
 						)) ?? baseUrl)
 					: baseUrl;
@@ -7646,6 +7756,8 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_SPECIALIZED: readonly ModelsDevProviderDes
 			return { api: "openai-completions" as const, baseUrl: ZENMUX_OPENAI_BASE_URL };
 		},
 	}),
+	// --- Modular ---
+	openAiCompletionsDescriptor("modular", "modular", "https://api.modular.com/v1"),
 ];
 /** All provider descriptors for models.dev data mapping in generate-models.ts. */
 export const MODELS_DEV_PROVIDER_DESCRIPTORS: readonly ModelsDevProviderDescriptor[] = [

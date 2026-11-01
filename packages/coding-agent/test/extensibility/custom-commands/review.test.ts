@@ -1,7 +1,8 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, type Mock, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Settings, withActiveSettings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ReviewCommand } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/review";
 import type { CustomCommandAPI } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/types";
 import type { HookCommandContext } from "@oh-my-pi/pi-coding-agent/extensibility/hooks/types";
@@ -11,6 +12,7 @@ import type { PrDiffPayload, ViewLookupResult } from "@oh-my-pi/pi-coding-agent/
 import * as gh from "@oh-my-pi/pi-coding-agent/tools/gh";
 import { parsePrUnifiedDiff } from "@oh-my-pi/pi-coding-agent/tools/gh-pr-diff";
 import * as glab from "@oh-my-pi/pi-coding-agent/tools/glab-mr";
+import { resetForTests as resetCacheForTests } from "@oh-my-pi/pi-coding-agent/tools/github-cache";
 import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
 import { gitlab } from "@oh-my-pi/pi-coding-agent/utils/gitlab";
 import type { VcsGitRepo, VcsRepo } from "@oh-my-pi/pi-natives";
@@ -85,9 +87,16 @@ interface EditorCall {
 
 describe("ReviewCommand", () => {
 	let tmpDir: string;
+	let retainGeneration!: Mock<typeof gh.retainPrDiffGeneration>;
 
 	beforeAll(async () => {
 		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-command-"));
+	});
+
+	beforeEach(() => {
+		// PR review cases call the real generation writer. Keep that off the
+		// developer cache; the one case that resolves pinned links restores it.
+		retainGeneration = spyOn(gh, "retainPrDiffGeneration").mockReturnValue(1);
 	});
 
 	afterEach(() => {
@@ -288,6 +297,8 @@ describe("ReviewCommand", () => {
 			"https://github.com/owner/repo/pull/123/commits",
 			"pr://owner/repo/123/diff/all",
 			"pr://owner/repo/123/diff/1",
+			"pr://owner/repo/123/diff/2?at=1710000000000",
+			"pr://owner/repo/123/diff/all?at=1710000000000",
 		];
 
 		for (const url of cases) {
@@ -299,59 +310,113 @@ describe("ReviewCommand", () => {
 		}
 	});
 
+	it("does not retain a review snapshot when the GitHub cache is disabled", async () => {
+		const dir = createTempDir();
+		const previousToken = process.env.GH_TOKEN;
+		const previousCacheDb = process.env.OMP_GITHUB_CACHE_DB;
+		const cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-cache-off-"));
+		process.env.GH_TOKEN = "review-cache-disabled";
+		process.env.OMP_GITHUB_CACHE_DB = path.join(cacheDir, "github-cache.db");
+		resetCacheForTests();
+		const settings = Settings.isolated({ "github.cache.enabled": false });
+		spyOn(github, "text").mockResolvedValue(SAMPLE_PR_DIFF);
+		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+		try {
+			const result = await withActiveSettings(settings, () =>
+				command.execute(["https://github.com/owner/repo/pull/123"], {
+					hasUI: false,
+				} as unknown as HookCommandContext),
+			);
+			expect(retainGeneration).not.toHaveBeenCalled();
+			expect(result).toBeDefined();
+			expect(result!).toContain("pr://owner/repo/123/diff/");
+			expect(result!).not.toContain("?at=");
+		} finally {
+			resetCacheForTests();
+			if (previousToken === undefined) delete process.env.GH_TOKEN;
+			else process.env.GH_TOKEN = previousToken;
+			if (previousCacheDb === undefined) delete process.env.OMP_GITHUB_CACHE_DB;
+			else process.env.OMP_GITHUB_CACHE_DB = previousCacheDb;
+			resetCacheForTests();
+			await removeWithRetries(cacheDir);
+		}
+	});
+
 	it.each([
 		{ fileCount: 2, lastIndex: 4 },
 		{ fileCount: 21, lastIndex: 23 },
 	])(
 		"links each PR file to its actual diff slice with $fileCount reviewable files",
 		async ({ fileCount, lastIndex }) => {
-			const paths = [
-				"bun.lock",
-				"src/first.ts",
-				"dist/generated.js",
-				...Array.from({ length: fileCount - 2 }, (_, index) => `src/extra-${index}.ts`),
-				"src/last.ts",
-			];
-			const diff = paths
-				.map(
-					file => `diff --git a/${file} b/${file}
+			const previousCacheDb = process.env.OMP_GITHUB_CACHE_DB;
+			const previousGhToken = process.env.GH_TOKEN;
+			const cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-cache-"));
+			process.env.OMP_GITHUB_CACHE_DB = path.join(cacheDir, "github-cache.db");
+			process.env.GH_TOKEN = "review-test-token";
+			retainGeneration.mockRestore();
+			resetCacheForTests();
+			try {
+				const paths = [
+					"bun.lock",
+					"src/first.ts",
+					"dist/generated.js",
+					...Array.from({ length: fileCount - 2 }, (_, index) => `src/extra-${index}.ts`),
+					"src/last.ts",
+				];
+				const diff = paths
+					.map(
+						file => `diff --git a/${file} b/${file}
 --- a/${file}
 +++ b/${file}
 @@ -1 +1 @@
 -old
 +new
 `,
-				)
-				.join("\n");
-			const lookup = makePrDiffLookup(diff);
-			lookup.payload = parsePrUnifiedDiff(diff);
-			spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(lookup);
-			const command = new ReviewCommand({ cwd: createTempDir() } as unknown as CustomCommandAPI);
-			const result = await command.execute(["https://github.com/owner/repo/pull/123"], {
-				hasUI: false,
-			} as unknown as HookCommandContext);
-			const rows = result!
-				.split("\n")
-				.filter(line => line.startsWith("|") && line.includes("pr://"))
-				.map(line => {
-					const cells = line.split("|").map(cell => cell.trim());
-					return { index: Number(cells[1]), path: cells[2], url: cells[5]!.replaceAll("`", "") };
+					)
+					.join("\n");
+				const lookup = makePrDiffLookup(diff);
+				lookup.payload = parsePrUnifiedDiff(diff);
+				spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(lookup);
+				const command = new ReviewCommand({ cwd: createTempDir() } as unknown as CustomCommandAPI);
+				const result = await command.execute(["https://github.com/owner/repo/pull/123"], {
+					hasUI: false,
+				} as unknown as HookCommandContext);
+				const rows = result!
+					.split("\n")
+					.filter(line => line.startsWith("|") && line.includes("pr://"))
+					.map(line => {
+						const cells = line.split("|").map(cell => cell.trim());
+						return { index: Number(cells[1]), path: cells[2], url: cells[5]!.replaceAll("`", "") };
+					});
+				expect(rows.map(row => row.path)).toEqual(paths.filter(file => file.startsWith("src/")));
+				const snapshotQuery = `?at=${lookup.fetchedAt}`;
+				expect(rows[0]).toEqual({
+					index: 2,
+					path: "src/first.ts",
+					url: `pr://owner/repo/123/diff/2${snapshotQuery}`,
 				});
-			expect(rows.map(row => row.path)).toEqual(paths.filter(file => file.startsWith("src/")));
-			expect(rows[0]).toEqual({ index: 2, path: "src/first.ts", url: "pr://owner/repo/123/diff/2" });
-			expect(rows.at(-1)).toEqual({
-				index: lastIndex,
-				path: "src/last.ts",
-				url: `pr://owner/repo/123/diff/${lastIndex}`,
-			});
-			try {
-				const router = InternalUrlRouter.instance();
-				for (const row of rows) {
-					const resource = await router.resolve(row.url);
-					expect(resource.content.split("\n")[0]).toBe(`diff --git a/${row.path} b/${row.path}`);
+				expect(rows.at(-1)).toEqual({
+					index: lastIndex,
+					path: "src/last.ts",
+					url: `pr://owner/repo/123/diff/${lastIndex}${snapshotQuery}`,
+				});
+				try {
+					const router = InternalUrlRouter.instance();
+					for (const row of rows) {
+						const resource = await router.resolve(row.url);
+						expect(resource.content.split("\n")[0]).toBe(`diff --git a/${row.path} b/${row.path}`);
+					}
+				} finally {
+					InternalUrlRouter.resetForTests();
 				}
 			} finally {
-				InternalUrlRouter.resetForTests();
+				resetCacheForTests();
+				if (previousCacheDb === undefined) delete process.env.OMP_GITHUB_CACHE_DB;
+				else process.env.OMP_GITHUB_CACHE_DB = previousCacheDb;
+				if (previousGhToken === undefined) delete process.env.GH_TOKEN;
+				else process.env.GH_TOKEN = previousGhToken;
+				resetCacheForTests();
+				await removeWithRetries(cacheDir);
 			}
 		},
 	);

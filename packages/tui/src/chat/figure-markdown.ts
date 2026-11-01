@@ -18,6 +18,8 @@ export interface FigureMarkdownOptions {
 	charts: boolean;
 	/** Shared inline-image budget for the figures. */
 	budget?: ImageBudget;
+	/** Rows each figure may fill, read on every render; callers reserve prose, chrome and separators themselves. Unset or `undefined` takes a share of the terminal viewport. */
+	maxRows?: () => number | undefined;
 	/** A figure's rows changed outside a text update (raster landed, fell back to code). */
 	onChange: () => void;
 }
@@ -113,8 +115,8 @@ export class FigureMarkdown extends Container {
 					return old;
 				}
 				reshaped = true;
-				const { budget, onChange } = this.#options;
-				return { kind: "chart", figure: new TableChartFigure({ budget, onChange }), table: segment.table };
+				const { budget, maxRows, onChange } = this.#options;
+				return { kind: "chart", figure: new TableChartFigure({ budget, maxRows, onChange }), table: segment.table };
 			}
 			if (segment.kind === "markdown") {
 				const text = segment.text.trim();
@@ -132,10 +134,10 @@ export class FigureMarkdown extends Container {
 					return old;
 				}
 				reshaped = true;
-				const { markdown, budget, onChange } = this.#options;
+				const { markdown, budget, maxRows, onChange } = this.#options;
 				return {
 					kind: "mermaid",
-					figure: new MermaidFigure({ markdown, budget, onChange }),
+					figure: new MermaidFigure({ markdown, budget, maxRows, onChange }),
 					source: segment.source,
 					closed: true,
 				};
@@ -146,10 +148,10 @@ export class FigureMarkdown extends Container {
 				return old;
 			}
 			reshaped = true;
-			const { markdown, budget, onChange } = this.#options;
+			const { markdown, budget, maxRows, onChange } = this.#options;
 			return {
 				kind: "svg",
-				figure: new SvgFigure({ markdown, budget, onChange }),
+				figure: new SvgFigure({ markdown, budget, maxRows, onChange }),
 				source: segment.source,
 				closed: segment.closed,
 			};

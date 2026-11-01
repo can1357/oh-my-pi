@@ -125,6 +125,28 @@ describe("Factory Droid completions reasoning matrix", () => {
 		},
 	);
 
+	// Droid 0.250.0 gives the 1017 checkpoint Baseten's reasoning-effort mode, so
+	// thinking off is `none`; the base model's Baseten route is forced-on and
+	// clamps off to its lowest rung.
+	it.each([
+		{ id: "deepseek-v4.1-flash-1017", effort: "none" },
+		{ id: "deepseek-v4.1-flash", effort: "low" },
+	])("sends thinking off on $id's Baseten route as reasoning_effort $effort", async ({ id, effort }) => {
+		const captured: CapturedRequest[] = [];
+		await streamFactoryDroid(
+			factoryModel(id, ["baseten"]),
+			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{
+				apiKey: "workos-token",
+				fetch: captureFetch(captured, completionsChunks("OK", id)),
+				disableReasoning: true,
+			},
+		).result();
+
+		expect(captured[0].headers["x-api-provider"]).toBe("baseten");
+		expect(captured[0].body.reasoning_effort).toBe(effort);
+	});
+
 	it("decodes typed thinking for GLM routed through Mistral, not only Mistral model IDs", async () => {
 		const captured: CapturedRequest[] = [];
 		const routed = glm53("mistral");

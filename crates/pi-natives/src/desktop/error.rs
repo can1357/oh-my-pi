@@ -126,7 +126,6 @@ impl DesktopError {
 		Self::new(ErrorCode::AxUnconfirmed, message)
 	}
 
-	#[cfg(any(target_os = "linux", target_os = "macos"))]
 	pub(crate) fn unsupported(message: impl Into<String>) -> Self {
 		Self::new(ErrorCode::Unsupported, message)
 	}

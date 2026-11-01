@@ -12,12 +12,15 @@ import type { NativeToolHead, NativeToolView, RenderResultOptions, ToolRenderer,
 import type { Component } from "../tui";
 import { Text } from "../components/text";
 import { getLanguageFromPath } from "../lang-from-path";
-import { highlightCode as highlightThemeCode, type Theme } from "../theme/theme";
+import { highlightCode as highlightThemeCode, isHighlightLanguage, type Theme } from "../theme/theme";
 import {
+	formatCodeFrameLine,
 	formatCount,
 	formatExpandHint,
 	formatMoreItems,
 	formatStatusIcon,
+	formatStyledPath,
+	PREVIEW_LIMITS,
 	type ParsedDiagnostic,
 	parseDiagnosticMessage,
 	replaceTabs,
@@ -34,8 +37,8 @@ import { ansi, code, col, compact, keyed, md, node, row, span, text } from "../n
 import type { NativeNode } from "../native/node";
 import { OwnerMemo } from "../native/memo";
 import { plainText } from "../native/spans";
-import { walkGroupedOutput } from "./grouped-file-output";
-import { diagnosticGlyph, fileHref, fileRow, inlineErrorView } from "./native-view";
+import { numberedCode, walkGroupedOutput } from "./grouped-file-output";
+import { diagnosticGlyph, displayPath, fileHref, fileRow, inlineErrorView } from "./native-view";
 import { activeThemeSymbol } from "../theme/active-symbols";
 
 /** Display arguments for an LSP tool request. */
@@ -83,6 +86,8 @@ export interface FileDiagnosticsResult {
 	summary: string;
 	/** Whether there are any errors (severity 1) */
 	errored: boolean;
+	/** Servers that sent no fresh report in time: the file is unverified for them, not clean. */
+	unreported?: string[];
 	/** Whether the file was formatted */
 	formatter?: FileFormatResult;
 }
@@ -163,6 +168,9 @@ export function renderCall(args: LspParams, _options: RenderResultOptions, theme
 // Result Rendering
 // =============================================================================
 
+/** A diagnostics status line for a file no server reported on in time: unverified, never "No issues". */
+const UNREPORTED_LINE_RE = /\bno diagnostics report yet\b/;
+
 /**
  * Render LSP tool result with intelligent formatting based on result type.
  * Detects hover, diagnostics, references, symbols, etc. and formats accordingly.
@@ -183,19 +191,22 @@ export function renderResult(
 	const text = content.text;
 	const lines = text.split("\n");
 
-	// Static type detection (result content doesn't change between renders)
-	const codeBlockMatch = text.match(/```(\w*)\n([\s\S]*?)```/);
+	// Static type detection (result content doesn't change between renders). Locations are
+	// anchored at the response's first line, so they win over checks a source snippet could trip.
+	const locations = parseLspLocations(lines);
+	const codeBlockMatch = locations ? null : text.match(/```(\w*)\n([\s\S]*?)```/);
 	const errorMatch = text.match(/(\d+)\s+error\(s\)/);
 	const warningMatch = text.match(/(\d+)\s+warning\(s\)/);
 	const refMatch = text.match(/(\d+)\s+reference\(s\)/);
 	const symbolsMatch = text.match(/Symbols in (.+):/);
 	const hasStatusError = text.includes(theme.status.error);
+	const unreportedCount = lines.filter(line => UNREPORTED_LINE_RE.test(line)).length;
 
 	// Static request info
 	const request = args ?? result.details?.request;
 	const requestLines: string[] = [];
 	if (request?.file) {
-		requestLines.push(theme.fg("toolOutput", request.file));
+		requestLines.push(formatStyledPath(request.file, theme));
 	}
 	if (request?.line !== undefined) {
 		requestLines.push(theme.fg("dim", `line ${request.line}`));
@@ -211,6 +222,13 @@ export function renderResult(
 	// and render it once per expanded state instead of on every spinner frame.
 	const bodies: Array<LspResultBody | undefined> = [undefined, undefined];
 	const renderBody = (expanded: boolean): LspResultBody => {
+		if (locations) {
+			return {
+				label: "Locations",
+				state: locations.count > 0 ? "success" : "warning",
+				bodyLines: renderLocations(locations, expanded, theme),
+			};
+		}
 		if (codeBlockMatch) {
 			return {
 				label: "Hover",
@@ -218,12 +236,12 @@ export function renderResult(
 				bodyLines: renderHover(codeBlockMatch, text, lines, expanded, theme),
 			};
 		}
-		if (errorMatch || warningMatch || hasStatusError) {
+		if (errorMatch || warningMatch || hasStatusError || unreportedCount > 0) {
 			const errorCount = errorMatch ? Number.parseInt(errorMatch[1], 10) : 0;
 			const warnCount = warningMatch ? Number.parseInt(warningMatch[1], 10) : 0;
 			return {
 				label: "Diagnostics",
-				state: errorCount > 0 ? "error" : warnCount > 0 ? "warning" : "success",
+				state: errorCount > 0 ? "error" : warnCount > 0 || unreportedCount > 0 ? "warning" : "success",
 				bodyLines: renderDiagnostics(errorMatch, warningMatch, lines, expanded, theme),
 			};
 		}
@@ -267,6 +285,7 @@ export function renderResult(
 
 		// Hover code hangs under its rail; expanded rows hang under their tree
 		// connector or guide rails so Ctrl+O reveals full text instead of clipping.
+		// Collapsed source lines stop at the card's edge, one row each under their rail.
 		const rail = ` ${theme.fg("mdCodeBlockBorder", theme.boxRound.vertical)} `;
 		const contentLines = codeBlockMatch
 			? bodyLines.flatMap(line =>
@@ -274,7 +293,9 @@ export function renderResult(
 				)
 			: expanded
 				? bodyLines.flatMap(line => wrapGuidedLine(line, contentWidth, theme))
-				: bodyLines;
+				: locations
+					? clipCollapsedLocations(bodyLines, contentWidth, locations, theme)
+					: bodyLines;
 		return {
 			header,
 			phase: isPartial ? "partial" : state,
@@ -366,10 +387,16 @@ function renderHover(
 // Diagnostics Rendering
 // =============================================================================
 
+/** A diagnostic's location: the muted file-type icon, the styled path and the muted `:line:col`. */
 function formatDiagnosticLocation(file: string, line: number, col: number, theme: Theme): string {
 	const lang = getLanguageFromPath(file);
 	const icon = theme.fg("muted", theme.getLangIcon(lang));
-	return `${icon} ${file}:${line}:${col}`;
+	return `${icon} ${formatStyledPath(file, theme)}${theme.fg("muted", `:${line}:${col}`)}`;
+}
+
+/** The `[severity]` tag in its severity's color: the path no longer carries it. */
+function formatSeverityTag(severity: ParsedDiagnostic["severity"], theme: Theme): string {
+	return theme.fg(severityToColor(severity), `[${severity}]`);
 }
 
 /**
@@ -384,17 +411,19 @@ function renderDiagnostics(
 ): string[] {
 	const errorCount = errorMatch ? Number.parseInt(errorMatch[1], 10) : 0;
 	const warnCount = warningMatch ? Number.parseInt(warningMatch[1], 10) : 0;
+	const unreportedLines = lines.filter(line => UNREPORTED_LINE_RE.test(line));
 
 	const icon =
 		errorCount > 0
 			? theme.styledSymbol("status.error", "error")
-			: warnCount > 0
+			: warnCount > 0 || unreportedLines.length > 0
 				? theme.styledSymbol("status.warning", "warning")
 				: theme.styledSymbol("tool.lsp", "accent");
 
 	const meta: string[] = [];
 	if (errorCount > 0) meta.push(`${errorCount} error${errorCount !== 1 ? "s" : ""}`);
 	if (warnCount > 0) meta.push(`${warnCount} warning${warnCount !== 1 ? "s" : ""}`);
+	if (unreportedLines.length > 0) meta.push(formatCount("unverified file", unreportedLines.length));
 	if (meta.length === 0) meta.push("No issues");
 
 	const diagLines = lines.filter(l => l.includes(theme.status.error) || /:\d+:\d+/.test(l));
@@ -404,10 +433,14 @@ function renderDiagnostics(
 	const fallbackDiagnostics: RawDiagnostic[] = diagLines.map(line => ({
 		raw: sanitizeDiagnosticDisplayText(line.trim()),
 	}));
+	// Unverified files lead: they are the rows a reader must not miss among diagnostics.
+	const items: DiagnosticItem[] = [
+		...unreportedLines.map(line => ({ raw: sanitizeDiagnosticDisplayText(line.trim()) })),
+		...(parsedDiagnostics.length > 0 ? parsedDiagnostics : fallbackDiagnostics),
+	];
 
 	if (expanded) {
 		let output = `${icon} ${theme.fg("dim", meta.join(theme.sep.dot))}`;
-		const items: DiagnosticItem[] = parsedDiagnostics.length > 0 ? parsedDiagnostics : fallbackDiagnostics;
 		for (let i = 0; i < items.length; i++) {
 			const item = items[i];
 			const isLast = i === items.length - 1;
@@ -417,12 +450,8 @@ function renderDiagnostics(
 				output += `\n ${theme.fg("dim", branch)} ${theme.fg("muted", item.raw)}`;
 				continue;
 			}
-			const severityColor = severityToColor(item.severity);
 			const location = formatDiagnosticLocation(item.filePath, item.line, item.col, theme);
-			output += `\n ${theme.fg("dim", branch)} ${theme.fg(severityColor, location)} ${theme.fg(
-				"dim",
-				`[${item.severity}]`,
-			)}`;
+			output += `\n ${theme.fg("dim", branch)} ${location} ${formatSeverityTag(item.severity, theme)}`;
 			const message = formatDiagnosticMessage(item);
 			if (message) {
 				output += `\n ${theme.fg("dim", detailPrefix)}${theme.fg("muted", message)}`;
@@ -432,10 +461,8 @@ function renderDiagnostics(
 	}
 
 	// Collapsed view
-	const previewItems: DiagnosticItem[] =
-		parsedDiagnostics.length > 0 ? parsedDiagnostics.slice(0, 3) : fallbackDiagnostics.slice(0, 3);
-	const remaining =
-		(parsedDiagnostics.length > 0 ? parsedDiagnostics.length : fallbackDiagnostics.length) - previewItems.length;
+	const previewItems = items.slice(0, 3);
+	const remaining = items.length - previewItems.length;
 	const clipped = previewItems.some(
 		item => !("raw" in item) && visibleWidth(formatDiagnosticMessage(item)) > TRUNCATE_LENGTHS.CONTENT,
 	);
@@ -449,13 +476,12 @@ function renderDiagnostics(
 			output += `\n ${theme.fg("dim", branch)} ${theme.fg("muted", item.raw)}`;
 			continue;
 		}
-		const severityColor = severityToColor(item.severity);
 		const location = formatDiagnosticLocation(item.filePath, item.line, item.col, theme);
 		const diagnosticMessage = formatDiagnosticMessage(item);
 		const message = diagnosticMessage
 			? ` ${theme.fg("muted", truncateToWidth(diagnosticMessage, TRUNCATE_LENGTHS.CONTENT))}`
 			: "";
-		output += `\n ${theme.fg("dim", branch)} ${theme.fg(severityColor, location)}${message}`;
+		output += `\n ${theme.fg("dim", branch)} ${location} ${formatSeverityTag(item.severity, theme)}${message}`;
 	}
 	if (remaining > 0) {
 		output += `\n ${theme.fg("dim", theme.tree.last)} ${theme.fg("muted", `… ${remaining} more`)}`;
@@ -505,7 +531,7 @@ function renderReferences(refMatch: RegExpMatchArray, lines: string[], expanded:
 			const fileCont = isLastFile ? "   " : `${theme.tree.vertical}  `;
 
 			const fileMeta = `${locs.length} reference${locs.length !== 1 ? "s" : ""}`;
-			output += `\n ${theme.fg("dim", fileBranch)} ${theme.fg("accent", file)} ${theme.fg("dim", fileMeta)}`;
+			output += `\n ${theme.fg("dim", fileBranch)} ${formatStyledPath(file, theme)} ${theme.fg("dim", fileMeta)}`;
 
 			if (maxLocsPerFile > 0) {
 				const locsToShow = locs.slice(0, maxLocsPerFile);
@@ -519,10 +545,8 @@ function renderReferences(refMatch: RegExpMatchArray, lines: string[], expanded:
 						`line ${line}, col ${col}`,
 					)}`;
 					if (expanded) {
-						output += `\n ${theme.fg("dim", fileCont)}${theme.fg("dim", locCont)}${theme.fg(
-							"muted",
-							`at ${file}:${line}:${col}`,
-						)}`;
+						const at = `${theme.fg("muted", "at ")}${formatStyledPath(file, theme)}${theme.fg("muted", `:${line}:${col}`)}`;
+						output += `\n ${theme.fg("dim", fileCont)}${theme.fg("dim", locCont)}${at}`;
 					}
 				}
 				if (locs.length > maxLocsPerFile) {
@@ -545,6 +569,109 @@ function renderReferences(refMatch: RegExpMatchArray, lines: string[], expanded:
 	};
 
 	return (expanded ? renderGrouped(files.length, Number.POSITIVE_INFINITY) : renderGrouped(3, 1)).split("\n");
+}
+
+// =============================================================================
+// Locations Rendering
+// =============================================================================
+
+/** One location of a definition-style response, with its numbered source context. */
+interface LspLocation {
+	file: string;
+	line: number;
+	col: number;
+	/** Source lines around the location; the location's own line is `mark`ed. */
+	context: { n: number; text: string; mark: boolean }[];
+}
+
+/** A definition, type definition or implementation response. */
+interface LspLocations {
+	/** `definition`, `type definition` or `implementation`. */
+	noun: string;
+	count: number;
+	locations: LspLocation[];
+}
+
+const LOCATIONS_HEADER_RE = /^Found (\d+) (definition|type definition|implementation)\(s\):$/;
+/**
+ * `  file:line:col`, the path from column 2 on (it may itself start with whitespace). Context rows are
+ * `    N: source`; a row matching both is context of the current location.
+ */
+const LOCATION_RE = /^ {2}(.+):(\d+):(\d+)$/;
+const LOCATION_CONTEXT_RE = /^ {4}(\d+): ?(.*)$/;
+
+/**
+ * Parse a `Found N definition(s):` response (also type definitions and
+ * implementations): `  file:line:col` rows, each followed by its
+ * `    N: source` context lines.
+ */
+function parseLspLocations(lines: readonly string[]): LspLocations | undefined {
+	const header = LOCATIONS_HEADER_RE.exec(lines[0] ?? "");
+	if (!header) return undefined;
+	const locations: LspLocation[] = [];
+	for (const line of lines.slice(1)) {
+		const current = locations.at(-1);
+		const context = current ? LOCATION_CONTEXT_RE.exec(line) : null;
+		if (current && context) {
+			const n = Number(context[1]);
+			current.context.push({ n, text: context[2].trimEnd(), mark: n === current.line });
+			continue;
+		}
+		const location = LOCATION_RE.exec(line);
+		if (location) {
+			const [, file, lineNumber, column] = location;
+			locations.push({ file, line: Number(lineNumber), col: Number(column), context: [] });
+		}
+	}
+	return { noun: header[2], count: Number(header[1]), locations };
+}
+
+/**
+ * Render definitions, type definitions and implementations: each
+ * `file:line:col` over its source context, the location's line marked like a
+ * grep match.
+ */
+function renderLocations(parsed: LspLocations, expanded: boolean, theme: Theme): string[] {
+	const { noun, count, locations } = parsed;
+	const shown = expanded ? locations : locations.slice(0, PREVIEW_LIMITS.LOCATIONS_COLLAPSED);
+	const hidden = locations.length - shown.length;
+	const icon = count > 0 ? theme.styledSymbol("tool.lsp", "accent") : theme.styledSymbol("status.warning", "warning");
+	const rows = [
+		`${icon} ${theme.fg("dim", formatCount(noun, count))}${formatExpandHint(theme, expanded, hidden > 0)}`,
+	];
+
+	shown.forEach((location, index) => {
+		const isLast = index === shown.length - 1 && hidden === 0;
+		const branch = isLast ? theme.tree.last : theme.tree.branch;
+		const rail = isLast ? "   " : `${theme.tree.vertical}  `;
+		const position = theme.fg("muted", `:${location.line}:${location.col}`);
+		const file = formatStyledPath(replaceTabs(shortenPath(location.file)), theme);
+		rows.push(` ${theme.fg("dim", branch)} ${file}${position}`);
+
+		const numberWidth = location.context.reduce((width, line) => Math.max(width, String(line.n).length), 0);
+		for (const line of location.context) {
+			const frame = formatCodeFrameLine(line.mark ? "*" : "", line.n, replaceTabs(line.text), numberWidth);
+			rows.push(` ${theme.fg("dim", rail)}${theme.fg("toolOutput", frame)}`);
+		}
+	});
+
+	if (hidden > 0) {
+		rows.push(` ${theme.fg("dim", theme.tree.last)} ${theme.fg("muted", formatMoreItems(hidden, noun))}`);
+	}
+	return rows;
+}
+
+/**
+ * Collapsed location rows stop at the card's edge. When that clips a row and no hidden location already
+ * advertises Ctrl+O, the header gets the expand hint: the expanded view wraps the full text.
+ */
+function clipCollapsedLocations(rows: string[], width: number, parsed: LspLocations, theme: Theme): string[] {
+	const clipped = rows.map(row => truncateToWidth(row, width));
+	const hinted = parsed.locations.length > PREVIEW_LIMITS.LOCATIONS_COLLAPSED;
+	if (!hinted && clipped.some((row, index) => row !== rows[index])) {
+		clipped[0] = truncateToWidth(`${rows[0]}${formatExpandHint(theme, false, true)}`, width);
+	}
+	return clipped;
 }
 
 // =============================================================================
@@ -605,6 +732,13 @@ function renderSymbols(symbolsMatch: RegExpMatchArray, lines: string[], expanded
 	};
 
 	const topLevelCount = symbols.filter(s => s.indent === 0).length;
+	// The glyph keeps the accent; the name and signature read as code in the file's language.
+	const lang = getLanguageFromPath(fileName);
+	const symbolName = (name: string): string => {
+		const plain = replaceTabs(name);
+		if (!isHighlightLanguage(lang)) return theme.fg("accent", plain);
+		return highlightThemeCode(plain, lang, theme)[0] ?? plain;
+	};
 
 	if (expanded) {
 		let output = `${icon} ${theme.fg("dim", `in ${fileName}`)}`;
@@ -616,7 +750,7 @@ function renderSymbols(symbolsMatch: RegExpMatchArray, lines: string[], expanded
 			const symIsLast = isLast[i];
 			const branch = symIsLast ? theme.tree.last : theme.tree.branch;
 			const detailPrefix = symIsLast ? "   " : `${theme.tree.vertical}  `;
-			output += `\n${prefix}${theme.fg("dim", branch)} ${theme.fg("accent", sym.icon)} ${theme.fg("accent", sym.name)}`;
+			output += `\n${prefix}${theme.fg("dim", branch)} ${theme.fg("accent", sym.icon)} ${symbolName(sym.name)}`;
 			output += `\n${prefix}${theme.fg("dim", detailPrefix)}${theme.fg("muted", `line ${sym.line}`)}`;
 		}
 		return output.split("\n");
@@ -631,7 +765,7 @@ function renderSymbols(symbolsMatch: RegExpMatchArray, lines: string[], expanded
 		const sym = topLevel[i];
 		const isLast = i === topLevel.length - 1 && topLevelCount <= 3;
 		const branch = isLast ? theme.tree.last : theme.tree.branch;
-		output += `\n ${theme.fg("dim", branch)} ${theme.fg("accent", sym.icon)} ${theme.fg("accent", sym.name)} ${theme.fg(
+		output += `\n ${theme.fg("dim", branch)} ${theme.fg("accent", sym.icon)} ${symbolName(sym.name)} ${theme.fg(
 			"muted",
 			`line ${sym.line}`,
 		)}`;
@@ -788,6 +922,8 @@ interface LspDiagnosticsParse {
 	diagnostics: ParsedDiagnostic[];
 	failures: string[];
 	warnings: string[];
+	/** Files a server sent no report for in time: unverified, never "No issues". */
+	unreported: string[];
 	/** Lines neither a diagnostic nor a status line (kept verbatim). */
 	other: string[];
 }
@@ -803,10 +939,10 @@ const FILE_SUMMARY_RE = /: (?:no issues|\d+ \w+\(s\)(?:, \d+ \w+\(s\))*)$/;
  * Parse a diagnostics response: grouped (`# dir/`, `## file`, `  12:5 [error] …`)
  * or flat (`file:12:5 [error] …`) diagnostic lines, and the per-file status
  * lines (`✗ file: all language servers failed (…)`, `⚠ …some servers failed`,
- * `✓ file: no issues`, `✗ file: 2 error(s)`).
+ * `⚠ file: no diagnostics report yet from …`, `✓ file: no issues`, `✗ file: 2 error(s)`).
  */
 function parseLspDiagnostics(lines: readonly string[]): LspDiagnosticsParse {
-	const out: LspDiagnosticsParse = { diagnostics: [], failures: [], warnings: [], other: [] };
+	const out: LspDiagnosticsParse = { diagnostics: [], failures: [], warnings: [], unreported: [], other: [] };
 	let file: string | undefined;
 	for (const event of walkGroupedOutput(lines)) {
 		if (event.kind !== "line") {
@@ -822,6 +958,10 @@ function parseLspDiagnostics(lines: readonly string[]): LspDiagnosticsParse {
 		}
 		if (/\bsome servers failed\b/.test(line)) {
 			out.warnings.push(line.replace(STATUS_GLYPH_RE, ""));
+			continue;
+		}
+		if (UNREPORTED_LINE_RE.test(line)) {
+			out.unreported.push(line.replace(STATUS_GLYPH_RE, ""));
 			continue;
 		}
 		if (FILE_SUMMARY_RE.test(line)) continue;
@@ -888,25 +1028,30 @@ function statusRow(message: string, tone: "error" | "warning", key: string): Nat
 }
 
 /**
- * Diagnostics view: a card when there are diagnostics or failures (rows of
- * severity icon · `file:line:col` · source · message), an inline `No issues`
- * otherwise. A failed server is an error row, never "No issues".
+ * Diagnostics view: a card when there are diagnostics, failures or unverified files
+ * (rows of severity icon · `file:line:col` · source · message), an inline `No issues`
+ * otherwise. A failed server or a missing report is a row, never "No issues".
  */
 function describeLspDiagnostics(request: Partial<LspParams> | undefined, fallbackAction: string, lines: string[]) {
 	const parsed = parseLspDiagnostics(lines);
 	const counts = diagnosticCounts(parsed.diagnostics);
 	const failed =
 		parsed.failures.length > 0 ? [span(formatCount("server failure", parsed.failures.length), "error")] : undefined;
+	const unverified =
+		parsed.unreported.length > 0
+			? [span(formatCount("unverified file", parsed.unreported.length), "warning")]
+			: undefined;
 	const rows: NativeNode[] = [
 		...parsed.failures.map((message, i) => statusRow(message, "error", `x${i}`)),
+		...parsed.unreported.map((message, i) => statusRow(message, "warning", `u${i}`)),
 		...parsed.diagnostics.map((diag, i) => diagnosticRow(diag, `d${i}`)),
 		...parsed.warnings.map((message, i) => statusRow(message, "warning", `w${i}`)),
 	];
 	if (parsed.other.length > 0) rows.push(keyed(code(parsed.other.join("\n"), { wrap: true }), "other"));
 	const hasErrors = parsed.failures.length > 0 || parsed.diagnostics.some(d => d.severity === "error");
-	const meta = compact<TspText>([counts, failed, !counts && !failed && "No issues"]);
+	const meta = compact<TspText>([counts, failed, unverified, !counts && !failed && !unverified && "No issues"]);
 	const head = lspNativeHead(request, fallbackAction, meta);
-	if (parsed.diagnostics.length === 0 && parsed.failures.length === 0) {
+	if (parsed.diagnostics.length === 0 && parsed.failures.length === 0 && parsed.unreported.length === 0) {
 		return { tool: head, inline: true, body: rows.length > 0 ? rows : undefined } satisfies NativeToolView;
 	}
 	return {
@@ -978,6 +1123,29 @@ function describeLspSymbols(lines: string[]): NativeNode | undefined {
 	return roots.length > 0 ? node("tree", { nodes: roots }) : undefined;
 }
 
+/** Definition-style locations: a file row with `:line:col`, then the numbered source context. */
+function describeLspLocations(
+	request: Partial<LspParams> | undefined,
+	fallbackAction: string,
+	parsed: LspLocations,
+): NativeToolView {
+	const body = parsed.locations.map(location => {
+		const file = plainText(location.file);
+		const context = location.context.map(line => ({ ...line, text: plainText(line.text) }));
+		const range = `:${location.line}:${location.col}`;
+		const code = numberedCode(context, { path: file });
+		const header = fileRow(displayPath(file), { range, title: file });
+		return keyed(col(code ? [header, code] : [header], { gap: "xs" }), `${file}${range}`);
+	});
+	return {
+		tool: lspNativeHead(request, fallbackAction, [formatCount(parsed.noun, parsed.count)]),
+		tone: parsed.count > 0 ? undefined : "warning",
+		inline: true,
+		body: body.length > 0 ? body : undefined,
+		preview: { lines: PREVIEW_LIMITS.COLLAPSED_ITEMS },
+	};
+}
+
 function describeLspResult(result: ToolRenderResult<LspToolDetails>, args: LspParams | undefined): NativeToolView {
 	const request = args ?? result.details?.request;
 	const fallbackAction = result.details?.action ?? "request";
@@ -987,6 +1155,9 @@ function describeLspResult(result: ToolRenderResult<LspToolDetails>, args: LspPa
 	if (!text) return { tool: lspNativeHead(request, fallbackAction, ["No result"]), tone: "warning", inline: true };
 
 	const lines = text.split("\n");
+	const locations = parseLspLocations(lines);
+	if (locations) return describeLspLocations(request, fallbackAction, locations);
+
 	const statusError = activeThemeSymbol("status.error");
 	const refMatch = text.match(/(\d+)\s+reference\(s\)/);
 	const symbolsMatch = text.match(/Symbols in (.+):/);

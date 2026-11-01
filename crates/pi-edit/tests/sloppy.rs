@@ -287,7 +287,7 @@ async fn no_op_recovery_respects_utf8_boundaries_in_source_and_replacement() {
 			.apply_raw(&input, &writer)
 			.await
 			.expect_err("an unchanged edit reports a no-op instead of panicking");
-		assert!(matches!(error, EditError::Match(_)));
+		assert_eq!(error.kind(), "no_change", "{error}");
 		assert!(writer.requests.lock().is_empty());
 		assert_eq!(workspace.read("a.txt").unwrap(), before);
 	}

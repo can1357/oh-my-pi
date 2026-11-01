@@ -1,9 +1,15 @@
-use std::io::Write;
+use std::{fmt::NumBuffer, io::Write};
 
 use brush_core::{ErrorKind, ExecutionExitCode, ExecutionResult, builtins, env, escape, variables};
 use clap::Parser;
+use tokio_util::sync::CancellationToken;
 
 use crate::line_input::{CTRL_C, CTRL_D, LineInput, ReadAhead, decode_line};
+
+/// Work between yields to the runtime and cancellation checks, counted in
+/// bytes read; an entry counts as [`ENTRY_STEPS`] bytes.
+const CHECKPOINT_STEPS: usize = 64 * 1024;
+const ENTRY_STEPS: usize = 64;
 
 /// Read lines from standard input into an indexed array variable.
 #[derive(Parser)]
@@ -134,18 +140,41 @@ impl MapFileCommand {
 		let read_ahead =
 			if max_count == 0 && self.callback.is_none() { ReadAhead::ToEof } else { ReadAhead::Seekable };
 		let mut input = LineInput::new(input_file, read_ahead);
+		// Endless input (`< /dev/zero`, a line with no delimiter, or endless
+		// empty entries) never reaches EOF. The bytes are read without
+		// awaiting, so every so often yield to the runtime, which lets a
+		// `timeout` running this on the same task reach its deadline, and then
+		// notice cancellation (abort, `timeout`), as `read` does. Input that
+		// pauses before a delimiter or EOF is waited for without blocking the
+		// task, for the same reason.
+		let cancel_token = context.cancel_token();
+		let mut steps = 0usize;
 
 		while max_count == 0 || entry_count < max_count {
+			steps += ENTRY_STEPS;
+			if steps >= CHECKPOINT_STEPS {
+				steps = 0;
+				yield_then_check(cancel_token.as_ref()).await?;
+			}
 			let mut line = vec![];
 			let mut saw_delimiter = false;
 
-			while let Some(byte) = input.next_byte()? {
+			loop {
+				input.wait_for_input(cancel_token.as_ref()).await?;
+				let Some(byte) = input.next_byte()? else {
+					break;
+				};
 				// Interactive keys end input only on a terminal; in a file or
 				// pipe they are data.
 				if terminal && (byte == CTRL_C || byte == CTRL_D && line.is_empty()) {
 					break;
 				}
 				line.push(byte);
+				steps += 1;
+				if steps >= CHECKPOINT_STEPS {
+					steps = 0;
+					yield_then_check(cancel_token.as_ref()).await?;
+				}
 				if byte == delimiter {
 					saw_delimiter = true;
 					break;
@@ -161,8 +190,8 @@ impl MapFileCommand {
 				continue;
 			}
 
-			if self.remove_delimiter && line.ends_with(&[delimiter]) {
-				line.pop();
+			if self.remove_delimiter {
+				line.pop_if(|byte| *byte == delimiter);
 			}
 
 			let line_str = decode_line(line);
@@ -194,14 +223,24 @@ impl MapFileCommand {
 	}
 }
 
+/// Yields to the runtime, then fails with `Interrupted` if `cancel` fired.
+async fn yield_then_check(cancel: Option<&CancellationToken>) -> Result<(), brush_core::Error> {
+	tokio::task::yield_now().await;
+	if cancel.is_some_and(CancellationToken::is_cancelled) {
+		return Err(ErrorKind::Interrupted.into());
+	}
+	Ok(())
+}
+
 async fn run_callback<SE: brush_core::ShellExtensions>(
 	callback: &str,
 	array_index: i64,
 	line: &str,
 	context: &mut brush_core::ExecutionContext<'_, SE>,
 ) -> Result<ExecutionResult, brush_core::Error> {
-	let index_arg = array_index.to_string();
-	let index_arg = escape::quote_if_needed(&index_arg, escape::QuoteMode::SingleQuote);
+	let mut index_buf = NumBuffer::new();
+	let index_arg =
+		escape::quote_if_needed(array_index.format_into(&mut index_buf), escape::QuoteMode::SingleQuote);
 	let line_arg = escape::quote_if_needed(line, escape::QuoteMode::SingleQuote);
 
 	let mut command = String::with_capacity(callback.len() + index_arg.len() + line_arg.len() + 2);

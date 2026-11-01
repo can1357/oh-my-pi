@@ -90,7 +90,7 @@ Which automatic inputs reach each kind of session. An input applies only when it
 | Task subagent    | Not inherited | Inherited                 | No                                            | Inherited | Inherited               | No            | `none`      |
 | Advisor/watchdog | Inherited     | Inherited                 | No                                            | No        | No                      | Yes           | None        |
 
-1. Task spawning drops inherited context files whose basename is `agents.md` (case-insensitive). Text pulled in through `@` imports is not filtered, and additional workspace roots are discovered separately.
+1. Task subagents drop every context file whose basename is `agents.md` (case-insensitive), whether inherited from the parent or discovered for an additional workspace root, including the user-level `~/.omp/agent/AGENTS.md`. Text pulled in through `@` imports is not filtered.
 2. Context discovery selects one user file and one project file per directory depth, and higher-priority providers win. Foreign user files require `enabledProviders` opt-in. A standalone `CLAUDE.md` is supported; `GEMINI.md` is read from the user and project `.gemini` directories.
 3. A task agent's `tools:` list does not remove MCP tools or server instructions: the tools stay available top-level or under `xd://`. Plan-mode tasks and children of restricted sessions run with `restrictToolNames`, which drops both.
 
@@ -225,17 +225,17 @@ The CLI flags and files do **not** set `systemPrompt`: they select the plain/tem
 
 ## Quick reference
 
-| Goal                                                                       | Use                                                                                                              |
-| -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| Add instructions while keeping the complete default prompt                 | `APPEND_SYSTEM.md` or `--append-system-prompt`                                                                   |
-| Replace the default instruction block with plain text                      | `SYSTEM.md` or `--system-prompt`                                                                                 |
-| Replace the default instruction block with Handlebars                      | `SYSTEM_TEMPLATE.md` or `--system-prompt-template <path>`                                                        |
-| Supply raw Handlebars through the programmatic API                         | `CreateAgentSessionOptions.systemPromptTemplate` or `buildSystemPrompt({ systemPromptTemplate })`                |
-| Replace every provider-facing system block                                 | `CreateAgentSessionOptions.systemPrompt`                                                                         |
-| Customize automatic session titles                                         | `TITLE_SYSTEM.md`                                                                                                |
-| Replace the personality block while keeping the rest of the default prompt | `PERSONALITY.md`                                                                                                 |
-| Use `{{cwd}}` or other internal variables in a plain user file             | Not supported; plain user content is inserted verbatim                                                           |
-| Include live settings, tool inventory, or xdev docs in a template          | Reference the corresponding Handlebars fields, such as `{{eagerTasks}}`, `{{toolInventory}}`, and `{{xdevDocs}}` |
-| Inherit selected default-template sections automatically                   | Not supported; a template must reference the data it needs                                                       |
+| Goal                                                                       | Use                                                                                                                    |
+| -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Add instructions while keeping the complete default prompt                 | `APPEND_SYSTEM.md` or `--append-system-prompt`                                                                         |
+| Replace the default instruction block with plain text                      | `SYSTEM.md` or `--system-prompt`                                                                                       |
+| Replace the default instruction block with Handlebars                      | `SYSTEM_TEMPLATE.md` or `--system-prompt-template <path>`                                                              |
+| Supply raw Handlebars through the programmatic API                         | `CreateAgentSessionOptions.systemPromptTemplate` or `buildSystemPrompt({ systemPromptTemplate })`                      |
+| Replace every provider-facing system block                                 | `CreateAgentSessionOptions.systemPrompt`                                                                               |
+| Customize automatic session titles                                         | `TITLE_SYSTEM.md`                                                                                                      |
+| Replace the personality block while keeping the rest of the default prompt | `PERSONALITY.md`                                                                                                       |
+| Use `{{cwd}}` or other internal variables in a plain user file             | Not supported; plain user content is inserted verbatim                                                                 |
+| Include live settings, tool inventory, or xdev docs in a template          | Reference the corresponding Handlebars fields, such as `{{eagerTasks}}`, `{{toolInventory}}`, and `{{xdevDocs}}`       |
+| Inherit selected default-template sections automatically                   | Not supported; a template must reference the data it needs                                                             |
 | Per-directory override                                                     | A supported project config base; native `.omp` and `.agent` / `.agents` custom prompts also support ancestor discovery |
-| Global override                                                            | The active native agent directory, or another supported user config base                                         |
+| Global override                                                            | The active native agent directory, or another supported user config base                                               |

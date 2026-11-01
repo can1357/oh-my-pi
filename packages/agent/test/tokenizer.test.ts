@@ -1,9 +1,12 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import type { Api, AssistantMessage, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
 import { convertCodexResponsesMessages } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import { convertMessages } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import { transformMessages } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import type { OpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import * as natives from "@oh-my-pi/pi-natives";
 import { Agent } from "../src/agent";
 import type { SessionMessageEntry } from "../src/compaction/entries";
@@ -267,6 +270,135 @@ describe("Ollama chat history estimate", () => {
 		expect(agent.tokenizer.countMessage(turn)).toBeGreaterThan(agent.tokenizer.countMessage(turn, floor));
 		agent.setModel(model);
 		expect(agent.tokenizer.countMessage(turn, floor)).toBe(visibleCount);
+	});
+});
+
+// Contract: a chat-completions request without a reasoning slot drops the
+// model's own past thinking, so the context estimate (and the compaction
+// triggers built on it) must not count it; thinking the request carries still
+// counts (#15797).
+describe("chat-completions history estimate", () => {
+	const THINKING = "Let me reason about the call sites carefully. ".repeat(400);
+	const toolCall = { type: "toolCall", id: "call_1", name: "read", arguments: { path: "a.ts" } } as const;
+
+	function completionsModel(
+		id: string,
+		compat: Partial<OpenAICompat> & { replayReasoningContent: boolean },
+		reasoning = true,
+	): Model<"openai-completions"> {
+		return buildModel({
+			id,
+			name: id,
+			api: "openai-completions",
+			provider: "my-host",
+			baseUrl: "http://my-server.example:8000/v1",
+			reasoning,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 262_144,
+			maxTokens: 32_768,
+			compat: { thinkingFormat: "qwen-chat-template", ...compat },
+		});
+	}
+
+	function thinkingTurn(from: Model, thinkingSignature: string): AssistantMessage {
+		return {
+			role: "assistant",
+			content: [{ type: "thinking", thinking: THINKING, thinkingSignature }, toolCall],
+			api: from.api,
+			provider: from.provider,
+			model: from.id,
+			usage: {
+				input: 100,
+				output: 3_000,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 3_100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: 1,
+		};
+	}
+
+	const dropping = completionsModel("Qwen3.8-27B", { replayReasoningContent: false });
+	const replaying = completionsModel("Qwen3.8-27B", { replayReasoningContent: true });
+	const floor = { excludeEncryptedReasoning: true };
+	const toolCallOnly = new Tokenizer(dropping).countMessage({ ...thinkingTurn(dropping, "x"), content: [toolCall] });
+
+	test.each([
+		{ name: "replay off", model: dropping, carried: false },
+		{ name: "replay on", model: replaying, carried: true },
+		{
+			name: "replay only in the thinking view",
+			model: completionsModel("Qwen3.8-27B", {
+				replayReasoningContent: false,
+				whenThinking: { replayReasoningContent: true },
+			}),
+			carried: true,
+		},
+		{
+			name: "Mistral content parts",
+			model: completionsModel("Qwen3.8-27B", { replayReasoningContent: false, mistralReasoningContentParts: true }),
+			carried: true,
+		},
+		{
+			name: "thinking as text",
+			model: completionsModel("Qwen3.8-27B", { replayReasoningContent: false, requiresThinkingAsText: true }),
+			carried: true,
+		},
+		{
+			name: "reasoning content required for tool calls",
+			model: completionsModel("Qwen3.8-27B", {
+				replayReasoningContent: false,
+				requiresReasoningContentForToolCalls: true,
+			}),
+			carried: true,
+		},
+		{
+			name: "Z.AI on a reasoning model",
+			model: completionsModel("Qwen3.8-27B", { replayReasoningContent: false, thinkingFormat: "zai" }),
+			carried: true,
+		},
+		{
+			name: "Z.AI on a non-reasoning model",
+			model: completionsModel("Qwen3.8-27B", { replayReasoningContent: false, thinkingFormat: "zai" }, false),
+			carried: false,
+		},
+		// Another model's thinking reaches the request demoted to text.
+		{
+			name: "another model's turn",
+			model: dropping,
+			from: completionsModel("other-model", { replayReasoningContent: false }),
+			carried: true,
+		},
+		// LiteLLM replays a raw signature's thinking in `thinking_blocks`.
+		{ name: "a raw LiteLLM signature", model: dropping, signature: "EqQBCkgIARABGAIiQL", carried: true },
+	])("counts thinking only when a request carries it: $name", ({ model, from, signature, carried }) => {
+		const turn = thinkingTurn(from ?? model, signature ?? "reasoning_content");
+		const views = [model.compat, model.compat.whenThinking].filter(view => view !== undefined);
+		const messages = transformMessages([turn], model);
+		const sent = views.some(view =>
+			JSON.stringify(convertMessages(model, { messages }, view)).includes(THINKING.trim()),
+		);
+		expect(sent).toBe(carried);
+
+		const tokenizer = new Tokenizer(model);
+		if (carried) {
+			expect(tokenizer.countMessage(turn, floor)).toBeGreaterThan(toolCallOnly + 1000);
+		} else {
+			expect(tokenizer.countMessage(turn)).toBe(toolCallOnly);
+			expect(tokenizer.countMessage(turn, floor)).toBe(toolCallOnly);
+		}
+	});
+
+	test("recounts after the replay policy changes", () => {
+		const turn = thinkingTurn(dropping, "reasoning_content");
+		const agent = new Agent({ initialState: { model: dropping, systemPrompt: [], tools: [], messages: [] } });
+		expect(agent.tokenizer.countMessage(turn, floor)).toBe(toolCallOnly);
+		expect(agent.tokenizer.countsAlike(replaying)).toBe(false);
+		agent.setModel(replaying);
+		expect(agent.tokenizer.countMessage(turn, floor)).toBeGreaterThan(toolCallOnly + 1000);
 	});
 });
 

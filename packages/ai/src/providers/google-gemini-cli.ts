@@ -7,15 +7,18 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { scheduler } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
+import { isReviewedTierVariantWireId } from "@oh-my-pi/pi-catalog/compat/collapse";
 import {
 	ensureAntigravityVersion,
+	getAntigravityHeaders,
 	getAntigravityModelWireProfile,
-	getAntigravityUserAgent,
 	getGeminiCliHeaders,
 } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import { extractHttpStatusFromError, fetchWithRetry, readSseJson } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
+import { oauthAccountKey } from "../auth/types";
 import type {
+	AntigravityModelWireProfile,
 	Api,
 	AssistantMessage,
 	Context,
@@ -284,14 +287,17 @@ export interface AntigravityProviderSessionState extends ProviderSessionState {
 	/**
 	 * Per-conversation request-envelope identity that mirrors the real
 	 * Antigravity client. `sessionId` is the signed-decimal session id;
-	 * `agentId`/`trajectoryId` are UUIDs; `stepIndex` is the monotonic step
-	 * counter; `lastExecutionId` is the prior response id echoed as
-	 * `labels.last_execution_id`.
+	 * `agentId`/`trajectoryId` are UUIDs (`agentId` doubles as
+	 * `labels.cascade_id`/`root_cascade_id`); `stepIndex` is the last
+	 * requestId step (monotonic); `requestCount` counts envelopes already built for the trajectory
+	 * (`labels.request_id` suffix); `lastExecutionId` is the prior response id
+	 * echoed as `labels.last_execution_id`.
 	 */
 	agentId?: string;
 	trajectoryId?: string;
 	sessionId?: string;
 	stepIndex?: number;
+	requestCount?: number;
 	lastExecutionId?: string;
 }
 
@@ -340,6 +346,7 @@ const innerCredentialsSchema = type({
 	"refreshToken?": optionalCredentialString,
 	"refresh?": optionalCredentialString,
 	"email?": optionalCredentialString,
+	"accountId?": optionalCredentialString,
 	"expiresAt?": "unknown",
 	"expires?": "unknown",
 });
@@ -355,6 +362,7 @@ interface ParsedGeminiCliCredentials {
 	refreshToken?: string;
 	expiresAt?: number;
 	email?: string;
+	accountId?: string;
 }
 
 function normalizeExpiryMs(value: unknown): number | undefined {
@@ -388,6 +396,7 @@ export function parseGeminiCliCredentials(apiKeyRaw: string): ParsedGeminiCliCre
 	const refreshToken = parsed.refreshToken ?? parsed.refresh;
 	const expiresAt = normalizeExpiryMs(parsed.expiresAt ?? parsed.expires);
 	const email = parsed.email && parsed.email.length > 0 ? parsed.email : undefined;
+	const accountId = parsed.accountId && parsed.accountId.length > 0 ? parsed.accountId : undefined;
 
 	return {
 		accessToken: parsed.token,
@@ -395,6 +404,7 @@ export function parseGeminiCliCredentials(apiKeyRaw: string): ParsedGeminiCliCre
 		refreshToken,
 		expiresAt,
 		email,
+		accountId,
 	};
 }
 
@@ -470,7 +480,7 @@ interface CloudCodeAssistResponseChunk {
 		promptFeedback?: { blockReason?: string; blockReasonMessage?: string };
 	};
 	/** In-band stream failure (quota, internal error) delivered as a final JSON event. */
-	error?: { code?: number; message?: string; status?: string };
+	error?: { code?: number; message?: string; status?: string; details?: unknown[] };
 	traceId?: string;
 }
 
@@ -583,7 +593,12 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 				model.compat.maxImageDimension !== undefined || model.compat.maxImagePayloadBytes !== undefined
 					? await prepareAnthropicImageContext(context, model)
 					: context;
-			let requestBody = buildRequest(model, requestContext, projectId, options, isAntigravity);
+			// Multi-account discovery keys per-account request constants by this
+			// credential's identity; see `Model.accountAccess`.
+			const accountKey = isAntigravity
+				? oauthAccountKey({ accountId: parsedCredentials.accountId, email: parsedCredentials.email, projectId })
+				: undefined;
+			let requestBody = buildRequest(model, requestContext, projectId, options, isAntigravity, accountKey);
 			const replacementPayload = await options?.onPayload?.(requestBody, model);
 			if (replacementPayload !== undefined) {
 				requestBody = replacementPayload as typeof requestBody;
@@ -591,13 +606,14 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			// The backend gates newer models on the client version; a process that
 			// skipped discovery (fresh model cache) must still send the current one.
 			if (isAntigravity) await ensureAntigravityVersion(options?.fetch ?? fetch, options?.signal);
-			const headers = isAntigravity ? { "User-Agent": getAntigravityUserAgent() } : getGeminiCliHeaders(model.id);
-
+			// Antigravity mirrors the native Go client: no `Accept`, gzip only, and
+			// no Claude-thinking beta on Claude 5.x (the compat flag scopes it).
 			const requestHeaders = {
 				Authorization: `Bearer ${accessToken}`,
 				"Content-Type": "application/json",
-				Accept: "text/event-stream",
-				...headers,
+				...(isAntigravity
+					? getAntigravityHeaders()
+					: { Accept: "text/event-stream", ...getGeminiCliHeaders(model.id) }),
 				...(model.compat.claudeThinkingBetaHeader && model.identity.class === "anthropic" && model.reasoning
 					? { "anthropic-beta": CLAUDE_THINKING_BETA_HEADER }
 					: {}),
@@ -787,8 +803,15 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 				);
 				for await (const chunk of chunks) {
 					if (chunk.error) {
-						const detail = chunk.error.message || chunk.error.status || "unknown error";
-						const message = `Cloud Code Assist stream error: ${detail}`;
+						const detail =
+							chunk.error.message && chunk.error.status
+								? `${chunk.error.message} (${chunk.error.status})`
+								: chunk.error.message || chunk.error.status || "unknown error";
+						const residue =
+							Array.isArray(chunk.error.details) && chunk.error.details.length > 0
+								? ` ${JSON.stringify({ error: { status: chunk.error.status, details: chunk.error.details } })}`
+								: "";
+						const message = `Cloud Code Assist stream error: ${detail}${residue}`;
 						throw typeof chunk.error.code === "number" && chunk.error.code >= 400
 							? new AIError.GeminiCliApiError(message, chunk.error.code)
 							: new AIError.ProviderResponseError(message, { provider: model.provider, kind: "runtime" });
@@ -1222,36 +1245,49 @@ interface AntigravityRequestEnvelope {
  * Build the Antigravity request envelope (sessionId, structured requestId,
  * labels) advancing the per-conversation session state. Mirrors the real
  * `antigravity/hub` client: `requestId` is `agent/<agentId>/<ts>/<trajectoryId>/<step>`
- * and `labels.last_step_index` trails the requestId step by one. Without session
- * state (direct callers/tests) it falls back to ephemeral ids.
+ * where `<step>` counts the trajectory's steps so far (each user turn, model
+ * turn and tool result is one step: 1 on the first request, 3 after one tool
+ * round trip), `labels.last_step_index` trails it by one, `labels.cascade_id`
+ * and `labels.root_cascade_id` repeat the agentId, and `labels.request_id` is
+ * `<trajectoryId>-<n>` for the n-th (0-based) request of the trajectory. Labels
+ * are inserted in alphabetical key order like the real client. The step never
+ * moves backwards, so a compacted or resent context still advances it. Without
+ * session state (direct callers/tests) it falls back to ephemeral ids.
  */
 function buildAntigravityRequestEnvelope(
 	model: Model<"google-gemini-cli">,
 	context: Context,
-	wireModelId: string,
+	profile: AntigravityModelWireProfile | undefined,
 	state: AntigravityProviderSessionState | undefined,
 ): AntigravityRequestEnvelope {
+	const contextSteps = Math.max(1, context.messages.length);
+	let requestIndex = 0;
 	if (state) {
 		state.agentId ??= randomUUID();
 		state.trajectoryId ??= randomUUID();
 		state.sessionId ??= randomSignedDecimalSessionId();
-		state.stepIndex = (state.stepIndex ?? 1) + 1;
+		state.stepIndex = Math.max(contextSteps, (state.stepIndex ?? 0) + 1);
+		requestIndex = state.requestCount ?? 0;
+		state.requestCount = requestIndex + 1;
 	}
 	const agentId = state?.agentId ?? randomUUID();
 	const trajectoryId = state?.trajectoryId ?? randomUUID();
 	const sessionId = state?.sessionId ?? deriveAntigravitySessionId(context);
-	const step = state?.stepIndex ?? 2;
+	const step = state?.stepIndex ?? contextSteps;
 	const requestId = `agent/${agentId}/${Date.now()}/${trajectoryId}/${step}`;
 	const isClaude = model.identity.class === "anthropic";
-	const profile = getAntigravityModelWireProfile(wireModelId);
 	const labels: Record<string, string> = {};
+	labels.cascade_id = agentId;
 	if (state?.lastExecutionId) labels.last_execution_id = state.lastExecutionId;
 	labels.last_step_index = String(step - 1);
 	if (profile?.modelEnum !== undefined) labels.model_enum = profile.modelEnum;
+	labels.request_id = `${trajectoryId}-${requestIndex}`;
+	labels.root_cascade_id = agentId;
 	labels.trajectory_id = trajectoryId;
 	const usageLabel = model.compat.antigravityUsageLabel ?? String(isClaude);
 	labels.used_claude = usageLabel;
 	labels.used_claude_conservative = usageLabel;
+	labels.used_non_gemini_model = String(model.identity.class !== "gemini");
 	return { sessionId, requestId, labels };
 }
 
@@ -1261,6 +1297,8 @@ export function buildRequest(
 	projectId: string,
 	options: GoogleGeminiCliOptions = {},
 	isAntigravity = false,
+	/** Serving credential's account key; selects its discovered Antigravity request constants. */
+	accountKey?: string,
 ): CloudCodeAssistRequest {
 	const systemPrompts = normalizeSystemPrompts(context.systemPrompt);
 	const contents = convertMessages(model, context);
@@ -1372,14 +1410,42 @@ export function buildRequest(
 	const wireModelId = options.requestModelId ?? model.requestModelId ?? model.id;
 
 	if (isAntigravity) {
-		// The real client sends a fixed per-model output cap independent of the
-		// thinking budget; reassign so it keeps its slot ahead of thinkingConfig.
-		const profile = getAntigravityModelWireProfile(wireModelId);
-		if (profile) {
+		// The native client sends each SKU's own constants from the account's
+		// roster: a fixed output cap independent of the thinking budget
+		// (reassigned so it keeps its slot ahead of thinkingConfig) and the
+		// `model_enum` label.
+		const profile = getAntigravityModelWireProfile(
+			wireModelId,
+			accountKey === undefined ? undefined : model.accountAccess?.[accountKey]?.antigravityWireProfiles,
+			model.antigravityWireProfiles,
+		);
+		if (profile?.maxOutputTokens !== undefined) {
 			generationConfig.maxOutputTokens = profile.maxOutputTokens;
 		}
+		const thinkingConfig = generationConfig.thinkingConfig;
+		if (
+			profile &&
+			thinkingConfig &&
+			options.thinking?.enabled &&
+			isReviewedTierVariantWireId(model.provider, wireModelId)
+		) {
+			// A tier SKU fixes its own thinking strength; the effort only chose
+			// the SKU. Send it the way the SKU advertises: a level when it has
+			// one, else its budget (`-1` is dynamic).
+			if (profile.thinkingLevel !== undefined) {
+				generationConfig.thinkingConfig = {
+					includeThoughts: thinkingConfig.includeThoughts,
+					thinkingLevel: profile.thinkingLevel,
+				};
+			} else if (profile.thinkingBudget !== undefined) {
+				generationConfig.thinkingConfig = {
+					includeThoughts: thinkingConfig.includeThoughts,
+					thinkingBudget: profile.thinkingBudget,
+				};
+			}
+		}
 		const state = getAntigravityProviderSessionState(options.providerSessionState);
-		const envelope = buildAntigravityRequestEnvelope(model, context, wireModelId, state);
+		const envelope = buildAntigravityRequestEnvelope(model, context, profile, state);
 		request.labels = envelope.labels;
 		if (Object.keys(generationConfig).length > 0) {
 			request.generationConfig = generationConfig;

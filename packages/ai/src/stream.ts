@@ -13,7 +13,7 @@ import {
 	resolveWireModelId,
 	withoutUnverifiedThinking,
 } from "@oh-my-pi/pi-catalog/model-thinking";
-import { $env, getProviderInFlightRoot, isEnoent, logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { $env, getProviderInFlightRoot, isEnoent, isPidAlive, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { getCustomApi } from "./api-registry";
 import { createAuthRetryKeyState, isApiKeyResolver, resolvedApiKeyBearer, resolveNextAuthRetryKey } from "./auth-retry";
 import type { OAuthRequestIdentity } from "./auth/types";
@@ -165,18 +165,6 @@ function providerInFlightLockDir(provider: string): string {
 	return `${providerInFlightDir(provider)}.lock`;
 }
 
-// `process.kill(pid, 0)` may throw for permission/sandbox reasons even when a
-// process exists. Treat non-ESRCH failures as alive; timestamp expiry still
-// reaps leases whose heartbeat stopped.
-function isProcessAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		return (error as NodeJS.ErrnoException).code !== "ESRCH";
-	}
-}
-
 async function readProviderInFlightInfo(infoPath: string): Promise<ProviderInFlightLeaseInfo | null> {
 	try {
 		const content = await fs.readFile(infoPath, "utf-8");
@@ -208,7 +196,7 @@ async function writeProviderInFlightInfo(dir: string, token: string): Promise<vo
 async function isProviderInFlightDirStale(dir: string, staleMs: number): Promise<boolean> {
 	const info = await readProviderInFlightInfo(path.join(dir, "info.json"));
 	if (info) {
-		if (!isProcessAlive(info.pid)) return true;
+		if (!isPidAlive(info.pid)) return true;
 		return Date.now() - info.timestamp > staleMs;
 	}
 
@@ -231,7 +219,7 @@ async function isProviderInFlightDirStale(dir: string, staleMs: number): Promise
 async function readProviderInFlightStaleLock(lockDir: string): Promise<ProviderInFlightStaleLock | null> {
 	const infoPath = path.join(lockDir, "info.json");
 	const info = await readProviderInFlightInfo(infoPath);
-	if (info) return isProcessAlive(info.pid) ? null : { token: info.token };
+	if (info) return isPidAlive(info.pid) ? null : { token: info.token };
 
 	try {
 		const stat = await fs.stat(lockDir);
@@ -935,6 +923,7 @@ function streamDispatch<TApi extends Api>(
 			return streamAnthropic(providerModel as Model<"anthropic-messages">, context, {
 				...anthropicOptions,
 				isOAuth: anthropicOptions.isOAuth ?? providerModel.isOAuth,
+				waitForTerminalDrain: limited,
 			});
 		}
 
@@ -1555,6 +1544,34 @@ const GOOGLE_THINKING: Record<Effort, number> = {
 	max: 32768,
 };
 
+/**
+ * Estimated thinking spend for an effort, used to size Google's
+ * `maxOutputTokens` (Gemini counts thinking against it). Level mode and the
+ * dynamic budget (`-1`, from a custom or catalog budget) put no positive
+ * number on the wire, so the effort default stands in for them.
+ */
+function googleThinkingHeadroom(model: Model<Api>, effort: Effort, customBudgets?: ThinkingBudgets): number {
+	const custom = customBudgets?.[effort];
+	if (custom !== undefined && custom > 0) return custom;
+	const catalog = model.thinking?.effortBudgets?.[effort];
+	return catalog !== undefined && catalog > 0 ? catalog : GOOGLE_THINKING[effort];
+}
+
+/**
+ * Google total output cap for a caller answer budget: the budget plus thinking
+ * headroom, bounded by the model cap. `undefined` (no cap sent) when neither
+ * the caller nor the model has one.
+ */
+function googleMaxOutputTokens(
+	baseMaxTokens: number | undefined,
+	model: Model<Api>,
+	headroom: number,
+): number | undefined {
+	return baseMaxTokens === undefined
+		? undefined
+		: maxTokensWithThinkingBudget(baseMaxTokens, model.maxTokens, headroom);
+}
+
 const BEDROCK_CLAUDE_THINKING: Record<Effort, number> = {
 	minimal: 1024,
 	low: 2048,
@@ -1775,6 +1792,7 @@ function mapOptionsForApi<TApi extends Api>(
 		initiatorOverride: options?.initiatorOverride,
 		maxRetryDelayMs: options?.maxRetryDelayMs,
 		metadata: options?.metadata,
+		loopGuard: options?.loopGuard,
 		taskBudget: options?.taskBudget,
 		sessionId: options?.sessionId,
 		promptCacheKey: options?.promptCacheKey,
@@ -2059,6 +2077,7 @@ function mapOptionsForApi<TApi extends Api>(
 				serviceTier: options?.serviceTier,
 				preferWebsockets: options?.preferWebsockets,
 				codexCompaction: options?.codexCompaction,
+				codexAccessPrograms: options?.codexAccessPrograms,
 				reasoningSummary: options?.hideThinkingSummary ? null : undefined,
 				textVerbosity: options?.textVerbosity,
 				disableReasoning: options?.disableReasoning,
@@ -2069,14 +2088,16 @@ function mapOptionsForApi<TApi extends Api>(
 			// Explicitly disable thinking when reasoning is absent, unsupported, or
 			// replaced by the caller's external scratchpad. Gemini defaults thinking on.
 			const reasoning = options?.reasoning;
-			if (!reasoning || !model.reasoning || options?.disableReasoning || options?.forceReasoningOff) {
-				return castApi<"google-generative-ai">({
+			const thinkingOff = () =>
+				castApi<"google-generative-ai">({
 					...base,
 					serviceTier: options?.serviceTier,
 					thinking: resolveGoogleThinkingOff(model),
 					toolChoice: mapGoogleToolChoice(options?.toolChoice),
 					cachedContent: options?.cachedContent,
 				});
+			if (!reasoning || !model.reasoning || options?.disableReasoning || options?.forceReasoningOff) {
+				return thinkingOff();
 			}
 
 			const googleModel = model as Model<"google-generative-ai">;
@@ -2087,6 +2108,12 @@ function mapOptionsForApi<TApi extends Api>(
 			if (googleModel.thinking?.mode === "google-level") {
 				return castApi<"google-generative-ai">({
 					...base,
+					// Caller's maxTokens is desired output; Gemini counts thinking against the cap.
+					maxTokens: googleMaxOutputTokens(
+						base.maxTokens,
+						model,
+						googleThinkingHeadroom(model, effort, options?.thinkingBudgets),
+					),
 					serviceTier: options?.serviceTier,
 					thinking: {
 						enabled: true,
@@ -2098,11 +2125,24 @@ function mapOptionsForApi<TApi extends Api>(
 				});
 			}
 
+			const requestedBudget = getGoogleBudget(googleModel, effort, options?.thinkingBudgets);
+			const maxTokens = googleMaxOutputTokens(
+				base.maxTokens,
+				model,
+				requestedBudget > 0 ? requestedBudget : googleThinkingHeadroom(model, effort, options?.thinkingBudgets),
+			);
+			let budgetTokens = requestedBudget;
+			// If not enough room for thinking + output, reduce thinking budget.
+			if (requestedBudget > 0 && maxTokens !== undefined && maxTokens <= requestedBudget) {
+				budgetTokens = maxTokens - MIN_OUTPUT_TOKENS;
+				if (budgetTokens <= 0) return thinkingOff();
+			}
 			return castApi<"google-generative-ai">({
 				...base,
+				maxTokens,
 				thinking: {
 					enabled: true,
-					budgetTokens: getGoogleBudget(googleModel, effort, options?.thinkingBudgets),
+					budgetTokens,
 				},
 				hideThinkingSummary: options?.hideThinkingSummary,
 				toolChoice: mapGoogleToolChoice(options?.toolChoice),
@@ -2120,6 +2160,12 @@ function mapOptionsForApi<TApi extends Api>(
 				if (model.thinking?.mode === "google-level") {
 					return castApi<"google-gemini-cli">({
 						...base,
+						// Caller's maxTokens is desired output; Gemini counts thinking against the cap.
+						maxTokens: googleMaxOutputTokens(
+							base.maxTokens,
+							model,
+							googleThinkingHeadroom(model, effort, options.thinkingBudgets),
+						),
 						requestModelId: resolveWireModelId(model, effort),
 						thinking: {
 							enabled: true,
@@ -2175,14 +2221,16 @@ function mapOptionsForApi<TApi extends Api>(
 			// Explicitly disable thinking when reasoning is absent, unsupported, or
 			// replaced by the caller's external scratchpad.
 			const reasoning = options?.reasoning;
-			if (!reasoning || !model.reasoning || options?.disableReasoning || options?.forceReasoningOff) {
-				return castApi<"google-vertex">({
+			const thinkingOff = () =>
+				castApi<"google-vertex">({
 					...base,
 					serviceTier: options?.serviceTier,
 					thinking: resolveGoogleThinkingOff(model),
 					toolChoice: mapGoogleToolChoice(options?.toolChoice),
 					cachedContent: options?.cachedContent,
 				});
+			if (!reasoning || !model.reasoning || options?.disableReasoning || options?.forceReasoningOff) {
+				return thinkingOff();
 			}
 
 			const vertexModel = model as Model<"google-vertex">;
@@ -2192,6 +2240,12 @@ function mapOptionsForApi<TApi extends Api>(
 			if (geminiModel.thinking?.mode === "google-level") {
 				return castApi<"google-vertex">({
 					...base,
+					// Caller's maxTokens is desired output; Gemini counts thinking against the cap.
+					maxTokens: googleMaxOutputTokens(
+						base.maxTokens,
+						model,
+						googleThinkingHeadroom(model, effort, options?.thinkingBudgets),
+					),
 					serviceTier: options?.serviceTier,
 					thinking: {
 						enabled: true,
@@ -2203,12 +2257,25 @@ function mapOptionsForApi<TApi extends Api>(
 				});
 			}
 
+			const requestedBudget = getGoogleBudget(geminiModel, effort, options?.thinkingBudgets);
+			const maxTokens = googleMaxOutputTokens(
+				base.maxTokens,
+				model,
+				requestedBudget > 0 ? requestedBudget : googleThinkingHeadroom(model, effort, options?.thinkingBudgets),
+			);
+			let budgetTokens = requestedBudget;
+			// If not enough room for thinking + output, reduce thinking budget.
+			if (requestedBudget > 0 && maxTokens !== undefined && maxTokens <= requestedBudget) {
+				budgetTokens = maxTokens - MIN_OUTPUT_TOKENS;
+				if (budgetTokens <= 0) return thinkingOff();
+			}
 			return castApi<"google-vertex">({
 				...base,
+				maxTokens,
 				serviceTier: options?.serviceTier,
 				thinking: {
 					enabled: true,
-					budgetTokens: getGoogleBudget(geminiModel, effort, options?.thinkingBudgets),
+					budgetTokens,
 				},
 				hideThinkingSummary: options?.hideThinkingSummary,
 				toolChoice: mapGoogleToolChoice(options?.toolChoice),
@@ -2254,6 +2321,7 @@ function mapOptionsForApi<TApi extends Api>(
 				maxTokens: options?.maxTokens,
 				reasoning,
 				disableReasoning: options?.disableReasoning || options?.forceReasoningOff,
+				disableServerSideFallback: options?.disableServerSideFallback,
 				hideThinkingSummary: options?.hideThinkingSummary,
 				textVerbosity: options?.textVerbosity,
 				serviceTier: options?.serviceTier,

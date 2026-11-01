@@ -79,7 +79,7 @@ impl Arena {
 	/// Record `start..start + len` as owned by a new guard.
 	fn commit(&self, start: usize, len: usize) {
 		self.offset.set(start + len);
-		self.live.set(self.live.get() + 1);
+		self.live.update(|v| v + 1);
 	}
 
 	/// Return `start..end`. The topmost range rolls the bump pointer back

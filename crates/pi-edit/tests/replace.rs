@@ -101,6 +101,28 @@ async fn cursor_batch_failure_stages_nothing() {
 	assert_eq!(workspace.read("a.ts").as_deref(), Some("one\ntwo\n"));
 }
 
+#[tokio::test]
+async fn a_batch_that_undoes_itself_is_a_no_change_refusal() {
+	let workspace = Workspace::new(EditMode::Replace);
+	workspace.write("a.ts", "one\ntwo\n");
+	let writer = DiskWriter::default();
+	let error = workspace
+		.apply_json(
+			&json!({
+				"path": "a.ts",
+				"edits": [
+					{ "old_string": "one", "new_string": "ONE" },
+					{ "old_string": "ONE", "new_string": "one" }
+				]
+			}),
+			&writer,
+		)
+		.await
+		.unwrap_err();
+	assert_eq!(error.kind(), "no_change", "{error}");
+	assert!(writer.requests.lock().is_empty());
+}
+
 #[test]
 fn replace_matcher_entries_use_top_level_path_and_new_string() {
 	let engine = ReplaceEngine { allow_fuzzy: true, fuzzy_threshold: 0.95 };

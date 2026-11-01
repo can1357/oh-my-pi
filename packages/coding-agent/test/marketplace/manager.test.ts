@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
+import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
@@ -116,6 +117,16 @@ function createTestContext(): TestContext {
 	});
 
 	return { manager, tmpDir, clearCount: () => count };
+}
+
+/** Shares `ctx`'s user-level paths but has no project registry, like running omp outside the project. */
+function createOutsideProjectManager(tmpDir: string): MarketplaceManager {
+	return new MarketplaceManager({
+		marketplacesRegistryPath: path.join(tmpDir, "marketplaces.json"),
+		installedRegistryPath: path.join(tmpDir, "installed_plugins.json"),
+		marketplacesCacheDir: path.join(tmpDir, "cache", "marketplaces"),
+		pluginsCacheDir: path.join(tmpDir, "cache", "plugins"),
+	});
 }
 
 function mockPluginManagerPaths(root: string) {
@@ -1183,6 +1194,19 @@ describe("MarketplaceManager", () => {
 		expect(fs.existsSync(userEntry.installPath)).toBe(true);
 	});
 
+	it("user-scope uninstall outside the project keeps the cache dir a project install links to", async () => {
+		await ctx.manager.addMarketplace(FIXTURE_DIR);
+		await ctx.manager.installPlugin("hello-plugin", "test-marketplace", { scope: "user" });
+		const projectEntry = await ctx.manager.installPlugin("hello-plugin", "test-marketplace", { scope: "project" });
+
+		await createOutsideProjectManager(ctx.tmpDir).uninstallPlugin("hello-plugin@test-marketplace", "user");
+		expect(fs.existsSync(projectEntry.installPath)).toBe(true);
+
+		// Once the project drops it too, nothing references the cache dir and it is collected.
+		await ctx.manager.uninstallPlugin("hello-plugin@test-marketplace", "project");
+		expect(fs.existsSync(projectEntry.installPath)).toBe(false);
+	});
+
 	it("listInstalledPlugins marks user entry as shadowed when project entry exists for same ID", async () => {
 		await ctx.manager.addMarketplace(FIXTURE_DIR);
 		await ctx.manager.installPlugin("hello-plugin", "test-marketplace", { scope: "user" });
@@ -1326,6 +1350,32 @@ describe("MarketplaceManager", () => {
 			expect(installed[0].entries[0].version).toBe("2.0.0");
 		});
 
+		it("upgradePlugin names the new version in the registry before it removes the old version's files", async () => {
+			await ctx.manager.addMarketplace(mktDir);
+			const first = await ctx.manager.installPlugin("hello-plugin", "test-marketplace");
+			await setPluginJsonVersion("2.0.0");
+			// A running session that reads the registry while the old directory goes must still find the plugin.
+			const registeredAtRemoval: string[][] = [];
+			const rm = fsp.rm;
+			const rmSpy = spyOn(fsp, "rm").mockImplementation(async (target, options) => {
+				if (target === first.installPath) {
+					const reg = await readInstalledPluginsRegistry(path.join(ctx.tmpDir, "installed_plugins.json"));
+					registeredAtRemoval.push(
+						(reg.plugins["hello-plugin@test-marketplace"] ?? []).map(entry => entry.version),
+					);
+				}
+				return rm(target, options);
+			});
+			try {
+				await ctx.manager.upgradePlugin("hello-plugin@test-marketplace");
+			} finally {
+				rmSpy.mockRestore();
+			}
+
+			expect(registeredAtRemoval).toEqual([["2.0.0"]]);
+			expect(fs.existsSync(first.installPath)).toBe(false);
+		});
+
 		it("upgradePlugin rejects invalid plugin ID", async () => {
 			await expect(ctx.manager.upgradePlugin("no-at-sign")).rejects.toThrow(/Invalid plugin ID/);
 		});
@@ -1338,6 +1388,23 @@ describe("MarketplaceManager", () => {
 			const entry = await ctx.manager.upgradePlugin("hello-plugin@test-marketplace");
 			expect(entry.scope).toBe("project");
 			expect(entry.version).toBe("2.0.0");
+		});
+
+		it("user-scope upgrade outside the project keeps the old cache dir a project install links to", async () => {
+			await ctx.manager.addMarketplace(mktDir);
+			await ctx.manager.installPlugin("hello-plugin", "test-marketplace", { scope: "user" });
+			const projectEntry = await ctx.manager.installPlugin("hello-plugin", "test-marketplace", {
+				scope: "project",
+			});
+			await setPluginJsonVersion("2.0.0");
+
+			const upgraded = await createOutsideProjectManager(ctx.tmpDir).upgradePlugin(
+				"hello-plugin@test-marketplace",
+				"user",
+			);
+
+			expect(upgraded.installPath).not.toBe(projectEntry.installPath);
+			expect(fs.existsSync(projectEntry.installPath)).toBe(true);
 		});
 
 		it("upgradeAllPlugins upgrades outdated plugins and returns results", async () => {

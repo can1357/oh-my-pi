@@ -197,7 +197,7 @@ export class SessionHandoff {
 				// cancelled"; an empty document is the remaining path that produced the
 				// same misleading, undebuggable message (#7993).
 				logger.warn("Handoff generation produced no content", {
-					sessionId: this.#host.sessionId(),
+					providerSessionId: this.#host.sessionId(),
 					autoTriggered: options?.autoTriggered ?? false,
 				});
 				// Auto-handoff is best-effort: returning undefined lets maintenance fall

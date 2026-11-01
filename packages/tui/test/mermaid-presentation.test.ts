@@ -241,6 +241,33 @@ describe("graphical Mermaid presentation", () => {
 		});
 	}
 
+	it.each([
+		["image", NORMAL, true],
+		["source fallback", "not a Mermaid diagram\nsecond line\nthird line\n", false],
+	] as const)("honors the caller's row ceiling for a Mermaid %s", async (_kind, source, graphical) => {
+		let maxRows = 2;
+		const changes = new Changes();
+		const component = new FigureMarkdown(fence(source), {
+			markdown: text => new Markdown(text, 1, 0, getMarkdownTheme()),
+			charts: false,
+			maxRows: () => maxRows,
+			onChange: changes.notify,
+		});
+		mounted.add(component);
+		const rows = await settle(component, changes);
+		expect(rows.length).toBeLessThanOrEqual(2);
+		expect(hasImage(rows)).toBe(graphical);
+
+		maxRows = 0;
+		expect(component.render(80)).toEqual([]);
+		expect(component.pending).toBe(false);
+
+		maxRows = 3;
+		const restored = await settle(component, changes);
+		expect(restored.length).toBeLessThanOrEqual(3);
+		expect(hasImage(restored)).toBe(graphical);
+	});
+
 	it("renders assistant thinking, prose and figures without changing the original source", async () => {
 		const changes = new Changes();
 		const body = `Before diagram.\n\n${fence(NORMAL)}\n\nAfter diagram.`;

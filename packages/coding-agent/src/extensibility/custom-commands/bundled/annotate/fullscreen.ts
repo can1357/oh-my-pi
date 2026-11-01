@@ -11,6 +11,7 @@ import type {
 } from "@oh-my-pi/pi-tui/overlays/annotation-types";
 import type { ResolvedReviewTarget } from "../review/target";
 import { getEditorCommand, openEditorOnPath, openInEditor } from "../../../../utils/external-editor";
+import { type AnnotationDraft, openAnnotationDraft } from "./draft-store";
 
 /** What the overlay host reads: the UI surface plus the live session cwd for editor paths. */
 export type AnnotationOverlayContext = Pick<CustomCommandContext, "ui" | "cwd" | "sessionManager">;
@@ -106,12 +107,16 @@ async function editReviewedFile(tui: TUI, ctx: AnnotationOverlayContext, overlay
 	ctx.ui.notify(`Opened ${relative}. The review still uses the frozen diff.`, "info");
 }
 
-/** Mount the frozen diff in the TUI overlay surface owned by the command host. */
-export function showCodeReviewOverlay(
+/** Mount the frozen diff in the TUI overlay surface owned by the command host, resuming its saved draft. */
+export async function showCodeReviewOverlay(
 	ctx: AnnotationOverlayContext,
 	target: ResolvedReviewTarget,
+	focus?: string,
+	resumed?: AnnotationDraft,
 ): Promise<CodeReviewOverlayResult | undefined> {
-	return ctx.ui.custom<CodeReviewOverlayResult | undefined>(
+	const draft = await openAnnotationDraft(ctx.sessionManager, { kind: "diff", target, focus }, resumed);
+	if (draft.restored && !resumed) ctx.ui.notify("Restored the saved annotation draft.", "info");
+	const result = await ctx.ui.custom<CodeReviewOverlayResult | undefined>(
 		(tui, theme, keybindings, done) => {
 			const overlay: AnnotationOverlay = new AnnotationOverlay(
 				tui,
@@ -130,18 +135,24 @@ export function showCodeReviewOverlay(
 							: () => editReviewedFile(tui, ctx, overlay),
 				},
 			);
+			draft.restore(overlay);
 			return overlay;
 		},
 		{ overlay: true, overlayOptions: ANNOTATION_OVERLAY_OPTIONS },
 	);
+	await draft.close(result).catch(error => ctx.ui.notify(`Could not save the annotation draft: ${error}`, "warning"));
+	return result;
 }
 
-/** Mount a frozen text source in the same annotation overlay UX. */
-export function showTextReviewOverlay(
+/** Mount a frozen text source in the same annotation overlay UX, resuming its saved draft. */
+export async function showTextReviewOverlay(
 	ctx: AnnotationOverlayContext,
 	source: TextReviewSource,
+	resumed?: AnnotationDraft,
 ): Promise<TextReviewOverlayResult | undefined> {
-	return ctx.ui.custom<TextReviewOverlayResult | undefined>(
+	const draft = await openAnnotationDraft(ctx.sessionManager, { kind: "text", source }, resumed);
+	if (draft.restored && !resumed) ctx.ui.notify("Restored the saved annotation draft.", "info");
+	const result = await ctx.ui.custom<TextReviewOverlayResult | undefined>(
 		(tui, theme, keybindings, done) => {
 			const provenance = source.provenance;
 			const editable = provenance?.kind === "file" || provenance?.kind === "prompt" ? provenance : undefined;
@@ -151,8 +162,11 @@ export function showTextReviewOverlay(
 				onAnnotationExternalEditor: (draft, commit) => editAnnotationDraft(tui, draft, commit),
 				onExternalEditor: editable ? () => editTextSource(tui, ctx, overlay, editable) : undefined,
 			});
+			draft.restore(overlay);
 			return overlay;
 		},
 		{ overlay: true, overlayOptions: ANNOTATION_OVERLAY_OPTIONS },
 	);
+	await draft.close(result).catch(error => ctx.ui.notify(`Could not save the annotation draft: ${error}`, "warning"));
+	return result;
 }

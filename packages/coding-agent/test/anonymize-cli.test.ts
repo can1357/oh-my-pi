@@ -1,9 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { convertAnthropicMessages } from "@oh-my-pi/pi-ai/providers/anthropic";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { runAnonymizeCommand } from "../src/cli/anonymize-cli";
 import { CliUsageError } from "../src/cli/usage-error";
+import { collectPendingToolCalls } from "../src/session/exit-diagnostics";
+import { convertToLlm } from "../src/session/messages";
+import { SessionManager } from "../src/session/session-manager";
 
 const SESSION = `${JSON.stringify({ type: "session", version: 3, id: "01a0c9ac", timestamp: "2026-10-01T00:00:00.000Z", cwd: "/tmp" })}
 ${JSON.stringify({ type: "message", id: "a1b2c3d4", parentId: null, timestamp: "2026-10-01T00:00:01.000Z", message: { role: "user", content: "keep me", timestamp: 1 } })}
@@ -18,6 +24,77 @@ describe("omp anonymize output", () => {
 
 	afterEach(async () => {
 		await tempDir.remove();
+	});
+
+	it("resumes an anonymized session with a completed read and pending edit without treating text as an image", async () => {
+		const seed = SessionManager.inMemory(tempDir.path());
+		const assistant: Omit<AssistantMessage, "content" | "stopReason"> = {
+			role: "assistant",
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			timestamp: 1,
+			usage: {
+				input: 120,
+				output: 30,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 150,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+		};
+		seed.appendMessage({ role: "user", content: "Update the invoice parser", timestamp: 1 });
+		seed.appendMessage({
+			...assistant,
+			stopReason: "toolUse",
+			content: [{ type: "toolCall", id: "toolu_01readabcdef", name: "read", arguments: { path: "billing.ts" } }],
+		});
+		seed.appendMessage({
+			role: "toolResult",
+			toolCallId: "toolu_01readabcdef",
+			toolName: "read",
+			content: [{ type: "text", text: "export const customer = 'alice';" }],
+			isError: false,
+			timestamp: 2,
+		});
+		seed.appendMessage({
+			...assistant,
+			stopReason: "toolUse",
+			content: [
+				{
+					type: "toolCall",
+					id: "toolu_02editabcdef",
+					name: "edit",
+					arguments: { path: "billing.ts", old_string: "alice", new_string: "bob" },
+				},
+			],
+		});
+		const source = path.join(tempDir.path(), "main.jsonl");
+		await Bun.write(
+			source,
+			`${[seed.getHeader(), ...seed.getEntries()].map(entry => JSON.stringify(entry)).join("\n")}\n`,
+		);
+		const out = path.join(tempDir.path(), "out");
+		await runAnonymizeCommand({ session: source, out });
+		const resumed = await SessionManager.open(path.join(out, "session.jsonl"), tempDir.path(), undefined, {
+			initialCwd: tempDir.path(),
+			suppressBreadcrumb: true,
+		});
+		try {
+			expect(collectPendingToolCalls(resumed.getBranch())).toContainEqual(
+				expect.objectContaining({ toolName: "edit", toolCallId: "toolu_02editabcdef" }),
+			);
+			const model = getBundledModel<"anthropic-messages">("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected bundled model");
+			const wire = convertAnthropicMessages(convertToLlm(resumed.buildSessionContext().messages), model, false);
+			const result = wire
+				.flatMap(message => (typeof message.content === "string" ? [] : message.content))
+				.find(block => block.type === "tool_result");
+			expect(result?.content).toEqual([{ type: "text", text: expect.stringMatching(/^\[redacted #\d+:/) }]);
+		} finally {
+			await resumed.close();
+			await seed.close();
+		}
 	});
 
 	it("refuses an --out directory that would overwrite or bundle the source session", async () => {

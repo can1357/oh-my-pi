@@ -218,10 +218,13 @@ export class AnthropicConnectionTimeoutError extends Error {
 }
 
 /**
- * A malformed Anthropic SSE stream envelope — events arriving out of order
- * (before `message_start`) or otherwise violating the message-event grammar.
- * The message is prefixed with {@link STREAM_ENVELOPE_ERROR_PREFIX} so the
- * shared envelope predicates classify it.
+ * A malformed or truncated Anthropic SSE stream envelope — events arriving out
+ * of order (before `message_start`), a retryable in-band `error` frame that ends
+ * the message before its terminal frame, or otherwise a stream that never
+ * reached that frame. A deterministic provider rejection keeps its
+ * completed-turn error instead. The message is prefixed with
+ * {@link STREAM_ENVELOPE_ERROR_PREFIX} so the shared envelope predicates
+ * classify it.
  */
 export class AnthropicStreamEnvelopeError extends Error {
 	constructor(detail: string) {

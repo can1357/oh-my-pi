@@ -128,6 +128,21 @@ describe("JSON query in read tool", () => {
 		);
 	});
 
+	it("retains the reason and key when jaq rejects a large JSON value", async () => {
+		const largeFile = path.join(tempDir, "large.json");
+		const rows = Array.from({ length: 400 }, (_, index) => ({ label: `row ${index}`, input: "x".repeat(40) }));
+		await Bun.write(largeFile, JSON.stringify([{ rows }]));
+
+		const error = await readTool.execute("large-error", { path: `${largeFile}?q=.changedFiles` }).then(
+			() => null,
+			error => error,
+		);
+		const message = String(error);
+		expect(message).toContain("cannot index");
+		expect(message).toContain('with "changedFiles"');
+		expect(message.length).toBeLessThan(1000);
+	});
+
 	it("reads the file normally without jq query when ?q= is omitted", async () => {
 		const result = await readTool.execute("call_7", { path: jsonFile });
 		const text = getText(result);

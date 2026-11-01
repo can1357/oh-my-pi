@@ -5,6 +5,7 @@ import type {
 	ElementHandle,
 	Frame,
 	JSHandle,
+	KeyboardTypeOptions,
 	KeyInput,
 	KeyPressOptions,
 	MouseButton,
@@ -91,6 +92,13 @@ interface PageShadowRoot {
 	elementFromPoint(x: number, y: number): PageElement | null;
 }
 
+/** An element on the way up to a contenteditable's editing host. */
+interface EditableAncestor {
+	isContentEditable: boolean;
+	parentElement: EditableAncestor | null;
+	focus(): void;
+}
+
 interface PageElement {
 	readonly tagName: string;
 	id: string;
@@ -105,6 +113,8 @@ interface PageElement {
 	readonly dataset: Record<string, string>;
 	readonly style: Record<string, string>;
 	parentElement: PageElement | null;
+	/** The `<slot>` rendering this node, its parent in the flat tree; `null` when unslotted. */
+	assignedSlot: PageElement | null;
 	shadowRoot: PageShadowRoot | null;
 	getBoundingClientRect(): PageRect;
 	getClientRects(): ArrayLike<PageRect>;
@@ -154,19 +164,33 @@ export class ClickRefusedError extends ToolAbortError {
 	}
 }
 
+/**
+ * Text entry aborted after input reached the page; `progress` says what the field may already hold.
+ * The per-op timeout reports this instead of an actionability hint, since the element did take input.
+ */
+export class TypingInterruptedError extends ToolAbortError {
+	constructor(
+		readonly progress: string,
+		options?: ErrorOptions,
+	) {
+		super(undefined, options);
+	}
+}
+
 function requireFiniteNumber(value: number, label: string): void {
 	if (!Number.isFinite(value)) throw new ToolError(`${label} must be a finite number`);
 }
 
 /**
  * Page function (self-contained; serialisable via `.toString()`): whether `descendant` is `ancestor` or
- * sits inside it, crossing the shadow-root boundaries `Node.contains` stops at.
+ * renders inside it — its flat-tree ancestry, which follows slot assignment into shadow trees and climbs
+ * shadow-root boundaries out to their hosts, where `Node.contains` stops.
  */
 export function composedContains(ancestor: unknown, descendant: unknown): boolean {
 	for (let current = descendant as PageElement | null; current;) {
 		if (current === ancestor) return true;
 		const root: PageRoot = current.getRootNode();
-		current = current.parentElement ?? root.host ?? null;
+		current = current.assignedSlot ?? current.parentElement ?? root.host ?? null;
 	}
 	return false;
 }
@@ -237,7 +261,7 @@ function checkClickActionable(
 		let current: PageElement | null = hit;
 		while (current && current !== owner) {
 			if (current.matches(interactiveContent)) return false;
-			current = current.parentElement ?? current.getRootNode().host ?? null;
+			current = current.assignedSlot ?? current.parentElement ?? current.getRootNode().host ?? null;
 		}
 		return current === owner;
 	};
@@ -411,7 +435,7 @@ export async function clickElement(
  * had focus; a read-only one drops them. The check runs after `focus()` so a
  * focus handler that locks the field is seen.
  */
-export async function focusTextEntryTarget(
+async function focusTextEntryTarget(
 	handle: ElementHandle,
 	action: "fill" | "type into",
 	signal?: AbortSignal,
@@ -433,6 +457,49 @@ export async function focusTextEntryTarget(
 }
 
 /**
+ * Type into the focused element one code point at a time, checking `signal` before each key.
+ * Puppeteer's `keyboard.type()` cannot be cancelled, so awaiting it whole under a deadline would leave
+ * the rest of the text typing behind a rejected call.
+ *
+ * @throws TypingInterruptedError when `signal` aborts after at least one key was sent.
+ */
+async function typeKeys(
+	page: Page,
+	text: string,
+	signal: AbortSignal | undefined,
+	options?: Readonly<KeyboardTypeOptions>,
+): Promise<void> {
+	const characters = Array.from(text);
+	let typed = 0;
+	try {
+		for (const character of characters) {
+			throwIfAborted(signal);
+			await untilAborted(signal, () => page.keyboard.type(character, options));
+			typed++;
+		}
+	} catch (error) {
+		if (signal?.aborted && typed > 0) {
+			throw new TypingInterruptedError(
+				`typing stopped after ${typed} of ${characters.length} characters (the field keeps what was typed)`,
+				{ cause: signal.reason },
+			);
+		}
+		throw error;
+	}
+}
+
+/** Focus a text-entry target, then type `text` so an abort stops before the next key; see {@link typeKeys}. */
+export async function typeIntoElement(
+	handle: ElementHandle,
+	text: string,
+	signal?: AbortSignal,
+	options?: Readonly<KeyboardTypeOptions>,
+): Promise<void> {
+	await focusTextEntryTarget(handle, "type into", signal);
+	await typeKeys(handle.frame.page(), text, signal, options);
+}
+
+/**
  * Input types set through a picker or slider, with an example of the value each takes. Typing into
  * one fills its segments by keystroke rules (`2026-10-12` became `61012-02-02`) or nothing at all
  * (a colour stayed `#000000`, a range at its midpoint), so fill sets their value instead.
@@ -450,25 +517,19 @@ const PICKER_INPUT_TYPES = Object.keys(PICKER_VALUE_EXAMPLES);
 
 /**
  * Focus a field that can take text, clear any existing value, then retype. A colour, date, time or
- * range input gets its value set the way its picker would, and refuses one it rejects.
+ * range input gets its value set the way its picker would, and refuses one it rejects. A
+ * contenteditable element has its contents selected and replaced by one text insertion (or deleted
+ * by Backspace for an empty value), as a paste would.
  *
  * Every step is a DOM evaluation or an input dispatch, so this works on tabs
  * that produce no animation frames — unlike Puppeteer's `Locator.fill`, whose
  * viewport/stability/enabled preconditions wait on `requestAnimationFrame`
  * and `IntersectionObserver` callbacks that a backgrounded headless tab never
- * delivers (#12892).
- *
- * `type` overrides how the value is entered, for callers that need their own
- * abort-aware keyboard loop.
+ * delivers (#12892). Typing stops at the next key once `signal` aborts.
  */
-export async function fillViaHandle(
-	handle: ElementHandle,
-	value: string,
-	signal?: AbortSignal,
-	type: (text: string) => Promise<unknown> = text => handle.type(text, { delay: 0 }),
-): Promise<void> {
+export async function fillViaHandle(handle: ElementHandle, value: string, signal?: AbortSignal): Promise<void> {
 	await focusTextEntryTarget(handle, "fill", signal);
-	const picker = await untilAborted(signal, () =>
+	const prepared = await untilAborted(signal, () =>
 		handle.evaluate(
 			(el, wanted, pickerTypes) => {
 				const node = el as unknown as {
@@ -477,7 +538,8 @@ export async function fillViaHandle(
 					value?: string;
 					focus?: () => void;
 					isContentEditable?: boolean;
-					innerText?: string;
+					parentElement: EditableAncestor | null;
+					getRootNode(): { activeElement: { contains(other: unknown): boolean } | null };
 					getAttribute(name: string): string | null;
 					namespaceURI: string | null;
 					ownerDocument: {
@@ -485,6 +547,12 @@ export async function fillViaHandle(
 							namespace: string | null,
 							tag: "input",
 						): { value: string; setAttribute(name: string, value: string): void };
+						createRange(): {
+							readonly collapsed: boolean;
+							selectNodeContents(node: unknown): void;
+							getClientRects(): ArrayLike<{ width: number; height: number }>;
+						};
+						getSelection(): { removeAllRanges(): void; addRange(range: unknown): void } | null;
 					};
 					dispatchEvent(event: unknown): boolean;
 				};
@@ -570,27 +638,77 @@ export async function fillViaHandle(
 						write(wanted);
 						report();
 					}
-					return { kind, refused };
+					return { target: "picker" as const, kind, refused };
 				}
-				const before = node.isContentEditable ? node.innerText : node.value;
-				if (node.isContentEditable) node.innerText = "";
-				else if ("value" in node) write("");
+				if (node.isContentEditable) {
+					// An element inside an editing host cannot take focus itself, so its host is focused. Input goes
+					// to whatever holds focus, so a host whose focus handler moved it elsewhere (or an inert one)
+					// would have the replacement land in another control. The element's own root (its document, or a
+					// shadow root, closed ones included) says which of its elements holds focus.
+					let host: EditableAncestor | null = node.parentElement?.isContentEditable ? node.parentElement : null;
+					while (host?.parentElement?.isContentEditable) host = host.parentElement;
+					host?.focus();
+					if (!node.getRootNode().activeElement?.contains(node)) return { target: "unfocused" as const };
+					// Rich-text editors (Slate, Lexical) keep their own document and either undo a direct DOM write
+					// or stop tracking the element, so the old text is selected for the input that replaces it.
+					const range = node.ownerDocument.createRange();
+					range.selectNodeContents(node);
+					const selection = node.ownerDocument.getSelection();
+					selection?.removeAllRanges();
+					selection?.addRange(range);
+					// The browser keeps a deletion inside the editing host, so a host with any contents is cleared.
+					// Inside a host, Backspace over contents that draw nothing deletes the character before them, so
+					// an element there is cleared only when its contents draw something (text, an image).
+					const deletable = node.parentElement?.isContentEditable
+						? Array.from(range.getClientRects()).some(rect => rect.width > 0 && rect.height > 0)
+						: !range.collapsed;
+					return { target: "editable" as const, deletable };
+				}
+				const before = node.value;
+				if ("value" in node) write("");
 				// Typing a value fires its own input events; an empty value types nothing,
 				// so report the clear itself when there was something to clear.
 				if (wanted === "" && before) report();
-				return null;
+				return { target: "field" as const };
 			},
 			value,
 			PICKER_INPUT_TYPES,
 		),
 	);
-	if (picker?.refused) {
-		throw new ToolError(
-			`<input type=${picker.kind}> does not accept ${JSON.stringify(value)}; give its value format, e.g. ${PICKER_VALUE_EXAMPLES[picker.kind]}`,
-		);
+	const page = handle.frame.page();
+	switch (prepared.target) {
+		case "picker":
+			if (prepared.refused) {
+				throw new ToolError(
+					`<input type=${prepared.kind}> does not accept ${JSON.stringify(value)}; give its value format, e.g. ${PICKER_VALUE_EXAMPLES[prepared.kind]}`,
+				);
+			}
+			return;
+		case "unfocused":
+			throw new ToolError("Cannot fill an element that does not keep focus");
+		case "editable":
+			if (!value && !prepared.deletable) return;
+			throwIfAborted(signal);
+			try {
+				// One `Input.insertText` replaces the selection the way a paste does; the editor's own
+				// beforeinput handling applies it to its model. Backspace is a real deletion of the selection.
+				await untilAborted(signal, () =>
+					value ? page.keyboard.sendCharacter(value) : page.keyboard.press("Backspace"),
+				);
+			} catch (error) {
+				// The input was already sent and cannot be recalled, so the editor may hold its result.
+				if (signal?.aborted) {
+					throw new TypingInterruptedError(
+						`the ${value ? "replacement text" : "deletion"} was already sent and may have reached the editor`,
+						{ cause: signal.reason },
+					);
+				}
+				throw error;
+			}
+			return;
+		case "field":
+			await typeKeys(page, value, signal);
 	}
-	if (picker) return;
-	await untilAborted(signal, () => type(value));
 }
 
 interface QueryCandidate {
@@ -650,7 +768,7 @@ function measureBoxInPage(el: unknown): MeasuredBox {
 			if (!nested || nested === hit) break;
 			hit = nested;
 		}
-		for (let node = hit; node; node = node.parentElement ?? node.getRootNode().host ?? null) {
+		for (let node = hit; node; node = node.assignedSlot ?? node.parentElement ?? node.getRootNode().host ?? null) {
 			if (node === element) return true;
 		}
 		return false;

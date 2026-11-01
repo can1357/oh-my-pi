@@ -155,6 +155,8 @@ class ComposerSceneController implements SetupSceneController {
 export const composerSetupScene: SetupScene = {
 	id: "composer-shape",
 	title: "Choose composer shape",
+	step: "Composer",
 	minVersion: 2,
+	ansiOnly: true,
 	mount: host => new ComposerSceneController(host),
 };

@@ -36,7 +36,6 @@ import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 import { HookEditorComponent } from "./hook-editor";
 import {
 	buildBrowserItems,
-	MODEL_PICKER_COLUMNS,
 	ModelBrowser,
 	type ModelBrowserItem,
 	type ModelBrowserSource,
@@ -64,10 +63,11 @@ import { getThinkingLevelMetadata, parseThinkingLevel } from "../thinking";
 
 export const ADVISOR_REVIEW_MODES = ["turn", "agent-end"] as const;
 export const ADVISOR_SYNC_BACKLOG_MODES = ["off", "1", "3", "5", "strict"] as const;
+export const ADVISOR_SESSION_SCOPES = ["main", "subagent", "all"] as const;
 
 export type AdvisorReviewMode = (typeof ADVISOR_REVIEW_MODES)[number];
 export type AdvisorSyncBacklog = (typeof ADVISOR_SYNC_BACKLOG_MODES)[number];
-
+export type AdvisorSessionScope = (typeof ADVISOR_SESSION_SCOPES)[number];
 /** One advisor declared in `WATCHDOG.yml`; its instructions specialize the shared baseline. */
 export interface AdvisorConfig {
 	name: string;
@@ -83,6 +83,10 @@ export interface AdvisorConfig {
 	reviewMode?: AdvisorReviewMode;
 	reviewInterval?: number;
 	syncBacklog?: AdvisorSyncBacklog;
+	/** Which session kinds this advisor attaches to (`main`, `subagent`, or `all`; defaults to `all`). */
+	scope?: AdvisorSessionScope;
+	/** Whether primary assistant thinking blocks are included in updates sent to this advisor (defaults to `true`). */
+	includeReasoning?: boolean;
 }
 
 /** Which level a `WATCHDOG.yml` lives at: the project root or the user agent dir. */
@@ -744,16 +748,8 @@ export class AdvisorConfigOverlayComponent implements Component {
 				size: "md",
 				layout: "rows",
 				preview: "below",
-				query: browser.query,
-				cursor: browser.cursor,
 				placeholder: "Search models…",
-				columns: MODEL_PICKER_COLUMNS,
-				...catalogue,
-				order: order.order,
-				...(order.hits ? { hits: order.hits } : {}),
-				selected: browser.pickerSelected,
-				...(this.#modelCurrent ? { current: [this.#modelCurrent] } : {}),
-				total: browser.baseCount,
+				...browser.pickerRows(catalogue, order, this.#modelCurrent),
 				empty: "No models available",
 				actions: [
 					pickerAction("use", "Use for advisor", "enter", { primary: true }),
@@ -1202,7 +1198,9 @@ export class AdvisorConfigOverlayComponent implements Component {
 			advisor.syncBacklog === undefined &&
 			!advisor.instructions?.trim() &&
 			advisor.enabled !== false &&
-			advisor.maxNotesPerUpdate === undefined
+			advisor.maxNotesPerUpdate === undefined &&
+			advisor.scope === undefined &&
+			advisor.includeReasoning === undefined
 		);
 	}
 

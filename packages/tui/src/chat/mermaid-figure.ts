@@ -309,7 +309,7 @@ export function resolveMermaidDiagram(source: string): MermaidDiagram | null {
 	return diagram;
 }
 
-type MermaidFigureOptions = Pick<SvgFigureOptions, "markdown" | "budget" | "onChange">;
+type MermaidFigureOptions = Pick<SvgFigureOptions, "markdown" | "budget" | "maxRows" | "onChange">;
 
 /** A completed Mermaid fence with a bounded, themed image and its original ASCII fallback. */
 export class MermaidFigure implements Component {
@@ -318,7 +318,12 @@ export class MermaidFigure implements Component {
 	#closed = false;
 	#resolvedSource: string | undefined;
 	#svg: SvgFigure | undefined;
-	#fallback: Markdown | undefined;
+	#fallback:
+		| {
+				md: Markdown;
+				clip?: { of: readonly string[]; rows: readonly string[] };
+		  }
+		| undefined;
 	#queued = false;
 	#disposed = false;
 
@@ -355,18 +360,35 @@ export class MermaidFigure implements Component {
 	}
 
 	get pending(): boolean {
-		return !this.#disposed && this.#closed && (this.#resolvedSource !== this.#source || this.#svg?.pending === true);
+		return (
+			this.#maxRows() !== 0 &&
+			!this.#disposed &&
+			this.#closed &&
+			(this.#resolvedSource !== this.#source || this.#svg?.pending === true)
+		);
+	}
+
+	#maxRows(): number | undefined {
+		const rows = this.#options.maxRows?.();
+		return rows === undefined ? undefined : Math.max(0, Math.floor(rows));
 	}
 
 	render(width: number): readonly string[] {
-		if (this.#disposed) return [];
+		if (this.#disposed || this.#maxRows() === 0) return [];
 		return this.#svg?.render(width) ?? this.#fallbackRows(width);
 	}
 
 	#fallbackRows(width: number): readonly string[] {
-		if (!this.#options.markdown) return [];
-		this.#fallback ??= this.#options.markdown(fencedCode("mermaid", this.#source));
-		return this.#fallback.render(width);
+		const maxRows = this.#maxRows();
+		if (!this.#options.markdown || maxRows === 0) return [];
+		this.#fallback ??= { md: this.#options.markdown(fencedCode("mermaid", this.#source)) };
+		const fallback = this.#fallback;
+		const rows = fallback.md.render(width);
+		if (maxRows === undefined || rows.length <= maxRows) return rows;
+		if (fallback.clip?.of !== rows || fallback.clip.rows.length !== maxRows) {
+			fallback.clip = { of: rows, rows: rows.slice(0, maxRows) };
+		}
+		return fallback.clip.rows;
 	}
 
 	invalidate(): void {

@@ -2,7 +2,12 @@ import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { reconcileOpenFilesFromDisk } from "@oh-my-pi/pi-coding-agent/lsp/client";
+import {
+	beginPendingDiskWrite,
+	endPendingDiskWrite,
+	reconcileOpenFilesFromDisk,
+	refreshFile,
+} from "@oh-my-pi/pi-coding-agent/lsp/client";
 import type { LspClient } from "@oh-my-pi/pi-coding-agent/lsp/types";
 import { fileToUri } from "@oh-my-pi/pi-coding-agent/lsp/utils";
 
@@ -70,6 +75,41 @@ describe("reconcileOpenFilesFromDisk", () => {
 			expect(await reconcileOpenFilesFromDisk(client)).toBe(0);
 			expect(frames.length).toBe(before);
 		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("closes an open document deleted outside OMP", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-reconcile-open-"));
+		try {
+			const file = path.join(dir, "consumer.py");
+			const uri = fileToUri(file);
+			const { client, frames } = fakeClient(new Map([[uri, { version: 1, languageId: "python" }]]));
+
+			expect(await reconcileOpenFilesFromDisk(client)).toBe(0);
+			expect(frames.filter(frame => frame.includes("textDocument/didClose") && frame.includes(uri)).length).toBe(1);
+			expect(client.openFiles.has(uri)).toBe(false);
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("refreshFile", () => {
+	test("keeps a missing document open while an OMP write to it is pending", async () => {
+		// A new file's overlay is synced before the write commits it to disk, so
+		// ENOENT here means "not written yet", not "deleted".
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-refresh-missing-"));
+		const file = path.join(dir, "new.ts");
+		const uri = fileToUri(file);
+		const { client, frames } = fakeClient(new Map([[uri, { version: 1, languageId: "typescript" }]]));
+		beginPendingDiskWrite(file);
+		try {
+			await refreshFile(client, file);
+			expect(frames).toEqual([]);
+			expect(client.openFiles.has(uri)).toBe(true);
+		} finally {
+			endPendingDiskWrite(file);
 			await fs.rm(dir, { recursive: true, force: true });
 		}
 	});

@@ -93,25 +93,46 @@ export function structuredStatusLabel(status: StructuredSubagentOutput["status"]
 	return status === "unavailable" ? "unavailable" : `schema ${status}`;
 }
 
+/**
+ * Which agent handles a result for task job `jobId` names. A task job's id can
+ * differ from its agent id (a messaged agent's next turn, vibe turns, workpool
+ * batches, /tan) while its output and transcript stay under the agent id.
+ * `agent://` answers for this job only when it completed without reporting that
+ * it wrote no output; otherwise only `history://` resolves to its turn.
+ * `undefined`: the job id already is the agent id, or this is not a task job.
+ */
+export function taskAgentHandles(
+	jobId: string,
+	job: Pick<AsyncJob, "type" | "status" | "agentOutputPublished"> | undefined,
+	agentUrlId: string | undefined,
+): "agent" | "history" | undefined {
+	if (job?.type !== "task" || !agentUrlId || agentUrlId === jobId) return undefined;
+	return job.status === "completed" && job.agentOutputPublished !== false ? "agent" : "history";
+}
+
 export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): CustomMessage<AsyncResultDetails> | null {
 	if (entries.length === 0) return null;
 	const jobs = entries.map(entry => {
 		const structured = entry.job?.structured;
 		const hasStructuredData = structured ? Object.hasOwn(structured, "data") : false;
 		const structuredJson = structured && structured.status !== "valid" ? renderStructuredJson(structured) : undefined;
+		// The job manager disambiguates a requested job id when it collides
+		// with another live job (e.g. a task job reusing a vibe turn's job
+		// id), suffixing `jobId` — but the task's artifacts are still
+		// written under its own agent id (`AsyncJob.agentId`). Build the
+		// advertised `agent://` URL from that, or the delivery would point
+		// at an id with no backing `<id>.md`/`.json` on disk.
+		const agentUrlId = entry.job?.agentId ?? entry.jobId;
+		const handles = taskAgentHandles(entry.jobId, entry.job, agentUrlId);
 		// Job output (a command's output, or a task's `<task-result>` around a
 		// subagent's output), a subagent's payload and its validation error are
 		// text the job controls: it must not close the `<system-notice>` it renders
 		// into or open a forged harness block.
 		return {
 			jobId: entry.jobId,
-			// The job manager disambiguates a requested job id when it collides
-			// with another live job (e.g. a task job reusing a vibe turn's job
-			// id), suffixing `jobId` — but the task's artifacts are still
-			// written under its own agent id (`AsyncJob.agentId`). Build the
-			// advertised `agent://` URL from that, or the delivery would point
-			// at an id with no backing `<id>.md`/`.json` on disk.
-			agentUrlId: entry.job?.agentId ?? entry.jobId,
+			agentUrlId,
+			showAgentUrl: handles === "agent",
+			showHistoryUrl: handles === "history",
 			result: escapeHarnessTags(entry.result),
 			type: entry.job?.type,
 			status: entry.job?.status,

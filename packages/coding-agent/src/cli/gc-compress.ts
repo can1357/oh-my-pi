@@ -231,6 +231,31 @@ export async function compressFilesInPlace(
 	return result;
 }
 
+/**
+ * Whether `method` actually stores a compressible file compressed under `dir`.
+ * The volume type alone does not prove it: on macOS 27 `ditto --hfsCompression`
+ * exits 0 but writes plain copies (#16244), and policy can disable NTFS
+ * compression. Runs one throwaway file through {@link compressFilesInPlace}
+ * inside a scratch directory the sweep reclaims if this process dies. Throws
+ * when the compression tool itself fails, so a broken run is not mistaken for
+ * a volume that stores files uncompressed.
+ */
+export async function compressionWorks(dir: string, method: CompressMethod): Promise<boolean> {
+	const scratch = await fs.mkdtemp(path.join(dir, COMPRESS_SCRATCH_PREFIX));
+	try {
+		await Bun.write(path.join(scratch, SCRATCH_OWNER_MARKER), "");
+		const probe = path.join(scratch, "probe.txt");
+		await Bun.write(probe, "omp gc compression probe\n".repeat(10_000));
+		const candidate = await compressCandidate(probe);
+		if (!candidate) return false;
+		const batch = await compressFilesInPlace([candidate], method, new Set());
+		if (batch.errors.length > 0) throw new Error(batch.errors.join("; "));
+		return batch.compressed === 1;
+	} finally {
+		await fs.rm(scratch, { recursive: true, force: true });
+	}
+}
+
 async function compactBatch(batch: CompressCandidate[], result: CompressBatchResult): Promise<void> {
 	for (const candidate of batch) result.allocatedAfter += candidate.allocated;
 	// LZNT1 rather than `/exe` (WOF) compression: WOF inflates the whole file on

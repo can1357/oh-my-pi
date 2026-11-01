@@ -86,6 +86,6 @@ describe("ssh file-transfer POSIX guard", () => {
 		expect(dispatches[1]).toMatch(/^bash -c '.*cat > /);
 		expect(buildSpy.mock.calls[1]?.[2]).toMatchObject({ allowStdin: true });
 		expect(dispatches[2]).toMatch(/^bash -c '.*if \[ -d /);
-		expect(dispatches[3]).toMatch(/^bash -c '.*LC_ALL=C ls -1Ap /);
+		expect(dispatches[3]).toMatch(/^bash -c '.*LC_ALL=C find /);
 	});
 });

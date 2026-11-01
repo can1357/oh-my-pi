@@ -19,12 +19,17 @@ import { initXdg } from "./commands/init-xdg";
 
 export type ConfigAction = "list" | "get" | "set" | "reset" | "path" | "init-xdg";
 
+/** Layer `list --scope` reads as written: the agent dir's `config.yml`, or the project's settings files. */
+export type ConfigScope = "global" | "project";
+
 export interface ConfigCommandArgs {
 	action: ConfigAction;
 	key?: string;
 	value?: string;
 	flags: {
 		json?: boolean;
+		/** `list` shows only the keys this layer sets, with the values as written. */
+		scope?: ConfigScope;
 	};
 }
 // =============================================================================
@@ -161,11 +166,16 @@ function getTypeDisplay(def: CliSettingDef): string {
 // =============================================================================
 
 export async function runConfigCommand(cmd: ConfigCommandArgs): Promise<void> {
+	if (cmd.flags.scope !== undefined && cmd.action !== "list") {
+		console.error(chalk.red("--scope applies to `config list` only"));
+		process.exit(1);
+	}
 	await Settings.init();
 
 	switch (cmd.action) {
 		case "list":
-			await handleList(cmd.flags);
+			if (cmd.flags.scope === undefined) await handleList(cmd.flags);
+			else await handleListLayer(cmd.flags.scope, cmd.flags);
 			break;
 		case "get":
 			handleGet(cmd.key, cmd.flags);
@@ -252,6 +262,40 @@ async function handleList(flags: { json?: boolean }): Promise<void> {
 			console.log(`  ${chalk.white(def.path)} = ${valueStr} ${chalk.dim(typeStr)}`);
 		}
 		console.log("");
+	}
+}
+
+/**
+ * The keys the `scope` layer sets, with the values as written: path-scoped arrays
+ * (`enabledModels`, `enabledProviders`, `disabledProviders`) keep their `{ path, … }` entries
+ * unresolved, so a host can edit the layer's own value without dropping them. Defaults, other
+ * layers and the environment are not consulted. Credentials are redacted as in `list`.
+ */
+async function handleListLayer(scope: ConfigScope, flags: { json?: boolean }): Promise<void> {
+	const layer = scope === "project" ? settings.getProjectSettings() : settings.getGlobalSettings();
+	const entries: [CliSettingDef, unknown][] = [];
+	for (const def of orderedSettings().map(toSettingDef)) {
+		let value: unknown = layer;
+		for (const segment of def.setting.segments) value = isRecord(value) ? value[segment] : undefined;
+		if (value !== undefined) entries.push([def, value]);
+	}
+
+	if (flags.json) {
+		const result: Record<string, { value?: unknown; redacted?: true; type: string; description: string }> = {};
+		for (const [def, value] of entries) {
+			result[def.path] =
+				def.setting.isCredential && value
+					? { redacted: true, type: def.type, description: def.description }
+					: { value, type: def.type, description: def.description };
+		}
+		await writeStdout(`${JSON.stringify(result, null, 2)}\n`);
+		return;
+	}
+
+	console.log(chalk.bold(`Settings in the ${scope} layer:\n`));
+	for (const [def, value] of entries) {
+		const valueStr = def.setting.isCredential && value ? REDACTED : formatValue(value);
+		console.log(`  ${chalk.white(def.path)} = ${valueStr} ${chalk.dim(getTypeDisplay(def))}`);
 	}
 }
 
@@ -415,6 +459,7 @@ ${chalk.bold("Commands:")}
 
 ${chalk.bold("Options:")}
   --json             Output as JSON
+  --scope <scope>    With list: only the keys the global or project layer sets, as written
 
 ${chalk.bold("Examples:")}
   ${APP_NAME} config list
@@ -424,6 +469,7 @@ ${chalk.bold("Examples:")}
   ${APP_NAME} config set defaultThinkingLevel medium
   ${APP_NAME} config reset steeringMode
   ${APP_NAME} config list --json
+  ${APP_NAME} config list --scope global --json
   ${APP_NAME} config init-xdg
 
 ${chalk.bold("Boolean Values:")}

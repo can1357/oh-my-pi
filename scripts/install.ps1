@@ -52,7 +52,7 @@ $BuildTarget = switch ($RawArchitecture.ToUpperInvariant()) {
     "ARM64" { "windows-arm64" }
     default { throw "Unsupported Windows architecture: $RawArchitecture" }
 }
-$MinimumBunVersion = "1.3.14"
+$MinimumBunVersion = "1.4.4"
 
 # PowerShell 5.1 raises a terminating NativeCommandError for any line a native
 # executable writes to stderr while $ErrorActionPreference is "Stop", regardless

@@ -11,7 +11,7 @@ use tokio::sync::Mutex;
 
 use crate::{
 	ExecutionControlFlow, ExecutionResult, builtins, env::ShellEnvironment, error, extensions,
-	functions, interfaces, jobs, keywords, openfiles, options::RuntimeOptions, pathcache,
+	functions, interfaces, jobs, keywords, openfiles, options::RuntimeOptions, pathcache, sys,
 	wellknownvars,
 };
 
@@ -93,6 +93,9 @@ pub struct Shell<SE: extensions::ShellExtensions = extensions::DefaultShellExten
 	/// TODO(serde): Need to warn somehow that jobs cannot be serialized.
 	#[cfg_attr(feature = "serde", serde(skip))]
 	jobs: jobs::JobManager,
+	/// PID of the most recently started async child in this shell's scope.
+	/// Cloned into subshells without transferring ownership of the job.
+	last_background_pid: Option<sys::process::ProcessId>,
 
 	/// Shell aliases.
 	aliases: HashMap<String, String>,
@@ -179,6 +182,7 @@ impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
 			funcs: self.funcs.clone(),
 			options: self.options.clone(),
 			jobs: jobs::JobManager::new(),
+			last_background_pid: self.last_background_pid,
 			aliases: self.aliases.clone(),
 			last_exit_status: self.last_exit_status,
 			last_exit_status_change_count: self.last_exit_status_change_count,
@@ -404,6 +408,18 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
 
 	pub(crate) const fn last_exit_status_change_count(&self) -> usize {
 		self.last_exit_status_change_count
+	}
+}
+
+impl<SE: extensions::ShellExtensions> Shell<SE> {
+	/// PID of the last asynchronous child, including one inherited by a subshell.
+	pub(crate) fn last_background_pid(&self) -> Option<sys::process::ProcessId> {
+		self.last_background_pid
+	}
+
+	/// Records the last asynchronous child launched in this shell's scope.
+	pub(crate) fn set_last_background_pid(&mut self, pid: Option<sys::process::ProcessId>) {
+		self.last_background_pid = pid;
 	}
 }
 

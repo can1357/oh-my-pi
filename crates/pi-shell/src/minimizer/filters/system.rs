@@ -1,6 +1,9 @@
 //! Conservative text filters for system-style commands.
 
-use std::{collections::HashMap, fmt::Write as _};
+use std::{
+	collections::HashMap,
+	fmt::{NumBuffer, Write as _},
+};
 
 use super::git;
 use crate::minimizer::{MinimizerCtx, MinimizerOutput, primitives};
@@ -46,6 +49,7 @@ pub fn filter(ctx: &MinimizerCtx<'_>, input: &str, exit_code: i32) -> MinimizerO
 		"summary" => compact_summary_output(&cleaned, exit_code),
 		"err" => compact_err_output(&cleaned),
 		"test" => compact_test_output(&cleaned),
+		"diff" if git::keeps_patch_whole(ctx, ctx.program, input, &cleaned, exit_code) => cleaned,
 		"diff" => git::compact_diff_output(&cleaned),
 		"format" => compact_format_output(&cleaned),
 		"pipe" => compact_pipe_like_output(&cleaned, exit_code),
@@ -371,7 +375,7 @@ fn push_counted_line(out: &mut String, line: &str, count: usize) {
 	out.push_str(line);
 	if count > 1 {
 		out.push_str(" (×");
-		out.push_str(&count.to_string());
+		out.push_str(count.format_into(&mut NumBuffer::new()));
 		out.push(')');
 	}
 	out.push('\n');
@@ -892,7 +896,7 @@ fn compact_ssh_output(input: &str) -> String {
 		out.push_str(line);
 		out.push('\n');
 	}
-	if out.lines().count() > 200 {
+	if input.len() > primitives::WHOLE_OUTPUT_BYTES && out.lines().count() > 200 {
 		primitives::head_tail_lines(&out, 100, 80)
 	} else if out.trim().is_empty() {
 		input.to_string()
@@ -1012,6 +1016,8 @@ warning: unused import: `baz`
 			input.push_str(&idx.to_string());
 			input.push('\n');
 		}
+		// Blank lines take the patch past the size it is returned whole at.
+		input.push_str(&"\n".repeat(primitives::WHOLE_OUTPUT_BYTES));
 		let out = filter(&ctx, &input, 0);
 		assert!(out.changed);
 		assert!(out.text.contains("a.rs | 280"));

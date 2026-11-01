@@ -213,4 +213,86 @@ describe("advisor auto thinking level", () => {
 		expect(await review("cooldown expired")).toBe(`${model.id}:${Effort.High}`);
 		expect(s.getAdvisorAgent()).toBe(advisor);
 	});
+
+	for (const { name, unverified, revertPolicy } of [
+		{ name: "keeps following the primary with no revert", unverified: false, revertPolicy: "never" },
+		{ name: "retunes during cooldown and restores fixed effort", unverified: false, revertPolicy: "cooldown-expiry" },
+		{ name: "leaves unverified thinking unset", unverified: true, revertPolicy: "never" },
+	] as const) {
+		it(`a fixed-effort advisor on an :auto fallback ${name}`, async () => {
+			const provider = "meta";
+			modelRegistry.registerProvider(provider, {
+				api: "openai-completions",
+				apiKey: "test-key",
+				baseUrl: "https://test.example.com",
+				models: [
+					{
+						id: "fallback",
+						name: "Auto fallback",
+						reasoning: !unverified,
+						input: ["text"],
+						supportsTools: true,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 200_000,
+						maxTokens: 64_000,
+					},
+				],
+			});
+			const primary = createMockModel({ handler: { content: ["primary complete"] } });
+			const advisorMock = createMockModel();
+			const wire: Array<{ id: string; reasoning: Effort | undefined }> = [];
+			let failed = false;
+			const s = newSession(
+				primary.stream,
+				{
+					"advisor.syncBacklog": "1",
+					"retry.baseDelayMs": 5,
+					"retry.fallbackRevertPolicy": revertPolicy,
+					"retry.fallbackChains": { advisor: [`${provider}/fallback:auto`] },
+				},
+				(m, context, options) => {
+					wire.push({ id: m.id, reasoning: options?.reasoning });
+					if (m.id === model.id && !failed) {
+						failed = true;
+						advisorMock.push({
+							throw: "Devin stream error failed_precondition: Your daily usage quota has been exhausted. Your quota will reset after 60s.",
+						});
+					} else {
+						advisorMock.push({ content: ["advisor ok"] });
+					}
+					return advisorMock.stream(m, context, options);
+				},
+			);
+			vi.spyOn(modelRegistry.authStorage.limits, "markReached").mockResolvedValue({ switched: false });
+			s.settings.setModelRole("advisor", `${model.provider}/${model.id}:low`);
+			s.setThinkingLevel(Effort.High);
+			expect(s.setAdvisorEnabled(true)).toBe(true);
+			const advisor = s.getAdvisorAgent();
+			if (!advisor) throw new Error("Expected advisor Agent to be live");
+			const fellBack = Promise.withResolvers<void>();
+			s.subscribe(event => {
+				if (event.type === "retry_fallback_succeeded") fellBack.resolve();
+			});
+
+			await s.agent.prompt("fall back from fixed effort to auto");
+			await fellBack.promise;
+			expect(wire).toEqual([
+				{ id: model.id, reasoning: Effort.Low },
+				{ id: "fallback", reasoning: unverified ? undefined : Effort.High },
+			]);
+
+			s.setThinkingLevel(Effort.Medium);
+			await s.agent.prompt("follow the next primary turn");
+			expect(await s.waitForAdvisorCatchup(5000)).toBe(true);
+			expect(wire.at(-1)).toEqual({ id: "fallback", reasoning: unverified ? undefined : Effort.Medium });
+			expect(s.getAdvisorAgent()).toBe(advisor);
+
+			if (revertPolicy === "cooldown-expiry") {
+				vi.spyOn(Date, "now").mockReturnValue(Date.now() + 120_000);
+				await s.agent.prompt("restore the fixed-effort advisor");
+				expect(await s.waitForAdvisorCatchup(5000)).toBe(true);
+				expect(wire.at(-1)).toEqual({ id: model.id, reasoning: Effort.Low });
+			}
+		});
+	}
 });

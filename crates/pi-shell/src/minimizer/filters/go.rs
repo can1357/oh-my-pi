@@ -1,6 +1,6 @@
 //! Go toolchain output filters.
 
-use std::fmt::Write as _;
+use std::fmt::{NumBuffer, Write as _};
 
 use crate::minimizer::{MinimizerCtx, MinimizerOutput, primitives};
 
@@ -332,9 +332,9 @@ fn summarize_golangci_json(line: &str) -> Option<String> {
 			.map_or("", |value| value);
 		out.push_str(file);
 		out.push(':');
-		out.push_str(&line_no.to_string());
+		out.push_str(line_no.format_into(&mut NumBuffer::new()));
 		out.push(':');
-		out.push_str(&col_no.to_string());
+		out.push_str(col_no.format_into(&mut NumBuffer::new()));
 		out.push_str(": ");
 		out.push_str(text);
 		out.push_str(" (");
@@ -343,7 +343,7 @@ fn summarize_golangci_json(line: &str) -> Option<String> {
 	}
 	if issues.len() > 40 {
 		out.push_str("[…");
-		out.push_str(&(issues.len() - 40).to_string());
+		out.push_str((issues.len() - 40).format_into(&mut NumBuffer::new()));
 		out.push_str(" issues elided…]\n");
 	}
 	Some(out)

@@ -3,6 +3,7 @@ import type { PipeStreams } from "@oh-my-pi/pi-natives";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
 import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { IrcBus } from "../irc/bus";
 import type { JobWidgetInputs, JobWidgetRegistry } from "../job-widgets/types";
 
 const DELIVERY_RETRY_BASE_MS = 500;
@@ -51,6 +52,8 @@ export type AsyncJobType = "bash" | "task" | "eval";
 export interface AsyncJobRunResult {
 	text: string;
 	structured?: StructuredSubagentOutput;
+	/** See {@link AsyncJob.agentOutputPublished}. */
+	agentOutputPublished?: boolean;
 }
 
 /**
@@ -83,6 +86,12 @@ export interface AsyncJob {
 	/** When the job's run settled; `endTime - startTime` is its frozen run duration. */
 	endTime?: number;
 	label: string;
+	/**
+	 * What the job is for, in the model's words: the `i` intent on the call
+	 * that started it, as one line of plain text. Job views lead with it over
+	 * the `label`. Only tools whose call starts a single job set it.
+	 */
+	intent?: string;
 	abortController: AbortController;
 	promise: Promise<void>;
 	resultText?: string;
@@ -111,6 +120,14 @@ export interface AsyncJob {
 	 * id differs from the agent id (vibe turn jobs, tan clones).
 	 */
 	agentId?: string;
+	/**
+	 * Whether this job's turn published the agent's `<agentId>.md` output. A
+	 * follow-up turn that neither yielded nor produced a message result writes
+	 * none, so `agent://<agentId>` still holds an earlier turn's output; job
+	 * bodies that know this report it so deliveries advertise only the handles
+	 * that answer for this turn. Undefined where the body does not report it.
+	 */
+	agentOutputPublished?: boolean;
 	/** The process the job runs, when it spawns one. */
 	process?: AsyncJobProcess;
 	/** What the job's live widget reads; set by bash and task jobs. */
@@ -212,7 +229,16 @@ interface AsyncJobDelivery {
 	 */
 	jobSnapshot?: Pick<
 		AsyncJob,
-		"type" | "status" | "startTime" | "endTime" | "label" | "structured" | "agentId" | "latestDetails"
+		| "type"
+		| "status"
+		| "startTime"
+		| "endTime"
+		| "label"
+		| "intent"
+		| "structured"
+		| "agentId"
+		| "agentOutputPublished"
+		| "latestDetails"
 	>;
 }
 
@@ -242,6 +268,8 @@ export interface AsyncJobRegisterOptions {
 	foreground?: boolean;
 	/** The process the job runs; see {@link AsyncJob.process}. */
 	process?: AsyncJobProcess;
+	/** See {@link AsyncJob.intent}. */
+	intent?: string;
 	/** See {@link AsyncJob.widgetInputs}. */
 	widgetInputs?: JobWidgetInputs;
 }
@@ -295,6 +323,19 @@ export class AsyncJobManager {
 	#disposed = false;
 	/** Live widgets of this root's jobs; set by the root session when widgets are available. */
 	widgets: JobWidgetRegistry | undefined;
+	readonly #settleListeners = new Set<() => void>();
+
+	/**
+	 * Calls `listener` whenever a job settles (completed, failed or cancelled), so
+	 * views counting running jobs repaint even when no result delivery follows.
+	 * Returns the unsubscribe.
+	 */
+	onJobSettled(listener: () => void): () => void {
+		this.#settleListeners.add(listener);
+		return () => {
+			this.#settleListeners.delete(listener);
+		};
+	}
 
 	#filterJobs(jobs: Iterable<AsyncJob>, filter?: AsyncJobFilter): AsyncJob[] {
 		if (!filter) return Array.from(jobs);
@@ -384,6 +425,7 @@ export class AsyncJobManager {
 			status: "running",
 			startTime,
 			label,
+			...(options?.intent ? { intent: options.intent } : {}),
 			abortController,
 			promise: Promise.resolve(),
 			ownerId: options?.ownerId,
@@ -421,11 +463,15 @@ export class AsyncJobManager {
 				const text = typeof outcome === "string" ? outcome : outcome.text;
 				const structured = typeof outcome === "string" ? undefined : outcome.structured;
 				if (structured) job.structured = structured;
+				if (typeof outcome !== "string" && outcome.agentOutputPublished !== undefined) {
+					job.agentOutputPublished = outcome.agentOutputPublished;
+				}
 				if (job.status === "cancelled") {
 					job.resultText = text;
 				} else {
 					job.status = "completed";
 					job.resultText = text;
+					this.#recordAgentReply(job);
 					this.#enqueueDelivery(id, text);
 				}
 			} catch (error) {
@@ -435,11 +481,22 @@ export class AsyncJobManager {
 				job.errorText = errorText;
 				if (job.status !== "cancelled") {
 					job.status = "failed";
+					this.#recordAgentReply(job);
 					this.#enqueueDelivery(id, errorText);
 				}
 			}
 			if (this.#releasedForegroundJobs.has(id)) this.#discardForegroundJob(id);
 			else this.#scheduleEviction(id);
+			for (const listener of this.#settleListeners) {
+				try {
+					listener();
+				} catch (error) {
+					logger.warn("Async job settle listener failed", {
+						jobId: id,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
+			}
 		})();
 
 		this.#jobs.set(id, job);
@@ -472,11 +529,22 @@ export class AsyncJobManager {
 			agentId: options.agentId,
 			resultText: result.text,
 			structured: result.structured,
+			agentOutputPublished: result.agentOutputPublished,
 		};
 		this.#jobs.set(id, job);
+		this.#recordAgentReply(job);
 		this.#enqueueDelivery(id, result.text);
 		this.#scheduleEviction(id);
 		return id;
+	}
+
+	/**
+	 * A settled job that runs a subagent carries that agent's outcome to the
+	 * job's owner, which answers whatever the owner asked the agent before now:
+	 * a reply `wait` must not keep reporting as owed.
+	 */
+	#recordAgentReply(job: AsyncJob): void {
+		if (job.agentId !== undefined && job.ownerId !== undefined) IrcBus.recordReply(job.agentId, job.ownerId);
 	}
 
 	/**
@@ -1132,8 +1200,10 @@ export class AsyncJobManager {
 						startTime: job.startTime,
 						endTime: job.endTime,
 						label: job.label,
+						intent: job.intent,
 						structured: job.structured,
 						agentId: job.agentId,
+						agentOutputPublished: job.agentOutputPublished,
 						latestDetails: job.latestDetails,
 					}
 				: undefined,
@@ -1272,11 +1342,13 @@ export class AsyncJobManager {
 			startTime: snapshot.startTime,
 			endTime: snapshot.endTime,
 			label: snapshot.label,
+			intent: snapshot.intent,
 			abortController: new AbortController(),
 			promise: Promise.resolve(),
 			resultText: delivery.text,
 			structured: snapshot.structured,
 			agentId: snapshot.agentId,
+			agentOutputPublished: snapshot.agentOutputPublished,
 			latestDetails: snapshot.latestDetails,
 		};
 	}
