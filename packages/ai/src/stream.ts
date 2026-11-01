@@ -15,7 +15,13 @@ import {
 } from "@oh-my-pi/pi-catalog/model-thinking";
 import { $env, getProviderInFlightRoot, isEnoent, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { getCustomApi } from "./api-registry";
-import { createAuthRetryKeyState, isApiKeyResolver, resolvedApiKeyBearer, resolveNextAuthRetryKey } from "./auth-retry";
+import {
+	createAuthRetryKeyState,
+	isApiKeyResolver,
+	preferAuthRetryError,
+	resolvedApiKeyBearer,
+	resolveNextAuthRetryKey,
+} from "./auth-retry";
 import type { OAuthRequestIdentity } from "./auth/types";
 import { getEnvApiKey } from "./env-api-key";
 import * as AIError from "./error";
@@ -1341,6 +1347,7 @@ function streamSimpleRequest<TApi extends Api>(
 			const retryState = createAuthRetryKeyState(lastKey);
 			let failure = await runAttempt(lastKey, credentialId, oauthIdentity);
 			if (!failure) return;
+			let reportedFailure = failure;
 			while (true) {
 				// Caller aborted between attempts: don't mint a fresh token or fire
 				// another doomed request — emit the captured failure instead.
@@ -1360,9 +1367,13 @@ function streamSimpleRequest<TApi extends Api>(
 				if (nextKey === undefined) break;
 				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity);
 				if (!next) return;
+				reportedFailure =
+					preferAuthRetryError(reportedFailure.error, next.error) === reportedFailure.error
+						? reportedFailure
+						: next;
 				failure = next;
 			}
-			emitFailure(failure);
+			emitFailure(reportedFailure);
 		})();
 		return outer;
 	}

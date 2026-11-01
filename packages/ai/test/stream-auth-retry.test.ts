@@ -541,6 +541,41 @@ describe("streamSimple resolver auth retry", () => {
 		expect(keys).toEqual(["old-key", "switch-key"]);
 	});
 
+	it("surfaces the Z.AI reset rather than a stale sibling's 401 after rotation runs out", async () => {
+		const quota = Object.assign(
+			new Error("429 [1308][Usage limit reached for 5 hour. Your limit will reset at 13:23 UTC]"),
+			{ status: 429 },
+		);
+		const stale = Object.assign(new Error('401 {"error":{"message":"Authentication Failed","type":"1000"}}'), {
+			status: 401,
+		});
+		const keys: string[] = [];
+		registerCustomApi(
+			API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				keys.push(String(options?.apiKey));
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => stream.fail(options?.apiKey === "valid" ? quota : stale));
+				return stream;
+			},
+			SOURCE_ID,
+		);
+		const stream = streamSimple(model(), context, {
+			apiKey: ctx =>
+				ctx.error === undefined ? "valid" : ctx.lastChance ? (keys.length === 1 ? "stale" : undefined) : "stale",
+		});
+		let caught: unknown;
+		try {
+			for await (const _event of stream) {
+				// drain
+			}
+		} catch (error) {
+			caught = error;
+		}
+		expect(keys).toEqual(["valid", "stale"]);
+		expect(caught).toBe(quota);
+	});
+
 	it("retries a thrown usage-limit error and passes the cause to the resolver", async () => {
 		const keys: unknown[] = [];
 		const errors: unknown[] = [];
@@ -571,6 +606,45 @@ describe("streamSimple resolver auth retry", () => {
 		// The cause carries the original 429 so the resolver can branch usage-limit vs 401.
 		expect((errors[0] as { status?: number }).status).toBe(429);
 		expect((errors[0] as Error).message).toMatch(/usage limit/i);
+	});
+
+	it("emits the Z.AI 429 error event after a sibling emits a 401 error event", async () => {
+		const keys: string[] = [];
+		registerCustomApi(
+			API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				keys.push(String(options?.apiKey));
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					stream.push({ type: "start", partial: assistant() });
+					stream.push({
+						type: "error",
+						reason: "error",
+						error:
+							options?.apiKey === "valid"
+								? assistantError(
+										"429 [1308][Usage limit reached for 5 hour. Your limit will reset at 13:23 UTC]",
+										429,
+									)
+								: assistantError("401 Authentication Failed (type=1000)", 401),
+					});
+				});
+				return stream;
+			},
+			SOURCE_ID,
+		);
+		const stream = streamSimple(model(), context, {
+			apiKey: ctx =>
+				ctx.error === undefined ? "valid" : ctx.lastChance ? (keys.length === 1 ? "stale" : undefined) : "stale",
+		});
+		const errors: AssistantMessage[] = [];
+		for await (const event of stream) {
+			if (event.type === "error") errors.push(event.error);
+		}
+		expect(keys).toEqual(["valid", "stale"]);
+		expect(errors.map(error => [error.errorStatus, error.errorMessage])).toEqual([
+			[429, "429 [1308][Usage limit reached for 5 hour. Your limit will reset at 13:23 UTC]"],
+		]);
 	});
 
 	it("retries a usage-limit error event before content", async () => {
