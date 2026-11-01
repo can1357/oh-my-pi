@@ -107,7 +107,7 @@ One-shot shell (`executeShell`) always creates and drops a fresh session per cal
 ### Streaming/output and minimizer behavior
 
 - Stdout/stderr are routed into a shared pipe and read concurrently.
-- Reader decodes UTF-8 incrementally; invalid byte sequences emit `U+FFFD` replacement chunks.
+- Reader decodes UTF-8 incrementally; invalid byte sequences emit `U+FFFD`. On Windows, a single invalid byte whose ANSI character (the byte, or a DBCS lead byte plus the next byte) strict-decodes in the system ANSI code page switches the rest of the stream to that code page instead. Any other invalid byte, and a truncated multibyte UTF-8 prefix (such as a byte-cut Hangul), becomes `U+FFFD` and decoding stays UTF-8.
 - The N-API output bridge has a bounded 64-chunk queue and awaits callback execution, backpressuring pipe readers and the child. Queued chunks are coalesced before forwarding. A single callback stalled for 30 seconds disconnects the bridge so readers can continue draining.
 - The command runs with `ProcessGroupPolicy::NewProcessGroup`.
 - After the foreground command completes, the reader drains until EOF, 250ms of idle output, or 2s maximum; reader shutdown then gets a 250ms timeout.

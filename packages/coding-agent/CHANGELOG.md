@@ -662,6 +662,7 @@
 
 ### Fixed
 
+- Fixed Windows bash output on CJK systems turning into mojibake (`??쒓?`) after a single stray invalid byte: it now becomes `�` and the valid UTF-8 after it is kept; legacy ANSI-code-page output still decodes as before ([#16260](https://github.com/can1357/oh-my-pi/pull/16260) by [@DdangJin](https://github.com/DdangJin))
 - Fixed repeated status commands such as `/goal show` showing nothing after the first few times in a native terminal when the text had not changed
 - Fixed browser relay tabs that a browser already had open when its extension connected staying invisible to omp until they changed; opening such a tab by `app.target` could fail with "Selected tab did not become available before omp could attach"
 - Fixed Ollama Cloud sessions compacting too early on stripped thinking or too late after switching from another model ([#16164](https://github.com/can1357/oh-my-pi/issues/16164))
