@@ -1813,8 +1813,8 @@ export function sessionModelDiscoveryProviders(
  * Resolve a list of override patterns to the first matching model, with an
  * auth-aware fallback to the parent session's active model.
  *
- * Providers disabled through settings are removed before matching so ordered
- * overrides skip them and an all-disabled list resolves to no model.
+ * Disabled providers and models outside the active enabledModels scope are
+ * removed before matching, including when considering the parent fallback.
  *
  * If the resolved subagent model has no working credentials (provider has no
  * usable auth), and the parent's active model resolves with working auth,
@@ -1853,6 +1853,20 @@ export async function resolveModelOverrideWithAuthFallback(
 	warning?: string;
 }> {
 	const disabledProviders = disabledProviderIds(settings);
+	const enabledPatterns = settings ? cfgEnabledModels.get(settings) : [];
+	if (enabledPatterns.length > 0) {
+		const unscopedRegistry = modelRegistry;
+		const available = unscopedRegistry.getAvailable();
+		const scopedModels = filterAvailableModelsByEnabledPatterns(
+			disabledProviders.size > 0 ? available.filter(model => !disabledProviders.has(model.provider)) : available,
+			enabledPatterns,
+			settings,
+		);
+		modelRegistry = {
+			getAvailable: () => scopedModels,
+			getApiKey: (model, credentialSessionId) => unscopedRegistry.getApiKey(model, credentialSessionId),
+		};
+	}
 	let lookupRegistry: ModelLookupRegistry = modelRegistry;
 	if (disabledProviders.size > 0) {
 		const enabledModels = modelRegistry.getAvailable().filter(model => !disabledProviders.has(model.provider));

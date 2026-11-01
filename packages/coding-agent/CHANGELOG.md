@@ -79,6 +79,7 @@
 - Fixed `read` of a whole URL returning no content when the page's first line is over the 50 KB output budget, as on minified pages read with `:raw`; it now shows that line's first 50 KB ([#17500](https://github.com/can1357/oh-my-pi/pull/17500) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed an advisor whose usage-limited account kept being reported as switchable retrying the same capped account thousands of times; it now tries each sibling account at most once per provider per failing review, then falls back, waits, or pauses on the quota ([#17472](https://github.com/can1357/oh-my-pi/issues/17472))
 - Fixed LSP definition, type definition, implementation and reference results carrying a stray carriage return on every source context line from files with Windows (CRLF) line endings ([#17549](https://github.com/can1357/oh-my-pi/pull/17549) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- Fixed subagents running on models outside the active `enabledModels` scope through a requested model, agent override, frontmatter model or parent-model auth fallback ([#14381](https://github.com/can1357/oh-my-pi/issues/14381), [#16782](https://github.com/can1357/oh-my-pi/pull/16782) by [@Xytronix](https://github.com/Xytronix))
 
 ## [18.14.1] - 2026-10-31
 
