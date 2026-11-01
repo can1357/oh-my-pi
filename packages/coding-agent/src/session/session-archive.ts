@@ -37,8 +37,8 @@ import {
 	notRegularAsAbsent,
 	openRegularFile,
 	type OwnFileRemoval,
-	removeOwnFile,
-	unlinkOwnFile,
+	removeFileNoOneElseWrites,
+	unlinkFileNoOneElseWrites,
 	writeExclusive,
 } from "./regular-file";
 import { SESSION_TITLE_SLOT_BYTES } from "./session-entries";
@@ -235,7 +235,7 @@ async function rewriteOwnRestoreRecord(own: OwnRestoreRecord, text: string): Pro
  * removed only while the name holds the file this run created, by the
  * identity taken at creation and while this run still holds the descriptor
  * it created the record through, so that inode cannot have been handed out
- * again to a file someone put at the name — see {@link unlinkOwnFile}, which
+ * again to a file someone put at the name — see {@link unlinkFileNoOneElseWrites}, which
  * also names the one gap left: a file renamed onto the name between the last
  * look and the `unlink`. A directory that refuses the change is named, with
  * what to do.
@@ -243,7 +243,7 @@ async function rewriteOwnRestoreRecord(own: OwnRestoreRecord, text: string): Pro
 async function dropOwnRestoreRecord(own: OwnRestoreRecord): Promise<string | undefined> {
 	let removal: OwnFileRemoval;
 	try {
-		removal = await unlinkOwnFile(own.path, [own]);
+		removal = await unlinkFileNoOneElseWrites(own.path, [own]);
 	} catch (error) {
 		if (!isPermissionError(error)) throw error;
 		return (
@@ -1342,7 +1342,7 @@ export interface StagingGround {
 	 * The record, held: the descriptor that wrote it, open until
 	 * {@link removeStagingGround} has removed it or given it up, and the
 	 * bytes it wrote, a random value among them. What this run removes the
-	 * record by — see {@link removeOwnFile} — since neither its name nor its
+	 * record by — see {@link removeFileNoOneElseWrites} — since neither its name nor its
 	 * inode number is proof the file there is still the one this run wrote.
 	 */
 	recordHeld: HeldFile;
@@ -1393,7 +1393,7 @@ async function assertPrivateLedger(ledger: string): Promise<void> {
  * between the two leaves both records, naming the same directory. Nothing
  * here writes over a name: every record is created afresh or linked in,
  * where a name already taken fails with `EEXIST`, and only the files this
- * attempt wrote are removed — see {@link removeOwnFile}. A `rename` onto the
+ * attempt wrote are removed — see {@link removeFileNoOneElseWrites}. A `rename` onto the
  * record's name would replace whatever stood there by then. Nothing here is
  * synced, so after a power loss the directory can outlive its record; it is
  * then indistinguishable from an artifact and is treated as one.
@@ -1444,7 +1444,7 @@ export async function mintStagingGround(target: string, ledger: string, mode = 0
 		const unrecord = async (): Promise<string[]> => {
 			const notes: string[] = [];
 			for (const at of names) {
-				const note = await removeOwnFile(at, written, "a record this run wrote");
+				const note = await removeFileNoOneElseWrites(at, written, "a record this run wrote");
 				if (note) notes.push(note);
 			}
 			return notes;
@@ -1459,7 +1459,7 @@ export async function mintStagingGround(target: string, ledger: string, mode = 0
 		try {
 			await fs.link(part, record);
 			// The part name goes; the record keeps the file under its own name.
-			const left = await removeOwnFile(part, written, "a record this run wrote");
+			const left = await removeFileNoOneElseWrites(part, written, "a record this run wrote");
 			if (left) throw new Error(left);
 		} catch (error) {
 			const notes = await unrecord();
@@ -1498,7 +1498,7 @@ export async function mintStagingGround(target: string, ledger: string, mode = 0
 			written.push(recordHeld);
 			await fs.link(completePart, complete);
 			for (const at of [completePart, record]) {
-				const left = await removeOwnFile(at, written, "a record this run wrote");
+				const left = await removeFileNoOneElseWrites(at, written, "a record this run wrote");
 				if (left) throw new Error(left);
 			}
 			// Only the second record's descriptor goes on with the ground.
@@ -1599,7 +1599,7 @@ export async function removeStagingGround(ground: StagingGround): Promise<string
 	try {
 		const note = await clearStagingGround(ground.dir, ground.file, ground.created, "this run");
 		if (note !== undefined) return note;
-		return await removeOwnFile(ground.record, [ground.recordHeld], "the record this run wrote");
+		return await removeFileNoOneElseWrites(ground.record, [ground.recordHeld], "the record this run wrote");
 	} finally {
 		await ground.recordHeld.handle.close().catch(() => undefined);
 	}
@@ -2014,7 +2014,7 @@ async function resolvedPath(target: string): Promise<{ real: string; existing: s
  * A staging record, held: the descriptor it was read through stays open, so
  * no other file can be given its inode number until the caller closes it,
  * and the bytes read are what a file at its name must still hold for this
- * run to call it the same record — see {@link removeOwnFile}.
+ * run to call it the same record — see {@link removeFileNoOneElseWrites}.
  */
 async function readRecordFile(file: string): Promise<{ held: HeldFile; entry: StagingRecord }> {
 	const handle = await openRegularFile(file);
@@ -2625,7 +2625,7 @@ async function quarantineHoldingRecord(
 	// since can carry its inode number, and the bytes must match too — a
 	// file put there since is somebody's, and kept, a copy across
 	// filesystems included.
-	const note = await removeOwnFile(record, [read], "the record this command copied into the quarantine");
+	const note = await removeFileNoOneElseWrites(record, [read], "the record this command copied into the quarantine");
 	if (note) {
 		return refuse(
 			`${note}; the copy and the directory are in ${destination}, so look at ${record}, then run the same command ` +

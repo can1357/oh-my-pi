@@ -129,7 +129,7 @@ export async function chmodDirectory(dir: string, mode: number): Promise<void> {
  * still open; the identity that descriptor reports; and, where this run
  * knows them, the bytes the file holds — what this run wrote into it, a
  * random value among them, or what it read from it. See
- * {@link removeOwnFile} for what each layer proves.
+ * {@link unlinkFileNoOneElseWrites} for what each layer proves.
  */
 export interface HeldFile {
 	handle: fs.FileHandle;
@@ -163,7 +163,7 @@ export async function writeExclusive(file: string, text: string, mode: number): 
 	} catch (error) {
 		// What it holds after a failed write is not known, so this one is
 		// recognised by the held descriptor alone.
-		const note = held ? await removeOwnFile(file, [held], "the file this run created") : undefined;
+		const note = held ? await removeFileNoOneElseWrites(file, [held], "the file this run created") : undefined;
 		await handle.close().catch(() => undefined);
 		throw note
 			? new Error(`${error instanceof Error ? error.message : String(error)}; ${note}`, { cause: error })
@@ -180,13 +180,20 @@ async function heldAs(handle: fs.FileHandle, own: readonly HeldFile[]): Promise<
 	return same;
 }
 
-/** What {@link unlinkOwnFile} found at the name: its own file, gone; nothing; or something else, kept. */
+/** What {@link unlinkFileNoOneElseWrites} found at the name: its own file, gone; nothing; or something else, kept. */
 export type OwnFileRemoval = "removed" | "absent" | "kept";
 
 /**
  * Unlink `file` only while the name holds one of `own`, files this run
  * holds. Throws what a look or the `unlink` threw, for the caller to report;
- * {@link removeOwnFile} reports it for most.
+ * {@link removeFileNoOneElseWrites} reports it for most.
+ *
+ * **Only for a file no writer but this run can name**: one gc created with
+ * `O_EXCL` or `link` and writes, if at all, only through its own descriptor —
+ * `gc.lock`, `gc.lock.break`, a staging record and its part name, a restore
+ * record. A file another process may append to by name, such as a live
+ * transcript or artifact, must not come here: an append made after the last
+ * look goes with the `unlink`.
  *
  * A name is not provenance, and neither is an inode number: the kernel hands
  * a freed number to the next file created, so a file someone put at the name
@@ -218,7 +225,7 @@ export type OwnFileRemoval = "removed" | "absent" | "kept";
  * writer renames onto a name: each creates with `O_EXCL` or `link`, which
  * refuse a name already taken.
  */
-export async function unlinkOwnFile(file: string, own: readonly HeldFile[]): Promise<OwnFileRemoval> {
+export async function unlinkFileNoOneElseWrites(file: string, own: readonly HeldFile[]): Promise<OwnFileRemoval> {
 	const lookAgain = async (): Promise<Stats | undefined> =>
 		await fs.lstat(file).catch((error: unknown) => {
 			if (isEnoent(error)) return undefined;
@@ -258,13 +265,18 @@ export async function unlinkOwnFile(file: string, own: readonly HeldFile[]): Pro
 
 /**
  * Remove `file` only while the name holds one of `own` — see
- * {@link unlinkOwnFile} — and say why not, otherwise. Returns undefined once
- * nothing of this run's is left at the name, or a sentence for the command
- * to print, `what` naming this run's file ("the record this run wrote").
+ * {@link unlinkFileNoOneElseWrites}, and the files it is for — and say why
+ * not, otherwise. Returns undefined once nothing of this run's is left at
+ * the name, or a sentence for the command to print, `what` naming this
+ * run's file ("the record this run wrote").
  */
-export async function removeOwnFile(file: string, own: readonly HeldFile[], what: string): Promise<string | undefined> {
+export async function removeFileNoOneElseWrites(
+	file: string,
+	own: readonly HeldFile[],
+	what: string,
+): Promise<string | undefined> {
 	try {
-		return (await unlinkOwnFile(file, own)) === "kept"
+		return (await unlinkFileNoOneElseWrites(file, own)) === "kept"
 			? `${file} is not ${what}, so it was left as it is`
 			: undefined;
 	} catch (error) {

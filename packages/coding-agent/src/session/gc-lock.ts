@@ -21,7 +21,7 @@
  * way, the command stops and names it, to be moved aside. A lock with the
  * value is removed only through the descriptor it was read through, held
  * until it is gone, and only while it holds the bytes read — see
- * {@link removeOwnFile} — so a run releasing its own lock removes only a
+ * {@link removeFileNoOneElseWrites} — so a run releasing its own lock removes only a
  * file that carries the value it wrote. An empty one, which a run killed
  * between creating the lock and writing it leaves, holds nothing to lose
  * and is broken once it is older than the grace.
@@ -34,7 +34,7 @@ import {
 	newNonce,
 	NotARegularFile,
 	openRegularFile,
-	removeOwnFile,
+	removeFileNoOneElseWrites,
 	writeExclusive,
 } from "./regular-file";
 
@@ -98,7 +98,7 @@ function readLockText(text: string): LockReading {
 /**
  * What the lock at `lockPath` holds, held: read through a descriptor checked
  * to hold a regular file, and that descriptor kept open, so the caller can
- * remove exactly that file by it — see {@link removeOwnFile}. Null when
+ * remove exactly that file by it — see {@link removeFileNoOneElseWrites}. Null when
  * nothing is there. A FIFO, socket or device at the name — itself or through
  * a link — is not read: reading a FIFO waits for a writer, or takes what was
  * written to it for somebody else. It is refused instead, and the run with
@@ -171,7 +171,7 @@ async function removeStaleGcLock(lockPath: string): Promise<boolean> {
 		if (judgeLock(lockPath, found) === "held") return false;
 		// Removed only while it is still the very file read above — the
 		// descriptor is held, and the bytes must match.
-		return (await removeOwnFile(lockPath, [found.held], "the stale lock this run read")) === undefined;
+		return (await removeFileNoOneElseWrites(lockPath, [found.held], "the stale lock this run read")) === undefined;
 	} finally {
 		await found.held.handle.close().catch(() => undefined);
 	}
@@ -205,7 +205,7 @@ async function openNewGcLock(lockPath: string): Promise<HeldFile | null> {
  * behind holds what gc writes and this run's pid, so the next run can break it.
  */
 async function releaseGcLockFile(lockPath: string, held: HeldFile): Promise<void> {
-	await removeOwnFile(lockPath, [held], "the lock this run took");
+	await removeFileNoOneElseWrites(lockPath, [held], "the lock this run took");
 	await held.handle.close().catch(() => undefined);
 }
 
