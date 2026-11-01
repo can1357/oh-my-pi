@@ -575,7 +575,10 @@ export async function resolveEffectiveSubagentPolicy(
 	const perCallSelector: unknown = request.perCallModel ?? (isBundledSeance(agent) ? undefined : request.seanceModel);
 	const parentActiveModel = request.session.getActiveModel?.();
 	const userTaggedEffort =
-		sessionAgents.includes(agent) && agent.thinkingLevel !== undefined && agent.thinkingLevel !== AUTO_THINKING;
+		sessionAgents.includes(agent) &&
+		agent.thinkingLevel !== undefined &&
+		agent.thinkingLevel !== AUTO_THINKING &&
+		agent.model?.[0]?.endsWith(`:${agent.thinkingLevel}`) === true;
 	const perCallModelGrants =
 		perCallSelector === undefined
 			? undefined

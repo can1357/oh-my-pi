@@ -4,9 +4,9 @@ import * as os from "node:os";
 import path from "node:path";
 import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
-import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	disableProvider,
 	enableProvider,
@@ -491,12 +491,23 @@ describe("structured subagent primitive", () => {
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 	it("starts a level-tagged agent at its tagged effort and other agents at the capped hint", async () => {
-		const model = getBundledModel("openai-codex", "gpt-5.6-sol");
-		if (!model) throw new Error("Expected gpt-5.6-sol model to exist");
+		const model = buildModel({
+			id: "effort-target",
+			name: "Effort Target",
+			api: "openai-responses",
+			provider: "mock",
+			baseUrl: "https://example.com",
+			reasoning: true,
+			thinking: { mode: "budget", efforts: [Effort.Low, Effort.Medium, Effort.High] },
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 1024,
+		});
 		const selector = `${model.provider}/${model.id}`;
 		mockDiscovery({ ...AGENT, model: [selector], thinkingLevel: Effort.High });
 		const tagged: AgentDefinition = { ...AGENT, name: "m1", model: [`${selector}:high`], thinkingLevel: Effort.High };
-		const untagged: AgentDefinition = { ...AGENT, name: "m2", model: [selector], thinkingLevel: "auto" };
+		const untagged: AgentDefinition = { ...AGENT, name: "m2", model: [selector], thinkingLevel: Effort.Medium };
 		const settings = Settings.isolated({ "task.maxEffort": "low", "task.isolation.enabled": false });
 		const parent = Object.assign(session({ settings, sessionAgents: [tagged, untagged] }), {
 			modelRegistry: { authStorage: {}, refresh: async () => {}, getAvailable: () => [model] },
