@@ -5766,7 +5766,7 @@ export class AgentSession implements SettingsScope {
 		}, SESSION_MOVED_HANDLER_GRACE_MS);
 		try {
 			// A gate clears itself as it opens, so what is here after one opens is a later move's.
-			for (let gate = this.#movesGate; gate && !expired; gate = this.#movesGate) {
+			for (let gate: Promise<void> | undefined = this.#movesGate; gate && !expired; gate = this.#movesGate) {
 				const waits = [gate, deadline.promise];
 				await (signal ? Promise.race([...waits, abortRejection(signal)]) : Promise.race(waits));
 			}

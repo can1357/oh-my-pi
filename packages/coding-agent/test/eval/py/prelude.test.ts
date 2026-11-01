@@ -187,9 +187,10 @@ describe("python prelude", () => {
 				name: "__artifacts_ready__",
 				// `answer`: the kernel asks for the file, and only comes back
 				// for the bytes if what it opens is not what it was told about.
-				// `token` is the hold the cell was given. This answer holds no
-				// pin, so there is nothing for the kernel to give back.
-				args: { id: "12", op: "answer", root: artifacts.path(), token: null },
+				// The cell was given no hold, so `token` is left out: the host
+				// refuses a token that is present and not a string. This answer
+				// holds no pin, so there is nothing for the kernel to give back.
+				args: { id: "12", op: "answer", root: artifacts.path() },
 				run: "",
 				session: "test-session",
 			},
