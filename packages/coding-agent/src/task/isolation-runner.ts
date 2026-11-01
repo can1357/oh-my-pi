@@ -25,11 +25,11 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { prompt } from "@oh-my-pi/pi-utils";
 import isolationErrorTemplate from "../prompts/tools/isolation-error.md" with { type: "text" };
 import isolationSummaryTemplate from "../prompts/tools/isolation-summary.md" with { type: "text" };
-import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
 import type { ToolSession } from "../tools";
 import { generateCommitMessage } from "../utils/commit-message-generator";
 import { trackLateCleanup } from "../utils/late-cleanup";
+import { asReleaseHold, createReleaseHold } from "../utils/release-hold";
 import type { ExecutorOptions } from "./executor";
 import { runSubprocess } from "./executor";
 import { needsNativeTeardown, writeRetainedBackend } from "./isolation-ownership";
@@ -390,6 +390,8 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 	let baseReleasePromise: Promise<void> | undefined;
 	let cleanupPromise: Promise<void> | undefined;
 	let releasePromise: Promise<void> | undefined;
+	/** Artifacts {@link releaseIsolation} captured, when it ran before this function's own post-run capture. */
+	let releasedCapture: IsolationPatchCapture["artifacts"] | undefined;
 	/** The run's IRC wake hold, released only once the run-end capture is done. */
 	let releaseIrcWakes: (() => void) | undefined;
 	const releaseBase = (): Promise<void> => {
@@ -426,6 +428,12 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 					);
 				}
 				const patchResult = capture.artifacts;
+				// Kept for the post-run path: a release that ran inside the child's
+				// own teardown — a refused adoption ends the child there — has
+				// already captured and removed the workspace, so the result the
+				// parent reads must carry that capture rather than a second,
+				// impossible one.
+				releasedCapture = patchResult;
 				AgentRegistry.global().setHistory(opts.agentId, {
 					patchPath: patchResult.patchPath,
 					nestedPatchPaths: patchResult.nestedPatchPaths,
@@ -451,12 +459,30 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		})();
 		return releasePromise;
 	};
+	let lifecycleOwnsRelease = false;
 	try {
 		handle = await ensureIsolation(opts.context.repoRoot, opts.agentId, opts.preferredBackend);
 		const isolationDir = handle.mergedDir;
 		const isolationBackend = handle.backend;
 		const baseline = await captureIsolationBaseline(isolationDir, opts.context.repoRoot);
 		taskBaseline = baseline;
+		/**
+		 * What this run hands the child, built only once there is a child to
+		 * hand it to: the base release for a one-shot run (it never touches the
+		 * worktree, and its `finalizeSubagentLifecycle` runs `onRelease` before
+		 * the post-run capture below, so the handle must survive to the
+		 * `finally`), full capture-and-cleanup for a kept-alive one. Claiming it
+		 * says the agent lifecycle owns the workspace and everything the caller
+		 * held behind it, which is what the `finally` asks instead of looking a
+		 * manager up by id — a manager mid-release, replaced, or rewritten by a
+		 * concurrent operation answers for neither.
+		 */
+		const childHold = createReleaseHold(opts.baseOptions.keepAlive === false ? releaseBase : releaseIsolation, () => {
+			lifecycleOwnsRelease = true;
+			// Whatever owns this owns the caller's hold behind it, since
+			// discharging this discharges that.
+			asReleaseHold(opts.baseOptions.onRelease)?.claim();
+		});
 		const result = await runSubprocess({
 			...opts.baseOptions,
 			worktree: isolationDir,
@@ -472,7 +498,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			// post-run capture, so the handle must survive until the `finally`
 			// below cleans it up. Only kept-alive runs hand full capture+cleanup
 			// (`releaseIsolation`) to the agent lifecycle.
-			onRelease: opts.baseOptions.keepAlive === false ? releaseBase : releaseIsolation,
+			onRelease: childHold,
 			deferIrcWakeRelease: release => {
 				releaseIrcWakes = release;
 			},
@@ -483,6 +509,16 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		// so their cleanup remains asynchronous.
 		if (deferredCleanup && result.exitCode === 0) {
 			await deferredCleanup;
+		}
+		if (releasePromise) {
+			// The child's own teardown already ran the release — a refused
+			// adoption ends the child inside `runSubprocess` — so the capture and
+			// the workspace removal have happened. Re-capturing from a directory
+			// that is gone would report a capture failure, and a retained
+			// workspace, for work that was in fact captured: hand back what the
+			// release wrote.
+			await releasePromise;
+			return rememberAgentArtifacts({ ...result, ...releasedCapture });
 		}
 		if (opts.mergeMode === "branch" && result.exitCode === 0) {
 			let commitResult: CommitToBranchResult | null;
@@ -588,13 +624,19 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 	} catch (err) {
 		return rememberAgentArtifacts(opts.buildFailureResult(err));
 	} finally {
-		if (
-			handle &&
-			!retainWorkspace &&
-			!releasePromise &&
-			!(opts.baseOptions.keepAlive !== false && AgentLifecycleManager.global().has(opts.agentId))
-		) {
-			if (deferredCleanup) {
+		if (!handle) {
+			// Isolation failed before a workspace existed, so no child was ever
+			// dispatched and no child lifecycle will end: whatever the caller
+			// holds for this child is still owed, and this is the last place
+			// that can discharge it.
+			await releaseBase();
+		} else if (!releasePromise && !lifecycleOwnsRelease) {
+			if (retainWorkspace) {
+				// The workspace stays on disk, but the caller's hold is not part
+				// of it: nothing left will end to release it. `releaseBase` runs
+				// at most once.
+				await releaseBase();
+			} else if (deferredCleanup) {
 				trackLateCleanup(deferredCleanup.then(cleanupHandle), {
 					agentId: opts.agentId,
 					resource: "isolation",

@@ -5,6 +5,7 @@
  */
 
 import * as fs from "node:fs/promises";
+import { scheduler } from "node:timers/promises";
 import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { AgentBusyError, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
@@ -101,6 +102,7 @@ import { ToolAbortError } from "../tools/tool-errors";
 import { resetYieldTurnState } from "../tools/yield";
 import { type EventBus, emitSubagentFrame } from "../utils/event-bus";
 import { trackLateCleanup } from "../utils/late-cleanup";
+import { asReleaseHold } from "../utils/release-hold";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { WorkspaceTree } from "../workspace-tree";
 import { isCompletionProbeEnabled, startCompletionProbe } from "./completion-probe";
@@ -166,6 +168,14 @@ import {
 } from "../session/context-settings";
 
 export type { YieldItem } from "@oh-my-pi/pi-tui/tools/task";
+
+/**
+ * How long a refused child's release waits for a disposal that outran its
+ * cleanup deadline. Long enough for a slow flush to land, short enough that a
+ * disposal which never finishes cannot hold a kernel or an isolation workspace
+ * for the life of the host.
+ */
+const REFUSED_RELEASE_MAX_WAIT_MS = 60_000;
 
 const TASK_ABORT_CLEANUP_GRACE_MS = 10_000;
 
@@ -3570,7 +3580,12 @@ export async function finalizeSubagentLifecycle(args: {
 	const ref = registry.get(args.id);
 	const ownsRef = Boolean(ref && ref.session === args.session);
 	const cleanupDeadlineAt = args.cleanupDeadlineAt ?? Date.now() + 5000;
-	const disposeSession = async (): Promise<void> => {
+	/**
+	 * Dispose the child, bounded by the cleanup deadline. Returns the disposal
+	 * still running when that deadline passed, so a caller whose next step
+	 * destroys what the child is being disposed on can wait for it.
+	 */
+	const disposeSession = async (): Promise<{ deferred?: Promise<void> }> => {
 		// On a graceful finish (e.g. a `yield`) the advisor's review of the final
 		// turn was enqueued at turn end but may still be draining. Give it a
 		// chance to land in the transcript before the runtime is torn down —
@@ -3587,13 +3602,14 @@ export async function finalizeSubagentLifecycle(args: {
 		} catch (error) {
 			if (Date.now() >= cleanupDeadlineAt) {
 				args.onCleanupDeferred?.(disposal);
-				return;
+				return { deferred: disposal };
 			}
 			logger.warn("Subagent session cleanup failed", {
 				id: args.id,
 				error: error instanceof Error ? error.message : String(error),
 			});
 		}
+		return {};
 	};
 	const releaseOwnedResources = async (): Promise<void> => {
 		try {
@@ -3659,7 +3675,7 @@ export async function finalizeSubagentLifecycle(args: {
 		await releaseOwnedResources();
 		return;
 	}
-	AgentLifecycleManager.global().adopt(
+	const adopted = AgentLifecycleManager.global().adopt(
 		args.id,
 		{
 			idleTtlMs: args.agentIdleTtlMs,
@@ -3668,6 +3684,51 @@ export async function finalizeSubagentLifecycle(args: {
 		},
 		ref,
 	);
+	if (adopted) return;
+	// Nothing will keep this child: the only owner of an idle, kept-alive agent
+	// is the lifecycle, and it refused. Ending it is the same teardown a
+	// one-shot gets — dispose, unregister, release — because releasing what the
+	// caller held while leaving the child registered and revivable hands
+	// `ensureLive` a session whose workspace and kernel have just gone.
+	// `runSubprocess`'s own boundary is the backstop if this throws.
+	const { deferred } = await disposeSession();
+	if (registry.get(args.id) === ref) registry.unregister(args.id, ref);
+	if (!deferred) {
+		await releaseOwnedResources();
+		return;
+	}
+	// The disposal outran the cleanup deadline. What the caller held is what the
+	// child is still being disposed on — its isolation workspace, its kernel —
+	// so the release waits for the disposal rather than pulling the ground out
+	// from under it, and the wait is tracked rather than awaited here, which is
+	// what the deadline was for. Claiming says so: this discharge is owned now,
+	// and the boundary that created the hold must not run it on the way out.
+	//
+	// The wait is bounded. A disposal that never finishes — a subsystem flush
+	// with nothing to flush it — would otherwise hold the kernel and the
+	// workspace for the life of the host, which is the leak this whole change
+	// exists to end. Past the bound the release runs anyway and says why.
+	asReleaseHold(args.onRelease)?.claim();
+	// Whichever side loses the race is cancelled, so a disposal that finishes
+	// in a second does not leave a sixty-second timer armed behind it.
+	const waitBound = new AbortController();
+	const settled = Promise.race([
+		deferred.catch(() => undefined).then(() => true),
+		scheduler.wait(REFUSED_RELEASE_MAX_WAIT_MS, { signal: waitBound.signal }).then(
+			() => false,
+			() => true,
+		),
+	]).then(async disposed => {
+		waitBound.abort();
+		if (!disposed) {
+			logger.warn("Subagent disposal outran its release wait; releasing its resources anyway", {
+				id: args.id,
+				waitedMs: REFUSED_RELEASE_MAX_WAIT_MS,
+			});
+		}
+		await releaseOwnedResources();
+	});
+	trackLateCleanup(settled, { id: args.id, resource: "refused-adoption-release" });
 }
 
 /** Options for {@link runSubagentFollowUpTurn}. */
@@ -4247,8 +4308,41 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
 
 /**
  * Run a single agent in-process.
+ *
+ * {@link ExecutorOptions.onRelease} — what the caller holds on this child's
+ * behalf, such as the retained eval kernel its tools run on — is owed here
+ * until something that will certainly end takes it over, which is the agent
+ * lifecycle and nothing else. So this boundary asks one question on the way
+ * out, rather than each exit remembering to release: an abort before the child
+ * starts, a throw from the run, or a run that never created a session all
+ * leave the hold owed, and all discharge it here.
  */
 export async function runSubprocess(options: ExecutorOptions): Promise<SingleResult> {
+	let releaseOwed = options.onRelease !== undefined;
+	try {
+		return await runDispatchedSubprocess(options, () => {
+			releaseOwed = false;
+		});
+	} finally {
+		if (releaseOwed) {
+			try {
+				await options.onRelease?.();
+			} catch (error) {
+				logger.warn("Subagent lifecycle resource cleanup failed", { id: options.id, error: String(error) });
+			}
+		}
+	}
+}
+
+/**
+ * The run itself. `onReleaseTakenOver` is called once
+ * {@link finalizeSubagentLifecycle} has either run the caller's release or
+ * handed it to the lifecycle manager of a kept-alive child.
+ */
+async function runDispatchedSubprocess(
+	options: ExecutorOptions,
+	onReleaseTakenOver: () => void,
+): Promise<SingleResult> {
 	const {
 		cwd,
 		agent,
@@ -5200,6 +5294,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						deferCleanup(completion);
 					},
 				});
+				// Either it ran the release or the lifecycle manager now holds it
+				// for a kept-alive child: it is no longer owed by this run.
+				onReleaseTakenOver();
 			}
 			if (jobManager) {
 				if (deferredSessionShutdown) {
