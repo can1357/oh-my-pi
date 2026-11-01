@@ -430,6 +430,8 @@ export class Agent {
 	#abortController?: AbortController;
 	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	#transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
+	/** Wrappers added with `outermost`, then the rest; each kind in the order it was added. */
+	readonly #outermostContextTransformWrappers = new Set<ContextTransformWrapper>();
 	readonly #contextTransformWrappers = new Set<ContextTransformWrapper>();
 	/**
 	 * The host's transform applied to the context before each model request. It is read for every
@@ -446,7 +448,7 @@ export class Agent {
 	}
 	/** What one model request runs to transform its context: every wrapper, around the host's transform as it is now. */
 	readonly #transformContextForRequest = (messages: AgentMessage[], signal?: AbortSignal): Promise<AgentMessage[]> => {
-		const wrappers = [...this.#contextTransformWrappers];
+		const wrappers = [...this.#outermostContextTransformWrappers, ...this.#contextTransformWrappers];
 		const run = (
 			index: number,
 			current: AgentMessage[],
@@ -1049,14 +1051,17 @@ export class Agent {
 	 * Run `wrapper` around the context transform of every model request until the returned disposer
 	 * is called. It wraps `transformContext` as that is when the request is prepared, so a host that
 	 * replaces or removes the transform changes what the wrapper calls, never whether it runs.
-	 * Wrappers added earlier run outside those added later.
+	 * Wrappers added earlier run outside those added later. With `outermost`, the wrapper runs
+	 * outside every wrapper added without it, whenever that was added — for a wrapper that must see
+	 * the whole of each request's preparation, such as one that holds requests until the host is ready.
 	 */
-	wrapContextTransform(wrapper: ContextTransformWrapper): () => void {
+	wrapContextTransform(wrapper: ContextTransformWrapper, options: { outermost?: boolean } = {}): () => void {
+		const wrappers = options.outermost ? this.#outermostContextTransformWrappers : this.#contextTransformWrappers;
 		const registration: ContextTransformWrapper = (messages, signal, transform) =>
 			wrapper(messages, signal, transform);
-		this.#contextTransformWrappers.add(registration);
+		wrappers.add(registration);
 		return () => {
-			this.#contextTransformWrappers.delete(registration);
+			wrappers.delete(registration);
 		};
 	}
 

@@ -2636,6 +2636,14 @@ export class SessionManager {
 	/** Every notice raised so far, replayed to each later subscriber. */
 	#persistenceNotices: SessionPersistenceNotice[] = [];
 	/**
+	 * Moves whose new file no full transcript has been published to yet,
+	 * oldest first. A move is announced inside the write that decides it, and
+	 * the new file is written after that, asynchronously on some paths.
+	 */
+	#movesAwaitingWrite: { notice: SessionPersistenceNotice; written: PromiseWithResolvers<boolean> }[] = [];
+	/** How each move no longer awaiting its write ended: its file published (`true`), or never. */
+	readonly #moveWriteOutcomes = new WeakMap<SessionPersistenceNotice, boolean>();
+	/**
 	 * This process's ownership claim on the session it last wrote (file storage
 	 * only), keyed by session id so every path to the journal meets it. Unheld
 	 * while another live process owns the session, and after {@link close} gave
@@ -3236,7 +3244,9 @@ export class SessionManager {
 		this.#pendingArtifactCopy = { sessionFile: to, done: copySessionArtifacts(from, to) };
 		this.#rememberBreadcrumb(this.#cwd, to);
 		this.#claimSession();
-		this.#notifyPersistenceNotice({ reason, from, to, previousSessionId, sessionId: this.#sessionId });
+		const notice: SessionPersistenceNotice = { reason, from, to, previousSessionId, sessionId: this.#sessionId };
+		this.#movesAwaitingWrite.push({ notice, written: Promise.withResolvers<boolean>() });
+		this.#notifyPersistenceNotice(notice);
 		return to;
 	}
 
@@ -3445,7 +3455,7 @@ export class SessionManager {
 				throw this.#latchIndeterminate(operationError, recoveryErrors);
 			}
 		}
-		this.#recordFullRewrite(body.bytes);
+		this.#recordFullRewrite(target, body.bytes);
 	}
 
 	#appendWriter(): SessionStorageWriter {
@@ -3467,8 +3477,44 @@ export class SessionManager {
 		this.#expectedDiskSize = (this.#expectedDiskSize ?? 0) + Buffer.byteLength(line, "utf8");
 	}
 
-	#recordFullRewrite(bytes: number): void {
+	/**
+	 * A full transcript is durable at `target`. That settles every move up to
+	 * the last one to `target`: an earlier move whose file was never written
+	 * because the session moved on again counts as written with it.
+	 */
+	#recordFullRewrite(target: string, bytes: number): void {
 		this.#expectedDiskSize = bytes;
+		const published = path.resolve(target);
+		const last = this.#movesAwaitingWrite.findLastIndex(move => path.resolve(move.notice.to) === published);
+		for (const move of this.#movesAwaitingWrite.splice(0, last + 1)) this.#settleMoveWrite(move, true);
+	}
+
+	#settleMoveWrite(
+		move: { notice: SessionPersistenceNotice; written: PromiseWithResolvers<boolean> },
+		written: boolean,
+	): void {
+		this.#moveWriteOutcomes.set(move.notice, written);
+		move.written.resolve(written);
+	}
+
+	/**
+	 * Whether the move `notice` reports has a durable new file: `true` once a
+	 * full transcript has been published there (or to the file a later move
+	 * went to), `false` when this manager stopped writing first ({@link seal})
+	 * or `notice` is not one of its moves, and `undefined` while that write is
+	 * still to come. A move is announced before it, so a subscriber that must
+	 * not act before the new file exists waits with {@link whenMoveWritten}.
+	 */
+	moveWritten(notice: SessionPersistenceNotice): boolean | undefined {
+		if (this.#movesAwaitingWrite.some(move => move.notice === notice)) return undefined;
+		return this.#moveWriteOutcomes.get(notice) ?? false;
+	}
+
+	/** Settles with {@link moveWritten}'s answer once that is no longer `undefined`. */
+	whenMoveWritten(notice: SessionPersistenceNotice): Promise<boolean> {
+		const pending = this.#movesAwaitingWrite.find(move => move.notice === notice);
+		if (pending) return pending.written.promise;
+		return Promise.resolve(this.#moveWriteOutcomes.get(notice) ?? false);
 	}
 
 	/**
@@ -3612,11 +3658,12 @@ export class SessionManager {
 				// becomes durable state.
 				const generation = ++this.#deferredPublishGen;
 				const { bytes, stamp } = body;
-				this.#confirmDeferredPublish(targetPath, () => {
+				const publishedPath = targetPath;
+				this.#confirmDeferredPublish(publishedPath, () => {
 					// A newer deferred publish owns the durability record now;
 					// this body is no longer on the backend, so record nothing.
 					if (generation !== this.#deferredPublishGen) return;
-					this.#recordFullRewrite(bytes);
+					this.#recordFullRewrite(publishedPath, bytes);
 					const entries = this.#entries;
 					const bodyIsCurrent =
 						stamp.entries === entries &&
@@ -3645,7 +3692,7 @@ export class SessionManager {
 				});
 				return;
 			}
-			this.#recordFullRewrite(body.bytes);
+			this.#recordFullRewrite(targetPath, body.bytes);
 			// Only mark the manager current when writing the active session path.
 			// Mid-move writes update the live relocation path; `#sessionFile` is
 			// still the pre-repoint source until moveTo repoints it.
@@ -3733,7 +3780,7 @@ export class SessionManager {
 					}
 					try {
 						if (textMatchesLines(await this.#storage.readText(sessionFile), body.lines)) {
-							this.#recordFullRewrite(body.bytes);
+							this.#recordFullRewrite(sessionFile, body.bytes);
 						}
 					} catch {
 						// Preserve the publish error when durable state cannot be read back.
@@ -3743,14 +3790,14 @@ export class SessionManager {
 				if (this.#diskEpoch !== epoch) {
 					try {
 						if (textMatchesLines(await this.#storage.readText(sessionFile), body.lines)) {
-							this.#recordFullRewrite(body.bytes);
+							this.#recordFullRewrite(sessionFile, body.bytes);
 						}
 					} catch {
 						// A superseding rewrite owns the durability record when its body cannot be read back.
 					}
 					return false;
 				}
-				this.#recordFullRewrite(body.bytes);
+				this.#recordFullRewrite(sessionFile, body.bytes);
 			} while (this.#atomicRewriteDirty);
 			return true;
 		} finally {
@@ -5076,6 +5123,8 @@ export class SessionManager {
 	 *   superseded and an ALREADY-RUNNING fenced/repair rewrite (awaiting the
 	 *   tail, drain, writer close, or the atomic stage) fails its commit guard
 	 *   at the rename fence instead of publishing over a revived file.
+	 * - a move whose new file was never written stays unwritten
+	 *   ({@link whenMoveWritten} settles `false`).
 	 * The final `close()` itself is scheduled after the bump and still runs;
 	 * pre-seal hot-path appends are already in the page cache. Idempotent;
 	 * terminal.
@@ -5084,6 +5133,7 @@ export class SessionManager {
 		if (this.#released) return;
 		this.#released = true;
 		this.#diskEpoch++;
+		for (const move of this.#movesAwaitingWrite.splice(0)) this.#settleMoveWrite(move, false);
 	}
 
 	/**

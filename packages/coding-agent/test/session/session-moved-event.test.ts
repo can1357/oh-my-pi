@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentContext, type AgentTool } from "@oh-my-pi/pi-agent-core";
@@ -13,7 +14,7 @@ import { AgentSession, SESSION_MOVED_HANDLER_GRACE_MS } from "@oh-my-pi/pi-codin
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { FileSessionStorage, SessionWriteConflictError } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { logger, TempDir } from "@oh-my-pi/pi-utils";
 
@@ -32,6 +33,36 @@ class StorageWithForeignOwner extends FileSessionStorage {
 
 	override claimSession(sessionId: string, sessionPath: string): (() => void) | null {
 		return sessionId === this.#ownedElsewhere ? null : super.claimSession(sessionId, sessionPath);
+	}
+}
+
+/**
+ * File storage that, once `original` is set, holds every full asynchronous
+ * rewrite of any other file — the file the session moves to — before it is
+ * published, until `publish` resolves. With `contestOriginal`, every full
+ * rewrite of `original` meets another writer's change instead, so the session
+ * ends up moving off it ("contested").
+ */
+class StorageHoldingMovedWrites extends StorageWithForeignOwner {
+	original?: string;
+	contestOriginal = false;
+	readonly heldWrite = Promise.withResolvers<void>();
+	readonly publish = Promise.withResolvers<void>();
+
+	override async writeTextAtomic(
+		sessionFile: string,
+		body: string,
+		options?: Parameters<FileSessionStorage["writeTextAtomic"]>[2],
+	): Promise<void> {
+		const original = this.original;
+		if (original !== undefined && path.resolve(sessionFile) !== path.resolve(original)) {
+			this.heldWrite.resolve();
+			await this.publish.promise;
+		} else if (original !== undefined && this.contestOriginal) {
+			const expected = options?.expectedSize ?? 0;
+			throw new SessionWriteConflictError(sessionFile, expected, expected + 1);
+		}
+		await super.writeTextAtomic(sessionFile, body, options);
 	}
 }
 
@@ -208,6 +239,7 @@ describe("a session that had to leave its file", () => {
 	 * owner, before this process opens it; `storage` decides which ids this
 	 * process may claim — by default every id but the owner's. As the SDK does,
 	 * the agent's context transform runs the extensions' `context` handlers.
+	 * `host` runs on the agent before the session is built around it.
 	 */
 	async function sessionOverOwnedFile(
 		tempDir: TempDir,
@@ -216,6 +248,7 @@ describe("a session that had to leave its file", () => {
 		responses: Parameters<typeof createMockModel>[0] = {},
 		seed: (owner: SessionManager) => void = () => {},
 		storage: (ownerId: string) => FileSessionStorage = ownerId => new StorageWithForeignOwner(ownerId),
+		host: (agent: Agent, sessionManager: SessionManager) => void = () => {},
 	) {
 		const sessionDir = path.join(tempDir.path(), "sessions");
 		const owner = SessionManager.create(tempDir.path(), sessionDir, new FileSessionStorage());
@@ -236,14 +269,16 @@ describe("a session that had to leave its file", () => {
 		const modelRegistry = new ModelRegistry(authStorage);
 		const mock = createMockModel(responses);
 		const runner = new ExtensionRunner([extension], runtime, tempDir.path(), sessionManager, modelRegistry);
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model: mock, systemPrompt: ["Test"], tools, messages: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+			transformContext: (messages, signal) => runner.emitContext(messages, signal),
+		});
+		host(agent, sessionManager);
 		const session = new AgentSession({
-			agent: new Agent({
-				getApiKey: () => "test-key",
-				initialState: { model: mock, systemPrompt: ["Test"], tools, messages: [] },
-				convertToLlm,
-				streamFn: mock.stream,
-				transformContext: (messages, signal) => runner.emitContext(messages, signal),
-			}),
+			agent,
 			sessionManager,
 			settings: Settings.isolated(),
 			modelRegistry,
@@ -730,6 +765,189 @@ describe("a session that had to leave its file", () => {
 		} finally {
 			firstMayFinish.resolve();
 			contextMayFinish.resolve();
+			secondMayFinish.resolve();
+			await session.dispose().catch(() => {});
+		}
+	}, 30_000);
+
+	it.each([
+		{ path: "a full rewrite that finds the file owned by another process", reason: "open-elsewhere" },
+		{ path: "a full rewrite that loses every race for the file to another writer", reason: "contested" },
+	] as const)(
+		"starts no session_moved handler until $path has published the new file",
+		async ({ reason }) => {
+			using tempDir = TempDir.createSync("@omp-session-moved-");
+			const seen: { reason: string; fileExisted: boolean }[] = [];
+			const handlerStarted = Promise.withResolvers<void>();
+			let storage: StorageHoldingMovedWrites | undefined;
+			const { session, sessionManager } = await sessionOverOwnedFile(
+				tempDir,
+				pi => {
+					pi.on("session_moved", event => {
+						seen.push({ reason: event.reason, fileExisted: fs.existsSync(event.sessionFile) });
+						handlerStarted.resolve();
+					});
+				},
+				[],
+				{},
+				() => {},
+				// "contested": this process may claim the owner's id, so only the races move it.
+				ownerId => (storage = new StorageHoldingMovedWrites(reason === "open-elsewhere" ? ownerId : "")),
+			);
+			if (!storage) throw new Error("Expected the session's storage");
+			try {
+				storage.original = sessionManager.getSessionFile();
+				storage.contestOriginal = reason === "contested";
+				const rewrite = sessionManager.rewriteEntries();
+				await storage.heldWrite.promise;
+				// The session has moved and its new file is being written, not yet published.
+				expect(sessionManager.getSessionFile()).not.toBe(storage.original);
+				await nextEventLoopTurn();
+				await nextEventLoopTurn();
+				expect(seen).toEqual([]);
+				storage.publish.resolve();
+				await rewrite;
+				await handlerStarted.promise;
+				expect(seen).toEqual([{ reason, fileExisted: true }]);
+			} finally {
+				storage.publish.resolve();
+				await session.dispose();
+			}
+		},
+		30_000,
+	);
+
+	it("holds the model request for a move that a host's context wrapper, added before the session, makes after the context is prepared", async () => {
+		using tempDir = TempDir.createSync("@omp-session-moved-");
+		using timers = holdGraceTimers();
+		const order: string[] = [];
+		const moveStarted = Promise.withResolvers<void>();
+		const moveMayFinish = Promise.withResolvers<void>();
+		const modelRequested = Promise.withResolvers<void>();
+		const { session } = await sessionOverOwnedFile(
+			tempDir,
+			pi => {
+				pi.on("session_moved", async () => {
+					order.push("move started");
+					moveStarted.resolve();
+					await moveMayFinish.promise;
+					order.push("move finished");
+				});
+			},
+			[],
+			{},
+			() => {},
+			undefined,
+			(agent, sessionManager) => {
+				agent.wrapContextTransform(async (messages, signal, transform) => {
+					const prepared = await transform(messages, signal);
+					if (!order.includes("host persisted")) {
+						// The session's first write: it moves the session.
+						order.push("host persisted");
+						sessionManager.appendCustomEntry("host-context-state", {});
+						await sessionManager.flush();
+					}
+					return prepared;
+				});
+			},
+		);
+		const stream = session.agent.streamFn;
+		session.agent.streamFn = (...args) => {
+			order.push("model request");
+			modelRequested.resolve();
+			return stream(...args);
+		};
+		try {
+			const turn = session.prompt("go");
+			// The move's gate starts one grace timer; a request that waits for it starts the second.
+			await Promise.race([modelRequested.promise, Promise.all([moveStarted.promise, timers.untilStarted(2)])]);
+			expect(order).toEqual(["host persisted", "move started"]);
+			moveMayFinish.resolve();
+			await turn;
+			expect(order).toEqual(["host persisted", "move started", "move finished", "model request"]);
+		} finally {
+			moveMayFinish.resolve();
+			await session.dispose();
+		}
+	}, 30_000);
+
+	it("warns when a request goes on past a move whose own grace ended while the context was prepared", async () => {
+		using tempDir = TempDir.createSync("@omp-session-moved-");
+		using timers = holdGraceTimers();
+		const warn = spyOn(logger, "warn");
+		const order: string[] = [];
+		const firstStarted = Promise.withResolvers<void>();
+		const firstMayFinish = Promise.withResolvers<void>();
+		const secondStarted = Promise.withResolvers<void>();
+		const secondMayFinish = Promise.withResolvers<void>();
+		const contextEntered = Promise.withResolvers<void>();
+		const contextMayPersist = Promise.withResolvers<void>();
+		const contextPersisted = Promise.withResolvers<void>();
+		const contextMayReturn = Promise.withResolvers<void>();
+		const writer: { manager?: SessionManager } = {};
+		let moves = 0;
+		const { session, sessionManager } = await sessionOverOwnedFile(
+			tempDir,
+			pi => {
+				pi.on("session_moved", async () => {
+					const move = ++moves;
+					order.push(`move ${move} started`);
+					if (move === 1) {
+						firstStarted.resolve();
+						await firstMayFinish.promise;
+					} else {
+						secondStarted.resolve();
+						await secondMayFinish.promise;
+					}
+					order.push(`move ${move} finished`);
+				});
+				pi.on("context", async () => {
+					if (order.includes("context")) return;
+					order.push("context");
+					contextEntered.resolve();
+					await contextMayPersist.promise;
+					// This write moves the session again.
+					writer.manager?.appendCustomEntry("context-state", {});
+					await writer.manager?.flush();
+					contextPersisted.resolve();
+					await contextMayReturn.promise;
+				});
+			},
+			[],
+			{},
+			() => {},
+			() => new StorageRefusingFirstTwoIds(),
+		);
+		writer.manager = sessionManager;
+		const stream = session.agent.streamFn;
+		session.agent.streamFn = (...args) => {
+			order.push("model request");
+			return stream(...args);
+		};
+		try {
+			sessionManager.appendCustomEntry("first write", {});
+			await sessionManager.flush();
+			await firstStarted.promise;
+			const turn = session.prompt("go");
+			// The first move's gate starts one grace timer, the request's wait for it the second.
+			await timers.untilStarted(2);
+			// The first handler finishes: the wait before the context is prepared ends without a warning.
+			firstMayFinish.resolve();
+			await contextEntered.promise;
+			contextMayPersist.resolve();
+			await Promise.all([contextPersisted.promise, secondStarted.promise]);
+			// Two seconds pass: the request's deadline, and the second move's own grace, which opens its gate.
+			timers.fire();
+			await nextEventLoopTurn();
+			contextMayReturn.resolve();
+			await turn;
+			expect(order).toContain("model request");
+			expect(order).not.toContain("move 2 finished");
+			expect(goneOnWarnings(warn)).toBe(1);
+		} finally {
+			firstMayFinish.resolve();
+			contextMayPersist.resolve();
+			contextMayReturn.resolve();
 			secondMayFinish.resolve();
 			await session.dispose().catch(() => {});
 		}

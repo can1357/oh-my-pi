@@ -62,13 +62,17 @@ export interface SessionSwitchEvent {
  * Handlers observe; they cannot refuse the move, which has already happened by
  * the time it is announced — the session had nowhere else to save.
  *
- * Handlers run after the previous move's, so moves are handled in order. The
- * session's next tool call and model request wait for them for up to 2
- * seconds from the move (`SESSION_MOVED_HANDLER_GRACE_MS`), and one wait
- * never lasts longer than that however many moves happen during it, a move
- * that a `context` handler makes while the request is being prepared
- * included. At 2 seconds the session stops waiting, logs a warning and goes
- * on under the new id. A handler's own code is never stopped: it gets no
+ * Handlers run once the new file `sessionFile` has been written and the
+ * previous move's handlers are done, so moves are handled in order and a
+ * handler finds its file on disk. The session's next tool call and model
+ * request wait for them for up to 2 seconds from the move
+ * (`SESSION_MOVED_HANDLER_GRACE_MS`), and one wait never lasts longer than
+ * that however many moves happen during it — a move made while the request
+ * is being prepared included, by a `context` handler or by a context
+ * wrapper the host added. At 2 seconds the session stops waiting, logs a
+ * warning and goes on under the new id. If the new file is never written —
+ * the session is disposed first — no handler runs for that move.
+ * A handler's own code is never stopped: it gets no
  * signal, so the session cannot tell it to stop. The extension runner's
  * 30-second handler timeout and the session's disposal stop waiting for it
  * and cancel its `ctx.ui` dialogs, and after disposal no further handler for

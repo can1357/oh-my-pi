@@ -474,6 +474,7 @@ import {
 	extractSessionInit,
 	type PersistedSessionInit,
 	type SessionManager,
+	type SessionPersistenceNotice,
 } from "./session-manager";
 import { SessionMemory, type SessionMemoryHost } from "./session-memory";
 import { buildSessionMetadata } from "./session-metadata";
@@ -2246,11 +2247,12 @@ export class AgentSession implements SettingsScope {
 		this.#unsubscribeSessionMoved = this.sessionManager.onPersistenceNotice(notice => {
 			const runner = this.#extensionRunner;
 			if (!runner || !liveForMoves) return;
-			// The move happens inside a synchronous write, so its handlers cannot
-			// be awaited here. They run after the previous move's, so moves are
-			// handled in order, and the session's next tool call or model request
-			// waits for them for up to `SESSION_MOVED_HANDLER_GRACE_MS` from now.
-			// At that point the session stops waiting; the handlers keep running.
+			// The move is announced inside the write that decides it, before the
+			// new file is written, so its handlers cannot be awaited here. They
+			// run once that file is written and the previous move's handlers are
+			// done, and the session's next tool call or model request waits for
+			// them for up to `SESSION_MOVED_HANDLER_GRACE_MS` from now. At that
+			// point the session stops waiting; the handlers keep running.
 			const event = {
 				type: "session_moved",
 				reason: notice.reason,
@@ -2277,11 +2279,20 @@ export class AgentSession implements SettingsScope {
 				if (this.#movesGate === gate) this.#movesGate = undefined;
 			});
 			this.#movesGate = gate;
-			// Handlers start once the previous move's are done, and never inside
-			// the write that announced this one: a handler that writes there
-			// would rewrite the file under the write still in progress.
+			// Handlers start once this move's new file is durably written —
+			// asynchronously on some write paths, so not before the write that
+			// announced it has finished — and the previous move's handlers are
+			// done. A move whose file is never written, because the manager
+			// stopped writing or the session was disposed first, starts none.
+			// A file already written starts them in the same step, so a
+			// synchronous write's handlers start a microtask after it.
+			const emit = (written: boolean) =>
+				written ? runner.emitSessionMoved(event, this.#movesAbort.signal) : undefined;
 			void previous
-				.then(() => runner.emitSessionMoved(event, this.#movesAbort.signal))
+				.then(() => {
+					const written = this.sessionManager.moveWritten(notice);
+					return written === undefined ? this.#whenMoveWritten(notice).then(emit) : emit(written);
+				})
 				.catch(error => logger.warn("session_moved handlers failed", { error: toError(error).message }))
 				.finally(() => {
 					this.#movesPending--;
@@ -2651,10 +2662,13 @@ export class AgentSession implements SettingsScope {
 		this.agent.setOnBeforeYield(() => this.#ttsr.settleJudgments());
 		// The main loop's model requests wait for the move handlers through a
 		// wrapper the agent runs around whatever context transform a host gives
-		// it, so replacing `agent.transformContext` cannot remove the wait.
+		// it, so replacing `agent.transformContext` cannot remove the wait. It
+		// is outermost, so it waits around every wrapper a host adds, before
+		// this session or after: a move one of them makes is waited for too.
 		this.addDisposer(
-			this.agent.wrapContextTransform((messages, signal, transform) =>
-				this.#transformAfterMoves(messages, signal, transform),
+			this.agent.wrapContextTransform(
+				(messages, signal, transform) => this.#transformAfterMoves(messages, signal, transform),
+				{ outermost: true },
 			),
 		);
 		this.agent.setOnModelCallSystemPrompt(prompt => {
@@ -5817,9 +5831,9 @@ export class AgentSession implements SettingsScope {
 
 	/**
 	 * Waits on the move gates until none is left or `deadline` has passed. Says
-	 * so, once per wait, when it goes on with handlers still running: after
-	 * pausing for them, or straight past an open gate because the deadline
-	 * passed earlier in the same wait — while the context was being prepared.
+	 * so, once per wait, when it goes on with handlers still running after
+	 * meeting a gate in this wait: pausing for it now, or earlier, so that the
+	 * deadline passed while the context was being prepared.
 	 */
 	async #waitForMoves(deadline: MoveWaitDeadline, signal: AbortSignal | undefined): Promise<void> {
 		let waited = false;
@@ -5829,8 +5843,8 @@ export class AgentSession implements SettingsScope {
 			const waits = [gate, deadline.reached()];
 			await (signal ? Promise.race([...waits, abortRejection(signal)]) : Promise.race(waits));
 		}
-		const pastOpenGate = deadline.expired && this.#peekMovesGate() !== undefined;
-		if ((waited || pastOpenGate) && this.#movesPending > 0 && !deadline.warned) {
+		// The deadline runs only once this wait has met a gate.
+		if ((waited || deadline.expired) && this.#movesPending > 0 && !deadline.warned) {
 			deadline.warned = true;
 			logger.warn("session_moved handlers still running; the session goes on without waiting for them", {
 				sessionId: this.sessionManager.getSessionId(),
@@ -5842,6 +5856,18 @@ export class AgentSession implements SettingsScope {
 	/** The current move gate, read without the narrowing a caller's own check gave the field. */
 	#peekMovesGate(): Promise<void> | undefined {
 		return this.#movesGate;
+	}
+
+	/** Whether `notice`'s new file was written before the manager stopped writing; `false` once the session is disposed. */
+	#whenMoveWritten(notice: SessionPersistenceNotice): Promise<boolean> {
+		const signal = this.#movesAbort.signal;
+		if (signal.aborted) return Promise.resolve(false);
+		const disposed = Promise.withResolvers<boolean>();
+		const onAbort = () => disposed.resolve(false);
+		signal.addEventListener("abort", onAbort, { once: true });
+		return Promise.race([this.sessionManager.whenMoveWritten(notice), disposed.promise]).finally(() =>
+			signal.removeEventListener("abort", onAbort),
+		);
 	}
 
 	/**
@@ -6615,10 +6641,11 @@ export class AgentSession implements SettingsScope {
 		// the manager.
 		this.#unsubscribeSessionMoved?.();
 		this.#unsubscribeSessionMoved = undefined;
-		// A move's handlers start a microtask after the write that announced it,
-		// never inside it. Yield that microtask, so a handler the exit record's
-		// move may start now has started before `session_shutdown` is emitted;
-		// one queued behind a handler still running does not start here.
+		// The exit record is written synchronously, so its move's new file is
+		// written by now, and its handlers start a microtask after that write.
+		// Yield that microtask, so a handler the exit record's move may start
+		// now has started before `session_shutdown` is emitted; one queued
+		// behind a handler still running does not start here.
 		await Promise.resolve();
 		try {
 			await emitSessionShutdownEvent(this.#extensionRunner);
