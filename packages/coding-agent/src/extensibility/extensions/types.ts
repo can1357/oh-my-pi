@@ -2048,8 +2048,10 @@ export interface ExtensionAPI {
 	 * an internal continuation that consumes the message on the next turn.
 	 *
 	 * `deliverAs: "aside"` injects the message at the next agent step boundary without interrupting
-	 * the in-flight tool batch; when the session is idle it starts a turn regardless of `triggerTurn`
-	 * (plan mode folds it into context instead).
+	 * the in-flight tool batch; when the session is idle it starts a turn (plan mode, or a user
+	 * interrupt's auto-resume suppression, folds it into context instead). With `triggerTurn: true`,
+	 * an aside no running turn consumes still starts a turn in plan mode and under that suppression;
+	 * only a user interrupt after the send folds it.
 	 */
 	sendMessage<T = unknown>(
 		message: CustomMessagePayload<T>,
@@ -2289,7 +2291,8 @@ export type SendMessageHandler = <T = unknown>(
 	 * When paired with `triggerTurn: true` during prompt teardown, the session schedules
 	 * an internal continuation without surfacing the message in the editable pending queue.
 	 * `deliverAs: "aside"` injects at the next step boundary without interrupting the in-flight
-	 * tool batch, except that it ends a running interruptible `wait`; idle starts a turn regardless of `triggerTurn` (plan mode folds into context).
+	 * tool batch, except that it ends a running interruptible `wait`; idle starts a turn (plan mode or
+	 * interrupt suppression folds into context unless `triggerTurn` is set and no user interrupt came after the send).
 	 */
 	options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" | "aside" },
 ) => void;

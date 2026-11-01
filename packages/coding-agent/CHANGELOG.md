@@ -111,6 +111,14 @@
 
 ### Fixed
 
+- Fixed an extension message sent with `deliverAs: "aside"` and `triggerTurn: true` being folded into the conversation with no turn in plan mode or after an earlier interrupt, when it was sent to an idle session or no run picked it up (a prompt refused before its run, or the message arriving after the run's last check); it now starts a turn unless you interrupt after it was sent ([#17166](https://github.com/can1357/oh-my-pi/pull/17166) by [@sjawhar](https://github.com/sjawhar))
+- Fixed `agent_end` reporting `isTerminal: false` after an interrupt when the messages left over were only folded into the conversation and no turn followed ([#17166](https://github.com/can1357/oh-my-pi/pull/17166) by [@sjawhar](https://github.com/sjawhar))
+- Fixed `agent_end` reporting a final turn while an extension message sent with `triggerTurn: true` during an interrupt still had its turn to come ([#17166](https://github.com/can1357/oh-my-pi/pull/17166) by [@sjawhar](https://github.com/sjawhar))
+- Fixed an extension message sent with `triggerTurn: true` just as a session switch started being folded, or left waiting for an unrelated prompt, after that switch failed and rolled back ([#17166](https://github.com/can1357/oh-my-pi/pull/17166) by [@sjawhar](https://github.com/sjawhar))
+- Fixed a background message whose images fail to load ending the run while a different message was still on its way to the turn it asked for, and a disposed session leaving its last run reported as unfinished ([#17166](https://github.com/can1357/oh-my-pi/pull/17166) by [@sjawhar](https://github.com/sjawhar))
+- Fixed a background message whose images fail to load reporting the previous run as finished while the turn another message had already started was still running ([#17166](https://github.com/can1357/oh-my-pi/pull/17166) by [@sjawhar](https://github.com/sjawhar))
+- Fixed an extension or peer message already waiting behind a running turn losing the turn it asked for when a session switch failed and rolled back ([#17166](https://github.com/can1357/oh-my-pi/pull/17166) by [@sjawhar](https://github.com/sjawhar))
+- Fixed `agent_end` reporting a final turn while you leave a mode, when a message that asked for a turn was parked behind that mode's teardown and still had its turn to come ([#17166](https://github.com/can1357/oh-my-pi/pull/17166) by [@sjawhar](https://github.com/sjawhar))
 - Fixed live configuration reloads missing edits immediately after a symlink switches to another file in the same directory.
 - Fixed auth-gateway model routing after catalog refreshes so bare model IDs select the highest-priority credentialed provider, with wire-format compatibility used as a tie-breaker.
 - Fixed chart recommendations that incorrectly inferred whether higher or lower values were better from row or column names; smart charting now uses the judge and avoids charting unsuitable numeric text such as page or step numbers.
