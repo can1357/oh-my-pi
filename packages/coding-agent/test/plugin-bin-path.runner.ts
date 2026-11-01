@@ -45,7 +45,7 @@ export interface RunnerScenario {
 	selector?: "extensions" | "tools";
 	/** `subagent`: the child session's cwd. */
 	childCwd?: string;
-	/** `sdk`: commands to run, in order, through the session's own shell. */
+	/** `sdk`, `explicitSession`, `subagent` (the child): commands to run, in order, through the session's own shell. `isolation`: through `/bin/sh` in this process, after the inner case. */
 	commands?: string[];
 	/** `isolation`: the case this process runs through `runCase`, in its own cwd. */
 	inner?: Omit<RunnerScenario, "cwd">;
@@ -81,6 +81,16 @@ function createSession(cwd: string, options: Partial<CreateAgentSessionOptions> 
 		skipPythonPreflight: true,
 		...options,
 	});
+}
+
+/** Run each command through the session's own shell, as `!` and the RPC `bash` command do. */
+async function runInSessionShell(session: AgentSession, commands: readonly string[] = []) {
+	const outcomes: RunnerResult["shell"] = [];
+	for (const command of commands) {
+		const { output, exitCode } = await session.executeBash(command);
+		outcomes.push({ output, exitCode });
+	}
+	return outcomes;
 }
 
 async function runRoute(scenario: RunnerScenario): Promise<RunnerResult> {
@@ -127,10 +137,7 @@ async function runRoute(scenario: RunnerScenario): Promise<RunnerResult> {
 			sessions.push(session);
 			result.tools = session.getAllToolNames();
 			result.errors = extensionsResult.errors.map(error => error.error);
-			for (const command of scenario.commands ?? []) {
-				const { output, exitCode } = await session.executeBash(command);
-				result.shell.push({ output, exitCode });
-			}
+			result.shell = await runInSessionShell(session, scenario.commands);
 			break;
 		}
 		case "acp": {
@@ -182,6 +189,7 @@ async function runRoute(scenario: RunnerScenario): Promise<RunnerResult> {
 				.filter(extensionPath => !extensionPath.startsWith("<inline"));
 			result.errors = extensionsResult.errors.map(error => error.error);
 			result.tools = session.getAllToolNames();
+			result.shell = await runInSessionShell(session, scenario.commands);
 			break;
 		}
 		case "subagent": {
@@ -201,6 +209,7 @@ async function runRoute(scenario: RunnerScenario): Promise<RunnerResult> {
 			sessions.push(child.session);
 			result.tools = child.session.getAllToolNames();
 			result.errors = child.extensionsResult.errors.map(error => error.error);
+			result.shell = await runInSessionShell(child.session, scenario.commands);
 			break;
 		}
 		case "install": {
@@ -246,6 +255,10 @@ async function runRoute(scenario: RunnerScenario): Promise<RunnerResult> {
 				{ HOME: process.env.HOME ?? "", TMPDIR: process.env.TMPDIR ?? "", PATH: process.env.PATH ?? "" },
 			);
 			setProfile(undefined);
+			for (const command of scenario.commands ?? []) {
+				const run = Bun.spawnSync(["/bin/sh", "-c", command], { env: { PATH: process.env.PATH } });
+				result.shell.push({ output: run.stdout.toString(), exitCode: run.exitCode });
+			}
 			break;
 		}
 	}
