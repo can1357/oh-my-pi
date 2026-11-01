@@ -119,9 +119,11 @@ export class AuthStorage {
 	}
 	/**
 	 * Monotonic epoch of the backing credential store; advances on every
-	 * `replaceStore` (live `auth.broker.url` change). Credential row ids belong to
-	 * one store generation, and the replacement store can reuse a numeric id for
-	 * a different account, so consumers pinning a request's `credentialId` for
+	 * `replaceStore` (live `auth.broker.url` change) and is based at a random
+	 * value unique to the store, so two independent `AuthStorage` instances
+	 * never agree either. Credential row ids belong to
+	 * one store generation, and the replacement store can reuse a numeric id for a
+	 * different account, so consumers pinning a request's `credentialId` for
 	 * later use (delayed usage-limit attribution) must compare the epoch captured
 	 * alongside the id against this value and drop the pin on mismatch.
 	 */

@@ -916,11 +916,15 @@ export class TurnRecovery {
 						// healthy credential for the failing account's window.
 						// Fence the id to the store that issued it: a live
 						// auth.broker.url change (AuthStorage.replaceStore) retires
-						// the old store's row ids, and the replacement store can
-						// reuse the same numeric id for a different account, so an
-						// epoch mismatch drops the pin and falls back to affinity
-						// resolution. Messages without an epoch (older sessions,
-						// resolvers that cannot attest one) keep the pin.
+						// the old store's row ids, the replacement store can
+						// reuse the same numeric id for a different account, and
+						// each store's epoch is based at its own random value, so
+						// an independent store (an SDK getApiKey override backed
+						// by another AuthStorage) never validates its row ids
+						// here — any epoch mismatch drops the pin and falls back
+						// to affinity resolution. Messages without an epoch
+						// (older sessions, resolvers that cannot attest one)
+						// keep the pin.
 						credentialId:
 							message.credentialStoreEpoch === undefined ||
 							message.credentialStoreEpoch === this.#host.modelRegistry.authStorage.credentialStoreEpoch

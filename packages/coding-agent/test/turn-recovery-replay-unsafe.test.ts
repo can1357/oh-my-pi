@@ -460,6 +460,41 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		});
 	});
 
+	it("drops the credential pin when its epoch belongs to an independent store", async () => {
+		const codex = getBundledModel("openai-codex", "gpt-6.1-sol");
+		if (!codex) throw new Error("Expected bundled openai-codex model gpt-6.1-sol");
+		// An SDK session can resolve keys through a second AuthStorage
+		// (`options.getApiKey`): that store stamps its own epoch onto the
+		// message, and row ids are only unique within one store, so the foreign
+		// epoch must never validate against this registry — otherwise the pin
+		// would block this registry's unrelated healthy row that happens to
+		// reuse the same numeric id.
+		const foreign = await AuthStorage.create(tempDir.join("foreign-auth.db"));
+		try {
+			expect(foreign.credentialStoreEpoch).not.toBe(authStorage.credentialStoreEpoch);
+			const host = createHost(model, modelRegistry);
+			const recovery = new TurnRecovery(host);
+			const markReached = vi.spyOn(authStorage.limits, "markReached").mockResolvedValue({ switched: false });
+			const foreignStorePin: AssistantMessage = {
+				...makeMessage([], codex),
+				errorMessage: "429 usage_limit_reached: You've reached your ChatGPT plan limit. Try again in ~9701 min.",
+				credentialId: 42,
+				credentialStoreEpoch: foreign.credentialStoreEpoch,
+			};
+			await recovery.recordUsageLimitOutcome(foreignStorePin);
+			expect(markReached).toHaveBeenCalledTimes(1);
+			expect(markReached).toHaveBeenCalledWith("openai-codex", "test-session", {
+				retryAfterMs: expect.any(Number),
+				providerTimed: true,
+				baseUrl: codex.baseUrl,
+				modelId: codex.id,
+				credentialId: undefined,
+			});
+		} finally {
+			foreign.close();
+		}
+	});
+
 	it("keeps a delayed foreign-provider usage limit out of the active model's retry policy", async () => {
 		const codex = getBundledModel("openai-codex", "gpt-6.1-sol");
 		if (!codex) throw new Error("Expected bundled openai-codex model gpt-6.1-sol");

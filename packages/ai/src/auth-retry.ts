@@ -45,9 +45,11 @@ export interface ResolvedApiKey {
 	/**
 	 * Store epoch under which {@link credentialId} was assigned; `undefined`
 	 * when the resolver cannot attest it. `AuthStorage.replaceStore` retires the
-	 * issuing store, and the replacement store can reuse the id for a different
-	 * credential, so delayed consumers must re-check the epoch before reusing
-	 * the id (see `AuthStorage.credentialStoreEpoch`).
+	 * issuing store, the replacement store can reuse the id for a different
+	 * credential, and each store's epoch is based at its own random value, so an
+	 * id resolved through an independent store never validates here; delayed
+	 * consumers must re-check the epoch before reusing the id (see
+	 * `AuthStorage.credentialStoreEpoch`).
 	 */
 	credentialStoreEpoch?: number;
 	/**
