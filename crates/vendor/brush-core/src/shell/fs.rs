@@ -9,7 +9,6 @@ use crate::{
 	env::{EnvironmentLookup, EnvironmentScope},
 	error, openfiles, pathsearch,
 	sys::users,
-	variables,
 };
 
 impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
@@ -24,7 +23,11 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 		&mut self,
 		target_dir: impl AsRef<Path>,
 	) -> Result<(), error::Error> {
-		let abs_path = self.absolute_path(target_dir.as_ref());
+		// The parameters are the shell's own rather than the caller's, since
+		// `set_working_dir` is a plain method with thirty-odd callers: that
+		// bounds the holds below, which is the defect, but a `cd` inside a
+		// cancelled run will not see that run's token.
+		let params = self.default_exec_params();
 
 		// Native directories are checked as spelled and then normalized (but
 		// not canonicalized, so symlinks are not resolved, preserving logical
@@ -32,8 +35,37 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 		// the stored working_dir has one spelling. Virtual providers only ever
 		// see the lexically normalized path: `..` in a URL is not theirs to
 		// resolve.
-		let native = self.filesystem.is_native_local(&abs_path);
-		let checked_path = if native { abs_path } else { pi_vfs::normalize_lexically(&abs_path) };
+		//
+		// A path has no enforced bound: a virtual provider may accept one of
+		// any length, and making a 64 MiB one absolute and normalizing it held
+		// the worker 79.6 ms, 286.8 ms under load, in one step. **What is
+		// resolved is the target joined to the working directory, not the
+		// target**: `cd .` in an accepted 64 MiB virtual directory held it
+		// 63–64 ms, 179–277 ms under load, while the gate measured one byte.
+		// So the gate is the length of the text resolution reads
+		// ([`resolution_len`]), and a resolution longer than a stride runs on
+		// a blocking worker, from copies made in strides, unless this is one
+		// already.
+		let target = target_dir.as_ref();
+		let (native, checked_path) = if resolution_len(self.working_dir(), target)
+			> crate::interp::DIVIDE_COPY_ABOVE_BYTES
+			&& !crate::commands::builtin_on_blocking_worker()
+		{
+			let target = copy_path_in_strides(&params, target).await?;
+			let working_dir = copy_path_in_strides(&params, self.working_dir()).await?;
+			let filesystem = self.filesystem.clone();
+			match tokio::task::spawn_blocking(move || resolve_directory(&filesystem, &working_dir, &target))
+				.await
+			{
+				Ok(resolved) => resolved,
+				Err(join_error) if join_error.is_panic() => {
+					std::panic::resume_unwind(join_error.into_panic())
+				},
+				Err(join_error) => return Err(error::ErrorKind::ThreadingError(join_error).into()),
+			}
+		} else {
+			resolve_directory(&self.filesystem, self.working_dir(), target)
+		};
 
 		if !self.filesystem.metadata(&checked_path).await?.is_dir() {
 			return Err(error::ErrorKind::NotADirectory(checked_path).into());
@@ -45,24 +77,37 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 			checked_path
 		};
 
-		let pwd = cleaned_path.to_string_lossy().to_string();
+		// An accepted 64 MiB working directory also held the worker
+		// **105.400 ms** through these two assignments, and 15 ms more in
+		// `to_string_lossy`, whose check that the path is UTF-8 is one pass.
+		// The check, the copy and the writes are divided.
+		let pwd = path_text_in_strides(&params, &cleaned_path).await?;
 
-		self.env.update_or_add(
-			"PWD",
-			variables::ShellValueLiteral::Scalar(pwd),
-			|_| Ok(()),
-			EnvironmentLookup::Anywhere,
-			EnvironmentScope::Global,
-		)?;
+		self
+			.env
+			.update_or_add(
+				"PWD",
+				crate::variables::ShellValueLiteral::Scalar(pwd),
+				|_| Ok(()),
+				EnvironmentLookup::Anywhere,
+				EnvironmentScope::Global,
+				&params,
+			)
+			.await?;
 		let oldpwd = std::mem::replace(self.working_dir_mut(), cleaned_path);
+		let oldpwd = path_text_in_strides(&params, &oldpwd).await?;
 
-		self.env.update_or_add(
-			"OLDPWD",
-			variables::ShellValueLiteral::Scalar(oldpwd.to_string_lossy().to_string()),
-			|_| Ok(()),
-			EnvironmentLookup::Anywhere,
-			EnvironmentScope::Global,
-		)?;
+		self
+			.env
+			.update_or_add(
+				"OLDPWD",
+				crate::variables::ShellValueLiteral::Scalar(oldpwd),
+				|_| Ok(()),
+				EnvironmentLookup::Anywhere,
+				EnvironmentScope::Global,
+				&params,
+			)
+			.await?;
 
 		Ok(())
 	}
@@ -179,17 +224,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 	///
 	/// * `path` - The path to get the absolute form of.
 	pub fn absolute_path(&self, path: impl AsRef<Path>) -> PathBuf {
-		let path = path.as_ref();
-		if pi_vfs::is_virtual_path(path) {
-			return path.to_owned();
-		}
-		let normalized_path = crate::sys::fs::normalize_shell_path(path);
-		let path = normalized_path.as_ref();
-		if path.as_os_str().is_empty() || path.is_absolute() {
-			path.to_owned()
-		} else {
-			pi_vfs::join_path(self.working_dir(), path)
-		}
+		absolute_path_in(self.working_dir(), path.as_ref())
 	}
 
 	/// Opens the given file through the shell's filesystem, using the context
@@ -256,4 +291,77 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 	pub(crate) const fn persistent_open_files(&self) -> &openfiles::OpenFiles {
 		&self.open_files
 	}
+}
+
+/// The absolute form of `path` for a shell whose working directory is
+/// `working_dir`. Virtual (`scheme://`) paths are already absolute; relative
+/// paths join the working directory, which may itself be virtual.
+fn absolute_path_in(working_dir: &Path, path: &Path) -> PathBuf {
+	if pi_vfs::is_virtual_path(path) {
+		return path.to_owned();
+	}
+	let normalized_path = crate::sys::fs::normalize_shell_path(path);
+	let path = normalized_path.as_ref();
+	if path.as_os_str().is_empty() || path.is_absolute() {
+		path.to_owned()
+	} else {
+		pi_vfs::join_path(working_dir, path)
+	}
+}
+
+/// The path `cd` checks for `target`, and whether it is native: the absolute
+/// path, normalized lexically when it is virtual. Each step is one pass over
+/// the path.
+fn resolve_directory(filesystem: &pi_vfs::Fs, working_dir: &Path, target: &Path) -> (bool, PathBuf) {
+	let absolute = absolute_path_in(working_dir, target);
+	let native = filesystem.is_native_local(&absolute);
+	let checked = if native { absolute } else { pi_vfs::normalize_lexically(&absolute) };
+	(native, checked)
+}
+
+/// How much text [`resolve_directory`] may read for `target`: the target, and
+/// the working directory a relative target is joined to and normalized with.
+/// Counted from the lengths alone, which is an upper bound for a target that
+/// turns out to be absolute: telling that a long target is absolute or a URL
+/// would itself read it.
+fn resolution_len(working_dir: &Path, target: &Path) -> usize {
+	working_dir.as_os_str().len().saturating_add(target.as_os_str().len())
+}
+
+/// A copy of `path` made a stride at a time.
+async fn copy_path_in_strides(params: &ExecutionParameters, path: &Path) -> Result<PathBuf, error::Error> {
+	let bytes = path.as_os_str().as_encoded_bytes();
+	let mut copy = Vec::with_capacity(bytes.len());
+	for stride in bytes.chunks(crate::interp::BYTE_CHECKPOINT_STRIDE) {
+		crate::interp::stride_checkpoint(params).await?;
+		copy.extend_from_slice(stride);
+	}
+	// SAFETY: `copy` holds exactly the bytes `as_encoded_bytes` gave for a
+	// valid `OsStr`, in order.
+	Ok(PathBuf::from(unsafe { std::ffi::OsString::from_encoded_bytes_unchecked(copy) }))
+}
+
+/// The text of `path`, as `to_string_lossy` gives it, checked and copied a
+/// stride at a time. A path that is not UTF-8 is rendered lossily in one step:
+/// no shell writes such a path, and a provider that hands one back gets the
+/// one-step answer.
+async fn path_text_in_strides(params: &ExecutionParameters, path: &Path) -> Result<String, error::Error> {
+	let bytes = path.as_os_str().as_encoded_bytes();
+	// How much of the path is known to be UTF-8: a stride can end inside a
+	// character, which the next stride then completes.
+	let mut valid = 0;
+	for stride_end in (0..bytes.len()).step_by(crate::interp::BYTE_CHECKPOINT_STRIDE).skip(1).chain([bytes.len()]) {
+		crate::interp::stride_checkpoint(params).await?;
+		match std::str::from_utf8(&bytes[valid..stride_end]) {
+			Ok(_) => valid = stride_end,
+			Err(error) if error.error_len().is_none() => valid += error.valid_up_to(),
+			Err(_) => return Ok(path.to_string_lossy().into_owned()),
+		}
+	}
+	if valid != bytes.len() {
+		return Ok(path.to_string_lossy().into_owned());
+	}
+	// SAFETY: every byte of `bytes` was just checked to be UTF-8.
+	let text = unsafe { std::str::from_utf8_unchecked(bytes) };
+	crate::interp::clone_in_strides(params, text).await
 }

@@ -4,7 +4,7 @@ use brush_parser::ast;
 
 use crate::{
 	ExecutionParameters, Shell, ShellFd, arithmetic, env, error, escape, expansion, extensions,
-	namedoptions, pathsearch, patterns, regex,
+	interp, namedoptions, pathsearch, patterns, regex,
 	sys::users,
 	variables::{self, ArrayLiteral},
 };
@@ -82,15 +82,17 @@ async fn apply_unary_predicate(
 	let expanded_operand = expansion::basic_expand_word(shell, params, operand).await?;
 
 	if shell.options().print_commands_and_arguments {
-		shell
-			.trace_command(
-				params,
-				std::format!(
-					"[[ {op} {} ]]",
-					escape::quote_if_needed(&expanded_operand, escape::QuoteMode::SingleQuote)
-				),
-			)
-			.await;
+		// The operand is as long as its expansion made it, and quoting reads it
+		// twice and writes it once, so both the quoting and the line are
+		// divided.
+		let quoted =
+			escape::quote_if_needed_divided(params, &expanded_operand, escape::QuoteMode::SingleQuote)
+				.await?;
+		let mut traced = String::with_capacity(quoted.len() + 16);
+		traced.push_str(&std::format!("[[ {op} "));
+		push_traced_operand(params, &mut traced, quoted.as_ref()).await?;
+		traced.push_str(" ]]");
+		shell.trace_command(params, traced).await;
 	}
 
 	apply_unary_predicate_to_str(op, expanded_operand.as_str(), shell, params).await
@@ -207,6 +209,47 @@ pub(crate) async fn apply_unary_predicate_to_str(
 	}
 }
 
+/// Composes the `xtrace` line for a binary test, written in strides.
+///
+/// Both operands are as long as their expansions made them, so a line built
+/// in one `format!` is a hold as long as they are: under `set -x`,
+/// `[[ $big == $big ]]` copied the whole of a 64 MiB variable twice before
+/// anything was compared.
+///
+/// # Errors
+///
+/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part
+/// way, leaving the line unfinished and discarded.
+async fn traced_binary_test(
+	params: &ExecutionParameters,
+	left: &str,
+	op: &ast::BinaryPredicate,
+	right: &str,
+) -> Result<String, error::Error> {
+	let mut traced = String::with_capacity(left.len() + right.len() + 16);
+	traced.push_str("[[ ");
+	push_traced_operand(params, &mut traced, left).await?;
+	traced.push_str(&std::format!(" {op} "));
+	push_traced_operand(params, &mut traced, right).await?;
+	traced.push_str(" ]]");
+	Ok(traced)
+}
+
+/// Appends one operand of a traced test, dividing the copy above the
+/// threshold.
+async fn push_traced_operand(
+	params: &ExecutionParameters,
+	out: &mut String,
+	operand: &str,
+) -> Result<(), error::Error> {
+	if operand.len() > interp::DIVIDE_COPY_ABOVE_BYTES {
+		interp::push_str_in_strides(params, out, operand).await?;
+	} else {
+		out.push_str(operand);
+	}
+	Ok(())
+}
+
 #[expect(clippy::too_many_lines)]
 async fn apply_binary_predicate(
 	op: &ast::BinaryPredicate,
@@ -223,14 +266,21 @@ async fn apply_binary_predicate(
 				.set_multiline(true);
 
 			if shell.options().print_commands_and_arguments {
-				shell
-					.trace_command(params, std::format!("[[ {s} {op} {right} ]]"))
-					.await;
+				// The left operand is as long as its expansion made it; the
+				// right is the word as the script wrote it.
+				let mut traced = String::with_capacity(s.len() + 16);
+				traced.push_str("[[ ");
+				push_traced_operand(params, &mut traced, s.as_str()).await?;
+				traced.push_str(&std::format!(" {op} {right} ]]"));
+				shell.trace_command(params, traced).await;
 			}
 
-			let (matches, captures) = match regex.matches(s.as_str()) {
+			let (matches, captures) = match regex.matches(params, s).await {
 				Ok(Some(captures)) => (true, captures),
 				Ok(None) => (false, vec![]),
+				// A cancelled run carries out rather than being reported as a
+				// regex that would not compile.
+				Err(e) if matches!(e.kind(), error::ErrorKind::Interrupted) => return Err(e),
 				// If we can't compile the regex, don't abort the whole operation but make sure to
 				// report it.
 				// TODO(test): Docs indicate we should yield 2 on an invalid regex (not 1).
@@ -240,20 +290,28 @@ async fn apply_binary_predicate(
 				},
 			};
 
-			let captures_value = variables::ShellValueLiteral::Array(ArrayLiteral(
-				captures
-					.into_iter()
-					.map(|c| (None, c.unwrap_or_default()))
-					.collect(),
-			));
+			// One group for every pair of parentheses in the pattern, which the
+			// pattern's own length is the only bound on.
+			let mut elements = Vec::new();
+			interp::extend_in_strides(
+				params,
+				&mut elements,
+				captures.into_iter().map(|c| (None, c.unwrap_or_default())),
+			)
+			.await?;
+			let captures_value = variables::ShellValueLiteral::Array(ArrayLiteral(elements));
 
-			shell.env_mut().update_or_add(
-				"BASH_REMATCH",
-				captures_value,
-				|_| Ok(()),
-				env::EnvironmentLookup::Anywhere,
-				env::EnvironmentScope::Global,
-			)?;
+			shell
+				.env_mut()
+				.update_or_add(
+					"BASH_REMATCH",
+					captures_value,
+					|_| Ok(()),
+					env::EnvironmentLookup::Anywhere,
+					env::EnvironmentScope::Global,
+					params,
+				)
+				.await?;
 
 			Ok(matches)
 		},
@@ -262,9 +320,8 @@ async fn apply_binary_predicate(
 			let right = expansion::basic_expand_word(shell, params, right).await?;
 
 			if shell.options().print_commands_and_arguments {
-				shell
-					.trace_command(params, std::format!("[[ {left} {op} {right} ]]"))
-					.await;
+				let traced = traced_binary_test(params, &left, op, &right).await?;
+				shell.trace_command(params, traced).await;
 			}
 
 			Ok(left == right)
@@ -274,9 +331,8 @@ async fn apply_binary_predicate(
 			let right = expansion::basic_expand_word(shell, params, right).await?;
 
 			if shell.options().print_commands_and_arguments {
-				shell
-					.trace_command(params, std::format!("[[ {left} {op} {right} ]]"))
-					.await;
+				let traced = traced_binary_test(params, &left, op, &right).await?;
+				shell.trace_command(params, traced).await;
 			}
 
 			Ok(left != right)
@@ -286,9 +342,8 @@ async fn apply_binary_predicate(
 			let substring = expansion::basic_expand_word(shell, params, right).await?;
 
 			if shell.options().print_commands_and_arguments {
-				shell
-					.trace_command(params, std::format!("[[ {s} {op} {substring} ]]"))
-					.await;
+				let traced = traced_binary_test(params, &s, op, &substring).await?;
+				shell.trace_command(params, traced).await;
 			}
 
 			Ok(s.contains(substring.as_str()))
@@ -298,9 +353,8 @@ async fn apply_binary_predicate(
 			let right = expansion::basic_expand_word(shell, params, right).await?;
 
 			if shell.options().print_commands_and_arguments {
-				shell
-					.trace_command(params, std::format!("[[ {left} {op} {right} ]]"))
-					.await;
+				let traced = traced_binary_test(params, &left, op, &right).await?;
+				shell.trace_command(params, traced).await;
 			}
 
 			files_refer_to_same_device_and_inode_numbers(shell, &left, &right).await
@@ -310,9 +364,8 @@ async fn apply_binary_predicate(
 			let right = expansion::basic_expand_word(shell, params, right).await?;
 
 			if shell.options().print_commands_and_arguments {
-				shell
-					.trace_command(params, std::format!("[[ {left} {op} {right} ]]"))
-					.await;
+				let traced = traced_binary_test(params, &left, op, &right).await?;
+				shell.trace_command(params, traced).await;
 			}
 
 			left_file_is_newer_or_exists_when_right_does_not(shell, &left, &right).await
@@ -322,9 +375,8 @@ async fn apply_binary_predicate(
 			let right = expansion::basic_expand_word(shell, params, right).await?;
 
 			if shell.options().print_commands_and_arguments {
-				shell
-					.trace_command(params, std::format!("[[ {left} {op} {right} ]]"))
-					.await;
+				let traced = traced_binary_test(params, &left, op, &right).await?;
+				shell.trace_command(params, traced).await;
 			}
 
 			left_file_is_older_or_does_not_exist_when_right_does(shell, &left, &right).await
@@ -334,9 +386,8 @@ async fn apply_binary_predicate(
 			let right = expansion::basic_expand_word(shell, params, right).await?;
 
 			if shell.options().print_commands_and_arguments {
-				shell
-					.trace_command(params, std::format!("[[ {left} {op} {right} ]]"))
-					.await;
+				let traced = traced_binary_test(params, &left, op, &right).await?;
+				shell.trace_command(params, traced).await;
 			}
 
 			// TODO(test): According to docs, should be lexicographical order of the current
@@ -348,9 +399,8 @@ async fn apply_binary_predicate(
 			let right = expansion::basic_expand_word(shell, params, right).await?;
 
 			if shell.options().print_commands_and_arguments {
-				shell
-					.trace_command(params, std::format!("[[ {left} {op} {right} ]]"))
-					.await;
+				let traced = traced_binary_test(params, &left, op, &right).await?;
+				shell.trace_command(params, traced).await;
 			}
 
 			// TODO(test): According to docs, should be lexicographical order of the current
@@ -449,11 +499,14 @@ async fn apply_binary_predicate(
 
 			if shell.options().print_commands_and_arguments {
 				let expanded_right = expansion::basic_expand_word(shell, params, right).await?;
-				let escaped_right =
-					escape::quote_if_needed(expanded_right.as_str(), escape::QuoteMode::BackslashEscape);
-				shell
-					.trace_command(params, std::format!("[[ {s} {op} {escaped_right} ]]"))
-					.await;
+				let escaped_right = escape::quote_if_needed_divided(
+					params,
+					expanded_right.as_str(),
+					escape::QuoteMode::BackslashEscape,
+				)
+				.await?;
+				let traced = traced_binary_test(params, &s, op, escaped_right.as_ref()).await?;
+				shell.trace_command(params, traced).await;
 			}
 
 			pattern.exactly_matches(s.as_str())
@@ -467,11 +520,14 @@ async fn apply_binary_predicate(
 
 			if shell.options().print_commands_and_arguments {
 				let expanded_right = expansion::basic_expand_word(shell, params, right).await?;
-				let escaped_right =
-					escape::quote_if_needed(expanded_right.as_str(), escape::QuoteMode::BackslashEscape);
-				shell
-					.trace_command(params, std::format!("[[ {s} {op} {escaped_right} ]]"))
-					.await;
+				let escaped_right = escape::quote_if_needed_divided(
+					params,
+					expanded_right.as_str(),
+					escape::QuoteMode::BackslashEscape,
+				)
+				.await?;
+				let traced = traced_binary_test(params, &s, op, escaped_right.as_ref()).await?;
+				shell.trace_command(params, traced).await;
 			}
 
 			let eq = pattern.exactly_matches(s.as_str())?;

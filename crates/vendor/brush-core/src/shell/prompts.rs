@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 
-use crate::{Shell, error, extensions, prompt};
+use crate::{Shell, error, extensions, interp, prompt};
 
 impl<SE: extensions::ShellExtensions> Shell<SE> {
 	/// Returns the default prompt string for the shell.
@@ -47,19 +47,32 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
 		// if that's required.
 		//
 
-		// Retrieve the spec.
-		let prompt_spec = self.parameter_or_default(var_name, default);
-		if prompt_spec.is_empty() {
-			return Ok(String::new());
-		}
+		let params = self.default_exec_params();
+
+		// Retrieve the spec. Expanding it needs the shell mutably, so it has to
+		// be copied out of the variable first; for a PS1 that a variable grew
+		// that copy is the first hold on the path, and it is divided above the
+		// threshold like any other.
+		let prompt_spec = {
+			let prompt_spec = self.parameter_or_default(var_name, default);
+			if prompt_spec.is_empty() {
+				return Ok(String::new());
+			}
+			match prompt_spec {
+				Cow::Owned(spec) => spec,
+				Cow::Borrowed(spec) if spec.len() <= interp::DIVIDE_COPY_ABOVE_BYTES => {
+					spec.to_owned()
+				},
+				Cow::Borrowed(spec) => interp::clone_in_strides(&params, spec).await?,
+			}
+		};
 
 		// Save (and later restore) the last exit status.
 		let prev_last_result = self.last_exit_status();
 		let prev_last_pipeline_statuses = self.last_pipeline_statuses.clone();
 
 		// Expand it.
-		let params = self.default_exec_params();
-		let result = prompt::expand_prompt(self, &params, prompt_spec.into_owned()).await;
+		let result = prompt::expand_prompt(self, &params, prompt_spec).await;
 
 		// Restore the last exit status.
 		self.last_pipeline_statuses = prev_last_pipeline_statuses;
@@ -67,10 +80,7 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
 
 		// Strip out special characters that readline would typically drop:
 		// \001 and \002 (start and end of non-printing sequences).
-		let mut expanded = result?;
-		expanded.retain(|c| c != '\x01' && c != '\x02');
-
-		Ok(expanded)
+		prompt::strip_non_printing_markers(&params, result?).await
 	}
 
 	fn parameter_or_default<'a>(&'a self, name: &str, default: &'a str) -> Cow<'a, str> {

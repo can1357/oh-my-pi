@@ -37,7 +37,6 @@ use std::{
 	ffi::OsString,
 	future::poll_fn,
 	io::{self, BufWriter, LineWriter, Read, Write},
-	marker::PhantomData,
 	panic::{AssertUnwindSafe, catch_unwind},
 	path::{Path, PathBuf},
 	pin::pin,
@@ -185,7 +184,7 @@ pub(crate) struct Host {
 
 	name:                  String,
 	paths:                 ShellPaths,
-	env:                   HashMap<String, String>,
+	env:                   ExportedEnv,
 	cancel:                Arc<AtomicBool>,
 	exit_code:             i32,
 	stdin_is_search_input: bool,
@@ -720,7 +719,7 @@ impl Host {
 	/// The shell's exported variables are *not* present in the host process
 	/// environment, so `std::env::var` would miss them.
 	pub fn var(&self, key: &str) -> Option<&str> {
-		self.env.get(key).map(String::as_str)
+		self.env.get(key)
 	}
 
 	/// The exported shell environment, for building a child process
@@ -1208,7 +1207,7 @@ fn cancelled_command() -> io::Error {
 /// child process. Finished workers are reused; another is forked only when
 /// every existing one is busy, so sequential commands share one.
 struct CommandRunner<SE: ShellExtensions> {
-	template: Shell<SE>,
+	template: Arc<Shell<SE>>,
 	idle:     Vec<Shell<SE>>,
 	params:   Arc<ExecutionParameters>,
 	cwd:      Arc<Path>,
@@ -1216,12 +1215,17 @@ struct CommandRunner<SE: ShellExtensions> {
 }
 
 impl<SE: ShellExtensions> CommandRunner<SE> {
-	fn new(context: &ExecutionContext<'_, SE>, requests: flume::Receiver<CommandRequest>) -> Self {
-		let mut template = context.shell.clone();
+	/// A runner forking its workers from `template`, the invoking shell
+	/// copied a step at a time ([`copy_for_utility`]).
+	fn new(
+		context: &ExecutionContext<'_, SE>,
+		mut template: Shell<SE>,
+		requests: flume::Receiver<CommandRequest>,
+	) -> Self {
 		template.options_mut().interactive = false;
 		let cwd = Arc::from(template.working_dir());
 		Self {
-			template,
+			template: Arc::new(template),
 			idle: Vec::new(),
 			params: Arc::new(context.params.clone()),
 			cwd,
@@ -1231,12 +1235,27 @@ impl<SE: ShellExtensions> CommandRunner<SE> {
 
 	/// Starts serving `request` on a worker. The future answers the request —
 	/// a utility that stopped waiting (it was cancelled) simply never reads
-	/// the answer — and yields the worker back for [`CommandRunner::release`].
-	fn start(&mut self, request: CommandRequest) -> impl Future<Output = Shell<SE>> + Send + use<SE> {
-		let mut shell = self.idle.pop().unwrap_or_else(|| self.template.clone());
+	/// the answer — and yields the worker back for [`CommandRunner::release`],
+	/// or nothing if a new worker's copy was cancelled.
+	///
+	/// A new worker is a copy of every variable of the template, so it is
+	/// made a step at a time inside the future, not in one `clone` here.
+	fn start(&mut self, request: CommandRequest) -> impl Future<Output = Option<Shell<SE>>> + Send + use<SE> {
+		let idle = self.idle.pop();
+		let template = Arc::clone(&self.template);
 		let params = Arc::clone(&self.params);
 		let cwd = Arc::clone(&self.cwd);
 		async move {
+			let mut shell = match idle {
+				Some(shell) => shell,
+				None => match template.clone_divided(&params).await {
+					Ok(shell) => shell,
+					Err(_cancelled) => {
+						let _ = request.reply.send(Err(cancelled_command()));
+						return None;
+					},
+				},
+			};
 			let status = run_in(&mut shell, &params, &cwd, request.command).await.map_err(|error| {
 				let kind = match ExecutionExitCode::from(&error) {
 					ExecutionExitCode::NotFound => io::ErrorKind::NotFound,
@@ -1246,7 +1265,7 @@ impl<SE: ShellExtensions> CommandRunner<SE> {
 				io::Error::new(kind, error.to_string())
 			});
 			let _ = request.reply.send(status);
-			shell
+			Some(shell)
 		}
 	}
 
@@ -1272,9 +1291,12 @@ async fn run_in<SE: ShellExtensions>(
 		return dispatch(shell, base, command, None).await;
 	}
 	// The worker is reused for later commands: run on a scratch environment
-	// and put the worker's own back whatever the outcome.
-	let saved = shell.env().clone();
-	*shell.env_mut() = changed_env(&saved, &command.env)?;
+	// and put the worker's own back whatever the outcome. The scratch one is
+	// built a step at a time from the worker's, which is swapped out rather
+	// than copied: `env A=1 cmd` copied the whole environment twice in one
+	// step each, 59 ms with 100,000 variables and 79 ms with one of 64 MiB.
+	let scratch = changed_env(shell.env(), &command.env, base).await?;
+	let saved = std::mem::replace(shell.env_mut(), scratch);
 	let path_dirs = search_path(shell);
 	let status = dispatch(shell, base, command, Some(path_dirs)).await;
 	*shell.env_mut() = saved;
@@ -1284,30 +1306,60 @@ async fn run_in<SE: ShellExtensions>(
 /// `env` with `changes` applied, flattened into one global scope: a change
 /// must win over every scope, and the command runs no shell functions whose
 /// locals could need the stack.
-fn changed_env(
+///
+/// Built a step at a time: the visible variables are found and copied one
+/// step each, every name is hashed a stride at a time as it goes in
+/// ([`brush_core::env::ShellVariableMap::set_divided`]), and the map is sized
+/// before it is filled, so it never grows. A variable a clearing change
+/// (`env -i`) removes is never copied: changes up to the last clear can only
+/// remove what it would remove anyway, or a variable it keeps.
+async fn changed_env(
 	env: &brush_core::env::ShellEnvironment,
 	changes: &[EnvChange],
+	params: &ExecutionParameters,
 ) -> Result<brush_core::env::ShellEnvironment, Error> {
-	let mut vars: HashMap<String, brush_core::ShellVariable> =
-		env.iter().map(|(name, var)| (name.clone(), var.clone())).collect();
-	for change in changes {
+	let last_clear = changes.iter().rposition(|change| matches!(change, EnvChange::Clear));
+	let (before, after) = match last_clear {
+		Some(clear) => (&changes[..clear], &changes[clear + 1..]),
+		None => (&changes[..0], changes),
+	};
+	let visible = env.visible_divided(params).await?;
+	let mut vars = brush_core::env::ShellVariableMap::with_capacity(visible.len());
+	let mut budget = brush_core::ElementBudget::new();
+	for (name, var) in visible {
+		if last_clear.is_some() && var.is_exported() {
+			continue;
+		}
+		let name = brush_core::clone_charged(params, &mut budget, name).await?;
+		let var = var.clone_divided(params, &mut budget).await?;
+		vars.set_divided(params, &mut budget, name, var).await?;
+	}
+	// Before the last clear, a removal removes the name, and so does a set:
+	// it makes the name an exported variable, which the clear then removes.
+	for change in before {
+		if let EnvChange::Remove(name) | EnvChange::Set(name, _) = change {
+			vars.unset(name);
+		}
+	}
+	for change in after {
 		match change {
-			EnvChange::Clear => vars.retain(|_, var| !var.is_exported()),
+			// None follows the last clear.
+			EnvChange::Clear => {},
 			EnvChange::Remove(name) => {
-				vars.remove(name);
+				vars.unset(name);
 			},
 			EnvChange::Set(name, value) => {
-				let mut var = brush_core::ShellVariable::new(brush_core::ShellValue::String(value.clone()));
+				// A replacement value can be any length: `env A="$big" cmd`
+				// held the worker 108.9 ms copying it in one `clone`.
+				let value = brush_core::clone_charged(params, &mut budget, value).await?;
+				let name = brush_core::clone_charged(params, &mut budget, name).await?;
+				let mut var = brush_core::ShellVariable::new(brush_core::ShellValue::String(value));
 				var.export();
-				vars.insert(name.clone(), var);
+				vars.set_divided(params, &mut budget, name, var).await?;
 			},
 		}
 	}
-	let mut changed = brush_core::env::ShellEnvironment::new();
-	for (name, var) in vars {
-		changed.set_global(name, var)?;
-	}
-	Ok(changed)
+	Ok(brush_core::env::ShellEnvironment::with_globals(vars))
 }
 
 /// The directories `execvp` would search for a command run with `shell`'s
@@ -1337,16 +1389,25 @@ async fn dispatch<SE: ShellExtensions>(
 	let mut params = base.clone();
 	params.set_fd(OpenFiles::STDIN_FD, or_null(command.stdin)?);
 	let cancel = params.cancel_token();
-	let mut args: Vec<CommandArg> = command
-		.argv
-		.into_iter()
-		.map(|arg| CommandArg::from(arg.to_string_lossy().into_owned()))
-		.collect();
-	let name = args.first().map_or_default(ToString::to_string);
-	let argv0 = command.argv0.map(|argv0| argv0.to_string_lossy().into_owned());
-	if let (Some(argv0), Some(first)) = (&argv0, args.first_mut()) {
-		*first = CommandArg::from(argv0.clone());
+	// Each argument is a step, and a long one is not copied in one: `env
+	// --argv0 "$big"` read a 64 MiB `argv[0]` and copied it twice here.
+	let mut budget = brush_core::ElementBudget::new();
+	let mut texts = Vec::with_capacity(command.argv.len());
+	for arg in command.argv {
+		texts.push(os_into_string(base, &mut budget, arg).await?);
 	}
+	let name = match texts.first() {
+		Some(first) => brush_core::clone_charged(base, &mut budget, first).await?,
+		None => String::new(),
+	};
+	let argv0 = match command.argv0 {
+		Some(argv0) => Some(os_into_string(base, &mut budget, argv0).await?),
+		None => None,
+	};
+	if let (Some(argv0), Some(first)) = (&argv0, texts.first_mut()) {
+		*first = brush_core::clone_charged(base, &mut budget, argv0).await?;
+	}
+	let args: Vec<CommandArg> = texts.into_iter().map(CommandArg::from).collect();
 	let mut simple =
 		SimpleCommand::new(ShellForCommand::ParentShell(shell), params, name, args);
 	simple.use_functions = false;
@@ -1372,6 +1433,32 @@ async fn dispatch<SE: ShellExtensions>(
 		},
 	};
 	wait_status(spawned, cancel).await
+}
+
+/// `text` as a `String`, read as `to_string_lossy` reads it, as one step of
+/// `budget`. Text that is UTF-8 already is taken without a copy; checking
+/// that reads all of it, so a text longer than
+/// [`brush_core::DIVIDE_COPY_ABOVE_BYTES`] is checked on a blocking worker,
+/// unless this is one already.
+async fn os_into_string(
+	params: &ExecutionParameters,
+	budget: &mut brush_core::ElementBudget,
+	text: OsString,
+) -> Result<String, Error> {
+	let long = text.len() > brush_core::DIVIDE_COPY_ABOVE_BYTES;
+	let due = budget.charge(if long { 0 } else { text.len() });
+	if due > 0 {
+		brush_core::loop_checkpoints(params, due).await?;
+	}
+	let convert = |text: OsString| text.into_string().unwrap_or_else(|text| text.to_string_lossy().into_owned());
+	if !long || brush_core::commands::builtin_on_blocking_worker() {
+		return Ok(convert(text));
+	}
+	match tokio::task::spawn_blocking(move || convert(text)).await {
+		Ok(text) => Ok(text),
+		Err(join_error) if join_error.is_panic() => std::panic::resume_unwind(join_error.into_panic()),
+		Err(join_error) => Err(brush_core::ErrorKind::ThreadingError(join_error).into()),
+	}
 }
 
 /// Waits for a spawned command, keeping the signal that killed a process
@@ -1997,13 +2084,13 @@ impl Spec {
 
 /// Adapter turning an [`AsyncUtility`] into a brush builtin; see [`Util`].
 pub(crate) struct AsyncUtil<U: AsyncUtility> {
-	argv:    Vec<String>,
-	_marker: PhantomData<fn() -> U>,
+	/// The parse [`builtins::Command::new`] made, taken by `execute`.
+	parsed: Mutex<Option<Result<U, Finished>>>,
 }
 
 impl<U: AsyncUtility> clap::FromArgMatches for AsyncUtil<U> {
 	fn from_arg_matches(_matches: &clap::ArgMatches) -> Result<Self, clap::Error> {
-		Ok(Self { argv: Vec::new(), _marker: PhantomData })
+		Ok(Self { parsed: Mutex::new(None) })
 	}
 
 	fn update_from_arg_matches(&mut self, _matches: &clap::ArgMatches) -> Result<(), clap::Error> {
@@ -2030,31 +2117,47 @@ impl<U: AsyncUtility> builtins::Command for AsyncUtil<U> {
 	where
 		I: IntoIterator<Item = String>,
 	{
-		Ok(Self { argv: args.into_iter().collect(), _marker: PhantomData })
+		let parsed = parse_utility_argv::<U>(args.into_iter().collect(), Spec::of_async::<U>());
+		Ok(Self { parsed: Mutex::new(Some(parsed)) })
 	}
 
 	async fn execute<SE: ShellExtensions>(
 		&self,
 		context: ExecutionContext<'_, SE>,
 	) -> Result<ExecutionResult, Self::Error> {
-		run_async_utility::<U, SE>(context, self.argv.clone()).await
+		let parsed = self.parsed.lock().take();
+		match parsed {
+			Some(Ok(parsed)) => run_async_utility::<U, SE>(context, parsed).await,
+			Some(Err(finished)) => Ok(finished.report(&context)),
+			None => Err(executed_twice(U::NAME)),
+		}
 	}
 }
 
 /// Adapter turning a [`Utility`] into a brush builtin.
 ///
-/// Holds the raw argument vector rather than a parsed `U`: parse failures must
-/// be reported on the utility's own terms (help on stdout, usage errors with
-/// the utility's exit status) rather than through brush's generic usage-error
-/// path.
+/// Parses the arguments itself rather than through brush's generic parse:
+/// parse failures must be reported on the utility's own terms (help on
+/// stdout, usage errors with the utility's exit status) rather than through
+/// brush's generic usage-error path.
+///
+/// **The parse is made in [`builtins::Command::new`]**, which brush calls off
+/// the worker for arguments of more than one step
+/// (`brush_core::builtins::parse_builtin_args`), and is taken, not copied,
+/// when the builtin runs. Holding the arguments and parsing them in `execute`
+/// copied and parsed them on the worker: `env "A=$big" /usr/bin/true` with a
+/// 64 MiB value held it 110.8 ms in one poll, five passes over the value —
+/// the copy of the arguments, clap's copy of them, its parse, the copy its
+/// value parser keeps, and a UTF-8 check — and `env --argv0 "$big"` held it
+/// 155 ms, with two more copies in `env`'s own option scan.
 pub(crate) struct Util<U: Utility> {
-	argv:    Vec<String>,
-	_marker: PhantomData<fn() -> U>,
+	/// The parse [`builtins::Command::new`] made, taken by `execute`.
+	parsed: Mutex<Option<Result<U, Finished>>>,
 }
 
 impl<U: Utility> clap::FromArgMatches for Util<U> {
 	fn from_arg_matches(_matches: &clap::ArgMatches) -> Result<Self, clap::Error> {
-		Ok(Self { argv: Vec::new(), _marker: PhantomData })
+		Ok(Self { parsed: Mutex::new(None) })
 	}
 
 	fn update_from_arg_matches(&mut self, _matches: &clap::ArgMatches) -> Result<(), clap::Error> {
@@ -2081,25 +2184,38 @@ impl<U: Utility> builtins::Command for Util<U> {
 	where
 		I: IntoIterator<Item = String>,
 	{
-		Ok(Self { argv: args.into_iter().collect(), _marker: PhantomData })
+		let parsed = parse_utility_argv::<U>(args.into_iter().collect(), Spec::of_sync::<U>());
+		Ok(Self { parsed: Mutex::new(Some(parsed)) })
 	}
 
 	async fn execute<SE: ShellExtensions>(
 		&self,
 		context: ExecutionContext<'_, SE>,
 	) -> Result<ExecutionResult, Self::Error> {
-		run_utility::<U, SE>(context, self.argv.clone()).await
+		let parsed = self.parsed.lock().take();
+		match parsed {
+			Some(Ok(parsed)) => run_utility::<U, SE>(context, parsed).await,
+			Some(Err(finished)) => Ok(finished.report(&context)),
+			None => Err(executed_twice(U::NAME)),
+		}
 	}
 }
 
-/// Drives a utility from raw arguments to an exit status.
+/// The error for a utility builtin run a second time: brush builds a builtin
+/// for each command it runs, and its parse is taken by the first run.
+fn executed_twice(name: &str) -> Error {
+	brush_core::ErrorKind::InternalError(format!("{name}: builtin ran twice")).into()
+}
+
+/// Drives a parsed utility to an exit status.
 async fn run_utility<U: Utility, SE: ShellExtensions>(
 	context: ExecutionContext<'_, SE>,
-	argv: Vec<String>,
+	parsed: U,
 ) -> Result<ExecutionResult, Error> {
 	let spec = Spec::of_sync::<U>();
+	let (env, template) = copy_for_utility(&context, spec).await?;
 	let Prepared { parsed, mut host, runner, cancel, cancel_flag, _cancel_on_drop } =
-		match prepare::<U, SE>(context, argv, spec) {
+		match prepare::<U, SE>(context, parsed, spec, env, template) {
 			Ok(prepared) => prepared,
 			Err(done) => return done,
 		};
@@ -2120,15 +2236,16 @@ async fn run_utility<U: Utility, SE: ShellExtensions>(
 	Ok(ExecutionResult::new((code & 0xff) as u8))
 }
 
-/// Drives an [`AsyncUtility`] from raw arguments to an exit status, awaiting
-/// its body on the shell task.
+/// Drives a parsed [`AsyncUtility`] to an exit status, awaiting its body on
+/// the shell task.
 async fn run_async_utility<U: AsyncUtility, SE: ShellExtensions>(
 	context: ExecutionContext<'_, SE>,
-	argv: Vec<String>,
+	parsed: U,
 ) -> Result<ExecutionResult, Error> {
 	let spec = Spec::of_async::<U>();
+	let (env, template) = copy_for_utility(&context, spec).await?;
 	let Prepared { parsed, mut host, runner, cancel, cancel_flag, _cancel_on_drop } =
-		match prepare::<U, SE>(context, argv, spec) {
+		match prepare::<U, SE>(context, parsed, spec, env, template) {
 			Ok(prepared) => prepared,
 			Err(done) => return done,
 		};
@@ -2150,52 +2267,189 @@ struct Prepared<P, SE: ShellExtensions> {
 	_cancel_on_drop:  CancelOnDrop,
 }
 
-/// Rewrites and parses `argv` and builds the host. `Err` carries the finished
-/// result when the invocation ends early (usage error, `--help`, host failure).
+/// A utility invocation that ended while its arguments were parsed (a usage
+/// error, `--help`): what it prints, where, and its status.
+struct Finished {
+	text:        String,
+	on_stdout:   bool,
+	usage_error: u8,
+}
+
+impl Finished {
+	/// Prints the text and gives the invocation's result: success for what
+	/// belongs on stdout (`--help`, `--version`), the usage error otherwise.
+	fn report<SE: ShellExtensions>(self, context: &ExecutionContext<'_, SE>) -> ExecutionResult {
+		if self.on_stdout {
+			let _ = write!(context.stdout(), "{}", self.text);
+			return ExecutionResult::success();
+		}
+		let _ = write!(context.stderr(), "{}", self.text);
+		ExecutionResult::new(self.usage_error)
+	}
+}
+
+/// Rewrites and parses `argv`. `Err` carries what the invocation prints when
+/// it ends there (usage error, `--help`).
+fn parse_utility_argv<P: clap::Parser>(argv: Vec<String>, spec: Spec) -> Result<P, Finished> {
+	let argv: Vec<OsString> = argv.into_iter().map(OsString::from).collect();
+	let argv = (spec.rewrite_argv)(argv).map_err(|message| Finished {
+		text:        format!("{}: {message}\n", spec.name),
+		on_stdout:   false,
+		usage_error: spec.usage_error,
+	})?;
+
+	// clap reports `--help` and `--version` as errors; those belong on stdout
+	// with a success status, everything else on stderr.
+	P::try_parse_from(&argv).map_err(|err| {
+		let on_stdout = !err.use_stderr();
+		Finished { text: err.to_string(), on_stdout, usage_error: spec.usage_error }
+	})
+}
+
+/// A host's copy of the exported environment.
 ///
-/// Everything owned is captured here, before the caller's first await, so its
-/// future stays `Send`: the borrowed `ExecutionContext` (and its `&mut Shell`)
-/// is dropped on return.
+/// **A name is hashed a stride at a time, where it is copied.** A map keyed
+/// by the name hashes all of it in one call: `cat </dev/null` with one
+/// exported variable whose name is 1 MiB long held the worker for that hash,
+/// and a 64 MiB name 37.4 ms. So the map is keyed by the name's hash, which
+/// [`ExportedEnv::insert_divided`] computes in strides, and the few names that
+/// share a hash sit side by side under it.
+///
+/// Freed where freeing it cannot hold the worker
+/// ([`brush_core::variables::free_off_worker`]): an async utility's host is
+/// dropped on the shell's task, and a hundred thousand entries are two
+/// hundred thousand frees.
+#[derive(Default)]
+struct ExportedEnv {
+	/// The keys every name is hashed with.
+	seed: std::hash::RandomState,
+	/// The variables, by the hash of their name.
+	vars: HashMap<u64, Vec<(String, String)>>,
+	len:  usize,
+}
+
+impl ExportedEnv {
+	fn with_capacity(capacity: usize) -> Self {
+		Self { seed: std::hash::RandomState::new(), vars: HashMap::with_capacity(capacity), len: 0 }
+	}
+
+	/// The value of the variable `name`. `name` is hashed in one step: the
+	/// names a utility looks up are its own, and short.
+	fn get(&self, name: &str) -> Option<&str> {
+		let found = self.vars.get(&brush_core::hash_in_one_step(&self.seed, name))?;
+		found.iter().find(|(key, _)| key == name).map(|(_, value)| value.as_str())
+	}
+
+	fn iter(&self) -> impl Iterator<Item = (&String, &String)> {
+		self.vars.values().flatten().map(|(name, value)| (name, value))
+	}
+
+	/// Sets `name` to `value`, hashing `name` a stride at a time, each stride
+	/// a step of `budget`.
+	async fn insert_divided(
+		&mut self,
+		params: &ExecutionParameters,
+		budget: &mut brush_core::ElementBudget,
+		name: String,
+		value: String,
+	) -> Result<(), Error> {
+		let hash = brush_core::hash_in_strides(params, budget, &self.seed, &name).await?;
+		self.insert_hashed(hash, name, value);
+		Ok(())
+	}
+
+	/// [`Self::insert_divided`] in one step, for a short name.
+	#[cfg(test)]
+	fn insert(&mut self, name: String, value: String) {
+		self.insert_hashed(brush_core::hash_in_one_step(&self.seed, &name), name, value);
+	}
+
+	fn insert_hashed(&mut self, hash: u64, name: String, value: String) {
+		let entries = self.vars.entry(hash).or_default();
+		match entries.iter_mut().find(|(key, _)| *key == name) {
+			Some((_, old)) => *old = value,
+			None => {
+				entries.push((name, value));
+				self.len += 1;
+			},
+		}
+	}
+}
+
+impl Drop for ExportedEnv {
+	fn drop(&mut self) {
+		let vars = std::mem::take(&mut self.vars);
+		let allocations = self.len.saturating_mul(2);
+		brush_core::variables::free_off_worker(vars, allocations);
+	}
+}
+
+/// The exported environment a utility's host is given, found and copied a
+/// step at a time.
+///
+/// Every utility builtin takes this snapshot, so a copy made in one step was
+/// a hold on every call: `cat </dev/null` with 100,000 exported variables held
+/// the worker 21.6–22.6 ms, and with one 64 MiB exported value 26.7–27.4 ms.
+/// Each variable is a step charged its bytes, and a long name or value is
+/// copied, and a long name hashed, in strides.
+async fn exported_environment<SE: ShellExtensions>(
+	context: &ExecutionContext<'_, SE>,
+) -> Result<ExportedEnv, Error> {
+	let exported = context.shell.env().exported_divided(&context.params).await?;
+	let mut env = ExportedEnv::with_capacity(exported.len());
+	let mut budget = brush_core::ElementBudget::new();
+	for (name, variable) in exported {
+		if variable.value().is_set() {
+			let value = variable.value().to_cow_str(context.shell);
+			let value = brush_core::clone_charged(&context.params, &mut budget, &value).await?;
+			let name = brush_core::clone_charged(&context.params, &mut budget, name).await?;
+			env.insert_divided(&context.params, &mut budget, name, value).await?;
+		}
+	}
+	Ok(env)
+}
+
+/// Builds the host for parsed arguments. `Err` carries the finished result
+/// when the host cannot be built.
+///
+/// Everything owned is captured here, so the caller's future stays `Send`
+/// after it: the borrowed `ExecutionContext` (and its `&mut Shell`) is dropped
+/// on return.
 fn prepare<P: clap::Parser, SE: ShellExtensions>(
 	context: ExecutionContext<'_, SE>,
-	argv: Vec<String>,
+	parsed: P,
 	spec: Spec,
+	env: ExportedEnv,
+	template: Option<Shell<SE>>,
 ) -> Result<Prepared<P, SE>, Result<ExecutionResult, Error>> {
-	let argv: Vec<OsString> = argv.into_iter().map(OsString::from).collect();
-
-	let argv = match (spec.rewrite_argv)(argv) {
-		Ok(argv) => argv,
-		Err(message) => {
-			let _ = writeln!(context.stderr(), "{}: {message}", spec.name);
-			return Err(Ok(ExecutionResult::new(spec.usage_error)));
-		},
-	};
-
-	let parsed = match P::try_parse_from(&argv) {
-		Ok(parsed) => parsed,
-		Err(err) => {
-			// clap reports `--help` and `--version` as errors; those belong on
-			// stdout with a success status, everything else on stderr.
-			let rendered = err.to_string();
-			if err.use_stderr() {
-				let _ = write!(context.stderr(), "{rendered}");
-				return Err(Ok(ExecutionResult::new(spec.usage_error)));
-			}
-			let _ = write!(context.stdout(), "{rendered}");
-			return Err(Ok(ExecutionResult::success()));
-		},
-	};
-
-	let mut host = build_host(&context, spec).map_err(Err)?;
+	let mut host = build_host(&context, spec, env).map_err(Err)?;
 	let cancel = context.cancel_token();
 	let cancel_flag = host.cancel_flag();
 	let cancel_on_drop = CancelOnDrop(Arc::clone(&cancel_flag));
-	let runner = spec.runs_commands.then(|| {
+	let runner = template.map(|template| {
 		let (sender, requests) = flume::unbounded();
 		host.commands = Some(sender);
-		CommandRunner::new(&context, requests)
+		CommandRunner::new(&context, template, requests)
 	});
 	Ok(Prepared { parsed, host, runner, cancel, cancel_flag, _cancel_on_drop: cancel_on_drop })
+}
+
+/// What a utility needs before [`prepare`], copied a step at a time: its
+/// exported environment, and, for one that runs commands, the shell its
+/// command workers are copied from. `env /usr/bin/true` held the worker
+/// 27.7 ms forking that shell with one 64 MiB variable in it, and 11.2 ms
+/// with 100,000 small ones, in one `clone`.
+async fn copy_for_utility<SE: ShellExtensions>(
+	context: &ExecutionContext<'_, SE>,
+	spec: Spec,
+) -> Result<(ExportedEnv, Option<Shell<SE>>), Error> {
+	let env = exported_environment(context).await?;
+	let template = if spec.runs_commands {
+		Some(context.shell.clone_divided(&context.params).await?)
+	} else {
+		None
+	};
+	Ok((env, template))
 }
 
 /// Awaits `body` (`None` when its task failed) while serving the utility's
@@ -2236,8 +2490,8 @@ async fn drive<SE: ShellExtensions>(
 				let (result, ()) = tokio::join!(&mut body, drain(&mut running));
 				break final_status(spec.owns_cancellation, true, result);
 			},
-			Some(shell) = running.next(), if !running.is_empty() => {
-				if let Some(runner) = runner.as_mut() {
+			Some(worker) = running.next(), if !running.is_empty() => {
+				if let (Some(runner), Some(shell)) = (runner.as_mut(), worker) {
 					runner.release(shell);
 				}
 			},
@@ -2374,9 +2628,14 @@ fn settle(name: &str, outcome: std::thread::Result<i32>, host: &mut Host) -> i32
 	}
 }
 
-/// Snapshots the command's streams, working directory, and exported
-/// environment into an owned [`Host`] that can move to a blocking thread.
-fn build_host<SE: ShellExtensions>(context: &ExecutionContext<'_, SE>, spec: Spec) -> Result<Host, Error> {
+/// Snapshots the command's streams and working directory into an owned
+/// [`Host`] that can move to a blocking thread, with `env`, the exported
+/// environment [`exported_environment`] copied.
+fn build_host<SE: ShellExtensions>(
+	context: &ExecutionContext<'_, SE>,
+	spec: Spec,
+	env: ExportedEnv,
+) -> Result<Host, Error> {
 	let Spec { name, checks_stdout_path, owns_cancellation, async_io, .. } = spec;
 	let stdin = context.try_fd(OpenFiles::STDIN_FD);
 	// The `OpenFile` is kept alive by the `Stdin` below, so the fd stays valid.
@@ -2384,13 +2643,6 @@ fn build_host<SE: ShellExtensions>(context: &ExecutionContext<'_, SE>, spec: Spe
 	let stdin_is_search_input = stdin
 		.as_ref()
 		.is_some_and(|file| matches!(file, OpenFile::PipeReader(_) | OpenFile::Stream(_) | OpenFile::Vfs(_)));
-
-	let mut env = HashMap::new();
-	for (key, var) in context.shell.env().iter_exported() {
-		if var.value().is_set() {
-			env.insert(key.clone(), var.value().to_cow_str(context.shell).into_owned());
-		}
-	}
 
 	let invoked = if context.command_name.is_empty() {
 		name.to_string()
@@ -2568,9 +2820,9 @@ mod testing {
 	use parking_lot::Mutex;
 
 	use super::{
-		Arc, AtomicBool, CommandCancel, GuardedStream, HashMap, Host, OpenFile, OpenFiles, OsString,
-		PathBuf, Read, ShellPaths, Sigpipe, SigpipeGuard, Stdin, StreamWriter, Utility, Write, io, openfiles,
-		output_handle, run_caught,
+		Arc, AtomicBool, CommandCancel, GuardedStream, Host, OpenFile, OpenFiles, PathBuf, Read,
+		ShellPaths, Sigpipe, SigpipeGuard, Stdin, StreamWriter, Utility, Write, io, openfiles,
+		output_handle, parse_utility_argv, run_caught,
 		AsyncStreams, AsyncUtility, Spec, async_out_for, run_caught_async,
 	};
 
@@ -2702,7 +2954,7 @@ mod testing {
 				umask:                 Default::default(),
 				name:                  name.to_string(),
 				paths:                 ShellPaths::with_cwd(cwd),
-				env:                   HashMap::new(),
+				env:                   crate::host::ExportedEnv::default(),
 				cancel,
 				exit_code:             0,
 				stdin_is_search_input: false,
@@ -2831,24 +3083,14 @@ mod testing {
 	/// Rewrites and parses `argv` as the adapter does; `Err` is the exit status
 	/// of an invocation that ends before the body (usage error, `--help`).
 	fn parse_for_test<P: clap::Parser>(spec: Spec, argv: &[&str], host: &mut Host) -> Result<P, i32> {
-		let full: Vec<OsString> = std::iter::once(OsString::from(spec.name))
-			.chain(argv.iter().map(OsString::from))
-			.collect();
-		let full = match (spec.rewrite_argv)(full) {
-			Ok(full) => full,
-			Err(message) => {
-				let _ = writeln!(host.stderr, "{}: {message}", spec.name);
-				return Err(i32::from(spec.usage_error));
-			},
-		};
-		P::try_parse_from(&full).map_err(|err| {
-			let rendered = err.to_string();
-			if err.use_stderr() {
-				let _ = write!(host.stderr, "{rendered}");
-				i32::from(spec.usage_error)
-			} else {
-				let _ = write!(host.stdout, "{rendered}");
+		let full = std::iter::once(spec.name).chain(argv.iter().copied()).map(String::from).collect();
+		parse_utility_argv::<P>(full, spec).map_err(|finished| {
+			if finished.on_stdout {
+				let _ = write!(host.stdout, "{}", finished.text);
 				0
+			} else {
+				let _ = write!(host.stderr, "{}", finished.text);
+				i32::from(finished.usage_error)
 			}
 		})
 	}

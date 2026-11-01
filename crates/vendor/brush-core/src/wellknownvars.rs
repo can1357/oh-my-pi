@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::path::PathBuf;
 
 use rand::RngExt as _;
 
@@ -92,16 +92,13 @@ pub(crate) fn init_well_known_vars(
 		"BASH_ALIASES",
 		ShellVariable::new(ShellValue::Dynamic {
 			getter: |shell| {
-				let values = variables::ArrayLiteral(
+				ShellValue::AssociativeArray(
 					shell
 						.aliases()
 						.iter()
-						.map(|(k, v)| (Some(k.to_owned()), v.to_owned()))
-						.collect::<Vec<_>>(),
-				);
-
-				ShellValue::associative_array_from_literals(values)
-					.unwrap_or_else(|_error| ShellValue::AssociativeArray(BTreeMap::new()))
+						.map(|(name, value)| (name.to_owned(), value.to_owned()))
+						.collect(),
+				)
 			},
 			setter: |_| (),
 		}),
@@ -142,12 +139,7 @@ pub(crate) fn init_well_known_vars(
 	shell.env_mut().set_global(
 		"BASH_CMDS",
 		ShellVariable::new(ShellValue::Dynamic {
-			getter: |shell| {
-				shell
-					.program_location_cache()
-					.to_value()
-					.unwrap_or_else(|_error| ShellValue::AssociativeArray(BTreeMap::new()))
-			},
+			getter: |shell| shell.program_location_cache().to_value(),
 			setter: |_| (),
 		}),
 	)?;

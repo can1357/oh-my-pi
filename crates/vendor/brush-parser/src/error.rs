@@ -83,6 +83,12 @@ pub enum WordParseError {
     #[error("failed to parse pattern")]
     Pattern(ParseErrorLocation),
 
+    /// A shell pattern nests closed extended globs deeper than the parser
+    /// follows. It reads each level with a call of its own, so past this it
+    /// ran out of stack and aborted the process.
+    #[error("failed to parse pattern: extended globs nest more than {0} deep")]
+    PatternNestedTooDeep(usize),
+
     /// An error occurred while parsing a prompt string.
     #[error("failed to parse prompt string")]
     Prompt(ParseErrorLocation),

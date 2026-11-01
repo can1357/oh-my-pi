@@ -6,7 +6,7 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use brush_parser::unquote_str;
+use brush_parser::{unquote_str, unquote_str_into};
 use clap::ValueEnum;
 use strum::IntoEnumIterator;
 
@@ -371,9 +371,19 @@ impl Spec {
 		if let Some(filter_pattern) = &self.filter_pattern
 			&& !filter_pattern.is_empty()
 		{
+			// One step per candidate and a regex that reads the whole of
+			// each: a completion command can write as many candidates as it
+			// likes and any one of them can be any length.
+			let params = shell.default_exec_params();
 			let mut updated = Vec::new();
+			let mut budget = crate::interp::ElementBudget::new();
 
 			for candidate in candidates {
+				let due = budget.charge(candidate.len());
+				if due > 0 {
+					crate::interp::loop_checkpoints(&params, due).await?;
+				}
+
 				let matches = completion_filter_pattern_matches(
 					filter_pattern.as_str(),
 					candidate.as_str(),
@@ -395,9 +405,31 @@ impl Spec {
 			let prefix = self.prefix.as_ref().unwrap_or(&empty);
 			let suffix = self.suffix.as_ref().unwrap_or(&empty);
 
+			// Each candidate is copied once more to carry the affixes, and
+			// the affixes are copied once per candidate.
+			let params = shell.default_exec_params();
 			let mut updated = Vec::new();
+			let mut budget = crate::interp::ElementBudget::new();
 			for candidate in candidates {
-				updated.push(std::format!("{prefix}{candidate}{suffix}"));
+				let long = candidate.len() > crate::interp::DIVIDE_COPY_ABOVE_BYTES;
+				let due = budget.charge(
+					prefix.len() + suffix.len() + if long { 0 } else { candidate.len() },
+				);
+				if due > 0 {
+					crate::interp::loop_checkpoints(&params, due).await?;
+				}
+
+				let mut affixed =
+					String::with_capacity(prefix.len() + candidate.len() + suffix.len());
+				affixed.push_str(prefix);
+				if long {
+					crate::interp::push_str_in_strides(&params, &mut affixed, candidate.as_str())
+						.await?;
+				} else {
+					affixed.push_str(candidate.as_str());
+				}
+				affixed.push_str(suffix);
+				updated.push(affixed);
 			}
 
 			candidates = updated;
@@ -422,7 +454,8 @@ impl Spec {
 		if options.plus_dirs || options.dir_names {
 			// Also add dir name completion.
 			let mut dir_candidates =
-				get_file_completions(shell, context.token_to_complete, /* must_be_dir */ true).await;
+				get_file_completions(shell, context.token_to_complete, /* must_be_dir */ true)
+					.await?;
 			candidates.append(&mut dir_candidates);
 		}
 
@@ -443,7 +476,7 @@ impl Spec {
 			let must_be_dir = options.dir_names;
 
 			let mut default_candidates =
-				get_file_completions(shell, context.token_to_complete, must_be_dir).await;
+				get_file_completions(shell, context.token_to_complete, must_be_dir).await?;
 			candidates.append(&mut default_candidates);
 
 			if shell.completion_config().fallback_options.mark_directories {
@@ -520,7 +553,7 @@ impl Spec {
 				},
 				CompleteAction::Directory => {
 					let mut file_completions =
-						get_file_completions(shell, context.token_to_complete, true).await;
+						get_file_completions(shell, context.token_to_complete, true).await?;
 					candidates.append(&mut file_completions);
 				},
 				CompleteAction::Disabled => {
@@ -546,7 +579,7 @@ impl Spec {
 				},
 				CompleteAction::File => {
 					let mut file_completions =
-						get_file_completions(shell, context.token_to_complete, false).await;
+						get_file_completions(shell, context.token_to_complete, false).await?;
 					candidates.append(&mut file_completions);
 				},
 				CompleteAction::Function => {
@@ -664,27 +697,35 @@ impl Spec {
 		context: &Context<'_>,
 	) -> Result<Vec<String>, error::Error> {
 		// Move to a subshell so we can start filling out variables.
-		let mut shell = shell.clone();
+		let mut shell = shell.clone_divided(&shell.default_exec_params()).await?;
 
-		let vars_and_values: Vec<(&str, ShellValueLiteral)> = vec![
-			("COMP_LINE", context.input_line.into()),
-			("COMP_POINT", context.cursor_index.to_string().into()),
-			("COMP_KEY", context.trigger.comp_key().to_string().into()),
-			("COMP_TYPE", context.trigger.comp_type().to_string().into()),
+		// `COMP_LINE` is the line being completed and has no bound, so the
+		// copy of it is divided as well as the assignment: dividing only the
+		// write leaves the `to_owned` holding the worker.
+		let params = shell.default_exec_params();
+		let vars_and_values: Vec<(&str, String)> = vec![
+			("COMP_LINE", crate::interp::clone_in_strides(&params, context.input_line).await?),
+			("COMP_POINT", context.cursor_index.to_string()),
+			("COMP_KEY", context.trigger.comp_key().to_string()),
+			("COMP_TYPE", context.trigger.comp_type().to_string()),
 		];
 
 		// Fill out variables.
 		for (var, value) in vars_and_values {
-			shell.env_mut().update_or_add(
-				var,
-				value,
-				|v| {
-					v.export();
-					Ok(())
-				},
-				env::EnvironmentLookup::Anywhere,
-				env::EnvironmentScope::Global,
-			)?;
+			shell
+				.env_mut()
+				.update_or_add(
+					var,
+					variables::ShellValueLiteral::Scalar(value),
+					|v| {
+						v.export();
+						Ok(())
+					},
+					env::EnvironmentLookup::Anywhere,
+					env::EnvironmentScope::Global,
+					&params,
+				)
+				.await?;
 		}
 
 		// Compute args.
@@ -694,12 +735,20 @@ impl Spec {
 		}
 
 		// Compose the full command line.
+		//
+		// The arguments are the token being completed and the one before it,
+		// so quoting one and copying it onto the line are both the length of
+		// what the user typed. The line the quoting reads is the same line
+		// `COMP_LINE` holds above.
 		let mut command_line = command_name.to_owned();
 		for arg in args {
 			command_line.push(' ');
 
-			let escaped_arg = escape::quote_if_needed(arg, escape::QuoteMode::SingleQuote);
-			command_line.push_str(escaped_arg.as_ref());
+			let escaped_arg =
+				escape::quote_if_needed_divided(&params, arg, escape::QuoteMode::SingleQuote)
+					.await?;
+			crate::interp::push_str_in_strides(&params, &mut command_line, escaped_arg.as_ref())
+				.await?;
 		}
 
 		// Run the command.
@@ -709,9 +758,23 @@ impl Spec {
 				.await?;
 
 		// Split results.
+		//
+		// The output is unbounded in both ways at once: a completion command
+		// can write any number of candidates and any one of them can be any
+		// length, so the loop is charged by steps and bytes together.
 		let mut candidates = Vec::new();
+		let mut budget = crate::interp::ElementBudget::new();
 		for line in output.lines() {
-			candidates.push(line.to_owned());
+			let long = line.len() > crate::interp::DIVIDE_COPY_ABOVE_BYTES;
+			let due = budget.charge(if long { 0 } else { line.len() });
+			if due > 0 {
+				crate::interp::loop_checkpoints(&params, due).await?;
+			}
+			if long {
+				candidates.push(crate::interp::clone_in_strides(&params, line).await?);
+			} else {
+				candidates.push(line.to_owned());
+			}
 		}
 
 		Ok(candidates)
@@ -724,35 +787,81 @@ impl Spec {
 		context: &Context<'_>,
 	) -> Result<Answer, error::Error> {
 		// TODO(completions): Don't pollute the persistent environment with these?
+		//
+		// This is the other route into a completion: the command route above
+		// divides `COMP_LINE`, and so must this one. `COMP_WORDS` is that
+		// same line a second time, cut into words, so the loop that copies
+		// them is charged by steps as well as bytes: a line of a million
+		// one-character words and a line of one huge word are the same size
+		// and neither may hold the worker.
+		let params = shell.default_exec_params();
+		let mut comp_words = Vec::with_capacity(context.tokens.len());
+		let mut budget = crate::interp::ElementBudget::new();
+		for token in context.tokens {
+			let long = token.text.len() > crate::interp::DIVIDE_COPY_ABOVE_BYTES;
+			let due = budget.charge(if long { 0 } else { token.text.len() });
+			if due > 0 {
+				crate::interp::loop_checkpoints(&params, due).await?;
+			}
+			let text = if long {
+				crate::interp::clone_in_strides(&params, token.text).await?
+			} else {
+				token.text.to_owned()
+			};
+			comp_words.push((None, text));
+		}
+
 		let vars_and_values: Vec<(&str, ShellValueLiteral)> = vec![
-			("COMP_LINE", context.input_line.into()),
+			(
+				"COMP_LINE",
+				ShellValueLiteral::Scalar(
+					crate::interp::clone_in_strides(&params, context.input_line).await?,
+				),
+			),
 			("COMP_POINT", context.cursor_index.to_string().into()),
 			("COMP_KEY", context.trigger.comp_key().to_string().into()),
 			("COMP_TYPE", context.trigger.comp_type().to_string().into()),
-			(
-				"COMP_WORDS",
-				context
-					.tokens
-					.iter()
-					.map(|t| t.text)
-					.collect::<Vec<_>>()
-					.into(),
-			),
+			("COMP_WORDS", ShellValueLiteral::Array(variables::ArrayLiteral(comp_words))),
 			("COMP_CWORD", context.token_index.to_string().into()),
 		];
 
+		// The values are described rather than rendered. Formatting
+		// `COMP_LINE` copies the whole line a further time, and a 64 MiB line
+		// is no more readable in a log than its length is; anything of
+		// ordinary size is still printed in full.
+		let describe = |value: &ShellValueLiteral| -> String {
+			const TRACE_VALUE_BYTES: usize = 256;
+			const TRACE_WORDS: usize = 64;
+			match value {
+				ShellValueLiteral::Scalar(s) if s.len() <= TRACE_VALUE_BYTES => s.clone(),
+				ShellValueLiteral::Scalar(s) => std::format!("[{} bytes]", s.len()),
+				// The count is tested first, so the test on the words
+				// themselves reads at most `TRACE_WORDS` of them.
+				ShellValueLiteral::Array(values)
+					if values.0.len() <= TRACE_WORDS
+						&& !values.0.iter().any(|(_, v)| v.len() > TRACE_VALUE_BYTES) =>
+				{
+					value.to_string()
+				},
+				ShellValueLiteral::Array(values) => std::format!("[{} words]", values.0.len()),
+			}
+		};
 		tracing::debug!(target: trace_categories::COMPLETION, "[calling completion func '{function_name}']: {}",
-            vars_and_values.iter().map(|(k, v)| std::format!("{k}={v}")).collect::<Vec<String>>().join(" "));
+            vars_and_values.iter().map(|(k, v)| std::format!("{k}={}", describe(v))).collect::<Vec<String>>().join(" "));
 
 		let mut vars_to_remove = Vec::with_capacity(vars_and_values.len());
 		for (var, value) in vars_and_values {
-			shell.env_mut().update_or_add(
-				var,
-				value,
-				|_| Ok(()),
-				env::EnvironmentLookup::Anywhere,
-				env::EnvironmentScope::Global,
-			)?;
+			shell
+				.env_mut()
+				.update_or_add(
+					var,
+					value,
+					|_| Ok(()),
+					env::EnvironmentLookup::Anywhere,
+					env::EnvironmentScope::Global,
+					&params,
+				)
+				.await?;
 
 			vars_to_remove.push(var);
 		}
@@ -770,7 +879,6 @@ impl Spec {
 		// `release_trap_delivery_block()` always runs.
 		shell.acquire_trap_delivery_block();
 
-		let params = shell.default_exec_params();
 		let invoke_result = shell
 			.invoke_function(function_name, args.iter(), &params)
 			.await;
@@ -1026,7 +1134,7 @@ impl Config {
 		const MAX_RESTARTS: u32 = 10;
 
 		// Make a best-effort attempt to tokenize.
-		let tokens = Self::tokenize_input_for_completion(shell, input);
+		let tokens = Self::tokenize_input_for_completion(shell, input).await?;
 
 		let cursor = position;
 		let mut preceding_token = None;
@@ -1036,10 +1144,22 @@ impl Config {
 
 		// Copy a set of references to the tokens; we will adjust this list as
 		// we find we need to insert an empty token.
-		let mut adjusted_tokens: Vec<&CompletionToken<'_>> = tokens.iter().collect();
+		//
+		// One reference per token and one step of the search per token: the
+		// line says how many there are, so both are charged. Neither copies
+		// any text.
+		let params = shell.default_exec_params();
+		let mut adjusted_tokens: Vec<&CompletionToken<'_>> = Vec::new();
+		crate::interp::extend_in_strides(&params, &mut adjusted_tokens, tokens.iter()).await?;
 
 		// Try to find which token we are in.
+		let mut budget = crate::interp::ElementBudget::new();
 		for (i, token) in tokens.iter().enumerate() {
+			let due = budget.charge(0);
+			if due > 0 {
+				crate::interp::loop_checkpoints(&params, due).await?;
+			}
+
 			// If the cursor is before the start of the token, then it's between
 			// this token and the one that preceded it (or it's before the first
 			// token if this is the first token).
@@ -1125,10 +1245,16 @@ impl Config {
 		}
 	}
 
-	fn tokenize_input_for_completion<'a>(
+	/// Tokenises the line for completion.
+	///
+	/// # Errors
+	///
+	/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part
+	/// way.
+	async fn tokenize_input_for_completion<'a>(
 		shell: &Shell<impl extensions::ShellExtensions>,
 		input: &'a str,
-	) -> Vec<CompletionToken<'a>> {
+	) -> Result<Vec<CompletionToken<'a>>, error::Error> {
 		const FALLBACK: &str = " \t\n\"\'@><=;|&(:";
 
 		let delimiter_str = shell
@@ -1137,7 +1263,8 @@ impl Config {
 
 		let delimiters: Vec<_> = delimiter_str.chars().collect();
 
-		simple_tokenize_by_delimiters(input, delimiters.as_slice())
+		let params = shell.default_exec_params();
+		simple_tokenize_by_delimiters(&params, input, delimiters.as_slice()).await
 	}
 
 	async fn get_completions_for_token(
@@ -1192,32 +1319,49 @@ impl Config {
 	}
 }
 
+/// Expands the token being completed and lists the files its glob matches.
+///
+/// The token is the user's and reaches here on every completion that has no
+/// specification of its own, so each copy of it on the way to the glob is
+/// divided. It is the same word `COMP_LINE` holds.
 async fn get_file_completions(
 	shell: &Shell<impl extensions::ShellExtensions>,
 	token_to_complete: &str,
 	must_be_dir: bool,
-) -> Vec<String> {
+) -> Result<Vec<String>, error::Error> {
 	// Basic-expand the token-to-be-completed; it won't have been expanded to this
 	// point.
-	let mut throwaway_shell = shell.clone();
+	let mut throwaway_shell = shell.clone_divided(&shell.default_exec_params()).await?;
 	let params = throwaway_shell.default_exec_params();
 	let options =
 		expansion::ExpanderOptions { execute_command_substitutions: false, ..Default::default() };
-	let expanded_token = expansion::basic_expand_word_with_options(
+	let unquoted = unquote_in_strides(&params, token_to_complete).await?;
+	let expanded_token = match expansion::basic_expand_word_with_options(
 		&mut throwaway_shell,
 		&params,
-		&unquote_str(token_to_complete),
+		&unquoted,
 		&options,
 	)
 	.await
-	.unwrap_or_else(|_err| token_to_complete.to_owned());
+	{
+		Ok(expanded) => expanded,
+		// The token stands for itself when it will not expand, and it is the
+		// whole of what the user typed.
+		Err(_err) => crate::interp::clone_in_strides(&params, token_to_complete).await?,
+	};
 
 	// Normalize path separators before building the glob pattern, because backslash
 	// is the escape character in glob syntax and must not be confused with a
-	// Windows path separator.
-	let expanded_token = sys::fs::normalize_path_separators(&expanded_token).into_owned();
+	// Windows path separator. A token that needs no normalising is kept rather
+	// than copied, as the matched paths below already are.
+	let expanded_token = match sys::fs::normalize_path_separators(&expanded_token) {
+		std::borrow::Cow::Borrowed(_) => expanded_token,
+		std::borrow::Cow::Owned(normalized) => normalized,
+	};
 
-	let glob = std::format!("{expanded_token}*");
+	let mut glob = String::with_capacity(expanded_token.len() + 1);
+	crate::interp::push_str_in_strides(&params, &mut glob, expanded_token.as_str()).await?;
+	glob.push('*');
 
 	let pattern = patterns::Pattern::from(glob)
 		.set_extended_globbing(shell.options().extended_globbing)
@@ -1257,7 +1401,47 @@ async fn get_file_completions(
 
 	completions.sort();
 	completions.dedup();
-	completions
+	Ok(completions)
+}
+
+/// [`unquote_str`] with a checkpoint before each stride of the token.
+///
+/// Unquoting reads the whole word and writes it out again, and the word is
+/// the user's: `compgen` takes it as an argument and an interactive
+/// completion takes it from the line. The escape state is carried from one
+/// stride to the next, so a backslash that lands on a stride boundary still
+/// escapes the character after it.
+///
+/// # Errors
+///
+/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part
+/// way, leaving the unquoting unfinished and discarded.
+pub async fn unquote_in_strides(
+	params: &crate::ExecutionParameters,
+	s: &str,
+) -> Result<String, error::Error> {
+	if s.len() <= crate::interp::DIVIDE_COPY_ABOVE_BYTES {
+		return Ok(unquote_str(s));
+	}
+
+	let mut unquoted = String::with_capacity(s.len());
+	let mut in_escape = false;
+	let mut rest = s;
+	loop {
+		crate::interp::stride_checkpoint(params).await?;
+		if rest.len() <= crate::interp::BYTE_CHECKPOINT_STRIDE {
+			unquote_str_into(rest, &mut unquoted, &mut in_escape);
+			return Ok(unquoted);
+		}
+		// A stride lands mid-character at most three bytes in.
+		let mut end = crate::interp::BYTE_CHECKPOINT_STRIDE;
+		while !rest.is_char_boundary(end) {
+			end -= 1;
+		}
+		let (piece, remaining) = rest.split_at(end);
+		unquote_str_into(piece, &mut unquoted, &mut in_escape);
+		rest = remaining;
+	}
 }
 
 async fn get_external_command_completions(
@@ -1385,7 +1569,11 @@ async fn get_completions_using_basic_lookup(
 	}
 
 	// File completions
-	let mut candidates = get_file_completions(shell, token, false).await;
+	// The only error this can answer with is a cancelled run, and a lookup
+	// with no error channel of its own answers that with no candidates.
+	let mut candidates = get_file_completions(shell, token, false)
+		.await
+		.unwrap_or_default();
 
 	// If this appears to be the command token (and if there's *some* prefix without
 	// a path separator) then also consider whether we should search the path for
@@ -1406,18 +1594,37 @@ async fn get_completions_using_basic_lookup(
 /// sequences) are emitted as tokens. Consecutive non-whitespace delimiters are
 /// grouped into a single token. Whitespace delimiters separate tokens but are
 /// not emitted themselves.
+///
+/// The input is the line being completed and the delimiters are
+/// `COMP_WORDBREAKS`; both are the user's, and every character of the line is
+/// compared against every delimiter. The walk is therefore charged by the
+/// bytes of each character *and* by the number of delimiters it is compared
+/// against, so a line of a million one-byte words against a long
+/// `COMP_WORDBREAKS` yields as surely as a line of a hundred million bytes.
+///
+/// # Errors
+///
+/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part
+/// way, leaving the tokens found so far discarded.
 #[allow(clippy::string_slice, reason = "used indices come from char_indices")]
-fn simple_tokenize_by_delimiters<'a>(
+async fn simple_tokenize_by_delimiters<'a>(
+	params: &crate::ExecutionParameters,
 	input: &'a str,
 	delimiters: &[char],
-) -> Vec<CompletionToken<'a>> {
+) -> Result<Vec<CompletionToken<'a>>, error::Error> {
 	let mut tokens = vec![];
 	let mut word_start = None;
 	let mut word_is_delimiters = false;
 	let mut quote_char: Option<char> = None;
 	let mut escaped = false;
 
+	let mut budget = crate::interp::ElementBudget::new();
 	for (i, c) in input.char_indices() {
+		let due = budget.charge(c.len_utf8() + delimiters.len());
+		if due > 0 {
+			crate::interp::loop_checkpoints(params, due).await?;
+		}
+
 		let mut is_active_delimiter = false;
 		if escaped {
 			escaped = false;
@@ -1485,7 +1692,7 @@ fn simple_tokenize_by_delimiters<'a>(
 		tokens.push(CompletionToken { text: &input[start..], start });
 	}
 
-	tokens
+	Ok(tokens)
 }
 
 fn completion_filter_pattern_matches(
@@ -1538,33 +1745,40 @@ mod tests {
 
 	use super::*;
 
-	#[test]
+	/// [`simple_tokenize_by_delimiters`] with parameters that cancel nothing.
+	async fn tokenize<'a>(input: &'a str, delimiters: &[char]) -> Vec<CompletionToken<'a>> {
+		simple_tokenize_by_delimiters(&crate::ExecutionParameters::default(), input, delimiters)
+			.await
+			.expect("a run that cannot be cancelled cannot interrupt the tokenizer")
+	}
+
+	#[tokio::test]
 	#[allow(clippy::too_many_lines)]
-	fn completion_tokenization() {
-		assert_matches!(simple_tokenize_by_delimiters("one two", &[' ']).as_slice(), [
+	async fn completion_tokenization() {
+		assert_matches!(tokenize("one two", &[' ']).await.as_slice(), [
 			CompletionToken { text: "one", start: 0 },
 			CompletionToken { text: "two", start: 4 }
 		]);
 
-		assert_matches!(simple_tokenize_by_delimiters("one \t two", &[' ', '\t']).as_slice(), [
+		assert_matches!(tokenize("one \t two", &[' ', '\t']).await.as_slice(), [
 			CompletionToken { text: "one", start: 0 },
 			CompletionToken { text: "two", start: 6 }
 		]);
 
-		assert_matches!(simple_tokenize_by_delimiters("    ", &[' ']).as_slice(), []);
+		assert_matches!(tokenize("    ", &[' ']).await.as_slice(), []);
 
-		assert_matches!(simple_tokenize_by_delimiters(":", &[':']).as_slice(), [CompletionToken {
+		assert_matches!(tokenize(":", &[':']).await.as_slice(), [CompletionToken {
 			text:  ":",
 			start: 0,
 		}]);
 
-		assert_matches!(simple_tokenize_by_delimiters("a:::b", &[':', ' ']).as_slice(), [
+		assert_matches!(tokenize("a:::b", &[':', ' ']).await.as_slice(), [
 			CompletionToken { text: "a", start: 0 },
 			CompletionToken { text: ":::", start: 1 },
 			CompletionToken { text: "b", start: 4 }
 		]);
 
-		assert_matches!(simple_tokenize_by_delimiters("a: : :b", &[':', ' ']).as_slice(), [
+		assert_matches!(tokenize("a: : :b", &[':', ' ']).await.as_slice(), [
 			CompletionToken { text: "a", start: 0 },
 			CompletionToken { text: ":", start: 1 },
 			CompletionToken { text: ":", start: 3 },
@@ -1572,32 +1786,40 @@ mod tests {
 			CompletionToken { text: "b", start: 6 }
 		]);
 
-		assert_matches!(simple_tokenize_by_delimiters("one two:three", &[':', ' ']).as_slice(), [
+		assert_matches!(tokenize("one two:three", &[':', ' ']).await.as_slice(), [
 			CompletionToken { text: "one", start: 0 },
 			CompletionToken { text: "two", start: 4 },
 			CompletionToken { text: ":", start: 7 },
 			CompletionToken { text: "three", start: 8 }
 		]);
 
-		assert_matches!(simple_tokenize_by_delimiters("one'two", &['\'']).as_slice(), [
+		assert_matches!(tokenize("one'two", &['\'']).await.as_slice(), [
 			CompletionToken { text: "one", start: 0 },
 			CompletionToken { text: "'", start: 3 },
 			CompletionToken { text: "two", start: 4 },
 		]);
 
-		assert_matches!(simple_tokenize_by_delimiters("one 'two:three'", &[':', ' ']).as_slice(), [
+		assert_matches!(tokenize("one 'two:three'", &[':', ' ']).await.as_slice(), [
 			CompletionToken { text: "one", start: 0 },
 			CompletionToken { text: "'two:three'", start: 4 },
 		]);
 
-		assert_matches!(
-			simple_tokenize_by_delimiters("one \\'two \"two four\"", &[':', ' ']).as_slice(),
-			[
-				CompletionToken { text: "one", start: 0 },
-				CompletionToken { text: "\\'two", start: 4 },
-				CompletionToken { text: "\"two four\"", start: 10 },
-			]
-		);
+		assert_matches!(tokenize("one \\'two \"two four\"", &[':', ' ']).await.as_slice(), [
+			CompletionToken { text: "one", start: 0 },
+			CompletionToken { text: "\\'two", start: 4 },
+			CompletionToken { text: "\"two four\"", start: 10 },
+		]);
+
+		// A line longer than a stride is tokenized the same, with the walk
+		// interrupted in the middle of a word and in the middle of a quoted
+		// one.
+		let wide = "a".repeat(crate::interp::BYTE_CHECKPOINT_STRIDE * 2 + 7);
+		let first = std::format!("'{wide}'");
+		let line = std::format!("{first} {wide}");
+		let tokens = tokenize(&line, &[' ']).await;
+		let texts: Vec<&str> = tokens.iter().map(|t| t.text).collect();
+		assert_eq!(texts, vec![first.as_str(), wide.as_str()]);
+		assert_eq!(tokens[1].start, first.len() + 1);
 	}
 
 	/// Runs `spec` as `compgen` does, with an empty word.

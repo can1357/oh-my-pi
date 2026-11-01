@@ -4,7 +4,7 @@ use brush_core::{ErrorKind, ExecutionExitCode, ExecutionResult, builtins, env, e
 use clap::Parser;
 use tokio_util::sync::CancellationToken;
 
-use crate::line_input::{CTRL_C, CTRL_D, LineInput, ReadAhead, decode_line};
+use crate::line_input::{CTRL_C, CTRL_D, LineInput, ReadAhead, decode_line_in_strides};
 
 /// Work between yields to the runtime and cancellation checks, counted in
 /// bytes read; an entry counts as [`ENTRY_STEPS`] bytes.
@@ -96,13 +96,18 @@ impl builtins::Command for MapFileCommand {
 		// target array before reading; callbacks then see earlier assigned entries
 		// but not the entry that is currently being delivered to the callback.
 		if self.origin.is_none() {
-			context.shell.env_mut().update_or_add(
-				&self.array_var_name,
-				variables::ShellValueLiteral::Array(variables::ArrayLiteral(vec![])),
-				|_| Ok(()),
-				env::EnvironmentLookup::Anywhere,
-				env::EnvironmentScope::Global,
-			)?;
+			context
+				.shell
+				.env_mut()
+				.update_or_add(
+					&self.array_var_name,
+					variables::ShellValueLiteral::Array(variables::ArrayLiteral(vec![])),
+					|_| Ok(()),
+					env::EnvironmentLookup::Anywhere,
+					env::EnvironmentScope::Global,
+					&context.params,
+				)
+				.await?;
 		}
 
 		if let Some(result) = self.read_entries(input_file, &mut context).await? {
@@ -194,7 +199,9 @@ impl MapFileCommand {
 				line.pop_if(|byte| *byte == delimiter);
 			}
 
-			let line_str = decode_line(line);
+			// An entry is as long as the input between two delimiters, so the
+			// walk that decodes it is divided like the walk that read it.
+			let line_str = decode_line_in_strides(&context.params, line).await?;
 			let array_index = self.origin.unwrap_or(0) + i64::try_from(entry_count)?;
 
 			if let Some(callback) = &self.callback
@@ -207,14 +214,21 @@ impl MapFileCommand {
 				}
 			}
 
-			context.shell.env_mut().update_or_add_array_element(
-				&self.array_var_name,
-				array_index.to_string(),
-				line_str,
-				|_| Ok(()),
-				env::EnvironmentLookup::Anywhere,
-				env::EnvironmentScope::Global,
-			)?;
+			// A line has no bound, and this is an `async` caller with the
+			// execution parameters: the element assignment is divided.
+			context
+				.shell
+				.env_mut()
+				.update_or_add_array_element_divided(
+					&self.array_var_name,
+					array_index.to_string(),
+					line_str,
+					|_| Ok(()),
+					env::EnvironmentLookup::Anywhere,
+					env::EnvironmentScope::Global,
+					&context.params,
+				)
+				.await?;
 
 			entry_count += 1;
 		}
@@ -241,14 +255,24 @@ async fn run_callback<SE: brush_core::ShellExtensions>(
 	let mut index_buf = NumBuffer::new();
 	let index_arg =
 		escape::quote_if_needed(array_index.format_into(&mut index_buf), escape::QuoteMode::SingleQuote);
-	let line_arg = escape::quote_if_needed(line, escape::QuoteMode::SingleQuote);
+	// An entry is as long as the input between two delimiters, so the walk
+	// that quotes it is divided too; the index is bounded by its type and
+	// takes the plain path.
+	let line_arg =
+		escape::quote_if_needed_divided(&context.params, line, escape::QuoteMode::SingleQuote).await?;
 
 	let mut command = String::with_capacity(callback.len() + index_arg.len() + line_arg.len() + 2);
 	command.push_str(callback);
 	command.push(' ');
 	command.push_str(index_arg.as_ref());
 	command.push(' ');
-	command.push_str(line_arg.as_ref());
+	// The quoted entry is a second copy as long as the entry, so the last
+	// append is divided as well.
+	if line_arg.len() > brush_core::DIVIDE_COPY_ABOVE_BYTES {
+		brush_core::push_str_in_strides(&context.params, &mut command, line_arg.as_ref()).await?;
+	} else {
+		command.push_str(line_arg.as_ref());
+	}
 
 	let source_info = context.shell.call_stack().current_pos_as_source_info();
 	context.shell.run_string(command, &source_info, &context.params).await

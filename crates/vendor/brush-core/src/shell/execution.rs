@@ -4,8 +4,7 @@ use std::{io::Read, path::Path};
 
 use crate::{
 	ExecutionControlFlow, ExecutionParameters, ExecutionResult, ProcessGroupPolicy, SourceInfo,
-	arithmetic::Evaluatable as _, callstack, error, interp::Execute as _, openfiles,
-	trace_categories,
+	callstack, error, interp::Execute as _, openfiles, trace_categories,
 };
 
 impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
@@ -184,7 +183,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 		source_info: &crate::SourceInfo,
 		params: &ExecutionParameters,
 	) -> Result<ExecutionResult, error::Error> {
-		let parse_result = self.parse_string(command);
+		let parse_result = self.parse_string_off_worker(command.into()).await?;
 		self
 			.run_parsed_result(parse_result, source_info, params)
 			.await
@@ -298,10 +297,16 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 	}
 
 	/// Evaluate the given arithmetic expression, returning the result.
-	pub fn eval_arithmetic(
+	///
+	/// # Arguments
+	///
+	/// * `params` - The execution parameters of the run doing the evaluation.
+	/// * `expr` - The expression to evaluate.
+	pub async fn eval_arithmetic(
 		&mut self,
+		params: &ExecutionParameters,
 		expr: &brush_parser::ast::ArithmeticExpr,
 	) -> Result<i64, error::Error> {
-		Ok(expr.eval(self)?)
+		Ok(crate::arithmetic::evaluate(self, params, expr).await?)
 	}
 }

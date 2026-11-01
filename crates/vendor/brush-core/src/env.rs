@@ -6,7 +6,7 @@ use std::{
 };
 
 use crate::{
-	Shell, error, extensions,
+	ExecutionParameters, Shell, error, extensions,
 	variables::{self, ShellValue, ShellValueUnsetType, ShellVariable},
 };
 
@@ -103,6 +103,18 @@ impl Default for ShellEnvironment {
 	}
 }
 
+impl Drop for ShellEnvironment {
+	/// A subshell's environment is a copy of every variable it inherited, and
+	/// it is let go of when the subshell ends: `( : )` in a shell holding a
+	/// million-element array held the worker 28 ms, and 66 ms under load,
+	/// freeing that copy. So the variables are freed where that cannot hold
+	/// the worker ([`crate::variables::free_off_worker`]).
+	fn drop(&mut self) {
+		let elements = self.scopes.iter().map(|(_, map)| map.element_count()).sum();
+		crate::variables::free_off_worker(std::mem::take(&mut self.scopes), elements);
+	}
+}
+
 impl ShellEnvironment {
 	/// Returns a new shell environment.
 	pub fn new() -> Self {
@@ -111,6 +123,30 @@ impl ShellEnvironment {
 			export_variables_on_modification: false,
 			entry_count: 0,
 		}
+	}
+
+	/// A copy of this environment for a subshell, every variable copied with
+	/// [`ShellVariable::clone_divided`] under one budget, so that neither a
+	/// large value nor a great many small ones is copied in one step.
+	///
+	/// # Errors
+	///
+	/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part
+	/// way, discarding the copy.
+	pub(crate) async fn clone_divided(
+		&self,
+		params: &crate::ExecutionParameters,
+	) -> Result<Self, error::Error> {
+		let mut budget = crate::interp::ElementBudget::new();
+		let mut scopes = Vec::with_capacity(self.scopes.len());
+		for (scope, map) in &self.scopes {
+			scopes.push((*scope, map.clone_divided(params, &mut budget).await?));
+		}
+		Ok(Self {
+			scopes,
+			export_variables_on_modification: self.export_variables_on_modification,
+			entry_count: self.entry_count,
+		})
 	}
 
 	/// Pushes a new scope of the given type onto the environment's scope stack.
@@ -132,7 +168,13 @@ impl ShellEnvironment {
 		// TODO(env): Should we panic instead on failure? It's effectively a broken
 		// invariant.
 		match self.scopes.pop() {
-			Some((actual_scope_type, _)) if actual_scope_type == expected_scope_type => Ok(()),
+			Some((actual_scope_type, map)) if actual_scope_type == expected_scope_type => {
+				// A function's locals are freed when it returns, and one of
+				// them can be an array of any size.
+				let elements = map.element_count();
+				crate::variables::free_off_worker(map, elements);
+				Ok(())
+			},
 			Some((actual_scope_type, _)) => Err(
 				error::ErrorKind::UnexpectedScopeType {
 					expected: expected_scope_type,
@@ -165,6 +207,111 @@ impl ShellEnvironment {
 		}
 
 		visible_vars.into_iter()
+	}
+
+	/// The variables [`Self::iter_exported`] yields, found a step at a time.
+	///
+	/// Finding them looks at every variable of every scope, exported or not,
+	/// so the walk is as long as the environment: before an external command,
+	/// a million unexported variables held the worker 12.7 ms, and a hundred
+	/// thousand exported ones 90.8 ms with the copies made of them, in a walk
+	/// and a map built in one step. Each variable looked at is one step of an
+	/// [`crate::interp::ElementBudget`]. Shadowing is resolved as
+	/// [`Self::iter_exported`] resolves it, the innermost exported variable of
+	/// each name winning ([`Self::innermost_divided`]).
+	///
+	/// # Errors
+	///
+	/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part
+	/// way.
+	pub async fn exported_divided(
+		&self,
+		params: &crate::ExecutionParameters,
+	) -> Result<Vec<(&String, &ShellVariable)>, error::Error> {
+		self.innermost_divided(params, ShellVariable::is_exported).await
+	}
+
+	/// The variables [`Self::iter`] yields — the innermost variable of each
+	/// name — found a step at a time, as [`Self::exported_divided`] finds the
+	/// exported ones.
+	///
+	/// # Errors
+	///
+	/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part
+	/// way.
+	pub async fn visible_divided(
+		&self,
+		params: &crate::ExecutionParameters,
+	) -> Result<Vec<(&String, &ShellVariable)>, error::Error> {
+		self.innermost_divided(params, |_| true).await
+	}
+
+	/// The innermost variable of each name among those `counts` accepts,
+	/// every variable looked at one step of an
+	/// [`crate::interp::ElementBudget`].
+	///
+	/// **A name is hashed only when it can shadow or be shadowed, and then a
+	/// stride at a time.** The walk goes from the innermost scope out and
+	/// keeps the names found, keyed by their hash
+	/// ([`crate::interp::hash_in_strides`]). Three earlier versions held the
+	/// worker. A set that grew as it filled rehashed all of it in one step:
+	/// 249 ms at a million exported variables. Looking each name up in every
+	/// scope inside its own hashed a 1 MiB exported name once per scope: 16
+	/// nested shell functions held `/usr/bin/true` 6.2 ms under load, against
+	/// 1.7 at the base. A set keyed by the name itself hashed a 64 MiB exported
+	/// name in one call: 10.1 ms quiet and 28.8 loaded, where the lookup before
+	/// it never hashed that name at all. The map is sized before the walk, so
+	/// it never grows. A name in the outermost scope is never added, since no
+	/// scope is left outside it, and is not hashed while no name has been
+	/// added, since then nothing can shadow it.
+	async fn innermost_divided(
+		&self,
+		params: &crate::ExecutionParameters,
+		counts: fn(&ShellVariable) -> bool,
+	) -> Result<Vec<(&String, &ShellVariable)>, error::Error> {
+		let mut budget = crate::interp::ElementBudget::new();
+		let mut found = Vec::new();
+		let state = std::hash::RandomState::new();
+		// The names found so far, by hash; only an inner scope's are added.
+		let inner_variables = self.scopes.iter().skip(1).map(|(_, map)| map.variables.len()).sum();
+		let mut seen: HashMap<u64, Vec<&String>> = HashMap::with_capacity(inner_variables);
+		for (depth, (_, var_map)) in self.scopes.iter().enumerate().rev() {
+			let outermost = depth == 0;
+			for (name, var) in var_map.iter() {
+				let due = budget.charge(0);
+				if due > 0 {
+					crate::interp::loop_checkpoints(params, due).await?;
+				}
+				if !counts(var) {
+					continue;
+				}
+				if outermost && seen.is_empty() {
+					found.push((name, var));
+					continue;
+				}
+				let hash = crate::interp::hash_in_strides(params, &mut budget, &state, name).await?;
+				if seen.get(&hash).is_some_and(|names| names.iter().any(|seen_name| *seen_name == name)) {
+					continue;
+				}
+				if !outermost {
+					seen.entry(hash).or_default().push(name);
+				}
+				found.push((name, var));
+			}
+		}
+		Ok(found)
+	}
+
+	/// An environment holding `variables` in its one, global scope, for a
+	/// caller that built them a step at a time: the map is taken as it is,
+	/// not copied or rehashed.
+	pub fn with_globals(variables: ShellVariableMap) -> Self {
+		let entry_count = variables.variables.len();
+		Self {
+			scopes: vec![(EnvironmentScope::Global, variables)],
+			export_variables_on_modification: false,
+			entry_count,
+		}
 	}
 
 	/// Returns an iterator over all the variables defined in the environment.
@@ -464,6 +611,10 @@ impl ShellEnvironment {
 	/// Update a variable in the environment, or add it if it doesn't already
 	/// exist.
 	///
+	/// An array literal spends a checkpoint on each element (see
+	/// [`ShellVariable::assign`]); [`Self::update_or_add_scalar`] assigns a
+	/// scalar without a run.
+	///
 	/// # Arguments
 	///
 	/// * `name` - The name of the variable to update or add.
@@ -473,10 +624,57 @@ impl ShellEnvironment {
 	/// * `lookup_policy` - The policy to use when looking up the variable.
 	/// * `scope_if_creating` - The scope to create the variable in if it doesn't
 	///   already exist.
-	pub fn update_or_add<N: Into<String>>(
+	/// * `params` - The execution parameters of the run doing the update.
+	pub async fn update_or_add<N: Into<String>>(
 		&mut self,
 		name: N,
 		value: variables::ShellValueLiteral,
+		updater: impl Fn(&mut ShellVariable) -> Result<(), error::Error>,
+		lookup_policy: EnvironmentLookup,
+		scope_if_creating: EnvironmentScope,
+		params: &ExecutionParameters,
+	) -> Result<(), error::Error> {
+		let name = name.into();
+
+		let auto_export = self.export_variables_on_modification;
+		if let Some(var) = self.get_mut_using_policy(&name, lookup_policy) {
+			var.assign(value, false, params).await?;
+			if auto_export {
+				var.export();
+			}
+			updater(var)
+		} else {
+			let mut var = ShellVariable::new(ShellValue::Unset(ShellValueUnsetType::Untyped));
+			var.assign(value, false, params).await?;
+			if auto_export {
+				var.export();
+			}
+			updater(&mut var)?;
+
+			self.add(name, var, scope_if_creating)
+		}
+	}
+
+	/// Update a variable in the environment with a scalar, or add it if it
+	/// doesn't already exist.
+	///
+	/// Nothing in a scalar's assignment grows with how many elements the
+	/// variable holds (see [`ShellVariable::assign_scalar`]), so this takes no
+	/// run: arithmetic and the shell's own bookkeeping use it.
+	///
+	/// # Arguments
+	///
+	/// * `name` - The name of the variable to update or add.
+	/// * `value` - The value to assign to the variable.
+	/// * `updater` - A function to call to update the variable after assigning
+	///   the value.
+	/// * `lookup_policy` - The policy to use when looking up the variable.
+	/// * `scope_if_creating` - The scope to create the variable in if it doesn't
+	///   already exist.
+	pub fn update_or_add_scalar<N: Into<String>>(
+		&mut self,
+		name: N,
+		value: String,
 		updater: impl Fn(&mut ShellVariable) -> Result<(), error::Error>,
 		lookup_policy: EnvironmentLookup,
 		scope_if_creating: EnvironmentScope,
@@ -485,14 +683,14 @@ impl ShellEnvironment {
 
 		let auto_export = self.export_variables_on_modification;
 		if let Some(var) = self.get_mut_using_policy(&name, lookup_policy) {
-			var.assign(value, false)?;
+			var.assign_scalar(value, false)?;
 			if auto_export {
 				var.export();
 			}
 			updater(var)
 		} else {
 			let mut var = ShellVariable::new(ShellValue::Unset(ShellValueUnsetType::Untyped));
-			var.assign(value, false)?;
+			var.assign_scalar(value, false)?;
 			if auto_export {
 				var.export();
 			}
@@ -530,14 +728,40 @@ impl ShellEnvironment {
 			var.assign_at_index(index, value, false)?;
 			updater(var)
 		} else {
-			let mut var = ShellVariable::new(ShellValue::Unset(ShellValueUnsetType::Untyped));
-			var.assign(
-				variables::ShellValueLiteral::Array(variables::ArrayLiteral(vec![(
-					Some(index),
-					value,
-				)])),
-				false,
-			)?;
+			let mut var = ShellVariable::new(ShellValue::indexed_array_with_element(&index, value)?);
+			updater(&mut var)?;
+
+			self.add(name, var, scope_if_creating)
+		}
+	}
+
+	/// [`Self::update_or_add_array_element`] for a caller that has a run to
+	/// cancel.
+	///
+	/// One element can be any size, so its assignment is divided: see
+	/// [`ShellVariable::assign_at_index_divided`].
+	///
+	/// # Errors
+	///
+	/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part
+	/// way, leaving the variable as it was.
+	pub async fn update_or_add_array_element_divided<N: Into<String>>(
+		&mut self,
+		name: N,
+		index: String,
+		value: String,
+		updater: impl Fn(&mut ShellVariable) -> Result<(), error::Error>,
+		lookup_policy: EnvironmentLookup,
+		scope_if_creating: EnvironmentScope,
+		params: &ExecutionParameters,
+	) -> Result<(), error::Error> {
+		let name = name.into();
+
+		if let Some(var) = self.get_mut_using_policy(&name, lookup_policy) {
+			var.assign_at_index_divided(index, value, false, params).await?;
+			updater(var)
+		} else {
+			let mut var = ShellVariable::new(ShellValue::indexed_array_with_element(&index, value)?);
 			updater(&mut var)?;
 
 			self.add(name, var, scope_if_creating)
@@ -591,20 +815,87 @@ impl ShellEnvironment {
 }
 
 /// Represents a map from names to shell variables.
+///
+/// **Each variable is kept with the hash of its name**, so that nothing
+/// after the insertion that computed it reads the name to hash it again: a
+/// copy ([`Self::clone_divided`]) places every variable by the hash it
+/// already has, and so does the table when it grows. A copy that inserted
+/// each name into a new `HashMap` hashed every name in one call: an exported
+/// variable whose name is 64 MiB long held the worker 11.4 ms on
+/// `env -i /usr/bin/true`, and as long on every pipeline stage, subshell and
+/// command substitution, 40 ms at 256 MiB. A copy keeps the original's keys,
+/// as `HashMap::clone` keeps its hasher, so the hashes stay valid in it.
 #[derive(Clone, Debug, Default)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ShellVariableMap {
-	variables: HashMap<String, ShellVariable>,
+	/// The keys every name in this map is hashed with.
+	state:     std::hash::RandomState,
+	/// The variables, each beside its name and that name's hash.
+	variables: hashbrown::HashTable<Slot>,
+}
+
+/// One variable of a [`ShellVariableMap`].
+#[derive(Clone, Debug)]
+struct Slot {
+	/// The hash of `name` under the map's keys.
+	hash:     u64,
+	name:     String,
+	variable: ShellVariable,
+}
+
+impl Slot {
+	/// Whether this is the slot of `name`, whose hash is `hash`. The hash is
+	/// compared first: two names of one length differ in their hashes far
+	/// more cheaply than in their bytes.
+	fn holds(&self, hash: u64, name: &str) -> bool {
+		self.hash == hash && self.name == name
+	}
 }
 
 impl ShellVariableMap {
+	/// An empty map with room for `capacity` variables, for a caller that
+	/// knows how many it will add: the table never grows while they go in.
+	pub fn with_capacity(capacity: usize) -> Self {
+		Self {
+			state:     std::hash::RandomState::new(),
+			variables: hashbrown::HashTable::with_capacity(capacity),
+		}
+	}
+
 	//
 	// Iterators/Getters
 	//
 
 	/// Returns an iterator over all the variables in the map.
 	pub fn iter(&self) -> impl Iterator<Item = (&String, &ShellVariable)> {
-		self.variables.iter()
+		self.variables.iter().map(|slot| (&slot.name, &slot.variable))
+	}
+
+	/// How many allocations freeing this scope frees: each variable's name,
+	/// and each element of its value.
+	fn element_count(&self) -> usize {
+		self.variables.iter().map(|slot| 1 + slot.variable.value().element_count()).sum()
+	}
+
+	/// The hash of `name` under this map's keys, in one step: the name of a
+	/// lookup or a plain assignment, which the shell has just read in full.
+	fn hash(&self, name: &str) -> u64 {
+		crate::interp::hash_in_one_step(&self.state, name)
+	}
+
+	/// [`ShellEnvironment::clone_divided`] for one scope. Each variable is
+	/// placed by the hash it was stored with; no name is hashed.
+	async fn clone_divided(
+		&self,
+		params: &crate::ExecutionParameters,
+		budget: &mut crate::interp::ElementBudget,
+	) -> Result<Self, error::Error> {
+		let mut variables = hashbrown::HashTable::with_capacity(self.variables.len());
+		for slot in self.variables.iter() {
+			let name = crate::variables::clone_charged(params, budget, &slot.name).await?;
+			let variable = slot.variable.clone_divided(params, budget).await?;
+			variables.insert_unique(slot.hash, Slot { hash: slot.hash, name, variable }, |slot| slot.hash);
+		}
+		Ok(Self { state: self.state.clone(), variables })
 	}
 
 	/// Tries to retrieve an immutable reference to the variable with the given
@@ -614,7 +905,8 @@ impl ShellVariableMap {
 	///
 	/// * `name` - The name of the variable to retrieve.
 	pub fn get(&self, name: &str) -> Option<&ShellVariable> {
-		self.variables.get(name)
+		let hash = self.hash(name);
+		self.variables.find(hash, |slot| slot.holds(hash, name)).map(|slot| &slot.variable)
 	}
 
 	/// Tries to retrieve a mutable reference to the variable with the given
@@ -624,7 +916,8 @@ impl ShellVariableMap {
 	///
 	/// * `name` - The name of the variable to retrieve.
 	pub fn get_mut(&mut self, name: &str) -> Option<&mut ShellVariable> {
-		self.variables.get_mut(name)
+		let hash = self.hash(name);
+		self.variables.find_mut(hash, |slot| slot.holds(hash, name)).map(|slot| &mut slot.variable)
 	}
 
 	//
@@ -638,7 +931,9 @@ impl ShellVariableMap {
 	///
 	/// * `name` - The name of the variable to unset.
 	pub fn unset(&mut self, name: &str) -> Option<ShellVariable> {
-		self.variables.remove(name)
+		let hash = self.hash(name);
+		let slot = self.variables.find_entry(hash, |slot| slot.holds(hash, name)).ok()?;
+		Some(slot.remove().0.variable)
 	}
 
 	/// Sets a variable in the map.
@@ -648,7 +943,82 @@ impl ShellVariableMap {
 	/// * `name` - The name of the variable to set.
 	/// * `var` - The variable to set.
 	pub fn set<N: Into<String>>(&mut self, name: N, var: ShellVariable) -> Option<ShellVariable> {
-		self.variables.insert(name.into(), var)
+		let name = name.into();
+		let hash = self.hash(&name);
+		self.set_hashed(hash, name, var)
+	}
+
+	/// [`Self::set`] for a caller with a run, whose name can be any length:
+	/// the name is hashed a stride at a time, each stride a step of `budget`
+	/// ([`crate::interp::hash_in_strides`]).
+	///
+	/// # Errors
+	///
+	/// Returns [`error::ErrorKind::Interrupted`] if the run is cancelled part
+	/// way, leaving the map as it was.
+	pub async fn set_divided(
+		&mut self,
+		params: &crate::ExecutionParameters,
+		budget: &mut crate::interp::ElementBudget,
+		name: String,
+		var: ShellVariable,
+	) -> Result<Option<ShellVariable>, error::Error> {
+		let hash = crate::interp::hash_in_strides(params, budget, &self.state, &name).await?;
+		Ok(self.set_hashed(hash, name, var))
+	}
+
+	/// Sets `name`, whose hash is `hash`, to `var`. A variable already there
+	/// keeps its name and gives up its value, as `HashMap::insert` does.
+	fn set_hashed(&mut self, hash: u64, name: String, var: ShellVariable) -> Option<ShellVariable> {
+		match self.variables.entry(hash, |slot| slot.holds(hash, &name), |slot| slot.hash) {
+			hashbrown::hash_table::Entry::Occupied(mut slot) => {
+				Some(std::mem::replace(&mut slot.get_mut().variable, var))
+			},
+			hashbrown::hash_table::Entry::Vacant(slot) => {
+				slot.insert(Slot { hash, name, variable: var });
+				None
+			},
+		}
+	}
+}
+
+/// Written as the map of names to variables it holds, in the shape the
+/// derived implementation gave the `HashMap` this map used to be.
+#[cfg(feature = "serde")]
+impl serde::Serialize for ShellVariableMap {
+	fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		struct Variables<'a>(&'a ShellVariableMap);
+
+		impl serde::Serialize for Variables<'_> {
+			fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+				serializer.collect_map(self.0.iter())
+			}
+		}
+
+		use serde::ser::SerializeStruct as _;
+		let mut map = serializer.serialize_struct("ShellVariableMap", 1)?;
+		map.serialize_field("variables", &Variables(self))?;
+		map.end()
+	}
+}
+
+/// Read from the shape [`ShellVariableMap`]'s `Serialize` writes, every name
+/// hashed under new keys.
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for ShellVariableMap {
+	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		#[derive(serde::Deserialize)]
+		#[serde(rename = "ShellVariableMap")]
+		struct Written {
+			variables: HashMap<String, ShellVariable>,
+		}
+
+		let written = Written::deserialize(deserializer)?;
+		let mut map = Self::with_capacity(written.variables.len());
+		for (name, variable) in written.variables {
+			map.set(name, variable);
+		}
+		Ok(map)
 	}
 }
 

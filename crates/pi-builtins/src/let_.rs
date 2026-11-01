@@ -1,6 +1,6 @@
 use std::io::Write;
 
-use brush_core::{ExecutionExitCode, ExecutionResult, arithmetic::Evaluatable, builtins};
+use brush_core::{ExecutionExitCode, ExecutionResult, arithmetic, builtins};
 use clap::Parser;
 
 /// Evaluate arithmetic expressions.
@@ -26,8 +26,8 @@ impl builtins::Command for LetCommand {
 		}
 
 		for expr in &self.exprs {
-			let parsed = brush_parser::arithmetic::parse(expr.as_str())?;
-			let evaluated = parsed.eval(context.shell)?;
+			let parsed = arithmetic::parse_for_builtin(&context.params, expr.as_str()).await?;
+			let evaluated = arithmetic::evaluate(context.shell, &context.params, &parsed).await?;
 
 			if evaluated == 0 {
 				result = ExecutionResult::general_error();

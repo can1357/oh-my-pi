@@ -91,6 +91,13 @@ version = "0.17.0"
 [dependencies.futures]
 version = "0.3.32"
 
+# `ShellVariableMap` keeps each name's hash beside it (`HashTable`), so a copy
+# of a scope never hashes a name again.
+[dependencies.hashbrown]
+version = "0.17"
+default-features = false
+features = ["inline-more"]
+
 [dependencies.inherent]
 version = "1.0.13"
 

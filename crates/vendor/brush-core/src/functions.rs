@@ -104,6 +104,12 @@ impl Registration {
 		&self.definition
 	}
 
+	/// The function definition, shared: for rendering it as text where that
+	/// cannot hold the runtime's worker, since a definition can be any length.
+	pub(crate) fn shared_definition(&self) -> Arc<brush_parser::ast::FunctionDefinition> {
+		Arc::clone(&self.definition)
+	}
+
 	/// Returns a reference to the source info for the function definition.
 	pub const fn source(&self) -> &crate::SourceInfo {
 		&self.source_info
