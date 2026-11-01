@@ -179,6 +179,18 @@ describe("formatScraperQuery", () => {
 		);
 	});
 
+	it("keeps inurl: native with keepInUrl while still demoting path-carrying site:", () => {
+		const query = formatScraperQuery(
+			"site:github.com/can1357/oh-my-pi inurl:releases release",
+			undefined,
+			GOOGLE_QUERY_SYNTAX,
+			{ keepInUrl: true },
+		);
+		expect(query).toContain("inurl:releases");
+		expect(query).toContain("github.com/can1357/oh-my-pi");
+		expect(query).not.toContain("site:");
+	});
+
 	it("demotes every site in an OR-groupable multi-site query when all carry paths", () => {
 		expect(formatScraperQuery("cve site:nvd.nist.gov/vuln site:mitre.org/cgi-bin")).toBe(
 			"cve nvd.nist.gov/vuln mitre.org/cgi-bin",

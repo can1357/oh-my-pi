@@ -656,19 +656,25 @@ export function formatQuery(q: StructuredQuery, syntax: QuerySyntax = {}): strin
  * ({@link applyQueryConstraints}) enforces every demoted or unsupported
  * constraint on the returned sources. Directive-free queries pass through
  * byte-identical.
+ *
+ * `keepInUrl` is for Google-backed callers (Serply): Google honors `inurl:`,
+ * so it stays native when the syntax supports it. Path-carrying `site:` is
+ * still demoted.
  */
 export function formatScraperQuery(
 	query: string,
 	parsedQuery?: StructuredQuery,
 	syntax: QuerySyntax = GOOGLE_QUERY_SYNTAX,
+	options: { keepInUrl?: boolean } = {},
 ): string {
 	const parsed = parsedQuery ?? parseSearchQuery(query);
 	if (!parsed.hasDirectives) return query;
-	const demoted = [...parsed.sites.filter(site => site.includes("/")), ...parsed.inUrl];
+	const keepInUrl = options.keepInUrl === true && syntax.inUrl === true;
+	const demoted = [...parsed.sites.filter(site => site.includes("/")), ...(keepInUrl ? [] : parsed.inUrl)];
 	const downgraded: StructuredQuery = {
 		...parsed,
 		sites: parsed.sites.filter(site => !site.includes("/")),
-		inUrl: [],
+		inUrl: keepInUrl ? parsed.inUrl : [],
 		terms: [...parsed.terms, ...demoted.map(text => ({ text }))],
 	};
 	return formatQuery(downgraded, syntax);

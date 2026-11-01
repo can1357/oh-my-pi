@@ -30,6 +30,7 @@ export const SEARCH_PROVIDER_LABELS = {
 	kimi: "Kimi",
 	synthetic: "Synthetic",
 	ollama: "Ollama",
+	serply: "Serply",
 	searxng: "SearXNG",
 	startpage: "Startpage",
 	duckduckgo: "DuckDuckGo",
