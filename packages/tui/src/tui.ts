@@ -935,6 +935,12 @@ export class TUI extends Container {
 	onDebug?: () => void;
 	#renderRequested = false;
 	#renderTimer: RenderTimer | undefined;
+	/**
+	 * Scheduler-clock instant the live `#renderTimer` fires at. Meaningless
+	 * while that timer is undefined; it exists so `#rearmRenderIfSooner` can
+	 * tell a pending frame that is now overdue from one still correctly held.
+	 */
+	#renderTimerDueAtMs = 0;
 	#renderScheduler: RenderScheduler;
 	#lastRenderAt = 0;
 	/**
@@ -970,6 +976,21 @@ export class TUI extends Container {
 	static readonly #MAX_PENDING_OUTPUT_BYTES = STDOUT_BACKLOG_CLEAR_BYTES;
 	/** Retry cadence while the output backlog gate is holding renders back. */
 	static readonly #OUTPUT_BACKLOG_RETRY_MS = 10;
+	/**
+	 * Frame interval while the terminal reports no audience
+	 * ({@link Terminal.hasAudience} is `false`). A detached tmux pane still
+	 * drains everything written to it, so nothing throttles the spinner on its
+	 * own: a session parked on a model call keeps composing and writing frames
+	 * at the full rate into a pane no client is reading.
+	 *
+	 * Slowed rather than stopped, because the status line carries a live
+	 * elapsed-turn readout: at one frame a second a pane someone re-attaches to
+	 * is at most a second stale, where a frozen one would show a dead spinner
+	 * and a wrong clock until the next real event. Ordinary (animation) frames
+	 * only — a forced render, which is what every user action and screen-shape
+	 * change issues, still paints immediately.
+	 */
+	static readonly #NO_AUDIENCE_RENDER_INTERVAL_MS = 1_000;
 	/** Quiet window before restoring the normal buffer after resize. */
 	static readonly #RESIZE_VIEWPORT_SETTLE_MS = 120;
 	/** Longest wait for a CPR reply before the settled repaint falls back. */
@@ -2819,7 +2840,16 @@ export class TUI extends Container {
 
 	/** Ordinary (non-forced) render scheduling. */
 	#requestOrdinaryRender(): void {
-		if (this.#renderRequested) return;
+		if (this.#renderRequested) {
+			// A frame is already owed. Its timer was sized by the floors that held
+			// at the instant it was armed, and one of them — the no-audience floor
+			// above all — can have lapsed since: the keystroke that reaches a
+			// detached pane re-opens the audience question, and this request is
+			// the repaint that keystroke asks for. Without this, the character
+			// waits out a delay chosen for a terminal nobody was watching.
+			this.#rearmRenderIfSooner();
+			return;
+		}
 		this.#renderRequested = true;
 		this.#renderScheduler.scheduleImmediate(() => this.#scheduleRender());
 	}
@@ -2883,7 +2913,40 @@ export class TUI extends Container {
 		if (this.#stopped || this.#renderTimer || !this.#renderRequested) {
 			return;
 		}
+		this.#armRenderTimer(this.#renderScheduler.now());
+	}
+
+	/**
+	 * Shorten an already-armed frame when the floors that sized it have lapsed.
+	 *
+	 * Every floor is measured from a fixed instant — `#lastRenderAt` for the
+	 * cadence, adaptive and audience floors, `#inputRenderGraceUntilMs` for the
+	 * grace — so the due time a pending timer was given only moves earlier when
+	 * one of those floors itself dropped. The mere passage of time never
+	 * re-arms anything, and a floor that grows (a freshly extended input grace)
+	 * leaves the pending timer alone rather than pushing it out.
+	 */
+	#rearmRenderIfSooner(): void {
+		if (this.#stopped || !this.#renderTimer || !this.#renderRequested) return;
 		const now = this.#renderScheduler.now();
+		if (now + this.#renderDelayMs(now) >= this.#renderTimerDueAtMs) return;
+		this.#renderTimer.cancel();
+		this.#renderTimer = undefined;
+		this.#armRenderTimer(now);
+	}
+
+	/** Arm `#renderTimer` for the delay the floors ask for at `now`. */
+	#armRenderTimer(now: number): void {
+		const delay = this.#renderDelayMs(now);
+		this.#renderTimerDueAtMs = now + delay;
+		this.#renderTimer = this.#renderScheduler.scheduleRender(this.#runScheduledRender, delay);
+	}
+
+	/** How long the next ordinary frame must wait, given the clock reads `now`. */
+	#renderDelayMs(now: number): number {
+		// Native frames are paced by the terminal's acknowledgements (credits),
+		// not by the row renderer's cadence.
+		if (this.#nativeLive) return 0;
 		const elapsed = now - this.#lastRenderAt;
 		const cadenceDelay = Math.max(0, TUI.#MIN_RENDER_INTERVAL_MS - elapsed);
 		// Adaptive backpressure — target ~50% render duty cycle: the next frame
@@ -2895,10 +2958,11 @@ export class TUI extends Container {
 		const adaptiveFloor = Math.min(TUI.#MAX_ADAPTIVE_RENDER_MS, this.#lastFrameCostMs * 2);
 		const adaptiveDelay = Math.max(0, adaptiveFloor - elapsed);
 		const inputGraceDelay = Math.max(0, this.#inputRenderGraceUntilMs - now);
-		// Native frames are paced by the terminal's acknowledgements (credits),
-		// not by the row renderer's cadence.
-		const delay = this.#nativeLive ? 0 : Math.max(cadenceDelay, adaptiveDelay, inputGraceDelay);
-		this.#renderTimer = this.#renderScheduler.scheduleRender(this.#runScheduledRender, delay);
+		// Nobody is looking at this terminal — established, not assumed: every
+		// host that cannot answer reports `undefined` and lands here at 0.
+		const audienceFloor = this.terminal.hasAudience === false ? TUI.#NO_AUDIENCE_RENDER_INTERVAL_MS : 0;
+		const audienceDelay = Math.max(0, audienceFloor - elapsed);
+		return Math.max(cadenceDelay, adaptiveDelay, inputGraceDelay, audienceDelay);
 	}
 
 	/**
@@ -2923,10 +2987,13 @@ export class TUI extends Container {
 		const pending = this.terminal.pendingOutputBytes;
 		if (pending === undefined || pending <= TUI.#MAX_PENDING_OUTPUT_BYTES) return false;
 		this.#renderRequested = true;
-		this.#renderTimer ??= this.#renderScheduler.scheduleRender(
-			this.#runScheduledRender,
-			TUI.#OUTPUT_BACKLOG_RETRY_MS,
-		);
+		if (!this.#renderTimer) {
+			this.#renderTimerDueAtMs = this.#renderScheduler.now() + TUI.#OUTPUT_BACKLOG_RETRY_MS;
+			this.#renderTimer = this.#renderScheduler.scheduleRender(
+				this.#runScheduledRender,
+				TUI.#OUTPUT_BACKLOG_RETRY_MS,
+			);
+		}
 		return true;
 	}
 

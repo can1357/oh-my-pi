@@ -15,7 +15,7 @@ import {
 	retryTransientCompletion,
 } from "@oh-my-pi/pi-ai";
 import { StreamMarkupHealing } from "@oh-my-pi/pi-ai/utils/stream-markup-healing";
-import { writeTerminalSequence } from "@oh-my-pi/pi-tui";
+import { getActiveTerminal, writeTerminalSequence } from "@oh-my-pi/pi-tui";
 import { isNativeRendering, onNativeRenderingChange } from "@oh-my-pi/pi-tui/native/state";
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import { SPINNER_FRAMES } from "@oh-my-pi/pi-tui/theme/symbols";
@@ -970,6 +970,12 @@ function startTerminalTitleSpinner(): void {
 		return;
 
 	terminalTitleRuntime.timer = setInterval(() => {
+		// Nothing displays this terminal, so its title is not on any screen: the
+		// frame would be an OSC write nobody can read. Established emptiness
+		// only — `undefined` (no multiplexer, failed probe) keeps animating.
+		// The state separator still rewrites on every real transition, so a
+		// re-attached pane shows the right title at once.
+		if (getActiveTerminal()?.hasAudience === false) return;
 		terminalTitleRuntime.frame =
 			(terminalTitleRuntime.frame + 1) % TERMINAL_TITLE_SPINNER_STYLES[terminalTitleRuntime.style].length;
 		// An extension override is frame-independent; the sink would dedupe it anyway.

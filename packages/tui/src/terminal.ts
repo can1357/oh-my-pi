@@ -32,17 +32,50 @@ import {
 import { tmuxMultiplexer } from "./multiplexers/tmux";
 import type { TerminalMultiplexerBackgroundColorCache } from "./multiplexers/types";
 import { classifyTerminalMultiplexerModule, terminalMultiplexerSessions } from "./terminal-multiplexer";
-import { setTmuxPaneApcTitles, tmuxSessionSpeaksTsp } from "./tmux";
+import {
+	canQueryTmuxAttachment,
+	setTmuxPaneApcTitles,
+	tmuxSessionHasAttachedClients,
+	tmuxSessionSpeaksTsp,
+} from "./tmux";
 import { setHangulCompatibilityJamoWidth } from "./utils";
 import { translateWindowsAltGrSequence } from "./windows-altgr";
 import { Win32InputModeDecoder, Win32PasteMarkerNormalizer } from "./windows-input-mode";
 
-export { writeTerminalSequence, writeThroughActiveTerminal } from "./active-terminal";
+export { getActiveTerminal, writeTerminalSequence, writeThroughActiveTerminal } from "./active-terminal";
 
 const TERMINAL_PROGRESS_KEEPALIVE_MS = 1000;
 const TERMINAL_PROGRESS_ACTIVE_SEQUENCE = "\x1b]9;4;3\x07";
 const TERMINAL_PROGRESS_CLEAR_SEQUENCE = "\x1b]9;4;0;\x07";
 const WINDOWS_TERMINAL_OSC11_POLL_MS = 30_000;
+/**
+ * How long an OSC 11 cycle waits for the DA1 sentinel that ends it. The
+ * sentinel is what releases the next query — a Mode 2031 notification, an
+ * explicit refresh — so a terminal that never answers it (or a layer that
+ * drops the reply) would otherwise leave every later appearance change queued
+ * for the life of the process, with the last colour latched.
+ *
+ * Far longer than any DA1 round trip, including a slow ssh link, because
+ * abandoning early costs a redundant query while abandoning late only delays
+ * a theme change nobody has asked for twice.
+ */
+const OSC11_SENTINEL_TIMEOUT_MS = 5_000;
+/**
+ * How long after a cycle gives up its answers may still arrive and be
+ * recognised as its own. A deadline can say when to stop waiting; it cannot
+ * say that bytes already on the wire will never land, so the cycle leaves
+ * markers behind that swallow its late OSC 11 reply and its late sentinel
+ * instead of letting the replacement query adopt them.
+ *
+ * One further deadline beyond the cycle's own, so a marker outlives a whole
+ * replacement cycle before it is swept. Bounded because it must be: a
+ * sentinel that is lost rather than late would otherwise leave the FIFO
+ * permanently offset by one, every later cycle paying a timeout, and the
+ * markers would accumulate for the life of the process. Past this window a
+ * reply is treated as never coming — the explicit resolution of an ambiguity
+ * that has no certain answer.
+ */
+const OSC11_LATE_REPLY_GRACE_MS = 2 * OSC11_SENTINEL_TIMEOUT_MS;
 /** How long a relayed ESC record waits for the rest of its sequence before acting as Escape (matches StdinBuffer). */
 const WIN32_RELAYED_ESCAPE_TIMEOUT_MS = 75;
 
@@ -271,6 +304,42 @@ const STDOUT_STALL_TIMEOUT_MS = 60_000;
 
 /** Cadence at which {@link ProcessTerminal} re-samples the backlog while an episode is armed. */
 const STDOUT_STALL_POLL_MS = 250;
+
+/**
+ * Shortest gap between two audience probes, and the longest. The gap is chosen
+ * per machine from the probe's own wall cost (see {@link AUDIENCE_PROBE_DUTY}),
+ * because that cost is not a constant: a direct `tmux` binary answers in a few
+ * milliseconds, while a `tmux` that `PATH` resolves to a wrapper script — a
+ * version manager's shim, a login-shell alias — pays a second fork/exec first.
+ *
+ * Only an established empty audience polls at that cadence, because that is
+ * the only state an attach has to be noticed quickly in. Watched or unknown,
+ * the gap is the maximum: a detach noticed late costs a few seconds of
+ * animation nobody sees, and a pane tmux cannot answer for must not spawn a
+ * doomed child every two seconds.
+ *
+ * The floor also bounds what a passive watcher waits for: someone who attaches
+ * and touches nothing sees the no-audience cadence until the next probe. A
+ * keystroke or a resize does not wait for it (`#invalidateAudience`).
+ */
+const AUDIENCE_PROBE_MIN_INTERVAL_MS = 2_000;
+const AUDIENCE_PROBE_MAX_INTERVAL_MS = 30_000;
+
+/**
+ * Probe gap as a multiple of the last probe's wall time, so the poll can never
+ * cost more than 1% of the thread it saves, whatever an answer costs on this
+ * host. A fixed gap would be the wrong trade on both ends: too slow to notice
+ * an attach where the probe is cheap, and a visible cost where it is not.
+ */
+const AUDIENCE_PROBE_DUTY = 100;
+
+/**
+ * How long a probe may stay in flight before it is abandoned. `Bun.spawn`'s
+ * own `timeout` SIGKILLs the child, but a child stuck in an uninterruptible
+ * read never dies; without this the in-flight flag would hold for the life of
+ * the process and latch the last answer, `false` included.
+ */
+const ABANDONED_AUDIENCE_PROBE_MS = 5_000;
 
 /**
  * Bounds a never-draining stdout backlog without killing a single large but
@@ -614,6 +683,18 @@ export interface Terminal {
 	readonly pendingOutputBytes?: number;
 
 	/**
+	 * Whether anything is displaying this terminal: `false` only when the
+	 * implementation has established that nothing is (a tmux pane whose session
+	 * has no attached client), `true` when it has established that something
+	 * is, and `undefined` whenever it cannot tell — no multiplexer, a failed
+	 * probe, or a terminal that does not implement this at all. The renderer
+	 * drops to {@link TUI}'s no-audience cadence only on `false`, so every
+	 * unknown keeps the full animation rate. Optional so custom Terminals built
+	 * against older pi-tui versions keep working.
+	 */
+	readonly hasAudience?: boolean | undefined;
+
+	/**
 	 * Whether a pseudoconsole host owns the grid this terminal writes to, so
 	 * neither the cursor nor the painted rows survive a resize under the
 	 * application's own model. Measured on Windows conhost: resizing the
@@ -770,12 +851,59 @@ export function isConPTYHosted(): boolean {
 /** Discriminated owner of an outstanding DA1 sentinel in the unified probe FIFO. */
 type Da1SentinelOwner =
 	| { kind: "keyboard" }
-	| { kind: "osc11" }
+	| { kind: "osc11"; cycle: Osc11Cycle }
 	| { kind: "privateMode"; mode: number }
 	| { kind: "osc99Probe"; id: string }
 	| { kind: "glyphProtocol"; phase: "support" | "confirm" }
 	| { kind: "tsp" }
-	| { kind: "drain"; answered: () => void };
+	| { kind: "drain"; answered: () => void }
+	/**
+	 * A cycle that gave up waiting for its sentinel. The slot stays in the FIFO
+	 * with nothing left to resolve, because the FIFO is positional: dropping it
+	 * would hand a reply that is merely late to the next probe's sentinel, and
+	 * that probe would resolve as unanswered. Here the late reply is matched to
+	 * the cycle that asked for it and discarded. The marker itself is retired
+	 * once {@link OSC11_LATE_REPLY_GRACE_MS} has passed, so a sentinel that is
+	 * lost rather than late cannot offset the FIFO for good; what the cycle is
+	 * still owed outlives the marker as a claim, which carries no deadline.
+	 */
+	| { kind: "abandoned"; cycle?: Osc11Cycle };
+
+/**
+ * One background-colour question, from the moment its OSC 11 query is written
+ * until its reply is accounted for. Ordered in {@link ProcessTerminal} by when
+ * they were asked, which is the order the terminal answers them in, so a reply
+ * belongs to the oldest cycle still owed one — never to whoever happens to be
+ * live.
+ */
+interface Osc11Cycle {
+	/** Identity of the explicit refresh this cycle serves, if any. */
+	token?: TerminalAppearanceRequestToken;
+	/** False once the cycle gave up: its reply is still swallowed, never published. */
+	live: boolean;
+	/** True once somebody older spent the answer this cycle was waiting for. */
+	absorbed: boolean;
+}
+
+/**
+ * Cap on the answers retired cycles may still be owed. Claims carry no
+ * deadline — a deadline is a statement about waiting, never proof that an
+ * answer cannot arrive — so this count is what keeps a terminal that stops
+ * answering from leaving a backlog that swallows answers for ever.
+ *
+ * Two, and the trade is the reason rather than the depth of any backlog seen:
+ * three, four and eight retired cycles answering together all reproduce. A
+ * larger cap holds more old answers back and publishes fewer stale ones, but a
+ * terminal that stops answering then owes that many swallowed answers before
+ * anything is published again: measured after a hundred unanswered cycles, a
+ * cap of two publishes on the third good refresh, three on the fourth, a
+ * hundred on the hundred-and-first. That debt is finite — every arriving
+ * answer pays one off, so it is a stale colour for a run of refreshes, not an
+ * appearance that never updates again — but at a large cap the run outlasts
+ * any practical session. The price of two is that past it an old answer can be
+ * published under a later request.
+ */
+const OSC11_MAX_CLAIMS = 2;
 
 let nextOsc99ProbeId = 1;
 
@@ -913,6 +1041,23 @@ export class ProcessTerminal implements Terminal {
 	// reported. Only #safeWrite enqueues and the pump thread only drains, so
 	// the live backlog cannot exceed this until the next enqueue refreshes it.
 	#pumpBacklogBound = 0;
+	// Audience: whether anything displays this terminal. `undefined` until a
+	// probe has answered, and forever on a host that cannot be asked, so every
+	// reader that cannot establish an empty audience keeps the full frame rate.
+	#audience: boolean | undefined;
+	#audienceProbedAtMs = Number.NEGATIVE_INFINITY;
+	#audienceProbeIntervalMs = AUDIENCE_PROBE_MIN_INTERVAL_MS;
+	#audienceProbeInFlight = false;
+	#audienceProbeStartedAtMs = 0;
+	// Bumped by stop(), so a probe still in flight across a stop()/start() cycle
+	// drops its answer instead of reviving it or re-arming a dead poll.
+	#audienceEpoch = 0;
+	// Bumped by every signal that proves someone is watching now. A probe that
+	// sampled the server under an older generation may no longer establish an
+	// empty audience: it asked before that signal existed.
+	#audienceGeneration = 0;
+	// Resolved once at start: a host nobody can ask never spawns a probe.
+	#audienceProbeSupported = false;
 
 	#windowsVTInputRestore?: () => void;
 	#xtermScrollToBottomRestoreModes = new Set<number>();
@@ -924,11 +1069,38 @@ export class ProcessTerminal implements Terminal {
 	> = [];
 	#appearance: TerminalAppearance | undefined;
 	#osc11Pending = false;
-	#osc11ActiveToken?: TerminalAppearanceRequestToken;
+	/**
+	 * Cycles still owed an OSC 11 reply, oldest first — the live one, and any
+	 * that surrendered while their reply was still on the wire. A reply is
+	 * matched to the head of this queue, which is what keeps a late answer from
+	 * being published under the identity of the request that replaced it.
+	 */
+	#osc11Cycles: Osc11Cycle[] = [];
+	/** The cycle a reply would currently resolve, while one is outstanding. */
+	#osc11LiveCycle?: Osc11Cycle;
 	#osc11QueuedQuery?: { cache?: TerminalMultiplexerBackgroundColorCache; token?: TerminalAppearanceRequestToken };
 	#nextAppearanceRequestToken = 1;
 	#osc11ResponseBuffer = "";
 	#osc11CacheRefreshTimer?: Timer;
+	/** Deadline for the DA1 sentinel of the OSC 11 cycle currently outstanding. */
+	#osc11SentinelTimer?: Timer;
+	/** Grace deadlines of surrendered cycles, so teardown can drop them all. */
+	#osc11GraceTimers = new Set<Timer>();
+	/**
+	 * Answers the cycles whose ownership has expired may still send, oldest
+	 * first. Each claim swallows one report so it is neither forwarded to the
+	 * application nor published under the identity of the request that replaced
+	 * it, and names nothing, because by now nothing can say whose it was.
+	 *
+	 * One per retired cycle, not one in total: serialisation bounds how many
+	 * cycles are *live* at once, never how many answers are still in flight
+	 * behind them. No claim carries a deadline — none of these drains with time
+	 * — so a backlog is paid off one arriving answer at a time, and
+	 * {@link OSC11_MAX_CLAIMS} is what keeps it finite.
+	 */
+	#osc11ReplyClaims = 0;
+	/** The sentinels those same cycles still owe, on the same terms. */
+	#osc11SentinelClaims = 0;
 	#osc99PendingId: string | undefined;
 	#osc99ResponseBuffer = "";
 	#osc99Capabilities = new Map<string, string>();
@@ -1145,6 +1317,12 @@ export class ProcessTerminal implements Terminal {
 			}
 		}
 
+		// Decide once whether this host can be asked who is watching. Everything
+		// else — a plain terminal, an ssh pty, a bare pty with no multiplexer,
+		// ACP, RPC — leaves `hasAudience` at `undefined` for the whole session
+		// and keeps the full frame rate.
+		this.#audienceProbeSupported = canQueryTmuxAttachment($env as NodeJS.ProcessEnv);
+
 		// Keep unmanaged native fd-2 writes off the viewport while we own the
 		// terminal; released in stop(). See stderr-guard in pi-utils.
 		suppressTerminalStderr();
@@ -1156,6 +1334,9 @@ export class ProcessTerminal implements Terminal {
 			// Conservative: some hosts reset modes across a resize/reattach, so
 			// re-establish cursor visibility on the next explicit call.
 			this.#cursorVisible = undefined;
+			// A resize is the signal a tmux attach delivers before any probe can
+			// run, so treat it as proof the audience question is open again.
+			this.#invalidateAudience();
 			this.#reconcileInBandGeometryOnResize();
 			this.#resizeHandler?.();
 		};
@@ -1554,6 +1735,17 @@ export class ProcessTerminal implements Terminal {
 						}
 					}
 				}
+				// A cycle that is owed a sentinel without holding a slot claims this
+				// one: an orphan whose colour was swallowed, or a cycle retired
+				// after its colour had arrived. The sentinel answers nobody in the
+				// FIFO, but it is not inert — the cycle waiting behind it has just
+				// lost its own, so the helper finishes that cycle where its colour
+				// already arrived and releases whatever was parked behind it.
+				if (this.#osc11SentinelClaims > 0) {
+					this.#osc11SentinelClaims -= 1;
+					this.#settleCycleWhoseSentinelWasSpent();
+					return;
+				}
 				const owner = this.#da1SentinelOwners.shift();
 				if (!owner) {
 					// Late/unowned reply: nothing to resolve, just drop the bytes.
@@ -1561,23 +1753,53 @@ export class ProcessTerminal implements Terminal {
 				}
 				switch (owner.kind) {
 					case "osc11": {
-						if (this.#osc11Pending) {
-							// DA1 arrived before OSC 11 response: terminal doesn't support OSC 11.
+						// Clearing the deadline without checking whose it is holds only
+						// because the query gate keeps at most one `osc11` owner in the
+						// FIFO at a time (see #queryBackgroundColor), so the owner
+						// drained here is always the one that armed it. Let two coexist
+						// and this cancels a live cycle's deadline on an older cycle's
+						// sentinel, and that cycle never surrenders.
+						this.#clearOsc11SentinelDeadline();
+						if (this.#osc11LiveCycle === owner.cycle) {
+							// DA1 arrived before OSC 11 response: terminal doesn't support
+							// OSC 11. It said so itself, so unlike a cycle that merely ran
+							// out of patience this one is owed nothing more and leaves no
+							// marker behind.
+							//
+							// This ends a live cycle without touching
+							// `#osc11CacheRefreshTimer`, which is safe only because a
+							// cycle cannot be in multiplexer settlement here: the owner
+							// matched above is pushed by #startDirectOsc11Query, which
+							// runs after the settle timer fires. Push that owner earlier
+							// and this path has to cancel the settle timer too, or the
+							// request parked behind the cycle is stranded — the defect
+							// the reply path at #consumeOsc11Reply exists to prevent.
+							const index = this.#osc11Cycles.indexOf(owner.cycle);
+							if (index >= 0) this.#osc11Cycles.splice(index, 1);
+							this.#osc11LiveCycle = undefined;
 							this.#osc11Pending = false;
-							this.#osc11ActiveToken = undefined;
-							this.#osc11ResponseBuffer = "";
+							if (this.#osc11Cycles.length === 0) this.#osc11ResponseBuffer = "";
 						}
-						// Start a queued OSC 11 query once the prior cycle is fully drained.
-						if (
-							this.#osc11QueuedQuery !== undefined &&
-							!this.#osc11Pending &&
-							!this.#da1SentinelOwners.some(o => o.kind === "osc11") &&
-							!this.#dead
-						) {
-							const query = this.#osc11QueuedQuery;
-							this.#osc11QueuedQuery = undefined;
-							this.#startOsc11Query(query.cache, query.token);
+						this.#startQueuedOsc11Query();
+						break;
+					}
+					case "abandoned": {
+						// The sentinel this slot was waiting for, arriving after its
+						// cycle gave up. Matched here so it cannot be read as an answer
+						// to a later probe.
+						//
+						// It also settles what that cycle is still owed. A terminal
+						// answers in the order it was asked, so a colour reply would
+						// have come before this sentinel; arriving without one means
+						// none is coming, and the next reply belongs to whoever asked
+						// after. Retiring the expectation here is what keeps the
+						// surrendered cycle from swallowing its successor's answer.
+						if (owner.cycle) {
+							const index = this.#osc11Cycles.indexOf(owner.cycle);
+							if (index >= 0) this.#osc11Cycles.splice(index, 1);
+							if (this.#osc11Cycles.length === 0) this.#osc11ResponseBuffer = "";
 						}
+						this.#settleCycleWhoseSentinelWasSpent();
 						break;
 					}
 					case "privateMode": {
@@ -1670,22 +1892,51 @@ export class ProcessTerminal implements Terminal {
 			// Accumulate fragments until the BEL/ST terminator arrives, then parse once.
 			// If a new escape sequence arrives (not the ST terminator), abort buffering
 			// and forward it as normal input so user keystrokes are never swallowed.
-			if (this.#osc11Pending && (this.#osc11ResponseBuffer || sequence.startsWith("\x1b]11;"))) {
+			//
+			// An OSC 11 colour report is a terminal→host report, exactly like the
+			// DA1 reply handled below: it is recognised and consumed here whatever
+			// the bookkeeping says, because nothing a terminal reports may reach
+			// the application as typed text. Only *publishing* it needs an owner,
+			// and that is a separate question with a separate lifetime — a
+			// deadline is a statement about how long to wait, never proof that
+			// bytes already on the wire cannot land.
+			//
+			// Only a *complete* recognised colour report is swallowed. A string
+			// that merely opens like one and then turns out to be something else
+			// is not held: holding it would append every later keystroke to a
+			// buffer that can never match, and the keyboard would go silent. A
+			// genuinely partial report is held only while something is still
+			// owed one, which is the only state it can be arriving for.
+			//
+			// Owners are consulted oldest first, since that is the order a
+			// terminal answers in. A cycle that gave up waiting still owns its
+			// own answer; a cycle whose ownership has since expired leaves a
+			// claim, which can swallow one more answer but can never name it.
+			if (this.#osc11ResponseBuffer || sequence.startsWith("\x1b]11;")) {
 				if (this.#osc11ResponseBuffer && sequence.startsWith("\x1b") && sequence !== "\x1b\\") {
 					// New escape sequence arrived mid-buffer — not an OSC 11 continuation.
 					this.#osc11ResponseBuffer = "";
 					// Fall through to normal input handling below.
 				} else {
-					this.#osc11ResponseBuffer += sequence;
-					const osc11Match = this.#osc11ResponseBuffer.match(osc11ResponsePattern);
-					if (!osc11Match) return;
-					const [, rHex, gHex, bHex] = osc11Match;
-					this.#osc11Pending = false;
-					const requestToken = this.#osc11ActiveToken;
-					this.#osc11ActiveToken = undefined;
-					this.#osc11ResponseBuffer = "";
-					this.#handleOsc11Response(rHex!, gHex!, bHex!, requestToken);
-					return;
+					const candidate = this.#osc11ResponseBuffer + sequence;
+					const osc11Match = candidate.match(osc11ResponsePattern);
+					if (!osc11Match) {
+						const terminated = candidate.endsWith("\x07") || candidate.endsWith("\x1b\\");
+						const owed = this.#osc11Cycles.length > 0 || this.#osc11ReplyClaims > 0;
+						if (!terminated && owed) {
+							this.#osc11ResponseBuffer = candidate;
+							return;
+						}
+						// Finished, and not a colour report — or nothing is waiting
+						// for one. Either way it is not ours to hold.
+						this.#osc11ResponseBuffer = "";
+						// Fall through to normal input handling below.
+					} else {
+						const [, rHex, gHex, bHex] = osc11Match;
+						this.#osc11ResponseBuffer = "";
+						this.#consumeOsc11Reply(rHex!, gHex!, bHex!);
+						return;
+					}
 				}
 			}
 
@@ -1774,6 +2025,38 @@ export class ProcessTerminal implements Terminal {
 
 		// Handler that pipes stdin data through the buffer
 		this.#stdinDataHandler = (data: string) => {
+			// Someone is at the keyboard, which settles the audience question
+			// ahead of any probe: a pane held at the no-audience cadence returns
+			// to full speed on the first keystroke instead of at the next poll.
+			//
+			// Every non-empty chunk counts, terminal reports included. That is a
+			// trade, not a necessity, and both sides of it are measured.
+			//
+			// A report is not proof of a client: a detached tmux or screen pane
+			// still answers device-attribute and cursor-position queries from the
+			// multiplexer itself. And the cost is not bounded by a single
+			// demotion — a report every 100 ms for 60 s holds the pane at the
+			// full rate throughout: 1,797 paints, seven probes, audience never
+			// re-established, because every probe in that window is demoted.
+			//
+			// Against that: six seconds of continuous output in a real detached
+			// tmux and a real detached screen produced no input reports at all,
+			// and nothing else in the renderer emits a report on a cadence —
+			// startup probes run once, DEC 2048 and CPR follow a resize, TSP acks
+			// only arrive where frames are credit-paced and this floor never
+			// applies. A narrower seam does exist, and it has been measured: the
+			// sequence handler already separates reports from forwarded input, so
+			// invalidation could move to that dispatch. Moving it there alone
+			// loses the in-band resize contract; moving it there while the DEC
+			// 2048 handler invalidates explicitly keeps every case. That report
+			// is not how tmux announces an attach — real tmux 3.8 answers DECRQM
+			// 2048 with status 0, a same-size attach emits neither report nor
+			// signal, and a resized attach emits SIGWINCH — so the case for it is
+			// the hosts that do provide it, not tmux. Keeping the broad signal
+			// costs an idle pane nothing today and never hides a keystroke; move
+			// it with a measurement of a real periodic reporter, and keep the DEC
+			// 2048 path invalidating explicitly when it moves.
+			if (data) this.#invalidateAudience();
 			// Recover modes reset by the host before the user's next paste. Not
 			// mid-paste: the host is plainly in 2004 then, and per-key reads would
 			// turn one paste into thousands of writes (#15757).
@@ -1800,6 +2083,11 @@ export class ProcessTerminal implements Terminal {
 		// prematurely clear the new query's pending state. Preserve a requested
 		// cache refresh when coalescing direct and explicit queries, and retain
 		// the latest explicit request identity across automatic queries.
+		//
+		// This is also what keeps at most one `osc11` owner in the sentinel
+		// FIFO, which the DA1 branch relies on when it clears the sentinel
+		// deadline without checking whose it is. Relax the gate and that clear
+		// has to match the owner it drained against `#osc11LiveCycle` first.
 		if (this.#osc11Pending || this.#da1SentinelOwners.some(o => o.kind === "osc11")) {
 			const queued = this.#osc11QueuedQuery;
 			this.#osc11QueuedQuery = { cache: queued?.cache ?? cache, token: token ?? queued?.token };
@@ -1812,25 +2100,275 @@ export class ProcessTerminal implements Terminal {
 		cache: TerminalMultiplexerBackgroundColorCache | undefined,
 		token?: TerminalAppearanceRequestToken,
 	): void {
+		const cycle: Osc11Cycle = { token, live: true, absorbed: false };
+		this.#osc11Cycles.push(cycle);
+		this.#osc11LiveCycle = cycle;
 		this.#osc11Pending = true;
-		this.#osc11ActiveToken = token;
-		this.#osc11ResponseBuffer = "";
+		// Not cleared while anything is still owed an answer: a partial reply in
+		// the buffer belongs to an older cycle, or to an orphan claim, and
+		// dropping it would spill its tail into application input when the rest
+		// arrives.
+		if (this.#osc11Cycles.length === 1 && this.#osc11ReplyClaims === 0) this.#osc11ResponseBuffer = "";
 		if (cache) {
 			this.#safeWrite(cache.passthrough("\x1b]11;?\x07"));
 			this.#osc11CacheRefreshTimer = setTimeout(() => {
 				this.#osc11CacheRefreshTimer = undefined;
-				if (this.#dead || !this.#osc11Pending) return;
-				this.#startDirectOsc11Query();
+				if (this.#dead || this.#osc11LiveCycle !== cycle) return;
+				this.#startDirectOsc11Query(cycle);
 			}, cache.settleMs);
 			return;
 		}
-		this.#startDirectOsc11Query();
+		this.#startDirectOsc11Query(cycle);
 	}
 
-	#startDirectOsc11Query(): void {
-		this.#da1SentinelOwners.push({ kind: "osc11" });
+	/**
+	 * Two things downstream depend on where this owner is pushed, and both are
+	 * silent if it moves.
+	 *
+	 * It is pushed here, after any multiplexer settlement has ended, so the DA1
+	 * branch that drains it can end a live cycle without cancelling
+	 * `#osc11CacheRefreshTimer` — a cycle it matches is never still in
+	 * settlement. Push it when the settlement query goes out instead and that
+	 * branch strands the request parked behind the cycle.
+	 *
+	 * And it is the only `osc11` owner in the FIFO, because
+	 * {@link ProcessTerminal.#queryBackgroundColor} queues rather than starting
+	 * a second cycle while one is outstanding. That is what lets the same
+	 * branch clear the sentinel deadline without checking whose it is.
+	 */
+	#startDirectOsc11Query(cycle: Osc11Cycle): void {
+		const owner: Da1SentinelOwner = { kind: "osc11", cycle };
+		this.#da1SentinelOwners.push(owner);
 		this.#safeWrite("\x1b]11;?\x07"); // OSC 11 query (BEL terminated)
 		this.#safeWrite("\x1b[c"); // DA1 sentinel
+		this.#clearOsc11SentinelDeadline();
+		this.#osc11SentinelTimer = setTimeout(() => {
+			this.#osc11SentinelTimer = undefined;
+			this.#abandonOsc11Cycle(owner);
+		}, OSC11_SENTINEL_TIMEOUT_MS);
+	}
+
+	#clearOsc11SentinelDeadline(): void {
+		if (!this.#osc11SentinelTimer) return;
+		clearTimeout(this.#osc11SentinelTimer);
+		this.#osc11SentinelTimer = undefined;
+	}
+
+	/** Drop every grace deadline a surrendered cycle left running. */
+	#clearOsc11GraceDeadlines(): void {
+		for (const timer of this.#osc11GraceTimers) clearTimeout(timer);
+		this.#osc11GraceTimers.clear();
+	}
+
+	/**
+	 * Give up on a cycle whose sentinel never came, without letting it hold the
+	 * appearance pipeline shut and without letting its answers, if they are
+	 * merely late, be read as somebody else's.
+	 *
+	 * The cycle surrenders rather than disappears. Its FIFO slot is kept and
+	 * neutered, because that FIFO is positional: dropping it would hand a late
+	 * sentinel to the replacement query and resolve that query as unanswered.
+	 * Its place in the reply queue is kept for the same reason — a late colour
+	 * reply is still this cycle's, and publishing it under the replacement's
+	 * request token is the error the queue exists to prevent. The markers are
+	 * retired {@link OSC11_LATE_REPLY_GRACE_MS} later, and what the cycle is
+	 * still owed becomes a claim with no deadline of its own.
+	 */
+	#abandonOsc11Cycle(owner: Da1SentinelOwner & { kind: "osc11" }): void {
+		const index = this.#da1SentinelOwners.indexOf(owner);
+		if (index < 0 || this.#dead) return;
+		if (owner.cycle.absorbed && this.#osc11Cycles.includes(owner.cycle)) {
+			// Its turn was spent on somebody older's answer, and the sentinel
+			// that went with it too. There is nothing left for this cycle to be
+			// owed, so it leaves no marker: a lost answer costs one update, not
+			// every update after it.
+			//
+			// Only while it is still owed a colour. A cycle that went on to
+			// receive and publish its own answer has an outstanding sentinel
+			// that nothing is guessing about, and deleting that slot hands its
+			// late arrival to the next question and ends that one unanswered.
+			this.#da1SentinelOwners.splice(index, 1);
+			const spent = this.#osc11Cycles.indexOf(owner.cycle);
+			if (spent >= 0) this.#osc11Cycles.splice(spent, 1);
+			if (this.#osc11LiveCycle === owner.cycle) this.#osc11LiveCycle = undefined;
+			this.#osc11Pending = false;
+			this.#startQueuedOsc11Query();
+			return;
+		}
+		const owed = this.#osc11Cycles.includes(owner.cycle);
+		const marker: Da1SentinelOwner = { kind: "abandoned", cycle: owed ? owner.cycle : undefined };
+		this.#da1SentinelOwners[index] = marker;
+		if (owed) owner.cycle.live = false;
+		if (this.#osc11LiveCycle === owner.cycle) this.#osc11LiveCycle = undefined;
+		this.#osc11Pending = false;
+		if (this.#osc11CacheRefreshTimer) {
+			clearTimeout(this.#osc11CacheRefreshTimer);
+			this.#osc11CacheRefreshTimer = undefined;
+		}
+		const grace = setTimeout(() => {
+			this.#osc11GraceTimers.delete(grace);
+			this.#retireOsc11Marker(marker);
+		}, OSC11_LATE_REPLY_GRACE_MS);
+		this.#osc11GraceTimers.add(grace);
+		this.#startQueuedOsc11Query();
+	}
+
+	/**
+	 * Retire a marker that has waited out its grace. Only its *ownership*
+	 * expires: the FIFO slot goes, because keeping it would grow with every
+	 * unanswered cycle and leave the queue offset by one for good — every later
+	 * cycle then eating its predecessor's marker and paying a timeout of its
+	 * own, however promptly the terminal answers.
+	 *
+	 * What the cycle may still send does not expire with it, and that is two
+	 * different things. A colour it was owed becomes a reply claim: still
+	 * swallowed, so it cannot surface as application text or be published under
+	 * the request that replaced it, but no longer able to name a token. A
+	 * sentinel becomes a claim only where the colour before it has already
+	 * arrived — then the terminal has shown it is answering this cycle and the
+	 * sentinel is demonstrably on its way, and letting the slot go without
+	 * recording it hands that arrival to the next question and ends it
+	 * unanswered. A cycle that sent nothing at all leaves no sentinel claim:
+	 * nothing says its sentinel is coming, and holding one back would make
+	 * every later cycle wait out its own deadline.
+	 */
+	#retireOsc11Marker(marker: Da1SentinelOwner & { kind: "abandoned" }): void {
+		const slot = this.#da1SentinelOwners.indexOf(marker);
+		// Gone already means the sentinel arrived and was matched here; nothing
+		// is outstanding and nothing is owed.
+		if (slot < 0) return;
+		this.#da1SentinelOwners.splice(slot, 1);
+		const owed = marker.cycle ? this.#osc11Cycles.indexOf(marker.cycle) : -1;
+		if (owed < 0) {
+			this.#addOsc11SentinelClaim();
+			return;
+		}
+		this.#osc11Cycles.splice(owed, 1);
+		this.#addOsc11ReplyClaim();
+	}
+
+	/**
+	 * Account for a complete colour report. The oldest party still owed one
+	 * takes it: a claim left by a retired cycle, else the oldest cycle in the
+	 * queue. Only a live cycle's own answer is published.
+	 *
+	 * When a *claim* takes it — a cycle so old that its ownership is gone — the
+	 * live cycle is noted as having had its turn absorbed, and leaves nothing
+	 * behind when it gives up. Without that, one answer the terminal never sent
+	 * would push every later answer one place out of step for good and nothing
+	 * would publish again. A cycle that merely surrendered keeps its own claim
+	 * on its own answer, and takes this one without any inference about whose
+	 * turn was spent: its answer is still plausibly in flight, and the live
+	 * cycle's record is the only thing that can tell its late colour apart from
+	 * the live cycle's own.
+	 */
+	#consumeOsc11Reply(rHex: string, gHex: string, bHex: string): void {
+		if (this.#osc11ReplyClaims > 0) {
+			this.#osc11ReplyClaims -= 1;
+			// The colour arrived, so its sentinel is on its way behind it. One
+			// sentinel follows one answer: letting that go unrecorded would hand
+			// it to the next question and end that one unanswered.
+			this.#addOsc11SentinelClaim();
+			this.#absorbLiveOsc11Turn();
+			return;
+		}
+		const cycle = this.#osc11Cycles.shift();
+		if (!cycle) return;
+		if (!cycle.live) return;
+		this.#osc11Pending = false;
+		this.#osc11LiveCycle = undefined;
+		// The cycle is over, so whatever it still had running is over with it.
+		// Through a multiplexer cache the direct query is armed on a settle
+		// timer that checks this cycle is still the live one: without cancelling
+		// it and releasing the queue here, a reply that ends the cycle before
+		// that timer fires leaves the request parked behind it with nothing left
+		// to start it, and the terminal never asks about its colour again.
+		if (this.#osc11CacheRefreshTimer) {
+			clearTimeout(this.#osc11CacheRefreshTimer);
+			this.#osc11CacheRefreshTimer = undefined;
+		}
+		this.#handleOsc11Response(rHex, gHex, bHex, cycle.token);
+		this.#startQueuedOsc11Query();
+	}
+
+	/** Note that somebody older spent the answer the live cycle was waiting for. */
+	#absorbLiveOsc11Turn(): void {
+		if (this.#osc11LiveCycle) this.#osc11LiveCycle.absorbed = true;
+	}
+
+	/**
+	 * A sentinel has just been spent on an older debt — a claim, or a marker a
+	 * surrendered cycle left. The cycle waiting behind it has therefore lost
+	 * its own, and if its colour already arrived there is nothing else it is
+	 * owed, so it is finished here exactly as its own sentinel would have
+	 * finished it.
+	 *
+	 * Without this the debt is transferable and therefore perpetual: that cycle
+	 * waits out its deadline, surrenders, and leaves a marker or a claim of its
+	 * own, so every later refresh pays the same five seconds for the rest of
+	 * the session. Paying somebody else's debt must not make you a debtor.
+	 */
+	#settleCycleWhoseSentinelWasSpent(): void {
+		const slot = this.#da1SentinelOwners.findIndex(o => o.kind === "osc11");
+		if (slot < 0) return;
+		const owner = this.#da1SentinelOwners[slot] as Da1SentinelOwner & { kind: "osc11" };
+		// Still owed its colour: it is not finished, and its own sentinel is
+		// what will end it.
+		if (this.#osc11Cycles.includes(owner.cycle)) return;
+		this.#da1SentinelOwners.splice(slot, 1);
+		this.#clearOsc11SentinelDeadline();
+		if (this.#osc11LiveCycle === owner.cycle) {
+			this.#osc11LiveCycle = undefined;
+			this.#osc11Pending = false;
+		}
+		this.#startQueuedOsc11Query();
+	}
+
+	/**
+	 * Record one more colour a retired cycle may still send. Plain data with no
+	 * deadline: a timer here would be another statement about waiting standing
+	 * in for proof that an answer cannot arrive, and every such deadline became
+	 * the next place that inference was wrong. The count is capped instead, so
+	 * a terminal that stops answering altogether cannot leave a backlog that
+	 * swallows answers for ever — at the price named in {@link OSC11_MAX_CLAIMS}.
+	 *
+	 * Sentinel claims are not recorded here; they have their own two sources,
+	 * both of them evidence that a sentinel without a live question is coming —
+	 * a claim that has just taken a colour, and a marker retired after its
+	 * colour had already arrived. See {@link ProcessTerminal.#addOsc11SentinelClaim}.
+	 */
+	#addOsc11ReplyClaim(): void {
+		this.#osc11ReplyClaims = Math.min(this.#osc11ReplyClaims + 1, OSC11_MAX_CLAIMS);
+	}
+
+	/**
+	 * Record one more sentinel a cycle is still owed. Raised only on evidence —
+	 * a claim that has just taken a colour, or a marker retired after its
+	 * colour had already arrived — because a sentinel claim that is wrong costs
+	 * the next cycle its own sentinel and a wait for its deadline.
+	 */
+	#addOsc11SentinelClaim(): void {
+		this.#osc11SentinelClaims = Math.min(this.#osc11SentinelClaims + 1, OSC11_MAX_CLAIMS);
+	}
+
+	#clearOsc11Claims(): void {
+		this.#osc11ReplyClaims = 0;
+		this.#osc11SentinelClaims = 0;
+	}
+
+	/** Run the request parked behind the cycle that just ended, if there is one. */
+	#startQueuedOsc11Query(): void {
+		const query = this.#osc11QueuedQuery;
+		if (
+			query === undefined ||
+			this.#osc11Pending ||
+			this.#da1SentinelOwners.some(o => o.kind === "osc11") ||
+			this.#dead
+		) {
+			return;
+		}
+		this.#osc11QueuedQuery = undefined;
+		this.#startOsc11Query(query.cache, query.token);
 	}
 
 	#shouldQueryOsc99Support(): boolean {
@@ -2354,6 +2892,14 @@ export class ProcessTerminal implements Terminal {
 		// Suppress observer/timer callbacks before any teardown can yield or throw.
 		this.#active = false;
 		this.#inputDeferred = false;
+		// A stopped terminal has no audience question: a later start() re-decides
+		// support and re-probes, and until then every reader sees `undefined`.
+		this.#audienceEpoch += 1;
+		this.#audienceProbeSupported = false;
+		this.#audience = undefined;
+		this.#audienceProbedAtMs = Number.NEGATIVE_INFINITY;
+		this.#audienceProbeIntervalMs = AUDIENCE_PROBE_MIN_INTERVAL_MS;
+		this.#audienceProbeInFlight = false;
 		// Release stdout ownership (out-of-band writers and emergency cleanup)
 		// before headless/teardown exits, without disturbing another owner's RGB.
 		if (getActiveTerminal() === this) {
@@ -2421,10 +2967,14 @@ export class ProcessTerminal implements Terminal {
 			clearTimeout(this.#osc11CacheRefreshTimer);
 			this.#osc11CacheRefreshTimer = undefined;
 		}
+		this.#clearOsc11SentinelDeadline();
+		this.#clearOsc11GraceDeadlines();
+		this.#clearOsc11Claims();
 		this.#appearanceCallbacks = [];
 		this.#appearanceReportCallbacks = [];
 		this.#osc11Pending = false;
-		this.#osc11ActiveToken = undefined;
+		this.#osc11Cycles.length = 0;
+		this.#osc11LiveCycle = undefined;
 		this.#clearWindowsTerminalAppearancePoll();
 		this.#osc11QueuedQuery = undefined;
 		this.#osc11ResponseBuffer = "";
@@ -2672,6 +3222,122 @@ export class ProcessTerminal implements Terminal {
 		}
 		// Stream fallback: bytes queued past the high-water mark by refused writes.
 		return process.stdout.writableLength ?? 0;
+	}
+
+	/**
+	 * Whether anything displays this terminal (see {@link Terminal.hasAudience}).
+	 *
+	 * Reading it also re-arms the probe when the cached answer has gone stale,
+	 * the way {@link pendingOutputBytes} re-reads the pump: the readers are the
+	 * animation paths, so the poll runs exactly while an animation could be
+	 * wasted and stops the moment the screen goes quiet. The probe itself is
+	 * async and never blocks this read, so the value returned is the previous
+	 * answer until the new one lands.
+	 */
+	get hasAudience(): boolean | undefined {
+		this.#refreshAudienceWhenStale();
+		return this.#audience;
+	}
+
+	/**
+	 * Re-open the audience question and answer `undefined` (watched) until the
+	 * next probe lands. Called from the signals that prove a person is there
+	 * before any poll could: a keystroke, and the resize a tmux attach sends.
+	 *
+	 * Two things happen, and they are gated differently.
+	 *
+	 * The generation bump always happens. It voids the `false` of any probe
+	 * already in flight, because that probe asked the server before this
+	 * signal arrived: its answer describes the pane the client had not
+	 * attached to yet, and letting it land would re-hide the very keystroke
+	 * that re-opened the question. Bumping an integer costs nothing when
+	 * nothing is in flight.
+	 *
+	 * Clearing the cached answer happens only from the withheld state. An
+	 * established audience withholds nothing, so there is nothing to re-open
+	 * and a keystroke must not cost a probe: every render reads
+	 * {@link hasAudience}, so forcing a re-probe on a `true` answer would
+	 * spawn a `tmux` child per keystroke for someone typing at a watched pane.
+	 * A client that leaves is picked up by the next poll.
+	 */
+	#invalidateAudience(): void {
+		this.#audienceGeneration += 1;
+		if (this.#audience !== false) return;
+		this.#audience = undefined;
+		this.#audienceProbedAtMs = Number.NEGATIVE_INFINITY;
+	}
+
+	#refreshAudienceWhenStale(): void {
+		if (!this.#audienceProbeSupported || this.#headless || this.#dead) return;
+		const now = performance.now();
+		if (this.#audienceProbeInFlight) {
+			// A `tmux` child wedged past its own SIGKILL (an uninterruptible read
+			// on a jammed server socket) would otherwise hold the in-flight flag
+			// for the process's life and latch the last answer — `false`
+			// included. Abandon it: the answer becomes unknown, which is the
+			// full frame rate, and the next read starts a fresh probe.
+			if (now - this.#audienceProbeStartedAtMs <= ABANDONED_AUDIENCE_PROBE_MS) return;
+			this.#audienceEpoch += 1;
+			this.#audienceProbeInFlight = false;
+			this.#audience = undefined;
+		}
+		if (now - this.#audienceProbedAtMs < this.#audienceProbeIntervalMs) return;
+		this.#audienceProbeInFlight = true;
+		this.#audienceProbeStartedAtMs = now;
+		// A probe started before stop(), or abandoned above, answers later. Its
+		// epoch no longer matches, so it neither revives a stale answer nor
+		// overwrites the interval and in-flight flag that moved on without it.
+		const epoch = this.#audienceEpoch;
+		// The generation this probe samples under. An invalidation between here
+		// and the answer means the answer predates a client who is demonstrably
+		// at the keyboard now.
+		const generation = this.#audienceGeneration;
+		void tmuxSessionHasAttachedClients()
+			// The helper answers `undefined` for every failure it knows about;
+			// this covers the rest, because an unreachable multiplexer is not an
+			// empty audience.
+			.catch(() => undefined)
+			.then(attached => {
+				if (epoch !== this.#audienceEpoch) return;
+				const endedAtMs = performance.now();
+				this.#audienceProbeInFlight = false;
+				// A keystroke or an attach's resize re-opened the question while
+				// this probe was out, so its `false` is a reading of the pane
+				// before that client arrived. Accepting it would re-hide the
+				// keystroke that re-opened the question — and would overwrite the
+				// re-probe the invalidation asked for, so nothing would correct
+				// it until the next poll. Demote it to unknown, which is the full
+				// frame rate a pane someone is typing into deserves, and let the
+				// next probe settle it. A stale `true` or `undefined` withholds
+				// nothing and is kept as it is.
+				//
+				// Only the verdict is void. What the probe cost on this host is
+				// an honest measurement whatever the answer turned out to be, so
+				// the demoted cycle still pays for its own gap at the same duty —
+				// discarding that would poll a slow host several times harder
+				// than the fresh path ever does, and would spawn a child straight
+				// behind the one that just returned.
+				const stale = attached === false && generation !== this.#audienceGeneration;
+				this.#audience = stale ? undefined : attached;
+				// Poll at the duty-derived cadence only while frames are actually
+				// being withheld, or while a withheld answer has just been
+				// demoted, because those are the only states an attach has to be
+				// noticed quickly in. Watched or unknown, the longest gap is
+				// right: a detach noticed late costs a few seconds of animation
+				// nobody sees, and an unanswerable pane (a `TMUX_PANE` the server
+				// no longer has) must not spawn a doomed child every two seconds.
+				this.#audienceProbeIntervalMs =
+					attached === false
+						? Math.min(
+								AUDIENCE_PROBE_MAX_INTERVAL_MS,
+								Math.max(
+									AUDIENCE_PROBE_MIN_INTERVAL_MS,
+									(endedAtMs - this.#audienceProbeStartedAtMs) * AUDIENCE_PROBE_DUTY,
+								),
+							)
+						: AUDIENCE_PROBE_MAX_INTERVAL_MS;
+				this.#audienceProbedAtMs = endedAtMs;
+			});
 	}
 
 	get hostOwnsGridOnResize(): boolean {

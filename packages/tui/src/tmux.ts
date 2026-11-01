@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import { $which } from "@oh-my-pi/pi-utils";
 import { isBunTestRuntime } from "@oh-my-pi/pi-utils/env";
 import { tmuxMultiplexer, wrapTmuxPassthrough } from "./multiplexers/tmux";
@@ -179,4 +180,105 @@ export function tmuxPaneAllowsPassthrough(env: NodeJS.ProcessEnv = Bun.env): boo
 		cachedPanePassthrough = { key, allowed: queryTmuxPaneAllowsPassthrough(env) };
 	}
 	return cachedPanePassthrough.allowed;
+}
+
+/**
+ * Whether this process can ask tmux how many clients watch its pane: it runs
+ * inside tmux, tmux told it which pane it owns, and a `tmux` binary is on
+ * `PATH`. A caller that gets `false` must never spawn the query.
+ */
+export function canQueryTmuxAttachment(env: NodeJS.ProcessEnv = Bun.env): boolean {
+	if (!tmuxMultiplexer.isInside(env) || !env.TMUX_PANE) return false;
+	return $which("tmux", { PATH: env.PATH }) !== null;
+}
+
+/**
+ * The one report every attachment answer is read from. `pane_tty` is in it so
+ * the answer can be rejected when the pane it describes is not the terminal
+ * this process writes to: `TMUX` and `TMUX_PANE` are inherited by anything a
+ * pane launches, so a GUI terminal started from a tmux pane
+ * (`alacritty -e omp &`) would otherwise take that pane's audience for its own
+ * window's.
+ */
+const TMUX_ATTACHMENT_FORMAT = "#{session_attached}\t#{session_group_attached}\t#{pane_tty}";
+
+/**
+ * Read a {@link TMUX_ATTACHMENT_FORMAT} report. `true` when a client watches
+ * the pane, `false` when none does, and `undefined` when the report does not
+ * settle it — an empty or short report (a pane the server no longer has still
+ * exits 0), no parseable count, or a pane whose tty is not this process's
+ * (`ownsTty` decides, and a tty it cannot compare answers `false`).
+ *
+ * Both counts are read, because a grouped session (`tmux new-session -t`)
+ * shares its windows with its siblings: a client on a sibling is watching this
+ * pane, and tmux resolves a pane target to whichever of them it judges best,
+ * so `session_attached` alone reports 0 for a pane someone is looking at. A
+ * tmux too old for `session_group_attached` leaves that field empty, which
+ * parses as absent and leaves `session_attached` to decide.
+ */
+export function parseTmuxAttachmentReport(report: string, ownsTty: (paneTty: string) => boolean): boolean | undefined {
+	const [attached, groupAttached, paneTty] = report.split("\t");
+	if (!paneTty?.trim() || !ownsTty(paneTty.trim())) return undefined;
+	const counts = [attached, groupAttached]
+		.map(field => Number.parseInt(field ?? "", 10))
+		.filter(count => !Number.isNaN(count));
+	return counts.length === 0 ? undefined : counts.some(count => count > 0);
+}
+
+/** Whether `paneTty` is the character device this process's stdout writes to. */
+function stdoutIsPaneTty(paneTty: string): boolean {
+	try {
+		return fs.statSync(paneTty).rdev === fs.fstatSync(1).rdev;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Same round trip as {@link CLIENT_TERMINAL_TIMEOUT_MS} and bounded the same
+ * way, for the same reason: a lost race reads as "cannot tell", and here that
+ * keeps the full frame rate on exactly the loaded machines the floor is worth
+ * most on. The probe is async and its gap is derived from its own wall time,
+ * so a slow answer costs nothing but a longer gap.
+ */
+const AUDIENCE_PROBE_TIMEOUT_MS = CLIENT_TERMINAL_TIMEOUT_MS;
+
+/**
+ * Whether a tmux client is attached to the session that holds this pane:
+ * `true` with at least one, `false` with none, and `undefined` whenever the
+ * answer cannot be established — outside tmux, without a `tmux` binary, when
+ * the query fails or times out, or when the report does not settle it (see
+ * {@link parseTmuxAttachmentReport}). A caller that reads `undefined` must
+ * assume the pane is watched.
+ *
+ * Async because callers poll it from the render path: `runTmux`'s
+ * `Bun.spawnSync` would stall the event loop for the whole round trip, and on
+ * a saturated machine the fork/exec alone takes tens of milliseconds. The
+ * child is unreferenced so a probe in flight never holds up a clean exit.
+ *
+ * Measured on tmux 3.8: a read-only client (`attach -r`), a control-mode
+ * client and a client on a grouped sibling all count, and a window put into
+ * another attached session with `link-window` resolves to that session, so it
+ * counts too.
+ */
+export async function tmuxSessionHasAttachedClients(env: NodeJS.ProcessEnv = Bun.env): Promise<boolean | undefined> {
+	const pane = env.TMUX_PANE;
+	if (!pane) return undefined;
+	const tmux = $which("tmux", { PATH: env.PATH });
+	if (!tmux) return undefined;
+	try {
+		const child = Bun.spawn([tmux, "display-message", "-p", "-t", pane, TMUX_ATTACHMENT_FORMAT], {
+			env,
+			stdout: "pipe",
+			stderr: "ignore",
+			timeout: AUDIENCE_PROBE_TIMEOUT_MS,
+			killSignal: "SIGKILL",
+		});
+		child.unref();
+		const [text] = await Promise.all([new Response(child.stdout).text(), child.exited]);
+		if (child.exitCode !== 0) return undefined;
+		return parseTmuxAttachmentReport(text.trimEnd(), stdoutIsPaneTty);
+	} catch {
+		return undefined;
+	}
 }
