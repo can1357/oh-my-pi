@@ -15,7 +15,7 @@ import { type CustomMessage, type FileMentionMessage, resolveAbortLabel, shouldR
 import { createIrcMessageCard } from "../tools/wait";
 import { formatArtifactErrorNotice, type OutputMeta } from "../tools/output-meta";
 import type { OutputArtifactError } from "../tools/streaming-output";
-import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../render/render-utils";
+import { formatStyledPath, replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../render/render-utils";
 import { canonicalizeMessage } from "./thinking-display";
 import { ToolActivityContainer } from "../chrome/tool-activity";
 import { type TranscriptBlock } from "../chrome/transcript-container";
@@ -203,7 +203,7 @@ export function buildFileMentionBlock(files: FileMentionMessage["files"], indent
 			parts: [
 				{ text: theme.tree.last, color: "dim" },
 				{ text: "Read", color: "muted" },
-				{ text: file.path, color: "accent" },
+				{ text: formatStyledPath(file.path, theme) },
 				{ text: `(${detail})`, color: "dim" },
 			],
 			indent,
