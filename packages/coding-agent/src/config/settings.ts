@@ -24,6 +24,7 @@ import {
 	getLastChangelogVersionPath,
 	getProjectDir,
 	getProjectAgentDir,
+	isEexist,
 	isEnoent,
 	isRecord,
 	logger,
@@ -571,6 +572,58 @@ function physicalTargetSegments(target: string, pathApi: typeof path = path): st
 	const spelled = windows ? pathApi.normalize(target) : target;
 	const body = pathApi.isAbsolute(spelled) ? spelled.slice(pathApi.parse(spelled).root.length) : spelled;
 	return body.split(separator);
+}
+
+/** Backup names tried for a migrated `settings.json`: `settings.json.bak`, then `.bak.1` to `.bak.99`. */
+const LEGACY_SETTINGS_BACKUP_NAMES = 100;
+
+/**
+ * Move a migrated legacy `settings.json` to the first backup name nothing
+ * holds yet, and return that name.
+ *
+ * A backup already there — an earlier migration's, or one the user made —
+ * is never replaced. A `rename` straight onto `settings.json.bak` replaced
+ * it, and its only copy of whatever it held. So the free name is taken first
+ * with an empty placeholder created `O_EXCL`, which fails on any name already
+ * there, and the file is then renamed onto that placeholder, which this call
+ * created and holds. `settings.json` is a name the user writes too, so it is
+ * moved, never copied and unlinked: a save that lands between a copy and an
+ * `unlink` would be removed.
+ */
+async function moveLegacySettingsAside(settingsJsonPath: string): Promise<string> {
+	for (let n = 0; n < LEGACY_SETTINGS_BACKUP_NAMES; n++) {
+		const backup = n === 0 ? `${settingsJsonPath}.bak` : `${settingsJsonPath}.bak.${n}`;
+		let placeholder: fs.promises.FileHandle;
+		try {
+			placeholder = await fs.promises.open(backup, "wx", 0o600);
+		} catch (error) {
+			if (isEexist(error)) continue;
+			throw error;
+		}
+		try {
+			await fs.promises.rename(settingsJsonPath, backup);
+			return backup;
+		} catch (error) {
+			// Nothing moved: the empty placeholder goes again, and only while the
+			// name still holds the file this call created.
+			const held = await placeholder.stat();
+			const named = await fs.promises.lstat(backup).catch(() => undefined);
+			if (named?.isFile() && named.dev === held.dev && named.ino === held.ino && named.size === 0) {
+				await fs.promises.unlink(backup).catch((unlinkError: unknown) => {
+					logger.warn("Settings: left an empty placeholder after a failed settings.json move", {
+						path: backup,
+						error: String(unlinkError),
+					});
+				});
+			}
+			throw error;
+		} finally {
+			await placeholder.close().catch(() => undefined);
+		}
+	}
+	throw new Error(
+		`no backup name beside ${settingsJsonPath} was free: ${LEGACY_SETTINGS_BACKUP_NAMES} in a row were taken`,
+	);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2622,7 +2675,8 @@ export class Settings {
 
 			if (migratedSettingsJson) {
 				try {
-					await fs.promises.rename(settingsJsonPath, `${settingsJsonPath}.bak`);
+					const backup = await moveLegacySettingsAside(settingsJsonPath);
+					logger.debug("Settings: moved migrated settings.json aside", { path: settingsJsonPath, backup });
 				} catch (error) {
 					logger.warn("Settings: failed to archive settings.json after migration", {
 						path: settingsJsonPath,
