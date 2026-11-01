@@ -635,7 +635,11 @@ const renderUserAppend = prompt.compile(userAppendPromptTemplate.trimEnd());
 /**
  * Join generated append blocks (memory, auto-learn, `xd://` routes, MCP server
  * instructions) with the user's append prompt. Keep the user text in its own
- * section so it is not misclassified as MCP server-controlled instructions.
+ * `<user-instructions>` block so it does not read as a trailing paragraph of the
+ * section before it.
+ *
+ * The block is a reading marker, not an authenticity marker: generated blocks
+ * are inlined verbatim, so MCP server text can contain a look-alike block.
  */
 export function composeAppendPrompt(appendParts: readonly string[], appendSystemPrompt?: string): string | undefined {
 	const generated = appendParts.length > 0 ? appendParts.join("\n\n") : undefined;

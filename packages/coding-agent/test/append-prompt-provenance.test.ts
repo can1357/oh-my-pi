@@ -20,18 +20,18 @@ describe("composeAppendPrompt", () => {
 		const composed = composeAppendPrompt(["memory guidance", MCP_SECTION], "Reply in English.");
 		expect(composed).toBeDefined();
 
-		const boundary = composed!.indexOf("\n## User Instructions\n\n");
+		const boundary = composed!.indexOf("\n§ User Instructions\n\n");
 		expect(boundary).toBeGreaterThan(composed!.indexOf("### codegraph"));
 		expect(composed!.slice(0, boundary)).not.toContain("Reply in English.");
-		expect(composed!.slice(boundary).endsWith("Reply in English.")).toBe(true);
+		expect(composed!.endsWith(`Reply in English.\n</user-instructions>`)).toBe(true);
 	});
 
 	it("preserves Markdown hard breaks and literal content when framing user instructions", () => {
 		const generated = "## MCP Server Instructions\n\nKeep this hard break.  \nNext line.\n\n\n<server>";
 		const user = "Keep this hard break.  \nNext line.\n\n\n| left | right |\n{{literal}} <user> & value\n";
 		const composed = composeAppendPrompt([generated], user)!;
-		expect(composed.startsWith(`${generated}\n\n## User Instructions\n\n`)).toBe(true);
-		expect(composed.slice(-user.length)).toBe(user);
+		expect(composed.startsWith(`${generated}\n\n§ User Instructions\n\n<user-instructions>\n`)).toBe(true);
+		expect(composed.endsWith(`${user}\n</user-instructions>`)).toBe(true);
 	});
 
 	it("leaves a lone user append prompt untouched", () => {
