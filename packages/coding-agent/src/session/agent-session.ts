@@ -8989,15 +8989,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			? await this.#buildImageDescriptionNotice(normalizedImages)
 			: undefined;
 
-		// A `subagent_stop` pass holds this session until its verdict is published.
-		// Only the holder's own turns run meanwhile: an explicit user prompt cancels
-		// the pass, any other prompt waits it out. Checked after preprocessing, with
-		// no await between here and dispatch, so a hold taken while images were being
-		// prepared is honored too.
-		if (!holder && this.#stopPassHolds.size > 0) {
-			await this.#waitOutStopPasses(options?.userInitiated === true || promptAttribution === "user");
-		}
-
 		// abort() bumps #promptGeneration and can land while normalization and the
 		// vision-description call above are still in flight. #promptWithMessage below
 		// captures its own generation fresh at entry, so it cannot see this race and
@@ -9009,6 +9000,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#reportDroppedPrompt(typedText, options, followUps);
 			if (options?.throwOnDrop) throw new PromptDroppedError();
 			return true;
+		}
+
+		// A `subagent_stop` pass holds this session until its verdict is published.
+		// Only the holder's own turns run meanwhile: an explicit user prompt cancels
+		// the pass (stopping a continuation the holder is running), any other prompt
+		// waits it out. Checked after preprocessing and after the abort check above,
+		// since cancelling the pass aborts the holder's turn, with no await between
+		// here and dispatch.
+		if (!holder && this.#stopPassHolds.size > 0) {
+			await this.#waitOutStopPasses(options?.userInitiated === true || promptAttribution === "user");
 		}
 
 		// A concurrent prompt() can start a turn during the awaits above: image
@@ -11017,8 +11018,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			timestamp: Date.now(),
 		};
 		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
-		// A turn-starting message waits out a held `subagent_stop` pass; a user's cancels it.
-		if (options?.triggerTurn && !this.isStreaming) {
+		// A turn-starting message (an idle aside starts one too) waits out a held
+		// `subagent_stop` pass; a user's cancels it.
+		if ((options?.triggerTurn || options?.deliverAs === "aside") && !this.isStreaming) {
 			await this.#waitOutStopPasses(normalizedAppMessage.attribution === "user");
 		}
 		if (this.isStreaming) {
@@ -13756,9 +13758,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				state.consulting = true;
 			},
 			prompt: async (text, options) => {
+				// A user prompt cancelling the pass must not wait behind the holder's own
+				// turn: stop it, so the pass can drop its candidate and release.
+				const stopTurn = (): void => void this.abort();
+				state.cancel.signal.addEventListener("abort", stopTurn, { once: true });
 				try {
+					state.cancel.signal.throwIfAborted();
 					return await this.#admitSubmission(() => this.#prompt(text, options, state));
 				} finally {
+					state.cancel.signal.removeEventListener("abort", stopTurn);
 					// Deliveries held during the verdict now reach the continuation's settle.
 					stopConsulting();
 				}
