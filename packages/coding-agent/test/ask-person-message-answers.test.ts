@@ -1,9 +1,10 @@
 /**
  * Contract: when a person's message closes an `ask`, only what someone submitted is an answer.
  * Text typed but not submitted never is. A finished answer is kept: a guest's over the host's
- * unsubmitted text, and one a remote client submitted before the message, even when its bytes
- * arrive after it. A multi-select confirmed empty and a note submitted on an option the person
- * did not pick are kept too.
+ * unsubmitted text, and a remote client's answer that omp receives within the reply window
+ * (`WITHDRAWN_DIALOG_REPLY_MS`) after the message, even if it was already in transit. A
+ * multi-select confirmed empty and a note submitted on an option the person did not pick are kept.
+ * An answer received after the window, and a collab guest's answer in transit, are known losses.
  *
  * Real Agent, AgentSession, AskTool, ExtensionUiController and rich ask dialog; a real CollabHost
  * and guest socket over the in-memory relay; a real ACP connection pair; the real RPC request
@@ -51,6 +52,8 @@ import { installInMemoryRelay, uninstallInMemoryRelay } from "./collab/helpers/i
 
 const DOWN = "\x1b[B";
 const ENTER = "\r";
+const SPACE = " ";
+const SHIFT_TAB = "\x1b[Z";
 
 type AskQuestion = { id: string; question: string; options: Array<{ label: string }>; multi?: boolean };
 
@@ -325,10 +328,35 @@ describe("ask closed by a person's message keeps only what was submitted", () =>
 
 		expect(resultText(h)).toContain("note on Yes: Never deploy this to production");
 	});
+
+	it("keeps the note confirmed with an answer when the person toggles the check off afterwards", async () => {
+		const h = createHarness([question("first", "Deploy production?", true), question("second", "Notify the team?")]);
+		const run = h.session.prompt("start");
+		await h.opened;
+		// Check Yes, submit a note on it, and confirm with Enter.
+		h.input(SPACE);
+		h.input("n");
+		h.input("Only on staging, never production");
+		h.input(ENTER);
+		await settle();
+		h.input(ENTER);
+		// Back on the first question, toggle Yes off without confirming.
+		h.input(SHIFT_TAB);
+		h.input(SPACE);
+
+		await sendCard(h.session);
+		await sendPersonMessage(h.session, "go ahead with what I said");
+		await finish(h, run);
+
+		expect(h.results[0]?.details).toMatchObject({
+			results: [{ id: "first", selectedOptions: ["Yes"], note: "Only on staging, never production" }],
+		});
+		expect(resultText(h)).toContain("Only on staging, never production");
+	});
 });
 
-describe("ask on a remote client keeps an answer submitted before the person's message", () => {
-	it("returns an ACP answer whose bytes arrive after the message", async () => {
+describe("ask on a remote client keeps an answer received within the reply window", () => {
+	it("returns an ACP answer whose bytes arrive after the message, within the window", async () => {
 		const h = createHarness([question("deploy", "Deploy production?")]);
 		const formOpened = Promise.withResolvers<void>();
 		const answerHeld = Promise.withResolvers<void>();
@@ -374,7 +402,8 @@ describe("ask on a remote client keeps an answer submitted before the person's m
 		await formOpened.promise;
 		await sendCard(h.session);
 
-		// The person submits the form; the answer is on the wire when their message arrives.
+		// The person submits the form; the answer is on the wire when their message arrives, and
+		// reaches omp within the reply window.
 		submitted.resolve({ action: "accept", content: { q0__other: "No, do not deploy production" } });
 		await answerHeld.promise;
 		await sendPersonMessage(h.session, "please also update documentation");
@@ -384,7 +413,7 @@ describe("ask on a remote client keeps an answer submitted before the person's m
 		expect(resultText(h)).toContain("No, do not deploy production");
 	});
 
-	it("returns an RPC answer the host sent before the message, read after it", async () => {
+	it("returns an RPC answer the host sent before the message, read after it within the window", async () => {
 		const h = createHarness([question("deploy", "Deploy production?")]);
 		const pending = new Map<string, PendingExtensionRequest>();
 		const askFrame = Promise.withResolvers<{ id: string }>();

@@ -4497,7 +4497,7 @@ pub struct AskUiRequest {
 	pub timeout: Option<i64>,
 }
 
-/// Close the dialog opened by request `targetId`. When a person's message withdrew it, an answer the host sent before this arrived still counts, and a host closing it unanswered replies `cancelled: true`; otherwise a later answer is ignored.
+/// Close the dialog opened by request `targetId`. When a person's message withdrew it, an answer to it that omp receives within two seconds still counts, and a host closing it unanswered replies `cancelled: true`; an answer received later is ignored.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CancelUiRequest {
 	pub id: String,
@@ -4565,7 +4565,7 @@ pub enum ExtensionUiRequest {
 	Editor(EditorUiRequest),
 	/// Every question of one `ask` tool call; sent only after `set_ask_dialog` enables it.
 	Ask(AskUiRequest),
-	/// Close the dialog opened by request `targetId`. When a person's message withdrew it, an answer the host sent before this arrived still counts, and a host closing it unanswered replies `cancelled: true`; otherwise a later answer is ignored.
+	/// Close the dialog opened by request `targetId`. When a person's message withdrew it, an answer to it that omp receives within two seconds still counts, and a host closing it unanswered replies `cancelled: true`; an answer received later is ignored.
 	Cancel(CancelUiRequest),
 	Notify(NotifyUiRequest),
 	SetStatus(SetStatusUiRequest),

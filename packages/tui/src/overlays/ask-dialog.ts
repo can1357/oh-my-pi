@@ -191,6 +191,13 @@ interface ConfirmedAnswer {
 	customInputImages: ImageContent[] | undefined;
 }
 
+/** A note as the person left it by a deliberate act: submitting it, or confirming the question. */
+interface CommittedNote {
+	text: string;
+	images: ImageContent[] | undefined;
+	rowKey: string;
+}
+
 interface QuestionState {
 	selectedOptions: Set<string>;
 	customInput: string | undefined;
@@ -200,6 +207,8 @@ interface QuestionState {
 	noteRowKey: string | undefined;
 	/** What a dialog a message from the person closes hands back; checks toggled since are not in it. */
 	confirmed: ConfirmedAnswer | undefined;
+	/** The note that goes with `confirmed` in that case: a check toggled since does not clear it. */
+	committedNote: CommittedNote | undefined;
 	cursorIndex: number;
 	scrollOffset: number;
 	manualScroll: boolean;
@@ -479,6 +488,14 @@ function clearNoteUnlessRow(state: QuestionState, rowKey: string): void {
 	if (state.noteRowKey !== undefined && state.noteRowKey !== rowKey) clearNote(state);
 }
 
+/** Record the question's current note as the one the person left by a deliberate act. */
+function commitNote(state: QuestionState): void {
+	state.committedNote =
+		state.note === undefined || state.noteRowKey === undefined
+			? undefined
+			: { text: state.note, images: state.noteImages, rowKey: state.noteRowKey };
+}
+
 /** The option an `option:N` row key names; `undefined` for the Other row. */
 function optionForRowKey(question: ExtensionAskDialogQuestion, rowKey: string): ExtensionAskDialogOption | undefined {
 	const match = /^option:(\d+)$/.exec(rowKey);
@@ -657,6 +674,7 @@ export class AskDialogComponent implements Component {
 				noteImages: undefined,
 				noteRowKey: undefined,
 				confirmed: undefined,
+				committedNote: undefined,
 				cursorIndex: clamp(recommended ?? 0, 0, maxIndex),
 				scrollOffset: 0,
 				manualScroll: false,
@@ -1497,13 +1515,14 @@ export class AskDialogComponent implements Component {
 		this.#advanceAfterQuestion(rowItem.key);
 	}
 
-	/** Record the question's current answer as the one the person confirmed. */
+	/** Record the question's current answer, and its note, as the ones the person confirmed. */
 	#confirm(state: QuestionState): void {
 		state.confirmed = {
 			selectedOptions: new Set(state.selectedOptions),
 			customInput: state.customInput,
 			customInputImages: state.customInputImages,
 		};
+		commitNote(state);
 	}
 
 	#handleSubmitTabInput(keyData: string): void {
@@ -1574,6 +1593,7 @@ export class AskDialogComponent implements Component {
 				state.customInput = undefined;
 				state.customInputImages = undefined;
 				clearNoteIfRow(state, rowItem.key);
+				commitNote(state);
 				// The confirmed answer loses it too; with no option left, nothing is confirmed.
 				const confirmed = state.confirmed;
 				state.confirmed =
@@ -1622,6 +1642,7 @@ export class AskDialogComponent implements Component {
 			state.note = note.text;
 			state.noteImages = note.images;
 			state.noteRowKey = rowItem.key;
+			commitNote(state);
 		} finally {
 			this.#promptActive = false;
 			this.#runDeferredInterrupt();
@@ -1907,11 +1928,11 @@ export class AskDialogComponent implements Component {
 			const answered =
 				confirmed !== undefined &&
 				(question.multi === true || confirmed.selectedOptions.size > 0 || confirmed.customInput !== undefined);
-			const note = state.note?.trim() ? state.note : undefined;
-			const noteOption =
-				note === undefined || state.noteRowKey === undefined
-					? undefined
-					: optionForRowKey(question, state.noteRowKey)?.label;
+			// The note as of the person's last deliberate act, read with `confirmed`: a check toggled
+			// off since then clears the editable note, but not this one.
+			const committed = state.committedNote?.text.trim() ? state.committedNote : undefined;
+			const note = committed?.text;
+			const noteOption = committed === undefined ? undefined : optionForRowKey(question, committed.rowKey)?.label;
 			results.push({
 				id: question.id,
 				question: question.question,
@@ -1923,7 +1944,7 @@ export class AskDialogComponent implements Component {
 				customInput: answered ? confirmed.customInput : undefined,
 				customInputImages: answered ? confirmed.customInputImages : undefined,
 				note,
-				noteImages: note === undefined ? undefined : state.noteImages,
+				noteImages: committed?.images,
 				noteOption,
 				...(answered ? {} : { unanswered: true }),
 			});

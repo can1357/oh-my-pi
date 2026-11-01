@@ -278,7 +278,7 @@ async function askSingleQuestion(
 		);
 		const dialogSignal = closeSignals.length > 1 ? AbortSignal.any(closeSignals) : closeSignals[0];
 		// The wait ends at once on these. A person's message is not among them: the host settles
-		// the picker itself, with an answer the person gave before the withdrawal reached them.
+		// the picker itself, with an answer the person had already given.
 		const waitSignals = [signal, timeoutController?.signal].filter(
 			(candidate): candidate is AbortSignal => candidate !== undefined,
 		);
@@ -850,7 +850,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 			this.session.superviseUserSteering?.(loopSteeringSignal, "pending") ??
 			superviseUserSteering(loopSteeringSignal);
 		// The dialog's `signal` for that message: the host withdraws the dialog and settles it with what the
-		// person had submitted, including an answer a remote client sent before the withdrawal reached it.
+		// person had submitted; a remote client's answer counts if it arrives within WITHDRAWN_DIALOG_REPLY_MS.
 		using superseded = supersedeOnMessage(userSteering.signal);
 		const abortError = (): ToolAbortError =>
 			new ToolAbortError(userSteering.signal.aborted ? "Ask interrupted by message" : "Ask input was cancelled");
@@ -903,7 +903,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 						},
 					);
 				// Only the run's abort ends the wait at once. After a person's message the host settles the
-				// dialog itself, with an answer the person submitted before it, even one still on its way.
+				// dialog itself, with the answers the person had submitted.
 				const richResult = signal ? await untilAborted(signal, showRichDialog) : await showRichDialog();
 				if (!richResult) return cancelAsk();
 				if (richResult.kind === "chat") {

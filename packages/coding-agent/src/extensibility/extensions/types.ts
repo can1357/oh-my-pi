@@ -219,11 +219,11 @@ export function isDialogSuperseded(signal: AbortSignal | undefined): boolean {
 
 /**
  * After a person's message withdraws a dialog a remote client shows (an RPC host, an ACP client), how long omp
- * waits for the client's reply to it: an answer the client submitted before the withdrawal reached it, or its
- * acknowledgement (RPC `cancelled: true`, ACP `-32800`). Either ends the wait at once. Neither protocol says when
- * an answer was submitted, so for a client that sends neither, omp cannot tell an answer still in transit from
- * none; it treats the dialog as unanswered once this long has passed, and an answer reaching it later is ignored.
- * Waiting longer would hold back the person's message that long on every such client.
+ * keeps reading the client's reply to it: an answer, or an acknowledgement (RPC `cancelled: true`, ACP `-32800`).
+ * Either ends the wait at once. An answer received within this window is used. Neither protocol carries when an
+ * answer was submitted, so an answer received later cannot be told apart from none: the dialog is reported
+ * unanswered when the window ends, and a later answer is ignored, even one submitted before the withdrawal.
+ * Waiting longer would hold back the person's message that long on every client that sends no reply.
  */
 export const WITHDRAWN_DIALOG_REPLY_MS = 2_000;
 
@@ -236,8 +236,8 @@ export interface ExtensionUIDialogOptions {
 	 * superseded it, and the host hands back what the person had submitted, never text they had
 	 * not submitted: the interactive TUI's `askDialog` resolves a submit result with
 	 * `interrupted: true`, and a remote host (RPC, ACP) withdraws the dialog and resolves with an
-	 * answer its client sent before the withdrawal reached it. Any other reason: the answer no
-	 * longer matters, and the dialog resolves its cancelled value.
+	 * answer its client sends within {@link WITHDRAWN_DIALOG_REPLY_MS}, else unanswered. Any other
+	 * reason: the answer no longer matters, and the dialog resolves its cancelled value.
 	 */
 	signal?: AbortSignal;
 	timeout?: number;

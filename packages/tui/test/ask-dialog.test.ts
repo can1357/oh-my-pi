@@ -2001,4 +2001,33 @@ describe("AskDialogComponent", () => {
 
 		expect(onSubmit.mock.calls[0]?.[0].results[0]).toMatchObject({ id: "features", selectedOptions: ["Auth"] });
 	});
+
+	it("interruption keeps the note confirmed with an answer when a check is toggled off afterwards", async () => {
+		const onSubmit = vi.fn();
+		const component = new AskDialogComponent(
+			[
+				{ id: "first", question: "Deploy?", options: [{ label: "Yes" }, { label: "No" }], multi: true },
+				{ id: "second", question: "Notify?", options: [{ label: "Yes" }] },
+			],
+			{ onSubmit, onCancel: vi.fn(), onPrompt: vi.fn().mockResolvedValue("Only on staging, never production") },
+		);
+
+		// Check Yes, submit a note on it, and confirm with Enter.
+		component.handleInput(SPACE);
+		component.handleInput("n");
+		await Promise.resolve();
+		await Promise.resolve();
+		component.handleInput(ENTER);
+		// Back on the first question, toggle Yes off without confirming.
+		component.handleInput(SHIFT_TAB);
+		component.handleInput(SPACE);
+		component.interrupt();
+
+		expect(onSubmit.mock.calls[0]?.[0].results[0]).toMatchObject({
+			id: "first",
+			selectedOptions: ["Yes"],
+			note: "Only on staging, never production",
+			noteOption: "Yes",
+		});
+	});
 });

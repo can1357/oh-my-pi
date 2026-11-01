@@ -358,15 +358,15 @@ await runRpcMode(session);
 		expect(pendingRequests.size).toBe(0);
 	});
 
-	it("keeps an ask answer held in transit when a person message withdraws the dialog", async () => {
+	it("keeps an ask answer received within the reply window after a person message withdraws the dialog", async () => {
 		const pendingRequests = new Map<string, PendingExtensionRequest>();
 		const output = vi.fn<(frame: object) => void>();
 		const superseded = new AbortController();
 		const result = requestRpcAskDialog(pendingRequests, output, [dbQuestion], { signal: superseded.signal });
 		const request = requireRequest(output.mock.calls[0]?.[0]);
 
-		// The host submitted this answer before the person message, but its bytes have not reached
-		// omp's request resolver until after the message withdraws the visible dialog.
+		// The host sent this answer before it received the `cancel`; omp reads it after the person
+		// message withdrew the dialog, inside WITHDRAWN_DIALOG_REPLY_MS.
 		const response = { answers: [{ id: "db", selectedOptions: ["Postgres"] }] };
 		superseded.abort(new DialogSupersededError());
 		respond(pendingRequests, request.id, response);
@@ -380,7 +380,9 @@ await runRpcMode(session);
 		);
 	});
 
-	it("closes a withdrawn dialog unanswered when the host never replies to the cancel", async () => {
+	// Pins a known limit, not an ordering guarantee: RPC carries no submission time, so after the
+	// reply window omp reports the dialog unanswered and drops any answer that arrives later.
+	it("reports a withdrawn dialog unanswered once the reply window ends without a host reply", async () => {
 		vi.useFakeTimers();
 		try {
 			const pendingRequests = new Map<string, PendingExtensionRequest>();

@@ -1215,7 +1215,8 @@ export function requestRpcEditor(
 
 /**
  * Sends an RPC extension dialog and cancels the remote presentation when its signal aborts. When a person's
- * message superseded the dialog, an answer the host sent before it received the `cancel` still settles it.
+ * message superseded the dialog, an answer the host sends within `WITHDRAWN_DIALOG_REPLY_MS` of the `cancel`
+ * still settles it; a later one is ignored.
  */
 export function requestRpcDialog<T>(
 	pendingRequests: Map<string, PendingExtensionRequest>,
@@ -1254,9 +1255,9 @@ export function requestRpcDialog<T>(
 			settleDefault();
 			return;
 		}
-		// The person moved on, but an answer they submitted before the `cancel` reached the host may
-		// still be on its way: the host's reply settles the dialog, as an answer or `cancelled: true`.
-		// A host that sends neither is closed after WITHDRAWN_DIALOG_REPLY_MS.
+		// The person moved on: read the host's reply for WITHDRAWN_DIALOG_REPLY_MS, an answer or
+		// `cancelled: true`. RPC does not carry when an answer was submitted, so a reply received
+		// later is ignored.
 		clearTimeout(timeoutId);
 		timeoutId = setTimeout(settleDefault, WITHDRAWN_DIALOG_REPLY_MS);
 	};

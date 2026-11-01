@@ -1524,7 +1524,7 @@ class AskUiRequest:
 
 @dataclass(slots=True, frozen=True, kw_only=True)
 class CancelUiRequest:
-    """Close the dialog opened by request `targetId`. When a person's message withdrew it, an answer the host sent before this arrived still counts, and a host closing it unanswered replies `cancelled: true`; otherwise a later answer is ignored."""
+    """Close the dialog opened by request `targetId`. When a person's message withdrew it, an answer to it that omp receives within two seconds still counts, and a host closing it unanswered replies `cancelled: true`; an answer received later is ignored."""
     type: Literal["extension_ui_request"] = "extension_ui_request"
     id: str
     method: Literal["cancel"] = "cancel"

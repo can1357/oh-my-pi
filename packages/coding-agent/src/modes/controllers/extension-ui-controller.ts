@@ -837,6 +837,8 @@ export class ExtensionUiController {
 			).then(result => (result === "unavailable" ? localWinner : { source: "remote", value: result }));
 			const winner = await Promise.race([localWinner, remoteWinner]);
 			if (winner.source === "remote") localAbort.abort();
+			// Known limit: this withdraws the guest's open request at once (`CollabHost.requestGuestUi`
+			// settles it unavailable), so a guest answer still in transit is acknowledged and dropped.
 			else remoteAbort.abort();
 			const value = winner.value;
 			if (winner.source !== "local" || !isDialogSuperseded(parentSignal)) return value;

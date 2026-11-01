@@ -1300,7 +1300,7 @@ export interface AskUiRequest {
 	timeout?: number;
 }
 
-/** Close the dialog opened by request `targetId`. When a person's message withdrew it, an answer the host sent before this arrived still counts, and a host closing it unanswered replies `cancelled: true`; otherwise a later answer is ignored. */
+/** Close the dialog opened by request `targetId`. When a person's message withdrew it, an answer to it that omp receives within two seconds still counts, and a host closing it unanswered replies `cancelled: true`; an answer received later is ignored. */
 export interface CancelUiRequest {
 	type: "extension_ui_request";
 	id: string;

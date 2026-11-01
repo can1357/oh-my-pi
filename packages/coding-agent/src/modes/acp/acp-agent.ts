@@ -513,11 +513,11 @@ function buildAcpSpeechModelsCatalog(): Record<string, unknown> {
  * cancelled (`$/cancel_request`), so the client closes the form instead of
  * leaving the person filling in one whose answer is no longer used. When a
  * message from the person superseded the form (`DialogSupersededError`), the
- * request is cancelled the same way but the agent keeps waiting for the
- * client's response: an answer the person submitted before the cancellation
- * reached the client still counts, and a client that honors `$/cancel_request`
- * answers `-32800` at once. ACP does not say when an answer was submitted, so a
- * client that sends neither is closed after `WITHDRAWN_DIALOG_REPLY_MS`. The
+ * request is cancelled the same way but the agent keeps reading the client's
+ * response for `WITHDRAWN_DIALOG_REPLY_MS`: an answer received in that window is
+ * used, and a client that honors `$/cancel_request` answers `-32800` at once.
+ * ACP does not carry when an answer was submitted, so an answer received after
+ * the window is dropped, even one submitted before the cancellation. The
  * abort listener is removed once the elicitation settles so that callers which
  * reuse the same signal across many elicitations don't accumulate listeners and
  * trip Node's `MaxListeners` warning.
@@ -571,10 +571,9 @@ async function elicitFormFromAcpClient(
 			abandon();
 			return;
 		}
-		// The person moved on: close the client's form, and read its response, an answer the
-		// person submitted before the cancellation reached the client or its `-32800`. A client
-		// that sends neither is closed after WITHDRAWN_DIALOG_REPLY_MS; the dialog's own timeout no
-		// longer applies.
+		// The person moved on: close the client's form, and read its response for
+		// WITHDRAWN_DIALOG_REPLY_MS, an answer or its `-32800`. An answer received later is
+		// dropped; the dialog's own timeout no longer applies.
 		withdrawn = true;
 		request.withdraw();
 		clearTimeout(timeoutId);
