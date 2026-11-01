@@ -592,7 +592,9 @@ jobs:
               # Not `test:scripts`: scripts/install.test.ts fails on main
               # (its install.sh smoke-check executes a fake binary), so running
               # the whole group here would red this job on an unrelated break.
-              bun test scripts/release.test.ts scripts/ci-build-upload.test.ts
+              # The metaharness package has no CI bucket; this file runs here.
+              bun test scripts/release.test.ts scripts/ci-build-upload.test.ts scripts/github-run-data.test.ts \
+                packages/metaharness/test/tb-agent.test.ts
 
    test_coding_agent_singleton:
       name: Test coding-agent singleton/global-state (TS)

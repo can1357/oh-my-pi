@@ -128,7 +128,7 @@
 		"stats:edits": "python3 scripts/session-stats/analyze.py edits",
 		"stats:followups": "python3 scripts/session-stats/analyze.py followups",
 		"stats:audit": "bun scripts/session-stats/audit.ts",
-		"test:py": "python3 -m pytest -x sdk/python/omp-rpc/tests && python3 -m pytest -x python/robomp/tests",
+		"test:py": "python3 -m pytest -x sdk/python/omp-rpc/tests && python3 -m pytest -x python/robomp/tests && python3 -m pytest -x infra/vmon",
 		"robomp:install": "pip install -e sdk/python/omp-rpc -e 'python/robomp[dev]'",
 		"robomp:serve": "python3 -m robomp serve",
 		"robomp:test:integration": "ROBOMP_INTEGRATION=1 python3 -m pytest -x python/robomp/tests/test_worker_smoke.py",
