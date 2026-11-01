@@ -305,7 +305,7 @@ export default function (pi: ExtensionAPI) {
 }
 ```
 
-- `override(scope, value)` writes the in-memory runtime layer; it is never persisted and outranks project, global, and `--config` layers. A setting's environment binding normally takes precedence; definitions using `envFallback` instead defer to configured settings. A value the definition rejects throws, e.g. `Invalid value for recap.enabled: "nope" (expected a boolean)`.
+- `override(scope, value)` writes the in-memory runtime layer; it is never persisted and outranks project, global, and `--config` layers. A setting's environment binding normally takes precedence; definitions using `envFallback` instead defer to configured settings. A value the definition rejects throws, naming the value by its type and length only, e.g. `Invalid value for recap.enabled: string (length 4) (expected a boolean)`.
 - `clearOverride(scope)` releases the override, restoring the persisted/default value.
 - `isConfigured(scope)` / `provenance(scope)` tell a user-configured value from the default (`"env" | "runtime" | "overlay" | "project" | "global" | "default"`). A hand-edited value the definition rejects is not a user-configured value: it reads as unset in its config file, with a warning.
 - `get(scope)` reads the effective value; `listen(scope, cb)` observes changes. Writes go through the settings store, so change listeners and live effects fire.

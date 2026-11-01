@@ -161,6 +161,71 @@ describe("settings registry", () => {
 		}
 	});
 
+	it("never puts a rejected value in a validation, write or parse error", () => {
+		// A token pasted into the wrong key is the likeliest rejected value; a validator's error is logged
+		// when a watched reload keeps the last good config, and `omp config set` prints a parse error.
+		const secret = "sk-ant-api03-validation-canary-17600";
+		const errors: string[] = [];
+		const capture = (fn: () => unknown): void => {
+			try {
+				fn();
+			} catch (error) {
+				errors.push(String(error));
+			}
+		};
+		capture(() => Settings.isolated({ "session.maxCost": secret }));
+		capture(() => Settings.isolated({ "session.warnCost": { apiToken: secret } }));
+		capture(() => Settings.isolated({ "task.agentSoftRequestBudget": { lead: secret } }));
+		capture(() => Settings.isolated({ "task.perCallModelAllow": secret }));
+		capture(() => Settings.isolated({ "task.perCallModelAllow": [{ token: secret }] }));
+		capture(() => Settings.isolated({ temperature: secret }));
+		for (const id of ["temperature", "compaction.enabled", "steeringMode", "task.agentPrewalk"]) {
+			capture(() => lookup(id)?.parse(secret));
+		}
+		expect(errors).toHaveLength(10);
+		expect(errors.join("\n")).not.toContain(secret);
+		expect(errors).toContain(
+			`Error: Invalid session.maxCost: expected a positive USD amount, got string (length ${secret.length}).`,
+		);
+	});
+
+	it("shows an overlay a rejection its parent learns on a later reload", async () => {
+		using dir = TempDir.createSync("@pi-settings-rejected-overlay-");
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			const parent = await loadHandEditedSettings(dir, { global: {} }, { reloadable: true });
+			const child = parent.overlay();
+			expect(child.ignoredValues()).toEqual([]);
+			await Bun.write(dir.join("project", ".omp", "config.yml"), YAML.stringify({ temperature: "hot" }));
+			await parent.reloadFromDisk();
+			expect(child.ignoredValues().map(ignored => ignored.setting.id)).toEqual(["temperature"]);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it("keeps the record of a rejected value when a reload fails before its layers are committed", async () => {
+		using dir = TempDir.createSync("@pi-settings-rejected-partial-reload-");
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			const settings = await loadHandEditedSettings(
+				dir,
+				{ overlays: [{ temperature: "hot" }, { topK: 5 }] },
+				{ reloadable: true },
+			);
+			const ignored = () => settings.ignoredValues().map(({ setting, source }) => [setting.id, source]);
+			expect(ignored()).toEqual([["temperature", dir.join("overlay-0.yml")]]);
+			// The first file is fixed and the second no longer parses: nothing is adopted.
+			await Bun.write(dir.join("overlay-0.yml"), YAML.stringify({ temperature: 0.3 }));
+			await Bun.write(dir.join("overlay-1.yml"), "topK: [unterminated\n");
+			await expect(settings.reloadFromDisk()).rejects.toThrow();
+			expect(cfgTemperature.get(settings)).toBe(cfgTemperature.default);
+			expect(ignored()).toEqual([["temperature", dir.join("overlay-0.yml")]]);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
 	it("reads a value the setting rejects as unset where it is written: value, presence and provenance agree", async () => {
 		const dir = TempDir.createSync("@pi-settings-rejected-layer-");
 		const aloneDir = TempDir.createSync("@pi-settings-rejected-alone-");

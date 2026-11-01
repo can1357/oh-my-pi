@@ -145,6 +145,11 @@ type ProjectSettingsReadResult = {
 	sourcePaths: string[];
 	/** Project warnings surfaced for this read; commit with the layer as `#projectSettingsWarningsSeen`. */
 	warningsSeen: Set<string>;
+	/**
+	 * Records the values the read dropped (see `reportDropped`). Run only when the layer is committed,
+	 * so a read that fails or is not adopted keeps the record of an earlier rejection.
+	 */
+	reportDropped: () => void;
 };
 
 /** `strict` rejects on any unreadable layer; `keep-last-good` keeps each failed layer's previous value. */
@@ -159,6 +164,8 @@ const CONFIG_WATCH_DEBOUNCE_MS = 200;
 type ConfigOverlayReadResult = {
 	settings: RawSettings;
 	shellPathSource: string | undefined;
+	/** As {@link ProjectSettingsReadResult.reportDropped}, for every `--config` file the read loaded. */
+	reportDropped: () => void;
 };
 
 export interface SettingsOptions {
@@ -818,7 +825,7 @@ export class Settings {
 		child.#storage = this.#storage;
 		child.#parent = this;
 		child.#derived = options.derived ?? false;
-		inheritWarnings(child, this);
+		inheritWarnings(child, this, { dropped: false });
 		child.#rebuildMerged();
 		// The parent holds only a weak reference, so a discarded child is collected without an
 		// explicit dispose; its listener unsubscribes on the next parent change.
@@ -932,17 +939,18 @@ export class Settings {
 	/**
 	 * Safe metadata for config values this instance ignores because their setting rejects them, each
 	 * with its file: those project and `--config` files dropped as they loaded, and a rejected value
-	 * read as unset (a global one, say) once its setting has been read. Never exposes the raw value.
+	 * read as unset (a global one, say) once its setting has been read. An overlay also reports what its
+	 * parent ignores now, not only what it ignored when the overlay was made. Never exposes the raw value.
 	 */
 	ignoredValues(): IgnoredValue[] {
-		const ignored = [...this.warnState.invalid.values()];
-		for (const layer of this.warnState.dropped.values()) ignored.push(...layer.values());
-		return ignored.map(({ setting, source, valueType, valueLength }) => ({
-			setting,
-			source,
-			valueType,
-			valueLength,
-		}));
+		const ignored = new Map<string, IgnoredValue>();
+		const add = ({ setting, source, valueType, valueLength }: IgnoredValue): void => {
+			ignored.set(`${setting.id}\0${source ?? ""}`, { setting, source, valueType, valueLength });
+		};
+		for (const value of this.#parent?.ignoredValues() ?? []) add(value);
+		for (const value of this.warnState.invalid.values()) add(value);
+		for (const layer of this.warnState.dropped.values()) for (const value of layer.values()) add(value);
+		return [...ignored.values()];
 	}
 
 	/**
@@ -1514,6 +1522,7 @@ export class Settings {
 					source: this.#configFiles.join(", "),
 					commit: () => {
 						this.#overlayShellPathSource = shellPathSource;
+						overlayResult.value.reportDropped();
 					},
 				});
 			}
@@ -2575,16 +2584,17 @@ export class Settings {
 		const dropped = new Map<AnySetting, unknown>();
 		const settings = this.#dropRejected(asWritten, dropped);
 		// One key for the project layer: a re-scope to another project replaces what the last one dropped.
-		reportDropped(this, "project", dropped, (setting, value) => {
-			// Name the highest file holding the value; a value migration renamed names the project.
-			if (setting === cfgModelRoles && Bun.deepEquals(nativeModelRoles, value)) return projectConfigPath;
-			for (let index = items.length - 1; index >= 0; index--) {
-				if (Bun.deepEquals(getByPath(items[index].data as RawSettings, setting.segments), value)) {
-					return items[index].path;
+		const report = () =>
+			reportDropped(this, "project", dropped, (setting, value) => {
+				// Name the highest file holding the value; a value migration renamed names the project.
+				if (setting === cfgModelRoles && Bun.deepEquals(nativeModelRoles, value)) return projectConfigPath;
+				for (let index = items.length - 1; index >= 0; index--) {
+					if (Bun.deepEquals(getByPath(items[index].data as RawSettings, setting.segments), value)) {
+						return items[index].path;
+					}
 				}
-			}
-			return projectConfigDir;
-		});
+				return projectConfigDir;
+			});
 		return {
 			settings,
 			asWritten,
@@ -2592,6 +2602,7 @@ export class Settings {
 			shellPathSource,
 			sourcePaths,
 			warningsSeen,
+			reportDropped: report,
 		};
 	}
 
@@ -2603,6 +2614,7 @@ export class Settings {
 
 	/** Adopts the read-side state of a project read whose layer is being committed. */
 	#commitProjectRead(result: ProjectSettingsReadResult): void {
+		result.reportDropped();
 		this.#projectFileSettings = result.fileSettings;
 		this.#projectShellPathSource = result.shellPathSource;
 		this.#projectSourcePaths = result.sourcePaths;
@@ -2613,6 +2625,7 @@ export class Settings {
 	async #readConfigOverlays(captureLegacyChangelogVersion = true): Promise<ConfigOverlayReadResult> {
 		let shellPathSource: string | undefined;
 		let settings: RawSettings = {};
+		const reports: (() => void)[] = [];
 		for (const filePath of this.#configFiles) {
 			const written = dropSettingsGroupShadows(
 				await this.#loadOverlayYaml(filePath, captureLegacyChangelogVersion),
@@ -2620,16 +2633,23 @@ export class Settings {
 			);
 			const dropped = new Map<AnySetting, unknown>();
 			const overlay = this.#dropRejected(written, dropped);
-			reportDropped(this, filePath, dropped);
+			reports.push(() => reportDropped(this, filePath, dropped));
 			settings = this.#deepMerge(settings, overlay);
 			if (Object.hasOwn(overlay, "shellPath")) shellPathSource = filePath;
 		}
-		return { settings, shellPathSource };
+		return {
+			settings,
+			shellPathSource,
+			reportDropped: () => {
+				for (const report of reports) report();
+			},
+		};
 	}
 
 	async #loadConfigOverlays(): Promise<RawSettings> {
 		const result = await this.#readConfigOverlays();
 		this.#overlayShellPathSource = result.shellPathSource;
+		result.reportDropped();
 		return result.settings;
 	}
 
