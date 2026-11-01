@@ -4,7 +4,8 @@
  *
  * The reads below walked the local filesystem instead of the storage that
  * holds the session, so the resumed session could not see its own subagents,
- * and `/seance` could not find a session the table held by its id or its path.
+ * `/seance` could not find a session the table held by its id or its path,
+ * and the resume picker could not rename it.
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
@@ -19,6 +20,7 @@ import {
 	type SessionStorage,
 } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { SqlSessionStorage } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { resolveSeanceSource } from "@oh-my-pi/pi-coding-agent/task/seance";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -154,5 +156,33 @@ describe("a session resumed from SQL session storage", () => {
 		const byPath = await resolveSeanceSource(sessionFile, { cwd });
 
 		expect([byId.id, byId.file, byPath.id, byPath.file]).toEqual([id, sessionFile, id, sessionFile]);
+	});
+
+	it("is renamed from the resume picker and keeps the title in the table", async () => {
+		using tempDir = TempDir.createSync("@omp-sql-rename-");
+		const cwd = tempDir.join("project");
+		const database = `sqlite://${tempDir.join("sessions.db")}`;
+		const storage = await SqlSessionStorage.create({ client: new SQL(database) });
+		setDefaultSessionStorage(storage);
+
+		const id = "01a1880d-cccc-7000-9000-000000000003";
+		const sessionDir = computeDefaultSessionDir(cwd, storage);
+		const sessionFile = path.join(sessionDir, `2026-10-29T00-00-00-000Z_${id}.jsonl`);
+		await storage.writeText(sessionFile, transcript(id, cwd, "only in the table", "stored reply"));
+		await storage.drain();
+
+		const renamed = await SessionManager.renameSessionTitle(sessionFile, "Renamed in the table", { cwd });
+		await storage.drain();
+		// A second store over the same database reads what the first one wrote.
+		const reopened = await SessionManager.open(
+			sessionFile,
+			undefined,
+			await SqlSessionStorage.create({ client: new SQL(database) }),
+			{ suppressBreadcrumb: true },
+		);
+		const persisted = reopened.getSessionName();
+		await reopened.close();
+
+		expect([renamed, persisted]).toEqual(["Renamed in the table", "Renamed in the table"]);
 	});
 });
