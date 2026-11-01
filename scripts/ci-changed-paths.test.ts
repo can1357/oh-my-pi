@@ -103,49 +103,75 @@ afterAll(async () => {
 });
 
 describe("ci-changed-paths.sh on a pull request", () => {
-	it("counts only the PR's own changes, never the base branch's commits since the fork point", async () => {
-		const tsPr = await checkout("refs/pull/pr-ts/merge", 2);
-		// main-sdk changed sdk/ after pr-ts forked; a diff from the fork point or
-		// from the PR head would report sdk/go/b.go and wrongly run the SDK jobs.
-		expect(await run(tsPr, "pull_request", ["sdk"])).toMatchObject({ exitCode: 0, paths: [] });
-		expect(await run(tsPr, "pull_request", ["packages"])).toMatchObject({ exitCode: 0, paths: ["packages/x/a.ts"] });
-		expect(await run(tsPr, "pull_request", ["--print-base"])).toMatchObject({ exitCode: 0, stdout: sha["main-ts"] });
+	it(
+		"counts only the PR's own changes, never the base branch's commits since the fork point",
+		async () => {
+			const tsPr = await checkout("refs/pull/pr-ts/merge", 2);
+			// main-sdk changed sdk/ after pr-ts forked; a diff from the fork point or
+			// from the PR head would report sdk/go/b.go and wrongly run the SDK jobs.
+			expect(await run(tsPr, "pull_request", ["sdk"])).toMatchObject({ exitCode: 0, paths: [] });
+			expect(await run(tsPr, "pull_request", ["packages"])).toMatchObject({
+				exitCode: 0,
+				paths: ["packages/x/a.ts"],
+			});
+			expect(await run(tsPr, "pull_request", ["--print-base"])).toMatchObject({
+				exitCode: 0,
+				stdout: sha["main-ts"],
+			});
 
-		const sdkPr = await checkout("refs/pull/pr-sdk/merge", 2);
-		expect(await run(sdkPr, "pull_request", ["sdk"])).toMatchObject({ exitCode: 0, paths: ["sdk/go/a.go"] });
-	}, TIMEOUT);
+			const sdkPr = await checkout("refs/pull/pr-sdk/merge", 2);
+			expect(await run(sdkPr, "pull_request", ["sdk"])).toMatchObject({ exitCode: 0, paths: ["sdk/go/a.go"] });
+		},
+		TIMEOUT,
+	);
 
-	it("counts a file moved out of the pathspec", async () => {
-		const renamePr = await checkout("refs/pull/pr-rename/merge", 2);
-		expect(await run(renamePr, "pull_request", ["sdk"])).toMatchObject({ exitCode: 0, paths: ["sdk/go/a.go"] });
-	}, TIMEOUT);
+	it(
+		"counts a file moved out of the pathspec",
+		async () => {
+			const renamePr = await checkout("refs/pull/pr-rename/merge", 2);
+			expect(await run(renamePr, "pull_request", ["sdk"])).toMatchObject({ exitCode: 0, paths: ["sdk/go/a.go"] });
+		},
+		TIMEOUT,
+	);
 
-	it("answers unknown, so the caller runs, when the checkout cannot show the base", async () => {
-		const tooShallow = await checkout("refs/pull/pr-sdk/merge", 1);
-		const shallow = await run(tooShallow, "pull_request", ["sdk"]);
-		expect(shallow.exitCode).toBe(3);
-		expect(shallow.stderr).toContain("fetch-depth: 2");
+	it(
+		"answers unknown, so the caller runs, when the checkout cannot show the base",
+		async () => {
+			const tooShallow = await checkout("refs/pull/pr-sdk/merge", 1);
+			const shallow = await run(tooShallow, "pull_request", ["sdk"]);
+			expect(shallow.exitCode).toBe(3);
+			expect(shallow.stderr).toContain("fetch-depth: 2");
 
-		const notMerge = await checkout("pr-sdk", 2);
-		expect(await run(notMerge, "pull_request", ["sdk"])).toMatchObject({ exitCode: 3, stdout: "" });
-	}, TIMEOUT);
+			const notMerge = await checkout("pr-sdk", 2);
+			expect(await run(notMerge, "pull_request", ["sdk"])).toMatchObject({ exitCode: 3, stdout: "" });
+		},
+		TIMEOUT,
+	);
 });
 
 describe("ci-changed-paths.sh on a push", () => {
-	it("counts every pushed commit, fetching a previous tip older than the shallow history", async () => {
-		// Pushing main-sdk and main-ts together: `before` is base, beyond depth 2.
-		const tip = await checkout("main", 2);
-		const twoCommits = { before: sha.base, forced: false };
-		expect(await run(tip, "push", ["sdk"], twoCommits)).toMatchObject({ exitCode: 0, paths: ["sdk/go/b.go"] });
-		expect(await run(tip, "push", ["--print-base"], twoCommits)).toMatchObject({ exitCode: 0, stdout: sha.base });
-		const lastOnly = { before: sha["main-sdk"], forced: false };
-		expect(await run(tip, "push", ["sdk"], lastOnly)).toMatchObject({ exitCode: 0, paths: [] });
-	}, TIMEOUT);
+	it(
+		"counts every pushed commit, fetching a previous tip older than the shallow history",
+		async () => {
+			// Pushing main-sdk and main-ts together: `before` is base, beyond depth 2.
+			const tip = await checkout("main", 2);
+			const twoCommits = { before: sha.base, forced: false };
+			expect(await run(tip, "push", ["sdk"], twoCommits)).toMatchObject({ exitCode: 0, paths: ["sdk/go/b.go"] });
+			expect(await run(tip, "push", ["--print-base"], twoCommits)).toMatchObject({ exitCode: 0, stdout: sha.base });
+			const lastOnly = { before: sha["main-sdk"], forced: false };
+			expect(await run(tip, "push", ["sdk"], lastOnly)).toMatchObject({ exitCode: 0, paths: [] });
+		},
+		TIMEOUT,
+	);
 
-	it("answers unknown for a forced push, a new branch, or an event with no base", async () => {
-		const tip = await checkout("main", 2);
-		expect(await run(tip, "push", ["sdk"], { before: sha.base, forced: true })).toMatchObject({ exitCode: 3 });
-		expect(await run(tip, "push", ["sdk"], { before: ZERO, forced: false })).toMatchObject({ exitCode: 3 });
-		expect(await run(tip, "workflow_dispatch", ["sdk"])).toMatchObject({ exitCode: 3, stdout: "" });
-	}, TIMEOUT);
+	it(
+		"answers unknown for a forced push, a new branch, or an event with no base",
+		async () => {
+			const tip = await checkout("main", 2);
+			expect(await run(tip, "push", ["sdk"], { before: sha.base, forced: true })).toMatchObject({ exitCode: 3 });
+			expect(await run(tip, "push", ["sdk"], { before: ZERO, forced: false })).toMatchObject({ exitCode: 3 });
+			expect(await run(tip, "workflow_dispatch", ["sdk"])).toMatchObject({ exitCode: 3, stdout: "" });
+		},
+		TIMEOUT,
+	);
 });

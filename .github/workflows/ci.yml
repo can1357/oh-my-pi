@@ -24,6 +24,7 @@ on:
          - "LICENSE"
          - "rust-toolchain.toml"
          - "rustfmt.toml"
+         - ".cargo/**"
          # A root dependency change (lockfile/catalog/patches) affects every
          # job; without these a lockfile-only push shipped untested — and a
          # release retagged onto such a commit never triggered its run.
@@ -55,6 +56,7 @@ on:
          - "LICENSE"
          - "rust-toolchain.toml"
          - "rustfmt.toml"
+         - ".cargo/**"
          - "bun.lock"
          - "bunfig.toml"
          - "package.json"
@@ -592,7 +594,7 @@ jobs:
               # Not `test:scripts`: scripts/install.test.ts fails on main
               # (its install.sh smoke-check executes a fake binary), so running
               # the whole group here would red this job on an unrelated break.
-              bun test scripts/release.test.ts scripts/ci-build-upload.test.ts
+              bun test scripts/release.test.ts scripts/ci-build-upload.test.ts scripts/ci-changed-paths.test.ts
 
    test_coding_agent_singleton:
       name: Test coding-agent singleton/global-state (TS)
