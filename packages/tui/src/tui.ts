@@ -2371,12 +2371,15 @@ export class TUI extends Container {
 	/** Paint the full semantic tail on the borrowed resize buffer. */
 	#renderResizeAltFrame(width: number, height: number): void {
 		const provider = this.#frameProvider;
+		const layoutWidth = this.#layoutWidth(width);
 		let rendered: readonly string[];
 		do {
 			this.#imageBudget.beginPass(false, true);
 			rendered =
-				provider?.renderResizeFrame?.({ columns: width, rows: height }) ??
-				(provider ? provider.renderFrame({ columns: width, rows: height }).viewport : this.render(width));
+				provider?.renderResizeFrame?.({ columns: layoutWidth, rows: height }) ??
+				(provider
+					? provider.renderFrame({ columns: layoutWidth, rows: height }).viewport
+					: this.render(layoutWidth));
 		} while (this.#imageBudget.endPass());
 		const viewport = rendered.length > height ? rendered.slice(rendered.length - height) : Array.from(rendered);
 		// The borrowed resize buffer is transient, not a streamable session paint.
@@ -2626,12 +2629,13 @@ export class TUI extends Container {
 		const height = this.terminal.rows;
 		if (width <= 0 || height <= 0) return;
 		provider.beginHistoryFlush();
+		const layoutWidth = this.#layoutWidth(width);
 		while (true) {
 			let plan: TerminalFramePlan;
 			let viewport: string[];
 			do {
 				this.#imageBudget.beginPass();
-				plan = provider.renderFrame({ columns: width, rows: height });
+				plan = provider.renderFrame({ columns: layoutWidth, rows: height });
 				viewport = Array.from(plan.viewport);
 				if (viewport.length > height) viewport = viewport.slice(0, height);
 			} while (this.#imageBudget.endPass());
@@ -3462,11 +3466,12 @@ export class TUI extends Container {
 		const provider = this.#frameProvider;
 		if (!provider || width <= 0 || height <= 0) return;
 		this.#debugNextWindowTop = 0;
+		const layoutWidth = this.#layoutWidth(width);
 		let plan: TerminalFramePlan;
 		let viewport: string[];
 		do {
 			this.#imageBudget.beginPass();
-			plan = provider.renderFrame({ columns: width, rows: height });
+			plan = provider.renderFrame({ columns: layoutWidth, rows: height });
 			viewport = Array.from(plan.viewport);
 			if (viewport.length > height) {
 				const message = `Frame provider returned ${viewport.length} rows for a ${height}-row viewport`;
@@ -3474,7 +3479,7 @@ export class TUI extends Container {
 				logger.error("TUI layout contract violated", { rows: viewport.length, height });
 				viewport = viewport.slice(0, height);
 			}
-			viewport = this.#compositeVisibleOverlays(viewport, width, height);
+			viewport = this.#compositeVisibleOverlays(viewport, layoutWidth, height);
 		} while (this.#imageBudget.endPass());
 		if (this.#maybeDeferGhosttyInitialImagePaint()) return;
 		this.#emitPlanFrame(width, height, viewport, plan.history, provider);
@@ -3552,7 +3557,9 @@ export class TUI extends Container {
 	 * replay's ED2 erases it together with the rest of the screen.
 	 */
 	#rebuildNoticeSequence(width: number, height: number): string {
-		const label = truncateToWidth("↻ Rebuilding…", width, Ellipsis.Omit);
+		// Fit at layout width: on ConPTY-class hosts a label filling the final
+		// column arms the pending wrap that DECRC (#9783) can materialize early.
+		const label = truncateToWidth("↻ Rebuilding…", this.#layoutWidth(width), Ellipsis.Omit);
 		return `${this.#paintBeginSequence}\x1b7\x1b[${height};1H${SEGMENT_RESET}${ERASE_LINE}${label}${LINE_TERMINATOR}\x1b8${this.#paintEndSequence}`;
 	}
 
@@ -4022,13 +4029,14 @@ export class TUI extends Container {
 	 * mutable viewport. Nothing is ever appended to terminal history.
 	 */
 	#renderChildrenFrame(width: number, height: number): void {
+		const layoutWidth = this.#layoutWidth(width);
 		let viewport: string[];
 		do {
 			this.#imageBudget.beginPass();
-			const composed = this.render(width);
+			const composed = this.render(layoutWidth);
 			this.#debugNextWindowTop = Math.max(0, composed.length - height);
 			viewport = composed.length > height ? composed.slice(composed.length - height) : Array.from(composed);
-			viewport = this.#compositeVisibleOverlays(viewport, width, height);
+			viewport = this.#compositeVisibleOverlays(viewport, layoutWidth, height);
 		} while (this.#imageBudget.endPass());
 		if (this.#maybeDeferGhosttyInitialImagePaint()) return;
 		this.#emitPlanFrame(width, height, viewport, undefined, undefined);
@@ -4117,18 +4125,32 @@ export class TUI extends Container {
 			: undefined;
 	}
 
+	/**
+	 * Width components may lay out to on ConPTY-class hosts: one cell short of
+	 * the physical grid. ConPTY can materialize a pending wrap before a
+	 * following cursor-addressing sequence even while DECAWM is disabled
+	 * (#9783), and that hazard arms only when a row fills the final column —
+	 * so right-aligned chrome must sit a column early, and prose wraps a
+	 * column early, rather than being clipped after the fact. Paint geometry
+	 * (CUP coordinates, reflow counts, erase math) keeps the physical width;
+	 * {@link #prepareLine} caps any content that still reaches the final
+	 * column as a backstop for components that ignore the reduced width.
+	 */
+	#layoutWidth(width: number): number {
+		return width > 1 && this.terminal.hostOwnsGridOnResize === true ? width - 1 : width;
+	}
+
 	#prepareLine(raw: string, width: number, widthEpoch: number, imageProtocol: ImageProtocol | null): PreparedLine {
 		const safeWidth = Number.isFinite(width) ? Math.max(1, Math.trunc(width)) : 1;
-		// ConPTY-class hosts can materialize a pending wrap before a following
-		// cursor-addressing sequence even while DECAWM is disabled (#9783): a row
-		// written to the final column can advance the grid one physical row early,
-		// and `\n`-chain retirement compounds that drift per row — new paint lands
-		// over old rows and the damage persists into scrollback until a resize
-		// rebuild. Prevention is total when no prepared row ever reaches the final
-		// column, so on those hosts every row is fitted to width - 1. The stored
-		// PreparedLine.width stays PHYSICAL: CUP coordinates, rewrite comparison,
-		// and the memo key are unaffected; the classification flag is immutable
-		// post-construction, so the cap can never stale-cache.
+		// Backstop for #layoutWidth: layout already keeps components a column
+		// early on ConPTY-class hosts, but content that ignores the layout width
+		// (a component sizing from its own state, a pre-wrapped blob) must still
+		// never reach the final column — a row that fills it can arm a pending
+		// wrap that materializes before the next cursor move and advances the
+		// grid a row early (#9783). The stored PreparedLine.width stays
+		// PHYSICAL: CUP coordinates, rewrite comparison, and the memo key are
+		// unaffected; the classification flag is immutable post-construction,
+		// so the cap can never stale-cache.
 		const capWidth = safeWidth > 1 && this.terminal.hostOwnsGridOnResize === true ? safeWidth - 1 : safeWidth;
 		const maxSourceLength = Math.min(
 			LINE_FIT_MAX_SOURCE_CODE_UNITS,
@@ -4533,7 +4555,7 @@ export class TUI extends Container {
 		let lines: string[];
 		do {
 			this.#imageBudget.beginPass(false, true);
-			lines = this.#compositeOverlaysIntoWindow(base, width, height);
+			lines = this.#compositeOverlaysIntoWindow(base, this.#layoutWidth(width), height);
 		} while (this.#imageBudget.endPass());
 		const markers: { row: number; col: number }[] = [];
 		const prepared = this.#prepareLinesArray(lines, width, this.#altPreparedRows, height, markers);

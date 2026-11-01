@@ -1,27 +1,28 @@
 /**
- * RED regression: turn-boundary text overlap on ConPTY-class terminals.
+ * Regression: turn-boundary text overlap on ConPTY-class terminals (#9783).
  *
- * Assistant markdown right-pads every row to EXACTLY terminal width
- * (src/components/markdown.ts:3604-3606). #lineRewriteSequence skips the
- * erase on exact-width ascii rows (src/tui.ts:4449-4452) and ends each
- * rewrite with CR (:4463). Turn-boundary retirement replays history with a
- * bare "\n"-chain after CSI startTop;1H (src/tui.ts:3759-3793), assuming one
- * emitted line advances exactly one physical row.
- *
- * Per issue #9783 (src/tui.ts:4422-4426), ConPTY materializes a pending wrap
- * before a FOLLOWING cursor-addressing sequence even while DECAWM is
- * disabled (paint emits ?7l, src/tui.ts:100-104). LF/CNL is cursor
- * addressing, and the app only BELIEVES the trailing CR kills the wrap. On
- * conhost, an exact-width row followed by the retirement "\n" therefore
- * advances TWO physical rows: every full-width retired row adds one row of
- * drift, new text lands over retired text, and the garble is baked into
- * scrollback until a resize rebuild.
+ * The markdown renderer right-pads every row to the full layout width
+ * (components/markdown.ts, "No background - just pad to width"), and the
+ * turn-boundary retirement replays history through #lineRewriteSequence as a
+ * bare "\n"-chain that assumes one emitted line advances exactly one physical
+ * row. Live captures in Windows Terminal (PR #17692) show the unpatched
+ * renderer expanding retired full-width rows into TWO physical buffer rows
+ * (160 of 161 streamed table rows), which the layout-width fix reduces to one
+ * artifact per 123 rows. Single-shot cursor probes on conhost, ConPTY, and
+ * OpenConsole 1.23/1.24/1.25 did NOT reproduce a +1 advance for a settled LF
+ * after an exact-width row, and CR clears the delayed-EOL wrap flag on every
+ * host tested — the trigger is a real-time write-timing condition (#9783),
+ * not a generic grid property. The emulation below is the STRICTEST model of
+ * that condition, and the fix is preventive by design: no row reaches the
+ * final column, so the trigger can never arm, whatever its timing. See also
+ * the CR-terminated rewrites at #lineRewriteSequence, which reduce (not
+ * eliminate) materialization.
  *
  * The kitty-vt-wasm engine (test/virtual-terminal.ts) models permissive
  * DECAWM only, so the ConPTY semantics are injected below: the CSI-move
- * materialization copies ConptyPendingWrapTerminal
- * (test/history-frame-plan.test.ts:163-183); the LF materialization is the
- * untested turn-boundary variant.
+ * materialization mirrors ConptyPendingWrapTerminal
+ * (test/history-frame-plan.test.ts); the LF materialization is the
+ * turn-boundary variant.
  */
 import { beforeAll, describe, expect, it } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
@@ -48,7 +49,7 @@ const LINES_B = 12;
  * LF is cursor addressing, so an exact-width row whose text the app
  * terminated with CR still drifts by one physical row at the LF.
  */
-export class ConptyClassTerminal extends VirtualTerminal {
+class ConptyClassTerminal extends VirtualTerminal {
 	lfMaterializations = 0;
 	csiMaterializations = 0;
 
@@ -96,7 +97,7 @@ export class ConptyClassTerminal extends VirtualTerminal {
  *  where the right-margin cap was gated off. Retained for the vacuity guard:
  *  it proves the emulated hazard still arms, so a clean flagged run is
  *  evidence of the fix, not of an idle harness. */
-export class UnclassifiedConptyTerminal extends ConptyClassTerminal {
+class UnclassifiedConptyTerminal extends ConptyClassTerminal {
 	override get hostOwnsGridOnResize(): boolean {
 		return false;
 	}
@@ -203,8 +204,7 @@ describe("turn-boundary overlap (#9783 family, LF-chain drift)", () => {
 	it("baseline: plain VT-model terminal keeps retired and new rows separate", async () => {
 		const terminal = new VirtualTerminal(COLUMNS, ROWS);
 		await runTurnBoundary(terminal);
-		const buffer = expectCleanTranscript(terminal);
-		expect(buffer.length).toBeGreaterThan(0);
+		expectCleanTranscript(terminal);
 	});
 
 	it("ConPTY-class host must not paint new rows over retired rows", async () => {
@@ -236,5 +236,34 @@ describe("turn-boundary overlap (#9783 family, LF-chain drift)", () => {
 		).toBe(0);
 		expectCleanTranscript(conpty);
 		expect(conpty.getBufferPosition().baseY, "untracked scroll: baseY drifted past baseline").toBe(baseline);
+	});
+
+	it("right-aligned chrome keeps its final glyph on a ConPTY-class host", async () => {
+		// The margin must be reserved at layout width, not clipped after
+		// layout: a component that fills its layout width with a closed box
+		// keeps its right border, one column before the physical final one.
+		// A post-layout truncation instead (the naive fix) drops the closing
+		// glyph — every box/table/status right border silently vanishes on
+		// Windows hosts.
+		const terminal = new ConptyClassTerminal(COLUMNS, ROWS);
+		const scheduler = new VirtualRenderScheduler();
+		const composer = new Composer({
+			terminal,
+			tuiOptions: { renderScheduler: scheduler },
+			preferences: { ...COMPOSER_DEFAULTS, quiet: true },
+		});
+		const content = new Container();
+		content.addChild({
+			render: (width: number) => [`│${"-".repeat(Math.max(0, width - 2))}│`, "box body"],
+		});
+		composer.setRuntimeChildren([content], { transientChrome: [] });
+		composer.start({ playWelcomeIntro: false });
+		await scheduler.settle(terminal);
+		const boxRow = terminal
+			.getViewport()
+			.map(row => Bun.stripANSI(row))
+			.find(row => row.startsWith("│"));
+		expect(boxRow, "the box row must reach the viewport").toBeDefined();
+		expect(boxRow!.trimEnd().endsWith("│"), `right border must close the row: ${JSON.stringify(boxRow)}`).toBe(true);
 	});
 });
