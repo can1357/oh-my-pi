@@ -12,7 +12,12 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { safeSend as safeSendIpc } from "../../utils/ipc";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../bridge-timeout";
 import { getEnabledEvalPreludes } from "../preludes";
-import { attachSessionOwner, EvalKernelNotRunningError, type SessionOwners } from "../executor-base";
+import {
+	attachSessionOwner,
+	EvalKernelNotRunningError,
+	formatKernelReclaimNotice,
+	type SessionOwners,
+} from "../executor-base";
 import { shouldDetachKernel } from "../py/spawn-options";
 import { updateEvalState } from "../state";
 import { SupersededKernelReaper, type SupersededReclaimOutcome } from "../superseded-reclaim";
@@ -129,6 +134,14 @@ const ownerKeys = new Map<string, string>();
 const reaper = new SupersededKernelReaper<JsSession>();
 const startingSessions = new Map<string, StartingJsSession>();
 const resettingSessions = new Map<string, Promise<void>>();
+/**
+ * Keys whose worker a reclaim terminated, with the owners registered against
+ * it. The next cell on such a key runs in a fresh worker with none of the
+ * globals the caller built up, and nothing else here would say so — a reclaim
+ * that works is silent. Consumed by that cell, dropped by a reset, and
+ * dropped with its owners when they are disposed.
+ */
+const reclaimedKeys = new Map<string, Set<string>>();
 // Worker startup (module-graph import + WorkerCore construction) is infrastructure
 // cost, not user compute. Floor it independently of Bun's 5s default per-test timeout
 // so a slow cold-start under load isn't aborted mid-init — terminating a still-
@@ -179,6 +192,10 @@ export async function executeInVmContext(options: {
 }): Promise<{ value: unknown }> {
 	const { sessionKey } = options;
 	if (options.reset) {
+		// A caller that asked for a fresh context is not surprised by one, so a
+		// reclaim's pending notice is dropped rather than explaining a restart
+		// the caller ordered.
+		reclaimedKeys.delete(sessionKey);
 		// Coalesce concurrent resets: an existing in-flight reset already
 		// produces a fresh context, so a follow-up `reset: true` cell should
 		// just wait for it rather than failing the user-visible call.
@@ -224,6 +241,13 @@ export async function executeInVmContext(options: {
 			options.ownerId,
 		);
 		reconcileSupersededJsSessions();
+		// The worker this key had was reclaimed while the owner worked
+		// elsewhere, so this cell is the first thing that can say the earlier
+		// globals are gone. Emitted before the cell's own output, and after
+		// the acquisition so a startup that fails leaves the notice owed.
+		if (reclaimedKeys.delete(sessionKey)) {
+			options.runState.onText?.(`${formatKernelReclaimNotice("JS worker")}\n`);
+		}
 		const result = await runOnce(session, options);
 		if (session.state === "alive" && path.isAbsolute(options.filename)) {
 			updateEvalState(options.session, {
@@ -280,7 +304,11 @@ async function reclaimSuperseded(key: string, session: JsSession): Promise<Super
 	if (session.pending.size > 0 || session.pendingSnapshots.size > 0 || session.pendingShadowRuns.size > 0) {
 		return "deferred";
 	}
+	const owners = new Set(session.ownerIds);
 	await killSessionFor(session, new ToolError("JS context left behind by its session"), { force: false });
+	// The globals this key held are gone. The next cell here is the first
+	// thing that can say so.
+	reclaimedKeys.set(key, owners);
 	return "settled";
 }
 
@@ -503,6 +531,7 @@ export async function runIfSnapshotMatches(options: {
 }
 
 export async function resetVmContext(sessionKey: string): Promise<void> {
+	reclaimedKeys.delete(sessionKey);
 	const session = sessions.get(sessionKey) ?? (await startingSessions.get(sessionKey)?.promise.catch(() => undefined));
 	if (!session) return;
 	reaper.cancel(session);
@@ -524,6 +553,7 @@ export async function disposeAllVmContexts(): Promise<void> {
 		if (!all.includes(result.value)) all.push(result.value);
 	}
 	sessions.clear();
+	reclaimedKeys.clear();
 	await Promise.all(all.map(session => killSession(session, new ToolError("JS context disposed"), { force: false })));
 	// A reclaim that fired just before the cancel may still be terminating a
 	// worker; a dispose must not return while one is up.
@@ -535,9 +565,19 @@ export async function disposeAllVmContexts(): Promise<void> {
  * owners (e.g. an in-memory session keyed only by cwd) just drop the registration.
  */
 export async function disposeVmContextsByOwner(ownerId: string): Promise<void> {
+	// A reclaim already running removed its session from the map before it
+	// awaited the kill, so the sweep below cannot see it and would return
+	// while that worker is still alive. Joining it first is what makes this
+	// function's return the statement its name makes.
+	await reaper.settle();
 	// This owner is gone, so it is at no key: a context it shared stops waiting
 	// on it.
 	ownerKeys.delete(ownerId);
+	for (const [key, owners] of Array.from(reclaimedKeys.entries())) {
+		if (!owners.delete(ownerId)) continue;
+		// Nobody is left to be told, so the notice goes with its owners.
+		if (owners.size === 0) reclaimedKeys.delete(key);
+	}
 	const toKill: JsSession[] = [];
 	for (const session of sessions.values()) {
 		if (session.ownerIds.has(ownerId)) reaper.cancel(session);
@@ -573,6 +613,10 @@ export async function disposeVmContextsByOwner(ownerId: string): Promise<void> {
 	await Promise.all(
 		toKill.map(session => killSession(session, new ToolError("JS context disposed"), { force: false })),
 	);
+	// A grace that expired while those kills ran started a reclaim of its own,
+	// with the same handle problem. Joining again costs nothing when nothing
+	// is in flight.
+	await reaper.settle();
 	// A context this owner shared with another agent kept only its registration
 	// dropped above. Nobody is left to notice that, so the arming question is
 	// asked again here: the agents it still belongs to may have moved away long

@@ -78,6 +78,13 @@ export interface KernelExecutorBaseOptions {
 	bridgeSessionId?: string;
 	artifactId?: string;
 	artifactPath?: string;
+	/**
+	 * Set by the kernel session registry. Called once, when the cell starts on
+	 * its kernel, and returns the line that cell must open with — today, that
+	 * the kernel the session previously used here was shut down and its state
+	 * is gone. Returns undefined when there is nothing to say.
+	 */
+	claimKernelNotice?: () => string | undefined;
 }
 
 /** Normalised execution result produced by {@link executeWithKernelBase}. */
@@ -96,6 +103,17 @@ export interface KernelExecutionResult {
 	outputBytes: number;
 	displayOutputs: EvalDisplayOutput[];
 	stdinRequested: boolean;
+}
+
+/**
+ * First line of a cell that runs on a kernel which replaced one this session
+ * left behind and the registry reclaimed. Reclaiming frees the memory a
+ * forgotten runtime holds, and the cost lands on the user as a namespace that
+ * is suddenly empty, so the cell that meets it says so instead of failing with
+ * an unexplained `NameError`.
+ */
+export function formatKernelReclaimNotice(runtimeLabel: string): string {
+	return `Kernel restarted: the previous ${runtimeLabel} was shut down after this session moved away and left it idle; state is unavailable. Re-run needed setup: variables, imports and definitions from earlier cells are gone.`;
 }
 
 /** Minimal kernel surface the base executor drives, satisfied by every backend kernel. */
@@ -513,6 +531,8 @@ export async function executeWithKernelBase<
 			: null;
 
 	try {
+		const notice = options?.claimKernelNotice?.();
+		if (notice !== undefined) sink.push(`${notice}\n`);
 		if (remainingMs !== undefined && remainingMs <= 0) {
 			throw new cancelledErrorClass(true);
 		}

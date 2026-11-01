@@ -130,6 +130,8 @@ export interface PythonExecutorOptions {
 	bridgeSessionId?: string;
 	/** @internal Bridge endpoint info, set by `executePython` before delegating. */
 	bridge?: { url: string; token: string };
+	/** @internal Set by the session registry; see {@link KernelExecutorBaseOptions.claimKernelNotice}. */
+	claimKernelNotice?: () => string | undefined;
 }
 
 export interface PythonKernelExecutor {

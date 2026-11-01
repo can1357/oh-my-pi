@@ -4,6 +4,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import {
 	attachSessionOwner,
 	type CancelledErrorClass,
+	formatKernelReclaimNotice,
 	getRemainingTimeoutMs,
 	isCancellationError,
 	isTimedOutCancellation,
@@ -160,6 +161,16 @@ export function createKernelSessionRegistry<
 	 */
 	const ownerKeys = new Map<string, string>();
 	const reaper = new SupersededKernelReaper<TSession>();
+	/**
+	 * Keys whose kernel a reclaim shut down, with the owners that were
+	 * registered against it. The next cell on such a key starts a fresh kernel
+	 * with an empty namespace, and nothing else in this registry would tell
+	 * the caller why: a reclaim that works logs nothing, and the only warning
+	 * here fires when a shutdown cannot be confirmed. The entry is consumed by
+	 * that cell, dropped by a reset (which asks for a fresh kernel anyway),
+	 * and dropped with its owners when they are disposed.
+	 */
+	const reclaimedKeys = new Map<string, Set<string>>();
 
 	const context: KernelSessionRegistryContext<TKernel, TOptions, TSession> = {
 		sessions,
@@ -421,7 +432,13 @@ export function createKernelSessionRegistry<
 		descriptor.invalidateSession?.(session);
 		if (sessions.get(key) === session) sessions.delete(key);
 		const result = await settleShutdown(session, false);
-		if (result.status === "fulfilled" && result.value?.confirmed !== false) return "settled";
+		if (result.status === "fulfilled" && result.value?.confirmed !== false) {
+			// The namespace this session had here is gone. Nobody has been told
+			// yet: the next cell on this key is the first thing a caller will
+			// see, and it carries the notice.
+			reclaimedKeys.set(key, new Set(session.ownerIds));
+			return "settled";
+		}
 		logger.warn(`${descriptor.languageLabel} kernel left behind by its session did not confirm exit`, {
 			sessionId: session.sessionId,
 			sessionKey: key,
@@ -488,6 +505,7 @@ export function createKernelSessionRegistry<
 		const pending = [...startingSessions.values()].map(starting => starting.promise);
 		startingSessions.clear();
 		if (descriptor.clearResetsOnDisposeAll) resettingSessions.clear();
+		reclaimedKeys.clear();
 		const all = [...sessions.entries()];
 		for (const [id, session] of all) {
 			descriptor.invalidateSession?.(session);
@@ -522,9 +540,21 @@ export function createKernelSessionRegistry<
 	}
 
 	async function disposeByOwner(ownerId: string): Promise<void> {
+		// A reclaim already running holds the only registry handle on its
+		// kernel: it removed the entry before it awaited the shutdown, so the
+		// sweep below cannot find that session and would return while its
+		// runner is still alive — which is what "the session ended" must never
+		// mean here. Joining it first is what makes this function's return the
+		// statement its name makes. `disposeAll` joins the same work.
+		await reaper.settle();
 		// This owner is gone, so it is at no key: a kernel it shared stops
 		// waiting on it.
 		ownerKeys.delete(ownerId);
+		for (const [key, owners] of Array.from(reclaimedKeys.entries())) {
+			if (!owners.delete(ownerId)) continue;
+			// Nobody is left to be told, so the notice goes with its owners.
+			if (owners.size === 0) reclaimedKeys.delete(key);
+		}
 		const toShutdown: TSession[] = [];
 		for (const session of sessions.values()) {
 			if (session.ownerIds.has(ownerId)) reaper.cancel(session);
@@ -562,6 +592,10 @@ export function createKernelSessionRegistry<
 			shutdowns.push(settleShutdown(session, false));
 		}
 		const results = await Promise.all(shutdowns);
+		// A grace that expired while the shutdowns above were running started a
+		// reclaim of its own, with the same handle problem. Joining again costs
+		// nothing when nothing is in flight.
+		await reaper.settle();
 		for (let i = 0; i < toShutdown.length; i += 1) {
 			const session = toShutdown[i];
 			const result = results[i];
@@ -604,6 +638,10 @@ export function createKernelSessionRegistry<
 			options.bridgeSessionId = sessionId;
 		}
 		if (options.reset) {
+			// The caller asked for a fresh kernel, so an empty namespace is not
+			// news: a reclaim's pending notice goes unsaid rather than
+			// explaining a restart the caller ordered.
+			reclaimedKeys.delete(sessionKey);
 			const inFlight = resettingSessions.get(sessionKey);
 			if (inFlight) await inFlight.catch(() => undefined);
 			else {
@@ -640,10 +678,27 @@ export function createKernelSessionRegistry<
 			const kernel = await acquireLiveSessionKernel(session, cwd, options);
 			if (!isCurrent(session, kernel)) throw new descriptor.cancelledErrorClass(false);
 			throwIfCallerCancelled(options);
-			const runOptions = { ...options, cwd };
+			// Whoever runs the first cell after a reclaim is told that the
+			// kernel it would have reused is gone. Claimed at the start of the
+			// cell, inside the executor, so the line lands ahead of that cell's
+			// own output rather than after it.
+			const reclaimedOwners = reclaimedKeys.get(sessionKey);
+			let claimedNotice: Set<string> | undefined;
+			const claimKernelNotice = (): string | undefined => {
+				if (reclaimedOwners === undefined || !reclaimedKeys.delete(sessionKey)) return undefined;
+				claimedNotice = reclaimedOwners;
+				return formatKernelReclaimNotice(`${descriptor.languageLabel} kernel`);
+			};
+			const runOptions = { ...options, cwd, claimKernelNotice };
 			try {
 				return await descriptor.executeWithKernel(kernel, code, runOptions);
 			} catch (err) {
+				// A cell that threw returns no output, so a notice it claimed
+				// reached nobody. It is owed again, and the next cell on this
+				// key carries it.
+				if (claimedNotice !== undefined && !reclaimedKeys.has(sessionKey)) {
+					reclaimedKeys.set(sessionKey, claimedNotice);
+				}
 				if (
 					descriptor.isCancellation?.(err) ||
 					isCancellationError(err, descriptor.cancelledErrorClass) ||
