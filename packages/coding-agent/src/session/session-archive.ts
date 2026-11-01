@@ -35,9 +35,9 @@ import {
 	NotARegularFile,
 	notRegularAsAbsent,
 	openRegularFile,
-	type OwnFileRemoval,
 	removeFileNoOneElseWrites,
-	unlinkFileNoOneElseWrites,
+	removeFileOthersMayWrite,
+	removeHeldDirectory,
 	writeExclusive,
 } from "./regular-file";
 import { SESSION_TITLE_SLOT_BYTES } from "./session-entries";
@@ -185,6 +185,8 @@ interface OwnRestoreRecord {
 	handle: fs.FileHandle;
 	dev: number;
 	ino: number;
+	/** What this run last wrote into it, through {@link handle}. */
+	text: Buffer;
 }
 
 /**
@@ -217,7 +219,7 @@ async function createRestoreRecord(record: string, text: string): Promise<OwnRes
 	try {
 		await handle.writeFile(text);
 		const { dev, ino } = await handle.stat();
-		return { path: record, handle, dev, ino };
+		return { path: record, handle, dev, ino, text: Buffer.from(text) };
 	} catch (error) {
 		await handle.close().catch(() => undefined);
 		throw error;
@@ -228,35 +230,45 @@ async function createRestoreRecord(record: string, text: string): Promise<OwnRes
 async function rewriteOwnRestoreRecord(own: OwnRestoreRecord, text: string): Promise<void> {
 	await own.handle.truncate(0);
 	await own.handle.write(text, 0);
+	own.text = Buffer.from(text);
 }
 
 /**
- * Take this run's record down, or say why what has its name was left. The
- * record is a file only gc names and writes — created here with `O_EXCL` and
- * written only through its own descriptor — so it goes by
- * {@link unlinkFileNoOneElseWrites}: removed only while the name holds the
- * very inode this run created, which no other file can have been given while
- * this run holds its descriptor, looked at again the instant before the
- * `unlink`. Nothing is moved aside, so a run killed here leaves its record at
- * its own name or nothing. A directory that refuses the change is named,
- * with what to do.
+ * Take this run's record down, or say why what has its name was left.
+ *
+ * The record sits in an archive bucket, where any process of this user can
+ * name it, so it is a file others may write by its name and goes by
+ * {@link removeFileOthersMayWrite}: moved onto a private placeholder and
+ * judged there, never unlinked by its name. A check of the name followed by
+ * an `unlink` of it removed a file a review renamed onto the name in the one
+ * call between the two, and the restore exited 0. What moved must be the very
+ * inode this run created — no other file can have been given its number
+ * while this run holds its descriptor — holding exactly what this run last
+ * wrote, so a write appended by the name before the move keeps it. Anything
+ * else goes back under the name, or, when something took the name
+ * meanwhile, stays at the private name the note gives. A directory that
+ * refuses the move is named, with what to do.
  */
 async function dropOwnRestoreRecord(own: OwnRestoreRecord): Promise<string | undefined> {
-	let removal: OwnFileRemoval;
-	try {
-		removal = await unlinkFileNoOneElseWrites(own.path, [{ handle: own.handle, dev: own.dev, ino: own.ino }]);
-	} catch (error) {
-		if (isPermissionError(error)) {
-			return (
-				`${recordDirectoryNotWritable(own.path, error)}, so this restore could not take down its record ${own.path}, ` +
-				`though everything else came home. While it is there the session is treated as unfinished and does not open: ` +
-				`make the directory writable with \`chmod u+w\`, then look at the record and move it aside`
-			);
-		}
-		throw error;
+	const isOwn = (entry: Stats): boolean => entry.isFile() && entry.dev === own.dev && entry.ino === own.ino;
+	const notOurs = `${own.path} held something other than the record this restore wrote`;
+	const removal = await removeFileOthersMayWrite(own.path, {
+		matches: isOwn,
+		mismatch: notOurs,
+		judge: async (_moved, handle) => {
+			if (!handle || !isOwn(await handle.stat())) return notOurs;
+			return (await handle.readFile()).equals(own.text) ? undefined : notOurs;
+		},
+	});
+	if (removal.outcome !== "kept") return undefined;
+	if (isPermissionError(removal.cause)) {
+		return (
+			`${recordDirectoryNotWritable(own.path, removal.cause)}, so this restore could not take down its record ${own.path}, ` +
+			`though everything else came home. While it is there the session is treated as unfinished and does not open: ` +
+			`make the directory writable with \`chmod u+w\`, then look at the record and move it aside`
+		);
 	}
-	if (removal !== "kept") return undefined;
-	return `${own.path} held something other than the record this restore wrote, so it was left: look at it, and once the session holds everything, move it aside`;
+	return `${removal.note}: look at it, and once the session holds everything, move it aside`;
 }
 
 /**
@@ -1524,6 +1536,13 @@ export interface StagingGround {
 	 * linked to — and nothing put at those names since. See {@link removeFileNoOneElseWrites}.
 	 */
 	held: HeldFile;
+	/**
+	 * The directory held: made and proved by {@link makeHeldDirectory}, its
+	 * descriptor open until {@link removeStagingGround} has removed it or
+	 * given it up, so it goes only while its name holds that very directory —
+	 * see {@link removeHeldDirectory}.
+	 */
+	dirHeld: HeldFile;
 	/** This directory's record in {@link stagingLedgerDir}. */
 	record: string;
 	/**
@@ -1586,9 +1605,13 @@ async function assertPrivateLedger(ledger: string): Promise<void> {
  * synced, so after a power loss the directory can outlive its record; it is
  * then indistinguishable from an artifact and is treated as one.
  *
- * Mode `0700`, so nothing without this user's rights puts a file inside.
- * What the directory is not: a boundary against a process that can write
- * the directory it sits in. Such a process can rename the minted directory
+ * Mode `0700`, so nothing without this user's rights puts a file inside,
+ * made and proved by {@link makeHeldDirectory}, so a directory somebody put
+ * at the name before this run looked is not taken for this run's unless it
+ * already carries that mode, is empty and is this user's — and held, so it
+ * is removed only while its name holds that very directory. What the
+ * directory is not: a boundary against a process that can write the
+ * directory it sits in. Such a process can rename the minted directory
  * away and put one of its own at the name, and every later step here names
  * a path — there is no system call that unlinks an inode — so it then acts
  * on whatever stands there. The identity checks narrow what that can do;
@@ -1654,9 +1677,24 @@ export async function mintStagingGround(target: string, ledger: string, mode = 0
 			await release();
 			throw failed(error, notes);
 		}
+		let dirHeld: HeldFile;
 		try {
-			await fs.mkdir(dir, { mode: 0o700 });
+			dirHeld = await makeHeldDirectory(dir, 0o700);
 		} catch (error) {
+			// `EEXIST` is the `mkdir` refusing a name already taken: nothing of
+			// this run's is there, so the record goes and another name is tried.
+			// Any other failure can come after the `mkdir` made the directory —
+			// an `open` refused, or a directory there that this run cannot show
+			// it made — and a directory at that name that no record names is one
+			// a later restore carries home as somebody's artifact. So while
+			// anything stands at the name, the record stays, and says so.
+			const standing = codeOf(error) === "EEXIST" ? undefined : await fs.lstat(dir).catch(() => undefined);
+			if (standing) {
+				await release();
+				throw failed(error, [
+					`${dir} was left where it is, and the staging record ${record} names it, so a later restore leaves it out of the live tree and names it`,
+				]);
+			}
 			const notes = await unrecord();
 			await release();
 			if (notes.length > 0) throw failed(error, notes);
@@ -1666,12 +1704,11 @@ export async function mintStagingGround(target: string, ledger: string, mode = 0
 		let handle: fs.FileHandle | undefined;
 		let created: Stats | undefined;
 		try {
-			const minted = await fs.lstat(dir);
 			handle = await createExclusive(file, mode, true);
 			created = await handle.stat();
 			const recorded: StagingRecord = {
 				...intent,
-				dirIdentity: { dev: minted.dev, ino: minted.ino },
+				dirIdentity: { dev: dirHeld.dev, ino: dirHeld.ino },
 				identity: { dev: created.dev, ino: created.ino },
 			};
 			// The same way as the first: written whole under a part name of
@@ -1697,6 +1734,7 @@ export async function mintStagingGround(target: string, ledger: string, mode = 0
 				handle,
 				created,
 				held: { handle, dev: created.dev, ino: created.ino },
+				dirHeld,
 				record: complete,
 				recordHeld,
 			};
@@ -1712,9 +1750,11 @@ export async function mintStagingGround(target: string, ledger: string, mode = 0
 				dir,
 				file,
 				handle && created ? { handle, dev: created.dev, ino: created.ino } : undefined,
+				dirHeld,
 				"this run",
 			);
 			await handle?.close().catch(() => undefined);
+			await dirHeld.handle.close().catch(() => undefined);
 			if (note) {
 				await release();
 				throw failed(error, [note]);
@@ -1740,8 +1780,11 @@ export async function mintStagingGround(target: string, ledger: string, mode = 0
  * at most, and a record is a file anybody running as this user could have
  * written, naming a directory with a name, a place and an inode anybody
  * could arrange; none of that says a run made it, so no record removes
- * anything. The directory itself goes with `rmdir`, which removes nothing
- * but an empty directory.
+ * anything. The directory is read only while its name holds `dirHeld`, the
+ * directory this run made and holds open, and goes only by
+ * {@link removeHeldDirectory}: an empty directory somebody put at the name
+ * is theirs, and a review lost one, with its own extended attribute, to an
+ * `rmdir` by name in an archive that reported success.
  *
  * Anything else inside is reported rather than deleted, and a failure to
  * look is reported rather than read as an absence: "it was not there" and "I
@@ -1754,8 +1797,18 @@ async function clearStagingGround(
 	dir: string,
 	file: string,
 	staged: HeldFile | undefined,
+	dirHeld: HeldFile,
 	stager: string,
 ): Promise<string | undefined> {
+	const notOurs = `${dir} is not the directory ${stager} made, so it was left as it is`;
+	let named: Stats;
+	try {
+		named = await fs.lstat(dir);
+	} catch (error) {
+		if (isEnoent(error)) return undefined;
+		return `${dir} could not be looked at, so it was left as it is: ${error}`;
+	}
+	if (!named.isDirectory() || named.dev !== dirHeld.dev || named.ino !== dirHeld.ino) return notOurs;
 	const notes: string[] = [];
 	const entries = await fs.readdir(dir).catch(error => {
 		if (isEnoent(error)) return undefined;
@@ -1772,12 +1825,16 @@ async function clearStagingGround(
 				: `${at} is not ${what}, so it was left as it is`;
 		if (note) notes.push(note);
 	}
-	if (notes.length === 0) {
-		await fs.rmdir(dir).catch((error: unknown) => {
-			if (!isEnoent(error)) notes.push(`${dir} could not be removed: ${error}`);
-		});
+	if (notes.length > 0) return notes.join("; ");
+	try {
+		const removal = await removeHeldDirectory(dir, dirHeld);
+		if (removal === "kept") return notOurs;
+		if (removal === "not-empty")
+			return `${dir} holds something ${stager} did not stage there, so it was left as it is`;
+	} catch (error) {
+		return `${dir} could not be removed: ${error}`;
 	}
-	return notes.length > 0 ? notes.join("; ") : undefined;
+	return undefined;
 }
 
 /**
@@ -1790,11 +1847,12 @@ async function clearStagingGround(
  */
 export async function removeStagingGround(ground: StagingGround): Promise<string | undefined> {
 	try {
-		const note = await clearStagingGround(ground.dir, ground.file, ground.held, "this run");
+		const note = await clearStagingGround(ground.dir, ground.file, ground.held, ground.dirHeld, "this run");
 		if (note !== undefined) return note;
 		return await removeFileNoOneElseWrites(ground.record, [ground.recordHeld], "the record this run wrote");
 	} finally {
 		await ground.recordHeld.handle.close().catch(() => undefined);
+		await ground.dirHeld.handle.close().catch(() => undefined);
 	}
 }
 

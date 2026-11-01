@@ -105,47 +105,158 @@ export async function createExclusive(file: string, mode: number, readable = fal
 }
 
 /**
- * Make `dir`, new, with `mode` given to the `mkdir` itself, and hold it.
+ * Make `dir`, new, with `mode` given to the `mkdir` itself, and hold it —
+ * but only once what the descriptor holds is shown to be the directory that
+ * `mkdir` made, not merely a directory: being a directory, being this
+ * user's and being empty are each true of a directory somebody else of this
+ * user put at the name, and a review filled such a directory, at `0777`,
+ * with a restore's artifacts, and deleted an empty one, carrying its own
+ * extended attribute, while undoing an archive.
  *
  * The mode is set by the one call that makes the directory, as `mkdtemp`
  * sets `0700`: the kernel applies it, less the umask, as the directory comes
- * into being, so there is no moment at which the directory exists with a
- * mode it is later changed from, and nothing here changes a mode afterwards
- * — not through the name, not through a descriptor. A mode set after the
- * `mkdir` went to whatever the name held by then: through the name it
- * followed a link put there, and through a descriptor opened after the
- * `mkdir` it reached a directory a writer of this user's own swapped in
- * between the two calls — a review won that race with an inotify watcher
- * about a third of the time, the restore gave somebody's private directory
- * the archived `0777`, and another user removed its only file. With no
- * change of mode left, a directory swapped in keeps its own.
+ * into being, and nothing here changes a mode afterwards — not through the
+ * name, not through a descriptor. A mode set after the `mkdir` went to
+ * whatever the name held by then, and gave somebody's private directory the
+ * archived `0777`.
  *
- * The directory is then opened with `O_DIRECTORY` and `O_NOFOLLOW`, so a
- * link put at the name is refused, and what the descriptor holds must be a
- * directory of this user's with nothing in it, read through the descriptor:
- * a directory just made is empty, and one swapped in before the `open`
- * that holds anything is somebody's, so nothing is put into it. The caller
- * adds entries by name, each created afresh — never written over — and
- * keeps the descriptor, and the identity it reports, to say afterwards
- * whether the name still holds the directory and, while it is open, to know
- * the directory by an inode number no other entry can be given.
+ * `mkdir` returns no identity and no descriptor, so provenance is built from
+ * three looks, each refusing what the one before cannot:
+ *
+ * 1. The name is looked at with `lstat` straight after the `mkdir`, and must
+ *    be a directory, not a link. Its device and inode are what this run takes
+ *    the `mkdir` to have made.
+ * 2. The name is opened with `O_DIRECTORY` and `O_NOFOLLOW`, and the
+ *    descriptor's own `fstat` must report that very device and inode. This
+ *    comparison, not the open's flags, is what refuses a link put at the name
+ *    between the look and the `open`: an ordinary Linux kernel refuses a link
+ *    to a directory under those flags with `ENOTDIR`, but gVisor was measured
+ *    following one with no error. That measurement used a plain `openat` with
+ *    `O_NOFOLLOW`; `openat2` with `RESOLVE_NO_SYMLINKS` was not tested.
+ * 3. The descriptor's mode must be exactly `mode` less the umask, which is
+ *    what `mkdir` gives every directory it makes. A directory swapped in
+ *    before the look in step 1 passes steps 1 and 2 — it is what the name
+ *    held — and is refused here unless it already carries exactly the mode
+ *    this run's own would have had: the review's `0777` directory is refused,
+ *    and nothing is put into it.
+ *
+ * It must also be this user's and empty, read through the descriptor.
+ *
+ * What is left: an empty directory of this user's, swapped in before the
+ * look in step 1 and already carrying exactly that mode, is taken for this
+ * run's. It is filled, and if the run then fails, removed — `rmdir` takes
+ * its extended attributes with it. What is put in it is open to nobody this
+ * run's own directory would not have opened it to. No system call makes a
+ * directory and hands back a descriptor on it, so no look taken after the
+ * `mkdir` can tell such a directory from the one the `mkdir` made. And a
+ * parent directory carrying a default ACL gives a new directory the ACL's
+ * mode instead of `mode` less the umask, so there every directory this makes
+ * can be refused: nothing is filled, and the refusal names it.
+ *
+ * The caller adds entries by name, each created afresh — never written
+ * over — and keeps the descriptor, and the identity it reports, to say
+ * afterwards whether the name still holds the directory and, while it is
+ * open, to know the directory by an inode number no other entry can be
+ * given. Removal goes through {@link removeHeldDirectory}.
  */
 export async function makeHeldDirectory(dir: string, mode: number): Promise<HeldFile> {
 	await fs.mkdir(dir, { mode });
-	const handle = await fs.open(dir, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+	const notMine = (): Error => new Error(`${dir} is not the directory this run just made, so nothing was put into it`);
+	const made = await fs.lstat(dir).catch((error: unknown) => {
+		if (isEnoent(error)) throw notMine();
+		throw error;
+	});
+	if (!made.isDirectory()) throw notMine();
+	const held = await holdSeenDirectory(dir, made);
+	if (!held) throw notMine();
+	try {
+		const stat = await held.handle.stat();
+		if (process.getuid !== undefined && stat.uid !== process.getuid()) throw notMine();
+		// Windows keeps no mode bits a `mkdir` could be told by, and has
+		// neither `/dev/fd` nor the swap.
+		if (process.platform !== "win32") {
+			if ((stat.mode & 0o777) !== (mode & ~process.umask() & 0o777)) throw notMine();
+			// `/dev/fd/<n>` opens the directory the descriptor holds, wherever
+			// its name has gone since.
+			if ((await fs.readdir(`/dev/fd/${held.handle.fd}`)).length > 0) throw notMine();
+		}
+		return held;
+	} catch (error) {
+		await held.handle.close().catch(() => undefined);
+		throw error;
+	}
+}
+
+/**
+ * Open the directory `dir` names and hold it — but only when it is `seen`,
+ * the directory an earlier `lstat` of the name found, by the device and
+ * inode the descriptor's own `fstat` reports. Undefined when the name no
+ * longer holds that directory: nothing there, something that is no
+ * directory, a link the open refused, or a different directory.
+ *
+ * The open is `O_DIRECTORY | O_NOFOLLOW`, but those flags are not what keeps
+ * a link out: an ordinary Linux kernel refuses a link to a directory under
+ * them with `ENOTDIR`, and gVisor was measured following one with no error
+ * (a plain `openat` with `O_NOFOLLOW`; `openat2` with `RESOLVE_NO_SYMLINKS`
+ * was not tested). The identity comparison refuses it everywhere.
+ */
+export async function holdSeenDirectory(dir: string, seen: Stats): Promise<HeldFile | undefined> {
+	let handle: fs.FileHandle;
+	try {
+		handle = await fs.open(dir, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+	} catch (error) {
+		const code = error instanceof Error && "code" in error ? error.code : undefined;
+		if (code === "ENOENT" || code === "ENOTDIR" || code === "ELOOP") return undefined;
+		throw error;
+	}
 	try {
 		const stat = await handle.stat();
-		const notMine = (): Error =>
-			new Error(`${dir} is not the directory this run just made, so nothing was put into it`);
-		if (!stat.isDirectory() || (process.getuid !== undefined && stat.uid !== process.getuid())) throw notMine();
-		// `/dev/fd/<n>` opens the directory the descriptor holds, wherever its
-		// name has gone since; Windows has neither the path nor the swap.
-		if (process.platform !== "win32" && (await fs.readdir(`/dev/fd/${handle.fd}`)).length > 0) throw notMine();
-		return { handle, dev: stat.dev, ino: stat.ino };
+		if (stat.isDirectory() && stat.dev === seen.dev && stat.ino === seen.ino) {
+			return { handle, dev: stat.dev, ino: stat.ino };
+		}
 	} catch (error) {
 		await handle.close().catch(() => undefined);
 		throw error;
 	}
+	await handle.close().catch(() => undefined);
+	return undefined;
+}
+
+/** What {@link removeHeldDirectory} found at the name: the held directory, gone; nothing; something else, kept; or the held directory with something in it, kept. */
+export type HeldDirectoryRemoval = "removed" | "absent" | "kept" | "not-empty";
+
+/**
+ * Remove `dir` only while its name holds `held`, a directory this run holds
+ * open: one it made through {@link makeHeldDirectory}, or one a reclaim
+ * proved and opened. Throws what the look or the `rmdir` threw, for the
+ * caller to report.
+ *
+ * `rmdir` removes nothing but an empty directory, and an empty directory is
+ * not nothing: one somebody put at the name has its own owner, mode and
+ * extended attributes, and a review lost one to an `rmdir` by name that
+ * reported success. So the name is looked at the instant before the `rmdir`
+ * and must hold the held directory, whose inode number no other directory
+ * can be given while this run holds its descriptor. One gap is left, as for
+ * a file — see {@link unlinkFileNoOneElseWrites}: an empty directory renamed
+ * onto the name between that look and the `rmdir` is removed, because POSIX
+ * has no rmdir-if-this-inode.
+ */
+export async function removeHeldDirectory(dir: string, held: HeldFile): Promise<HeldDirectoryRemoval> {
+	const standing = await fs.lstat(dir).catch((error: unknown) => {
+		if (isEnoent(error)) return undefined;
+		throw error;
+	});
+	if (!standing) return "absent";
+	if (!standing.isDirectory() || standing.dev !== held.dev || standing.ino !== held.ino) return "kept";
+	try {
+		await fs.rmdir(dir);
+	} catch (error) {
+		const code = error instanceof Error && "code" in error ? error.code : undefined;
+		if (code === "ENOENT") return "absent";
+		if (code === "ENOTEMPTY" || code === "EEXIST") return "not-empty";
+		throw error;
+	}
+	return "removed";
 }
 
 /**
@@ -214,10 +325,13 @@ export type OwnFileRemoval = "removed" | "absent" | "kept";
  * for most.
  *
  * For gc's own files: the lock, its breaker, the staging records and their
- * part names, the restore record, a stage — written once, by gc, through its
- * own descriptor, and appended to by nobody. A file anybody else may write
- * goes through {@link removeFileOthersMayWrite} instead, which catches a
- * write by its name that a look before an `unlink` cannot.
+ * part names, a stage — written once, by gc, through its own descriptor,
+ * and appended to by nobody. A file anybody else may write by its name goes
+ * through {@link removeFileOthersMayWrite} instead, which catches a write by
+ * its name that a look before an `unlink` cannot. The restore record is such
+ * a file: it sits in an archive bucket, where any process of this user can
+ * name it, and a review renamed a file of its own onto it in the one call
+ * between the last look and the `unlink`, which removed that file.
  *
  * A name is not provenance, and neither is an inode number: the kernel hands
  * a freed number to the next file created, so a file someone put at the name
@@ -343,8 +457,12 @@ export type OthersMayWriteRemoval =
 	| { outcome: "removed"; note?: string }
 	/** Nothing was at the name, so nothing was done. */
 	| { outcome: "absent" }
-	/** What the name held was kept; `note` says why and where it is, for the command to print. */
-	| { outcome: "kept"; note: string };
+	/**
+	 * What the name held was kept; `note` says why and where it is, for the
+	 * command to print, and `cause` is the error that stopped the move aside,
+	 * when one did.
+	 */
+	| { outcome: "kept"; note: string; cause?: unknown };
 
 /** Private names tried before moving a file aside gives up. */
 const ASIDE_ATTEMPTS = 8;
@@ -387,16 +505,44 @@ const ASIDE_ATTEMPTS = 8;
  * descriptor kept until the rename is done, and a rename that fails takes it
  * away by {@link removeFileNoOneElseWrites}, as this run's own file. Eight
  * private names taken in a row refuse the removal, naming the file, and
- * nothing moves. A run killed between the two steps leaves an empty file at
- * a `.leaving` name, and nothing removes it: no later run can tell it from an
- * empty file somebody keeps, so it stays, zero bytes, until someone removes it.
+ * nothing moves.
+ *
+ * A run killed part-way leaves a `.leaving` name, and nothing removes it
+ * automatically: no later run can show that a run made it, and a file whose
+ * maker cannot be shown is not gc's to remove.
+ *
+ * - Killed between the placeholder and the rename: an empty file. Each killed
+ *   run leaves its own name — a review's twenty kills left twenty — and a
+ *   later reclaim that succeeds removes none of them.
+ * - Killed after the rename and before the file is unlinked or linked back:
+ *   the whole file, under the `.leaving` name, and nothing at its own name.
+ *   It holds what the file held when it moved, which can be more than any
+ *   copy holds if something was written to it just before the move. In a
+ *   live artifact tree, which is where a reclaim moves an artifact, a restore
+ *   brings the archived copy home at the file's name and leaves the
+ *   `.leaving` file beside it; the next `gc --archive --apply` takes it for an
+ *   artifact and copies it into the archive with no error, and from then on
+ *   the archive holds it and a restore brings it home like any other
+ *   artifact. A transcript's `.leaving` name is in its bucket, outside every
+ *   artifact tree, and nothing copies it. An archived artifact's — a
+ *   superseded, withdrawn or rolled-back copy — is in the archived tree, and
+ *   a restore brings it home as an artifact. A restore takes its record down
+ *   only once the session is whole, so a kill there leaves a whole session
+ *   and the record's text under the `.leaving` name.
+ *
+ * Either way the file is the user's to look at, compare with what stands at
+ * the name it came from, and remove.
  *
  * And one writer stays outside any removal: one that held the file open
  * from before and writes through that descriptor after the judgment, which
  * no removal by any program can see.
  */
 export async function removeFileOthersMayWrite(file: string, rule: OthersMayWriteRule): Promise<OthersMayWriteRemoval> {
-	const kept = (why: string): OthersMayWriteRemoval => ({ outcome: "kept", note: `${why}, so it was left as it is` });
+	const kept = (why: string, cause?: unknown): OthersMayWriteRemoval => ({
+		outcome: "kept",
+		note: `${why}, so it was left as it is`,
+		cause,
+	});
 	let standing: Stats;
 	try {
 		standing = await fs.lstat(file);
@@ -421,7 +567,8 @@ export async function removeFileOthersMayWrite(file: string, rule: OthersMayWrit
 			placeholder = { handle, dev, ino };
 			aside = candidate;
 		} catch (error) {
-			if (!isEexist(error)) return kept(`${file} could not be moved aside to be checked (${errorText(error)})`);
+			if (!isEexist(error))
+				return kept(`${file} could not be moved aside to be checked (${errorText(error)})`, error);
 		}
 	}
 	if (aside === undefined || placeholder === undefined) {
@@ -436,7 +583,10 @@ export async function removeFileOthersMayWrite(file: string, rule: OthersMayWrit
 		const left = await removeFileNoOneElseWrites(aside, [placeholder], "the placeholder this run made");
 		await placeholder.handle.close().catch(() => undefined);
 		if (isEnoent(error) && !left) return { outcome: "absent" };
-		return kept(`${file} could not be moved aside to be checked (${errorText(error)})${left ? `; ${left}` : ""}`);
+		return kept(
+			`${file} could not be moved aside to be checked (${errorText(error)})${left ? `; ${left}` : ""}`,
+			error,
+		);
 	}
 	await placeholder.handle.close().catch(() => undefined);
 	let why: string | undefined;
