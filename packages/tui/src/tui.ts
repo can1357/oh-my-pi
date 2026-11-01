@@ -360,12 +360,6 @@ export interface OverlayFocusOwner {
 	ownsOverlayFocusTarget(component: Component): boolean;
 }
 
-/** Lets an overlay expose the component that should receive a paste while it delegates keyboard focus. */
-export interface OverlayPasteOwner {
-	/** The paste target inside this overlay, or `undefined` to keep the delegated focus target. */
-	getOverlayPasteTarget(): Component | undefined;
-}
-
 function isOverlayFocusTarget(owner: Component, component: Component | null): boolean {
 	if (component === owner) return true;
 	if (!component) return false;
@@ -1296,17 +1290,6 @@ export class TUI extends Container {
 		return this.#focusedComponent;
 	}
 
-	/**
-	 * Component that should receive a paste. Focus-delegating overlays can expose
-	 * an internal field (the fullscreen search Input) without making that field
-	 * the terminal keyboard-focus target.
-	 */
-	getFocusedPasteTarget(): Component | null {
-		const focused = this.#focusedComponent;
-		const holder = this.#getKeyHolderOverlay();
-		if (holder === undefined || !isOverlayFocusTarget(holder.component, focused)) return focused;
-		return (holder.component as Component & Partial<OverlayPasteOwner>).getOverlayPasteTarget?.() ?? focused;
-	}
 	/** Last viewport successfully written by the renderer, for debug inspection. */
 	getDebugPaint():
 		| {

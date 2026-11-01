@@ -412,19 +412,6 @@ function visualColAtOffset(text: string, offset: number): number {
 	return col;
 }
 
-/** Code-unit offset of visual cell `col` within `text`, snapped to a grapheme
- *  boundary so the result never splits a surrogate pair or cluster. */
-function offsetAtVisualCol(text: string, col: number): number {
-	if (col <= 0) return 0;
-	let current = 0;
-	for (const seg of segmenter.segment(text)) {
-		const width = visibleWidth(seg.segment);
-		if (current + width > col) return seg.index;
-		current += width;
-	}
-	return text.length;
-}
-
 /** Highest visual column the cursor may occupy on a wrap segment: the full width
  *  on a logical line's last segment, otherwise just before the final grapheme
  *  (the segment end is the next segment's start). */
@@ -4235,7 +4222,7 @@ export class Editor implements Component, Focusable {
 
 			// Set cursor position, snapping to a grapheme boundary in the target text
 			this.#state.cursorLine = targetVL.logicalLine;
-			const targetCol = targetVL.startCol + offsetAtVisualCol(targetText, moveToVisualCol);
+			const targetCol = targetVL.startCol + colToCodeUnitIndex(targetText, moveToVisualCol);
 			this.#state.cursorCol = Math.min(targetCol, targetLine.length);
 		}
 	}

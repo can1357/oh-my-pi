@@ -40,6 +40,8 @@ export interface FullscreenChatViewOptions {
 	editor: () => Component & MouseRoutable;
 	/** Asks the host for a re-render; drives drag auto-scroll and copy-flash timers. */
 	requestRender?: () => void;
+	/** Moves terminal keyboard focus to a fullscreen-owned input (search). */
+	setFocus?: (component: Component) => void;
 }
 
 /**
@@ -101,12 +103,12 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 
 	/** Lets the normal editor slot keep keyboard focus while this overlay owns the screen. */
 	ownsOverlayFocusTarget(component: Component): boolean {
-		return this.options.editorContainer.children.includes(component);
+		return this.ownsSearchInput(component) || this.options.editorContainer.children.includes(component);
 	}
 
-	/** Keeps enhanced clipboard paste in the transient search field, not the parked chat editor. */
-	getOverlayPasteTarget(): Component | undefined {
-		return this.options.editorContainer.children.includes(this.options.editor()) ? this.#search?.input : undefined;
+	/** True for the transient search field, which keeps fullscreen keyboard routing. */
+	ownsSearchInput(component: Component): boolean {
+		return component === this.#search?.input;
 	}
 
 	/** True when the fullscreen surface consumed the input: navigation keys, the search bar, selection gestures, or composer-click routing. */
@@ -118,7 +120,10 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 		// Ctrl+F toggles the transcript search bar. The editor still owns the
 		// bare key as cursor-right's Ctrl twin; fullscreen takes the chord.
 		if (matchesKey(data, "ctrl+f")) {
-			this.#search = this.#search === undefined ? this.#openSearch() : undefined;
+			if (this.#search === undefined) {
+				this.#search = this.#openSearch();
+				this.options.setFocus?.(this.#search.input);
+			} else this.#closeSearch(true);
 			return true;
 		}
 		if (this.#search !== undefined) {
@@ -136,9 +141,7 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 		const input = new Input();
 		input.prompt = " find: ";
 		input.focused = true;
-		input.onEscape = () => {
-			this.#search = undefined;
-		};
+		input.onEscape = () => this.#closeSearch(true);
 		input.onSubmit = () => this.#stepSearch(1);
 		return { input, matches: [] as TranscriptMatch[], current: 0, reveal: false, matchQuery: "" };
 	}
@@ -185,9 +188,18 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 		this.#followTail = false;
 	}
 
+	/** Closes search, optionally returning focus to the mounted chat editor. */
+	#closeSearch(focusEditor: boolean): void {
+		if (this.#search === undefined) return;
+		this.#search = undefined;
+		if (focusEditor && this.options.editorContainer.children.includes(this.options.editor())) {
+			this.options.setFocus?.(this.options.editor());
+		}
+	}
+
 	/** An editor-slot prompt or modal owns all input until it returns control. */
 	cancelInput(): void {
-		this.#search = undefined;
+		this.#closeSearch(false);
 		this.#draggingScrollbar = false;
 		this.#clearSelection();
 	}

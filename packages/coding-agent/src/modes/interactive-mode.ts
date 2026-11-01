@@ -2127,8 +2127,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Tern's native view routes link clicks itself, so claimed links stop (or start) being
 		// pickable here: re-run the renderers reading `getLinkClicksAvailable()`.
 		this.#eventBusUnsubscribers.push(
-			onNativeRenderingChange(() => {
+			onNativeRenderingChange(active => {
 				if ((this.viewSession.extensionRunner?.getLinkSchemes().length ?? 0) > 0) this.#redrawExtensionLinks();
+				this.setFullscreenTui(active ? false : cfgTuiMode.get(this.settings) === "fullscreen");
 			}),
 		);
 		this.chatContainer = new TranscriptContainer();
@@ -8291,6 +8292,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	setFullscreenTui(enabled: boolean): void {
 		if (enabled) {
 			if (this.#fullscreenChatOverlay) return;
+			// Tern already provides the flowing transcript and a live composer dock;
+			// mounting this ANSI viewport would replace both with inert rows.
+			if (this.ui.nativeRendering) return;
 			const rootChildren = this.composer.runtimeChildren;
 			const dockStart = rootChildren.indexOf(this.pendingMessagesContainer);
 			if (dockStart === -1) return;
@@ -8301,14 +8305,16 @@ export class InteractiveMode implements InteractiveModeContext {
 				terminalRows: () => this.ui.terminal.rows,
 				editor: () => this.editor,
 				requestRender: () => this.ui.requestRender(),
+				setFocus: component => this.ui.setFocus(component),
 			});
 			this.#fullscreenChatInputUnsubscribe = this.ui.addInputListener(data => {
+				const view = this.#fullscreenChatView;
 				const focused = this.ui.getFocused();
-				if (focused !== this.editor) {
-					this.#fullscreenChatView?.cancelInput();
+				if (focused !== this.editor && !(focused !== null && (view?.ownsSearchInput(focused) ?? false))) {
+					view?.cancelInput();
 					return undefined;
 				}
-				if (!this.#fullscreenChatView?.handleViewportInput(data)) return undefined;
+				if (!view?.handleViewportInput(data)) return undefined;
 				this.ui.requestRender();
 				return { consume: true };
 			});

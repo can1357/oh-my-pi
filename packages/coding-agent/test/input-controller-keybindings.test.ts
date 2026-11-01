@@ -177,7 +177,6 @@ async function createContext() {
 			addInputListener,
 			addStartListener,
 			getFocused: vi.fn(() => focused),
-			getFocusedPasteTarget: vi.fn(() => focused),
 			hasFullscreenBaseOverlay: () => false,
 			hasOverlay: vi.fn(() => overlayVisible),
 			terminal: { write: terminalWrite, refreshAppearance },

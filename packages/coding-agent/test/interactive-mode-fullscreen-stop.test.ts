@@ -129,6 +129,47 @@ describe("InteractiveMode fullscreen", () => {
 		}
 	});
 
+	it("gives the search field precedence over editor shortcut listeners", async () => {
+		mode.present(new StaticLines(["branch copy follow target"]));
+		cfgTuiMode.set(Settings.instance, "fullscreen");
+		await terminal.waitForRender();
+		mode.ui.injectDebugInput("\x06");
+		await terminal.waitForRender();
+		expect(mode.ui.getFocused()).toBeInstanceOf(Input);
+
+		const branch = vi.spyOn(mode, "handleBtwBranchKey").mockResolvedValue(true);
+		const canCopy = vi.spyOn(mode, "canCopyBtw").mockReturnValue(true);
+		const copy = vi.spyOn(mode, "handleBtwCopyKey").mockResolvedValue(true);
+		const canFollowUp = vi.spyOn(mode, "canFollowUpBtw").mockReturnValue(true);
+		const followUp = vi.spyOn(mode, "handleBtwFollowUpKey").mockReturnValue(true);
+		for (const key of ["b", "c", "f"]) mode.ui.injectDebugInput(key);
+		await terminal.waitForRender();
+
+		expect(terminal.getViewport()[0]).toContain("find: bcf");
+		expect(mode.editor.getText()).toBe("");
+		expect(branch).not.toHaveBeenCalled();
+		expect(copy).not.toHaveBeenCalled();
+		expect(followUp).not.toHaveBeenCalled();
+		expect(canCopy).not.toHaveBeenCalled();
+		expect(canFollowUp).not.toHaveBeenCalled();
+
+		mode.ui.injectDebugInput("\x1b");
+		await terminal.waitForRender();
+		expect(mode.ui.getFocused()).toBe(mode.editor);
+	});
+
+	it("does not mount the ANSI fullscreen viewport while Tern native rendering is live", () => {
+		const originalUi = mode.ui;
+		const showOverlay = vi.fn();
+		mode.ui = { nativeRendering: true, showOverlay } as unknown as TUI;
+		try {
+			mode.setFullscreenTui(true);
+			expect(showOverlay).not.toHaveBeenCalled();
+		} finally {
+			mode.ui = originalUi;
+		}
+	});
+
 	it("routes an enhanced clipboard paste into the open search field", async () => {
 		mode.editor.setText("draft");
 		mode.present(new StaticLines(["kitty search target", ...Array.from({ length: 60 }, (_, i) => `line-${i}`)]));

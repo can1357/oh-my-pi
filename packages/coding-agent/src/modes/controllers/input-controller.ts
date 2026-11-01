@@ -386,8 +386,8 @@ export class InputController {
 			this.#btwBranchListenerInstalled = true;
 			this.ctx.ui.addInputListener(data => {
 				if (!matchesKey(data, "b")) return undefined;
-				if (!this.ctx.handlesBtwBranchKey()) return undefined;
 				if (this.ctx.ui.getFocused() !== this.ctx.editor) return undefined;
+				if (!this.ctx.handlesBtwBranchKey()) return undefined;
 				if (this.ctx.editor.getText().trim()) return undefined;
 				void this.ctx.handleBtwBranchKey();
 				return { consume: true };
@@ -1016,7 +1016,7 @@ export class InputController {
 				// text in the detached editor while the dialog has focus (#2127). The
 				// main editor takes it as a bracketed paste too, so a pasted or dropped
 				// image path attaches (#3506) instead of landing as text.
-				const focused = this.ctx.ui.getFocusedPasteTarget();
+				const focused = this.ctx.ui.getFocused();
 				if (focused && focused !== this.ctx.editor && hasPasteText(focused)) focused.pasteText(text);
 				else if (focused && focused !== this.ctx.editor && focused.handleInput)
 					focused.handleInput(`${BRACKETED_PASTE_START}${text}${BRACKETED_PASTE_END}`);
@@ -2430,7 +2430,7 @@ export class InputController {
 		const prepared = await this.#preparePastedImage(image, unsupportedMessage, sourcePath);
 		if (!prepared) return undefined;
 		const dims = await this.#imageDimensions(prepared.image);
-		if (this.ctx.ui.getFocusedPasteTarget() !== target) return undefined;
+		if (this.ctx.ui.getFocused() !== target) return undefined;
 		const attachment = prepared.source
 			? tagImageAttachmentSource(prepared.image, prepared.source.path, prepared.source.kind)
 			: prepared.image;
@@ -2561,7 +2561,7 @@ export class InputController {
 	 * images refuses, so the image never lands in the hidden main editor (#6057).
 	 */
 	async #pasteImageIntoFocus(paste: (sink: ImagePasteSink) => Promise<unknown>): Promise<void> {
-		const focused = this.ctx.ui.getFocusedPasteTarget();
+		const focused = this.ctx.ui.getFocused();
 		if (!focused || focused === this.ctx.editor || !hasPasteText(focused)) {
 			await paste(this.#editorImageSink);
 			return;
@@ -2600,7 +2600,7 @@ export class InputController {
 			finish: () => {
 				const text = pasted.join(" ");
 				if (finishPaste) finishPaste(text || undefined);
-				else if (text && this.ctx.ui.getFocusedPasteTarget() === target) target.pasteText(text);
+				else if (text && this.ctx.ui.getFocused() === target) target.pasteText(text);
 				this.ctx.ui.requestRender();
 			},
 		};
@@ -2717,7 +2717,7 @@ export class InputController {
 			// behavior and surface the unsupported-status instead (#6057).
 			// A prompt that opted into images gets the main editor's full image flow
 			// instead, delivered through one reservation.
-			const focusedNow = this.ctx.ui.getFocusedPasteTarget();
+			const focusedNow = this.ctx.ui.getFocused();
 			const promptTarget =
 				focusedNow && focusedNow !== this.ctx.editor && hasPasteText(focusedNow) ? focusedNow : null;
 			if (promptTarget?.acceptsImages) promptPaste = this.#beginPromptImagePaste(promptTarget);
@@ -2804,7 +2804,7 @@ export class InputController {
 				return true;
 			}
 			// Keep the initiating prompt as the only possible modal destination.
-			if (promptTarget && this.ctx.ui.getFocusedPasteTarget() !== promptTarget) return false;
+			if (promptTarget && this.ctx.ui.getFocused() !== promptTarget) return false;
 			if (finishPaste) {
 				const accepted = finishPaste(text);
 				finishPaste = undefined;
