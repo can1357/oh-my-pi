@@ -1,7 +1,9 @@
 import type { Model } from "@oh-my-pi/pi-ai";
-import type { AutocompleteItem } from "../index";
+import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
+import type { AutocompleteItem, ModelMentionCompletion } from "../index";
 import type { ModelBrowserRegistry, ModelBrowserSource } from "../overlays/model-browser";
-import { modelMentionDisplayName } from "./model-mention-syntax";
+import { sameItems } from "../native/memo";
+import { modelMentionDisplayName, modelMentionName } from "./model-mention-syntax";
 import type {
 	buildSearchAffinity as BuildSearchAffinity,
 	ModelBrowserItem,
@@ -12,9 +14,15 @@ import { theme } from "../theme/theme";
 
 const MODEL_MENTION_CONTEXT_RE = /(?:^|\s)(\^[^\s]*)$/;
 const MAX_MODEL_MENTION_SUGGESTIONS = 20;
+const MAX_EFFORT_CANDIDATE_MODELS = 3;
 
-/** Supplies picker-ranked model candidates for the query after `^`. */
-export type ModelMentionCandidateSource = (query: string) => ReadonlyArray<ModelBrowserItem>;
+/**
+ * Supplies picker-ranked model candidates for the query after `^`. `availableModelIds`
+ * lists every available model's selector, in or out of the picker scope.
+ */
+export type ModelMentionCandidateSource = ((query: string) => ReadonlyArray<ModelBrowserItem>) & {
+	availableModelIds?: () => ReadonlySet<string>;
+};
 
 interface ModelBrowserModules {
 	SessionModelScopeCache: typeof SessionModelScopeCacheClass;
@@ -32,25 +40,59 @@ export function isModelMentionPrefix(prefix: string): boolean {
 	return prefix.startsWith("^");
 }
 
+function mentionRow(value: string, description: string): AutocompleteItem {
+	return { value, label: value, description, icon: theme.symbol("icon.model"), iconName: "model" };
+}
+
+/**
+ * Some provider model ids contain a colon or end in a level name (`qwen3:8b`, `glm-4.7:max`),
+ * so literal matches are listed before level rows.
+ */
+function mentionRows(query: string, candidates: ModelMentionCandidateSource): AutocompleteItem[] {
+	const colon = query.lastIndexOf(":");
+	if (colon > 0) {
+		const typed = query.slice(colon + 1).toLowerCase();
+		const levelRows: AutocompleteItem[] = [];
+		for (const { selector, model } of candidates(query.slice(0, colon)).slice(0, MAX_EFFORT_CANDIDATE_MODELS)) {
+			for (const effort of getSupportedEfforts(model)) {
+				if (!effort.startsWith(typed)) continue;
+				levelRows.push(
+					mentionRow(`${selector}:${effort}`, modelMentionName(modelMentionDisplayName(model), effort)),
+				);
+			}
+		}
+		if (levelRows.length > 0) {
+			const lowered = query.toLowerCase();
+			const literalRows: AutocompleteItem[] = [];
+			for (const item of candidates(query)) {
+				if (literalRows.length === MAX_MODEL_MENTION_SUGGESTIONS) break;
+				if (item.selector.toLowerCase().includes(lowered)) {
+					literalRows.push(mentionRow(item.selector, modelMentionDisplayName(item.model)));
+				}
+			}
+			const literalValues = new Set(literalRows.map(row => row.value));
+			const available = candidates.availableModelIds?.();
+			return [
+				...literalRows,
+				...levelRows.filter(row => !literalValues.has(row.value) && !available?.has(row.value)),
+			];
+		}
+	}
+	return candidates(query)
+		.slice(0, MAX_MODEL_MENTION_SUGGESTIONS)
+		.map(item => mentionRow(item.selector, modelMentionDisplayName(item.model)));
+}
+
 /** Build model mention choices for the whitespace-delimited token at the cursor. */
 export function getModelMentionSuggestions(
 	textBeforeCursor: string,
 	candidates: ModelMentionCandidateSource | undefined,
-): { items: AutocompleteItem[]; prefix: string } | null {
-	if (!candidates) return null;
-	const match = textBeforeCursor.match(MODEL_MENTION_CONTEXT_RE);
-	const prefix = match?.[1];
-	if (!prefix) return null;
-	const items = candidates(prefix.slice(1))
-		.slice(0, MAX_MODEL_MENTION_SUGGESTIONS)
-		.map(item => ({
-			value: item.selector,
-			label: item.selector,
-			description: modelMentionDisplayName(item.model),
-			icon: theme.symbol("icon.model"),
-			iconName: "model",
-		}));
-	return items.length > 0 ? { items, prefix } : null;
+): ModelMentionCompletion {
+	if (!candidates) return { kind: "unhandled" };
+	const prefix = textBeforeCursor.match(MODEL_MENTION_CONTEXT_RE)?.[1];
+	if (!prefix) return { kind: "unhandled" };
+	const items = mentionRows(prefix.slice(1), candidates).slice(0, MAX_MODEL_MENTION_SUGGESTIONS);
+	return items.length > 0 ? { kind: "matched", suggestions: { items, prefix } } : { kind: "no-match" };
 }
 
 /** Replace the live mention token with the selected canonical selector and a trailing space. */
@@ -88,7 +130,7 @@ export function createModelMentionSource(host: {
 	let scopeCache: SessionModelScopeCacheClass | undefined;
 	let ranker: ModelItemRankerClass | undefined;
 	let rankerProviderOrder: readonly string[] | undefined;
-	return query => {
+	const rank = (query: string): ReadonlyArray<ModelBrowserItem> => {
 		const { SessionModelScopeCache, buildSearchAffinity, ModelItemRanker } = loadModelBrowser();
 		scopeCache ??= new SessionModelScopeCache(host.source, host.registry);
 		const scope = scopeCache.get(host.scopedModels());
@@ -104,4 +146,15 @@ export function createModelMentionSource(host: {
 		}
 		return ranker.rank(query);
 	};
+	let availableModels: readonly Model[] | undefined;
+	let availableIds: ReadonlySet<string> = new Set();
+	const availableModelIds = (): ReadonlySet<string> => {
+		const models = host.registry.getAvailable();
+		if (!sameItems(availableModels, models)) {
+			availableModels = models;
+			availableIds = new Set(models.map(model => `${model.provider}/${model.id}`));
+		}
+		return availableIds;
+	};
+	return Object.assign(rank, { availableModelIds });
 }

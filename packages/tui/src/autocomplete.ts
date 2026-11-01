@@ -236,6 +236,15 @@ export interface AutocompleteItem {
 
 type Awaitable<T> = T | Promise<T>;
 
+/**
+ * `^` model mention completion at the cursor. `unhandled` means no mention token there, or
+ * another completion outranks it, so the async {@link AutocompleteProvider.getSuggestions} decides.
+ */
+export type ModelMentionCompletion =
+	| { kind: "unhandled" }
+	| { kind: "no-match" }
+	| { kind: "matched"; suggestions: { items: AutocompleteItem[]; prefix: string } };
+
 export interface SlashCommand {
 	name: string;
 	aliases?: string[];
@@ -294,6 +303,11 @@ export interface AutocompleteProvider {
 	 * the collapsed `/skill:` namespace row. Returns null outside a command-name token or with no match.
 	 */
 	trySyncSlashCompletion?(textBeforeCursor: string): { items: AutocompleteItem[]; prefix: string } | null;
+	/**
+	 * Synchronously list `^` model mention completions for the token at the cursor, so a
+	 * shown mention popup never lags the typed text.
+	 */
+	trySyncModelMentionCompletion?(lines: string[], cursorLine: number, cursorCol: number): ModelMentionCompletion;
 	/**
 	 * Synchronously try to expand text immediately before the cursor (no async I/O).
 	 * Called after every single-character insert. Implementations MUST cheaply

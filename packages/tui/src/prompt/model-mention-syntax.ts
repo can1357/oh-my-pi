@@ -4,6 +4,7 @@
  * the startup composer prepaint graph never loads the catalog or task agents.
  */
 import type { Model } from "@oh-my-pi/pi-ai";
+import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 
 /** Whitespace-delimited token; groups are leading delimiter and selector. Reset lastIndex before reuse. */
 export const MODEL_MENTION_RE = /(^|\s)\^([^\s^]+)(?=\s|$)/g;
@@ -13,8 +14,11 @@ export const MODEL_MENTION_TAG_RE = /<model agent="(m\d+)" name="([^"]*)"\/>/g;
 /** A user-tagged model usable as a subagent pseudonym on the current session branch. */
 export interface ModelMention {
 	agent: string;
+	/** Canonical selector: `provider/id`, plus `:<effort>` when the tag names one. */
 	selector: string;
 	name: string;
+	/** Initial effort from the tag's `:<level>` suffix; absent keeps the agent's default policy. */
+	thinkingLevel?: Effort;
 }
 
 /** Expand a composer atom back into its canonical model selector. */
@@ -30,6 +34,11 @@ export function modelMentionTag(mention: ModelMention): string {
 /** Use the catalog display name, without quotes, or the id when the name is empty. */
 export function modelMentionDisplayName(model: Model): string {
 	return (model.name.trim() || model.id).replaceAll('"', "");
+}
+
+/** Display name of a mention, naming the tagged effort so tags of one model stay distinct. */
+export function modelMentionName(displayName: string, thinkingLevel: Effort): string {
+	return `${displayName} · ${thinkingLevel}`;
 }
 
 /** Restore known submitted tags to editable selectors; leave unknown agents literal. */

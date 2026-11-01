@@ -441,6 +441,23 @@ describe("Editor model mention autocomplete", () => {
 		expect(deleteEditor.getText()).toBe("^a");
 	});
 
+	it("reopens on a colon inside a mention so its effort levels can be listed", async () => {
+		const provider = new ModelMentionProvider(["^a:"]);
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider(provider);
+		const rejectedChecked = onceAutocompleteUpdate(editor);
+		editor.handleInput("^a");
+		await rejectedChecked;
+		expect(editor.isShowingAutocomplete()).toBe(false);
+
+		editor.handleInput(":");
+		await untilAutocompleteShown(editor);
+		editor.handleInput("\t");
+
+		expect(editor.getText()).toBe("^a/x ");
+		expect(editor.isShowingAutocomplete()).toBe(false);
+	});
+
 	it("accepts a stale popup while the live text is still a mention", async () => {
 		const editor = new Editor(defaultEditorTheme);
 		editor.setAutocompleteProvider(new ModelMentionProvider());

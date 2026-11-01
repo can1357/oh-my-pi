@@ -404,9 +404,13 @@ describe("CustomEditor bracketed path paste", () => {
 	describe("model mention chips", () => {
 		function makeModelEditor() {
 			const { editor } = makeEditor();
-			editor.modelMentionLabel = selector => {
-				if (selector === "a/x" || selector === "b/y") return modelMentionChipLabel("X One");
-				if (selector === "c/z") return modelMentionChipLabel("Zed");
+			editor.resolveModelMention = selector => {
+				if (selector === "a/x" || selector === "b/y") return { label: modelMentionChipLabel("X One"), selector };
+				if (selector === "c/z") return { label: modelMentionChipLabel("Zed"), selector };
+				if (selector === "c/z:auto") return { label: modelMentionChipLabel("Zed"), selector: "c/z" };
+				if (selector === "c/z:hi" || selector === "c/z:high") {
+					return { label: modelMentionChipLabel("Zed · high"), selector: "c/z:high" };
+				}
 				return undefined;
 			};
 			editor.modelMentionSelector = agent => (agent === "m1" ? "a/x" : undefined);
@@ -488,6 +492,23 @@ describe("CustomEditor bracketed path paste", () => {
 			const chip = modelMentionChipLabel("Zed");
 			expect(editor.getText()).toBe(`paste ${chip} `);
 			expect(editor.getExpandedText()).toBe("paste ^c/z ");
+		});
+
+		it("shows the full effort name on the chip and expands to the canonical selector", () => {
+			const editor = makeModelEditor();
+			for (const ch of "ask ^c/z:hi ") editor.handleInput(ch);
+
+			expect(editor.getText()).toBe(`ask ${modelMentionChipLabel("Zed · high")} `);
+			expect(editor.getExpandedText()).toBe("ask ^c/z:high ");
+		});
+
+		it("collapses equivalent spellings of one mention into the same chip", () => {
+			const editor = makeModelEditor();
+			for (const ch of "^c/z then ^c/z:auto ") editor.handleInput(ch);
+
+			const chip = modelMentionChipLabel("Zed");
+			expect(editor.getText()).toBe(`${chip} then ${chip} `);
+			expect(editor.getExpandedText()).toBe("^c/z then ^c/z ");
 		});
 
 		it("self-heals the atomic token pattern after history restores mention atoms", () => {
