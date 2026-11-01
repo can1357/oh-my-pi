@@ -2320,8 +2320,11 @@ impl Display for UnaryAssignmentOperator {
 pub enum ArithmeticTarget {
     /// A named variable.
     Variable(String),
-    /// An element in an array.
-    ArrayElement(String, Box<ArithmeticExpr>),
+    /// An element in an array: the array's name, its subscript as an
+    /// expression (`None` when the subscript is not one), and the subscript as
+    /// written. An associative array takes the written subscript as its key; an
+    /// indexed array, the expression's value.
+    ArrayElement(String, Option<Box<ArithmeticExpr>>, String),
 }
 
 impl Node for ArithmeticTarget {}
@@ -2337,7 +2340,7 @@ impl Display for ArithmeticTarget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Variable(name) => write!(f, "{name}"),
-            Self::ArrayElement(name, index) => write!(f, "{name}[{index}]"),
+            Self::ArrayElement(name, _, subscript) => write!(f, "{name}[{subscript}]"),
         }
     }
 }

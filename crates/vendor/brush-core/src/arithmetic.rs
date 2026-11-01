@@ -4,7 +4,10 @@ use std::borrow::Cow;
 
 use brush_parser::ast;
 
-use crate::{ExecutionParameters, Shell, env, expansion, extensions, variables};
+use crate::{
+	ExecutionParameters, Shell, env, expansion, extensions,
+	variables::{self, ShellValue, ShellValueUnsetType},
+};
 
 /// Maximum recursion depth for arithmetic variable dereference chains
 /// (e.g., a=b, b=c, c=a would cycle through variable dereferences).
@@ -200,13 +203,13 @@ fn deref_lvalue(
 ) -> Result<i64, EvalError> {
 	let value_str: Cow<'_, str> = match lvalue {
 		ast::ArithmeticTarget::Variable(name) => get_var_value(shell, name.as_str())?,
-		ast::ArithmeticTarget::ArrayElement(name, index_expr) => {
-			let index_str = eval_expr_impl(index_expr, shell, depth)?.to_string();
+		ast::ArithmeticTarget::ArrayElement(name, index_expr, subscript) => {
+			let key = element_key(shell, name, index_expr.as_deref(), subscript, depth)?;
 
 			shell
 				.env()
 				.get(name)
-				.map_or_else(|| Ok(None), |(_, v)| v.value().get_at(index_str.as_str(), shell))
+				.map_or_else(|| Ok(None), |(_, v)| v.value().get_at(key.as_str(), shell))
 				.map_err(|_err| EvalError::FailedToAccessArray)?
 				.unwrap_or(Cow::Borrowed(""))
 		},
@@ -228,6 +231,33 @@ fn deref_lvalue(
 	}
 
 	eval_expr_impl(&parsed_value, shell, new_depth)
+}
+
+/// The element `name[subscript]` names, as Bash takes it: an associative
+/// array's key is the subscript as written (`m[k]` is key `k`, `m[i+1]` key
+/// `i+1`, `m[src/a.ts]` key `src/a.ts`), and any other variable's index is
+/// the subscript's value (`a[i+1]`), which a subscript that is not an
+/// expression does not have. Only an index is evaluated, so only an index's
+/// side effects happen.
+fn element_key(
+	shell: &mut Shell<impl extensions::ShellExtensions>,
+	name: &str,
+	index_expr: Option<&ast::ArithmeticExpr>,
+	subscript: &str,
+	depth: u32,
+) -> Result<String, EvalError> {
+	let associative = shell.env().get(name).is_some_and(|(_, var)| {
+		matches!(
+			var.value(),
+			ShellValue::AssociativeArray(_) | ShellValue::Unset(ShellValueUnsetType::AssociativeArray)
+		)
+	});
+
+	if associative {
+		return Ok(subscript.to_owned());
+	}
+	let index_expr = index_expr.ok_or_else(|| EvalError::ParseError(subscript.to_owned()))?;
+	Ok(eval_expr_impl(index_expr, shell, depth)?.to_string())
 }
 
 fn apply_unary_op(
@@ -378,8 +408,8 @@ fn assign(
 				)
 				.map_err(|_err| EvalError::FailedToUpdateEnvironment)?;
 		},
-		ast::ArithmeticTarget::ArrayElement(name, index_expr) => {
-			let index_str = eval_expr_impl(index_expr, shell, depth)?.to_string();
+		ast::ArithmeticTarget::ArrayElement(name, index_expr, subscript) => {
+			let index_str = element_key(shell, name, index_expr.as_deref(), subscript, depth)?;
 
 			shell
 				.env_mut()

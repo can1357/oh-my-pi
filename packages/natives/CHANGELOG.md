@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the bash tool ignoring a quoted or expanded assignment such as `export "PATH=$HOME/bin:$PATH"` while reporting success, accepting `export` of an invalid name, dropping `+=` in `declare`/`export`, using element 0 for `m[key]` in arithmetic on an associative array, letting element writes change a readonly array, and ending the command line when `(( ))` fails instead of returning 1
+
 ## [18.14.2] - 2026-10-31
 
 ### Added

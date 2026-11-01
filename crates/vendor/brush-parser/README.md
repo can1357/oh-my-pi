@@ -17,6 +17,15 @@ The workspace `Cargo.toml` routes the registry dependency here through
 - `src/tokenizer.rs`: a newline token cut short by a construct's terminating
   char (`)` in `$(...)`) is delimited as a newline, not as the terminator, so
   a here-document body starting with `)` no longer closes the substitution.
+- `src/word.rs`: `parse_assignment_word` is public, so brush-core's declaration
+  builtins can take `name=value` from a quoted or expanded argument, as Bash's
+  `export "name=value"` does.
+- `src/arithmetic.rs`, `src/ast.rs`: `ArithmeticTarget::ArrayElement` carries
+  its subscript as written, which an associative array uses as the key (`m[k]`
+  is key `k`, not element `0`), and the subscript's expression only when the
+  whole subscript is one (`None` for `m[src/a.ts]` or `m[a b]`, which brush-core
+  refuses for an indexed array). Whitespace is allowed inside the brackets
+  (`a[ 1 ]`), and `Display` writes the subscript as written.
 - `Cargo.toml`: `publish = false`; the `miette`/`serde` examples, the
   `criterion` bench, and the dev-dependencies only they used (`criterion`,
   `miette`, `serde_yaml`, insta's `glob`/`yaml` features) are dropped.
@@ -28,4 +37,5 @@ The workspace `Cargo.toml` routes the registry dependency here through
 Everything else is byte-identical to the 0.4.0 release.
 
 Remove this directory and its `[patch.crates-io]` entry once a brush-parser
-release delimits command substitutions containing here-documents correctly.
+release delimits command substitutions containing here-documents correctly,
+exposes assignment-word parsing, and keeps an arithmetic subscript's text.

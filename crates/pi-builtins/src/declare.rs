@@ -1,7 +1,9 @@
 use std::{io::Write, sync::LazyLock};
 
 use brush_core::{
-	ErrorKind, ExecutionResult, builtins,
+	ErrorKind, ExecutionResult,
+	arithmetic::{EvalError, Evaluatable},
+	builtins,
 	env::{self, EnvironmentLookup, EnvironmentScope},
 	parser::ast,
 	variables::{
@@ -139,8 +141,13 @@ impl builtins::Command for DeclareCommand {
 						result = ExecutionResult::general_error();
 					}
 				} else {
-					if !self.process_declaration(&mut context, declaration, verb)? {
-						result = ExecutionResult::general_error();
+					match self.process_declaration(&mut context, declaration, verb) {
+						Ok(true) => {},
+						Ok(false) => result = ExecutionResult::general_error(),
+						// A builtin's error fails only the builtin, so one that
+						// ends the shell (see `element_key`) ends it here.
+						Err(error) if error.is_fatal() => return Ok(error.into_result(context.shell)),
+						Err(error) => return Err(error),
 					}
 				}
 			}
@@ -241,7 +248,7 @@ impl DeclareCommand {
 		}
 
 		// Extract the variable name and the initial value being assigned (if any).
-		let (name, assigned_index, initial_value, name_is_array) =
+		let (name, assigned_index, initial_value, name_is_array, append) =
 			Self::declaration_to_name_and_value(declaration)?;
 
 		// Special-case: `local -`
@@ -266,12 +273,45 @@ impl DeclareCommand {
 			EnvironmentLookup::Anywhere
 		};
 
+		// A local that inherits (`local -I`, `shopt -s localvar_inherit`) takes
+		// the outer variable's value and attributes, so its type too.
+		let inherits = create_var_local
+			&& (self.locals_inherit_from_prev_scope
+				|| context.shell.options().local_vars_inherit_value_and_attrs);
+
+		// The element `name[subscript]=value` writes, as the same assignment
+		// outside `declare` names it.
+		let element = match assigned_index {
+			Some(subscript) if initial_value.is_some() => {
+				match self.element_key(context, name.as_str(), lookup, inherits, subscript, verb)? {
+					Some(key) => Some(key),
+					None => return Ok(false),
+				}
+			},
+			_ => None,
+		};
+
+		// `readonly` is a special builtin: in POSIX mode its error ends the
+		// shell.
+		let refusal_is_fatal =
+			matches!(verb, DeclareVerb::Readonly) && context.shell.options().posix_mode;
+
 		// Look up the variable.
 		if let Some(var) = context
 			.shell
 			.env_mut()
 			.get_mut_using_policy(name.as_str(), lookup)
 		{
+			// A readonly variable keeps its value, and the declarations after
+			// this one still run.
+			if var.is_readonly() && initial_value.is_some() {
+				if refusal_is_fatal {
+					return Err(ErrorKind::ReadonlyVariable.into());
+				}
+				writeln!(context.stderr(), "{}: {name}: readonly variable", context.command_name)?;
+				return Ok(false);
+			}
+
 			if self.make_associative_array.is_some() {
 				var.convert_to_associative_array()?;
 			}
@@ -282,12 +322,23 @@ impl DeclareCommand {
 			self.apply_attributes_before_update(var)?;
 
 			if let Some(initial_value) = initial_value {
-				// We append if the declaration included an explicit index.
-				var.assign(initial_value, assigned_index.is_some())?;
+				Self::assign_declared_value(var, element, initial_value, append)?;
 			}
 
 			self.apply_attributes_after_update(var, verb)?;
 		} else {
+			// A local cannot hide a readonly variable, with or without a value.
+			if create_var_local
+				&& context
+					.shell
+					.env()
+					.get_using_policy(name.as_str(), EnvironmentLookup::Anywhere)
+					.is_some_and(|var| var.is_readonly())
+			{
+				writeln!(context.stderr(), "{}: {name}: readonly variable", context.command_name)?;
+				return Ok(false);
+			}
+
 			let unset_type = if self.make_indexed_array.is_some() {
 				ShellValueUnsetType::IndexedArray
 			} else if self.make_associative_array.is_some() {
@@ -306,10 +357,6 @@ impl DeclareCommand {
 					.env()
 					.get_using_policy(name.as_str(), EnvironmentLookup::Anywhere)
 			{
-				if prev_var.is_readonly() {
-					return Err(ErrorKind::ReadonlyVariable.into());
-				}
-
 				let mut var = prev_var.clone();
 				var.unset_treat_as_nameref();
 				var
@@ -320,7 +367,7 @@ impl DeclareCommand {
 			self.apply_attributes_before_update(&mut var)?;
 
 			if let Some(initial_value) = initial_value {
-				var.assign(initial_value, false)?;
+				Self::assign_declared_value(&mut var, element, initial_value, append)?;
 			}
 
 			if context.shell.options().export_variables_on_modification && !var.value().is_array() {
@@ -341,13 +388,91 @@ impl DeclareCommand {
 		Ok(true)
 	}
 
+	/// The element a declaration's `name[subscript]` names: an associative
+	/// array's key is the subscript as it stands, and an indexed array's index
+	/// is the subscript's arithmetic value (`declare a[i++]=x` writes element
+	/// `i` and increments `i`). Returns `None`, having said why, for an empty
+	/// subscript, which names no element. An index that is not an expression
+	/// or does not evaluate ends the shell, as in Bash. Only `readonly` outside
+	/// POSIX mode refuses the word instead, as Bash's does, and so does any
+	/// declaration whose subscript still holds `$` or a backquote: Bash expands
+	/// such a subscript a second time, which this does not.
+	fn element_key(
+		&self,
+		context: &mut brush_core::ExecutionContext<'_, impl brush_core::ShellExtensions>,
+		name: &str,
+		lookup: EnvironmentLookup,
+		inherits: bool,
+		subscript: String,
+		verb: DeclareVerb,
+	) -> Result<Option<String>, brush_core::Error> {
+		if subscript.is_empty() {
+			writeln!(context.stderr(), "{}: {name}[]: bad array subscript", context.command_name)?;
+			return Ok(None);
+		}
+
+		let env = context.shell.env();
+		let mut declared = env.get_using_policy(name, lookup);
+		if declared.is_none() && inherits {
+			declared = env.get_using_policy(name, EnvironmentLookup::Anywhere);
+		}
+		let associative = self.make_associative_array.is_some()
+			|| (!self.make_indexed_array.is_some()
+				&& declared.is_some_and(|var| {
+					matches!(
+						var.value(),
+						ShellValue::AssociativeArray(_) | ShellValue::Unset(ShellValueUnsetType::AssociativeArray)
+					)
+				}));
+		if associative {
+			return Ok(Some(subscript));
+		}
+
+		let index = match brush_parser::arithmetic::parse(subscript.as_str()) {
+			Ok(expr) => expr.eval(context.shell),
+			Err(_) => Err(EvalError::ParseError(subscript.clone())),
+		};
+		let error = match index {
+			Ok(index) => return Ok(Some(index.to_string())),
+			Err(error) => error,
+		};
+		writeln!(context.stderr(), "{}: {subscript}: {error}", context.command_name)?;
+		let refuses = (matches!(verb, DeclareVerb::Readonly) && !context.shell.options().posix_mode)
+			|| subscript.contains(['$', '`']);
+		if refuses {
+			Ok(None)
+		} else {
+			Err(brush_core::Error::from(error).into_fatal())
+		}
+	}
+
+	/// Writes a declaration's value into `var` as the same assignment outside
+	/// `declare` writes it: `declare v+=x` appends to the value `v` has,
+	/// `declare a[i]+=x` appends to element `i`, and `declare a[i]=x` writes
+	/// element `i`, leaving the others. Any other value replaces the
+	/// variable's.
+	fn assign_declared_value(
+		var: &mut ShellVariable,
+		element: Option<String>,
+		value: ShellValueLiteral,
+		append: bool,
+	) -> Result<(), brush_core::Error> {
+		match (element, value) {
+			(Some(key), ShellValueLiteral::Scalar(value)) => var.assign_at_index(key, value, append),
+			(Some(_), ShellValueLiteral::Array(_)) => Err(ErrorKind::AssigningListToArrayMember.into()),
+			(None, value) => var.assign(value, append),
+		}
+	}
+
 	fn declaration_to_name_and_value(
 		declaration: &brush_core::CommandArg,
-	) -> Result<(String, Option<String>, Option<ShellValueLiteral>, bool), brush_core::Error> {
+	) -> Result<(String, Option<String>, Option<ShellValueLiteral>, bool, bool), brush_core::Error>
+	{
 		let name;
 		let assigned_index;
 		let initial_value;
 		let name_is_array;
+		let append;
 
 		match declaration {
 			brush_core::CommandArg::String(s) => {
@@ -379,6 +504,7 @@ impl DeclareCommand {
 					name_is_array = false;
 				}
 				initial_value = None;
+				append = false;
 			},
 			brush_core::CommandArg::Assignment(assignment) => {
 				match &assignment.name {
@@ -398,16 +524,8 @@ impl DeclareCommand {
 
 				match &assignment.value {
 					ast::AssignmentValue::Scalar(s) => {
-						if let Some(index) = &assigned_index {
-							initial_value = Some(ShellValueLiteral::Array(ArrayLiteral(vec![(
-								Some(index.to_owned()),
-								s.value.clone(),
-							)])));
-							name_is_array = true;
-						} else {
-							initial_value = Some(ShellValueLiteral::Scalar(s.value.clone()));
-							name_is_array = false;
-						}
+						initial_value = Some(ShellValueLiteral::Scalar(s.value.clone()));
+						name_is_array = assigned_index.is_some();
 					},
 					ast::AssignmentValue::Array(a) => {
 						initial_value = Some(ShellValueLiteral::Array(ArrayLiteral(
@@ -418,10 +536,11 @@ impl DeclareCommand {
 						name_is_array = true;
 					},
 				}
+				append = assignment.append;
 			},
 		}
 
-		Ok((name, assigned_index, initial_value, name_is_array))
+		Ok((name, assigned_index, initial_value, name_is_array, append))
 	}
 
 	fn display_matching_env_declarations(

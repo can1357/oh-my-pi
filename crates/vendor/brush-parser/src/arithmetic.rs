@@ -91,12 +91,30 @@ peg::parser! {
         }
 
         rule lvalue() -> ast::ArithmeticTarget =
-            name:variable_name() "[" index:expression() "]" {
-                ast::ArithmeticTarget::ArrayElement(name.to_owned(), Box::new(index))
+            name:variable_name() "[" subscript:subscript() "]" {
+                let (index, text) = subscript;
+                ast::ArithmeticTarget::ArrayElement(name.to_owned(), index.map(Box::new), text.to_owned())
             } /
             name:variable_name() {
                 ast::ArithmeticTarget::Variable(name.to_owned())
             }
+
+        // A subscript as the text it was written as, and as an expression when
+        // the whole text is one. An associative array's element is the text, as
+        // a key (`m[k]`, `m[src/a.ts]`, `m[a b]`); an indexed array's is the
+        // expression's value, and a subscript that is not an expression is an
+        // error for an indexed array only.
+        rule subscript() -> (Option<ast::ArithmeticExpr>, &'input str) =
+            start:position!() _ index:expression() _ end:position!() &"]"
+            text:#{|input, pos| match input.get(start..end) {
+                Some(text) => peg::RuleResult::Matched(pos, text),
+                None => peg::RuleResult::Failed,
+            }} {
+                (Some(index), text)
+            } /
+            text:$(subscript_part()+) { (None, text) }
+
+        rule subscript_part() = [^ '[' | ']'] / "[" subscript_part()* "]"
 
         rule variable_name() -> &'input str =
             $(['a'..='z' | 'A'..='Z' | '_'](['a'..='z' | 'A'..='Z' | '_' | '0'..='9']*))

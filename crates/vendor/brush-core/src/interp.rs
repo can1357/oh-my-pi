@@ -1630,11 +1630,10 @@ impl Execute for ast::ArithmeticCommand {
 		params: &ExecutionParameters,
 	) -> Result<ExecutionResult, error::Error> {
 		ensure_not_cancelled(params)?;
-		let value = self.expr.eval(shell, params, true).await?;
-		let result = if value != 0 {
-			ExecutionResult::success()
-		} else {
-			ExecutionResult::general_error()
+		let result = match self.expr.eval(shell, params, true).await {
+			Ok(0) => ExecutionResult::general_error(),
+			Ok(_) => ExecutionResult::success(),
+			Err(error) => return arithmetic_command_failure(shell, params, error).await,
 		};
 
 		shell.set_last_exit_status(result.exit_code.into());
@@ -1652,16 +1651,22 @@ impl Execute for ast::ArithmeticForClauseCommand {
 	) -> Result<ExecutionResult, error::Error> {
 		ensure_not_cancelled(params)?;
 		let mut result = ExecutionResult::success();
-		if let Some(initializer) = &self.initializer {
-			initializer.eval(shell, params, true).await?;
+		if let Some(initializer) = &self.initializer
+			&& let Err(error) = initializer.eval(shell, params, true).await
+		{
+			return arithmetic_command_failure(shell, params, error).await;
 		}
 
 		loop {
 			ensure_not_cancelled(params)?;
-			if let Some(condition) = &self.condition {
-				// An empty condition (e.g., `for (( ; ; ))`) means "always true".
-				if !condition.value.is_empty() && condition.eval(shell, params, true).await? == 0 {
-					break;
+			// An empty condition (e.g., `for (( ; ; ))`) means "always true".
+			if let Some(condition) = &self.condition
+				&& !condition.value.is_empty()
+			{
+				match condition.eval(shell, params, true).await {
+					Ok(0) => break,
+					Ok(_) => {},
+					Err(error) => return arithmetic_command_failure(shell, params, error).await,
 				}
 			}
 
@@ -1678,14 +1683,44 @@ impl Execute for ast::ArithmeticForClauseCommand {
 				break;
 			}
 
-			if let Some(updater) = &self.updater {
-				updater.eval(shell, params, true).await?;
+			if let Some(updater) = &self.updater
+				&& let Err(error) = updater.eval(shell, params, true).await
+			{
+				return arithmetic_command_failure(shell, params, error).await;
 			}
 		}
 
 		shell.set_last_exit_status(result.exit_code.into());
 		Ok(result)
 	}
+}
+
+/// What `(( expr ))`, or a clause of `for (( ))`, does when its expression
+/// fails to evaluate: as in Bash, `(( 1/0 ))`, a syntax error, or an
+/// assignment to a readonly variable or element reports the error and fails
+/// the command with status 1, and the commands after it still run. An unset
+/// variable under `set -u`, or an expansion that fails, still ends the command
+/// line, as it ends the shell in Bash.
+async fn arithmetic_command_failure(
+	shell: &mut Shell<impl extensions::ShellExtensions>,
+	params: &ExecutionParameters,
+	error: arithmetic::EvalError,
+) -> Result<ExecutionResult, error::Error> {
+	if matches!(
+		error,
+		arithmetic::EvalError::ExpandingUnsetVariable(_)
+			| arithmetic::EvalError::FailedToExpandExpression(_)
+	) {
+		return Err(error.into());
+	}
+
+	let error = error::Error::from(error);
+	if params.reports_errors() {
+		let _ = shell.display_error(&mut params.stderr(shell), &error).await;
+	}
+	let result = ExecutionResult::general_error();
+	shell.set_last_exit_status(result.exit_code.into());
+	Ok(result)
 }
 
 #[async_trait::async_trait]

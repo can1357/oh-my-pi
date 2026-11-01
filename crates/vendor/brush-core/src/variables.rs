@@ -377,6 +377,12 @@ impl ShellVariable {
 		value: String,
 		append: bool,
 	) -> Result<(), error::Error> {
+		// An element of a readonly array is as readonly as the array: `a[0]=x`,
+		// `(( m[k]++ ))` and `declare a[0]+=x` are refused like `a=(x)`.
+		if self.is_readonly() {
+			return Err(error::ErrorKind::ReadonlyVariable.into());
+		}
+
 		match &self.value {
 			ShellValue::Unset(_) => {
 				self.assign(ShellValueLiteral::Array(ArrayLiteral(vec![])), false)?;
@@ -388,6 +394,7 @@ impl ShellVariable {
 		}
 
 		let treat_as_int = self.is_treated_as_integer();
+		let update_transform = self.get_update_transform();
 		let value = self.convert_value_str_for_assignment(value);
 
 		match &mut self.value {
@@ -405,6 +412,9 @@ impl ShellVariable {
 					} else {
 						new_value = existing_value.to_owned();
 						new_value.push_str(value.as_str());
+						// The case attributes apply to the whole value, as they do to a
+						// scalar's append: `declare -u a[0]+=y` on `x` is `XY`.
+						Self::apply_value_transforms(&mut new_value, false, update_transform);
 					}
 
 					arr.insert(key, new_value);
@@ -428,6 +438,7 @@ impl ShellVariable {
 					} else {
 						new_value = existing_value.to_owned();
 						new_value.push_str(value.as_str());
+						Self::apply_value_transforms(&mut new_value, false, update_transform);
 					}
 
 					arr.insert(array_index, new_value.clone());

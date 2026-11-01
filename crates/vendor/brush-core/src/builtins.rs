@@ -676,7 +676,8 @@ async fn exec_declaration_builtin_impl<
 			{
 				options.push(s);
 			},
-			_ => declarations.push(arg),
+			CommandArg::String(s) => declarations.push(declaration_from_word(s)),
+			CommandArg::Assignment(_) => declarations.push(arg),
 		}
 	}
 
@@ -692,6 +693,19 @@ async fn exec_declaration_builtin_impl<
 	command.set_declarations(declarations);
 
 	call_builtin(command, context).await
+}
+
+/// The declaration an argument word makes. A word the parser did not see as
+/// an assignment (quoted, as in `export "v=1"`, or produced by expansion, as
+/// in `export "$kv"` or `export $kvs`) still assigns when its text is
+/// `name=value`, `name+=value` or `name[subscript]=value`, as Bash's
+/// declaration builtins take it. The value is the text after the `=`, already
+/// expanded and not expanded again. Any other word stays a name.
+fn declaration_from_word(word: String) -> CommandArg {
+	match brush_parser::word::parse_assignment_word(word.as_str()) {
+		Ok(assignment) => CommandArg::Assignment(assignment),
+		Err(_) => CommandArg::String(word),
+	}
 }
 
 fn exec_raw_arg_builtin<

@@ -1,10 +1,10 @@
-use std::io::Write;
+use std::{borrow::Cow, io::Write};
 
 use brush_core::{
-	ExecutionExitCode, ExecutionResult, builtins,
-	env::{EnvironmentLookup, EnvironmentScope},
+	ErrorKind, ExecutionResult, builtins,
+	env::{self, EnvironmentLookup, EnvironmentScope},
 	parser::ast,
-	variables,
+	variables::{self, ShellValue, ShellValueUnsetType, ShellVariable},
 };
 use clap::Parser;
 use itertools::Itertools;
@@ -68,22 +68,30 @@ impl ExportCommand {
 		context: &mut brush_core::ExecutionContext<'_, impl brush_core::ShellExtensions>,
 		decl: &brush_core::CommandArg,
 	) -> Result<ExecutionResult, brush_core::Error> {
+		// With `-f` every word names a function, whatever it looks like:
+		// `export -f 'v=1'` names no function and assigns nothing.
+		if self.names_are_functions {
+			let name = match decl {
+				brush_core::CommandArg::String(s) => Cow::Borrowed(s.as_str()),
+				brush_core::CommandArg::Assignment(assignment) => Cow::Owned(assignment.to_string()),
+			};
+			if let Some(func) = context.shell.func_mut(name.as_ref()) {
+				if self.unexport {
+					func.unexport();
+				} else {
+					func.export();
+				}
+				return Ok(ExecutionResult::success());
+			}
+			writeln!(context.stderr(), "{}: {name}: not a function", context.command_name)?;
+			return Ok(ExecutionResult::general_error());
+		}
+
 		match decl {
 			brush_core::CommandArg::String(s) => {
-				// See if this is supposed to be a function name.
-				if self.names_are_functions {
-					// Try to find the function already present; if we find it, then mark it
-					// exported.
-					if let Some(func) = context.shell.func_mut(s) {
-						if self.unexport {
-							func.unexport();
-						} else {
-							func.export();
-						}
-					} else {
-						writeln!(context.stderr(), "{s}: not a function")?;
-						return Ok(ExecutionExitCode::InvalidUsage.into());
-					}
+				if !env::valid_variable_name(s) {
+					writeln!(context.stderr(), "{}: `{s}': not a valid identifier", context.command_name)?;
+					return Ok(ExecutionResult::general_error());
 				}
 				// Try to find the variable already present; if we find it, then mark it
 				// exported.
@@ -94,15 +102,42 @@ impl ExportCommand {
 						variable.export();
 					}
 				}
+				// A name with no variable yet is marked for export, so that a later
+				// assignment exports it: `export v; v=1` gives children `v=1`.
+				else if !self.unexport {
+					let mut variable = ShellVariable::new(ShellValue::Unset(ShellValueUnsetType::Untyped));
+					variable.export();
+					context.shell.env_mut().add(s, variable, EnvironmentScope::Global)?;
+				}
 			},
 			brush_core::CommandArg::Assignment(assignment) => {
 				let name = match &assignment.name {
 					ast::AssignmentName::VariableName(name) => name,
-					ast::AssignmentName::ArrayElementName(..) => {
-						writeln!(context.stderr(), "not a valid variable name")?;
-						return Ok(ExecutionExitCode::InvalidUsage.into());
+					ast::AssignmentName::ArrayElementName(name, index) => {
+						writeln!(
+							context.stderr(),
+							"{}: `{name}[{index}]': not a valid identifier",
+							context.command_name
+						)?;
+						return Ok(ExecutionResult::general_error());
 					},
 				};
+
+				// A readonly variable keeps its value, and the words after this one
+				// are still exported. In POSIX mode the refusal is the special
+				// builtin's error, which ends the shell.
+				if context
+					.shell
+					.env()
+					.get_using_policy(name, EnvironmentLookup::Anywhere)
+					.is_some_and(|var| var.is_readonly())
+				{
+					if context.shell.options().posix_mode {
+						return Err(ErrorKind::ReadonlyVariable.into());
+					}
+					writeln!(context.stderr(), "{}: {name}: readonly variable", context.command_name)?;
+					return Ok(ExecutionResult::general_error());
+				}
 
 				let value = match &assignment.value {
 					ast::AssignmentValue::Scalar(s) => variables::ShellValueLiteral::Scalar(s.flatten()),
@@ -115,21 +150,34 @@ impl ExportCommand {
 					},
 				};
 
-				// Update the variable with the provided value and then mark it exported.
-				context.shell.env_mut().update_or_add(
-					name,
-					value,
-					|var| {
-						if self.unexport {
-							var.unexport();
-						} else {
-							var.export();
-						}
-						Ok(())
-					},
-					EnvironmentLookup::Anywhere,
-					EnvironmentScope::Global,
-				)?;
+				let mark = |var: &mut ShellVariable| {
+					if self.unexport {
+						var.unexport();
+					} else {
+						var.export();
+					}
+				};
+
+				// `export v+=x` appends to the value `v` has, as `v+=x` does.
+				let env = context.shell.env_mut();
+				if assignment.append
+					&& let Some(var) = env.get_mut_using_policy(name, EnvironmentLookup::Anywhere)
+				{
+					var.assign(value, true)?;
+					mark(var);
+				} else {
+					// Update the variable with the provided value and then mark it exported.
+					env.update_or_add(
+						name,
+						value,
+						|var| {
+							mark(var);
+							Ok(())
+						},
+						EnvironmentLookup::Anywhere,
+						EnvironmentScope::Global,
+					)?;
+				}
 			},
 		}
 

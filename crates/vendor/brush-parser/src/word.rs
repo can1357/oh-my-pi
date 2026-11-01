@@ -588,10 +588,20 @@ pub fn parse_brace_expansions(
         .map_err(|err| error::WordParseError::BraceExpansion(word.to_owned(), err.into()))
 }
 
-pub(crate) fn parse_assignment_word(
-    word: &str,
-) -> Result<ast::Assignment, peg::error::ParseError<peg::str::LineCol>> {
-    expansion_parser::name_equals_scalar_value(word, &ParserOptions::default())
+/// Parses `text` as an assignment word: a name, or a name with a subscript,
+/// then `=` or `+=`, then the value. The value is taken as it stands, with no
+/// further parsing or expansion.
+///
+/// A declaration builtin uses this to treat an argument as an assignment when
+/// the argument reached it as an ordinary word (quoted, or produced by
+/// expansion), as Bash's `export "name=value"` does.
+///
+/// # Arguments
+///
+/// * `text` - The text to parse.
+pub fn parse_assignment_word(text: &str) -> Result<ast::Assignment, error::WordParseError> {
+    expansion_parser::name_equals_scalar_value(text, &ParserOptions::default())
+        .map_err(|err| error::WordParseError::Word(text.to_owned(), err.into()))
 }
 
 pub(crate) fn parse_array_assignment(
