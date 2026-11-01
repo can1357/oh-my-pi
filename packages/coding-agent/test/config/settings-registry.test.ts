@@ -5,6 +5,7 @@ import { orderedSettings } from "@oh-my-pi/pi-coding-agent/config/all-settings";
 import { all, bindEffects, combine, effect, lookup } from "@oh-my-pi/pi-coding-agent/config/registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { logger, TempDir } from "@oh-my-pi/pi-utils";
+import { loadHandEditedSettings } from "../helpers/hand-edited-settings";
 import { YAML } from "bun";
 
 import {
@@ -15,7 +16,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { cfgSteeringMode } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { cfgEditFuzzyMatch, cfgEditModelVariants } from "@oh-my-pi/pi-coding-agent/edit/settings";
-import { cfgTaskMaxConcurrency } from "@oh-my-pi/pi-coding-agent/task/settings";
+import { cfgTaskAgentPrewalk, cfgTaskMaxConcurrency } from "@oh-my-pi/pi-coding-agent/task/settings";
 import { cfgEvalPy } from "@oh-my-pi/pi-coding-agent/eval/settings";
 import { cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { cfgSearxngBasicPassword, cfgSearxngEndpoint } from "@oh-my-pi/pi-coding-agent/web/settings";
@@ -81,6 +82,261 @@ describe("settings registry", () => {
 			expect(cfgSearxngBasicPassword.isConfigured(cleared)).toBe(false);
 			expect(cfgSearxngBasicPassword.provenance(cleared)).toBe("default");
 		});
+	});
+
+	it("lets a fallback env var apply over a configured value the setting rejects, with a warning", async () => {
+		const dir = TempDir.createSync("@pi-settings-env-rejected-");
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			// `searxng.endpoint` yields to its variable on a blank value; `searxng.basicPassword` only when unset.
+			const settings = await loadHandEditedSettings(dir, {
+				global: { searxng: { endpoint: 8080, basicPassword: 42 } },
+			});
+			withEnv({ SEARXNG_ENDPOINT: "https://env.example", SEARXNG_BASIC_PASSWORD: "env-secret" }, () => {
+				expect(cfgSearxngEndpoint.get(settings)).toBe("https://env.example");
+				expect(cfgSearxngBasicPassword.get(settings)).toBe("env-secret");
+			});
+			// A global value is read, not dropped at load, and its warning still names the file.
+			const source = dir.join("agent", "config.yml");
+			expect(warn).toHaveBeenCalledWith("Settings: ignoring invalid value", {
+				setting: "searxng.endpoint",
+				valueType: "number",
+				valueLength: 4,
+				expected: "a string",
+				source,
+			});
+			// Every rejected value is metadata-only, credential or not.
+			expect(warn).toHaveBeenCalledWith("Settings: ignoring invalid value", {
+				setting: "searxng.basicPassword",
+				valueType: "number",
+				valueLength: 2,
+				expected: "a string",
+				source,
+			});
+		} finally {
+			warn.mockRestore();
+			dir.removeSync();
+		}
+	});
+
+	it("never logs a rejected value, including nested tokens in an unmarked setting", async () => {
+		const dir = TempDir.createSync("@pi-settings-rejected-value-");
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const secret = "settings-registry-nested-token-9f2c";
+		try {
+			// Lists where records are expected, under a valid `--config` record that hides the project layer.
+			await loadHandEditedSettings(dir, {
+				project: {
+					images: { urls: { credentials: [{ token: secret }] } },
+					temperature: { apiToken: secret },
+					steeringMode: secret,
+				},
+				overlays: [{ images: { urls: { credentials: {} } } }],
+			});
+			expect(warn).toHaveBeenCalledWith("Settings: ignoring invalid value", {
+				setting: "images.urls.credentials",
+				valueType: "array",
+				valueLength: 1,
+				expected: "a record",
+				source: expect.stringMatching(/\.omp[\\/]config\.yml$/),
+			});
+			expect(warn).toHaveBeenCalledWith("Settings: ignoring invalid value", {
+				setting: "temperature",
+				valueType: "object",
+				valueLength: 1,
+				expected: "a number",
+				source: expect.stringMatching(/\.omp[\\/]config\.yml$/),
+			});
+			expect(warn).toHaveBeenCalledWith("Settings: ignoring invalid value", {
+				setting: "steeringMode",
+				valueType: "string",
+				valueLength: secret.length,
+				expected: expect.stringContaining("one of "),
+				source: expect.stringMatching(/\.omp[\\/]config\.yml$/),
+			});
+			expect(Bun.inspect(warn.mock.calls)).not.toContain(secret);
+		} finally {
+			warn.mockRestore();
+			dir.removeSync();
+		}
+	});
+
+	it("never puts a rejected value in a validation, write or parse error", () => {
+		// A token pasted into the wrong key is the likeliest rejected value; a validator's error is logged
+		// when a watched reload keeps the last good config, and `omp config set` prints a parse error.
+		const secret = "sk-ant-api03-validation-canary-17600";
+		const errors: string[] = [];
+		const capture = (fn: () => unknown): void => {
+			try {
+				fn();
+			} catch (error) {
+				errors.push(String(error));
+			}
+		};
+		capture(() => Settings.isolated({ "session.maxCost": secret }));
+		capture(() => Settings.isolated({ "session.warnCost": { apiToken: secret } }));
+		capture(() => Settings.isolated({ "task.agentSoftRequestBudget": { lead: secret } }));
+		capture(() => Settings.isolated({ "task.perCallModelAllow": secret }));
+		capture(() => Settings.isolated({ "task.perCallModelAllow": [{ token: secret }] }));
+		capture(() => Settings.isolated({ temperature: secret }));
+		for (const id of ["temperature", "compaction.enabled", "steeringMode", "task.agentPrewalk"]) {
+			capture(() => lookup(id)?.parse(secret));
+		}
+		expect(errors).toHaveLength(10);
+		expect(errors.join("\n")).not.toContain(secret);
+		expect(errors).toContain(
+			`Error: Invalid session.maxCost: expected a positive USD amount, got string (length ${secret.length}).`,
+		);
+	});
+
+	it("keeps what a lower project file holds when a higher project file holds a rejected value", async () => {
+		using dir = TempDir.createSync("@pi-settings-project-files-");
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			const agentDir = dir.join("agent");
+			const cwd = dir.join("project");
+			// The project's settings.json ranks below its config.yml.
+			await Bun.write(
+				path.join(cwd, ".omp", "settings.json"),
+				JSON.stringify({ temperature: 0.4, tools: { approval: { bash: "deny" } } }),
+			);
+			await Bun.write(
+				path.join(cwd, ".omp", "config.yml"),
+				YAML.stringify({ temperature: "hot", tools: { approval: "deny-bash" } }),
+			);
+			const settings = await Settings.loadReadOnly({ agentDir, cwd });
+			expect(lookup("tools.approval")?.get(settings)).toEqual({ bash: "deny" });
+			expect(cfgTemperature.get(settings)).toBe(0.4);
+			expect(
+				settings
+					.ignoredValues()
+					.map(ignored => ignored.setting.id)
+					.sort(),
+			).toEqual(["temperature", "tools.approval"]);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it("shows an overlay a rejection its parent learns on a later reload", async () => {
+		using dir = TempDir.createSync("@pi-settings-rejected-overlay-");
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			const parent = await loadHandEditedSettings(dir, { global: {} }, { reloadable: true });
+			const child = parent.overlay();
+			expect(child.ignoredValues()).toEqual([]);
+			await Bun.write(dir.join("project", ".omp", "config.yml"), YAML.stringify({ temperature: "hot" }));
+			await parent.reloadFromDisk();
+			expect(child.ignoredValues().map(ignored => ignored.setting.id)).toEqual(["temperature"]);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it("keeps the record of a rejected value when a reload fails before its layers are committed", async () => {
+		using dir = TempDir.createSync("@pi-settings-rejected-partial-reload-");
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			const settings = await loadHandEditedSettings(
+				dir,
+				{ overlays: [{ temperature: "hot" }, { topK: 5 }] },
+				{ reloadable: true },
+			);
+			const ignored = () => settings.ignoredValues().map(({ setting, source }) => [setting.id, source]);
+			expect(ignored()).toEqual([["temperature", dir.join("overlay-0.yml")]]);
+			// The first file is fixed and the second no longer parses: nothing is adopted.
+			await Bun.write(dir.join("overlay-0.yml"), YAML.stringify({ temperature: 0.3 }));
+			await Bun.write(dir.join("overlay-1.yml"), "topK: [unterminated\n");
+			await expect(settings.reloadFromDisk()).rejects.toThrow();
+			expect(cfgTemperature.get(settings)).toBe(cfgTemperature.default);
+			expect(ignored()).toEqual([["temperature", dir.join("overlay-0.yml")]]);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it("reads a value the setting rejects as unset where it is written: value, presence and provenance agree", async () => {
+		const dir = TempDir.createSync("@pi-settings-rejected-layer-");
+		const aloneDir = TempDir.createSync("@pi-settings-rejected-alone-");
+		const validatedDir = TempDir.createSync("@pi-settings-rejected-validated-");
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			const underGlobal = await loadHandEditedSettings(dir, {
+				global: { temperature: 0.2, task: { agentPrewalk: { scout: "anthropic/claude-haiku-4-5" } } },
+				project: { temperature: "hot", task: { agentPrewalk: "fast" } },
+				overlays: [{ task: { agentPrewalk: { plan: "anthropic/claude-opus-4-8" } } }],
+			});
+			expect(cfgTemperature.get(underGlobal)).toBe(0.2);
+			expect(cfgTemperature.isConfigured(underGlobal)).toBe(true);
+			expect(cfgTemperature.provenance(underGlobal)).toBe("global");
+			// The malformed project record does not replace the global entries the --config record merges over.
+			expect(cfgTaskAgentPrewalk.get(underGlobal)).toEqual({
+				plan: "anthropic/claude-opus-4-8",
+				scout: "anthropic/claude-haiku-4-5",
+			});
+			expect(warn).toHaveBeenCalledWith("Settings: ignoring invalid value", {
+				setting: "temperature",
+				valueType: "string",
+				valueLength: 3,
+				expected: "a number",
+				source: expect.stringMatching(/\.omp[\\/]config\.yml$/),
+			});
+			// The project layer as written still shows it, so a host editing that file does not lose it.
+			expect(underGlobal.getProjectSettings()).toMatchObject({ temperature: "hot" });
+
+			const alone = await loadHandEditedSettings(aloneDir, { overlays: [{ temperature: "hot" }] });
+			expect(cfgTemperature.get(alone)).toBe(cfgTemperature.default);
+			expect(cfgTemperature.isConfigured(alone)).toBe(false);
+			expect(cfgTemperature.provenance(alone)).toBe("default");
+
+			// A setting with `validate` keeps the value for its check and reads it as unset, never the
+			// lower value that check did not see.
+			const validated = await loadHandEditedSettings(validatedDir, {
+				global: { providers: { maxInFlightRequests: { openai: -1 } } },
+				overlays: [{ providers: { maxInFlightRequests: "lots" } }],
+			});
+			expect(cfgProvidersMaxInFlightRequests.get(validated)).toEqual({});
+			expect(cfgProvidersMaxInFlightRequests.isConfigured(validated)).toBe(false);
+		} finally {
+			warn.mockRestore();
+			dir.removeSync();
+			aloneDir.removeSync();
+			validatedDir.removeSync();
+		}
+	});
+
+	it("warns once per file about a value it holds, and again only after the file fixes and breaks it", async () => {
+		const dir = TempDir.createSync("@pi-settings-rejected-warn-once-");
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const sources = () =>
+			warn.mock.calls
+				.filter(([message]) => message === "Settings: ignoring invalid value")
+				.map(([, context]) =>
+					context && typeof context === "object" && "source" in context ? context.source : undefined,
+				);
+		try {
+			const settings = await loadHandEditedSettings(
+				dir,
+				{ global: { temperature: 0.2 }, overlays: [{ temperature: "hot" }, { temperature: "hot" }] },
+				{ reloadable: true },
+			);
+			const [first, second] = [dir.join("overlay-0.yml"), dir.join("overlay-1.yml")];
+			expect(sources()).toEqual([first, second]);
+
+			expect(cfgTemperature.get(settings)).toBe(0.2);
+			await settings.reloadFromDisk();
+			await settings.reloadFromDisk();
+			expect(sources()).toEqual([first, second]);
+
+			await Bun.write(second, YAML.stringify({ temperature: 0.4 }));
+			await settings.reloadFromDisk();
+			await Bun.write(second, YAML.stringify({ temperature: "hot" }));
+			await settings.reloadFromDisk();
+			expect(sources()).toEqual([first, second, second]);
+		} finally {
+			warn.mockRestore();
+			dir.removeSync();
+		}
 	});
 
 	it("rejects writes whose value does not fit the setting's type", () => {

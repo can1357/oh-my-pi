@@ -2844,6 +2844,18 @@ describe("Settings", () => {
 			cfgExtensions.override(settings, ["../override-ext"]);
 			expect(settings.extensionsSourceLevel()).toBe("user");
 		});
+
+		it("keeps a project list project-owned under a --config file holding an extensions value that is not a list", async () => {
+			await Bun.write(
+				path.join(projectDir, ".omp", "config.yml"),
+				YAML.stringify({ extensions: ["../project-ext"] }),
+			);
+			const overlay = path.join(projectDir, "overlay.yml");
+			await Bun.write(overlay, YAML.stringify({ extensions: "../overlay-ext" }));
+			const settings = await Settings.init({ cwd: projectDir, agentDir, configFiles: [overlay] });
+			expect(cfgExtensions.get(settings)).toEqual(["../project-ext"]);
+			expect(settings.extensionsSourceLevel()).toBe("project");
+		});
 	});
 
 	describe("project .claude/settings.json parse warnings", () => {

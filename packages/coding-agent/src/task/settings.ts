@@ -7,7 +7,7 @@ import {
 	type AgentCompactionThresholdOverride,
 	validateAgentCompactionThresholdOverrides,
 } from "../config/compaction-threshold";
-import { effect, register } from "../config/registry";
+import { describeRejectedValue, effect, register } from "../config/registry";
 import type { Settings } from "../config/settings";
 import { type ServiceTierInheritSettingValue, validateAgentServiceTierOverrides } from "../config/service-tier";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
@@ -344,13 +344,13 @@ function validatePerCallModelAllow(value: unknown): void {
 	if (value === undefined || value === null) return;
 	if (!Array.isArray(value)) {
 		throw new Error(
-			`Invalid task.perCallModelAllow: expected a list of provider/model-id strings, got ${Bun.inspect(value)}.`,
+			`Invalid task.perCallModelAllow: expected a list of provider/model-id strings, got ${describeRejectedValue(value)}.`,
 		);
 	}
 	for (const [index, entry] of value.entries()) {
 		if (typeof entry === "string") continue;
 		throw new Error(
-			`Invalid task.perCallModelAllow[${index}]: expected a provider/model-id string, got ${Bun.inspect(entry)}.`,
+			`Invalid task.perCallModelAllow[${index}]: expected a provider/model-id string, got ${describeRejectedValue(entry)}.`,
 		);
 	}
 }
@@ -509,7 +509,7 @@ function validateAgentSoftRequestBudget(value: unknown): void {
 	for (const [agentName, budget] of Object.entries(value)) {
 		if (budget === null || (typeof budget === "number" && Number.isSafeInteger(budget) && budget >= 0)) continue;
 		throw new Error(
-			`Invalid task.agentSoftRequestBudget.${agentName}: expected a non-negative integer request count (0 disables the guard), got ${Bun.inspect(budget)}.`,
+			`Invalid task.agentSoftRequestBudget.${agentName}: expected a non-negative integer request count (0 disables the guard), got ${describeRejectedValue(budget)}.`,
 		);
 	}
 }

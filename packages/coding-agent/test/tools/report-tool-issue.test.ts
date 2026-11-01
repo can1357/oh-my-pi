@@ -15,6 +15,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/report-tool-issue";
 import * as piUtils from "@oh-my-pi/pi-utils";
 import { mockFetch } from "../helpers/fetch-mock";
+import { loadHandEditedSettings } from "../helpers/hand-edited-settings";
 
 function openTempDb(): Database {
 	const db = new Database(":memory:");
@@ -137,6 +138,32 @@ describe("flushGrievances", () => {
 
 	it("stays off when explicitly disabled", () => {
 		expect(isAutoQaEnabled(Settings.isolated({ "dev.autoqa": false }))).toBe(false);
+	});
+
+	it("keeps a denied consent when dev.autoqa holds a value that is not a boolean", async () => {
+		const dir = piUtils.TempDir.createSync("@pi-autoqa-malformed-");
+		try {
+			const settings = await loadHandEditedSettings(dir, {
+				global: { dev: { autoqa: "on", autoqaConsent: "denied" } },
+			});
+			expect(isAutoQaEnabled(settings)).toBe(false);
+		} finally {
+			dir.removeSync();
+		}
+	});
+
+	it("honors a consent denied in a project file's legacy dev.autoqa shape over a global grant", async () => {
+		const dir = piUtils.TempDir.createSync("@pi-autoqa-legacy-");
+		try {
+			// The legacy shape fails `dev.autoqa`'s type until migration moves it to `dev.autoqaConsent`.
+			const settings = await loadHandEditedSettings(dir, {
+				global: { dev: { autoqaConsent: "granted" } },
+				project: { dev: { autoqa: { consent: "denied" } } },
+			});
+			expect(isAutoQaEnabled(settings)).toBe(false);
+		} finally {
+			dir.removeSync();
+		}
 	});
 
 	it("skips network when consent is missing and leaves rows intact", async () => {

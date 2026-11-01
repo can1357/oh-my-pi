@@ -1,9 +1,11 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
+import { logger, TempDir } from "@oh-my-pi/pi-utils";
 import { isReplyWrite } from "@oh-my-pi/pi-tui/chat/reply-write";
 import { Settings } from "../../src/config/settings";
 import { InternalUrlRouter } from "../../src/internal-urls";
 import type { SchemeHost } from "../../src/internal-urls/types";
 import type { ToolSession } from "../../src/tools";
+import { loadHandEditedSettings } from "../helpers/hand-edited-settings";
 
 const host: SchemeHost = {
 	skillUriAccess: false,
@@ -51,6 +53,30 @@ describe("out://", () => {
 			policy: "deny",
 			reason: expect.stringContaining("Subagents"),
 		});
+	});
+
+	it("reads a hand-edited `out.enabled` that is not a boolean as unset, with a warning", async () => {
+		const dir = TempDir.createSync("@pi-out-enabled-malformed-");
+		const warn = spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			const settings = await loadHandEditedSettings(dir, { global: { out: { enabled: "off" } } });
+			const router = InternalUrlRouter.instance();
+			const tier = (tuiTranscript: boolean) =>
+				router.writeTier("out://", "hi", { settings, taskDepth: 0, tuiTranscript } as unknown as ToolSession);
+
+			expect(tier(false)).toMatchObject({ policy: "deny", reason: expect.stringContaining("out.enabled") });
+			expect(tier(true)).toBe("read");
+			expect(warn).toHaveBeenCalledWith("Settings: ignoring invalid value", {
+				setting: "out.enabled",
+				valueType: "string",
+				valueLength: 3,
+				expected: "a boolean",
+				source: dir.join("agent", "config.yml"),
+			});
+		} finally {
+			warn.mockRestore();
+			dir.removeSync();
+		}
 	});
 
 	it("accepts Markdown as an elidable result and rejects disabled, blank, and oversize replies", async () => {
