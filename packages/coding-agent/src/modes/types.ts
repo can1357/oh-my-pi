@@ -32,6 +32,7 @@ import type { Skill } from "../extensibility/skills";
 import type { MCPManager } from "../mcp";
 import type { PlanApprovalDetails } from "../plan-mode/approved-plan";
 import type { AgentSession } from "../session/agent-session";
+import type { ResetSessionContextResult } from "../session/agent-session-types";
 import type { CompactMode } from "../session/compact-modes";
 import type { ForeignSessionSource } from "../session/foreign-session-store";
 import type { HistoryStorage } from "../session/history-storage";
@@ -540,7 +541,7 @@ export interface InteractiveModeContext {
 	/** User-initiated `/new`: {@link handleClearCommand} plus the `plan.defaultOnStartup` default. */
 	handleNewCommand(): Promise<void>;
 	handleFreshCommand(): Promise<void>;
-	handleResetContextCommand(): Promise<void>;
+	handleResetContextCommand(): Promise<ResetSessionContextResult | undefined>;
 	handleDeleteCommand(): Promise<void>;
 	handleForkCommand(placement?: "pane" | "window"): Promise<void>;
 	handleBashCommand(command: string, excludeFromContext?: boolean): Promise<void>;

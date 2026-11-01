@@ -168,6 +168,8 @@ interface VibeRecord {
 	killed: boolean;
 	/** True while a parent switch is detaching this process-local record without terminating it. */
 	suspended: boolean;
+	/** True while {@link pauseScope} holds this worker for a later {@link activateScope}. */
+	paused: boolean;
 	/** True only after a terminal lifecycle event has durably flushed. */
 	terminalPersisted: boolean;
 }
@@ -303,6 +305,7 @@ export class VibeSessionRegistry {
 			turnCount: 0,
 			killed: record.killed ?? false,
 			suspended: false,
+			paused: false,
 			terminalPersisted: false,
 		});
 	}
@@ -310,6 +313,7 @@ export class VibeSessionRegistry {
 	readonly #records = new Map<string, VibeRecord>();
 	readonly #terminationTails = new Map<string, Promise<void>>();
 	readonly #terminatedScopes = new Set<string>();
+	readonly #pausedScopes = new Set<string>();
 	#teardownGraceMs = VIBE_TEARDOWN_GRACE_MS;
 
 	/** Override the teardown grace period for deterministic lifecycle tests. */
@@ -330,9 +334,14 @@ export class VibeSessionRegistry {
 		};
 	}
 
-	/** Re-open spawn admission after an explicit Vibe-mode entry. */
+	/** Reopen a scope and its retained workers without replaying interrupted turns. */
 	activateScope(scope: VibeOwnerScope): void {
 		this.#terminatedScopes.delete(scopeKey(scope, ""));
+		this.#pausedScopes.delete(scopeKey(scope, ""));
+		for (const record of this.#records.values()) {
+			if (!record.paused || !matchesScope(record, scope)) continue;
+			record.paused = false;
+		}
 	}
 
 	async #withTerminationLock<T>(scope: VibeOwnerScope, operation: () => Promise<T>): Promise<T> {
@@ -787,12 +796,13 @@ export class VibeSessionRegistry {
 				lastActivity: blockedByCollision
 					? "blocked by an agent id collision"
 					: candidate.inFlight
-						? `turn ${candidate.turnCount} interrupted by process restart`
+						? `turn ${candidate.turnCount} interrupted before completion`
 						: undefined,
 				queue: [],
 				turnCount: candidate.turnCount,
 				killed: false,
 				suspended: false,
+				paused: false,
 				terminalPersisted: false,
 			});
 			restored++;
@@ -813,6 +823,9 @@ export class VibeSessionRegistry {
 	): Promise<VibeSpawnOutcome> {
 		if (this.#terminatedScopes.has(scopeKey(scope, ""))) {
 			throw new ToolError("Vibe mode has exited; enter Vibe mode again before spawning a worker.");
+		}
+		if (this.#pausedScopes.has(scopeKey(scope, ""))) {
+			throw new ToolError("Vibe mode is paused; resume it before spawning a worker.");
 		}
 		const manager = this.#manager(session);
 		const { agent, modelOverride, modelRole } = this.#resolveWorker(session, args.cli);
@@ -846,6 +859,7 @@ export class VibeSessionRegistry {
 			turnCount: 0,
 			killed: false,
 			suspended: false,
+			paused: false,
 			terminalPersisted: false,
 		};
 		const key = scopeKey(scope, id);
@@ -896,6 +910,9 @@ export class VibeSessionRegistry {
 		const record = this.#record(scope, args.session);
 		if (record.state === "dead") {
 			throw new ToolError(`Vibe session "${record.id}" is dead. Spawn a new one with vibe_spawn.`);
+		}
+		if (record.paused) {
+			throw new ToolError(`Vibe session "${record.id}" is paused until Vibe resumes.`);
 		}
 		const message = args.message.trim();
 		if (!message) throw new ToolError("Message must not be empty.");
@@ -1014,6 +1031,45 @@ export class VibeSessionRegistry {
 		// watched turn settled may already be mid queued follow-up.
 		const stillRunning = watched.filter(record => record.turn !== undefined).map(record => record.id);
 		return { settled, stillRunning, timedOut: waitEndedByTimeout && settled.length === 0 };
+	}
+
+	/** Cancel turns and queued directives without releasing conversations; activateScope admits new work again. */
+	async pauseScope(scope: VibeOwnerScope, manager?: AsyncJobManager): Promise<number> {
+		return this.#withTerminationLock(scope, async () => {
+			this.#pausedScopes.add(scopeKey(scope, ""));
+			const records = [...this.#records.values()].filter(
+				record => matchesScope(record, scope) && record.state !== "dead",
+			);
+			const settling: TrackedVibeTeardown[] = [];
+			for (const record of records) {
+				record.paused = true;
+				record.queue.length = 0;
+				if (!record.turn || !manager) continue;
+				const job = manager.getJob(record.turn.jobId);
+				const wasRunning = job?.status === "running";
+				// A steered directive lives in the child agent's own steering/follow-up
+				// queues, not in `record.queue`, and abort() keeps non-user queues — its
+				// stranded drain would start a fresh turn on the paused worker. Take them
+				// back here so pausing means pausing.
+				const live = this.#registeredAgent(record)?.session;
+				if (live) {
+					const queued = [...live.agent.peekSteeringQueue(), ...live.agent.peekFollowUpQueue()];
+					if (queued.length > 0) live.dropQueuedMessages(queued);
+				}
+				manager.cancel(record.turn.jobId, { ownerId: record.ownerId });
+				// A settled job already cleared `record.turn` from its own body; only
+				// a running one needs its settlement awaited before we report done.
+				if (job && wasRunning) settling.push(this.#trackJobSettlement(record, job));
+			}
+			if (settling.length === 0) return records.length;
+			const settled = await waitForVibeTeardown(settling, Date.now() + this.#teardownGraceMs);
+			if (!settled) {
+				logger.warn("vibe: paused worker turns are still settling; they stay paused in the background", {
+					pending: settling.filter(task => task.status() === "pending").length,
+				});
+			}
+			return records.length;
+		});
 	}
 
 	/** Detach one parent's process-local workers without tombstoning their persisted conversations. */
@@ -1333,6 +1389,9 @@ export class VibeSessionRegistry {
 				? agentAccountPools[record.agent.name]
 				: undefined,
 			keepAlive: true,
+			// A --no-session worker's live conversation is its only copy: keep it
+			// resident (no idle-TTL parking) until Vibe exits.
+			retainLiveSession: true,
 		};
 	}
 
@@ -1438,6 +1497,8 @@ export class VibeSessionRegistry {
 		// Only an idle/parked ref with this parent's exact child file is resumable.
 		const registered = this.#registeredAgent(record);
 		record.state = registered && (registered.status === "idle" || registered.status === "parked") ? "idle" : "dead";
+		// A paused turn settles without replaying directives or journaling a completion.
+		if (record.paused) return;
 		if (record.state === "dead") {
 			record.terminalPersisted = await this.#appendTombstone(session, record, "unrecoverable");
 			return;

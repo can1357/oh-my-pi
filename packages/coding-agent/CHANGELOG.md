@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `/plan` no longer requires exiting Vibe: entering plan mode parks the worker scope — cancelling turns and dropping directives without losing the conversations — and restores it before queued input or approved execution. While parked, changing sessions (`/new`, `/fork`, `/move`, `/wt`, handoff, branching) is refused, and `--no-session` workers keep their only copy of history ([#17642](https://github.com/can1357/oh-my-pi/pull/17642) by [@ee-](https://github.com/ee-))
+
 ## [18.14.2] - 2026-10-31
 
 ### Added

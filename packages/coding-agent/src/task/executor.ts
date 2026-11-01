@@ -599,6 +599,12 @@ export interface ExecutorOptions {
 	 * set this false so disposal unregisters them instead of leaving idle peers.
 	 */
 	keepAlive?: boolean;
+	/**
+	 * Keep a keep-alive session resident when it has no reviver to restore it from:
+	 * it is not idle-TTL parked on completion and not disposed on interruption.
+	 * Shutdown and explicit kills stay terminal.
+	 */
+	retainLiveSession?: boolean;
 	/** Internal ownership handoff for cleanup that outlives the visible Task result. */
 	onCleanupDeferred?: (completion: Promise<void>) => void;
 	/** Releases resources retained for a kept-alive agent when its lifecycle ends. */
@@ -3562,6 +3568,8 @@ export async function finalizeSubagentLifecycle(args: {
 	isolated: boolean;
 	agentIdleTtlMs: number;
 	reviveSession: AgentReviver | null;
+	/** Keep the session resident without a reviver, on completion and on abort; see {@link ExecutorOptions.retainLiveSession}. */
+	retainLiveSession?: boolean;
 	cleanupDeadlineAt?: number;
 	onCleanupDeferred?: (completion: Promise<void>) => void;
 	onRelease?: () => Promise<void>;
@@ -3610,7 +3618,10 @@ export async function finalizeSubagentLifecycle(args: {
 	// Hub, RPC `cancel_subagent`, collab, vibe) publishes the `aborted` tombstone
 	// before the run observes its abort, and stays terminal.
 	const resumableAbort =
-		args.abortKind !== "shutdown" && args.keepAlive && args.reviveSession !== null && ref?.status !== "aborted";
+		args.abortKind !== "shutdown" &&
+		args.keepAlive &&
+		(args.reviveSession !== null || args.retainLiveSession === true) &&
+		ref?.status !== "aborted";
 	if (args.aborted && !resumableAbort) {
 		if (ref && ownsRef) {
 			if (args.abortKind === "shutdown") {
@@ -3662,7 +3673,8 @@ export async function finalizeSubagentLifecycle(args: {
 	AgentLifecycleManager.global().adopt(
 		args.id,
 		{
-			idleTtlMs: args.agentIdleTtlMs,
+			// A retained session with no transcript has nothing to revive from, so it must stay live.
+			idleTtlMs: args.reviveSession === null && args.retainLiveSession === true ? 0 : args.agentIdleTtlMs,
 			revive: args.reviveSession ?? undefined,
 			onRelease: args.onRelease,
 		},
@@ -5193,6 +5205,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					isolated: worktree !== undefined,
 					agentIdleTtlMs,
 					reviveSession,
+					retainLiveSession: options.retainLiveSession === true,
 					cleanupDeadlineAt,
 					onRelease: options.onRelease,
 					onCleanupDeferred: completion => {
