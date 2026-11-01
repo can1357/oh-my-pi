@@ -91,6 +91,7 @@ interface FactRow {
 }
 
 interface EdgeRow {
+	readonly id?: number;
 	readonly source: string;
 	readonly target: string;
 	readonly edge_type: string;
@@ -513,7 +514,7 @@ export class EpisodicGraph {
 		if (nodeIds.length === 0 || max === 0) return [];
 		const threshold = clampWeight(minWeight);
 		const seenKeys = new Set<string>();
-		const collected: GraphEdge[] = [];
+		const collected: Array<{ id: number; edge: GraphEdge }> = [];
 		const hasSqlLimit = Number.isFinite(limit) && max > 0;
 
 		for (let i = 0; i < nodeIds.length; i += MAX_SQL_IDS_PER_CHUNK) {
@@ -524,14 +525,14 @@ export class EpisodicGraph {
 				edgeType.length > 0
 					? (this.db
 							.query(
-								`SELECT source, target, edge_type, weight, timestamp FROM graph_edges
+								`SELECT id, source, target, edge_type, weight, timestamp FROM graph_edges
 					 WHERE (source IN (${placeholders}) OR target IN (${placeholders})) AND edge_type = ? AND weight >= ?
 					 ORDER BY weight DESC, id${limitClause}`,
 							)
 							.all(...chunk, ...chunk, edgeType, threshold, ...(hasSqlLimit ? [max] : [])) as EdgeRow[])
 					: (this.db
 							.query(
-								`SELECT source, target, edge_type, weight, timestamp FROM graph_edges
+								`SELECT id, source, target, edge_type, weight, timestamp FROM graph_edges
 					 WHERE (source IN (${placeholders}) OR target IN (${placeholders})) AND weight >= ?
 					 ORDER BY weight DESC, id${limitClause}`,
 							)
@@ -541,13 +542,16 @@ export class EpisodicGraph {
 				const key = `${row.source}\0${row.target}\0${row.edge_type}`;
 				if (seenKeys.has(key)) continue;
 				seenKeys.add(key);
-				collected.push(edgeFromRow(row));
+				collected.push({ id: row.id ?? 0, edge: edgeFromRow(row) });
 			}
 		}
 
-		collected.sort((a, b) => b.weight - a.weight || b.timestamp.localeCompare(a.timestamp));
-		if (collected.length > max) return collected.slice(0, max);
-		return collected;
+		collected.sort((a, b) => {
+			if (b.edge.weight !== a.edge.weight) return b.edge.weight - a.edge.weight;
+			return a.id - b.id;
+		});
+		const selected = collected.length > max ? collected.slice(0, max) : collected;
+		return selected.map(item => item.edge);
 	}
 	findFactsBySubject(subject: string): Fact[] {
 		const rows = this.db

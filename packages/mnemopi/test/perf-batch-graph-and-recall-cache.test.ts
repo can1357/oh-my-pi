@@ -400,4 +400,38 @@ describe("performance optimizations: batched graph and recall cache", () => {
 
 		graph.close();
 	});
+
+	it("findEdgesTouching preserves ascending id tie-breaker order across chunks when weights are equal", () => {
+		const db = new Database(":memory:");
+		const graph = new EpisodicGraph({ db });
+
+		// Insert 1000 nodes across 2 chunks (>900).
+		// Chunk 1 has node_10 with id 11, older timestamp, weight 0.8.
+		// Chunk 2 has node_950 with id 951, newer timestamp, equal weight 0.8.
+		// Under timestamp tie-break, node_950 (newer) would come first.
+		// Under id tie-break (ORDER BY weight DESC, id ASC), node_10 (smaller id) must come first.
+		const nodeCount = 1000;
+		for (let i = 0; i < nodeCount; i++) {
+			const weight = i === 10 || i === 950 ? 0.8 : 0.2;
+			const timestamp = i === 10 ? "2026-01-01T00:00:00.000Z" : "2026-11-01T00:00:00.000Z";
+			graph.addEdge({
+				source: "root",
+				target: `node_${i}`,
+				edgeType: "ctx",
+				weight,
+				timestamp,
+			});
+		}
+
+		const nodeIds = Array.from({ length: nodeCount }, (_, i) => `node_${i}`);
+		const edges = graph.findEdgesTouching(nodeIds, "ctx", 0.5, 2);
+
+		expect(edges).toHaveLength(2);
+		expect(edges[0]?.target).toBe("node_10");
+		expect(edges[0]?.weight).toBe(0.8);
+		expect(edges[1]?.target).toBe("node_950");
+		expect(edges[1]?.weight).toBe(0.8);
+
+		graph.close();
+	});
 });
