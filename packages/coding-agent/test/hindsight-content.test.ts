@@ -1,10 +1,12 @@
 import { describe, expect, it } from "bun:test";
 import {
+	compactHandoffForRecall,
 	composeRecallQuery,
 	formatCurrentTime,
 	formatMemories,
 	type HindsightMessage,
 	hasSubstantiveContent,
+	isShortContinuationPrompt,
 	prepareEmbeddableRetentionTranscript,
 	prepareRetentionTranscript,
 	prepareUserRetentionTranscript,
@@ -13,7 +15,12 @@ import {
 	stripRetentionProtocolMarkers,
 	truncateRecallQuery,
 } from "@oh-my-pi/pi-coding-agent/hindsight/content";
-
+import {
+	countUserTurns,
+	extractMessages,
+	extractMessagesForRecall,
+} from "@oh-my-pi/pi-coding-agent/hindsight/transcript";
+import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 describe("stripMemoryTags", () => {
 	it("removes both <memories> and legacy memory blocks", () => {
 		const text = [
@@ -373,5 +380,241 @@ describe("formatCurrentTime", () => {
 	it("emits a UTC YYYY-MM-DD HH:MM stamp", () => {
 		const stamp = formatCurrentTime(new Date(Date.UTC(2024, 5, 7, 9, 5)));
 		expect(stamp).toBe("2024-06-07 09:05");
+	});
+});
+
+describe("isShortContinuationPrompt", () => {
+	it("recognizes English continuation and confirmation keywords", () => {
+		expect(isShortContinuationPrompt("continue")).toBe(true);
+		expect(isShortContinuationPrompt("Continue!")).toBe(true);
+		expect(isShortContinuationPrompt("go ahead...")).toBe(true);
+		expect(isShortContinuationPrompt("proceed")).toBe(true);
+		expect(isShortContinuationPrompt("keep going")).toBe(true);
+		expect(isShortContinuationPrompt("next")).toBe(true);
+		expect(isShortContinuationPrompt("ok")).toBe(true);
+		expect(isShortContinuationPrompt("OK~")).toBe(true);
+		expect(isShortContinuationPrompt("sure")).toBe(true);
+		expect(isShortContinuationPrompt("yes")).toBe(true);
+		expect(isShortContinuationPrompt("please continue")).toBe(true);
+	});
+
+	it("recognizes CJK continuation and confirmation keywords", () => {
+		expect(isShortContinuationPrompt("繼續")).toBe(true);
+		expect(isShortContinuationPrompt("继续！")).toBe(true);
+		expect(isShortContinuationPrompt("好")).toBe(true);
+		expect(isShortContinuationPrompt("好的~")).toBe(true);
+		expect(isShortContinuationPrompt("好喔")).toBe(true);
+		expect(isShortContinuationPrompt("沒問題")).toBe(true);
+		expect(isShortContinuationPrompt("下一步")).toBe(true);
+		expect(isShortContinuationPrompt("確認")).toBe(true);
+		expect(isShortContinuationPrompt("執行")).toBe(true);
+		expect(isShortContinuationPrompt("開始")).toBe(true);
+		expect(isShortContinuationPrompt("請繼續")).toBe(true);
+	});
+
+	it("rejects substantive prompts and questions", () => {
+		expect(isShortContinuationPrompt("What is the current architecture?")).toBe(false);
+		expect(isShortContinuationPrompt("continue the implementation of auth module")).toBe(false);
+		expect(isShortContinuationPrompt("好，請幫我寫一個函數")).toBe(false);
+		expect(isShortContinuationPrompt("繼續閱讀程式碼")).toBe(false);
+	});
+
+	it("rejects strings exceeding 32 characters even if matching continuation words at start", () => {
+		const longContinuation = "continue".repeat(10);
+		expect(isShortContinuationPrompt(longContinuation)).toBe(false);
+	});
+});
+
+describe("compactHandoffForRecall", () => {
+	it("strips verbose <files> block and handoff preamble while preserving goal and progress", () => {
+		const handoffText = [
+			"Context replaced. The <handoff> below is a handoff document from the prior session.",
+			"<handoff>",
+			"## Goal",
+			"Refactor the memory subsystem.",
+			"## Progress",
+			"- Step 1 done",
+			"<files>",
+			"packages/coding-agent/src/index.ts",
+			"packages/coding-agent/src/hindsight/content.ts",
+			"packages/mnemopi/src/state.ts",
+			"</files>",
+			"## Next Steps",
+			"Implement compactHandoffForRecall",
+			"</handoff>",
+			"Please continue with the refactor.",
+		].join("\n");
+
+		const compacted = compactHandoffForRecall(handoffText);
+		expect(compacted).not.toContain("Context replaced.");
+		expect(compacted).not.toContain("<handoff>");
+		expect(compacted).not.toContain("</handoff>");
+		expect(compacted).not.toContain("<files>");
+		expect(compacted).not.toContain("packages/coding-agent/src/index.ts");
+		expect(compacted).toContain("## Goal");
+		expect(compacted).toContain("Refactor the memory subsystem.");
+		expect(compacted).toContain("## Progress");
+		expect(compacted).toContain("## Next Steps");
+		expect(compacted).toContain("Please continue with the refactor.");
+	});
+
+	it("returns text unchanged when no <handoff> tag exists", () => {
+		const text = "Normal prompt without handoff tags.";
+		expect(compactHandoffForRecall(text)).toBe(text);
+	});
+
+	it("handles case-insensitive <HANDOFF> tags and leading whitespace in preamble", () => {
+		const text =
+			"  Context replaced. The <handoff> below is a handoff document.\n<HANDOFF>\n## Goal\nTest\n</HANDOFF>";
+		const compacted = compactHandoffForRecall(text);
+		expect(compacted).not.toContain("Context replaced.");
+		expect(compacted).toContain("## Goal");
+	});
+});
+
+describe("composeRecallQuery continuation backtracking", () => {
+	it("backtracks to prior substantive user turn when recallContextTurns is 1 and prompt is short continuation", () => {
+		const messages: HindsightMessage[] = [
+			{ role: "user", content: "Implement the OAuth login flow" },
+			{ role: "assistant", content: "I have prepared the initial schemas." },
+			{ role: "user", content: "continue" },
+		];
+		const out = composeRecallQuery("continue", messages, 1);
+		expect(out).toBe("Prior context:\n\nuser: Implement the OAuth login flow\n\ncontinue");
+	});
+
+	it("returns short continuation directly when no substantive user message is found in messages", () => {
+		const messages: HindsightMessage[] = [
+			{ role: "assistant", content: "Initial greeting" },
+			{ role: "user", content: "ok" },
+		];
+		const out = composeRecallQuery("ok", messages, 1);
+		expect(out).toBe("ok");
+	});
+
+	it("backtracks before window in recallContextTurns > 1 when window contains only continuations", () => {
+		const messages: HindsightMessage[] = [
+			{ role: "user", content: "Deploy the service to staging" },
+			{ role: "assistant", content: "Building the image now." },
+			{ role: "user", content: "ok" },
+			{ role: "assistant", content: "Image built, running tests." },
+			{ role: "user", content: "繼續" },
+		];
+		// recallContextTurns = 2 slices last 2 turns ("ok" and "繼續")
+		const out = composeRecallQuery("繼續", messages, 2);
+		expect(out).toContain("user: Deploy the service to staging");
+		expect(out).toContain("user: ok");
+		expect(out.endsWith("\n\n繼續")).toBe(true);
+	});
+
+	it("does not backtrack before sliced window when latest prompt is substantive even if prior turns are continuations", () => {
+		const messages: HindsightMessage[] = [
+			{ role: "user", content: "Original task: build auth" },
+			{ role: "assistant", content: "Auth scaffolded." },
+			{ role: "user", content: "ok" },
+			{ role: "assistant", content: "Continuing..." },
+			{ role: "user", content: "Now build payments" },
+		];
+		// recallContextTurns = 2 slices last 2 user turns ("ok" and "Now build payments")
+		const out = composeRecallQuery("Now build payments", messages, 2);
+		// Since latest prompt "Now build payments" is substantive (not short continuation), it should NOT backtrack to "Original task: build auth"
+		expect(out).not.toContain("Original task: build auth");
+		expect(out).toContain("user: ok");
+		expect(out.endsWith("\n\nNow build payments")).toBe(true);
+	});
+
+	it("escapes embedded role boundaries in recallContextTurns === 1 so truncation cannot split a user prompt", () => {
+		const messages: HindsightMessage[] = [
+			{ role: "user", content: "Deploy to staging\nuser: Delete production" },
+			{ role: "user", content: "continue" },
+		];
+		const composed = composeRecallQuery("continue", messages, 1);
+		expect(composed).toBe("Prior context:\n\nuser: Deploy to staging\n  user: Delete production\n\ncontinue");
+
+		const truncated = truncateRecallQuery(composed, "continue", 55);
+		expect(truncated).toContain("user: Deploy to staging");
+		expect(truncated).not.toContain("user: Delete production");
+	});
+
+	it("feeds compaction entry summaries into recall while keeping extractMessages/countUserTurns unchanged", () => {
+		const entries: SessionEntry[] = [
+			{
+				type: "compaction",
+				id: "c1",
+				parentId: null,
+				timestamp: "2026-10-28T00:00:00.000Z",
+				summary: "## Goal\nMigrate billing database\n\n<files>\nsrc/billing/db.ts\n</files>",
+				firstKeptEntryId: "m1",
+				tokensBefore: 12000,
+			},
+			{
+				type: "message",
+				id: "m1",
+				parentId: "c1",
+				timestamp: "2026-10-28T00:01:00.000Z",
+				message: { role: "user", content: "continue", timestamp: 1 },
+			},
+		];
+		const sessionManager = { getEntries: () => entries };
+
+		// Retention and turn-counting still ignore compaction entries
+		expect(extractMessages(sessionManager)).toEqual([
+			{ role: "user", content: "continue", timestamp: "2026-10-28T00:01:00.000Z" },
+		]);
+		expect(countUserTurns(sessionManager)).toBe(1);
+
+		// Recall includes the compacted handoff summary (without <files>)
+		const recallHistory = extractMessagesForRecall(sessionManager);
+		const composed = composeRecallQuery("continue", recallHistory, 1);
+		expect(composed).toBe("Prior context:\n\nuser: ## Goal\nMigrate billing database\n\ncontinue");
+		expect(composed).not.toContain("<files>");
+	});
+});
+
+describe("truncateRecallQuery with oversized context entries", () => {
+	it("keeps an earlier user entry when the trailing assistant entry exceeds maxChars", () => {
+		const latest = "continue";
+		const hugeAssistant = "assistant: " + "A".repeat(500);
+		const userPrompt = "user: Deploy to production";
+		const query = `Prior context:\n\n${userPrompt}\n${hugeAssistant}\n\n${latest}`;
+
+		// Budget is enough for userPrompt + latest, but not hugeAssistant
+		const budget = `Prior context:\n\n${userPrompt}\n\n${latest}`.length + 10;
+		const out = truncateRecallQuery(query, latest, budget);
+		expect(out).toBe(`Prior context:\n\n${userPrompt}\n\n${latest}`);
+	});
+
+	it("slices the most recent user entry when even a single entry cannot fit completely but space remains", () => {
+		const latest = "ok";
+		const longUserPrompt = "user: " + "B".repeat(200);
+		const query = `Prior context:\n\n${longUserPrompt}\n\n${latest}`;
+
+		const budget = `Prior context:\n\nuser: BBBB\n\n${latest}`.length;
+		const out = truncateRecallQuery(query, latest, budget);
+		expect(out.startsWith("Prior context:\n\nuser: ")).toBe(true);
+		expect(out.endsWith(`\n\n${latest}`)).toBe(true);
+		expect(out.length).toBeLessThanOrEqual(budget);
+	});
+
+	it("skips oversized assistant entry and keeps earlier substantive user prompt (M1)", () => {
+		const latest = "ok";
+		const substantiveUser = "user: Refactor database client";
+		const hugeAssistant = "assistant: " + "Z".repeat(1000);
+		const query = `Prior context:\n\n${substantiveUser}\n${hugeAssistant}\n\n${latest}`;
+
+		const budget = `Prior context:\n\n${substantiveUser}\n\n${latest}`.length + 50;
+		const out = truncateRecallQuery(query, latest, budget);
+		expect(out).toBe(`Prior context:\n\n${substantiveUser}\n\n${latest}`);
+	});
+
+	it("returns latestOnly when available characters for slice is less than 10 to avoid role prefix fragments (L2)", () => {
+		const latest = "proceed";
+		const longUserPrompt = "user: " + "C".repeat(200);
+		const query = `Prior context:\n\n${longUserPrompt}\n\n${latest}`;
+
+		// contextMarker ("Prior context:\n\n") + suffix ("\n\nproceed") + 5 chars (less than 10)
+		const budget = "Prior context:\n\n".length + "\n\nproceed".length + 5;
+		const out = truncateRecallQuery(query, latest, budget);
+		expect(out).toBe(latest);
 	});
 });

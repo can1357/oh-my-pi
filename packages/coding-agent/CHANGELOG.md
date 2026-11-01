@@ -10,6 +10,10 @@
 
 - Background bash and eval jobs now carry the purpose the model gave for the call: `/jobs`, `/jobs full`, `proc://` listings, `wait` and `job` results, and the jobs HUD hover lead with it ahead of the raw command line ([#17649](https://github.com/can1357/oh-my-pi/pull/17649) by [@wolfiesch](https://github.com/wolfiesch))
 
+### Fixed
+
+- Fixed recall query composition to retain prior user or compaction handoff context when the latest prompt is a short continuation reply ([#17239](https://github.com/can1357/oh-my-pi/pull/17239) by [@GTanger](https://github.com/GTanger)).
+
 ## [18.14.2] - 2026-10-31
 
 ### Added

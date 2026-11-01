@@ -26,6 +26,13 @@ const MEMORIES_REGEX = /<memories>[\s\S]*?<\/memories>/g;
 const LEGACY_HINDSIGHT_MEMORIES_REGEX = /<hindsight_memories>[\s\S]*?<\/hindsight_memories>/g;
 const LEGACY_RELEVANT_MEMORIES_REGEX = /<relevant_memories>[\s\S]*?<\/relevant_memories>/g;
 const MENTAL_MODELS_REGEX = /<mental_models>[\s\S]*?<\/mental_models>/g;
+const HANDOFF_FILES_REGEX = /<files>[\s\S]*?<\/files>/gi;
+const HANDOFF_PREAMBLE_REGEX =
+	/^\s*Context replaced\.\s+The <handoff> below is a handoff document[\s\S]*?(?=<handoff>)/i;
+const HANDOFF_WRAPPER_REGEX = /<handoff>([\s\S]*?)<\/handoff>/i;
+const SHORT_CONTINUATION_PUNCTUATION_RE = /[.!?,;~。！？，、；～]+$/;
+const SHORT_CONTINUATION_RE =
+	/^(?:continue|go ahead|proceed|keep going|carry on|next|next step|ok|okay|yes|yep|sure|do it|please continue|繼續|继续|好|好的|好喔|沒問題|没问题|下一步|確認|确认|執行|执行|開始|开始|請繼續|请继续)$/i;
 
 const RETENTION_PROTOCOL_MARKER_REGEX = /^\[(?:role:\s*[-_a-zA-Z0-9]+|[-_a-zA-Z0-9]+:end|timestamp:\s+.+)\]$/;
 /**
@@ -44,6 +51,35 @@ export function stripMemoryTags(content: string): string {
 		.replace(MENTAL_MODELS_REGEX, "")
 		.replace(LEGACY_HINDSIGHT_MEMORIES_REGEX, "")
 		.replace(LEGACY_RELEVANT_MEMORIES_REGEX, "");
+}
+/**
+ * Compact handoff documents for recall by stripping verbose `<files>` listings
+ * and system preamble so substantive goals and progress dominate the query.
+ *
+ * If `<handoff>` is not present, returns `text` unchanged.
+ */
+export function compactHandoffForRecall(text: string): string {
+	const hasHandoffTag = /<handoff>/i.test(text);
+	if (!hasHandoffTag && !/<files>/i.test(text)) return text;
+	if (!hasHandoffTag) {
+		return /^\s*##\s+Goal\b/im.test(text) ? text.replace(HANDOFF_FILES_REGEX, "") : text;
+	}
+	let cleaned = text.replace(HANDOFF_PREAMBLE_REGEX, "");
+	cleaned = cleaned.replace(HANDOFF_WRAPPER_REGEX, (_, inner: string) => {
+		return inner.replace(HANDOFF_FILES_REGEX, "");
+	});
+	return cleaned;
+}
+
+/**
+ * Returns true when `text` is a concise continuation or confirmation prompt
+ * (e.g. "continue", "go ahead", "ok", "繼續", "下一步") rather than a substantive query.
+ */
+export function isShortContinuationPrompt(text: string): boolean {
+	const trimmed = text.trim();
+	if (trimmed.length === 0 || trimmed.length > 32) return false;
+	const normalized = trimmed.replace(SHORT_CONTINUATION_PUNCTUATION_RE, "").trim();
+	return SHORT_CONTINUATION_RE.test(normalized);
 }
 
 // At least one letter or digit means the message carries a token a retriever
@@ -88,7 +124,7 @@ export function formatCurrentTime(now: Date = new Date()): string {
  * Slice messages to the last N turns, where a turn boundary is a user message.
  * Returns the trailing tail starting at the (N-th from the end) user message.
  */
-export function sliceLastTurnsByUserBoundary(messages: HindsightMessage[], turns: number): HindsightMessage[] {
+export function sliceLastTurnsByUserBoundary(messages: readonly HindsightMessage[], turns: number): HindsightMessage[] {
 	if (messages.length === 0 || turns <= 0) return [];
 
 	let userTurnsSeen = 0;
@@ -110,36 +146,87 @@ export function sliceLastTurnsByUserBoundary(messages: HindsightMessage[], turns
 /**
  * Compose a recall query from the latest user prompt plus optional prior context.
  *
- * When `recallContextTurns <= 1` the query is just the trimmed latest prompt.
+ * When `recallContextTurns <= 1`, returns the latest prompt unless it is a short
+ * continuation prompt (in which case it prepends the most recent substantive user prompt).
  * Otherwise we prepend a `Prior context:` block built from the trailing
  * `recallContextTurns` user-bounded turns (memory tags stripped, latest prompt
  * suppressed to avoid duplicating it inside the context block).
  */
 export function composeRecallQuery(
 	latestQuery: string,
-	messages: HindsightMessage[],
+	messages: readonly HindsightMessage[],
 	recallContextTurns: number,
 ): string {
-	const latest = latestQuery.trim();
-	if (recallContextTurns <= 1 || messages.length === 0) return latest;
+	const latest = compactHandoffForRecall(stripMemoryTags(latestQuery)).trim();
+	if (messages.length === 0 || recallContextTurns <= 0) return latest;
 
-	const contextual = sliceLastTurnsByUserBoundary(messages, recallContextTurns);
 	let trailingUserIndex = -1;
-	for (let i = contextual.length - 1; i >= 0; i--) {
-		if (contextual[i].role === "user") {
-			trailingUserIndex = i;
-			break;
+	for (let i = messages.length - 1; i >= 0; i--) {
+		if (messages[i].role === "user") {
+			const cleaned = compactHandoffForRecall(stripMemoryTags(messages[i].content)).trim();
+			if (cleaned === latest) {
+				trailingUserIndex = i;
+				break;
+			}
 		}
 	}
 
+	if (recallContextTurns === 1) {
+		if (!isShortContinuationPrompt(latest)) return latest;
+		const searchFrom = trailingUserIndex >= 0 ? trailingUserIndex - 1 : messages.length - 1;
+		for (let i = searchFrom; i >= 0; i--) {
+			if (messages[i].role === "user") {
+				const c = compactHandoffForRecall(stripMemoryTags(messages[i].content)).trim();
+				if (hasSubstantiveContent(c) && !isShortContinuationPrompt(c)) {
+					const safeContent = c.replace(/\n(?=(?:user|assistant|system|tool): )/g, "\n  ");
+					return `Prior context:\n\nuser: ${safeContent}\n\n${latest}`;
+				}
+			}
+		}
+		return latest;
+	}
+
+	const contextual = sliceLastTurnsByUserBoundary(messages, recallContextTurns);
 	const contextLines: string[] = [];
+	let contextualTrailingUserIndex = -1;
+	for (let i = contextual.length - 1; i >= 0; i--) {
+		if (contextual[i].role === "user") {
+			const content = compactHandoffForRecall(stripMemoryTags(contextual[i].content)).trim();
+			if (content === latest) {
+				contextualTrailingUserIndex = i;
+				break;
+			}
+		}
+	}
+
 	for (let i = 0; i < contextual.length; i++) {
 		const msg = contextual[i];
-		const content = stripMemoryTags(msg.content).trim();
+		const content = compactHandoffForRecall(stripMemoryTags(msg.content)).trim();
 		if (!content || (msg.role === "assistant" && !hasSubstantiveContent(content))) continue;
-		if (i === trailingUserIndex && content === latest) continue;
+		if (i === contextualTrailingUserIndex && content === latest) continue;
 		const safeContent = content.replace(/\n(?=(?:user|assistant|system|tool): )/g, "\n  ");
 		contextLines.push(`${msg.role}: ${safeContent}`);
+	}
+
+	const isLatestContinuation = isShortContinuationPrompt(latest);
+	const hasSubstantiveUserInLines = contextLines.some(line => {
+		if (!line.startsWith("user: ")) return false;
+		const promptText = line.slice("user: ".length);
+		return hasSubstantiveContent(promptText) && !isShortContinuationPrompt(promptText);
+	});
+
+	if (isLatestContinuation && !hasSubstantiveUserInLines) {
+		const sliceStartIndex = messages.length - contextual.length;
+		for (let i = sliceStartIndex - 1; i >= 0; i--) {
+			if (messages[i].role === "user") {
+				const c = compactHandoffForRecall(stripMemoryTags(messages[i].content)).trim();
+				if (hasSubstantiveContent(c) && !isShortContinuationPrompt(c)) {
+					const safeContent = c.replace(/\n(?=(?:user|assistant|system|tool): )/g, "\n  ");
+					contextLines.unshift(`user: ${safeContent}`);
+					break;
+				}
+			}
+		}
 	}
 
 	if (contextLines.length === 0) return latest;
@@ -155,7 +242,7 @@ export function composeRecallQuery(
 export function truncateRecallQuery(query: string, latestQuery: string, maxChars: number): string {
 	if (maxChars <= 0 || query.length <= maxChars) return query;
 
-	const latest = latestQuery.trim();
+	const latest = compactHandoffForRecall(stripMemoryTags(latestQuery)).trim();
 	const latestOnly = latest.length > maxChars ? latest.slice(0, maxChars) : latest;
 
 	if (!query.includes("Prior context:")) return latestOnly;
@@ -178,11 +265,58 @@ export function truncateRecallQuery(query: string, latestQuery: string, maxChars
 		const candidate = `${contextMarker}${kept.join("\n")}${suffix}`;
 		if (candidate.length > maxChars) {
 			kept.shift();
+			continue;
+		}
+	}
+
+	const isSubstantiveUserEntry = (entry: string): boolean => {
+		if (!entry.startsWith("user: ")) return false;
+		const promptText = entry.slice("user: ".length);
+		return hasSubstantiveContent(promptText) && !isShortContinuationPrompt(promptText);
+	};
+
+	let mostRecentSubstantiveUser: string | undefined;
+	for (let i = contextEntries.length - 1; i >= 0; i--) {
+		if (isSubstantiveUserEntry(contextEntries[i])) {
+			mostRecentSubstantiveUser = contextEntries[i];
 			break;
 		}
 	}
 
-	if (kept.length > 0) return `${contextMarker}${kept.join("\n")}${suffix}`;
+	if (kept.length > 0) {
+		const keptHasSubstantiveUser = kept.some(isSubstantiveUserEntry);
+		if (keptHasSubstantiveUser || !mostRecentSubstantiveUser) {
+			return `${contextMarker}${kept.join("\n")}${suffix}`;
+		}
+		const keptBody = kept.join("\n");
+		const remainingForTask = maxChars - contextMarker.length - 1 - keptBody.length - suffix.length;
+		if (remainingForTask >= 10) {
+			const slicedTask = mostRecentSubstantiveUser.slice(0, remainingForTask);
+			return `${contextMarker}${slicedTask}\n${keptBody}${suffix}`;
+		}
+	}
+
+	// Either kept is empty or kept only held trivial entries that crowded out the oversized substantive user prompt.
+	const available = maxChars - contextMarker.length - suffix.length;
+	if (available >= 10) {
+		let targetEntry = mostRecentSubstantiveUser;
+		if (!targetEntry) {
+			for (let i = contextEntries.length - 1; i >= 0; i--) {
+				if (contextEntries[i].startsWith("user: ")) {
+					targetEntry = contextEntries[i];
+					break;
+				}
+			}
+		}
+		if (!targetEntry && contextEntries.length > 0) {
+			targetEntry = contextEntries[contextEntries.length - 1];
+		}
+		if (targetEntry) {
+			const sliced = targetEntry.slice(0, available);
+			return `${contextMarker}${sliced}${suffix}`;
+		}
+	}
+
 	return latestOnly;
 }
 

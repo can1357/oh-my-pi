@@ -17,7 +17,7 @@ import type { AgentSession } from "../session/agent-session";
 import { type BankScope, computeBankScope } from "./bank";
 import { createHindsightClient } from "./client";
 import { type HindsightConfig, isHindsightConfigured, loadHindsightConfig } from "./config";
-import { type HindsightMessage, hasSubstantiveContent } from "./content";
+import { compactHandoffForRecall, type HindsightMessage, hasSubstantiveContent } from "./content";
 import { HindsightSessionState } from "./state";
 
 import { cfgMemoryBackend } from "../memory-backend/settings";
@@ -441,6 +441,10 @@ function flattenMessagesForRecall(messages: AgentMessage[]): HindsightMessage[] 
 				.map(b => b.text)
 				.join("\n");
 			if (hasSubstantiveContent(text)) out.push({ role: "assistant", content: text });
+		}
+		if (msg.role === "compactionSummary") {
+			const compacted = compactHandoffForRecall(msg.summary).trim();
+			if (hasSubstantiveContent(compacted)) out.push({ role: "user", content: compacted });
 		}
 	}
 	return out;
