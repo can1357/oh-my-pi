@@ -495,6 +495,7 @@ describe("extractRetryHint", () => {
 		])("reads %s as GMT", (_label, value) => {
 			process.env.TZ = "America/Los_Angeles";
 			const expected = Date.UTC(2099, 8, 1, 9, 44, 51) - Date.now();
+
 			for (const hint of [
 				extractRetryHint(new Headers({ "retry-after": value })),
 				longestRetryHint(new Headers({ "retry-after": value })),
@@ -512,6 +513,29 @@ describe("extractRetryHint", () => {
 			const hint = extractRetryHint(new Headers({ "retry-after": value }));
 			expect(Math.abs(hint! - (instant - Date.now()))).toBeLessThan(1000);
 		});
+	});
+	describe("malformed Retry-After dates", () => {
+		it.each([
+			["a one-digit IMF-fixdate day", "Sun, 6 Nov 1994 08:49:37 GMT"],
+			["a one-digit RFC 850 day", "Sunday, 6-Nov-94 08:49:37 GMT"],
+			["an impossible numeric offset", "Sun, 06 Nov 1994 08:49:37 +2500"],
+			["an impossible ISO calendar date", "1994-02-30T00:00:00Z"],
+			["an impossible HTTP calendar date", "Sun, 31 Feb 2099 08:49:37 GMT"],
+			["an HTTP hour past 23", "Sun, 06 Nov 1994 24:00:00 GMT"],
+			["a weekday the date does not fall on", "Mon, 06 Nov 1994 08:49:37 GMT"],
+		])("%s does not hide an adjacent window reset", (_label, retryAfter) => {
+			const headers = new Headers({ "retry-after": retryAfter, "x-ratelimit-reset": "3600" });
+			expect(extractRetryHint(headers)).toBe(3_600_000);
+			expect(longestRetryHint(headers)).toBe(3_600_000);
+		});
+	});
+
+	it.each([
+		["+002099-09-01T09:44:51Z", Date.UTC(2099, 8, 1, 9, 44, 51)],
+		["+002099-09-01T11:44:51+02:00", Date.UTC(2099, 8, 1, 9, 44, 51)],
+	])("reads the supported expanded ISO year %s", (retryAfter, instant) => {
+		const hint = extractRetryHint(new Headers({ "retry-after": retryAfter }));
+		expect(Math.abs(hint! - (instant - Date.now()))).toBeLessThan(1000);
 	});
 
 	it.each([

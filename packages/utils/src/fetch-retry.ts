@@ -42,53 +42,206 @@ const RESET_BODY_PATTERN = /x-ratelimit-reset\s*[:=]\s*(\d+)/i;
 // falls back to its own backoff — unless the provider's catalog declares the
 // zone its stamps use (`naiveResetTimezoneOffset`), which makes it explicit.
 //
-// Only a value in a date grammar reaches `Date.parse`. It reads almost
-// anything as some date — `0,`, `0/1` and `0-1Z` all as 1 Jan 2000 — and a
-// date that has passed is an explicit "retry now", so a malformed value hid
-// the window reset beside it.
+// Parse only the supported shapes here. `Date.parse` accepts arbitrary words
+// and normalizes impossible dates: `0,`, `0/1` and `0-1Z` become 1 Jan 2000,
+// and 30 February rolls into March. Either turns a malformed Retry-After into
+// an elapsed date and an explicit "retry now", which hides a valid reset.
 
-const WEEKDAY = "(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)";
-const WEEKDAY_LONG = "(?:Mon|Tues|Wednes|Thurs|Fri|Satur|Sun)day";
-const MONTH = "(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)";
-const TIME_OF_DAY = "\\d{2}:\\d{2}:\\d{2}";
-/** A date's zone: `GMT`, `UTC`, `UT`, `Z`, a US zone name, or a numeric offset. */
-const ZONE = "(?:GMT|UTC|UT|[ECMP][SD]T|Z|[+-]\\d{2}:?\\d{2})";
-/**
- * An HTTP-date (RFC 9110 §5.6.7): IMF-fixdate (`Sun, 06 Nov 1994 08:49:37 GMT`),
- * the obsolete RFC 850 form (`Sunday, 06-Nov-94 08:49:37 GMT`) or asctime
- * (`Sun Nov  6 08:49:37 1994`). Group 1 is its zone, when it names one.
- */
-const HTTP_DATE_PATTERN = new RegExp(
-	`^(?:${WEEKDAY},\\s+\\d{1,2}\\s+${MONTH}\\s+\\d{4}\\s+${TIME_OF_DAY}` +
-		`|${WEEKDAY_LONG},\\s+\\d{1,2}-${MONTH}-\\d{2}\\s+${TIME_OF_DAY}` +
-		`|${WEEKDAY}\\s+${MONTH}\\s+\\d{1,2}\\s+${TIME_OF_DAY}\\s+\\d{4})(?:\\s+(${ZONE}))?$`,
+const WEEKDAY_INDEX: Record<string, number> = {
+	sun: 0,
+	mon: 1,
+	tue: 2,
+	wed: 3,
+	thu: 4,
+	fri: 5,
+	sat: 6,
+};
+const MONTH_INDEX: Record<string, number> = {
+	jan: 0,
+	feb: 1,
+	mar: 2,
+	apr: 3,
+	may: 4,
+	jun: 5,
+	jul: 6,
+	aug: 7,
+	sep: 8,
+	oct: 9,
+	nov: 10,
+	dec: 11,
+};
+const NAMED_TIMEZONE_OFFSETS: Record<string, number> = {
+	gmt: 0,
+	utc: 0,
+	ut: 0,
+	z: 0,
+	est: -5 * 60,
+	edt: -4 * 60,
+	cst: -6 * 60,
+	cdt: -5 * 60,
+	mst: -7 * 60,
+	mdt: -6 * 60,
+	pst: -8 * 60,
+	pdt: -7 * 60,
+};
+const WEEKDAY = "(Mon|Tue|Wed|Thu|Fri|Sat|Sun)";
+const WEEKDAY_LONG = "(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)";
+const MONTH = "(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)";
+const TIMEZONE = "(GMT|UTC|UT|[ECMP][SD]T|Z|[+-]\\d{2}:?\\d{2})";
+const IMF_FIXDATE_PATTERN = new RegExp(
+	`^${WEEKDAY}, (\\d{2}) ${MONTH} (\\d{4}) (\\d{2}):(\\d{2}):(\\d{2})(?: ${TIMEZONE})?$`,
 	"i",
 );
-/**
- * An ISO 8601 date-time: `2099-09-01T09:44:51` or `2099-09-01 09:44:51`,
- * seconds and a fraction optional, the fraction after a point or a comma (RFC
- * 3339 allows either). Group 1 is its zone, when it names one.
- */
-const ISO_DATE_TIME_PATTERN = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:[.,]\d+)?)?(Z|[+-]\d{2}:?\d{2})?$/i;
+const RFC_850_DATE_PATTERN = new RegExp(
+	`^${WEEKDAY_LONG}, (\\d{2})-${MONTH}-(\\d{2}) (\\d{2}):(\\d{2}):(\\d{2})(?: ${TIMEZONE})?$`,
+	"i",
+);
+const ASCTIME_DATE_PATTERN = new RegExp(
+	`^${WEEKDAY} ${MONTH} (\\d{2}| \\d) (\\d{2}):(\\d{2}):(\\d{2}) (\\d{4})(?: ${TIMEZONE})?$`,
+	"i",
+);
+const ISO_DATE_TIME_PATTERN =
+	/^([+-]\d{6}|\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:[.,](\d+))?)?(Z|[+-]\d{2}:?\d{2})?$/i;
+
+interface RetryDateParts {
+	year: number;
+	month: number;
+	day: number;
+	hour: number;
+	minute: number;
+	second: number;
+	millisecond: number;
+	timezone?: string;
+	weekday?: number;
+}
 
 /**
- * Epoch ms of `value` read as an HTTP-date or an ISO date-time in its stated
+ * Epoch ms of `value` read as an HTTP-date or ISO date-time in its stated
  * zone; `undefined` for anything else. A date with no zone is read as GMT when
  * `zoneless` is `"gmt"` (an HTTP header's date) and is `undefined` when it is
- * `"reject"` (a date out of a message body). Not `Date.parse` alone: that reads
- * a zone-less date in this machine's zone, and a malformed value as some date.
+ * `"reject"` (a date out of a message body).
  */
 export function parseRetryDateMs(value: string, zoneless: "gmt" | "reject"): number | undefined {
-	const trimmed = value.trim();
-	const iso = ISO_DATE_TIME_PATTERN.exec(trimmed);
-	const match = iso ?? HTTP_DATE_PATTERN.exec(trimmed);
-	if (!match) return undefined;
-	const zoned = match[1] !== undefined;
-	if (!zoned && zoneless === "reject") return undefined;
-	const ms = Date.parse(
-		iso ? `${trimmed.replace(" ", "T").replace(",", ".")}${zoned ? "" : "Z"}` : zoned ? trimmed : `${trimmed} GMT`,
-	);
-	return Number.isNaN(ms) ? undefined : ms;
+	const date = parseRetryDateParts(value.trim());
+	if (!date || (date.timezone === undefined && zoneless === "reject")) return undefined;
+	const timezoneMinutes = date.timezone === undefined ? 0 : timezoneOffsetMinutes(date.timezone);
+	if (timezoneMinutes === undefined) return undefined;
+	const ms = validDateMs(date);
+	if (
+		ms === undefined ||
+		(date.weekday !== undefined && new Date(date.second === 60 ? ms - 1000 : ms).getUTCDay() !== date.weekday)
+	) {
+		return undefined;
+	}
+	return ms - timezoneMinutes * 60_000;
+}
+
+function parseRetryDateParts(value: string): RetryDateParts | undefined {
+	const iso = ISO_DATE_TIME_PATTERN.exec(value);
+	if (iso) {
+		return {
+			year: Number(iso[1]),
+			month: Number(iso[2]) - 1,
+			day: Number(iso[3]),
+			hour: Number(iso[4]),
+			minute: Number(iso[5]),
+			second: iso[6] === undefined ? 0 : Number(iso[6]),
+			millisecond: iso[7] === undefined ? 0 : Number(iso[7].slice(0, 3).padEnd(3, "0")),
+			timezone: iso[8],
+		};
+	}
+
+	const imf = IMF_FIXDATE_PATTERN.exec(value);
+	if (imf) return httpDateParts(imf, Number(imf[4]), imf[3], imf[2], imf[5], imf[6], imf[7], imf[8]);
+
+	const rfc850 = RFC_850_DATE_PATTERN.exec(value);
+	if (rfc850) {
+		// RFC 9110 §5.6.7: a two-digit year more than 50 years ahead is the most recent past one.
+		const currentYear = new Date(Date.now()).getUTCFullYear();
+		let year = Math.floor(currentYear / 100) * 100 + Number(rfc850[4]);
+		if (year > currentYear + 50) year -= 100;
+		return httpDateParts(rfc850, year, rfc850[3], rfc850[2], rfc850[5], rfc850[6], rfc850[7], rfc850[8]);
+	}
+
+	const asctime = ASCTIME_DATE_PATTERN.exec(value);
+	if (asctime) {
+		return httpDateParts(
+			asctime,
+			Number(asctime[7]),
+			asctime[2],
+			asctime[3].trim(),
+			asctime[4],
+			asctime[5],
+			asctime[6],
+			asctime[8],
+		);
+	}
+
+	return undefined;
+}
+
+function httpDateParts(
+	match: RegExpExecArray,
+	year: number,
+	monthText: string,
+	dayText: string,
+	hourText: string,
+	minuteText: string,
+	secondText: string,
+	timezone: string | undefined,
+): RetryDateParts | undefined {
+	const month = MONTH_INDEX[monthText.toLowerCase()];
+	const weekday = WEEKDAY_INDEX[match[1]!.slice(0, 3).toLowerCase()];
+	if (month === undefined || weekday === undefined) return undefined;
+	return {
+		year,
+		month,
+		day: Number(dayText),
+		hour: Number(hourText),
+		minute: Number(minuteText),
+		second: Number(secondText),
+		millisecond: 0,
+		timezone,
+		weekday,
+	};
+}
+
+function timezoneOffsetMinutes(timezone: string): number | undefined {
+	const named = NAMED_TIMEZONE_OFFSETS[timezone.toLowerCase()];
+	if (named !== undefined) return named;
+	const offset = /^([+-])(\d{2}):?(\d{2})$/.exec(timezone);
+	if (!offset) return undefined;
+	const hours = Number(offset[2]);
+	const minutes = Number(offset[3]);
+	if (hours > 23 || minutes > 59) return undefined;
+	const total = hours * 60 + minutes;
+	return offset[1] === "+" ? total : -total;
+}
+
+function validDateMs(date: RetryDateParts): number | undefined {
+	if (
+		date.month < 0 ||
+		date.month > 11 ||
+		date.day < 1 ||
+		date.hour > 23 ||
+		date.minute > 59 ||
+		date.second > 60 ||
+		date.millisecond > 999
+	) {
+		return undefined;
+	}
+	const value = new Date(0);
+	value.setUTCFullYear(date.year, date.month, date.day);
+	value.setUTCHours(date.hour, date.minute, Math.min(date.second, 59), date.millisecond);
+	if (
+		!Number.isFinite(value.getTime()) ||
+		value.getUTCFullYear() !== date.year ||
+		value.getUTCMonth() !== date.month ||
+		value.getUTCDate() !== date.day
+	) {
+		return undefined;
+	}
+	return value.getTime() + (date.second === 60 ? 1000 : 0);
 }
 
 /** Provider-specific interpretation for timezone-naive retry timestamps. */
@@ -370,8 +523,8 @@ function bodyRetryHint(
 			const hasOffset = /(?:Z|[+-][0-9]{2}:?[0-9]{2})$/i.test(normalized);
 			const configuredOffset = options?.naiveResetTimezoneOffset;
 			if (options?.excludeDates || (!hasOffset && configuredOffset === undefined)) continue;
-			const parsed = Date.parse(hasOffset ? normalized : `${normalized}${configuredOffset}`);
-			if (!Number.isNaN(parsed) && parsed > Date.now()) consider(parsed - Date.now());
+			const parsed = parseRetryDateMs(hasOffset ? normalized : `${normalized}${configuredOffset}`, "reject");
+			if (parsed !== undefined && parsed > Date.now()) consider(parsed - Date.now());
 		}
 	}
 	// OpenCode Go compound remainder ("Resets in 2hr 15min"): the generic

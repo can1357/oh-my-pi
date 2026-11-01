@@ -9,7 +9,7 @@
 ### Fixed
 
 - `fetchWithRetry` now waits the longer of a header's wait and a relative wait in the body, reads a header sent twice (`9, 120`) at its longer value when every part is a bare delay, and reads `x-ratelimit-reset: 9` as 9 s ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
-- A `Retry-After` that is neither digits nor an HTTP or ISO date (`0x0`, `-1`, `0,`, `0/1`) now states no wait instead of "retry now" ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- A `Retry-After` that is neither digits nor a valid HTTP or ISO date (`0x0`, `-1`, `0,`, `0/1`, 30 February) now states no wait instead of "retry now" ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
 - A `Retry-After` date with no zone is read as GMT, and a zone-less date in a message body gives no wait unless the provider declares its zone ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.2] - 2026-10-31
