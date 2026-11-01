@@ -75,6 +75,20 @@ describe("InteractiveMode plan mode exit", () => {
 		tempDir.removeSync();
 	});
 
+	it("restores a stashed draft after a local /plan exit", async () => {
+		await mode.init({ suppressWelcomeIntro: true });
+		await mode.handlePlanModeCommand();
+		mode.editor.setText("saved draft");
+		mode.editor.handleInput("\x13");
+		mode.editor.setText("/plan exit");
+		mode.editor.setText(""); // Enter detaches the submitted text before onSubmit.
+
+		await mode.editor.onSubmit?.("/plan exit");
+
+		expect(mode.planModeEnabled).toBe(false);
+		expect(mode.editor.getText()).toBe("saved draft");
+	});
+
 	it("aborts the in-flight turn when exited mid-stream", async () => {
 		const started = Promise.withResolvers<void>();
 		let abortReason: unknown;
