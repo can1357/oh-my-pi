@@ -18,7 +18,7 @@ import { updateEvalState } from "../state";
 import type { EvalShadowCellSession } from "../speculation/cell-session";
 import { getActiveEvalShadowCell } from "../speculation/runtime-context";
 import type { ShadowPlan } from "../speculation/types";
-import type { EvalDisplayOutput, EvalToolDescriptor, EvalToolInvokeResult } from "../types";
+import type { EvalDisplayOutput, EvalOutputConsumerFailure, EvalToolDescriptor, EvalToolInvokeResult } from "../types";
 import { type ShadowSnapshot, shadowSnapshotDigest } from "./shared/runtime";
 import { projectJavaScriptShadowPlan } from "./speculation";
 import { callSessionTool, type JsStatusEvent } from "./tool-bridge";
@@ -41,6 +41,11 @@ export interface VmRunState {
 	onDisplay?: (output: EvalDisplayOutput) => void;
 	/** Shows the user `out://` replies of the run's bridged tool calls; absent, those calls are refused. */
 	onReply?: (text: string) => void;
+	/**
+	 * Set by the context manager when `onText` or `onDisplay` threw: the first
+	 * such error. The run kept going and its later output still reached them.
+	 */
+	consumerFailure?: EvalOutputConsumerFailure;
 }
 
 /** Isolated runtime transport used by the context manager and startup regression fixtures. */
@@ -733,16 +738,37 @@ async function initWorker(session: JsSession, snapshot: SessionSnapshot, timeout
 	}
 }
 
+/**
+ * Hands worker output to the run's consumer. A consumer that throws must not
+ * escape into the worker's message handler, where it surfaces as a
+ * process-fatal uncaught exception: the first error stays on the run state for
+ * the cell's result, and the run's later output is still delivered.
+ */
+function deliverRunOutput(
+	runState: VmRunState,
+	callback: EvalOutputConsumerFailure["callback"],
+	deliver: () => void,
+): void {
+	try {
+		deliver();
+	} catch (err) {
+		if (runState.consumerFailure) return;
+		const message = err instanceof Error ? err.message : String(err);
+		runState.consumerFailure = { callback, message };
+		logger.warn("JS eval output callback failed", { callback, error: message });
+	}
+}
+
 function handleSessionMessage(session: JsSession, msg: WorkerOutbound): void {
 	switch (msg.type) {
 		case "text": {
-			const pending = session.pending.get(msg.runId);
-			pending?.runState.onText?.(msg.chunk);
+			const runState = session.pending.get(msg.runId)?.runState;
+			if (runState) deliverRunOutput(runState, "onChunk", () => runState.onText?.(msg.chunk));
 			return;
 		}
 		case "display": {
-			const pending = session.pending.get(msg.runId);
-			pending?.runState.onDisplay?.(msg.output);
+			const runState = session.pending.get(msg.runId)?.runState;
+			if (runState) deliverRunOutput(runState, "onDisplay", () => runState.onDisplay?.(msg.output));
 			return;
 		}
 		case "tool-call":
@@ -819,7 +845,7 @@ async function handleToolCall(session: JsSession, msg: Extract<WorkerOutbound, {
 			onReply: pending.runState.onReply,
 			emitStatus: (event: JsStatusEvent) => {
 				trackDeferPhase(pending, event);
-				pending.runState.onDisplay?.({ type: "status", event });
+				deliverRunOutput(pending.runState, "onDisplay", () => pending.runState.onDisplay?.({ type: "status", event }));
 			},
 		});
 		safeSend(session, { type: "tool-reply", id: msg.id, reply: { ok: true, value } });

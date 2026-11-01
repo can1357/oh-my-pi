@@ -44,3 +44,13 @@ export type EvalDisplayOutput =
 	| ImageContent
 	| { type: "view"; text: string; view: EvalView }
 	| { type: "status"; event: EvalStatusEvent };
+
+/**
+ * The first error a cell's output consumer threw, from either backend. The
+ * cell kept running and its later output still went to the consumer.
+ */
+export interface EvalOutputConsumerFailure {
+	/** `onChunk` for streamed text and tracebacks; `onDisplay` for views, images and status events. */
+	callback: "onChunk" | "onDisplay";
+	message: string;
+}

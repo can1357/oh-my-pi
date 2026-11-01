@@ -2,7 +2,7 @@ import type { EvalStatusEvent, EvalView } from "@oh-my-pi/pi-tui/tools/eval";
 import { isRecord, logger, readLines, Snowflake } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
 import type { ShadowBarrier, ShadowControlNode, ShadowOperation } from "./speculation/types";
-import { type EvalDisplayOutput, evalImageMetadata } from "./types";
+import { type EvalDisplayOutput, type EvalOutputConsumerFailure, evalImageMetadata } from "./types";
 
 const STARTUP_CONTROL_TIMEOUT_MS = 5_000;
 
@@ -54,6 +54,8 @@ export interface KernelExecuteResult {
 	 * kernel died unexpectedly). When false, the kernel remains reusable.
 	 */
 	kernelKilled?: boolean;
+	/** Set when an output callback threw while this execution ran; the execution and the kernel carried on. */
+	consumerFailure?: EvalOutputConsumerFailure;
 }
 
 export interface KernelShutdownResult {
@@ -143,6 +145,7 @@ interface PendingExecution {
 	stdinRequested: boolean;
 	kernelKilled: boolean;
 	settled: boolean;
+	consumerFailure?: EvalOutputConsumerFailure;
 	escalationTimer?: NodeJS.Timeout;
 	finalize?: () => void;
 }
@@ -320,6 +323,7 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 				admissionRejected: pending.admissionRejected,
 				reply: pending.reply,
 				kernelKilled: pending.kernelKilled,
+				consumerFailure: pending.consumerFailure,
 			});
 		};
 
@@ -530,7 +534,7 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 		for (const entry of pending) {
 			if (entry.settled) continue;
 			entry.settled = true;
-			void entry.options?.onChunk?.(`[kernel] ${reason}\n`);
+			void this.#deliver(entry, "onChunk", () => entry.options?.onChunk?.(`[kernel] ${reason}\n`));
 			entry.resolve({
 				status: "error",
 				cancelled: true,
@@ -539,6 +543,7 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 				executionCount: entry.executionCount,
 				error: entry.error,
 				kernelKilled: entry.kernelKilled || kernelKilledDefault,
+				consumerFailure: entry.consumerFailure,
 			});
 		}
 	}
@@ -619,6 +624,32 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 		void loop();
 	}
 
+	/**
+	 * Hands one frame to an execution's output callback. A callback that throws
+	 * fails only its own execution, never the reader: the first error is kept for
+	 * that execution's result, and its later frames still go to the same callback.
+	 * A sink that stores each chunk before passing it on therefore still holds the
+	 * whole output, while the kernel keeps serving this and every later request.
+	 */
+	async #deliver(
+		pending: PendingExecution,
+		callback: EvalOutputConsumerFailure["callback"],
+		deliver: () => Promise<void> | void,
+	): Promise<void> {
+		try {
+			await deliver();
+		} catch (err) {
+			if (pending.consumerFailure) return;
+			const message = err instanceof Error ? err.message : String(err);
+			pending.consumerFailure = { callback, message };
+			logger.warn(`${this.#options.languageName} execution output callback failed`, {
+				kernelId: this.id,
+				callback,
+				error: message,
+			});
+		}
+	}
+
 	async #handleFrame(frame: Frame): Promise<void> {
 		const rid = frame.id;
 		if (!rid) return;
@@ -636,38 +667,38 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 			case "stdout":
 			case "stderr": {
 				const text = frame.data ?? "";
-				if (text && pending.options?.onChunk) {
-					await pending.options.onChunk(text);
-				}
+				const onChunk = pending.options?.onChunk;
+				if (text && onChunk) await this.#deliver(pending, "onChunk", () => onChunk(text));
 				return;
 			}
 			case "view": {
 				// The view's text already arrived through stdout; only the pretty view travels here.
-				if (typeof frame.text === "string" && isRecord(frame.view) && pending.options?.onDisplay) {
-					await pending.options.onDisplay({ type: "view", text: frame.text, view: frame.view });
+				const onDisplay = pending.options?.onDisplay;
+				if (typeof frame.text === "string" && isRecord(frame.view) && onDisplay) {
+					const output: EvalDisplayOutput = { type: "view", text: frame.text, view: frame.view };
+					await this.#deliver(pending, "onDisplay", () => onDisplay(output));
 				}
 				return;
 			}
 			case "image": {
 				const image = frame.image;
-				if (
-					isRecord(image) &&
-					typeof image.data === "string" &&
-					typeof image.mimeType === "string" &&
-					pending.options?.onDisplay
-				) {
-					await pending.options.onDisplay({
+				const onDisplay = pending.options?.onDisplay;
+				if (isRecord(image) && typeof image.data === "string" && typeof image.mimeType === "string" && onDisplay) {
+					const output: EvalDisplayOutput = {
 						type: "image",
 						data: image.data,
 						mimeType: image.mimeType,
 						...evalImageMetadata(image),
-					});
+					};
+					await this.#deliver(pending, "onDisplay", () => onDisplay(output));
 				}
 				return;
 			}
 			case "status": {
-				if (isRecord(frame.event) && typeof frame.event.op === "string" && pending.options?.onDisplay) {
-					await pending.options.onDisplay({ type: "status", event: frame.event });
+				const onDisplay = pending.options?.onDisplay;
+				if (isRecord(frame.event) && typeof frame.event.op === "string" && onDisplay) {
+					const output: EvalDisplayOutput = { type: "status", event: frame.event };
+					await this.#deliver(pending, "onDisplay", () => onDisplay(output));
 				}
 				return;
 			}
@@ -685,9 +716,8 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 				};
 				const message =
 					traceback.length > 0 ? `${traceback.join("\n")}\n` : `${pending.error.name}: ${pending.error.value}\n`;
-				if (pending.options?.onChunk) {
-					await pending.options.onChunk(message);
-				}
+				const onChunk = pending.options?.onChunk;
+				if (onChunk) await this.#deliver(pending, "onChunk", () => onChunk(message));
 				return;
 			}
 			case "done": {

@@ -12,7 +12,7 @@ import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP, isEvalTimeoutControlEven
 import type { JsStatusEvent } from "./js/shared/types";
 import { registerPyToolBridge } from "./py/tool-bridge";
 import { getActiveEvalShadowCell } from "./speculation/runtime-context";
-import type { EvalDisplayOutput } from "./types";
+import type { EvalDisplayOutput, EvalOutputConsumerFailure } from "./types";
 
 /**
  * Constructor for a language executor's cancellation error. Each backend
@@ -117,7 +117,18 @@ export interface GenericKernel<TEnv> {
 		timedOut: boolean;
 		kernelKilled?: boolean;
 		stdinRequested?: boolean;
+		consumerFailure?: EvalOutputConsumerFailure;
 	}>;
+}
+
+/**
+ * Annotation for a cell whose output consumer threw. The runtime kept the cell
+ * running and stored its output before handing it on, so the result is
+ * complete; what the consumer showed while the cell ran may not be.
+ */
+export function formatConsumerFailureAnnotation(failure: EvalOutputConsumerFailure): string {
+	const consumer = failure.callback === "onChunk" ? "stream output" : "display output";
+	return `The ${consumer} consumer failed: ${failure.message}. The cell kept running and this result holds all of its output; output shown while it ran may be incomplete.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -476,13 +487,16 @@ export async function executeWithKernelBase<
 			: (timeoutSignal ?? options?.signal);
 	const abortShield = createBridgeAbortShield(abortSource);
 
+	// Store before handing an event to the caller's consumer, as the output sink
+	// does, so a consumer that throws cannot drop it from the result.
 	const collectDisplay = (output: EvalDisplayOutput): void => {
-		if (output.type === "status") {
-			abortShield.handleStatus?.(output.event);
-			options?.onStatus?.(output.event);
-			if (isEvalTimeoutControlEvent(output.event)) return;
+		if (output.type !== "status") {
+			display.push(output);
+			return;
 		}
-		display.push(output);
+		abortShield.handleStatus?.(output.event);
+		if (!isEvalTimeoutControlEvent(output.event)) display.push(output);
+		options?.onStatus?.(output.event);
 	};
 
 	const emitStatus: (event: JsStatusEvent) => void =
@@ -527,6 +541,7 @@ export async function executeWithKernelBase<
 			onDisplay: output => collectDisplay(output),
 		});
 
+		const consumerFailure = result.consumerFailure && formatConsumerFailureAnnotation(result.consumerFailure);
 		if (result.cancelled || abortShield.abortRequested) {
 			const timedOut = result.timedOut || abortShield.timedOut;
 			const annotation = timedOut
@@ -534,7 +549,9 @@ export async function executeWithKernelBase<
 				: result.kernelKilled && !abortShield.abortRequested
 					? "Kernel died during execution; completion is uncertain. The cell was not replayed; check for partial side effects before retrying."
 					: undefined;
-			const dumped = await sink.dump(annotation);
+			const dumped = await sink.dump(
+				annotation && consumerFailure ? `${annotation} ${consumerFailure}` : (annotation ?? consumerFailure),
+			);
 			return {
 				exitCode: undefined,
 				cancelled: true,
@@ -553,7 +570,9 @@ export async function executeWithKernelBase<
 		}
 
 		if (result.stdinRequested) {
-			const dumped = await sink.dump("Kernel requested stdin; interactive input is not supported.");
+			const dumped = await sink.dump(
+				`Kernel requested stdin; interactive input is not supported.${consumerFailure ? ` ${consumerFailure}` : ""}`,
+			);
 			return {
 				exitCode: 1,
 				cancelled: false,
@@ -572,7 +591,7 @@ export async function executeWithKernelBase<
 		}
 
 		const exitCode = result.status === "ok" ? 0 : 1;
-		const dumped = await sink.dump();
+		const dumped = await sink.dump(consumerFailure);
 		return {
 			exitCode,
 			cancelled: false,

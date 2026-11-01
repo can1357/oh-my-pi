@@ -6,9 +6,9 @@ import {
 	resolveOutputSinkHeadBytes,
 } from "../../tools/output-meta";
 import { isEvalTimeoutControlEvent, withBridgeTimeoutPause } from "../bridge-timeout";
-import { DisplayOutputCollector } from "../executor-base";
+import { DisplayOutputCollector, formatConsumerFailureAnnotation } from "../executor-base";
 import type { EvalDisplayOutput } from "../types";
-import { executeInVmContext } from "./context-manager";
+import { executeInVmContext, type VmRunState } from "./context-manager";
 import { installJsPackages } from "./package-installer";
 import type { JsPackageEnvironmentMode } from "./package-installer";
 import type { JsStatusEvent } from "./shared/types";
@@ -132,6 +132,10 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 		: options.signal;
 	let packageWorkComplete = false;
 	let runtimeEntered = false;
+	let runState: VmRunState | undefined;
+	// The context manager records a consumer that threw; the run went on, so every return path says so.
+	const consumerNotice = (): string | undefined =>
+		runState?.consumerFailure && formatConsumerFailureAnnotation(runState.consumerFailure);
 
 	try {
 		const cwd = options.cwd ?? options.session.cwd;
@@ -163,6 +167,23 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 				: (options.signal ?? timeoutSignal);
 		signal?.throwIfAborted();
 		runtimeEntered = true;
+		runState = {
+			signal,
+			onReply: options.onReply,
+			onText: chunk => outputSink.push(chunk),
+			// Store before handing an event to the caller's consumer, as the output
+			// sink does, so a consumer that throws cannot drop it from the result.
+			onDisplay: output => {
+				if (output.type !== "status") {
+					display.push(output);
+					return;
+				}
+				// Timeout-control events drive the eval watchdog only; never store or
+				// render them as cell output.
+				if (!isEvalTimeoutControlEvent(output.event)) display.push(output);
+				options.onStatus?.(output.event);
+			},
+		};
 		await executeInVmContext({
 			sessionKey: options.sessionId,
 			sessionId: options.sessionId,
@@ -176,22 +197,9 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 			code,
 			filename: options.filename ?? `js-cell-${crypto.randomUUID()}.js`,
 			timeoutMs: runtimeTimeoutMs ?? options.idleTimeoutMs,
-			runState: {
-				signal,
-				onReply: options.onReply,
-				onText: chunk => outputSink.push(chunk),
-				onDisplay: output => {
-					if (output.type === "status") {
-						// Timeout-control events drive the eval watchdog only; never
-						// store or render them as cell output.
-						options.onStatus?.(output.event);
-						if (isEvalTimeoutControlEvent(output.event)) return;
-					}
-					display.push(output);
-				},
-			},
+			runState,
 		});
-		const summary = await outputSink.dump();
+		const summary = await outputSink.dump(consumerNotice());
 		return {
 			output: summary.output,
 			exitCode: 0,
@@ -220,7 +228,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 						: formatPackageInstallTimeoutAnnotation(packageTimeoutSignal?.aborted === true);
 				outputSink.push(annotation);
 			}
-			const summary = await outputSink.dump();
+			const summary = await outputSink.dump(consumerNotice());
 			return {
 				output: summary.output,
 				exitCode: undefined,
@@ -238,7 +246,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 		}
 		const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
 		outputSink.push(message);
-		const summary = await outputSink.dump();
+		const summary = await outputSink.dump(consumerNotice());
 		return {
 			output: summary.output,
 			exitCode: 1,

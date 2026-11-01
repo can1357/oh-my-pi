@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed an eval cell whose output consumer throws while the cell runs: a JavaScript cell no longer exits omp, and a Python cell no longer hangs until its timeout and loses the kernel with every variable. The cell finishes, the runtime keeps its state, and the result says which consumer failed and that output shown while it ran may be incomplete
+
 ## [18.14.2] - 2026-10-31
 
 ### Added

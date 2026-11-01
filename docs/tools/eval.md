@@ -111,7 +111,7 @@ The renderer merges call and result inline, syntax-highlights from the declared 
 4. The timeout defaults to 30 seconds. `0` creates no watchdog. Otherwise `IdleTimeout` is combined with tool and session abort signals.
 5. Agent/completion handle waits, `judge()`, judgment-batch drains, package installation, delegated `tool.task()`/`tool.wait()`, and browser/computer preludes pause the watchdog. Resuming starts a fresh timeout window. Compute, output, status helpers, and ordinary `tool.*` calls, including MCP tools that report progress, count against it.
 6. The selected backend receives cwd, retained session id, session file, kernel owner, reset flag, callbacks, and cancellation signal.
-7. Output chunks stream into an artifact-aware `OutputSink` and live tail. Runtime display outputs are separated into view, image, and status channels.
+7. Output chunks stream into an artifact-aware `OutputSink` and live tail. Runtime display outputs are separated into view, image, and status channels. Each chunk and display output is stored before it is handed to the caller's consumer. A consumer that throws does not stop the cell or the runtime: the Python kernel reader (`#deliver` in `packages/coding-agent/src/eval/kernel-base.ts`) and the JS worker message handler (`deliverRunOutput` in `packages/coding-agent/src/eval/js/context-manager.ts`) keep the first error and keep delivering later output, and the result opens with `[The stream output consumer failed: … output shown while it ran may be incomplete.]` (`display output` for the display channel).
 8. Success, nonzero exit, and cancellation are assembled into the result shapes above. The output sink is finalized even when execution fails.
 
 ## Auto-backgrounding
