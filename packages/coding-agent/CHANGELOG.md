@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed coding-agent tests contacting the user's text-predict daemon and leaking interactive-host state between test files.
+
 ## [18.14.2] - 2026-10-31
 
 ### Added

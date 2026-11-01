@@ -38,7 +38,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
 import { closeSessionIndex } from "@oh-my-pi/pi-coding-agent/session/session-index";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
-import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
+import { getProjectDir, isInteractiveHost, setInteractiveHost, setProjectDir } from "@oh-my-pi/pi-utils";
 import * as utils from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../../tui/test/virtual-terminal";
 import { createTestSession, type TestSessionContext } from "../utilities";
@@ -237,7 +237,10 @@ const guestCleanups: (() => void)[] = [];
 const publishWaiters: (() => void)[] = [];
 let capturedSockets: FakeWebSocket[] = [];
 
+let savedInteractiveHost: boolean;
+
 beforeEach(async () => {
+	savedInteractiveHost = isInteractiveHost();
 	tmp = await fs.mkdtemp(path.join(os.tmpdir(), "omp-collabctl-"));
 	utils.setAgentDir(path.join(tmp, "agent"));
 	installInMemoryRelay();
@@ -265,6 +268,7 @@ afterEach(async () => {
 	uninstallInMemoryRelay();
 	publishSpy?.mockRestore();
 	// `runRootCommand` registers the CLI's extension roots (`--no-extensions` → explicit-only) process-wide.
+	setInteractiveHost(savedInteractiveHost);
 	clearOmpExtensionCliRoots();
 	restoreEnv("PI_CODING_AGENT_DIR", originalAgentDir);
 	restoreEnv("PI_PROFILE", originalPiProfile);

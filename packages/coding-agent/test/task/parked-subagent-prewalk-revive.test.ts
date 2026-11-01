@@ -17,7 +17,7 @@ import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
-import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir, setInteractiveHost } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
 const AGENT_ID = "HandedOff";
@@ -31,6 +31,7 @@ const thinking = { mode: "effort", efforts: [Effort.Medium, Effort.High] } as co
 
 let savedEnv: Record<string, string | undefined> = {};
 let root: string;
+let savedInteractiveHost: boolean;
 
 function restoreEnvValue(key: string, value: string | undefined): void {
 	if (value === undefined) {
@@ -43,6 +44,7 @@ function restoreEnvValue(key: string, value: string | undefined): void {
 }
 
 beforeEach(async () => {
+	savedInteractiveHost = setInteractiveHost(false);
 	savedEnv = Object.fromEntries(ENV_KEYS.map(key => [key, process.env[key]]));
 	root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-prewalk-revive-"));
 	const home = path.join(root, "home");
@@ -65,6 +67,7 @@ afterEach(async () => {
 	__resetDirsFromEnvForTests();
 	AgentStorage.close();
 	closeModelCache();
+	setInteractiveHost(savedInteractiveHost);
 	await removeWithRetries(root);
 });
 
