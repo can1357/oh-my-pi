@@ -1068,6 +1068,8 @@ export class SessionManager {
 	#tailRewritePending = false;
 	/** The latest title slot update a queued title change still owes the file, applied once the queue lands. */
 	#pendingTitleUpdate: SessionTitleUpdate | undefined;
+	/** Non-file title work still owed, without making an otherwise appendable body divergent. */
+	#pendingAsyncTitleUpdate: SessionTitleUpdate | undefined;
 	/** FIFO reservation for atomic batches and authoritative recovery. */
 	#atomicPersistenceTail: Promise<void> = Promise.resolve();
 	/** Observer notifications withheld until their entries are proven durable. */
@@ -1542,7 +1544,12 @@ export class SessionManager {
 		if (this.#unappendedTail.length > 0 || this.#pendingTitleUpdate) {
 			if (!this.#appendUnappendedTail(syncTitle, allowSealed)) throw this.#diskFailure;
 		} else if (this.#storage.defersSyncPublish || (!allowSealed && !this.#tailRewritePending)) return;
-		if (this.#tailRewritePending || (allowSealed && !this.#fileIsCurrent && this.#shouldHaveSessionFile())) {
+		if (
+			this.#tailRewritePending ||
+			(allowSealed &&
+				(!this.#fileIsCurrent || this.#pendingAsyncTitleUpdate !== undefined) &&
+				this.#shouldHaveSessionFile())
+		) {
 			this.#rewriteSynchronously(allowSealed);
 			if (this.#diskFailure) throw this.#diskFailure;
 		}
@@ -1799,6 +1806,9 @@ export class SessionManager {
 			});
 		}
 		if (this.#unappendedTail.length === 0) this.#pendingTitleUpdate = undefined;
+		if (stamp.prefix === this.#titleSlotLine() + this.#lineFor(this.#header)) {
+			this.#pendingAsyncTitleUpdate = undefined;
+		}
 	}
 
 	/**
@@ -2174,7 +2184,14 @@ export class SessionManager {
 		// Cold/divergent: not on disk yet, in-memory entries diverged from the
 		// file, or another live process owns it → rewrite the whole file
 		// synchronously (to a sibling in the last case) and keep going.
-		if (!this.#fileIsCurrent || this.#rewriteRequired || this.#sessionOwnedElsewhere()) {
+		// A queued header rewrite still owns divergence while the Indexed title append
+		// settles. Keep later lines on that same writer instead of CAS-rewriting its
+		// optimistic index size with the last confirmed byte count.
+		if (
+			((!this.#fileIsCurrent || this.#rewriteRequired) &&
+				!(this.#storage.defersSyncPublish && this.#pendingAsyncTitleUpdate && !this.#diskFailure)) ||
+			this.#sessionOwnedElsewhere()
+		) {
 			this.#prospectiveDiskSize += estimateJsonBytes(entry) + 1;
 			this.#rewriteSynchronously();
 			return;
@@ -2228,6 +2245,25 @@ export class SessionManager {
 		}
 	}
 
+	/** A slot update cannot be cancelled once inside the backend; repair a superseded commit. */
+	async #updateTitleSlot(sessionFile: string, update: SessionTitleUpdate): Promise<void> {
+		await this.#storage.updateSessionTitle(sessionFile, update);
+		if (
+			this.#sessionFile !== sessionFile ||
+			(this.#sessionName === update.title &&
+				this.#titleSource === update.source &&
+				this.#titleUpdatedAt === update.updatedAt)
+		)
+			return;
+		this.#fileIsCurrent = false;
+		this.#rewriteRequired = true;
+		this.#tailRewritePending = true;
+		if (!(await this.#runFencedAtomicRewrite(this.#diskEpoch))) return;
+		this.#fileIsCurrent = true;
+		this.#rewriteRequired = false;
+		this.#hasTitleSlot = true;
+	}
+
 	async #persistTitleChangeEntry(entry: TitleChangeEntry, update: SessionTitleUpdate): Promise<void> {
 		if (!this.#persist || !this.#sessionFile) return;
 		this.#prospectiveDiskSize += estimateJsonBytes(entry) + 1;
@@ -2248,7 +2284,7 @@ export class SessionManager {
 					const pending = this.#pendingTitleUpdate;
 					const sessionFile = this.#sessionFile;
 					if (pending && sessionFile && this.#hasTitleSlot) {
-						await this.#storage.updateSessionTitle(sessionFile, pending);
+						await this.#updateTitleSlot(sessionFile, pending);
 						if (this.#pendingTitleUpdate === pending) this.#pendingTitleUpdate = undefined;
 						this.#clearDiskError();
 					}
@@ -2294,22 +2330,22 @@ export class SessionManager {
 		}
 
 		const epoch = this.#diskEpoch;
-		const revision = this.#bodyRevision;
-		this.#fileIsCurrent = false;
-		this.#rewriteRequired = true;
+		this.#pendingAsyncTitleUpdate = update;
 		await this.#scheduleDiskWork(
 			async () => {
-				if (this.#released) return;
+				if (this.#released || !this.#fileIsCurrent || this.#rewriteRequired || !this.#pendingAsyncTitleUpdate)
+					return;
 				const sessionFile = this.#sessionFile;
 				if (!sessionFile) return;
 				try {
 					const line = this.#lineFor(entry);
 					await this.#appendWriter().append(line);
 					this.#recordDurableAppend(line);
-					await this.#storage.updateSessionTitle(sessionFile, update);
-					if (this.#diskEpoch === epoch && this.#bodyRevision === revision) {
-						this.#fileIsCurrent = true;
-						this.#rewriteRequired = false;
+					if (!this.#released && this.#diskEpoch === epoch && this.#pendingAsyncTitleUpdate === update) {
+						await this.#updateTitleSlot(sessionFile, update);
+						if (this.#diskEpoch === epoch && this.#pendingAsyncTitleUpdate === update) {
+							this.#pendingAsyncTitleUpdate = undefined;
+						}
 					}
 				} catch {
 					if (!(await this.#runFencedAtomicRewrite(epoch))) return;
@@ -2336,6 +2372,7 @@ export class SessionManager {
 
 	#resetToNewSession(options?: NewSessionOptions, forcedSessionFile?: string): string | undefined {
 		this.#diskTail = Promise.resolve();
+		this.#pendingAsyncTitleUpdate = undefined;
 		this.#clearDiskError();
 		this.#expectedDiskSize = null;
 		this.#reconcileSessionDirForFallback();
@@ -2576,12 +2613,22 @@ export class SessionManager {
 			sessionFile: this.#sessionFile,
 			expectedDiskSize: this.#expectedDiskSize,
 			prospectiveDiskSize: this.#prospectiveDiskSize,
-			onDisk: this.#fileIsCurrent && this.#unappendedTail.length === 0 && !this.#pendingTitleUpdate,
+			onDisk:
+				this.#fileIsCurrent &&
+				this.#unappendedTail.length === 0 &&
+				!this.#pendingTitleUpdate &&
+				!this.#pendingAsyncTitleUpdate,
 			forceFileCreation: this.#forceFileCreation,
 			needsRewrite:
-				this.#rewriteRequired || this.#unappendedTail.length > 0 || this.#pendingTitleUpdate !== undefined,
+				this.#rewriteRequired ||
+				this.#unappendedTail.length > 0 ||
+				this.#pendingTitleUpdate !== undefined ||
+				this.#pendingAsyncTitleUpdate !== undefined,
 			tailRewritePending:
-				this.#tailRewritePending || this.#unappendedTail.length > 0 || this.#pendingTitleUpdate !== undefined,
+				this.#tailRewritePending ||
+				this.#unappendedTail.length > 0 ||
+				this.#pendingTitleUpdate !== undefined ||
+				this.#pendingAsyncTitleUpdate !== undefined,
 			draftOnlySessionCleanupArmed: this.#draftOnlySessionCleanupArmed,
 			fallbackRuntimeOnly: this.#fallbackRuntimeOnly,
 			taskSiblingCandidate: this.#taskSiblingCandidate,
@@ -2605,7 +2652,13 @@ export class SessionManager {
 		const clone = new SessionManager(this.#cwd, this.#sessionDir, persist, this.#storage);
 		clone.#suppressBreadcrumb = true;
 		clone.restoreState(this.captureState());
-		if (persist && (this.#unappendedTail.length > 0 || this.#pendingTitleUpdate || this.#tailRewritePending)) {
+		if (
+			persist &&
+			(this.#unappendedTail.length > 0 ||
+				this.#pendingTitleUpdate ||
+				this.#pendingAsyncTitleUpdate ||
+				this.#tailRewritePending)
+		) {
 			// Both managers can publish this tail now. Reconcile through size-checked rewrites,
 			// never append lines a persistent clone may already have written.
 			this.#fileIsCurrent = false;
@@ -2630,6 +2683,7 @@ export class SessionManager {
 		this.#diskTail = Promise.resolve();
 		this.#unappendedTail = [];
 		this.#pendingTitleUpdate = undefined;
+		this.#pendingAsyncTitleUpdate = undefined;
 		if (this.#sessionClaim && this.#sessionClaim.sessionId !== snapshot.sessionId) {
 			this.#sessionClaim.release?.();
 			this.#sessionClaim = undefined;
@@ -2714,6 +2768,7 @@ export class SessionManager {
 	): Promise<void> {
 		this.#drainUnappendedTail();
 		await this.#drainAndCloseWriter();
+		this.#pendingAsyncTitleUpdate = undefined;
 		this.#clearDiskError();
 		this.#draftOnlySessionCleanupArmed = false;
 		// A switch gives up the previous file. Opening claims nothing: the first
@@ -2750,8 +2805,8 @@ export class SessionManager {
 			this.#resetToNewSession(options?.newSession, resolvedSessionFile);
 			this.#expectedDiskSize = sourceSize;
 			this.#forceFileCreation = true;
+			this.#rewriteRequired = true;
 			await this.#rewriteAtomically();
-			this.#fileIsCurrent = true;
 			return;
 		}
 
@@ -2874,6 +2929,7 @@ export class SessionManager {
 		this.#fileIsCurrent = false;
 		this.#rewriteRequired = false;
 		this.#tailRewritePending = false;
+		this.#pendingAsyncTitleUpdate = undefined;
 		this.#forceFileCreation = true;
 		this.#draftOnlySessionCleanupArmed = false;
 		this.#artifactManager = null;
@@ -3110,7 +3166,13 @@ export class SessionManager {
 		if (!this.#persist || !this.#sessionFile) return;
 		this.#forceFileCreation = true;
 		this.#drainUnappendedTail();
-		if (this.#fileIsCurrent && !this.#rewriteRequired && this.#unappendedTail.length === 0) return;
+		if (
+			this.#fileIsCurrent &&
+			!this.#rewriteRequired &&
+			this.#unappendedTail.length === 0 &&
+			!this.#pendingAsyncTitleUpdate
+		)
+			return;
 		await this.#rewriteAtomically();
 	}
 
@@ -3257,7 +3319,7 @@ export class SessionManager {
 		if (this.#atomicEntryBatch) throw new Error("Cannot synchronously flush during an atomic session batch.");
 		this.#drainUnappendedTail();
 		if (this.#diskFailure) throw this.#diskFailure;
-		if (this.#fileIsCurrent && !this.#rewriteRequired) {
+		if (this.#fileIsCurrent && !this.#rewriteRequired && !this.#pendingAsyncTitleUpdate) {
 			this.#writer?.flushSync?.();
 			const writerError = this.#writer?.getError();
 			if (writerError) throw writerError;
@@ -3362,7 +3424,10 @@ export class SessionManager {
 			{ ignorePriorError: true },
 		);
 		if (
-			(this.#diskFailure || this.#tailRewritePending || !this.#fileIsCurrent) &&
+			(this.#diskFailure ||
+				this.#tailRewritePending ||
+				!this.#fileIsCurrent ||
+				this.#pendingAsyncTitleUpdate !== undefined) &&
 			this.#sessionFile &&
 			this.#storage.defersSyncPublish &&
 			!this.#entriesReleased &&
@@ -3397,6 +3462,7 @@ export class SessionManager {
 		this.#entries = [];
 		this.#unappendedTail = [];
 		this.#pendingTitleUpdate = undefined;
+		this.#pendingAsyncTitleUpdate = undefined;
 		this.#rewriteRequired = false;
 		this.#tailRewritePending = false;
 		this.#forceFileCreation = false;
@@ -3451,7 +3517,13 @@ export class SessionManager {
 	 */
 	releaseRetainedEntries(): void {
 		this.seal();
-		if (this.#diskFailure || this.#tailRewritePending || this.#unappendedTail.length > 0 || this.#pendingTitleUpdate)
+		if (
+			this.#diskFailure ||
+			this.#tailRewritePending ||
+			this.#unappendedTail.length > 0 ||
+			this.#pendingTitleUpdate ||
+			this.#pendingAsyncTitleUpdate
+		)
 			return;
 		this.#entries = [];
 		this.#index.clear();
