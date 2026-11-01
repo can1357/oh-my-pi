@@ -108,7 +108,19 @@ describe("HTML export template", () => {
 		});
 		const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
 		expect(exitCode).not.toBe(0);
-		expect(stderr).toContain("Run bun gen:export-viewer");
+		// Bun also prints the throwing source line, so read only the reported error.
+		const reported = stderr.split("\n").find(line => line.startsWith("error: Development export viewer not found:"));
+		const missingViewer = path.join(
+			tempRoot,
+			"checkout",
+			"packages",
+			"coding-agent",
+			"export-assets",
+			viewerAsset.file,
+		);
+		expect(reported).toContain(missingViewer);
+		expect(reported).toContain("Run bun gen:export-viewer");
+		expect(reported).toContain("packages/collab-web/scripts/build-export-viewer.ts");
 	});
 
 	test("packaged exports load the version-pinned viewer after both integrity-checked shared libraries", async () => {

@@ -5,27 +5,27 @@
 import type { Message, ToolCall } from "@oh-my-pi/pi-ai";
 import { type Dialect, getDialectDefinition } from "@oh-my-pi/pi-ai/dialect";
 import { escapeHarmonyControlTokens } from "@oh-my-pi/pi-ai/utils/harmony-leak";
-import { formatGroupedPaths, prompt, stringifyJson } from "@oh-my-pi/pi-utils";
+import { prompt, stringifyJson } from "@oh-my-pi/pi-utils";
+import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { AgentMessage } from "../types";
-import fileOperationsTemplate from "./prompts/file-operations.md" with { type: "text" };
 import summarizationSystemPrompt from "./prompts/summarization-system.md" with { type: "text" };
 
-// ============================================================================
-// File Operation Tracking
-// ============================================================================
+/** @deprecated Import these from `@oh-my-pi/snapcompact`. */
+export {
+	computeFileLists,
+	createFileOps,
+	type FileOperations,
+	isUrlSchemePath,
+	upsertFileOperations,
+} from "@oh-my-pi/snapcompact";
 
-export interface FileOperations {
-	read: Set<string>;
-	written: Set<string>;
-	edited: Set<string>;
-}
-
-export function createFileOps(): FileOperations {
-	return {
-		read: new Set(),
-		written: new Set(),
-		edited: new Set(),
-	};
+/** @deprecated Use `upsertFileOperations("", readFiles, modifiedFiles, readSet)` from `@oh-my-pi/snapcompact`. */
+export function formatFileOperations(
+	readFiles: string[],
+	modifiedFiles: string[],
+	readSet?: ReadonlySet<string>,
+): string {
+	return snapcompact.upsertFileOperations("", readFiles, modifiedFiles, readSet);
 }
 
 /** Error text for a summarization call that hit its output limit (`stopReason: "length"`): partial text is never used. */
@@ -92,26 +92,9 @@ export function isAlternateFormReadSelector(sel: string): boolean {
 }
 
 /**
- * A real filesystem path never contains a `scheme://` URL. Tool-call paths that
- * do — `conflict://1`, `artifact://3`, `local://ctx.md`, `history://…`,
- * `issue://12`, `https://…`, and the tolerated `file.ts:conflict://1` prefix
- * form — are session-scoped or remote resources, not files the post-compaction
- * agent can re-ground on. Keep them out of the `<files>` summary.
- */
-const URL_SCHEME_RE = /[a-z][a-z0-9+.-]*:\/\//i;
-
-/**
- * Whether `path` references a `scheme://` URL (internal URI or web URL) rather
- * than a filesystem path that belongs in the compaction `<files>` summary.
- */
-export function isUrlSchemePath(path: string): boolean {
-	return URL_SCHEME_RE.test(path);
-}
-
-/**
  * Extract file operations from tool calls in an assistant message.
  */
-export function extractFileOpsFromMessage(message: AgentMessage, fileOps: FileOperations): void {
+export function extractFileOpsFromMessage(message: AgentMessage, fileOps: snapcompact.FileOperations): void {
 	if (message.role !== "assistant") return;
 	if (!("content" in message) || !Array.isArray(message.content)) return;
 
@@ -128,7 +111,7 @@ export function extractFileOpsFromMessage(message: AgentMessage, fileOps: FileOp
 
 		// Internal URIs (conflict://, artifact://, local://, history://, …) and
 		// web URLs are not re-groundable files — keep them out of `<files>`.
-		if (isUrlSchemePath(path)) continue;
+		if (snapcompact.isUrlSchemePath(path)) continue;
 
 		switch (block.name) {
 			case "read":
@@ -142,68 +125,6 @@ export function extractFileOpsFromMessage(message: AgentMessage, fileOps: FileOp
 				break;
 		}
 	}
-}
-
-/**
- * Compute final file lists from file operations.
- * Returns readFiles (files only read, not modified) and modifiedFiles.
- */
-export function computeFileLists(fileOps: FileOperations): { readFiles: string[]; modifiedFiles: string[] } {
-	// Drop any `scheme://` URLs (e.g. legacy `conflict://`/`artifact://` entries
-	// rehydrated straight into `fileOps` from a pre-fix compaction summary) — only
-	// real files belong in `<files>`. New tool-call scans are already filtered.
-	const modified = new Set([...fileOps.edited, ...fileOps.written].filter(f => !isUrlSchemePath(f)));
-	const readOnly = [...fileOps.read].filter(f => !isUrlSchemePath(f) && !modified.has(f)).sort();
-	const modifiedFiles = [...modified].sort();
-	return { readFiles: readOnly, modifiedFiles };
-}
-
-/**
- * Format file operations as one `<files>` tag: a grouped, prefix-folded
- * directory tree (find-tool shape — `# dir/` headers, bare basenames) with a
- * ` (Read)` / ` (Write)` / ` (RW)` marker per file instead of separate
- * read/modified lists. `readSet` is the cumulative read set (`fileOps.read`),
- * used to tell modified files that were also read (RW) from blind writes.
- */
-const FILE_OPERATION_SUMMARY_LIMIT = 20;
-
-function stripFileOperationTags(summary: string): string {
-	// Legacy <read-files>/<modified-files> tags are still stripped so summaries
-	// written before the combined <files> tag self-heal on the next compaction.
-	return summary
-		.replace(/<files>[\s\S]*?<\/files>\s*/g, "")
-		.replace(/<read-files>[\s\S]*?<\/read-files>\s*/g, "")
-		.replace(/<modified-files>[\s\S]*?<\/modified-files>\s*/g, "")
-		.trimEnd();
-}
-export function formatFileOperations(
-	readFiles: string[],
-	modifiedFiles: string[],
-	readSet?: ReadonlySet<string>,
-): string {
-	if (readFiles.length === 0 && modifiedFiles.length === 0) return "";
-	const mode = new Map<string, "Read" | "Write" | "RW">();
-	for (const file of readFiles) mode.set(file, "Read");
-	for (const file of modifiedFiles) mode.set(file, readSet?.has(file) ? "RW" : "Write");
-	const all = [...mode.keys()].sort();
-	let files = formatGroupedPaths(all.slice(0, FILE_OPERATION_SUMMARY_LIMIT), path => ` (${mode.get(path)})`);
-	if (all.length > FILE_OPERATION_SUMMARY_LIMIT) {
-		files += `\n[…${all.length - FILE_OPERATION_SUMMARY_LIMIT} files elided…]`;
-	}
-	return prompt.render(fileOperationsTemplate, { files });
-}
-
-export function upsertFileOperations(
-	summary: string,
-	readFiles: string[],
-	modifiedFiles: string[],
-	readSet?: ReadonlySet<string>,
-): string {
-	const baseSummary = stripFileOperationTags(summary);
-	const fileOperations = formatFileOperations(readFiles, modifiedFiles, readSet);
-	if (!fileOperations) return baseSummary;
-	if (!baseSummary) return fileOperations;
-	return `${baseSummary}\n\n${fileOperations}`;
 }
 
 // ============================================================================

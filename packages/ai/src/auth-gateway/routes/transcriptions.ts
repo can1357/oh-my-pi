@@ -11,7 +11,7 @@ import {
 	recordGatewayUsage,
 	resolveGatewayApiKey,
 } from "../dispatch";
-import { gatewayResponseHeaders, json, resolveClientIdentity } from "../http";
+import { gatewayResponseHeaders, json, resolveClientIdentity, codedErrorResponse } from "../http";
 
 /** OpenAI-compatible `POST /v1/audio/transcriptions` gateway handler. */
 export async function handleTranscriptions(
@@ -22,7 +22,7 @@ export async function handleTranscriptions(
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
 	const controller = mirrorRequestAbort(req);
-	const aborted = (): Response => transcriptions.formatError(499, "request_aborted", "client closed request");
+	const aborted = (): Response => codedErrorResponse(499, "request_aborted", "client closed request");
 	if (controller.signal.aborted) return aborted();
 
 	let parsed: transcriptions.TranscriptionParsedRequest;
@@ -32,20 +32,20 @@ export async function handleTranscriptions(
 		if (controller.signal.aborted) return aborted();
 		const message = error instanceof Error ? error.message : String(error);
 		const status = error instanceof transcriptions.TranscriptionWireError ? error.status : 400;
-		return transcriptions.formatError(status, "invalid_request_error", message);
+		return codedErrorResponse(status, "invalid_request_error", message);
 	}
 	if (controller.signal.aborted) return aborted();
 
 	const model = bootOpts.resolveModel(parsed.modelId);
 	if (!model) {
-		return transcriptions.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
+		return codedErrorResponse(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
 	}
 	if (model.api !== "openai-transcriptions") {
 		const detail =
 			model.api === "local-inference"
 				? `Model ${parsed.modelId} runs on-device only and cannot be served by the auth gateway`
 				: `Model ${parsed.modelId} does not support audio transcription`;
-		return transcriptions.formatError(400, "invalid_request_error", detail);
+		return codedErrorResponse(400, "invalid_request_error", detail);
 	}
 
 	const client = resolveClientIdentity(req.headers);
@@ -53,7 +53,7 @@ export async function handleTranscriptions(
 	const apiKey = await resolveGatewayApiKey(bootOpts, model, sessionId, controller.signal, peer);
 	if (controller.signal.aborted) return aborted();
 	if ("status" in apiKey) {
-		return transcriptions.formatError(apiKey.status, apiKey.type, apiKey.message);
+		return codedErrorResponse(apiKey.status, apiKey.type, apiKey.message);
 	}
 
 	logger.info("auth-gateway request", {
@@ -95,6 +95,6 @@ export async function handleTranscriptions(
 			error: classified.message,
 			peer,
 		});
-		return transcriptions.formatError(classified.status, classified.type, classified.message);
+		return codedErrorResponse(classified.status, classified.type, classified.message);
 	}
 }

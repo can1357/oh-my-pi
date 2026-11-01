@@ -1298,8 +1298,8 @@ impl Execute for ast::CoprocessCommand {
 		}
 
 		// Set up the pipes that we'll use to communicate with the coprocess.
-		let (stdin_reader, stdin_writer) = std::io::pipe()?;
-		let (stdout_reader, stdout_writer) = std::io::pipe()?;
+		let (stdin_reader, stdin_writer) = ioutils::pipe("coprocess")?;
+		let (stdout_reader, stdout_writer) = ioutils::pipe("coprocess")?;
 
 		// Allocate new fds in the (parent) shell for the read end of the coprocess's
 		// stdout and the write end of the coprocess's stdin.
@@ -1761,10 +1761,8 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 			match item {
 				CommandPrefixOrSuffixItem::IoRedirect(redirect) => {
 					if let Err(e) = setup_redirect(&mut context.shell, &mut params, redirect).await {
-						params
-							.stderr(&context.shell)
-							.write_all_async(format!("error: {e}\n").as_bytes())
-							.await?;
+						let mut stderr = params.stderr(&context.shell);
+						context.shell.display_error(&mut stderr, &e).await?;
 						return Ok(ExecutionResult::general_error().into());
 					}
 				},
@@ -2320,7 +2318,7 @@ pub(crate) async fn setup_redirect(
 						.map_err(|err| {
 							error::ErrorKind::RedirectionFailure(
 								expanded_file_path.to_string_lossy().to_string(),
-								err.to_string(),
+								err,
 							)
 						})?;
 
@@ -2493,7 +2491,7 @@ pub(crate) async fn setup_redirect(
 				io_here.doc.flatten()
 			};
 
-			let f = setup_open_file_with_contents(io_here_doc.as_str())?;
+			let f = setup_open_file_with_contents("here-document", io_here_doc.as_str())?;
 			if params.touches_deferred(fd_num) {
 				materialize_deferred_redirects(shell, params).await?;
 			}
@@ -2508,7 +2506,7 @@ pub(crate) async fn setup_redirect(
 			let mut expanded_word = expansion::basic_expand_word(shell, params, word).await?;
 			expanded_word.push('\n');
 
-			let f = setup_open_file_with_contents(expanded_word.as_str())?;
+			let f = setup_open_file_with_contents("here-string", expanded_word.as_str())?;
 			if params.touches_deferred(fd_num) {
 				materialize_deferred_redirects(shell, params).await?;
 			}
@@ -2571,10 +2569,7 @@ async fn setup_redirect_output_and_error_to(
 		.open_file(&file_options, &abs_file_path, params)
 		.await
 		.map_err(|err| {
-			error::ErrorKind::RedirectionFailure(
-				abs_file_path.to_string_lossy().to_string(),
-				err.to_string(),
-			)
+			error::ErrorKind::RedirectionFailure(abs_file_path.to_string_lossy().to_string(), err)
 		})?;
 
 	let stderr_file = stdout_file.try_clone()?;
@@ -2672,7 +2667,7 @@ pub(crate) async fn materialize_deferred_redirects(
 		match redirect {
 			DeferredRedirect::Open { fd, path, options, .. } => {
 				let file = shell.open_file(&options, &path, params).await.map_err(|err| {
-					error::ErrorKind::RedirectionFailure(path.clone(), err.to_string())
+					error::ErrorKind::RedirectionFailure(path.clone(), err)
 				})?;
 				params.open_files.set_fd(fd, file);
 			},
@@ -2751,7 +2746,7 @@ fn setup_process_substitution(
 	}
 
 	// Set up pipe so we can connect to the command.
-	let (reader, writer) = std::io::pipe()?;
+	let (reader, writer) = ioutils::pipe("process substitution")?;
 	let (reader, writer) = (reader.into(), writer.into());
 
 	let target_file = match kind {
@@ -2801,8 +2796,11 @@ fn setup_process_substitution(
 // pipe or drops the reader (`BrokenPipe`), so no `JoinHandle` is retained.
 // Targets without OS thread support keep upstream's synchronous write path
 // so heredocs continue to work there instead of failing at thread spawn.
-fn setup_open_file_with_contents(contents: &str) -> Result<OpenFile, error::Error> {
-	let (reader, mut writer) = std::io::pipe()?;
+fn setup_open_file_with_contents(
+	construct: &'static str,
+	contents: &str,
+) -> Result<OpenFile, error::Error> {
+	let (reader, mut writer) = ioutils::pipe(construct)?;
 	let bytes = contents.as_bytes();
 
 	// Linux fast path: grow the pipe so the entire body fits inline.

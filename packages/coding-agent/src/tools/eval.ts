@@ -692,7 +692,11 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					throw error;
 				}
 			},
-			{ ownerId: session.getAgentId?.() ?? undefined, foreground: !startBackgrounded },
+			{
+				ownerId: session.getAgentId?.() ?? undefined,
+				foreground: !startBackgrounded,
+				intent: session.getToolCallIntent?.(_toolCallId),
+			},
 		);
 
 		const backgroundStartResult = (extraNotice?: string) =>

@@ -2,6 +2,7 @@ import * as path from "node:path";
 import { readUInt32LE, writeUInt32LE } from "./bytes";
 import { ArchiveError } from "./error";
 import { assertArchiveMemberSize, assertEntryCount, assertIndexSize } from "./limits";
+import { isRecord } from "../type-guards";
 import {
 	assertArchivePathBytes,
 	assertArchivePathString,
@@ -55,14 +56,10 @@ function alignAsarPayload(size: number): number {
 	return size + ((4 - (size % 4)) % 4);
 }
 
-function isArchiveRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function parseIntegrity(value: unknown, entryPath: string, size: number): AsarIntegrity | undefined {
 	if (value === undefined) return undefined;
 	const label = formatArchivePathForError(entryPath);
-	if (!isArchiveRecord(value)) {
+	if (!isRecord(value)) {
 		throw invalidAsar(`file '${label}' has an invalid integrity record`);
 	}
 	if (value.algorithm !== "SHA256") {
@@ -228,7 +225,7 @@ async function readAsarIndex(source: ByteSource, options: FormatReadOptions): Pr
 	} catch {
 		throw invalidAsar("header is not valid JSON");
 	}
-	if (!isArchiveRecord(header) || !isArchiveRecord(header.files)) {
+	if (!isRecord(header) || !isRecord(header.files)) {
 		throw invalidAsar("root must contain a files object");
 	}
 
@@ -257,7 +254,7 @@ async function readAsarIndex(source: ByteSource, options: FormatReadOptions): Pr
 		) {
 			throw invalidAsar(`invalid entry name '${formatArchivePathForError(current.name)}'`);
 		}
-		if (!isArchiveRecord(current.node)) {
+		if (!isRecord(current.node)) {
 			throw invalidAsar(`entry '${formatArchivePathForError(current.name)}' must be an object`);
 		}
 		const entryPathBytes = current.parentPathBytes + (current.parentPath ? 1 : 0) + nameBytes;
@@ -295,7 +292,7 @@ async function readAsarIndex(source: ByteSource, options: FormatReadOptions): Pr
 		}
 
 		if ("files" in current.node) {
-			if (!isArchiveRecord(current.node.files)) {
+			if (!isRecord(current.node.files)) {
 				throw invalidAsar(`directory '${entryLabel}' must contain a files object`);
 			}
 			entries.push({ path: entryPath, isDirectory: true, size: 0 });
