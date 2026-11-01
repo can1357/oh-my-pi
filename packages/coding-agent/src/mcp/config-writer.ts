@@ -6,8 +6,8 @@
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { isEnoent } from "@oh-my-pi/pi-utils";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
+import { readRegularFileText } from "@oh-my-pi/pi-utils/regular-file";
 import { invalidate as invalidateFsCache } from "../capability/fs";
 
 import { validateServerConfig } from "./config";
@@ -37,19 +37,17 @@ function withConfigLock<T>(filePath: string, fn: () => Promise<T>): Promise<T> {
 /**
  * Read an MCP config file.
  * Returns empty config if file doesn't exist.
+ *
+ * Read through a descriptor judged a regular file before a byte is read: a
+ * FIFO at the name — the user `mcp.json` is read at every session start — is
+ * refused with `NotARegularFile` rather than waited on or drained, so startup
+ * passes over it as it does over a malformed file, and an edit never writes
+ * over it.
  */
 export async function readMCPConfigFile(filePath: string): Promise<MCPConfigFile> {
-	try {
-		const content = await fs.promises.readFile(filePath, "utf-8");
-		const parsed = JSON.parse(content) as MCPConfigFile;
-		return parsed;
-	} catch (error) {
-		if (isEnoent(error)) {
-			// File doesn't exist, return empty config
-			return { mcpServers: {} };
-		}
-		throw error;
-	}
+	const content = await readRegularFileText(filePath);
+	if (content === undefined) return { mcpServers: {} };
+	return JSON.parse(content) as MCPConfigFile;
 }
 
 /**

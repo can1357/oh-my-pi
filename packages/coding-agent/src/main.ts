@@ -25,6 +25,7 @@ import * as logger from "@oh-my-pi/pi-utils/logger";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import { fuzzyFilter } from "@oh-my-pi/pi-tui/fuzzy";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import { routeSkippedFileNotes } from "@oh-my-pi/pi-utils/regular-file";
 import { reset as resetCapabilities } from "./capability";
 import {
 	type Args,
@@ -749,6 +750,9 @@ async function runInteractiveMode(
 			// `emitNotice` fired before the UI subscribed and was silently lost.
 			mode.showWarning(`WATCHDOG.yml: ${sanitizeDisplayWarnings(advisorConfigWarnings).join("; ")}`);
 		}
+
+		// From here on, a file not read is told in the UI as it happens.
+		routeSkippedFileNotes(note => mode.showWarning(note));
 
 		for (const notify of notifs) {
 			if (!notify) {
@@ -1946,6 +1950,11 @@ export async function runRootCommand(
 		setInteractiveHost(isInteractive);
 		if (!isInteractive) {
 			stopPendingStartupComposer();
+		} else {
+			// The UI clears what was written before it: a file not read at startup
+			// (a FIFO at `~/.env`, say) is told in it, with those noted so far.
+			const noteSkippedFile = (note: string) => notifs.push({ kind: "warn", message: note });
+			for (const note of routeSkippedFileNotes(noteSkippedFile)) noteSkippedFile(note);
 		}
 		// Account routing must use the effective settings, including `--config` and
 		// `PI_CONFIG_FILES` overlays, rather than independently re-reading only the

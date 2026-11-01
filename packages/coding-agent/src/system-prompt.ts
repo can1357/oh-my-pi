@@ -18,6 +18,7 @@ import {
 	logger,
 	prompt,
 } from "@oh-my-pi/pi-utils";
+import { readOptionalFileText } from "@oh-my-pi/pi-utils/regular-file";
 import { contextFileCapability } from "./capability/context-file";
 import { systemPromptCapability } from "./capability/system-prompt";
 import { findConfigFile } from "./config";
@@ -120,7 +121,11 @@ const PERSONALITY_SPECS: Record<Exclude<Personality, "none">, string> = {
 async function loadPersonalityOverride(): Promise<string | null> {
 	const filePath = path.join(getAgentDir(), "PERSONALITY.md");
 	try {
-		const content = (await Bun.file(filePath).text()).trim();
+		// Judged a regular file before a byte is read: a FIFO here is reported
+		// and the preset used, never waited on or drained.
+		const text = await readOptionalFileText(filePath);
+		if (text === undefined) return null;
+		const content = text.trim();
 		if (content) return content;
 		logger.warn("PERSONALITY.md is empty; using the configured personality preset", { path: filePath });
 	} catch (error) {

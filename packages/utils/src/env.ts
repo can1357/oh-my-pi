@@ -1,8 +1,17 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { isatty } from "node:tty";
 import { parseEnv } from "node:util";
 import { getAgentDir, getConfigRootDir, getProjectDir, refreshDirsFromEnv } from "./dirs";
+import {
+	NotARegularFile,
+	PipeNotAnswered,
+	readRegularFileOrPipeTextSync,
+	readRegularFileTextSync,
+	reportFileWait,
+	reportSkippedFile,
+} from "./regular-file";
 import { isBunTestRuntime } from "./test-runtime";
 
 export * from "./test-runtime";
@@ -260,20 +269,129 @@ export function getDotenvEnvValues(
 }
 
 /**
- * Parses a complete .env file with the runtime's dotenv grammar, then retains
+ * How long a `.env` that is a named pipe gets at startup, from the open, for
+ * its writer to close it, when no one is at a terminal. 1Password mounts `.env`
+ * files as named pipes on purpose and writes the file when a reader opens it.
+ * An unlocked 1Password needs no person to answer; a locked one shows an
+ * authorization prompt, and with no terminal there is usually no one to approve
+ * it, so a long wait only delays the command. Not measured against a real
+ * 1Password mount: a judgement. A slower answer leaves that file's variables
+ * unset, and the note says so.
+ */
+export const ENV_PIPE_DEADLINE_MS = 10_000;
+
+/**
+ * {@link ENV_PIPE_DEADLINE_MS} when standard input and standard error are both
+ * a terminal: a person is there to find and approve 1Password's authorization
+ * prompt, sees the note that omp is waiting, and can press Ctrl-C. Also a
+ * judgement, not a measurement.
+ */
+export const ENV_PIPE_TERMINAL_DEADLINE_MS = 60_000;
+
+/** The most a `.env` pipe may send: far more than any `.env` holds, and a bound on what a writer that never stops can make omp hold. */
+const ENV_PIPE_MAX_BYTES = 1024 * 1024;
+
+/** How long a `.env` pipe may stay silent before omp says it is waiting: a mount that answers at once needs no note. */
+const ENV_PIPE_NOTICE_AFTER_MS = 500;
+
+/**
+ * The text each `.env` read at startup held, by path. A child shell's
+ * environment and the stream redactor read the project's `.env` files again;
+ * when one is a named pipe, they take what startup read from it instead of
+ * waiting on it again. 1Password's mounts are not built for repeated or
+ * concurrent reads, and the values startup loaded are the ones those readers
+ * need.
+ */
+const startupEnvText = new Map<string, string>();
+
+/** `.env` pipes that did not answer at startup: this process does not wait on them again. */
+const unansweredEnvPipes = new Set<string>();
+
+/**
+ * A `.env` read before any command runs: a named pipe is read until its writer
+ * closes it, within a bound. A writer that dies part way through the file also
+ * closes it, and what it wrote by then is parsed as the whole file: no bound or
+ * check here can tell the two apart.
+ */
+function startupEnvFileText(filePath: string): string | undefined {
+	const key = path.resolve(filePath);
+	if (unansweredEnvPipes.has(key)) return undefined;
+	const deadlineMs = isatty(0) && isatty(2) ? ENV_PIPE_TERMINAL_DEADLINE_MS : ENV_PIPE_DEADLINE_MS;
+	const bound = `${deadlineMs / 1000} s`;
+	try {
+		const text = readRegularFileOrPipeTextSync(filePath, {
+			deadlineMs,
+			maxBytes: ENV_PIPE_MAX_BYTES,
+			noticeAfterMs: ENV_PIPE_NOTICE_AFTER_MS,
+			onWait: (started, stoppable) =>
+				reportFileWait(
+					`omp is waiting up to ${bound} for ${filePath}: it is a named pipe, and ` +
+						`${started ? "what is writing it has not finished" : "nothing has written it yet"}. ` +
+						`If 1Password serves it, approve its authorization prompt. ` +
+						(stoppable ? "Ctrl-C stops omp." : "Ctrl-C takes effect when the wait ends."),
+				),
+		});
+		if (text !== undefined) startupEnvText.set(key, text);
+		return text;
+	} catch (error) {
+		if (error instanceof NotARegularFile) {
+			reportSkippedFile(error);
+			return undefined;
+		}
+		if (!(error instanceof PipeNotAnswered)) throw error;
+		unansweredEnvPipes.add(key);
+		const cause =
+			error.reason === "silent"
+				? `nothing wrote to it within ${bound}`
+				: error.reason === "unfinished"
+					? `what was writing it did not finish within ${bound}`
+					: `what was writing it sent more than ${ENV_PIPE_MAX_BYTES / 1024} KiB, more than a .env file holds`;
+		reportSkippedFile({
+			file: filePath,
+			message:
+				`omp did not load ${filePath}: it is a named pipe, and ${cause}, so every variable it sets is unset ` +
+				`for this command. If 1Password serves it, unlock 1Password and approve its prompt; otherwise put a ` +
+				`regular file there.`,
+		});
+		return undefined;
+	}
+}
+
+/**
+ * A `.env` read again while omp runs, to build a child shell's environment or
+ * the redactor's list: never waited on. A named pipe gives what startup read
+ * from it, or is refused like any other file that is not a regular file.
+ */
+function runtimeEnvFileText(filePath: string): string | undefined {
+	try {
+		return readRegularFileTextSync(filePath);
+	} catch (error) {
+		if (!(error instanceof NotARegularFile)) throw error;
+		const loaded = error.kind === "a FIFO" ? startupEnvText.get(path.resolve(filePath)) : undefined;
+		if (loaded !== undefined) return loaded;
+		reportSkippedFile(error);
+		return undefined;
+	}
+}
+
+/**
+ * Parses .env text with the runtime's dotenv grammar, then retains
  * only shell-identifier names and spawn-safe values before mirroring valid
  * `OMP_` variables to their `PI_` aliases.
  */
-export function parseEnvFile(filePath: string): Record<string, string> {
+function parseEnvText(read: () => string | undefined): Record<string, string> {
 	const result: Record<string, string> = {};
 	try {
-		const parsed = parseEnv(fs.readFileSync(filePath, "utf-8"));
-		for (const key in parsed) {
-			const value = parsed[key];
-			if (value !== undefined && isValidEnvName(key) && isSafeEnvValue(value)) result[key] = value;
+		const text = read();
+		if (text !== undefined) {
+			const parsed = parseEnv(text);
+			for (const key in parsed) {
+				const value = parsed[key];
+				if (value !== undefined && isValidEnvName(key) && isSafeEnvValue(value)) result[key] = value;
+			}
 		}
 	} catch {
-		// File doesn't exist or can't be read - return empty result
+		// The file can't be read or parsed - return empty result
 	}
 
 	// OMP_ overrides PI_
@@ -286,11 +404,22 @@ export function parseEnvFile(filePath: string): Record<string, string> {
 	return result;
 }
 
-// Eagerly parse the user's $HOME/.env and the current project's .env (from cwd)
-const homeEnv = parseEnvFile(path.join(os.homedir(), ".env"));
-const piEnv = parseEnvFile(path.join(getConfigRootDir(), ".env"));
-const agentEnv = parseEnvFile(path.join(getAgentDir(), ".env"));
-const projectEnv = parseEnvFile(path.join(getProjectDir(), ".env"));
+/**
+ * Parses a .env file (see {@link parseEnvText}) without ever waiting on it: a
+ * regular file is read; a named pipe gives what startup read from it, or is
+ * refused; a socket, device or directory is refused. A refusal is reported once
+ * and gives no variables.
+ */
+export function parseEnvFile(filePath: string): Record<string, string> {
+	return parseEnvText(() => runtimeEnvFileText(filePath));
+}
+
+// Eagerly parse the user's $HOME/.env and the current project's .env (from cwd).
+// Only these reads, before any command runs, wait on a named pipe.
+const homeEnv = parseEnvText(() => startupEnvFileText(path.join(os.homedir(), ".env")));
+const piEnv = parseEnvText(() => startupEnvFileText(path.join(getConfigRootDir(), ".env")));
+const agentEnv = parseEnvText(() => startupEnvFileText(path.join(getAgentDir(), ".env")));
+const projectEnv = parseEnvText(() => startupEnvFileText(path.join(getProjectDir(), ".env")));
 
 for (const key of Object.keys(Bun.env)) {
 	const value = Bun.env[key];

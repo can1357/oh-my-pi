@@ -15,6 +15,7 @@ import {
 	logger,
 	normalizePathForComparison,
 } from "@oh-my-pi/pi-utils";
+import { readOptionalFileText } from "@oh-my-pi/pi-utils/regular-file";
 import { getConfigDirPaths } from "../../config";
 import { registerPluginCacheInvalidator, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import { findExtensionDirectoryIndex, resolveExtensionDirectory } from "../extensions/directory-resolution";
@@ -55,12 +56,10 @@ registerPluginCacheInvalidator(clearEnabledPluginsCache);
  */
 async function loadRuntimeConfig(home?: string): Promise<PluginRuntimeConfig> {
 	const lockPath = getPluginsLockfile(home);
-	try {
-		return normalizePluginRuntimeConfig(await Bun.file(lockPath).json());
-	} catch (err) {
-		if (isEnoent(err)) return normalizePluginRuntimeConfig({});
-		throw err;
-	}
+	// Judged a regular file before a byte is read: a FIFO here is reported and
+	// passed over like a missing lock, never waited on or drained.
+	const text = await readOptionalFileText(lockPath);
+	return normalizePluginRuntimeConfig(text === undefined ? {} : JSON.parse(text));
 }
 
 /**
@@ -69,9 +68,12 @@ async function loadRuntimeConfig(home?: string): Promise<PluginRuntimeConfig> {
 async function loadProjectOverrides(cwd: string): Promise<ProjectPluginOverrides> {
 	for (const overridesPath of getConfigDirPaths("plugin-overrides.json", { user: false, cwd })) {
 		try {
-			return await Bun.file(overridesPath).json();
+			// Judged a regular file before a byte is read: a FIFO here is
+			// reported and passed over, never waited on or drained.
+			const text = await readOptionalFileText(overridesPath);
+			if (text === undefined) continue;
+			return JSON.parse(text);
 		} catch (err) {
-			if (isEnoent(err)) continue;
 			// Malformed or unreadable overrides would otherwise silently act
 			// as {} — project-disabled plugins re-enable and project settings
 			// vanish without a trace. Report it, then fall through like a
@@ -130,7 +132,8 @@ async function collectPluginsAtRoot(
 	const lockPath = path.join(root, "omp-plugins.lock.json");
 	let runtimeConfig: PluginRuntimeConfig;
 	try {
-		runtimeConfig = normalizePluginRuntimeConfig(await Bun.file(lockPath).json());
+		const text = await readOptionalFileText(lockPath);
+		runtimeConfig = normalizePluginRuntimeConfig(text === undefined ? {} : JSON.parse(text));
 	} catch (err) {
 		if (isUnreadableRoot(err)) {
 			logger.warn("plugins: skipping unreadable plugin root", { root, path: lockPath });

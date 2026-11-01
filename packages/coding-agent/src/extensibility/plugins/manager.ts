@@ -12,6 +12,7 @@ import {
 	logger,
 	normalizePathForComparison,
 } from "@oh-my-pi/pi-utils";
+import { readOptionalFileText } from "@oh-my-pi/pi-utils/regular-file";
 import { JSONC } from "bun";
 import { resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import { loadExtensions } from "../extensions/loader";
@@ -168,9 +169,11 @@ export class PluginManager {
 
 	async #readRuntimeConfigAt(lockPath: string): Promise<PluginRuntimeConfig> {
 		try {
-			return normalizePluginRuntimeConfig(await Bun.file(lockPath).json());
+			// Judged a regular file before a byte is read: a FIFO here is reported
+			// and passed over like a missing lock, as the plugin loader does.
+			const text = await readOptionalFileText(lockPath);
+			return normalizePluginRuntimeConfig(text === undefined ? {} : JSON.parse(text));
 		} catch (err) {
-			if (isEnoent(err)) return normalizePluginRuntimeConfig({});
 			logger.warn("Failed to load plugin runtime config", { path: lockPath, error: String(err) });
 			return normalizePluginRuntimeConfig({});
 		}
@@ -195,9 +198,11 @@ export class PluginManager {
 	async #loadProjectOverrides(): Promise<ProjectPluginOverrides> {
 		const overridesPath = getProjectPluginOverridesPath(this.#cwd);
 		try {
-			return await Bun.file(overridesPath).json();
+			// Judged a regular file before a byte is read: a FIFO here is
+			// reported and passed over, never waited on or drained.
+			const text = await readOptionalFileText(overridesPath);
+			return text === undefined ? {} : JSON.parse(text);
 		} catch (err) {
-			if (isEnoent(err)) return {};
 			logger.warn("Failed to load project plugin overrides", { path: overridesPath, error: String(err) });
 			return {};
 		}

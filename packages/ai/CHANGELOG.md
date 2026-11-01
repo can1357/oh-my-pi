@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed Codex conversation replay failing with an unknown `internal_chat_message_metadata_passthrough.content_token_count` parameter by omitting backend-internal response metadata from replayed input ([#17590](https://github.com/can1357/oh-my-pi/pull/17590) by [@briankeefe](https://github.com/briankeefe)).
+- Fixed session start and Bedrock credential resolution hanging, or taking input written for someone else, when a FIFO stands at `~/.aws/credentials` or `~/.aws/config`; such a file is passed over with a note that names it. Auth-broker discovery refuses a FIFO at `config.yml` or `config.yaml` as an unreadable config, and passes over one at the token file ([#17638](https://github.com/can1357/oh-my-pi/pull/17638) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.2] - 2026-10-31
 

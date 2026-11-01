@@ -1055,7 +1055,10 @@ describe("Settings", () => {
 			await Bun.write(getConfigPath(), original);
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 			cfgThemeDark.set(settings, "anthracite");
-			const readSpy = vi.spyOn(fs.promises, "readFile");
+			// Settings files are read through `@oh-my-pi/pi-utils/regular-file`, which opens through the
+			// `node:fs/promises` namespace — a different object from `fs.promises` — so the failure is
+			// injected there.
+			const readSpy = vi.spyOn(fsp, "open");
 			readSpy.mockRejectedValueOnce(new FsCodeError("EIO", "injected read failure"));
 
 			await expect(settings.flush()).rejects.toThrow("Failed to read settings config");
@@ -1078,7 +1081,7 @@ describe("Settings", () => {
 			await Bun.write(projectConfigPath, original);
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 			settings.setProjectModelRole("smol", "new/smol");
-			const readSpy = vi.spyOn(fs.promises, "readFile");
+			const readSpy = vi.spyOn(fsp, "open");
 			readSpy.mockRejectedValueOnce(new FsCodeError("EACCES", "injected read failure"));
 
 			await expect(settings.flush()).rejects.toThrow("Failed to read settings config");
