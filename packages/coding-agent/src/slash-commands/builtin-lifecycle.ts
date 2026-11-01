@@ -741,6 +741,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	},
 	{
 		name: "move",
+		aliases: ["cd"],
 		icon: "folderMove",
 		description: "Move the current session to a different directory",
 		acpDescription: "Move the current session to a different directory",

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `/cd` is an alias for `/move`, so a session can change directory under the name the `cd` tool already uses ([#17624](https://github.com/can1357/oh-my-pi/pull/17624) by [@iacore](https://github.com/iacore))
+
 ## [18.14.2] - 2026-10-31
 
 ### Added
