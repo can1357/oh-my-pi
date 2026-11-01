@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `lfm3-1.7b` to the `local` provider's authored seeds, so `local/lfm3-1.7b` resolves as a selectable model (for example `modelRoles.memory`) ([#17258](https://github.com/can1357/oh-my-pi/issues/17258))
+
 ## [18.14.2] - 2026-10-31
 
 ### Breaking Changes

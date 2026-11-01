@@ -103,6 +103,13 @@ provider "local" {
 			limits
 			supports-tools #false
 		}
+		model "lfm3-1.7b" name="LFM3 1.7B" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
 	}
 
 	models "kokoro" {
