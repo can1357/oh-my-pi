@@ -424,6 +424,7 @@ Twenty-five backends. Pin one, or let `auto` walk the chain in order.
 | `kimi`       | `/login kimi-code` or search key          |
 | `parallel`   | `PARALLEL_API_KEY`                        |
 | `synthetic`  | `SYNTHETIC_API_KEY`                       |
+| `serply`     | `SERPLY_API_KEY`                          |
 | `searxng`    | self-hosted                               |
 | `duckduckgo` | no key                                    |
 | `startpage`  | no key                                    |

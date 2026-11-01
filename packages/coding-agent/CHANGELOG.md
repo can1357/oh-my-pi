@@ -17,6 +17,10 @@
 - Added per-rule TTSR `repeatMode` settings (`once`, `after-gap`, or `always`) to control reminder repetition.
 - Compound bash approval prompts now show each command segment separately and identify which segments are allowed and which require approval.
 - The `todo` tool's `done`, `drop`, and `rm` ops now accept several tasks at once, as an array or a single string separated by newlines, `;`, `,`, or spaces; text matching an existing task exactly is never split.
+- Subagents now preserve @upstream provider pinning on inherited models
+- Press Delete at the end of the Ctrl+R search field to remove the selected prompt from history.
+- Added `--no-judge` and `--no-spotlight` to restrict those services to the active model's provider, and `--offline` to restrict auxiliary services.
+- Added Serply as a web search provider; authenticate with `SERPLY_API_KEY` or `/login serply` ([#12021](https://github.com/can1357/oh-my-pi/pull/12021) by [@googio](https://github.com/googio))
 
 ### Changed
 

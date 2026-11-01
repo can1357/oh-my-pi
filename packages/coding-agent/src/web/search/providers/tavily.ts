@@ -11,7 +11,7 @@ import { formatQuery, parseSearchQuery } from "../query";
 import { clampNumResults, dateToAgeSeconds } from "../utils";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
-import { classifyProviderHttpError, siteHosts, withHardTimeout } from "./utils";
+import { classifyProviderHttpError, getErrorMessage, siteHosts, withHardTimeout } from "./utils";
 
 const TAVILY_SEARCH_URL = "https://api.tavily.com/search";
 const DEFAULT_NUM_RESULTS = 5;
@@ -43,23 +43,6 @@ interface TavilySearchResponse {
 function asRecord(value: unknown): Record<string, unknown> | null {
 	if (typeof value !== "object" || value === null) return null;
 	return value as Record<string, unknown>;
-}
-
-function getErrorMessage(value: unknown): string | null {
-	if (typeof value === "string") {
-		const trimmed = value.trim();
-		return trimmed.length > 0 ? trimmed : null;
-	}
-
-	const record = asRecord(value);
-	if (!record) return null;
-
-	for (const key of ["detail", "error", "message"]) {
-		const message = getErrorMessage(record[key]);
-		if (message) return message;
-	}
-
-	return null;
 }
 
 /** Find Tavily API key through AuthStorage's unified refresh pipeline. */

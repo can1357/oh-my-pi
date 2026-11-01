@@ -1,3 +1,4 @@
+import { asRecord } from "@oh-my-pi/pi-utils";
 import type { AgentStorageApi } from "../../../session/agent-storage";
 import { DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS, SearchProviderError } from "../../../web/search/types";
 import { SEARCH_PROVIDER_LABELS, type SearchProviderId, type SearchSource } from "../types";
@@ -136,6 +137,28 @@ export function normalizeSearchText(value: unknown): string | undefined {
 	if (typeof value !== "string") return undefined;
 	const text = value.replace(/\s+/g, " ").trim();
 	return text.length > 0 ? text : undefined;
+}
+
+/**
+ * First non-blank message in a provider error body: a bare string, or the
+ * `detail` / `error` / `message` field, searched recursively through nested
+ * objects. Returns `null` when nothing usable is found.
+ */
+export function getErrorMessage(value: unknown): string | null {
+	if (typeof value === "string") {
+		const trimmed = value.trim();
+		return trimmed.length > 0 ? trimmed : null;
+	}
+
+	const record = asRecord(value);
+	if (!record) return null;
+
+	for (const key of ["detail", "error", "message"]) {
+		const message = getErrorMessage(record[key]);
+		if (message) return message;
+	}
+
+	return null;
 }
 
 /**
