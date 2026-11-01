@@ -13,6 +13,7 @@
  * pending state with it, so the published end state is unchanged.
  */
 
+import { withRetryWait } from "@oh-my-pi/pi-utils/format";
 import type {
 	AgentSnapshot,
 	AssistantMessage,
@@ -574,10 +575,14 @@ export class GuestClient {
 				this.#pushNotice(event.level, event.message);
 				break;
 			case "auto_retry_start":
-				this.#pushNotice("info", `retry ${event.attempt}/${event.maxAttempts}: ${event.errorMessage}`);
+				this.#pushNotice(
+					"info",
+					`retry ${event.attempt}/${event.maxAttempts}: ${withRetryWait(event.errorMessage, event.retryAfterMs)}`,
+				);
 				break;
 			case "auto_retry_end":
-				if (!event.success) this.#pushNotice("error", event.finalError ?? "retry failed");
+				if (!event.success)
+					this.#pushNotice("error", withRetryWait(event.finalError ?? "retry failed", event.finalRetryAfterMs));
 				break;
 			case "auto_compaction_start":
 				this.#pushNotice("info", `compacting context (${event.reason})`);
@@ -589,7 +594,7 @@ export class GuestClient {
 						event.aborted
 							? "compaction aborted"
 							: event.errorMessage
-								? `compaction failed: ${event.errorMessage}`
+								? `compaction failed: ${withRetryWait(event.errorMessage, event.retryAfterMs)}`
 								: "context compacted",
 					);
 				}

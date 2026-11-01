@@ -8,6 +8,7 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { presentNarrationAsAnswer } from "@oh-my-pi/pi-ai/utils/narration";
+import { assistantErrorText, errorText } from "@oh-my-pi/pi-ai/utils/retry-wait-display";
 import { $flag, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
 import { HINDSIGHT_NOTICE_SOURCE } from "../hindsight/state";
 import type { MCPManager } from "../mcp/manager";
@@ -176,7 +177,7 @@ async function runPrintModeCore(
 		mode: mode === "json" ? "json" : "print",
 		reportSendError: (action, err) => {
 			process.stderr.write(
-				`Extension ${action === "extension_send" ? "sendMessage" : "sendUserMessage"} failed: ${err.message}\n`,
+				`Extension ${action === "extension_send" ? "sendMessage" : "sendUserMessage"} failed: ${errorText(err)}\n`,
 			);
 		},
 		reportRuntimeError: err => {
@@ -573,7 +574,7 @@ async function runPrintModeCore(
 				assistantMsg.stopReason !== "error" &&
 				assistantMsg.stopReason !== "aborted"
 			) {
-				process.stderr.write(`${sanitizeText(assistantMsg.errorMessage)}\n`);
+				process.stderr.write(`${sanitizeText(assistantErrorText(assistantMsg))}\n`);
 			}
 
 			// Output text content; narration the provider returned as thinking is part of the reply.
@@ -628,8 +629,10 @@ async function runPrintModeCore(
 
 	// Text mode reports the terminal failure on stderr exactly as before: same
 	// line, same ordering after dispose, without terminating the process here.
+	// The server's retry wait is rendered here, from `errorRetryAfterMs`; JSON
+	// mode carries that field on the message instead.
 	if (mode === "text" && terminalFailure && assistantMsg) {
-		const errorLine = sanitizeText(assistantMsg.errorMessage || `Request ${assistantMsg.stopReason}`);
+		const errorLine = sanitizeText(assistantErrorText(assistantMsg, `Request ${assistantMsg.stopReason}`));
 		if (!process.stderr.write(`${errorLine}\n`)) {
 			const { promise, resolve } = Promise.withResolvers<void>();
 			process.stderr.once("drain", resolve);

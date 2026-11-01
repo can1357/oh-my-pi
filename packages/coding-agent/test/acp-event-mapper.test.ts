@@ -206,6 +206,56 @@ describe("ACP event mapper", () => {
 		expect(doneUpdates).toEqual([]);
 	});
 
+	it("renders a streamed error's retry wait from errorRetryAfterMs, and none from its text", () => {
+		expect(
+			mapAgentSessionEventToAcpSessionUpdates(
+				{
+					type: "message_update",
+					message: makeAssistantMessage(""),
+					assistantMessageEvent: {
+						type: "error",
+						reason: "error",
+						error: { errorMessage: "503 overloaded", errorRetryAfterMs: 9000 },
+					},
+				} as AgentSessionEvent,
+				"session-1",
+			),
+		).toEqual([
+			{
+				sessionId: "session-1",
+				update: {
+					sessionUpdate: "agent_message_chunk",
+					content: { type: "text", text: "503 overloaded (retry after 9.0s)" },
+					messageId: undefined,
+				},
+			},
+		]);
+		// A message persisted before the wait was structured keeps its text, and no wait is rendered.
+		expect(
+			mapAgentSessionEventToAcpSessionUpdates(
+				{
+					type: "message_update",
+					message: makeAssistantMessage(""),
+					assistantMessageEvent: {
+						type: "error",
+						reason: "error",
+						error: { errorMessage: "503 overloaded retry-after-ms=9000" },
+					},
+				} as AgentSessionEvent,
+				"session-1",
+			),
+		).toEqual([
+			{
+				sessionId: "session-1",
+				update: {
+					sessionUpdate: "agent_message_chunk",
+					content: { type: "text", text: "503 overloaded retry-after-ms=9000" },
+					messageId: undefined,
+				},
+			},
+		]);
+	});
+
 	it("keeps write agent:// messages off the ACP session stream", () => {
 		const args = { path: "agent://Scout", content: "Private coordination" };
 		const events: AgentSessionEvent[] = [

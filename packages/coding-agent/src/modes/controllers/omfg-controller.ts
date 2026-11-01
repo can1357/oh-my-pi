@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { errorText } from "@oh-my-pi/pi-ai/utils/retry-wait-display";
 import { CONFIG_DIR_NAME, prompt } from "@oh-my-pi/pi-utils";
 import { invalidate as invalidateCapabilityCache } from "../../capability";
 import type { Rule } from "../../capability/rule";
@@ -136,7 +137,7 @@ export class OmfgController {
 				request.component.markAborted();
 				return;
 			}
-			request.component.markError(error instanceof Error ? error.message : String(error));
+			request.component.markError(errorText(error));
 		}
 	}
 

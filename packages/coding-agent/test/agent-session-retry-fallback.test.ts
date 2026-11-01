@@ -188,7 +188,10 @@ async function finalizeCodexCapacityError(retryAfterSeconds: string): Promise<AI
 	});
 }
 
-/** A stream that ends with a finalized provider error, as a provider stream does. */
+/**
+ * A stream that ends with a finalized provider error, as a provider stream does:
+ * the server's wait travels as `errorRetryAfterMs`, never in the message text.
+ */
 function finalizedErrorStream(model: Model<Api>, failure: AIError.FinalizeResult): AssistantMessageEventStream {
 	const stream = new AssistantMessageEventStream();
 	queueMicrotask(() => {
@@ -201,6 +204,7 @@ function finalizedErrorStream(model: Model<Api>, failure: AIError.FinalizeResult
 			usage: emptyUsage(),
 			stopReason: failure.stopReason,
 			errorMessage: failure.message,
+			errorRetryAfterMs: failure.retryAfterMs,
 			errorStatus: failure.status,
 			errorId: failure.id,
 			timestamp: Date.now(),
@@ -232,6 +236,11 @@ function recoveredTextStream(model: Model<Api>, text: string): AssistantMessageE
 	});
 	return stream;
 }
+/**
+ * A stream that emits a tool call and then dies on the socket, on a request the
+ * provider reports it put on the wire once (`providerReplays: 0`) — the shape
+ * that earns one held same-model retry before the fallback chain.
+ */
 function transportErrorAfterToolCallStream(
 	model: Model<Api>,
 	toolCall: ToolCall,
@@ -281,6 +290,7 @@ function transportErrorAfterToolCallStream(
 				...partial,
 				stopReason: "error",
 				errorMessage: "The socket connection was closed unexpectedly.",
+				providerReplays: 0,
 				duration: 1000,
 			},
 		});

@@ -26,6 +26,7 @@ import {
 	getOpenAIStreamFirstEventTimeoutMs,
 	getOpenAIStreamIdleTimeoutMs,
 } from "../utils/idle-iterator";
+import { gateOptionalFetch, ReplayBudget, restoreReplaced } from "../utils/replay-budget";
 import { sanitizeSchemaForOllama, toolWireSchema } from "../utils/schema";
 import {
 	getStreamMarkupHealingPattern,
@@ -465,10 +466,14 @@ const streamOllamaOnce = (
 	const stream = new AssistantMessageEventStream();
 	void (async () => {
 		const startTime = performance.now();
+		const replayBudget = ReplayBudget.forCall(options);
 		let firstTokenTime: number | undefined;
 		const output = createEmptyOutput(model);
 		let rawRequestDump: RawHttpRequestDump | undefined;
 		let capturedErrorResponse: CapturedHttpErrorResponse | undefined;
+		// The chat response's headers once it is accepted (2xx), for `finalize`:
+		// an NDJSON error record or a cut stream keeps the response's `Retry-After`.
+		let streamResponseHeaders: Headers | undefined;
 		let activeThinkingIndex: number | undefined;
 		let activeTextIndex: number | undefined;
 		const activeToolIndices = new Set<number>();
@@ -611,7 +616,8 @@ const streamOllamaOnce = (
 					signal: watchdog.signal,
 					defaultDelayMs: OLLAMA_RETRY_DELAYS_MS,
 					shouldRetryResponse: shouldRetryOllamaResponse,
-					fetch: options.fetch,
+					retryGate: replayBudget?.admits,
+					fetch: gateOptionalFetch(replayBudget, options.fetch),
 					timeout: false,
 				});
 			} finally {
@@ -623,10 +629,9 @@ const streamOllamaOnce = (
 					headers: response.headers,
 				});
 			}
+			streamResponseHeaders = response.headers;
 			if (!response.body) {
-				throw new AIError.OllamaApiError("Ollama returned an empty response body", response.status, {
-					headers: response.headers,
-				});
+				throw new AIError.OllamaApiError("Ollama returned an empty response body", response.status);
 			}
 			stream.push({ type: "start", partial: output });
 			for await (const chunk of readJsonl<OllamaChatChunk>(response.body)) {
@@ -778,17 +783,20 @@ const streamOllamaOnce = (
 					clearStreamingPartialJson(block);
 				}
 			}
-			const result = await AIError.finalize(error, {
+			const result = await AIError.finalize(restoreReplaced(error, replayBudget), {
 				api: model.api,
 				provider: model.provider,
 				signal: options.signal,
 				rawRequestDump,
 				capturedErrorResponse,
+				streamResponseHeaders,
 			});
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = result.message;
+			output.errorRetryAfterMs = result.retryAfterMs;
+			replayBudget?.stamp(output);
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) {
 				output.ttft = firstTokenTime - startTime;

@@ -299,6 +299,10 @@ export const stateDefs = {
 			createdAt: "number.integer",
 			updatedAt: "number.integer",
 			"error?": "string",
+			"errorRetryAfterMs?": doc(
+				"number",
+				"The failed turn's retry wait in milliseconds, from the error's response headers. `error` never carries it. Live frames only: history read back from disk has none.",
+			),
 		},
 		"One question and its answer within a side-question topic.",
 	),
@@ -311,6 +315,10 @@ export const stateDefs = {
 			createdAt: "number.integer",
 			updatedAt: "number.integer",
 			"error?": "string",
+			"errorRetryAfterMs?": doc(
+				"number",
+				"The failed turn's retry wait in milliseconds, from the error's response headers. `error` never carries it. Live frames only: history read back from disk has none.",
+			),
 			id: "string",
 			leafId: "string | null",
 			"followUps?": "BtwHistoryTurn[]",

@@ -15,6 +15,7 @@ import { parseGitHubCopilotApiKey } from "@oh-my-pi/pi-catalog/wire/github-copil
 import {
 	$env,
 	$flag,
+	findRetryRefusal,
 	logger,
 	parseJsonWithRepair,
 	parseStreamingJsonThrottled,
@@ -87,6 +88,7 @@ import {
 	kStreamingPartialJson,
 } from "../utils/block-symbols";
 import { withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
+import { withErrorEventHeaders } from "../utils/error-event-headers";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
 import {
@@ -101,12 +103,14 @@ import {
 	parseAnthropicSlowModeHeaders,
 } from "./anthropic-slow-mode";
 import { notifyProviderResponse } from "../utils/provider-response";
-import { getHeadersFromError, getRetryAfterMsFromHeaders } from "../utils/retry-after";
+import { admitsReplay, gateFetch, longestServerWaitMs, ReplayBudget, restoreReplaced } from "../utils/replay-budget";
+import { getFailureRetryAfterMs, getHeadersFromError } from "../utils/retry-after";
 import { COMBINATOR_KEYS, NO_STRICT, toolWireSchema } from "../utils/schema";
 import { spillToDescription } from "../utils/schema/spill";
 import { createSdkStreamRequestOptions } from "../utils/sdk-stream-timeout";
 import { notifyRawSseEvent } from "../utils/sse-debug";
 import { isForcedToolChoice } from "../utils/tool-choice";
+import { providerReplaysFrom, wireCountedFetch } from "../utils/wire-attempts";
 import {
 	AnthropicConnectionTimeoutError,
 	type AnthropicFetchOptions,
@@ -866,6 +870,8 @@ export type AnthropicClientOptionsArgs = {
 	 * build. `undefined` rereads the cache at dispatch.
 	 */
 	copilotCacheSnapshot?: string | null;
+	/** The call's replay budget: gates the client's transport handoff and the resends its fetch wrappers make. */
+	replayBudget?: ReplayBudget;
 };
 
 export type AnthropicClientOptionsResult = {
@@ -991,14 +997,19 @@ function createAnthropicSseStreamError(data: string, midMessage: boolean): Error
 			: data,
 		{ provider: "anthropic", kind: "output" },
 	);
+	// A relay that already committed its 200 (the omp auth gateway) states the
+	// upstream's retry wait as the error object's structured `headers`.
 	if (!midMessage || !AIError.isProviderRetryableError(rejection)) {
-		return rejection;
+		return withErrorEventHeaders(rejection, parsed?.error);
 	}
 	const fields = [errorType ? `type=${errorType}` : undefined, errorCode ? `code=${errorCode}` : undefined]
 		.filter(field => field !== undefined)
 		.join(" ");
-	return new AIError.AnthropicStreamEnvelopeError(
-		`error frame received before message_stop${fields ? ` (${fields})` : ""}: ${message ?? data}`,
+	return withErrorEventHeaders(
+		new AIError.AnthropicStreamEnvelopeError(
+			`error frame received before message_stop${fields ? ` (${fields})` : ""}: ${message ?? data}`,
+		),
+		parsed?.error,
 	);
 }
 
@@ -1814,7 +1825,8 @@ type AnthropicStreamTransport = {
 		params: MessageCreateParamsStreaming,
 		betas: readonly string[],
 	) => Promise<{ payload: unknown; rawRequestDump: RawHttpRequestDump }>;
-	createClient: (getPayload: () => unknown) => AnthropicMessagesClientLike;
+	/** `replayBudget` is the call's budget, for a client that sends or retries below this module. */
+	createClient: (getPayload: () => unknown, replayBudget: ReplayBudget | undefined) => AnthropicMessagesClientLike;
 	prepareOptions: (options: AnthropicOptions) => AnthropicOptions;
 };
 
@@ -1828,6 +1840,7 @@ const streamAnthropicOnce = (
 
 	(async () => {
 		const startTime = performance.now();
+		const replayBudget = ReplayBudget.forCall(options);
 		let firstTokenTime: number | undefined;
 
 		const sourceModel = transport?.sourceModel ?? model;
@@ -1842,8 +1855,31 @@ const streamAnthropicOnce = (
 			timestamp: Date.now(),
 		};
 		let rawRequestDump: RawHttpRequestDump | undefined;
+		// The current attempt's accepted (2xx) response headers: set when its
+		// response arrives, cleared when the next attempt starts, so an in-band
+		// error or a cut stream reads this attempt's `Retry-After` and a later
+		// attempt that fails before its response never reads an earlier one's.
+		let streamResponseHeaders: Headers | undefined;
 		let transportPayload: unknown;
 		let activeAbortTracker = createAbortSourceTracker(options?.signal);
+		// Request attempts, counted on the `fetch` the client issues them through
+		// (`wireCountedFetch`): the request's own counter — `withRequestTransport`
+		// on the `stream()` path, `withWireCount` at `streamAnthropic` otherwise —
+		// shared by every call that sends this request again with the same
+		// options (an authentication retry, an empty-completion retry). Every
+		// wrapper `buildAnthropicClientOptions` adds sits above it — compression
+		// and its uncompressed resend, the cch rewriter, the Copilot identity
+		// resend — so their requests are counted too.
+		const wire = wireCountedFetch(options?.fetch);
+		/**
+		 * Every attempt after the first the request has made, or `undefined`
+		 * when the requests went through a transport this module does not own —
+		 * a caller-supplied client, or a transport that builds its own — or
+		 * through a caller-supplied `fetch`. Each knows how often it replayed and
+		 * this module does not.
+		 */
+		const reportedProviderReplays = (): number | undefined =>
+			transport || options?.client ? undefined : providerReplaysFrom(wire.attempts);
 
 		const onSseEvent = options?.onSseEvent;
 		const rawSseObserver = onSseEvent ? (event: RawSseEvent) => onSseEvent(event, sourceModel) : undefined;
@@ -2173,7 +2209,7 @@ const streamAnthropicOnce = (
 				requestExtraBetas = extraBetas;
 				if (transport) {
 					return {
-						client: transport.createClient(() => transportPayload),
+						client: transport.createClient(() => transportPayload, replayBudget),
 						isOAuthToken: false,
 					};
 				}
@@ -2191,10 +2227,11 @@ const streamAnthropicOnce = (
 						context.tools?.some(tool => ANTHROPIC_BUFFERED_INPUT_TOOLS.has(tool.name)) ?? false,
 					thinkingEnabled: options?.thinkingEnabled,
 					thinkingDisplay: options?.thinkingDisplay,
-					fetch: options?.fetch,
+					fetch: wire.fetch,
 					maxRetryDelayMs: options?.maxRetryDelayMs,
 					copilotCacheKey,
 					copilotCacheSnapshot: copilotCached ?? null,
+					replayBudget,
 					sessionId:
 						options?.sessionId ??
 						extractClaudeMetadataSessionId(options?.metadata?.user_id) ??
@@ -2474,8 +2511,13 @@ const streamAnthropicOnce = (
 			let slowWaitSinceMs: number | undefined;
 			let slowWaitAttempts = 0;
 			let sentSlow = false;
+			// The failure the next request would replace. A rung admits its resend
+			// before waiting and rebuilding the request; the clock moves meanwhile, so
+			// the budget is asked again right before the request goes out.
+			let replayOf: unknown;
 			while (true) {
 				activeAbortTracker = createAbortSourceTracker(options?.signal);
+				streamResponseHeaders = undefined;
 				const { requestSignal } = activeAbortTracker;
 				// The provider loop owns retries: pin the client's internal retry loop
 				// to zero even when no watchdog timeout is configured (the helper only
@@ -2603,6 +2645,10 @@ const streamAnthropicOnce = (
 						),
 					};
 				}
+				if (replayOf !== undefined) {
+					if (!admitsReplay(replayBudget, 0)) throw replayOf;
+					replayOf = undefined;
+				}
 				const requestOptions = {
 					...createSdkStreamRequestOptions(requestSignal, requestTimeoutMs),
 					maxRetries: 0,
@@ -2641,6 +2687,7 @@ const streamAnthropicOnce = (
 					} finally {
 						if (requestTimeout !== undefined) clearTimeout(requestTimeout);
 					}
+					streamResponseHeaders = response.headers;
 					await notifyProviderResponse(options, response, sourceModel, requestId);
 					if (slowMode) {
 						const slowSignal = parseAnthropicSlowModeHeaders(response.headers);
@@ -3200,15 +3247,20 @@ const streamAnthropicOnce = (
 					}
 					break;
 				} catch (streamError) {
+					// A request the budget refused at handoff stands for the failure it replaced.
+					if (findRetryRefusal(streamError)) throw restoreReplaced(streamError);
 					const localAbortReason = activeAbortTracker.getLocalAbortReason();
 					const preserveTransportStatus = transport && AIError.status(streamError) !== undefined;
 					const streamFailure = preserveTransportStatus ? streamError : (localAbortReason ?? streamError);
 					if (transport) throw streamFailure;
+					replayOf = streamFailure;
 					if (
 						!disableStrictTools &&
 						firstTokenTime === undefined &&
 						hasStrictAnthropicTools(params) &&
-						AIError.isGrammarError(streamFailure)
+						AIError.isGrammarError(streamFailure) &&
+						(!replayBudget ||
+							(await replayBudget.replayAfter(streamFailure, 0, options?.signal, options?.providerRetryWait)))
 					) {
 						// Log-only: the retried turn must not carry an errorMessage on
 						// success (consumers treat its presence as failure).
@@ -3233,7 +3285,17 @@ const streamAnthropicOnce = (
 						const errMessage = streamFailure instanceof Error ? streamFailure.message : String(streamFailure);
 						const redemption = frozenRedemption;
 						if (errMessage.includes("redemption temporarily unavailable")) {
-							if (Date.now() < redemption.expiresAt && fallbackCreditTransientRetries < 2) {
+							if (
+								Date.now() < redemption.expiresAt &&
+								fallbackCreditTransientRetries < 2 &&
+								(!replayBudget ||
+									(await replayBudget.replayAfter(
+										streamFailure,
+										500,
+										options?.signal,
+										options?.providerRetryWait,
+									)))
+							) {
 								fallbackCreditTransientRetries++;
 								logger.warn(
 									"anthropic: fallback credit redemption temporarily unavailable, retrying same shape",
@@ -3242,13 +3304,17 @@ const streamAnthropicOnce = (
 										attempt: fallbackCreditTransientRetries,
 									},
 								);
-								await waitForRetry(options?.providerRetryWait, 500, options?.signal);
+								if (!replayBudget) await waitForRetry(options?.providerRetryWait, 500, options?.signal);
 								resetStreamOutputState();
 								continue;
 							}
 							throw streamFailure;
 						}
-						if (fallbackCreditShape === "continuation") {
+						if (
+							fallbackCreditShape === "continuation" &&
+							(!replayBudget ||
+								(await replayBudget.replayAfter(streamFailure, 0, options?.signal, options?.providerRetryWait)))
+						) {
 							logger.warn(
 								"anthropic: fallback credit continuation shape rejected, retrying with unchanged body",
 								{
@@ -3265,7 +3331,11 @@ const streamAnthropicOnce = (
 							resetStreamOutputState();
 							continue;
 						}
-						if (errMessage.includes("fallback_credit_token")) {
+						if (
+							errMessage.includes("fallback_credit_token") &&
+							(!replayBudget ||
+								(await replayBudget.replayAfter(streamFailure, 0, options?.signal, options?.providerRetryWait)))
+						) {
 							forfeitFallbackCredit(streamFailure);
 							logger.warn(
 								"anthropic: fallback credit token rejected, falling back to standard request without token",
@@ -3286,7 +3356,9 @@ const streamAnthropicOnce = (
 						isOAuthToken &&
 						clientArgs &&
 						firstTokenTime === undefined &&
-						adoptRequiredClaudeCodeVersion(streamFailure)
+						adoptRequiredClaudeCodeVersion(streamFailure) &&
+						(!replayBudget ||
+							(await replayBudget.replayAfter(streamFailure, 0, options?.signal, options?.providerRetryWait)))
 					) {
 						logger.warn("anthropic: Claude Code version rejected as too old, retrying with required version", {
 							model: model.id,
@@ -3312,7 +3384,9 @@ const streamAnthropicOnce = (
 						options?.anthropicPrefixMismatchBehavior !== "error" &&
 						firstTokenTime === undefined &&
 						!streamedReplayUnsafeContent &&
-						isThinkingPrefixBindingError(streamFailureMessage)
+						isThinkingPrefixBindingError(streamFailureMessage) &&
+						(!replayBudget ||
+							(await replayBudget.replayAfter(streamFailure, 0, options?.signal, options?.providerRetryWait)))
 					) {
 						logger.warn("anthropic: thinking prefix changed, stripping bound thinking and retrying", {
 							provider: model.provider,
@@ -3349,7 +3423,11 @@ const streamAnthropicOnce = (
 						// The session remembers the dropped blocks so later requests replay
 						// the same prefix; without session state, drop every block instead.
 						const keys = latestAssistantTurnThinkingKeys(params);
-						if (keys.length > 0) {
+						if (
+							keys.length > 0 &&
+							(!replayBudget ||
+								(await replayBudget.replayAfter(streamFailure, 0, options?.signal, options?.providerRetryWait)))
+						) {
 							logger.warn(
 								"anthropic: latest assistant turn's thinking rejected as modified, dropping it and retrying",
 								{
@@ -3385,7 +3463,9 @@ const streamAnthropicOnce = (
 						firstTokenTime === undefined &&
 						!streamedReplayUnsafeContent &&
 						!isThinkingPrefixBindingError(streamFailureMessage) &&
-						isInvalidThinkingSignatureError(streamFailureMessage)
+						isInvalidThinkingSignatureError(streamFailureMessage) &&
+						(!replayBudget ||
+							(await replayBudget.replayAfter(streamFailure, 0, options?.signal, options?.providerRetryWait)))
 					) {
 						logger.warn(
 							"anthropic: signing proxy detected (thinking signature rejected), demoting unsigned thinking and retrying",
@@ -3418,7 +3498,9 @@ const streamAnthropicOnce = (
 						firstTokenTime === undefined &&
 						!streamedReplayUnsafeContent &&
 						!isThinkingPrefixBindingError(streamFailureMessage) &&
-						isInvalidThinkingSignatureError(streamFailureMessage)
+						isInvalidThinkingSignatureError(streamFailureMessage) &&
+						(!replayBudget ||
+							(await replayBudget.replayAfter(streamFailure, 0, options?.signal, options?.providerRetryWait)))
 					) {
 						// The unsigned-demotion retry only rewrites UNSIGNED blocks;
 						// when every replayed block carries a signature the signer no
@@ -3459,7 +3541,9 @@ const streamAnthropicOnce = (
 						!dropFastMode &&
 						wantsAnthropicFastMode(model, options) &&
 						firstTokenTime === undefined &&
-						AIError.isFastModeUnsupported(streamFailure)
+						AIError.isFastModeUnsupported(streamFailure) &&
+						(!replayBudget ||
+							(await replayBudget.replayAfter(streamFailure, 0, options?.signal, options?.providerRetryWait)))
 					) {
 						logger.debug("anthropic: fast mode unsupported, retrying without speed", {
 							model: model.id,
@@ -3494,7 +3578,9 @@ const streamAnthropicOnce = (
 						!dropCacheControlOptions &&
 						firstTokenTime === undefined &&
 						AIError.isCacheControlUnsupported(streamFailure) &&
-						requestCarriesCacheControlOptions()
+						requestCarriesCacheControlOptions() &&
+						(!replayBudget ||
+							(await replayBudget.replayAfter(streamFailure, 0, options?.signal, options?.providerRetryWait)))
 					) {
 						logger.warn(
 							"anthropic: endpoint rejected cache_control, retrying with breakpoints but no ttl/scope",
@@ -3540,7 +3626,16 @@ const streamAnthropicOnce = (
 							waitedMs: slowWaitSinceMs === undefined ? 0 : Date.now() - slowWaitSinceMs,
 							attempts: slowWaitAttempts,
 						});
-						if (slowRetry) {
+						if (
+							slowRetry &&
+							(!replayBudget ||
+								(await replayBudget.replayAfter(
+									streamFailure,
+									slowRetry.delayMs,
+									options?.signal,
+									options?.providerRetryWait,
+								)))
+						) {
 							if (slowRetry.capacityWait) {
 								slowWaitSinceMs ??= Date.now();
 								slowWaitAttempts++;
@@ -3551,7 +3646,7 @@ const streamAnthropicOnce = (
 								delayMs: slowRetry.delayMs,
 								attempt: slowWaitAttempts,
 							});
-							if (slowRetry.delayMs > 0) {
+							if (!replayBudget && slowRetry.delayMs > 0) {
 								await waitForRetry(options?.providerRetryWait, slowRetry.delayMs, options?.signal);
 							}
 							resetStreamOutputState();
@@ -3561,7 +3656,9 @@ const streamAnthropicOnce = (
 					if (
 						!dropCacheControl &&
 						firstTokenTime === undefined &&
-						AIError.isCacheControlUnsupported(streamFailure)
+						AIError.isCacheControlUnsupported(streamFailure) &&
+						(!replayBudget ||
+							(await replayBudget.replayAfter(streamFailure, 0, options?.signal, options?.providerRetryWait)))
 					) {
 						logger.warn("anthropic: endpoint rejected cache_control, retrying without prompt-cache breakpoints", {
 							provider: model.provider,
@@ -3607,9 +3704,19 @@ const streamAnthropicOnce = (
 					providerRetryAttempt++;
 					const backoffDelayMs = calculateAnthropicRetryDelayMs(providerRetryAttempt - 1);
 					// Honor the server's retry hint (`retry-after-ms`/`retry-after`) on
-					// 429/529-style failures: retrying sooner than the server asked is a
-					// guaranteed failure that just burns the retry budget.
-					const headerDelayMs = getRetryAfterMsFromHeaders(getHeadersFromError(streamFailure));
+					// 429/529-style failures and on an accepted stream that failed after
+					// naming one: retrying sooner than the server asked is a guaranteed
+					// failure that just burns the retry budget. The same reader as the
+					// failed message's `errorRetryAfterMs`, so this cap and every layer
+					// above judge one wait. Under a replay budget the longest wait the
+					// headers or the message name also counts, so a header that says zero
+					// cannot beat a body that says thirty seconds.
+					const statedDelayMs = getFailureRetryAfterMs(streamFailure, { streamResponseHeaders });
+					const longestDelayMs = replayBudget ? longestServerWaitMs(streamFailure) : undefined;
+					const headerDelayMs =
+						longestDelayMs === undefined || (statedDelayMs !== undefined && statedDelayMs > longestDelayMs)
+							? statedDelayMs
+							: longestDelayMs;
 					// Bound the server-directed wait so a multi-hour `retry-after` cannot
 					// park the provider stream before higher-level recovery runs. A non-positive cap
 					// disables the bound; an over-cap hint surfaces the original error immediately.
@@ -3618,7 +3725,25 @@ const streamAnthropicOnce = (
 						throw streamFailure;
 					}
 					const delayMs = headerDelayMs !== undefined ? Math.max(headerDelayMs, backoffDelayMs) : backoffDelayMs;
-					await waitForRetry(options?.providerRetryWait, delayMs, options?.signal);
+					// Neither wait is shortened to fit the caller's budget: retrying
+					// sooner than the server asked is a guaranteed failure, so a wait
+					// that would end past the budget ends the call now instead. The
+					// wait is raced against the deadline, and the request it leads to
+					// is checked again at handoff.
+					if (replayBudget) {
+						if (
+							!(await replayBudget.replayAfter(
+								streamFailure,
+								delayMs,
+								options?.signal,
+								options?.providerRetryWait,
+							))
+						) {
+							throw streamFailure;
+						}
+					} else {
+						await waitForRetry(options?.providerRetryWait, delayMs, options?.signal);
+					}
 					output.content.length = 0;
 					output.model = sourceModel.id;
 					output.responseId = undefined;
@@ -3640,6 +3765,10 @@ const streamAnthropicOnce = (
 				output.content.unshift(...prefix);
 				if (retained !== output.content) retained.unshift(...prefix);
 			}
+			// A success carries the count too: the layer above may discard this
+			// response (an empty completion it retries) and the requests already
+			// spent on it are still requests the model saw.
+			output.providerReplays = reportedProviderReplays();
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			if (dropFastMode && model.compat.firstPartyProvider && options?.serviceTier === "priority") {
@@ -3687,16 +3816,20 @@ const streamAnthropicOnce = (
 				if (block.type === "toolCall") clearStreamingPartialJson(block);
 			}
 			const retained = settleFallbackHandoff();
-			const result = await AIError.finalize(error, {
+			const result = await AIError.finalize(restoreReplaced(error, replayBudget), {
 				api: sourceModel.api,
 				provider: sourceModel.provider,
 				abortTracker: activeAbortTracker,
 				rawRequestDump,
+				streamResponseHeaders,
 			});
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = transport ? result.message : maybeAddReplayUnsignedThinkingHint(model, result.message);
+			output.errorRetryAfterMs = result.retryAfterMs;
+			output.providerReplays = reportedProviderReplays();
+			replayBudget?.stamp(output);
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({
@@ -3894,6 +4027,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		dropPromptCacheBetas = false,
 		copilotCacheKey,
 		copilotCacheSnapshot,
+		replayBudget,
 	} = args;
 	const compat = model.compat;
 	const disableStrictTools = disableStrictToolsOverride ?? compat.disableStrictTools;
@@ -3937,7 +4071,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 	// Compression sits beneath the cch rewriter, which must hash the uncompressed
 	// body. Catalog rules scope it to verified hosts (official API, Copilot), so
 	// proxies pass through.
-	const baseFetch = wrapFetchForRequestCompression(args.fetch ?? fetch, model);
+	const baseFetch = wrapFetchForRequestCompression(gateFetch(replayBudget, args.fetch ?? fetch), model, replayBudget);
 	// Only OAuth requests inject the CC billing header; no API-key request can ever
 	// contain it, so there is no need to install the rewriter for those.
 	const cchFetch = oauthToken ? wrapFetchForCch(baseFetch) : baseFetch;
@@ -3986,6 +4120,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 				resolveCopilotRequestIdentity(headers),
 				copilotCacheKey ?? getCopilotIntegrationCacheKey(apiKey, baseUrl),
 				copilotCacheSnapshot,
+				replayBudget,
 			),
 			fetchOptions,
 		};
@@ -5461,7 +5596,7 @@ export function streamBedrockAnthropicCompaction(
 		params: MessageCreateParamsStreaming,
 		betas: readonly string[],
 	) => Promise<{ payload: unknown; rawRequestDump: RawHttpRequestDump }>,
-	createClient: (getPayload: () => unknown) => AnthropicMessagesClientLike,
+	createClient: (getPayload: () => unknown, replayBudget: ReplayBudget | undefined) => AnthropicMessagesClientLike,
 	prepareOptions: (options: AnthropicOptions) => AnthropicOptions,
 	forceThinkingOffFields?: Record<string, unknown>,
 ): AssistantMessageEventStream {

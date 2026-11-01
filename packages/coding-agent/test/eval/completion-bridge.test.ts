@@ -1088,6 +1088,45 @@ describe("completion() through eval runtimes", () => {
 		expect(result.output.trim()).toBe("TimeoutError");
 	});
 
+	it("prints a completion() failure's server wait in the cell, never in the message cell code catches", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-completion-wait-");
+		const options = {
+			cwd: tempDir.path(),
+			sessionId: `js-completion-wait:${crypto.randomUUID()}`,
+			session: makeSession({ cwd: tempDir.path() }),
+			sessionFile: path.join(tempDir.path(), "session.jsonl"),
+		};
+		vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			...assistant({ stopReason: "error", errorMessage: "429 rate_limit_error" }),
+			errorRetryAfterMs: 30_000,
+		});
+
+		const uncaught = await executeJs('await wait(completion("hi", { model: "smol" }));', options);
+		expect(uncaught.exitCode).toBe(1);
+		expect(uncaught.output).toContain("429 rate_limit_error");
+		expect(uncaught.output).toContain("(retry after 30.0s)");
+
+		// Cell code that catches the failure reads the provider's text, without the wait.
+		const caught = await executeJs(
+			'try { await wait(completion("hi", { model: "smol" })); } catch (error) { print(error.message); }',
+			options,
+		);
+		expect(caught.output.trim()).toBe("429 rate_limit_error");
+	});
+
+	it("prints no wait for a plain cell error, even when its text names one", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-plain-error-");
+		const result = await executeJs('throw new Error("429 rate_limit_error retry-after-ms=9000");', {
+			cwd: tempDir.path(),
+			sessionId: `js-plain-error:${crypto.randomUUID()}`,
+			session: makeSession({ cwd: tempDir.path() }),
+			sessionFile: path.join(tempDir.path(), "session.jsonl"),
+		});
+		expect(result.exitCode).toBe(1);
+		expect(result.output).toContain("429 rate_limit_error retry-after-ms=9000");
+		expect(result.output).not.toContain("retry after");
+	});
+
 	it("exposes plain and structured completion() in the Python runtime", async () => {
 		const tempDir = TempDir.createSync("@omp-eval-completion-py-");
 		try {

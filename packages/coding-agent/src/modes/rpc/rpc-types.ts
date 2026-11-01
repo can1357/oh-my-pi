@@ -245,6 +245,8 @@ export interface RpcPromptError {
 	model?: string;
 	/** HTTP status reported by the provider, when the failure came from a request. */
 	httpStatus?: number;
+	/** The failed response's retry wait in milliseconds, from its headers. `message` never carries it. */
+	retryAfterMs?: number;
 	/** The failure is classified transient: resubmitting later may succeed. OMP's own retries are already exhausted. */
 	retryable: boolean;
 	/** `cost_cap`: the session reached `session.maxCost` (`--max-cost`) and omp did not send the next request. */

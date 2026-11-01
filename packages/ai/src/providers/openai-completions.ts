@@ -6,6 +6,7 @@ import type { ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { clinePassClientHeaders } from "@oh-my-pi/pi-catalog/wire/cline-pass";
 import {
 	$env,
+	findRetryRefusal,
 	logger,
 	parseStreamingJson,
 	parseStreamingJsonThrottled,
@@ -38,6 +39,7 @@ import { normalizeSystemPrompts, normalizeToolCallId, resolveCacheRetention } fr
 import { createAbortSourceTracker } from "../utils/abort";
 import { isDemotedThinking, kStreamingLastParseLen } from "../utils/block-symbols";
 import { hasVisibleAssistantContent, withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
+import { withErrorEventHeaders } from "../utils/error-event-headers";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import {
@@ -48,6 +50,7 @@ import {
 } from "../utils/idle-iterator";
 import { OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
 import { notifyProviderResponse } from "../utils/provider-response";
+import { admitsReplay, gateFetch, ReplayBudget, restoreReplaced } from "../utils/replay-budget";
 import { wrapFetchForRequestCompression } from "../utils/request-compression";
 import {
 	adaptSchemaForStrict,
@@ -843,6 +846,7 @@ const streamOpenAICompletionsOnce = (
 
 	(async () => {
 		const startTime = performance.now();
+		const replayBudget = ReplayBudget.forCall(options);
 		let firstTokenTime: number | undefined;
 
 		const output: AssistantMessage = createInitialResponsesAssistantMessage(model.api, model.provider, model.id);
@@ -883,6 +887,13 @@ const streamOpenAICompletionsOnce = (
 		// the catch handler uses it to close open blocks before emitting the
 		// terminal error so both exit paths obey the same block lifecycle.
 		let finishOpenBlocksOnError: () => void = () => {};
+		// The current attempt's accepted (2xx) response headers: droid CLI parity
+		// reads cache-read details from `fireworks-cached-prompt-tokens` when the
+		// SSE body omits `cached_tokens`, and the catch hands them to `finalize`
+		// so an in-band error or a cut stream keeps the response's `Retry-After`.
+		// Cleared when an attempt starts: a fallback request that fails before
+		// its response must not read an earlier response's headers.
+		let responseHeaders: Headers | undefined;
 
 		try {
 			const policy = resolveOpenAICompatForRequest(model, options, Boolean(context.tools?.length));
@@ -932,7 +943,12 @@ const streamOpenAICompletionsOnce = (
 			const completionsUrl = query
 				? `${trimmedBaseUrl}/chat/completions?${new URLSearchParams(query)}`
 				: `${trimmedBaseUrl}/chat/completions`;
-			const createCompletionsStream = async (toolStrictModeOverride?: ToolStrictModeOverride) => {
+			const createCompletionsStream = async (
+				toolStrictModeOverride?: ToolStrictModeOverride,
+				/** The rejection a corrected request replaces; returned as-is when the budget refuses it at send time. */
+				correctionOf?: unknown,
+			) => {
+				responseHeaders = undefined;
 				const effectiveToolStrictModeOverride = disableStrictTools ? "none" : toolStrictModeOverride;
 				const builtParams = buildParams(model, context, options, effectiveToolStrictModeOverride);
 				appliedStrictTools = builtParams.strictToolsApplied;
@@ -976,18 +992,26 @@ const streamOpenAICompletionsOnce = (
 					if (requestTimeoutMs !== undefined) {
 						headersWithTimeout["X-Stainless-Timeout"] = Math.floor(requestTimeoutMs / 1000).toString();
 					}
+					if (correctionOf !== undefined && !admitsReplay(replayBudget, 0)) throw correctionOf;
 					const { events, response, requestId } = await postOpenAIStream<ChatCompletionChunk>({
 						url: completionsUrl,
 						headers: headersWithTimeout,
 						body: params,
 						signal: requestSignal,
 						maxAttempts: options?.maxHttpAttempts,
+						retryGate: replayBudget?.admits,
+						maxRetryDelayMs: options?.maxRetryDelayMs,
 						fetch: wrapFetchForCopilotFallback(
-							wrapFetchForRequestCompression(options?.fetch ?? fetch, model),
+							wrapFetchForRequestCompression(
+								gateFetch(replayBudget, options?.fetch ?? fetch),
+								model,
+								replayBudget,
+							),
 							model.provider === "github-copilot",
 							resolveCopilotRequestIdentity(options?.headers),
 							copilotCacheKey,
 							copilotCacheSnapshot,
+							replayBudget,
 						),
 						// Transient 408/429/5xx get Retry-After-aware transport retries.
 						// The first-event watchdog above aborts `requestSignal`, which
@@ -1010,14 +1034,12 @@ const streamOpenAICompletionsOnce = (
 					clearTimeout(requestTimeout);
 				}
 			};
-			// droid CLI parity: cache-read details can arrive on the
-			// `fireworks-cached-prompt-tokens` response header when the SSE body
-			// omits `cached_tokens`; captured here for the usage parser.
-			let responseHeaders: Headers | undefined;
 			let openaiStream: AsyncIterable<ChatCompletionChunk>;
 			try {
 				openaiStream = await createCompletionsStream();
 			} catch (error) {
+				// A request the budget refused at handoff stands for the failure it replaced.
+				if (findRetryRefusal(error)) throw restoreReplaced(error);
 				const capturedErrorResponse = error instanceof OpenAIHttpError ? error.captured : undefined;
 				// A caller disable with a retained effort preference is still an
 				// explicit disable: without this, a fieldless rejection of the
@@ -1033,9 +1055,17 @@ const streamOpenAICompletionsOnce = (
 				if (reasoningEffortFallback !== undefined && activeReasoningEffortFallbackKey) {
 					const retryMarker = `${activeReasoningEffortFallbackKey}:${String(reasoningEffortFallback)}`;
 					if (attemptedReasoningEffortFallbacks.has(retryMarker)) throw error;
+					// A correction re-sends a rejected request: a replay. Under a budget it
+					// waits the server's named wait when that fits and is refused when not.
+					if (
+						replayBudget &&
+						!(await replayBudget.replayAfter(error, 0, options?.signal, options?.providerRetryWait))
+					) {
+						throw error;
+					}
 					attemptedReasoningEffortFallbacks.add(retryMarker);
 					requestReasoningEffortFallbacks.set(activeReasoningEffortFallbackKey, reasoningEffortFallback);
-					openaiStream = await createCompletionsStream();
+					openaiStream = await createCompletionsStream(undefined, error);
 					// Explicit-disable fallbacks stay per-request so a reasoning-off
 					// side request cannot downgrade later normal turns sharing
 					// the session state.
@@ -1051,9 +1081,15 @@ const streamOpenAICompletionsOnce = (
 					!disableStrictTools &&
 					isCompiledGrammarTooLargeStrictError(error, capturedErrorResponse)
 				) {
+					if (
+						replayBudget &&
+						!(await replayBudget.replayAfter(error, 0, options?.signal, options?.providerRetryWait))
+					) {
+						throw error;
+					}
 					disableStrictToolsForScope(providerSessionState, strictToolsScope);
 					disableStrictTools = true;
-					openaiStream = await createCompletionsStream("none");
+					openaiStream = await createCompletionsStream("none", error);
 				} else {
 					if (
 						!shouldRetryWithoutStrictTools(error, capturedErrorResponse, {
@@ -1064,11 +1100,17 @@ const streamOpenAICompletionsOnce = (
 					) {
 						throw error;
 					}
+					if (
+						replayBudget &&
+						!(await replayBudget.replayAfter(error, 0, options?.signal, options?.providerRetryWait))
+					) {
+						throw error;
+					}
 					// Remember the rejection for the rest of the session so every
 					// subsequent request doesn't pay a strict-400 + retry round-trip.
 					disableStrictToolsForScope(providerSessionState, strictToolsScope);
 					disableStrictTools = true;
-					openaiStream = await createCompletionsStream("none");
+					openaiStream = await createCompletionsStream("none", error);
 				}
 			}
 			if (premiumRequestsTotal !== undefined) {
@@ -1420,10 +1462,12 @@ const streamOpenAICompletionsOnce = (
 				// synthesized message is never opaque, so an unreadable body cannot burn
 				// a credential. Envelopes that are not a recognised throttle return
 				// `undefined` and keep their pre-existing handling.
-				const inBand = AIError.createInBandProviderError(chunk);
-				if (inBand) throw inBand;
-				const streamError = createOpenAICompletionsStreamError(chunk, model.provider);
-				if (streamError) throw streamError;
+				// A relay that already committed its 200 (the omp auth gateway)
+				// states the upstream's retry wait as the error object's structured
+				// `headers`; the thrown error carries them for `finalize`.
+				const inBand =
+					AIError.createInBandProviderError(chunk) ?? createOpenAICompletionsStreamError(chunk, model.provider);
+				if (inBand) throw withErrorEventHeaders(inBand, Reflect.get(chunk, "error"));
 
 				// OpenAI documents ChatCompletionChunk.id as the unique chat completion identifier,
 				// and each chunk in a streamed completion carries the same id.
@@ -1874,18 +1918,22 @@ const streamOpenAICompletionsOnce = (
 			try {
 				finishOpenBlocksOnError();
 			} catch {}
-			const capturedErrorResponse = error instanceof OpenAIHttpError ? error.captured : undefined;
-			const result = await AIError.finalize(error, {
+			const answered = restoreReplaced(error, replayBudget);
+			const capturedErrorResponse = answered instanceof OpenAIHttpError ? answered.captured : undefined;
+			const result = await AIError.finalize(answered, {
 				api: model.api,
 				provider: model.provider,
 				abortTracker,
 				rawRequestDump,
 				capturedErrorResponse,
+				streamResponseHeaders: responseHeaders,
 			});
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = result.message;
+			output.errorRetryAfterMs = result.retryAfterMs;
+			replayBudget?.stamp(output);
 			// Some providers via OpenRouter include extra details here.
 			const rawMetadata = readOpenRouterRawMetadata(capturedErrorResponse);
 			if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;

@@ -3,6 +3,7 @@
  * above the editor, drives the shared cleanse core against it, and maps Esc to
  * cancel-then-dismiss (mirroring the `/omfg` panel).
  */
+import { errorText } from "@oh-my-pi/pi-ai/utils/retry-wait-display";
 import { runCleanse } from "../../cleanse";
 import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { CleanseBoardModel } from "@oh-my-pi/pi-tui/apps/cleanse-board";
@@ -110,7 +111,7 @@ export class CleanseCommandController {
 			if (result.status === "cancelled" && result.report.checks.length === 0) this.#close(run);
 		} catch (error) {
 			if (this.#active !== run) return;
-			run.panel.markError(error instanceof Error ? error.message : String(error));
+			run.panel.markError(errorText(error));
 		} finally {
 			if (this.#active === run) run.settled = true;
 		}

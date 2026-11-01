@@ -7,7 +7,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
-import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
+import { $env, prompt, Snowflake, withRetryWait } from "@oh-my-pi/pi-utils";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import {
@@ -968,7 +968,7 @@ function describeSalvagedWork(result: SingleResult): string {
 		aborted: result.aborted,
 		abortReason: result.abortReason,
 		exitCode: result.exitCode,
-		error: result.error,
+		error: result.error === undefined ? undefined : withRetryWait(result.error, result.errorRetryAfterMs),
 		id: result.id,
 		outputPath: result.outputPath,
 	});

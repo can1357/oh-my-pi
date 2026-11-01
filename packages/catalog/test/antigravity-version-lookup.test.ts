@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, setSystemTime } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 import { ensureAntigravityVersion, getAntigravityPlatform } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
+import { RetryRefusedError } from "@oh-my-pi/pi-utils";
 
 const RETRY_WINDOW_MS = 10 * 60_000;
 // The lookup state is process-wide; every test starts on a fresh clock past any
@@ -44,6 +45,21 @@ describe("ensureAntigravityVersion", () => {
 		setSystemTime(new Date(clock));
 		await ensureAntigravityVersion(fetcher);
 		expect(calls()).toBe(2);
+	});
+
+	// The calling request's replay budget refused the lookup's request: nothing
+	// failed, so other callers may look the version up at once.
+	it("does not hold back later lookups after a lookup its caller's replay budget refused", async () => {
+		const refused = countingFetch(async () => {
+			throw new RetryRefusedError(new Error("503 original overload"));
+		});
+		await ensureAntigravityVersion(refused.fetcher);
+
+		const next = countingFetch(async () => new Response("unavailable", { status: 503 }));
+		await ensureAntigravityVersion(next.fetcher);
+
+		expect(refused.calls()).toBe(1);
+		expect(next.calls()).toBe(1);
 	});
 
 	it("lets an aborted caller stop waiting without cancelling the shared lookup", async () => {

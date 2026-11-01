@@ -22,6 +22,7 @@ export { OpenAIHttpError };
 
 import type { FetchImpl } from "../types";
 import type { CapturedHttpErrorResponse } from "./http-inspector";
+import { retryWaitBounds } from "./retry-after";
 
 /**
  * Total attempts (initial + retries). Parity with the removed SDK clients'
@@ -31,6 +32,9 @@ import type { CapturedHttpErrorResponse } from "./http-inspector";
  * transient 408/429/5xx retries can never extend the caller's deadline.
  */
 const DEFAULT_MAX_ATTEMPTS = 6;
+
+/** The longest server-stated wait a transport retry sleeps when the caller sets no cap (`StreamOptions.maxRetryDelayMs`'s default). */
+const DEFAULT_MAX_RETRY_DELAY_MS = 60_000;
 
 /** Bound the `Error.message` allocation for proxy HTML error pages and the like. */
 const MAX_DETAIL_CHARS = 4096;
@@ -70,8 +74,16 @@ export interface OpenAIStreamRequestInit {
 	fetch?: FetchImpl;
 	/** Override the default transport attempt budget for this request. */
 	maxAttempts?: number;
+	/**
+	 * The caller's `StreamOptions.maxRetryDelayMs`: a 429/5xx whose headers name a
+	 * longer wait is surfaced at once instead of retried, and no retry sleeps
+	 * longer ({@link retryWaitBounds}). Non-positive disables the bound.
+	 */
+	maxRetryDelayMs?: number;
 	/** Optional caller-specific gate composed with shared transport retry exclusions. */
 	shouldRetryResponse?: (response: Response, bodyText: string) => boolean | Promise<boolean>;
+	/** Consulted before each transport retry with its wait; `false` stops retrying (`StreamOptions.replayBudgetMs`). */
+	retryGate?: (delayMs: number) => boolean;
 	/**
 	 * Raw wire-frame observer (`onSseEvent` debug pipeline). Leave it unset
 	 * when no diagnostic listener exists: any observer turns on per-line raw
@@ -98,6 +110,7 @@ export interface OpenAIStreamHandle<TEvent> {
  * watchdog timers and abort-reason bookkeeping.
  */
 export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): Promise<OpenAIStreamHandle<TEvent>> {
+	const retryBounds = retryWaitBounds(init.maxRetryDelayMs, DEFAULT_MAX_RETRY_DELAY_MS);
 	let response: Response;
 	try {
 		response = await fetchWithRetry(init.url, {
@@ -107,12 +120,16 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
 			signal: init.signal,
 			fetch: init.fetch,
 			maxAttempts: init.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
+			maxDelayMs: retryBounds.maxDelayMs,
 			// A proxy concurrency-admission 429 (`rate_limit_type: max_parallel_requests`)
 			// surfaces immediately instead of being slept-and-retried here; session
-			// recovery owns its backoff/fallback (issue #8854).
+			// recovery owns its backoff/fallback (issue #8854). So does a refusal whose
+			// headers name a longer wait than the caller's cap.
 			shouldRetryResponse: async (response, bodyText) =>
 				!isConcurrencyAdmissionRejection(response, bodyText) &&
+				!retryBounds.declines(response.headers) &&
 				(init.shouldRetryResponse === undefined || (await init.shouldRetryResponse(response, bodyText))),
+			retryGate: init.retryGate,
 			// Bun's native fetch enforces a hard ~300s pre-response timeout (issue #2422).
 			// Cold large-context streams legitimately exceed it; the caller's
 			// `firstEventTimeoutMs`/`AbortSignal` already govern stuck requests.

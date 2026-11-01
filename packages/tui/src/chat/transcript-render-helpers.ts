@@ -7,7 +7,7 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { type Component } from "../tui";
-import { formatBytes, formatCount, formatDuration } from "@oh-my-pi/pi-utils";
+import { formatBytes, formatCount, formatDuration, withRetryWait } from "@oh-my-pi/pi-utils";
 import { span } from "../native/describe";
 import type { JobSnapshot } from "../tools/wait";
 import type { DaemonSnapshot } from "../tools/daemon";
@@ -306,7 +306,16 @@ export function normalizeToolArgs(args: unknown): Record<string, unknown> {
 
 export type AssistantErrorPresentation =
 	| { kind: "none" }
-	| { kind: "full"; text: string; isError: true }
+	| {
+			kind: "full";
+			/** What a person reads: `body`, then the server's retry wait. */
+			text: string;
+			/** `text` without the wait: a display that cuts the error cuts this, then adds the wait back. */
+			body: string;
+			/** The server's retry wait in ms (`errorRetryAfterMs`); absent renders none. */
+			retryAfterMs?: number;
+			isError: true;
+	  }
 	| { kind: "compact-recovered"; text: string; isError: false };
 
 function sanitizeRecoveredRetryNote(note: string): string {
@@ -319,6 +328,10 @@ function sanitizeRecoveredRetryNote(note: string): string {
  * Silent and user-interrupt aborts yield no label. Recovered retry attempts
  * render a compact note; attempts superseded by an exhausted budget are hidden
  * while the final terminal error keeps its full presentation.
+ *
+ * A provider error's `text` is its `body` with the server's retry wait rendered
+ * from `errorRetryAfterMs` (none when the field is absent). It is display text:
+ * never classify, compare or store it back into the message.
  */
 export function resolveAssistantErrorPresentation(
 	message: AssistantAgentMessage,
@@ -334,13 +347,13 @@ export function resolveAssistantErrorPresentation(
 	}
 	if (message.stopReason === "aborted") {
 		if (!shouldRenderAbortReason(message)) return { kind: "none" };
-		return { kind: "full", text: resolveAbortLabel(message, retryAttempt), isError: true };
+		const label = resolveAbortLabel(message, retryAttempt);
+		return { kind: "full", text: label, body: label, isError: true };
 	}
-	if (message.stopReason === "error") {
-		return { kind: "full", text: message.errorMessage || "Error", isError: true };
-	}
-	if (message.errorMessage && shouldRenderAbortReason(message)) {
-		return { kind: "full", text: message.errorMessage, isError: true };
+	if (message.stopReason === "error" || (message.errorMessage && shouldRenderAbortReason(message))) {
+		const body = message.errorMessage || "Error";
+		const retryAfterMs = message.errorRetryAfterMs;
+		return { kind: "full", text: withRetryWait(body, retryAfterMs), body, retryAfterMs, isError: true };
 	}
 	return { kind: "none" };
 }

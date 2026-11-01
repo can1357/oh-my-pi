@@ -21,6 +21,7 @@
  *   with up to 25% jitter).
  */
 import { scheduler } from "node:timers/promises";
+import { parseRetryAfter } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { AnthropicApiError, AnthropicConnectionError, AnthropicConnectionTimeoutError } from "../error";
 
@@ -110,7 +111,7 @@ function shouldRetryResponse(response: Response): boolean {
 	return AIError.isTransientStatus(status) || status === 409;
 }
 
-/** Server-suggested delay (`retry-after-ms`, then `retry-after` seconds or HTTP date). */
+/** Server-suggested delay (`retry-after-ms`, then `retry-after` read by the shared `parseRetryAfter`). */
 export function retryDelayFromHeaders(headers: Pick<Headers, "get"> | undefined): number | undefined {
 	if (!headers) return undefined;
 	const retryAfterMs = headers.get("retry-after-ms");
@@ -119,13 +120,7 @@ export function retryDelayFromHeaders(headers: Pick<Headers, "get"> | undefined)
 		if (Number.isFinite(ms) && ms >= 0) return ms;
 	}
 	const retryAfter = headers.get("retry-after");
-	if (retryAfter) {
-		const seconds = Number.parseFloat(retryAfter);
-		if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
-		const dateMs = Date.parse(retryAfter) - Date.now();
-		if (Number.isFinite(dateMs) && dateMs >= 0) return dateMs;
-	}
-	return undefined;
+	return retryAfter ? parseRetryAfter(retryAfter) : undefined;
 }
 
 export function calculateAnthropicRetryDelayMs(attempt: number): number {

@@ -4,6 +4,7 @@
  * Handles /mcp subcommands for managing MCP servers.
  */
 import { type Component, replaceTabs, Spacer, Text } from "@oh-my-pi/pi-tui";
+import { errorText } from "@oh-my-pi/pi-ai/utils/retry-wait-display";
 import { getMCPConfigPath, getProjectDir } from "@oh-my-pi/pi-utils";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
@@ -631,9 +632,7 @@ export class MCPCommandController {
 					await this.#handleTestConnection(finalConfig);
 				} catch (error) {
 					if (parsed.hasAuthToken) {
-						this.ctx.showError(
-							`Authentication failed for "${parsed.initialName}": ${error instanceof Error ? error.message : String(error)}`,
-						);
+						this.ctx.showError(`Authentication failed for "${parsed.initialName}": ${errorText(error)}`);
 						return;
 					}
 					const authResult = analyzeAuthError(error as Error, finalConfig.url);
@@ -705,9 +704,7 @@ export class MCPCommandController {
 								this.ctx.showStatus(`Add cancelled for "${parsed.initialName}"`);
 								return;
 							}
-							this.ctx.showError(
-								`OAuth flow failed for "${parsed.initialName}": ${oauthError instanceof Error ? oauthError.message : String(oauthError)}`,
-							);
+							this.ctx.showError(`OAuth flow failed for "${parsed.initialName}": ${errorText(oauthError)}`);
 							return;
 						}
 					}
@@ -1092,7 +1089,7 @@ export class MCPCommandController {
 				helpText = `\n\nTip: Use ${theme.fg("accent", "/mcp list")} to see existing servers.`;
 			}
 
-			this.ctx.showError(`Failed to add server: ${errorMsg}${helpText}`);
+			this.ctx.showError(`Failed to add server: ${errorText(error)}${helpText}`);
 		}
 	}
 
@@ -1242,7 +1239,7 @@ export class MCPCommandController {
 			}
 			this.#showReport("Configured MCP Servers", lines.join("\n"));
 		} catch (error) {
-			this.ctx.showError(`Failed to list servers: ${error instanceof Error ? error.message : String(error)}`);
+			this.ctx.showError(`Failed to list servers: ${errorText(error)}`);
 		}
 	}
 
@@ -1288,7 +1285,7 @@ export class MCPCommandController {
 
 			this.#showMessage(["", theme.fg("success", `- Removed server "${name}" from ${scope} config`), ""].join("\n"));
 		} catch (error) {
-			this.ctx.showError(`Failed to remove server: ${error instanceof Error ? error.message : String(error)}`);
+			this.ctx.showError(`Failed to remove server: ${errorText(error)}`);
 		}
 	}
 
@@ -1449,7 +1446,7 @@ export class MCPCommandController {
 			}
 
 			settleNote = `Connection test for "${name}" failed.`;
-			this.ctx.showError(`Failed to connect to "${name}": ${errorMsg}${helpText}`);
+			this.ctx.showError(`Failed to connect to "${name}": ${errorText(error)}${helpText}`);
 		} finally {
 			settled = true;
 			if (hintShown) {
@@ -1576,9 +1573,7 @@ export class MCPCommandController {
 			lines.push("");
 			this.#showMessage(lines.join("\n"));
 		} catch (error) {
-			this.ctx.showError(
-				`Failed to ${enabled ? "enable" : "disable"} server: ${error instanceof Error ? error.message : String(error)}`,
-			);
+			this.ctx.showError(`Failed to ${enabled ? "enable" : "disable"} server: ${errorText(error)}`);
 		}
 	}
 
@@ -1636,7 +1631,7 @@ export class MCPCommandController {
 				["", theme.fg("success", `- Cleared auth for "${name}" (${found.scope} config)`), ""].join("\n"),
 			);
 		} catch (error) {
-			this.ctx.showError(`Failed to clear auth: ${error instanceof Error ? error.message : String(error)}`);
+			this.ctx.showError(`Failed to clear auth: ${errorText(error)}`);
 		}
 	}
 
@@ -1725,9 +1720,7 @@ export class MCPCommandController {
 				return;
 			}
 			if (!options.silent) {
-				this.ctx.showError(
-					`Failed to reauthorize server: ${error instanceof Error ? error.message : String(error)}`,
-				);
+				this.ctx.showError(`Failed to reauthorize server: ${errorText(error)}`);
 			}
 		}
 	}
@@ -1750,7 +1743,7 @@ export class MCPCommandController {
 				].join("\n"),
 			);
 		} catch (error) {
-			this.ctx.showError(`Failed to reload MCP: ${error instanceof Error ? error.message : String(error)}`);
+			this.ctx.showError(`Failed to reload MCP: ${errorText(error)}`);
 		}
 	}
 
@@ -1789,9 +1782,7 @@ export class MCPCommandController {
 				this.ctx.showError(`Failed to reconnect to "${name}". Check server status and logs.`);
 			}
 		} catch (error) {
-			this.ctx.showError(
-				`Failed to reconnect to "${name}": ${error instanceof Error ? error.message : String(error)}`,
-			);
+			this.ctx.showError(`Failed to reconnect to "${name}": ${errorText(error)}`);
 		}
 	}
 
@@ -2032,9 +2023,7 @@ export class MCPCommandController {
 				await this.#validateSmitheryApiKey(apiKey);
 				return apiKey;
 			} catch (error) {
-				this.ctx.showError(
-					`Smithery API key validation failed: ${error instanceof Error ? error.message : String(error)}`,
-				);
+				this.ctx.showError(`Smithery API key validation failed: ${errorText(error)}`);
 			}
 		}
 	}
@@ -2117,9 +2106,7 @@ export class MCPCommandController {
 		try {
 			return await this.#handleSmitheryBrowserLogin();
 		} catch (error) {
-			this.ctx.showWarning(
-				`Browser authorization failed: ${error instanceof Error ? error.message : String(error)}. Falling back to API key.`,
-			);
+			this.ctx.showWarning(`Browser authorization failed: ${errorText(error)}. Falling back to API key.`);
 			return await this.#handleSmitheryLoginWithApiKey();
 		}
 	}
@@ -2322,10 +2309,10 @@ export class MCPCommandController {
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			if (/authentication was cancelled|login cancelled/i.test(message)) {
-				this.ctx.showError(`${message} Run /mcp smithery-login to authenticate first.`);
+				this.ctx.showError(`${errorText(error)} Run /mcp smithery-login to authenticate first.`);
 				return;
 			}
-			this.ctx.showError(`Smithery search failed: ${message}`);
+			this.ctx.showError(`Smithery search failed: ${errorText(error)}`);
 		}
 	}
 

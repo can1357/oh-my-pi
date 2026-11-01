@@ -30,6 +30,8 @@ export interface RunErrorPayload {
 	stack?: string;
 	isAbort?: boolean;
 	isToolError?: boolean;
+	/** The server's retry wait (ms) the error carried in its headers; `message` never carries it. */
+	retryAfterMs?: number;
 }
 
 export type ToolReply = { ok: true; value: unknown } | { ok: false; error: RunErrorPayload };

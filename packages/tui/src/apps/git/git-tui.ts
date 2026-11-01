@@ -27,6 +27,7 @@
  * on a clean tree, which shows the HEAD commit instead of a change list.
  */
 
+import { errorText } from "@oh-my-pi/pi-ai/utils/retry-wait-display";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { formatKeyHint, formatKeyHints, formatTooltipKey } from "../../app-keybindings";
 import { SplitPane } from "../../components/layout/split-pane";
@@ -573,8 +574,7 @@ class GitTuiComponent implements Component {
 	}
 	/** Persistent single-line error status; provider/git messages may span lines. */
 	#setError(error: unknown): void {
-		const message = error instanceof Error ? error.message : String(error);
-		this.#setStatus("error", message.replace(/\s+/g, " ").trim());
+		this.#setStatus("error", errorText(error).replace(/\s+/g, " ").trim());
 		this.#statusSticky = true;
 	}
 

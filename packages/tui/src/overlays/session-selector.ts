@@ -14,6 +14,7 @@ import {
 	visibleWidth,
 } from "../index";
 import * as path from "node:path";
+import { errorText } from "@oh-my-pi/pi-ai/utils/retry-wait-display";
 import { formatBytes, getProjectDir } from "@oh-my-pi/pi-utils";
 import type { TspPickerGroup, TspPickerItem, TspSpan, TspText, TspTone } from "@oh-my-pi/pi-wire";
 import { compact, kv, md, node, span } from "../native/describe";
@@ -1657,7 +1658,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 				try {
 					global = await this.#loadAllSessions();
 				} catch (err) {
-					this.#showError(err instanceof Error ? err.message : String(err));
+					this.#showError(errorText(err));
 					this.#toggling = false;
 					this.#onRequestRender?.();
 					return;
@@ -1738,7 +1739,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 						}
 					}
 				} catch (err) {
-					this.#showError(err instanceof Error ? err.message : String(err));
+					this.#showError(errorText(err));
 				}
 			}
 			closeDialog();
@@ -1834,7 +1835,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 					this.#showError("Failed to rename session.");
 				}
 			} catch (err) {
-				this.#showError(err instanceof Error ? err.message : String(err));
+				this.#showError(errorText(err));
 			} finally {
 				pending = false;
 			}
@@ -1901,7 +1902,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 			await this.#onSetPinned(session, pinned);
 			this.#sessionList.setPinned(session.id, pinned);
 		} catch (err) {
-			this.#showError(err instanceof Error ? err.message : String(err));
+			this.#showError(errorText(err));
 		}
 		this.#onRequestRender?.();
 	}

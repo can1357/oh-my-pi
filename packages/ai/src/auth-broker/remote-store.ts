@@ -9,6 +9,7 @@
  */
 import * as os from "node:os";
 import { getAppName, getInstallId, logger, postmortem } from "@oh-my-pi/pi-utils";
+import { MAX_HINTED_BLOCK_MS } from "../auth/blocks";
 import type { AuthCredentialStore } from "../auth/store";
 import {
 	type AuthCredential,
@@ -344,6 +345,10 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	#deletedCredentialBlocks: Map<string, CredentialBlockSnapshot> = new Map();
 	/** Local block writes not yet reflected by the broker; see {@link #pendingBlocksFor}. */
 	#pendingCredentialBlocks: Map<string, CredentialBlockSnapshot> = new Map();
+	/** First sighting of each block deadline a snapshot carried without `updatedAtMs`; see {@link #boundedSnapshotBlockUntil}. */
+	#unstampedBlockFirstSeen: Map<string, { blockedUntilMs: number; seenAtMs: number }> = new Map();
+	/** Rows whose broker repair is in flight; see {@link #repairBrokerBlock}. */
+	#repairingBrokerBlocks: Set<string> = new Set();
 	#usageCacheEpoch = 0;
 	/** Raw broker credentials retained to size aggregate usage requests before account-pool filtering. */
 	#brokerUsageProviderByCredentialId = new Map<number, Provider>();
@@ -889,6 +894,9 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 
 	cleanExpiredCredentialBlocks(nowMs: number): void {
 		this.#pruneExpiredCredentialBlocks(nowMs);
+		for (const [key, seen] of this.#unstampedBlockFirstSeen) {
+			if (seen.seenAtMs + MAX_HINTED_BLOCK_MS <= nowMs) this.#unstampedBlockFirstSeen.delete(key);
+		}
 		for (const [key, block] of this.#deletedCredentialBlocks) {
 			if (block.blockedUntilMs <= nowMs) this.#deletedCredentialBlocks.delete(key);
 		}
@@ -1097,6 +1105,12 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 			...pending,
 		];
 		const blocks = merged
+			.map(block => ({
+				providerKey: block.providerKey,
+				blockScope: block.blockScope,
+				blockedUntilMs: this.#boundedSnapshotBlockUntil(entry.id, block, nowMs),
+				...(block.updatedAtMs !== undefined ? { updatedAtMs: block.updatedAtMs } : {}),
+			}))
 			.filter(block => {
 				if (block.blockedUntilMs <= nowMs) return false;
 				const deleted = this.#deletedCredentialBlocks.get(blockKey(entry.id, block));
@@ -1107,17 +1121,63 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 					!deleted || deleted.blockedUntilMs !== block.blockedUntilMs || deleted.updatedAtMs !== block.updatedAtMs
 				);
 			})
-			.map(block => ({
-				providerKey: block.providerKey,
-				blockScope: block.blockScope,
-				blockedUntilMs: block.blockedUntilMs,
-				...(block.updatedAtMs !== undefined ? { updatedAtMs: block.updatedAtMs } : {}),
-			}))
 			.sort(compareCredentialBlockSnapshots);
 		if (blocks.length > 0) return { ...entry, blocks };
 		const next: SnapshotEntry = { ...entry };
 		delete next.blocks;
 		return next;
+	}
+
+	/**
+	 * `block`'s deadline, at most `MAX_HINTED_BLOCK_MS` after the broker wrote
+	 * it — the bound the local store applies to its own rows. A broker, or a
+	 * cached snapshot, from before the ceiling can hold any deadline. A row
+	 * without `updatedAtMs` is bounded from when this process first saw that
+	 * deadline, so later snapshots do not move its bound. A deadline past its
+	 * bound is also repaired on the broker ({@link #repairBrokerBlock}).
+	 */
+	#boundedSnapshotBlockUntil(credentialId: number, block: CredentialBlockSnapshot, nowMs: number): number {
+		const key = blockKey(credentialId, block);
+		let writtenAtMs = block.updatedAtMs;
+		if (writtenAtMs === undefined) {
+			const seen = this.#unstampedBlockFirstSeen.get(key);
+			writtenAtMs = seen && seen.blockedUntilMs === block.blockedUntilMs ? seen.seenAtMs : nowMs;
+			this.#unstampedBlockFirstSeen.set(key, { blockedUntilMs: block.blockedUntilMs, seenAtMs: writtenAtMs });
+		}
+		const boundMs = writtenAtMs + MAX_HINTED_BLOCK_MS;
+		if (block.blockedUntilMs <= boundMs) return block.blockedUntilMs;
+		this.#repairBrokerBlock(credentialId, block, boundMs);
+		return boundMs;
+	}
+
+	/**
+	 * Store `boundMs` on the broker in place of `block`'s longer deadline, so
+	 * every client of the broker, older ones included, reads a fixed deadline
+	 * that expires. An upsert alone is longest-wins on the broker and would keep
+	 * the old deadline, so the row is deleted first; a bound already past is
+	 * only deleted. One repair per row at a time.
+	 */
+	#repairBrokerBlock(credentialId: number, block: CredentialBlockSnapshot, boundMs: number): void {
+		const key = blockKey(credentialId, block);
+		if (this.#repairingBrokerBlocks.has(key)) return;
+		this.#repairingBrokerBlocks.add(key);
+		const target = { providerKey: block.providerKey, blockScope: block.blockScope };
+		void this.#client
+			.deleteCredentialBlock(credentialId, target)
+			.then(() =>
+				boundMs > Date.now()
+					? this.#client.upsertCredentialBlock(credentialId, { ...target, blockedUntilMs: boundMs })
+					: undefined,
+			)
+			.then(() => this.#maybeRefreshSnapshot("credential block repair"))
+			.catch(error => {
+				logger.warn("auth-broker credential block repair failed", {
+					id: credentialId,
+					...target,
+					error: String(error),
+				});
+			})
+			.finally(() => this.#repairingBrokerBlocks.delete(key));
 	}
 
 	/**

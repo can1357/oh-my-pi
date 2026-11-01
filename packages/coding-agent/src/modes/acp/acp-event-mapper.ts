@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import { assistantErrorText } from "@oh-my-pi/pi-ai/utils/retry-wait-display";
 import type {
 	SessionNotification,
 	SessionUpdate,
@@ -330,15 +331,18 @@ function mapAssistantMessageUpdate(
 				progress.textEmitted = true;
 			}
 			break;
-		case "error":
+		case "error": {
 			sessionUpdate = "agent_message_chunk";
-			text = event.assistantMessageEvent.error.errorMessage ?? "Unknown error";
+			// An empty error text sends nothing; a missing one reads "Unknown error".
+			const error = event.assistantMessageEvent.error;
+			text = error.errorMessage === "" ? "" : assistantErrorText(error, "Unknown error");
 			// The surfaced error is the message's visible text: keeps the
 			// message_end / agent_end fallbacks from emitting again.
 			if (text.length > 0 && progress) {
 				progress.textEmitted = true;
 			}
 			break;
+		}
 		default:
 			return [];
 	}

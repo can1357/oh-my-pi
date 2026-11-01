@@ -193,6 +193,67 @@ describe("RpcPromptResults", () => {
 		]);
 	});
 
+	test("reports a failure's retry wait as a number, never in its message", async () => {
+		const { frames, session, results } = createHarness();
+		session.isStreaming = true;
+		results.settle(results.begin("req_wait"));
+		results.observe(
+			agentEnd([
+				assistant({
+					stopReason: "error",
+					errorStatus: 429,
+					errorMessage: "429 rate_limit_error: slow down",
+					errorRetryAfterMs: 9000,
+				}),
+			]),
+		);
+		// A message persisted before the wait was structured: its old text is
+		// reported as it is, and no wait is read out of it.
+		results.settle(results.begin("req_old"));
+		results.observe(
+			agentEnd([
+				assistant({
+					stopReason: "error",
+					errorStatus: 429,
+					errorMessage: "429 rate_limit_error: slow down retry-after-ms=9000",
+				}),
+			]),
+		);
+		await flushFrames();
+
+		expect(frames).toEqual([
+			{
+				type: "prompt_result",
+				id: "req_wait",
+				agentInvoked: true,
+				status: "error",
+				sessionSettled: false,
+				error: {
+					message: "429 rate_limit_error: slow down",
+					provider: "anthropic",
+					model: "claude-sonnet-4-5",
+					httpStatus: 429,
+					retryAfterMs: 9000,
+					retryable: true,
+				},
+			},
+			{
+				type: "prompt_result",
+				id: "req_old",
+				agentInvoked: true,
+				status: "error",
+				sessionSettled: false,
+				error: {
+					message: "429 rate_limit_error: slow down retry-after-ms=9000",
+					provider: "anthropic",
+					model: "claude-sonnet-4-5",
+					httpStatus: 429,
+					retryable: true,
+				},
+			},
+		]);
+	});
+
 	test("reports an interrupted prompt's own aborted run, not the replacement run still streaming", async () => {
 		const { frames, session, results } = createHarness();
 		const interrupted = results.begin("req_old");

@@ -11,6 +11,7 @@
 import {
 	type AssistantMessage,
 	type AssistantMessageEventStream,
+	assistantTurnError,
 	type AuthStorage,
 	type Context,
 	type FetchImpl,
@@ -488,9 +489,11 @@ async function drainAssistantStream(stream: AssistantMessageEventStream): Promis
 function throwPerplexityStreamError(message: AssistantMessage): never {
 	const status = message.errorStatus ?? 500;
 	const details = message.errorMessage ?? "Perplexity API stream failed";
-	const classified = classifyProviderHttpError("perplexity", status, details);
-	if (classified) throw classified;
-	throw new SearchProviderError("perplexity", `Perplexity API error (${status}): ${details}`, status);
+	const error =
+		classifyProviderHttpError("perplexity", status, details) ??
+		new SearchProviderError("perplexity", `Perplexity API error (${status}): ${details}`, status);
+	// The failed turn rides as the cause, so the server's wait stays structured (`retryAfterMsOf`).
+	throw Object.assign(error, { cause: assistantTurnError(message, details) });
 }
 
 /** Call the Perplexity API-key endpoint through the shared OpenAI streaming providers. */

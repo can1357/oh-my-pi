@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `longestRetryHint`, the longest wait a response names across every retry header and every hint in its body ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- Added a `retryGate` option to `fetchWithRetry` that can refuse a retry before its wait and again just before it is sent ([#17643](https://github.com/can1357/oh-my-pi/pull/17643) by [@sjawhar](https://github.com/sjawhar))
+- Added `RetryRefusedError` and `findRetryRefusal` for a transport that refuses a retry at handoff ([#17643](https://github.com/can1357/oh-my-pi/pull/17643) by [@sjawhar](https://github.com/sjawhar))
+- Added `parseRetryAfter`, the one reading of a `Retry-After` value; `parseRetryDateMs` now reads RFC 9110 dates field by field instead of with `Date.parse` ([#17643](https://github.com/can1357/oh-my-pi/pull/17643) by [@sjawhar](https://github.com/sjawhar))
+- Added `parseRetryAfterHeaderMs`, the wait one `retry-after-ms` or `Retry-After` header value states, as every retry-hint reader now reads it ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+
+### Fixed
+
+- `extractRetryHint` and `longestRetryHint` read a `Retry-After` date with no zone as GMT, as an HTTP-date is, instead of in this machine's zone, and read no wait from a date with no zone in a message body (`reset at 2026-11-01 01:40:17`, `将在 … 重置`, `retry-after: 2026-11-01T01:40:17`) unless the provider declares the zone its stamps use; read as UTC, such a date once gave eight hours where the server's header said 750 ms. The new `excludeDates` option reads only a body's relative waits, for a caller that already has the header's wait ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- Fixed `extractRetryHint` misreading `Retry-After` dates (two-digit years, leap seconds, impossible dates, dates in error text); it now uses `parseRetryAfter` ([#17643](https://github.com/can1357/oh-my-pi/pull/17643) by [@sjawhar](https://github.com/sjawhar))
+- `fetchWithRetry` and `extractRetryHint` read a `Retry-After` or `retry-after-ms` header sent twice (`9, 120`) at its longest value; before, it read as no wait and the request was retried after 500 ms ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.14.2] - 2026-10-31
 
 ### Added

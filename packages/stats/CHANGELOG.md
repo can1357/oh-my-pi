@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the server's retry wait to failed requests: a new `error_retry_after_ms` column, shown beside the error in the errors and requests views ([#17643](https://github.com/can1357/oh-my-pi/pull/17643) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.14.2] - 2026-10-31
 
 ### Added

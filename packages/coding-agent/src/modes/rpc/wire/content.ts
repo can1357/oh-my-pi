@@ -116,6 +116,10 @@ export const messageDefs = {
 		usage: "Usage",
 		stopReason: "StopReason",
 		"errorMessage?": "string",
+		"errorRetryAfterMs?": doc(
+			"number",
+			"The failed response's retry wait in milliseconds, from its headers. `errorMessage` never carries it.",
+		),
 		"errorStatus?": "number.integer",
 		"errorId?": "number",
 		"providerPayload?": JSON_OBJECT,

@@ -8,9 +8,18 @@ import * as fs from "node:fs/promises";
 import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { AgentBusyError, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
-import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
+import { type Api, errorText, type Model, type ServiceTierByFamily, type Usage } from "@oh-my-pi/pi-ai";
 import { isCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
-import { isRecord, logger, popLoopPhase, prompt, pushLoopPhase, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
+import {
+	isRecord,
+	logger,
+	popLoopPhase,
+	prompt,
+	pushLoopPhase,
+	sanitizeText,
+	untilAborted,
+	withRetryWait,
+} from "@oh-my-pi/pi-utils";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobError, AsyncJobManager, type AsyncJobRunResult } from "../async";
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
@@ -1013,7 +1022,7 @@ export function createMCPProxyTools(mcpManager: MCPManager): CustomTool[] {
 						content: [
 							{
 								type: "text" as const,
-								text: `MCP error: ${error instanceof Error ? error.message : String(error)}`,
+								text: `MCP error: ${errorText(error)}`,
 							},
 						],
 						details: { serverName, mcpToolName, isError: true },
@@ -2241,6 +2250,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 					maxAttempts: event.maxAttempts,
 					delayMs: event.delayMs,
 					errorMessage: event.errorMessage,
+					retryAfterMs: event.retryAfterMs,
 					startedAtMs: Date.now(),
 				};
 				progress.retryFailure = undefined;
@@ -2254,6 +2264,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 					progress.retryFailure = {
 						attempt,
 						errorMessage: event.finalError ?? "Auto-retry failed",
+						retryAfterMs: event.finalRetryAfterMs,
 					};
 				}
 				scheduleProgress(true);
@@ -2404,6 +2415,8 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 interface DriveOutcome {
 	exitCode: number;
 	error?: string;
+	/** The server's retry wait (ms) the provider error in `error` stated; set only when `error` is that provider error. */
+	errorRetryAfterMs?: number;
 	aborted: boolean;
 	abortReasonText?: string;
 }
@@ -2459,6 +2472,7 @@ async function driveSessionToResult(
 	const abortSignal = monitor.abortSignal;
 	let exitCode = 0;
 	let error: string | undefined;
+	let errorRetryAfterMs: number | undefined;
 	let aborted = false;
 	let abortReasonText: string | undefined;
 	const checkAbort = () => {
@@ -2732,7 +2746,10 @@ async function driveSessionToResult(
 				}
 			} else if (lastAssistant.stopReason === "error") {
 				exitCode = 1;
-				error ??= attributeSubagentError(lastAssistant.errorMessage, lastAssistant);
+				if (error === undefined) {
+					error = attributeSubagentError(lastAssistant.errorMessage, lastAssistant);
+					errorRetryAfterMs = lastAssistant.errorRetryAfterMs;
+				}
 			}
 		}
 
@@ -2764,6 +2781,7 @@ async function driveSessionToResult(
 			exitCode = 1;
 			if (!abortSignal.aborted) {
 				error = err instanceof Error ? err.stack || err.message : String(err);
+				errorRetryAfterMs = undefined;
 			}
 		}
 	} finally {
@@ -2777,12 +2795,20 @@ async function driveSessionToResult(
 		}
 	}
 
-	return { exitCode, error, aborted, abortReasonText };
+	return { exitCode, error, errorRetryAfterMs, aborted, abortReasonText };
 }
 
 interface FinalizeRunArgs {
 	monitor: SubagentRunMonitor;
-	done: { exitCode: number; error?: string; aborted?: boolean; abortReason?: string; durationMs: number };
+	done: {
+		exitCode: number;
+		error?: string;
+		/** The server's retry wait (ms) the provider error in `error` stated. */
+		errorRetryAfterMs?: number;
+		aborted?: boolean;
+		abortReason?: string;
+		durationMs: number;
+	};
 	index: number;
 	id: string;
 	agent: AgentDefinition;
@@ -2995,6 +3021,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	};
 	emitSubagentFrame(args.eventBus, args.subagentEventBus, TASK_SUBAGENT_LIFECYCLE_CHANNEL, settledPayload);
 
+	const error = exitCode !== 0 && stderr ? stderr : undefined;
 	return {
 		index,
 		id,
@@ -3022,7 +3049,12 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		resolvedModelIsFallback: progress.resolvedModelIsFallback,
 		resolvedModelRoute: progress.resolvedModelRoute,
 		advisor: progress.advisor,
-		error: exitCode !== 0 && stderr ? stderr : undefined,
+		error,
+		// The wait belongs to the provider error the run ended on; an error
+		// finalization replaced (schema violation, missing yield) states none.
+		...(error !== undefined && error === done.error && done.errorRetryAfterMs !== undefined
+			? { errorRetryAfterMs: done.errorRetryAfterMs }
+			: {}),
 		aborted: wasAborted,
 		abortReason: finalAbortReason,
 		usage: monitor.hasUsage() ? monitor.accumulatedUsage : undefined,
@@ -3111,6 +3143,8 @@ async function relayWakeTurnOutput(args: {
 	turnText: string;
 	/** Short, attributed peer-visible error text (no stack) when the turn died on an error. */
 	error: string | undefined;
+	/** The server's retry wait (ms) the provider error in `error` stated; rendered into the relay text. */
+	errorRetryAfterMs?: number;
 	/** Whether the turn was aborted (runtime limit, cancellation, hard abort). */
 	aborted: boolean;
 	/** Reason text for an aborted turn, from {@link SubagentRunMonitor.resolveAbortReasonText}. */
@@ -3175,6 +3209,8 @@ export function buildWakeRelayBody(args: {
 	result: SingleResult | undefined;
 	turnText: string;
 	error: string | undefined;
+	/** The server's retry wait (ms) the provider error in `error` stated; rendered into the relay text. */
+	errorRetryAfterMs?: number;
 	aborted: boolean;
 	abortReason: string | undefined;
 	finalizeError: unknown;
@@ -3189,7 +3225,7 @@ export function buildWakeRelayBody(args: {
 			: undefined;
 
 	const headline = args.error
-		? `Wake turn failed: ${args.error}.`
+		? `Wake turn failed: ${withRetryWait(args.error, args.errorRetryAfterMs)}.`
 		: args.aborted
 			? `Wake turn was cancelled${args.abortReason?.trim() ? `: ${args.abortReason.trim()}` : ""}.`
 			: undefined;
@@ -3404,6 +3440,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			const errorForPeer =
 				providerError ??
 				(thrown instanceof Error ? thrown.message : thrown === undefined ? undefined : String(thrown));
+			const providerErrorRetryAfterMs = providerError === undefined ? undefined : lastAssistant?.errorRetryAfterMs;
 			turnMonitor.finish();
 			if (yielded) {
 				// Acceptance boundary for an autonomous wake turn (#11079): the
@@ -3429,6 +3466,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					done: {
 						exitCode: aborted || error ? 1 : 0,
 						error,
+						errorRetryAfterMs: providerErrorRetryAfterMs,
 						aborted,
 						abortReason,
 						durationMs: Date.now() - turnStartTime,
@@ -3501,7 +3539,12 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					const message = finalizeError instanceof Error ? finalizeError.message : String(finalizeError);
 					wakeJob.outcome.reject(new Error(`Wake turn of ${id} failed to finalize: ${message}`));
 				} else if (wakeJob) {
-					const outcome = { error: errorForPeer, aborted, finalizeError };
+					const outcome = {
+						error: errorForPeer,
+						errorRetryAfterMs: providerErrorRetryAfterMs,
+						aborted,
+						finalizeError,
+					};
 					const text = buildWakeRelayBody({
 						...outcome,
 						id,
@@ -3526,6 +3569,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 						result,
 						turnText,
 						error: errorForPeer,
+						errorRetryAfterMs: providerErrorRetryAfterMs,
 						aborted,
 						abortReason,
 						finalizeError,
@@ -4466,6 +4510,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	const runSubagent = async (): Promise<{
 		exitCode: number;
 		error?: string;
+		errorRetryAfterMs?: number;
 		aborted?: boolean;
 		abortReason?: string;
 		durationMs: number;
@@ -4474,6 +4519,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		const abortSignal = monitor.abortSignal;
 		let exitCode = 0;
 		let error: string | undefined;
+		let errorRetryAfterMs: number | undefined;
 		let aborted = false;
 		let abortReasonText: string | undefined;
 		const checkAbort = () => {
@@ -5101,6 +5147,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 			exitCode = outcome.exitCode;
 			error = outcome.error;
+			errorRetryAfterMs = outcome.errorRetryAfterMs;
 			aborted = outcome.aborted;
 			abortReasonText = outcome.abortReasonText;
 		} catch (err) {
@@ -5315,6 +5362,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		return {
 			exitCode,
 			error,
+			errorRetryAfterMs,
 			aborted,
 			abortReason: aborted ? abortReasonText : undefined,
 			durationMs: Date.now() - startTime,

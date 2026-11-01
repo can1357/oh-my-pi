@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import type { FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
+import { ReplayBudget } from "@oh-my-pi/pi-ai/utils/replay-budget";
 import {
 	resetRequestCompressionForTesting,
 	wrapFetchForRequestCompression,
@@ -71,6 +72,45 @@ const copilotRejection = () =>
 afterEach(() => resetRequestCompressionForTesting());
 
 describe("wrapFetchForRequestCompression", () => {
+	// The uncompressed resend is a second request inside one call: a caller's
+	// replay budget that it ignored would be spent without anyone above knowing.
+	it("returns the rejection instead of resending when the call's replay budget is spent", async () => {
+		const { calls, fetch } = captureFetch([anthropicRejection()]);
+		const budget = ReplayBudget.from(0);
+		const response = await wrapFetchForRequestCompression(fetch, anthropic, budget)(ANTHROPIC_URL, post());
+
+		expect(calls).toHaveLength(1);
+		expect(response.status).toBe(400);
+		expect(await response.text()).toContain("not valid gzip");
+	});
+
+	// A server that named a wait on the rejection is not resent to sooner.
+	it("returns the rejection when the server's named wait does not fit the budget", async () => {
+		const { calls, fetch } = captureFetch([
+			new Response(anthropicRejection().body, { status: 400, headers: { "retry-after": "30" } }),
+		]);
+		const response = await wrapFetchForRequestCompression(
+			fetch,
+			anthropic,
+			ReplayBudget.from(2_000),
+		)(ANTHROPIC_URL, post());
+
+		expect(calls).toHaveLength(1);
+		expect(response.status).toBe(400);
+	});
+
+	it("resends uncompressed when a budget is set and the rejection names no wait", async () => {
+		const { calls, fetch } = captureFetch([anthropicRejection()]);
+		const response = await wrapFetchForRequestCompression(
+			fetch,
+			anthropic,
+			ReplayBudget.from(60_000),
+		)(ANTHROPIC_URL, post());
+
+		expect(calls).toHaveLength(2);
+		expect(response.status).toBe(200);
+	});
+
 	it("gzips large bodies to the official Anthropic API without disturbing other headers", async () => {
 		const { calls, fetch } = captureFetch([]);
 		await wrapFetchForRequestCompression(fetch, anthropic)(ANTHROPIC_URL, post());

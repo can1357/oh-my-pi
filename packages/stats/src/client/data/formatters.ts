@@ -1,4 +1,5 @@
 import { format, formatDistanceToNow } from "@oh-my-pi/pi-utils/dates";
+import { withRetryWait } from "@oh-my-pi/pi-utils/format";
 import type { MessageStats } from "../types";
 
 /**
@@ -95,6 +96,15 @@ export function formatTimestamp(timestamp: number): string {
 /** Project folder as stored by ingest (`/work-pi/`), without the slashes. */
 export function formatFolder(folder: string): string {
 	return folder.replace(/^\/+|\/+$/g, "") || "(root)";
+}
+
+/**
+ * A failed request's error as a person reads it: the raw `errorMessage` plus
+ * the server's retry wait from its own column, rendered here and nowhere
+ * earlier. Grouping, search and sorting keep reading the raw text.
+ */
+export function formatRequestError(row: Pick<MessageStats, "errorMessage" | "errorRetryAfterMs">): string | null {
+	return row.errorMessage === null ? null : withRetryWait(row.errorMessage, row.errorRetryAfterMs ?? undefined);
 }
 
 export function formatBytes(value: number): string {

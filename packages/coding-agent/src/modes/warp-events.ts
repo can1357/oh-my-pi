@@ -6,6 +6,7 @@ import { wrapTmuxPassthrough } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { VERSION } from "@oh-my-pi/pi-utils/dirs";
 import type { ExtensionContext, ExtensionFactory } from "../extensibility/extensions/types";
 import { isSilentAbort, isUserInterruptAbort, SKILL_PROMPT_MESSAGE_TYPE } from "../session/messages";
+import { withRetryWait } from "@oh-my-pi/pi-utils";
 
 const WARP_CLI_AGENT_PROTOCOL_VERSION = 1;
 const WARP_CLI_AGENT_SENTINEL = "warp://cli-agent";
@@ -83,10 +84,16 @@ export function createWarpEventEmitter(options: WarpEventEmitterOptions): WarpEv
 }
 
 type LastAssistantStop = {
+	/** The answer text, or the failure's error text without its retry wait. */
 	response: string;
+	/** The failure's retry wait (`errorRetryAfterMs`) when `response` is its error text. */
+	retryAfterMs?: number;
 	event: "stop" | "stop_failure";
 	error_type?: "error" | "aborted";
 };
+
+/** Warp's cap on `query` and `response`, in Unicode code points. */
+const EVENT_TEXT_MAX_CODE_POINTS = 200;
 
 function lastAssistantStop(messages: readonly AgentMessage[]): LastAssistantStop {
 	for (let index = messages.length - 1; index >= 0; index--) {
@@ -99,21 +106,24 @@ function lastAssistantStop(messages: readonly AgentMessage[]): LastAssistantStop
 			.join("");
 
 		let response = "";
+		let retryAfterMs: number | undefined;
 		if (text.length > 0) {
 			response = text;
 		} else {
 			const errorMessage = message.errorMessage;
 			if (typeof errorMessage === "string" && errorMessage.length > 0 && !isSilentAbort(message)) {
-				if (message.stopReason === "error") {
+				if (
+					message.stopReason === "error" ||
+					(message.stopReason === "aborted" && !isUserInterruptAbort(message))
+				) {
 					response = errorMessage;
-				} else if (message.stopReason === "aborted" && !isUserInterruptAbort(message)) {
-					response = errorMessage;
+					retryAfterMs = message.errorRetryAfterMs;
 				}
 			}
 		}
 
 		if (message.stopReason === "error") {
-			return { response, event: "stop_failure", error_type: "error" };
+			return { response, retryAfterMs, event: "stop_failure", error_type: "error" };
 		}
 		if (
 			message.stopReason === "aborted" &&
@@ -122,22 +132,33 @@ function lastAssistantStop(messages: readonly AgentMessage[]): LastAssistantStop
 			typeof message.errorMessage === "string" &&
 			message.errorMessage.length > 0
 		) {
-			return { response, event: "stop_failure", error_type: "aborted" };
+			return { response, retryAfterMs, event: "stop_failure", error_type: "aborted" };
 		}
 		return { response, event: "stop" };
 	}
 	return { response: "", event: "stop" };
 }
 
-function truncateEventText(text: string): string {
+function truncateEventText(text: string, maxCodePoints = EVENT_TEXT_MAX_CODE_POINTS): string {
 	let end = 0;
 	let count = 0;
 	for (const codePoint of text) {
-		if (count === 200) break;
+		if (count === maxCodePoints) break;
 		end += codePoint.length;
 		count++;
 	}
 	return text.slice(0, end);
+}
+
+/**
+ * The stop's `response` for Warp, within the code-point cap. A failure's retry
+ * wait is display text rendered here; the error is cut first, to the cap minus
+ * the wait's length, so a long error keeps its wait.
+ */
+function stopResponse(stop: LastAssistantStop): string {
+	const waitLength =
+		Array.from(withRetryWait(stop.response, stop.retryAfterMs)).length - Array.from(stop.response).length;
+	return withRetryWait(truncateEventText(stop.response, EVENT_TEXT_MAX_CODE_POINTS - waitLength), stop.retryAfterMs);
 }
 
 function messageText(content: unknown): string {
@@ -226,7 +247,7 @@ export function createWarpEventBridgeExtension(): ExtensionFactory {
 			emitter?.emit({
 				event: stop.event,
 				query: activePrompt,
-				response: truncateEventText(stop.response),
+				response: stopResponse(stop),
 				...(stop.error_type !== undefined ? { error_type: stop.error_type } : {}),
 			});
 		});

@@ -67,6 +67,8 @@ import type {
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
 import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
+import { getHeadersFromError, getRetryAfterMsFromHeaders } from "@oh-my-pi/pi-ai/utils/retry-after";
+import { retryAfterMsOf } from "@oh-my-pi/pi-ai/utils/retry-wait-display";
 import { resolvePromptCacheLookback } from "@oh-my-pi/pi-catalog/compat/prompt-cache-lookback";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import type { CatalogPolicyInputs } from "@oh-my-pi/pi-catalog/types";
@@ -506,7 +508,11 @@ export interface SessionMaintenanceHost {
 		message: AssistantMessage,
 		options: { autoContinue: boolean; triggerContextTokens?: number; excludeMediaMethods?: boolean },
 	): Promise<CompactionCheckResult>;
-	parseRetryAfterMsFromError(errorMessage: string): number | undefined;
+	/**
+	 * The retry delay a failure names: the longer of the first wait its text
+	 * names and the failed response's header wait, passed structured.
+	 */
+	parseRetryAfterMsFromError(errorMessage: string, headerRetryAfterMs?: number): number | undefined;
 	setModelTemporary(
 		model: Model,
 		thinkingLevel?: ConfiguredThinkingLevel,
@@ -2006,6 +2012,7 @@ export class SessionMaintenance {
 					aborted: controller.signal.aborted,
 					willRetry: false,
 					errorMessage: error instanceof Error ? error.message : String(error),
+					retryAfterMs: retryAfterMsOf(error),
 				},
 				detachPostCommit,
 			);
@@ -3127,6 +3134,7 @@ export class SessionMaintenance {
 				provider: assistantMessage.provider,
 				model: assistantMessage.model,
 				message: assistantMessage.errorMessage,
+				retryAfterMs: assistantMessage.errorRetryAfterMs,
 				storedTokens,
 				contextWindow,
 			});
@@ -3209,6 +3217,7 @@ export class SessionMaintenance {
 						provider: assistantMessage.provider,
 						model: assistantMessage.model,
 						message: assistantMessage.errorMessage,
+						retryAfterMs: assistantMessage.errorRetryAfterMs,
 						storedTokens,
 						contextWindow,
 					});
@@ -3235,6 +3244,7 @@ export class SessionMaintenance {
 					provider: assistantMessage.provider,
 					model: assistantMessage.model,
 					message: assistantMessage.errorMessage,
+					retryAfterMs: assistantMessage.errorRetryAfterMs,
 					storedTokens,
 					contextWindow,
 				});
@@ -5677,7 +5687,13 @@ export class SessionMaintenance {
 								break;
 							}
 
-							const retryAfterMs = this.#host.parseRetryAfterMsFromError(message);
+							// The failed response's header wait rides on the thrown error's
+							// headers (a compaction failure carries its message's
+							// `errorRetryAfterMs` there); the text never stands in for it.
+							const retryAfterMs = this.#host.parseRetryAfterMsFromError(
+								message,
+								getRetryAfterMsFromHeaders(getHeadersFromError(error)),
+							);
 							// An input the summarizer cannot fit is deterministic: the same
 							// prompt fails identically every attempt, so the retry budget is
 							// pure latency and the next candidate (a larger window) is the
@@ -5909,6 +5925,7 @@ export class SessionMaintenance {
 						aborted: false,
 						willRetry: false,
 						errorMessage: `${contextErrorMessage}; trying the next preferred compaction method.`,
+						retryAfterMs: retryAfterMsOf(error),
 					},
 					options.detachPostCommit === true,
 				);
@@ -5925,6 +5942,7 @@ export class SessionMaintenance {
 					aborted: false,
 					willRetry: false,
 					errorMessage: contextErrorMessage,
+					retryAfterMs: retryAfterMsOf(error),
 				},
 				options.detachPostCommit === true,
 			);
@@ -6308,6 +6326,7 @@ export class SessionMaintenance {
 					aborted: false,
 					willRetry: false,
 					errorMessage: message,
+					retryAfterMs: retryAfterMsOf(error),
 					skipped: false,
 				},
 				detachPostCommit,

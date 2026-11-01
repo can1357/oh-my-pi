@@ -8,6 +8,7 @@ import {
 	tokenizeCredentialProcessCommand,
 } from "@oh-my-pi/pi-ai/providers/aws-credentials";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
+import { RetryRefusedError } from "@oh-my-pi/pi-utils";
 import { removeWithRetries } from "../../utils/src/temp";
 import { waitForDelayOrAbort } from "./helpers";
 
@@ -371,6 +372,54 @@ describe("resolveAwsCredentials", () => {
 		expect(credentials.sessionToken).toBe("imds-session");
 	});
 
+	// A call's replay budget can refuse the probe its fetch makes. That is not
+	// "no instance role": the call answers with the failure its replay replaced,
+	// and a call that was waiting on the shared resolution resolves on its own.
+	test("hands an IMDS probe's budget refusal to its own call and resolves again for a waiting call", async () => {
+		const credentialsPath = path.join(tmp, "empty-refused-imds-credentials");
+		const configPath = path.join(tmp, "empty-refused-imds-config");
+		await Promise.all([Bun.write(credentialsPath, ""), Bun.write(configPath, "")]);
+		Bun.env.AWS_SHARED_CREDENTIALS_FILE = credentialsPath;
+		Bun.env.AWS_CONFIG_FILE = configPath;
+		Bun.env.AWS_EC2_METADATA_DISABLED = "false";
+		Bun.env.AWS_EC2_METADATA_SERVICE_ENDPOINT = "http://imds.internal:8181/";
+		const replaced = new Error("503 original overload");
+		const refused: FetchImpl = Object.assign(
+			async () => {
+				throw new RetryRefusedError(replaced);
+			},
+			{ preconnect: fetch.preconnect },
+		);
+		let waiterRequests = 0;
+		const waiter: FetchImpl = Object.assign(
+			async (input: string | URL | Request) => {
+				waiterRequests++;
+				const url = String(input);
+				if (url.endsWith("/latest/api/token")) return new Response("imds-token");
+				if (url.endsWith("/latest/meta-data/iam/security-credentials/")) return new Response("test-role");
+				return Response.json({
+					AccessKeyId: "AKIAWAITER",
+					SecretAccessKey: "imds-secret",
+					Token: "imds-session",
+					Expiration: "2099-01-01T00:00:00Z",
+				});
+			},
+			{ preconnect: fetch.preconnect },
+		);
+
+		const owner = resolveAwsCredentials({ fetch: refused });
+		const joined = resolveAwsCredentials({ fetch: waiter });
+
+		const ownerError = await owner.then(
+			() => undefined,
+			(error: unknown) => error,
+		);
+		expect(ownerError).toBeInstanceOf(RetryRefusedError);
+		expect((ownerError as RetryRefusedError).replaced).toBe(replaced);
+		expect((await joined).accessKeyId).toBe("AKIAWAITER");
+		expect(waiterRequests).toBe(3);
+	});
+
 	test("uses the IPv6 IMDS endpoint when endpoint mode requests it", async () => {
 		const credentialsPath = path.join(tmp, "empty-ipv6-imds-credentials");
 		const configPath = path.join(tmp, "empty-ipv6-imds-config");
@@ -719,6 +768,26 @@ describe("resolveAwsCredentials SSO token refresh", () => {
 		expect(persisted.clientSecret).toBe("client-secret");
 		// No temp files left behind by the atomic rename.
 		expect((await fs.readdir(cacheDir)).filter(f => f.endsWith(".tmp"))).toEqual([]);
+	});
+
+	test("passes a budget refusal of the token refresh through instead of reading it as a failed refresh", async () => {
+		await writeSsoConfig();
+		await writeCachedToken(expiredToken());
+		const replaced = new Error("503 original overload");
+		const refused: FetchImpl = Object.assign(
+			async () => {
+				throw new RetryRefusedError(replaced);
+			},
+			{ preconnect: fetch.preconnect },
+		);
+
+		const error = await resolveAwsCredentials({ profile: "sso-test", fetch: refused }).then(
+			() => undefined,
+			(caught: unknown) => caught,
+		);
+
+		expect(error).toBeInstanceOf(RetryRefusedError);
+		expect((error as RetryRefusedError).replaced).toBe(replaced);
 	});
 
 	test("leaves a still-valid token alone", async () => {

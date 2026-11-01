@@ -34,6 +34,7 @@ import type {
 } from "../types";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
+import { inheritReplayBudget, withReplayBudget } from "../utils/replay-budget";
 import { type AnthropicOptions, shouldStripThinkingHistory } from "./anthropic";
 import { mapStainlessArch, mapStainlessOs } from "./anthropic-headers";
 import { createProviderErrorMessage } from "./error-message";
@@ -379,6 +380,7 @@ type ForwardedOptions = Pick<
 	| "providerRetryWait"
 	| "acceptEmptyResponse"
 	| "maxRetryDelayMs"
+	| "replayBudgetMs"
 	| "streamIdleTimeoutMs"
 	| "streamFirstEventTimeoutMs"
 	| "maxTokens"
@@ -719,6 +721,8 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 	options?: FactoryDroidOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
+	// The replay budget's clock starts at this call; every delegate inherits it.
+	if (options) options = withReplayBudget(options);
 
 	(async () => {
 		// Sole credential path: the OMP-stored WorkOS session from `/login
@@ -753,7 +757,8 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 					systemPrompt: [DROID_SYSTEM_PREFIX, ...systemPrompt],
 				},
 				options,
-				forwarded: {
+				// Every delegate spends this call's replay budget: same deadline, same arms.
+				forwarded: inheritReplayBudget(options, {
 					apiKey: harnessToken,
 					signal: options?.signal,
 					fetch: options?.fetch,
@@ -766,6 +771,7 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 					providerRetryWait: options?.providerRetryWait,
 					acceptEmptyResponse: options?.acceptEmptyResponse,
 					maxRetryDelayMs: options?.maxRetryDelayMs,
+					replayBudgetMs: options?.replayBudgetMs,
 					streamIdleTimeoutMs: options?.streamIdleTimeoutMs,
 					streamFirstEventTimeoutMs: options?.streamFirstEventTimeoutMs,
 					maxTokens: options?.maxTokens ?? scope.model.maxTokens ?? undefined,
@@ -787,7 +793,7 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 						}),
 						...options?.headers,
 					},
-				},
+				}),
 			};
 
 			for await (const event of streamWire(wire, attempt)) {

@@ -5,6 +5,7 @@ import * as AIError from "../error";
 import { ANTHROPIC_THINKING, mapAnthropicToolChoice } from "../stream";
 import type { Api, Context, FetchImpl, Model, ModelSpec, SimpleStreamOptions } from "../types";
 import { AssistantMessageEventStream } from "../utils/event-stream";
+import { inheritReplayBudget, withReplayBudget } from "../utils/replay-budget";
 import { createProviderErrorMessage } from "./error-message";
 import type { OpenAICompletionsOptions } from "./openai-completions";
 import type { OpenAIResponsesOptions } from "./openai-responses";
@@ -93,6 +94,9 @@ export function streamGitLabDuo(
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
 	const stream = new AssistantMessageEventStream();
+	// The replay budget's clock starts at this call, not after the token fetch
+	// below: the delegate inherits this one budget.
+	if (options) options = withReplayBudget(options);
 
 	(async () => {
 		try {
@@ -146,7 +150,7 @@ export function streamGitLabDuo(
 								compat: model.compatConfig,
 							} as ModelSpec<"anthropic-messages">),
 							context,
-							{
+							inheritReplayBudget(options, {
 								apiKey: directAccess.token,
 								isOAuth: true,
 								temperature: options.temperature,
@@ -160,6 +164,7 @@ export function streamGitLabDuo(
 								cacheRetention: options.cacheRetention,
 								headers,
 								maxRetryDelayMs: options.maxRetryDelayMs,
+								replayBudgetMs: options.replayBudgetMs,
 								metadata: options.metadata,
 								sessionId: options.sessionId,
 								promptCacheKey: options.promptCacheKey,
@@ -176,7 +181,7 @@ export function streamGitLabDuo(
 								reasoning: anthropicReasoningEffort,
 								toolChoice: mapAnthropicToolChoice(options.toolChoice),
 								waitForTerminalDrain: options.waitForTerminalDrain,
-							},
+							}),
 						)
 					: route.api === "openai-responses"
 						? streamOpenAIResponses(
@@ -188,7 +193,7 @@ export function streamGitLabDuo(
 									compat: model.compatConfig,
 								} as ModelSpec<"openai-responses">),
 								context,
-								{
+								inheritReplayBudget(options, {
 									apiKey: directAccess.token,
 									temperature: options.temperature,
 									topP: options.topP,
@@ -201,6 +206,7 @@ export function streamGitLabDuo(
 									cacheRetention: options.cacheRetention,
 									headers,
 									maxRetryDelayMs: options.maxRetryDelayMs,
+									replayBudgetMs: options.replayBudgetMs,
 									metadata: options.metadata,
 									sessionId: options.sessionId,
 									promptCacheKey: options.promptCacheKey,
@@ -214,7 +220,7 @@ export function streamGitLabDuo(
 									disableReasoning: options.disableReasoning,
 									forceReasoningOff: options.forceReasoningOff,
 									toolChoice: options.toolChoice,
-								} satisfies OpenAIResponsesOptions,
+								} satisfies OpenAIResponsesOptions),
 							)
 						: streamOpenAICompletions(
 								buildModel({
@@ -225,7 +231,7 @@ export function streamGitLabDuo(
 									compat: model.compatConfig,
 								} as ModelSpec<"openai-completions">),
 								context,
-								{
+								inheritReplayBudget(options, {
 									apiKey: directAccess.token,
 									temperature: options.temperature,
 									topP: options.topP,
@@ -238,6 +244,7 @@ export function streamGitLabDuo(
 									cacheRetention: options.cacheRetention,
 									headers,
 									maxRetryDelayMs: options.maxRetryDelayMs,
+									replayBudgetMs: options.replayBudgetMs,
 									metadata: options.metadata,
 									sessionId: options.sessionId,
 									promptCacheKey: options.promptCacheKey,
@@ -252,7 +259,7 @@ export function streamGitLabDuo(
 									disableReasoning: options.disableReasoning || options.forceReasoningOff,
 									toolChoice: options.toolChoice,
 									waitForTerminalDrain: options.waitForTerminalDrain,
-								} satisfies OpenAICompletionsOptions,
+								} satisfies OpenAICompletionsOptions),
 							);
 
 			for await (const event of inner) {

@@ -200,7 +200,7 @@ describe("finalizeErrorMessage", () => {
 		expect(occurrences(message, MUSE_DENIAL_BODY)).toBe(1);
 	});
 
-	it("prints a truncated body once when a retry header is present, with the hint last", async () => {
+	it("prints a truncated body once and writes no retry wait into it", async () => {
 		const core = "slow down ".repeat(500);
 		const payload = { error: { message: core, type: "rate_limit" } };
 		const captured: CapturedHttpErrorResponse = {
@@ -211,15 +211,16 @@ describe("finalizeErrorMessage", () => {
 		};
 		const message = await finalizeErrorMessage(new Error(`429 ${core.slice(0, 4096)}`), undefined, captured);
 
-		expect(message).toBe(`429 ${core} (type=rate_limit) retry-after-ms=1000`);
+		// The header's wait travels structured (`errorRetryAfterMs`), never in the text.
+		expect(message).toBe(`429 ${core} (type=rate_limit)`);
 	});
 
-	it("keeps the retry hint when a bodyless status line is replaced by the captured payload", async () => {
+	it("replaces a bodyless status line with the captured payload and writes no retry wait", async () => {
 		const headers = new Headers({ "retry-after-ms": "250" });
 		const captured: CapturedHttpErrorResponse = { ...MUSE_DENIAL_RESPONSE, headers };
 		const message = await finalizeErrorMessage(new Error("403 status code (no body)"), undefined, captured);
 
-		expect(message).toBe(`403 status code: ${MUSE_DENIAL_BODY}${MUSE_DENIAL_SUFFIX} retry-after-ms=250`);
+		expect(message).toBe(`403 status code: ${MUSE_DENIAL_BODY}${MUSE_DENIAL_SUFFIX}`);
 	});
 
 	it("restores a truncated body that starts like the status code without touching the status code", async () => {

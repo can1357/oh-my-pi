@@ -224,10 +224,15 @@ Client helpers:
 
 Session-level retry events:
 
-- `auto_retry_start { attempt, maxAttempts, delayMs, errorMessage, errorId? }`
-- `auto_retry_end { success, attempt, finalError?, retryErrors? }`
+- `auto_retry_start { attempt, maxAttempts, delayMs, errorMessage, errorId?, retryAfterMs? }`
+- `auto_retry_end { success, attempt, finalError?, finalRetryAfterMs?, retryErrors? }`
 - `retry_fallback_applied { from, to, role, reason? }`
 - `retry_fallback_succeeded { model, role }`
+
+`retryAfterMs` and `finalRetryAfterMs` are the retry wait, in milliseconds, that
+the failed response's headers stated (`AssistantMessage.errorRetryAfterMs`);
+`delayMs` is the delay omp chose. `errorMessage` and `finalError` never carry
+the wait: a display renders it from the number, and absent the number shows none.
 
 `from`, `to`, and `role` retain their existing selector semantics.
 The optional `reason` explains the decision using the triggering health snapshot
@@ -253,7 +258,7 @@ Propagation:
 Final failure surfacing:
 
 - On max-exceeded, max-delay failure, or cancellation, `auto_retry_end.success === false`
-- TUI shows: `Retry failed after N attempts: <finalError>`
+- TUI shows: `Retry failed after N attempts: <finalError>`, followed by `(retry after <wait>)` when `finalRetryAfterMs` is set
 - Extensions/hooks receive `auto_retry_end` with same fields
 - RPC consumers receive same event object on stdout stream
 

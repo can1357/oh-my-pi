@@ -1,4 +1,5 @@
 import * as fs from "node:fs/promises";
+import { errorText } from "@oh-my-pi/pi-ai/utils/retry-wait-display";
 import {
 	applyOpsToPhases,
 	getLatestTodoPhasesFromEntries,
@@ -217,7 +218,7 @@ export class TodoCommandController {
 			copyToClipboard(phasesToMarkdown(phases));
 			this.ctx.showStatus("Copied todos as Markdown to clipboard.");
 		} catch (error) {
-			this.ctx.showError(error instanceof Error ? error.message : String(error));
+			this.ctx.showError(errorText(error));
 		}
 	}
 
@@ -236,7 +237,7 @@ export class TodoCommandController {
 			await fs.writeFile(target, phasesToMarkdown(phases), "utf8");
 			this.ctx.showStatus(`Wrote todos to ${target}`);
 		} catch (error) {
-			this.ctx.showError(`Failed to write todos: ${error instanceof Error ? error.message : String(error)}`);
+			this.ctx.showError(`Failed to write todos: ${errorText(error)}`);
 		}
 	}
 
@@ -247,7 +248,7 @@ export class TodoCommandController {
 			source = this.#resolveTodoPath(rest);
 			content = await fs.readFile(source, "utf8");
 		} catch (error) {
-			this.ctx.showError(`Failed to read todos: ${error instanceof Error ? error.message : String(error)}`);
+			this.ctx.showError(`Failed to read todos: ${errorText(error)}`);
 			return;
 		}
 		const { phases, errors } = markdownToPhases(content);
@@ -433,9 +434,7 @@ export class TodoCommandController {
 			const taskCount = parsed.reduce((sum, p) => sum + p.tasks.length, 0);
 			this.ctx.showStatus(`Todos updated from editor: ${parsed.length} phase(s), ${taskCount} task(s).`);
 		} catch (error) {
-			this.ctx.showWarning(
-				`Failed to open external editor: ${error instanceof Error ? error.message : String(error)}`,
-			);
+			this.ctx.showWarning(`Failed to open external editor: ${errorText(error)}`);
 		} finally {
 			this.ctx.ui.start();
 			this.ctx.ui.requestRender();

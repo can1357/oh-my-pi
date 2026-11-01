@@ -8,6 +8,7 @@ import {
 	formatFolder,
 	formatInteger,
 	formatMessageCost,
+	formatRequestError,
 	formatRelativeTime,
 	formatTimestamp,
 } from "../data/formatters";
@@ -300,7 +301,7 @@ function buildGroupColumns(maxCount: number): Column<ErrorGroupView>[] {
 			wrap: true,
 			sort: group => group.signature,
 			render: group => (
-				<span className="errors-signature" title={group.latest.errorMessage ?? undefined}>
+				<span className="errors-signature" title={formatRequestError(group.latest) ?? undefined}>
 					{group.signature}
 				</span>
 			),
@@ -343,7 +344,7 @@ function SignatureDetail({ group, onRequestClick }: { group: ErrorGroupView; onR
 	const latestId = group.latest.id;
 	return (
 		<div className="errors-detail">
-			<pre className="code-block errors-detail-message">{group.latest.errorMessage ?? "Unknown error"}</pre>
+			<pre className="code-block errors-detail-message">{formatRequestError(group.latest) ?? "Unknown error"}</pre>
 			<div className="errors-detail-meta">
 				<span className="muted">
 					{formatInteger(group.count)} failures · first {formatTimestamp(group.firstSeen)} · last{" "}
@@ -390,8 +391,8 @@ const FAILURE_COLUMNS: readonly Column<MessageStats>[] = [
 		header: "Error",
 		sort: row => row.errorMessage ?? "",
 		render: row => (
-			<span className="errors-message" title={row.errorMessage ?? undefined}>
-				{row.errorMessage ?? "Unknown error"}
+			<span className="errors-message" title={formatRequestError(row) ?? undefined}>
+				{formatRequestError(row) ?? "Unknown error"}
 			</span>
 		),
 	},

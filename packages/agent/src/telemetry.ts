@@ -28,6 +28,7 @@ import {
 	type AssistantMessage,
 	type Context,
 	completeSimple,
+	errorText,
 	type Message,
 	type Model,
 	type OneshotRetryOptions,
@@ -39,6 +40,7 @@ import {
 	type ToolChoice,
 	type Usage,
 } from "@oh-my-pi/pi-ai";
+import { withRetryWait } from "@oh-my-pi/pi-utils";
 import {
 	type Attributes,
 	type AttributeValue,
@@ -1187,7 +1189,7 @@ export async function finishChatSpan(
 		conversationId: telemetry?.conversationId,
 		stepNumber: options.stepNumber,
 	});
-	applyTerminalStatus(span, message.stopReason, message.errorMessage);
+	applyTerminalStatus(span, message.stopReason, message.errorMessage, message.errorRetryAfterMs);
 	telemetry?.collector.endChat(span, message, cost);
 	span.end();
 }
@@ -1211,14 +1213,14 @@ export function failChatSpan(
 	if (!span) return;
 	applyGatewayAttributes(span, options.responseHeaders, options.baseUrl);
 	const err = options.errorObject;
+	// The status message is display text: a wait the error's headers carry renders here.
 	if (err instanceof Error) {
 		span.recordException(err);
 		span.setAttribute(GenAIAttr.ErrorType, options.errorType ?? err.name ?? "Error");
-		span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
 	} else {
 		span.setAttribute(GenAIAttr.ErrorType, options.errorType ?? "Error");
-		span.setStatus({ code: SpanStatusCode.ERROR, message: String(err) });
 	}
+	span.setStatus({ code: SpanStatusCode.ERROR, message: errorText(err) });
 	telemetry?.collector.failChat(span, {
 		errorType: options.errorType ?? (err instanceof Error ? err.name || "Error" : "Error"),
 	});
@@ -1581,10 +1583,19 @@ function mapStopReason(reason: StopReason | undefined): string | undefined {
 	}
 }
 
-function applyTerminalStatus(span: Span, stopReason: StopReason | undefined, errorMessage: string | undefined): void {
+function applyTerminalStatus(
+	span: Span,
+	stopReason: StopReason | undefined,
+	errorMessage: string | undefined,
+	errorRetryAfterMs?: number,
+): void {
 	if (stopReason === "error" || stopReason === "aborted") {
 		span.setAttribute(GenAIAttr.ErrorType, stopReason);
-		span.setStatus({ code: SpanStatusCode.ERROR, message: errorMessage ?? stopReason });
+		// The status message is display text: the server's wait renders here, never into the error text.
+		span.setStatus({
+			code: SpanStatusCode.ERROR,
+			message: withRetryWait(errorMessage ?? stopReason, errorRetryAfterMs),
+		});
 	}
 }
 
@@ -1694,6 +1705,8 @@ export interface JudgmentTelemetryOptions {
 	readonly usage: Usage;
 	readonly stopReason: StopReason;
 	readonly errorMessage?: string;
+	/** The server's retry wait (ms) the failed attempt stated; rendered only into the span status message. */
+	readonly errorRetryAfterMs?: number;
 	/** Epoch ms the attempt started. */
 	readonly startTime: number;
 	/** Questions in the request; omitted for prompted backends, which report per completion attempt. */
@@ -1771,7 +1784,7 @@ export async function recordJudgmentTelemetry(
 			headers: undefined,
 		});
 	}
-	applyTerminalStatus(span, options.stopReason, options.errorMessage);
+	applyTerminalStatus(span, options.stopReason, options.errorMessage, options.errorRetryAfterMs);
 	safeOnSpanEnd(telemetry, { ...buildTelemetryAttributeContext(telemetry, "judgment", {}), span });
 	span.end();
 }

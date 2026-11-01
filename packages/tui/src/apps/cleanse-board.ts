@@ -10,7 +10,7 @@
  * Non-TTY output keeps the original plain-line protocol
  * (`[start]`/`[done]`/`[fail]`), so scripted callers see unchanged output.
  */
-import { formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
+import { formatDuration, formatNumber, withRetryWait } from "@oh-my-pi/pi-utils";
 import { sanitizeDisplaySingleLine } from "../overlays/extensions/display-text";
 import { truncateToWidth } from "../utils";
 import { renderProgressBar, type ProgressBarStyle } from "../components/progress-bar";
@@ -430,7 +430,7 @@ function describeAgentLane(agentName: string, agent: RunningAgent, now: number):
 						max: progress.retryState.maxAttempts,
 						age: Math.max(0, now - progress.retryState.startedAtMs),
 						delay: progress.retryState.delayMs,
-						error: progress.retryState.errorMessage,
+						error: withRetryWait(progress.retryState.errorMessage, progress.retryState.retryAfterMs),
 					}
 				: null,
 			stats: {

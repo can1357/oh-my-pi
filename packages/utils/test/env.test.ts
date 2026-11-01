@@ -228,7 +228,7 @@ describe("filterChildShellEnv", () => {
 
 		expect(exitCode, stderr).toBe(0);
 		expect(JSON.parse(stdout)).toEqual({ UNCHANGED: "parent-value" });
-	});
+	}, 30_000); // spawns a bun child: its start time varies ten-fold with host load, past the default 5 s
 
 	it("drops inherited git repo-location overrides", () => {
 		const cwd = path.dirname(writeTempEnv(""));

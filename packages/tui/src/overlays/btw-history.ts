@@ -9,6 +9,13 @@ export interface BtwHistoryTurn {
 	createdAt: number;
 	updatedAt: number;
 	error?: string;
+	/**
+	 * The failed turn's retry wait in milliseconds, from the error's response
+	 * headers. Held in memory and sent on the RPC wire only: the history store
+	 * never writes it (older builds reject unknown record keys), so a turn read
+	 * back from disk has none and shows no wait.
+	 */
+	errorRetryAfterMs?: number;
 }
 
 export interface BtwHistoryRecord extends BtwHistoryTurn {

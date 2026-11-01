@@ -1,6 +1,7 @@
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
+import { errorText, retryAfterMsOf } from "@oh-my-pi/pi-ai/utils/retry-wait-display";
 import { type OverlayHandle, replaceTabs } from "@oh-my-pi/pi-tui";
-import { logger, toError, withTimeout } from "@oh-my-pi/pi-utils";
+import { logger, toError, withRetryWait, withTimeout } from "@oh-my-pi/pi-utils";
 import {
 	type BtwHistoryRecord,
 	type BtwHistoryTurn,
@@ -164,7 +165,7 @@ export class BtwController {
 				inlineRequest.component.markCopied();
 			return true;
 		} catch (error) {
-			this.ctx.showError(sanitizeErrorLine(error));
+			this.ctx.showError(withRetryWait(sanitizeErrorLine(error), retryAfterMsOf(error)));
 			return true;
 		} finally {
 			this.#copyInFlight = false;
@@ -196,7 +197,10 @@ export class BtwController {
 			await this.ctx.handleBtwBranch(question, assistantMessage, leafId, sessionId, images);
 			return true;
 		} catch (error) {
-			this.ctx.showError(sanitizeErrorLine(`Cannot branch /btw: ${toError(error).message}`));
+			// Cut the error to a line first, then add the server's wait.
+			this.ctx.showError(
+				withRetryWait(sanitizeErrorLine(`Cannot branch /btw: ${toError(error).message}`), retryAfterMsOf(error)),
+			);
 			return false;
 		} finally {
 			this.#branchInFlight = false;
@@ -313,7 +317,7 @@ export class BtwController {
 			if (moved) await this.dispose();
 			return moved;
 		} catch (error) {
-			this.ctx.showError(sanitizeErrorLine(error));
+			this.ctx.showError(withRetryWait(sanitizeErrorLine(error), retryAfterMsOf(error)));
 			return false;
 		} finally {
 			this.#transitionCount--;
@@ -502,7 +506,12 @@ export class BtwController {
 			void this.#runRequest(request);
 			return true;
 		} catch (error) {
-			this.ctx.showError(sanitizeErrorLine(`Cannot open /btw history: ${toError(error).message}`));
+			this.ctx.showError(
+				withRetryWait(
+					sanitizeErrorLine(`Cannot open /btw history: ${toError(error).message}`),
+					retryAfterMsOf(error),
+				),
+			);
 			return false;
 		} finally {
 			this.#starting = false;
@@ -607,7 +616,12 @@ export class BtwController {
 				if (request.persisted) this.#failedWrites.set(request, toError(error));
 				logger.error("BTW history save failed", { error });
 				if (request.sessionId === request.sessionManager.getSessionId()) {
-					this.ctx.showError(sanitizeErrorLine(`Could not save /btw history: ${toError(error).message}`));
+					this.ctx.showError(
+						withRetryWait(
+							sanitizeErrorLine(`Could not save /btw history: ${toError(error).message}`),
+							retryAfterMsOf(error),
+						),
+					);
 				}
 				return false;
 			},
@@ -666,14 +680,15 @@ export class BtwController {
 			if (getBtwLatestTurn(request.record).status !== "running") return;
 			const cancelled = request.abortController.signal.aborted;
 			const message = error instanceof Error ? error.message : String(error);
+			// The record keeps the unrendered text and the wait as a number; displays render the two.
 			this.#updateRequest(request, {
 				status: cancelled ? "cancelled" : "error",
 				updatedAt: Date.now(),
-				...(cancelled ? {} : { error: message }),
+				...(cancelled ? {} : { error: message, errorRetryAfterMs: retryAfterMsOf(error) }),
 			});
 			if (this.#isActiveRequest(request)) {
 				if (cancelled) request.component.markAborted();
-				else request.component.markError(message);
+				else request.component.markError(errorText(error));
 			}
 		}
 		this.#persist(request);

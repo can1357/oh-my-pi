@@ -1,4 +1,5 @@
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { errorText } from "@oh-my-pi/pi-ai/utils/retry-wait-display";
 import { logger } from "@oh-my-pi/pi-utils";
 import { LiveSessionController, type LiveSessionControllerOptions, type LiveTranscript } from "../../live/controller";
 import { LIVE_MODEL } from "../../live/protocol";
@@ -144,7 +145,7 @@ export class LiveCommandController {
 		this.#assistantTranscriptStartedAt = 0;
 		const visualizer = new LiveVisualizer({
 			onStop: () => {
-				void this.stop().catch(cause => this.#ctx.showError(errorFrom(cause).message));
+				void this.stop().catch(cause => this.#ctx.showError(errorText(errorFrom(cause))));
 			},
 			onToggleMute: () => this.#session?.toggleMute(),
 			stopKeys: this.#ctx.keybindings.getKeys("app.live.toggle"),
@@ -288,7 +289,7 @@ export class LiveCommandController {
 		if (this.#session !== session) return;
 		this.#session = undefined;
 		this.#restoreEditor();
-		if (error) this.#ctx.showError(error.message);
+		if (error) this.#ctx.showError(errorText(error));
 		const settling = session.stop().catch(cause => {
 			logger.debug("Live session cleanup failed", { error: errorFrom(cause).message });
 		});

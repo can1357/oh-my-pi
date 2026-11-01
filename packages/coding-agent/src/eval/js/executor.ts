@@ -1,3 +1,5 @@
+import { retryAfterMsOf } from "@oh-my-pi/pi-ai/utils/retry-wait-display";
+import { withRetryWait } from "@oh-my-pi/pi-utils/format";
 import { DEFAULT_MAX_BYTES, type OutputArtifactError, OutputSink } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import type { ToolSession } from "../../tools";
 import {
@@ -237,7 +239,10 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 			};
 		}
 		const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
-		outputSink.push(message);
+		// The cell output is display: a server retry wait the error carries renders
+		// here, on its own line after the trace. The message cell code caught stays plain.
+		const waitNote = withRetryWait("", retryAfterMsOf(error)).trimStart();
+		outputSink.push(waitNote ? `${message}\n${waitNote}` : message);
 		const summary = await outputSink.dump();
 		return {
 			output: summary.output,

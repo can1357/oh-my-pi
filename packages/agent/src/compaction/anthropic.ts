@@ -25,6 +25,7 @@ import {
 import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 import { type InstrumentedChatSpanOptions, instrumentedCompleteSimple } from "../telemetry";
 import type { AgentMessage } from "../types";
+import { failedResponseError } from "./errors";
 import anthropicCompactionInstructionsPrompt from "./prompts/anthropic-compaction-instructions.md" with { type: "text" };
 
 export const ANTHROPIC_COMPACTION_PRESERVE_KEY = "anthropicCompaction";
@@ -286,10 +287,7 @@ export async function requestAnthropicNativeCompaction(
 		throw new AIError.AbortError("Anthropic compaction aborted", { cause: signal?.reason });
 	}
 	if (response.stopReason === "error") {
-		const message = `Anthropic compaction failed: ${response.errorMessage ?? "unknown error"}`;
-		throw response.errorStatus === undefined
-			? new Error(message)
-			: new AIError.ProviderHttpError(message, response.errorStatus);
+		throw failedResponseError(`Anthropic compaction failed: ${response.errorMessage ?? "unknown error"}`, response);
 	}
 	const payload = response.providerPayload;
 	if (

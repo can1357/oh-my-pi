@@ -10,7 +10,7 @@ import {
 	TruncatedText,
 	truncateToWidth,
 } from "../index";
-import { isRecord, oklabDistance, sanitizeText } from "@oh-my-pi/pi-utils";
+import { isRecord, oklabDistance, sanitizeText, withRetryWait } from "@oh-my-pi/pi-utils";
 /** Available session-tree display filters. */
 export const TREE_FILTER_MODES = ["default", "no-tools", "user-only", "labeled-only", "all"] as const;
 /** Session-tree display filter. */
@@ -1137,7 +1137,9 @@ class TreeList implements Component {
 					const textContent = normalize(this.#extractContent(msgWithContent.content));
 					if (textContent) return [head, { t: textContent }];
 					if (presentation.kind === "full") {
-						return [head, { t: normalize(presentation.text).slice(0, 80), s: "error" }];
+						// Cut the error first, then add the wait, so a long error keeps it.
+						const error = withRetryWait(normalize(presentation.body).slice(0, 80), presentation.retryAfterMs);
+						return [head, { t: error, s: "error" }];
 					}
 					if (msgWithContent.stopReason === "aborted") return [head, { t: "(aborted)", s: "muted" }];
 					return [head, { t: "(no content)", s: "muted" }];

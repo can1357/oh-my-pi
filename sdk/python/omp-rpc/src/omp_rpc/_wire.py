@@ -312,6 +312,8 @@ class AssistantMessage(TypedDict):
     upstreamProvider: NotRequired[str]
     upstreamModel: NotRequired[str]
     errorMessage: NotRequired[str]
+    errorRetryAfterMs: NotRequired[float]
+    """The failed response's retry wait in milliseconds, from its headers. `errorMessage` never carries it."""
     errorStatus: NotRequired[int]
     errorId: NotRequired[float]
     providerPayload: NotRequired[JsonObject]
@@ -912,6 +914,8 @@ class BtwHistoryTurn:
     images: tuple[ImageContent, ...] | None = None
     """Images attached to the question."""
     error: str | None = None
+    error_retry_after_ms: float | None = None
+    """The failed turn's retry wait in milliseconds, from the error's response headers. `error` never carries it. Live frames only: history read back from disk has none."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -927,6 +931,8 @@ class BtwHistoryRecord:
     images: tuple[ImageContent, ...] | None = None
     """Images attached to the question."""
     error: str | None = None
+    error_retry_after_ms: float | None = None
+    """The failed turn's retry wait in milliseconds, from the error's response headers. `error` never carries it. Live frames only: history read back from disk has none."""
     follow_ups: tuple[BtwHistoryTurn, ...] | None = None
 
 
@@ -1071,6 +1077,8 @@ class AutoCompactionEndEvent:
     will_retry: bool
     result: CompactionResult | None = None
     error_message: str | None = None
+    retry_after_ms: float | None = None
+    """The failed compaction request's retry wait in milliseconds. `errorMessage` never carries it."""
     skipped: bool | None = None
     """Compaction was skipped for a benign reason."""
 
@@ -1104,6 +1112,8 @@ class AutoRetryStartEvent:
     delay_ms: int
     error_message: str
     error_id: int | None = None
+    retry_after_ms: float | None = None
+    """The retry wait the failed response stated, in milliseconds; distinct from `delayMs`. `errorMessage` never carries it."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -1112,6 +1122,8 @@ class AutoRetryEndEvent:
     success: bool
     attempt: int
     final_error: str | None = None
+    final_retry_after_ms: float | None = None
+    """The retry wait the final failed response stated, in milliseconds. `finalError` never carries it."""
     retry_errors: tuple[JsonObject, ...] = ()
     """Persisted retry errors whose presentation changed when the retry settled."""
 
@@ -1257,6 +1269,8 @@ class PromptError:
     provider: str | None = None
     model: str | None = None
     http_status: int | None = None
+    retry_after_ms: float | None = None
+    """The failed response's retry wait in milliseconds, from its headers. `message` never carries it."""
     code: Literal["cost_cap"] | None = None
     """`cost_cap`: the session reached `session.maxCost` (`--max-cost`) and omp did not send the next request."""
 
@@ -2298,6 +2312,7 @@ def parse_btw_history_turn(value: object, path: str = "BtwHistoryTurn") -> BtwHi
         updated_at=required(payload, "updatedAt", decode_int, path),
         images=optional(payload, "images", array(parse_image_content), path),
         error=optional(payload, "error", decode_str, path),
+        error_retry_after_ms=optional(payload, "errorRetryAfterMs", decode_float, path),
     )
 
 
@@ -2313,6 +2328,7 @@ def parse_btw_history_record(value: object, path: str = "BtwHistoryRecord") -> B
         leaf_id=required(payload, "leafId", nullable(decode_str), path),
         images=optional(payload, "images", array(parse_image_content), path),
         error=optional(payload, "error", decode_str, path),
+        error_retry_after_ms=optional(payload, "errorRetryAfterMs", decode_float, path),
         follow_ups=optional(payload, "followUps", array(parse_btw_history_turn), path),
     )
 
@@ -2480,6 +2496,7 @@ def parse_auto_compaction_end_event(value: object, path: str = "AutoCompactionEn
         will_retry=required(payload, "willRetry", decode_bool, path),
         result=optional(payload, "result", parse_compaction_result, path),
         error_message=optional(payload, "errorMessage", decode_str, path),
+        retry_after_ms=optional(payload, "retryAfterMs", decode_float, path),
         skipped=optional(payload, "skipped", decode_bool, path),
     )
 
@@ -2512,6 +2529,7 @@ def parse_auto_retry_start_event(value: object, path: str = "AutoRetryStartEvent
         delay_ms=required(payload, "delayMs", decode_int, path),
         error_message=required(payload, "errorMessage", decode_str, path),
         error_id=optional(payload, "errorId", decode_int, path),
+        retry_after_ms=optional(payload, "retryAfterMs", decode_float, path),
     )
 
 
@@ -2522,6 +2540,7 @@ def parse_auto_retry_end_event(value: object, path: str = "AutoRetryEndEvent") -
         success=required(payload, "success", decode_bool, path),
         attempt=required(payload, "attempt", decode_int, path),
         final_error=optional(payload, "finalError", decode_str, path),
+        final_retry_after_ms=optional(payload, "finalRetryAfterMs", decode_float, path),
         retry_errors=defaulted(payload, "retryErrors", array(decode_json_object), path, ()),
     )
 
@@ -2688,6 +2707,7 @@ def parse_prompt_error(value: object, path: str = "PromptError") -> PromptError:
         provider=optional(payload, "provider", decode_str, path),
         model=optional(payload, "model", decode_str, path),
         http_status=optional(payload, "httpStatus", decode_int, path),
+        retry_after_ms=optional(payload, "retryAfterMs", decode_float, path),
         code=optional(payload, "code", cast('Decoder[Literal["cost_cap"]]', literal(frozenset({"cost_cap"}))), path),
     )
 

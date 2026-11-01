@@ -127,6 +127,8 @@ export interface ModelUsageEntry extends SessionEntryBase {
 	usage: Usage;
 	stopReason: StopReason;
 	errorMessage?: string;
+	/** The server's retry wait (ms) the failed call stated; `errorMessage` never carries it. */
+	errorRetryAfterMs?: number;
 }
 
 export interface ThinkingLevelChangeEntry extends SessionEntryBase {

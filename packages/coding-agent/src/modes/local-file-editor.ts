@@ -1,4 +1,5 @@
 import * as fs from "node:fs/promises";
+import { errorText } from "@oh-my-pi/pi-ai/utils/retry-wait-display";
 import { disambiguateDisplayLabels, replaceTabs, shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { formatBytes, sanitizeText } from "@oh-my-pi/pi-utils";
 import { InternalUrlRouter, type LocalFileEntry, type LocalProtocolOptions, listLocalFiles } from "../internal-urls";
@@ -8,13 +9,9 @@ import type { InteractiveModeContext } from "./types";
 
 const PICKER_TITLE = "Open local:// file in external editor";
 
-function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
-}
-
 /** Error text safe for the UI: strips ANSI/C0 bytes and tabs, shortens home paths. */
 function showErrorMessage(error: unknown): string {
-	return shortenPath(replaceTabs(sanitizeText(errorMessage(error))));
+	return shortenPath(replaceTabs(sanitizeText(errorText(error))));
 }
 
 export function sessionLocalProtocolOptions(

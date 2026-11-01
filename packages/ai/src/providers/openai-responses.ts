@@ -2,6 +2,7 @@ import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import {
 	$flag,
 	cloneJsonTree,
+	findRetryRefusal,
 	isUnexpectedSocketCloseMessage,
 	logger,
 	type ServerSentEvent,
@@ -40,6 +41,7 @@ import {
 import { OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
 import { notifyProviderResponse } from "../utils/provider-response";
 import { wrapFetchForRequestCompression } from "../utils/request-compression";
+import { admitsReplay, gateFetch, gateOptionalFetch, ReplayBudget, restoreReplaced } from "../utils/replay-budget";
 import { waitForRetry } from "../utils/retry-wait";
 import {
 	adaptSchemaForStrict,
@@ -258,12 +260,20 @@ export async function pollOpenAIResponsesResultForCompletion(args: {
 	signal?: AbortSignal;
 	/** Sleep between polls; defaults to a real wait honoring `signal`. */
 	wait?: (ms: number, signal?: AbortSignal) => Promise<void>;
+	/**
+	 * The caller's replay budget. When set, every poll — the first included —
+	 * starts only inside it: a stored result is preferred over a fresh
+	 * generation, but not fetched after the caller's budget is gone. Omitted,
+	 * every poll the deadline allows runs.
+	 */
+	admits?: (delayMs: number) => boolean;
 }): Promise<Record<string, unknown> | undefined> {
 	const deadline = Date.now() + OPENAI_RESPONSES_RESUME_DEADLINE_MS;
 	for (let attempt = 0; attempt < OPENAI_RESPONSES_RESUME_MAX_POLLS; attempt++) {
 		if (args.signal?.aborted) return undefined;
 		if (attempt > 0) {
 			if (Date.now() + OPENAI_RESPONSES_RESUME_POLL_INTERVAL_MS >= deadline) return undefined;
+			if (args.admits && !args.admits(OPENAI_RESPONSES_RESUME_POLL_INTERVAL_MS)) return undefined;
 			try {
 				await waitForRetry(args.wait, OPENAI_RESPONSES_RESUME_POLL_INTERVAL_MS, args.signal);
 			} catch {
@@ -271,6 +281,8 @@ export async function pollOpenAIResponsesResultForCompletion(args: {
 			}
 			if (args.signal?.aborted) return undefined;
 		}
+		// Asked right before every poll goes out, after any wait.
+		if (args.admits && !args.admits(0)) return undefined;
 		const remainingMs = deadline - Date.now();
 		if (remainingMs <= 0) return undefined;
 		const attemptTimeout = AbortSignal.timeout(
@@ -662,6 +674,7 @@ const streamOpenAIResponsesOnce = (
 	// Start async processing
 	(async () => {
 		const startTime = performance.now();
+		const replayBudget = ReplayBudget.forCall(options);
 		let firstTokenTime: number | undefined;
 
 		const output: AssistantMessage = createInitialResponsesAssistantMessage(model.api, model.provider, model.id);
@@ -693,6 +706,11 @@ const streamOpenAIResponsesOnce = (
 					onSseEvent({ event: event.event, data: event.data, raw: [...event.raw] }, model);
 				}
 			: undefined;
+		// The current attempt's accepted (2xx) response headers, for `finalize`:
+		// an in-band error or a cut stream keeps the response's `Retry-After`.
+		// Cleared when an attempt starts, so a retry or fallback that fails before
+		// its response never reads an earlier response's headers.
+		let streamResponseHeaders: Headers | undefined;
 
 		try {
 			// Keep request routing on `sessionId` while allowing callers to pin a
@@ -797,6 +815,7 @@ const streamOpenAIResponsesOnce = (
 			const openResponsesStream = async (
 				requestParams: OpenAIResponsesSamplingParams,
 			): Promise<AsyncIterable<ResponseStreamEvent>> => {
+				streamResponseHeaders = undefined;
 				activeReasoningEffortFallbackKey = createOpenAIReasoningEffortFallbackKey(
 					"responses",
 					resolvedBaseUrl,
@@ -821,21 +840,29 @@ const streamOpenAIResponsesOnce = (
 						headers: headersWithTimeout,
 						body: requestParams,
 						signal: requestSignal,
+						maxRetryDelayMs: options?.maxRetryDelayMs,
 						fetch: wrapFetchForCopilotFallback(
-							wrapFetchForRequestCompression(options?.fetch ?? fetch, model),
+							wrapFetchForRequestCompression(
+								gateFetch(replayBudget, options?.fetch ?? fetch),
+								model,
+								replayBudget,
+							),
 							model.provider === "github-copilot",
 							resolveCopilotRequestIdentity(options?.headers),
 							copilotCacheKey,
 							copilotCacheSnapshot,
+							replayBudget,
 						),
 						shouldRetryResponse: (response, bodyText) =>
 							!AIError.isRequestBodyReadTimeout(response.status, bodyText) ||
 							lastSubmittedRequestWasFullReplay !== true,
+						retryGate: replayBudget?.admits,
 						// Transient 408/429/5xx get Retry-After-aware transport
 						// retries; the first-event watchdog aborts `requestSignal`,
 						// so retries cannot extend the caller's deadline.
 						onSseEvent: rawSseObserver,
 					});
+					streamResponseHeaders = response.headers;
 					// Disarm the first-event watchdog as soon as headers arrive — a slow
 					// onResponse callback must not abort an already-connected stream.
 					clearTimeout(requestTimeout);
@@ -850,7 +877,14 @@ const streamOpenAIResponsesOnce = (
 			let forceDisableStrictTools = false;
 			const openResponsesStreamWithFallbacks = async (): Promise<AsyncIterable<ResponseStreamEvent>> => {
 				let openaiStream: AsyncIterable<ResponseStreamEvent>;
+				// The rejection a corrected request replaces; the corrected request is
+				// asked against the budget again right before it goes out.
+				let correctionOf: unknown;
 				while (true) {
+					if (correctionOf !== undefined) {
+						if (!admitsReplay(replayBudget, 0)) throw correctionOf;
+						correctionOf = undefined;
+					}
 					try {
 						openaiStream = await openResponsesStream(chained.params);
 						if (pendingReasoningEffortFallback) {
@@ -873,6 +907,9 @@ const streamOpenAIResponsesOnce = (
 						}
 						break;
 					} catch (error) {
+						// A request the budget refused at handoff stands for the failure it replaced.
+						if (findRetryRefusal(error)) throw restoreReplaced(error);
+						correctionOf = error;
 						const capturedErrorResponse = error instanceof OpenAIHttpError ? error.captured : undefined;
 						const reasoningEffortFallback =
 							activeReasoningEffortFallbackKey && activeRequestParams && !requestSignal.aborted
@@ -883,7 +920,17 @@ const streamOpenAIResponsesOnce = (
 								: undefined;
 						if (reasoningEffortFallback !== undefined && activeReasoningEffortFallbackKey) {
 							const retryMarker = `${activeReasoningEffortFallbackKey}:${String(reasoningEffortFallback)}`;
+							// A correction already tried ends the call on the provider's own
+							// terms; only a correction it would make asks the budget.
 							if (attemptedReasoningEffortFallbacks.has(retryMarker)) throw error;
+							// A correction re-sends a rejected request: a replay. Under a budget
+							// it waits the server's named wait when that fits and is refused when not.
+							if (
+								replayBudget &&
+								!(await replayBudget.replayAfter(error, 0, options?.signal, options?.providerRetryWait))
+							) {
+								throw error;
+							}
 							attemptedReasoningEffortFallbacks.add(retryMarker);
 							requestReasoningEffortFallbacks.set(activeReasoningEffortFallbackKey, reasoningEffortFallback);
 							applyOpenAIReasoningEffortFallback(chained.params, reasoningEffortFallback);
@@ -907,7 +954,11 @@ const streamOpenAIResponsesOnce = (
 									strictToolsApplied: activeStrictToolsApplied,
 									tools: context.tools,
 								}));
-						if (canRetryWithoutStrictTools) {
+						if (
+							canRetryWithoutStrictTools &&
+							(!replayBudget ||
+								(await replayBudget.replayAfter(error, 0, options?.signal, options?.providerRetryWait)))
+						) {
 							strictRetryAvailable = false;
 							forceDisableStrictTools = true;
 							disableStrictToolsForScope(providerSessionState, strictToolsScope);
@@ -953,6 +1004,12 @@ const streamOpenAIResponsesOnce = (
 							((error as { code?: string }).code === "invalid_prompt" ||
 								/invalid_prompt|Request blocked/i.test(error.message));
 						if (!zdrRejection && !isPromptBlocked && !isOpenAIResponsesStalePreviousResponseError(error)) {
+							throw error;
+						}
+						if (
+							replayBudget &&
+							!(await replayBudget.replayAfter(error, 0, options?.signal, options?.providerRetryWait))
+						) {
 							throw error;
 						}
 						// Server rejected the chain baseline: reset, count the failure (or
@@ -1116,17 +1173,24 @@ const streamOpenAIResponsesOnce = (
 					) {
 						const resumedResponse = await pollOpenAIResponsesResultForCompletion({
 							fetchImpl: wrapFetchForCopilotFallback(
-								options?.fetch,
+								gateOptionalFetch(replayBudget, options?.fetch),
 								model.provider === "github-copilot",
 								resolveCopilotRequestIdentity(options?.headers),
 								copilotCacheKey,
 								copilotCacheSnapshot,
+								replayBudget,
 							),
 							url: `${resolvedBaseUrl}/responses/${resumeId}`,
 							headers,
 							responseId: resumeId,
 							signal: options?.signal,
-							wait: options?.providerRetryWait,
+							// Under a budget the wait between polls is raced against its deadline.
+							wait: replayBudget
+								? async (ms, signal) => {
+										await replayBudget.wait(ms, signal, options?.providerRetryWait);
+									}
+								: options?.providerRetryWait,
+							admits: replayBudget?.admits,
 						});
 						if (resumedResponse !== undefined) {
 							const deadContent = [...output.content];
@@ -1208,12 +1272,17 @@ const streamOpenAIResponsesOnce = (
 							}
 						}
 					}
+					// Under a budget the server's own wait counts too.
+					const transientRetryDelayMs = replayBudget
+						? replayBudget.delayFor(streamFailure, OPENAI_RESPONSES_TRANSIENT_STREAM_RETRY_DELAY_MS)
+						: OPENAI_RESPONSES_TRANSIENT_STREAM_RETRY_DELAY_MS;
 					const canRetry =
 						!sawReplayUnsafeOutput &&
 						!requestSignal.aborted &&
 						!abortTracker.wasCallerAbort() &&
 						transientStreamRetryAttempt < OPENAI_RESPONSES_MAX_TRANSIENT_STREAM_RETRIES &&
-						isRetryableOpenAIResponsesStreamFailure(streamFailure);
+						isRetryableOpenAIResponsesStreamFailure(streamFailure) &&
+						admitsReplay(replayBudget, transientRetryDelayMs);
 					if (!canRetry) {
 						forwardAttemptEvents();
 						throw streamFailure;
@@ -1243,11 +1312,20 @@ const streamOpenAIResponsesOnce = (
 					firstTokenTime = undefined;
 					nativeOutputItems.length = 0;
 
-					await waitForRetry(
-						options?.providerRetryWait,
-						OPENAI_RESPONSES_TRANSIENT_STREAM_RETRY_DELAY_MS,
-						options?.signal,
-					);
+					if (replayBudget) {
+						// Raced against the deadline: a wait that cannot finish inside it
+						// refuses the replay, however long a wait hook runs.
+						if (!(await replayBudget.wait(transientRetryDelayMs, options?.signal, options?.providerRetryWait))) {
+							throw streamFailure;
+						}
+						replayBudget.arm(streamFailure);
+					} else {
+						await waitForRetry(
+							options?.providerRetryWait,
+							OPENAI_RESPONSES_TRANSIENT_STREAM_RETRY_DELAY_MS,
+							options?.signal,
+						);
+					}
 					if (abortTracker.wasCallerAbort()) throw new AIError.AbortError();
 					openaiStream = await openResponsesStreamWithFallbacks();
 				}
@@ -1315,18 +1393,22 @@ const streamOpenAIResponsesOnce = (
 			stream.end();
 		} catch (error) {
 			if (chainState) resetOpenAIResponsesChainState(chainState);
-			const capturedErrorResponse = error instanceof OpenAIHttpError ? error.captured : undefined;
-			const result = await AIError.finalize(error, {
+			const answered = restoreReplaced(error, replayBudget);
+			const capturedErrorResponse = answered instanceof OpenAIHttpError ? answered.captured : undefined;
+			const result = await AIError.finalize(answered, {
 				api: model.api,
 				provider: model.provider,
 				abortTracker,
 				rawRequestDump,
 				capturedErrorResponse,
+				streamResponseHeaders,
 			});
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = result.message;
+			output.errorRetryAfterMs = result.retryAfterMs;
+			replayBudget?.stamp(output);
 			if (AIError.isRequestBodyReadTimeout(result.status, result.message) && lastSubmittedRequestWasFullReplay) {
 				output.requestBodyReadTimeoutFullReplay = true;
 			}

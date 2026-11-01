@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getLogsDir, isBunTestRuntime, isEnoent, isRecord, logger } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error/flags";
-import { appendRetryAfterHint, errorMessageText, getHeadersFromError } from "./retry-after.js";
+import { errorMessageText } from "./retry-after.js";
 
 export type RawHttpRequestDump = {
 	provider: string;
@@ -167,10 +167,10 @@ export async function finalizeErrorMessage(
 	capturedErrorResponse?: CapturedHttpErrorResponse,
 ): Promise<string> {
 	const captured = formatCapturedHttpErrorParts(capturedErrorResponse);
-	const body = captured
+	const message = captured
 		? mergeCapturedBody(errorMessageText(error), captured, capturedErrorResponse?.status)
 		: errorMessageText(error);
-	const message = appendRetryAfterHint(body, capturedErrorResponse?.headers ?? getHeadersFromError(error));
+
 	return appendRawHttpRequestDumpFor400(message, error, rawRequestDump);
 }
 
@@ -178,9 +178,9 @@ const STATUS_PREFIX_PATTERN = /^\s*\d{3}\s+/;
 
 /**
  * Fold the captured provider body into the thrown message so it prints once.
- * Works on the message before any retry hint is appended: OpenAI-family errors
- * cap the body they interpolate, so the thrown message may hold only a prefix
- * of the captured body, which the captured copy then replaces.
+ * OpenAI-family errors cap the body they interpolate, so the thrown message may
+ * hold only a prefix of the captured body, which the captured copy then
+ * replaces.
  */
 function mergeCapturedBody(message: string, captured: CapturedHttpErrorText, status: number | undefined): string {
 	if (/\bstatus code\s*\(no body\)/i.test(message)) {

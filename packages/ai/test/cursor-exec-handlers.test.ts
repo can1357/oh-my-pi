@@ -39,6 +39,8 @@ import { logger } from "@oh-my-pi/pi-utils";
 
 afterEach(() => {
 	vi.restoreAllMocks();
+	// The transport override is process-global: put the built-in back so later files stream for real.
+	setCursorProviderModule({ streamCursor });
 });
 
 const cursorModel: Model<"cursor-agent"> = buildModel({

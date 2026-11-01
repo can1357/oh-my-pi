@@ -54,6 +54,18 @@ function snapshotRecord(record: BtwHistoryRecord, recover = false): BtwHistoryRe
 	});
 }
 
+/**
+ * The record as written to disk: without any turn's `errorRetryAfterMs`. The wait
+ * stays in memory only, because older builds reject unknown record keys and would
+ * then fail to open the whole history.
+ */
+function withoutRetryWaits(record: BtwHistoryRecord): BtwHistoryRecord {
+	const { errorRetryAfterMs: _errorRetryAfterMs, ...fields } = record;
+	const followUps = fields.followUps;
+	if (!followUps?.some(turn => "errorRetryAfterMs" in turn)) return fields;
+	return { ...fields, followUps: followUps.map(({ errorRetryAfterMs: _turnRetryAfterMs, ...turn }) => turn) };
+}
+
 function recordFileName(id: string): string {
 	// The prefix also prevents Windows device names (CON, NUL, etc.).
 	return `entry-${id}.json`;
@@ -180,9 +192,11 @@ export class BtwHistoryStore {
 	async #upsert(record: BtwHistoryRecord, retry: boolean): Promise<void> {
 		if (this.#writeError && !retry) throw this.#writeError;
 		// Capture before yielding: callers may keep mutating their streaming record.
+		// Validate and write without the in-memory retry waits; the live view keeps them.
 		const { title, ...fields } = record;
-		const saved = snapshotRecord(parseRecord(fields));
-		const snapshot = title === undefined ? saved : Object.freeze({ ...saved, title });
+		const saved = snapshotRecord(parseRecord(withoutRetryWaits(fields)));
+		const live = snapshotRecord(fields);
+		const snapshot = title === undefined ? live : Object.freeze({ ...live, title });
 		if (this.#directory === undefined) {
 			this.#records.set(snapshot.id, snapshot);
 			this.#refreshSnapshot();

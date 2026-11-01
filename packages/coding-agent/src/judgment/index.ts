@@ -38,6 +38,7 @@ import {
 	type NativeJudge,
 	type Question,
 	type Questions,
+	retryAfterMsOf,
 	type TextBackend,
 	type TextCompletion,
 	type TextPrompt,
@@ -79,6 +80,8 @@ export interface JudgmentUsage {
 	usage: Usage;
 	stopReason: AssistantMessage["stopReason"];
 	errorMessage?: string;
+	/** The server's retry wait (ms) the failed attempt stated; `errorMessage` never carries it. */
+	errorRetryAfterMs?: number;
 }
 
 export interface JudgeDeps {
@@ -554,6 +557,7 @@ export class ChainJudge implements Judge {
 			usage: usage.usage,
 			stopReason: usage.stopReason,
 			errorMessage: usage.errorMessage,
+			errorRetryAfterMs: usage.errorRetryAfterMs,
 			startTime: startedAt,
 			questions,
 			cachedQuestions,
@@ -625,6 +629,7 @@ export class ChainJudge implements Judge {
 					usage: attempt.usage,
 					stopReason: attempt.stopReason,
 					errorMessage: attempt.errorMessage,
+					errorRetryAfterMs: attempt.errorRetryAfterMs,
 					startedAt: attempt.timestamp,
 				}),
 		});
@@ -759,6 +764,7 @@ function nativeJudge(
 						usage: partial,
 						stopReason: isAbortOrTimeout(error) ? "aborted" : "error",
 						errorMessage: error instanceof Error ? error.message : String(error),
+						errorRetryAfterMs: retryAfterMsOf(error),
 					});
 					throw error;
 				}

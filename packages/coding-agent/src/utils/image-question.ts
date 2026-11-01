@@ -1,6 +1,13 @@
 import { instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
-import { type Api, type AssistantMessage, completeSimple, type Model, type Usage } from "@oh-my-pi/pi-ai";
+import {
+	type Api,
+	type AssistantMessage,
+	assistantTurnError,
+	completeSimple,
+	type Model,
+	type Usage,
+} from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import { extractTextContent } from "../commit/utils";
 import {
@@ -168,7 +175,10 @@ export async function askImageQuestion(
 	}
 
 	if (response.stopReason === "error") {
-		throw new ToolError(response.errorMessage ?? "Image question request failed.");
+		// The failed turn rides as the cause, so the server's wait stays structured (`retryAfterMsOf`).
+		throw Object.assign(new ToolError(response.errorMessage ?? "Image question request failed."), {
+			cause: assistantTurnError(response),
+		});
 	}
 	if (response.stopReason === "aborted") {
 		if (timedOut()) throw new ToolError(formatTimeoutMessage());

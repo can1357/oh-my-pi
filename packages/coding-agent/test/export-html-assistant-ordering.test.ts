@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import * as vm from "node:vm";
 import { type Document, Element, parseHTML } from "@oh-my-pi/pi-utils/dom";
 import { Marked } from "@oh-my-pi/pi-utils/marked";
+import { withRetryWait } from "@oh-my-pi/pi-utils";
 import type { SessionEntry } from "../src/session/session-entries";
 import type { SubSession } from "../src/session/sub-sessions";
 
@@ -483,5 +484,61 @@ describe("HTML export assistant content ordering", () => {
 		expect(renderedSidebarOrder(rendered)).toEqual(["assistant: root", "user: branch-b", "user: branch-a"]);
 		const updatedRows = Array.from(rendered.document.querySelectorAll("#tree-container .tree-node"));
 		expect(updatedRows.map(row => row.classList.contains("in-path"))).toEqual([true, true, false]);
+	});
+
+	test("renders a failed turn's retry wait from errorRetryAfterMs with pi-utils' wording, and none from its text", () => {
+		// One wait per duration branch of the viewer's port (seconds, minutes, hours),
+		// then a message persisted before the wait was structured: its text stays and no wait is added.
+		for (const [message, expected] of [
+			[{ errorMessage: "503 overloaded", errorRetryAfterMs: 9_000 }, withRetryWait("503 overloaded", 9_000)],
+			[{ errorMessage: "503 overloaded", errorRetryAfterMs: 90_000 }, withRetryWait("503 overloaded", 90_000)],
+			[{ errorMessage: "503 overloaded", errorRetryAfterMs: 4_000_000 }, withRetryWait("503 overloaded", 4_000_000)],
+			[{ errorMessage: "503 overloaded retry-after-ms=9000" }, "503 overloaded retry-after-ms=9000"],
+		] as const) {
+			const rendered = renderSession(
+				[
+					{
+						type: "message",
+						id: "assistant-1",
+						parentId: null,
+						timestamp: "2026-01-01T00:00:01.000Z",
+						message: { role: "assistant", content: [], stopReason: "error", timestamp: 1, ...message },
+					},
+				],
+				"assistant-1",
+			);
+			expect(rendered.assistant.querySelector(".error-text")?.textContent?.trim()).toBe(`Error: ${expected}`);
+			expect(renderedSidebarOrder(rendered)).toEqual([`assistant: ${expected}`]);
+		}
+	});
+
+	test("cuts a long error in the sidebar row before adding its retry wait", () => {
+		const longError = `503 ${"overloaded ".repeat(20)}`.trim();
+		const rendered = renderSession(
+			[
+				{
+					type: "message",
+					id: "assistant-1",
+					parentId: null,
+					timestamp: "2026-01-01T00:00:01.000Z",
+					message: {
+						role: "assistant",
+						content: [],
+						stopReason: "error",
+						timestamp: 1,
+						errorMessage: longError,
+						errorRetryAfterMs: 9_000,
+					},
+				},
+			],
+			"assistant-1",
+		);
+		// The row keeps 100 characters of the error, then its wait; the message block keeps the whole error.
+		expect(renderedSidebarOrder(rendered)).toEqual([
+			`assistant: ${withRetryWait(`${longError.slice(0, 100)}...`, 9_000)}`,
+		]);
+		expect(rendered.assistant.querySelector(".error-text")?.textContent?.trim()).toBe(
+			`Error: ${withRetryWait(longError, 9_000)}`,
+		);
 	});
 });

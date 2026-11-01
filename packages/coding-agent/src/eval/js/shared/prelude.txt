@@ -351,7 +351,13 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		const status = snapshot?.status ?? "failed";
 		if (status === "running") throw timeoutError(`${handle.kind} handle ${handle.id} is still running`);
 		if (status === "failed" || status === "cancelled") {
-			throw new Error(snapshot?.error || `${handle.kind} handle ${handle.id} failed`);
+			const error = new Error(snapshot?.error || `${handle.kind} handle ${handle.id} failed`);
+			// The server's retry wait rides structured, as the host's errors carry it: a
+			// `retry-after-ms` header. The message caught here stays the plain text.
+			if (typeof snapshot?.errorRetryAfterMs === "number") {
+				error.headers = { "retry-after-ms": String(snapshot.errorRetryAfterMs) };
+			}
+			throw error;
 		}
 		const value = hasOwn(snapshot ?? {}, "data")
 			? snapshot.data

@@ -169,6 +169,7 @@ export async function initDb(): Promise<Database> {
 			ttft INTEGER,
 			stop_reason TEXT NOT NULL,
 			error_message TEXT,
+			error_retry_after_ms INTEGER,
 			input_tokens INTEGER NOT NULL,
 			output_tokens INTEGER NOT NULL,
 			cache_read_tokens INTEGER NOT NULL,
@@ -290,6 +291,12 @@ export async function initDb(): Promise<Database> {
 	// fills them from the session's assistant messages.
 	if (!messageColumns.some(column => column.name === "service_tier")) {
 		db.run("ALTER TABLE messages ADD COLUMN service_tier TEXT");
+	}
+	// The server's retry wait the failed turn stated, kept beside the raw
+	// `error_message`. Rows ingested before this column existed carry none; a
+	// re-parse fills them from the session's assistant messages.
+	if (!messageColumns.some(column => column.name === "error_retry_after_ms")) {
+		db.run("ALTER TABLE messages ADD COLUMN error_retry_after_ms INTEGER");
 	}
 	// Rows ingested before this column existed default to 0 (not unpriced), so
 	// their epoch-sentinel zeros read as free until a re-parse rewrites them.
@@ -929,6 +936,7 @@ export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 			"ttft",
 			"stop_reason",
 			"error_message",
+			"error_retry_after_ms",
 			"input_tokens",
 			"output_tokens",
 			"cache_read_tokens",
@@ -955,7 +963,8 @@ export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 			cost_total = excluded.cost_total,
 			cost_no_cache_input = excluded.cost_no_cache_input,
 			cost_unpriced = excluded.cost_unpriced,
-			service_tier = excluded.service_tier`,
+			service_tier = excluded.service_tier,
+			error_retry_after_ms = excluded.error_retry_after_ms`,
 	});
 	return atomically(db, () => {
 		for (const s of stats) {
@@ -976,6 +985,7 @@ export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 					s.ttft,
 					s.stopReason,
 					s.errorMessage,
+					s.errorRetryAfterMs ?? null,
 					s.usage.input,
 					s.usage.output,
 					s.usage.cacheRead,
@@ -1032,6 +1042,7 @@ function rowToMessageStats(row: any): MessageStats {
 		ttft: row.ttft,
 		stopReason: row.stop_reason as any,
 		errorMessage: row.error_message,
+		errorRetryAfterMs: row.error_retry_after_ms ?? null,
 		usage: {
 			input: row.input_tokens,
 			output: row.output_tokens,

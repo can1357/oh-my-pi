@@ -1552,6 +1552,7 @@ function createCustomToolsExtension(tools: CustomTool[], sourcePaths?: ReadonlyM
 					aborted: event.aborted,
 					willRetry: event.willRetry,
 					errorMessage: event.errorMessage,
+					retryAfterMs: event.retryAfterMs,
 				},
 				ctx,
 			),
@@ -1565,6 +1566,7 @@ function createCustomToolsExtension(tools: CustomTool[], sourcePaths?: ReadonlyM
 					delayMs: event.delayMs,
 					errorMessage: event.errorMessage,
 					errorId: event.errorId,
+					retryAfterMs: event.retryAfterMs,
 				},
 				ctx,
 			),
@@ -1576,6 +1578,7 @@ function createCustomToolsExtension(tools: CustomTool[], sourcePaths?: ReadonlyM
 					success: event.success,
 					attempt: event.attempt,
 					finalError: event.finalError,
+					finalRetryAfterMs: event.finalRetryAfterMs,
 					retryErrors: event.retryErrors,
 				},
 				ctx,
@@ -4701,6 +4704,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					agent.state.tools.some(tool => tool.name === "think") &&
 					supportsExternalThinking(streamModel);
 				const fallbackCreditRedemption = session?.consumeActiveFallbackCreditRedemption(streamModel);
+				const heldReplayBudgetMs = session?.consumeHeldRetryReplayBudget(streamModel);
 				if (streamOptions?.promptCacheKey === undefined) session?.promoteTaskSiblingCandidate(streamModel);
 				const merged: SimpleStreamOptions = {
 					...streamOptions,
@@ -4710,6 +4714,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				const stream = primaryStreamFn(streamModel, context, {
 					...merged,
 					...(fallbackCreditRedemption !== undefined ? { fallbackCreditRedemption } : {}),
+					...(heldReplayBudgetMs !== undefined ? { replayBudgetMs: heldReplayBudgetMs } : {}),
 				});
 				// A request that waited for a provider slot is checked again when it goes out.
 				if (stream instanceof Promise) {

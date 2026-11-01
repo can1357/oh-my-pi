@@ -191,6 +191,7 @@ export function extensionEventFromSessionEvent(
 				aborted: event.aborted,
 				willRetry: event.willRetry,
 				errorMessage: event.errorMessage,
+				retryAfterMs: event.retryAfterMs,
 				skipped: event.skipped,
 			};
 		case "auto_retry_start":
@@ -201,6 +202,7 @@ export function extensionEventFromSessionEvent(
 				delayMs: event.delayMs,
 				errorMessage: event.errorMessage,
 				errorId: event.errorId,
+				retryAfterMs: event.retryAfterMs,
 			};
 		case "auto_retry_end":
 			return {
@@ -208,6 +210,7 @@ export function extensionEventFromSessionEvent(
 				success: event.success,
 				attempt: event.attempt,
 				finalError: event.finalError,
+				finalRetryAfterMs: event.finalRetryAfterMs,
 				retryErrors: event.retryErrors,
 			};
 		case "retry_fallback_applied":

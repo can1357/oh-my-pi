@@ -14,7 +14,7 @@ import {
 	getAntigravityModelWireProfile,
 	getGeminiCliHeaders,
 } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
-import { extractHttpStatusFromError, fetchWithRetry, readSseJson } from "@oh-my-pi/pi-utils";
+import { extractHttpStatusFromError, fetchWithRetry, findRetryRefusal, readSseJson } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { oauthAccountKey } from "../auth/types";
 import type {
@@ -35,6 +35,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import { extractGoogleValidationUrl, formatGoogleValidationRequiredMessage } from "../utils/google-validation";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import { armPreResponseTimeout, getStreamFirstEventTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
+import { admitsReplay, gateFetch, gateOptionalFetch, ReplayBudget, restoreReplaced } from "../utils/replay-budget";
 // Refresh is the sole responsibility of AuthStorage (broker-aware, single-flighted);
 // the stream provider trusts the access token threaded through `options.apiKey`.
 import { normalizeSchemaForCCA } from "../utils/schema";
@@ -493,6 +494,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 
 	(async () => {
 		const startTime = performance.now();
+		const replayBudget = ReplayBudget.forCall(options);
 		let firstTokenTime: number | undefined;
 
 		const output: AssistantMessage = {
@@ -513,6 +515,12 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			timestamp: Date.now(),
 		};
 		let rawRequestDump: RawHttpRequestDump | undefined;
+		// The current attempt's accepted (2xx) response headers, for `finalize`:
+		// an in-band stream error or a cut stream keeps the response's
+		// `Retry-After`. Cleared when an attempt starts (each endpoint, each
+		// empty-stream refetch), so a later attempt that fails before its response
+		// never reads an earlier response's headers.
+		let streamResponseHeaders: Headers | undefined;
 
 		try {
 			const apiKeyRaw = options?.apiKey;
@@ -951,11 +959,18 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 						block.type === "thinking" && (block.thinking.trim().length > 0 || Boolean(block.thinkingSignature)),
 				);
 
+			// Under a replay budget the next endpoint is a replay like any other: it
+			// waits the failing endpoint's longest named wait, only if that fits the
+			// budget, raced against the deadline, and its request is checked again at
+			// handoff. Called only under a budget; without one the switch is immediate.
+			const switchesEndpoint = (budget: ReplayBudget, failure: unknown): Promise<boolean> =>
+				budget.replayAfter(failure, 0, options?.signal, options?.providerRetryWait);
 			for (let i = 0; i < endpoints.length; i++) {
 				const endpoint = endpoints[i];
 				const isLastEndpoint = i === endpoints.length - 1;
 				try {
 					started = false;
+					streamResponseHeaders = undefined;
 					resetOutput();
 
 					// Per attempt: arm a pre-response (TTFT) timer, cleared the instant
@@ -972,7 +987,8 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 							maxAttempts: isLastEndpoint ? MAX_RETRIES + 1 : 1,
 							defaultDelayMs: attempt => BASE_DELAY_MS * 2 ** attempt,
 							maxDelayMs: options?.maxRetryDelayMs ?? RATE_LIMIT_BUDGET_MS,
-							fetch: options?.fetch,
+							fetch: gateOptionalFetch(replayBudget, options?.fetch),
+							retryGate: replayBudget?.admits,
 							timeout: false,
 						});
 					} finally {
@@ -980,11 +996,8 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					}
 
 					if (!response.ok) {
-						if (AIError.isTransientStatus(response.status)) {
-							if (!isLastEndpoint) {
-								continue;
-							}
-						}
+						const transientElsewhere = AIError.isTransientStatus(response.status) && !isLastEndpoint;
+						if (transientElsewhere && !replayBudget) continue;
 						const errorText = await response.text();
 						const validationUrl = extractGoogleValidationUrl(errorText);
 						const errorMessage = validationUrl
@@ -994,13 +1007,16 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 									parsedCredentials.email,
 								)
 							: errorText;
-						throw new AIError.GeminiCliApiError(
+						const failure = new AIError.GeminiCliApiError(
 							`Cloud Code Assist API error (${response.status}): ${errorMessage}`,
 							response.status,
 							{ headers: response.headers },
 						);
+						if (transientElsewhere && replayBudget && (await switchesEndpoint(replayBudget, failure))) continue;
+						throw failure;
 					}
 
+					streamResponseHeaders = response.headers;
 					const requestUrl = response.url;
 					let currentResponse = response;
 
@@ -1011,17 +1027,31 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 
 						if (emptyAttempt > 0) {
 							const backoffMs = EMPTY_STREAM_BASE_DELAY_MS * 2 ** (emptyAttempt - 1);
-							try {
-								await scheduler.wait(backoffMs, { signal: options?.signal });
-							} catch {
-								throw new AIError.AbortError("Request was aborted");
+							if (!admitsReplay(replayBudget, backoffMs)) break;
+							if (replayBudget) {
+								// Raced against the deadline; the replay's request is checked
+								// again at handoff and, refused there, ends as the empty response.
+								if (!(await replayBudget.wait(backoffMs, options?.signal, options?.providerRetryWait))) break;
+								replayBudget.arm(
+									new AIError.ProviderResponseError("Cloud Code Assist API returned an empty response", {
+										provider: model.provider,
+										kind: "empty-body",
+									}),
+								);
+							} else {
+								try {
+									await scheduler.wait(backoffMs, { signal: options?.signal });
+								} catch {
+									throw new AIError.AbortError("Request was aborted");
+								}
 							}
 
 							if (!requestUrl) {
 								throw new AIError.ConfigurationError("Missing request URL");
 							}
 
-							currentResponse = await (options?.fetch ?? fetch)(requestUrl, {
+							streamResponseHeaders = undefined;
+							currentResponse = await gateFetch(replayBudget, options?.fetch ?? fetch)(requestUrl, {
 								method: "POST",
 								headers: requestHeaders,
 								body: requestBodyJson,
@@ -1036,6 +1066,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 									{ headers: currentResponse.headers },
 								);
 							}
+							streamResponseHeaders = currentResponse.headers;
 						}
 
 						const streamed = await streamResponse(currentResponse);
@@ -1110,6 +1141,8 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					}
 					break;
 				} catch (error) {
+					// A request the budget refused at handoff stands for the failure it replaced.
+					if (findRetryRefusal(error)) throw restoreReplaced(error);
 					const status = extractHttpStatusFromError(error);
 					if (
 						!isLastEndpoint &&
@@ -1117,7 +1150,8 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 						(AIError.isTransientStatus(status) ||
 							(status === undefined &&
 								!(error instanceof AIError.ProviderResponseError && error.kind === "output") &&
-								AIError.retriable(AIError.classify(error))))
+								AIError.retriable(AIError.classify(error)))) &&
+						(!replayBudget || (await switchesEndpoint(replayBudget, error)))
 					) {
 						continue;
 					}
@@ -1137,11 +1171,18 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
 		} catch (error) {
-			const result = await AIError.finalize(error, { api: model.api, signal: options?.signal, rawRequestDump });
+			const result = await AIError.finalize(restoreReplaced(error, replayBudget), {
+				api: model.api,
+				signal: options?.signal,
+				rawRequestDump,
+				streamResponseHeaders,
+			});
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = result.message;
+			output.errorRetryAfterMs = result.retryAfterMs;
+			replayBudget?.stamp(output);
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: output.stopReason, error: output });

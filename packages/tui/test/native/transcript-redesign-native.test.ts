@@ -87,6 +87,29 @@ describe("native transcript redesign", () => {
 		expect(harness.errors).toEqual([]);
 	});
 
+	it("reads the status chip from the unrendered error and renders the retry wait from the field only", async () => {
+		const component = new AssistantMessageComponent({ ...failed("429 rate limited"), errorRetryAfterMs: 9000 });
+		harness = await TspHarness.start();
+		harness.tui.addChild(component);
+		await harness.render();
+		expect(harness.find(node => node.k === "badge" && node.p?.role === "omp.error.code")?.p).toMatchObject({
+			text: "429",
+		});
+		expect(texts(harness.find(node => node.p?.role === "omp.error.message"))).toBe("rate limited (retry after 9.0s)");
+
+		// A message persisted before the wait was structured keeps its old text,
+		// and no wait is rendered for it.
+		component.updateContent(failed("429 rate limited retry-after-ms=9000"));
+		await harness.render();
+		expect(harness.find(node => node.k === "badge" && node.p?.role === "omp.error.code")?.p).toMatchObject({
+			text: "429",
+		});
+		expect(texts(harness.find(node => node.p?.role === "omp.error.message"))).toBe(
+			"rate limited retry-after-ms=9000",
+		);
+		expect(harness.errors).toEqual([]);
+	});
+
 	it("streams thinking under a live head, then settles to a collapsed 'Thought' line", async () => {
 		const component = new AssistantMessageComponent();
 		harness = await TspHarness.start();

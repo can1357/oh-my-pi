@@ -1191,6 +1191,68 @@ describe("thinking-loop retry budget (result path)", () => {
 		}
 	});
 
+	// A re-sample replays the call: under a spent replay budget the stall in hand
+	// is the result, and it says the budget ended it.
+	test.each([
+		["completeSimple", (model: Model<Api>) => completeSimple(model, context(), { replayBudgetMs: 0 })],
+		["complete", (model: Model<Api>) => complete(model, context(), { replayBudgetMs: 0 })],
+	])("%s does not re-sample once the replay budget is spent", async (_name, run) => {
+		registerMockApi();
+		const waitSpy = spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		try {
+			const mock = createMockModel({ provider: "openrouter", id: "google/gemini-3.5-flash" });
+			for (let i = 0; i < 4; i++) mock.push(loopResponse());
+
+			const result = await run(mock.model);
+
+			expect(mock.calls).toHaveLength(1);
+			expect(result.errorMessage).toContain(THINKING_LOOP_ERROR_MARKER);
+			expect(result.replayBudgetExhausted).toBe(true);
+		} finally {
+			waitSpy.mockRestore();
+			clearCustomApis();
+		}
+	});
+
+	// The re-sample was admitted, but its own request reaches the transport after
+	// the deadline: the checkpoint refuses it. The stall in hand is the result,
+	// marked, not the refused attempt's error.
+	test("returns the stall in hand when the re-sample's request is refused at handoff", async () => {
+		registerMockApi();
+		const waitSpy = spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const realNow = performance.now.bind(performance);
+		let skew = 0;
+		const nowSpy = spyOn(performance, "now").mockImplementation(() => realNow() + skew);
+		let resampleRequests = 0;
+		try {
+			const mock = createMockModel({ provider: "openrouter", id: "google/gemini-3.5-flash" });
+			mock.push(loopResponse());
+			mock.push(async (_context, options) => {
+				// The re-sample's preparation outlasts the budget.
+				skew += 30_000;
+				resampleRequests++;
+				try {
+					await options?.fetch?.("http://127.0.0.1:9/never-sent");
+				} catch (error) {
+					// A stock provider's final catch turns the refusal into an error result.
+					return { stopReason: "error", errorMessage: String(error) };
+				}
+				return loopResponse();
+			});
+
+			const result = await completeSimple(mock.model, context(), { replayBudgetMs: 20_000 });
+
+			expect(resampleRequests).toBe(1);
+			expect(mock.calls).toHaveLength(2);
+			expect(result.errorMessage).toContain(THINKING_LOOP_ERROR_MARKER);
+			expect(result.replayBudgetExhausted).toBe(true);
+		} finally {
+			nowSpy.mockRestore();
+			waitSpy.mockRestore();
+			clearCustomApis();
+		}
+	});
+
 	test("a caller abort during backoff rejects instead of returning the stall", async () => {
 		registerMockApi();
 		const controller = new AbortController();

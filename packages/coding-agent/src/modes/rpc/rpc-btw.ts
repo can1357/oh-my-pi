@@ -7,6 +7,7 @@
  * turn is checkpointed into the session's BTW history sidecar, so the TUI and
  * RPC hosts read and continue the same topics.
  */
+import { retryAfterMsOf } from "@oh-my-pi/pi-ai/utils/retry-wait-display";
 import { logger, toError } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "../../session/agent-session";
 import {
@@ -232,7 +233,12 @@ export class RpcBtwController {
 			});
 			this.#finish(running, { answer: replyText, status: "complete", updatedAt: Date.now() });
 		} catch (error) {
-			this.#finish(running, { status: "error", error: toError(error).message, updatedAt: Date.now() });
+			this.#finish(running, {
+				status: "error",
+				error: toError(error).message,
+				errorRetryAfterMs: retryAfterMsOf(error),
+				updatedAt: Date.now(),
+			});
 		}
 	}
 

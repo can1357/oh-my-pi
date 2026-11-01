@@ -1,8 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { Buffer } from "node:buffer";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { RetryRefusedError } from "@oh-my-pi/pi-utils";
 import { __resetVertexTokenCache, getVertexAccessToken, userAdcPath } from "../../src/providers/google-auth";
 import type { FetchImpl } from "../../src/types";
 
@@ -216,4 +217,60 @@ describe("gcloud user ADC location", () => {
 			expect(body.get("refresh_token")).toBe("refresh-token");
 		},
 	);
+});
+
+// A call's replay budget can refuse the metadata probe its fetch makes. That is
+// not "no metadata server": the call answers with the failure its replay
+// replaced, and a call waiting on the shared resolution resolves on its own.
+describe("a metadata token probe a replay budget refused", () => {
+	const ENV_KEYS = ["GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_ACCESS_TOKEN", "CLOUDSDK_AUTH_ACCESS_TOKEN"];
+	let tmpDir: string;
+	let originalEnv: Record<string, string | undefined>;
+	let homedirSpy: ReturnType<typeof spyOn>;
+
+	beforeEach(async () => {
+		__resetVertexTokenCache();
+		originalEnv = Object.fromEntries(ENV_KEYS.map(key => [key, Bun.env[key]]));
+		for (const key of ENV_KEYS) delete Bun.env[key];
+		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-vertex-metadata-"));
+		// No gcloud user ADC: the resolution falls through to the metadata server.
+		homedirSpy = spyOn(os, "homedir").mockReturnValue(tmpDir);
+	});
+
+	afterEach(async () => {
+		__resetVertexTokenCache();
+		homedirSpy.mockRestore();
+		for (const key of ENV_KEYS) {
+			const original = originalEnv[key];
+			if (original === undefined) delete Bun.env[key];
+			else Bun.env[key] = original;
+		}
+		await fs.rm(tmpDir, { recursive: true, force: true });
+	});
+
+	it("hands the refusal to its own call and resolves again for a call waiting on it", async () => {
+		const replaced = new Error("503 original overload");
+		const refused: FetchImpl = async () => {
+			throw new RetryRefusedError(replaced);
+		};
+		const waiterUrls: string[] = [];
+		const waiter: FetchImpl = async input => {
+			waiterUrls.push(urlOf(input));
+			return Response.json({ access_token: "waiter-token", expires_in: 3600 });
+		};
+
+		const owner = getVertexAccessToken({ fetch: refused });
+		const joined = getVertexAccessToken({ fetch: waiter });
+
+		const ownerError = await owner.then(
+			() => undefined,
+			(error: unknown) => error,
+		);
+		expect(ownerError).toBeInstanceOf(RetryRefusedError);
+		expect((ownerError as RetryRefusedError).replaced).toBe(replaced);
+		expect(await joined).toBe("waiter-token");
+		expect(waiterUrls).toEqual([
+			"http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
+		]);
+	});
 });

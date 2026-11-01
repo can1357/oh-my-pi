@@ -22,14 +22,18 @@
  *   POST /v1/pi/stream
  *   body:    { modelId, context, options?, stream? }   // `stream` defaults to true
  *   200 SSE: stream of `AssistantMessageEvent` (terminated by `data: [DONE]`),
- *            interleaved with `: keepalive` comment frames
+ *            interleaved with `: keepalive` comment frames. When the upstream
+ *            fails by throwing, the last event is the failure frame
+ *            `{ type: "error", reason: "error", errorMessage, errorRetryAfterMs? }`.
  *   200 JSON (stream=false): { message: AssistantMessage }
- *   4xx/5xx: { error: { type, message } }
+ *   4xx/5xx: { error: { type, message } }, with `retry-after-ms` / `Retry-After`
+ *            headers when the failed upstream attempt's headers named a wait
  */
 
 import type { AuthGatewayStreamControl } from "../auth-gateway/types";
 import * as AIError from "../error";
 import type { AssistantMessageEventStream, Context, SimpleStreamOptions } from "../types";
+import { getHeadersFromError, getRetryAfterMsFromHeaders } from "../utils/retry-after";
 
 export interface PiNativeParsedRequest {
 	modelId: string;
@@ -63,6 +67,7 @@ const ALLOWED_OPTION_KEYS: ReadonlySet<keyof SimpleStreamOptions> = new Set([
 	"headers",
 	"initiatorOverride",
 	"maxRetryDelayMs",
+	"replayBudgetMs",
 	"metadata",
 	"sessionId",
 	"promptCacheKey",
@@ -243,13 +248,17 @@ export function encodeStream(
 					// instead of hanging on the dropped connection. Shape matches the
 					// canonical `error` event minus the `error: AssistantMessage`
 					// payload (we don't have a usable one here); `streamPiNative`
-					// rebuilds that payload from its own model.
-					const message = err instanceof Error ? err.message : String(err);
-					controller.enqueue(
-						SSE_ENCODER.encode(
-							`data: ${JSON.stringify({ type: "error", reason: "error", errorMessage: message })}\n\n`,
-						),
-					);
+					// rebuilds that payload from its own model. The thrown error's
+					// own response headers supply the wait the rebuilt message
+					// carries as `errorRetryAfterMs`; its text never does.
+					// `JSON.stringify` drops the field when there is no wait.
+					const frame = {
+						type: "error",
+						reason: "error",
+						errorMessage: err instanceof Error ? err.message : String(err),
+						errorRetryAfterMs: getRetryAfterMsFromHeaders(getHeadersFromError(err)),
+					};
+					controller.enqueue(SSE_ENCODER.encode(`data: ${JSON.stringify(frame)}\n\n`));
 					controller.enqueue(SSE_DONE);
 					controller.close();
 				}

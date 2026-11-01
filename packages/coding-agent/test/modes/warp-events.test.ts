@@ -485,6 +485,65 @@ describe("Warp CLI-agent events", () => {
 			response: "rate limited",
 		});
 
+		// The server's retry wait is rendered from errorRetryAfterMs; a message persisted
+		// before the wait was structured keeps its old text and gets no rendered wait.
+		write.mockClear();
+		messageStart(userMessageStart("prompt wait"));
+		agentEnd({
+			type: "agent_end",
+			messages: [
+				{
+					role: "assistant",
+					content: [],
+					stopReason: "error",
+					errorMessage: "rate limited",
+					errorRetryAfterMs: 9000,
+				} as never,
+			],
+		});
+		expect(parseBodies(write).at(-1)).toMatchObject({
+			event: "stop_failure",
+			response: "rate limited (retry after 9.0s)",
+		});
+		write.mockClear();
+		messageStart(userMessageStart("prompt old"));
+		agentEnd({
+			type: "agent_end",
+			messages: [
+				{
+					role: "assistant",
+					content: [],
+					stopReason: "error",
+					errorMessage: "rate limited retry-after-ms=9000",
+				} as never,
+			],
+		});
+		expect(parseBodies(write).at(-1)).toMatchObject({
+			event: "stop_failure",
+			response: "rate limited retry-after-ms=9000",
+		});
+
+		// A long error is cut to the cap minus the wait, so the response keeps its
+		// wait and stays within 200 code points.
+		write.mockClear();
+		messageStart(userMessageStart("prompt long"));
+		agentEnd({
+			type: "agent_end",
+			messages: [
+				{
+					role: "assistant",
+					content: [],
+					stopReason: "error",
+					errorMessage: "😀".repeat(300),
+					errorRetryAfterMs: 9000,
+				} as never,
+			],
+		});
+		const wait = " (retry after 9.0s)";
+		const longResponse = parseBodies(write).at(-1)?.response;
+		expect(longResponse).toBe(`${"😀".repeat(200 - wait.length)}${wait}`);
+		expect(Array.from(longResponse as string)).toHaveLength(200);
+
 		// Normal text content is preferred over errorMessage; error stopReason still fails the turn.
 		write.mockClear();
 		messageStart(userMessageStart("prompt text"));

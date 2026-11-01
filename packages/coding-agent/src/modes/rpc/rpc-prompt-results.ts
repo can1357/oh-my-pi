@@ -223,6 +223,7 @@ function promptError(message: AssistantMessage): RpcPromptError {
 		retryable: AIError.is(errorId, AIError.Flag.Transient),
 	};
 	if (message.errorStatus !== undefined) error.httpStatus = message.errorStatus;
+	if (message.errorRetryAfterMs !== undefined) error.retryAfterMs = message.errorRetryAfterMs;
 	return error;
 }
 

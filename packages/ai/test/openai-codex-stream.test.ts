@@ -841,7 +841,9 @@ describe("openai-codex streaming", () => {
 			const result =
 				transport === "sse" ? (await runCodexSseEvents([failure])).result : await runCodexWebSocketEvent(failure);
 			expect(result.stopReason).toBe("error");
-			expect(extractProviderRetryHint("openai-codex", result.errorMessage)).toBe(expectedDelay);
+			// The wait is carried structured, and never written into the text.
+			expect(result.errorRetryAfterMs).toBe(expectedDelay);
+			expect(extractProviderRetryHint("openai-codex", result.errorMessage)).toBeUndefined();
 		});
 	});
 
@@ -2761,6 +2763,70 @@ describe("openai-codex streaming", () => {
 		expect(result.stopReason).toBe("error");
 		expect((result.errorMessage ?? "").toLowerCase()).toContain("rate limit");
 		expect(result.errorMessage).not.toContain("Body already used");
+	});
+
+	it("reports the replays it spent on a failure that opened only an empty reasoning block", async () => {
+		// This loop measures commitment by streamed block length, so a leading
+		// `output_item.added` for an empty reasoning item does not stop it: the
+		// request goes out six times. Recovery above reads `providerReplays` to
+		// tell that apart from one request that happened to open a block, which
+		// the content left on the message cannot say.
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+
+		const payload = Buffer.from(
+			JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "acc_test" } }),
+			"utf8",
+		).toBase64();
+		const token = `aaa.${payload}.bbb`;
+		let requestCount = 0;
+
+		// The runtime's `fetch` is the wire; a caller-supplied one would make the
+		// count unknown.
+		const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((async (input: string | URL) => {
+			const url = typeof input === "string" ? input : input.toString();
+			if (url !== "https://chatgpt.com/backend-api/codex/responses") {
+				return new Response("not found", { status: 404 });
+			}
+			requestCount += 1;
+			const sse = `${[
+				`data: ${JSON.stringify({ type: "response.created", response: { id: `resp_${requestCount}` } })}`,
+				`data: ${JSON.stringify({ type: "response.output_item.added", output_index: 0, item: { type: "reasoning", id: `rs_${requestCount}`, summary: [] } })}`,
+				`data: ${JSON.stringify({ type: "error", error: { code: "model_error", message: "upstream closed the connection" } })}`,
+			].join("\n\n")}\n\n`;
+			return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
+		}) as typeof fetch);
+
+		const model: Model<"openai-codex-responses"> = buildModel({
+			id: "gpt-5.1-codex",
+			name: "GPT-5.1 Codex",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			preferWebsockets: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+		});
+
+		const context: Context = {
+			systemPrompt: ["You are a helpful assistant."],
+			messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }],
+		};
+
+		const result = await streamOpenAICodexResponses(model, context, {
+			apiKey: token,
+			preferWebsockets: false,
+		}).result();
+
+		expect(fetchMock).toHaveBeenCalledTimes(6);
+		expect(result.stopReason).toBe("error");
+		expect(result.providerReplays).toBe(5);
+		// The block the stand-in used to read as "nothing replayed" is still there.
+		expect(result.content.some(block => block.type === "thinking")).toBe(true);
 	});
 
 	it.each([

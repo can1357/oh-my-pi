@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { ApiKeyResolution, ApiKeyResolveContext } from "@oh-my-pi/pi-ai";
 import { registerCustomApi, resolveApiKeyOnce, seedApiKeyResolver, unregisterCustomApis } from "@oh-my-pi/pi-ai";
 import { OAuthError, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
@@ -982,5 +982,166 @@ describe("streamSimple resolver auth retry", () => {
 
 		expect((caught as Error).message).toMatch(/No API key for provider/);
 		expect(attempts).toBe(0);
+	});
+});
+
+// A retry with another credential re-sends the request: a replay. Under a
+// replay budget it must begin inside it, and its request is checked again when
+// it is handed to the transport.
+describe("streamSimple resolver auth retry under a replay budget", () => {
+	afterEach(() => {
+		unregisterCustomApis(SOURCE_ID);
+		vi.restoreAllMocks();
+	});
+
+	/**
+	 * An API whose first attempt is rejected 401 after its request is sent
+	 * through the call's fetch. Like a provider, it reports every failure as an
+	 * error event, a refused send included.
+	 */
+	function registerSendingApi(keys: unknown[], beforeSend: (attempt: number) => void = () => {}): void {
+		registerCustomApi(
+			API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				pushKey(keys, options);
+				const attempt = keys.length;
+				const stream = new AssistantMessageEventStream();
+				const fail = (message: AssistantMessage): void => {
+					stream.push({ type: "start", partial: assistant() });
+					stream.push({ type: "error", reason: "error", error: message });
+				};
+				void (async () => {
+					try {
+						beforeSend(attempt);
+						const send = options?.fetch;
+						if (!send) throw new Error("expected the call's fetch");
+						await send("https://auth-retry.example.test/v1/messages", { method: "POST" });
+						if (attempt === 1) fail(assistantError("401 authentication_error", 401));
+						else ok(stream);
+					} catch (error) {
+						fail(assistantError(error instanceof Error ? error.message : String(error)));
+					}
+				})();
+				return stream;
+			},
+			SOURCE_ID,
+		);
+	}
+
+	async function run(
+		keys: unknown[],
+		replayBudgetMs: number | undefined,
+	): Promise<{ sent: number; result: AssistantMessage }> {
+		let sent = 0;
+		const stream = streamSimple(model(), context, {
+			apiKey: async ctx => (ctx.error === undefined ? "old-key" : "refresh-key"),
+			fetch: async () => {
+				sent++;
+				return new Response("ok");
+			},
+			...(replayBudgetMs === undefined ? {} : { replayBudgetMs }),
+		});
+		for await (const _event of stream) {
+			// drain
+		}
+		return { sent, result: await stream.result() };
+	}
+
+	it("retries with the next credential when no budget is set", async () => {
+		const keys: unknown[] = [];
+		registerSendingApi(keys);
+
+		const { sent, result } = await run(keys, undefined);
+
+		expect(keys).toEqual(["old-key", "refresh-key"]);
+		expect(sent).toBe(2);
+		expect(result.stopReason).toBe("stop");
+		expect(result.replayBudgetExhausted).toBeUndefined();
+	});
+
+	it("keeps the 401, marked, once the budget is spent", async () => {
+		const keys: unknown[] = [];
+		registerSendingApi(keys);
+
+		const { sent, result } = await run(keys, 0);
+
+		expect(keys).toEqual(["old-key"]);
+		expect(sent).toBe(1);
+		expect(result.stopReason).toBe("error");
+		expect(result.replayBudgetExhausted).toBe(true);
+	});
+
+	it("keeps the 401, marked, when the retry's request is ready only after the deadline", async () => {
+		let now = 0;
+		vi.spyOn(performance, "now").mockImplementation(() => now);
+		const keys: unknown[] = [];
+		registerSendingApi(keys, attempt => {
+			if (attempt === 2) now += 5_000;
+		});
+
+		const { sent, result } = await run(keys, 1_000);
+
+		expect(keys).toEqual(["old-key", "refresh-key"]);
+		expect(sent).toBe(1);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("401");
+		expect(result.replayBudgetExhausted).toBe(true);
+	});
+
+	// A provider can throw the rejection instead of reporting it as an error
+	// event; its wait is then on the error's own response headers, with no text.
+	describe("a thrown 401 whose only wait is in its headers", () => {
+		function registerThrowingApi(keys: unknown[]): void {
+			registerCustomApi(
+				API,
+				(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+					pushKey(keys, options);
+					const stream = new AssistantMessageEventStream();
+					queueMicrotask(() =>
+						keys.length === 1
+							? stream.fail(
+									Object.assign(new Error("401 authentication_error"), {
+										status: 401,
+										headers: new Headers({ "retry-after": "30" }),
+									}),
+								)
+							: ok(stream),
+					);
+					return stream;
+				},
+				SOURCE_ID,
+			);
+		}
+
+		async function call(replayBudgetMs: number | undefined): Promise<{ keys: unknown[]; message: AssistantMessage }> {
+			const keys: unknown[] = [];
+			registerThrowingApi(keys);
+			const stream = streamSimple(model(), context, {
+				apiKey: async ctx => (ctx.error === undefined ? "old-key" : "refresh-key"),
+				...(replayBudgetMs === undefined ? {} : { replayBudgetMs }),
+			});
+			let thrown: unknown;
+			try {
+				for await (const _event of stream) {
+					// drain
+				}
+			} catch (error) {
+				thrown = error;
+			}
+			return { keys, message: thrown === undefined ? await stream.result() : assistantError(String(thrown)) };
+		}
+
+		it("does not retry inside the server's 30 s window against a 2 s budget", async () => {
+			const { keys } = await call(2_000);
+
+			expect(keys).toEqual(["old-key"]);
+		});
+
+		it("retries with the next credential when no budget is set", async () => {
+			const { keys, message } = await call(undefined);
+
+			expect(keys).toEqual(["old-key", "refresh-key"]);
+			expect(message.stopReason).toBe("stop");
+		});
 	});
 });

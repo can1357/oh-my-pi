@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import { type AssistantMessage, assistantTurnError, type ImageContent, type TextContent } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { raceWithSignal } from "@oh-my-pi/pi-ai/utils/abort";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -1382,8 +1382,10 @@ export class AdvisorRuntime {
 					// Agent.#runLoop catches provider/stream failures internally and
 					// resolves prompt() cleanly with stopReason: "error". Treat that
 					// as a failed turn so endpoint rejections trip the retry path.
+					// The failed turn's server wait rides as headers on the thrown error.
 					const promptError = this.agent.state.error;
-					if (promptError) throw new Error(promptError);
+					if (promptError)
+						throw assistantTurnError(this.#terminalAssistantFailure(messageSnapshot) ?? {}, promptError);
 					// A content-less stop is a deliberate silent review — the documented
 					// verifier behavior ("prefer silence when the agent is on track") — and
 					// completes the turn. Sessions can legitimately have nothing to advise

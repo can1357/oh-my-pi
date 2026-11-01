@@ -1,4 +1,4 @@
-import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, prompt, withRetryWait } from "@oh-my-pi/pi-utils";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import workpoolBatchTemplate from "../prompts/tools/workpool-batch.md" with { type: "text" };
 import workpoolTurnResultTemplate from "../prompts/tools/workpool-turn-result.md" with { type: "text" };
@@ -100,6 +100,8 @@ interface TurnOutcome {
 	exitCode: number;
 	output: string;
 	error?: string;
+	/** The server's retry wait (ms) the provider error in `error` stated; rendered only into the delivery text. */
+	errorRetryAfterMs?: number;
 	aborted?: boolean;
 	extractedToolData?: Record<string, unknown[]>;
 	abortReason?: string;
@@ -535,7 +537,8 @@ export class WorkPool {
 
 	#renderTurnResult(agent: WorkPoolAgent, batch: WorkPoolBatch, result: TurnOutcome): string {
 		const remaining = this.items.filter(item => item.status === "queued" || item.status === "running").length;
-		const output = result.output.trim() || result.error || result.abortReason || "(no output)";
+		const error = result.error ? withRetryWait(result.error, result.errorRetryAfterMs) : undefined;
+		const output = result.output.trim() || error || result.abortReason || "(no output)";
 		const renderedOutput =
 			output.length <= DELIVERY_OUTPUT_LIMIT
 				? output

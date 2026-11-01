@@ -8,7 +8,7 @@ import { CodexApiError, parseCodexError } from "@oh-my-pi/pi-ai/providers/openai
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { convertOpenAICodexResponsesTools } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import type { Tool } from "@oh-my-pi/pi-ai/types";
-import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
+import { providerRetryWaitMs } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { OPENAI_HEADER_VALUES } from "@oh-my-pi/pi-catalog/wire/codex";
 import { createCodexModel } from "./helpers";
 
@@ -412,6 +412,8 @@ describe("openai-codex error parsing", () => {
 			provider: "openai-codex",
 			model: "gpt-5.6-sol",
 		});
-		expect(extractProviderRetryHint("openai-codex", result.message)).toBe(expectedHintMs);
+		// The wait as every consumer reads it: the structured header wait and the
+		// first wait the text names. The header's wait is never written into the text.
+		expect(providerRetryWaitMs("openai-codex", result.message, result.retryAfterMs)).toBe(expectedHintMs);
 	});
 });

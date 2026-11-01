@@ -4,7 +4,7 @@ import {
 	type AgentToolUpdateCallback,
 	validateAgentToolArguments,
 } from "@oh-my-pi/pi-agent-core";
-import { type ImageContent, toolWireSchema } from "@oh-my-pi/pi-ai";
+import { errorText, type ImageContent, toolWireSchema } from "@oh-my-pi/pi-ai";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type { ToolSession } from "../../tools";
@@ -247,7 +247,7 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 		} catch (error) {
 			options.emitStatus?.({
 				op: request.name,
-				error: error instanceof Error ? error.message : String(error),
+				error: errorText(error),
 			});
 			throw error;
 		}
@@ -372,7 +372,7 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 	} catch (error) {
 		options.emitStatus?.({
 			op: name,
-			error: error instanceof Error ? error.message : String(error),
+			error: errorText(error),
 		});
 		throw error;
 	}

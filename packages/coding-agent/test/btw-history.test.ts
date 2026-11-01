@@ -4,6 +4,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { type BtwHistoryRecord, BtwHistoryStore, getBtwCopyText } from "@oh-my-pi/pi-coding-agent/session/btw-history";
+import { BtwHistoryPanel } from "@oh-my-pi/pi-tui/overlays/btw-history-panel";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { acquireFileLock, withFileLock } from "@oh-my-pi/pi-utils";
 
 describe("BtwHistoryStore", () => {
@@ -199,6 +201,60 @@ describe("BtwHistoryStore", () => {
 		expect((await BtwHistoryStore.open(artifactsDir)).getRecords()).toEqual([
 			{ ...titled, answer: "Revised answer", updatedAt: 3 },
 		]);
+	});
+
+	it("keeps a failed turn's retry wait in memory only: shown live, never written, absent after reopen", async () => {
+		await initTheme(false);
+		const rendered = (topic: BtwHistoryRecord): string =>
+			Bun.stripANSI(
+				new BtwHistoryPanel({
+					records: [topic],
+					onClose: () => {},
+					onCopy: () => {},
+					onCancel: () => {},
+					requestRender: () => {},
+					getHeight: () => 40,
+				})
+					.render(160)
+					.join("\n"),
+			);
+		const store = await BtwHistoryStore.open(artifactsDir);
+		const failed = record("waited", {
+			status: "error",
+			error: "503 overloaded",
+			followUps: [
+				{
+					question: "Follow-up",
+					answer: "",
+					status: "error",
+					createdAt: 3,
+					updatedAt: 4,
+					error: "429 rate limited",
+					errorRetryAfterMs: 9000,
+				},
+			],
+			errorRetryAfterMs: 90_000,
+		});
+		await store.upsert(failed);
+
+		// The live view keeps each turn's wait and renders it after the error.
+		expect(store.getRecords()).toEqual([failed]);
+		const live = rendered(store.getRecords()[0]!);
+		expect(live).toContain("503 overloaded (retry after 1m30s)");
+		expect(live).toContain("429 rate limited (retry after 9.0s)");
+
+		// The record JSON older builds read carries no wait at any turn.
+		const json = await Bun.file(path.join(artifactsDir, "btw-history", "entry-waited.json")).text();
+		expect(json).not.toContain("errorRetryAfterMs");
+
+		// Read back, the turns have no wait, and none is rendered.
+		const [reread] = (await BtwHistoryStore.open(artifactsDir)).getRecords();
+		expect(reread?.errorRetryAfterMs).toBeUndefined();
+		expect(reread?.followUps?.[0]?.errorRetryAfterMs).toBeUndefined();
+		const afterRestart = rendered(reread!);
+		expect(afterRestart).toContain("503 overloaded");
+		expect(afterRestart).toContain("429 rate limited");
+		expect(afterRestart).not.toContain("(retry after");
 	});
 
 	it("opens history beside orphaned and unreadable title sidecars", async () => {

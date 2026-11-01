@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
+import { errorText } from "@oh-my-pi/pi-ai/utils/retry-wait-display";
 import {
 	type AutocompleteProvider,
 	BRACKETED_PASTE_END,
@@ -1195,7 +1196,7 @@ export class InputController {
 					// the error, mirroring `handleFollowUp`'s Ctrl+Enter path.
 					if (!draftDetached) throw error;
 					restoreDetachedDraft(this.ctx.editor, text, inputImages, inputImageLinks);
-					this.ctx.showError(error instanceof Error ? error.message : String(error));
+					this.ctx.showError(errorText(error));
 					return;
 				}
 				if (slashResult === true) {
@@ -1348,7 +1349,7 @@ export class InputController {
 						this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
 					}
 					this.ctx.editor.setCollapsedText(text);
-					this.ctx.showError(error instanceof Error ? error.message : String(error));
+					this.ctx.showError(errorText(error));
 				}
 				return;
 			}
@@ -1390,7 +1391,7 @@ export class InputController {
 						this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
 					}
 					this.ctx.editor.setCollapsedText(text);
-					this.ctx.showError(error instanceof Error ? error.message : String(error));
+					this.ctx.showError(errorText(error));
 				}
 				this.ctx.updatePendingMessagesDisplay();
 				this.ctx.ui.requestRender();
@@ -1468,7 +1469,7 @@ export class InputController {
 						this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
 					}
 					this.ctx.editor.setCollapsedText(text);
-					this.ctx.showError(error instanceof Error ? error.message : String(error));
+					this.ctx.showError(errorText(error));
 					// Dispatch rejected after the body was armed: park it so the
 					// failed prompt is not resubmitted on next idle.
 					if (this.ctx.loopPrompt === text) this.ctx.pauseLoop();
@@ -1562,7 +1563,7 @@ export class InputController {
 			question = renderFileSlashCommand(command, invocation.args);
 		} catch (error) {
 			draft.restore();
-			this.ctx.showError(error instanceof Error ? error.message : String(error));
+			this.ctx.showError(errorText(error));
 			return true;
 		}
 		this.ctx.editor.addToHistory(text);
@@ -1676,7 +1677,7 @@ export class InputController {
 				this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
 			}
 			this.ctx.editor.setCollapsedText(text);
-			this.ctx.showError(error instanceof Error ? error.message : String(error));
+			this.ctx.showError(errorText(error));
 		}
 		this.ctx.updatePendingMessagesDisplay();
 		this.ctx.ui.requestRender();
@@ -1813,8 +1814,7 @@ export class InputController {
 			process.removeListener("SIGCONT", onResume);
 			this.ctx.ui.start();
 			this.ctx.ui.requestRender(true);
-			const reason = err instanceof Error ? err.message : String(err);
-			this.ctx.showError(`Failed to suspend: ${reason}`);
+			this.ctx.showError(`Failed to suspend: ${errorText(err)}`);
 		}
 	}
 
@@ -1907,7 +1907,7 @@ export class InputController {
 			return dispatched;
 		} catch (error) {
 			restoreDraft();
-			this.ctx.showError(error instanceof Error ? error.message : String(error));
+			this.ctx.showError(errorText(error));
 			return true;
 		} finally {
 			if (this.ctx.session.isStreaming) {
@@ -2059,7 +2059,7 @@ export class InputController {
 				if (options.detachedText !== undefined) restoreDetachedDraft(this.ctx.editor, restored);
 				else this.ctx.editor.setText(restored);
 			}
-			this.ctx.showError(error instanceof Error ? error.message : String(error));
+			this.ctx.showError(errorText(error));
 		}
 
 		this.ctx.updatePendingMessagesDisplay();
@@ -2120,7 +2120,7 @@ export class InputController {
 						({ text, images, imageLinks } = input);
 					} catch (error) {
 						restoreDetachedDraft(this.ctx.editor, text, images, imageLinks);
-						this.ctx.showError(error instanceof Error ? error.message : String(error));
+						this.ctx.showError(errorText(error));
 						return;
 					}
 				}
@@ -2189,7 +2189,7 @@ export class InputController {
 				}
 			} catch (error) {
 				restoreDetachedDraft(this.ctx.editor, text, images, imageLinks);
-				this.ctx.showError(error instanceof Error ? error.message : String(error));
+				this.ctx.showError(errorText(error));
 				return;
 			}
 		}
@@ -2208,7 +2208,7 @@ export class InputController {
 		// or text+image draft can be retried, mirroring the main submit error path.
 		const restoreOnError = (error: unknown) => {
 			restoreDetachedDraft(this.ctx.editor, text, images, imageLinks);
-			this.ctx.showError(error instanceof Error ? error.message : String(error));
+			this.ctx.showError(errorText(error));
 		};
 
 		if (this.ctx.session.isStreaming) {
@@ -3054,7 +3054,7 @@ export class InputController {
 				cycleOrder.indexOf(result.role),
 			);
 		} catch (error) {
-			this.ctx.showError(error instanceof Error ? error.message : String(error));
+			this.ctx.showError(errorText(error));
 		}
 	}
 
@@ -3161,9 +3161,7 @@ export class InputController {
 				this.ctx.editor.setText(result);
 			}
 		} catch (error) {
-			this.ctx.showWarning(
-				`Failed to open external editor: ${error instanceof Error ? error.message : String(error)}`,
-			);
+			this.ctx.showWarning(`Failed to open external editor: ${errorText(error)}`);
 		} finally {
 			this.ctx.ui.start();
 			this.ctx.ui.requestRender();
