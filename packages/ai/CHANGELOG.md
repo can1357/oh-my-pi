@@ -219,6 +219,7 @@
 
 ### Fixed
 
+- Fixed OpenCode free-tier 403 on most conversations: the `x-opencode-session` head low 12 bits are now forced into the gateway-accepted range instead of raw digest bits the gate rejects ~98% of the time ([#12556](https://github.com/can1357/oh-my-pi/pull/12556) by [@palprateek](https://github.com/palprateek), gate range measured by [@jaskaran-ai](https://github.com/jaskaran-ai)).
 - Fixed Claude streams that a gateway cut off before `message_delta` failing the turn instead of being retried ([#16341](https://github.com/can1357/oh-my-pi/pull/16341) by [@lz-lunzi](https://github.com/lz-lunzi))
 - Fixed Gemini pairing parallel same-name tool results with the wrong call when history stores them out of call order (sessions from before 18.4.2, SDK-built contexts) ([#16259](https://github.com/can1357/oh-my-pi/pull/16259) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed Factory Droid Gemini dropping calls to tools with names over 64 characters (most MCP tools) and their results from later requests, so the model called the tool again; such names now shorten to 64 characters ([#16283](https://github.com/can1357/oh-my-pi/pull/16283) by [@will-bogusz](https://github.com/will-bogusz))
@@ -329,6 +330,7 @@
 
 ### Fixed
 
+- Fixed OpenCode free-tier 403 on advisor turns: the gateway mandatorily requires the `bash` and `read` tool names, so requests missing either (including rosters that carry other tool names but no `bash`) are now padded with stubs for the missing pair — on both dispatch funnels, with the `tool_choice: none` pin kept off `openai-responses` ([#12556](https://github.com/can1357/oh-my-pi/pull/12556) by [@palprateek](https://github.com/palprateek), with funnel coverage contributed by [@NoelJacob](https://github.com/NoelJacob)).
 - Fixed parallel tool calls failing with "Tool call arguments are not valid JSON" on some OpenAI-compatible gateways, such as Gemini ([#15682](https://github.com/can1357/oh-my-pi/pull/15682) by [@Zzz141592653](https://github.com/Zzz141592653))
 - Fixed Anthropic fallback-credit redemption losing its credit on errors that only mention `400` in their text, such as an overload message ([#15702](https://github.com/can1357/oh-my-pi/pull/15702) by [@H4vC](https://github.com/H4vC))
 - Fixed Anthropic fallback-credit redemption sending an extra `fallback-credit-2026-06-01` beta when the refused request used a newer one ([#15702](https://github.com/can1357/oh-my-pi/pull/15702) by [@H4vC](https://github.com/H4vC))
@@ -815,6 +817,9 @@
 
 ### Fixed
 
+- Fixed OpenCode Zen/Go free-tier 403 `FreeTierError` on model requests: OpenCode's gate rejects clients whose `User-Agent` is not `opencode/<version>` and whose `x-opencode-session` is not the canonical `ses_<12 hex><14 alnum>` shape, which omp's identity failed on both counts. All OpenCode inference now sends the canonical client UA and a stable session token derived from the conversation id so routing and prompt caching stay pinned across turns ([#12556](https://github.com/can1357/oh-my-pi/pull/12556) by [@palprateek](https://github.com/palprateek))
+- Fixed OpenCode free-tier 403 on tool-less auxiliary calls (advisors, one-shot helpers): the gate also requires at least five OpenCode core tool names in `tools[]`, so `stream()` now pads such requests with stub entries for the missing names instead of letting the gateway refuse them ([#12556](https://github.com/can1357/oh-my-pi/pull/12556) by [@palprateek](https://github.com/palprateek)).
+- OpenCode `403 FreeTierError` denials no longer rotate sibling credentials or invalidate the stored key (the same key keeps serving paid models), and the surfaced message now explains the model-scoped restriction instead of reading like an auth failure ([#12556](https://github.com/can1357/oh-my-pi/pull/12556) by [@palprateek](https://github.com/palprateek)).
 - Fixed Claude Opus 5.5 not applying a mid-session switch to high-effort reasoning when the session started without an explicit effort setting.
 - Fixed Alibaba Token Plan monthly quotas not appearing in usage reports or the status line.
 

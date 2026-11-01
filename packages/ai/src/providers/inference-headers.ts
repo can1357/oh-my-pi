@@ -2,7 +2,8 @@
 
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import type { CatalogPolicyInputs } from "@oh-my-pi/pi-catalog/types";
-import { APP_NAME, APP_URL, USER_AGENT } from "@oh-my-pi/pi-utils";
+import { OPENCODE_USER_AGENT, toOpenCodeSessionToken } from "@oh-my-pi/pi-catalog/wire/opencode";
+import { APP_NAME, APP_URL, getInstallId, USER_AGENT } from "@oh-my-pi/pi-utils";
 
 /** Options controlling provider and protocol inference headers. */
 export interface InferenceHeaderOptions {
@@ -110,7 +111,8 @@ export function applyInferenceHeaders(headers: Record<string, string>, options: 
 	// optional: a Go sibling lane can carry its family affinity with no
 	// conversation session in hand (V1 compaction, direct client-options
 	// builds), while every other lane still needs the conversation id.
-	if (!sessionId && !options.cacheAffinity) return;
+	// OpenCode lanes always project identity, even outside a conversation.
+	if (!sessionId && !options.cacheAffinity && !isOpenCode) return;
 
 	if (sessionId) {
 		if (options.protocol === "anthropic") {
@@ -122,12 +124,22 @@ export function applyInferenceHeaders(headers: Record<string, string>, options: 
 	}
 
 	if (isOpenCode) {
-		setHeaderIfAbsent(headers, "User-Agent", USER_AGENT);
+		// The free-tier gate reads the UA's leading token before anything else;
+		// only an explicit caller override (e.g. a Claude OAuth fingerprint) wins.
+		setHeaderIfAbsent(headers, "User-Agent", OPENCODE_USER_AGENT);
 		// Go's session header doubles as the gateway's cache-affinity handle:
 		// opted-in sibling lanes (see resolveOpenCodeGoCacheAffinity) share one
 		// task cache key there; every other lane keeps the conversation id.
+		// The formatter keeps the gate-required `ses_` shape and low-12-bit
+		// range while staying deterministic, so sibling lanes still share a key.
 		const goSession = backend === "opencode-go" ? (options.cacheAffinity ?? sessionId) : sessionId;
-		if (goSession) setHeader(headers, "x-opencode-session", goSession);
+		if (goSession) {
+			setHeader(headers, "x-opencode-session", toOpenCodeSessionToken(goSession));
+		} else {
+			// Background traffic outside any conversation (usage polls, model
+			// discovery) still has to carry the session header shape.
+			setHeaderIfAbsent(headers, "x-opencode-session", toOpenCodeSessionToken(getInstallId()));
+		}
 	}
 }
 
