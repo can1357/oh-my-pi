@@ -593,8 +593,8 @@ jobs:
               # (its install.sh smoke-check executes a fake binary), so running
               # the whole group here would red this job on an unrelated break.
               # The metaharness package has no CI bucket; this file runs here.
-              bun test scripts/release.test.ts scripts/ci-build-upload.test.ts scripts/github-run-data.test.ts \
-                packages/metaharness/test/tb-agent.test.ts
+              bun test scripts/release.test.ts scripts/ci-build-upload.test.ts scripts/run-rs-task.test.ts \
+                scripts/github-run-data.test.ts packages/metaharness/test/tb-agent.test.ts
 
    test_coding_agent_singleton:
       name: Test coding-agent singleton/global-state (TS)

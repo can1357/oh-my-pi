@@ -1,3 +1,4 @@
+import { isRecord } from "@oh-my-pi/pi-utils";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { EvalKernelNotRunningError } from "../eval/executor-base";
@@ -16,10 +17,6 @@ import { cfgEvalToolsEnabled } from "../eval/settings";
 interface EvalToolQueryResult {
 	tools: EvalToolDescriptor[];
 	missing: string[];
-}
-
-function isUnknownRecord(value: unknown): value is Record<string, unknown> {
-	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 async function queryPythonTools(
@@ -156,7 +153,7 @@ export function createEvalCustomTools(session: ToolSession, descriptors: EvalToo
 		parameters: descriptor.parameters,
 		loadMode: "essential",
 		async execute(_toolCallId, rawParams, _onUpdate, _ctx, signal) {
-			const params = isUnknownRecord(rawParams) ? rawParams : {};
+			const params = isRecord(rawParams) ? rawParams : {};
 			const args = stripHarnessIntent(params, descriptor.parameters);
 			let result: EvalToolInvokeResult;
 			try {

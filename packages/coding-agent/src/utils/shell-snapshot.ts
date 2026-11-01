@@ -128,22 +128,26 @@ function generateSnapshotScript(shell: string, snapshotPath: string, rcFile: str
 
 	const quotedPath = quotePosixArgument(snapshotPath);
 
-	// Function extraction differs between bash and zsh. Each form prints function
-	// bodies on stdout so we can both persist them AND scan their bodies for
-	// referenced env vars (issue #3470).
-	const functionExtractor = isZsh
-		? `# Force autoload all functions first
-typeset -f > /dev/null 2>&1
-# Get user function names - filter system/private ones
-typeset +f 2>/dev/null | grep -vE '^(_|__)' | grep -vE '${commonFunctionRegex}' | while read func; do
-   typeset -f "$func" 2>/dev/null
-done`
-		: `# Force autoload all functions first
-declare -f > /dev/null 2>&1
-# Get user function names - filter system/private ones
-declare -F 2>/dev/null | cut -d' ' -f3 | grep -vE '^(_|__)' | grep -vE '${commonFunctionRegex}' | while read func; do
-   declare -f "$func" 2>/dev/null
-done`;
+	// Function extraction differs between bash and zsh. Each form prints function bodies on stdout so
+	// we can both persist them AND scan their bodies for referenced env vars (issue #3470).
+	// Seeds are the user's own (non-`_`) functions; the worklist then pulls in every defined function a
+	// kept body names, so `cd() { __zsh_like_cd cd "$@"; }` (mise/zoxide) keeps its helper. Core tools
+	// stay excluded even when referenced, and utilities are `command`-qualified against rc overrides.
+	const listFunctionNames = isZsh ? "typeset +f" : "declare -F | cut -d' ' -f3";
+	const printFunction = isZsh ? "typeset -f" : "declare -f";
+	const functionExtractor = `# Force autoload all functions first
+${printFunction} > /dev/null 2>&1
+__omp_all=$(${listFunctionNames} 2>/dev/null | command sort -u)
+__omp_next=$(printf '%s\\n' "$__omp_all" | grep -vE '^(_|__)' | grep -vE '${commonFunctionRegex}')
+__omp_kept=$(mktemp)
+while [ -n "$__omp_next" ]; do
+   printf '%s\\n' "$__omp_next" >> "$__omp_kept"
+   __omp_next=$(printf '%s\\n' "$__omp_next" | while IFS= read -r __omp_f; do ${printFunction} "$__omp_f" 2>/dev/null; done \\
+      | grep -oE '[A-Za-z_][A-Za-z0-9_.-]*' | command sort -u | grep -xF -f <(printf '%s\\n' "$__omp_all") \\
+      | grep -vE '${commonFunctionRegex}' | grep -vxF -f "$__omp_kept")
+done
+while IFS= read -r __omp_f; do ${printFunction} "$__omp_f" 2>/dev/null; done < "$__omp_kept"
+rm -f "$__omp_kept"`;
 
 	// Shell options extraction
 	const optionsScript = isZsh
