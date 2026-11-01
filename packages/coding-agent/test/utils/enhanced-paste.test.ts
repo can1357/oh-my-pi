@@ -135,6 +135,24 @@ describe("EnhancedPasteController", () => {
 		expect(statuses).toEqual(["Clipboard paste has no supported text or image data"]);
 	});
 
+	it("does not paste the regular clipboard for an unsupported primary-selection listing", () => {
+		const statuses: string[] = [];
+		const controller = new EnhancedPasteController({
+			write: () => {},
+			pasteText: () => {},
+			pasteImage: () => {},
+			showStatus: message => statuses.push(message),
+			pasteNative: unexpectedNativePaste,
+		});
+
+		const tiffMime = Buffer.from("image/tiff", "utf8").toString("base64");
+		controller.handleInput(packet("type=read:status=OK:loc=primary"));
+		controller.handleInput(packet(`type=read:status=DATA:mime=${tiffMime}`));
+		controller.handleInput(packet("type=read:status=DONE"));
+
+		expect(statuses).toEqual(["Clipboard paste has no supported text or image data"]);
+	});
+
 	it("decodes Kitty's dot-listing DATA payload to discover plain-text and request it", () => {
 		const writes: string[] = [];
 		const pastedText: string[] = [];
