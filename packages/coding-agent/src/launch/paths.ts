@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { ipcEndpoint } from "@oh-my-pi/pi-natives";
+import { IpcConnection, ipcEndpoint } from "@oh-my-pi/pi-natives";
 import { getDaemonRuntimeDir, hasFsCode, isEacces, isEisdir, isEnoent } from "@oh-my-pi/pi-utils";
 
 /** Resolve the private runtime directory shared by omp processes in one project directory. */
@@ -21,6 +21,8 @@ export const DAEMON_META_FILE = "meta.json";
  * still accept that layout and broker recovery migrates it.
  */
 export const DAEMON_SPEC_FILE = "spec.json";
+/** Connect budget for the endpoint probe that answers "is a broker serving this scope?". */
+const ENDPOINT_PROBE_TIMEOUT_MS = 250;
 
 /**
  * Canonicalize a project directory the same way every broker client does, so
@@ -85,4 +87,35 @@ export async function readStoredDaemonRecord(dir: string): Promise<StoredDaemonR
 /** Resolve the Unix socket or Windows named pipe used by one daemon broker scope. */
 export function daemonBrokerEndpoint(runtimeDir: string): string {
 	return ipcEndpoint(runtimeDir, "broker");
+}
+
+/**
+ * What a connect to a scope endpoint says about its broker. `absent` (ENOENT):
+ * no socket exists there, so nothing can serve the scope. `refused`
+ * (ECONNREFUSED): normally nothing listens on the socket, but a live broker can
+ * be refused too: between its bind and listen, or where a full accept queue is
+ * reported this way (Bun's `node:net` does on Linux). `unknown`: any other
+ * error (EACCES, say, or the EAGAIN this transport gets from a full accept
+ * queue on Linux) or the timeout, after which the listener may still be alive.
+ */
+export type BrokerEndpointState = "live" | "absent" | "refused" | "unknown";
+
+/**
+ * Whether a broker is accepting connections on the scope endpoint right now
+ * (see {@link BrokerEndpointState}). Unlike a recorded pid, this answers the
+ * same in every PID namespace that shares the runtime directory.
+ */
+export async function probeBrokerEndpoint(endpoint: string): Promise<BrokerEndpointState> {
+	try {
+		const connection = await IpcConnection.connect(endpoint, {
+			framing: "lines",
+			timeoutMs: ENDPOINT_PROBE_TIMEOUT_MS,
+		});
+		connection.destroy();
+		return "live";
+	} catch (error) {
+		if (hasFsCode(error, "ENOENT")) return "absent";
+		if (hasFsCode(error, "ECONNREFUSED")) return "refused";
+		return "unknown";
+	}
 }
