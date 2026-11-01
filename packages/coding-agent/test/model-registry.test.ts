@@ -14,6 +14,7 @@ import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { fingerprintStaticModels } from "@oh-my-pi/pi-catalog/model-manager";
 import * as catalogModels from "@oh-my-pi/pi-catalog/models";
 import { calculateUsageCost, getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { finalizeCustomModel } from "@oh-my-pi/pi-coding-agent/config/custom-models";
 import { applyModelPatch, mergeDiscoveredModel } from "@oh-my-pi/pi-coding-agent/config/model-patch";
@@ -2314,7 +2315,532 @@ describe("ModelRegistry", () => {
 		});
 	});
 
-	describe("github-copilot oauth endpoint alignment", () => {
+	describe("configured discovery sources", () => {
+		test("reports cache, provider, and stale cache fallback sources", async () => {
+			const provider = "configured-source";
+			const baseUrl = "https://configured.example.com/v1";
+			fs.writeFileSync(
+				modelsJsonPath,
+				JSON.stringify({
+					providers: {
+						[provider]: {
+							baseUrl,
+							api: "openai-completions",
+							auth: "none",
+							discovery: { type: "openai-models-list" },
+						},
+					},
+				}),
+			);
+			const configTime = new Date(Date.now() - 1000);
+			fs.utimesSync(modelsJsonPath, configTime, configTime);
+			const cachedModel = buildModel({
+				id: "cached-model",
+				name: "Cached model",
+				provider,
+				api: "openai-completions",
+				baseUrl,
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 32_000,
+				maxTokens: 4096,
+			});
+			writeModelCache(
+				`${provider}:openai-models-list-context-v6`,
+				Date.now(),
+				[cachedModel],
+				true,
+				"",
+				path.join(tempDir, "models.db"),
+			);
+			let fetches = 0;
+			let fail = false;
+			const fetchMock: FetchImpl = async () => {
+				fetches++;
+				if (fail) throw new Error("configured provider unavailable");
+				return Response.json({ data: [{ id: "live-model" }] });
+			};
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+			expect(registry.getProviderDiscoveryState(provider)).toMatchObject({ source: "cache", stale: false });
+			await registry.refreshDiscoverableProviders([provider], "online-if-uncached");
+			expect(registry.getProviderDiscoveryState(provider)).toMatchObject({ source: "cache", stale: false });
+			expect(fetches).toBe(0);
+			await registry.refreshDiscoverableProviders([provider], "online");
+			expect(registry.getProviderDiscoveryState(provider)).toMatchObject({ source: "provider", stale: false });
+			fail = true;
+			await registry.refreshDiscoverableProviders([provider], "online");
+			expect(registry.getProviderDiscoveryState(provider)).toMatchObject({
+				source: "cache",
+				status: "cached",
+				stale: true,
+				error: expect.stringContaining("configured provider unavailable"),
+			});
+			expect(fetches).toBe(2);
+		});
+
+		test("publishes an online result that finishes after a newer cache read", async () => {
+			const provider = "configured-order";
+			fs.writeFileSync(
+				modelsJsonPath,
+				JSON.stringify({
+					providers: {
+						[provider]: {
+							baseUrl: "https://configured.example.com/v1",
+							api: "openai-completions",
+							auth: "none",
+							discovery: { type: "openai-models-list" },
+						},
+					},
+				}),
+			);
+			const started = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			let fetches = 0;
+			const fetchMock: FetchImpl = async () => {
+				fetches++;
+				if (fetches === 1) return Response.json({ data: [{ id: "old-model" }] });
+				started.resolve();
+				await release.promise;
+				return Response.json({ data: [{ id: "new-model" }] });
+			};
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+			await registry.refreshDiscoverableProviders([provider], "online");
+			const online = registry.refreshDiscoverableProviders([provider], "online");
+			try {
+				await started.promise;
+				await registry.refreshDiscoverableProviders([provider], "online-if-uncached");
+				expect(registry.find(provider, "old-model")).toBeDefined();
+				expect(registry.getProviderDiscoveryState(provider)?.source).toBe("cache");
+			} finally {
+				release.resolve();
+				await online;
+			}
+			expect(registry.find(provider, "new-model")).toBeDefined();
+			expect(registry.find(provider, "old-model")).toBeUndefined();
+			expect(registry.getProviderDiscoveryState(provider)?.source).toBe("provider");
+			expect(fetches).toBe(2);
+		});
+	});
+
+	describe("account-scoped OAuth discovery and Copilot endpoint alignment", () => {
+		async function waitForDiscoveryStart(
+			started: Promise<void>,
+			refresh: Promise<void>,
+			requested: string[],
+			provider: string,
+		): Promise<void> {
+			const missing = () => new Error(`${provider} discovery did not start; requests: ${requested.join(", ")}`);
+			const timeout = Promise.withResolvers<never>();
+			const timer = setTimeout(() => timeout.reject(missing()), 2_000);
+			try {
+				await Promise.race([
+					started,
+					refresh.then(() => {
+						throw missing();
+					}),
+					timeout.promise,
+				]);
+			} finally {
+				clearTimeout(timer);
+			}
+		}
+
+		test.each(["logout", "credential replacement"])("drops Kimi account rows after %s", async change => {
+			const provider = "kimi-code";
+			const oldModelId = "kimi-old-account-model";
+			const newModelId = "kimi-new-account-model";
+			const url = "https://api.kimi.com/coding/v1/models";
+			const previousEnvKey = Bun.env.KIMI_API_KEY;
+			Bun.env.KIMI_API_KEY = "";
+			try {
+				await authStorage.credentials.set(provider, {
+					type: "oauth",
+					access: "old-kimi-token",
+					refresh: "old-kimi-refresh",
+					expires: Date.now() + 60_000,
+				});
+				const replacementStarted = Promise.withResolvers<void>();
+				const releaseReplacement = Promise.withResolvers<void>();
+				const requested: string[] = [];
+				const fetchMock: FetchImpl = async (input, init) => {
+					const requestUrl = input instanceof Request ? input.url : String(input);
+					requested.push(requestUrl);
+					if (requestUrl !== url) throw new Error(`Unexpected URL: ${requestUrl}`);
+					const headers = input instanceof Request ? input.headers : new Headers(init?.headers);
+					if (headers.get("Authorization") === "Bearer new-kimi-token") {
+						replacementStarted.resolve();
+						await releaseReplacement.promise;
+						return Response.json({ data: [{ id: newModelId }] });
+					}
+					expect(headers.get("Authorization")).toBe("Bearer old-kimi-token");
+					return Response.json({ data: [{ id: oldModelId }] });
+				};
+				const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+				expect(fs.existsSync(modelsJsonPath)).toBe(false);
+				await registry.refreshProvider(provider, "online");
+				expect(registry.getAll().some(model => model.provider === provider && model.id === oldModelId)).toBe(true);
+				expect(registry.getProviderDiscoveryState(provider)?.models).toContain(oldModelId);
+
+				if (change === "logout") {
+					await authStorage.credentials.remove(provider);
+					await registry.refreshProvider(provider, "online");
+				} else {
+					await authStorage.credentials.set(provider, {
+						type: "oauth",
+						access: "new-kimi-token",
+						refresh: "new-kimi-refresh",
+						expires: Date.now() + 60_000,
+					});
+					const replacement = registry.refreshProvider(provider, "online");
+					try {
+						await waitForDiscoveryStart(replacementStarted.promise, replacement, requested, "replacement Kimi");
+						expect(registry.getAll().some(model => model.provider === provider && model.id === oldModelId)).toBe(
+							false,
+						);
+						expect(registry.getProviderDiscoveryState(provider)?.models ?? []).not.toContain(oldModelId);
+					} finally {
+						releaseReplacement.resolve();
+						await replacement;
+					}
+				}
+
+				expect(registry.getAll().some(model => model.provider === provider && model.id === oldModelId)).toBe(false);
+				expect(registry.getProviderDiscoveryState(provider)?.models ?? []).not.toContain(oldModelId);
+			} finally {
+				if (previousEnvKey === undefined) delete Bun.env.KIMI_API_KEY;
+				else Bun.env.KIMI_API_KEY = previousEnvKey;
+			}
+		});
+
+		test("rejects late logged-out Kimi discovery without rejecting unrelated pending discovery", async () => {
+			const provider = "kimi-code";
+			const oldModelId = "kimi-late-logged-out-account";
+			const otherProvider = "github-copilot";
+			const otherModelId = "gpt-99-unrelated-pending";
+			const copilotBaseUrl = "https://api.business.githubcopilot.com";
+			const previousEnvKey = Bun.env.KIMI_API_KEY;
+			Bun.env.KIMI_API_KEY = "";
+			try {
+				await authStorage.credentials.set(provider, {
+					type: "oauth",
+					access: "late-logged-out-account-token",
+					refresh: "late-logged-out-account-refresh",
+					expires: Date.now() + 60_000,
+				});
+				authStorage.keys.setRuntime(
+					otherProvider,
+					JSON.stringify({ token: "unrelated-provider-key", apiEndpoint: copilotBaseUrl }),
+				);
+				const oldStarted = Promise.withResolvers<void>();
+				const otherStarted = Promise.withResolvers<void>();
+				const release = Promise.withResolvers<void>();
+				const requested: string[] = [];
+				const fetchMock: FetchImpl = async input => {
+					const url = input instanceof Request ? input.url : String(input);
+					requested.push(url);
+					if (url === "https://api.kimi.com/coding/v1/models") {
+						oldStarted.resolve();
+						await release.promise;
+						return Response.json({ data: [{ id: oldModelId }] });
+					}
+					if (url === `${copilotBaseUrl}/models`) {
+						otherStarted.resolve();
+						await release.promise;
+						return Response.json({ data: [{ id: otherModelId }] });
+					}
+					throw new Error(`Unexpected URL: ${url}`);
+				};
+				const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+				const oldRefresh = registry.refreshDiscoverableProviders([provider], "online");
+				const otherRefresh = registry.refreshDiscoverableProviders([otherProvider], "online");
+				try {
+					await Promise.all([
+						waitForDiscoveryStart(oldStarted.promise, oldRefresh, requested, "Kimi"),
+						waitForDiscoveryStart(otherStarted.promise, otherRefresh, requested, "Copilot"),
+					]);
+					await authStorage.credentials.remove(provider);
+					await registry.refreshProvider(provider, "online");
+					expect(registry.getAll().some(model => model.provider === provider && model.id === oldModelId)).toBe(
+						false,
+					);
+					expect(registry.getProviderDiscoveryState(provider)?.models ?? []).not.toContain(oldModelId);
+				} finally {
+					release.resolve();
+					await Promise.all([oldRefresh, otherRefresh]);
+				}
+
+				expect(registry.getAll().some(model => model.provider === provider && model.id === oldModelId)).toBe(false);
+				expect(registry.getProviderDiscoveryState(provider)?.models ?? []).not.toContain(oldModelId);
+				expect(registry.getAll().some(model => model.provider === otherProvider && model.id === otherModelId)).toBe(
+					true,
+				);
+				expect(registry.getProviderDiscoveryState(otherProvider)?.models).toContain(otherModelId);
+			} finally {
+				if (previousEnvKey === undefined) delete Bun.env.KIMI_API_KEY;
+				else Bun.env.KIMI_API_KEY = previousEnvKey;
+			}
+		});
+
+		test("keeps discovery using an internally refreshed OAuth credential across unrelated refreshes", async () => {
+			const provider = "kimi-code";
+			const modelId = "kimi-refreshed-account-model";
+			const refreshedAuth = await AuthStorage.create(":memory:", {
+				refreshOAuthCredential: async (_provider, _credentialId, credential) => ({
+					...credential,
+					access: "fresh-kimi-token",
+					expires: Date.now() + 60_000,
+				}),
+			});
+			try {
+				await refreshedAuth.credentials.set(provider, {
+					type: "oauth",
+					access: "expired-kimi-token",
+					refresh: "kimi-refresh-token",
+					expires: Date.now() - 1,
+				});
+				const started = Promise.withResolvers<void>();
+				const release = Promise.withResolvers<void>();
+				const requested: string[] = [];
+				const fetchMock: FetchImpl = async (input, init) => {
+					const url = input instanceof Request ? input.url : String(input);
+					requested.push(url);
+					if (url !== "https://api.kimi.com/coding/v1/models") throw new Error(`Unexpected URL: ${url}`);
+					const headers = input instanceof Request ? input.headers : new Headers(init?.headers);
+					expect(headers.get("Authorization")).toBe("Bearer fresh-kimi-token");
+					started.resolve();
+					await release.promise;
+					return Response.json({ data: [{ id: modelId }] });
+				};
+				const registry = new ModelRegistry(refreshedAuth, modelsJsonPath, { fetch: fetchMock });
+				const discovery = registry.refreshDiscoverableProviders([provider], "online");
+				try {
+					await waitForDiscoveryStart(started.promise, discovery, requested, "refreshed Kimi");
+					await registry.refreshProvider("anthropic", "offline");
+				} finally {
+					release.resolve();
+					await discovery;
+				}
+				expect(registry.find(provider, modelId)?.id).toBe(modelId);
+				expect(registry.getProviderDiscoveryState(provider)?.models).toContain(modelId);
+				await registry.refreshProvider("anthropic", "offline");
+				expect(registry.find(provider, modelId)?.id).toBe(modelId);
+				expect(registry.getProviderDiscoveryState(provider)?.models).toContain(modelId);
+			} finally {
+				refreshedAuth.close();
+			}
+		});
+
+		test("keeps a scoped online catalog when an older full refresh finishes later", async () => {
+			const provider = "github-copilot";
+			const baseUrl = "https://api.business.githubcopilot.com";
+			const apiKey = JSON.stringify({ token: "copilot-race-key", apiEndpoint: baseUrl });
+			const cachedModel = buildModel({
+				id: "gpt-99-old-catalog",
+				name: "Old catalog model",
+				provider,
+				api: "openai-responses",
+				baseUrl,
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 200_000,
+				maxTokens: 16_384,
+			});
+			fs.writeFileSync(modelsJsonPath, JSON.stringify({ providers: {} }));
+			authStorage.keys.setRuntime(provider, apiKey);
+			writeModelCache(
+				resolveModelCacheProviderId(provider, { apiKey, baseUrl }),
+				Date.now(),
+				[cachedModel],
+				true,
+				"",
+				path.join(tempDir, "models.db"),
+			);
+			const slowStarted = Promise.withResolvers<void>();
+			const releaseSlow = Promise.withResolvers<void>();
+			let copilotFetches = 0;
+			const fetchMock: FetchImpl = async input => {
+				const url = input instanceof Request ? input.url : String(input);
+				if (url !== `${baseUrl}/models`) throw new Error(`Unexpected URL: ${url}`);
+				copilotFetches++;
+				return Response.json({
+					data: [
+						{
+							id: "gpt-99-new-catalog",
+							name: "New catalog model",
+							capabilities: {
+								type: "chat",
+								limits: { max_context_window_tokens: 200_000, max_output_tokens: 16_384 },
+							},
+						},
+					],
+				});
+			};
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+			registry.registerProvider("slow-runtime", {
+				baseUrl: "https://slow.example.com",
+				api: "openai-completions",
+				fetchDynamicModels: async () => {
+					slowStarted.resolve();
+					await releaseSlow.promise;
+					return [
+						{
+							id: "slow-model",
+							name: "Slow model",
+							reasoning: false,
+							input: ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 32_000,
+							maxTokens: 4096,
+						},
+					];
+				},
+			});
+			const background = registry.refresh("online-if-uncached");
+			try {
+				await slowStarted.promise;
+				// Wait for the full pass to take its cached Copilot snapshot before
+				// publishing the newer scoped response.
+				for (let i = 0; i < 1000 && registry.getProviderDiscoveryState(provider)?.source !== "cache"; i++) {
+					await Promise.resolve();
+				}
+				expect(registry.getProviderDiscoveryState(provider)).toMatchObject({ source: "cache", stale: false });
+				await registry.refreshDiscoverableProviders([provider], "online-if-uncached");
+				expect(registry.find(provider, "gpt-99-new-catalog")).toBeUndefined();
+				await registry.refreshDiscoverableProviders([provider], "online");
+				expect(registry.find(provider, "gpt-99-new-catalog")).toBeDefined();
+				expect(
+					registry.getAll().some(model => model.provider === provider && model.id === "gpt-99-new-catalog"),
+				).toBe(true);
+				expect(copilotFetches).toBe(1);
+			} finally {
+				releaseSlow.resolve();
+				await background;
+			}
+			expect(registry.find(provider, "gpt-99-new-catalog")).toBeDefined();
+			expect(registry.getAll().some(model => model.provider === provider && model.id === "gpt-99-new-catalog")).toBe(
+				true,
+			);
+			expect(registry.getProviderDiscoveryState(provider)?.source).toBe("provider");
+			expect(registry.find("slow-runtime", "slow-model")).toBeDefined();
+			expect(copilotFetches).toBe(1);
+		});
+
+		test("does not publish an older credential's late discovery over the current account", async () => {
+			const provider = "github-copilot";
+			const baseUrl = "https://api.business.githubcopilot.com";
+			const credential = (token: string) => JSON.stringify({ token, apiEndpoint: baseUrl });
+			fs.writeFileSync(modelsJsonPath, JSON.stringify({ providers: {} }));
+			authStorage.keys.setRuntime(provider, credential("account-a"));
+			const started = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const tokens: string[] = [];
+			const fetchMock: FetchImpl = async (input, init) => {
+				const url = input instanceof Request ? input.url : String(input);
+				if (url !== `${baseUrl}/models`) throw new Error(`Unexpected URL: ${url}`);
+				const headers = input instanceof Request ? input.headers : new Headers(init?.headers);
+				const token = headers.get("Authorization");
+				if (!token) throw new Error("Missing Copilot authorization");
+				tokens.push(token);
+				if (token === "Bearer account-a") {
+					started.resolve();
+					await release.promise;
+				}
+				return Response.json({
+					data: [{ id: token === "Bearer account-a" ? "gpt-99-account-a" : "gpt-99-account-b" }],
+				});
+			};
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+			const oldRefresh = registry.refreshDiscoverableProviders([provider], "online");
+			try {
+				await started.promise;
+				authStorage.keys.setRuntime(provider, credential("account-b"));
+				await registry.refreshDiscoverableProviders([provider], "online");
+				expect(registry.find(provider, "gpt-99-account-b")).toBeDefined();
+			} finally {
+				release.resolve();
+				await oldRefresh;
+			}
+			expect(registry.find(provider, "gpt-99-account-b")).toBeDefined();
+			expect(registry.find(provider, "gpt-99-account-a")).toBeUndefined();
+			expect(registry.getProviderDiscoveryState(provider)?.models).toContain("gpt-99-account-b");
+			expect(tokens).toEqual(["Bearer account-a", "Bearer account-b"]);
+		});
+
+		test("keeps a pending Copilot discovery across an unrelated refresh without a models file", async () => {
+			const provider = "github-copilot";
+			const baseUrl = "https://api.business.githubcopilot.com";
+			authStorage.keys.setRuntime(provider, JSON.stringify({ token: "copilot-no-config", apiEndpoint: baseUrl }));
+			const started = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			let fetches = 0;
+			const fetchMock: FetchImpl = async input => {
+				const url = input instanceof Request ? input.url : String(input);
+				if (url !== `${baseUrl}/models`) throw new Error(`Unexpected URL: ${url}`);
+				fetches++;
+				started.resolve();
+				await release.promise;
+				return Response.json({ data: [{ id: "gpt-99-no-config" }] });
+			};
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+			const first = registry.refreshDiscoverableProviders([provider], "online-if-uncached");
+			let second: Promise<void> | undefined;
+			try {
+				await started.promise;
+				await registry.refreshProvider("anthropic", "offline");
+				second = registry.refreshDiscoverableProviders([provider], "online-if-uncached");
+				const nextTurn = Promise.withResolvers<void>();
+				setImmediate(nextTurn.resolve);
+				await nextTurn.promise;
+				expect(fetches).toBe(1);
+			} finally {
+				release.resolve();
+				await Promise.all([first, second]);
+			}
+			expect(registry.find(provider, "gpt-99-no-config")).toBeDefined();
+			expect(registry.getProviderDiscoveryState(provider)?.source).toBe("provider");
+			expect(fetches).toBe(1);
+		});
+
+		test("invalidates a pending discovery when a models file appears", async () => {
+			const provider = "github-copilot";
+			const oldBase = "https://api.business.githubcopilot.com";
+			const newBase = "https://copilot-proxy.example.com";
+			authStorage.keys.setRuntime(provider, JSON.stringify({ token: "copilot-no-config", apiEndpoint: oldBase }));
+			const started = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const requested: string[] = [];
+			const fetchMock: FetchImpl = async input => {
+				const url = input instanceof Request ? input.url : String(input);
+				if (url === `${oldBase}/models`) {
+					requested.push(url);
+					started.resolve();
+					await release.promise;
+					return Response.json({ data: [{ id: "gpt-99-old-endpoint" }] });
+				}
+				if (url === `${newBase}/models`) {
+					requested.push(url);
+					return Response.json({ data: [{ id: "gpt-99-new-endpoint" }] });
+				}
+				throw new Error(`Unexpected URL: ${url}`);
+			};
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+			const first = registry.refreshDiscoverableProviders([provider], "online");
+			try {
+				await started.promise;
+				fs.writeFileSync(modelsJsonPath, JSON.stringify({ providers: { [provider]: { baseUrl: newBase } } }));
+				await registry.refreshProvider(provider, "online");
+				expect(registry.find(provider, "gpt-99-new-endpoint")).toBeDefined();
+			} finally {
+				release.resolve();
+				await first;
+			}
+			expect(registry.find(provider, "gpt-99-new-endpoint")).toBeDefined();
+			expect(registry.find(provider, "gpt-99-old-endpoint")).toBeUndefined();
+			expect(requested).toEqual([`${oldBase}/models`, `${newBase}/models`]);
+		});
+
 		test("getApiKey does not mutate bundled github-copilot baseUrl", async () => {
 			await authStorage.credentials.set("github-copilot", [
 				{

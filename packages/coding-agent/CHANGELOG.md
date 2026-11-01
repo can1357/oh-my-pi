@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Fixed saved Copilot and other discovery-backed models failing to restore after catalog invalidation when reopening or switching chats ([#17670](https://github.com/can1357/oh-my-pi/pull/17670) by [@felipe-fontes](https://github.com/felipe-fontes)).
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
 
 ## [18.15.0] - 2026-11-01

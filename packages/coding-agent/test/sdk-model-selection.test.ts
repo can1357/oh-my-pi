@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -1781,6 +1782,367 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			extensions: [],
 		};
 	}
+
+	async function buildCopilotResumeOptions({
+		cache,
+		disabled = false,
+		served = true,
+		catalogError = false,
+		beforeCatalogResponse,
+	}: {
+		cache: "missing" | "expired" | "fresh" | "fresh-missing";
+		disabled?: boolean;
+		served?: boolean;
+		catalogError?: boolean;
+		beforeCatalogResponse?: () => Promise<void>;
+	}) {
+		const options = buildResumeOptions();
+		const provider = "github-copilot";
+		const baseUrl = "https://api.business.githubcopilot.com";
+		const apiKey = JSON.stringify({ token: "copilot-restore-test-key", apiEndpoint: baseUrl });
+		const modelId = "gpt-99-restore-only-1m";
+		options.authStorage.keys.setRuntime(provider, apiKey);
+		const settings = Settings.isolated({
+			modelRoles: { default: "anthropic/claude-sonnet-4-5" },
+			disabledProviders: disabled ? [provider] : [],
+		});
+		let fetches = 0;
+		let seeding = cache !== "missing";
+		const fetchMock: FetchImpl = async input => {
+			const url = input instanceof Request ? input.url : String(input);
+			if (url !== `${baseUrl}/models`) throw new Error(`Unexpected URL: ${url}`);
+			if (!seeding) {
+				fetches++;
+				await beforeCatalogResponse?.();
+				if (catalogError) return new Response("catalog unavailable", { status: 503 });
+			}
+			return Response.json({
+				data:
+					seeding || served
+						? [
+								{
+									id: seeding && cache !== "fresh" ? "gpt-99-previous-catalog" : "gpt-99-restore-only",
+									name: "Saved Copilot model",
+									capabilities: {
+										type: "chat",
+										limits: { max_context_window_tokens: 1_000_000, max_output_tokens: 64_000 },
+										supports: { vision: true },
+									},
+									billing: {
+										token_prices: {
+											default: {
+												context_max: 200_000,
+												input_price: 500,
+												output_price: 2500,
+												cache_price: 50,
+											},
+											long_context: {
+												context_max: 936_000,
+												input_price: 500,
+												output_price: 2500,
+												cache_price: 50,
+											},
+										},
+									},
+								},
+							]
+						: [],
+			});
+		};
+		if (seeding) {
+			// Use production discovery so authoritative-cache fingerprints and
+			// header restoration markers really match the serving manager.
+			const seedRegistry = new ModelRegistry(options.authStorage, path.join(tempDir, "models.yml"), {
+				settings: Settings.isolated({ disabledProviders: [] }),
+				fetch: fetchMock,
+			});
+			await seedRegistry.refreshDiscoverableProviders([provider], "online");
+			// The shared catalog feed is outside this fixture. Model an earlier
+			// fully successful snapshot without rewriting its header provenance.
+			const cacheId = resolveModelCacheProviderId(provider, { apiKey, baseUrl });
+			const db = new Database(path.join(tempDir, "models.db"));
+			try {
+				const updated = db.run("UPDATE model_cache SET authoritative = 1, updated_at = ? WHERE provider_id = ?", [
+					Date.now() - (cache === "expired" ? 25 * 60 * 60 * 1000 : 0),
+					cacheId,
+				]);
+				if (updated.changes !== 1) throw new Error("Expected production-seeded Copilot cache");
+				db.run("DELETE FROM model_cache_refresh WHERE provider_id = ?", [cacheId]);
+			} finally {
+				db.close();
+			}
+			seeding = false;
+		}
+		options.sessionManager.appendModelChange(`${provider}/${modelId}`);
+		options.sessionManager.appendMessage({
+			role: "user",
+			content: "Preserve the saved evidence discussion",
+			timestamp: 1,
+		});
+		const modelRegistry = new ModelRegistry(options.authStorage, path.join(tempDir, "models.yml"), {
+			settings,
+			fetch: fetchMock,
+		});
+		if (cache === "fresh-missing" && !disabled) {
+			await modelRegistry.refreshDiscoverableProviders([provider], "online-if-uncached");
+			expect(fetches).toBe(0);
+			expect(modelRegistry.getProviderDiscoveryState(provider)).toMatchObject({ source: "cache", stale: false });
+		}
+		return {
+			...options,
+			settings,
+			modelRegistry,
+			hasUI: true,
+			allowSessionModelFallback: false,
+			fetchCount: () => fetches,
+		};
+	}
+
+	test("shares the pending Copilot startup fetch when restoring the saved model", async () => {
+		const fetchStarted = Promise.withResolvers<void>();
+		const finishFetch = Promise.withResolvers<void>();
+		const restoreStarted = Promise.withResolvers<void>();
+		const options = await buildCopilotResumeOptions({
+			cache: "missing",
+			beforeCatalogResponse: async () => {
+				fetchStarted.resolve();
+				await finishFetch.promise;
+			},
+		});
+		options.modelRegistry.refreshInBackground();
+		await fetchStarted.promise;
+		const refresh = options.modelRegistry.refreshDiscoverableProviders.bind(options.modelRegistry);
+		const refreshSpy = vi
+			.spyOn(options.modelRegistry, "refreshDiscoverableProviders")
+			.mockImplementation((...args) => {
+				restoreStarted.resolve();
+				return refresh(...args);
+			});
+		const startup = createAgentSession(options);
+		try {
+			await restoreStarted.promise;
+			// Drain local credential/cache microtasks before releasing the provider.
+			const nextTurn = Promise.withResolvers<void>();
+			setImmediate(nextTurn.resolve);
+			await nextTurn.promise;
+			finishFetch.resolve();
+			const { session } = await startup;
+			try {
+				expect(session.model?.provider).toBe("github-copilot");
+				expect(session.model?.id).toBe("gpt-99-restore-only-1m");
+				expect(options.fetchCount()).toBe(1);
+			} finally {
+				await session.dispose();
+			}
+		} finally {
+			finishFetch.resolve();
+			refreshSpy.mockRestore();
+			await options.modelRegistry.awaitBackgroundRefresh();
+		}
+	});
+
+	test.each(["missing", "expired", "fresh", "fresh-missing"] as const)(
+		"restores the exact saved Copilot 1M model with a %s catalog cache",
+		async cache => {
+			const options = await buildCopilotResumeOptions({ cache });
+			const { session, modelFallbackMessage } = await createAgentSession(options);
+			try {
+				expect(session.model?.provider).toBe("github-copilot");
+				expect(session.model?.id).toBe("gpt-99-restore-only-1m");
+				expect(session.model?.contextWindow).toBe(1_000_000);
+				expect(session.messages).toEqual([
+					{ role: "user", content: "Preserve the saved evidence discussion", timestamp: 1 },
+				]);
+				expect(modelFallbackMessage).toBeUndefined();
+				expect(options.fetchCount()).toBe(cache === "fresh" ? 0 : 1);
+			} finally {
+				await session.dispose();
+			}
+		},
+	);
+
+	for (const cache of ["missing", "fresh-missing"] as const) {
+		test.each([true, false])(
+			`refuses an unavailable saved Copilot model with a ${cache} catalog (disabled=%s) without substitution`,
+			async disabled => {
+				const options = await buildCopilotResumeOptions({ cache, disabled, served: false });
+				await expect(createAgentSession(options)).rejects.toThrow(
+					"Could not restore model github-copilot/gpt-99-restore-only-1m",
+				);
+				expect(options.fetchCount()).toBe(disabled ? 0 : 1);
+			},
+		);
+	}
+
+	test("does not force a catalog fetch when a later saved candidate already restored", async () => {
+		const options = await buildCopilotResumeOptions({ cache: "fresh-missing" });
+		options.sessionManager.appendModelChange("anthropic/claude-sonnet-4-5", "default");
+		options.sessionManager.appendModelChange("github-copilot/gpt-99-restore-only-1m", "smol");
+		const { session } = await createAgentSession(options);
+		try {
+			expect(session.model?.provider).toBe("anthropic");
+			expect(session.model?.id).toBe("claude-sonnet-4-5");
+			expect(options.fetchCount()).toBe(0);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test.each(["missing", "fresh-missing"] as const)(
+		"does not retry a failed Copilot catalog request with a %s cache",
+		async cache => {
+			const options = await buildCopilotResumeOptions({ cache, catalogError: true });
+			await expect(createAgentSession(options)).rejects.toThrow(
+				"Could not restore model github-copilot/gpt-99-restore-only-1m",
+			);
+			expect(options.fetchCount()).toBe(1);
+		},
+	);
+
+	async function buildCustomCopilotResumeOptions(route: "configured" | "extension") {
+		const options = buildResumeOptions();
+		const provider = "github-copilot";
+		const cachedId = "custom-copilot-cached-model";
+		const savedId = "custom-copilot-saved-model";
+		const savedSelector = `${provider}/${savedId}`;
+		const baseUrl = "https://custom-copilot.example.com";
+		const modelsPath = path.join(tempDir, "models.yml");
+		let fetches = 0;
+		let seeding = true;
+		const nextModelId = () => {
+			fetches++;
+			return seeding ? cachedId : savedId;
+		};
+		const fetchMock: FetchImpl = async input => {
+			const url = input instanceof Request ? input.url : String(input);
+			if (url !== `${baseUrl}/v1/models`) throw new Error(`Unexpected URL: ${url}`);
+			return Response.json({ data: [{ id: nextModelId(), context_length: 65_536 }] });
+		};
+		const providerConfig: ProviderConfigInput = {
+			baseUrl,
+			api: "openai-completions",
+			apiKey: "custom-copilot-test-key",
+			fetchDynamicModels: async () => [
+				{
+					id: nextModelId(),
+					name: "Custom Copilot model",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 65_536,
+					maxTokens: 4096,
+				},
+			],
+		};
+		const extensions: ExtensionFactory[] = [];
+		if (route === "configured") {
+			await Bun.write(
+				modelsPath,
+				JSON.stringify({
+					providers: {
+						[provider]: {
+							baseUrl,
+							api: "openai-completions",
+							auth: "none",
+							discovery: { type: "openai-models-list" },
+						},
+					},
+				}),
+			);
+			const configTime = new Date(Date.now() - 1000);
+			await fs.promises.utimes(modelsPath, configTime, configTime);
+		} else {
+			extensions.push(pi => pi.registerProvider(provider, providerConfig));
+		}
+
+		const seedRegistry = new ModelRegistry(options.authStorage, modelsPath, { fetch: fetchMock });
+		if (route === "extension") seedRegistry.registerProvider(provider, providerConfig);
+		await seedRegistry.refreshDiscoverableProviders([provider], "online");
+		expect(fetches).toBe(1);
+		expect(seedRegistry.find(provider, cachedId)).toBeDefined();
+		seeding = false;
+
+		const modelRegistry = new ModelRegistry(options.authStorage, modelsPath, { fetch: fetchMock });
+		if (route === "extension") modelRegistry.registerProvider(provider, providerConfig);
+		await modelRegistry.refreshDiscoverableProviders([provider], "online-if-uncached");
+		expect(fetches).toBe(1);
+		expect(modelRegistry.getProviderDiscoveryState(provider)).toMatchObject({ source: "cache", stale: false });
+		expect(modelRegistry.find(provider, cachedId)).toBeDefined();
+		expect(modelRegistry.find(provider, savedId)).toBeUndefined();
+		options.sessionManager.appendModelChange(savedSelector);
+		return {
+			...options,
+			modelRegistry,
+			extensions,
+			hasUI: true,
+			savedSelector,
+			fetchCount: () => fetches,
+		};
+	}
+
+	test.each(["configured", "extension"] as const)(
+		"refuses an unavailable saved model without refetching a fresh %s Copilot route",
+		async route => {
+			const options = await buildCustomCopilotResumeOptions(route);
+			const outcome = await createAgentSession({ ...options, allowSessionModelFallback: false }).then(
+				result => ({ result }),
+				error => ({ error }),
+			);
+			if ("result" in outcome) await outcome.result.session.dispose();
+			expect(options.fetchCount()).toBe(1);
+			expect("error" in outcome ? String(outcome.error) : "").toContain(
+				`Could not restore model ${options.savedSelector}`,
+			);
+		},
+	);
+
+	test.each(["configured", "extension"] as const)(
+		"keeps the default model and restore warning with a fresh %s Copilot route",
+		async route => {
+			const options = await buildCustomCopilotResumeOptions(route);
+			const { session, modelFallbackMessage } = await createAgentSession(options);
+			try {
+				expect(options.fetchCount()).toBe(1);
+				expect(session.model?.provider).toBe("anthropic");
+				expect(session.model?.id).toBe("claude-sonnet-4-5");
+				expect(modelFallbackMessage).toContain(`Could not restore model ${options.savedSelector}`);
+			} finally {
+				await session.dispose();
+			}
+		},
+	);
+
+	test("does not discover a known saved model when its credential is missing", async () => {
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		const sourceSpy = vi.spyOn(authStorage.keys, "source").mockReturnValue(undefined);
+		let catalogFetches = 0;
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"), {
+			fetch: async () => {
+				catalogFetches++;
+				return new Response("not available", { status: 503 });
+			},
+		});
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendModelChange("anthropic/claude-sonnet-4-5");
+		try {
+			await expect(
+				createAgentSession({
+					...buildSessionOptions(""),
+					authStorage,
+					modelRegistry,
+					sessionManager,
+					settings: Settings.isolated(),
+					extensions: [],
+					hasUI: true,
+					allowSessionModelFallback: false,
+				}),
+			).rejects.toThrow("Could not restore model anthropic/claude-sonnet-4-5");
+			expect(catalogFetches).toBe(0);
+		} finally {
+			sourceSpy.mockRestore();
+		}
+	});
 
 	test("rejects a headless resume instead of substituting the settings default", async () => {
 		await expect(createAgentSession(buildResumeOptions())).rejects.toThrow(
