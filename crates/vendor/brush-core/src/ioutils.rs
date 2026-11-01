@@ -16,6 +16,15 @@ enum ReaderWriterError {
 	Flush(&'static str),
 }
 
+/// Makes a pipe for `construct` (a pipeline, a command substitution, …), so
+/// that failing to make it, as when the process is out of descriptors, names
+/// what the shell was doing.
+pub(crate) fn pipe(
+	construct: &'static str,
+) -> Result<(std::io::PipeReader, std::io::PipeWriter), crate::error::Error> {
+	std::io::pipe().map_err(|err| crate::error::ErrorKind::PipeCreationFailure(construct, err).into())
+}
+
 /// Marks a `FailingReaderWriter` error that stands for descriptor exhaustion:
 /// its file could not be duplicated because no descriptor could be allocated.
 #[derive(Clone, Debug, thiserror::Error)]

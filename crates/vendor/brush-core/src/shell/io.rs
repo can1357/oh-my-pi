@@ -70,7 +70,8 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 	}
 
 	/// Displays the given error to the user, using the shell's error display
-	/// mechanisms.
+	/// mechanisms. An error caused by running out of file descriptors is
+	/// shown with the process's open-file limit.
 	///
 	/// # Arguments
 	///
@@ -89,7 +90,10 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 			return Ok(());
 		}
 
-		let str = self.error_formatter.format_error(err, self);
+		let restated = err.with_open_file_limit();
+		let str = self
+			.error_formatter
+			.format_error(restated.as_ref().unwrap_or(err), self);
 		file.write_all_async(str.as_bytes()).await?;
 
 		Ok(())
@@ -100,10 +104,11 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 	/// effect where it happened, as Bash does, unless `report` is false or it
 	/// was already reported. Returns the error that carries the abandonment on
 	/// to the enclosing command without being reported again. A report that
-	/// fails because descriptors ran out (deep nesting can exhaust a low
-	/// descriptor limit) instead returns the refusal itself, for an enclosing
-	/// command to report; any other failure, such as a closed or full standard
-	/// error, leaves the refusal unreported, as in Bash.
+	/// fails because no descriptor was left to write it (see
+	/// [`ioutils::is_descriptor_exhaustion`]) instead returns the refusal
+	/// itself, for an enclosing command to report; any other failure, such as
+	/// a closed or full standard error, leaves the refusal unreported, as in
+	/// Bash.
 	pub(crate) async fn report_abandonment(
 		&self,
 		stderr: &mut openfiles::OpenFile,

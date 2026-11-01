@@ -7170,37 +7170,75 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 		assert_eq!((code, output.as_str()), (Some(0), "alive\n"));
 	}
 
-	/// A refusal 500 levels deep behaves the same under a 1,024 soft
-	/// descriptor limit and a raised one. Each nesting level holds duplicated
-	/// descriptors (a separate defect), so at 1,024 the refusal cannot be
-	/// written where it happens and an enclosing command reports it, once. A
-	/// refusal whose standard error is closed or full stays silent at both
-	/// limits, as in Bash, instead of falling back to an outer standard error,
-	/// wherever that standard error is set: on the call, on an enclosing group,
-	/// on both, on a function definition, or on a pipeline stage.
+	/// Nesting 500 levels deep is refused visibly, and the same way, under a
+	/// 1,024 soft descriptor limit and a raised one: a runaway function,
+	/// `eval` or `source` prints its refusal once, and so does a recursion that
+	/// opens a file on every call (`< /dev/null`), which stays under 1,024 open
+	/// files at the 500-level bound. Before, that recursion ran off the end of
+	/// the stack and killed the process. A refusal whose standard error is
+	/// closed or full stays silent, as in Bash, instead of falling back to an
+	/// outer standard error, wherever that standard error is set: on the call,
+	/// on an enclosing group, on both, on a function definition, or on a
+	/// pipeline stage.
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
-	async fn deep_function_nesting_refusal_respects_standard_error_at_any_descriptor_limit() {
+	async fn deep_nesting_is_refused_the_same_at_any_descriptor_limit() {
 		if rerun_in_open_file_limit_child(
-			"shell::tests::deep_function_nesting_refusal_respects_standard_error_at_any_descriptor_limit",
+			"shell::tests::deep_nesting_is_refused_the_same_at_any_descriptor_limit",
 		)
 		.await
 		{
 			return;
 		}
 
+		let dir = tempfile::tempdir().expect("temp dir");
+		let again = dir.path().join("again.sh");
+		std::fs::write(&again, ". \"$AGAIN\"\n").expect("write script");
+		let redirect_recursion = |depth: usize| {
+			format!(
+				"f() {{ if [ \"$1\" -lt {depth} ]; then f $(( $1 + 1 )) < /dev/null; else echo \
+				 reached=$1; fi; }}\nf 0\necho \"after=$?\""
+			)
+		};
+		let runaways: [(String, &[&str]); 5] = [
+			("f() { f; }\nf\necho \"after=$?\"".into(), &[
+				"f: maximum function nesting level exceeded (500)",
+				"after=1",
+			]),
+			("e='eval \"$e\"'\neval \"$e\"\necho \"after=$?\"".into(), &[
+				"eval: maximum eval nesting level exceeded (500)",
+				"after=1",
+			]),
+			(
+				format!(
+					"AGAIN={}\n. \"$AGAIN\"\necho \"after=$?\"",
+					quote_arg(&again.to_string_lossy())
+				),
+				&["again.sh: maximum source nesting level exceeded (500)", "after=1"],
+			),
+			(redirect_recursion(450), &["reached=450", "after=0"]),
+			(redirect_recursion(1000), &[
+				"f: maximum function nesting level exceeded (500)",
+				"after=1",
+			]),
+		];
+
 		// Every case runs before the test fails, so a failure lists each
-		// limit and placement that went wrong, not only the first.
+		// limit and case that went wrong, not only the first.
 		let mut wrong = Vec::new();
 		for soft in [1024, 65_536] {
 			set_open_file_limit(soft);
-			let (_, output) = execute_captured("f() { f; }\nf\necho \"after=$?\"".into()).await;
-			let lines: Vec<&str> = output.lines().collect();
-			if !(lines.len() == 2
-				&& lines[0].ends_with("f: maximum function nesting level exceeded (500)")
-				&& lines[1] == "after=1")
-			{
-				wrong.push(format!("limit {soft}: f: {output:?}"));
+			for (script, expected) in &runaways {
+				let (_, output) = execute_captured(script.clone()).await;
+				let lines: Vec<&str> = output.lines().collect();
+				if lines.len() != expected.len()
+					|| !lines
+						.iter()
+						.zip(expected.iter())
+						.all(|(line, tail)| line.ends_with(tail))
+				{
+					wrong.push(format!("limit {soft}: {script:?}: {output:?}"));
+				}
 			}
 
 			for stderr in ["2>&-", "2>/dev/full"] {
@@ -7439,8 +7477,7 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 	/// Sets this test process's soft descriptor limit to `soft`, or to the
 	/// hard limit if that is lower. Only a child started by
 	/// [`rerun_in_open_file_limit_child`] may call it. Bun raises omp's soft
-	/// limit to the hard limit at startup; each nesting level holds about 25
-	/// duplicated descriptors, so 500 levels need far more than 1,024.
+	/// limit to the hard limit at startup; other hosts may keep 1,024.
 	#[cfg(unix)]
 	fn set_open_file_limit(soft: libc::rlim_t) {
 		assert!(
@@ -7456,51 +7493,6 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 		// hard limit needs no privilege.
 		let set = unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit) };
 		assert_eq!(set, 0, "set RLIMIT_NOFILE to {}", limit.rlim_cur);
-	}
-
-	/// An `eval` that evaluates itself forever is refused at the nesting limit
-	/// with Bash's message and status 1. Before, it killed the host process at
-	/// about 31 levels.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn runaway_eval_recursion_is_refused() {
-		if rerun_in_open_file_limit_child("shell::tests::runaway_eval_recursion_is_refused").await {
-			return;
-		}
-		set_open_file_limit(65_536);
-		let (_, output) =
-			execute_captured("e='eval \"$e\"'\neval \"$e\"\necho \"after=$?\"".into()).await;
-		let lines: Vec<&str> = output.lines().collect();
-		assert_eq!(lines.len(), 2, "{output}");
-		assert!(lines[0].ends_with("eval: maximum eval nesting level exceeded (500)"), "{output}");
-		assert_eq!(lines[1], "after=1");
-	}
-
-	/// A file that sources itself forever is refused at the nesting limit with
-	/// Bash's message and status 1. Before, it killed the host process at about
-	/// 30 levels.
-	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn runaway_source_recursion_is_refused() {
-		if rerun_in_open_file_limit_child("shell::tests::runaway_source_recursion_is_refused").await {
-			return;
-		}
-		set_open_file_limit(65_536);
-		let dir = tempfile::tempdir().expect("temp dir");
-		let script = dir.path().join("again.sh");
-		std::fs::write(&script, ". \"$AGAIN\"\n").expect("write script");
-		let (_, output) = execute_captured(format!(
-			"AGAIN={}\n. \"$AGAIN\"\necho \"after=$?\"",
-			quote_arg(&script.to_string_lossy())
-		))
-		.await;
-		let lines: Vec<&str> = output.lines().collect();
-		assert_eq!(lines.len(), 2, "{output}");
-		assert!(
-			lines[0].ends_with("again.sh: maximum source nesting level exceeded (500)"),
-			"{output}"
-		);
-		assert_eq!(lines[1], "after=1");
 	}
 
 	/// `Shell::pids` reports the in-flight run's live external children without

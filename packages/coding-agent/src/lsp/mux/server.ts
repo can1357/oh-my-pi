@@ -1,3 +1,4 @@
+import { type } from "@oh-my-pi/omptype";
 import { type IpcConnection, IpcServer } from "@oh-my-pi/pi-natives";
 import { isRecord, logger, postmortem, ptree, setProcessName } from "@oh-my-pi/pi-utils";
 import { encodeMessageFrame, MessageFramer } from "../../jsonrpc/message-framing";
@@ -43,22 +44,20 @@ interface RegistrationBatch {
 	registrations: Registration[];
 }
 
-interface ProgressParams {
-	token: string | number;
-	value?: { kind?: string; [key: string]: unknown };
-}
-
-interface DiagnosticsParams {
-	uri: string;
-	version?: number | null;
-	[key: string]: unknown;
-}
-
-interface TextDocumentParams {
-	textDocument: { uri: string; version: number; text?: string; [key: string]: unknown };
-	contentChanges?: unknown;
-	[key: string]: unknown;
-}
+const ConnectParams = type({
+	command: "string",
+	args: "string[]",
+	cwd: "string",
+	"env?": "Record<string, string>",
+	"initializationOptions?": "unknown",
+});
+/** Every validated params value keeps its undeclared keys: messages are forwarded and replayed as received. */
+const DocumentParams = type({ textDocument: { uri: "string", version: "number" } });
+const UriParams = type({ textDocument: { uri: "string" } });
+const DiagnosticsParams = type({ uri: "string" });
+const ProgressParams = type({ token: "string | number", "value?": "Record<string, unknown>" });
+type DiagnosticsParams = typeof DiagnosticsParams.infer;
+type ProgressParams = typeof ProgressParams.infer;
 
 class Session {
 	readonly connection: IpcConnection;
@@ -131,37 +130,6 @@ function rpcResult(id: LspJsonRpcId, result: unknown): LspJsonRpcResponse {
 
 function rpcError(id: LspJsonRpcId, code: number, message: string): LspJsonRpcResponse {
 	return { jsonrpc: "2.0", id, error: { code, message } };
-}
-
-function parseConnectParams(params: unknown): MuxConnectParams | undefined {
-	if (!isRecord(params) || typeof params.command !== "string" || typeof params.cwd !== "string") return undefined;
-	if (!Array.isArray(params.args) || !params.args.every(arg => typeof arg === "string")) return undefined;
-	if (params.env !== undefined) {
-		if (!isRecord(params.env)) return undefined;
-		for (const key in params.env) if (typeof params.env[key] !== "string") return undefined;
-	}
-	return params as unknown as MuxConnectParams;
-}
-
-function parseDocumentParams(params: unknown): TextDocumentParams | undefined {
-	if (!isRecord(params) || !isRecord(params.textDocument)) return undefined;
-	if (typeof params.textDocument.uri !== "string" || typeof params.textDocument.version !== "number") return undefined;
-	return params as unknown as TextDocumentParams;
-}
-
-function parseUri(params: unknown): string | undefined {
-	if (!isRecord(params) || !isRecord(params.textDocument)) return undefined;
-	return typeof params.textDocument.uri === "string" ? params.textDocument.uri : undefined;
-}
-
-function parseDiagnostics(params: unknown): DiagnosticsParams | undefined {
-	if (!isRecord(params) || typeof params.uri !== "string") return undefined;
-	return params as DiagnosticsParams;
-}
-
-function parseProgress(params: unknown): ProgressParams | undefined {
-	if (!isRecord(params) || (typeof params.token !== "string" && typeof params.token !== "number")) return undefined;
-	return params as unknown as ProgressParams;
 }
 
 /**
@@ -267,8 +235,8 @@ export class LspMuxServer {
 				this.#sendSession(session, rpcError(message.id, -32600, "session already bound"));
 				return;
 			}
-			const params = parseConnectParams(message.params);
-			if (!params) {
+			const params = ConnectParams(message.params);
+			if (params instanceof type.errors) {
 				this.#sendSession(session, rpcError(message.id, -32602, "invalid mux connect params"));
 				return;
 			}
@@ -377,8 +345,8 @@ export class LspMuxServer {
 	}
 
 	async #didOpen(session: Session, server: ServerInstance, message: LspJsonRpcNotification): Promise<void> {
-		const params = parseDocumentParams(message.params);
-		if (!params) return;
+		const params = DocumentParams(message.params);
+		if (params instanceof type.errors) return;
 		const uri = params.textDocument.uri;
 		session.openUris.add(uri);
 		server.documents.add(uri);
@@ -390,8 +358,9 @@ export class LspMuxServer {
 	}
 
 	async #didClose(session: Session, server: ServerInstance, message: LspJsonRpcNotification): Promise<void> {
-		const uri = parseUri(message.params);
-		if (!uri) return;
+		const params = UriParams(message.params);
+		if (params instanceof type.errors) return;
+		const uri = params.textDocument.uri;
 		session.openUris.delete(uri);
 		// Safe to forward: a server is reused only once its session count is zero (see connect),
 		// so no other session holds an overlay of this document on this server.
@@ -459,16 +428,16 @@ export class LspMuxServer {
 			return;
 		}
 		if (message.method === "textDocument/publishDiagnostics") {
-			const params = parseDiagnostics(message.params);
-			if (!params) return;
+			const params = DiagnosticsParams(message.params);
+			if (params instanceof type.errors) return;
 			// Freshly parsed and never mutated: stored as-is for replay to later sessions.
 			server.diagnostics.set(params.uri, params);
 			this.#broadcast(server, { jsonrpc: "2.0", method: "textDocument/publishDiagnostics", params });
 			return;
 		}
 		if (message.method === "$/progress") {
-			const params = parseProgress(message.params);
-			if (params) {
+			const params = ProgressParams(message.params);
+			if (!(params instanceof type.errors)) {
 				if (params.value?.kind === "begin") server.progress.set(params.token, params);
 				else if (params.value?.kind === "end") server.progress.delete(params.token);
 			}

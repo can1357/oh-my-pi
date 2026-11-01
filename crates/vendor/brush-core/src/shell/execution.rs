@@ -160,11 +160,12 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 		params: &ExecutionParameters,
 		call_type: callstack::ScriptCallType,
 	) -> Result<ExecutionResult, error::Error> {
-		// Parse the whole file, then close it before running it, as Bash does,
-		// so that nested `source` commands do not each hold a descriptor open.
+		// The parser reads the whole script; the file closes before the script
+		// runs, so a nested `source` does not hold one descriptor per level.
 		let parse_result = {
 			let mut reader = std::io::BufReader::new(file);
 			let mut parser = brush_parser::Parser::new(&mut reader, &self.parser_options());
+
 			tracing::debug!(target: trace_categories::PARSE, "Parsing sourced file: {}", source_info.source);
 			parser.parse_program()
 		};
