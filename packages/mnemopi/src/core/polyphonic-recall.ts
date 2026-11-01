@@ -265,21 +265,20 @@ function cosineAgainstRow(
 	const shouldAdmit =
 		scanState.admittedEntries + 1 <= MAX_EMBEDDING_CACHE_ENTRIES &&
 		scanState.admittedBytes + byteSize <= MAX_EMBEDDING_CACHE_BYTES;
-
-	const values = shouldAdmit ? new Float64Array(raw.length) : null;
 	let normSq = 0;
 	let dot = 0;
 	for (let i = 0; i < raw.length; i++) {
 		const value = raw[i];
 		if (typeof value !== "number" || !Number.isFinite(value)) return null;
-		if (values !== null) values[i] = value;
 		normSq += value * value;
 		dot += (unit[i] as number) * value;
 	}
 	if (normSq === 0) return null;
 	const norm = Math.sqrt(normSq);
 
-	if (values !== null) {
+	if (shouldAdmit) {
+		const values = new Float64Array(raw.length);
+		for (let i = 0; i < raw.length; i++) values[i] = raw[i] as number;
 		scanState.admittedEntries++;
 		scanState.admittedBytes += byteSize;
 		cache.set(row.memory_id, { rawJson: row.embedding_json, values, norm, byteSize });

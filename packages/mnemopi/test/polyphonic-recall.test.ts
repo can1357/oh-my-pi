@@ -396,4 +396,67 @@ describe("PolyphonicRecallEngine", () => {
 			parseSpy.mockRestore();
 		}
 	});
+
+	it("discards all-zero and non-numeric embeddings without allocating or caching them", () => {
+		const beam = makeBeam();
+		try {
+			const engine = new PolyphonicRecallEngine({
+				db: beam.db,
+				sessionId: beam.sessionId,
+				channelId: beam.channelId,
+			});
+			insertWorking(beam, "wm-zero", "Zero vector memory", 0.9);
+			insertWorking(beam, "wm-nan", "Non-numeric vector memory", 0.9);
+			insertWorking(beam, "wm-valid", "Valid vector memory", 0.9);
+
+			beam.db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, 'test')", [
+				"wm-zero",
+				JSON.stringify([0, 0]),
+			]);
+			beam.db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, 'test')", [
+				"wm-nan",
+				JSON.stringify([1, "not-a-number"]),
+			]);
+			beam.db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, 'test')", [
+				"wm-valid",
+				JSON.stringify([1, 0]),
+			]);
+
+			const origFloat64Array = globalThis.Float64Array;
+			let float64ArrayAllocations = 0;
+			const float64Proxy = new Proxy(origFloat64Array, {
+				construct(target, args, newTarget) {
+					float64ArrayAllocations++;
+					return Reflect.construct(target, args, newTarget);
+				},
+			});
+			globalThis.Float64Array = float64Proxy;
+
+			const parseSpy = spyOn(JSON, "parse");
+			try {
+				const hits = engine.vectorVoice([1, 0]);
+				const hitIds = hits.map(h => h.memoryId);
+				expect(hitIds).toEqual(["wm-valid"]);
+				expect(hitIds).not.toContain("wm-zero");
+				expect(hitIds).not.toContain("wm-nan");
+
+				// Only wm-valid should have allocated a Float64Array for cache admission
+				expect(float64ArrayAllocations).toBe(1);
+
+				// Second call: wm-valid should hit the cache, while wm-zero and wm-nan are still parsed on scan
+				// without allocating Float64Array
+				parseSpy.mockClear();
+				const warmHits = engine.vectorVoice([1, 0]);
+				expect(warmHits.map(h => h.memoryId)).toEqual(["wm-valid"]);
+				// wm-valid is cached so not parsed; wm-zero and wm-nan are parsed again because they were not admitted to cache
+				expect(parseSpy).toHaveBeenCalledTimes(2);
+				expect(float64ArrayAllocations).toBe(1);
+			} finally {
+				globalThis.Float64Array = origFloat64Array;
+				parseSpy.mockRestore();
+			}
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
 });
