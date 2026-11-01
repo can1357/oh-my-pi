@@ -395,6 +395,57 @@ describe("getOrCreateSnapshot", () => {
 		expect(content).toContain(`export __MISE_EXE='${REAL_ECHO}'`);
 	});
 
+	it.skipIf(onWindows)("sources the rc file at its literal path when the home path holds shell syntax", async () => {
+		const realBash = REAL_BASH;
+		if (!existsSync(realBash)) return;
+		const marker = path.join(os.tmpdir(), `omp-snap-rc-marker-${crypto.randomUUID()}`);
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-snap-rc-data-"));
+		const home = path.join(root, `home'$(printf PWNED > "$MARKER")`);
+		const shellLink = path.join(home, "bash-omp-rc-data");
+		try {
+			await fs.mkdir(home);
+			await fs.writeFile(path.join(home, ".bashrc"), "rc_loaded () { :; }\n");
+			await fs.symlink(realBash, shellLink);
+
+			const snapshot = await getOrCreateSnapshot(shellLink, { ...process.env, HOME: home, MARKER: marker });
+
+			expect(snapshot).not.toBeNull();
+			expect(await Bun.file(marker).exists()).toBe(false);
+			expect(await fs.readFile(snapshot!, "utf8")).toContain("rc_loaded");
+		} finally {
+			await fs.rm(marker, { force: true });
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
+	it.skipIf(onWindows)("writes PATH so a replayed snapshot restores it as data", async () => {
+		const realBash = REAL_BASH;
+		if (!existsSync(realBash)) return;
+		const marker = path.join(os.tmpdir(), `omp-snap-path-marker-${crypto.randomUUID()}`);
+		const home = await fs.mkdtemp(path.join(os.tmpdir(), "omp-snap-path-data-"));
+		const shellLink = path.join(home, "bash-omp-path-data");
+		// An apostrophe ends a naive single-quoted copy; the `$(…)` after it then runs on replay.
+		const unsafePath = `/usr/bin:'$(printf PWNED > ${marker})'`;
+		try {
+			await fs.writeFile(path.join(home, ".bashrc"), "");
+			await fs.symlink(realBash, shellLink);
+			const snapshot = await getOrCreateSnapshot(shellLink, { ...process.env, HOME: home, PATH: unsafePath });
+
+			expect(snapshot).not.toBeNull();
+			const replay = Bun.spawn(
+				[realBash, "--noprofile", "--norc", "-c", `source "$1"; printf '%s' "$PATH"`, "_", snapshot!],
+				{ stdout: "pipe", stderr: "pipe" },
+			);
+			const stdout = await readStream(replay.stdout as ReadableStream<Uint8Array> | null);
+			await replay.exited;
+			expect(await Bun.file(marker).exists()).toBe(false);
+			expect({ exitCode: replay.exitCode, path: stdout }).toEqual({ exitCode: 0, path: unsafePath });
+		} finally {
+			await fs.rm(marker, { force: true });
+			await fs.rm(home, { recursive: true, force: true });
+		}
+	});
+
 	it.skipIf(onWindows)("drops core-tool aliases so they resolve to real binaries (issue #17067)", async () => {
 		// Regression: the alias filter embedded the anchored `^(ls|...)$` regex
 		// inside `^alias (...)=`, which never matches, so `alias ls='eza --icons'`

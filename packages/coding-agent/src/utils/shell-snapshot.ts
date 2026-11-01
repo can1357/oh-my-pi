@@ -174,7 +174,7 @@ SNAPSHOT_FILE=${quotedPath}
 umask 077
 
 # Source user's rc file if it exists
-${hasRcFile ? `source "${rcFile}" < /dev/null 2>/dev/null` : "# No user config file to source"}
+${hasRcFile ? `source ${quotePosixArgument(rcFile)} < /dev/null 2>/dev/null` : "# No user config file to source"}
 
 # Re-tighten umask in case the rc reset it (common \`.bashrc\`/\`.zshrc\` set
 # \`umask 022\` for the interactive shell).
@@ -202,8 +202,6 @@ printf '%s\\n' "$__omp_funcs" >> "$SNAPSHOT_FILE"
 echo "# Captured function environment" >> "$SNAPSHOT_FILE"
 ${fnEnvHelper}
 printf '%s\\n' "$__omp_funcs" | __omp_emit_referenced_exports >> "$SNAPSHOT_FILE"
-unset -f __omp_sq_quote __omp_emit_export_for __omp_emit_referenced_exports 2>/dev/null
-unset __omp_funcs __omp_qbuf __omp_qout __omp_sq __omp_xv __omp_name 2>/dev/null
 
 ${optionsScript}
 
@@ -216,8 +214,10 @@ else
    alias 2>/dev/null | grep -vE '${commonAliasRegex}' | sed 's/^alias //g' | sed 's/^/alias -- /' | head -n 1000 >> "$SNAPSHOT_FILE"
 fi
 
-# Export PATH
-echo "export PATH='$PATH'" >> "$SNAPSHOT_FILE"
+# Export PATH as one single-quoted word, so a later shell reads it as data.
+printf 'export PATH=%s\\n' "$(__omp_sq_quote "$PATH")" >> "$SNAPSHOT_FILE"
+unset -f __omp_sq_quote __omp_emit_export_for __omp_emit_referenced_exports 2>/dev/null
+unset __omp_funcs __omp_qbuf __omp_qout __omp_sq __omp_xv __omp_name 2>/dev/null
 
 # Verify snapshot was created
 if [ ! -f "$SNAPSHOT_FILE" ]; then

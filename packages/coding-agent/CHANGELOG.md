@@ -10,6 +10,7 @@
 ### Fixed
 
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
+- Fixed the bash tool's shell snapshot running part of your home directory path or `PATH` as a command when it held shell syntax such as `$(…)`, backticks or an apostrophe
 
 ## [18.15.0] - 2026-11-01
 

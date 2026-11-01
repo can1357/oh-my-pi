@@ -66,11 +66,14 @@ runs:
       - name: Install pinned bun when missing or mismatched
         if: steps.env.outputs.setup_bun == 'true'
         shell: bash
+        env:
+           BUN_INSTALL_TAG: ${{ steps.env.outputs.bun_install }}
         run: |
            export BUN_INSTALL="${HOME}/.bun"
-           # Unquoted on purpose: an empty tag (floor pin) must pass no argument, which the
-           # script reads as "latest".
-           curl -fsSL https://bun.sh/install | bash -s -- ${{ steps.env.outputs.bun_install }}
+           # The tag comes from package.json, so bash reads it from the environment
+           # rather than from substituted script text. An empty tag (floor pin) must
+           # pass no argument, which the script reads as "latest".
+           curl -fsSL https://bun.sh/install | bash -s -- ${BUN_INSTALL_TAG:+"$BUN_INSTALL_TAG"}
            echo "${BUN_INSTALL}/bin" >> "$GITHUB_PATH"
 
       # Off-infra (GitHub-hosted): actions/cache for the bun store, split into
