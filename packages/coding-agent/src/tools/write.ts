@@ -213,6 +213,24 @@ async function assertNotReadSelectorMisfire(target: string, content: string, cwd
 	throwReadSelectorMisfire(target, sel);
 }
 
+/**
+ * Whether `writePath` addresses a row in an existing SQLite database. Row writes
+ * use empty content as the delete signal, so they opt out of the empty-payload
+ * guard rather than being mistaken for a degraded call.
+ */
+async function isSqliteWriteTarget(writePath: string, session: ToolSession, signal?: AbortSignal): Promise<boolean> {
+	const candidates = parseSqlitePathCandidates(writePath).filter(candidate => candidate.sqlitePath !== writePath);
+	for (const candidate of candidates) {
+		try {
+			const absolutePath = await resolvePlanPath(session, candidate.sqlitePath, signal);
+			if (await isSqliteFile(absolutePath)) return true;
+		} catch {
+			// Unresolvable candidates are not SQLite writes; the normal path reports them.
+		}
+	}
+	return false;
+}
+
 const writeSchema = type({
 	path: "string",
 	"content?": "string",
@@ -947,11 +965,16 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		// write silently truncates the target to zero bytes; the failure only surfaces
 		// on the next read. Require the explicit opt-in for an empty payload, except
 		// where the target scheme already declares content optional (coordination,
-		// replies, device dispatches, proc kill) or the write touches no files.
+		// replies, device dispatches, proc kill), the write touches no files, or the
+		// target is a SQLite row where empty content means delete or a device
+		// transport that validates its own payload.
+		const sqliteTarget = content.length === 0 ? await isSqliteWriteTarget(path, this.session, signal) : false;
 		if (
 			content.length === 0 &&
 			allowEmpty !== true &&
 			!touchesNoFiles &&
+			!sqliteTarget &&
+			target?.spec.backing !== "device" &&
 			!(target && policy?.contentOptional?.(target.url))
 		) {
 			// A selector-shaped target is a more specific failure than an empty
