@@ -2302,6 +2302,107 @@ describe("lsp regressions", () => {
 		}
 	});
 
+	it("updates importer diagnostics after a registered watcher sees an external dependency edit", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-external-watch-");
+		const cwd = tempDir.path();
+		const dependency = path.join(cwd, "b.ts");
+		const importer = path.join(cwd, "a.ts");
+		const error: Diagnostic = {
+			message: "Type 'string' is not assignable to type 'number'.",
+			code: 2322,
+			severity: 1,
+			source: "ts",
+			range: { start: { line: 1, character: 13 }, end: { line: 1, character: 14 } },
+		};
+		const dependencyUri = fileToUri(dependency);
+		const isWatchedChange = (message: RpcMessage, uri: string, type: number): boolean => {
+			if (message.method !== "workspace/didChangeWatchedFiles" || !piUtils.isRecord(message.params)) return false;
+			const changes = message.params.changes;
+			return (
+				Array.isArray(changes) &&
+				changes.some(change => piUtils.isRecord(change) && change.uri === uri && change.type === type)
+			);
+		};
+		let watchedText = "number";
+		try {
+			await Bun.write(dependency, "export const x: number = 1;\n");
+			await Bun.write(importer, 'import { x } from "./b";\nexport const y: number = x;\n');
+			const server = installFakeLsp((message, peer) => {
+				if (message.method === "initialize") {
+					peer.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: { diagnosticProvider: true } } });
+					for (const kind of ["begin", "end"])
+						peer.send({ jsonrpc: "2.0", method: "$/progress", params: { token: "load", value: { kind } } });
+				} else if (isWatchedChange(message, dependencyUri, 2)) {
+					watchedText = "string";
+				} else if (message.method === "textDocument/diagnostic") {
+					peer.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						result: { kind: "full", items: watchedText === "string" ? [error] : [] },
+					});
+				} else if (message.method === "shutdown") {
+					peer.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					peer.exit(0);
+				}
+			});
+			const config: ServerConfig = { command: "fake-lsp", fileTypes: ["ts"], rootMarkers: [] };
+			configCache.set(cwd, { servers: { "fake-lsp": config } });
+			await lspClient.getOrCreateClient(config, cwd);
+			server.send({
+				jsonrpc: "2.0",
+				id: "watch-register",
+				method: "client/registerCapability",
+				params: {
+					registrations: [
+						{
+							id: "watch-ts",
+							method: "workspace/didChangeWatchedFiles",
+							registerOptions: {
+								watchers: [{ globPattern: { baseUri: fileToUri(cwd), pattern: "**/*.ts" }, kind: 2 }],
+							},
+						},
+					],
+				},
+			});
+			await server.waitFor(message => message.id === "watch-register" && "result" in message);
+			const tool = new LspTool(makeLspSession(cwd));
+			const diagnostics = async () =>
+				textResult(await tool.execute("watch-importer", { action: "diagnostics", file: importer, timeout: 5 }));
+			expect(await diagnostics()).toBe("OK");
+			await Bun.write(path.join(cwd, "unrelated.txt"), "ignored\n");
+			await Bun.write(dependency, "export const x: string = 'changed';\n");
+			await server.waitFor(message => isWatchedChange(message, dependencyUri, 2));
+			expect(await diagnostics()).toContain("Type 'string' is not assignable to type 'number'.");
+			const notifications = server.received.filter(message => message.method === "workspace/didChangeWatchedFiles");
+			expect(notifications).toHaveLength(1);
+			server.send({
+				jsonrpc: "2.0",
+				id: "watch-create-register",
+				method: "client/registerCapability",
+				params: {
+					registrations: [
+						{
+							id: "watch-created",
+							method: "workspace/didChangeWatchedFiles",
+							registerOptions: { watchers: [{ globPattern: "**/*.ts", kind: 5 }] },
+						},
+					],
+				},
+			});
+			await server.waitFor(message => message.id === "watch-create-register" && "result" in message);
+			const generated = path.join(cwd, "generated", "types.ts");
+			await Bun.write(generated, "export type Generated = boolean;\n");
+			await server.waitFor(message => isWatchedChange(message, fileToUri(generated), 1), 2_000);
+			await fsp.unlink(generated);
+			await server.waitFor(message => isWatchedChange(message, fileToUri(generated), 3), 2_000);
+		} finally {
+			configCache.delete(cwd);
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	}, 15_000);
+
 	it("refreshes externally edited open dependencies before importer diagnostics", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-open-dependency-");
 		const cwd = tempDir.path();

@@ -10,6 +10,7 @@ import { getConfig } from "./config";
 import { applyWorkspaceEdit, type ExecutedWorkspaceChange } from "./edits";
 import { getLspmuxCommand, isLspmuxSupported } from "./lspmux";
 import { connectSharedLspTransport } from "./mux/daemon";
+import { WatchedFiles } from "./watched-files";
 import type {
 	DocumentBuildStatus,
 	LspClient,
@@ -305,6 +306,7 @@ const CLIENT_CAPABILITIES = {
 		workDoneProgress: true,
 	},
 	workspace: {
+		didChangeWatchedFiles: { dynamicRegistration: true },
 		applyEdit: true,
 		workspaceEdit: {
 			documentChanges: true,
@@ -895,6 +897,9 @@ export async function applyWorkspaceEditWithLsp(
 interface DynamicCapabilityRegistration {
 	id?: unknown;
 	method?: unknown;
+	registerOptions?: {
+		watchers?: Array<{ globPattern: string | { baseUri: string | { uri: string }; pattern: string }; kind?: number }>;
+	};
 }
 
 interface DynamicCapabilityParams {
@@ -903,32 +908,44 @@ interface DynamicCapabilityParams {
 	unregistrations?: DynamicCapabilityRegistration[];
 }
 
-function updateDynamicCapabilities(client: LspClient, message: LspJsonRpcRequest): void {
+async function updateDynamicCapabilities(client: LspClient, message: LspJsonRpcRequest): Promise<void> {
 	const params = message.params as DynamicCapabilityParams;
 	if (message.method === "client/registerCapability") {
 		if (!Array.isArray(params.registrations)) return;
-		let registrations = client.dynamicCapabilityRegistrations;
-		if (!registrations) {
-			registrations = new Map();
-			client.dynamicCapabilityRegistrations = registrations;
-		}
-		for (const registration of params.registrations) {
-			if (typeof registration.id === "string" && typeof registration.method === "string") {
-				registrations.set(registration.id, registration.method);
+		const watched = params.registrations.filter(
+			(registration): registration is DynamicCapabilityRegistration & { id: string; method: string } =>
+				typeof registration.id === "string" && registration.method === "workspace/didChangeWatchedFiles",
+		);
+		if (watched.length) {
+			let watcher = client.watchedFiles;
+			if (!watcher) {
+				watcher = new WatchedFiles(client.cwd, changes =>
+					notifyClientWatchedFiles(client, changes, { registered: true }),
+				);
+				client.watchedFiles = watcher;
 			}
+			await watcher.register(watched);
+		}
+		const registrations = client.dynamicCapabilityRegistrations ?? new Map<string, string>();
+		client.dynamicCapabilityRegistrations = registrations;
+		for (const registration of params.registrations) {
+			if (typeof registration.id === "string" && typeof registration.method === "string")
+				registrations.set(registration.id, registration.method);
 		}
 		return;
 	}
 
 	const registrations = client.dynamicCapabilityRegistrations;
-	if (!registrations) return;
 	const unregistrations = params.unregisterations ?? params.unregistrations;
 	if (!Array.isArray(unregistrations)) return;
+	const watcher = client.watchedFiles;
+	const watchedIds: string[] = [];
 	for (const registration of unregistrations) {
-		if (typeof registration.id === "string") {
-			registrations.delete(registration.id);
-		}
+		if (typeof registration.id !== "string") continue;
+		if (registrations?.get(registration.id) === "workspace/didChangeWatchedFiles") watchedIds.push(registration.id);
+		registrations?.delete(registration.id);
 	}
+	watcher?.unregister(watchedIds);
 }
 
 /** Whether the server advertised LSP 3.17 document diagnostic pulls statically or through registration. */
@@ -966,9 +983,13 @@ async function handleServerRequest(client: LspClient, message: LspJsonRpcRequest
 		return;
 	}
 	if (message.method === "client/registerCapability" || message.method === "client/unregisterCapability") {
-		updateDynamicCapabilities(client, message);
-		// Some servers block semantic requests until dynamic registration succeeds.
-		await sendResponse(client, message.id, null, message.method);
+		try {
+			await updateDynamicCapabilities(client, message);
+			// Some servers block semantic requests until dynamic registration succeeds.
+			await sendResponse(client, message.id, null, message.method);
+		} catch (error) {
+			await sendResponse(client, message.id, null, message.method, { code: -32602, message: String(error) });
+		}
 		return;
 	}
 	if (message.method === "window/showMessageRequest") {
@@ -1400,6 +1421,7 @@ export async function getOrCreateClient(
 
 		// Register crash recovery - remove client on process exit
 		proc.exited.then(() => {
+			client.watchedFiles?.close();
 			if (clients.get(key) === client) clients.delete(key);
 			maybeStopIdleChecker();
 			if (clientLocks.get(key)?.token === lockToken) clientLocks.delete(key);
@@ -1478,6 +1500,7 @@ export async function getOrCreateClient(
 		} catch (err) {
 			// Clean up on initialization failure
 			client.status = "error";
+			client.watchedFiles?.close();
 			if (clients.get(key) === client) clients.delete(key);
 			proc.kill();
 			const message = err instanceof Error ? err.message : String(err);
@@ -1962,34 +1985,8 @@ export async function notifyWorkspaceWatchedFiles(
 	);
 	if (activeClients.length === 0) return;
 
-	const timeoutSignal = AbortSignal.timeout(WATCHED_FILES_NOTIFY_TIMEOUT_MS);
-	const sendSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 	const results = await Promise.allSettled(
-		activeClients.map(async client => {
-			const served = await Promise.all(changes.map(change => clientServesPath(client, change.filePath)));
-			const clientChanges = changes
-				.filter((_change, index) => served[index])
-				.map(change => {
-					const uri = fileToUri(change.filePath);
-					// Keep a report echoing the open document's version only while OMP's own
-					// write is in flight: the writethrough synced the overlay before writing, so
-					// the report already answers the new disk text, and a publish that beat this
-					// notification must not be lost. Any other write (the ACP bridge, for one)
-					// leaves the overlay on the old text, so its report is stale.
-					const published = client.diagnostics.get(uri);
-					const current =
-						change.type === FileChangeType.Changed &&
-						pendingDiskWrites.has(uri) &&
-						published !== undefined &&
-						published.version === client.openFiles.get(uri)?.version;
-					if (!current) client.diagnostics.delete(uri);
-					return { uri, type: change.type };
-				});
-			if (clientChanges.length === 0) return;
-			await sendNotification(client, "workspace/didChangeWatchedFiles", { changes: clientChanges }, sendSignal);
-			if (clientChanges.every(change => change.type === FileChangeType.Changed)) return;
-			await refreshOpenFiles(client, sendSignal);
-		}),
+		activeClients.map(client => notifyClientWatchedFiles(client, changes, { signal })),
 	);
 	throwIfAborted(signal);
 	for (const result of results) {
@@ -1999,6 +1996,32 @@ export async function notifyWorkspaceWatchedFiles(
 	}
 }
 
+async function notifyClientWatchedFiles(
+	client: LspClient,
+	changes: readonly WatchedFileChange[],
+	options?: { signal?: AbortSignal; registered?: boolean },
+): Promise<void> {
+	const timeoutSignal = AbortSignal.timeout(WATCHED_FILES_NOTIFY_TIMEOUT_MS);
+	const sendSignal = options?.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
+	const served = options?.registered
+		? undefined
+		: await Promise.all(changes.map(change => clientServesPath(client, change.filePath)));
+	const clientChanges = (served ? changes.filter((_change, index) => served[index]) : changes).map(change => {
+		const uri = fileToUri(change.filePath);
+		const published = client.diagnostics.get(uri);
+		const current =
+			change.type === FileChangeType.Changed &&
+			pendingDiskWrites.has(uri) &&
+			published !== undefined &&
+			published.version === client.openFiles.get(uri)?.version;
+		if (!current) client.diagnostics.delete(uri);
+		return { uri, type: change.type };
+	});
+	if (clientChanges.length === 0) return;
+	await sendNotification(client, "workspace/didChangeWatchedFiles", { changes: clientChanges }, sendSignal);
+	if (clientChanges.every(change => change.type === FileChangeType.Changed)) return;
+	await refreshOpenFiles(client, sendSignal);
+}
 /**
  * Refresh a file in the LSP client.
  * Increments version, sends didChange and didSave notifications; closes a tracked

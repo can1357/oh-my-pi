@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- The `lsp` tool now reports external file edits and generated files to servers using client-side file watching, so TypeScript 7 diagnostics update after shell commands without `lsp reload` ([#17711](https://github.com/can1357/oh-my-pi/issues/17711)).
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
 
 ## [18.15.0] - 2026-11-01
