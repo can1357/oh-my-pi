@@ -10,6 +10,8 @@
 ### Fixed
 
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
+- Fixed daemon broker idle shutdown closing newly accepted clients before authentication under load; unauthenticated sockets now close after the client authentication timeout.
+- Fixed supervised image tunnels rejecting a published URL when the child exits between the startup log read and exit check; each tunnel child now uses a private temporary log directory.
 
 ## [18.15.0] - 2026-11-01
 
