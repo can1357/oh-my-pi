@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the bash tool's shell snapshot running part of your home directory path or `PATH` as a command when it held shell syntax such as `$(…)`, backticks or an apostrophe
+
 ## [18.14.2] - 2026-10-31
 
 ### Added
