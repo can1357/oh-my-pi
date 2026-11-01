@@ -1003,4 +1003,70 @@ Tail content
 		expect((sanitized as Record<string, unknown>)["__proto__"]).toBe("Authorization: Bearer [REDACTED]");
 		expect(JSON.stringify(sanitized)).toContain("Authorization: Bearer [REDACTED]");
 	});
+
+	it("consumes legacy PEM encrypted RFC 1421 headers in truncated private keys", () => {
+		const legacyPemTruncated = `Key:\n-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: DES-EDE3-CBC,0123456789ABCDEF\n\nMIIFDjBABgkqhkiG9w0BBQ0wMzAbBgkqhkiG9w0BBQwwDgQISecretMaterial`;
+		const scrubbed = scrubLiveCredentials(legacyPemTruncated);
+		expect(scrubbed.matchedTypes).toContain("pem_private_key");
+		expect(scrubbed.content).toBe("Key:\n[REDACTED]");
+		expect(scrubbed.content).not.toContain("Proc-Type");
+		expect(scrubbed.content).not.toContain("DES-EDE3-CBC");
+		expect(scrubbed.content).not.toContain("SecretMaterial");
+	});
+
+	it("accepts unpadded base64 before scrubbing data URLs", () => {
+		// "Hello" -> "SGVsbG8=" (padded) or "SGVsbG8" (unpadded, length % 4 === 1 is impossible for 5 bytes; length % 4 is 3)
+		const unpadded = "SGVsbG8";
+		const parsed = parseDataUri(`data:text/plain;base64,${unpadded}`);
+		expect(parsed).not.toBeNull();
+		expect(parsed![1].toString("utf8")).toBe("Hello");
+	});
+
+	it("resanitizes textual data URLs decoded from data URLs", () => {
+		const blobRoot = useTempBlobDir();
+		const secret = "Authorization: Bearer secretBearerToken123456";
+		const innerDataUri = `data:text/plain;base64,${Buffer.from(secret, "utf8").toString("base64")}`;
+		const outerDataUri = `data:text/plain;base64,${Buffer.from(innerDataUri, "utf8").toString("base64")}`;
+
+		expect(sanitizeTextField(outerDataUri)).toBe("Authorization: Bearer [REDACTED]");
+
+		const [, dataMeta] = sanitizeContent(outerDataUri);
+		expect(dataMeta.extraction_reason).toBe("data_uri");
+		expect(dataMeta.redacted_secrets).toContain("auth_bearer_basic");
+		const sha = (dataMeta.blob_ref ?? "").replace("blob://sha256/", "");
+		const stored = readFileSync(join(blobRoot, sha.slice(0, 2), sha.slice(0, 4), sha), "utf8");
+		expect(stored).toBe("Authorization: Bearer [REDACTED]");
+		expect(stored).not.toContain(innerDataUri);
+		expect(stored).not.toContain("secretBearerToken123456");
+	});
+
+	it("normalizes fact timestamps with invalid or injected characters", () => {
+		expect(sanitizeTimestamp("<system-x>2026-11-01T00:00:00Z</system-x>", "")).toBe("2026-11-01T00:00:00.000Z");
+		expect(sanitizeTimestamp("malicious-tag-injection<script>", "")).toBe("");
+	});
+
+	it("redacts short Basic authorization credentials", () => {
+		const shortBasic = "Authorization: Basic dTpw"; // u:p (4 chars)
+		const scrubbed = scrubLiveCredentials(shortBasic);
+		expect(scrubbed.matchedTypes).toContain("auth_bearer_basic");
+		expect(scrubbed.content).toBe("Authorization: Basic [REDACTED]");
+	});
+
+	it("decodes and encodes windows-1252 with its declared character map", () => {
+		const blobRoot = useTempBlobDir();
+		// 0x80 -> € (U+20AC), 0x93 -> “ (U+201C), 0x94 -> ” (U+201D)
+		const prefix = Buffer.from([0x80, 0x93, 0x94]);
+		const secret = Buffer.from(" Authorization: Bearer secretBearer123456", "ascii");
+		const rawBytes = Buffer.concat([prefix, secret]);
+		const uri = `data:text/plain;charset=windows-1252;base64,${rawBytes.toString("base64")}`;
+
+		expect(sanitizeTextField(uri)).toBe("€“” Authorization: Bearer [REDACTED]");
+
+		const [, meta] = sanitizeContent(uri);
+		expect(meta.redacted_secrets).toContain("auth_bearer_basic");
+		const sha = (meta.blob_ref ?? "").replace("blob://sha256/", "");
+		const stored = readFileSync(join(blobRoot, sha.slice(0, 2), sha.slice(0, 4), sha));
+		expect(stored.subarray(0, 3).equals(prefix)).toBe(true);
+		expect(stored.toString("latin1")).toContain("Authorization: Bearer [REDACTED]");
+	});
 });

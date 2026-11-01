@@ -21,7 +21,7 @@ import { isQueryCacheEnabled, QueryCache } from "../query-cache";
 import { adjustWeights, classifyIntent } from "../query-intent";
 import { getSynonyms, STOP_WORDS as QUERY_STOP_WORDS } from "../synonyms";
 import { extractTemporal } from "../temporal-parser";
-import { sanitizeMemoryRow, sanitizeTextField } from "../content-sanitizer";
+import { sanitizeMemoryRow, sanitizeTextField, sanitizeTimestamp } from "../content-sanitizer";
 import { cosineSimilarity } from "../vector-math";
 import type { BeamMemoryState, RecallEnhancedOptions, RecallOptions, RecallResult } from "./types";
 
@@ -1407,7 +1407,7 @@ export function factRecall(beam: BeamMemoryState, query: string, topK = 30): Fac
 				fact_id: asString(row.fact_id),
 				subject: cleanSubject,
 				predicate: cleanPredicate,
-				timestamp: asNullableString(row.timestamp),
+				timestamp: row.timestamp ? sanitizeTimestamp(asNullableString(row.timestamp), "") : null,
 				tier_label: "fact",
 				tier: "fact",
 				source: "facts",

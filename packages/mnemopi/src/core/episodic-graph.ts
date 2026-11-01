@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import { sanitizeTextField } from "./content-sanitizer";
+import { sanitizeTextField, sanitizeTimestamp } from "./content-sanitizer";
 import { closeQuietly, type DatabasePath, openDatabase, transaction } from "../db";
 
 export interface Gist {
@@ -202,7 +202,7 @@ function rowToGist(row: GistRow): Gist {
 	return {
 		id: row.id,
 		text: sanitizeTextField(row.text),
-		timestamp: row.timestamp ?? "",
+		timestamp: sanitizeTimestamp(row.timestamp, ""),
 		participants: parseJsonStringArray(row.participants_json).map(p => sanitizeTextField(p)),
 		location: row.location !== null ? sanitizeTextField(row.location) : null,
 		emotion: row.emotion !== null ? sanitizeTextField(row.emotion) : null,
@@ -216,7 +216,7 @@ function rowToFact(row: FactRow): Fact {
 		subject: row.subject,
 		predicate: row.predicate,
 		object: row.object,
-		timestamp: row.timestamp ?? "",
+		timestamp: sanitizeTimestamp(row.timestamp, ""),
 		confidence: row.confidence ?? 0.5,
 		temporalQualifier: null,
 		memoryId: row.source_msg_id,
@@ -411,6 +411,7 @@ export class EpisodicGraph {
 		const cleanLocation = gist.location !== null ? sanitizeTextField(gist.location) : null;
 		const cleanEmotion = gist.emotion !== null ? sanitizeTextField(gist.emotion) : null;
 		const cleanTimeScope = gist.timeScope !== null ? sanitizeTextField(gist.timeScope) : null;
+		const cleanTimestamp = sanitizeTimestamp(gist.timestamp, "");
 		this.db.run(
 			`INSERT OR REPLACE INTO gists
 				(id, text, timestamp, participants_json, location, emotion, time_scope, memory_id)
@@ -418,7 +419,7 @@ export class EpisodicGraph {
 			[
 				gist.id,
 				cleanText,
-				gist.timestamp,
+				cleanTimestamp,
 				JSON.stringify(cleanParticipants),
 				cleanLocation,
 				cleanEmotion,
@@ -435,11 +436,12 @@ export class EpisodicGraph {
 		const cleanSubject = sanitizeTextField(fact.subject);
 		const cleanPredicate = sanitizeTextField(fact.predicate);
 		const cleanObject = sanitizeTextField(fact.object);
+		const cleanTimestamp = sanitizeTimestamp(fact.timestamp, "");
 		this.db.run(
 			`INSERT OR REPLACE INTO facts
 				(fact_id, session_id, subject, predicate, object, timestamp, source_msg_id, confidence)
 				VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			[fact.id, sessionId, cleanSubject, cleanPredicate, cleanObject, fact.timestamp, memoryId, fact.confidence],
+			[fact.id, sessionId, cleanSubject, cleanPredicate, cleanObject, cleanTimestamp, memoryId, fact.confidence],
 		);
 	}
 	getFact(id: string): Fact | null {

@@ -62,6 +62,21 @@ export function parseDataUri(content: string): [mimeType: string, raw: Buffer] |
 	return [mimeType, decoded];
 }
 
+export function isValidBase64(payload: string): boolean {
+	const cleaned = payload.replace(/\s+/g, "");
+	if (cleaned.length < 2 || cleaned.length % 4 === 1 || !/^[A-Za-z0-9+/]+={0,2}$/.test(cleaned)) {
+		return false;
+	}
+	const padded = cleaned.length % 4 === 0 ? cleaned : cleaned + "=".repeat(4 - (cleaned.length % 4));
+	if (!BASE64_RE.test(padded)) return false;
+	try {
+		Buffer.from(padded, "base64");
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 function decodeBase64Payload(rawPayload: string): Buffer | null {
 	const candidate = rawPayload.includes("%")
 		? (() => {
@@ -72,7 +87,18 @@ function decodeBase64Payload(rawPayload: string): Buffer | null {
 				}
 			})()
 		: rawPayload;
-	return isValidBase64(candidate) ? Buffer.from(candidate, "base64") : null;
+	const cleaned = candidate.replace(/\s+/g, "");
+	if (cleaned.length >= 2 && cleaned.length % 4 !== 1 && /^[A-Za-z0-9+/]+={0,2}$/.test(cleaned)) {
+		const padded = cleaned.length % 4 === 0 ? cleaned : cleaned + "=".repeat(4 - (cleaned.length % 4));
+		if (BASE64_RE.test(padded)) {
+			try {
+				return Buffer.from(padded, "base64");
+			} catch {
+				return null;
+			}
+		}
+	}
+	return null;
 }
 function decodePercentEncoded(raw: string): Buffer {
 	try {
@@ -95,6 +121,7 @@ const SUPPORTED_SYMMETRIC_CHARSETS = new Set([
 	"iso-8859-1",
 	"latin1",
 	"windows-1252",
+	"cp1252",
 	"us-ascii",
 	"ascii",
 	"utf-16",
@@ -131,7 +158,10 @@ function decodeWithCharset(rawBytes: Uint8Array | Buffer, charset: string | null
 	if (!lower || lower === "utf-8" || lower === "utf8") {
 		return new TextDecoder("utf-8", { fatal: false }).decode(rawBytes);
 	}
-	if (lower === "iso-8859-1" || lower === "latin1" || lower === "windows-1252") {
+	if (lower === "windows-1252" || lower === "cp1252") {
+		return new TextDecoder("windows-1252").decode(rawBytes);
+	}
+	if (lower === "iso-8859-1" || lower === "latin1") {
 		return Buffer.isBuffer(rawBytes) ? rawBytes.toString("latin1") : Buffer.from(rawBytes).toString("latin1");
 	}
 	if (lower === "us-ascii" || lower === "ascii") {
@@ -162,7 +192,10 @@ function decodeWithCharset(rawBytes: Uint8Array | Buffer, charset: string | null
 
 function encodeWithCharset(text: string, charset: string | null, rawBytes?: Uint8Array | Buffer): Buffer {
 	const lower = charset ? charset.toLowerCase() : null;
-	if (lower === "iso-8859-1" || lower === "latin1" || lower === "windows-1252") {
+	if (lower === "windows-1252" || lower === "cp1252") {
+		return encodeWindows1252(text);
+	}
+	if (lower === "iso-8859-1" || lower === "latin1") {
 		return Buffer.from(text, "latin1");
 	}
 	if (lower === "us-ascii" || lower === "ascii") {
@@ -507,7 +540,53 @@ function redactJwtsWithFlag(input: string): { content: string; matched: boolean 
 }
 const PEM_BEGIN_RE = /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----/g;
 const PEM_END_RE = /-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----/g;
+const PEM_LEGACY_HEADERS_RE = /^(?:[ \t]*\r?\n[A-Za-z0-9-]+:[ \t]*[^\r\n]+)*/;
 
+const WIN1252_SPECIAL_CHARS: Readonly<Record<number, number>> = {
+	0x20ac: 0x80,
+	0x201a: 0x82,
+	0x0192: 0x83,
+	0x201e: 0x84,
+	0x2026: 0x85,
+	0x2020: 0x86,
+	0x2021: 0x87,
+	0x02c6: 0x88,
+	0x2030: 0x89,
+	0x0160: 0x8a,
+	0x2039: 0x8b,
+	0x0152: 0x8c,
+	0x017d: 0x8e,
+	0x2018: 0x91,
+	0x2019: 0x92,
+	0x201c: 0x93,
+	0x201d: 0x94,
+	0x2022: 0x95,
+	0x2013: 0x96,
+	0x2014: 0x97,
+	0x02dc: 0x98,
+	0x2122: 0x99,
+	0x0161: 0x9a,
+	0x203a: 0x9b,
+	0x0153: 0x9c,
+	0x017e: 0x9e,
+	0x0178: 0x9f,
+};
+
+function encodeWindows1252(text: string): Buffer {
+	const buf = Buffer.alloc(text.length);
+	for (let i = 0; i < text.length; i++) {
+		const code = text.charCodeAt(i);
+		const mapped = WIN1252_SPECIAL_CHARS[code];
+		if (mapped !== undefined) {
+			buf[i] = mapped;
+		} else if (code <= 0xff) {
+			buf[i] = code;
+		} else {
+			buf[i] = 0x3f; // '?'
+		}
+	}
+	return buf;
+}
 /**
  * Redact PEM private key blocks in strictly linear time.
  * If no matching END marker remains in the suffix, subsequent unclosed BEGIN markers
@@ -549,6 +628,10 @@ export function redactPemPrivateKeys(text: string): { content: string; matched: 
 		// Consume the BEGIN header and any trailing PEM base64/whitespace characters, matching
 		// the original pattern: -----BEGIN ... PRIVATE KEY-----[A-Za-z0-9+/=\r\n\t -]*
 		let payloadEnd = beginEnd;
+		const headerMatch = PEM_LEGACY_HEADERS_RE.exec(text.slice(payloadEnd));
+		if (headerMatch && headerMatch[0].length > 0) {
+			payloadEnd += headerMatch[0].length;
+		}
 		while (payloadEnd < text.length) {
 			const code = text.charCodeAt(payloadEnd);
 			if (
@@ -625,7 +708,7 @@ const CREDENTIAL_RULES: ReadonlyArray<{
 	{
 		type: "auth_bearer_basic",
 		pattern:
-			/((?:\\?["'])?\b(?:Proxy-)?Authorization(?:\\?["'])?\s*:\s*(?:\\?["'])?(?:Bearer|Basic)\s+)(?:(?!\\["'])[^\s"',;}{[\]]){8,}/gi,
+			/((?:\\?["'])?\b(?:Proxy-)?Authorization(?:\\?["'])?\s*:\s*(?:\\?["'])?(?:Bearer\s+(?=(?:(?!\\["'])[^\s"',;}{[\]]){8,})|Basic\s+(?=(?:(?!\\["'])[^\s"',;}{[\]]){4,})))(?:(?!\\["'])[^\s"',;}{[\]])+/gi,
 		replacement: "$1[REDACTED]",
 	},
 	{
@@ -693,6 +776,75 @@ export function redactMemorySecrets(input: string): string {
 
 const TEXT_FIELDS = ["content", "extractText", "extract_text", "embedText", "embed_text", "source"] as const;
 
+function resanitizeTextualDataUrl(
+	uri: string,
+	onStripped?: () => void,
+	onRedacted?: (types: string[]) => void,
+): string {
+	const uriMatch = DATA_URI_RE.exec(uri);
+	let rawMime = uriMatch?.groups?.mime;
+	let isBase64 = uriMatch?.groups?.base64 !== undefined;
+	let rawPayload = uriMatch?.groups?.data;
+	const charset = extractCharset(uriMatch?.groups?.params);
+	if (!uriMatch?.groups) {
+		const b64 = /^data:[^,]*;base64,(?<data>[\s\S]*)$/i.exec(uri);
+		if (b64?.groups?.data !== undefined) {
+			rawMime = undefined;
+			isBase64 = true;
+			rawPayload = b64.groups.data;
+		} else {
+			const nonB64 = /^data:[^,]*,(?<data>[\s\S]*)$/i.exec(uri);
+			if (nonB64?.groups?.data !== undefined) {
+				rawMime = undefined;
+				isBase64 = false;
+				rawPayload = nonB64.groups.data;
+			}
+		}
+	}
+	if (rawPayload !== undefined) {
+		const mimeType = rawMime ?? "text/plain";
+		const payloadBytes = isBase64 ? decodeBase64Payload(rawPayload) : decodePercentEncoded(rawPayload);
+		if (payloadBytes !== null && (rawMime === undefined || isTextualMime(mimeType, payloadBytes, charset))) {
+			let innerDecoded = decodeWithCharset(payloadBytes, charset);
+			const tagRes = stripInjectedMemoryTags(innerDecoded);
+			if (tagRes.stripped) {
+				innerDecoded = tagRes.content;
+				onStripped?.();
+			}
+			const credRes = scrubLiveCredentials(innerDecoded);
+			if (credRes.matchedTypes.length > 0) {
+				innerDecoded = credRes.content;
+				onRedacted?.(credRes.matchedTypes);
+			}
+			return innerDecoded;
+		}
+	}
+	return uri;
+}
+
+function resanitizeDecodedText(
+	initialText: string,
+	onStripped?: () => void,
+	onRedacted?: (types: string[]) => void,
+): string {
+	let current = initialText;
+	for (let pass = 0; pass < 4; pass++) {
+		if (!/data:/i.test(current)) break;
+		let changed = false;
+		const next = current.replace(/data:[^\s"'<>]+/gi, matchedUri => {
+			const resanitized = resanitizeTextualDataUrl(matchedUri, onStripped, onRedacted);
+			if (resanitized !== matchedUri) {
+				changed = true;
+				return resanitized;
+			}
+			return matchedUri;
+		});
+		current = next;
+		if (!changed) break;
+	}
+	return current;
+}
+
 export function sanitizeTextField(input: string): string {
 	const stripped = stripInjectedMemoryTags(input);
 	const text = stripped.content;
@@ -714,11 +866,28 @@ export function sanitizeTextField(input: string): string {
 			if (payloadBytes !== null && (rawMime === undefined || isTextualMime(mimeType, payloadBytes, charset))) {
 				const unsupportedCharset = !isSupportedSymmetricCharset(charset);
 				let decoded = decodeWithCharset(payloadBytes, charset);
+				let anyStripped = false;
+				let anyRedacted = false;
+				decoded = resanitizeDecodedText(
+					decoded,
+					() => {
+						anyStripped = true;
+					},
+					() => {
+						anyRedacted = true;
+					},
+				);
 				const tagRes = stripInjectedMemoryTags(decoded);
-				if (tagRes.stripped) decoded = tagRes.content;
+				if (tagRes.stripped) {
+					decoded = tagRes.content;
+					anyStripped = true;
+				}
 				const credRes = scrubLiveCredentials(decoded);
-				if (credRes.matchedTypes.length > 0) decoded = credRes.content;
-				if (unsupportedCharset || tagRes.stripped || credRes.matchedTypes.length > 0) {
+				if (credRes.matchedTypes.length > 0) {
+					decoded = credRes.content;
+					anyRedacted = true;
+				}
+				if (unsupportedCharset || anyStripped || anyRedacted) {
 					return decoded;
 				}
 			}
@@ -729,11 +898,28 @@ export function sanitizeTextField(input: string): string {
 			const payloadBytes = decodeBase64Payload(b64Fallback.groups.data);
 			if (payloadBytes !== null) {
 				let decoded = decodeWithCharset(payloadBytes, "utf-8");
+				let anyStripped = false;
+				let anyRedacted = false;
+				decoded = resanitizeDecodedText(
+					decoded,
+					() => {
+						anyStripped = true;
+					},
+					() => {
+						anyRedacted = true;
+					},
+				);
 				const tagRes = stripInjectedMemoryTags(decoded);
-				if (tagRes.stripped) decoded = tagRes.content;
+				if (tagRes.stripped) {
+					decoded = tagRes.content;
+					anyStripped = true;
+				}
 				const credRes = scrubLiveCredentials(decoded);
-				if (credRes.matchedTypes.length > 0) decoded = credRes.content;
-				if (tagRes.stripped || credRes.matchedTypes.length > 0) {
+				if (credRes.matchedTypes.length > 0) {
+					decoded = credRes.content;
+					anyRedacted = true;
+				}
+				if (anyStripped || anyRedacted) {
 					return decoded;
 				}
 			}
@@ -742,11 +928,28 @@ export function sanitizeTextField(input: string): string {
 			if (nonB64Fallback?.groups?.data !== undefined) {
 				const payloadBytes = decodePercentEncoded(nonB64Fallback.groups.data);
 				let decoded = decodeWithCharset(payloadBytes, "utf-8");
+				let anyStripped = false;
+				let anyRedacted = false;
+				decoded = resanitizeDecodedText(
+					decoded,
+					() => {
+						anyStripped = true;
+					},
+					() => {
+						anyRedacted = true;
+					},
+				);
 				const tagRes = stripInjectedMemoryTags(decoded);
-				if (tagRes.stripped) decoded = tagRes.content;
+				if (tagRes.stripped) {
+					decoded = tagRes.content;
+					anyStripped = true;
+				}
 				const credRes = scrubLiveCredentials(decoded);
-				if (credRes.matchedTypes.length > 0) decoded = credRes.content;
-				if (tagRes.stripped || credRes.matchedTypes.length > 0) {
+				if (credRes.matchedTypes.length > 0) {
+					decoded = credRes.content;
+					anyRedacted = true;
+				}
+				if (anyStripped || anyRedacted) {
 					return decoded;
 				}
 			}
@@ -1075,17 +1278,37 @@ export function sanitizeContent(content: string): [sanitizedContent: string, met
 					if (isTextual) {
 						const unsupportedCharset = !isSupportedSymmetricCharset(charset);
 						let decoded = decodeWithCharset(rawBytes, charset);
+						let anyStripped = false;
+						const innerRedacted: string[] = [];
+						decoded = resanitizeDecodedText(
+							decoded,
+							() => {
+								anyStripped = true;
+								dataMeta.stripped_tags = true;
+							},
+							types => {
+								for (const t of types) {
+									if (!innerRedacted.includes(t)) innerRedacted.push(t);
+								}
+							},
+						);
 						const tagRes = stripInjectedMemoryTags(decoded);
 						if (tagRes.stripped) {
 							decoded = tagRes.content;
 							dataMeta.stripped_tags = true;
+							anyStripped = true;
 						}
 						const credRes = scrubLiveCredentials(decoded);
 						if (credRes.matchedTypes.length > 0) {
 							decoded = credRes.content;
-							dataMeta.redacted_secrets = credRes.matchedTypes;
+							for (const t of credRes.matchedTypes) {
+								if (!innerRedacted.includes(t)) innerRedacted.push(t);
+							}
 						}
-						if (unsupportedCharset || tagRes.stripped || credRes.matchedTypes.length > 0) {
+						if (innerRedacted.length > 0) {
+							dataMeta.redacted_secrets = innerRedacted;
+						}
+						if (unsupportedCharset || anyStripped || innerRedacted.length > 0) {
 							bytesToStore = encodeWithCharset(decoded, charset, rawBytes);
 						}
 					}
@@ -1104,15 +1327,32 @@ export function sanitizeContent(content: string): [sanitizedContent: string, met
 				const rawBytes = decodeBase64Payload(b64Fallback.groups.data);
 				if (rawBytes !== null) {
 					let decoded = decodeWithCharset(rawBytes, "utf-8");
+					let anyStripped = false;
+					const innerRedacted: string[] = [];
+					decoded = resanitizeDecodedText(
+						decoded,
+						() => {
+							anyStripped = true;
+						},
+						types => {
+							for (const t of types) {
+								if (!innerRedacted.includes(t)) innerRedacted.push(t);
+							}
+						},
+					);
 					const tagRes = stripInjectedMemoryTags(decoded);
 					if (tagRes.stripped) {
 						decoded = tagRes.content;
+						anyStripped = true;
 					}
 					const credRes = scrubLiveCredentials(decoded);
 					if (credRes.matchedTypes.length > 0) {
 						decoded = credRes.content;
+						for (const t of credRes.matchedTypes) {
+							if (!innerRedacted.includes(t)) innerRedacted.push(t);
+						}
 					}
-					if (tagRes.stripped || credRes.matchedTypes.length > 0) {
+					if (anyStripped || innerRedacted.length > 0) {
 						const bytesToStore = encodeWithCharset(decoded, "utf-8", rawBytes);
 						const sha256 = storeBlob(bytesToStore);
 						const blobRef = `blob://sha256/${sha256}`;
@@ -1122,11 +1362,11 @@ export function sanitizeContent(content: string): [sanitizedContent: string, met
 							extraction_reason: "data_uri",
 							blob_ref: blobRef,
 						};
-						if (tagsWereStripped || tagRes.stripped) {
+						if (tagsWereStripped || anyStripped) {
 							dataMeta.stripped_tags = true;
 						}
-						if (credRes.matchedTypes.length > 0) {
-							dataMeta.redacted_secrets = credRes.matchedTypes;
+						if (innerRedacted.length > 0) {
+							dataMeta.redacted_secrets = innerRedacted;
 						}
 						return [
 							`[Binary content extracted: text/plain, ${bytesToStore.length.toLocaleString("en-US")} bytes → ${blobRef}]`,
@@ -1139,15 +1379,32 @@ export function sanitizeContent(content: string): [sanitizedContent: string, met
 				if (nonB64Fallback?.groups?.data !== undefined) {
 					const rawBytes = decodePercentEncoded(nonB64Fallback.groups.data);
 					let decoded = decodeWithCharset(rawBytes, "utf-8");
+					let anyStripped = false;
+					const innerRedacted: string[] = [];
+					decoded = resanitizeDecodedText(
+						decoded,
+						() => {
+							anyStripped = true;
+						},
+						types => {
+							for (const t of types) {
+								if (!innerRedacted.includes(t)) innerRedacted.push(t);
+							}
+						},
+					);
 					const tagRes = stripInjectedMemoryTags(decoded);
 					if (tagRes.stripped) {
 						decoded = tagRes.content;
+						anyStripped = true;
 					}
 					const credRes = scrubLiveCredentials(decoded);
 					if (credRes.matchedTypes.length > 0) {
 						decoded = credRes.content;
+						for (const t of credRes.matchedTypes) {
+							if (!innerRedacted.includes(t)) innerRedacted.push(t);
+						}
 					}
-					if (tagRes.stripped || credRes.matchedTypes.length > 0) {
+					if (anyStripped || innerRedacted.length > 0) {
 						const bytesToStore = encodeWithCharset(decoded, "utf-8", rawBytes);
 						const sha256 = storeBlob(bytesToStore);
 						const blobRef = `blob://sha256/${sha256}`;
@@ -1157,11 +1414,11 @@ export function sanitizeContent(content: string): [sanitizedContent: string, met
 							extraction_reason: "data_uri",
 							blob_ref: blobRef,
 						};
-						if (tagsWereStripped || tagRes.stripped) {
+						if (tagsWereStripped || anyStripped) {
 							dataMeta.stripped_tags = true;
 						}
-						if (credRes.matchedTypes.length > 0) {
-							dataMeta.redacted_secrets = credRes.matchedTypes;
+						if (innerRedacted.length > 0) {
+							dataMeta.redacted_secrets = innerRedacted;
 						}
 						return [
 							`[Binary content extracted: text/plain, ${bytesToStore.length.toLocaleString("en-US")} bytes → ${blobRef}]`,
@@ -1223,14 +1480,4 @@ export function sanitizeContent(content: string): [sanitizedContent: string, met
 	}
 
 	return [text, meta];
-}
-function isValidBase64(payload: string): boolean {
-	if (payload.length % 4 !== 0) return false;
-	if (!BASE64_RE.test(payload)) return false;
-	try {
-		Buffer.from(payload, "base64");
-		return true;
-	} catch {
-		return false;
-	}
 }
