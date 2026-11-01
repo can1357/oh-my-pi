@@ -111,12 +111,8 @@ function refreshGateFetch(seen: Array<{ auth?: string; tenant?: string }>): Fetc
 
 describe("ModelRegistry command-resolved models.yml values", () => {
 	test("does not run a command-backed value outside an enterable project", async () => {
-		const enterable = spyOn(piUtils, "directoryIsEnterable").mockResolvedValue(false);
-		try {
-			expect(await resolveConfigValue("!printf %s home-secret")).toBeUndefined();
-		} finally {
-			enterable.mockRestore();
-		}
+		spyOn(piUtils, "directoryIsEnterable").mockResolvedValue(false);
+		expect(await resolveConfigValue("!printf %s home-secret")).toBeUndefined();
 	});
 
 	let tempDir = "";
@@ -131,6 +127,11 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 	});
 
 	afterEach(() => {
+		// Restore spies here, never in a test body: a test that times out never reaches its own
+		// restore, and a performance.now spy it leaves behind makes the next
+		// mockSchedulerWaitWithClock() wrap that spy in itself, so every later test in the file
+		// dies with RangeError: Maximum call stack size exceeded.
+		vi.restoreAllMocks();
 		authStorage.close();
 		if (!tempDir || !fs.existsSync(tempDir)) return;
 		try {
@@ -434,7 +435,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 	});
 
 	test("a provider with no apiKey configured still fails with the non-retryable missing-key error", async () => {
-		const envKey = spyOn(envApiKey, "getEnvApiKey").mockReturnValue(undefined);
+		spyOn(envApiKey, "getEnvApiKey").mockReturnValue(undefined);
 		const registry = new ModelRegistry(authStorage, modelsPath);
 		const model = registry.find("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected bundled Anthropic model");
@@ -445,8 +446,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			.then(
 				() => undefined,
 				(failure: unknown) => failure,
-			)
-			.finally(() => envKey.mockRestore());
+			);
 
 		expect(error).toBeInstanceOf(AIError.MissingApiKeyError);
 		expect(AIError.retriable(AIError.classify(error))).toBe(false);
@@ -545,7 +545,6 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		} finally {
 			await session.dispose();
 			await sessionManager.close();
-			vi.restoreAllMocks();
 		}
 	}
 
@@ -642,7 +641,6 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			expect(fs.readFileSync(counterFile, "utf8").length).toBeGreaterThanOrEqual(2);
 		} finally {
 			await session.dispose();
-			vi.restoreAllMocks();
 			unregisterCustomApis(mockSource);
 		}
 	});
@@ -687,7 +685,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		const model = registry.getAll().find(candidate => candidate.provider === "bedrock-mantle");
 		if (!model) throw new Error("Expected a bundled bedrock-mantle model");
 		// Keyless bedrock-mantle signs with the AWS credential chain.
-		const credentials = spyOn(awsCredentials, "resolveAwsCredentials").mockResolvedValue({
+		spyOn(awsCredentials, "resolveAwsCredentials").mockResolvedValue({
 			accessKeyId: "AKIDSYNTHETIC",
 			secretAccessKey: "synthetic-secret",
 		});
@@ -703,8 +701,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		const context: Context = { systemPrompt: ["s"], messages: [{ role: "user", content: "hi", timestamp: 0 }] };
 		await streamSimple(model, context, { apiKey: registry.turnResolver(model), fetch: captureFetch, maxTokens: 16 })
 			.result()
-			.catch(() => undefined)
-			.finally(() => credentials.mockRestore());
+			.catch(() => undefined);
 
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("1");
 		expect(requests.length).toBeGreaterThan(0);
