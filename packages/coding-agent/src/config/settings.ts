@@ -930,14 +930,19 @@ export class Settings {
 	}
 
 	/**
-	 * Values config files hold that this instance ignores because their setting rejects them, each with
-	 * the file holding it: those project and `--config` files dropped as they loaded, and a rejected
-	 * value read as unset (a global one, say) once its setting has been read.
+	 * Safe metadata for config values this instance ignores because their setting rejects them, each
+	 * with its file: those project and `--config` files dropped as they loaded, and a rejected value
+	 * read as unset (a global one, say) once its setting has been read. Never exposes the raw value.
 	 */
 	ignoredValues(): IgnoredValue[] {
 		const ignored = [...this.warnState.invalid.values()];
 		for (const layer of this.warnState.dropped.values()) ignored.push(...layer.values());
-		return ignored;
+		return ignored.map(({ setting, source, valueType, valueLength }) => ({
+			setting,
+			source,
+			valueType,
+			valueLength,
+		}));
 	}
 
 	/**

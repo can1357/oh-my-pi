@@ -75,7 +75,7 @@ This only controls the startup splash animation. It does not rerun setup or chan
 
 `omp config` with no subcommand lists settings. `--help` or `-h` displays command help. The `--json` flag is accepted by `list`, `get`, `set`, and `reset`. `--scope` is accepted by `list` only.
 
-A value a config file holds that its key rejects (the wrong type, or not one of the enum values) is ignored by every read. `omp config get <key>` and `omp config list` name each such value on stderr, with the file holding it and what the key expects; with `--json` it appears under that key as `ignored: [{ value, expected, source }]` instead. For a credential, these warnings print `********` and the JSON has `redacted: true` in place of `value`, as does the log warning. `omp config list --scope` still shows the value as the layer holds it and marks it `(ignored: expected …)`, or `ignored: true` with `expected` in `--json`.
+A value a config file holds that its key rejects (the wrong type, or not one of the enum values) is ignored by every read. `omp config get <key>` and `omp config list` name each rejected setting on stderr, with the file holding it, its type and length, and what the key expects; with `--json` it appears under that key as `ignored: [{ valueType, valueLength, expected, source }]` instead. A rejected value is never shown, even when its destination setting is not marked as a credential. `omp config list --scope` also omits it and marks it `(ignored: <type and length>)`, or `ignored: true` with `valueType`, `valueLength` and `expected` in `--json`.
 
 ### Value parsing
 

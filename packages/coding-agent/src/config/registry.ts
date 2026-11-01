@@ -654,29 +654,26 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 	/**
 	 * Registry plumbing behind `Settings.rawValue`: warns that `raw`, the value `settings` configures,
 	 * is one this setting rejects and so reads as unset, naming the config file `sourceOf` finds, and
-	 * records it for `Settings.ignoredValues`. Once per instance and value, until {@link rearmRejected},
-	 * so a view that cannot name the file (a grant view) keeps what its parent already reported.
+	 * records safe metadata for `Settings.ignoredValues`. The raw value stays only in warn-once state.
+	 * Once per instance and value, until {@link rearmRejected}, so a view that cannot name the file
+	 * (a grant view) keeps what its parent already reported.
 	 */
 	reportRejected(settings: Settings, raw: unknown, sourceOf: () => string | undefined): void {
 		const warned = settings.warnState.invalid;
 		const previous = warned.get(this.id);
-		if (previous && Bun.deepEquals(previous.value, raw)) return;
+		if (previous && Bun.deepEquals(previous.raw, raw)) return;
 		const source = sourceOf();
-		warned.set(this.id, { setting: this, value: raw, source });
+		warned.set(this.id, { setting: this, raw, source, ...rejectedValueMetadata(raw) });
 		this.warnRejected(raw, source);
 	}
 
 	/**
-	 * Registry plumbing: logs that `raw` (found in the config file `source`, when known) is a value this
-	 * setting rejects, naming the setting, the value and what was expected. A credential's value never
-	 * reaches the log, however malformed: the warning says `redacted` instead. Callers decide how often.
+	 * Registry plumbing: logs that a config file holds a value this setting rejects. Diagnostics name
+	 * the setting, type, length and expectation, never the value: invalid data often is a misplaced token.
+	 * Callers decide how often.
 	 */
 	warnRejected(raw: unknown, source: string | undefined): void {
-		const context = {
-			setting: this.id,
-			...(this.isCredential ? { redacted: true } : { value: raw }),
-			expected: this.expected,
-		};
+		const context = { setting: this.id, ...rejectedValueMetadata(raw), expected: this.expected };
 		logger.warn("Settings: ignoring invalid value", source === undefined ? context : { ...context, source });
 	}
 
@@ -871,12 +868,34 @@ export function all(): readonly AnySetting[] {
 // Warn-once diagnostics
 // ═══════════════════════════════════════════════════════════════════════════
 
-/** A value a config file holds that its setting rejects, so it reads as unset (see `Settings.ignoredValues`). */
-export interface IgnoredValue {
+/** Safe shape information about a rejected configured value; the value itself never leaves registry plumbing. */
+export interface RejectedValueMetadata {
+	readonly valueType: string;
+	readonly valueLength: number;
+}
+
+/** A config value's type and size, for diagnostics that must not disclose its contents. */
+export function rejectedValueMetadata(value: unknown): RejectedValueMetadata {
+	const valueType = Array.isArray(value) ? "array" : value === null ? "null" : typeof value;
+	const valueLength =
+		typeof value === "string" || Array.isArray(value)
+			? value.length
+			: value !== null && typeof value === "object"
+				? Object.keys(value).length
+				: String(value).length;
+	return { valueType, valueLength };
+}
+
+/** A config file's rejected setting, safe to show through `Settings.ignoredValues`. */
+export interface IgnoredValue extends RejectedValueMetadata {
 	readonly setting: AnySetting;
-	readonly value: unknown;
 	/** The config file holding it, when known. */
 	readonly source: string | undefined;
+}
+
+/** Registry-private rejected value retained only to re-arm an unchanged warning without disclosing it. */
+interface RejectedValue extends IgnoredValue {
+	readonly raw: unknown;
 }
 
 /**
@@ -885,11 +904,11 @@ export interface IgnoredValue {
  */
 export interface WarnState {
 	/** Rejected value each setting (by id) last read as unset; re-armed once the value is fixed. */
-	readonly invalid: Map<string, IgnoredValue>;
+	readonly invalid: Map<string, RejectedValue>;
 	/** Unknown `items` entries each setting (by id) warned about that are still configured. */
 	readonly items: Map<string, Set<string>>;
 	/** Per loaded layer (each `--config` file, the project): values its load dropped, by setting id (see {@link reportDropped}). */
-	readonly dropped: Map<string, ReadonlyMap<string, IgnoredValue>>;
+	readonly dropped: Map<string, ReadonlyMap<string, RejectedValue>>;
 }
 
 /**
@@ -921,12 +940,12 @@ export function reportDropped(
 ): void {
 	const warned = settings.warnState.dropped;
 	const previous = warned.get(layer);
-	const reported = new Map<string, IgnoredValue>();
+	const reported = new Map<string, RejectedValue>();
 	for (const [setting, value] of dropped) {
 		const source = sourceOf(setting, value);
-		reported.set(setting.id, { setting, value, source });
+		reported.set(setting.id, { setting, raw: value, source, ...rejectedValueMetadata(value) });
 		const before = previous?.get(setting.id);
-		if (before && before.source === source && Bun.deepEquals(before.value, value)) continue;
+		if (before && before.source === source && Bun.deepEquals(before.raw, value)) continue;
 		setting.warnRejected(value, source);
 	}
 	if (reported.size === 0) warned.delete(layer);

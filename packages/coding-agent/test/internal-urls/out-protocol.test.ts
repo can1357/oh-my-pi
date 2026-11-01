@@ -68,7 +68,8 @@ describe("out://", () => {
 			expect(tier(true)).toBe("read");
 			expect(warn).toHaveBeenCalledWith("Settings: ignoring invalid value", {
 				setting: "out.enabled",
-				value: "off",
+				valueType: "string",
+				valueLength: 3,
 				expected: "a boolean",
 				source: dir.join("agent", "config.yml"),
 			});

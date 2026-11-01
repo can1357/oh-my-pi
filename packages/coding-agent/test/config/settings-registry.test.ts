@@ -100,14 +100,16 @@ describe("settings registry", () => {
 			const source = dir.join("agent", "config.yml");
 			expect(warn).toHaveBeenCalledWith("Settings: ignoring invalid value", {
 				setting: "searxng.endpoint",
-				value: 8080,
+				valueType: "number",
+				valueLength: 4,
 				expected: "a string",
 				source,
 			});
-			// `searxng.basicPassword` is a credential: the warning names it but never logs the value.
+			// Every rejected value is metadata-only, credential or not.
 			expect(warn).toHaveBeenCalledWith("Settings: ignoring invalid value", {
 				setting: "searxng.basicPassword",
-				redacted: true,
+				valueType: "number",
+				valueLength: 2,
 				expected: "a string",
 				source,
 			});
@@ -117,20 +119,39 @@ describe("settings registry", () => {
 		}
 	});
 
-	it("never logs a credential's value when a project file's malformed credential is dropped", async () => {
-		const dir = TempDir.createSync("@pi-settings-rejected-credential-");
+	it("never logs a rejected value, including nested tokens in an unmarked setting", async () => {
+		const dir = TempDir.createSync("@pi-settings-rejected-value-");
 		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
-		const secret = "settings-registry-credential-leak-9f2c";
+		const secret = "settings-registry-nested-token-9f2c";
 		try {
-			// A list where a record is expected, under a valid `--config` record that hides it from every read.
+			// Lists where records are expected, under a valid `--config` record that hides the project layer.
 			await loadHandEditedSettings(dir, {
-				project: { images: { urls: { credentials: [{ token: secret }] } } },
+				project: {
+					images: { urls: { credentials: [{ token: secret }] } },
+					temperature: { apiToken: secret },
+					steeringMode: secret,
+				},
 				overlays: [{ images: { urls: { credentials: {} } } }],
 			});
 			expect(warn).toHaveBeenCalledWith("Settings: ignoring invalid value", {
 				setting: "images.urls.credentials",
-				redacted: true,
+				valueType: "array",
+				valueLength: 1,
 				expected: "a record",
+				source: expect.stringMatching(/\.omp[\\/]config\.yml$/),
+			});
+			expect(warn).toHaveBeenCalledWith("Settings: ignoring invalid value", {
+				setting: "temperature",
+				valueType: "object",
+				valueLength: 1,
+				expected: "a number",
+				source: expect.stringMatching(/\.omp[\\/]config\.yml$/),
+			});
+			expect(warn).toHaveBeenCalledWith("Settings: ignoring invalid value", {
+				setting: "steeringMode",
+				valueType: "string",
+				valueLength: secret.length,
+				expected: expect.stringContaining("one of "),
 				source: expect.stringMatching(/\.omp[\\/]config\.yml$/),
 			});
 			expect(Bun.inspect(warn.mock.calls)).not.toContain(secret);
@@ -161,7 +182,8 @@ describe("settings registry", () => {
 			});
 			expect(warn).toHaveBeenCalledWith("Settings: ignoring invalid value", {
 				setting: "temperature",
-				value: "hot",
+				valueType: "string",
+				valueLength: 3,
 				expected: "a number",
 				source: expect.stringMatching(/\.omp[\\/]config\.yml$/),
 			});

@@ -8,7 +8,7 @@
 import { APP_NAME, getAgentDir, isRecord } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { orderedSettings } from "../config/all-settings";
-import { type AnySetting, lookup } from "../config/registry";
+import { type AnySetting, lookup, rejectedValueMetadata } from "../config/registry";
 import { Settings, settings } from "../config/settings";
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import { initXdg } from "./commands/init-xdg";
@@ -161,11 +161,10 @@ function getTypeDisplay(def: CliSettingDef): string {
 	}
 }
 
-/** One value a config file holds that its setting rejects and so ignores, as `--json` reports it. */
+/** Safe details for one config value a setting rejects, as `--json` reports it. */
 interface IgnoredEntry {
-	/** The value as written; absent for a credential, which says `redacted` instead, as in `list`. */
-	value?: unknown;
-	redacted?: true;
+	valueType: string;
+	valueLength: number;
 	expected: string;
 	/** The config file holding it, when known. */
 	source?: string;
@@ -176,24 +175,30 @@ function ignoredEntries(setting?: AnySetting): [id: string, entry: IgnoredEntry]
 	return settings
 		.ignoredValues()
 		.filter(ignored => !setting || ignored.setting === setting)
-		.map(({ setting: ignored, value, source }) => [
+		.map(({ setting: ignored, valueType, valueLength, source }) => [
 			ignored.id,
 			{
-				...(ignored.isCredential ? { redacted: true as const } : { value }),
+				valueType,
+				valueLength,
 				expected: ignored.expected,
 				...(source === undefined ? {} : { source }),
 			},
 		]);
 }
 
-/** Prints, on stderr, a warning for each of {@link ignoredEntries}: a hand-edited mistake is otherwise invisible here. */
+/** A rejected value's safe human description: never echo invalid file contents into a terminal. */
+function ignoredDescription(valueType: string, valueLength: number): string {
+	return `${valueType} (length ${valueLength})`;
+}
+
+/** Prints, on stderr, safe metadata for each ignored config value: a hand-edited mistake is otherwise invisible here. */
 function warnIgnored(setting?: AnySetting): void {
 	for (const [id, entry] of ignoredEntries(setting)) {
-		// JSON shows the value's type and any stray whitespace, which is usually the mistake.
-		const shown = entry.redacted ? REDACTED : JSON.stringify(entry.value);
 		const where = entry.source === undefined ? "" : ` in ${entry.source}`;
 		console.error(
-			chalk.yellow(`${theme.status.warning} Ignored ${id} = ${shown}${where}: expected ${entry.expected}.`),
+			chalk.yellow(
+				`${theme.status.warning} Ignored ${id}${where}: ${ignoredDescription(entry.valueType, entry.valueLength)}; expected ${entry.expected}.`,
+			),
 		);
 	}
 }
@@ -330,14 +335,24 @@ async function handleListLayer(scope: ConfigScope, flags: { json?: boolean }): P
 	if (flags.json) {
 		const result: Record<
 			string,
-			{ value?: unknown; redacted?: true; type: string; description: string; ignored?: true; expected?: string }
+			{
+				value?: unknown;
+				redacted?: true;
+				type: string;
+				description: string;
+				ignored?: true;
+				valueType?: string;
+				valueLength?: number;
+				expected?: string;
+			}
 		> = {};
 		for (const [def, value] of entries) {
+			const rejected = ignored(def, value);
 			result[def.path] = {
-				...(def.setting.isCredential && value ? { redacted: true } : { value }),
+				...(rejected ? {} : def.setting.isCredential && value ? { redacted: true } : { value }),
 				type: def.type,
 				description: def.description,
-				...(ignored(def, value) ? { ignored: true, expected: def.setting.expected } : {}),
+				...(rejected ? { ignored: true, ...rejectedValueMetadata(value), expected: def.setting.expected } : {}),
 			};
 		}
 		await writeStdout(`${JSON.stringify(result, null, 2)}\n`);
@@ -346,8 +361,15 @@ async function handleListLayer(scope: ConfigScope, flags: { json?: boolean }): P
 
 	console.log(chalk.bold(`Settings in the ${scope} layer:\n`));
 	for (const [def, value] of entries) {
-		const valueStr = def.setting.isCredential && value ? REDACTED : formatValue(value);
-		const note = ignored(def, value) ? ` ${chalk.yellow(`(ignored: expected ${def.setting.expected})`)}` : "";
+		const rejected = ignored(def, value);
+		const valueStr = rejected
+			? chalk.yellow(
+					`(ignored: ${ignoredDescription(rejectedValueMetadata(value).valueType, rejectedValueMetadata(value).valueLength)})`,
+				)
+			: def.setting.isCredential && value
+				? REDACTED
+				: formatValue(value);
+		const note = rejected ? ` ${chalk.yellow(`(expected ${def.setting.expected})`)}` : "";
 		console.log(`  ${chalk.white(def.path)} = ${valueStr} ${chalk.dim(getTypeDisplay(def))}${note}`);
 	}
 }

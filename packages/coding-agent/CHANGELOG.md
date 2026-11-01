@@ -5,7 +5,7 @@
 ### Fixed
 
 - In ACP sessions, a `tools.approvalMode` that is not one of the four modes (a typo, `YOLO`, a number) no longer counts as an explicit `yolo` and no longer turns off the client's permission prompts for `bash`, `edit`, `delete` and `move` ([#17600](https://github.com/can1357/oh-my-pi/pull/17600) by [@sjawhar](https://github.com/sjawhar))
-- A hand-edited setting of the wrong type is now ignored where it is written, with a warning naming the setting, the value, the expected type and the file (also shown by `omp config get` and `omp config list`), so the config beneath it (global under project, project under `--config`) or the default applies; it no longer bypasses a denied Auto-QA consent, turns on `out://` in print, RPC and ACP, sends Codex `textVerbosity: medium`, blocks the Nerd Font symbol upgrade, hides the SearXNG and Mnemopi environment variable fallbacks, or erases a lower config's approval policies ([#17600](https://github.com/can1357/oh-my-pi/pull/17600) by [@sjawhar](https://github.com/sjawhar))
+- A hand-edited setting of the wrong type is now ignored where it is written, with a warning naming the setting, rejected value's type and length, the expected type and the file (also shown safely by `omp config get` and `omp config list`), so the config beneath it (global under project, project under `--config`) or the default applies; it no longer bypasses a denied Auto-QA consent, turns on `out://` in print, RPC and ACP, sends Codex `textVerbosity: medium`, blocks the Nerd Font symbol upgrade, hides the SearXNG and Mnemopi environment variable fallbacks, or erases a lower config's approval policies ([#17600](https://github.com/can1357/oh-my-pi/pull/17600) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.2] - 2026-10-31
 

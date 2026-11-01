@@ -374,51 +374,58 @@ describe("config list --scope", () => {
 		expect(text).not.toContain("defaultThinkingLevel");
 	});
 
-	it("shows get and list users a value a config file holds that every read ignores, and the file", async () => {
+	it("shows safe rejected-value metadata without echoing its file contents in any config surface", async () => {
 		if (!testAgentDir || !projectDir) throw new Error("Test directories were not initialized");
 		const globalFile = path.join(testAgentDir.path(), "config.yml");
 		const projectFile = path.join(projectDir.path(), ".omp", "config.yml");
-		// A global value is read as unset; a project value is dropped as the project layer loads.
-		await Bun.write(globalFile, 'temperature: "hot"\nhindsight:\n  apiToken: 12345678\n');
-		await Bun.write(projectFile, "steeringMode: sometimes\n");
+		const secret = "config-cli-nested-token-84e3";
+		await Bun.write(globalFile, `temperature:\n  apiToken: ${secret}\n`);
+		await Bun.write(projectFile, `steeringMode: ${secret}\n`);
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 		const stderr = () => Bun.stripANSI(errorSpy.mock.calls.map(call => String(call[0] ?? "")).join("\n"));
 		const stdout = () => Bun.stripANSI(logSpy.mock.calls.map(call => String(call[0] ?? "")).join("\n"));
 
 		await runConfigCommand({ action: "get", key: "temperature", flags: {} });
-		expect(stderr()).toContain(`Ignored temperature = "hot" in ${globalFile}: expected a number.`);
+		expect(stderr()).toContain(`Ignored temperature in ${globalFile}: object (length 1); expected a number.`);
 
 		await runConfigCommand({ action: "get", key: "temperature", flags: { json: true } });
 		expect(JSON.parse(String(logSpy.mock.calls.at(-1)?.[0]))).toMatchObject({
 			key: "temperature",
 			value: -1,
-			ignored: [{ value: "hot", expected: "a number", source: globalFile }],
+			ignored: [{ valueType: "object", valueLength: 1, expected: "a number", source: globalFile }],
 		});
 
 		errorSpy.mockClear();
 		await runConfigCommand({ action: "list", flags: {} });
-		expect(stderr()).toContain(`Ignored steeringMode = "sometimes" in ${projectFile}: expected one of `);
-		// A credential of the wrong type is still a credential: named, never printed.
-		expect(stderr()).toContain(`Ignored hindsight.apiToken = ******** in ${globalFile}: expected a string.`);
-		expect(stderr()).not.toContain("12345678");
-		expect(stdout()).not.toContain("12345678");
+		expect(stderr()).toContain(
+			`Ignored steeringMode in ${projectFile}: string (length ${secret.length}); expected one of `,
+		);
+		expect(stderr()).not.toContain(secret);
+		expect(stdout()).not.toContain(secret);
 
 		const all = await listLayer();
 		expect(all.steeringMode.ignored).toEqual([
-			{ value: "sometimes", expected: expect.stringContaining("one of "), source: projectFile },
+			{
+				valueType: "string",
+				valueLength: secret.length,
+				expected: expect.stringContaining("one of "),
+				source: projectFile,
+			},
 		]);
-		expect(all["hindsight.apiToken"].ignored).toEqual([{ redacted: true, expected: "a string", source: globalFile }]);
+		expect(JSON.stringify(all)).not.toContain(secret);
 
-		// The layer as written still shows the value, marked so a host does not take it as the one in effect.
+		// The layer as written never echoes a rejected value, even under `--scope`.
 		expect((await listLayer("project")).steeringMode).toMatchObject({
-			value: "sometimes",
 			ignored: true,
+			valueType: "string",
+			valueLength: secret.length,
 			expected: expect.stringContaining("one of "),
 		});
 		logSpy.mockClear();
 		await runConfigCommand({ action: "list", flags: { scope: "global" } });
-		expect(stdout()).toMatch(/temperature = hot \(number\) \(ignored: expected a number\)/);
+		expect(stdout()).toContain("temperature = (ignored: object (length 1)) (number) (expected a number)");
+		expect(stdout()).not.toContain(secret);
 	});
 
 	it("rejects --scope on actions other than list", async () => {
