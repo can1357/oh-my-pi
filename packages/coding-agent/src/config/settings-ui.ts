@@ -55,7 +55,8 @@ function envNote(setting: AnySetting): string {
 /**
  * Adapt the application schema and settings store to the terminal overlay. The panel shows and
  * edits the value of the settings layers, never an environment-supplied one (so an env credential
- * is never pre-filled or written to config); descriptions note an active environment variable.
+ * is never pre-filled or written to config); descriptions note an active environment variable. A
+ * record entry the setting cannot read shows by its shape alone (`Setting.displayValue`).
  */
 export function createSettingsHost(): SettingsHost {
 	const entries: SettingsDisplayEntry[] = [];
@@ -82,7 +83,10 @@ export function createSettingsHost(): SettingsHost {
 	};
 	return {
 		entries,
-		get: path => lookup(path)?.layered(settings),
+		get: path => {
+			const setting = lookup(path);
+			return setting?.displayValue(setting.layered(settings));
+		},
 		set: (path, value) => resolve(path).set(settings, value),
 		unset: path => resolve(path).unset(settings),
 		normalizeProviderLimits: normalizeProviderMaxInFlightRequests,

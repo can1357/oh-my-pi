@@ -105,20 +105,16 @@ const unreadableRecords = new WeakMap<
 >();
 
 /**
- * The `tools.approval` record every approval check reads: the record in effect, or, when a config file
- * holds a value that is not a record (see `Settings.ignoredValues`) or the key left empty, that record
- * marked with {@link UNREADABLE_RECORD}: its denies still apply and every other tool call asks, warned
- * about once per settings instance, value and file.
+ * The `tools.approval` record every approval check reads: the record in effect, or, when any config
+ * file holds a value that is not a record or the key left empty (see `Settings.ignoredValues`, which
+ * lists such a value wherever it sits, even beneath a higher file's usable record), that record marked
+ * with {@link UNREADABLE_RECORD}: its denies still apply and every other tool call asks, warned about
+ * once per settings instance, value and file.
  */
 export function readUserApprovalPolicies(settings: Settings): Record<string, unknown> {
 	// Reading the handle first reports a rejected global value, which `ignoredValues` then lists.
 	const configured = asPolicyMap(cfgToolsApproval.get(settings));
-	const ignored = settings.ignoredValues().find(item => item.setting === cfgToolsApproval);
-	const unreadable = ignored
-		? { valueType: ignored.valueType, valueLength: ignored.valueLength, source: ignored.source }
-		: !cfgToolsApproval.isConfigured(settings) && settings.isConfiguredNull(cfgToolsApproval)
-			? { ...rejectedValueMetadata(null), source: undefined }
-			: undefined;
+	const unreadable = settings.ignoredValues().find(item => item.setting === cfgToolsApproval);
 	if (!unreadable) return configured;
 	// Unreadable is sticky at the whole-record level: a value someone wrote to restrain tools and that
 	// cannot be read never resolves in the permissive direction. The record still in effect keeps its

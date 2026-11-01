@@ -317,13 +317,16 @@ export function valueShape(value: unknown): { valueType: string; valueLength: nu
 }
 
 // Tool approval policies. A config file can still hold an entry no write accepts; approval
-// resolution reads one as `prompt` (see `resolveApproval`). This is the one setting whose unset state
-// is permissive, so a whole value that is not a record, or a key left empty, does not read as the `{}`
-// default there: every tool asks instead (see `readUserApprovalPolicies`).
+// resolution reads one as `prompt` (see `resolveApproval`), and every surface showing the value shows
+// it by its shape. This is the one setting whose unset state is permissive, so a whole value that is
+// not a record, or a key left empty, in any config file and under any higher value, does not read as
+// the `{}` default there: every tool asks instead (see `readUserApprovalPolicies`).
 export const cfgToolsApproval = register({
 	id: "tools.approval",
 	type: "record",
 	default: {},
+	permissiveDefault: true,
+	readableEntry: policy => parseApprovalPolicy(policy) !== undefined,
 	normalize: value => {
 		if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
 		const invalid = Object.entries(value)

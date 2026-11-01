@@ -85,3 +85,17 @@ it("keeps the per-call allowlist editor when only the global layer supplies it",
 	const entry = createSettingsHost().entries.find(candidate => candidate.path === "task.perCallModelAllow");
 	expect(entry?.condition?.()).toBe(true);
 });
+
+it("shows an unreadable tools.approval entry by its shape, never its text", async () => {
+	// A token pasted into the wrong place is the likeliest unreadable entry worth hiding.
+	const secret = "panel-approval-entry-token-17619";
+	await Bun.write(
+		path.join(agentDir, "config.yml"),
+		YAML.stringify({ tools: { approval: { bash: "deny", read: secret } } }),
+	);
+	await Settings.init({ cwd: projectDir, agentDir });
+	expect(createSettingsHost().get("tools.approval")).toEqual({
+		bash: "deny",
+		read: `(unreadable: string (length ${secret.length}))`,
+	});
+});

@@ -428,6 +428,54 @@ describe("config list --scope", () => {
 		expect(stdout()).not.toContain(secret);
 	});
 
+	it("shows an unreadable tools.approval entry by its shape, never its text, in every config surface", async () => {
+		if (!testAgentDir || !projectDir) throw new Error("Test directories were not initialized");
+		// A token pasted into the wrong place is the likeliest unreadable entry worth hiding.
+		const secret = "approval-entry-token-17619";
+		const shape = `(unreadable: string (length ${secret.length}))`;
+		await Bun.write(
+			path.join(testAgentDir.path(), "config.yml"),
+			`tools:\n  approval:\n    bash: deny\n    read: ${secret}\n`,
+		);
+		await Bun.write(
+			path.join(projectDir.path(), ".omp", "config.yml"),
+			`tools:\n  approval:\n    write: ${secret}\n`,
+		);
+		const printed: string[] = [];
+		vi.spyOn(console, "log").mockImplementation(
+			(...args: unknown[]) => void printed.push(args.map(String).join(" ")),
+		);
+		vi.spyOn(console, "error").mockImplementation(
+			(...args: unknown[]) => void printed.push(args.map(String).join(" ")),
+		);
+		vi.spyOn(process.stdout, "write").mockImplementation(((text: string, cb?: (error?: Error | null) => void) => {
+			printed.push(text);
+			cb?.();
+			return true;
+		}) as typeof process.stdout.write);
+		const last = () => JSON.parse(printed.at(-1) ?? "null");
+
+		await runConfigCommand({ action: "get", key: "tools.approval", flags: {} });
+		await runConfigCommand({ action: "get", key: "tools.approval", flags: { json: true } });
+		expect(last().value).toEqual({ bash: "deny", read: shape, write: shape });
+		await runConfigCommand({ action: "list", flags: {} });
+		await runConfigCommand({ action: "list", flags: { json: true } });
+		expect(last()["tools.approval"].value).toEqual({ bash: "deny", read: shape, write: shape });
+		for (const scope of ["global", "project"] as const) {
+			await runConfigCommand({ action: "list", flags: { scope } });
+			await runConfigCommand({ action: "list", flags: { scope, json: true } });
+		}
+		expect(last()["tools.approval"].value).toEqual({ write: shape });
+		// The value in effect after a reset comes from the project file.
+		await runConfigCommand({ action: "reset", key: "tools.approval", flags: {} });
+		await runConfigCommand({ action: "reset", key: "tools.approval", flags: { json: true } });
+		expect(last().value).toEqual({ write: shape });
+
+		const output = Bun.stripANSI(printed.join("\n"));
+		expect(output).toContain(`"read":"${shape}"`);
+		expect(output).not.toContain(secret);
+	});
+
 	it("rejects --scope on actions other than list", async () => {
 		vi.spyOn(console, "error").mockImplementation(() => {});
 		const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => {
