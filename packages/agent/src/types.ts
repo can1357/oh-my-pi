@@ -672,7 +672,8 @@ export interface ToolCallContext {
 	providerMetadata?: ToolCallProviderMetadata;
 	/**
 	 * Cooperative steering signal: aborted when a queued user/steering message
-	 * (or an interrupting peer IRC) is detected while this tool batch runs.
+	 * (or an interrupting peer IRC) is detected while this tool batch runs. Its
+	 * `reason` names the source: a {@link SteeringInterruptSource} or `"irc"`.
 	 * Unlike the hard abort signal it NEVER kills the tool — long-running
 	 * tools MAY observe it (via `ctx.toolCall.steeringSignal`) to finish early
 	 * or background themselves so the message injects promptly; ignoring it is

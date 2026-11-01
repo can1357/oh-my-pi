@@ -6,10 +6,10 @@ import { type ThemeColor, theme } from "../theme";
 import { TranscriptBlock } from "./transcript-container";
 import { type NoticeTone, noticeRow } from "./transcript-notice";
 
-/** One themed run of a status row's terminal line. */
+/** One run of a status row's terminal line, in `color` unless the text is already styled. */
 export interface TranscriptStatusPart {
 	readonly text: string;
-	readonly color: ThemeColor;
+	readonly color?: ThemeColor;
 }
 
 /** A status row in a native terminal: its {@link noticeRow}'s tone, icon and message. */
@@ -41,7 +41,9 @@ export class TranscriptStatusBlock extends TranscriptBlock {
 	constructor(rows: readonly TranscriptStatusRow[]) {
 		super();
 		for (const row of rows) {
-			const styled = row.parts.flatMap(part => (part ? [theme.fg(part.color, part.text)] : []));
+			const styled = row.parts.flatMap(part =>
+				part ? [part.color ? theme.fg(part.color, part.text) : part.text] : [],
+			);
 			this.addChild(new Text(styled.join(" "), row.indent ?? 1, 0));
 		}
 		this.#native = col(
