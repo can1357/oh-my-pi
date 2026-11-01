@@ -341,16 +341,21 @@ describe("session persistence on a full volume", () => {
 		});
 	}
 
-	it("does not turn a lazy malformed-tail repair into an eager flush rewrite", async () => {
+	it("does not turn a lazy malformed-tail repair into an eager flush or close rewrite", async () => {
 		const { manager, sessionFile } = newSession("@pi-full-volume-lazy-repair-");
 		await manager.close();
 		manager.releaseRetainedEntries();
 		fs.appendFileSync(sessionFile, '{"type":"message","torn":');
 		const before = fs.readFileSync(sessionFile, "utf8");
+		const filesBefore = fs.readdirSync(path.dirname(sessionFile)).sort();
 		const reopened = await SessionManager.open(sessionFile);
 		try {
 			await reopened.flush();
 			expect(fs.readFileSync(sessionFile, "utf8")).toBe(before);
+			await reopened.close();
+			expect(reopened.getSessionFile()).toBe(sessionFile);
+			expect(fs.readFileSync(sessionFile, "utf8")).toBe(before);
+			expect(fs.readdirSync(path.dirname(sessionFile)).sort()).toEqual(filesBefore);
 		} finally {
 			await reopened.close();
 			reopened.releaseRetainedEntries();
