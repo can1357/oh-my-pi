@@ -907,7 +907,7 @@ export function redactMemorySecrets(input: string): string {
 
 const TEXT_FIELDS = ["content", "extractText", "extract_text", "embedText", "embed_text", "source"] as const;
 const MAX_NESTED_DATA_URI_PASSES = 3;
-const EMBEDDED_DATA_URI_RE = /\bdata:[^\s"'<>]+/gi;
+const EMBEDDED_DATA_URI_RE = /(?<![a-z0-9+.-])data:[^\s"'<>]+/gi;
 
 function trimTrailingDelimitersFromDataUri(candidate: string): [cleanUri: string, trailing: string] {
 	const match = /^(data:[^,]*;base64,)([A-Za-z0-9+/=%_-]*)([\s\S]*)$/i.exec(candidate);
@@ -1147,10 +1147,16 @@ const CREDENTIAL_METADATA_KEY_RE =
 	/(?:^|[_.\s-])(?:password|passwd|pwd|secret|api[_.\s-]?key|apikey|access[_.\s-]?key|secret[_.\s-]?key|private[_.\s-]?key|client[_.\s-]?secret|auth[_.\s-]?token|access[_.\s-]?token|refresh[_.\s-]?token|bearer[_.\s-]?token|session[_.\s-]?token|id[_.\s-]?token|webhook[_.\s-]?secret|signing[_.\s-]?secret|credentials?)(?:$|[_.\s-])/i;
 
 const CREDENTIAL_METADATA_KEY_EXCLUSION_RE =
-	/(?:^|[_.\s-])(?:max[_.\s-]?tokens|token[_.\s-]?(?:count|limit|budget|expiry|ttl|type|url|endpoint)|secret[_.\s-]?(?:name|id|ref|arn|path)|password[_.\s-]?(?:policy|reset|hash|length|required))(?:$|[_.\s-])/i;
+	/(?:^|[_.\s-])(?:max[_.\s-]?tokens|token[_.\s-]?(?:count|limit|budget|expiry|ttl|type|url|endpoint)|secret[_.\s-]?(?:name|id|ref|arn|path)|password[_.\s-]?(?:policy|reset|hash|length|required))(?:[_.\s-]?(?:url|id|seconds|ms|at|count|limit))?$/i;
+
+const CREDENTIAL_TERM_SUFFIX_RE =
+	/(?:^|[_.\s-])(?:token|tokens|secret|api[_.\s-]?key|private[_.\s-]?key|access[_.\s-]?key|secret[_.\s-]?key|password|passwd|pwd|credentials?)$/i;
 
 function isCredentialMetadataKey(key: string): boolean {
 	if (/^token$/i.test(key)) return true;
+	if (CREDENTIAL_TERM_SUFFIX_RE.test(key) && !/(?:^|[_.\s-])max[_.\s-]?tokens$/i.test(key)) {
+		return true;
+	}
 	if (CREDENTIAL_METADATA_KEY_EXCLUSION_RE.test(key)) return false;
 	return CREDENTIAL_METADATA_KEY_RE.test(key);
 }
@@ -1158,7 +1164,29 @@ function isCredentialMetadataKey(key: string): boolean {
 function redactCredentialMetadataValue(val: unknown, stripTags = false): unknown {
 	if (typeof val === "string") return val.length > 0 ? "[REDACTED]" : val;
 	if (Array.isArray(val)) return val.map(v => redactCredentialMetadataValue(v, stripTags));
-	if (val && typeof val === "object") return redactNested(val, stripTags);
+	if (val && typeof val === "object") {
+		const source = val as Record<string, unknown>;
+		let changed = false;
+		const out: Record<string, unknown> = {};
+		for (const [key, item] of Object.entries(source)) {
+			const nextKeyRaw = stripTags ? sanitizeAuxiliaryString(key) : redactMemorySecrets(key);
+			const baseKey = nextKeyRaw.trim().length > 0 ? nextKeyRaw : "[REDACTED]";
+			let safeKey = baseKey;
+			let suffix = 2;
+			while (Object.hasOwn(out, safeKey)) {
+				safeKey = `${baseKey}_${suffix++}`;
+			}
+			const nextItem = redactCredentialMetadataValue(item, stripTags);
+			if (safeKey !== key || nextItem !== item) changed = true;
+			Object.defineProperty(out, safeKey, {
+				value: nextItem,
+				enumerable: true,
+				configurable: true,
+				writable: true,
+			});
+		}
+		return changed ? out : val;
+	}
 	return val;
 }
 

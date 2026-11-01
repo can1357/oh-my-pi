@@ -444,10 +444,11 @@ export function reconcileEmbeddingModel(beam: BeamMemoryState): void {
 export function remember(beam: BeamMemoryState, rawContent: string, rawOptions: StoreRememberOptions = {}): string {
 	const [content, contentMeta] = sanitizeContent(rawContent);
 	const options = redactMemoryTextFields(rawOptions, true);
+	let metadata = options.metadata ?? null;
 	if (contentMeta && Object.keys(contentMeta).length > 0) {
 		const existingMeta =
-			options.metadata && typeof options.metadata === "object" ? (options.metadata as Record<string, unknown>) : {};
-		options.metadata = { ...existingMeta, ...contentMeta };
+			metadata && typeof metadata === "object" ? (metadata as Record<string, unknown>) : {};
+		metadata = { ...existingMeta, ...contentMeta };
 	}
 	const source = options.source ?? "conversation";
 	const importance = options.importance ?? 0.5;
@@ -460,7 +461,6 @@ export function remember(beam: BeamMemoryState, rawContent: string, rawOptions: 
 	const authorId = options.authorId ?? options.author_id ?? beam.authorId;
 	const authorType = options.authorType ?? options.author_type ?? beam.authorType;
 	const channelId = options.channelId ?? options.channel_id ?? beam.channelId;
-	const metadata = options.metadata ?? null;
 	const embedText = embeddingText(content, options);
 	const existingId = findDuplicate(beam, content);
 	if (existingId !== null) {

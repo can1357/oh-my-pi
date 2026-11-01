@@ -1355,4 +1355,67 @@ Tail content
 			beam.close();
 		}
 	});
+
+	it("sanitizes underscore-prefixed data URIs while keeping super-schemes untouched", () => {
+		const secretPayload = "Authorization: Bearer mySecretToken123456789";
+		const b64 = Buffer.from(secretPayload, "utf8").toString("base64");
+		const underscoreUri = `payload_data:text/plain;base64,${b64}`;
+		const customSchemeUri = `custom+data:text/plain;base64,${b64}`;
+
+		const [sanitizedUnderscore] = sanitizeContent(underscoreUri);
+		expect(sanitizedUnderscore).toBe("payload_Authorization: Bearer [REDACTED]");
+		expect(sanitizedUnderscore).not.toContain("mySecretToken123456789");
+
+		const [sanitizedCustom] = sanitizeContent(customSchemeUri);
+		expect(sanitizedCustom).toBe(customSchemeUri);
+	});
+
+	it("redacts nested objects under credential keys", () => {
+		const rawMetadata = {
+			credentials: {
+				value: "hunter2",
+				nested: {
+					pin: "123456",
+				},
+			},
+		};
+		const sanitized = sanitizeMetadataRecord(rawMetadata);
+		expect(sanitized.credentials.value).toBe("[REDACTED]");
+		expect(sanitized.credentials.nested.pin).toBe("[REDACTED]");
+	});
+
+	it("redacts password_reset_token while leaving password_reset and max_tokens intact", () => {
+		const rawMetadata = {
+			password_reset_token: "rst_live_secret_value",
+			password_reset: "completed",
+			max_tokens: "4096",
+		};
+		const sanitized = sanitizeMetadataRecord(rawMetadata);
+		expect(sanitized.password_reset_token).toBe("[REDACTED]");
+		expect(sanitized.password_reset).toBe("completed");
+		expect(sanitized.max_tokens).toBe("4096");
+	});
+
+	it("does not mutate caller options in remember()", () => {
+		const beam = new BeamMemory({ dbPath: ":memory:", sessionId: "no-mutate-test" });
+		try {
+			const secretPayload = "Authorization: Bearer secretBearerNoMutate123456789";
+			const b64 = Buffer.from(secretPayload, "utf8").toString("base64");
+			const uri = `data:text/plain;base64,${b64}`;
+
+			const callerOptions = {
+				metadata: { tag: "clean" },
+			};
+			const originalMetaRef = callerOptions.metadata;
+
+			beam.remember(`leak sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789 ${uri}`, callerOptions);
+
+			expect(callerOptions.metadata).toBe(originalMetaRef);
+			expect(callerOptions.metadata).toEqual({ tag: "clean" });
+			expect((callerOptions.metadata as Record<string, unknown>).blob_ref).toBeUndefined();
+			expect((callerOptions.metadata as Record<string, unknown>).extraction_reason).toBeUndefined();
+		} finally {
+			beam.close();
+		}
+	});
 });
