@@ -90,12 +90,24 @@ impl clap::Parser for TimeoutCommand {}
 /// `brush_core::processes::Process::wait`), so delivering the *configured*
 /// signal requires knowing the child's pid/pgid; the shell reports those
 /// through its [`SpawnObserver`] hook.
-#[derive(Default)]
-struct SpawnRecorder(Mutex<Vec<(i32, Option<i32>)>>);
+///
+/// Each spawn is also reported to the observer this command inherited: the
+/// run's spawn registry, or an enclosing `timeout`. That observer signals
+/// what it recorded when the whole run is cancelled or an outer limit
+/// expires; replacing it would leave the operand's process group, which
+/// direct-child cancellation does not reach, unknown to it.
+struct SpawnRecorder {
+	spawns: Mutex<Vec<(i32, Option<i32>)>>,
+	parent: Option<Arc<dyn SpawnObserver>>,
+}
 
 impl SpawnObserver for SpawnRecorder {
 	fn on_spawn(&self, pid: i32, pgid: Option<i32>) {
-		if let Ok(mut spawns) = self.0.lock() {
+		// Forward first: the run's registry pins the child's identity at once.
+		if let Some(parent) = &self.parent {
+			parent.on_spawn(pid, pgid);
+		}
+		if let Ok(mut spawns) = self.spawns.lock() {
 			spawns.push((pid, pgid));
 		}
 	}
@@ -105,7 +117,7 @@ impl SpawnRecorder {
 	/// Sends `signal` to every recorded child — its whole process group when
 	/// `group` is set — and reports whether any delivery succeeded.
 	fn signal(&self, signal: TrapSignal, group: bool) -> bool {
-		let spawns = match self.0.lock() {
+		let spawns = match self.spawns.lock() {
 			Ok(spawns) => spawns.clone(),
 			Err(_) => return false,
 		};
@@ -203,7 +215,10 @@ impl builtins::Command for TimeoutCommand {
 		};
 
 		let child_cancel = CancellationToken::new();
-		let spawns = Arc::new(SpawnRecorder::default());
+		let spawns = Arc::new(SpawnRecorder {
+			spawns: Mutex::default(),
+			parent: context.params.spawn_observer().cloned(),
+		});
 		let mut params = context.params.clone();
 		// GNU runs the command in its own process group and signals the whole
 		// group; `--foreground` keeps it in the invoking group and signals

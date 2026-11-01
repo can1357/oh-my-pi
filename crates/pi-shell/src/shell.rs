@@ -7908,6 +7908,154 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		);
 	}
 
+	/// Whether `pid` still runs. A killed orphan waits as a zombie until init
+	/// reaps it, so on Linux a `Z` state counts as stopped.
+	#[cfg(unix)]
+	fn process_running(pid: i32) -> bool {
+		#[cfg(target_os = "linux")]
+		if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+			return stat
+				.rsplit_once(')')
+				.and_then(|(_, rest)| rest.trim_start().chars().next())
+				.is_some_and(|state| state != 'Z');
+		}
+		// SAFETY: `kill(pid, 0)` only probes whether the process exists.
+		unsafe { libc::kill(pid, 0) == 0 }
+	}
+
+	/// Runs `command`, whose first output line is the pid of a background
+	/// `sleep`, and returns that pid with the finished run. `cancel_after_pid`
+	/// cancels the run as soon as the pid is known.
+	#[cfg(unix)]
+	async fn run_reporting_background_pid(
+		command: &str,
+		cancel_after_pid: bool,
+	) -> (i32, ShellRunResult) {
+		let shell = Shell::new(None);
+		let (tx, rx) = flume::unbounded::<String>();
+		let mut cancel_token = CancelToken::default();
+		let abort_token = cancel_token.emplace_abort_token();
+		let command = command.to_owned();
+		let handle = tokio::spawn(async move {
+			shell
+				.run(ShellRunOptions { command, ..Default::default() }, Some(tx), cancel_token)
+				.await
+		});
+		let mut output = String::new();
+		let pid = time::timeout(Duration::from_secs(10), async {
+			loop {
+				output.push_str(
+					&rx.recv_async()
+						.await
+						.expect("run ended before printing the pid"),
+				);
+				if let Some(line_end) = output.find('\n') {
+					return output[..line_end]
+						.trim()
+						.parse::<i32>()
+						.expect("pid line should be an integer");
+				}
+			}
+		})
+		.await
+		.expect("timed out waiting for the background pid");
+		if cancel_after_pid {
+			abort_token.abort(AbortReason::Signal);
+		}
+		let result = time::timeout(Duration::from_secs(20), handle)
+			.await
+			.expect("run did not finish")
+			.expect("run task panicked")
+			.expect("run failed");
+		(pid, result)
+	}
+
+	/// Waits up to five seconds for `pid` to stop. A survivor is killed so a
+	/// failure does not leak it; the error carries its `/proc` stat line
+	/// (state and parent pid) where one exists.
+	#[cfg(unix)]
+	async fn stopped_within_grace(pid: i32) -> std::result::Result<(), String> {
+		let stopped = time::timeout(Duration::from_secs(5), async {
+			while process_running(pid) {
+				time::sleep(Duration::from_millis(20)).await;
+			}
+		})
+		.await
+		.is_ok();
+		if stopped {
+			return Ok(());
+		}
+		let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+		// SAFETY: `pid` is the leaked test `sleep`; SIGKILL only ends it.
+		unsafe { libc::kill(pid, libc::SIGKILL) };
+		Err(stat.trim().to_owned())
+	}
+
+	/// `timeout` runs its operand in a new process group. Cancelling the run
+	/// must reach that group, or the operand's background child outlives the
+	/// cancel, reparented to init.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn cancelling_a_run_stops_a_timeout_operands_background_child() {
+		let _guard = shell_test_lock().lock().await;
+		let (sleep_pid, result) = run_reporting_background_pid(
+			"timeout 30 /bin/sh -c '/bin/sleep 30 & echo \"$!\"; wait'",
+			true,
+		)
+		.await;
+		assert!(result.cancelled, "the aborted run should report cancellation");
+		let stopped = stopped_within_grace(sleep_pid).await;
+		assert!(stopped.is_ok(), "sleep {sleep_pid} under timeout survived the cancel: {stopped:?}");
+	}
+
+	/// A process group that ignores SIGTERM must still fall to the run's
+	/// SIGKILL wave; `sleep` inherits the ignored TERM from its shell.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn cancelling_a_run_kills_a_timeout_operands_term_ignoring_child() {
+		let _guard = shell_test_lock().lock().await;
+		let (sleep_pid, result) = run_reporting_background_pid(
+			"timeout 30 /bin/sh -c 'trap \"\" TERM; /bin/sleep 30 & echo \"$!\"; wait'",
+			true,
+		)
+		.await;
+		assert!(result.cancelled, "the aborted run should report cancellation");
+		let stopped = stopped_within_grace(sleep_pid).await;
+		assert!(stopped.is_ok(), "TERM-ignoring sleep {sleep_pid} survived the cancel: {stopped:?}");
+	}
+
+	/// With nested `timeout`s, the run must still learn the innermost
+	/// operand's process group through both of them.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn cancelling_a_run_stops_a_nested_timeout_operands_background_child() {
+		let _guard = shell_test_lock().lock().await;
+		let (sleep_pid, result) = run_reporting_background_pid(
+			"timeout 30 timeout 30 /bin/sh -c '/bin/sleep 30 & echo \"$!\"; wait'",
+			true,
+		)
+		.await;
+		assert!(result.cancelled, "the aborted run should report cancellation");
+		let stopped = stopped_within_grace(sleep_pid).await;
+		assert!(stopped.is_ok(), "sleep {sleep_pid} under two timeouts survived: {stopped:?}");
+	}
+
+	/// An outer `timeout` whose limit expires first must reach the process
+	/// group an inner `timeout` created for its operand.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn an_outer_timeout_deadline_stops_an_inner_timeout_operands_background_child() {
+		let _guard = shell_test_lock().lock().await;
+		let (sleep_pid, result) = run_reporting_background_pid(
+			"timeout 2 timeout 30 /bin/sh -c '/bin/sleep 30 & echo \"$!\"; wait'",
+			false,
+		)
+		.await;
+		let stopped = stopped_within_grace(sleep_pid).await;
+		assert!(stopped.is_ok(), "sleep {sleep_pid} survived the outer deadline: {stopped:?}");
+		assert_eq!(result.exit_code, Some(124), "the outer limit should expire first");
+	}
+
 	/// Regression for the `suspended (tty input)` bug: an **interactive child
 	/// inside a pipeline** (`zsh -i ... | awk`) used to stay in the host
 	/// session, open `/dev/tty`, `tcsetpgrp` itself to the foreground, and
