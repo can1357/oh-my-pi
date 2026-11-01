@@ -1,6 +1,7 @@
+import * as os from "node:os";
 import { afterEach, describe, expect, it } from "bun:test";
 import { AsyncJobManager, type AsyncJob } from "../../src/async/job-manager";
-import { type JobWidgetAuthorRequest, JobWidgets, TextTap } from "../../src/job-widgets";
+import { type JobWidgetAuthorRequest, JobWidgets, normalizeJobCaption, TextTap } from "../../src/job-widgets";
 
 const REQ_SPEC = {
 	title: "load test",
@@ -43,7 +44,7 @@ afterEach(async () => {
 	for (const manager of managers.splice(0)) await manager.dispose({ timeoutMs: 500 });
 });
 
-function startJob(manager: AsyncJobManager, label: string) {
+function startJob(manager: AsyncJobManager, label: string, intent?: string) {
 	const tap = new TextTap("out", "stdout+stderr");
 	const done = Promise.withResolvers<string>();
 	const run = ({ signal }: { signal: AbortSignal }) => {
@@ -51,7 +52,8 @@ function startJob(manager: AsyncJobManager, label: string) {
 		return done.promise;
 	};
 	const id = manager.register("bash", label, run, {
-		widgetInputs: { sources: () => [tap], brief: () => ({ kind: "bash", command: label }) },
+		intent,
+		widgetInputs: { sources: () => [tap], brief: () => ({ kind: "bash", command: label, intent }) },
 	});
 	const job = manager.getJob(id) as AsyncJob;
 	return { job, tap, finish: () => done.resolve("ok") };
@@ -289,5 +291,89 @@ describe("job widget registry", () => {
 		tap.append("\nlate\n");
 		expect(widgets.view(job)).toBe(frozen);
 		unsubscribe();
+	});
+
+	it("captions a shown command that needs explaining once, after it has run a while; never a glanceable one", async () => {
+		const manager = new AsyncJobManager({});
+		managers.push(manager);
+		let offset = 0;
+		let enabled = true;
+		const calls: [string, string | undefined][] = [];
+		const widgets = new JobWidgets({
+			now: () => Date.now() + offset,
+			minIngestMs: 0,
+			enabled: () => enabled,
+			captioner: async ({ command, intent }) => {
+				calls.push([command, intent]);
+				// A raw reply: the registry keeps its first line as plain text.
+				return '- "Checks worker every 60s until the indexer stops."\nExtra';
+			},
+		});
+		const watch = startJob(
+			manager,
+			"while ssh worker 'systemctl is-active indexer'; do sleep 60; done",
+			"Wait for the indexer",
+		).job;
+		// A redirection and quoted metacharacters are not control flow.
+		const glanceable = ["bun test 2>&1", "curl -sO 'https://x.test/a?one=1&two=2|3'"].map(
+			command => startJob(manager, command).job,
+		);
+		const viewAll = () => {
+			for (const job of [watch, ...glanceable]) widgets.view(job);
+		};
+		viewAll();
+		expect(calls).toHaveLength(0);
+
+		offset = 15_000;
+		const pushed = Promise.withResolvers<void>();
+		const unsubscribe = widgets.subscribe(() => pushed.resolve());
+		viewAll();
+		await pushed.promise;
+		expect(calls).toEqual([[watch.label, "Wait for the indexer"]]);
+		expect(widgets.caption(watch)).toBe("Checks worker every 60s until the indexer stops");
+		enabled = false;
+		expect(widgets.caption(watch)).toBeUndefined();
+
+		enabled = true;
+		viewAll();
+		expect(calls).toHaveLength(1);
+		unsubscribe();
+	});
+
+	it("captions a listed command whose widget was never shown, without writing a spec", async () => {
+		const manager = new AsyncJobManager({});
+		managers.push(manager);
+		let offset = 0;
+		let captioned = 0;
+		const { calls, author } = scriptedAuthor();
+		const widgets = new JobWidgets({
+			author,
+			now: () => Date.now() + offset,
+			captioner: async () => {
+				captioned += 1;
+				return "Waits about 2 min, printing a tick every 3s";
+			},
+		});
+		const { job, tap } = startJob(manager, "i=0; while [ $i -lt 40 ]; do echo tick $i; sleep 3; i=$((i+1)); done");
+		tap.append("tick 0\ntick 1\ntick 2\ntick 3\n");
+		widgets.requestCaption(job);
+		expect(captioned).toBe(0);
+
+		offset = 15_000;
+		widgets.requestCaption(job);
+		await settle();
+		expect(widgets.caption(job)).toBe("Waits about 2 min, printing a tick every 3s");
+		widgets.requestCaption(job);
+		expect(captioned).toBe(1);
+		expect(calls).toHaveLength(0);
+	});
+});
+
+describe("job caption replies", () => {
+	it("keeps the first line of a reply as plain text with home paths shortened, without quotes, list markers or a final period", () => {
+		expect(
+			normalizeJobCaption(`\n- "Tails \x1b[1m${os.homedir()}/logs/app.log\x1b[0m until cancelled."\nExtra`),
+		).toBe("Tails ~/logs/app.log until cancelled");
+		expect(normalizeJobCaption("  \n ")).toBeUndefined();
 	});
 });

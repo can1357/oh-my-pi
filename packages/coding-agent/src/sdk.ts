@@ -27,6 +27,7 @@ import type {
 import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
 import type { DiscoverAuthStorageOptions } from "@oh-my-pi/pi-ai/auth-broker/discover";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
+import { anthropicHostRunsTool } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { prewarmModelConnection } from "@oh-my-pi/pi-ai/providers/connection-prewarm";
 import { isOpenAICodexWebSocketPreferred } from "@oh-my-pi/pi-ai/providers/openai-codex-transport";
 import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
@@ -165,6 +166,7 @@ import { resolveMCPToolAlias } from "./mcp/tool-bridge";
 import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memory-backend";
 import { MEMORY_BACKEND_TOOL_NAMES } from "./memory-backend/tool-names";
 import type { MnemopiSessionState } from "./mnemopi/state";
+import autolearnCaptureRefused from "./prompts/system/autolearn-capture-refused.md" with { type: "text" };
 import mcpXdevGuidanceTemplate from "./prompts/system/mcp-xdev-guidance.md" with { type: "text" };
 import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with { type: "text" };
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
@@ -296,7 +298,15 @@ import {
 	xdevEntries,
 } from "./tools";
 import { resolveYieldReportText } from "./tools/yield";
-import { createModelJobWidgetAuthor, type JobWidgetAuthor, JobWidgets, resolveToolCallIntent } from "./job-widgets";
+import {
+	createModelJobCaptionWriter,
+	createModelJobWidgetAuthor,
+	type JobCaptionWriter,
+	type JobWidgetAuthor,
+	JobWidgets,
+	type ModelJobWidgetAuthorOptions,
+	resolveToolCallIntent,
+} from "./job-widgets";
 import { createBrowserPrelude } from "./tools/browser";
 import { isMCPToolName, normalizeToolNames } from "./tools/builtin-names";
 import { createComputerPrelude } from "./tools/computer";
@@ -657,6 +667,11 @@ export interface CreateAgentSessionOptions {
 	onPrewalkWarning?: (warning: string) => void;
 	/** Keep `prewalk.auto` away from the startup session (`--no-prewalk`); `/new` lifts it. */
 	suppressAutoPrewalk?: boolean;
+	/**
+	 * Session is IRC-routable before its owner sends the first prompt (task executor spawns): until
+	 * then, incoming IRC messages queue for that prompt's turn instead of waking one without it.
+	 */
+	awaitingAssignment?: boolean;
 	/** Force read-only plan mode at start, auto-approve on the model's first resolve call, then switch to execute. */
 	planYolo?: PlanYolo;
 
@@ -875,6 +890,12 @@ export interface CreateAgentSessionOptions {
 	 * which share their root's widgets.
 	 */
 	jobWidgetAuthor?: JobWidgetAuthor;
+	/**
+	 * Writes the captions of the root session's long command jobs. Defaults
+	 * to the `widget` model role; ignored for child sessions, like
+	 * {@link jobWidgetAuthor}.
+	 */
+	jobCaptionWriter?: JobCaptionWriter;
 	/**
 	 * Registry id of the spawning agent, recorded as this subagent's parent in
 	 * the agent registry. Distinct from `parentTaskPrefix`, which is this agent's
@@ -1649,15 +1670,99 @@ function buildMCPPromptCommands(manager: MCPManager): LoadedCustomCommand[] {
 	return commands;
 }
 
+/** `AgentTool` keys that shape the request's tool list; a capture turn copies them so it keeps the primary's cache prefix. */
+const CAPTURE_ADVERTISED_KEYS = [
+	"name",
+	"description",
+	"parameters",
+	"strict",
+	"deferLoading",
+	"customFormat",
+	"customWireName",
+	"native",
+	"examples",
+	"label",
+	"hidden",
+	"loadMode",
+	"summary",
+	"intent",
+	"readsSkillUris",
+	"deferrable",
+	"delegationGuidance",
+	"lenientArgValidation",
+] as const satisfies readonly (keyof AgentTool)[];
+
+/** `AgentTool` keys that run code or let a call reach an effect; a refused copy has none of them. */
+const CAPTURE_DROPPED_KEYS = [
+	"execute",
+	"openArgStream",
+	"docTopics",
+	"concurrency",
+	"speculation",
+	"interruptible",
+	"handlesToolInterrupt",
+	"matcherDigest",
+	"matcherPaths",
+	"matcherEntries",
+	"approval",
+	"formatApprovalDetails",
+	"approvalCacheTargets",
+	"approvalRestrictionPaths",
+	"renderCall",
+	"renderResult",
+] as const satisfies readonly (keyof AgentTool)[];
+
+// A new `AgentTool` key must be sorted into one of the lists above before this compiles.
+type UnsortedCaptureToolKey = Exclude<
+	keyof AgentTool,
+	(typeof CAPTURE_ADVERTISED_KEYS)[number] | (typeof CAPTURE_DROPPED_KEYS)[number]
+>;
+const captureToolKeysSorted: [UnsortedCaptureToolKey] extends [never] ? true : UnsortedCaptureToolKey = true;
+void captureToolKeysSorted;
+
+const CAPTURE_REFUSED = autolearnCaptureRefused.trim();
+
+/** `tool` as the capture turn advertises it: the same request shape, and a call that runs nothing. */
+function refusedCaptureTool(tool: AgentTool): AgentTool {
+	const refused: AgentTool = {
+		name: tool.name,
+		label: tool.label,
+		description: tool.description,
+		parameters: tool.parameters,
+		execute: async () => ({ content: [{ type: "text", text: CAPTURE_REFUSED }], isError: true }),
+	};
+	for (const key of CAPTURE_ADVERTISED_KEYS) if (tool[key] !== undefined) Object.assign(refused, { [key]: tool[key] });
+	return refused;
+}
+
+/**
+ * The capture turn's tools: the primary turn's list in its order, so the request keeps the primary prompt's cache
+ * prefix, with every tool but the capture tools refused; capture tools the primary list lacks go last.
+ */
+export function captureToolList(primary: readonly AgentTool[], capture: readonly AgentTool[]): AgentTool[] {
+	const allowed = new Map(capture.map(tool => [tool.name, tool]));
+	const tools = primary.map(tool => allowed.get(tool.name) ?? refusedCaptureTool(tool));
+	const advertised = new Set(primary.map(tool => tool.name));
+	for (const tool of capture) if (!advertised.has(tool.name)) tools.push(tool);
+	return tools;
+}
+
 /** Dependencies used to construct an isolated auto-learn capture agent. */
 export interface AutoLearnCaptureRunnerOptions {
 	sourceAgent: Agent;
 	/** Resolves the capture tools per run, so live `autolearn.enabled` / backend changes apply. */
 	captureTools: () => AgentTool[];
 	createAgent: (options: AgentOptions) => Agent;
+	/** The cache key the primary loop sends for `model`; falls back to the source agent's key, then its session id. */
+	primaryPromptCacheKey?: (model: Model) => string | undefined;
 	onPayload?: SimpleStreamOptions["onPayload"];
 	onResponse?: SimpleStreamOptions["onResponse"];
 	createSessionId?: () => string;
+}
+
+/** A tool the provider runs itself (a refused copy could not stop it); resolved headers can switch one on. */
+function hostRunsTool(model: Model, name: string): boolean {
+	return model.api === "anthropic-messages" && anthropicHostRunsTool(model as Model<"anthropic-messages">, name);
 }
 
 /** Build a private capture runner over a detached message snapshot and provider session. */
@@ -1667,15 +1772,33 @@ export function createAutoLearnCaptureRunner(
 	return async (content, signal) => {
 		const captureTools = options.captureTools();
 		if (captureTools.length === 0 || signal?.aborted) return;
-		const captureModel = options.sourceAgent.state.model;
-		if (!captureModel) return;
+		// One snapshot of the source turn before any await: the primary keeps running while a capture is built.
+		const source = options.sourceAgent.state;
+		const sourceModel = source.model;
+		if (!sourceModel) return;
+		const sourceSystemPrompt = [...source.systemPrompt];
+		const sourceThinkingLevel = source.thinkingLevel;
+		const sourceDisableReasoning = source.disableReasoning;
+		const sourceTools = [...source.tools];
+		const sourceMessages = [...source.messages];
+		const sourceSentToolDefinitions = options.sourceAgent.copySentToolDefinitions();
+		const capturePromptCacheKey =
+			options.primaryPromptCacheKey?.(sourceModel) ??
+			options.sourceAgent.promptCacheKey ??
+			options.sourceAgent.sessionId;
+		// Resolve headers once so the tool list and the request agree on which tools the host runs.
+		const captureModel: Model = sourceModel.resolveHeaders
+			? { ...sourceModel, resolveHeaders: undefined, headers: { ...(await sourceModel.resolveHeaders(signal)) } }
+			: sourceModel;
+		if (signal?.aborted) return;
+		const hostRuns = (name: string) => hostRunsTool(captureModel, name);
 
 		const captureSessionId = options.createSessionId?.() ?? Bun.randomUUIDv7();
 		const captureProviderSessionState = new Map<string, ProviderSessionState>();
 		const stripInheritedReasoning =
 			captureModel.api === "openai-responses" ||
 			(captureModel.api === "openrouter" && $env.PI_OPENROUTER_RESPONSES !== "0");
-		const captureMessages = options.sourceAgent.state.messages.map((message): AgentMessage => {
+		const captureMessages = sourceMessages.map((message): AgentMessage => {
 			if (message.role === "assistant") {
 				let content = message.content;
 				if (
@@ -1702,15 +1825,22 @@ export function createAutoLearnCaptureRunner(
 		});
 		const captureAgent = options.createAgent({
 			initialState: {
-				systemPrompt: [...options.sourceAgent.state.systemPrompt],
+				systemPrompt: sourceSystemPrompt,
 				model: captureModel,
-				thinkingLevel: options.sourceAgent.state.thinkingLevel,
-				disableReasoning: options.sourceAgent.state.disableReasoning,
-				tools: captureTools,
+				thinkingLevel: sourceThinkingLevel,
+				disableReasoning: sourceDisableReasoning,
+				// A provider-executed tool is dropped instead: that costs the prefix only where the gateway search is on.
+				tools: captureToolList(
+					sourceTools.filter(tool => !hostRuns(tool.name)),
+					captureTools,
+				),
 				messages: captureMessages,
 			},
 			sessionId: captureSessionId,
-			promptCacheKey: captureSessionId,
+			// The primary's cache key; the provider session id stays the capture's own (#10869).
+			promptCacheKey: capturePromptCacheKey,
+			// Withdrawn tools the replayed history declares keep their sent definitions; host-run ones are dropped.
+			sentToolDefinitions: sourceSentToolDefinitions.copy(name => !hostRuns(name)),
 			providerSessionState: captureProviderSessionState,
 			getApiKey: requestModel => options.sourceAgent.getApiKey?.(requestModel),
 			onPayload: options.onPayload,
@@ -2343,32 +2473,38 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			})
 		: undefined;
 	if (asyncJobManager) {
+		const usagePurpose =
+			(purpose: string): ModelJobWidgetAuthorOptions["onUsage"] =>
+			message => {
+				if (!message.usage) return;
+				sessionManager.appendModelUsage(
+					{
+						purpose,
+						api: message.api,
+						provider: message.provider,
+						model: message.model,
+						usage: message.usage,
+						stopReason: message.stopReason,
+					},
+					{ sessionId: sessionManager.getSessionId(), parentId: sessionManager.getLeafId() },
+				);
+			};
+		const cheapModelOptions: Omit<ModelJobWidgetAuthorOptions, "onUsage"> = {
+			settings,
+			modelRegistry,
+			sessionId: () => sessionManager.getSessionId(),
+			costGate: currentCostGate,
+			telemetry: () => agent?.telemetry,
+			obfuscate: () => (obfuscator?.hasSecrets() ? text => obfuscator?.obfuscate(text) ?? text : undefined),
+		};
 		asyncJobManager.widgets = new JobWidgets({
 			enabled: () => cfgAsyncWidgets.get(settings),
 			author:
 				options.jobWidgetAuthor ??
-				createModelJobWidgetAuthor({
-					settings,
-					modelRegistry,
-					sessionId: () => sessionManager.getSessionId(),
-					costGate: currentCostGate,
-					telemetry: () => agent?.telemetry,
-					obfuscate: () => (obfuscator?.hasSecrets() ? text => obfuscator?.obfuscate(text) ?? text : undefined),
-					onUsage: message => {
-						if (!message.usage) return;
-						sessionManager.appendModelUsage(
-							{
-								purpose: "job-widget",
-								api: message.api,
-								provider: message.provider,
-								model: message.model,
-								usage: message.usage,
-								stopReason: message.stopReason,
-							},
-							{ sessionId: sessionManager.getSessionId(), parentId: sessionManager.getLeafId() },
-						);
-					},
-				}),
+				createModelJobWidgetAuthor({ ...cheapModelOptions, onUsage: usagePurpose("job-widget") }),
+			captioner:
+				options.jobCaptionWriter ??
+				createModelJobCaptionWriter({ ...cheapModelOptions, onUsage: usagePurpose("job-caption") }),
 		});
 	}
 	const scopedAsyncJobManager = asyncJobManager ?? options.asyncJobManager;
@@ -4915,6 +5051,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			deferRetryFallbackValidation: options.deferRetryFallbackValidation,
 			prewalk,
 			suppressAutoPrewalk: options.suppressAutoPrewalk,
+			awaitingAssignment: options.awaitingAssignment,
 			planYolo: options.planYolo,
 			serviceTierByFamily: initialServiceTierByFamily,
 			sessionManager,
@@ -5519,6 +5656,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		const runAutoLearnCapture = createAutoLearnCaptureRunner({
 			sourceAgent: agent,
+			primaryPromptCacheKey: model => session.getPromptCacheKeyForModel(model),
 			captureTools: () =>
 				(["manage_skill", "learn"] as const)
 					.map(name => session.getToolByName(name))
@@ -5562,14 +5700,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					getToolContext: toolCall => toolContextStore.getContext(toolCall),
 					streamFn: primaryStreamFn,
 					transformToolCallArguments,
-					// No fallback resolver. The capture agent advertises only
-					// `learn`/`manage_skill`, both of which stay top-level and never
-					// mount as devices, so it has nothing legitimate to recover — while
-					// the primary session's resolver is bound to the primary agent's
-					// tools and would have let a capture response reach a main-session
-					// MCP tool, side effects included. A hallucinated call from here
-					// correctly stays `not found`, and suggesting session devices it
-					// cannot call would only mislead it.
+					// No fallback resolver: only `learn`/`manage_skill` execute here (the rest are refused
+					// copies), and the primary's resolver could reach main-session MCP tools.
 					intentTracing: agent.intentTracing,
 					pruneToolDescriptions: agent.pruneToolDescriptions,
 					dialect: resolveDialect(cfgToolsFormat.get(settings), captureModel),

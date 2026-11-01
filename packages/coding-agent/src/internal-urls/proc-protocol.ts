@@ -203,9 +203,10 @@ export class ProcProtocolHandler implements ProtocolHandler {
 							? `up ${formatDuration(now - job.startTime)}`
 							: `in ${formatDuration(job.endTime - job.startTime)}`;
 					const progress = runningTaskProgressSuffix(snapshots[index], { duration: false });
+					const intent = job.intent ? `${job.intent} — ` : "";
 					const due =
 						job.type === "task" && job.status === "running" ? dueNote(session, job.agentId ?? job.id) : "";
-					return `${job.id} [${job.type}] ${job.status} ${duration} — ${job.label.replace(/\s+/g, " ")}${progress}${due}`;
+					return `${job.id} [${job.type}] ${job.status} ${duration} — ${intent}${job.label.replace(/\s+/g, " ")}${progress}${due}`;
 				}),
 				...runningAgentsOutsideJobs(session).map(
 					agent =>
@@ -239,7 +240,7 @@ export class ProcProtocolHandler implements ProtocolHandler {
 			const snapshot = snapshotJobs(session, [job])[0];
 			const due = job.type === "task" && job.status === "running" ? dueNote(session, job.agentId ?? job.id) : "";
 			const lines = [
-				`${job.id} [${job.type}] — ${job.status} — ${job.label}${runningTaskProgressSuffix(snapshot, { duration: true })}${due}`,
+				`${job.id} [${job.type}] — ${job.status} — ${job.intent ? `${job.intent} — ` : ""}${job.label}${runningTaskProgressSuffix(snapshot, { duration: true })}${due}`,
 			];
 			if (job.resultText) lines.push(job.resultText);
 			if (job.errorText) lines.push(`Error: ${job.errorText}`);

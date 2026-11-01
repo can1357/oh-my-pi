@@ -144,6 +144,7 @@ The variables below supply credentials after runtime/config overrides and stored
 | `siliconflow-cn`                 | `SILICONFLOW_CN_API_KEY`                                                            |
 | `fireworks`                      | `FIREWORKS_API_KEY`                                                                 |
 | `together`                       | `TOGETHER_API_KEY`                                                                  |
+| `modular`                        | `MODULAR_API_KEY`                                                                   |
 | `typesafe`                       | `TYPESAFE_API_KEY`                                                                  |
 | `coreweave`                      | `COREWEAVE_API_KEY`, then `WANDB_API_KEY`                                           |
 | `nvidia`                         | `NVIDIA_API_KEY`                                                                    |
@@ -217,6 +218,8 @@ SingularityAPI sells two unrelated products behind one brand, so OMP models them
 `singularityapi-dev` is the pay-as-you-go universal inference gateway (300+ models: DeepSeek, Kimi, GLM, frontier flagships). Create a key at `https://app.singularityapi.dev` (or run `/login singularityapi-dev`) and set `SINGULARITYAPI_DEV_API_KEY`; the roster, limits, and tariffs are discovered live from `https://api.singularityapi.dev/v1/models`.
 
 `singularityapi-tech` is the reserved DeepSeek lanes gateway. Usage bills against a booked reservation slot rather than prepaid credit, so a valid key with no active slot answers 403 until you book one at `https://app.singularityapi.tech`. Create an `sk-...` key there (or run `/login singularityapi-tech`), set `SINGULARITYAPI_TECH_API_KEY`, and the lane roster is discovered live from `https://api.singularityapi.tech/v1/models`.
+
+For Mistral, set `MISTRAL_API_KEY` to a key created on the Mistral console, or run `/login mistral` to sign in through the browser the way the Mistral Vibe CLI does. The browser sign-in mints a regular API key tied to your Mistral plan: its usage counts against the plan's Vibe Code quota instead of pay-as-you-go API credits. OMP stores it as a plain API key; there is nothing to refresh.
 
 OAuth-backed providers such as `anthropic`, `openai-codex`, `github-copilot`, `cursor`, `muse-code`, `ollama-cloud`, `qwen-portal`, `kimi-code`, `xai-oauth`, `wafer-serverless`, `google-gemini-cli`, `google-antigravity`, `devin`, and the GitLab providers (`gitlab-duo`, `gitlab-duo-agent`) are normally reached through `/login` rather than an environment variable. Interactive API-key logins exist too: `/login baseten`, `/login coreweave`, `/login sakana`, `/login singularityapi-dev`, and `/login singularityapi-tech` prompt for a dashboard/API key (`coreweave` additionally requires `COREWEAVE_PROJECT` for the `OpenAI-Project` header). See [Environment variables](./environment-variables.md) for search-tool and configuration variables not listed here.
 
