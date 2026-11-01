@@ -472,6 +472,8 @@ A `seed` _defines_ bundled rows for providers whose catalog cannot be discovered
 
 `seed` properties: `api` and `base-url` are per-row defaults (a `model` may override either with the same property names); `bundle` defaults to `always`; `precedence="seed"` is optional. `model` takes the row id positionally, requires `name=`, and its body MUST declare `reasoning`, `input` (`"text"` and/or `"image"`), `cost` (all four per-million rates), and `limits` (`context=` / `max-tokens=`, an omitted limit is `null`); `supports-tools #true` is optional, and `request-model-id "<wire id>"` sets the row's `requestModelId` when the upstream id differs from the row id (an OpenAI Decisions judge row beside the same-id chat model). Any other directive is an axis from the cascade vocabulary: thinking axes become the row's explicit `thinking` (then `thinking-mode` and `thinking-efforts` are both required), wire axes become its explicit `compat` and must apply to the row's API, and catalog axes are rejected because they stay rule-owned in the cascade block. Explicit `thinking`/`compat` on a seed row win over the cascade exactly as they do for any authored spec.
 
+`unsupported "<backend>" reason="…"` records a reviewed backend refusal for that row: the named backend cannot load it, and the reason is the message surfaces quote when skipping or refusing the model. `backend` is `onnx` or `mlx`; a row may carry one node per refused backend, and a row with none is loadable by every backend. It is read at runtime through `seedBackendRefusals(provider, modelId)`, so backend support stays policy rather than code.
+
 `bundle` decides when the generator includes the rows:
 
 | Policy     | Rows enter the bundle                                                     |
