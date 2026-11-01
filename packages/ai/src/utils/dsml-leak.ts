@@ -17,6 +17,8 @@ import {
 	DEEPSEEK_TOOL_CALLS_END,
 	findDeepSeekTemplateToken,
 } from "../dialect/deepseek";
+import { sanitizeTextDeep } from "@oh-my-pi/pi-utils";
+
 import type { AssistantMessage, Model } from "../types";
 
 // Structural DSML tags in either pipe spelling (fullwidth `｜` U+FF5C or ASCII),
@@ -30,11 +32,11 @@ const QUOTED_CODE_PATTERN = /(```|~~~)[\s\S]*?(?:\1|$)|`[^`\n]*`/g;
 const TRAILING_TOOL_NAME_LINE = /(^|\n)[ \t]*[A-Za-z_][\w.-]*[ \t]*\r?\n[ \t]*$/;
 const CLOSING_TAG_PATTERN = /^<\s*\//;
 const BLANK_LINE_PATTERN = /\r?\n[ \t]*\r?\n/;
-// Orphan closers left inside a tool-call argument by a degraded model. Canonical
-// DeepSeek closers end a parameter, invoke, or tool_calls envelope; hosts also
-// re-spell the parameter tag as parameter_name or invoke_param.
-const TOOL_ARGUMENT_MARKUP_PATTERN =
-	/<\s*\/\s*(?:(?:｜{1,2}|\|?DSML\|?)\s*)?(?:tool_calls?|invoke(?:_param)?|calls|parameter(?:_name)?)\b[^<>]*>?/giu;
+// Re-spelled closing tags a degraded host emits in place of the canonical DSML
+// closers. Only these named forms are markers: a bare `</parameter`,
+// `</invoke`, or `</tool_call>` is ordinary XML or chat-template content and
+// must survive untouched, so this pattern never matches without the suffix.
+const TOOL_ARGUMENT_MARKUP_PATTERN = /<\s*\/\s*(?:parameter_name|invoke_param)\s*>/giu;
 
 interface MarkupTag {
 	readonly index: number;
@@ -153,37 +155,8 @@ function stripDsmlToolArgumentMarkup(value: string): string | undefined {
  * (numbers, booleans, null) pass through untouched.
  */
 function sanitizeToolCallArguments(argumentsRecord: Record<string, unknown>): Record<string, unknown> | undefined {
-	let changed = false;
-	const walk = (value: unknown): unknown => {
-		if (typeof value === "string") {
-			const stripped = stripDsmlToolArgumentMarkup(value);
-			if (stripped === undefined) return value;
-			changed = true;
-			return stripped;
-		}
-		if (Array.isArray(value)) {
-			let arrayChanged = false;
-			const next = value.map(item => {
-				const stripped = walk(item);
-				if (stripped !== item) arrayChanged = true;
-				return stripped;
-			});
-			return arrayChanged ? next : value;
-		}
-		if (value !== null && typeof value === "object") {
-			let objectChanged = false;
-			const next: Record<string, unknown> = {};
-			for (const [key, item] of Object.entries(value)) {
-				const stripped = walk(item);
-				if (stripped !== item) objectChanged = true;
-				next[key] = stripped;
-			}
-			return objectChanged ? next : value;
-		}
-		return value;
-	};
-	const next = walk(argumentsRecord);
-	return changed && next !== argumentsRecord ? (next as Record<string, unknown>) : undefined;
+	const sanitized = sanitizeTextDeep(argumentsRecord, value => stripDsmlToolArgumentMarkup(value) ?? value);
+	return sanitized === argumentsRecord ? undefined : (sanitized as Record<string, unknown>);
 }
 
 /**

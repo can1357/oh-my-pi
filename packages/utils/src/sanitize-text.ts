@@ -40,17 +40,18 @@ function sanitizeWellFormedText(text: string): string {
 }
 
 /**
- * Apply {@link sanitizeText} to every string value inside a JSON-shaped value.
- * Only plain objects and arrays are walked; class instances, typed arrays, and
- * cyclic back-references pass through untouched. Object keys are kept as-is.
+ * Apply {@link sanitizeText} (or a caller-supplied `transform`) to every string
+ * value inside a JSON-shaped value. Only plain objects and arrays are walked;
+ * class instances, typed arrays, and cyclic back-references pass through
+ * untouched. Object keys are kept as-is, including an own `__proto__`.
  *
  * Returns the input reference when nothing changed, so reference-keyed caches
  * stay warm; changed containers are copied and the input is never mutated.
  * The iterative walk also handles arbitrarily deep tool-result `details`
  * without exhausting the TUI's call stack.
  */
-export function sanitizeTextDeep(value: unknown): unknown {
-	if (typeof value === "string") return sanitizeText(value);
+export function sanitizeTextDeep(value: unknown, transform: (text: string) => string = sanitizeText): unknown {
+	if (typeof value === "string") return transform(value);
 	const root = sanitizerFrame(value);
 	if (!root) return value;
 	const stack: SanitizerFrame[] = [root];
@@ -68,7 +69,7 @@ export function sanitizeTextDeep(value: unknown): unknown {
 		}
 		const child = frame.kind === "array" ? frame.value[frame.index++] : frame.value[frame.keys[frame.index++]!];
 		if (typeof child === "string") {
-			acceptSanitizedValue(frame, sanitizeText(child));
+			acceptSanitizedValue(frame, transform(child));
 			continue;
 		}
 		if (child === null || typeof child !== "object" || ancestors.has(child)) continue;

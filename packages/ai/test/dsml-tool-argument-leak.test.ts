@@ -78,6 +78,23 @@ describe("removeDsmlToolMarkupLeak on tool-call arguments", () => {
 		});
 	});
 
+	it("leaves literal XML and chat-template closers in payloads untouched", () => {
+		const payload = "<parameter>value</parameter\u003e <tool_call>{{ m }}</tool_call\u003e <invoke>x</invoke\u003e";
+		const message = assistant([toolCall({ content: payload })]);
+		expect(removeDsmlToolMarkupLeak(message)).toBe(false);
+		expect(callAt(message, 0).arguments).toEqual({ content: payload });
+	});
+
+	it("preserves an own __proto__ argument key", () => {
+		const args = JSON.parse('{"__proto__":{"admin":true},"text":"x</parameter_name>"}') as Record<string, unknown>;
+		const message = assistant([toolCall(args)]);
+		expect(removeDsmlToolMarkupLeak(message)).toBe(true);
+		const result = callAt(message, 0).arguments;
+		expect(Object.hasOwn(result, "__proto__")).toBe(true);
+		expect(Object.getPrototypeOf(result)).toBe(Object.prototype);
+		expect(result.text).toBe("x");
+	});
+
 	it("leaves clean arguments and unrelated blocks untouched", () => {
 		const message = assistant([toolCall({ path: "/tmp/a.txt", content: "hello " }), { type: "text", text: "done" }]);
 		expect(removeDsmlToolMarkupLeak(message)).toBe(false);
