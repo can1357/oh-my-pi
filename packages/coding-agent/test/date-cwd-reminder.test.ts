@@ -8,6 +8,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession, type ExtensionFactory } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
+	createSessionDateCwdReminderJournal,
 	DateCwdReminderInjector,
 	type DateCwdReminderJournal,
 	type DateCwdReminderPlacement,
@@ -807,6 +808,59 @@ describe("date-cwd-reminder", () => {
 
 				expect(switched.messages[2]?.content).toBe(`${renderDateCwdReminder("2026-08-15", "/work")}\n\nbranch`);
 				expect(switched.messages[4]?.content).toBe(`${renderDateCwdReminder("2026-08-16", "/work")}\n\nnext`);
+			});
+
+			it("sends a sibling branch's turns with their own reminders after a tree move", () => {
+				using tempDir = TempDir.createSync("@pi-date-cwd-tree-");
+				const sessionManager = SessionManager.inMemory(tempDir.path());
+				const journal = () => createSessionDateCwdReminderJournal(sessionManager);
+				const send = (injector: DateCwdReminderInjector, messages: Message[], date: string) =>
+					injector.transform({ systemPrompt: ["system"], messages }, date, "/work");
+				const first: Message = { role: "user", content: "first", timestamp: 1 };
+				const reply = createAssistantMessage("a");
+				const sideB: Message = { role: "user", content: "side b", timestamp: 7 };
+				const replyB = createAssistantMessage("b");
+				const sideA: Message = { role: "user", content: "side a", timestamp: 8 };
+				const earlier = new DateCwdReminderInjector(journal());
+				sessionManager.appendMessage(first);
+				send(earlier, [first], "2026-08-14");
+				const forkPoint = sessionManager.appendMessage(reply);
+				sessionManager.appendMessage(sideB);
+				const sentB = send(earlier, [first, reply, sideB], "2026-08-15");
+				const leafB = sessionManager.appendMessage(replyB);
+				sessionManager.branch(forkPoint);
+				sessionManager.appendMessage(sideA);
+
+				// Reopened later: the new process serves branch A, then the tree moves to branch B.
+				const resumed = new DateCwdReminderInjector(journal());
+				send(resumed, [first, reply, sideA], "2026-08-16");
+				sessionManager.branch(leafB);
+				const next: Message = { role: "user", content: "next", timestamp: 9 };
+				sessionManager.appendMessage(next);
+				const moved = send(resumed, [first, reply, sideB, replyB, next], "2026-08-16");
+
+				expect(wireOf(moved).slice(0, 3)).toEqual(wireOf(sentB));
+				expect(moved.messages[4]?.content).toBe(`${renderDateCwdReminder("2026-08-16", "/work")}\n\nnext`);
+			});
+
+			it("starts the history after /clear afresh even when its first turn repeats an earlier one", () => {
+				using tempDir = TempDir.createSync("@pi-date-cwd-clear-");
+				const sessionManager = SessionManager.inMemory(tempDir.path());
+				const injector = new DateCwdReminderInjector(createSessionDateCwdReminderJournal(sessionManager));
+				// A context hook's static bootstrap message opens both histories.
+				const before: Message = { role: "user", content: "BOOTSTRAP", timestamp: 1 };
+				sessionManager.appendMessage(before);
+				injector.transform({ systemPrompt: ["system"], messages: [before] }, "2026-08-14", "/work");
+				sessionManager.appendMessage(createAssistantMessage("a"));
+				sessionManager.appendResetBoundary();
+
+				const after = injector.transform(
+					{ systemPrompt: ["system"], messages: [{ role: "user", content: "BOOTSTRAP", timestamp: 50 }] },
+					"2026-08-16",
+					"/work",
+				);
+
+				expect(after.messages[0]?.content).toBe(`${renderDateCwdReminder("2026-08-16", "/work")}\n\nBOOTSTRAP`);
 			});
 
 			it("resends a retained turn with its own reminder after a compaction renumbered it", () => {
