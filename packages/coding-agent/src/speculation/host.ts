@@ -21,7 +21,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import type { ToolSession } from "../tools";
-import { approvalRestrictions, resolveApproval } from "../tools/approval";
+import { approvalRestrictions, readUserApprovalPolicies, resolveApproval } from "../tools/approval";
 import { getApprovalGrants } from "../tools/approval-cache";
 import { CONVERTIBLE_EXTENSIONS } from "../utils/markit";
 import {
@@ -36,7 +36,6 @@ import { isVideoPath } from "@oh-my-pi/pi-tui/prompt/video";
 import { cfgTaskSpeculativeLaunch } from "../task/settings";
 
 import {
-	cfgToolsApproval,
 	cfgToolsApprovalMode,
 	cfgToolsSpeculativeExecutionEnabled,
 	cfgToolsSpeculativeExecutionMaxInFlight,
@@ -226,7 +225,7 @@ export class CodingAgentSpeculativeExecutionHost implements SpeculativeExecution
 			tool,
 			args,
 			cfgToolsApprovalMode.get(this.settings),
-			cfgToolsApproval.get(this.settings),
+			readUserApprovalPolicies(this.settings),
 			getApprovalGrants(this.settings.getAgentDir(), this.toolSession.sessionManager?.getSessionId?.()),
 			approvalRestrictions(this.settings, this.toolSession.cwd),
 		);

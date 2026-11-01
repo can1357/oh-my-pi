@@ -290,11 +290,53 @@ export const cfgReadToolResultPreview = register({
 // Tools
 // ────────────────────────────────────────────────────────────────────────
 
-// Tool approval policies
+/** The policies a `tools.approval` entry can name. */
+export const APPROVAL_POLICIES = ["allow", "deny", "prompt"] as const;
+
+/** The policy a `tools.approval` entry names, in any case and ignoring surrounding whitespace; `undefined` for any other value. */
+export function parseApprovalPolicy(value: unknown): (typeof APPROVAL_POLICIES)[number] | undefined {
+	if (typeof value !== "string") return undefined;
+	const policy = value.trim().toLowerCase();
+	return APPROVAL_POLICIES.find(candidate => candidate === policy);
+}
+
+/**
+ * The type and length of a value an approval setting cannot read, which is all a log, a prompt or an
+ * error may say about it: a misplaced token is the likeliest such value, so its text never leaves the
+ * config file.
+ */
+export function valueShape(value: unknown): { valueType: string; valueLength: number } {
+	const valueType = Array.isArray(value) ? "array" : value === null ? "null" : typeof value;
+	const valueLength =
+		typeof value === "string" || Array.isArray(value)
+			? value.length
+			: value !== null && typeof value === "object"
+				? Object.keys(value).length
+				: String(value).length;
+	return { valueType, valueLength };
+}
+
+// Tool approval policies. A config file can still hold an entry no write accepts; approval
+// resolution reads one as `prompt` (see `resolveApproval`). This is the one setting whose unset state
+// is permissive, so a whole value that is not a record, or a key left empty, does not read as the `{}`
+// default there: every tool asks instead (see `readUserApprovalPolicies`).
 export const cfgToolsApproval = register({
 	id: "tools.approval",
 	type: "record",
 	default: {},
+	normalize: value => {
+		if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
+		const invalid = Object.entries(value)
+			.filter(([, policy]) => parseApprovalPolicy(policy) === undefined)
+			.map(([tool, policy]) => {
+				const { valueType, valueLength } = valueShape(policy);
+				return `${tool}: ${valueType} (length ${valueLength})`;
+			});
+		if (invalid.length > 0) {
+			throw new Error(`tools.approval entries must be allow, deny or prompt; got ${invalid.join(", ")}`);
+		}
+		return value;
+	},
 	ui: {
 		tab: "interaction",
 		group: "Approvals",

@@ -908,6 +908,16 @@ export class Settings {
 	}
 
 	/**
+	 * Whether the merged layers hold `setting`'s key with no value (`approval:` in YAML, read as
+	 * `null`), which {@link rawValue} and {@link isConfigured} take as unset. Only a setting whose unset
+	 * state is permissive needs to tell the two apart: `tools.approval` reads such a key as a
+	 * restriction it could not read, not as no policies.
+	 */
+	isConfiguredNull(setting: AnySetting): boolean {
+		return getByPath(this.#mergedView(), setting.segments) === null;
+	}
+
+	/**
 	 * Layer supplying the effective value of `setting`, in merge precedence order:
 	 * runtime override → config overlay → project → global → (overlay parent) → schema default.
 	 * A value that merges to `null` is unset and reports `"default"`.

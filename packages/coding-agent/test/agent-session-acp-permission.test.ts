@@ -30,7 +30,8 @@ import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
 import { computerTurnInFlight, registerComputerController } from "@oh-my-pi/pi-coding-agent/tools/computer/supervisor";
 import { dispatchXdevTool, resolveMountedXdevExecutable, type XdevState } from "@oh-my-pi/pi-coding-agent/tools/xdev";
-import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
+import { logger, TempDir, withTimeout } from "@oh-my-pi/pi-utils";
+import { loadHandWrittenConfig } from "./helpers/approval-config-file";
 
 // ---------------------------------------------------------------------------
 // Shared setup
@@ -94,12 +95,14 @@ async function createSession(
 		xdev?: XdevState;
 		builtInToolNames?: string[];
 		persist?: boolean;
+		/** Settings read from config files, in place of `settingsOverrides`. */
+		settings?: Settings;
 	},
 ): Promise<AgentSession> {
 	const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 	if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
 
-	const settings = Settings.isolated({ "compaction.enabled": false, ...settingsOverrides });
+	const settings = options?.settings ?? Settings.isolated({ "compaction.enabled": false, ...settingsOverrides });
 	const sessionManager = options?.persist
 		? SessionManager.create(tempDir.path(), `${tempDir.path()}/sessions`)
 		: SessionManager.inMemory(tempDir.path());
@@ -330,6 +333,49 @@ it("explicit yolo still gates tools whose per-tool policy requires a prompt", as
 
 	expect(permissionSpy).toHaveBeenCalledTimes(1);
 	expect(bashTool.executeCalls).toBe(1);
+});
+
+it("explicit yolo still gates a destructive tool whose hand-edited policy is not a policy, saying why", async () => {
+	const deleteTool = makeFakeTool("delete");
+	const requests: ClientBridgePermissionToolCall[] = [];
+	const bridge: ClientBridge = {
+		capabilities: { requestPermission: true },
+		async requestPermission(toolCall) {
+			requests.push(toolCall);
+			return { outcome: "selected", optionId: "allow_once", kind: "allow_once" };
+		},
+	};
+	const logWarn = spyOn(logger, "warn").mockImplementation(() => {});
+	try {
+		// Only a config file can hold such an entry: every write refuses it.
+		const settings = await loadHandWrittenConfig(tempDir.path(), {
+			compaction: { enabled: false },
+			tools: { approvalMode: "yolo", approval: { delete: false } },
+		});
+		session = await createSession([deleteTool], bridge, {}, { settings });
+
+		await session.setActiveToolsByName(["delete"]);
+		const wrappedDelete = session.agent.state.tools.find(t => t.name === "delete");
+		await wrappedDelete!.execute(
+			"call-1",
+			{ path: "/tmp/gone.ts" },
+			undefined,
+			undefined as never,
+			undefined as never,
+		);
+
+		expect(requests.map(request => request.content)).toEqual([
+			[
+				{
+					type: "content",
+					content: { type: "text", text: "Reason: tools.approval.delete is a boolean, not allow, deny or prompt" },
+				},
+			],
+		]);
+		expect(deleteTool.executeCalls).toBe(1);
+	} finally {
+		logWarn.mockRestore();
+	}
 });
 
 /**

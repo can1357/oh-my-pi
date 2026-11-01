@@ -50,6 +50,8 @@ import type {
 } from "@oh-my-pi/pi-natives";
 
 import { cfgComputerEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import { logger, TempDir } from "@oh-my-pi/pi-utils";
+import { loadHandWrittenConfig } from "../helpers/approval-config-file";
 
 /** Method name of the last step in a facade call chain, or "" when the chain is malformed. */
 function terminalMethod(chain: unknown): string {
@@ -2583,6 +2585,50 @@ describe("expanded computer APIs", () => {
 			}
 		},
 	);
+
+	it("still asks for control under an unreadable computer.control entry, and names it to the user and the script", async () => {
+		const native = new FakeNativeSession();
+		vi.spyOn(logger, "warn").mockImplementation(() => {});
+		using dir = TempDir.createSync("@pi-computer-control-entry-");
+		// Only a config file can hold such an entry: every write refuses it.
+		const settings = await loadHandWrittenConfig(dir.path(), {
+			computer: { enabled: true },
+			tools: { approval: { "computer.control": "ask" } },
+		});
+		const session = { ...toolSession(), settings };
+		const supervisor = new ComputerSupervisor(
+			session,
+			() => liveWorker(native),
+			undefined,
+			undefined,
+			NO_ESCAPE_STOPS,
+		);
+		const setting = "tools.approval.computer.control is a string of 3 characters, not allow, deny or prompt";
+		const confirm = vi.fn(async (_title: string, _body: string) => false);
+		try {
+			const asked = await supervisor.run(
+				'return await desktop.control.acquire({ reason: "Policy" })',
+				2_000,
+				snapshot(),
+				undefined,
+				{ ...confirmationContext(confirm), settings },
+			);
+			expect(asked.returnValue).toEqual({ active: false, reason: "denied", setting });
+			expect(confirm.mock.calls[0]?.[1]).toContain(`Reason: ${setting}`);
+			// Headless, the script can tell the mistyped setting from an intentional prompt.
+			const headless = await supervisor.run(
+				'return await desktop.control.acquire({ reason: "Headless" })',
+				2_000,
+				snapshot(),
+				undefined,
+				{ hasUI: false, settings } as AgentToolContext,
+			);
+			expect(headless.returnValue).toEqual({ active: false, reason: "no-ui", setting });
+			expect(native.acquireCount).toBe(0);
+		} finally {
+			await supervisor.close();
+		}
+	});
 
 	// Neither the approval mode nor the computer policy grants foreground control.
 	it.each([

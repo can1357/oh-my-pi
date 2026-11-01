@@ -7,6 +7,7 @@ import {
 	requestApproval,
 	resolveApproval,
 	resolveApprovalFromContext,
+	userPolicyReasonLine,
 } from "../tools/approval";
 
 /** Host context supplied when an eval prelude calls back out of its language VM. */
@@ -121,7 +122,7 @@ async function approvePreludeInvocation(
 	const ui = context.context?.ui;
 	if (!ui || context.context?.hasUI === false) {
 		throw new Error(
-			`Eval prelude "${definition.name}" requires approval but no interactive UI is available.\n` +
+			`Eval prelude "${definition.name}" requires approval but no interactive UI is available.${userPolicyReasonLine(resolved)}\n` +
 				`Set tools.approval.${definition.name}: allow or use an interactive UI to approve the call.`,
 		);
 	}

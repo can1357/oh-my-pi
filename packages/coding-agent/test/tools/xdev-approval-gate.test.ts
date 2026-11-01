@@ -17,7 +17,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import type { Tool } from "@oh-my-pi/pi-coding-agent/tools";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { resolveXdevTool, type XdevState } from "@oh-my-pi/pi-coding-agent/tools/xdev";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { logger, TempDir } from "@oh-my-pi/pi-utils";
 
 const DEVICE = "mcp__jira_addcomment";
 
@@ -150,19 +150,27 @@ function context(sessionManager: SessionManager, settings: Record<string, unknow
 const args = { path: `xd://${DEVICE}`, content: JSON.stringify({ body: "hello" }) };
 
 describe("write xd://<device> approval", () => {
-	it("asks once for an explicit device prompt policy", async () => {
+	// A key naming the device only by case is the same policy, so it asks once too.
+	it.each([
+		["an explicit device prompt policy", DEVICE],
+		["a device prompt policy whose key differs only in case", DEVICE.toUpperCase()],
+	])("asks once for %s", async (_label, key) => {
 		const cwd = root.path();
 		const sessionManager = SessionManager.inMemory(cwd);
 		const select = vi.fn(async (_title: string, options: string[]) => options[0]);
 		const { write, executed } = mountedDevice(runnerWith(sessionManager, select), cwd);
-
-		await write.execute(
-			"call-1",
-			args,
-			undefined,
-			undefined,
-			context(sessionManager, { "tools.approvalMode": "write", "tools.approval": { [DEVICE]: "prompt" } }),
-		);
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			await write.execute(
+				"call-1",
+				args,
+				undefined,
+				undefined,
+				context(sessionManager, { "tools.approvalMode": "write", "tools.approval": { [key]: "prompt" } }),
+			);
+		} finally {
+			warn.mockRestore();
+		}
 
 		expect(select).toHaveBeenCalledTimes(1);
 		expect(executed).toEqual([{ body: "hello" }]);

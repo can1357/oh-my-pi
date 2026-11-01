@@ -6,7 +6,7 @@
  * - compare a tool capability tier against the active approval mode,
  * - format the generic approval prompt body.
  */
-import { isRecord, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import { replaceTabs } from "@oh-my-pi/pi-tui";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import approvalFolderTemplate from "../prompts/tools/approval-folder.md" with { type: "text" };
@@ -27,7 +27,14 @@ import {
 	approvalCacheKeyForPath,
 	approvalGrantKey,
 } from "./approval-cache";
-import { cfgToolsApproval, cfgToolsApprovalMode, cfgToolsRestrictedFolders } from "./settings";
+import {
+	type APPROVAL_POLICIES,
+	cfgToolsApproval,
+	cfgToolsApprovalMode,
+	cfgToolsRestrictedFolders,
+	parseApprovalPolicy,
+	valueShape,
+} from "./settings";
 import {
 	approvalFolderListing,
 	type ApprovalFolderListing,
@@ -38,7 +45,7 @@ import { expandTilde, resolveToCwd } from "./path-utils";
 
 export type { ToolApproval, ToolApprovalDecision, ToolTier } from "@oh-my-pi/pi-agent-core";
 
-export type ApprovalPolicy = "allow" | "deny" | "prompt";
+export type ApprovalPolicy = (typeof APPROVAL_POLICIES)[number];
 
 /** Every approval mode: the type below and `isApprovalMode` read from one list. */
 const APPROVAL_MODES = ["always-ask", "always-ask-cached", "write", "yolo"] as const;
@@ -80,6 +87,43 @@ function asPolicyMap(value: unknown): Record<string, unknown> {
 }
 
 /**
+ * Marks a `tools.approval` value that is not a record at all (`"deny-bash"`, a list), or a key
+ * written and left empty (`approval:`, which YAML reads as null). Everywhere else a malformed or
+ * empty value counting as unset falls back to a safe default; here unset is permissive, since under
+ * `yolo` no policy means the call runs. So, like an unreadable entry for its own tool, such a value
+ * reads as `prompt` for every tool instead of as "no policies".
+ */
+const UNREADABLE_RECORD: unique symbol = Symbol("tools.approval is not a record");
+
+/** A `tools.approval` record as approval resolution reads it: entries by tool, or {@link UNREADABLE_RECORD}. */
+type UserPolicies = Record<string, unknown> & { [UNREADABLE_RECORD]?: unknown };
+
+/** The marker record last built per settings instance, so its warning is logged once per value. */
+const unreadableRecords = new WeakMap<Settings, { value: unknown; policies: UserPolicies }>();
+
+/**
+ * The `tools.approval` record every approval check reads: the configured record, or, when the
+ * configured value is not a record or the key is left empty, one that asks before every tool call
+ * (see {@link UNREADABLE_RECORD}), warned about once per settings instance and value.
+ */
+export function readUserApprovalPolicies(settings: Settings): Record<string, unknown> {
+	// What the handle itself reads; the handle turns a non-record into its `{}` default, and this
+	// read, like every other, takes a key left empty as unset.
+	const raw = settings.rawValue(cfgToolsApproval);
+	const value = raw === undefined && settings.isConfiguredNull(cfgToolsApproval) ? null : raw;
+	if (value === undefined || isRecord(value)) return asPolicyMap(cfgToolsApproval.get(settings));
+	const cached = unreadableRecords.get(settings);
+	if (cached && Bun.deepEquals(cached.value, value)) return cached.policies;
+	logger.warn("Approval: tools.approval is not a record of tool policies; asking before every tool call", {
+		...valueShape(value),
+		expected: "a record of tool policies, such as {bash: deny}",
+	});
+	const policies: UserPolicies = { [UNREADABLE_RECORD]: value };
+	unreadableRecords.set(settings, { value, policies });
+	return policies;
+}
+
+/**
  * Resolve approval mode and per-tool user policies from the execute-time
  * `AgentToolContext`.
  *
@@ -98,7 +142,7 @@ export function resolveApprovalFromContext(context?: ApprovalContextSource | nul
 	if (context?.autoApprove === true) {
 		return {
 			approvalMode: "yolo",
-			userPolicies: context.settings ? asPolicyMap(cfgToolsApproval.get(context.settings)) : {},
+			userPolicies: context.settings ? readUserApprovalPolicies(context.settings) : {},
 		};
 	}
 	const settings = context?.settings;
@@ -108,7 +152,7 @@ export function resolveApprovalFromContext(context?: ApprovalContextSource | nul
 	const configured: unknown = cfgToolsApprovalMode.get(settings);
 	return {
 		approvalMode: isApprovalMode(configured) ? configured : "yolo",
-		userPolicies: asPolicyMap(cfgToolsApproval.get(settings)),
+		userPolicies: readUserApprovalPolicies(settings),
 	};
 }
 
@@ -125,7 +169,8 @@ export interface ResolvedApproval {
 	policyKey?: string;
 }
 
-const POLICY_VALUES: ReadonlySet<ApprovalPolicy> = new Set(["allow", "deny", "prompt"]);
+/** How strongly each policy restrains a call, for choosing between two user entries that both apply. */
+const POLICY_RANK: Readonly<Record<ApprovalPolicy, number>> = { allow: 0, prompt: 1, deny: 2 };
 const TIER_VALUES: ReadonlySet<ToolTier> = new Set(["read", "write", "exec"]);
 
 /** Ordering of capability tiers, least to most privileged. */
@@ -260,11 +305,154 @@ export function recordApprovalGrant(
 
 const DEFAULT_PROMPT_TRUNCATE_CHARS = 2000;
 
-/** Best-effort conversion of an arbitrary user-supplied value to a policy. */
-function normalizePolicy(value: unknown): ApprovalPolicy | undefined {
-	if (typeof value !== "string") return undefined;
-	const lowered = value.trim().toLowerCase();
-	return POLICY_VALUES.has(lowered as ApprovalPolicy) ? (lowered as ApprovalPolicy) : undefined;
+/** The user policy one tool call gets: the `tools.approval` entry it came from, and why it differs from that entry's value. */
+export interface UserPolicy {
+	policy: ApprovalPolicy;
+	/** The `tools.approval` key holding the entry (the tool's own name when the whole value is unreadable). */
+	key: string;
+	/**
+	 * Shown wherever the call asks or is refused when the entry is not simply its value: unrecognised,
+	 * matched by case alone, or part of a `tools.approval` value that is not a record.
+	 */
+	reason?: string;
+	/**
+	 * The entry or value could not be read as a policy, so it reads as `prompt`. Someone wrote it to
+	 * restrain the tool, so it outranks every allow a tool or mode would give; only a deny is stronger.
+	 */
+	unreadable?: true;
+}
+
+/**
+ * Entries each `tools.approval` record already warned about. A record is replaced, never mutated,
+ * when its settings change, so a fixed and re-broken entry warns again.
+ */
+const warnedEntries = new WeakMap<object, Set<string>>();
+
+function warnEntryOnce(
+	userConfig: Record<string, unknown>,
+	key: string,
+	message: string,
+	context: Record<string, unknown>,
+): void {
+	let warned = warnedEntries.get(userConfig);
+	if (!warned) {
+		warned = new Set();
+		warnedEntries.set(userConfig, warned);
+	}
+	if (warned.has(key)) return;
+	warned.add(key);
+	logger.warn(message, context);
+}
+
+/** `<what> is <the value's shape>`, as a prompt or refusal shows an unreadable value (see {@link valueShape}). */
+function describeUnreadable(what: string, value: unknown): string {
+	const { valueType, valueLength } = valueShape(value);
+	const plural = valueLength === 1 ? "" : "s";
+	let shape: string;
+	switch (valueType) {
+		case "null":
+			shape = "empty";
+			break;
+		case "string":
+			shape = valueLength === 0 ? "an empty string" : `a string of ${valueLength} character${plural}`;
+			break;
+		case "array":
+			shape = `a list of ${valueLength} item${plural}`;
+			break;
+		case "object":
+			shape = `a record of ${valueLength} key${plural}`;
+			break;
+		default:
+			shape = `a ${valueType}`;
+	}
+	return sanitizeText(`${what} is ${shape}`);
+}
+
+/** The entry at `key`, read for the tool `name`; see {@link userApprovalPolicy}. */
+function readUserEntry(userConfig: Record<string, unknown>, key: string, name: string): UserPolicy | undefined {
+	const value = userConfig[key];
+	const policy = parseApprovalPolicy(value);
+	if (key === name) {
+		if (policy) return { policy, key };
+		warnEntryOnce(userConfig, key, "Approval: tools.approval entry is not allow, deny or prompt; asking instead", {
+			tool: key,
+			...valueShape(value),
+		});
+		return {
+			policy: "prompt",
+			key,
+			reason: `${describeUnreadable(`tools.approval.${key}`, value)}, not allow, deny or prompt`,
+			unreadable: true,
+		};
+	}
+	warnEntryOnce(userConfig, key, "Approval: tools.approval key matches a tool only by case", {
+		key,
+		tool: name,
+		...valueShape(value),
+		applied: policy === "allow" ? "nothing" : (policy ?? "prompt"),
+	});
+	if (policy === "allow") return undefined;
+	const written = policy ? `tools.approval.${key} is ${policy}` : describeUnreadable(`tools.approval.${key}`, value);
+	return {
+		policy: policy ?? "prompt",
+		key,
+		reason: `${written}, which names ${name} only by case`,
+		...(policy === undefined ? { unreadable: true as const } : {}),
+	};
+}
+
+/**
+ * The user's `tools.approval` policy for the tool (or policy key) `name`, or `undefined` when none
+ * applies. Whoever writes an entry means to restrain that tool, so a typo never grants it: an entry
+ * that is not `allow`, `deny` or `prompt` (any case, surrounding whitespace ignored) reads as
+ * `prompt`, and without an entry under `name` itself, one whose key differs only in case (`Bash`)
+ * applies its `deny` or `prompt` — never its `allow` — merged as {@link stricterUserPolicy} says.
+ * Each such entry warns once per record, naming the tool and the value's type and length. A
+ * `tools.approval` value that is not a record, or is left empty, reads as `prompt` for every tool
+ * (see {@link UNREADABLE_RECORD}). Either way the result carries a `reason` naming what to fix,
+ * never the text of a value that could not be read.
+ */
+export function userApprovalPolicy(userConfig: UserPolicies, name: string): UserPolicy | undefined {
+	if (Object.hasOwn(userConfig, UNREADABLE_RECORD)) {
+		const value = describeUnreadable("tools.approval", userConfig[UNREADABLE_RECORD]);
+		return {
+			policy: "prompt",
+			key: name,
+			reason: `${value}, not a record of tool policies such as {bash: deny}`,
+			unreadable: true,
+		};
+	}
+	if (Object.hasOwn(userConfig, name)) return readUserEntry(userConfig, name, name);
+	let lowered: string | undefined;
+	let found: UserPolicy | undefined;
+	for (const key in userConfig) {
+		if (!Object.hasOwn(userConfig, key) || key.length !== name.length) continue;
+		lowered ??= name.toLowerCase();
+		if (key.toLowerCase() === lowered) found = stricterUserPolicy(found, readUserEntry(userConfig, key, name));
+	}
+	return found;
+}
+
+/**
+ * Two user policies that both apply, merged. The stricter policy wins (deny, then prompt, then
+ * allow). Unreadable is sticky, not a rank: if either entry could not be read, the result is
+ * unreadable whatever wins and whatever order the keys arrive in, so a tool's own allow can never
+ * run the call. Between two prompts the unreadable one wins, so its reason is the one shown.
+ */
+function stricterUserPolicy(a: UserPolicy | undefined, b: UserPolicy | undefined): UserPolicy | undefined {
+	if (!a || !b) return a ?? b;
+	const rankA = POLICY_RANK[a.policy];
+	const rankB = POLICY_RANK[b.policy];
+	const winner = rankB > rankA || (rankB === rankA && b.unreadable && !a.unreadable) ? b : a;
+	return (a.unreadable || b.unreadable) && !winner.unreadable ? { ...winner, unreadable: true } : winner;
+}
+
+/**
+ * The `Reason:` line a refusal without an interactive UI adds when an unreadable `tools.approval`
+ * entry or value made the call ask, so the person meeting it can find what to fix; `""` otherwise.
+ */
+export function userPolicyReasonLine(resolved: ResolvedApproval): string {
+	return resolved.source === "user" && resolved.reason ? `\nReason: ${resolved.reason}` : "";
 }
 
 function isToolTier(value: unknown): value is ToolTier {
@@ -280,7 +468,7 @@ function normalizeDecision(value: unknown): Omit<ResolvedApproval, "policy"> & {
 		const record = value as Record<string, unknown>;
 		const tier = isToolTier(record.tier) ? record.tier : "exec";
 		const reason = typeof record.reason === "string" && record.reason.length > 0 ? record.reason : undefined;
-		const policy = normalizePolicy(record.policy);
+		const policy = parseApprovalPolicy(record.policy);
 		const policyKey =
 			typeof record.policyKey === "string" && record.policyKey.length > 0 ? record.policyKey : undefined;
 		return {
@@ -351,7 +539,8 @@ export function approvalRestrictions(
  *     the invoking tool's own policy as the fallback when the user set none for
  *     the keyed sub-tool (e.g. an `xd://` device dispatch without a device
  *     policy still honors `tools.approval.write`).
- *  2. User per-tool override, if set and valid.
+ *  2. User per-tool override (see {@link userApprovalPolicy}). A deny, the tool's or the user's,
+ *     wins first; an unreadable entry or value then prompts, outranking any tool or mode allow.
  *  3. Active mode tier comparison. In `always-ask-cached`, a call whose
  *     `approvalCacheTargets` are all granted in `grants` is allowed instead
  *     (see {@link resolveCachedModeApproval}).
@@ -395,29 +584,28 @@ function resolvePolicy(
 ): ResolvedApproval {
 	const decision = getToolDecision(tool, args);
 	const policyKey = decision.policyKey ?? tool.name;
-	const userPolicy = Object.hasOwn(userConfig, policyKey) ? normalizePolicy(userConfig[policyKey]) : undefined;
-	const fallbackPolicy =
-		policyKey !== tool.name && userPolicy === undefined && Object.hasOwn(userConfig, tool.name)
-			? normalizePolicy(userConfig[tool.name])
+	const keyed = userApprovalPolicy(userConfig, policyKey);
+	// The invoking tool's own policy applies when the keyed sub-tool has no entry of its own, and
+	// still applies, if stricter, when the keyed entry only reads as `prompt` (a `reason` says so).
+	const fallback =
+		policyKey !== tool.name && (keyed === undefined || keyed.reason !== undefined)
+			? userApprovalPolicy(userConfig, tool.name)
 			: undefined;
-	const effectiveUserPolicy = userPolicy ?? fallbackPolicy;
-	const userPolicyKey = userPolicy !== undefined ? policyKey : tool.name;
+	const own = stricterUserPolicy(keyed, fallback);
 
 	// Legacy-name fallback for renamed tools (e.g. MCP mints that gained digits).
 	// Fail-closed: only `deny`/`prompt` carry over from the old key, so a
 	// forgotten restrictive policy keeps protecting the renamed tool, while a
 	// stale `allow` cannot mask a `deny` another user sets under the new name.
-	const legacyPolicy =
-		effectiveUserPolicy === undefined &&
+	// Under a current entry that only reads as `prompt`, a legacy `deny` still denies.
+	const legacy =
+		(own === undefined || own.reason !== undefined) &&
 		typeof tool.legacyName === "string" &&
-		tool.legacyName !== tool.name &&
-		Object.hasOwn(userConfig, tool.legacyName)
-			? normalizePolicy(userConfig[tool.legacyName])
+		tool.legacyName !== tool.name
+			? userApprovalPolicy(userConfig, tool.legacyName)
 			: undefined;
-	const inheritedPolicy = legacyPolicy === "deny" || legacyPolicy === "prompt" ? legacyPolicy : undefined;
-	const inheritedPolicyKey = inheritedPolicy !== undefined ? tool.legacyName : undefined;
-	const combinedUserPolicy = effectiveUserPolicy ?? inheritedPolicy;
-	const combinedUserPolicyKey = effectiveUserPolicy !== undefined ? userPolicyKey : inheritedPolicyKey;
+	const user = stricterUserPolicy(own, legacy?.policy === "allow" ? undefined : legacy);
+	const userFields = user ? { policyKey: user.key, ...(user.reason ? { reason: user.reason } : {}) } : {};
 
 	if (decision.policy === "deny") {
 		return {
@@ -429,14 +617,19 @@ function resolvePolicy(
 			...(decision.reason ? { reason: decision.reason } : {}),
 		};
 	}
-	if (combinedUserPolicy === "deny") {
+	if (user?.policy === "deny") {
 		return {
 			policy: "deny",
 			tier: decision.tier,
 			override: decision.override,
 			source: "user",
-			...(combinedUserPolicyKey ? { policyKey: combinedUserPolicyKey } : {}),
+			...userFields,
 		};
+	}
+	// An unreadable entry or value was written to restrain this tool: it outranks a tool's own allow
+	// (a `bash.patterns` allow, say), a safety override's allow and the mode. Only the denies above win.
+	if (user?.unreadable) {
+		return { policy: "prompt", tier: decision.tier, override: false, source: "user", ...userFields };
 	}
 
 	if (mode === "yolo") {
@@ -451,11 +644,11 @@ function resolvePolicy(
 			};
 		}
 		return {
-			policy: combinedUserPolicy ?? "allow",
+			policy: user?.policy ?? "allow",
 			tier: decision.tier,
 			override: false,
-			source: combinedUserPolicy ? "user" : "mode",
-			...(combinedUserPolicyKey ? { policyKey: combinedUserPolicyKey } : {}),
+			source: user ? "user" : "mode",
+			...userFields,
 		};
 	}
 
@@ -481,13 +674,13 @@ function resolvePolicy(
 		};
 	}
 
-	if (combinedUserPolicy) {
+	if (user) {
 		return {
-			policy: combinedUserPolicy,
+			policy: user.policy,
 			tier: decision.tier,
 			override: false,
 			source: "user",
-			...(combinedUserPolicyKey ? { policyKey: combinedUserPolicyKey } : {}),
+			...userFields,
 		};
 	}
 
