@@ -82,7 +82,14 @@ export class TanCommandController {
 		const systemPrompt = [...session.systemPrompt];
 		// The copied prompt carries the parent's memory recall; the clone inherits it as delivered.
 		const parentMnemopiSessionState = session.getMnemopiSessionState?.();
-		const toolNames = session.getEnabledToolNames();
+		// A read-only agent's `write` is only the synthetic agent:// reply transport
+		// (see createTools); snapshotting it as an explicit capability would re-grant
+		// full filesystem write to the clone. Strip it so the clone re-derives the
+		// same restricted transport instead of escalating.
+		const toolNames =
+			session.isAgentOnlyWrite || session.isDeviceOnlyWrite
+				? session.getEnabledToolNames().filter(name => name !== "write")
+				: session.getEnabledToolNames();
 		const activeToolNames = session.getActiveToolNames();
 		const mountedToolNames = session.getMountedXdevToolNames();
 		const modelRegistry = session.modelRegistry;
@@ -200,10 +207,18 @@ export class TanCommandController {
 							throw error;
 						}
 						mcpFollower?.bind(clone);
+						// Persist the clone's capability snapshot, not its live enabled set: a
+						// read-only clone's synthetic `write` (agent:// reply transport) must not
+						// be recorded as an explicit capability that a later reopen would
+						// reinterpret as a full filesystem grant.
+						const cloneToolNames =
+							clone.isAgentOnlyWrite || clone.isDeviceOnlyWrite
+								? clone.getEnabledToolNames().filter(name => name !== "write")
+								: clone.getEnabledToolNames();
 						clone.sessionManager?.appendSessionInit?.({
 							systemPrompt: clone.systemPrompt ?? systemPrompt,
 							task: trimmedWork,
-							tools: clone.getEnabledToolNames(),
+							tools: cloneToolNames,
 						});
 						const abortClone = () => {
 							void clone?.abort();

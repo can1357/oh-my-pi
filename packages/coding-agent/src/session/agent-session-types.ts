@@ -303,6 +303,8 @@ export interface AgentSessionConfig {
 	ensureWriteRegistered?: () => Promise<boolean>;
 	/** Reports whether the registered write tool is currently transport-only. */
 	isDeviceOnlyWrite?: () => boolean;
+	/** True when `write` is only the agent:// reply transport of a read-only agent. */
+	isAgentOnlyWrite?: () => boolean;
 	/** Switches the registered write tool between transport-only and full access. */
 	setDeviceOnlyWrite?: (enabled: boolean) => void;
 	/** Previews the full-write description without changing execution access. */

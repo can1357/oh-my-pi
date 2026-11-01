@@ -304,6 +304,7 @@ import { createRatchetPrelude } from "./ratchet/prelude-definition";
 import { createArchivePrelude } from "./archive/prelude-definition";
 import { ToolContextStore } from "./tools/context";
 import { isIrcEnabled } from "./irc/messaging";
+import { isReadOnlyToolNames } from "./task/read-only-policy";
 import { imageGenTool } from "./tools/image-gen";
 import { wrapToolWithMetaNotice } from "./tools/output-meta";
 import { isFilesystemSourcePath } from "./tools/path-utils";
@@ -3889,6 +3890,50 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			for (const entry of custom.added) {
 				added.push({ name: entry.name, builtIn: false, activate: entry.hidden !== true });
 			}
+			// A read-only agent's synthetic agent:// `write` reply transport is gated on
+			// messaging availability, which a gating-setting change (e.g.
+			// task.maxRecursionDepth flipping IRC on/off) can toggle. Mirror createTools'
+			// classification here so reconcile adds/drops the transport with the flag.
+			if (!restrictToolNames && plan.requestedTools !== undefined) {
+				const declaredTools = options.toolNames === undefined ? undefined : normalizeToolNames(options.toolNames);
+				const messagingAvailable =
+					toolSession.enableIrc !== false && isIrcEnabled(settings, toolSession.taskDepth ?? 0);
+				const agentOnly =
+					!plan.requestedTools.includes("write") && isReadOnlyToolNames(declaredTools) && messagingAvailable;
+				const wasAgentOnly = toolSession.agentOnlyWrite === true;
+				if (agentOnly !== wasAgentOnly) {
+					toolSession.agentOnlyWrite = agentOnly ? true : undefined;
+					if (agentOnly) {
+						toolSession.deviceOnlyWrite = true;
+						// Only the native built-in qualifies as the gated reply transport.
+						// If an extension replaced/wrote `write` (hidden/defaultInactive),
+						// re-register the restricted native so the reconcile never labels or
+						// activates the imposter as a built-in (mirrors the initial active-set
+						// retention block below).
+						if (!builtInRegistryToolNames.has("write")) {
+							const writeTool = await logger.time(
+								"createTools:write:agent-transport",
+								BUILTIN_TOOLS.write,
+								toolSession,
+							);
+							if (writeTool) {
+								const native = wrapToolWithMetaNotice(writeTool);
+								nativeToolsByName.set("write", native);
+								toolRegistry.set("write", new ExtensionToolWrapper(native, extensionRunner) as Tool);
+								builtInRegistryToolNames.add("write");
+							}
+						}
+						if (builtInRegistryToolNames.has("write") && !added.some(entry => entry.name === "write")) {
+							added.push({ name: "write", builtIn: true, activate: true });
+						}
+					} else if (toolSession.deviceOnlyWrite === true && !toolSession.xdev) {
+						toolSession.deviceOnlyWrite = undefined;
+						if (builtInRegistryToolNames.has("write") && !removed.includes("write")) {
+							removed.push("write");
+						}
+					}
+				}
+			}
 			syncXdevState();
 			return { added, removed, xdev: toolSession.xdev };
 		};
@@ -4421,6 +4466,25 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}
 		}
 
+		// A read-only agent's synthetic agent:// `write` (see createTools) is the
+		// reply transport: it must be active even though the explicit list omits it.
+		// Only the native tool qualifies as that gated transport, so if an extension
+		// replaced `write` (hidden/defaultInactive) the provenance guard would decline
+		// to activate it — retain the native restricted transport instead so the peer
+		// roster the prompt renders stays backed by a real reply tool.
+		if (toolSession.agentOnlyWrite === true && !initialToolNames.includes("write")) {
+			if (!builtInRegistryToolNames.has("write")) {
+				const writeTool = await logger.time("createTools:write:agent-transport", BUILTIN_TOOLS.write, toolSession);
+				if (writeTool) {
+					const native = wrapToolWithMetaNotice(writeTool);
+					nativeToolsByName.set("write", native);
+					toolRegistry.set("write", new ExtensionToolWrapper(native, extensionRunner) as Tool);
+					builtInRegistryToolNames.add("write");
+				}
+			}
+			if (toolRegistry.has("write")) initialToolNames.push("write");
+		}
+
 		setSessionActiveToolNames(initialToolNames);
 		const { systemPrompt } = await logger.time(
 			"buildSystemPrompt",
@@ -4838,6 +4902,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// The primary may carry a dormant xd:// write transport. Advisors use
 			// their own configured tool slate, so a selected write is always full.
 			deviceOnlyWrite: undefined,
+			agentOnlyWrite: undefined,
 			pendingFullWriteDescription: undefined,
 			get cwd() {
 				return sessionManager.getCwd();
@@ -4987,6 +5052,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			setActiveToolNames: setSessionActiveToolNames,
 			ensureWriteRegistered,
 			isDeviceOnlyWrite: () => toolSession.deviceOnlyWrite === true,
+			isAgentOnlyWrite: () => toolSession.agentOnlyWrite === true,
 			setDeviceOnlyWrite: enabled => {
 				toolSession.deviceOnlyWrite = enabled ? true : undefined;
 			},

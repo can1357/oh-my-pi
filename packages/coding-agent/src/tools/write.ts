@@ -48,6 +48,7 @@ import { getLspBatchRequest } from "../lsp/batch";
 import { getDiagnosticsLedger } from "../lsp/diagnostics-ledger";
 
 import writeDescription from "../prompts/tools/write.md" with { type: "text" };
+import writeAgentOnlyDescription from "../prompts/tools/write-agent-only.md" with { type: "text" };
 import writeDeviceOnlyDescription from "../prompts/tools/write-device-only.md" with { type: "text" };
 import writeDeviceOnlyRefusal from "../prompts/tools/write-device-only-refusal.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
@@ -603,7 +604,20 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		return key === undefined ? undefined : [key];
 	};
 	readonly label = "Write";
+	/**
+	 * agent://-only mode is a presentation of the device-only transport (the
+	 * enforcement is the device-only gate below, which already admits only
+	 * coordination and device targets): it holds only while `deviceOnlyWrite`
+	 * does, so a runtime full-write grant (which clears `deviceOnlyWrite`, or
+	 * rolls it back) flips both together.
+	 */
+	get #agentOnly(): boolean {
+		return this.session.agentOnlyWrite === true && this.session.deviceOnlyWrite === true;
+	}
 	get description(): string {
+		if (this.#agentOnly && this.session.pendingFullWriteDescription !== true) {
+			return prompt.render(writeAgentOnlyDescription);
+		}
 		const deviceOnly = this.session.deviceOnlyWrite === true && this.session.pendingFullWriteDescription !== true;
 		return prompt.render(deviceOnly ? writeDeviceOnlyDescription : writeDescription);
 	}
@@ -962,6 +976,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			// `yield`) instead of two competing deliverables.
 			throw new ToolError(
 				prompt.render(writeDeviceOnlyRefusal, {
+					agentOnly: this.#agentOnly,
 					diskPath: localFileDiskPathHint(this.session),
 					canYield: this.session.isToolActive?.("yield") === true,
 				}),

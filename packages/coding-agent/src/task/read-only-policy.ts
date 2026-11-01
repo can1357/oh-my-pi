@@ -23,6 +23,10 @@ export const READ_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
 	"rewind",
 ]);
 
+export function isReadOnlyToolNames(tools: readonly string[] | undefined): boolean {
+	return !!tools?.length && tools.every(tool => READ_ONLY_TOOL_NAMES.has(tool));
+}
+
 export function isReadOnlyAgent(agent: AgentDefinition): boolean {
-	return !!agent.tools?.length && agent.tools.every(tool => READ_ONLY_TOOL_NAMES.has(tool));
+	return isReadOnlyToolNames(agent.tools);
 }

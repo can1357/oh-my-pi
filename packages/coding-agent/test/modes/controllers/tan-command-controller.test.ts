@@ -105,6 +105,8 @@ function createContext(overrides?: {
 	register?: (run: CapturedJobRun, options?: AsyncJobRegisterOptions) => string;
 	activeToolNames?: string[];
 	enabledToolNames?: string[];
+	agentOnlyWrite?: boolean;
+	deviceOnlyWrite?: boolean;
 	preparedExtensions?: unknown;
 	effectiveExtensionRoots?: unknown;
 	extensionPaths?: unknown;
@@ -134,6 +136,12 @@ function createContext(overrides?: {
 		systemPrompt: ["system prompt"],
 		getActiveToolNames: vi.fn(() => overrides?.activeToolNames ?? ["read", "bash"]),
 		getEnabledToolNames: vi.fn(() => overrides?.enabledToolNames ?? overrides?.activeToolNames ?? ["read", "bash"]),
+		get isAgentOnlyWrite(): boolean {
+			return overrides?.agentOnlyWrite === true;
+		},
+		get isDeviceOnlyWrite(): boolean {
+			return overrides?.deviceOnlyWrite === true;
+		},
 		getMountedXdevToolNames: vi.fn(() => []),
 		modelRegistry: { authStorage: { marker: "auth" } },
 		preparedExtensions: overrides?.preparedExtensions,
@@ -602,6 +610,31 @@ describe("TanCommandController", () => {
 
 		expect(createAgentSessionSpy.mock.calls[0]?.[0]?.toolNames).toEqual(enabledToolNames);
 		expect(appendSessionInit).toHaveBeenCalledWith(expect.objectContaining({ tools: enabledToolNames }));
+	});
+
+	it("strips the synthetic write reply transport from a read-only parent's snapshot", async () => {
+		const enabledToolNames = ["read", "grep", "write", "yield"];
+		const harness = createContext({ enabledToolNames, agentOnlyWrite: true });
+		vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(harness.cloneManager);
+		const appendSessionInit = vi.fn();
+		const { clone } = createCloneStub({
+			sessionManager: { appendSessionInit },
+			enabledToolNames: ["read", "grep", "yield"],
+		});
+		const createAgentSessionSpy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({
+			session: clone,
+		} as unknown as CreateAgentSessionResult);
+		const controller = new TanCommandController(harness.ctx);
+
+		await controller.start("reconcile read-only transport");
+		const run = harness.capturedRun;
+		if (!run) throw new Error("run function was not captured");
+		await run({ jobId: "job-123", signal: new AbortController().signal, reportProgress: async () => {} });
+
+		// The clone must NOT inherit the parent's restricted reply transport as a
+		// full write grant; it re-derives its own transport from its tool list.
+		expect(createAgentSessionSpy.mock.calls[0]?.[0]?.toolNames).toEqual(["read", "grep", "yield"]);
+		expect(appendSessionInit).toHaveBeenCalledWith(expect.objectContaining({ tools: ["read", "grep", "yield"] }));
 	});
 
 	it("restores the request when compaction summarizes an already-dispatched turn", async () => {

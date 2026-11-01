@@ -34,6 +34,7 @@ import { logger, removeSyncWithRetries, Snowflake, untilAborted } from "@oh-my-p
 import { cfgExternalThinking } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { cfgPlanEnabled } from "@oh-my-pi/pi-coding-agent/plan-mode/settings";
 import { cfgToolsXdev } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import { cfgTaskMaxRecursionDepth } from "@oh-my-pi/pi-coding-agent/task/settings";
 
 const toolActivationExtension: ExtensionFactory = pi => {
 	pi.registerTool({
@@ -505,7 +506,8 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		});
 
 		try {
-			expect(session.getActiveToolNames()).not.toContain("write");
+			// A read-only list gets the agent:// reply transport active up front.
+			expect(session.getActiveToolNames()).toContain("write");
 			const runner = session.extensionRunner;
 			if (!runner) throw new Error("expected extension runner");
 			await runner.emit({ type: "session_start" });
@@ -1826,7 +1828,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
-	it("keeps an idle device-only write out of the active tool set", async () => {
+	it("keeps the agent:// reply write active for a read-only list", async () => {
 		const tempDir = makeTempDir();
 
 		const settings = Settings.isolated();
@@ -1839,9 +1841,9 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		});
 
 		try {
-			// The dormant transport remains registered for later xd:// discovery,
-			// but does not add an inert schema to a pure read-only surface.
-			expect(session.getActiveToolNames()).not.toContain("write");
+			// A read-only list (subset of READ_ONLY_TOOL_NAMES) keeps `write` active
+			// as the agent:// reply transport; it is not an inert schema.
+			expect(session.getActiveToolNames()).toContain("write");
 			const write = session.getToolByName("write");
 			expect(write).toBeDefined();
 			await expect(
@@ -1856,12 +1858,62 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		const tempDir = makeTempDir();
 		const { session } = await createAgentSession({
 			...baseOptions(tempDir),
-			toolNames: ["read"],
+			// A list with a mutating tool is not a read-only agent, so no agent:// reply grant applies.
+			toolNames: ["read", "edit"],
 		});
 
 		try {
-			await session.setActiveToolsByName(["read"]);
+			await session.setActiveToolsByName(["read", "edit"]);
 			expect(session.getActiveToolNames()).not.toContain("write");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("keeps the agent:// reply write active for read-only lists and yields to a runtime full grant", async () => {
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			toolNames: ["read", "grep"],
+		});
+
+		try {
+			expect(session.getActiveToolNames()).toContain("write");
+			const write = session.getToolByName("write");
+			expect(write?.description).toContain("agent://");
+			const filePath = path.join(tempDir, "agent-only-fs.txt");
+			await expect(write!.execute("agent-only-fs", { path: filePath, content: "x" })).rejects.toThrow(
+				"agent:// messages",
+			);
+
+			// A later explicit runtime grant is a real filesystem write: the
+			// agent-only presentation and gate must go with the device-only flag.
+			await session.setActiveToolsByName(["read", "grep", "write"]);
+			const full = session.getToolByName("write");
+			expect(full?.description).not.toContain("limited to");
+			await full!.execute("runtime-full-write-2", { path: filePath, content: "ok\n" });
+			expect(await Bun.file(filePath).text()).toBe("ok\n");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("keeps the agent:// reply write through runtime tool re-application without widening it", async () => {
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			toolNames: ["read", "grep"],
+		});
+
+		try {
+			await session.setActiveToolsByName(["read", "grep"]);
+			await session.refreshMCPTools([]);
+			expect(session.getActiveToolNames()).toContain("write");
+			const write = session.getToolByName("write");
+			expect(write?.description).toContain("agent://");
+			await expect(
+				write!.execute("still-agent-only", { path: path.join(tempDir, "nope.txt"), content: "x" }),
+			).rejects.toThrow("agent:// messages");
 		} finally {
 			await session.dispose();
 		}
@@ -1887,6 +1939,92 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			await session.dispose();
 		}
 	});
+	it("reconciles the agent:// reply write transport with live messaging availability", async () => {
+		const tempDir = makeTempDir();
+		const settings = Settings.isolated();
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			settings,
+			toolNames: ["read", "grep"],
+		});
+
+		try {
+			// Messaging available at top level (default max recursion depth) → the
+			// read-only agent's synthetic agent:// reply transport is present.
+			expect(session.getActiveToolNames()).toContain("write");
+			const write = session.getToolByName("write");
+			expect(write?.description).toContain("agent://");
+			await expect(
+				write!.execute("reconcile-live-fs", { path: path.join(tempDir, "nope.txt"), content: "x" }),
+			).rejects.toThrow("agent:// messages");
+
+			// Flip messaging off (no recursion allowed → IRC unavailable at depth 0);
+			// reconcile must drop the synthetic transport.
+			cfgTaskMaxRecursionDepth.set(settings, 0);
+			await session.reconcileBuiltinTools({ refreshPrompt: false });
+
+			// Flip messaging back on; reconcile must restore the native transport.
+			cfgTaskMaxRecursionDepth.set(settings, 2);
+			await session.reconcileBuiltinTools({ refreshPrompt: false });
+			expect(session.getActiveToolNames()).toContain("write");
+			const restored = session.getToolByName("write");
+			expect(restored?.description).toContain("agent://");
+			await expect(
+				restored!.execute("reconcile-live-fs-2", { path: path.join(tempDir, "nope2.txt"), content: "x" }),
+			).rejects.toThrow("agent:// messages");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("retains the native reply write when an extension shadows write during messaging-on reconcile", async () => {
+		const tempDir = makeTempDir();
+		// An extension that registers the literal name `write` (hidden/defaultInactive)
+		// replaces the built-in in the registry; turning messaging on (0→2) must
+		// retain the NATIVE built-in reply transport, never the imposter.
+		const shadowWriteExtension: ExtensionFactory = pi => {
+			pi.registerTool({
+				name: "write",
+				label: "Shadow Write",
+				description: "An extension-provided write that must not gain the agent:// reply grant.",
+				parameters: type({}),
+				defaultInactive: true,
+				async execute() {
+					return { content: [{ type: "text", text: "shadow write" }] };
+				},
+			});
+		};
+
+		const settings = Settings.isolated();
+		// Start with messaging unavailable (depth 0) so no native reply transport yet,
+		// and the extension's default-inactive write is not in the active set.
+		cfgTaskMaxRecursionDepth.set(settings, 0);
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			settings,
+			extensions: [shadowWriteExtension],
+			toolNames: ["read", "grep"],
+		});
+
+		try {
+			expect(session.getActiveToolNames()).not.toContain("write");
+
+			// Flip messaging on → reconcile must register the native agent:// reply
+			// write as a built-in (not the extension shadow), refusing filesystem paths.
+			cfgTaskMaxRecursionDepth.set(settings, 2);
+			await session.reconcileBuiltinTools({ refreshPrompt: false });
+			expect(session.getActiveToolNames()).toContain("write");
+			expect(session.hasBuiltInTool("write")).toBe(true);
+			const write = session.getToolByName("write");
+			expect(write?.description).toContain("agent://");
+			await expect(
+				write!.execute("shadow-native-fs", { path: path.join(tempDir, "nope.txt"), content: "x" }),
+			).rejects.toThrow("agent:// messages");
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("registers vibe tools only during explicit vibe activation and exposes parent Todo bookkeeping", async () => {
 		const tempDir = makeTempDir();
 		const { session } = await createAgentSession(baseOptions(tempDir));
