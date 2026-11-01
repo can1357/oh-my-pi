@@ -2,7 +2,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { BeamMemory } from "@oh-my-pi/pi-mnemopi/core/beam";
-import { embed } from "@oh-my-pi/pi-mnemopi/core/embeddings";
+import { embed, embedQuery } from "@oh-my-pi/pi-mnemopi/core/embeddings";
 import {
 	type MnemopiEmbeddingProvider,
 	type ResolvedMnemopiRuntimeOptions,
@@ -228,11 +228,23 @@ export function mnemopiEngine(options: MnemopiEngineOptions = {}): EngineAdapter
 			scoped(async () => {
 				const b = open();
 				await b.flushExtractions();
+				// Mnemopi swallows a failed query embedding and ranks by text alone, which would score a different
+				// retrieval path as this protocol's; embed the query here and refuse a missing or unusable vector.
+				let queryEmbedding: number[] | undefined;
+				if (opts.embeddings?.disabled !== true) {
+					const vector = await embedQuery(question.text);
+					if (vector === null || vector.length === 0 || !Array.from(vector).every(Number.isFinite)) {
+						throw new Error(
+							`query embedding unavailable for "${question.text.slice(0, 60)}"; refusing a text-only ranking`,
+						);
+					}
+					queryEmbedding = Array.from(vector);
+				}
 				// `enhanced` is the call omp's auto-recall makes (packages/coding-agent/src/mnemopi/state.ts).
 				const rows =
 					recallMode === "enhanced"
-						? await b.recallEnhanced(question.text, k, { includeFacts: true })
-						: await b.recall(question.text, k);
+						? await b.recallEnhanced(question.text, k, { includeFacts: true, queryEmbedding })
+						: await b.recall(question.text, k, { queryEmbedding });
 				return rows.map(row => ({
 					engineId: row.id,
 					tier: tierOf(row.tier_label, row.summary_of),
