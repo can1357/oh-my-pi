@@ -327,7 +327,7 @@ describe("SessionManager legacy session migration persistence", () => {
 		fs.writeFileSync(
 			sessionFile,
 			`${[
-				JSON.stringify({ type: "session", id: "legacy-session", timestamp: "2025-01-01T00:00:00Z", cwd: tempDir }),
+				JSON.stringify({ type: "session", id: "legacy-deferred", timestamp: "2025-01-01T00:00:00Z", cwd: tempDir }),
 				JSON.stringify({
 					type: "message",
 					timestamp: "2025-01-01T00:00:01Z",
@@ -376,7 +376,7 @@ describe("SessionManager legacy session migration persistence", () => {
 		fs.writeFileSync(
 			sessionFile,
 			`${[
-				JSON.stringify({ type: "session", id: "legacy-session", timestamp: "2025-01-01T00:00:00Z", cwd: tempDir }),
+				JSON.stringify({ type: "session", id: "legacy-rewrite", timestamp: "2025-01-01T00:00:00Z", cwd: tempDir }),
 				JSON.stringify({
 					type: "message",
 					timestamp: "2025-01-01T00:00:01Z",
@@ -408,7 +408,12 @@ describe("SessionManager legacy session migration persistence", () => {
 		fs.writeFileSync(
 			sessionFile,
 			`${[
-				JSON.stringify({ type: "session", id: "legacy-session", timestamp: "2025-01-01T00:00:00Z", cwd: tempDir }),
+				JSON.stringify({
+					type: "session",
+					id: "legacy-ensure-on-disk",
+					timestamp: "2025-01-01T00:00:00Z",
+					cwd: tempDir,
+				}),
 				JSON.stringify({
 					type: "message",
 					timestamp: "2025-01-01T00:00:01Z",

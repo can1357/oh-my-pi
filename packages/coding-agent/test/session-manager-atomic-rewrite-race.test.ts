@@ -20,6 +20,7 @@ import {
 import { TempDir } from "@oh-my-pi/pi-utils";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import type { SessionTitleUpdate } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
+import { UnleasedSessionStorage } from "./helpers/unleased-session-storage";
 
 interface DetachableWriter extends SessionStorageWriter {
 	detach(): void;
@@ -379,7 +380,7 @@ describe("SessionManager cross-process rewrite freshness", () => {
 		const ours = await SessionManager.open(contested, tempDir.path(), storage, { suppressBreadcrumb: true });
 		// Another writer without the ownership lease (an older omp, an external
 		// tool) appends to the same file.
-		const theirs = await SessionManager.open(contested, tempDir.path(), new FileSessionStorage(), {
+		const theirs = await SessionManager.open(contested, tempDir.path(), new UnleasedSessionStorage(), {
 			suppressBreadcrumb: true,
 		});
 		theirs.appendMessage(userTurn("durable second-writer turn"));
@@ -438,7 +439,7 @@ describe("SessionManager cross-process rewrite freshness", () => {
 
 		const storage = new RacedStorage();
 		const ours = await SessionManager.open(contested, tempDir.path(), storage, { suppressBreadcrumb: true });
-		const theirs = await SessionManager.open(contested, tempDir.path(), new FileSessionStorage(), {
+		const theirs = await SessionManager.open(contested, tempDir.path(), new UnleasedSessionStorage(), {
 			suppressBreadcrumb: true,
 		});
 		const racingTurns: string[] = [];

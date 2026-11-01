@@ -4375,6 +4375,21 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}
 		}
 
+		// This manager now belongs to a running agent loop, which will write its
+		// journal. The claim is taken here rather than at the first append, and
+		// before the registration below, so the journal is known to be open in
+		// this process from the moment anything can see this agent: a roster scan
+		// must not offer a session running here as a revivable transcript, and a
+		// revive must not reopen it. A resumed pane nobody has typed into yet is
+		// as protected as a busy one.
+		//
+		// A startup that fails from here on (the id collision below, an extension
+		// or model failure, a cancelled launch) has no loop to write anything, so
+		// the claim goes back: left standing, it would outlive this call for the
+		// life of the process and divert the next resume of this very journal to
+		// a sibling file. A manager a running caller already owns keeps its claim.
+		startupCleanup.defer(sessionManager.claimForWriting());
+
 		// Pre-register in the global agent registry BEFORE building the system prompt,
 		// so that subagents launched in the same parallel batch can see each other in
 		// their initial `# IRC Peers` block (rendered inside `rebuildSystemPrompt`).
@@ -5346,6 +5361,21 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			throw new Error(`Agent "${resolvedAgentId}" was replaced during session initialization.`);
 		}
 		hasRegistered = true;
+		// A live agent does not stay on the journal it was built on: `switchSession`
+		// (the resume picker, the extension API, RPC `switch_session`, an ACP load)
+		// hands it another transcript, `newSession` and `/fork` start one, `/move`
+		// relocates it, and a write that finds the file owned elsewhere goes to a
+		// sibling. The ref's `sessionFile` is how the rest of the process tells
+		// which journal this agent runs: the roster scan binds a transcript's name
+		// to the session found on it, and `AgentRegistry.get` keeps that binding
+		// only while the target still runs that file. Left at the file of
+		// construction it would both hide the agent under the name of the
+		// transcript it just adopted and keep the name of the one it left pointing
+		// at it. Follow the manager, which reports every one of those paths.
+		sessionManager.onSessionFileChanged(() => {
+			if (session.isDisposed) return;
+			agentRegistry.attachSession(resolvedAgentId, session, sessionManager.getSessionFile() ?? null, session);
+		});
 		// MCP notification bridge cleanup — assigned when the bridge is wired below,
 		// invoked from the dispose wrapper AND registered as a postmortem so both
 		// explicit-dispose (SDK embedders that reuse the process across sessions) and

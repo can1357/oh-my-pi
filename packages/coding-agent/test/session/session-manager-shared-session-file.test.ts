@@ -3,7 +3,11 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { readSessionHeaderId } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { SessionManager, type SessionPersistenceNotice } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { FileSessionStorage, tryAcquireSessionLease } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import {
+	FileSessionStorage,
+	sessionJournalLiveness,
+	tryAcquireSessionLease,
+} from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 const SESSION_MANAGER_MODULE = path.join(import.meta.dir, "../../src/session/session-manager.ts");
@@ -396,6 +400,213 @@ describe("SessionManager on a session file another omp process writes", () => {
 		} finally {
 			await ours.close();
 			await other.close();
+		}
+	}, 30_000);
+});
+
+describe("SessionManager on a session file this process already writes", () => {
+	it("moves a second manager in this process off the journal the first one writes", async () => {
+		using tempDir = TempDir.createSync("@omp-same-process-session-file-");
+		const original = await createSession(tempDir);
+		const owner = await SessionManager.open(original, tempDir.path(), new FileSessionStorage(), {
+			suppressBreadcrumb: true,
+		});
+		owner.appendMessage(userTurn("owner 1"));
+		await owner.flush();
+		// What reviving a session this process already runs does: reopen the
+		// same journal here and write through it.
+		const second = await SessionManager.open(original, tempDir.path(), new FileSessionStorage(), {
+			suppressBreadcrumb: true,
+		});
+		const notices: SessionPersistenceNotice[] = [];
+		second.onPersistenceNotice(notice => notices.push(notice));
+		second.appendMessage(userTurn("second 1"));
+		await second.flush();
+		const sibling = second.getSessionFile();
+		if (!sibling) throw new Error("Expected the second manager to save somewhere");
+		owner.appendMessage(userTurn("owner 2"));
+		await owner.flush();
+		await second.close();
+		await owner.close();
+
+		expect(owner.getSessionFile()).toBe(original);
+		expect(sibling).not.toBe(original);
+		expect(notices).toEqual([{ reason: "open-elsewhere", from: original, to: sibling }]);
+		expect(await userTurnsIn(original, tempDir.path())).toEqual(["before", "owner 1", "owner 2"]);
+		expect(await userTurnsIn(sibling, tempDir.path())).toContain("second 1");
+	}, 30_000);
+});
+
+describe("SessionManager.cloneCurrentSession hands one journal over", () => {
+	it("keeps the journal live for the clone after the host moves to another session", async () => {
+		using tempDir = TempDir.createSync("@omp-clone-handover-");
+		const original = await createSession(tempDir);
+		const elsewhere = await createSession(tempDir);
+		const host = await SessionManager.open(original, tempDir.path(), new FileSessionStorage(), {
+			suppressBreadcrumb: true,
+		});
+		host.appendMessage(userTurn("host 1"));
+		await host.flush();
+		expect(sessionJournalLiveness(original)).toBe("here");
+
+		// What BashRunner.beginSessionTransition does: clone the manager, then
+		// move the host to another session, leaving the clone on this journal.
+		const clone = host.cloneCurrentSession();
+		await host.setSessionFile(elsewhere);
+		expect(sessionJournalLiveness(original)).toBe("here");
+
+		// Still one writer to the rest of the process: a revive is refused.
+		const reviver = await SessionManager.open(original, tempDir.path(), new FileSessionStorage(), {
+			suppressBreadcrumb: true,
+		});
+		reviver.appendMessage(userTurn("revived"));
+		await reviver.flush();
+		expect(reviver.getSessionFile()).not.toBe(original);
+		await reviver.close();
+
+		clone.appendMessage(userTurn("detached bash result"));
+		await clone.flush();
+		expect(await userTurnsIn(original, tempDir.path())).toEqual(["before", "host 1", "detached bash result"]);
+
+		await clone.close();
+		expect(sessionJournalLiveness(original)).toBe("free");
+		await host.close();
+	}, 30_000);
+
+	it("keeps the journal live for the host after the clone closes", async () => {
+		using tempDir = TempDir.createSync("@omp-clone-handover-");
+		const original = await createSession(tempDir);
+		const host = await SessionManager.open(original, tempDir.path(), new FileSessionStorage(), {
+			suppressBreadcrumb: true,
+		});
+		host.appendMessage(userTurn("host 1"));
+		await host.flush();
+
+		// A branch or rewind clones and drops the clone while the host runs on.
+		const clone = host.cloneCurrentSession();
+		await clone.close();
+		expect(sessionJournalLiveness(original)).toBe("here");
+
+		const reviver = await SessionManager.open(original, tempDir.path(), new FileSessionStorage(), {
+			suppressBreadcrumb: true,
+		});
+		reviver.appendMessage(userTurn("revived"));
+		await reviver.flush();
+		expect(reviver.getSessionFile()).not.toBe(original);
+		await reviver.close();
+
+		host.appendMessage(userTurn("host 2"));
+		await host.flush();
+		expect(host.getSessionFile()).toBe(original);
+		expect(await userTurnsIn(original, tempDir.path())).toEqual(["before", "host 1", "host 2"]);
+
+		await host.close();
+		expect(sessionJournalLiveness(original)).toBe("free");
+	}, 30_000);
+});
+
+describe("SessionManager resumes the journal it handed to a clone", () => {
+	it("keeps a session resumed while its own detached bash still runs in its own journal", async () => {
+		using tempDir = TempDir.createSync("@omp-handover-resume-");
+		const original = await createSession(tempDir);
+		const host = await SessionManager.open(original, tempDir.path(), new FileSessionStorage(), {
+			suppressBreadcrumb: true,
+		});
+		host.appendMessage(userTurn("host 1"));
+		await host.flush();
+		const originalId = host.getSessionId();
+
+		// The user path: a bash command is in flight, so
+		// BashRunner.beginSessionTransition clones the manager; `/new` then moves
+		// the host to a fresh session; the user resumes the session they were in
+		// before that command finishes.
+		const detached = host.cloneCurrentSession();
+		await host.newSession();
+		expect(host.getSessionFile()).not.toBe(original);
+
+		const notices: SessionPersistenceNotice[] = [];
+		host.onPersistenceNotice(notice => notices.push(notice));
+		await host.setSessionFile(original);
+		host.appendMessage(userTurn("after resume"));
+		await host.flush();
+
+		// The conversation the person is looking at, with its id unchanged.
+		expect(host.getSessionFile()).toBe(original);
+		expect(host.getSessionId()).toBe(originalId);
+		expect(notices).toEqual([]);
+		expect(await userTurnsIn(original, tempDir.path())).toEqual(["before", "host 1", "after resume"]);
+
+		detached.appendMessage(userTurn("detached bash result"));
+		await detached.flush();
+		expect(await userTurnsIn(original, tempDir.path())).toEqual([
+			"before",
+			"host 1",
+			"after resume",
+			"detached bash result",
+		]);
+
+		await detached.close();
+		expect(sessionJournalLiveness(original)).toBe("here");
+		await host.close();
+		expect(sessionJournalLiveness(original)).toBe("free");
+	}, 30_000);
+
+	it("is still refused when another manager in this process took the journal over meanwhile", async () => {
+		using tempDir = TempDir.createSync("@omp-handover-resume-");
+		const original = await createSession(tempDir);
+		const host = await SessionManager.open(original, tempDir.path(), new FileSessionStorage(), {
+			suppressBreadcrumb: true,
+		});
+		host.appendMessage(userTurn("host 1"));
+		await host.flush();
+
+		const detached = host.cloneCurrentSession();
+		await host.newSession();
+		// The detached work finishes and lets the journal go, and something else
+		// in this process legitimately takes the transcript over.
+		await detached.close();
+		const other = await SessionManager.open(original, tempDir.path(), new FileSessionStorage(), {
+			suppressBreadcrumb: true,
+		});
+		other.appendMessage(userTurn("other writer"));
+		await other.flush();
+		expect(other.getSessionFile()).toBe(original);
+
+		// The memory of the hand-over must not admit the host beside that writer.
+		await host.setSessionFile(original);
+		host.appendMessage(userTurn("host 2"));
+		await host.flush();
+		expect(host.getSessionFile()).not.toBe(original);
+		expect(await userTurnsIn(original, tempDir.path())).toEqual(["before", "host 1", "other writer"]);
+
+		await other.close();
+		await host.close();
+	}, 30_000);
+
+	it("is still refused when another omp process took the journal over meanwhile", async () => {
+		using tempDir = TempDir.createSync("@omp-handover-resume-");
+		const original = await createSession(tempDir);
+		const host = await SessionManager.open(original, tempDir.path(), new FileSessionStorage(), {
+			suppressBreadcrumb: true,
+		});
+		host.appendMessage(userTurn("host 1"));
+		await host.flush();
+
+		const detached = host.cloneCurrentSession();
+		await host.newSession();
+		await detached.close();
+
+		const { other } = await OtherProcess.resume(tempDir, original);
+		try {
+			await other.run("append theirs");
+			await host.setSessionFile(original);
+			host.appendMessage(userTurn("host 2"));
+			await host.flush();
+			expect(host.getSessionFile()).not.toBe(original);
+			expect(await userTurnsIn(original, tempDir.path())).not.toContain("host 2");
+		} finally {
+			await other.close();
+			await host.close();
 		}
 	}, 30_000);
 });

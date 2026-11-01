@@ -63,6 +63,7 @@
 
 ### Fixed
 
+- Fixed a transcript a live session is running being offered to peers as a parked, revivable agent: a pane resumed on a subagent's transcript (`omp --resume <name>.jsonl`) started a second agent loop on that same transcript when a peer messaged it by that name, and a second omp process did the same to a sibling pane's. The roster scan now asks the session ownership lease who is running a journal before deriving a ref from it, and binds the transcript's name to the session running it, so `agent://<name>`, Agent Hub focus and a `task` resume all reach that session; a journal another omp process runs, and a copy of a running session's journal, are not offered and say why ([#17257](https://github.com/can1357/oh-my-pi/pull/17257) by [@sjawhar](https://github.com/sjawhar))
 - Fixed account-policy recovery repeatedly rotating through denied credentials instead of surfacing the error or using the configured model fallback, including unnecessary sibling-unblock waits after the account allowance is spent ([#17439](https://github.com/can1357/oh-my-pi/pull/17439) by [@wolfiesch](https://github.com/wolfiesch))
 - Startup prewalk now arms a later fallback candidate of the role named by prewalk.into when its first candidate is unavailable, matching /prewalk and /new ([#17373](https://github.com/can1357/oh-my-pi/pull/17373)).
 - Fixed `omp install git:github.com/user/repo` treating `git` as the host instead of installing the GitHub plugin ([#17436](https://github.com/can1357/oh-my-pi/issues/17436)).

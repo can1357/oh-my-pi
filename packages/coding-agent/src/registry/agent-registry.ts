@@ -138,6 +138,16 @@ export class AgentRegistry {
 	}
 
 	readonly #refs = new Map<string, AgentRef>();
+	/**
+	 * Names that resolve to a live agent registered under a different id, with
+	 * the journal that made them one agent. A pane resumed on a subagent's
+	 * transcript (`omp --resume <name>.jsonl`) runs that transcript as its own
+	 * session, registered as `Main`; peers, the Agent Hub and `task` still know
+	 * it as `<name>`, the name the roster scan derives from its file. Binding
+	 * the name to the live ref is what makes those reach the running session
+	 * instead of a transcript-derived ghost of it.
+	 */
+	readonly #aliases = new Map<string, { targetId: string; sessionFile: string }>();
 	readonly #listeners = new Set<RegistryListener>();
 	/** Which of these agents are blocked until others finish. */
 	readonly awaits = new AgentAwaits();
@@ -168,6 +178,9 @@ export class AgentRegistry {
 			lifecycle: input.lifecycle,
 		};
 		this.#refs.set(ref.id, ref);
+		// A real agent under this id shadows any name bound to a live session,
+		// so the binding is stale from here on.
+		this.#aliases.delete(ref.id);
 		this.#emit({ type: "registered", ref });
 		return ref;
 	}
@@ -373,8 +386,37 @@ export class AgentRegistry {
 		return true;
 	}
 
+	/**
+	 * Bind `name` to the live agent `targetId`, which runs the journal at
+	 * `sessionFile`: everything that resolves an agent through {@link get} — a
+	 * peer's `agent://<name>`, Agent Hub focus, a `task` resume,
+	 * `history://<name>` — then reaches the running session under that name.
+	 * Used by the roster scan for the transcript this process is itself
+	 * running, which is a live agent, not a revivable one.
+	 *
+	 * Refused while a real agent holds the name (that agent is the recipient)
+	 * and when the target is not a live session on that journal.
+	 */
+	bindLiveName(name: string, targetId: string, sessionFile: string): boolean {
+		if (name === targetId || this.#refs.has(name)) return false;
+		const target = this.#refs.get(targetId);
+		if (!target?.session || target.sessionFile !== sessionFile) return false;
+		this.#aliases.set(name, { targetId, sessionFile });
+		return true;
+	}
+
 	get(id: string): AgentRef | undefined {
-		return this.#refs.get(id);
+		const ref = this.#refs.get(id);
+		if (ref) return ref;
+		const alias = this.#aliases.get(id);
+		if (!alias) return undefined;
+		// The binding holds only while that agent still runs that journal: a
+		// released ref, or one that switched session file, is no longer the
+		// agent this name meant.
+		const target = this.#refs.get(alias.targetId);
+		if (target?.sessionFile === alias.sessionFile) return target;
+		this.#aliases.delete(id);
+		return undefined;
 	}
 
 	list(): AgentRef[] {

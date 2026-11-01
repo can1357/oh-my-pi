@@ -7,6 +7,7 @@ import { resolveExplicitModelRole } from "../config/model-resolver";
 import { assistantTurnProducedOutput } from "../session/messages";
 import { EPHEMERAL_MODEL_CHANGE_ROLE, PREWALK_MODEL_CHANGE_ROLE } from "../session/session-entries";
 import { visitEntriesFromFileStream } from "../session/session-loader";
+import { isSameJournalFile, type SessionJournalLiveness, sessionJournalLiveness } from "../session/session-storage";
 import { loadBundledAgents } from "../task/agents";
 import { isReadOnlyAgent } from "../task/read-only-policy";
 import { persistedVibeChildIds } from "../vibe/lifecycle";
@@ -28,6 +29,67 @@ const MAX_METADATA_LINES = 64;
  * render thread when the Hub roster is built.
  */
 const MAX_ADVISOR_HISTORY_LINES = 200_000;
+
+/** Where the live agent loop that holds a transcript's journal runs. */
+export type LiveJournalHolder = Exclude<SessionJournalLiveness, "free">;
+
+/**
+ * Why a transcript whose journal a live session holds is not revivable here,
+ * and what to do with it instead. A journal running in another process cannot
+ * be reached locally at all; one running here under a different file is a copy
+ * carrying the live session's id, which a second loop must not take; and the
+ * journal of a session this process is still opening is nobody's to revive
+ * until that session attaches.
+ */
+export function liveJournalRefusal(id: string, sessionFile: string, holder: LiveJournalHolder): string {
+	switch (holder) {
+		case "elsewhere":
+			return `Agent "${id}" is the transcript of a session another omp process is running, so it cannot be revived here. Reach it in that process, or read history://${id}.`;
+		case "copy":
+			return `Agent "${id}" is a copy of the transcript this session is running and carries its session id, so reviving it here would run a second agent loop on that session. Open it in its own process (\`omp --resume ${sessionFile}\`), or read history://${id}.`;
+		case "here":
+			return `Agent "${id}" is the transcript of a session this process is opening right now; it is not revivable while that session takes it. Retry in a moment, or read history://${id}.`;
+	}
+}
+
+/**
+ * Transcripts the scan refused to offer as revivable, by the id a sender would
+ * address them with. Without them a name the roster deliberately left out
+ * reads as a name that never existed, and the sender is told to consult a
+ * roster that will never list it. Bounded, and re-checked on read, so an entry
+ * whose session has since exited disappears instead of lying.
+ */
+const suppressedTranscripts = new Map<string, { sessionFile: string; holder: LiveJournalHolder }>();
+
+/** How many refusals are remembered; a tree with more live transcripts forgets the least recently met. */
+const MAX_SUPPRESSED_TRANSCRIPTS = 256;
+
+function noteSuppressedTranscript(id: string, sessionFile: string, holder: LiveJournalHolder): void {
+	// Re-inserted so the bound below drops the least recently met entry.
+	suppressedTranscripts.delete(id);
+	suppressedTranscripts.set(id, { sessionFile, holder });
+	for (const oldest of suppressedTranscripts.keys()) {
+		if (suppressedTranscripts.size <= MAX_SUPPRESSED_TRANSCRIPTS) break;
+		suppressedTranscripts.delete(oldest);
+	}
+}
+
+/**
+ * What to tell someone who addressed `id` and found no agent, when the last
+ * roster scan met its transcript and refused to offer it as revivable.
+ * Undefined when no scan refused that name, and when the session holding its
+ * journal has since exited — the transcript is revivable again then, and the
+ * next scan registers it.
+ */
+export function suppressedTranscriptNote(id: string): string | undefined {
+	const refusal = suppressedTranscripts.get(id);
+	if (!refusal) return undefined;
+	if (sessionJournalLiveness(refusal.sessionFile) === "free") {
+		suppressedTranscripts.delete(id);
+		return undefined;
+	}
+	return liveJournalRefusal(id, refusal.sessionFile, refusal.holder);
+}
 
 interface PersistedAgentMetadata {
 	activity?: string;
@@ -489,6 +551,14 @@ interface PersistedRosterLatch {
 	 * tree — no reverse global map.
 	 */
 	owned: Map<string, string>;
+	/**
+	 * The other half of the token: every (id → sessionFile) pair this scan
+	 * refused to offer because a live session holds that journal. They are in
+	 * no registry, so `owned` cannot speak for them, and a settled latch that
+	 * ignored them would keep a sibling pane's transcript out of the roster
+	 * for the rest of this process's life — long after that pane exited.
+	 */
+	suppressed: Map<string, string>;
 }
 
 interface RegistryWithPersistedRosterLatches extends AgentRegistry {
@@ -498,15 +568,20 @@ interface RegistryWithPersistedRosterLatches extends AgentRegistry {
 
 /**
  * A settled latch is reusable only while every parked ref its scan restored
- * still matches registry identity/session. A missing ref (released) or one
- * re-targeted at a different session file (superseded by another root's scan)
- * invalidates the latch, forcing a re-scan that restores this root's own
- * transcripts. Refs the scan did not restore are not this root's to police.
+ * still matches registry identity/session, and every transcript it refused is
+ * still held by a live session. A missing ref (released) or one re-targeted at
+ * a different session file (superseded by another root's scan) invalidates the
+ * latch, as does a journal whose session has since exited, forcing a re-scan
+ * that restores this root's own transcripts. Refs the scan did not restore are
+ * not this root's to police.
  */
-function latchOwnershipValid(registry: AgentRegistry, owned: Map<string, string>): boolean {
-	for (const [id, sessionFile] of owned) {
+function latchStillValid(registry: AgentRegistry, latch: PersistedRosterLatch): boolean {
+	for (const [id, sessionFile] of latch.owned) {
 		const ref = registry.get(id);
 		if (!ref || ref.sessionFile !== sessionFile) return false;
+	}
+	for (const sessionFile of latch.suppressed.values()) {
+		if (sessionJournalLiveness(sessionFile) === "free") return false;
 	}
 	return true;
 }
@@ -594,13 +669,15 @@ export async function ensurePersistedRoster(
 		await existing.pending;
 		if (existing.settled) {
 			// A settled latch is reusable only while every parked ref its scan
-			// restored still matches registry identity/session. Another root's
-			// scan can replace a shared id globally while this root's latch sits
-			// settled; reusing the latch then would leave this root's roster
-			// pointing at the other root's transcripts. On any missing or
-			// re-targeted ref, drop the latch and refresh this root through the
-			// same serialized scan tail so its own transcripts win again.
-			if (latchOwnershipValid(registry, existing.owned)) return root;
+			// restored still matches registry identity/session, and every
+			// transcript it refused is still held by a live session. Another
+			// root's scan can replace a shared id globally while this root's
+			// latch sits settled; reusing the latch then would leave this root's
+			// roster pointing at the other root's transcripts, or keep offering
+			// nothing for a pane that has since exited. On any such change, drop
+			// the latch and refresh this root through the same serialized scan
+			// tail so its own transcripts win again.
+			if (latchStillValid(registry, existing)) return root;
 			if (latches.get(root) === existing) latches.delete(root);
 			// A concurrent superseded waiter may already have inserted the fresh
 			// latch; join it instead of scanning twice.
@@ -628,10 +705,19 @@ export async function ensurePersistedRoster(
 	// calls never reach here: they joined the latch above). The tail always
 	// stores a settled wrapper, so a failed scan settles it and the next root
 	// still proceeds.
-	const latch: PersistedRosterLatch = { pending: undefined!, settled: false, owned: new Map() };
+	const latch: PersistedRosterLatch = {
+		pending: undefined!,
+		settled: false,
+		owned: new Map(),
+		suppressed: new Map(),
+	};
 	const tail = taggedRegistry[kPersistedRosterScanTail] ?? Promise.resolve();
 	const scan = tail.then(() =>
-		registerPersistedSubagents(registry, root, { hydrateHistory: false, owned: latch.owned }),
+		registerPersistedSubagents(registry, root, {
+			hydrateHistory: false,
+			owned: latch.owned,
+			suppressed: latch.suppressed,
+		}),
 	);
 	taggedRegistry[kPersistedRosterScanTail] = scan.then(
 		() => {},
@@ -676,6 +762,12 @@ export async function registerPersistedSubagents(
 		 * against, bounded by this root's own transcript tree.
 		 */
 		owned?: Map<string, string>;
+		/**
+		 * The same token for the transcripts this scan refused to offer because
+		 * a live session holds their journal: no ref exists for them, so a
+		 * settled latch re-probes these instead.
+		 */
+		suppressed?: Map<string, string>;
 	} = {},
 ): Promise<void> {
 	if (!sessionFile?.endsWith(".jsonl")) return;
@@ -696,6 +788,7 @@ export async function registerPersistedSubagents(
 		shouldContinue,
 		sessionFile,
 		options.owned,
+		options.suppressed,
 	);
 	if (!hydrateHistory || !shouldContinue()) return;
 	let nextTranscript = 0;
@@ -728,6 +821,7 @@ async function registerPersistedSubagentsFromDir(
 	shouldContinue: () => boolean,
 	rootSessionFile: string,
 	owned?: Map<string, string>,
+	suppressed?: Map<string, string>,
 ): Promise<void> {
 	if (!shouldContinue()) return;
 	let entries: fs.Dirent[];
@@ -743,6 +837,88 @@ async function registerPersistedSubagentsFromDir(
 	for (const entry of entries) {
 		if (entry.isDirectory()) childDirectories.add(entry.name);
 	}
+	/**
+	 * Restore the transcripts in `<dir>/<id>/`, the artifacts directory of the
+	 * transcript `<id>.jsonl`. A transcript stem is not proof of a child
+	 * directory: "." and ".." revisit ancestors, and symlinks can point back
+	 * into the same tree.
+	 */
+	const registerChildrenOf = async (id: string): Promise<void> => {
+		if (!childDirectories.has(id)) return;
+		await registerPersistedSubagentsFromDir(
+			registry,
+			path.join(dir, id),
+			id,
+			vibeOwned,
+			transcripts,
+			shouldContinue,
+			rootSessionFile,
+			owned,
+			suppressed,
+		);
+	};
+	/**
+	 * Take a transcript whose journal a live agent loop holds, and report that
+	 * the scan must derive nothing from it. A journal a live agent loop writes
+	 * is not a parked transcript. The tree this walks holds the journal this
+	 * process is itself running (`omp --resume <name>.jsonl` resumes a
+	 * subagent's transcript, and the scan climbs to the root above it) and
+	 * those of sibling panes in other processes. A `parked` ref derived from
+	 * one of those offers a running agent as a revivable transcript, and
+	 * reviving it runs a second agent loop on that session. Its own parked
+	 * children stay restorable.
+	 */
+	const takeLiveJournal = async (entryName: string, sessionFile: string): Promise<boolean> => {
+		const liveness = sessionJournalLiveness(sessionFile);
+		if (liveness === "free") return false;
+		// Advisor transcripts are observability-only and never peers, so a
+		// live one is simply not listed.
+		if (isAdvisorTranscriptName(entryName)) return true;
+		const liveId = entryName.slice(0, -".jsonl".length);
+		let live: AgentRef | undefined;
+		if (liveness === "here") {
+			for (const ref of registry.list()) {
+				if (!ref.session || !ref.sessionFile) continue;
+				if (!isSameJournalFile(ref.sessionFile, sessionFile)) continue;
+				live = ref;
+				break;
+			}
+		}
+		const liveFile = live?.sessionFile;
+		if (live && liveFile) {
+			// The session running here is what this name means. Under its own
+			// id it already is that agent; under another (a pane resumed on a
+			// subagent's transcript runs it as `Main`) bind the name, so a
+			// peer's `agent://<name>`, Hub focus and a `task` resume reach the
+			// running agent, and drop the phantom an earlier scan left on the
+			// journal before the session went live.
+			if (live.id !== liveId) {
+				const phantom = registry.get(liveId);
+				if (phantom && !phantom.session && phantom.sessionFile === sessionFile) {
+					registry.unregister(liveId, phantom);
+				}
+				registry.bindLiveName(liveId, live.id, liveFile);
+			}
+			// This root's to keep: the entry goes stale exactly when that
+			// agent stops running this journal, which re-scans.
+			owned?.set(liveId, liveFile);
+		} else if (liveness === "here") {
+			// This process writes this very journal, and no live ref owns it
+			// yet: a revive that has claimed the file but not attached its
+			// session, or an agent parking after its ref detached. Both are
+			// this process's own transitions, and both end in a ref on this
+			// file — touch nothing and let them finish.
+			logger.debug("Roster scan skipped a journal this process is opening", { id: liveId, sessionFile });
+		} else {
+			// A copy of a journal running here, or a journal another omp
+			// process runs: not ours to offer, and the note says why to
+			// whoever addresses the name.
+			noteSuppressedTranscript(liveId, sessionFile, liveness);
+			suppressed?.set(liveId, sessionFile);
+		}
+		await registerChildrenOf(liveId);
+		return true;
+	};
 	let entriesSinceYield = 0;
 	for (const entry of entries) {
 		if (!shouldContinue()) return;
@@ -753,6 +929,7 @@ async function registerPersistedSubagentsFromDir(
 		if (!shouldContinue()) return;
 		if (!entry.isFile() || !entry.name.endsWith(".jsonl") || entry.name.includes(".bak")) continue;
 		const sessionFile = path.join(dir, entry.name);
+		if (await takeLiveJournal(entry.name, sessionFile)) continue;
 		// The advisor transcript is observability-only: register it as a non-peer
 		// `advisor` kind under its owning session so the Hub can show its read-only
 		// transcript, but it never joins agent-facing rosters and is not revivable.
@@ -805,6 +982,8 @@ async function registerPersistedSubagentsFromDir(
 			continue;
 		}
 		const id = entry.name.slice(0, -6);
+		// Revivable again: whatever ran this journal is gone.
+		suppressedTranscripts.delete(id);
 		const existing = registry.get(id);
 		if (existing?.sessionFile !== sessionFile && (await vibeOwned()).has(id)) continue;
 		let tombstoned = false;
@@ -818,6 +997,11 @@ async function registerPersistedSubagentsFromDir(
 			if (isFilesystemError(error)) throw error;
 		}
 		if (!shouldContinue()) return;
+		// The vibe lookup and the tombstone probe yield too, and a session can
+		// take the journal while they do. Both branches below speak for this
+		// transcript from here on — one latches the ref it finds, the other
+		// registers a new one — so neither may run on a stale answer.
+		if (await takeLiveJournal(entry.name, sessionFile)) continue;
 		const replaceable =
 			existing !== undefined &&
 			existing.kind === "sub" &&
@@ -839,9 +1023,16 @@ async function registerPersistedSubagentsFromDir(
 			const expected = existing ?? null;
 			const metadata = await readPersistedAgentMetadata(sessionFile, nestedPatchFilesFor(dir, entry.name, entries));
 			if (!shouldContinue()) return;
-			// Metadata reads yield. A spawn may claim the id while this scan is
-			// inspecting the file; never replace that live generation with a
-			// transcript-derived parked ref.
+			// Metadata reads yield, and a session can take this journal while
+			// they do: a resume claims its file before it registers its agent.
+			// A parked ref derived from the answer this iteration started with
+			// would be a phantom on a live session, and `owned` below would
+			// latch it, so later scans keep it instead of replacing it. Ask
+			// again, as late as anything is derived from the answer.
+			if (await takeLiveJournal(entry.name, sessionFile)) continue;
+			// A spawn may claim the id while this scan is inspecting the file;
+			// never replace that live generation with a transcript-derived
+			// parked ref.
 			const current = registry.get(id);
 			const stillUnclaimed = expected === null && !current;
 			const stillReplaceable =
@@ -876,19 +1067,6 @@ async function registerPersistedSubagentsFromDir(
 				}
 			}
 		}
-		// A transcript stem is not proof of a child directory: "." and ".."
-		// revisit ancestors, and symlinks can point back into the same tree.
-		if (childDirectories.has(id)) {
-			await registerPersistedSubagentsFromDir(
-				registry,
-				path.join(dir, id),
-				id,
-				vibeOwned,
-				transcripts,
-				shouldContinue,
-				rootSessionFile,
-				owned,
-			);
-		}
+		await registerChildrenOf(id);
 	}
 }
