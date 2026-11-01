@@ -8,6 +8,7 @@
 - Added `btw.inject` (off by default; `/settings` → Interaction → "/btw Steering Inject"): when you ask `/btw` for a steering prompt, it drafts one in an `<inject>` block shown behind a pink rail, and `Alt+I` (`app.btw.inject`) sends it to the main session (as a steer while the agent runs, else as a new turn) from the inline answer or the BTW history sheet, once per answer from the current run. Once sent, the block turns green with `➤` on each line and "Injected into main session" below it; if the main session drops or refuses the send, the block turns back to pending and the same key retries ([#17618](https://github.com/can1357/oh-my-pi/pull/17618) by [@apullin](https://github.com/apullin))
 - Added `agentSteeringNext` to RPC `queue_update` and `get_state` `queuedMessages`: `true` when the next steering delivery is agent-authored, so the first queued `steering` entry is read one delivery later ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
 - `set_steering_mode` now sends a `queue_update` when it changes `agentSteeringNext`, so RPC queue views keep showing whether an agent message goes first ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
+- RPC `agent_end` (and the Go, Python and Rust SDK event types) carries an optional `source` naming another producer that forwarded the end into the session; the session's own runs never set it ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
 
 ### Fixed
 
