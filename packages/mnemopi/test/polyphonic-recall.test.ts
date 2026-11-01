@@ -1201,4 +1201,113 @@ describe("PolyphonicRecallEngine", () => {
 			closeQuietly(beam.db);
 		}
 	});
+
+	it("sorts recency queries (e.g. 最新的部署 / 近期的部署) newest first while preserving ascending order for EO/standard TR", () => {
+		const beam = makeBeam();
+		try {
+			beam.db.run(
+				`INSERT INTO memoria_timelines
+					(session_id, event_id, date, description, source_memory_id)
+					VALUES
+					(?, 1, '2026-01-15', '部署核心資料庫叢集', 'tl-early'),
+					(?, 2, '2026-10-31', '部署核心資料庫叢集', 'tl-late')`,
+				[beam.sessionId, beam.sessionId],
+			);
+			const recentRes = memoriaRetrieve(beam, "最新的部署", null, 1);
+			expect(recentRes.ability).toBe("TR");
+			expect(recentRes.results.length).toBe(1);
+			expect((recentRes.results as Array<{ date?: string }>)[0]?.date).toBe("2026-10-31");
+
+			const recentRes2 = memoriaRetrieve(beam, "近期的部署", null, 1);
+			expect(recentRes2.ability).toBe("TR");
+			expect(recentRes2.results.length).toBe(1);
+			expect((recentRes2.results as Array<{ date?: string }>)[0]?.date).toBe("2026-10-31");
+
+			const orderRes = memoriaRetrieve(beam, "部署先後順序", null, 1);
+			expect(orderRes.ability).toBe("EO");
+			expect(orderRes.results.length).toBe(1);
+			expect((orderRes.results as Array<{ date?: string }>)[0]?.date).toBe("2026-01-15");
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
+
+	it("routes what is 明日香 to IE and matches entity fact keyed 明日香 without misclassifying as TR", () => {
+		const beam = makeBeam();
+		try {
+			beam.db.run(
+				`INSERT INTO memoria_facts
+					(session_id, message_idx, fact_type, key, value, context_snippet, importance, source_memory_id)
+					VALUES
+					(?, 0, 'entity', '明日香', 'EVA pilot character', 'anime character reference', 0.95, 'wm-asuka')`,
+				[beam.sessionId],
+			);
+			const result = memoriaRetrieve(beam, "what is 明日香", null, 10);
+			expect(result.ability).toBe("IE");
+			expect(result.results.length).toBeGreaterThan(0);
+			expect((result.results as Array<{ key?: string }>)[0]?.key).toBe("明日香");
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
+
+	it("preserves hash-suffixed identifiers like C# and F# in diversityRerank without near-duplicate collapsing", () => {
+		const beam = makeBeam();
+		try {
+			const engine = new PolyphonicRecallEngine({
+				db: beam.db,
+				sessionId: beam.sessionId,
+				channelId: beam.channelId,
+			});
+			insertWorking(beam, "m-csharp", "C#資料庫連線設定與備份策略", 0.9);
+			insertWorking(beam, "m-fsharp", "F#資料庫連線設定與備份策略", 0.9);
+
+			const results = new Map([
+				[
+					"m-csharp",
+					{
+						memoryId: "m-csharp",
+						combinedScore: 0.95,
+						voiceScores: { hybrid: 0.95 },
+						metadata: {},
+					},
+				],
+				[
+					"m-fsharp",
+					{
+						memoryId: "m-fsharp",
+						combinedScore: 0.9,
+						voiceScores: { hybrid: 0.9 },
+						metadata: {},
+					},
+				],
+			]);
+
+			const reranked = engine.diversityRerank(results, 10, candidate => {
+				const row = beam.db
+					.query("SELECT id, content, importance FROM working_memory WHERE id = ?")
+					.get(candidate.memoryId) as { id: string; content: string; importance: number } | null;
+				if (!row) return null;
+				return {
+					id: row.id,
+					content: row.content,
+					score: candidate.combinedScore,
+					combined_score: candidate.combinedScore,
+					importance: row.importance,
+					tier: "working",
+					tier_label: "working",
+					created_at: new Date().toISOString(),
+					updated_at: new Date().toISOString(),
+					metadata: {},
+					voice_scores: candidate.voiceScores,
+				};
+			});
+
+			const ids = reranked.map(r => r.id);
+			expect(ids).toContain("m-csharp");
+			expect(ids).toContain("m-fsharp");
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
 });

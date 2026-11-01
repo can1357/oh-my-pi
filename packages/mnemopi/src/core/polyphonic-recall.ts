@@ -352,7 +352,7 @@ function contentTokens(text: string): Set<string> {
 }
 function latinIdentifierTokens(text: string): Set<string> {
 	const out = new Set<string>();
-	for (const match of text.matchAll(/[a-z0-9][a-z0-9_.:/+-]{1,}/gi)) {
+	for (const match of text.matchAll(/[a-z0-9][a-z0-9_.:/#+-]+/gi)) {
 		const lower = match[0].toLowerCase();
 		if (!STOP_WORDS.has(lower) && !/^\d+$/.test(lower)) {
 			out.add(lower);

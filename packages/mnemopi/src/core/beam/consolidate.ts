@@ -1023,7 +1023,12 @@ function factRetrieve(beam: BeamMemoryState, query: string, topK: number): Memor
 	return { ability: "IE", query, results };
 }
 
-function timelineRetrieve(beam: BeamMemoryState, query: string, topK: number): MemoriaRetrieveResult {
+function timelineRetrieve(
+	beam: BeamMemoryState,
+	query: string,
+	topK: number,
+	ability: string = "TR",
+): MemoriaRetrieveResult {
 	const { exactPrimary, primary, all: tokens } = makeQuestionTokenGroups(query);
 	const clauses: string[] = [];
 	const params: SQLQueryBindings[] = [sourceSession(beam)];
@@ -1098,15 +1103,19 @@ function timelineRetrieve(beam: BeamMemoryState, query: string, topK: number): M
 		orderParams.push(...variants.flatMap(v => [`%${escapeLike(v)}%`, `%${escapeLike(v)}%`]));
 	}
 	const rankClause = scoreExprs.length > 0 ? `(${scoreExprs.join(" + ")}) DESC, ` : "";
+	const isRecencyQuery =
+		ability === "TR" &&
+		/(?:最新|近期|最近|剛剛|剛才|刚刚|刚才|\blatest\b|\brecent(?:ly)?\b|\blast\b|\bnewest\b)/iu.test(query);
+	const tieOrder = isRecencyQuery ? "date DESC, event_id DESC" : "date ASC, event_id ASC";
 	const allParams = [...params, ...orderParams, topK];
 	const results = asRows(
 		beam.db
 			.query(
-				`SELECT * FROM memoria_timelines WHERE session_id = ? AND (${where}) ORDER BY ${rankClause}date ASC, event_id ASC LIMIT ?`,
+				`SELECT * FROM memoria_timelines WHERE session_id = ? AND (${where}) ORDER BY ${rankClause}${tieOrder} LIMIT ?`,
 			)
 			.all(...allParams),
 	);
-	return { ability: "TR", query, results };
+	return { ability, query, results };
 }
 
 function kgRetrieve(beam: BeamMemoryState, query: string, topK: number): MemoriaRetrieveResult {
@@ -1168,7 +1177,7 @@ export function memoriaRetrieve(
 	topK = 10,
 ): MemoriaRetrieveResult {
 	const selected = ability ?? classifyAbility(query);
-	if (selected === "TR" || selected === "EO") return timelineRetrieve(beam, query, topK);
+	if (selected === "TR" || selected === "EO") return timelineRetrieve(beam, query, topK, selected);
 	if (selected === "MR") return kgRetrieve(beam, query, topK);
 	if (selected === "IE" || selected === "KU" || selected === "PF" || selected === "IF" || selected === "CR")
 		return factRetrieve(beam, query, topK);
