@@ -16,13 +16,14 @@ import { SessionAccountPoolScope } from "@oh-my-pi/pi-coding-agent/config/accoun
 import { invalidateAllCommandConfigs, resolveConfigValue } from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import { AgentRegistry, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as piUtils from "@oh-my-pi/pi-utils";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
+import { TestCleanup } from "./helpers/test-cleanup";
 
 function shellQuote(value: string): string {
 	return `'${value.replaceAll("'", "'\\''")}'`;
@@ -109,6 +110,15 @@ function refreshGateFetch(seen: Array<{ auth?: string; tenant?: string }>): Fetc
 	};
 }
 
+function removeTempDir(dir: string): void {
+	if (!fs.existsSync(dir)) return;
+	try {
+		removeSyncWithRetries(dir);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "EBUSY") throw error;
+	}
+}
+
 describe("ModelRegistry command-resolved models.yml values", () => {
 	test("does not run a command-backed value outside an enterable project", async () => {
 		spyOn(piUtils, "directoryIsEnterable").mockResolvedValue(false);
@@ -118,38 +128,27 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 	let tempDir = "";
 	let authStorage: AuthStorage;
 	let modelsPath = "";
-	// A test registers the cleanup of a session, session manager or API registration as soon as
-	// it creates one, and afterEach runs it. A test body cannot own cleanup: a test that times
-	// out never reaches its own `finally`.
-	const cleanups: Array<() => unknown> = [];
+	let cleanup = new TestCleanup();
 
 	beforeEach(async () => {
-		tempDir = path.join(os.tmpdir(), `pi-test-model-command-values-${Snowflake.next()}`);
-		fs.mkdirSync(tempDir, { recursive: true });
-		modelsPath = path.join(tempDir, "models.json");
-		authStorage = await AuthStorage.create(":memory:");
+		cleanup = new TestCleanup();
+		const dir = path.join(os.tmpdir(), `pi-test-model-command-values-${Snowflake.next()}`);
+		tempDir = dir;
+		fs.mkdirSync(dir, { recursive: true });
+		await cleanup.add(() => removeTempDir(dir));
+		modelsPath = path.join(dir, "models.json");
+		const storage = await AuthStorage.create(":memory:");
+		authStorage = storage;
+		await cleanup.add(() => storage.close());
 	});
 
 	afterEach(async () => {
 		// Restore spies first, so a cleanup that throws or hangs cannot leave them installed. A
 		// performance.now spy left behind makes the next mockSchedulerWaitWithClock() throw.
+		// Nothing after the await touches shared state: a disposal can outlive this hook's timeout,
+		// and code after the await would then run during the next test.
 		vi.restoreAllMocks();
-		const failures: unknown[] = [];
-		for (const cleanup of cleanups.splice(0).reverse()) {
-			try {
-				await cleanup();
-			} catch (error) {
-				failures.push(error);
-			}
-		}
-		authStorage.close();
-		if (tempDir && fs.existsSync(tempDir)) {
-			try {
-				removeSyncWithRetries(tempDir);
-			} catch (error) {
-				if ((error as NodeJS.ErrnoException).code !== "EBUSY") throw error;
-			}
-		}
+		const failures = await cleanup.end();
 		if (failures.length > 0) throw new AggregateError(failures, "test cleanup failed");
 	});
 
@@ -469,6 +468,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 	 * first run; with `manualRetry`, `/retry` the failed turn once it settles.
 	 */
 	async function runCommandKeyedTurn(maxRetries: number, helperRecovers: boolean, manualRetry = false) {
+		const owner = cleanup;
 		const tokenFile = path.join(tempDir, "token.txt");
 		const counterFile = path.join(tempDir, "counter.txt");
 		fs.writeFileSync(tokenFile, "FAIL");
@@ -506,7 +506,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			},
 		});
 		const sessionManager = SessionManager.create(tempDir, path.join(tempDir, "sessions"));
-		cleanups.push(() => sessionManager.close());
+		await owner.add(() => sessionManager.close());
 		const session = new AgentSession({
 			agent,
 			sessionManager,
@@ -520,7 +520,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			}),
 			modelRegistry: registry,
 		});
-		cleanups.push(() => session.dispose());
+		await owner.add(() => session.dispose());
 		// Backoff sleeps advance a virtual clock instead of waiting; the wall
 		// clock the command failure window reads follows that same clock.
 		mockSchedulerWaitWithClock();
@@ -577,9 +577,11 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 	);
 
 	test("a createAgentSession turn whose apiKey command failed retries and completes once the command recovers", async () => {
-		const mockSource = "test/model-registry-command-values/create-agent-session";
+		const owner = cleanup;
+		// One source id per test run: unregistering by a shared id could remove a later test's live registration.
+		const mockSource = `test/model-registry-command-values/create-agent-session/${Snowflake.next()}`;
 		registerMockApi(mockSource);
-		cleanups.push(() => unregisterCustomApis(mockSource));
+		owner.release(() => unregisterCustomApis(mockSource));
 		const tokenFile = path.join(tempDir, "token.txt");
 		const counterFile = path.join(tempDir, "counter.txt");
 		fs.writeFileSync(tokenFile, "FAIL");
@@ -608,6 +610,9 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			cwd: tempDir,
 			agentDir: tempDir,
 			modelRegistry: registry,
+			// createAgentSession registers its agent before it returns. A private registry keeps that
+			// entry out of the next test even when this call never returns.
+			agentRegistry: new AgentRegistry(),
 			model: mock,
 			sessionManager: SessionManager.inMemory(tempDir),
 			settings: Settings.isolated({
@@ -630,7 +635,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			skipPythonPreflight: true,
 			toolNames: [],
 		});
-		cleanups.push(() => session.dispose());
+		await owner.add(() => session.dispose());
 		mockSchedulerWaitWithClock();
 		const wallStart = Date.now();
 		const monotonicStart = performance.now();
