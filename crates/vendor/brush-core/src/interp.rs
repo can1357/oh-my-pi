@@ -2664,6 +2664,7 @@ pub(crate) async fn materialize_deferred_redirects(
 	params: &mut ExecutionParameters,
 ) -> Result<(), error::Error> {
 	for redirect in std::mem::take(&mut params.deferred_redirects) {
+		loop_checkpoint(params).await?;
 		match redirect {
 			DeferredRedirect::Open { fd, path, options, .. } => {
 				let file = shell.open_file(&options, &path, params).await.map_err(|err| {
