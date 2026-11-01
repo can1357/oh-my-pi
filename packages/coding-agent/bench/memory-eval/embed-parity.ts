@@ -1,7 +1,7 @@
 // Run: bun packages/coding-agent/bench/memory-eval/embed-parity.ts <parity-py.json>
 // Compares Mnemopi's embeddings of the texts py/embed_parity.py embedded with fastembed; exits 1 if any cosine is
 // non-finite or < 0.99.
-import { embed } from "@oh-my-pi/pi-mnemopi/core/embeddings";
+import { cosineSimilarity, embed } from "@oh-my-pi/pi-mnemopi/core/embeddings";
 import { withMnemopiRuntimeOptions } from "@oh-my-pi/pi-mnemopi/core/runtime-options";
 import { assertMnemopiEnvClean } from "./engines/mnemopi";
 
@@ -14,17 +14,16 @@ interface ParityFile {
 	vectors: number[][];
 }
 
-function cosine(a: ArrayLike<number>, b: ArrayLike<number>): number {
+/**
+ * Mnemopi's cosine, after the checks parity needs and the shared helper skips on purpose: it zeroes non-finite
+ * components and pads unequal lengths, which here would hide a broken embedding instead of failing it.
+ */
+export function parityCosine(a: ArrayLike<number>, b: ArrayLike<number>): number {
 	if (a.length !== b.length) throw new Error(`vector dimensions differ: ${a.length} vs ${b.length}`);
-	let dot = 0;
-	let normA = 0;
-	let normB = 0;
-	for (let i = 0; i < a.length; i++) {
-		dot += a[i] * b[i];
-		normA += a[i] * a[i];
-		normB += b[i] * b[i];
+	for (const vector of [a, b]) {
+		if (!Array.from(vector).every(Number.isFinite)) throw new Error("vector has a non-finite component");
 	}
-	return dot / Math.sqrt(normA * normB);
+	return cosineSimilarity(a, b);
 }
 
 /** Throws unless every cosine is finite and at least MIN_COSINE. */
@@ -45,7 +44,7 @@ async function main(file: string | undefined): Promise<void> {
 		embed(py.texts),
 	);
 	if (!vectors || vectors.length !== py.texts.length) throw new Error("mnemopi returned no usable embeddings");
-	const cosines = vectors.map((vector, i) => cosine(vector, py.vectors[i]));
+	const cosines = vectors.map((vector, i) => parityCosine(vector, py.vectors[i]));
 	const mean = cosines.reduce((sum, c) => sum + c, 0) / cosines.length;
 	console.log(
 		`${cosines.length} texts: min cosine ${Math.min(...cosines).toFixed(6)}, mean cosine ${mean.toFixed(6)}`,
