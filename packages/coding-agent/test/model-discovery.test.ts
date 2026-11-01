@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -2884,6 +2884,54 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(maxTokensById["openai-test/nested-output-wins"]).toBe(32_768);
 		expect(maxTokensById["openai-test/output-over-context"]).toBe(8_192);
 		expect(maxTokensById["openai-test/no-limits"]).toBe(32_768);
+	});
+
+	test("openai-models-list discovery waits out a timeoutMs longer than one platform timer", async () => {
+		// 2^31 ms (about 24.9 days) is one past the longest delay a single platform
+		// timer holds. Handed to a raw setTimeout it fires after 1 ms, abandoning a
+		// probe the configuration said to wait for.
+		const timeoutMs = 2 ** 31;
+		const requested = Promise.withResolvers<void>();
+		let probeAborted = false;
+		const ctx = {
+			fetch: (async (_input: unknown, init?: RequestInit) => {
+				requested.resolve();
+				const pending = Promise.withResolvers<Response>();
+				init?.signal?.addEventListener(
+					"abort",
+					() => {
+						probeAborted = true;
+						pending.reject(init.signal?.reason);
+					},
+					{ once: true },
+				);
+				return pending.promise;
+			}) satisfies FetchImpl,
+			getBearerApiKeyResolver: async () => undefined,
+		};
+		vi.useFakeTimers();
+		try {
+			const discovery = discoverOpenAIModelsList(
+				{
+					provider: "openai-test",
+					api: "openai-completions",
+					baseUrl: "http://127.0.0.1:9993/v1",
+					discovery: { type: "openai-models-list", timeoutMs },
+				},
+				ctx,
+			);
+			discovery.catch(() => {});
+			await requested.promise;
+
+			vi.advanceTimersByTime(timeoutMs - 1);
+			expect(probeAborted).toBe(false);
+
+			vi.advanceTimersByTime(1);
+			expect(probeAborted).toBe(true);
+			await expect(discovery).rejects.toThrow("The operation timed out.");
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	// Runs one `/v1/models` payload through the real `openai-models-list`

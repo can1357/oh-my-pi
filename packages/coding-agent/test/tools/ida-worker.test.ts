@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -71,6 +71,17 @@ interface ExecResult {
 describe("IDA worker protocol", () => {
 	let dir: string;
 	let worker: IdaWorker;
+	let env: Record<string, string>;
+
+	const stubLocation = (name: string): IdbLocation => ({
+		id: name,
+		dir,
+		sourcePath: path.join(dir, `${name}.bin`),
+		kind: "inplace",
+		openPath: path.join(dir, `${name}.i64`),
+		isNew: false,
+		lockTarget: path.join(dir, `${name}.i64`),
+	});
 
 	beforeAll(async () => {
 		dir = await fs.mkdtemp(path.join(os.tmpdir(), "ida-worker-"));
@@ -81,20 +92,12 @@ describe("IDA worker protocol", () => {
 		await Bun.write(path.join(stubs, "ida_domain", "database.py"), STUB_MODULE);
 		await Bun.write(path.join(stubs, "ida_domain", "xrefs.py"), STUB_MODULE);
 
-		const env: Record<string, string> = {};
+		env = {};
 		for (const [key, value] of Object.entries(process.env)) if (value !== undefined) env[key] = value;
 		env.PYTHONPATH = stubs;
 		env.PYTHONUNBUFFERED = "1";
 		env.PYTHONIOENCODING = "utf-8";
-		const loc: IdbLocation = {
-			id: "stub",
-			dir,
-			sourcePath: path.join(dir, "stub.bin"),
-			kind: "inplace",
-			openPath: path.join(dir, "stub.i64"),
-			isNew: false,
-			lockTarget: path.join(dir, "stub.i64"),
-		};
+		const loc = stubLocation("stub");
 		const lock = await acquireFileLock(loc.lockTarget);
 		worker = await IdaWorker.start(loc, { pythonPath, env }, lock, 0);
 	});
@@ -130,4 +133,31 @@ describe("IDA worker protocol", () => {
 		}
 		expect(worker.pid).toBe(pid);
 	});
+
+	// The 30 s limit covers starting a second Python worker on a loaded host.
+	it("keeps an idle database open for an idle-close longer than one platform timer", async () => {
+		// `ida.idleCloseSec` reaches the worker as seconds × 1000. 2,147,484 s is the
+		// first whole second past the ~24.8-day delay a single platform timer holds;
+		// a raw setTimeout fires it after 1 ms and closes the database at once.
+		const idleCloseMs = 2_147_484 * 1000;
+		const loc = stubLocation("long-idle");
+		const lock = await acquireFileLock(loc.lockTarget);
+		vi.useFakeTimers();
+		let longIdle: IdaWorker | undefined;
+		try {
+			// Opening arms the idle close on the fake clock.
+			longIdle = await IdaWorker.start(loc, { pythonPath, env }, lock, idleCloseMs);
+			const close = vi.spyOn(longIdle, "close").mockResolvedValue();
+
+			vi.advanceTimersByTime(idleCloseMs - 1);
+			expect(close).not.toHaveBeenCalled();
+
+			vi.advanceTimersByTime(1);
+			expect(close).toHaveBeenCalledWith({ save: true });
+		} finally {
+			vi.useRealTimers();
+			vi.restoreAllMocks();
+			await longIdle?.close({ save: false }).catch(() => {});
+		}
+	}, 30_000);
 });

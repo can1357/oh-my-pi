@@ -196,6 +196,39 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 		expect(promptCalls).toBe(0);
 	});
 
+	it("keeps a runtime limit longer than one platform timer until it elapses", async () => {
+		// 2^31 ms (about 24.9 days) is one past the longest delay a single platform
+		// timer holds. Handed to a raw setTimeout it fires after 1 ms, so the
+		// subagent is aborted for a runtime limit it is nowhere near.
+		const limitMs = 2 ** 31;
+		const settings = Settings.isolated({ "task.maxRuntimeMs": limitMs });
+		const handle = createHangingSession();
+		const prompted = Promise.withResolvers<void>();
+		const originalPrompt = handle.session.prompt;
+		handle.session.prompt = async (text, options) => {
+			prompted.resolve();
+			return originalPrompt.call(handle.session, text, options);
+		};
+		mockCreateAgentSession(handle.session);
+
+		vi.useFakeTimers();
+		try {
+			const run = runSubprocess({ ...baseOptions, id: "subagent-long-limit", settings });
+			await prompted.promise;
+
+			vi.advanceTimersByTime(limitMs - 1);
+			for (let i = 0; i < 5; i++) await Promise.resolve();
+			expect(handle.abortCalls()).toBe(0);
+
+			vi.advanceTimersByTime(1);
+			const result = await run;
+			expect(result.aborted).toBe(true);
+			expect(result.abortReason).toContain(`task.maxRuntimeMs=${limitMs}`);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it("a cancelled late initializer cannot replace a newer same-id worker", async () => {
 		AgentRegistry.resetGlobalForTests();
 		const registry = AgentRegistry.global();

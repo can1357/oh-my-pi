@@ -29,6 +29,42 @@ export async function sleepLong(delayMs: number, signal?: AbortSignal): Promise<
 	}
 }
 
+/** A pending {@link setLongTimeout} delay. */
+export interface LongTimeout {
+	/** Cancel the delay; a no-op once it has fired or been cleared. */
+	clear(): void;
+}
+
+/**
+ * `setTimeout` for delays past {@link MAX_TIMER_DELAY_MS}. A platform timer
+ * fires a longer delay after 1 ms, so a longer delay is waited out one timer at
+ * a time against a monotonic deadline: a chunk that wakes early re-arms for what
+ * is left. A delay within the limit is one ordinary timer. `unref` keeps the
+ * pending timer from holding the process open.
+ */
+export function setLongTimeout(callback: () => void, delayMs: number, options?: { unref?: boolean }): LongTimeout {
+	const deadline = performance.now() + delayMs;
+	let timer: Timer | undefined;
+	const fire = (): void => {
+		timer = undefined;
+		callback();
+	};
+	const arm = (waitMs: number): void => {
+		timer =
+			waitMs > MAX_TIMER_DELAY_MS
+				? setTimeout(() => arm(deadline - performance.now()), MAX_TIMER_DELAY_MS)
+				: setTimeout(fire, waitMs);
+		if (options?.unref) timer.unref();
+	};
+	arm(delayMs);
+	return {
+		clear: () => {
+			clearTimeout(timer);
+			timer = undefined;
+		},
+	};
+}
+
 /**
  * Wait for a wall-clock deadline, including time spent suspended. Some platforms
  * exclude suspend from relative timers, so recheck at least once per second.

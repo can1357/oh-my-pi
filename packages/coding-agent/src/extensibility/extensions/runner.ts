@@ -26,7 +26,7 @@ import {
 	setContextHistoryIndex,
 } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import type { KeyId } from "@oh-my-pi/pi-tui";
-import { logger } from "@oh-my-pi/pi-utils";
+import { type LongTimeout, logger, setLongTimeout } from "@oh-my-pi/pi-utils";
 import { refreshShellConfigCache } from "@oh-my-pi/pi-utils/procmgr";
 import { MAIN_AGENT_RULE_NAME } from "../../capability/rule";
 import type { ModelRegistry } from "../../config/model-registry";
@@ -315,14 +315,13 @@ async function raceHandlerWithTimeout<T>(
 	>();
 	const onAbort = () => resolveInterrupt(EXTENSION_HANDLER_ABORTED);
 	signal?.addEventListener("abort", onAbort, { once: true });
-	let timer: Timer | undefined;
+	let timer: LongTimeout | undefined;
 	let remainingMs = timeoutMs;
 	let activeSince = performance.now();
 	let pauseDepth = 0;
 	let settled = false;
 	const clearTimer = () => {
-		if (timer === undefined) return;
-		clearTimeout(timer);
+		timer?.clear();
 		timer = undefined;
 	};
 	const expire = () => {
@@ -335,7 +334,8 @@ async function raceHandlerWithTimeout<T>(
 	const armTimer = () => {
 		if (settled || pauseDepth > 0) return;
 		activeSince = performance.now();
-		timer = setTimeout(expire, Math.max(0, remainingMs));
+		// A budget past the ~24.8-day platform timer ceiling is honoured, not fired after 1 ms.
+		timer = setLongTimeout(expire, Math.max(0, remainingMs));
 	};
 	const settle = () => {
 		if (settled) return;

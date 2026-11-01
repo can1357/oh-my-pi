@@ -2094,6 +2094,67 @@ describe("ExtensionRunner", () => {
 			}
 		});
 
+		it("holds a configured tool_call timeout longer than one platform timer until it elapses", async () => {
+			// 2^31 ms (about 24.9 days) is one past the longest delay a single platform
+			// timer holds. Handed to a raw setTimeout it fires after 1 ms, so a handler
+			// that is still working is reported timed out and its tool call is blocked.
+			const timeoutMs = 2 ** 31;
+			const extensionPath = path.join(tempDir.path(), "long-timeout-tool-call.ts");
+			fs.writeFileSync(
+				extensionPath,
+				`
+					export default function(pi) {
+						pi.on("tool_call", async () => {
+							await Promise.withResolvers().promise;
+						});
+					}
+				`,
+			);
+			const loaded = await loadTestExtensions([extensionPath]);
+			const overlayPath = path.join(tempDir.path(), "long-timeout.yml");
+			fs.writeFileSync(overlayPath, `extensionHandlers:\n  toolCallTimeoutMs: ${timeoutMs}\n`);
+			const settings = await Settings.loadIsolated({ inMemory: true, cwd: tempDir.path(), configFiles: [overlayPath] });
+			const runner = new ExtensionRunner(
+				loaded.extensions,
+				loaded.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+				undefined,
+				settings,
+			);
+			vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+			vi.useFakeTimers();
+			try {
+				let settled = false;
+				const decision = runner
+					.emitToolCall({ type: "tool_call", toolName: "guarded", toolCallId: "long-timeout-call", input: {} })
+					.then(result => {
+						settled = true;
+						return result;
+					});
+
+				// Drain the zero-delay wait an expired race takes before it reports, so
+				// an early expiry would have settled the decision by now.
+				vi.advanceTimersByTime(timeoutMs - 1);
+				for (let i = 0; i < 3; i++) await Promise.resolve();
+				vi.advanceTimersByTime(0);
+				for (let i = 0; i < 5; i++) await Promise.resolve();
+				expect(settled).toBe(false);
+
+				vi.advanceTimersByTime(1);
+				for (let i = 0; i < 3; i++) await Promise.resolve();
+				vi.advanceTimersByTime(0);
+				expect(await decision).toEqual({
+					block: true,
+					reason: `Extension ${extensionPath} timed out after ${timeoutMs}ms`,
+				});
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
 		it("fails closed when a tool_call handler registration cannot activate", async () => {
 			const extensionPath = path.join(tempDir.path(), "tool-call-registration.ts");
 			fs.writeFileSync(

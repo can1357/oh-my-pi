@@ -34,7 +34,7 @@ import {
 } from "@oh-my-pi/pi-catalog/types";
 import { Effort, THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { parseServiceTierIds } from "@oh-my-pi/pi-catalog/utils";
-import { isRecord } from "@oh-my-pi/pi-utils";
+import { isRecord, setLongTimeout } from "@oh-my-pi/pi-utils";
 import type { ProviderDiscovery } from "./models-config-schema";
 
 // Default cap on `max_tokens` for auto-discovered models that do not advertise
@@ -85,12 +85,13 @@ export function isDiscoveryAuthRejection(error: unknown): boolean {
  *
  * The backing timer is cleared as soon as `fn` settles, unlike
  * `AbortSignal.timeout()`, whose delayed reason previously crashed Bun's
- * concurrent GC during an unrelated allocation.
+ * concurrent GC during an unrelated allocation. A `discovery.timeoutMs` past
+ * the ~24.8-day platform timer ceiling is honoured, not fired after 1 ms.
  */
 async function withTimeoutSignal<T>(timeoutMs: number, fn: (signal: AbortSignal) => Promise<T>): Promise<T> {
 	const controller = new AbortController();
 	const timeout = Promise.withResolvers<never>();
-	const timer = setTimeout(() => {
+	const timer = setLongTimeout(() => {
 		const error = new DOMException("The operation timed out.", "TimeoutError");
 		controller.abort(error);
 		timeout.reject(error);
@@ -98,7 +99,7 @@ async function withTimeoutSignal<T>(timeoutMs: number, fn: (signal: AbortSignal)
 	try {
 		return await Promise.race([fn(controller.signal), timeout.promise]);
 	} finally {
-		clearTimeout(timer);
+		timer.clear();
 	}
 }
 

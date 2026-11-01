@@ -5,6 +5,8 @@
  * settlement race against abort/steering signals.
  */
 
+import { setLongTimeout } from "@oh-my-pi/pi-utils";
+
 /** Default foreground-wait threshold before a tool call auto-backgrounds. */
 export const DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS = 60_000;
 
@@ -46,10 +48,12 @@ export async function raceJobSettlement<C>(
 	// Cancellable threshold: a bare Bun.sleep(thresholdMs) leaves a live, ref'd
 	// timer for the full threshold after the job finishes (or abort/steer) wins
 	// the race first — delaying SDK/headless shutdown and accumulating timers
-	// under fast completion rates. Settle a withResolvers promise from
-	// setTimeout so the finally can clear it regardless of which waiter wins.
+	// under fast completion rates. Settle a withResolvers promise from a
+	// clearable timer so the finally can clear it regardless of which waiter
+	// wins. A threshold past the ~24.8-day platform timer ceiling (reachable with
+	// `timeout: 0`) is honoured, not fired after 1 ms.
 	const { promise: thresholdPromise, resolve: resolveThreshold } = Promise.withResolvers<{ kind: "running" }>();
-	const thresholdTimer = setTimeout(() => resolveThreshold({ kind: "running" }), thresholdMs);
+	const thresholdTimer = setLongTimeout(() => resolveThreshold({ kind: "running" }), thresholdMs);
 	const waiters: Array<Promise<C | JobWaitInterrupt>> = [completion, thresholdPromise];
 
 	const { promise: abortedPromise, resolve: resolveAborted } = Promise.withResolvers<{ kind: "aborted" }>();
@@ -67,7 +71,7 @@ export async function raceJobSettlement<C>(
 	try {
 		return await Promise.race(waiters);
 	} finally {
-		clearTimeout(thresholdTimer);
+		thresholdTimer.clear();
 		signal?.removeEventListener("abort", onAbort);
 		steeringSignal?.removeEventListener("abort", onSteer);
 	}

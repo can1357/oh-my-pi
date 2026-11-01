@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
-import { MAX_TIMER_DELAY_MS, sleepLong } from "@oh-my-pi/pi-utils/async";
+import { MAX_TIMER_DELAY_MS, setLongTimeout, sleepLong } from "@oh-my-pi/pi-utils/async";
 
 function mockMonotonicScheduler(elapsedForWait: (delayMs: number) => number = delayMs => delayMs) {
 	const startedAt = 10_000;
@@ -15,6 +15,7 @@ function mockMonotonicScheduler(elapsedForWait: (delayMs: number) => number = de
 }
 
 afterEach(() => {
+	vi.useRealTimers();
 	vi.restoreAllMocks();
 });
 
@@ -64,5 +65,55 @@ describe("sleepLong", () => {
 
 		await expect(sleepLong(0, controller.signal)).rejects.toThrow("The operation was aborted");
 		expect(clock.wait).not.toHaveBeenCalled();
+	});
+});
+
+describe("setLongTimeout", () => {
+	it("fires a delay past the native timer limit at its deadline, not after 1 ms", () => {
+		vi.useFakeTimers();
+		const delayMs = MAX_TIMER_DELAY_MS + 1;
+		let fired = 0;
+		setLongTimeout(() => fired++, delayMs);
+
+		vi.advanceTimersByTime(delayMs - 1);
+		expect(fired).toBe(0);
+
+		vi.advanceTimersByTime(1);
+		expect(fired).toBe(1);
+
+		vi.advanceTimersByTime(MAX_TIMER_DELAY_MS);
+		expect(fired).toBe(1);
+	});
+
+	it("cancels a pending delay in any of its timer chunks", () => {
+		vi.useFakeTimers();
+		let fired = 0;
+		const timer = setLongTimeout(() => fired++, MAX_TIMER_DELAY_MS * 2);
+
+		vi.advanceTimersByTime(MAX_TIMER_DELAY_MS + 1);
+		timer.clear();
+		vi.advanceTimersByTime(MAX_TIMER_DELAY_MS * 2);
+
+		expect(fired).toBe(0);
+	});
+
+	it("re-arms a chunk that wakes before the monotonic deadline", () => {
+		vi.useFakeTimers();
+		let now = 0;
+		vi.spyOn(performance, "now").mockImplementation(() => now);
+		const delayMs = MAX_TIMER_DELAY_MS + 5_000;
+		let fired = 0;
+		setLongTimeout(() => fired++, delayMs);
+
+		// The first chunk wakes while the monotonic clock has advanced 10 s less.
+		now = MAX_TIMER_DELAY_MS - 10_000;
+		vi.advanceTimersByTime(MAX_TIMER_DELAY_MS);
+		now = delayMs - 1;
+		vi.advanceTimersByTime(5_000);
+		expect(fired).toBe(0);
+
+		now = delayMs;
+		vi.advanceTimersByTime(10_000);
+		expect(fired).toBe(1);
 	});
 });
