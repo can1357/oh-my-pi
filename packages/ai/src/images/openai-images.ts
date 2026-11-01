@@ -88,9 +88,8 @@ export async function generateOpenAIImage(
 				form.set("n", String(count));
 				if (!isGptImage) form.set("response_format", "b64_json");
 				if (size) form.set("size", size);
-				// A repeated scalar `image` field is rejected as `duplicate_parameter`; lists
-				// use the `image[]` array syntax the official SDKs emit. A single reference
-				// keeps the scalar field for compatible endpoints that only accept `image`.
+				// 重复的标量 `image` 字段会被判为 `duplicate_parameter`；多图须使用官方 SDK
+				// 同款的 `image[]` 数组语法。单图保留标量字段，兼容只接受 `image` 的端点。
 				const imageField = inputImages.length === 1 ? "image" : "image[]";
 				for (const image of inputImages) {
 					validateImageInput(image);
