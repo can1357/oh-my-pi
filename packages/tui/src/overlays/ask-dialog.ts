@@ -585,6 +585,8 @@ export class AskDialogComponent implements Component {
 	#countdown: CountdownTimer | undefined;
 	#promptActive = false;
 	#timeoutExpired = false;
+	/** `interrupt()` arrived while a host prompt was open; it runs once the prompt's answer is applied. */
+	#interruptRequested = false;
 	#closed = false;
 	#tabBar: TabBar | undefined;
 	#stableHeight: { key: string; total: number } | undefined;
@@ -1554,6 +1556,7 @@ export class AskDialogComponent implements Component {
 			}
 		} finally {
 			this.#promptActive = false;
+			this.#runDeferredInterrupt();
 			this.#runDeferredTimeout();
 			this.#requestRender();
 		}
@@ -1580,6 +1583,7 @@ export class AskDialogComponent implements Component {
 			state.noteRowKey = rowItem.key;
 		} finally {
 			this.#promptActive = false;
+			this.#runDeferredInterrupt();
 			this.#runDeferredTimeout();
 			this.#requestRender();
 		}
@@ -1801,14 +1805,27 @@ export class AskDialogComponent implements Component {
 	/**
 	 * Close the dialog and submit what the person has entered so far, marked
 	 * `interrupted`: a message from them superseded the question, and their
-	 * answers must not be lost with it.
+	 * answers must not be lost with it. While a host prompt is open, the dialog
+	 * closes once the prompt's answer is applied, so an answer the person
+	 * submitted just before the message is kept: the host must settle the prompt
+	 * (`HookEditorComponent.submitDraft()` keeps a draft being typed).
 	 */
 	interrupt(): void {
 		if (this.#closed) return;
+		if (this.#promptActive) {
+			this.#interruptRequested = true;
+			return;
+		}
 		this.#closed = true;
 		this.#countdown?.dispose();
 		this.#stopRingTick();
 		this.callbacks.onSubmit({ kind: "submit", results: this.#buildResults(), interrupted: true });
+	}
+
+	#runDeferredInterrupt(): void {
+		if (!this.#interruptRequested) return;
+		this.#interruptRequested = false;
+		this.interrupt();
 	}
 
 	#buildResults(): ExtensionAskDialogResultItem[] {

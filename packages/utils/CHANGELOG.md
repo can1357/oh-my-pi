@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `AgentSideConnection.unstable_createElicitationWithCancel()`, which cancels a pending form elicitation with `$/cancel_request`, and an abort signal for a client's `unstable_createElicitation` handler that fires when the agent cancels it ([#17585](https://github.com/can1357/oh-my-pi/pull/17585) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.14.2] - 2026-10-31
 
 ### Added

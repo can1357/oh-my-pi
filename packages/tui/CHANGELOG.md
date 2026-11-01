@@ -4,7 +4,8 @@
 
 ### Added
 
-- Added `AskDialogComponent.interrupt()`, which closes the dialog and submits what was entered so far with `interrupted: true`, and `HookEditorComponent.submitDraft()`, which submits the typed draft or cancels when nothing is typed ([#17585](https://github.com/can1357/oh-my-pi/pull/17585) by [@sjawhar](https://github.com/sjawhar))
+- Added `AskDialogComponent.interrupt()`, which closes the dialog and submits what was entered so far with `interrupted: true`; with a custom-answer or note prompt open, it first applies the answer the host's prompt settles with ([#17585](https://github.com/can1357/oh-my-pi/pull/17585) by [@sjawhar](https://github.com/sjawhar))
+- Added `HookEditorComponent.submitDraft()`, which submits the typed draft or cancels when nothing is typed ([#17585](https://github.com/can1357/oh-my-pi/pull/17585) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.2] - 2026-10-31
 

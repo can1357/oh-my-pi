@@ -179,6 +179,49 @@ describe("ExtensionUiController Ask dialog input", () => {
 		});
 	});
 
+	it("hands back a custom answer still being typed when a person's message closes the ask", async () => {
+		const harness = makeHarness();
+		const interrupt = new AbortController();
+		const pending = harness.controller.showAskDialog(
+			[
+				{ id: "first", question: "Which one?", options: [{ label: "Alpha" }] },
+				{ id: "second", question: "Then which?", options: [{ label: "Beta" }] },
+			],
+			{ interrupt: interrupt.signal },
+		);
+		harness.handleInput("\x1b[B");
+		harness.handleInput("\r");
+		harness.handleInput("half typed");
+		interrupt.abort();
+
+		expect(await pending).toMatchObject({
+			kind: "submit",
+			interrupted: true,
+			results: [
+				{ id: "first", selectedOptions: [], customInput: "half typed" },
+				{ id: "second", selectedOptions: [], customInput: undefined },
+			],
+		});
+		expect(harness.getFocused()).toBe(harness.editor);
+	});
+
+	it("keeps a custom answer submitted in the same tick as a person's message", async () => {
+		const harness = makeHarness();
+		const interrupt = new AbortController();
+		const pending = harness.controller.showAskDialog(questions, { interrupt: interrupt.signal });
+		harness.handleInput("\x1b[B");
+		harness.handleInput("\r");
+		harness.handleInput("just submitted");
+		harness.handleInput("\r");
+		interrupt.abort();
+
+		expect(await pending).toMatchObject({
+			kind: "submit",
+			results: [{ id: "answer", selectedOptions: [], customInput: "just submitted" }],
+		});
+		expect(harness.getFocused()).toBe(harness.editor);
+	});
+
 	it("discards a cancelled prompt's late paste after a new custom editor opens", async () => {
 		const harness = makeHarness();
 		const clipboard = Promise.withResolvers<string>();

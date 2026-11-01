@@ -507,21 +507,19 @@ function buildAcpSpeechModelsCatalog(): Record<string, unknown> {
  * Bridge an ExtensionUIContext form to ACP `unstable_createElicitation`.
  *
  * `dialogOptions.signal` short-circuits the elicitation if it is already
- * aborted and races the in-flight request against the abort event. The SDK
- * exposes no `cancel_elicitation` surface for form-mode elicitations
- * (`unstable_completeElicitation` is URL-mode only), so the ACP request itself
- * keeps running on the client side until the user dismisses it — but
- * resolving the local promise unblocks the caller (matches the RPC mode
- * pattern in `requestRpcEditor`). The abort listener is removed once the
- * elicitation settles so that callers which reuse the same signal across many
+ * aborted and races the in-flight request against the abort event. When the
+ * agent stops waiting (abort or timeout) the wire request is cancelled
+ * (`$/cancel_request`), so the client closes the form instead of leaving the
+ * person filling in one whose answer is no longer used; a response that was
+ * already on the wire when the cancellation left is dropped, as for an RPC
+ * dialog's `cancel`. The abort listener is removed once the elicitation
+ * settles so that callers which reuse the same signal across many
  * elicitations don't accumulate listeners and trip Node's `MaxListeners`
  * warning.
  *
  * `dialogOptions.timeout` mirrors `RpcExtensionUIContext.#createDialogPromise`:
  * when the timer fires before the client responds, `onTimeout` is invoked and
- * the caller's promise resolves to the stub fallback. Late SDK responses that
- * arrive after abort/timeout — both rejections and successful `accept`s —
- * are dropped silently (no `logger.warn`) to keep operator logs clean.
+ * the caller's promise resolves to the stub fallback.
  */
 async function elicitFormFromAcpClient(
 	connection: AgentSideConnection,
@@ -543,11 +541,26 @@ async function elicitFormFromAcpClient(
 		if (settled) return;
 		settled = true;
 		clearTimeout(timeoutId);
-		signal?.removeEventListener("abort", onAbort);
+		signal?.removeEventListener("abort", abandon);
 		resolve(value);
 	};
-	const onAbort = () => finish(undefined);
-	signal?.addEventListener("abort", onAbort, { once: true });
+	const request = connection.unstable_createElicitationWithCancel({
+		mode: "form",
+		sessionId,
+		message,
+		requestedSchema: {
+			type: "object",
+			properties,
+			required,
+		},
+	});
+	// The agent no longer waits for this answer: close the client's form.
+	const abandon = () => {
+		if (settled) return;
+		finish(undefined);
+		request.cancel();
+	};
+	signal?.addEventListener("abort", abandon, { once: true });
 	if (dialogOptions?.timeout !== undefined) {
 		timeoutId = setTimeout(() => {
 			if (settled) return;
@@ -555,10 +568,10 @@ async function elicitFormFromAcpClient(
 				dialogOptions.onTimeout?.();
 			} catch (error) {
 				// A throwing `onTimeout` must not leave the elicitation promise
-				// pending — settle it via `finish` below regardless.
+				// pending — settle it via `abandon` below regardless.
 				logger.warn("ACP elicitation onTimeout threw", { acpSessionId: sessionId, method, error });
 			}
-			finish(undefined);
+			abandon();
 		}, dialogOptions.timeout);
 		// A long pending timeout alone shouldn't keep the event loop alive when
 		// the rest of the agent has shut down — matches `job-manager.ts` /
@@ -566,23 +579,13 @@ async function elicitFormFromAcpClient(
 		// loop alive on the happy path.
 		timeoutId.unref();
 	}
-	connection
-		.unstable_createElicitation({
-			mode: "form",
-			sessionId,
-			message,
-			requestedSchema: {
-				type: "object",
-				properties,
-				required,
-			},
-		})
-		.then(finish, error => {
-			// Caller may already have moved on via abort/timeout; suppress noise.
-			if (settled) return;
-			logger.warn("ACP elicitation failed", { acpSessionId: sessionId, method, error });
-			finish(undefined);
-		});
+	request.promise.then(finish, error => {
+		// Caller may already have moved on via abort/timeout (that cancellation
+		// rejects the request); suppress noise.
+		if (settled) return;
+		logger.warn("ACP elicitation failed", { acpSessionId: sessionId, method, error });
+		finish(undefined);
+	});
 	const response = await promise;
 	if (!isAcceptedElicitation(response) || !response.content) {
 		return undefined;

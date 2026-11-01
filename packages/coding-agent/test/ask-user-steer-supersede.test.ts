@@ -1,14 +1,17 @@
 /**
  * Contract: a message a person types while an `ask` dialog is open closes the
  * dialog and reaches the agent first, even when an agent card or another
- * non-user steer already spent the tool batch's cooperative steering signal.
+ * non-user steer already spent the tool batch's cooperative steering signal;
+ * a second message sent while the dialog closes goes ahead of the card too.
  * While that message is unread, a later `ask` in the same batch closes without
- * showing. Answers the person already gave are returned, not dropped, and a
- * custom answer being typed is not cut off. Agent-authored steering alone
- * leaves the dialog open, and `interruptMode: "wait"` keeps it open.
+ * showing. Answers the person already gave are returned, not dropped, including
+ * one given in the same tick as the message, and a custom answer being typed is
+ * not cut off. An ACP client is told to close the form. Agent-authored steering
+ * alone leaves the dialog open, and `interruptMode: "wait"` keeps it open.
  *
  * Real Agent, real AgentSession queue and real AskTool; only the dialog UI and
- * the model are stand-ins.
+ * the model are stand-ins, except the ACP case, which runs the real ACP UI over
+ * a real connection pair.
  */
 import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import { setImmediate as tick } from "node:timers/promises";
@@ -22,8 +25,17 @@ import {
 import { createMockModel, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import type { ExtensionAskDialogResult, ExtensionAskDialogResultItem } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
+import {
+	type Agent as AcpAgent,
+	AgentSideConnection,
+	type Client,
+	ClientSideConnection,
+	type CreateElicitationResponse,
+	ndJsonStream,
+} from "@oh-my-pi/pi-utils/acp";
 import { Settings } from "../src/config/settings";
-import type { ExtensionUIDialogOptions } from "../src/extensibility/extensions";
+import type { ExtensionUIContext, ExtensionUIDialogOptions } from "../src/extensibility/extensions";
+import { createAcpExtensionUiContext } from "../src/modes/acp/acp-agent";
 import { AgentSession } from "../src/session/agent-session";
 import { convertToLlm } from "../src/session/messages";
 import { SessionManager } from "../src/session/session-manager";
@@ -40,19 +52,17 @@ const ONE_QUESTION: AskArgs = {
 };
 
 const THREE_QUESTIONS: AskArgs = {
-	questions: ["a", "b", "c"].map(id => ({
-		id,
-		question: `Question ${id}?`,
-		options: [{ label: `${id.toUpperCase()}1` }, { label: `${id.toUpperCase()}2` }],
-	})),
+	questions: [
+		{ id: "color", question: "Which color?", options: [{ label: "Red" }, { label: "Blue" }] },
+		{ id: "size", question: "Which size?", options: [{ label: "Small" }, { label: "Large" }] },
+		{ id: "shape", question: "Which shape?", options: [{ label: "Round" }, { label: "Square" }] },
+	],
 };
 
 /** A select or editor dialog on screen. */
 interface OpenDialog {
 	kind: "select" | "editor";
 	signal: AbortSignal | undefined;
-	/** The tool batch's cooperative steering signal, as the loop handed it to `ask`. */
-	loopSignal: AbortSignal | undefined;
 	answer(value: string | undefined): void;
 }
 
@@ -121,6 +131,8 @@ function createHarness(
 		args?: AskArgs;
 		/** Offer the rich ask dialog. */
 		rich?: boolean;
+		/** A real host's UI in place of the stand-in dialogs. */
+		ui?: ExtensionUIContext;
 	} = {},
 ): AskHarness {
 	const settings = Settings.isolated({
@@ -151,13 +163,12 @@ function createHarness(
 	const askResults: AgentToolResult<unknown>[] = [];
 	const open = (
 		kind: OpenDialog["kind"],
-		call: ToolCallContext | undefined,
 		dialog: { signal?: AbortSignal } | undefined,
 	): Promise<string | undefined> => {
 		shown++;
 		const { promise, resolve } = Promise.withResolvers<string | undefined>();
 		dialog?.signal?.addEventListener("abort", () => resolve(undefined), { once: true });
-		dialogs.push({ kind, signal: dialog?.signal, loopSignal: call?.steeringSignal, answer: resolve });
+		dialogs.push({ kind, signal: dialog?.signal, answer: resolve });
 		return promise;
 	};
 	const agent = new Agent({
@@ -171,11 +182,9 @@ function createHarness(
 				toolCall: call,
 				hasUI: true,
 				abort: () => agent.abort(),
-				ui: {
-					select: (_title: string, _items: unknown[], dialog?: ExtensionUIDialogOptions) =>
-						open("select", call, dialog),
-					editor: (_title: string, _prefill?: string, dialog?: ExtensionUIDialogOptions) =>
-						open("editor", call, dialog),
+				ui: options.ui ?? {
+					select: (_title: string, _items: unknown[], dialog?: ExtensionUIDialogOptions) => open("select", dialog),
+					editor: (_title: string, _prefill?: string, dialog?: ExtensionUIDialogOptions) => open("editor", dialog),
 					...(options.rich
 						? {
 								askDialog: (_questions: unknown[], dialog?: ExtensionUIDialogOptions) => {
@@ -213,14 +222,12 @@ function createHarness(
 }
 
 /** An agent card as an extension hands it over: `pi.sendMessage(..., { deliverAs: "steer" })`. */
-async function sendCard(target: AgentSession, loopSignal: AbortSignal | undefined): Promise<void> {
+async function sendCard(target: AgentSession): Promise<void> {
 	await target.sendCustomMessage(
 		{ customType: "envoy-message", content: "agent card", display: true },
 		{ deliverAs: "steer", triggerTurn: true },
 	);
 	await settle();
-	// The card spends the batch's cooperative signal, unless interruptMode is "wait".
-	expect(loopSignal?.reason).toBe(loopSignal?.aborted ? "system" : undefined);
 }
 
 async function typeMessage(target: AgentSession, text = "please stop asking"): Promise<void> {
@@ -257,8 +264,7 @@ describe("ask dialog and a person's later steer", () => {
 		const run = session.prompt("start");
 		const dialog = await nextDialog();
 
-		await sendCard(session, dialog.loopSignal);
-		expect(dialog.loopSignal?.aborted).toBe(true);
+		await sendCard(session);
 		expect(dialog.signal?.aborted).toBe(false);
 		await typeMessage(session);
 
@@ -271,9 +277,9 @@ describe("ask dialog and a person's later steer", () => {
 	it("delivers the person's message that closed the dialog before the earlier card", async () => {
 		const { session, mock, nextDialog } = createHarness();
 		const run = session.prompt("start");
-		const dialog = await nextDialog();
+		await nextDialog();
 
-		await sendCard(session, dialog.loopSignal);
+		await sendCard(session);
 		await typeMessage(session);
 		await run;
 		await session.waitForIdle();
@@ -281,6 +287,41 @@ describe("ask dialog and a person's later steer", () => {
 		expect(requestHas(mock.calls[1], "please stop asking")).toBe(true);
 		expect(requestHas(mock.calls[1], "agent card")).toBe(false);
 		expect(mock.calls.slice(2).some(call => requestHas(call, "agent card"))).toBe(true);
+	});
+
+	it("keeps an answer the person gave in the same tick as their message", async () => {
+		const { session, mock, nextDialog, askResults } = createHarness();
+		const run = session.prompt("start");
+		const dialog = await nextDialog();
+
+		await sendCard(session);
+		dialog.answer("Yes");
+		session.agent.steer({ role: "user", content: "sent with the answer", timestamp: Date.now() });
+		await run;
+		await session.waitForIdle();
+
+		expect(askResults[0]?.details).toMatchObject({ selectedOptions: ["Yes"] });
+		expect(mock.calls.some(call => requestHas(call, "sent with the answer"))).toBe(true);
+	});
+
+	it("moves a second message sent while the dialog closes ahead of the earlier card too", async () => {
+		const { session, mock, nextDialog } = createHarness();
+		const run = session.prompt("start");
+		await nextDialog();
+
+		await sendCard(session);
+		session.agent.steer({ role: "user", content: "first message", timestamp: Date.now() });
+		session.agent.steer({ role: "user", content: "second message", timestamp: Date.now() });
+		await run;
+		await session.waitForIdle();
+
+		const read = requestTexts(mock.calls[mock.calls.length - 1]!);
+		const first = read.findIndex(text => text.includes("first message"));
+		const second = read.findIndex(text => text.includes("second message"));
+		const card = read.findIndex(text => text.includes("agent card"));
+		expect(first).toBeGreaterThanOrEqual(0);
+		expect(second).toBeGreaterThan(first);
+		expect(card).toBeGreaterThan(second);
 	});
 
 	// Every way a person's message can reach the steering queue, by the queue mutation it makes,
@@ -339,7 +380,7 @@ describe("ask dialog and a person's later steer", () => {
 			const run = session.prompt("start");
 			const dialog = await nextDialog();
 
-			await sendCard(session, dialog.loopSignal);
+			await sendCard(session);
 			await send(session);
 			await settle();
 			expect(dialog.signal?.aborted).toBe(true);
@@ -356,7 +397,7 @@ describe("ask dialog and a person's later steer", () => {
 		const run = session.prompt("start");
 		const dialog = await nextDialog();
 
-		await sendCard(session, dialog.loopSignal);
+		await sendCard(session);
 		await session.promptCustomMessage(
 			{ customType: "skill-prompt", content: "run the review skill", display: true, attribution: "user" },
 			{ streamingBehavior: "steer" },
@@ -387,7 +428,7 @@ describe("ask dialog and a person's later steer", () => {
 		const run = session.prompt("start");
 		const dialog = await nextDialog();
 
-		await sendCard(session, dialog.loopSignal);
+		await sendCard(session);
 		expect(dialog.signal?.aborted).toBe(false);
 		dialog.answer("Yes");
 		await run;
@@ -400,7 +441,7 @@ describe("ask dialog and a person's later steer", () => {
 		const run = session.prompt("start");
 		const dialog = await nextDialog();
 
-		await sendCard(session, dialog.loopSignal);
+		await sendCard(session);
 		await session.sendUserMessage("parent notice", { deliverAs: "steer", attribution: "agent" });
 		await settle();
 		expect(dialog.signal?.aborted).toBe(false);
@@ -415,8 +456,7 @@ describe("ask dialog and a person's later steer", () => {
 		const run = session.prompt("start");
 		const dialog = await nextDialog();
 
-		await sendCard(session, dialog.loopSignal);
-		expect(dialog.loopSignal?.aborted).toBe(false);
+		await sendCard(session);
 		await typeMessage(session);
 		expect(dialog.signal?.aborted).toBe(false);
 		dialog.answer("Yes");
@@ -432,7 +472,7 @@ describe("ask dialog and a person's later steer", () => {
 			const run = session.prompt("start");
 			const first = await nextDialog();
 
-			if (shape === "after an agent card") await sendCard(session, first.loopSignal);
+			if (shape === "after an agent card") await sendCard(session);
 			await typeMessage(session);
 			expect(first.signal?.aborted).toBe(true);
 			await run;
@@ -452,20 +492,25 @@ describe("ask answers given before a person's message closed the dialog", () => 
 	it("returns the answers given to earlier questions with the open ones named", async () => {
 		const { session, nextDialog, askResults } = createHarness({ args: THREE_QUESTIONS });
 		const run = session.prompt("start");
-		(await nextDialog()).answer("A1");
-		(await nextDialog()).answer("B2");
+		(await nextDialog()).answer("Red");
+		(await nextDialog()).answer("Large");
 		const third = await nextDialog();
 
-		await sendCard(session, third.loopSignal);
+		await sendCard(session);
 		await typeMessage(session);
 		expect(third.signal?.aborted).toBe(true);
 		await run;
 		await session.waitForIdle();
 
+		expect(askResults[0]?.details).toMatchObject({
+			results: [
+				{ id: "color", selectedOptions: ["Red"] },
+				{ id: "size", selectedOptions: ["Large"] },
+			],
+		});
 		const text = resultText(askResults[0]);
-		expect(text).toContain("a: A1");
-		expect(text).toContain("b: B2");
-		expect(text).toContain("Not answered: c");
+		// The model reads which question is still open.
+		expect(text).toContain("shape");
 		expect(text).not.toContain("Ask interrupted by message");
 	});
 
@@ -476,9 +521,8 @@ describe("ask answers given before a person's message closed the dialog", () => 
 		const editor = await nextDialog();
 		expect(editor.kind).toBe("editor");
 
-		// A plain steer: the batch's signal aborts with reason "user", which used to cut the editor off.
+		// A plain steer, which used to cut the editor off.
 		await typeMessage(session);
-		expect(editor.loopSignal?.reason).toBe("user");
 		expect(editor.signal?.aborted ?? false).toBe(false);
 		editor.answer("my own answer");
 		await run;
@@ -498,7 +542,7 @@ describe("ask answers given before a person's message closed the dialog", () => 
 				dialog.answer({
 					kind: "submit",
 					interrupted: true,
-					results: [richAnswer("a", ["A1"]), richAnswer("b", []), richAnswer("c", ["C2"])],
+					results: [richAnswer("color", ["Red"]), richAnswer("size", []), richAnswer("shape", ["Square"])],
 				}),
 			{ once: true },
 		);
@@ -507,10 +551,13 @@ describe("ask answers given before a person's message closed the dialog", () => 
 		await run;
 		await session.waitForIdle();
 
-		const text = resultText(askResults[0]);
-		expect(text).toContain("a: A1");
-		expect(text).toContain("c: C2");
-		expect(text).toContain("Not answered: b");
+		expect(askResults[0]?.details).toMatchObject({
+			results: [
+				{ id: "color", selectedOptions: ["Red"] },
+				{ id: "shape", selectedOptions: ["Square"] },
+			],
+		});
+		expect(resultText(askResults[0])).toContain("size");
 	});
 
 	it("closes a rich dialog whose host ignores the interrupt", async () => {
@@ -519,11 +566,65 @@ describe("ask answers given before a person's message closed the dialog", () => 
 		const dialog = await nextRichDialog();
 
 		await typeMessage(session);
-		expect(dialog.interrupt?.aborted).toBe(true);
 		await run;
 		await session.waitForIdle();
 
 		expect(dialog.signal?.aborted).toBe(true);
 		expect(resultText(askResults[0])).toContain("Ask interrupted by message");
+	});
+});
+
+describe("ask on an ACP client, whose form returns only when submitted", () => {
+	it("closes the client's form when the person's message closes the ask", async () => {
+		const toAgent = new TransformStream<Uint8Array, Uint8Array>();
+		const toClient = new TransformStream<Uint8Array, Uint8Array>();
+		const formOpened = Promise.withResolvers<void>();
+		const formClosed = Promise.withResolvers<void>();
+		let formSignal: AbortSignal | undefined;
+		const client: Client = {
+			requestPermission: async () => ({ outcome: { outcome: "cancelled" } }),
+			sessionUpdate: async () => {},
+			unstable_createElicitation: (_params, options) => {
+				formSignal = options?.signal;
+				formOpened.resolve();
+				const { promise, resolve } = Promise.withResolvers<CreateElicitationResponse>();
+				// The person submits what they typed just as the form closes: too late to be read.
+				options?.signal?.addEventListener(
+					"abort",
+					() => {
+						formClosed.resolve();
+						resolve({ action: "accept", content: { q0__other: "typed as the form closed" } });
+					},
+					{ once: true },
+				);
+				return promise;
+			},
+		};
+		new ClientSideConnection(() => client, ndJsonStream(toAgent.writable, toClient.readable));
+		const agentSide: AcpAgent = {
+			initialize: params => ({ protocolVersion: params.protocolVersion }),
+			newSession: async () => ({ sessionId: "acp-ask" }),
+			prompt: async () => ({ stopReason: "end_turn" }),
+			cancel: async () => {},
+		};
+		const connection = new AgentSideConnection(() => agentSide, ndJsonStream(toClient.writable, toAgent.readable));
+		const ui = createAcpExtensionUiContext(connection, () => "acp-ask", { elicitation: { form: {} } });
+		const { session, mock, askResults } = createHarness({ ui });
+		const run = session.prompt("start");
+		await formOpened.promise;
+
+		await typeMessage(session);
+		await run;
+		await session.waitForIdle();
+		// The cancellation crosses a real transport, so there is no in-process event to await
+		// when it never comes; the bound only turns that failure into the assertion below
+		// instead of a test timeout. When the form closes, the wait ends at once.
+		await Promise.race([formClosed.promise, Bun.sleep(2_000)]);
+
+		expect(formSignal?.aborted).toBe(true);
+		const text = resultText(askResults[0]);
+		expect(text).toContain("Ask interrupted by message");
+		expect(text).not.toContain("typed as the form closed");
+		expect(requestHas(mock.calls[1], "please stop asking")).toBe(true);
 	});
 });

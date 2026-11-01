@@ -200,7 +200,8 @@ interface AskSingleQuestionOptions {
 	signal?: AbortSignal;
 	/**
 	 * A message from the person: closes an option picker, returning `interrupted` with what was
-	 * entered. A custom answer being typed is not cut off; the next picker returns instead.
+	 * entered. An answer the picker already gave is kept. A custom answer being typed is not cut
+	 * off; the next picker returns instead.
 	 */
 	interrupt?: AbortSignal;
 	initialSelection?: Pick<SelectionResult, "selectedOptions" | "customInput" | "note">;
@@ -270,10 +271,18 @@ async function askSingleQuestion(
 		const helpText = `${editorKeys("tui.select.up", "tui.select.down")} navigate  ${formatKeyHint("enter")} select  ${questionHint}${editorKey("tui.select.cancel")} cancel`;
 		const timeoutMs = typeof timeout === "number" && timeout > 0 ? timeout : undefined;
 		const timeoutController = timeoutMs === undefined ? undefined : new AbortController();
+		// The host closes the picker on any of these.
 		const closeSignals = [signal, interrupt, timeoutController?.signal].filter(
 			(candidate): candidate is AbortSignal => candidate !== undefined,
 		);
 		const dialogSignal = closeSignals.length > 1 ? AbortSignal.any(closeSignals) : closeSignals[0];
+		// The wait ends at once on these. A person's message is not among them: an answer the host
+		// already gave must still be read, so the wait gives the host a turn (awaitSupersedable).
+		const interruptClose = interrupt ? new AbortController() : undefined;
+		const waitSignals = [signal, timeoutController?.signal, interruptClose?.signal].filter(
+			(candidate): candidate is AbortSignal => candidate !== undefined,
+		);
+		const waitSignal = waitSignals.length > 1 ? AbortSignal.any(waitSignals) : waitSignals[0];
 		let timeoutId: NodeJS.Timeout | undefined;
 		let timeoutStartedMs = Date.now();
 		const armFallbackTimeout = (durationMs: number) => {
@@ -315,7 +324,12 @@ async function askSingleQuestion(
 				}
 				return selection;
 			};
-			const choice = dialogSignal ? await untilAborted(dialogSignal, runSelect) : await runSelect();
+			const pending = waitSignal ? untilAborted(waitSignal, runSelect) : runSelect();
+			const choice =
+				interrupt && interruptClose ? await awaitSupersedable(pending, interrupt, interruptClose) : await pending;
+			if (choice === undefined && !timeoutTriggered && interrupt?.aborted && !signal?.aborted) {
+				return { choice: undefined, timedOut: false, interrupted: true };
+			}
 			if (!timeoutTriggered && choice === undefined && typeof timeout === "number") {
 				// Fallback for UI surfaces that enforce `timeout` without invoking
 				// `onTimeout`: their auto-cancel resolves right at the deadline. A
@@ -328,9 +342,6 @@ async function askSingleQuestion(
 		} catch (error) {
 			if (timeoutTriggered && error instanceof Error && error.name === "AbortError") {
 				return { choice: undefined, timedOut: true, navigation: navigationAction };
-			}
-			if (interrupt?.aborted && !signal?.aborted && error instanceof Error && error.name === "AbortError") {
-				return { choice: undefined, timedOut: false, interrupted: true };
 			}
 			throw error;
 		} finally {
@@ -553,7 +564,9 @@ const HOST_IGNORED_INTERRUPT = Symbol("host ignored interrupt");
 /**
  * Await a dialog that a message from the person may supersede. A host that honors
  * `interrupt` settles at once with what was entered; one that does not is closed through
- * `close` once a macrotask passes after the interrupt, and this resolves `undefined`.
+ * `close` once a macrotask passes after the interrupt, and this resolves `undefined`. An
+ * answer the host settled before that macrotask, even in the same tick as the interrupt,
+ * is returned: the person gave it before their message took effect.
  */
 async function awaitSupersedable<T>(
 	dialog: Promise<T>,

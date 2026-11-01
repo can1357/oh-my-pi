@@ -2,9 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- An agent-authored steer no longer closes an ACP permission request; a message from you still does ([#17585](https://github.com/can1357/oh-my-pi/pull/17585) by [@sjawhar](https://github.com/sjawhar))
+
 ### Fixed
 
-- Fixed a message you type while `ask` waits being ignored when an agent card, peer message or aside reached the turn first; your message now closes the question, no further question opens in that turn while it is unread, the answers you already gave are kept, and the agent reads it before agent messages. Your message counts however it reaches the steering queue, including a typed `/skill:` prompt or a promoted follow-up. An agent-authored steer no longer closes an ACP permission request ([#17585](https://github.com/can1357/oh-my-pi/pull/17585) by [@sjawhar](https://github.com/sjawhar))
+- Fixed a message you type while `ask` waits being ignored when an agent card, peer message or aside reached the turn first; your message now closes the question, you are not asked again before the agent has read it, and the agent reads your messages before agent messages. The answers you already gave are kept, including one you submit as you send the message and, in a collab session, the answers a guest finished. This holds however your message reaches the steering queue, including a typed `/skill:` prompt or a promoted follow-up ([#17585](https://github.com/can1357/oh-my-pi/pull/17585) by [@sjawhar](https://github.com/sjawhar))
+- Fixed an ACP client keeping a form open after omp stopped waiting for its answer; omp now cancels the request and the client closes the form ([#17585](https://github.com/can1357/oh-my-pi/pull/17585) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.2] - 2026-10-31
 

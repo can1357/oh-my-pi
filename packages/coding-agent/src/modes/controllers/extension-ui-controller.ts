@@ -817,13 +817,32 @@ export class ExtensionUiController {
 		const localWinner = this.#showLocalAskDialog(normalized, { ...dialogOptions, signal: localSignal }).then(
 			(value): CollabAskDialogWinner => ({ source: "local", value }),
 		);
-		const remoteWinner: Promise<CollabAskDialogWinner> = this.#runGuestAskDialog(host, normalized, remoteSignal).then(
-			result => (result === "unavailable" ? localWinner : { source: "remote", value: result }),
-		);
+		// The guest's finished answers, by question index. They live here, not in the guest loop,
+		// so they outlive it when a person's message closes the local dialog first.
+		const guestAnswers: ExtensionAskDialogResultItem[] = [];
+		const remoteWinner: Promise<CollabAskDialogWinner> = this.#runGuestAskDialog(
+			host,
+			normalized,
+			remoteSignal,
+			guestAnswers,
+		).then(result => (result === "unavailable" ? localWinner : { source: "remote", value: result }));
 		const winner = await Promise.race([localWinner, remoteWinner]);
 		if (winner.source === "remote") localAbort.abort();
 		else remoteAbort.abort();
-		return winner.value;
+		const value = winner.value;
+		if (winner.source === "local" && value?.kind === "submit" && value.interrupted) {
+			// Each question keeps the local answer when the host's person gave one (an option or
+			// a custom answer), else the guest's finished answer.
+			return {
+				...value,
+				results: value.results.map((local, index) =>
+					local.selectedOptions.length > 0 || local.customInput !== undefined
+						? local
+						: (guestAnswers[index] ?? local),
+				),
+			};
+		}
+		return value;
 	}
 
 	#showLocalAskDialog(
@@ -940,16 +959,13 @@ export class ExtensionUiController {
 			);
 			// A message from the person supersedes the ask: hand back what they entered,
 			// including a custom answer or note still being typed, instead of dropping it.
+			// An open prompt settles with its draft first; AskDialog applies a prompt's answer
+			// before it closes, so text submitted just before the message is kept as well.
 			const interrupt = dialogOptions?.interrupt;
 			const onInterrupt = (): void => {
 				if (closed) return;
-				if (promptEditor) {
-					// The prompt's answer reaches AskDialog in the next microtask (see finishPrompt).
-					promptEditor.submitDraft();
-					queueMicrotask(() => askDialog.interrupt());
-				} else {
-					askDialog.interrupt();
-				}
+				promptEditor?.submitDraft();
+				askDialog.interrupt();
 			};
 			this.ctx.editorContainer.clear();
 			this.ctx.editorContainer.addChild(askDialog);
@@ -1013,15 +1029,15 @@ export class ExtensionUiController {
 		host: CollabHost,
 		questions: ExtensionAskDialogQuestion[],
 		signal: AbortSignal,
+		answers: ExtensionAskDialogResultItem[],
 	): Promise<ExtensionAskDialogResult | "unavailable" | undefined> {
-		const results: ExtensionAskDialogResultItem[] = [];
 		for (const question of questions) {
 			const result = await this.#runGuestAskQuestion(host, question, signal);
 			if (result === "unavailable" || result === undefined) return result;
 			if (result === "chat") return { kind: "chat" };
-			results.push(result);
+			answers.push(result);
 		}
-		return { kind: "submit", results };
+		return { kind: "submit", results: answers };
 	}
 
 	async #runGuestAskQuestion(

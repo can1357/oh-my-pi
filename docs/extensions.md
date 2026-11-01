@@ -1130,6 +1130,7 @@ ACP installs an elicitation-bridged UI context (`createAcpExtensionUiContext` in
 `modes/acp/acp-agent.ts`). `ctx.mode` is `"rpc"` and `ctx.hasUI` is `true`.
 `select`/`confirm`/`input`/`editor` and optional `askDialog` round-trip as ACP form
 elicitations; defaults are returned when the client lacks `elicitation.form`, and `input` returns `undefined` without emitting a form elicitation when `dialogOptions.secret` is `true`.
+When omp stops waiting for a form (`dialogOptions.signal` aborts or `timeout` expires), it cancels the request with `$/cancel_request` so the client closes the form; a response already on the wire is dropped.
 The non-elicitation surface (widgets, editor control, theming, terminal input,
 autocomplete stacking) is inert; `notify` logs a debug notification.
 

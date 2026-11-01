@@ -32,6 +32,7 @@ import type {
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
 import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { AskDialogComponent } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
 import { instrumentRelay, waitFor } from "./helpers/throttled-host";
 
@@ -1157,6 +1158,63 @@ describe("guest ask multi-select Next gating (#4375 PRRT_kwDOQxs0bc6OFbDW)", () 
 			}
 			guest.socket.close();
 		} finally {
+			await host.stop("test done");
+		}
+	});
+});
+
+describe("guest ask closed by the host person's message", () => {
+	it("returns the guest's finished answers with the host's, the host's winning where both answered", async () => {
+		const ctx = makeAskHostContext();
+		// Capture the host's own ask dialog so the host's person can answer in it.
+		let local: AskDialogComponent | undefined;
+		ctx.editorContainer.addChild = child => {
+			if (child instanceof AskDialogComponent) local = child;
+		};
+		const host = new CollabHost(ctx);
+		await host.start("ws://localhost:8787");
+		ctx.collabHost = host;
+		const controller = new ExtensionUiController(ctx);
+		const interrupt = new AbortController();
+		try {
+			const guest = await joinRawGuest(host.link, COLLAB_PROTO);
+			const welcome = await guest.nextFrame();
+			if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+			const nextRequest = async (): Promise<CollabFrame & { t: "ui-request" }> => {
+				for (;;) {
+					const frame = await guest.nextFrame();
+					if (frame.t === "ui-request") return frame;
+				}
+			};
+
+			const result = controller.showAskDialog(
+				[
+					{ id: "first", question: "First?", options: [{ label: "Alpha" }, { label: "Gamma" }] },
+					{ id: "second", question: "Second?", options: [{ label: "Beta" }] },
+					{ id: "third", question: "Third?", options: [{ label: "Delta" }] },
+				],
+				{ interrupt: interrupt.signal },
+			);
+			// The host's person answers the first question; the guest answers it differently.
+			local?.handleInput("\r");
+			guest.socket.send({ t: "ui-response", reqId: (await nextRequest()).request.reqId, value: "Gamma" });
+			guest.socket.send({ t: "ui-response", reqId: (await nextRequest()).request.reqId, value: "Beta" });
+			await nextRequest();
+			// The guest is on the third question when the host's person sends a message.
+			interrupt.abort();
+
+			expect(await result).toMatchObject({
+				kind: "submit",
+				interrupted: true,
+				results: [
+					{ id: "first", selectedOptions: ["Alpha"] },
+					{ id: "second", selectedOptions: ["Beta"] },
+					{ id: "third", selectedOptions: [], customInput: undefined },
+				],
+			});
+			guest.socket.close();
+		} finally {
+			interrupt.abort();
 			await host.stop("test done");
 		}
 	});

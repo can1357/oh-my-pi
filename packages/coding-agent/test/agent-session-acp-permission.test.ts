@@ -1232,7 +1232,7 @@ it("keeps the dialog open when an agent-authored steer queues mid-dialog", async
 	permissionPending.resolve({ outcome: "cancelled" });
 });
 
-it("keeps the dialog open for an agent-attributed steer that fires the arrival channel, then yields to a person's steer", async () => {
+it("keeps the dialog open for an agent-attributed steer sent through the session, then yields to a person's steer", async () => {
 	const deleteTool = makeFakeTool("delete");
 	const permissionPending = Promise.withResolvers<ClientBridgePermissionOutcome>();
 	const permissionOpened = Promise.withResolvers<void>();
@@ -1263,7 +1263,7 @@ it("keeps the dialog open for an agent-attributed steer that fires the arrival c
 	});
 	await permissionOpened.promise;
 
-	// `sendUserMessage` with agent attribution goes through the arrival channel, unlike `agent.steer`.
+	// An agent-attributed `sendUserMessage` steer: the arrival channel announces only a person's messages.
 	await session.sendUserMessage("parent budget notice", { deliverAs: "steer", attribution: "agent" });
 	loopSteering.abort("system");
 	for (let i = 0; i < 8; i++) await new Promise<void>(resolve => setImmediate(resolve));

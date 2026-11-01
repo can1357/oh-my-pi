@@ -39,10 +39,11 @@ export interface UserSteeringSupersede extends Disposable {
  * Move every queued person's message, with its hidden companions, ahead of agent-authored
  * steering, keeping the person's messages in the order they were queued. A message that
  * supersedes a dialog is read before an agent card that reached the batch first, but never
- * before an earlier message from the person. Agent steering keeps its own order. Where the
- * agent core reads a person's steering first anyway (one-at-a-time priority), this changes no
- * delivery order, and the core's allowance for waiting agent steering does not depend on where
- * a message sits, so moving messages cannot reset or bypass it.
+ * before an earlier message from the person. Agent steering keeps its own order. Nothing
+ * bounds by count how long a card then waits: it is read once no message moved here is
+ * queued. This runs only while a person's message supersedes a dialog the agent itself
+ * opened, so a card waits only while the person keeps answering the agent's questions with
+ * messages.
  */
 export function promotePersonSteering(agent: UserSteeringHost["agent"]): void {
 	const person = agent.peekSteeringQueue().filter(m => isUserAuthoredQueuedMessage(m) || isHiddenUserCompanion(m));
@@ -76,6 +77,10 @@ export function superviseUserSteering(
 	const controller = new AbortController();
 	// Arrivals before the dialog opened do not count in "arrivals" mode.
 	const parkSeq = host && mode === "arrivals" ? host.steeringArrivalSeq() : undefined;
+	// "arrivals" mode: every message admitted in this dialog's window, in admission order. Each
+	// read drains the channel, so a later read alone would move only its own arrival, ahead of
+	// an earlier one.
+	const admitted: AgentMessage[] = [];
 	/** Whether a person's steer supersedes the dialog now; moves the messages that go first. */
 	const supersedes = (): boolean => {
 		if (!host) return loopSteeringSignal?.reason === "user";
@@ -84,24 +89,26 @@ export function superviseUserSteering(
 			promotePersonSteering(host.agent);
 			return true;
 		}
-		const arrived = host.steeringArrivalAdmitted(parkSeq) ?? [];
-		if (!arrived.some(isUserAuthoredQueuedMessage)) return false;
+		admitted.push(...(host.steeringArrivalAdmitted(parkSeq) ?? []));
+		if (!admitted.some(isUserAuthoredQueuedMessage)) return false;
 		const queued = new Set(host.agent.peekSteeringQueue());
-		const promotable = arrived.filter(
+		const promotable = admitted.filter(
 			message => queued.has(message) && (isUserAuthoredQueuedMessage(message) || isHiddenUserCompanion(message)),
 		);
 		if (promotable.length > 0) host.agent.prioritizeSteering(promotable);
 		return true;
 	};
+	// Runs again after the dialog is superseded: a person's message that arrives while it
+	// closes (a second one in the same tick, say) moves ahead of agent steering as well, until
+	// the dialog's owner disposes the watch.
 	const check = (): void => {
-		if (controller.signal.aborted) return;
 		if (loopSteeringSignal && !loopSteeringSignal.aborted) return;
 		if (supersedes()) controller.abort();
 	};
 	let arrivalSignal = host?.steeringArrivalSignal();
 	const onArrival = (): void => {
 		check();
-		if (controller.signal.aborted || !host) return;
+		if (!host) return;
 		// The channel replaces its signal after each admission: follow it.
 		arrivalSignal = host.steeringArrivalSignal();
 		arrivalSignal.addEventListener("abort", onArrival, { once: true });
