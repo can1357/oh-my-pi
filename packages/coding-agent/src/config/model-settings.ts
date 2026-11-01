@@ -59,6 +59,12 @@ export const cfgAuthAccountPolicies = register({
 	type: "array",
 	default: EMPTY_AUTH_ACCOUNT_POLICIES,
 });
+/** Strict default OAuth account selector per provider (email, local-part, or account id). */
+export const cfgAuthDefaultAccounts = register({
+	id: "auth.defaultAccounts",
+	type: "record",
+	default: EMPTY_STRING_RECORD,
+});
 
 export const cfgEnabledModels = register({
 	id: "enabledModels",

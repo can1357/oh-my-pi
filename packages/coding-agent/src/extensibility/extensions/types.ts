@@ -14,6 +14,7 @@ import {
 	type ExtensionWidgetContent,
 	type MessageRenderer,
 	type AssistantThinkingRenderer,
+	type AssistantTextDisplayRenderer,
 	type AssistantTextRenderer,
 } from "@oh-my-pi/pi-tui/chat/extension-types";
 export {
@@ -24,6 +25,9 @@ export {
 	type MessageRenderer,
 	type AssistantThinkingRenderContext,
 	type AssistantThinkingRenderer,
+	type AssistantTextDisplayContext,
+	type AssistantTextDisplayResult,
+	type AssistantTextDisplayRenderer,
 	type AssistantTextRenderContext,
 	type AssistantTextRenderer,
 } from "@oh-my-pi/pi-tui/chat/extension-types";
@@ -746,6 +750,8 @@ export interface ExtensionLiveSession {
 export interface ExtensionContext {
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
+	/** Cancellation for this handler, linked to its timeout and main-turn cancellation. */
+	readonly abortSignal?: AbortSignal;
 	/** Current run mode. Use `"tui"` to guard terminal-only UI such as custom components. */
 	mode: ExtensionMode;
 	/** Get current context usage for the active model. */
@@ -1708,6 +1714,12 @@ export type { ToolCallEventResult } from "../shared-events";
 
 /** Result from input event handler */
 export interface InputEventResult {
+	/**
+	 * Reject this submission with a visible reason and restore its original draft
+	 * and attachments. Takes precedence over handled, text and images; no commands,
+	 * queueing or model dispatch may proceed. Handler failures also reject input.
+	 */
+	reject?: string;
 	/** If true, the input was handled and should not continue through normal flow */
 	handled?: boolean;
 	/** Replace the input text */
@@ -1780,6 +1792,17 @@ export interface RegisteredCommand {
 /** Handler function type for events */
 export type ExtensionHandler<E, R = undefined> = (event: E, ctx: ExtensionContext) => Promise<R | void> | R | void;
 
+/** Options for an individual event handler registered with `on`. */
+export interface ExtensionHandlerOptions {
+	/**
+	 * Override this handler's deadline in milliseconds (default: 30,000).
+	 * Must be finite, nonnegative, and at most 2,147,483,647 (the timer limit).
+	 * Zero disables the deadline while retaining cancellation.
+	 * `session_shutdown` remains capped at 2,000ms even with zero.
+	 */
+	timeoutMs?: number;
+}
+
 /** Service tiers accepted by each provider family. */
 export type ExtensionServiceTier<Family extends ServiceTierFamily> = Family extends "anthropic"
 	? "priority"
@@ -1816,79 +1839,198 @@ export interface ExtensionAPI {
 	// Event Subscription
 	// =========================================================================
 
-	on(event: "resources_discover", handler: ExtensionHandler<ResourcesDiscoverEvent, ResourcesDiscoverResult>): void;
-	on(event: "session_start", handler: ExtensionHandler<SessionStartEvent>): void;
+	on(
+		event: "resources_discover",
+		handler: ExtensionHandler<ResourcesDiscoverEvent, ResourcesDiscoverResult>,
+		options?: ExtensionHandlerOptions,
+	): void;
+	on(event: "session_start", handler: ExtensionHandler<SessionStartEvent>, options?: ExtensionHandlerOptions): void;
 	on(
 		event: "session_before_switch",
 		handler: ExtensionHandler<SessionBeforeSwitchEvent, SessionBeforeSwitchResult>,
+		options?: ExtensionHandlerOptions,
 	): void;
-	on(event: "session_switch", handler: ExtensionHandler<SessionSwitchEvent>): void;
+	on(event: "session_switch", handler: ExtensionHandler<SessionSwitchEvent>, options?: ExtensionHandlerOptions): void;
 	on(
 		event: "session_before_branch",
 		handler: ExtensionHandler<SessionBeforeBranchEvent, SessionBeforeBranchResult>,
+		options?: ExtensionHandlerOptions,
 	): void;
-	on(event: "session_branch", handler: ExtensionHandler<SessionBranchEvent>): void;
+	on(event: "session_branch", handler: ExtensionHandler<SessionBranchEvent>, options?: ExtensionHandlerOptions): void;
 	on(
 		event: "session_before_compact",
 		handler: ExtensionHandler<SessionBeforeCompactEvent, SessionBeforeCompactResult>,
+		options?: ExtensionHandlerOptions,
 	): void;
-	on(event: "session.compacting", handler: ExtensionHandler<SessionCompactingEvent, SessionCompactingResult>): void;
+	on(
+		event: "session.compacting",
+		handler: ExtensionHandler<SessionCompactingEvent, SessionCompactingResult>,
+		options?: ExtensionHandlerOptions,
+	): void;
 	on(
 		event: "cache_warming_decision",
 		handler: ExtensionHandler<CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult>,
+		options?: ExtensionHandlerOptions,
 	): void;
-	on(event: "session_compact", handler: ExtensionHandler<SessionCompactEvent>): void;
-	on(event: "session_shutdown", handler: ExtensionHandler<SessionShutdownEvent>): void;
-	on(event: "session_before_tree", handler: ExtensionHandler<SessionBeforeTreeEvent, SessionBeforeTreeResult>): void;
-	on(event: "session_tree", handler: ExtensionHandler<SessionTreeEvent>): void;
-	on(event: "context", handler: ExtensionHandler<ContextEvent, ContextEventResult>): void;
+	on(
+		event: "session_compact",
+		handler: ExtensionHandler<SessionCompactEvent>,
+		options?: ExtensionHandlerOptions,
+	): void;
+	on(
+		event: "session_shutdown",
+		handler: ExtensionHandler<SessionShutdownEvent>,
+		options?: ExtensionHandlerOptions,
+	): void;
+	on(
+		event: "session_before_tree",
+		handler: ExtensionHandler<SessionBeforeTreeEvent, SessionBeforeTreeResult>,
+		options?: ExtensionHandlerOptions,
+	): void;
+	on(event: "session_tree", handler: ExtensionHandler<SessionTreeEvent>, options?: ExtensionHandlerOptions): void;
+	on(
+		event: "context",
+		handler: ExtensionHandler<ContextEvent, ContextEventResult>,
+		options?: ExtensionHandlerOptions,
+	): void;
 	on(
 		event: "before_provider_request",
 		handler: ExtensionHandler<BeforeProviderRequestEvent, BeforeProviderRequestEventResult>,
+		options?: ExtensionHandlerOptions,
 	): void;
-	on(event: "after_provider_response", handler: ExtensionHandler<AfterProviderResponseEvent>): void;
-	on(event: "before_agent_start", handler: ExtensionHandler<BeforeAgentStartEvent, BeforeAgentStartEventResult>): void;
+	on(
+		event: "after_provider_response",
+		handler: ExtensionHandler<AfterProviderResponseEvent>,
+		options?: ExtensionHandlerOptions,
+	): void;
+	on(
+		event: "before_agent_start",
+		handler: ExtensionHandler<BeforeAgentStartEvent, BeforeAgentStartEventResult>,
+		options?: ExtensionHandlerOptions,
+	): void;
 	on(
 		event: "before_subagent_spawn",
 		handler: ExtensionHandler<BeforeSubagentSpawnEvent, BeforeSubagentSpawnEventResult>,
+		options?: ExtensionHandlerOptions,
 	): void;
-	on(event: "agent_start", handler: ExtensionHandler<AgentStartEvent>): void;
-	on(event: "agent_end", handler: ExtensionHandler<AgentEndEvent>): void;
-	on(event: "session_stop", handler: ExtensionHandler<SessionStopEvent, SessionStopEventResult>): void;
-	on(event: "turn_start", handler: ExtensionHandler<TurnStartEvent>): void;
-	on(event: "turn_end", handler: ExtensionHandler<TurnEndEvent>): void;
-	on(event: "message_start", handler: ExtensionHandler<MessageStartEvent>): void;
-	on(event: "message_update", handler: ExtensionHandler<MessageUpdateEvent>): void;
-	on(event: "message_end", handler: ExtensionHandler<MessageEndEvent>): void;
+	on(event: "agent_start", handler: ExtensionHandler<AgentStartEvent>, options?: ExtensionHandlerOptions): void;
+	on(event: "agent_end", handler: ExtensionHandler<AgentEndEvent>, options?: ExtensionHandlerOptions): void;
+	on(
+		event: "session_stop",
+		handler: ExtensionHandler<SessionStopEvent, SessionStopEventResult>,
+		options?: ExtensionHandlerOptions,
+	): void;
+	on(event: "turn_start", handler: ExtensionHandler<TurnStartEvent>, options?: ExtensionHandlerOptions): void;
+	on(event: "turn_end", handler: ExtensionHandler<TurnEndEvent>, options?: ExtensionHandlerOptions): void;
+	on(event: "message_start", handler: ExtensionHandler<MessageStartEvent>, options?: ExtensionHandlerOptions): void;
+	on(event: "message_update", handler: ExtensionHandler<MessageUpdateEvent>, options?: ExtensionHandlerOptions): void;
+	on(event: "message_end", handler: ExtensionHandler<MessageEndEvent>, options?: ExtensionHandlerOptions): void;
 	on(
 		event: "assistant_message",
 		handler: ExtensionHandler<AssistantMessageRewriteEvent, AssistantMessageRewriteResult>,
+		options?: ExtensionHandlerOptions,
 	): void;
-	on(event: "tool_execution_start", handler: ExtensionHandler<ToolExecutionStartEvent>): void;
-	on(event: "tool_execution_update", handler: ExtensionHandler<ToolExecutionUpdateEvent>): void;
-	on(event: "tool_execution_end", handler: ExtensionHandler<ToolExecutionEndEvent>): void;
-	on(event: "auto_compaction_start", handler: ExtensionHandler<AutoCompactionStartEvent>): void;
-	on(event: "auto_compaction_end", handler: ExtensionHandler<AutoCompactionEndEvent>): void;
-	on(event: "auto_retry_start", handler: ExtensionHandler<AutoRetryStartEvent>): void;
-	on(event: "auto_retry_end", handler: ExtensionHandler<AutoRetryEndEvent>): void;
-	on(event: "retry_fallback_applied", handler: ExtensionHandler<RetryFallbackAppliedEvent>): void;
-	on(event: "retry_fallback_succeeded", handler: ExtensionHandler<RetryFallbackSucceededEvent>): void;
-	on(event: "ttsr_triggered", handler: ExtensionHandler<TtsrTriggeredEvent>): void;
-	on(event: "todo_reminder", handler: ExtensionHandler<TodoReminderEvent>): void;
-	on(event: "goal_updated", handler: ExtensionHandler<GoalUpdatedEvent>): void;
-	on(event: "credential_disabled", handler: ExtensionHandler<CredentialDisabledEvent>): void;
-	on(event: "input", handler: ExtensionHandler<InputEvent, InputEventResult>): void;
-	on(event: "tool_approval_requested", handler: ExtensionHandler<ToolApprovalRequestedEvent>): void;
-	on(event: "tool_approval_resolved", handler: ExtensionHandler<ToolApprovalResolvedEvent>): void;
-	on(event: "plan_review_requested", handler: ExtensionHandler<PlanReviewRequestedEvent>): void;
-	on(event: "plan_review_resolved", handler: ExtensionHandler<PlanReviewResolvedEvent>): void;
-	on(event: "mode_changed", handler: ExtensionHandler<ModeChangedEvent>): void;
-	on(event: "tool_call", handler: ExtensionHandler<ToolCallEvent, ToolCallEventResult>): void;
-	on(event: "tool_result", handler: ExtensionHandler<ToolResultEvent, ToolResultEventResult>): void;
-	on(event: "user_bash", handler: ExtensionHandler<UserBashEvent, UserBashEventResult>): void;
-	on(event: "user_python", handler: ExtensionHandler<UserPythonEvent, UserPythonEventResult>): void;
-	on(event: "mcp_notification", handler: ExtensionHandler<McpNotificationEvent>): void;
-	on(event: "link_activate", handler: ExtensionHandler<LinkActivateEvent>): void;
+	on(
+		event: "tool_execution_start",
+		handler: ExtensionHandler<ToolExecutionStartEvent>,
+		options?: ExtensionHandlerOptions,
+	): void;
+	on(
+		event: "tool_execution_update",
+		handler: ExtensionHandler<ToolExecutionUpdateEvent>,
+		options?: ExtensionHandlerOptions,
+	): void;
+	on(
+		event: "tool_execution_end",
+		handler: ExtensionHandler<ToolExecutionEndEvent>,
+		options?: ExtensionHandlerOptions,
+	): void;
+	on(
+		event: "auto_compaction_start",
+		handler: ExtensionHandler<AutoCompactionStartEvent>,
+		options?: ExtensionHandlerOptions,
+	): void;
+	on(
+		event: "auto_compaction_end",
+		handler: ExtensionHandler<AutoCompactionEndEvent>,
+		options?: ExtensionHandlerOptions,
+	): void;
+	on(event: "auto_retry_start", handler: ExtensionHandler<AutoRetryStartEvent>, options?: ExtensionHandlerOptions): void;
+	on(event: "auto_retry_end", handler: ExtensionHandler<AutoRetryEndEvent>, options?: ExtensionHandlerOptions): void;
+	on(
+		event: "retry_fallback_applied",
+		handler: ExtensionHandler<RetryFallbackAppliedEvent>,
+		options?: ExtensionHandlerOptions,
+	): void;
+	on(
+		event: "retry_fallback_succeeded",
+		handler: ExtensionHandler<RetryFallbackSucceededEvent>,
+		options?: ExtensionHandlerOptions,
+	): void;
+	on(event: "ttsr_triggered", handler: ExtensionHandler<TtsrTriggeredEvent>, options?: ExtensionHandlerOptions): void;
+	on(event: "todo_reminder", handler: ExtensionHandler<TodoReminderEvent>, options?: ExtensionHandlerOptions): void;
+	on(event: "goal_updated", handler: ExtensionHandler<GoalUpdatedEvent>, options?: ExtensionHandlerOptions): void;
+	on(
+		event: "credential_disabled",
+		handler: ExtensionHandler<CredentialDisabledEvent>,
+		options?: ExtensionHandlerOptions,
+	): void;
+	on(event: "input", handler: ExtensionHandler<InputEvent, InputEventResult>, options?: ExtensionHandlerOptions): void;
+	on(
+		event: "tool_approval_requested",
+		handler: ExtensionHandler<ToolApprovalRequestedEvent>,
+		options?: ExtensionHandlerOptions,
+	): void;
+	on(
+		event: "tool_approval_resolved",
+		handler: ExtensionHandler<ToolApprovalResolvedEvent>,
+		options?: ExtensionHandlerOptions,
+	): void;
+	on(
+		event: "plan_review_requested",
+		handler: ExtensionHandler<PlanReviewRequestedEvent>,
+		options?: ExtensionHandlerOptions,
+	): void;
+	on(
+		event: "plan_review_resolved",
+		handler: ExtensionHandler<PlanReviewResolvedEvent>,
+		options?: ExtensionHandlerOptions,
+	): void;
+	on(
+		event: "tool_call",
+		handler: ExtensionHandler<ToolCallEvent, ToolCallEventResult>,
+		options?: ExtensionHandlerOptions,
+	): void;
+	on(
+		event: "tool_result",
+		handler: ExtensionHandler<ToolResultEvent, ToolResultEventResult>,
+		options?: ExtensionHandlerOptions,
+	): void;
+	on(
+		event: "user_bash",
+		handler: ExtensionHandler<UserBashEvent, UserBashEventResult>,
+		options?: ExtensionHandlerOptions,
+	): void;
+	on(
+		event: "user_python",
+		handler: ExtensionHandler<UserPythonEvent, UserPythonEventResult>,
+		options?: ExtensionHandlerOptions,
+	): void;
+	on(
+		event: "mcp_notification",
+		handler: ExtensionHandler<McpNotificationEvent>,
+		options?: ExtensionHandlerOptions,
+	): void;
+	on(
+		event: "mode_changed",
+		handler: ExtensionHandler<ModeChangedEvent>,
+		options?: ExtensionHandlerOptions,
+	): void;
+	on(
+		event: "link_activate",
+		handler: ExtensionHandler<LinkActivateEvent>,
+		options?: ExtensionHandlerOptions,
+	): void;
 
 	// =========================================================================
 	// Tool Registration
@@ -2002,6 +2144,9 @@ export interface ExtensionAPI {
 
 	/** Register a renderer for assistant thinking blocks. Rendered after the original thinking text. */
 	registerAssistantThinkingRenderer(renderer: AssistantThinkingRenderer): void;
+
+	/** Project assistant text in the existing component without changing messages or history. */
+	registerAssistantTextDisplay(renderer: AssistantTextDisplayRenderer): void;
 
 	/**
 	 * Register a display-only transform for assistant text blocks: it returns the markdown to draw.
@@ -2400,9 +2545,12 @@ export interface Extension {
 	resolvedPath: string;
 	label?: string;
 	handlers: Map<string, HandlerFn[]>;
+	/** Per-event deadlines for handlers that explicitly override the default. */
+	handlerTimeouts?: Map<string, WeakMap<object, number>>;
 	tools: Map<string, RegisteredTool<any, any>>;
 	toolRegistrationListeners?: Set<ToolRegistrationListener>;
 	assistantThinkingRenderers: AssistantThinkingRenderer[];
+	assistantTextDisplayRenderers: AssistantTextDisplayRenderer[];
 	assistantTextRenderers: AssistantTextRenderer[];
 	/** Link schemes claimed with `registerLinkScheme`, lowercase. */
 	linkSchemes: string[];

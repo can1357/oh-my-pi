@@ -18,7 +18,13 @@ import { Text } from "../components/text";
 import { formatDuration, formatNumber, logger } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
-import type { AssistantTextRenderer, AssistantTextRendering, AssistantThinkingRenderer } from "./extension-types";
+import type {
+	AssistantTextDisplayRenderer,
+	AssistantTextDisplayResult,
+	AssistantTextRenderer,
+	AssistantTextRendering,
+	AssistantThinkingRenderer,
+} from "./extension-types";
 import { ensureThemeSync, getMarkdownTheme, getMarkdownThemeWithLinkTargets, getThemeEpoch, theme } from "../theme";
 import { card, col, elapsed, node, span, text } from "../native/describe";
 import { hasTranscriptActions, runTranscriptAction } from "./transcript-actions";
@@ -52,6 +58,7 @@ import { chartFence, hasChartTable, lookupTableChart, splitTableCharts } from ".
  */
 const MAX_TRANSCRIPT_ERROR_ROWS = 8;
 const EMPTY_STABLE_RENDER: readonly string[] = [];
+const TEXT_DISPLAY_FAILURE = "文本显示失败：未获得完整的显示文本。";
 /** Text renderers that threw once; each failure is logged once per renderer, not per frame. */
 const failedTextRenderers = new WeakSet<AssistantTextRenderer>();
 
@@ -406,10 +413,12 @@ export class AssistantMessageComponent extends Container {
 	#reactionTarget: ReactionTarget | undefined;
 	/** Reaction lifted from the reply's opening emoji, once resolved. */
 	#reaction: string | undefined;
-	/** Display form of {@link #lastMessage} (reaction handled, extension text renderers applied) the native description is built from. */
+	/** Display form of {@link #lastMessage} (reaction handled, display projections and extension text renderers applied) the native description is built from. */
 	#displayedMessage: AssistantMessage | undefined;
 	/** {@link #displayedMessage} before extension text renderers: the reply as written, which thinking state and the native Copy follow. */
 	#answerMessage: AssistantMessage | undefined;
+	#projectedTextBlocks = new Set<number>();
+	#pendingTextDisplayBlocks = new Set<number>();
 	/** Thinking-extension components per content index, recorded when the slow path mounts them. */
 	#thinkingExtensions = new Map<number, Component[]>();
 	/** Collapse state of thinking sections toggled in the terminal, by content index; cleared by {@link setHideThinkingBlock}. */
@@ -542,6 +551,48 @@ export class AssistantMessageComponent extends Container {
 		return { ...message, content };
 	}
 
+	#projectTextDisplay(source: AssistantMessage, display: AssistantMessage, transient: boolean): AssistantMessage {
+		this.#projectedTextBlocks.clear();
+		this.#pendingTextDisplayBlocks.clear();
+		if (this.#textDisplayRenderers.length === 0) return display;
+		let content: AssistantMessage["content"] | undefined;
+		const opening = this.#reactionTarget ? this.#openingText(source) : undefined;
+		for (let index = 0; index < source.content.length; index++) {
+			const block = source.content[index]!;
+			if (block.type !== "text") continue;
+			let result: AssistantTextDisplayResult | undefined;
+			for (const renderer of this.#textDisplayRenderers) {
+				try {
+					result = renderer(block.text, { message: source, blockIndex: index, transient });
+				} catch {
+					// Display failures must be visible, not fall back to potentially private source prose.
+					result = { text: TEXT_DISPLAY_FAILURE };
+				}
+				if (result !== undefined) break;
+			}
+			if (result === undefined) continue;
+			this.#projectedTextBlocks.add(index);
+			const pending = result.pending === true && transient;
+			if (pending) this.#pendingTextDisplayBlocks.add(index);
+			let text = result.pending === true && !transient ? TEXT_DISPLAY_FAILURE : result.text;
+			if (opening?.index === index && opening.split.emoji !== undefined) {
+				const reaction = splitReaction(text);
+				if (reaction.emoji !== undefined) text = reaction.body;
+			}
+			const displayedBlock = display.content[index]!;
+			if (displayedBlock.type !== "text" || displayedBlock.text === text) continue;
+			// Reaction handling may already own a shallow display copy; reuse it.
+			content ??= display === source ? display.content.slice() : display.content;
+			content[index] = { ...displayedBlock, text };
+		}
+		return content && display === source ? { ...display, content } : display;
+	}
+
+	/** Pending prose cannot be sealed merely because a following tool call started. */
+	hasPendingTextDisplay(): boolean {
+		return this.#pendingTextDisplayBlocks.size > 0;
+	}
+
 	/**
 	 * Display form with the extension text renderers applied, in registration order: each gets the
 	 * previous one's output. A renderer that throws or returns a non-string leaves its input drawn;
@@ -595,6 +646,7 @@ export class AssistantMessageComponent extends Container {
 	#hideThinkingBlock: boolean;
 	readonly #onImageUpdate?: () => void;
 	readonly #thinkingRenderers: readonly AssistantThinkingRenderer[];
+	readonly #textDisplayRenderers: readonly AssistantTextDisplayRenderer[];
 	#textRendering: AssistantTextRendering | undefined;
 	/** Index in the full reply's `content` of this component's first block, kept across renderer swaps. */
 	readonly #textContentOffset: number;
@@ -612,13 +664,24 @@ export class AssistantMessageComponent extends Container {
 		imageBudget?: ImageBudget,
 		proseOnlyThinking = true,
 		linkTargets?: ReadonlyMap<string, string>,
-		expandThinkingBlocks = false,
-		textRendering?: AssistantTextRendering,
+		textDisplayRenderersOrExpand: readonly AssistantTextDisplayRenderer[] | boolean = [],
+		expandThinkingBlocksOrRendering: boolean | AssistantTextRendering = false,
+		textRenderingArg?: AssistantTextRendering,
 	) {
 		super();
+		const textDisplayRenderers = Array.isArray(textDisplayRenderersOrExpand) ? textDisplayRenderersOrExpand : [];
+		const expandThinkingBlocks =
+			typeof textDisplayRenderersOrExpand === "boolean"
+				? textDisplayRenderersOrExpand
+				: typeof expandThinkingBlocksOrRendering === "boolean"
+					? expandThinkingBlocksOrRendering
+					: false;
+		const textRendering =
+			typeof expandThinkingBlocksOrRendering === "object" ? expandThinkingBlocksOrRendering : textRenderingArg;
 		this.#hideThinkingBlock = hideThinkingBlock;
 		this.#onImageUpdate = onImageUpdate;
 		this.#thinkingRenderers = thinkingRenderers;
+		this.#textDisplayRenderers = textDisplayRenderers;
 		this.#textRendering = textRendering?.renderers.length ? textRendering : undefined;
 		this.#textContentOffset = textRendering?.contentOffset ?? 0;
 		this.#imageBudget = imageBudget;
@@ -978,7 +1041,7 @@ export class AssistantMessageComponent extends Container {
 			}
 			for (let index = 0; index < message.content.length; index++) {
 				const content = message.content[index]!;
-				const streaming = live && index === tailIndex;
+				const streaming = live && (index === tailIndex || this.#pendingTextDisplayBlocks.has(index));
 				if (content.type === "text" && canonicalizeMessage(content.text)) {
 					// A native terminal sizes table columns by every row it gets: send a growing row once
 					// its line ends. Hold before trimming, which would drop the newline ending a finished row.
@@ -1339,6 +1402,9 @@ export class AssistantMessageComponent extends Container {
 			const item = items[itemIndex];
 			if (item?.md === child) {
 				const md = item.md;
+				// Projected prose can be replaced at the terminal event, even when its
+				// source block already closed. Never publish it into immutable history.
+				if (item.blockType === "text" && this.#projectedTextBlocks.has(item.contentIndex)) break;
 				if (md instanceof FigureMarkdown) {
 					// Plain Markdown reproduces only the prose ahead of the first figure.
 					if (md.leadingProse) parts.push({ kind: item.blockType, text: md.leadingProse });
@@ -1569,15 +1635,24 @@ export class AssistantMessageComponent extends Container {
 		this.#transcriptBlockFinalized = true;
 		this.#dropStableRenders();
 		this.#stopThinkingAnimation();
+		// A forced seal (abort, abandoned stream) also settles pending projections.
+		// Re-render from source, never from the translated display snapshot.
 		// If the live pulse was on screen when the block sealed, drop the fast path
 		// and rebuild so the placeholder is removed — finalized blocks never animate.
 		// A sealed block's text is also complete and can retire to scrollback before the
 		// reply's final update reaches it: give the text renderers their final call now
 		// (sealed renders pass `streaming: false`).
+		const pendingDisplay = this.hasPendingTextDisplay();
 		const sealRenderers = this.#textRendering !== undefined && this.#lastUpdateTransient;
-		if (this.#thinkingDots) {
+		if (this.#thinkingDots || pendingDisplay) {
 			this.#fastPathKey = undefined;
 			this.#fastPathItems = undefined;
+			if (pendingDisplay) {
+				if (this.#lastMessage) {
+					this.updateContent(this.#lastMessage, { transient: false });
+				}
+				return;
+			}
 		}
 		if ((this.#thinkingDots || sealRenderers) && this.#lastMessage) {
 			this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
@@ -1915,9 +1990,14 @@ export class AssistantMessageComponent extends Container {
 		this.#lastMessage = message;
 		this.#lastUpdateTransient = opts?.transient === true;
 		// Everything below renders the display form; #lastMessage keeps the
-		// verbatim message so re-renders re-derive the reaction deterministically.
+		// verbatim message so re-renders re-derive narration, reactions and projection deterministically.
 		// Narration the provider returned as thinking renders as answer text.
-		message = this.#displayMessage(presentNarrationAsAnswer(message), this.#lastUpdateTransient);
+		const source = presentNarrationAsAnswer(message);
+		message = this.#projectTextDisplay(
+			source,
+			this.#displayMessage(source, this.#lastUpdateTransient),
+			this.#lastUpdateTransient,
+		);
 		this.#answerMessage = message;
 		// A sealed block (closed at a tool call) keeps receiving transient updates; its text is final.
 		// Thinking state below reads `answer`: renderers transform display only, so one that hides the
@@ -2099,7 +2179,9 @@ export class AssistantMessageComponent extends Container {
 		const items = this.#fastPathItems;
 		if (!items) return;
 		for (let i = 0; i < items.length; i++) {
-			items[i]!.md.transientRenderCache = transient && i === items.length - 1;
+			const item = items[i]!;
+			item.md.transientRenderCache =
+				transient && (i === items.length - 1 || this.#pendingTextDisplayBlocks.has(item.contentIndex));
 		}
 	}
 }

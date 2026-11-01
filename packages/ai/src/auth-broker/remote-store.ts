@@ -4,12 +4,13 @@
  * `upsert*`, `delete*ForProvider`) throw because login flows are server-side.
  *
  * Cache (`getCache`/`setCache`/`cleanExpiredCache`) is in-memory and ephemeral.
- * The bounded hot set preserves recently used session pins without keeping
- * every gateway client's 30-day sticky row resident.
+ * The bounded hot set preserves recently used ordinary session pins. Strict
+ * session locks remain until explicit removal or expiry, never capacity eviction.
  */
 import * as os from "node:os";
 import { getAppName, getInstallId, logger, postmortem } from "@oh-my-pi/pi-utils";
 import type { AuthCredentialStore } from "../auth/store";
+import { SESSION_STICKY_CACHE_PREFIX } from "../auth/affinity";
 import {
 	type AuthCredential,
 	type AuthCredentialSnapshotEntry,
@@ -36,8 +37,7 @@ import type {
 	SnapshotStreamEvent,
 } from "./types";
 
-// Bound both the number of distinct session pins and the size of caller-supplied
-// keys/values; an evicted session falls back to normal credential selection.
+// Bound ordinary cache rows; dropping a strict session lock would authorize fallback.
 const REMOTE_CACHE_MAX_ENTRIES = 4096;
 const REMOTE_CACHE_MAX_CHARACTERS = 4 * 1024 * 1024;
 
@@ -335,6 +335,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	/** Present while the background loop is parked; resolved by `#noteActivity` or `close()`. */
 	#activityWakeup: PromiseWithResolvers<void> | null = null;
 	#cache: Map<string, CacheEntry> = new Map();
+	#strictSessionCache: Map<string, CacheEntry> = new Map();
 	#cacheCharacters = 0;
 	/** `undefined` is the aggregate scope; provider scopes never stand in for it. */
 	#usageCache = new Map<Provider | undefined, UsageCacheEntry>();
@@ -1220,20 +1221,34 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 
 	getCache(key: string): string | null {
 		this.#noteActivity();
-		const entry = this.#cache.get(key);
+		const strict = this.#strictSessionCache.get(key);
+		const entry = strict ?? this.#cache.get(key);
 		if (!entry) return null;
 		if (entry.expiresAtSec * 1000 <= Date.now()) {
 			this.#deleteCache(key);
 			return null;
 		}
-		this.#cache.delete(key);
-		this.#cache.set(key, entry);
+		if (!strict) {
+			this.#cache.delete(key);
+			this.#cache.set(key, entry);
+		}
 		return entry.value;
 	}
 
 	setCache(key: string, value: string, expiresAtSec: number): void {
 		this.#noteActivity();
 		this.#deleteCache(key);
+		if (key.startsWith(SESSION_STICKY_CACHE_PREFIX)) {
+			try {
+				const sticky = JSON.parse(value) as { strict?: boolean } | null;
+				if (sticky?.strict === true) {
+					this.#strictSessionCache.set(key, { value, expiresAtSec });
+					return;
+				}
+			} catch {
+				// Non-JSON cache values use the ordinary bounded hot set.
+			}
+		}
 		const size = key.length + value.length;
 		if (size > REMOTE_CACHE_MAX_CHARACTERS) return;
 		this.#cache.set(key, { value, expiresAtSec });
@@ -1246,22 +1261,29 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	#deleteCache(key: string): void {
+		this.#strictSessionCache.delete(key);
 		const entry = this.#cache.get(key);
 		if (!entry) return;
 		this.#cacheCharacters -= key.length + entry.value.length;
 		this.#cache.delete(key);
 	}
 
-	/** Drop all cache rows whose keys start with the supplied prefix. */
-	deleteCachePrefix(prefix: string): void {
-		for (const key of this.#cache.keys()) {
-			if (key.startsWith(prefix)) this.#deleteCache(key);
+	/** Drop prefix-matching rows, optionally filtered by their value. */
+	deleteCachePrefix(prefix: string, shouldDelete?: (value: string) => boolean): void {
+		for (const [key, entry] of this.#cache) {
+			if (key.startsWith(prefix) && (!shouldDelete || shouldDelete(entry.value))) this.#deleteCache(key);
+		}
+		for (const [key, entry] of this.#strictSessionCache) {
+			if (key.startsWith(prefix) && (!shouldDelete || shouldDelete(entry.value))) this.#deleteCache(key);
 		}
 	}
 
 	cleanExpiredCache(): void {
 		const nowSec = Math.floor(Date.now() / 1000);
 		for (const [key, entry] of this.#cache) {
+			if (entry.expiresAtSec <= nowSec) this.#deleteCache(key);
+		}
+		for (const [key, entry] of this.#strictSessionCache) {
 			if (entry.expiresAtSec <= nowSec) this.#deleteCache(key);
 		}
 	}
@@ -1660,6 +1682,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		// process exiting right after close() still sends it; failures are dropped.
 		void this.#flushObservedUsage().finally(() => this.#cancelObservedUsageExitFlush?.());
 		this.#cache.clear();
+		this.#strictSessionCache.clear();
 		this.#cacheCharacters = 0;
 		this.#usageOverlays.clear();
 	}

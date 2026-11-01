@@ -425,6 +425,7 @@ export class ChatTranscriptBuilder {
 			this.#deps.ui.imageBudget,
 			proseOnlyThinking,
 			this.#deps.linkTargets,
+			undefined,
 			expandThinkingBlocks,
 		);
 		assistantComponent.pickReactionTarget(this.container.children);
@@ -459,8 +460,9 @@ export class ChatTranscriptBuilder {
 				this.#deps.getMessageRenderer ? undefined : [],
 				undefined,
 				proseOnlyThinking,
-				this.#deps.linkTargets,
-				expandThinkingBlocks,
+			this.#deps.linkTargets,
+			undefined,
+			expandThinkingBlocks,
 			);
 			this.#mountProse(component);
 			lastAssistantComponent = component;

@@ -31,6 +31,24 @@ export type AssistantThinkingRenderer = (
 	theme: Theme,
 ) => Component | undefined;
 
+/** Original assistant data and the lifecycle of the displayed text block. */
+export interface AssistantTextDisplayContext {
+	message: AssistantMessage;
+	blockIndex: number;
+	transient: boolean;
+}
+
+export interface AssistantTextDisplayResult {
+	text: string;
+	/** Keep this block mutable until its terminal display is available. */
+	pending?: boolean;
+}
+
+/** Synchronous display-only projection; undefined delegates to the next renderer. */
+export type AssistantTextDisplayRenderer = (
+	sourceText: string,
+	context: AssistantTextDisplayContext,
+) => AssistantTextDisplayResult | undefined;
 export interface AssistantTextRenderContext {
 	/**
 	 * The message being drawn; `message.timestamp` identifies the reply for `ctx.ui.rerenderMessage()`.

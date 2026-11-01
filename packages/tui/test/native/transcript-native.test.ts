@@ -119,6 +119,32 @@ describe("native transcript", () => {
 		expect(h.errors).toEqual([]);
 	});
 
+	it("replaces pending assistant display on the same native markdown node without sending source English", async () => {
+		let complete = false;
+		const source = assistant([{ type: "text", text: "Original English answer" }]);
+		const component = new AssistantMessageComponent(undefined, false, undefined, [], undefined, true, undefined, [
+			() => (complete ? { text: "中文最终答案" } : { text: "等待中文显示", pending: true }),
+		]);
+		const h = await startWith(h => h.tui.addChild(component));
+		component.updateContent(source, { transient: true });
+		await h.render();
+		const pending = h.find(node => node.k === "md");
+		expect(pending?.p).toMatchObject({ text: "等待中文显示", stream: true });
+		expect(component.hasPendingTextDisplay()).toBe(true);
+		expect(JSON.stringify(h.frames)).not.toContain("Original English answer");
+
+		complete = true;
+		component.updateContent(source);
+		component.markTranscriptBlockFinalized();
+		await h.render();
+		expect(h.byId(pending!.id)?.p).toMatchObject({ text: "中文最终答案" });
+		expect(h.byId(pending!.id)?.p).not.toHaveProperty("stream");
+		expect(component.hasPendingTextDisplay()).toBe(false);
+		expect(JSON.stringify(h.frames)).not.toContain("Original English answer");
+		expect(source.content[0]).toEqual({ type: "text", text: "Original English answer" });
+		expect(h.errors).toEqual([]);
+	});
+
 	it("streams a table row to the terminal only once its line ends", async () => {
 		const component = new AssistantMessageComponent();
 		const h = await startWith(h => h.tui.addChild(component));

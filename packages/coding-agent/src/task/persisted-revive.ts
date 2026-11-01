@@ -344,6 +344,11 @@ export function createPersistedSubagentReviverFactory(
 					cwd: restoredSeance?.cwd ?? ctx.session.sessionManager.getCwd(),
 					costGate: ctx.session.costGate,
 					authStorage: ctx.authStorage,
+					// Copy live direct-parent policy; SDK preserves the child's recorded
+					// automatic affinity unless the parent explicitly pinned an account.
+					credentialSourceSessionId:
+						(ref.parentId ? registry.get(ref.parentId)?.session?.sessionId : undefined) ??
+						(ref.parentId === MAIN_AGENT_ID ? ctx.session.sessionId : undefined),
 					// Revived agents join the root session tree, so their observability
 					// frames ride the same bus the RPC/collab surfaces subscribed to.
 					subagentEventBus: ctx.subagentEventBus,
