@@ -19,7 +19,7 @@ export const CJK_PARTICLE_SPLIT_RE =
 const CJK_TRAILING_PARTICLE_RE =
 	/(?:について|に関して|を確認|を調べ|에서|으로|에게|부터|까지|[のをがはにでともへや은는이가을를의에로과와도만])+$/u;
 export const CJK_TEMPORAL_QUERY_RE =
-	/(?:昨天|今天|明天|前天|大前天|後天|大後天|后天|大后天|(?:昨日|今日|明日|前日|後日)(?![香菜花子太郎方舟之星頭头條条新聞报報刊])|最近(?![鄰邻公共點点對对小大優优佳近親亲似距離距离最少])|近期|最新|這週|本週|上週|上周|下週|下周|本周|这周|這個月|上個月|上个月|下個月|下个月|这个月|去年|今年|明年|之前|先前|以前|何時|什麼時候|何时|什么时候|剛剛|剛才|刚刚|刚才|(?:過去|过去|現在|现在)(?![式時时態态完成分詞词進行进行])|目前|截止(?![頻频點点電壓压波長长區区率])(?:日|日期|時間|时间|時限|时限|前|到|至|於|于|$)|いつ(?![もでか])|何時|(?:昨日|今日|明日)(?![香菜花子太郎方舟之星頭头條条新聞报報刊])|一昨日|明後日|先週|今週|来週|先月|今月|来月|去年|今年|来年|タイムライン|時系列|時期|日時|언제(?![나든])|어제|오늘|내일|그제|모레|지난주|이번주|다음주|지난달|이번달|다음달|작년|올해|내년|타임라인|연표|시기|일시)/u;
+	/(?:昨天|今天|明天|前天|大前天|後天|大後天|后天|大后天|(?:昨日|今日|明日|前日|後日)(?![香菜花子太郎方舟之星頭头條条新聞报報刊])|最近(?![鄰邻公共點点對对小大優优佳近親亲似距離距离最少])|近期|最新|這週|本週|上週|上周|下週|下周|本周|这周|這個月|上個月|上个月|下個月|下个月|这个月|去年|今年|明年|之前|先前|以前|何時|什麼時候|何时|什么时候|剛剛|剛才|刚刚|刚才|(?:過去|过去|現在|现在)(?![式時时態态完成分詞词進行进行])|目前|截止(?![頻频點点電壓压波長长區区率])(?:日|日期|時間|时间|時限|时限|前|到|至|於|于|$)|いつ(?!(?:も|でも|しか|までも|か(?![ら？?]|$)))|何時|(?:昨日|今日|明日)(?![香菜花子太郎方舟之星頭头條条新聞报報刊])|一昨日|明後日|先週|今週|来週|先月|今月|来月|去年|今年|来年|タイムライン|時系列|時期|日時|언제(?![나든])|어제|오늘|내일|그제|모레|지난주|이번주|다음주|지난달|이번달|다음달|작년|올해|내년|타임라인|연표|시기|일시|최신|최근)/u;
 const HOMOGENEOUS_CJK_SUBRUN_RE =
 	/[\p{Script=Katakana}\u30FC\uFF66-\uFF9F]{2,}|[\p{Script=Han}\u3005]{2,}|[\p{Script=Hangul}]{2,}/gu;
 /** High-frequency CJK stop segments and question pronouns excluded from indexing and candidate shingles. */
@@ -280,7 +280,41 @@ export function stripCjkQuestionAffixes(segment: string): string {
 	return current;
 }
 
+export const CJK_TEMPORAL_ROUTING_PHRASES = [
+	"多久",
+	"幾天",
+	"几天",
+	"幾週",
+	"几周",
+	"幾個月",
+	"几个月",
+	"什麼時候",
+	"什么时候",
+	"何時",
+	"何时",
+	"哪一天",
+	"幾號",
+	"几号",
+	"哪天",
+	"時間線",
+	"时间线",
+	"時程",
+] as const;
+
 const CJK_TEMPORAL_PREFIXES = [
+	...CJK_TEMPORAL_ROUTING_PHRASES,
+	"截止日期",
+	"截止時間",
+	"截止时间",
+	"截止時限",
+	"截止时限",
+	"截止日",
+	"截止前",
+	"截止到",
+	"截止至",
+	"截止於",
+	"截止于",
+	"截止",
 	"大前天",
 	"大後天",
 	"大后天",
@@ -292,8 +326,6 @@ const CJK_TEMPORAL_PREFIXES = [
 	"下个月",
 	"這個月",
 	"这个月",
-	"什麼時候",
-	"什么时候",
 	"タイムライン",
 	"時系列",
 	"타임라인",
@@ -331,8 +363,6 @@ const CJK_TEMPORAL_PREFIXES = [
 	"之前",
 	"先前",
 	"以前",
-	"何時",
-	"何时",
 	"剛剛",
 	"剛才",
 	"刚刚",
@@ -351,6 +381,7 @@ const CJK_TEMPORAL_PREFIXES = [
 	"来年",
 	"時期",
 	"日時",
+	"いつ",
 	"언제",
 	"어제",
 	"오늘",
@@ -363,6 +394,8 @@ const CJK_TEMPORAL_PREFIXES = [
 	"연표",
 	"시기",
 	"일시",
+	"최신",
+	"최근",
 ].sort((a, b) => b.length - a.length);
 
 const CJK_TEMPORAL_ENTITY_SUFFIX_RE = /^[香菜花子太郎方舟之星頭头條条新聞报報刊]/u;
@@ -371,8 +404,9 @@ function isTemporalPrefixExcludedSuffix(prefix: string, after: string): boolean 
 	if (after.length === 0) return false;
 	if (CJK_TEMPORAL_ENTITY_SUFFIX_RE.test(after)) return true;
 	if (prefix === "언제" && /^[나든]/u.test(after)) return true;
-	if (prefix === "いつ" && /^[もでか]/u.test(after)) return true;
+	if (prefix === "いつ" && /^(?:も|でも|しか|までも|か(?![ら？?]|$))/u.test(after)) return true;
 	if (prefix === "最近" && /^[鄰邻公共點点對对小大優优佳近親亲似距離距离最少]/u.test(after)) return true;
+	if (prefix === "截止" && /^[頻频點点電壓压波長长區区率]/u.test(after)) return true;
 	if (
 		(prefix === "過去" || prefix === "过去" || prefix === "現在" || prefix === "现在") &&
 		/^[式時时態态完成分詞词進行进行]/u.test(after)

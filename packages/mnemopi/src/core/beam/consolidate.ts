@@ -8,15 +8,15 @@ import {
 	CJK_PARTICLE_SPLIT_RE,
 	CJK_STOP_SEGMENTS,
 	CJK_TEMPORAL_QUERY_RE,
+	CJK_TEMPORAL_ROUTING_PHRASES,
 	cjkCodePointShingles,
 	codePointLength,
+	extractCjkNonTemporalSegments,
 	hasCjk,
 	RECALL_RAW_TOKEN_RE,
+	splitCjkClausesPreservingPossessiveCompounds,
 	splitMixedScriptToken,
 	stripCjkQuestionAffixes,
-	extractCjkNonTemporalSegments,
-	splitCjkClausesPreservingPossessiveCompounds,
-	stripCjkTemporalAffixes,
 	unicodeCaseVariants,
 } from "../../util/regex";
 import { STOP_WORDS } from "../synonyms";
@@ -277,7 +277,7 @@ function makeQuestionTokenGroups(query: string): {
 		}
 	};
 
-	for (const rawToken of rawTokens) {
+	for (const rawToken of rawTokens.slice(0, 8)) {
 		const token = rawToken.toLowerCase();
 		if (hasCjk(token)) {
 			const { nonCjk, cjkRuns } = splitMixedScriptToken(rawToken);
@@ -300,11 +300,11 @@ function makeQuestionTokenGroups(query: string): {
 				}
 				if (!CJK_CLAUSE_PARTICLE_RE.test(token)) {
 					pushUnique(primary, token);
-					if (rawToken !== token) pushUnique(primary, rawToken);
 				}
 			}
 			for (const latin of nonCjk) {
-				if (latin.length > 1 && !stop.has(latin.toLowerCase())) pushUnique(primary, latin);
+				const lowerLatin = latin.toLowerCase();
+				if (lowerLatin.length > 1 && !stop.has(lowerLatin)) pushUnique(primary, lowerLatin);
 			}
 			for (const rawRun of cjkRuns) {
 				for (const run of new Set([rawRun, rawRun.normalize("NFKC")])) {
@@ -354,7 +354,7 @@ function makeQuestionTokenGroups(query: string): {
 		}
 	}
 
-	const all = [...primary, ...shingles].slice(0, 8);
+	const all = primary.length >= 8 ? primary : [...primary, ...shingles.slice(0, 8 - primary.length)];
 	const primarySet = new Set(primary);
 	const primaryInAll = all.filter(t => primarySet.has(t));
 	const exactPrimary = primaryInAll.filter(t => !primaryInAll.some(other => other !== t && other.includes(t)));
@@ -382,24 +382,7 @@ export const TR_ROUTING_PHRASES = [
 	"deadline",
 	"timeline",
 	"how far apart",
-	"多久",
-	"幾天",
-	"几天",
-	"幾週",
-	"几周",
-	"幾個月",
-	"几个月",
-	"什麼時候",
-	"什么时候",
-	"何時",
-	"何时",
-	"哪一天",
-	"幾號",
-	"几号",
-	"哪天",
-	"時間線",
-	"时间线",
-	"時程",
+	...CJK_TEMPORAL_ROUTING_PHRASES,
 ] as const;
 
 export const EO_ROUTING_PHRASES = [
@@ -445,6 +428,8 @@ const EXTRA_GENERIC_TIMELINE_WORDS = [
 	"最新",
 	"いつ",
 	"언제",
+	"최신",
+	"최근",
 	"タイムライン",
 	"時系列",
 	"타임라인",
@@ -1131,7 +1116,9 @@ function timelineRetrieve(
 	const rankClause = scoreExprs.length > 0 ? `(${scoreExprs.join(" + ")}) DESC, ` : "";
 	const isRecencyQuery =
 		ability === "TR" &&
-		/(?:最新|近期|最近|剛剛|剛才|刚刚|刚才|\blatest\b|\brecent(?:ly)?\b|\blast\b|\bnewest\b)/iu.test(query);
+		/(?:最新|近期|最近|剛剛|剛才|刚刚|刚才|최신|최근|\blatest\b|\brecent(?:ly)?\b|\blast\b|\bnewest\b)/iu.test(
+			query,
+		);
 	const tieOrder = isRecencyQuery ? "date DESC, event_id DESC" : "date ASC, event_id ASC";
 	const allParams = [...params, ...orderParams, topK];
 	const results = asRows(

@@ -365,9 +365,20 @@ function latinIdentifierTokens(text: string): Set<string> {
 		}
 	}
 	for (const match of text.matchAll(/[\p{L}\p{N}][\p{L}\p{N}_.#+-]*/gu)) {
-		const token = match[0].replace(/[.:/-]+$/, "").toLowerCase();
-		if (token.length > 0 && !hasCjk(token) && !STOP_WORDS.has(token) && !/^\d+$/.test(token)) {
-			out.add(token);
+		const rawMatch = match[0];
+		const token = rawMatch.replace(/[.:/-]+$/, "").toLowerCase();
+		if (token.length === 0) continue;
+		if (!hasCjk(token)) {
+			if (!STOP_WORDS.has(token) && !/^\d+$/.test(token)) {
+				out.add(token);
+			}
+		} else {
+			for (const part of splitMixedScriptToken(rawMatch).nonCjk) {
+				const lowerPart = part.replace(/[.:/-]+$/, "").toLowerCase();
+				if (lowerPart.length > 0 && !STOP_WORDS.has(lowerPart) && !/^\d+$/.test(lowerPart)) {
+					out.add(lowerPart);
+				}
+			}
 		}
 	}
 	return out;

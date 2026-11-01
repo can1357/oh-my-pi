@@ -1649,4 +1649,115 @@ describe("PolyphonicRecallEngine", () => {
 			closeQuietly(beam.db);
 		}
 	});
+
+	it("routes Japanese いつですか and いつからですか and Korean 최신/최근 questions to TR", () => {
+		const beam = makeBeam();
+		try {
+			beam.db.run(
+				`INSERT INTO memoria_timelines (session_id, event_id, date, description, source_memory_id)
+					VALUES
+					(?, 1, '2026-10-10', 'デプロイ完了とリリース確認', 'wm-jp-deploy'),
+					(?, 2, '2026-10-12', '최신 배포 완료 및 서비스 점검', 'wm-kr-deploy')`,
+				[beam.sessionId, beam.sessionId],
+			);
+
+			const jp1 = memoriaRetrieve(beam, "デプロイはいつですか", null, 5);
+			expect(jp1.ability).toBe("TR");
+			expect(jp1.results.length).toBeGreaterThan(0);
+
+			const jp2 = memoriaRetrieve(beam, "デプロイはいつからですか", null, 5);
+			expect(jp2.ability).toBe("TR");
+
+			const kr1 = memoriaRetrieve(beam, "최신 배포는 무엇인가요", null, 5);
+			expect(kr1.ability).toBe("TR");
+			expect((kr1.results as Array<{ description?: string }>)[0]?.description).toContain("배포");
+
+			const kr2 = memoriaRetrieve(beam, "최근 배포", null, 5);
+			expect(kr2.ability).toBe("TR");
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
+
+	it("splits deadline markers in unspaced CJK queries like 後端截止日期 to score 後端 primary", () => {
+		const beam = makeBeam();
+		try {
+			beam.db.run(
+				`INSERT INTO memoria_timelines (session_id, event_id, date, description, source_memory_id)
+					VALUES
+					(?, 1, '2026-01-01', '前端專案截止日期為一月一日', 'wm-fe-deadline'),
+					(?, 2, '2026-06-01', '後端專案截止日期為六月一日', 'wm-be-deadline')`,
+				[beam.sessionId, beam.sessionId],
+			);
+
+			const res = memoriaRetrieve(beam, "後端截止日期", null, 1);
+			expect(res.ability).toBe("TR");
+			expect((res.results as Array<{ description?: string }>)[0]?.description).toContain("後端");
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
+
+	it("preserves adjacent Cyrillic identifiers in mixed-script CJK memories during diversityRerank and respects lexical token cap", () => {
+		const beam = makeBeam();
+		try {
+			const engine = new PolyphonicRecallEngine({
+				db: beam.db,
+				sessionId: beam.sessionId,
+				channelId: beam.channelId,
+			});
+			const timestamp = new Date().toISOString();
+			insertWorking(beam, "wm-moscow", "Москва資料庫連線設定與備份策略", 0.9, timestamp);
+			insertWorking(beam, "wm-kyiv", "Киев資料庫連線設定與備份策略", 0.85, timestamp);
+
+			const candidates = new Map([
+				[
+					"wm-moscow",
+					{
+						memoryId: "wm-moscow",
+						combinedScore: 0.1,
+						voiceScores: { hybrid: 0.1 },
+						metadata: {},
+					},
+				],
+				[
+					"wm-kyiv",
+					{
+						memoryId: "wm-kyiv",
+						combinedScore: 0.09,
+						voiceScores: { hybrid: 0.09 },
+						metadata: {},
+					},
+				],
+			]);
+			const reranked = engine.diversityRerank(candidates, 10, candidate => {
+				const row = beam.db
+					.query("SELECT id, content FROM working_memory WHERE id = ?")
+					.get(candidate.memoryId) as { id: string; content: string } | null;
+				if (!row) return null;
+				return {
+					id: row.id,
+					content: row.content,
+					score: candidate.combinedScore,
+					combined_score: candidate.combinedScore,
+					voice_scores: candidate.voiceScores,
+					metadata: candidate.metadata,
+					tier: "working",
+					tier_label: "working",
+				};
+			});
+			expect(reranked.map(r => r.id)).toEqual(["wm-moscow", "wm-kyiv"]);
+
+			beam.db.run(
+				`INSERT INTO memoria_facts
+					(session_id, message_idx, fact_type, key, value, context_snippet, importance, source_memory_id)
+					VALUES (?, 0, 'entity', 'delta', 'Delta cluster configuration', 'delta settings', 0.9, 'wm-delta')`,
+				[beam.sessionId],
+			);
+			const factRes = memoriaRetrieve(beam, "Москва資料庫 alpha beta gamma delta", "IE", 1);
+			expect((factRes.results as Array<{ key?: string }>)[0]?.key).toBe("delta");
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
 });
