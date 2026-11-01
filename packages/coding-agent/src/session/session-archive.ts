@@ -1216,26 +1216,28 @@ async function copyEntryDereferenced(
 					`the archive is kept — give the live tree a directory of its own and restore again`,
 			);
 		}
-		if (plan) {
-			if (!existing) {
-				await planWritableDirectory(path.dirname(destination), plan, source);
-				plan.notePromise(destination);
-				plan.created.add(destination);
-			}
+		// A directory this restore makes gets its mode from the `mkdir` that
+		// makes it, and nothing changes that mode afterwards — see
+		// {@link makeHeldDirectory}: a mode set after the `mkdir`, by name or
+		// through a descriptor opened after it, reached a directory a writer
+		// swapped in between the two, and gave somebody's private directory
+		// the archived `0777`. The mode is the archived one with the owner's
+		// read, write and search added, so the restore can fill it — an
+		// archived `0500` directory taken as it is could not be filled — and
+		// the umask narrows it as it narrows any directory this user makes. A
+		// directory the live tree already holds keeps its own permissions:
+		// merging an archive into a private `0700` directory must not widen it.
+		const mode = (stat.mode & 0o777) | 0o700;
+		if (!existing) {
+			if (plan) await planWritableDirectory(path.dirname(destination), plan, source);
+			assertUmaskKeepsOwnerWrite(destination, mode, source);
+			plan?.created.add(destination);
 		}
-		// A directory this restore makes is held, not named. Private while it
-		// is filled, and given the archived mode last, through the descriptor
-		// it was opened with — `fchmod`, which no rename or link can redirect.
-		// Setting the mode by name after the fill followed a link put at the
-		// name in between: a review renamed the new directory away and linked
-		// the name to a private directory, the restore's `chmod` gave that
-		// directory the archived `0777`, and another user removed its owner's
-		// only file. Taking the archived mode first instead made an archived
-		// `0500` directory one this restore could not fill. A directory the
-		// live tree already holds keeps its own permissions — merging an
-		// archive into a private `0700` directory must not widen it.
-		let held: fs.FileHandle | undefined;
-		if (!plan && !existing) held = await makeHeldDirectory(destination);
+		// Where this directory's entries start in the preview's list, so that
+		// once all of them would come home the directory is named in their place.
+		const promisedFrom = plan?.missing.length ?? 0;
+		let held: HeldFile | undefined;
+		if (!plan && !existing) held = await makeHeldDirectory(destination, mode);
 		try {
 			// Sorted, so a restore that stops part-way is reproducible from its report.
 			for (const entry of (await fs.readdir(source)).sort()) {
@@ -1249,16 +1251,15 @@ async function copyEntryDereferenced(
 					plan,
 				);
 			}
+			if (plan && !existing) plan.noteDirectory(destination, promisedFrom);
 			if (held) {
-				await held.chmod(stat.mode & 0o7777);
 				// The fill names paths, so a writer that moved this directory
 				// away and put something else at its name while it was filled
 				// had files land there instead: said, not taken for a restore.
-				// This comparison only reports. It runs after the mode was set
-				// and decides nothing — not the mode, not any later step — since
-				// by the time it is read it is already stale.
-				const [mine, standing] = await Promise.all([held.stat(), fs.lstat(destination).catch(() => undefined)]);
-				if (!standing || standing.dev !== mine.dev || standing.ino !== mine.ino) {
+				// This comparison only reports and decides nothing, since by the
+				// time it is read it is already stale.
+				const standing = await fs.lstat(destination).catch(() => undefined);
+				if (!standing || standing.dev !== held.dev || standing.ino !== held.ino) {
 					throw new Error(
 						`${destination} is no longer the directory this restore made for ${source}: something moved it ` +
 							`while it was being filled, so what was restored into it may be elsewhere`,
@@ -1266,7 +1267,7 @@ async function copyEntryDereferenced(
 				}
 			}
 		} finally {
-			await held?.close().catch(() => undefined);
+			await held?.handle.close().catch(() => undefined);
 		}
 		return;
 	}
@@ -1398,12 +1399,22 @@ async function copyTreeDereferenced(
  * live tree that is the archive itself, a ledger it could not write.
  */
 export interface RestorePlan {
-	/** Archived entries the live tree lacks and applying would bring home, relative to the live artifact tree; a missing directory named once. */
+	/**
+	 * Archived entries the live tree lacks and applying would bring home whole,
+	 * relative to the live artifact tree, in the order the walk reached them. A
+	 * directory applying would make is named once, in place of its entries, and
+	 * only when every one of them would come home: a refusal inside it leaves
+	 * the entries before the refusal named one by one, and the directory not at
+	 * all. Naming it beside a refusal promised a whole directory the apply
+	 * then left empty.
+	 */
 	missing: string[];
 	/** Directories applying would create, so a step inside one knows it will be there and writable. */
 	created: Set<string>;
-	/** Record `destination` as something applying would bring home, unless a directory it would create holds it. */
+	/** Record the file `destination` as something applying would bring home. */
 	notePromise(destination: string): void;
+	/** Record a directory applying would make, all of it planned: named in place of the entries recorded since `from`. */
+	noteDirectory(destination: string, from: number): void;
 	/** Whether the staging ledger has been checked. */
 	ledgerChecked: boolean;
 }
@@ -1415,15 +1426,12 @@ export function newRestorePlan(liveArtifacts: string): RestorePlan {
 		created: new Set(),
 		ledgerChecked: false,
 		notePromise(destination) {
+			plan.missing.push(path.relative(liveArtifacts, destination));
+		},
+		noteDirectory(destination, from) {
 			// The live tree's own root is not an entry of it.
 			if (destination === liveArtifacts) return;
-			for (let dir = path.dirname(destination); isWithin(liveArtifacts, dir) && dir !== liveArtifacts;) {
-				if (plan.created.has(dir)) return;
-				const up = path.dirname(dir);
-				if (up === dir) break;
-				dir = up;
-			}
-			plan.missing.push(path.relative(liveArtifacts, destination));
+			plan.missing.splice(from, plan.missing.length - from, path.relative(liveArtifacts, destination));
 		},
 	};
 	return plan;
@@ -1526,6 +1534,12 @@ export interface StagingGround {
 	handle: fs.FileHandle;
 	/** The staged file's identity, from the descriptor that created it. */
 	created: Stats;
+	/**
+	 * The staged file held: {@link handle} and {@link created}'s identity, by
+	 * which this run removes the file — at the stage, or at any name it was
+	 * linked to — and nothing put at those names since. See {@link removeOwnFile}.
+	 */
+	held: HeldFile;
 	/** This directory's record in {@link stagingLedgerDir}. */
 	record: string;
 	/**
@@ -1693,7 +1707,15 @@ export async function mintStagingGround(target: string, ledger: string, mode = 0
 			}
 			// Only the second record's descriptor goes on with the ground.
 			await release(recordHeld);
-			return { dir, file, handle, created, record: complete, recordHeld };
+			return {
+				dir,
+				file,
+				handle,
+				created,
+				held: { handle, dev: created.dev, ino: created.ino },
+				record: complete,
+				recordHeld,
+			};
 		} catch (error) {
 			// What this attempt made goes again before the failure is
 			// reported, and the record goes with it only once nothing it
@@ -1702,7 +1724,12 @@ export async function mintStagingGround(target: string, ledger: string, mode = 0
 			// file is removed while its descriptor is still held, and only
 			// then closed: a file it did not get to create is not its to
 			// remove.
-			const note = await clearStagingGround(dir, file, created, "this run");
+			const note = await clearStagingGround(
+				dir,
+				file,
+				handle && created ? { handle, dev: created.dev, ino: created.ino } : undefined,
+				"this run",
+			);
 			await handle?.close().catch(() => undefined);
 			if (note) {
 				await release();
@@ -1720,15 +1747,17 @@ export async function mintStagingGround(target: string, ledger: string, mode = 0
 
 /**
  * Take away a staging directory this run made, with the one file this run
- * staged in it — while that file is still the regular file whose identity
- * this run holds in memory — and nothing else. `staged` undefined means
- * this run never created the file, so nothing inside is its to remove.
+ * staged in it — while that file is still the one this run holds open, by
+ * the rule every removal here follows ({@link removeOwnFile}) — and nothing
+ * else. `staged` undefined means this run never created the file, so nothing
+ * inside is its to remove.
  *
  * Only the run that minted a directory calls this. A later run has a record
  * at most, and a record is a file anybody running as this user could have
  * written, naming a directory with a name, a place and an inode anybody
  * could arrange; none of that says a run made it, so no record removes
- * anything.
+ * anything. The directory itself goes with `rmdir`, which removes nothing
+ * but an empty directory.
  *
  * Anything else inside is reported rather than deleted, and a failure to
  * look is reported rather than read as an absence: "it was not there" and "I
@@ -1740,7 +1769,7 @@ export async function mintStagingGround(target: string, ledger: string, mode = 0
 async function clearStagingGround(
 	dir: string,
 	file: string,
-	staged: { dev: number; ino: number } | undefined,
+	staged: HeldFile | undefined,
 	stager: string,
 ): Promise<string | undefined> {
 	const notes: string[] = [];
@@ -1752,22 +1781,12 @@ async function clearStagingGround(
 	if (entries === undefined) return notes[0];
 	for (const name of entries) {
 		const at = path.join(dir, name);
-		const standing = await fs.lstat(at).catch(error => {
-			if (!isEnoent(error)) notes.push(`${at} could not be read, so it was left alone: ${error}`);
-			return undefined;
-		});
-		if (!standing) continue;
-		const ours =
-			staged !== undefined &&
-			at === file &&
-			standing.isFile() &&
-			standing.dev === staged.dev &&
-			standing.ino === staged.ino;
-		if (!ours) {
-			notes.push(`${at} is not what ${stager} staged there, so it was left alone`);
-			continue;
-		}
-		await fs.rm(at).catch((error: unknown) => notes.push(`${at} could not be removed: ${error}`));
+		const what = `what ${stager} staged there`;
+		const note =
+			staged !== undefined && at === file
+				? await removeOwnFile(at, [staged], what)
+				: `${at} is not ${what}, so it was left as it is`;
+		if (note) notes.push(note);
 	}
 	if (notes.length === 0) {
 		await fs.rmdir(dir).catch((error: unknown) => {
@@ -1787,7 +1806,7 @@ async function clearStagingGround(
  */
 export async function removeStagingGround(ground: StagingGround): Promise<string | undefined> {
 	try {
-		const note = await clearStagingGround(ground.dir, ground.file, ground.created, "this run");
+		const note = await clearStagingGround(ground.dir, ground.file, ground.held, "this run");
 		if (note !== undefined) return note;
 		return await removeOwnFile(ground.record, [ground.recordHeld], "the record this run wrote");
 	} finally {

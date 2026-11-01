@@ -21,7 +21,7 @@ import { randomBytes } from "node:crypto";
 import * as fs from "node:fs/promises";
 import { constants as fsConstants, type Stats } from "node:fs";
 import * as path from "node:path";
-import { isEnoent } from "@oh-my-pi/pi-utils";
+import { isEexist, isEnoent } from "@oh-my-pi/pi-utils";
 
 /** What a name stands for when it is not a regular file, in a reader's words: "a FIFO", "a socket", "a device". */
 export function kindOf(stat: Stats): string {
@@ -105,34 +105,45 @@ export async function createExclusive(file: string, mode: number, readable = fal
 }
 
 /**
- * Make `dir`, new — a plain `mkdir`, which fails on any name already there —
- * and hold it: open it at once with `O_DIRECTORY` and `O_NOFOLLOW`, so a link
- * put at the name since the `mkdir` is refused, require the held directory to
- * be this user's, and give it `mode` through the descriptor, so no umask
- * leaves it unwritable to its maker. Every later change of its own — its
- * mode above all — goes through the returned descriptor, which no rename or
- * link can redirect: a mode set by name after the directory was filled
- * followed a link put at the name, and gave an unrelated private directory
- * the archived `0777`.
+ * Make `dir`, new, with `mode` given to the `mkdir` itself, and hold it.
  *
- * Linux has no call that makes a directory and opens it in one step, and Node
- * has no `mkdirat` or `openat` to tie the open to the parent: between the
- * `mkdir` and the `open`, a writer of this user's own with access to the
- * parent can swap in another directory it made, and the caller then holds
- * that one. Such a concurrent writer is outside what this guards.
+ * The mode is set by the one call that makes the directory, as `mkdtemp`
+ * sets `0700`: the kernel applies it, less the umask, as the directory comes
+ * into being, so there is no moment at which the directory exists with a
+ * mode it is later changed from, and nothing here changes a mode afterwards
+ * — not through the name, not through a descriptor. A mode set after the
+ * `mkdir` went to whatever the name held by then: through the name it
+ * followed a link put there, and through a descriptor opened after the
+ * `mkdir` it reached a directory a writer of this user's own swapped in
+ * between the two calls — a review won that race with an inotify watcher
+ * about a third of the time, the restore gave somebody's private directory
+ * the archived `0777`, and another user removed its only file. With no
+ * change of mode left, a directory swapped in keeps its own.
+ *
+ * The directory is then opened with `O_DIRECTORY` and `O_NOFOLLOW`, so a
+ * link put at the name is refused, and what the descriptor holds must be a
+ * directory of this user's with nothing in it, read through the descriptor:
+ * a directory just made is empty, and one swapped in before the `open`
+ * that holds anything is somebody's, so nothing is put into it. The caller
+ * adds entries by name, each created afresh — never written over — and
+ * keeps the descriptor, and the identity it reports, to say afterwards
+ * whether the name still holds the directory and, while it is open, to know
+ * the directory by an inode number no other entry can be given.
  */
-export async function makeHeldDirectory(dir: string, mode = 0o700): Promise<fs.FileHandle> {
+export async function makeHeldDirectory(dir: string, mode: number): Promise<HeldFile> {
 	await fs.mkdir(dir, { mode });
-	const held = await fs.open(dir, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+	const handle = await fs.open(dir, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
 	try {
-		const stat = await held.stat();
-		if (!stat.isDirectory() || (process.getuid !== undefined && stat.uid !== process.getuid())) {
-			throw new Error(`${dir} is not the directory this run just made, so nothing was put into it`);
-		}
-		await held.chmod(mode);
-		return held;
+		const stat = await handle.stat();
+		const notMine = (): Error =>
+			new Error(`${dir} is not the directory this run just made, so nothing was put into it`);
+		if (!stat.isDirectory() || (process.getuid !== undefined && stat.uid !== process.getuid())) throw notMine();
+		// `/dev/fd/<n>` opens the directory the descriptor holds, wherever its
+		// name has gone since; Windows has neither the path nor the swap.
+		if (process.platform !== "win32" && (await fs.readdir(`/dev/fd/${handle.fd}`)).length > 0) throw notMine();
+		return { handle, dev: stat.dev, ino: stat.ino };
 	} catch (error) {
-		await held.close().catch(() => undefined);
+		await handle.close().catch(() => undefined);
 		throw error;
 	}
 }
@@ -194,78 +205,181 @@ async function isOneOf(handle: fs.FileHandle, own: readonly HeldFile[]): Promise
 }
 
 /**
+ * How {@link takeAway} decides whether what a name holds may go. Every
+ * reason is a clause naming the file — "`x` is not the record this run
+ * wrote" — which {@link takeAway} finishes with what became of it.
+ */
+export interface TakeAwayRule {
+	/** On an `lstat` of the name, before anything moves: false leaves the name untouched. */
+	matches(standing: Stats): boolean;
+	/** Why a name the rule does not match is kept. */
+	mismatch: string;
+	/**
+	 * On what the rename moved: its `lstat` and, when it is a regular file, a
+	 * descriptor opened on it now — never through a link. Undefined when it may
+	 * go, or why it may not. Anything that is not a regular file has no
+	 * descriptor, so a judgment that reads bytes keeps it.
+	 */
+	judge(moved: Stats, handle: fs.FileHandle | undefined): Promise<string | undefined>;
+	/**
+	 * Put a replacement at the name once what was there is judged, and before
+	 * it goes: it goes only after this returns, and goes back if this throws.
+	 */
+	replaceWith?(): Promise<void>;
+}
+
+/** What {@link takeAway} did with a name. */
+export type TakeAwayResult =
+	/**
+	 * The name no longer holds what it held — removed, or replaced by
+	 * {@link TakeAwayRule.replaceWith}. A replaced file whose private name
+	 * could not be removed is still there, which `note` says.
+	 */
+	| { outcome: "removed"; note?: string }
+	/** Nothing was at the name, so nothing was done. */
+	| { outcome: "absent" }
+	/** What the name held was kept; `note` says why and where it is, for the command to print. */
+	| { outcome: "kept"; note: string };
+
+/**
+ * The one way gc takes a file away: what a name holds goes only once it has
+ * been moved to a name nobody else knows and judged there, through a
+ * descriptor on what was moved.
+ *
+ * A name is not provenance, and neither is a look taken before the removal:
+ * a writer can put something at the name, or write to the file the name
+ * holds, after any look at it and before an `unlink` of that name — which
+ * removes whatever stands there by then. So the name is first renamed to a
+ * private one — `.<name>.<16 hex digits>.leaving`, in the same directory —
+ * which moves exactly what had the name at that moment, and everything
+ * after acts on that: the judgment, read through a descriptor opened on it
+ * now, and the `unlink`. A writer that opens the file by its name after the
+ * rename finds nothing there and creates a file of its own, which is never
+ * touched; one that wrote before the rename wrote into what is judged.
+ * Anything that fails the judgment is put back under its name with `link`,
+ * which replaces nothing; if something has taken the name meanwhile, it
+ * stays at the private name, which the note gives. Anything the rule's
+ * first look does not match is not moved at all.
+ *
+ * Two writers stay outside this, neither of them one that loses its own
+ * work to gc: one that puts a file at the private name after the rename —
+ * a name of 64 random bits nobody has reason to write to, and no system
+ * call removes a file by its descriptor — and one that held the file open
+ * from before the rename and writes through that descriptor after the
+ * judgment, which no removal by any program can see.
+ */
+export async function takeAway(file: string, rule: TakeAwayRule): Promise<TakeAwayResult> {
+	const kept = (why: string): TakeAwayResult => ({ outcome: "kept", note: `${why}, so it was left as it is` });
+	let standing: Stats;
+	try {
+		standing = await fs.lstat(file);
+	} catch (error) {
+		if (isEnoent(error)) return { outcome: "absent" };
+		return kept(`${file} could not be looked at (${errorText(error)})`);
+	}
+	if (!rule.matches(standing)) return kept(rule.mismatch);
+	const aside = path.join(path.dirname(file), `.${path.basename(file)}.${randomBytes(8).toString("hex")}.leaving`);
+	try {
+		await fs.rename(file, aside);
+	} catch (error) {
+		if (isEnoent(error)) return { outcome: "absent" };
+		return kept(`${file} could not be moved aside to be checked (${errorText(error)})`);
+	}
+	let why: string | undefined;
+	try {
+		const moved = await fs.lstat(aside);
+		const handle = moved.isFile()
+			? await openRegularFile(aside, { noFollow: true }).catch(notRegularAsAbsent)
+			: undefined;
+		try {
+			why = await rule.judge(moved, handle);
+		} finally {
+			await handle?.close().catch(() => undefined);
+		}
+	} catch (error) {
+		why = `${file} could not be checked (${errorText(error)})`;
+	}
+	if (why === undefined && rule.replaceWith) {
+		try {
+			await rule.replaceWith();
+		} catch (error) {
+			why = `${file} could not be replaced (${errorText(error)})`;
+		}
+	}
+	if (why === undefined) {
+		try {
+			await fs.unlink(aside);
+			return { outcome: "removed" };
+		} catch (error) {
+			// Replaced, the name already holds its replacement, and only the old
+			// file's private name is left over; otherwise the file goes back.
+			if (rule.replaceWith) {
+				return {
+					outcome: "removed",
+					note: `${file} was replaced, and what it held could not be removed from ${aside} (${errorText(error)})`,
+				};
+			}
+			why = `${file} could not be removed (${errorText(error)})`;
+		}
+	}
+	try {
+		await fs.link(aside, file);
+	} catch (error) {
+		return {
+			outcome: "kept",
+			note: isEexist(error)
+				? `${why}, and something else took its name meanwhile, so it was left at ${aside}`
+				: `${why}, and it could not be put back (${errorText(error)}), so it was left at ${aside}`,
+		};
+	}
+	try {
+		await fs.unlink(aside);
+	} catch (error) {
+		return {
+			outcome: "kept",
+			note: `${why}, so it was put back, and its second name ${aside} could not be removed (${errorText(error)})`,
+		};
+	}
+	return kept(why);
+}
+
+/**
  * Remove `file` only while the name holds one of `own`, files this run holds
  * — and say why not, otherwise. Returns undefined once nothing of this run's
  * is left at the name, or a sentence for the command to print, `what`
  * naming this run's file ("the record this run wrote").
  *
- * A name is not provenance, and neither is an inode number: the kernel hands
- * a freed number to the next file created, so a file someone put at the name
- * after this run's was removed can carry the very number this run captured —
- * a reviewer saw it, on the first create, once a copy across filesystems had
- * left the original free. So identity comes in layers, each one something
- * this run holds or wrote:
+ * It goes the way every file gc removes goes — see {@link takeAway} — and is
+ * judged by identity, in layers, each one something this run holds or wrote,
+ * because an inode number is no more provenance than a name: the kernel
+ * hands a freed number to the next file created, so a file someone put at
+ * the name after this run's was removed can carry the very number this run
+ * captured — a review saw it, on the first create, once a copy across
+ * filesystems had left the original free.
  *
  * - the descriptor, held open by the caller from the create or the read
  *   until after this returns: an inode is freed only once its last link and
  *   its last open descriptor are gone, so while this run holds one, no other
  *   file can be given its number;
  * - the device and inode that descriptor reports;
- * - the bytes, compared through a descriptor on what is removed: for a file
- *   this run wrote, they carry a random value from {@link newNonce}, which a
- *   writer who did not read the file cannot repeat.
- *
- * And what is checked is what is removed: the name is first renamed to one
- * only this call knows, which moves exactly what has the name at that
- * moment, and the check and the `unlink` both act on that. Anything else is
- * put back under its name with `link`, which replaces nothing; if something
- * has taken the name meanwhile, it stays at the private name, which the
- * message gives. Anything that is not a regular file is not touched at all.
- *
- * A writer that can write in this directory and puts a file at the private
- * name between the rename and the `unlink` is outside this: the name has 64
- * random bits, and no system call removes a file by its descriptor.
+ * - the bytes, where this run knows them, compared through a descriptor on
+ *   what is removed: for a file this run wrote, they carry a random value
+ *   from {@link newNonce}, which a writer who did not read the file cannot
+ *   repeat.
  */
 export async function removeOwnFile(file: string, own: readonly HeldFile[], what: string): Promise<string | undefined> {
-	const kept = `${file} is not ${what}, so it was left as it is`;
-	try {
-		const standing = await fs.lstat(file).catch((error: unknown) => {
-			if (isEnoent(error)) return undefined;
-			throw error;
-		});
-		if (!standing) return undefined;
-		if (!standing.isFile() || !own.some(held => held.dev === standing.dev && held.ino === standing.ino)) return kept;
-		const aside = path.join(path.dirname(file), `.${path.basename(file)}.${randomBytes(8).toString("hex")}.leaving`);
-		try {
-			await fs.rename(file, aside);
-		} catch (error) {
-			if (isEnoent(error)) return undefined;
-			throw error;
-		}
-		const moved = await openRegularFile(aside, { noFollow: true }).catch(notRegularAsAbsent);
-		let ours = false;
-		try {
-			ours = moved !== undefined && (await isOneOf(moved, own));
-		} finally {
-			await moved?.close().catch(() => undefined);
-		}
-		if (ours) {
-			await fs.unlink(aside);
-			return undefined;
-		}
-		try {
-			await fs.link(aside, file);
-		} catch (error) {
-			if ((error as { code?: string }).code === "EEXIST") {
-				return `${file} is not ${what}, and something else took its name meanwhile, so it was left at ${aside}`;
-			}
-			throw error;
-		}
-		await fs.unlink(aside);
-		return kept;
-	} catch (error) {
-		return `${file} could not be checked or removed, so it was left as it is: ${error instanceof Error ? error.message : String(error)}`;
-	}
+	const notOurs = `${file} is not ${what}`;
+	const result = await takeAway(file, {
+		matches: standing =>
+			standing.isFile() && own.some(held => held.dev === standing.dev && held.ino === standing.ino),
+		mismatch: notOurs,
+		judge: async (_moved, handle) => (handle && (await isOneOf(handle, own)) ? undefined : notOurs),
+	});
+	return result.outcome === "kept" ? result.note : undefined;
+}
+
+function errorText(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
 }
 
 /** The error a read by name gave when nothing was at `file`, for a reader that opened it through {@link openRegularFile}. */
