@@ -41,6 +41,7 @@ import type { ContextUsage } from "../extensibility/extensions/types";
 import type { SkillDescriptionCatalog } from "../extensibility/skill-descriptions";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
+import type { AgentRegistry } from "../registry/agent-registry";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
@@ -372,6 +373,12 @@ export interface AgentSessionConfig {
 	asyncJobManager?: AsyncJobManager;
 	/** Registry identity used for IRC routing. */
 	agentId?: string;
+	/**
+	 * Registry holding this session's agent ref; the process-global one when
+	 * absent. A session that replaces its conversation renews the ref's
+	 * conversation identity there.
+	 */
+	agentRegistry?: AgentRegistry;
 	/** Whether this is a top-level or subagent session. */
 	agentKind?: "main" | "sub";
 	/** Provider-facing session ID override. */

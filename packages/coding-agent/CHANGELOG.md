@@ -2,8 +2,13 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- `AgentRef`, exported from the SDK, now requires `identityToken` and `conversationToken`: code that builds an `AgentRef` itself must supply both, or register through `AgentRegistry.register`, which creates them ([#17630](https://github.com/can1357/oh-my-pi/pull/17630) by [@sjawhar](https://github.com/sjawhar))
+
 ### Added
 
+- Added a due-by for subagents: `task` takes `dueMinutes` (default 6 hours, `task.dueMinutes`). A subagent past its due-by is not wrong; the expectation was. The agent that dispatched it is told this is taking longer than you said, and at twice the time the nearest live agent above that one is told (you, for the main session). Nothing is killed, cancelled or discarded. `proc://` shows each running subagent's due-by, or `no due-by` for one that has none, such as a restored or message-started run ([#17630](https://github.com/can1357/oh-my-pi/pull/17630) by [@sjawhar](https://github.com/sjawhar))
 - With the Hindsight memory backend, `retain` and `learn` can now store a memory with `scope: "global"` so every project recalls it. It is opt-in through the new `hindsight.globalScope` setting (off by default) and needs `global` or `per-project-tagged` scoping ([#17706](https://github.com/can1357/oh-my-pi/pull/17706) by [@alphastorm](https://github.com/alphastorm), from [#15030](https://github.com/can1357/oh-my-pi/pull/15030) by [@kithawk](https://github.com/kithawk)).
 - Added `btw.inject` (off by default; `/settings` → Interaction → "/btw Steering Inject"): when you ask `/btw` for a steering prompt, it drafts one in an `<inject>` block shown behind a pink rail, and `Alt+I` (`app.btw.inject`) sends it to the main session (as a steer while the agent runs, else as a new turn) from the inline answer or the BTW history sheet, once per answer from the current run. Once sent, the block turns green with `➤` on each line and "Injected into main session" below it; if the main session drops or refuses the send, the block turns back to pending and the same key retries ([#17618](https://github.com/can1357/oh-my-pi/pull/17618) by [@apullin](https://github.com/apullin))
 

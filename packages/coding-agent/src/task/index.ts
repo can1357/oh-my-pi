@@ -25,7 +25,7 @@ import type {
 	ToolSpeculationPolicy,
 } from "@oh-my-pi/pi-agent-core";
 import type { Usage } from "@oh-my-pi/pi-ai";
-import { $env, isRecord, logger, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
+import { $env, formatDuration, isRecord, logger, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "..";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { Settings } from "../config/settings";
@@ -57,11 +57,12 @@ import { AsyncJobError, type AsyncJobManager } from "../async";
 import { hasResolvableTranscript } from "../internal-urls/registry-helpers";
 import { sessionResolveContext } from "../internal-urls/context";
 import { InternalUrlRouter } from "../internal-urls/router";
-import { AgentRegistry, isResumable } from "../registry/agent-registry";
+import { AgentRegistry, isResumable, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { type DiscoveryResult, discoverAgents } from "./discovery";
 import { createEvalCustomTools, describeEvalTools, evalToolsEnabled } from "./eval-tools";
 import { getPerCallModelAdvertisement, type PerCallModelAdvertisement } from "./model-approval";
-import { generateTaskName } from "./name-generator";
+import { generateTaskName, sanitizeAgentId } from "./name-generator";
+import { dispatchChain } from "./due-by";
 import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
 import { renderResult, renderCall as renderTaskCall } from "@oh-my-pi/pi-tui/tools/task";
@@ -92,6 +93,7 @@ import {
 	cfgTaskMaxConcurrency,
 	cfgTaskMaxRecursionDepth,
 	cfgTaskMaxRuntimeMs,
+	cfgTaskDueMinutes,
 	cfgTaskSpeculativeLaunch,
 	cfgTaskStructured,
 	perCallModelEnabled,
@@ -170,6 +172,8 @@ interface TaskDescriptionOptions {
 	planMode: boolean;
 	asyncGuidance: string;
 	parentSpawns: string;
+	/** `task.dueMinutes`: the due-by a dispatch gets when it names none; 0 = none. */
+	dueMinutes: number;
 }
 
 /** Plan mode hides seance; a `spawns` list led by it defaults to the next permitted agent. */
@@ -225,6 +229,7 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		seanceGuidance: seanceAgent && isBundledSeance(seanceAgent) ? seanceTaskGuidance : "",
 		ircEnabled: options.ircEnabled,
 		asyncGuidance: options.asyncGuidance,
+		dueDefault: options.dueMinutes > 0 ? formatDuration(options.dueMinutes * 60_000) : undefined,
 	});
 }
 function createTaskModeError(text: string): AgentToolResult<TaskToolDetails> {
@@ -271,6 +276,12 @@ function validateShapeParams(batchEnabled: boolean, params: TaskParams): string 
 function validateEffort(effort: TaskEffort | undefined, label: string): string | undefined {
 	if (effort === undefined || TASK_EFFORTS.includes(effort)) return undefined;
 	return `${label} has an invalid \`effort\` value ${JSON.stringify(effort)}. Use "lo", "med", or "hi".`;
+}
+
+/** Reject a non-positive or non-numeric `dueMinutes` on calls that bypass the wire schema. */
+function validateDueMinutes(dueMinutes: number | undefined, label: string): string | undefined {
+	if (dueMinutes === undefined || (Number.isFinite(dueMinutes) && dueMinutes > 0)) return undefined;
+	return `${label} has an invalid \`dueMinutes\` value ${JSON.stringify(dueMinutes)}. Use a positive number of minutes.`;
 }
 
 function validateTaskInput(item: TaskItem | undefined, label: string, fileEnabled: boolean): string | undefined {
@@ -325,8 +336,8 @@ function validateSpawnParams(
 			const label = `Task ${i + 1}${item?.name ? ` (\`${item.name}\`)` : ""}`;
 			const inputError = validateTaskInput(item, label, fileEnabled);
 			if (inputError) return inputError;
-			const effortError = validateEffort(item.effort, label);
-			if (effortError) return effortError;
+			const fieldError = validateEffort(item.effort, label) ?? validateDueMinutes(item.dueMinutes, label);
+			if (fieldError) return fieldError;
 			const modelError = validateModel(item, label, defaultAgent, settings);
 			if (modelError) return modelError;
 		}
@@ -352,6 +363,7 @@ function validateSpawnParams(
 	return (
 		validateTaskInput(params, "The call", fileEnabled) ??
 		validateEffort(params.effort, "The call") ??
+		validateDueMinutes(params.dueMinutes, "The call") ??
 		validateModel(params, "The call", defaultAgent, settings)
 	);
 }
@@ -394,6 +406,7 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
 	if ("schemaMode" in params) item.schemaMode = params.schemaMode;
 	if ("tools" in params) item.tools = params.tools;
 	if ("effort" in params) item.effort = params.effort;
+	if ("dueMinutes" in params) item.dueMinutes = params.dueMinutes;
 	if ("isolated" in params) item.isolated = params.isolated;
 	if ("sourceSession" in params) item.sourceSession = params.sourceSession;
 	if ("model" in params) item.model = params.model;
@@ -467,6 +480,7 @@ function spawnParamsFor(params: TaskParams, item: ResolvedTaskItem, defaultAgent
 	if ("schemaMode" in item) spawn.schemaMode = item.schemaMode;
 	if ("tools" in item) spawn.tools = item.tools;
 	if ("effort" in item) spawn.effort = item.effort;
+	if (item.dueMinutes !== undefined) spawn.dueMinutes = item.dueMinutes;
 	if ("sourceSession" in item) spawn.sourceSession = item.sourceSession;
 	if ("model" in item) spawn.model = item.model;
 	if (item.isolated !== undefined) {
@@ -922,6 +936,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			planMode,
 			asyncGuidance: this.delegationGuidance,
 			parentSpawns: this.session.getSessionSpawns() ?? "*",
+			dueMinutes: cfgTaskDueMinutes.get(this.session.settings),
 		});
 	}
 	private constructor(
@@ -1002,7 +1017,14 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		return manager;
 	}
 
-	/** Start one spawn's subagent run behind the session semaphore. */
+	/**
+	 * Start one spawn's subagent run behind the session semaphore, and its
+	 * due-by clock with it: every path (inline, background job, speculative
+	 * launch while the call streams) creates its run here, so the clock starts
+	 * when the child does, with the due-by read now. The dispatcher's
+	 * `dueMinutes`, else `task.dueMinutes`; the clock stops when the run settles
+	 * or is cancelled. Nothing here stops or cancels the child.
+	 */
 	#launch(spawn: {
 		toolCallId: string;
 		params: SpawnParams;
@@ -1010,7 +1032,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		agentId?: string;
 		detached: boolean;
 	}): SpawnRun {
-		return new SpawnRun(
+		const spawnRun = new SpawnRun(
 			this.#permit,
 			run =>
 				this.#runSpawn(
@@ -1027,6 +1049,24 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				),
 			{ agentId: spawn.agentId, detached: spawn.detached },
 		);
+		if (spawn.agentId !== undefined) {
+			// The registry this session's agents live in: an SDK host may give a session its own.
+			const registry = this.session.agentRegistry ?? AgentRegistry.global();
+			const ownerId = this.session.getAgentId?.() ?? MAIN_AGENT_ID;
+			const minutes = spawn.params.dueMinutes ?? cfgTaskDueMinutes.get(this.session.settings);
+			registry.dueBy.arm(
+				{
+					childId: spawn.agentId,
+					...dispatchChain(registry, ownerId),
+					agent: spawn.params.agent ?? "task",
+					dispatchedAt: Date.now(),
+					dueMs: minutes * 60_000,
+					stated: spawn.params.dueMinutes !== undefined,
+				},
+				{ settled: spawnRun.result, signal: spawnRun.signal },
+			);
+		}
+		return spawnRun;
 	}
 
 	/**
@@ -1236,14 +1276,17 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 							this.session.getSessionSpawns?.() ?? "*",
 						),
 					});
-			const result = await this.#executeSyncFanout(
-				toolCallId,
-				params,
-				spawnItems.map((item, index) => ({ item, index, run: adopted.get(index) })),
-				defaultAgent,
-				signal,
-				onUpdate,
-			);
+			// Ids are claimed here, as the id allocation inside the run would
+			// name them, so each spawn's due-by clock can name it from dispatch.
+			const syncSpawns: SyncSpawnRef[] = [];
+			for (const [index, item] of spawnItems.entries()) {
+				const run = adopted.get(index);
+				const preAllocatedId =
+					run?.identity.agentId ??
+					(await this.#outputManager().allocate(sanitizeAgentId(item.name) ?? generateTaskName()));
+				syncSpawns.push({ item, index, run, preAllocatedId });
+			}
+			const result = await this.#executeSyncFanout(toolCallId, params, syncSpawns, defaultAgent, signal, onUpdate);
 			if (!advisory) return result;
 			let appended = false;
 			const content = result.content.map(part => {

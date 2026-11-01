@@ -19,6 +19,7 @@ Shared edits need one integration owner{{#if ircEnabled}}; siblings coordinate v
 {{/if}}
 `name`: CamelCase ≤32, auto-generated if omitted; address agent by name.{{#if structured}} `outputSchema` overrides agent/session schemas.{{/if}}
 `solutionSpace`: describe how open-ended the child's problem is: whether the fix or design is given, or which causes or designs remain open. Volume of work does not widen it; NEVER mention sibling agents or coordination. (`one fix: rename, names given`; `one fix: slice end in paginate`; `single-flight cache load; races easy to miss`; `several retry API shapes; error classes to choose`; `deadlock cause open, no repro`)
+`dueMinutes`: minutes until you expect the result{{#if dueDefault}} (default {{dueDefault}}){{/if}}. Past it you get a notice; at twice it, whoever dispatched you is told. Nothing is stopped. Set it to what you expect: a 20-minute review gets `dueMinutes: 30`; an 8-hour proof run gets `dueMinutes: 600`.
 {{#if seanceGuidance}}{{seanceGuidance}}{{/if}}
 {{#if evalToolsEnabled}}`tools`: eval-defined, run in your kernel.
 {{/if}}{{#if effortEnabled}}`effort`: `"lo"`|`"med"`|`"hi"` by how open-ended the problem is.

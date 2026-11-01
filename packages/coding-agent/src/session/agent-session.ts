@@ -145,6 +145,7 @@ import type { EvalPreludeDefinition } from "../eval/preludes";
 import type { PythonResult } from "../eval/py/executor";
 import { EVAL_STATE_CONTEXT_TYPE, formatEvalStateContext, isEvalStateContext } from "../eval/state";
 import { WorkPoolRegistry } from "../task/workpool";
+import { buildSubagentOverdueMessage, SUBAGENT_OVERDUE_MESSAGE_TYPE, type SubagentOverdueEntry } from "../task/due-by";
 import { type BashPtyOptions, type BashResult, releaseShellSessions } from "../exec/bash-executor";
 import type { TtsrManager } from "../export/ttsr";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
@@ -1116,6 +1117,10 @@ export class AgentSession implements SettingsScope {
 	#openTurnObservation: TurnObservation | undefined;
 	// Agent identity (registry id) used for IRC routing and job ownership.
 	#agentId: string | undefined;
+	/** Registry holding this session's agent ref; the process-global one unless the host gave its own. */
+	#agentRegistry: AgentRegistry | undefined;
+	/** Session id that owns the ref's current conversation token. */
+	#conversationSessionId: string | undefined;
 	#agentKind: "main" | "sub" = "main";
 	#scoutAllowedBySpawnPolicy = true;
 	#providerSessionId: string | undefined;
@@ -1962,6 +1967,7 @@ export class AgentSession implements SettingsScope {
 				isHiddenUserCompanion(previous) && (isHiddenUserCompanion(next) || isUserQueuedMessage(next)),
 		);
 		this.sessionManager = config.sessionManager;
+		this.#conversationSessionId = this.sessionManager.getSessionId();
 		this.settings = config.settings;
 		this.#ownsCostGate = config.costGate === undefined;
 		this.#costGate = config.costGate ?? this.#createCostGate();
@@ -2375,19 +2381,27 @@ export class AgentSession implements SettingsScope {
 				this.#isDisposed || !isLaunchCompletionOwner(entry.owner, this.sessionManager.getSessionId()),
 			build: buildLaunchCompletionBatchMessage,
 		});
+		// Due-by notices about subagents this agent dispatched (or its subagents
+		// did). A notice is dropped unread once its subagent settles, or once this
+		// session no longer holds the conversation the notice was addressed to.
+		this.yieldQueue.register<SubagentOverdueEntry>(SUBAGENT_OVERDUE_MESSAGE_TYPE, {
+			isStale: entry => this.#isDisposed || entry.isStale(),
+			build: buildSubagentOverdueMessage,
+		});
 		// Background-job completions / late diagnostics are pulled into the run at
 		// each step boundary as non-interrupting asides. Peer IRCs share the aside
 		// injection boundary, but also expose a non-consuming interrupt peek so
 		// `wait` can return early before the boundary drains them.
 		this.agent.hasIrcInterrupts = () => this.#irc.hasInterrupts();
 		// Completion notices (finished background jobs, exited supervised
-		// processes) queue here for the same boundary; peeking them lets a
-		// `wait` return early rather than miss a queued completion. Entries
+		// processes) and due-by notices queue here for the same boundary;
+		// peeking them lets a `wait` return early rather than miss one. Entries
 		// consumed elsewhere since they queued (an eval cell awaiting the job)
 		// are dropped by the drain, so they must not cut a wait short.
 		this.agent.hasBackgroundCompletions = () =>
 			this.yieldQueue.hasDeliverable(LAUNCH_COMPLETION_MESSAGE_TYPE) ||
-			this.yieldQueue.hasDeliverable(ASYNC_RESULT_MESSAGE_TYPE);
+			this.yieldQueue.hasDeliverable(ASYNC_RESULT_MESSAGE_TYPE) ||
+			this.yieldQueue.hasDeliverable(SUBAGENT_OVERDUE_MESSAGE_TYPE);
 		// Passive asides (`deliverAs: "aside"`) also end an interruptible `wait`
 		// instead of sitting behind it. Deferred wakes are not peeked: no
 		// boundary injection would drain them. Foreground tools are unaffected.
@@ -2531,6 +2545,7 @@ export class AgentSession implements SettingsScope {
 		this.#streamingEditGuard = new StreamingEditGuard(streamGuardsHost);
 		this.#loopGuards = new LoopGuards(streamGuardsHost);
 		this.#agentId = config.agentId;
+		this.#agentRegistry = config.agentRegistry;
 		this.#agentKind = config.agentKind ?? "main";
 		// A subagent's streamed text reaches no output sink until the run settles
 		// (the parent sees only the yield), so a failed turn's partial prose is
@@ -3120,6 +3135,25 @@ export class AgentSession implements SettingsScope {
 
 	getAgentId(): string | undefined {
 		return this.#agentId;
+	}
+
+	/** Renew or recover the identity of the conversation this session now holds. */
+	#renewConversation(reset = false): void {
+		if (this.#agentId) {
+			(this.#agentRegistry ?? AgentRegistry.global()).transitionConversation(
+				this.#agentId,
+				this,
+				this.#conversationSessionId,
+				reset,
+			);
+		}
+		this.#conversationSessionId = this.sessionManager.getSessionId();
+	}
+
+	/** A full fork preserves every dispatched message, so its new session id retains this conversation identity. */
+	#retainConversation(): void {
+		if (this.#agentId) (this.#agentRegistry ?? AgentRegistry.global()).rememberConversation(this.#agentId, this);
+		this.#conversationSessionId = this.sessionManager.getSessionId();
 	}
 
 	/** Dequeue the next HARD forced tool choice for the upcoming LLM call, dropping
@@ -3781,6 +3815,17 @@ export class AgentSession implements SettingsScope {
 	 */
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void {
 		this.#emit({ type: "notice", level, message, source });
+	}
+
+	/**
+	 * Queue a due-by notice about a subagent (one this agent dispatched, or one
+	 * dispatched by an agent it dispatched). An idle session gets a turn; a
+	 * running one reads it at the next step boundary, and a `wait` ends early.
+	 * Dropped unread once the subagent settles.
+	 */
+	notifySubagentOverdue(entry: SubagentOverdueEntry): void {
+		if (this.#isDisposed) return;
+		this.yieldQueue.enqueue(SUBAGENT_OVERDUE_MESSAGE_TYPE, entry);
 	}
 
 	#recordToolExecutionStart(event: Extract<AgentEvent, { type: "tool_execution_start" }>): void {
@@ -6640,6 +6685,7 @@ export class AgentSession implements SettingsScope {
 		// The cleared context is a new transcript: an aside or held message captured for the old one drops
 		// its record instead of landing here (mirrors newSession()).
 		this.#sessionGeneration++;
+		this.#renewConversation(true);
 		this.#pendingNextTurnMessages = [];
 		this.#experimentalContextNotesReminder = undefined;
 		this.#scheduledHiddenNextTurnGeneration = undefined;
@@ -11460,6 +11506,7 @@ export class AgentSession implements SettingsScope {
 			// outgoing session also drops its record instead of landing in this new one.
 			this.#irc.clearPending();
 			this.#sessionGeneration++;
+			this.#renewConversation();
 			this.#scheduledHiddenNextTurnGeneration = undefined;
 			this.#queuedMessageDrainBlocked = false;
 			this.#usagePreflightReadyForNextModelCall = false;
@@ -11602,6 +11649,7 @@ export class AgentSession implements SettingsScope {
 			this.#freshProviderSessionId = undefined;
 			this.#adoptInheritedProviderPromptCacheKey();
 			this.#syncAgentSessionId();
+			this.#retainConversation();
 			this.#memory.rekeyForCurrentSessionId();
 			this.#advisors.reattachRecorderFeeds();
 			advisorRecordersDetached = false;
@@ -13395,6 +13443,8 @@ export class AgentSession implements SettingsScope {
 			if (previousSessionState.sessionId !== this.sessionManager.getSessionId()) {
 				this.#notifySessionChangeCallbacks();
 			}
+			// Only now is the other transcript this session's conversation; a rollback keeps the old one.
+			if (switchingToDifferentSession) this.#renewConversation();
 			generationSettled.resolve();
 			this.#sessionGenerationSettled = previousSessionGenerationSettled;
 			if (modelFallbackWarning) {
@@ -13626,6 +13676,8 @@ export class AgentSession implements SettingsScope {
 			this.#freshProviderSessionId = undefined;
 			this.#clearInheritedProviderPromptCacheKey();
 			this.#syncAgentSessionId();
+			// A tree branch can omit the dispatch that created a due-by, unlike a full fork.
+			this.#renewConversation(true);
 			this.#memory.rekeyForCurrentSessionId();
 			await this.#memory.resetContextForNewTranscript();
 
@@ -13756,6 +13808,8 @@ export class AgentSession implements SettingsScope {
 			this.#modelMentions.syncFromBranch();
 			this.#freshProviderSessionId = undefined;
 			this.#syncAgentSessionId();
+			// A promoted /btw branch replaces the active conversation history.
+			this.#renewConversation(true);
 			this.#memory.rekeyForCurrentSessionId();
 			await this.#memory.resetContextForNewTranscript();
 
@@ -14082,6 +14136,8 @@ export class AgentSession implements SettingsScope {
 		});
 		const displayContext = this.#withEvalStateContext(deobfuscateSessionContext(stateContext, this.#obfuscator));
 		this.agent.replaceMessages(displayContext.messages);
+		// Navigation replaces the active transcript branch. Do not let its old dispatches address this one.
+		this.#renewConversation(true);
 		this.#rehydrateCheckpointRewindState();
 		this.#advisors.resetSessionState({ preserveCost: true });
 		this.#todo.syncFromBranch();

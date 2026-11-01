@@ -23,6 +23,8 @@ import {
 import type { ProcReadDetails } from "@oh-my-pi/pi-tui/tools/proc-render";
 import procPromptDoc from "../prompts/internal-urls/proc.md" with { type: "text" };
 import type { ToolSession } from "../tools";
+import { AgentRegistry } from "../registry/agent-registry";
+import { describeDueBy } from "../task/due-by";
 import type {
 	InternalResource,
 	InternalUrl,
@@ -57,6 +59,15 @@ function target(url: InternalUrl): ProcTarget {
 		return { id, action: "streams", stream: streams[1] === undefined ? undefined : Number(streams[1]) };
 	}
 	return { id, action: path === "/mode" ? "mode" : path === "/kill" ? "kill" : "stdin" };
+}
+
+/**
+ * A running subagent's due-by, for its row. Every running task row says it, so
+ * a quiet row never implies a clock: a turn a message started, a revived or
+ * restored run, and an eval-started agent all show `no due-by`.
+ */
+function dueNote(session: ToolSession, agentId: string): string {
+	return ` — ${describeDueBy((session.agentRegistry ?? AgentRegistry.global()).dueBy, agentId)}`;
 }
 
 /** `proc://<id>/kill`: cancels a job, agent, or service; needs no content and touches no files. */
@@ -193,11 +204,13 @@ export class ProcProtocolHandler implements ProtocolHandler {
 							: `in ${formatDuration(job.endTime - job.startTime)}`;
 					const progress = runningTaskProgressSuffix(snapshots[index], { duration: false });
 					const intent = job.intent ? `${job.intent} — ` : "";
-					return `${job.id} [${job.type}] ${job.status} ${duration} — ${intent}${job.label.replace(/\s+/g, " ")}${progress}`;
+					const due =
+						job.type === "task" && job.status === "running" ? dueNote(session, job.agentId ?? job.id) : "";
+					return `${job.id} [${job.type}] ${job.status} ${duration} — ${intent}${job.label.replace(/\s+/g, " ")}${progress}${due}`;
 				}),
 				...runningAgentsOutsideJobs(session).map(
 					agent =>
-						`${agent.id} [task] running up ${formatDuration(agent.ageMs)} — ${agent.activity ?? "agent"}${agentStaleNote(agent)}`,
+						`${agent.id} [task] running up ${formatDuration(agent.ageMs)} — ${agent.activity ?? "agent"}${agentStaleNote(agent)}${dueNote(session, agent.id)}`,
 				),
 				...services.map(service => serviceStatus(service)),
 				...(servicesError ? [`Services unavailable (daemon broker): ${servicesError}`] : []),
@@ -225,8 +238,9 @@ export class ProcProtocolHandler implements ProtocolHandler {
 		}
 		if (job) {
 			const snapshot = snapshotJobs(session, [job])[0];
+			const due = job.type === "task" && job.status === "running" ? dueNote(session, job.agentId ?? job.id) : "";
 			const lines = [
-				`${job.id} [${job.type}] — ${job.status} — ${job.intent ? `${job.intent} — ` : ""}${job.label}${runningTaskProgressSuffix(snapshot, { duration: true })}`,
+				`${job.id} [${job.type}] — ${job.status} — ${job.intent ? `${job.intent} — ` : ""}${job.label}${runningTaskProgressSuffix(snapshot, { duration: true })}${due}`,
 			];
 			if (job.resultText) lines.push(job.resultText);
 			if (job.errorText) lines.push(`Error: ${job.errorText}`);
@@ -250,7 +264,7 @@ export class ProcProtocolHandler implements ProtocolHandler {
 		if (agent)
 			return textResource(
 				url,
-				`${agent.id} [task] — running — ${agent.activity ?? "agent"}${agentStaleNote(agent)}\nhistory://${agent.id}`,
+				`${agent.id} [task] — running — ${agent.activity ?? "agent"}${agentStaleNote(agent)}${dueNote(session, agent.id)}\nhistory://${agent.id}`,
 				undefined,
 				false,
 				{ agents: [agent] },

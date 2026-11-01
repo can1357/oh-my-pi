@@ -46,6 +46,8 @@ export interface SubagentEventPayload {
 const outputSchemaInputSchema = type("object | boolean | string | null");
 // Coarse per-spawn thinking effort; must stay in sync with TASK_EFFORTS in ../thinking.
 const effortRule = '"lo" | "med" | "hi"' as const;
+// Per-spawn due-by: minutes after dispatch by which the dispatcher expects the result.
+const dueMinutesRule = "number > 0" as const;
 
 // Per-spawn fields the seance schema adds or widens. Typed against
 // SeanceTaskSchemaFields so a field added there fails to compile until it is
@@ -81,6 +83,7 @@ export const taskItemSchema = type({
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
 	"model?": "string",
+	"dueMinutes?": dueMinutesRule,
 	"+": "delete",
 });
 const taskItemSchemaIsolated = type({
@@ -92,6 +95,7 @@ const taskItemSchemaIsolated = type({
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
 	"model?": "string",
+	"dueMinutes?": dueMinutesRule,
 	"isolated?": "boolean",
 	"+": "delete",
 });
@@ -105,6 +109,7 @@ export const taskSchema = type({
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
 	"model?": "string",
+	"dueMinutes?": dueMinutesRule,
 	"isolated?": "boolean",
 	"+": "delete",
 });
@@ -117,6 +122,7 @@ const taskSchemaNoIsolation = type({
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
 	"model?": "string",
+	"dueMinutes?": dueMinutesRule,
 	"+": "delete",
 });
 function guardBatchAgent(schema: BaseType): BaseType {
@@ -193,6 +199,7 @@ function createTaskSchema(options: {
 	// `model` is always declared, and preflight decides whether a per-call model
 	// is allowed; seance widens it to a list.
 	const seanceFields = { "model?": "string", ...options.seanceFields };
+	const dueField = { "dueMinutes?": dueMinutesRule };
 	if (options.batchEnabled) {
 		if (options.isolationEnabled) {
 			const item = type.raw({
@@ -204,6 +211,7 @@ function createTaskSchema(options: {
 				...schemaFields,
 				...toolsField,
 				...seanceFields,
+				...dueField,
 				"isolated?": "boolean",
 				"+": "delete",
 			});
@@ -224,6 +232,7 @@ function createTaskSchema(options: {
 			...schemaFields,
 			...toolsField,
 			...seanceFields,
+			...dueField,
 			"+": "delete",
 		});
 		return guardBatchAgent(
@@ -244,6 +253,7 @@ function createTaskSchema(options: {
 			...schemaFields,
 			...toolsField,
 			...seanceFields,
+			...dueField,
 			"isolated?": "boolean",
 			"+": "delete",
 		});
@@ -257,6 +267,7 @@ function createTaskSchema(options: {
 		...schemaFields,
 		...toolsField,
 		...seanceFields,
+		...dueField,
 		"+": "delete",
 	});
 }

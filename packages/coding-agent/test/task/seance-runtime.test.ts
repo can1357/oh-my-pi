@@ -462,6 +462,8 @@ describe("seance startup contracts", () => {
 			status: "parked",
 			session: null,
 			sessionFile,
+			identityToken: "FailedSeance",
+			conversationToken: "FailedSeance",
 			createdAt: 0,
 			lastActivity: 0,
 		});

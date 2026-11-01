@@ -101,6 +101,11 @@ export class SpawnRun {
 		void this.result.then(closeTools, closeTools);
 	}
 
+	/** Aborted once the run is cancelled (owner abort or {@link discard}), before its body has wound down. */
+	get signal(): AbortSignal {
+		return this.#controller.signal;
+	}
+
 	/** Bind the adopting owner: its abort cancels the run, and buffered progress/artifacts flush to it. */
 	attach(owner: SpawnRunOwner): void {
 		const signal = owner.signal;

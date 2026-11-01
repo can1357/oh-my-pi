@@ -2271,6 +2271,8 @@ export interface TaskItem {
 	tools?: string[];
 	/** Run this spawn in an isolated worktree (batch form; flat form carries it top-level). */
 	isolated?: boolean;
+	/** Minutes after dispatch by which the dispatcher expects the result; past it the dispatcher is told, at twice the time its own dispatcher. Nothing is stopped. */
+	dueMinutes?: number;
 }
 
 /**
@@ -2302,6 +2304,8 @@ export interface TaskParams {
 	schemaMode?: "permissive" | "strict";
 	/** Eval-defined tool names exposed to the flat-form child. */
 	tools?: string[];
+	/** See {@link TaskItem.dueMinutes} (flat form). */
+	dueMinutes?: number;
 	/** Batch form (`task.batch`): one subagent per item. */
 	tasks?: TaskItem[];
 	/** Batch form: shared background prepended to every assignment; required by the batch schema. */
