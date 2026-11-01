@@ -7,7 +7,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
-import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
+import { $env, logger, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import {
@@ -751,10 +751,9 @@ function resolveAutoloadSkills(session: ToolSession, agent: AgentDefinition) {
  * created the caller's hold reads that off its own object.
  */
 function composeLifecycleRelease(
-	callerRelease: ReleaseHold | undefined,
+	callerRelease: ReleaseHold,
 	artifactsRelease: (() => Promise<void>) | undefined,
-): ReleaseHold | undefined {
-	if (!callerRelease) return artifactsRelease ? createReleaseHold(artifactsRelease) : undefined;
+): ReleaseHold {
 	if (!artifactsRelease) return callerRelease;
 	return createReleaseHold(async () => {
 		const settled = await Promise.allSettled([callerRelease(), artifactsRelease()]);
@@ -768,7 +767,7 @@ function buildExecutorOptions(
 	policy: EffectiveSubagentPolicy,
 	lease: ArtifactLease,
 	id: string,
-	callerRelease: ReleaseHold | undefined,
+	callerRelease: ReleaseHold,
 ): ExecutorOptions {
 	const { session } = request;
 	const preparedSession = policy.preparedSession;
@@ -1044,13 +1043,26 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 	try {
 		return await runStructuredSubagentDispatch(request, hold);
 	} finally {
-		if (hold.isOwed()) await hold();
+		// Nothing sits above this boundary to catch a failing release, so it
+		// must not replace the run's result or the error that ended the run:
+		// a release that throws is reported, the way every other discharge
+		// site reports it.
+		if (hold.isOwed()) {
+			try {
+				await hold();
+			} catch (error) {
+				logger.warn("Subagent caller hold release failed", {
+					agent: request.agent,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
 	}
 }
 
 async function runStructuredSubagentDispatch(
 	request: StructuredSubagentRequest,
-	onRelease: ReleaseHold | undefined,
+	onRelease: ReleaseHold,
 ): Promise<StructuredSubagentResult> {
 	const policy = await applySpawnHook(request, await resolveEffectiveSubagentPolicy(request));
 	const lease = await leaseArtifacts(request.session, request.invocationKind);

@@ -111,11 +111,15 @@ interface ReopeningAgent {
 	promise: Promise<AgentRef>;
 }
 
-/** One discharge a manager started: the id it owes, when that discharge settles, and who owns it. */
+/**
+ * One discharge a manager started: the id it owes and when that discharge
+ * settles. It names no manager on purpose: the set below is module-level, and
+ * a reference from it would keep a torn-down manager — its adoptions and
+ * subscriptions — reachable for as long as a late discharge runs.
+ */
 interface ReleaseInFlight {
 	id: string;
 	settled: Promise<void>;
-	owner: AgentLifecycleManager;
 }
 
 /**
@@ -626,7 +630,7 @@ export class AgentLifecycleManager {
 			// concurrent release that took nothing over cannot clear it.
 			const settled = Promise.withResolvers<void>();
 			settleInFlight = settled.resolve;
-			inFlight = { id, settled: settled.promise, owner: this };
+			inFlight = { id, settled: settled.promise };
 			this.#releasing.add(inFlight);
 			releasesInFlight.add(inFlight);
 		}
@@ -831,7 +835,7 @@ export class AgentLifecycleManager {
 		const release = adopted.onRelease;
 		if (!release) return;
 		const settled = Promise.withResolvers<void>();
-		const inFlight: ReleaseInFlight = { id, settled: settled.promise, owner: this };
+		const inFlight: ReleaseInFlight = { id, settled: settled.promise };
 		this.#releasing.add(inFlight);
 		releasesInFlight.add(inFlight);
 		void (async () => {
