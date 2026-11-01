@@ -73,6 +73,26 @@ Batch calls reject a top-level `agent` rather than silently discarding a special
 
 There is no legacy per-call `schema` parameter. Use `outputSchema` and optional `schemaMode`; when absent, structured output falls back to the agent definition's `output` frontmatter and then the inherited parent session schema.
 
+### Fast mode
+
+The task/eval wire formats have no `fast` or `serviceTier` parameter, but subagents support provider priority through settings. This does not change the selected model or thinking effort; provider/model support and pricing still apply.
+
+`tier.subagent` defaults to `inherit`: new spawns snapshot the parent's live per-family tiers, including `/fast` changes. Enabling `/fast` for an OpenAI model does not also enable the Anthropic family.
+
+To request priority for one agent type without changing other agents' policies, merge an entry into the existing settings map:
+
+```yaml
+task:
+  agentServiceTierOverrides:
+    scout: priority
+```
+
+Keys match the exact, case-sensitive `agent` type, not the spawned `name`. An entry overrides `tier.subagent`; unlisted agents keep that fallback. These settings affect new task/eval spawns, not already-running agents. Priority may cost more and is not guaranteed to be supported or honored by the provider.
+
+In a top-level interactive session, the assistant can read `cfg://task/agentServiceTierOverrides` and request an approval-gated write of the updated map, preserving other entries. Without a write to `cfg://task/agentServiceTierOverrides/save`, the change is session-only; persist it only when requested. Headless sessions and subagents cannot make these writes, so explain how the user can configure the setting instead of claiming fast mode is unavailable.
+
+See [service-tier precedence](../task-agent-discovery.md#model-and-structured-output-precedence) for inheritance, model resolution, and revival, and [settings](../settings.md) for configuration methods.
+
 ## Outputs
 
 The tool returns one text block plus `details: TaskToolDetails`.

@@ -137,6 +137,7 @@
 
 ### Changed
 
+- Task guidance now points agents to existing fast-mode settings for subagents instead of treating the missing per-call flag as unsupported ([#17388](https://github.com/can1357/oh-my-pi/pull/17388) by [@Lu1sDV](https://github.com/Lu1sDV))
 - Improved startup responsiveness by deferring nonessential UI, accessibility, browser, provider, slash-command, and interactive-composer loading until needed, and by overlapping independent session preparation work.
 - OpenAI live steering is now disabled by default for GPT models. Typed messages wait for the next tool boundary unless providers.openaiLiveSteering is enabled, avoiding unsupported in-flight message errors.
 - HTML exports now match the /stats visual design with a higher-contrast light theme, timeline and full-trace views, and navigation for nested subagents and advisors. Packaged viewers use integrity-pinned shared assets and require network access; source checkouts continue to embed the viewer.

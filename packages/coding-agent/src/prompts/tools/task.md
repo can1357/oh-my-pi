@@ -28,6 +28,10 @@ Shared edits need one integration owner{{#if ircEnabled}}; siblings coordinate v
 {{else}}`isolated`: worktree; changes retained, not applied.
 {{/if}}{{/if}}Children start blank;{{#if ircEnabled}} parent IRC steers immediately;{{/if}} large payloads via `local://<path>`, NEVER inline.
 
+# Fast mode
+No per-call tier flag: `tier.subagent` (default `inherit`) and exact-name `task.agentServiceTierOverrides[agent]` configure future spawns. When asked for fast mode, inspect these before claiming it unavailable. Provider priority is not a model or effort change; support and premium cost vary.
+Merge per-agent changes into the existing override map.
+
 # Format
 {{#if batchEnabled}}`context`: shared (`# Goal`, `# Contract` interfaces); NEVER repeat per task.
 {{/if}}`task`{{#if file}} or the contents of `taskFile`{{/if}}: self-contained (`# Target` files/non-goals, `# Change` steps/APIs, `# Acceptance` observable result).
