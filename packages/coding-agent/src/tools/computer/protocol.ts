@@ -36,6 +36,17 @@ export type ToolReply = { ok: true; value: unknown } | { ok: false; error: RunEr
  */
 export type ControlVerdict = "approved" | "denied" | "no-ui" | "unanswered";
 
+/**
+ * A {@link ControlVerdict} with, when an unreadable `tools.approval` entry or value made the host ask
+ * (`tools.approval["computer.control"]: ask`, say), that setting and what it should be, so a script told
+ * `no-ui` or `denied` can tell a mistyped setting from an intentional prompt. The host replies with this
+ * object or a bare verdict.
+ */
+export interface ControlAnswer {
+	verdict: ControlVerdict;
+	setting?: string;
+}
+
 /** Where the native session counts the user's Escape stops, and how many the user's latest message acknowledged. */
 export interface ComputerEscapeScope {
 	key: string;

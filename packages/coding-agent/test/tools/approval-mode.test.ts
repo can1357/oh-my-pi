@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -8,13 +8,17 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { logger, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { loadHandWrittenConfig } from "../helpers/approval-config-file";
 
 const BASE_SETTINGS = {
 	"async.enabled": false,
 	"bash.autoBackground.enabled": false,
 	"bashInterceptor.enabled": false,
-	"bash.patterns": [{ match: "rm -rf *", approval: "deny" }],
+	"bash.patterns": [
+		{ match: "rm -rf *", approval: "deny" },
+		{ match: "printf approval-audit*", approval: "allow" },
+	],
 } as const;
 
 function emptyWorkspaceTree(cwd: string) {
@@ -305,5 +309,126 @@ describe("tools.approvalMode setting", () => {
 				},
 			} as never),
 		).rejects.toThrow(/pending provider safety checks but no interactive UI/);
+	});
+
+	describe("a hand-edited tools.approval under the default yolo", () => {
+		afterEach(() => {
+			vi.restoreAllMocks();
+		});
+
+		// The spellings measured on main: the first five kept their meaning there, the rest were read as
+		// no policy, so under the default yolo the command ran without asking. A reason names what was
+		// written by its type and length, never by its text.
+		const UNRECOGNISED = (shape: string) =>
+			`requires approval but no interactive UI available.\nReason: tools.approval.bash is ${shape}, not allow, deny or prompt`;
+		const NOT_A_RECORD = (shape: string) =>
+			`requires approval but no interactive UI available.\nReason: tools.approval is ${shape}, not a record of tool policies`;
+		const spellings: Array<[label: string, approval: unknown, refusal: string, warns: boolean]> = [
+			["exact deny", { bash: "deny" }, 'Tool "bash" is blocked by user policy', false],
+			["capitalised Deny", { bash: "Deny" }, 'Tool "bash" is blocked by user policy', false],
+			["DENY", { bash: "DENY" }, 'Tool "bash" is blocked by user policy', false],
+			["deny with a leading space", { bash: " deny" }, 'Tool "bash" is blocked by user policy', false],
+			["exact prompt", { bash: "prompt" }, "requires approval but no interactive UI available.\nOptions:", false],
+			["denied", { bash: "denied" }, UNRECOGNISED("a string of 6 characters"), true],
+			["block", { bash: "block" }, UNRECOGNISED("a string of 5 characters"), true],
+			["boolean false", { bash: false }, UNRECOGNISED("a boolean"), true],
+			["boolean true", { bash: true }, UNRECOGNISED("a boolean"), true],
+			["number 0", { bash: 0 }, UNRECOGNISED("a number"), true],
+			["null", { bash: null }, UNRECOGNISED("empty"), true],
+			[
+				"key Bash",
+				{ Bash: "deny" },
+				'Tool "Bash" is blocked by user policy.\nTo allow: remove "tools.approval.Bash: deny"',
+				true,
+			],
+			["typo prmopt", { bash: "prmopt" }, UNRECOGNISED("a string of 6 characters"), true],
+			["ask", { bash: "ask" }, UNRECOGNISED("a string of 3 characters"), true],
+			// A whole value that is not a record: no policy at all would let every call run.
+			["the whole value a string", "deny-bash", NOT_A_RECORD("a string of 9 characters"), true],
+			["the whole value a list", ["bash"], NOT_A_RECORD("a list of 1 item"), true],
+			// `approval:` written with nothing under it: YAML reads null, which other reads take as unset.
+			["the whole value left empty", null, NOT_A_RECORD("empty"), true],
+		];
+		for (const [label, approval, refusal, warns] of spellings) {
+			it(`does not run the command for ${label}`, async () => {
+				const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+				const settings = await loadHandWrittenConfig(tempDir, { tools: { approval } }, BASE_SETTINGS);
+				await expect(
+					bashTool().execute(`hand-edited-${label}`, { command: "echo ran" }, undefined, undefined, {
+						settings,
+					} as AgentToolContext),
+				).rejects.toThrow(refusal);
+				const entryWarnings = warn.mock.calls.filter(([message]) => String(message).startsWith("Approval:"));
+				expect(entryWarnings).toHaveLength(warns ? 1 : 0);
+			});
+		}
+
+		// A `bash.patterns` allow is a tool-owned allow: it must not turn a mistyped restriction into a grant,
+		// while a deny, the user's or the tool's own, stays stronger than the unreadable entry.
+		const underAllowPattern: Array<[label: string, approval: unknown, command: string, refusal: string]> = [
+			[
+				"an unreadable entry",
+				{ bash: "prmopt" },
+				"printf approval-audit-executed",
+				"Reason: tools.approval.bash is a string of 6 characters, not allow, deny or prompt",
+			],
+			[
+				"a value that is not a record",
+				"deny-bash",
+				"printf approval-audit-executed",
+				"Reason: tools.approval is a string of 9 characters, not a record of tool policies",
+			],
+			[
+				"a value left empty",
+				null,
+				"printf approval-audit-executed",
+				"Reason: tools.approval is empty, not a record of tool policies",
+			],
+			// Unreadable is sticky, not a rank: the key order of two case variants must not decide it.
+			[
+				"an understood case variant before an unreadable one",
+				{ Bash: "prompt", BASH: "prmopt" },
+				"printf approval-audit-executed",
+				"Reason: tools.approval.BASH is a string of 6 characters, which names bash only by case",
+			],
+			[
+				"an unreadable case variant before an understood one",
+				{ BASH: "prmopt", Bash: "prompt" },
+				"printf approval-audit-executed",
+				"Reason: tools.approval.BASH is a string of 6 characters, which names bash only by case",
+			],
+			["a user deny", { bash: "deny" }, "printf approval-audit-executed", 'Tool "bash" is blocked by user policy'],
+			[
+				"a tool deny over an unreadable entry",
+				{ bash: "prmopt" },
+				"rm -rf /tmp/approval-audit-never",
+				'Tool "bash" is blocked by tool policy',
+			],
+		];
+		for (const [label, approval, command, refusal] of underAllowPattern) {
+			it(`does not run a pattern-allowed command under ${label}`, async () => {
+				vi.spyOn(logger, "warn").mockImplementation(() => {});
+				const settings = await loadHandWrittenConfig(tempDir, { tools: { approval } }, BASE_SETTINGS);
+				await expect(
+					bashTool().execute(`pattern-${label}`, { command }, undefined, undefined, {
+						settings,
+					} as AgentToolContext),
+				).rejects.toThrow(refusal);
+			});
+		}
+
+		it("still runs a pattern-allowed command with no tools.approval", async () => {
+			const settings = await loadHandWrittenConfig(tempDir, {}, BASE_SETTINGS);
+			const result = await bashTool().execute(
+				"pattern-control",
+				{ command: "printf approval-audit-ran" },
+				undefined,
+				undefined,
+				{
+					settings,
+				} as AgentToolContext,
+			);
+			expect(textOf(result)).toContain("approval-audit-ran");
+		});
 	});
 });

@@ -48,6 +48,7 @@ import {
 	type ComputerSessionSnapshot,
 	type ComputerWorkerInbound,
 	type ComputerWorkerTransport,
+	type ControlAnswer,
 	type ControlVerdict,
 	ESCAPE_AFTER_CALL_MESSAGE,
 	ESCAPE_STOPPED_MESSAGE,
@@ -174,7 +175,7 @@ interface ComputerRunContext {
 	readOnly: boolean;
 	snapshot: ComputerSessionSnapshot;
 	output: RunOutput;
-	confirmControl(reason: string): Promise<ControlVerdict>;
+	confirmControl(reason: string): Promise<ControlAnswer>;
 	screenshots: ComputerScreenshot[];
 }
 
@@ -1674,15 +1675,18 @@ export class ComputerWorkerCore {
 		return await promise;
 	}
 
-	async #confirmControl(active: ActiveRun, reason: string, answerDeadline: number): Promise<ControlVerdict> {
+	async #confirmControl(active: ActiveRun, reason: string, answerDeadline: number): Promise<ControlAnswer> {
 		throwIfAborted(active.signal);
 		const id = `computer-control-${active.id}-${crypto.randomUUID()}`;
 		const pending = Promise.withResolvers<unknown>();
 		active.pendingTools.set(id, pending);
 		const timeoutMs = Math.max(0, Math.floor(answerDeadline - performance.now()));
 		this.#transport.send({ type: "control-request", id, runId: active.id, reason, timeoutMs });
-		const verdict = await pending.promise;
-		return verdict === "approved" || verdict === "no-ui" || verdict === "unanswered" ? verdict : "denied";
+		const reply = await pending.promise;
+		const answer = reply !== null && typeof reply === "object" ? (reply as Partial<ControlAnswer>) : undefined;
+		const value = answer ? answer.verdict : reply;
+		const verdict = value === "approved" || value === "no-ui" || value === "unanswered" ? value : "denied";
+		return typeof answer?.setting === "string" ? { verdict, setting: answer.setting } : { verdict };
 	}
 
 	#deliverToolReply(id: string, reply: ToolReply): void {
@@ -1810,7 +1814,7 @@ export class ComputerWorkerCore {
 			control: {
 				acquire: async (options: {
 					reason: string;
-				}): Promise<{ active: boolean; reason?: Exclude<ControlVerdict, "approved"> }> => {
+				}): Promise<{ active: boolean; reason?: Exclude<ControlVerdict, "approved">; setting?: string }> => {
 					const context = getContext();
 					guardRun(context, "control.acquire");
 					refuseForeground(
@@ -1823,9 +1827,9 @@ export class ComputerWorkerCore {
 					if (typeof options.reason !== "string" || !options.reason.trim())
 						throw new ToolError("control.acquire requires a non-empty reason");
 					if (session.controlState().active) return { active: true };
-					const verdict = await context.confirmControl(options.reason);
+					const { verdict, setting } = await context.confirmControl(options.reason);
 					throwIfAborted(context.signal);
-					if (verdict !== "approved") return { active: false, reason: verdict };
+					if (verdict !== "approved") return { active: false, reason: verdict, ...(setting ? { setting } : {}) };
 					return await nativeCall(context.signal, () => session.acquireControl());
 				},
 				release: async (): Promise<void> => {

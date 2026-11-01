@@ -41,6 +41,7 @@ import {
 	resolveApproval,
 	resolveApprovalFromContext,
 	restrictedFolderReason,
+	userPolicyReasonLine,
 } from "./tools/approval";
 import { approvalTargetKey } from "./tools/approval-targets";
 import { getApprovalGrants } from "./tools/approval-cache";
@@ -397,7 +398,7 @@ function refuseByWritePolicy(options: CursorExecBridgeOptions, toolName: string,
 	}
 	return approval.policy === "deny"
 		? `Tool "${toolName}" is blocked by user policy.`
-		: `Tool "${toolName}" requires approval, which this channel cannot request.`;
+		: `Tool "${toolName}" requires approval, which this channel cannot request.${userPolicyReasonLine(approval)}`;
 }
 
 async function executeDelete(options: CursorExecBridgeOptions, pathArg: string, toolCallId: string) {
