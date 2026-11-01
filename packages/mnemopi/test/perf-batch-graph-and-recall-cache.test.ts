@@ -349,4 +349,55 @@ describe("performance optimizations: batched graph and recall cache", () => {
 
 		graph.close();
 	});
+
+	it("findEdgesTouching with limit passes LIMIT to SQLite chunks and returns top-limit edges across chunks", () => {
+		const db = new Database(":memory:");
+		const graph = new EpisodicGraph({ db });
+		const now = new Date().toISOString();
+
+		// Insert 1000 nodes connected to root across multiple chunks (> 900)
+		const nodeCount = 1000;
+		for (let i = 0; i < nodeCount; i++) {
+			// Assign weights such that nodes in both chunk 1 and chunk 2 have high-weight edges
+			// e.g. i = 50 has weight 0.99 (chunk 1), i = 950 has weight 0.98 (chunk 2)
+			const weight = i === 50 ? 0.99 : i === 950 ? 0.98 : 0.1;
+			graph.addEdge({
+				source: "root",
+				target: `node_${i}`,
+				edgeType: "ctx",
+				weight,
+				timestamp: now,
+			});
+		}
+
+		const queriesIssued: string[] = [];
+		const originalQuery = db.query.bind(db);
+		spyOn(db, "query").mockImplementation((sql: string) => {
+			queriesIssued.push(sql);
+			return originalQuery(sql);
+		});
+
+		const nodeIds = Array.from({ length: nodeCount }, (_, i) => `node_${i}`);
+		// Request top 2 edges
+		const topEdges = graph.findEdgesTouching(nodeIds, "ctx", 0, 2);
+
+		// Check that SQL contains LIMIT ? for chunked edge queries
+		const edgeQueries = queriesIssued.filter(q => q.includes("FROM graph_edges"));
+		expect(edgeQueries.length).toBe(2); // 1000 items / 900 chunk size = 2 chunks
+		for (const q of edgeQueries) {
+			expect(q).toContain("LIMIT ?");
+		}
+
+		expect(topEdges).toHaveLength(2);
+		expect(topEdges[0]?.target).toBe("node_50");
+		expect(topEdges[0]?.weight).toBe(0.99);
+		expect(topEdges[1]?.target).toBe("node_950");
+		expect(topEdges[1]?.weight).toBe(0.98);
+
+		// Verify limit <= 0 returns []
+		expect(graph.findEdgesTouching(nodeIds, "ctx", 0, 0)).toEqual([]);
+		expect(graph.findEdgesTouching(nodeIds, "ctx", 0, -5)).toEqual([]);
+
+		graph.close();
+	});
 });

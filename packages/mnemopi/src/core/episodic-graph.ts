@@ -514,26 +514,28 @@ export class EpisodicGraph {
 		const threshold = clampWeight(minWeight);
 		const seenKeys = new Set<string>();
 		const collected: GraphEdge[] = [];
+		const hasSqlLimit = Number.isFinite(limit) && max > 0;
 
 		for (let i = 0; i < nodeIds.length; i += MAX_SQL_IDS_PER_CHUNK) {
 			const chunk = nodeIds.slice(i, i + MAX_SQL_IDS_PER_CHUNK);
 			const placeholders = chunk.map(() => "?").join(", ");
+			const limitClause = hasSqlLimit ? " LIMIT ?" : "";
 			const rows =
 				edgeType.length > 0
 					? (this.db
 							.query(
 								`SELECT source, target, edge_type, weight, timestamp FROM graph_edges
 					 WHERE (source IN (${placeholders}) OR target IN (${placeholders})) AND edge_type = ? AND weight >= ?
-					 ORDER BY weight DESC, id`,
+					 ORDER BY weight DESC, id${limitClause}`,
 							)
-							.all(...chunk, ...chunk, edgeType, threshold) as EdgeRow[])
+							.all(...chunk, ...chunk, edgeType, threshold, ...(hasSqlLimit ? [max] : [])) as EdgeRow[])
 					: (this.db
 							.query(
 								`SELECT source, target, edge_type, weight, timestamp FROM graph_edges
 					 WHERE (source IN (${placeholders}) OR target IN (${placeholders})) AND weight >= ?
-					 ORDER BY weight DESC, id`,
+					 ORDER BY weight DESC, id${limitClause}`,
 							)
-							.all(...chunk, ...chunk, threshold) as EdgeRow[]);
+							.all(...chunk, ...chunk, threshold, ...(hasSqlLimit ? [max] : [])) as EdgeRow[]);
 
 			for (const row of rows) {
 				const key = `${row.source}\0${row.target}\0${row.edge_type}`;
