@@ -44,7 +44,7 @@ import {
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests, logger, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
 import { cfgRetryModelFallback } from "@oh-my-pi/pi-coding-agent/session/settings";
@@ -1568,6 +1568,8 @@ describe("structured subagent primitive", () => {
 	});
 
 	it("runs the caller hold's release when the spawn fails before any child exists", async () => {
+		// The structured boundary's own `finally` is the only thing that can
+		// release here: policy resolution throws before `runSubprocess` exists.
 		mockDiscovery();
 		const run = vi.spyOn(executorModule, "runSubprocess");
 		let released = 0;
@@ -1580,10 +1582,38 @@ describe("structured subagent primitive", () => {
 		expect(released).toBe(1);
 	});
 
+	it("keeps the run's own error when the caller hold's release throws", async () => {
+		// Nothing sits above the structured boundary, so a release that throws
+		// there must be reported, not raised: raising it would replace the
+		// error that ended the run with a cleanup failure.
+		mockDiscovery();
+		let attempts = 0;
+		const warn = vi.spyOn(logger, "warn");
+
+		await expect(
+			runStructuredSubagent(
+				request({
+					agent: "ghost",
+					onRelease: () => {
+						attempts += 1;
+						throw new Error("kernel already gone");
+					},
+				}),
+			),
+		).rejects.toThrow('Unknown agent "ghost"');
+
+		expect(attempts).toBe(1);
+		expect(warn).toHaveBeenCalledWith(
+			"Subagent caller hold release failed",
+			expect.objectContaining({ error: "kernel already gone" }),
+		);
+	});
+
 	it("runs the caller hold's release when the spawn is cancelled before the child starts", async () => {
 		// The real runner, not a replacement: an already-aborted spawn returns
-		// "Cancelled before start" without creating a child session, so nothing
-		// downstream will ever end and release what the parent holds for it.
+		// "Cancelled before start" without creating a child session. What
+		// releases the hold is `runSubprocess`'s own boundary, which this
+		// exercises end to end through the structured entry point.
 		mockDiscovery();
 		let released = 0;
 
@@ -1599,7 +1629,8 @@ describe("structured subagent primitive", () => {
 	it("runs the caller hold's release when the isolation workspace cannot be created", async () => {
 		// Real failure in the real runner: a directory that is not a repository
 		// has no isolation to build, so `ensureIsolation` throws before any
-		// workspace handle, child, or lifecycle exists.
+		// workspace handle, child, or lifecycle exists. What releases the hold
+		// is the isolation runner's no-handle branch, called directly here.
 		const outside = await fs.mkdtemp(path.join(os.tmpdir(), "omp-isolation-startup-"));
 		let released = 0;
 		try {

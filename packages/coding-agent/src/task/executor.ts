@@ -3709,10 +3709,17 @@ export async function finalizeSubagentLifecycle(args: {
 	// workspace for the life of the host, which is the leak this whole change
 	// exists to end. Past the bound the release runs anyway and says why.
 	asReleaseHold(args.onRelease)?.claim();
+	// Whichever side loses the race is cancelled, so a disposal that finishes
+	// in a second does not leave a sixty-second timer armed behind it.
+	const waitBound = new AbortController();
 	const settled = Promise.race([
 		deferred.catch(() => undefined).then(() => true),
-		scheduler.wait(REFUSED_RELEASE_MAX_WAIT_MS).then(() => false),
+		scheduler.wait(REFUSED_RELEASE_MAX_WAIT_MS, { signal: waitBound.signal }).then(
+			() => false,
+			() => true,
+		),
 	]).then(async disposed => {
+		waitBound.abort();
 		if (!disposed) {
 			logger.warn("Subagent disposal outran its release wait; releasing its resources anyway", {
 				id: args.id,
