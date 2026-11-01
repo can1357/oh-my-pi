@@ -206,6 +206,7 @@ describe("proc:// background jobs", () => {
 		async launch => {
 			const client: DaemonBrokerClient = {
 				projectDir: process.cwd(),
+				observeOwners: () => () => {},
 				onCompletion: () => () => {},
 				close() {},
 				async request(operation: DaemonOperation): Promise<DaemonRpcResult> {
