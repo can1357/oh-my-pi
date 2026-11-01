@@ -66,6 +66,30 @@ function makeLspSession(cwd: string): ToolSession {
 	return { cwd, settings: lspTestSettings } as ToolSession;
 }
 
+/** Minimal LSP client stub for rename_file tests: no process, no responses. */
+function makeStubLspClient(name: string, config: ServerConfig, cwd: string): LspClient {
+	return {
+		name,
+		cwd,
+		config,
+		proc: {
+			stdin: { write() {}, flush: async () => {} },
+		} as unknown as LspClient["proc"],
+		requestId: 0,
+		diagnostics: new Map(),
+		diagnosticsVersion: 0,
+		openFiles: new Map(),
+		pendingRequests: new Map(),
+		isReading: false,
+		status: "ready",
+		lastActivity: Date.now(),
+		writeQueue: Promise.resolve(),
+		activeProgressTokens: new Set(),
+		projectLoaded: Promise.resolve(),
+		resolveProjectLoaded: () => {},
+	};
+}
+
 /**
  * Race an async read of a FIFO that has no writer. Real kernel FIFO I/O can't be driven by fake
  * timers; if the read is still pending at the bound, a non-blocking writer releases it so the
@@ -3509,6 +3533,384 @@ describe("lsp regressions", () => {
 			expect(fs.existsSync(sourceFile)).toBe(false);
 			expect(fs.existsSync(destFile)).toBe(true);
 			expect(result.details).toMatchObject({ action: "rename_file", success: true });
+		} finally {
+			vi.restoreAllMocks();
+			tempDir.removeSync();
+		}
+	});
+
+	it("rename_file reports a plain move when no server supports workspace/willRenameFiles", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-rename-file-unsupported-");
+		try {
+			const sourceFile = path.join(tempDir.path(), "src", "old.ts");
+			const destFile = path.join(tempDir.path(), "src", "new.ts");
+			await Bun.write(sourceFile, "export const value = 42;\n");
+
+			const server: ServerConfig = { command: "test-lsp", fileTypes: ["ts"], rootMarkers: [] };
+			const client: LspClient = {
+				name: "test-lsp",
+				cwd: tempDir.path(),
+				config: server,
+				proc: {
+					stdin: { write() {}, flush: async () => {} },
+				} as unknown as LspClient["proc"],
+				requestId: 0,
+				diagnostics: new Map(),
+				diagnosticsVersion: 0,
+				openFiles: new Map(),
+				pendingRequests: new Map(),
+				isReading: false,
+				status: "ready",
+				lastActivity: Date.now(),
+				writeQueue: Promise.resolve(),
+				activeProgressTokens: new Set(),
+				projectLoaded: Promise.resolve(),
+				resolveProjectLoaded: () => {},
+			};
+
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+				servers: { "test-lsp": server },
+				idleTimeoutMs: undefined,
+			});
+			vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(client);
+			// The server does not implement workspace/willRenameFiles, so it
+			// cannot rewrite the imports pointing at the old path.
+			vi.spyOn(lspClient, "sendRequest").mockImplementation(async (_client, method) => {
+				if (method === "workspace/willRenameFiles") {
+					throw new Error("Method not found: -32601");
+				}
+				return null;
+			});
+			vi.spyOn(lspClient, "sendNotification").mockResolvedValue();
+
+			const tool = new LspTool(makeLspSession(tempDir.path()));
+			const result = await tool.execute("rename-file-unsupported", {
+				action: "rename_file",
+				file: sourceFile,
+				new_name: destFile,
+				timeout: 5,
+			});
+
+			// The path moves, but the result must not read as a semantic rename:
+			// the caller has to know the imports were left pointing at a file
+			// that no longer exists.
+			expect(fs.existsSync(sourceFile)).toBe(false);
+			expect(fs.existsSync(destFile)).toBe(true);
+			const output = textResult(result);
+			expect(output).toContain("does not support workspace/willRenameFiles");
+			expect(output).toContain("NOT updated");
+			expect(result.details).toMatchObject({
+				action: "rename_file",
+				// `success` reports the file move; `semanticRename` reports that
+				// no server rewrote the references.
+				success: true,
+				semanticRename: false,
+				referenceEdits: 0,
+				unsupportedServers: ["test-lsp"],
+			});
+		} finally {
+			vi.restoreAllMocks();
+			tempDir.removeSync();
+		}
+	});
+
+	it("rename_file distinguishes a supporting server that finds no references to update", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-rename-file-zero-edits-");
+		try {
+			const sourceFile = path.join(tempDir.path(), "src", "old.ts");
+			const destFile = path.join(tempDir.path(), "src", "new.ts");
+			await Bun.write(sourceFile, "export const value = 42;\n");
+
+			const server: ServerConfig = { command: "test-lsp", fileTypes: ["ts"], rootMarkers: [] };
+			const client: LspClient = {
+				name: "test-lsp",
+				cwd: tempDir.path(),
+				config: server,
+				proc: {
+					stdin: { write() {}, flush: async () => {} },
+				} as unknown as LspClient["proc"],
+				requestId: 0,
+				diagnostics: new Map(),
+				diagnosticsVersion: 0,
+				openFiles: new Map(),
+				pendingRequests: new Map(),
+				isReading: false,
+				status: "ready",
+				lastActivity: Date.now(),
+				writeQueue: Promise.resolve(),
+				activeProgressTokens: new Set(),
+				projectLoaded: Promise.resolve(),
+				resolveProjectLoaded: () => {},
+			};
+
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+				servers: { "test-lsp": server },
+				idleTimeoutMs: undefined,
+			});
+			vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(client);
+			// A supporting server answers and reports that nothing references
+			// the old path — a real "0 reference edits", not a missing server.
+			vi.spyOn(lspClient, "sendRequest").mockResolvedValue({ documentChanges: [] });
+			vi.spyOn(lspClient, "sendNotification").mockResolvedValue();
+
+			const tool = new LspTool(makeLspSession(tempDir.path()));
+			const result = await tool.execute("rename-file-zero-edits", {
+				action: "rename_file",
+				file: sourceFile,
+				new_name: destFile,
+				timeout: 5,
+			});
+
+			expect(fs.existsSync(destFile)).toBe(true);
+			const output = textResult(result);
+			expect(output).toContain("0 reference edits");
+			expect(output).not.toContain("NOT updated");
+			expect(result.details).toMatchObject({
+				action: "rename_file",
+				success: true,
+				semanticRename: true,
+				referenceEdits: 0,
+			});
+		} finally {
+			vi.restoreAllMocks();
+			tempDir.removeSync();
+		}
+	});
+
+	it("rename_file preview says the rename would be aborted when a supporting server fails", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-rename-file-preview-abort-");
+		try {
+			const sourceFile = path.join(tempDir.path(), "src", "old.ts");
+			const destFile = path.join(tempDir.path(), "src", "new.ts");
+			await Bun.write(sourceFile, "export const value = 42;\n");
+
+			const server: ServerConfig = { command: "test-lsp", fileTypes: ["ts"], rootMarkers: [] };
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+				servers: { "test-lsp": server },
+				idleTimeoutMs: undefined,
+			});
+			vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(
+				makeStubLspClient("test-lsp", server, tempDir.path()),
+			);
+			// The server supports willRenameFiles but fails: applying aborts
+			// with "No files were moved".
+			vi.spyOn(lspClient, "sendRequest").mockImplementation(async (_client, method) => {
+				if (method === "workspace/willRenameFiles") {
+					throw new Error("internal error: index not ready");
+				}
+				return null;
+			});
+			vi.spyOn(lspClient, "sendNotification").mockResolvedValue();
+
+			const tool = new LspTool(makeLspSession(tempDir.path()));
+			const result = await tool.execute("rename-file-preview-abort", {
+				action: "rename_file",
+				file: sourceFile,
+				new_name: destFile,
+				apply: false,
+				timeout: 5,
+			});
+
+			// The preview must describe the abort. Describing a plain move
+			// would promise a rename that applying never performs.
+			const output = textResult(result);
+			expect(output).toContain("would be aborted");
+			expect(output).toContain("No files would be moved");
+			expect(output).not.toContain("plain move");
+			expect(output).not.toContain("NOT updated");
+			// The details must not claim success for a rename that would abort.
+			expect(result.details).toMatchObject({ action: "rename_file", success: false });
+			// Nothing moved.
+			expect(fs.existsSync(sourceFile)).toBe(true);
+			expect(fs.existsSync(destFile)).toBe(false);
+		} finally {
+			vi.restoreAllMocks();
+			tempDir.removeSync();
+		}
+	});
+
+	it("rename_file names a server that could not update references even when another server answered", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-rename-file-partial-");
+		try {
+			const sourceFile = path.join(tempDir.path(), "src", "old.ts");
+			const destFile = path.join(tempDir.path(), "src", "new.ts");
+			await Bun.write(sourceFile, "export const value = 42;\n");
+
+			const responder: ServerConfig = { command: "responder-lsp", fileTypes: ["ts"], rootMarkers: [] };
+			const unsupported: ServerConfig = { command: "unsupported-lsp", fileTypes: ["ts"], rootMarkers: [] };
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+				servers: { "responder-lsp": responder, "unsupported-lsp": unsupported },
+				idleTimeoutMs: undefined,
+			});
+			vi.spyOn(lspClient, "getOrCreateClient").mockImplementation(async serverConfig =>
+				makeStubLspClient(serverConfig.command, serverConfig, tempDir.path()),
+			);
+			// One server answers with nothing to change; the server that knows
+			// the references does not implement the method.
+			vi.spyOn(lspClient, "sendRequest").mockImplementation(async (client, method) => {
+				if (method === "workspace/willRenameFiles") {
+					if (client.name === "responder-lsp") return null;
+					throw new Error("Method not found: -32601");
+				}
+				return null;
+			});
+			vi.spyOn(lspClient, "sendNotification").mockResolvedValue();
+
+			const tool = new LspTool(makeLspSession(tempDir.path()));
+			const result = await tool.execute("rename-file-partial", {
+				action: "rename_file",
+				file: sourceFile,
+				new_name: destFile,
+				timeout: 5,
+			});
+
+			// The server that never looked at the references has to be named:
+			// "0 reference edits" from one server does not prove that there is
+			// nothing to update.
+			const output = textResult(result);
+			expect(output).toContain("unsupported-lsp: does not support workspace/willRenameFiles");
+			expect(output).not.toContain("no references to update");
+			expect(result.details).toMatchObject({
+				action: "rename_file",
+				success: true,
+				semanticRename: true,
+				referenceEdits: 0,
+				unsupportedServers: ["unsupported-lsp"],
+			});
+		} finally {
+			vi.restoreAllMocks();
+			tempDir.removeSync();
+		}
+	});
+
+	it("rename_file preview names a server that could not update references", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-rename-file-preview-partial-");
+		try {
+			const sourceFile = path.join(tempDir.path(), "src", "old.ts");
+			const destFile = path.join(tempDir.path(), "src", "new.ts");
+			await Bun.write(sourceFile, "export const value = 42;\n");
+
+			const responder: ServerConfig = { command: "responder-lsp", fileTypes: ["ts"], rootMarkers: [] };
+			const unsupported: ServerConfig = { command: "unsupported-lsp", fileTypes: ["ts"], rootMarkers: [] };
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+				servers: { "responder-lsp": responder, "unsupported-lsp": unsupported },
+				idleTimeoutMs: undefined,
+			});
+			vi.spyOn(lspClient, "getOrCreateClient").mockImplementation(async serverConfig =>
+				makeStubLspClient(serverConfig.command, serverConfig, tempDir.path()),
+			);
+			vi.spyOn(lspClient, "sendRequest").mockImplementation(async (client, method) => {
+				if (method === "workspace/willRenameFiles") {
+					if (client.name === "responder-lsp") return null;
+					throw new Error("Method not found: -32601");
+				}
+				return null;
+			});
+			vi.spyOn(lspClient, "sendNotification").mockResolvedValue();
+
+			const tool = new LspTool(makeLspSession(tempDir.path()));
+			const result = await tool.execute("rename-file-preview-partial", {
+				action: "rename_file",
+				file: sourceFile,
+				new_name: destFile,
+				apply: false,
+				timeout: 5,
+			});
+
+			// The preview is what the model reads before deciding to apply: it
+			// has to name the server that never looked at the references, and
+			// must not claim that there is nothing to update.
+			const output = textResult(result);
+			expect(output).toContain("unsupported-lsp: does not support workspace/willRenameFiles");
+			expect(output).not.toContain("no references to update");
+			expect(fs.existsSync(sourceFile)).toBe(true);
+			expect(fs.existsSync(destFile)).toBe(false);
+		} finally {
+			vi.restoreAllMocks();
+			tempDir.removeSync();
+		}
+	});
+
+	it("rename_file reports a missing semantic assist with a preset-independent marker", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-rename-file-marker-");
+		try {
+			const sourceFile = path.join(tempDir.path(), "src", "old.ts");
+			const destFile = path.join(tempDir.path(), "src", "new.ts");
+			await Bun.write(sourceFile, "export const value = 42;\n");
+
+			const server: ServerConfig = { command: "test-lsp", fileTypes: ["ts"], rootMarkers: [] };
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+				servers: { "test-lsp": server },
+				idleTimeoutMs: undefined,
+			});
+			vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(
+				makeStubLspClient("test-lsp", server, tempDir.path()),
+			);
+			vi.spyOn(lspClient, "sendRequest").mockImplementation(async (_client, method) => {
+				if (method === "workspace/willRenameFiles") {
+					throw new Error("Method not found: -32601");
+				}
+				return null;
+			});
+			vi.spyOn(lspClient, "sendNotification").mockResolvedValue();
+
+			const tool = new LspTool(makeLspSession(tempDir.path()));
+			const result = await tool.execute("rename-file-marker", {
+				action: "rename_file",
+				file: sourceFile,
+				new_name: destFile,
+				timeout: 5,
+			});
+
+			// The model-facing text carries a fixed marker: the same rename has
+			// to read the same for every theme, and a nerd-font private-use
+			// glyph is unreadable to the model.
+			const output = textResult(result);
+			expect(output).toContain("warning:");
+			expect(output).not.toMatch(/[\uE000-\uF8FF]/);
+			expect(output).not.toContain("⚠");
+		} finally {
+			vi.restoreAllMocks();
+			tempDir.removeSync();
+		}
+	});
+
+	it("rename_file names an unreachable server exactly once", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-rename-file-unreachable-");
+		try {
+			const sourceFile = path.join(tempDir.path(), "src", "old.ts");
+			const destFile = path.join(tempDir.path(), "src", "new.ts");
+			await Bun.write(sourceFile, "export const value = 42;\n");
+
+			const ghost: ServerConfig = { command: "ghost-lsp", fileTypes: ["ts"], rootMarkers: [] };
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+				servers: { "ghost-lsp": ghost },
+				idleTimeoutMs: undefined,
+			});
+			// The server cannot be started at all.
+			vi.spyOn(lspClient, "getOrCreateClient").mockRejectedValue(new Error("spawn ENOENT"));
+			vi.spyOn(lspClient, "sendNotification").mockResolvedValue();
+
+			const tool = new LspTool(makeLspSession(tempDir.path()));
+			const result = await tool.execute("rename-file-unreachable", {
+				action: "rename_file",
+				file: sourceFile,
+				new_name: destFile,
+				timeout: 5,
+			});
+
+			const output = textResult(result);
+			expect(output).toContain("ghost-lsp: could not be reached");
+			// The same server must not be listed twice — once under the warning
+			// and again under "Server notes".
+			expect(output.match(/ghost-lsp/g) ?? []).toHaveLength(1);
+			expect(output).not.toContain("Server notes:");
+			expect(result.details).toMatchObject({
+				action: "rename_file",
+				success: true,
+				semanticRename: false,
+				unreachableServers: ["ghost-lsp"],
+			});
 		} finally {
 			vi.restoreAllMocks();
 			tempDir.removeSync();
