@@ -4,8 +4,7 @@
  * - `dist/omp-browser-relay-extension.zip` — packaged extension for GH releases
  * - `../coding-agent/src/tools/browser/relay/extension-assets/*.txt` —
  *   generated text assets embedded into the omp CLI so `omp browser-relay
- *   install` works from the compiled binary (same committed-generated-output
- *   pattern as tool-views.generated.js). Re-run this script after touching
+ *   install` works from the compiled binary. Re-run this script after touching
  *   anything under `extension/` and commit the regenerated assets.
  *
  * Dependency-free on purpose: CI runs this without `bun install`.
@@ -41,9 +40,7 @@ if (!bundle.success) {
 for (const file of ["options.html", "options.js"]) {
 	await Bun.write(path.join(distExtension, file), Bun.file(path.join(root, "extension", file)));
 }
-for (const file of ["LICENSE", "THIRD-PARTY-NOTICES.txt"]) {
-	await Bun.write(path.join(distExtension, file), Bun.file(path.join(repoRoot, file)));
-}
+await Bun.write(path.join(distExtension, "LICENSE"), Bun.file(path.join(repoRoot, "LICENSE")));
 // The release zip carries the omp version it ships with, as `omp browser-relay install` stamps its copy;
 // the extension reports it to the relay. The embedded assets stay unstamped so releases do not rewrite them.
 const sourceManifest = path.join(root, "extension/manifest.json");
@@ -69,7 +66,6 @@ const embeddedAssets = [
 	[path.join(distExtension, "options.html"), "options.html.txt"],
 	[path.join(distExtension, "options.js"), "options.js.txt"],
 	[path.join(distExtension, "LICENSE"), "LICENSE.txt"],
-	[path.join(distExtension, "THIRD-PARTY-NOTICES.txt"), "THIRD-PARTY-NOTICES.txt"],
 ] as const;
 for (const [source, destination] of embeddedAssets) {
 	await Bun.write(path.join(assetsDir, destination), Bun.file(source));

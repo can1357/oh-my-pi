@@ -8,11 +8,13 @@ import { getThemeByName, initTheme, type Theme, theme } from "@oh-my-pi/pi-tui/t
 import {
 	dedupeParseErrors,
 	expandKeyHint,
+	FILE_NAME_COLOR,
 	formatCodeFrameLine,
 	formatDiagnostics,
 	formatErrorMessage,
 	formatExpandHint,
 	formatParseErrors,
+	formatStyledPath,
 	formatFeedModelBadge,
 	PREVIEW_LIMITS,
 	resolveImageOptions,
@@ -343,6 +345,20 @@ describe("formatDiagnostics", () => {
 		expect(formatted.replace(/\s+/g, " ")).toContain("too many arguments in call");
 		expect(formatted.replace(/\s+/g, " ")).toContain("unparsed diagnostic message");
 		expect(formatted.replace(/\s+/g, " ")).toContain("1 error(s)");
+	});
+});
+
+describe("formatStyledPath", () => {
+	it("dims the directory and colors the final segment for each separator and shape", async () => {
+		const theme = (await getThemeByName("dark"))!;
+		const split = (dir: string, name: string) =>
+			`${dir ? theme.fg("dim", dir) : ""}${theme.fg(FILE_NAME_COLOR, name)}`;
+
+		expect(formatStyledPath("src/tools/grep.ts", theme)).toBe(split("src/tools/", "grep.ts"));
+		expect(formatStyledPath("C:\\repo\\src\\grep.ts", theme)).toBe(split("C:\\repo\\src\\", "grep.ts"));
+		// A trailing-slash directory keeps its slash on the colored folder name.
+		expect(formatStyledPath("src/components/", theme)).toBe(split("src/", "components/"));
+		expect(formatStyledPath("README.md", theme)).toBe(split("", "README.md"));
 	});
 });
 

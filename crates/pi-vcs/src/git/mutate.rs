@@ -458,6 +458,27 @@ impl GitRepo {
 		Ok(())
 	}
 
+	/// Write the checkout's uncommitted changes to tracked files as a stash
+	/// commit, leaving the working tree, the index, and the stash list as they
+	/// are. `None` when nothing is uncommitted. Git cannot record unmerged
+	/// entries, so this fails mid-conflict.
+	pub fn stash_create(&self) -> Result<Option<String>> {
+		let create = ["stash", "create"].map(str::to_owned);
+		let created = super::cli::run_sync(self.root(), &create, super::cli::COMMAND_TIMEOUT)?
+			.into_checked(&create)?;
+		let id = created.stdout.trim();
+		Ok((!id.is_empty()).then(|| id.to_owned()))
+	}
+
+	/// Point `reference` at `id`, recording `message` on its reflog.
+	pub fn record_ref(&self, reference: &str, id: &str, message: &str) -> Result<()> {
+		let update =
+			["update-ref", "--create-reflog", "-m", message, reference, id].map(str::to_owned);
+		super::cli::run_sync(self.root(), &update, super::cli::COMMAND_TIMEOUT)?
+			.into_checked(&update)?;
+		Ok(())
+	}
+
 	/// Reset HEAD, index, and optionally the worktree to a target commit.
 	pub fn reset(&self, mode: ResetMode, target: Option<&str>) -> Result<()> {
 		let repo = self.gix()?;
@@ -988,8 +1009,8 @@ fn run_commit_hook(repository: &GitRepo, name: &str, args: &[&OsStr]) -> Result<
 	Err(Error::Cli {
 		command:   format!("git commit ({name} hook)"),
 		exit_code: output.status.code().unwrap_or(1),
-		stdout:    String::from_utf8_lossy(&output.stdout).into_owned(),
-		stderr:    String::from_utf8_lossy(&output.stderr).into_owned(),
+		stdout:    String::from_utf8_lossy_owned(output.stdout),
+		stderr:    String::from_utf8_lossy_owned(output.stderr),
 	})
 }
 

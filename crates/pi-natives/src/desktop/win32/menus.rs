@@ -2,7 +2,7 @@
 //! Neither route activates a window or substitutes keyboard input. Lazy menus
 //! absent from the provider's current tree are refused rather than guessed.
 
-use std::{mem::size_of, ptr::with_exposed_provenance_mut};
+use std::ptr::with_exposed_provenance_mut;
 
 use uiautomation::{
 	UIAutomation, UIElement, UITreeWalker,

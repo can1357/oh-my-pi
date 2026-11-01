@@ -93,15 +93,23 @@ const COLOR_NONE: ColorVal = 0;
 
 #[derive(Clone, Copy, Default)]
 struct AnsiState {
-	attrs: u16,
-	fg:    ColorVal,
-	bg:    ColorVal,
+	attrs:           u16,
+	/// Underline style while `ATTR_UNDERLINE` is set: 0/1 plain, 2..=5 the `4:n`
+	/// styles (double, curly, dotted, dashed).
+	underline_style: u8,
+	fg:              ColorVal,
+	bg:              ColorVal,
 }
 
 impl AnsiState {
 	#[inline]
 	const fn new() -> Self {
-		Self { attrs: 0, fg: COLOR_NONE, bg: COLOR_NONE }
+		Self {
+			attrs:           0,
+			underline_style: 0,
+			fg:              COLOR_NONE,
+			bg:              COLOR_NONE,
+		}
 	}
 
 	#[inline]
@@ -122,15 +130,21 @@ impl AnsiState {
 
 		let mut i = 0;
 		while i < params.len() {
-			let (code, next_i) = parse_sgr_num_u16(params, i);
+			let (param, next_i) = next_sgr_param_u16(params, i);
 			i = next_i;
+			let code = param.code;
 
 			match code {
 				0 => self.reset(),
 				1 => self.attrs |= ATTR_BOLD,
 				2 => self.attrs |= ATTR_DIM,
 				3 => self.attrs |= ATTR_ITALIC,
-				4 => self.attrs |= ATTR_UNDERLINE,
+				// `4:0` ends underlining; `4:n` picks a style (curly, dotted, ...).
+				4 if param.subs().first() == Some(&0) => self.attrs &= !ATTR_UNDERLINE,
+				4 => {
+					self.attrs |= ATTR_UNDERLINE;
+					self.underline_style = param.subs().first().map_or(1, |&style| style.min(5) as u8);
+				},
 				5 => self.attrs |= ATTR_BLINK,
 				7 => self.attrs |= ATTR_INVERSE,
 				8 => self.attrs |= ATTR_HIDDEN,
@@ -152,33 +166,40 @@ impl AnsiState {
 				90..=97 => self.fg = (code - 81) as ColorVal,
 				100..=107 => self.bg = (code - 91) as ColorVal,
 
-				38 | 48 => {
-					let (mode, ni) = parse_sgr_num_u16(params, i);
-					i = ni;
-
-					let color = match mode {
-						5 => {
-							let (idx, ni) = parse_sgr_num_u16(params, i);
-							i = ni;
-							0x100 | (idx as ColorVal & 0xff)
-						},
-						2 => {
-							let (r, ni) = parse_sgr_num_u16(params, i);
-							let (g, ni) = parse_sgr_num_u16(params, ni);
-							let (b, ni) = parse_sgr_num_u16(params, ni);
-							i = ni;
-							0x1000000
-								| ((r as ColorVal & 0xff) << 16)
-								| ((g as ColorVal & 0xff) << 8)
-								| (b as ColorVal & 0xff)
-						},
-						_ => continue,
+				// Extended colors, `;` form (`38;2;r;g;b`) or `:` form (`38:2::r:g:b`, `38:5:n`).
+				// Underline color (58) is consumed so its arguments are not read as codes, not tracked.
+				38 | 48 | 58 => {
+					let color = if param.subs().is_empty() {
+						let (mode, ni) = next_sgr_param_u16(params, i);
+						i = ni;
+						match mode.code {
+							5 => {
+								let (idx, ni) = next_sgr_param_u16(params, i);
+								i = ni;
+								0x100 | (idx.code as ColorVal & 0xff)
+							},
+							2 => {
+								let (r, ni) = next_sgr_param_u16(params, i);
+								let (g, ni) = next_sgr_param_u16(params, ni);
+								let (b, ni) = next_sgr_param_u16(params, ni);
+								i = ni;
+								rgb_color(r.code, g.code, b.code)
+							},
+							_ => continue,
+						}
+					} else {
+						match param.subs() {
+							[5, idx, ..] => 0x100 | (*idx as ColorVal & 0xff),
+							// With a color-space id (`2:cs:r:g:b`, often empty) or without one.
+							[2, _, r, g, b, ..] | [2, r, g, b] => rgb_color(*r, *g, *b),
+							_ => continue,
+						}
 					};
 
-					if code == 38 {
-						self.fg = color;
-					} else {
-						self.bg = color;
+					match code {
+						38 => self.fg = color,
+						48 => self.bg = color,
+						_ => {},
 					}
 				},
 
@@ -216,6 +237,10 @@ impl AnsiState {
 		}
 		if self.attrs & ATTR_UNDERLINE != 0 {
 			push_code!(4);
+			if self.underline_style > 1 {
+				out.push(b':' as u16);
+				write_u32_u16(out, u32::from(self.underline_style));
+			}
 		}
 		if self.attrs & ATTR_BLINK != 0 {
 			push_code!(5);
@@ -303,27 +328,71 @@ fn write_color_u16(out: &mut Vec<u16>, color: ColorVal, base: u32, first: &mut b
 	}
 }
 
+/// Most `:` subparameters an SGR parameter carries that matter (`38:2:cs:r:g:b`
+/// has five).
+const SGR_MAX_SUBS: usize = 5;
+
+/// One SGR parameter: its number and its `:`-separated subparameters (an empty
+/// one reads as 0).
+struct SgrParam {
+	code:      u32,
+	subs:      [u32; SGR_MAX_SUBS],
+	sub_count: usize,
+}
+
+impl SgrParam {
+	#[inline]
+	fn subs(&self) -> &[u32] {
+		&self.subs[..self.sub_count]
+	}
+}
+
 #[inline]
-fn parse_sgr_num_u16(params: &[u16], mut i: usize) -> (u32, usize) {
+const fn rgb_color(r: u32, g: u32, b: u32) -> ColorVal {
+	0x1000000 | ((r & 0xff) << 16) | ((g & 0xff) << 8) | (b & 0xff)
+}
+
+/// Read the SGR parameter starting at `i` (leading `;` skipped); returns it and
+/// the index after its terminating `;`. Subparameters past [`SGR_MAX_SUBS`] are
+/// skipped.
+#[inline]
+fn next_sgr_param_u16(params: &[u16], mut i: usize) -> (SgrParam, usize) {
 	while i < params.len() && params[i] == b';' as u16 {
 		i += 1;
 	}
 
+	let mut param = SgrParam { code: 0, subs: [0; SGR_MAX_SUBS], sub_count: 0 };
+	// 0 is the main number; n > 0 is subparameter n.
+	let mut field = 0usize;
 	let mut val: u32 = 0;
+	let store = |param: &mut SgrParam, field: usize, val: u32| {
+		if field == 0 {
+			param.code = val;
+		} else if field <= SGR_MAX_SUBS {
+			param.subs[field - 1] = val;
+			param.sub_count = field;
+		}
+	};
 	while i < params.len() {
 		let b = params[i];
+		i += 1;
 		if b == b';' as u16 {
-			i += 1;
 			break;
+		}
+		if b == b':' as u16 {
+			store(&mut param, field, val);
+			field += 1;
+			val = 0;
+			continue;
 		}
 		if (b'0' as u16..=b'9' as u16).contains(&b) {
 			val = val
 				.saturating_mul(10)
 				.saturating_add((b - b'0' as u16) as u32);
 		}
-		i += 1;
 	}
-	(val, i)
+	store(&mut param, field, val);
+	(param, i)
 }
 
 #[inline]
@@ -501,17 +570,14 @@ fn parse_osc66_meta_u16(meta: &[u16]) -> (usize, Option<usize>) {
 				let value = &part[eq + 1..];
 				if key.len() == 1 {
 					match key[0] {
-						0x73 => {
+						0x73
 							if let Some(parsed) = parse_ascii_usize_u16(value)
-								&& (1..=7).contains(&parsed)
-							{
-								scale = parsed;
-							}
+								&& (1..=7).contains(&parsed) =>
+						{
+							scale = parsed;
 						},
-						0x77 => {
-							if let Some(parsed) = parse_ascii_usize_u16(value) {
-								explicit_width = Some(parsed);
-							}
+						0x77 if let Some(parsed) = parse_ascii_usize_u16(value) => {
+							explicit_width = Some(parsed);
 						},
 						_ => {},
 					}
@@ -2179,6 +2245,29 @@ mod tests {
 		assert!(first.starts_with("\x1b[38;2;156;163;176m"));
 		assert!(second.starts_with("\x1b[38;2;156;163;176m"));
 		assert!(second.contains("world"));
+	}
+
+	#[test]
+	fn test_wrap_text_with_ansi_carries_styled_underline_and_colon_colors() {
+		let wrap = |text: &str, width: usize| -> Vec<String> {
+			wrap_text_with_ansi_impl(&to_u16(text), width, DEFAULT_TAB_WIDTH)
+				.iter()
+				.map(|line| String::from_utf16_lossy(line))
+				.collect()
+		};
+		// A dotted underline continues dotted on the next row, not as background
+		// color 44.
+		let lines = wrap("\x1b[4:4mhello world\x1b[4:0m", 5);
+		assert_eq!(lines.len(), 2);
+		assert!(lines[1].starts_with("\x1b[4:4m"), "{:?}", lines[1]);
+		// `4:0` ends it: a later hard line starts unstyled, not with background
+		// color 40.
+		let lines = wrap("\x1b[4:4mlink\x1b[4:0m\nnext", 20);
+		assert_eq!(lines[1], "next");
+		// Colon-form truecolor (with an empty color-space id) and underline color
+		// carry as colors.
+		let lines = wrap("\x1b[38:2::1:2:3;58:2::9:9:9mhello world", 5);
+		assert!(lines[1].starts_with("\x1b[38;2;1;2;3m"), "{:?}", lines[1]);
 	}
 
 	#[test]

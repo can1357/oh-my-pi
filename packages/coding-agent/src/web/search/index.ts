@@ -167,9 +167,8 @@ function expandHostedCandidate(
 ): RoleChainCandidate[] {
 	if (!isHostedPlaceholder(candidate.model) || !sessionModel) return [candidate];
 	const swap = resolveConfiguredModelTarget(sessionModel.webSearchModel, sessionModel, pool);
-	const models = [swap, sessionModel].filter(
-		(model, index, all): model is Model<Api> => !!model?.webSearch && all.indexOf(model) === index,
-	);
+	const distinctSwap = swap?.provider === sessionModel.provider && swap.id === sessionModel.id ? undefined : swap;
+	const models = [distinctSwap, sessionModel].filter((model): model is Model<Api> => !!model?.webSearch);
 	if (models.length === 0) return [candidate];
 	return models.map(model => ({ ...candidate, model }));
 }

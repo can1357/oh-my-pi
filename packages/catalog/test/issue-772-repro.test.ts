@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { loginXiaomi } from "@oh-my-pi/pi-ai/registry/oauth/xiaomi";
 import { xiaomiModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
-import modelsJson from "../src/models.json";
+import { getBundledModels } from "../src/models";
 
 const TOKEN_PLAN_SGP_HOST = "token-plan-sgp.xiaomimimo.com";
 const STANDARD_HOST = "api.xiaomimimo.com";
@@ -91,6 +91,6 @@ describe("issue-772: Xiaomi MiMo token-plan (tp-) keys", () => {
 	});
 
 	it("does not bundle Xiaomi ASR-only models", () => {
-		expect(Object.keys(modelsJson.xiaomi)).not.toContain("mimo-v2.5-asr");
+		expect(getBundledModels("xiaomi").map(model => model.id)).not.toContain("mimo-v2.5-asr");
 	});
 });

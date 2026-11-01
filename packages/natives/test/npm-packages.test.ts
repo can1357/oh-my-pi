@@ -98,7 +98,7 @@ describe("generated native npm leaf packages", () => {
 		}
 	});
 
-	it("uses the repository notice when direct generation has only package-local licenses", async () => {
+	it("refuses to stand in another notice for the natives package's own", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-natives-npm-notice-"));
 		const packageDir = path.join(root, "packages/natives");
 		try {
@@ -110,9 +110,8 @@ describe("generated native npm leaf packages", () => {
 				Bun.write(path.join(root, "THIRD-PARTY-NOTICES.txt"), "Repository notice\n"),
 			]);
 
-			await generateNpmPackages({ packageDir, tags: ["darwin-arm64"] });
-			expect(await Bun.file(path.join(packageDir, "npm/darwin-arm64/THIRD-PARTY-NOTICES.txt")).text()).toBe(
-				"Repository notice\n",
+			await expect(generateNpmPackages({ packageDir, tags: ["darwin-arm64"] })).rejects.toThrow(
+				"Missing legal payload THIRD-PARTY-NOTICES.txt for generated native leaf darwin-arm64",
 			);
 		} finally {
 			await fs.rm(root, { recursive: true, force: true });

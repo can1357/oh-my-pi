@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { resolveCascade } from "../src/compat/cascade";
 import { Effort } from "../src/effort";
 import { getBundledModels } from "../src/models";
 import type { Model } from "../src/types";
@@ -28,5 +29,25 @@ describe("DeepSeek V4.1 Flash", () => {
 		// Retired V4 SKUs stay text-only by reviewed census decision.
 		expect(bundled("deepseek", "deepseek-v4-flash").compat.stripImageInput).toBe(true);
 		expect(bundled("deepseek", "deepseek-v4-pro").compat.stripImageInput).toBe(true);
+	});
+
+	test("publisher-namespaced ids keep the exemption", () => {
+		// Gateways that resell the upstream prefix its namespace onto the id, so
+		// the carve-out has to key on the release name rather than the exact id.
+		const stripImageInput = (model: string) =>
+			resolveCascade({
+				provider: "omni",
+				api: "openai-completions",
+				class: "deepseek",
+				family: "flash",
+				model,
+				reasoning: true,
+			}).wire.stripImageInput;
+
+		expect(stripImageInput("ds/deepseek-flash")).toBe(false);
+		expect(stripImageInput("deepseek/deepseek-flash")).toBe(false);
+		// Namespacing must not turn into suffix matching: the retired V4 reseller
+		// id still ends in `-v4` and stays text-only.
+		expect(stripImageInput("deepseek-flash-v4")).toBe(true);
 	});
 });

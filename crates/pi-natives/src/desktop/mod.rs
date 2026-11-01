@@ -1844,11 +1844,8 @@ impl Drop for SessionCore {
 }
 
 fn response_unit(response: Response) -> CoreResult<()> {
-	if matches!(response, Response::Unit) {
-		Ok(())
-	} else {
-		Err(DesktopError::internal("unexpected desktop worker response"))
-	}
+	matches!(response, Response::Unit)
+		.ok_or_else(|| DesktopError::internal("unexpected desktop worker response"))
 }
 
 /// Physical-Escape stops counted under `key` by every desktop session created

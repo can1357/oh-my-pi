@@ -51,7 +51,7 @@ impl fmt::Debug for Cell {
 
 impl From<char> for Cell {
 	fn from(c: char) -> Self {
-		let mut buf = [0u8; 4];
+		let mut buf = [0u8; char::MAX_LEN_UTF8];
 		let len = c.encode_utf8(&mut buf).len() as u8;
 		Self::Char { buf, len }
 	}

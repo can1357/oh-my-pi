@@ -20,6 +20,7 @@ import type { ConflictBlock, ConflictEntry, ConflictScope } from "@oh-my-pi/pi-t
  */
 
 import type { ToolSession } from "./index";
+import { hasFsCode, isEnoent } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 const OURS_PREFIX = "<<<<<<<";
@@ -181,15 +182,16 @@ export class ConflictHistory {
 	#entries = new Map<number, ConflictEntry>();
 
 	/**
-	 * Register a conflict block. Returns the (possibly pre-existing) entry
-	 * — if the same `absolutePath`+`startLine` was registered before, the
-	 * earlier id is reused so a re-read does not inflate the counter or
-	 * orphan the prior id. The recorded region is overwritten on re-read
-	 * so the splice always reflects the current marker positions on disk.
+	 * Reuse an id only for the same block at the same position. Reconciliation
+	 * relocates unchanged blocks first; a changed block never inherits an old id.
 	 */
 	register(input: Omit<ConflictEntry, "id">): ConflictEntry {
 		for (const existing of this.#entries.values()) {
 			if (existing.absolutePath === input.absolutePath && existing.startLine === input.startLine) {
+				if (!conflictRegionsEqual(existing, input)) {
+					this.#entries.delete(existing.id);
+					continue;
+				}
 				const merged: ConflictEntry = { ...input, id: existing.id };
 				this.#entries.set(existing.id, merged);
 				return merged;
@@ -199,6 +201,50 @@ export class ConflictHistory {
 		const entry: ConflictEntry = { ...input, id };
 		this.#entries.set(id, entry);
 		return entry;
+	}
+
+	/**
+	 * Refresh only already-registered blocks, without registering unseen ones.
+	 * Match unchanged positions before relocations so identical distinct blocks
+	 * keep separate ids. A capped scan cannot disprove a block crossing or beyond
+	 * its unscanned boundary.
+	 */
+	reconcilePath(absolutePath: string, scan: ConflictFileScan): void {
+		const entries = this.entries().filter(entry => entry.absolutePath === absolutePath);
+		const available = new Set(scan.blocks);
+		const matched = new Map<ConflictEntry, ConflictBlock>();
+		for (const entry of entries) {
+			for (const block of available) {
+				if (block.startLine === entry.startLine && conflictRegionsEqual(entry, block)) {
+					matched.set(entry, block);
+					available.delete(block);
+					break;
+				}
+			}
+		}
+		for (const entry of entries) {
+			if (matched.has(entry)) continue;
+			let nearest: ConflictBlock | undefined;
+			let distance = Number.POSITIVE_INFINITY;
+			for (const block of available) {
+				const delta = Math.abs(block.startLine - entry.startLine);
+				if (delta < distance && conflictRegionsEqual(entry, block)) {
+					nearest = block;
+					distance = delta;
+				}
+			}
+			if (nearest) {
+				matched.set(entry, nearest);
+				available.delete(nearest);
+			}
+		}
+		for (const entry of entries) {
+			const block = matched.get(entry);
+			if (block) this.#entries.set(entry.id, { ...entry, ...block });
+			else if (scan.truncatedAtLine === undefined || entry.endLine < scan.truncatedAtLine) {
+				this.#entries.delete(entry.id);
+			}
+		}
 	}
 
 	get(id: number): ConflictEntry | undefined {
@@ -221,6 +267,102 @@ export class ConflictHistory {
 			if (entry.absolutePath === absolutePath) {
 				this.#entries.delete(id);
 			}
+		}
+	}
+}
+
+/**
+ * Stream `absolutePath` for marker blocks equal to a registered entry. Unlike
+ * discovery this has no byte cap, so memory is bounded instead: only one
+ * candidate block is held, and it is dropped once it outgrows the largest
+ * registered block (in lines or line bytes). Stops early once every entry is
+ * found at its recorded line.
+ */
+async function findRegisteredBlocks(absolutePath: string, entries: readonly ConflictEntry[]): Promise<ConflictBlock[]> {
+	const regions = new Set<string>();
+	const unconfirmed = new Map<number, string>();
+	let maxLines = 0;
+	let maxLineBytes = 0;
+	for (const entry of entries) {
+		const region = buildRecordedRegion(entry);
+		const key = region.join("\n");
+		regions.add(key);
+		unconfirmed.set(entry.startLine, key);
+		maxLines = Math.max(maxLines, region.length);
+		for (const line of region) maxLineBytes = Math.max(maxLineBytes, Buffer.byteLength(line));
+	}
+	maxLineBytes += 1; // trailing CR
+
+	const found: ConflictBlock[] = [];
+	let candidate: string[] = [];
+	let candidateStart = 0;
+	/** Feed one line (`null` when over the byte bound); returns true once every entry is confirmed. */
+	const feed = (raw: string | null, lineNumber: number): boolean => {
+		const line = raw === null ? null : stripTrailingCr(raw);
+		if (line !== null && matchMarker(line, OURS_PREFIX) !== null) {
+			candidate = [line];
+			candidateStart = lineNumber;
+			return false;
+		}
+		if (candidate.length === 0) return false;
+		if (line === null || candidate.length === maxLines) {
+			candidate = [];
+			return false;
+		}
+		candidate.push(line);
+		if (matchMarker(line, THEIRS_PREFIX) === null) return false;
+		const block = scanConflictLines(candidate, candidateStart)[0];
+		candidate = [];
+		if (!block) return false;
+		const key = buildRecordedRegion(block).join("\n");
+		if (!regions.has(key)) return false;
+		found.push(block);
+		if (unconfirmed.get(block.startLine) === key) unconfirmed.delete(block.startLine);
+		return unconfirmed.size === 0;
+	};
+
+	// The decoder drops a leading BOM, as discovery's whole-file decode does.
+	const decoder = new TextDecoder();
+	let parts: Uint8Array[] = [];
+	let lineBytes = 0;
+	let lineNumber = 1;
+	const takeLine = (): string | null => {
+		const line = lineBytes > maxLineBytes ? null : decoder.decode(Buffer.concat(parts, lineBytes));
+		parts = [];
+		lineBytes = 0;
+		return line;
+	};
+	for await (const chunk of Bun.file(absolutePath).stream()) {
+		let start = 0;
+		for (let end = chunk.indexOf(10); ; end = chunk.indexOf(10, start)) {
+			const segment = chunk.subarray(start, end === -1 ? chunk.length : end);
+			lineBytes += segment.length;
+			if (lineBytes <= maxLineBytes) parts.push(segment);
+			if (end === -1) break;
+			if (feed(takeLine(), lineNumber++)) return found;
+			start = end + 1;
+		}
+	}
+	if (lineBytes > 0) feed(takeLine(), lineNumber);
+	return found;
+}
+
+/**
+ * Re-check registered ids against the live file contents (all files, or only
+ * `absolutePath`): unchanged blocks follow line shifts, changed or vanished
+ * ones are retired, and a deleted file retires all of its ids.
+ */
+export async function reconcileRegisteredConflicts(history: ConflictHistory, absolutePath?: string): Promise<void> {
+	const byPath = Map.groupBy(
+		history.entries().filter(entry => absolutePath === undefined || entry.absolutePath === absolutePath),
+		entry => entry.absolutePath,
+	);
+	for (const [file, entries] of byPath) {
+		try {
+			history.reconcilePath(file, { blocks: await findRegisteredBlocks(file, entries) });
+		} catch (error) {
+			if (!isEnoent(error) && !hasFsCode(error, "ENOTDIR")) throw error;
+			history.invalidatePath(file);
 		}
 	}
 }
@@ -455,11 +597,8 @@ function buildRecordedRegion(entry: ConflictBlock): string[] {
 }
 
 /**
- * True when two registered blocks record the same marker-block content
- * (labels and all sides). Out-of-band edits can shift a block's line
- * numbers between reads, registering a fresh id while the stale one
- * persists; callers use content identity to treat a locate-miss for the
- * stale twin as "already resolved" instead of a hard failure.
+ * True when two blocks record the same marker-block content (labels and all
+ * sides), independent of source coordinates.
  */
 export function conflictRegionsEqual(a: ConflictBlock, b: ConflictBlock): boolean {
 	const ra = buildRecordedRegion(a);
@@ -469,19 +608,6 @@ export function conflictRegionsEqual(a: ConflictBlock, b: ConflictBlock): boolea
 		if (ra[i] !== rb[i]) return false;
 	}
 	return true;
-}
-
-/**
- * True when the entry's recorded marker block still occurs in `content`
- * (LF-normalized — recorded sections are stored LF). Distinguishes a stale
- * re-registration of a just-resolved region (no longer present) from a
- * DISTINCT conflict block that happens to be byte-identical (still present
- * elsewhere in the file and must stay addressable).
- */
-export function conflictRegionPresent(content: string, entry: ConflictBlock): boolean {
-	const region = buildRecordedRegion(entry).join("\n");
-	const normalized = content.includes("\r") ? content.replace(/\r\n/g, "\n") : content;
-	return normalized.includes(region);
 }
 
 /**

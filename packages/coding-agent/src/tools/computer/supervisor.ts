@@ -6,6 +6,12 @@ import { withTimeout } from "@oh-my-pi/pi-utils/async";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { workerHostEntry } from "@oh-my-pi/pi-utils/worker-host";
+import {
+	type ApprovalContextSource,
+	type ApprovalPolicy,
+	resolveApproval,
+	resolveApprovalFromContext,
+} from "../approval";
 import type { ToolSession } from "../index";
 import { ToolAbortError, toWorkerErrorPayload } from "../tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
@@ -31,6 +37,15 @@ const SMOKE_TIMEOUT_MS = 5_000;
 // the first ensure may load the desktop addon, so it shares the start budget.
 const CAPABILITIES_TIMEOUT_MS = 10_000;
 const RESTART_MESSAGE = "computer worker restarted; captures and ax refs were reset";
+
+/**
+ * The user's `tools.approval["computer.control"]` policy. The approval mode never decides it: the default `yolo`
+ * would hand the user's foreground to every headless run, so without an explicit entry the user is asked.
+ */
+function controlPolicy(context: ApprovalContextSource): ApprovalPolicy {
+	const { userPolicies } = resolveApprovalFromContext(context);
+	return resolveApproval({ name: "computer.control", approval: "exec" }, undefined, "always-ask", userPolicies).policy;
+}
 
 /** Runs desktop scripts and owns their persistent worker session. */
 export interface ComputerController {
@@ -387,8 +402,13 @@ export class ComputerSupervisor implements ComputerController {
 		else pending.signal?.addEventListener("abort", onAbort, { once: true });
 		try {
 			const context = pending.context ?? this.#session.getToolContext?.();
+			const policy = controlPolicy(context ?? { settings: this.#session.settings });
 			let verdict: ControlVerdict;
-			if (!context?.ui || context.hasUI === false) {
+			if (policy === "allow") {
+				verdict = "approved";
+			} else if (policy === "deny") {
+				verdict = "denied";
+			} else if (!context?.ui || context.hasUI === false) {
 				verdict = "no-ui";
 			} else if (message.timeoutMs <= 0) {
 				// The run has no time left to wait in; a prompt would close before anyone could answer it.

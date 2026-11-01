@@ -285,6 +285,11 @@ CREATE TABLE IF NOT EXISTS meta (
 	value TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS notice_claims (
+	key TEXT PRIMARY KEY,
+	expires_at_ms INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);
 `);
 
@@ -553,6 +558,25 @@ FROM model_usage_legacy
 			this.#usageStmts[kind].upsert.run(name);
 		} catch (error) {
 			logger.warn("AgentStorage failed to record usage", { kind, name, error: String(error) });
+		}
+	}
+
+	/**
+	 * Claims a one-time notice: true only for the first claim of `key` among every
+	 * process sharing this database, so concurrent omp windows show it once. The
+	 * claim lasts until `expiresAtMs`, when the notice no longer applies.
+	 * Failures are logged and return false: a notice that cannot be recorded
+	 * stays unshown rather than repeating on every check.
+	 */
+	claimNotice(key: string, expiresAtMs: number): boolean {
+		try {
+			using prune = this.#db.prepare("DELETE FROM notice_claims WHERE expires_at_ms <= ?");
+			prune.run(Date.now());
+			using claim = this.#db.prepare("INSERT OR IGNORE INTO notice_claims (key, expires_at_ms) VALUES (?, ?)");
+			return claim.run(key, expiresAtMs).changes > 0;
+		} catch (error) {
+			logger.warn("AgentStorage failed to claim notice", { key, error: String(error) });
+			return false;
 		}
 	}
 

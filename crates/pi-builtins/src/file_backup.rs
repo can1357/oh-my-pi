@@ -125,7 +125,7 @@ pub(crate) fn backup_path(
 /// `operand`.
 pub(crate) fn backup_display(operand: &Path, backup: &Path) -> PathBuf {
 	match (parent_path(operand), file_name(backup)) {
-		(Some(parent), Some(name)) if !parent.as_os_str().is_empty() => child_path(parent, &name),
+		(Some(parent), Some(name)) if !parent.is_empty() => child_path(parent, &name),
 		(_, Some(name)) => PathBuf::from(name.into_owned()),
 		_ => backup.to_path_buf(),
 	}

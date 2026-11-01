@@ -16,7 +16,7 @@ provider "openai-codex" {
 
 	// Policy budgets: the Codex backend documents no request-size or image
 	// limit, and requests with several thousand images fail mid-stream at
-	// random. Inline images keep Anthropic's 24 MB; the official endpoint's
+	// random. Inline images keep a 24 MB budget; the official endpoint's
 	// image count stays well below those failures. A custom baseUrl keeps 200.
 	inline-image-byte-budget 24000000
 	image-count-budget 200

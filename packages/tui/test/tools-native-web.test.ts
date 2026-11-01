@@ -76,7 +76,8 @@ describe("generic / MCP native views", () => {
 			label: "custom",
 			args: { a: 1 },
 			result: { output: '{"x":1}', isError: false },
-		} as never);
+			options: opts,
+		});
 		expect(view.tool).toMatchObject({ title: "custom", targetKind: "text" });
 		expect(view.tool?.target).toContain("a");
 		expect(nodes(view.body)[0]?.k).toBe("tree");
@@ -97,5 +98,20 @@ describe("generic / MCP native views", () => {
 		}
 		expect(nodes(res?.body).map(n => n.k)).toEqual(["tree", "section"]);
 		expect(describeMCPCall({}, "srv/tool").body).toBeUndefined();
+	});
+
+	it("MCP sends JSON output and args to a host that draws json as values, less the hidden root keys", () => {
+		const json = { ...opts, json: true };
+		const args = { query: "tokyo", limit: 2, i: "intent" };
+		const text = JSON.stringify({ hits: [{ id: 1 }], __partialJson: "{" });
+		const res = describeMCPResult({ content: [{ type: "text", text }] }, json, args);
+		const [output, section] = nodes(res?.body);
+		expect(output?.k).toBe("json");
+		expect(output?.p).toEqual({ value: { hits: [{ id: 1 }] } });
+		const argsNode = nodes(section?.c)[0];
+		expect(argsNode?.k).toBe("json");
+		expect(argsNode?.p).toEqual({ value: { query: "tokyo", limit: 2 } });
+		const call = describeMCPCall(args, "srv/tool", json);
+		expect(nodes(nodes(call.body)[0]?.c)[0]?.k).toBe("json");
 	});
 });

@@ -18,7 +18,7 @@ describe("RPC queued-message editing", () => {
 	let directory: string;
 
 	/** `script` selects a scripted first model call; see the fixture's QUEUED_RPC_SCRIPT. */
-	function createClient(script?: "internal-steer" | "live-steer"): RpcClient {
+	function createClient(script?: "hold" | "until-steer" | "internal-steer" | "live-steer"): RpcClient {
 		return new RpcClient({
 			command: [process.execPath, path.join(import.meta.dir, "fixtures", "queued-message-rpc-agent.ts")],
 			cwd: directory,
@@ -197,6 +197,8 @@ describe("RPC queued-message editing", () => {
 			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
 		};
 
+		// The first turn streams until the promoted steer is queued.
+		client = createClient("until-steer");
 		await client.start();
 
 		const agentStarted = Promise.withResolvers<void>();
@@ -231,9 +233,9 @@ describe("RPC queued-message editing", () => {
 	}, 30_000);
 
 	describe("abort_and_restore_queue", () => {
-		/** Starts the fixture under `script` with a first turn that is still streaming. */
-		async function startStreamingTurn(script?: "internal-steer" | "live-steer"): Promise<void> {
-			if (script) client = createClient(script);
+		/** Starts the fixture under `script` with a first turn that streams until aborted. */
+		async function startStreamingTurn(script: "hold" | "internal-steer" | "live-steer" = "hold"): Promise<void> {
+			client = createClient(script);
 			await client.start();
 			const agentStarted = Promise.withResolvers<void>();
 			const unsubscribe = client.onEvent(event => {

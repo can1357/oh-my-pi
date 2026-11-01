@@ -187,6 +187,26 @@ describe("central logger byte contract", () => {
 		expect((await readSingleLog(result.primaryDir)).text).toBe(expected);
 	});
 
+	test("stamps each record with its own async context, read live, which call fields override", async () => {
+		const result = await runScenario("context");
+		expect(result.stderr).toBe("");
+		const expected = [
+			expectedLine(result.pid, "info", "parent-start", { sessionId: "parent" }),
+			expectedLine(result.pid, "info", "outside"),
+			expectedLine(result.pid, "info", "parent-after-timer", { sessionId: "parent-rekeyed" }),
+			expectedLine(result.pid, "info", "explicit-wins", { sessionId: "explicit" }),
+			expectedLine(result.pid, "info", "shared-service"),
+			expectedLine(result.pid, "info", "child-nested", { sessionId: "grandchild", ordinal: 1 }),
+			expectedLine(result.pid, "info", "reserved-kept", { sessionId: "reserved" }),
+			expectedLine(result.pid, "info", "to-sink", { sessionId: "sink", turn: 2 }),
+			expectedLine(result.pid, "info", "to-sink-outside"),
+		].join("");
+		expect((await readSingleLog(result.primaryDir)).text).toBe(expected);
+		const payload = JSON.parse(await fs.readFile(result.resultPath, "utf8")) as { sinkContexts: unknown[] };
+		// The throwing getter drops that record from the file; its sink still gets the call's own fields.
+		expect(payload.sinkContexts).toEqual([{ sessionId: "sink", turn: 2 }, null, { kept: true }]);
+	});
+
 	test("drops native JSON failures locally but sends original contexts to sinks", async () => {
 		const result = await runScenario("serialization-failures");
 		expect(result.stdout).toBe("");

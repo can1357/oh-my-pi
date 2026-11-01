@@ -1,6 +1,6 @@
 /**
- * Entry point for the self-contained tool-view bundle embedded in HTML
- * session exports (built by scripts/build-tool-views.ts; React included).
+ * Tool-view registration included in the shared HTML export viewer
+ * (built by scripts/build-export-viewer.ts; React included).
  * Importing registers `<omp-tool-view>`.
  */
 import { defineToolViewElement } from "./element";

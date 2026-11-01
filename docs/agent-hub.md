@@ -48,8 +48,8 @@ Metrics depend on the progress or persisted usage data available for that agent.
 | `j` / `k`, `↑` / `↓`, wheel | Select an agent.                                                             |
 | `Enter` or click            | Open the selected agent.                                                     |
 | `t`                         | Toggle flat and parent/child views.                                          |
-| `/`                         | Filter agents by id or display name.                                        |
-| `1` / `2`                   | Switch between Agents and Activity sections.                               |
+| `/`                         | Filter agents by id or display name.                                         |
+| `1` / `2`                   | Switch between Agents and Activity sections.                                 |
 | `Tab`                       | Toggle the inspector on narrow terminals.                                    |
 | `PageUp` / `PageDown`       | Scroll an open inspector.                                                    |
 | `r`                         | Revive the selected parked or killed agent.                                  |

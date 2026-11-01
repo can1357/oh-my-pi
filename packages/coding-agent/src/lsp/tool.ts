@@ -20,6 +20,7 @@ import { clampTimeout, resolveLspTimeouts, TOOL_TIMEOUTS } from "../tools/tool-t
 import {
 	applyWorkspaceEditWithLsp,
 	clearInitializationFailure,
+	ensureWorkspaceFolders,
 	getActiveClients,
 	getOrCreateClient,
 	isRustAnalyzerClient,
@@ -27,10 +28,13 @@ import {
 	reconcileFileFromDisk,
 	reconcileIdleChecker,
 	reconcileOpenFilesFromDisk,
+	rebuildFile,
 	refreshFile,
+	reopenFile,
 	sendNotification,
 	sendRequest,
 	shutdownStaleClients,
+	supportsDocumentDiagnostics,
 	waitForProjectLoaded,
 } from "./client";
 import { getLinterClient } from "./clients";
@@ -49,6 +53,7 @@ import {
 	SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS,
 	WORKSPACE_SYMBOL_LIMIT,
 	waitForDiagnostics,
+	waitForRebuiltDiagnostics,
 } from "./diagnostics";
 import {
 	applyEditsThenRename,
@@ -228,6 +233,21 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		const callerSignal = signal;
 		signal = callerSignal ? AbortSignal.any([callerSignal, timeoutSignal]) : timeoutSignal;
 		throwIfAborted(signal);
+		/**
+		 * Rethrow an abort; return for any other error. A caller cancel stays a
+		 * ToolAbortError, while the call's own deadline becomes a ToolError naming the
+		 * budget and server instead of an opaque "Operation aborted".
+		 */
+		const rethrowAbort = (err: unknown, serverName?: string): void => {
+			if (!(err instanceof ToolAbortError) && !signal?.aborted) return;
+			if (timeoutSignal.aborted && !callerSignal?.aborted) {
+				const server = serverName ? ` on ${serverName}` : "";
+				throw new ToolError(
+					`LSP ${action} timed out after ${timeoutSec}s${server}. The server may still be indexing; try again or pass timeout=<larger>.`,
+				);
+			}
+			throw new ToolAbortError();
+		};
 
 		const config = getConfig(this.session.cwd);
 
@@ -283,7 +303,10 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		if (action === "diagnostics") {
 			if (file === "*") {
 				// `*` => run workspace diagnostics across all configured servers
-				const result = await runWorkspaceDiagnostics(this.session.cwd, signal);
+				const result = await runWorkspaceDiagnostics(this.session.cwd, signal).catch(err => {
+					rethrowAbort(err);
+					throw err;
+				});
 				return {
 					content: [
 						{
@@ -323,7 +346,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			const results: string[] = [];
 			const allServerNames = new Set<string>();
 			let totalServerAttempts = 0;
-			let totalServerSuccesses = 0;
+			let totalServerFailures = 0;
 			if (truncatedGlobTargets) {
 				results.push(
 					`${theme.status.warning} Pattern matched more than ${MAX_GLOB_DIAGNOSTIC_TARGETS} files; showing first ${MAX_GLOB_DIAGNOSTIC_TARGETS}. Narrow the glob or use workspace diagnostics.`,
@@ -344,6 +367,8 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				const allDiagnostics: Diagnostic[] = [];
 				const failedServers: string[] = [];
 				let succeededServers = 0;
+				// Servers with no fresh report within the wait: the file is unverified, not clean.
+				const unreportedServers: string[] = [];
 
 				// Query all applicable servers for this file
 				for (const [serverName, serverConfig] of servers) {
@@ -356,19 +381,35 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 							const diagnostics = await linterClient.lint(resolved, signal);
 							allDiagnostics.push(...diagnostics);
 							succeededServers++;
-							totalServerSuccesses++;
 							continue;
 						}
 						const client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
-						if (isProjectAwareLspServer(serverConfig)) {
-							await waitForProjectLoaded(client, signal);
-							throwIfAborted(signal);
-						}
-						// Open dependencies can hold pre-edit overlays after external disk writes.
-						// Reconcile them before the importer's diagnostics are computed.
-						await reconcileOpenFilesFromDisk(client, signal);
+						// Sync open dependencies, then make the server compute the target's
+						// diagnostics against current disk state. A report cached from an earlier
+						// call cannot be trusted: a dependency OMP never opened may have changed.
+						await reconcileOpenFilesFromDisk(client, signal, uri);
 						const minVersion = client.diagnosticsVersion;
-						await refreshFile(client, resolved, signal);
+						// Set when clangd was asked to rebuild: its report is final only once its
+						// build status settles.
+						let rebuildStatusSeq: number | undefined;
+						if (supportsDocumentDiagnostics(client)) {
+							// The wait pulls a fresh report; drop the cached one so it cannot answer first.
+							client.diagnostics.delete(uri);
+							await reconcileFileFromDisk(client, resolved, signal);
+						} else if (client.buildStatus) {
+							// clangd with build status: rebuild the main file in place, keeping the
+							// headers it can reuse, rather than paying a full rebuild on reopen.
+							const sinceSeq = client.buildStatusSeq ?? 0;
+							if (await rebuildFile(client, resolved, signal)) rebuildStatusSeq = sinceSeq;
+						} else if (client.publishesDocumentVersions) {
+							// A push server need not republish unchanged text (clangd does not), but
+							// it does on open, and the echoed version identifies that report at once.
+							await reopenFile(client, resolved, signal);
+						} else {
+							// Without echoed versions a reopen's report cannot be told apart from the
+							// empty one its close may publish; resend the text instead.
+							await refreshFile(client, resolved, signal);
+						}
 						const expectedDocumentVersion = client.openFiles.get(uri)?.version;
 						// Project-aware servers (Roslyn, tsserver, …) compute pull diagnostics
 						// on demand; their first response routinely overruns the 3s single-file
@@ -380,21 +421,34 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 							: isProjectAwareLspServer(serverConfig)
 								? waitMs
 								: SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS;
-						const diagnostics = await waitForDiagnostics(client, uri, {
-							timeoutMs: Math.min(waitCapMs, timeoutSec * 1000),
-							signal,
-							minVersion,
-							expectedDocumentVersion,
-						});
+						const timeoutMs = Math.min(waitCapMs, timeoutSec * 1000);
+						const diagnostics =
+							rebuildStatusSeq !== undefined && expectedDocumentVersion !== undefined
+								? await waitForRebuiltDiagnostics(client, uri, {
+										version: expectedDocumentVersion,
+										sinceSeq: rebuildStatusSeq,
+										timeoutMs,
+										signal,
+									})
+								: await waitForDiagnostics(client, uri, {
+										timeoutMs,
+										signal,
+										minVersion,
+										expectedDocumentVersion,
+										// Decided per pull, not above: a server can register pulls after this call began.
+										afterProjectLoad: isProjectAwareLspServer(serverConfig),
+									});
+						if (diagnostics === undefined) {
+							unreportedServers.push(serverName);
+							continue;
+						}
 						allDiagnostics.push(...diagnostics);
 						succeededServers++;
-						totalServerSuccesses++;
 					} catch (err) {
-						if (err instanceof ToolAbortError || signal?.aborted) {
-							throw err;
-						}
+						rethrowAbort(err, serverName);
 						// Server failed; record it so a total failure is not reported as clean.
 						failedServers.push(serverName);
+						totalServerFailures++;
 						logger.debug("LSP diagnostics server failed", {
 							server: serverName,
 							file: relPath,
@@ -416,67 +470,45 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 
 				sortDiagnostics(uniqueDiagnostics);
 
-				if (!detailed && targets.length === 1) {
-					if (succeededServers === 0) {
-						return {
-							content: [
-								{
-									type: "text",
-									text: `${theme.status.error} ${relPath}: all language servers failed (${failedServers.join(", ")})`,
-								},
-							],
-							details: { action, serverName: Array.from(allServerNames).join(", "), success: false },
-						};
-					}
-
-					if (uniqueDiagnostics.length === 0) {
-						const text =
-							failedServers.length > 0
-								? `OK\n${theme.status.warning} some servers failed: ${failedServers.join(", ")}`
-								: "OK";
-						return {
-							content: [{ type: "text", text }],
-							details: { action, serverName: Array.from(allServerNames).join(", "), success: true },
-						};
-					}
-
+				const notes: string[] = [];
+				if (unreportedServers.length > 0) {
+					const hint = detailed ? "query the file alone for a longer wait" : "retry once it finishes analyzing";
+					notes.push(
+						`${theme.status.warning} ${relPath}: no diagnostics report yet from ${unreportedServers.join(", ")}; ${hint}`,
+					);
+				}
+				if (failedServers.length > 0 && (succeededServers > 0 || unreportedServers.length > 0)) {
+					notes.push(`${theme.status.warning} ${relPath}: some servers failed (${failedServers.join(", ")})`);
+				}
+				const lines: string[] = [];
+				if (succeededServers === 0 && unreportedServers.length === 0) {
+					lines.push(
+						`${theme.status.error} ${relPath}: all language servers failed (${failedServers.join(", ")})`,
+					);
+				} else if (uniqueDiagnostics.length > 0) {
 					const summary = formatDiagnosticsSummary(uniqueDiagnostics);
-					const formatted = uniqueDiagnostics.map(d => formatDiagnostic(d, relPath));
-					let output = `${summary}:\n${formatGroupedDiagnosticMessages(formatted)}`;
-					if (failedServers.length > 0) {
-						output += `\n${theme.status.warning} some servers failed: ${failedServers.join(", ")}`;
-					}
+					lines.push(detailed ? `${theme.status.error} ${relPath}: ${summary}` : `${summary}:`);
+					lines.push(formatGroupedDiagnosticMessages(uniqueDiagnostics.map(d => formatDiagnostic(d, relPath))));
+				} else if (succeededServers > 0) {
+					lines.push(detailed ? `${theme.status.success} ${relPath}: no issues` : "OK");
+				}
+				lines.push(...notes);
+
+				if (!detailed) {
 					return {
-						content: [{ type: "text", text: output }],
-						details: { action, serverName: Array.from(allServerNames).join(", "), success: true },
+						content: [{ type: "text", text: lines.join("\n") }],
+						// Unverified is not failed: success unless every server errored.
+						details: {
+							action,
+							serverName: Array.from(allServerNames).join(", "),
+							success: succeededServers > 0 || unreportedServers.length > 0,
+						},
 					};
 				}
-
-				if (uniqueDiagnostics.length === 0) {
-					if (succeededServers === 0) {
-						results.push(
-							`${theme.status.error} ${relPath}: all language servers failed (${failedServers.join(", ")})`,
-						);
-					} else {
-						results.push(`${theme.status.success} ${relPath}: no issues`);
-						if (failedServers.length > 0) {
-							results.push(
-								`${theme.status.warning} ${relPath}: some servers failed (${failedServers.join(", ")})`,
-							);
-						}
-					}
-				} else {
-					const summary = formatDiagnosticsSummary(uniqueDiagnostics);
-					results.push(`${theme.status.error} ${relPath}: ${summary}`);
-					const formatted = uniqueDiagnostics.map(d => formatDiagnostic(d, relPath));
-					results.push(formatGroupedDiagnosticMessages(formatted));
-					if (failedServers.length > 0) {
-						results.push(`${theme.status.warning} ${relPath}: some servers failed (${failedServers.join(", ")})`);
-					}
-				}
+				results.push(...lines);
 			}
 
-			const allServersFailed = totalServerAttempts > 0 && totalServerSuccesses === 0;
+			const allServersFailed = totalServerAttempts > 0 && totalServerFailures === totalServerAttempts;
 			return {
 				content: [{ type: "text", text: results.join("\n") }],
 				details: { action, serverName: Array.from(allServerNames).join(", "), success: !allServersFailed },
@@ -609,8 +641,24 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			for (const [serverName, serverConfig] of servers) {
 				throwIfAborted(signal);
 				let client: LspClient;
+				// A server that never received the rename's checkouts answers without them.
+				let folderError: unknown;
 				try {
 					client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
+					// Per renamed file, both sides, not per directory: a rename can span checkouts.
+					// One file per directory is enough, and one notification adds them all.
+					const byDir = new Map<string, string>();
+					for (const { oldUri, newUri } of pairs) {
+						for (const filePath of [uriToFile(oldUri), uriToFile(newUri)]) {
+							if (!byDir.has(path.dirname(filePath))) byDir.set(path.dirname(filePath), filePath);
+						}
+					}
+					try {
+						await ensureWorkspaceFolders(client, [...byDir.values()], signal);
+					} catch (err) {
+						if (err instanceof ToolAbortError || signal?.aborted) throw err;
+						folderError = err;
+					}
 					if (isProjectAwareLspServer(serverConfig)) {
 						await waitForProjectLoaded(client, signal);
 					}
@@ -632,7 +680,13 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						signal,
 					)) as WorkspaceEdit | null;
 					respondingServers.add(serverName);
-					if (result && (result.changes || result.documentChanges)) {
+					if (folderError !== undefined) {
+						// Its edits leave out the checkout it never loaded; method-not-found
+						// (below) means it has no rename edits to miss.
+						const msg = folderError instanceof Error ? folderError.message : String(folderError);
+						serverNotes.push(`  ${serverName}: could not add the rename's checkout to its workspace: ${msg}`);
+						hardFailures.push(serverName);
+					} else if (result && (result.changes || result.documentChanges)) {
 						perServerEdits.push({ serverName, edit: result });
 					}
 				} catch (err) {
@@ -1378,7 +1432,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					// wait cannot complete, so a diagnostics failure never breaks code_actions.
 					if (reconciledFromDisk) {
 						try {
-							diagnostics = await waitForDiagnostics(client, uri, {
+							const reported = await waitForDiagnostics(client, uri, {
 								timeoutMs: Math.min(
 									isProjectAwareLspServer(serverConfig) ? waitMs : SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS,
 									timeoutSec * 1000,
@@ -1386,6 +1440,8 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 								signal,
 								expectedDocumentVersion: client.openFiles.get(uri)?.version,
 							});
+							// No fresh report: the cached one belongs to an older document version.
+							diagnostics = reported ?? [];
 						} catch (err) {
 							if (err instanceof ToolAbortError || signal?.aborted) throw err;
 							diagnostics = client.diagnostics.get(uri)?.diagnostics ?? [];
@@ -1567,18 +1623,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			};
 		} catch (err) {
 			if (err instanceof ToolError) throw err;
-			if (err instanceof ToolAbortError || signal?.aborted) {
-				// Distinguish a wall-clock timeout from a caller cancel:
-				// callerSignal aborting → real cancel (re-throw ToolAbortError);
-				// timeoutSignal aborting without callerSignal → emit a ToolError naming the
-				// elapsed budget and server, instead of opaque "Operation aborted".
-				if (timeoutSignal.aborted && !callerSignal?.aborted) {
-					throw new ToolError(
-						`LSP ${action} timed out after ${timeoutSec}s on ${serverName}. The server may still be indexing; try again or pass timeout=<larger>.`,
-					);
-				}
-				throw new ToolAbortError();
-			}
+			rethrowAbort(err, serverName);
 			const errorMessage = err instanceof Error ? err.message : String(err);
 			return {
 				content: [{ type: "text", text: `LSP error: ${errorMessage}` }],

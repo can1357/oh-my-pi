@@ -26,13 +26,11 @@ import {
 	type ApprovalGrants,
 	approvalCacheKeyForPath,
 	approvalGrantKey,
-	commonApprovalDirectoryKey,
 } from "./approval-cache";
 import { cfgToolsApproval, cfgToolsApprovalMode, cfgToolsRestrictedFolders } from "./settings";
 import {
 	approvalFolderListing,
 	type ApprovalFolderListing,
-	approvalTargetDirectory,
 	approvalTargetNamesFile,
 	approvalTreeSearchFolderKey,
 } from "./approval-targets";
@@ -57,7 +55,10 @@ export interface ResolvedExecuteTimeApproval {
 	userPolicies: Record<string, unknown>;
 }
 
-type ApprovalSubject = Pick<AgentTool, "name" | "approval" | "formatApprovalDetails" | "approvalCacheTargets"> & {
+type ApprovalSubject = Pick<
+	AgentTool,
+	"name" | "approval" | "formatApprovalDetails" | "approvalCacheTargets" | "approvalRestrictionPaths"
+> & {
 	/**
 	 * Previous public name of this tool, when a rename changed how it mints.
 	 * MCP tools minted before digits were kept carry their digit-stripped name
@@ -162,16 +163,24 @@ function approvalCacheTargets(tool: ApprovalSubject, args: unknown): string[] {
 }
 
 /**
+ * The folder key whose one-level grant covers `target`: a directory key is its own folder, an
+ * absolute file key its parent's. `undefined` for anything else (internal or web URLs, tree keys).
+ */
+function coveringFolderKey(target: string): string | undefined {
+	if (!path.isAbsolute(target)) return undefined;
+	if (target.endsWith("/") || target.endsWith("\\")) return target;
+	const parent = path.dirname(target);
+	return parent.endsWith(path.sep) ? parent : `${parent}${path.sep}`;
+}
+
+/**
  * Grant keys any one of which covers `target` for a call at `capability`: grants at that tier or a
  * more privileged one, on the target itself or — for a file key — on the folder holding it. Folder
  * grants cover their own entries only, so a directory or tree key never inherits its parent's.
  */
 function coveringGrantKeys(target: string, capability: ToolTier): string[] {
-	const subjects = [target];
-	if (path.isAbsolute(target) && !target.endsWith("/") && !target.endsWith("\\")) {
-		const parent = path.dirname(target);
-		subjects.push(parent.endsWith(path.sep) ? parent : `${parent}${path.sep}`);
-	}
+	const folder = coveringFolderKey(target);
+	const subjects = folder === undefined || folder === target ? [target] : [target, folder];
 	const tiers = (["read", "write", "exec"] as const).filter(tier => TIER_RANK[tier] >= TIER_RANK[capability]);
 	return tiers.flatMap(tier => subjects.map(subject => approvalGrantKey(tier, subject)));
 }
@@ -205,21 +214,19 @@ function resolveCachedModeApproval(
 }
 
 /**
- * The folder a directory answer would grant: the deepest directory holding every path target — a
- * directory target is that directory itself, a file target its parent. `undefined` when the call
- * names no filesystem path.
+ * The folder a directory answer would grant: the one folder whose grant covers every target.
+ * `undefined` when the targets span folders or include one no folder grant covers.
  */
 export function approvalFolderCandidate(
 	tool: ApprovalSubject,
 	args: unknown,
 ): { key: string; label: string } | undefined {
-	const directories: string[] = [];
+	let key: string | undefined;
 	for (const target of approvalCacheTargets(tool, args)) {
-		if (!path.isAbsolute(target)) continue;
-		const directory = approvalTargetDirectory(target);
-		if (directory !== undefined) directories.push(directory);
+		const folder = coveringFolderKey(target);
+		if (folder === undefined || (key !== undefined && folder !== key)) return undefined;
+		key = folder;
 	}
-	const key = commonApprovalDirectoryKey(directories);
 	if (key === undefined) return undefined;
 	// A filesystem root keeps its separator: stripping it would leave POSIX "" or drive-relative "C:".
 	const label = shortenPath(path.parse(key).root === key ? key : key.replace(/[\\/]+$/, ""));
@@ -513,8 +520,9 @@ function isWithinFolder(root: string, candidate: string): boolean {
 /**
  * Absolute filesystem paths a call touches, keyed like grants (symlinks resolved, case-folded on
  * Windows); `recursive` marks a search that reads the whole tree below its path. A call whose tool
- * reports no targets is matched by the directory it runs in: its own `cwd` argument when it names
- * one, else the session's. Non-filesystem targets (internal and web URLs) touch no folder.
+ * reports no targets is matched by the directory it runs in — its own `cwd` argument when it names
+ * one, else the session's — plus any `approvalRestrictionPaths`. Non-filesystem targets (internal
+ * and web URLs) touch no folder.
  */
 function restrictionSubjects(
 	tool: ApprovalSubject,
@@ -534,7 +542,10 @@ function restrictionSubjects(
 		}
 		return subjects;
 	}
-	if (cwd === undefined) return [];
+	const subjects = (tool.approvalRestrictionPaths?.(args) ?? [])
+		.filter(target => path.isAbsolute(target))
+		.map(target => ({ path: approvalCacheKeyForPath(target), recursive: false }));
+	if (cwd === undefined) return subjects;
 	let workingDirectory = cwd;
 	const requested = isRecord(args) ? args.cwd : undefined;
 	if (typeof requested === "string" && requested.trim().length > 0) {
@@ -544,7 +555,8 @@ function restrictionSubjects(
 			// An internal-URL working directory is no local folder; the session's still applies.
 		}
 	}
-	return [{ path: approvalCacheKeyForPath(workingDirectory), recursive: false }];
+	subjects.push({ path: approvalCacheKeyForPath(workingDirectory), recursive: false });
+	return subjects;
 }
 
 /**

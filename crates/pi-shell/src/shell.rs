@@ -278,7 +278,7 @@ impl Shell {
 	#[must_use]
 	pub fn pids(&self) -> Vec<i32> {
 		let registry = self.active_spawns.lock().clone();
-		registry.map_or_else(Vec::new, |registry| registry.live_pids())
+		registry.map_or_default(|registry| registry.live_pids())
 	}
 
 	/// Number of live external background jobs tracked by the persistent
@@ -748,10 +748,7 @@ fn inherited_env_value<'a>(key: &str, value: &'a str) -> std::borrow::Cow<'a, st
 	if !matches!(key, "TEMP" | "TMP" | "TMPDIR") || !path.is_absolute() {
 		return std::borrow::Cow::Borrowed(value);
 	}
-	match brush_core::sys::fs::expand_to_long_path(path)
-		.into_os_string()
-		.into_string()
-	{
+	match brush_core::sys::fs::expand_to_long_path(path).into_string() {
 		Ok(expanded) => std::borrow::Cow::Owned(expanded),
 		Err(_) => std::borrow::Cow::Borrowed(value),
 	}
@@ -914,8 +911,9 @@ async fn create_session_for_run(
 	// implementations that run without spawning a process and resolve paths
 	// against the shell working directory. The whole set can be disabled
 	// (falling back to system binaries) via PI_DISABLE_UUTILS_BUILTINS; the
-	// destructive set (`rm`, `mv`, `cp`, `ln`, `dd`) additionally honors
-	// PI_DISABLE_UUTILS_DESTRUCTIVE, and `rm`/`mv` have their own switches.
+	// destructive set (`rm`, `mv`, `cp`, `ln`, `dd`, `rsync`) additionally
+	// honors PI_DISABLE_UUTILS_DESTRUCTIVE, and `rm`/`mv` have their own
+	// switches.
 	if !env_flag(config, "PI_DISABLE_UUTILS_BUILTINS") {
 		let destructive_disabled = env_flag(config, "PI_DISABLE_UUTILS_DESTRUCTIVE");
 		let rm_disabled = destructive_disabled || env_flag(config, "PI_DISABLE_RM_BUILTIN");
@@ -924,9 +922,10 @@ async fn create_session_for_run(
 			let disabled = match name {
 				"rm" => rm_disabled,
 				"mv" => mv_disabled,
-				// cp and dd (`of=`) overwrite existing files, ln can clobber them
-				// via -f; gate them with the destructive set.
-				"cp" | "ln" | "dd" => destructive_disabled,
+				// cp, dd (`of=`), and rsync overwrite existing files (rsync also
+				// deletes with --delete), ln can clobber them via -f; gate them
+				// with the destructive set.
+				"cp" | "ln" | "dd" | "rsync" => destructive_disabled,
 				_ => false,
 			};
 			if !disabled {
@@ -2010,7 +2009,12 @@ fn should_skip_env_var(key: &str) -> bool {
 }
 
 fn ensure_trailing_newline_for_heredoc(command: &mut String) {
-	if command.ends_with('\n') || !command.as_bytes().windows(2).any(|window| window == b"<<") {
+	if command.ends_with('\n')
+		|| !command
+			.as_bytes()
+			.array_windows()
+			.any(|window| window == b"<<")
+	{
 		return;
 	}
 	command.push('\n');
@@ -2216,11 +2220,7 @@ fn set_nonblocking<T: std::os::fd::AsRawFd>(file: &T) -> io::Result<()> {
 
 	// SAFETY: `fd` remains valid here and we are only toggling `O_NONBLOCK`.
 	let result = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
-	if result < 0 {
-		Err(io::Error::last_os_error())
-	} else {
-		Ok(())
-	}
+	(result >= 0).ok_or_else(io::Error::last_os_error)
 }
 
 #[cfg(unix)]
@@ -2250,29 +2250,14 @@ async fn emit_chunk(text: String, callback: Option<&Sender<String>>) {
 
 fn pipe_to_files(label: &str) -> Result<(fs::File, fs::File)> {
 	let (r, w) =
-		os_pipe::pipe().map_err(|err| Error::msg(format!("Failed to create {label} pipe: {err}")))?;
+		std::io::pipe().map_err(|err| Error::msg(format!("Failed to create {label} pipe: {err}")))?;
 
 	#[cfg(unix)]
-	let (r, w): (fs::File, fs::File) = {
-		use std::os::unix::io::{FromRawFd, IntoRawFd};
-		let r = r.into_raw_fd();
-		let w = w.into_raw_fd();
-		// SAFETY: We just obtained these fds from os_pipe and own them
-		// exclusively.
-		unsafe { (FromRawFd::from_raw_fd(r), FromRawFd::from_raw_fd(w)) }
-	};
-
+	use std::os::fd::OwnedFd as Owned;
 	#[cfg(windows)]
-	let (r, w): (fs::File, fs::File) = {
-		use std::os::windows::io::{FromRawHandle, IntoRawHandle};
-		let r = r.into_raw_handle();
-		let w = w.into_raw_handle();
-		// SAFETY: We just obtained these handles from os_pipe and own them
-		// exclusively.
-		unsafe { (FromRawHandle::from_raw_handle(r), FromRawHandle::from_raw_handle(w)) }
-	};
+	use std::os::windows::io::OwnedHandle as Owned;
 
-	Ok((r, w))
+	Ok((fs::File::from(Owned::from(r)), fs::File::from(Owned::from(w))))
 }
 
 /// Whether the `nohup` builtin should stand aside for the system binary.
@@ -4696,6 +4681,7 @@ mod tests {
 		// contain: a loop over the registry cannot notice a name missing from it.
 		// Adding a utility is expected to update this list.
 		let expected = [
+			"ast-grep",
 			"b2sum",
 			"base32",
 			"base64",
@@ -4745,8 +4731,10 @@ mod tests {
 			"rg",
 			"rm",
 			"rmdir",
+			"rsync",
 			"sed",
 			"seq",
+			"sg",
 			"sha1sum",
 			"sha224sum",
 			"sha256sum",
@@ -4790,12 +4778,15 @@ mod tests {
 			let help = std::fs::read_to_string(tmp.join("help.txt")).expect("help.txt");
 			let err = std::fs::read_to_string(tmp.join("err.txt")).expect("err.txt");
 			assert!(err.is_empty(), "{name} --help wrote to stderr: {err:?}");
-			// Two builtins are registered under the familiar command name but keep
-			// their implementation's own help text, exactly as the standalone
-			// versions did: `rg` is ripgrep, `jq` is jaq.
+			// Some builtins are registered under the familiar command name but
+			// keep their implementation's own help text, exactly as the
+			// standalone versions did: `rg` is ripgrep, `jq` is jaq, `sg`
+			// is ast-grep (whose help names itself only through its usage
+			// line, here `sg`).
 			let expected = match name {
 				"rg" => "ripgrep",
 				"jq" => "jaq",
+				"sg" => "using AST pattern",
 				other => other,
 			};
 			assert!(
@@ -5462,7 +5453,7 @@ mod tests {
 	/// Mirrors busybox applet probing: `grep -qx "$applet" <(strings bin)`.
 	#[tokio::test(flavor = "multi_thread")]
 	async fn grep_quiet_and_line_regexp() {
-		let tmp = std::env::temp_dir().join(format!("pi-grepq-{}", std::process::id()));
+		let tmp = std::env::temp_dir().join(format!("pi-walkerq-{}", std::process::id()));
 		let _ = std::fs::remove_dir_all(&tmp);
 		std::fs::create_dir_all(&tmp).expect("temp dir");
 		std::fs::write(tmp.join("data.txt"), "foo\nbar\nbaz\n").expect("data");
@@ -6145,10 +6136,12 @@ mod tests {
 	}
 
 	fn shell_test_lock() -> &'static TokioMutex<()> {
-		static LOCK: std::sync::OnceLock<TokioMutex<()>> = std::sync::OnceLock::new();
-		LOCK.get_or_init(|| TokioMutex::new(()))
+		static LOCK: TokioMutex<()> = TokioMutex::const_new(());
+		&LOCK
 	}
 
+	/// Runs `command` under [`shell_test_lock`] and returns its result and
+	/// output.
 	#[cfg(unix)]
 	async fn run_command_capture(
 		command: &str,
@@ -6157,6 +6150,33 @@ mod tests {
 		cancel_token: CancelToken,
 	) -> (ShellExecuteResult, String) {
 		let _guard = shell_test_lock().lock().await;
+		capture_unlocked(command, cwd, minimizer, cancel_token).await
+	}
+
+	/// [`run_command_capture`] that fails once the run outlasts `limit`. The
+	/// limit starts when the lock is held: in a single-process `cargo test`,
+	/// the wait behind slower shell tests took up the limit of a fast one.
+	#[cfg(unix)]
+	async fn run_command_capture_within(
+		limit: Duration,
+		command: &str,
+		cwd: Option<&std::path::Path>,
+		minimizer: Option<minimizer::MinimizerOptions>,
+		cancel_token: CancelToken,
+	) -> Result<(ShellExecuteResult, String), time::error::Elapsed> {
+		let _guard = shell_test_lock().lock().await;
+		time::timeout(limit, capture_unlocked(command, cwd, minimizer, cancel_token)).await
+	}
+
+	/// Runs `command` and collects its streamed output; the caller holds
+	/// [`shell_test_lock`].
+	#[cfg(unix)]
+	async fn capture_unlocked(
+		command: &str,
+		cwd: Option<&std::path::Path>,
+		minimizer: Option<minimizer::MinimizerOptions>,
+		cancel_token: CancelToken,
+	) -> (ShellExecuteResult, String) {
 		let (tx, rx) = flume::unbounded::<String>();
 		let options = ShellExecuteOptions {
 			command: command.to_string(),
@@ -6189,9 +6209,12 @@ mod tests {
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn uutils_diff_reads_process_substitution_fds() {
-		let (result, output) = time::timeout(
+		let (result, output) = run_command_capture_within(
 			Duration::from_secs(5),
-			run_command_capture("diff <(echo a) <(echo b)", None, None, CancelToken::default()),
+			"diff <(echo a) <(echo b)",
+			None,
+			None,
+			CancelToken::default(),
 		)
 		.await
 		.expect("process substitution should not hang");
@@ -6211,15 +6234,13 @@ mod tests {
 		pi_vfs::BlockingFs::native()
 			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
 			.expect("create FIFO");
-		let (result, output) = time::timeout(
+		let (result, output) = run_command_capture_within(
 			Duration::from_secs(5),
-			run_command_capture(
-				"/bin/sh -c 'sleep 0.15; echo one > f' & /bin/cat < f; /bin/sh -c 'sleep 0.15; echo \
-				 two > f' & x=$(< f); echo \"x=$x\"; wait",
-				Some(root.path()),
-				None,
-				CancelToken::default(),
-			),
+			"/bin/sh -c 'sleep 0.15; echo one > f' & /bin/cat < f; /bin/sh -c 'sleep 0.15; echo two \
+			 > f' & x=$(< f); echo \"x=$x\"; wait",
+			Some(root.path()),
+			None,
+			CancelToken::default(),
 		)
 		.await
 		.expect("a FIFO redirect waits for its writer and returns");
@@ -6240,24 +6261,12 @@ mod tests {
 				.make_node(root.path().join(name), pi_vfs::NodeKind::Fifo, 0o600)
 				.expect("create FIFO");
 		}
-		let cwd = root.path().to_path_buf();
-		let (tx, rx) = std::sync::mpsc::channel();
-		std::thread::spawn(move || {
-			let runtime = tokio::runtime::Builder::new_multi_thread()
-				.worker_threads(1)
-				.enable_all()
-				.build()
-				.expect("single-worker runtime");
-			let _ = tx.send(runtime.block_on(run_command_capture(
-				"echo one > f & cat < f; cat < g & echo two > g; wait",
-				Some(&cwd),
-				None,
-				CancelToken::default(),
-			)));
-		});
-		let (result, output) = rx
-			.recv_timeout(Duration::from_secs(5))
-			.expect("a FIFO redirect must not hold the worker its other end needs");
+		let (result, output) = capture_on_runtime(
+			"echo one > f & cat < f; cat < g & echo two > g; wait",
+			Some(root.path().to_path_buf()),
+			512,
+		)
+		.expect("a FIFO redirect must not hold the worker its other end needs");
 
 		assert_eq!((result.exit_code, output.as_str()), (Some(0), "one\ntwo\n"));
 	}
@@ -6275,21 +6284,19 @@ mod tests {
 		pi_vfs::BlockingFs::native()
 			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
 			.expect("create FIFO");
-		let (result, output) = time::timeout(
+		let (result, output) = run_command_capture_within(
 			Duration::from_secs(10),
-			run_command_capture(
-				concat!(
-					// First, so the job is `%1`.
-					"/bin/sleep 30 < f & jobs; kill %1; wait $!; echo \"kill-job=$?\"\n",
-					"/bin/sleep 30 < f & kill $!; wait $!; echo \"kill-pid=$?\"\n",
-					"/bin/cat < f & pid=$!; echo one > f; wait $pid; echo \"wait=$?\"\n",
-					"/bin/sh -c 'echo $$' > f & bg=$!; read -r self < f; wait $bg\n",
-					"[ \"$self\" = \"$bg\" ] && echo same-pid",
-				),
-				Some(root.path()),
-				None,
-				CancelToken::default(),
+			concat!(
+				// First, so the job is `%1`.
+				"/bin/sleep 30 < f & jobs; kill %1; wait $!; echo \"kill-job=$?\"\n",
+				"/bin/sleep 30 < f & kill $!; wait $!; echo \"kill-pid=$?\"\n",
+				"/bin/cat < f & pid=$!; echo one > f; wait $pid; echo \"wait=$?\"\n",
+				"/bin/sh -c 'echo $$' > f & bg=$!; read -r self < f; wait $bg\n",
+				"[ \"$self\" = \"$bg\" ] && echo same-pid",
 			),
+			Some(root.path()),
+			None,
+			CancelToken::default(),
 		)
 		.await
 		.expect("the shell goes on while a background command waits for its FIFO");
@@ -6312,14 +6319,12 @@ mod tests {
 		pi_vfs::BlockingFs::native()
 			.make_node(&fifo, pi_vfs::NodeKind::Fifo, 0o600)
 			.expect("create FIFO");
-		let (result, output) = time::timeout(
+		let (result, output) = run_command_capture_within(
 			Duration::from_secs(10),
-			run_command_capture(
-				"cat < f & sleep 0.2; kill %1; wait; echo done",
-				Some(root.path()),
-				None,
-				CancelToken::default(),
-			),
+			"cat < f & sleep 0.2; kill %1; wait; echo done",
+			Some(root.path()),
+			None,
+			CancelToken::default(),
 		)
 		.await
 		.expect("the killed job ends");
@@ -6350,20 +6355,18 @@ mod tests {
 		pi_vfs::BlockingFs::native()
 			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
 			.expect("create FIFO");
-		let (result, output) = time::timeout(
+		let (result, output) = run_command_capture_within(
 			Duration::from_secs(30),
-			run_command_capture(
-				concat!(
-					"for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do\n",
-					"  cat < f & sleep 0.05; kill %%\n",
-					"  /bin/cat < f > got & sleep 0.1; echo \"hi$i\" > f; wait\n",
-					"  read -r x < got; [ \"$x\" = \"hi$i\" ] || echo \"lost $i\"\n",
-					"done; echo done",
-				),
-				Some(root.path()),
-				None,
-				CancelToken::default(),
+			concat!(
+				"for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do\n",
+				"  cat < f & sleep 0.05; kill %%\n",
+				"  /bin/cat < f > got & sleep 0.1; echo \"hi$i\" > f; wait\n",
+				"  read -r x < got; [ \"$x\" = \"hi$i\" ] || echo \"lost $i\"\n",
+				"done; echo done",
 			),
+			Some(root.path()),
+			None,
+			CancelToken::default(),
 		)
 		.await
 		.expect("no writer is left without a reader");
@@ -6383,17 +6386,15 @@ mod tests {
 		pi_vfs::BlockingFs::native()
 			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
 			.expect("create FIFO");
-		let (result, output) = time::timeout(
+		let (result, output) = run_command_capture_within(
 			Duration::from_secs(10),
-			run_command_capture(
-				concat!(
-					"/bin/echo out > /dev/stdout & wait\n",
-					"export f1=orig; /usr/bin/env > f & grep '^f1=' < f; wait",
-				),
-				Some(root.path()),
-				None,
-				CancelToken::default(),
+			concat!(
+				"/bin/echo out > /dev/stdout & wait\n",
+				"export f1=orig; /usr/bin/env > f & grep '^f1=' < f; wait",
 			),
+			Some(root.path()),
+			None,
+			CancelToken::default(),
 		)
 		.await
 		.expect("the commands finish");
@@ -6413,20 +6414,18 @@ mod tests {
 		pi_vfs::BlockingFs::native()
 			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
 			.expect("create FIFO");
-		let (result, output) = time::timeout(
+		let (result, output) = run_command_capture_within(
 			Duration::from_secs(10),
-			run_command_capture(
-				concat!(
-					"/bin/echo replaced >f >/dev/null & cat <f; wait; echo \"replace=$?\"\n",
-					"/bin/echo closed 3>f >&3 3>&- & cat <f; wait\n",
-					"/bin/echo moved 3>f 1>&3- & cat <f; wait\n",
-					"/bin/echo both >f &>/dev/null & cat <f; wait; echo \"both=$?\"\n",
-					"/bin/echo descriptor >f >/dev/stdout & cat <f; wait",
-				),
-				Some(root.path()),
-				None,
-				CancelToken::default(),
+			concat!(
+				"/bin/echo replaced >f >/dev/null & cat <f; wait; echo \"replace=$?\"\n",
+				"/bin/echo closed 3>f >&3 3>&- & cat <f; wait\n",
+				"/bin/echo moved 3>f 1>&3- & cat <f; wait\n",
+				"/bin/echo both >f &>/dev/null & cat <f; wait; echo \"both=$?\"\n",
+				"/bin/echo descriptor >f >/dev/stdout & cat <f; wait",
 			),
+			Some(root.path()),
+			None,
+			CancelToken::default(),
 		)
 		.await
 		.expect("the shell goes on while a background command waits for its FIFO");
@@ -6448,18 +6447,16 @@ mod tests {
 		pi_vfs::BlockingFs::native()
 			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
 			.expect("create FIFO");
-		let (result, output) = time::timeout(
+		let (result, output) = run_command_capture_within(
 			Duration::from_secs(10),
-			run_command_capture(
-				concat!(
-					"{ /bin/echo dup3 >f 1>&3 3>/dev/null & cat <f; wait; } 3>out3; cat out3\n",
-					"{ /bin/echo moved4 >f 1>&4- & cat <f; wait; } 4>out4; cat out4\n",
-					"/bin/echo sw 2>f 3>&1 1>&2 2>&3 3>&- & cat <f; wait",
-				),
-				Some(root.path()),
-				None,
-				CancelToken::default(),
+			concat!(
+				"{ /bin/echo dup3 >f 1>&3 3>/dev/null & cat <f; wait; } 3>out3; cat out3\n",
+				"{ /bin/echo moved4 >f 1>&4- & cat <f; wait; } 4>out4; cat out4\n",
+				"/bin/echo sw 2>f 3>&1 1>&2 2>&3 3>&- & cat <f; wait",
 			),
+			Some(root.path()),
+			None,
+			CancelToken::default(),
 		)
 		.await
 		.expect("the shell goes on while a background command waits for its FIFO");
@@ -6467,21 +6464,55 @@ mod tests {
 		assert_eq!((result.exit_code, output.as_str()), (Some(0), "dup3\nmoved4\nsw\n"));
 	}
 
-	/// Runs `command` on a dedicated single-worker runtime and fails after five
-	/// seconds. The deadline lives on the calling thread, so it still fires when
-	/// a builtin blocks the runtime's only worker.
+	/// On macOS `poll` and kqueue report a FIFO's data but never its EOF, so
+	/// a builtin waiting for more input hung once the writer closed: `mapfile`
+	/// and `read` until cancelled, and `read -t` timed out instead of reading
+	/// EOF. Each writer here closes while its reader waits.
 	#[cfg(unix)]
-	fn capture_on_single_worker(command: &'static str) -> (ShellExecuteResult, String) {
-		capture_on_runtime(command, 512)
+	#[tokio::test(flavor = "multi_thread")]
+	async fn builtins_waiting_on_a_fifo_see_its_writer_close() {
+		let root = tempfile::tempdir().expect("scratch directory");
+		pi_vfs::BlockingFs::native()
+			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
+			.expect("create FIFO");
+		let (result, output) = run_command_capture_within(
+			Duration::from_secs(10),
+			concat!(
+				"{ echo a; sleep 0.2; } > f & mapfile -t lines < f; wait; echo \
+				 \"mapfile=${#lines[@]}\"\n",
+				"{ echo b; sleep 0.2; } > f & while read -r l; do echo \"read=$l\"; done < f; wait\n",
+				"{ printf c; sleep 0.2; } > f & read -t 5 -r x < f; echo \"read-t=$? $x\"; wait",
+			),
+			Some(root.path()),
+			None,
+			CancelToken::default(),
+		)
+		.await
+		.expect("each reader ends at its writer's EOF");
+
+		assert_eq!((result.exit_code, output.as_str()), (Some(0), "mapfile=1\nread=b\nread-t=1 c\n"));
 	}
 
-	/// [`capture_on_single_worker`] with the blocking pool capped at
-	/// `max_blocking_threads`.
+	/// Runs `command` on a dedicated single-worker runtime and fails after five
+	/// seconds.
+	#[cfg(unix)]
+	fn capture_on_single_worker(command: &'static str) -> (ShellExecuteResult, String) {
+		capture_on_runtime(command, None, 512)
+			.expect("read must not wait on a blocking worker it cannot get")
+	}
+
+	/// Runs `command` in `cwd` on a dedicated single-worker runtime whose
+	/// blocking pool holds `max_blocking_threads`; fails once the run outlasts
+	/// five seconds. The deadline lives on the calling thread, so it still
+	/// fires when a builtin blocks the runtime's only worker, and starts once
+	/// this thread holds [`shell_test_lock`].
 	#[cfg(unix)]
 	fn capture_on_runtime(
 		command: &'static str,
+		cwd: Option<std::path::PathBuf>,
 		max_blocking_threads: usize,
-	) -> (ShellExecuteResult, String) {
+	) -> Result<(ShellExecuteResult, String), std::sync::mpsc::RecvTimeoutError> {
+		let _guard = shell_test_lock().blocking_lock();
 		let (tx, rx) = std::sync::mpsc::channel();
 		std::thread::spawn(move || {
 			let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -6490,15 +6521,14 @@ mod tests {
 				.enable_all()
 				.build()
 				.expect("single-worker runtime");
-			let _ = tx.send(runtime.block_on(run_command_capture(
+			let _ = tx.send(runtime.block_on(capture_unlocked(
 				command,
-				None,
+				cwd.as_deref(),
 				None,
 				CancelToken::default(),
 			)));
 		});
 		rx.recv_timeout(Duration::from_secs(5))
-			.expect("read must not wait on a blocking worker it cannot get")
 	}
 
 	/// Owned-shell pipeline stages already hold a blocking worker. Two `read`
@@ -6508,10 +6538,55 @@ mod tests {
 	#[test]
 	fn pipeline_reads_do_not_nest_on_a_full_blocking_pool() {
 		let (result, output) =
-			capture_on_runtime("printf 'a\\n' | read -r x | read -r y; printf 'done\\n'", 2);
+			capture_on_runtime("printf 'a\\n' | read -r x | read -r y; printf 'done\\n'", None, 2)
+				.expect("read must not wait on a blocking worker it cannot get");
 
 		assert_eq!(result.exit_code, Some(0), "output: {output:?}");
 		assert_eq!(output, "done\n");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn async_utilities_wait_for_a_slow_producer_without_blocking_the_worker() {
+		let (result, output) =
+			capture_on_runtime("{ sleep 0.3; echo hit; } | grep hit | rg hit", None, 512)
+				.expect("async utilities must not block the runtime's only worker");
+
+		assert_eq!(result.exit_code, Some(0), "output: {output:?}");
+		assert_eq!(output, "hit\n");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn async_utilities_pipe_more_than_a_pipe_buffer() {
+		let dir = tempfile::tempdir().expect("temp dir");
+		for i in 0..3000 {
+			std::fs::write(dir.path().join(format!("{}{i:05}", "f".repeat(40))), b"")
+				.expect("create file");
+		}
+
+		let find =
+			capture_on_runtime("find . -type f | grep -c f", Some(dir.path().to_path_buf()), 512);
+		let fd = capture_on_runtime("fd -t f . | rg -c f", Some(dir.path().to_path_buf()), 512);
+
+		let (result, output) = find.expect("find | grep must not deadlock on a full pipe");
+		assert_eq!(result.exit_code, Some(0), "output: {output:?}");
+		assert_eq!(output, "3000\n");
+		let (result, output) = fd.expect("fd | rg must not deadlock on a full pipe");
+		assert_eq!(result.exit_code, Some(0), "output: {output:?}");
+		assert_eq!(output, "3000\n");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn async_utility_waiting_on_stdin_is_cancelled_by_timeout() {
+		// The pipeline ends with its producer (1 s); `grep` must be cancelled at
+		// 0.3 s while the producer still needs the worker.
+		let (result, output) =
+			capture_on_runtime("{ sleep 1; echo x; } | timeout 0.3 grep x", None, 512)
+				.expect("timeout must cancel a utility waiting on stdin");
+
+		assert_eq!((result.exit_code, output.as_str()), (Some(124), ""));
 	}
 
 	#[cfg(unix)]
@@ -6547,9 +6622,12 @@ mod tests {
 		let command = "for f in $(cat /dev/stdin <<'EOF'\na\nb\nEOF\n); do echo \"$f\"; done\necho \
 		               to-stderr > /dev/stderr\necho via-tee | tee /dev/stderr > /dev/null\nsource \
 		               /dev/stdin <<< 'echo sourced'";
-		let (result, output) = time::timeout(
+		let (result, output) = run_command_capture_within(
 			Duration::from_secs(5),
-			run_command_capture(command, None, None, CancelToken::default()),
+			command,
+			None,
+			None,
+			CancelToken::default(),
 		)
 		.await
 		.expect("descriptor paths must not read the host terminal");
@@ -6573,9 +6651,12 @@ mod tests {
 		let command =
 			format!("cat /dev/fd/{fd}; echo \"rc=$?\"; cat < /proc/self/fd/{fd}; echo \"rc=$?\"");
 
-		let (_, output) = time::timeout(
+		let (_, output) = run_command_capture_within(
 			Duration::from_secs(5),
-			run_command_capture(&command, None, None, CancelToken::default()),
+			&command,
+			None,
+			None,
+			CancelToken::default(),
 		)
 		.await
 		.expect("closed descriptor paths should fail fast");
@@ -6593,9 +6674,12 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread")]
 	async fn process_substitution_operands_keep_the_shell_fd_name() {
 		let command = "wc -l <(printf 'a\\nb\\n'); ls <(true); sed -n -f <(echo p) <<< from-sed";
-		let (result, output) = time::timeout(
+		let (result, output) = run_command_capture_within(
 			Duration::from_secs(5),
-			run_command_capture(command, None, None, CancelToken::default()),
+			command,
+			None,
+			None,
+			CancelToken::default(),
 		)
 		.await
 		.expect("process substitution should not hang");
@@ -6616,9 +6700,12 @@ mod tests {
 			 's/c/d/w /dev/stdout'",
 			dir.display()
 		);
-		let (result, output) = time::timeout(
+		let (result, output) = run_command_capture_within(
 			Duration::from_secs(5),
-			run_command_capture(&command, None, None, CancelToken::default()),
+			&command,
+			None,
+			None,
+			CancelToken::default(),
 		)
 		.await
 		.expect("sed should not hang");
@@ -6635,9 +6722,12 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread")]
 	async fn descriptor_paths_keep_their_spelling() {
 		let command = "pgrep -F /dev/fd/9; sed 'w /dev/fd/9' <<< x; readlink /dev/stdin <<< x";
-		let (_, output) = time::timeout(
+		let (_, output) = run_command_capture_within(
 			Duration::from_secs(5),
-			run_command_capture(command, None, None, CancelToken::default()),
+			command,
+			None,
+			None,
+			CancelToken::default(),
 		)
 		.await
 		.expect("closed descriptor paths should fail fast");
@@ -7421,7 +7511,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		let mut session = create_session(&config).await.expect("create_session");
 
 		// Output pipe shared between the brush child and a concurrent reader. The
-		// reader runs on a blocking thread because `os_pipe` reads are blocking.
+		// reader runs on a blocking thread because pipe reads are blocking.
 		let (mut reader, writer) = pipe_to_files("e2e").expect("pipe");
 		let stdout_file = OpenFile::from(writer.try_clone().expect("clone"));
 		let stderr_file = OpenFile::from(writer);

@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, it } from "bun:test";
 import type { TspText } from "@oh-my-pi/pi-wire";
 import { ReadToolGroupComponent } from "../src/chat/read-tool-group";
 import type { DescribeContext, NativeChild, NativeNode } from "../src/native/node";
-import { initTheme } from "../src/theme";
+import { getThemeByName, initTheme, type Theme } from "../src/theme";
 import { globToolRenderer } from "../src/tools/glob";
 import { grepToolRenderer } from "../src/tools/grep";
 import { lspToolRenderer } from "../src/tools/lsp";
@@ -41,7 +41,9 @@ function plain(text: TspText | undefined): string {
 	return typeof text === "string" ? text : (text ?? []).map(s => s.t).join("");
 }
 
-function codeProps(children: readonly NativeChild[] | undefined): { start?: number; text?: string }[] {
+function codeProps(
+	children: readonly NativeChild[] | undefined,
+): { start?: number; nums?: readonly number[]; text?: string; marks?: readonly { line: number }[] }[] {
 	return collect(children, n => n.k === "code").flatMap(n => (n.k === "code" && n.p ? [n.p] : []));
 }
 
@@ -78,12 +80,18 @@ describe("grep native view", () => {
 		expect(small.inline).toBe(true);
 	});
 
-	it("splits non-adjacent match lines into numbered runs with a gap row between", () => {
+	it("keeps non-adjacent match lines in one block numbered by their real lines", () => {
 		const view = grepToolRenderer.describeResult(result, expanded, { pattern: "hit" });
 		const first = collect(view.body, n => role(n) === "omp.tool.search.file")[0]!;
-		expect(codeStarts(first.c)).toEqual([9, 40]);
 		const kinds = (first.c ?? []).filter(isNode).map(n => n.k);
-		expect(kinds).toEqual(["row", "code", "text", "code"]);
+		expect(kinds).toEqual(["row", "code"]);
+		const [props] = codeProps(first.c);
+		expect(props).toMatchObject({ text: "ctx\nhit\nfar", nums: [9, 10, 40] });
+		expect(props!.start).toBeUndefined();
+		expect(props!.marks?.map(m => m.line)).toEqual([10, 40]);
+		// Contiguous files keep `start` and send no `nums`.
+		const second = collect(view.body, n => role(n) === "omp.tool.search.file")[1]!;
+		expect(codeProps(second.c)).toEqual([expect.objectContaining({ start: 1, nums: undefined })]);
 	});
 
 	it("puts a single-file search, which prints no header, under that file's row", () => {
@@ -99,8 +107,8 @@ describe("grep native view", () => {
 		const body = (view.body ?? []).filter(isNode);
 		expect(body.map(role)).toEqual(["omp.tool.search.file"]);
 		const kinds = (body[0]!.c ?? []).filter(isNode).map(n => n.k);
-		expect(kinds).toEqual(["row", "code", "text", "code"]);
-		expect(codeStarts(body[0]!.c)).toEqual([9, 40]);
+		expect(kinds).toEqual(["row", "code"]);
+		expect(codeProps(body[0]!.c).map(p => p.nums)).toEqual([[9, 10, 40]]);
 	});
 });
 
@@ -122,7 +130,7 @@ describe("read native view", () => {
 			collapsed,
 			{ path: "src/x.ts:4-5,90" },
 		);
-		expect(codeStarts(view.body)).toEqual([4, 90]);
+		expect(codeProps(view.body)).toEqual([expect.objectContaining({ text: "a\nb\nz", nums: [4, 5, 90] })]);
 	});
 
 	it("puts a read error's message in the head, not only behind the disclosure", () => {
@@ -251,6 +259,23 @@ describe("lsp native view", () => {
 		expect(collect(view?.body, n => role(n) === "omp.tool.error")).toHaveLength(1);
 	});
 
+	it("shows a file whose server sent no report as unverified, never as no issues", () => {
+		const text = [
+			"✔ src/fast.cpp: no issues",
+			"⚠ src/slow.cpp: no diagnostics report yet from clangd; query the file alone for a longer wait",
+		].join("\n");
+		const view = lspToolRenderer.describeResult(
+			{ content: [{ type: "text", text }], details: { action: "diagnostics", success: true } },
+			collapsed,
+			{ action: "diagnostics", file: "src/*.cpp" },
+		);
+		expect(view?.inline).not.toBe(true);
+		const meta = (view?.tool?.meta ?? []).map(plain).join(" ");
+		expect(meta).toContain("1 unverified file");
+		expect(meta).not.toContain("No issues");
+		expect(collect(view?.body, n => role(n) === "omp.tool.diagnostic")).toHaveLength(1);
+	});
+
 	it("parses grouped diagnostics into file:line:col rows and frames them", () => {
 		const text = [
 			"2 error(s):",
@@ -271,5 +296,47 @@ describe("lsp native view", () => {
 		expect(texts[0]).toBe("src/frame.rs:12:5");
 		const badges = collect(rows[0]!.c, n => n.k === "badge").map(n => (n.k === "badge" ? n.p?.text : undefined));
 		expect(badges).toEqual(["rust-analyzer"]);
+	});
+});
+
+describe("lsp text view", () => {
+	let theme: Theme;
+	beforeAll(async () => {
+		await initTheme();
+		theme = (await getThemeByName("dark"))!;
+	});
+
+	it("lists a file whose server sent no report beside the diagnostics, never as no issues", () => {
+		const unverified = `${theme.status.warning} src/slow.cpp: no diagnostics report yet from clangd; query the file alone for a longer wait`;
+		const cases: Array<[string[], RenderResultOptions]> = [
+			[
+				[
+					`${theme.status.error} src/bad.cpp: 1 error(s)`,
+					"src/bad.cpp:3:5 [error] [clangd] use of undeclared identifier 'x'",
+					unverified,
+				],
+				collapsed,
+			],
+			[[`${theme.status.success} src/fast.cpp: no issues`, unverified], expanded],
+		];
+		for (const [lines, options] of cases) {
+			const rendered = Bun.stripANSI(
+				lspToolRenderer
+					.renderResult(
+						{
+							content: [{ type: "text", text: lines.join("\n") }],
+							details: { action: "diagnostics", success: true },
+						},
+						options,
+						theme,
+						{ action: "diagnostics", file: "src/*.cpp" },
+					)
+					.render(120)
+					.join("\n"),
+			);
+			expect(rendered).toContain("1 unverified file");
+			expect(rendered).toContain("src/slow.cpp: no diagnostics report yet from clangd");
+			expect(rendered).not.toContain("No issues");
+		}
 	});
 });

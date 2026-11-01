@@ -345,6 +345,12 @@ provider "factory-droid" {
 			cost input=0 output=0 cache-read=0 cache-write=0
 			limits context=136464 max-tokens=65536
 		}
+		model "deepseek-v4.1-flash-1017" name="DeepSeek V4.1 Flash 1017" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=908928 max-tokens=131072
+		}
 		model "deepseek-v4.1-flash" name="DeepSeek V4.1 Flash" {
 			reasoning #true
 			input "text" "image"
@@ -975,6 +981,17 @@ provider "factory-droid" {
 		thinking-requires-effort #false
 		thinking-default-level "high"
 	}
+	models "deepseek-v4.1-flash-1017" {
+		routing-family "factory"
+		upstream-rotation "fireworks" "baseten" "databricks"
+		credit-rates { input 0.12; output 4; cache-read 0.024 }
+		// No bundled Fireworks row for the 1017 slug; Fireworks prices it like V4.1 Flash.
+		list-price-from "fireworks" "deepseek-v4.1-flash"
+		thinking-efforts "low" "high" "max"
+		thinking-requires-effort #false
+		thinking-default-level "high"
+		entitlement { feature-flag "deepseek_v4_1_flash_1017" }
+	}
 	models "deepseek-v4.1-flash" {
 		routing-family "factory"
 		upstream-rotation "fireworks" "baseten" "databricks"
@@ -1129,6 +1146,13 @@ provider "factory-droid" {
 		on-upstream "fireworks" "baseten" {
 			requires-reasoning-content-for-tool-calls #true
 			synthetic-reasoning-content-fallback " "
+		}
+	}
+	// Droid 0.250.0 configures the 1017 checkpoint's Baseten route with
+	// thinkingMode "reasoning-effort": thinking off is sent as `none`.
+	models "deepseek-v4.1-flash-1017" {
+		on-upstream "baseten" {
+			completions-reasoning-mode "effort"
 		}
 	}
 	// The replay codec follows the selected route, including EU GLM routes.

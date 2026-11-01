@@ -2254,8 +2254,9 @@ mod tests {
 		let parent = shell.last_background_pid().expect("background process PID").to_string();
 
 		for word in [
-			r#""$(/bin/true & /bin/echo "$!")""#,
-			r#""$( (/bin/true & /bin/echo "$!") )""#,
+			// `/bin/sleep`, not `/bin/true`, which macOS keeps in `/usr/bin`.
+			r#""$(/bin/sleep 0 & /bin/echo "$!")""#,
+			r#""$( (/bin/sleep 0 & /bin/echo "$!") )""#,
 		] {
 			let child = full_expand_and_split_word(&mut shell, &params, word).await?;
 			assert_eq!(child.len(), 1, "nested expansion: {word}");

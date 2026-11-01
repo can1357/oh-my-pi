@@ -379,11 +379,8 @@ mod platform {
 				// SAFETY: `flags` contains only documented `EXECUTION_STATE` bits.
 				let result = unsafe { SetThreadExecutionState(flags) };
 				let acquired = result != 0;
-				let _ = ready_sender.send(if acquired {
-					Ok(())
-				} else {
-					Err(std::io::Error::last_os_error().to_string())
-				});
+				let _ = ready_sender
+					.send(acquired.ok_or_else(|| std::io::Error::last_os_error().to_string()));
 				if !acquired {
 					return;
 				}

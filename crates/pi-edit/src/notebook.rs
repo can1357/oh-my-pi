@@ -4,7 +4,12 @@
 //!
 //! Port of `packages/coding-agent/src/edit/notebook.ts`.
 
-use std::{collections::HashSet, fmt::Write as _, path::Path, sync::LazyLock};
+use std::{
+	collections::HashSet,
+	fmt::{NumBuffer, Write as _},
+	path::Path,
+	sync::LazyLock,
+};
 
 use regex::Regex;
 use serde_json::{Map, Value};
@@ -400,7 +405,7 @@ fn js_number_to_string(number: &serde_json::Number) -> String {
 		if scientific_exponent >= 0 {
 			output.push('+');
 		}
-		write!(output, "{scientific_exponent}").expect("writing to String cannot fail");
+		output.push_str(scientific_exponent.format_into(&mut NumBuffer::new()));
 	}
 	output
 }

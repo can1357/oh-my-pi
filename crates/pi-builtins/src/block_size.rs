@@ -243,7 +243,7 @@ impl BlockSize {
 				if symbols.decimal_point == b'.' {
 					text
 				} else {
-					text.replace('.', char::from(symbols.decimal_point).encode_utf8(&mut [0; 4]))
+					text.replace('.', char::from(symbols.decimal_point).encode_utf8(&mut [0; char::MAX_LEN_UTF8]))
 				}
 			},
 			None => n.div_ceil(self.bytes).to_string(),
@@ -266,7 +266,7 @@ fn group_digits(text: &str, separator: u8) -> String {
 	let separator = char::from(separator);
 	let mut out = String::with_capacity(text.len() + digits / 3);
 	for (i, digit) in text[..digits].chars().enumerate() {
-		if i != 0 && (digits - i) % 3 == 0 {
+		if i != 0 && (digits - i).is_multiple_of(3) {
 			out.push(separator);
 		}
 		out.push(digit);

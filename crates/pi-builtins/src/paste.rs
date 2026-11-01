@@ -119,7 +119,7 @@ fn paste(
 			prepared.push(PreparedSource::StandardInput);
 		} else {
 			let file = host.fs().open(host.resolve(&filename)).map_err(|err| {
-				format!("{}: {}", filename.to_string_lossy(), strip_errno(&err))
+				format!("{}: {}", filename.display(), strip_errno(&err))
 			})?;
 			prepared.push(PreparedSource::File(BufReader::new(file)));
 		}
@@ -232,7 +232,7 @@ fn parse_delimiters(delimiters: &OsString) -> Result<Box<[Box<[u8]>]>, String> {
 			if i >= bytes.len() {
 				return Err(format!(
 					"delimiter list ends with an unescaped backslash: {}",
-					delimiters.to_string_lossy()
+					delimiters.display()
 				));
 			}
 			match bytes[i] {
@@ -262,9 +262,7 @@ fn parse_delimiters(delimiters: &OsString) -> Result<Box<[Box<[u8]>]>, String> {
 }
 
 fn remove_trailing_line_ending(line_ending: u8, output: &mut Vec<u8>) {
-	if output.last() == Some(&line_ending) {
-		output.pop();
-	}
+	output.pop_if(|byte| *byte == line_ending);
 }
 
 enum DelimiterState<'a> {
