@@ -1990,13 +1990,15 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * The start of the viewed branch the link browser last found no extension link in: its first
 	 * `checked` entries, the last of them `lastId`. They end where a user turn starts, so no later
 	 * entry changes how they draw (as a tool result does its call's card). The next check replays
-	 * only the entries after them, until the link schemes, the width or the renderers change.
+	 * only the entries after them, until the session, the link schemes, the width or the renderers
+	 * change. It holds the session by id and the renderers weakly, so a finished subagent's
+	 * session and extensions stay collectable.
 	 */
 	#linkBrowserMiss:
 		| {
-				view: AgentSession;
+				sessionId: string;
 				key: string;
-				renderers: readonly AssistantTextRenderer[];
+				renderers: readonly WeakRef<AssistantTextRenderer>[];
 				checked: number;
 				lastId: string | undefined;
 		  }
@@ -4463,11 +4465,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		const key = `${extensionLinksVersion()}\0${columns}`;
 		const entries: TranscriptEntryLike[] = view.sessionManager.getBranch().filter(isTranscriptEntry);
 		const committed = entries.length;
+		const sessionId = view.sessionManager.getSessionId();
 		const miss = this.#linkBrowserMiss;
 		const checked =
-			miss?.view === view &&
+			miss?.sessionId === sessionId &&
 			miss.key === key &&
-			sameItems(miss.renderers, renderers) &&
+			miss.renderers.length === renderers.length &&
+			miss.renderers.every((renderer, index) => renderer.deref() === renderers[index]) &&
 			entries[miss.checked - 1]?.id === miss.lastId
 				? miss.checked
 				: 0;
@@ -4505,7 +4509,13 @@ export class InteractiveMode implements InteractiveModeContext {
 			let settled = committed - 1;
 			while (settled > checked && !isUserRequestEntry(entries[settled]!)) settled--;
 			if (settled > checked) {
-				this.#linkBrowserMiss = { view, key, renderers, checked: settled, lastId: entries[settled - 1]!.id };
+				this.#linkBrowserMiss = {
+					sessionId,
+					key,
+					renderers: renderers.map(renderer => new WeakRef(renderer)),
+					checked: settled,
+					lastId: entries[settled - 1]!.id,
+				};
 			}
 			return false;
 		}
