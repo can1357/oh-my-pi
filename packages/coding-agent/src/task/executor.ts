@@ -3569,15 +3569,17 @@ async function runWakeStopPasses(
 	hasCandidate: () => boolean,
 ): Promise<"allowed" | "refused" | "cancelled"> {
 	const signal = AbortSignal.any([monitor.abortSignal, hold.signal]);
+	let refused = false;
 	const io: SubagentStopPassIo = {
 		hold,
 		awaitAbortable: promise => untilAborted(signal, () => promise),
 		continueWith: async text => {
+			// A handler already refused: a continuation that fails must not erase that verdict.
+			refused = true;
 			await hold.prompt(text, { attribution: "agent", synthetic: true, runCommands: false, throwOnDrop: true });
 			await untilAborted(signal, () => session.waitForIdle());
 		},
 	};
-	let refused = false;
 	try {
 		for (;;) {
 			// Judge only once owner async work quiesced, the first candidate included. A
