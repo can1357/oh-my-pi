@@ -11,6 +11,7 @@ import { APP_NAME } from "./dirs";
 import * as logger from "./logger";
 import { onStopSignal } from "./regular-file";
 import { restoreTerminalStderr } from "./stderr-guard";
+import { toError } from "./type-guards";
 
 // Cleanup reasons, in order of priority/meaning.
 export enum Reason {
@@ -277,7 +278,7 @@ function runCleanup(reason: Reason, keepAlive = false): Promise<void> {
 	const cleanupSettled = Promise.allSettled(promises).then(async results => {
 		for (const result of results) {
 			if (result.status === "rejected") {
-				const err = result.reason instanceof Error ? result.reason : new Error(String(result.reason));
+				const err = toError(result.reason);
 				logger.error("Cleanup callback failed", { err, stack: err.stack });
 			}
 		}
@@ -709,7 +710,7 @@ function handleWorkerSendEpipe(err: Error): boolean {
  * Reports a caught top-level failure after terminal owners restore their display, then exits.
  */
 export async function fatal(error: unknown): Promise<never> {
-	const err = error instanceof Error ? error : new Error(String(error));
+	const err = toError(error);
 	const report = `${Bun.inspect(error, { colors: process.stderr.isTTY === true })}\n`;
 	if (!Bun.isMainThread) {
 		process.stderr.write(`${report}${formatFatalRecoveryHints(fatalRecoveryHintProviders)}`);
@@ -765,7 +766,7 @@ export function installProcessHandlers(): void {
 				logger.warn("Ignoring expected cleanup exception", { err: thrown });
 				return;
 			}
-			const err = thrown instanceof Error ? thrown : new Error(String(thrown));
+			const err = toError(thrown);
 			// A worker IPC `send()` race can surface through either global error event;
 			// contain it in both. Stdout write disconnects are attributed to stdout by
 			// registerStdioDisconnectHandling's `error` listener, not classified here.
@@ -798,7 +799,7 @@ export function installProcessHandlers(): void {
 			);
 		})
 		.on("unhandledRejection", async reason => {
-			const err = reason instanceof Error ? reason : new Error(String(reason));
+			const err = toError(reason);
 			if (handleWorkerSendEpipe(err)) return;
 			if (isExpectedCleanupError(reason)) {
 				logger.warn("Ignoring expected cleanup rejection", { err });
@@ -879,7 +880,7 @@ export function register(
 			const pending = invokeCleanup(registration, reason, keepAlive, cleanupPass);
 			if (!pending) return;
 			const tracked = pending.catch(error => {
-				const err = error instanceof Error ? error : new Error(String(error));
+				const err = toError(error);
 				logger.error("Cleanup callback failed", { err, id, stack: err.stack });
 			});
 			// Join the active pass so cleanup()/signal exits await it; after a
@@ -889,7 +890,7 @@ export function register(
 				activePassDeadline?.extend(tracked, registration.deadlineMs, registration.waitMessage);
 			}
 		} catch (error) {
-			const err = error instanceof Error ? error : new Error(String(error));
+			const err = toError(error);
 			logger.error("Cleanup callback failed", { err, id, stack: err.stack });
 		}
 	};

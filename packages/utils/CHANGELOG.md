@@ -2,17 +2,18 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `acp` runtime validators (`zNewSessionResponse`, `zSessionNotification`, …) now report each failing field's path and reason in `error.issues` instead of a single `Invalid <label>`; `ValidationError` issue paths are typed `PropertyKey[]` ([#17699](https://github.com/can1357/oh-my-pi/pull/17699))
+
 ### Added
 
 - Added `@oh-my-pi/pi-utils/regular-file`, which reads a file only after `fstat` on the opened descriptor shows a regular file, and throws `NotARegularFile` naming the file for a FIFO, socket, device or directory, whether the name is one or links to one ([#17638](https://github.com/can1357/oh-my-pi/pull/17638) by [@sjawhar](https://github.com/sjawhar))
+- Added `isPidAlive` (signal-0 liveness probe) and `asStrictBytes` (a `Uint8Array` narrowed to its own `ArrayBuffer` for WebCrypto)
 
 ### Fixed
 
 - Fixed every command hanging when nothing writes to a named pipe at `~/.env`, `~/.omp/.env`, `~/.omp/agent/.env` or the project's `.env`. At startup a pipe there (1Password mounts `.env` files this way) is read until its writer closes it, within 60 seconds at a terminal or 10 seconds otherwise, both judgements rather than measurements; after that the command goes on with a note that the file's variables are unset, and Ctrl-C stops the wait. A writer that dies part way through the file also closes the pipe, and the part it wrote is loaded as if it were the whole file: no bound or check can prevent that. Each file is read at startup once per process: a worker thread, or a second path to the same file, uses what startup read and never opens the pipe again. Building a child shell's environment never waits on a `.env` pipe: it uses what startup read from it, or passes over the file with a note. A socket, device or directory there is passed over with a note ([#17638](https://github.com/can1357/oh-my-pi/pull/17638) by [@sjawhar](https://github.com/sjawhar))
-
-### Changed
-
-- `acp` runtime validators (`zNewSessionResponse`, `zSessionNotification`, …) now report each failing field's path and reason in `error.issues` instead of a single `Invalid <label>`; `ValidationError` issue paths are typed `PropertyKey[]` ([#17699](https://github.com/can1357/oh-my-pi/pull/17699))
 
 ## [18.15.0] - 2026-11-01
 

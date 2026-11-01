@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { getDbBusyTimeoutMs } from "./env";
 import { withFileLockSync } from "./file-lock";
 import { isEnoent } from "./fs-error";
+import { toError } from "./type-guards";
 import * as logger from "./logger";
 
 const BUSY_MAX_ATTEMPTS = 4;
@@ -100,7 +101,7 @@ function closeFailedDatabase(db: Database | undefined, error: unknown, identity:
 	try {
 		db?.close();
 	} catch (closeError) {
-		const original = error instanceof Error ? error : new Error(String(error));
+		const original = toError(error);
 		const detail = closeError instanceof Error ? closeError.message : String(closeError);
 		original.message += `; failed to close the SQLite handle: ${detail}`;
 		throw new SqliteAttemptFailure(original, identity, { canRecover: false });
@@ -333,7 +334,7 @@ export function openSqliteDatabaseSync<T>(
 
 /** Adds the failing store's path to an error without losing SQLite result codes or its original stack. */
 export function annotateSqliteError(error: unknown, dbPath: string): Error {
-	const annotated = error instanceof Error ? error : new Error(String(error));
+	const annotated = toError(error);
 	annotated.message = `Database "${dbPath}": ${annotated.message}`;
 	return annotated;
 }

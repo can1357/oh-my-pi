@@ -137,6 +137,46 @@ describe("computeFileLists", () => {
 	});
 });
 
+describe("upsertFileOperations", () => {
+	it("renders one grouped <files> tree with Read/Write/RW markers", () => {
+		const rendered = snapcompact.upsertFileOperations(
+			"",
+			["src/a.ts", "src/b.ts"],
+			["src/c.ts", "src/d.ts"],
+			new Set(["src/a.ts", "src/b.ts", "src/c.ts"]),
+		);
+		expect(rendered).toBe(
+			["<files>", "# src/", "a.ts (Read)", "b.ts (Read)", "c.ts (RW)", "d.ts (Write)", "</files>"].join("\n"),
+		);
+	});
+
+	it("marks modified files Write when no read set is provided", () => {
+		const rendered = snapcompact.upsertFileOperations("", [], ["c.ts"]);
+		expect(rendered).toBe(["<files>", "c.ts (Write)", "</files>"].join("\n"));
+	});
+});
+
+describe("isUrlSchemePath", () => {
+	it("flags internal URIs and web URLs", () => {
+		expect(snapcompact.isUrlSchemePath("conflict://1")).toBe(true);
+		expect(snapcompact.isUrlSchemePath("conflict://*")).toBe(true);
+		expect(snapcompact.isUrlSchemePath("artifact://7")).toBe(true);
+		expect(snapcompact.isUrlSchemePath("local://ctx.md")).toBe(true);
+		expect(snapcompact.isUrlSchemePath("history://AuthLoader")).toBe(true);
+		expect(snapcompact.isUrlSchemePath("https://example.com/page")).toBe(true);
+		// Prefixed conflict typo form — scheme appears after a colon, not at start.
+		expect(snapcompact.isUrlSchemePath("src/login.ts:conflict://3")).toBe(true);
+	});
+
+	it("leaves real filesystem paths untouched", () => {
+		expect(snapcompact.isUrlSchemePath("src/foo.ts")).toBe(false);
+		expect(snapcompact.isUrlSchemePath("C:/Users/me/file.ts")).toBe(false);
+		expect(snapcompact.isUrlSchemePath("db.sqlite:users")).toBe(false);
+		expect(snapcompact.isUrlSchemePath("archive.zip:dir/file.ts")).toBe(false);
+		expect(snapcompact.isUrlSchemePath("docs/compaction.md:100-170:raw")).toBe(false);
+	});
+});
+
 interface DecodedPng {
 	width: number;
 	height: number;
