@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a subagent's retained eval kernel or isolation workspace being released while the child was still using it, and being held for the life of the host when a spawn ended before the child existed ([#17640](https://github.com/can1357/oh-my-pi/pull/17640) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.14.2] - 2026-10-31
 
 ### Added
