@@ -317,10 +317,11 @@ function formatOmittedRequestedLineNotice(
 	line: NonNullable<ReadLineWindow["byteLimitLine"]>,
 	maxBytes: number,
 	rawTarget: string,
+	precedingContext = true,
 ): string {
 	return `[Line ${line.index + 1} is ${formatBytes(
 		line.byteLength,
-	)} and could not fit after preceding context in the ${formatBytes(maxBytes)} read budget. Use ${rawTarget} to read that line without context (byte-capped if it exceeds the budget), or widen the requested range to increase the budget.]`;
+	)} and could not fit${precedingContext ? " after preceding context" : ""} in the ${formatBytes(maxBytes)} read budget. Use ${rawTarget} to read that line without context (byte-capped if it exceeds the budget), or widen the requested range to increase the budget.]`;
 }
 
 /** Column-cap cuts of one read: the cap and the first-to-last cut line, for the `:raw` recovery notice. */
@@ -1567,11 +1568,14 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		displayMode: { hashLines: boolean; lineNumbers: boolean },
 		suffixResolution: { from: string; to: string } | undefined,
 		signal: AbortSignal | undefined,
+		maxColumns: number,
+		artifactTarget: string | undefined,
 		allowBridge = true,
 	): Promise<{
 		outputText: string;
 		columnCut: ColumnCut | undefined;
 		details?: ReadToolDetails;
+		truncation?: TruncationResult;
 		bridgeResult?: AgentToolResult<ReadToolDetails>;
 	}> {
 		const rawSelector = isRawSelector(parsed);
@@ -1603,15 +1607,20 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 		const shouldAddHashLines = !rawSelector && displayMode.hashLines;
 		const shouldAddLineNumbers = rawSelector ? false : shouldAddHashLines ? false : displayMode.lineNumbers;
-		const maxColumns = resolveOutputMaxColumns(this.session.settings);
 
 		const blocks: string[] = [];
 		const notices: string[] = [];
 		const visibleSpans: Array<{ startLine: number; endLine: number }> = [];
 		const displayLineByNumber = new Map<number, string>();
 		const fullLines = rawSelector ? undefined : buffered?.addressableLines;
+		const contextMaxColumns = artifactTarget ? resolveOutputMaxColumns(this.session.settings) : maxColumns;
 		let columnCut: ColumnCut | undefined;
 		let cutLines: Set<number> | undefined;
+		let budgetTruncation: TruncationResult | undefined;
+		let selectedBytes = 0;
+		let selectedLines = 0;
+		let outputBytes = 0;
+		let outputLines = 0;
 		let displayContent: { text: string; startLine: number; lineNumbers?: Array<number | null> } | undefined;
 
 		for (const range of ranges) {
@@ -1619,14 +1628,14 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			const requestedLength = range.endLine !== undefined ? range.endLine - range.startLine + 1 : this.#defaultLimit;
 			const maxLines = Math.min(requestedLength, DEFAULT_MAX_LINES);
 
-			// The file is already in memory for everything within the snapshot byte
-			// cap, so slice ranges out of it instead of re-streaming per range. Raw
-			// mode keeps CR bytes, so it slices the original segments instead.
+			// Buffered ordinary reads retain their display-only column cap.
+			// Artifact recovery and raw reads collect from the same buffer with
+			// byte accounting, rather than returning unbounded selected lines.
 			let collectedLines: string[];
 			let totalFileLines: number;
 			let endsAtTerminalNewline = false;
 			const maxBytesForRead = Math.max(DEFAULT_MAX_BYTES, maxLines * 512);
-			if (fullLines) {
+			if (fullLines && !artifactTarget) {
 				totalFileLines = fullLines.length;
 				collectedLines = fullLines.slice(rangeStart, rangeStart + maxLines);
 			} else {
@@ -1643,6 +1652,35 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					window.reachedEof &&
 					window.hasTrailingNewline &&
 					rangeStart + collectedLines.length === totalFileLines;
+				if (!rawSelector && artifactTarget) {
+					selectedBytes += window.selectedBytes;
+					selectedLines += Math.min(maxLines, Math.max(0, totalFileLines - rangeStart));
+					outputBytes += window.collectedBytes;
+					outputLines += collectedLines.length;
+					if (window.stoppedByByteLimit && window.byteLimitLine) {
+						budgetTruncation ??= {
+							content: "",
+							truncated: true,
+							truncatedBy: "bytes",
+							totalLines: 0,
+							totalBytes: 0,
+							outputLines: 0,
+							outputBytes: 0,
+							lastLinePartial: false,
+							firstLineExceedsLimit: false,
+							partialByteWindows: true,
+						};
+						const omitted = window.byteLimitLine;
+						notices.push(
+							formatOmittedRequestedLineNotice(
+								omitted,
+								maxBytesForRead,
+								`${artifactTarget}:raw:${omitted.index + 1}-${omitted.index + 1}`,
+								false,
+							),
+						);
+					}
+				}
 			}
 
 			if (rangeStart >= totalFileLines) {
@@ -1693,15 +1731,25 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					lineText: (lineNumber, sourceText) => {
 						const visibleText = displayLineByNumber.get(lineNumber);
 						if (visibleText !== undefined) return visibleText;
-						if (maxColumns <= 0) return sourceText;
-						const truncated = truncateLine(sourceText, maxColumns);
+						if (contextMaxColumns <= 0) return sourceText;
+						const truncated = truncateLine(sourceText, contextMaxColumns);
 						if (truncated.wasTruncated) {
-							columnCut = addColumnCut(columnCut, maxColumns, lineNumber);
+							columnCut = addColumnCut(columnCut, contextMaxColumns, lineNumber);
 							(cutLines ??= new Set()).add(lineNumber);
 						}
 						return truncated.text;
 					},
 				},
+			).filter(
+				entry =>
+					!artifactTarget ||
+					entry.kind !== "line" ||
+					displayLineByNumber.has(entry.lineNumber) ||
+					!ranges.some(
+						range =>
+							entry.lineNumber >= range.startLine &&
+							entry.lineNumber <= (range.endLine ?? range.startLine + this.#defaultLimit - 1),
+					),
 			);
 			const firstLine = entries.find(entry => entry.kind === "line");
 			displayContent = {
@@ -1737,7 +1785,13 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			raw: rawSelector || undefined,
 		};
 		if (notices.length > 0) outputText = appendReadNotice(outputText, notices.join("\n"), details);
-		return { outputText, columnCut, details };
+		if (budgetTruncation) {
+			budgetTruncation.totalLines = selectedLines;
+			budgetTruncation.totalBytes = selectedBytes;
+			budgetTruncation.outputLines = outputLines;
+			budgetTruncation.outputBytes = outputBytes;
+		}
+		return { outputText, columnCut, details, truncation: budgetTruncation };
 	}
 
 	async execute(
@@ -1933,6 +1987,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const rawImages = toolContext?.rawImages === true;
 		const immutable = located?.spec.immutable === true;
 		const displayMode = resolveFileDisplayMode(this.session, { immutable });
+		// Artifact recovery must not reapply the column cap that elided the original output.
+		// Line and byte budgets still bound each page.
+		const contextMaxColumns = resolveOutputMaxColumns(this.session.settings);
+		const maxColumns = located?.spec.artifactStore ? 0 : contextMaxColumns;
 		// In-body continuation hints name the URL for located reads, so paging stays on the URL.
 		const selectorBase = located?.url ?? "";
 
@@ -2224,7 +2282,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			| {
 					result: TruncationResult;
 					options: {
-						direction: "head";
+						direction: "head" | "middle";
 						startLine?: number;
 						totalFileLines?: number;
 						nextOffset?: number | null;
@@ -2434,6 +2492,8 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						displayMode,
 						suffixResolution,
 						undefined, // plain-file read: deterministic and fast, never abort mid-read
+						maxColumns,
+						located?.spec.artifactStore ? located.url : undefined,
 						!located, // located URLs read their backing file directly, as their handlers do
 					);
 					if (multiResult.bridgeResult) return multiResult.bridgeResult;
@@ -2441,6 +2501,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					sourcePath = absolutePath;
 					details = multiResult.details ?? {};
 					columnCut = multiResult.columnCut;
+					if (multiResult.truncation) {
+						details.truncation = toReadTruncationStats(multiResult.truncation);
+						truncationInfo = { result: multiResult.truncation, options: { direction: "middle" } };
+					}
 				} else {
 					// Raw text or line-range mode
 					const { offset, limit } = selToOffsetLimit(sel);
@@ -2572,11 +2636,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 							.done();
 					}
 
-					// Per-line column cap. Skipped in raw mode so `:raw` always returns
-					// verbatim bytes for paste-back-into-tool workflows. Total byte/line
-					// counts in `truncation` keep reflecting the source, not the trimmed
-					// view — column truncation surfaces separately via `.limits()`.
-					const maxColumns = resolveOutputMaxColumns(this.session.settings);
+					// Per-line column cap. Raw reads and artifact recovery preserve full
+					// lines within the byte budget. Total byte/line counts in `truncation`
+					// keep reflecting the source, not the trimmed view — column
+					// truncation surfaces separately via `.limits()`.
 					// Column truncation is display-only. `collectedLines` MUST stay
 					// byte-for-byte with the on-disk content so the snapshot recorded
 					// below can be verified against the live file. Mutating it with
@@ -2712,10 +2775,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 								lineText: (lineNumber, sourceText) => {
 									const visibleText = displayLineByNumber.get(lineNumber);
 									if (visibleText !== undefined) return visibleText;
-									if (maxColumns <= 0) return sourceText;
-									const truncated = truncateLine(sourceText, maxColumns);
+									if (contextMaxColumns <= 0) return sourceText;
+									const truncated = truncateLine(sourceText, contextMaxColumns);
 									if (truncated.wasTruncated) {
-										columnCut = addColumnCut(columnCut, maxColumns, lineNumber);
+										columnCut = addColumnCut(columnCut, contextMaxColumns, lineNumber);
 										(cutLines ??= new Set()).add(lineNumber);
 									}
 									return truncated.text;
