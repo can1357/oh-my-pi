@@ -1,5 +1,6 @@
 import type { Database, SQLQueryBindings } from "bun:sqlite";
 import { logger, withLoopPhase } from "@oh-my-pi/pi-utils";
+import { proactiveLinkingEnabled } from "../../config";
 import { transaction } from "../../db";
 import { toUtcIso } from "../../util/datetime";
 import { generateId } from "../../util/ids";
@@ -8,6 +9,7 @@ import { EpisodicGraph } from "../episodic-graph";
 import { countExtractedFactCategories, extractFactCategoriesSafe } from "../extraction";
 import { getMnemopiRuntimeOptions, withMnemopiRuntimeOptions } from "../runtime-options";
 import { storeExtractedFactCategories } from "./consolidate";
+import { clearCachedEmbeddings, forgetCachedEmbeddings } from "./embedding-cache";
 import { type EmbedItem, scheduleEmbedding, vecAvailable, vecInsert } from "./helpers";
 import type {
 	BeamEvent,
@@ -201,6 +203,7 @@ function purgeWorkingMemoryArtifacts(db: BeamMemoryState["db"], ids: readonly st
 
 	db.run(`DELETE FROM annotations WHERE memory_id IN (${placeholders})`, [...ids]);
 	db.run(`DELETE FROM memory_embeddings WHERE memory_id IN (${placeholders})`, [...ids]);
+	forgetCachedEmbeddings(db, ids);
 	for (const table of MEMORIA_SOURCE_TABLES) {
 		db.run(`DELETE FROM ${table} WHERE source_memory_id IN (${placeholders})`, [...ids]);
 	}
@@ -271,18 +274,13 @@ function addTemporalAnnotations(beam: BeamMemoryState, memoryId: string, timesta
 	}
 }
 
-function proactiveLinkingAllowed(beam: BeamMemoryState): boolean {
-	const override = process.env.MNEMOPI_PROACTIVE_LINKING;
-	return override === undefined ? beam.config.proactiveLinking === true : override === "1";
-}
-
 function proactiveLinkIfEnabled(
 	beam: BeamMemoryState,
 	memoryId: string,
 	content: string,
 	extractEntities: boolean,
 ): void {
-	if (!proactiveLinkingAllowed(beam)) return;
+	if (!proactiveLinkingEnabled(process.env, beam.config.proactiveLinking === true)) return;
 	try {
 		const graph =
 			beam.episodicGraph instanceof EpisodicGraph
@@ -394,6 +392,7 @@ export function reconcileEmbeddingModel(beam: BeamMemoryState): void {
 
 		transaction(beam.db, () => {
 			beam.db.run("DELETE FROM memory_embeddings");
+			clearCachedEmbeddings(beam.db);
 			beam.db.run("UPDATE episodic_memory SET binary_vector = NULL");
 			if (vecAvailable(beam.db)) {
 				try {

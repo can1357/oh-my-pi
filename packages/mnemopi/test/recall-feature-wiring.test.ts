@@ -8,6 +8,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Mnemopi, type MnemopiOptions } from "@oh-my-pi/pi-mnemopi/core/memory";
+import { recallEnhanced as recallEnhancedRows } from "@oh-my-pi/pi-mnemopi/core/beam/recall";
 import {
 	GRAPH_VOICE_MAX_DEPTH,
 	GRAPH_VOICE_MAX_RESULTS,
@@ -68,7 +69,7 @@ describe("polyphonic recall wiring", () => {
 		expect(contents(linear)).not.toContain("The durable launch checklist lives in the Notion workspace");
 		const linked = polyphonic.find(result => result.content.includes("Notion workspace"));
 		expect(linked?.voice_scores?.graph).toBeGreaterThan(0);
-		// Fused scores are rescaled to 0..1 so banks stay comparable when results are merged.
+		// Fused scores are rescaled to 0..1 within one bank only, not for cross-bank comparison or confidence.
 		expect(linked?.score).toBeGreaterThan(0);
 		expect(linked?.score).toBeLessThanOrEqual(1);
 	});
@@ -94,6 +95,98 @@ describe("polyphonic recall wiring", () => {
 		for (const result of results) {
 			expect(result.score).toBeGreaterThan(0);
 			expect(result.score).toBeLessThanOrEqual(1);
+		}
+	});
+
+	it("never returns a false-veracity memory, linear or polyphonic, while eligible memories remain", async () => {
+		const dbPath = tempDbPath();
+		const writer = memory(dbPath, { proactiveLinking: true });
+		const disputed = writer.remember("Alice disputed the durable launch checklist owner", {
+			veracity: "false",
+			extractEntities: true,
+		});
+		const eligible = writer.remember("Alice owns the durable launch checklist", { veracity: "stated" });
+
+		for (const polyphonicRecall of [false, true]) {
+			const reader = memory(dbPath, { polyphonicRecall });
+			const results = await reader.recallEnhanced("Alice", 10, {
+				includeFacts: true,
+				channelId: "bank-a",
+			});
+			const ids = results.map(result => result.id);
+			expect(ids).toContain(eligible);
+			expect(ids).not.toContain(disputed);
+			expect(
+				await recallEnhancedRows(reader.beam, "Alice", 10, {
+					veracity: "false",
+					includeFacts: false,
+					channelId: "bank-a",
+					queryEmbedding: null,
+					useCache: false,
+				}),
+			).toEqual([]);
+			expect(reader.get(disputed)).toMatchObject({ veracity: "false" });
+		}
+	});
+
+	it("drops derived facts whose source memory is false or weighted 0, keeping facts of eligible sources", async () => {
+		const priorTier3Weight = process.env.MNEMOPI_TIER3_WEIGHT;
+		process.env.MNEMOPI_TIER3_WEIGHT = "0";
+		try {
+			const dbPath = tempDbPath();
+			const writer = memory(dbPath);
+			const falseSource = writer.remember("Quasar ledger owner is Mallory", { veracity: "false" });
+			const eligibleSource = writer.remember("Quasar ledger host is orion-7", { veracity: "stated" });
+			const { db, sessionId } = writer.beam;
+			const now = new Date().toISOString();
+			db.run(
+				"INSERT INTO episodic_memory (id, content, source, timestamp, session_id, importance, veracity, tier) VALUES ('ep-source', 'Quasar ledger archive retention is nine years', 'test', ?, ?, 0.5, 'stated', 3)",
+				[now, sessionId],
+			);
+			for (const [factId, object, sourceId] of [
+				["fact-false", "Quasar ledger owner is Mallory", falseSource],
+				["fact-tier0", "Quasar ledger archive retention is nine years", "ep-source"],
+				["fact-ok", "Quasar ledger host is orion-7", eligibleSource],
+			] as const) {
+				db.run(
+					"INSERT INTO facts (fact_id, session_id, subject, predicate, object, timestamp, source_msg_id, confidence) VALUES (?, ?, 'Quasar', 'ledger', ?, ?, ?, 0.9)",
+					[factId, sessionId, object, now, sourceId],
+				);
+			}
+
+			for (const polyphonicRecall of [false, true]) {
+				const reader = memory(dbPath, { polyphonicRecall });
+				const results = await reader.recallEnhanced("Quasar ledger", 10, {
+					includeFacts: true,
+					channelId: "bank-a",
+				});
+				const ids = results.map(result => result.id);
+				expect(ids).toContain("fact-ok");
+				expect(ids).toContain(eligibleSource);
+				for (const excluded of [falseSource, "fact-false", "ep-source", "fact-tier0"]) {
+					expect(ids).not.toContain(excluded);
+				}
+				expect(
+					await recallEnhancedRows(reader.beam, "Quasar ledger", 10, {
+						includeFacts: true,
+						veracity: "false",
+						channelId: "bank-a",
+						queryEmbedding: null,
+						useCache: false,
+					}),
+				).toEqual([]);
+				const stated = await recallEnhancedRows(reader.beam, "Quasar ledger", 10, {
+					includeFacts: true,
+					veracity: "stated",
+					channelId: "bank-a",
+					queryEmbedding: null,
+					useCache: false,
+				});
+				expect(stated.map(result => result.id).sort()).toEqual(["fact-ok", eligibleSource].sort());
+			}
+		} finally {
+			if (priorTier3Weight === undefined) delete process.env.MNEMOPI_TIER3_WEIGHT;
+			else process.env.MNEMOPI_TIER3_WEIGHT = priorTier3Weight;
 		}
 	});
 
@@ -167,6 +260,20 @@ describe("polyphonic recall wiring", () => {
 
 		// No token budget applies: 120 rows overflow the engine's default 4000-token context.
 		expect(await mem.recallEnhanced("Alice deploy runbook", 120)).toHaveLength(120);
+	});
+
+	it("does not pad a query that mentions time with unrelated recent memories", async () => {
+		const mem = memory(":memory:", { polyphonicRecall: true });
+		const relevant = "The terraform deploy pipeline runs plan, then apply after review";
+		mem.remember(relevant);
+		for (let i = 0; i < 40; i++) mem.remember(`Standup ${i} covered lunch-${i}, desk-${i} and parking-${i}`);
+
+		for (const query of [
+			"how does the terraform deploy pipeline work, run it before commit",
+			"how does the terraform deploy pipeline work, fix the blast radius",
+		]) {
+			expect(contents(await mem.recallEnhanced(query, 8, { includeFacts: true }))).toEqual([relevant]);
+		}
 	});
 });
 

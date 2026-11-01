@@ -7,6 +7,7 @@ import { REGEX_EXTRACTION_MAX_INPUT_CHARS } from "../entities";
 import { EpisodicGraph } from "../episodic-graph";
 import { type ExtractedFactCategories, heuristicExtractFacts } from "../extraction";
 import { clampVeracity, VERACITY_WEIGHTS, type Veracity, VeracityConsolidator } from "../veracity-consolidation";
+import { forgetCachedEmbeddings } from "./embedding-cache";
 import { scheduleEmbedding } from "./helpers";
 import type { BeamMemoryState, BeamStats, JsonValue, MemoriaRetrieveResult, Metadata, SleepResult } from "./types";
 
@@ -945,6 +946,7 @@ function extractKeySignal(content: string, maxChars: number): string {
 
 function invalidateEpisodicVectors(beam: BeamMemoryState, memoryId: string): void {
 	beam.db.run("DELETE FROM memory_embeddings WHERE memory_id = ?", [memoryId]);
+	forgetCachedEmbeddings(beam.db, [memoryId]);
 	beam.db.run("UPDATE episodic_memory SET binary_vector = NULL WHERE id = ?", [memoryId]);
 }
 
