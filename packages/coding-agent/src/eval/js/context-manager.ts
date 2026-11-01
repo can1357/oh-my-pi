@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { logger, Snowflake, workerHostEntry } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, Snowflake, workerHostEntry } from "@oh-my-pi/pi-utils";
 import {
 	createWorkerHandle,
 	createWorkerSubprocess,
@@ -222,10 +222,6 @@ export async function executeInVmContext(options: {
 	return result;
 }
 
-function isUnknownRecord(value: unknown): value is Record<string, unknown> {
-	return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
 /** Describe or invoke tools defined in a retained JavaScript kernel. */
 export async function invokeJsTool(
 	request: JsToolRequest,
@@ -275,7 +271,7 @@ export async function invokeJsTool(
 		session.pending.delete(runId);
 	}
 
-	if (!isUnknownRecord(envelope) || envelope.ok !== true) {
+	if (!isRecord(envelope) || envelope.ok !== true) {
 		return { ok: false, error: "JavaScript tool request returned an invalid response" };
 	}
 	if (request.op === "call") {
@@ -286,9 +282,9 @@ export async function invokeJsTool(
 	const rawTools = Array.isArray(envelope.tools) ? envelope.tools : [];
 	const tools: EvalToolDescriptor[] = [];
 	for (const rawTool of rawTools) {
-		if (!isUnknownRecord(rawTool)) continue;
+		if (!isRecord(rawTool)) continue;
 		const { name, description, parameters } = rawTool;
-		if (typeof name !== "string" || typeof description !== "string" || !isUnknownRecord(parameters)) continue;
+		if (typeof name !== "string" || typeof description !== "string" || !isRecord(parameters)) continue;
 		tools.push({ name, description, parameters, language: "js" });
 	}
 	const missing = Array.isArray(envelope.missing)
