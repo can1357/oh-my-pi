@@ -137,6 +137,44 @@ describe("native task", () => {
 		const nested = nodes(parent.c).find(n => n.k === "agent" && n.key === "Child");
 		expect(nested?.p).toMatchObject({ status: "running", depth: 1 });
 	});
+
+	it("uses the provider reason rather than a 400 envelope in retry props and failures", () => {
+		const message = "Your credit balance is too low to access the Anthropic API.";
+		const error = `400 {"type":"error","error":{"type":"invalid_request_error","message":"${message}"}}`;
+		const liveDetails: TaskToolDetails = {
+			projectAgentsDir: null,
+			results: [],
+			totalDurationMs: 0,
+			progress: [
+				progress("Retrying", {
+					retryState: {
+						attempt: 3,
+						maxAttempts: 10,
+						delayMs: 30_000,
+						errorMessage: error,
+						startedAtMs: 1000,
+					},
+				}),
+			],
+		};
+		const live = taskToolRenderer.describeResult(
+			{ content: [], details: liveDetails },
+			{ ...opts, isPartial: true, renderContext: { nowMs: 4000 } },
+		);
+		const liveAgent = nodes(live?.body).find(node => node.k === "agent" && node.key === "Retrying");
+		expect(liveAgent).toBeDefined();
+		expect((liveAgent!.p as TspAgentProps).retry).toMatchObject({ error: `400 ${message}` });
+
+		const exhaustedDetails: TaskToolDetails = {
+			projectAgentsDir: null,
+			results: [],
+			totalDurationMs: 0,
+			progress: [progress("Exhausted", { status: "failed", retryFailure: { attempt: 10, errorMessage: error } })],
+		};
+		const exhausted = taskToolRenderer.describeResult({ content: [], details: exhaustedDetails }, opts);
+		expect(JSON.stringify(exhausted)).toContain(`auto-retry gave up after 10 attempts: 400 ${message}`);
+		expect(JSON.stringify(exhausted)).not.toContain("invalid_request_error");
+	});
 });
 
 describe("native wait", () => {

@@ -10,6 +10,7 @@
  * Non-TTY output keeps the original plain-line protocol
  * (`[start]`/`[done]`/`[fail]`), so scripted callers see unchanged output.
  */
+import { httpErrorReason } from "@oh-my-pi/pi-ai/error/http-body";
 import { formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
 import { sanitizeDisplaySingleLine } from "../overlays/extensions/display-text";
 import { truncateToWidth } from "../utils";
@@ -380,6 +381,10 @@ function renderWaveHeader(
 	return `${fgOrPlain("accent", spinner)} Repairing [${bar}] ${parts.join(fgOrPlain("dim", " · "))}`;
 }
 
+function retryReason(errorMessage: string): string {
+	return sanitizeDisplaySingleLine(httpErrorReason(errorMessage)).replace(/\s+/g, " ").trim();
+}
+
 function renderAgentRow(spinner: string, agentName: string, agent: RunningAgent): string {
 	const label = agentName.replace(/^Cleanse/, "");
 	const meta: string[] = [];
@@ -430,7 +435,7 @@ function describeAgentLane(agentName: string, agent: RunningAgent, now: number):
 						max: progress.retryState.maxAttempts,
 						age: Math.max(0, now - progress.retryState.startedAtMs),
 						delay: progress.retryState.delayMs,
-						error: progress.retryState.errorMessage,
+						error: retryReason(progress.retryState.errorMessage),
 					}
 				: null,
 			stats: {
@@ -451,7 +456,10 @@ function describeActivity(progress: AgentProgress | undefined): TspSpan[] {
 	if (!progress) return [span("starting", "dim")];
 	if (progress.retryState) {
 		return [
-			span(`rate-limited · retry ${progress.retryState.attempt}/${progress.retryState.maxAttempts}`, "warning"),
+			span(
+				`retrying · ${progress.retryState.attempt}/${progress.retryState.maxAttempts}: ${retryReason(progress.retryState.errorMessage)}`,
+				"warning",
+			),
 		];
 	}
 	const intent = sanitizeDisplaySingleLine(progress.lastIntent ?? "")
@@ -526,7 +534,10 @@ function agentActivity(progress: AgentProgress | undefined): string {
 	if (progress.retryState) {
 		return fgOrPlain(
 			"warning",
-			`rate-limited · retry ${progress.retryState.attempt}/${progress.retryState.maxAttempts}`,
+			`retrying · ${progress.retryState.attempt}/${progress.retryState.maxAttempts}: ${truncateToWidth(
+				retryReason(progress.retryState.errorMessage),
+				ACTIVITY_WIDTH,
+			)}`,
 		);
 	}
 	const intent = truncateToWidth(

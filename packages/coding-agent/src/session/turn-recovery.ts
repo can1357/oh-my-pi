@@ -17,7 +17,7 @@ import type {
 	ToolChoice,
 	AnthropicFallbackCreditHandle,
 } from "@oh-my-pi/pi-ai";
-import { calculateRateLimitBackoffMs, parseRateLimitReason } from "@oh-my-pi/pi-ai";
+import { calculateCreditBalanceBackoffMs, calculateRateLimitBackoffMs, parseRateLimitReason } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { shouldDropTruncatedThinkingOnlyAssistant } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
@@ -3011,6 +3011,13 @@ export class TurnRecovery {
 			} else if (usageLimitWaitMs === undefined && parsedRetryAfterMs && parsedRetryAfterMs > delayMs) {
 				delayMs = parsedRetryAfterMs;
 			}
+		}
+
+		// An empty prepaid balance lifts within minutes: wait at least 30 seconds
+		// and add jitter after any provider hint has selected the effective
+		// minimum. A fallback changes models immediately and skips this wait.
+		if (!switchedModel && AIError.isCreditBalanceTooLow(message.errorStatus, errorMessage)) {
+			delayMs = calculateCreditBalanceBackoffMs(Math.max(delayMs, 30_000), retrySettings.maxDelayMs);
 		}
 
 		if (retryBudgetExhausted) {

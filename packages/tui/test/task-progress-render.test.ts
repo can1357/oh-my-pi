@@ -841,6 +841,87 @@ describe("task progress rendering", () => {
 			}
 		}
 	});
+
+	// The `400 <JSON body>` an Anthropic rejection arrives as, with the dump
+	// pointer the provider appends on its own line.
+	const creditBalanceError =
+		'400 {"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."},"request_id":"req_011CgbLuqzvWZWRDTHtaVVMj"}\nraw-http-request=/tmp/http-400-requests/1.json';
+
+	it("names what a waiting subagent waits for, not the provider's JSON envelope", async () => {
+		const theme = (await getThemeByName("dark"))!;
+		const progress = runningProgress({
+			retryState: {
+				attempt: 3,
+				maxAttempts: 10,
+				delayMs: 30_000,
+				errorMessage: creditBalanceError,
+				startedAtMs: Date.now(),
+			},
+		});
+		const row = Bun.stripANSI(
+			findRow(
+				taskToolRenderer.renderResult(
+					{ content: [], details: detailsFor(progress) },
+					{ expanded: false, isPartial: true },
+					theme,
+				),
+				"retrying 3/10",
+			),
+		);
+
+		expect(row).toMatch(/retrying 3\/10 in [\d.]+s: 400 Your credit balance is too low/);
+		expect(row).not.toContain('{"type"');
+	});
+
+	it("names the provider's reason when a subagent's retries ran out", async () => {
+		const theme = (await getThemeByName("dark"))!;
+		const progress = runningProgress({
+			status: "failed",
+			retryFailure: { attempt: 10, errorMessage: creditBalanceError },
+		});
+		const row = Bun.stripANSI(
+			findRow(
+				taskToolRenderer.renderResult(
+					{ content: [], details: detailsFor(progress) },
+					{ expanded: false, isPartial: true },
+					theme,
+				),
+				"auto-retry gave up",
+			),
+		);
+
+		expect(row).toContain("auto-retry gave up after 10 attempts: 400 Your credit balance is too low");
+	});
+
+	it("names the provider reason after a subagent's retries run out", async () => {
+		const theme = (await getThemeByName("dark"))!;
+		const text = Bun.stripANSI(
+			taskToolRenderer
+				.renderResult(
+					{
+						content: [],
+						details: {
+							projectAgentsDir: null,
+							totalDurationMs: 0,
+							results: [
+								finishedResult({
+									exitCode: 1,
+									error: creditBalanceError,
+									retryFailure: { attempt: 10, errorMessage: creditBalanceError },
+								}),
+							],
+						},
+					},
+					{ expanded: false, isPartial: false },
+					theme,
+				)
+				.render(120)
+				.join("\n"),
+		);
+
+		expect(text).toContain("auto-retry gave up after 10 attempts: 400 Your credit balance is too low");
+		expect(text).not.toContain("invalid_request_error");
+	});
 });
 
 describe("task result detail-less state", () => {

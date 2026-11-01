@@ -1,4 +1,5 @@
 import { extractRetryHint } from "@oh-my-pi/pi-utils/fetch-retry";
+import { parseHttpErrorBody } from "./http-body";
 
 /**
  * Rate limit reason classification and backoff calculation utilities.
@@ -151,6 +152,56 @@ function parseJsonBody(errorMessage: string): Record<string, unknown> | undefine
 	} catch {
 		return undefined;
 	}
+}
+
+// Anthropic answers `invalid_request_error` "Your credit balance is too low to
+// access the Anthropic API. …" while the account's prepaid balance is empty,
+// either as the HTTP 400 body or, after a 200, as an in-stream `error` event
+// (rendered `Anthropic stream error (<type>): <message>`). Observed clearing
+// on its own within minutes once the balance was topped up again, so a later
+// replay of the same request can succeed. Every fact below is required: the
+// 400 whose whole body is the error envelope (or the stream event), the error
+// type, and the leading sentence. A malformed request, an unsupported
+// parameter or a too-long prompt is also a 400 `invalid_request_error`, and
+// those replay identically.
+const CREDIT_BALANCE_TOO_LOW_PREFIX = "Your credit balance is too low";
+const CREDIT_BALANCE_STREAM_ERROR_PREFIX = `Anthropic stream error (invalid_request_error): ${CREDIT_BALANCE_TOO_LOW_PREFIX}`;
+// At least 30 s between retries, so the default ten retries (retry.maxRetries)
+// wait at least 5 minutes. The 30 s floor is a heuristic from two observed
+// outages, not a measured maximum outage. Up to 7.5 s of jitter on top keeps
+// sessions that failed together from retrying together.
+const CREDIT_BALANCE_BACKOFF_MS = 30 * 1000;
+const CREDIT_BALANCE_JITTER_MS = 7.5 * 1000;
+
+/** Whether an error is Anthropic's empty-prepaid-balance rejection, which lifts once the balance is refilled. */
+export function isCreditBalanceTooLow(status: number | undefined, message: string | undefined): boolean {
+	if (!message) return false;
+	if (message.startsWith(CREDIT_BALANCE_STREAM_ERROR_PREFIX)) return true;
+	const response = parseHttpErrorBody(message, status);
+	if (response?.status !== 400) return false;
+	const error = asRecord(response.body.error);
+	return (
+		response.body.type === "error" &&
+		error?.type === "invalid_request_error" &&
+		typeof error.message === "string" &&
+		error.message.startsWith(CREDIT_BALANCE_TOO_LOW_PREFIX)
+	);
+}
+
+/**
+ * Wait before retrying an {@link isCreditBalanceTooLow} rejection. The 30 s
+ * minimum keeps the default budget at five minutes; jitter above it spreads
+ * simultaneous failures. When a configured cap permits the minimum but not
+ * the jitter, use the cap. When the cap is below the minimum, return the
+ * minimum so turn recovery reports the existing fail-fast cap error.
+ */
+export function calculateCreditBalanceBackoffMs(minimumMs = CREDIT_BALANCE_BACKOFF_MS, maxDelayMs = 0): number {
+	if (maxDelayMs > 0 && maxDelayMs < minimumMs) return minimumMs;
+	const maximumMs =
+		maxDelayMs > 0
+			? Math.min(minimumMs + CREDIT_BALANCE_JITTER_MS, maxDelayMs)
+			: minimumMs + CREDIT_BALANCE_JITTER_MS;
+	return minimumMs + Math.floor(Math.random() * (maximumMs - minimumMs));
 }
 
 /**

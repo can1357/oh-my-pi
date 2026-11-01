@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed an Anthropic "Your credit balance is too low" rejection ending every in-flight turn and subagent at once: the session now retries it about every 30 seconds (with jitter) for at least 5 minutes of backoff before it returns the original error, and `omp -p` prints each wait on stderr ([#17656](https://github.com/can1357/oh-my-pi/pull/17656) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.14.2] - 2026-10-31
 
 ### Added

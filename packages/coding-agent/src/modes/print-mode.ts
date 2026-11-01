@@ -7,8 +7,9 @@
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
+import { httpErrorReason } from "@oh-my-pi/pi-ai/error/http-body";
 import { presentNarrationAsAnswer } from "@oh-my-pi/pi-ai/utils/narration";
-import { $flag, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
+import { $flag, formatDuration, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
 import { HINDSIGHT_NOTICE_SOURCE } from "../hindsight/state";
 import type { MCPManager } from "../mcp/manager";
 import { resolveMCPTimeoutMs } from "../mcp/timeout";
@@ -360,6 +361,12 @@ async function runPrintModeCore(
 		// In JSON mode, output all events
 		if (mode === "json") {
 			writeStdoutLine(`${JSON.stringify(printableEvent(event))}\n`);
+		} else if (event.type === "auto_retry_start") {
+			// Text mode prints only the answer on stdout. Name the wait on stderr
+			// in the terminal's words, or a backoff looks like a hung run.
+			writeStderrLine(
+				`Retrying (${event.attempt}/${event.maxAttempts}) in ${formatDuration(event.delayMs)}: ${singleLine(httpErrorReason(event.errorMessage))}`,
+			);
 		} else if (
 			event.type === "notice" &&
 			(event.source === CREDENTIAL_DISABLED_NOTICE_SOURCE ||

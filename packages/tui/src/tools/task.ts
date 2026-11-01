@@ -1,4 +1,5 @@
 import type { Usage } from "@oh-my-pi/pi-ai";
+import { httpErrorReason } from "@oh-my-pi/pi-ai/error/http-body";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { ThemeColor } from "../theme/theme";
 import type { ConfiguredThinkingLevel } from "../render/render-utils";
@@ -816,12 +817,12 @@ function renderAgentProgress(
 		const waitLabel = remainingMs > 0 ? `in ${formatDuration(remainingMs)}` : "now";
 		const summary =
 			`retrying ${progress.retryState.attempt}/${progress.retryState.maxAttempts} ${waitLabel}: ` +
-			previewLine(sanitizeText(progress.retryState.errorMessage), 60);
+			previewLine(sanitizeText(httpErrorReason(progress.retryState.errorMessage)), 60);
 		lines.push(`${continuePrefix}${theme.tree.hook} ${theme.fg("warning", summary)}`);
 	} else if (progress.retryFailure && progress.status !== "running") {
 		const summary = `auto-retry gave up after ${progress.retryFailure.attempt} attempt${
 			progress.retryFailure.attempt === 1 ? "" : "s"
-		}: ${previewLine(sanitizeText(progress.retryFailure.errorMessage), 80)}`;
+		}: ${previewLine(sanitizeText(httpErrorReason(progress.retryFailure.errorMessage)), 80)}`;
 		lines.push(`${continuePrefix}${theme.tree.hook} ${theme.fg("error", summary)}`);
 	}
 
@@ -1269,8 +1270,18 @@ function renderAgentResult(
 		}
 	}
 
-	// Error message
-	if (result.error && (!success || mergeFailed) && (!aborted || result.error !== result.abortReason)) {
+	// A retry failure is the task's terminal reason. Show its decoded provider
+	// message instead of the generic result error, which often starts with the
+	// same raw JSON envelope.
+	if (result.retryFailure) {
+		const reason = `auto-retry gave up after ${result.retryFailure.attempt} ${pluralize(
+			"attempt",
+			result.retryFailure.attempt,
+		)}: ${httpErrorReason(result.retryFailure.errorMessage)}`;
+		lines.push(
+			`${continuePrefix}${theme.fg("error", clipCollapsed(flattenLine(sanitizeText(reason)), 80, expanded))}`,
+		);
+	} else if (result.error && (!success || mergeFailed) && (!aborted || result.error !== result.abortReason)) {
 		lines.push(
 			`${continuePrefix}${theme.fg(mergeFailed ? "warning" : "error", clipCollapsed(flattenLine(sanitizeText(result.error)), 70, expanded))}`,
 		);
@@ -1919,7 +1930,7 @@ function describeProgressAgent(progress: AgentProgress, state: AgentDescribeStat
 					max: progress.retryState.maxAttempts,
 					age: Math.max(0, nowMs - progress.retryState.startedAtMs),
 					delay: progress.retryState.delayMs,
-					error: plainText(progress.retryState.errorMessage),
+					error: plainText(httpErrorReason(progress.retryState.errorMessage)),
 				}
 			: null;
 	return agentNode(
@@ -1954,7 +1965,7 @@ function describeProgressAgent(progress: AgentProgress, state: AgentDescribeStat
 				? text(
 						[
 							span(
-								`auto-retry gave up after ${progress.retryFailure.attempt} ${pluralize("attempt", progress.retryFailure.attempt)}: ${plainText(progress.retryFailure.errorMessage)}`,
+								`auto-retry gave up after ${progress.retryFailure.attempt} ${pluralize("attempt", progress.retryFailure.attempt)}: ${plainText(httpErrorReason(progress.retryFailure.errorMessage))}`,
 								"error",
 							),
 						],
@@ -2012,7 +2023,9 @@ function describeResultAgent(result: SingleResult, state: AgentDescribeState, de
 			aborted && result.abortReason ? errorLine(result.abortReason) : undefined,
 			warning ? errorLine(warning, "warning") : undefined,
 			result.error ? errorLine(result.error) : undefined,
-			result.retryFailure ? errorLine(`auto-retry gave up: ${result.retryFailure.errorMessage}`) : undefined,
+			result.retryFailure
+				? errorLine(`auto-retry gave up: ${httpErrorReason(result.retryFailure.errorMessage)}`)
+				: undefined,
 			// The structured result is the agent's answer: its containers open one level, as in the fallback tree.
 			structured !== undefined
 				? describeJsonValue(structured, { native: state.json, open: 1 })
