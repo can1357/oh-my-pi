@@ -16,8 +16,9 @@ import {
 	getFailureRetryAfterMs,
 	getRetryAfterMsFromHeaders,
 	retryWaitHeaders,
-	transportRetryBounds,
+	retryWaitBounds,
 	longestProviderRetryHint,
+	providerFailureWaitMs,
 	providerRetryWaitMs,
 } from "@oh-my-pi/pi-ai/utils/retry-after";
 
@@ -169,7 +170,7 @@ describe("wire restatement guards", () => {
 	});
 
 	it("keeps the transport default when the cap is NaN", () => {
-		expect(transportRetryBounds(Number.NaN, 60_000).maxDelayMs).toBe(60_000);
+		expect(retryWaitBounds(Number.NaN, 60_000).maxDelayMs).toBe(60_000);
 	});
 });
 
@@ -197,5 +198,48 @@ describe("the header's wait beside any body text", () => {
 		// The header's wait reaches readers structured and is never written into
 		// the text, so whatever the body says, the header's 9 s is kept.
 		expect(providerRetryWaitMs("anthropic", message, getRetryAfterMsFromHeaders(headers))).toBe(9000);
+	});
+});
+
+describe("providerFailureWaitMs", () => {
+	it("reads a thrown failure's own header wait beside its message's relative wait, the longer winning", () => {
+		const error = Object.assign(new Error("429 rate limited, try again in 2s"), { headers: { "retry-after": "9" } });
+		expect(providerFailureWaitMs("anthropic", error)).toBe(9_000);
+		expect(providerFailureWaitMs("anthropic", error, { message: "429 rate limited, try again in 20s" })).toBe(20_000);
+	});
+
+	it("takes a header wait the caller already holds over the failure's own headers", () => {
+		// A credential rotation or an advisor holding the failed message's
+		// `errorRetryAfterMs` passes it; the thrown error's headers do not override it.
+		const error = Object.assign(new Error("429"), { headers: { "retry-after": "9" } });
+		expect(providerFailureWaitMs("anthropic", error, { retryAfterMs: 1_000 })).toBe(1_000);
+	});
+});
+
+describe("an explicit zero wait beside a window reset", () => {
+	it("is read as retry now, not as the window's end", () => {
+		// `fetchWithRetry` reads `Retry-After: 0` as an immediate retry; the
+		// failed message and the transport's decline must read the same.
+		const headers = { "retry-after": "0", "x-ratelimit-reset": "7200" };
+		expect(getRetryAfterMsFromHeaders(headers)).toBe(0);
+		expect(getRetryAfterMsFromHeaders({ "retry-after-ms": "0", "x-ratelimit-reset-ms": "7200000" })).toBe(0);
+		expect(retryWaitBounds(undefined, 60_000).declines(headers)).toBe(false);
+	});
+});
+
+describe("a Retry-After joined from duplicate header lines", () => {
+	it.each([
+		["retry-after", "9, 120", 120_000],
+		["retry-after", "120, 9", 120_000],
+		["retry-after-ms", "100, 9000", 9_000],
+	] as [string, string, number][])("%s: %s reads the longest part", (name, value, expected) => {
+		expect(getRetryAfterMsFromHeaders({ [name]: value })).toBe(expected);
+	});
+
+	it("still reads an HTTP-date, whose own comma is not a separator", () => {
+		const date = new Date(Date.now() + 90_000).toUTCString();
+		const waitMs = getRetryAfterMsFromHeaders({ "retry-after": date });
+		expect(waitMs).toBeGreaterThan(85_000);
+		expect(waitMs).toBeLessThanOrEqual(90_000);
 	});
 });

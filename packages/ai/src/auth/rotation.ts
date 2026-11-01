@@ -1,7 +1,7 @@
 import { scheduler } from "node:timers/promises";
 import * as AIError from "../error";
 import { isUsageLimitOutcome } from "../error/rate-limit";
-import { getHeadersFromError, getRetryAfterMsFromHeaders, providerRetryWaitMs } from "../utils/retry-after";
+import { providerFailureWaitMs } from "../utils/retry-after";
 import type { CredentialRankingContext, CredentialRankingStrategy } from "../usage";
 import type { RankingStrategyResolver } from "../usage/registry";
 import { raceSignal } from "./abort";
@@ -422,11 +422,7 @@ export class RateLimits implements LimitsApi {
 			// will reset in 13 minutes") into the block duration so the credential
 			// is not reselected and hammered while the cap remains active. The
 			// header's wait comes from the response object, never from the text.
-			const retryAfterMs = providerRetryWaitMs(
-				provider,
-				message,
-				options?.retryAfterMs ?? getRetryAfterMsFromHeaders(getHeadersFromError(error)),
-			);
+			const retryAfterMs = providerFailureWaitMs(provider, error, { message, retryAfterMs: options?.retryAfterMs });
 			const mark = await this.markReached(provider, sessionId, {
 				retryAfterMs,
 				providerTimed: retryAfterMs !== undefined,

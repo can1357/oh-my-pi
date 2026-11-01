@@ -1,5 +1,5 @@
 import { retryResetTimezoneOffsetFor } from "@oh-my-pi/pi-catalog/compat/behavior";
-import { extractRetryHint, longestRetryHint, parseRetryAfter } from "@oh-my-pi/pi-utils";
+import { extractRetryHint, longestRetryHint, parseRetryAfterHeaderMs } from "@oh-my-pi/pi-utils";
 
 export type HeadersLike = Headers | Record<string, string | undefined> | undefined | null;
 
@@ -33,8 +33,8 @@ export function extractProviderRetryHint(
  * The wait a failure names, for every caller that keeps a route or a credential
  * closed for it — a credential block, a usage-limit mark, a one-shot retry, the
  * session's retry delay. The response headers' wait, passed in structured
- * (`AssistantMessage.errorRetryAfterMs`, or a thrown error's headers through
- * {@link getRetryAfterMsFromHeaders}), outranks any date the message's text
+ * (`AssistantMessage.errorRetryAfterMs`; for a thrown error, read through
+ * {@link providerFailureWaitMs}), outranks any date the message's text
  * states: beside it, only the text's relative waits count, and the longer of
  * the two wins. Without a header wait, the first wait the text names
  * ({@link extractProviderRetryHint}). The header's wait is taken from the
@@ -147,29 +147,62 @@ export function getFailureRetryAfterMs(error: unknown, headers: FailureResponseH
 	);
 }
 
-/** How a transport's own `fetchWithRetry` loop keeps to the caller's cap; see {@link transportRetryBounds}. */
-export interface TransportRetryBounds {
-	/** `fetchWithRetry`'s `maxDelayMs`: no retry sleep exceeds it. */
-	maxDelayMs: number;
-	/** Whether `response`'s headers name a wait longer than {@link maxDelayMs}: hand the refusal back at once. */
-	declines(response: Response): boolean;
+/** What {@link providerFailureWaitMs} reads beside the failure itself. */
+export interface ProviderFailureWaitOptions {
+	/** The failure's text, when the caller derives it its own way; `undefined` reads no text. Defaults to {@link errorMessageText}. */
+	message?: string | undefined;
+	/**
+	 * A header wait the caller already holds from the response object (a failed
+	 * message's `errorRetryAfterMs`); it is taken over the failure's own headers.
+	 */
+	retryAfterMs?: number;
+	/** An accepted response's headers, when the failure arrived inside one. */
+	streamResponseHeaders?: HeadersLike;
 }
 
 /**
- * The bounds a transport-level retry loop (`fetchWithRetry`) takes from the
- * caller's `maxRetryDelayMs` (`StreamOptions`), so a transport retries a 429 or
- * 5xx exactly when the provider loops above it would. A retry whose response
- * headers name a longer wait than the cap is declined and the refusal surfaces
- * at once; the headers are read as `finalize` reads them
- * ({@link getRetryAfterMsFromHeaders}), so the transport and the failed
- * message's `errorRetryAfterMs` judge one wait. A wait within the cap is
- * honored. A non-positive cap disables the bound, as the option documents; an
- * absent one keeps the transport's own `defaultMaxDelayMs`.
+ * The wait a thrown failure states, read as {@link providerRetryWaitMs} reads
+ * it: the header wait (`options.retryAfterMs`, else the failure's own headers
+ * and an accepted response's, {@link getFailureRetryAfterMs}) beside the
+ * relative waits its text names, the longer winning. For a caller holding a
+ * thrown error rather than a failed message: a credential rotation, the auth
+ * gateway's usage-limit block, an advisor's retry.
  */
-export function transportRetryBounds(
-	maxRetryDelayMs: number | undefined,
-	defaultMaxDelayMs: number,
-): TransportRetryBounds {
+export function providerFailureWaitMs(
+	provider: string | undefined,
+	error: unknown,
+	options: ProviderFailureWaitOptions = {},
+): number | undefined {
+	return providerRetryWaitMs(
+		provider,
+		Object.hasOwn(options, "message") ? options.message : errorMessageText(error),
+		options.retryAfterMs ?? getFailureRetryAfterMs(error, { streamResponseHeaders: options.streamResponseHeaders }),
+	);
+}
+
+/** How a retry loop keeps to the caller's cap; see {@link retryWaitBounds}. */
+export interface RetryWaitBounds {
+	/** `fetchWithRetry`'s `maxDelayMs`: no retry sleep exceeds it. */
+	maxDelayMs: number;
+	/**
+	 * Whether a stated wait is longer than {@link maxDelayMs}, so the failure is
+	 * handed back at once instead of retried. `wait` is the wait itself, or the
+	 * headers that state it, read by {@link getRetryAfterMsFromHeaders}.
+	 */
+	declines(wait: number | HeadersLike): boolean;
+}
+
+/**
+ * The bounds a retry loop takes from the caller's `maxRetryDelayMs`
+ * (`StreamOptions`), so a transport's own `fetchWithRetry` retries a 429 or 5xx
+ * exactly when the provider loops above it would. A retry whose stated wait is
+ * longer than the cap is declined and the refusal surfaces at once. Headers are
+ * read as `finalize` reads them ({@link getRetryAfterMsFromHeaders}), so the
+ * transport and the failed message's `errorRetryAfterMs` judge one wait. A wait
+ * within the cap is honored. A non-positive cap disables the bound, as the
+ * option documents; an absent one keeps the caller's `defaultMaxDelayMs`.
+ */
+export function retryWaitBounds(maxRetryDelayMs: number | undefined, defaultMaxDelayMs: number): RetryWaitBounds {
 	const maxDelayMs =
 		maxRetryDelayMs === undefined || Number.isNaN(maxRetryDelayMs)
 			? defaultMaxDelayMs
@@ -178,8 +211,8 @@ export function transportRetryBounds(
 				: Number.POSITIVE_INFINITY;
 	return {
 		maxDelayMs,
-		declines: response => {
-			const waitMs = getRetryAfterMsFromHeaders(response.headers);
+		declines: wait => {
+			const waitMs = typeof wait === "number" ? wait : getRetryAfterMsFromHeaders(wait);
 			return waitMs !== undefined && waitMs > maxDelayMs;
 		},
 	};
@@ -188,10 +221,12 @@ export function transportRetryBounds(
 /**
  * The wait a response's headers state. `retry-after-ms` and `Retry-After` are
  * the server telling the client how long to wait, and when either is present
- * it is the answer. `x-ratelimit-reset[-ms]` says when a rate window ends — a
- * bound on when capacity returns, not an instruction — and is read only when
- * no explicit wait is stated: a "retry in 1 second" beside a window that ends
- * in an hour is one second.
+ * it is the answer, `0` (retry now) included. `x-ratelimit-reset[-ms]` says
+ * when a rate window ends — a bound on when capacity returns, not an
+ * instruction — and is read only when no explicit wait is stated: a "retry in
+ * 1 second" beside a window that ends in an hour is one second, and a
+ * `Retry-After: 0` beside it is an immediate retry. Each value is read as
+ * `fetchWithRetry` reads it ({@link parseRetryAfterHeaderMs}).
  */
 export function getRetryAfterMsFromHeaders(headers: HeadersLike): number | undefined {
 	if (!headers) return undefined;
@@ -204,13 +239,14 @@ export function getRetryAfterMsFromHeaders(headers: HeadersLike): number | undef
 	);
 }
 
-/** `retry-after-ms` and `Retry-After`: the headers that tell the client to wait. */
+/** `retry-after-ms` and `Retry-After`: the headers that tell the client to wait, rounded up to whole milliseconds. */
 function getExplicitRetryAfterMsFromHeaders(headers: HeadersLike): number | undefined {
 	if (!headers) return undefined;
-	return longestWait(
-		parseRetryAfterMsHeader(getHeaderValue(headers, "retry-after-ms")),
-		parseRetryAfterHeader(getHeaderValue(headers, "retry-after")),
+	const longest = longestWait(
+		parseRetryAfterHeaderMs(getHeaderValue(headers, "retry-after-ms"), "ms"),
+		parseRetryAfterHeaderMs(getHeaderValue(headers, "retry-after"), "s"),
 	);
+	return longest === undefined ? undefined : Math.ceil(longest);
 }
 
 function longestWait(...waits: (number | undefined)[]): number | undefined {
@@ -250,21 +286,6 @@ function getHeaderValue(headers: Headers | Record<string, string | undefined>, n
 		}
 	}
 	return undefined;
-}
-
-/** `retry-after-ms` (Anthropic-style): a plain millisecond delta. */
-function parseRetryAfterMsHeader(value: string | undefined): number | undefined {
-	if (!value) return undefined;
-	const ms = Number(value.trim());
-	if (!Number.isFinite(ms) || ms <= 0) return undefined;
-	return Math.ceil(ms);
-}
-
-/** The header's wait, read by the shared `parseRetryAfter`; a wait of zero names none here. */
-function parseRetryAfterHeader(value: string | undefined): number | undefined {
-	if (!value) return undefined;
-	const ms = parseRetryAfter(value);
-	return ms === undefined || ms <= 0 ? undefined : Math.ceil(ms);
 }
 
 function parseResetHeader(value: string | undefined, unit: "ms" | "s"): number | undefined {

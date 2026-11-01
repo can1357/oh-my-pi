@@ -15,7 +15,7 @@ import { classifyGatewayError, type GatewayErrorClassification } from "../error/
 import { isUsageLimitOutcome } from "../error/rate-limit";
 import type { Api, FetchImpl, Model, Usage } from "../types";
 import type { ClientUsageIdentity } from "../usage";
-import { getHeadersFromError, getRetryAfterMsFromHeaders, providerRetryWaitMs } from "../utils/retry-after";
+import { providerFailureWaitMs } from "../utils/retry-after";
 import type { AuthGatewayClientScope } from "./clients";
 import type { AuthGatewayServerOptions } from "./types";
 
@@ -179,11 +179,7 @@ async function refreshGatewayApiKeyAfterAuthError(
 	const message = error instanceof Error ? error.message : String(error);
 	const status = extractHttpStatusFromError(error);
 	if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) {
-		const retryAfterMs = providerRetryWaitMs(
-			provider,
-			message,
-			getRetryAfterMsFromHeaders(getHeadersFromError(error)),
-		);
+		const retryAfterMs = providerFailureWaitMs(provider, error, { message });
 		const { switched, retryAtMs } = await storage.limits.markReached(provider, sessionId, {
 			retryAfterMs,
 			providerTimed: retryAfterMs !== undefined,
