@@ -118,6 +118,7 @@ import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import { formatUsageResetWindow } from "@oh-my-pi/pi-tui/overlays/usage-display";
 import { loadAdvisorTranscriptCosts } from "../advisor";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager } from "../async";
+import type { JobWidgetRegistry } from "../job-widgets/types";
 import { classifyAutoPrewalk } from "../auto-prewalk/classifier";
 import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
@@ -497,13 +498,15 @@ const TITLE_FORK_TIMEOUT_MS = 15_000;
 /** Cap on the judgment that decides whether a `title.refreshAfterPrompts` check regenerates the title. */
 const TITLE_DRIFT_JUDGE_TIMEOUT_MS = 15_000;
 
-/** The public summary of `job` (see {@link AsyncJobSnapshotItem}). */
-function jobSnapshotItem(job: AsyncJob): AsyncJobSnapshotItem {
+/** The public summary of `job` (see {@link AsyncJobSnapshotItem}); its caption shows only while widgets are on. */
+function jobSnapshotItem(job: AsyncJob, widgets: JobWidgetRegistry | undefined): AsyncJobSnapshotItem {
 	return {
 		id: job.id,
 		type: job.type,
 		status: job.status,
 		label: job.label,
+		intent: job.intent,
+		caption: widgets?.caption(job),
 		command: job.process?.command,
 		startTime: job.startTime,
 		endTime: job.endTime,
@@ -3303,8 +3306,10 @@ export class AgentSession implements SettingsScope {
 		const manager = this.#asyncJobManager;
 		if (!manager) return null;
 		const ownerFilter = this.#agentId ? { ownerId: this.#agentId } : undefined;
-		const running = manager.getRunningJobs(ownerFilter).map(jobSnapshotItem);
-		const recent = manager.getRecentJobs(options?.recentLimit ?? 5, ownerFilter).map(jobSnapshotItem);
+		const running = manager.getRunningJobs(ownerFilter).map(job => jobSnapshotItem(job, manager.widgets));
+		const recent = manager
+			.getRecentJobs(options?.recentLimit ?? 5, ownerFilter)
+			.map(job => jobSnapshotItem(job, manager.widgets));
 		const delivery = manager.getDeliveryState(ownerFilter);
 		return { running, recent, delivery };
 	}
@@ -3350,11 +3355,25 @@ export class AgentSession implements SettingsScope {
 			}
 		}
 		return {
-			running: running.map(jobSnapshotItem),
-			recent: recent.map(jobSnapshotItem),
+			running: running.map(job => jobSnapshotItem(job, manager.widgets)),
+			recent: recent.map(job => jobSnapshotItem(job, manager.widgets)),
 			rootId,
 			agents: [...agents.values()],
 		};
+	}
+
+	/**
+	 * Asks for the captions of the running commands in this agent's job tree
+	 * (see {@link getAsyncJobTree}), for a listing that prints them (`/jobs full`).
+	 */
+	requestJobCaptions(): void {
+		const manager = this.#asyncJobManager;
+		const widgets = manager?.widgets;
+		if (!manager || !widgets) return;
+		const parents = this.#jobTreeParents();
+		for (const job of manager.getRunningJobs()) {
+			if (this.#inJobTree(job, parents)) widgets.requestCaption(job);
+		}
 	}
 
 	/**

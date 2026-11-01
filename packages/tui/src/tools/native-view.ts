@@ -8,7 +8,7 @@ import type { TspSpan, TspText, TspTone } from "@oh-my-pi/pi-wire";
 import { ansi, code, compact, keyed, node, row, span, text } from "../native/describe";
 import type { NativeChild, NativeNode } from "../native/node";
 import { tryFileUri } from "../render/hyperlink";
-import { type ParsedDiagnostic, parseDiagnosticMessage, shortenPath } from "../render/render-utils";
+import { type ParsedDiagnostic, parseDiagnosticMessage, pathNameStart, shortenPath } from "../render/render-utils";
 import { plainText } from "../native/spans";
 import type { FileDiagnosticsResult } from "./lsp";
 import { formatArtifactErrorNotice, formatTruncationMetaNotice, type OutputMeta } from "./output-meta";
@@ -74,11 +74,10 @@ export function fileRow(
 	} = {},
 ): NativeNode {
 	const isDir = filePath.endsWith("/");
-	const bare = isDir ? filePath.slice(0, -1) : filePath;
-	const cut = bare.lastIndexOf("/") + 1;
+	const cut = pathNameStart(filePath);
 	const spans: TspSpan[] = [];
-	if (cut > 0) spans.push(span(bare.slice(0, cut), "dim"));
-	spans.push(span(`${bare.slice(cut) || "…"}${isDir ? "/" : ""}`, "strong", p.href ? { href: p.href } : undefined));
+	if (cut > 0) spans.push(span(filePath.slice(0, cut), "dim"));
+	spans.push(span(filePath.slice(cut) || "…", "strong", p.href ? { href: p.href } : undefined));
 	if (p.range) spans.push(span(p.range, "muted"));
 	const children: NativeChild[] = [
 		p.lead ?? node("icon", { name: p.icon ?? (isDir ? "folder" : "file"), tone: p.tone }),
