@@ -346,9 +346,11 @@ impl JobManager {
 	/// * `job` - The job to add.
 	#[allow(clippy::missing_panics_doc, reason = "push() guarantees the vector length is >= 1")]
 	pub fn add_as_current(&mut self, mut job: Job) -> &Job {
-		// As in Bash, the current job becomes the previous one, the previous
-		// one loses its mark, and the new job takes the number after the
-		// highest one in use.
+		// As in Bash, a new job first takes the ended jobs `jobs` reported out
+		// of the table. Then the current job becomes the previous one, the
+		// previous one loses its mark, and the new job takes the number after
+		// the highest one in use.
+		self.remove_reported_jobs();
 		for j in &mut self.jobs {
 			match j.annotation {
 				JobAnnotation::Current => j.annotation = JobAnnotation::Previous,
@@ -524,10 +526,13 @@ impl JobManager {
 			let mut found_candidate = false;
 			let mut i = 0;
 			while i != self.jobs.len() {
-				if !selectors.is_empty()
-					&& !selectors
-						.iter()
-						.any(|selector| self.jobs[i].matches_selector(*selector))
+				// A job `jobs` reported has told its status, so, as in Bash, it
+				// is not one to wait for.
+				if self.jobs[i].is_reported()
+					|| (!selectors.is_empty()
+						&& !selectors
+							.iter()
+							.any(|selector| self.jobs[i].matches_selector(*selector)))
 				{
 					i += 1;
 					continue;
@@ -598,6 +603,35 @@ impl JobManager {
 			!job.tasks.is_empty()
 		});
 		Ok(())
+	}
+
+	/// Records that `jobs` showed the job `id` names in its current state, as
+	/// Bash does for each job it lists. `jobs -n` then leaves the job out until
+	/// its state changes. A job shown as ended counts as reported: `wait -n`
+	/// passes over it, and the next listing of every job, or the next job to
+	/// start, takes it out of the table. A job shown while it still runs is
+	/// not reported, so `wait -n` returns it once it ends.
+	pub fn mark_reported(&mut self, id: usize) {
+		if let Some(job) = self.jobs.iter_mut().find(|job| job.id == id) {
+			job.listed_state = Some(job.state.clone());
+		}
+	}
+
+	/// Takes the ended jobs `jobs` reported out of the table, as Bash does
+	/// before it lists every job and before a new job starts. Each one's pid
+	/// keeps its status for a later `wait` on that pid.
+	pub fn remove_reported_jobs(&mut self) {
+		let mut index = 0;
+		while index < self.jobs.len() {
+			if !self.jobs[index].is_reported() {
+				index += 1;
+				continue;
+			}
+			let mut job = self.remove(index);
+			if let Ok(result) = job.take_completed_result() {
+				self.report(&job, u8::from(result.exit_code));
+			}
+		}
 	}
 
 	/// Takes the job `selector` names out of job control, as `disown` does: no
@@ -803,6 +837,12 @@ pub struct Job {
 	/// The current operational state of the job.
 	pub state: JobState,
 
+	/// The state `jobs` last showed the job in, if it showed it at all. A job
+	/// shown as ended is reported: as in Bash, `wait -n` passes over it, while
+	/// `wait` on its job spec or pid still finds it until the next listing of
+	/// every job, or the next job to start, takes it out of the table.
+	listed_state: Option<JobState>,
+
 	/// The pid of a job that runs inside the shell process, and what `kill`
 	/// reaches of it; `None` for a job of external processes.
 	in_process: Option<InProcess>,
@@ -859,6 +899,7 @@ impl Job {
 			annotation: JobAnnotation::None,
 			command_line,
 			state,
+			listed_state: None,
 			in_process: None,
 		}
 	}
@@ -918,6 +959,20 @@ impl Job {
 	/// Returns the annotation of the job.
 	pub fn annotation(&self) -> JobAnnotation {
 		self.annotation.clone()
+	}
+
+	/// Returns whether `jobs` has shown the job since it ended.
+	pub const fn is_reported(&self) -> bool {
+		matches!(self.listed_state, Some(JobState::Done))
+	}
+
+	/// Returns whether the job's state differs from the one `jobs` last
+	/// showed, which is what `jobs -n` lists. A job `jobs` never showed has
+	/// changed.
+	pub fn changed_since_listed(&self) -> bool {
+		self.listed_state
+			.as_ref()
+			.is_none_or(|listed| std::mem::discriminant(listed) != std::mem::discriminant(&self.state))
 	}
 
 	/// Returns the command name of the job.

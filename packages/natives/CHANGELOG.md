@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed the bash tool's `wait "$!"` failing with `no such job` instead of waiting when the backgrounded command was a function, subshell or brace group: `$!` now holds an id for a job the shell runs itself, `jobs -p` and `jobs -l` in that shell show it, and `wait`, `kill` and the newly implemented `disown` accept it; it is not an operating-system process id, so `ps`, `/proc` and `kill` from another process will not find it ([#17678](https://github.com/can1357/oh-my-pi/pull/17678) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the bash tool's `jobs` showing a background job that had already ended as `Running`, listing it again on later calls, and leaving it for `wait -n` after reporting it; `jobs` (with `-n`, `-p`, `-r`, `-s` or job specs too) now reports an ended job once, and `jobs -n` lists every job whose state changed, as Bash does ([#17712](https://github.com/can1357/oh-my-pi/pull/17712) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 

@@ -485,6 +485,9 @@ async fn run_shell_session(
 					.await?,
 				),
 			};
+			// Bash removes the jobs a previous input line reported before it
+			// reads this one. Their pids still retain their statuses for `wait`.
+			core.shell.jobs_mut().remove_reported_jobs();
 			abort_state.set(at).await;
 			let result =
 				run_shell_command(core, &run_config, on_chunk, tokio_cancel, spawn_registry).await;

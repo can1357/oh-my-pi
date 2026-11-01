@@ -419,3 +419,252 @@ fn dropping_the_shell_stops_its_background_loops() {
 		assert!(stopped, "`{suffix}`: the loop kept running 5 s after its shell was dropped");
 	}
 }
+
+/// Defines `$o`, a file a `jobs` listing is written to, and `kind`, which
+/// prints what the listing in `$o` was: `full` (a `[N]` line), `pid` (a bare
+/// pid) or `none`. The output format differs from Bash (`Done` against
+/// `Exit 1`), so rows compare the kind of listing rather than its text.
+const LISTING_KIND: &str = r#"o=$(mktemp); kind(){ line=; read -r line < "$o"; case $line in "["*) echo full;; "") echo none;; *) echo pid;; esac; }; "#;
+
+/// Runs each `(tail, bash output)` row twice: after an external job that
+/// exited with status 1, then after an in-process one. Both have ended before
+/// the tail runs, and nothing has reported them yet. A foreground process
+/// waits for the external job to exit; the shell's runtime learns of that
+/// exit no later than of the foreground process's own. A `sleep` in the loop
+/// that waits for the in-process job lets the job's task run.
+///
+/// Each expected output is what Bash 5.2.21 prints when it reads the script
+/// from stdin or a file, as a session that runs one command after another
+/// does. Plain `bash -c` differs in the rows that run `wait %1`, `jobs %1` or
+/// `jobs -p`: it drops an ended job from its table at the next process it
+/// waits for, here the foreground waiter or `sleep`.
+#[cfg(target_os = "linux")]
+async fn assert_bash_outputs_after_an_ended_job(rows: &[(&str, &str)]) {
+	const EXTERNAL: &str = r#"/bin/sh -c 'exit 1' & p=$!; /bin/sh -c 'until [ ! -e "/proc/$1" ] || [ "$(cut -d " " -f 3 "/proc/$1/stat" 2>/dev/null)" = Z ]; do :; done' sh "$p"; "#;
+	const IN_PROCESS: &str =
+		r#"f(){ return 1; }; f & p=$!; while kill -0 "$p" 2>/dev/null; do sleep 0.01; done; "#;
+	let scripts: Vec<(String, &str)> = rows
+		.iter()
+		.flat_map(|&(tail, output)| {
+			[EXTERNAL, IN_PROCESS]
+				.map(|job| (format!(r#"{LISTING_KIND}{job}{tail}; rm -f "$o""#), output))
+		})
+		.collect();
+	let rows: Vec<(&str, &str)> = scripts
+		.iter()
+		.map(|(script, output)| (script.as_str(), *output))
+		.collect();
+	assert_bash_outputs(&rows).await;
+}
+
+/// `jobs` showed a job that had ended during the same command as `Running`:
+/// it read the job states without first collecting the jobs that had ended.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn jobs_shows_a_job_that_ended_as_ended() {
+	assert_bash_outputs_after_an_ended_job(&[(r#"jobs -r; echo "[end]""#, "[end]\n")]).await;
+}
+
+/// Once `jobs` has listed an ended job, the next listing of every job leaves
+/// it out, `jobs -p` and `jobs -n` included. It was listed again on every
+/// call.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn jobs_lists_an_ended_job_once() {
+	assert_bash_outputs_after_an_ended_job(&[
+		(r#"jobs >/dev/null; jobs; echo "[end]""#, "[end]\n"),
+		(r#"jobs >/dev/null; jobs -p; echo "[end]""#, "[end]\n"),
+		(r#"jobs -n > "$o"; kind; jobs -n > "$o"; kind"#, "full\nnone\n"),
+	])
+	.await;
+}
+
+/// `wait -n` passes over an ended job that `jobs`, `jobs -l`, `jobs %1` or
+/// `jobs -n` listed, so with no other job it returns 127; it returned the
+/// listed job again. `jobs -p` prints only pids, `jobs -r` leaves the job
+/// out and `jobs %99` names no job, so none of them reports a status and
+/// `wait -n` still returns the job.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn wait_n_passes_over_a_job_jobs_reported() {
+	assert_bash_outputs_after_an_ended_job(&[
+		(r#"jobs >/dev/null; wait -n; echo "n=$?""#, "n=127\n"),
+		(r#"jobs -l >/dev/null; wait -n; echo "n=$?""#, "n=127\n"),
+		(r#"jobs %1 >/dev/null; wait -n; echo "n=$?""#, "n=127\n"),
+		(r#"jobs -n >/dev/null; wait -n; echo "n=$?""#, "n=127\n"),
+		(r#"jobs -r %1 >/dev/null; wait -n; echo "n=$?""#, "n=127\n"),
+		(r#"jobs -s %1 >/dev/null; wait -n; echo "n=$?""#, "n=127\n"),
+		(r#"jobs -p >/dev/null; wait -n; echo "n=$?""#, "n=1\n"),
+		(r#"jobs -r >/dev/null; wait -n; echo "n=$?""#, "n=1\n"),
+		(r#"jobs %99 2>/dev/null; wait -n; echo "n=$?""#, "n=1\n"),
+	])
+	.await;
+}
+
+/// A listing of every job (`jobs`, `jobs -n`) keeps the ended job it reports
+/// in the table, so `wait %1` still returns its status. Each job spec a
+/// listing resolves takes the reported jobs out after it, so `wait %1` gives
+/// 127 and a second `%1` operand names no job. A job spec that names no job
+/// takes nothing out. Either way the job's pid keeps its status, also after
+/// the next listing of every job. `jobs -n` took the job out at once and
+/// `jobs %1` left it in.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reported_job_leaves_the_table_where_bash_takes_it_out() {
+	const TAIL: &str = r#"wait %1 2>/dev/null; echo "job=$?"; wait "$p"; echo "pid=$?""#;
+	let rows = [
+		(format!("jobs >/dev/null; {TAIL}"), "job=1\npid=1\n"),
+		(format!("jobs -n >/dev/null; {TAIL}"), "job=1\npid=1\n"),
+		(format!("jobs %1 >/dev/null; {TAIL}"), "job=127\npid=1\n"),
+		(format!("jobs -n %1 >/dev/null; {TAIL}"), "job=127\npid=1\n"),
+		(format!("jobs >/dev/null; jobs >/dev/null; {TAIL}"), "job=127\npid=1\n"),
+		(
+			r#"jobs %1 %1 >/dev/null 2>&1; echo "list=$?"; wait "$p"; echo "pid=$?""#.to_owned(),
+			"list=1\npid=1\n",
+		),
+		(
+			r#"jobs >/dev/null; jobs %99 2>/dev/null; echo "list=$?"; wait %1 2>/dev/null; echo "job=$?""#
+				.to_owned(),
+			"list=1\njob=1\n",
+		),
+	];
+	let rows: Vec<(&str, &str)> = rows
+		.iter()
+		.map(|(tail, output)| (tail.as_str(), *output))
+		.collect();
+	assert_bash_outputs_after_an_ended_job(&rows).await;
+}
+
+/// With both `-n` and `-p`, the later option decides: `-pn` lists the changed
+/// job in full and reports it, `-np` prints only its pid, which reports
+/// nothing. Any `-p` printed only the pid.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn the_later_of_jobs_n_and_p_decides_the_listing() {
+	assert_bash_outputs_after_an_ended_job(&[
+		(r#"jobs -pn > "$o"; kind; wait -n; echo "n=$?""#, "full\nn=127\n"),
+		(r#"jobs -p -n > "$o"; kind; wait -n; echo "n=$?""#, "full\nn=127\n"),
+		(r#"jobs -np > "$o"; kind; wait -n; echo "n=$?""#, "pid\nn=1\n"),
+		(r#"jobs -n -p > "$o"; kind; wait -n; echo "n=$?""#, "pid\nn=1\n"),
+	])
+	.await;
+}
+
+/// The next job to start leaves out an ended job `jobs` reported, so it takes
+/// that job's number. It took the next number, and `%1` still named the ended
+/// job.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_job_takes_the_number_of_a_reported_job() {
+	assert_bash_outputs_after_an_ended_job(&[(
+		r#"jobs >/dev/null; /bin/sh -c 'exit 3' & wait %1; echo "jobspec=$?""#,
+		"jobspec=3\n",
+	)])
+	.await;
+}
+
+/// A job-spec listing takes out every job a listing reported, not only the
+/// job it names: after `jobs` reported both ended jobs, `jobs %2` also takes
+/// out `%1`, whose pid keeps its status.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_spec_listing_takes_out_every_reported_job() {
+	const TAIL: &str = r#"jobs >/dev/null; jobs %2 >/dev/null; wait %1 2>/dev/null; echo "job1=$?"; wait "$a"; echo "pid=$?""#;
+	let scripts = [
+		format!(
+			r#"/bin/sh -c 'exit 1' & a=$!; /bin/sh -c 'exit 2' & b=$!; for q in $a $b; do /bin/sh -c 'until [ ! -e "/proc/$1" ] || [ "$(cut -d " " -f 3 "/proc/$1/stat" 2>/dev/null)" = Z ]; do :; done' sh "$q"; done; {TAIL}"#
+		),
+		format!(
+			r#"f(){{ return "$1"; }}; f 1 & a=$!; f 2 & b=$!; while kill -0 $a 2>/dev/null || kill -0 $b 2>/dev/null; do sleep 0.01; done; {TAIL}"#
+		),
+	];
+	assert_bash_outputs(&[(&scripts[0], "job1=127\npid=1\n"), (&scripts[1], "job1=127\npid=1\n")])
+		.await;
+}
+
+/// `jobs -n` lists a job whose state changed since a listing last showed it,
+/// and a job no listing has shown yet counts as changed, also while it runs.
+/// Once a listing has shown a running job, `jobs -n` leaves it out, and
+/// `wait -n` returns it when it ends: a running job is not reported. `jobs
+/// -n` listed only ended jobs.
+#[tokio::test(flavor = "multi_thread")]
+async fn jobs_n_lists_a_job_whose_state_changed() {
+	const WAIT_JOB: &str = r#"wait %1; echo "wait=$?""#;
+	let rows = [
+		("jobs >/dev/null", r#"wait -n; echo "n=$?""#, "n=6\n"),
+		(r#"jobs -n %1 > "$o"; kind"#, WAIT_JOB, "full\nwait=6\n"),
+		(r#"jobs %1 >/dev/null; jobs -n %1 > "$o"; kind"#, WAIT_JOB, "none\nwait=6\n"),
+		(r#"jobs -n > "$o"; kind"#, WAIT_JOB, "full\nwait=6\n"),
+		(r#"jobs >/dev/null; jobs -n > "$o"; kind"#, WAIT_JOB, "none\nwait=6\n"),
+	];
+	let dir = tempfile::tempdir().expect("fifo directory");
+	let mut scripts = Vec::new();
+	for (index, (listing, after, output)) in rows.iter().enumerate() {
+		let external = dir.path().join(format!("{index}-external"));
+		let in_process = dir.path().join(format!("{index}-in-process"));
+		let (external, in_process) = (external.display(), in_process.display());
+		let starts = [
+			(
+				external.to_string(),
+				format!(r#"/bin/sh -c 'read -r x < "$0"; exit 6' '{external}' & "#),
+			),
+			(
+				in_process.to_string(),
+				format!(r#"g(){{ read -r x < '{in_process}'; return 6; }}; g & "#),
+			),
+		];
+		for (fifo, start) in starts {
+			scripts.push((
+				format!(
+					r#"{LISTING_KIND}mkfifo '{fifo}'; {start}{listing}; echo go > '{fifo}'; {after}; rm -f "$o""#
+				),
+				*output,
+			));
+		}
+	}
+	let rows: Vec<(&str, &str)> = scripts
+		.iter()
+		.map(|(script, output)| (script.as_str(), *output))
+		.collect();
+	assert_bash_outputs(&rows).await;
+}
+
+/// A persistent shell removes a job `jobs` reported before its next input,
+/// while retaining the status for `wait` on the job's pid.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_shell_input_forgets_a_job_jobs_reported() {
+	let setup_commands = [
+		r#"f(){ return 1; }; f & p=$!; while kill -0 "$p" 2>/dev/null; do sleep 0.01; done; jobs >/dev/null"#,
+		r#"/bin/sh -c 'exit 1' & p=$!; /bin/sh -c 'until [ ! -e "/proc/$1" ] || [ "$(cut -d " " -f 3 "/proc/$1/stat" 2>/dev/null)" = Z ]; do :; done' sh "$p"; jobs >/dev/null"#,
+	];
+	for setup in setup_commands {
+		let shell = Shell::new(None);
+		let (first_tx, first_rx) = flume::unbounded::<String>();
+		let first = shell
+			.run(
+				ShellRunOptions { command: setup.into(), ..Default::default() },
+				Some(first_tx),
+				CancelToken::new(Some(20_000)),
+			)
+			.await
+			.expect("first run");
+		assert_eq!(first.exit_code, Some(0));
+		assert_eq!(first_rx.drain().collect::<String>(), "");
+
+		let (second_tx, second_rx) = flume::unbounded::<String>();
+		let second = shell
+			.run(
+				ShellRunOptions {
+					command: r#"wait %1 2>/dev/null; echo "job=$?"; wait "$p"; echo "pid=$?""#.into(),
+					..Default::default()
+				},
+				Some(second_tx),
+				CancelToken::new(Some(20_000)),
+			)
+			.await
+			.expect("second run");
+		assert_eq!(second.exit_code, Some(0));
+		assert_eq!(second_rx.drain().collect::<String>(), "job=127\npid=1\n");
+	}
+}
