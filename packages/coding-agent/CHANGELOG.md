@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- An eval kernel a session moves away from now shuts down after a two-minute idle grace instead of holding memory for the process lifetime; returning within the grace keeps its namespace, a kernel a borrower or a running cell holds is kept until it is free, and one shared by two agents is kept until both have moved on ([#17394](https://github.com/can1357/oh-my-pi/pull/17394) by [@sjawhar](https://github.com/sjawhar))
+- An eval kernel you move away from is now shut down two minutes later instead of holding its memory for the life of the process: come back to that directory, session file or interpreter after the two minutes and your variables are gone, and the first cell there says so. Coming back inside the two minutes keeps everything, and a kernel a running cell, a subagent or a second agent is still using is kept until they are done with it ([#17394](https://github.com/can1357/oh-my-pi/pull/17394) by [@sjawhar](https://github.com/sjawhar))
 - Fixed an isolated task's cleanup deleting untracked files its capture could not read, such as a file without read permission or one in a directory git could not open; the capture now fails and the workspace is kept ([#17394](https://github.com/can1357/oh-my-pi/pull/17394) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.2] - 2026-10-31
