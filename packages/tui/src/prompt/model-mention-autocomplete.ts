@@ -2,6 +2,7 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import type { AutocompleteItem, ModelMentionCompletion } from "../index";
 import type { ModelBrowserRegistry, ModelBrowserSource } from "../overlays/model-browser";
+import { sameItems } from "../native/memo";
 import { modelMentionDisplayName, modelMentionName } from "./model-mention-syntax";
 import type {
 	buildSearchAffinity as BuildSearchAffinity,
@@ -145,7 +146,15 @@ export function createModelMentionSource(host: {
 		}
 		return ranker.rank(query);
 	};
-	return Object.assign(rank, {
-		availableModelIds: () => new Set(host.registry.getAvailable().map(model => `${model.provider}/${model.id}`)),
-	});
+	let availableModels: readonly Model[] | undefined;
+	let availableIds: ReadonlySet<string> = new Set();
+	const availableModelIds = (): ReadonlySet<string> => {
+		const models = host.registry.getAvailable();
+		if (!sameItems(availableModels, models)) {
+			availableModels = models;
+			availableIds = new Set(models.map(model => `${model.provider}/${model.id}`));
+		}
+		return availableIds;
+	};
+	return Object.assign(rank, { availableModelIds });
 }
