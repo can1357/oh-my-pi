@@ -1,0 +1,9 @@
+auth "modular" {
+	name "Modular"
+	login "api-key" {
+		auth-url "https://console.modular.com/api_keys"
+		instructions "Create an API key in the Modular Console"
+		prompt "Paste your Modular API key" placeholder="..."
+		validate "models-endpoint" label="Modular" url="https://api.modular.com/v1/models"
+	}
+}

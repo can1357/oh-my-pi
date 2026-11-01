@@ -129,6 +129,33 @@ function resultsPage(blocks: string): string {
 }
 
 describe("DuckDuckGo web search provider", () => {
+	it.each(["https://duckduckgo.com", "//duckduckgo.com"])(
+		"excludes %s advertising redirects before applying the result limit",
+		async origin => {
+			const html = resultsPage(
+				[
+					resultBlock(
+						`${origin}/y.js?ad_domain=advertiser.example&amp;ad_type=txad`,
+						"Advertisement",
+						"Sponsored",
+					),
+					resultBlock(
+						"//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fguide",
+						"Organic guide",
+						"Useful source",
+					),
+				].join(""),
+			);
+			const fetchMock: FetchImpl = () => Promise.resolve(new Response(html, { status: 200 }));
+
+			const response = await searchDuckDuckGo({ ...makeParams("guide", fetchMock), limit: 1 });
+
+			expect(response.sources.map(source => ({ title: source.title, url: source.url }))).toEqual([
+				{ title: "Organic guide", url: "https://example.com/guide" },
+			]);
+		},
+	);
+
 	it("extracts result timestamps into publishedDate/ageSeconds so date bounds can be enforced", async () => {
 		const html = resultsPage(
 			[

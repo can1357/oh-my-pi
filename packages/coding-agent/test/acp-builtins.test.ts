@@ -44,6 +44,7 @@ interface FakeAcpBuiltinSession {
 	fetchUsageReports?: () => Promise<unknown>;
 	getAsyncJobSnapshot: (opts?: { recentLimit?: number }) => { running: unknown[]; recent: unknown[] } | null;
 	getAsyncJobTree: () => AsyncJobTree | null;
+	requestJobCaptions: () => void;
 	cancelAsyncJob: (id: string) => boolean;
 	formatSessionAsText: () => string;
 	dumpLlmRequestToTmpDir: () => Promise<string | undefined>;
@@ -169,6 +170,7 @@ function createRuntime() {
 		async applyMemoryBackend() {},
 		getAsyncJobSnapshot: () => null,
 		getAsyncJobTree: () => null,
+		requestJobCaptions: () => {},
 		cancelAsyncJob: () => false,
 		formatSessionAsText: () => "",
 		dumpLlmRequestToTmpDir: async () => undefined,
