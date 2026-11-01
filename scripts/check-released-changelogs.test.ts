@@ -488,6 +488,38 @@ describe("check-released-changelogs", () => {
 	);
 
 	test(
+		"rejects a head-only old release retained beside the real fixer's archive",
+		async () => {
+			const beforeOldest = RELEASES.slice(0, RELEASES.indexOf("## [1.0.0]"));
+			const fakeOldRelease = `## [0.0.1] - 2025-12-01
+
+### Fixed
+
+- Added a release that the base never had
+`;
+			// The proposed head fits through the fake release. The genuine 1.0.0
+			// section does not, so the real fixer removes it instead.
+			const placeholderFooter = fixerFooter("a".repeat(40));
+			const padding = "x".repeat(
+				MAX_CHANGELOG_BYTES - 1 - Buffer.byteLength(`${beforeOldest}${fakeOldRelease}${placeholderFooter}\n`),
+			);
+			const base = THREE_RELEASES.replace("- Fixed an old bug", `- Fixed an old bug ${padding}`);
+			const repo = await repoWith(base);
+			const baseline = (await repo.git("rev-parse", "HEAD")).output.trim();
+
+			const fixed = await fixChangelogs(repo);
+			expect(fixed.changedFiles.map(file => file.collapsedReleases)).toEqual([1]);
+			expect(await repo.read()).not.toContain("## [0.0.1]");
+
+			await repo.write(`${beforeOldest}${fakeOldRelease}${fixerFooter(baseline)}\n`);
+			const result = await check(repo, "--base", "HEAD");
+			expect(result.exitCode).toBe(1);
+			expect(result.output).toContain(`${CHANGELOG}: ## [1.0.0] - 2026-01-01\n  Missing here.`);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
 		"rejects an archive that keeps the oldest release but drops the one the fixer archives with it",
 		async () => {
 			// Over the limit, the fixer archives 1.1.0 and 1.0.0 together; this keeps 1.0.0.
