@@ -15,15 +15,23 @@
  * enough that a long-lived host is not carrying a kernel nobody has touched.
  * It is the `eval.kernelReclaimGraceMs` setting, because it is also how long a
  * person's variables outlive their attention, and `0` there turns reclaiming
- * off. The clock starts when the session is superseded, not when the kernel
- * falls idle, so a cell still running when its owner walks away is measured
- * from the same moment; a kernel still busy at the far end of the grace is
- * re-armed, not killed and not forgotten. The grace only ever delays the
- * shutdown; it never delays a disposal, because a session ending or the
- * process exiting cancels the timer and shuts the kernel down through the
- * ordinary path.
+ * off. Every finite non-negative value is honoured, including one longer than
+ * a platform timer can hold. The clock starts when the session is superseded,
+ * not when the kernel falls idle, so a cell still running when its owner walks
+ * away is measured from the same moment; a kernel still busy at the far end
+ * of the grace is re-armed, not killed and not forgotten. The grace only ever
+ * delays the shutdown; it never delays a disposal, because a session ending
+ * or the process exiting cancels the timer and shuts the kernel down through
+ * the ordinary path.
  */
 export const SUPERSEDED_KERNEL_GRACE_MS = 120_000;
+
+/**
+ * The longest delay a platform timer holds, about 24.8 days. Bun, like Node,
+ * fires anything longer after 1 ms, which would turn a request to keep a
+ * namespace for longer than this into its immediate destruction.
+ */
+const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
 
 let graceMs = SUPERSEDED_KERNEL_GRACE_MS;
 
@@ -67,19 +75,31 @@ export class SupersededKernelReaper<TSession extends object> {
 	/** Arm the grace for `session`, unless it is already armed or reclaiming is off. */
 	schedule(session: TSession, reclaim: () => Promise<SupersededReclaimOutcome>): void {
 		if (graceMs <= 0 || this.#timers.has(session)) return;
-		this.#arm(session, reclaim, this.#generation, this.#cancellations.get(session) ?? 0);
+		this.#arm(session, reclaim, this.#generation, this.#cancellations.get(session) ?? 0, graceMs);
 	}
 
+	/**
+	 * Wait `remainingMs`, then reclaim. A platform timer holds at most
+	 * {@link MAX_TIMER_DELAY_MS} and fires a longer delay after 1 ms instead, so
+	 * a longer grace is waited out one timer at a time; each is the one
+	 * {@link cancel} clears.
+	 */
 	#arm(
 		session: TSession,
 		reclaim: () => Promise<SupersededReclaimOutcome>,
 		generation: number,
 		cancellation: number,
+		remainingMs: number,
 	): void {
+		const delayMs = Math.min(remainingMs, MAX_TIMER_DELAY_MS);
 		const timer = setTimeout(() => {
 			this.#timers.delete(session);
 			// Reclaiming was turned off after this grace was armed.
 			if (graceMs <= 0) return;
+			if (remainingMs > delayMs) {
+				this.#arm(session, reclaim, generation, cancellation, remainingMs - delayMs);
+				return;
+			}
 			// A failed reclaim is logged by the caller, never thrown at whoever
 			// happens to be disposing.
 			const running = reclaim().then(
@@ -90,7 +110,7 @@ export class SupersededKernelReaper<TSession extends object> {
 					if (this.#generation !== generation) return;
 					if ((this.#cancellations.get(session) ?? 0) !== cancellation) return;
 					if (this.#timers.has(session)) return;
-					this.#arm(session, reclaim, generation, cancellation);
+					this.#arm(session, reclaim, generation, cancellation, graceMs);
 				},
 				() => {},
 			);
@@ -98,7 +118,7 @@ export class SupersededKernelReaper<TSession extends object> {
 			void running.finally(() => {
 				if (this.#inFlight.get(session) === running) this.#inFlight.delete(session);
 			});
-		}, graceMs);
+		}, delayMs);
 		// Never hold the host open for a kernel it is about to throw away.
 		timer.unref?.();
 		this.#timers.set(session, timer);

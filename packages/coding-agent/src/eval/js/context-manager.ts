@@ -3,7 +3,10 @@ import { logger, Snowflake, workerHostEntry } from "@oh-my-pi/pi-utils";
 import {
 	createWorkerHandle,
 	createWorkerSubprocess,
+	killWorkerSubprocess,
 	resolveWorkerSpawnCmd,
+	settlesWithin,
+	WORKER_EXIT_CONFIRM_MS,
 	workerEnvFromParent,
 } from "../../subprocess/worker-client";
 import type { ToolSession } from "../../tools";
@@ -55,8 +58,14 @@ export interface JsEvalWorkerHandle {
 	send(msg: WorkerInbound): void;
 	onMessage(handler: (msg: WorkerOutbound) => void): () => void;
 	onError(handler: (error: Error) => void): () => void;
+	/** Ask the worker to exit; true once it has, false when it did not answer in time. */
 	close(): Promise<boolean>;
-	terminate(): Promise<void>;
+	/**
+	 * Kill the worker; true once its exit has been seen, false when it was not
+	 * seen within {@link WORKER_EXIT_CONFIRM_MS}. Sending the kill is not the
+	 * answer: a caller that must not lose a live worker keeps it on false.
+	 */
+	terminate(): Promise<boolean>;
 }
 
 /** Startup dependencies overridden by tests to exercise process-to-Worker recovery. */
@@ -148,6 +157,26 @@ const resettingSessions = new Map<string, Promise<void>>();
  * the key, and with the owner when it is disposed.
  */
 const reclaimedWorkers = new Map<string, Map<string, { kernelId: string; cwd: string }>>();
+
+/** A worker whose kill could not be confirmed: no context's any more, only a process still to end. */
+interface UnconfirmedWorker {
+	worker: JsEvalWorkerHandle;
+	kernelId: string;
+	/** Owners whose disposal still retries it, once; that disposal drops itself from here. */
+	owners: Set<string>;
+}
+
+/**
+ * Workers whose kill could not be confirmed, kept so a disposal can try again
+ * rather than return with them forgotten. Each is out of `sessions` and dead
+ * to every caller — no cell, reclaim or notice reaches it — so this is cleanup
+ * debt only, kept apart from who owns a live context and who is owed a
+ * notice. An owner's disposal retries that owner's once; the process-wide
+ * disposal retries every one. A worker stuck in truly uninterruptible kernel
+ * I/O stays until that I/O completes or is aborted.
+ */
+const unconfirmedWorkers = new Set<UnconfirmedWorker>();
+
 // Worker startup (module-graph import + WorkerCore construction) is infrastructure
 // cost, not user compute. Floor it independently of Bun's 5s default per-test timeout
 // so a slow cold-start under load isn't aborted mid-init — terminating a still-
@@ -576,7 +605,10 @@ export async function disposeAllVmContexts(): Promise<void> {
 	// A reclaim that fired just before the cancel removed its context from the
 	// map and may still be closing that worker; a dispose must not return
 	// while one is up. Joined alongside the kills below, not ahead of them.
+	const reclaiming = reaper.running();
 	const reclaims = reaper.settle();
+	// Workers an earlier kill could not confirm get their attempt alongside.
+	const earlier = [...unconfirmedWorkers];
 	const pending = [...startingSessions.values()].map(starting => starting.promise);
 	startingSessions.clear();
 	const all = Array.from(sessions.values());
@@ -594,8 +626,12 @@ export async function disposeAllVmContexts(): Promise<void> {
 	await Promise.all([
 		reclaims,
 		started,
+		retryUnconfirmedWorkers(earlier),
 		...all.map(session => killSession(session, new ToolError("JS context disposed"), { force: false })),
 	]);
+	// A joined reclaim whose kill went unconfirmed gets one more attempt; what
+	// this disposal's own kills could not confirm is kept for the next one.
+	await retryUnconfirmedWorkers(unconfirmedOf(reclaiming));
 }
 
 /**
@@ -610,7 +646,11 @@ export async function disposeVmContextsByOwner(ownerId: string): Promise<void> {
 	// awaited the kill, so the sweep below cannot see that worker and would
 	// return while it is still up. This owner's reclaims are joined alongside
 	// its own kills; another owner's are not this disposal's to wait for.
-	const reclaims = reaper.settle(reaper.running().filter(session => session.ownerIds.has(ownerId)));
+	const reclaiming = reaper.running().filter(session => session.ownerIds.has(ownerId));
+	const reclaims = reaper.settle(reclaiming);
+	// What an earlier kill of this owner's workers could not confirm gets its
+	// attempt alongside this disposal's own kills.
+	const earlier = [...unconfirmedWorkers].filter(entry => entry.owners.has(ownerId));
 	// This owner is gone, so it is at no key: a context it shared stops waiting
 	// on it, and nobody is left to tell what a reclaim took from it.
 	ownerKeys.delete(ownerId);
@@ -649,13 +689,53 @@ export async function disposeVmContextsByOwner(ownerId: string): Promise<void> {
 	await Promise.all([
 		reclaims,
 		started,
+		retryUnconfirmedWorkers(earlier),
 		...toKill.map(session => killSession(session, new ToolError("JS context disposed"), { force: false })),
 	]);
+	// A joined reclaim whose kill went unconfirmed gets one more attempt.
+	await retryUnconfirmedWorkers(unconfirmedOf(reclaiming));
+	// What is still unconfirmed is no longer this owner's to retry: only the
+	// process-wide disposal tries again, so a later disposal under the same
+	// owner id does not inherit a debt it never incurred.
+	for (const entry of unconfirmedWorkers) entry.owners.delete(ownerId);
 	// A context this owner shared with another agent kept only its registration
 	// dropped above. Nobody is left to notice that, so the arming question is
 	// asked again here: the agents it still belongs to may have moved away long
 	// ago.
 	reconcileSupersededJsSessions();
+}
+
+/** The unconfirmed workers left by the kills of `sessions`. */
+function unconfirmedOf(sessions: readonly JsSession[]): UnconfirmedWorker[] {
+	const kernelIds = new Set(sessions.map(session => session.kernelId));
+	return [...unconfirmedWorkers].filter(entry => kernelIds.has(entry.kernelId));
+}
+
+/**
+ * Kill each of `entries` again. One whose exit is now seen is forgotten; one
+ * that still cannot be confirmed — a process stuck in truly uninterruptible
+ * kernel I/O outlives every kill until that I/O completes or is aborted — is
+ * logged and kept.
+ */
+async function retryUnconfirmedWorkers(entries: readonly UnconfirmedWorker[]): Promise<void> {
+	await Promise.all(
+		entries.map(async entry => {
+			if (!unconfirmedWorkers.has(entry)) return;
+			if (await entry.worker.terminate().catch(() => false)) {
+				unconfirmedWorkers.delete(entry);
+				return;
+			}
+			logger.warn("JS eval worker still did not confirm exit; kept for the next disposal", {
+				kernelId: entry.kernelId,
+			});
+		}),
+	);
+}
+
+/** Keep `worker`, whose kill could not be confirmed, where a disposal will try again. */
+function keepUnconfirmedWorker(worker: JsEvalWorkerHandle, kernelId: string, owners: Iterable<string>): void {
+	logger.warn("JS eval worker did not confirm exit; kept for disposal to retry", { kernelId });
+	unconfirmedWorkers.add({ worker, kernelId, owners: new Set(owners) });
 }
 
 /**
@@ -880,7 +960,9 @@ async function acquireSession(
 				// runtime failure must surface; running the cell on this host thread
 				// would make synchronous user code impossible to cancel.
 				const failed = session.worker;
-				await failed.terminate().catch(() => undefined);
+				if (!(await failed.terminate().catch(() => false))) {
+					keepUnconfirmedWorker(failed, session.kernelId, startingSession.ownerIds);
+				}
 				if (failed.mode === "worker") {
 					throw new Error(
 						`Failed to initialize isolated JS eval worker: ${error instanceof Error ? error.message : String(error)}`,
@@ -1118,12 +1200,10 @@ async function killSession(session: JsSession, error: Error, options: { force: b
 	session.pendingSnapshots.clear();
 	for (const pending of session.pendingShadowRuns.values()) pending.reject(error);
 	session.pendingShadowRuns.clear();
-	if (options.force) {
-		await session.worker.terminate().catch(() => undefined);
-		return;
-	}
-	if (await session.worker.close().catch(() => false)) return;
-	await session.worker.terminate().catch(() => undefined);
+	const confirmed = options.force
+		? await session.worker.terminate().catch(() => false)
+		: (await session.worker.close().catch(() => false)) || (await session.worker.terminate().catch(() => false));
+	if (!confirmed) keepUnconfirmedWorker(session.worker, session.kernelId, session.ownerIds);
 }
 
 function markJsSessionAlive(session: JsSession, toolSession: ToolSession, environment: string | undefined): void {
@@ -1255,17 +1335,23 @@ function spawnJsProcess(): JsEvalWorkerHandle {
 			};
 			unsubscribe = base.onMessage(message => {
 				if (message.type !== "closed") return;
-				void base.terminate().finally(() => finish(true));
+				// Acknowledged: the kill below ends it, and only its seen exit
+				// means it closed.
+				clearTimeout(timeout);
+				void killWorkerSubprocess(spawned).then(finish);
 			});
 			const timeout = setTimeout(() => finish(false), WORKER_CLOSE_TIMEOUT_MS);
 			base.send({ type: "close" });
 			return await promise;
 		},
-		terminate: () => base.terminate(),
+		terminate: () => killWorkerSubprocess(spawned),
 	};
 }
 
 function wrapBunWorker(worker: Worker): JsEvalWorkerHandle {
+	// Watched from the start, so an exit that happened before teardown asked is still seen.
+	const exited = Promise.withResolvers<void>();
+	worker.addEventListener("close", () => exited.resolve(), { once: true });
 	return {
 		mode: "worker",
 		send(msg) {
@@ -1323,6 +1409,7 @@ function wrapBunWorker(worker: Worker): JsEvalWorkerHandle {
 		},
 		async terminate() {
 			worker.terminate();
+			return await settlesWithin(exited.promise, WORKER_EXIT_CONFIRM_MS);
 		},
 	};
 }

@@ -193,11 +193,21 @@ export function createKernelSessionRegistry<
 	 */
 	const reclaimedKernels = new Map<string, Map<string, ReclaimedKernel<TKernel>>>();
 	/**
-	 * Sessions whose shutdown did not confirm while another session held, or
-	 * was starting at, their key, so they could not be put back. Owner disposal
-	 * retries its own once; `disposeAll` retries every one.
+	 * Sessions whose reclaim did not confirm the shutdown while another session
+	 * held, or was starting at, their key, so they could not be put back. Their
+	 * owners are still live, so owner disposal retries its own once;
+	 * `disposeAll` retries every one.
 	 */
 	const unconfirmed = new Set<TSession>();
+	/**
+	 * Sessions a disposal could not confirm down: cleanup debt and nothing
+	 * else. The owner that held one has been disposed and was told what it
+	 * lost, so it is neither a live session nor anyone's notice — never put
+	 * back where a cell, the arming pass or a reclaim can reach it, which made
+	 * the reaper reclaim it again and record the loss once more for the owner
+	 * the disposal had just forgotten. Only `disposeAll` retries it.
+	 */
+	const retained = new Set<TSession>();
 
 	const context: KernelSessionRegistryContext<TKernel, TOptions, TSession> = {
 		sessions,
@@ -498,11 +508,12 @@ export function createKernelSessionRegistry<
 	}
 
 	/**
-	 * Keep a session whose shutdown did not confirm where a later disposal can
-	 * retry it: back under its key when nothing else holds or is starting
-	 * there — the next cell on that key replaces a dead kernel the ordinary
-	 * way — and otherwise in {@link unconfirmed}, since publishing over a
-	 * fresh or starting session would strand that one instead.
+	 * Keep a session whose reclaim did not confirm the shutdown where a later
+	 * disposal can retry it: back under its key when nothing else holds or is
+	 * starting there — the next cell on that key replaces a dead kernel the
+	 * ordinary way — and otherwise in {@link unconfirmed}, since publishing
+	 * over a fresh or starting session would strand that one instead. Its
+	 * owners are live; a disposal's failures go to {@link retained} instead.
 	 */
 	function keepUnconfirmed(session: TSession): void {
 		const key = session.sessionKey;
@@ -512,9 +523,11 @@ export function createKernelSessionRegistry<
 
 	/**
 	 * Shut `session` down for a disposal. One that does not confirm is logged
-	 * and kept ({@link keepUnconfirmed}). Each attempt is bounded by the
-	 * kernel's own shutdown escalation; a runner stuck in uninterruptible
-	 * kernel I/O can outlast every one of them, and is then only ever kept.
+	 * and held in {@link retained} for `disposeAll`, never put back under its
+	 * key. Each attempt is bounded by the kernel's own shutdown escalation. A
+	 * signal cannot immediately end truly uninterruptible kernel I/O, and a
+	 * bounded wait cannot guarantee the exit: a runner in it outlasts the
+	 * attempt and stays retained until that I/O completes or is aborted.
 	 */
 	async function shutdownForDisposal(session: TSession): Promise<boolean> {
 		const result = await settleShutdown(session, false);
@@ -525,7 +538,7 @@ export function createKernelSessionRegistry<
 			cwd: session.cwd,
 			reason: result.status === "rejected" ? result.reason : "not confirmed",
 		});
-		keepUnconfirmed(session);
+		retained.add(session);
 		return false;
 	}
 
@@ -536,7 +549,7 @@ export function createKernelSessionRegistry<
 	 * under its key or set aside — is shut down once more; a put-back session
 	 * another owner is still registered on only loses `ownerId`'s
 	 * registration. A kernel the disposal's own shutdown could not confirm is
-	 * not retried here; it is kept, as before, for the next disposal.
+	 * not retried here; it is retained for `disposeAll`.
 	 */
 	async function retryUnconfirmed(reclaimed: Iterable<TSession>, ownerId?: string): Promise<void> {
 		const retries: TSession[] = [];
@@ -615,14 +628,16 @@ export function createKernelSessionRegistry<
 		// reclaims running now each removed their session from the map before
 		// awaiting the shutdown, so only the reaper still reaches those runners:
 		// they are joined, and a kernel one of them could not confirm gets one
-		// more attempt afterwards. The map, the startups, and what an earlier
-		// reclaim set aside are this disposal's own to shut down.
+		// more attempt afterwards. The map, the startups, what an earlier
+		// reclaim set aside and what an earlier disposal retained are this
+		// disposal's own to shut down.
 		const reclaiming = new Set<TSession>(reaper.running());
 		const reclaims = reaper.settle(reclaiming);
 		const pending = [...startingSessions.values()].map(starting => starting.promise);
 		startingSessions.clear();
-		const all = [...unconfirmed];
+		const all = [...unconfirmed, ...retained];
 		unconfirmed.clear();
+		retained.clear();
 		for (const [key, session] of Array.from(sessions.entries())) {
 			descriptor.invalidateSession?.(session);
 			sessions.delete(key);

@@ -175,6 +175,9 @@ function observeWorkers(holds: { firstReady?: Promise<void>; firstClose?: Promis
 			},
 			async terminate() {
 				worker.terminate();
+				// A thread always ends on terminate(); its close event is the confirmation.
+				await exited.promise;
+				return true;
 			},
 		};
 	};

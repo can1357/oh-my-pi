@@ -106,18 +106,26 @@ export interface KernelExecutionResult {
 }
 
 /**
- * What a reclaim takes besides the namespace, by how the runtime is torn
- * down. A kernel process's shutdown ends in a `SIGKILL` to the runner's
- * process group, even after a clean exit, so its threads and subprocesses
- * go. A JavaScript worker is terminated, so its timers and pending callbacks
- * never run; only the worker itself is killed, not a process group, so
- * nothing is claimed about a subprocess a cell spawned.
+ * What a reclaim's teardown does besides losing the namespace, by how the
+ * runtime is torn down. Unlike the namespace loss, which the cell carrying
+ * the notice proves by running on another kernel, these are what the
+ * teardown sends, not what it observed — the old runtime may still be exiting
+ * when the notice is read — so each says where the signal does not reach.
+ *
+ * A kernel process's shutdown ends in a `SIGKILL` to the runner's process
+ * group. A child that started its own session or process group (an ordinary
+ * `Popen(..., start_new_session=True)`) is outside it and is not signalled.
+ * A JavaScript worker is terminated on its own, not as a group, so its
+ * timers, callbacks and `node:worker_threads` threads end with it while a
+ * subprocess it spawned is not signalled. In both, a signal cannot
+ * immediately end truly uninterruptible kernel I/O: a thread blocked in it
+ * outlives the kill until that I/O completes or is aborted.
  */
-const RECLAIM_LOSS = {
+const RECLAIM_TEARDOWN = {
 	"process-group":
-		"Threads and subprocesses its cells started were killed with it, and file writes not yet flushed were lost.",
+		"Its shutdown sends SIGKILL to the kernel's process group, which stops threads and subprocesses its cells left running and loses writes they had not flushed — except a subprocess that started its own session or process group, which is not signalled and can keep running, and a thread blocked in uninterruptible I/O, which outlives the kill until that I/O completes or is aborted.",
 	worker:
-		"Timers and callbacks its cells left pending were dropped with it, and file writes not yet flushed were lost.",
+		"Its shutdown terminates the worker, which stops the timers, pending callbacks and background threads its cells left running and loses writes they had not flushed — except a thread blocked in uninterruptible I/O, which outlives the kill until that I/O completes or is aborted. Subprocesses its cells started are not signalled and can keep running.",
 } as const;
 
 /**
@@ -127,14 +135,16 @@ const RECLAIM_LOSS = {
  * is suddenly empty, so the cell that meets it says so instead of failing with
  * an unexplained `NameError`. It names `directory`, the working directory of
  * the kernel that went, because an agent working in two directories cannot
- * otherwise tell which namespace it lost, and says what else went with it.
+ * otherwise tell which namespace it lost. The namespace loss comes first, as
+ * the one certainty; what the teardown also stops, and what it cannot reach,
+ * follows.
  */
 export function formatKernelReclaimNotice(
 	runtimeLabel: string,
 	directory: string,
-	teardown: keyof typeof RECLAIM_LOSS,
+	teardown: keyof typeof RECLAIM_TEARDOWN,
 ): string {
-	return `Kernel restarted: the previous ${runtimeLabel} for ${directory} was shut down after this session moved away from it; state is unavailable. ${RECLAIM_LOSS[teardown]} Re-run needed setup: variables, imports and definitions from earlier cells are gone.`;
+	return `Kernel restarted: the previous ${runtimeLabel} for ${directory} was reclaimed after this session moved away from it, so variables, imports and definitions from earlier cells are gone; re-run needed setup. ${RECLAIM_TEARDOWN[teardown]}`;
 }
 
 /** Minimal kernel surface the base executor drives, satisfied by every backend kernel. */

@@ -23,11 +23,14 @@ interface TestOptions {
 	reset?: boolean;
 	signal?: AbortSignal;
 	deadlineMs?: number;
+	claimKernelNotice?: () => string | undefined;
 }
 
 interface TestResult {
 	cancelled: boolean;
 	value: string;
+	/** The reclaim notice the cell opened with, if any. */
+	notice: string | undefined;
 }
 
 class TestCancelledError extends Error {
@@ -87,7 +90,11 @@ function createRegistry(prepare: (kernel: HeldKernel, index: number) => void = (
 			kernels.push(kernel);
 			return kernel;
 		},
-		executeWithKernel: async (_kernel, code) => ({ cancelled: false, value: code }),
+		executeWithKernel: async (_kernel, code, options) => ({
+			cancelled: false,
+			value: code,
+			notice: options.claimKernelNotice?.(),
+		}),
 	});
 	const kernel = (index: number): HeldKernel => {
 		const found = kernels[index];
@@ -210,6 +217,95 @@ describe("owner disposal and an in-flight reclaim", () => {
 			expect(kernel(0).alive).toBe(false);
 		} finally {
 			exit.resolve();
+			await registry.disposeAll();
+		}
+	}, 30_000);
+});
+
+/**
+ * A kernel a disposal could not confirm down is a cleanup debt, not a session:
+ * nobody owns it any more and nobody lost anything to it after the disposal.
+ * Putting it back where the reaper looks made the reaper treat it as a kernel
+ * its owners had walked away from — reclaim it again, and record the loss
+ * once more for the very owner the disposal had just forgotten, so that
+ * owner's next cell, under the same id, opened with a notice about a kernel
+ * it had already been told it lost. The same mechanism was measured on a real
+ * Python runner whose thread stayed in uninterruptible I/O.
+ *
+ * The grace is a real timer here, and the tests wait on it by its own order:
+ * a bystander's reclaim, armed on the same grace after anything the disposal
+ * could have left armed, has run before its kernel reports — so every reclaim
+ * the disposal could have re-armed has run by then too.
+ */
+describe("a kernel a disposal could not confirm down", () => {
+	afterEach(() => setSupersededKernelGraceMs());
+
+	it("stays out of the registry after its owner's disposal, so no reclaim re-arms it and the owner's next cell hears nothing", async () => {
+		setSupersededKernelGraceMs(5);
+		const { kernel, cell, registry } = createRegistry((started, index) => {
+			// Down only on the third attempt: the reclaim's, the owner
+			// disposal's, and the process-wide disposal's.
+			if (index === 0) started.confirmsOnShutdown = 3;
+		});
+		try {
+			const owner = "agent-session:disposed-unconfirmed";
+			await cell("/one", owner);
+			await cell("/two", owner);
+			await kernel(0).reported.promise;
+			await settleMicrotasks();
+			await registry.disposeByOwner(owner);
+			expect(kernel(0).shutdowns).toBe(2);
+
+			const bystander = "agent-session:bystander";
+			await cell("/three", bystander);
+			await cell("/four", bystander);
+			await kernel(2).reported.promise;
+			await settleMicrotasks();
+
+			// The same owner id comes back to the directory it was disposed in.
+			expect((await cell("/one", owner)).notice).toBeUndefined();
+			expect(kernel(0).shutdowns).toBe(2);
+			expect(kernel(0).alive).toBe(true);
+
+			// The debt is still held: the process-wide disposal settles it.
+			await registry.disposeAll();
+			expect(kernel(0).shutdowns).toBe(3);
+			expect(kernel(0).alive).toBe(false);
+		} finally {
+			await registry.disposeAll();
+		}
+	}, 30_000);
+
+	it("stays out of the registry after the process-wide disposal, so a later cell cannot re-arm it", async () => {
+		setSupersededKernelGraceMs(5);
+		const { kernel, cell, registry } = createRegistry((started, index) => {
+			if (index === 0) started.confirmsOnShutdown = 3;
+		});
+		try {
+			const owner = "agent-session:all-disposed-unconfirmed";
+			await cell("/one", owner);
+			await cell("/two", owner);
+			await kernel(0).reported.promise;
+			await settleMicrotasks();
+			await registry.disposeAll();
+			expect(kernel(0).shutdowns).toBe(2);
+
+			// Another agent's cells run the reaper's arming pass after the
+			// disposal; the disposed kernel must not be among what it finds.
+			const bystander = "agent-session:later-bystander";
+			await cell("/three", bystander);
+			await cell("/four", bystander);
+			await kernel(2).reported.promise;
+			await settleMicrotasks();
+
+			expect((await cell("/one", owner)).notice).toBeUndefined();
+			expect(kernel(0).shutdowns).toBe(2);
+			expect(kernel(0).alive).toBe(true);
+
+			await registry.disposeAll();
+			expect(kernel(0).shutdowns).toBe(3);
+			expect(kernel(0).alive).toBe(false);
+		} finally {
 			await registry.disposeAll();
 		}
 	}, 30_000);

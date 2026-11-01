@@ -341,6 +341,49 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 		expect(await waitForExit(first, EXIT_BUDGET_MS)).toBe(true);
 	}, 60_000);
 
+	it("tells the owner that a subprocess its cell started in its own session survived the reclaim", async () => {
+		setSupersededKernelGraceMs(RECLAIM_GRACE_MS);
+		using firstDir = TempDir.createSync("@python-runner-notice-a-");
+		using secondDir = TempDir.createSync("@python-runner-notice-b-");
+		const options = {
+			sessionId: "notice-kernel",
+			kernelOwnerId: "agent-session:notice",
+			kernelMode: "session" as const,
+			timeoutMs: 10_000,
+		};
+		// An ordinary call, nothing exotic: a child in a session of its own is
+		// outside the runner's process group, which is all the reclaim signals.
+		const started = await executePython(
+			[
+				"import os, subprocess",
+				`detached = subprocess.Popen([${JSON.stringify(SLEEP)}, '600'], start_new_session=True)`,
+				"print(f'runner-pid:{os.getpid()} detached-pid:{detached.pid}')",
+			].join("\n"),
+			{ ...options, cwd: firstDir.path() },
+		);
+		expect(started.exitCode).toBe(0);
+		const runner = Number(/runner-pid:(\d+)/.exec(started.output)?.[1]);
+		const detached = Number(/detached-pid:(\d+)/.exec(started.output)?.[1]);
+		try {
+			await runnerPid({ ...options, cwd: secondDir.path() });
+			expect(await waitForExit(runner, EXIT_BUDGET_MS)).toBe(true);
+			expect(isRunning(detached)).toBe(true);
+
+			const back = await executePython("print('back')", { ...options, cwd: firstDir.path() });
+			expect(back.exitCode).toBe(0);
+			const notice = back.output.split("\n").find(line => line.startsWith("Kernel restarted:"));
+			expect(notice).toContain(firstDir.path());
+			// The line must not claim a death that did not happen.
+			expect(notice).toMatch(/own session or process group, which is not signalled/);
+		} finally {
+			try {
+				process.kill(detached, "SIGKILL");
+			} catch {
+				// Already gone.
+			}
+		}
+	}, 60_000);
+
 	it("streams stdout chunks as they are produced", async () => {
 		using tempDir = TempDir.createSync("@python-runner-stream-");
 		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
