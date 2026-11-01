@@ -1,6 +1,7 @@
 import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { AsyncJobManager } from "../../src/async";
 import { Settings } from "../../src/config/settings";
@@ -361,12 +362,45 @@ describe("runEvalAgent", () => {
 		expect(runSpy.mock.calls[0]?.[0]?.modelOverride).toEqual(["p/requested:high"]);
 	});
 
+	it.each([{ model: "@review" }, { model: ["mock/missing", "@review"] }])(
+		"expands an agent() role selection before dispatch: $model",
+		async ({ model }) => {
+			mockAgents();
+			const target = createMockModel({ id: "role-target" });
+			const session = Object.assign(
+				makeSession({
+					settings: Settings.isolated({
+						"task.perCallModel": "eval",
+						"task.isolation.enabled": false,
+						modelRoles: { review: "mock/role-target" },
+					}),
+				}),
+				{
+					modelRegistry: {
+						getAll: () => [target],
+						getAvailable: () => [target],
+						awaitBackgroundRefresh: async () => {},
+						isBackgroundRefreshPending: () => false,
+					},
+				},
+			);
+			const runSpy = vi
+				.spyOn(taskExecutor, "runSubprocess")
+				.mockImplementation(async options => singleResult(options));
+			await runEvalAgentAndWait({ prompt: "work", agent: "reviewer", model }, { session });
+			expect(runSpy.mock.calls[0]?.[0]?.modelOverride).toEqual(["mock/role-target"]);
+		},
+	);
+
 	it.each([
-		// The gate wins over the selector check, so an invalid selector still reports the disabled gate.
+		// The gate wins over selector and argument-schema validation.
 		{ mode: "off", model: "@smol", error: /task\.perCallModel: off/ },
+		{ mode: "off", model: [42], error: /task\.perCallModel: off/ },
 		{ mode: "on", model: "default", error: /invalid `model`/ },
-		// The argument schema accepts only a string, so a candidate array never reaches preflight.
-		{ mode: "on", model: ["p/preferred:high", "p/alternative"], error: /model must be a string/ },
+		{ mode: "on", model: [], error: /invalid `model`/ },
+		{ mode: "on", model: ["p/preferred:high", "p/*"], error: /invalid `model`/ },
+		{ mode: "on", model: ["p/preferred", 42], error: /invalid `model`/ },
+		{ mode: "on", model: "@smol", error: /has no modelRoles entry/ },
 	])("rejects agent() model $model under $mode before dispatch", async ({ mode, model, error }) => {
 		mockAgents();
 		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));

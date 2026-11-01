@@ -37,6 +37,7 @@
 
 - Added `task.perCallModel` (`off` by default, `eval`, `on`) so a task item or an eval `agent()`/`workpool()` call can run on one exact model the operator already names: a chat role from your own (non-project) settings, the selected agent's own model, or the parent's current model. Glob values (`anthropic/*`) never approve a model. `task.perCallModelAllow` narrows that list, `task.maxEffort` caps the worker's effort, and the worker never switches to another model. Project settings can only narrow this: they never turn it on or approve a model ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix))
 - Added `Settings.reloadFromDisk({ includeParents: true })`, which reloads the persisted settings behind an overlay while keeping the overlay's own overrides ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix))
+- Added per-call `model` selectors for configured chat roles (`@review[:level]`) and ordered candidate lists, choosing the first available approved model with credentials at spawn without runtime fallback; `task.perCallModelAllow` also accepts configured roles and scoped globs that only narrow grants ([#16793](https://github.com/can1357/oh-my-pi/pull/16793) by [@Xytronix](https://github.com/Xytronix))
 
 ### Changed
 

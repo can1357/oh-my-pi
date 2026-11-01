@@ -12,7 +12,7 @@
  * disabled agents). Catalog membership, credentials, built-in role defaults,
  * project agent frontmatter, other agents' frontmatter and saved transcripts
  * grant nothing. `task.perCallModelAllow`, when set, narrows the result to the
- * exact models it lists.
+ * models its exact, configured `@role` or glob entries match.
  */
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
@@ -140,9 +140,44 @@ function configuredRoleGrantPatterns(settings: Settings): PerCallModelAdvertisem
 	});
 }
 
-/** The allowlist compares canonical identities literally; it never resolves or case-folds entries. */
-function allowlistAdmitsIdentity(allow: string[], identity: string): boolean {
-	return allow.length === 0 || allow.some(entry => entry.trim() === identity);
+interface GrantResolution {
+	chat: Model<Api>[];
+	catalog: Model<Api>[];
+	matchPreferences?: ModelMatchPreferences;
+}
+
+/** Allowlist globs match one identity scope; wildcards never cross `@`, even within a model id. */
+function globAdmitsIdentity(pattern: string, identity: string): boolean {
+	const expression = pattern.replace(/[\\^$.*+?()[\]{}|]/g, char =>
+		char === "*" ? "[^@]*" : char === "?" ? "[^@]" : `\\${char}`,
+	);
+	const target = pattern.includes("/") ? identity : identity.slice(identity.indexOf("/") + 1);
+	return new RegExp(`^${expression}$`, "i").test(target);
+}
+
+/** Exact entries stay literal; configured roles and scoped globs only narrow existing grants. */
+function allowlistAdmitsIdentity(
+	allow: string[],
+	identity: string,
+	authority: Settings,
+	resolution?: GrantResolution,
+): boolean {
+	return (
+		allow.length === 0 ||
+		allow.some(entry => {
+			const selector = entry.trim();
+			const role = selector.startsWith("@") ? resolveExplicitModelRole(selector, authority) : undefined;
+			if (role !== undefined) {
+				return (
+					!isKindRole(role) &&
+					modelGrantPatterns(authority.getModelRole(role), authority).some(
+						pattern => grantPatternIdentity(pattern, resolution) === identity,
+					)
+				);
+			}
+			return selector === identity || (/[*?]/.test(selector) && globAdmitsIdentity(selector, identity));
+		})
+	);
 }
 
 /**
@@ -153,8 +188,13 @@ function perCallAllowlists(settings: Settings): [operator: string[], live: strin
 	return [cfgTaskPerCallModelAllow.get(settings.grantAuthority()), cfgTaskPerCallModelAllow.get(settings)];
 }
 
-function allowlistsAdmitIdentity(allowlists: string[][], identity: string): boolean {
-	return allowlists.every(allow => allowlistAdmitsIdentity(allow, identity));
+function allowlistsAdmitIdentity(
+	allowlists: string[][],
+	identity: string,
+	authority: Settings,
+	resolution?: GrantResolution,
+): boolean {
+	return allowlists.every(allow => allowlistAdmitsIdentity(allow, identity, authority, resolution));
 }
 
 /** A non-exact role value resolves by the same preferences for approval and advertisement. */
@@ -169,6 +209,74 @@ function resolveGrantPattern(
 	return resolveModelRoleValue(pattern, candidates, { matchPreferences });
 }
 
+/** Full-catalog literals win over effort suffixes; glob role/frontmatter values never grant. */
+function grantPatternIdentity(pattern: string, resolution?: GrantResolution): string | undefined {
+	if (/[*?]/.test(pattern)) return undefined;
+	if (!resolution) {
+		return pattern.includes("/") ? splitThinkingSuffix(pattern, -1, MAX_THINKING_SUFFIX_OPTIONS).base : undefined;
+	}
+	const { chat, catalog, matchPreferences } = resolution;
+	const exact = exactIdentity(pattern, catalog);
+	if (exact !== undefined) return exact;
+	const resolved = resolveGrantPattern(pattern, chat, catalog, matchPreferences).model;
+	return resolved && formatModelStringWithRouting(resolved);
+}
+
+/** Whether a configured allowlist selector can survive the other narrowing layer. */
+function allowlistSelectorAdmitted(
+	selector: string,
+	allowlists: string[][],
+	authority: Settings,
+	resolution?: GrantResolution,
+): boolean {
+	const role = selector.startsWith("@") ? resolveExplicitModelRole(selector, authority) : undefined;
+	if (role !== undefined) {
+		return (
+			!isKindRole(role) &&
+			modelGrantPatterns(authority.getModelRole(role), authority).some(pattern => {
+				const identity = grantPatternIdentity(pattern, resolution);
+				return identity !== undefined && allowlistsAdmitIdentity(allowlists, identity, authority, resolution);
+			})
+		);
+	}
+	if (!/[*?]/.test(selector)) return allowlistsAdmitIdentity(allowlists, selector, authority, resolution);
+	return allowlists.every(
+		allow =>
+			allow.length === 0 ||
+			allow.some(entry => {
+				const other = entry.trim();
+				const otherRole = other.startsWith("@") ? resolveExplicitModelRole(other, authority) : undefined;
+				if (otherRole !== undefined) {
+					return (
+						!isKindRole(otherRole) &&
+						modelGrantPatterns(authority.getModelRole(otherRole), authority).some(pattern => {
+							const identity = grantPatternIdentity(pattern, resolution);
+							return identity !== undefined && globAdmitsIdentity(selector, identity);
+						})
+					);
+				}
+				if (!/[*?]/.test(other)) return globAdmitsIdentity(selector, other);
+				// Keep possible glob intersections, but fixed providers and pin scopes cannot disagree.
+				if (selector.includes("@") !== other.includes("@")) return false;
+				const provider = selector.includes("/") ? selector.slice(0, selector.indexOf("/")) : undefined;
+				const otherProvider = other.includes("/") ? other.slice(0, other.indexOf("/")) : undefined;
+				if (
+					provider !== undefined &&
+					otherProvider !== undefined &&
+					!/[*?]/.test(provider + otherProvider) &&
+					provider.toLowerCase() !== otherProvider.toLowerCase()
+				) {
+					return false;
+				}
+				const pin = selector.slice(selector.lastIndexOf("@") + 1);
+				const otherPin = other.slice(other.lastIndexOf("@") + 1);
+				return (
+					!selector.includes("@") || /[*?]/.test(pin + otherPin) || pin.toLowerCase() === otherPin.toLowerCase()
+				);
+			}),
+	);
+}
+
 /**
  * Inputs a cached approval result was computed from: the operator view, the live settings
  * revision, and the catalog snapshot (absent when the computation never read the catalog).
@@ -176,6 +284,7 @@ function resolveGrantPattern(
 interface ApprovalCacheKey {
 	authority: Settings;
 	revision: number;
+	registry?: ApprovalRegistry;
 	catalog?: Model<Api>[];
 }
 
@@ -183,20 +292,23 @@ function isCurrent(cached: ApprovalCacheKey | undefined, settings: Settings, reg
 	return (
 		cached !== undefined &&
 		cached.authority === settings.grantAuthority() &&
+		cached.registry === registry &&
 		cached.revision === settings.revision &&
 		(cached.catalog === undefined || cached.catalog === registry?.getAll())
 	);
 }
 
-type AdvertisedGrants = Omit<PerCallModelAdvertisement, "parentModelWithheld"> & { allowlists: string[][] };
+type AdvertisedGrants = Omit<PerCallModelAdvertisement, "parentModelWithheld"> & {
+	allowlists: string[][];
+	resolution?: GrantResolution;
+};
 
 const advertisementCache = new WeakMap<Settings, ApprovalCacheKey & AdvertisedGrants>();
 
 /**
- * Each granting role value as a selector a caller can send; globs never grant, so they are skipped.
- * Provider-qualified values are shown as written (compared to the allowlists
- * without a `:level`), so rendering never composes the full catalog; a bare value needs the registry
- * to name its provider.
+ * Each granting role value as a selector a caller can send; globs and `@default` are omitted.
+ * Provider-qualified values are shown as written. Only bare values or role-valued allowlists
+ * need the full catalog, and their cached expansion is invalidated with that catalog.
  */
 function advertisedGrants(
 	settings: Settings,
@@ -205,42 +317,53 @@ function advertisedGrants(
 	const authority = settings.grantAuthority();
 	const allowlists = perCallAllowlists(settings);
 	const [operatorAllow, liveAllow] = allowlists;
-	let models: { chat: Model<Api>[]; catalog: Model<Api>[]; preferences: ModelMatchPreferences } | undefined;
+	let resolution: GrantResolution | undefined;
+	const grantResolution = (): GrantResolution =>
+		(resolution ??= {
+			chat: registry?.getAvailable("chat") ?? [],
+			catalog: registry?.getAll() ?? [],
+			matchPreferences: getModelMatchPreferences(authority),
+		});
+	const needsRoleResolution = allowlists.some(allow =>
+		allow.some(
+			entry => entry.trim().startsWith("@") && resolveExplicitModelRole(entry.trim(), authority) !== undefined,
+		),
+	);
+	// Even fully-qualified advertisements depend on the catalog when an allowlist expands a role.
+	if (registry && needsRoleResolution) grantResolution();
+	const admitted = (identity: string): boolean => allowlistsAdmitIdentity(allowlists, identity, authority, resolution);
 	const advertise = (pattern: string): string | undefined => {
 		if (/[*?]/.test(pattern)) return undefined;
 		if (pattern.includes("/")) {
 			const base = splitThinkingSuffix(pattern, -1, MAX_THINKING_SUFFIX_OPTIONS).base;
-			return allowlistsAdmitIdentity(allowlists, base) || allowlistsAdmitIdentity(allowlists, pattern)
-				? pattern
-				: undefined;
+			return admitted(base) || admitted(pattern) ? pattern : undefined;
 		}
 		if (!registry) return undefined;
-		models ??= {
-			chat: registry.getAvailable("chat"),
-			catalog: registry.getAll(),
-			preferences: getModelMatchPreferences(authority),
-		};
-		const resolved = resolveGrantPattern(pattern, models.chat, models.catalog, models.preferences);
+		const models = grantResolution();
+		const resolved = resolveGrantPattern(pattern, models.chat, models.catalog, models.matchPreferences);
 		if (!resolved.model) return undefined;
 		const identity = formatModelStringWithRouting(resolved.model);
-		if (!allowlistsAdmitIdentity(allowlists, identity)) return undefined;
+		if (!admitted(identity)) return undefined;
 		return resolved.explicitThinkingLevel && resolved.thinkingLevel
 			? `${identity}:${resolved.thinkingLevel}`
 			: identity;
 	};
 	const roles = configuredRoleGrantPatterns(authority).flatMap(({ role, patterns }) => {
+		if (role === "default") return [];
 		const selectors = [...new Set(patterns.map(advertise).filter(selector => selector !== undefined))];
 		return selectors.length > 0 ? [{ role, patterns: selectors }] : [];
 	});
 	return {
 		authority,
 		revision: settings.revision,
-		catalog: models?.catalog,
+		registry,
+		catalog: registry ? resolution?.catalog : undefined,
 		roles,
 		allowlist: [...new Set((operatorAllow.length > 0 ? operatorAllow : liveAllow).map(entry => entry.trim()))].filter(
-			entry => allowlistsAdmitIdentity(allowlists, entry),
+			entry => allowlistSelectorAdmitted(entry, allowlists, authority, resolution),
 		),
 		allowlists,
+		resolution,
 	};
 }
 
@@ -262,10 +385,11 @@ export function getPerCallModelAdvertisement(
 	return {
 		roles: grants.roles,
 		allowlist: grants.allowlist,
-		// Same literal comparison dispatch applies to the allowlist.
+		// The same literal, role and scoped-glob checks dispatch applies to each allowlist.
 		parentModelWithheld:
 			parentModel !== undefined &&
-			(parentPattern === undefined || !allowlistsAdmitIdentity(grants.allowlists, parentPattern)),
+			(parentPattern === undefined ||
+				!allowlistsAdmitIdentity(grants.allowlists, parentPattern, grants.authority, grants.resolution)),
 	};
 }
 
@@ -289,22 +413,17 @@ function perCallModelGrantPatterns(grants: PerCallModelGrants): string[] {
 
 /** Whether the configuration grants this model; the caller has already checked chat availability. */
 function computeGranted(
-	model: Model<Api>,
 	target: string,
 	grants: PerCallModelGrants,
 	chat: Model<Api>[],
 	catalog: Model<Api>[],
 ): boolean {
-	if (!allowlistsAdmitIdentity(perCallAllowlists(grants.settings), target)) return false;
-	return perCallModelGrantPatterns(grants).some(pattern => {
-		// Full-catalog literals win even when unavailable, so :low and [1m] never broaden a grant.
-		const exact = exactIdentity(pattern, catalog);
-		if (exact !== undefined) return exact === target;
-		// A glob routes the role but never grants: the operator must name each per-call model.
-		if (/[*?]/.test(pattern)) return false;
-		const resolved = resolveGrantPattern(pattern, chat, catalog, grants.matchPreferences).model;
-		return resolved !== undefined && formatModelStringWithRouting(resolved) === target;
-	});
+	const authority = grants.settings.grantAuthority();
+	const resolution = { chat, catalog, matchPreferences: grants.matchPreferences };
+	return (
+		allowlistsAdmitIdentity(perCallAllowlists(grants.settings), target, authority, resolution) &&
+		perCallModelGrantPatterns(grants).some(pattern => grantPatternIdentity(pattern, resolution) === target)
+	);
 }
 
 /**
@@ -329,6 +448,7 @@ export function assertPerCallModelApproved(
 		cache = {
 			authority: grants.settings.grantAuthority(),
 			revision: grants.settings.revision,
+			registry,
 			catalog: registry.getAll(),
 			decisions: new Map(),
 		};
@@ -341,12 +461,12 @@ export function assertPerCallModelApproved(
 		if (!chat.some(candidate => candidate.provider === model.provider && candidate.id === model.id)) {
 			throw new PerCallModelUnavailableError(`Per-call model ${target} is not an available chat model.`);
 		}
-		granted = computeGranted(model, target, grants, chat, cache.catalog);
+		granted = computeGranted(target, grants, chat, cache.catalog);
 		cache.decisions.set(target, granted);
 	}
 	if (granted) return;
 	const allowGuidance = perCallAllowlists(grants.settings).some(allow => allow.length > 0)
-		? " It must also be listed in task.perCallModelAllow."
+		? " It must also match an entry in task.perCallModelAllow."
 		: "";
 	throw new PerCallModelError(
 		`Per-call model ${target} is not approved for agent "${grants.agentName}": use a model named by a chat role configured outside project settings, the selected agent's own frontmatter (bundled or user-level agents only), or the parent's model.${allowGuidance} Catalog or credentials alone do not approve a model.`,
