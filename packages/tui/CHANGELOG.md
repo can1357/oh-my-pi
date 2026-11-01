@@ -12,6 +12,7 @@
 
 ### Changed
 
+- Compact read rows now name why a read failed, so a failed `skill://`, `rule://` or file read keeps its diagnostic when previews are off ([#16516](https://github.com/can1357/oh-my-pi/pull/16516) by [@Komzpa](https://github.com/Komzpa))
 - File paths in tool output share one style: a dim directory and the file name in the custom-message label color (bronze in titanium), with line locations and selectors (`:1-175`, `:42:14`, `?q=`) muted. This covers Grep, AST Grep, AST Edit, Glob, Find, LSP, diagnostics, grouped Reads and file mentions; Glob's folder icon is muted like the file-type icons, and paths in tool headers keep their color ([#17608](https://github.com/can1357/oh-my-pi/pull/17608) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Grep, AST Grep and AST Edit results label each file with its full path instead of the model-facing `# dir/` and `## file#tag` headers, and each file gets its own tree branch. Their collapsed previews fit the same row budget the same way, cutting the last file short rather than overflowing, and end with `… N more matches` (`… N more files` for AST Edit) ([#17608](https://github.com/can1357/oh-my-pi/pull/17608) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - AST Grep match rows link to their line, as Grep's do ([#17608](https://github.com/can1357/oh-my-pi/pull/17608) by [@JustasMasiulis](https://github.com/JustasMasiulis))
@@ -202,9 +203,6 @@
 - Fixed an inline image (such as a table's chart) disappearing in iTerm2 when new output pushed it past the top of the screen; it now moves to scrollback whole ([#16467](https://github.com/can1357/oh-my-pi/pull/16467) by [@galtamam-cmyk](https://github.com/galtamam-cmyk))
 - Fixed inline images, hyperlinks, notifications and styled underlines staying off in iTerm2 sessions reached over SSH, where the forwarded `LC_TERMINAL` marker was ignored ([#16450](https://github.com/can1357/oh-my-pi/pull/16450) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Added Eval `mcp_progress` status events, updated in place per call and evictable under the status-event cap, plus `formatMCPProgress()` and `MCPToolDetails.progress` for MCP progress display ([#16431](https://github.com/can1357/oh-my-pi/pull/16431) by [@alphastorm](https://github.com/alphastorm))
-### Changed
-
-- Compact read rows now name why a read failed, so a failed `skill://`, `rule://` or file read keeps its diagnostic when previews are off ([#16516](https://github.com/can1357/oh-my-pi/pull/16516) by [@Komzpa](https://github.com/Komzpa))
 
 ## [18.12.3] - 2026-10-19
 
