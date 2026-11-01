@@ -171,8 +171,8 @@ pub fn default_builtins<SE: brush_core::ShellExtensions>(
 		#[cfg(feature = "builtin.caller")]
 		m.insert("caller".into(), builtin::<caller::CallerCommand, SE>());
 
-		// TODO(disown): implement disown builtin
-		m.insert("disown".into(), builtin::<unimp::UnimplementedCommand, SE>());
+		#[cfg(feature = "builtin.disown")]
+		m.insert("disown".into(), builtin::<disown::DisownCommand, SE>());
 
 		// TODO(logout): implement logout builtin
 		m.insert("logout".into(), builtin::<unimp::UnimplementedCommand, SE>());

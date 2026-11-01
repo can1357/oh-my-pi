@@ -281,10 +281,11 @@ impl Shell {
 		registry.map_or_default(|registry| registry.live_pids())
 	}
 
-	/// Number of live external background jobs tracked by the persistent
-	/// session. The host retains a per-call shell while this is nonzero, since
-	/// dropping it would kill its children. Reaps exited children without
-	/// discarding their status, so a later `wait` still sees the exit code.
+	/// Number of unfinished background jobs tracked by the persistent session,
+	/// including jobs the shell runs itself and jobs `disown` took out of job
+	/// control. The host retains a per-call shell while this is nonzero, since
+	/// dropping it would stop those jobs. A job can retain the shell until it
+	/// exits or the omp process exits and drops every retained shell.
 	pub async fn live_background_job_count(&self) -> u32 {
 		let mut guard = self.session.lock().await;
 		let Some(core) = guard.as_mut() else {
@@ -296,14 +297,7 @@ impl Shell {
 		if jobs.poll_preserving_completed().is_err() {
 			return 0;
 		}
-		u32::try_from(
-			jobs
-				.jobs
-				.iter()
-				.filter(|job| job.external_process_count() > 0)
-				.count(),
-		)
-		.unwrap_or(u32::MAX)
+		u32::try_from(jobs.live_job_count()).unwrap_or(u32::MAX)
 	}
 }
 
@@ -1839,8 +1833,9 @@ async fn wait_for_term_grace(registry: &process::SpawnRegistry) {
 }
 
 fn register_background_jobs(shell: &BrushShell, registry: &process::SpawnRegistry) {
-	// Include retained session jobs in the same cancellation wave as new spawns.
-	for job in &shell.jobs().jobs {
+	// Include retained session jobs, `disown`ed ones too, in the same
+	// cancellation wave as new spawns.
+	for job in shell.jobs().owned_jobs() {
 		// A reaped job keeps its representative PID for `wait`, but that PID
 		// may later be reused by an unrelated process. Use an external child
 		// still held by the job (the first pipeline stage may have exited).
@@ -1857,7 +1852,7 @@ async fn terminate_background_jobs(shell: &mut BrushShell, registry: &process::S
 	// Aborting their internal tasks sooner drops ChildProcess and hard-kills
 	// children while their TERM traps are still running.
 	wait_for_term_grace(registry).await;
-	for job in &mut shell.jobs_mut().jobs {
+	for job in shell.jobs_mut().owned_jobs_mut() {
 		job.abort_internal_tasks();
 	}
 }

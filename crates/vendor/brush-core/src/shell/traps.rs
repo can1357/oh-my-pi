@@ -91,6 +91,24 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 		result
 	}
 
+	/// Runs the trap for a signal `kill` left pending for the background job
+	/// this shell runs inside the shell process, if one is pending, and
+	/// returns the trap's result. A process runs such a trap once its
+	/// foreground command returns; this runs it between commands.
+	pub(crate) async fn run_pending_job_trap(
+		&mut self,
+		params: &ExecutionParameters,
+	) -> Result<Option<ExecutionResult>, error::Error> {
+		let Some(signal) = self
+			.traps
+			.job_signals()
+			.and_then(|job_signals| job_signals.take_pending())
+		else {
+			return Ok(None);
+		};
+		self.invoke_trap_handler(signal, params).await.map(Some)
+	}
+
 	/// Returns whether the given trap signal is inherited in the current
 	/// function or subshell scope.
 	fn is_trap_inherited_in_current_scope(&self, signal: TrapSignal) -> bool {
