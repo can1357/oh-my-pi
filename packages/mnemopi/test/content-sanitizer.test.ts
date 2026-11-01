@@ -239,6 +239,59 @@ Tail content
 		expect(meta.redacted_secrets).toEqual(matchedTypes);
 		expect(sanitized).toBe(content);
 	});
+	it("scrubs credential catalogue patterns (HuggingFace, Stripe, SendGrid) across sanitizeContent, scrubLiveCredentials, and BeamMemory.remember", () => {
+		const hfToken = `hf_${"a".repeat(30)}`;
+		const stripeWebhook = `whsec_${"b".repeat(20)}`;
+		const stripeLiveKey = `sk_live_${"c".repeat(20)}`;
+		const stripeRestrictedKey = `rk_live_${"d".repeat(20)}`;
+		const sendgridKey = `SG.${"e".repeat(22)}.${"f".repeat(43)}`;
+
+		const rawText = [
+			`HF: ${hfToken}`,
+			`Stripe Webhook: ${stripeWebhook}`,
+			`Stripe Live: ${stripeLiveKey}`,
+			`Stripe Restricted: ${stripeRestrictedKey}`,
+			`SendGrid: ${sendgridKey}`,
+		].join("\n");
+
+		const { content: scrubbed, matchedTypes } = scrubLiveCredentials(rawText);
+		expect(matchedTypes).toContain("huggingface_token");
+		expect(matchedTypes).toContain("stripe_webhook_secret");
+		expect(matchedTypes).toContain("stripe_key");
+		expect(matchedTypes).toContain("sendgrid_key");
+		expect(scrubbed).not.toContain(hfToken);
+		expect(scrubbed).not.toContain(stripeWebhook);
+		expect(scrubbed).not.toContain(stripeLiveKey);
+		expect(scrubbed).not.toContain(stripeRestrictedKey);
+		expect(scrubbed).not.toContain(sendgridKey);
+		expect(scrubbed).toBe(
+			[
+				"HF: [REDACTED]",
+				"Stripe Webhook: [REDACTED]",
+				"Stripe Live: [REDACTED]",
+				"Stripe Restricted: [REDACTED]",
+				"SendGrid: [REDACTED]",
+			].join("\n"),
+		);
+
+		const [sanitized, meta] = sanitizeContent(rawText);
+		expect(meta.redacted_secrets).toEqual(matchedTypes);
+		expect(sanitized).toBe(scrubbed);
+
+		const beam = new BeamMemory({ dbPath: ":memory:", sessionId: "catalogue-scrub-test" });
+		try {
+			const id = beam.remember(rawText);
+			const stored = beam.get(id) as { content: string } | null;
+			expect(stored?.content).toBe(scrubbed);
+			expect(stored?.content).not.toContain(hfToken);
+			expect(stored?.content).not.toContain(stripeWebhook);
+			expect(stored?.content).not.toContain(stripeLiveKey);
+			expect(stored?.content).not.toContain(stripeRestrictedKey);
+			expect(stored?.content).not.toContain(sendgridKey);
+		} finally {
+			beam.close();
+		}
+	});
 
 	it("preserves benign text, URLs, and documentation placeholders", () => {
 		const benign = [
