@@ -99,16 +99,23 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 	/// [`error::Error::abandons_command`]) on `stderr`, the standard error in
 	/// effect where it happened, as Bash does, unless `report` is false or it
 	/// was already reported. Returns the error that carries the abandonment on
-	/// to the enclosing command without being reported again; or, when the
-	/// report cannot be written here (deep nesting can exhaust a low descriptor
-	/// limit), the refusal itself, for an enclosing command to report.
+	/// to the enclosing command without being reported again. A report that
+	/// fails because descriptors ran out (deep nesting can exhaust a low
+	/// descriptor limit) instead returns the refusal itself, for an enclosing
+	/// command to report; any other failure, such as a closed or full standard
+	/// error, leaves the refusal unreported, as in Bash.
 	pub(crate) async fn report_abandonment(
 		&self,
 		stderr: &mut openfiles::OpenFile,
 		report: bool,
 		err: error::Error,
 	) -> error::Error {
-		if report && self.display_error(stderr, &err).await.is_err() {
+		if report
+			&& let Err(write_err) = self.display_error(stderr, &err).await
+			&& write_err
+				.as_io_error()
+				.is_some_and(ioutils::is_descriptor_exhaustion)
+		{
 			return err;
 		}
 		error::ErrorKind::CommandAbandoned.into()

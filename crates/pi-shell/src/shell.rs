@@ -7155,38 +7155,43 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 		assert_eq!((code, output.as_str()), (Some(0), "alive\n"));
 	}
 
-	/// Each nesting level holds duplicated descriptors (a separate defect), so
-	/// under a 1,024 soft descriptor limit a refusal 500 levels deep cannot be
-	/// written where it happens. An enclosing command then reports it, so it
-	/// is not lost. Runs in a child process, as the limit is process-wide.
+	/// A refusal 500 levels deep behaves the same under a 1,024 soft
+	/// descriptor limit and a raised one. Each nesting level holds duplicated
+	/// descriptors (a separate defect), so at 1,024 the refusal cannot be
+	/// written where it happens and an enclosing command reports it, once. A
+	/// refusal whose standard error is closed or full stays silent at both
+	/// limits, as in Bash, instead of falling back to an outer standard error.
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
-	async fn function_nesting_refusal_stays_visible_under_a_low_descriptor_limit() {
-		const MARKER: &str = "PI_SHELL_TEST_LOW_NOFILE";
-		if std::env::var_os(MARKER).is_none() {
-			run_isolated_kill_test(
-				"shell::tests::function_nesting_refusal_stays_visible_under_a_low_descriptor_limit",
-				MARKER,
-				false,
-			)
-			.await;
+	async fn deep_function_nesting_refusal_respects_standard_error_at_any_descriptor_limit() {
+		if rerun_in_open_file_limit_child(
+			"shell::tests::deep_function_nesting_refusal_respects_standard_error_at_any_descriptor_limit",
+		)
+		.await
+		{
 			return;
 		}
 
-		let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
-		// SAFETY: `limit` is a valid, writable `rlimit` for the duration of the
-		// call.
-		assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) }, 0);
-		limit.rlim_cur = limit.rlim_max.min(1024);
-		// SAFETY: `limit` is a valid `rlimit`; lowering the soft limit needs no
-		// privilege, and this child process exists only for this test.
-		assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit) }, 0);
+		for soft in [1024, 65_536] {
+			set_open_file_limit(soft);
+			let (_, output) = execute_captured("f() { f; }\nf\necho \"after=$?\"".into()).await;
+			let lines: Vec<&str> = output.lines().collect();
+			assert_eq!(lines.len(), 2, "limit {soft}: {output:?}");
+			assert!(
+				lines[0].ends_with("f: maximum function nesting level exceeded (500)"),
+				"limit {soft}: {output:?}"
+			);
+			assert_eq!(lines[1], "after=1", "limit {soft}");
 
-		let (_, output) = execute_captured("f() { f; }\nf\necho \"after=$?\"".into()).await;
-		let lines: Vec<&str> = output.lines().collect();
-		assert_eq!(lines.len(), 2, "{output:?}");
-		assert!(lines[0].ends_with("f: maximum function nesting level exceeded (500)"), "{output:?}");
-		assert_eq!(lines[1], "after=1");
+			for stderr in ["2>&-", "2>/dev/full"] {
+				for call in ["f {r}", "{ f; } {r}"] {
+					let call = call.replace("{r}", stderr);
+					let (_, output) =
+						execute_captured(format!("f() {{ f; }}\n{call}\necho \"after=$?\"")).await;
+					assert_eq!(output, "after=1\n", "limit {soft}: {call}");
+				}
+			}
+		}
 	}
 
 	/// `FUNCNEST` sets the function nesting limit as it does in Bash: a lower
@@ -7317,22 +7322,78 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 		);
 	}
 
-	/// Raises this process's soft descriptor limit toward its hard limit, as
-	/// omp's Bun host does at startup. Each nesting level holds about 25
-	/// duplicated descriptors, so a run 500 levels deep needs far more than a
-	/// 1,024 soft limit, and an error reported from that deep cannot be written
-	/// past it. 65,536 covers 500 levels with room to spare.
+	/// Asserts that a `FUNCNEST=3` refusal sent to the standard error that
+	/// `redirect` leaves (closed or full) prints nothing, as in Bash, however
+	/// that standard error reaches the refused call: on the call itself, on an
+	/// enclosing group, on both, on a function definition, or on a pipeline
+	/// stage. Before, the refusal fell back to an outer standard error.
 	#[cfg(unix)]
-	fn raise_open_file_limit() {
+	async fn assert_refusal_stays_silent_with(redirect: &str) {
+		for (call, code, expected) in [
+			("f {r}; printf 'PARENT\\n'", 1, ""),
+			("{ f; } {r}; printf 'PARENT\\n'", 1, ""),
+			("{ f {r}; } {r}; printf 'PARENT\\n'", 1, ""),
+			("g() { f; } {r}; g; printf 'PARENT\\n'", 1, ""),
+			("f {r} | cat; printf 'PARENT=%s\\n' \"$?\"", 0, "PARENT=0\n"),
+		] {
+			let call = call.replace("{r}", redirect);
+			let (result, output) = execute_captured(format!("FUNCNEST=3; f() {{ f; }}; {call}")).await;
+			assert_eq!((result.exit_code, output.as_str()), (Some(code), expected), "{call}");
+		}
+	}
+
+	/// A nesting refusal sent to a closed standard error stays silent.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn function_nesting_refusal_does_not_escape_closed_standard_error() {
+		assert_refusal_stays_silent_with("2>&-").await;
+	}
+
+	/// A nesting refusal sent to a full standard error stays silent.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn function_nesting_refusal_does_not_escape_full_standard_error() {
+		assert_refusal_stays_silent_with("2>/dev/full").await;
+	}
+
+	/// Marks a test process started to run one test under a descriptor limit
+	/// of its own; see [`rerun_in_open_file_limit_child`].
+	#[cfg(unix)]
+	const OPEN_FILE_LIMIT_CHILD: &str = "PI_SHELL_TEST_OPEN_FILE_LIMIT_CHILD";
+
+	/// Runs the test named `test` again in a child test process, where it may
+	/// change the process-wide descriptor limit without affecting any other
+	/// test. Returns `true` in the parent, once the child has passed, and
+	/// `false` in the child, which then runs the test body.
+	#[cfg(unix)]
+	async fn rerun_in_open_file_limit_child(test: &str) -> bool {
+		if std::env::var_os(OPEN_FILE_LIMIT_CHILD).is_some() {
+			return false;
+		}
+		run_isolated_kill_test(test, OPEN_FILE_LIMIT_CHILD, false).await;
+		true
+	}
+
+	/// Sets this test process's soft descriptor limit to `soft`, or to the
+	/// hard limit if that is lower. Only a child started by
+	/// [`rerun_in_open_file_limit_child`] may call it. Bun raises omp's soft
+	/// limit to the hard limit at startup; each nesting level holds about 25
+	/// duplicated descriptors, so 500 levels need far more than 1,024.
+	#[cfg(unix)]
+	fn set_open_file_limit(soft: libc::rlim_t) {
+		assert!(
+			std::env::var_os(OPEN_FILE_LIMIT_CHILD).is_some(),
+			"only a child test process may change the descriptor limit"
+		);
 		let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
 		// SAFETY: `limit` is a valid, writable `rlimit` for the duration of the
 		// call.
 		assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) }, 0);
-		limit.rlim_cur = limit.rlim_max.min(65_536);
-		// SAFETY: `limit` is a valid `rlimit`; raising the soft limit up to the
+		limit.rlim_cur = limit.rlim_max.min(soft);
+		// SAFETY: `limit` is a valid `rlimit`; moving the soft limit up to the
 		// hard limit needs no privilege.
-		let raised = unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit) };
-		assert_eq!(raised, 0, "raise RLIMIT_NOFILE to {}", limit.rlim_cur);
+		let set = unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit) };
+		assert_eq!(set, 0, "set RLIMIT_NOFILE to {}", limit.rlim_cur);
 	}
 
 	/// An `eval` that evaluates itself forever is refused at the nesting limit
@@ -7341,7 +7402,10 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn runaway_eval_recursion_is_refused() {
-		raise_open_file_limit();
+		if rerun_in_open_file_limit_child("shell::tests::runaway_eval_recursion_is_refused").await {
+			return;
+		}
+		set_open_file_limit(65_536);
 		let (_, output) =
 			execute_captured("e='eval \"$e\"'\neval \"$e\"\necho \"after=$?\"".into()).await;
 		let lines: Vec<&str> = output.lines().collect();
@@ -7356,7 +7420,10 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn runaway_source_recursion_is_refused() {
-		raise_open_file_limit();
+		if rerun_in_open_file_limit_child("shell::tests::runaway_source_recursion_is_refused").await {
+			return;
+		}
+		set_open_file_limit(65_536);
 		let dir = tempfile::tempdir().expect("temp dir");
 		let script = dir.path().join("again.sh");
 		std::fs::write(&script, ". \"$AGAIN\"\n").expect("write script");
