@@ -14,7 +14,7 @@ import {
 } from "@oh-my-pi/pi-utils/dirs";
 import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 import * as logger from "@oh-my-pi/pi-utils/logger";
-import type { SessionStorage } from "./session-storage";
+import { defaultSessionStorage, type SessionStorage } from "./session-storage";
 
 const migratedSessionRoots = new Set<string>();
 
@@ -525,8 +525,9 @@ export async function readTerminalBreadcrumbEntry(): Promise<TerminalBreadcrumb 
 		if (!parsed) return null;
 		const { cwd: breadcrumbCwd, sessionFile, fresh, cwdIdentity } = parsed;
 
-		const stat = fs.statSync(sessionFile, { throwIfNoEntry: false });
-		const exists = stat?.isFile() === true;
+		// Through the configured storage: under `session.storage: sql` the
+		// target is a row, and a filesystem check would drop every breadcrumb.
+		const exists = defaultSessionStorage().existsSync(sessionFile);
 		// A materialized target resumes normally; a missing target is honored only
 		// for a never-written lazy fresh-session boundary.
 		if (exists || fresh) return { cwd: breadcrumbCwd, sessionFile, exists, fresh, cwdIdentity };

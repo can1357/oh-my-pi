@@ -65,6 +65,12 @@ export interface SessionStorageStat {
 	size: number;
 	mtimeMs: number;
 	mtime: Date;
+	/**
+	 * Creation time, when the backend records one. File storage reports the
+	 * filesystem's; key-indexed backends store no birth time and omit it, so
+	 * callers fall back to the transcript's own header timestamp.
+	 */
+	birthtimeMs?: number;
 }
 
 export interface SessionStorageWriter {
@@ -200,6 +206,15 @@ export interface SessionStorage {
 	updateSessionTitle(path: string, update: SessionTitleUpdate): Promise<void>;
 	statSync(path: string): SessionStorageStat;
 	listFilesSync(dir: string, pattern: string): string[];
+	/**
+	 * Names of the directories holding session files directly inside `dir` —
+	 * the directory half of {@link listFilesSync}. A recursive transcript walk
+	 * (a session's subagent tree) needs both, and only the backend knows how
+	 * its keys nest: file backends read the directory, key-indexed backends
+	 * derive the names from the keys below `dir`. A missing or unreadable
+	 * `dir` lists as empty rather than throwing.
+	 */
+	listDirsSync(dir: string): string[];
 
 	exists(path: string): Promise<boolean>;
 	readText(path: string): Promise<string>;
@@ -1068,20 +1083,35 @@ export class FileSessionStorage implements SessionStorage {
 
 	statSync(path: string): SessionStorageStat {
 		const stats = fs.statSync(path);
-		return { size: stats.size, mtimeMs: stats.mtimeMs, mtime: stats.mtime };
+		return { size: stats.size, mtimeMs: stats.mtimeMs, mtime: stats.mtime, birthtimeMs: stats.birthtimeMs };
 	}
 
 	listFilesSync(dir: string, pattern: string): string[] {
 		try {
 			// Bun.Glob walks no symlink unless asked, and a transcript placed in
 			// a session directory as one — a launcher's, a supervisor's — is a
-			// transcript like any other (#15878)
-			return Array.from(new Bun.Glob(pattern).scanSync({ cwd: dir, followSymlinks: true })).map(name =>
+			// transcript like any other (#15878). `dot` likewise: a transcript
+			// whose agent id starts with a dot is a transcript, and a key-indexed
+			// backend lists it, so the two backends must agree.
+			return Array.from(new Bun.Glob(pattern).scanSync({ cwd: dir, followSymlinks: true, dot: true })).map(name =>
 				path.join(dir, name),
 			);
 		} catch {
 			return [];
 		}
+	}
+
+	listDirsSync(dir: string): string[] {
+		let entries: fs.Dirent[];
+		try {
+			entries = fs.readdirSync(dir, { withFileTypes: true });
+		} catch {
+			return [];
+		}
+		// Real directories only: a transcript stem such as "." or ".." would
+		// revisit an ancestor, and a symlinked directory can loop back into the
+		// tree a walk is descending.
+		return entries.filter(entry => entry.isDirectory()).map(entry => entry.name);
 	}
 
 	async exists(path: string): Promise<boolean> {
@@ -1428,7 +1458,27 @@ export class FileSessionStorage implements SessionStorage {
 	}
 }
 
-function matchesPattern(name: string, pattern: string): boolean {
+let defaultStorage: SessionStorage | undefined;
+
+/**
+ * The storage every session factory, listing, resume, and maintenance path
+ * falls back to when the caller passes none. Lazily a {@link FileSessionStorage}
+ * (stateless, so one shared instance is safe); {@link setDefaultSessionStorage}
+ * replaces it with the configured storage before the first session is opened,
+ * so `--resume`, the resume picker, `--continue`, and listing all read the same
+ * store the session is written to.
+ */
+export function defaultSessionStorage(): SessionStorage {
+	defaultStorage ??= new FileSessionStorage();
+	return defaultStorage;
+}
+
+/** Install the process-wide default storage. Call before any session is opened. */
+export function setDefaultSessionStorage(storage: SessionStorage): void {
+	defaultStorage = storage;
+}
+
+function matchesPatternSegment(name: string, pattern: string): boolean {
 	if (pattern === "*") return true;
 	if (pattern.startsWith("*.")) {
 		return name.endsWith(pattern.slice(1));
@@ -1437,15 +1487,62 @@ function matchesPattern(name: string, pattern: string): boolean {
 }
 
 /**
- * Name of `key` when it sits directly inside `resolvedDir` (a `path.resolve`d
- * directory), else `undefined`. Key-indexed storages keep whatever spelling
- * callers wrote, so both sides are resolved: on Windows `/sessions/x` and the
- * `path.join`-built `\sessions\x\…` keys must list as the same directory.
+ * Name of `key` relative to `resolvedDir` (a `path.resolve`d directory),
+ * slash-joined, when it sits exactly `segments` levels inside it; else
+ * `undefined`. Key-indexed storages keep whatever spelling callers wrote, so
+ * both sides are resolved: on Windows `/sessions/x` and the `path.join`-built
+ * `\sessions\x\…` keys must list as the same directory.
  */
-export function directChildKeyName(resolvedDir: string, key: string): string | undefined {
-	const name = path.basename(key);
-	if (!name || name.includes("/") || name.includes("\\")) return undefined;
-	return path.resolve(path.dirname(key)) === resolvedDir ? name : undefined;
+export function childKeyName(resolvedDir: string, key: string, segments: number): string | undefined {
+	const names: string[] = [];
+	let parent = key;
+	for (let i = 0; i < segments; i++) {
+		const name = path.basename(parent);
+		if (!name || name.includes("/") || name.includes("\\")) return undefined;
+		names.unshift(name);
+		parent = path.dirname(parent);
+	}
+	return path.resolve(parent) === resolvedDir ? names.join("/") : undefined;
+}
+
+/**
+ * The directory names that `keys` imply directly inside `resolvedDir` (a
+ * `path.resolve`d directory): the first segment of every key that sits at
+ * least two levels inside it. Key-indexed storages hold no directory entries,
+ * so a directory exists exactly while a key lives below it — which is what
+ * makes a subagent tree walkable on those backends.
+ */
+export function childDirNames(resolvedDir: string, keys: Iterable<string>): string[] {
+	const names = new Set<string>();
+	for (const key of keys) {
+		let child = path.dirname(key);
+		for (;;) {
+			const parent = path.dirname(child);
+			if (parent === child) break;
+			const name = path.basename(child);
+			if (!name || name.includes("/") || name.includes("\\")) break;
+			if (path.resolve(parent) === resolvedDir) {
+				names.add(name);
+				break;
+			}
+			child = parent;
+		}
+	}
+	return [...names];
+}
+
+/**
+ * Match a slash-joined path remainder against a pattern of the same shape
+ * (a single segment such as `"*.jsonl"`, or a wildcard project directory
+ * followed by `"*.jsonl"` for the one-level cross-project case). Segment
+ * counts must agree, so a direct child never matches a two-segment pattern
+ * and a nested key never matches a one-segment one.
+ */
+function matchesPattern(name: string, pattern: string): boolean {
+	const nameParts = name.split("/");
+	const patternParts = pattern.split("/");
+	if (nameParts.length !== patternParts.length) return false;
+	return nameParts.every((part, i) => matchesPatternSegment(part, patternParts[i]));
 }
 
 class MemorySessionStorageWriter implements SessionStorageWriter {
@@ -1704,12 +1801,17 @@ export class MemorySessionStorage implements SessionStorage {
 	listFilesSync(dir: string, pattern: string): string[] {
 		const resolvedDir = path.resolve(dir);
 		const files: string[] = [];
+		const segments = pattern.split("/").length;
 		for (const key of this.#files.keys()) {
-			const name = directChildKeyName(resolvedDir, key);
+			const name = childKeyName(resolvedDir, key, segments);
 			if (name === undefined || !matchesPattern(name, pattern)) continue;
 			files.push(key);
 		}
 		return files;
+	}
+
+	listDirsSync(dir: string): string[] {
+		return childDirNames(path.resolve(dir), this.#files.keys());
 	}
 
 	exists(path: string): Promise<boolean> {
