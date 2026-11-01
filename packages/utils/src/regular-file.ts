@@ -169,17 +169,24 @@ export function readOptionalFileTextSync(file: string): string | undefined {
 }
 
 /**
- * A named pipe that was not written to its end in the time allowed. `started`
- * tells whether a writer sent any of it; what it sent is not used, because half
- * a file is not the file.
+ * A named pipe that was not written to its end within the bounds allowed, and
+ * why: nothing wrote to it, what was writing it did not finish in time, or it
+ * sent more bytes than allowed. What it sent is not used, because part of a
+ * file is not the file.
  */
 export class PipeNotAnswered extends Error {
 	constructor(
 		readonly file: string,
-		readonly started: boolean,
+		readonly reason: "silent" | "unfinished" | "oversized",
 	) {
 		super(
-			`${file} is a named pipe, and ${started ? "what was writing it stopped before the end" : "nothing wrote to it"}`,
+			`${file} is a named pipe, and ${
+				reason === "silent"
+					? "nothing wrote to it"
+					: reason === "unfinished"
+						? "what was writing it did not finish"
+						: "what was writing it sent more than allowed"
+			}`,
 		);
 		this.name = "PipeNotAnswered";
 	}
@@ -211,12 +218,13 @@ function detachStopListeners(): () => void {
 
 /**
  * The text of `file` when it is a regular file, or when it is a named pipe
- * that a writer fills to its end within `pipe.deadlineMs` of the open — for a
- * file that a tool serves through a pipe on purpose (1Password mounts `.env`
- * files that way). `pipe.onWait` runs once when the pipe has not reached its
- * end after `pipe.noticeAfterMs`, told whether any of it has come. Undefined when nothing is at the name;
+ * that a writer fills to its end within `pipe.deadlineMs` of the open and
+ * within `pipe.maxBytes` — for a file that a tool serves through a pipe on
+ * purpose (1Password mounts `.env` files that way). `pipe.onWait` runs once
+ * when the pipe has not reached its end after `pipe.noticeAfterMs`, told
+ * whether any of it has come. Undefined when nothing is at the name;
  * {@link NotARegularFile} for a socket, device or directory;
- * {@link PipeNotAnswered} when the pipe does not reach its end in time.
+ * {@link PipeNotAnswered} when the pipe does not reach its end within the bounds.
  *
  * The wait polls with `Bun.sleepSync`, so nothing else on the event loop runs
  * during it, timers and signal listeners included. For the wait, SIGINT and
@@ -224,7 +232,7 @@ function detachStopListeners(): () => void {
  */
 export function readRegularFileOrPipeTextSync(
 	file: string,
-	pipe: { deadlineMs: number; noticeAfterMs: number; onWait(started: boolean): void },
+	pipe: { deadlineMs: number; maxBytes: number; noticeAfterMs: number; onWait(started: boolean): void },
 ): string | undefined {
 	let fd: number;
 	try {
@@ -241,6 +249,7 @@ export function readRegularFileOrPipeTextSync(
 		const opened = Date.now();
 		const buffer = Buffer.alloc(64 * 1024);
 		const chunks: Buffer[] = [];
+		let received = 0;
 		let noticed = false;
 		for (;;) {
 			let n: number;
@@ -252,17 +261,21 @@ export function readRegularFileOrPipeTextSync(
 				n = -1;
 			}
 			if (n > 0) {
+				received += n;
+				if (received > pipe.maxBytes) throw new PipeNotAnswered(file, "oversized");
 				chunks.push(Buffer.from(buffer.subarray(0, n)));
-				continue;
 			}
 			// End of file after the writer's bytes: the whole file. End of file
 			// before any byte is a writer that has not come yet.
-			if (n === 0 && chunks.length > 0) return Buffer.concat(chunks).toString("utf8");
+			if (n === 0 && received > 0) return Buffer.concat(chunks).toString("utf8");
+			// Checked after every read, data or not: a writer that never pauses
+			// is held to the same deadline as one that never comes.
 			const waited = Date.now() - opened;
-			if (waited >= pipe.deadlineMs) throw new PipeNotAnswered(file, chunks.length > 0);
+			if (waited >= pipe.deadlineMs) throw new PipeNotAnswered(file, received > 0 ? "unfinished" : "silent");
+			if (n > 0) continue;
 			if (!noticed && waited >= pipe.noticeAfterMs) {
 				noticed = true;
-				pipe.onWait(chunks.length > 0);
+				pipe.onWait(received > 0);
 			}
 			reattachStopListeners ??= detachStopListeners();
 			Bun.sleepSync(PIPE_POLL_MS);

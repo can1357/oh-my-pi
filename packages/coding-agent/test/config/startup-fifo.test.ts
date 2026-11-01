@@ -2,6 +2,10 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
+// A namespace import, not named imports: this file must still load against code
+// that has no such constants, which is how it is run against `main` to show
+// each case fails there.
+import * as envBounds from "@oh-my-pi/pi-utils/env";
 
 // Every file a user or another process can place that omp reads before a
 // command does its own work: the `.env` and `config.yml` files every command
@@ -20,7 +24,12 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 // process, so only another process can see it. An open with `O_NONBLOCK`
 // alone fails the first run: the open returns at once, and the read after it
 // reads the FIFO like any stream.
-const CHILD_DEADLINE_MS = 20_000;
+// The deadline is wide because it cannot tell a child blocked on a FIFO from one
+// slow to load omp's modules on a busy machine: at load about 290, a child that
+// was still loading was killed at a 20 s deadline. A blocked child never
+// finishes, so a wide deadline only slows a failing run.
+const CHILD_DEADLINE_MS = 45_000;
+const TEST_TIMEOUT_MS = CHILD_DEADLINE_MS + 15_000;
 const PAYLOAD = "queued for someone else\n";
 const repoRoot = path.resolve(import.meta.dir, "../../../..");
 
@@ -310,74 +319,91 @@ function expectNamed(run: Run, c: Case): void {
 
 describe.skipIf(process.platform === "win32")("a FIFO at a startup path is neither waited on nor read", () => {
 	for (const c of cases) {
-		it(`${c.name}, with input waiting in it`, async () => {
-			const fifo = fifoWithInput(c.at());
+		it(
+			`${c.name}, with input waiting in it`,
+			async () => {
+				const fifo = fifoWithInput(c.at());
 
-			const run = await runChild(c.script(), c.env?.() ?? {});
-			const left = fifo.left();
+				const run = await runChild(c.script(), c.env?.() ?? {});
+				const left = fifo.left();
 
-			expectNamed(run, c);
-			expect(left).toBe(PAYLOAD);
-			expect(fs.lstatSync(c.at()).isFIFO()).toBe(true);
-		}, 30_000);
+				expectNamed(run, c);
+				expect(left).toBe(PAYLOAD);
+				expect(fs.lstatSync(c.at()).isFIFO()).toBe(true);
+			},
+			TEST_TIMEOUT_MS,
+		);
 
-		it(`${c.name}, with nothing writing to it`, async () => {
-			mkfifo(c.at());
+		it(
+			`${c.name}, with nothing writing to it`,
+			async () => {
+				mkfifo(c.at());
 
-			const run = await runChild(c.script(), c.env?.() ?? {});
+				const run = await runChild(c.script(), c.env?.() ?? {});
 
-			expectNamed(run, c);
-		}, 30_000);
+				expectNamed(run, c);
+			},
+			TEST_TIMEOUT_MS,
+		);
 	}
 
-	it("a link to a FIFO is judged by what it leads to", async () => {
-		const pipe = path.join(tempDir.path(), "elsewhere", "pipe");
-		const fifo = fifoWithInput(pipe);
-		const at = path.join(home, ".idapro", "ida-config.json");
-		fs.mkdirSync(path.dirname(at), { recursive: true });
-		fs.symlinkSync(pipe, at);
+	it(
+		"a link to a FIFO is judged by what it leads to",
+		async () => {
+			const pipe = path.join(tempDir.path(), "elsewhere", "pipe");
+			const fifo = fifoWithInput(pipe);
+			const at = path.join(home, ".idapro", "ida-config.json");
+			fs.mkdirSync(path.dirname(at), { recursive: true });
+			fs.symlinkSync(pipe, at);
 
-		const run = await runChild(
-			`import { locateIdaInstall } from ${mod("coding-agent", "ida/install.ts")};
+			const run = await runChild(
+				`import { locateIdaInstall } from ${mod("coding-agent", "ida/install.ts")};
 			locateIdaInstall(undefined);`,
-			{},
-		);
-		const left = fifo.left();
+				{},
+			);
+			const left = fifo.left();
 
-		expect(run.exit).toBe(0);
-		expect(timesNamed(run.stderr, at)).toBe(1);
-		expect(left).toBe(PAYLOAD);
-	}, 30_000);
+			expect(run.exit).toBe(0);
+			expect(timesNamed(run.stderr, at)).toBe(1);
+			expect(left).toBe(PAYLOAD);
+		},
+		TEST_TIMEOUT_MS,
+	);
 
-	it("a FIFO put at a discovery file's name after a look at it is still not read", async () => {
-		const at = path.join(projectDir, "AGENTS.md");
-		const fifo = fifoWithInput(at);
-		const regular = path.join(tempDir.path(), "regular.md");
-		fs.writeFileSync(regular, "a regular file\n");
+	it(
+		"a FIFO put at a discovery file's name after a look at it is still not read",
+		async () => {
+			const at = path.join(projectDir, "AGENTS.md");
+			const fifo = fifoWithInput(at);
+			const regular = path.join(tempDir.path(), "regular.md");
+			fs.writeFileSync(regular, "a regular file\n");
 
-		// The look at the name sees a regular file; by the read, a FIFO stands there.
-		const run = await runChild(
-			`import * as fs from "node:fs";
+			// The look at the name sees a regular file; by the read, a FIFO stands there.
+			const run = await runChild(
+				`import * as fs from "node:fs";
 			import { readFile } from ${mod("coding-agent", "capability/fs.ts")};
 			const look = fs.promises.stat;
 			fs.promises.stat = (file, ...rest) => look(file === ${JSON.stringify(at)} ? ${JSON.stringify(regular)} : file, ...rest);
 			const content = await readFile(${JSON.stringify(at)});
 			console.log("content", JSON.stringify(content));`,
-			{},
-		);
-		const left = fifo.left();
+				{},
+			);
+			const left = fifo.left();
 
-		expect(run.exit).toBe(0);
-		expect(run.stdout).toContain("content null");
-		expect(left).toBe(PAYLOAD);
-	}, 30_000);
+			expect(run.exit).toBe(0);
+			expect(run.stdout).toContain("content null");
+			expect(left).toBe(PAYLOAD);
+		},
+		TEST_TIMEOUT_MS,
+	);
 });
 
 // A `.env` is the one file a tool serves through a named pipe on purpose:
 // 1Password mounts `.env` files that way, and writes the file when a reader
-// opens it. So a pipe at a `.env` path is read, but only to its end within a
-// bound, and never in part; with nothing writing it, the command goes on
-// without it after the bound and says that its variables are unset.
+// opens it. So at startup a pipe at a `.env` path is read, but only to its end
+// within a bound, and never in part; with nothing writing it, the command goes
+// on without it after the bound and says that its variables are unset. The
+// children here have no terminal, so the bound is ENV_PIPE_DEADLINE_MS.
 const ENV_PATHS = {
 	"~/.env": () => path.join(home, ".env"),
 	"~/.omp/.env": () => path.join(home, ".omp", ".env"),
@@ -385,80 +411,234 @@ const ENV_PATHS = {
 	"<project>/.env": () => path.join(projectDir, ".env"),
 };
 const VARIABLE = "STARTUP_FIFO_PROBE";
+const BOUND = `${envBounds.ENV_PIPE_DEADLINE_MS / 1000} s`;
 
 /** The child loads omp's environment as every command does, then prints what the probe variable holds. */
 const loadEnvAndPrint = (): string =>
 	`import ${mod("utils", "index.ts")};
 	console.log("${VARIABLE}=" + (process.env.${VARIABLE} ?? "unset"));`;
 
-/** A writer that waits for a reader to open `target`, writes `text` and closes it, as a 1Password mount does. */
+/** A writer that waits for a reader to open `target`, writes `text` once and closes it, as a 1Password mount does. */
 function answeringWriter(target: string, text: string): Bun.Subprocess {
 	mkfifo(target);
 	return Bun.spawn(["sh", "-c", 'printf %s "$1" > "$0"', target, text], { stdout: "ignore", stderr: "ignore" });
 }
 
+/** Whether `stderr` says omp waited on, or passed over, a file. */
+function saysNothingAboutFiles(stderr: string): boolean {
+	return !stderr.includes("omp is waiting") && !stderr.includes("omp did not");
+}
+
 describe.skipIf(process.platform === "win32")("a named pipe at a .env path is read to its end, within a bound", () => {
 	for (const [name, at] of Object.entries(ENV_PATHS)) {
-		it(`${name}, answered by a writer, sets its variables`, async () => {
-			const writer = answeringWriter(at(), `${VARIABLE}=loaded\n`);
+		it(
+			`${name}, answered by a writer, sets its variables`,
+			async () => {
+				const writer = answeringWriter(at(), `${VARIABLE}=loaded\n`);
+				try {
+					const run = await runChild(loadEnvAndPrint(), {});
+
+					expect(run.exit).toBe(0);
+					expect(run.stdout).toContain(`${VARIABLE}=loaded`);
+					expect(saysNothingAboutFiles(run.stderr)).toBe(true);
+				} finally {
+					writer.kill();
+				}
+			},
+			TEST_TIMEOUT_MS,
+		);
+
+		it(
+			`${name}, with nothing writing to it, is passed over after the bound with its variables unset`,
+			async () => {
+				mkfifo(at());
+
+				const run = await runChild(loadEnvAndPrint(), {});
+
+				expect(run.exit).toBe(0);
+				expect(run.stdout).toContain(`${VARIABLE}=unset`);
+				const waiting = run.stderr.indexOf(
+					`omp is waiting up to ${BOUND} for ${at()}: it is a named pipe, and nothing has written it yet. ` +
+						`If 1Password serves it, approve its authorization prompt. Ctrl-C stops omp.`,
+				);
+				const passedOver = run.stderr.indexOf(
+					`omp did not load ${at()}: it is a named pipe, and nothing wrote to it within ${BOUND}, ` +
+						`so every variable it sets is unset for this command.`,
+				);
+				expect(waiting).toBeGreaterThanOrEqual(0);
+				expect(passedOver).toBeGreaterThan(waiting);
+			},
+			TEST_TIMEOUT_MS,
+		);
+	}
+
+	it(
+		"a writer that stops before the end of the file sets none of its variables",
+		async () => {
+			const at = path.join(home, ".env");
+			// The first line is whole; the writer holds the pipe open and never finishes the second.
+			mkfifo(at);
+			const fd = fs.openSync(at, fs.constants.O_RDWR | fs.constants.O_NONBLOCK);
+			fs.writeSync(fd, `${VARIABLE}=loaded\nSECOND=`);
 			try {
 				const run = await runChild(loadEnvAndPrint(), {});
 
 				expect(run.exit).toBe(0);
-				expect(run.stdout).toContain(`${VARIABLE}=loaded`);
-				expect(run.stderr).not.toContain("omp did not load");
+				expect(run.stdout).toContain(`${VARIABLE}=unset`);
+				const waiting = run.stderr.indexOf(
+					`omp is waiting up to ${BOUND} for ${at}: it is a named pipe, and what is writing it has not finished.`,
+				);
+				const passedOver = run.stderr.indexOf(
+					`omp did not load ${at}: it is a named pipe, and what was writing it did not finish within ${BOUND}`,
+				);
+				expect(waiting).toBeGreaterThanOrEqual(0);
+				expect(passedOver).toBeGreaterThan(waiting);
+			} finally {
+				fs.closeSync(fd);
+			}
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"a writer that sends more than any .env holds sets none of its variables, and is cut off",
+		async () => {
+			const at = path.join(home, ".env");
+			mkfifo(at);
+			// A whole first line, then 2 MiB with no end, the pipe held open after it.
+			const writer = Bun.spawn(
+				[
+					"sh",
+					"-c",
+					'{ printf "%s\\n" "$1"; head -c 2097152 /dev/zero | tr "\\0" A; sleep 60; } > "$0"',
+					at,
+					`${VARIABLE}=loaded`,
+				],
+				{ stdout: "ignore", stderr: "ignore" },
+			);
+			try {
+				const run = await runChild(loadEnvAndPrint(), {});
+
+				expect(run.exit).toBe(0);
+				expect(run.stdout).toContain(`${VARIABLE}=unset`);
+				expect(run.stderr).toContain(
+					`omp did not load ${at}: it is a named pipe, and what was writing it sent more than 1024 KiB, more than a .env file holds`,
+				);
 			} finally {
 				writer.kill();
 			}
-		}, 30_000);
+		},
+		TEST_TIMEOUT_MS,
+	);
 
-		it(`${name}, with nothing writing to it, is passed over after the bound with its variables unset`, async () => {
-			mkfifo(at());
+	it(
+		"a regular .env file sets its variables, with nothing said",
+		async () => {
+			fs.writeFileSync(path.join(home, ".env"), `${VARIABLE}=loaded\n`);
 
 			const run = await runChild(loadEnvAndPrint(), {});
 
 			expect(run.exit).toBe(0);
-			expect(run.stdout).toContain(`${VARIABLE}=unset`);
-			const waiting = run.stderr.indexOf(`omp is waiting up to 10 s for ${at()}: it is a named pipe`);
-			const passedOver = run.stderr.indexOf(
-				`omp did not load ${at()}: it is a named pipe, and nothing wrote to it within 10 s, so every variable it sets is unset`,
-			);
-			expect(waiting).toBeGreaterThanOrEqual(0);
-			expect(passedOver).toBeGreaterThan(waiting);
-		}, 30_000);
-	}
+			expect(run.stdout).toContain(`${VARIABLE}=loaded`);
+			expect(saysNothingAboutFiles(run.stderr)).toBe(true);
+		},
+		TEST_TIMEOUT_MS,
+	);
 
-	it("a writer that stops before the end of the file sets none of its variables", async () => {
-		const at = path.join(home, ".env");
-		// The first line is whole; the writer holds the pipe open and never finishes the second.
-		mkfifo(at);
-		const fd = fs.openSync(at, fs.constants.O_RDWR | fs.constants.O_NONBLOCK);
-		fs.writeSync(fd, `${VARIABLE}=loaded\nSECOND=`);
-		try {
-			const run = await runChild(loadEnvAndPrint(), {});
+	it.skipIf(process.platform !== "linux" || !Bun.which("script"))(
+		"at a terminal the wait is longer, and Ctrl-C ends it at once",
+		async () => {
+			const at = path.join(home, ".env");
+			mkfifo(at);
+			const childFile = path.join(tempDir.path(), "child.ts");
+			fs.writeFileSync(childFile, `${loadEnvAndPrint()}\nprocess.exit(0);\n`);
+			// util-linux `script` runs the child on a pseudo-terminal; a ^C byte written to it
+			// is turned into SIGINT for the child by the terminal, as a key press is.
+			const child = Bun.spawn(["script", "-qfec", `${process.execPath} --no-env-file ${childFile}`, "/dev/null"], {
+				cwd: projectDir,
+				stdin: "pipe",
+				stdout: "pipe",
+				stderr: "pipe",
+				env: childEnv({}),
+			});
+			const notice = `omp is waiting up to ${envBounds.ENV_PIPE_TERMINAL_DEADLINE_MS / 1000} s for ${at}: it is a named pipe`;
+			const reader = (child.stdout as ReadableStream<Uint8Array>).getReader();
+			let seen = "";
+			const noticed = (async () => {
+				for (;;) {
+					const { done, value } = await reader.read();
+					if (done) return false;
+					seen += new TextDecoder().decode(value);
+					if (seen.includes(notice)) return true;
+				}
+			})();
+			// A real timer: the child's start-up and the terminal are real.
+			const sawNotice = await Promise.race([noticed, Bun.sleep(CHILD_DEADLINE_MS).then(() => false)]);
+			const pressed = Date.now();
+			child.stdin.write("\x03");
+			child.stdin.flush();
+			const ended = await Promise.race([child.exited.then(() => true), Bun.sleep(10_000).then(() => false)]);
+			const afterPress = Date.now() - pressed;
+			if (!ended) child.kill("SIGKILL");
+			await child.exited;
+
+			expect(sawNotice).toBe(true);
+			expect(ended).toBe(true);
+			expect(afterPress).toBeLessThan(10_000);
+			expect(seen).not.toContain(`${VARIABLE}=`);
+		},
+		TEST_TIMEOUT_MS,
+	);
+});
+
+// Re-reads of the project's `.env` files while omp runs — for every child
+// shell's environment and for the stream redactor — never wait on a pipe.
+describe.skipIf(process.platform === "win32")("a .env re-read while omp runs never waits on a pipe", () => {
+	it(
+		"a FIFO at a .env file read only for a child shell is refused, not waited on or read",
+		async () => {
+			const at = path.join(projectDir, ".env.local");
+			const fifo = fifoWithInput(at);
+
+			const run = await runChild(
+				`import { filterChildShellEnv } from ${mod("utils", "index.ts")};
+			filterChildShellEnv(process.env);
+			console.log("BUILT");`,
+				{},
+			);
+			const left = fifo.left();
 
 			expect(run.exit).toBe(0);
-			expect(run.stdout).toContain(`${VARIABLE}=unset`);
-			const waiting = run.stderr.indexOf(
-				`omp is waiting up to 10 s for ${at}: it is a named pipe (1Password mounts .env files this way), and what is writing it has not finished`,
-			);
-			const passedOver = run.stderr.indexOf(
-				`omp did not load ${at}: it is a named pipe, and what was writing it stopped before the end within 10 s`,
-			);
-			expect(waiting).toBeGreaterThanOrEqual(0);
-			expect(passedOver).toBeGreaterThan(waiting);
-		} finally {
-			fs.closeSync(fd);
-		}
-	}, 30_000);
+			expect(run.stdout).toContain("BUILT");
+			expect(timesNamed(run.stderr, at)).toBe(1);
+			expect(run.stderr).not.toContain("omp is waiting");
+			expect(left).toBe(PAYLOAD);
+		},
+		TEST_TIMEOUT_MS,
+	);
 
-	it("a regular .env file sets its variables, with nothing said", async () => {
-		fs.writeFileSync(path.join(home, ".env"), `${VARIABLE}=loaded\n`);
+	it(
+		"a .env pipe loaded at startup is not read again: a child shell and the redactor use what was loaded",
+		async () => {
+			// The writer answers once, as at startup, and is gone before the re-reads.
+			const writer = answeringWriter(path.join(projectDir, ".env"), `${VARIABLE}=loaded\n`);
+			try {
+				const run = await runChild(
+					`import { filterChildShellEnv, getDotenvEnvValues } from ${mod("utils", "index.ts")};
+				console.log("redactor=" + getDotenvEnvValues().includes("loaded"));
+				console.log("child=" + (filterChildShellEnv(process.env).${VARIABLE} ?? "absent"));`,
+					{},
+				);
 
-		const run = await runChild(loadEnvAndPrint(), {});
-
-		expect(run.exit).toBe(0);
-		expect(run.stdout).toContain(`${VARIABLE}=loaded`);
-		expect(run.stderr).toBe("");
-	}, 30_000);
+				expect(run.exit).toBe(0);
+				// The redactor knows the value, and the child shell does not inherit it.
+				expect(run.stdout).toContain("redactor=true");
+				expect(run.stdout).toContain("child=absent");
+				expect(saysNothingAboutFiles(run.stderr)).toBe(true);
+			} finally {
+				writer.kill();
+			}
+		},
+		TEST_TIMEOUT_MS,
+	);
 });

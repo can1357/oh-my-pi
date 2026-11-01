@@ -8,7 +8,8 @@ import { getLastChangelogVersionPath, TempDir } from "@oh-my-pi/pi-utils";
 // command; a synchronous read blocked the whole event loop, so no timer in the same process could
 // ever report it. Each case therefore runs in a child process that is killed if it hangs, and a
 // child that finishes — whatever it decided about the unreadable file — is the pass.
-const CHILD_DEADLINE_MS = 20_000;
+// Wide, because the deadline cannot tell a blocked child from one slow to load on a busy machine.
+const CHILD_DEADLINE_MS = 45_000;
 const packageRoot = path.resolve(import.meta.dir, "../..");
 
 let tempDir: TempDir;
@@ -75,7 +76,7 @@ describe.skipIf(process.platform === "win32")("a FIFO at a settings path is refu
 
 		expect(run.outcome).toBe("finished");
 		expect(fs.lstatSync(pipe).isFIFO()).toBe(true);
-	}, 30_000);
+	}, 60_000);
 
 	for (const write of ["the value it already holds", "a new value"] as const) {
 		it(`config.yml read again when a setting is written: ${write}`, async () => {
@@ -91,7 +92,7 @@ describe.skipIf(process.platform === "win32")("a FIFO at a settings path is refu
 
 			expect(run.outcome).toBe("finished");
 			expect(fs.lstatSync(config).isFIFO()).toBe(true);
-		}, 30_000);
+		}, 60_000);
 	}
 
 	it("a --config overlay", async () => {
@@ -105,7 +106,7 @@ describe.skipIf(process.platform === "win32")("a FIFO at a settings path is refu
 		expect(run.outcome).toBe("finished");
 		// The overlay loader treats an unreadable overlay as the hard error it is.
 		expect(run.stdout).toContain("Failed to read config overlay");
-	}, 30_000);
+	}, 60_000);
 
 	it("the legacy settings.json a first start migrates", async () => {
 		mkfifo(path.join(agentDir, "settings.json"));
@@ -114,7 +115,7 @@ describe.skipIf(process.platform === "win32")("a FIFO at a settings path is refu
 
 		expect(run.outcome).toBe("finished");
 		expect(fs.lstatSync(path.join(agentDir, "settings.json")).isFIFO()).toBe(true);
-	}, 30_000);
+	}, 60_000);
 
 	it("the last-changelog-version marker a legacy config.yml seeds", async () => {
 		fs.writeFileSync(path.join(agentDir, "config.yml"), "lastChangelogVersion: 1.0.0\n");
@@ -125,5 +126,5 @@ describe.skipIf(process.platform === "win32")("a FIFO at a settings path is refu
 
 		expect(run.outcome).toBe("finished");
 		expect(fs.lstatSync(marker).isFIFO()).toBe(true);
-	}, 30_000);
+	}, 60_000);
 });

@@ -12,7 +12,7 @@ import {
 	logger,
 	normalizePathForComparison,
 } from "@oh-my-pi/pi-utils";
-import { readOptionalFileText, readRegularFileText } from "@oh-my-pi/pi-utils/regular-file";
+import { readOptionalFileText } from "@oh-my-pi/pi-utils/regular-file";
 import { JSONC } from "bun";
 import { resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import { loadExtensions } from "../extensions/loader";
@@ -169,7 +169,9 @@ export class PluginManager {
 
 	async #readRuntimeConfigAt(lockPath: string): Promise<PluginRuntimeConfig> {
 		try {
-			const text = await readRegularFileText(lockPath);
+			// Judged a regular file before a byte is read: a FIFO here is reported
+			// and passed over like a missing lock, as the plugin loader does.
+			const text = await readOptionalFileText(lockPath);
 			return normalizePluginRuntimeConfig(text === undefined ? {} : JSON.parse(text));
 		} catch (err) {
 			logger.warn("Failed to load plugin runtime config", { path: lockPath, error: String(err) });
