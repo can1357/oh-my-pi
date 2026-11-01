@@ -422,6 +422,18 @@ impl ExecutionParameters {
 			.filter(|(fd, _)| !self.open_files.contains_fd(*fd));
 		self.open_files.iter_fds().chain(shell_fds)
 	}
+
+	/// Keeps only what [`end_failed_subshell`] reads: this context's standard
+	/// error and its cancellation. A command that consumes its parameters
+	/// keeps these to report the error it ends with.
+	pub(crate) fn failure_report(&self, shell: &Shell<impl extensions::ShellExtensions>) -> Self {
+		let mut report = Self { cancel_token: self.cancel_token.clone(), ..Self::default() };
+		match self.try_stderr(shell) {
+			Some(stderr) => report.open_files.set_fd(OpenFiles::STDERR_FD, stderr),
+			None => report.open_files.remove_fd(OpenFiles::STDERR_FD),
+		};
+		report
+	}
 }
 
 fn ensure_not_cancelled(params: &ExecutionParameters) -> Result<(), error::Error> {
@@ -429,6 +441,23 @@ fn ensure_not_cancelled(params: &ExecutionParameters) -> Result<(), error::Error
 		return Err(error::ErrorKind::Interrupted.into());
 	}
 	Ok(())
+}
+
+/// Ends a subshell whose body failed with `error` as a child shell process
+/// ends: it reports the error on its own standard error and exits with the
+/// error's status, so its parent sees neither the error nor a request to exit,
+/// return or break. A cancelled subshell keeps the error, so cancellation still
+/// stops the parent and nothing reports the interruption.
+pub(crate) async fn end_failed_subshell(
+	subshell: &Shell<impl extensions::ShellExtensions>,
+	params: &ExecutionParameters,
+	error: error::Error,
+) -> Result<ExecutionResult, error::Error> {
+	if params.is_cancelled() {
+		return Err(error);
+	}
+	let _ = subshell.display_error(&mut params.stderr(subshell), &error).await;
+	Ok(ExecutionExitCode::from(&error).into())
 }
 
 
@@ -726,7 +755,7 @@ async fn try_spawn_pipeline_as_job<SE: extensions::ShellExtensions>(
 	let mut tasks = VecDeque::new();
 
 	for spawn_result in spawn_results {
-		if let ExecutionWaitResult::Stopped(child) = spawn_result.poll().await? {
+		if let ExecutionWaitResult::Stopped(child) = spawn_result.spawned.poll().await? {
 			tasks.push_back(jobs::JobTask::External(child));
 		}
 	}
@@ -927,16 +956,24 @@ impl Execute for ast::Pipeline {
 	}
 }
 
+/// A started stage of a pipeline.
+struct PipelineStage {
+	spawned:     ExecutionSpawnResult,
+	/// Whether the stage runs in a subshell of its own rather than in the
+	/// current shell.
+	in_subshell: bool,
+}
+
 async fn spawn_pipeline_processes(
 	pipeline: &ast::Pipeline,
 	shell: &mut Shell<impl extensions::ShellExtensions>,
 	params: &ExecutionParameters,
-) -> Result<VecDeque<ExecutionSpawnResult>, error::Error> {
+) -> Result<VecDeque<PipelineStage>, error::Error> {
 	ensure_not_cancelled(params)?;
 	let pipeline_len = pipeline.seq.len();
 	let mut pipe_readers = vec![];
 	let mut pipe_writers = vec![];
-	let mut spawn_results = VecDeque::new();
+	let mut stages = VecDeque::new();
 	let mut process_group_id: Option<i32> = None;
 
 	// Create pipes to use between commands, but only bother doing so if there's
@@ -1013,26 +1050,32 @@ async fn spawn_pipeline_processes(
 			}
 		};
 
-		let spawn_result = command
-			.execute_in_pipeline(pipeline_context, cmd_params)
-			.await?;
+		let spawned = match command.execute_in_pipeline(pipeline_context, cmd_params).await {
+			// A stage in a subshell of its own ends at its error, and the rest of
+			// the pipeline runs on. An error that returns here ended the stage
+			// before it ran a command (a word failed to expand, say), so it goes
+			// where the pipeline's standard error goes, not to that command's own
+			// redirections.
+			Err(error) if !run_in_current_shell => end_failed_subshell(shell, params, error).await?.into(),
+			spawned => spawned?,
+		};
 
 		// Update the process group ID if something was spawned.
-		if let ExecutionSpawnResult::StartedProcess(child) = &spawn_result {
+		if let ExecutionSpawnResult::StartedProcess(child) = &spawned {
 			if process_group_id.is_none() {
 				process_group_id = child.pgid();
 			}
 		}
 
-		spawn_results.push_back(spawn_result);
+		stages.push_back(PipelineStage { spawned, in_subshell: !run_in_current_shell });
 	}
 
-	Ok(spawn_results)
+	Ok(stages)
 }
 
 async fn wait_for_pipeline_processes_and_update_status(
 	pipeline: &ast::Pipeline,
-	mut process_spawn_results: VecDeque<ExecutionSpawnResult>,
+	mut stages: VecDeque<PipelineStage>,
 	shell: &mut Shell<impl extensions::ShellExtensions>,
 	params: &ExecutionParameters,
 ) -> Result<ExecutionResult, error::Error> {
@@ -1049,30 +1092,33 @@ async fn wait_for_pipeline_processes_and_update_status(
 	// pipe-input stage can leave the recorded group while still belonging to
 	// the pipeline. A lone process needs no shared scope: its wait checks its
 	// own PID.
-	let external_pid = |result: &ExecutionSpawnResult| match result {
+	let external_pid = |stage: &PipelineStage| match &stage.spawned {
 		ExecutionSpawnResult::StartedProcess(child) => child.pid(),
 		ExecutionSpawnResult::Completed(_) | ExecutionSpawnResult::StartedTask(_) => None,
 	};
-	if process_spawn_results.iter().filter_map(external_pid).nth(1).is_some() {
-		let pipeline_pids: Arc<[_]> = process_spawn_results.iter().filter_map(external_pid).collect();
-		for result in &mut process_spawn_results {
-			if let ExecutionSpawnResult::StartedProcess(child) = result {
+	if stages.iter().filter_map(external_pid).nth(1).is_some() {
+		let pipeline_pids: Arc<[_]> = stages.iter().filter_map(external_pid).collect();
+		for stage in &mut stages {
+			if let ExecutionSpawnResult::StartedProcess(child) = &mut stage.spawned {
 				child.set_stop_pids(Arc::clone(&pipeline_pids));
 			}
 		}
 	}
 
-	while let Some(child) = process_spawn_results.pop_front() {
+	while let Some(PipelineStage { spawned, in_subshell }) = stages.pop_front() {
 		ensure_not_cancelled(params)?;
 		let wait_result = if !stopped_children.is_empty() {
-			child.poll().await?
+			spawned.poll().await?
 		} else {
-			child.wait_with_cancel(params.cancel_token()).await?
+			spawned.wait_with_cancel(params.cancel_token()).await?
 		};
 
 		match wait_result {
 			ExecutionWaitResult::Completed(current_result) => {
-				result = current_result;
+				// A stage in a subshell of its own hands the pipeline only its exit
+				// status: an `exit`, `return`, `break` or `continue` in it ended
+				// that subshell.
+				result = if in_subshell { current_result.exit_code.into() } else { current_result };
 				shell.set_last_exit_status(result.exit_code.into());
 				shell
 					.last_pipeline_statuses_mut()
@@ -1162,12 +1208,21 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::Command {
 						let redirects = redirects.clone();
 						let mut params = params;
 						Ok(ExecutionSpawnResult::StartedTask(tokio::spawn(async move {
-							if let Some(redirects) = &redirects {
-								for redirect in &redirects.0 {
-									setup_redirect(&mut shell, &mut params, redirect).await?;
+							let result = async {
+								if let Some(redirects) = &redirects {
+									for redirect in &redirects.0 {
+										setup_redirect(&mut shell, &mut params, redirect).await?;
+									}
 								}
+								compound.execute(&mut shell, &params).await
 							}
-							compound.execute(&mut shell, &params).await
+							.await;
+							// An error ends this stage's subshell, reported where
+							// the stage's own redirections send its standard error.
+							match result {
+								Err(error) => end_failed_subshell(&shell, &params, error).await,
+								result => result,
+							}
 						})))
 					},
 					mut shell => {
@@ -1190,26 +1245,32 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::Command {
 					.into())
 			},
 			Self::ExtendedTest(e, redirects) => {
-				// Set up any additional redirects.
-				if let Some(redirects) = redirects {
-					for redirect in &redirects.0 {
-						setup_redirect(&mut pipeline_context.shell, &mut params, redirect).await?;
+				let result = async {
+					// Set up any additional redirects.
+					if let Some(redirects) = redirects {
+						for redirect in &redirects.0 {
+							setup_redirect(&mut pipeline_context.shell, &mut params, redirect).await?;
+						}
 					}
-				}
 
-				// Evaluate the extended test expression.
-				let result = if extendedtests::eval_extended_test_expr(
-					&e.expr,
-					&mut pipeline_context.shell,
-					&params,
-				)
-				.await?
-				{
-					0
-				} else {
-					1
+					// Evaluate the extended test expression.
+					extendedtests::eval_extended_test_expr(&e.expr, &mut pipeline_context.shell, &params)
+						.await
+				}
+				.await;
+				let result = match result {
+					Ok(true) => ExecutionResult::new(0),
+					Ok(false) => ExecutionResult::new(1),
+					// In a pipeline stage's own subshell, an error ends that
+					// stage, reported where its redirections send standard error.
+					Err(error)
+						if matches!(pipeline_context.shell, commands::ShellForCommand::OwnedShell { .. }) =>
+					{
+						end_failed_subshell(&pipeline_context.shell, &params, error).await?
+					},
+					Err(error) => return Err(error),
 				};
-				Ok(ExecutionResult::new(result).into())
+				Ok(result.into())
 			},
 		}
 	}
