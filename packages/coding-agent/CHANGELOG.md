@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `/cd` is an alias for `/move`, so a session can change directory under the name the `cd` tool already uses
+
 ## [18.14.2] - 2026-10-31
 
 ### Added
