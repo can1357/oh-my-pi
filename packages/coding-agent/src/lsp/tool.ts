@@ -384,17 +384,18 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 							continue;
 						}
 						const client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
-						// Sync open dependencies, then make the server compute the target's
-						// diagnostics against current disk state. A report cached from an earlier
-						// call cannot be trusted: a dependency OMP never opened may have changed.
+						// Sync open dependencies before querying. Pulls recompute the
+						// analysis; a previous push remains valid until the server
+						// republishes it or the document overlay changes.
 						await reconcileOpenFilesFromDisk(client, signal, uri);
 						const minVersion = client.diagnosticsVersion;
 						// Set when clangd was asked to rebuild: its report is final only once its
 						// build status settles.
 						let rebuildStatusSeq: number | undefined;
-						if (supportsDocumentDiagnostics(client)) {
-							// The wait pulls a fresh report; drop the cached one so it cannot answer first.
-							client.diagnostics.delete(uri);
+						const canPull = supportsDocumentDiagnostics(client);
+						if (canPull) {
+							// Reconcile clears pushes when the document changes; otherwise
+							// retain the last check result while asking for fresh analysis.
 							await reconcileFileFromDisk(client, resolved, signal);
 						} else if (client.buildStatus) {
 							// clangd with build status: rebuild the main file in place, keeping the
@@ -433,7 +434,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 								: await waitForDiagnostics(client, uri, {
 										timeoutMs,
 										signal,
-										minVersion,
+										minVersion: canPull ? undefined : minVersion,
 										expectedDocumentVersion,
 										// Decided per pull, not above: a server can register pulls after this call began.
 										afterProjectLoad: isProjectAwareLspServer(serverConfig),
@@ -461,7 +462,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				const seen = new Set<string>();
 				const uniqueDiagnostics: Diagnostic[] = [];
 				for (const d of allDiagnostics) {
-					const key = `${d.range.start.line}:${d.range.start.character}:${d.range.end.line}:${d.range.end.character}:${d.message}`;
+					const key = `${d.range.start.line}:${d.range.start.character}:${d.range.end.line}:${d.range.end.character}:${d.source ?? ""}:${d.message}`;
 					if (!seen.has(key)) {
 						seen.add(key);
 						uniqueDiagnostics.push(d);
@@ -1423,14 +1424,11 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 
 				case "code_actions": {
 					let diagnostics = client.diagnostics.get(uri)?.diagnostics ?? [];
-					// A reconcile dropped the stale diagnostics and pushed a didChange (or
-					// reopened a document closed for idleness); the server re-publishes (or a
-					// pull answers) asynchronously, so read the map now and quick-fix
-					// providers see an empty context.diagnostics.
-					// Wait for diagnostics matching the reconciled document version first.
-					// Non-diagnostic actions (refactors, source actions) still return if the
-					// wait cannot complete, so a diagnostics failure never breaks code_actions.
-					if (reconciledFromDisk) {
+					// Pull reports are not cached with publishes: a dual-mode server
+					// can replace either set independently. Re-pull for the full
+					// code-action context, or wait for fresh data after a reconcile.
+					// Non-diagnostic actions still return if the wait fails.
+					if (reconciledFromDisk || supportsDocumentDiagnostics(client)) {
 						try {
 							const reported = await waitForDiagnostics(client, uri, {
 								timeoutMs: Math.min(

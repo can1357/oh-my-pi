@@ -316,10 +316,35 @@ function isProvisionalColdPublish(
 	);
 }
 
+/** Keep a server's independent push and pull reports without repeating shared findings. */
+function mergeDiagnostics(pulled: Diagnostic[], published: Diagnostic[]): Diagnostic[] {
+	if (pulled.length === 0) return published;
+	if (published.length === 0) return pulled;
+	const merged = [...pulled];
+	for (const pushed of published) {
+		let duplicate = false;
+		for (const item of pulled) {
+			if (
+				item.source === pushed.source &&
+				item.message === pushed.message &&
+				item.range.start.line === pushed.range.start.line &&
+				item.range.start.character === pushed.range.start.character &&
+				item.range.end.line === pushed.range.end.line &&
+				item.range.end.character === pushed.range.end.character
+			) {
+				duplicate = true;
+				break;
+			}
+		}
+		if (!duplicate) merged.push(pushed);
+	}
+	return merged;
+}
+
 /**
- * Wait for a fresh diagnostics report for `uri`: a pull answer, or a publish that
- * passes the freshness checks. Resolves `undefined` when none arrives within the
- * budget, which callers MUST NOT read as a clean file; `[]` is a clean report.
+ * Wait for a fresh diagnostics report for `uri`, combining a pull with any
+ * valid pushed report for dual-mode servers. Resolves `undefined` when neither
+ * arrives within the budget; `[]` means the server reported the file clean.
  */
 export async function waitForDiagnostics(
 	client: LspClient,
@@ -353,7 +378,8 @@ export async function waitForDiagnostics(
 			throwIfAborted(signal);
 			deadline = Math.max(deadline, Date.now() + timeoutMs);
 		}
-		if (nextPullAt !== undefined && Date.now() >= nextPullAt && supportsDocumentDiagnostics(client)) {
+		const canPull = supportsDocumentDiagnostics(client);
+		if (nextPullAt !== undefined && Date.now() >= nextPullAt && canPull) {
 			nextPullAt = undefined;
 			pullResultPromise = requestDocumentDiagnostics(client, uri, signal, Math.max(1, deadline - Date.now()));
 		}
@@ -361,8 +387,9 @@ export async function waitForDiagnostics(
 		const versionOk = minVersion === undefined || client.diagnosticsVersion > minVersion;
 		const published = client.diagnostics.get(uri);
 		if (published && versionOk) {
-			// Server honored our exact document version → authoritative, accept now.
-			if (expectedDocumentVersion !== undefined && published.version === expectedDocumentVersion) {
+			// A pull-capable server can publish a different diagnostic set for
+			// this same version; wait for its pull before reporting both.
+			if (!canPull && expectedDocumentVersion !== undefined && published.version === expectedDocumentVersion) {
 				return published.diagnostics;
 			}
 			// An empty unversioned publish from a newly started server is often its
@@ -374,6 +401,7 @@ export async function waitForDiagnostics(
 				settledRef = published;
 				settledAt = now;
 			} else if (
+				!canPull &&
 				now - settledAt >= settleMs &&
 				!isProvisionalColdPublish(client, uri, published, expectedDocumentVersion, now)
 			) {
@@ -406,9 +434,27 @@ export async function waitForDiagnostics(
 		}
 	}
 
+	// A pending pull can finish at the deadline; it may also receive a push
+	// while the request settles, so read the latest publish after it completes.
+	if (pullResultPromise) {
+		const outcome = await pullResultPromise;
+		if (outcome.diagnostics !== undefined) pulled = outcome.diagnostics;
+		else if (outcome.failed !== undefined && isPullFailure(outcome.failed)) pullFailure = outcome.failed;
+	}
 	const versionOk = minVersion === undefined || client.diagnosticsVersion > minVersion;
 	const published = client.diagnostics.get(uri);
-	if (published && versionOk) {
+	if (pulled !== undefined && published && versionOk) {
+		const now = Date.now();
+		if (
+			(expectedDocumentVersion === undefined ||
+				published.version === null ||
+				published.version === expectedDocumentVersion) &&
+			!isProvisionalColdPublish(client, uri, published, expectedDocumentVersion, now)
+		) {
+			return mergeDiagnostics(pulled, published.diagnostics);
+		}
+	}
+	if (pulled === undefined && published && versionOk) {
 		if (expectedDocumentVersion !== undefined && published.version === expectedDocumentVersion) {
 			return published.diagnostics;
 		}
@@ -421,11 +467,6 @@ export async function waitForDiagnostics(
 			return published.diagnostics;
 		}
 	}
-	if (pullResultPromise) {
-		const outcome = await pullResultPromise;
-		if (outcome.diagnostics !== undefined) pulled = outcome.diagnostics;
-		else if (outcome.failed !== undefined && isPullFailure(outcome.failed)) pullFailure = outcome.failed;
-	}
 	throwIfAborted(signal);
 	if (pulled === undefined) {
 		// A pull the server failed leaves the file's state unknown; never let it
@@ -435,11 +476,8 @@ export async function waitForDiagnostics(
 		}
 		return undefined;
 	}
-	client.diagnostics.set(uri, {
-		diagnostics: pulled,
-		version: expectedDocumentVersion ?? client.openFiles.get(uri)?.version ?? null,
-	});
-	client.diagnosticsVersion += 1;
+	// Keep the cache for publishes only. A later push replaces its own report,
+	// not a synthetic union; the next pull recombines the latest independent sets.
 	return pulled;
 }
 

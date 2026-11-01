@@ -443,6 +443,7 @@ export interface LspClient {
 	config: ServerConfig;
 	proc: LspTransport;
 	requestId: number;
+	/** Latest pushed report per URI; pull reports are combined on demand, not cached here. */
 	diagnostics: Map<string, PublishedDiagnostics>;
 	diagnosticsVersion: number;
 	/** Set once a publish echoes a document version, so a wait can identify the report for a reopen. */

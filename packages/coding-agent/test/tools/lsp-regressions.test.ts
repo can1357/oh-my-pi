@@ -2184,6 +2184,160 @@ describe("lsp regressions", () => {
 		}, 15_000);
 	}
 
+	it("reports rustc pushes alongside rust-analyzer's empty pull report", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-dual-diagnostics-");
+		const target = path.join(tempDir.path(), "main.rs");
+		const warning: Diagnostic = {
+			message: "unused variable: `unused`",
+			source: "rustc",
+			severity: 2,
+			range: { start: { line: 1, character: 6 }, end: { line: 1, character: 12 } },
+		};
+		try {
+			await Bun.write(target, "fn main() {\n let unused = 1;\n}\n");
+			installFakeLsp((message, server) => {
+				if (message.method === "initialize") {
+					server.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						result: { capabilities: { diagnosticProvider: { identifier: "rust-analyzer" } } },
+					});
+				} else if (message.method === "textDocument/didOpen") {
+					for (const kind of ["begin", "end"]) {
+						server.send({ jsonrpc: "2.0", method: "$/progress", params: { token: "load", value: { kind } } });
+					}
+					server.send({
+						jsonrpc: "2.0",
+						method: "textDocument/publishDiagnostics",
+						params: { uri: documentUri(message.params), diagnostics: [warning] },
+					});
+				} else if (message.method === "textDocument/diagnostic") {
+					server.send({ jsonrpc: "2.0", id: message.id, result: { kind: "full", items: [] } });
+				} else if (message.method === "shutdown") {
+					server.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					server.exit(0);
+				}
+			});
+			const serverConfig: ServerConfig = { command: "fake-lsp", fileTypes: ["rs"], rootMarkers: [] };
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+				servers: { "fake-lsp": serverConfig },
+				idleTimeoutMs: undefined,
+			});
+			vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["fake-lsp", serverConfig]]);
+
+			const result = await new LspTool(makeLspSession(tempDir.path())).execute("dual-diagnostics", {
+				action: "diagnostics",
+				file: target,
+				timeout: 5,
+			});
+			expect(textResult(result)).toContain("unused variable: `unused`");
+			const again = await new LspTool(makeLspSession(tempDir.path())).execute("dual-diagnostics-again", {
+				action: "diagnostics",
+				file: target,
+				timeout: 5,
+			});
+			expect(textResult(again)).toContain("unused variable: `unused`");
+			await Bun.write(target, "fn main() {}\n");
+			const changed = await new LspTool(makeLspSession(tempDir.path())).execute("dual-diagnostics-changed", {
+				action: "diagnostics",
+				file: target,
+				timeout: 5,
+			});
+			expect(textResult(changed)).toBe("OK");
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	}, 10_000);
+
+	it("combines independent push and pull findings without retaining a cleared push", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-mixed-diagnostics-");
+		const target = path.join(tempDir.path(), "main.rs");
+		const uri = fileToUri(target);
+		const range = { start: { line: 0, character: 0 }, end: { line: 0, character: 4 } };
+		const analysis: Diagnostic = { range, source: "rust-analyzer", message: "inactive code", severity: 3 };
+		const warning: Diagnostic = { range, source: "rustc", message: "unused variable", severity: 2 };
+		const lint: Diagnostic = { range, source: "clippy", message: "unused variable", severity: 2 };
+		let pulls = 0;
+		try {
+			await Bun.write(target, "fn main() {}\n");
+			installFakeLsp((message, server) => {
+				if (message.method === "initialize") {
+					server.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: { diagnosticProvider: true } } });
+				} else if (message.method === "textDocument/didOpen") {
+					for (const kind of ["begin", "end"]) {
+						server.send({ jsonrpc: "2.0", method: "$/progress", params: { token: "load", value: { kind } } });
+					}
+					server.send({
+						jsonrpc: "2.0",
+						method: "textDocument/publishDiagnostics",
+						params: { uri, diagnostics: [warning, lint] },
+					});
+				} else if (message.method === "textDocument/diagnostic") {
+					pulls++;
+					if (pulls === 2 || pulls === 4) {
+						server.send({
+							jsonrpc: "2.0",
+							method: "textDocument/publishDiagnostics",
+							params: { uri, diagnostics: pulls === 2 ? [] : [warning, lint] },
+						});
+					}
+					server.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						result: { kind: "full", items: pulls === 1 ? [analysis, { ...warning }] : [analysis] },
+					});
+				} else if (message.method === "textDocument/codeAction") {
+					const params = message.params;
+					const context = params && typeof params === "object" && "context" in params ? params.context : undefined;
+					const diagnostics =
+						context && typeof context === "object" && "diagnostics" in context ? context.diagnostics : undefined;
+					server.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						result:
+							Array.isArray(diagnostics) &&
+							diagnostics.some(item => item.source === "rust-analyzer" && item.message === "inactive code")
+								? [{ title: "Fix inactive code", kind: "quickfix" }]
+								: [],
+					});
+				} else if (message.method === "shutdown") {
+					server.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					server.exit(0);
+				}
+			});
+			const serverConfig: ServerConfig = { command: "fake-lsp", fileTypes: ["rs"], rootMarkers: [] };
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+				servers: { "fake-lsp": serverConfig },
+				idleTimeoutMs: undefined,
+			});
+			vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["fake-lsp", serverConfig]]);
+			const client = await lspClient.getOrCreateClient(serverConfig, tempDir.path());
+			await lspClient.ensureFileOpen(client, target);
+			expect(await waitForDiagnostics(client, uri, { timeoutMs: 1_000 })).toEqual([analysis, warning, lint]);
+			expect(await waitForDiagnostics(client, uri, { timeoutMs: 1_000 })).toEqual([analysis]);
+			const action = await new LspTool(makeLspSession(tempDir.path())).execute("mixed-code-action", {
+				action: "code_actions",
+				file: target,
+				line: 1,
+			});
+			expect(textResult(action)).toContain("Fix inactive code");
+			const result = await new LspTool(makeLspSession(tempDir.path())).execute("mixed-diagnostics", {
+				action: "diagnostics",
+				file: target,
+				timeout: 5,
+			});
+			expect(textResult(result)).toContain("[rust-analyzer] inactive code");
+			expect(textResult(result)).toContain("[rustc] unused variable");
+			expect(textResult(result)).toContain("[clippy] unused variable");
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	}, 10_000);
+
 	it("pulls rust-analyzer diagnostics once its workspace has loaded, not when its progress first ends", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-ra-workspace-load-");
 		const cwd = tempDir.path();

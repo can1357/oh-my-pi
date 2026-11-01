@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `lsp diagnostics` dropping rustc and clippy warnings when rust-analyzer also answers diagnostic pulls ([#17657](https://github.com/can1357/oh-my-pi/issues/17657)).
+
 ## [18.14.2] - 2026-10-31
 
 ### Added
