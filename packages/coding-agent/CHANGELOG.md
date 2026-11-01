@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed an endless shell loop in one bash command taking the shell from every later command in the session; such a command is now cancelled by its own deadline, and `kill %N` reaches it
+
 ## [18.14.2] - 2026-10-31
 
 ### Added
