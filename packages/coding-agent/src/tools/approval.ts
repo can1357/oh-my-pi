@@ -33,6 +33,7 @@ import {
 	cfgToolsApprovalMode,
 	cfgToolsRestrictedFolders,
 	parseApprovalPolicy,
+	valueShape,
 } from "./settings";
 import {
 	approvalFolderListing,
@@ -341,21 +342,6 @@ function warnEntryOnce(
 	if (warned.has(key)) return;
 	warned.add(key);
 	logger.warn(message, context);
-}
-
-/**
- * The type and length of an unreadable value, which is all a log or a prompt may say about it: a
- * misplaced token is the likeliest such value, so its text never leaves the config file.
- */
-function valueShape(value: unknown): { valueType: string; valueLength: number } {
-	const valueType = Array.isArray(value) ? "array" : value === null ? "null" : typeof value;
-	const valueLength =
-		typeof value === "string" || Array.isArray(value)
-			? value.length
-			: value !== null && typeof value === "object"
-				? Object.keys(value).length
-				: String(value).length;
-	return { valueType, valueLength };
 }
 
 /** `<what> is <the value's shape>`, as a prompt or refusal shows an unreadable value (see {@link valueShape}). */

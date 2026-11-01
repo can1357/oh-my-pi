@@ -325,10 +325,11 @@ describe("tools.approval entries as a user writes them by hand", () => {
 
 	it("refuses to write an entry no policy names", () => {
 		const settings = Settings.isolated();
+		// The refusal names the entry and its shape, never the text typed for it.
 		expect(() => cfgToolsApproval.set(settings, { bash: "block" })).toThrow(
-			'tools.approval entries must be allow, deny or prompt; got bash: "block"',
+			"tools.approval entries must be allow, deny or prompt; got bash: string (length 5)",
 		);
-		expect(() => Settings.isolated({ "tools.approval": { bash: null } })).toThrow("got bash: null");
+		expect(() => Settings.isolated({ "tools.approval": { bash: null } })).toThrow("got bash: null (length 4)");
 		// A policy in another case is still a policy, and the write keeps it.
 		cfgToolsApproval.override(settings, { bash: "Deny" });
 		const { userPolicies } = resolveApprovalFromContext({ settings });
