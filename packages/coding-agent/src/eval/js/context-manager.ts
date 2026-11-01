@@ -9,7 +9,7 @@ import {
 import type { ToolSession } from "../../tools";
 import { ToolAbortError } from "../../tools/tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { safeSend as safeSendIpc } from "../../utils/ipc";
+import { isThenable, safeSend as safeSendIpc } from "../../utils/ipc";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../bridge-timeout";
 import { getEnabledEvalPreludes } from "../preludes";
 import { attachSessionOwner, EvalKernelNotRunningError, type SessionOwners } from "../executor-base";
@@ -42,8 +42,9 @@ export interface VmRunState {
 	/** Shows the user `out://` replies of the run's bridged tool calls; absent, those calls are refused. */
 	onReply?: (text: string) => void;
 	/**
-	 * Set by the context manager when `onText` or `onDisplay` threw: the first
-	 * such error. The run kept going and its later output still reached them.
+	 * Set by the context manager when `onText` or `onDisplay` threw, or returned
+	 * a promise that rejected: the first such error. The run kept going and its
+	 * later output still reached them.
 	 */
 	consumerFailure?: EvalOutputConsumerFailure;
 }
@@ -739,23 +740,28 @@ async function initWorker(session: JsSession, snapshot: SessionSnapshot, timeout
 }
 
 /**
- * Hands worker output to the run's consumer. A consumer that throws must not
- * escape into the worker's message handler, where it surfaces as a
- * process-fatal uncaught exception: the first error stays on the run state for
- * the cell's result, and the run's later output is still delivered.
+ * Hands worker output to the run's callback. A callback that throws, or returns
+ * a promise that rejects, must not escape into the worker's message handler,
+ * where it surfaces as a process-fatal uncaught exception or unhandled
+ * rejection: the first error stays on the run state for the cell's result, and
+ * the run's later output is still delivered.
  */
 function deliverRunOutput(
 	runState: VmRunState,
 	callback: EvalOutputConsumerFailure["callback"],
-	deliver: () => void,
+	deliver: () => unknown,
 ): void {
-	try {
-		deliver();
-	} catch (err) {
+	const record = (err: unknown): void => {
 		if (runState.consumerFailure) return;
 		const message = err instanceof Error ? err.message : String(err);
 		runState.consumerFailure = { callback, message };
 		logger.warn("JS eval output callback failed", { callback, error: message });
+	};
+	try {
+		const returned = deliver();
+		if (isThenable(returned)) returned.then(undefined, record);
+	} catch (err) {
+		record(err);
 	}
 }
 

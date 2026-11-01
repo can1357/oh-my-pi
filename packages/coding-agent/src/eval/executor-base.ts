@@ -3,6 +3,7 @@ import { Settings } from "../config/settings";
 import { type OutputArtifactError, OutputSink } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { statusEventKey } from "@oh-my-pi/pi-tui/tools/eval";
 import type { ToolSession } from "../tools";
+import { isThenable } from "../utils/ipc";
 import {
 	resolveOutputMaxColumns,
 	resolveOutputSinkArtifactMaxBytes,
@@ -122,13 +123,72 @@ export interface GenericKernel<TEnv> {
 }
 
 /**
- * Annotation for a cell whose output consumer threw. The runtime kept the cell
- * running and stored its output before handing it on, so the result is
- * complete; what the consumer showed while the cell ran may not be.
+ * Guards a cell's output consumers where they enter an executor: `onChunk`, which
+ * the output sink calls after storing each chunk (without awaiting it, and again
+ * from its final flush), and the status consumers, which the tool bridge calls
+ * from inside a tool call. A guard inside the runtime cannot see those calls. A
+ * consumer that throws, or returns a promise that rejects, is recorded here
+ * instead of reaching the runtime, the tool call or the host's fatal handlers;
+ * it still receives later output, and the first failure is reported with the
+ * cell's result.
  */
-export function formatConsumerFailureAnnotation(failure: EvalOutputConsumerFailure): string {
-	const consumer = failure.callback === "onChunk" ? "stream output" : "display output";
-	return `The ${consumer} consumer failed: ${failure.message}. The cell kept running and this result holds all of its output; output shown while it ran may be incomplete.`;
+export class OutputConsumerGuard {
+	#failure: EvalOutputConsumerFailure | undefined;
+
+	constructor(readonly languageLabel: string) {}
+
+	/** Wraps `consumer` so it never throws and never leaves a rejection unhandled. */
+	wrap<T>(
+		callback: EvalOutputConsumerFailure["callback"],
+		consumer: ((value: T) => unknown) | undefined,
+	): ((value: T) => void) | undefined {
+		if (!consumer) return undefined;
+		const record = (err: unknown): void => {
+			if (this.#failure) return;
+			const message = err instanceof Error ? err.message : String(err);
+			this.#failure = { callback, message };
+			logger.warn(`${this.languageLabel} eval output consumer failed`, { callback, error: message });
+		};
+		return value => {
+			try {
+				const returned = consumer(value);
+				if (isThenable(returned)) returned.then(undefined, record);
+			} catch (err) {
+				record(err);
+			}
+		};
+	}
+
+	/**
+	 * Opens a cell's result with the first consumer failure, saying what the
+	 * result still holds. Only a cell that ran to its end (`completed`) kept
+	 * running after the failure; a truncated result holds what truncation kept.
+	 * A failure the runtime caught (`runtimeFailure`) came from the output path
+	 * itself rather than from the consumer, so its output may be missing. A
+	 * rejection that settles after the result is assembled is only logged.
+	 */
+	annotate(
+		summary: { output: string; truncated: boolean; artifactId?: string | null },
+		completed: boolean,
+		runtimeFailure?: EvalOutputConsumerFailure,
+	): string {
+		const failure = this.#failure;
+		const runtimeNote =
+			runtimeFailure &&
+			`Delivering the cell's output failed: ${runtimeFailure.message}. This result may be missing output.`;
+		if (!failure) return runtimeNote ? `[${runtimeNote}]\n${summary.output}` : summary.output;
+		const consumer = failure.callback === "onChunk" ? "stream output" : "display output";
+		const head = `The ${consumer} consumer failed: ${failure.message}.`;
+		const tail =
+			!completed || runtimeNote
+				? "Output shown while the cell ran may be incomplete."
+				: !summary.truncated
+					? "The cell kept running and this result holds all of its output; output shown while it ran may be incomplete."
+					: summary.artifactId
+						? `The cell kept running; this result is truncated as usual and the saved output is in artifact://${summary.artifactId}; output shown while it ran may be incomplete.`
+						: "The cell kept running; this result keeps its output up to the usual truncation and no full copy was saved; output shown while it ran may be incomplete.";
+		return `[${runtimeNote ? `${head} ${tail} ${runtimeNote}` : `${head} ${tail}`}]\n${summary.output}`;
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -456,8 +516,10 @@ export async function executeWithKernelBase<
 	} = params;
 
 	const settings = await Settings.init();
+	const consumers = new OutputConsumerGuard(errorLogLabel);
+	const onStatus = consumers.wrap("onDisplay", options?.onStatus);
 	const sink = new OutputSink({
-		onChunk: options?.onChunk,
+		onChunk: consumers.wrap("onChunk", options?.onChunk),
 		artifactPath: options?.artifactPath,
 		artifactId: options?.artifactId,
 		headBytes: resolveOutputSinkHeadBytes(settings),
@@ -487,20 +549,17 @@ export async function executeWithKernelBase<
 			: (timeoutSignal ?? options?.signal);
 	const abortShield = createBridgeAbortShield(abortSource);
 
-	// Store before handing an event to the caller's consumer, as the output sink
-	// does, so a consumer that throws cannot drop it from the result.
 	const collectDisplay = (output: EvalDisplayOutput): void => {
-		if (output.type !== "status") {
-			display.push(output);
-			return;
+		if (output.type === "status") {
+			abortShield.handleStatus?.(output.event);
+			onStatus?.(output.event);
+			if (isEvalTimeoutControlEvent(output.event)) return;
 		}
-		abortShield.handleStatus?.(output.event);
-		if (!isEvalTimeoutControlEvent(output.event)) display.push(output);
-		options?.onStatus?.(output.event);
+		display.push(output);
 	};
 
 	const emitStatus: (event: JsStatusEvent) => void =
-		options?.emitStatus ?? (event => collectDisplay({ type: "status", event }));
+		consumers.wrap("onDisplay", options?.emitStatus) ?? (event => collectDisplay({ type: "status", event }));
 	const runId = `${runIdPrefix}-${crypto.randomUUID()}`;
 	// Two aborts cross the bridge, and conflating them is what let a cancelled
 	// turn keep working. Delegated work (above all the subagents `agent()`
@@ -541,7 +600,6 @@ export async function executeWithKernelBase<
 			onDisplay: output => collectDisplay(output),
 		});
 
-		const consumerFailure = result.consumerFailure && formatConsumerFailureAnnotation(result.consumerFailure);
 		if (result.cancelled || abortShield.abortRequested) {
 			const timedOut = result.timedOut || abortShield.timedOut;
 			const annotation = timedOut
@@ -549,14 +607,12 @@ export async function executeWithKernelBase<
 				: result.kernelKilled && !abortShield.abortRequested
 					? "Kernel died during execution; completion is uncertain. The cell was not replayed; check for partial side effects before retrying."
 					: undefined;
-			const dumped = await sink.dump(
-				annotation && consumerFailure ? `${annotation} ${consumerFailure}` : (annotation ?? consumerFailure),
-			);
+			const dumped = await sink.dump(annotation);
 			return {
 				exitCode: undefined,
 				cancelled: true,
 				truncated: dumped.truncated,
-				output: dumped.output,
+				output: consumers.annotate(dumped, false, result.consumerFailure),
 				artifactId: dumped.artifactId ?? undefined,
 				artifactElidedBytes: dumped.artifactElidedBytes,
 				artifactError: dumped.artifactError,
@@ -570,14 +626,12 @@ export async function executeWithKernelBase<
 		}
 
 		if (result.stdinRequested) {
-			const dumped = await sink.dump(
-				`Kernel requested stdin; interactive input is not supported.${consumerFailure ? ` ${consumerFailure}` : ""}`,
-			);
+			const dumped = await sink.dump("Kernel requested stdin; interactive input is not supported.");
 			return {
 				exitCode: 1,
 				cancelled: false,
 				truncated: dumped.truncated,
-				output: dumped.output,
+				output: consumers.annotate(dumped, false, result.consumerFailure),
 				artifactId: dumped.artifactId ?? undefined,
 				artifactElidedBytes: dumped.artifactElidedBytes,
 				artifactError: dumped.artifactError,
@@ -591,12 +645,12 @@ export async function executeWithKernelBase<
 		}
 
 		const exitCode = result.status === "ok" ? 0 : 1;
-		const dumped = await sink.dump(consumerFailure);
+		const dumped = await sink.dump();
 		return {
 			exitCode,
 			cancelled: false,
 			truncated: dumped.truncated,
-			output: dumped.output,
+			output: consumers.annotate(dumped, true, result.consumerFailure),
 			artifactId: dumped.artifactId ?? undefined,
 			artifactElidedBytes: dumped.artifactElidedBytes,
 			artifactError: dumped.artifactError,
@@ -617,7 +671,7 @@ export async function executeWithKernelBase<
 				exitCode: undefined,
 				cancelled: true,
 				truncated: dumped.truncated,
-				output: dumped.output,
+				output: consumers.annotate(dumped, false),
 				artifactId: dumped.artifactId ?? undefined,
 				artifactElidedBytes: dumped.artifactElidedBytes,
 				artifactError: dumped.artifactError,

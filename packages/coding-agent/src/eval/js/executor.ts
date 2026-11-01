@@ -6,7 +6,7 @@ import {
 	resolveOutputSinkHeadBytes,
 } from "../../tools/output-meta";
 import { isEvalTimeoutControlEvent, withBridgeTimeoutPause } from "../bridge-timeout";
-import { DisplayOutputCollector, formatConsumerFailureAnnotation } from "../executor-base";
+import { DisplayOutputCollector, OutputConsumerGuard } from "../executor-base";
 import type { EvalDisplayOutput } from "../types";
 import { executeInVmContext, type VmRunState } from "./context-manager";
 import { installJsPackages } from "./package-installer";
@@ -110,6 +110,8 @@ function formatPackageInstallTimeoutAnnotation(installDeadlineReached: boolean):
 export async function executeJs(code: string, options: JsExecutorOptions): Promise<JsResult> {
 	const display = new DisplayOutputCollector();
 	const displayOutputs = display.outputs;
+	const consumers = new OutputConsumerGuard("JavaScript");
+	const onStatus = consumers.wrap("onDisplay", options.onStatus);
 	const outputSink = new OutputSink({
 		artifactPath: options.artifactPath,
 		artifactId: options.artifactId,
@@ -117,7 +119,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 		headBytes: resolveOutputSinkHeadBytes(options.session.settings),
 		artifactMaxBytes: resolveOutputSinkArtifactMaxBytes(options.session.settings),
 		maxColumns: resolveOutputMaxColumns(options.session.settings),
-		onChunk: chunk => options.onChunk?.(chunk),
+		onChunk: consumers.wrap("onChunk", options.onChunk),
 	});
 	const legacyTimeoutMs = getExecutionTimeoutMs(options);
 	let runtimeTimeoutMs = legacyTimeoutMs;
@@ -133,9 +135,6 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 	let packageWorkComplete = false;
 	let runtimeEntered = false;
 	let runState: VmRunState | undefined;
-	// The context manager records a consumer that threw; the run went on, so every return path says so.
-	const consumerNotice = (): string | undefined =>
-		runState?.consumerFailure && formatConsumerFailureAnnotation(runState.consumerFailure);
 
 	try {
 		const cwd = options.cwd ?? options.session.cwd;
@@ -148,7 +147,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 		};
 		const install =
 			packages.length > 0
-				? await withBridgeTimeoutPause(options.onStatus, () => installJsPackages(installOptions))
+				? await withBridgeTimeoutPause(onStatus, () => installJsPackages(installOptions))
 				: await installJsPackages(installOptions);
 		packageSignal?.throwIfAborted();
 		if (install.summary) outputSink.push(`${install.summary}\n`);
@@ -171,17 +170,14 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 			signal,
 			onReply: options.onReply,
 			onText: chunk => outputSink.push(chunk),
-			// Store before handing an event to the caller's consumer, as the output
-			// sink does, so a consumer that throws cannot drop it from the result.
 			onDisplay: output => {
-				if (output.type !== "status") {
-					display.push(output);
-					return;
+				if (output.type === "status") {
+					// Timeout-control events drive the eval watchdog only; never
+					// store or render them as cell output.
+					onStatus?.(output.event);
+					if (isEvalTimeoutControlEvent(output.event)) return;
 				}
-				// Timeout-control events drive the eval watchdog only; never store or
-				// render them as cell output.
-				if (!isEvalTimeoutControlEvent(output.event)) display.push(output);
-				options.onStatus?.(output.event);
+				display.push(output);
 			},
 		};
 		await executeInVmContext({
@@ -199,9 +195,9 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 			timeoutMs: runtimeTimeoutMs ?? options.idleTimeoutMs,
 			runState,
 		});
-		const summary = await outputSink.dump(consumerNotice());
+		const summary = await outputSink.dump();
 		return {
-			output: summary.output,
+			output: consumers.annotate(summary, true, runState.consumerFailure),
 			exitCode: 0,
 			cancelled: false,
 			truncated: summary.truncated,
@@ -228,9 +224,9 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 						: formatPackageInstallTimeoutAnnotation(packageTimeoutSignal?.aborted === true);
 				outputSink.push(annotation);
 			}
-			const summary = await outputSink.dump(consumerNotice());
+			const summary = await outputSink.dump();
 			return {
-				output: summary.output,
+				output: consumers.annotate(summary, false, runState?.consumerFailure),
 				exitCode: undefined,
 				cancelled: true,
 				truncated: summary.truncated,
@@ -246,9 +242,10 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 		}
 		const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
 		outputSink.push(message);
-		const summary = await outputSink.dump(consumerNotice());
+		const summary = await outputSink.dump();
 		return {
-			output: summary.output,
+			// The cell's own error and a worker that died both land here, so the note claims nothing about completeness.
+			output: consumers.annotate(summary, false, runState?.consumerFailure),
 			exitCode: 1,
 			cancelled: false,
 			truncated: summary.truncated,

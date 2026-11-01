@@ -534,17 +534,19 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 		for (const entry of pending) {
 			if (entry.settled) continue;
 			entry.settled = true;
-			void this.#deliver(entry, "onChunk", () => entry.options?.onChunk?.(`[kernel] ${reason}\n`));
-			entry.resolve({
-				status: "error",
-				cancelled: true,
-				timedOut: entry.timedOut,
-				stdinRequested: entry.stdinRequested,
-				executionCount: entry.executionCount,
-				error: entry.error,
-				kernelKilled: entry.kernelKilled || kernelKilledDefault,
-				consumerFailure: entry.consumerFailure,
-			});
+			// Resolve once the exit message is delivered, so a callback that rejects it is reported.
+			void this.#deliver(entry, "onChunk", () => entry.options?.onChunk?.(`[kernel] ${reason}\n`)).then(() =>
+				entry.resolve({
+					status: "error",
+					cancelled: true,
+					timedOut: entry.timedOut,
+					stdinRequested: entry.stdinRequested,
+					executionCount: entry.executionCount,
+					error: entry.error,
+					kernelKilled: entry.kernelKilled || kernelKilledDefault,
+					consumerFailure: entry.consumerFailure,
+				}),
+			);
 		}
 	}
 
@@ -625,11 +627,11 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 	}
 
 	/**
-	 * Hands one frame to an execution's output callback. A callback that throws
-	 * fails only its own execution, never the reader: the first error is kept for
-	 * that execution's result, and its later frames still go to the same callback.
-	 * A sink that stores each chunk before passing it on therefore still holds the
-	 * whole output, while the kernel keeps serving this and every later request.
+	 * Hands one frame to an execution's output callback, awaiting it. A callback
+	 * that throws or rejects fails only its own execution, never the reader: the
+	 * first error is kept for that execution's result, its later frames still go
+	 * to the same callback, and the kernel keeps serving this and every later
+	 * request. Whether the callback kept the frame is for the caller to say.
 	 */
 	async #deliver(
 		pending: PendingExecution,
