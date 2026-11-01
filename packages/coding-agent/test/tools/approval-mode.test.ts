@@ -317,34 +317,37 @@ describe("tools.approvalMode setting", () => {
 		});
 
 		// The spellings measured on main: the first five kept their meaning there, the rest were read as
-		// no policy, so under the default yolo the command ran without asking.
-		const UNRECOGNISED = (written: string) =>
-			`requires approval but no interactive UI available.\nReason: tools.approval.bash is ${written}, not allow, deny or prompt`;
-		const NOT_A_RECORD = (written: string) =>
-			`requires approval but no interactive UI available.\nReason: tools.approval is ${written}, not a record of tool policies`;
+		// no policy, so under the default yolo the command ran without asking. A reason names what was
+		// written by its type and length, never by its text.
+		const UNRECOGNISED = (shape: string) =>
+			`requires approval but no interactive UI available.\nReason: tools.approval.bash is ${shape}, not allow, deny or prompt`;
+		const NOT_A_RECORD = (shape: string) =>
+			`requires approval but no interactive UI available.\nReason: tools.approval is ${shape}, not a record of tool policies`;
 		const spellings: Array<[label: string, approval: unknown, refusal: string, warns: boolean]> = [
 			["exact deny", { bash: "deny" }, 'Tool "bash" is blocked by user policy', false],
 			["capitalised Deny", { bash: "Deny" }, 'Tool "bash" is blocked by user policy', false],
 			["DENY", { bash: "DENY" }, 'Tool "bash" is blocked by user policy', false],
 			["deny with a leading space", { bash: " deny" }, 'Tool "bash" is blocked by user policy', false],
 			["exact prompt", { bash: "prompt" }, "requires approval but no interactive UI available.\nOptions:", false],
-			["denied", { bash: "denied" }, UNRECOGNISED('"denied"'), true],
-			["block", { bash: "block" }, UNRECOGNISED('"block"'), true],
-			["boolean false", { bash: false }, UNRECOGNISED("false"), true],
-			["boolean true", { bash: true }, UNRECOGNISED("true"), true],
-			["number 0", { bash: 0 }, UNRECOGNISED("0"), true],
-			["null", { bash: null }, UNRECOGNISED("null"), true],
+			["denied", { bash: "denied" }, UNRECOGNISED("a string of 6 characters"), true],
+			["block", { bash: "block" }, UNRECOGNISED("a string of 5 characters"), true],
+			["boolean false", { bash: false }, UNRECOGNISED("a boolean"), true],
+			["boolean true", { bash: true }, UNRECOGNISED("a boolean"), true],
+			["number 0", { bash: 0 }, UNRECOGNISED("a number"), true],
+			["null", { bash: null }, UNRECOGNISED("empty"), true],
 			[
 				"key Bash",
 				{ Bash: "deny" },
 				'Tool "Bash" is blocked by user policy.\nTo allow: remove "tools.approval.Bash: deny"',
 				true,
 			],
-			["typo prmopt", { bash: "prmopt" }, UNRECOGNISED('"prmopt"'), true],
-			["ask", { bash: "ask" }, UNRECOGNISED('"ask"'), true],
+			["typo prmopt", { bash: "prmopt" }, UNRECOGNISED("a string of 6 characters"), true],
+			["ask", { bash: "ask" }, UNRECOGNISED("a string of 3 characters"), true],
 			// A whole value that is not a record: no policy at all would let every call run.
-			["the whole value a string", "deny-bash", NOT_A_RECORD('"deny-bash"'), true],
-			["the whole value a list", ["bash"], NOT_A_RECORD('["bash"]'), true],
+			["the whole value a string", "deny-bash", NOT_A_RECORD("a string of 9 characters"), true],
+			["the whole value a list", ["bash"], NOT_A_RECORD("a list of 1 item"), true],
+			// `approval:` written with nothing under it: YAML reads null, which other reads take as unset.
+			["the whole value left empty", null, NOT_A_RECORD("empty"), true],
 		];
 		for (const [label, approval, refusal, warns] of spellings) {
 			it(`does not run the command for ${label}`, async () => {
@@ -367,13 +370,32 @@ describe("tools.approvalMode setting", () => {
 				"an unreadable entry",
 				{ bash: "prmopt" },
 				"printf approval-audit-executed",
-				'Reason: tools.approval.bash is "prmopt", not allow, deny or prompt',
+				"Reason: tools.approval.bash is a string of 6 characters, not allow, deny or prompt",
 			],
 			[
 				"a value that is not a record",
 				"deny-bash",
 				"printf approval-audit-executed",
-				'Reason: tools.approval is "deny-bash", not a record of tool policies',
+				"Reason: tools.approval is a string of 9 characters, not a record of tool policies",
+			],
+			[
+				"a value left empty",
+				null,
+				"printf approval-audit-executed",
+				"Reason: tools.approval is empty, not a record of tool policies",
+			],
+			// Unreadable is sticky, not a rank: the key order of two case variants must not decide it.
+			[
+				"an understood case variant before an unreadable one",
+				{ Bash: "prompt", BASH: "prmopt" },
+				"printf approval-audit-executed",
+				"Reason: tools.approval.BASH is a string of 6 characters, which names bash only by case",
+			],
+			[
+				"an unreadable case variant before an understood one",
+				{ BASH: "prmopt", Bash: "prompt" },
+				"printf approval-audit-executed",
+				"Reason: tools.approval.BASH is a string of 6 characters, which names bash only by case",
 			],
 			["a user deny", { bash: "deny" }, "printf approval-audit-executed", 'Tool "bash" is blocked by user policy'],
 			[

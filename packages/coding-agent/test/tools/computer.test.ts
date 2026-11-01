@@ -2603,7 +2603,7 @@ describe("expanded computer APIs", () => {
 			undefined,
 			NO_ESCAPE_STOPS,
 		);
-		const setting = 'tools.approval.computer.control is "ask", not allow, deny or prompt';
+		const setting = "tools.approval.computer.control is a string of 3 characters, not allow, deny or prompt";
 		const confirm = vi.fn(async (_title: string, _body: string) => false);
 		try {
 			const asked = await supervisor.run(

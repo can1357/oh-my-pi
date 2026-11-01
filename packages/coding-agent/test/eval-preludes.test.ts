@@ -154,7 +154,7 @@ describe("eval prelude host invocation", () => {
 			const settings = await loadHandWrittenConfig(dir.path(), { tools: { approval: { guarded: "block" } } });
 			const session = { ...makeSession(() => [definition]), settings };
 			await expect(invokeEvalPrelude("guarded", {}, { session, toolCallId: "unreadable" })).rejects.toThrow(
-				'requires approval but no interactive UI is available.\nReason: tools.approval.guarded is "block", not allow, deny or prompt',
+				"requires approval but no interactive UI is available.\nReason: tools.approval.guarded is a string of 5 characters, not allow, deny or prompt",
 			);
 			expect(invoke).not.toHaveBeenCalled();
 		} finally {

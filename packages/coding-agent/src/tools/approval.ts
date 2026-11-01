@@ -86,10 +86,11 @@ function asPolicyMap(value: unknown): Record<string, unknown> {
 }
 
 /**
- * Marks a `tools.approval` value that is not a record at all (`"deny-bash"`, a list). Everywhere
- * else a malformed value counting as unset falls back to a safe default; here unset is permissive,
- * since under `yolo` no policy means the call runs. So, like an unreadable entry for its own tool,
- * such a value reads as `prompt` for every tool instead of as "no policies".
+ * Marks a `tools.approval` value that is not a record at all (`"deny-bash"`, a list), or a key
+ * written and left empty (`approval:`, which YAML reads as null). Everywhere else a malformed or
+ * empty value counting as unset falls back to a safe default; here unset is permissive, since under
+ * `yolo` no policy means the call runs. So, like an unreadable entry for its own tool, such a value
+ * reads as `prompt` for every tool instead of as "no policies".
  */
 const UNREADABLE_RECORD: unique symbol = Symbol("tools.approval is not a record");
 
@@ -101,17 +102,19 @@ const unreadableRecords = new WeakMap<Settings, { value: unknown; policies: User
 
 /**
  * The `tools.approval` record every approval check reads: the configured record, or, when the
- * configured value is not a record, one that asks before every tool call (see
- * {@link UNREADABLE_RECORD}), warned about once per settings instance and value.
+ * configured value is not a record or the key is left empty, one that asks before every tool call
+ * (see {@link UNREADABLE_RECORD}), warned about once per settings instance and value.
  */
 export function readUserApprovalPolicies(settings: Settings): Record<string, unknown> {
-	// What the handle itself reads; the handle turns a non-record into its `{}` default.
-	const value = settings.rawValue(cfgToolsApproval);
-	if (value === undefined || value === null || isRecord(value)) return asPolicyMap(cfgToolsApproval.get(settings));
+	// What the handle itself reads; the handle turns a non-record into its `{}` default, and this
+	// read, like every other, takes a key left empty as unset.
+	const raw = settings.rawValue(cfgToolsApproval);
+	const value = raw === undefined && settings.isConfiguredNull(cfgToolsApproval) ? null : raw;
+	if (value === undefined || isRecord(value)) return asPolicyMap(cfgToolsApproval.get(settings));
 	const cached = unreadableRecords.get(settings);
 	if (cached && Bun.deepEquals(cached.value, value)) return cached.policies;
 	logger.warn("Approval: tools.approval is not a record of tool policies; asking before every tool call", {
-		value,
+		...valueShape(value),
 		expected: "a record of tool policies, such as {bash: deny}",
 	});
 	const policies: UserPolicies = { [UNREADABLE_RECORD]: value };
@@ -340,9 +343,43 @@ function warnEntryOnce(
 	logger.warn(message, context);
 }
 
-/** `<what> is <value>`, as the prompt shows it. */
-function describeValue(what: string, value: unknown): string {
-	return sanitizeText(`${what} is ${truncateForPrompt(JSON.stringify(value) ?? String(value), 80)}`);
+/**
+ * The type and length of an unreadable value, which is all a log or a prompt may say about it: a
+ * misplaced token is the likeliest such value, so its text never leaves the config file.
+ */
+function valueShape(value: unknown): { valueType: string; valueLength: number } {
+	const valueType = Array.isArray(value) ? "array" : value === null ? "null" : typeof value;
+	const valueLength =
+		typeof value === "string" || Array.isArray(value)
+			? value.length
+			: value !== null && typeof value === "object"
+				? Object.keys(value).length
+				: String(value).length;
+	return { valueType, valueLength };
+}
+
+/** `<what> is <the value's shape>`, as a prompt or refusal shows an unreadable value (see {@link valueShape}). */
+function describeUnreadable(what: string, value: unknown): string {
+	const { valueType, valueLength } = valueShape(value);
+	const plural = valueLength === 1 ? "" : "s";
+	let shape: string;
+	switch (valueType) {
+		case "null":
+			shape = "empty";
+			break;
+		case "string":
+			shape = valueLength === 0 ? "an empty string" : `a string of ${valueLength} character${plural}`;
+			break;
+		case "array":
+			shape = `a list of ${valueLength} item${plural}`;
+			break;
+		case "object":
+			shape = `a record of ${valueLength} key${plural}`;
+			break;
+		default:
+			shape = `a ${valueType}`;
+	}
+	return sanitizeText(`${what} is ${shape}`);
 }
 
 /** The entry at `key`, read for the tool `name`; see {@link userApprovalPolicy}. */
@@ -353,26 +390,27 @@ function readUserEntry(userConfig: Record<string, unknown>, key: string, name: s
 		if (policy) return { policy, key };
 		warnEntryOnce(userConfig, key, "Approval: tools.approval entry is not allow, deny or prompt; asking instead", {
 			tool: key,
-			value,
+			...valueShape(value),
 		});
 		return {
 			policy: "prompt",
 			key,
-			reason: `${describeValue(`tools.approval.${key}`, value)}, not allow, deny or prompt`,
+			reason: `${describeUnreadable(`tools.approval.${key}`, value)}, not allow, deny or prompt`,
 			unreadable: true,
 		};
 	}
 	warnEntryOnce(userConfig, key, "Approval: tools.approval key matches a tool only by case", {
 		key,
 		tool: name,
-		value,
+		...valueShape(value),
 		applied: policy === "allow" ? "nothing" : (policy ?? "prompt"),
 	});
 	if (policy === "allow") return undefined;
+	const written = policy ? `tools.approval.${key} is ${policy}` : describeUnreadable(`tools.approval.${key}`, value);
 	return {
 		policy: policy ?? "prompt",
 		key,
-		reason: `${describeValue(`tools.approval.${key}`, value)}, which names ${name} only by case`,
+		reason: `${written}, which names ${name} only by case`,
 		...(policy === undefined ? { unreadable: true as const } : {}),
 	};
 }
@@ -382,14 +420,15 @@ function readUserEntry(userConfig: Record<string, unknown>, key: string, name: s
  * applies. Whoever writes an entry means to restrain that tool, so a typo never grants it: an entry
  * that is not `allow`, `deny` or `prompt` (any case, surrounding whitespace ignored) reads as
  * `prompt`, and without an entry under `name` itself, one whose key differs only in case (`Bash`)
- * applies its `deny` or `prompt` — never its `allow` — the strictest such entry winning. Each such
- * entry warns once per record, naming the tool and the value. A `tools.approval` value that is not
- * a record reads as `prompt` for every tool (see {@link UNREADABLE_RECORD}). Either way the result
- * carries a `reason` naming what to fix.
+ * applies its `deny` or `prompt` — never its `allow` — merged as {@link stricterUserPolicy} says.
+ * Each such entry warns once per record, naming the tool and the value's type and length. A
+ * `tools.approval` value that is not a record, or is left empty, reads as `prompt` for every tool
+ * (see {@link UNREADABLE_RECORD}). Either way the result carries a `reason` naming what to fix,
+ * never the text of a value that could not be read.
  */
 export function userApprovalPolicy(userConfig: UserPolicies, name: string): UserPolicy | undefined {
 	if (Object.hasOwn(userConfig, UNREADABLE_RECORD)) {
-		const value = describeValue("tools.approval", userConfig[UNREADABLE_RECORD]);
+		const value = describeUnreadable("tools.approval", userConfig[UNREADABLE_RECORD]);
 		return {
 			policy: "prompt",
 			key: name,
@@ -408,9 +447,18 @@ export function userApprovalPolicy(userConfig: UserPolicies, name: string): User
 	return found;
 }
 
+/**
+ * Two user policies that both apply, merged. The stricter policy wins (deny, then prompt, then
+ * allow). Unreadable is sticky, not a rank: if either entry could not be read, the result is
+ * unreadable whatever wins and whatever order the keys arrive in, so a tool's own allow can never
+ * run the call. Between two prompts the unreadable one wins, so its reason is the one shown.
+ */
 function stricterUserPolicy(a: UserPolicy | undefined, b: UserPolicy | undefined): UserPolicy | undefined {
 	if (!a || !b) return a ?? b;
-	return POLICY_RANK[b.policy] > POLICY_RANK[a.policy] ? b : a;
+	const rankA = POLICY_RANK[a.policy];
+	const rankB = POLICY_RANK[b.policy];
+	const winner = rankB > rankA || (rankB === rankA && b.unreadable && !a.unreadable) ? b : a;
+	return (a.unreadable || b.unreadable) && !winner.unreadable ? { ...winner, unreadable: true } : winner;
 }
 
 /**

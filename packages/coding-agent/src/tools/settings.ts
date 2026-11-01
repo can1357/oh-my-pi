@@ -302,8 +302,8 @@ export function parseApprovalPolicy(value: unknown): (typeof APPROVAL_POLICIES)[
 
 // Tool approval policies. A config file can still hold an entry no write accepts; approval
 // resolution reads one as `prompt` (see `resolveApproval`). This is the one setting whose unset state
-// is permissive, so a whole value that is not a record does not read as the `{}` default there:
-// every tool asks instead (see `readUserApprovalPolicies`).
+// is permissive, so a whole value that is not a record, or a key left empty, does not read as the `{}`
+// default there: every tool asks instead (see `readUserApprovalPolicies`).
 export const cfgToolsApproval = register({
 	id: "tools.approval",
 	type: "record",

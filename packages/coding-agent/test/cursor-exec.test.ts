@@ -1887,7 +1887,9 @@ describe("CursorExecHandlers native delete gating (issue #5680)", () => {
 			);
 
 			expect(result.isError).toBe(true);
-			expect(JSON.stringify(result)).toContain("Reason: tools.approval.delete is false, not allow, deny or prompt");
+			expect(JSON.stringify(result)).toContain(
+				"Reason: tools.approval.delete is a boolean, not allow, deny or prompt",
+			);
 			expect(await Bun.file(target).exists()).toBe(true);
 		} finally {
 			warn.mockRestore();

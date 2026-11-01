@@ -368,7 +368,7 @@ it("explicit yolo still gates a destructive tool whose hand-edited policy is not
 			[
 				{
 					type: "content",
-					content: { type: "text", text: "Reason: tools.approval.delete is false, not allow, deny or prompt" },
+					content: { type: "text", text: "Reason: tools.approval.delete is a boolean, not allow, deny or prompt" },
 				},
 			],
 		]);
