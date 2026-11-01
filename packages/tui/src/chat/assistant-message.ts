@@ -40,7 +40,7 @@ import { isRowPrefix, type TranscriptStableRow, trimBlankEdges } from "../chrome
 import { formatTurnUsage, type TurnUsageSummary } from "../overlays/usage-row";
 import { FigureMarkdown } from "./figure-markdown";
 import { svgFigureRendering } from "./svg-figure";
-import { hasSvgFence } from "./svg-source";
+import { hasMermaidFence, hasSvgFence } from "./svg-source";
 import { chartFence, hasChartTable, lookupTableChart, splitTableCharts } from "./table-chart";
 
 /**
@@ -63,7 +63,7 @@ function thoughtLabel(clock: { start: number; end?: number } | undefined): strin
 }
 
 type ThinkingContentBlock = Extract<AssistantMessage["content"][number], { type: "thinking" }>;
-/** Renders one text or thinking block: Markdown, or {@link FigureMarkdown} for text holding a ```svg fence. */
+/** Renders one prose block, lifting enabled figure fences and table charts from assistant text. */
 type ProseBlock = Markdown | FigureMarkdown;
 /** A streamed block the fast path updates in place. */
 interface FastPathItem {
@@ -352,7 +352,7 @@ export class AssistantMessageComponent extends Container {
 	#fastPathKey: string | undefined;
 	#fastPathItems: FastPathItem[] | undefined;
 	/**
-	 * Text blocks whose ```svg fences are lifted into figures, by content index.
+	 * Text blocks whose enabled figure fences or tables are lifted, by content index.
 	 * Kept across slow-path rebuilds so a figure keeps its raster (and its
 	 * in-flight one) instead of starting over on every update.
 	 */
@@ -1458,18 +1458,22 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	/**
-	 * Whether `text` holds a ```svg fence this terminal draws as a figure, or a
-	 * table it draws a chart under. Native (TSP) terminals receive the fence
+	 * Whether `text` holds an enabled graphical figure fence, or a table it
+	 * draws a chart under. Native (TSP) terminals receive the original fence
 	 * verbatim in the `md` node and draw it themselves, and get charts as image
-	 * nodes from {@link describe}; image-less terminals keep fences as code and
-	 * tables as tables.
+	 * nodes from {@link describe}; image-less terminals retain Mermaid ASCII
+	 * rendering and leave other fences and tables as text.
 	 */
 	#liftsFigures(text: string): boolean {
 		return (
 			this.#showImages &&
 			TERMINAL.imageProtocol !== null &&
 			!isNativeRendering() &&
-			((svgFigureRendering() && hasSvgFence(text)) || (this.#showTableCharts && hasChartTable(text)))
+			((svgFigureRendering() && hasSvgFence(text)) ||
+				((TERMINAL.imageProtocol === ImageProtocol.Kitty || TERMINAL.imageProtocol === ImageProtocol.Sixel) &&
+					getMarkdownTheme().resolveMermaidAscii !== undefined &&
+					hasMermaidFence(text)) ||
+				(this.#showTableCharts && hasChartTable(text)))
 		);
 	}
 
@@ -1486,7 +1490,7 @@ export class AssistantMessageComponent extends Container {
 
 	/**
 	 * The component for text block `index`: Markdown, or a {@link FigureMarkdown}
-	 * when it holds a ```svg fence to lift or a table to chart — taken over from
+	 * when it holds an enabled figure fence or a table to chart — taken over from
 	 * `previous` so its figures keep their rasters across rebuilds.
 	 */
 	#proseBlock(index: number, text: string, previous: ReadonlyMap<number, FigureMarkdown>): ProseBlock {

@@ -113,6 +113,12 @@ export interface SvgFigureOptions {
 	markdown?: (text: string) => Markdown;
 	/** Shared inline-image budget; superseded rasters are released from it. */
 	budget?: ImageBudget;
+	/** Text to show instead of generated pixels when rasterization or image display is unavailable. */
+	fallback?: (width: number) => readonly string[];
+	/** Trusted app-owned name used while drawing; defaults to SVG. */
+	label?: string;
+	/** Optional paint palette for a generated figure; authored SVGs keep the shared palette. */
+	palette?: () => Readonly<Record<string, string>>;
 	/**
 	 * Rows the figure may fill, fallback code included, read on every render;
 	 * zero hides it. Unset or `undefined` takes a share of the terminal viewport.
@@ -239,7 +245,7 @@ export class SvgFigure implements Component {
 		const raster = this.#raster;
 		if (!raster) {
 			if (!this.#options.markdown) return [];
-			this.#placeholder ??= [` ${theme.fg("dim", "Drawing SVG…")}`];
+			this.#placeholder ??= [` ${theme.fg("dim", `Drawing ${this.#options.label ?? "SVG"}…`)}`];
 			return this.#placeholder;
 		}
 		const rows = this.#imageFor(raster, maxRows).render(width);
@@ -255,10 +261,12 @@ export class SvgFigure implements Component {
 		this.#fallback = undefined;
 	}
 
-	dispose(): void {
+	/** Discard a superseded source's raster; ordinary disposal preserves scrollback residency. */
+	dispose(discardRaster = false): void {
 		this.#disposed = true;
 		clearTimeout(this.#timer);
 		this.#timer = undefined;
+		if (discardRaster && this.#raster) this.#options.budget?.release(this.#raster.key);
 	}
 
 	debugState(): Record<string, unknown> {
@@ -342,7 +350,7 @@ export class SvgFigure implements Component {
 			this.#rasterizing = true;
 			this.#startedAt = performance.now();
 			try {
-				const prepared = prepareSvg(svg, svgFigurePalette());
+				const prepared = prepareSvg(svg, this.#options.palette?.() ?? svgFigurePalette());
 				png = await rasterizeSvg(
 					new TextEncoder().encode(prepared),
 					attempt.limits.columns * cell.widthPx,
@@ -411,9 +419,10 @@ export class SvgFigure implements Component {
 			{
 				maxWidthCells: columns,
 				maxHeightCells: rows,
-				filename: "svg",
+				filename: this.#options.label?.toLowerCase() ?? "svg",
 				budget: this.#options.budget,
 				imageKey: raster.key,
+				fallback: this.#options.fallback,
 				requestRender: this.#options.onChange,
 			},
 			{ widthPx: raster.widthPx, heightPx: raster.heightPx },
@@ -424,10 +433,10 @@ export class SvgFigure implements Component {
 
 	/** The source as the fenced code block it was written as, fenced longer than any backtick run inside. */
 	#fallbackRows(width: number, maxRows?: number): readonly string[] {
-		const source = this.#source;
+		if (this.#options.fallback) return this.#options.fallback(width);
 		if (!this.#options.markdown) return [];
-		if (this.#fallback?.source !== source) {
-			this.#fallback = { source, md: this.#options.markdown(fencedCode("svg", source)) };
+		if (this.#fallback?.source !== this.#source) {
+			this.#fallback = { source: this.#source, md: this.#options.markdown(fencedCode("svg", this.#source)) };
 		}
 		const fallback = this.#fallback;
 		const rows = fallback.md.render(width);

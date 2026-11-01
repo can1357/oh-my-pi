@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added bounded, themed inline Mermaid previews on supported Kitty and SIXEL terminals. Original source and authored colors are preserved, with existing ASCII/source fallback on iTerm2 and when graphics are unavailable ([#16977](https://github.com/can1357/oh-my-pi/pull/16977) by [@kiendle](https://github.com/kiendle))
+- Added `modelEnds` to `GroupedFileSection`: per file, the model-line index just past its last line, so a caller cutting the output can tell which files it shows whole ([#16594](https://github.com/can1357/oh-my-pi/pull/16594) by [@will-bogusz](https://github.com/will-bogusz))
 - `/btw` answers can show a steering prompt as a block behind a pink rail (a toned card in Tern) that `Alt+I` (`app.btw.inject`, remappable) sends to the main session; once sent it turns green with `➤` on each line, without moving ([#17618](https://github.com/can1357/oh-my-pi/pull/17618) by [@apullin](https://github.com/apullin))
 - Added `singleLine` and `finiteWidth` to `utils` for row-confined text and cell widths
 

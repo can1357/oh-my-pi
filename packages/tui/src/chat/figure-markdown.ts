@@ -2,9 +2,13 @@ import type { Tokens } from "@oh-my-pi/pi-utils/marked";
 import type { ImageBudget } from "../components/image";
 import { type Markdown, streamingMarkdownSource } from "../components/markdown";
 import { Spacer } from "../components/spacer";
+import { isNativeRendering } from "../native/state";
+import { ImageProtocol, TERMINAL } from "../terminal-capabilities";
+import { getMarkdownTheme } from "../theme";
 import { Container } from "../tui";
 import { SvgFigure, svgFigureRendering } from "./svg-figure";
-import { type FigureSegment, splitSvgFences } from "./svg-source";
+import { MermaidFigure } from "./mermaid-figure";
+import { type FigureSegment, splitFigureFences } from "./svg-source";
 import { type ChartSegment, hasChartTable, splitTableCharts, TableChartFigure } from "./table-chart";
 
 export interface FigureMarkdownOptions {
@@ -23,15 +27,15 @@ export interface FigureMarkdownOptions {
 type Part =
 	| { readonly kind: "markdown"; readonly md: Markdown; text: string }
 	| { readonly kind: "svg"; readonly figure: SvgFigure; source: string; closed: boolean }
+	| { readonly kind: "mermaid"; readonly figure: MermaidFigure; source: string; closed: true }
 	| { readonly kind: "chart"; readonly figure: TableChartFigure; table: Tokens.Table };
 
 /**
- * Assistant Markdown whose top-level ```svg fences are lifted out of the prose
- * and drawn as images ({@link SvgFigure}), and whose numeric tables get a chart
- * drawn under them ({@link TableChartFigure}), with ordinary {@link Markdown}
- * for the prose between them. Stands in for Markdown on an assistant text
- * block that holds an svg fence or a chartable table: {@link setText} streams
- * in place, reusing every part whose kind is unchanged, and
+ * Assistant Markdown whose top-level SVG and completed Mermaid fences are
+ * lifted out of prose and drawn as images, and whose numeric tables get a
+ * chart drawn under them ({@link TableChartFigure}), with ordinary Markdown
+ * for the prose between them. {@link setText} streams in place, reusing every
+ * part whose kind is unchanged, and
  * {@link transientRenderCache} marks the block's tail as still streaming — the
  * last prose run renders transient, the last figure throttles its rasters
  * until its fence closes, and a table at the tail waits for its last row.
@@ -91,6 +95,7 @@ export class FigureMarkdown extends Container {
 
 	/** Rebuild the prose runs through the Markdown factory after its theme changed; figures keep their rasters. */
 	restyle(): void {
+		this.#reconcile();
 		this.#parts = this.#parts.map(part =>
 			part.kind === "markdown" ? { kind: "markdown", md: this.#options.markdown(part.text), text: part.text } : part,
 		);
@@ -123,6 +128,20 @@ export class FigureMarkdown extends Container {
 				reshaped = true;
 				return { kind: "markdown", md: this.#options.markdown(text), text };
 			}
+			if (segment.kind === "mermaid") {
+				if (old?.kind === "mermaid") {
+					old.source = segment.source;
+					return old;
+				}
+				reshaped = true;
+				const { markdown, budget, maxRows, onChange } = this.#options;
+				return {
+					kind: "mermaid",
+					figure: new MermaidFigure({ markdown, budget, maxRows, onChange }),
+					source: segment.source,
+					closed: true,
+				};
+			}
 			if (old?.kind === "svg") {
 				old.source = segment.source;
 				old.closed = segment.closed;
@@ -147,13 +166,17 @@ export class FigureMarkdown extends Container {
 	}
 
 	/**
-	 * The block as prose, ```svg fences (when figures are on) and charts after
+	 * The block as prose, enabled SVG/completed Mermaid fences, and charts after
 	 * complete tables (when charts are on); only the last run can still stream.
 	 */
 	#segments(): (FigureSegment | ChartSegment)[] {
-		const fences: FigureSegment[] = svgFigureRendering()
-			? splitSvgFences(this.#text)
-			: [{ kind: "markdown", text: this.#text }];
+		const fences = splitFigureFences(this.#text, {
+			svg: svgFigureRendering(),
+			mermaid:
+				(TERMINAL.imageProtocol === ImageProtocol.Kitty || TERMINAL.imageProtocol === ImageProtocol.Sixel) &&
+				!isNativeRendering() &&
+				getMarkdownTheme().resolveMermaidAscii !== undefined,
+		});
 		if (!this.#options.charts || !hasChartTable(this.#text)) return fences;
 		const last = fences.length - 1;
 		return fences.flatMap((segment, index): (FigureSegment | ChartSegment)[] =>
@@ -176,7 +199,8 @@ export class FigureMarkdown extends Container {
 		this.#parts.forEach((part, index) => {
 			const streaming = this.#transient && index === last;
 			if (part.kind === "markdown") part.md.transientRenderCache = streaming;
-			else if (part.kind === "svg") part.figure.update(part.source, part.closed || !streaming);
+			else if (part.kind === "svg" || part.kind === "mermaid")
+				part.figure.update(part.source, part.closed || !streaming);
 			else part.figure.update(part.table);
 		});
 	}

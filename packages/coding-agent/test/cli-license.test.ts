@@ -23,4 +23,5 @@ it("prints the OMP license with the CLI and native addon notices on the exact to
 	expect(stderr).toBe("");
 	const sections = [license, ...notices].map(text => text.trimEnd());
 	expect(stdout).toBe(`OMP License and Third-Party Notices\n\n${sections.join("\n\n")}\n`);
+	expect(stdout.match(/^Copyright \(c\) 2017 Braintree$/m)?.[0]).toBe("Copyright (c) 2017 Braintree");
 });

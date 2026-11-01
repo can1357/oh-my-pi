@@ -449,7 +449,7 @@ export const cfgTuiRenderMermaid = register({
 		tab: "appearance",
 		group: "Display",
 		label: "Render Mermaid Diagrams",
-		description: "Render Mermaid fenced code blocks as ASCII diagrams",
+		description: "Render Mermaid diagrams as images where supported, with ASCII fallback",
 	},
 });
 

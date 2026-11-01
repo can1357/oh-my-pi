@@ -1,0 +1,28 @@
+/* Only Pele's default presentation paint is themed. Authored inline styles win. */
+.pele-node > [fill="var(--mermaid-node)"] {
+	stroke: var(--mermaid-node-border);
+}
+
+.pele-flowchart .pele-shape-diam > [fill="var(--mermaid-node)"] {
+	fill: var(--mermaid-decision);
+	stroke: var(--mermaid-decision-border);
+}
+
+.pele-flowchart .pele-shape-stadium > [fill="var(--mermaid-node)"],
+.pele-flowchart .pele-shape-circle > [fill="var(--mermaid-node)"] {
+	fill: var(--mermaid-boundary);
+	stroke: var(--mermaid-boundary-border);
+}
+
+.pele-flowchart .pele-shape-cyl > [fill="var(--mermaid-node)"] {
+	fill: var(--mermaid-storage);
+	stroke: var(--mermaid-storage-border);
+}
+
+.pele-cluster > rect[fill="var(--mermaid-group)"] {
+	fill-opacity: 1;
+}
+
+.pele-cluster-title > text[fill="none"] {
+	stroke: var(--mermaid-group);
+}

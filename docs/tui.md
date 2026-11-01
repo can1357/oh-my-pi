@@ -135,6 +135,21 @@ Then use `isKeyRelease()` / `isKeyRepeat()` if needed.
 
 The coding-agent integration also mounts built-in full-screen surfaces outside `ctx.ui.custom(...)`. [Agent Hub](./agent-hub.md) is the live roster and control surface for subagents. Its file-backed transcript viewer borrows the alternate screen while it is open, then restores the Hub beneath it on close.
 
+### Inline Mermaid previews
+
+With `tui.renderMermaid` enabled, completed top-level Mermaid fences in assistant replies can become static, bounded images in the interactive row-rendered transcript. Previews use the existing SVG/image pipeline and image budget when images are enabled on a supported Kitty or SIXEL terminal; they do not require `tui.renderSvg`. Tool file/fence previews retain their existing ASCII Mermaid behavior.
+
+Previews use one built-in theme derived from OMP's active light/dark palette. Explicit Mermaid `classDef` and `style` colors override the defaults. Rendering preserves the authored layout and source; authored SVGs and numeric table charts keep their existing appearance. A fitted preview shows overall structure, not necessarily readable labels. Source remains canonical for copying, saved messages, replay, and search; rasterized labels are not terminal-selectable or searchable.
+
+Previews and their text fallback respect the containing surface's row ceiling. A zero-row surface hides the figure without keeping transcript completion pending.
+
+Compatibility and fallbacks:
+
+- `tui.renderMermaid` off keeps the source fence. With it on, unavailable/disabled graphics or unsupported, invalid, or over-limit diagrams use the existing ASCII rendering where possible, otherwise the original source.
+- iTerm2 keeps ASCII rendering. Kitty and SIXEL use existing capability detection and image transport. tmux, SSH, and containers still depend on those capabilities and passthrough; no protocol is forced.
+- Graphical limits use encoded UTF-8 bytes: 64 KiB for Mermaid source and 1 MiB for the resolved SVG. Over-limit diagrams keep the fallback and original source.
+- Native Tern/TSP retains its Mermaid/source description path; graphical previews are a row-mode surface. Print, headless, RPC, and SDK paths retain source.
+
 ## Mount points and return contracts
 
 ## 1) Extension UI (`ExtensionUIContext`)
