@@ -468,6 +468,23 @@ async fn async_subshell_status(
 	status.into()
 }
 
+/// Reports an error that ends a command carrying its own redirections while
+/// those redirections still apply, as Bash reports an error where it happens,
+/// and marks it reported, so the command that catches it outside them does
+/// not print it again on its own standard error. A cancelled run reports
+/// nothing.
+pub(crate) async fn report_in_redirect_scope(
+	shell: &Shell<impl extensions::ShellExtensions>,
+	params: &ExecutionParameters,
+	error: error::Error,
+) -> error::Error {
+	if params.is_cancelled() || error.is_reported() {
+		return error;
+	}
+	let _ = shell.display_error(&mut params.stderr(shell), &error).await;
+	error.into_reported()
+}
+
 
 #[derive(Clone, Debug, Default)]
 /// Policy for how to manage spawned external processes.
@@ -1227,7 +1244,13 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::Command {
 									setup_redirect(&mut shell, &mut params, redirect).await?;
 								}
 							}
-							compound.execute(&mut shell, &params).await
+							let ended = compound.execute(&mut shell, &params).await;
+							match ended {
+								Err(error) if redirects.is_some() => {
+									Err(report_in_redirect_scope(&shell, &params, error).await)
+								},
+								ended => ended,
+							}
 						})))
 					},
 					mut shell => {
@@ -1238,7 +1261,13 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::Command {
 							}
 						}
 
-						Ok(compound.execute(&mut shell, &params).await?.into())
+						let ended = match compound.execute(&mut shell, &params).await {
+							Err(error) if redirects.is_some() => {
+								Err(report_in_redirect_scope(&*shell, &params, error).await)
+							},
+							ended => ended,
+						};
+						Ok(ended?.into())
 					},
 				}
 			},

@@ -1120,8 +1120,14 @@ pub(crate) async fn invoke_shell_function(
 		&context.params,
 	)?;
 
-	// Invoke the function.
-	let result = body.execute(context.shell, &params).await;
+	// Invoke the function. A failure is reported while the definition's
+	// redirections still apply.
+	let result = match body.execute(context.shell, &params).await {
+		Err(error) if redirects.is_some() => {
+			Err(interp::report_in_redirect_scope(&*context.shell, &params, error).await)
+		},
+		result => result,
+	};
 
 	// Clean up parameters so any owned files are closed.
 	drop(params);
