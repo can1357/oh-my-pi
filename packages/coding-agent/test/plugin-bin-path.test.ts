@@ -140,7 +140,7 @@ describe.skipIf(process.platform === "win32")("plugin bin directories on PATH", 
 		const probe = path.join(dir, "bin", `${name}-probe`);
 		await Bun.write(probe, `#!/bin/sh\necho "${name} ran"\n`);
 		await fs.chmod(probe, 0o755);
-		const runProbe = `const run = Bun.spawnSync(["sh", "-c", ${JSON.stringify(`${name}-probe`)}], { env: { PATH: process.env.PATH } });
+		const runProbe = `const run = Bun.spawnSync(["/bin/sh", "-c", ${JSON.stringify(`${name}-probe`)}], { env: { PATH: process.env.PATH } });
 globalThis[${JSON.stringify(`__ompBinProbe_${name}`)}] = run.stdout.toString();
 if (run.exitCode !== 0) throw new Error(${JSON.stringify(`${name}-probe is not on PATH when the module evaluates`)});
 `;
@@ -319,6 +319,21 @@ if (run.exitCode !== 0) throw new Error(${JSON.stringify(`${name}-probe is not o
 		expect(result.shell).toEqual([{ output: "sdktool ran\n", exitCode: 0 }]);
 	});
 
+	test("an SDK session imports a tool from a plugin's conventional `tools/` directory with the plugin's command on PATH", async () => {
+		// The manifest names no tool: the module is found by the `tools/` scan alone.
+		const pluginDir = path.join(pluginsDir, "node_modules", "convtool");
+		await writeBinPlugin(pluginDir, "convtool", {});
+		await fs.mkdir(path.join(pluginDir, "tools"), { recursive: true });
+		await fs.rename(path.join(pluginDir, "tool.js"), path.join(pluginDir, "tools", "convtool.js"));
+		await declare(["convtool"]);
+
+		const result = await run({ route: "sdk", commands: ["convtool-probe"] });
+
+		expect(result.tools).toContain("convtool_probe");
+		expect(result.probes).toEqual({ convtool: "convtool ran\n" });
+		expect(result.shell).toEqual([{ output: "convtool ran\n", exitCode: 0 }]);
+	});
+
 	test("an ACP session imports a plugin's tool with the plugin's command on PATH", async () => {
 		await writeBinPlugin(path.join(pluginsDir, "node_modules", "acptool"), "acptool", { tools: "tool.js" });
 		await declare(["acptool"]);
@@ -371,12 +386,15 @@ if (run.exitCode !== 0) throw new Error(${JSON.stringify(`${name}-probe is not o
 		});
 		await declare(["childplug"], [], projectPlugins);
 
-		const result = await run({ route: "subagent", childCwd });
+		const result = await run({ route: "subagent", childCwd, commands: ["parentplug-probe", "childplug-probe"] });
 
 		expect(result.parentPATH).toBe([binOf("parentplug"), BASE_PATH].join(path.delimiter));
 		expect(result.PATH).toBe(result.parentPATH);
 		expect(result.tools).toContain("parentplug_probe");
 		expect(result.probes).toEqual({ parentplug: "parentplug ran\n" });
+		// The child's own shell: the parent's plugin command runs, the child project's does not.
+		expect(result.shell[0]).toEqual({ output: "parentplug ran\n", exitCode: 0 });
+		expect(result.shell[1]?.exitCode).toBe(127);
 	});
 
 	test("two names for one plugin directory load one extension and put one entry on PATH, under the first name", async () => {
@@ -393,16 +411,16 @@ if (run.exitCode !== 0) throw new Error(${JSON.stringify(`${name}-probe is not o
 	});
 
 	test("an inherited PATH entry naming the realpath does not stand in for the installed path", async () => {
-		const realPlugins = path.join(root, "deploy", "v1", "plugins");
-		await writeBinPlugin(path.join(realPlugins, "node_modules", "gamma"), "gamma", { extensions: ["ext.js"] });
-		await writeJson(path.join(realPlugins, "package.json"), { dependencies: { gamma: "1.0.0" } });
-		await fs.symlink(realPlugins, pluginsDir);
 		// What a process started by an older session inherits: the realpath entry.
-		const realBin = path.join(realPlugins, "node_modules", "gamma", "bin");
+		const realBin = await deploy("gamma", { extensions: ["ext.js"] });
 
 		const result = await run({ route: "session" }, [realBin, BASE_PATH].join(path.delimiter));
+		await moveDeployment();
+		const after = Bun.spawnSync(["/bin/sh", "-c", "gamma-probe"], { env: { PATH: result.PATH ?? "" } });
 
 		expect(result.PATH).toBe([binOf("gamma"), realBin, BASE_PATH].join(path.delimiter));
+		expect(after.stdout.toString()).toBe("gamma ran\n");
+		expect(after.exitCode).toBe(0);
 	});
 
 	test("an installed bin directory already on PATH is not added again", async () => {
@@ -411,7 +429,29 @@ if (run.exitCode !== 0) throw new Error(${JSON.stringify(`${name}-probe is not o
 
 		const result = await run({ route: "twice" });
 
+		expect(result.errors).toEqual([]);
+		expect(result.probes).toEqual({ delta: "delta ran\n" });
 		expect(result.PATH).toBe([binOf("delta"), BASE_PATH].join(path.delimiter));
+	});
+
+	test("a plugin command outranks the user's of the same name, unless the user lists the installed path behind their own directory", async () => {
+		await writeBinPlugin(path.join(pluginsDir, "node_modules", "order"), "order", { extensions: ["ext.js"] });
+		await declare(["order"]);
+		// The user's own `order-probe`, in a directory already on PATH.
+		const userBin = path.join(root, "userbin");
+		await fs.mkdir(userBin, { recursive: true });
+		await Bun.write(path.join(userBin, "order-probe"), '#!/bin/sh\necho "user ran"\n');
+		await fs.chmod(path.join(userBin, "order-probe"), 0o755);
+
+		const userFirst = [userBin, BASE_PATH].join(path.delimiter);
+		const pluginWins = await run({ route: "session" }, userFirst);
+		const listed = [userBin, binOf("order"), BASE_PATH].join(path.delimiter);
+		const userWins = await run({ route: "session" }, listed);
+
+		expect(pluginWins.probes).toEqual({ order: "order ran\n" });
+		expect(pluginWins.PATH).toBe([binOf("order"), userFirst].join(path.delimiter));
+		expect(userWins.probes).toEqual({ order: "user ran\n" });
+		expect(userWins.PATH).toBe(listed);
 	});
 
 	test("a bin entry that is not a directory adds nothing", async () => {
@@ -429,21 +469,22 @@ if (run.exitCode !== 0) throw new Error(${JSON.stringify(`${name}-probe is not o
 	});
 
 	test("empty PATH entries survive, and an unset PATH gets only the plugin's directories", async () => {
-		await writeBinPlugin(path.join(pluginsDir, "node_modules", "zeta"), "zeta", {});
+		await writeBinPlugin(path.join(pluginsDir, "node_modules", "zeta"), "zeta", { extensions: ["ext.js"] });
 		await declare(["zeta"]);
 		const bin = binOf("zeta");
 		const d = path.delimiter;
 
-		const outcomes: Array<[string | undefined, string | null]> = [];
+		// Each row: the inherited PATH, the PATH omp leaves, and what the plugin's command printed at import.
+		const outcomes: Array<[string | undefined, string | null, string | undefined]> = [];
 		for (const inherited of ["", `${d}/usr/bin${d}`, undefined]) {
 			const result = await run({ route: "session", unsetPath: inherited === undefined }, inherited ?? BASE_PATH);
-			outcomes.push([inherited, result.PATH]);
+			outcomes.push([inherited, result.PATH, result.probes.zeta]);
 		}
 
 		expect(outcomes).toEqual([
-			["", `${bin}${d}`],
-			[`${d}/usr/bin${d}`, `${bin}${d}${d}/usr/bin${d}`],
-			[undefined, bin],
+			["", `${bin}${d}`, "zeta ran\n"],
+			[`${d}/usr/bin${d}`, `${bin}${d}${d}/usr/bin${d}`, "zeta ran\n"],
+			[undefined, bin, "zeta ran\n"],
 		]);
 	});
 
@@ -455,13 +496,20 @@ if (run.exitCode !== 0) throw new Error(${JSON.stringify(`${name}-probe is not o
 		const explicit = path.join(root, "explicit.js");
 		await Bun.write(explicit, "export default function () {}\n");
 
-		const result = await run({ route: "explicitSession", explicitPath: explicit });
+		const result = await run({
+			route: "explicitSession",
+			explicitPath: explicit,
+			commands: ["ambienttool-probe", "ambient-probe"],
+		});
 
 		expect(result.extensions).toEqual([explicit]);
 		expect(result.errors).toEqual([]);
 		expect(result.tools).toContain("ambienttool_probe");
 		expect(result.probes).toEqual({ ambienttool: "ambienttool ran\n" });
 		expect(result.PATH).toBe([binOf("ambienttool"), BASE_PATH].join(path.delimiter));
+		// The session's shell: the tool plugin's command runs, the extension-only plugin's does not.
+		expect(result.shell[0]).toEqual({ output: "ambienttool ran\n", exitCode: 0 });
+		expect(result.shell[1]?.exitCode).toBe(127);
 	});
 
 	test("a case leaves the process that runs it with its PATH, and with the agent directory it had before a profile", async () => {
@@ -471,11 +519,18 @@ if (run.exitCode !== 0) throw new Error(${JSON.stringify(`${name}-probe is not o
 		// a named profile active when it runs the case.
 		const priorAgentDir = path.join(root, "prior-agent");
 
-		const result = await run({ route: "isolation", inner: { route: "session" } }, BASE_PATH, {
-			PI_CODING_AGENT_DIR: priorAgentDir,
-		});
+		const result = await run(
+			{ route: "isolation", inner: { route: "session" }, commands: ["isolated-probe"] },
+			BASE_PATH,
+			{
+				PI_CODING_AGENT_DIR: priorAgentDir,
+			},
+		);
 
+		expect(result.inner?.probes).toEqual({ isolated: "isolated ran\n" });
 		expect(result.inner?.PATH).toBe([binOf("isolated"), BASE_PATH].join(path.delimiter));
+		// The calling process: the case's command is not on its PATH, and its agent directory is its own.
+		expect(result.shell).toEqual([{ output: "", exitCode: 127 }]);
 		expect(result.PATH).toBe(BASE_PATH);
 		expect(result.agentDir).toBe(priorAgentDir);
 	});

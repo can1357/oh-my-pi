@@ -486,11 +486,13 @@ function namesDirectory(entry: string, identity: string): boolean {
 // =============================================================================
 
 /**
- * Get all tool paths from all enabled plugins, for loading: the `bin`
- * directories of the plugins that ship tools go on PATH here, before any
- * returned module can be imported. Tool discovery also runs in an explicit-only
- * session, which loads no other installed plugin code, so no other plugin's
- * directories are added.
+ * Get all tool paths from all enabled plugins' manifests, for loading: the `bin`
+ * directories of the plugins whose manifests name tools go on PATH here, before
+ * any returned module can be imported. Tool discovery also runs in an
+ * explicit-only session, which loads no other installed plugin code, so no
+ * other plugin's directories are added. Tools a plugin ships in its
+ * conventional `tools/` directory are found by capability discovery instead;
+ * see {@link prependBinDirsOfOwningPlugins}.
  */
 export async function getAllPluginToolPaths(cwd: string): Promise<string[]> {
 	const withTools: InstalledPlugin[] = [];
@@ -505,6 +507,24 @@ export async function getAllPluginToolPaths(cwd: string): Promise<string[]> {
 
 	prependPluginBinDirs(withTools);
 	return paths;
+}
+
+/**
+ * Put on PATH the `bin` directories of the enabled plugins whose package root
+ * holds any of `modulePaths`, before any of those modules is imported. For
+ * plugin modules found outside the manifest, such as the tools capability
+ * discovery finds in a plugin's conventional `tools/` directory; a module under
+ * no enabled plugin's root adds nothing. Roots and modules compare by realpath.
+ */
+export async function prependBinDirsOfOwningPlugins(cwd: string, modulePaths: readonly string[]): Promise<void> {
+	if (modulePaths.length === 0) return;
+	const modules = await Promise.all(modulePaths.map(p => fs.promises.realpath(p).catch(() => path.resolve(p))));
+	const owners: InstalledPlugin[] = [];
+	for (const plugin of await getEnabledPlugins(cwd)) {
+		const root = await fs.promises.realpath(plugin.path).catch(() => path.resolve(plugin.path));
+		if (modules.some(modulePath => modulePath.startsWith(root + path.sep))) owners.push(plugin);
+	}
+	prependPluginBinDirs(owners);
 }
 
 /**

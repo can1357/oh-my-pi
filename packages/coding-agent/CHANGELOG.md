@@ -4,7 +4,7 @@
 
 ### Added
 
-- Plugins can declare `bin` directories in their `omp` manifest; when omp selects an installed plugin's extensions or tools to load, it puts those directories on `PATH` under the plugin's installed path rather than its realpath, so a running session keeps the plugin's commands when a symlinked plugins root is re-pointed and its old target removed ([#17635](https://github.com/can1357/oh-my-pi/pull/17635) by [@sjawhar](https://github.com/sjawhar))
+- Plugins can declare `bin` directories in their `omp` manifest; omp puts them on `PATH`, and a running session keeps the plugin's commands when a symlinked plugins root is re-pointed and its old target removed ([#17635](https://github.com/can1357/oh-my-pi/pull/17635) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.2] - 2026-10-31
 
