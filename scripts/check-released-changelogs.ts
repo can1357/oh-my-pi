@@ -34,11 +34,14 @@
  * - The order of the sections, blank lines, `###` heading spacing, duplicate
  *   `###` headings and empty `###` headings: `bun run fix:changelogs` rewrites
  *   all of them inside released sections.
- * - The oldest sections, when the working tree has a new archive footer and
- *   they are gone from the end of the file: `bun run fix:changelogs` moves them
- *   behind a link once a changelog passes its size limit.
+ * - An oldest section that is gone, when a new footer names this changelog
+ *   and `bun run fix:changelogs` would archive that section: the base's
+ *   missing sections are put back into the working tree's changelog, sorted
+ *   by version, and collapsed behind that footer at the default size limit,
+ *   as the fixer does. The fixer always keeps the newest release.
  * - A released section with no entries, gone: `bun run release` removes those.
- * - A changelog that exists on one side only: a package was added or removed.
+ * - A package whose manifest and changelog are both gone. Deleting a changelog
+ *   while its package manifest remains is a failure.
  *
  * There is no override. A change that repairs a released section which is
  * already wrong at the base fails here too; it has to reach the base branch
@@ -47,15 +50,19 @@
 import * as path from "node:path";
 import { $ } from "bun";
 import {
-	changelogPaths,
+	collapseChangelogTail,
+	compareVersionTitlesDesc,
 	isSubsectionHeading,
 	normalizeSection,
+	parseChangelog,
 	parseReleaseSection,
 	parseSubsectionTitle,
 	renderChangelog,
 	resolveRepoRoot,
+	sortReleaseSections,
 	splitArchiveFooter,
 	splitReleaseBlocks,
+	type ChangelogDocument,
 } from "./fix-changelogs";
 
 const UNRELEASED_TITLE = "Unreleased";
@@ -81,6 +88,8 @@ export interface ReleasedSectionChange {
 	/** Lines the base section has, here more times than at the base. */
 	repeated: ChangedLine[];
 	removed: string[];
+	/** The changelog itself is absent while its package manifest remains. */
+	missingChangelog?: boolean;
 }
 
 export interface ReleasedChangelogCheck {
@@ -104,7 +113,7 @@ interface ReleasedSection {
 
 interface ReleasedChangelog {
 	sections: Map<string, ReleasedSection[]>;
-	/** Section titles in file order, first appearance. */
+	/** Release titles in the same version order the fixer uses before collapsing. */
 	order: string[];
 	archiveLink: string | undefined;
 }
@@ -112,7 +121,6 @@ interface ReleasedChangelog {
 function parseReleased(content: string): ReleasedChangelog {
 	const { body, archiveLink } = splitArchiveFooter(content);
 	const sections = new Map<string, ReleasedSection[]>();
-	const order: string[] = [];
 	for (const block of splitReleaseBlocks(body).blocks) {
 		if (block.title === UNRELEASED_TITLE) continue;
 		const parsed = parseReleaseSection(block.heading.text, block.bodyLines);
@@ -122,14 +130,42 @@ function parseReleased(content: string): ReleasedChangelog {
 			.filter(line => line.trim() !== "");
 		const section = { heading: block.heading.text, headLine: block.heading.lineNumber, lines };
 		const copies = sections.get(block.title);
-		if (copies) {
-			copies.push(section);
-		} else {
-			sections.set(block.title, [section]);
-			order.push(block.title);
-		}
+		if (copies) copies.push(section);
+		else sections.set(block.title, [section]);
 	}
-	return { sections, order, archiveLink };
+	return { sections, order: [...sections.keys()].sort(compareVersionTitlesDesc), archiveLink };
+}
+
+function normalizedDocument(content: string): ChangelogDocument {
+	const document = parseChangelog(splitArchiveFooter(content).body);
+	for (const section of document.sections) normalizeSection(section);
+	sortReleaseSections(document);
+	return document;
+}
+
+function archiveFooterMatchesPath(archiveLink: string | undefined, changelogPath: string): boolean {
+	return archiveLink?.startsWith(`Older entries are archived in [${changelogPath}@`) ?? false;
+}
+
+/**
+ * The release titles `bun run fix:changelogs` would archive behind
+ * `archiveLink` if the base's `missingTitles` were back in `headContent`.
+ */
+function titlesFixerWouldArchive(
+	baseContent: string,
+	headContent: string,
+	missingTitles: ReadonlySet<string>,
+	archiveLink: string,
+): Set<string> {
+	const base = normalizedDocument(baseContent);
+	const restored = normalizedDocument(headContent);
+	restored.sections.push(
+		...base.sections.filter(section => section.title !== UNRELEASED_TITLE && missingTitles.has(section.title)),
+	);
+	sortReleaseSections(restored);
+	const collapsed = collapseChangelogTail(renderChangelog(restored), archiveLink);
+	const kept = new Set(parseChangelog(collapsed.content).sections.map(section => section.title));
+	return new Set(restored.sections.map(section => section.title).filter(title => !kept.has(title)));
 }
 
 function compareSection(
@@ -192,15 +228,24 @@ export function findReleasedSectionChanges(
 	const base = parseReleased(baseContent);
 	const head = parseReleased(headContent);
 
-	// The size limit drops the oldest sections and writes a footer linking the
-	// last commit that still has them. Accept only that shape: a new footer and
-	// the missing sections all at the end of the base's file.
+	// The fixer sorts releases by version, then archives the oldest ones that no
+	// longer fit and always keeps the newest. A missing section counts as
+	// archived only when that same collapse, behind the new footer, archives it.
 	const archivedTitles = new Set<string>();
-	if (head.archiveLink !== undefined && head.archiveLink !== base.archiveLink) {
+	const headArchiveLink = head.archiveLink;
+	if (
+		headArchiveLink !== undefined &&
+		headArchiveLink !== base.archiveLink &&
+		archiveFooterMatchesPath(headArchiveLink, changelogPath)
+	) {
 		for (let index = base.order.length - 1; index >= 0; index--) {
 			const title = base.order[index];
 			if (title === undefined || head.sections.has(title)) break;
 			archivedTitles.add(title);
+		}
+		if (archivedTitles.size > 0) {
+			const fixerArchives = titlesFixerWouldArchive(baseContent, headContent, archivedTitles, headArchiveLink);
+			for (const title of archivedTitles) if (!fixerArchives.has(title)) archivedTitles.delete(title);
 		}
 	}
 
@@ -241,32 +286,47 @@ export async function checkReleasedChangelogs(options: {
 	}
 	const baseCommit = resolved.stdout.trim();
 
-	const workingTreePaths = await changelogPaths(repoRoot);
-	const listed =
-		workingTreePaths.length === 0
-			? { ok: true, stdout: "", stderr: "" }
-			: await git(["ls-tree", "-z", "--name-only", baseCommit, "--", ...workingTreePaths], repoRoot);
+	const listed = await git(["ls-tree", "-r", "-z", "--name-only", baseCommit, "--", "packages"], repoRoot);
 	if (!listed.ok) throw new UnreadableBaseError(`cannot list the changelogs at ${baseCommit}: ${listed.stderr}`);
-	const sharedPaths = listed.stdout.split("\0").filter(Boolean);
-	if (sharedPaths.length === 0) {
-		throw new UnreadableBaseError(
-			`no packages/*/CHANGELOG.md exists both at ${baseCommit} and in ${repoRoot}; nothing to compare.`,
-		);
+	const basePaths = listed.stdout.split("\0").filter(pathName => /^packages\/[^/]+\/CHANGELOG\.md$/.test(pathName));
+	if (basePaths.length === 0) {
+		throw new UnreadableBaseError(`no packages/*/CHANGELOG.md exists at ${baseCommit}; nothing to compare.`);
 	}
 
+	let changelogs = 0;
 	let sections = 0;
 	let archived = 0;
 	const changes: ReleasedSectionChange[] = [];
-	for (const changelogPath of sharedPaths) {
+	for (const changelogPath of basePaths) {
+		const absolutePath = path.join(repoRoot, changelogPath);
+		if (!(await Bun.file(absolutePath).exists())) {
+			const packageManifest = path.join(path.dirname(absolutePath), "package.json");
+			if (await Bun.file(packageManifest).exists()) {
+				changes.push({
+					path: changelogPath,
+					heading: "CHANGELOG.md is missing",
+					headLine: undefined,
+					baseCopies: 1,
+					headCopies: 0,
+					added: [],
+					repeated: [],
+					removed: [],
+					missingChangelog: true,
+				});
+			}
+			continue;
+		}
+
 		const base = await git(["cat-file", "blob", `${baseCommit}:${changelogPath}`], repoRoot);
 		if (!base.ok) throw new UnreadableBaseError(`cannot read ${changelogPath} at ${baseCommit}: ${base.stderr}`);
-		const head = await Bun.file(path.join(repoRoot, changelogPath)).text();
+		const head = await Bun.file(absolutePath).text();
 		const result = findReleasedSectionChanges(changelogPath, base.stdout, head);
+		changelogs++;
 		sections += result.sections;
 		archived += result.archived;
 		changes.push(...result.changes);
 	}
-	return { baseCommit, changelogs: sharedPaths.length, sections, archived, changes };
+	return { baseCommit, changelogs, sections, archived, changes };
 }
 
 /**
@@ -283,6 +343,10 @@ export function formatReleasedChangelogReport(check: ReleasedChangelogCheck, rec
 	const out = [`A released changelog section differs from the base (${base}).`, ""];
 	for (const change of check.changes) {
 		out.push(`${change.path}: ${change.heading}`);
+		if (change.missingChangelog) {
+			out.push("  The package manifest remains, so this is not a package removal. Restore the changelog.", "");
+			continue;
+		}
 		if (change.headCopies === 0) {
 			out.push(`  Missing here. Restore it from \`git show ${base}:${change.path}\`.`, "");
 			continue;
@@ -356,13 +420,15 @@ export function formatGithubAnnotations(check: ReleasedChangelogCheck): string[]
 		if (change.headLine !== undefined) properties.push(`line=${change.headLine}`);
 		properties.push(`title=${escapeAnnotationProperty("Released changelog section changed")}`);
 		const counts = [
-			change.headCopies === 0 ? "missing" : undefined,
+			change.missingChangelog ? "changelog missing while package remains" : undefined,
+			!change.missingChangelog && change.headCopies === 0 ? "missing" : undefined,
 			change.added.length > 0 ? `${change.added.length} line(s) added` : undefined,
 			change.repeated.length > 0 ? `${change.repeated.length} repeated` : undefined,
 			change.removed.length > 0 ? `${change.removed.length} removed` : undefined,
 		].filter(Boolean);
-		const remedy =
-			change.added.length > 0
+		const remedy = change.missingChangelog
+			? "Restore the changelog; its package manifest is still present."
+			: change.added.length > 0
 				? `Run \`${FIX_COMMAND}\` to move added lines back under ## [Unreleased].`
 				: "Make it match the base; the job log lists the lines.";
 		const what = counts.length > 0 ? counts.join(", ") : "lines reordered";

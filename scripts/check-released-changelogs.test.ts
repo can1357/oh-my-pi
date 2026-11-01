@@ -279,6 +279,89 @@ describe("check-released-changelogs", () => {
 		TEST_TIMEOUT_MS,
 	);
 
+	test.each([
+		{ name: "a small changelog", fill: false },
+		{ name: "a changelog whose full content exceeds the limit", fill: true },
+	])(
+		"rejects a footer naming the base commit that removes every release of $name",
+		async ({ fill }) => {
+			// The fixer archives nothing under the limit and always keeps the newest release over it.
+			let content =
+				"# Changelog\n\n## [Unreleased]\n\n## [1.1.0] - 2026-02-01\n\n### Fixed\n\n- Fixed a recent bug\n\n## [1.0.0] - 2026-01-01\n\n### Fixed\n\n- Fixed an old bug\n";
+			for (let index = 0; fill; index++) {
+				const line = `- Fixed historical rendering regression ${index} in the terminal screen.\n`;
+				if (Buffer.byteLength(content + line) > MAX_CHANGELOG_BYTES - 128) break;
+				content += line;
+			}
+			const repo = await repoWith(content);
+			const baseline = (await repo.git("rev-parse", "HEAD")).output.trim();
+			const archiveFooter = `Older entries are archived in [${CHANGELOG}@${baseline.slice(0, 12)}](https://github.com/can1357/oh-my-pi/blob/${baseline}/${CHANGELOG}).`;
+			await repo.write(`# Changelog\n\n## [Unreleased]\n\n${archiveFooter}\n`);
+
+			const result = await check(repo, "--base", "HEAD");
+			expect(result.exitCode).toBe(1);
+			expect(result.output).toContain(`${CHANGELOG}: ## [1.1.0] - 2026-02-01\n  Missing here.`);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"uses the fixer's version order before accepting a default-limit archive",
+		async () => {
+			// The oldest version is physically first. The fixer sorts it behind 1.1.0
+			// before collapsing it, so the checker must sort the base identically.
+			let content = "# Changelog\n\n## [Unreleased]\n\n## [1.0.0] - 2026-01-01\n\n### Fixed\n\n";
+			for (let index = 0; ; index++) {
+				const line = `- Fixed historical rendering regression ${index} in the terminal screen.\n`;
+				if (Buffer.byteLength(content + line) > MAX_CHANGELOG_BYTES - 128) break;
+				content += line;
+			}
+			content += "\n## [1.1.0] - 2026-02-01\n\n### Fixed\n\n- Fixed a recent bug\n";
+			const repo = await repoWith(content);
+			const entries = Array.from({ length: 8 }, (_, index) => `- Added a new terminal feature ${index}\n`).join("");
+			await repo.write(content.replace("## [Unreleased]\n", `## [Unreleased]\n\n### Added\n\n${entries}`));
+
+			const fixed = await fixChangelogs(repo);
+			expect(fixed.changedFiles.map(file => file.collapsedReleases)).toEqual([1]);
+			const result = await check(repo, "--base", "HEAD");
+			expect(result.output).toContain("; 1 oldest archived behind a new size-limit footer.");
+			expect(result.exitCode).toBe(0);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"rejects an archive that drops more releases than the fixer would",
+		async () => {
+			// Eight new entries make the fixer archive only 1.0.0; 1.1.0 still fits.
+			let content =
+				"# Changelog\n\n## [Unreleased]\n\n## [1.2.0] - 2026-03-01\n\n### Fixed\n\n- Fixed a newer bug\n\n## [1.1.0] - 2026-02-01\n\n### Fixed\n\n- Fixed a recent bug\n\n## [1.0.0] - 2026-01-01\n\n### Fixed\n\n";
+			for (let index = 0; ; index++) {
+				const line = `- Fixed historical rendering regression ${index} in the terminal screen.\n`;
+				if (Buffer.byteLength(content + line) > MAX_CHANGELOG_BYTES - 128) break;
+				content += line;
+			}
+			const repo = await repoWith(content);
+			const entries = Array.from({ length: 8 }, (_, index) => `- Added a new terminal feature ${index}\n`).join("");
+			await repo.write(content.replace("## [Unreleased]\n", `## [Unreleased]\n\n### Added\n\n${entries}`));
+
+			const fixed = await fixChangelogs(repo);
+			expect(fixed.changedFiles.map(file => file.collapsedReleases)).toEqual([1]);
+			const archivedContent = await repo.read();
+			const middle = archivedContent.slice(
+				archivedContent.indexOf("## [1.1.0]"),
+				archivedContent.indexOf("Older entries are archived in ["),
+			);
+			await repo.write(archivedContent.replace(middle, ""));
+
+			const result = await check(repo, "--base", "HEAD");
+			expect(result.exitCode).toBe(1);
+			expect(result.output).toContain(`${CHANGELOG}: ## [1.1.0] - 2026-02-01\n  Missing here.`);
+			expect(result.output).not.toContain("## [1.0.0]");
+		},
+		TEST_TIMEOUT_MS,
+	);
+
 	test(
 		"fails a section missing from the middle even when an archive footer was added",
 		async () => {
@@ -450,11 +533,39 @@ describe("check-released-changelogs", () => {
 		TEST_TIMEOUT_MS,
 	);
 
+	test(
+		"fails a deleted changelog while its package manifest remains, but accepts deleting the package too",
+		async () => {
+			// Another package's changelog stays, so the deleted one is the only difference.
+			const repo = await repoWith(BASE_CHANGELOG);
+			const packageManifest = path.join(repo.dir, "packages/tui/package.json");
+			await Bun.write(packageManifest, "{}\n");
+			await Bun.write(path.join(repo.dir, "packages/ai/CHANGELOG.md"), BASE_CHANGELOG);
+			await repo.git("add", "-A");
+			await repo.git("commit", "-qm", "chore: package manifest");
+
+			await fs.rm(path.join(repo.dir, CHANGELOG));
+			const missingChangelog = await check(repo, "--base", "HEAD", "--github-annotations");
+			expect(missingChangelog.exitCode).toBe(1);
+			expect(missingChangelog.output).toContain(`${CHANGELOG}: CHANGELOG.md is missing`);
+			expect(missingChangelog.output).toContain("The package manifest remains, so this is not a package removal.");
+			expect(missingChangelog.output).toContain(
+				"::error file=packages/tui/CHANGELOG.md,title=Released changelog section changed::CHANGELOG.md is missing: changelog missing while package remains.",
+			);
+
+			await fs.rm(packageManifest);
+			const packageRemoved = await check(repo, "--base", "HEAD");
+			expect(packageRemoved.exitCode).toBe(0);
+			expect(packageRemoved.output).toContain("1 sections in 1 changelogs");
+		},
+		TEST_TIMEOUT_MS,
+	);
+
 	test.each([
 		{
 			name: "no changelog exists at the base",
 			args: ["--base", "HEAD~1"],
-			expected: "no packages/*/CHANGELOG.md exists both at",
+			expected: "no packages/*/CHANGELOG.md exists at",
 		},
 		{ name: "--base is missing", args: [], expected: "error: --base is required" },
 		{

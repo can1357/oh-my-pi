@@ -459,7 +459,7 @@ function sectionHasContent(section: ReleaseSection): boolean {
 	return section.subsections.some(subsection => trimBlankLines(numberedText(subsection.lines)).length > 0);
 }
 
-function compareVersionTitlesDesc(left: string, right: string): number {
+export function compareVersionTitlesDesc(left: string, right: string): number {
 	const leftParts = left.split(".").map(part => Number.parseInt(part, 10));
 	const rightParts = right.split(".").map(part => Number.parseInt(part, 10));
 	const limit = Math.max(leftParts.length, rightParts.length);
@@ -470,7 +470,7 @@ function compareVersionTitlesDesc(left: string, right: string): number {
 	return 0;
 }
 
-function sortReleaseSections(document: ChangelogDocument): void {
+export function sortReleaseSections(document: ChangelogDocument): void {
 	const unreleasedSections = document.sections.filter(section => section.title === "Unreleased");
 	const releasedSections = document.sections
 		.filter(section => section.title !== "Unreleased")
