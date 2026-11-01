@@ -13387,11 +13387,7 @@ export class AgentSession implements SettingsScope {
 	 * session yet, since parking would drop them.
 	 */
 	get ircWakesPending(): boolean {
-		return (
-			this.#ircWakeHolds > 0 ||
-			this.#carriedRecords.size > 0 ||
-			this.#irc.hasPending()
-		);
+		return this.#ircWakeHolds > 0 || this.#carriedRecords.size > 0 || this.#irc.hasPending();
 	}
 
 	/** Emits an IRC relay observation for UI rendering without persisting it. */

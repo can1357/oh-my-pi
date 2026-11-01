@@ -34,19 +34,22 @@ const runner = new ExtensionRunner([], runtime, dir.path(), SessionManager.inMem
 /** The host's compaction: in flight until this probe releases it. */
 const hostCompaction = Promise.withResolvers<void>();
 let hostCalls = 0;
-runner.initialize({} as unknown as ExtensionActions, {
-	getModel: () => undefined,
-	isIdle: () => true,
-	abort() {},
-	shutdown() {},
-	hasPendingMessages: () => false,
-	getContextUsage: () => undefined,
-	getSystemPrompt: () => [],
-	compact: async () => {
-		hostCalls++;
-		await hostCompaction.promise;
-	},
-} as unknown as ExtensionContextActions);
+runner.initialize(
+	{} as unknown as ExtensionActions,
+	{
+		getModel: () => undefined,
+		isIdle: () => true,
+		abort() {},
+		shutdown() {},
+		hasPendingMessages: () => false,
+		getContextUsage: () => undefined,
+		getSystemPrompt: () => [],
+		compact: async () => {
+			hostCalls++;
+			await hostCompaction.promise;
+		},
+	} as unknown as ExtensionContextActions,
+);
 const endSession = runtime.beginSession();
 const ctx = runner.createContext();
 const say = (what: string, detail?: unknown): void => {
@@ -84,6 +87,7 @@ switch (shape) {
 		break;
 	}
 	case "derived-all": {
+		// oxlint-disable-next-line unicorn/no-single-promise-in-promise-methods -- the aggregate is the shape under test
 		void Promise.all([ctx.compact()]);
 		endSession();
 		hostCompaction.resolve();

@@ -1649,17 +1649,17 @@ describe("what a session set on the host's UI", () => {
 	test("is the setting session's before the host's setter runs: a setter that ends a session, or writes and throws", () => {
 		// One host for both sessions: B's setting ends A from inside the host's setter.
 		let status: string | undefined;
-		let endA: (() => void) | undefined;
+		const ending: { a?: () => void } = {};
 		const host = {
 			setStatus: (_key: string, value?: string) => {
 				status = value;
-				if (value === "B") endA?.();
+				if (value === "B") ending.a?.();
 			},
 		};
 		const a = withUI(host);
 		const b = withUI(host);
 		a.ui.setStatus("same", "A");
-		endA = a.end;
+		ending.a = a.end;
 		b.ui.setStatus("same", "B");
 		const endedMidSet = status;
 
@@ -1678,7 +1678,11 @@ describe("what a session set on the host's UI", () => {
 		}
 		throwing.end();
 
-		expect({ endedMidSet, threw, afterItEnds: shown }).toEqual({ endedMidSet: "B", threw: true, afterItEnds: undefined });
+		expect({ endedMidSet, threw, afterItEnds: shown }).toEqual({
+			endedMidSet: "B",
+			threw: true,
+			afterItEnds: undefined,
+		});
 	});
 });
 
