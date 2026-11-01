@@ -1116,6 +1116,8 @@ export class SessionManager {
 	#writerStateGen = 0;
 	/** Ordinary writer appends not yet confirmed by a deferred backend. */
 	#pendingDeferredAppends = 0;
+	/** Whole-file publishes queued by a synchronous write but not yet confirmed. */
+	#pendingDeferredRewrites = 0;
 	/** Only superseded in-flight writer paths are omitted from this manager's otherwise-global drains. */
 	#retiredWriterFiles: Set<string> | undefined;
 	/** Only explicitly shared clones may merge deferred CAS conflicts; remote peers fail closed. */
@@ -1464,11 +1466,15 @@ export class SessionManager {
 		if (
 			this.#storage.defersSyncPublish &&
 			this.#sessionFile &&
-			(this.#pendingDeferredAppends > 0 || this.#atomicRewriteFenceEpoch !== null || !this.#fileIsCurrent)
+			(this.#pendingDeferredAppends > 0 ||
+				this.#pendingDeferredRewrites > 0 ||
+				this.#atomicRewriteFenceEpoch !== null ||
+				!this.#fileIsCurrent)
 		)
 			(this.#retiredWriterFiles ??= new Set()).add(this.#sessionFile);
 		this.#writerStateGen++;
 		this.#pendingDeferredAppends = 0;
+		this.#pendingDeferredRewrites = 0;
 		if (!preserveAtomicFence) {
 			this.#atomicRewriteFenceEpoch = null;
 			this.#atomicRewriteDirty = false;
@@ -1965,12 +1971,22 @@ export class SessionManager {
 		const writerStateGen = this.#writerStateGen;
 		const confirmed = this.#storage.confirmWrites?.(sessionFile);
 		if (!confirmed) return;
+		this.#pendingDeferredRewrites++;
+		let pendingRewrite = true;
 		void confirmed
 			.then(() => {
+				if (writerStateGen !== this.#writerStateGen) return;
+				pendingRewrite = false;
+				this.#pendingDeferredRewrites--;
 				if (!this.#isCurrentWriterState(writerStateGen, sessionFile)) return;
 				onConfirm?.();
 			})
 			.catch(err => {
+				if (writerStateGen !== this.#writerStateGen) return;
+				if (pendingRewrite) {
+					pendingRewrite = false;
+					this.#pendingDeferredRewrites--;
+				}
 				if (!this.#isCurrentWriterState(writerStateGen, sessionFile)) return;
 				this.#fileIsCurrent = false;
 				this.#rewriteRequired = true;
@@ -2051,7 +2067,12 @@ export class SessionManager {
 	}
 
 	#sharedDeferredStateDrifted(): boolean {
-		if (!this.#storage.defersSyncPublish || !this.#sharedDeferredSnapshot || this.#pendingDeferredAppends > 0)
+		if (
+			!this.#storage.defersSyncPublish ||
+			!this.#sharedDeferredSnapshot ||
+			this.#pendingDeferredAppends > 0 ||
+			this.#pendingDeferredRewrites > 0
+		)
 			return false;
 		const sessionFile = this.#sessionFile;
 		if (!sessionFile) return false;
@@ -2077,6 +2098,12 @@ export class SessionManager {
 	#rewriteSynchronously(allowSealed = false): void {
 		if (this.#entriesReleased || (this.#released && !allowSealed)) return;
 		if (!this.#persist || !this.#shouldHaveSessionFile()) return;
+		if (this.#storage.defersSyncPublish && this.#pendingDeferredRewrites > 0 && !this.#sessionFileRelocating) {
+			// The confirming body owns the next rewrite and its last durable size token.
+			this.#fileIsCurrent = false;
+			this.#rewriteRequired = true;
+			return;
+		}
 		if (
 			this.#storage.defersSyncPublish &&
 			(this.#pendingDeferredAppends > 0 ||
@@ -2729,11 +2756,22 @@ export class SessionManager {
 			sessionFile: this.#sessionFile,
 			expectedDiskSize: this.#expectedDiskSize,
 			prospectiveDiskSize: this.#prospectiveDiskSize,
-			onDisk: this.#fileIsCurrent && this.#unappendedTail.length === 0 && this.#pendingDeferredAppends === 0,
+			onDisk:
+				this.#fileIsCurrent &&
+				this.#unappendedTail.length === 0 &&
+				this.#pendingDeferredAppends === 0 &&
+				this.#pendingDeferredRewrites === 0,
 			forceFileCreation: this.#forceFileCreation,
-			needsRewrite: this.#rewriteRequired || this.#unappendedTail.length > 0 || this.#pendingDeferredAppends > 0,
+			needsRewrite:
+				this.#rewriteRequired ||
+				this.#unappendedTail.length > 0 ||
+				this.#pendingDeferredAppends > 0 ||
+				this.#pendingDeferredRewrites > 0,
 			tailRewritePending:
-				this.#tailRewritePending || this.#unappendedTail.length > 0 || this.#pendingDeferredAppends > 0,
+				this.#tailRewritePending ||
+				this.#unappendedTail.length > 0 ||
+				this.#pendingDeferredAppends > 0 ||
+				this.#pendingDeferredRewrites > 0,
 			sharedDeferredSnapshot: this.#sharedDeferredSnapshot,
 			draftOnlySessionCleanupArmed: this.#draftOnlySessionCleanupArmed,
 			fallbackRuntimeOnly: this.#fallbackRuntimeOnly,
@@ -2764,7 +2802,10 @@ export class SessionManager {
 		}
 		if (
 			persist &&
-			(this.#unappendedTail.length > 0 || this.#pendingDeferredAppends > 0 || this.#tailRewritePending)
+			(this.#unappendedTail.length > 0 ||
+				this.#pendingDeferredAppends > 0 ||
+				this.#pendingDeferredRewrites > 0 ||
+				this.#tailRewritePending)
 		) {
 			// Both managers can publish this tail now. Reconcile through size-checked rewrites,
 			// never append lines a persistent clone may already have written.
@@ -3664,7 +3705,8 @@ export class SessionManager {
 			this.#diskFailure ||
 			this.#tailRewritePending ||
 			this.#unappendedTail.length > 0 ||
-			this.#pendingDeferredAppends
+			this.#pendingDeferredAppends ||
+			this.#pendingDeferredRewrites
 		)
 			return;
 		this.#resetWriterState();

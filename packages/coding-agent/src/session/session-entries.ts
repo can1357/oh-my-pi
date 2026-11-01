@@ -17,6 +17,8 @@ import type { RuntimeIdentity } from "./runtime-identity";
 export const CURRENT_SESSION_VERSION = 3;
 
 export const SESSION_TITLE_SLOT_BYTES = 256;
+/** Bounded tail window shared by session listing and legacy title reconciliation. */
+export const SESSION_LIST_SUFFIX_BYTES = 32_768;
 
 export const SESSION_TITLE_SLOT_ENTRY_TYPE = "title";
 

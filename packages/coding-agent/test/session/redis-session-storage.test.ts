@@ -361,6 +361,7 @@ describe("RedisSessionStorage", () => {
 		const content =
 			serializeTitleSlot({ title: "Stale", updatedAt: "t1" }) +
 			'{"type":"session","id":"legacy"}\n' +
+			`${JSON.stringify({ type: "custom", data: "x".repeat(256 * 1024) })}\n` +
 			'{"type":"title_change","title":"Legacy journal","source":"user","timestamp":"t2"}\n';
 		redis.strings.set(`omp:sessions:file:${file}`, content);
 		redis.hashes.set("omp:sessions:meta", new Map([[file, "1"]]));
@@ -383,6 +384,43 @@ describe("RedisSessionStorage", () => {
 		});
 		expect(redis.calls.some(call => call.method === "get")).toBe(false);
 		expect(redis.strings.get(`omp:sessions:file:${file}`)).toBe(content);
+	});
+
+	it("preserves newer metadata-only title authority over an older journal across refresh and reopen", async () => {
+		const storage = await RedisSessionStorage.create({ client: redis });
+		const file = "/sessions/p/direct-title.jsonl";
+		const body =
+			serializeTitleSlot({ title: "Slot", updatedAt: "slot" }) +
+			'{"type":"session","id":"direct"}\n' +
+			'{"type":"title_change","title":"Older journal","source":"auto","timestamp":"2099-01-01"}\n';
+		await storage.writeText(file, body);
+		const writer = storage.openWriter(file);
+		const pending = writer.append('{"type":"custom","data":"drain before title"}\n');
+		const title = { title: "Direct metadata", source: "user" as const, updatedAt: "1900-01-01" };
+		redis.calls.length = 0;
+		await storage.updateSessionTitle(file, title);
+		await pending;
+		await writer.close();
+		const content = redis.strings.get(`omp:sessions:file:${file}`);
+		expect(content).toBe(`${body}{"type":"custom","data":"drain before title"}\n`);
+		expect(JSON.parse(redis.hashes.get("omp:sessions:title")?.get(file) ?? "{}")).toEqual({
+			...title,
+			titleIndexedSize: Buffer.byteLength(content ?? ""),
+		});
+		expect(await storage.readLatestTitle(file)).toEqual(title);
+		expect(redis.calls.some(call => call.method === "get")).toBe(false);
+		redis.calls.length = 0;
+		await storage.refresh();
+		const reopened = await RedisSessionStorage.create({ client: redis });
+		expect(await storage.readLatestTitle(file)).toEqual(title);
+		expect(await reopened.readLatestTitle(file)).toEqual(title);
+		expect(redis.calls.some(call => call.method === "get" || call.method === "getrange")).toBe(false);
+		expect(redis.strings.get(`omp:sessions:file:${file}`)).toBe(content);
+		const cleared = { title: undefined, source: "user" as const, updatedAt: "clear" };
+		await reopened.updateSessionTitle(file, cleared);
+		const clearedReopen = await RedisSessionStorage.create({ client: redis });
+		expect(await clearedReopen.readLatestTitle(file)).toEqual(cleared);
+		expect(redis.calls.some(call => call.method === "get" || call.method === "getrange")).toBe(false);
 	});
 
 	it("listFilesSync returns only direct children matching the glob", async () => {

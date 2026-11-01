@@ -331,7 +331,7 @@
 
 ### Changed
 
-- SQL session stores maintain a nullable `title_indexed_size` freshness column automatically; externally managed schemas using `createTable: false` must provide it alongside the existing title columns.
+- SQL session stores retain automatic `title_indexed_size` freshness tracking while supporting externally managed six-column schemas without DDL, using their existing title metadata and bounded lazy reconciliation.
 
 ### Fixed
 
@@ -471,6 +471,9 @@
 - Deferred append acknowledgements, failures, writer shutdowns, and title notifications stay attached to their issuing session across branching and rollback, preserving the replacement session's durability and ownership.
 - Persistent remote clones reconcile divergent journals asynchronously, preserving physical title/source/timestamp order and newer local renames while unshared compare-and-swap conflicts still fail closed.
 - Session lists use maintained Redis/SQL title metadata and lazily reconcile legacy metadata once. File title scans skip decoding unrelated complete records; continue and resume inspect only the relevant candidates.
+- Untitled sessions and explicit journal title clears use compaction summaries when available rather than displaying empty titles or reviving stale headers. Continue selection breaks equal modification times by creation time and path, without scanning older journals.
+- Metadata-only SQL/Redis title updates retain their drained-byte authority instead of rereading and restoring an older journal title.
+- Turn-one titles wait for an unconfirmed remote cold rewrite before publishing the complete journal and notifying listeners; genuine failed cold writes remain failed without a speculative replacement.
 - Sealed shutdown rewrites recover deleted or externally changed session files, check deferred-backend ownership, and await sibling artifact copies; failed internal copies, forks, and relocations release ownership without publishing orphan journals ([#17431](https://github.com/can1357/oh-my-pi/pull/17431) by [@AdamDureyAtWillship](https://github.com/AdamDureyAtWillship))
 
 ## [18.14.0] - 2026-10-29

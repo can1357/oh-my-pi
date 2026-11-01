@@ -11,6 +11,7 @@ import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { parseJsonlLenient } from "@oh-my-pi/pi-utils/stream";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
 import { EVAL_STATE_CONTEXT_TYPE } from "../eval/state";
+import { SESSION_LIST_SUFFIX_BYTES } from "./session-entries";
 import { readLatestSessionTitle, visitEntriesFromFile } from "./session-loader";
 import { computeDefaultSessionDir } from "./session-paths";
 import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
@@ -71,12 +72,6 @@ export interface RecentSessionInfo {
 }
 
 const SESSION_LIST_PREFIX_BYTES = 4096;
-/**
- * Tail window read to derive {@link SessionStatus}. Large enough to capture a
- * typical final assistant turn (thinking + text); when the final message exceeds
- * it the status falls back to `unknown` rather than misreporting.
- */
-const SESSION_LIST_SUFFIX_BYTES = 32_768;
 const SESSION_LIST_PARALLEL_THRESHOLD = 64;
 const SESSION_LIST_MAX_WORKERS = 16;
 
@@ -463,6 +458,7 @@ async function scanSessionFile(
 			return undefined;
 		}
 		const latestTitle = await readLatestSessionTitle(file, storage);
+		const resolvedTitle = latestTitle ? (normalizeTitleOverride(latestTitle.title) ?? undefined) : header.title;
 
 		let parsedMessageCount = 0;
 		let assistantTurns = 0;
@@ -500,8 +496,11 @@ async function scanSessionFile(
 		// large leading entry (memory recall, attachment) or a reply (after a
 		// `/skill:` invocation), and an assistant record that fits in neither
 		// window. Recover both in one line-boundary pass rather than trusting the gap.
+		// Windows that together span the whole file already counted every
+		// assistant marker, so only a gap between them warrants the turn search.
 		let needPrompt = !firstMessage;
-		let needTurn = assistantTurns === 0;
+		let needTurn =
+			assistantTurns === 0 && size > SESSION_LIST_PREFIX_BYTES + (withStatus ? SESSION_LIST_SUFFIX_BYTES : 0);
 		if ((needPrompt || needTurn) && size > SESSION_LIST_PREFIX_BYTES && storage.scanLines) {
 			try {
 				await storage.scanLines(file, line => {
@@ -530,7 +529,7 @@ async function scanSessionFile(
 			path: file,
 			id: header.id,
 			cwd: header.cwd ?? "",
-			title: latestTitle ? latestTitle.title : (header.title ?? shortSummary),
+			title: resolvedTitle ?? shortSummary,
 			parentSessionPath: header.parentSession,
 			continuationOf: header.continuationOf,
 			created: new Date(header.timestamp ?? ""),
@@ -895,11 +894,19 @@ export async function findMostRecentNonEmptySession(
 	} catch {
 		return null;
 	}
+	let latest: SessionInfo | undefined;
+	let latestMtimeMs: number | undefined;
 	for (const { file, stat } of await newestSessionFiles(sessionDir, "*.jsonl", storage)) {
+		// Every file in the winning mtime cohort may have a newer header timestamp.
+		// Once that cohort ends, no older journal can outrank its useful sessions.
+		if (latest && stat.mtimeMs !== latestMtimeMs) break;
 		const session = await scanSessionFile(file, storage, true, stat);
-		if (session && !isEmptySession(session)) return file;
+		if (session && !isEmptySession(session) && (!latest || compareNewestFirst(session, latest) < 0)) {
+			latest = session;
+			latestMtimeMs = stat.mtimeMs;
+		}
 	}
-	return null;
+	return latest?.path ?? null;
 }
 
 /** Exported for testing */
@@ -1503,7 +1510,7 @@ async function newestSessionFiles(
 			} catch {}
 		}
 	}
-	return stated.sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
+	return stated.sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs || b.file.localeCompare(a.file));
 }
 
 /** Header-level {@link SessionInfo} with status for one session file; undefined when unreadable or not a session. */

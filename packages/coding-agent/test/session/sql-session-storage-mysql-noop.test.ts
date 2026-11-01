@@ -39,11 +39,13 @@ function mysqlResult(affectedRows: number, rows: unknown[] = []): SqlSessionStor
 }
 
 /** In-memory row store speaking just enough MySQL wire behavior for the test. */
-function mysqlFake(): { client: SqlSessionStorageClient; rows: Map<string, FakeRow> } {
+function mysqlFake(): { client: SqlSessionStorageClient; rows: Map<string, FakeRow>; queries: string[] } {
 	const rows = new Map<string, FakeRow>();
+	const queries: string[] = [];
 	const client: SqlSessionStorageClient = {
 		options: { adapter: "mysql" },
 		async unsafe(sql: string, values: unknown[] = []): Promise<SqlSessionStorageResult> {
+			queries.push(sql);
 			if (sql.startsWith("CREATE TABLE") || sql.startsWith("ALTER TABLE")) return mysqlResult(0);
 			if (sql.startsWith("SELECT path")) {
 				return mysqlResult(
@@ -97,6 +99,20 @@ function mysqlFake(): { client: SqlSessionStorageClient; rows: Map<string, FakeR
 				});
 				return mysqlResult(1);
 			}
+			if (sql.startsWith("UPDATE") && sql.includes("SET title =")) {
+				const path = values.at(-1) as string;
+				const row = rows.get(path);
+				if (!row) return mysqlResult(0);
+				rows.set(path, {
+					...row,
+					title: values[0] as string | null,
+					source: values[1] as string | null,
+					updatedAt: values[2] as string | null,
+					mtimeMs: values[3] as number,
+					titleIndexedSize: values.length === 6 ? (values[4] as number) : null,
+				});
+				return mysqlResult(1);
+			}
 			if (sql.startsWith("UPDATE")) {
 				const [content, mtimeMs, title, source, updatedAt, titleIndexedSize, path, expectedSize] = values as [
 					string,
@@ -126,7 +142,7 @@ function mysqlFake(): { client: SqlSessionStorageClient; rows: Map<string, FakeR
 			return callback(client);
 		},
 	};
-	return { client, rows };
+	return { client, rows, queries };
 }
 
 const BODY = "title-slot-line\nheader-line\nentry-one\n";
@@ -207,5 +223,28 @@ describe("SqlSessionStorage (MySQL no-op replace)", () => {
 			source: "user",
 			updatedAt: "t2",
 		});
+	});
+	it("persists direct metadata title authority through the MySQL adapter without reading an older journal", async () => {
+		const { client, rows, queries } = mysqlFake();
+		const storage = await SqlSessionStorage.create({ client });
+		const file = "/s/direct-title.jsonl";
+		const body =
+			'{"type":"session","id":"direct"}\n' +
+			'{"type":"title_change","title":"Older journal","source":"auto","timestamp":"2099"}\n';
+		await storage.writeText(file, body);
+		const title = { title: "New metadata", source: "user" as const, updatedAt: "1900" };
+		queries.length = 0;
+		await storage.updateSessionTitle(file, title);
+		expect(rows.get(file)).toMatchObject({
+			content: body,
+			title: title.title,
+			source: title.source,
+			updatedAt: title.updatedAt,
+			titleIndexedSize: Buffer.byteLength(body),
+		});
+		expect(await storage.readLatestTitle(file)).toEqual(title);
+		const reopened = await SqlSessionStorage.create({ client });
+		expect(await reopened.readLatestTitle(file)).toEqual(title);
+		expect(queries.some(query => query.startsWith("SELECT content"))).toBe(false);
 	});
 });

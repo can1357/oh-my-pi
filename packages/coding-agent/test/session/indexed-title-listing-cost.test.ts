@@ -102,7 +102,7 @@ class Backend implements SessionStorageBackend {
 				: { title: title?.title, titleSource: title?.source, titleUpdatedAt: title?.updatedAt, titleIndexedSize }),
 		});
 	}
-	async updateSessionTitle(path: string, title: SessionTitleUpdate, mtimeMs: number) {
+	async updateSessionTitle(path: string, title: SessionTitleUpdate, mtimeMs: number, size?: number) {
 		const previous = this.metadata.get(path)!;
 		this.metadata.set(path, {
 			...previous,
@@ -110,7 +110,7 @@ class Backend implements SessionStorageBackend {
 			title: title.title,
 			titleSource: title.source,
 			titleUpdatedAt: title.updatedAt,
-			titleIndexedSize: undefined,
+			titleIndexedSize: size,
 		});
 	}
 	async indexTitle(path: string, title: SessionTitleUpdate | undefined, size: number): Promise<void> {
@@ -380,5 +380,93 @@ describe("indexed journal title metadata", () => {
 		await draining;
 		expect(settledBeforeRelease).toBe(true);
 		await writer.close();
+	});
+	for (const source of ["auto", "user"] as const) {
+		it(`keeps a newer metadata-only ${source} title authoritative over an older journal without body reads`, async () => {
+			const backend = new Backend(),
+				storage = await reopen(backend),
+				file = `/indexed-cost/direct-${source}.jsonl`;
+			await storage.writeText(file, session(`direct-${source}`));
+			const update = { title: "New metadata-only title", source, updatedAt: "1900-01-01" };
+			const updateCall = spyOn(backend, "updateSessionTitle");
+			await storage.updateSessionTitle(file, update);
+			expect(await storage.readLatestTitle(file)).toEqual(update);
+			expect((await listSessions("/indexed-cost", storage))[0].title).toBe(update.title);
+			expect(updateCall.mock.calls[0]?.[3]).toBe(Buffer.byteLength(backend.files.get(file)!));
+			await storage.refresh();
+			expect(await storage.readLatestTitle(file)).toEqual(update);
+			expect(await (await reopen(backend)).readLatestTitle(file)).toEqual(update);
+			expect(backend.fullReads).toBe(0);
+		});
+	}
+
+	it("marks direct metadata authority at the size after an earlier queued append drains", async () => {
+		const backend = new Backend(),
+			storage = await reopen(backend),
+			file = "/indexed-cost/drained-direct.jsonl";
+		await storage.writeText(file, session("drained-direct"));
+		const gate = Promise.withResolvers<void>();
+		backend.appendGate = gate.promise;
+		const writer = storage.openWriter(file),
+			pending = writer.append(titleLine("Queued older title"));
+		const update = { title: "Final metadata", source: "user" as const, updatedAt: "1800-01-01" };
+		const updating = storage.updateSessionTitle(file, update);
+		gate.resolve();
+		await pending;
+		await updating;
+		await writer.close();
+		expect(await storage.readLatestTitle(file)).toEqual(update);
+		expect(backend.metadata.get(file)?.titleIndexedSize).toBe(Buffer.byteLength(backend.files.get(file)!));
+		expect(backend.fullReads).toBe(0);
+	});
+
+	it("reconciles small unknown legacy rows using bounded slices rather than readFull", async () => {
+		const backend = new Backend(),
+			file = "/indexed-cost/small-legacy.jsonl";
+		const content =
+			serializeTitleSlot(oldTitle) + '{"type":"session","id":"small-legacy"}\n' + titleLine("Current small journal");
+		backend.files.set(file, content);
+		backend.metadata.set(file, {
+			path: file,
+			size: Buffer.byteLength(content),
+			mtimeMs: 1,
+			title: oldTitle.title,
+			titleSource: oldTitle.source,
+			titleUpdatedAt: oldTitle.updatedAt,
+		});
+		const storage = await reopen(backend);
+		expect(await storage.readLatestTitle(file)).toEqual({
+			title: "Current small journal",
+			source: "user",
+			updatedAt: timestamp,
+		});
+		expect(backend.fullReads).toBe(0);
+		expect(backend.sliceBytes).toBeGreaterThan(0);
+		expect(backend.sliceBytes).toBeLessThanOrEqual(256 + 32_768);
+		const firstBytes = backend.sliceBytes;
+		expect((await storage.readLatestTitle(file))?.title).toBe("Current small journal");
+		expect(backend.sliceBytes).toBe(firstBytes);
+	});
+
+	it("trusts backend-declared compatible metadata without granting authority to generic stale legacy metadata", async () => {
+		const backend = new Backend(),
+			file = "/indexed-cost/compatible-metadata.jsonl";
+		await (await reopen(backend)).writeText(file, session("compatible-metadata"));
+		const row = backend.metadata.get(file)!;
+		backend.metadata.set(file, {
+			...row,
+			title: "Compatible metadata wins",
+			titleSource: "user",
+			titleUpdatedAt: "1800-01-01",
+			titleIndexedSize: undefined,
+			titleMetadataAuthoritative: true,
+		});
+		expect(await (await reopen(backend)).readLatestTitle(file)).toEqual({
+			title: "Compatible metadata wins",
+			source: "user",
+			updatedAt: "1800-01-01",
+		});
+		expect(backend.fullReads).toBe(0);
+		expect(backend.sliceBytes).toBe(0);
 	});
 });
