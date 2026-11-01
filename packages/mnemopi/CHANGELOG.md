@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `PolyphonicRecallEngine` (`factVoice`, `temporalVoice`, `diversityRerank`) and `memoriaRetrieve` failing on unspaced CJK queries, and `VeracityConsolidator.consolidateFact` inflating `mention_count` and confidence on duplicate source IDs ([#17424](https://github.com/can1357/oh-my-pi/pull/17424) by [@GTanger](https://github.com/GTanger))
+
 ## [18.14.2] - 2026-10-31
 
 ### Fixed
