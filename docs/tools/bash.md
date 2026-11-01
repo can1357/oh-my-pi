@@ -22,15 +22,16 @@
 
 ## Inputs
 
-| Field     | Type                                                               | Required | Description                                                                                                                                                                                                                                                                                                                        |
-| --------- | ------------------------------------------------------------------ | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `command` | `string`                                                           | Yes      | Shell command text to execute. A leading `cd <path> && ...` is rewritten into `cwd` only when `cwd` was omitted.                                                                                                                                                                                                                   |
-| `timeout` | `number`                                                           | No       | Timeout in seconds. Default `300`. `0` disables the deadline. Nonzero values (including the default) are capped by a positive `tools.maxTimeout`, then clamped to `1..3600`.                                                                                                                                                       |
-| `cwd`     | `string`                                                           | No       | Working directory, resolved against `session.cwd` via `resolveToCwd`, or a registered internal URL directory for embedded-shell execution. Must exist and be a directory.                                                                                                                                                          |
-| `pty`     | `boolean`                                                          | No       | Request PTY mode. Default `false` for finite commands, `true` for named services. Foreground PTY requires a UI and `PI_NO_PTY !== "1"`; named services forward this setting to the broker.                                                                                                                                         |
-| `async`   | `boolean`                                                          | No       | Background execution request. Present only when `async.enabled` is true for the session. Returns immediately with a job id instead of waiting; it does not change the effective deadline, including a disabled deadline from `timeout: 0`.                                                                                         |
-| `name`    | `string`                                                           | No       | Project-unique supervised service name: 1–48 letters, numbers, dots, underscores, or hyphens, starting with a letter or number. Present only when `launch.enabled` and Bash is active. Blank names select finite-command mode. A live name restarts using the new spec. Incompatible with `async: true` or any supplied `timeout`. |
-| `ready`   | `{ log?: string; port?: number; host?: string; timeout?: number }` | No       | Service readiness requires a nonblank log regex and/or integer TCP port `1..65535`; all supplied conditions must pass. Host defaults to `127.0.0.1`, timeout to 30 seconds (clamped to `0.05..3600`). Without `name`, a nonempty spec is ignored with a notice.                                                                    |
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `command` | `string` | Yes | Shell command text to execute. A leading `cd <path> && ...` is rewritten into `cwd` only when `cwd` was omitted. |
+| `timeout` | `number` | No | Timeout in seconds. Default `300`. `0` disables the deadline. Nonzero values (including the default) are capped by a positive `tools.maxTimeout`, then clamped to `1..3600`. |
+| `cwd` | `string` | No | Working directory, resolved against `session.cwd` via `resolveToCwd`, or a registered internal URL directory for embedded-shell execution. Must exist and be a directory. |
+| `pty` | `boolean` | No | Request PTY mode. Default `false` for finite commands, `true` for named services. Foreground PTY requires a UI and `PI_NO_PTY !== "1"`; named services forward this setting to the broker. |
+| `async` | `boolean` | No | Background execution request. Present only when `async.enabled` is true for the session. Returns immediately with a job id instead of waiting; it does not change the effective deadline, including a disabled deadline from `timeout: 0`. |
+| `name` | `string` | No | Project-unique supervised service name: 1–48 letters, numbers, dots, underscores, or hyphens, starting with a letter or number. Present only when `launch.enabled` and Bash is active. Blank names select finite-command mode. A live name restarts using the new spec. Incompatible with `async: true` or any supplied `timeout`. |
+| `ready` | `{ log?: string; port?: number; host?: string; timeout?: number }` | No | Service readiness requires a nonblank log regex and/or integer TCP port `1..65535`; all supplied conditions must pass. Host defaults to `127.0.0.1`, timeout to 30 seconds (clamped to `0.05..3600`). Without `name`, a nonempty spec is ignored with a notice. |
+| `progress` | `"wake" \| "ambient" \| "off"` | No | Service live-output subscription. `wake` starts a follow-up turn when idle; `ambient` delivers during active turns; `off` (default) starts without monitoring. Only with `name`. |
 
 There is no `env` input. Every command and named service also gets `PI_SESSION_ID`, `PI_SESSION_FILE` (the transcript's absolute path, empty when the session is not persisted), and `PI_TOOL_CALL_ID` (the id of the running `bash` call), read when the call starts; see [environment variables](../environment-variables.md#set-by-the-bash-tool). Named services otherwise inherit the configured shell environment; put command-specific assignments in `command`.
 
@@ -69,6 +70,39 @@ The tool returns a `text` content block plus optional `details` and image blocks
    - cancellation, missing exit status, validation failures, and intercepted commands throw `ToolError` / `ToolAbortError`; timeouts return an error result.
 
 Stdout and stderr are merged before the model sees them. Definite non-zero exit codes are appended to the returned error result text as `Command exited with code <n>`.
+
+## Live service progress
+
+Start a named service with progress when its output should reach the agent before exit:
+
+```json
+{"command":"bun run dev","name":"web","ready":{"port":5173},"progress":"wake"}
+```
+
+Use `wake` for actionable output; use `ambient` for diagnostics that can wait for an active turn. Wake-ups spend model requests and share one session-wide wake-turn budget with background-job progress. Ambient delivery does not start an extra turn.
+
+Change the calling session's subscription with `write`:
+
+```json
+{"path":"proc://web/progress","content":"wake"}
+{"path":"proc://web/progress","content":"ambient"}
+{"path":"proc://web/progress","content":"off"}
+```
+
+- `wake` or `ambient` attaches to a running service or retunes an existing subscription. A new attachment captures future output only; it does not replay earlier logs.
+- `off` detaches this session's monitor without stopping the service or affecting other watchers. A service started without monitoring can gain a monitor later.
+- `read proc://` and `read proc://web` show watchers, their delivery modes, and capture artifacts.
+- Monitoring and lifetime are independent: `proc://web/mode` changes service survival, not progress delivery. Fully detached services cannot be live-monitored; read their output through `proc://web`, or relaunch with named `bash` service mode when safe.
+- Complete non-empty merged output lines are batched over a trailing 200 ms window. A final partial line is flushed before completion. Progress is rate-limited; truncated or suppressed previews link the raw capture at `artifact://<id>`.
+- Inline progress is not an exhaustive log. Read the artifact or service output before concluding that no error or state transition occurred.
+- Progress and completion are separate. Do not poll `proc://` or call `wait` to keep a turn alive for wake progress; finish other work, then end the turn and let the harness resume it. Use `ready` at launch when readiness must be observed before continuing.
+- For noisy progress, lower source verbosity on a safe relaunch (calling named `bash` again replaces the live service with the new command). To keep it running, write `ambient` or `off` to its progress URL. Output queued before a mode change can still arrive afterward.
+
+### Background-job retuning
+
+For a caller-owned running job that already has a progress channel, `write proc://<job-id>/progress` accepts `wake` or `ambient`. This retunes routing without restarting the job, changing its artifact, or consuming its result. Queued output is merged into the new delivery queue; an already-permitted wake batch may still start a turn after switching to ambient.
+
+Jobs reject `off`: their progress channel cannot be detached. A job launched without a channel cannot gain one later. This differs from service monitoring; Bash's `progress` input currently requires a service `name`. Jobs that are settled or whose progress is withheld by an active `wait` cannot be retuned.
 
 ## Command policy and dedicated-tool routing
 
