@@ -1306,9 +1306,15 @@ async function newestSessionFiles(
 	return stated.sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
 }
 
-/** Header-level {@link SessionInfo} with status for one session file; undefined when unreadable or not a session. */
-export function readSessionInfo(file: string): Promise<SessionInfo | undefined> {
-	return scanSessionFile(file, new FileSessionStorage(), true);
+/**
+ * Header-level {@link SessionInfo} with status for one session file; undefined when unreadable or not a session.
+ * `storage` reads the file; `omp gc` passes one that opens only regular files.
+ */
+export function readSessionInfo(
+	file: string,
+	storage: SessionStorage = new FileSessionStorage(),
+): Promise<SessionInfo | undefined> {
+	return scanSessionFile(file, storage, true);
 }
 
 /** Selects which session files {@link listRecentSessions} considers. */

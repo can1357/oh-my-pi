@@ -62,11 +62,9 @@ import {
 	isSamePath,
 	liveSessionPathForArchive,
 	restoreArchivedSessionLocked,
-	artifactRestoreConflicts,
+	newRestorePlan,
 	quarantineStagingRecord,
 	moveAsidePermission,
-	restoreRecordLeftNote,
-	restoreRecordRefusal,
 	stagingResidueNote,
 	stagingResidueUnder,
 	type StagingGround,
@@ -76,11 +74,13 @@ import { codeOf, statIfPresent, withGcLock, withoutGcLock } from "../session/gc-
 import { RegularFileSessionStorage } from "../session/gc-session-storage";
 import {
 	absentFile,
-	chmodDirectory,
+	type HeldFile,
 	kindOf,
+	makeHeldDirectory,
 	NotARegularFile,
 	notRegularAsAbsent,
 	openRegularFile,
+	removeFileOthersMayWrite,
 } from "../session/regular-file";
 import { readSessionHeaderIdFromHandle } from "../session/session-loader";
 import { isSessionLeaseHeld, tryAcquireSessionLease } from "../session/session-storage";
@@ -218,7 +218,11 @@ export interface ReclaimGcResult {
 	reclaimed: number;
 	/** 1 when a preview found nothing to refuse, so applying would give the live copy up. */
 	wouldReclaim?: number;
-	/** The live artifact tree a refused reclaim left in place, with the reason in `errors`. */
+	/**
+	 * The live artifact tree a refused reclaim left whole, with the reason in
+	 * `errors`. Never set beside a non-empty {@link partiallyRemoved}: part of
+	 * a tree gone is not a tree kept.
+	 */
 	keptArtifactTree?: string;
 	errors: string[];
 }
@@ -1189,45 +1193,30 @@ function inflatesTo(expected: { hash: string; bytes: number }): (published: fs.F
 }
 
 /**
- * Take back a name this run linked onto its stage, when that is all taking
+ * Take back the name this run linked onto its stage, when that is all taking
  * it back removes. Returns what was left and why, for the command to print.
  *
- * The name goes only while it and the stage still name one inode: then the
- * stage keeps that inode's bytes — this run's, or a file somebody bound to
- * the stage before the link, which the ground's cleanup then reports and
- * leaves. A name holding anything else was put there after the link by
- * somebody else, and removing it would delete their file; it is left and
- * named. The published name is looked at last, so the `unlink` follows its
- * look by one system call. This runs on the way out of a failure, so it
- * reports rather than throws.
+ * The name is in the archive, where any process of this user can name it,
+ * so it goes by {@link removeFileOthersMayWrite} and is
+ * judged on what the move took: this run's staged file, held open since it
+ * was created, or whatever the stage's name holds now, which a `link` from a
+ * rebound stage gave this second name and which keeps another name after
+ * this one goes. Either way only a name goes, never a file's last one.
+ * Anything else at the name is somebody's, and is left and named. This runs
+ * on the way out of a failure, so it reports rather than throws.
  */
-async function withdrawLinkedPublication(destination: string, stage: string): Promise<string | undefined> {
-	let staged: Stats | undefined;
-	let stageUnseen: unknown;
-	try {
-		staged = await fs.lstat(stage).catch(absentOnly);
-	} catch (error) {
-		stageUnseen = error;
-	}
-	let named: Stats;
-	try {
-		named = await fs.lstat(destination);
-	} catch (error) {
-		if (codeOf(error) === "ENOENT") return undefined;
-		return `${destination} could not be looked at, so it was left as it is: ${errorMessage(error)}`;
-	}
-	if (stageUnseen !== undefined) {
-		return `${stage} could not be looked at, so ${destination} was left as it is: ${errorMessage(stageUnseen)}`;
-	}
-	if (staged?.dev !== named.dev || staged.ino !== named.ino) {
-		return `${destination} is not what this run published there, so it was left alone`;
-	}
-	try {
-		await fs.unlink(destination);
-	} catch (error) {
-		if (codeOf(error) !== "ENOENT") return `${destination} could not be taken back: ${errorMessage(error)}`;
-	}
-	return undefined;
+async function withdrawLinkedPublication(destination: string, ground: StagingGround): Promise<string | undefined> {
+	const staged = await fs.lstat(ground.file).catch(() => undefined);
+	const linkedHere = (entry: Stats): boolean =>
+		(entry.dev === ground.held.dev && entry.ino === ground.held.ino) ||
+		(staged !== undefined && entry.dev === staged.dev && entry.ino === staged.ino);
+	const notOurs = `${destination} is not what this run published there`;
+	const result = await removeFileOthersMayWrite(destination, {
+		matches: linkedHere,
+		mismatch: notOurs,
+		judge: async moved => (linkedHere(moved) && moved.nlink > 1 ? undefined : notOurs),
+	});
+	return result.outcome === "kept" ? result.note : undefined;
 }
 
 /**
@@ -1300,28 +1289,41 @@ async function gzipSessionFile(
 			// it takes another turn.
 			//
 			// Proved again here, by reading the file rather than its name,
-			// through the very descriptor this check opened. An inode
-			// comparison cannot see a replacement written in place, and the
-			// earlier proof was taken before the stage existed, so it is an
-			// observation about bytes that may since have changed. The rename
-			// runs while that descriptor is still held, so the copy it replaces
-			// cannot have been freed and its inode number handed to a file put
-			// at the name meanwhile, and right after the name is looked at once
-			// more. What survives is the one system call between that look and
-			// the rename, which no portable call closes.
+			// through the very descriptor this check opened, and held open until
+			// the shorter copy is gone, so no other file can take its inode
+			// number. An inode comparison cannot see a replacement written in
+			// place, and the earlier proof was taken before the stage existed,
+			// so it is an observation about bytes that may since have changed.
 			// Anything but a regular file at the archived name has changed.
 			const archived = await openRegularFile(destination).catch(notRegularAsAbsent);
-			const changed = `${destination} changed while it was being archived; run \`omp gc --archive\` again`;
-			if (!archived) throw new Error(changed);
+			const changed = `${destination} changed while it was being archived`;
+			if (!archived) throw new Error(`${changed}; run \`omp gc --archive\` again`);
 			try {
 				if (!(await compared(archivedHandleIsPrefixOfLive(archived, source), destination, source))) {
-					throw new Error(changed);
+					throw new Error(`${changed}; run \`omp gc --archive\` again`);
 				}
 				const standing = await archived.stat();
-				if (standing.dev !== supersedes.dev || standing.ino !== supersedes.ino) throw new Error(changed);
-				const named = await fs.lstat(destination).catch(absentOnly);
-				if (!named || named.dev !== standing.dev || named.ino !== standing.ino) throw new Error(changed);
-				await fs.rename(ground.file, destination);
+				if (standing.dev !== supersedes.dev || standing.ino !== supersedes.ino) {
+					throw new Error(`${changed}; run \`omp gc --archive\` again`);
+				}
+				// The shorter copy, a name any process of this user can write,
+				// goes by `removeFileOthersMayWrite` —
+				// moved to a private name and judged there to be the very file
+				// proved above — and the longer one is linked in at its name
+				// before it goes. A rename onto the name instead replaced
+				// whatever stood there by the time it ran.
+				const replaced = await removeFileOthersMayWrite(destination, {
+					matches: named => named.isFile() && named.dev === standing.dev && named.ino === standing.ino,
+					mismatch: changed,
+					judge: async (_moved, handle) => {
+						const now = await handle?.stat();
+						return now?.dev === standing.dev && now.ino === standing.ino ? undefined : changed;
+					},
+					replaceWith: () => fs.link(ground.file, destination),
+				});
+				if (replaced.outcome === "absent") throw new Error(`${changed}; run \`omp gc --archive\` again`);
+				if (replaced.outcome === "kept") throw new Error(`${replaced.note}; run \`omp gc --archive\` again`);
+				if (replaced.note) notes.push(replaced.note);
 			} finally {
 				await archived.close();
 			}
@@ -1360,7 +1362,7 @@ async function gzipSessionFile(
 		// transcript survives anyway. A linked one is taken back only while
 		// taking it back removes nothing but a name.
 		if (linked) {
-			const note = await withdrawLinkedPublication(destination, ground.file);
+			const note = await withdrawLinkedPublication(destination, ground);
 			if (note) notes.push(note);
 		}
 		throw error;
@@ -1377,11 +1379,18 @@ async function gzipSessionFile(
 	}
 }
 
-/** One entry this copy created, as the entry it created — not merely the name it used. */
+/**
+ * One entry this copy created, held: the descriptor it was created through
+ * stays open until the copy has finished or been undone, so no other entry
+ * can be given its inode number meanwhile. A review copied an archived file
+ * elsewhere, removed it, and created a file of its own at the name; the
+ * kernel gave the new file the freed number, and a rollback that knew the
+ * entry by its number alone deleted that file, its only copy.
+ */
 interface ArchiveCreation {
 	path: string;
-	dev: number;
-	ino: number;
+	held: HeldFile;
+	directory: boolean;
 }
 
 /** What one copy into the archive created, so a failure can undo exactly that. */
@@ -1427,50 +1436,44 @@ async function survivesSourceRemoval(destination: string, sourceRoot: string): P
 	return relative !== "" && (relative.startsWith("..") || path.isAbsolute(relative));
 }
 
-/** Remember an entry this copy made, by the entry and not by its name. */
-async function noteCreation(target: string, state: ArchiveCopyState): Promise<void> {
-	const made = await statIfPresent(target);
-	if (made) state.created.push({ path: target, dev: made.dev, ino: made.ino });
-}
-
 /**
- * Put back at `destination` the bytes an open descriptor still holds.
+ * Put back at `destination` the bytes an open descriptor still holds, in
+ * place of `replacing`, the file this run published there.
  *
- * A `rename` replaces, so a superseding publication that turns out not to
- * have published what this run copied has already taken the shorter
- * archived copy off its name. That copy is not gone: this run has held it
- * open throughout, and an unlinked inode is still readable through a
- * descriptor. It goes back the way everything else is written here — a
- * stage of this run's own, digested as it is copied, published, and read
- * back by {@link checkPublished}. A put-back that does not read back is
- * reported as that; what stands at the name then is left as it is.
- *
- * It goes over nothing but `publication`, this run's own superseding copy,
- * whose inode the caller still holds open: the name is looked at the instant
- * before, and an empty name is filled by `link`, which replaces nothing, and
- * a name holding anything else is left as it is.
+ * A superseding publication that turns out not to have published what this
+ * run copied has already taken the shorter archived copy off its name. That
+ * copy is not gone: this run has held it open throughout, and an unlinked
+ * inode is still readable through a descriptor. It goes back the way
+ * everything else is written here — a stage of this run's own, digested as
+ * it is copied, published, and read back by {@link checkPublished} — and
+ * what this run published there, a name any process of this user can write,
+ * goes by {@link removeFileOthersMayWrite}. Anything else at the name is left as it is.
  */
 async function putArchivedCopyBack(
 	archived: fs.FileHandle,
 	destination: string,
+	replacing: HeldFile,
 	mode: number,
 	ledger: string,
 	notes: string[],
-	publication: { dev: number; ino: number },
 ): Promise<void> {
 	const ground = await mintStagingGround(destination, ledger, mode & 0o7777);
 	try {
 		const written = await copyHandleWithDigest(archived, ground.handle);
 		await ground.handle.chmod(mode & 0o7777);
-		const standing = await fs.lstat(destination).catch(absentOnly);
-		if (!standing) await fs.link(ground.file, destination);
-		else if (standing.dev === publication.dev && standing.ino === publication.ino) {
-			await fs.rename(ground.file, destination);
-		} else {
-			throw new Error(
-				`${destination} could not be put back: that name now holds something this run did not put there, so it was left as it is`,
-			);
-		}
+		const notOurs = `${destination} is not the copy this run published there`;
+		const replaced = await removeFileOthersMayWrite(destination, {
+			matches: named => named.isFile() && named.dev === replacing.dev && named.ino === replacing.ino,
+			mismatch: notOurs,
+			judge: async (_moved, handle) => {
+				const now = await handle?.stat();
+				return now?.dev === replacing.dev && now.ino === replacing.ino ? undefined : notOurs;
+			},
+			replaceWith: () => fs.link(ground.file, destination),
+		});
+		if (replaced.outcome === "absent") await fs.link(ground.file, destination);
+		if (replaced.outcome === "kept") throw new Error(`${destination} could not be put back: ${replaced.note}`);
+		if (replaced.outcome === "removed" && replaced.note) notes.push(replaced.note);
 		const check = await checkPublished(destination, ground.created, holdsCopied(written));
 		if (!check.staged) {
 			throw new Error(
@@ -1545,7 +1548,13 @@ async function publishArtifactIntoArchive(
 		if (!live) throw new Error(`${source} was not opened`);
 		return (await live.stat()).mode & 0o7777;
 	};
+	// Once linked into the archive, the stage's descriptor goes to the copy's
+	// record of what it created, and is closed only after the copy has
+	// finished or been undone.
+	let published = false;
 	try {
+		// Through the regular-file check: a live artifact replaced by a FIFO,
+		// a socket or a device since the walk looked is refused unread.
 		live = await openRegularFile(source);
 		if (!live) throw absentFile(source);
 		const copied = await copyHandleWithDigest(live, ground.handle);
@@ -1561,16 +1570,17 @@ async function publishArtifactIntoArchive(
 					`\`omp gc --restore ${shellQuote(target)} --apply${state.recovery}\` and archive it again, ` +
 					`or move one of the two copies aside. Without \`--apply\`, \`--restore\` reports what it would do and changes nothing.`,
 			);
-		// The proof was about a descriptor; the publication is about a name,
-		// and `link` and `rename` take whatever the name points at when they
-		// run. So what the publication left at the name is read back — see
-		// {@link checkPublished} for each step and what it rules out.
-		//
-		// The limit, stated rather than engineered past: a process that can
-		// write the destination's directory can rebind the name after the
-		// last look, and no check run here sees that. An ordinary writer
-		// rewriting the live source is a different thing and is handled —
-		// what was copied is what is published.
+		// The proof was about a descriptor; the publication is about a name.
+		// `link` replaces nothing, and a shorter copy is replaced only once it
+		// has been moved to a private name and judged there — see
+		// {@link removeFileOthersMayWrite} — so neither writes over a file somebody put at the
+		// name. What the publication left at the name is read back — see
+		// {@link checkPublished} for each step and what it rules out — since
+		// a process that can write the destination's directory can still
+		// rebind the name after the link, which no check run here prevents
+		// and the read-back reports. An ordinary writer rewriting the live
+		// source is a different thing and is handled — what was copied is
+		// what is published.
 		const stagedIsStillOurs = async (): Promise<boolean> => {
 			const standing = await fs.lstat(tempPath).catch(absentOnly);
 			return standing?.dev === held.dev && standing.ino === held.ino;
@@ -1596,12 +1606,13 @@ async function publishArtifactIntoArchive(
 			await fs.link(tempPath, destination);
 			const linkedCheck = await checkPublished(destination, held, holdsCopied(copied));
 			if (!linkedCheck.staged) {
-				const note = await withdrawLinkedPublication(destination, tempPath);
+				const note = await withdrawLinkedPublication(destination, ground);
 				if (note) state.notes.push(note);
 				throw notPublished(linkedCheck);
 			}
+			state.created.push({ path: destination, held: ground.held, directory: false });
+			published = true;
 			await ground.handle.chmod(await liveMode());
-			state.created.push({ path: destination, dev: held.dev, ino: held.ino });
 			return;
 		}
 		try {
@@ -1635,43 +1646,43 @@ async function publishArtifactIntoArchive(
 			// copied bytes begin. Anything else is a different file wearing
 			// the name.
 			if (archivedBytes.size > copied.size || !(await handleBeginsWith(ground.handle, archived))) throw conflict();
-			// Each name once more, the archived one last, so the rename follows
-			// its look by one system call, while the descriptor on the copy it
-			// replaces is still held.
-			if (!(await stagedIsStillOurs())) throw rebound();
-			const standing = await fs.lstat(destination).catch(absentOnly);
-			if (!standing || standing.dev !== verified.dev || standing.ino !== verified.ino) {
-				throw new Error(`${destination} changed while it was being archived; run \`omp gc --archive\` again`);
+			// The shorter copy, a name any process of this user can write, goes by
+			// `removeFileOthersMayWrite` — moved to a private name and judged there to be the very file read
+			// above, held open since — and the longer one is linked in at its
+			// name before it goes. A rename onto the name instead replaced
+			// whatever stood there by the time it ran.
+			const changed = `${destination} changed while it was being archived`;
+			const replaced = await removeFileOthersMayWrite(destination, {
+				matches: named => named.isFile() && named.dev === verified.dev && named.ino === verified.ino,
+				mismatch: changed,
+				judge: async (_moved, handle) => {
+					const now = await handle?.stat();
+					return now?.dev === verified.dev && now.ino === verified.ino ? undefined : changed;
+				},
+				replaceWith: async () => {
+					if (!(await stagedIsStillOurs())) throw rebound();
+					await fs.link(tempPath, destination);
+				},
+			});
+			if (replaced.outcome === "absent") throw new Error(`${changed}; run \`omp gc --archive\` again`);
+			if (replaced.outcome === "kept") {
+				throw new Error(`${replaced.note}; ${source} was not archived; run \`omp gc --archive\` again`);
 			}
-			await fs.rename(tempPath, destination);
+			if (replaced.note) state.notes.push(replaced.note);
 			const check = await checkPublished(destination, held, holdsCopied(copied));
 			if (!check.staged) {
-				// A rename replaces, so the shorter archived copy is already
-				// gone from that name — and it is still here, in the
-				// descriptor this run has held open throughout. It goes back
-				// over what this run put there and over nothing else: a file
-				// somebody has put at the name since is theirs.
-				let now: Stats | undefined;
+				// The shorter archived copy is gone from that name — and it is
+				// still here, in the descriptor this run has held open
+				// throughout. It goes back in place of what this run put there
+				// and of nothing else: a file somebody has put at the name
+				// since is theirs.
 				try {
-					now = await fs.lstat(destination).catch(absentOnly);
+					await putArchivedCopyBack(archived, destination, ground.held, verified.mode, state.ledger, state.notes);
 				} catch (error) {
 					throw new Error(
-						`${notPublished(check).message}; the shorter copy the archive held at ${destination} was not put back, ` +
-							`because what that name holds could not be checked: ${errorMessage(error)}. ${source}, which ` +
-							`began with those bytes when this run copied it, is kept`,
+						`${notPublished(check).message}; ${errorMessage(error)}. ${source}, which began with the bytes of the ` +
+							`shorter copy the archive held when this run copied it, is kept`,
 					);
-				}
-				if (now && (now.dev !== held.dev || now.ino !== held.ino)) {
-					throw new Error(
-						`${notPublished(check).message}; the shorter copy the archive held at ${destination} was not put back, ` +
-							`because that name now holds something this run did not put there. ${source}, which began ` +
-							`with those bytes when this run copied it, is kept`,
-					);
-				}
-				try {
-					await putArchivedCopyBack(archived, destination, verified.mode, state.ledger, state.notes, held);
-				} catch (error) {
-					throw new Error(`${notPublished(check).message}; ${errorMessage(error)}`);
 				}
 				throw notPublished(check);
 			}
@@ -1689,7 +1700,7 @@ async function publishArtifactIntoArchive(
 			const note = await removeStagingGround(ground);
 			if (note) state.notes.push(note);
 		} finally {
-			await ground.handle.close().catch(() => undefined);
+			if (!published) await ground.handle.close().catch(() => undefined);
 			await live?.close().catch(() => undefined);
 		}
 	}
@@ -1723,18 +1734,24 @@ async function copyArtifactEntryIntoArchive(
 		if (await isSamePath(source, destination)) {
 			throw new Error(`the live artifact tree ${source} is the archived tree ${destination} itself`);
 		}
-		const standing = await statIfPresent(destination);
-		await fs.mkdir(destination, { recursive: true });
-		if (!standing) {
-			// Recorded before the mode is set: a `chmod` that fails must still
-			// leave this directory to the rollback, or a retry finds it standing
-			// at whatever the umask gave it and keeps that mode for good.
-			await noteCreation(destination, state);
-			// A directory deliberately kept private stays private in the archive:
-			// `mkdir` applies the umask, which would widen a `0700` tree to
-			// `0755`. A directory the archive already holds keeps its own mode —
-			// merging into a private one must not widen it to the live tree's.
-			await chmodDirectory(destination, stat.mode & 0o7777);
+		// A directory this copy makes gets the live directory's mode from the
+		// `mkdir` that makes it — with the owner's read, write and search
+		// added, so the copy can fill it, and narrowed by the umask — and
+		// nothing changes it afterwards: see {@link makeHeldDirectory}. A
+		// directory deliberately kept private stays private in the archive,
+		// and one the archive already holds keeps its own mode: merging into a
+		// private one must not widen it to the live tree's.
+		let held: HeldFile | undefined;
+		try {
+			held = await makeHeldDirectory(destination, (stat.mode & 0o777) | 0o700);
+		} catch (error) {
+			if (codeOf(error) !== "EEXIST") throw error;
+		}
+		if (held) state.created.push({ path: destination, held, directory: true });
+		else if (!(await statIfPresent(destination))?.isDirectory()) {
+			throw new Error(
+				`the archive already holds ${destination}, and it is not a directory, so ${source} was not archived into it`,
+			);
 		}
 		// Sorted, so a run that fails part-way is reproducible from its report.
 		for (const entry of (await fs.readdir(source)).sort()) {
@@ -1764,14 +1781,18 @@ async function copyArtifactEntryIntoArchive(
  * created at a destination the copy refused to replace must not be removed
  * because its name is unfamiliar, and a file somebody put at a name this
  * copy did once create must not be removed because the name is familiar.
- * The entry is identified by `dev`/`ino`, so an entry that was replaced
- * since is left alone. Deepest first, so a directory is empty when its turn
- * comes.
+ * Neither is an inode number, which the kernel hands to the next file once
+ * the last name and descriptor of the old one are gone — so every entry this
+ * copy made has been held open since it was made. A file, at a name any
+ * process of this user can write, goes by {@link removeFileOthersMayWrite}; a directory goes
+ * with `rmdir`, which removes nothing but an empty directory, only while the
+ * name holds the very directory held. Deepest first, so a directory is empty
+ * when its turn comes.
  *
- * A failure to look at an entry, or to remove one, goes into `notes` rather
- * than being read as an absence: "it was not there" and "I could not tell"
- * are different answers. A directory left because something else is in it
- * is not news — that something is not this copy's to remove.
+ * Whatever is left is said in `notes`, and so is a failure to look at an
+ * entry or to remove one: "it was not there" and "I could not tell" are
+ * different answers. A directory left because something else is in it is not
+ * news — that something is not this copy's to remove.
  *
  * Staging directories a failed publication left are not this function's:
  * they go through {@link removeStagingGround}, which knows what it put
@@ -1779,6 +1800,23 @@ async function copyArtifactEntryIntoArchive(
  */
 async function removeTreeAdditions(created: readonly ArchiveCreation[], notes: string[]): Promise<void> {
 	for (const made of [...created].reverse()) {
+		if (!made.directory) {
+			// An archived name any process of this user can write: what it holds
+			// goes only once moved aside and judged to be the copy held since it
+			// was published.
+			const notOurs = `${made.path} is not the copy this run put in the archive`;
+			const removal = await removeFileOthersMayWrite(made.path, {
+				matches: standing => standing.isFile() && standing.dev === made.held.dev && standing.ino === made.held.ino,
+				mismatch: notOurs,
+				judge: async (_moved, handle) => {
+					const now = await handle?.stat();
+					return now?.dev === made.held.dev && now.ino === made.held.ino ? undefined : notOurs;
+				},
+			});
+			const note = removal.outcome === "kept" ? removal.note : undefined;
+			if (note) notes.push(note);
+			continue;
+		}
 		let standing: Stats;
 		try {
 			standing = await fs.lstat(made.path);
@@ -1788,10 +1826,12 @@ async function removeTreeAdditions(created: readonly ArchiveCreation[], notes: s
 			}
 			continue;
 		}
-		if (standing.dev !== made.dev || standing.ino !== made.ino) continue;
+		if (standing.dev !== made.held.dev || standing.ino !== made.held.ino) {
+			notes.push(`${made.path} is not the directory this run made in the archive, so it was left as it is`);
+			continue;
+		}
 		try {
-			if (standing.isDirectory()) await fs.rmdir(made.path);
-			else await fs.unlink(made.path);
+			await fs.rmdir(made.path);
 		} catch (error) {
 			const code = codeOf(error);
 			if (code !== "ENOENT" && code !== "ENOTEMPTY" && code !== "EEXIST") {
@@ -1877,86 +1917,51 @@ async function standsAsProved(entry: string, proved: EntryIdentity): Promise<boo
 	return now === undefined ? undefined : sameIdentity(now, proved);
 }
 
-/** One live entry a reclaim proved, as the entry rather than as its name. */
+/** One live file a reclaim proved, as the entry rather than as its name. */
 interface ProvenEntry extends EntryIdentity {
 	path: string;
 	destination: string;
-	/** A link, device or socket: nothing to compare, only a name to drop. */
-	compared: boolean;
 }
 
 /**
- * Look once more, as an entry is about to go, at whether it is still the one
- * the walk proved and whether the archive still holds it.
+ * Give up one live file the reclaim proved, the way every file gc removes
+ * goes: moved to a private name, judged there through a descriptor on what
+ * was moved, and only then unlinked — see {@link removeFileOthersMayWrite}. The judgment is
+ * the proof again, on what was moved: still the very entry the walk proved,
+ * and holding what the archive holds (`holds`). Throws why it was kept, and
+ * where it is.
  *
- * The walk's reading is a fact about a moment that has passed by the time
- * the removal reaches this entry. A file is read again through a descriptor
- * opened now; a link or a device has nothing to read, so the name has to
- * still hold the very entry the walk saw — see {@link standsAsProved}. An
- * entry gone at any of these looks is not the entry proved either, the same
- * as for the transcript: whatever stands at the name by the `unlink` was
- * never looked at.
+ * A proof followed by an `unlink` of the name could not hold across the two:
+ * a writer without a lease appended a turn to the transcript after the last
+ * comparison and before the `unlink`, and the reclaim and the restore after
+ * it both exited 0 without the turn. Moved first, a file has no name anybody
+ * else knows: a write by its name after the move creates a file of the
+ * writer's own at that name, which the caller then finds and keeps, and a
+ * write before the move is in what is judged, which then fails and goes back.
  *
- * The caller holds the lease of every transcript in the tree, so no process
- * that writes a session through its lease changes the answer after this.
- * One that writes without a lease still can, between this look and the
- * `unlink`, which takes a name because no system call takes an inode.
+ * The caller holds the lease of every transcript in the tree, so no session
+ * writer writes at all; this is what keeps everything else. Only regular
+ * files reach here: a link, a FIFO, a socket or a device keeps the tree, so
+ * nothing goes that was not compared.
  */
-async function proveEntryStillGoes(entry: ProvenEntry): Promise<void> {
-	const kept = (what: string): Error =>
-		new Error(`${entry.path} is no longer the ${what} this run proved; it was kept`);
-	if (!entry.compared) {
-		if ((await standsAsProved(entry.path, entry)) !== true) throw kept("entry");
-		return;
-	}
-	const live = await openRegularFile(entry.path).catch(error => {
-		// Anything but a regular file at the name is not the file proved.
-		if (error instanceof NotARegularFile) throw kept("file");
-		throw error;
-	});
-	if (!live) throw kept("file");
-	try {
-		const now = await live.stat();
-		if (!now.isFile() || !sameIdentity(identityFrom(now), entry)) throw kept("file");
-		if (!(await compared(archivedHandleIsHeldBy(live, now, entry.destination), entry.path, entry.destination))) {
-			throw new Error(`${entry.path} holds what ${entry.destination} does not; it was kept`);
-		}
-	} finally {
-		await live.close().catch(() => undefined);
-	}
-	// The descriptor follows a link; the name has to be the file itself.
-	if ((await standsAsProved(entry.path, entry)) !== true) throw kept("file");
-}
-
-/**
- * The same for the session's own transcript, which goes first: the name still
- * holds the entry the reclaim proved under its lease, and what it holds, read
- * through a descriptor opened now, is still exactly what the archive inflates
- * to. A transcript somebody put at the name while the tree was being proved
- * fails one of the two whichever way it got there — moved in beside the
- * original, or created on the inode the original freed.
- */
-async function proveTranscriptStillGoes(
-	sessionPath: string,
+async function giveUpProvedFile(
+	file: string,
 	proved: EntryIdentity,
-	archiveFile: string,
+	holds: (moved: fs.FileHandle, now: Stats) => Promise<string | undefined>,
 ): Promise<void> {
-	const kept = (): Error => new Error(`${sessionPath} is no longer the transcript this run proved; it was kept`);
-	if ((await standsAsProved(sessionPath, proved)) !== true) throw kept();
-	const live = await openRegularFile(sessionPath).catch(notRegularAsAbsent);
-	if (!live) throw kept();
-	try {
-		const [now, archived] = await Promise.all([
-			digestStream(bytesOfHandle(live)),
-			digestArchivedSessionFile(archiveFile),
-		]);
-		if (now.hash !== archived.hash || now.bytes !== archived.bytes) {
-			throw new Error(`${sessionPath} holds what ${archiveFile} does not; it was kept`);
-		}
-	} finally {
-		await live.close().catch(() => undefined);
-	}
-	if ((await standsAsProved(sessionPath, proved)) !== true) throw kept();
+	const changed = `${file} is no longer the file this run proved`;
+	const result = await removeFileOthersMayWrite(file, {
+		matches: standing => standing.isFile() && sameIdentity(identityFrom(standing), proved),
+		mismatch: changed,
+		judge: async (_moved, handle) => {
+			if (!handle) return changed;
+			const now = await handle.stat();
+			if (!now.isFile() || !sameIdentity(identityFrom(now), proved)) return changed;
+			return await holds(handle, now);
+		},
+	});
+	if (result.outcome === "absent") throw new Error(`${file} is gone since this run proved it`);
+	if (result.outcome === "kept") throw new Error(result.note);
 }
 
 /**
@@ -2016,6 +2021,45 @@ async function carryLiveModeToArchive(live: string, archived: string): Promise<v
 }
 
 /**
+ * A relative link's target as an absolute path that keeps every name the
+ * target goes through: the leading `..` steps are taken against `realParent`,
+ * the link's own directory as a real path, so none of them passes through
+ * that directory by name; the rest is kept as written, so a name in it that is
+ * itself a link — `outside/current` — stays one, and the moved link follows it
+ * when it moves on. `.` steps are dropped. Undefined when a `..` follows a
+ * name in the rest: that name may be a link, so no lexical form is the same
+ * path, and a resolved one would be a snapshot.
+ */
+function aliasPreservingTarget(realParent: string, target: string): string | undefined {
+	const parts = target.split("/").filter(part => part !== "" && part !== ".");
+	let base = realParent;
+	let at = 0;
+	while (at < parts.length && parts[at] === "..") {
+		base = path.dirname(base);
+		at += 1;
+	}
+	const rest = parts.slice(at);
+	if (rest.includes("..")) return undefined;
+	return rest.length === 0 ? base : path.join(base, ...rest);
+}
+
+/**
+ * Why a reclaim keeps a session whose transcript is a symbolic link: the file
+ * it leads to is outside the session's tree and its leases, so a turn written
+ * there after the last comparison and before the `unlink` would be left at a
+ * name the session no longer references — the review did exactly that, and
+ * the reclaim and the restore after it both exited 0 without the turn.
+ */
+function transcriptLinkRefusal(sessionPath: string, target: string, kept: "was" | "would be"): string {
+	return (
+		`${sessionPath} is a symbolic link, to ${target}, which a reclaim does not give up: a turn written to that file ` +
+		`after the last comparison would be left where this session no longer looks. The live copy ${kept} kept; to give ` +
+		`it up, replace the link with a copy of the transcript it leads to, at the same name, and reclaim again. The ` +
+		`file it leads to is not touched`
+	);
+}
+
+/**
  * Prove the archive holds every file of a live tree, collecting the files in
  * the order they would be removed.
  *
@@ -2024,6 +2068,12 @@ async function carryLiveModeToArchive(live: string, archived: string): Promise<v
  * ones before it, and the refusal then said the tree "was kept" while part
  * of it was gone. The whole tree is settled first; only then does anything
  * go.
+ *
+ * Only regular files the archive holds and directories are collected. A
+ * FIFO, socket or device has no copy. Neither does a symbolic link: a
+ * reference to something outside the tree cannot be archived — only what it
+ * led to at one moment can — so giving a link up always loses whatever that
+ * thing becomes, and the tree is kept instead.
  *
  * Throws the reason the first unproved entry could not be proved, with
  * nothing deleted.
@@ -2071,26 +2121,65 @@ async function proveLiveTreeIsArchived(
 		return;
 	}
 	if (!stat.isFile()) {
-		// A FIFO, a socket or a device: the archive holds nothing for it, so
-		// giving up the live tree would remove something no copy has.
-		if (!stat.isSymbolicLink()) {
+		// A link: what it leads to is outside this tree and its leases, so any
+		// process can change it — a child added to a linked directory, a hop
+		// of a chain rebound — after any proof of it and before the `unlink`,
+		// and no descriptor holds a directory still. Removing the link would
+		// then drop the session's only reference to whatever changed, and
+		// even with nothing changing it would turn a live reference into a
+		// copy of one moment. A link takes no space, so it is kept, the way a
+		// FIFO is, and the user decides where it goes.
+		if (stat.isSymbolicLink()) {
+			// A relative link leads somewhere else once moved, so the advice for
+			// one makes it absolute first — keeping every name it goes through.
+			// The target as the kernel resolves it now is a snapshot: a link to
+			// `outside/current` made into one to `outside/v1` no longer follows
+			// `current` when it moves on, which is the very reason a reclaim
+			// keeps links. So only the leading `..` steps, which climb out of
+			// the link's own directory, are taken against that directory's real
+			// path — no step back through this tree is left to stop resolving
+			// once the tree goes — and the rest of the target is kept as written.
+			const target = await fs.readlink(source).catch(() => undefined);
+			const resolved = await fs.realpath(source).catch(() => undefined);
+			let move =
+				`move the link out of the tree — it keeps leading where it leads, and the archive holds what it led to ` +
+				`when the session was archived — and reclaim again`;
+			if (target !== undefined && !path.isAbsolute(target)) {
+				const parent = await fs.realpath(path.dirname(source)).catch(() => path.dirname(source));
+				const absolute = aliasPreservingTarget(parent, target);
+				move =
+					absolute !== undefined
+						? `move the link out of the tree and reclaim again. It is a relative link, to ${target}, so moved as it ` +
+							`is it would lead somewhere else: first make it absolute, keeping every name it goes through, with ` +
+							`\`ln -sfn ${shellQuote(absolute)} ${shellQuote(source)}\`, then move it. The archive holds what it ` +
+							`led to when the session was archived`
+						: `move the link out of the tree and reclaim again. It is a relative link, to ${target}, so moved as it ` +
+							`is it would lead somewhere else, and its target steps back with \`..\` after a name that may itself ` +
+							`be a link, so no absolute form keeps it as it is: either spell the absolute target yourself, or ` +
+							`freeze it at what it leads to now${resolved !== undefined ? `, ${resolved},` : ""} — a snapshot ` +
+							`that no longer follows a name it went through when that name moves on`;
+			}
+			// Moved out, a link into this tree leads to a file the reclaim then
+			// gives up; the archive holds it, but the link will lead nowhere.
+			const realRoot = await fs.realpath(sourceRoot).catch(() => sourceRoot);
+			if (resolved !== undefined && (resolved === realRoot || resolved.startsWith(`${realRoot}${path.sep}`))) {
+				move +=
+					`. It leads into this session's own tree, to ${resolved}, so once the live copy is given up it will ` +
+					`lead nowhere: the archive holds that file, and \`omp gc --restore\` brings it back`;
+			}
 			throw new Error(
-				`${source} is ${kindOf(stat)}, which the archive cannot hold, so the live tree was kept; move it out of the ` +
-					`tree to give this session's live copy up`,
+				`${source} is a symbolic link, which a reclaim does not give up: what it leads to is outside this ` +
+					`session's tree and can change between a proof and the removal, so removing it could drop the ` +
+					`session's only reference to what changed. The live tree was kept; to give this session's live copy ` +
+					`up, ${move}`,
 			);
 		}
-		// A link the copy resolved rather than carried. What is recorded is
-		// one look at it, and it has to be the entry the walk just found — a
-		// file put in its place would go uncompared. Its name is all a reclaim
-		// gives up, and only once the archive is shown to hold what it points
-		// to: the reason a FIFO keeps the tree holds for a link with no copy.
-		const seen = await lookAt(source);
-		if (!seen || !sameIdentity({ ...seen, target: undefined }, identityFrom(stat))) {
-			throw new Error(`${source} changed while this run was looking at it; it was kept`);
-		}
-		await proveLinkTargetIsArchived(source, source, destination, sourceRoot);
-		proven.files.push({ path: source, destination, ...seen, compared: false });
-		return;
+		// A FIFO, a socket or a device: the archive holds nothing for it, so
+		// giving up the live tree would remove something no copy has.
+		throw new Error(
+			`${source} is ${kindOf(stat)}, which the archive cannot hold, so the live tree was kept; move it out of the ` +
+				`tree to give this session's live copy up`,
+		);
 	}
 	// Only absence is nothing. A name that is not a regular file throws, in its
 	// own words; any other look that fails says what is there could not be
@@ -2120,73 +2209,7 @@ async function proveLiveTreeIsArchived(
 	if ((await standsAsProved(source, proved)) !== true) {
 		throw new Error(`${source} is no longer the file this run proved; it was kept`);
 	}
-	proven.files.push({ path: source, destination, ...proved, compared: true });
-}
-
-/**
- * Prove the archive holds what a link in the live tree leads to, collecting
- * nothing under it for removal: a reclaim gives up the link's name, and what
- * it points to stays where it is. The archive copied the link by following
- * it — a file as a file, a directory as the tree below it, a link inside
- * that followed again — so that is what has to be there, each file compared
- * the way any live file is. A link that leads nowhere was counted in
- * `brokenLinks` and not copied, a link made after the archive has no copy
- * at all, and a FIFO, socket or device it leads to is not copied either:
- * for any of them, giving up the name would remove something no copy has,
- * so the live tree is kept, as it is for a FIFO in the tree itself.
- *
- * `entry` is the path being proved, through the link; `link` is the link
- * the reclaim would remove, named in every refusal.
- */
-async function proveLinkTargetIsArchived(
-	link: string,
-	entry: string,
-	destination: string,
-	sourceRoot: string,
-): Promise<void> {
-	const noCopy = (why: string): Error =>
-		new Error(
-			`${link} is a link the archive holds no copy for: ${why}; the live tree was kept — move the link out of ` +
-				`the tree to give this session's live copy up`,
-		);
-	const stat = await fs.stat(entry).catch(absentOnly);
-	if (!stat) throw noCopy(entry === link ? "what it points to is gone" : `${entry} leads nowhere`);
-	if (stat.isDirectory()) {
-		if (!(await fs.lstat(destination).catch(absentOnly))?.isDirectory()) {
-			throw noCopy(`${destination} is not a directory holding what ${entry} holds`);
-		}
-		for (const name of (await fs.readdir(entry)).sort()) {
-			await proveLinkTargetIsArchived(link, path.join(entry, name), path.join(destination, name), sourceRoot);
-		}
-		return;
-	}
-	const special = (kind: string): Error =>
-		noCopy(`${entry === link ? "it leads to" : `${entry} is`} ${kind}, which the archive cannot hold`);
-	if (!stat.isFile()) throw special(kindOf(stat));
-	// Through a descriptor checked to hold a regular file: a name swapped for
-	// a FIFO since the look above is refused, not read.
-	const live = await openRegularFile(entry).catch(error => {
-		if (error instanceof NotARegularFile) throw special(error.kind);
-		throw error;
-	});
-	if (!live) throw noCopy(`${entry} leads nowhere`);
-	try {
-		const liveStat = await live.stat();
-		if (!(await survivesSourceRemoval(destination, sourceRoot))) {
-			throw noCopy(`${destination} is not an independent archived copy of ${entry}`);
-		}
-		const archived = await fs.lstat(destination).catch(absentOnly);
-		// A link onto the archived copy itself leads to that copy; its name is
-		// all that goes, and the copy stays where it is.
-		const isTheCopy = archived?.isFile() === true && archived.dev === liveStat.dev && archived.ino === liveStat.ino;
-		if (!isTheCopy && !(await compared(archivedHandleIsHeldBy(live, liveStat, destination), entry, destination))) {
-			throw noCopy(`${entry} holds what ${destination} does not`);
-		}
-		const wider = await archivedModeWider(entry, liveStat, destination);
-		if (wider) throw new Error(wider);
-	} finally {
-		await live.close();
-	}
+	proven.files.push({ path: source, destination, ...proved });
 }
 
 /**
@@ -2199,16 +2222,14 @@ async function proveLinkTargetIsArchived(
  * transcript about to go, a subagent's that joined after the tree was first
  * listed included: a session a live process owns is reported and kept
  * before this runs, and a dead owner writes nothing late. What is left here
- * is the removal itself, each entry looked at once more as it goes — see
- * {@link proveEntryStillGoes}. A removal that fails part-way reports exactly
- * what went, because saying a tree "was kept" when some of it is gone is the
- * misreport this replaces.
- *
- * What this does not exclude, stated rather than implied: a process that
- * changes the tree without holding a lease — an editor, a script, anything
- * that is not a session writer — between the last look at an entry and its
- * `unlink`. A subagent session created below the tree after the walk is not
- * removed, because its file was never proved; the removal then stops at its
+ * is the removal itself: each file is moved aside and proved again there
+ * before it goes — see {@link giveUpProvedFile} — so a write by its name
+ * after the move lands in a file of the writer's own, and a directory goes
+ * only once empty, so such a file keeps its directory and is named. A
+ * removal that fails part-way reports exactly what went, because saying a
+ * tree "was kept" when some of it is gone is the misreport this replaces.
+ * A subagent session created below the tree after the walk is not removed,
+ * because its file was never proved; the removal then stops at its
  * directory and says what it had already given up.
  */
 async function removeProvenLiveTree(
@@ -2218,12 +2239,23 @@ async function removeProvenLiveTree(
 	// Appended as each one goes, so a removal that throws part-way leaves the
 	// caller holding exactly what it had already given up.
 	for (const entry of proven.files) {
-		await proveEntryStillGoes(entry);
-		await fs.unlink(entry.path);
+		await giveUpProvedFile(entry.path, entry, async (moved, now) =>
+			(await archivedHandleIsHeldBy(moved, now, entry.destination))
+				? undefined
+				: `${entry.path} holds what ${entry.destination} does not`,
+		);
 		removed.push(entry.path);
 	}
 	for (const directory of proven.directories) {
-		await fs.rmdir(directory);
+		try {
+			await fs.rmdir(directory);
+		} catch (error) {
+			if (codeOf(error) !== "ENOTEMPTY" && codeOf(error) !== "EEXIST") throw error;
+			throw new Error(
+				`${directory} holds something this run did not prove — written there after the tree was proved — ` +
+					`so it was kept, with what is in it`,
+			);
+		}
 		removed.push(directory);
 	}
 }
@@ -2269,6 +2301,9 @@ async function copyArtifactsTree(
 		// a note dropped on the error path is a file nobody is told about.
 		if (state.notes.length > 0) throw new Error(`${errorMessage(error)}; ${state.notes.join("; ")}`);
 		throw error;
+	} finally {
+		// Every entry this copy made was held until now — see {@link ArchiveCreation}.
+		for (const made of state.created) await made.held.handle.close().catch(() => undefined);
 	}
 	return { brokenLinks: state.brokenLinks, notes: state.notes };
 }
@@ -2552,7 +2587,8 @@ async function readArtifactSessionId(file: string): Promise<string | undefined> 
 	// Through a descriptor that holds a regular file: an artifact that is, or
 	// links to, a FIFO, a socket or a device is no transcript, and reading it
 	// would wait on it or take what is written to it. It owns nothing here;
-	// the copy and the reclaim name it, as what the archive cannot hold.
+	// the archive copy names it as what the archive cannot hold, and the
+	// reclaim keeps the live tree for it.
 	const handle = await openRegularFile(file).catch(notRegularAsAbsent);
 	if (!handle) return undefined;
 	try {
@@ -2946,36 +2982,25 @@ export function renderText(result: GcResult): string {
 }
 
 /**
- * What `--restore --apply` would refuse or leave, for the preview to say
- * first: what stands at the restore record's name — something that is not a
- * regular file is refused, and a regular file is left, keeping the session
- * unfinished — and conflicts in the artifact tree. A preview that checks
- * only the transcript exits 0 over a refusal applying then reports.
+ * What `--restore --apply` would refuse, leave or bring back, for the
+ * preview to say first. It runs the restore itself in its plan mode — the
+ * same steps, refusals and order, each write replaced by a check that it
+ * could be made — so the preview cannot promise what the apply would then
+ * refuse: a preview that walked the trees its own way did, three rounds
+ * running, for a different reason each time.
  */
-async function previewArtifactConflicts(archiveFile: string, sessionPath: string, agentDir: string): Promise<string[]> {
-	const refusals: string[] = [];
-	const record = restoreRecordPath(archiveFile);
+async function previewRestore(
+	archiveFile: string,
+	sessionPath: string,
+	agentDir: string,
+): Promise<{ refusals: string[]; missing?: string[] }> {
+	const plan = newRestorePlan(sessionPath.slice(0, -".jsonl".length));
 	try {
-		const refused = await restoreRecordRefusal(record);
-		const standing = await fs.lstat(record).catch((error: unknown) => {
-			if (codeOf(error) === "ENOENT") return undefined;
-			throw error;
-		});
-		if (refused) refusals.push(refused);
-		else if (standing) refusals.push(restoreRecordLeftNote(record));
+		const planned = await restoreArchivedSessionLocked(archiveFile, agentDir, plan);
+		return { refusals: planned.notRestored, missing: plan.missing.sort() };
 	} catch (error) {
-		refusals.push(`${record} could not be looked at: ${errorMessage(error)}`);
+		return { refusals: [errorMessage(error)] };
 	}
-	try {
-		refusals.push(
-			...(await artifactRestoreConflicts(archiveFile, sessionPath, agentDir)).map(
-				conflict => `the artifact tree would not be restored whole: ${conflict}`,
-			),
-		);
-	} catch (error) {
-		refusals.push(`the artifact tree could not be checked: ${errorMessage(error)}`);
-	}
-	return refusals;
 }
 
 /**
@@ -3026,14 +3051,10 @@ async function runRestoreGc(options: ResolvedGcOptions, query: string): Promise<
 		// What applying would bring home, and what it would refuse.
 		const preview = async (): Promise<RestoreGcResult> => {
 			result.sessionPath = sessionPath;
-			const conflicts = await previewArtifactConflicts(archiveFile, sessionPath, options.agentDir);
-			result.errors.push(...conflicts);
-			result.notRestored.push(...conflicts);
-			try {
-				result.missingArtifacts = await archivedPathsWithoutLiveCopies(archiveFile, sessionPath);
-			} catch (error) {
-				result.errors.push(`the artifact tree could not be compared with the archive: ${errorMessage(error)}`);
-			}
+			const { refusals, missing } = await previewRestore(archiveFile, sessionPath, options.agentDir);
+			result.errors.push(...refusals);
+			result.notRestored.push(...refusals);
+			if (missing) result.missingArtifacts = missing;
 			return result;
 		};
 		if (await pathExists(sessionPath)) {
@@ -3100,23 +3121,24 @@ async function runRestoreGc(options: ResolvedGcOptions, query: string): Promise<
  * only then does the live copy go, entry by entry, each looked at again as
  * it goes.
  *
- * A proof and an `unlink` are two operations, and no proof taken between
- * them closes the gap — a subagent session that joined while this ran, holding
- * its own lease, took a turn after the last comparison of its file and lost
- * it. So the rule is about owners, not about proofs: every transcript about
- * to go is leased first, a subagent's that joined after the tree was listed
- * included, and a session any live process owns is reported and kept. A
- * dead owner writes nothing late, and a lease held until the file is gone
- * means nothing claims it in between.
+ * A proof and an `unlink` of a name are two operations, and no proof taken
+ * between them closes the gap — a subagent session that joined while this
+ * ran, holding its own lease, took a turn after the last comparison of its
+ * file and lost it, and a script without a lease did the same to the
+ * transcript. So two rules, each closing one of them. Owners: every
+ * transcript about to go is leased first, a subagent's that joined after
+ * the tree was listed included, and a session any live process owns is
+ * reported and kept; a dead owner writes nothing late, and a lease held
+ * until the file is gone means nothing claims it in between. Everything
+ * else: no file goes by its name — each is moved to a private name first and
+ * proved again there, so a write by its name after the move lands in a file
+ * of its own, which is kept and named — see {@link giveUpProvedFile}.
  *
- * What that leaves, named rather than narrowed. A process that writes into
- * the tree without holding a lease, between the last look at an entry and
- * its `unlink`: session writers hold one; editors and scripts do not. And a
- * process with write access to the existing archive's files during the
- * reclaim, even with the archive directory read-only: the comparison is a
- * reading of the archive at one moment, and a byte changed in the archived
- * transcript after it leaves the live copy gone and an archive that does not
- * inflate — no valid copy anywhere.
+ * What that leaves, named rather than narrowed: a process with write access
+ * to the existing archive's files during the reclaim, even with the archive
+ * directory read-only. The comparison is a reading of the archive at one
+ * moment, and a byte changed in the archived transcript after it leaves the
+ * live copy gone and an archive that does not inflate.
  */
 async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<ReclaimGcResult> {
 	const result: ReclaimGcResult = { query, reclaimed: 0, errors: [] };
@@ -3200,10 +3222,9 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 		return { session: { path: sessionPath } };
 	};
 	// A session a live process owns is reported and kept, whenever it joined.
-	// The transcripts are the files the walk compared: a link or a device
-	// carries no session's bytes, and removing one removes only a name. The
-	// leases taken go into `tree`; the reason to keep the session, if any,
-	// comes back.
+	// The transcripts are among the files the walk compared, which are the
+	// only entries a reclaim gives up besides directories. The leases taken
+	// go into `tree`; the reason to keep the session, if any, comes back.
 	const leaseProvedTranscripts = async (
 		tree: SessionTreeLeases,
 		proved: { files: ProvenEntry[] },
@@ -3211,7 +3232,7 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 	): Promise<string | undefined> => {
 		const owner = await leaseTranscripts(
 			tree,
-			proved.files.filter(entry => entry.compared).map(entry => entry.path),
+			proved.files.map(entry => entry.path),
 			check,
 		);
 		if (owner === undefined) return undefined;
@@ -3271,6 +3292,11 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 			await keepTree();
 			result.errors.push(errorMessage(error));
 			return result;
+		}
+		const transcriptTarget = (await lookAt(sessionPath))?.target;
+		if (transcriptTarget !== undefined) {
+			await keepTree();
+			result.errors.push(transcriptLinkRefusal(sessionPath, transcriptTarget, "would be"));
 		}
 		if (await pathExists(liveArtifacts)) {
 			const preview = { files: [] as ProvenEntry[], directories: [] as string[] };
@@ -3347,6 +3373,17 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 			result.errors.push(`${sessionPath} is no longer there to reclaim`);
 			return result;
 		}
+		// A transcript that is a symbolic link is kept, like any link in the
+		// tree: the file it leads to is outside this session's tree and its
+		// leases, so a writer that appends a turn there after the last
+		// comparison and before the `unlink` leaves that turn only at a name
+		// the session no longer references — the review did exactly that, and
+		// the reclaim and the restore after it both exited 0 without the turn.
+		if (root.target !== undefined) {
+			await keepTree();
+			result.errors.push(transcriptLinkRefusal(sessionPath, root.target, "was"));
+			return result;
+		}
 		// Every file settled before any of it goes. Proving and deleting as
 		// the walk went meant a tree that refused on its last file had
 		// already lost the ones before it, while the report said it was kept.
@@ -3383,10 +3420,28 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 			// tree, and the session opened short with nothing said — a
 			// reclaim writes no record of being unfinished the way an archive
 			// and a restore do, so the order is that record.
-			await proveTranscriptStillGoes(sessionPath, root, archiveFile);
-			await fs.unlink(sessionPath);
+			await giveUpProvedFile(sessionPath, root, async moved => {
+				const [now, archived] = await Promise.all([
+					digestStream(bytesOfHandle(moved)),
+					digestArchivedSessionFile(archiveFile),
+				]);
+				return now.hash === archived.hash && now.bytes === archived.bytes
+					? undefined
+					: `${sessionPath} holds what ${archiveFile} does not`;
+			});
 			removed.push(sessionPath);
 			await removeProvenLiveTree(proven, removed);
+			// A writer that wrote by the transcript's name after it was moved
+			// aside made a file of its own there, which no copy has: kept, and
+			// said, since a session with that file at its name is not the one
+			// the archive holds.
+			if (await fs.lstat(sessionPath).catch(() => undefined)) {
+				throw new Error(
+					`${sessionPath} was written to after this run moved the transcript aside to give it up, so what ` +
+						`was written there is kept at that name and is not in ${archiveFile}: look at it, and move it ` +
+						`aside before restoring`,
+				);
+			}
 		} catch (error) {
 			// The removal itself failed part-way. What went is named, because
 			// the live copy is no longer whole and saying it was kept would be
@@ -3394,7 +3449,9 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 			// and `omp gc --restore` brings it back — as does opening the
 			// session, once its transcript is among what went.
 			result.partiallyRemoved = removed;
-			await keepTree();
+			// The tree is kept only when nothing went: beside a list of what
+			// went, "kept" would say the opposite of it.
+			if (removed.length === 0) await keepTree();
 			result.errors.push(
 				removed.length === 0
 					? `${sessionPath} was kept: ${errorMessage(error)}`

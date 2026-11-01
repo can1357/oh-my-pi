@@ -15,6 +15,9 @@ import { SessionManager } from "../session/session-manager";
  * subagent transcripts.
  */
 export async function resolveSessionFileArg(sessionArg: string | undefined, cwd: string): Promise<string> {
+	// These commands run before anything else owns the terminal: a session
+	// coming out of the archive says so on stderr, which keeps stdout clean.
+	const progress = (line: string): void => void process.stderr.write(`${line}\n`);
 	if (sessionArg) {
 		if (sessionArg.includes("/") || sessionArg.includes("\\") || sessionArg.endsWith(".jsonl")) {
 			const resolved = path.resolve(sessionArg);
@@ -24,11 +27,11 @@ export async function resolveSessionFileArg(sessionArg: string | undefined, cwd:
 				if (isEnoent(err)) throw new Error(`Session file not found: ${resolved}`);
 				throw err;
 			}
-			return await materializeSessionFile(resolved);
+			return await materializeSessionFile(resolved, undefined, progress);
 		}
 		const match = await resolveResumableSession(sessionArg, cwd);
 		if (!match) throw new Error(`Session "${sessionArg}" not found.`);
-		return await materializeSessionFile(match.session.path);
+		return await materializeSessionFile(match.session.path, undefined, progress);
 	}
 	const recent = await findMostRecentSession(SessionManager.getDefaultSessionDir(cwd));
 	if (!recent) throw new Error(`No sessions found for ${cwd}. Pass a session file or id.`);

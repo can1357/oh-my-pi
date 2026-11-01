@@ -126,6 +126,7 @@ import {
 	type SessionContinuation,
 	type SessionInfo,
 } from "./session/session-listing";
+import type { RestoreProgress } from "./session/session-archive";
 import { ForkSourceNotFoundError, SessionManager, SessionMoveRefusedError } from "./session/session-manager";
 import { forkIfMovedAway } from "./session/session-transfer";
 import { shouldShowStartupSplash } from "./startup-splash";
@@ -1250,7 +1251,9 @@ function validateSessionPersistenceArgs(parsed: Pick<Args, "continue" | "noSessi
  * `nativeFlagOwnership: "preliminary"` is reserved for the startup parse,
  * before extensions establish whether a built-in-named flag belongs to them.
  * `onSessionContinuation` hears when `--resume`, `--continue` or auto-resume
- * opens a newer copy of the chosen session's conversation instead of its file.
+ * opens a newer copy of the chosen session's conversation instead of its file;
+ * `onArchiveRestore` receives what to show while a session given to `--resume`
+ * or `--fork` comes out of the archive.
  */
 export async function createSessionManager(
 	parsed: Args,
@@ -1260,6 +1263,7 @@ export async function createSessionManager(
 	options: {
 		nativeFlagOwnership?: "preliminary" | "resolved";
 		onSessionContinuation?: (continuation: SessionContinuation) => void;
+		onArchiveRestore?: RestoreProgress;
 	} = {},
 ): Promise<SessionManager | undefined> {
 	if (parsed.fork) {
@@ -1271,6 +1275,7 @@ export async function createSessionManager(
 			try {
 				return await SessionManager.forkFrom(forkSource, cwd, parsed.sessionDir, undefined, {
 					repairInterruptedTail: true,
+					onArchiveRestore: options.onArchiveRestore,
 				});
 			} catch (err) {
 				if (err instanceof ForkSourceNotFoundError) {
@@ -1286,6 +1291,7 @@ export async function createSessionManager(
 		try {
 			return await SessionManager.forkFrom(match.session.path, cwd, parsed.sessionDir, undefined, {
 				repairInterruptedTail: true,
+				onArchiveRestore: options.onArchiveRestore,
 			});
 		} catch (err) {
 			if (err instanceof ForkSourceNotFoundError) {
@@ -1318,6 +1324,7 @@ export async function createSessionManager(
 					undefined,
 					{
 						throwIfMissing: true,
+						onArchiveRestore: options.onArchiveRestore,
 					},
 				);
 			} catch (err) {
@@ -1348,7 +1355,12 @@ export async function createSessionManager(
 		if (moveResult.status === "declined") {
 			return undefined;
 		}
-		return await forkIfMovedAway(await SessionManager.open(session.path, parsed.sessionDir), parsed.sessionDir);
+		return await forkIfMovedAway(
+			await SessionManager.open(session.path, parsed.sessionDir, undefined, {
+				onArchiveRestore: options.onArchiveRestore,
+			}),
+			parsed.sessionDir,
+		);
 	}
 	if (parsed.continue) {
 		return await forkIfMovedAway(
@@ -2186,6 +2198,8 @@ export async function runRootCommand(
 					{
 						nativeFlagOwnership: "preliminary",
 						onSessionContinuation: continuation => resumedContinuations.push(continuation),
+						// Before the interface starts, so stderr is the user's terminal.
+						onArchiveRestore: line => void process.stderr.write(`${line}\n`),
 					},
 				);
 			}

@@ -2020,6 +2020,8 @@ export class SelectorController {
 				onModelFallback: warning => {
 					modelFallbackWarning = warning;
 				},
+				// A session coming out of the archive can take seconds: say so as it goes.
+				onArchiveRestore: line => this.ctx.showStatus(line),
 			})) === false
 		) {
 			return false;

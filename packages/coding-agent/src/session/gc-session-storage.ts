@@ -11,6 +11,7 @@
  * them cannot be defined while that cycle is still loading.
  */
 import { isArchivedSessionPath } from "./session-archive";
+import { readSessionInfo, type SessionInfo } from "./session-listing";
 import { FileSessionStorage } from "./session-storage";
 import { isAssistantMessageLine } from "./session-entries";
 import { absentFile as absent, openRegularFile } from "./regular-file";
@@ -51,4 +52,9 @@ export class RegularFileSessionStorage extends FileSessionStorage {
 			await handle.close().catch(() => undefined);
 		}
 	}
+}
+
+/** {@link readSessionInfo} for `omp gc`: the transcript read through {@link RegularFileSessionStorage}. */
+export function readRegularSessionInfo(file: string): Promise<SessionInfo | undefined> {
+	return readSessionInfo(file, new RegularFileSessionStorage());
 }
