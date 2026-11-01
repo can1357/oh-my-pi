@@ -482,6 +482,41 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 		expect(artifact).not.toContain("REFUSED-PAYLOAD");
 	});
 
+	it("fails a follow-up cancelled while it waits out a wake's stop pass, without running it", async () => {
+		const stopEntered = Promise.withResolvers<void>();
+		const releaseStop = Promise.withResolvers<void>();
+		const run = await setup({
+			driven: true,
+			responses: [yieldCall("WAKE-PAYLOAD"), yieldCall("CANCELLED-FOLLOW-UP")],
+			onStop: async () => {
+				stopEntered.resolve();
+				await releaseStop.promise;
+				return undefined;
+			},
+		});
+		attachIrcWakeTurnMonitor(run.session, { id: AGENT_ID, agent: wakeAgent, artifactsDir: tempDir.path() });
+
+		await deliverWake(run.session, "m1");
+		await stopEntered.promise;
+		const controller = new AbortController();
+		const followUp = runSubagentFollowUpTurn({
+			id: AGENT_ID,
+			agent: wakeAgent,
+			message: "do more",
+			signal: controller.signal,
+			artifactsDir: tempDir.path(),
+		});
+		controller.abort();
+		releaseStop.resolve();
+
+		await expect(followUp).rejects.toThrow();
+		await run.session.waitForIrcReplies();
+		await run.session.waitForIdle();
+		// The wake's judged yield is the result; the cancelled follow-up never reached the model.
+		expect(run.mock.calls).toHaveLength(1);
+		expect(await Bun.file(run.artifact).text()).toContain("WAKE-PAYLOAD");
+	});
+
 	it("lets a user prompt to the idle child cancel the pass, then runs the prompt", async () => {
 		const stopEntered = Promise.withResolvers<void>();
 		let handlerSawCancel = false;
