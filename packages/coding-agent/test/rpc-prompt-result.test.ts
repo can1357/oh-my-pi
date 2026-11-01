@@ -5,6 +5,7 @@ import {
 	RpcPromptResults,
 	reportPromptResult,
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-prompt-results";
+import { ExtensionSendQueue } from "../src/extensibility/extensions/send-queue";
 import { RpcSessionSettleWatcher } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-session-settle";
 import type { ExtensionActions } from "../src/extensibility/extensions/types";
 import { initializeExtensions } from "../src/modes/runtime-init";
@@ -456,7 +457,9 @@ describe("reportPromptResult", () => {
 					},
 					onError: () => {},
 					emit: async () => {},
+					sends: new ExtensionSendQueue(),
 				},
+				discoverStartupSkillPaths: async () => {},
 				...testCase.session,
 			} as unknown as AgentSession;
 			await initializeExtensions(session, {
@@ -542,7 +545,9 @@ describe("initializeExtensions markAgentInvokingMessage", () => {
 				},
 				onError: () => {},
 				emit: async () => {},
+				sends: new ExtensionSendQueue(),
 			},
+			discoverStartupSkillPaths: async () => {},
 			sendCustomMessage: async (_message: unknown, options?: { triggerTurn?: boolean }) => {
 				sentOptions = options;
 				return true;
@@ -591,7 +596,9 @@ describe("initializeExtensions invokingTask rejection safety", () => {
 				},
 				onError: () => {},
 				emit: async () => {},
+				sends: new ExtensionSendQueue(),
 			},
+			discoverStartupSkillPaths: async () => {},
 			// Mirrors AgentSession.sendCustomMessage's contract: `false` iff no turn started,
 			// e.g. an idle steer superseded by a concurrent turn's preflight generation check.
 			sendCustomMessage: async () => false,

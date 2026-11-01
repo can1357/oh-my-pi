@@ -583,7 +583,29 @@ export interface ExecutorOptions {
 	 * transition explicitly.
 	 */
 	parentTelemetry?: AgentTelemetryConfig;
-	/** Skills to autoload via sendCustomMessage before the first prompt */
+	/**
+	 * Skill names to autoload via sendCustomMessage before the first prompt.
+	 * Names, not resolved `Skill` objects: the child's `resources_discover`
+	 * (post-`session_start`) can replace a same-named inherited skill or
+	 * contribute one the parent never had, so resolution must happen against
+	 * `session.skills` *after* startup discovery, not in the spawner.
+	 */
+	autoloadSkillNames?: string[];
+	/**
+	 * Merge the child session's own `resources_discover` skill contributions
+	 * into a supplied `skills` snapshot. Internal spawners forwarding a parent
+	 * snapshot for perf set this true; direct SDK callers default to false so
+	 * a deliberately curated snapshot stays fixed (released semantics).
+	 */
+	mergeDiscoveredSkillPaths?: boolean;
+	/**
+	 * Skills to autoload via sendCustomMessage before the first prompt.
+	 * Released SDK surface (predates {@link autoloadSkillNames}); each entry
+	 * is re-resolved by name against `session.skills` after startup
+	 * `resources_discover`, falling back to the provided object when the
+	 * session has no skill of that name — so SDK callers can still inject
+	 * skills the session never discovered.
+	 */
 	autoloadSkills?: Skill[];
 	/**
 	 * Registry id of the spawning agent, recorded as this subagent's parent.
@@ -4795,6 +4817,13 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					// Subagents never receive AGENTS.md, including from additional workspace roots they rediscover.
 					excludeAgentsMd: true,
 					skills: options.skills,
+					// Internal spawners (task/eval/vibe) forward the parent snapshot
+					// for perf and set this true so discoverStartupSkillPaths still
+					// merges the child's own resources_discover contributions
+					// (session-tools.ts). Direct SDK callers of the exported
+					// runSubprocess keep the released fixed-snapshot semantics:
+					// default false, matching createAgentSession's own opt-in.
+					mergeDiscoveredSkillPaths: options.mergeDiscoveredSkillPaths === true,
 					promptTemplates: options.promptTemplates,
 					workspaceTree: options.workspaceTree,
 					rules: options.rules,
@@ -4999,38 +5028,47 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					? enabledSubagentTools.filter(name => name !== "write")
 					: enabledSubagentTools;
 
-			session.sessionManager.appendSessionInit({
-				// Blocks as sent; the session appends a newer session_init whenever a model call's base changes.
-				systemPrompt: session.agent.state.systemPrompt,
-				task,
-				tools: persistedSubagentTools,
-				agent: agent.name,
-				modelRole: modelRole ?? resolveExplicitModelRole(modelOverride ?? agent.model, subagentSettings),
-				resolvedModel: progress.resolvedModel,
-				...(perCallModelGrants
-					? {
-							perCallModel: true,
-							// Display selectors can conflate literal :level ids with effort, so revival records each separately.
-							perCallModelIdentity: formatModelStringWithRouting(session.model!),
-							perCallThinkingLevel: session.configuredThinkingLevel() ?? null,
-						}
-					: {}),
-				// Deferred model resolution installs this role inside createAgentSession,
-				// so read it back from the settings both install paths write.
-				retryFallback: getRetryFallbackRole(subagentSettings, subagentRetryFallbackRole(id)),
-				readOnly: isReadOnlyAgent(agent),
-				spawns: spawnsEnv,
-				readSummarize: agent.readSummarize,
-				advisor: advisorSelection ? (advisorRolePattern ?? "on") : undefined,
-				compactionThreshold: options.compactionThresholdOverride,
-				outputSchema,
-				outputSchemaMode: options.outputSchemaMode,
-				restrictToolNames: restrictToolNames || undefined,
-				// Isolated runs are never revivable (worktree merged + cleaned):
-				// stamp the contract so cold revival leaves them transcript-only
-				// even when the workspace was retained for recovery.
-				isolated: worktree !== undefined || undefined,
-			});
+			// Persist the subagent's revival contract at spawn, before any extension
+			// runs: `readPersistedAgentMetadata()` (registry/persisted-agents.ts) only
+			// scans the first records of the session file, and a `session_start`
+			// handler can append entries of its own. The session is an argument so
+			// this closure does not capture `session` (see below).
+			const persistSessionInit = (started: AgentSession): void => {
+				started.sessionManager.appendSessionInit({
+					// Blocks as sent; the session appends a newer session_init whenever a model call's base changes.
+					systemPrompt: started.agent.state.systemPrompt,
+					task,
+					tools: persistedSubagentTools,
+					agent: agent.name,
+					modelRole: modelRole ?? resolveExplicitModelRole(modelOverride ?? agent.model, subagentSettings),
+					resolvedModel: progress.resolvedModel,
+					...(perCallModelGrants
+						? {
+								perCallModel: true,
+								// Display selectors can conflate literal :level ids with effort, so revival records each separately.
+								perCallModelIdentity: formatModelStringWithRouting(started.model!),
+								perCallThinkingLevel: started.configuredThinkingLevel() ?? null,
+							}
+						: {}),
+					// Deferred model resolution installs this role inside createAgentSession,
+					// so read it back from the settings both install paths write.
+					retryFallback: getRetryFallbackRole(subagentSettings, subagentRetryFallbackRole(id)),
+					readOnly: isReadOnlyAgent(agent),
+					spawns: spawnsEnv,
+					readSummarize: agent.readSummarize,
+					advisor: advisorSelection ? (advisorRolePattern ?? "on") : undefined,
+					compactionThreshold: options.compactionThresholdOverride,
+					outputSchema,
+					outputSchemaMode: options.outputSchemaMode,
+					restrictToolNames: restrictToolNames || undefined,
+					// Isolated runs are never revivable (worktree merged + cleaned):
+					// stamp the contract so cold revival leaves them transcript-only
+					// even when the workspace was retained for recovery.
+					isolated: worktree !== undefined || undefined,
+				});
+			};
+			persistSessionInit(session);
+			const spawnSystemPrompt = [...session.agent.state.systemPrompt];
 
 			abortSignal.addEventListener(
 				"abort",
@@ -5050,6 +5088,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// block one shared scope object, so the lifecycle reviver built above would
 			// then pin the parked, disposed session for the life of the process.
 			const pendingExtensionMessages: Array<Promise<unknown>> = [];
+			// `discoverStartupSkillPaths()` rebuilds `session.agent.state.systemPrompt`
+			// when a `resources_discover` handler contributed a directory, and a
+			// cold-revived session (persisted-revive.ts) replays the latest
+			// `session_init` verbatim: append a newer one when discovery changed the
+			// prompt. `initializeExtensions` runs this inside its startup hold, before
+			// any held startup send dispatches, and passes the session in.
 			await awaitAbortable(
 				initializeExtensions(session, {
 					reportSendError: (action, err) => logger.error("Extension send failed", { action, error: err.message }),
@@ -5059,6 +5103,16 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						pendingExtensionMessages.push(task.catch(() => {}));
 					},
 					filterActiveTools: toolNames => toolNames.filter(name => !isParentOwnedTool(name)),
+					afterStartupDiscovery: started => {
+						const prompt = started.agent.state.systemPrompt;
+						if (
+							prompt.length === spawnSystemPrompt.length &&
+							prompt.every((block, index) => block === spawnSystemPrompt[index])
+						) {
+							return;
+						}
+						persistSessionInit(started);
+					},
 				}),
 			);
 			while (pendingExtensionMessages.length > 0) {
@@ -5068,9 +5122,29 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			unsubscribe = monitor.attach(session);
 
 			checkAbort();
-			// Autoload skills via sendCustomMessage (same mechanic as /skill:<name>)
-			if (options.autoloadSkills?.length) {
-				for (const skill of options.autoloadSkills) {
+			// Autoload skills via sendCustomMessage (same mechanic as /skill:<name>).
+			// Resolved against `session.skills` only now — after the startup
+			// `resources_discover` above — so a skill the child's extensions
+			// replaced (merge precedence, session-tools.ts) or contributed anew
+			// injects the child's file, not the parent's stale snapshot object.
+			if (options.autoloadSkillNames?.length || options.autoloadSkills?.length) {
+				const skillsByName = new Map(session.skills.map(skill => [skill.name, skill]));
+				const toAutoload = new Map<string, Skill>();
+				for (const name of options.autoloadSkillNames ?? []) {
+					const skill = skillsByName.get(name);
+					if (!skill) {
+						logger.warn("Autoload skill not found in subagent session", { name });
+						continue;
+					}
+					toAutoload.set(skill.name, skill);
+				}
+				// Released SDK option: session resolution wins (the child may have
+				// replaced the skill), the caller's object is the fallback.
+				for (const provided of options.autoloadSkills ?? []) {
+					if (toAutoload.has(provided.name)) continue;
+					toAutoload.set(provided.name, skillsByName.get(provided.name) ?? provided);
+				}
+				for (const skill of toAutoload.values()) {
 					const { message, details } = await buildSkillPromptMessage(skill, { args: "" }, "autoload", session);
 					await session.sendCustomMessage(
 						{

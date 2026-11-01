@@ -3,6 +3,7 @@ import { AgentBusyError, type AgentTelemetryConfig, type Tracer } from "@oh-my-p
 import { type AssistantMessage, Effort } from "@oh-my-pi/pi-ai";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { ExtensionSendQueue } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/send-queue";
 import type { ExtensionActions, LoadExtensionsResult } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
@@ -66,6 +67,7 @@ function createMockSession(
 		agent: { state: { systemPrompt: ["test"] } },
 		model: undefined,
 		extensionRunner: undefined,
+		discoverStartupSkillPaths: async () => {},
 		sessionManager: {
 			appendSessionInit: () => {},
 		},
@@ -169,6 +171,7 @@ describe("runSubprocess yield reminders", () => {
 				}
 				return undefined;
 			},
+			sends: new ExtensionSendQueue(),
 		} as unknown as NonNullable<AgentSession["extensionRunner"]>;
 
 		mockCreateAgentSession(session);

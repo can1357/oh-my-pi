@@ -1139,6 +1139,32 @@ describe("wave 3 commands", () => {
 		}
 	});
 
+	it("/move: refreshes skills only through the plugin reload, so reload handlers run once", async () => {
+		const { runtime, session } = createRuntime();
+		const targetDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-reload-once-"));
+		const originalProjectDir = process.cwd();
+		// Every headless reloadPlugins() implementation refreshes skills, and a
+		// skill refresh emits resources_discover (reason "reload"). A second
+		// refresh from /move itself ran each reload handler twice (PR #9379 review).
+		const sessionWithRefresh = session as typeof session & { refreshSkills: () => Promise<void> };
+		sessionWithRefresh.refreshSkills = async () => {};
+		const refreshSkills = spyOn(sessionWithRefresh, "refreshSkills");
+		const refreshSkillsAndCommands = spyOn(session, "refreshSkillsAndCommands");
+		const reloadPlugins = spyOn(runtime, "reloadPlugins");
+
+		try {
+			const result = await executeAcpBuiltinSlashCommand(`/move ${targetDir}`, runtime);
+
+			expect(result).toEqual({ consumed: true });
+			expect(reloadPlugins).toHaveBeenCalledTimes(1);
+			expect(refreshSkills).not.toHaveBeenCalled();
+			expect(refreshSkillsAndCommands).not.toHaveBeenCalled();
+		} finally {
+			setProjectDir(originalProjectDir);
+			await fs.rm(targetDir, { recursive: true, force: true });
+		}
+	});
+
 	// /wt
 	it("/wt: refuses outside a git checkout", async () => {
 		const { output, runtime, fakeSessionManager } = createRuntime();

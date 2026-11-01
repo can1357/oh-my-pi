@@ -1315,6 +1315,9 @@ export class VibeSessionRegistry {
 			contextFiles: session.contextFiles,
 			noContextFiles: session.noContextFiles,
 			skills: [...(session.skills ?? [])],
+			// Parent snapshot forwarded for perf; keep the child's own
+			// resources_discover contributions mergeable (executor.ts).
+			mergeDiscoveredSkillPaths: true,
 			workspaceTree: session.workspaceTree,
 			promptTemplates: session.promptTemplates,
 			rules: session.rules,

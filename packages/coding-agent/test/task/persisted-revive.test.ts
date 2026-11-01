@@ -14,6 +14,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { cfgCompaction } from "@oh-my-pi/pi-coding-agent/session/context-settings";
+import { ExtensionSendQueue } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/send-queue";
 import type { PreparedExtension } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { RpcSubagentRegistry } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-subagents";
@@ -133,6 +134,7 @@ function createRevivedSession(activeToolNames: string[][], extensionRunner?: unk
 		},
 		subscribeRunState: () => () => {},
 		getLastAssistantMessage: () => lastAssistant,
+		discoverStartupSkillPaths: async () => {},
 		extensionRunner,
 	} as unknown as AgentSession;
 	return {
@@ -274,7 +276,7 @@ describe("persisted subagent revival", () => {
 		const onError = vi.fn();
 		const emit = vi.fn(async () => undefined);
 		const emitBeforeAgentStart = vi.fn(async () => undefined);
-		const extensionRunner = { initialize, onError, emit, emitBeforeAgentStart };
+		const extensionRunner = { initialize, onError, emit, emitBeforeAgentStart, sends: new ExtensionSendQueue() };
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(
 			async () => ({ session: createRevivedSession([], extensionRunner).session }) as CreateAgentSessionResult,
 		);
@@ -447,6 +449,42 @@ describe("persisted subagent revival", () => {
 		expect(capturedArtifactsDir).toBe(path.dirname(sessionFile));
 		expect(capturedArtifactsDir).not.toBe(path.join(cwd, "parent"));
 		AgentRegistry.resetGlobalForTests();
+	});
+
+	it("merges discovered startup skill paths on cold revival (regression: PR #9379 review, persisted-revive.ts mergeDiscoveredSkillPaths)", async () => {
+		const cwd = makeTempDir("@pi-revive-skill-discovery-");
+		const sessionFile = await createPersistedSession(cwd);
+		MCPManager.setInstance(fakeMcpManager(() => []));
+		const extensionRunner = {
+			initialize: vi.fn(),
+			onError: vi.fn(),
+			emit: vi.fn(async () => undefined),
+			emitBeforeAgentStart: vi.fn(async () => undefined),
+			sends: new ExtensionSendQueue(),
+		};
+		const revived = createRevivedSession([], extensionRunner);
+		const discoverStartupSkillPaths = vi.fn(async () => {});
+		// `createRevivedSession`'s stub is a plain test double with a known
+		// shape (not external/unchecked input), so a one-line assertion is the
+		// narrowest way to replace its no-op discovery method with a spy.
+		const revivedSession = revived.session as AgentSession & { discoverStartupSkillPaths: () => Promise<void> };
+		revivedSession.discoverStartupSkillPaths = discoverStartupSkillPaths;
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: revivedSession } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		// A revived subagent re-runs its own resources_discover on session_start;
+		// without mergeDiscoveredSkillPaths the merge is a no-op even though
+		// discoverStartupSkillPaths itself is called.
+		expect(capturedOptions?.mergeDiscoveredSkillPaths).toBe(true);
+		expect(discoverStartupSkillPaths).toHaveBeenCalledTimes(1);
 	});
 
 	it("cold-revives a restricted contract without loading hostile same-name capabilities", async () => {
@@ -1948,6 +1986,7 @@ describe("cold revival replays the system prompt the last request sent", () => {
 				initialize: () => {},
 				onError: () => () => {},
 				hasHandlers: () => false,
+				emitResourcesDiscover: async () => ({ skillPaths: [], promptPaths: [], themePaths: [] }),
 				emit: async (event: { type: string }) => {
 					if (event.type === "session_start") hooks.sessionStart?.();
 				},
@@ -1955,6 +1994,7 @@ describe("cold revival replays the system prompt the last request sent", () => {
 					const override = await hooks.beforeAgentStart?.(session, systemPrompt);
 					return override ? { systemPrompt: override } : undefined;
 				},
+				sends: new ExtensionSendQueue(),
 			} as unknown as ExtensionRunner,
 			rebuildSystemPrompt: async toolNames => ({ systemPrompt: buildPrompt(toolNames) }),
 		});

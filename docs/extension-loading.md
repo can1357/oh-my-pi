@@ -66,6 +66,25 @@ then a sorted one-level scan. That scan skips declaration files
 (`*.d.ts`, `*.d.mts`, `*.d.cts`); explicitly declared file entries are not
 suffix-filtered.
 
+#### `skills` manifest field
+
+A plugin package may declare `omp.skills` (or, when the package has no `omp` key, legacy `pi.skills`) alongside `omp.extensions`: an array of path strings, each resolved relative to the plugin package root.
+
+```json
+{
+  "name": "my-plugin",
+  "omp": {
+    "extensions": ["./src/main.ts"],
+    "skills": ["./skills/curated", "./skills/standalone-skill"]
+  }
+}
+```
+
+- **Replaces, not merges**: when `skills` is present (even `[]`), it *replaces* the conventional `<plugin>/skills` directory scan entirely for that plugin — the fallback directory is not also scanned.
+- **Resolution**: each entry resolves against the plugin package root, not the caller's cwd.
+- **Containment**: a resolved entry that escapes the plugin root is skipped with a warning; it never contributes skills.
+- Each declared directory is scanned like a normal skills collection (`<dir>/<name>/SKILL.md`), but an entry may also point directly at an individual skill directory containing `SKILL.md` (e.g. `"./skills/standalone-skill"` with `standalone-skill/SKILL.md`) — that shape loads too.
+
 ### 4) Explicitly configured paths
 
 After plugin extension entries, configured paths are appended and resolved.

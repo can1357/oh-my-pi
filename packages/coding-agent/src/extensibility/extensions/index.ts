@@ -13,6 +13,7 @@ export {
 	loadExtensions,
 } from "./loader";
 export * from "./runner";
+export * from "./send-queue";
 // Type guards
 export * from "./types";
 export * from "./wrapper";

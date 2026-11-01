@@ -171,38 +171,6 @@ async function runPrintModeCore(
 			writeStdoutLine(`${JSON.stringify(header)}\n`);
 		}
 	}
-	// Set up extensions for print mode (no UI, no command context)
-	await initializeExtensions(session, {
-		mode: mode === "json" ? "json" : "print",
-		reportSendError: (action, err) => {
-			process.stderr.write(
-				`Extension ${action === "extension_send" ? "sendMessage" : "sendUserMessage"} failed: ${err.message}\n`,
-			);
-		},
-		reportRuntimeError: err => {
-			process.stderr.write(`Extension error (${err.extensionPath}): ${err.error}\n`);
-		},
-	});
-
-	// `plan.defaultOnStartup` opens fresh *interactive* sessions in plan mode so a
-	// human can review the plan before it executes. Headless print mode has no
-	// surface to review, approve, or exit a plan from, and the turn carries no
-	// deterministic way out of plan mode — the model must voluntarily emit a valid
-	// `xd://propose` execute-dispatch, and when it does not the run strands until
-	// the deadline (issue #8272). So do not honor the startup default here; the
-	// supported headless plan flow is `--plan-yolo` (auto-approve → implement),
-	// which is wired independently through the prewalk coordinator.
-	const planStartupIgnored =
-		cfgPlanDefaultOnStartup.get(session.settings) &&
-		cfgPlanEnabled.get(session.settings) &&
-		session.sessionManager.buildSessionContext().messages.length === 0 &&
-		!session.sessionManager.getEntries().some(entry => entry.type === "mode_change") &&
-		!planYolo;
-	if (planStartupIgnored) {
-		process.stderr.write(
-			"Note: plan.defaultOnStartup is ignored in print mode (no interactive surface to review the plan). Use --plan-yolo for a headless plan flow.\n",
-		);
-	}
 
 	// process.stderr.write is fire-and-forget as well: a diagnostic buffered
 	// behind a backpressured pipe would still be undelivered when runPrintMode
@@ -345,17 +313,9 @@ async function runPrintModeCore(
 		return true;
 	};
 
-	// Discriminates a store failure from any other dispose rejection below.
-	let persistenceFailure: Error | undefined;
-	session.sessionManager.onPersistenceError(error => {
-		persistenceFailure = error;
-		writeStderrLine(formatPersistenceFailure(error.message));
-	});
-	session.sessionManager.onPersistenceNotice(notice => {
-		writeStderrLine(`Warning: ${formatPersistenceNotice(notice)}`);
-	});
-
-	// Always subscribe to enable session persistence via _handleAgentEvent
+	// Always subscribe to enable session persistence via _handleAgentEvent.
+	// Subscribed before initializeExtensions so events from a turn a
+	// session_start/resources_discover handler triggers are not lost.
 	session.subscribe(event => {
 		// In JSON mode, output all events
 		if (mode === "json") {
@@ -372,6 +332,48 @@ async function runPrintModeCore(
 			// as an answer that used memories.
 			writeStderrLine(event.source === COST_GATE_NOTICE_SOURCE ? event.message : `Warning: ${event.message}`);
 		}
+	});
+	// Set up extensions for print mode (no UI, no command context)
+	await initializeExtensions(session, {
+		mode: mode === "json" ? "json" : "print",
+		reportSendError: (action, err) => {
+			process.stderr.write(
+				`Extension ${action === "extension_send" ? "sendMessage" : "sendUserMessage"} failed: ${err.message}\n`,
+			);
+		},
+		reportRuntimeError: err => {
+			process.stderr.write(`Extension error (${err.extensionPath}): ${err.error}\n`);
+		},
+	});
+
+	// `plan.defaultOnStartup` opens fresh *interactive* sessions in plan mode so a
+	// human can review the plan before it executes. Headless print mode has no
+	// surface to review, approve, or exit a plan from, and the turn carries no
+	// deterministic way out of plan mode — the model must voluntarily emit a valid
+	// `xd://propose` execute-dispatch, and when it does not the run strands until
+	// the deadline (issue #8272). So do not honor the startup default here; the
+	// supported headless plan flow is `--plan-yolo` (auto-approve → implement),
+	// which is wired independently through the prewalk coordinator.
+	const planStartupIgnored =
+		cfgPlanDefaultOnStartup.get(session.settings) &&
+		cfgPlanEnabled.get(session.settings) &&
+		session.sessionManager.buildSessionContext().messages.length === 0 &&
+		!session.sessionManager.getEntries().some(entry => entry.type === "mode_change") &&
+		!planYolo;
+	if (planStartupIgnored) {
+		process.stderr.write(
+			"Note: plan.defaultOnStartup is ignored in print mode (no interactive surface to review the plan). Use --plan-yolo for a headless plan flow.\n",
+		);
+	}
+
+	// Discriminates a store failure from any other dispose rejection below.
+	let persistenceFailure: Error | undefined;
+	session.sessionManager.onPersistenceError(error => {
+		persistenceFailure = error;
+		writeStderrLine(formatPersistenceFailure(error.message));
+	});
+	session.sessionManager.onPersistenceNotice(notice => {
+		writeStderrLine(`Warning: ${formatPersistenceNotice(notice)}`);
 	});
 
 	const timeoutMs = resolveMCPTimeoutMs();
