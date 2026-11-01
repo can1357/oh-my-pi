@@ -17,16 +17,31 @@ enum ReaderWriterError {
 }
 
 /// Marks a `FailingReaderWriter` error that stands for descriptor exhaustion:
-/// its file could not be duplicated because this process, or the system, had
-/// no descriptor left.
+/// its file could not be duplicated because no descriptor could be allocated.
 #[derive(Clone, Debug, thiserror::Error)]
 #[error(transparent)]
 struct DescriptorsExhausted(ReaderWriterError);
 
-/// Whether `err` reports that this process, or the system, ran out of file
-/// descriptors, directly or through a file that could not be duplicated for
-/// that reason. Any other failure, such as a closed descriptor or a full
-/// device, is not exhaustion.
+/// Whether `err`, from duplicating an open file, means that no descriptor
+/// could be allocated for the copy: this process (`EMFILE`) or the system
+/// (`ENFILE`) has none left, or the kernel could not grow the descriptor
+/// table (`ENOMEM`, which `dup(2)` and `fcntl(F_DUPFD)` return for that).
+fn is_failed_descriptor_allocation(err: &std::io::Error) -> bool {
+	#[cfg(unix)]
+	{
+		matches!(err.raw_os_error(), Some(libc::EMFILE | libc::ENFILE | libc::ENOMEM))
+	}
+	#[cfg(not(unix))]
+	{
+		let _ = err;
+		false
+	}
+}
+
+/// Whether `err`, from writing to a file, reports that this process, or the
+/// system, ran out of file descriptors, directly or through a file that could
+/// not be duplicated for that reason. Any other failure, such as a closed
+/// descriptor or a full device, is not exhaustion.
 pub(crate) fn is_descriptor_exhaustion(err: &std::io::Error) -> bool {
 	#[cfg(unix)]
 	if matches!(err.raw_os_error(), Some(libc::EMFILE | libc::ENFILE)) {
@@ -58,11 +73,12 @@ impl FailingReaderWriter {
 	}
 
 	/// Stands for a file that could not be duplicated, failing with `err`.
-	/// Its operations report descriptor exhaustion when `err` did.
+	/// Its operations report descriptor exhaustion when no descriptor could
+	/// be allocated for the copy.
 	pub(crate) fn duplicate_failed(err: &std::io::Error) -> Self {
 		Self {
 			message:               "failed to duplicate open file",
-			descriptors_exhausted: is_descriptor_exhaustion(err),
+			descriptors_exhausted: is_failed_descriptor_allocation(err),
 		}
 	}
 
@@ -110,5 +126,40 @@ impl std::io::Write for FailingReaderWriter {
 impl From<FailingReaderWriter> for openfiles::OpenFile {
 	fn from(frw: FailingReaderWriter) -> Self {
 		Self::Stream(Box::new(frw))
+	}
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+	use std::io::Write as _;
+
+	use super::{FailingReaderWriter, is_descriptor_exhaustion};
+
+	/// A nesting refusal whose standard error could not be duplicated is left
+	/// for an enclosing command to report only when no descriptor could be
+	/// allocated for the copy, which Linux reports as `EMFILE`, `ENFILE` or,
+	/// when it cannot grow the descriptor table, `ENOMEM`. Any other failure
+	/// stays a failed write, and the refusal goes unreported, as Bash leaves a
+	/// refusal sent to a closed or full standard error.
+	#[test]
+	fn only_failed_descriptor_allocation_defers_a_report() {
+		for (errno, deferred) in [
+			(libc::EMFILE, true),
+			(libc::ENFILE, true),
+			(libc::ENOMEM, true),
+			(libc::EBADF, false),
+			(libc::EINVAL, false),
+		] {
+			let mut copy =
+				FailingReaderWriter::duplicate_failed(&std::io::Error::from_raw_os_error(errno));
+			let err = copy.write(b"refusal").expect_err("a failed copy cannot be written");
+			assert_eq!(is_descriptor_exhaustion(&err), deferred, "duplication failed with {errno}");
+		}
+
+		// A write's own failure is never a failed allocation, `ENOMEM` included.
+		for errno in [libc::EBADF, libc::ENOSPC, libc::EPIPE, libc::EIO, libc::ENOMEM] {
+			let err = std::io::Error::from_raw_os_error(errno);
+			assert!(!is_descriptor_exhaustion(&err), "write failed with {errno}");
+		}
 	}
 }

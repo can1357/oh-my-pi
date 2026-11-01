@@ -4221,9 +4221,24 @@ mod tests {
 		assert_eq!(output, "9\nKILL\n");
 	}
 
+	/// Runs the test named `test_name` again in a child test process, with
+	/// `marker` set so that the child runs the test body. A test name that no
+	/// longer matches would select no test, and libtest passes an empty run,
+	/// so the name must first select exactly that one test.
 	async fn run_isolated_kill_test(test_name: &str, marker: &str, own_process_group: bool) {
-		let mut command =
-			tokio::process::Command::new(std::env::current_exe().expect("current test executable"));
+		let exe = std::env::current_exe().expect("current test executable");
+		let listed = tokio::process::Command::new(&exe)
+			.args(["--exact", test_name, "--list", "--format", "terse"])
+			.output()
+			.await
+			.expect("list isolated test");
+		assert_eq!(
+			String::from_utf8_lossy(&listed.stdout).trim_end(),
+			format!("{test_name}: test"),
+			"isolated test must select exactly itself"
+		);
+
+		let mut command = tokio::process::Command::new(exe);
 		command.args(["--exact", test_name]).env(marker, "1");
 		#[cfg(unix)]
 		if own_process_group {
@@ -7160,7 +7175,9 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 	/// descriptors (a separate defect), so at 1,024 the refusal cannot be
 	/// written where it happens and an enclosing command reports it, once. A
 	/// refusal whose standard error is closed or full stays silent at both
-	/// limits, as in Bash, instead of falling back to an outer standard error.
+	/// limits, as in Bash, instead of falling back to an outer standard error,
+	/// wherever that standard error is set: on the call, on an enclosing group,
+	/// on both, on a function definition, or on a pipeline stage.
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn deep_function_nesting_refusal_respects_standard_error_at_any_descriptor_limit() {
@@ -7172,25 +7189,70 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 			return;
 		}
 
+		// Every case runs before the test fails, so a failure lists each
+		// limit and placement that went wrong, not only the first.
+		let mut wrong = Vec::new();
 		for soft in [1024, 65_536] {
 			set_open_file_limit(soft);
 			let (_, output) = execute_captured("f() { f; }\nf\necho \"after=$?\"".into()).await;
 			let lines: Vec<&str> = output.lines().collect();
-			assert_eq!(lines.len(), 2, "limit {soft}: {output:?}");
-			assert!(
-				lines[0].ends_with("f: maximum function nesting level exceeded (500)"),
-				"limit {soft}: {output:?}"
-			);
-			assert_eq!(lines[1], "after=1", "limit {soft}");
+			if !(lines.len() == 2
+				&& lines[0].ends_with("f: maximum function nesting level exceeded (500)")
+				&& lines[1] == "after=1")
+			{
+				wrong.push(format!("limit {soft}: f: {output:?}"));
+			}
 
 			for stderr in ["2>&-", "2>/dev/full"] {
-				for call in ["f {r}", "{ f; } {r}"] {
+				for (call, expected) in [
+					("f {r}", "after=1\n"),
+					("{ f; } {r}", "after=1\n"),
+					("{ f {r}; } {r}", "after=1\n"),
+					("g() { f; } {r}; g", "after=1\n"),
+					("f {r} | cat", "after=0\n"),
+				] {
 					let call = call.replace("{r}", stderr);
 					let (_, output) =
 						execute_captured(format!("f() {{ f; }}\n{call}\necho \"after=$?\"")).await;
-					assert_eq!(output, "after=1\n", "limit {soft}: {call}");
+					if output != expected {
+						wrong.push(format!("limit {soft}: {call}: {output:?}"));
+					}
 				}
 			}
+		}
+		assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+	}
+
+	/// A call is refused before its function's own definition-time
+	/// redirections apply, as in Bash: a `>` there does not truncate its file,
+	/// and a `<` there that cannot open is not reported instead of the refusal.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn function_nesting_is_checked_before_definition_redirections() {
+		let dir = tempfile::tempdir().expect("temp dir");
+		let sentinel = dir.path().join("sentinel");
+		std::fs::write(&sentinel, "keep\n").expect("write sentinel");
+		let missing = dir.path().join("missing-input");
+		for (case, redirect) in [
+			("unopenable input", format!("<{}", quote_arg(&missing.to_string_lossy()))),
+			("truncating output", format!(">{}", quote_arg(&sentinel.to_string_lossy()))),
+		] {
+			let (result, output) = execute_captured(format!(
+				"FUNCNEST=1; outer() {{ inner; }}; inner() {{ :; }} {redirect}; outer; printf \
+				 'after=%s\\n' \"$?\""
+			))
+			.await;
+			assert_eq!(result.exit_code, Some(1), "{case}: {output:?}");
+			let lines: Vec<&str> = output.lines().collect();
+			assert_eq!(lines.len(), 1, "{case}: {output:?}");
+			assert!(
+				lines[0].ends_with("inner: maximum function nesting level exceeded (1)"),
+				"{case}: {output:?}"
+			);
+			assert_eq!(
+				std::fs::read_to_string(&sentinel).expect("read sentinel"),
+				"keep\n",
+				"{case}: the refused call's redirection ran"
+			);
 		}
 	}
 
