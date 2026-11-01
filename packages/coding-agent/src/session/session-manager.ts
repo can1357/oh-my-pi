@@ -1543,9 +1543,11 @@ export class SessionManager {
 	 * Refuse a whole-file rewrite the session volume cannot hold, before its body is built: building it
 	 * costs memory in proportion to the whole session, and on a full disk the write would fail anyway.
 	 */
-	#assertRoomForRewrite(targetPath: string): void {
+	#assertRoomForRewrite(
+		targetPath: string,
+		size = Math.max(this.#expectedDiskSize ?? 0, this.#prospectiveDiskSize),
+	): void {
 		if (!(this.#storage instanceof FileSessionStorage)) return;
-		let size = Math.max(this.#expectedDiskSize ?? 0, this.#prospectiveDiskSize);
 		if (size === 0) {
 			try {
 				size = fs.statSync(targetPath).size;
@@ -1760,9 +1762,9 @@ export class SessionManager {
 		return line;
 	}
 
-	#estimateBodyBytes(): number {
-		let bytes = Buffer.byteLength(this.#titleSlotLine(), "utf8") + estimateJsonBytes(this.#header) + 1;
-		for (const entry of this.#entries) bytes += estimateJsonBytes(entry) + 1;
+	#estimateBodyBytes(header = this.#header, entries: readonly SessionEntry[] = this.#entries): number {
+		let bytes = Buffer.byteLength(this.#titleSlotLine(), "utf8") + estimateJsonBytes(header) + 1;
+		for (const entry of entries) bytes += estimateJsonBytes(entry) + 1;
 		return bytes;
 	}
 
@@ -2578,6 +2580,12 @@ export class SessionManager {
 		const clone = new SessionManager(this.#cwd, this.#sessionDir, persist, this.#storage);
 		clone.#suppressBreadcrumb = true;
 		clone.restoreState(this.captureState());
+		if (persist && (this.#unappendedTail.length > 0 || this.#pendingTitleUpdate)) {
+			// Both managers can publish this tail now. Reconcile through size-checked rewrites,
+			// never append lines a persistent clone may already have written.
+			this.#fileIsCurrent = false;
+			this.#rewriteRequired = true;
+		}
 		if (persist && !this.#persist) clone.#prospectiveDiskSize = this.#estimateBodyBytes();
 		if (!persist) {
 			clone.#sessionFile = undefined;
@@ -2917,14 +2925,14 @@ export class SessionManager {
 		// live write target — not a `#diskEpoch` bump, which would cancel any
 		// disk task already queued at the current epoch (e.g. a header-only
 		// `ensureOnDisk()` materializing rewrite) before the drain below runs it.
-		this.#drainUnappendedTail();
-		if (this.#persist && this.#sessionFile) {
-			const source = this.#sessionFile;
-			const dest = path.join(nextSessionDir, path.basename(source));
-			this.#sessionFileRelocating = { source, dest };
-		}
-
 		try {
+			this.#drainUnappendedTail();
+			if (this.#persist && this.#sessionFile) {
+				const source = this.#sessionFile;
+				const dest = path.join(nextSessionDir, path.basename(source));
+				this.#sessionFileRelocating = { source, dest };
+			}
+
 			if (this.#persist && this.#sessionFile) {
 				this.#storage.ensureDirSync(nextSessionDir);
 				await this.#drainAndCloseWriter();
@@ -4082,6 +4090,8 @@ export class SessionManager {
 	 */
 	async rewriteEntries(): Promise<void> {
 		this.#bodyRevision++;
+		this.#fileIsCurrent = false;
+		this.#rewriteRequired = true;
 		if (!this.#persist || !this.#sessionFile) return;
 		await this.#rewriteAtomically();
 	}
@@ -4467,7 +4477,6 @@ export class SessionManager {
 		const newSessionId = mintSessionId();
 		this.#reconcileSessionDirForFallback();
 		const newSessionFile = path.join(this.#sessionDir, `${fileSafeTimestamp(timestamp)}_${newSessionId}.jsonl`);
-		if (this.#persist) this.#assertRoomForRewrite(newSessionFile);
 		const header: SessionHeader = {
 			type: "session",
 			version: CURRENT_SESSION_VERSION,
@@ -4496,8 +4505,13 @@ export class SessionManager {
 			parentId = labelEntry.id;
 		}
 
+		const keptEntries = [...entriesToKeep, ...labels];
+		const branchSize = this.#estimateBodyBytes(header, keptEntries);
+		if (this.#persist) this.#assertRoomForRewrite(newSessionFile, branchSize);
+
 		this.#header = header;
-		this.#entries = [...entriesToKeep, ...labels];
+		this.#entries = keptEntries;
+		this.#prospectiveDiskSize = branchSize;
 		this.#sessionId = newSessionId;
 		this.#taskSiblingCandidate = undefined;
 		this.#sessionName = header.title;
