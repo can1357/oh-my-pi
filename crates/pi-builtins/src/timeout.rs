@@ -241,7 +241,6 @@ impl builtins::Command for TimeoutCommand {
 
 		let outer_cancel_requested =
 			|| outer_cancel.as_ref().is_some_and(CancellationToken::is_cancelled);
-
 		let outer_cancelled = async {
 			match &outer_cancel {
 				Some(token) => token.cancelled().await,
@@ -260,6 +259,10 @@ impl builtins::Command for TimeoutCommand {
 		};
 		tokio::pin!(deadline);
 
+		// `child_cancel` is cancelled together with `outer_cancel`, so an
+		// in-process command can finish in the same poll that `outer_cancelled`
+		// becomes ready; `select!` then picks either branch. Report the
+		// interruption either way, not the command's own result.
 		tokio::select! {
 			result = &mut run_future => {
 				return if outer_cancel_requested() {
@@ -1043,5 +1046,4 @@ mod tests {
 			.expect("timeout returned an error");
 		assert_eq!(status, 130, "a cancelled run must read as interrupted");
 	}
-
 }
