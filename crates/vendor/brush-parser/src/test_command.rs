@@ -1,5 +1,6 @@
 //! Parser for shell test commands.
 
+use crate::nesting::NestingGuard;
 use crate::{ast, error};
 
 /// Parses a test command expression.
@@ -8,14 +9,20 @@ use crate::{ast, error};
 ///
 /// * `input` - The test command expression to parse, in string form.
 pub fn parse<S: AsRef<str>>(input: &[S]) -> Result<ast::TestExpr, error::TestCommandParseError> {
-    let expr =
-        test_command::full_expression(&input.iter().map(AsRef::as_ref).collect::<Vec<&str>>())?;
+    let nesting = NestingGuard::default();
+    let result = test_command::full_expression(
+        &input.iter().map(AsRef::as_ref).collect::<Vec<&str>>(),
+        &nesting,
+    );
+    if let Some((exceeded, _)) = nesting.exceeded() {
+        return Err(exceeded.into());
+    }
 
-    Ok(expr)
+    Ok(result?)
 }
 
 peg::parser! {
-    grammar test_command<'a>() for [&'a str] {
+    grammar test_command<'a>(nesting: &NestingGuard) for [&'a str] {
         pub(crate) rule full_expression() -> ast::TestExpr =
             end() { ast::TestExpr::False } /
             e:one_arg_expr() end() { e } /
@@ -45,16 +52,17 @@ peg::parser! {
             left:(@) ["-a"] right:@ { ast::TestExpr::And(Box::from(left), Box::from(right)) }
             left:(@) ["-o"] right:@ { ast::TestExpr::Or(Box::from(left), Box::from(right)) }
             --
-            ["("] e:expression() [")"] { ast::TestExpr::Parenthesized(Box::from(e)) }
-            --
-            ["!"] e:@ { ast::TestExpr::Not(Box::from(e)) }
-            --
-            [left] op:binary_op() [right] { ast::TestExpr::BinaryTest(op, left.to_owned(), right.to_owned()) }
-            --
-            op:unary_op() [operand] { ast::TestExpr::UnaryTest(op, operand.to_owned()) }
-            --
-            [s] { ast::TestExpr::Literal(s.to_owned()) }
+            e:unary() { e }
         }
+
+        // `(`, `!` and the primaries, in the order the table above used to try them. They are a
+        // rule of their own so that every nested `(` and `!` passes the nesting guard.
+        rule unary() -> ast::TestExpr =
+            ["("] e:nested("(", <expression()>) [")"] { ast::TestExpr::Parenthesized(Box::from(e)) } /
+            ["!"] e:nested("!", <unary()>) { ast::TestExpr::Not(Box::from(e)) } /
+            [left] op:binary_op() [right] { ast::TestExpr::BinaryTest(op, left.to_owned(), right.to_owned()) } /
+            op:unary_op() [operand] { ast::TestExpr::UnaryTest(op, operand.to_owned()) } /
+            [s] { ast::TestExpr::Literal(s.to_owned()) }
 
         rule unary_op() -> ast::UnaryPredicate =
             ["-a"] { ast::UnaryPredicate::FileExists } /
@@ -101,5 +109,23 @@ peg::parser! {
             [">"]   { ast::BinaryPredicate::LeftSortsAfterRight }
 
         rule end() = ![_]
+
+        // Parses `r` one nesting level deeper, as the operand of `construct`. Fails, without
+        // trying `r`, once that would go past the nesting limit.
+        rule nested<T>(construct: &'static str, r: rule<T>) -> T =
+            enter(construct) v:r()? leave() {? v.ok_or("nested expression") }
+
+        rule enter(construct: &'static str) = #{|_input, pos| {
+            if nesting.enter(construct, pos) {
+                peg::RuleResult::Matched(pos, ())
+            } else {
+                peg::RuleResult::Failed
+            }
+        }}
+
+        rule leave() = #{|_input, pos| {
+            nesting.leave();
+            peg::RuleResult::Matched(pos, ())
+        }}
     }
 }

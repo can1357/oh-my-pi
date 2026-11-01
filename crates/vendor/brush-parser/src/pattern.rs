@@ -1,6 +1,14 @@
 //! Implements parsing for shell glob and extglob patterns.
 
+// Each rule peg generates takes peg's four arguments, the grammar's two (extglob flag and
+// nesting guard), and the rule's own, so a rule with two arguments of its own takes eight.
+#![expect(
+    clippy::too_many_arguments,
+    reason = "peg-generated rule functions"
+)]
+
 use crate::error;
+use crate::nesting::NestingGuard;
 
 /// Represents the kind of an extended glob.
 pub enum ExtendedGlobKind {
@@ -26,13 +34,17 @@ pub fn pattern_to_regex_str(
     pattern: &str,
     enable_extended_globbing: bool,
 ) -> Result<String, error::WordParseError> {
-    let regex_str = pattern_to_regex_translator::pattern(pattern, enable_extended_globbing)
-        .map_err(|e| error::WordParseError::Pattern(e.into()))?;
-    Ok(regex_str)
+    let nesting = NestingGuard::default();
+    let result =
+        pattern_to_regex_translator::pattern(pattern, enable_extended_globbing, &nesting);
+    if let Some((exceeded, _)) = nesting.exceeded() {
+        return Err(exceeded.into());
+    }
+    result.map_err(|e| error::WordParseError::Pattern(e.into()))
 }
 
 peg::parser! {
-    grammar pattern_to_regex_translator(enable_extended_globbing: bool) for str {
+    grammar pattern_to_regex_translator(enable_extended_globbing: bool, nesting: &NestingGuard) for str {
         pub(crate) rule pattern() -> String =
             pieces:(pattern_piece()*) {
                 pieces.join("")
@@ -122,7 +134,7 @@ peg::parser! {
             &[_] {? if enable_extended_globbing { Ok(()) } else { Err("extglob disabled") } }
 
         pub(crate) rule extended_glob_pattern() -> String =
-            kind:extended_glob_prefix() "(" branches:extended_glob_body() ")" {
+            kind:extended_glob_prefix() "(" branches:nested("(", <extended_glob_body()>) ")" {
                 let mut s = String::new();
 
                 // fancy_regex uses ?! to indicate a negative lookahead.
@@ -189,6 +201,24 @@ peg::parser! {
         // via negative lookaheads, keeping a single source of truth.
         pub(crate) rule has_glob_metacharacters() -> bool =
             non_glob_piece()* glob_piece() [_]* { true }
+
+        // Parses `r` one nesting level deeper, as the body of `construct`. Fails, without trying
+        // `r`, once that would go past the nesting limit.
+        rule nested<T>(construct: &'static str, r: rule<T>) -> T =
+            enter(construct) v:r()? leave() {? v.ok_or("nested pattern") }
+
+        rule enter(construct: &'static str) = #{|_input, pos| {
+            if nesting.enter(construct, pos) {
+                peg::RuleResult::Matched(pos, ())
+            } else {
+                peg::RuleResult::Failed
+            }
+        }}
+
+        rule leave() = #{|_input, pos| {
+            nesting.leave();
+            peg::RuleResult::Matched(pos, ())
+        }}
     }
 }
 
@@ -202,8 +232,15 @@ peg::parser! {
 /// * `pattern` - The shell pattern to check.
 /// * `enable_extended_globbing` - Whether to enable extended globbing (extglob).
 pub fn pattern_has_glob_metacharacters(pattern: &str, enable_extended_globbing: bool) -> bool {
-    pattern_to_regex_translator::has_glob_metacharacters(pattern, enable_extended_globbing)
-        .unwrap_or(false)
+    let nesting = NestingGuard::default();
+    let result = pattern_to_regex_translator::has_glob_metacharacters(
+        pattern,
+        enable_extended_globbing,
+        &nesting,
+    );
+    // A pattern nested past the limit is treated as a pattern, so that converting it reports the
+    // limit instead of the word being taken as literal text.
+    nesting.exceeded().is_some() || result.unwrap_or(false)
 }
 
 /// Returns whether or not a given character needs to be escaped in a regular expression.
@@ -243,33 +280,35 @@ mod tests {
 
     #[test]
     fn test_extended_glob() -> Result<()> {
+        let nesting = NestingGuard::default();
+
         assert_eq!(
-            pattern_to_regex_translator::extended_glob_pattern("@(a|b)", true)?,
+            pattern_to_regex_translator::extended_glob_pattern("@(a|b)", true, &nesting)?,
             "(a|b)"
         );
 
         assert_eq!(
-            pattern_to_regex_translator::extended_glob_pattern("@(|a)", true)?,
+            pattern_to_regex_translator::extended_glob_pattern("@(|a)", true, &nesting)?,
             "(|a)"
         );
 
         assert_eq!(
-            pattern_to_regex_translator::extended_glob_pattern("@(|)", true)?,
+            pattern_to_regex_translator::extended_glob_pattern("@(|)", true, &nesting)?,
             "(|)"
         );
 
         assert_eq!(
-            pattern_to_regex_translator::extended_glob_body("ab|ac", true)?,
+            pattern_to_regex_translator::extended_glob_body("ab|ac", true, &nesting)?,
             vec!["ab", "ac"],
         );
 
         assert_eq!(
-            pattern_to_regex_translator::extended_glob_pattern("*(ab|ac)", true)?,
+            pattern_to_regex_translator::extended_glob_pattern("*(ab|ac)", true, &nesting)?,
             "(ab|ac)*"
         );
 
         assert_eq!(
-            pattern_to_regex_translator::extended_glob_body("", true)?,
+            pattern_to_regex_translator::extended_glob_body("", true, &nesting)?,
             Vec::<String>::new(),
         );
 

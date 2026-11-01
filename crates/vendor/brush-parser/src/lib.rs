@@ -12,6 +12,7 @@ pub mod test_command;
 pub mod word;
 
 mod error;
+mod nesting;
 mod parser;
 mod source;
 mod tokenizer;
@@ -19,6 +20,7 @@ mod tokenizer;
 pub use error::{
     BindingParseError, ParseError, ParseErrorLocation, TestCommandParseError, WordParseError,
 };
+pub use nesting::{MAX_NESTING_DEPTH, NestingLimitExceeded};
 
 #[cfg(feature = "diagnostics")]
 pub use error::miette::PrettyError;

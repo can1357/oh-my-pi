@@ -224,7 +224,10 @@ pub enum ErrorKind {
 	WordParseError(#[from] crate::parser::WordParseError),
 
 	/// Unable to parse a test command.
-	#[error("invalid test command")]
+	#[error("{}", match .0 {
+		crate::parser::TestCommandParseError::NestingLimitExceeded(e) => e.to_string(),
+		crate::parser::TestCommandParseError::Syntax(_) => "invalid test command".to_owned(),
+	})]
 	TestCommandParseError(#[from] crate::parser::TestCommandParseError),
 
 	/// Unable to parse a key binding specification.

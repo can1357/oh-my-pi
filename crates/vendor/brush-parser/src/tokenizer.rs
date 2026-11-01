@@ -140,6 +140,10 @@ pub enum TokenizerError {
     /// An I/O error occurred while reading from the input stream.
     #[error("failed to read input")]
     ReadError(#[from] std::io::Error),
+
+    /// An expansion was nested more deeply than the tokenizer accepts.
+    #[error(transparent)]
+    NestingLimitExceeded(#[from] crate::NestingLimitExceeded),
 }
 
 impl TokenizerError {
@@ -247,6 +251,8 @@ pub(crate) struct Tokenizer<'a, R: ?Sized + std::io::BufRead> {
     char_reader: std::iter::Peekable<utf8_chars::Chars<'a, R>>,
     cross_state: CrossTokenParseState,
     options: TokenizerOptions,
+    /// How many `$(`, `$((`, `$[` and `${` the token being scanned is inside.
+    nesting_depth: usize,
 }
 
 /// Encapsulates the current token parsing state.
@@ -537,24 +543,29 @@ pub fn uncached_tokenize_str(
 /// `input` must start just past the `$(`. The body is delimited exactly as the tokenizer delimits
 /// it while scanning the enclosing word: nested parentheses, quoting, and here-documents are
 /// honored, so a `)` or quote inside a here-document body neither closes the substitution nor
-/// hides its real closer. Returns `None` if the substitution is unterminated.
+/// hides its real closer. Returns `None` if the substitution is unterminated, and an error if
+/// expansions in it are nested past the limit.
 ///
 /// The word grammar (`word.rs`) uses this instead of re-parsing the body as words, which knows
 /// nothing about here-documents.
 pub(crate) fn command_substitution_body_len(
     input: &str,
     options: &TokenizerOptions,
-) -> Option<usize> {
+) -> Result<Option<usize>, crate::NestingLimitExceeded> {
     let mut reader = std::io::BufReader::new(input.as_bytes());
     let mut tokenizer = Tokenizer::new(&mut reader, options);
     let mut state = TokenParseState::new(&tokenizer.cross_state.cursor);
-    tokenizer
-        .consume_nested_construct(&mut state, ')', "(", 1)
-        .ok()?;
+    match tokenizer.consume_nested_construct(&mut state, ')', "(", 1) {
+        Ok(()) => (),
+        Err(TokenizerError::NestingLimitExceeded(exceeded)) => return Err(exceeded),
+        Err(_) => return Ok(None),
+    }
 
     // The cursor counts consumed chars; the last one consumed is the closing `)`.
-    let closer = tokenizer.cross_state.cursor.index.checked_sub(1)?;
-    input.char_indices().nth(closer).map(|(offset, _)| offset)
+    let Some(closer) = tokenizer.cross_state.cursor.index.checked_sub(1) else {
+        return Ok(None);
+    };
+    Ok(input.char_indices().nth(closer).map(|(offset, _)| offset))
 }
 
 impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
@@ -573,7 +584,21 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                 queued_tokens: vec![],
                 arithmetic_expansion: false,
             },
+            nesting_depth: 0,
         }
+    }
+
+    /// Enters one more nested expansion, refusing to go past the nesting limit.
+    fn enter_nested(&mut self, construct: &'static str) -> Result<(), TokenizerError> {
+        if self.nesting_depth >= crate::MAX_NESTING_DEPTH {
+            return Err(crate::NestingLimitExceeded::new(construct).into());
+        }
+        self.nesting_depth += 1;
+        Ok(())
+    }
+
+    const fn leave_nested(&mut self) {
+        self.nesting_depth -= 1;
     }
 
     #[expect(clippy::unnecessary_wraps)]
@@ -960,7 +985,9 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                                 self.cross_state.arithmetic_expansion = true;
                             }
 
+                            self.enter_nested(if is_arithmetic { "$((" } else { "$(" })?;
                             self.consume_nested_construct(&mut state, ')', "(", initial_nesting)?;
+                            self.leave_nested();
 
                             if is_arithmetic {
                                 self.cross_state.arithmetic_expansion = false;
@@ -978,7 +1005,9 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                             // some text will be interpreted differently as a result.
                             self.cross_state.arithmetic_expansion = true;
 
+                            self.enter_nested("$[")?;
                             self.consume_nested_construct(&mut state, ']', "[", 1)?;
+                            self.leave_nested();
 
                             self.cross_state.arithmetic_expansion = false;
                         }
@@ -993,6 +1022,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                             let mut pending_here_doc_tokens = vec![];
                             let mut drain_here_doc_tokens = false;
 
+                            self.enter_nested("${")?;
                             loop {
                                 let cur_token = if drain_here_doc_tokens
                                     && !pending_here_doc_tokens.is_empty()
@@ -1053,6 +1083,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                                     _ => (),
                                 }
                             }
+                            self.leave_nested();
                         }
                         _ => {
                             // This is either a different character, or else the end of the string.

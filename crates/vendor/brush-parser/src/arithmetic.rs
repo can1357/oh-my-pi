@@ -2,6 +2,7 @@
 
 use crate::ast;
 use crate::error;
+use crate::nesting::NestingGuard;
 
 /// Parses a shell arithmetic expression.
 ///
@@ -15,12 +16,20 @@ pub fn parse(input: &str) -> Result<ast::ArithmeticExpr, error::WordParseError> 
 #[cached::proc_macro::cached(size = 64, result = true)]
 fn cacheable_parse(input: String) -> Result<ast::ArithmeticExpr, error::WordParseError> {
     tracing::debug!(target: "arithmetic", "parsing arithmetic expression: '{input}'");
-    arithmetic::full_expression(input.as_str())
-        .map_err(|e| error::WordParseError::ArithmeticExpression(e.into()))
+    let nesting = NestingGuard::default();
+    let result = arithmetic::full_expression(input.as_str(), &nesting);
+    if let Some((exceeded, _)) = nesting.exceeded() {
+        return Err(exceeded.into());
+    }
+    result.map_err(|e| error::WordParseError::ArithmeticExpression(e.into()))
 }
 
+// Every way one expression nests in another goes through a rule call wrapped in `nested`, so the
+// nesting guard bounds the recursion: parentheses, subscripts, unary operators, and the right
+// operands of the right-associative `**`, `?:` and assignments. Only the left-associative binary
+// operators stay in a `precedence!` table, which applies them in a loop.
 peg::parser! {
-    grammar arithmetic() for str {
+    grammar arithmetic(nesting: &NestingGuard) for str {
         pub(crate) rule full_expression() -> ast::ArithmeticExpr =
             ![_] { ast::ArithmeticExpr::Literal(0) } /
             _ e:expression() _ { e }
@@ -28,20 +37,19 @@ peg::parser! {
         pub(crate) rule expression() -> ast::ArithmeticExpr = precedence!{
             x:(@) _ "," _ y:@ { ast::ArithmeticExpr::BinaryOp(ast::BinaryOperator::Comma, Box::new(x), Box::new(y)) }
             --
-            x:lvalue() _ "*=" _ y:(@) { ast::ArithmeticExpr::BinaryAssignment(ast::BinaryOperator::Multiply, x, Box::new(y)) }
-            x:lvalue() _ "/=" _ y:(@) { ast::ArithmeticExpr::BinaryAssignment(ast::BinaryOperator::Divide, x, Box::new(y)) }
-            x:lvalue() _ "%=" _ y:(@) { ast::ArithmeticExpr::BinaryAssignment(ast::BinaryOperator::Modulo, x, Box::new(y)) }
-            x:lvalue() _ "+=" _ y:(@) { ast::ArithmeticExpr::BinaryAssignment(ast::BinaryOperator::Add, x, Box::new(y)) }
-            x:lvalue() _ "-=" _ y:(@) { ast::ArithmeticExpr::BinaryAssignment(ast::BinaryOperator::Subtract, x, Box::new(y)) }
-            x:lvalue() _ "<<=" _ y:(@) { ast::ArithmeticExpr::BinaryAssignment(ast::BinaryOperator::ShiftLeft, x, Box::new(y)) }
-            x:lvalue() _ ">>=" _ y:(@) { ast::ArithmeticExpr::BinaryAssignment(ast::BinaryOperator::ShiftRight, x, Box::new(y)) }
-            x:lvalue() _ "&=" _ y:(@) { ast::ArithmeticExpr::BinaryAssignment(ast::BinaryOperator::BitwiseAnd, x, Box::new(y)) }
-            x:lvalue() _ "|=" _ y:(@) { ast::ArithmeticExpr::BinaryAssignment(ast::BinaryOperator::BitwiseOr, x, Box::new(y)) }
-            x:lvalue() _ "^=" _ y:(@) { ast::ArithmeticExpr::BinaryAssignment(ast::BinaryOperator::BitwiseXor, x, Box::new(y)) }
-            x:lvalue() _ "=" _ y:(@) { ast::ArithmeticExpr::Assignment(x, Box::new(y)) }
-            --
-            x:@ _ "?" _ y:expression() _ ":" _ z:(@) { ast::ArithmeticExpr::Conditional(Box::new(x), Box::new(y), Box::new(z)) }
-            --
+            e:conditional() { e }
+        }
+
+        // `?:` is right associative: its else branch is another conditional.
+        rule conditional() -> ast::ArithmeticExpr =
+            x:binary() branches:(_ "?" _ y:nested("?", <expression()>) _ ":" _ z:nested(":", <conditional()>) { (y, z) })? {
+                match branches {
+                    Some((y, z)) => ast::ArithmeticExpr::Conditional(Box::new(x), Box::new(y), Box::new(z)),
+                    None => x,
+                }
+            }
+
+        rule binary() -> ast::ArithmeticExpr = precedence!{
             x:(@) _ "||" _ y:@ { ast::ArithmeticExpr::BinaryOp(ast::BinaryOperator::LogicalOr, Box::new(x), Box::new(y)) }
             --
             x:(@) _ "&&" _ y:@ { ast::ArithmeticExpr::BinaryOp(ast::BinaryOperator::LogicalAnd, Box::new(x), Box::new(y)) }
@@ -70,28 +78,59 @@ peg::parser! {
             x:(@) _ "%" _ y:@ { ast::ArithmeticExpr::BinaryOp(ast::BinaryOperator::Modulo, Box::new(x), Box::new(y)) }
             x:(@) _ "/" _ y:@ { ast::ArithmeticExpr::BinaryOp(ast::BinaryOperator::Divide, Box::new(x), Box::new(y)) }
             --
-            x:@ _ "**" _ y:(@) { ast::ArithmeticExpr::BinaryOp(ast::BinaryOperator::Power, Box::new(x), Box::new(y)) }
-            --
-            "!" _ x:(@) { ast::ArithmeticExpr::UnaryOp(ast::UnaryOperator::LogicalNot, Box::new(x)) }
-            "~" _ x:(@) { ast::ArithmeticExpr::UnaryOp(ast::UnaryOperator::BitwiseNot, Box::new(x)) }
-            --
-            // NOTE: We add negative lookahead to avoid ambiguity with the pre-increment/pre-decrement operators.
-            "+" !['+'] _ x:(@) { ast::ArithmeticExpr::UnaryOp(ast::UnaryOperator::UnaryPlus, Box::new(x)) }
-            "-" !['-'] _ x:(@) { ast::ArithmeticExpr::UnaryOp(ast::UnaryOperator::UnaryMinus, Box::new(x)) }
-            --
-            "++" _ x:lvalue() { ast::ArithmeticExpr::UnaryAssignment(ast::UnaryAssignmentOperator::PrefixIncrement, x) }
-            "--" _ x:lvalue() { ast::ArithmeticExpr::UnaryAssignment(ast::UnaryAssignmentOperator::PrefixDecrement, x) }
-            --
-            x:lvalue() _ "++" { ast::ArithmeticExpr::UnaryAssignment(ast::UnaryAssignmentOperator::PostfixIncrement, x) }
-            x:lvalue() _ "--" { ast::ArithmeticExpr::UnaryAssignment(ast::UnaryAssignmentOperator::PostfixDecrement, x) }
-            --
-            n:literal_number() { ast::ArithmeticExpr::Literal(n) }
-            l:lvalue() { ast::ArithmeticExpr::Reference(l) }
-            "(" _ expr:expression() _ ")" { expr }
+            e:power() { e }
         }
 
+        // `**` is right associative.
+        rule power() -> ast::ArithmeticExpr =
+            x:unary() y:(_ "**" _ y:nested("**", <power()>) { y })? {
+                match y {
+                    Some(y) => ast::ArithmeticExpr::BinaryOp(ast::BinaryOperator::Power, Box::new(x), Box::new(y)),
+                    None => x,
+                }
+            }
+
+        // Assignments, unary operators and primaries, in the order they are tried at every
+        // operand position; an assignment can be the operand of any operator, as before.
+        rule unary() -> ast::ArithmeticExpr =
+            x:lvalue() _ op:assignment_operator() _ y:nested("=", <conditional()>) {
+                match op {
+                    Some(op) => ast::ArithmeticExpr::BinaryAssignment(op, x, Box::new(y)),
+                    None => ast::ArithmeticExpr::Assignment(x, Box::new(y)),
+                }
+            } /
+            "!" _ x:nested("!", <unary()>) { ast::ArithmeticExpr::UnaryOp(ast::UnaryOperator::LogicalNot, Box::new(x)) } /
+            "~" _ x:nested("~", <unary()>) { ast::ArithmeticExpr::UnaryOp(ast::UnaryOperator::BitwiseNot, Box::new(x)) } /
+            // NOTE: We add negative lookahead to avoid ambiguity with the pre-increment/pre-decrement operators.
+            "+" !['+'] _ x:nested("+", <unary()>) { ast::ArithmeticExpr::UnaryOp(ast::UnaryOperator::UnaryPlus, Box::new(x)) } /
+            "-" !['-'] _ x:nested("-", <unary()>) { ast::ArithmeticExpr::UnaryOp(ast::UnaryOperator::UnaryMinus, Box::new(x)) } /
+            "++" _ x:lvalue() { ast::ArithmeticExpr::UnaryAssignment(ast::UnaryAssignmentOperator::PrefixIncrement, x) } /
+            "--" _ x:lvalue() { ast::ArithmeticExpr::UnaryAssignment(ast::UnaryAssignmentOperator::PrefixDecrement, x) } /
+            x:lvalue() _ "++" { ast::ArithmeticExpr::UnaryAssignment(ast::UnaryAssignmentOperator::PostfixIncrement, x) } /
+            x:lvalue() _ "--" { ast::ArithmeticExpr::UnaryAssignment(ast::UnaryAssignmentOperator::PostfixDecrement, x) } /
+            n:literal_number() { ast::ArithmeticExpr::Literal(n) } /
+            l:lvalue() { ast::ArithmeticExpr::Reference(l) } /
+            "(" _ expr:nested("(", <expression()>) _ ")" { expr }
+
+        rule assignment_operator() -> Option<ast::BinaryOperator> =
+            "*=" { Some(ast::BinaryOperator::Multiply) } /
+            "/=" { Some(ast::BinaryOperator::Divide) } /
+            "%=" { Some(ast::BinaryOperator::Modulo) } /
+            "+=" { Some(ast::BinaryOperator::Add) } /
+            "-=" { Some(ast::BinaryOperator::Subtract) } /
+            "<<=" { Some(ast::BinaryOperator::ShiftLeft) } /
+            ">>=" { Some(ast::BinaryOperator::ShiftRight) } /
+            "&=" { Some(ast::BinaryOperator::BitwiseAnd) } /
+            "|=" { Some(ast::BinaryOperator::BitwiseOr) } /
+            "^=" { Some(ast::BinaryOperator::BitwiseXor) } /
+            "=" { None }
+
+        // Memoized: an operand is tried as an assignment target, a postfix operand and a
+        // reference in turn, and without this each try re-parses every nested subscript, which
+        // takes exponential time in the subscript depth.
+        #[cache]
         rule lvalue() -> ast::ArithmeticTarget =
-            name:variable_name() "[" index:expression() "]" {
+            name:variable_name() "[" index:nested("[", <expression()>) "]" {
                 ast::ArithmeticTarget::ArrayElement(name.to_owned(), Box::new(index))
             } /
             name:variable_name() {
@@ -126,6 +165,24 @@ peg::parser! {
                 // when preceded by unary minus: -(9223372036854775808) wraps to i64::MIN.
                 s.parse::<u64>().map(|v| v.cast_signed()).or(Err("i64"))
             }
+
+        // Parses `r` one nesting level deeper, as the operand of `construct`. Fails, without
+        // trying `r`, once that would go past the nesting limit.
+        rule nested<T>(construct: &'static str, r: rule<T>) -> T =
+            enter(construct) v:r()? leave() {? v.ok_or("nested expression") }
+
+        rule enter(construct: &'static str) = #{|_input, pos| {
+            if nesting.enter(construct, pos) {
+                peg::RuleResult::Matched(pos, ())
+            } else {
+                peg::RuleResult::Failed
+            }
+        }}
+
+        rule leave() = #{|_input, pos| {
+            nesting.leave();
+            peg::RuleResult::Matched(pos, ())
+        }}
     }
 }
 

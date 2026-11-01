@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the bash tool killing the whole process, with no message, on shell source nested a few hundred levels deep (brace groups, subshells, loops, `$(...)`, `${...}`, `$((...))`, `[[ ]]`); nesting past 32 levels is now refused with "maximum nesting level exceeded (32)" and the shell keeps running
+- Fixed nested arithmetic array subscripts such as `$(( a[a[a[0]]] ))` taking time exponential in their depth; nine levels took minutes
+
 ## [18.15.0] - 2026-11-01
 
 ### Fixed

@@ -727,9 +727,15 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		}
 
 		let parse_result = brush_parser::word::parse_brace_expansions(word, &self.parser_options);
-		if parse_result.is_err() {
-			tracing::error!("failed to parse for brace expansion: {parse_result:?}");
-			return Ok(vec![word.into()]);
+		match parse_result {
+			// Too deep to expand is an error, not text: taking the word literally would print
+			// something the script never asked for.
+			Err(e @ brush_parser::WordParseError::NestingLimitExceeded(_)) => return Err(e.into()),
+			Err(e) => {
+				tracing::error!("failed to parse for brace expansion: {e:?}");
+				return Ok(vec![word.into()]);
+			},
+			Ok(_) => (),
 		}
 
 		let brace_expansion_pieces = parse_result?;

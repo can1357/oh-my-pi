@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use bon::bon;
 
 use crate::ast;
+use crate::nesting::NestingGuard;
 use crate::tokenizer::{Token, TokenEndReason, Tokenizer, TokenizerOptions, Tokens};
 
 pub mod peg;
@@ -181,9 +182,13 @@ impl<R: std::io::BufRead> Parser<R> {
         &mut self,
     ) -> Result<ast::FunctionBody, crate::error::ParseError> {
         let tokens = self.tokenize()?;
-        let parse_result =
-            peg::token_parser::function_parens_and_body(&Tokens { tokens: &tokens }, &self.options);
-        parse_result_to_error(parse_result, &tokens)
+        let nesting = NestingGuard::default();
+        let parse_result = peg::token_parser::function_parens_and_body(
+            &Tokens { tokens: &tokens },
+            &self.options,
+            &nesting,
+        );
+        parse_result_to_error(parse_result, &nesting, &tokens)
     }
 
     fn tokenize(&mut self) -> Result<Vec<Token>, crate::error::ParseError> {
@@ -196,6 +201,12 @@ impl<R: std::io::BufRead> Parser<R> {
         loop {
             let result = match tokenizer.next_token() {
                 Ok(result) => result,
+                Err(crate::tokenizer::TokenizerError::NestingLimitExceeded(inner)) => {
+                    return Err(crate::error::ParseError::NestingLimitExceeded {
+                        inner,
+                        position: tokenizer.current_location(),
+                    });
+                }
                 Err(e) => {
                     return Err(crate::error::ParseError::Tokenizing {
                         inner: e,
@@ -231,17 +242,31 @@ pub fn parse_tokens(
     tokens: &[Token],
     options: &ParserOptions,
 ) -> Result<ast::Program, crate::error::ParseError> {
-    let parse_result = peg::token_parser::program(&Tokens { tokens }, options);
-    parse_result_to_error(parse_result, tokens)
+    let nesting = NestingGuard::default();
+    let parse_result = peg::token_parser::program(&Tokens { tokens }, options, &nesting);
+    parse_result_to_error(parse_result, &nesting, tokens)
 }
 
 fn parse_result_to_error<R>(
     parse_result: Result<R, ::peg::error::ParseError<usize>>,
+    nesting: &NestingGuard,
     tokens: &[Token],
 ) -> Result<R, crate::error::ParseError>
 where
     R: std::fmt::Debug,
 {
+    // Past the nesting limit the grammar stopped descending, so whatever it made of the input
+    // is not the program: report the limit even if an alternative happened to match.
+    if let Some((exceeded, token_index)) = nesting.exceeded() {
+        tracing::debug!(target: "parse", "Nesting limit exceeded: {exceeded}");
+        // The guard is entered just past the construct's opening token.
+        return Err(crate::error::convert_nesting_error(
+            exceeded,
+            token_index.saturating_sub(1),
+            tokens,
+        ));
+    }
+
     match parse_result {
         Ok(program) => {
             tracing::debug!(target: "parse", "PROG: {:?}", program);

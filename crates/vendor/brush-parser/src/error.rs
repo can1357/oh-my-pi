@@ -1,4 +1,4 @@
-use crate::tokenizer;
+use crate::{nesting, tokenizer};
 
 /// Represents an error that occurred while parsing tokens.
 #[derive(thiserror::Error, Debug)]
@@ -17,6 +17,15 @@ pub enum ParseError {
         /// The inner error.
         inner: tokenizer::TokenizerError,
         /// Optionally provides the position of the error.
+        position: Option<crate::SourcePosition>,
+    },
+
+    /// A construct was nested more deeply than the parser accepts.
+    #[error("syntax error{}: {inner}", .position.as_ref().map_or_else(String::new, |p| std::format!(" at line {} col {}", p.line, p.column)))]
+    NestingLimitExceeded {
+        /// The construct and the limit.
+        inner: nesting::NestingLimitExceeded,
+        /// Optionally provides the position of the construct.
         position: Option<crate::SourcePosition>,
     },
 }
@@ -42,6 +51,9 @@ pub mod miette {
                 Self::ParsingAtEndOfInput => {
                     Some(SourceOffset::from_location(&input, usize::MAX, usize::MAX))
                 }
+                Self::NestingLimitExceeded { ref position, .. } => position
+                    .as_ref()
+                    .map(|p| SourceOffset::from_location(&input, p.line, p.column)),
             };
 
             PrettyError {
@@ -98,12 +110,23 @@ pub enum WordParseError {
     /// An error occurred while parsing a word.
     #[error("failed to parse word '{0}'")]
     Word(String, ParseErrorLocation),
+
+    /// A construct was nested more deeply than the parser accepts.
+    #[error(transparent)]
+    NestingLimitExceeded(#[from] nesting::NestingLimitExceeded),
 }
 
 /// Represents an error that occurred while parsing a (non-extended) test command.
 #[derive(Debug, thiserror::Error)]
-#[error(transparent)]
-pub struct TestCommandParseError(#[from] peg::error::ParseError<usize>);
+pub enum TestCommandParseError {
+    /// The arguments do not form a test expression.
+    #[error(transparent)]
+    Syntax(#[from] peg::error::ParseError<usize>),
+
+    /// A construct was nested more deeply than the parser accepts.
+    #[error(transparent)]
+    NestingLimitExceeded(#[from] nesting::NestingLimitExceeded),
+}
 
 /// Represents an error that occurred while parsing a key-binding specification.
 #[derive(Debug, thiserror::Error)]
@@ -128,5 +151,18 @@ pub(crate) fn convert_peg_parse_error(
         ParseError::ParsingNear((*token.location().start).clone())
     } else {
         ParseError::ParsingAtEndOfInput
+    }
+}
+
+pub(crate) fn convert_nesting_error(
+    inner: nesting::NestingLimitExceeded,
+    token_index: usize,
+    tokens: &[crate::Token],
+) -> ParseError {
+    ParseError::NestingLimitExceeded {
+        inner,
+        position: tokens
+            .get(token_index)
+            .map(|token| (*token.location().start).clone()),
     }
 }

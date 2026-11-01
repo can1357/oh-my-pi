@@ -9,6 +9,13 @@
 //! - Command substitution expressions.
 //! - Arithmetic expansion expressions.
 
+// Each rule peg generates takes peg's four arguments, the grammar's two (options and nesting
+// guard), and the rule's own, so a rule with two arguments of its own takes eight.
+#![expect(
+    clippy::too_many_arguments,
+    reason = "peg-generated rule functions"
+)]
+
 use std::fmt::Debug;
 use std::fmt::Display;
 
@@ -16,6 +23,7 @@ use crate::ParserOptions;
 use crate::SourceSpan;
 use crate::ast;
 use crate::error;
+use crate::nesting::NestingGuard;
 
 /// Encapsulates a `WordPiece` together with its position in the string it came from.
 #[derive(Clone, Debug)]
@@ -538,8 +546,10 @@ fn cacheable_parse(
 ) -> Result<Vec<WordPieceWithSource>, error::WordParseError> {
     tracing::debug!(target: "expansion", "Parsing word '{}'", word);
 
-    let pieces = expansion_parser::unexpanded_word(word.as_str(), &options)
-        .map_err(|err| error::WordParseError::Word(word.clone(), err.into()))?;
+    let pieces = guarded(
+        |nesting| expansion_parser::unexpanded_word(word.as_str(), &options, nesting),
+        |err| error::WordParseError::Word(word.clone(), err.into()),
+    )?;
 
     tracing::debug!(target: "expansion", "Parsed word '{}' => {{{:?}}}", word, pieces);
 
@@ -556,8 +566,10 @@ pub fn parse_heredoc(
     word: &str,
     options: &ParserOptions,
 ) -> Result<Vec<WordPieceWithSource>, error::WordParseError> {
-    expansion_parser::unexpanded_heredoc_word(word, options)
-        .map_err(|err| error::WordParseError::Word(word.to_owned(), err.into()))
+    guarded(
+        |nesting| expansion_parser::unexpanded_heredoc_word(word, options, nesting),
+        |err| error::WordParseError::Word(word.to_owned(), err.into()),
+    )
 }
 
 /// Parse the given word into a parameter expression.
@@ -570,8 +582,10 @@ pub fn parse_parameter(
     word: &str,
     options: &ParserOptions,
 ) -> Result<Parameter, error::WordParseError> {
-    expansion_parser::parameter(word, options)
-        .map_err(|err| error::WordParseError::Parameter(word.to_owned(), err.into()))
+    guarded(
+        |nesting| expansion_parser::parameter(word, options, nesting),
+        |err| error::WordParseError::Parameter(word.to_owned(), err.into()),
+    )
 }
 
 /// Parse brace expansion from a given word .
@@ -584,26 +598,51 @@ pub fn parse_brace_expansions(
     word: &str,
     options: &ParserOptions,
 ) -> Result<Option<Vec<BraceExpressionOrText>>, error::WordParseError> {
-    expansion_parser::brace_expansions(word, options)
-        .map_err(|err| error::WordParseError::BraceExpansion(word.to_owned(), err.into()))
+    guarded(
+        |nesting| expansion_parser::brace_expansions(word, options, nesting),
+        |err| error::WordParseError::BraceExpansion(word.to_owned(), err.into()),
+    )
 }
 
+/// Runs one parse with a fresh nesting guard. A construct nested past the limit is reported as
+/// such, whatever the grammar made of the input.
+fn guarded<T>(
+    parse: impl FnOnce(&NestingGuard) -> Result<T, peg::error::ParseError<peg::str::LineCol>>,
+    syntax_error: impl FnOnce(peg::error::ParseError<peg::str::LineCol>) -> error::WordParseError,
+) -> Result<T, error::WordParseError> {
+    let nesting = NestingGuard::default();
+    let result = parse(&nesting);
+    if let Some((exceeded, _)) = nesting.exceeded() {
+        return Err(exceeded.into());
+    }
+    result.map_err(syntax_error)
+}
+
+/// Parses a word as an assignment. `nesting` is the guard of the parse the word came from; a
+/// subscript nested past the limit trips it.
 pub(crate) fn parse_assignment_word(
     word: &str,
+    nesting: &NestingGuard,
 ) -> Result<ast::Assignment, peg::error::ParseError<peg::str::LineCol>> {
-    expansion_parser::name_equals_scalar_value(word, &ParserOptions::default())
+    expansion_parser::name_equals_scalar_value(word, &ParserOptions::default(), nesting)
 }
 
+/// Parses a word and the elements that follow it as an array assignment. `nesting` is the guard
+/// of the parse the word came from; a subscript nested past the limit trips it.
 pub(crate) fn parse_array_assignment(
     word: &str,
     elements: &[&String],
+    nesting: &NestingGuard,
 ) -> Result<ast::Assignment, &'static str> {
-    let (assignment_name, append) = expansion_parser::name_equals(word, &ParserOptions::default())
-        .map_err(|_| "not array assignment word")?;
+    let (assignment_name, append) =
+        expansion_parser::name_equals(word, &ParserOptions::default(), nesting)
+            .map_err(|_| "not array assignment word")?;
 
     let elements = elements
         .iter()
-        .map(|element| expansion_parser::literal_array_element(element, &ParserOptions::default()))
+        .map(|element| {
+            expansion_parser::literal_array_element(element, &ParserOptions::default(), nesting)
+        })
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| "invalid array element in literal")?;
 
@@ -626,7 +665,7 @@ pub(crate) fn parse_array_assignment(
 }
 
 peg::parser! {
-    grammar expansion_parser(parser_options: &ParserOptions) for str {
+    grammar expansion_parser(parser_options: &ParserOptions, nesting: &NestingGuard) for str {
         // Helper rule that enables pegviz to be used to visualize debug peg traces.
         rule traced<T>(e: rule<T>) -> T =
             &(input:$([_]*) {
@@ -671,7 +710,7 @@ peg::parser! {
 
         // Parses a complete brace expression, with no prefix or suffix.
         pub(crate) rule brace_expr() -> BraceExpression =
-            "{" inner:brace_expr_inner() "}" { inner }
+            "{" inner:nested("{", <brace_expr_inner()>) "}" { inner }
 
         // Parses the text inside a complete brace expression; basically the complete brace
         // expression without the opening and closing brace characters.
@@ -735,7 +774,7 @@ peg::parser! {
             // delegate the rest to a helper rule. We don't worry about the stop condition passed
             // into us, because if we see an opening parenthesis then we *must* find its closing
             // partner.
-            "(" arithmetic_word_plus_right_paren() {} /
+            "(" nested("(", <arithmetic_word_plus_right_paren() {}>) {} /
             // This branch handles the case where we have an array element name with square brackets,
             // which may (legitimately) contain the stop condition.
             array_element_name() {} /
@@ -837,13 +876,13 @@ peg::parser! {
         rule is_true(value: bool) = &[_] {? if value { Ok(()) } else { Err("not true") } }
 
         rule extglob_pattern() =
-            ("@" / "!" / "?" / "+" / "*") "(" extglob_body_piece()* ")" {}
+            ("@" / "!" / "?" / "+" / "*") "(" nested("(", <extglob_body_piece()* {}>) ")" {}
 
         rule extglob_body_piece() =
             word_piece(<[')']>, true /*in_command*/) {}
 
         rule subshell_command() =
-            "(" command() ")" {}
+            "(" nested("(", <command()>) ")" {}
 
         rule double_quoted_text() -> WordPiece =
             s:double_quote_body_text() { WordPiece::Text(s.to_owned()) }
@@ -918,7 +957,7 @@ peg::parser! {
         // TODO(parser): Deal with fact that there may be a quoted word or escaped closing brace chars.
         // TODO(parser): Improve on how we handle a '$' not followed by a valid variable name or parameter.
         rule parameter_expansion() -> WordPiece =
-            "${" e:parameter_expression() "}" {
+            "${" e:nested("${", <parameter_expression()>) "}" {
                 WordPiece::ParameterExpansion(e)
             } /
             "$" parameter:unbraced_parameter() {
@@ -1043,7 +1082,7 @@ peg::parser! {
             p:special_parameter() { Parameter::Special(p) } /
             non_posix_extensions_enabled() p:variable_name() "[@]" { Parameter::NamedWithAllIndices { name: p.to_owned(), concatenate: false } } /
             non_posix_extensions_enabled() p:variable_name() "[*]" { Parameter::NamedWithAllIndices { name: p.to_owned(), concatenate: true } } /
-            non_posix_extensions_enabled() p:variable_name() "[" index:array_index() "]" {?
+            non_posix_extensions_enabled() p:variable_name() "[" index:nested("[", <array_index()>) "]" {?
                 Ok(Parameter::NamedWithIndex { name: p.to_owned(), index: index.to_owned() })
             } /
             p:variable_name() { Parameter::Named(p.to_owned()) }
@@ -1074,16 +1113,20 @@ peg::parser! {
         // produced this word) instead of `command()`: re-parsing the body as words let quotes and
         // parentheses inside a here-document body end the match early or swallow the real `)`.
         rule command_substitution_body() -> &'input str = #{|input, pos| {
-            let body = input.get(pos..).and_then(|rest| {
+            let body: Option<Result<Option<&str>, crate::NestingLimitExceeded>> = input.get(pos..).map(|rest| {
                 let len = crate::tokenizer::command_substitution_body_len(
                     rest,
                     &parser_options.tokenizer_options(),
                 )?;
-                rest.get(..len)
+                Ok(len.and_then(|len| rest.get(..len)))
             });
             match body {
-                Some(body) => peg::RuleResult::Matched(pos + body.len(), body),
-                None => peg::RuleResult::Failed,
+                Some(Ok(Some(body))) => peg::RuleResult::Matched(pos + body.len(), body),
+                Some(Err(exceeded)) => {
+                    nesting.exceed(&exceeded, pos);
+                    peg::RuleResult::Failed
+                }
+                Some(Ok(None)) | None => peg::RuleResult::Failed,
             }
         }}
 
@@ -1130,6 +1173,24 @@ peg::parser! {
         rule non_posix_extensions_enabled() -> () =
             &[_] {? if !parser_options.sh_mode { Ok(()) } else { Err("posix") } }
 
+        // Parses `r` one nesting level deeper, as the body of `construct`. Fails, without trying
+        // `r`, once that would go past the nesting limit.
+        rule nested<T>(construct: &'static str, r: rule<T>) -> T =
+            enter(construct) v:r()? leave() {? v.ok_or("nested construct") }
+
+        rule enter(construct: &'static str) = #{|_input, pos| {
+            if nesting.enter(construct, pos) {
+                peg::RuleResult::Matched(pos, ())
+            } else {
+                peg::RuleResult::Failed
+            }
+        }}
+
+        rule leave() = #{|_input, pos| {
+            nesting.leave();
+            peg::RuleResult::Matched(pos, ())
+        }}
+
         rule tilde_exprs_at_word_start_enabled() -> () =
             &[_] {? if parser_options.tilde_expansion_at_word_start { Ok(()) } else { Err("no tilde expansion at word start") } }
 
@@ -1167,7 +1228,7 @@ peg::parser! {
             }
 
         rule array_element_name() -> (&'input str, &'input str) =
-            name:assigned_scalar_name() "[" ai:array_index() "]" { (name, ai) }
+            name:assigned_scalar_name() "[" ai:nested("[", <array_index()>) "]" { (name, ai) }
 
         rule array_index() -> &'input str =
             $(arithmetic_word(<"]">))
@@ -1251,10 +1312,12 @@ mod tests {
 
     #[test]
     fn parse_command_substitution() -> Result<()> {
-        super::expansion_parser::command_piece("echo", &ParserOptions::default())?;
-        super::expansion_parser::command_piece("hi", &ParserOptions::default())?;
-        super::expansion_parser::command("echo hi", &ParserOptions::default())?;
-        super::expansion_parser::command_substitution("$(echo hi)", &ParserOptions::default())?;
+        let options = ParserOptions::default();
+        let nesting = NestingGuard::default();
+        super::expansion_parser::command_piece("echo", &options, &nesting)?;
+        super::expansion_parser::command_piece("hi", &options, &nesting)?;
+        super::expansion_parser::command("echo hi", &options, &nesting)?;
+        super::expansion_parser::command_substitution("$(echo hi)", &options, &nesting)?;
 
         assert_ron_snapshot!(test_parse("$(echo hi)")?);
 
@@ -1263,13 +1326,12 @@ mod tests {
 
     #[test]
     fn parse_command_substitution_with_embedded_quotes() -> Result<()> {
-        super::expansion_parser::command_piece("echo", &ParserOptions::default())?;
-        super::expansion_parser::command_piece(r#""hi""#, &ParserOptions::default())?;
-        super::expansion_parser::command(r#"echo "hi""#, &ParserOptions::default())?;
-        super::expansion_parser::command_substitution(
-            r#"$(echo "hi")"#,
-            &ParserOptions::default(),
-        )?;
+        let options = ParserOptions::default();
+        let nesting = NestingGuard::default();
+        super::expansion_parser::command_piece("echo", &options, &nesting)?;
+        super::expansion_parser::command_piece(r#""hi""#, &options, &nesting)?;
+        super::expansion_parser::command(r#"echo "hi""#, &options, &nesting)?;
+        super::expansion_parser::command_substitution(r#"$(echo "hi")"#, &options, &nesting)?;
 
         assert_ron_snapshot!(test_parse(r#"$(echo "hi")"#)?);
         Ok(())
@@ -1363,34 +1425,36 @@ mod tests {
     #[test]
     fn test_arithmetic_word_parsing() {
         let options = ParserOptions::default();
+        let nesting = NestingGuard::default();
 
-        assert!(super::expansion_parser::is_arithmetic_word("a", &options).is_ok());
-        assert!(super::expansion_parser::is_arithmetic_word("b", &options).is_ok());
-        assert!(super::expansion_parser::is_arithmetic_word(" a + b ", &options).is_ok());
-        assert!(super::expansion_parser::is_arithmetic_word("(a)", &options).is_ok());
-        assert!(super::expansion_parser::is_arithmetic_word("((a))", &options).is_ok());
-        assert!(super::expansion_parser::is_arithmetic_word("(((a)))", &options).is_ok());
-        assert!(super::expansion_parser::is_arithmetic_word("(1+2)", &options).is_ok());
-        assert!(super::expansion_parser::is_arithmetic_word("(1+2)*3", &options).is_ok());
-        assert!(super::expansion_parser::is_arithmetic_word("((1+2)*3)", &options).is_ok());
+        assert!(super::expansion_parser::is_arithmetic_word("a", &options, &nesting).is_ok());
+        assert!(super::expansion_parser::is_arithmetic_word("b", &options, &nesting).is_ok());
+        assert!(super::expansion_parser::is_arithmetic_word(" a + b ", &options, &nesting).is_ok());
+        assert!(super::expansion_parser::is_arithmetic_word("(a)", &options, &nesting).is_ok());
+        assert!(super::expansion_parser::is_arithmetic_word("((a))", &options, &nesting).is_ok());
+        assert!(super::expansion_parser::is_arithmetic_word("(((a)))", &options, &nesting).is_ok());
+        assert!(super::expansion_parser::is_arithmetic_word("(1+2)", &options, &nesting).is_ok());
+        assert!(super::expansion_parser::is_arithmetic_word("(1+2)*3", &options, &nesting).is_ok());
+        assert!(super::expansion_parser::is_arithmetic_word("((1+2)*3)", &options, &nesting).is_ok());
     }
 
     #[test]
     fn test_arithmetic_word_piece_parsing() {
         let options = ParserOptions::default();
+        let nesting = NestingGuard::default();
 
-        assert!(super::expansion_parser::is_arithmetic_word_piece("a", &options).is_ok());
-        assert!(super::expansion_parser::is_arithmetic_word_piece("b", &options).is_ok());
-        assert!(super::expansion_parser::is_arithmetic_word_piece(" a + b ", &options).is_ok());
-        assert!(super::expansion_parser::is_arithmetic_word_piece("(a)", &options).is_ok());
-        assert!(super::expansion_parser::is_arithmetic_word_piece("((a))", &options).is_ok());
-        assert!(super::expansion_parser::is_arithmetic_word_piece("(((a)))", &options).is_ok());
-        assert!(super::expansion_parser::is_arithmetic_word_piece("(1+2)", &options).is_ok());
-        assert!(super::expansion_parser::is_arithmetic_word_piece("((1+2))", &options).is_ok());
-        assert!(super::expansion_parser::is_arithmetic_word_piece("((1+2)*3)", &options).is_ok());
-        assert!(super::expansion_parser::is_arithmetic_word_piece("(a", &options).is_err());
-        assert!(super::expansion_parser::is_arithmetic_word_piece("(a))", &options).is_err());
-        assert!(super::expansion_parser::is_arithmetic_word_piece("((a)", &options).is_err());
+        assert!(super::expansion_parser::is_arithmetic_word_piece("a", &options, &nesting).is_ok());
+        assert!(super::expansion_parser::is_arithmetic_word_piece("b", &options, &nesting).is_ok());
+        assert!(super::expansion_parser::is_arithmetic_word_piece(" a + b ", &options, &nesting).is_ok());
+        assert!(super::expansion_parser::is_arithmetic_word_piece("(a)", &options, &nesting).is_ok());
+        assert!(super::expansion_parser::is_arithmetic_word_piece("((a))", &options, &nesting).is_ok());
+        assert!(super::expansion_parser::is_arithmetic_word_piece("(((a)))", &options, &nesting).is_ok());
+        assert!(super::expansion_parser::is_arithmetic_word_piece("(1+2)", &options, &nesting).is_ok());
+        assert!(super::expansion_parser::is_arithmetic_word_piece("((1+2))", &options, &nesting).is_ok());
+        assert!(super::expansion_parser::is_arithmetic_word_piece("((1+2)*3)", &options, &nesting).is_ok());
+        assert!(super::expansion_parser::is_arithmetic_word_piece("(a", &options, &nesting).is_err());
+        assert!(super::expansion_parser::is_arithmetic_word_piece("(a))", &options, &nesting).is_err());
+        assert!(super::expansion_parser::is_arithmetic_word_piece("((a)", &options, &nesting).is_err());
     }
 
     #[test]
@@ -1410,11 +1474,12 @@ mod tests {
 
     #[test]
     fn parse_assignment_word() -> Result<()> {
-        super::parse_assignment_word("x=3")?;
-        super::parse_assignment_word("x=")?;
-        super::parse_assignment_word("x[3]=a")?;
-        super::parse_assignment_word("x[${y[3]}]=a")?;
-        super::parse_assignment_word("x[y[3]]=a")?;
+        let nesting = NestingGuard::default();
+        super::parse_assignment_word("x=3", &nesting)?;
+        super::parse_assignment_word("x=", &nesting)?;
+        super::parse_assignment_word("x[3]=a", &nesting)?;
+        super::parse_assignment_word("x[${y[3]}]=a", &nesting)?;
+        super::parse_assignment_word("x[y[3]]=a", &nesting)?;
         Ok(())
     }
 }

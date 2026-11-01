@@ -49,6 +49,10 @@ pub enum EvalError {
 	/// Expression recursion level exceeded.
 	#[error("expression recursion level exceeded")]
 	RecursionLimitExceeded,
+
+	/// The expression nests more deeply than the parser accepts.
+	#[error(transparent)]
+	NestingLimitExceeded(crate::parser::NestingLimitExceeded),
 }
 
 /// Trait implemented by arithmetic expressions that can be evaluated.
@@ -100,7 +104,7 @@ pub(crate) async fn expand_and_eval(
 
 	// Now parse.
 	let expr = brush_parser::arithmetic::parse(&expanded_self)
-		.map_err(|_e| EvalError::ParseError(expanded_self))?;
+		.map_err(|e| parse_error(e, expanded_self))?;
 
 	// Trace if applicable.
 	if trace_if_needed && shell.options().print_commands_and_arguments {
@@ -111,6 +115,15 @@ pub(crate) async fn expand_and_eval(
 
 	// Now evaluate.
 	expr.eval(shell)
+}
+
+/// Reports an expression nested past the parser's limit as such, and any other
+/// parse failure as the expression that failed to parse.
+fn parse_error(error: crate::parser::WordParseError, expr: String) -> EvalError {
+	match error {
+		crate::parser::WordParseError::NestingLimitExceeded(e) => EvalError::NestingLimitExceeded(e),
+		_ => EvalError::ParseError(expr),
+	}
 }
 
 /// Trait implemented by evaluatable arithmetic expressions.
@@ -213,7 +226,7 @@ fn deref_lvalue(
 	};
 
 	let parsed_value = brush_parser::arithmetic::parse(value_str.as_ref())
-		.map_err(|_err| EvalError::ParseError(value_str.to_string()))?;
+		.map_err(|e| parse_error(e, value_str.to_string()))?;
 
 	// Literals don't need depth tracking — they can't cause recursion.
 	// Only increment depth when the parsed value requires further evaluation

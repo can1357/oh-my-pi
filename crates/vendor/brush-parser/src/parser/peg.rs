@@ -1,14 +1,22 @@
 //! PEG-based parser implementation for shell scripts.
 
+// Each rule peg generates takes peg's four arguments, the grammar's two (options and nesting
+// guard), and the rule's own, so a rule with two arguments of its own takes eight.
+#![expect(
+    clippy::too_many_arguments,
+    reason = "peg-generated rule functions"
+)]
+
 use crate::SourceSpan;
 use crate::ast::{self, SeparatorOperator, SourceLocation, maybe_location};
+use crate::nesting::NestingGuard;
 use crate::tokenizer::Token;
 use crate::word;
 
 use super::{ParserOptions, Tokens};
 
 peg::parser! {
-    pub grammar token_parser<'a>(parser_options: &ParserOptions) for Tokens<'a> {
+    pub grammar token_parser<'a>(parser_options: &ParserOptions, nesting: &NestingGuard) for Tokens<'a> {
         pub(crate) rule program() -> ast::Program =
             linebreak() c:complete_commands() linebreak() { ast::Program { complete_commands: c } } /
             linebreak() { ast::Program { complete_commands: vec![] } }
@@ -125,7 +133,7 @@ peg::parser! {
 
         rule arithmetic_expression_piece() =
             // Allow a parenthesized expression (with matching opening and closing parens).
-            specific_operator("(") (!specific_operator(")") arithmetic_expression_piece())* specific_operator(")") {} /
+            specific_operator("(") nested("(", <(!specific_operator(")") arithmetic_expression_piece())* {}>) specific_operator(")") {} /
             // Otherwise consume any token that's neither the normal end of the entire arithmetic expression, nor an
             // unexpected mismatched closing parenthesis. In the latter case, it may be that this really was never an
             // arithmetic expression in the first place and we need to backtrack and instead try parsing as a subshell
@@ -138,7 +146,7 @@ peg::parser! {
             specific_operator(";") {}
 
         rule subshell() -> ast::SubshellCommand =
-            start:specific_operator("(") list:compound_list() end:specific_operator(")") {
+            start:specific_operator("(") list:nested("(", <compound_list()>) end:specific_operator(")") {
                 let loc = SourceSpan::within(start.location(), end.location());
                 ast::SubshellCommand { list, loc }
             }
@@ -212,23 +220,28 @@ peg::parser! {
             --
             left:(@) linebreak() specific_operator("&&") linebreak() right:@ { ast::ExtendedTestExpr::And(Box::from(left), Box::from(right)) }
             --
-            specific_word("!") e:@ { ast::ExtendedTestExpr::Not(Box::from(e)) }
-            --
-            specific_operator("(") e:extended_test_expression() specific_operator(")") { ast::ExtendedTestExpr::Parenthesized(Box::from(e)) }
-            --
+            e:extended_test_unary() { e }
+        }
+
+        // `!` and the primaries, in the order the table above used to try them. `!` takes a unary
+        // operand, so it binds tighter than `&&` and `||`. It is a rule of its own rather than a
+        // prefix operator of the table so that every nested `!` and `(` passes the nesting guard.
+        rule extended_test_unary() -> ast::ExtendedTestExpr =
+            specific_word("!") e:nested("!", <extended_test_unary()>) { ast::ExtendedTestExpr::Not(Box::from(e)) } /
+            specific_operator("(") e:nested("(", <extended_test_expression()>) specific_operator(")") { ast::ExtendedTestExpr::Parenthesized(Box::from(e)) } /
             // Arithmetic operators
-            left:word() specific_word("-eq") right:word() { ast::ExtendedTestExpr::BinaryTest(ast::BinaryPredicate::ArithmeticEqualTo, ast::Word::from(left), ast::Word::from(right)) }
-            left:word() specific_word("-ne") right:word() { ast::ExtendedTestExpr::BinaryTest(ast::BinaryPredicate::ArithmeticNotEqualTo, ast::Word::from(left), ast::Word::from(right)) }
-            left:word() specific_word("-lt") right:word() { ast::ExtendedTestExpr::BinaryTest(ast::BinaryPredicate::ArithmeticLessThan, ast::Word::from(left), ast::Word::from(right)) }
-            left:word() specific_word("-le") right:word() { ast::ExtendedTestExpr::BinaryTest(ast::BinaryPredicate::ArithmeticLessThanOrEqualTo, ast::Word::from(left), ast::Word::from(right)) }
-            left:word() specific_word("-gt") right:word() { ast::ExtendedTestExpr::BinaryTest(ast::BinaryPredicate::ArithmeticGreaterThan, ast::Word::from(left), ast::Word::from(right)) }
-            left:word() specific_word("-ge") right:word() { ast::ExtendedTestExpr::BinaryTest(ast::BinaryPredicate::ArithmeticGreaterThanOrEqualTo, ast::Word::from(left), ast::Word::from(right)) }
+            left:word() specific_word("-eq") right:word() { ast::ExtendedTestExpr::BinaryTest(ast::BinaryPredicate::ArithmeticEqualTo, ast::Word::from(left), ast::Word::from(right)) } /
+            left:word() specific_word("-ne") right:word() { ast::ExtendedTestExpr::BinaryTest(ast::BinaryPredicate::ArithmeticNotEqualTo, ast::Word::from(left), ast::Word::from(right)) } /
+            left:word() specific_word("-lt") right:word() { ast::ExtendedTestExpr::BinaryTest(ast::BinaryPredicate::ArithmeticLessThan, ast::Word::from(left), ast::Word::from(right)) } /
+            left:word() specific_word("-le") right:word() { ast::ExtendedTestExpr::BinaryTest(ast::BinaryPredicate::ArithmeticLessThanOrEqualTo, ast::Word::from(left), ast::Word::from(right)) } /
+            left:word() specific_word("-gt") right:word() { ast::ExtendedTestExpr::BinaryTest(ast::BinaryPredicate::ArithmeticGreaterThan, ast::Word::from(left), ast::Word::from(right)) } /
+            left:word() specific_word("-ge") right:word() { ast::ExtendedTestExpr::BinaryTest(ast::BinaryPredicate::ArithmeticGreaterThanOrEqualTo, ast::Word::from(left), ast::Word::from(right)) } /
             // Non-arithmetic binary operators
-            left:word() specific_word("-ef") right:word() { ast::ExtendedTestExpr::BinaryTest(ast::BinaryPredicate::FilesReferToSameDeviceAndInodeNumbers, ast::Word::from(left), ast::Word::from(right)) }
-            left:word() specific_word("-nt") right:word() { ast::ExtendedTestExpr::BinaryTest(ast::BinaryPredicate::LeftFileIsNewerOrExistsWhenRightDoesNot, ast::Word::from(left), ast::Word::from(right)) }
-            left:word() specific_word("-ot") right:word() { ast::ExtendedTestExpr::BinaryTest(ast::BinaryPredicate::LeftFileIsOlderOrDoesNotExistWhenRightDoes, ast::Word::from(left), ast::Word::from(right)) }
-            left:word() (specific_word("==") / specific_word("=")) right:word()  { ast::ExtendedTestExpr::BinaryTest(ast::BinaryPredicate::StringExactlyMatchesPattern, ast::Word::from(left), ast::Word::from(right)) }
-            left:word() specific_word("!=") right:word()  { ast::ExtendedTestExpr::BinaryTest(ast::BinaryPredicate::StringDoesNotExactlyMatchPattern, ast::Word::from(left), ast::Word::from(right)) }
+            left:word() specific_word("-ef") right:word() { ast::ExtendedTestExpr::BinaryTest(ast::BinaryPredicate::FilesReferToSameDeviceAndInodeNumbers, ast::Word::from(left), ast::Word::from(right)) } /
+            left:word() specific_word("-nt") right:word() { ast::ExtendedTestExpr::BinaryTest(ast::BinaryPredicate::LeftFileIsNewerOrExistsWhenRightDoesNot, ast::Word::from(left), ast::Word::from(right)) } /
+            left:word() specific_word("-ot") right:word() { ast::ExtendedTestExpr::BinaryTest(ast::BinaryPredicate::LeftFileIsOlderOrDoesNotExistWhenRightDoes, ast::Word::from(left), ast::Word::from(right)) } /
+            left:word() (specific_word("==") / specific_word("=")) right:word()  { ast::ExtendedTestExpr::BinaryTest(ast::BinaryPredicate::StringExactlyMatchesPattern, ast::Word::from(left), ast::Word::from(right)) } /
+            left:word() specific_word("!=") right:word()  { ast::ExtendedTestExpr::BinaryTest(ast::BinaryPredicate::StringDoesNotExactlyMatchPattern, ast::Word::from(left), ast::Word::from(right)) } /
             left:word() specific_word("=~") right:regex_word()  {
                 if right.value.starts_with(['\'', '\"']) {
                     // TODO(test): Confirm it ends with that too?
@@ -236,14 +249,11 @@ peg::parser! {
                 } else {
                     ast::ExtendedTestExpr::BinaryTest(ast::BinaryPredicate::StringMatchesRegex, ast::Word::from(left), right)
                 }
-            }
-            left:word() specific_operator("<") right:word()   { ast::ExtendedTestExpr::BinaryTest(ast::BinaryPredicate::LeftSortsBeforeRight, ast::Word::from(left), ast::Word::from(right)) }
-            left:word() specific_operator(">") right:word()   { ast::ExtendedTestExpr::BinaryTest(ast::BinaryPredicate::LeftSortsAfterRight, ast::Word::from(left), ast::Word::from(right)) }
-            --
-            p:extended_unary_predicate() f:word() { ast::ExtendedTestExpr::UnaryTest(p, ast::Word::from(f)) }
-            --
+            } /
+            left:word() specific_operator("<") right:word()   { ast::ExtendedTestExpr::BinaryTest(ast::BinaryPredicate::LeftSortsBeforeRight, ast::Word::from(left), ast::Word::from(right)) } /
+            left:word() specific_operator(">") right:word()   { ast::ExtendedTestExpr::BinaryTest(ast::BinaryPredicate::LeftSortsAfterRight, ast::Word::from(left), ast::Word::from(right)) } /
+            p:extended_unary_predicate() f:word() { ast::ExtendedTestExpr::UnaryTest(p, ast::Word::from(f)) } /
             w:word() { ast::ExtendedTestExpr::UnaryTest(ast::UnaryPredicate::StringHasNonZeroLength, ast::Word::from(w)) }
-        }
 
         rule extended_unary_predicate() -> ast::UnaryPredicate =
             specific_word("-a") { ast::UnaryPredicate::FileExists } /
@@ -283,7 +293,7 @@ peg::parser! {
         rule regex_word_piece() =
             word() {} /
             specific_operator("|") {} /
-            specific_operator("(") parenthesized_regex_word()* specific_operator(")") {}
+            specific_operator("(") nested("(", <parenthesized_regex_word()* {}>) specific_operator(")") {}
 
         rule parenthesized_regex_word() =
             regex_word_piece() /
@@ -311,7 +321,7 @@ peg::parser! {
             }
 
         pub(crate) rule case_item_ns() -> ast::CaseItem =
-            s:specific_operator("(")? p:pattern() specific_operator(")") c:compound_list() {
+            s:specific_operator("(")? p:pattern() specific_operator(")") c:nested("case", <compound_list()>) {
                 let start = s.map(Token::location).or_else(|| p.first().and_then(|w| w.loc.as_ref()));
                 let end = c.location();
 
@@ -334,7 +344,7 @@ peg::parser! {
                 let loc = maybe_location(start, end);
                 ast::CaseItem { patterns: p, cmd: None, post_action: post_action.0, loc }
             } /
-            s:specific_operator("(")? p:pattern() specific_operator(")") c:compound_list() post_action:case_item_post_action() linebreak() {
+            s:specific_operator("(")? p:pattern() specific_operator(")") c:nested("case", <compound_list()>) post_action:case_item_post_action() linebreak() {
                 let start = s.map(Token::location).or_else(|| p.first().and_then(|w| w.loc.as_ref()));
                 let end = Some(post_action.1);
                 let loc = maybe_location(start, end);
@@ -356,7 +366,7 @@ peg::parser! {
             (w:word() { ast::Word::from(w) }) ++ specific_operator("|")
 
         rule if_clause() -> ast::IfClauseCommand =
-            s:specific_word("if") condition:compound_list() specific_word("then") then:compound_list() elses:else_part()? e:specific_word("fi") {
+            s:specific_word("if") condition:nested("if", <compound_list()>) specific_word("then") then:nested("then", <compound_list()>) elses:else_part()? e:specific_word("fi") {
                 let start = s.location();
                 let end = s.location();
                 let loc = SourceSpan::within(start, end);
@@ -385,17 +395,17 @@ peg::parser! {
             e:_unconditional_else_part() { vec![e] }
 
         rule _conditional_else_part() -> ast::ElseClause =
-            specific_word("elif") condition:compound_list() specific_word("then") body:compound_list() {
+            specific_word("elif") condition:nested("elif", <compound_list()>) specific_word("then") body:nested("then", <compound_list()>) {
                 ast::ElseClause { condition: Some(condition), body }
             }
 
         rule _unconditional_else_part() -> ast::ElseClause =
-            specific_word("else") body:compound_list() {
+            specific_word("else") body:nested("else", <compound_list()>) {
                 ast::ElseClause { condition: None, body }
              }
 
         rule while_clause() -> ast::WhileOrUntilClauseCommand =
-            s:specific_word("while") c:compound_list() d:do_group() {
+            s:specific_word("while") c:nested("while", <compound_list()>) d:do_group() {
                 let start = s.location();
                 let end = &d.loc;
                 let loc = SourceSpan::within(start, end);
@@ -404,7 +414,7 @@ peg::parser! {
             }
 
         rule until_clause() -> ast::WhileOrUntilClauseCommand =
-            s:specific_word("until") c:compound_list() d:do_group() {
+            s:specific_word("until") c:nested("until", <compound_list()>) d:do_group() {
                 let start = s.location();
                 let end = &d.loc;
                 let loc = SourceSpan::within(start, end);
@@ -414,7 +424,7 @@ peg::parser! {
 
         // N.B. Coproc is a bash extension.
         rule coproc_clause() -> ast::CoprocessCommand =
-            s:specific_word("coproc") linebreak() name:coproc_name()? body:command() {
+            s:specific_word("coproc") linebreak() name:coproc_name()? body:nested("coproc", <command()>) {
                 let start = s.location();
                 let loc = body.location().unwrap_or_else(|| start.clone());
 
@@ -459,13 +469,13 @@ peg::parser! {
             !reserved_word() w:fname() { w }
 
         rule brace_group() -> ast::BraceGroupCommand =
-            start:specific_word("{") list:compound_list() end:specific_word("}") {
+            start:specific_word("{") list:nested("{", <compound_list()>) end:specific_word("}") {
                 let loc = SourceSpan::within(start.location(), end.location());
                 ast::BraceGroupCommand { list, loc }
             }
 
         rule do_group() -> ast::DoGroupCommand =
-            start:specific_word("do") list:compound_list() end:specific_word("done") {
+            start:specific_word("do") list:nested("do", <compound_list()>) end:specific_word("done") {
                 let loc = SourceSpan::within(start.location(), end.location());
                 ast::DoGroupCommand { list, loc }
             }
@@ -651,9 +661,11 @@ peg::parser! {
             specific_operator("\n") {}
         }
 
+        // A subscript nested past the limit in the word is reported at the word. (The guard reports
+        // a construct at the token before the position it was entered at.)
         pub(crate) rule assignment_word() -> (ast::Assignment, ast::Word) =
-            non_posix_extensions_enabled() [Token::Word(w, l)] specific_operator("(") elements:array_elements() end:specific_operator(")") {?
-                let mut parsed = word::parse_array_assignment(w.as_str(), elements.as_slice())?;
+            non_posix_extensions_enabled() p:position!() [Token::Word(w, l)] specific_operator("(") elements:array_elements() end:specific_operator(")") {?
+                let mut parsed = nesting.sharing_at(p + 1, || word::parse_array_assignment(w.as_str(), elements.as_slice(), nesting))?;
 
                 let mut all_as_word = w.to_owned();
                 all_as_word.push('(');
@@ -669,8 +681,8 @@ peg::parser! {
                 parsed.loc = loc.clone();
                 Ok((parsed, ast::Word::with_location(&all_as_word, &loc)))
             } /
-            [Token::Word(w, l)] {?
-                let mut parsed = word::parse_assignment_word(w.as_str()).map_err(|_| "not assignment word")?;
+            p:position!() [Token::Word(w, l)] {?
+                let mut parsed = nesting.sharing_at(p + 1, || word::parse_assignment_word(w.as_str(), nesting)).map_err(|_| "not assignment word")?;
                 parsed.loc = l.clone();
                 Ok((parsed, ast::Word::with_location(w, l)))
             }
@@ -706,6 +718,24 @@ peg::parser! {
 
         rule non_posix_extensions_enabled() -> () =
             &[_] {? if !parser_options.sh_mode { Ok(()) } else { Err("posix") } }
+
+        // Parses `r` one nesting level deeper, as the body of `construct`. Fails, without trying
+        // `r`, once that would go past the nesting limit.
+        rule nested<T>(construct: &'static str, r: rule<T>) -> T =
+            enter(construct) v:r()? leave() {? v.ok_or("nested construct") }
+
+        rule enter(construct: &'static str) = #{|_input, pos| {
+            if nesting.enter(construct, pos) {
+                peg::RuleResult::Matched(pos, ())
+            } else {
+                peg::RuleResult::Failed
+            }
+        }}
+
+        rule leave() = #{|_input, pos| {
+            nesting.leave();
+            peg::RuleResult::Matched(pos, ())
+        }}
     }
 }
 
