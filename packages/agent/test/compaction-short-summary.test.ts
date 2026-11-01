@@ -1,11 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import {
-	type CompactionPreparation,
-	compact,
-	createFileOps,
-	DEFAULT_COMPACTION_SETTINGS,
-} from "@oh-my-pi/pi-agent-core/compaction";
+import { type CompactionPreparation, compact, DEFAULT_COMPACTION_SETTINGS } from "@oh-my-pi/pi-agent-core/compaction";
+import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { AssistantMessage, Model, StopReason } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
@@ -53,7 +49,7 @@ function makePreparation(settings: Partial<CompactionPreparation["settings"]> = 
 		recentMessages: [{ role: "user", content: "recent msg", timestamp: Date.now() }],
 		isSplitTurn: false,
 		tokensBefore: 12_345,
-		fileOps: createFileOps(),
+		fileOps: snapcompact.createFileOps(),
 		settings: { ...DEFAULT_COMPACTION_SETTINGS, remoteEnabled: false, ...settings },
 	};
 }

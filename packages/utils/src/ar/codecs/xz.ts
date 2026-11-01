@@ -1,3 +1,4 @@
+import { readUInt32BE } from "../bytes";
 import { crc32, crc64 } from "../checksums";
 import { ArchiveError } from "../error";
 import { lzma2Decompress } from "./lzma";
@@ -14,10 +15,6 @@ function write32LE(bytes: Uint8Array, offset: number, value: number): void {
 	bytes[offset + 1] = (value >>> 8) & 0xff;
 	bytes[offset + 2] = (value >>> 16) & 0xff;
 	bytes[offset + 3] = value >>> 24;
-}
-
-function read32BE(bytes: Uint8Array, offset: number): number {
-	return ((bytes[offset]! << 24) | (bytes[offset + 1]! << 16) | (bytes[offset + 2]! << 8) | bytes[offset + 3]!) >>> 0;
 }
 
 function write32BE(bytes: Uint8Array, offset: number, value: number): void {
@@ -155,7 +152,8 @@ interface XzFilter {
 	properties: Uint8Array;
 }
 
-function deltaDecode(bytes: Uint8Array, distance: number): void {
+/** Undo the delta filter (shared by XZ and 7z) in place. */
+export function deltaDecode(bytes: Uint8Array, distance: number): void {
 	const history = new Uint8Array(256);
 	let position = 0;
 	for (let index = 0; index < bytes.byteLength; index++) {
@@ -166,7 +164,8 @@ function deltaDecode(bytes: Uint8Array, distance: number): void {
 	}
 }
 
-function x86Decode(bytes: Uint8Array, startOffset: number): void {
+/** Undo the x86 BCJ filter (shared by XZ and 7z) in place; `startOffset` is the stream position of `bytes[0]`. */
+export function x86Decode(bytes: Uint8Array, startOffset: number): void {
 	const maskToBitNumber = [0, 1, 2, 2, 3] as const;
 	let previousMask = 0;
 	let previousPosition = 0xfffffffb;
@@ -267,7 +266,7 @@ function sparcDecode(bytes: Uint8Array, startOffset: number): void {
 			)
 		)
 			continue;
-		const source = (read32BE(bytes, index) << 2) >>> 0;
+		const source = (readUInt32BE(bytes, index) << 2) >>> 0;
 		let destination = (source - startOffset - index) >>> 2;
 		destination = (((0 - ((destination >>> 22) & 1)) << 22) & 0x3fffffff) | (destination & 0x3fffff) | 0x40000000;
 		write32BE(bytes, index, destination >>> 0);
@@ -356,7 +355,7 @@ function riscvDecode(bytes: Uint8Array, startOffset: number): void {
 				index += 2;
 				continue;
 			}
-			const address = (read32BE(bytes, index + 4) - startOffset - index) >>> 0;
+			const address = (readUInt32BE(bytes, index + 4) - startOffset - index) >>> 0;
 			instruction2 = ((instruction >>> 12) | (address << 20)) >>> 0;
 			instruction = (0x17 | (register << 7) | ((address + 0x800) & 0xfffff000)) >>> 0;
 		}

@@ -1,3 +1,5 @@
+import { isRecord } from "@oh-my-pi/pi-utils";
+
 /** Frameless Bidi model used by Codex Desktop live calls. */
 export const LIVE_MODEL = "gpt-live-1-codex" as const;
 
@@ -55,10 +57,6 @@ export type LiveServerEvent =
 	| { type: "unknown"; wireType: string };
 
 type UnknownRecord = Record<string, unknown>;
-
-function isRecord(value: unknown): value is UnknownRecord {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function parsePayload(payload: unknown): UnknownRecord | null {
 	let parsed = payload;

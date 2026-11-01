@@ -4,15 +4,17 @@
  */
 import type { Database } from "bun:sqlite";
 import * as path from "node:path";
+import { type } from "@oh-my-pi/omptype";
 import { getModelDbPath, isSqliteCorruptionError, logger, openSqliteDatabaseSync, VERSION } from "@oh-my-pi/pi-utils";
 import RULES from "./compat/rules.json" with { type: "json" };
 import type { Api, Model } from "./types";
 
 // Rows persist fully materialized Models so compatible warm-cache reads do not
 // rerun the compat cascade. Request headers are intentionally omitted:
-// arbitrary provider-defined header names can carry credentials. v14
-// invalidates Antigravity rows predating per-SKU `antigravityWireProfiles`
-// (model_enum label, output cap, SKU thinking). v13 replaces
+// arbitrary provider-defined header names can carry credentials. v15
+// invalidates unbundled OpenAI-compatible rows that ignored provider-reported
+// token limits. v14 invalidates Antigravity rows predating per-SKU
+// `antigravityWireProfiles` (model_enum label, output cap, SKU thinking). v13 replaces
 // sparse ModelSpec rows with materialized rows and records the exact app/rules/
 // builder policy that produced them. v12 invalidated Kimi Code rows carrying the blanket
 // maxTokens: 32000 that predate per-family output caps (k3/k3-256k -> 131072,
@@ -27,7 +29,7 @@ import type { Api, Model } from "./types";
 // retired unknown-limit sentinels (222222/8888); v5 invalidated rows predating
 // effort-tier variant collapsing (raw `-low`/`-high`/`-thinking` member ids);
 // v4 dropped the pre-efforts ThinkingConfig shape.
-const CACHE_SCHEMA_VERSION = 14;
+const CACHE_SCHEMA_VERSION = 15;
 /** Oldest schema whose rows are guaranteed never to carry request headers. */
 const FIRST_HEADERLESS_SCHEMA_VERSION = 11;
 const HEADER_RESTORE_VERSION = 1;
@@ -444,61 +446,33 @@ function migrateCacheSchema(db: Database): void {
 	}
 }
 
+/**
+ * A cacheable materialized model. Also checked on the write side against
+ * in-memory models, so optional keys may be present as `undefined`.
+ */
+const MaterializedModel = type({
+	id: "string > 0",
+	name: "string > 0",
+	api: "string > 0",
+	provider: "string > 0",
+	// Empty is legitimate: Azure-style providers resolve the endpoint from
+	// configuration at request time, and their bundled rows carry "".
+	baseUrl: "string",
+	reasoning: "boolean",
+	input: "('text' | 'image')[] > 0",
+	"headers?": "undefined",
+	supportsComputerUseConfig: "boolean | null",
+	contextWindow: "number > 0 | null",
+	maxTokens: "number > 0 | null",
+	identity: { class: "string" },
+	"compat?": type("object")
+		.narrow(compat => !Array.isArray(compat))
+		.or("undefined"),
+	cost: { input: "number", output: "number", cacheRead: "number", cacheWrite: "number" },
+});
+
 function isMaterializedModel(value: unknown): value is PersistedModel<Api> {
-	if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
-	const model = value as Partial<PersistedModel<Api>>;
-	if (
-		typeof model.id !== "string" ||
-		model.id.length === 0 ||
-		typeof model.name !== "string" ||
-		model.name.length === 0 ||
-		typeof model.api !== "string" ||
-		model.api.length === 0 ||
-		typeof model.provider !== "string" ||
-		model.provider.length === 0 ||
-		// Empty is legitimate: Azure-style providers resolve the endpoint from
-		// configuration at request time, and their bundled rows carry "".
-		typeof model.baseUrl !== "string" ||
-		typeof model.reasoning !== "boolean" ||
-		!Array.isArray(model.input) ||
-		model.input.length === 0 ||
-		model.input.some(input => input !== "text" && input !== "image") ||
-		model.headers !== undefined ||
-		!Object.hasOwn(model, "supportsComputerUseConfig") ||
-		(model.supportsComputerUseConfig !== null && typeof model.supportsComputerUseConfig !== "boolean")
-	) {
-		return false;
-	}
-	const contextWindow = model.contextWindow;
-	const maxTokens = model.maxTokens;
-	if (
-		(contextWindow !== null &&
-			(typeof contextWindow !== "number" || !Number.isFinite(contextWindow) || contextWindow <= 0)) ||
-		(maxTokens !== null && (typeof maxTokens !== "number" || !Number.isFinite(maxTokens) || maxTokens <= 0))
-	) {
-		return false;
-	}
-	if (
-		model.identity === null ||
-		typeof model.identity !== "object" ||
-		typeof model.identity.class !== "string" ||
-		(model.compat !== undefined &&
-			(model.compat === null || typeof model.compat !== "object" || Array.isArray(model.compat)))
-	) {
-		return false;
-	}
-	if (model.cost === null || typeof model.cost !== "object") return false;
-	const cost = model.cost as Partial<Model<Api>["cost"]>;
-	return (
-		typeof cost.input === "number" &&
-		Number.isFinite(cost.input) &&
-		typeof cost.output === "number" &&
-		Number.isFinite(cost.output) &&
-		typeof cost.cacheRead === "number" &&
-		Number.isFinite(cost.cacheRead) &&
-		typeof cost.cacheWrite === "number" &&
-		Number.isFinite(cost.cacheWrite)
-	);
+	return MaterializedModel.allows(value);
 }
 
 function parseMaterializedModels<TApi extends Api>(serialized: string): Model<TApi>[] | null {
