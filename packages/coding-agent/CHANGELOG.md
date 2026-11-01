@@ -527,6 +527,10 @@
 
 - Added the `_session/steering` ACP extension (advertised as `_meta.steering.supported`), so clients such as agent-shell can steer a running turn; a steer sent while a permission dialog is open cancels that dialog, and `_meta.steering.queue: "followUp"` queues a follow-up instead ([#15885](https://github.com/can1357/oh-my-pi/pull/15885) by [@marcintustin](https://github.com/marcintustin))
 - `/mcp reauth <name>` now works over ACP, RPC, and print mode (`omp -p '/mcp reauth <name>'`): it opens the browser, prints the authorization URL, reconnects the server in the running session, and print mode exits 1 when reauthorization fails ([#16046](https://github.com/can1357/oh-my-pi/pull/16046) by [@marcintustin](https://github.com/marcintustin))
+- Make auto-thinking classification timeout configurable via `providers.autoThinkingTimeoutMs` and `PI_AUTO_THINKING_TIMEOUT_MS` ([#14321](https://github.com/can1357/oh-my-pi/issues/14321))
+- Make auto-thinking classification timeout configurable via `providers.autoThinkingTimeoutMs` and `PI_AUTO_THINKING_TIMEOUT_MS` ([#14756](https://github.com/can1357/oh-my-pi/pull/14756) by [@twotnguyen](https://github.com/twotnguyen))
+- Make auto-thinking classification timeout configurable via `providers.autoThinkingTimeoutMs` and `PI_AUTO_THINKING_TIMEOUT_MS` ([#14756](https://github.com/can1357/oh-my-pi/pull/14756) by [@twotnguyen](https://github.com/twotnguyen), fixing [#14321](https://github.com/can1357/oh-my-pi/issues/14321))
+- Files the write tool creates now preview the way the matching code blocks in replies do, building up while the write streams: `.svg` as an image and Mermaid (`.mmd`, `.mermaid`) as a diagram under the write card, and in Tern also 3D models (`.obj`, `.ply`, `.wrl`, `.x3dv`, `.stl`, `.gltf`, `.usda`); in Tern an SVG write now draws like an SVG figure in a reply
 
 ### Changed
 

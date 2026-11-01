@@ -50,10 +50,12 @@ import type { SessionManager } from "./session-manager";
 
 import {
 	cfgDefaultThinkingLevel,
+	cfgProvidersAutoThinkingTimeoutMs,
 	cfgProvidersFireworksTier,
 	cfgTierAnthropic,
 	cfgTierGoogle,
 	cfgTierOpenai,
+	MAX_AUTO_THINKING_TIMEOUT_MS,
 } from "./settings";
 import { cfgDisabledProviders, cfgEnabledModels } from "../config/model-settings";
 
@@ -619,7 +621,19 @@ export class ModelControls {
 	}
 
 	/** Timeout (ms) for per-turn auto-thinking classification before falling back. */
-	static readonly #AUTO_THINKING_TIMEOUT_MS = 4000;
+	static readonly #DEFAULT_AUTO_THINKING_TIMEOUT_MS = 4000;
+
+	#resolveAutoThinkingTimeoutMs(): number {
+		const envOverride = Bun.env.OMP_AUTO_THINKING_TIMEOUT_MS ?? Bun.env.OMP_JUDGMENT_TIMEOUT_MS;
+		if (envOverride !== undefined && envOverride.trim() !== "") {
+			const parsed = Number(envOverride.trim());
+			if (Number.isFinite(parsed) && parsed > 0) return Math.min(Math.floor(parsed), MAX_AUTO_THINKING_TIMEOUT_MS);
+		}
+		const configured = cfgProvidersAutoThinkingTimeoutMs.get(this.#host.settings);
+		return Number.isFinite(configured) && configured > 0
+			? Math.min(Math.floor(configured), MAX_AUTO_THINKING_TIMEOUT_MS)
+			: ModelControls.#DEFAULT_AUTO_THINKING_TIMEOUT_MS;
+	}
 
 	/**
 	 * Classify the current user turn and set the effective thinking level for it.
@@ -644,8 +658,9 @@ export class ModelControls {
 			// to the highest supported level for this model.
 			resolved = clampAutoThinkingEffort(model, Effort.Max);
 		} else {
+			const timeoutMs = this.#resolveAutoThinkingTimeoutMs();
 			const controller = new AbortController();
-			const timer = setTimeout(() => controller.abort(), ModelControls.#AUTO_THINKING_TIMEOUT_MS);
+			const timer = setTimeout(() => controller.abort(), timeoutMs);
 			const usageOwner = {
 				sessionId: this.#host.sessionManager.getSessionId(),
 				parentId: this.#host.sessionManager.getLeafId(),
