@@ -18,6 +18,10 @@
 - Fixed Google Vertex requests with Workforce Identity Federation ADC failing token refresh against the wrong endpoint ([#17447](https://github.com/can1357/oh-my-pi/issues/17447)).
 - Fixed Anthropic (and other rotating-token) OAuth accounts being signed out automatically when a background usage poll's token refresh got `invalid_grant`, including refreshes a client delegates to an auth broker; usage polling no longer disables credentials, so only a real request's refresh can do that ([#17468](https://github.com/can1357/oh-my-pi/issues/17468))
 
+### Added
+
+- Added `CredentialUnavailableError`, a transient error for a configured credential source that produced no key; unlike `MissingApiKeyError`, a retry may succeed ([#14031](https://github.com/can1357/oh-my-pi/pull/14031) by [@sjawhar](https://github.com/sjawhar)).
+
 ## [18.14.2] - 2026-10-31
 
 ### Breaking Changes

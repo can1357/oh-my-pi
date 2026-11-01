@@ -10,6 +10,7 @@
 ### Fixed
 
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
+- A provider `apiKey: "!command"` that fails, times out, or prints nothing is now retried by turn auto-retry, which runs the command again up to 3 times, each after its 30-second failure backoff, instead of ending the turn (or subagent) with "No API key" ([#14031](https://github.com/can1357/oh-my-pi/pull/14031) by [@sjawhar](https://github.com/sjawhar)).
 
 ## [18.15.0] - 2026-11-01
 
