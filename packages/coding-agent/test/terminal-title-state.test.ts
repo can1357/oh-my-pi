@@ -71,9 +71,9 @@ describe("buildTerminalTitleWithState", () => {
 		expect(unbranded(LABEL, "idle", true)).toBe(`> ${LABEL}`);
 		expect(unbranded(LABEL, "working", true)).toBe(`⠋ ${LABEL}`);
 		expect(unbranded(LABEL, "attention", true)).toBe(`! ${LABEL}`);
-		expect(unbranded(undefined, "idle", true)).toBe(">");
 		expect(unbranded(LABEL, "working", false)).toBe(LABEL);
 		// With neither brand nor label the title still names the program instead of going blank.
+		expect(unbranded(undefined, "idle", true)).toBe("> omp");
 		expect(unbranded(undefined, "idle", false)).toBe("omp");
 	});
 

@@ -889,7 +889,7 @@ const terminalTitleRuntime: {
  *   - disabled:              `π: label`.
  * Without a label the separator trails the brand (`π >`) so the state stays visible.
  * With `brand` off the title starts at the separator (`> label`), or is the bare
- * label when disabled (`omp` without one).
+ * label when disabled; without a label it names the program (`> omp`, `omp`).
  * The `working` separator cycles `TERMINAL_TITLE_SPINNER_STYLES[style]`; `style`
  * defaults to `braille` so existing 5-arg callers keep the historical frames.
  */
@@ -904,8 +904,12 @@ export function buildTerminalTitleWithState(
 	nativeTitleFailed = false,
 	brand = true,
 ): string {
-	if (!enabled) {
-		if (!brand) return label ?? NATIVE_TERMINAL_TITLE;
+	if (!brand) {
+		// Unbranded, the label is the only thing naming the tab: never leave it empty.
+		const name = label ?? NATIVE_TERMINAL_TITLE;
+		if (!enabled) return name;
+		label = name;
+	} else if (!enabled) {
 		return label ? `${DEFAULT_TERMINAL_TITLE}: ${label}` : DEFAULT_TERMINAL_TITLE;
 	}
 	const frames = TERMINAL_TITLE_SPINNER_STYLES[style] ?? TERMINAL_TITLE_SPINNER_STYLES.braille;
