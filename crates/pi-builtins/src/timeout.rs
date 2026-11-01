@@ -378,8 +378,10 @@ impl builtins::Command for TimeoutCommand {
 #[cfg(test)]
 mod tests {
 	use std::{
+		cell::RefCell,
 		io::{Read, Seek, SeekFrom},
 		sync::{
+			Arc,
 			atomic::{AtomicBool, Ordering},
 			mpsc,
 		},
@@ -449,8 +451,30 @@ mod tests {
 		}
 	}
 
-	/// Set once [`SpinCommand`] starts spinning.
-	static SPIN_STARTED: AtomicBool = AtomicBool::new(false);
+	/// Lets a test watch and stop the [`SpinCommand`] it runs on another
+	/// thread: the command sets `started` before it spins, and setting
+	/// `released` stops it whether or not cancellation reached it.
+	#[derive(Default)]
+	struct SpinGate {
+		started: AtomicBool,
+		released: AtomicBool,
+	}
+
+	/// Sets `released` when dropped, so a test that fails while the command
+	/// spins does not leave a core busy for the tests that run after it.
+	struct ReleaseOnDrop(Arc<SpinGate>);
+
+	impl Drop for ReleaseOnDrop {
+		fn drop(&mut self) {
+			self.0.released.store(true, Ordering::SeqCst);
+		}
+	}
+
+	thread_local! {
+		/// The gate of the [`SpinCommand`] that runs on this thread. Each run
+		/// gets its own, so no state carries over from one test to the next.
+		static SPIN_GATE: RefCell<Option<Arc<SpinGate>>> = const { RefCell::new(None) };
+	}
 
 	/// An in-process operand that never awaits: it spins until its
 	/// cancellation token is cancelled, so nothing else on its task runs.
@@ -464,8 +488,11 @@ mod tests {
 			&self,
 			context: ExecutionContext<'_, SE>,
 		) -> Result<ExecutionResult, Self::Error> {
-			SPIN_STARTED.store(true, Ordering::SeqCst);
-			while !context.is_cancelled() {
+			let gate = SPIN_GATE
+				.with_borrow(Clone::clone)
+				.expect("spin-test runs on a thread that holds a SpinGate");
+			gate.started.store(true, Ordering::SeqCst);
+			while !context.is_cancelled() && !gate.released.load(Ordering::SeqCst) {
 				std::hint::spin_loop();
 			}
 			Ok(ExecutionResult::new(99))
@@ -492,12 +519,21 @@ mod tests {
 	}
 
 	async fn run_with_deadline(command: &str) -> ExecutionResult {
+		run_with_deadline_under(command, None).await
+	}
+
+	/// [`run_with_deadline`], with `caller` as the run's cancellation token
+	/// when given.
+	async fn run_with_deadline_under(command: &str, caller: Option<CancellationToken>) -> ExecutionResult {
 		let mut shell = test_shell().await;
 		let mut params = shell.default_exec_params();
 		// Cancelling the operand makes the shell report an interrupted command;
 		// without this the diagnostic lands on the test runner's terminal.
 		for fd in [OpenFiles::STDIN_FD, OpenFiles::STDOUT_FD, OpenFiles::STDERR_FD] {
 			params.set_fd(fd, brush_core::openfiles::null().expect("null device"));
+		}
+		if let Some(token) = caller {
+			params.set_cancel_token(token);
 		}
 		tokio::time::timeout(
 			Duration::from_secs(1),
@@ -995,6 +1031,27 @@ mod tests {
 		assert_eq!(u8::from(result.exit_code), 143, "SIGTERM death is 128+15");
 	}
 
+	/// `timeout`'s own limit cancels only its command's token, which is a
+	/// child of the caller's. If the limit cancelled the caller's token, each
+	/// limit that fires would cancel the caller's whole run, and the run would
+	/// report the shell's error status 1 in place of 124.
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn own_limit_leaves_the_callers_token_alone() {
+		let caller = CancellationToken::new();
+		for (command, status) in [
+			("timeout 0.250 status-test", 7),
+			("timeout 0.010 slow-test", 124),
+			("timeout -s KILL 0.010 slow-test", 137),
+			("timeout -s TERM 0.050 sleep 5", 124),
+			("timeout --preserve-status 0.050 sleep 5", 143),
+		] {
+			let result = run_with_deadline_under(command, Some(caller.clone())).await;
+			assert_eq!(u8::from(result.exit_code), status, "{command}");
+			assert!(!caller.is_cancelled(), "`{command}` cancelled the caller's token");
+		}
+	}
+
 	#[test]
 	fn caller_cancel_stops_an_operand_that_never_awaits() {
 		// Failure mode: cancelling a run hangs in `timeout 30 <in-process
@@ -1004,10 +1061,14 @@ mod tests {
 		// run must read as interrupted, not as the command's own status.
 		let caller = CancellationToken::new();
 		let token = caller.clone();
+		let gate = Arc::new(SpinGate::default());
+		let _release = ReleaseOnDrop(Arc::clone(&gate));
+		let run_gate = Arc::clone(&gate);
 		let (done_tx, done_rx) = mpsc::channel();
-		// A spinning operand would pin the runtime for good, so the runtime
-		// lives on a thread that is left behind when the test fails.
+		// A spinning operand holds its runtime's only thread, so the runtime
+		// runs on a thread of its own, which `_release` frees if the test fails.
 		std::thread::spawn(move || {
+			SPIN_GATE.set(Some(run_gate));
 			let runtime = tokio::runtime::Builder::new_current_thread()
 				.enable_all()
 				.build()
@@ -1023,6 +1084,9 @@ mod tests {
 					params.set_fd(fd, brush_core::openfiles::null().expect("null device"));
 				}
 				params.set_cancel_token(token);
+				// The builtin is called directly: once the caller's token is
+				// cancelled, the shell reports status 1 for the run whatever
+				// `timeout` returns, so only here does that status show.
 				let timeout = <TimeoutCommand as builtins::Command>::new(
 					["timeout", "30", "spin-test"].map(String::from),
 				)
@@ -1035,7 +1099,7 @@ mod tests {
 		});
 
 		let started = Instant::now();
-		while !SPIN_STARTED.load(Ordering::SeqCst) {
+		while !gate.started.load(Ordering::SeqCst) {
 			assert!(started.elapsed() < Duration::from_secs(5), "spin-test never started");
 			std::thread::sleep(Duration::from_millis(1));
 		}
