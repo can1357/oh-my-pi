@@ -480,14 +480,13 @@ export class EpisodicGraph {
 			for (let i = 0; i < frontierIds.length; i += MAX_SQL_IDS_PER_CHUNK) {
 				const chunk = frontierIds.slice(i, i + MAX_SQL_IDS_PER_CHUNK);
 				const placeholders = chunk.map(() => "?").join(", ");
-				const edgesByNode = new Map<string, GraphEdge[]>();
-				for (const mem of chunk) edgesByNode.set(mem, []);
-
-				let unseenCandidateEdges = 0;
+				const edgesByNode = new Map<string, Map<string, GraphEdge>>();
+				for (const mem of chunk) edgesByNode.set(mem, new Map());
+				const chunkUnseenNeighbors = new Set<string>();
 				let lastWeight: number | null = null;
 				let lastId: number | null = null;
 
-				while (unseenCandidateEdges < MAX_TRAVERSAL_EDGES_PER_CHUNK) {
+				while (chunkUnseenNeighbors.size < MAX_TRAVERSAL_EDGES_PER_CHUNK) {
 					const paginationCondition =
 						lastWeight !== null && lastId !== null ? " AND (weight < ? OR (weight = ? AND id > ?))" : "";
 					const querySql =
@@ -518,13 +517,22 @@ export class EpisodicGraph {
 							continue;
 						}
 
-						const edge = edgeFromRow(row);
-						edgesByNode.get(edge.source)?.push(edge);
-						if (edge.target !== edge.source) {
-							edgesByNode.get(edge.target)?.push(edge);
+						if (!seen.has(row.target)) {
+							const nodeEdges = edgesByNode.get(row.source);
+							if (nodeEdges && !nodeEdges.has(row.target)) {
+								nodeEdges.set(row.target, edgeFromRow(row));
+							}
+							chunkUnseenNeighbors.add(row.target);
 						}
-						unseenCandidateEdges++;
-						if (unseenCandidateEdges >= MAX_TRAVERSAL_EDGES_PER_CHUNK) {
+						if (row.target !== row.source && !seen.has(row.source)) {
+							const nodeEdges = edgesByNode.get(row.target);
+							if (nodeEdges && !nodeEdges.has(row.source)) {
+								nodeEdges.set(row.source, edgeFromRow(row));
+							}
+							chunkUnseenNeighbors.add(row.source);
+						}
+
+						if (chunkUnseenNeighbors.size >= MAX_TRAVERSAL_EDGES_PER_CHUNK) {
 							break;
 						}
 					}
@@ -533,8 +541,7 @@ export class EpisodicGraph {
 				}
 
 				for (const mem of chunk) {
-					for (const edge of edgesByNode.get(mem) ?? []) {
-						const neighbor = edge.source === mem ? edge.target : edge.source;
+					for (const [neighbor, edge] of edgesByNode.get(mem) ?? []) {
 						if (seen.has(neighbor)) continue;
 						seen.add(neighbor);
 						nextLevel.add(neighbor);
