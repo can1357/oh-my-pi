@@ -407,6 +407,7 @@ import {
 	cfgTerminalProgramStatus,
 	cfgTerminalShowImages,
 	cfgTuiHyperlinks,
+	cfgTuiShowLinkUrl,
 	cfgTuiImeSafeCursor,
 	cfgTuiMaxInlineImages,
 	cfgTuiAutoGraph,
@@ -490,6 +491,7 @@ const cfgLiveUiSettings = combine({
 	"tui.textSizing": cfgTuiTextSizing,
 	"tui.tight": cfgTuiTight,
 	"tui.hyperlinks": cfgTuiHyperlinks,
+	"tui.showLinkUrl": cfgTuiShowLinkUrl,
 	"tui.titleState": cfgTuiTitleState,
 	"tui.titleSpinner": cfgTuiTitleSpinner,
 	"statusLine.preset": cfgStatusLinePreset,
@@ -1467,6 +1469,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 	proseOnlyThinking = true;
 	expandThinkingBlocks = false;
+	get linkUrls(): boolean {
+		return cfgTuiShowLinkUrl.get(this.settings);
+	}
 	compactionQueuedMessages: CompactionQueuedMessage[] = [];
 	yieldCompaction: YieldCompaction | undefined = undefined;
 	compactionQueueOrigin: ConversationPosition | undefined = undefined;
@@ -2456,7 +2461,14 @@ export class InteractiveMode implements InteractiveModeContext {
 				);
 				headerAfter.push(new Text(summary, 1, 0));
 			} else {
-				headerAfter.push(new Markdown(this.#startupChangelog.markdown?.trim() ?? "", 1, 0, getMarkdownTheme()));
+				const headerMarkdown = new Markdown(
+					this.#startupChangelog.markdown?.trim() ?? "",
+					1,
+					0,
+					getMarkdownTheme(),
+				);
+				headerMarkdown.linkUrls = this.linkUrls;
+				headerAfter.push(headerMarkdown);
 			}
 			headerAfter.push(new Spacer(1), new DynamicBorder());
 		}
@@ -4266,6 +4278,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (any("tui.hyperlinks")) {
 			// The tui.hyperlinks effect already re-applied the flag; repaint cached rows.
 			this.statusLine.invalidate();
+			this.ui.invalidate();
+			this.ui.requestRender();
+		}
+		if (any("tui.showLinkUrl")) {
+			// The value is read live per instance; only the repaint is needed.
 			this.ui.invalidate();
 			this.ui.requestRender();
 		}

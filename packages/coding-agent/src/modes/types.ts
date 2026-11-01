@@ -299,6 +299,8 @@ export interface InteractiveModeContext {
 	noteDisplayableThinkingContent(message: AgentMessage): boolean;
 	proseOnlyThinking: boolean;
 	expandThinkingBlocks: boolean;
+	/** Whether named links append their target URL in parentheses (`tui.showLinkUrl`). */
+	linkUrls: boolean;
 	compactionQueuedMessages: CompactionQueuedMessage[];
 	/** Compaction queued for the next yield; follow-ups sent after it wait in `compactionQueuedMessages`. */
 	yieldCompaction: YieldCompaction | undefined;
