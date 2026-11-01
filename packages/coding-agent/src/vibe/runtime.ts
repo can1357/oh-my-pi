@@ -656,6 +656,9 @@ export class VibeSessionRegistry {
 		const registry = AgentRegistry.global();
 		const existing = registry.get(id);
 		if (expected !== undefined && existing !== undefined && existing !== expected) return;
+		// A kill releases the worker before it gets here, which unregisters its ref: the
+		// worker's identity then lives only on the ref captured before the release.
+		const retained = existing ?? expected ?? undefined;
 		if (
 			existing &&
 			(existing.kind !== "sub" || existing.parentId !== ownerId || existing.sessionFile !== childSessionFile)
@@ -683,7 +686,8 @@ export class VibeSessionRegistry {
 			sessionFile: childSessionFile,
 			status: "aborted",
 			// Same worker and transcript: a later reopen is a revival, not a replacement.
-			identityToken: existing?.identityToken,
+			identityToken: retained?.identityToken,
+			conversationToken: retained?.conversationToken,
 		});
 	}
 

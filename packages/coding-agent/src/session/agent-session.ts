@@ -1112,6 +1112,8 @@ export class AgentSession implements SettingsScope {
 	#openTurnObservation: TurnObservation | undefined;
 	// Agent identity (registry id) used for IRC routing and job ownership.
 	#agentId: string | undefined;
+	/** Registry holding this session's agent ref; the process-global one unless the host gave its own. */
+	#agentRegistry: AgentRegistry | undefined;
 	#agentKind: "main" | "sub" = "main";
 	#scoutAllowedBySpawnPolicy = true;
 	#providerSessionId: string | undefined;
@@ -2364,9 +2366,10 @@ export class AgentSession implements SettingsScope {
 			build: buildLaunchCompletionBatchMessage,
 		});
 		// Due-by notices about subagents this agent dispatched (or its subagents
-		// did). A notice whose subagent settled before it was read is dropped.
+		// did). A notice is dropped unread once its subagent settles, or once this
+		// session no longer holds the conversation the notice was addressed to.
 		this.yieldQueue.register<SubagentOverdueEntry>(SUBAGENT_OVERDUE_MESSAGE_TYPE, {
-			isStale: entry => this.#isDisposed || entry.isSettled(),
+			isStale: entry => this.#isDisposed || entry.isStale(),
 			build: buildSubagentOverdueMessage,
 		});
 		// Background-job completions / late diagnostics are pulled into the run at
@@ -2526,6 +2529,7 @@ export class AgentSession implements SettingsScope {
 		this.#streamingEditGuard = new StreamingEditGuard(streamGuardsHost);
 		this.#loopGuards = new LoopGuards(streamGuardsHost);
 		this.#agentId = config.agentId;
+		this.#agentRegistry = config.agentRegistry;
 		this.#agentKind = config.agentKind ?? "main";
 		// A subagent's streamed text reaches no output sink until the run settles
 		// (the parent sees only the yield), so a failed turn's partial prose is
@@ -3114,6 +3118,14 @@ export class AgentSession implements SettingsScope {
 
 	getAgentId(): string | undefined {
 		return this.#agentId;
+	}
+
+	/**
+	 * This session replaced its conversation: give its agent ref a new
+	 * conversation identity, so notices addressed to the old one stop matching.
+	 */
+	#renewConversation(): void {
+		if (this.#agentId) (this.#agentRegistry ?? AgentRegistry.global()).renewConversation(this.#agentId, this);
 	}
 
 	/** Dequeue the next HARD forced tool choice for the upcoming LLM call, dropping
@@ -6629,6 +6641,7 @@ export class AgentSession implements SettingsScope {
 		// The cleared context is a new transcript: an aside or held message captured for the old one drops
 		// its record instead of landing here (mirrors newSession()).
 		this.#sessionGeneration++;
+		this.#renewConversation();
 		this.#pendingNextTurnMessages = [];
 		this.#experimentalContextNotesReminder = undefined;
 		this.#scheduledHiddenNextTurnGeneration = undefined;
@@ -11444,6 +11457,7 @@ export class AgentSession implements SettingsScope {
 			// outgoing session also drops its record instead of landing in this new one.
 			this.#irc.clearPending();
 			this.#sessionGeneration++;
+			this.#renewConversation();
 			this.#scheduledHiddenNextTurnGeneration = undefined;
 			this.#queuedMessageDrainBlocked = false;
 			this.#usagePreflightReadyForNextModelCall = false;
@@ -13379,6 +13393,8 @@ export class AgentSession implements SettingsScope {
 			if (previousSessionState.sessionId !== this.sessionManager.getSessionId()) {
 				this.#notifySessionChangeCallbacks();
 			}
+			// Only now is the other transcript this session's conversation; a rollback keeps the old one.
+			if (switchingToDifferentSession) this.#renewConversation();
 			generationSettled.resolve();
 			this.#sessionGenerationSettled = previousSessionGenerationSettled;
 			if (modelFallbackWarning) {

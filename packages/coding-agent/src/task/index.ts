@@ -1050,7 +1050,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			{ agentId: spawn.agentId, detached: spawn.detached },
 		);
 		if (spawn.agentId !== undefined) {
-			const registry = AgentRegistry.global();
+			// The registry this session's agents live in: an SDK host may give a session its own.
+			const registry = this.session.agentRegistry ?? AgentRegistry.global();
 			const ownerId = this.session.getAgentId?.() ?? MAIN_AGENT_ID;
 			const minutes = spawn.params.dueMinutes ?? cfgTaskDueMinutes.get(this.session.settings);
 			registry.dueBy.arm(

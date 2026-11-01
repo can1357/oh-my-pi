@@ -79,6 +79,14 @@ export interface AgentRef {
 	 * Revival keeps it. A replacement registration gets a new one.
 	 */
 	identityToken: string;
+	/**
+	 * Opaque identity of the conversation the agent's session holds. It changes
+	 * when that session replaces its conversation (`/new`, a switch to another
+	 * transcript, an in-place reset) and survives what continues one (a fork,
+	 * park and revival, a reopen). Code that addresses the conversation that
+	 * asked for something pairs the id with this token as well.
+	 */
+	conversationToken: string;
 	createdAt: number;
 	lastActivity: number;
 	/** Short gist of what the agent is currently doing (latest intent or tool), for the work-aware roster. Display-only. */
@@ -127,6 +135,8 @@ export interface RegisterInput {
 	history?: AgentHistorySummary;
 	/** Identity token retained by an in-process revival. */
 	identityToken?: string;
+	/** Conversation token retained by an in-process revival of the same transcript. */
+	conversationToken?: string;
 	/** Run lifecycle milestones restored from persisted history, when known. */
 	lifecycle?: AgentRunLifecycle;
 }
@@ -174,6 +184,7 @@ export class AgentRegistry {
 			session: input.session,
 			sessionFile: input.sessionFile ?? null,
 			identityToken: input.identityToken ?? crypto.randomUUID(),
+			conversationToken: input.conversationToken ?? crypto.randomUUID(),
 			createdAt: input.createdAt ?? now,
 			lastActivity: input.lastActivity ?? now,
 			activity: input.activity,
@@ -216,6 +227,7 @@ export class AgentRegistry {
 			sessionFile: current.sessionFile,
 			status: "parked",
 			identityToken: current.identityToken,
+			conversationToken: current.conversationToken,
 			createdAt: current.createdAt,
 			history: current.history,
 		});
@@ -376,6 +388,19 @@ export class AgentRegistry {
 		const ref = this.#refs.get(id);
 		if (!ref || !this.#matchesExpected(ref, expected)) return false;
 		ref.session = null;
+		return true;
+	}
+
+	/**
+	 * Give the ref `session` holds a new conversation identity: the session has
+	 * replaced its conversation, so anything addressed to the old one (a due-by
+	 * notice about work it dispatched) no longer reaches it. A ref that does not
+	 * hold `session` is left alone.
+	 */
+	renewConversation(id: string, session: AgentSession): boolean {
+		const ref = this.#refs.get(id);
+		if (!ref || ref.session !== session) return false;
+		ref.conversationToken = crypto.randomUUID();
 		return true;
 	}
 

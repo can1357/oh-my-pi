@@ -1,7 +1,8 @@
 /**
  * `omp --restore` end to end for a subagent: a transcript a crash cut off mid tool
  * call is revived from disk, its cut-off call runs again, the agent answers, and the
- * parent receives the answer as the subagent's job.
+ * parent receives the answer as the subagent's job. The due-by it was dispatched with
+ * died with the old process, and the restored job says so where it is seen.
  */
 import { afterEach, beforeEach, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
@@ -11,6 +12,8 @@ import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { Effort } from "@oh-my-pi/pi-ai";
 import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
+import { ProcProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/proc-protocol";
+import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -20,7 +23,9 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
-import { restoreSession } from "@oh-my-pi/pi-coding-agent/task/restore";
+import * as restoreModule from "@oh-my-pi/pi-coding-agent/task/restore";
+import { type RestoreOutcome, restoreSession } from "@oh-my-pi/pi-coding-agent/task/restore";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
@@ -85,7 +90,13 @@ const thinking = { mode: "effort", efforts: [Effort.Medium, Effort.High] } as co
  * `handoff` records a prewalk handoff to `high` effort before the cut-off call;
  * `fallback` follows that handoff with a retry fallback hop back to the spawn model.
  */
-async function restoreInterruptedChild(options: { transcript?: "handoff" | "fallback" } = {}) {
+async function restoreInterruptedChild(
+	options: {
+		transcript?: "handoff" | "fallback";
+		/** Runs while the restored child's re-run call waits for its answer. */
+		whileRunning?: (outcome: RestoreOutcome) => Promise<void>;
+	} = {},
+) {
 	const cwd = path.join(root, "home", "work");
 	await fs.mkdir(cwd, { recursive: true });
 	const notes = path.join(cwd, "notes.txt");
@@ -144,16 +155,21 @@ async function restoreInterruptedChild(options: { transcript?: "handoff" | "fall
 	const modelRegistry = new ModelRegistry(authStorage);
 	const readResults: Record<string, string[]> = { [SPAWN_MODEL]: [], [HANDOFF_MODEL]: [] };
 	const readEfforts: Record<string, (string | undefined)[]> = { [SPAWN_MODEL]: [], [HANDOFF_MODEL]: [] };
+	const reading = Promise.withResolvers<void>();
+	const answer = Promise.withResolvers<void>();
+	if (!options.whileRunning) answer.resolve();
 	const mocks = [SPAWN_MODEL, HANDOFF_MODEL].map(id =>
 		Object.assign(
 			createMockModel({
 				id,
 				reasoning: true,
-				handler: (context, streamOptions) => {
+				handler: async (context, streamOptions) => {
 					const last = context.messages.at(-1);
 					if (last?.role !== "toolResult" || last.toolName !== "read") return { content: ["label"] };
 					readResults[id]!.push(JSON.stringify(last.content));
 					readEfforts[id]!.push(streamOptions?.reasoning);
+					reading.resolve();
+					await answer.promise;
 					return { content: [`restored: 42 (${id})`] };
 				},
 			}),
@@ -196,6 +212,14 @@ async function restoreInterruptedChild(options: { transcript?: "handoff" | "fall
 	try {
 		const outcome = await restoreSession(session);
 		expect(outcome.subagents).toEqual([AGENT_ID]);
+		if (options.whileRunning) {
+			try {
+				await reading.promise;
+				await options.whileRunning(outcome);
+			} finally {
+				answer.resolve();
+			}
+		}
 		return { delivered: await delivered.promise, readResults, readEfforts };
 	} finally {
 		authStorage.close();
@@ -225,4 +249,30 @@ it("revives a subagent whose handoff target failed over on the spawn model, not 
 	expect(delivered).toContain(`restored: 42 (${SPAWN_MODEL})`);
 	expect(readResults[SPAWN_MODEL]).toHaveLength(1);
 	expect(readResults[HANDOFF_MODEL]).toEqual([]);
+}, 20_000);
+
+it("says a restored subagent has no due-by, in the restore status and in proc:// while it runs", async () => {
+	const procSession = {
+		cwd: root,
+		hasUI: false,
+		settings: Settings.isolated({ "launch.enabled": false }),
+		getAgentId: () => MAIN_AGENT_ID,
+		agentRegistry: AgentRegistry.global(),
+		asyncJobManager: manager,
+	} as unknown as ToolSession;
+	let row: string | undefined;
+	let restored: RestoreOutcome | undefined;
+	const { delivered } = await restoreInterruptedChild({
+		whileRunning: async outcome => {
+			restored = outcome;
+			const listing = await new ProcProtocolHandler().resolve(parseInternalUrl("proc://"), { session: procSession });
+			row = listing.content.split("\n").find(line => line.startsWith(`${AGENT_ID} `));
+		},
+	});
+
+	expect(row).toMatch(/ \[task\] running .* — no due-by$/);
+	expect(restoreModule.describeRestore(restored!)).toBe(
+		"Restored: 1 subagent going on with its interrupted turn. Restored subagents have no due-by: nobody is told if one runs long.",
+	);
+	expect(delivered).toContain(`restored: 42 (${SPAWN_MODEL})`);
 }, 20_000);

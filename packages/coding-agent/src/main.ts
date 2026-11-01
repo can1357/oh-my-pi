@@ -136,7 +136,7 @@ import {
 	resolvePromptInput,
 } from "./system-prompt";
 import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
-import { type RestoreOutcome, restoreSession } from "./task/restore";
+import { describeRestore, type RestoreOutcome, restoreSession } from "./task/restore";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
 import { cfgTelemetryOtlpExportEnabled } from "./telemetry-settings";
 import { registerLocalInferenceApi } from "./tiny/local-inference-api";
@@ -802,17 +802,7 @@ async function runInteractiveMode(
 
 	if (startupRestore) {
 		try {
-			const { turn, subagents } = await startupRestore();
-			const agents = subagents.length === 1 ? "1 subagent" : `${subagents.length} subagents`;
-			mode.showStatus(
-				turn && subagents.length > 0
-					? `Restored: going on with the interrupted turn and ${agents}.`
-					: turn
-						? "Restored: going on with the interrupted turn."
-						: subagents.length > 0
-							? `Restored: ${agents} going on with their interrupted turns.`
-							: "Restored: nothing was left unfinished.",
-			);
+			mode.showStatus(describeRestore(await startupRestore()));
 		} catch (error: unknown) {
 			mode.showError(error instanceof Error ? error.message : "Unknown error occurred");
 		}

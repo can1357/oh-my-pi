@@ -11,6 +11,11 @@
  *
  * Nothing is stopped. Passing a due-by says the expectation was wrong, not
  * the child, so the notices say "taking longer than you said".
+ *
+ * A notice is addressed to the conversation that dispatched the work, not to
+ * whatever holds the dispatcher's id later: each recipient is recorded at
+ * dispatch as its id, its ref's identity token and its conversation token, and
+ * is told only while all three still match.
  */
 import { MAIN_AGENT_ID } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
 import { formatDuration, logger, prompt } from "@oh-my-pi/pi-utils";
@@ -43,14 +48,19 @@ export const SUBAGENT_OVERDUE_MESSAGE_TYPE = "subagent-overdue";
 const MAX_TIMER_MS = 2 ** 31 - 1;
 
 /**
- * A registry id and the lifetime token of the ref that held it at dispatch.
- * An id is a name, not an identity: a ref registered later under the same id
- * carries a different token and is refused. A revival keeps its token.
+ * A registry id, the lifetime token of the ref that held it at dispatch, and
+ * the conversation that ref's session held then. An id is a name, not an
+ * identity: a ref registered later under the same id carries a different
+ * identity token and is refused. A session that replaced its conversation
+ * since (`/new`, a switch to another transcript) carries a different
+ * conversation token and is refused too. A revival or a fork keeps both.
  */
 export interface DispatchIdentity {
 	id: string;
 	/** Absent when no ref held the id at dispatch; such an identity matches no ref. */
 	identityToken?: string;
+	/** Absent when no ref held the id at dispatch. */
+	conversationToken?: string;
 }
 
 /** One dispatch the clock watches. */
@@ -61,6 +71,8 @@ export interface SubagentDispatch {
 	owner: DispatchIdentity;
 	/** The owner's own dispatchers, nearest first, read from the registry at dispatch. */
 	ancestors: readonly DispatchIdentity[];
+	/** The main session as it was at dispatch: the person at its UI is told when no ancestor is live. */
+	main: DispatchIdentity;
 	/** Agent type of the child, for the notice. */
 	agent: string;
 	dispatchedAt: number;
@@ -77,27 +89,35 @@ export interface SubagentRunWatch {
 	signal: AbortSignal;
 }
 
-/** The owner and its dispatchers, nearest first, as the registry holds them now. */
-export function dispatchChain(registry: AgentRegistry, ownerId: string): Pick<SubagentDispatch, "owner" | "ancestors"> {
-	const ownerRef = registry.get(ownerId);
+function identityOf(registry: AgentRegistry, id: string): DispatchIdentity {
+	const ref = registry.get(id);
+	return { id, identityToken: ref?.identityToken, conversationToken: ref?.conversationToken };
+}
+
+/** The owner, its dispatchers nearest first, and the main session, as the registry holds them now. */
+export function dispatchChain(
+	registry: AgentRegistry,
+	ownerId: string,
+): Pick<SubagentDispatch, "owner" | "ancestors" | "main"> {
 	const ancestors: DispatchIdentity[] = [];
 	const seen = new Set<string>([ownerId]);
-	for (let id = ownerRef?.parentId; id !== undefined && !seen.has(id);) {
+	for (let id = registry.get(ownerId)?.parentId; id !== undefined && !seen.has(id);) {
 		seen.add(id);
 		const ref = registry.get(id);
 		if (!ref) break;
-		ancestors.push({ id, identityToken: ref.identityToken });
+		ancestors.push({ id, identityToken: ref.identityToken, conversationToken: ref.conversationToken });
 		id = ref.parentId;
 	}
-	return { owner: { id: ownerId, identityToken: ownerRef?.identityToken }, ancestors };
+	return { owner: identityOf(registry, ownerId), ancestors, main: identityOf(registry, MAIN_AGENT_ID) };
 }
 
-/** One rendered notice queued for an agent; dropped unread once the child settles. */
+/** One rendered notice queued for an agent; dropped unread once it goes stale. */
 export interface SubagentOverdueEntry {
 	childId: string;
 	stage: "owner" | "escalation";
 	text: string;
-	isSettled(): boolean;
+	/** The child settled, or the recipient is no longer the conversation it was addressed to. */
+	isStale(): boolean;
 }
 
 /** Batch the queued notices into one model-visible message. */
@@ -117,12 +137,25 @@ function isoMinute(ms: number): string {
 	return `${new Date(ms).toISOString().slice(0, 16)}Z`;
 }
 
+/** A running subagent's due-by as the process view shows it: when it falls, or that there is none. */
+export function describeDueBy(clock: SubagentDueClock, childId: string): string {
+	const at = clock.dueAt(childId);
+	return at === undefined ? "no due-by" : `due by ${isoMinute(at)}`;
+}
+
 export class SubagentDueClock {
 	readonly #registry: AgentRegistry;
 	readonly #timers = new Set<NodeJS.Timeout>();
+	/** Due-by (wall clock) of each child whose clock runs, for the process view. */
+	readonly #dueAt = new Map<string, { at: number }>();
 
 	constructor(registry: AgentRegistry) {
 		this.#registry = registry;
+	}
+
+	/** When `childId`'s due-by falls, while its clock runs; undefined for a child with no clock. */
+	dueAt(childId: string): number | undefined {
+		return this.#dueAt.get(childId)?.at;
 	}
 
 	/**
@@ -133,6 +166,7 @@ export class SubagentDueClock {
 	arm(dispatch: SubagentDispatch, run: SubagentRunWatch): void {
 		let done = false;
 		const own = new Set<NodeJS.Timeout>();
+		const due = { at: dispatch.dispatchedAt + dispatch.dueMs };
 		const disarm = () => {
 			if (done) return;
 			done = true;
@@ -141,6 +175,7 @@ export class SubagentDueClock {
 				this.#timers.delete(timer);
 			}
 			own.clear();
+			if (this.#dueAt.get(dispatch.childId) === due) this.#dueAt.delete(dispatch.childId);
 			run.signal.removeEventListener("abort", disarm);
 		};
 		// Observed whether or not the clock arms: a rejection here must never
@@ -151,6 +186,7 @@ export class SubagentDueClock {
 			return;
 		}
 		run.signal.addEventListener("abort", disarm, { once: true });
+		this.#dueAt.set(dispatch.childId, due);
 		const start = performance.now() - Math.max(0, Date.now() - dispatch.dispatchedAt);
 		let ownerQueued = false;
 		const at = (offsetMs: number, fire: () => void): void => {
@@ -182,12 +218,32 @@ export class SubagentDueClock {
 	dispose(): void {
 		for (const timer of this.#timers) clearTimeout(timer);
 		this.#timers.clear();
+		this.#dueAt.clear();
 	}
 
-	/** The live session of the ref recorded at dispatch; never a later ref that reuses the id. */
+	/**
+	 * The live session of the ref recorded at dispatch, while it still holds the
+	 * conversation recorded then; never a later ref that reuses the id, and never
+	 * a conversation the session started since.
+	 */
 	#session(identity: DispatchIdentity): AgentSession | undefined {
 		const ref = this.#registry.get(identity.id);
-		return ref && ref.identityToken === identity.identityToken ? (ref.session ?? undefined) : undefined;
+		if (!ref || ref.identityToken !== identity.identityToken) return undefined;
+		return ref.conversationToken === identity.conversationToken ? (ref.session ?? undefined) : undefined;
+	}
+
+	/** Queue `text` for `session`, the live session of `identity`, dropped once it goes stale. */
+	#notify(
+		session: AgentSession,
+		identity: DispatchIdentity,
+		entry: Pick<SubagentOverdueEntry, "childId" | "stage" | "text">,
+		isSettled: () => boolean,
+	): void {
+		session.notifySubagentOverdue({
+			...entry,
+			// Read later, from the queue: a conversation replaced meanwhile must not read it.
+			isStale: () => isSettled() || this.#session(identity) !== session,
+		});
 	}
 
 	#childView(dispatch: SubagentDispatch, now: number): Record<string, unknown> {
@@ -222,7 +278,7 @@ export class SubagentDueClock {
 			hasAncestors: dispatch.ancestors.length > 0,
 			escalateTo: dispatch.ancestors.find(ancestor => this.#session(ancestor))?.id,
 		});
-		owner.notifySubagentOverdue({ childId: dispatch.childId, stage: "owner", text, isSettled });
+		this.#notify(owner, dispatch.owner, { childId: dispatch.childId, stage: "owner", text }, isSettled);
 		return true;
 	}
 
@@ -239,11 +295,11 @@ export class SubagentDueClock {
 		for (const ancestor of dispatch.ancestors) {
 			const session = this.#session(ancestor);
 			if (!session) continue;
-			session.notifySubagentOverdue({ childId: dispatch.childId, stage: "escalation", text, isSettled });
+			this.#notify(session, ancestor, { childId: dispatch.childId, stage: "escalation", text }, isSettled);
 			return;
 		}
 		// No live ancestor: the person at the main session's UI, or at the owner's own when it is the top.
-		const session = (dispatch.ancestors.length > 0 ? this.#registry.get(MAIN_AGENT_ID)?.session : undefined) ?? owner;
+		const session = (dispatch.ancestors.length > 0 ? this.#session(dispatch.main) : undefined) ?? owner;
 		session?.emitNotice("warning", text, SUBAGENT_OVERDUE_MESSAGE_TYPE);
 	}
 }

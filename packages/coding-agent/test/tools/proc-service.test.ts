@@ -566,7 +566,7 @@ describe("proc:// background jobs", () => {
 		expect(await Bun.file(file).text()).toBe("");
 	});
 
-	it("shows a running task's progress in the proc:// listing and its own read, but not a bash job's", async () => {
+	it("shows a running task's progress and due-by in the proc:// listing and its own read, but not a bash job's", async () => {
 		const manager = new AsyncJobManager({});
 		const pending = Promise.withResolvers<string>();
 		const reported = Promise.withResolvers<void>();
@@ -588,13 +588,16 @@ describe("proc:// background jobs", () => {
 			await reported.promise;
 			const proc = new ProcProtocolHandler();
 			const rows = (await proc.resolve(parseInternalUrl("proc://"), { session })).content.split("\n");
+			// Registered without a task dispatch, so it runs with no due-by clock.
 			expect(rows.find(row => row.startsWith(taskId))).toMatch(
-				/ \[task\] running up \S+ — AcpSurface — 90 req · \$18\.40 · ctx 160K\/1M$/,
+				/ \[task\] running up \S+ — AcpSurface — 90 req · \$18\.40 · ctx 160K\/1M — no due-by$/,
 			);
 			expect(rows.find(row => row.startsWith(bashId))).toMatch(/ \[bash\] running up \S+ — sleep 60$/);
 			const single = await proc.resolve(parseInternalUrl(`proc://${taskId}`), { session });
 			expect(single.content.split("\n")[0]).toMatch(
-				new RegExp(`^${taskId} \\[task\\] — running — AcpSurface — \\S+ · 90 req · \\$18\\.40 · ctx 160K/1M$`),
+				new RegExp(
+					`^${taskId} \\[task\\] — running — AcpSurface — \\S+ · 90 req · \\$18\\.40 · ctx 160K/1M — no due-by$`,
+				),
 			);
 		} finally {
 			pending.resolve("done");

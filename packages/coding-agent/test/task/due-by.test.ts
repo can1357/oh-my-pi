@@ -25,6 +25,17 @@
  * 9. A child started speculatively, while its call still streams, is on the
  *    clock from its start, and adoption by the finished call adds no second
  *    clock.
+ * 10. A notice reaches the conversation that dispatched the work. A dispatcher
+ *    whose session replaced its conversation since (`/new`, a switch to
+ *    another transcript) is skipped like a replaced one, whether the notice
+ *    fires after the change or was queued before it and read after. A fork
+ *    continues the conversation and is still told.
+ * 11. With no recorded dispatcher live, the person is warned at a main session
+ *    only while it is the one recorded at dispatch.
+ * 12. A session given its own agent registry is told: the clock runs on the
+ *    registry the dispatching session uses.
+ * 13. `proc://` shows a running subagent's due-by, and says when one has none
+ *    (a turn a message started).
  *
  * Due-bys here are a fraction of a second and the clock runs on real timers:
  * the session's idle flush and the agent loop's interrupt poll, which carry
@@ -43,6 +54,8 @@ import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
+import { ProcProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/proc-protocol";
+import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
 import { type AgentKind, AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -82,11 +95,15 @@ const zeroUsage = {
 interface Observed {
 	session: AgentSession;
 	task: TaskTool;
+	/** The tool session its task tool runs in. */
+	toolSession: ToolSession;
 	contexts: Context[];
 	notices: Array<Extract<AgentSessionEvent, { type: "notice" }>>;
 	/** Resolves with the request time once a model request contains `needle`. */
 	seen(needle: string): Promise<number>;
 	saw(needle: string): boolean;
+	/** Resolves once a UI notice contains `needle`. */
+	warned(needle: string): Promise<void>;
 	/** How many messages of the latest model request contain `needle`. */
 	count(needle: string): number;
 }
@@ -168,6 +185,12 @@ describe("subagent due-by", () => {
 		parentId?: string;
 		dispatch?: Record<string, unknown>;
 		settings?: Record<string, unknown>;
+		/** Registry the session and its task tool use; the process-global one by default. */
+		registry?: AgentRegistry;
+		/** Keep the transcript on disk, so the session can fork or switch away from it. */
+		persist?: boolean;
+		/** Every model response waits for this before it streams. */
+		hold?: Promise<void>;
 	}): Promise<Observed> {
 		const model = createMockModel({ provider: "openai", id: "gpt-test" }).model;
 		const settings = Settings.isolated({
@@ -179,8 +202,8 @@ describe("subagent due-by", () => {
 			...options.settings,
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
-		const registry = AgentRegistry.global();
-		const task = await TaskTool.create({
+		const registry = options.registry ?? AgentRegistry.global();
+		const toolSession = {
 			cwd: tempDir.path(),
 			hasUI: false,
 			settings,
@@ -189,7 +212,8 @@ describe("subagent due-by", () => {
 			getAgentId: () => options.id,
 			agentRegistry: registry,
 			asyncJobManager: manager,
-		} as unknown as ToolSession);
+		} as unknown as ToolSession;
+		const task = await TaskTool.create(toolSession);
 		const contexts: Context[] = [];
 		const waiters: Array<{ needle: string; resolve: (at: number) => void }> = [];
 		const agentCore = new Agent({
@@ -217,7 +241,8 @@ describe("subagent due-by", () => {
 					timestamp: Date.now(),
 				};
 				const stream = new AssistantMessageEventStream();
-				queueMicrotask(() => {
+				queueMicrotask(async () => {
+					await options.hold;
 					stream.push({ type: "start", partial: message });
 					stream.push({ type: "done", reason: dispatching ? "toolUse" : "stop", message });
 				});
@@ -226,11 +251,14 @@ describe("subagent due-by", () => {
 		});
 		const session = new AgentSession({
 			agent: agentCore,
-			sessionManager: SessionManager.inMemory(tempDir.path()),
+			sessionManager: options.persist
+				? SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"))
+				: SessionManager.inMemory(tempDir.path()),
 			settings,
 			modelRegistry: new ModelRegistry(authStorage),
 			toolRegistry: new Map([["task", task as unknown as AgentTool]]),
 			agentId: options.id,
+			agentRegistry: registry,
 			asyncJobManager: manager,
 		});
 		sessions.push(session);
@@ -248,6 +276,7 @@ describe("subagent due-by", () => {
 		return {
 			session,
 			task,
+			toolSession,
 			contexts,
 			notices,
 			seen: needle => {
@@ -257,6 +286,14 @@ describe("subagent due-by", () => {
 				return promise;
 			},
 			saw: needle => contexts.some(context => JSON.stringify(context.messages).includes(needle)),
+			warned: needle => {
+				const { promise, resolve } = Promise.withResolvers<void>();
+				if (notices.some(notice => notice.message.includes(needle))) resolve();
+				session.subscribe(event => {
+					if (event.type === "notice" && event.message.includes(needle)) resolve();
+				});
+				return promise;
+			},
 			count: needle =>
 				(contexts.at(-1)?.messages ?? []).filter(message => JSON.stringify(message).includes(needle)).length,
 		};
@@ -580,6 +617,215 @@ describe("subagent due-by", () => {
 			expect(owner.notices.filter(notice => notice.message.includes(ESCALATION))).toHaveLength(1);
 			child.resolve(childResult("Spec", "task"));
 			await manager.getJob("Spec")?.promise;
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"never escalates into the new conversation a dispatcher started with /new after dispatching",
+		async () => {
+			const boss = await agent({ id: "Boss", kind: "main" });
+			const lead = await agent({
+				id: "Lead",
+				kind: "sub",
+				parentId: "Boss",
+				dispatch: dispatch("gate", "Gate", SLACK_DUE_MINUTES),
+			});
+			const run = lead.session.prompt("dispatch");
+			await childStarted.promise;
+			expect(await boss.session.newSession()).toBe(true);
+
+			// The conversation that asked for the work is gone, so no dispatcher above `Lead` is live.
+			const recipient = await Promise.race([
+				boss.seen(ESCALATION).then(() => "Boss's new conversation"),
+				lead.warned(ESCALATION).then(() => "the person"),
+			]);
+			expect(recipient).toBe("the person");
+			expect(boss.saw(ESCALATION)).toBe(false);
+			child.resolve(childResult("Gate", "gate"));
+			await run;
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"never escalates into an unrelated transcript a dispatcher switched to after dispatching",
+		async () => {
+			const boss = await agent({ id: "Boss", kind: "main", persist: true });
+			await boss.session.prompt("old conversation");
+			const other = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "other"));
+			other.appendMessage({ role: "user", content: "UNRELATED_CONVERSATION", timestamp: Date.now() });
+			const otherFile = other.getSessionFile()!;
+			await other.ensureOnDisk();
+			await other.close();
+			const lead = await agent({
+				id: "Lead",
+				kind: "sub",
+				parentId: "Boss",
+				dispatch: dispatch("gate", "Gate", SLACK_DUE_MINUTES),
+			});
+			const run = lead.session.prompt("dispatch");
+			await childStarted.promise;
+			expect(await boss.session.switchSession(otherFile)).toBe(true);
+
+			const recipient = await Promise.race([
+				boss.seen(ESCALATION).then(() => "the unrelated transcript"),
+				lead.warned(ESCALATION).then(() => "the person"),
+			]);
+			expect(recipient).toBe("the person");
+			expect(boss.saw(ESCALATION)).toBe(false);
+			child.resolve(childResult("Gate", "gate"));
+			await run;
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"drops an escalation queued for a conversation that /new replaced before it was read",
+		async () => {
+			const boss = await agent({ id: "Boss", kind: "main" });
+			const lead = await agent({ id: "Lead", kind: "sub", parentId: "Boss", dispatch: dispatch("gate", "Gate") });
+			const deliver = boss.session.notifySubagentOverdue.bind(boss.session);
+			const queued = Promise.withResolvers<void>();
+			// The clock addresses the escalation to Boss's conversation; /new replaces it before Boss reads it.
+			vi.spyOn(boss.session, "notifySubagentOverdue").mockImplementation(entry => {
+				void boss.session.newSession().then(() => {
+					deliver(entry);
+					queued.resolve();
+				});
+			});
+			const run = lead.session.prompt("dispatch");
+			await childStarted.promise;
+			await queued.promise;
+			await boss.session.prompt("FIRST_OF_THE_NEW_CONVERSATION", { streamingBehavior: "steer" });
+			await boss.session.waitForIdle();
+
+			expect(boss.saw("FIRST_OF_THE_NEW_CONVERSATION")).toBe(true);
+			expect(boss.saw(ESCALATION)).toBe(false);
+			child.resolve(childResult("Gate", "gate"));
+			await run;
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"keeps escalating to a dispatcher that forked its conversation, since the fork goes on with it",
+		async () => {
+			const boss = await agent({ id: "Boss", kind: "main", persist: true });
+			await boss.session.prompt("before the fork");
+			const lead = await agent({
+				id: "Lead",
+				kind: "sub",
+				parentId: "Boss",
+				dispatch: dispatch("gate", "Gate", SLACK_DUE_MINUTES),
+			});
+			const run = lead.session.prompt("dispatch");
+			await childStarted.promise;
+			expect(await boss.session.fork()).toBe(true);
+
+			const recipient = await Promise.race([
+				boss.seen(ESCALATION).then(() => "Boss"),
+				lead.warned(ESCALATION).then(() => "the person"),
+			]);
+			expect(recipient).toBe("Boss");
+			child.resolve(childResult("Gate", "gate"));
+			await run;
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"never warns a main session registered after dispatch under the main session's id",
+		async () => {
+			await agent({ id: "Main", kind: "main" });
+			const lead = await agent({ id: "Lead", kind: "sub", parentId: "Main", dispatch: dispatch("gate", "Gate") });
+			const run = lead.session.prompt("dispatch");
+			await childStarted.promise;
+			AgentRegistry.global().unregister("Main");
+			const replacement = await agent({ id: "Main", kind: "main" });
+
+			const recipient = await Promise.race([
+				replacement.warned(ESCALATION).then(() => "the replacement Main"),
+				lead.warned(ESCALATION).then(() => "Lead's own session"),
+			]);
+			expect(recipient).toBe("Lead's own session");
+			expect(replacement.notices).toEqual([]);
+			expect(replacement.contexts).toEqual([]);
+			child.resolve(childResult("Gate", "gate"));
+			await run;
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"tells the dispatcher's dispatcher in a session given its own agent registry",
+		async () => {
+			const registry = new AgentRegistry();
+			try {
+				const boss = await agent({ id: "Boss", kind: "main", registry });
+				const lead = await agent({
+					id: "Lead",
+					kind: "sub",
+					parentId: "Boss",
+					registry,
+					dispatch: dispatch("gate", "Gate"),
+				});
+				const run = lead.session.prompt("dispatch");
+				await childStarted.promise;
+
+				// Telling nobody has no event to wait for: bound the wait at ten times the
+				// escalation's due time, so that failure is an assertion, not a timeout.
+				const told = await Promise.race([
+					boss.seen(ESCALATION).then(() => true),
+					Bun.sleep(20 * DUE_MS).then(() => false),
+				]);
+				expect(told).toBe(true);
+				child.resolve(childResult("Gate", "gate"));
+				await run;
+			} finally {
+				registry.dueBy.dispose();
+			}
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"shows in proc:// a dispatched subagent's due-by, and that a subagent woken by a message has none",
+		async () => {
+			const main = await agent({
+				id: "Main",
+				kind: "main",
+				dispatch: dispatch("task", "Slow", SLACK_DUE_MINUTES),
+			});
+			await main.session.prompt("dispatch");
+			await childStarted.promise;
+			// A turn a message starts runs with no clock: no dispatcher said when to expect it.
+			const finish = Promise.withResolvers<void>();
+			const peer = await agent({ id: "Peer", kind: "sub", parentId: "Main", hold: finish.promise });
+			executorModule.attachIrcWakeTurnMonitor(peer.session, {
+				id: "Peer",
+				agent: { name: "task", description: "test", systemPrompt: "Work.", source: "bundled" },
+			});
+			await peer.session.deliverIrcMessage({
+				id: "wake",
+				from: "Other",
+				to: "Peer",
+				body: "KEEP_WORKING",
+				ts: Date.now(),
+			});
+			await peer.seen("KEEP_WORKING");
+			expect(peer.session.isStreaming).toBe(true);
+
+			const listing = await new ProcProtocolHandler().resolve(parseInternalUrl("proc://"), {
+				session: main.toolSession,
+			});
+			const rows = listing.content.split("\n");
+			expect(rows.find(row => row.startsWith("Slow "))).toMatch(/ — due by \d{4}-\d\d-\d\dT\d\d:\d\dZ$/);
+			expect(rows.find(row => row.startsWith("Peer "))).toMatch(/ — no due-by$/);
+			finish.resolve();
+			await peer.session.waitForIdle();
+			child.resolve(childResult("Slow", "task"));
+			await manager.getJob("Slow")?.promise;
 		},
 		TEST_TIMEOUT_MS,
 	);

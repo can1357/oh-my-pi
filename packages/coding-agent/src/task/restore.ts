@@ -11,6 +11,9 @@
  * cut-off turn and drives it to `yield`, and the parent receives the result as the
  * ordinary `async-result` of a job with the subagent's id, the id its first run's
  * job had, so a parent waiting on that job finds it again.
+ *
+ * A restored job has no due-by: the clock and the due-by it was dispatched with
+ * lived in the process that ended. {@link describeRestore} and `proc://` say so.
  */
 import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -50,6 +53,20 @@ export async function restoreSession(session: AgentSession, options: RestoreOpti
 	const subagents = await restoreSubagents(session, options);
 	const turn = await session.restoreInterruptedTurn();
 	return { turn, subagents };
+}
+
+/** What the person is told once `omp --restore` has started going on with `outcome`. */
+export function describeRestore(outcome: RestoreOutcome): string {
+	const { turn, subagents } = outcome;
+	const agents = subagents.length === 1 ? "1 subagent" : `${subagents.length} subagents`;
+	if (subagents.length === 0) {
+		return turn ? "Restored: going on with the interrupted turn." : "Restored: nothing was left unfinished.";
+	}
+	const going = turn
+		? `Restored: going on with the interrupted turn and ${agents}.`
+		: `Restored: ${agents} going on with ${subagents.length === 1 ? "its interrupted turn" : "their interrupted turns"}.`;
+	// The due-by each was dispatched with ended with the process that ran its clock.
+	return `${going} Restored subagents have no due-by: nobody is told if one runs long.`;
 }
 
 /**
