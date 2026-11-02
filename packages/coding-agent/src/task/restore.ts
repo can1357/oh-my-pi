@@ -4,8 +4,9 @@
  * ({@link AgentSession.restoreInterruptedTurn}) and the subagents it was running.
  *
  * Every persisted subagent transcript under the session ({@link collectSubSessions})
- * that its process left mid-turn ({@link hasRestorableTurn}), was not killed (no
- * tombstone) and can be revived (a `session_init` contract, not isolated) runs one
+ * that its process left mid-turn, or whose turn ended because its provider key could
+ * not be resolved ({@link hasRestorableTurn}), was not killed (no tombstone) and can
+ * be revived (a `session_init` contract, not isolated) runs one
  * more monitored turn as a background job of its parent: the lifecycle reviver
  * rebuilds it from its transcript, {@link runSubagentFollowUpTurn} goes on with the
  * cut-off turn and drives it to `yield`, and the parent receives the result as the

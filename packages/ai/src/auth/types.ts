@@ -134,6 +134,15 @@ export interface DisabledCredentialSummary {
 }
 
 /**
+ * Whether a tombstone records an OAuth credential torn down automatically
+ * (refresh failure, upstream invalidation) rather than one the user replaced
+ * or deleted: lost capacity a new login restores, not lifecycle noise.
+ */
+export function isAutoDisabledCredential(summary: DisabledCredentialSummary): boolean {
+	return summary.type === "oauth" && !/^(replaced by|deleted by user)/i.test(summary.cause);
+}
+
+/**
  * Per-credential health record returned by {@link AuthStorage.health.check}.
  *
  * Use this to identify which credential in a multi-account pool is causing

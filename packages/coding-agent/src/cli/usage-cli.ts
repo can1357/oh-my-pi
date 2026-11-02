@@ -15,6 +15,7 @@ import {
 	type OAuthAccountIdentity,
 	type OAuthAccountSummary,
 	type ResetCreditRedeemOutcome,
+	isAutoDisabledCredential,
 	isWithinUsageReserve,
 	resolveCredentialIdentityKey,
 	resolveUsedFraction,
@@ -586,12 +587,12 @@ function formatReloginDeadline(
 
 /**
  * Tombstones worth a row in `omp usage`: OAuth credentials torn down
- * automatically (refresh failure, upstream invalidation). Rows the user
- * replaced or deleted deliberately are lifecycle noise, not lost capacity.
+ * automatically ({@link isAutoDisabledCredential}) whose account has no active
+ * credential. Rows the user replaced or deleted deliberately are lifecycle
+ * noise, not lost capacity.
  */
 function isActionableDisable(summary: DisabledCredentialSummary, activeAccounts: UsageAccountIdentity[] = []): boolean {
-	if (summary.type !== "oauth") return false;
-	if (/^(replaced by|deleted by user)/i.test(summary.cause)) return false;
+	if (!isAutoDisabledCredential(summary)) return false;
 
 	// Do not display tombstone if there is an active account for the same provider
 	// matching the same identity (email, accountId, or org).

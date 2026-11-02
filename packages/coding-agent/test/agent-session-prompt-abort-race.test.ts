@@ -41,7 +41,7 @@ describe("AgentSession prompt admission racing abort", () => {
 		responses: Array<() => MockResponse | Promise<MockResponse>>,
 		textOnly = false,
 		options: {
-			modelRegistry?: Pick<ModelRegistry, "getApiKey" | "retriesFailedCommandKey">;
+			modelRegistry?: Pick<ModelRegistry, "getApiKey" | "missingKeyMayRecover">;
 			clientBridge?: unknown;
 			extensionRunner?: unknown;
 		} = {},
@@ -473,8 +473,9 @@ describe("AgentSession prompt admission racing abort", () => {
 				await apiKeyGate.promise;
 				return undefined;
 			},
-			// The key is a plain runtime key, not a `!command`, so a missing one fails setup at once.
-			retriesFailedCommandKey: () => false,
+			// The key is a plain runtime key, not a `!command` or a stored credential, so a
+			// missing one fails setup at once.
+			missingKeyMayRecover: async () => false,
 		};
 		const { session } = await createSession(
 			[
@@ -529,7 +530,7 @@ describe("AgentSession prompt admission racing abort", () => {
 				await apiKeyGate.promise;
 				return undefined;
 			},
-			retriesFailedCommandKey: () => false,
+			missingKeyMayRecover: async () => false,
 		};
 		const { session } = await createSession(
 			[

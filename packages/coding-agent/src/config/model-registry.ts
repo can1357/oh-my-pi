@@ -1,14 +1,24 @@
 import * as path from "node:path";
-import type { ApiKeyResolver, FetchImpl, ResolvedApiKey, UsageProvider } from "@oh-my-pi/pi-ai";
+import type { ApiKeyResolution, ApiKeyResolver, FetchImpl, ResolvedApiKey, UsageProvider } from "@oh-my-pi/pi-ai";
 import { resolvedApiKeyBearer } from "@oh-my-pi/pi-ai/auth-retry";
-import { type AuthApiKeyOptions, type AuthPeekOptions, oauthAccountKey } from "@oh-my-pi/pi-ai/auth-storage";
+import {
+	type AuthApiKeyOptions,
+	type AuthPeekOptions,
+	type DisabledCredentialSummary,
+	isAutoDisabledCredential,
+	oauthAccountKey,
+} from "@oh-my-pi/pi-ai/auth-storage";
 import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { registerOAuthProvider, unregisterOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
 import { setCodexAttestationProvider } from "@oh-my-pi/pi-ai/providers/openai-codex-attestation";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/env-api-key";
-import { OAuthRefreshUnavailableError } from "@oh-my-pi/pi-ai/error";
+import {
+	AccountPoolUnavailableError,
+	CredentialUnavailableError,
+	OAuthRefreshUnavailableError,
+} from "@oh-my-pi/pi-ai/error";
 import type {
 	Api,
 	Context,
@@ -3238,6 +3248,54 @@ export class ModelRegistry {
 		return this.hasCommandBackedApiKey(provider) && !getProviderDefinition(provider)?.allowsMissingApiKey;
 	}
 
+	/**
+	 * Whether a missing key for the provider may come back without the user
+	 * configuring one: its `!command` apiKey produced nothing
+	 * ({@link retriesFailedCommandKey}), or its stored credentials exist but none
+	 * can serve now ({@link #storedCredentialsUnavailable}). A turn's request
+	 * reports such a key retryably ({@link turnResolver}).
+	 */
+	async missingKeyMayRecover(provider: string, signal?: AbortSignal): Promise<boolean> {
+		return this.retriesFailedCommandKey(provider) || (await this.#storedCredentialsUnavailable(provider, signal));
+	}
+
+	/**
+	 * Whether the provider has stored credentials that exist but could not serve
+	 * a request: an active row that resolved no key, or an OAuth credential a
+	 * failure disabled ({@link isAutoDisabledCredential}) after the user last
+	 * removed or replaced one. A new login, here or in another session sharing
+	 * the store, brings such a credential back; a provider whose latest teardown
+	 * was the user's own (a logout), or that never had a credential, does not
+	 * count. A tombstone lookup that fails counts, since the store could not
+	 * tell; one the caller aborted does not. False for a disabled provider and
+	 * for one whose catalog dispatches without a key.
+	 */
+	async #storedCredentialsUnavailable(provider: string, signal?: AbortSignal): Promise<boolean> {
+		if (this.#isProviderDisabled(provider) || getProviderDefinition(provider)?.allowsMissingApiKey) return false;
+		if (this.authStorage.credentials.has(provider)) return true;
+		let tombstones: DisabledCredentialSummary[];
+		try {
+			tombstones = await this.authStorage.credentials.listDisabled(provider, signal);
+		} catch (error) {
+			if (signal?.aborted) return false;
+			logger.debug("Disabled credential lookup failed; treating the missing key as recoverable", {
+				provider,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return true;
+		}
+		// The latest teardown decides; an unknown time sorts first, and a tie goes
+		// to the user's removal.
+		let autoDisabledAt = -1;
+		let removedAt = -1;
+		for (const tombstone of tombstones) {
+			const at = tombstone.disabledAtMs ?? 0;
+			if (isAutoDisabledCredential(tombstone)) autoDisabledAt = Math.max(autoDisabledAt, at);
+			else removedAt = Math.max(removedAt, at);
+		}
+		return autoDisabledAt > removedAt;
+	}
+
 	getDiscoverableProviders(): string[] {
 		const disabledProviders = getDisabledProviderIdsFromSettings(this.#settings);
 		return this.#discoverableProviders
@@ -3493,33 +3551,48 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * The {@link resolver} for an agent turn's requests. When the provider's
-	 * configured apiKey is a `!command` that produced no key, the initial resolve
-	 * throws {@link ApiKeyCommandError} instead of returning no key, so the turn
-	 * fails retryably and turn recovery runs the command again. Other callers
-	 * keep {@link resolver}, where such a request fails at once as a missing key.
+	 * The {@link resolver} for an agent turn's requests. When the initial resolve
+	 * finds no key that may come back ({@link failCommandKeyRetryably}), it throws
+	 * a {@link CredentialUnavailableError} instead of returning no key, so the
+	 * turn fails retryably and turn recovery resolves again. Other callers keep
+	 * {@link resolver}, where such a request fails at once as a missing key.
 	 */
 	turnResolver(model: ApiKeyResolverModel, sessionId?: string): ApiKeyResolver {
 		return this.failCommandKeyRetryably(model.provider, this.resolver(model, sessionId));
 	}
 
 	/**
-	 * `resolve` as {@link turnResolver} hands it out: an initial resolve that
-	 * returns no key throws {@link ApiKeyCommandError} when the provider's apiKey
-	 * is a `!command`. A registry view that builds its own resolvers wraps them
-	 * with this.
+	 * `resolve` as {@link turnResolver} hands it out. An initial resolve that
+	 * finds no key throws a transient {@link CredentialUnavailableError} when the
+	 * key may come back without the user configuring one:
+	 * - the provider's apiKey is a `!command` that produced nothing ({@link ApiKeyCommandError});
+	 * - the session's OAuth account pool has no account that can serve now
+	 *   ({@link AccountPoolUnavailableError}, kept as `cause`);
+	 * - the provider's stored credentials exist but none can serve now
+	 *   ({@link #storedCredentialsUnavailable}).
+	 * A registry view that builds its own resolvers wraps them with this.
 	 */
 	failCommandKeyRetryably(provider: string, resolve: ApiKeyResolver): ApiKeyResolver {
 		return async ctx => {
-			const resolved = await resolve(ctx);
-			if (
-				ctx.error === undefined &&
-				resolvedApiKeyBearer(resolved) === undefined &&
-				this.retriesFailedCommandKey(provider)
-			) {
+			let resolved: ApiKeyResolution;
+			try {
+				resolved = await resolve(ctx);
+			} catch (error) {
+				if (ctx.error === undefined && error instanceof AccountPoolUnavailableError) {
+					throw new CredentialUnavailableError(error.message, { cause: error });
+				}
+				throw error;
+			}
+			if (ctx.error !== undefined || resolvedApiKeyBearer(resolved) !== undefined) return resolved;
+			if (this.retriesFailedCommandKey(provider)) {
 				throw new ApiKeyCommandError(
 					provider,
 					commandFailureRetryAfterMs(this.#customProviderApiKeys.get(provider)),
+				);
+			}
+			if (await this.#storedCredentialsUnavailable(provider, ctx.signal)) {
+				throw new CredentialUnavailableError(
+					`No API key for provider: ${provider} (its stored credentials are disabled or cannot serve now)`,
 				);
 			}
 			return resolved;

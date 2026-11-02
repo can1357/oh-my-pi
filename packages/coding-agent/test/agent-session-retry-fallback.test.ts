@@ -4362,19 +4362,15 @@ describe("AgentSession retry fallback", () => {
 	});
 
 	describe("when a fallback candidate's provider is outside the session's account pool", () => {
-		// A session restricted to an OAuth account pool (`task.agentAccountPools`) gets a
-		// MissingApiKeyError, not `undefined`, for any provider whose pooled accounts are
-		// all unavailable. The fallback walk must treat that candidate as unavailable.
+		// A session restricted to an OAuth account pool (`task.agentAccountPools`) gets an
+		// AccountPoolUnavailableError (a MissingApiKeyError), not `undefined`, for any
+		// provider whose pooled accounts are all unavailable. The fallback walk must
+		// treat that candidate as unavailable.
 		function blockProvider(provider: string): void {
 			const originalGetApiKey = modelRegistry.getApiKey.bind(modelRegistry);
 			vi.spyOn(modelRegistry, "getApiKey").mockImplementation((model, sessionId, options) => {
 				if (model.provider === provider) {
-					return Promise.reject(
-						new AIError.MissingApiKeyError(
-							provider,
-							`No API key for provider: ${provider} (session ${sessionId} is restricted to its OAuth account pool and none of those accounts is available)`,
-						),
-					);
+					return Promise.reject(new AIError.AccountPoolUnavailableError(provider, sessionId));
 				}
 				return originalGetApiKey(model, sessionId, options);
 			});

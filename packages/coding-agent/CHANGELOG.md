@@ -11,6 +11,9 @@
 
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
 - A provider `apiKey: "!command"` that fails, times out, or prints nothing is now retried by turn auto-retry, which runs the command again up to 3 times, each after its 30-second failure backoff, instead of ending the turn (or subagent) with "No API key" ([#14031](https://github.com/can1357/oh-my-pi/pull/14031) by [@sjawhar](https://github.com/sjawhar)).
+- A turn whose provider key cannot be resolved for a while (the stored OAuth login was disabled by a failed refresh, the session's OAuth account pool has no account that can serve, or an OAuth refresh failed on a network error) is now retried by turn auto-retry instead of ending at once, and a prompt sent meanwhile starts instead of failing with "No API key found"
+- `omp --restore` now resumes a turn, or a subagent's turn, that ended because its provider key could not be resolved even after its retries, also when its process exited normally afterwards
+- A stored GitHub Copilot credential is no longer removed when a turn failed because its key lookup produced no key
 
 ## [18.15.0] - 2026-11-01
 

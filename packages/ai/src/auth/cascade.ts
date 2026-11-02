@@ -427,10 +427,7 @@ export class KeyCascade implements KeysApi {
 		}
 		if (restricted) {
 			if (oauthRefreshFailure) throw oauthRefreshFailure;
-			throw new AIError.MissingApiKeyError(
-				provider,
-				`No API key for provider: ${provider} (session ${sessionId} is restricted to its OAuth account pool and none of those accounts is available)`,
-			);
+			throw new AIError.AccountPoolUnavailableError(provider, sessionId);
 		}
 		const loginApiKeySelection = await this.#deps.selector.selectApiKey(
 			provider,

@@ -2143,8 +2143,11 @@ export class Agent {
 				: err instanceof Error
 					? err.message
 					: String(err);
-			// A credential source that produced no key keeps its Transient flag so
-			// turn recovery retries it; other thrown errors stay classified by text.
+			// A credential source that produced no key (a failed key command, stored
+			// credentials that cannot serve now, a transient OAuth refresh failure)
+			// keeps its flags: Transient so turn recovery retries it, and
+			// CredentialUnavailable so the turn stays resumable if the retries run
+			// out. Other thrown errors stay classified by text.
 			const errorId =
 				!stoppedForAbort && err instanceof AIError.CredentialUnavailableError ? AIError.classify(err) : undefined;
 			const shouldEmitVisibleError = !stoppedForAbort;

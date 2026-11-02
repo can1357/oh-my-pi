@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 
 const PROVIDER = "unit-oauth-restrict";
@@ -77,7 +78,9 @@ describe("AuthStorage session account restrictions", () => {
 		expect(storage.oauth.identity(PROVIDER, "allowed")?.accountId).toBe("acc-a");
 		expect((await storage.oauth.access(PROVIDER, "allowed"))?.accessToken).toBe("access-a");
 		for (const sessionId of ["missing", "empty"]) {
-			await expect(storage.keys.get(PROVIDER, sessionId)).rejects.toThrow(
+			const error = await storage.keys.get(PROVIDER, sessionId).catch((failure: unknown) => failure);
+			expect(error).toBeInstanceOf(AIError.AccountPoolUnavailableError);
+			expect((error as Error).message).toStartWith(
 				`No API key for provider: ${PROVIDER} (session ${sessionId} is restricted to its OAuth account pool`,
 			);
 		}
@@ -90,7 +93,11 @@ describe("AuthStorage session account restrictions", () => {
 		// A config key marks the provider's endpoint (often a proxy) as taking that
 		// key: the pooled session fails rather than sending it an OAuth token.
 		storage.keys.setConfig(PROVIDER, "config-key");
-		await expect(storage.keys.get(PROVIDER, "allowed")).rejects.toThrow("pooled OAuth tokens are never sent past it");
+		const conflict = await storage.keys.get(PROVIDER, "allowed").catch((failure: unknown) => failure);
+		expect(conflict).toBeInstanceOf(AIError.MissingApiKeyError);
+		// Not a pool that may serve later: the turn's resolver leaves it final.
+		expect(conflict).not.toBeInstanceOf(AIError.AccountPoolUnavailableError);
+		expect((conflict as Error).message).toContain("pooled OAuth tokens are never sent past it");
 		expect(await storage.oauth.access(PROVIDER, "allowed")).toBeUndefined();
 		expect(storage.oauth.identity(PROVIDER, "allowed")).toBeUndefined();
 		expect(await storage.keys.get(PROVIDER, "unrestricted")).toBe("runtime-key");
