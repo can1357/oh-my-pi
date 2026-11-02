@@ -19,6 +19,8 @@ import { TempDir } from "@oh-my-pi/pi-utils";
  */
 class StorageTakenOverMidRewrite extends FileSessionStorage {
 	#takenOver?: string;
+	/** From when it is set, every synchronous full write of a file the other writer did not take fails. */
+	failSyncWrites = false;
 	held?: { file: string; reached: PromiseWithResolvers<void>; go: PromiseWithResolvers<void> };
 
 	takeOver(file: string): void {
@@ -30,6 +32,8 @@ class StorageTakenOverMidRewrite extends FileSessionStorage {
 			const expected = options?.expectedSize ?? 0;
 			throw new SessionWriteConflictError(file, expected, expected + 1);
 		}
+		if (this.failSyncWrites)
+			throw Object.assign(new Error(`EACCES: permission denied, open '${file}'`), { code: "EACCES" });
 		super.writeTextSync(file, body, options);
 	}
 
@@ -92,3 +96,53 @@ it("keeps a rewrite that a write moving the session superseded, instead of repor
 		await manager.close().catch(() => {});
 	}
 });
+
+// The successor that superseded the rewrite must itself have published the
+// transcript: one that failed published nothing, so the rewrite's failure
+// still reaches its caller (prune, snapshot restore and the like restore
+// their change on it).
+for (const [successor, moves] of [
+	["a synchronous rewrite of the same file that fails", false],
+	["a synchronous rewrite that moves the session and fails to write the new file", true],
+] as const) {
+	it(`reports the rewrite failed when ${successor} superseded it`, async () => {
+		using tempDir = TempDir.createSync("@omp-rewrite-superseded-failed-");
+		const storage = new StorageTakenOverMidRewrite();
+		const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"), storage);
+		const notices: SessionPersistenceNotice[] = [];
+		manager.onPersistenceNotice(notice => notices.push(notice));
+		manager.onPersistenceError(() => {});
+		try {
+			manager.appendMessage({ role: "user", content: "a turn worth saving", timestamp: Date.now() });
+			manager.appendCustomEntry("marker", { state: "before" });
+			await manager.ensureOnDisk();
+			await manager.flush();
+			const original = manager.getSessionFile();
+			if (!original) throw new Error("Expected a persisted session");
+			const marker = manager.getEntries().find(entry => entry.type === "custom" && entry.customType === "marker");
+			if (marker?.type !== "custom") throw new Error("Expected the marker entry");
+			marker.data = { state: "after" };
+			const held = { file: original, reached: Promise.withResolvers<void>(), go: Promise.withResolvers<void>() };
+			storage.held = held;
+			const rewrite = manager.rewriteEntries().then(
+				() => "kept",
+				() => "failed",
+			);
+			await held.reached.promise;
+
+			if (moves) storage.takeOver(original);
+			storage.failSyncWrites = true;
+			manager.appendCustomEntry("concurrent", {});
+			held.go.resolve();
+
+			expect(await rewrite).toBe("failed");
+			expect(notices.map(notice => notice.reason)).toEqual(moves ? ["contested"] : []);
+			// Nothing published the change: the original file still holds the old state.
+			expect(fs.readFileSync(original, "utf8")).toContain('"state":"before"');
+		} finally {
+			storage.failSyncWrites = false;
+			manager.seal();
+			await manager.close().catch(() => {});
+		}
+	});
+}
