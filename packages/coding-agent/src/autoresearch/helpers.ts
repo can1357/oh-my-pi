@@ -1,5 +1,3 @@
-import * as os from "node:os";
-import { Process } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { ASIData, ASIValue, NumericMetricMap } from "@oh-my-pi/pi-tui/tools/autoresearch";
 
@@ -142,25 +140,6 @@ export function mergeAsi(base: ASIData | null, override: ASIData | undefined): A
 		...base,
 		...override,
 	};
-}
-
-/**
- * Signals `pid` and every process it started.
- *
- * A child spawned without `detached` shares its parent's process group, so a
- * group signal to `-pid` does not exist for it; its descendants are found by
- * walking the process tree instead. A detached child's group can outlive its
- * leader, and members reparented to init are reached only through the group.
- */
-export function killTree(pid: number, signal: NodeJS.Signals | number = "SIGTERM"): void {
-	if (!Number.isSafeInteger(pid) || pid <= 1) return;
-	const signalNumber = typeof signal === "number" ? signal : os.constants.signals[signal];
-	try {
-		process.kill(-pid, signalNumber);
-	} catch {
-		// ESRCH: `pid` does not lead a process group, or the group is gone.
-	}
-	Process.fromPid(pid)?.killTree(signalNumber);
 }
 
 export function inferMetricUnitFromName(name: string): string {
