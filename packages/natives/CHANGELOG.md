@@ -136,7 +136,7 @@
 
 ### Fixed
 
-- Fixed macOS screenshots of on-screen windows drawing the window smaller than it appears, so clicks aimed from them missed by tens of points; a window spanning displays or partly off screen is now captured as its part on the display holding most of it.
+- Fixed macOS screenshots of on-screen windows drawing the window smaller than it appears, so clicks aimed from them missed by tens of points; a window spanning displays or partly off screen is now captured as its part on the display holding most of it ([#17757](https://github.com/can1357/oh-my-pi/pull/17757) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.15.0] - 2026-11-01
 
