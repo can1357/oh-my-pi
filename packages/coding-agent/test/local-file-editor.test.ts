@@ -9,7 +9,7 @@ import {
 	revalidateLocalEditorEntry,
 } from "@oh-my-pi/pi-coding-agent/modes/local-file-editor";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { once, TempDir } from "@oh-my-pi/pi-utils";
 import { vi } from "bun:test";
 
 describe("resolveLocalEditorTarget", () => {
@@ -85,10 +85,11 @@ describe("resolveLocalEditorTarget", () => {
 	it("strips control bytes from errors shown for missing control-byte names", async () => {
 		using tmp = TempDir.createSync("@omp-local-editor-");
 		const editorBackup = process.env.EDITOR;
-		const restoreEditor = () => {
+		// once: a timed-out body's late finally must not overwrite the next test's value.
+		const restoreEditor = once(() => {
 			if (editorBackup === undefined) delete process.env.EDITOR;
 			else process.env.EDITOR = editorBackup;
-		};
+		});
 		onTestFinished(restoreEditor);
 		process.env.EDITOR = "true";
 		const showError = vi.fn();

@@ -33,6 +33,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
 import { acquireTab, getTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
+import { once } from "@oh-my-pi/pi-utils";
 import {
 	type Browser,
 	type ConnectionTransport,
@@ -1295,12 +1296,13 @@ it("uses relay metadata through a proxy without corrupting UTF-8 titles", async 
 		NO_PROXY: process.env.NO_PROXY,
 		no_proxy: process.env.no_proxy,
 	};
-	const restoreProxyEnv = () => {
+	// once: a timed-out body's late finally must not overwrite the next test's value.
+	const restoreProxyEnv = once(() => {
 		for (const key of ["HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy"] as const) {
 			process.env[key] = saved[key] ?? "";
 			if (saved[key] === undefined) delete process.env[key];
 		}
-	};
+	});
 	onTestFinished(restoreProxyEnv);
 	process.env.HTTP_PROXY = `http://127.0.0.1:${proxy.port}`;
 	process.env.http_proxy = process.env.HTTP_PROXY;

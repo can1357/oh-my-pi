@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { MacAppearanceObserver, MacOSAppearance, rasterizeSvg } from "@oh-my-pi/pi-natives";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { Image } from "@oh-my-pi/pi-tui/components/image";
@@ -210,11 +210,7 @@ describe("terminal background SIXEL repaint", () => {
 	});
 
 	it("repaints multiplexer viewports without clearing their native history", async () => {
-		const previousSty = Bun.env.STY;
-		onTestFinished(() => {
-			if (previousSty === undefined) delete Bun.env.STY;
-			else Bun.env.STY = previousSty;
-		});
+		// withoutTerminalMultiplexer() saves STY before the test and puts it back after it.
 		Bun.env.STY = "fixture";
 		expect(isInsideTerminalMultiplexer()).toBe(true);
 		expect(isTerminalBackgroundQueryTrusted()).toBe(true);

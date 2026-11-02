@@ -1,7 +1,7 @@
 import { describe, expect, it, onTestFinished } from "bun:test";
 import * as path from "node:path";
 import { loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
-import { __resetDirsFromEnvForTests, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests, once, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
 describe("issue #5879: legacy provider compatibility", () => {
 	it("creates a fresh agent database while loading historical auth exports", async () => {
@@ -12,14 +12,15 @@ describe("issue #5879: legacy provider compatibility", () => {
 			OMP_PROFILE: process.env.OMP_PROFILE,
 			PI_PROFILE: process.env.PI_PROFILE,
 		};
-		const restoreDirEnv = () => {
+		// once: a timed-out body's late finally must not overwrite the next test's value.
+		const restoreDirEnv = once(() => {
 			for (const key in originalDirEnv) {
 				const value = originalDirEnv[key];
 				if (value === undefined) delete process.env[key];
 				else process.env[key] = value;
 			}
 			__resetDirsFromEnvForTests();
-		};
+		});
 		onTestFinished(restoreDirEnv);
 		const extensionPath = path.join(projectDir.path(), "pi-provider-like-plugin", "index.ts");
 		await Bun.write(

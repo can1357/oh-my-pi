@@ -6,6 +6,7 @@ import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import { releaseAllTabs } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ScreenshotResult } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-protocol";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
+import { once } from "@oh-my-pi/pi-utils";
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
@@ -216,9 +217,10 @@ button { margin: 80px; width: 180px; height: 60px; }
 		async scale => {
 			// Backend overrides would send this open to a relay or cmux surface instead of headless Chromium.
 			const savedEnv = { ...process.env };
-			const restoreEnv = () => {
+			// once: a timed-out body's late finally must not overwrite the next test's value.
+			const restoreEnv = once(() => {
 				Object.assign(process.env, savedEnv);
-			};
+			});
 			onTestFinished(restoreEnv);
 			for (const key of ["PI_BROWSER_RELAY", "PI_BROWSER_CMUX", "PI_BROWSER_TERN"]) delete process.env[key];
 			const invoke = createHost();

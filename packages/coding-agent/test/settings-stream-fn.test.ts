@@ -18,6 +18,7 @@ import { bindEffects } from "@oh-my-pi/pi-coding-agent/config/registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { cfgProvidersMuseCodeStoreResponses } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { createSettingsAwareStreamFn } from "@oh-my-pi/pi-coding-agent/session/settings-stream-fn";
+import { once } from "@oh-my-pi/pi-utils";
 
 function captureBase(): { fn: StreamFn; calls: Array<{ options?: SimpleStreamOptions }> } {
 	const calls: Array<{ options?: SimpleStreamOptions }> = [];
@@ -477,10 +478,11 @@ describe("createSettingsAwareStreamFn", () => {
 			send: (options: SimpleStreamOptions) => Promise<unknown>,
 		): Promise<unknown> {
 			const previous = process.env.PI_MUSE_STORE_RESPONSES;
-			const restore = () => {
+			// once: a timed-out body's late finally must not overwrite the next test's value.
+			const restore = once(() => {
 				if (previous === undefined) delete process.env.PI_MUSE_STORE_RESPONSES;
 				else process.env.PI_MUSE_STORE_RESPONSES = previous;
-			};
+			});
 			onTestFinished(restore);
 			if (env === undefined) delete process.env.PI_MUSE_STORE_RESPONSES;
 			else process.env.PI_MUSE_STORE_RESPONSES = env;

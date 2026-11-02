@@ -17,7 +17,7 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { VibeSessionRegistry } from "@oh-my-pi/pi-coding-agent/vibe/runtime";
-import { getSessionsDir, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { getSessionsDir, once, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { getActiveProfile, getConfigRootDir, setProfile } from "@oh-my-pi/pi-utils/dirs";
 
 function createTtsrRule(name: string): Rule {
@@ -40,11 +40,12 @@ const SECRET_ENV_PATTERNS = /(?:KEY|SECRET|TOKEN|PASSWORD|PASS|AUTH|CREDENTIAL|P
 
 async function withClearedSecretEnv<T>(run: () => Promise<T>): Promise<T> {
 	const removed: Array<[string, string]> = [];
-	const restoreSecretEnv = () => {
+	// once: a timed-out body's late finally must not overwrite the next test's value.
+	const restoreSecretEnv = once(() => {
 		for (const [name, value] of removed) {
 			process.env[name] = value;
 		}
-	};
+	});
 	onTestFinished(restoreSecretEnv);
 	for (const [name, value] of Object.entries(process.env)) {
 		if (!value || value.length < 8) continue;
@@ -65,11 +66,8 @@ async function withTempConfigRoot<T>(run: () => Promise<T>): Promise<T> {
 	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 	const configDirName = `.omp-sdk-session-${Snowflake.next()}`;
 	const configRoot = path.join(os.homedir(), configDirName);
-	try {
-		process.env.PI_CONFIG_DIR = configDirName;
-		setProfile(undefined);
-		return await run();
-	} finally {
+	// once: a timed-out body's late finally must not overwrite the next test's value.
+	const restoreConfigRoot = once(() => {
 		setProfile(undefined);
 		if (originalConfigDir === undefined) {
 			delete process.env.PI_CONFIG_DIR;
@@ -82,6 +80,14 @@ async function withTempConfigRoot<T>(run: () => Promise<T>): Promise<T> {
 			process.env.PI_CODING_AGENT_DIR = originalAgentDir;
 		}
 		setProfile(originalProfile);
+	});
+	onTestFinished(restoreConfigRoot);
+	try {
+		process.env.PI_CONFIG_DIR = configDirName;
+		setProfile(undefined);
+		return await run();
+	} finally {
+		restoreConfigRoot();
 		// The model registry opened the shared `<configRoot>/agent/models.db` cache while the
 		// temp root was active; release it so Windows can delete the root.
 		closeModelCache();

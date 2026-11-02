@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
 import { completeSimple, streamSimple } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
@@ -1978,6 +1978,7 @@ describe("openai-codex streaming", () => {
 
 	it("passes the provider proxy to websocket handshakes", async () => {
 		const proxy = "socks5://127.0.0.1:7890";
+		// The file's afterEach puts PI_PROXY_CODEX_PROXY_TEST back to its value at module load.
 		Bun.env.PI_PROXY_CODEX_PROXY_TEST = proxy;
 		__resetProxyCache();
 		let capturedProxy: string | undefined;
@@ -1995,9 +1996,6 @@ describe("openai-codex streaming", () => {
 		};
 		const providerSessionState = new Map<string, ProviderSessionState>();
 
-		onTestFinished(() => {
-			delete Bun.env.PI_PROXY_CODEX_PROXY_TEST;
-		});
 		try {
 			await prewarmOpenAICodexResponses(model, {
 				apiKey: createCodexTestToken(),

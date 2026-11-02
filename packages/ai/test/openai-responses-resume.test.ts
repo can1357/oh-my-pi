@@ -6,6 +6,7 @@ import {
 import { configureProviderStoreResponses } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
 import type { AssistantMessageEvent, Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { once } from "@oh-my-pi/pi-utils";
 
 const SOCKET_CLOSE =
 	"The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()";
@@ -154,10 +155,11 @@ const noWait = async (): Promise<void> => {};
 /** Run `fn` with PI_MUSE_STORE_RESPONSES set to `value` (unset when undefined), then restore it. */
 async function withStoreEnv(value: string | undefined, fn: () => Promise<void>): Promise<void> {
 	const previous = process.env.PI_MUSE_STORE_RESPONSES;
-	const restore = () => {
+	// once: a timed-out body's late finally must not overwrite the next test's value.
+	const restore = once(() => {
 		if (previous === undefined) delete process.env.PI_MUSE_STORE_RESPONSES;
 		else process.env.PI_MUSE_STORE_RESPONSES = previous;
-	};
+	});
 	onTestFinished(restore);
 	if (value === undefined) delete process.env.PI_MUSE_STORE_RESPONSES;
 	else process.env.PI_MUSE_STORE_RESPONSES = value;

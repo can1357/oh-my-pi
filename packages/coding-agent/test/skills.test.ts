@@ -15,7 +15,7 @@ import {
 import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
 import { SkillProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/skill-protocol";
 import { CombinedAutocompleteProvider } from "@oh-my-pi/pi-tui/autocomplete";
-import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests, once, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { restoreEnvValue } from "./helpers/settings-test-state";
 
 afterEach(() => {
@@ -164,6 +164,9 @@ describe("skills", () => {
 
 		it("should keep user Claude skills when project .claude/skills is missing", async () => {
 			const originalClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
+			// once: a timed-out body's late finally must not overwrite the next test's value.
+			const restoreClaudeConfigDir = once(() => restoreEnvValue("CLAUDE_CONFIG_DIR", originalClaudeConfigDir));
+			onTestFinished(restoreClaudeConfigDir);
 			delete process.env.CLAUDE_CONFIG_DIR;
 			delete Bun.env.CLAUDE_CONFIG_DIR;
 			const tempHomeDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-claude-home-"));
@@ -194,7 +197,7 @@ describe("skills", () => {
 				expect(result.items.some(skill => skill.name === "user-only-skill" && skill.level === "user")).toBe(true);
 			} finally {
 				disableUserSource("claude");
-				restoreEnvValue("CLAUDE_CONFIG_DIR", originalClaudeConfigDir);
+				restoreClaudeConfigDir();
 				await removeWithRetries(tempProjectDir);
 				await removeWithRetries(tempHomeDir);
 			}

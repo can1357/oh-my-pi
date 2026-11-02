@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, onTestFinished, spyOn, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as natives from "@oh-my-pi/pi-natives";
 import { Container, TUI } from "@oh-my-pi/pi-tui";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
@@ -858,7 +858,6 @@ describe("TUI inline-image budget", () => {
 
 	it("clips a direct Kitty placement during an in-place width repaint", async () => {
 		const originalGraphics = { ...getKittyGraphics() };
-		const originalResizeMode = Bun.env.PI_TUI_RESIZE_IN_PLACE;
 		const term = new VirtualTerminal(40, 6);
 		const writes: string[] = [];
 		const realWrite = term.write.bind(term);
@@ -868,6 +867,7 @@ describe("TUI inline-image budget", () => {
 		});
 
 		setKittyGraphics({ unicodePlaceholders: false });
+		// withoutTerminalMultiplexer() saves PI_TUI_RESIZE_IN_PLACE before the test and puts it back after it.
 		Bun.env.PI_TUI_RESIZE_IN_PLACE = "1";
 		const tui = createTui(term);
 		tui.addChild(
@@ -881,10 +881,6 @@ describe("TUI inline-image budget", () => {
 		);
 		tui.addChild(new Text("after-0\nafter-1\nafter-2", 0, 0));
 
-		onTestFinished(() => {
-			if (originalResizeMode === undefined) delete Bun.env.PI_TUI_RESIZE_IN_PLACE;
-			else Bun.env.PI_TUI_RESIZE_IN_PLACE = originalResizeMode;
-		});
 		try {
 			tui.start();
 			await scheduler.settle(term);

@@ -5,7 +5,7 @@ import {
 	setLocalModelInitializerForTests,
 } from "@oh-my-pi/pi-mnemopi/core/embeddings";
 import { withMnemopiRuntimeOptions } from "@oh-my-pi/pi-mnemopi/core/runtime-options";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, once } from "@oh-my-pi/pi-utils";
 
 const ENV_KEYS = [
 	"NODE_ENV",
@@ -24,7 +24,8 @@ type EnvKey = (typeof ENV_KEYS)[number];
 /** Force the local-fastembed path: not a test runtime, local model, no API config. */
 async function withLocalModelEnv<T>(fn: () => Promise<T>): Promise<T> {
 	const snapshot: Partial<Record<EnvKey, string>> = {};
-	const restoreEnv = () => {
+	// once: a timed-out body's late finally must not overwrite the next test's value.
+	const restoreEnv = once(() => {
 		for (const key of ENV_KEYS) {
 			const value = snapshot[key];
 			if (value === undefined) {
@@ -34,7 +35,7 @@ async function withLocalModelEnv<T>(fn: () => Promise<T>): Promise<T> {
 			}
 		}
 		resetEmbeddingProviderForTests();
-	};
+	});
 	onTestFinished(restoreEnv);
 	for (const key of ENV_KEYS) {
 		const value = process.env[key];

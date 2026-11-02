@@ -22,7 +22,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { FileSessionStorage, MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { getTerminalId } from "@oh-my-pi/pi-tui";
 import { isTaskToolDetails, type TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
-import { getAgentDir, getTerminalSessionsDir, removeWithRetries, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { getAgentDir, getTerminalSessionsDir, once, removeWithRetries, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
 interface JsonlMessageEntry {
 	type: "message";
@@ -70,6 +70,10 @@ describe("SessionManager.forkFrom", () => {
 	it("suppresses terminal breadcrumbs while preserving source history under a new parented session", async () => {
 		using tempDir = TempDir.createSync("@omp-session-fork-");
 		const previousAgentDir = getAgentDir();
+		// setAgentDir() writes PI_CODING_AGENT_DIR and clears the profile variables.
+		// once: a timed-out body's late finally must not overwrite the next test's value.
+		const restoreAgentDir = once(() => setAgentDir(previousAgentDir));
+		onTestFinished(restoreAgentDir);
 		const previousTermSessionId = process.env.TERM_SESSION_ID;
 		setAgentDir(path.join(tempDir.path(), "agent"));
 		process.env.TERM_SESSION_ID = "omp-fork-test";
@@ -129,7 +133,7 @@ describe("SessionManager.forkFrom", () => {
 			if (cloneMessage?.message.role !== "user") throw new Error("expected forked user message");
 			expect(cloneMessage.message.content).toBe("hello");
 		} finally {
-			setAgentDir(previousAgentDir);
+			restoreAgentDir();
 		}
 	});
 

@@ -4,6 +4,7 @@ import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { type Context, type Model, type ModelSpec, OPENAI_MAX_OUTPUT_TOKENS } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { once } from "@oh-my-pi/pi-utils";
 
 // Output-token wire policy for OpenAI-family providers:
 //   - Non-aggregator completions + non-OpenRouter responses: clamp to
@@ -48,13 +49,14 @@ async function drainResponses(
 	maxTokens?: number,
 ): Promise<Record<string, unknown>> {
 	const previousOpenRouterResponses = Bun.env.PI_OPENROUTER_RESPONSES;
-	const restore = () => {
+	// once: a timed-out body's late finally must not overwrite the next test's value.
+	const restore = once(() => {
 		if (previousOpenRouterResponses === undefined) {
 			delete Bun.env.PI_OPENROUTER_RESPONSES;
 		} else {
 			Bun.env.PI_OPENROUTER_RESPONSES = previousOpenRouterResponses;
 		}
-	};
+	});
 	onTestFinished(restore);
 	if (model.api === "openrouter") Bun.env.PI_OPENROUTER_RESPONSES = "1";
 	try {

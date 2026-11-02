@@ -24,7 +24,7 @@ import {
 	createCodexAutoRedeemCoordinator,
 } from "@oh-my-pi/pi-coding-agent/session/codex-auto-reset";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { __resetDirsFromEnvForTests, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests, once, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
 import { cfgClaudeResetsAutoRedeem } from "@oh-my-pi/pi-coding-agent/session/settings";
@@ -731,13 +731,14 @@ describe("Claude saved-reset trigger integration", () => {
 			OMP_PROFILE: process.env.OMP_PROFILE,
 			PI_PROFILE: process.env.PI_PROFILE,
 		};
-		const restoreEnv = () => {
+		// once: a timed-out body's late finally must not overwrite the next test's value.
+		const restoreEnv = once(() => {
 			for (const [key, value] of Object.entries(originalEnv)) {
 				if (value === undefined) delete process.env[key];
 				else process.env[key] = value;
 			}
 			__resetDirsFromEnvForTests();
-		};
+		});
 		onTestFinished(restoreEnv);
 		setAgentDir(tempDir.path());
 		try {

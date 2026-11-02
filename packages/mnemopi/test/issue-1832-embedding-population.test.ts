@@ -26,6 +26,7 @@ import {
 	withMnemopiRuntimeOptions,
 } from "@oh-my-pi/pi-mnemopi/core/runtime-options";
 import { withBeam } from "@oh-my-pi/pi-mnemopi/mcp";
+import { once } from "@oh-my-pi/pi-utils";
 
 interface EmbeddingRow {
 	readonly memory_id: string;
@@ -318,13 +319,14 @@ describe("issue #1832 — embedding write/read coverage", () => {
 		};
 
 		const originalDataDir = process.env.MNEMOPI_DATA_DIR;
-		const restoreDataDir = () => {
+		// once: a timed-out body's late finally must not overwrite the next test's value.
+		const restoreDataDir = once(() => {
 			if (originalDataDir === undefined) {
 				delete process.env.MNEMOPI_DATA_DIR;
 			} else {
 				process.env.MNEMOPI_DATA_DIR = originalDataDir;
 			}
-		};
+		});
 		onTestFinished(restoreDataDir);
 		process.env.MNEMOPI_DATA_DIR = dataDir;
 		let thrown: unknown;

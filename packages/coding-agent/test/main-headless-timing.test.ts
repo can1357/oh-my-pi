@@ -13,7 +13,7 @@ import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { logger, postmortem, TempDir } from "@oh-my-pi/pi-utils";
+import { logger, once, postmortem, TempDir } from "@oh-my-pi/pi-utils";
 
 const tempDirs: TempDir[] = [];
 
@@ -71,10 +71,11 @@ describe("startup timing after a headless runner starts", () => {
 		const quitSpy = spyOn(postmortem, "quit").mockImplementation(async () => {});
 		// Print mode intentionally keeps recording under PI_TIMING; this case covers the default.
 		const savedTiming = process.env.PI_TIMING;
-		const restoreTiming = () => {
+		// once: a timed-out body's late finally must not overwrite the next test's value.
+		const restoreTiming = once(() => {
 			if (savedTiming !== undefined) process.env.PI_TIMING = savedTiming;
 			else delete process.env.PI_TIMING;
-		};
+		});
 		onTestFinished(restoreTiming);
 		delete process.env.PI_TIMING;
 		try {

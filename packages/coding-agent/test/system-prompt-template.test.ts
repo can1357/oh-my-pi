@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, onTestFinished, spyOn, vi } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
-import { __resetDirsFromEnvForTests, CONFIG_DIR_NAME, getConfigAgentDirName, TempDir } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests, CONFIG_DIR_NAME, getConfigAgentDirName, once, TempDir } from "@oh-my-pi/pi-utils";
 import {
 	buildSystemPrompt,
 	discoverSystemPromptOverride,
@@ -39,14 +39,15 @@ async function withDiscoveryHome<T>(fn: (paths: DiscoveryPaths) => Promise<T>): 
 	const previousHome = process.env.HOME;
 	const previousUserProfile = process.env.USERPROFILE;
 	const previousAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
-	const restoreEnv = () => {
+	// once: a timed-out body's late finally must not overwrite the next test's value.
+	const restoreEnv = once(() => {
 		if (previousHome === undefined) delete process.env.HOME;
 		else process.env.HOME = previousHome;
 		if (previousUserProfile === undefined) delete process.env.USERPROFILE;
 		else process.env.USERPROFILE = previousUserProfile;
 		restoreEnvValue("PI_CODING_AGENT_DIR", previousAgentDirEnv);
 		__resetDirsFromEnvForTests();
-	};
+	});
 	onTestFinished(restoreEnv);
 	process.env.HOME = home;
 	process.env.USERPROFILE = home;

@@ -1,4 +1,4 @@
-import { describe, expect, it, onTestFinished } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
 import {
 	type Component,
@@ -590,10 +590,8 @@ describe("terminal frame plans", () => {
 	});
 
 	it("rebuilds on a multiplexer height shrink to repair clipped and pushed live rows", async () => {
+		// withoutTerminalMultiplexer() saves TMUX before the test and puts it back after it.
 		Bun.env.TMUX = "/tmp/tmux-0/default,1,0"; // isInsideTerminalMultiplexer ← authoritative
-		onTestFinished(() => {
-			delete Bun.env.TMUX;
-		});
 		const terminal = new CountingTerminal(20, 6);
 		const provider = new WidthReplayProvider();
 		const renderScheduler = new VirtualRenderScheduler();
