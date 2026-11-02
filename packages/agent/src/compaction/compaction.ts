@@ -86,16 +86,12 @@ import handoffDocumentPrompt from "./prompts/handoff-document.md" with { type: "
 import snapcompactArchiveContextPrompt from "./prompts/snapcompact-archive-context.md" with { type: "text" };
 
 import {
-	computeFileLists,
-	createFileOps,
 	escapeSummaryBoundaryTags,
 	extractFileOpsFromMessage,
-	type FileOperations,
 	incompleteOutputError,
 	SUMMARIZATION_SYSTEM_PROMPT,
 	serializeConversationForSummary,
 	stripReadSelector,
-	upsertFileOperations,
 } from "./utils";
 
 // ============================================================================
@@ -115,8 +111,8 @@ function extractFileOperations(
 	messages: AgentMessage[],
 	entries: SessionEntry[],
 	prevCompactionIndex: number,
-): FileOperations {
-	const fileOps = createFileOps();
+): snapcompact.FileOperations {
+	const fileOps = snapcompact.createFileOps();
 
 	// Collect from previous compaction's details (if pi-generated)
 	if (prevCompactionIndex >= 0) {
@@ -1384,7 +1380,7 @@ export interface CompactionPreparation {
 	/** Preserved opaque compaction payload from the previous compaction, if any. */
 	previousPreserveData?: Record<string, unknown>;
 	/** File operations extracted from messagesToSummarize */
-	fileOps: FileOperations;
+	fileOps: snapcompact.FileOperations;
 	/** Compaction settions from settings.jsonl	*/
 	settings: CompactionSettings;
 }
@@ -2343,8 +2339,8 @@ export async function compact(
 			});
 
 	// Compute file lists and append to summary
-	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
-	summary = upsertFileOperations(summary, readFiles, modifiedFiles, fileOps.read);
+	const { readFiles, modifiedFiles } = snapcompact.computeFileLists(fileOps);
+	summary = snapcompact.upsertFileOperations(summary, readFiles, modifiedFiles, fileOps.read);
 	if (nativeSummary !== undefined) {
 		// The replayed block (summary and any `tool_changes`) stays
 		// byte-identical to the API's output so it matches its signature. The
@@ -2352,7 +2348,7 @@ export async function compact(
 		// summary message with the block and skips its text, so they would
 		// otherwise be invisible to this provider. Every other provider keeps
 		// reading the entry text.
-		const filesText = upsertFileOperations("", readFiles, modifiedFiles, fileOps.read) || undefined;
+		const filesText = snapcompact.upsertFileOperations("", readFiles, modifiedFiles, fileOps.read) || undefined;
 		preserveData = withAnthropicCompactionPreserveData(preserveData, {
 			provider: model.provider,
 			content: nativeSummary,

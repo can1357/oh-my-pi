@@ -5,6 +5,7 @@ import * as path from "node:path";
 import type { AssistantMessage, ImageContent, Message, Usage } from "@oh-my-pi/pi-ai";
 import { BtwHistoryPanel } from "@oh-my-pi/pi-tui/overlays/btw-history-panel";
 import { BtwController } from "@oh-my-pi/pi-coding-agent/modes/controllers/btw-controller";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { type BtwHistoryRecord, BtwHistoryStore, getBtwTurns } from "@oh-my-pi/pi-coding-agent/session/btw-history";
@@ -109,6 +110,7 @@ async function harness(spaceHoldKeys: readonly KeyId[] = ["space"]) {
 		} as unknown as TUI,
 		btwContainer: new Container(),
 		session,
+		settings: Settings.isolated(),
 		keybindings: {
 			getKeys(action: string) {
 				return action === "app.stt.pushToTalk" ? [...spaceHoldKeys] : [];

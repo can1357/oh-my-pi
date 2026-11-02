@@ -22,6 +22,7 @@ import * as path from "node:path";
 import { isPromise } from "node:util/types";
 import { getLogsDir, localDay } from "./dirs";
 import { RotatingFileSink } from "./logger/rotating-file";
+import { isPidAlive } from "./pid";
 import { setStderrRedirectTarget } from "./stderr-guard";
 import { drainModuleLoadEvents } from "./timing-buffer";
 /** Severity names accepted by the centralized logger. */
@@ -81,15 +82,6 @@ const LEGACY_AUDIT_PATTERN = /^\.[0-9a-f]{8,}-audit\.json$/;
 const RETAINED_STALE_LOGS_PER_PROCESS_DAY = 1;
 const RETAINED_STALE_LOG_DAYS = 5;
 
-function processIsRunning(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		return !(error instanceof Error && "code" in error && (error.code === "ESRCH" || error.code === "EINVAL"));
-	}
-}
-
 /**
  * Retain one newest completed-process log per process/day within the current
  * and previous four local calendar days, remove completed-process audit files
@@ -133,7 +125,7 @@ function pruneStaleProcessLogs(dir: string): void {
 		const logMatch = PROCESS_LOG_PATTERN.exec(entry.name);
 		const auditMatch = PROCESS_AUDIT_PATTERN.exec(entry.name);
 		const pidText = logMatch?.[2] ?? auditMatch?.[1];
-		if (!pidText || processIsRunning(Number(pidText))) continue;
+		if (!pidText || isPidAlive(Number(pidText))) continue;
 
 		if (auditMatch) {
 			removeBestEffort(entryPath);
