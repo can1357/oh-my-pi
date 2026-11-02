@@ -348,8 +348,8 @@ export async function decideIsolationReclaim(baseDir: string): Promise<Isolation
 			reclaimable: false,
 			reason: inUse
 				? `a live task is working in it (pid ${identity.pid})`
-				: `the omp process that built it is still running (pid ${identity.pid}); it goes when that run ` +
-					"finishes with it, or now with --all",
+				: `the omp process that built it is still running (pid ${identity.pid}); \`omp worktree clear\` ` +
+					"can remove it once that run has exited, and --all removes it now",
 		};
 	}
 	if (await hasLiveIsolationLease(baseDir)) {
@@ -599,46 +599,17 @@ const SANDBOX_LOCK_REMINDER_MS = 30_000;
  */
 const heldByThisProcess = new Set<SandboxLockHandle>();
 
-/** Set once: stderr keeps a no-op error listener so a late stream failure cannot kill the run. */
-let stderrGuarded = false;
-
 /**
- * Write a diagnostic to stderr, and never fail because of it.
- *
- * A closed descriptor throws here; a broken pipe fails *later*, as a stream
- * error with no listener, which terminates the process. Both killed children
- * that were a moment away from being granted the lock they were waiting for.
- * A diagnostic is not worth a run, so the synchronous throw, the write
- * callback's error and the stream's own error event are all swallowed.
- */
-function writeNoticeSafely(text: string): void {
-	try {
-		const stream = process.stderr;
-		if (!stderrGuarded) {
-			stderrGuarded = true;
-			stream.on?.("error", () => {
-				// Nothing to do: the caller cannot be told. That is not a failure
-				// of the work it is doing.
-			});
-		}
-		stream.write(text, () => {
-			// Swallows the asynchronous failure the callback reports.
-		});
-	} catch {
-		// Swallows the synchronous one.
-	}
-}
-
-/**
- * Take a sandbox lock, telling the caller at the *start* of a wait rather than
- * at the end of it.
+ * Take a sandbox lock, logging at the *start* of a wait rather than at the end
+ * of it.
  *
  * The wait itself is unchanged — shortening it would only trade a slow
- * materialisation for a failed one — but there is no reason the caller should
+ * materialisation for a failed one — but there is no reason the log should
  * learn in the sixtieth second what can be said in the first. The notice
  * carries what is actually knowable: the holder of the lock is an anonymous
  * kernel object, and the pid in the marker is the run that built the
- * workspace, which may not be the holder.
+ * workspace, which may not be the holder. It goes to the log only: these
+ * waits run in the host process, where the TUI owns the terminal.
  */
 export async function acquireSandboxLockWithNotice(baseDir: string, purpose: string): Promise<SandboxLockHandle> {
 	const startedAt = Date.now();
@@ -656,12 +627,8 @@ export async function acquireSandboxLockWithNotice(baseDir: string, purpose: str
 			// Says only what is true at this moment: the lock has not been granted.
 			// Whether that is a holder or a lock that cannot be opened is not known
 			// until the attempt ends, and claiming a holder here contradicted the
-			// failure that followed.
-			const message =
-				`Waiting for the isolation workspace lock to ${purpose} ${baseDir} — it has not been granted yet. ` +
-				`If another run holds it, the holder is not identifiable, and ${recorded}. ` +
-				"`omp worktree list` shows what owns it.";
-			writeNoticeSafely(`${message}\n`);
+			// failure that followed. Logged rather than written to stderr: the
+			// waits run in the host process, under the TUI.
 			logger.warn(`Waiting for the isolation workspace lock to ${purpose} ${baseDir}`, {
 				waitedMs: Date.now() - startedAt,
 				detail:

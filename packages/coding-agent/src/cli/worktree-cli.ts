@@ -52,6 +52,12 @@ export interface WorktreeEntry {
 	/** When set, the entry is unhealthy and `omp worktree clear` will remove it. */
 	orphanReason?: string;
 	/**
+	 * Why plain `omp worktree clear` leaves this entry, when it can say: for a
+	 * task-isolation sandbox that cannot prove it is finished, which only
+	 * `--all` removes.
+	 */
+	keptReason?: string;
+	/**
 	 * Set when this process could not read the entry. It is listed so the user
 	 * sees it, and never removed: a failure to look is not a licence to delete.
 	 */
@@ -73,7 +79,7 @@ export interface ListWorktreesOptions {
 }
 
 export interface ClearWorktreesOptions {
-	/** Remove every entry, including live PR-checkout worktrees. */
+	/** Remove every entry, including live PR-checkout worktrees and sandboxes that cannot prove they are finished. */
 	all: boolean;
 	/** Print what would be removed without touching the filesystem. */
 	dryRun: boolean;
@@ -472,7 +478,7 @@ async function classifyDir(dir: string): Promise<WorktreeEntry | null> {
 	return {
 		path: dir,
 		kind: "task-isolation",
-		orphanReason: decision.reclaimable ? decision.reason : undefined,
+		...(decision.reclaimable ? { orphanReason: decision.reason } : { keptReason: decision.reason }),
 	};
 }
 
@@ -564,5 +570,6 @@ function formatEntryDetail(entry: WorktreeEntry): string {
 		parts.push("unrecognized contents");
 	}
 	if (entry.orphanReason) parts.push(entry.orphanReason);
+	if (entry.keptReason) parts.push(entry.keptReason);
 	return parts.join(" — ");
 }

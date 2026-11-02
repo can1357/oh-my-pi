@@ -171,6 +171,20 @@ pub struct NumstatEntry {
 	pub removed: Option<u32>,
 }
 
+/// A path listing with what it cannot answer for.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LsFilesReport {
+	/// Listed paths, each the file's own name.
+	pub paths:       Vec<String>,
+	/// Directories git reported it could not open, so `paths` is short.
+	pub unreadable:  Vec<String>,
+	/// Listed entries whose names are not UTF-8, which no `String` holds and
+	/// `paths` therefore leaves out. Each is written for a person, not for a
+	/// path API: a byte outside a UTF-8 character as `\xNN`, a backslash
+	/// doubled.
+	pub undecodable: Vec<String>,
+}
+
 /// Options for diff generation.
 ///
 /// The output contract is git patch format — the TS layer parses it with the

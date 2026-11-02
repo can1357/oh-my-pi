@@ -318,11 +318,15 @@ async function captureUntrackedPatch(
 	const patches: string[] = [];
 	for (const result of untrackedDiffs) {
 		if (result === undefined) continue;
-		if (result.diff === undefined) {
+		// A listed file always renders at least its header, even when it is
+		// empty, so an empty diff means the read found nothing at that name. As
+		// a patch it said there was nothing to save, and the file went with the
+		// workspace.
+		if (result.diff === undefined || !result.diff.trim()) {
 			unread.push(result.entry);
 			continue;
 		}
-		if (result.diff.trim()) patches.push(result.diff);
+		patches.push(result.diff);
 	}
 	return { patch: patches.join("\n"), unread };
 }
@@ -481,6 +485,17 @@ async function captureRepoDeltaPatch(repoDir: string, rb: RepoBaseline, objectRe
 			`git could not read ${listed.unreadable.length} ${listed.unreadable.length === 1 ? "directory" : "directories"} ` +
 				`in ${repoDir}, so this capture cannot say what is in them: ${listed.unreadable.slice(0, 10).join(", ")}`,
 			listed.unreadable,
+		);
+	}
+	if (listed.undecodable.length > 0) {
+		// A name that is not UTF-8 has no JS string, so no path this process
+		// holds reaches the file and the patch cannot carry it. Decoded
+		// lossily, it named a file that does not exist, whose diff read as
+		// empty, and the teardown deleted the only copy.
+		throw new IsolationCaptureIncompleteError(
+			`git listed ${listed.undecodable.length} untracked file(s) in ${repoDir} whose names are not UTF-8, ` +
+				`so this capture cannot carry them: ${listed.undecodable.slice(0, 10).join(", ")}`,
+			listed.undecodable,
 		);
 	}
 	const currentUntracked = listed.paths;
@@ -777,7 +792,9 @@ function errorMessage(err: unknown): string {
  * hook child still running after the owner died writes into a path nobody can
  * take, instead of into the workspace a successor has since built at the same
  * name — which is how a successor's data was read and overwritten. The cost is
- * a directory left for the sweeper; the cost of reuse was a user's work.
+ * a directory nothing removes on its own: the user's `omp worktree clear`
+ * removes it once its owner has gone, and `--all` removes one that cannot
+ * prove it is finished. The cost of reuse was a user's work.
  */
 function getTaskIsolationSegment(repoRoot: string, id: string): string {
 	const key = `${path.resolve(repoRoot)}\0${id}`;
@@ -1159,8 +1176,8 @@ export async function cleanupIsolation(
 				retiredDir = candidate;
 				// The copy left behind is nobody's sandbox now. Saying so keeps a
 				// failed removal below from looking like a live owner's workspace to
-				// `omp worktree clear`, which would then never reclaim it while this
-				// process lives.
+				// the user's `omp worktree clear`, which would then refuse to remove
+				// it while this process lives.
 				await markIsolationRetired(candidate).catch(() => undefined);
 			} catch {
 				// A live mount pins the directory in place; hold the lock across the
@@ -1177,8 +1194,8 @@ export async function cleanupIsolation(
 		// An in-place teardown holds the lock, so a backend stop that never settles
 		// would deny every later materialisation of this id. Bounded: past the
 		// bound the stop is left running, the lock goes back, and the directory is
-		// left to `omp worktree clear`, which can tell a retired sandbox from a
-		// live one.
+		// left for the user to remove with `omp worktree clear`, which can tell a
+		// retired sandbox from a live one. Nothing removes it on its own.
 		let abandoned = false;
 		let lockHandedOver = false;
 		try {

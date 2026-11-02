@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as natives from "@oh-my-pi/pi-natives";
-import { clearWorktrees } from "@oh-my-pi/pi-coding-agent/cli/worktree-cli";
+import { clearWorktrees, listWorktrees, type WorktreeEntry } from "@oh-my-pi/pi-coding-agent/cli/worktree-cli";
 import { ISOLATION_LEASE_DIR } from "@oh-my-pi/pi-coding-agent/task/isolation-lease";
 import {
 	ISOLATION_OWNER_FILE,
@@ -106,6 +106,21 @@ describe("worktree clear task-isolation ownership", () => {
 		// Windows reports neither /proc start times nor `ps`, so pid-only liveness
 		// cannot spot the recycled pid and the sandbox is conservatively kept.
 		expect(await exists(recycled)).toBe(process.platform === "win32");
+	});
+
+	it("lists why plain clear keeps a sandbox that cannot prove it is finished, and what removes it", async () => {
+		// Nothing removes such a sandbox on its own, and the reason naming
+		// `--all` was computed and then dropped: the list called it `live`.
+		const orphan = await makeSandbox("tnone0012");
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+
+		await listWorktrees({ json: true });
+
+		const entries = JSON.parse(String(log.mock.calls.at(-1)?.[0])) as WorktreeEntry[];
+		expect(entries.find(entry => entry.path === orphan)).toMatchObject({
+			kind: "task-isolation",
+			keptReason: "no owner marker (use --all to remove)",
+		});
 	});
 
 	it("keeps a sandbox a live session still leases, and reclaims one its owner retired", async () => {

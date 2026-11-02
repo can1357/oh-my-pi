@@ -1508,6 +1508,58 @@ describe("a capture that could not read everything", () => {
 		expect(await Bun.file(path.join(locked, "only-copy.txt")).exists()).toBe(true);
 	});
 
+	it("raises on an untracked file whose name is not UTF-8, instead of reporting an empty patch", async () => {
+		// git lists `ordinary-\xff.txt` with its raw byte, exits 0 and says
+		// nothing on stderr. Decoded lossily, the name pointed at a file that
+		// does not exist; its diff read as empty, the capture succeeded with an
+		// empty patch, and the teardown deleted the only copy.
+		if (process.platform === "win32") return;
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "src@example.com"]);
+		await runGit(repo, ["config", "user.name", "Source User"]);
+		await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+		await runGit(repo, ["add", "tracked.txt"]);
+		await runGit(repo, ["commit", "-q", "-m", "base"]);
+		const baseline = await captureBaseline(repo);
+		const raw = Buffer.concat([Buffer.from(`${repo}${path.sep}ordinary-`), Buffer.from([0xff]), Buffer.from(".txt")]);
+		await fs.writeFile(raw, "work nobody else has\n");
+
+		await expect(captureDeltaPatch(repo, baseline)).rejects.toThrow(/not UTF-8.*: ordinary-\\xff\.txt$/);
+		// Still there, because the capture refused rather than reporting none.
+		expect(await fs.readFile(raw, "utf8")).toBe("work nobody else has\n");
+	});
+
+	it("raises when a listed untracked file renders an empty diff", async () => {
+		// A listed file always has a header to show, even when it is empty, so
+		// an empty diff is a read that found nothing, not a file with nothing
+		// in it. Dropped as one, it never reached the refusal, and the file went
+		// with the workspace.
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "src@example.com"]);
+		await runGit(repo, ["config", "user.name", "Source User"]);
+		await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+		await runGit(repo, ["add", "tracked.txt"]);
+		await runGit(repo, ["commit", "-q", "-m", "base"]);
+		const baseline = await captureBaseline(repo);
+		await fs.writeFile(path.join(repo, "must-preserve.txt"), "work nobody else has\n");
+		// Every other call reaches git: only the diff of the listed file is empty.
+		const requireGit = vcs.requireGit;
+		vi.spyOn(vcs, "requireGit").mockImplementation(dir => {
+			const actual = requireGit(dir);
+			return new Proxy(actual, {
+				get(target, key) {
+					if (key === "diffNoIndex") return async () => "";
+					const value: unknown = Reflect.get(target, key);
+					return typeof value === "function" ? value.bind(target) : value;
+				},
+			});
+		});
+
+		await expect(captureDeltaPatch(repo, baseline)).rejects.toThrow(
+			/Could not read 1 untracked file.*: must-preserve\.txt$/,
+		);
+	});
+
 	it("captures a readable untracked file in the same shape", async () => {
 		const repo = await createGitRepo();
 		await runGit(repo, ["config", "user.email", "src@example.com"]);

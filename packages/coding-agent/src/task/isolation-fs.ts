@@ -3,11 +3,9 @@
  *
  * Reads come from `isolation-lookup` and answer `found` | `absent` |
  * `unknown`. Writes are here, and they are the operations that either happen
- * or raise — there is no third answer to swallow. Together they are the reason
- * the modules that decide whether a workspace may be deleted import no
- * filesystem API of their own: a read in the old form is not discouraged
- * there, it is unavailable, and `isolation-lookup-surface.test.ts` asks that
- * of the module graph rather than of the text.
+ * or raise — there is no third answer to swallow. Together they are why the
+ * modules that decide whether a workspace may be deleted import no
+ * filesystem API of their own.
  */
 
 import { type FSWatcher, watch as nodeWatch } from "node:fs";
