@@ -5,6 +5,7 @@
 ### Breaking Changes
 
 - `SessionSelectorOptions.loadAllSessions` and `SessionPickerHost.loadAllSessions` resolve to a `SessionListing`, and `allSessions` takes one, so the all-projects scope can show preliminary rows before its complete listing
+- `Editor.prediction` is replaced by `Editor.predictions`, which returns every prediction for the next prompt, most likely first, and `Editor.onPredictionAccepted` receives the inserted prediction's index in that list ([#17796](https://github.com/can1357/oh-my-pi/pull/17796) by [@wolfiesch](https://github.com/wolfiesch))
 
 ### Added
 
@@ -15,6 +16,7 @@
 - Added `AskDialogComponent.interrupt()`, which closes the dialog with only the answers a person confirmed and every note they submitted; text still being typed is never submitted, and a confirmed empty multi-select remains distinct from an unanswered question ([#17585](https://github.com/can1357/oh-my-pi/pull/17585) by [@sjawhar](https://github.com/sjawhar))
 - `Editor.onPredictionAccepted` and `Editor.onPredictionShown` report when Tab or Right inserts the rest of the composer prediction and when a frame paints it (at least one cell in the terminal, or the ghost on a native editor node) ([#17739](https://github.com/can1357/oh-my-pi/pull/17739) by [@wolfiesch](https://github.com/wolfiesch))
 - Added `CollabStatus.waitingOn`: the host's collab status segment reads `waiting on <guest>` (or `waiting on N guests`) while a question the host's person closed still waits on guests ([#17761](https://github.com/can1357/oh-my-pi/pull/17761) by [@sjawhar](https://github.com/sjawhar))
+- With two or more `Editor.predictions`, the ghost text follows the first one the draft is a prefix of; a typed draft that equals a shorter one keeps the ghost of a longer one. Once the buffer equals one of them with no ghost (always right after Tab, Right, or the list inserts one), a dim `⇥ N more` hint appears; press Tab to list them all, then Enter, Tab or Right to swap the whole line (never submitting) or Esc to keep it ([#17796](https://github.com/can1357/oh-my-pi/pull/17796) by [@wolfiesch](https://github.com/wolfiesch))
 
 ## [18.15.0] - 2026-11-01
 
