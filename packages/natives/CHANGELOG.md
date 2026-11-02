@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed the bash tool failing with `JoinHandle polled after completion` after `wait` for a background job or coprocess that hit an error; background jobs, coprocesses and process substitutions now print their own errors, and an `exit` or `break` in one no longer ends the shell that waits for it ([#17684](https://github.com/can1357/oh-my-pi/pull/17684) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the bash tool's shell sending an error where Bash does not: an error from `[[ … ]]` or from a later redirection now goes into the file the command redirects standard error to, a simple command's expansion error no longer creates that command's files, a function definition's redirections now expand with the function's arguments, and a failed redirection with standard error closed no longer ends the command line ([#17684](https://github.com/can1357/oh-my-pi/pull/17684) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 

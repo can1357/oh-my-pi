@@ -468,11 +468,24 @@ async fn async_subshell_status(
 	status.into()
 }
 
-/// Reports an error that ends a command carrying its own redirections while
-/// those redirections still apply, as Bash reports an error where it happens,
-/// and marks it reported, so the command that catches it outside them does
-/// not print it again on its own standard error. A cancelled run reports
-/// nothing.
+/// Reports `error`, which ends a command while redirections it installed are
+/// in force, through those redirections, and marks it reported, so the command
+/// that catches it outside them does not print it again. A cancelled run
+/// reports nothing.
+///
+/// Every diagnostic is written exactly once, through the redirections Bash
+/// 5.2.21 has installed when the diagnostic is produced:
+/// - A compound command, `[[ … ]]` and a function's definition install their
+///   redirections in the order written before the body runs; a function's,
+///   after its nesting depth is checked and its arguments are set. An error
+///   from the body goes through all of them, and one from installing a
+///   redirection goes through those installed before it.
+/// - A simple command expands its words, and a command without a name makes
+///   its assignments, before it installs any of its redirections: their
+///   errors go where the command's caller sends them. A redirection that
+///   cannot be installed is reported through those before it, and the command
+///   fails with status 1. An error from the command itself goes through all of
+///   them.
 pub(crate) async fn report_in_redirect_scope(
 	shell: &Shell<impl extensions::ShellExtensions>,
 	params: &ExecutionParameters,
@@ -485,6 +498,38 @@ pub(crate) async fn report_in_redirect_scope(
 	error.into_reported()
 }
 
+/// Installs `redirects` into `params` in the order written. A redirection that
+/// cannot be installed is reported through those installed before it; see
+/// [`report_in_redirect_scope`].
+pub(crate) async fn setup_redirects(
+	shell: &mut Shell<impl extensions::ShellExtensions>,
+	params: &mut ExecutionParameters,
+	redirects: &[ast::IoRedirect],
+) -> Result<(), error::Error> {
+	for redirect in redirects {
+		if let Err(error) = setup_redirect(shell, params, redirect).await {
+			return Err(report_in_redirect_scope(shell, params, error).await);
+		}
+	}
+	Ok(())
+}
+
+/// Installs a simple command's redirections into `params` in the order
+/// written, once its words are expanded; see [`setup_redirects`].
+async fn setup_simple_command_redirects(
+	shell: &mut Shell<impl extensions::ShellExtensions>,
+	params: &mut ExecutionParameters,
+	command: &ast::SimpleCommand,
+) -> Result<(), error::Error> {
+	let prefix = command.prefix.as_ref().map_or(&[][..], |prefix| prefix.0.as_slice());
+	let suffix = command.suffix.as_ref().map_or(&[][..], |suffix| suffix.0.as_slice());
+	for item in prefix.iter().chain(suffix) {
+		if let CommandPrefixOrSuffixItem::IoRedirect(redirect) = item {
+			setup_redirects(shell, params, std::slice::from_ref(redirect)).await?;
+		}
+	}
+	Ok(())
+}
 
 #[derive(Clone, Debug, Default)]
 /// Policy for how to manage spawned external processes.
@@ -578,7 +623,9 @@ impl Execute for ast::CompoundList {
 						.await?;
 				}
 
+				// Starting a job succeeds: `$?` is 0 after `&`, as in Bash.
 				result = ExecutionResult::success();
+				shell.set_last_exit_status(result.exit_code.into());
 			} else {
 				result = ao_list.execute(shell, params).await?;
 
@@ -1239,13 +1286,12 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::Command {
 						let redirects = redirects.clone();
 						let mut params = params;
 						Ok(ExecutionSpawnResult::StartedTask(tokio::spawn(async move {
+							// An error from installing the redirections or from the
+							// body is reported while those installed apply.
 							if let Some(redirects) = &redirects {
-								for redirect in &redirects.0 {
-									setup_redirect(&mut shell, &mut params, redirect).await?;
-								}
+								setup_redirects(&mut shell, &mut params, &redirects.0).await?;
 							}
-							let ended = compound.execute(&mut shell, &params).await;
-							match ended {
+							match compound.execute(&mut shell, &params).await {
 								Err(error) if redirects.is_some() => {
 									Err(report_in_redirect_scope(&shell, &params, error).await)
 								},
@@ -1254,11 +1300,10 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::Command {
 						})))
 					},
 					mut shell => {
-						// Set up any additional redirects.
+						// Set up any additional redirects. An error from installing
+						// them or from the body is reported while those installed apply.
 						if let Some(redirects) = redirects {
-							for redirect in &redirects.0 {
-								setup_redirect(&mut shell, &mut params, redirect).await?;
-							}
+							setup_redirects(&mut shell, &mut params, &redirects.0).await?;
 						}
 
 						let ended = match compound.execute(&mut shell, &params).await {
@@ -1279,26 +1324,29 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::Command {
 					.into())
 			},
 			Self::ExtendedTest(e, redirects) => {
-				// Set up any additional redirects.
+				// Set up any additional redirects. An error from installing them or
+				// from evaluating the expression is reported while those installed
+				// apply.
 				if let Some(redirects) = redirects {
-					for redirect in &redirects.0 {
-						setup_redirect(&mut pipeline_context.shell, &mut params, redirect).await?;
-					}
+					setup_redirects(&mut pipeline_context.shell, &mut params, &redirects.0).await?;
 				}
 
 				// Evaluate the extended test expression.
-				let result = if extendedtests::eval_extended_test_expr(
+				let matched = match extendedtests::eval_extended_test_expr(
 					&e.expr,
 					&mut pipeline_context.shell,
 					&params,
 				)
-				.await?
+				.await
 				{
-					0
-				} else {
-					1
+					Err(error) if redirects.is_some() => {
+						return Err(
+							report_in_redirect_scope(&*pipeline_context.shell, &params, error).await,
+						);
+					},
+					matched => matched?,
 				};
-				Ok(ExecutionResult::new(result).into())
+				Ok(ExecutionResult::new(if matched { 0 } else { 1 }).into())
 			},
 		}
 	}
@@ -1848,16 +1896,15 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 		// if expansion (e.g., command substitution) set an exit status.
 		let status_change_count_before_expansion = context.shell.last_exit_status_change_count();
 
+		// As Bash does, expand every word, process substitutions included, before
+		// installing any redirection, then install them in the order written (see
+		// `report_in_redirect_scope`): an expansion error, or what a substitution
+		// writes to standard error, goes where this command's caller sends it,
+		// and a command whose expansion fails opens none of its files.
 		for item in prefix_iter.chain(cmd_name_items.iter()).chain(suffix_iter) {
 			ensure_not_cancelled(&params)?;
 			match item {
-				CommandPrefixOrSuffixItem::IoRedirect(redirect) => {
-					if let Err(e) = setup_redirect(&mut context.shell, &mut params, redirect).await {
-						let mut stderr = params.stderr(&context.shell);
-						context.shell.display_error(&mut stderr, &e).await?;
-						return Ok(ExecutionResult::general_error().into());
-					}
-				},
+				CommandPrefixOrSuffixItem::IoRedirect(_) => {},
 				CommandPrefixOrSuffixItem::ProcessSubstitution(kind, subshell_command) => {
 					params.disable_command_output_marking();
 					let (installed_fd_num, substitution_file) =
@@ -1941,6 +1988,12 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 
 		// If we have a command, then execute it.
 		if let Some(CommandArg::String(cmd_name)) = args.first().cloned() {
+			ensure_not_cancelled(&params)?;
+			if setup_simple_command_redirects(&mut context.shell, &mut params, self).await.is_err() {
+				// Reported; the command fails, as in Bash.
+				return Ok(ExecutionResult::general_error().into());
+			}
+
 			let mut stderr = params.stderr(&context.shell);
 			// The token that leaves this command's end unreported, if any; see
 			// `ExecutionParameters::set_quiet_cancellation`.
@@ -1989,6 +2042,13 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 					EnvironmentScope::Global,
 				)
 				.await?;
+			}
+
+			// Bash makes the assignments before it installs the redirections.
+			ensure_not_cancelled(&params)?;
+			if setup_simple_command_redirects(&mut context.shell, &mut params, self).await.is_err() {
+				// Reported; the command fails, as in Bash.
+				return Ok(ExecutionResult::general_error().into());
 			}
 
 			// Assignment-only statements clear $_ (set to empty string).

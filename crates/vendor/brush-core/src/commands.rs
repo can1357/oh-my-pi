@@ -1099,20 +1099,12 @@ pub(crate) async fn invoke_shell_function(
 ) -> Result<ExecutionSpawnResult, error::Error> {
 	let ast::FunctionBody(body, redirects) = &function.definition().body;
 
-	// Apply any redirects specified at function definition-time.
-	if let Some(redirects) = redirects {
-		for redirect in &redirects.0 {
-			interp::setup_redirect(context.shell, &mut context.params, redirect).await?;
-		}
-	}
-
 	let positional_args = args.iter().map(|a| a.to_string());
 
-	// Pass through open files.
-	let params = context.params.clone();
-
 	// Note that we're going deeper. Once we do this, we need to make sure we don't
-	// bail early before "exiting" the function.
+	// bail early before "exiting" the function. As in Bash, the nesting depth is
+	// checked and the arguments are set before the definition's redirections are
+	// installed, which expand with the function's own arguments.
 	context.shell.enter_function(
 		context.command_name.as_str(),
 		&function,
@@ -1120,17 +1112,31 @@ pub(crate) async fn invoke_shell_function(
 		&context.params,
 	)?;
 
-	// Invoke the function. A failure is reported while the definition's
-	// redirections still apply.
-	let result = match body.execute(context.shell, &params).await {
-		Err(error) if redirects.is_some() => {
-			Err(interp::report_in_redirect_scope(&*context.shell, &params, error).await)
+	// Apply any redirects specified at function definition-time, then invoke the
+	// function. An error from either is reported while the redirections
+	// installed so far apply.
+	let installed = match redirects {
+		Some(redirects) => {
+			interp::setup_redirects(context.shell, &mut context.params, &redirects.0).await
 		},
-		result => result,
+		None => Ok(()),
 	};
-
-	// Clean up parameters so any owned files are closed.
-	drop(params);
+	let result = match installed {
+		Err(error) => Err(error),
+		Ok(()) => {
+			// Pass through open files.
+			let params = context.params.clone();
+			let result = match body.execute(context.shell, &params).await {
+				Err(error) if redirects.is_some() => {
+					Err(interp::report_in_redirect_scope(&*context.shell, &params, error).await)
+				},
+				result => result,
+			};
+			// Clean up parameters so any owned files are closed.
+			drop(params);
+			result
+		},
+	};
 
 	// We've come back out, reflect it.
 	context.shell.leave_function()?;
