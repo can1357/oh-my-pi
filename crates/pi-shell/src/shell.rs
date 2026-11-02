@@ -8660,7 +8660,15 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 			.expect("run task panicked")
 			.expect("run");
 		assert!(result.cancelled);
-		assert!(!taps.read(1, None).expect("stream 1").open);
+		// The relay thread marks the stream finished once no process holds the
+		// pipe, which can be a moment after the run returns.
+		time::timeout(Duration::from_secs(5), async {
+			while taps.read(1, None).expect("stream 1").open {
+				time::sleep(Duration::from_millis(5)).await;
+			}
+		})
+		.await
+		.expect("stream 1 stayed open after the cancelled run ended");
 	}
 
 	/// A consumer that exits early still ends the pipeline at once through a
