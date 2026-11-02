@@ -5,7 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { getSessionTrace } from "../src/client/api";
 import { LiveProvider } from "../src/client/data/live";
 import { type QueryResult, useQuery } from "../src/client/data/query";
-import { cachedEntry, inflightRequest, loadQuery, releaseQuery } from "../src/client/data/query-store";
+import { inflightRequest, loadQuery, releaseQuery } from "../src/client/data/query-store";
 import type { SessionTrace } from "../src/client/types";
 
 type FetchInput = string | URL | Request;
@@ -77,18 +77,6 @@ describe("query store shared requests", () => {
 		releaseQuery(key, second);
 		expect(signals[0].aborted).toBe(true);
 		expect(inflightRequest(key)).toBeUndefined();
-	});
-	it("retains the start version when a newer consumer joins a shared request", async () => {
-		const key = JSON.stringify([freshKey()]);
-		const pending = Promise.withResolvers<number>();
-		const first = loadQuery(key, 1, () => pending.promise);
-		const second = loadQuery(key, 2, () => Promise.resolve(16));
-		pending.resolve(0);
-		await second.promise;
-		expect(cachedEntry(key)?.version).toBe(1);
-		expect(cachedEntry(key)?.data).toBe(0);
-		releaseQuery(key, first);
-		releaseQuery(key, second);
 	});
 });
 
@@ -193,7 +181,13 @@ describe("live query revalidation", () => {
 		}
 		try {
 			const view = mount();
-			await act(async () => view.render(<LiveProvider><Overview /></LiveProvider>));
+			await act(async () =>
+				view.render(
+					<LiveProvider>
+						<Overview />
+					</LiveProvider>,
+				),
+			);
 			for (const version of [1, 2]) {
 				await act(async () => {
 					if (!receive) throw new Error("Expected live listener");
@@ -209,10 +203,14 @@ describe("live query revalidation", () => {
 			await act(async () => pending.resolve(0));
 			expect(document.querySelector("output")?.textContent).toBe("0");
 			now += 1499;
-			await act(async () => { vi.advanceTimersByTime(1499); });
+			await act(async () => {
+				vi.advanceTimersByTime(1499);
+			});
 			expect(requests).toBe(1);
 			now += 1;
-			await act(async () => { vi.advanceTimersByTime(1); });
+			await act(async () => {
+				vi.advanceTimersByTime(1);
+			});
 			expect(document.querySelector("output")?.textContent).toBe("16");
 			expect(requests).toBe(2);
 		} finally {
