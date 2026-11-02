@@ -11,9 +11,9 @@ import { enoent } from "./session-storage-errors";
 import type { SessionTitleUpdate } from "./session-title-slot";
 
 /** Key prefix of a file under the sessions root: `sessions/` and its root-relative path. */
-const ROOT_KEY_PREFIX = "sessions/";
+export const ROOT_KEY_PREFIX = "sessions/";
 /** Key prefix of a file outside the sessions root: `abs:` and its absolute path. */
-const ABSOLUTE_KEY_PREFIX = "abs:";
+export const ABSOLUTE_KEY_PREFIX = "abs:";
 
 /**
  * The row key of the session file `file`. A file under `sessionsRoot` is keyed
@@ -228,10 +228,23 @@ interface ReadFromRow {
 
 const DEFAULT_TABLE = "omp_session_files";
 const IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]{0,56}$/;
+
+/**
+ * The session table `table` names (default `omp_session_files`), refused
+ * unless it is identifier-safe: both it and `<table>_parts` are inlined into
+ * statements.
+ */
+export function sessionTableName(table: string = DEFAULT_TABLE): string {
+	if (IDENT_RE.test(table)) return table;
+	throw new Error(
+		`SqlSessionStorage: table name must match ${IDENT_RE.source}, at most 57 characters so ` +
+			`${JSON.stringify(`${table}_parts`)} stays a valid identifier (got ${JSON.stringify(table)})`,
+	);
+}
 /** Largest part a full write stores; an append stores its line as one part. */
 const PART_BYTES = 1024 * 1024;
 const SCHEMA_DOCS = 'docs/session.md ("SQL session storage")';
-const KEY_MIGRATION_DOCS = 'docs/session.md ("Row keys")';
+const KEY_MIGRATION_COMMAND = 'omp session migrate-keys (docs/session.md, "Row keys")';
 /** How long a SQLite connection waits for another process's write lock, when the client sets no wait itself. */
 const SQLITE_BUSY_TIMEOUT_MS = 5000;
 /** Attempts per write when PostgreSQL or MySQL picks it as a deadlock victim. */
@@ -281,7 +294,81 @@ function sqliteQueue(client: SqlSessionStorageClient): SqliteQueue {
 	return queue;
 }
 
-function detectAdapter(client: SqlSessionStorageClient): SqlSessionStorageAdapter {
+/** Run `task` after every task queued before it on `queue`; with no queue, at once. */
+function runExclusive<T>(queue: SqliteQueue | undefined, task: () => Promise<T>): Promise<T> {
+	if (!queue) return task();
+	const result = queue.tail.then(task);
+	// The queue only orders tasks; each caller receives its own task's failure.
+	queue.tail = result.then(
+		() => {},
+		() => {},
+	);
+	return result;
+}
+
+/**
+ * Give a SQLite connection with no busy timeout one of
+ * {@link SQLITE_BUSY_TIMEOUT_MS}, so another process's write lock makes it
+ * wait instead of failing at once.
+ */
+export async function ensureSqliteBusyTimeout(client: SqlSessionStorageTransaction): Promise<void> {
+	const [setting] = (await client.unsafe("PRAGMA busy_timeout")) as BusyTimeoutRow[];
+	if (setting && rowNumber(setting.timeout) === 0) {
+		await client.unsafe(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
+	}
+}
+
+/**
+ * Run `work` in one SQLite transaction opened with `BEGIN IMMEDIATE`, which
+ * takes the write lock up front: a writer in another process makes it wait
+ * (busy timeout) or fail before anything ran. Any failure rolls it back.
+ */
+async function sqliteTransaction(
+	client: SqlSessionStorageClient,
+	work: (transaction: SqlSessionStorageTransaction) => Promise<void>,
+): Promise<void> {
+	await client.unsafe("BEGIN IMMEDIATE");
+	try {
+		await work(client);
+		await client.unsafe("COMMIT");
+	} catch (err) {
+		// A failed COMMIT (a reader in another process held the file past
+		// the busy timeout) leaves the transaction open, so roll back here.
+		// SQLite refuses the ROLLBACK when the error already rolled the
+		// transaction back (SQLITE_FULL, SQLITE_IOERR, ...); `err` is then
+		// the whole story. Any other ROLLBACK failure leaves the connection
+		// inside a transaction, so it is reported beside `err`.
+		try {
+			await client.unsafe("ROLLBACK");
+		} catch (rollbackErr) {
+			if (!isNoActiveTransactionError(rollbackErr)) {
+				throw new AggregateError(
+					[err, rollbackErr],
+					"SqlSessionStorage: a SQLite transaction failed and its ROLLBACK failed too",
+				);
+			}
+		}
+		throw err;
+	}
+}
+
+/**
+ * Run `work` in one transaction on `client`, the way the store runs its
+ * writes: `client.transaction()` on PostgreSQL and MySQL, which rolls back
+ * when `work` throws; on SQLite `BEGIN IMMEDIATE` … `COMMIT` in the call
+ * queue every store in this process shares for that database (see
+ * {@link sqliteQueue}), rolled back on any failure.
+ */
+export function runSqlTransaction(
+	client: SqlSessionStorageClient,
+	adapter: SqlSessionStorageAdapter,
+	work: (transaction: SqlSessionStorageTransaction) => Promise<void>,
+): Promise<void> {
+	if (adapter !== "sqlite") return client.transaction(work);
+	return runExclusive(sqliteQueue(client), () => sqliteTransaction(client, work));
+}
+
+export function detectAdapter(client: SqlSessionStorageClient): SqlSessionStorageAdapter {
 	const reported = String(client.options?.adapter ?? "").toLowerCase();
 	if (reported === "postgres" || reported === "postgresql" || reported === "pg") return "postgres";
 	if (reported === "mysql" || reported === "mariadb") return "mysql";
@@ -628,15 +715,8 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 	constructor(options: SqlSessionStorageOptions) {
 		this.#client = options.client;
 		this.#adapter = options.adapter ?? detectAdapter(options.client);
-		const table = options.table ?? DEFAULT_TABLE;
-		if (!IDENT_RE.test(table)) {
-			throw new Error(
-				`SqlSessionStorage: table name must match ${IDENT_RE.source}, at most 57 characters so ` +
-					`${JSON.stringify(`${table}_parts`)} stays a valid identifier (got ${JSON.stringify(table)})`,
-			);
-		}
-		this.#table = table;
-		this.#q = buildQueries(this.#adapter, table);
+		this.#table = sessionTableName(options.table);
+		this.#q = buildQueries(this.#adapter, this.#table);
 		this.#createTable = options.createTable !== false;
 		this.#sqliteQueue = this.#adapter === "sqlite" ? sqliteQueue(options.client) : undefined;
 		this.#sessionsRoot = path.resolve(options.sessionsRoot ?? getSessionsDir());
@@ -669,13 +749,7 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 
 	init(): Promise<void> {
 		return this.#exclusive(async () => {
-			if (this.#adapter === "sqlite") {
-				// Another process's write lock then makes this one wait instead of failing at once.
-				const [setting] = (await this.#client.unsafe("PRAGMA busy_timeout")) as BusyTimeoutRow[];
-				if (setting && rowNumber(setting.timeout) === 0) {
-					await this.#client.unsafe(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
-				}
-			}
+			if (this.#adapter === "sqlite") await ensureSqliteBusyTimeout(this.#client);
 			if (this.#createTable) await this.#applySchema();
 			else await this.#assertSchema();
 			await this.#assertRowKeys();
@@ -715,7 +789,7 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 		throw new Error(
 			`SqlSessionStorage: ${this.#table} holds the row key ${JSON.stringify(legacy.path)}, which is neither ` +
 				`"${ROOT_KEY_PREFIX}…" nor "${ABSOLUTE_KEY_PREFIX}…". Stop every older Oh My Pi process that writes ` +
-				`the table, then migrate its keys as ${KEY_MIGRATION_DOCS} describes.`,
+				`the table, then migrate its keys with ${KEY_MIGRATION_COMMAND}.`,
 		);
 	}
 
@@ -726,15 +800,7 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 	 * connections and need no queue.
 	 */
 	#exclusive<T>(task: () => Promise<T>): Promise<T> {
-		const queue = this.#sqliteQueue;
-		if (!queue) return task();
-		const result = queue.tail.then(task);
-		// The queue only orders tasks; each caller receives its own task's failure.
-		queue.tail = result.then(
-			() => {},
-			() => {},
-		);
-		return result;
+		return runExclusive(this.#sqliteQueue, task);
 	}
 
 	/**
@@ -746,31 +812,7 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 	 */
 	#transaction(work: (transaction: SqlSessionStorageTransaction) => Promise<void>): Promise<void> {
 		if (this.#adapter !== "sqlite") return this.#retryDeadlocks(() => this.#client.transaction(work));
-		return this.#exclusive(async () => {
-			await this.#client.unsafe("BEGIN IMMEDIATE");
-			try {
-				await work(this.#client);
-				await this.#client.unsafe("COMMIT");
-			} catch (err) {
-				// A failed COMMIT (a reader in another process held the file past
-				// the busy timeout) leaves the transaction open, so roll back here.
-				// SQLite refuses the ROLLBACK when the error already rolled the
-				// transaction back (SQLITE_FULL, SQLITE_IOERR, ...); `err` is then
-				// the whole story. Any other ROLLBACK failure leaves the connection
-				// inside a transaction, so it is reported beside `err`.
-				try {
-					await this.#client.unsafe("ROLLBACK");
-				} catch (rollbackErr) {
-					if (!isNoActiveTransactionError(rollbackErr)) {
-						throw new AggregateError(
-							[err, rollbackErr],
-							"SqlSessionStorage: a SQLite transaction failed and its ROLLBACK failed too",
-						);
-					}
-				}
-				throw err;
-			}
-		});
+		return this.#exclusive(() => sqliteTransaction(this.#client, work));
 	}
 
 	async #retryDeadlocks(write: () => Promise<unknown>): Promise<void> {
@@ -853,7 +895,7 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 				table: this.#table,
 				count: unmapped.length,
 				example: unmapped[0],
-				docs: KEY_MIGRATION_DOCS,
+				docs: KEY_MIGRATION_COMMAND,
 			});
 		}
 		return entries;

@@ -65,11 +65,42 @@ export async function resolveSessionStorage({ settings, env }: ResolveSessionSto
 		throw new SessionStorageConfigError(`${source} is ${JSON.stringify(kind)}; expected "file" or "sql"`);
 	}
 
+	const connection = await openSessionSqlClient({ settings, env });
+	try {
+		return await SqlSessionStorage.create({ client: connection.client });
+	} catch (err) {
+		void connection.client.end().catch(() => undefined);
+		throw sessionDatabaseError(connection, err);
+	}
+}
+
+/** A client of the session database, and where its connection string came from. */
+export interface SessionSqlConnection {
+	client: SQL;
+	/** The variable or setting that named the connection-string file. */
+	source: string;
+	/** The connection-string file. */
+	dsnFile: string;
+}
+
+/**
+ * Open a client of the session database from the connection-string file
+ * `OMP_SESSION_SQL_DSN_FILE` or `session.sql.dsnFile` names, with the pool
+ * policy of an omp-created client. `Bun.SQL` connects on the first statement,
+ * so that is where an unreachable database fails; report it with
+ * {@link sessionDatabaseError}. Throws {@link SessionStorageConfigError} when
+ * no file is named, or the file is unreadable, empty, or not a connection URL,
+ * never quoting the connection string.
+ */
+export async function openSessionSqlClient({
+	settings,
+	env,
+}: ResolveSessionStorageInput): Promise<SessionSqlConnection> {
 	const envPath = env[SESSION_SQL_DSN_FILE_ENV]?.trim();
 	const dsnFile = envPath || cfgSessionSqlDsnFile.layered(settings)?.trim();
 	if (!dsnFile) {
 		throw new SessionStorageConfigError(
-			`session storage is sql but no connection-string file is named: set ${SESSION_SQL_DSN_FILE_ENV} or ${SESSION_SQL_DSN_FILE_SETTING}`,
+			`no connection-string file for the session database is named: set ${SESSION_SQL_DSN_FILE_ENV} or ${SESSION_SQL_DSN_FILE_SETTING}`,
 		);
 	}
 	const source = envPath ? SESSION_SQL_DSN_FILE_ENV : SESSION_SQL_DSN_FILE_SETTING;
@@ -87,26 +118,29 @@ export async function resolveSessionStorage({ settings, env }: ResolveSessionSto
 	}
 	if (!dsn) throw new SessionStorageConfigError(`${source} names ${dsnFile}, which is empty`);
 
-	let client: SQL;
 	try {
-		client = new SQL(dsn, { max: SESSION_SQL_POOL_MAX, idleTimeout: SESSION_SQL_POOL_IDLE_TIMEOUT_SECONDS });
+		const client = new SQL(dsn, { max: SESSION_SQL_POOL_MAX, idleTimeout: SESSION_SQL_POOL_IDLE_TIMEOUT_SECONDS });
+		return { client, source, dsnFile };
 	} catch {
 		throw new SessionStorageConfigError(
 			`${source} names ${dsnFile}, but its contents are not a connection URL the database driver accepts`,
 		);
 	}
-	try {
-		return await SqlSessionStorage.create({ client });
-	} catch (err) {
-		void client.end().catch(() => undefined);
-		const error = toError(err);
-		const code = "code" in error ? error.code : undefined;
-		const detail = typeof code === "string" && code.length > 0 ? `${error.message} (${code})` : error.message;
-		throw new SessionStorageConfigError(
-			`${source} names ${dsnFile}, but the session database could not be opened: ${detail}`,
-			{ cause: error },
-		);
-	}
+}
+
+/**
+ * `err`, a failure to open the database `connection` names, as the refusal
+ * the start-up prints: the file and its source with the driver's error,
+ * never the connection string.
+ */
+export function sessionDatabaseError(connection: SessionSqlConnection, err: unknown): SessionStorageConfigError {
+	const error = toError(err);
+	const code = "code" in error ? error.code : undefined;
+	const detail = typeof code === "string" && code.length > 0 ? `${error.message} (${code})` : error.message;
+	return new SessionStorageConfigError(
+		`${connection.source} names ${connection.dsnFile}, but the session database could not be opened: ${detail}`,
+		{ cause: error },
+	);
 }
 
 /**
