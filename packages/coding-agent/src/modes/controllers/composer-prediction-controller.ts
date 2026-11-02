@@ -1,5 +1,6 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import type { MeterProvider } from "@opentelemetry/api";
 import { logger, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import composerPredictionPrompt from "../../prompts/system/composer-prediction-user.md" with { type: "text" };
 import type { AgentSession } from "../../session/agent-session";
@@ -7,6 +8,7 @@ import { cfgComposerPredictions } from "../settings";
 import type { InteractiveModeContext } from "../types";
 import {
 	type PredictionOutcome,
+	type PredictionResolution,
 	recordPredictionRequest,
 	recordPredictionResolved,
 } from "./composer-prediction-telemetry";
@@ -43,8 +45,8 @@ interface PredictionSource {
 interface Prediction {
 	text: string;
 	source: PredictionSource;
-	/** `performance.now()` when the prediction was offered. */
-	offeredAt: number;
+	/** `performance.now()` when the composer first displayed the prediction; unset while never displayed. */
+	shownAt: number | undefined;
 	accepted: boolean;
 }
 
@@ -71,12 +73,15 @@ export function parseComposerPrediction(reply: string): string | undefined {
 export class ComposerPredictionController {
 	readonly #ctx: PredictionContext;
 	readonly #deadlineMs: number;
+	/** Metrics sink; the global provider when unset. */
+	readonly #meterProvider: MeterProvider | undefined;
 	#abort: AbortController | undefined;
 	#prediction: Prediction | undefined;
 
-	constructor(ctx: PredictionContext, options: { deadlineMs?: number } = {}) {
+	constructor(ctx: PredictionContext, options: { deadlineMs?: number; meterProvider?: MeterProvider } = {}) {
 		this.#ctx = ctx;
 		this.#deadlineMs = options.deadlineMs ?? PREDICTION_DEADLINE_MS;
+		this.#meterProvider = options.meterProvider;
 	}
 
 	/** The prediction for the conversation as it stands now, if one is ready. */
@@ -112,12 +117,23 @@ export class ComposerPredictionController {
 		void this.#run(source, abort);
 	}
 
+	/** The composer painted the current prediction; its first display starts the offer. */
+	shown(): void {
+		const prediction = this.#prediction;
+		if (prediction && prediction.shownAt === undefined && this.#isCurrent(prediction.source)) {
+			prediction.shownAt = performance.now();
+		}
+	}
+
 	/** The user inserted the offered prediction (Tab or Right). */
 	accepted(): void {
 		const prediction = this.#prediction;
 		if (!prediction || prediction.accepted || !this.#isCurrent(prediction.source)) return;
 		prediction.accepted = true;
-		recordPredictionResolved("accepted", prediction.source.model, performance.now() - prediction.offeredAt);
+		// Tab or Right only inserts a displayable prediction, even one accepted before its first frame.
+		const shownAt = prediction.shownAt ?? performance.now();
+		prediction.shownAt = shownAt;
+		this.#resolve("accepted", prediction.source.model, performance.now() - shownAt);
 	}
 
 	/** Abort an in-flight prediction and clear the shown one. */
@@ -126,8 +142,9 @@ export class ComposerPredictionController {
 		this.#abort = undefined;
 		const prediction = this.#prediction;
 		if (!prediction) return;
-		if (!prediction.accepted) {
-			recordPredictionResolved("ignored", prediction.source.model, performance.now() - prediction.offeredAt);
+		// Only a prediction the user saw can have been ignored.
+		if (!prediction.accepted && prediction.shownAt !== undefined) {
+			this.#resolve("ignored", prediction.source.model, performance.now() - prediction.shownAt);
 		}
 		this.#prediction = undefined;
 		this.#ctx.ui.requestRender();
@@ -153,7 +170,7 @@ export class ComposerPredictionController {
 		} finally {
 			if (this.#abort === abort) this.#abort = undefined;
 		}
-		recordPredictionRequest(outcome, source.model, performance.now() - startedAt);
+		recordPredictionRequest(outcome, source.model, performance.now() - startedAt, this.#meterProvider);
 	}
 
 	/** Offer a settled reply as the composer prediction when it is still wanted; returns how it settled. */
@@ -162,10 +179,18 @@ export class ComposerPredictionController {
 		if (!this.#isCurrent(source)) return "stale";
 		const text = parseComposerPrediction(replyText);
 		if (!text) return "skipped";
-		this.#prediction = { text, source, offeredAt: performance.now(), accepted: false };
+		const prediction: Prediction = { text, source, shownAt: undefined, accepted: false };
+		this.#prediction = prediction;
 		this.#ctx.ui.requestRender();
-		// The ghost paints only while the draft is a prefix of the prediction.
-		return text.startsWith(this.#ctx.editor.getText()) ? "shown" : "hidden";
+		// The editor's own display test: a draft that is not a strict prefix, a cursor inside the
+		// draft, or an open autocomplete keeps the ghost off screen until that changes.
+		if (!this.#ctx.editor.isPredictionVisible()) return "hidden";
+		prediction.shownAt = performance.now();
+		return "shown";
+	}
+
+	#resolve(result: PredictionResolution, model: string, shownForMs: number): void {
+		recordPredictionResolved(result, model, shownForMs, this.#meterProvider);
 	}
 
 	#recordUsage(source: PredictionSource, message: AssistantMessage): void {

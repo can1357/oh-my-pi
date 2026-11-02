@@ -1,9 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { beforeAll, describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { Message, Model } from "@oh-my-pi/pi-ai";
-import { metrics } from "@opentelemetry/api";
+import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
+import { getEditorTheme, initTheme } from "@oh-my-pi/pi-tui/theme";
 import {
 	AggregationTemporality,
+	type DataPoint,
+	type Histogram,
 	InMemoryMetricExporter,
 	MeterProvider,
 	PeriodicExportingMetricReader,
@@ -15,6 +18,10 @@ import {
 } from "@oh-my-pi/pi-coding-agent/modes/controllers/composer-prediction-controller";
 import type { EphemeralTurnOptions, EphemeralTurnResult } from "@oh-my-pi/pi-coding-agent/session/agent-session-types";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+
+beforeAll(async () => {
+	await initTheme(false);
+});
 
 describe("parseComposerPrediction", () => {
 	it("normalizes a reply to the single line the composer shows", () => {
@@ -48,6 +55,7 @@ interface HarnessOptions {
 	/** What `ephemeralMaxTokensPreservesRequest()` reports for the session. */
 	capPreservesRequest?: boolean;
 	deadlineMs?: number;
+	meterProvider?: MeterProvider;
 }
 
 const MODEL = { id: "claude-sonnet-4-5", provider: "anthropic", api: "anthropic-messages" } as Model;
@@ -77,14 +85,23 @@ function harness(options: HarnessOptions = {}) {
 		},
 	};
 	let renders = 0;
-	let draft = options.draft ?? "";
+	// The composer, wired to the controller the way interactive mode wires it.
+	const editor = new CustomEditor(getEditorTheme());
+	editor.setText(options.draft ?? "");
 	const ctx = {
 		settings: Settings.isolated({ "composer.predictions": options.enabled ?? true }),
 		viewSession: session,
 		focusedAgentId: options.focusedAgentId,
-		editor: { getText: () => draft },
+		editor,
 		ui: { requestRender: () => renders++ },
 	} as unknown as ConstructorParameters<typeof ComposerPredictionController>[0];
+	const controller = new ComposerPredictionController(ctx, {
+		deadlineMs: options.deadlineMs,
+		meterProvider: options.meterProvider,
+	});
+	editor.prediction = () => controller.text;
+	editor.onPredictionAccepted = () => controller.accepted();
+	editor.onPredictionShown = () => controller.shown();
 	const reply = async (index: number, replyText: string) => {
 		const turn = turns[index]!;
 		const assistantMessage = {
@@ -104,16 +121,17 @@ function harness(options: HarnessOptions = {}) {
 		await turn.promise.catch(() => {});
 	};
 	return {
-		controller: new ComposerPredictionController(ctx, { deadlineMs: options.deadlineMs }),
+		controller,
+		editor,
 		turns,
 		messages,
 		firstLeafId,
 		reply,
 		fail,
-		/** The user edits the composer. */
-		type: (text: string) => {
-			draft = text;
-		},
+		/** The user replaces the composer draft. */
+		type: (text: string) => editor.setText(text),
+		/** Paint one composer frame. */
+		paint: () => editor.render(80).join("\n"),
 		renders: () => renders,
 		usageEntries: () => sessionManager.getEntries().filter(entry => entry.type === "model_usage"),
 		/** A new message lands on the journal and in the live history. */
@@ -219,61 +237,70 @@ describe("ComposerPredictionController", () => {
 });
 
 describe("ComposerPredictionController metrics", () => {
-	let exporter: InMemoryMetricExporter;
-	let reader: PeriodicExportingMetricReader;
-
-	beforeEach(() => {
-		exporter = new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE);
-		reader = new PeriodicExportingMetricReader({ exporter, exportIntervalMillis: 3_600_000 });
-		metrics.setGlobalMeterProvider(new MeterProvider({ readers: [reader] }));
-	});
-
-	afterEach(async () => {
-		await reader.shutdown();
-		metrics.disable();
-	});
-
-	/** `{attribute value: count}` for one counter, keyed by `attribute`. */
-	async function counts(name: string, attribute: string): Promise<Record<string, number>> {
-		await reader.forceFlush();
-		const points = exporter
-			.getMetrics()
-			.at(-1)
-			?.scopeMetrics.flatMap(scope => scope.metrics)
-			.find(metric => metric.descriptor.name === name)?.dataPoints;
-		return Object.fromEntries(
-			(points ?? []).map(point => [
-				String(point.attributes[attribute]),
-				typeof point.value === "number" ? point.value : NaN,
-			]),
-		);
+	/** A test-local meter provider, so this suite never touches the global one. */
+	function sink() {
+		const exporter = new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE);
+		const reader = new PeriodicExportingMetricReader({ exporter, exportIntervalMillis: 3_600_000 });
+		const meterProvider = new MeterProvider({ readers: [reader] });
+		const points = async <T>(name: string): Promise<DataPoint<T>[]> => {
+			await reader.forceFlush();
+			const metric = exporter
+				.getMetrics()
+				.at(-1)
+				?.scopeMetrics.flatMap(scope => scope.metrics)
+				.find(metric => metric.descriptor.name === name);
+			return (metric?.dataPoints ?? []) as DataPoint<T>[];
+		};
+		return {
+			meterProvider,
+			/** `{attribute value: count}` for one counter, keyed by `attribute`. */
+			async counts(name: string, attribute: string): Promise<Record<string, number>> {
+				const data = await points<number>(name);
+				return Object.fromEntries(data.map(point => [String(point.attributes[attribute]), point.value]));
+			},
+			/** Each histogram series as its attributes plus how many values it recorded. */
+			async histogram(name: string): Promise<Array<Record<string, unknown>>> {
+				const data = await points<Histogram>(name);
+				return data.map(point => ({ ...point.attributes, count: point.value.count }));
+			},
+			shutdown: () => meterProvider.shutdown(),
+		};
 	}
 
-	it("counts each request by how it settled", async () => {
-		const shown = harness();
+	it("counts each request by how it settled and times it, by serving model", async () => {
+		const metrics = sink();
+		const { meterProvider } = metrics;
+
+		const shown = harness({ meterProvider });
 		shown.controller.request();
 		await shown.reply(0, "now run the tests");
 
-		const hidden = harness();
-		hidden.controller.request();
-		hidden.type("deploy");
-		await hidden.reply(0, "now run the tests");
+		const diverged = harness({ meterProvider });
+		diverged.controller.request();
+		diverged.type("deploy");
+		await diverged.reply(0, "now run the tests");
 
-		const skipped = harness();
+		// The editor shows only a strict prefix: a draft that is already the whole prediction has no ghost.
+		const complete = harness({ meterProvider });
+		complete.controller.request();
+		complete.type("now run the tests");
+		await complete.reply(0, "now run the tests");
+
+		const skipped = harness({ meterProvider });
 		skipped.controller.request();
 		await skipped.reply(0, "NO_PREDICTION");
 
-		const stale = harness();
+		const stale = harness({ meterProvider });
 		stale.controller.request();
 		stale.advance("something else");
 		await stale.reply(0, "too late");
 
-		const superseded = harness();
+		const superseded = harness({ meterProvider });
 		superseded.controller.request();
 		superseded.controller.request();
 		await superseded.fail(0, new DOMException("aborted", "AbortError"));
 
-		const timedOut = harness({ deadlineMs: 5 });
+		const timedOut = harness({ deadlineMs: 5, meterProvider });
 		timedOut.controller.request();
 		const signal = timedOut.turns[0]!.options.signal!;
 		const { promise: deadline, resolve: reachDeadline } = Promise.withResolvers<void>();
@@ -281,46 +308,90 @@ describe("ComposerPredictionController metrics", () => {
 		await deadline;
 		await timedOut.fail(0, signal.reason);
 
-		const failed = harness();
+		const failed = harness({ meterProvider });
 		failed.controller.request();
 		await failed.fail(0, new Error("overloaded"));
 
-		expect(await counts("omp.composer.prediction.requests", "omp.composer.prediction.outcome")).toEqual({
+		expect(await metrics.counts("omp.composer.prediction.requests", "omp.composer.prediction.outcome")).toEqual({
 			shown: 1,
-			hidden: 1,
+			hidden: 2,
 			skipped: 1,
 			stale: 1,
 			cancelled: 1,
 			timeout: 1,
 			error: 1,
 		});
+		const model = "anthropic/claude-sonnet-4-5";
+		expect(await metrics.histogram("omp.composer.prediction.duration")).toEqual(
+			expect.arrayContaining([
+				{ "omp.composer.prediction.outcome": "shown", "omp.composer.prediction.model": model, count: 1 },
+				{ "omp.composer.prediction.outcome": "hidden", "omp.composer.prediction.model": model, count: 2 },
+				{ "omp.composer.prediction.outcome": "timeout", "omp.composer.prediction.model": model, count: 1 },
+			]),
+		);
+		await metrics.shutdown();
 	});
 
-	it("resolves each offered prediction once, as accepted or ignored", async () => {
-		const accepted = harness();
-		accepted.controller.request();
-		await accepted.reply(0, "now run the tests");
-		accepted.controller.accepted();
-		accepted.controller.accepted();
-		// The submitted message ends the turn; the next request retires the accepted prediction.
-		accepted.controller.request();
+	it("resolves each displayed prediction once, accepted through Tab or Right, else ignored", async () => {
+		const metrics = sink();
+		const { meterProvider } = metrics;
 
-		const ignored = harness();
+		const tab = harness({ meterProvider });
+		tab.controller.request();
+		await tab.reply(0, "now run the tests");
+		tab.paint();
+		tab.editor.handleInput("\t");
+		expect(tab.editor.getText()).toBe("now run the tests");
+		// The submitted message ends the turn; the next request retires the accepted prediction.
+		tab.controller.request();
+
+		const right = harness({ meterProvider });
+		right.controller.request();
+		await right.reply(0, "now run the tests");
+		right.paint();
+		right.editor.handleInput("\x1b[C");
+		expect(right.editor.getText()).toBe("now run the tests");
+		right.controller.request();
+
+		const ignored = harness({ meterProvider });
 		ignored.controller.request();
 		await ignored.reply(0, "now run the tests");
+		ignored.paint();
 		ignored.controller.request();
 
-		const outdated = harness();
+		// Offered behind a diverging draft: never on screen, so neither accepted nor ignored.
+		const neverShown = harness({ meterProvider });
+		neverShown.controller.request();
+		neverShown.type("deploy");
+		await neverShown.reply(0, "now run the tests");
+		neverShown.paint();
+		neverShown.controller.cancel();
+
+		// Hidden at first, painted once the user clears the draft.
+		const shownLater = harness({ meterProvider });
+		shownLater.controller.request();
+		shownLater.type("deploy");
+		await shownLater.reply(0, "now run the tests");
+		shownLater.type("");
+		expect(shownLater.paint()).toContain("now run the tests");
+		shownLater.controller.cancel();
+
+		const outdated = harness({ meterProvider });
 		outdated.controller.request();
 		await outdated.reply(0, "now run the tests");
+		outdated.paint();
 		outdated.advance("something else");
 		// No longer offered, so there is nothing to accept.
 		outdated.controller.accepted();
 		outdated.controller.cancel();
 
-		expect(await counts("omp.composer.prediction.resolved", "omp.composer.prediction.result")).toEqual({
-			accepted: 1,
-			ignored: 2,
+		expect(await metrics.counts("omp.composer.prediction.resolved", "omp.composer.prediction.result")).toEqual({
+			accepted: 2,
+			ignored: 3,
 		});
+		expect(await metrics.histogram("omp.composer.prediction.accept.delay")).toEqual([
+			{ "omp.composer.prediction.model": "anthropic/claude-sonnet-4-5", count: 2 },
+		]);
+		await metrics.shutdown();
 	});
 });

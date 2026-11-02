@@ -12,8 +12,9 @@ import { type Attributes, type Counter, type Histogram, type MeterProvider, metr
 
 /**
  * How a prediction request settled:
- * - `shown`: usable reply, offered as ghost text over the current draft
- * - `hidden`: usable reply, but the draft typed meanwhile is not a prefix of it
+ * - `shown`: usable reply, displayed as ghost text in the composer
+ * - `hidden`: usable reply, but the composer cannot display it now (a non-prefix or complete
+ *   draft, the cursor inside the draft, or an open autocomplete)
  * - `skipped`: the model declined (`NO_PREDICTION`) or replied with nothing usable
  * - `stale`: the conversation moved on before the reply arrived
  * - `cancelled`: superseded or cancelled (new turn, newer request, setting off)
@@ -21,7 +22,7 @@ import { type Attributes, type Counter, type Histogram, type MeterProvider, metr
  * - `error`: the side turn failed
  */
 export type PredictionOutcome = "shown" | "hidden" | "skipped" | "stale" | "cancelled" | "timeout" | "error";
-/** What became of an offered prediction: inserted with Tab/Right, or retired without that. */
+/** What became of a displayed prediction: inserted with Tab/Right, or retired without that. */
 export type PredictionResolution = "accepted" | "ignored";
 
 const METER_NAME = "@oh-my-pi/pi-coding-agent/composer-prediction";
@@ -47,36 +48,49 @@ class PredictionInstruments {
 			advice: { explicitBucketBoundaries: [250, 500, 1000, 2000, 3000, 5000, 8000, 12000, 15000, 20000] },
 		});
 		this.resolved = meter.createCounter("omp.composer.prediction.resolved", {
-			description: "Offered predictions, by whether the user inserted them.",
+			description: "Displayed predictions, by whether the user inserted them.",
 			unit: "{prediction}",
 		});
 		this.acceptDelay = meter.createHistogram("omp.composer.prediction.accept.delay", {
-			description: "Time from a prediction being offered to the user inserting it.",
+			description: "Time from a prediction first being displayed to the user inserting it.",
 			unit: "ms",
 			advice: { explicitBucketBoundaries: [500, 1000, 2000, 5000, 10000, 30000, 60000, 300000, 1800000] },
 		});
 	}
 }
 
-let bound: { provider: MeterProvider; instruments: PredictionInstruments } | undefined;
+const bound = new WeakMap<MeterProvider, PredictionInstruments>();
 
-function instruments(): PredictionInstruments {
-	const provider = metrics.getMeterProvider();
-	if (bound?.provider !== provider) bound = { provider, instruments: new PredictionInstruments(provider) };
-	return bound.instruments;
+function instruments(provider: MeterProvider): PredictionInstruments {
+	let instruments = bound.get(provider);
+	if (!instruments) {
+		instruments = new PredictionInstruments(provider);
+		bound.set(provider, instruments);
+	}
+	return instruments;
 }
 
 /** Count one settled prediction request and record how long it took, by outcome and serving `provider/model`. */
-export function recordPredictionRequest(outcome: PredictionOutcome, model: string, durationMs: number): void {
+export function recordPredictionRequest(
+	outcome: PredictionOutcome,
+	model: string,
+	durationMs: number,
+	provider: MeterProvider = metrics.getMeterProvider(),
+): void {
 	const attributes = { [OUTCOME]: outcome, [MODEL]: model };
-	const { requests, duration } = instruments();
+	const { requests, duration } = instruments(provider);
 	requests.add(1, attributes);
 	duration.record(durationMs, attributes);
 }
 
-/** Count one offered prediction as accepted or ignored; an accepted one also records how long it was on offer. */
-export function recordPredictionResolved(result: PredictionResolution, model: string, offeredForMs: number): void {
-	const { resolved, acceptDelay } = instruments();
+/** Count one displayed prediction as accepted or ignored; an accepted one also records how long it was displayed. */
+export function recordPredictionResolved(
+	result: PredictionResolution,
+	model: string,
+	shownForMs: number,
+	provider: MeterProvider = metrics.getMeterProvider(),
+): void {
+	const { resolved, acceptDelay } = instruments(provider);
 	resolved.add(1, { [RESULT]: result, [MODEL]: model });
-	if (result === "accepted") acceptDelay.record(offeredForMs, { [MODEL]: model });
+	if (result === "accepted") acceptDelay.record(shownForMs, { [MODEL]: model });
 }
