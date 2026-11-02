@@ -1,0 +1,128 @@
+name: Contributor registry upkeep
+
+# Regenerates the generated block in CONTRIBUTORS.md from the GitHub API
+# and opens or updates a pull request when it drifts. The updater's unit
+# tests run first and in-run validation gates the PR. Pull requests created
+# with GITHUB_TOKEN do not trigger pull_request workflows, so the run also
+# posts its own `contributors-validation` check on the PR head SHA; that
+# check reports only this validation, never repository CI.
+
+on:
+  schedule:
+    - cron: '47 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: write
+
+concurrency:
+  group: contributors-upkeep
+  cancel-in-progress: false
+
+jobs:
+  upkeep:
+    runs-on: ubuntu-latest
+    env:
+      # One exclusion policy shared by regeneration and the --check pass so
+      # the check can never validate under a different policy than wrote.
+      EXTRA_EXCLUDE: ''
+    steps:
+      # Always regenerate against the default branch, even when a maintainer
+      # picks another ref in workflow_dispatch (a dispatch against a feature
+      # branch would otherwise open a PR from the wrong base).
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Fail closed on updater unit tests
+        run: python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v
+
+      - name: Regenerate the generated registry
+        id: regen
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/update_contributors.py | tee regen.log
+          if grep -qx 'CHANGED=true' regen.log; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate run (idempotent second pass, single-file diff)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/update_contributors.py --check
+          others=$(git status --porcelain | grep -v -e ' regen\.log$' -e ' CONTRIBUTORS\.md$' || true)
+          if [ -n "$others" ]; then
+            echo "::error::updater touched files beyond CONTRIBUTORS.md:"
+            printf '%s\n' "$others"
+            exit 1
+          fi
+
+      - name: Open or update the registry pull request
+        if: steps.regen.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          BRANCH=contributors/auto-update
+          BASE=$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name)
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$BRANCH"
+          git add CONTRIBUTORS.md
+          if git diff --cached --quiet; then
+            echo "nothing to commit"; exit 0
+          fi
+          git commit -m "chore: refresh generated contributor registry"
+          git push -f origin "$BRANCH"
+          HEAD_SHA=$(git rev-parse HEAD)
+          {
+            echo "Generated [CONTRIBUTORS.md](https://github.com/$GH_REPO/blob/$BASE/CONTRIBUTORS.md) from the GitHub API"
+            echo "(non-anonymous commit authors + merged PR authors; maintainer, bot and"
+            echo "agent accounts excluded). Validated in-run: unit tests, idempotent"
+            echo "second pass, single-file diff. No repository CI is claimed by this PR."
+            echo
+            echo '```'
+            git diff "origin/$BASE...HEAD" -- CONTRIBUTORS.md | head -200
+            echo '```'
+          } > pr-body.md
+          NUMBER=$(gh pr list --head "$BRANCH" --state open --json number -q '.[0].number')
+          if [ -z "$NUMBER" ]; then
+            gh pr create --base "$BASE" --head "$BRANCH" \
+              --title "Refresh contributor registry" --body-file pr-body.md
+          else
+            gh pr edit "$NUMBER" --body-file pr-body.md
+          fi
+          gh api "repos/$GH_REPO/check-runs" \
+            -F name=contributors-validation \
+            -F head_sha="$HEAD_SHA" \
+            -F status=completed -F conclusion=success \
+            -f "output[title]=Registry regenerated and validated in-run" \
+            -f "output[summary]=Updater unit tests, idempotent regeneration and single-file-diff guard all passed for $HEAD_SHA. This check covers only the contributor-registry updater."
+
+      - name: Converge — close a stale PR when the registry matches the default branch
+        if: steps.regen.outputs.changed != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          NUMBER=$(gh pr list --head contributors/auto-update --state open --json number -q '.[0].number' || true)
+          [ -n "$NUMBER" ] || exit 0
+          BASE=$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name)
+          STATUS=$(gh api "repos/$GH_REPO/compare/$BASE...contributors/auto-update" --jq .status || true)
+          if [ "$STATUS" = "identical" ]; then
+            gh pr close "$NUMBER" --comment "Registry already matches the default branch; closing as converged."
+          fi
+
+      - name: No change needed
+        if: steps.regen.outputs.changed != 'true'
+        run: echo "registry already up to date; no pull request opened"
