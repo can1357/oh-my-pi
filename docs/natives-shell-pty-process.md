@@ -36,7 +36,7 @@ Shell execution modes:
 
 Both stream merged stdout/stderr text through a threadsafe callback and return `{ exitCode?, cancelled, timedOut, minimized?, workingDir? }`.
 
-Persistent `Shell` also exposes `liveBackgroundJobCount()`, which silently reaps completed jobs and returns the number of live jobs tracked by the session. Hosts can retain per-call shells while ordinary background jobs remain alive. Builtin `nohup <command> &` is special: brush detaches and reparents the operand so it survives shell teardown; this is not the behavior of the system `nohup` binary.
+Persistent `Shell` also exposes `liveBackgroundJobCount()`, which silently reaps completed jobs and returns the number of live jobs tracked by the session. Hosts can retain per-call shells while ordinary background jobs remain alive. Builtin `nohup <command> &` is special: brush starts the operand in its own session and leaves it out of the shell's teardown and out of `liveBackgroundJobCount()`, so it survives the shell; it stays the shell's child, so `$!` names it and `wait` and `kill` reach it, as in Bash. This is not the behavior of the system `nohup` binary.
 
 `ShellOptions` supports `sessionEnv`, `snapshotPath`, output `minimizer`, and `filesystem`. `ShellExecuteOptions` additionally supports `command`, `cwd`, command-scoped `env`, `timeoutMs`, and `signal`. `ShellRunOptions` supports `command`, `cwd`, command-scoped `env`, `timeoutMs`, `signal`, and a run-only `filesystem` override.
 

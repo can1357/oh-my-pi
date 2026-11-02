@@ -935,13 +935,7 @@ pub(crate) async fn execute_external_command(
 	match session_action {
 		ChildSessionAction::DetachSession => {
 			// setsid() creates the fresh session + process group; no process_group().
-			// A reparenting operand (`nohup cmd &`) additionally double-forks so it
-			// leaves the host's descendant tree and survives the teardown walk.
-			if context.params.detach_reparent {
-				cmd.detach_session_reparent();
-			} else {
-				cmd.detach_session();
-			}
+			cmd.detach_session();
 		}
 		ChildSessionAction::TakeForeground if command_leads_session => {
 			// Don't set process_group(0) - setsid() in pre_exec will handle it.
@@ -978,7 +972,13 @@ pub(crate) async fn execute_external_command(
 			  .join(" ")
 	);
 
-	match sys::process::spawn(cmd) {
+	// An operand that outlives the shell (`nohup cmd &`) stays the shell's child,
+	// as in Bash, so `$!` names it, `wait` gets its status and `kill` reaches it.
+	// It survives the shell instead: it is in its own session, left out of the
+	// run's teardown (below, and the job it heads; see `Job::outlives_shell`),
+	// and killed neither when its handle is dropped nor when a wait for it is
+	// cancelled (`ChildProcess::outliving_shell`).
+	match sys::process::spawn(cmd, context.params.outlives_shell) {
 		Ok(child) => {
 			// Retrieve the pid.
 			#[expect(clippy::cast_possible_wrap)]
@@ -992,11 +992,11 @@ pub(crate) async fn execute_external_command(
 				tracing::warn!("could not retrieve pid for child process");
 			}
 
-			// Report the spawned child for scoped teardown. Skipped for reparented
-			// launches (`detach_reparent`, e.g. `nohup cmd &`): those double-fork
-			// out of the descendant tree and must survive the host's cancellation
-			// cleanup, so they are intentionally left unowned.
-			if !context.params.detach_reparent
+			// Report the spawned child for scoped teardown. Skipped for a launch
+			// that outlives the shell (`outlives_shell`, e.g. `nohup cmd &`): it
+			// must survive the host's cancellation cleanup, so it is intentionally
+			// left unowned.
+			if !context.params.outlives_shell
 				&& let Some(observer) = context.params.spawn_observer()
 				&& let Some(pid) = pid
 			{
@@ -1004,6 +1004,9 @@ pub(crate) async fn execute_external_command(
 			}
 
 			let mut child_process = processes::ChildProcess::new(child, pid, actual_pgid);
+			if context.params.outlives_shell {
+				child_process = child_process.outliving_shell();
+			}
 			if let Some((output, markers)) = marker_output.take() {
 				child_process.set_completion_marker(
 					output,

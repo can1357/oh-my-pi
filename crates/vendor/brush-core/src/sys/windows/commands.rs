@@ -114,18 +114,10 @@ pub trait CommandSessionExt {
 	/// terminal. On Windows this is a no-op; process-group and console behavior
 	/// are handled uniformly by `sys::process::spawn`.
 	fn detach_session(&mut self);
-	/// Like [`CommandSessionExt::detach_session`]. On Windows there is no session
-	/// or `fork`-based reparenting, so this is a no-op: the operand stays a child
-	/// of the shell.
-	fn detach_session_reparent(&mut self);
 }
 
 impl CommandSessionExt for std::process::Command {
 	fn detach_session(&mut self) {
 		// NOTE: Windows has no setsid; intentionally a no-op.
-	}
-
-	fn detach_session_reparent(&mut self) {
-		// NOTE: no reparenting primitive on Windows; intentionally a no-op.
 	}
 }

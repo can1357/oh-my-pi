@@ -42,6 +42,10 @@ pub struct ChildProcess {
 	#[cfg(windows)]
 	kill_handle: Option<OwnedHandle>,
 	completion_marker: Option<CompletionMarker>,
+	/// Whether the process outlives the shell (the operand of `nohup cmd &`):
+	/// nothing here kills it, neither dropping this handle nor cancelling a
+	/// wait for it.
+	outlives_shell:    bool,
 }
 
 impl ChildProcess {
@@ -63,7 +67,16 @@ impl ChildProcess {
 			#[cfg(windows)]
 			kill_handle,
 			completion_marker: None,
+			outlives_shell: false,
 		}
+	}
+
+	/// Marks the process as one that outlives the shell; see
+	/// [`crate::jobs::Job::outlives_shell`].
+	#[must_use]
+	pub(crate) const fn outliving_shell(mut self) -> Self {
+		self.outlives_shell = true;
+		self
 	}
 
 	/// Returns the process's ID.
@@ -112,7 +125,9 @@ impl ChildProcess {
 
 	/// Waits for the process to exit.
 	///
-	/// Cancellation gives the process a bounded TERM grace before killing it.
+	/// Cancellation gives the process a bounded TERM grace before killing it;
+	/// a process that outlives the shell is left running, and only the wait
+	/// ends.
 	pub async fn wait(
 		&mut self,
 		cancel_token: Option<CancellationToken>,
@@ -152,15 +167,16 @@ impl ChildProcess {
 				_ = &mut cancelled => {
 					// The embedding host terminates the process group/tree. Allow
 					// its TERM wave to finish without sending a duplicate TERM or
-					// racing it with an immediate hard kill.
+					// racing it with an immediate hard kill. It leaves a process
+					// that outlives the shell alone, and so does this.
 					#[cfg(unix)]
-					{
-						if let Ok(Ok(_)) = tokio::time::timeout(
+					if !self.outlives_shell
+						&& let Ok(Ok(_)) = tokio::time::timeout(
 							std::time::Duration::from_secs(1),
 							&mut self.exec_future,
-						).await {
-							self.reaped = true;
-						}
+						).await
+					{
+						self.reaped = true;
 					}
 					self.kill();
 					self.write_completion_marker(130);
@@ -183,9 +199,10 @@ impl ChildProcess {
 		}
 	}
 
-	/// Sends a kill signal if the process has not already been reaped.
+	/// Sends a kill signal if the process has not already been reaped and does
+	/// not outlive the shell.
 	fn kill(&mut self) {
-		if self.reaped {
+		if self.reaped || self.outlives_shell {
 			return;
 		}
 		#[cfg(unix)]
@@ -374,6 +391,7 @@ mod tests {
 			pgid: None,
 			stop_pids: None,
 			completion_marker: None,
+			outlives_shell: false,
 		};
 		child.set_completion_marker(
 			OpenFile::from(marker.try_clone().expect("marker writer")),

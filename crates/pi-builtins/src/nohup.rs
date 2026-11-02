@@ -4,7 +4,8 @@
 //! survives the embedded shell's kill-on-drop teardown. A system `nohup` does
 //! not escape the process-group kill, so this command intentionally shadows it.
 //! Registration marks it as a transparent background wrapper, allowing brush to
-//! spawn the operand directly with session reparenting.
+//! spawn the operand directly in its own session, as a child that outlives the
+//! shell.
 
 use std::{future::Future, io::Write};
 
@@ -96,8 +97,8 @@ impl builtins::Command for NohupCommand {
 			// exit status. Persistence across the host's teardown is a *background*
 			// concern that never reaches this builtin: brush's
 			// `transparent_background_wrapper` unwraps `nohup <server> &` to spawn the
-			// operand directly with session reparenting, double-forking it out of the
-			// shell's descendant tree. Like coreutils, we run the operand here; we only
+			// operand directly in its own session, as a child that the host's
+			// teardown leaves alone. Like coreutils, we run the operand here; we only
 			// differ by not masking SIGHUP.
 			let command_line = rebuild_command_line(&command);
 

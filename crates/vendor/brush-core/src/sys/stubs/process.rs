@@ -27,7 +27,12 @@ impl Child {
 	}
 }
 
-pub(crate) fn spawn(mut command: std::process::Command) -> std::io::Result<Child> {
+/// Starts `command`; a std child is never killed on drop, so `_outlives_shell`
+/// changes nothing here.
+pub(crate) fn spawn(
+	mut command: std::process::Command,
+	_outlives_shell: bool,
+) -> std::io::Result<Child> {
 	let child = command.spawn()?;
 	Ok(Child { inner: child })
 }

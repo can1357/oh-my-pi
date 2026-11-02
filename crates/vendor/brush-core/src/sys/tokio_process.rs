@@ -3,9 +3,12 @@
 pub(crate) type ProcessId = i32;
 pub(crate) use tokio::process::Child;
 
-pub(crate) fn spawn(command: std::process::Command) -> std::io::Result<Child> {
+/// Starts `command`. A child is killed when its handle is dropped (the shell
+/// that owns its job goes away), unless it `outlives_shell`, as the operand of
+/// `nohup cmd &` does: tokio then reaps it once it exits.
+pub(crate) fn spawn(command: std::process::Command, outlives_shell: bool) -> std::io::Result<Child> {
 	let mut command = tokio::process::Command::from(command);
-	command.kill_on_drop(true);
+	command.kill_on_drop(!outlives_shell);
 	// Isolate every external child from the host's console:
 	//
 	// - `CREATE_NO_WINDOW` gives the child its own *invisible* console instead

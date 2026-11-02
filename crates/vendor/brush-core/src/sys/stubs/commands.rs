@@ -98,17 +98,10 @@ impl CommandFgControlExt for std::process::Command {
 pub trait CommandSessionExt {
 	/// Arranges for the command to run in a new session with no controlling terminal.
 	fn detach_session(&mut self);
-	/// Like [`CommandSessionExt::detach_session`]. No-op on platforms without
-	/// `setsid`/`fork` reparenting.
-	fn detach_session_reparent(&mut self);
 }
 
 impl CommandSessionExt for std::process::Command {
 	fn detach_session(&mut self) {
 		// NOTE: This is a no-op on platforms without setsid support.
-	}
-
-	fn detach_session_reparent(&mut self) {
-		// NOTE: This is a no-op on platforms without setsid/fork support.
 	}
 }

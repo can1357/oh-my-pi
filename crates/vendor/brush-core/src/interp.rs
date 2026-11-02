@@ -74,9 +74,9 @@ pub trait ExternalCommandOutputMarker: Send + Sync {
 /// given run launched, rather than diffing the whole host process tree. That
 /// cannot distinguish children of concurrent runs sharing one host process.
 ///
-/// It is not called for reparented launches (`detach_reparent`): those
-/// deliberately escape the shell's descendant tree (e.g. `nohup cmd &`) and
-/// must survive teardown, so they are intentionally left unowned.
+/// It is not called for a launch that outlives the shell (`outlives_shell`,
+/// e.g. `nohup cmd &`): that process must survive teardown, so it is
+/// intentionally left unowned.
 pub trait SpawnObserver: Send + Sync {
 	/// Reports a freshly spawned external child. `pgid` is the child's process
 	/// group id when known (always its own pid under `NewProcessGroup`).
@@ -90,11 +90,12 @@ pub struct ExecutionParameters {
 	open_files:               openfiles::OpenFiles,
 	/// Policy for how to manage spawned external processes.
 	pub process_group_policy: ProcessGroupPolicy,
-	/// Whether external commands spawned in this context should reparent out of
-	/// the shell's descendant tree (double-fork on Unix) so they survive the
-	/// host's descendant-walk teardown. Set for the operand of a transparent
-	/// background wrapper such as `nohup cmd &`.
-	pub detach_reparent: bool,
+	/// Whether external commands spawned in this context outlive the shell: they
+	/// start in their own session, the host's teardown of the shell's processes
+	/// leaves them alone, and dropping their job does not kill them. They stay
+	/// the shell's children, so `$!`, `wait` and `kill` reach them. Set for the
+	/// operand of a transparent background wrapper such as `nohup cmd &`.
+	pub outlives_shell: bool,
 	/// Optional cancellation token shared with callers.
 	cancel_token:             Option<CancellationToken>,
 	/// Optional command-output marker hook.
@@ -556,12 +557,12 @@ async fn spawn_async_ao_list_as_job<'a, SE: extensions::ShellExtensions>(
 
 	let direct_pipeline =
 		background_process_pipeline_for_async_job(ao_list, shell, &async_params).await?;
-	let job = if let Some((pipeline, detach_reparent)) = direct_pipeline {
+	let job = if let Some((pipeline, outlives_shell)) = direct_pipeline {
 		// A transparent background wrapper (e.g. `nohup cmd &`) was unwrapped to its
-		// operand. Reparent that operand out of the shell's descendant tree so it
-		// survives the host's descendant-walk teardown — the persistence agents
-		// reach for `nohup` expecting.
-		async_params.detach_reparent = detach_reparent;
+		// operand. The operand outlives the shell — the persistence agents reach
+		// for `nohup` expecting — while it stays the shell's child, so `$!`, `wait`
+		// and `kill` reach it as in Bash; see `Job::outlives_shell`.
+		async_params.outlives_shell = outlives_shell;
 		// The parent spawns this command before going on, so it must not wait for
 		// a FIFO's other end; see `DeferredRedirect`.
 		let mut direct_params = async_params.clone();
@@ -594,14 +595,14 @@ async fn background_process_pipeline_for_async_job<SE: extensions::ShellExtensio
 	}
 
 	let mut pipeline = ao_list.first.clone();
-	let mut detach_reparent = false;
+	let mut outlives_shell = false;
 	for _ in 0..8 {
 		match classify_background_process_pipeline(&pipeline, shell, params).await? {
-			BackgroundProcessPipeline::Direct => return Ok(Some((pipeline, detach_reparent))),
+			BackgroundProcessPipeline::Direct => return Ok(Some((pipeline, outlives_shell))),
 			BackgroundProcessPipeline::Wrapper(unwrapped) => {
 				// Unwrapping a transparent background wrapper (`nohup`) means the
-				// operand should reparent away from the shell when finally spawned.
-				detach_reparent = true;
+				// operand outlives the shell when finally spawned.
+				outlives_shell = true;
 				pipeline = unwrapped;
 			},
 			BackgroundProcessPipeline::Internal => return Ok(None),
@@ -735,7 +736,8 @@ async fn try_spawn_pipeline_as_job<SE: extensions::ShellExtensions>(
 		return Ok(None);
 	}
 
-	Ok(Some(jobs::Job::new(tasks, command_line, jobs::JobState::Running)))
+	let job = jobs::Job::new(tasks, command_line, jobs::JobState::Running);
+	Ok(Some(if params.outlives_shell { job.outliving_shell() } else { job }))
 }
 
 fn spawn_async_ao_list_in_task<SE: extensions::ShellExtensions>(

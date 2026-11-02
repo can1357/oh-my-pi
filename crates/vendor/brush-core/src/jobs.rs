@@ -453,6 +453,11 @@ pub struct Job {
 	/// wired into the job's execution parameters, which the interpreter polls
 	/// (`ensure_not_cancelled`) on every loop iteration and command.
 	cancellation: Option<CancellationToken>,
+
+	/// Whether the job's process is to outlive the shell, as the operand of
+	/// `nohup cmd &` is: the host's teardown of the shell's processes leaves it
+	/// alone. It is still the shell's child, so `wait` and `kill` reach it.
+	outlives_shell: bool,
 }
 
 impl Display for Job {
@@ -507,6 +512,7 @@ impl Job {
 			command_line,
 			state,
 			cancellation: None,
+			outlives_shell: false,
 		}
 	}
 
@@ -515,6 +521,20 @@ impl Job {
 	pub(crate) fn with_cancellation(mut self, token: CancellationToken) -> Self {
 		self.cancellation = Some(token);
 		self
+	}
+
+	/// Marks the job's process as one that outlives the shell; see
+	/// [`Self::outlives_shell`].
+	pub(crate) const fn outliving_shell(mut self) -> Self {
+		self.outlives_shell = true;
+		self
+	}
+
+	/// Whether the job's process is to outlive the shell, as the operand of
+	/// `nohup cmd &` is, so the host's teardown of the shell's processes must
+	/// leave it alone.
+	pub const fn outlives_shell(&self) -> bool {
+		self.outlives_shell
 	}
 
 	/// Returns a pid-style string for the job.

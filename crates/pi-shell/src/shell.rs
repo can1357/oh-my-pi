@@ -283,8 +283,10 @@ impl Shell {
 
 	/// Number of live external background jobs tracked by the persistent
 	/// session. The host retains a per-call shell while this is nonzero, since
-	/// dropping it would kill its children. Reaps exited children without
-	/// discarding their status, so a later `wait` still sees the exit code.
+	/// dropping it would kill its children. A job that outlives the shell
+	/// (`nohup cmd &`) is not killed when the shell is dropped, so it is not
+	/// counted. Reaps exited children without discarding their status, so a
+	/// later `wait` still sees the exit code.
 	pub async fn live_background_job_count(&self) -> u32 {
 		let mut guard = self.session.lock().await;
 		let Some(core) = guard.as_mut() else {
@@ -300,7 +302,7 @@ impl Shell {
 			jobs
 				.jobs
 				.iter()
-				.filter(|job| job.external_process_count() > 0)
+				.filter(|job| job.external_process_count() > 0 && !job.outlives_shell())
 				.count(),
 		)
 		.unwrap_or(u32::MAX)
@@ -1840,7 +1842,9 @@ async fn wait_for_term_grace(registry: &process::SpawnRegistry) {
 
 fn register_background_jobs(shell: &BrushShell, registry: &process::SpawnRegistry) {
 	// Include retained session jobs in the same cancellation wave as new spawns.
-	for job in &shell.jobs().jobs {
+	// A job that outlives the shell (`nohup cmd &`) is left alone: surviving the
+	// run is what the user asked for.
+	for job in shell.jobs().jobs.iter().filter(|job| !job.outlives_shell()) {
 		// A reaped job keeps its representative PID for `wait`, but that PID
 		// may later be reused by an unrelated process. Use an external child
 		// still held by the job (the first pipeline stage may have exited).
