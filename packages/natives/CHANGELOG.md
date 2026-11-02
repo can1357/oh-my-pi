@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed the bash tool killing the whole process, with no message, on a long chain of one operator: `$(( 1+1+… ))` past about 6,000 terms, `[[ a && a && … ]]` past about 1,500, `[ x -a x -a … ]` past about 1,400; chains of a million terms now run
+- Fixed the bash tool killing the whole process, with no message, on a long chain of one operator: `$(( 1+1+… ))` past about 6,000 terms, `[[ a && a && … ]]` past about 1,500, `[ x -a x -a … ]` past about 1,400; chains of a million terms now run ([#17872](https://github.com/can1357/oh-my-pi/pull/17872) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.16.0] - 2026-11-02
 
