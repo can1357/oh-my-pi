@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import errno
 import functools
 import json
@@ -15,7 +16,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterator, Mapping
 from unittest import mock
 
 from omp_rpc import (
@@ -4546,6 +4547,17 @@ BINDING_SERVER = textwrap.dedent(
             print(json.dumps({"type": "host_tool_call", "id": "unknown", "toolName": "nope",
                               "toolCallId": "unknown", "arguments": {}}), flush=True)
             continue
+        if kind == "break_reader":
+            # A line that is not JSON: the client's reader fails on it and
+            # ends, while this server goes on reading.
+            print("not json", flush=True)
+            continue
+        if kind == "slow":
+            continue  # never answered
+        if kind == "bad_slow":
+            # An error for a `slow` request no request of this server awaits.
+            print(json.dumps({"type": "response", "id": "absent", "command": "slow",
+                              "success": False, "error": "new child failure"}), flush=True)
         if kind == "bad_async":
             # An error response no request awaits: the client records it as an
             # async error of its prompts.
@@ -4834,6 +4846,105 @@ class CallBindingTests(unittest.TestCase):
         )
         with self.assertRaises(RpcCommandError):
             client.wait_for_idle(timeout=0.5)
+
+    def test_a_request_of_a_stopped_child_cannot_take_the_new_childs_error(self) -> None:
+        # The reader has failed and marked the client closed, but the child
+        # still reads: a request made then is written and never answered.
+        # stop() must fail it, so it is not left among the new child's
+        # requests, where the new child's error would resolve it.
+        client = self._client()
+        client.start()
+        process = client._process
+        reader = client._stdout_thread
+        assert process is not None and reader is not None
+        client._write_json(process, {"type": "break_reader", "id": "break"})
+        reader.join(10.0)
+        self.assertFalse(reader.is_alive(), "the bad frame did not end the reader")
+        outcome: list[BaseException | object] = []
+        sent = threading.Event()
+        real_write = client._write_json
+
+        def write(child: Any, payload: Any) -> None:
+            real_write(child, payload)
+            if payload.get("type") == "slow":
+                sent.set()
+
+        client._write_json = write  # type: ignore[method-assign]
+
+        def call() -> None:
+            try:
+                outcome.append(client.request_raw("slow"))
+            except BaseException as exc:  # noqa: BLE001
+                outcome.append(exc)
+
+        caller = threading.Thread(target=call, daemon=True)
+        caller.start()
+        self.assertTrue(sent.wait(10.0), "the request was never written")
+        self.assertIs(client.stop(), True)
+        caller.join(5.0)
+        stopped_in_time = not caller.is_alive()
+        client.start()
+        client.request_raw("bad_slow")  # the new child's error for a `slow` request
+        client.request_raw("barrier")
+        caller.join(15.0)
+        self.assertTrue(stopped_in_time, "stop() did not end the old child's request")
+        self.assertEqual(len(outcome), 1)
+        self.assertIsInstance(outcome[0], RpcProcessExitError, f"the old request ended with {outcome[0]!r}")
+        self.assertEqual(
+            [error.remote_error for error in client.protocol_errors], ["new child failure"],
+            "the new child's error did not reach the new client",
+        )
+
+    def test_an_old_prompt_does_not_open_a_result_slot_for_the_new_child(self) -> None:
+        client = self._client()
+        client.start()
+        bound, release_bound = threading.Event(), threading.Event()
+        submitting, release_submit = threading.Event(), threading.Event()
+        for event in (release_bound, release_submit):
+            self.addCleanup(event.set)
+        real_bound = client._bound_to_child
+        real_submit = client._submit_prompt
+
+        @contextlib.contextmanager
+        def bound_to_child() -> Iterator[int]:
+            with real_bound() as generation:
+                if threading.current_thread().name == "old-call":
+                    bound.set()
+                    release_bound.wait(20.0)
+                yield generation
+
+        def submit(*args: Any, **kwargs: Any) -> bool:
+            if threading.current_thread().name == "old-call":
+                submitting.set()
+                release_submit.wait(20.0)
+            return real_submit(*args, **kwargs)
+
+        client._bound_to_child = bound_to_child  # type: ignore[method-assign]
+        client._submit_prompt = submit  # type: ignore[method-assign]
+        outcome: list[BaseException | str] = []
+
+        def run() -> None:
+            try:
+                client.prompt_and_wait("old")
+                outcome.append("returned")
+            except BaseException as exc:  # noqa: BLE001
+                outcome.append(exc)
+
+        caller = threading.Thread(target=run, name="old-call", daemon=True)
+        caller.start()
+        self.assertTrue(bound.wait(20.0), "the old prompt never bound to its child")
+        self.assertIs(client.stop(), True)
+        client.start()
+        release_bound.set()
+        self.assertTrue(submitting.wait(20.0), "the old prompt never reached its submission")
+        with client._event_condition:
+            slots = dict(client._prompt_results)
+        release_submit.set()
+        caller.join(20.0)
+        self.assertFalse(caller.is_alive(), "the old prompt never returned")
+        self.assertEqual(slots, {}, "the old prompt opened a result slot in the new client")
+        self.assertEqual(len(outcome), 1)
+        self.assertIsInstance(outcome[0], RpcProcessExitError, f"the old prompt ended with {outcome[0]!r}")
 
     def test_a_reply_queued_by_a_frame_that_raises_is_sent(self) -> None:
         client = self._client()

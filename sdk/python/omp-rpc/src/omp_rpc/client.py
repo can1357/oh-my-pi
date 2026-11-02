@@ -1077,6 +1077,12 @@ class RpcClient(WireClient):
                     # waiting for its request timeout. The stdout reader loop
                     # skips this while `_stopping` is set. It is idempotent.
                     self._mark_closed(RpcProcessExitError("RPC process stopped"))
+                    # The retired child's requests and result slots go with it,
+                    # also when `_mark_closed` found the client closed already:
+                    # the client's maps hold only the current child's entries.
+                    self._fail_pending(RpcProcessExitError("RPC process stopped"))
+                    with self._event_condition:
+                        self._prompt_results.clear()
                     with self._state_lock:
                         self._pending_host_tool_calls.clear()
                         self._pending_host_uri_requests.clear()
@@ -1552,13 +1558,12 @@ class RpcClient(WireClient):
             # The prompt goes only to the child the call began for: once that
             # child is stopped or replaced, it is not sent to the new one.
             with self._bound_to_child() as generation:
-                with self._event_condition:
-                    self._prompt_results[request_id] = None
                 start_index = self._current_event_index()
                 start_async_error_index = self._current_async_error_index()
                 agent_invoked = self._submit_prompt(
                     "prompt",
                     request_id,
+                    result_slot=True,
                     message=message,
                     images=cast(JsonValue, list(images)) if images is not None else None,
                     streamingBehavior=streaming_behavior,
@@ -1681,17 +1686,23 @@ class RpcClient(WireClient):
             raise RpcProcessExitError(str(self._closed_error))
 
     def _submit_prompt(
-        self, command_type: str, request_id: str, **payload: JsonValue
+        self,
+        command_type: str,
+        request_id: str,
+        *,
+        result_slot: bool = False,
+        **payload: JsonValue,
     ) -> bool:
         """Send a prompt command, tracking it until its `prompt_result`.
 
-        Returns False when the server handled it locally (`agentInvoked: false`),
-        in which case no `prompt_result` follows.
+        With `result_slot`, also opens the slot `prompt_and_wait()` reads the
+        result from. Returns False when the server handled it locally
+        (`agentInvoked: false`), in which case no `prompt_result` follows.
         """
         # The prompt's child and its tracking are taken together, under the
-        # lock start() resets the tracking under: a prompt whose child is
-        # stopped or replaced before it is sent neither changes the new
-        # child's tracking nor reaches it. Registered before sending: the
+        # lock start() and stop() reset the tracking under: a prompt whose
+        # child is stopped or replaced before it is sent neither changes the
+        # new child's tracking nor reaches it. Registered before sending: the
         # result may arrive before the response has been handed back to this
         # thread.
         with self._dispatch_lock:
@@ -1699,6 +1710,8 @@ class RpcClient(WireClient):
             with self._event_condition:
                 self._pending_prompt_ids.add(request_id)
                 self._last_schedule_async_error_index = self._async_errors.current_index()
+                if result_slot:
+                    self._prompt_results[request_id] = None
         try:
             with self._bound_to(process):
                 data = self._request_with_id(command_type, request_id, payload)
@@ -1905,17 +1918,22 @@ class RpcClient(WireClient):
 
         `timeout` overrides the client's `request_timeout` for this command.
         """
-        process = self._require_process()
         envelope: JsonObject = {"id": request_id, "type": command_type}
         for key, value in payload.items():
             if value is not None or not drop_none:
                 envelope[key] = value
 
         response_queue: queue.Queue[JsonObject | BaseException] = queue.Queue(maxsize=1)
-        with self._state_lock:
-            self._pending[request_id] = _PendingRequest(
-                command=command_type, response_queue=response_queue
-            )
+        # The request's child and its pending entry are taken together, under
+        # the lock stop() retires a child's requests under: the pending map
+        # holds only the current child's requests, so a response or an id-less
+        # error of a restarted child never resolves a request of the old one.
+        with self._dispatch_lock:
+            process = self._require_process()
+            with self._state_lock:
+                self._pending[request_id] = _PendingRequest(
+                    command=command_type, response_queue=response_queue
+                )
 
         try:
             self._write_json(process, envelope)
