@@ -10,7 +10,8 @@ import * as fs from "node:fs";
 import { APP_NAME } from "./dirs";
 import * as logger from "./logger";
 import { restoreTerminalStderr } from "./stderr-guard";
-import { describeThrown, thrownStack, toError } from "./type-guards";
+import { type DescribedError, describeError } from "./thrown";
+import { toError } from "./type-guards";
 
 // Cleanup reasons, in order of priority/meaning.
 export enum Reason {
@@ -277,8 +278,7 @@ function runCleanup(reason: Reason, keepAlive = false): Promise<void> {
 	const cleanupSettled = Promise.allSettled(promises).then(async results => {
 		for (const result of results) {
 			if (result.status === "rejected") {
-				const err = toError(result.reason);
-				logger.error("Cleanup callback failed", { err, stack: err.stack });
+				logger.error("Cleanup callback failed", { err: describeError(result.reason) });
 			}
 		}
 		// Join callbacks registered while this pass ran (already error-caught);
@@ -316,23 +316,22 @@ export type BrokenPipeSource = "ipc-send" | "stdio-write";
 
 /**
  * Classify EPIPE errors from worker IPC and stdio without treating unrelated
- * broken pipes as globally recoverable. Never throws: the error can come from
- * any code, and reading its fields can run a getter or a Proxy trap that throws.
+ * broken pipes as globally recoverable. Never throws: the error is described
+ * once ({@link describeError}), whatever code it comes from.
  */
-export function classifyBrokenPipe(err: Error): BrokenPipeSource | undefined {
-	try {
-		if (!("code" in err) || err.code !== "EPIPE" || !("syscall" in err)) return undefined;
-		const syscall = err.syscall;
-		if (syscall === "send") return "ipc-send";
-		if (syscall === "write") return "stdio-write";
-	} catch {
-		// Reading a field threw: not a broken pipe the runtime raised.
-	}
+export function classifyBrokenPipe(err: unknown): BrokenPipeSource | undefined {
+	return brokenPipeSource(describeError(err));
+}
+
+function brokenPipeSource(error: DescribedError): BrokenPipeSource | undefined {
+	if (error.code !== "EPIPE") return undefined;
+	if (error.syscall === "send") return "ipc-send";
+	if (error.syscall === "write") return "stdio-write";
 	return undefined;
 }
 
 /** Whether an EPIPE came from an IPC `send()` to an optional worker. */
-export function isIpcSendEpipe(err: Error): boolean {
+export function isIpcSendEpipe(err: unknown): boolean {
 	return classifyBrokenPipe(err) === "ipc-send";
 }
 
@@ -349,13 +348,12 @@ export function isIpcSendEpipe(err: Error): boolean {
  * through application code keeps the fatal path.
  */
 export function isInternalSocketClosedError(err: unknown): boolean {
-	try {
-		if (!(err instanceof Error) || !("code" in err) || err.code !== "ERR_SOCKET_CLOSED") return false;
-	} catch {
-		// Reading a field threw: not an error the runtime raised.
-		return false;
-	}
-	const frames = (thrownStack(err) ?? "").split("\n").slice(1);
+	return internalSocketClosed(describeError(err));
+}
+
+function internalSocketClosed(error: DescribedError): boolean {
+	if (error.errorClass === undefined || error.code !== "ERR_SOCKET_CLOSED") return false;
+	const frames = (error.stack ?? "").split("\n").slice(1);
 	if (frames.length === 0) return false;
 	let hasNetFrame = false;
 	const internal = frames.every(frame => {
@@ -389,18 +387,17 @@ export function isInternalSocketClosedError(err: unknown): boolean {
  * (#2997, #9158).
  */
 export function isWorkerIpcDeserializeError(err: unknown): boolean {
-	try {
-		return (
-			err instanceof TypeError &&
-			err.message === "Unable to deserialize data." &&
-			!err.stack &&
-			!("code" in err) &&
-			!("syscall" in err)
-		);
-	} catch {
-		// Reading a field threw: not an error the runtime raised.
-		return false;
-	}
+	return workerIpcDeserializeFailure(describeError(err));
+}
+
+function workerIpcDeserializeFailure(error: DescribedError): boolean {
+	return (
+		error.errorClass === "TypeError" &&
+		error.message === "Unable to deserialize data." &&
+		!error.stack &&
+		error.code === undefined &&
+		error.syscall === undefined
+	);
 }
 
 /** Recycle callbacks for the active advanced-serialization worker IPC channels. */
@@ -428,7 +425,7 @@ function faultWorkerIpcChannels(err: Error): void {
 		try {
 			handler(err);
 		} catch (handlerErr) {
-			logger.warn("Worker IPC fault handler threw", { err: handlerErr });
+			logger.warn("Worker IPC fault handler threw", { err: describeError(handlerErr) });
 		}
 	}
 }
@@ -450,8 +447,9 @@ function faultWorkerIpcChannels(err: Error): void {
  * Node's default throw, so deferring is a safe no-op when no other listener runs.
  */
 function onStdoutDisconnect(err: Error): void {
-	if (classifyBrokenPipe(err) !== "stdio-write") return;
-	logger.warn("Stdout peer disconnected; shutting down gracefully", { err });
+	const described = describeError(err);
+	if (brokenPipeSource(described) !== "stdio-write") return;
+	logger.warn("Stdout peer disconnected; shutting down gracefully", { err: described });
 	void runQuit(0, "native", { drainStdout: false });
 }
 
@@ -552,9 +550,13 @@ export function markExpectedCleanupError<T extends object>(reason: T): T {
 }
 
 function hasExpectedCleanupMarker(reason: unknown): boolean {
+	// Each object in the chain is read once: a `cause` that returns the value itself would otherwise be read again on every link.
+	const visited = new Set<object>();
 	let current: unknown = reason;
 	try {
 		for (let depth = 0; depth < 8 && current !== null && typeof current === "object"; depth++) {
+			if (visited.has(current)) break;
+			visited.add(current);
 			if (Reflect.get(current, EXPECTED_CLEANUP) === true) return true;
 			current = Reflect.get(current, "cause");
 		}
@@ -575,14 +577,16 @@ export function isExpectedCleanupError(reason: unknown): boolean {
 }
 
 /** Interceptors consulted by the global `unhandledRejection` handler before the fatal path. */
-const rejectionInterceptors = new Set<(reason: unknown) => boolean>();
+const rejectionInterceptors = new Set<(reason: unknown, described: DescribedError) => boolean>();
 
-function interceptRejection(reason: unknown): boolean {
+function interceptRejection(reason: unknown, described: DescribedError): boolean {
 	for (const interceptor of rejectionInterceptors) {
 		try {
-			if (interceptor(reason)) return true;
+			if (interceptor(reason, described)) return true;
 		} catch (interceptorErr) {
-			logger.warn("Unhandled-rejection interceptor threw; continuing with fatal path", { err: interceptorErr });
+			logger.warn("Unhandled-rejection interceptor threw; continuing with fatal path", {
+				err: describeError(interceptorErr),
+			});
 		}
 	}
 	return false;
@@ -596,13 +600,19 @@ let embeddedRejectionListener: ((reason: unknown) => void) | undefined;
 
 /**
  * Register an interceptor consulted before an unhandled rejection tears the
- * process down. A consuming interceptor owns reporting and keeps the process alive.
+ * process down. A consuming interceptor owns reporting and keeps the process
+ * alive. It gets the reason itself, to recognize it, and the reason already
+ * described once ({@link describeError}), to report it without reading it again.
  */
-export function interceptUnhandledRejections(interceptor: (reason: unknown) => boolean): () => void {
+export function interceptUnhandledRejections(
+	interceptor: (reason: unknown, described: DescribedError) => boolean,
+): () => void {
 	rejectionInterceptors.add(interceptor);
 	if (!processHandlersInstalled && Bun.isMainThread && !embeddedRejectionListener) {
 		const listener = (reason: unknown) => {
-			if (interceptRejection(reason) || process.listenerCount("unhandledRejection") > 1) return;
+			if (interceptRejection(reason, describeError(reason)) || process.listenerCount("unhandledRejection") > 1) {
+				return;
+			}
 			throw reason;
 		};
 		embeddedRejectionListener = listener;
@@ -649,26 +659,16 @@ function formatFatalRecoveryHints(providers: Iterable<FatalRecoveryHintProvider>
 			seenCommands.add(hint.command);
 			lines.push(`  ${escapeFatalHintText(hint.label)}: ${escapeFatalHintText(hint.command)}`);
 		} catch (err) {
-			logger.warn("Fatal recovery hint provider failed", { err });
+			logger.warn("Fatal recovery hint provider failed", { err: describeError(err) });
 		}
 	}
 	return lines.length > 0 ? `\n[Recovery]\n${lines.join("\n")}\n` : "";
 }
 
-function formatFatalError(label: string, err: Error): string {
-	// Each field is read once, inside a try: the error can come from any code, and a
-	// getter or a Proxy trap can throw or return something other than text.
-	let name: unknown;
-	let message: unknown;
-	try {
-		name = err.name;
-		message = err.message;
-	} catch {
-		// What was read before the throw stands; the error is described below.
-	}
-	const title = typeof name === "string" && name !== "" ? name : "Error";
-	const text = typeof message === "string" && message !== "" ? message : describeThrown(err) || "(no message)";
-	const stackLines = (thrownStack(err) ?? "").split("\n").slice(1);
+function formatFatalError(label: string, error: DescribedError): string {
+	const title = error.name || "Error";
+	const text = error.message || "(no message)";
+	const stackLines = (error.stack ?? "").split("\n").slice(1);
 	const formattedStack = stackLines.length > 0 ? `\n${stackLines.join("\n")}` : "";
 	return `\n[${label}] ${title}: ${text}${formattedStack}\n`;
 }
@@ -699,7 +699,12 @@ function writeRecoveryHints(providers: readonly FatalRecoveryHintProvider[], hea
 	writeTerminalReport(`${heading}${hints}`);
 }
 
-async function exitAfterFatal(output: string, logMessage: string, err: Error, reason: Reason): Promise<never> {
+async function exitAfterFatal(
+	output: string,
+	logMessage: string,
+	error: DescribedError,
+	reason: Reason,
+): Promise<never> {
 	const hintProviders = [...fatalRecoveryHintProviders];
 	// The forced exit backs up the pass deadline, so it waits while a callback with
 	// its own `deadlineMs` holds the pass open; that pass still ends at its deadline.
@@ -718,7 +723,7 @@ async function exitAfterFatal(output: string, logMessage: string, err: Error, re
 		// fatal report is written, while slower resource cleanup continues afterward.
 		const cleanup = runCleanup(reason);
 		writeTerminalReport(output);
-		logger.error(logMessage, { err });
+		logger.error(logMessage, { err: error });
 		await cleanup;
 		writeRecoveryHints(hintProviders);
 	} finally {
@@ -728,23 +733,24 @@ async function exitAfterFatal(output: string, logMessage: string, err: Error, re
 }
 
 /** Contain an EPIPE from an optional worker IPC `send()` (#2997, #9158). */
-function handleWorkerSendEpipe(err: Error): boolean {
-	if (!isIpcSendEpipe(err)) return false;
-	logger.warn("Ignoring EPIPE from worker IPC send; optional subsystem will self-recover", { err });
+function handleWorkerSendEpipe(error: DescribedError): boolean {
+	if (brokenPipeSource(error) !== "ipc-send") return false;
+	logger.warn("Ignoring EPIPE from worker IPC send; optional subsystem will self-recover", { err: error });
 	return true;
 }
 
 /**
  * Reports a caught top-level failure after terminal owners restore their display, then exits.
+ * The failure is described once ({@link describeError}), like the ones the process handlers catch.
  */
 export async function fatal(error: unknown): Promise<never> {
-	const err = toError(error);
-	const report = `${Bun.inspect(error, { colors: process.stderr.isTTY === true })}\n`;
+	const described = describeError(error);
+	const report = formatFatalError("Fatal Error", described);
 	if (!Bun.isMainThread) {
 		process.stderr.write(`${report}${formatFatalRecoveryHints(fatalRecoveryHintProviders)}`);
 		process.exit(1);
 	}
-	return exitAfterFatal(report, "Fatal error", err, Reason.UNHANDLED_REJECTION);
+	return exitAfterFatal(report, "Fatal error", described, Reason.UNHANDLED_REJECTION);
 }
 
 // Exit-time cleanup is safe in any host: it neither delays nor triggers an exit. Signal and fatal
@@ -780,14 +786,15 @@ export function installProcessHandlers(): void {
 		.on("uncaughtException", async thrown => {
 			// Expected cleanup is safe globally; unrelated synchronous errors stay fatal.
 			if (hasExpectedCleanupMarker(thrown)) {
-				logger.warn("Ignoring expected cleanup exception", { err: thrown });
+				logger.warn("Ignoring expected cleanup exception", { err: describeError(thrown) });
 				return;
 			}
-			const err = toError(thrown);
+			// Described once: every check and report below reads this, never the value again.
+			const described = describeError(thrown);
 			// A worker IPC `send()` race can surface through either global error event;
 			// contain it in both. Stdout write disconnects are attributed to stdout by
 			// registerStdioDisconnectHandling's `error` listener, not classified here.
-			if (handleWorkerSendEpipe(err)) return;
+			if (handleWorkerSendEpipe(described)) return;
 			// A malformed advanced-serialization frame from a worker subprocess
 			// surfaces here as a process-level uncaughtException (oven-sh/bun#37287)
 			// rather than in the channel's ipc() callback, and Bun gives no way to
@@ -797,37 +804,39 @@ export function installProcessHandlers(): void {
 			// the subprocess — a worker that sent a bad frame but stays alive would
 			// otherwise never fire onExit and leave callers awaiting forever.
 			// See the analogous worker IPC containment in handleBrokenPipe (#9158, #2997).
-			if (isWorkerIpcDeserializeError(err)) {
-				logger.warn("Malformed worker IPC frame; faulting active worker subsystems", { err });
-				faultWorkerIpcChannels(err);
+			if (workerIpcDeserializeFailure(described)) {
+				logger.warn("Malformed worker IPC frame; faulting active worker subsystems", { err: described });
+				// Bun's own TypeError, which the handlers may keep.
+				faultWorkerIpcChannels(toError(thrown));
 				return;
 			}
-			if (isInternalSocketClosedError(err)) {
+			if (internalSocketClosed(described)) {
 				logger.warn("Ignoring async ERR_SOCKET_CLOSED from node:net internals; socket owner recovers itself", {
-					err,
+					err: described,
 				});
 				return;
 			}
 			await exitAfterFatal(
-				formatFatalError("Uncaught Exception", err),
+				formatFatalError("Uncaught Exception", described),
 				"Uncaught exception",
-				err,
+				described,
 				Reason.UNCAUGHT_EXCEPTION,
 			);
 		})
 		.on("unhandledRejection", async reason => {
-			// `toError` never throws: a reason whose conversion throws must still reach the interceptors.
-			const err = toError(reason);
-			if (handleWorkerSendEpipe(err)) return;
+			// Described once, and never throws: the interceptors get this description
+			// with the reason, and the checks and the report read it, never the reason again.
+			const described = describeError(reason);
+			if (handleWorkerSendEpipe(described)) return;
 			if (isExpectedCleanupError(reason)) {
-				logger.warn("Ignoring expected cleanup rejection", { err });
+				logger.warn("Ignoring expected cleanup rejection", { err: described });
 				return;
 			}
-			if (interceptRejection(reason)) return;
+			if (interceptRejection(reason, described)) return;
 			await exitAfterFatal(
-				formatFatalError("Unhandled Rejection", err),
+				formatFatalError("Unhandled Rejection", described),
 				"Unhandled rejection",
-				err,
+				described,
 				Reason.UNHANDLED_REJECTION,
 			);
 		})
@@ -907,8 +916,7 @@ export function register(
 			const pending = invokeCleanup(registration, reason, keepAlive, cleanupPass);
 			if (!pending) return;
 			const tracked = pending.catch(error => {
-				const err = toError(error);
-				logger.error("Cleanup callback failed", { err, id, stack: err.stack });
+				logger.error("Cleanup callback failed", { err: describeError(error), id });
 			});
 			// Join the active pass so cleanup()/signal exits await it; after a
 			// completed exit pass there is nothing left to join.
@@ -917,8 +925,7 @@ export function register(
 				activePassDeadline?.extend(tracked, registration.deadlineMs, registration.waitMessage);
 			}
 		} catch (error) {
-			const err = toError(error);
-			logger.error("Cleanup callback failed", { err, id, stack: err.stack });
+			logger.error("Cleanup callback failed", { err: describeError(error), id });
 		}
 	};
 

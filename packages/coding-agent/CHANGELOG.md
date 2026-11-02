@@ -11,8 +11,8 @@
 ### Fixed
 
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
-- Fixed eval cells so one thrown output chunk no longer exits omp with code 1 or lets a 25-second Python timeout kill its kernel and lose every variable ([#17629](https://github.com/can1357/oh-my-pi/pull/17629) by [@sjawhar](https://github.com/sjawhar))
-- Fixed an eval cell that fails with a value that has no text form (such as `Object.create(null)`, a revoked `Proxy`, an error whose `stack` getter answers differently on a second read, or a Python exception whose `__str__`, class name or `__notes__` raises anything, `KeyboardInterrupt` and `SystemExit` included) waiting for its timeout and losing every variable, ending the worker or kernel, or, as an unawaited JavaScript rejection, reporting success ([#17629](https://github.com/can1357/oh-my-pi/pull/17629) by [@sjawhar](https://github.com/sjawhar))
+- Fixed eval cells so one thrown or rejected output chunk no longer exits omp with code 1 or lets a 25-second Python timeout kill its kernel and lose every variable ([#17629](https://github.com/can1357/oh-my-pi/pull/17629) by [@sjawhar](https://github.com/sjawhar))
+- Fixed an eval cell that fails with a value that has no text form (such as `Object.create(null)`, a revoked `Proxy`, an error whose `stack` getter answers differently on a second read, or a Python exception whose `__str__`, class name or `__notes__` raises anything, `KeyboardInterrupt` and `SystemExit` included, or whose `__notes__` or cause chain never ends) waiting for its timeout and losing every variable, ending the worker or kernel, or, as an unawaited JavaScript rejection, reporting success, or ending the worker when it arrives after its cell finished ([#17629](https://github.com/can1357/oh-my-pi/pull/17629) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 

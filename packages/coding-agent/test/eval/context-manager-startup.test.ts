@@ -7,7 +7,11 @@ import {
 	type JsEvalWorkerHandle,
 	setJsEvalWorkerFactoriesForTests,
 } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
-import type { WorkerInbound, WorkerOutbound } from "@oh-my-pi/pi-coding-agent/eval/js/worker-protocol";
+import {
+	runErrorPayload,
+	type WorkerInbound,
+	type WorkerOutbound,
+} from "@oh-my-pi/pi-coding-agent/eval/js/worker-protocol";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 setDefaultTimeout(2_000);
@@ -45,7 +49,7 @@ function createInitFailingHandle(
 			if (message.type !== "init") return;
 			queueMicrotask(() => {
 				for (const listener of messageListeners)
-					listener({ type: "init-failed", error: { message: errorMessage } });
+					listener({ type: "init-failed", error: runErrorPayload(errorMessage) });
 			});
 		},
 		onMessage(handler) {

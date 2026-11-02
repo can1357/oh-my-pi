@@ -1,6 +1,7 @@
 import type { EvalStatusEvent, EvalView } from "@oh-my-pi/pi-tui/tools/eval";
 import { isRecord, logger, readLines, Snowflake } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
+import { settled } from "../utils/ipc";
 import type { ShadowBarrier, ShadowControlNode, ShadowOperation } from "./speculation/types";
 import {
 	type EvalDisplayOutput,
@@ -636,16 +637,17 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 	 * that throws or rejects fails only its own execution, never the reader: the
 	 * first error is kept for that execution's result, its later frames still go
 	 * to the same callback, and the kernel keeps serving this and every later
-	 * request. Whether the callback kept the frame is for the caller to say.
+	 * request. The callback's result is awaited through `settled`, not `await`:
+	 * `await` ignores what a thenable's `then` returns, so an `async then()` that
+	 * throws would leave an unhandled rejection and stall the reader. Whether the
+	 * callback kept the frame is for the caller to say.
 	 */
 	async #deliver(
 		pending: PendingExecution,
 		callback: EvalOutputConsumerFailure["callback"],
 		deliver: () => Promise<void> | void,
 	): Promise<void> {
-		try {
-			await deliver();
-		} catch (err) {
+		const record = (err: unknown): void => {
 			if (pending.consumerFailure) return;
 			pending.consumerFailure = outputConsumerFailure(callback, err);
 			logger.warn(`${this.#options.languageName} execution output callback failed`, {
@@ -653,7 +655,15 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 				callback,
 				error: pending.consumerFailure.message,
 			});
+		};
+		let result: unknown;
+		try {
+			result = deliver();
+		} catch (err) {
+			record(err);
+			return;
 		}
+		await settled(result, record);
 	}
 
 	async #handleFrame(frame: Frame): Promise<void> {

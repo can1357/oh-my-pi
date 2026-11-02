@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { isRecord, logger, Snowflake, workerHostEntry } from "@oh-my-pi/pi-utils";
+import { describeError, inheritsFrom, isRecord, logger, Snowflake, workerHostEntry } from "@oh-my-pi/pi-utils";
 import {
 	createWorkerHandle,
 	createWorkerSubprocess,
@@ -32,14 +32,14 @@ import {
 } from "../types";
 import { type ShadowSnapshot, shadowSnapshotDigest } from "./shared/runtime";
 import { projectJavaScriptShadowPlan } from "./speculation";
-import { callSessionTool, type JsStatusEvent } from "./tool-bridge";
+import { callSessionTool, describeToolFailure, type JsStatusEvent } from "./tool-bridge";
 // Coding-agent binary/bundle workers route through the CLI entrypoint with a
 // hidden argv mode, so compiled/npm builds only need one JavaScript entry.
 import {
+	describedRunError,
 	type EvalPreludeSource,
 	type JsToolRequest,
 	type RunErrorPayload,
-	runErrorPayload,
 	type SessionSnapshot,
 	type WorkerInbound,
 	type WorkerOutbound,
@@ -845,7 +845,7 @@ async function handleToolCall(session: JsSession, msg: Extract<WorkerOutbound, {
 		safeSend(session, {
 			type: "tool-reply",
 			id: msg.id,
-			reply: { ok: false, error: { message: "Run no longer active" } },
+			reply: { ok: false, error: describedRunError(describeError("Run no longer active")) },
 		});
 		return;
 	}
@@ -853,7 +853,7 @@ async function handleToolCall(session: JsSession, msg: Extract<WorkerOutbound, {
 		safeSend(session, {
 			type: "tool-reply",
 			id: msg.id,
-			reply: { ok: false, error: { message: "Run was interrupted" } },
+			reply: { ok: false, error: describedRunError(describeError("Run was interrupted")) },
 		});
 		return;
 	}
@@ -876,7 +876,13 @@ async function handleToolCall(session: JsSession, msg: Extract<WorkerOutbound, {
 		safeSend(session, { type: "tool-reply", id: msg.id, reply: { ok: true, value } });
 	} catch (error) {
 		// A tool can throw any value, including one whose description throws; the reply must still go out.
-		safeSend(session, { type: "tool-reply", id: msg.id, reply: { ok: false, error: runErrorPayload(error) } });
+		// `callSessionTool` already described it for the status event: reading it again could answer differently.
+		const described = describeToolFailure(error);
+		const reply = {
+			ok: false as const,
+			error: describedRunError(described, inheritsFrom(error, ToolError.prototype)),
+		};
+		safeSend(session, { type: "tool-reply", id: msg.id, reply });
 	} finally {
 		pending.toolCalls.delete(msg.id);
 		// Last call of a run whose worker result was withheld: settle it now.
@@ -966,7 +972,8 @@ function safeSend(session: JsSession, msg: WorkerInbound): void {
 	try {
 		session.worker.send(msg);
 	} catch (err) {
-		logger.debug("js worker send failed", { error: err instanceof Error ? err.message : String(err) });
+		// Serializing the message runs the getters of any value a tool returned, so the failure can be anything.
+		logger.debug("js worker send failed", { error: describeError(err).message });
 	}
 }
 

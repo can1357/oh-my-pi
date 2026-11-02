@@ -198,9 +198,9 @@ describe("headless persistence-failure shutdown path", () => {
 		try {
 			await runRootCommand(harness.parsed, harness.rawArgs, harness.deps);
 		} catch (error) {
-			// `cli.ts` runs `runCli(...).catch(fatal)`, and `fatal()` renders
-			// `Bun.inspect(error)` onto fd 2. Reproduce that here so the stderr
-			// asserted below is the stderr an `omp --print` user would get.
+			// `cli.ts` runs `runCli(...).catch(fatal)`, and `fatal()` writes the
+			// error's stack frames onto fd 2. `Bun.inspect` prints the same frames,
+			// so the stderr asserted below is what an `omp --print` user would get.
 			escaped = error;
 			process.stderr.write(`${Bun.inspect(error, { colors: false })}\n`);
 		} finally {

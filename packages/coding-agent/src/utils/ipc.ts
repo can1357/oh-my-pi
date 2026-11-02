@@ -1,14 +1,93 @@
-import { logger } from "@oh-my-pi/pi-utils";
+import { describeError, logger } from "@oh-my-pi/pi-utils";
+
+// Captured when this module loads: code running in the same realm can replace the globals.
+const reflectApply = Reflect.apply;
+const reflectGet = Reflect.get;
+const promiseThen = Promise.prototype.then;
 
 /**
- * Attach `onRejected` to `value` when it is a thenable. `then` is read once: the
- * value can come from any code, and a getter can return a method to one read and
- * anything else to the next. A `then` getter that throws throws here.
+ * Hands every rejection `value` can produce to `onRejected`, and calls
+ * `onSettled` once `value` settles either way. Never throws, and leaves nothing
+ * it can reach unhandled.
+ *
+ * A value that is not a thenable settles at once. A thenable's `then` is read
+ * once (a getter can answer differently on a second read) and called with both
+ * callbacks; a `then` that throws counts as a rejection. What `then` returns is
+ * observed as well: an `async then()` that throws, or any `then` that returns a
+ * rejected promise, rejects that promise instead of calling back, so that
+ * rejection goes to `onRejected` too and counts as settling. `onSettled` runs at
+ * most once; `onRejected` runs once per rejection the thenable reports. A throw
+ * from either callback is dropped: they report a failure, and the report must
+ * not become a failure of its own.
+ *
+ * Not covered: a `then` that never calls back and returns nothing that settles
+ * never settles; a promise subclass whose own `then` drops its callbacks hides
+ * the rejection of the promise it wraps.
  */
+function observe(value: unknown, onRejected: (reason: unknown) => void, onSettled?: () => void): void {
+	let settled = false;
+	const settle = (): void => {
+		if (settled) return;
+		settled = true;
+		try {
+			onSettled?.();
+		} catch {
+			// See the doc comment: a report must not fail.
+		}
+	};
+	const reject = (reason: unknown): void => {
+		try {
+			onRejected(reason);
+		} catch {
+			// See the doc comment: a report must not fail.
+		}
+		settle();
+	};
+	if (value === null || (typeof value !== "object" && typeof value !== "function")) {
+		settle();
+		return;
+	}
+	let then: unknown;
+	let returned: unknown;
+	try {
+		then = reflectGet(value, "then");
+		if (typeof then !== "function") {
+			settle();
+			return;
+		}
+		returned = reflectApply(then, value, [settle, reject]);
+	} catch (error) {
+		reject(error);
+		return;
+	}
+	// The built-in `then` returns a promise that rejects only when a callback throws, and these do not.
+	if (then === promiseThen) return;
+	try {
+		// Only a native promise reports an unhandled rejection. The built-in `then`
+		// observes one without calling any `then` it overrides; given anything
+		// else, it throws before running any code, and nothing can go unhandled.
+		reflectApply(promiseThen, returned, [undefined, reject]);
+	} catch {
+		// Not a native promise.
+	}
+}
+
+/** Hands every rejection `value` can produce to `onRejected` (see {@link observe}). Never throws. */
 export function catchRejection(value: unknown, onRejected: (reason: unknown) => void): void {
-	if (value == null || (typeof value !== "object" && typeof value !== "function")) return;
-	const then: unknown = Reflect.get(value, "then");
-	if (typeof then === "function") then.call(value, undefined, onRejected);
+	observe(value, onRejected);
+}
+
+/**
+ * Resolves once `value` settles, after handing each rejection it produces to
+ * `onRejected` (see {@link observe}). Never rejects. For a caller that awaits
+ * a callback's result: `await` alone ignores what a thenable's `then` returns,
+ * so an `async then()` that throws would leave its rejection unhandled and the
+ * `await` waiting forever.
+ */
+export function settled(value: unknown, onRejected: (reason: unknown) => void): Promise<void> {
+	const { promise, resolve } = Promise.withResolvers<void>();
+	observe(value, onRejected, resolve);
+	return promise;
 }
 
 /**
@@ -20,14 +99,13 @@ export function catchRejection(value: unknown, onRejected: (reason: unknown) => 
  * un-awaited EPIPE rejection must not escape as a fatal unhandled rejection
  * that takes down the whole session. See issue #2997.
  *
- * `label` prefixes the debug log on synchronous failure (e.g. "tts").
+ * `label` prefixes the debug log on synchronous failure (e.g. "tts"). Serializing
+ * `message` runs its getters, so the failure can be any value.
  */
 export function safeSend(proc: { send(message: unknown): unknown }, message: unknown, label: string): void {
 	try {
 		catchRejection(proc.send(message), () => {});
 	} catch (error) {
-		logger.debug(`${label}: send to subprocess failed`, {
-			error: error instanceof Error ? error.message : String(error),
-		});
+		logger.debug(`${label}: send to subprocess failed`, { error: describeError(error).message });
 	}
 }

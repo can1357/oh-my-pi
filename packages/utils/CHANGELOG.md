@@ -11,7 +11,7 @@
 
 ### Fixed
 
-- Fixed `toError()` and the fatal error handlers throwing on a value whose conversion to text throws, such as `Object.create(null)` or a revoked `Proxy`, or on an error whose `code`, `message` or `stack` getter throws or is not text; the new `describeThrown()` describes any thrown value and `thrownStack()` reads an error's stack once, neither throwing ([#17629](https://github.com/can1357/oh-my-pi/pull/17629) by [@sjawhar](https://github.com/sjawhar))
+- Fixed `toError()`, the fatal error handlers and cleanup failure reports throwing on a value whose conversion to text throws, such as `Object.create(null)` or a revoked `Proxy`, or on an error whose `code`, `message` or `stack` getter throws or is not text; the new `describeError()` describes any thrown value once, reading each property at most once, never throwing, and bounding its text ([#17629](https://github.com/can1357/oh-my-pi/pull/17629) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 

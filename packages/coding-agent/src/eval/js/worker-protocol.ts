@@ -1,6 +1,6 @@
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 // The subpath, not the pi-utils barrel: the barrel loads pi_natives, which the worker must not.
-import { describeThrown } from "@oh-my-pi/pi-utils/type-guards";
+import { type DescribedError, describeError, inheritsFrom } from "@oh-my-pi/pi-utils/thrown";
 import type { EvalDisplayOutput } from "../types";
 import type { RuntimeCallIdentity, ShadowSnapshot } from "./shared/runtime";
 
@@ -27,39 +27,37 @@ export interface SessionSnapshot {
 	packageEnvironment?: string;
 }
 
-export interface RunErrorPayload {
-	name?: string;
-	message: string;
-	stack?: string;
-	isAbort?: boolean;
-	isToolError?: boolean;
+/**
+ * The wire form of what a run, a tool call or a cell's floating promise failed
+ * with. It extends {@link DescribedError}, which only `describeError` makes, so a
+ * payload cannot be built from a value read any other way.
+ */
+export interface RunErrorPayload extends DescribedError {
+	readonly isAbort: boolean;
+	readonly isToolError: boolean;
 }
 
 /**
- * The wire form of anything a run, a tool call or a cell's floating promise
- * threw, and never throws. An `Error` keeps its name, message and stack. Any
- * other value, or an error whose prototype, name or message throws or is not
- * text when read, is described by `describeThrown`: a payload that cannot be
- * built sends no result at all, and the cell then waits for its timeout.
+ * The payload for anything a run, a tool call or a cell's floating promise
+ * threw, and never throws: the value is described once ({@link describeError}),
+ * and a payload that could not be built would send no result at all, leaving
+ * the cell to wait for its timeout.
  */
 export function runErrorPayload(error: unknown): RunErrorPayload {
-	try {
-		if (error instanceof Error) {
-			const { name, message, stack } = error;
-			if (typeof name === "string" && typeof message === "string") {
-				return {
-					name,
-					message,
-					stack: typeof stack === "string" ? stack : undefined,
-					isAbort: name === "AbortError" || name === "ToolAbortError",
-					isToolError: name === "ToolError" || error instanceof ToolError,
-				};
-			}
-		}
-	} catch {
-		// Reading the error's prototype, name, message or stack threw.
-	}
-	return { message: describeThrown(error) };
+	return describedRunError(describeError(error), inheritsFrom(error, ToolError.prototype));
+}
+
+/**
+ * The payload for a value already described. `toolError` says the value
+ * inherits from `ToolError`; without the value, only the name `ToolError` marks one.
+ */
+export function describedRunError(described: DescribedError, toolError = false): RunErrorPayload {
+	const { name } = described;
+	return {
+		...described,
+		isAbort: name === "AbortError" || name === "ToolAbortError",
+		isToolError: toolError || name === "ToolError",
+	};
 }
 
 export type ToolReply = { ok: true; value: unknown } | { ok: false; error: RunErrorPayload };

@@ -1,6 +1,7 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { EvalLanguage, EvalStatusEvent, EvalView } from "@oh-my-pi/pi-tui/tools/eval";
-import { describeThrown, isRecord } from "@oh-my-pi/pi-utils/type-guards";
+import { describeError } from "@oh-my-pi/pi-utils/thrown";
+import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 
 /** Kernel-defined tool metadata exposed to task subagents. */
 export interface EvalToolDescriptor {
@@ -59,12 +60,12 @@ export interface EvalOutputConsumerFailure {
  * Records `thrown` as `callback`'s failure, and never throws. A consumer may
  * throw or reject with any value, including one whose conversion to text
  * throws: a null-prototype object, an error with a throwing `message` getter,
- * a `Proxy` whose traps throw. A failure to describe it must not escape, or the
- * report would itself end the Python reader or the host process.
+ * a `Proxy` whose traps throw. It is described once ({@link describeError}); a
+ * failure to describe it would end the Python reader or the host process.
  */
 export function outputConsumerFailure(
 	callback: EvalOutputConsumerFailure["callback"],
 	thrown: unknown,
 ): EvalOutputConsumerFailure {
-	return { callback, message: describeThrown(thrown) };
+	return { callback, message: describeError(thrown).message };
 }

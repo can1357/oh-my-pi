@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
@@ -9,11 +9,12 @@ import {
 	type VmRunState,
 } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
 import { executeJs } from "@oh-my-pi/pi-coding-agent/eval/js/executor";
+import type { KernelExecuteResult } from "@oh-my-pi/pi-coding-agent/eval/kernel-base";
 import { disposeAllKernelSessions, executePython } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
 import { PythonKernel } from "@oh-my-pi/pi-coding-agent/eval/py/kernel";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import type { JsStatusEvent } from "@oh-my-pi/pi-coding-agent/eval/js/shared/types";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { logger, TempDir } from "@oh-my-pi/pi-utils";
 
 type Language = "py" | "js";
 const LANGUAGES = ["py", "js"] as const;
@@ -240,7 +241,8 @@ const RETARGETING_TO_STRING_SOURCE =
 /**
  * Values a consumer may throw or reject with whose description is itself a
  * hazard: converting them to text or reading their message throws, or a
- * serializer cannot write them. `described` is how the cell's result names each.
+ * serializer cannot write them. `described` is how the cell's result names
+ * each: a value whose text cannot be read is named without running its code.
  */
 const THROWN_VALUES: ReadonlyArray<{ label: string; make: () => unknown; described: string }> = [
 	{ label: "a null-prototype object", make: () => Object.create(null), described: "[object Object]" },
@@ -251,12 +253,12 @@ const THROWN_VALUES: ReadonlyArray<{ label: string; make: () => unknown; describ
 	{
 		label: "a proxy that refuses every operation",
 		make: hostileProxy,
-		described: "a thrown object that cannot be converted to text",
+		described: "[object Object]",
 	},
 	{
 		label: "a value whose conversion replaces Object.prototype.toString",
 		make: retargetingToString,
-		described: "a thrown object that cannot be converted to text",
+		described: "[object Object]",
 	},
 ];
 
@@ -333,7 +335,7 @@ const UNDESCRIBABLE_VALUES: ReadonlyArray<{ label: string; make: () => unknown; 
 		make: hostileProxy,
 		source:
 			'new Proxy({}, new Proxy({}, { get: () => () => { throw new Error("the proxy refuses every operation"); } }))',
-		described: "a thrown object that cannot be converted to text",
+		described: "[object Object]",
 	},
 	{
 		label: "a revoked proxy",
@@ -345,7 +347,7 @@ const UNDESCRIBABLE_VALUES: ReadonlyArray<{ label: string; make: () => unknown; 
 		label: "a value whose conversion replaces Object.prototype.toString",
 		make: retargetingToString,
 		source: RETARGETING_TO_STRING_SOURCE,
-		described: "a thrown object that cannot be converted to text",
+		described: "[object Object]",
 	},
 	{
 		label: "an error whose stack is text on one read and an object on the next",
@@ -359,7 +361,7 @@ const UNDESCRIBABLE_VALUES: ReadonlyArray<{ label: string; make: () => unknown; 
 		make: errorProxy,
 		source:
 			'new Proxy(new Error("unused"), { get() { throw new Error("the error proxy refuses every read"); }, has() { throw new Error("the error proxy refuses every read"); } })',
-		described: "a thrown object that cannot be converted to text",
+		described: "[object Error]",
 	},
 ];
 
@@ -516,6 +518,67 @@ function thenableOnFirstRead(reason: unknown): PromiseLike<void> {
 	};
 	return thenable as unknown as PromiseLike<void>;
 }
+
+/** A consumer result whose `then` is async and throws `reason`: it calls back neither callback, and rejects the promise it returns. */
+function asyncThenThatThrows(reason: unknown): PromiseLike<void> {
+	const thenable = {
+		// oxlint-disable-next-line unicorn/no-thenable -- the consumer result under test is a thenable on purpose
+		async then() {
+			throw reason;
+		},
+	};
+	return thenable as unknown as PromiseLike<void>;
+}
+
+/**
+ * Collects the host's unhandled rejections while `body` runs. The runtime
+ * reports one once the microtask queue drains, so one macrotask turn after
+ * `body` settles is enough for a rejection `body` left behind to be seen.
+ */
+async function unhandledRejectionsDuring(body: () => Promise<void>): Promise<unknown[]> {
+	const seen: unknown[] = [];
+	const listener = (reason: unknown): void => {
+		seen.push(reason);
+	};
+	process.on("unhandledRejection", listener);
+	try {
+		await body();
+		const turn = Promise.withResolvers<void>();
+		setImmediate(turn.resolve);
+		await turn.promise;
+	} finally {
+		process.off("unhandledRejection", listener);
+	}
+	return seen;
+}
+
+/** An error whose `message` getter answers `read <n>` on its n-th read, and whose `stack` getter throws. */
+function errorWithCountingMessage(reads: { count: number }): Error {
+	const error = new Error("unused");
+	Object.defineProperty(error, "message", {
+		get() {
+			reads.count += 1;
+			return `read ${reads.count}`;
+		},
+	});
+	Object.defineProperty(error, "stack", {
+		get() {
+			throw new Error("the stack getter failed");
+		},
+	});
+	return error;
+}
+
+/** {@link errorWithCountingMessage}, built inside a JavaScript cell; `messageReads()` returns its count. */
+const COUNTING_MESSAGE_SOURCE =
+	'(() => { let reads = 0; globalThis.messageReads = () => reads; const error = new Error("unused"); ' +
+	'Object.defineProperty(error, "message", { get() { reads += 1; return "read " + reads; } }); ' +
+	'Object.defineProperty(error, "stack", { get() { throw new Error("the stack getter failed"); } }); return error; })()';
+
+/** A Python exception whose `__notes__` never end: each note takes a millisecond, so a reader that never stops grows slowly. */
+const ENDLESS_NOTES_EXCEPTION =
+	"import time\n\nclass Endless(list):\n    def __iter__(self):\n        while True:\n            time.sleep(0.001)\n            yield 'note'\n\n" +
+	"def endless_error(text):\n    error = ValueError(text)\n    error.__notes__ = Endless()\n    return error\n";
 
 describe("eval output consumer failure", () => {
 	afterEach(async () => {
@@ -727,6 +790,26 @@ describe("eval output consumer failure", () => {
 		);
 
 		it.skipIf(skipped(language))(
+			`${language}: a consumer whose thenable has an async then that throws is reported, and leaves no unhandled rejection`,
+			async () => {
+				const session = makeSession(`consumer-async-then-${language}-${crypto.randomUUID()}`);
+				let cell: Cell | undefined;
+				const unhandled = await unhandledRejectionsDuring(async () => {
+					cell = await run(session, language, TWO_LINES[language], {
+						onChunk: chunk =>
+							printsLine(chunk, "one") ? asyncThenThatThrows(new Error("then refused")) : undefined,
+					});
+				});
+
+				expect(unhandled).toEqual([]);
+				expect(cell?.exitCode).toBe(0);
+				// The rejection of the promise that `then` returned is the consumer's failure.
+				expectConsumerFailure(cell!, "stream", "then refused");
+			},
+			120_000,
+		);
+
+		it.skipIf(skipped(language))(
 			`${language}: a cell that times out after its consumer refused a printed line reports the failure without claiming the cell ran on`,
 			async () => {
 				const session = makeSession(`consumer-timeout-${language}-${crypto.randomUUID()}`);
@@ -879,6 +962,63 @@ describe("runtime output callback failure", () => {
 		});
 
 		expect(runState.consumerFailure).toEqual({ callback: "onChunk", message: "callback refused" });
+	}, 120_000);
+
+	it.skipIf(!PYTHON_INTEGRATION)(
+		"py: the kernel reports an output callback whose thenable has an async then that throws, and keeps serving",
+		async () => {
+			const kernel = await PythonKernel.start({ cwd: process.cwd() });
+			try {
+				let result: KernelExecuteResult | undefined;
+				const unhandled = await unhandledRejectionsDuring(async () => {
+					result = await kernel.execute(TWO_LINES.py, {
+						onChunk: (text =>
+							printsLine(text, "one") ? asyncThenThatThrows(new Error("then refused")) : undefined) as (
+							text: string,
+						) => Promise<void>,
+						// Bounds the red case, where awaiting the thenable stalls the reader and the execution never settles.
+						timeoutMs: 20_000,
+					});
+				});
+				const chunks: string[] = [];
+				await kernel.execute(READ_KEPT.py, { onChunk: text => void chunks.push(text) });
+
+				expect(unhandled).toEqual([]);
+				expect(result?.status).toBe("ok");
+				expect(result?.consumerFailure).toEqual({ callback: "onChunk", message: "then refused" });
+				expect(chunks.join("")).toBe("kept 42\n");
+			} finally {
+				await kernel.shutdown();
+			}
+		},
+		120_000,
+	);
+
+	it("js: the context manager reports an output callback whose thenable has an async then that throws", async () => {
+		const session = makeSession(`runtime-async-then-js-${crypto.randomUUID()}`);
+		const sessionId = session.getEvalSessionId?.() ?? "missing";
+		const runState: VmRunState = {
+			// The run state's callback type returns void; a callback that returns a thenable must be accepted all the same.
+			onText: (text => (printsLine(text, "one") ? asyncThenThatThrows(new Error("then refused")) : undefined)) as (
+				text: string,
+			) => void,
+		};
+
+		const unhandled = await unhandledRejectionsDuring(async () => {
+			await executeInVmContext({
+				sessionKey: sessionId,
+				sessionId,
+				cwd: session.cwd,
+				session,
+				code: TWO_LINES.js,
+				filename: "runtime-async-then.js",
+				timeoutMs: 20_000,
+				runState,
+			});
+		});
+
+		expect(unhandled).toEqual([]);
+		expect(runState.consumerFailure).toEqual({ callback: "onChunk", message: "then refused" });
 	}, 120_000);
 });
 
@@ -1138,6 +1278,136 @@ describe("a cell or tool failing with a value that cannot be described", () => {
 			} finally {
 				await kernel.shutdown();
 			}
+		},
+		120_000,
+	);
+});
+
+describe("a value read once, and a failure after its cell finished", () => {
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		await Promise.all([disposeAllKernelSessions(), disposeAllVmContexts()]);
+	});
+
+	it("js: a cell that throws an error whose stack getter throws is described with one read of its message", async () => {
+		const session = makeSession(`counting-message-js-${crypto.randomUUID()}`);
+		const failed = await run(session, "js", `throw ${COUNTING_MESSAGE_SOURCE};`);
+		const after = await run(session, "js", "print('reads', messageReads())");
+
+		expect(failed.exitCode).toBe(1);
+		expect(failed.output).toContain("read 1");
+		expect(failed.output).not.toContain("read 2");
+		expect(after.output).toContain("reads 1");
+	}, 120_000);
+
+	for (const language of LANGUAGES) {
+		it.skipIf(skipped(language))(
+			`${language}: a tool that throws an error whose stack getter throws is described once for its status and its reply`,
+			async () => {
+				const reads = { count: 0 };
+				const tool = refusingTool(() => errorWithCountingMessage(reads));
+				const session = makeSession(`counting-tool-${language}-${crypto.randomUUID()}`, tool);
+				const cell = await run(session, language, CALL_REFUSING_TOOL[language]);
+
+				expect(cell.exitCode).toBe(0);
+				expect(reads.count).toBe(1);
+				expect(cell.output).toContain("read 1");
+				expect(cell.output).not.toContain("read 2");
+			},
+			120_000,
+		);
+	}
+
+	it("js: a cell that throws a value whose description floats a rejection fails, and the worker keeps its variables", async () => {
+		const session = makeSession(`floating-description-js-${crypto.randomUUID()}`);
+		const before = await run(session, "js", `${PID_CELL.js}\nvar kept = 42;`);
+		const failed = await run(
+			session,
+			"js",
+			'throw { toString() { void Promise.reject(Object.create(null)); return "described"; } };',
+		);
+		const after = await run(session, "js", `${PID_CELL.js}\n${READ_KEPT.js}`);
+
+		expect(failed.exitCode).toBe(1);
+		expect(failed.output).toContain("described");
+		expect(pidOf(after)).toBe(pidOf(before));
+		expect(after.output).toContain("kept 42");
+	}, 120_000);
+
+	it("js: a rejection floated after its cell finished is logged on the host, and the worker keeps its variables", async () => {
+		const reported = Promise.withResolvers<unknown>();
+		vi.spyOn(logger, "warn").mockImplementation((message: string, meta?: Record<string, unknown>) => {
+			if (message === "Unhandled rejection after every eval cell finished (missing await?)") reported.resolve(meta);
+		});
+		const session = makeSession(`late-rejection-js-${crypto.randomUUID()}`);
+		const before = await run(
+			session,
+			"js",
+			`${PID_CELL.js}\nvar kept = 42;\nsetTimeout(() => { void Promise.reject(Object.create(null)); }, 50);`,
+		);
+		// A cell started before the rejection surfaced would own it, so wait for the report itself.
+		const meta = await reported.promise;
+		const after = await run(session, "js", `${PID_CELL.js}\n${READ_KEPT.js}`);
+
+		expect(before.exitCode).toBe(0);
+		expect(meta).toMatchObject({ error: { message: "[object Object]" } });
+		expect(pidOf(after)).toBe(pidOf(before));
+		expect(after.output).toContain("kept 42");
+	}, 120_000);
+
+	it.skipIf(!PYTHON_INTEGRATION)(
+		"py: a cell that raises an exception whose notes never end fails at once with no timeout, and the kernel keeps its variables",
+		async () => {
+			const session = makeSession(`endless-notes-py-${crypto.randomUUID()}`);
+			const before = await run(session, "py", `${PID_CELL.py}\nkept = 42`);
+			const failed = await run(session, "py", `${ENDLESS_NOTES_EXCEPTION}\nraise endless_error('endless notes')`, {
+				timeoutMs: undefined,
+			});
+			const after = await run(session, "py", `${PID_CELL.py}\n${READ_KEPT.py}`);
+
+			expect(failed.cancelled).toBe(false);
+			expect(failed.exitCode).toBe(1);
+			expect(failed.output).toContain("ValueError: endless notes");
+			expect(failed.output).toContain("further notes not shown");
+			expect(pidOf(after)).toBe(pidOf(before));
+			expect(after.output).toContain("kept 42");
+		},
+		120_000,
+	);
+
+	it.skipIf(!PYTHON_INTEGRATION)(
+		"py: a background task that fails after its cell with an exception whose notes never end is reported, and the kernel keeps serving",
+		async () => {
+			const logged: string[] = [];
+			const reportLogged = Promise.withResolvers<void>();
+			vi.spyOn(logger, "warn").mockImplementation((message: string, meta?: Record<string, unknown>) => {
+				if (message !== "Python runner stderr") return;
+				logged.push(String(meta?.text));
+				if (logged.join("\n").includes("further notes not shown")) reportLogged.resolve();
+			});
+			const session = makeSession(`background-failure-py-${crypto.randomUUID()}`);
+			const before = await run(session, "py", `${PID_CELL.py}\nkept = 42`);
+			// Nothing awaits the task, so once it fails the event loop reports its exception, after this cell returned.
+			const started = await run(
+				session,
+				"py",
+				`${ENDLESS_NOTES_EXCEPTION}\nimport asyncio\n\nasync def fail():\n    raise endless_error('background failure')\n\nasyncio.ensure_future(fail())\nprint('started')`,
+				{ timeoutMs: undefined },
+			);
+			// The collector runs first, so a task nobody kept is reported by the time this cell prints.
+			const after = await run(session, "py", `import gc\ngc.collect()\n${PID_CELL.py}\n${READ_KEPT.py}`, {
+				timeoutMs: undefined,
+			});
+			// Reported on the stderr of the cell running at the time; with none running, on the host's log,
+			// which the host reads from the kernel's stderr as it arrives.
+			if (!after.output.includes("Task exception was never retrieved")) await reportLogged.promise;
+			const reports = [started.output, after.output, ...logged].join("\n");
+
+			expect(started.exitCode).toBe(0);
+			expect(pidOf(after)).toBe(pidOf(before));
+			expect(after.output).toContain("kept 42");
+			expect(reports).toContain("Task exception was never retrieved");
+			expect(reports).toContain("further notes not shown");
 		},
 		120_000,
 	);

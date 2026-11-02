@@ -7,10 +7,10 @@
  * current execution and forwards to the same `callSessionTool` implementation
  * the JavaScript bridge uses.
  */
-import { describeThrown, logger, postmortem } from "@oh-my-pi/pi-utils";
+import { logger, postmortem } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../../tools";
 import type { RuntimeCallIdentity } from "../js/shared/runtime";
-import { bridgeValueFromToolResult, callSessionTool, type JsStatusEvent } from "../js/tool-bridge";
+import { bridgeValueFromToolResult, callSessionTool, describeToolFailure, type JsStatusEvent } from "../js/tool-bridge";
 import type { EvalShadowCellSession } from "../speculation/cell-session";
 
 export interface PyToolBridgeEntry {
@@ -211,7 +211,8 @@ async function startServer(): Promise<BridgeServer> {
 				return Response.json({
 					ok: false,
 					// A tool can throw any value; the reply must still describe it rather than fail the request.
-					error: describeThrown(err),
+					// `callSessionTool` already described it for the status event: reading it again could answer differently.
+					error: describeToolFailure(err).message,
 				});
 			}
 		},

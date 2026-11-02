@@ -1,5 +1,5 @@
 import { DEFAULT_MAX_BYTES, type OutputArtifactError, OutputSink } from "@oh-my-pi/pi-tui/tools/streaming-output";
-import { describeThrown, thrownStack } from "@oh-my-pi/pi-utils";
+import { describeError } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../../tools";
 import {
 	resolveOutputMaxColumns,
@@ -241,7 +241,10 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 				displayOutputs,
 			};
 		}
-		const message = thrownStack(error) ?? describeThrown(error);
+		const described = describeError(error);
+		// A stack normally opens with the message; one taken from an error whose message could not be read does not.
+		const { stack, message: text } = described;
+		const message = stack === undefined ? text : stack.includes(text) ? stack : `${text}\n${stack}`;
 		outputSink.push(message);
 		const summary = await outputSink.dump();
 		return {

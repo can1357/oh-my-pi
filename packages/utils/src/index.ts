@@ -39,6 +39,7 @@ export * from "./stderr-guard";
 export * from "./stream";
 export * from "./tab-spacing";
 export * from "./temp";
+export * from "./thrown";
 export * from "./tls-fetch";
 export * from "./type-guards";
 export * from "./version";
