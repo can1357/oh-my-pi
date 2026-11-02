@@ -20,6 +20,7 @@ import {
 } from "./isolation-lease";
 import {
 	clearClaimedWorkspace,
+	foreignMountsUnder,
 	acquireSandboxLockWithNotice,
 	holdsSandboxLock,
 	needsNativeTeardown,
@@ -1021,15 +1022,26 @@ export async function ensureIsolation(
 				// there for its own owner. A backend that mounted before it
 				// failed is stopped first; one that will not stop leaves its
 				// mount, its record and the sandbox, which the clear refuses.
+				// Neither the stop nor the emptying runs while something other
+				// than the backend's own mount is under the sandbox: both remove
+				// trees, and would remove through it.
 				if (claimed) {
-					if (needsNativeTeardown(candidate)) {
-						const mounted = await fs.liveMountsUnder(baseDir).then(
-							mounts => mounts.length > 0,
-							() => true,
-						);
-						if (mounted) await natives.isoStop(candidate, mergedDir).catch(() => undefined);
+					const foreign = await foreignMountsUnder(baseDir, candidate, mergedDir).catch(() => undefined);
+					if (foreign === undefined || foreign.length > 0) {
+						logger.warn("isolation workspace kept after a failed start: something else is mounted in it", {
+							mergedDir,
+							mounts: foreign,
+						});
+					} else {
+						if (needsNativeTeardown(candidate)) {
+							const mounted = await fs.liveMountsUnder(mergedDir).then(
+								mounts => mounts.length > 0,
+								() => true,
+							);
+							if (mounted) await natives.isoStop(candidate, mergedDir).catch(() => undefined);
+						}
+						await clearClaimedWorkspace(baseDir).catch(() => undefined);
 					}
-					await clearClaimedWorkspace(baseDir).catch(() => undefined);
 				}
 				const message = errorMessage(err);
 				if (!natives.isoIsUnavailableError(message)) throw err;
@@ -1408,6 +1420,20 @@ export async function cleanupIsolation(
 					keep = true;
 					logger.warn("isolation workspace kept: its mount directory is a symlink, so it is not stopped", {
 						mergedDir: teardownMerged,
+					});
+					return;
+				}
+				// Every native stop removes a tree, so it never runs while
+				// something other than the backend's own mount is under the
+				// workspace: a mount nested in an rcopy copy, or below an
+				// overlay's `upper`, had its source deleted by the stop itself,
+				// before the removal's own check could refuse.
+				const foreign = await foreignMountsUnder(teardownBase, handle.backend, teardownMerged);
+				if (foreign.length > 0) {
+					keep = true;
+					logger.warn("isolation workspace kept: something else is mounted in it, so it is not stopped", {
+						mergedDir: teardownMerged,
+						mounts: foreign,
 					});
 					return;
 				}

@@ -16,13 +16,54 @@ import {
 	writeRetainedBackend,
 } from "@oh-my-pi/pi-coding-agent/task/isolation-ownership";
 import { cleanupIsolation, ensureIsolation } from "@oh-my-pi/pi-coding-agent/task/worktree";
-import { setWorktreesDir } from "@oh-my-pi/pi-utils";
+import { readLines, setWorktreesDir } from "@oh-my-pi/pi-utils";
 
 /** Directories this file made, removed after each test. */
 const temporary: string[] = [];
 
-/** The real `stat`, kept before any spy replaces it. */
+/** The real `stat` and `lstat`, kept before any spy replaces them. */
 const realStat = fs.stat;
+const realLstat = fs.lstat;
+
+/** The omp-like caller a cooperating-process race runs as a separate process. */
+const CALLER_FIXTURE = path.join(import.meta.dir, "fixtures", "isolation-caller.ts");
+
+/**
+ * A real process running {@link CALLER_FIXTURE} against `worktrees`: each
+ * command is answered by one JSON reply. The lock it takes is the file lock omp
+ * takes, so two of these exclude each other exactly as two omp processes do.
+ */
+function spawnCaller(
+	repo: string,
+	id: string,
+	worktrees: string,
+): { ask: (command: string) => Promise<Record<string, unknown>>; close: () => void } {
+	const child = Bun.spawn([process.execPath, CALLER_FIXTURE, repo, id], {
+		cwd: path.dirname(CALLER_FIXTURE),
+		env: { ...process.env, OMP_WORKTREE_DIR: worktrees },
+		stdin: "pipe",
+		stdout: "pipe",
+		stderr: "ignore",
+	});
+	const lines = readLines(child.stdout as ReadableStream<Uint8Array>);
+	const decoder = new TextDecoder();
+	return {
+		ask: async command => {
+			child.stdin.write(`${command}\n`);
+			child.stdin.flush();
+			for (;;) {
+				const next = await lines.next();
+				if (next.done) throw new Error(`the caller exited before answering ${command}`);
+				const line = decoder.decode(next.value);
+				if (line.startsWith("@@")) return JSON.parse(line.slice(2)) as Record<string, unknown>;
+			}
+		},
+		close: () => {
+			child.stdin.end();
+			child.kill();
+		},
+	};
+}
 
 /**
  * Regression for #6761: `omp worktree clear` (no `--all`) must delete only
@@ -388,6 +429,101 @@ describe("worktree clear task-isolation ownership", () => {
 		expect(failed).toBe(0);
 		await expect(fs.stat(dir)).rejects.toThrow();
 	});
+	it("does not stop an overlay with something else mounted below its upper directory", async () => {
+		// Failure mode: overlayfs's stop deletes `upper` after it unmounts, and
+		// `clear` ran it with another mount below `upper`: the stop itself
+		// deleted that mount's source, before the removal's check could refuse.
+		const retained = await makeSandbox("tupper013");
+		await fs.mkdir(path.join(retained, "upper", "nested"), { recursive: true });
+		await Bun.write(path.join(retained, "upper", "nested", "keep.txt"), "another tree's file\n");
+		await Bun.write(
+			path.join(retained, ISOLATION_OWNER_FILE),
+			JSON.stringify({ pid: await deadPid(), id: "upper013" }),
+		);
+		await writeRetainedBackend(retained, natives.IsoBackendKind.Overlayfs);
+		const real = await fs.realpath(retained);
+		// The overlay's own mount at `m`, and another one below `upper`.
+		const mounts = [path.join(real, "m"), path.join(real, "upper", "nested")];
+		vi.spyOn(isolationFs, "liveMountsUnder").mockImplementation(async dir =>
+			mounts.filter(mount => mount === dir || mount.startsWith(`${dir}/`)),
+		);
+		const isoStop = vi.spyOn(natives, "isoStop").mockResolvedValue(undefined);
+
+		const { removed, failed } = await clearWorktrees({ all: false, dryRun: false, json: true });
+
+		expect(isoStop).not.toHaveBeenCalled();
+		expect(removed).toBe(0);
+		expect(failed).toBe(1);
+		expect(await Bun.file(path.join(retained, "upper", "nested", "keep.txt")).text()).toBe("another tree's file\n");
+	});
+
+	it("never follows a symlink out of the worktree directory, with or without --all", async () => {
+		// Failure mode: an entry that was a symlink — an alias naming a sandbox
+		// elsewhere, or a container pointing out of the worktree directory — was
+		// followed, and `clear` deleted the files of a directory outside it.
+		const outside = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-outside-"));
+		temporary.push(outside);
+		async function retiredSandbox(dir: string): Promise<void> {
+			await fs.mkdir(path.join(dir, "m"), { recursive: true });
+			await Bun.write(path.join(dir, "m", "only-copy.txt"), "outside the worktree directory\n");
+			await markIsolationRetired(dir);
+		}
+		await retiredSandbox(path.join(outside, "aliased"));
+		await retiredSandbox(path.join(outside, "contained", "sandbox"));
+		await fs.symlink(path.join(outside, "aliased"), path.join(base, "talias014"));
+		await fs.symlink(path.join(outside, "contained"), path.join(base, "project"));
+
+		for (const all of [false, true]) {
+			const { removed } = await clearWorktrees({ all, dryRun: false, json: true });
+			expect(removed).toBe(0);
+		}
+
+		for (const sandbox of ["aliased", path.join("contained", "sandbox")]) {
+			expect(await Bun.file(path.join(outside, sandbox, "m", "only-copy.txt")).text()).toBe(
+				"outside the worktree directory\n",
+			);
+		}
+		expect((await fs.lstat(path.join(base, "talias014"))).isSymbolicLink()).toBe(true);
+	});
+
+	it("loses nothing when two lock-taking processes race clear against materialise and retire", async () => {
+		// The threat this branch defends against is cooperating processes: every
+		// one that materialises, retires, removes or clears a sandbox takes its
+		// lock first, so their acts are ordered by it. Two real processes — a
+		// task runner that reuses one task id, as a replacement spawn does, and
+		// a user running `omp worktree clear` — race at each step. The runner's
+		// work must be there for as long as it holds the sandbox, every act must
+		// succeed, and nothing may be left behind.
+		const repo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-race-repo-"));
+		temporary.push(repo);
+		for (const args of [
+			["init", "-q"],
+			["-c", "user.name=Race", "-c", "user.email=race@example.com", "commit", "-q", "--allow-empty", "-m", "seed"],
+		]) {
+			const git = Bun.spawn(["git", ...args], { cwd: repo, stdout: "ignore", stderr: "ignore" });
+			expect(await git.exited).toBe(0);
+		}
+		const runner = spawnCaller(repo, "race-task", base);
+		const user = spawnCaller(repo, "race-task", base);
+		try {
+			for (let round = 0; round < 6; round += 1) {
+				const [made, duringMake] = await Promise.all([runner.ask(`make ${round}`), user.ask("clear")]);
+				expect(made).toMatchObject({ ok: true });
+				expect(duringMake).toMatchObject({ ok: true });
+				const [checked, whileHeld] = await Promise.all([runner.ask(`check ${round}`), user.ask("clear")]);
+				expect(checked).toMatchObject({ ok: true });
+				expect(whileHeld).toMatchObject({ ok: true, removed: 0 });
+				const [tornDown, duringRetire] = await Promise.all([runner.ask("teardown"), user.ask("clear")]);
+				expect(tornDown).toMatchObject({ ok: true });
+				expect(duringRetire).toMatchObject({ ok: true });
+			}
+			expect(await user.ask("clear")).toMatchObject({ ok: true, failed: 0 });
+			expect((await fs.readdir(base)).filter(name => !name.endsWith(".lock"))).toEqual([]);
+		} finally {
+			runner.close();
+			user.close();
+		}
+	}, 240_000);
 });
 
 afterEach(async () => {
@@ -406,15 +542,20 @@ it("keeps the parent of a child it could not read, instead of calling it a stray
 	const child = path.join(parent, "sandbox");
 	await fs.mkdir(child, { recursive: true });
 	await Bun.write(path.join(child, "payload.txt"), "work nobody else has\n");
-	const spy = vi.spyOn(fs, "stat");
-	spy.mockImplementation((async (target: string, ...rest: unknown[]) => {
-		if (String(target) === child) throw Object.assign(new Error("EACCES: denied"), { code: "EACCES" });
-		return await (realStat as (...a: unknown[]) => Promise<unknown>)(target, ...rest);
-	}) as unknown as typeof fs.stat);
+	// Denied however the scan looks at it, followed or not.
+	for (const [name, real] of [
+		["stat", realStat],
+		["lstat", realLstat],
+	] as const) {
+		vi.spyOn(fs, name).mockImplementation((async (target: string, ...rest: unknown[]) => {
+			if (String(target) === child) throw Object.assign(new Error("EACCES: denied"), { code: "EACCES" });
+			return await (real as (...a: unknown[]) => Promise<unknown>)(target, ...rest);
+		}) as unknown as typeof fs.stat);
+	}
 
 	const result = await clearWorktrees({ json: true, all: false, dryRun: false });
 
-	spy.mockRestore();
+	vi.restoreAllMocks();
 	expect(result.removed).toBe(0);
 	expect(await Bun.file(path.join(child, "payload.txt")).exists()).toBe(true);
 });

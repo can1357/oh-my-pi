@@ -25,6 +25,7 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Settings } from "../config/settings";
 import {
 	decideIsolationReclaim,
+	foreignMountsUnder,
 	ISOLATION_REMOVING_SUFFIX,
 	requireSandboxLockHeld,
 	withSandboxLock,
@@ -39,6 +40,9 @@ import { cfgIsolationBackend, cfgWorktreeClone } from "../task/settings";
 type WorktreeKind = "pr-checkout" | "task-isolation" | "empty" | "stray";
 
 const TASK_ISOLATION_MOUNT_DIRS = ["m", "merged"] as const;
+
+/** Why an entry that is a symlink is listed and never removed. */
+const SYMLINK_ENTRY_REASON = "is a symlink; clear does not follow it out of the worktree directory";
 
 export interface WorktreeEntry {
 	/** Absolute path to the worktree dir (or stray container) under `~/.omp/wt/`. */
@@ -127,6 +131,16 @@ export async function stopRetainedMount(dir: string): Promise<boolean> {
 		// stop. A subvolume is not a mount, and its stop also removes a plain
 		// directory, so it is always stopped.
 		if (backend === natives.IsoBackendKind.Overlayfs && (await fs.liveMountsUnder(candidate)).length === 0) continue;
+		// The stop removes a tree (overlayfs deletes `upper` and `work` after it
+		// unmounts), so it never runs while something other than this
+		// backend's own mount is under the workspace: a mount below `upper`
+		// had its source deleted by the stop itself.
+		const foreign = await foreignMountsUnder(dir, backend, candidate);
+		if (foreign.length > 0) {
+			throw new Error(
+				`Isolation workspace ${dir} has ${foreign.join(", ")} mounted in it; refusing to stop or remove it.`,
+			);
+		}
 		await natives.isoStop(backend, candidate);
 		return true;
 	}
@@ -334,14 +348,22 @@ async function scanWorktrees(): Promise<WorktreeEntry[]> {
 	const entries: WorktreeEntry[] = [];
 	for (const name of topLevel) {
 		const dir = path.join(root, name);
-		const stat = await fs.statLookup(dir);
+		// Never followed: an entry that is a symlink names something outside
+		// what `omp` made here, and resolving it sent the removal to a directory
+		// outside the worktree directory. It is listed, and kept.
+		const stat = await fs.lstatLookup(dir);
 		if (stat.kind === "unknown") {
 			// Named, not dropped: an entry nobody can look at is exactly the
 			// one a user needs to hear about, and it is never removed.
 			entries.push({ path: dir, kind: "stray", orphanReason: `could not be read (${stat.reason})`, keep: true });
 			continue;
 		}
-		if (stat.kind === "absent" || !stat.value.isDirectory()) continue;
+		if (stat.kind === "absent") continue;
+		if (stat.value.isSymbolicLink()) {
+			entries.push({ path: dir, kind: "stray", orphanReason: SYMLINK_ENTRY_REASON, keep: true });
+			continue;
+		}
+		if (!stat.value.isDirectory()) continue;
 
 		const direct = await classifyDir(dir);
 		if (direct) {
@@ -381,7 +403,7 @@ async function classifyContainer(dir: string): Promise<{ children: WorktreeEntry
 	let unclassifiable = false;
 	for (const child of children) {
 		const childDir = path.join(dir, child);
-		const childStat = await fs.statLookup(childDir);
+		const childStat = await fs.lstatLookup(childDir);
 		if (childStat.kind === "unknown") {
 			entries.push({
 				path: childDir,
@@ -396,7 +418,13 @@ async function classifyContainer(dir: string): Promise<{ children: WorktreeEntry
 			unclassifiable = true;
 			continue;
 		}
-		if (childStat.kind === "absent" || !childStat.value.isDirectory()) continue;
+		if (childStat.kind === "absent") continue;
+		if (childStat.value.isSymbolicLink()) {
+			entries.push({ path: childDir, kind: "stray", orphanReason: SYMLINK_ENTRY_REASON, keep: true });
+			unclassifiable = true;
+			continue;
+		}
+		if (!childStat.value.isDirectory()) continue;
 		const childClassified = await classifyDir(childDir);
 		if (childClassified) {
 			entries.push(childClassified);
@@ -496,6 +524,14 @@ async function removeEntry(target: WorktreeEntry, all: boolean): Promise<Removal
 			if (!moved.same) {
 				await fs.rename(aside, dir).catch(() => undefined);
 				throw new Error(`${dir} was replaced while it was being removed (${moved.reason}); nothing was deleted`);
+			}
+			// Asked again of what is about to go, after the move: the move takes
+			// a mount inside the tree with it, and the removal must not walk
+			// into one, whenever it appeared.
+			const asideMounts = await fs.liveMountsUnder(aside);
+			if (asideMounts.length > 0) {
+				await fs.rename(aside, dir).catch(() => undefined);
+				throw new Error(`${dir} has ${asideMounts.join(", ")} mounted in it; refusing to remove it`);
 			}
 			await fs.rm(aside, { recursive: true, force: true });
 			return { removed: true };

@@ -10,7 +10,7 @@ import * as fs from "./isolation-fs";
 import * as path from "node:path";
 import * as natives from "@oh-my-pi/pi-natives";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { acquireFileLock, logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { acquireFileLock, getWorktreesDir, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { hasLiveIsolationLease, hasUnfinishedWriter } from "./isolation-lease";
 
 /**
@@ -33,9 +33,39 @@ export const SANDBOX_LOCK_WAIT = { retries: 600, retryDelayMs: 100 };
  * I/O error — is raised: silently falling back to the alias is how two holders
  * end up with two locks on one directory, and a caller that cannot establish
  * the identity must not act as though it had.
+ *
+ * A name inside the worktree directory must resolve inside it, and is refused
+ * otherwise. A symlink there — an alias that names a sandbox elsewhere, a
+ * container that points out of the directory — resolved to a directory
+ * outside, and `omp worktree clear` deleted that directory's files. Every
+ * caller that locks, claims, leases, stops or removes a sandbox resolves it
+ * here first, so none of them follows a symlink out. A name outside the
+ * worktree directory is not one `omp` manages there and resolves as it is. The
+ * worktree directory may itself be a symlink; containment is against where it
+ * really is.
  */
 export async function resolveSandboxIdentity(target: string): Promise<string> {
 	const absolute = path.resolve(target);
+	const resolved = await resolveExistingPath(absolute);
+	const root = path.resolve(getWorktreesDir());
+	const realRoot = await resolveExistingPath(root);
+	if ((isWithin(absolute, root) || isWithin(absolute, realRoot)) && !isWithin(resolved, realRoot)) {
+		throw new OutsideWorktreeDirectoryError(absolute, resolved, realRoot);
+	}
+	return resolved;
+}
+
+/** A name inside the worktree directory whose real directory is outside it. */
+export class OutsideWorktreeDirectoryError extends Error {
+	constructor(name: string, resolved: string, root: string) {
+		super(
+			`Isolation path ${name} resolves to ${resolved}, outside the worktree directory ${root}; it is not followed.`,
+		);
+		this.name = "OutsideWorktreeDirectoryError";
+	}
+}
+
+async function resolveExistingPath(absolute: string): Promise<string> {
 	const resolved = await fs.realpathLookup(absolute);
 	if (resolved.kind === "found") return resolved.value;
 	if (resolved.kind === "unknown") {
@@ -43,7 +73,13 @@ export async function resolveSandboxIdentity(target: string): Promise<string> {
 	}
 	const parent = path.dirname(absolute);
 	if (parent === absolute) return absolute;
-	return path.join(await resolveSandboxIdentity(parent), path.basename(absolute));
+	return path.join(await resolveExistingPath(parent), path.basename(absolute));
+}
+
+/** Whether `candidate` is `root` or lies under it, by whole path components. */
+function isWithin(candidate: string, root: string): boolean {
+	if (candidate === root) return true;
+	return candidate.startsWith(root.endsWith(path.sep) ? root : `${root}${path.sep}`);
 }
 
 const { IsoBackendKind } = natives;
@@ -422,6 +458,26 @@ export const RETAINED_BACKEND_FILE = ".omp-retained-backend.json";
  */
 export function needsNativeTeardown(backend: unknown): backend is number {
 	return backend === IsoBackendKind.Overlayfs || backend === IsoBackendKind.Projfs || backend === IsoBackendKind.Btrfs;
+}
+
+/**
+ * Mounts under a workspace that its backend did not make.
+ *
+ * Every native stop removes a tree: the copy and clone backends delete the
+ * merged directory; overlayfs unmounts it and then deletes `upper`, `work` and
+ * the merged directory; btrfs and zfs delete the subvolume or the dataset. A
+ * removal walks into a mounted directory as into any other and deletes what
+ * the mount shows — another tree's files — so no stop and no removal may run
+ * while anything other than the backend's own mount is under the workspace.
+ * The own mount is the merged directory itself, for the backends that mount
+ * there (overlayfs and zfs); every other mount is foreign, including one
+ * nested inside the merged directory. Callers ask immediately before the stop
+ * or the removal and keep the workspace when the answer is not empty. `base`
+ * and `merged` are canonical paths.
+ */
+export async function foreignMountsUnder(base: string, backend: number | undefined, merged: string): Promise<string[]> {
+	const own = backend === IsoBackendKind.Overlayfs || backend === IsoBackendKind.Zfs ? merged : undefined;
+	return (await fs.liveMountsUnder(base)).filter(mount => mount !== own);
 }
 
 /**

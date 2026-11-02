@@ -242,6 +242,89 @@ describe("worktree isolation helpers", () => {
 
 			expect(recordedAtStop).toBe(natives.IsoBackendKind.Overlayfs);
 		});
+		/**
+		 * The mount table as these tests set it: `rel` are mount points relative
+		 * to the sandbox, wherever the teardown has moved it, and `own` drops
+		 * out once the backend's stop has run.
+		 */
+		function mountTable(rel: string[], ownStopped: () => boolean): (dir: string) => Promise<string[]> {
+			return async dir => {
+				let base = dir;
+				while (!path.basename(base).startsWith("overlay")) {
+					const up = path.dirname(base);
+					if (up === base) return [];
+					base = up;
+				}
+				return rel
+					.filter(mount => !(mount === "m" && ownStopped()))
+					.map(mount => path.join(base, mount))
+					.filter(mount => mount === dir || mount.startsWith(`${dir}${path.sep}`));
+			};
+		}
+
+		// Every native stop removes a tree — rcopy deletes the merged copy,
+		// overlayfs deletes `upper` and `work` after it unmounts — so none may
+		// run while something other than the backend's own mount is in the
+		// workspace. The check after the stop came too late: the stop itself
+		// had already deleted the mount's source.
+		it("does not stop an rcopy copy with a mount nested in it, and keeps its files", async () => {
+			const { root, mergedDir, generation } = await mountWorkspace();
+			await fs.writeFile(path.join(mergedDir, "copy.txt"), "the task's copy\n");
+			vi.spyOn(isolationFs, "liveMountsUnder").mockImplementation(mountTable(["m/nested"], () => false));
+
+			// The real rcopy stop: it removes the merged directory if it runs.
+			await cleanupIsolation({
+				mergedDir,
+				generation,
+				backend: natives.IsoBackendKind.Rcopy,
+				fellBack: false,
+				fallbackReason: null,
+			});
+
+			const kept = await onlyEntry(root);
+			expect(await fs.readFile(path.join(kept, "m", "copy.txt"), "utf8")).toBe("the task's copy\n");
+		});
+
+		it("does not stop an overlay with a mount below its upper directory", async () => {
+			const { root, mergedDir, generation } = await mountWorkspace();
+			vi.spyOn(isolationFs, "liveMountsUnder").mockImplementation(mountTable(["m", "upper/nested"], () => false));
+			const isoStop = vi.spyOn(natives, "isoStop").mockResolvedValue(undefined);
+
+			await cleanupIsolation({
+				mergedDir,
+				generation,
+				backend: natives.IsoBackendKind.Overlayfs,
+				fellBack: false,
+				fallbackReason: null,
+			});
+
+			expect(isoStop).not.toHaveBeenCalled();
+			expect(await fs.readFile(path.join(await onlyEntry(root), "upper", "work.txt"), "utf8")).toBe(
+				"the user's work\n",
+			);
+		});
+
+		it("still stops and removes an overlay whose only mount is its own", async () => {
+			// The negative case: the backend's own mount at the merged directory is
+			// what the stop is for, and must not keep the workspace for ever.
+			const { root, mergedDir, generation } = await mountWorkspace();
+			let stopped = false;
+			vi.spyOn(isolationFs, "liveMountsUnder").mockImplementation(mountTable(["m"], () => stopped));
+			const isoStop = vi.spyOn(natives, "isoStop").mockImplementation(async () => {
+				stopped = true;
+			});
+
+			await cleanupIsolation({
+				mergedDir,
+				generation,
+				backend: natives.IsoBackendKind.Overlayfs,
+				fellBack: false,
+				fallbackReason: null,
+			});
+
+			expect(isoStop).toHaveBeenCalledTimes(1);
+			expect((await fs.readdir(root)).filter(name => !name.endsWith(".lock"))).toEqual([]);
+		});
 	});
 
 	// Ownership is proved before the capture, and the capture can run for
@@ -368,7 +451,11 @@ describe("worktree isolation helpers", () => {
 		// The overlay's merged dir reads as mounted until its stop runs.
 		let stopped = false;
 		vi.spyOn(isolationFs, "liveMountsUnder").mockImplementation(async dir =>
-			!stopped && overlayMerged !== undefined && overlayMerged.startsWith(dir) ? [overlayMerged] : [],
+			!stopped &&
+			overlayMerged !== undefined &&
+			(overlayMerged === dir || overlayMerged.startsWith(`${dir}${path.sep}`))
+				? [overlayMerged]
+				: [],
 		);
 		const stoppedOverlays: string[] = [];
 		vi.spyOn(natives, "isoStop").mockImplementation(async (kind, merged) => {
@@ -387,6 +474,55 @@ describe("worktree isolation helpers", () => {
 			if (overlayMerged === undefined) throw new Error("the overlay start never ran");
 			expect(stoppedOverlays).toEqual([overlayMerged]);
 			await cleanupIsolation(handle);
+		} finally {
+			setWorktreesDir(undefined);
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+		}
+	});
+	it("neither stops nor empties a failed start with something else mounted in it", async () => {
+		// Failure mode: the failed-start cleanup stopped the overlay — whose stop
+		// deletes `upper` — while another mount sat below `upper`, and the stop
+		// deleted that mount's source. With a foreign mount present nothing is
+		// stopped or emptied, and the start fails rather than build beside it.
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "src@example.com"]);
+		await runGit(repo, ["config", "user.name", "Source User"]);
+		await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+		await runGit(repo, ["add", "tracked.txt"]);
+		await runGit(repo, ["commit", "-q", "-m", "base"]);
+		vi.spyOn(natives, "isoResolve").mockResolvedValue({
+			kind: natives.IsoBackendKind.Overlayfs,
+			candidates: [natives.IsoBackendKind.Overlayfs, natives.IsoBackendKind.Rcopy],
+			fellBack: false,
+			reason: undefined,
+		});
+		let mounts: string[] = [];
+		let keep: string | undefined;
+		vi.spyOn(natives, "isoStart").mockImplementation(async (_kind, _source, merged) => {
+			const nested = path.join(path.dirname(merged), "upper", "nested");
+			await fs.mkdir(merged, { recursive: true });
+			await fs.mkdir(nested, { recursive: true });
+			keep = path.join(nested, "keep.txt");
+			await fs.writeFile(keep, "another tree's file\n");
+			mounts = [merged, nested];
+			throw new Error("ISO_UNAVAILABLE: overlay mounted then failed");
+		});
+		vi.spyOn(isolationFs, "liveMountsUnder").mockImplementation(async dir =>
+			mounts.filter(mount => mount === dir || mount.startsWith(`${dir}${path.sep}`)),
+		);
+		const isoStop = vi.spyOn(natives, "isoStop").mockResolvedValue(undefined);
+		const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-failed-start-foreign-"));
+		tempDirs.push(worktreeBase);
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		delete process.env.OMP_WORKTREE_DIR;
+		setWorktreesDir(worktreeBase);
+		try {
+			await expect(ensureIsolation(repo, "failed-start-foreign")).rejects.toThrow("refusing to clear it");
+
+			expect(isoStop).not.toHaveBeenCalled();
+			if (keep === undefined) throw new Error("the overlay start never ran");
+			expect(await fs.readFile(keep, "utf8")).toBe("another tree's file\n");
 		} finally {
 			setWorktreesDir(undefined);
 			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
@@ -1797,6 +1933,43 @@ describe("detachGitDir", () => {
 		expect(await resolveSandboxIdentity(path.join(alias, "sandbox"))).toBe(
 			path.join(await fs.realpath(real), "sandbox"),
 		);
+	});
+	it("refuses a name inside the worktree directory that resolves outside it", async () => {
+		// Failure mode: an alias in the worktree directory named a sandbox
+		// elsewhere, every caller resolved through it, and `omp worktree clear`
+		// deleted the files of a directory outside the worktree directory.
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-contain-"));
+		tempDirs.push(root);
+		const worktrees = path.join(root, "wt");
+		const outside = path.join(root, "outside");
+		await fs.mkdir(path.join(worktrees, "real"), { recursive: true });
+		await fs.mkdir(outside);
+		await fs.symlink(outside, path.join(worktrees, "alias"));
+		await fs.symlink(worktrees, path.join(root, "wt-link"));
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		delete process.env.OMP_WORKTREE_DIR;
+		try {
+			setWorktreesDir(worktrees);
+			await expect(resolveSandboxIdentity(path.join(worktrees, "alias", "sandbox"))).rejects.toThrow(
+				"outside the worktree directory",
+			);
+			// A name that stays inside is the directory it names.
+			expect(await resolveSandboxIdentity(path.join(worktrees, "real"))).toBe(
+				path.join(await fs.realpath(worktrees), "real"),
+			);
+			// The worktree directory may itself be reached through a symlink.
+			setWorktreesDir(path.join(root, "wt-link"));
+			expect(await resolveSandboxIdentity(path.join(root, "wt-link", "real"))).toBe(
+				path.join(await fs.realpath(worktrees), "real"),
+			);
+			await expect(resolveSandboxIdentity(path.join(root, "wt-link", "alias"))).rejects.toThrow(
+				"outside the worktree directory",
+			);
+		} finally {
+			setWorktreesDir(undefined);
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+		}
 	});
 });
 
